@@ -25,7 +25,7 @@
 #   ...
 #   20. Reset / magic-link / verify-resend for a lookalike of an existing
 #       address (the fixture's lookup folds) → assert nothing mailed; a
-#       domain-case variant → mailed to the stored address only.
+#       an ASCII-case variant → mailed to the stored address only.
 #
 # All emails are captured in-process by the fixture's email_send
 # callback and read back via GET /_emails (debug endpoint, fixture-
@@ -450,10 +450,10 @@ run_flow() {
     #     utf8mb4_0900_ai_ci column does). A reset, magic link or verify
     #     resend asked for under a lookalike of an existing address issues no
     #     token at all - neither to the address typed (whoever reads it would
-    #     take the account) nor to the account's own. One whose domain differs
+    #     take the account) nor to the account's own. An ASCII-case variant
     #     only in case is mailed to the STORED address, never the typed one.
     curl -sS -X POST "$BASE/_emails/clear" > /dev/null
-    for _addr in 'CAROL@example.test' 'cärol@example.test'; do
+    for _addr in 'cärol@example.test' 'carol@exämple.test'; do
         curl -sS -X POST -H 'Content-Type: application/json' \
             -d "{\"email\":\"$_addr\"}" "$BASE/auth/password-reset/request" > /dev/null
         curl -sS -X POST -H 'Content-Type: application/json' \
@@ -471,7 +471,7 @@ run_flow() {
         sleep 0.2
     done
     TEXT=$(last_email_text "$PORT" "$EMAIL_C")
-    check_contains "$_label: a domain-case variant is mailed to the stored address" \
+    check_contains "$_label: an ASCII-case variant is mailed to the stored address" \
         "$TEXT" "/auth/password-reset/confirm?token="
     TEXT=$(last_email_text "$PORT" "carol@EXAMPLE.TEST")
     check_status "$_label: ...and never to the address typed" "${TEXT:-none}" "none"

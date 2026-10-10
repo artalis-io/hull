@@ -402,15 +402,21 @@ verify step between successful first-factor auth and `on_login` when
     `"1"` / `"true"` from a TEXT column) reads as NOT verified in both
     (and an email-change confirm logs a warning and records the old
     address's state as unknown: held for the undo, restored unverified).
-    **`user_find_by_email` must compare exactly** (audit 12): return an
-    account only when its stored address is the address asked for. A
-    lookup that folds case or accents - a MySQL `utf8mb4_0900_ai_ci`
-    column matches `josé@x` to `jose@x` and `Alice@x` to `alice@x`, as
-    does a `LOWER()` lookup, a SQLite `NOCASE` or a Postgres `citext`
-    column - answers logins and token requests typed as somebody else's
-    lookalike address. `standard_users` filters its SQL match down to the
-    row whose stored address is the same string as the one asked for, so
-    it is exact whatever the column's collation.
+    **`user_find_by_email` must fold no more than ASCII case** (audit 12):
+    return an account only when its stored address equals the address
+    asked for after ASCII letters are lowercased (`Alice@x` = `alice@x`),
+    every other byte compared exactly. A lookup that folds accents or
+    Unicode - a MySQL `utf8mb4_0900_ai_ci` column matches `josé@x` to
+    `jose@x`, a Unicode casefold or Postgres `citext` with a non-C
+    collation folds `ſ` to `s` - answers logins and token requests typed
+    as somebody else's look-alike (IDN) address. `standard_users` stores
+    addresses ASCII-lowercased and filters its SQL match down to the row
+    whose address is equal after ASCII lowercasing, whatever the column's
+    collation; rows stored with ASCII capitals before this rule are still
+    found (a `LOWER(email)` fallback when the indexed lookup misses). To
+    normalize existing rows once: `UPDATE users SET email = LOWER(email)`
+    (on MySQL / Postgres check first that it lowercases only ASCII for
+    your data, or do it in app code with an ASCII-only lowercase).
     **Token mails go to the stored address** (audit 12): a password reset,
     magic link or verify resend - from the routes or from
     `send_password_reset` / `send_magic_link` - is mailed to the account's
@@ -603,7 +609,7 @@ verify step between successful first-factor auth and `on_login` when
       auto-signup (and `send_magic_link`) creates none, and another
       account's email change to it - its request or its confirm - answers
       409 as for an address in use. The address is compared
-      case-insensitively (a superset of the exact match `user_find_by_email`
+      case-insensitively (a superset of the ASCII-case match `user_find_by_email`
       must make, so every account the undo can find holding the address is
       one the reservation kept the module's own paths from creating). Before, registering the vacated address took it,
       and the undo then had nothing to restore to: the thief kept the
@@ -776,12 +782,15 @@ verify step between successful first-factor auth and `on_login` when
   - `init` raises for `templates.email_change_notify` without
     `on_password_reset`, and for `enable_totp = true` without
     `totp_disable` (pass `totp.disable`).
-  - Token mails go to the stored address and need the typed address to be
-    it; an app whose `user_find_by_email` folds case keeps working for
-    users who type their address as stored (or with the domain in another
-    case), and silently mails nothing otherwise. Make the lookup exact.
-    `standard_users` is exact now: on a case-insensitive column an address
-    typed in another case no longer finds the account (login answers 401).
+  - Token mails go to the stored address and need the typed address to
+    equal it after ASCII lowercasing; an app whose `user_find_by_email`
+    folds further (accents, Unicode case) keeps working for users who type
+    their address as stored or in another ASCII case, and silently mails
+    nothing for any other spelling. Make the lookup fold no more than ASCII
+    case. `standard_users` now stores addresses ASCII-lowercased and matches
+    ASCII case only: `Alice@x` still logs in as `alice@x`, rows stored with
+    capitals before the upgrade are still found, and an accent or Unicode
+    variant no longer finds the account.
   - A recovery lock no longer expires: one written before the upgrade
     whose `email_change_ttl` had not passed stays until
     `unlock_recovery`; one already reaped is gone.

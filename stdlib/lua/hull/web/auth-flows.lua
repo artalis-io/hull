@@ -80,7 +80,8 @@
 --     every session (so the template requires on_password_reset).
 --   * Token mails (reset, magic link, verify resend) go to the account's
 --     STORED address, and only when the typed address is that address
---     (same_address); user_find_by_email must compare exactly.
+--     (same_address: equal after ASCII lowercasing); user_find_by_email
+--     must fold no more than ASCII case.
 --   * Login CSRF: every POST that signs a browser in or changes the
 --     account refuses a cross-site request (see "Cross-site guard").
 --
@@ -1158,18 +1159,16 @@ end
 -- Does the address a request typed name the account's STORED address (audit
 -- 12)? A token mail (magic link, password reset, verify resend) goes to the
 -- stored address, and only when the typed one is the same address: equal
--- bytes, except that the domain may differ in ASCII case (domains are
--- case-insensitive; local parts, strictly, are not). An app lookup that folds
--- more - a MySQL `utf8mb4_0900_ai_ci` column matches `josé@x` to `jose@x`, a
--- LOWER() lookup `Alice@x` to `alice@x` - would otherwise mail the token for
--- the account it found to whoever reads the address that was typed.
--- string.lower is ASCII-only here (Hull runs the C locale).
+-- once ASCII letters are lowercased, every other byte compared exactly. An
+-- app lookup that folds more - a MySQL `utf8mb4_0900_ai_ci` column matches
+-- `josé@x` to `jose@x`, a Unicode casefold `ſ` to `s` - would otherwise mail
+-- the token for the account it found to whoever reads the address that was
+-- typed (an IDN look-alike domain). ASCII case is folded because real users
+-- type `Alice@` for `alice@`; string.lower is ASCII-only here (Hull runs the
+-- C locale).
 local function same_address(typed, stored)
     if type(typed) ~= "string" or type(stored) ~= "string" then return false end
-    if typed == stored then return true end
-    local tl, td = typed:match("^(.*)@([^@]*)$")
-    local sl, sd = stored:match("^(.*)@([^@]*)$")
-    return tl ~= nil and sl ~= nil and tl == sl and td:lower() == sd:lower()
+    return typed:lower() == stored:lower()
 end
 
 -- Generic response shape for enumeration-safe endpoints. Same on
@@ -1205,7 +1204,7 @@ end
 -- too: failing toward the reservation keeps the undo possible.
 --
 -- The undo's holder check (handle_email_change_revoke) finds a holder through
--- user_find_by_email, which must compare exactly (audit 12): every account it
+-- user_find_by_email, which folds no more than ASCII case (audit 12): every account it
 -- can return then has an address this LOWER() match covers, so the stdlib's
 -- own paths cannot have created it. An app lookup that folds further (a MySQL
 -- accent-insensitive collation) can still name a holder the reservation did
@@ -2582,18 +2581,28 @@ function M.standard_users(opts)
     end
 
     return {
-        -- Exact (audit 12): the column's collation may fold (MySQL's
-        -- default utf8mb4_0900_ai_ci matches 'josé@x' to 'jose@x' and
-        -- 'Alice@x' to 'alice@x', a NOCASE or citext column folds case), and
-        -- an account found for another spelling of its address answered
-        -- logins, verify-resends, resets and magic links for it. The SQL
-        -- match still uses the index; only a row whose stored address is the
-        -- same bytes as the one asked for is returned.
+        -- ASCII case-insensitive, nothing more (audit 12): addresses are
+        -- stored ASCII-lowercased, so `Alice@x` logs in as `alice@x`, but
+        -- the column's own collation may fold further (MySQL's default
+        -- utf8mb4_0900_ai_ci matches 'josé@x' to 'jose@x'), and an account
+        -- found for another spelling of its address answered logins,
+        -- verify-resends, resets and magic links for it. So a row is
+        -- returned only when its address equals the one asked for after
+        -- ASCII lowercasing. The first query uses the index; the LOWER()
+        -- fallback finds rows stored with ASCII capitals before this rule.
         find_by_email = function(email)
+            if type(email) ~= "string" then return nil end
+            local key = email:lower()
             local rows = db.query(
-                "SELECT * FROM " .. tbl .. " WHERE email = ?", { email })
+                "SELECT * FROM " .. tbl .. " WHERE email = ?", { key })
+            if not rows or #rows == 0 then
+                rows = db.query(
+                    "SELECT * FROM " .. tbl .. " WHERE LOWER(email) = ?", { key })
+            end
             for _, r in ipairs(rows or {}) do
-                if r.email == email then return row(r) end
+                if type(r.email) == "string" and r.email:lower() == key then
+                    return row(r)
+                end
             end
             return nil
         end,
@@ -2610,7 +2619,7 @@ function M.standard_users(opts)
                 .. " (id, email, password_hash, email_verified, "
                 .. "  created_at, updated_at) "
                 .. "VALUES (?, ?, ?, 0, ?, ?)",
-                { id, email, pwhash, now, now })
+                { id, email:lower(), pwhash, now, now })
             return id
         end,
         set_password = function(id, pwhash)
@@ -2623,7 +2632,7 @@ function M.standard_users(opts)
             db.exec(
                 "UPDATE " .. tbl
                 .. " SET email = ?, updated_at = ? WHERE id = ?",
-                { email, time.now(), id })
+                { email:lower(), time.now(), id })
         end,
         set_email_verified = function(id, verified)
             db.exec(

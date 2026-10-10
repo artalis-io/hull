@@ -336,7 +336,7 @@ app.get("/users_exact", function(req, res)
     res:json({
         sql_folds  = #db.query("SELECT id FROM af_users WHERE email = ?", { "JOSE@x.test" }),
         exact      = (exact ~= nil and exact.id == id),
-        upper_nil  = users.find_by_email("JOSE@x.test") == nil,
+        upper_ok   = (function() local u = users.find_by_email("JOSE@x.test"); return u ~= nil and u.id == id end)(),
         accent_nil = users.find_by_email("jos\xc3\xa9@x.test") == nil,
     })
 end)
@@ -414,7 +414,7 @@ echo "$RESP_TOTP" | grep -q '"ip_locked":true'   || { echo "::error totp per-IP 
 RESP_USERS=$(curl -fsS "http://127.0.0.1:${PORT}/users_exact" || echo FAIL)
 echo "users_exact response: $RESP_USERS"
 echo "$RESP_USERS" | grep -q '"exact":true'      || { echo "::error standard_users did not find the exact address"; fail=1; }
-echo "$RESP_USERS" | grep -q '"upper_nil":true'  || { echo "::error standard_users matched a case variant"; fail=1; }
+echo "$RESP_USERS" | grep -q '"upper_ok":true'   || { echo "::error standard_users missed an ASCII case variant"; fail=1; }
 echo "$RESP_USERS" | grep -q '"accent_nil":true' || { echo "::error standard_users matched an accent variant"; fail=1; }
 
 # backend-agnostic DB stdlib on MySQL: inbox / rbac / audit-log / transaction / insert_if_absent

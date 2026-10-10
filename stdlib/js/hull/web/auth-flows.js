@@ -676,7 +676,7 @@ function dropPendingEmailChange(uid) {
 // (old_verified = 1, audit 11): an unverified one may be anybody's, and
 // holding it let its registrant block the owner and learn the account moved.
 // old_verified = 2 (unknown, audit 12) is held too. The undo's holder check
-// reads userFindByEmail, which must compare exactly (audit 12), so every
+// reads userFindByEmail, which folds no more than ASCII case (audit 12), so every
 // holder it can return is covered here; a restore the database still refuses
 // falls back to the recovery lock. An undone row (UNDONE_MARK) keeps holding
 // the address: the undo marks its row before it puts the address back.
@@ -722,19 +722,15 @@ function oldVerifiedState(user) {
 }
 
 // Does the typed address name the account's STORED address (audit 12; see
-// the Lua sibling, same_address)? Equal, except that the domain may differ in
-// ASCII case. toLowerCase folds beyond ASCII ("\u0130"), so ASCII is folded
-// by hand.
+// the Lua sibling, same_address)? Equal once ASCII letters are lowercased,
+// everything else compared exactly. toLowerCase folds beyond ASCII
+// ("\u0130", "\u212a"), so ASCII is folded by hand.
 function asciiLower(s) {
     return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 }
 function sameAddress(typed, stored) {
     if (typeof typed !== "string" || typeof stored !== "string") return false;
-    if (typed === stored) return true;
-    const ta = typed.lastIndexOf("@"), sa = stored.lastIndexOf("@");
-    if (ta < 0 || sa < 0) return false;
-    return typed.substring(0, ta) === stored.substring(0, sa)
-        && asciiLower(typed.substring(ta + 1)) === asciiLower(stored.substring(sa + 1));
+    return asciiLower(typed) === asciiLower(stored);
 }
 
 // Disable the account's second factor through the app's totpDisable hook,
@@ -2093,14 +2089,22 @@ function standardUsers(opts) {
     }
 
     return {
-        // Exact (audit 12; see the Lua sibling): the column's collation may
-        // fold case or accents, so only a row whose stored address is the
-        // same string as the one asked for is returned.
+        // ASCII case-insensitive, nothing more (audit 12; see the Lua
+        // sibling): addresses are stored ASCII-lowercased, the column's
+        // collation may fold further (accents), so a row is returned only
+        // when its address equals the one asked for after ASCII lowercasing.
+        // The LOWER() fallback finds rows stored with ASCII capitals before.
         findByEmail(email) {
-            const rows = db.query(
-                "SELECT * FROM " + tbl + " WHERE email = ?", [email]) || [];
+            if (typeof email !== "string") return null;
+            const key = asciiLower(email);
+            let rows = db.query(
+                "SELECT * FROM " + tbl + " WHERE email = ?", [key]) || [];
+            if (rows.length === 0) {
+                rows = db.query(
+                    "SELECT * FROM " + tbl + " WHERE LOWER(email) = ?", [key]) || [];
+            }
             for (const r of rows) {
-                if (r.email === email) return row(r);
+                if (typeof r.email === "string" && asciiLower(r.email) === key) return row(r);
             }
             return null;
         },
@@ -2117,7 +2121,7 @@ function standardUsers(opts) {
                 + " (id, email, password_hash, email_verified, "
                 + "  created_at, updated_at) "
                 + "VALUES (?, ?, ?, 0, ?, ?)",
-                [id, email, pwhash, now, now]);
+                [id, asciiLower(email), pwhash, now, now]);
             return id;
         },
         setPassword(id, pwhash) {
@@ -2130,7 +2134,7 @@ function standardUsers(opts) {
             db.exec(
                 "UPDATE " + tbl
                 + " SET email = ?, updated_at = ? WHERE id = ?",
-                [email, time.now(), id]);
+                [asciiLower(email), time.now(), id]);
         },
         setEmailVerified(id, verified) {
             db.exec(

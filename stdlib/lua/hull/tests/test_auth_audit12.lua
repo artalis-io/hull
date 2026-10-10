@@ -171,11 +171,11 @@ end
 
 -- ── H1: token mails go to the stored address ──────────────────────
 
-test("same_address: exact, or the domain in another ASCII case", function()
+test("same_address: equal after ASCII lowercasing, nothing more", function()
     local sa = af._test.same_address
     assert_eq(sa("jose@x.test", "jose@x.test"), true)
     assert_eq(sa("jose@X.Test", "jose@x.test"), true, "domain case")
-    assert_eq(sa("JOSE@x.test", "jose@x.test"), false, "local-part case")
+    assert_eq(sa("JOSE@x.test", "jose@x.test"), true, "local-part ASCII case")
     assert_eq(sa("jos\xc3\xa9@x.test", "jose@x.test"), false, "accent")
     assert_eq(sa("jose@x.t\xc3\xa9st", "jose@x.test"), false, "non-ASCII domain")
     assert_eq(sa("jose@x.test", nil), false, "no stored address")
@@ -184,7 +184,7 @@ end)
 test("reset / magic link / helpers for a lookalike address mail nothing", function()
     reset_store(); init({ magic_link_auto_signup = true })
     add_user(1, "jose@x.test", "first-password-1", true)
-    for _, typed in ipairs({ "jos\xc3\xa9@x.test", "JOSE@x.test", "Jose@x.test" }) do
+    for _, typed in ipairs({ "jos\xc3\xa9@x.test", "JOS\xc3\x89@x.test", "jose@x.t\xc3\xa9st" }) do
         local res = mkres()
         H.password_reset_request(mkreq({ email = typed }), res)
         assert_eq(res.body and res.body.ok, true, "generic ok")
@@ -213,13 +213,14 @@ test("verify resend: lookalike mails nothing; the stored address gets it", funct
     reset_store(); init()
     add_user(3, "eve@x.test", "first-password-1", false)
     H.verify_resend(mkreq({ email = "\xc3\x89ve@x.test" }), mkres())
-    H.verify_resend(mkreq({ email = "EVE@x.test" }), mkres())
+    H.verify_resend(mkreq({ email = "\xd0\xb5ve@x.test" }), mkres())
     assert_eq(#S.sent, 0, "nothing for a lookalike")
-    H.verify_resend(mkreq({ email = "eve@X.test" }), mkres())
-    assert_eq(sent_to("eve@x.test"), 1, "to the stored address")
+    H.verify_resend(mkreq({ email = "EVE@X.test" }), mkres())
+    assert_eq(sent_to("eve@x.test"), 1, "an ASCII case variant: to the stored address")
+    assert_eq(sent_to("EVE@X.test"), 0, "never to the typed spelling")
 end)
 
-test("standard_users finds only the exact address", function()
+test("standard_users: ASCII case-insensitive, accents exact, legacy rows found", function()
     reset_store(); init()
     db.exec("DROP TABLE IF EXISTS au12_users")
     db.exec("CREATE TABLE au12_users (id TEXT PRIMARY KEY, "
@@ -228,10 +229,15 @@ test("standard_users finds only the exact address", function()
             .. "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
     local users = af.standard_users({ table = "au12_users" })
     local id = users.create("Alice@x.test", "h")
-    assert_eq(users.find_by_email("alice@x.test"), nil, "folded case not found")
-    assert_eq(users.find_by_email("ALICE@X.TEST"), nil)
-    local u = users.find_by_email("Alice@x.test")
-    assert_eq(u and u.id, id, "exact found")
+    local stored = db.query("SELECT email FROM au12_users WHERE id = ?", { id })
+    assert_eq(stored[1].email, "alice@x.test", "stored ASCII-lowercased")
+    assert_eq(users.find_by_email("alice@x.test").id, id, "lowercase finds it")
+    assert_eq(users.find_by_email("ALICE@X.TEST").id, id, "ASCII case variant finds it")
+    assert_eq(users.find_by_email("alic\xc3\xa9@x.test"), nil, "accent variant does not")
+    db.exec("INSERT INTO au12_users (id, email, password_hash, email_verified, "
+            .. "created_at, updated_at) VALUES ('legacy', 'Bob@X.test', 'h', 0, 0, 0)")
+    local legacy = users.find_by_email("bob@x.test")
+    assert_eq(legacy and legacy.id, "legacy", "a row stored with ASCII capitals is still found")
     db.exec("DROP TABLE au12_users")
 end)
 

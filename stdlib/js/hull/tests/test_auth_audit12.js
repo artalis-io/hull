@@ -160,11 +160,11 @@ async function confirmedChange(id, oldEmail, newEmail) {
 
 // ── H1: token mails go to the stored address ──────────────────────
 
-await test("sameAddress: exact, or the domain in another ASCII case", () => {
+await test("sameAddress: equal after ASCII lowercasing, nothing more", () => {
     const sa = authFlows._test.sameAddress;
     assertEq(sa("jose@x.test", "jose@x.test"), true);
     assertEq(sa("jose@X.Test", "jose@x.test"), true, "domain case");
-    assertEq(sa("JOSE@x.test", "jose@x.test"), false, "local-part case");
+    assertEq(sa("JOSE@x.test", "jose@x.test"), true, "local-part ASCII case");
     assertEq(sa("josé@x.test", "jose@x.test"), false, "accent");
     assertEq(sa("jose@x.tést", "jose@x.test"), false, "non-ASCII domain");
     assertEq(sa("jose@Kelvin.test", "jose@kelvin.test"), false, "no Unicode case folding");
@@ -174,7 +174,7 @@ await test("sameAddress: exact, or the domain in another ASCII case", () => {
 await test("reset / magic link / helpers for a lookalike address mail nothing", async () => {
     resetStore(); init({ magicLinkAutoSignup: true });
     addUser(1, "jose@x.test", "first-password-1", true);
-    for (const typed of ["josé@x.test", "JOSE@x.test", "Jose@x.test"]) {
+    for (const typed of ["josé@x.test", "JOSÉ@x.test", "jose@x.tést"]) {
         let res = mkRes();
         await H.passwordResetRequest(mkReq({ email: typed }), res);
         assertEq(res.body && res.body.ok, true, "generic ok");
@@ -203,13 +203,14 @@ await test("verify resend: lookalike mails nothing; the stored address gets it",
     resetStore(); init();
     addUser(3, "eve@x.test", "first-password-1", false);
     await H.verifyResend(mkReq({ email: "Éve@x.test" }), mkRes());
-    await H.verifyResend(mkReq({ email: "EVE@x.test" }), mkRes());
+    await H.verifyResend(mkReq({ email: "\u0435ve@x.test" }), mkRes());
     assertEq(S.sent.length, 0, "nothing for a lookalike");
-    await H.verifyResend(mkReq({ email: "eve@X.test" }), mkRes());
-    assertEq(sentTo("eve@x.test"), 1, "to the stored address");
+    await H.verifyResend(mkReq({ email: "EVE@X.test" }), mkRes());
+    assertEq(sentTo("eve@x.test"), 1, "an ASCII case variant: to the stored address");
+    assertEq(sentTo("EVE@X.test"), 0, "never to the typed spelling");
 });
 
-await test("standardUsers finds only the exact address", () => {
+await test("standardUsers: ASCII case-insensitive, accents exact, legacy rows found", () => {
     resetStore(); init();
     db.exec("DROP TABLE IF EXISTS au12_users_js");
     db.exec("CREATE TABLE au12_users_js (id TEXT PRIMARY KEY, "
@@ -218,10 +219,15 @@ await test("standardUsers finds only the exact address", () => {
             + "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
     const users = authFlows.standardUsers({ table: "au12_users_js" });
     const id = users.create("Alice@x.test", "h");
-    assertEq(users.findByEmail("alice@x.test"), null, "folded case not found");
-    assertEq(users.findByEmail("ALICE@X.TEST"), null);
-    const u = users.findByEmail("Alice@x.test");
-    assertEq(u && u.id, id, "exact found");
+    const stored = db.query("SELECT email FROM au12_users_js WHERE id = ?", [id]);
+    assertEq(stored[0].email, "alice@x.test", "stored ASCII-lowercased");
+    assertEq(users.findByEmail("alice@x.test").id, id, "lowercase finds it");
+    assertEq(users.findByEmail("ALICE@X.TEST").id, id, "ASCII case variant finds it");
+    assertEq(users.findByEmail("alicé@x.test"), null, "accent variant does not");
+    db.exec("INSERT INTO au12_users_js (id, email, password_hash, email_verified, "
+            + "created_at, updated_at) VALUES ('legacy', 'Bob@X.test', 'h', 0, 0, 0)");
+    const legacy = users.findByEmail("bob@x.test");
+    assertEq(legacy && legacy.id, "legacy", "a row stored with ASCII capitals is still found");
     db.exec("DROP TABLE au12_users_js");
 });
 
