@@ -68,6 +68,13 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
     HlJS *js = (HlJS *)opaque;
     if (js->budget_tripped)
         return 1;
+    /* The run's wall-clock deadline (cap/run_watchdog.h): QuickJS HULL
+     * PATCH 0006 polls here at the next step once the watchdog raised it. */
+    if (hl_run_watch_stopped(&js->run_watch)) {
+        js->budget_tripped = 1;
+        js->budget_timed_out = 1;
+        return 1;
+    }
     js->instruction_count += HL_JS_INTERRUPT_WEIGHT;
     if (js->max_instructions > 0 &&
         js->instruction_count > js->max_instructions) {
@@ -81,6 +88,10 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
  * by hl_js_budget_charge (C work a binding does) and the SQL charge below. */
 static int js_budget_add(HlJS *js, uint64_t units)
 {
+    if (!js->budget_tripped && hl_run_watch_stopped(&js->run_watch)) {
+        js->budget_tripped = 1;          /* the run's deadline (see above) */
+        js->budget_timed_out = 1;
+    }
     if (!js->budget_tripped) {
         uint64_t room = (uint64_t)(INT64_MAX - js->instruction_count);
         js->instruction_count = units > room
@@ -117,7 +128,21 @@ static int js_db_budget_charge(void *ud, int64_t units)
 
 void hl_js_budget_arm(HlJS *js)
 {
+    hl_js_budget_arm_kind(js, HL_RUN_ENTRY);
+}
+
+const char *hl_js_trip_reason(const HlJS *js)
+{
+    return js && js->budget_timed_out ? HL_RUN_TIME_LIMIT_MSG
+                                      : "instruction limit exceeded";
+}
+
+void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
+{
     if (!js) return;
+    /* The run's wall-clock deadline, its flag cleared before any of the
+     * run's code (cap/run_watchdog.h). */
+    hl_run_watch_arm(&js->run_watch, hl_run_watchdog_limit_ms(kind));
 #ifdef HL_ENABLE_DB
     (void)hl_db_budget_swap(js_db_budget_charge, js);
 #endif
@@ -128,11 +153,13 @@ void hl_js_budget_arm(HlJS *js)
         JS_FreeValue(js->ctx, JS_GetException(js->ctx));
     js->instruction_count = 0;
     js->budget_tripped = 0;
+    js->budget_timed_out = 0;
 }
 
 JSValue hl_js_budget_throw(JSContext *ctx)
 {
-    JS_ThrowInternalError(ctx, "interrupted (instruction limit exceeded)");
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    JS_ThrowInternalError(ctx, "interrupted (%s)", hl_js_trip_reason(js));
     JS_SetUncatchableException(ctx, 1);
     return JS_EXCEPTION;
 }
@@ -975,6 +1002,8 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Set interrupt handler for gas metering */
     JS_SetInterruptHandler(js->rt, hl_js_interrupt_handler, js);
     JS_SetWorkHandler(js->rt, hl_js_work_handler, js);
+    /* QuickJS HULL PATCH 0006: the run watchdog's flag (cap/run_watchdog.h). */
+    JS_SetStopFlag(js->rt, &js->run_watch.stop);
 
     /* The code-cache seal key, read now - before the kernel sandbox
      * narrows file access (see hl_runtime_cache_seal_prepare). */
@@ -1356,8 +1385,9 @@ int hl_js_run_jobs(HlJS *js)
             /* ToCString can run app code (a toString) that throws. */
             JS_FreeValue(ectx, JS_GetException(ectx));
         } else if (!failed) {
-            log_error("[hull:js] instruction limit exceeded; the run's "
-                      "pending promise jobs are discarded");
+            log_error("[hull:js] %s; the run's "
+                      "pending promise jobs are discarded",
+                      hl_js_trip_reason(js));
         }
         failed = 1;
         JS_FreeValue(ectx, exc);
@@ -1406,6 +1436,9 @@ void hl_js_free(HlJS *js)
 #ifdef HL_ENABLE_DB
     hl_db_budget_unbind(js);   /* bound by every arm */
 #endif
+    /* The watchdog must be done with the watch before its storage goes, and
+     * the teardown below is no run. */
+    hl_run_watch_disarm(&js->run_watch);
 
     /* Cancel and free tracked timers - via async backend vtable. */
     {
@@ -1782,6 +1815,9 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
      * trivial test file trips "stack overflow". */
     JS_UpdateStackTop(js->rt);
 
+    /* Loading a test file runs its top level: an entry of its own (budget
+     * and wall-clock deadline), not the tail of the last file's last case. */
+    hl_js_budget_arm(js);
     JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file_path,
                              JS_EVAL_TYPE_MODULE);
     free(src);
@@ -2143,7 +2179,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     js->active_timer = NULL;
     js->active_life = NULL;
     js->last_async_cont = NULL;
-    hl_js_budget_arm(js);
+    hl_js_budget_arm_kind(js, HL_RUN_MAIN);   /* app.main's own deadline */
     JSValue call_argv[1] = { ctxobj };
     js->active_cli_main = 1;   /* the ops main makes are main's */
     JSValue ret = JS_Call(ctx, main_fn, JS_UNDEFINED, 1, call_argv);
@@ -2180,7 +2216,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     if (js->budget_tripped) {
         /* Over the limit before main settled: its promise never will (a
          * tripped run settles nothing), so do not wait on it. */
-        fprintf(stderr, "[hull:main] instruction limit exceeded\n");
+        fprintf(stderr, "[hull:main] %s\n", hl_js_trip_reason(js));
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
         JS_FreeValue(ctx, global);

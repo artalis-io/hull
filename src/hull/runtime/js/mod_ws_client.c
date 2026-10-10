@@ -209,7 +209,7 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
         JSValue exc = JS_GetException(ctx);
         const char *msg = tripped ? NULL : JS_ToCString(ctx, exc);
         log_error("[hull:ws:client] %s error: %s", what,
-                  msg ? msg : tripped ? "instruction limit exceeded" : "unknown");
+                  msg ? msg : tripped ? hl_js_trip_reason(js) : "unknown");
         if (msg) JS_FreeCString(ctx, msg);
         else JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (audit 10) */
         JS_FreeValue(ctx, exc);

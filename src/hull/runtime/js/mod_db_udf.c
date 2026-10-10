@@ -119,7 +119,7 @@ static void js_udf_report_error(JSContext *ctx, sqlite3_context *sctx,
     JSValue exc = JS_GetException(ctx);
     HlJS *js = get_hl_js(ctx);
     if (js && js->budget_tripped) {
-        sqlite3_result_error(sctx, "instruction limit exceeded", -1);
+        sqlite3_result_error(sctx, hl_js_trip_reason(js), -1);
     } else {
         const char *err = JS_ToCString(ctx, exc);
         sqlite3_result_error(sctx, err ? err : fallback, -1);

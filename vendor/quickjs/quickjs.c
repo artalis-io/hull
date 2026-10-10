@@ -363,6 +363,9 @@ struct JSRuntime {
        1/64 instruction units, flushed to work_handler in batches */
     JSWorkHandler *work_handler;
     void *work_opaque;
+    /* HULL PATCH 0006: a flag another thread may raise; while it is
+       non-zero every step polls the interrupt handler */
+    int *stop_flag;
     uint64_t work_pending;
 
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
@@ -550,6 +553,8 @@ struct JSContext {
 
     /* when the counter reaches zero, JSRutime.interrupt_handler is called */
     int interrupt_counter;
+    /* HULL PATCH 0006: the runtime's stop flag (JS_SetStopFlag), or NULL */
+    int *stop_flag;
 
     struct list_head loaded_modules; /* list of JSModuleDef.link */
 
@@ -1851,6 +1856,17 @@ void JS_SetWorkHandler(JSRuntime *rt, JSWorkHandler *cb, void *opaque)
     rt->work_pending = 0;
 }
 
+/* HULL PATCH 0006: see JS_SetStopFlag in quickjs.h */
+void JS_SetStopFlag(JSRuntime *rt, int *flag)
+{
+    struct list_head *el;
+    rt->stop_flag = flag;
+    list_for_each(el, &rt->context_list) {
+        JSContext *c = list_entry(el, JSContext, link);
+        c->stop_flag = flag;
+    }
+}
+
 static void js_trigger_gc(JSRuntime *rt, size_t size)
 {
     BOOL force_gc;
@@ -2684,6 +2700,7 @@ JSContext *JS_NewContextRaw(JSRuntime *rt)
         return NULL;
     }
     ctx->rt = rt;
+    ctx->stop_flag = rt->stop_flag;  /* HULL PATCH 0006 */
     list_add_tail(&ctx->link, &rt->context_list);
     for(i = 0; i < rt->class_count; i++)
         ctx->class_proto[i] = JS_NULL;
@@ -7989,9 +8006,22 @@ static no_inline __exception int __js_poll_interrupts(JSContext *ctx)
     return 0;
 }
 
+/* HULL PATCH 0006: an atomic read of the embedder's stop flag, which
+   another thread writes */
+#if defined(__GNUC__) || defined(__clang__)
+#define js_load_stop(p) __atomic_load_n((p), __ATOMIC_RELAXED)
+#else
+#define js_load_stop(p) (*(volatile int *)(p))
+#endif
+
 static inline __exception int js_poll_interrupts(JSContext *ctx)
 {
-    if (unlikely(--ctx->interrupt_counter <= 0)) {
+    /* HULL PATCH 0006: the stop flag (Hull's run watchdog) makes this step
+       poll the interrupt handler at once, not up to
+       JS_INTERRUPT_COUNTER_INIT steps later - each step may do work the
+       budget does not see. See docs/quickjs_patches.md. */
+    if (unlikely(--ctx->interrupt_counter <= 0) ||
+        unlikely(ctx->stop_flag != NULL && js_load_stop(ctx->stop_flag))) {
         return __js_poll_interrupts(ctx);
     } else {
         return 0;

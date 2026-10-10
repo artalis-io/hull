@@ -81,6 +81,7 @@
 #include "hull/sandbox.h"
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
+#include "hull/cap/run_watchdog.h"   /* --max-run-ms */
 #include "hull/static.h"
 #include "hull/tool.h"
 #ifdef HL_ENABLE_WASM
@@ -280,6 +281,8 @@ static void usage(const char *prog)
             "  --no-ca-bundle       Skip TLS certificate verification (dev mode)\n"
             "  --ca-bundle PATH     Use custom CA bundle (overrides system + embedded)\n"
             "  --max-instructions N Set runtime instruction limit per request (default: 100m)\n"
+            "  --max-run-ms MS      Wall-clock limit per uninterrupted script run (default:\n"
+            "                       60000; app.main 600000; 0 = none; env HULL_MAX_RUN_MS)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
             "  --max-connections N  Max concurrent connections (default: 256)\n"
             "  --body-max-size SIZE Max request body size (default: 1m)\n"
@@ -484,6 +487,14 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 fprintf(stderr, "hull: invalid instruction limit: %s\n", argv[i]);
                 return -1;
             }
+        } else if (strcmp(argv[i], "--max-run-ms") == 0 && i + 1 < argc) {
+            /* The run watchdog's wall-clock deadline (cap/run_watchdog.h). */
+            int64_t ms;
+            if (hl_run_watchdog_parse_ms(argv[++i], &ms) != 0) {
+                fprintf(stderr, "hull: invalid max-run-ms: %s\n", argv[i]);
+                return -1;
+            }
+            hl_run_watchdog_configure(ms);
         } else if (strcmp(argv[i], "--max-connections") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);

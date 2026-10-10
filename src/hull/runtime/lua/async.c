@@ -235,7 +235,10 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         status = LUA_ERRMEM;
     } else {
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
-        HL_LUA_ARM(lua, co);   /* a new run: budget.c */
+        /* A new run: budget.c. A resume of app.main itself keeps main's
+         * deadline default (cap/run_watchdog.h). */
+        HL_LUA_ARM_KIND(lua, co, co == lua->cli_main_co ? HL_RUN_MAIN
+                                                        : HL_RUN_ENTRY);
         status = lua_resume(co, lua->L, nargs, &nres);
         status = hl_lua_resume_status(co, status);
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
@@ -917,6 +920,9 @@ static void lua_task_fire(void *user)
     void          (*save_oc)(struct HlLua *, void *) = lua->active_on_complete;
     void           *save_oc_ctx     = lua->active_on_complete_ctx;
     HlLuaBudget     save_budget     = lua->budget;
+    /* And its wall-clock deadline: the arm below sets the task's own
+     * (cap/run_watchdog.h). */
+    uint64_t        save_deadline   = hl_run_watch_save(&lua->run_watch);
 #ifdef HL_ENABLE_DB
     /* The arm below rebinds this thread's SQL budget to this run. */
     HlDbBudgetBinding save_db_budget = hl_db_budget_current();
@@ -958,6 +964,7 @@ static void lua_task_fire(void *user)
     lua->active_on_complete     = save_oc;
     lua->active_on_complete_ctx = save_oc_ctx;
     lua->budget                 = save_budget;
+    hl_run_watch_restore(&lua->run_watch, save_deadline);
 #ifdef HL_ENABLE_DB
     hl_db_budget_restore(save_db_budget);
 #endif

@@ -364,6 +364,12 @@ LUA_API size_t lua_hltakeowed (lua_State *L) {
 }
 
 
+/* HULL PATCH 0005 (docs/lua_patches.md) */
+LUA_API void lua_hlsetstop (lua_State *L, int *flag) {
+  G(L)->hlstop = flag;
+}
+
+
 LUA_API void lua_arith (lua_State *L, int op) {
   lua_lock(L);
   if (op != LUA_OPUNM && op != LUA_OPBNOT)

@@ -155,12 +155,15 @@ static void test_budget_rejoin(HlLua *lua, const HlLuaBudget *saved)
 {
     int64_t nested = lua->budget.used;
     int nested_tripped = lua->budget.tripped;
+    int nested_timed_out = lua->budget.timed_out;
     lua->budget = *saved;
     lua->budget.used = nested > INT64_MAX - saved->used
                        ? INT64_MAX : saved->used + nested;
     if (nested_tripped ||
         (lua->budget.limit > 0 && lua->budget.used >= lua->budget.limit))
         lua->budget.tripped = 1;
+    if (nested_timed_out)
+        lua->budget.timed_out = 1;
 }
 
 static void test_result_free(HlLua *lua, HlTestResult *result)
@@ -277,6 +280,9 @@ static int l_test_http(lua_State *L, const char *method)
      * guard rolled back a transaction the case has open (a test.get inside
      * db.batch lost the batch's writes): held off while the case has one. */
     HlLuaBudget saved_budget = lua->budget;
+    /* Likewise the case's wall-clock deadline: the request's arm set one of
+     * its own, and the case runs on to its own (cap/run_watchdog.h). */
+    uint64_t saved_deadline = hl_run_watch_save(&lua->run_watch);
     int hold = hl_db_registry_open_txn(lua->base.db_registry) != NULL;
     if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
@@ -286,6 +292,11 @@ static int l_test_http(lua_State *L, const char *method)
                       &result);
     if (hold) hl_db_registry_guard_hold(-1);
     test_budget_rejoin(lua, &saved_budget);
+    hl_run_watch_restore(&lua->run_watch, saved_deadline);
+    if (hl_run_watch_stopped(&lua->run_watch) && !lua->budget.tripped) {
+        lua->budget.tripped = 1;
+        lua->budget.timed_out = 1;
+    }
     if (drc != 0)
         return luaL_error(L, "test dispatch failed");
     if (lua->budget.tripped) {

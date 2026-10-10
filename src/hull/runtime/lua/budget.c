@@ -28,6 +28,12 @@
  *     (`xpcall(spin, function() while true do end end)`). The trip is
  *     re-raised whatever the handler returns, so nothing is lost.
  *
+ * The run's wall-clock deadline (cap/run_watchdog.h) trips the same way: the
+ * watchdog thread raises the watch's stop flag, Lua HULL PATCH 0005 makes
+ * the next instruction of any hooked thread call this hook, and the hook
+ * trips the budget with its own message. It bounds what the count cannot
+ * see - work inside one instruction that no patch charges.
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -48,6 +54,11 @@ static int budget_db_charge(void *ud, int64_t units)
 {
     HlLuaBudget *b = (HlLuaBudget *)ud;
     if (b->tripped) return 1;
+    if (hl_run_watch_stopped(b->watch)) {   /* the run's deadline passed */
+        b->tripped = 1;
+        b->timed_out = 1;
+        return 1;
+    }
     if (b->limit <= 0) return 0;
     b->used = units > INT64_MAX - b->used ? INT64_MAX : b->used + units;
     if (b->used >= b->limit) b->tripped = 1;
@@ -62,6 +73,7 @@ static int budget_db_charge(void *ud, int64_t units)
 
 static const char hl_lua_budget_key = 0;
 static const char hl_lua_budget_err_key = 0;   /* the trip's message */
+static const char hl_lua_budget_time_key = 0;  /* the deadline's message */
 
 static HlLuaBudget *budget_of(lua_State *L)
 {
@@ -81,6 +93,10 @@ static void budget_hook(lua_State *L, lua_Debug *ar)
 {
     (void)ar;
     HlLuaBudget *b = budget_of(L);
+    if (b && !b->tripped && hl_run_watch_stopped(b->watch)) {
+        b->tripped = 1;                 /* the run's wall-clock deadline */
+        b->timed_out = 1;
+    }
     if (b && !b->tripped) {
         int count = lua_gethookcount(L);
         /* Plus the work charged past the hook's count (HULL PATCH 0004:
@@ -109,11 +125,16 @@ static void budget_hook(lua_State *L, lua_Debug *ar)
 
 int hl_lua_budget_raise(lua_State *L)
 {
+    HlLuaBudget *b = budget_of(L);
+    int timed = b && b->timed_out;
     /* A registry read: no allocation (luaD_hook left LUA_MINSTACK free). */
-    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_err_key) == LUA_TSTRING)
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX,
+                    timed ? &hl_lua_budget_time_key
+                          : &hl_lua_budget_err_key) == LUA_TSTRING)
         return lua_error(L);
     lua_pop(L, 1);
-    return luaL_error(L, "instruction limit exceeded");   /* not installed */
+    return luaL_error(L, timed ? HL_RUN_TIME_LIMIT_MSG
+                               : "instruction limit exceeded");   /* not installed */
 }
 
 void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
@@ -121,22 +142,37 @@ void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
     budget_hook(L, ar);
 }
 
-void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit)
+void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
+                       uint32_t run_ms)
 {
     if (!thread || !b) return;
     b->limit = limit;
     b->used = 0;
     b->tripped = 0;
+    b->timed_out = 0;
+    /* The run's wall-clock deadline: armed (and its flag cleared) before any
+     * of the run's code. */
+    if (b->watch) hl_run_watch_arm(b->watch, run_ms);
+    else run_ms = 0;
 #ifdef HL_ENABLE_DB
     /* This thread's SQL is this run's from here on (audit 9 H4). */
     (void)hl_db_budget_swap(budget_db_charge, b);
 #endif
-    if (limit <= 0) {
+    if (limit <= 0 && run_ms == 0) {
         lua_sethook(thread, NULL, 0, 0);
         return;
     }
-    int stride = limit < HL_LUA_BUDGET_STRIDE ? (int)limit : HL_LUA_BUDGET_STRIDE;
+    /* With no count limit the hook still runs, for the deadline (Lua HULL
+     * PATCH 0005 calls it only on a hooked thread). */
+    int stride = limit > 0 && limit < HL_LUA_BUDGET_STRIDE
+                 ? (int)limit : HL_LUA_BUDGET_STRIDE;
     lua_sethook(thread, budget_hook, LUA_MASKCOUNT, stride);
+}
+
+const char *hl_lua_trip_reason(const HlLuaBudget *b)
+{
+    return b && b->timed_out ? HL_RUN_TIME_LIMIT_MSG
+                             : "instruction limit exceeded";
 }
 
 /* ── pcall / xpcall that do not swallow the trip ──────────────────────
@@ -196,6 +232,10 @@ void hl_lua_budget_install(lua_State *L, HlLuaBudget *b)
     lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_key);
     lua_pushliteral(L, "instruction limit exceeded");
     lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_err_key);
+    lua_pushliteral(L, HL_RUN_TIME_LIMIT_MSG);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_time_key);
+    /* Lua HULL PATCH 0005: the watchdog's flag reaches every thread's hook. */
+    lua_hlsetstop(L, b->watch ? &b->watch->stop : NULL);
     lua_pushcfunction(L, budget_pcall);
     lua_setglobal(L, "pcall");
     lua_pushcfunction(L, budget_xpcall);

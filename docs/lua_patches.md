@@ -240,3 +240,43 @@ iterations a stored string may name trips the limit at once; `bcrypt_pbkdf` at
 body they copy or gzip, `res:header` the bytes it adds (round-9 M1 / M2), and
 `part:read()` the bytes it accumulates - a binding that reads a large input and
 allocates little is otherwise charged one instruction.
+
+## Patch 0005 - an embedder stop flag polled at every hooked instruction
+
+**Files:** `vendor/lua/lstate.h` / `lstate.c` (the `hlstop` global field),
+`lapi.c` + `lua.h` (`lua_hlsetstop`), `ldebug.c` (`luaG_traceexec`)
+**Found by:** round-12 audit (G2: the run watchdog)
+**Upstream:** Hull-specific.
+
+Audits 9-12 kept finding work one instruction does that patch 0004 does not
+charge (a rehash, `luaC_checkfinalizer` walking the finalizer list on every
+`setmetatable` with `__gc`, `luaH_next` over live entries, ...). Charging each
+one never converges, so Hull bounds every run by wall-clock time as well
+(`src/hull/cap/run_watchdog.c`): a watchdog thread raises a per-VM stop flag at
+the run's deadline. The hook can only see that flag when it runs, and between
+two count-hook calls a thread runs a whole hook period (10000 instructions) -
+each of which may be one of those uncharged operations.
+
+The patch gives the global state a pointer to an `int` the embedder owns
+(`lua_hlsetstop(L, &flag)`, NULL = none). `luaG_traceexec` - which a hooked
+thread already enters at every instruction to decrement `hookcount` - reads the
+flag (an atomic relaxed load: another thread writes it) and, when it is set,
+sets `hookcount` to 1 so the count hook runs at this instruction. Hull's hook
+(`runtime/lua/budget.c`) then trips the run's budget with its own message
+(`run exceeded its time limit`); the trip is the same sticky, uncatchable one
+the instruction limit raises.
+
+Cost: one pointer load and one compare per hooked instruction, in a function
+the hooked VM already calls per instruction. A VM with no count hook never
+enters `luaG_traceexec`, so the flag is not polled there - Hull installs the
+hook whenever a deadline is armed, even with no instruction limit. A VM with
+no flag set (the tool VM) behaves exactly as upstream.
+
+**Limit:** the flag is seen between instructions. One instruction that runs
+long (one huge rehash, a C function such as `table.sort` with a C
+comparator) runs to completion; the watchdog bounds loops of them.
+
+**Guard:** `tests/hull/runtime/lua/test_lua.c`, `lua_run_watchdog.*` (loops of
+round-12 triggers under a 200 ms deadline and no instruction limit are stopped;
+the trip survives pcall / xpcall / a coroutine; a worker.dispatch job is
+stopped).

@@ -58,6 +58,7 @@ typedef struct {
     size_t used;
     size_t limit;   /* 0 = none */
     HlLuaBudget budget;   /* the VM's instruction budget (budget.c) */
+    HlRunWatch  watch;    /* the job's wall-clock deadline (run_watchdog.h) */
 } WorkerHeap;
 
 /* The app's heap limit, counted per VM. Deliberately not the server's
@@ -134,6 +135,10 @@ static lua_State *worker_vm_new(WorkerHeap *heap,
 {
     heap->used = 0;
     heap->limit = op->mem_limit;
+    /* Before the budget is installed (it hands Lua the watch's flag). */
+    memset(&heap->budget, 0, sizeof heap->budget);
+    memset(&heap->watch, 0, sizeof heap->watch);
+    heap->budget.watch = &heap->watch;
     lua_State *L = lua_newstate(worker_alloc, heap);
     if (!L) return NULL;
     lua_pushcfunction(L, worker_vm_setup_k);
@@ -145,7 +150,9 @@ static lua_State *worker_vm_new(WorkerHeap *heap,
         lua_close(L);
         return NULL;
     }
-    hl_lua_budget_arm(L, &heap->budget, op->max_instructions);
+    /* A job is a run like a request's: the same wall-clock default. */
+    hl_lua_budget_arm(L, &heap->budget, op->max_instructions,
+                      hl_run_watchdog_limit_ms(HL_RUN_ENTRY));
     return L;
 }
 
@@ -311,6 +318,7 @@ static void lua_dispatch_work_fn(void *ud)
         return;
     }
     lua_dispatch_run(L, op);
+    hl_run_watch_disarm(&heap.watch);   /* before the stack frame goes */
     lua_close(L);
 #ifdef HL_ENABLE_DB
     hl_db_budget_unbind(&heap.budget);   /* bound by worker_vm_new's arm */

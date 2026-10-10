@@ -15,6 +15,7 @@
 #include "hull/limits/runtime.h"  /* transitively pulls in core.h */
 #include "hull/runtime.h"
 #include "hull/cap/types.h"
+#include "hull/cap/run_watchdog.h"
 #include "hull/reqctx.h"          /* HlReqCtxList */
 
 /* Forward declarations */
@@ -82,6 +83,10 @@ typedef struct HlJS {
     int64_t         instruction_count;
     int64_t         max_instructions;
     int             budget_tripped;
+    /* The run's wall-clock deadline (cap/run_watchdog.h), armed with the
+     * budget. budget_timed_out: the trip was that deadline, not the count. */
+    HlRunWatch      run_watch;
+    int             budget_timed_out;
 
     /* 1 while a middleware runs (and its microtasks drain). Middleware is
      * synchronous: an async op started now would suspend the connection the
@@ -276,9 +281,16 @@ void hl_js_reset_request(HlJS *js);
  * any interrupt a tripped run left pending on the context dropped). Every
  * entry point calls it - dispatch and middleware (via hl_js_reset_request),
  * a timer, an SSE / ws / ws-client callback, an async or multipart resume,
- * app.main, a hull test case.
+ * app.main, a hull test case. It also arms the run's wall-clock deadline
+ * (cap/run_watchdog.h); _kind picks the default (app.main's own runs get
+ * HL_RUN_MAIN).
  */
 void hl_js_budget_arm(HlJS *js);
+void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind);
+
+/* Why the run tripped: "instruction limit exceeded", or
+ * HL_RUN_TIME_LIMIT_MSG when its wall-clock deadline passed. */
+const char *hl_js_trip_reason(const HlJS *js);
 
 /*
  * Destroy the QuickJS runtime and free all resources.

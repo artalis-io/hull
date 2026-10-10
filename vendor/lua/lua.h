@@ -477,6 +477,9 @@ LUA_API int (lua_gethookcount) (lua_State *L);
 LUA_API void (lua_hlcharge) (lua_State *L, size_t units, size_t bytes);
 LUA_API void (lua_hlwork) (lua_State *L, size_t units, size_t bytes);
 LUA_API size_t (lua_hltakeowed) (lua_State *L);
+/* HULL PATCH 0005 (docs/lua_patches.md): a flag another thread may raise;
+   while it is non-zero the count hook runs at every instruction */
+LUA_API void (lua_hlsetstop) (lua_State *L, int *flag);
 
 LUA_API int (lua_setcstacklimit) (lua_State *L, unsigned int limit);
 

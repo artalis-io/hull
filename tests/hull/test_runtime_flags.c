@@ -71,7 +71,7 @@ UTEST(runtime_flags, not_prefixed)
 UTEST(runtime_flags, downgrades_need_the_prefix_in_a_built_binary)
 {
     static const char *const down[] = {
-        "--no-sandbox", "--ca-bundle=/x", "--max-instructions",
+        "--no-sandbox", "--ca-bundle=/x", "--max-instructions", "--max-run-ms",
         "-b", "-d", "-m", "-M", "-s", "--tls-cert", "--tls-key",
         "--wasm-gas", "--wasm-heap", "--wasm-stack", "--wasm-max-input",
         "--wasm-max-output", "--body-max-size",
@@ -126,7 +126,7 @@ UTEST(runtime_flags, cli_runner_reserves_only_what_it_implements)
     static const char *const reserved[] = {
         "--no-sandbox", "--allow-degraded-sandbox", "--no-ca-bundle",
         "--skip-ca-bundle", "--ca-bundle", "--ca-bundle=/x",
-        "--no-verify-platform", "--max-instructions", "-d",
+        "--no-verify-platform", "--max-instructions", "--max-run-ms", "-d",
 #ifdef HL_ENABLE_WASM
         "--wasm-heap", "--wasm-stack", "--wasm-gas", "--wasm-timeout-ms",
         "--wasm-timeout-ms=3600000", "--wasm-max-input", "--wasm-max-output",

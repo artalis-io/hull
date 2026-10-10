@@ -174,6 +174,11 @@ static int emit_elf(const HlObjTarget *tgt, const Plan *pl,
     uint32_t nm_symtab = strtab_add(&shstr, ".symtab");
     uint32_t nm_strtab = strtab_add(&shstr, ".strtab");
     uint32_t nm_shstr  = strtab_add(&shstr, ".shstrtab");
+    /* An object without .note.GNU-stack makes GNU ld mark the WHOLE binary
+     * as needing an executable stack: glibc then maps every thread stack
+     * PROT_EXEC (a thread started after the pledge is killed for it) and
+     * the app loses non-executable stacks. Empty, no flags = not executable. */
+    uint32_t nm_gnustk = strtab_add(&shstr, ".note.GNU-stack");
 
     if (rela.oom || strtab.oom || symtab.oom || shstr.oom) {
         free(rela.p); free(strtab.p); free(symtab.p); free(shstr.p); return -1;
@@ -189,7 +194,7 @@ static int emit_elf(const HlObjTarget *tgt, const Plan *pl,
     size_t shoff_field = o.len; buf_u64(&o, 0 /*e_shoff patched*/);
     buf_u32(&o, tgt->elf_flags);
     buf_u16(&o, 64); buf_u16(&o, 0); buf_u16(&o, 0);
-    buf_u16(&o, 64); buf_u16(&o, 6); buf_u16(&o, 5);
+    buf_u16(&o, 64); buf_u16(&o, 7); buf_u16(&o, 5);
 
     uint64_t off_sec, off_rela, off_symtab, off_strtab, off_shstr, off_shdrs;
     buf_pad(&o, 8); off_sec = o.len; buf_put(&o, pl->sec.p, pl->sec.len);
@@ -210,6 +215,7 @@ static int emit_elf(const HlObjTarget *tgt, const Plan *pl,
     SHDR(nm_symtab, 2 /*SYMTAB*/, 0, off_symtab, symtab.len, 4, 2, 8, 24);
     SHDR(nm_strtab, 3 /*STRTAB*/, 0, off_strtab, strtab.len, 0,0, 1, 0);
     SHDR(nm_shstr, 3 /*STRTAB*/, 0, off_shstr, shstr.len, 0,0, 1, 0);
+    SHDR(nm_gnustk, 1 /*PROGBITS*/, 0, off_shdrs, 0, 0,0, 1, 0);
     #undef SHDR
 
     free(rela.p); free(strtab.p); free(symtab.p); free(shstr.p);

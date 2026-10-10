@@ -14,6 +14,7 @@
 #include "hull/limits/runtime.h"  /* transitively pulls in core.h */
 #include "hull/runtime.h"
 #include "hull/cap/types.h"
+#include "hull/cap/run_watchdog.h"
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -40,6 +41,8 @@ typedef struct HlLuaBudget {
     int64_t limit;      /* 0 = none */
     int64_t used;
     int     tripped;    /* sticky until re-armed */
+    int     timed_out;  /* the trip was the run's wall-clock deadline */
+    HlRunWatch *watch;  /* the VM's run watchdog (cap/run_watchdog.h) */
 } HlLuaBudget;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
@@ -81,6 +84,8 @@ typedef struct HlLua {
     size_t          mem_limit;
     int64_t         max_instructions;  /* 0 = no limit */
     HlLuaBudget     budget;            /* shared by all threads of L */
+    HlRunWatch      run_watch;         /* the run's wall-clock deadline */
+    int             run_watch_on;      /* app VMs only (not the tool VM) */
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */

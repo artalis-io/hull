@@ -2996,13 +2996,14 @@ UTEST(lua_stdlib, nested_batch_is_a_savepoint)
 /* One statement is charged to the run's instruction budget (audit 9 H4): a
  * recursive CTE in one db.query held the event loop for good, and a pcall
  * around it does not catch the limit. */
-void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit);
+void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
+                       uint32_t run_ms);
 
 UTEST(db_audit9, lua_a_runaway_query_hits_the_instruction_limit)
 {
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
-    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 1000000);
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 1000000, 0);
     int rc = luaL_dostring(lua_rt.L,
         "local ok, e = pcall(db.query, 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c') "
         "return 'caught: ' .. tostring(e)");
@@ -3011,7 +3012,7 @@ UTEST(db_audit9, lua_a_runaway_query_hits_the_instruction_limit)
     EXPECT_NE_MSG(strstr(err ? err : "", "instruction limit"), NULL, err ? err : "");
     lua_settop(lua_rt.L, 0);
     /* The next run is armed afresh, and its queries run. */
-    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 1000000);
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 1000000, 0);
     EXPECT_EQ(eval_int("db.query('SELECT 7 AS n')[1].n"), 7);
     cleanup_lua_caps();
 }
@@ -3023,7 +3024,7 @@ UTEST(db_audit10, lua_sql_allocations_are_charged)
 {
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
-    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000);
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000, 0);
     int rc = luaL_dostring(lua_rt.L,
         "local ok, e = pcall(function() for i = 1, 5000 do "
         "  db.query('SELECT length(randomblob(200000)) AS n') end end) "
@@ -3032,7 +3033,7 @@ UTEST(db_audit10, lua_sql_allocations_are_charged)
     const char *err = lua_tostring(lua_rt.L, -1);
     EXPECT_NE_MSG(strstr(err ? err : "", "instruction limit"), NULL, err ? err : "");
     lua_settop(lua_rt.L, 0);
-    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000);
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000, 0);
     EXPECT_EQ(eval_int("db.query('SELECT length(randomblob(1000)) AS n')[1].n"), 1000);
     cleanup_lua_caps();
 }
@@ -10077,5 +10078,152 @@ UTEST(lua_audit11, content_type_and_error_headers_span_middleware)
     lua_settop(L, 0);
     cleanup_lua();
 }
+
+/* ── The run watchdog (cap/run_watchdog.h, audit 12) ──────────────────
+ *
+ * A wall-clock deadline per uninterrupted run, the backstop for work one
+ * instruction does that the instruction budget does not charge. Each case
+ * runs with NO instruction limit, so only the watchdog can stop it, and a
+ * short deadline (200 ms); assertions are on the trip, not on timing (the
+ * sanitizer jobs are slow). */
+#define WD_TEST_MS 200
+
+static void wd_sleep_ms(long ms)
+{
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) != 0) {}
+}
+
+/* A VM with no instruction limit whose top level runs `code` under a fresh
+ * WD_TEST_MS deadline; returns its status, the error in errbuf. */
+static int wd_lua_run(const char *code, char *errbuf, size_t n)
+{
+    hl_run_watchdog_configure(WD_TEST_MS);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 0;
+    HlLua lim;
+    memset(&lim, 0, sizeof lim);
+    if (hl_lua_init(&lim, &cfg) != 0) {
+        hl_run_watchdog_configure(-1);
+        return -100;
+    }
+    HL_LUA_ARM(&lim, lim.L);
+    int rc = luaL_dostring(lim.L, code);
+    errbuf[0] = '\0';
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(lim.L, -1);
+        snprintf(errbuf, n, "%s", e ? e : "");
+    }
+    hl_lua_free(&lim);
+    hl_run_watchdog_configure(-1);
+    return rc;
+}
+
+UTEST(lua_run_watchdog, loops_over_uncharged_work_are_stopped)
+{
+    static const char *const cases[] = {
+        "while true do end",
+        /* round-12 triggers: rehash churn, a finalizer check per object */
+        "N = 0 while true do local t = {} for i = 1, 64 do t[i] = i end "
+        "  t.x = 1 N = N + 1 end",
+        "while true do setmetatable({}, { __gc = function() end }) end",
+        /* the trip is uncatchable: pcall / xpcall / a coroutine */
+        "while true do pcall(function() while true do end end) end",
+        "xpcall(function() while true do end end, function() return 1 end) "
+        "while true do end",
+        "local co = coroutine.wrap(function() while true do end end) co() "
+        "return 1",
+        NULL
+    };
+    for (int i = 0; cases[i]; i++) {
+        char err[512];
+        int rc = wd_lua_run(cases[i], err, sizeof err);
+        EXPECT_NE_MSG(rc, LUA_OK, cases[i]);
+        EXPECT_NE_MSG(strstr(err, HL_RUN_TIME_LIMIT_MSG), NULL, cases[i]);
+    }
+}
+
+UTEST(lua_run_watchdog, a_run_under_its_deadline_is_not_stopped)
+{
+    char err[512];
+    EXPECT_EQ(wd_lua_run("local n = 0 for i = 1, 100000 do n = n + i end "
+                         "assert(n > 0) return 1", err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+}
+
+/* A run that waits (a parked handler) is not over its deadline when it is
+ * resumed: each entry re-arms it. Simulated: the deadline passes while the
+ * VM is idle, and the next arm clears it. */
+UTEST(lua_run_watchdog, an_idle_vm_is_rearmed_by_the_next_entry)
+{
+    hl_run_watchdog_configure(WD_TEST_MS);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 0;
+    HlLua lim;
+    memset(&lim, 0, sizeof lim);
+    ASSERT_EQ(hl_lua_init(&lim, &cfg), 0);
+    HL_LUA_ARM(&lim, lim.L);
+    wd_sleep_ms(2 * WD_TEST_MS + 100);
+    EXPECT_TRUE(hl_run_watch_stopped(&lim.run_watch));
+    HL_LUA_ARM(&lim, lim.L);
+    EXPECT_FALSE(hl_run_watch_stopped(&lim.run_watch));
+    EXPECT_EQ(luaL_dostring(lim.L, "return 1 + 1"), LUA_OK);
+    hl_lua_free(&lim);
+    hl_run_watchdog_configure(-1);
+}
+
+/* 0 turns the bound off; the instruction budget still applies. */
+UTEST(lua_run_watchdog, zero_disables_it)
+{
+    hl_run_watchdog_configure(0);
+    EXPECT_EQ(hl_run_watchdog_limit_ms(HL_RUN_ENTRY), 0u);
+    EXPECT_EQ(hl_run_watchdog_limit_ms(HL_RUN_MAIN), 0u);
+    hl_run_watchdog_configure(-1);
+    EXPECT_EQ(hl_run_watchdog_limit_ms(HL_RUN_ENTRY), HL_RUN_DEFAULT_MS);
+    EXPECT_EQ(hl_run_watchdog_limit_ms(HL_RUN_MAIN), HL_RUN_MAIN_DEFAULT_MS);
+    int64_t v = 0;
+    EXPECT_EQ(hl_run_watchdog_parse_ms("1500", &v), 0);
+    EXPECT_EQ(v, 1500);
+    EXPECT_EQ(hl_run_watchdog_parse_ms("-1", &v), -1);
+    EXPECT_EQ(hl_run_watchdog_parse_ms("12x", &v), -1);
+    EXPECT_EQ(hl_run_watchdog_parse_ms("", &v), -1);
+}
+
+/* A VM freed while its deadline is pending: the watchdog must never write to
+ * the freed watch (ASan reports it if it does). */
+UTEST(lua_run_watchdog, a_vm_freed_while_armed_is_never_touched)
+{
+    hl_run_watchdog_configure(WD_TEST_MS);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    for (int i = 0; i < 4; i++) {
+        HlLua *l = calloc(1, sizeof *l);
+        ASSERT_TRUE(l != NULL);
+        ASSERT_EQ(hl_lua_init(l, &cfg), 0);
+        HL_LUA_ARM(l, l->L);
+        hl_lua_free(l);
+        free(l);
+    }
+    wd_sleep_ms(2 * WD_TEST_MS + 100);
+    hl_run_watchdog_configure(-1);
+}
+
+/* A worker.dispatch job has its own deadline; the dispatching run, parked
+ * meanwhile, is past ITS deadline when resumed and still completes. */
+UTEST(lua_run_watchdog, a_runaway_worker_dispatch_is_stopped)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    lua_rt.max_instructions = 0;
+    hl_run_watchdog_configure(WD_TEST_MS);
+    char out[256];
+    lua_worker_run(&f,
+        "local r = require('hull.worker').dispatch(\n"
+        "                      function() while true do end end)\n"
+        "return type(r) == 'table' and r.error or tostring(r)\n", out, sizeof out);
+    EXPECT_NE_MSG(strstr(out, HL_RUN_TIME_LIMIT_MSG), NULL, out);
+    hl_run_watchdog_configure(-1);
+    lua_worker_close(&f);
+}
+
 
 UTEST_MAIN();

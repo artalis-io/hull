@@ -180,6 +180,9 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
      * held off while the case has one. */
     HlJS *tjs = state->js;
     int64_t saved_count = tjs->instruction_count;
+    /* Likewise the case's wall-clock deadline: the request's arm set one of
+     * its own, and the case runs on to its own (cap/run_watchdog.h). */
+    uint64_t saved_deadline = hl_run_watch_save(&tjs->run_watch);
     int hold = hl_db_registry_open_txn(tjs->base.db_registry) != NULL;
     if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
@@ -195,6 +198,11 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
         if (tjs->max_instructions > 0 &&
             tjs->instruction_count > tjs->max_instructions)
             tjs->budget_tripped = 1;
+    }
+    hl_run_watch_restore(&tjs->run_watch, saved_deadline);
+    if (!tjs->budget_tripped && hl_run_watch_stopped(&tjs->run_watch)) {
+        tjs->budget_tripped = 1;
+        tjs->budget_timed_out = 1;
     }
 
     /* Free C strings */
@@ -668,8 +676,8 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                     record_fail(out, results, max_results, idx, desc, err_buf);
                     (*failed)++;
                 } else if (js && js->budget_tripped) {
-                    snprintf(err_buf, sizeof(err_buf),
-                             "instruction limit exceeded");
+                    snprintf(err_buf, sizeof(err_buf), "%s",
+                             hl_js_trip_reason(js));
                     record_fail(out, results, max_results, idx, desc, err_buf);
                     (*failed)++;
                 } else {

@@ -206,7 +206,7 @@ void hl_js_timer_trampoline(void *user_data)
         JSValue result = JS_PromiseResult(ctx, ret);
         const char *msg = js->budget_tripped ? NULL : JS_ToCString(ctx, result);
         log_error("[hull:timer] %s", msg ? msg : js->budget_tripped
-                  ? "instruction limit exceeded" : "unknown error");
+                  ? hl_js_trip_reason(js) : "unknown error");
         if (msg) JS_FreeCString(ctx, msg);
         else if (!js->budget_tripped)
             JS_FreeValue(ctx, JS_GetException(ctx));   /* L2 */
