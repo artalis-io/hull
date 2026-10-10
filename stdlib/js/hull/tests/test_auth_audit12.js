@@ -245,19 +245,24 @@ await test("the notice to the old address is not rate limited", async () => {
 });
 
 await test("a change whose notice cannot be sent is not started", async () => {
-    for (const mode of ["throw", "false", "reject"]) {
+    // One user per mode: the confirmed change a mode ends with stays
+    // revocable, and blocks another change for that same user.
+    const modes = ["throw", "false", "reject"];
+    for (let i = 0; i < modes.length; i++) {
+        const mode = modes[i], uid = 11 + i * 100;
+        const oldAddr = "old" + uid + "@x.test", newAddr = "new" + uid + "@x.test";
         resetStore(); init();
-        const u = addUser(11, "old11@x.test", "first-password-1", true);
+        const u = addUser(uid, oldAddr, "first-password-1", true);
         S.failNotice = mode;
-        let res = await startChange(11, "new11@x.test");
+        let res = await startChange(uid, newAddr);
         assertEq(res.code, 503, mode + ": 503");
-        assertEq(sentTo("new11@x.test"), 0, mode + ": no confirm mail");
+        assertEq(sentTo(newAddr), 0, mode + ": no confirm mail");
         S.failNotice = null;
-        res = await startChange(11, "new11@x.test");
+        res = await startChange(uid, newAddr);
         assertEq(res.body && res.body.ok, true, mode + ": no pending row left behind");
         res = mkRes();
-        await H.emailChangeConfirm(mkReq({ token: tokenIn("new11@x.test") }), res);
-        assertEq(u.email, "new11@x.test", mode + ": the retried change confirms");
+        await H.emailChangeConfirm(mkReq({ token: tokenIn(newAddr) }), res);
+        assertEq(u.email, newAddr, mode + ": the retried change confirms");
     }
 });
 

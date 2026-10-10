@@ -256,19 +256,23 @@ test("the notice to the old address is not rate limited", function()
 end)
 
 test("a change whose notice cannot be sent is not started", function()
-    for _, mode in ipairs({ "throw", "false" }) do
+    -- One user per mode: the confirmed change a mode ends with stays
+    -- revocable, and blocks another change for that same user.
+    for i, mode in ipairs({ "throw", "false" }) do
+        local uid = 11 + (i - 1) * 100
+        local old_addr, new_addr = "old" .. uid .. "@x.test", "new" .. uid .. "@x.test"
         reset_store(); init()
-        local u = add_user(11, "old11@x.test", "first-password-1", true)
+        local u = add_user(uid, old_addr, "first-password-1", true)
         S.fail_notice = mode
-        local res = start_change(11, "new11@x.test")
+        local res = start_change(uid, new_addr)
         assert_eq(res.code, 503, mode .. ": 503")
-        assert_eq(sent_to("new11@x.test"), 0, mode .. ": no confirm mail")
+        assert_eq(sent_to(new_addr), 0, mode .. ": no confirm mail")
         S.fail_notice = nil
-        res = start_change(11, "new11@x.test")
+        res = start_change(uid, new_addr)
         assert_eq(res.body and res.body.ok, true, mode .. ": no pending row left behind")
         res = mkres()
-        H.email_change_confirm(mkreq({ token = token_in("new11@x.test") }), res)
-        assert_eq(u.email, "new11@x.test", mode .. ": the retried change confirms")
+        H.email_change_confirm(mkreq({ token = token_in(new_addr) }), res)
+        assert_eq(u.email, new_addr, mode .. ": the retried change confirms")
     end
 end)
 
