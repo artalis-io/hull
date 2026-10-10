@@ -162,6 +162,22 @@ UTEST(obj_emit, elf_aarch64) {
     check_emit(utest_result, HL_OBJ_AARCH64, 183 /*EM_AARCH64*/, 257 /*R_AARCH64_ABS64*/);
 }
 
+/* Without .note.GNU-stack GNU ld gives the linked app an executable stack
+ * (glibc then maps thread stacks PROT_EXEC, which the pledge refuses). */
+UTEST(obj_emit, elf_marks_stack_non_executable) {
+    HlEmitEntry ents[] = { { "./app", (const unsigned char *)"x", 1 } };
+    HlObjTarget tgt = { HL_OBJ_ELF, HL_OBJ_X86_64, 0, 0 };
+    unsigned char *o = NULL; size_t olen = 0;
+    ASSERT_EQ(0, hl_obj_emit_app_registry(&tgt, ents, 1, &o, &olen));
+    Elf e; parse(&e, o);
+    int i = find_sec(&e, ".note.GNU-stack");
+    ASSERT_GT(i, 0);
+    ASSERT_EQ((uint32_t)1, SH_TYPE(shdr(&e, i)));      /* PROGBITS */
+    ASSERT_EQ((uint64_t)0, SH_FLAGS(shdr(&e, i)));     /* no SHF_EXECINSTR */
+    ASSERT_EQ((uint64_t)0, SH_SIZE(shdr(&e, i)));
+    free(o);
+}
+
 UTEST(obj_emit, empty_is_just_sentinel) {
     HlObjTarget tgt = { HL_OBJ_ELF, HL_OBJ_X86_64, 0, 0 };
     unsigned char *o = NULL; size_t olen = 0;
