@@ -260,4 +260,49 @@ test("first rule error wins", function()
 end)
 
 -- Return results for C test harness
+test("integer: non-finite values fail", function()
+    local json = require("hull.json")
+    for _, value in ipairs({ math.huge, -math.huge, 0/0,
+                             json.decode('{"n":1e999}').n }) do
+        local ok, errors = validate.check({ n = value }, {
+            n = { type = "integer", min = 0 },
+        })
+        assert_eq(ok, false)
+        assert_eq(errors.n, "must be an integer")
+    end
+    assert_eq(validate.check({ n = 42 }, { n = { type = "integer" } }), true)
+end)
+
+test("oneof: boolean choices return a validation error", function()
+    local ok, errors = validate.check({ enabled = "bogus" }, {
+        enabled = { oneof = { true, false } },
+    })
+    assert_eq(ok, false)
+    assert_eq(errors.enabled, "must be one of: true, false")
+    assert_eq(validate.check({ enabled = false }, {
+        enabled = { oneof = { true, false } },
+    }), true)
+end)
+
+test("oneof: custom message does not stringify choices", function()
+    local choice = setmetatable({}, {
+        __tostring = function() error("choice must not be formatted") end,
+    })
+    local ok, errors = validate.check({ x = "bogus" }, {
+        x = { oneof = { choice }, message = "Pick a value" },
+    })
+    assert_eq(ok, false)
+    assert_eq(errors.x, "Pick a value")
+end)
+
+test("oneof: table choices return a validation error", function()
+    local choice = {}
+    local ok, errors = validate.check({ x = "bogus" }, {
+        x = { oneof = { choice } },
+    })
+    assert_eq(ok, false)
+    assert_eq(errors.x, "must be one of: " .. tostring(choice))
+    assert_eq(validate.check({ x = choice }, { x = { oneof = { choice } } }), true)
+end)
+
 return {pass = pass, fail = fail}

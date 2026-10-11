@@ -385,7 +385,7 @@ function resolveInheritance(ast, loadFn, visited, depth) {
 }
 
 function cloneSet(obj) {
-    return Object.assign({}, obj);
+    return Object.assign(Object.create(null), obj);
 }
 
 // `depth` counts nested INCLUDES only; `nest` counts control blocks (if /
@@ -570,11 +570,13 @@ function codegen(ast) {
                 const expr = genDotPath(node.expr, null, localsSet);
                 emit("{ const __it = " + expr + ";");
                 emit("for (const " + node.var + " of (__isArray(__it) ? __it : [])) {");
+                const previous = localsSet[node.var];
                 localsSet[node.var] = true;
                 indent++;
                 genBody(node.body);
                 indent--;
-                delete localsSet[node.var];
+                if (previous) localsSet[node.var] = previous;
+                else delete localsSet[node.var];
                 emit("} }");
             } else if (node.kind === "for_kv") {
                 // M-9: only iterate non-null object values; avoid TypeError
@@ -585,13 +587,17 @@ function codegen(ast) {
                 const expr2 = genDotPath(node.expr, null, localsSet);
                 emit("{ const __it = " + expr2 + ";");
                 emit("for (const [" + node.key + ", " + node.val + "] of __entries((__it && typeof __it === \"object\") ? __it : {})) {");
+                const previousKey = localsSet[node.key];
+                const previousVal = localsSet[node.val];
                 localsSet[node.key] = true;
                 localsSet[node.val] = true;
                 indent++;
                 genBody(node.body);
                 indent--;
-                delete localsSet[node.key];
-                delete localsSet[node.val];
+                if (previousKey) localsSet[node.key] = previousKey;
+                else delete localsSet[node.key];
+                if (previousVal) localsSet[node.val] = previousVal;
+                else delete localsSet[node.val];
                 emit("} }");
             } else if (node.kind === "block") {
                 genBody(node.body);

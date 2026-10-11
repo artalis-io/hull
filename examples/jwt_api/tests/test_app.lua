@@ -112,3 +112,14 @@ test("POST /refresh returns 401 without token", function()
     local res = test.post("/refresh")
     test.eq(res.status, 401)
 end)
+-- Non-string credentials must fail before hashing or querying users.
+for _, route in ipairs({ "/register", "/login" }) do
+    test("POST " .. route .. " rejects numeric passwords", function()
+        local res = test.post(route, {
+            body = '{"email":"audit@test.com","name":"Audit","password":8}',
+            headers = { ["Content-Type"] = "application/json" },
+        })
+        test.eq(res.status, 400)
+        test.eq(res.json.errors.password, "must be a string")
+    end)
+end

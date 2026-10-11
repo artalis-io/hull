@@ -10478,4 +10478,16 @@ UTEST(lua_audit12, a_task_failure_hook_restores_the_runs_state)
     be->free(actx);
 }
 
+UTEST(lua_stdlib, etag_audit13_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_etag_audit13.lua", &pass, &fail);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_EQ(pass, 36LL);
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();

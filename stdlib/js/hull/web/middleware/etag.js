@@ -73,7 +73,8 @@ function matches(req, tag) {
  * @param {number} [status=200]
  */
 function jsonEtag(req, res, data, status) {
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    // Conditional success must not replace an explicit non-200 response.
+    if ((req.method !== "GET" && req.method !== "HEAD") || (status && status !== 200)) {
         if (status) res.status(status);
         res.json(data);
         return;
@@ -105,7 +106,7 @@ function jsonEtag(req, res, data, status) {
  * @param {number} [status=200]
  */
 function textEtag(req, res, text, status) {
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    if ((req.method !== "GET" && req.method !== "HEAD") || (status && status !== 200)) {
         if (status) res.status(status);
         res.text(text);
         return;
@@ -136,7 +137,7 @@ function textEtag(req, res, text, status) {
  * @param {number} [status=200]
  */
 function htmlEtag(req, res, html, status) {
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    if ((req.method !== "GET" && req.method !== "HEAD") || (status && status !== 200)) {
         if (status) res.status(status);
         res.html(html);
         return;

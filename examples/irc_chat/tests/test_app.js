@@ -120,3 +120,14 @@ test("POST /channels returns 401 without session", () => {
     });
     test.eq(res.status, 401);
 });
+// Reject non-string credentials before hashing or querying users.
+for (const route of ["/register", "/login"]) {
+    test(`POST ${route} rejects numeric passwords`, () => {
+        const res = test.post(route, {
+            body: '{"username":"audit-user","password":8}',
+            headers: { "Content-Type": "application/json" },
+        });
+        test.eq(res.status, 400);
+        test.eq(res.json.errors.password, "must be a string");
+    });
+}

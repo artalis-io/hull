@@ -121,3 +121,14 @@ test("POST /channels returns 401 without session", function()
     })
     test.eq(res.status, 401)
 end)
+-- Non-string credentials must fail before hashing or querying users.
+for _, route in ipairs({ "/register", "/login" }) do
+    test("POST " .. route .. " rejects numeric passwords", function()
+        local res = test.post(route, {
+            body = '{"username":"audit-user","password":8}',
+            headers = { ["Content-Type"] = "application/json" },
+        })
+        test.eq(res.status, 400)
+        test.eq(res.json.errors.password, "must be a string")
+    end)
+end

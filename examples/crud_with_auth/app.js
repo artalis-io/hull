@@ -73,9 +73,9 @@ app.post("/register", (req, res) => {
     }
 
     const [ok, errors] = validate.check(body, {
-        email:    { required: true },
-        password: { required: true, min: 8 },
-        name:     { required: true },
+        email:    { required: true, type: "string" },
+        password: { required: true, type: "string", min: 8 },
+        name:     { required: true, type: "string" },
     });
     if (!ok) {
         return res.status(400).json({ errors });
@@ -114,8 +114,8 @@ app.post("/login", (req, res) => {
     }
 
     const [ok, errors] = validate.check(body, {
-        email:    { required: true },
-        password: { required: true },
+        email:    { required: true, type: "string" },
+        password: { required: true, type: "string" },
     });
     if (!ok) {
         return res.status(400).json({ errors });

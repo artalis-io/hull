@@ -109,3 +109,14 @@ test("POST /refresh returns 401 without token", () => {
     const res = test.post("/refresh");
     test.eq(res.status, 401);
 });
+// Reject non-string credentials before hashing or querying users.
+for (const route of ["/register", "/login"]) {
+    test(`POST ${route} rejects numeric passwords`, () => {
+        const res = test.post(route, {
+            body: '{"email":"audit@test.com","name":"Audit","password":8}',
+            headers: { "Content-Type": "application/json" },
+        });
+        test.eq(res.status, 400);
+        test.eq(res.json.errors.password, "must be a string");
+    });
+}

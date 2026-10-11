@@ -89,6 +89,7 @@ specific signature, parameter list, or return value.
 | [`kv_encryption_design.md`](kv_encryption_design.md) | Design: authenticated encryption of `hull.kv` values at rest (threat model, wire format, cas / rotation semantics, a shared `hull.crypto.sealbox` with TOTP), with its decisions. Implemented. |
 | [`encoding_consolidation_plan.md`](encoding_consolidation_plan.md) | `hull.encoding`: the one home for hex / base64 / base32 in the stdlib, what it replaced, the formats kept byte-identical, the UTF-8 family, and the C consolidation (`utils/base64`, `hl_hex_decode`). Implemented. |
 | [`crypto_encoding_ssh_audit.md`](crypto_encoding_ssh_audit.md) | Audit of `hull.encoding`, `hull.crypto`, encrypted kv and `hull.ssh` (C and Lua/JS), with the verified findings grouped into three fix PRs and the gaps not yet planned. |
+| [`audit_2026_10_10.md`](audit_2026_10_10.md) | C, Lua and JavaScript audit findings, nine fixes and regression verification; Keel v3.3.0 pin verification. |
 | [`ssh_cleanup_roadmap.md`](ssh_cleanup_roadmap.md) | What `hull/ssh` still needs to be safe, secure and usable, plus its architecture / DRY debt, grouped and ordered. |
 | [`jobs.md`](jobs.md) | `hull/jobs@1` - the durable DB-backed job queue (workers, steps/timers/signals/saga, observability). |
 | [`multipart.md`](multipart.md) | Streaming `multipart/form-data` uploads (`req:multipart()` / `req.multipart()`). |

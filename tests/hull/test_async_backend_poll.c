@@ -18,6 +18,7 @@
 #include "hull/shared/async_backend.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,6 +78,50 @@ UTEST(async_backend_poll, monotonic_ms_is_monotonic)
 
 static int timer_fired;
 static void on_timer(void *u) { (void)u; timer_fired = 1; }
+
+typedef struct {
+    Fixture *fixture;
+    atomic_int finished;
+    int failed;
+    int fired; /* Only the event-loop thread touches this field. */
+} TimerRace;
+
+static void count_race_timer(void *user)
+{
+    TimerRace *race = user;
+    race->fired++;
+}
+
+static void *submit_race_timers(void *user)
+{
+    TimerRace *race = user;
+    uint64_t previous = 0;
+    for (int i = 0; i < 10000; i++) {
+        uint64_t id = race->fixture->be->timer_add(race->fixture->ctx, 0,
+                                                  count_race_timer, race);
+        if (id == 0 || id <= previous) race->failed = 1;
+        previous = id;
+    }
+    atomic_store(&race->finished, 1);
+    return NULL;
+}
+
+/* ASan/TSan exercise a timer being freed while its submitter returns. */
+UTEST(async_backend_poll, cross_thread_zero_delay_timers)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+    TimerRace race = {.fixture = &f};
+    atomic_init(&race.finished, 0);
+    pthread_t submitter;
+    ASSERT_EQ(pthread_create(&submitter, NULL, submit_race_timers, &race), 0);
+    while (!atomic_load(&race.finished)) f.be->tick(f.ctx, 1);
+    ASSERT_EQ(pthread_join(submitter, NULL), 0);
+    f.be->tick(f.ctx, 0);
+    ASSERT_EQ(race.failed, 0);
+    ASSERT_EQ(race.fired, 10000);
+    fixture_free(&f);
+}
 
 UTEST(async_backend_poll, timer_fires)
 {

@@ -305,7 +305,7 @@ static JSValue js_tui_poll_push_result(JSContext *ctx, void *driver)
 
 static void js_tui_poll_free(void *driver) { free(driver); }
 
-static void js_tui_poll_schedule(TuiPollOpJs *op);
+static int js_tui_poll_schedule(TuiPollOpJs *op);
 
 static void js_tui_poll_tick(void *user)
 {
@@ -341,22 +341,23 @@ static void js_tui_poll_tick(void *user)
     }
 
     op->remaining_ms -= HL_TUI_POLL_SLICE_MS;
-    if (op->remaining_ms <= 0) {
+    /* Match Lua: a failed reschedule completes as a timeout. */
+    if (op->remaining_ms <= 0 || js_tui_poll_schedule(op) != 0) {
         op->has_event = 0;
         hl_async_ctx_resume_detached(op->async_ctx);
         return;
     }
-    js_tui_poll_schedule(op);
 }
 
-static void js_tui_poll_schedule(TuiPollOpJs *op)
+static int js_tui_poll_schedule(TuiPollOpJs *op)
 {
     const HlAsyncBackend *be = hl_async_backend();
     uint64_t slice = (op->remaining_ms < HL_TUI_POLL_SLICE_MS)
                      ? (uint64_t)op->remaining_ms
                      : HL_TUI_POLL_SLICE_MS;
     if (slice == 0) slice = 1;
-    be->timer_add(op->js->base.async_ctx, slice, js_tui_poll_tick, op);
+    return be->timer_add(op->js->base.async_ctx, slice, js_tui_poll_tick, op)
+           ? 0 : -1;
 }
 
 static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
@@ -428,7 +429,17 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
     async->detached    = 1;
     op->async_ctx      = async;
 
-    js_tui_poll_schedule(op);
+    if (js_tui_poll_schedule(op) != 0) {
+        /* No timer can settle the promise. The continuation owns the
+         * resolving functions; destroy it before freeing the context. */
+        async->cont = NULL;
+        async->driver = NULL;
+        cont->destroy(cont);
+        hl_async_ctx_free(async);
+        free(op);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "tui.poll: could not arm a timer");
+    }
     return promise;
 }
 
