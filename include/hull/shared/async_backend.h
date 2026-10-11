@@ -191,7 +191,9 @@ typedef struct HlAsyncBackend {
     void   (*pool_free)(HlAsyncBackendPool *pool);
 
     /* Submit a work item. Returns 0 on success, -1 if the queue is
-     * full (caller decides whether to retry or fail). */
+     * full, shut down or allocation fails (caller decides whether to retry
+     * or fail). On failure, ownership stays with the caller and no callback
+     * runs for the rejected item. */
     int    (*pool_submit)(HlAsyncBackendPool *pool,
                           HlAsyncWorkFn work_fn,
                           HlAsyncWorkFn done_fn,
