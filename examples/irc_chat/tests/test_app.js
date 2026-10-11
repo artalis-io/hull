@@ -122,7 +122,7 @@ test("POST /channels returns 401 without session", () => {
 });
 // Reject non-string credentials before hashing or querying users.
 for (const route of ["/register", "/login"]) {
-    test("POST " + route + " rejects numeric passwords", () => {
+    test(`POST ${route} rejects numeric passwords`, () => {
         const res = test.post(route, {
             body: '{"username":"audit-user","password":8}',
             headers: { "Content-Type": "application/json" },
