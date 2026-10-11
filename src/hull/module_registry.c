@@ -99,10 +99,11 @@ static const HlModuleSpec REGISTRY[] = {
         /* Typed, fail-fast config over the env capability. The env allowlist
          * still gates each read (config just wraps env.get). load_dotenv reads
          * an optional .env via fs (needs manifest.fs.read) and applies only
-         * allowlisted keys, so hull/fs is a dep. */
+         * allowlisted keys, so hull/fs is a dep. JS decodes the file through
+         * hull/encoding to preserve UTF-8 values. */
         .name = "hull/config",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = 0, .deps = {"hull/env", "hull/fs", 0},
+        .required_caps = 0, .deps = {"hull/env", "hull/fs", "hull/encoding", 0},
     },
     {
         /* Its outputs are hex and its inputs bytes, so every user of it

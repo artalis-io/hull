@@ -640,11 +640,13 @@ static uint64_t poll_timer_add(HlAsyncBackendCtx *ctx, uint64_t ms,
         free(t);
         return 0;
     }
+    /* The loop may fire and free t as soon as the lock is released. */
+    uint64_t id = t->id;
     pthread_mutex_unlock(&ctx->lock);
     /* Foreign-thread caller may have shrunk the wait deadline - wake
      * poll() so it doesn't oversleep. Cheap; one byte. */
     wakeup_write(ctx);
-    return t->id;
+    return id;
 }
 
 static void poll_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)

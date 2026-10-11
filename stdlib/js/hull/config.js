@@ -24,6 +24,7 @@
 
 import { env } from "hull:env";
 import { fs } from "hull:fs";
+import { encoding } from "hull:encoding";
 
 const config = {};
 
@@ -110,9 +111,8 @@ config.loadDotenv = function(path) {
     path = path || ".env";
     let ab;
     try { ab = fs.read(path); } catch (e) { return 0; }   // denied / missing
-    const bytes = new Uint8Array(ab);
-    let content = "";
-    for (let i = 0; i < bytes.length; i++) content += String.fromCharCode(bytes[i]);
+    const content = encoding.utf8.decode(ab);
+    if (content === null) throw new Error("config: .env is not valid UTF-8");
     let n = 0;
     const lines = content.split("\n");
     for (let i = 0; i < lines.length; i++) {

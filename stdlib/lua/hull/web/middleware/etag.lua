@@ -11,6 +11,7 @@
 --
 -- Skips ETag work for:
 --   - non-GET/HEAD methods
+--   - explicit statuses other than 200
 --   - bodies larger than 1 MB (`MAX_BODY_SIZE`)
 --
 -- @module hull.web.middleware.etag
@@ -78,7 +79,8 @@ end
 -- @tparam[opt=200] number status  HTTP status when sending the body.
 function etag.json(req, res, data, status)
     -- Only compute ETag for GET/HEAD
-    if req.method ~= "GET" and req.method ~= "HEAD" then
+    if (req.method ~= "GET" and req.method ~= "HEAD")
+       or (status and status ~= 200) then
         if status then res:status(status) end
         res:json(data)
         return
@@ -110,7 +112,8 @@ end
 -- @tparam[opt=200] number status
 function etag.text(req, res, text, status)
     if not text then text = "" end
-    if req.method ~= "GET" and req.method ~= "HEAD" then
+    if (req.method ~= "GET" and req.method ~= "HEAD")
+       or (status and status ~= 200) then
         if status then res:status(status) end
         res:text(text)
         return
@@ -141,7 +144,8 @@ end
 -- @tparam[opt=200] number status
 function etag.html(req, res, html, status)
     if not html then html = "" end
-    if req.method ~= "GET" and req.method ~= "HEAD" then
+    if (req.method ~= "GET" and req.method ~= "HEAD")
+       or (status and status ~= 200) then
         if status then res:status(status) end
         res:html(html)
         return

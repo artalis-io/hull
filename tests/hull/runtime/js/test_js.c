@@ -10405,4 +10405,29 @@ UTEST(js_audit12, polluted_object_prototype_does_not_reach_fetch_opts)
 }
 #endif /* HL_ENABLE_HTTP_CLIENT */
 
+UTEST(js_stdlib, audit13_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const unsigned char ok[] = "ok";
+    static const unsigned char cycle[] = "{% include \"cycle\" %}";
+    static const HlEntry templates[] = {
+        { "templates/__proto__", ok, sizeof ok - 1 },
+        { "templates/constructor", ok, sizeof ok - 1 },
+        { "templates/cycle", cycle, sizeof cycle - 1 },
+        { "templates/toString", ok, sizeof ok - 1 },
+        { NULL, NULL, 0 },
+    };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, templates, NULL);
+    js.base.app_vfs = &vfs;
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit13.js", &pass, &fail);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_EQ(pass, 40);
+    js.base.app_vfs = NULL;
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

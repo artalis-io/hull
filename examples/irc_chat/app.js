@@ -228,8 +228,8 @@ app.post("/register", (req, res) => {
     if (!body) return res.status(400).json({ error: "invalid JSON" });
 
     const [ok, errors] = validate.check(body, {
-        username: { required: true, min: 2, max: 32 },
-        password: { required: true, min: 8 },
+        username: { required: true, type: "string", min: 2, max: 32 },
+        password: { required: true, type: "string", min: 8 },
     });
     if (!ok) return res.status(400).json({ errors });
 
@@ -265,8 +265,8 @@ app.post("/login", (req, res) => {
     if (!body) return res.status(400).json({ error: "invalid JSON" });
 
     const [ok, errors] = validate.check(body, {
-        username: { required: true },
-        password: { required: true },
+        username: { required: true, type: "string" },
+        password: { required: true, type: "string" },
     });
     if (!ok) return res.status(400).json({ errors });
 

@@ -121,7 +121,9 @@ function validate.check(data, schema)
                     err = custom_msg or "must be a number"
                 end
             elseif rt == "integer" then
-                if type(value) ~= "number" or value ~= math.floor(value) then
+                if type(value) ~= "number" or value ~= value
+                   or value == math.huge or value == -math.huge
+                   or value ~= math.floor(value) then
                     err = custom_msg or "must be an integer"
                 end
             elseif rt == "boolean" then
@@ -187,7 +189,15 @@ function validate.check(data, schema)
                 if value == v then found = true; break end
             end
             if not found then
-                err = custom_msg or "must be one of: " .. table.concat(rules.oneof, ", ")
+                if custom_msg then
+                    err = custom_msg
+                else
+                    local choices = {}
+                    for i, choice in ipairs(rules.oneof) do
+                        choices[i] = tostring(choice)
+                    end
+                    err = "must be one of: " .. table.concat(choices, ", ")
+                end
             end
         end
 

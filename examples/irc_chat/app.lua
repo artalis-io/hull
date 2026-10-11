@@ -266,8 +266,8 @@ app.post("/register", function(req, res)
     end
 
     local ok, errors = validate.check(body, {
-        username = { required = true, min = 2, max = 32 },
-        password = { required = true, min = 8 },
+        username = { required = true, type = "string", min = 2, max = 32 },
+        password = { required = true, type = "string", min = 8 },
     })
     if not ok then
         return res:status(400):json({ errors = errors })
@@ -309,8 +309,8 @@ app.post("/login", function(req, res)
     end
 
     local ok, errors = validate.check(body, {
-        username = { required = true },
-        password = { required = true },
+        username = { required = true, type = "string" },
+        password = { required = true, type = "string" },
     })
     if not ok then
         return res:status(400):json({ errors = errors })
