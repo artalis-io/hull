@@ -854,19 +854,19 @@ $(BUILDDIR)/test_path_normalize: $(TESTDIR)/hull/test_path_normalize.c $(PATH_NO
 # $(SH_SEAL_ARENA_OBJ) $(KEEL_LIB) is a real prerequisite (not just a recipe arg): without it a -j
 # build can start the link before vendor/keel/libkeel.a is built and fail with
 # "cannot find vendor/keel/libkeel.a".
-# LOG_OBJ + LOG_LOCK_OBJ: the poll backend reports a dropped completion,
-# which is otherwise a coroutine that hangs with nothing said about why.
 $(BUILDDIR)/test_async_backend: $(TESTDIR)/hull/test_async_backend.c $(ASYNC_BACKEND_OBJS) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(ASYNC_BACKEND_OBJS) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) \
 		$(KEEL_LIB) -lm -lpthread
 
-# LOG_OBJ + LOG_LOCK_OBJ: the poll backend reports a dropped completion,
-# which is otherwise a coroutine that hangs with nothing said about why.
 $(BUILDDIR)/test_async_backend_poll: $(TESTDIR)/hull/test_async_backend_poll.c $(ASYNC_BACKEND_OBJS) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(ASYNC_BACKEND_OBJS) $(SH_SEAL_ARENA_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) \
 		$(KEEL_LIB) -lm -lpthread
+
+# Compile the actual poll backend with allocation fault injection.
+$(BUILDDIR)/test_async_poll_oom: $(TESTDIR)/hull/test_async_poll_oom.c $(SRCDIR)/hull/async/poll.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< -lm -lpthread
 
 # Module registry - standalone, only links the registry object
 $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODULE_REGISTRY_OBJ) | $(BUILDDIR)
@@ -1080,7 +1080,7 @@ msan:
 #     shared memory is the atomic stop flag; the concurrency is filesystem-level
 #     (mkdir/symlink/unlink vs openat resolution), which TSan tolerates. Proves
 #     the resolver's containment holds under a real thread race.
-TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async test_smtp_backend_poll test_smtp_saturation
+TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_async_poll_oom test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async test_smtp_backend_poll test_smtp_saturation
 tsan:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))

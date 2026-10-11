@@ -22,7 +22,7 @@
  *     enqueue a completion (done_fn + user) on the ctx's cross-thread
  *     completion queue and wake the event loop via the self-pipe.
  *
- *   * Any thread can call timer_add, op_complete, pool_submit, stop -
+ *   * Any thread can call timer_add, pool_submit, stop -
  *     each takes the ctx lock and (when relevant) writes the wakeup
  *     pipe so a blocking poll() returns immediately.
  *
@@ -38,8 +38,6 @@
 
 #include "hull/shared/async_backend.h"
 #include "hull/utils/alloc.h"
-
-#include "log.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -65,7 +63,6 @@ typedef struct PollCompletion PollCompletion;
  * because a completion may run a nested tick. */
 typedef struct PollDrain {
     PollCompletion   *batch;
-    size_t            n;
     struct PollDrain *prev;
 } PollDrain;
 
@@ -107,8 +104,9 @@ struct PollWatcher {
  * tick(), so callers can assume on_resume / done_fn are on-loop.
  */
 struct PollCompletion {
-    HlAsyncWorkFn fn;
-    void         *user;
+    HlAsyncWorkFn   fn;
+    void          *user;
+    PollCompletion *next;
 };
 
 /* ── Backend context ────────────────────────────────────────────────── */
@@ -140,10 +138,9 @@ struct HlAsyncBackendCtx {
     size_t             watcher_cap;
     uint64_t           next_watcher_epoch;  /* always > 0; 0 = no watcher */
 
-    /* Cross-thread completion queue */
+    /* Cross-thread completion queue; records reserved before accepting work. */
     PollCompletion    *completions;
-    size_t             completion_count;
-    size_t             completion_cap;
+    PollCompletion    *completion_tail;
     PollDrain         *draining;     /* batches tick() is running; under lock */
 };
 
@@ -228,7 +225,11 @@ static void poll_free(HlAsyncBackendCtx *ctx)
         free(ctx->timers[i]);
     free(ctx->timers);
     free(ctx->watchers);
-    free(ctx->completions);
+    while (ctx->completions) {
+        PollCompletion *next = ctx->completions->next;
+        free(ctx->completions);
+        ctx->completions = next;
+    }
 
     if (ctx->wakeup_pipe[0] >= 0) close(ctx->wakeup_pipe[0]);
     if (ctx->wakeup_pipe[1] >= 0) close(ctx->wakeup_pipe[1]);
@@ -495,28 +496,28 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
      * inside this tick. */
     pthread_mutex_lock(&ctx->lock);
     PollCompletion *batch = ctx->completions;
-    size_t batch_n  = ctx->completion_count;
     ctx->completions       = NULL;
-    ctx->completion_count  = 0;
-    ctx->completion_cap    = 0;
-    PollDrain drain = { batch, batch_n, ctx->draining };
+    ctx->completion_tail   = NULL;
+    PollDrain drain = { batch, ctx->draining };
     ctx->draining = &drain;
     pthread_mutex_unlock(&ctx->lock);
 
-    for (size_t i = 0; i < batch_n; i++) {
+    while (drain.batch) {
         /* Read under the lock: an earlier entry's callback may have
          * cancelled this one (poll_op_cancel nulls its fn). */
         pthread_mutex_lock(&ctx->lock);
-        HlAsyncWorkFn fn = batch[i].fn;
-        void *user = batch[i].user;
+        PollCompletion *entry = drain.batch;
+        drain.batch = entry->next;
+        HlAsyncWorkFn fn = entry->fn;
+        void *user = entry->user;
         pthread_mutex_unlock(&ctx->lock);
+        free(entry);
         if (fn) fn(user);
     }
 
     pthread_mutex_lock(&ctx->lock);
     ctx->draining = drain.prev;
     pthread_mutex_unlock(&ctx->lock);
-    free(batch);
 
     /* ── Step 5: fire expired timers. Pop under the lock, fire after. */
     for (;;) {
@@ -688,7 +689,7 @@ static void poll_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
 
 typedef struct PollWorkItem {
     HlAsyncWorkFn work_fn;
-    HlAsyncWorkFn done_fn;
+    PollCompletion *completion;  /* reserved before accepting work */
     HlAsyncWorkFn cancel_fn;
     void         *user;
 } PollWorkItem;
@@ -710,34 +711,15 @@ struct HlAsyncBackendPool {
     int                num_workers;
 };
 
-/* Enqueue a completion on the ctx (called from worker thread).
- * Grows the completion array under ctx->lock. */
-static void completion_enqueue(HlAsyncBackendCtx *ctx,
-                                HlAsyncWorkFn fn, void *user)
+/* Ownership transfers to the queue. No allocation after work is accepted. */
+static void completion_enqueue(HlAsyncBackendCtx *ctx, PollCompletion *entry)
 {
-    if (!fn) return;
+    if (!entry) return;
     pthread_mutex_lock(&ctx->lock);
-    if (ctx->completion_count == ctx->completion_cap) {
-        size_t ncap = ctx->completion_cap ? ctx->completion_cap * 2 : 16;
-        if (ncap > SIZE_MAX / sizeof *ctx->completions) {
-            pthread_mutex_unlock(&ctx->lock);
-            return;
-        }
-        PollCompletion *n = realloc(ctx->completions, ncap * sizeof *n);
-        if (!n) {
-            /* OOM: drop the completion. The work already happened, but its
-             * done_fn never fires - which for a parked op means a coroutine
-             * that waits forever and a state that leaks. Silent, that reads
-             * as a hang with no cause; logged, it names itself. */
-            pthread_mutex_unlock(&ctx->lock);
-            log_error("[hull:async] completion queue allocation failed; "
-                      "a pending resume was dropped");
-            return;
-        }
-        ctx->completions = n;
-        ctx->completion_cap = ncap;
-    }
-    ctx->completions[ctx->completion_count++] = (PollCompletion){ fn, user };
+    entry->next = NULL;
+    if (ctx->completion_tail) ctx->completion_tail->next = entry;
+    else ctx->completions = entry;
+    ctx->completion_tail = entry;
     pthread_mutex_unlock(&ctx->lock);
     wakeup_write(ctx);
 }
@@ -750,7 +732,7 @@ static void *worker_main(void *arg)
         while (p->queue_count == 0 && !p->shutdown)
             pthread_cond_wait(&p->queue_cv, &p->queue_lock);
 
-        if (p->queue_count == 0 && p->shutdown) {
+        if (p->shutdown) {
             pthread_mutex_unlock(&p->queue_lock);
             return NULL;
         }
@@ -761,7 +743,7 @@ static void *worker_main(void *arg)
         pthread_mutex_unlock(&p->queue_lock);
 
         if (item.work_fn) item.work_fn(item.user);
-        completion_enqueue(p->ctx, item.done_fn, item.user);
+        completion_enqueue(p->ctx, item.completion);
     }
 }
 
@@ -821,14 +803,6 @@ static void poll_pool_free(HlAsyncBackendPool *p)
     p->shutdown = 1;
     pthread_cond_broadcast(&p->queue_cv);
 
-    /* Snapshot pending items so we can call cancel_fn outside the lock
-     * (the callbacks may take their own locks). */
-    size_t pending_n = p->queue_count;
-    PollWorkItem *pending = pending_n ? calloc(pending_n, sizeof *pending) : NULL;
-    for (size_t i = 0; i < pending_n; i++) {
-        pending[i] = p->queue[(p->queue_head + i) % p->queue_cap];
-    }
-    p->queue_count = 0;
     pthread_mutex_unlock(&p->queue_lock);
 
     /* Wait for workers to drain in-flight + see shutdown. */
@@ -837,10 +811,13 @@ static void poll_pool_free(HlAsyncBackendPool *p)
 
     /* Fire cancel_fn for items that never ran. Done inline on the
      * calling thread - Keel's pool does the same. */
-    for (size_t i = 0; i < pending_n; i++) {
-        if (pending[i].cancel_fn) pending[i].cancel_fn(pending[i].user);
+    /* Workers stop taking queued work once shutdown is set. After joining,
+     * the ring is stable; cancellation needs neither a lock nor allocation. */
+    for (size_t i = 0; i < p->queue_count; i++) {
+        PollWorkItem item = p->queue[(p->queue_head + i) % p->queue_cap];
+        free(item.completion);
+        if (item.cancel_fn) item.cancel_fn(item.user);
     }
-    free(pending);
 
     pthread_cond_destroy(&p->queue_cv);
     pthread_mutex_destroy(&p->queue_lock);
@@ -861,8 +838,18 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
         pthread_mutex_unlock(&p->queue_lock);
         return -1;
     }
+    PollCompletion *completion = NULL;
+    if (done_fn) {
+        completion = calloc(1, sizeof *completion);
+        if (!completion) {
+            pthread_mutex_unlock(&p->queue_lock);
+            return -1;
+        }
+        completion->fn = done_fn;
+        completion->user = user;
+    }
     p->queue[p->queue_tail] = (PollWorkItem){
-        .work_fn = work_fn, .done_fn = done_fn, .cancel_fn = cancel_fn,
+        .work_fn = work_fn, .completion = completion, .cancel_fn = cancel_fn,
         .user = user,
     };
     p->queue_tail = (p->queue_tail + 1) % p->queue_cap;
@@ -876,17 +863,14 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
 
 /*
  * The op state - including the live deadline-timer handle - is owned
- * exclusively by the event-loop thread. Two threads need to interact
- * with it:
+ * exclusively by the event-loop thread. Two callbacks interact with it:
  *
  *   - poll_op_deadline_timer fires from the timer system (event-loop
  *     thread → safe).
  *
- *   - poll_op_complete may be called from ANY thread per the vtable
- *     contract. It marshals onto the event-loop thread via the
- *     completion queue, so the actual state mutation
- *     (poll_op_complete_eventloop) runs single-threaded next to the
- *     deadline timer.
+ *   - poll_op_complete is event-loop-thread only per the vtable contract.
+ *     It defers the resume via a completion record reserved at suspend,
+ *     so delivery needs no allocation and runs next to the deadline timer.
  *
  * That marshal removes every race: there are no atomics, no locks,
  * no `resumed` flag, no fragile coordination - the only state-mutating
@@ -895,9 +879,8 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
  * ENQUEUED BEFORE THE TICK BEGAN wins over a deadline due in the same
  * tick (matching keel-backend semantics where op_complete cancels the
  * deadline timer). One issued mid-tick lands in the NEXT tick's queue,
- * so that deadline fires first - still safe, because the deadline
- * detaches the state and the later drain then finds none and returns,
- * but not the blanket guarantee the first half of this reads as.
+ * so that deadline fires first and withdraws that queued resume before
+ * invoking on_deadline, which can free or reuse the op.
  *
  * Tradeoff vs the keel backend: op_complete has one tick of latency
  * (gets queued, fires on next tick). The keel backend does the same
@@ -907,7 +890,28 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
 typedef struct PollOpState {
     HlAsyncBackendCtx *ctx;
     uint64_t           deadline_timer;  /* 0 = no timer scheduled */
+    PollCompletion    *completion;      /* NULL once ownership goes to queue */
 } PollOpState;
+
+static void poll_op_complete_eventloop(void *ud);
+
+/* Invalidate links in place: the queue or a nested drain owns each node. */
+static void completion_invalidate(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
+{
+    pthread_mutex_lock(&ctx->lock);
+    for (PollCompletion *c = ctx->completions; c; c = c->next)
+        if (c->fn == poll_op_complete_eventloop && c->user == op) {
+            c->fn = NULL;
+            c->user = NULL;
+        }
+    for (PollDrain *d = ctx->draining; d; d = d->prev)
+        for (PollCompletion *c = d->batch; c; c = c->next)
+            if (c->fn == poll_op_complete_eventloop && c->user == op) {
+                c->fn = NULL;
+                c->user = NULL;
+            }
+    pthread_mutex_unlock(&ctx->lock);
+}
 
 /* DETACH and free before the callback. See the note on keel_op_resume_timer:
  * a callback that resumes a coroutine can re-suspend this same op, and
@@ -919,7 +923,9 @@ static void poll_op_deadline_timer(void *ud)
     HlAsyncOp *op = ud;
     PollOpState *s = op->_backend_state;
     if (!s) return;                     /* op_complete already cleaned up */
+    if (!s->completion) completion_invalidate(s->ctx, op);
     op->_backend_state = NULL;
+    free(s->completion);
     free(s);
     if (op->on_deadline) op->on_deadline(op);
 }
@@ -931,6 +937,7 @@ static void poll_op_complete_eventloop(void *ud)
     if (!s) return;                     /* deadline already fired + cleaned up */
     if (s->deadline_timer) poll_timer_cancel(s->ctx, s->deadline_timer);
     op->_backend_state = NULL;
+    free(s->completion);
     free(s);
     if (op->on_resume) op->on_resume(op);
 }
@@ -945,6 +952,13 @@ static int poll_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     if (op->_backend_state) return -1;
     PollOpState *s = calloc(1, sizeof *s);
     if (!s) return -1;
+    s->completion = calloc(1, sizeof *s->completion);
+    if (!s->completion) {
+        free(s);
+        return -1;
+    }
+    s->completion->fn = poll_op_complete_eventloop;
+    s->completion->user = op;
     s->ctx = ctx;
     op->_backend_state = s;
 
@@ -953,6 +967,7 @@ static int poll_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
         uint64_t delay = (op->deadline_ms > now) ? op->deadline_ms - now : 0;
         uint64_t h = poll_timer_add(ctx, delay, poll_op_deadline_timer, op);
         if (h == 0) {
+            free(s->completion);
             free(s);
             op->_backend_state = NULL;
             return -1;
@@ -965,9 +980,11 @@ static int poll_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 static void poll_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return;
-    /* Marshal to the event-loop thread; the actual mutation runs
-     * single-threaded in poll_op_complete_eventloop. */
-    completion_enqueue(ctx, poll_op_complete_eventloop, op);
+    PollOpState *s = op->_backend_state;
+    if (!s || !s->completion) return;  /* expired, cancelled or already queued */
+    PollCompletion *entry = s->completion;
+    s->completion = NULL;
+    completion_enqueue(ctx, entry);
 }
 
 /* Retract an op. See the vtable comment: op_complete defers, so an owner
@@ -977,31 +994,13 @@ static void poll_op_cancel(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return;
 
-    /* Drop any completion already queued for THIS op. Compacting in place is
-     * safe here because the queue is only ever walked by tick(), which
-     * detaches the whole array under the lock before touching it. */
-    pthread_mutex_lock(&ctx->lock);
-    size_t keep = 0;
-    for (size_t i = 0; i < ctx->completion_count; i++) {
-        if (ctx->completions[i].fn == poll_op_complete_eventloop &&
-            ctx->completions[i].user == op)
-            continue;
-        ctx->completions[keep++] = ctx->completions[i];
-    }
-    ctx->completion_count = keep;
-    /* ...and from any batch tick() has already detached and is running:
-     * an earlier completion in it may be the one freeing this op. */
-    for (PollDrain *d = ctx->draining; d; d = d->prev)
-        for (size_t i = 0; i < d->n; i++)
-            if (d->batch[i].fn == poll_op_complete_eventloop &&
-                d->batch[i].user == op)
-                d->batch[i].fn = NULL;
-    pthread_mutex_unlock(&ctx->lock);
+    completion_invalidate(ctx, op);
 
     PollOpState *s = op->_backend_state;
     if (!s) return;
     if (s->deadline_timer) poll_timer_cancel(ctx, s->deadline_timer);
     op->_backend_state = NULL;
+    free(s->completion);
     free(s);
 }
 
