@@ -923,6 +923,23 @@ UTEST(tool, unveil_check_refuses_backslash_dotdot)
     rmdir(grant);
 }
 
+UTEST(tool, unveil_check_new_directory_with_trailing_separator)
+{
+    char grant[HL_TEST_PATH_MAX], path[PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(grant, sizeof grant, "hull_newdir") != NULL);
+    HlToolUnveilCtx ctx;
+    hl_tool_unveil_init(&ctx);
+    ASSERT_EQ(hl_tool_unveil_add(&ctx, grant, "rwc"), 0);
+    hl_tool_unveil_seal(&ctx);
+    ASSERT_TRUE((size_t)snprintf(path, sizeof path, "%s/build/", grant) < sizeof path);
+    EXPECT_EQ(hl_tool_unveil_check(&ctx, path, 'w'), 0);
+    EXPECT_EQ(hl_tool_unveil_check(&ctx, path, 'c'), 0);
+    ASSERT_TRUE((size_t)snprintf(path, sizeof path, "%s/build/../outside/", grant) < sizeof path);
+    EXPECT_NE(hl_tool_unveil_check(&ctx, path, 'w'), 0);
+    hl_tool_unveil_free(&ctx);
+    rmdir(grant);
+}
+
 UTEST(tool, unveil_check_windows_new_output)
 {
     if (!hl_host_is_windows()) UTEST_SKIP("Windows path spellings");

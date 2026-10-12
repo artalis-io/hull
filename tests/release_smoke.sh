@@ -336,7 +336,7 @@ cleanup_psig() { rm -rf "$PSIG_TMP"; }
 trap cleanup_psig EXIT INT TERM
 
 cd "$PSIG_TMP"
-mkdir -p app
+mkdir -p app build
 cat > app/app.lua <<'LUA'
 app.manifest({modules = {"hull/http-server@1"}})
 app.get("/", function(req, res) res:json({ok=true, smoke="platform-sig"}) end)

@@ -149,6 +149,9 @@ static int tool_canonical_path(const char *path, char out[PATH_MAX])
      * its existing ancestor. Keep the missing-tail traversal checks below. */
     if (win)
         for (char *p = work; *p; p++) if (*p == '\\') *p = '/';
+    size_t work_len = strlen(work);
+    while (work_len > 1 && work[work_len - 1] == '/')
+        work[--work_len] = '\0';
     /* Split off trailing components until the rest resolves. */
     char tail[PATH_MAX];
     tail[0] = '\0';

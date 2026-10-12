@@ -241,7 +241,10 @@ local function main()
 
     local sig_json = json.encode(sig_table)
     local sig_path = dir .. "platform.sig"
-    write_file(sig_path, sig_json .. "\n")
+    if not write_file(sig_path, sig_json .. "\n") then
+        tool.stderr("hull sign-platform: cannot write " .. sig_path .. "\n")
+        tool.exit(1)
+    end
 
     -- Display summary
     print("hull sign-platform: signed platform libraries")
