@@ -336,7 +336,7 @@ cleanup_psig() { rm -rf "$PSIG_TMP"; }
 trap cleanup_psig EXIT INT TERM
 
 cd "$PSIG_TMP"
-mkdir -p app
+mkdir -p app build
 cat > app/app.lua <<'LUA'
 app.manifest({modules = {"hull/http-server@1"}})
 app.get("/", function(req, res) res:json({ok=true, smoke="platform-sig"}) end)
@@ -352,7 +352,7 @@ assert_contains "sign-platform wrote platform.sig"      "$OUT" "wrote build/plat
 
 # build --sign: the gethull cross-check fires here (or skips
 # gracefully on a placeholder-pubkey hull).
-OUT=$("$HULL" build --sign dev.key -o myapp app/ 2>&1)
+OUT=$("$HULL" build --sign dev.key --platform-sig "$PSIG_TMP/build/platform.sig" -o myapp app/ 2>&1)
 RC=$?
 if [ "$RC" -ne 0 ]; then
     # Builds may fail if the running hull is a placeholder build with
@@ -375,7 +375,8 @@ else
     # chain all gets exercised at startup. Picks a high port to
     # avoid collision.
     PORT=$((10000 + (RANDOM % 50000)))
-    ./myapp --verify-sig dev.pub --hull-no-sandbox -p "$PORT" app/app.lua >/dev/null 2>&1 &
+    # package.sig is in app/, so run the embedded app from that directory.
+    (cd app && exec ../myapp --verify-sig ../dev.pub --hull-no-sandbox -p "$PORT") >"$PSIG_TMP/myapp.log" 2>&1 &
     SVR=$!
     sleep 2
     if kill -0 "$SVR" 2>/dev/null; then
@@ -385,7 +386,8 @@ else
         assert_contains "myapp --verify-sig serves OK"  "$RESP" '"ok":true'
         assert_contains "smoke field present"           "$RESP" '"smoke":"platform-sig"'
     else
-        echo "  FAIL myapp did not start under --verify-sig (sig chain broken)"
+        echo "  FAIL myapp did not start under --verify-sig"
+        cat "$PSIG_TMP/myapp.log" | sed 's/^/      /'
         FAIL=$((FAIL + 1))
     fi
 fi

@@ -142,8 +142,16 @@ static int tool_canonical_path(const char *path, char out[PATH_MAX])
     if (realpath(path, out) != NULL) return 0;
     int win = hl_host_is_windows();
     char work[PATH_MAX];
-    int n = snprintf(work, sizeof work, "%s", path);
-    if (n <= 0 || (size_t)n >= sizeof work) return -1;
+    if (hl_host_normalize_path(path, work, sizeof work) < 0 || !work[0])
+        return -1;
+    /* A new Windows output has no realpath yet. Split the same separators
+     * Windows opens, including relative backslash paths, before walking to
+     * its existing ancestor. Keep the missing-tail traversal checks below. */
+    if (win)
+        for (char *p = work; *p; p++) if (*p == '\\') *p = '/';
+    size_t work_len = strlen(work);
+    while (work_len > 1 && work[work_len - 1] == '/')
+        work[--work_len] = '\0';
     /* Split off trailing components until the rest resolves. */
     char tail[PATH_MAX];
     tail[0] = '\0';

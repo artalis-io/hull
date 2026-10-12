@@ -55,7 +55,7 @@ stable `/releases/latest` without mutating release state during the run:
 
 1. Publish `v0.14.0-rc1` as an official **prerelease** on the main repo (the
    tag-triggered release workflow builds + signs + publishes the four binaries,
-   `hull.sha256`, and `hull.sha256.sig`).
+   `hull.sha256`, `hull.sha256.sig`, and the signed `hull.version` tag binding).
 2. Mirror the **exact** signed RC assets, unchanged, into `<staging_rc_repo>` as
    its latest **non-prerelease**; mirror the exact signed `v0.13.0` assets into
    `<staging_prev_repo>` likewise. The checked-in helper does this with your own
@@ -71,6 +71,9 @@ stable `/releases/latest` without mutating release state during the run:
 
    Both staging repositories must be **public** so unauthenticated
    `hull update --repo=` works, matching the real end-user path.
+   Include `hull.version` whenever the verified signed manifest names it;
+   current updaters require that exact tag binding before swapping binaries.
+   The historical v0.13.0 baseline has no version asset.
 3. The acceptance workflows are **read-only**: they never create, modify, or
    delete a tag, release, or asset, and never alter "latest". `populate_staging.sh`
    is the single deliberately-mutating step and is run by the maintainer, not
