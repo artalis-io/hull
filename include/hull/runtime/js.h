@@ -180,9 +180,9 @@ typedef struct HlJS {
     /* CLI mode (app.main) - tracks main's eventual completion when it
      * returns a pending Promise. Set in vt_js_run_main; the C-side
      * .then callbacks attached to main's Promise stash the resolved
-     * value here and call kl_http_server_stop. cli_main_value points at a
-     * heap-allocated JSValue (opaque to this header to avoid pulling
-     * in quickjs.h here); owned by the runtime - freed in run_main. */
+     * value here and stop the async backend. cli_main_value points at a
+     * borrowed stack JSValue (opaque here to avoid pulling in quickjs.h);
+     * run_main clears the pointer before returning. */
     int             cli_main_active;     /* 1 = waiting on main's Promise */
     /* 1 while app.main's own code runs (its call, and the resume of one of
      * its continuations): a continuation made now is main's, and only a
@@ -211,6 +211,8 @@ typedef struct HlJS {
      * HlJsTask list, async.c): each holds its function until its loop turn,
      * and hl_js_free releases the ones that never got one. */
     void           *tasks;
+    /* Detached sleep timers still holding promise references (async.c). */
+    struct HlJsSleepTimer *sleep_timers;
 
     /* The manifest app.manifest() declared (JSValue *, owned): a frozen,
      * plain-data copy, set once and only by app.manifest. The policy

@@ -952,6 +952,92 @@ UTEST(js_runtime, app_main_undefined_return_yields_zero)
     cleanup_js();
 }
 
+static void stop_main_loop(void *user)
+{
+    hl_async_backend()->stop(user);
+}
+
+static int register_cli_main(const char *body)
+{
+    JSValue v = JS_Eval(js.ctx, body, strlen(body), "<cli-main>", JS_EVAL_TYPE_MODULE);
+    int ok = !JS_IsException(v);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    return ok;
+}
+
+UTEST(js_runtime, async_main_needs_a_backend_not_a_server)
+{
+    init_js();
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main("import { app } from 'hull:app';"
+        "app.main(async () => { await hull.sleep(1); return 7; });"));
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    EXPECT_EQ(exit_code, 7);
+    EXPECT_TRUE(js.sleep_timers == NULL);
+    cleanup_js();
+    be->free(loop);
+}
+
+UTEST(js_runtime, unfinished_main_is_failure_and_releases_sleep)
+{
+    init_js();
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main("import { app } from 'hull:app';"
+        "app.main(async () => { await hull.sleep(60000); return 7; });"));
+    ASSERT_GT(be->timer_add(loop, 0, stop_main_loop, loop), (uint64_t)0);
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), -1);
+    EXPECT_EQ(exit_code, 1);
+    EXPECT_TRUE(js.sleep_timers == NULL);
+    EXPECT_TRUE(js.cli_main_value == NULL);
+    EXPECT_EQ(js.cli_main_active, 0);
+    cleanup_js();  /* QuickJS must have no outstanding C-owned promise refs. */
+    EXPECT_EQ(be->tick(loop, 0), 0);
+    be->free(loop);
+}
+
+UTEST(js_runtime, throwing_main_releases_its_unawaited_sleep)
+{
+    init_js();
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main("import { app } from 'hull:app';"
+        "app.main(() => { hull.sleep(60000); throw new Error('main failed'); });"));
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), -1);
+    EXPECT_EQ(exit_code, 1);
+    EXPECT_TRUE(js.sleep_timers == NULL);
+    cleanup_js();
+    be->free(loop);
+}
+
+UTEST(js_runtime, runtime_teardown_releases_an_unawaited_sleep)
+{
+    init_js();
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main("import { app } from 'hull:app';"
+        "app.main(() => { hull.sleep(60000); return 0; });"));
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    EXPECT_EQ(exit_code, 0);
+    cleanup_js();
+    EXPECT_EQ(be->tick(loop, 0), 0);
+    be->free(loop);
+}
+
 UTEST(js_runtime, app_main_promise_resolved_unwraps)
 {
     init_js();

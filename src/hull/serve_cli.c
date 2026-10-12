@@ -463,6 +463,7 @@ int hull_serve(int argc, char **argv)
         .entry_point     = entry,
         .db_path         = db_path,        /* NULL → ":memory:" */
         .worker_db_path  = db_path,        /* worker-thread sqlite connection */
+        .thread_pool     = pool,           /* worker imports register during init */
         .no_migrate      = no_migrate,
         .sandbox         = !no_sandbox,
         .gate_modules    = 1,
