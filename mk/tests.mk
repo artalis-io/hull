@@ -1444,6 +1444,10 @@ e2e-examples: $(BUILDDIR)/hull
 e2e-cli: $(BUILDDIR)/hull
 	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_cli.sh
 
+.PHONY: e2e-cli-poll
+e2e-cli-poll: $(BUILDDIR)/hull
+	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_cli_poll.sh
+
 e2e-migrate: $(BUILDDIR)/hull
 	sh tests/e2e_migrate.sh
 

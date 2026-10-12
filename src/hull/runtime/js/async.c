@@ -959,6 +959,38 @@ void hl_js_async_cont_set_timer(HlAsyncCont *cont, void *timer)
     jc->timer_ctx = timer;
 }
 
+typedef struct HlJsSleepTimer {
+    struct HlJsSleepTimer *next;
+    HlJS *js;
+    HlAsyncCtx *ctx;
+    uint64_t id;
+} HlJsSleepTimer;
+
+static void js_sleep_timer_fire(void *user)
+{
+    HlJsSleepTimer *t = user;
+    HlJsSleepTimer **link = &t->js->sleep_timers;
+    while (*link && *link != t) link = &(*link)->next;
+    if (*link) *link = t->next;
+    HlAsyncCtx *ctx = t->ctx;
+    HlAllocator *alloc = t->js->base.alloc;
+    hl_alloc_free(alloc, t, sizeof *t);
+    hl_async_ctx_resume_detached(ctx);
+}
+
+void hl_js_sleep_cancel_pending(HlJS *js)
+{
+    if (!js) return;
+    while (js->sleep_timers) {
+        HlJsSleepTimer *t = js->sleep_timers;
+        js->sleep_timers = t->next;
+        if (js->base.async_ctx)
+            hl_async_backend()->timer_cancel(js->base.async_ctx, t->id);
+        hl_async_ctx_cancel(t->ctx);
+        hl_alloc_free(js->base.alloc, t, sizeof *t);
+    }
+}
+
 static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
@@ -1037,17 +1069,24 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         actx->detached = 1;
 
         const HlAsyncBackend *be = hl_async_backend();
-        uint64_t tid = be->timer_add(js->base.async_ctx, (uint64_t)ms,
-                                      hl_detached_timer_fire, actx);
+        HlJsSleepTimer *t = hl_alloc_calloc(js->base.alloc, 1, sizeof *t);
+        uint64_t tid = t ? be->timer_add(js->base.async_ctx, (uint64_t)ms,
+                                       js_sleep_timer_fire, t) : 0;
         if (tid == 0) {
             /* Never armed: destroy frees resolve / reject. cancel() would also
              * end the still-running handler's request life. */
             actx->cont->destroy(actx->cont);
             hl_async_ctx_free(actx);
+            hl_alloc_free(js->base.alloc, t, sizeof *t);
             JS_FreeValue(ctx, promise);
             return JS_ThrowInternalError(ctx,
                 "hull.sleep(): failed to add timer");
         }
+        t->ctx = actx;
+        t->js = js;
+        t->id = tid;
+        t->next = js->sleep_timers;
+        js->sleep_timers = t;
     }
 
     return promise;

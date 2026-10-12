@@ -1490,6 +1490,11 @@ jobs:
             exit 1
           fi
 
+      - name: HTTP-free Lua and JS CLI regression tests
+        if: matrix.name == 'pure-compute (no http at all)'
+        timeout-minutes: 3
+        run: make ${{ matrix.flags }} e2e-cli-poll
+
   reproducibility:
     needs: [classify]
     if: needs.classify.outputs.run_core_common == 'true'

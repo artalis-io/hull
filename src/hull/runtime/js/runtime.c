@@ -1526,6 +1526,7 @@ void hl_js_free(HlJS *js)
 
     /* Spawned tasks that never got their loop turn. */
     hl_js_tasks_free(js);
+    hl_js_sleep_cancel_pending(js);
 
     if (js->ctx && js->fn_to_string) {
         JS_FreeValue(js->ctx, *(JSValue *)js->fn_to_string);
@@ -2192,6 +2193,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     if (JS_IsException(ret)) {
         js->active_cli_main = 0;
         js->last_async_cont = NULL;
+        hl_js_sleep_cancel_pending(js);
         hl_js_dump_error(js);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
@@ -2221,6 +2223,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         /* Over the limit before main settled: its promise never will (a
          * tripped run settles nothing), so do not wait on it. */
         fprintf(stderr, "[hull:main] %s\n", hl_js_trip_reason(js));
+        hl_js_sleep_cancel_pending(js);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
         JS_FreeValue(ctx, global);
@@ -2228,11 +2231,11 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     }
 
     if (st == JS_PROMISE_PENDING) {
-        /* Async main - attach C-side .then/.catch callbacks that stash
-         * the resolved value on the runtime and stop the server, then
-         * drive the Keel event loop until they fire. */
-        if (!server) {
-            fprintf(stderr, "[hull:main] internal: no server to drive event loop\n");
+        /* Main's pending promise is driven by either async backend, including
+         * a standalone poll context with no HTTP server. */
+        if (!js->base.async_ctx) {
+            fprintf(stderr, "[hull:main] no async context to drive event loop\n");
+            hl_js_sleep_cancel_pending(js);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, main_fn);
             JS_FreeValue(ctx, global);
@@ -2267,12 +2270,18 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
              * it's the poll backend's standalone loop. The .then
              * callbacks attached above (js_cli_main_settle) call
              * backend->stop when main's promise settles. */
-            (void)server;  /* unused - we go through the backend now */
-            int srv_rc = (js->base.async_ctx)
-                ? hl_async_backend()->run(js->base.async_ctx)
-                : -1;
-            if (srv_rc < 0)
-                fprintf(stderr, "[hull:main] event loop error\n");
+            int srv_rc = hl_async_backend()->run(js->base.async_ctx);
+            if (srv_rc < 0 || js->cli_main_active) {
+                fprintf(stderr, "[hull:main] event loop ended before main settled\n");
+                js->cli_main_value = NULL;
+                js->cli_main_active = 0;
+                hl_js_sleep_cancel_pending(js);
+                JS_FreeValue(ctx, settled_slot);
+                JS_FreeValue(ctx, ret);
+                JS_FreeValue(ctx, main_fn);
+                JS_FreeValue(ctx, global);
+                return -1;
+            }
             hl_js_run_jobs(js);  /* drain anything that landed after stop */
         }
 

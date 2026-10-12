@@ -48,7 +48,7 @@ typedef struct HlAppContextOpts {
                                    * top-level code without it. */
     HlAllocator  *alloc;          /* NULL = use raw malloc */
 
-    /* Server-specific runtime wiring (all optional, NULL/0 = not used) */
+    /* Runtime wiring for server and CLI entry points (optional). */
     HlAsyncBackendPool       *thread_pool;      /* wired to rt->thread_pool */
     const char               *worker_db_path;   /* for hl_worker_db_init */
     struct KlCompressConfig  *compress;         /* wired to rt->compress */

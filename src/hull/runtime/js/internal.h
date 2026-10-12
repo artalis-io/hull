@@ -267,6 +267,7 @@ int hl_js_init_task_module(JSContext *ctx, HlJS *js);
 /* Cancel every spawned task that has not run yet and release its function.
  * Called by hl_js_free while the context is still alive. */
 void hl_js_tasks_free(HlJS *js);
+void hl_js_sleep_cancel_pending(HlJS *js);
 
 /* ── Instruction budget (runtime.c) ─────────────────────────────────── */
 
