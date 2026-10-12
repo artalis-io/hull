@@ -44,6 +44,7 @@ function Serve-And-Get([string]$exe, [int]$port, [string]$route) {
     $so = Join-Path $work ("serve-$port.out.log")
     $se = Join-Path $work ("serve-$port.err.log")
     $p = Start-Process -FilePath $exe -ArgumentList @('-p', "$port") -PassThru `
+                       -WorkingDirectory (Split-Path -Parent $exe) `
                        -WindowStyle Hidden -RedirectStandardOutput $so -RedirectStandardError $se
     try {
         for ($i = 0; $i -lt 60; $i++) {
