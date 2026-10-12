@@ -10,7 +10,9 @@ trap 'rm -f "$work"/*.db* "$work"/output*; rmdir "$work"' EXIT
 out="$work/output"
 fail() { echo "FAIL: $1"; cat "$out" 2>/dev/null || true; exit 1; }
 
-doctor=$("$HULL_BIN" doctor --json)
+# Optional compiler/tool readiness can make doctor exit nonzero. Inspect the
+# build-capability data; this suite runs apps and does not need those tools.
+doctor=$("$HULL_BIN" doctor --json || true)
 echo "$doctor" | grep -q '"http":false' || fail 'this suite requires an HTTP-free build'
 echo "$doctor" | grep -q '"runtime":"lua+js"' || fail 'this suite requires both runtimes'
 
