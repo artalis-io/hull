@@ -61,6 +61,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 echo "populate_staging: verifying official $official@$tag before mirroring ..."
 sh "$here/verify_release_assets.sh" "$official" "$tag" "$expect_ver" "$work" "$pubkey"
+if [ -f "$work/hull.version" ]; then all="$all hull.version"; fi
 
 # 3. Create the staging release as latest NON-prerelease with the exact bytes.
 files=""

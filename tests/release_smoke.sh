@@ -352,7 +352,7 @@ assert_contains "sign-platform wrote platform.sig"      "$OUT" "wrote build/plat
 
 # build --sign: the gethull cross-check fires here (or skips
 # gracefully on a placeholder-pubkey hull).
-OUT=$("$HULL" build --sign dev.key -o myapp app/ 2>&1)
+OUT=$("$HULL" build --sign dev.key --platform-sig "$PSIG_TMP/build/platform.sig" -o myapp app/ 2>&1)
 RC=$?
 if [ "$RC" -ne 0 ]; then
     # Builds may fail if the running hull is a placeholder build with
@@ -375,7 +375,7 @@ else
     # chain all gets exercised at startup. Picks a high port to
     # avoid collision.
     PORT=$((10000 + (RANDOM % 50000)))
-    ./myapp --verify-sig dev.pub --hull-no-sandbox -p "$PORT" app/app.lua >/dev/null 2>&1 &
+    ./myapp --verify-sig dev.pub --hull-no-sandbox -p "$PORT" >/dev/null 2>&1 &
     SVR=$!
     sleep 2
     if kill -0 "$SVR" 2>/dev/null; then

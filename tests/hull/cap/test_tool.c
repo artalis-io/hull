@@ -7,6 +7,7 @@
 #include "utest.h"
 #include "hull/cap/tool.h"
 #include "hull/compilers.h"
+#include "hull/shared/host.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -918,6 +919,41 @@ UTEST(tool, unveil_check_refuses_backslash_dotdot)
     snprintf(p, sizeof p, "%s/new.txt", grant);
     EXPECT_EQ(hl_tool_unveil_check(&ctx, p, 'w'), 0);
 
+    hl_tool_unveil_free(&ctx);
+    rmdir(grant);
+}
+
+UTEST(tool, unveil_check_windows_new_output)
+{
+    if (!hl_host_is_windows()) UTEST_SKIP("Windows path spellings");
+    char grant[HL_TEST_PATH_MAX], resolved[PATH_MAX], native[PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(grant, sizeof grant, "hull_winout") != NULL);
+    ASSERT_TRUE(realpath(grant, resolved) != NULL);
+    if (resolved[0] == '/' && resolved[1] && resolved[2] == '/')
+        ASSERT_TRUE((size_t)snprintf(native, sizeof native, "%c:%s",
+                                   resolved[1], resolved + 2) < sizeof native);
+    else
+        ASSERT_TRUE((size_t)snprintf(native, sizeof native, "%s", resolved) < sizeof native);
+    for (char *p = native; *p; p++) if (*p == '/') *p = '\\';
+
+    HlToolUnveilCtx ctx;
+    hl_tool_unveil_init(&ctx);
+    ASSERT_EQ(hl_tool_unveil_add(&ctx, grant, "rwc"), 0);
+    hl_tool_unveil_seal(&ctx);
+    char path[PATH_MAX];
+    ASSERT_TRUE((size_t)snprintf(path, sizeof path, "%s\\out.com", native) < sizeof path);
+    EXPECT_EQ(hl_tool_unveil_check(&ctx, path, 'w'), 0);
+    EXPECT_EQ(hl_tool_unveil_check(&ctx, path, 'c'), 0);
+    ASSERT_TRUE((size_t)snprintf(path, sizeof path, "%s\\new\\nested\\out.com", native) < sizeof path);
+    EXPECT_EQ(hl_tool_unveil_check(&ctx, path, 'w'), 0);
+    static const char *const bad[] = {
+        "new\\..\\..\\outside.com", "new\\.. \\outside.com",
+        "new\\...\\outside.com", "new\\out.com:stream", NULL
+    };
+    for (int i = 0; bad[i]; i++) {
+        ASSERT_TRUE((size_t)snprintf(path, sizeof path, "%s\\%s", native, bad[i]) < sizeof path);
+        EXPECT_NE(hl_tool_unveil_check(&ctx, path, 'w'), 0);
+    }
     hl_tool_unveil_free(&ctx);
     rmdir(grant);
 }

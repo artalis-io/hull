@@ -42,7 +42,15 @@ else
         || { echo "FAIL: hull.sha256.sig does not verify against the embedded key"; exit 1; }
 fi
 
-# 3. per-binary SHA-256 vs the manifest
+# 3. per-asset SHA-256 vs the verified manifest. Current releases bind their
+# tag with hull.version; the historical downgrade baseline predates it.
+if grep -q '  hull.version$' hull.sha256; then
+    curl -fsSL -o hull.version "$base/hull.version" \
+        || { echo "FAIL: missing signed version asset in $repo@$tag"; exit 1; }
+    bins="$bins hull.version"
+    [ "$(cat hull.version)" = "$tag" ] \
+        || { echo "FAIL: signed version does not name $tag"; exit 1; }
+fi
 for a in $bins; do
     want=$(grep "  $a\$" hull.sha256 | awk '{print $1}')
     [ -n "$want" ] || { echo "FAIL: $a has no line in hull.sha256"; exit 1; }

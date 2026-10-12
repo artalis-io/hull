@@ -26,6 +26,7 @@ set -eu
 staging="$1"; ref="$2"; expect_ver="$3"; work="$4"; pubkey="${5:-}"
 bins="hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 hull-cosmo"
 all="$bins hull.sha256 hull.sha256.sig"
+if grep -q '  hull.version$' "$ref/hull.sha256"; then all="$all hull.version"; fi
 
 # /releases/latest metadata (read-only)
 meta=$(gh api "repos/$staging/releases/latest" 2>/dev/null) \
