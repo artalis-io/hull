@@ -95,6 +95,12 @@ run_hello_cli() {
 run_hello_cli "lua" "lua"
 run_hello_cli "js"  "js"
 
+if HULL_BIN="$HULL_BIN" sh tests/e2e_db_open_failure.sh; then
+    pass "Lua/JS database-open failures exit cleanly"
+else
+    fail "Lua/JS database-open failures exit cleanly"
+fi
+
 # run_udf_teardown <runtime> <ext>
 # Two db.udf regressions in one app.main run:
 #  (a) teardown ordering: the udf holds a runtime-side closure (JS JS_DupValue /
