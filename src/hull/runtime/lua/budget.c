@@ -43,16 +43,10 @@
 #include "lua.h"
 #include "lauxlib.h"
 
-#ifdef HL_ENABLE_DB
-#include "hull/cap/db_budget.h"
-
-/* SQL work, charged by the SQLite progress handler (cap/db_budget.h): a
- * statement runs inside one binding call, where the count hook never fires.
- * Once over, the statement is interrupted and the binding raises the trip
- * (hl_lua_raise_copy). */
-static int budget_db_charge(void *ud, int64_t units)
+/* Work done inside one binding call, where the count hook never fires:
+ * charged straight to the budget, never raising. 1 once tripped. */
+static int budget_charge(HlLuaBudget *b, int64_t units)
 {
-    HlLuaBudget *b = (HlLuaBudget *)ud;
     if (b->tripped) return 1;
     if (hl_run_watch_stopped(b->watch)) {   /* the run's deadline passed */
         b->tripped = 1;
@@ -63,6 +57,18 @@ static int budget_db_charge(void *ud, int64_t units)
     b->used = units > INT64_MAX - b->used ? INT64_MAX : b->used + units;
     if (b->used >= b->limit) b->tripped = 1;
     return b->tripped;
+}
+
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_budget.h"
+
+/* SQL work, charged by the SQLite progress handler (cap/db_budget.h): a
+ * statement runs inside one binding call, where the count hook never fires.
+ * Once over, the statement is interrupted and the binding raises the trip
+ * (hl_lua_raise_copy). */
+static int budget_db_charge(void *ud, int64_t units)
+{
+    return budget_charge((HlLuaBudget *)ud, units);
 }
 #endif
 
@@ -81,6 +87,12 @@ static HlLuaBudget *budget_of(lua_State *L)
     HlLuaBudget *b = (HlLuaBudget *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return b;
+}
+
+int hl_lua_budget_charge(lua_State *L, int64_t units)
+{
+    HlLuaBudget *b = budget_of(L);
+    return b ? budget_charge(b, units > 0 ? units : 0) : 0;
 }
 
 int hl_lua_budget_tripped(lua_State *L)

@@ -1675,7 +1675,7 @@ WASM plugins query segments via `host_call(0x02, segment_id, sub)`:
 - `host_call(0x02, seg_id, 1)` → size of segment
 - `host_call(0x02, -1, 0)` → total segment count
 
-Segments are page-aligned mmap regions in the high end of WASM32 address space. Up to 16 segments per module, 3 GB total. Adding/removing segments drains the instance pool. A segment change is refused with `"segments_in_use"` while an instance outside the pool still holds the module's segments - a live `compute.instance`, or a zero-copy `WasmBuffer` result not yet closed / collected - so close those first (load segments at startup, before dispatching work). An instance that was out of the pool across a change is destroyed when released, never pooled with the old segments. At most 128 instances may hold one module's segments at once (`"too_many_instances"`): WAMR counts them in 8 bits.
+Segments are page-aligned mmap regions in the high end of WASM32 address space. Up to 16 segments per module, 3 GB total, each at most 1 GiB (WAMR's shared-heap limit; a larger one is refused with `"segment_too_large"` and leaves the loaded segments as they were - audit 15). Adding/removing segments drains the instance pool. A segment change is refused with `"segments_in_use"` while an instance outside the pool still holds the module's segments - a live `compute.instance`, or a zero-copy `WasmBuffer` result not yet closed / collected - so close those first (load segments at startup, before dispatching work). An instance that was out of the pool across a change is destroyed when released, never pooled with the old segments. At most 128 instances may hold one module's segments at once (`"too_many_instances"`): WAMR counts them in 8 bits.
 
 **Mapped spans (per-invocation, zero-copy host-backed file windows).** Where `compute.segment` is module-scoped shared data, a **mapped span** attaches a host-`mmap`'d file window read-only to **ONE** `compute.call` and detaches on every exit path. It lets a WASM plugin scan/parse a very large file (OSM PBF, Parquet, raster, model blob) with **zero copy into linear memory** and kernel demand paging, reading it in place through ordinary bounds-checked loads with **no per-access host call**. Design: [docs/wasm_mapped_spans_design.md](wasm_mapped_spans_design.md); WAMR patch: [docs/wamr_patches.md](wamr_patches.md); worked example: `examples/mapped_spans/`.
 
@@ -1759,6 +1759,8 @@ compute.stream("module", data, function(chunk, index, is_last) end, { chunk_size
 - Input: string, WasmBuffer, MappedBuffer, or `{ file = "path" }`
 - Output: nil (return buffer), `{ file = "path" }`, or callback function
 - Uses persistent instance internally. State preserved between chunks
+- Each chunk has its own `gas` / `timeout_ms`, and the whole stream is also charged to the calling run: 1 instruction unit per chunk plus 1 per 64 input bytes, and the run's wall-clock deadline is checked before every chunk. Over either, the stream stops and the run fails with the usual uncatchable limit error (audit 15)
+- A returned buffer is capped at the VM heap (the JS heap limit, what is left of the Lua heap): past it the stream fails with `output_too_large` - stream large outputs to a file or a callback
 - Modules can query chunk metadata via `host_call(0x03)`: `hull_stream_is_first()`, `hull_stream_is_last()`, `hull_stream_chunk_index()`
 
 **Architecture:** See `docs/wamr_architecture.md` for the full design document.

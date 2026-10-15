@@ -8967,6 +8967,83 @@ UTEST(js_audit9, compute_stream_resolves_input_after_options)
     cleanup_js();
     hl_cap_wasm_destroy(&cache);
 }
+/* Audit 15: compute.stream ran every chunk inside one binding call, each
+ * with its own gas and timeout, and charged nothing to the run: a stream of
+ * many chunks held the event loop for as long as UINT32_MAX chunk timeouts.
+ * Each chunk is charged now (1 unit + 1 per 64 input bytes), and the trip
+ * is thrown from inside compute.stream. 1 MB in 256-byte chunks is 4096
+ * chunks, 20480 units; under a 15000 limit the stream stops part-way, so the
+ * statement after it never runs. (Unfixed, the stream ran to the end and
+ * returned: its 1 MB result is charged too, but only the next call or loop
+ * polls, so `after` was set.) */
+UTEST(js_audit15, compute_stream_chunks_are_charged_to_the_run)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int("globalThis.ab = new ArrayBuffer(1 << 20); 1"), 1);
+
+    int64_t saved = js.max_instructions;
+    js.max_instructions = 15000;
+    hl_js_budget_arm(&js);
+    static const char code[] =
+        "compute.stream('echo', ab, { chunkSize: 256 });\n"
+        "globalThis.after = 1;\n";
+    JSValue r = JS_Eval(js.ctx, code, sizeof code - 1, "<a15>",
+                        JS_EVAL_TYPE_GLOBAL);
+    EXPECT_TRUE(JS_IsException(r));
+    JS_FreeValue(js.ctx, r);
+    JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    EXPECT_TRUE(js.budget_tripped);
+    EXPECT_FALSE(js.budget_timed_out);
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue a = JS_GetPropertyStr(js.ctx, g, "after");
+    EXPECT_TRUE(JS_IsUndefined(a));
+    JS_FreeValue(js.ctx, a);
+    JS_FreeValue(js.ctx, g);
+
+    /* Under a budget that covers it, the same stream completes. */
+    js.max_instructions = saved;
+    hl_js_budget_arm(&js);
+    EXPECT_EQ(eval_int("new Uint8Array(compute.stream('echo', ab,"
+                       " { chunkSize: 256 })).length === (1 << 20) ? 1 : 0"), 1);
+
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 15: buffer-mode output is capped at the VM heap limit (it was grown
+ * off-heap without bound, then copied into the heap in one piece). */
+UTEST(js_audit15, compute_stream_output_is_capped_at_the_heap_limit)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 64 * 1024;
+    char *r = eval_str(
+        "(() => {\n"
+        "  try { compute.stream('echo', new ArrayBuffer(256 * 1024)); }\n"
+        "  catch (e) { return String(e.message); }\n"
+        "  return 'not refused';\n"
+        "})()");
+    EXPECT_TRUE(r && strstr(r, "output_too_large") != NULL);
+    if (r && !strstr(r, "output_too_large")) printf("  got: %s\n", r);
+    free(r);
+    js.max_heap_bytes = saved;
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
 #endif /* HL_ENABLE_WASM */
 
 /* M1: a rejection's toString is app code, and the resume ran it after its

@@ -138,6 +138,11 @@ const char *hl_lua_trip_reason(const HlLuaBudget *b);
 /* Raise the trip's error. The message is a string made at install, so the
  * raise allocates nothing (budget.c explains why that matters). */
 int  hl_lua_budget_raise(lua_State *L);
+/* Charge @p units of C work straight to the run's budget and check its
+ * deadline, WITHOUT raising: for a cap loop a binding cannot longjmp out of
+ * (compute.stream's chunks). Returns 1 once the run is tripped; the binding
+ * cleans up and then calls hl_lua_budget_raise. 0 on a VM with no budget. */
+int  hl_lua_budget_charge(lua_State *L, int64_t units);
 
 /* The stored manifest (registry "__hull_manifest") as JSON, encoded in C with
  * raw accessors - what the build signs and --verify-sig compares

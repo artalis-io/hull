@@ -2211,6 +2211,147 @@ UTEST(hl_cap_wasm, shared_data_replace_segment)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* ── Audit 15: a segment over WAMR's shared-heap limit ───────────────
+ *
+ * WAMR refuses a shared heap over APP_HEAP_SIZE_MAX (1 GiB) while Hull
+ * allowed a segment up to the 3 GB total, so such a load always failed - and
+ * a REPLACE had already freed the old segment by then: a lone segment's
+ * chain_head kept naming the freed heap (the next call attached it), and with
+ * more segments the slot was left hollow. The segment is now refused up
+ * front, and every failure leaves the old segments as they were. */
+
+/* Read `len` bytes of segment `seg` through the guest; 0 when they match. */
+static int read_segment_matches(HlWasmCache *cache, HlVfs *vfs, int seg,
+                                const char *expect, size_t len)
+{
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(seg, 0, (uint32_t)len, &msg_len);
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+    int rc = hl_cap_wasm_call(cache, "shared_read", msg, msg_len,
+                              &output, &output_len, NULL, NULL, NULL, vfs,
+                              NULL, NULL, &err);
+    int ok = rc == 0 && output_len == len && memcmp(output, expect, len) == 0;
+    free(output);
+    free(msg);
+    return ok ? 0 : -1;
+}
+
+static HlWasmModule *find_module(HlWasmCache *cache, const char *name)
+{
+    HlWasmModule *mod = NULL;
+    pthread_mutex_lock(&cache->pool_mutex);
+    for (int i = 0; i < cache->count; i++) {
+        if (strcmp(cache->modules[i].name, name) == 0) {
+            mod = &cache->modules[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&cache->pool_mutex);
+    return mod;
+}
+
+UTEST(hl_cap_wasm, segment_over_wamr_limit_refused_old_segment_kept)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    const char *err = NULL;
+
+    /* Oversize data: an untouched anonymous reservation (zero pages), so the
+     * test commits no memory - the refusal comes before any copy. */
+    size_t big = (size_t)HL_WASM_MAX_SEGMENT_SIZE + 1;
+    void *mem = mmap(NULL, big, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_TRUE(mem != MAP_FAILED);
+
+    /* No segment yet: refused, and the module is left with none. */
+    err = NULL;
+    EXPECT_NE(hl_cap_wasm_data_load(&cache, "shared_read", "x", mem, big,
+                                    NULL, &vfs, NULL, &err), 0);
+    EXPECT_TRUE(err && strcmp(err, "segment_too_large") == 0);
+    HlWasmModule *mod = find_module(&cache, "shared_read");
+    ASSERT_NE(mod, NULL);
+    EXPECT_EQ(mod->shared_data, NULL);
+
+    /* One segment, replaced by an oversize one: refused, the old one stays
+     * loaded and is what the chain names - a later call reads it. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "x", "OLD", 3,
+                                    NULL, &vfs, NULL, &err), 0);
+    err = NULL;
+    EXPECT_NE(hl_cap_wasm_data_load(&cache, "shared_read", "x", mem, big,
+                                    NULL, &vfs, NULL, &err), 0);
+    EXPECT_TRUE(err && strcmp(err, "segment_too_large") == 0);
+    ASSERT_NE(mod->shared_data, NULL);
+    ASSERT_EQ(mod->shared_data->count, 1);
+    EXPECT_TRUE(mod->shared_data->chain_head ==
+                mod->shared_data->segments[0].shared_heap);
+    EXPECT_EQ(read_segment_matches(&cache, &vfs, 0, "OLD", 3), 0);
+
+    /* Zero-copy (page-aligned pre_alloc) oversize: refused the same way. */
+    EXPECT_NE(hl_cap_wasm_data_load(&cache, "shared_read", "x", mem,
+                                    big - 1 + (size_t)sysconf(_SC_PAGESIZE),
+                                    mem, &vfs, NULL, &err), 0);
+    EXPECT_EQ(read_segment_matches(&cache, &vfs, 0, "OLD", 3), 0);
+
+    /* Two segments: replacing the second, or adding a third, oversize is
+     * refused and both stay chained and readable (no hollow slot). */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "y", "WHY!", 4,
+                                    NULL, &vfs, NULL, &err), 0);
+    EXPECT_NE(hl_cap_wasm_data_load(&cache, "shared_read", "y", mem, big,
+                                    NULL, &vfs, NULL, &err), 0);
+    EXPECT_NE(hl_cap_wasm_data_load(&cache, "shared_read", "z", mem, big,
+                                    NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(mod->shared_data->count, 2);
+    EXPECT_NE(mod->shared_data->chain_head, NULL);
+    EXPECT_EQ(read_segment_matches(&cache, &vfs, 0, "OLD", 3), 0);
+    EXPECT_EQ(read_segment_matches(&cache, &vfs, 1, "WHY!", 4), 0);
+
+    /* And a normal replace still works afterwards. */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "x", "NEW", 3,
+                                    NULL, &vfs, NULL, &err), 0);
+    EXPECT_EQ(read_segment_matches(&cache, &vfs, 0, "NEW", 3), 0);
+    EXPECT_EQ(read_segment_matches(&cache, &vfs, 1, "WHY!", 4), 0);
+
+    hl_cap_wasm_destroy(&cache);
+    munmap(mem, big);
+}
+
+/* HL_WASM_MAX_SEGMENT_SIZE must track WAMR's own limit: a heap of exactly
+ * that size is accepted, one page more is refused (a WAMR upgrade that
+ * changes APP_HEAP_SIZE_MAX trips this). The backing is an untouched
+ * reservation: creating a pre-allocated heap does not touch it. */
+UTEST(hl_cap_wasm, segment_size_cap_matches_wamr_limit)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) page = 4096;
+    size_t cap = (size_t)HL_WASM_MAX_SEGMENT_SIZE;
+    size_t len = cap + (size_t)page;
+    void *mem = mmap(NULL, len, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_TRUE(mem != MAP_FAILED);
+
+    SharedHeapInitArgs a;
+    memset(&a, 0, sizeof(a));
+    a.pre_allocated_addr = mem;
+    a.size = (uint32_t)cap;
+    wasm_shared_heap_t h = wasm_runtime_create_shared_heap(&a);
+    EXPECT_NE(h, NULL);
+    if (h)
+        EXPECT_TRUE(wasm_runtime_destroy_shared_heap(h));
+
+    a.size = (uint32_t)len;
+    h = wasm_runtime_create_shared_heap(&a);
+    EXPECT_EQ(h, NULL);
+    if (h)
+        wasm_runtime_destroy_shared_heap(h);
+
+    munmap(mem, len);
+    hl_cap_wasm_destroy(&cache);
+}
+
 UTEST(hl_cap_wasm, shared_data_remove_segment)
 {
     HlWasmCache cache;
@@ -2964,6 +3105,117 @@ UTEST(hl_cap_wasm, stream_echo_single_chunk)
     ASSERT_EQ(res.chunks, (uint32_t)1);
 
     free(out_data);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 15: the per-chunk hook runs before every chunk and stops the stream
+ * when it says so - the bindings charge the run's budget and check its
+ * deadline there; before, a stream of many chunks ran them all inside one
+ * binding call. And buffer-mode output is capped (max_output). */
+typedef struct { int calls; int stop_at; size_t bytes; } StreamHookState;
+
+static int stream_test_hook(size_t chunk_len, void *ud)
+{
+    StreamHookState *s = (StreamHookState *)ud;
+    s->calls++;
+    s->bytes += chunk_len;
+    return s->calls > s->stop_at;
+}
+
+UTEST(hl_cap_wasm, stream_before_chunk_hook_stops_the_stream)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    static char input[256 * 40];
+    memset(input, 'q', sizeof input);
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = sizeof input;
+
+    void *out_data = NULL;
+    size_t out_len = 0;
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_BUFFER;
+    out.buffer.data = &out_data;
+    out.buffer.len = &out_len;
+
+    /* A hook that never stops sees every chunk, with its length. */
+    StreamHookState st = { 0, 1000, 0 };
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 256;
+    opts.before_chunk = stream_test_hook;
+    opts.before_chunk_ud = &st;
+    HlStreamResult res = {0};
+    const char *err = NULL;
+    ASSERT_EQ(hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err),
+              HL_WASM_OK);
+    EXPECT_EQ(st.calls, 40);
+    EXPECT_EQ(st.bytes, sizeof input);
+    EXPECT_EQ(res.chunks, (uint32_t)40);
+    free(out_data);
+    out_data = NULL;
+
+    /* One that stops after 5: chunk 6 never runs, no output is handed back. */
+    st = (StreamHookState){ 0, 5, 0 };
+    memset(&res, 0, sizeof res);
+    err = NULL;
+    EXPECT_NE(hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err),
+              HL_WASM_OK);
+    EXPECT_TRUE(err && strcmp(err, "stopped") == 0);
+    EXPECT_EQ(st.calls, 6);
+    EXPECT_EQ(res.chunks, (uint32_t)5);
+    EXPECT_EQ(out_data, NULL);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, stream_buffer_output_is_capped)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    static char input[4096];
+    memset(input, 'z', sizeof input);
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = sizeof input;
+
+    void *out_data = NULL;
+    size_t out_len = 0;
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_BUFFER;
+    out.buffer.data = &out_data;
+    out.buffer.len = &out_len;
+
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 256;
+    opts.max_output = 1000;     /* the echo's 4096 bytes do not fit */
+    HlStreamResult res = {0};
+    const char *err = NULL;
+    EXPECT_NE(hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err),
+              HL_WASM_OK);
+    EXPECT_TRUE(err && strcmp(err, "output_too_large") == 0);
+    EXPECT_EQ(out_data, NULL);
+
+    /* Exactly at the cap is fine. */
+    opts.max_output = sizeof input;
+    err = NULL;
+    ASSERT_EQ(hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err),
+              HL_WASM_OK);
+    EXPECT_EQ(out_len, sizeof input);
+    free(out_data);
+
     hl_cap_wasm_destroy(&cache);
 }
 

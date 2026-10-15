@@ -1266,6 +1266,20 @@ static int lua_stream_cb_trampoline(const void *data, size_t len,
     return 0;
 }
 
+/* Per-chunk charge (audit 15): a stream runs every chunk inside this one
+ * binding call, each with its own gas and timeout, so the run's budget and
+ * deadline were never consulted - a stream of many chunks held the event
+ * loop for hours. 1 unit per chunk plus 1 per 64 input bytes, charged
+ * without raising (a longjmp out of the cap's loop would leak the instance,
+ * fds and buffers); the binding raises the trip once the stream is down. */
+static int lua_stream_before_chunk(size_t chunk_len, void *user_data)
+{
+    lua_State *L = (lua_State *)user_data;
+    uint64_t units = 1 + (uint64_t)chunk_len / 64;
+    return hl_lua_budget_charge(L, units > INT64_MAX ? INT64_MAX
+                                                     : (int64_t)units);
+}
+
 /* compute.stream(name, input, [output], [opts]) -> string | true, err */
 static int lua_compute_stream(lua_State *L)
 {
@@ -1380,6 +1394,13 @@ static int lua_compute_stream(lua_State *L)
     }
 
     wasm_clamp_opts(&stream_opts.call_opts, &lua->base);
+    stream_opts.before_chunk = lua_stream_before_chunk;
+    stream_opts.before_chunk_ud = L;
+    /* The buffer-mode result becomes one Lua string on the VM heap: it may
+     * not be larger than what is left of it. */
+    if (lua->mem_limit)
+        stream_opts.max_output = lua->mem_limit > lua->mem_used
+                                 ? lua->mem_limit - lua->mem_used : 1;
 
     /* A buffer input is pinned for the whole stream: the output callback is
      * app code, run between chunks, and could close() the input - unmapping
@@ -1443,6 +1464,14 @@ static int lua_compute_stream(lua_State *L)
     /* Clean up callback reference */
     if (cb_ctx.func_ref != LUA_NOREF)
         luaL_unref(L, LUA_REGISTRYINDEX, cb_ctx.func_ref);
+
+    /* Over the budget or past the run's deadline - charged per chunk, or
+     * tripped inside the output callback: raise the trip, never a
+     * catchable nil, "stopped" / "callback_failed". */
+    if (hl_lua_budget_tripped(L)) {
+        if (out_data) hl_alloc_free(lua->base.alloc, out_data, out_len);
+        return hl_lua_budget_raise(L);
+    }
 
     if (rc != HL_WASM_OK) {
         lua_pushnil(L);

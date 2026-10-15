@@ -121,6 +121,13 @@
 #ifndef HL_WASM_MAX_SHARED_DATA
 #define HL_WASM_MAX_SHARED_DATA  ((uint32_t)(3UL * 1024 * 1024 * 1024))  /* 3 GB total */
 #endif
+/* One segment is one WAMR shared heap, and WAMR refuses a heap larger than
+ * its APP_HEAP_SIZE_MAX (1 GiB, vendor/wamr/core/config.h). compute.segment
+ * refuses a larger segment (page-aligned size) up front with
+ * "segment_too_large" (audit 15). Must not exceed APP_HEAP_SIZE_MAX. */
+#ifndef HL_WASM_MAX_SEGMENT_SIZE
+#define HL_WASM_MAX_SEGMENT_SIZE ((uint64_t)1024 * 1024 * 1024)  /* 1 GiB */
+#endif
 #ifndef HL_WASM_MAX_DATA_SEGMENTS
 #define HL_WASM_MAX_DATA_SEGMENTS 16
 #endif
