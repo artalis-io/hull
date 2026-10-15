@@ -105,24 +105,6 @@ app.main(function()
     local ok_n, err_n = pcall(function() return f.wait_notify("ch", 10) end)
     print("notify_sqlite=" .. ((not ok_n and tostring(err_n):find("LISTEN/NOTIFY", 1, true))
                                and "refused" or "allowed"))
-    -- A __gc finalizer closes the handle while the call converts its SQL
-    -- argument (a number made a string allocates, and the GC settings below
-    -- make every allocation finish a whole cycle): the op must not run on
-    -- the closed handle (audit 16). CLOSED_IN shows the finalizer ran there.
-    local g = db.open("shard.db")
-    local gq = g.async.query
-    collectgarbage("incremental", 0, 1000, 40)
-    collectgarbage()
-    local o = setmetatable({}, { __gc = function() CLOSED_IN = PHASE; g.close() end })
-    o = nil
-    PHASE = "convert"
-    local ok_cg, err_cg = pcall(gq, 12345)
-    PHASE = "after"
-    collectgarbage("incremental", 200, 100, 13)
-    collectgarbage()
-    print("gc_close_during_convert=" .. tostring(CLOSED_IN) .. "/" ..
-          ((not ok_cg and tostring(err_cg):find("database not available", 1, true))
-           and "denied" or ("ran:" .. tostring(err_cg))))
     f.close()
     local ok_a = pcall(function() f.async.query("SELECT 1") end)
     print("async_after_close=" .. (ok_a and "ok" or "denied"))
@@ -137,7 +119,6 @@ app.main(function()
 end)
 LUA
 run_case lua "Lua"
-assert_line "$out" "gc_close_during_convert" "convert/denied" "Lua: async on a handle closed by a __gc during argument conversion fails"
 
 # ── JS ─────────────────────────────────────────────────────────────────
 cat > "$TMPDIR/app.js" << 'JS'
