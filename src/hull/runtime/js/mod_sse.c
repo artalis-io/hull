@@ -10,6 +10,8 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* hl_work_sse_units */
+#include "internal.h"   /* hl_js_budget_charge */
 #include "hull/shared/req_life.h"
 
 #include <keel/http_sse.h>
@@ -20,13 +22,7 @@
 
 JSClassID js_sse_stream_class_id;
 
-/* ── SSE stream opaque ─────────────────────────────────────────────── */
-
-typedef struct {
-    KlHttpSse    sse;
-    int      closed;
-    HlReqLife *life;  /* the request's life (shared/req_life.h) */
-} HlJSSseStreamUD;
+/* The stream's opaque, HlJSSseStreamUD, is in mod_buffer.h. */
 
 /* Closed by the script, or its request is over: a stream kept past its
  * request (fan-out lists are the usual case) holds a write path into a
@@ -75,6 +71,16 @@ static JSValue js_sse_event(JSContext *ctx, JSValueConst this_val,
         }
     }
 
+    /* Charged before the write (audit 14): Keel writes every line as its own
+     * field, three stream writes each, in this one call. */
+    if (hl_js_budget_charge(ctx, hl_work_sse_units(data, data_len,
+            (event_name ? strlen(event_name) : 0) + (id ? strlen(id) : 0)))) {
+        if (event_name) JS_FreeCString(ctx, event_name);
+        JS_FreeCString(ctx, data);
+        if (id) JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
+
     /* Again: a toString above is app code, and may have closed the stream
      * - kl_http_sse_end has run, and the write went out after the end. */
     int rc = stream_dead(ud) ? -2
@@ -108,6 +114,10 @@ static JSValue js_sse_comment(JSContext *ctx, JSValueConst this_val,
     if (stream_dead(ud)) {
         JS_FreeCString(ctx, text);
         return JS_ThrowTypeError(ctx, "SSE stream is closed");
+    }
+    if (hl_js_budget_charge(ctx, hl_work_sse_units(text, len, 0))) {   /* audit 14 */
+        JS_FreeCString(ctx, text);
+        return JS_EXCEPTION;
     }
     int rc = kl_http_sse_comment(&ud->sse, text, len);
     JS_FreeCString(ctx, text);

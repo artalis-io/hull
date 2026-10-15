@@ -16,6 +16,8 @@
 #include "mod_buffer.h"
 #include "hull/cap/tar.h"
 #include "hull/cap/fs.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
+#include "internal.h"   /* hl_js_budget_charge */
 
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +78,27 @@ static JSValue js_tar_parse(JSContext *ctx, JSValueConst this_val,
 
 /* ── tar.create ────────────────────────────────────────────────────── */
 
+/* The archive is built off-heap (cap/tar.c), then copied into the heap: one
+ * the heap could never hold is refused before it is built, and the build is
+ * charged before it runs, one unit per 64 bytes (audit 15). Runs no app
+ * code. 0; 1 refused (*err set); -1 the charge tripped the budget (the
+ * uncatchable interrupt is pending). */
+static int js_tar_check_and_charge(JSContext *ctx, const HlTarEntry *ents,
+                                   size_t n, const char **err)
+{
+    size_t total = 0;
+    if (hl_tar_create_size(ents, n, &total) != 0) {
+        *err = "archive too large";
+        return 1;
+    }
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->max_heap_bytes && total > js->max_heap_bytes) {
+        *err = "archive larger than the heap limit";
+        return 1;
+    }
+    return hl_js_budget_charge(ctx, (uint64_t)total / 64) ? -1 : 0;
+}
+
 static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -85,20 +108,28 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
 
     int64_t n = 0;
     JSValue lenv = JS_GetPropertyStr(ctx, argv[0], "length");
-    JS_ToInt64(ctx, &n, lenv);
+    int lrc = JS_ToInt64(ctx, &n, lenv);
     JS_FreeValue(ctx, lenv);
+    if (lrc < 0) return JS_EXCEPTION;
     if (n < 0) return JS_ThrowTypeError(ctx, "tar.create: bad length");
+    /* The arrays below are sized by `length`, which a sparse array sets at
+     * will: 2e8 allocated gigabytes, off-heap, before one entry was read.
+     * Capped, and allocated from the VM heap (audit 15). */
+    if (n > HL_TAR_CREATE_MAX_ENTRIES)
+        return JS_ThrowRangeError(ctx, "tar.create: too many entries (max %d)",
+                                  HL_TAR_CREATE_MAX_ENTRIES);
 
-    HlTarEntry *ents = n ? (HlTarEntry *)calloc((size_t)n, sizeof(HlTarEntry)) : NULL;
+    HlTarEntry *ents = n ? (HlTarEntry *)js_mallocz(ctx, (size_t)n * sizeof(HlTarEntry)) : NULL;
     /* Keep each entry's name CString + data buffer alive until create returns. */
-    const char **names = n ? (const char **)calloc((size_t)n, sizeof(char *)) : NULL;
-    HlBufferView *views = n ? (HlBufferView *)calloc((size_t)n, sizeof(HlBufferView)) : NULL;
-    const char **dstrs = n ? (const char **)calloc((size_t)n, sizeof(char *)) : NULL;
-    int *dfree = n ? (int *)calloc((size_t)n, sizeof(int)) : NULL;
-    JSValue *datas = n ? (JSValue *)malloc((size_t)n * sizeof(JSValue)) : NULL;
+    const char **names = n ? (const char **)js_mallocz(ctx, (size_t)n * sizeof(char *)) : NULL;
+    HlBufferView *views = n ? (HlBufferView *)js_mallocz(ctx, (size_t)n * sizeof(HlBufferView)) : NULL;
+    const char **dstrs = n ? (const char **)js_mallocz(ctx, (size_t)n * sizeof(char *)) : NULL;
+    int *dfree = n ? (int *)js_mallocz(ctx, (size_t)n * sizeof(int)) : NULL;
+    JSValue *datas = n ? (JSValue *)js_malloc(ctx, (size_t)n * sizeof(JSValue)) : NULL;
     if (n && (!ents || !names || !views || !dstrs || !dfree || !datas)) {
-        free(ents); free(names); free(views); free(dstrs); free(dfree); free(datas);
-        return JS_ThrowOutOfMemory(ctx);
+        js_free(ctx, ents); js_free(ctx, names); js_free(ctx, views);
+        js_free(ctx, dstrs); js_free(ctx, dfree); js_free(ctx, datas);
+        return JS_EXCEPTION;
     }
     for (int64_t j = 0; j < n; j++) datas[j] = JS_UNDEFINED;
 
@@ -148,16 +179,23 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
     unsigned char *out = NULL;
     size_t out_len = 0;
     int rc = -1;
-    if (!err && i == n)
-        rc = hl_tar_create(ents, (size_t)n, &out, &out_len);
+    int charged = 0;   /* -1: the charge threw; 1: refused (err set) */
+    if (!err && i == n) {
+        charged = js_tar_check_and_charge(ctx, ents, (size_t)n, &err);
+        if (charged == 0)
+            rc = hl_tar_create(ents, (size_t)n, &out, &out_len);
+    }
 
     for (int64_t j = 0; j < n; j++) {
         if (names && names[j]) JS_FreeCString(ctx, names[j]);
         if (dfree && dfree[j] && dstrs[j]) JS_FreeCString(ctx, dstrs[j]);
         if (datas) JS_FreeValue(ctx, datas[j]);
     }
-    free(ents); free(names); free(views); free(dstrs); free(dfree); free(datas);
+    js_free(ctx, ents); js_free(ctx, names); js_free(ctx, views);
+    js_free(ctx, dstrs); js_free(ctx, dfree); js_free(ctx, datas);
 
+    if (charged < 0) return JS_EXCEPTION;
+    if (charged > 0) return JS_ThrowRangeError(ctx, "tar.create: %s", err);
     if (rc != 0) {
         return err ? JS_ThrowTypeError(ctx, "tar.create: %s", err)
                    : JS_ThrowTypeError(ctx, "tar.create: unsafe name or out of memory");
@@ -248,23 +286,30 @@ static JSValue js_tar_pack(JSContext *ctx, JSValueConst this_val,
 
     int64_t n = 0;
     JSValue lenv = JS_GetPropertyStr(ctx, argv[0], "length");
-    JS_ToInt64(ctx, &n, lenv);
+    int lrc = JS_ToInt64(ctx, &n, lenv);
     JS_FreeValue(ctx, lenv);
+    if (lrc < 0) return JS_EXCEPTION;
     if (n <= 0) return JS_ThrowTypeError(ctx, "tar.pack: no files");
+    /* Sized by `length`, as tar.create: capped, and from the VM heap. */
+    if (n > HL_TAR_CREATE_MAX_ENTRIES)
+        return JS_ThrowRangeError(ctx, "tar.pack: too many files (max %d)",
+                                  HL_TAR_CREATE_MAX_ENTRIES);
 
-    HlTarEntry *ents = (HlTarEntry *)calloc((size_t)n, sizeof(HlTarEntry));
-    char **bufs = (char **)calloc((size_t)n, sizeof(char *));
+    HlTarEntry *ents = (HlTarEntry *)js_mallocz(ctx, (size_t)n * sizeof(HlTarEntry));
+    char **bufs = (char **)js_mallocz(ctx, (size_t)n * sizeof(char *));
     /* Own the CStrings the whole loop: `paths` feeds fs.read, `names` feeds the
      * archive member name (NULL means "use paths[i]"). Both freed after create,
      * so ents[i].name stays valid through hl_tar_create. */
-    const char **paths = (const char **)calloc((size_t)n, sizeof(char *));
-    const char **names = (const char **)calloc((size_t)n, sizeof(char *));
+    const char **paths = (const char **)js_mallocz(ctx, (size_t)n * sizeof(char *));
+    const char **names = (const char **)js_mallocz(ctx, (size_t)n * sizeof(char *));
     if (!ents || !bufs || !paths || !names) {
-        free(ents); free(bufs); free(paths); free(names);
-        return JS_ThrowOutOfMemory(ctx);
+        js_free(ctx, ents); js_free(ctx, bufs); js_free(ctx, paths); js_free(ctx, names);
+        return JS_EXCEPTION;
     }
 
     const char *err = NULL;
+    int threw = 0;              /* the budget charge tripped */
+    uint64_t archive = 1024;    /* running archive size: the trailer */
     int64_t i;
     for (i = 0; i < n; i++) {
         JSValue el = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)i);
@@ -283,12 +328,25 @@ static JSValue js_tar_pack(JSContext *ctx, JSValueConst this_val,
 
         int64_t size = hl_cap_fs_read(js->base.fs_cfg, paths[i], NULL, 0, &err);
         if (size < 0) break;
-        char *buf = (char *)malloc(size ? (size_t)size : 1);
-        if (!buf) { err = "out_of_memory"; break; }
+        /* A running total of the archive, against the heap limit, before
+         * this file is read; the read is charged before it runs, and lands
+         * in VM memory (audit 15): the same path listed many times was read
+         * - malloc'd, uncharged - each time. */
+        archive += 512 + (((uint64_t)size + 511) & ~(uint64_t)511);
+        if (js->max_heap_bytes && archive > (uint64_t)js->max_heap_bytes) {
+            err = "archive larger than the heap limit";
+            break;
+        }
+        if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)size))) {
+            threw = 1;
+            break;
+        }
+        char *buf = (char *)js_malloc(ctx, size ? (size_t)size : 1);
+        if (!buf) { threw = 1; break; }
         int64_t got = 0;
         if (size > 0) {
             got = hl_cap_fs_read(js->base.fs_cfg, paths[i], buf, (size_t)size, &err);
-            if (got < 0) { free(buf); break; }
+            if (got < 0) { js_free(ctx, buf); break; }
         }
         bufs[i] = buf;
         ents[i].name = names[i] ? names[i] : paths[i];
@@ -304,16 +362,21 @@ static JSValue js_tar_pack(JSContext *ctx, JSValueConst this_val,
     unsigned char *out = NULL;
     size_t out_len = 0;
     int rc = -1;
-    if (!err && i == n)
-        rc = hl_tar_create(ents, (size_t)n, &out, &out_len);
+    if (!threw && !err && i == n) {
+        int charged = js_tar_check_and_charge(ctx, ents, (size_t)n, &err);
+        if (charged < 0) threw = 1;
+        else if (charged == 0)
+            rc = hl_tar_create(ents, (size_t)n, &out, &out_len);
+    }
 
     for (int64_t j = 0; j < n; j++) {
-        free(bufs[j]);
+        js_free(ctx, bufs[j]);
         if (paths[j]) JS_FreeCString(ctx, paths[j]);
         if (names[j]) JS_FreeCString(ctx, names[j]);
     }
-    free(ents); free(bufs); free(paths); free(names);
+    js_free(ctx, ents); js_free(ctx, bufs); js_free(ctx, paths); js_free(ctx, names);
 
+    if (threw) return JS_EXCEPTION;
     if (rc != 0)
         return JS_ThrowTypeError(ctx, "tar.pack: %s", err ? err : "failed");
     JSValue ab = JS_NewArrayBufferCopy(ctx, out, out_len);

@@ -45,6 +45,8 @@
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
 #include "internal.h"   /* hl_js_budget_charge */
+#include "hull/limits/runtime.h"       /* HL_BLOB_READ_CHUNK_MAX */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 #include <limits.h>
 #include <stdio.h>
@@ -549,6 +551,12 @@ static JSValue js_reader_read(JSContext *ctx, JSValueConst this_val,
     HlBlobReader *r = (HlBlobReader *)bh->h;
     if (!r) return JS_ThrowInternalError(ctx, "blob.reader: read after close");
     if (cap <= 0) return JS_NewArrayBufferCopy(ctx, NULL, 0);
+    /* Clamped and charged before the read (audit 15, parity with Lua): a
+     * reader returns up to n bytes a call, so a larger n only means more
+     * calls. The charge cannot run app code, so the reader is still open. */
+    if (cap > HL_BLOB_READ_CHUNK_MAX) cap = HL_BLOB_READ_CHUNK_MAX;
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)cap)))
+        return JS_EXCEPTION;
 
     uint8_t *buf = js_malloc(ctx, (size_t)cap);
     if (!buf) return JS_ThrowOutOfMemory(ctx);
@@ -592,13 +600,42 @@ static JSValue js_blob_get(JSContext *ctx, JSValueConst this_val,
     int track = read_track_access(ctx, argc, argv, 1);
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js) {   /* get_store found one, so never; checked once, here */
+        JS_FreeCString(ctx, id);
+        return JS_ThrowInternalError(ctx, "blob.get: no runtime");
+    }
     uint8_t *buf = NULL;
     size_t len = 0;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
+    /* The cap reads the whole blob (up to 256 MB) into an off-heap buffer
+     * and SHA-256s it before the copy into the heap: a blob the heap could
+     * never hold is refused before that, and the read + hash is charged
+     * before it runs (audit 15). An unknown id is still null. No app code
+     * runs from here to the read. */
+    size_t want = 0;
+    if (hl_cap_blob_stat(b, id, &want, NULL) != 0) {
+        JS_FreeCString(ctx, id);
+        return JS_NULL;
+    }
+    size_t heap_max = js->max_heap_bytes;
+    if (heap_max && want > heap_max) {
+        JS_FreeCString(ctx, id);
+        return JS_ThrowRangeError(ctx, "blob.get: blob larger than the heap limit");
+    }
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)want))) {
+        JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_blob_get(b, id, track, &buf, &len);
     JS_FreeCString(ctx, id);
     if (rc != 0) return JS_NULL;
+    /* Sized from the opened file: a blob replaced since the stat (a shared
+     * store) is held to the same limit. */
+    if (heap_max && len > heap_max) {
+        if (buf) hl_alloc_free(js->base.alloc, buf, len);
+        return JS_ThrowRangeError(ctx, "blob.get: blob larger than the heap limit");
+    }
 
     /* Empty-blob contract: (NULL, 0). JS_NewArrayBufferCopy accepts
      * NULL when len is 0 and returns an empty ArrayBuffer - no

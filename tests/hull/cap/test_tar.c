@@ -720,4 +720,36 @@ UTEST_F(tar_fixture, extract_refuses_a_dotdot_through_a_link) {
     free(buf);
 }
 
+/* Audit 15: the output buffer was grown by doubling with no cap. It is sized
+ * exactly up front now (hl_tar_create_size) and capped at
+ * HL_TAR_CREATE_MAX_BYTES, refused before anything is allocated or read. */
+UTEST(tar_create, size_is_exact_and_capped) {
+    HlTarEntry entries[] = {
+        { .name = "a", .data = (const unsigned char *)"hello", .size = 5 },
+        { .name = "d", .is_dir = 1 },
+        { .name = "b", .data = (const unsigned char *)"", .size = 0 },
+    };
+    size_t sz = 0;
+    ASSERT_EQ(hl_tar_create_size(entries, 3, &sz), 0);
+    /* three headers, one padded data block, the two-block trailer */
+    EXPECT_EQ(sz, (size_t)(3 * 512 + 512 + 1024));
+    unsigned char *out = NULL;
+    size_t out_len = 0;
+    ASSERT_EQ(hl_tar_create(entries, 3, &out, &out_len), 0);
+    EXPECT_EQ(out_len, sz);
+    free(out);
+
+    /* Two entries of half the cap each go over it (with their headers):
+     * refused without reading the data, which is not there. */
+    static const unsigned char tiny[1] = { 0 };
+    HlTarEntry big[2];
+    memset(big, 0, sizeof big);
+    big[0].name = "x"; big[0].data = tiny; big[0].size = HL_TAR_CREATE_MAX_BYTES / 2;
+    big[1].name = "y"; big[1].data = tiny; big[1].size = HL_TAR_CREATE_MAX_BYTES / 2;
+    EXPECT_EQ(hl_tar_create_size(big, 2, &sz), -1);
+    out = NULL;
+    EXPECT_EQ(hl_tar_create(big, 2, &out, &out_len), -1);
+    EXPECT_TRUE(out == NULL);
+}
+
 UTEST_MAIN()

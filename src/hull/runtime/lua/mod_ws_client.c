@@ -13,6 +13,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "internal.h"   /* HL_LUA_ARM */
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/cap/http.h"
@@ -77,6 +78,7 @@ static int lua_ws_client_send(lua_State *L)
 
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
+    lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);   /* audit 14 */
 
     int rc = kl_ws_client_send_text(ud->client, data, len);
     lua_pushboolean(L, rc == 0);
@@ -92,6 +94,7 @@ static int lua_ws_client_send_binary(lua_State *L)
 
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
+    lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);   /* audit 14 */
 
     int rc = kl_ws_client_send_binary(ud->client, data, len);
     lua_pushboolean(L, rc == 0);

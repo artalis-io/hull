@@ -17,6 +17,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "hull/cap/ws.h"
 #include "hull/utils/alloc.h"
 
@@ -117,6 +118,9 @@ static int lua_ws_conn_send(lua_State *L)
 
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
+    /* Charged before the send (audit 14): one call frames and queues up to
+     * the whole heap. */
+    lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);
 
     int rc = kl_ws_server_send_text(ud->conn->kl_ws, data, len);
     if (rc == 0) {
@@ -139,6 +143,7 @@ static int lua_ws_conn_send_binary(lua_State *L)
 
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
+    lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);   /* audit 14 */
 
     int rc = kl_ws_server_send_binary(ud->conn->kl_ws, data, len);
     if (rc == 0) {
@@ -263,6 +268,9 @@ static int lua_ws_broadcast(lua_State *L)
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
     int binary = lua_toboolean(L, 3);
+    /* Charged before the sends, per connection the message goes to (audit
+     * 14): one call framed and queued it to every connection. */
+    lua_hlwork(L, (size_t)hl_work_send_units(len, hl_ws_connections(reg, path)), 0);
 
     int sent;
     if (binary)

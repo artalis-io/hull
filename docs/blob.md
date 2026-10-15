@@ -164,6 +164,12 @@ while true do
 end
 r:close()
 
+-- blob.get raises for a blob larger than the VM heap limit (checked before
+-- it is read), and a read is charged to the instruction budget before it
+-- runs, 1 unit per 8 bytes - for r:read(n), per 8 bytes of n. n is capped at
+-- 16 MB (HL_BLOB_READ_CHUNK_MAX): a reader returns up to n bytes a call
+-- (audit 15).
+
 -- Metadata (single stat call each)
 blob.exists(id)              -> bool
 blob.size(id)                -> integer or nil

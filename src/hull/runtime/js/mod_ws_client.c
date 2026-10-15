@@ -13,6 +13,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/http.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
@@ -142,6 +143,10 @@ static JSValue js_ws_client_send(JSContext *ctx, JSValueConst this_val,
     size_t len;
     const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!data) return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {   /* audit 14 */
+        JS_FreeCString(ctx, data);
+        return JS_EXCEPTION;
+    }
 
     int rc = kl_ws_client_send_text(ud->client, data, len);
     JS_FreeCString(ctx, data);
@@ -162,10 +167,16 @@ static JSValue js_ws_client_send_binary(JSContext *ctx, JSValueConst this_val,
     if (!buf) {
         const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
         if (!data) return JS_EXCEPTION;
+        if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {   /* audit 14 */
+            JS_FreeCString(ctx, data);
+            return JS_EXCEPTION;
+        }
         int rc = kl_ws_client_send_binary(ud->client, data, len);
         JS_FreeCString(ctx, data);
         return rc == 0 ? JS_TRUE : JS_ThrowTypeError(ctx, "send failed");
     }
+    if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1)))   /* audit 14 */
+        return JS_EXCEPTION;
     int rc = kl_ws_client_send_binary(ud->client, (const char *)buf, len);
     return rc == 0 ? JS_TRUE : JS_ThrowTypeError(ctx, "send failed");
 }
