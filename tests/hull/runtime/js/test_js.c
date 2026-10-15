@@ -11028,7 +11028,8 @@ UTEST(js_audit15, app_globals_cannot_register_handlers)
  * and built the defs with set too: an app setter on Array.prototype["0"] (or
  * Object.prototype.method) then ran with `this` = the internal array / def,
  * which reached the handlers after registration closed. Registration must
- * work and the setters must never fire. */
+ * work and the setters / getters must never fire, also when a hole in a def
+ * array is read. */
 UTEST(js_audit16, registration_ignores_prototype_setters)
 {
     init_js();
@@ -11055,13 +11056,22 @@ UTEST(js_audit16, registration_ignores_prototype_setters)
     EXPECT_EQ(eval_int("typeof globalThis.r === 'undefined' ? 1 : 0"), 1);
     EXPECT_EQ(eval_int(
         "Object.getOwnPropertyNames(globalThis.__hull_internals"
-        ".__hull_route_defs).length"), 3);   /* 0, 1 and length */
+        ".__hull_route_defs).length"), 3);   /* 0, 2 and length */
+    /* A def sits at its handler id (the middleware took id 1), so the def
+     * arrays have holes; with no prototype a hole reads as undefined, not
+     * through the Array.prototype getter (routes.c walks every index). */
     EXPECT_EQ(eval_int(
         "Object.getPrototypeOf(globalThis.__hull_internals"
-        ".__hull_route_defs[1]) === null ? 1 : 0"), 1);
+        ".__hull_route_defs) === null ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int(
+        "globalThis.__hull_internals.__hull_route_defs[1] === undefined"
+        " ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int(
+        "Object.getPrototypeOf(globalThis.__hull_internals"
+        ".__hull_route_defs[2]) === null ? 1 : 0"), 1);
     EXPECT_EQ(eval_int(
         "Object.getOwnPropertyDescriptor(globalThis.__hull_internals"
-        ".__hull_route_defs[1], 'method').value === 'POST' ? 1 : 0"), 1);
+        ".__hull_route_defs[2], 'method').value === 'POST' ? 1 : 0"), 1);
     EXPECT_EQ(eval_int(
         "typeof Object.getOwnPropertyDescriptor(globalThis.__hull_internals"
         ".__hull_routes, '2').value === 'function' ? 1 : 0"), 1);
