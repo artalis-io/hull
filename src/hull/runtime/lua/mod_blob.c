@@ -372,7 +372,8 @@ static int lua_reader_read(lua_State *L)
     luaL_Buffer lb;
     char *buf = luaL_buffinitsize(L, &lb, (size_t)cap);
     /* The box allocation can run a GC step, and an app __gc can close
-     * this reader. */
+     * this reader: read its state again, through the userdata. */
+    ud = check_reader_ud(L, 1);
     if (!ud->r) return luaL_error(L, "blob.reader: read after close");
     size_t got = 0;
     if (hl_cap_blob_reader_read(ud->r, (uint8_t *)buf, (size_t)cap, &got) != 0)
