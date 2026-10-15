@@ -330,6 +330,13 @@ HlDbHandle *hl_worker_db_handle_checked(const char *sql, const char **out_err)
     return &wdb->handle;
 }
 
+int hl_worker_db_notify_timeout(double ms)
+{
+    if (!(ms > 0)) return 0;                       /* negative, 0, NaN */
+    if (ms >= HL_WORKER_DB_NOTIFY_MAX_MS) return HL_WORKER_DB_NOTIFY_MAX_MS;
+    return (int)ms;
+}
+
 /* ── HlDbResult helpers ────────────────────────────────────────────── */
 
 void hl_db_result_free(HlDbResult *r)
@@ -413,10 +420,35 @@ static void materialize_value(const HlValue *in, HlDbValue *out)
 
 /* ── Materializing row callback (backend-agnostic) ─────────────────── */
 
+/* The result is copied into plain malloc on the worker thread, outside any VM
+ * heap: @p bytes keeps a running total (cell data plus per-cell bookkeeping),
+ * which fails the op past @p max_bytes, and the copy is charged to the op's
+ * budget bound on this thread (audit 15). Only the 100k-row cap stood in the
+ * way: a few large values per row exhausted the process's memory. */
 typedef struct {
     HlDbResult *r;
     const char *err;   /* static message, set on failure */
+    size_t      bytes;
+    size_t      max_bytes;
 } MaterializeCtx;
+
+/* Count @p n more result bytes: 0 to go on, -1 (mc->err set) when over the
+ * cap or the op's budget is exhausted. */
+static int materialize_account(MaterializeCtx *mc, size_t n)
+{
+    if (n > mc->max_bytes || mc->bytes > mc->max_bytes - n) {
+        mc->err = "result too large (it exceeds the heap limit)";
+        return -1;
+    }
+    mc->bytes += n;
+    int64_t units = (int64_t)((n + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                              HL_DB_ALLOC_UNIT_BYTES);
+    if (units > 0 && hl_db_budget_charge(units) != 0) {
+        mc->err = "interrupted (instruction limit exceeded)";
+        return -1;
+    }
+    return 0;
+}
 
 static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
 {
@@ -424,6 +456,10 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
     HlDbResult *r = mc->r;
 
     if (r->col_names == NULL) {   /* first row: capture the column names */
+        size_t names = (size_t)(ncols > 0 ? ncols : 0) * sizeof(char *);
+        for (int i = 0; i < ncols; i++)
+            names += (cols[i].name ? strlen(cols[i].name) : 1) + 1;
+        if (materialize_account(mc, names) != 0) return -1;
         r->ncols = ncols;
         r->col_names = calloc((size_t)ncols, sizeof(char *));
         if (!r->col_names) { mc->err = "out of memory"; r->ncols = 0; return -1; }
@@ -437,6 +473,14 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
     /* Rows are stored ncols wide, from the first row; one of another width
      * would be read past (fewer columns) or cut (more). */
     if (ncols != r->ncols) { mc->err = "result rows differ in column count"; return -1; }
+
+    size_t row_bytes = (size_t)r->ncols * sizeof(HlDbValue);
+    for (int i = 0; i < r->ncols; i++) {
+        const HlValue *v = &cols[i].value;
+        if ((v->type == HL_TYPE_TEXT || v->type == HL_TYPE_BLOB) && v->s)
+            row_bytes += v->len + 1;
+    }
+    if (materialize_account(mc, row_bytes) != 0) return -1;
 
     if (db_result_grow(r) != 0) { mc->err = "too many rows"; return -1; }
 
@@ -556,12 +600,16 @@ static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh)
     /* HL_WORK_DB_QUERY: materialize all rows through the vtable. */
     HlDbResult *r = &op->result;
     memset(r, 0, sizeof(*r));
-    MaterializeCtx mc = { .r = r, .err = NULL };
+    size_t cap = HL_WORKER_DB_RESULT_MAX_BYTES;
+    if (op->max_result_bytes > 0 && op->max_result_bytes < cap)
+        cap = op->max_result_bytes;
+    MaterializeCtx mc = { .r = r, .err = NULL, .bytes = 0, .max_bytes = cap };
     int rc = hl_db_query(h, op->sql, op->params, op->nparams,
                          db_materialize_row_cb, &mc, NULL);
     if (mc.err) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg), "%s", mc.err);
+        hl_db_result_free(r);   /* give the partial copy back now */
     } else if (rc < 0) {
         op->error = 1;
         snprintf(op->error_msg, sizeof(op->error_msg),

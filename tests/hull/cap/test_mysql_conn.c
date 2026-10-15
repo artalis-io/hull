@@ -10,6 +10,7 @@
 #include "utest.h"
 #include "hull/cap/mysql_conn.h"
 #include "hull/cap/mysqlwire.h"
+#include "hull/cap/db_budget.h"
 /* The backend itself, for its static transaction bookkeeping (the build
  * leaves cap_db_mysql.o out of this test's link). */
 #include "../../../src/hull/cap/db_mysql.c"
@@ -401,6 +402,69 @@ UTEST(mysql_conn, com_query_result_set)
     ASSERT_EQ(got.rows, 1);
     ASSERT_STREQ(got.col0, "id");
     ASSERT_STREQ(got.first, "42");
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A budget the row callback trips: the run went over its limit while the
+ * rows were being read. */
+static int my_tripped;
+static int my_trip_fn(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return my_tripped;
+}
+static int my_trip_row(void *ctx, const char *const *vals, const size_t *lens,
+                       int nc)
+{
+    (void)vals; (void)lens; (void)nc;
+    (*(int *)ctx)++;
+    my_tripped = 1;
+    return 0;
+}
+
+/* Once the run's budget or deadline trips, the rest of the rows are not read
+ * to the end (audit 15): the connection is closed and stays broken, and the
+ * query fails, so the backend reconnects on the next call. */
+UTEST(mysql_conn, a_tripped_run_abandons_the_reply)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_lenenc_int(&s, 1);
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 2, "x", HL_MY_TYPE_LONG);
+    put_eof(&s, 3);
+    for (uint8_t i = 0; i < 3; i++) {
+        size_t m = hl_my_packet_begin(&s, (uint8_t)(4 + i));
+        hl_my_put_lenenc_str(&s, "7", 1);
+        hl_my_packet_end(&s, m);
+    }
+    put_eof(&s, 7);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    my_tripped = 0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(my_trip_fn, NULL);
+    int rows = 0;
+    int rc = hl_my_conn_query(&conn, "SELECT x FROM t", NULL, my_trip_row,
+                              &rows, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, rows);                  /* no row read past the trip */
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL); /* closed, not drained */
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
 
     hl_my_conn_close(&conn);
     hl_my_writer_free(&s);
@@ -1247,6 +1311,59 @@ UTEST(mysql_backend, create_index_shim_uses_error_code)
     h.batch_depth = 0;
     EXPECT_EQ(0, mysql_exec(&h, "CREATE INDEX IF NOT EXISTS i ON t (x)", NULL, 0));
     EXPECT_EQ(-1, mysql_exec(&h, "CREATE INDEX IF NOT EXISTS i ON t (x)", NULL, 0));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* The shim rewrites exactly one CREATE [UNIQUE] INDEX IF NOT EXISTS
+ * statement, matched by tokens (audit 14): app SQL that merely holds the
+ * words - a procedure body, a string literal, a comment - or a
+ * multi-statement text is sent as written, and a duplicate-index error in
+ * one statement of a multi-statement text is a failure. */
+UTEST(mysql_backend, create_index_shim_is_token_exact)
+{
+    HlDbMyCtx z;
+    memset(&z, 0, sizeof z);
+    static const char *const not_shimmed[] = {
+        "CREATE PROCEDURE p() BEGIN SELECT 'index if not exists'; END",
+        "CREATE TABLE t (c TEXT DEFAULT 'index if not exists')",
+        "SELECT 1 /* create index if not exists */",
+        "CREATE INDEX IF NOT EXISTS i ON t (x); DROP TABLE z",
+        "CREATE INDEX i ON t (x) COMMENT 'if not exists'",
+        "CREATE INDEXX IF NOT EXISTS i ON t (x)",
+        "/*!80000 CREATE INDEX IF NOT EXISTS i ON t (x) */",
+    };
+    for (size_t i = 0; i < sizeof not_shimmed / sizeof not_shimmed[0]; i++) {
+        int handled = 7;
+        EXPECT_EQ(0, mysql_create_index_shim(&z, not_shimmed[i], &handled));
+        EXPECT_EQ(0, handled);
+    }
+
+    /* A multi-statement text with a duplicate index fails as sent. */
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002);                         /* rewritten CREATE */
+    build_err(&s, 1, HL_MY_ER_DUP_KEYNAME, "Duplicate key name 'i'");
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    char junk[512];
+    while (recv(sv[0], junk, sizeof junk, MSG_DONTWAIT) > 0) {}  /* handshake */
+    EXPECT_EQ(0, mysql_exec(&h,
+        "  create unique /* c */ index  if  not exists i on t (x);", NULL, 0));
+    char sent[512];
+    ssize_t n = recv(sv[0], sent, sizeof sent - 1, MSG_DONTWAIT);
+    ASSERT_GT(n, 4);
+    sent[n] = '\0';
+    EXPECT_TRUE(strstr(sent + 5, "index  i on t (x);") != NULL);
+    EXPECT_TRUE(strstr(sent + 5, "not") == NULL);
+    EXPECT_EQ(-1, mysql_exec(&h,
+        "CREATE INDEX IF NOT EXISTS i ON t (x); CREATE TABLE u (y INT)",
+        NULL, 0));
 
     hl_my_conn_close(&ctx.conn);
     hl_my_writer_free(&s);

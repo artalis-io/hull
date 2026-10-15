@@ -52,16 +52,22 @@ function checkValue(v) {
     return v;
 }
 
+// The longest ttl, in seconds (100 years). Past it the expiry (now + ttl in
+// ms) left the safe integers and the backends' ranges: the Postgres / MySQL
+// expiry columns refused it, and Valkey's PX overflowed.
+const MAX_TTL = 100 * 365 * 24 * 3600;
+
 // Validate a ttl / defaultTtl: undefined, null and false pass through;
-// anything else must be a finite number of seconds >= 0 (audit 12). NaN made
-// a value that never expired on the memory backend (every comparison with it
-// is false), Infinity one that overflowed the SQL expiry, and a negative one a
-// write that was already stale (and was refused by the Valkey backend only).
+// anything else must be a finite number of seconds in 0..MAX_TTL (audit 12,
+// audit 14). NaN made a value that never expired on the memory backend (every
+// comparison with it is false), Infinity (or any huge finite ttl, audit 14)
+// one that overflowed the SQL expiry, and a negative one a write that was
+// already stale (and was refused by the Valkey backend only).
 function checkTtl(ttl, what) {
     if (ttl === undefined || ttl === null || ttl === false) return ttl;
-    if (typeof ttl !== "number" || !Number.isFinite(ttl) || ttl < 0)
+    if (typeof ttl !== "number" || !Number.isFinite(ttl) || ttl < 0 || ttl > MAX_TTL)
         codedError("invalid_argument",
-            "kv: " + (what || "ttl") + " must be a finite number of seconds >= 0");
+            "kv: " + (what || "ttl") + " must be a finite number of seconds in 0.." + MAX_TTL);
     return ttl;
 }
 
@@ -118,7 +124,7 @@ function hexdecode(hex) {
 }
 
 const util = {
-    MAX_KEY, NO_EXPIRY, KEEP_TTL, error: codedError, checkKey, checkValue, checkCount, checkTtl,
+    MAX_KEY, MAX_TTL, NO_EXPIRY, KEEP_TTL, error: codedError, checkKey, checkValue, checkCount, checkTtl,
     expiryMs, nowMs, toInt, b64encode, b64decode, hexencode, hexdecode,
 };
 

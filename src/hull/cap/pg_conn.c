@@ -25,6 +25,7 @@
  * functions (DSN parse / sslmode parse / SCRAM proof / SQL rewrite). */
 #ifndef HL_PG_NO_TLS
 #include "hull/cap/db_transport.h"
+#include "hull/cap/db_budget.h"     /* hl_db_budget_charge: a tripped run */
 #include "hull/shared/tls_client.h"
 #endif
 
@@ -1116,6 +1117,27 @@ static int handle_data_row(HlPgCursor *c, HlPgRowCb cb, void *ctx,
     return r ? 1 : 0;
 }
 
+/* The run this reply is read for is over its instruction budget or past its
+ * wall-clock deadline (cap/db_budget.h; a 0-unit charge only asks): the
+ * binding raises that once the call returns, so the rest of the reply would
+ * be read - at the server's pace, a result of any size - only to be thrown
+ * away (audit 15). Drop the connection instead of draining it: the closed
+ * socket stops the query at the server's next write, the connection is
+ * broken, and the backend reconnects on the next call (db_postgres.c's
+ * pg_ready) - or, inside a transaction, refuses everything but the ROLLBACK
+ * the server has already done with the session. Simpler than a CancelRequest
+ * on a side connection, and it needs no new connect from inside the run. */
+static int pg_abandon_if_tripped(HlPgConn *conn)
+{
+    if (hl_db_budget_charge(0) == 0) return 0;
+    conn_teardown(conn);
+    conn->broken = 1;
+    set_err(conn->errmsg, sizeof conn->errmsg,
+            "interrupted (instruction limit exceeded); the connection was "
+            "closed rather than read to the end of the reply");
+    return 1;
+}
+
 /* The server answered a statement with CopyIn / CopyBoth: it now waits for
  * COPY data, and the client - reading for ReadyForQuery - waited for the
  * server: both sat until the read timeout. Hull does not stream COPY data,
@@ -1267,6 +1289,7 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
             if (handle_row_desc(&c, desc_cb, cb_ctx, conn) != 0) had_error = 1;
             break;
         case HL_PG_B_DATA_ROW:
+            if (pg_abandon_if_tripped(conn)) return -1;
             if (!stop_rows) {
                 int r = handle_data_row(&c, row_cb, cb_ctx, conn);
                 if (r < 0) had_error = 1;
@@ -1343,8 +1366,10 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         hl_pg_cursor_init(&c, &f);
 
         switch (f.type) {
-        case HL_PG_B_ROW_DESC:
         case HL_PG_B_DATA_ROW:
+            if (pg_abandon_if_tripped(conn)) return -1;
+            break;
+        case HL_PG_B_ROW_DESC:
         case HL_PG_B_CMD_COMPLETE:
         case HL_PG_B_EMPTY_QUERY:
         case HL_PG_B_PARAM_STATUS:

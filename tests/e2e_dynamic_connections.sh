@@ -58,6 +58,13 @@ run_case() {
     # module level), so a wait refuses while it holds a transaction (audit 6
     # L7), naming it.
     assert_line "$out" "wait_in_txn"    "refused" "$label: wait refused while a db.open handle is in a transaction"
+    # A db.async result is copied off the VM heap on the worker thread: one
+    # past the heap limit (64 MB default; ~80 MB here) fails the op instead
+    # of being materialized whole (audit 15).
+    assert_line "$out" "async_big"       "refused" "$label: db.async result over the heap limit fails"
+    assert_line "$out" "async_after_big" "1"       "$label: the connection works after an oversized result"
+    # wait_notify on a backend with no LISTEN/NOTIFY fails at once (audit 14).
+    assert_line "$out" "notify_sqlite"   "refused" "$label: wait_notify on SQLite raises"
 }
 
 # ── Lua ────────────────────────────────────────────────────────────────
@@ -89,6 +96,15 @@ app.main(function()
     f.exec("INSERT INTO t(x) VALUES (?)", { 7 })
     local r = f.async.query("SELECT x FROM t")
     print("async_x=" .. tostring(r[1] and r[1].x))
+    local ok_big, err_big = pcall(function()
+        return f.async.query("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 80) SELECT zeroblob(1048576) AS b FROM c")
+    end)
+    print("async_big=" .. ((not ok_big and tostring(err_big):find("result too large", 1, true))
+                           and "refused" or "allowed"))
+    print("async_after_big=" .. tostring(f.async.query("SELECT 1 AS n")[1].n))
+    local ok_n, err_n = pcall(function() return f.wait_notify("ch", 10) end)
+    print("notify_sqlite=" .. ((not ok_n and tostring(err_n):find("LISTEN/NOTIFY", 1, true))
+                               and "refused" or "allowed"))
     f.close()
     local ok_a = pcall(function() f.async.query("SELECT 1") end)
     print("async_after_close=" .. (ok_a and "ok" or "denied"))
@@ -134,6 +150,23 @@ app.main(async () => {
     f.exec("INSERT INTO t(x) VALUES (?)", [7]);
     const r = await f.async.query("SELECT x FROM t");
     console.log("async_x=" + (r[0] && r[0].x));
+    let big = "allowed";
+    try { await f.async.query("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 80) SELECT zeroblob(1048576) AS b FROM c"); }
+    catch (e) { if (String(e && e.message || e).includes("result too large")) big = "refused"; }
+    console.log("async_big=" + big);
+    console.log("async_after_big=" + (await f.async.query("SELECT 1 AS n"))[0].n);
+    let ns = "allowed";
+    try { await f.waitNotify("ch", 10); }
+    catch (e) { if (String(e && e.message || e).includes("LISTEN/NOTIFY")) ns = "refused"; }
+    console.log("notify_sqlite=" + ns);
+    // The SQL's toString closes the handle while the call converts its
+    // arguments: the op must not run on a closed handle (audit 15).
+    const g = dbMod.open("shard.db");
+    let cdc = "ran";
+    try {
+        await g.async.query({ toString() { g.close(); return "SELECT 1 AS n"; } });
+    } catch (e) { cdc = "denied"; }
+    console.log("close_during_convert=" + cdc);
     f.close();
     let aa = "ok"; try { await f.async.query("SELECT 1"); } catch (e) { aa = "denied"; }
     console.log("async_after_close=" + aa);
@@ -148,6 +181,7 @@ app.main(async () => {
 });
 JS
 run_case js "JS"
+assert_line "$out" "close_during_convert" "denied" "JS: async on a handle closed during argument conversion fails"
 
 echo ""
 echo "dynamic connections: $PASS passed, $FAIL failed"

@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 
 /* One extra slot beyond the manifest cap for the seeded "default". */
 #define HL_DB_REGISTRY_MAX (HL_MANIFEST_MAX_DATABASES + 1)
@@ -254,8 +255,10 @@ int hl_db_registry_default_is_network(const HlDbRegistry *reg)
     const char *dsn = lookup_dsn((HlDbRegistry *)(uintptr_t)reg, "default", &err);
     if (!dsn) return 0;
     if (dsn[0] == '$') return 1;
-    return strncmp(dsn, "postgres", 8) == 0 || strncmp(dsn, "mysql", 5) == 0
-        || strncmp(dsn, "mariadb", 7) == 0;
+    /* Without case (audit 14): the backend selector reads the scheme that
+     * way, so "PostgreSQL://..." is a network database too. */
+    return strncasecmp(dsn, "postgres", 8) == 0 || strncasecmp(dsn, "mysql", 5) == 0
+        || strncasecmp(dsn, "mariadb", 7) == 0;
 }
 
 int hl_db_registry_manifest_wired(const HlDbRegistry *reg)

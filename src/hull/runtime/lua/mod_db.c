@@ -849,7 +849,8 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     /* Require a live bound connection: a closed db.open() handle resolves to
      * NULL here, so async-after-close fails closed instead of silently
      * targeting the default database. */
-    if (!db_call_handle(L))
+    HlDbHandle *bound = db_call_handle(L);
+    if (!bound)
         return luaL_error(L, "database not available");
 
     /* Input differs by kind: WAIT_NOTIFY takes (channel, timeout_ms); the
@@ -860,8 +861,17 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     int nparams = 0;
 
     if (kind == HL_WORK_DB_WAIT_NOTIFY) {
+        /* A backend with no LISTEN/NOTIFY fails here (audit 14): the worker
+         * opened a connection only to have the wait return at once. */
+        if (!bound->backend || !bound->backend->dialect.supports_notify ||
+            !bound->backend->wait_notify)
+            return luaL_error(L, "wait_notify: this database has no "
+                              "LISTEN/NOTIFY (check conn.dialect.supports_notify)");
         channel = luaL_checkstring(L, 1);
-        timeout_ms = (int)luaL_optinteger(L, 2, 1000);
+        /* 0..HL_WORKER_DB_NOTIFY_MAX_MS (audit 14): the wait holds a pool
+         * thread, and an unclamped value held one for ~24 days. */
+        timeout_ms = hl_worker_db_notify_timeout(
+            (double)luaL_optinteger(L, 2, 1000));
     } else {
         sql = luaL_checkstring(L, 1);
         if (!lua_is_stdlib_caller(L, kind == HL_WORK_DB_QUERY ? "query" : "exec") &&
@@ -920,6 +930,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     {
         const char *dsn = db_call_dsn(L);
         op->max_instructions = lua->max_instructions;   /* the op's own */
+        op->max_result_bytes = lua->mem_limit;
         op->no_cache = luaL_testudata(L, lua_upvalueindex(1),
                                       HL_LUA_DB_OWNED_MT) != NULL;
         if (op->no_cache) op->dyn_id = hl_db_dynamic_id(db_resolve_handle(L));
@@ -998,8 +1009,10 @@ static int lua_db_async_exec(lua_State *L)
 /* conn.wait_notify(channel, timeout_ms) - yielding low-latency wakeup. Parks
  * the coroutine on the db.async worker pool while a worker blocks on the
  * backend's LISTEN/NOTIFY primitive; returns true (notified) or false
- * (timeout / unsupported backend). Latency only: false is indistinguishable
- * from a plain sleep, so callers gate on conn.dialect.supports_notify. */
+ * (timeout, or a dropped connection). Latency only: false is
+ * indistinguishable from a plain sleep. Raises on a backend without
+ * LISTEN/NOTIFY, so callers gate on conn.dialect.supports_notify. The
+ * timeout is clamped to 0..HL_WORKER_DB_NOTIFY_MAX_MS. */
 static int lua_db_wait_notify(lua_State *L)
 {
     return lua_db_async_common(L, HL_WORK_DB_WAIT_NOTIFY);

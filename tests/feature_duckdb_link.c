@@ -17,8 +17,20 @@
  */
 
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_budget.h"
 #include "hull/cap/db_duckdb.h"
 #include <stdio.h>
+
+/* The archive's one reference into the base: duck_execute charges each DuckDB
+ * task to the run's budget (cap/db_common.c, audit 15). A composed app gets
+ * the real hl_db_budget_charge from the platform lib (tests/
+ * e2e_feature_duckdb.sh exercises it); this smoke links the archive alone, so
+ * it stands in with "no budget bound" - never an interrupt. */
+int hl_db_budget_charge(int64_t units)
+{
+    (void)units;
+    return 0;
+}
 
 int main(void)
 {

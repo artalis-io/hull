@@ -22,6 +22,7 @@
 #ifdef HL_ENABLE_DUCKDB
 
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_budget.h"     /* hl_db_budget_charge */
 #include "hull/cap/db_duckdb.h"
 #include "hull/cap/db_sql_kw.h"
 #include "hull/cap/types.h"
@@ -38,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>       /* nanosleep */
 
 /* VARCHAR/BLOB inline threshold: a duckdb_string_t of length <= 12 stores its
  * bytes inline; longer strings live behind value.pointer.ptr. See duckdb.h. */
@@ -396,6 +398,64 @@ static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
     }
 }
 
+/* Units charged to the calling run's budget per DuckDB task this thread runs
+ * (a task is one morsel of a pipeline - up to ~120k rows). */
+#define HL_DB_DUCK_TASK_OPS 10000
+
+/* Run @p stmt to a materialized result in @p out, one task at a time, so the
+ * run that issued it is charged and can stop it (audit 15). A single
+ * duckdb_execute_prepared ran the whole statement inside one binding call:
+ * no budget saw it, no watchdog could stop it, and a long analytic query held
+ * the event loop for hours. Each task this thread runs charges
+ * HL_DB_DUCK_TASK_OPS to the budget bound on the thread (cap/db_budget.h, as
+ * SQLite's progress handler does); while DuckDB's own worker threads hold the
+ * tasks it charges nothing, but still asks (a 0-unit charge sees the run's
+ * wall-clock deadline) and naps briefly. Once the budget or the deadline
+ * trips, duckdb_interrupt stops the statement and the call fails. Returns
+ * DuckDBSuccess, or DuckDBError with s->errmsg set and @p out empty. */
+static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
+                                 duckdb_result *out)
+{
+    memset(out, 0, sizeof *out);
+    duckdb_pending_result pending = NULL;
+    if (duckdb_pending_prepared(stmt, &pending) != DuckDBSuccess) {
+        duck_set_err(s, pending ? duckdb_pending_error(pending) : NULL);
+        duckdb_destroy_pending(&pending);
+        return DuckDBError;
+    }
+    int tripped = 0;
+    duckdb_pending_state st;
+    for (;;) {
+        st = duckdb_pending_execute_task(pending);
+        if (st == DUCKDB_PENDING_RESULT_READY || st == DUCKDB_PENDING_ERROR)
+            break;
+        int idle = (st == DUCKDB_PENDING_NO_TASKS_AVAILABLE);
+        if (!tripped &&
+            hl_db_budget_charge(idle ? 0 : HL_DB_DUCK_TASK_OPS) != 0) {
+            tripped = 1;
+            duckdb_interrupt(s->con);   /* the next task fails */
+        }
+        if (idle) {
+            struct timespec nap = { 0, 100000 };   /* 0.1 ms */
+            (void)nanosleep(&nap, NULL);
+        }
+    }
+    if (tripped || st == DUCKDB_PENDING_ERROR) {
+        duck_set_err(s, tripped ? "interrupted (instruction limit exceeded)"
+                                : duckdb_pending_error(pending));
+        duckdb_destroy_pending(&pending);
+        return DuckDBError;
+    }
+    duckdb_state rc = duckdb_execute_pending(pending, out);
+    if (rc != DuckDBSuccess) {
+        duck_set_err(s, duckdb_result_error(out));
+        duckdb_destroy_result(out);
+        memset(out, 0, sizeof *out);
+    }
+    duckdb_destroy_pending(&pending);
+    return rc;
+}
+
 static int duck_query(HlDbHandle *h, const char *sql,
                       const HlValue *params, int nparams,
                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
@@ -419,9 +479,7 @@ static int duck_query(HlDbHandle *h, const char *sql,
     int is_txn_stmt =
         duckdb_prepared_statement_type(stmt) == DUCKDB_STATEMENT_TYPE_TRANSACTION;
     duckdb_result result;
-    if (duckdb_execute_prepared(stmt, &result) != DuckDBSuccess) {
-        duck_set_err(s, duckdb_result_error(&result));
-        duckdb_destroy_result(&result);
+    if (duck_execute(s, stmt, &result) != DuckDBSuccess) {
         duckdb_destroy_prepare(&stmt);
         if (is_txn_stmt) duck_track_txn(s, sql, 0);
         return -1;

@@ -165,6 +165,30 @@ static void kv_unwatch(HlKvHandle *h) {
     HlRespValue r; (void)run(h, &w, &r);
 }
 
+/* 1 when @p r is the simple status @p st ("QUEUED"). */
+static int is_status(const HlRespValue *r, const char *st) {
+    size_t n = strlen(st);
+    return r->type == HL_RESP_STR && r->str.len == n && memcmp(r->str.p, st, n) == 0;
+}
+
+/* MULTI answered something but OK, or a command inside it something but
+ * QUEUED (audit 14): the transaction is not the one built. Unchecked, a MULTI
+ * the server refused ran every following command at once - unqueued, so
+ * neither atomic nor guarded by the WATCH (a CAS write landing over a value
+ * that had changed). Abandon it on a live connection: DISCARD (ends a MULTI
+ * that did open; an error when none did) and UNWATCH. The reply's text is
+ * copied first - it borrows into the buffer those commands reuse. */
+static void txn_abandon(HlKvHandle *h, const HlRespValue *r, const char *what) {
+    if (!is_srv_err(h, r)) seterr(h, what);
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "DISCARD");
+    HlRespValue d;
+    char keep[KV_VALKEY_ERRMSG];
+    memcpy(keep, h->errmsg, sizeof keep);
+    if (run(h, &w, &d) == 0) kv_unwatch(h);
+    memcpy(h->errmsg, keep, sizeof keep);   /* report the first failure */
+}
+
 static int incr_simple(HlKvHandle *h, const uint8_t *key, size_t klen,
                        int64_t by, int64_t *newval) {
     HlRespWriter w; hl_resp_writer_init(&w);
@@ -203,14 +227,17 @@ static int vk_incr(HlKvHandle *h, const uint8_t *key, size_t klen,
 
         hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "MULTI");
         if (run(h, &w, &r) != 0) return -1;
+        if (!hl_resp_is_ok(&r)) { txn_abandon(h, &r, "MULTI: unexpected reply"); return -1; }
 
         hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 3);
         hl_resp_cmd_arg_cstr(&w, "INCRBY"); hl_resp_cmd_arg(&w, key, klen); hl_resp_cmd_arg_i64(&w, by);
-        if (run(h, &w, &r) != 0) return -1;                 /* +QUEUED */
+        if (run(h, &w, &r) != 0) return -1;
+        if (!is_status(&r, "QUEUED")) { txn_abandon(h, &r, "INCRBY: not queued"); return -1; }
         if (!exists) {
             hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 3);
             hl_resp_cmd_arg_cstr(&w, "PEXPIRE"); hl_resp_cmd_arg(&w, key, klen); hl_resp_cmd_arg_i64(&w, ttl_ms);
-            if (run(h, &w, &r) != 0) return -1;             /* +QUEUED */
+            if (run(h, &w, &r) != 0) return -1;
+            if (!is_status(&r, "QUEUED")) { txn_abandon(h, &r, "PEXPIRE: not queued"); return -1; }
         }
         hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "EXEC");
         if (run(h, &w, &r) != 0) return -1;
@@ -275,12 +302,14 @@ static HlKvCasResult cas_attempt(HlKvHandle *h, const uint8_t *key, size_t klen,
     /* MULTI { SET } EXEC */
     hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "MULTI");
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
+    if (!hl_resp_is_ok(&r)) { txn_abandon(h, &r, "MULTI: unexpected reply"); return HL_KV_CAS_ERROR; }
     hl_resp_writer_init(&w);
     hl_resp_cmd_begin(&w, ttl_ms > 0 ? 5 : ttl_ms == HL_KV_TTL_KEEP ? 4 : 3);
     hl_resp_cmd_arg_cstr(&w, "SET"); hl_resp_cmd_arg(&w, key, klen); hl_resp_cmd_arg(&w, newv, nlen);
     if (ttl_ms > 0) { hl_resp_cmd_arg_cstr(&w, "PX"); hl_resp_cmd_arg_i64(&w, ttl_ms); }
     else if (ttl_ms == HL_KV_TTL_KEEP) hl_resp_cmd_arg_cstr(&w, "KEEPTTL");  /* Valkey / Redis 6+ */
-    if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;   /* +QUEUED (or -ERR queued -> EXECABORT) */
+    if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
+    if (!is_status(&r, "QUEUED")) { txn_abandon(h, &r, "SET: not queued"); return HL_KV_CAS_ERROR; }
     hl_resp_writer_init(&w); hl_resp_cmd_begin(&w, 1); hl_resp_cmd_arg_cstr(&w, "EXEC");
     if (run(h, &w, &r) != 0) return HL_KV_CAS_ERROR;
     if (r.type == HL_RESP_ARRAY) return HL_KV_CAS_OK;        /* committed */
