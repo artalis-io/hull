@@ -1352,6 +1352,13 @@ e2e-http-timeout: $(BUILDDIR)/hull
 e2e-timers: $(BUILDDIR)/hull
 	sh tests/e2e_timers.sh
 
+# Shutdown with work in flight (audit 14 G1 / audit 15): SIGTERM over HTTP and
+# HTTPS with a parked handler, a detached fetch and an open WebSocket, and an
+# app.main that leaves unawaited work - each must exit 0.
+.PHONY: e2e-teardown
+e2e-teardown: $(BUILDDIR)/hull
+	sh tests/e2e_teardown.sh
+
 e2e-js-runs: $(BUILDDIR)/hull
 	sh tests/e2e_js_runs.sh
 

@@ -588,13 +588,13 @@ static void db_done_fn(void *ud)
 
 static void db_cancel_fn(void *ud)
 {
-    /* Called by kl_thread_pool_free for items that never ran.
-     * The async cancel handler already freed the cont (if it ran). */
+    /* Called by pool_free for items that never ran. The continuation is
+     * released (unless the async cancel handler already did) and an attached
+     * op is taken off the server's list before the ctx goes (audit 14 G1). */
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
-    HlAsyncCtx *ctx = op->async_ctx;
+    hl_async_ctx_drop_unrun(op->async_ctx);
     hl_worker_db_op_free(op);
     free(op);
-    if (ctx) hl_async_ctx_free(ctx);
 }
 
 /* ── Submit / free ─────────────────────────────────────────────────── */

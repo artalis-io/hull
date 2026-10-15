@@ -531,4 +531,43 @@ UTEST(async_backend_poll, pool_free_cancels_pending)
     fixture_free(&f);
 }
 
+/* ── Pool: a finished item's done_fn still runs at pool_free ─────────
+ *
+ * Audit 14 G1: work that had completed but whose done_fn the loop had not
+ * run yet sat in the completion queue, and poll_free dropped it without a
+ * done_fn - an unawaited db.async in app.main leaked its continuation and
+ * QuickJS aborted in JS_FreeRuntime. pool_free now delivers it, as Keel's
+ * pool does. */
+static atomic_int finished_work;
+static int late_done_count;
+static void finishing_work(void *u) { (void)u; atomic_fetch_add(&finished_work, 1); }
+static void late_done(void *u) { (void)u; late_done_count++; }
+
+UTEST(async_backend_poll, pool_free_delivers_finished_done)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+
+    HlAsyncBackendPool *pool = NULL;
+    ASSERT_EQ(f.be->pool_create(&pool, f.ctx, 1, 4), 0);
+
+    atomic_store(&finished_work, 0);
+    late_done_count = 0;
+    ASSERT_EQ(f.be->pool_submit(pool, finishing_work, late_done, NULL, NULL), 0);
+
+    /* The work runs; the loop is never ticked, so its done_fn stays queued. */
+    uint64_t start = f.be->monotonic_ms();
+    while (atomic_load(&finished_work) == 0 && f.be->monotonic_ms() - start < 2000) {}
+    ASSERT_EQ(atomic_load(&finished_work), 1);
+    EXPECT_EQ(late_done_count, 0);
+
+    f.be->pool_free(pool);
+    EXPECT_EQ(late_done_count, 1);
+
+    /* Nothing of the pool's is left for a later tick. */
+    EXPECT_EQ(f.be->tick(f.ctx, 0), 0);
+    EXPECT_EQ(late_done_count, 1);
+    fixture_free(&f);
+}
+
 UTEST_MAIN();

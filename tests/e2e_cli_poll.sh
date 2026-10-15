@@ -40,4 +40,10 @@ for mode in resolve reject; do
     fi
     echo "PASS: JS $mode with a pending timer tears down cleanly"
 done
-echo '6/6 poll CLI end-to-end tests passed'
+for ext in lua js; do
+    rc=$(hull_run "$out" "$HULL_BIN" "tests/fixtures/cli_poll/unawaited.$ext")
+    [ "$rc" = 0 ] || fail "$ext unawaited work: exit $rc, expected 0 (134 = QuickJS abort)"
+    grep -q '^poll-cli: left work behind' "$out" || fail "$ext main did not finish"
+    echo "PASS: $ext main returning with unawaited dispatch / db.async / sleep tears down cleanly"
+done
+echo '8/8 poll CLI end-to-end tests passed'

@@ -390,11 +390,12 @@ static void lua_dispatch_done_fn(void *ud)
 
 static void lua_dispatch_cancel_fn(void *ud)
 {
+    /* Never ran: release the continuation (an attached op through the
+     * server first) before the ctx goes (audit 14 G1). */
     HlLuaWorkerDispatchOp *op = (HlLuaWorkerDispatchOp *)ud;
-    HlAsyncCtx *ctx = op->async_ctx;
+    hl_async_ctx_drop_unrun(op->async_ctx);
     hl_lua_worker_dispatch_op_free(op);
     free(op);
-    if (ctx) hl_async_ctx_free(ctx);
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */

@@ -523,6 +523,9 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "http.fetch: failed to start request");
     }
     async_ctx->cont = cont;
+    /* No request holds a detached fetch: teardown cancels it (audit 14). */
+    if (async_ctx->detached)
+        hl_async_ctx_track(async_ctx, &js->base.async_live);
 
     return promise;
 }

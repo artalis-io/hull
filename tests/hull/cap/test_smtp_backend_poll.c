@@ -3,16 +3,19 @@
  *
  * Unlike test_smtp_async (which models the pool with a fake), this drives the
  * ACTUAL poll backend (src/hull/async/poll.c: real worker threads + the real
- * pool_free) through the submit layer, so the §15 "poll drops done_fn" divergence
- * and the exactly-once retained-ref release are exercised end to end, not modelled.
+ * pool_free) through the submit layer, so pool_free's done_fn delivery and the
+ * exactly-once retained-ref release are exercised end to end, not modelled.
  * The keel backend's counterpart is covered live by e2e_smtp.sh (the default build
  * links the keel async backend).
  *
  * Scenario: submit an op, let a real worker thread run the (injected) transport to
  * terminal, then tear the pool down WITHOUT ticking the loop - poll_pool_free joins
- * the worker (terminal already published, worker ref dropped) but drops the
- * enqueued done_fn. The shutdown sweep (ctx_release) then drops the one retained
- * runtime ref; ASan/TSan prove no UAF / double-free / leak.
+ * the worker (terminal already published, worker ref dropped) and delivers the
+ * queued done_fn, as Keel's pool does (audit 14 G1: it used to drop it). done_fn
+ * is resume-only and owns no ref; the real resume hook (smtp_async_resume)
+ * suppresses an op shutdown pass 1 marked non-resumable. The shutdown sweep
+ * (ctx_release) then drops the one retained runtime ref; ASan/TSan prove no UAF /
+ * double-free / leak.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -40,7 +43,7 @@ static int poll_submit(void *pool, HlAsyncWorkFn work, HlAsyncWorkFn done,
     return hl_async_backend_poll.pool_submit(g_pool, work, done, cancel, user);
 }
 
-static int  g_done_calls;   /* done_fn (resume) invocations - must stay 0 (dropped) */
+static int  g_done_calls;   /* done_fn (resume hook) invocations */
 static void resume_cb(void *u) { (void)u; g_done_calls++; }
 static int  suspend_ok = 1;
 static int  suspend_cb(void *su, HlSmtpSubmitCtx *c) { (void)su; (void)c; return suspend_ok ? 0 : -1; }
@@ -63,7 +66,7 @@ static HlSmtpOp *make_inputs(void)
     return hl_smtp_op_create(&m, 1000);
 }
 
-UTEST(smtp_backend_poll, real_worker_terminal_then_done_dropped_release_once)
+UTEST(smtp_backend_poll, real_worker_terminal_then_done_delivered_release_once)
 {
     HlAsyncBackendCtx *ctx = NULL;
     ASSERT_EQ(hl_async_backend_poll.init(&ctx, NULL), 0);
@@ -111,15 +114,15 @@ UTEST(smtp_backend_poll, real_worker_terminal_then_done_dropped_release_once)
      * request_cancel_all would - so the dropped/held done never resumes. */
     hl_smtp_submit_ctx_cancel(out.ctx);
 
-    /* pool_free: joins the worker (terminal already published), and DROPS the
-     * enqueued done_fn - we never ticked the loop, and poll_pool_free drains only
-     * never-ran items via cancel_fn, not the completion queue. */
+    /* pool_free: joins the worker (terminal already published), and DELIVERS the
+     * queued done_fn once, though the loop was never ticked - as Keel's pool does.
+     * The resume hook it calls is where a non-resumable op is suppressed. */
     hl_async_backend_poll.pool_free(g_pool);
-    ASSERT_EQ(g_done_calls, 0);                         /* done_fn dropped by poll shutdown */
+    ASSERT_EQ(g_done_calls, 1);                         /* delivered by pool_free */
 
     /* Shutdown pass 2: release the one retained runtime ref exactly once. Under
      * ASan/TSan this is where a double-free / UAF would fire if the ownership were
-     * wrong (worker ref already gone, done dropped). */
+     * wrong (worker ref already gone, done owning nothing). */
     hl_smtp_submit_ctx_release(out.ctx);
 
     hl_async_backend_poll.free(ctx);
@@ -127,7 +130,7 @@ UTEST(smtp_backend_poll, real_worker_terminal_then_done_dropped_release_once)
 
 /* Companion: when the loop IS ticked, the real poll backend DISPATCHES done_fn
  * (the non-shutdown path) - the resume fires exactly once, then the runtime
- * releases the ref. Confirms the drop above is a shutdown property, not a bug. */
+ * releases the ref, and pool_free has nothing left to deliver. */
 UTEST(smtp_backend_poll, real_worker_done_dispatched_when_ticked)
 {
     HlAsyncBackendCtx *ctx = NULL;

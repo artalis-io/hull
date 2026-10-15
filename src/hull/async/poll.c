@@ -107,6 +107,7 @@ struct PollCompletion {
     HlAsyncWorkFn   fn;
     void          *user;
     PollCompletion *next;
+    HlAsyncBackendPool *pool;   /* a pool item's done_fn; NULL for an op */
 };
 
 /* ── Backend context ────────────────────────────────────────────────── */
@@ -220,7 +221,11 @@ static void poll_free(HlAsyncBackendCtx *ctx)
 {
     if (!ctx) return;
     /* Drop pending state - graceful shutdown is the caller's job
-     * (call stop() + drain via tick before free). */
+     * (call stop() + drain via tick before free). No pool's done_fn can be
+     * queued here: pool_free, which must run first, delivered them. What
+     * remains is an op's deferred resume, whose owner retracts it
+     * (op_cancel) when it goes; running it now would reach a freed
+     * runtime. */
     for (size_t i = 0; i < ctx->timer_count; i++)
         free(ctx->timers[i]);
     free(ctx->timers);
@@ -809,6 +814,36 @@ static void poll_pool_free(HlAsyncBackendPool *p)
     for (int i = 0; i < p->num_workers; i++)
         pthread_join(p->workers[i], NULL);
 
+    /* Work that finished but whose done_fn the loop has not run yet: deliver
+     * it now, as Keel's pool does, while the op's owner is still alive. Left
+     * queued, poll_free dropped it without a done_fn - the op's continuation
+     * leaked and QuickJS then asserted in JS_FreeRuntime (audit 14 G1). */
+    PollCompletion *mine = NULL, **mine_tail = &mine;
+    pthread_mutex_lock(&p->ctx->lock);
+    PollCompletion **link = &p->ctx->completions, *kept = NULL;
+    while (*link) {
+        PollCompletion *c = *link;
+        if (c->pool == p) {
+            *link = c->next;
+            c->next = NULL;
+            *mine_tail = c;
+            mine_tail = &c->next;
+        } else {
+            kept = c;
+            link = &c->next;
+        }
+    }
+    p->ctx->completion_tail = kept;
+    pthread_mutex_unlock(&p->ctx->lock);
+    while (mine) {
+        PollCompletion *c = mine;
+        mine = c->next;
+        HlAsyncWorkFn fn = c->fn;
+        void *user = c->user;
+        free(c);
+        if (fn) fn(user);   /* a submit it makes is refused: shutdown is set */
+    }
+
     /* Fire cancel_fn for items that never ran. Done inline on the
      * calling thread - Keel's pool does the same. */
     /* Workers stop taking queued work once shutdown is set. After joining,
@@ -847,6 +882,7 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
         }
         completion->fn = done_fn;
         completion->user = user;
+        completion->pool = p;
     }
     p->queue[p->queue_tail] = (PollWorkItem){
         .work_fn = work_fn, .completion = completion, .cancel_fn = cancel_fn,

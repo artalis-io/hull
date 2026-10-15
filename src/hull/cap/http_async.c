@@ -84,6 +84,15 @@ static void disarm_detached_deadline(HlAsyncCtx *ctx)
     ctx->detached_timer = 0;
 }
 
+/* A detached fetch still in flight when its runtime shuts down
+ * (HlAsyncCtx.on_shutdown): drop its deadline timer while the loop is alive.
+ * hl_async_ctx_cancel then cancels the request itself (free_driver). */
+static void http_detached_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    (void)loop;
+    disarm_detached_deadline(ctx);
+}
+
 /* ── KlHttpRedirectClient on_done callback ───────────────────────────── */
 
 static void on_redirect_done(KlHttpRedirectClient *rc, void *user_data)
@@ -324,6 +333,9 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
             return NULL;
         }
         ctx->detached_timer = tid + 1;
+        /* The caller links it into its runtime's teardown list once the
+         * continuation is set (hl_async_ctx_track). */
+        ctx->on_shutdown = http_detached_shutdown;
     }
 
     return ctx;

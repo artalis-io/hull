@@ -304,6 +304,7 @@ static void tui_poll_complete(TuiPollOp *op)
 static void tui_poll_tick(void *user)
 {
     TuiPollOp *op = (TuiPollOp *)user;
+    op->timer_id = 0;                   /* this one has fired */
     const HlAsyncBackend *be = hl_async_backend();
     uint64_t now = be->monotonic_ms();
 
@@ -362,6 +363,15 @@ static int tui_poll_schedule(TuiPollOp *op)
     op->timer_id = be->timer_add(op->lua->base.async_ctx, slice,
                                   tui_poll_tick, op);
     return op->timer_id ? 0 : -1;
+}
+
+/* A poll still pending at teardown (HlAsyncCtx.on_shutdown, audit 14). */
+static void tui_poll_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    TuiPollOp *op = (TuiPollOp *)ctx->driver;
+    if (op && op->timer_id && loop)
+        hl_async_backend()->timer_cancel(loop, op->timer_id);
+    if (op) op->timer_id = 0;
 }
 
 static int lua_tui_poll(lua_State *L)
@@ -432,6 +442,8 @@ static int lua_tui_poll(lua_State *L)
         free(op);
         return luaL_error(L, "tui.poll: could not arm a timer");
     }
+    async->on_shutdown = tui_poll_shutdown;
+    hl_async_ctx_track(async, &lua->base.async_live);
     return lua_yieldk(L, 0, 0, NULL);
 }
 

@@ -41,4 +41,10 @@ HlNetBackendCtx *hl_net_backend_keel_wrap(KlHttpServer *server);
  */
 void hl_net_backend_keel_unwrap(HlNetBackendCtx *ctx);
 
+/**
+ * The wrapped server is about to be freed while the wrapper is still lent
+ * out: from here on every call on @p ctx is a no-op (suspend fails).
+ */
+void hl_net_backend_keel_orphan(HlNetBackendCtx *ctx);
+
 #endif /* HL_NET_KEEL_H */

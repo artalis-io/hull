@@ -1159,6 +1159,36 @@ registers.
    close DB → exit.
 ```
 
+**Teardown order (audit 14 G1 / audit 15).** Everything that calls back into
+the runtime is stopped while the runtime is alive, and the runtime goes last:
+(1) the thread pool (`rt->thread_pool` cleared first): a finished op's done_fn
+runs, a queued one's cancel_fn releases its continuation - through
+`hl_async_ctx_drop_unrun`, which takes an attached op off the server's list
+before its ctx is freed; the poll backend's `pool_free` delivers its finished
+items' done_fns too, as Keel's does (they used to be dropped by `poll_free`);
+(2) `rt->vt->stop_async`: sets `rt->shutting_down` and stops every detached op
+and WebSocket client on the runtime's teardown list (`HlRuntime.async_live`,
+`HlAsyncTeardown` in `shared/async.h`: http.fetch / Lua hull.sleep / tui.poll /
+Lua task + ssh parks from a timer, a WebSocket callback or app.main, each with
+an `on_shutdown` that stops its driver, plus JS's `sleep_timers`); (3) serve.c
+only: the client pool, then `kl_http_server_free` (`hl_serve_free_server`),
+which cancels the ops still suspended on connections and closes every
+connection - a WebSocket that is still open runs NO on_close then (the loop is
+gone; the conn is just invalidated) - after the async / net wraps are orphaned
+(`hl_*_backend_keel_orphan`: later calls are no-ops); (4) the app context
+(runtime, DB, VFS); (5) the client TLS context (a stream the runtime held does
+its close_notify through it); (6) the backend loop (serve_cli). A new detached
+async op must `hl_async_ctx_track` itself (with an `on_shutdown` if it holds a
+timer or a request); a new loop-bound object, an `HlAsyncTeardown` entry.
+**The server TLS context belongs to Keel once `kl_http_server_init` succeeds**
+(it copies the `KlTlsConfig`, `ctx_destroy` included, and destroys it in
+`kl_http_server_free` after every connection's close_notify); Hull destroys it
+only when init fails. Destroying it in Hull too was a double free on every
+HTTPS shutdown (audit 15). Covered by `tests/e2e_teardown.sh` (`make
+e2e-teardown`: SIGTERM over HTTP and HTTPS with a parked handler, a detached
+fetch and a held WebSocket, `--drain-timeout 100` and `0`; app.main leaving
+unawaited work) and the `unawaited` legs of `tests/e2e_cli_poll.sh`.
+
 Three useful patterns this covers:
 
 | App registers | Behavior |

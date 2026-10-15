@@ -1047,6 +1047,12 @@ static int hl_serve_init_server(HlServerState *s)
     if (kl_http_server_init(&s->server, &config) != 0) {
         log_error("[hull:c] server init failed: %s",
                   kl_strerror(s->server.last_error));
+        /* Keel never took it: the only place Hull destroys it. Once init
+         * succeeds the server owns the context (it copied the KlTlsConfig,
+         * ctx_destroy included) and kl_http_server_free destroys it - after
+         * the close_notify of every TLS connection still open. Hull
+         * destroying it too was a double free on every HTTPS shutdown
+         * (audit 15). */
         if (s->server_tls_ctx) {
             hl_tls_ctx_destroy(s->server_tls_ctx);
             s->server_tls_ctx = NULL;
@@ -1915,10 +1921,8 @@ static void hl_serve_undo_caps(HlServerState *s)
      * `sealed` flag short-circuits the per-string free walk). */
     hl_manifest_free(&s->manifest);
     s->manifest_extracted = 0;
-    if (s->client_tls_ctx) {
-        hl_tls_ctx_destroy(s->client_tls_ctx);
-        s->client_tls_ctx = NULL;
-    }
+    /* client_tls_ctx is left to hl_serve_cleanup, which frees it after the
+     * runtime that may still hold a stream on it. */
     /* The sealed manifest arena is NOT unmapped here: hl_serve_cleanup,
      * which always runs after this, still frees the pool and the server
      * while rt->module_set and the cap configs point into it. It is
@@ -2069,6 +2073,36 @@ static void hl_serve_run(HlServerState *s)
     log_info("[hull:c] server stopped");
 }
 
+/* Teardown step one (audit 14 G1 / audit 15): stop what the runtime holds on
+ * the loop outside a request - detached ops, WebSocket clients - while the
+ * runtime, the loop and the server are all alive. Idempotent. */
+static void hl_serve_stop_runtime_async(HlServerState *s)
+{
+    HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
+    if (rt && rt->vt && rt->vt->stop_async)
+        rt->vt->stop_async(rt);
+}
+
+/* Free the Keel server BEFORE the runtime (audit 14 G1 / audit 15). Its
+ * teardown cancels every op still suspended on a connection (a handler
+ * parked on hull.sleep or a fetch past the drain deadline) and closes every
+ * connection still open, a WebSocket's on_close included: all of it calls
+ * into the runtime, which hl_app_context_free used to have freed already.
+ * It also destroys the server TLS context it owns, after the connections'
+ * close_notify. The async / net wraps lent to the runtime are orphaned
+ * first, so a finalizer that later deregisters a watcher or cancels a timer
+ * reaches no freed loop. */
+static void hl_serve_free_server(HlServerState *s)
+{
+    if (!s->server_init) return;
+    hl_serve_stop_runtime_async(s);
+    if (s->async_ctx) hl_async_backend_keel_orphan(s->async_ctx);
+    if (s->net_ctx) hl_net_backend_keel_orphan(s->net_ctx);
+    kl_http_server_free(&s->server);
+    s->server_init = 0;
+    s->server_tls_ctx = NULL;   /* the server destroyed it */
+}
+
 /* Phase 5: tear down all resources after the event loop returns. */
 static void hl_serve_teardown_after_serve(HlServerState *s)
 {
@@ -2083,8 +2117,13 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
 #endif
 
     /* Free thread pool BEFORE server - join workers, drain queues while
-     * server infrastructure (connections, event loop) is still valid. */
+     * server infrastructure (connections, event loop) is still valid. A
+     * finished op's done_fn runs here (its continuation resumes), a queued
+     * one's cancel_fn releases it; the runtime stops seeing the pool first,
+     * so code resumed now cannot submit to a pool being freed. */
     if (s->thread_pool) {
+        HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
+        if (rt) rt->thread_pool = NULL;
         hl_async_backend()->pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
@@ -2098,13 +2137,21 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         hl_smtp_server_sweep(&s->smtp_async_storage);
 #endif
 
+    /* Detached fetches go before the client pool their connections came
+     * from. */
+    hl_serve_stop_runtime_async(s);
+
     /* Free client connection pool (closes idle connections) */
     if (s->cpool_ok == 0) {
         kl_http_client_pool_free(&s->client_pool);
         s->cpool_ok = -1; /* mark freed */
     }
 
-    /* Free compression context (shared by compress + decompress) */
+    /* The server, with the runtime still alive (see hl_serve_free_server). */
+    hl_serve_free_server(s);
+
+    /* Free compression context (shared by compress + decompress) - after
+     * the server, whose connections may still hold compressors. */
     if (s->comp_ctx) {
         kl_compress_miniz_ctx_destroy(s->comp_ctx);
         s->comp_ctx = NULL;
@@ -2179,13 +2226,12 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         gpu_ctx = NULL;
         gpu_ctx_ok = 0;
     }
+    /* After the runtime: an SSH / TLS stream it held does its close_notify
+     * through this context. The server TLS context is not Hull's to free:
+     * hl_serve_free_server's kl_http_server_free destroyed it. */
     if (s->client_tls_ctx) {
         hl_tls_ctx_destroy(s->client_tls_ctx);
         s->client_tls_ctx = NULL;
-    }
-    if (s->server_tls_ctx) {
-        hl_tls_ctx_destroy(s->server_tls_ctx);
-        s->server_tls_ctx = NULL;
     }
 
     /* The sealed manifest arena is unmapped at the end of
@@ -2345,6 +2391,8 @@ static void hl_serve_cleanup(HlServerState *s)
 
     /* Free thread pool BEFORE server (via the backend vtable) */
     if (s->thread_pool) {
+        HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
+        if (rt) rt->thread_pool = NULL;
         hl_async_backend()->pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
@@ -2354,24 +2402,24 @@ static void hl_serve_cleanup(HlServerState *s)
         hl_smtp_server_sweep(&s->smtp_async_storage);
 #endif
 
+    hl_serve_stop_runtime_async(s);
+
     /* Free client connection pool */
-    if (s->cpool_ok == 0)
+    if (s->cpool_ok == 0) {
         kl_http_client_pool_free(&s->client_pool);
+        s->cpool_ok = -1;
+    }
+
+    /* The server before the runtime; it destroys the server TLS context it
+     * owns (hl_serve_free_server). A context with no server - init failed -
+     * was destroyed by hl_serve_init_server. */
+    hl_serve_free_server(s);
 
     /* Free compression context */
-    if (s->comp_ctx)
+    if (s->comp_ctx) {
         kl_compress_miniz_ctx_destroy(s->comp_ctx);
-
-    /* Free client TLS context */
-    if (s->client_tls_ctx)
-        hl_tls_ctx_destroy(s->client_tls_ctx);
-
-    /* Free server TLS context (if server init failed after TLS ctx create) */
-    if (s->server_tls_ctx)
-        hl_tls_ctx_destroy(s->server_tls_ctx);
-
-    if (s->server_init)
-        kl_http_server_free(&s->server);
+        s->comp_ctx = NULL;
+    }
 
     /* Detach the borrowed async_ctx + net_ctx from the runtime before
      * app_context_free destroys the runtime - both wraps are owned by
@@ -2388,6 +2436,13 @@ static void hl_serve_cleanup(HlServerState *s)
     if (s->app) {
         hl_app_context_free(s->app);
         s->app = NULL;
+    }
+
+    /* Client TLS context after the runtime (a stream it held may still
+     * close_notify through it). */
+    if (s->client_tls_ctx) {
+        hl_tls_ctx_destroy(s->client_tls_ctx);
+        s->client_tls_ctx = NULL;
     }
 
     /* Unwrap the async-backend wrap (borrowed - does not destroy

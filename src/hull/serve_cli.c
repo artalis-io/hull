@@ -312,11 +312,12 @@ static int cli_fail(HlAppContext *ctx, HlRuntime *rt,
                     HlAsyncBackendPool *pool, HlManifest *manifest,
                     ShSealArena *cfg_arena, ShSealArena *seal_arena)
 {
-    if (rt) {
-        rt->async_ctx = NULL;
-        rt->thread_pool = NULL;
-    }
+    if (rt) rt->thread_pool = NULL;
     if (pool) be->pool_free(pool);
+    /* What the runtime still holds on the loop, released while both are
+     * alive (audit 14 G1). */
+    if (rt && rt->vt && rt->vt->stop_async) rt->vt->stop_async(rt);
+    if (rt) rt->async_ctx = NULL;
     if (manifest) hl_manifest_free(manifest);
     hl_app_context_free(ctx);
     be->free(async_ctx);
@@ -768,10 +769,21 @@ int hull_serve(int argc, char **argv)
     int rc = 1;
     int run = rt->vt->run_main(rt, NULL, app_argc, app_argv, env_allow, &rc);
 
+    /* main has returned; what it left running is retired while the runtime,
+     * its cap configs and the loop are all still in place (audit 14 G1).
+     * The pool first: a finished op's done_fn resumes its continuation, a
+     * queued one's cancel_fn releases it - the runtime stops seeing the pool
+     * before, so code resumed then cannot submit to it. Then the detached
+     * ops and WebSocket clients (stop_async). An unawaited worker.dispatch,
+     * db.async or compute.async used to leave its continuation behind, and
+     * QuickJS aborted in JS_FreeRuntime (exit 134). */
+    rt->thread_pool = NULL;
+    if (pool) be->pool_free(pool);
+    if (rt->vt->stop_async) rt->vt->stop_async(rt);
+
     /* Detach borrowed pointers before tearing down (mirrors serve.c). The
      * policy span is read-only since wiring; writable again for this. */
     hl_policy_unseal_runtime(rt);
-    rt->thread_pool = NULL;
     rt->async_ctx = NULL;
     rt->fs_cfg = NULL;
     rt->env_cfg = NULL;
@@ -779,14 +791,18 @@ int hull_serve(int argc, char **argv)
     rt->kv_policy  = NULL;
 #ifdef HL_ENABLE_HTTP_CLIENT
     rt->http_cfg   = NULL;
-    rt->client_tls = NULL;   /* before the ctx it points through goes */
-    if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
+    rt->client_tls = NULL;
 #endif
-    if (pool) be->pool_free(pool);
 
     free((void *)env_allow);
     hl_manifest_free(&manifest);
     hl_app_context_free(ctx);
+#ifdef HL_ENABLE_HTTP_CLIENT
+    /* After the runtime, as in serve.c: a TLS stream it held (an SSH tunnel
+     * collected with it) does its close_notify through this context, which
+     * the runtime used to outlive (audit 15). */
+    if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);
+#endif
     be->free(async_ctx);   /* last: the runtime's finalizers still use it */
 
     /* Destroyed LAST: the cap configs above borrow strings out of it, so

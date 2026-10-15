@@ -34,6 +34,7 @@
 #include "hull/shared/async_backend.h"
 #include "hull/shared/req_life.h"
 #include <stdatomic.h>
+#include <pthread.h>
 #include "hull/cap/env.h"
 #include "quickjs.h"
 
@@ -7247,6 +7248,49 @@ static void js_worker_close(const HlAsyncBackend *be, HlAsyncBackendCtx *actx,
         EXPECT_STREQ(out, "ok");                                 \
         js_worker_close(be, actx, pool);                         \
     }
+
+/* Audit 14 G1: a db.async and a worker.dispatch nobody awaited, still queued
+ * behind a busy worker when the pool is freed. Their cancel_fn freed the op
+ * and the ctx but never the continuation, so its resolving functions stayed
+ * referenced and JS_FreeRuntime aborted (exit 134). Now the cancel_fn
+ * releases it, and stop_async finds nothing left. */
+static void *release_dbsat_later(void *u)
+{
+    (void)u;
+    usleep(50000);   /* after pool_free has set shutdown */
+    atomic_store(&g_dbsat_release, 1);
+    return NULL;
+}
+
+UTEST(js_worker, unawaited_queued_ops_are_released_at_teardown)
+{
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+
+    atomic_store(&g_dbsat_release, 0);
+    atomic_store(&g_dbsat_running, 0);
+    ASSERT_EQ(be->pool_submit(pool, dbsat_block, dbsat_noop, dbsat_noop, NULL), 0);
+    while (atomic_load(&g_dbsat_running) < 1) usleep(500);   /* worker busy */
+
+    const char *src = "db.async.query('SELECT 1'); worker.dispatch(() => 1);";
+    JSValue rv = JS_Eval(js.ctx, src, strlen(src), "<unawaited>", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_FALSE(JS_IsException(rv));
+    JS_FreeValue(js.ctx, rv);
+    hl_js_run_jobs(&js);
+
+    pthread_t releaser;
+    ASSERT_EQ(pthread_create(&releaser, NULL, release_dbsat_later, NULL), 0);
+    js.base.thread_pool = NULL;
+    be->pool_free(pool);             /* both ops still queued: cancel_fn */
+    pthread_join(releaser, NULL);
+    hl_js_vtable.stop_async(&js.base);
+    EXPECT_TRUE(js.base.async_live == NULL);
+    EXPECT_EQ(js.base.shutting_down, 1);
+    cleanup_js_caps();               /* aborted here on a leaked continuation */
+    be->free(actx);
+}
 
 JS_WORKER_CASE(a_dispatch_does_not_see_what_the_last_one_left, (void)0,
     "  await worker.dispatch(() => { globalThis.LEAK = 42;\n"

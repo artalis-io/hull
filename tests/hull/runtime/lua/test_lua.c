@@ -7963,6 +7963,28 @@ UTEST(lua_worker, a_dispatch_does_not_see_what_the_last_one_left)
     lua_worker_close(&f);
 }
 
+/* Audit 14 G1: a detached hull.sleep (app.main, a timer) still pending when
+ * the runtime shuts down is on the teardown list; stop_async disarms its
+ * timer and releases the coroutine. It used to outlive the runtime: the
+ * ctx and continuation leaked, and the timer still pointed at them. */
+UTEST(lua_worker, a_pending_detached_sleep_is_released_at_teardown)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    lua_State *co;
+    EXPECT_EQ(ssh_co_start(&lua_rt, "hull.sleep(60000) return 'woke'", &co),
+              LUA_YIELD);
+    lua_rt.active_co = NULL;
+    lua_rt.active_thread_ref = LUA_NOREF;   /* the continuation holds it */
+    EXPECT_TRUE(lua_rt.base.async_live != NULL);
+    hl_lua_vtable.stop_async(&lua_rt.base);
+    EXPECT_TRUE(lua_rt.base.async_live == NULL);
+    EXPECT_EQ(lua_rt.base.shutting_down, 1);
+    /* The timer is gone: ticking the loop resumes nothing. */
+    EXPECT_EQ(f.be->tick(f.actx, 0), 0);
+    lua_worker_close(&f);
+}
+
 UTEST(lua_worker, a_runaway_dispatch_is_stopped)
 {
     /* It held a pool thread for good: no instruction hook in worker VMs. */

@@ -39,5 +39,14 @@ HlAsyncBackendCtx *hl_async_backend_keel_wrap(KlEventCtx *ev);
  */
 void hl_async_backend_keel_unwrap(HlAsyncBackendCtx *ctx);
 
+/**
+ * The wrapped KlEventCtx is about to be freed (kl_http_server_free) while
+ * the wrapper is still lent out: from here on every vtable call on @p ctx is
+ * a no-op (timer_add / watcher_add fail), so a runtime finalizer that
+ * deregisters a watcher or cancels a timer on its way out cannot reach the
+ * freed loop (audit 14 G1). Call it BEFORE the loop goes.
+ */
+void hl_async_backend_keel_orphan(HlAsyncBackendCtx *ctx);
+
 
 #endif /* HL_ASYNC_KEEL_H */

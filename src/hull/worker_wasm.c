@@ -138,10 +138,11 @@ static void wasm_cancel_fn(void *ud)
         op->persistent_inst = NULL;
     }
 
-    HlAsyncCtx *ctx = op->async_ctx;
+    /* The continuation too, and an attached op off the server's list,
+     * before the ctx goes (audit 14 G1). */
+    hl_async_ctx_drop_unrun(op->async_ctx);
     hl_worker_wasm_op_free(op);
     free(op);
-    if (ctx) hl_async_ctx_free(ctx);
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
