@@ -238,4 +238,34 @@ else
     echo "SKIP-phase3: jq not found"
 fi
 
+# ── Phase 4: a present-but-not-object platform_domain (audit 16) ─────────
+# `"platform_domain": false` / `null` and `"composed": null` are present to
+# --verify-sig (sh_json), which refuses them; hull verify read null as absent
+# and skipped `false`, so it reported VALID for a package the binary will not
+# start. Both must now name the malformed block. (The edit also breaks the app
+# signature, so the message, not the status, is what this asserts.)
+if command -v jq >/dev/null 2>&1; then
+    cp "$APP/package.sig" "$WORK/package.sig.orig"
+    for edit in '.platform.gethull.composed.platform_domain = false' \
+                '.platform.gethull.composed.platform_domain = null' \
+                '.platform.gethull.composed = null'; do
+        jq "$edit" "$WORK/package.sig.orig" > "$APP/package.sig"
+        VOUT=$("$HULL" verify "$APP" 2>&1 || true)
+        if ! printf '%s' "$VOUT" | grep -q "composed platform_domain is malformed"; then
+            echo "$VOUT"; cp "$WORK/package.sig.orig" "$APP/package.sig"
+            fail "hull verify did not refuse a malformed composed block ($edit)"
+        fi
+        run_app ""
+        if [ "$RC" = 3 ]; then
+            cat "$RUN_OUT"; rm -f "$RUN_OUT"; cp "$WORK/package.sig.orig" "$APP/package.sig"
+            fail "--verify-sig booted with a malformed composed block ($edit)"
+        fi
+        rm -f "$RUN_OUT"
+    done
+    cp "$WORK/package.sig.orig" "$APP/package.sig"
+    pass "hull verify and --verify-sig both refuse a null / false composed block"
+else
+    echo "SKIP-phase4: jq not found"
+fi
+
 echo "PASS: composed-sig e2e (harness + composed-block attestation + runtime tamper)"

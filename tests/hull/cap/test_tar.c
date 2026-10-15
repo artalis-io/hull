@@ -161,6 +161,72 @@ UTEST(tar_parse, rejects_name_extensions) {
     EXPECT_EQ(seen, 1);
 }
 
+/* A pax header (typeflag @p flag, records @p recs) followed by a.txt; returns
+ * hl_tar_parse's result and the members it surfaced in *seen. */
+static int tar_parse_with_pax(char flag, const char *recs, size_t rlen, int *seen) {
+    static unsigned char buf[8192];
+    memset(buf, 0, sizeof buf);
+    size_t off = 0;
+    tar_put_header(buf, "PaxHeader/a.txt", rlen);
+    buf[156] = (unsigned char)flag;
+    memcpy(buf + 257, "ustar", 6);
+    memcpy(buf + 263, "00", 2);
+    tar_seal(buf);
+    off = 512;
+    memcpy(buf + off, recs, rlen);
+    off += (rlen + 511) & ~(size_t)511;
+    tar_add_file(buf, &off, "a.txt", "hello", 5);
+    *seen = 0;
+    return hl_tar_parse(buf, off + 1024, count_entries_cb, seen);
+}
+
+/* pax headers that leave a member's name and size alone are skipped -
+ * bsdtar (macOS's tar) writes them for xattrs and times - while one naming a
+ * path, link target or size, in any pax typeflag, is refused, as is a
+ * malformed record (audit 16). */
+UTEST(tar_parse, pax_headers) {
+    int seen;
+    static const char meta[] =
+        "30 mtime=1700000000.123456789\n"
+        "39 SCHILY.xattr.com.apple.quarantine=q\n"
+        "14 uname=mark\n";
+    EXPECT_EQ(tar_parse_with_pax('x', meta, sizeof meta - 1, &seen), 0);
+    EXPECT_EQ(seen, 1);
+    EXPECT_EQ(tar_parse_with_pax('g', meta, sizeof meta - 1, &seen), 0);
+    EXPECT_EQ(seen, 1);
+    EXPECT_EQ(tar_parse_with_pax('x', "", 0, &seen), 0);
+    EXPECT_EQ(seen, 1);
+
+    static const char *const bad[] = {
+        "17 path=evil.txt\n",                   /* renames the member */
+        "21 linkpath=/etc/pwd\n",
+        "12 size=999\n",
+        "28 GNU.sparse.name=evil.txt\n",
+        "30 mtime=1700000000.123456789\n" "17 path=evil.txt\n",
+        "31 mtime=1700000000.123456789\n",      /* length one too long */
+        "29 mtime=1700000000.123456789\n",      /* one too short */
+        "17 path=evil.txt",                     /* no newline */
+        "x7 path=evil.txt\n",                   /* no length */
+        "6 =ab\n",                              /* empty key */
+        "8 mtime\n\n",                          /* no '=' */
+        "99999999999999999999999 a=b\n",        /* length overflow */
+    };
+    for (size_t k = 0; k < sizeof bad / sizeof bad[0]; k++) {
+        EXPECT_NE(tar_parse_with_pax('x', bad[k], strlen(bad[k]), &seen), 0);
+        EXPECT_EQ(seen, 0);
+    }
+    /* A key with a NUL in it ("path\0x" reads as "path" to a C reader). */
+    static const char nulkey[] = "12 path\0x=a\n";
+    EXPECT_NE(tar_parse_with_pax('x', nulkey, sizeof nulkey - 1, &seen), 0);
+    /* Solaris 'X' and global 'g' with a path are refused too. */
+    EXPECT_NE(tar_parse_with_pax('X', "17 path=evil.txt\n", 17, &seen), 0);
+    EXPECT_EQ(seen, 0);
+    EXPECT_NE(tar_parse_with_pax('g', "17 path=evil.txt\n", 17, &seen), 0);
+    EXPECT_EQ(seen, 0);
+    EXPECT_EQ(tar_parse_with_pax('X', meta, sizeof meta - 1, &seen), 0);
+    EXPECT_EQ(seen, 1);
+}
+
 /* ── Fixture: per-test sandbox under /tmp ───────────────────────────── */
 
 struct tar_fixture {

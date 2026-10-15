@@ -165,6 +165,51 @@ static int tar_safe_linkname(const char *member, const char *ln)
     return 1;
 }
 
+/* A pax extended header's records ("<len> <key>=<value>\n", <len> counting
+ * the whole record) - typeflag 'x', 'g', or Solaris 'X', which libarchive
+ * reads as 'x'. Validated strictly; 1 when the records only carry keys that
+ * leave a member's name and size alone (mtime, uid, xattrs, ... - bsdtar,
+ * macOS's tar, writes 'x' headers for xattrs), 0 when malformed or when a
+ * record would make tar see a different name, link target or size than this
+ * reader: path, linkpath, size, and the sparse-file keys that rename /
+ * resize a member (audit 16). */
+static int tar_pax_key_is(const unsigned char *k, size_t klen, const char *s)
+{
+    size_t n = strlen(s);
+    return klen == n && memcmp(k, s, n) == 0;
+}
+
+static int tar_pax_ok(const unsigned char *p, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        size_t len = 0, j = i;
+        while (j < n && p[j] >= '0' && p[j] <= '9') {
+            len = len * 10 + (size_t)(p[j] - '0');
+            if (len > n) return 0;              /* past the header's data */
+            j++;
+        }
+        if (j == i || j >= n || p[j] != ' ') return 0;
+        /* digits + ' ' + at least "k=" + '\n', and inside the data */
+        if (len < (j - i) + 4 || len > n - i) return 0;
+        const unsigned char *key = p + j + 1;
+        const unsigned char *end = p + i + len - 1;   /* the '\n' */
+        if (*end != '\n') return 0;
+        const unsigned char *eq = memchr(key, '=', (size_t)(end - key));
+        if (!eq || eq == key) return 0;
+        size_t klen = (size_t)(eq - key);
+        if (memchr(key, '\0', klen) || memchr(key, '\n', klen)) return 0;
+        if (tar_pax_key_is(key, klen, "path") ||
+            tar_pax_key_is(key, klen, "linkpath") ||
+            tar_pax_key_is(key, klen, "size") ||
+            tar_pax_key_is(key, klen, "SCHILY.realsize") ||
+            (klen >= 11 && memcmp(key, "GNU.sparse.", 11) == 0))
+            return 0;
+        i += len;
+    }
+    return 1;
+}
+
 /* The shared ustar iterator. @p want_files surfaces regular-file / directory
  * members; @p want_symlinks surfaces symlink members (typeflag '2', target in
  * HlTarEntry.linkname). hl_tar_parse selects files only (preserving the
@@ -193,22 +238,25 @@ static int tar_iter(const unsigned char *tar, size_t tar_len,
             tar_octal_strict(hdr + TAR_SIZE_OFF, TAR_SIZE_LEN, &size) != 0)
             return -1;                          /* not a (supported) header */
         /* Name extensions this reader does not implement change which name a
-         * member really has: a pax header ('x' / 'g'), a GNU long name or
-         * link ('L' / 'K'), or a POSIX ustar prefix (the name is
-         * prefix + "/" + name). Skipping them read a different archive than
+         * member really has: a GNU long name or link ('L' / 'K'), a POSIX
+         * ustar prefix (the name is prefix + "/" + name), or a pax record
+         * naming a path / size. Skipping them read a different archive than
          * tar does - members under the truncated or prefix-less name. Refused
-         * (audit 15). */
-        if (typeflag == 'x' || typeflag == 'g' ||
-            typeflag == 'L' || typeflag == 'K')
+         * (audit 15). A pax header ('x' / 'g' / 'X') whose records leave
+         * names and sizes alone is skipped (audit 16); its own name field is
+         * never used, so its prefix is not checked. */
+        int pax = (typeflag == 'x' || typeflag == 'g' || typeflag == 'X');
+        if (typeflag == 'L' || typeflag == 'K')
             return -1;
-        if (memcmp(hdr + TAR_MAGIC_OFF, "ustar", 6) == 0) {   /* POSIX "ustar\0" */
+        if (!pax && memcmp(hdr + TAR_MAGIC_OFF, "ustar", 6) == 0) { /* POSIX "ustar\0" */
             for (int i = 0; i < TAR_PREFIX_LEN; i++)
                 if (hdr[TAR_PREFIX_OFF + i]) return -1;
         }
         unsigned mode = (unsigned)(tar_octal(hdr + TAR_MODE_OFF, TAR_MODE_LEN) & 0777);
 
         off += TAR_BLOCK;
-        if (off + size > tar_len) return -1;    /* truncated data */
+        if (size > tar_len - off) return -1;    /* truncated data */
+        if (pax && !tar_pax_ok(tar + off, size)) return -1;
 
         if (typeflag == '5' || typeflag == '0' || typeflag == '\0') {
             if (want_files) {
