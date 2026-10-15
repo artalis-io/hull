@@ -1045,6 +1045,16 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
 
 static const char *const err_timeout = "timeout";
 
+/* Bytes of the instance's default linear memory right now: its initial
+ * memory, the app heap WAMR inserted and whatever memory.grow added. */
+static uint64_t linear_memory_bytes(wasm_module_inst_t inst)
+{
+    wasm_memory_inst_t mem = wasm_runtime_get_default_memory(inst);
+    return mem ? (uint64_t)wasm_memory_get_cur_page_count(mem) *
+                 (uint64_t)wasm_memory_get_bytes_per_page(mem)
+               : 0;
+}
+
 /* The call, under @p watch (armed by hl_cap_wasm_call_buf, unbound): bound to
  * the instance during instantiation and during the hull_process call only. */
 static int call_buf_impl(HlWasmCache *cache, const char *name,
@@ -1386,6 +1396,17 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
         goto cleanup_bufs_err;
     }
 
+    /* A memory.grow during the call may have moved linear memory (WAMR
+     * reallocates it where no guard region is reserved): take the output's
+     * native address again. */
+    if (wasm_out_ptr) {
+        native_out = wasm_runtime_addr_app_to_native(inst, wasm_out_ptr);
+        if (!native_out) {
+            if (err_msg) *err_msg = err_internal;
+            goto cleanup_bufs_err;
+        }
+    }
+
     /* Free input allocation - no longer needed */
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
@@ -1405,14 +1426,18 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
          * until the buffer is closed or collected. It counts as a live
          * instance (audit 12): past the cache's live count / bytes the output
          * is copied instead and the instance goes straight back. The
-         * reservation is released in hl_wasm_buffer_destroy. */
-        uint64_t zc_bytes = (uint64_t)heap_size + (uint64_t)stack_size;
+         * reservation is released in hl_wasm_buffer_destroy. It is the
+         * linear memory the instance holds NOW, plus its stack (audit 15
+         * follow-up): the call may have grown it with memory.grow far past
+         * heap_size, and no guest code runs on it while it is checked out. */
+        uint64_t zc_bytes = linear_memory_bytes(inst) + (uint64_t)stack_size;
         if (poolable && hl_wasm_live_instance_reserve(cache, zc_bytes) == 0) {
             /* Zero-copy: wrap WASM linear memory, keep instance checked out */
             *output_buf = hl_wasm_buffer_create_wasm(
                 inst, exec_env, process_fn, mod, cache,
                 wasm_out_ptr, native_out, (size_t)result,
-                heap_size, stack_size, chain.gen, chain.attached, alloc);
+                heap_size, stack_size, chain.gen, chain.attached,
+                zc_bytes, alloc);
             if (*output_buf)
                 return HL_WASM_OK; /* instance stays checked out */
             hl_wasm_live_instance_release(cache, zc_bytes);
@@ -1499,6 +1524,44 @@ void hl_wasm_live_instance_release(HlWasmCache *cache, uint64_t bytes)
     pthread_mutex_unlock(&cache->pool_mutex);
 }
 
+/* The max_memory_pages a persistent instance is instantiated with (audit 15
+ * follow-up): its default memory's declared initial pages plus
+ * hl_wasm_grow_pages(heap_size), never above the declared maximum. WAMR adds
+ * the app heap it inserts to both the initial and the maximum page count, so
+ * the instance can grow by exactly that many pages past where it starts,
+ * with or without an app heap (a module exporting malloc / free gets none).
+ * The memory is found through the public import / export listing (an
+ * imported memory is index 0); one the module neither imports nor exports
+ * gets 1, which WAMR raises to its initial size - no growth at all. */
+static uint32_t persistent_max_pages(wasm_module_t module, uint32_t heap_size)
+{
+    wasm_memory_type_t mt = NULL;
+    int32_t n = wasm_runtime_get_import_count(module);
+    for (int32_t i = 0; i < n && !mt; i++) {
+        wasm_import_t it;
+        memset(&it, 0, sizeof(it));
+        wasm_runtime_get_import_type(module, i, &it);
+        if (it.kind == WASM_IMPORT_EXPORT_KIND_MEMORY)
+            mt = it.u.memory_type;
+    }
+    n = wasm_runtime_get_export_count(module);
+    for (int32_t i = 0; i < n && !mt; i++) {
+        wasm_export_t et;
+        memset(&et, 0, sizeof(et));
+        wasm_runtime_get_export_type(module, i, &et);
+        if (et.kind == WASM_IMPORT_EXPORT_KIND_MEMORY)
+            mt = et.u.memory_type;
+    }
+    if (!mt)
+        return 1;
+    uint64_t want = (uint64_t)wasm_memory_type_get_init_page_count(mt) +
+                    hl_wasm_grow_pages(heap_size);
+    uint64_t declared_max = wasm_memory_type_get_max_page_count(mt);
+    if (want > declared_max) want = declared_max;
+    if (want == 0) want = 1;    /* 0 would mean "the module's maximum" */
+    return want > UINT32_MAX ? UINT32_MAX : (uint32_t)want;
+}
+
 HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
                                              const char *name,
                                              const HlWasmCallOpts *opts,
@@ -1558,17 +1621,19 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         return NULL;
     }
 
-    /* Reserve a live-instance slot and its heap + stack bytes before
-     * instantiating (audit 10): handed back on every failure below and when
-     * the instance is destroyed. */
-    uint64_t inst_bytes = (uint64_t)heap_size + (uint64_t)stack_size;
+    /* Reserve a live-instance slot and its bytes before instantiating
+     * (audit 10): heap, the growth it may make and stack. Handed back on every
+     * failure below and when the instance is destroyed. */
+    uint64_t inst_bytes = hl_wasm_instance_reservation(heap_size, stack_size);
     if (hl_wasm_live_instance_reserve(cache, inst_bytes) != 0) {
         if (err_msg) *err_msg = "too_many_instances";
         return NULL;
     }
 
     /* Instantiate - NOT from pool, this is exclusively owned. The instance's
-     * own start / ctor functions run here, under a wall-clock watch. */
+     * own start / ctor functions run here, under a wall-clock watch. Its
+     * linear memory is capped at the growth reserved above (audit 15
+     * follow-up): it lives across calls, outside every VM heap limit. */
     char error_buf[256];
     error_buf[0] = '\0';
     HlWasmWatch watch = {0};
@@ -1577,8 +1642,9 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         if (err_msg) *err_msg = "watchdog_unavailable";
         return NULL;
     }
-    wasm_module_inst_t inst = hl_wasm_watch_instantiate(
+    wasm_module_inst_t inst = hl_wasm_watch_instantiate_capped(
         &watch, mod->module, stack_size, heap_size,
+        persistent_max_pages((wasm_module_t)mod->module, heap_size),
         error_buf, sizeof(error_buf));
     hl_wasm_watch_disarm(&watch);
     if (!inst) {
@@ -1901,6 +1967,16 @@ static int instance_call_buf_run(HlWasmInstance *pi,
         goto cleanup_bufs_err;
     }
 
+    /* A memory.grow during the call may have moved linear memory: take the
+     * output's native address again (as call_buf_impl does). */
+    if (wasm_out_ptr) {
+        native_out = wasm_runtime_addr_app_to_native(inst, wasm_out_ptr);
+        if (!native_out) {
+            if (err_msg) *err_msg = err_internal;
+            goto cleanup_bufs_err;
+        }
+    }
+
     /* Success - free input, create OWNED output buffer */
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
@@ -2091,7 +2167,7 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
 
     if (pi->cache)
         hl_wasm_live_instance_release(pi->cache,
-                              (uint64_t)pi->heap_size + (uint64_t)pi->stack_size);
+            hl_wasm_instance_reservation(pi->heap_size, pi->stack_size));
 
     log_debug("[wasm] persistent instance '%s' destroyed", pi->name);
 

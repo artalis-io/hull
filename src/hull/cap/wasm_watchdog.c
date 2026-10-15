@@ -34,6 +34,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 #include <time.h>
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -267,10 +268,26 @@ void *hl_wasm_watch_instantiate(HlWasmWatch *w, void *module,
                                 uint32_t stack_size, uint32_t heap_size,
                                 char *error_buf, uint32_t error_buf_size)
 {
+    return hl_wasm_watch_instantiate_capped(w, module, stack_size, heap_size,
+                                            0, error_buf, error_buf_size);
+}
+
+void *hl_wasm_watch_instantiate_capped(HlWasmWatch *w, void *module,
+                                       uint32_t stack_size, uint32_t heap_size,
+                                       uint32_t max_memory_pages,
+                                       char *error_buf, uint32_t error_buf_size)
+{
+    /* wasm_runtime_instantiate is instantiate_ex with these arguments and
+     * max_memory_pages 0 (the module's own maximum). */
+    InstantiationArgs args;
+    memset(&args, 0, sizeof(args));
+    args.default_stack_size     = stack_size;
+    args.host_managed_heap_size = heap_size;
+    args.max_memory_pages       = max_memory_pages;
     HlWasmWatch *saved = tl_pending;
     tl_pending = w;
-    wasm_module_inst_t inst = wasm_runtime_instantiate(
-        (wasm_module_t)module, stack_size, heap_size, error_buf, error_buf_size);
+    wasm_module_inst_t inst = wasm_runtime_instantiate_ex(
+        (wasm_module_t)module, &args, error_buf, error_buf_size);
     tl_pending = saved;
     return inst;
 }

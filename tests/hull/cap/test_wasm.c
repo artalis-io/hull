@@ -266,10 +266,25 @@ static const unsigned char start_loop_wasm[] = {
 };
 static const unsigned int start_loop_wasm_len = 78;
 
+/* grow.wasm (68 bytes): one memory (1 page, no maximum); hull_process returns
+ * memory.grow(input_len) != -1 - i.e. it grows linear memory by one page per
+ * input byte and returns 1 (one output byte) when that worked, 0 when not.
+ * Hand-assembled; see the memory.grow tests below. */
+static const unsigned char grow_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x01, 0x60,
+  0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05,
+  0x03, 0x01, 0x00, 0x01, 0x07, 0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f,
+  0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72,
+  0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x00, 0x0a, 0x0b, 0x01, 0x09, 0x00,
+  0x20, 0x01, 0x40, 0x00, 0x41, 0x7f, 0x47, 0x0b,
+};
+static const unsigned int grow_wasm_len = 68;
+
 /* VFS with embedded WASM modules for testing (sorted by name) */
 static const HlEntry test_entries[] = {
     { "compute/echo.wasm", echo_wasm, echo_wasm_len },
     { "compute/echo64.wasm", echo64_wasm, echo64_wasm_len },
+    { "compute/grow.wasm", grow_wasm, grow_wasm_len },
     { "compute/kv_store.wasm", kv_store_wasm, kv_store_wasm_len },
     { "compute/loop_forever.wasm", loop_forever_wasm, loop_forever_wasm_len },
     { "compute/shared_read.wasm", shared_read_wasm, shared_read_wasm_len },
@@ -1410,6 +1425,134 @@ UTEST(hl_cap_wasm, instance_live_bytes_bounded)
     ASSERT_TRUE(pi != NULL);
     hl_cap_wasm_instance_destroy(pi);
     ASSERT_EQ(cache.live_instances, 0);
+    hl_cap_wasm_destroy(&cache);
+}
+
+static uint64_t test_linear_pages(void *inst)
+{
+    wasm_memory_inst_t mem =
+        wasm_runtime_get_default_memory((wasm_module_inst_t)inst);
+    return mem ? (uint64_t)wasm_memory_get_cur_page_count(mem) : 0;
+}
+
+/* grow.wasm called with n input bytes: 1 when memory.grow(n) worked. */
+static int test_grow_call(HlWasmInstance *pi, size_t pages)
+{
+    static const char ones[256] = {0};
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    int rc = hl_cap_wasm_instance_call(pi, ones, pages, &out, &out_len,
+                                       NULL, NULL, NULL, NULL, &err);
+    free(out);
+    return rc == HL_WASM_OK ? (int)out_len : -1;
+}
+
+/* Audit 15 follow-up: a persistent instance lives across calls, outside every
+ * VM heap limit, so memory.grow is capped at instantiation - it may grow by
+ * its heap_size (in pages) past where it started, and the guest sees -1 past
+ * that. The live-instance reservation covers that growth and is handed back
+ * on destroy. */
+UTEST(hl_cap_wasm, instance_memory_grow_capped_at_reservation)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts small = {0};
+    small.heap_size = 64 * 1024;        /* one page of growth */
+    small.max_input = 256;
+    small.max_output = 64;
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "grow", &small,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    ASSERT_EQ(cache.live_instances, 1);
+    ASSERT_EQ(cache.live_instance_bytes,
+              hl_wasm_instance_reservation(64 * 1024, HL_WASM_DEFAULT_STACK));
+
+    uint64_t start = test_linear_pages(pi->instance);
+    ASSERT_TRUE(start > 0);
+
+    /* Far past the reservation: refused inside the guest, nothing grown. */
+    ASSERT_EQ(test_grow_call(pi, 200), 0);
+    ASSERT_EQ(test_linear_pages(pi->instance), start);
+
+    /* The one page it reserved: granted. */
+    ASSERT_EQ(test_grow_call(pi, 1), 1);
+    ASSERT_EQ(test_linear_pages(pi->instance), start + 1);
+
+    /* And not one more, on this call or any later one. */
+    ASSERT_EQ(test_grow_call(pi, 1), 0);
+    ASSERT_EQ(test_grow_call(pi, 1), 0);
+    ASSERT_EQ(test_linear_pages(pi->instance), start + 1);
+
+    hl_cap_wasm_instance_destroy(pi);
+    ASSERT_EQ(cache.live_instances, 0);
+    ASSERT_EQ(cache.live_instance_bytes, (uint64_t)0);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* The cap is the persistent instance's own: a pooled one-shot call still
+ * grows its memory as far as the module allows. */
+UTEST(hl_cap_wasm, pooled_call_memory_grow_not_capped)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts small = {0};
+    small.heap_size = 64 * 1024;
+    small.max_input = 256;
+    small.max_output = 64;
+    static const char ones[64] = {0};
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    ASSERT_EQ(hl_cap_wasm_call(&cache, "grow", ones, sizeof ones,
+                               &out, &out_len, &small, NULL, NULL,
+                               &vfs, NULL, NULL, &err), HL_WASM_OK);
+    ASSERT_EQ(out_len, (size_t)1);
+    free(out);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 15 follow-up: a zero-copy buffer keeps a pooled instance checked out;
+ * it reserves the linear memory the instance holds when it is checked out
+ * (memory.grow during the call included), not just its heap + stack, and the
+ * buffer's close hands exactly that back. */
+UTEST(hl_cap_wasm, zero_copy_checkout_reserves_grown_memory)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts small = {0};
+    small.heap_size = 64 * 1024;
+    small.max_input = 256;
+    small.max_output = 64;
+    static const char ones[64] = {0};   /* grows 64 pages = 4 MB */
+    HlWasmBuffer *b = NULL;
+    const char *err = NULL;
+    ASSERT_EQ(hl_cap_wasm_call_buf(&cache, "grow", ones, sizeof ones, &b,
+                                   &small, NULL, NULL, &vfs, NULL, NULL, &err),
+              HL_WASM_OK);
+    ASSERT_TRUE(b != NULL);
+    ASSERT_EQ((int)b->kind, (int)HL_WASM_BUF_WASM);
+    ASSERT_EQ(hl_wasm_buffer_len(b), (size_t)1);
+    ASSERT_EQ(cache.live_instances, 1);
+
+    uint64_t held = test_linear_pages(b->u.wasm.instance) * HL_WASM_PAGE_BYTES;
+    ASSERT_TRUE(held >= (uint64_t)65 * HL_WASM_PAGE_BYTES);
+    ASSERT_EQ(cache.live_instance_bytes, held + HL_WASM_DEFAULT_STACK);
+    ASSERT_EQ((uint64_t)hl_wasm_buffer_footprint(b), cache.live_instance_bytes);
+
+    hl_wasm_buffer_close(b);
+    ASSERT_EQ(cache.live_instances, 0);
+    ASSERT_EQ(cache.live_instance_bytes, (uint64_t)0);
     hl_cap_wasm_destroy(&cache);
 }
 

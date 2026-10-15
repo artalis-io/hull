@@ -82,7 +82,7 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     uint64_t wasm_ptr, const void *native_ptr, size_t len,
     uint32_t heap_size, uint32_t stack_size,
     uint32_t chain_gen, int chain_attached,
-    HlAllocator *alloc)
+    uint64_t reserved, HlAllocator *alloc)
 {
     if (!inst || !exec_env || !module || !cache || !native_ptr) return NULL;
 
@@ -104,6 +104,7 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     buf->u.wasm.stack_size = stack_size;
     buf->u.wasm.chain_gen      = chain_gen;
     buf->u.wasm.chain_attached = chain_attached;
+    buf->u.wasm.reserved       = reserved;
 
     return buf;
 }
@@ -183,11 +184,11 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
             buf->u.wasm.heap_size,
             buf->u.wasm.stack_size,
             1, chain);
-        /* Hand back the live-instance slot call_buf reserved for the
-         * checkout (audit 12). */
-        hl_wasm_live_instance_release(
-            (HlWasmCache *)buf->u.wasm.cache,
-            (uint64_t)buf->u.wasm.heap_size + (uint64_t)buf->u.wasm.stack_size);
+        /* Hand back the live-instance slot and bytes call_buf reserved for
+         * the checkout (audit 12; its measured linear memory + stack since
+         * the audit 15 follow-up). */
+        hl_wasm_live_instance_release((HlWasmCache *)buf->u.wasm.cache,
+                                      buf->u.wasm.reserved);
 
         buf->u.wasm.instance = NULL;
         buf->u.wasm.exec_env = NULL;

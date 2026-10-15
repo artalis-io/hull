@@ -464,7 +464,10 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
 /*
  * Live-instance accounting (audit 10 / 12): every instance held outside the
  * pool - a compute.instance, or a pooled instance a zero-copy WasmBuffer keeps
- * checked out (HL_WASM_BUF_WASM) - reserves a slot and its heap + stack bytes.
+ * checked out (HL_WASM_BUF_WASM) - reserves a slot and its bytes: a
+ * compute.instance hl_wasm_instance_reservation (heap + capped growth +
+ * stack), a zero-copy checkout its measured linear memory + stack (audit 15
+ * follow-up: memory.grow is counted, not only the heap it started with).
  * At most max_live_instances (0 = HL_WASM_MAX_LIVE_INSTANCES) and
  * HL_WASM_MAX_LIVE_INSTANCE_BYTES between them (the byte budget never refuses
  * the first). reserve returns 0, or -1 past either bound. Thread-safe
@@ -475,23 +478,46 @@ void hl_wasm_live_instance_release(HlWasmCache *cache, uint64_t bytes);
 
 /* ── Persistent instance API ───────────────────────────────────────── */
 
+/* Linear memory a persistent instance may add with memory.grow past where it
+ * starts (audit 15 follow-up): its heap_size, in whole 64 KiB wasm pages. The
+ * instance is instantiated with its maximum capped there, so a grow past it
+ * returns -1 in the guest. */
+#define HL_WASM_PAGE_BYTES 65536u
+static inline uint64_t hl_wasm_grow_pages(uint32_t heap_size)
+{
+    return ((uint64_t)heap_size + HL_WASM_PAGE_BYTES - 1) / HL_WASM_PAGE_BYTES;
+}
+
+/* Bytes a persistent instance reserves against the live-instance budget: its
+ * app heap, the growth it is allowed (hl_wasm_grow_pages) and its exec-env
+ * stack. The module's own declared initial memory is not counted (fixed by
+ * the signed module, as for a pooled instance). */
+static inline uint64_t hl_wasm_instance_reservation(uint32_t heap_size,
+                                                    uint32_t stack_size)
+{
+    return (uint64_t)heap_size + hl_wasm_grow_pages(heap_size) * HL_WASM_PAGE_BYTES
+         + (uint64_t)stack_size;
+}
+
 /* Instruction-budget units the bindings charge before compute.instance()
- * (audit 10): one per 64 bytes of the app heap + exec-env stack the instance
- * reserves - the rate Lua charges VM allocation at. One binding call zeroed
- * up to the heap ceiling. */
+ * (audit 10): one per 64 bytes of the instance's reservation - the rate Lua
+ * charges VM allocation at. One binding call zeroed up to the heap ceiling. */
 static inline uint64_t hl_wasm_instance_units(const HlWasmCallOpts *o)
 {
-    uint64_t heap  = (o && o->heap_size)  ? o->heap_size  : HL_WASM_DEFAULT_HEAP;
-    uint64_t stack = (o && o->stack_size) ? o->stack_size : HL_WASM_DEFAULT_STACK;
-    return (heap + stack) / 64;
+    uint32_t heap  = (o && o->heap_size)  ? o->heap_size  : HL_WASM_DEFAULT_HEAP;
+    uint32_t stack = (o && o->stack_size) ? o->stack_size : HL_WASM_DEFAULT_STACK;
+    return hl_wasm_instance_reservation(heap, stack) / 64;
 }
 
 /**
  * Create a persistent WASM instance. Not pooled - exclusively owned by caller.
  * Linear memory is preserved across calls. Caller must destroy when done.
  * At most HL_WASM_MAX_LIVE_INSTANCES live per cache, reserving at most
- * HL_WASM_MAX_LIVE_INSTANCE_BYTES of heap + stack between them (the first is
- * never refused for its size); past either, NULL with "too_many_instances".
+ * HL_WASM_MAX_LIVE_INSTANCE_BYTES of hl_wasm_instance_reservation between
+ * them (the first is never refused for its size); past either, NULL with
+ * "too_many_instances". Its linear memory can grow at most
+ * hl_wasm_grow_pages(heap_size) pages past where it starts (memory.grow past
+ * that returns -1 in the guest).
  *
  * @param cache    Module cache (must be initialized)
  * @param name     Module name (e.g. "model" -> compute/model.wasm)
