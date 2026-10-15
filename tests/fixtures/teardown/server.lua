@@ -1,15 +1,18 @@
 -- Shutdown fixture (tests/e2e_teardown.sh): at SIGTERM it holds a request
 -- parked on hull.sleep, a WebSocket that never answers the close, and a
 -- detached http.fetch started from a timer - each of which the teardown used
--- to reach through a freed runtime (audit 14 G1 / audit 15).
+-- to reach through a freed runtime (audit 14 G1 / audit 15). And a __gc
+-- finalizer that lua_close runs at teardown calls ws.connect, which reached
+-- the freed Keel loop (audit 16).
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 local http_client = require("hull.http-client")
 local ws_server = require("hull.web.ws-server")
+local ws_client = require("hull.web.ws-client")
 
 app.manifest({
     modules = { "hull/http-server@1", "hull/http-client@1", "hull/timers@1",
-                "hull/web/ws-server@1" },
+                "hull/web/ws-server@1", "hull/web/ws-client@1" },
     hosts = { "127.0.0.1" },
 })
 
@@ -22,7 +25,16 @@ app.every(100, function()
     http_client.async.get(target)
 end)
 
-app.get("/ping", function(_req, res) res:text("pong") end)
+-- Collected only by lua_close, after the server is gone: ws.connect must
+-- refuse, not dial out on a freed event loop (audit 16).
+local at_close = setmetatable({}, { __gc = function()
+    pcall(ws_client.connect, "ws://127.0.0.1:1/", {})
+end })
+
+app.get("/ping", function(_req, res)
+    local _ = at_close   -- keeps it alive until the runtime goes
+    res:text("pong")
+end)
 app.get("/arm/:port", function(req, res)
     target = "http://127.0.0.1:" .. req.params.port .. "/slow"
     res:text("armed")

@@ -11022,4 +11022,56 @@ UTEST(js_audit15, app_globals_cannot_register_handlers)
     cleanup_js();
 }
 
+/* ── Audit 16: the internal stores are defined into, never set ──────────
+ *
+ * mod_app.c appended to __hull_routes and the def arrays with an indexed SET,
+ * and built the defs with set too: an app setter on Array.prototype["0"] (or
+ * Object.prototype.method) then ran with `this` = the internal array / def,
+ * which reached the handlers after registration closed. Registration must
+ * work and the setters must never fire. */
+UTEST(js_audit16, registration_ignores_prototype_setters)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "const grab = (k) => ({ configurable: true,\n"
+        "  get() { globalThis.r = this; return undefined; },\n"
+        "  set(v) { globalThis.r = this; } });\n"
+        "for (const i of ['0', '1', '2'])\n"
+        "  Object.defineProperty(Array.prototype, i, grab(i));\n"
+        "for (const k of ['method', 'pattern', 'handler_id', 'multipart',\n"
+        "                 'on_open_id'])\n"
+        "  Object.defineProperty(Object.prototype, k, grab(k));\n"
+        "app.get('/a', (req, res) => res.text('a'));\n"
+        "app.use('*', '/*', (req, res) => 0);\n"
+        "app.post('/b', (req, res) => res.text('b'));\n";
+    JSValue v = JS_Eval(js.ctx, code, strlen(code), "<a16>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    EXPECT_EQ(eval_int("typeof globalThis.r === 'undefined' ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int(
+        "Object.getOwnPropertyNames(globalThis.__hull_internals"
+        ".__hull_route_defs).length"), 3);   /* 0, 1 and length */
+    EXPECT_EQ(eval_int(
+        "Object.getPrototypeOf(globalThis.__hull_internals"
+        ".__hull_route_defs[1]) === null ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int(
+        "Object.getOwnPropertyDescriptor(globalThis.__hull_internals"
+        ".__hull_route_defs[1], 'method').value === 'POST' ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int(
+        "typeof Object.getOwnPropertyDescriptor(globalThis.__hull_internals"
+        ".__hull_routes, '2').value === 'function' ? 1 : 0"), 1);
+    /* Reading a key a def leaves out does not reach Object.prototype. */
+    EXPECT_EQ(eval_int(
+        "(() => { const d = globalThis.__hull_internals.__hull_route_defs;\n"
+        "  const o = Object.getOwnPropertyDescriptor(d, '0').value;\n"
+        "  return ('multipart' in o) ? 0 : 1; })()"), 1);
+    EXPECT_EQ(eval_int("typeof globalThis.r === 'undefined' ? 1 : 0"), 1);
+    cleanup_js();
+}
+
 UTEST_MAIN();

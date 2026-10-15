@@ -2120,10 +2120,12 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * server infrastructure (connections, event loop) is still valid. A
      * finished op's done_fn runs here (its continuation resumes), a queued
      * one's cancel_fn releases it; the runtime stops seeing the pool first,
-     * so code resumed now cannot submit to a pool being freed. */
+     * so code resumed now cannot submit to a pool being freed, and is marked
+     * shutting down first, so a cancelled timer handler is not rescheduled
+     * onto a loop that is going away (audit 16). */
     if (s->thread_pool) {
         HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
-        if (rt) rt->thread_pool = NULL;
+        if (rt) { rt->thread_pool = NULL; rt->shutting_down = 1; }
         hl_async_backend()->pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
@@ -2392,7 +2394,7 @@ static void hl_serve_cleanup(HlServerState *s)
     /* Free thread pool BEFORE server (via the backend vtable) */
     if (s->thread_pool) {
         HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
-        if (rt) rt->thread_pool = NULL;
+        if (rt) { rt->thread_pool = NULL; rt->shutting_down = 1; }
         hl_async_backend()->pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }

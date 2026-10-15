@@ -1185,19 +1185,25 @@ registers.
    close DB → exit.
 ```
 
-**Teardown order (audit 14 G1 / audit 15).** Everything that calls back into
-the runtime is stopped while the runtime is alive, and the runtime goes last:
-(1) the thread pool (`rt->thread_pool` cleared first): a finished op's done_fn
-runs, a queued one's cancel_fn releases its continuation - through
+**Teardown order (audit 14 G1 / audit 15 / audit 16).** Everything that calls
+back into the runtime is stopped while the runtime is alive, and the runtime
+goes last: (1) the thread pool (`rt->thread_pool` cleared and
+`rt->shutting_down` set first - a timer handler a cancel_fn or done_fn ends
+is not rescheduled, `hl_{lua,js}_timer_reschedule` refuses while shutting
+down; audit 16): a finished op's done_fn runs, a queued one's cancel_fn
+releases its continuation - through
 `hl_async_ctx_drop_unrun`, which takes an attached op off the server's list
 before its ctx is freed; the poll backend's `pool_free` delivers its finished
 items' done_fns too, as Keel's does (they used to be dropped by `poll_free`);
-(2) `rt->vt->stop_async`: sets `rt->shutting_down` and stops every detached op
+(2) `rt->vt->stop_async`: sets `rt->shutting_down`, stops every detached op
 and WebSocket client on the runtime's teardown list (`HlRuntime.async_live`,
 `HlAsyncTeardown` in `shared/async.h`: http.fetch / Lua hull.sleep / tui.poll /
 Lua task + ssh parks from a timer, a WebSocket callback or app.main, each with
-an `on_shutdown` that stops its driver, plus JS's `sleep_timers`); (3) serve.c
-only: the client pool, then `kl_http_server_free` (`hl_serve_free_server`),
+an `on_shutdown` that stops its driver, plus JS's `sleep_timers`), and clears
+the runtime's Keel server pointer (`HlLua` / `HlJS` `server`), so nothing -
+a Lua `__gc` that `lua_close` runs in step 4 calling `ws.connect`, which
+refuses while `shutting_down` - reaches the loop once it is freed (audit 16);
+(3) serve.c only: the client pool, then `kl_http_server_free` (`hl_serve_free_server`),
 which cancels the ops still suspended on connections and closes every
 connection - a WebSocket that is still open runs NO on_close then (the loop is
 gone; the conn is just invalidated) - after the async / net wraps are orphaned
@@ -1212,8 +1218,9 @@ timer or a request); a new loop-bound object, an `HlAsyncTeardown` entry.
 only when init fails. Destroying it in Hull too was a double free on every
 HTTPS shutdown (audit 15). Covered by `tests/e2e_teardown.sh` (`make
 e2e-teardown`: SIGTERM over HTTP and HTTPS with a parked handler, a detached
-fetch and a held WebSocket, `--drain-timeout 100` and `0`; app.main leaving
-unawaited work) and the `unawaited` legs of `tests/e2e_cli_poll.sh`.
+fetch, a held WebSocket and a Lua finalizer calling `ws.connect`,
+`--drain-timeout 100` and `0`; app.main leaving unawaited work) and the
+`unawaited` legs of `tests/e2e_cli_poll.sh`.
 
 Three useful patterns this covers:
 

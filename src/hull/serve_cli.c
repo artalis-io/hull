@@ -312,7 +312,9 @@ static int cli_fail(HlAppContext *ctx, HlRuntime *rt,
                     HlAsyncBackendPool *pool, HlManifest *manifest,
                     ShSealArena *cfg_arena, ShSealArena *seal_arena)
 {
-    if (rt) rt->thread_pool = NULL;
+    /* Shutting down from here on, before the pool: a cancel_fn it runs must
+     * not reschedule a timer or reach the loop (audit 16). */
+    if (rt) { rt->thread_pool = NULL; rt->shutting_down = 1; }
     if (pool) be->pool_free(pool);
     /* What the runtime still holds on the loop, released while both are
      * alive (audit 14 G1). */
@@ -778,6 +780,7 @@ int hull_serve(int argc, char **argv)
      * db.async or compute.async used to leave its continuation behind, and
      * QuickJS aborted in JS_FreeRuntime (exit 134). */
     rt->thread_pool = NULL;
+    rt->shutting_down = 1;   /* before the pool's done / cancel fns (audit 16) */
     if (pool) be->pool_free(pool);
     if (rt->vt->stop_async) rt->vt->stop_async(rt);
 
