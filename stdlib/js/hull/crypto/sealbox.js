@@ -13,9 +13,10 @@
  * A sealed blob is version(u32 BE) || nonce(24) || secretbox(frame), where the
  * frame is the value, or each context string length-prefixed and then the
  * value. secretbox has no associated data, so the context goes inside the box
- * and is checked on open. Whether a context was used is not itself recorded
- * (TOTP's rows predate contexts), so give a keyring one use: always with a
- * context (hull:kv) or never (TOTP), not both.
+ * and is checked on open. Whether a context was used is not itself recorded,
+ * so seal with a context (hull:kv: namespace and key; TOTP: "totp" and the
+ * account, since audit 15). TOTP still opens its older rows sealed with none,
+ * as a fallback after the bound open fails, and re-seals them bound.
  *
  * Values, keys and blobs are BYTE STRINGS (each char a byte, 0-255). Bytes
  * cross the crypto binding as Uint8Array, never as a JS string, which

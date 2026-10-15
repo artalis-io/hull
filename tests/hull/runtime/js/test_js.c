@@ -3537,7 +3537,9 @@ UTEST(js_stdlib, audit3_stdlib_fixes)
         "  inbox.init();\n"
         "  if (inbox.checkAndMark('m1', 'src') !== false) return 6;\n"
         "  if (inbox.checkAndMark('m1', 'src') !== true) return 7;\n"
-        "  if (inbox.checkAndMark('m2', 'src', { ttl: -1 }) !== false) return 8;\n"
+        "  try { inbox.checkAndMark('m2', 'src', { ttl: -1 }); return 8; } catch (_e) { }\n"
+        "  if (inbox.checkAndMark('m2', 'src') !== false) return 8;\n"
+        "  inbox._test.expire('m2', 'src');\n"
         "  if (inbox.checkAndMark('m2', 'src') !== false) return 9;\n"
         "  const quiet = { header() { return this; }, status() { return this; }, json() { return this; } };\n"
         "  const shared = (a, b) => {\n"
@@ -5275,6 +5277,60 @@ UTEST(js_stdlib, auth_audit12_suite)
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0);
     EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+/* The _hull_jobs / _hull_cron tables as a database from before jobs.init's
+ * additive columns has them (progress .. claim_started_at, tz_offset,
+ * last_error). Created by the harness: app code may not touch _hull_*. */
+static const char AUDIT15_OLD_JOBS_SCHEMA[] =
+    "CREATE TABLE _hull_jobs ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " queue VARCHAR(255) NOT NULL DEFAULT 'default',"
+    " type VARCHAR(255) NOT NULL, payload TEXT,"
+    " status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+    " priority INTEGER NOT NULL DEFAULT 0,"
+    " attempts INTEGER NOT NULL DEFAULT 0,"
+    " max_attempts INTEGER NOT NULL DEFAULT 25,"
+    " run_at INTEGER NOT NULL DEFAULT 0,"
+    " claim_token VARCHAR(255), claimed_at INTEGER, dedup_key VARCHAR(255),"
+    " last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);"
+    "CREATE TABLE _hull_cron ("
+    " name VARCHAR(255) NOT NULL PRIMARY KEY, spec VARCHAR(255) NOT NULL,"
+    " type VARCHAR(255) NOT NULL, payload TEXT,"
+    " queue VARCHAR(255) NOT NULL DEFAULT 'default',"
+    " priority INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER,"
+    " next_run_at INTEGER NOT NULL, last_run_at INTEGER,"
+    " updated_at INTEGER NOT NULL);";
+
+/* Statements that prepare only once jobs.init has added every column. */
+static const char *const AUDIT15_NEW_COLUMNS[] = {
+    "SELECT progress, trace_context, concurrency_key, concurrency_limit, "
+    "concurrency_strict, claim_started_at FROM _hull_jobs",
+    "SELECT tz_offset, last_error FROM _hull_cron",
+};
+
+/* Stdlib regressions from audit 15: jobs.init upgrades an old schema (the
+ * concurrency index came before the column it indexes), ttl options are
+ * positive numbers, TOTP secrets are bound to their account. */
+UTEST(js_stdlib, stdlib_audit15_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(sqlite3_exec(test_db, AUDIT15_OLD_JOBS_SCHEMA, NULL, NULL, NULL), SQLITE_OK);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit15.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    for (size_t i = 0; i < sizeof AUDIT15_NEW_COLUMNS / sizeof AUDIT15_NEW_COLUMNS[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        EXPECT_EQ(sqlite3_prepare_v2(test_db, AUDIT15_NEW_COLUMNS[i], -1, &st, NULL), SQLITE_OK);
+        sqlite3_finalize(st);
+    }
 
     cleanup_js_caps();
 }

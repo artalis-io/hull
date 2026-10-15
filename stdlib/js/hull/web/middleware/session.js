@@ -38,6 +38,15 @@ let initialized = false;
 // evade the device-list / new-device audit trail.
 let trustProxy = false;
 
+// A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
+// ("86400") concatenated onto the expiry (now + "86400"), a NaN one never
+// expired. Same rule as the Lua twin and auth.login; anything else throws.
+function checkTtl(who, v) {
+    if (!(typeof v === "number" && Number.isFinite(v) && v > 0))
+        throw new TypeError(who + " must be a positive number of seconds");
+    return v;
+}
+
 /**
  * Initialize the sessions table. Call once at startup.
  *
@@ -62,24 +71,17 @@ function init(opts) {
     // Lua kept the prior value on re-init. Apps that call init twice
     // (first with custom ttl, second with just absoluteTtl) lost
     // their ttl on JS. Now matches Lua semantics.
-    if (o.ttl !== undefined) sessionTtl = o.ttl;
+    if (o.ttl !== undefined) sessionTtl = checkTtl("session.init: ttl", o.ttl);
     if (o.trustProxy !== undefined) trustProxy = o.trustProxy === true;
     if (o.absoluteTtl !== undefined) {
         if (o.absoluteTtl === false) {
             absoluteTtl = null;
-        } else if (typeof o.absoluteTtl === "number"
-                   && (!Number.isFinite(o.absoluteTtl)
-                       || o.absoluteTtl <= 0)) {
-            // Round-10 MEDIUM-8: NaN and Infinity slipped through.
-            // NaN <= 0 is false → stored as NaN → cap silently
-            // disabled. Infinity makes the comparison always false
-            // too. Reject non-finite explicitly. Same shape on Lua.
-            log.warn("session.init: absoluteTtl must be finite > 0; "
-                + "use `false` for the explicit opt-out so the intent "
-                + "is loud.");
-            absoluteTtl = null;
         } else {
-            absoluteTtl = o.absoluteTtl;
+            // Round-10 MEDIUM-8: NaN and Infinity slipped through (NaN
+            // disabled the cap silently). Audit 15: so did a string, and
+            // an invalid value now throws rather than turning the cap off -
+            // `false` is the explicit opt-out. Same rule on Lua.
+            absoluteTtl = checkTtl("session.init: absoluteTtl (or false)", o.absoluteTtl);
         }
     }
 
@@ -171,7 +173,8 @@ function generateId() {
 function create(data, opts) {
     const id = generateId();
     const now = time.now();
-    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl : sessionTtl;
+    const ttl = (opts && opts.ttl !== undefined)
+        ? checkTtl("session.create: ttl", opts.ttl) : sessionTtl;
     const encoded = json.encode(data || {});
 
     // Capture device columns for audit-log + listForUser. user_id
@@ -255,7 +258,7 @@ function load(sessionId, opts) {
 
     // Touch: update last_accessed and extend expiration - by the caller's
     // ttl, else the session's own (create's), else the module TTL.
-    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl
+    const ttl = (opts && opts.ttl !== undefined) ? checkTtl("session.load: ttl", opts.ttl)
         : (typeof rows[0].ttl === "number" ? rows[0].ttl : sessionTtl);
     db.exec(
         "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
@@ -289,7 +292,8 @@ function update(sessionId, data, opts) {
         return false;
 
     const now = time.now();
-    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl : sessionTtl;
+    const ttl = (opts && opts.ttl !== undefined)
+        ? checkTtl("session.update: ttl", opts.ttl) : sessionTtl;
     const encoded = json.encode(data || {});
 
     // The user_id column follows the data: a session created before login

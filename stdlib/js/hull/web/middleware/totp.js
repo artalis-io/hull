@@ -209,32 +209,52 @@ function ctEq(a, b) {
 // shared with hull:kv's encrypted handles. See the matching Lua module's
 // encrypt_secret / decrypt_secret comments for the design - wire format v2
 // (current) is a sealbox blob, version(4 BE) || nonce(24) || ct, sealed with
-// no context; v1 (legacy, pre-rotation) was nonce(24) || ct. Both runtimes
-// produce identical byte sequences for the same key so a Lua<->JS migration
-// on the same DB works without re-enrolling.
+// the context ["totp", userId] (audit 15; rows sealed before with no context
+// still open, and are re-sealed bound on the next verify or by rekey()); v1
+// (legacy, pre-rotation) was nonce(24) || ct. Both runtimes produce
+// identical byte sequences for the same key so a Lua<->JS migration on the
+// same DB works without re-enrolling.
 function keyring() {
     return { keys: _state.keys, current: _state.currentKeyVersion };
 }
 
-function encryptSecret(secretBytes) {
+// The sealbox context of an account's secret: the id as UTF-8 bytes, as the
+// Lua twin's string is.
+function sealContext(userId) {
+    return ["totp", encoding.utf8.encode(String(userId))];
+}
+// How the frame of a bound secret begins (sealbox: each context string
+// length-prefixed, 4 bytes big-endian).
+const BOUND_PREFIX = "\x00\x00\x00\x04totp";
+
+function encryptSecret(secretBytes, userId) {
     const cur = _state.currentKeyVersion;
     if (cur == null || !_state.keys[cur]) return [secretBytes, 0, 0];
-    return [sealbox.seal(keyring(), secretBytes), 1, cur];
+    return [sealbox.seal(keyring(), secretBytes, sealContext(userId)), 1, cur];
 }
 
-// Returns [plaintext, version] on success, [null, null] on failure.
-// version=0 signals "plaintext storage" OR "legacy v1 row". Callers
-// use the version to decide whether to lazily re-encrypt under
-// current.
-function decryptSecret(blob, encrypted) {
+// Returns [plaintext, version, unbound] on success, [null, null] on failure.
+// version=0 signals "plaintext storage" OR "legacy v1 row"; unbound marks a
+// v2 blob sealed without the account context (before audit 15). Callers use
+// both to decide whether to lazily re-encrypt under current.
+function decryptSecret(blob, encrypted, userId) {
     if (encrypted === 0) return [blob, 0];
     if (typeof blob !== "string") return [null, null];
 
-    const [value, err, version] = sealbox.open(keyring(), blob);
+    const [value, err, version] = sealbox.open(keyring(), blob, sealContext(userId));
     if (!err) return [value, version];
-    // A v2 blob with a recognized version that fails to open is real
-    // corruption or a wrong key; don't paper over it with a legacy attempt.
-    if (err === "open_failed" && blob.length >= sealbox.MIN_LEN) return [null, null];
+    if (err === "open_failed" && blob.length >= sealbox.MIN_LEN) {
+        // A row sealed before secrets were bound to their account. Opened
+        // without a context, a blob bound to ANOTHER account opens too, to
+        // its frame ("totp", that account, the secret) - a secret whose codes
+        // its maker can compute - so a plaintext that starts with that frame
+        // is refused (a random legacy secret starts so with odds of 2^-64).
+        const old = sealbox.open(keyring(), blob);
+        if (!old[1] && !old[0].startsWith(BOUND_PREFIX)) return [old[0], old[2], true];
+        // A v2 blob with a recognized version that fails to open is real
+        // corruption or a wrong key; don't paper over it with a legacy attempt.
+        return [null, null];
+    }
 
     // v1 (legacy) fallback. Only if a legacy_key_version is configured.
     const legacyV = _state.legacyKeyVersion;
@@ -268,11 +288,12 @@ function loadSecret(userId) {
     // js_parse_destructuring_element fails an MSan use-of-uninit
     // check at module-compile time, which fails the MSan + UBSan
     // CI job. Refactored across this module until upstream fixes it.
-    const dec = decryptSecret(row.secret, row.encrypted);
+    const dec = decryptSecret(row.secret, row.encrypted, userId);
     if (!dec[0]) return null;
     return {
         secret:        dec[0],
         version:       dec[1],  // 0 = plaintext/legacy v1; else key id
+        unbound:       dec[2] === true,  // sealed without the account context
         confirmed:     row.confirmed,
         digits:        row.digits,
         period:        row.period,
@@ -289,7 +310,7 @@ function loadPendingSecret(userId) {
         + "FROM _hull_totp_pending WHERE user_id = ?", [userId]);
     if (!rows || rows.length === 0) return null;
     const row = rows[0];
-    const dec = decryptSecret(row.secret, row.encrypted);
+    const dec = decryptSecret(row.secret, row.encrypted, userId);
     if (!dec[0]) return null;
     return {
         secret:     dec[0],
@@ -306,7 +327,7 @@ function loadPendingSecret(userId) {
 // the current key. Best-effort - verify already succeeded; a
 // transient DB error here doesn't fail the user.
 function rekeyRow(userId, secretBytes) {
-    const enc = encryptSecret(secretBytes);
+    const enc = encryptSecret(secretBytes, userId);
     if (enc[1] !== 1) return;  // no current key, nothing to do
     try {
         db.exec(
@@ -542,8 +563,17 @@ function init(opts) {
     _state.onLockout = opts.onLockout || null;
     _state.maxFailedAttemptsPerIp = opts.maxFailedAttemptsPerIp
                                     || _state.maxFailedAttemptsPerIp;
-    _state.lockoutDurationPerIp   = opts.lockoutDurationPerIp
-                                    || _state.lockoutDurationPerIp;
+    // A positive, finite number of seconds (audit 15): a string one
+    // concatenated onto the lock's end (now + "900"), so the per-IP lockout
+    // never held. Same rule as the Lua twin.
+    if (opts.lockoutDurationPerIp !== undefined && opts.lockoutDurationPerIp !== null) {
+        const v = opts.lockoutDurationPerIp;
+        if (!(typeof v === "number" && Number.isFinite(v) && v > 0)) {
+            throw new TypeError("totp.init: lockoutDurationPerIp must be a positive "
+                + "number of seconds");
+        }
+        _state.lockoutDurationPerIp = v;
+    }
     _state.trustXff               = opts.trustXff === true;
     // Round-12 LOW-2: reset the one-shot XFF warn flag when the
     // caller explicitly touched trustXff. See Lua sibling.
@@ -582,10 +612,11 @@ function init(opts) {
     if (opts.encryptionKey != null && opts.encryptionKeys == null
         && _state.currentKeyVersion != null) {
         const sample = db.query(
-            "SELECT secret, encrypted FROM _hull_totp "
+            "SELECT user_id, secret, encrypted FROM _hull_totp "
             + "WHERE encrypted = 1 LIMIT 1");
         if (sample && sample[0]) {
-            const dec = decryptSecret(sample[0].secret, sample[0].encrypted);
+            const dec = decryptSecret(sample[0].secret, sample[0].encrypted,
+                                      sample[0].user_id);
             if (!dec[0]) {
                 throw new Error("totp.init: encryptionKey shorthand cannot "
                     + "decrypt existing _hull_totp rows. This is silent "
@@ -681,7 +712,7 @@ function enroll(userId) {
     const secretBytes = encoding.bytes.fromBuffer(crypto.random(20));
 
     const secretB32 = base32Encode(secretBytes);
-    const enc = encryptSecret(secretBytes);
+    const enc = encryptSecret(secretBytes, userId);
     const stored = enc[0];
     const encryptedFlag = enc[1];
 
@@ -833,7 +864,7 @@ function verifyWithKind(userId, code, req) {
                 // Lazy rekey: re-encrypt under current if the row was
                 // stored under an older version.
                 if (_state.currentKeyVersion != null
-                    && row.version !== _state.currentKeyVersion) {
+                    && (row.version !== _state.currentKeyVersion || row.unbound)) {
                     rekeyRow(userId, row.secret);
                 }
                 return [true, "totp"];
@@ -860,7 +891,7 @@ function verifyWithKind(userId, code, req) {
             if (ip) clearFailedAttemptsIp(ip);
             // Same lazy rekey on the recovery-code path.
             if (_state.currentKeyVersion != null
-                && row.version !== _state.currentKeyVersion) {
+                && (row.version !== _state.currentKeyVersion || row.unbound)) {
                 rekeyRow(userId, row.secret);
             }
             return [true, "recovery"];
@@ -896,10 +927,10 @@ function rekey() {
     for (let i = 0; i < (rows || []).length; i++) {
         scanned++;
         const r = rows[i];
-        const dec = decryptSecret(r.secret, r.encrypted);
+        const dec = decryptSecret(r.secret, r.encrypted, r.user_id);
         if (!dec[0]) { failed++; continue; }
-        if (dec[1] !== cur) {
-            const enc = encryptSecret(dec[0]);
+        if (dec[1] !== cur || dec[2] === true) {
+            const enc = encryptSecret(dec[0], r.user_id);
             try {
                 db.exec(
                     "UPDATE _hull_totp SET secret = ?, encrypted = 1, "
@@ -922,12 +953,12 @@ function rekey() {
  */
 function rekeyStatus() {
     checkInitialized();
-    const rows = db.query("SELECT secret, encrypted FROM _hull_totp");
+    const rows = db.query("SELECT user_id, secret, encrypted FROM _hull_totp");
     const counts = { total: 0 };
     for (let i = 0; i < (rows || []).length; i++) {
         counts.total++;
         const r = rows[i];
-        const dec = decryptSecret(r.secret, r.encrypted);
+        const dec = decryptSecret(r.secret, r.encrypted, r.user_id);
         const k = (dec && dec[1] != null) ? dec[1] : 0;
         counts[k] = (counts[k] || 0) + 1;
     }
@@ -974,6 +1005,13 @@ function enrolled(userId) {
 const _test = {
     base32Encode,
     base32Decode,
+    // [secret blob, encrypted flag] of a user's row, or null (the Lua
+    // twin's get_blob).
+    getBlob: (userId) => {
+        const rows = db.query(
+            "SELECT secret, encrypted FROM _hull_totp WHERE user_id = ?", [userId]);
+        return rows && rows.length > 0 ? [rows[0].secret, rows[0].encrypted] : null;
+    },
     totpAtStep,
     currentStep,
     ctEq,

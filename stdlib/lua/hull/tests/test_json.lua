@@ -56,5 +56,39 @@ test("roundtrip via hull namespace", function()
     assert_eq(decoded.count, 42)
 end)
 
+-- ── Number round trip (audit 15) ────────────────────────────────────
+-- Every number used to go out as "%.14g": an integer of 1e14 or more (a
+-- snowflake user id) came back as a different number.
+
+test("integers encode exactly and round-trip", function()
+    for _, n in ipairs({ 0, -1, 42, (1 << 53) - 1, 1000000000000001,
+                         1234567890123456789, math.maxinteger, math.mininteger }) do
+        local s = json.encode(n)
+        assert_eq(s, string.format("%d", n), "text of " .. tostring(n))
+        local back = json.decode(s)
+        assert_eq(math.type(back), "integer", "integer back for " .. s)
+        assert_eq(back, n, "value of " .. s)
+    end
+    local t = json.decode(json.encode({ user_id = 1234567890123456789 }))
+    assert_eq(t.user_id, 1234567890123456789, "inside an object")
+end)
+
+test("floats encode in the shortest form that round-trips", function()
+    assert_eq(json.encode(0.1), "0.1")
+    assert_eq(json.encode(1.5), "1.5")
+    for _, x in ipairs({ 0.1, 1 / 3, 2 / 3, 0.1 + 0.2, 1e15 + 0.5, 1e-300,
+                         123456.789, -2.5e-7, 2.0 ^ 53 - 1 }) do
+        assert_eq(json.decode(json.encode(x)), x, "round trip of " .. string.format("%.17g", x))
+    end
+    assert_eq(#json.encode(1 / 3) <= 19, true, "no more than 17 digits")
+end)
+
+test("NaN and infinities are still refused", function()
+    for _, x in ipairs({ 0 / 0, math.huge, -math.huge }) do
+        local ok = pcall(json.encode, x)
+        assert_eq(ok, false, tostring(x))
+    end
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

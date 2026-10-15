@@ -312,7 +312,13 @@ end
 --
 -- Wire format v1 (legacy):  nonce(24) || ct
 -- Wire format v2 (current): version(4 BE) || nonce(24) || ct  (a sealbox blob,
---                           sealed with no context)
+--                           sealed with the context {"totp", user_id})
+--
+-- Audit 15: a v2 blob is bound to its account (the sealbox context), so a
+-- secret copied into another account's row no longer opens there. Rows
+-- sealed before, with no context, still open (decrypt tries the bound form
+-- first, then the unbound one) and are re-sealed bound on the next verify
+-- or by rekey(), like a row on an older key.
 --
 -- v1 was the format before key rotation was supported (single
 -- encryption_key opt). Apps that upgrade with existing rows keep
@@ -327,28 +333,47 @@ local function keyring()
     return { keys = _state.keys, current = _state.current_key_version }
 end
 
+-- The sealbox context of an account's secret.
+local function seal_context(user_id)
+    return { "totp", tostring(user_id) }
+end
+-- How the frame of a bound secret begins (sealbox: each context string
+-- length-prefixed, 4 bytes big-endian).
+local BOUND_PREFIX = string.pack(">s4", "totp")
+
 -- encrypt_secret returns (blob, encrypted_flag, version). When no
 -- encryption keys are configured, secret is stored plaintext;
 -- version is 0 (sentinel for "no encryption"). Otherwise the blob
 -- is versioned and version is _state.current_key_version.
-local function encrypt_secret(secret_bytes)
+local function encrypt_secret(secret_bytes, user_id)
     local cur = _state.current_key_version
     if not (cur and _state.keys[cur]) then return secret_bytes, 0, 0 end
-    return sealbox.seal(keyring(), secret_bytes), 1, cur
+    return sealbox.seal(keyring(), secret_bytes, seal_context(user_id)), 1, cur
 end
 
--- decrypt_secret returns (plaintext, version) on success, or nil on
--- failure. Caller uses the returned version to decide whether to
--- re-encrypt under current (lazy rekey-on-verify).
-local function decrypt_secret(blob, encrypted)
+-- decrypt_secret returns (plaintext, version, unbound) on success, or nil
+-- on failure. Caller uses the returned version to decide whether to
+-- re-encrypt under current (lazy rekey-on-verify), and `unbound` (a v2 blob
+-- sealed without the account context, before audit 15) to re-seal it bound.
+local function decrypt_secret(blob, encrypted, user_id)
     if encrypted == 0 then return blob, 0 end
     if type(blob) ~= "string" then return nil end
 
-    local pt, version_or_reason = sealbox.open(keyring(), blob)
+    local pt, version_or_reason = sealbox.open(keyring(), blob, seal_context(user_id))
     if pt then return pt, version_or_reason end
-    -- A v2 blob with a recognized version that fails to open is real
-    -- corruption or a wrong key; don't paper over it by trying legacy.
     if version_or_reason == "open_failed" and #blob >= sealbox.MIN_LEN then
+        -- A row sealed before secrets were bound to their account. Opened
+        -- without a context, a blob bound to ANOTHER account opens too, to
+        -- its frame ("totp", that account, the secret) - a secret whose
+        -- codes its maker can compute - so a plaintext that starts with
+        -- that frame is refused (a random legacy secret starts so with
+        -- odds of 2^-64).
+        pt, version_or_reason = sealbox.open(keyring(), blob)
+        if pt and pt:sub(1, #BOUND_PREFIX) ~= BOUND_PREFIX then
+            return pt, version_or_reason, true
+        end
+        -- A v2 blob with a recognized version that fails to open is real
+        -- corruption or a wrong key; don't paper over it by trying legacy.
         return nil
     end
 
@@ -390,11 +415,12 @@ local function load_secret(user_id)
         .. "FROM _hull_totp WHERE user_id = ?", { user_id })
     if not rows or #rows == 0 then return nil end
     local row = rows[1]
-    local secret, version = decrypt_secret(row.secret, row.encrypted)
+    local secret, version, unbound = decrypt_secret(row.secret, row.encrypted, user_id)
     if not secret then return nil end  -- decrypt failure → treat as missing
     return {
         secret         = secret,
         version        = version,   -- 0 = plaintext or legacy v1; else key id
+        unbound        = unbound,   -- sealed without the account context
         confirmed      = row.confirmed,
         digits         = row.digits,
         period         = row.period,
@@ -411,7 +437,7 @@ local function load_pending_secret(user_id)
         .. "FROM _hull_totp_pending WHERE user_id = ?", { user_id })
     if not rows or #rows == 0 then return nil end
     local row = rows[1]
-    local secret = decrypt_secret(row.secret, row.encrypted)
+    local secret = decrypt_secret(row.secret, row.encrypted, user_id)
     if not secret then return nil end
     return {
         secret     = secret,
@@ -437,7 +463,7 @@ end
 -- attempt in pcall so a rare DB hiccup can't fail the user's
 -- already-successful authentication.
 local function rekey_row(user_id, secret_bytes)
-    local blob, enc_flag = encrypt_secret(secret_bytes)
+    local blob, enc_flag = encrypt_secret(secret_bytes, user_id)
     if enc_flag ~= 1 then return end  -- no current key, nothing to do
     db.exec(
         "UPDATE _hull_totp SET secret = ?, encrypted = 1, updated_at = ? "
@@ -721,8 +747,16 @@ function totp.init(opts)
                                  or _state.lockout_duration
     _state.max_failed_attempts_per_ip = opts.max_failed_attempts_per_ip
                                         or _state.max_failed_attempts_per_ip
-    _state.lockout_duration_per_ip    = opts.lockout_duration_per_ip
-                                        or _state.lockout_duration_per_ip
+    -- A positive, finite number of seconds (audit 15; a string one was
+    -- coerced here and concatenated by the JS twin). Same rule in both.
+    if opts.lockout_duration_per_ip ~= nil then
+        local v = opts.lockout_duration_per_ip
+        if not (type(v) == "number" and v > 0 and v < math.huge) then
+            error("totp.init: lockout_duration_per_ip must be a positive "
+                  .. "number of seconds", 2)
+        end
+        _state.lockout_duration_per_ip = v
+    end
     _state.trust_xff                  = opts.trust_xff == true
     -- Round-12 LOW-2: reset the one-shot XFF warn flag when the
     -- caller explicitly touched trust_xff. Lets a hot-reload that
@@ -778,10 +812,11 @@ function totp.init(opts)
     if opts.encryption_key and not opts.encryption_keys
        and _state.current_key_version then
         local sample = db.query(
-            "SELECT secret, encrypted FROM _hull_totp "
+            "SELECT user_id, secret, encrypted FROM _hull_totp "
             .. "WHERE encrypted = 1 LIMIT 1")
         if sample and sample[1] then
-            local pt = decrypt_secret(sample[1].secret, sample[1].encrypted)
+            local pt = decrypt_secret(sample[1].secret, sample[1].encrypted,
+                                      sample[1].user_id)
             if not pt then
                 error("totp.init: encryption_key shorthand cannot decrypt "
                       .. "existing _hull_totp rows. This is silent data "
@@ -906,7 +941,7 @@ function totp.enroll(user_id)
     -- RFC 6238 recommends >= 160 bits (20 bytes) of secret entropy.
     local secret_bytes = crypto.random(20)
     local secret_b32   = base32_encode(secret_bytes)
-    local stored, encrypted_flag = encrypt_secret(secret_bytes)
+    local stored, encrypted_flag = encrypt_secret(secret_bytes, user_id)
 
     local codes, hashes = generate_recovery_codes(_state.recovery_codes)
 
@@ -1100,7 +1135,7 @@ function totp.verify_with_kind(user_id, code, req)
                 -- itself already succeeded; a transient DB error on
                 -- the rekey path doesn't block the user.
                 if _state.current_key_version
-                   and row.version ~= _state.current_key_version then
+                   and (row.version ~= _state.current_key_version or row.unbound) then
                     -- pcall, as the comment on rekey_row says: a DB error
                     -- here burned an already-accepted code with a 500.
                     pcall(rekey_row, user_id, row.secret)
@@ -1133,7 +1168,7 @@ function totp.verify_with_kind(user_id, code, req)
             -- decrypted secret is in hand so we might as well
             -- migrate it forward.
             if _state.current_key_version
-               and row.version ~= _state.current_key_version then
+               and (row.version ~= _state.current_key_version or row.unbound) then
                 pcall(rekey_row, user_id, row.secret)
             end
             return true, "recovery"
@@ -1184,10 +1219,10 @@ function totp.rekey()
     local scanned, rekeyed, failed = 0, 0, 0
     for _, r in ipairs(rows or {}) do
         scanned = scanned + 1
-        local pt, version = decrypt_secret(r.secret, r.encrypted)
+        local pt, version, unbound = decrypt_secret(r.secret, r.encrypted, r.user_id)
         if not pt then
             failed = failed + 1
-        elseif version ~= cur then
+        elseif version ~= cur or unbound then
             -- Use the rekey_row helper directly (it calls db.exec
             -- without an intermediate pcall, so the stdlib-caller
             -- check sees totp's frame at level 1). Wrap the whole
@@ -1211,11 +1246,11 @@ end
 function totp.rekey_status()
     check_initialized()
     local rows = db.query(
-        "SELECT secret, encrypted FROM _hull_totp")
+        "SELECT user_id, secret, encrypted FROM _hull_totp")
     local counts = { total = 0 }
     for _, r in ipairs(rows or {}) do
         counts.total = counts.total + 1
-        local _, version = decrypt_secret(r.secret, r.encrypted)
+        local _, version = decrypt_secret(r.secret, r.encrypted, r.user_id)
         -- version is nil on decrypt failure; use 0 as the "unknown
         -- / unrecoverable" bucket (matches the version=0 used for
         -- plaintext + legacy v1).

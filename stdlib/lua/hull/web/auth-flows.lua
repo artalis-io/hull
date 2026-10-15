@@ -1633,7 +1633,7 @@ end
 -- Issue a pending-2FA token and respond appropriately for the
 -- channel: JSON (login, a JSON magic-link POST), or for a browser
 -- (`as_page`: the magic-link page's form) an HTML form or redirect.
-local function start_totp_pending(req, res, user, as_page)
+local function start_totp_pending(req, res, user, as_page, first_factor)
     local uid = user_uid(user)
     -- Bound to the password (and address) the first factor was checked
     -- against, as a reset token is (audit 9): a pending token taken before a
@@ -1644,7 +1644,10 @@ local function start_totp_pending(req, res, user, as_page)
                     and _state.user_find_by_email(user.email) or nil
     local token = issue_token(uid, ACTIONS.totp_pending,
                                _state.totp_pending_ttl,
-                               { pwb = password_binding(current or user) })
+                               { pwb = password_binding(current or user),
+                                 -- The first factor this sign-in passed
+                                 -- (audit 14), recorded with the second.
+                                 ff = first_factor })
     if not as_page then
         return res:json({
             ok = true, pending_2fa = true, totp_token = token,
@@ -1714,7 +1717,7 @@ local function handle_login(req, res)
     clear_failed_logins(uid)
     if _state.enable_totp
        and _state.user_totp_enrolled(user_uid(user)) then
-        return start_totp_pending(req, res, user)
+        return start_totp_pending(req, res, user, false, "password")
     end
     finish_login(req, res, user, "password")
 end
@@ -1877,7 +1880,7 @@ local function handle_magic_link_consume(req, res)
     gc_expired()
     if _state.enable_totp
        and _state.user_totp_enrolled(user_uid(user)) then
-        return start_totp_pending(req, res, user, not wants_json(req))
+        return start_totp_pending(req, res, user, not wants_json(req), "magic_link")
     end
     finish_login(req, res, user, "magic_link")
 end
@@ -1931,8 +1934,12 @@ local function handle_totp_verify(req, res)
     gc_expired()
     -- 2FA path - record both factors. Apps reading audit logs
     -- can use this to distinguish "password-only" from "with
-    -- 2FA" logins for compliance reporting.
-    finish_login(req, res, user, "password+totp")
+    -- 2FA" logins for compliance reporting. The first factor is the one
+    -- the pending token was issued after (audit 14: a magic-link sign-in
+    -- was recorded as "password+totp"); a token from before it was carried
+    -- came from the password path.
+    local first = env.ff == "magic_link" and "magic_link" or "password"
+    finish_login(req, res, user, first .. "+totp")
 end
 
 local function handle_password_reset_request(req, res)
@@ -2187,15 +2194,24 @@ local function handle_email_change(req, res)
     end
     local link = origin .. _state.prefix
                  .. "/email-change/confirm?token=" .. token
-    -- Send to the NEW address - proves the user controls it. A failure
-    -- leaves no pending row behind (it would block a retry until it expired).
+    -- Send to the NEW address - proves the user controls it. Like the
+    -- notice, it is required (audit 14): it skips the per-recipient rate
+    -- limit (which dropped it silently, answering ok while the pending row
+    -- blocked a retry for email_change_ttl), and when it cannot be sent
+    -- (email_send throws or returns false) the row goes and the request
+    -- answers 503.
     local ok, cerr = pcall(send_email, body.new_email, "email_change", {
         user = user, link = link, token = token,
         new_email = body.new_email,
-    })
+    }, true)
     if not ok then
         drop_row()
-        error(cerr, 0)
+        require("hull.log").warn("auth-flows: email change of account "
+            .. tostring(user_id) .. " not started: the confirmation to the "
+            .. "new address could not be sent: " .. tostring(cerr))
+        return res:status(503):json({
+            error = "could not send the confirmation to the new address; email change not started",
+        })
     end
     res:json({ ok = true })
 end
@@ -2437,12 +2453,13 @@ local function handle_email_change_confirm(req, res)
     -- row is deleted (not put back to pending): the link that would confirm
     -- it is already consumed.
     local keep = _state.templates.email_change_notify
+    local old_verified = keep and old_verified_state(user) or nil
     local n
     if keep then
         n = db.exec("UPDATE _hull_auth_pending_email_changes "
                     .. "SET confirmed_at = ?, old_email = ?, old_verified = ? "
                     .. "WHERE user_id = ? AND token_hash = ? AND confirmed_at IS NULL",
-                    { time.now(), old_email, old_verified_state(user), key, th })
+                    { time.now(), old_email, old_verified, key, th })
     else
         n = db.exec("DELETE FROM _hull_auth_pending_email_changes "
                     .. "WHERE user_id = ? AND token_hash = ? AND confirmed_at IS NULL",
@@ -2460,6 +2477,44 @@ local function handle_email_change_confirm(req, res)
         error(serr, 0)
     end
     _state.user_set_email_verified(env.sub, true)
+    -- A revoke that ran between the row write above and the switch (audit
+    -- 14) found the account still on its old address, so it restored
+    -- nothing and paused changes only - and the switch then moved the
+    -- account to the new address anyway, where a password reset could take
+    -- it. So the row is read again AFTER the switch: when it is no longer
+    -- this change's confirmed row, a revoke has undone the change, and the
+    -- confirm puts the old address (and its verified state) back itself.
+    -- A revoke that marks the row after this read runs its own restore
+    -- after these writes, so it wins either way.
+    if keep then
+        local rows = db.query(
+            "SELECT token_hash FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+            { key })
+        local cur = rows and rows[1]
+        if cur and cur.token_hash == UNDONE_LOCKED_MARK then
+            -- The revoke found the old address taken and locked recovery.
+            return verify_fail(req, res, 409, "email change failed: it was revoked")
+        end
+        if not (cur and type(cur.token_hash) == "string"
+                and crypto.constant_time_eq(cur.token_hash, th)) then
+            local rok, rerr = pcall(_state.user_set_email, env.sub, old_email)
+            if rok then
+                _state.user_set_email_verified(env.sub, old_verified == 1)
+            else
+                -- The old address cannot be put back: lock self-service
+                -- recovery, as the revoke does when it cannot restore.
+                require("hull.log").warn("auth-flows: email change of account "
+                    .. tostring(env.sub) .. " was revoked while it was being "
+                    .. "confirmed and its previous address could not be restored: "
+                    .. tostring(rerr) .. "; self-service recovery locked - restore "
+                    .. "the account by hand, then call auth_flows.unlock_recovery(user_id)")
+                db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
+                        .. "new_email = ? WHERE user_id = ? AND token_hash = ?",
+                        { UNDONE_LOCKED_MARK, env.new_email, key, UNDONE_MARK })
+            end
+            return verify_fail(req, res, 409, "email change failed: it was revoked")
+        end
+    end
     emit_event(env.sub, "email_changed", req,
                { metadata = { old_email = old_email,
                               new_email = env.new_email } })
@@ -2788,6 +2843,22 @@ function M.init(opts)
         if type(opts.totp_verify) ~= "function" then
             error("auth-flows.init: totp_verify(user, code) -> boolean "
                   .. "required when enable_totp = true")
+        end
+    end
+
+    -- Counts and durations must be whole numbers above zero (audit 14):
+    -- max_failed_logins = 0 locked every address out after two tries, NaN
+    -- turned the lockout off, and a string ttl failed at the first request.
+    -- Same rule as the JS twin; nil keeps the default.
+    for _, k in ipairs({ "max_failed_logins", "max_failed_logins_per_account",
+                         "lockout_duration", "verify_ttl", "reset_ttl",
+                         "magic_link_ttl", "email_change_ttl",
+                         "totp_pending_ttl" }) do
+        local v = opts[k]
+        if v ~= nil and not (type(v) == "number" and v > 0 and v < math.huge
+                             and v == math.floor(v)) then
+            error("auth-flows.init: " .. k .. " must be a whole number > 0 (got "
+                  .. tostring(v) .. ")")
         end
     end
 
