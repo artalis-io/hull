@@ -877,7 +877,8 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
      * is armed (audit 15). */
     if (!hl_lua_can_wait(L)) {
         lua_free_hl_values(L, params, nparams);
-        hl_lua_check_can_wait(L, "db.async");
+        hl_lua_check_can_wait(L, "db.async");   /* raises */
+        return luaL_error(L, "db.async cannot wait here");
     }
 
     /* Allocate op */

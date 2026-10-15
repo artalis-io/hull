@@ -235,7 +235,8 @@ static int lua_worker_dispatch(lua_State *L)
     if (!hl_lua_can_wait(L)) {
         free(bw.buf);
         hl_kv_free(ctx_kvs, ctx_count);
-        hl_lua_check_can_wait(L, "worker.dispatch()");
+        hl_lua_check_can_wait(L, "worker.dispatch()");   /* raises */
+        return luaL_error(L, "worker.dispatch() cannot wait here");
     }
 
     /* Allocate dispatch op */
