@@ -20,7 +20,7 @@ local cache     = require("hull.cache")
 local cookie    = require("hull.web.cookie")
 local session   = require("hull.web.middleware.session")
 local idem      = require("hull.web.middleware.idempotency")
-local oauth     = require("hull.web.middleware.oauth")
+require("hull.web.middleware.oauth")   -- registers its test hooks
 
 local pass = 0
 local fail = 0
