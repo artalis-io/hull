@@ -216,5 +216,16 @@ function cleanup() {
     );
 }
 
-const inbox = { init, isDuplicate, markProcessed, checkAndMark, cleanup };
+// Test-only: mark a message's record expired. A ttl must be positive (audit
+// 15), so a test can no longer plant an already-expired mark with ttl: -1.
+// Inside the module so the _hull_* namespace check admits the write.
+const _test = {
+    expire(messageId, source) {
+        db.exec("UPDATE _hull_inbox_processed SET expires_at = 0 "
+                + "WHERE source = ? AND message_id = ?",
+                [normSource(source), normId(messageId)]);
+    },
+};
+
+const inbox = { init, isDuplicate, markProcessed, checkAndMark, cleanup, _test };
 export { inbox };
