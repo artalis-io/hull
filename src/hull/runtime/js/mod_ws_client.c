@@ -42,8 +42,16 @@ typedef struct {
     JSValue         on_message;
     JSValue         on_close;
     JSValue         on_error;
-    JSValue         self_ref;    /* DupValue'd self object (prevent GC while active) */
+    /* A reference the object holds on itself while connected. Not reported
+     * by gc_mark, so the cycle collector sees an outside reference and keeps
+     * the object - and the callbacks it marks - as a root, whether or not
+     * the app kept the handle (audit 15: reported, the self-cycle was
+     * garbage, and a dropped client was collected and closed silently).
+     * Dropped one loop turn after the close (js_ws_client_finish), or by
+     * runtime teardown. */
+    JSValue         self_ref;
     int             release_scheduled;  /* self_ref release already queued */
+    uint64_t        release_timer;      /* its backend timer, 0 once fired */
     JSContext      *ctx;
     HlJS           *js;
     /* On the runtime's teardown list while `client` is held: the Keel
@@ -52,17 +60,29 @@ typedef struct {
     HlAsyncTeardown teardown;
 } HlJSWsClientUD;
 
-/* Runtime teardown, the loop still alive: free the Keel connection now. The
- * object itself (and its callbacks) go with the runtime. */
+/* Runtime teardown, the loop still alive: free the Keel connection now and
+ * drop the self-reference (a pending release timer is cancelled first), so
+ * the object goes with the runtime. Releasing it can run the finalizer,
+ * which frees ud: nothing touches ud after that. */
 static void js_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
 {
-    (void)loop;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)(void *)
         ((char *)t - offsetof(HlJSWsClientUD, teardown));
     ud->closed = 1;
     if (ud->client) {
         kl_ws_client_free(ud->client);
         ud->client = NULL;
+    }
+    if (ud->release_timer && loop) {
+        const HlAsyncBackend *be = hl_async_backend();
+        if (be) be->timer_cancel(loop, ud->release_timer);
+    }
+    ud->release_timer = 0;
+    if (!JS_IsUndefined(ud->self_ref)) {
+        JSContext *ctx = ud->ctx;
+        JSValue self = ud->self_ref;
+        ud->self_ref = JS_UNDEFINED;
+        JS_FreeValue(ctx, self);   /* may free ud */
     }
 }
 
@@ -84,9 +104,8 @@ static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
     if (!JS_IsUndefined(ud->on_message)) JS_FreeValueRT(rt, ud->on_message);
     if (!JS_IsUndefined(ud->on_close))   JS_FreeValueRT(rt, ud->on_close);
     if (!JS_IsUndefined(ud->on_error))   JS_FreeValueRT(rt, ud->on_error);
-    /* self_ref is the cycle-breaking handle dropped by on_close (or
-     * never installed if connect failed early); freeing it here would
-     * double-decrement the GC refcount. */
+    /* self_ref is undefined here: while it is held the object cannot be
+     * finalized (gc_mark does not report it). */
     js_free_rt(rt, ud);
 }
 
@@ -100,7 +119,7 @@ static void js_ws_client_conn_gc_mark(JSRuntime *rt, JSValueConst val,
     if (!JS_IsUndefined(ud->on_message)) JS_MarkValue(rt, ud->on_message, mark_func);
     if (!JS_IsUndefined(ud->on_close)) JS_MarkValue(rt, ud->on_close, mark_func);
     if (!JS_IsUndefined(ud->on_error)) JS_MarkValue(rt, ud->on_error, mark_func);
-    if (!JS_IsUndefined(ud->self_ref)) JS_MarkValue(rt, ud->self_ref, mark_func);
+    /* Not self_ref: see HlJSWsClientUD. */
 }
 
 static const JSClassDef js_ws_client_conn_class = {
@@ -293,6 +312,7 @@ static void js_ws_client_on_message(KlWsClientConn *ws, const char *data,
 static void js_ws_client_release_self(void *user_data)
 {
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
+    ud->release_timer = 0;   /* fired */
     if (JS_IsUndefined(ud->self_ref)) return;
     JSValue self = ud->self_ref;
     ud->self_ref = JS_UNDEFINED;
@@ -316,13 +336,17 @@ static void js_ws_client_finish(HlJSWsClientUD *ud)
      * reference is kept: a leak until teardown, not a use after free. */
     if (!JS_IsUndefined(ud->self_ref) && !ud->release_scheduled) {
         const HlAsyncBackend *be = hl_async_backend();
-        if (!be || !ud->js->base.async_ctx ||
-            be->timer_add(ud->js->base.async_ctx, 0,
-                          js_ws_client_release_self, ud) == 0)
+        uint64_t h = (be && ud->js->base.async_ctx)
+            ? be->timer_add(ud->js->base.async_ctx, 0,
+                            js_ws_client_release_self, ud)
+            : 0;
+        if (h == 0) {
             log_warn("[hull:ws:client] could not schedule the close "
                      "release; the client is kept until shutdown");
-        else
+        } else {
             ud->release_scheduled = 1;
+            ud->release_timer = h;
+        }
     }
 }
 
@@ -457,8 +481,9 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     ud->on_message = JS_IsFunction(ctx, on_message) ? on_message : (JS_FreeValue(ctx, on_message), JS_UNDEFINED);
     ud->on_close = JS_IsFunction(ctx, on_close) ? on_close : (JS_FreeValue(ctx, on_close), JS_UNDEFINED);
     ud->on_error = JS_IsFunction(ctx, on_error) ? on_error : (JS_FreeValue(ctx, on_error), JS_UNDEFINED);
-    ud->self_ref = JS_DupValue(ctx, obj); /* prevent GC while connected */
+    ud->self_ref = JS_DupValue(ctx, obj); /* a GC root while connected */
     ud->release_scheduled = 0;
+    ud->release_timer = 0;
     ud->ctx = ctx;
     ud->js = js;
     ud->client = NULL;

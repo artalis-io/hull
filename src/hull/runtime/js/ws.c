@@ -47,12 +47,12 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     /* Look up handler */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue store = hl_js_internals(ctx);
+    JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     JSValue handler = JS_GetPropertyUint32(ctx, routes,
                                             (uint32_t)route->on_open_id);
     JS_FreeValue(ctx, routes);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 
     if (!JS_IsFunction(ctx, handler)) {
         JS_FreeValue(ctx, handler);
@@ -118,12 +118,12 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     /* Look up handler */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue routes_arr = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue store = hl_js_internals(ctx);
+    JSValue routes_arr = JS_GetPropertyStr(ctx, store, "__hull_routes");
     JSValue handler = JS_GetPropertyUint32(ctx, routes_arr,
                                             (uint32_t)route->on_message_id);
     JS_FreeValue(ctx, routes_arr);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 
     if (!JS_IsFunction(ctx, handler)) {
         JS_FreeValue(ctx, handler);
@@ -215,12 +215,12 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         js->active_on_complete_ctx = conn;
 
         /* Look up handler */
-        JSValue global = JS_GetGlobalObject(ctx);
-        JSValue routes_arr = JS_GetPropertyStr(ctx, global, "__hull_routes");
+        JSValue store = hl_js_internals(ctx);
+        JSValue routes_arr = JS_GetPropertyStr(ctx, store, "__hull_routes");
         JSValue handler = JS_GetPropertyUint32(ctx, routes_arr,
                                                 (uint32_t)route->on_close_id);
         JS_FreeValue(ctx, routes_arr);
-        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, store);
 
         if (JS_IsFunction(ctx, handler)) {
             JSValue conn_obj = hl_js_ws_push_conn(ctx, conn);

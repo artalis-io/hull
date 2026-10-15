@@ -938,7 +938,6 @@ static GpuAsyncTmp *gpu_async_tmp_open(lua_State *L)
 /* Async dispatch - submits GPU work to thread pool */
 static int l_gpu_async_dispatch(lua_State *L)
 {
-    hl_lua_check_can_wait(L, "gpu.async.dispatch()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");
@@ -1077,6 +1076,10 @@ static int l_gpu_async_dispatch(lua_State *L)
         }
     }
     lua_pop(L, 1);
+
+    /* After the opts (app code that could BEGIN), before anything is armed;
+     * on a refusal `tmp` frees the copies (audit 15). */
+    hl_lua_check_can_wait(L, "gpu.async.dispatch()");
 
     /* Allocate worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
@@ -1419,7 +1422,6 @@ static void lua_push_worker_gpu_pipeline_result(lua_State *L, void *driver)
 
 static int l_gpu_async_pipeline(lua_State *L)
 {
-    hl_lua_check_can_wait(L, "gpu.async.pipeline()");   /* before anything is armed */
     lua_settop(L, 2);                /* opts may be absent: keep slot 2 */
     lua_newtable(L);                 /* anchor: see hl_lua_anchor */
     const int anchor = lua_gettop(L);
@@ -1487,6 +1489,10 @@ static int l_gpu_async_pipeline(lua_State *L)
             pipe_timeout_ms = gpu_timeout_arg(L, -1);
         lua_pop(L, 1);
     }
+
+    /* After the stages and opts (app code that could BEGIN), before
+     * anything is armed (audit 15). */
+    hl_lua_check_can_wait(L, "gpu.async.pipeline()");
 
     /* Deep-copy into worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));

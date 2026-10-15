@@ -115,11 +115,11 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     js->last_async_cont = NULL;
 
     /* Get the handler function from the route registry */
-    JSValue global = JS_GetGlobalObject(js->ctx);
-    JSValue routes = JS_GetPropertyStr(js->ctx, global, "__hull_routes");
+    JSValue store = hl_js_internals(js->ctx);
+    JSValue routes = JS_GetPropertyStr(js->ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes) || !JS_IsArray(js->ctx, routes)) {
         JS_FreeValue(js->ctx, routes);
-        JS_FreeValue(js->ctx, global);
+        JS_FreeValue(js->ctx, store);
         js->active_conn = NULL;
         js->active_req = NULL;
         return -1;
@@ -131,7 +131,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
 
     if (!JS_IsFunction(js->ctx, handler)) {
         JS_FreeValue(js->ctx, handler);
-        JS_FreeValue(js->ctx, global);
+        JS_FreeValue(js->ctx, store);
         js->active_conn = NULL;
         js->active_req = NULL;
         return -1;
@@ -143,7 +143,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     HlReqLife *life = hl_req_life_new();
     if (!life) {
         JS_FreeValue(js->ctx, handler);
-        JS_FreeValue(js->ctx, global);
+        JS_FreeValue(js->ctx, store);
         js->active_conn = NULL;
         js->active_req = NULL;
         return -1;
@@ -216,7 +216,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, js_res);
     JS_FreeValue(js->ctx, js_req);
     JS_FreeValue(js->ctx, handler);
-    JS_FreeValue(js->ctx, global);
+    JS_FreeValue(js->ctx, store);
 
     /* Suspended: the continuations hold the life now. Otherwise the handler
      * is done with its request. Either way dispatch drops its own ref. */
@@ -295,11 +295,11 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     req_ctx_sweep(js, req);
 
     /* Get the handler function from the route registry */
-    JSValue global = JS_GetGlobalObject(js->ctx);
-    JSValue routes = JS_GetPropertyStr(js->ctx, global, "__hull_routes");
+    JSValue store = hl_js_internals(js->ctx);
+    JSValue routes = JS_GetPropertyStr(js->ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes) || !JS_IsArray(js->ctx, routes)) {
         JS_FreeValue(js->ctx, routes);
-        JS_FreeValue(js->ctx, global);
+        JS_FreeValue(js->ctx, store);
         return -1;
     }
 
@@ -309,7 +309,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
 
     if (!JS_IsFunction(js->ctx, handler)) {
         JS_FreeValue(js->ctx, handler);
-        JS_FreeValue(js->ctx, global);
+        JS_FreeValue(js->ctx, store);
         return -1;
     }
 
@@ -318,7 +318,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     HlReqLife *life = hl_req_life_new();
     if (!life) {
         JS_FreeValue(js->ctx, handler);
-        JS_FreeValue(js->ctx, global);
+        JS_FreeValue(js->ctx, store);
         return -1;
     }
 
@@ -403,7 +403,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, js_res);
     JS_FreeValue(js->ctx, js_req);
     JS_FreeValue(js->ctx, handler);
-    JS_FreeValue(js->ctx, global);
+    JS_FreeValue(js->ctx, store);
 
     /* Run any pending microtasks - with no request active: whatever they
      * reach is not this middleware's to suspend (and in_middleware still

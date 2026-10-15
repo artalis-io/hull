@@ -223,6 +223,11 @@ typedef struct HlJS {
      * before or instead of calling app.manifest(). */
     void           *manifest;
 
+    /* The internal store (JSValue *, owned; hl_js_internals): a
+     * prototype-less object the runtime's __hull_* tables live on, held
+     * here rather than on globalThis so app code cannot reach them. */
+    void           *internals;
+
     /* The header lines each in-flight script entry's response started with
      * (shared/res_base.h): the entry's 500 keeps the ones earlier middleware
      * set. Per runtime, freed with it (audit 12). Event-loop thread only. */

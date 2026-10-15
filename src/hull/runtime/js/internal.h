@@ -370,6 +370,17 @@ int hl_js_poison_code_constructors(JSContext *ctx);
  * onto HlJS.manifest, defined before any app code runs. 0 / -1. */
 int hl_js_define_manifest_global(JSContext *ctx);
 
+/* The runtime's internal store (HlJS.internals, runtime.c): a prototype-less
+ * object held in C, never reachable from script, holding the tables app.*
+ * registration fills and the wiring reads - __hull_routes, __hull_route_defs,
+ * __hull_middleware, __hull_post_middleware, __hull_timers,
+ * __hull_timer_defs, __hull_ws_defs, __hull_sse_defs, __hull_main,
+ * __hull_app_ref, __hull_test_state. They were globals: app code could
+ * define them itself and have routes or timers wired without declaring the
+ * modules (audit 15). The Lua runtime keeps them in the registry. Main VM
+ * only (not a worker context). A new reference; undefined before init. */
+JSValue hl_js_internals(JSContext *ctx);
+
 /* Free req->ctx (a middleware's req.ctx, or a test dispatch's JSON) and
  * clear it, and any ctx an earlier request on the same connection slot left
  * tracked (dispatch.c). Idempotent. */

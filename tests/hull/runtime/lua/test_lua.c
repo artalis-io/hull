@@ -6703,6 +6703,9 @@ static int run_task_script(const char *body, char *out, size_t outsz)
     return 0;
 }
 
+/* The http config the next run_task_script_db installs (NULL: none). */
+static HlHttpConfig *task_http_cfg;
+
 /* run_task_script with the database capability (a registry whose "default"
  * is an in-memory SQLite connection). */
 static int run_task_script_db(const char *body, char *out, size_t outsz)
@@ -6712,6 +6715,7 @@ static int run_task_script_db(const char *body, char *out, size_t outsz)
     init_lua_with_caps();
     if (!lua_initialized) return 4;
     if (be->init(&lua_rt.base.async_ctx, NULL) != 0) return 2;
+    lua_rt.base.http_cfg = task_http_cfg;
 
     size_t n = strlen(TASK_PRELUDE) + strlen(body) + 64;
     char *src = malloc(n);
@@ -6731,6 +6735,7 @@ static int run_task_script_db(const char *body, char *out, size_t outsz)
     lua_pop(lua_rt.L, 1);
 
     HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
     be->tick(actx, 0);
     be->free(actx);
@@ -10581,10 +10586,16 @@ UTEST(lua_audit12, a_task_failure_hook_restores_the_runs_state)
     ASSERT_TRUE(lua_initialized);
     ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
     lua_State *L = lua_rt.L;
+    /* The run's wall-clock deadline too (audit 14): the hook arms its own,
+     * which the run used to keep. */
+    HL_LUA_ARM(&lua_rt, L);
+    uint64_t run_deadline = hl_run_watch_save(&lua_rt.run_watch);
+    EXPECT_NE(run_deadline, (uint64_t)0);
     ASSERT_EQ(luaL_dostring(L,
         "HOOKED = 0\n"
         "hull._spawn(function() error('task boom') end,\n"
         "            function(msg) HOOKED = HOOKED + 1 end)\n"), LUA_OK);
+    wd_sleep_ms(20);   /* the hook's deadline is a later one */
 
     /* The state of the run the loop is pumped from. */
     static int marker;
@@ -10608,6 +10619,7 @@ UTEST(lua_audit12, a_task_failure_hook_restores_the_runs_state)
     EXPECT_EQ(lua_rt.budget.used, (int64_t)678);
     EXPECT_EQ(lua_rt.budget.tripped, 0);
     EXPECT_EQ(oc_calls, 0);
+    EXPECT_EQ(hl_run_watch_save(&lua_rt.run_watch), run_deadline);
 
     lua_rt.active_on_complete     = NULL;
     lua_rt.active_on_complete_ctx = NULL;
@@ -10628,5 +10640,84 @@ UTEST(lua_stdlib, etag_audit13_suite)
     EXPECT_EQ(pass, 36LL);
     cleanup_lua_caps();
 }
+
+/* ── Audit 15: runtime lows ───────────────────────────────────────────── */
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+/* A wait refuses to start inside a transaction, but http.fetch checked that
+ * before it read its options: an opts __index (app code) that BEGINs ran
+ * after the check, and the fetch then waited inside the transaction. The
+ * check runs after the options now, with no app code before the op is
+ * armed. Unfixed, the fetch got as far as the host check. */
+UTEST(lua_audit15, the_wait_check_runs_after_the_opts_are_read)
+{
+    HlHttpConfig cfg = {0};          /* no hosts: a started fetch is refused */
+    task_http_cfg = &cfg;
+    char out[512];
+    int rc = run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "local http = require('hull.http-client')\n"
+        "local opts = setmetatable({}, { __index = function(_, k)\n"
+        "  if k == 'body' then db.exec('BEGIN') end end })\n"
+        "local ok, e = pcall(http.async.request, 'GET', 'http://x.invalid/', opts)\n"
+        "check(not ok and tostring(e):find('transaction is open', 1, true),\n"
+        "      'fetch: '..tostring(e))\n"
+        "db.exec('ROLLBACK')\n",
+        out, sizeof out);
+    task_http_cfg = NULL;
+    ASSERT_EQ(rc, 0);
+    ASSERT_STREQ(out, "ok");
+}
+#endif
+
+/* A worker.dispatch VM is closed after the job, and lua_close runs its __gc
+ * finalizers - app code. The job's deadline was disarmed before the close,
+ * so a looping finalizer held the pool thread for good; it is disarmed after
+ * now. No instruction limit: only the deadline can stop it. */
+UTEST(lua_audit15, a_dispatch_finalizer_is_bounded_by_the_deadline)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    hl_run_watchdog_configure(WD_TEST_MS);
+    lua_rt.max_instructions = 0;
+    char out[256];
+    lua_worker_run(&f,
+        "return require('hull.worker').dispatch(function()\n"
+        "  KEEP = setmetatable({}, { __gc = function() while true do end end })\n"
+        "  return 'done' end)\n", out, sizeof out);
+    hl_run_watchdog_configure(-1);
+    EXPECT_STREQ(out, "done");
+    lua_worker_close(&f);
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* A timer handler's wait that is cancelled never completes, so nothing
+ * cleared the timer's in_flight: every later fire saw it in flight and only
+ * retried. The cancel clears it and reschedules the timer (not at shutdown). */
+UTEST(lua_audit15, a_cancelled_timer_wait_clears_in_flight)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    HlLuaTimer t;
+    memset(&t, 0, sizeof t);
+    t.lua = &lua_rt;
+    t.interval_ms = 60000;
+    t.in_flight = 1;                 /* as the trampoline leaves it */
+    lua_rt.active_timer = &t;
+    lua_State *co;
+    EXPECT_EQ(ssh_co_start(&lua_rt, "hull.sleep(60000) return 'woke'", &co),
+              LUA_YIELD);
+    lua_rt.active_timer = NULL;
+    lua_rt.active_co = NULL;
+    lua_rt.active_thread_ref = LUA_NOREF;   /* the continuation holds it */
+    /* Cancel the wait, the runtime not shutting down. */
+    hl_async_teardown_run(&lua_rt.base.async_live, lua_rt.base.async_ctx);
+    EXPECT_EQ(t.in_flight, 0);
+    EXPECT_NE(t.timer_id, (int64_t)0);
+    if (t.timer_id > 0)
+        f.be->timer_cancel(f.actx, (uint64_t)t.timer_id);
+    lua_worker_close(&f);
+}
+#endif
 
 UTEST_MAIN();

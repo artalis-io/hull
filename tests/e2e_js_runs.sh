@@ -30,6 +30,11 @@
 #   L2  A stashed res is compressed for its own request.
 #   c_db L1  A wait on a promise Hull does not drive is checked too.
 #
+# Audit 15:
+#   L   A ws client whose handle the app dropped was garbage to the cycle
+#       collector (its self-reference was reported as a child) and was
+#       closed at the next collection; it stays a root while connected.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -105,6 +110,30 @@ app.get("/wsgo", (req, res) => {
 });
 let wsControl = "none";
 app.get("/wsseen", (_req, res) => res.text(wsSeen + "/" + wsControl));
+
+/* Audit 15: a ws client whose handle the app dropped is a GC root while
+ * connected - it was collected (and closed) at the next cycle collection. */
+const pushConns = [];
+app.ws("/push", { onOpen(c) { pushConns.push(c); }, onMessage(c, m) {} });
+let dropGot = "none";
+app.get("/wsdrop", (req, res) => {
+    wsClient.connect("ws://127.0.0.1:" + req.query.port + "/push", {
+        onMessage(c, m) { dropGot = m; },
+    });
+    res.text("started");
+});
+app.get("/gc", (_req, res) => {
+    /* Self-referencing garbage refcounting cannot free: the cycle
+     * collector runs, several times over. */
+    for (let i = 0; i < 300000; i++) { const o = { i }; o.self = o; }
+    res.text("gc");
+});
+app.get("/pushnow", (_req, res) => {
+    let n = 0;
+    for (const c of pushConns) { try { c.send("after-gc"); n++; } catch (_) {} }
+    res.text(String(n));
+});
+app.get("/dropgot", (_req, res) => res.text(dropGot));
 
 /* Every request passes this, 404s included: ~200 KB on req.ctx. */
 app.use("*", "/*", (req, res) => { req.ctx.blob = "x".repeat(200000); return 0; });
@@ -320,6 +349,15 @@ case "$out" in
     *'"ws"'*|*'"wc"'*) fail "nothing of either transaction is committed" "$out" ;;
     *) pass "nothing of either transaction is committed" ;;
 esac
+
+echo "=== audit 15: a ws client whose handle was dropped survives a GC ==="
+curl -s -m 10 -o /dev/null "$URL/wsdrop?port=$PORT"
+sleep 0.5
+curl -s -m 30 -o /dev/null "$URL/gc"
+curl -s -m 10 -o /dev/null "$URL/pushnow"
+sleep 0.5
+out=$(curl -s -m 10 "$URL/dropgot")
+[ "$out" = after-gc ] && pass "the dropped client still receives after a GC"     || fail "the dropped client still receives after a GC" "$out"
 
 echo "=== audit 8 H1: an op made while a resume settles its promise ==="
 # A keep-alive client (one connection, many requests) runs meanwhile: the

@@ -1199,6 +1199,9 @@ const client = ws.connect("ws://other:8080/feed", {
 - Host allowlist enforced (same as `http.fetch`. Must be in manifest `hosts`)
 - Requires running server (`hull` with `-p` port)
 - Callbacks fire on the event loop thread (same as server WS callbacks)
+- The client lives until it closes: an app need not keep the returned handle
+  (in JS a dropped handle was collected, and the connection closed, at the
+  next garbage collection - audit 15)
 
 ### SSE Endpoints
 
