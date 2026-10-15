@@ -426,27 +426,41 @@ static void materialize_value(const HlValue *in, HlDbValue *out)
  * budget bound on this thread (audit 15). Only the 100k-row cap stood in the
  * way: a few large values per row exhausted the process's memory. */
 typedef struct {
-    HlDbResult *r;
-    const char *err;   /* static message, set on failure */
-    size_t      bytes;
-    size_t      max_bytes;
+    HlDbResult   *r;
+    const char   *err;   /* static message, set on failure */
+    size_t        bytes;
+    size_t        max_bytes;
+    HlDbOpBudget *budget;   /* the op's, bound on this thread (or NULL) */
 } MaterializeCtx;
+
+/* The copy failed with @p msg: the rest of the reply would only be thrown
+ * away, so trip the op's budget too. A row callback's stop only stops the
+ * copy: the Postgres / MySQL backends read on to the end of the reply -
+ * every remaining row of `SELECT repeat('x', 100000) FROM
+ * generate_series(1, 1e9)`, uncharged and with no deadline, holding a pool
+ * thread for hours - while a tripped budget makes them close the connection
+ * at the next row (pg_abandon_if_tripped / my_abandon_if_tripped). SQLite
+ * and DuckDB stop on the callback's return already (audit 16). Returns -1. */
+static int materialize_fail(MaterializeCtx *mc, const char *msg)
+{
+    mc->err = msg;
+    if (mc->budget) mc->budget->tripped = 1;
+    return -1;
+}
 
 /* Count @p n more result bytes: 0 to go on, -1 (mc->err set) when over the
  * cap or the op's budget is exhausted. */
 static int materialize_account(MaterializeCtx *mc, size_t n)
 {
-    if (n > mc->max_bytes || mc->bytes > mc->max_bytes - n) {
-        mc->err = "result too large (it exceeds the heap limit)";
-        return -1;
-    }
+    if (n > mc->max_bytes || mc->bytes > mc->max_bytes - n)
+        return materialize_fail(mc, "result too large (it exceeds the heap "
+                                    "limit)");
     mc->bytes += n;
     int64_t units = (int64_t)((n + HL_DB_ALLOC_UNIT_BYTES - 1) /
                               HL_DB_ALLOC_UNIT_BYTES);
-    if (units > 0 && hl_db_budget_charge(units) != 0) {
-        mc->err = "interrupted (instruction limit exceeded)";
-        return -1;
-    }
+    if (units > 0 && hl_db_budget_charge(units) != 0)
+        return materialize_fail(mc, "interrupted (instruction limit "
+                                    "exceeded)");
     return 0;
 }
 
@@ -462,17 +476,21 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
         if (materialize_account(mc, names) != 0) return -1;
         r->ncols = ncols;
         r->col_names = calloc((size_t)ncols, sizeof(char *));
-        if (!r->col_names) { mc->err = "out of memory"; r->ncols = 0; return -1; }
+        if (!r->col_names) {
+            r->ncols = 0;
+            return materialize_fail(mc, "out of memory");
+        }
         for (int i = 0; i < ncols; i++) {
             const char *name = cols[i].name;
             r->col_names[i] = strdup(name ? name : "?");
-            if (!r->col_names[i]) { mc->err = "out of memory"; return -1; }
+            if (!r->col_names[i]) return materialize_fail(mc, "out of memory");
         }
     }
 
     /* Rows are stored ncols wide, from the first row; one of another width
      * would be read past (fewer columns) or cut (more). */
-    if (ncols != r->ncols) { mc->err = "result rows differ in column count"; return -1; }
+    if (ncols != r->ncols)
+        return materialize_fail(mc, "result rows differ in column count");
 
     size_t row_bytes = (size_t)r->ncols * sizeof(HlDbValue);
     for (int i = 0; i < r->ncols; i++) {
@@ -482,7 +500,7 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
     }
     if (materialize_account(mc, row_bytes) != 0) return -1;
 
-    if (db_result_grow(r) != 0) { mc->err = "too many rows"; return -1; }
+    if (db_result_grow(r) != 0) return materialize_fail(mc, "too many rows");
 
     HlDbValue *row = &r->values[r->nrows * r->ncols];
     for (int i = 0; i < r->ncols; i++)
@@ -491,9 +509,34 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
     return 0;
 }
 
+int hl_worker_db_materialize(HlDbHandle *h, const char *sql,
+                             const HlValue *params, int nparams,
+                             size_t max_bytes, HlDbOpBudget *budget,
+                             HlDbResult *out, char *err, size_t errsz)
+{
+    memset(out, 0, sizeof(*out));
+    size_t cap = HL_WORKER_DB_RESULT_MAX_BYTES;
+    if (max_bytes > 0 && max_bytes < cap) cap = max_bytes;
+    MaterializeCtx mc = { .r = out, .err = NULL, .bytes = 0, .max_bytes = cap,
+                          .budget = budget };
+    int rc = hl_db_query(h, sql, params, nparams,
+                         db_materialize_row_cb, &mc, NULL);
+    if (mc.err) {
+        snprintf(err, errsz, "%s", mc.err);
+        hl_db_result_free(out);   /* give the partial copy back now */
+        return -2;
+    }
+    if (rc < 0) {
+        snprintf(err, errsz, "query: %s", hl_db_errmsg(h));
+        return -1;
+    }
+    return 0;
+}
+
 /* ── KlWorkItem callbacks ──────────────────────────────────────────── */
 
-static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh);
+static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh,
+                               HlDbOpBudget *budget, int *refused);
 
 /* A db.open (no_cache) op closes the connection it opened, and only that one
  * (audit 5 L5): the close was keyed by DSN, so a db.open whose DSN equalled a
@@ -509,9 +552,10 @@ static void db_work_fn(void *ud)
     worker_db_sweep_closed_dynamic();
     HlDbOpBudget budget = { op->max_instructions, 0, 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
-    HlWorkerDb *wdb = db_work_run(op, &fresh);
+    int refused = 0;   /* the result was refused: keep that message */
+    HlWorkerDb *wdb = db_work_run(op, &fresh, &budget, &refused);
     hl_db_budget_restore(prev);
-    if (budget.tripped && op->error)
+    if (budget.tripped && op->error && !refused)
         snprintf(op->error_msg, sizeof(op->error_msg),
                  "interrupted (instruction limit exceeded)");
     if (op->no_cache && fresh && op->dsn) {
@@ -549,7 +593,8 @@ static int worker_end_txn(HlWorkerDbOp *op, HlDbHandle *h)
 
 /* Returns the connection the op ran on, or NULL when there was none or it
  * was dropped. */
-static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh)
+static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh,
+                               HlDbOpBudget *budget, int *refused)
 {
     HlWorkerDb *wdb = worker_db_get(op->dsn, fresh);
     if (!wdb) {
@@ -598,22 +643,13 @@ static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh)
     }
 
     /* HL_WORK_DB_QUERY: materialize all rows through the vtable. */
-    HlDbResult *r = &op->result;
-    memset(r, 0, sizeof(*r));
-    size_t cap = HL_WORKER_DB_RESULT_MAX_BYTES;
-    if (op->max_result_bytes > 0 && op->max_result_bytes < cap)
-        cap = op->max_result_bytes;
-    MaterializeCtx mc = { .r = r, .err = NULL, .bytes = 0, .max_bytes = cap };
-    int rc = hl_db_query(h, op->sql, op->params, op->nparams,
-                         db_materialize_row_cb, &mc, NULL);
-    if (mc.err) {
+    int rc = hl_worker_db_materialize(h, op->sql, op->params, op->nparams,
+                                      op->max_result_bytes, budget,
+                                      &op->result, op->error_msg,
+                                      sizeof(op->error_msg));
+    if (rc != 0) {
         op->error = 1;
-        snprintf(op->error_msg, sizeof(op->error_msg), "%s", mc.err);
-        hl_db_result_free(r);   /* give the partial copy back now */
-    } else if (rc < 0) {
-        op->error = 1;
-        snprintf(op->error_msg, sizeof(op->error_msg),
-                 "query: %s", hl_db_errmsg(h));
+        if (rc == -2) *refused = 1;
     }
     if (worker_end_txn(op, h)) {
         hl_worker_db_invalidate(op->dsn);

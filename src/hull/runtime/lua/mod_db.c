@@ -885,6 +885,13 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     /* After the arguments (a number converted to a string allocates, and
      * an allocation can run a __gc finalizer that BEGINs), before anything
      * is armed (audit 15). */
+    /* The same finalizer may have closed a db.open handle: the op would then
+     * run against the closed connection's DSN, after close() (audit 16, as
+     * JS's js_call_handle re-check). Resolve it again. */
+    if (!db_call_handle(L)) {
+        lua_free_hl_values(L, params, nparams);
+        return luaL_error(L, "database not available");
+    }
     if (!hl_lua_can_wait(L)) {
         lua_free_hl_values(L, params, nparams);
         hl_lua_check_can_wait(L, "db.async");   /* raises */

@@ -51,8 +51,9 @@ typedef struct HlDbDuckCtx {
     HlAllocator       *alloc;
     /* Whether a transaction is open. DuckDB's C API cannot report it, so it
      * is tracked from the TRANSACTION statements this connection runs (an
-     * explicit BEGIN opens one; COMMIT / ROLLBACK / ABORT / END end it, also
-     * when they fail - a failed COMMIT still ends DuckDB's transaction). */
+     * explicit BEGIN opens one; COMMIT / END end it, also when they fail - a
+     * failed COMMIT still ends DuckDB's transaction - and ROLLBACK / ABORT
+     * when they succeed; a statement the budget interrupted never ran). */
     int                in_txn;
     char               errmsg[512];
 } HlDbDuckCtx;
@@ -386,9 +387,11 @@ static void duck_decode(duckdb_type type, void *data, idx_t row, HlValue *out)
 static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
 {
     switch (hl_sql_txn_kind(sql)) {
-    case HL_SQL_TXN_COMMIT:
-    case HL_SQL_TXN_ROLLBACK:
+    case HL_SQL_TXN_COMMIT:     /* a failed COMMIT still ends it */
         s->in_txn = 0;
+        break;
+    case HL_SQL_TXN_ROLLBACK:   /* a failed one ended nothing (audit 16) */
+        if (ok) s->in_txn = 0;
         break;
     case HL_SQL_TXN_SAVEPOINT:
         break;
@@ -412,11 +415,13 @@ static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
  * tasks it charges nothing, but still asks (a 0-unit charge sees the run's
  * wall-clock deadline) and naps briefly. Once the budget or the deadline
  * trips, duckdb_interrupt stops the statement and the call fails. Returns
- * DuckDBSuccess, or DuckDBError with s->errmsg set and @p out empty. */
+ * DuckDBSuccess, or DuckDBError with s->errmsg set and @p out empty
+ * (*@p interrupted = 1 when the budget stopped it). */
 static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
-                                 duckdb_result *out)
+                                 duckdb_result *out, int *interrupted)
 {
     memset(out, 0, sizeof *out);
+    *interrupted = 0;
     duckdb_pending_result pending = NULL;
     if (duckdb_pending_prepared(stmt, &pending) != DuckDBSuccess) {
         duck_set_err(s, pending ? duckdb_pending_error(pending) : NULL);
@@ -441,6 +446,7 @@ static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
         }
     }
     if (tripped || st == DUCKDB_PENDING_ERROR) {
+        *interrupted = tripped;
         duck_set_err(s, tripped ? "interrupted (instruction limit exceeded)"
                                 : duckdb_pending_error(pending));
         duckdb_destroy_pending(&pending);
@@ -479,9 +485,11 @@ static int duck_query(HlDbHandle *h, const char *sql,
     int is_txn_stmt =
         duckdb_prepared_statement_type(stmt) == DUCKDB_STATEMENT_TYPE_TRANSACTION;
     duckdb_result result;
-    if (duck_execute(s, stmt, &result) != DuckDBSuccess) {
+    int interrupted = 0;
+    if (duck_execute(s, stmt, &result, &interrupted) != DuckDBSuccess) {
         duckdb_destroy_prepare(&stmt);
-        if (is_txn_stmt) duck_track_txn(s, sql, 0);
+        /* An interrupted statement never ran: the state is unchanged. */
+        if (is_txn_stmt && !interrupted) duck_track_txn(s, sql, 0);
         return -1;
     }
     if (is_txn_stmt) duck_track_txn(s, sql, 1);
@@ -552,7 +560,18 @@ static int duck_exec_script(HlDbHandle *h, const char *sql)
 
 static int duck_begin(HlDbHandle *h)    { return duck_exec(h, "BEGIN TRANSACTION", NULL, 0); }
 static int duck_commit(HlDbHandle *h)   { return duck_exec(h, "COMMIT", NULL, 0); }
-static int duck_rollback(HlDbHandle *h) { return duck_exec(h, "ROLLBACK", NULL, 0); }
+
+/* The rollbacks Hull runs (a failed batch, the end of a db.async op or a
+ * worker.dispatch job) run unbound, as hl_cap_db_rollback does for SQLite:
+ * charged to a budget that had tripped, the cleanup was interrupted and the
+ * transaction stayed open (audit 16). */
+static int duck_rollback(HlDbHandle *h)
+{
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    int rc = duck_exec(h, "ROLLBACK", NULL, 0);
+    hl_db_budget_restore(budget);
+    return rc;
+}
 
 /* See pg_guard_stale_txn. The C API does not report whether a transaction is
  * open, so ROLLBACK is sent unconditionally and its "no transaction is active"

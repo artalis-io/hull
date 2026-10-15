@@ -208,14 +208,24 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
 /* ── tar.extract (fs-composed, sandboxed) ──────────────────────────── */
 
 struct js_extract_ctx {
+    JSContext        *ctx;
     const HlFsConfig *fs;
     const char       *dir;
     const char       *err;
+    int               tripped;   /* the budget ran out: interrupt pending */
 };
 
 static int js_extract_write(const HlTarEntry *e, void *vctx)
 {
     struct js_extract_ctx *c = (struct js_extract_ctx *)vctx;
+    /* Each entry is charged before it is written, as fs.write is: one unit
+     * per 8 bytes plus one for the entry. The archive may be a MappedBuffer
+     * of up to 1 GiB, so the heap does not bound it either (audit 16). */
+    if (hl_js_budget_charge(c->ctx,
+                            hl_work_bytes_units((uint64_t)e->size) + 1)) {
+        c->tripped = 1;
+        return -1;
+    }
     if (e->is_dir) return 0;
 
     char path[4096];
@@ -259,13 +269,14 @@ static JSValue js_tar_extract(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "tar.extract: arg 1 must be a buffer");
     }
 
-    struct js_extract_ctx c = { js->base.fs_cfg, dir ? dir : "", NULL };
+    struct js_extract_ctx c = { ctx, js->base.fs_cfg, dir ? dir : "", NULL, 0 };
     int rc = hl_tar_parse((const unsigned char *)view.data, view.len,
                           js_extract_write, &c);
 
     if (dir) JS_FreeCString(ctx, dir);
     if (needs_free) JS_FreeCString(ctx, str);
 
+    if (c.tripped) return JS_EXCEPTION;   /* the uncatchable interrupt */
     if (rc != 0)
         return JS_ThrowTypeError(ctx, "tar.extract: %s",
                                  c.err ? c.err : "malformed or unsafe archive");

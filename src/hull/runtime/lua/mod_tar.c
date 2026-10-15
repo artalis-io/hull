@@ -250,6 +250,7 @@ static int l_tar_create(lua_State *L)
 /* ── tar.extract (fs-composed, sandboxed) ──────────────────────────── */
 
 struct extract_ctx {
+    lua_State        *L;
     const HlFsConfig *fs;
     const char       *dir;     /* destination prefix (relative, fs-validated) */
     const char       *err;     /* set on first failure */
@@ -258,6 +259,12 @@ struct extract_ctx {
 static int extract_write(const HlTarEntry *e, void *vctx)
 {
     struct extract_ctx *c = (struct extract_ctx *)vctx;
+    /* Each entry is charged before it is written, as fs.write is: one unit
+     * per 8 bytes plus one for the entry. The archive may be a MappedBuffer
+     * of up to 1 GiB, so the heap does not bound it either (audit 16).
+     * lua_hlwork raises at once when the run is over, with nothing more
+     * written; hl_tar_parse holds no allocation to leak. */
+    lua_hlwork(c->L, (size_t)hl_work_bytes_units((uint64_t)e->size) + 1, 0);
     if (e->is_dir) return 0;   /* fs.write creates parents; empty dirs dropped */
 
     /* Build "<dir>/<name>". Both halves are already traversal-checked (dir by
@@ -292,7 +299,7 @@ static int l_tar_extract(lua_State *L)
     }
     const char *dir = luaL_optstring(L, 2, "");
 
-    struct extract_ctx c = { lua->base.fs_cfg, dir, NULL };
+    struct extract_ctx c = { L, lua->base.fs_cfg, dir, NULL };
     int rc = hl_tar_parse((const unsigned char *)view.data, view.len,
                           extract_write, &c);
     if (rc != 0) {

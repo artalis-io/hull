@@ -17,6 +17,7 @@
 #include "hull/cap/types.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"  /* HlDbHandle */
+#include "hull/cap/db_budget.h"   /* HlDbOpBudget */
 #include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE */
 #include <stddef.h>
 #include <stdint.h>
@@ -103,6 +104,20 @@ typedef struct HlDbResult {
 } HlDbResult;
 
 void hl_db_result_free(HlDbResult *r);
+
+/* Run @p sql on @p h and copy its rows into @p out - what a db.async query
+ * does on its pool thread. The copy is bounded by @p max_bytes (0: only
+ * HL_WORKER_DB_RESULT_MAX_BYTES) and the 100k-row cap, and charged to the
+ * budget bound on this thread. When the copy fails (too large, too many rows,
+ * rows of another width, out of memory) @p budget - the op's, bound on this
+ * thread - is tripped, so a network backend closes the connection at its next
+ * row instead of reading the rest of the reply (audit 16). Returns 0; -1 when
+ * the query failed (@p err "query: ..."); -2 when the result was refused
+ * (@p err says why, @p out is empty). */
+int hl_worker_db_materialize(HlDbHandle *h, const char *sql,
+                             const HlValue *params, int nparams,
+                             size_t max_bytes, HlDbOpBudget *budget,
+                             HlDbResult *out, char *err, size_t errsz);
 
 /* ── Worker DB operation ───────────────────────────────────────────── */
 
