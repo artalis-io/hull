@@ -489,6 +489,11 @@ json.dump(plain, open(d + "/plain.sig", "w"))
 extra = dict(plain)
 extra["platform"] = p["platform"] or {"platforms": {}}
 json.dump(extra, open(d + "/extra.sig", "w"))
+# present but null: hl_sig_read sees the field and refuses (audit 16)
+for k in ("platform", "build", "modules_resolved"):
+    nul = dict(plain)
+    nul[k] = None
+    json.dump(nul, open(d + "/null_" + k + ".sig", "w"))
 PYEOF
         mv "$WORKDIR/myapp/package.sig" "$LEG/package.sig.orig"
         cp "$LEG/plain.sig" "$WORKDIR/myapp/hull.sig"
@@ -498,6 +503,12 @@ PYEOF
         hull_do "$HULL" verify --no-verify-platform "$WORKDIR/myapp"; VERIFY_OUT=$OUT
         check_exit "verify refuses a legacy sig carrying a platform block (exit 1)" 1 $RC
         check_contains "verify names the unsigned legacy field" "$VERIFY_OUT" "legacy signature"
+        for k in platform build modules_resolved; do
+            cp "$LEG/null_$k.sig" "$WORKDIR/myapp/hull.sig"
+            hull_do "$HULL" verify --no-verify-platform "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+            check_exit "verify refuses a legacy sig with \"$k\": null (exit 1)" 1 $RC
+            check_contains "verify names the null legacy field ($k)" "$VERIFY_OUT" "legacy signature"
+        done
         rm -f "$WORKDIR/myapp/hull.sig"
         mv "$LEG/package.sig.orig" "$WORKDIR/myapp/package.sig"
     else

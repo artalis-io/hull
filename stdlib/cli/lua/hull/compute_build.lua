@@ -140,8 +140,12 @@ end
 --      refused even inside the module.
 --   2. The preprocessed text is searched for `incbin` / `.include` (an asm
 --      directive that reads a file at assembly time), with every string
---      literal's escapes decoded, then compiled AS IS (`-x cpp-output`), so
---      what was checked is exactly what is built.
+--      literal's escapes decoded, and for any directive left in it (clang
+--      still runs directives in `-x cpp-output` input, and a macro can make
+--      one; audit 16), then compiled AS IS (`-x cpp-output`), so what was
+--      checked is exactly what is built.
+--   3. That compile writes its own dependency list; anything in it besides
+--      pre.i means the check missed a directive, and the output is deleted.
 
 local function is_windows()
     return tool.host_os and tool.host_os() == "windows"
@@ -265,6 +269,62 @@ local function scan_preprocessed(text)
     return table.concat(lits), markers
 end
 
+-- The pragmas a compute module may keep in its preprocessed text: loop and
+-- diagnostic control, floating-point and packing. Nothing here names a file
+-- (unlike `GCC dependency`, or the MS `include_alias`).
+local PRAGMA_OK = {
+    unroll = true, nounroll = true, unroll_and_jam = true,
+    nounroll_and_jam = true, pack = true, STDC = true,
+}
+local PRAGMA_OK_NS = {
+    clang = { loop = true, diagnostic = true, fp = true },
+    GCC   = { diagnostic = true },
+}
+
+-- Does the preprocessed text `pre` still hold a preprocessor directive?
+-- clang runs directives in `-x cpp-output` input too, and a macro can make
+-- one: `#define E # embed "/abs/secret"` expands, on a line of its own, to
+-- ` # embed "/abs/secret"`, which -E leaves alone and the compile step then
+-- obeys (audit 16). Only `# N "file" flags` line markers and the pragmas
+-- above may remain. Returns a reason or nil.
+local function preprocessed_directive(pre)
+    -- Phase 2 first: a `\`-newline joins two lines into one.
+    local text = pre:gsub("\\\r?\n", "")
+    if text:find("_Pragma", 1, true) or text:find("__pragma", 1, true) then
+        return "a _Pragma operator"
+    end
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        local l = line:gsub("^%s+", ""):gsub("%s+$", "")
+        local rest
+        if l:sub(1, 1) == "#" then rest = l:sub(2)
+        elseif l:sub(1, 2) == "%:" then rest = l:sub(3)   -- the # digraph
+        elseif l:sub(1, 3) == "??=" then rest = l:sub(4)  -- the # trigraph
+        end
+        if rest then
+            rest = rest:gsub("^%s+", "")
+            local marker = l:sub(1, 1) == "#" and (rest:match("^%d+$")
+                or rest:match('^%d+%s+".*"[%d%s]*$'))
+            if not marker then
+                local ok
+                if l:sub(1, 1) == "#" then
+                    local w1, tail = rest:match("^pragma%s+([%a_][%w_]*)(.*)$")
+                    if w1 and PRAGMA_OK[w1] then
+                        ok = true
+                    elseif w1 and PRAGMA_OK_NS[w1] then
+                        local w2 = tail:match("^%s+([%a_][%w_]*)")
+                        ok = w2 and PRAGMA_OK_NS[w1][w2] or false
+                    end
+                end
+                if not ok then
+                    return "a preprocessor directive made by a macro ("
+                        .. l:sub(1, 60) .. ")"
+                end
+            end
+        end
+    end
+    return nil
+end
+
 -- Does the preprocessed text `pre` ask the assembler to read a file?
 -- Returns a reason or nil.
 local function preprocessed_reads_files(pre)
@@ -295,8 +355,10 @@ function M.compile_module(cc, module)
     if not tmp then return false, "cannot create a temporary directory" end
     local deps_path = tmp .. "/deps.d"
     local pre_path  = tmp .. "/pre.i"
+    local deps2_path = tmp .. "/deps2.d"
     local function cleanup()
         tool.remove_file(deps_path)
+        tool.remove_file(deps2_path)
         tool.remove_file(pre_path)
         tool.rmdir(tmp)
     end
@@ -342,12 +404,15 @@ function M.compile_module(cc, module)
         end
     end
 
-    local what = preprocessed_reads_files(pre)
+    local what = preprocessed_directive(pre) or preprocessed_reads_files(pre)
     if what then
         return refuse(module.src .. " uses " .. what .. ", which can pull a file "
             .. "from outside the app into the module; compute sources may not")
     end
 
+    -- The compile step reports every file IT opened too (the driver drops
+    -- -MD for cpp-output input, so it goes to cc1 directly): anything but
+    -- pre.i means a directive got through, and the output is thrown away.
     ok = tool.spawn({
         cc,
         "--target=wasm32-unknown-unknown",
@@ -361,14 +426,28 @@ function M.compile_module(cc, module)
         "-Wl,--allow-undefined",
         "-Wl,--initial-memory=131072",
         "-Wl,--max-memory=67108864",
+        "-Xclang", "-dependency-file", "-Xclang", deps2_path,
+        "-Xclang", "-MT", "-Xclang", "pre",
         "-o", module.wasm,
         "-x", "cpp-output", pre_path,
     })
-    cleanup()
-
     if not ok then
-        return false, "clang failed compiling " .. module.src
+        tool.remove_file(module.wasm)
+        return refuse("clang failed compiling " .. module.src)
     end
+
+    local deps2 = parse_deps(tool.read_file(deps2_path) or "")
+    local pre_c = canon(pre_path)
+    local bad = (not deps2 or #deps2 == 0 or not pre_c) and "(no dependency list)"
+    for _, d in ipairs(deps2 or {}) do
+        if not bad and canon(d) ~= pre_c then bad = d end
+    end
+    if bad then
+        tool.remove_file(module.wasm)
+        return refuse(module.src .. ": the compile step read " .. bad
+            .. " besides the checked preprocessed text; compute sources may not")
+    end
+    cleanup()
     return true, nil
 end
 
@@ -376,6 +455,7 @@ end
 M._parse_deps = parse_deps
 M._decode_c_string = decode_c_string
 M._preprocessed_reads_files = preprocessed_reads_files
+M._preprocessed_directive = preprocessed_directive
 
 -- ── High-level: build all stale modules ───────────────────────────────
 

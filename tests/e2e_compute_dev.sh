@@ -408,7 +408,29 @@ cat > compute/evil_hdr/evil_hdr.c << 'EOF'
 int hull_process(void) { return X; }
 EOF
 
-for m in evil_inc evil_digraph evil_esc evil_embed evil_hdr; do
+# 6. / 7. A directive made by a macro: -E leaves ` # embed "..."` /
+# ` # include "..."` in the preprocessed text, the compile step (-x
+# cpp-output) still runs it, and deps.d lists only the source (audit 16).
+# The path is absolute (Windows form on Windows), as the compile step runs
+# from another directory.
+SECRET_ABS="$(pwd -W 2>/dev/null || pwd)/secret.txt"
+OUTSIDE_ABS="$(pwd -W 2>/dev/null || pwd)/outside.h"
+mkdir -p compute/evil_macro_embed
+cat > compute/evil_macro_embed/evil_macro_embed.c << EOF
+#define E # embed "$SECRET_ABS"
+static const char d[] = {
+E
+, 0};
+int hull_process(void) { return d[0]; }
+EOF
+mkdir -p compute/evil_macro_inc
+cat > compute/evil_macro_inc/evil_macro_inc.c << EOF
+#define I # include "$OUTSIDE_ABS"
+I
+int hull_process(void) { return X; }
+EOF
+
+for m in evil_inc evil_digraph evil_esc evil_embed evil_hdr evil_macro_embed evil_macro_inc; do
     rm -f "compute/$m.wasm"
     "$HULL_ABS" compute build "$m" > "/tmp/evil_$m.log" 2>&1 || true
     if [ -f "compute/$m.wasm" ]; then
@@ -421,7 +443,8 @@ for m in evil_inc evil_digraph evil_esc evil_embed evil_hdr; do
         sed 's/^/    /' "/tmp/evil_$m.log" | head -10
     fi
 done
-rm -rf compute/evil_inc compute/evil_digraph compute/evil_esc compute/evil_embed compute/evil_hdr
+rm -rf compute/evil_inc compute/evil_digraph compute/evil_esc compute/evil_embed compute/evil_hdr \
+    compute/evil_macro_embed compute/evil_macro_inc
 
 # The normal module still builds under the new two-step compile.
 rm -f compute/score.wasm

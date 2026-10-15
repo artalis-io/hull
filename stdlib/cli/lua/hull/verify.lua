@@ -61,6 +61,46 @@ local function read_file(path)
     return tool.read_file(path)
 end
 
+-- hull.json decodes `null` to nil, so a field that is present but null reads
+-- as absent - while hl_sig_read (sh_json) sees it present and refuses it
+-- (`"platform": null` in a legacy signature, `"platform_domain": null`).
+-- `decode_shape` decodes with every null literal outside a string replaced by
+-- a marker string ("\0hull:null"), so presence checks see what the C reader
+-- sees (audit 16). Only for those checks: the payloads are built from the
+-- plain decode.
+local function decode_shape(text)
+    local out, i, n, start = {}, 1, #text, 1
+    while i <= n do
+        local c = text:sub(i, i)
+        if c == '"' then
+            i = i + 1
+            while i <= n do
+                local d = text:sub(i, i)
+                if d == "\\" then i = i + 2
+                elseif d == '"' then break
+                else i = i + 1 end
+            end
+            i = i + 1
+        elseif c == "n" and text:sub(i, i + 3) == "null" then
+            out[#out + 1] = text:sub(start, i - 1)
+            out[#out + 1] = '"\\u0000hull:null"'
+            i = i + 4
+            start = i
+        else
+            i = i + 1
+        end
+    end
+    out[#out + 1] = text:sub(start)
+    local ok, v = pcall(json.decode, table.concat(out))
+    return ok and v or nil
+end
+
+-- Is `v` what sh_json calls an object? A decoded JSON array is a table too;
+-- a non-empty one has [1]. (An empty `[]` and `{}` decode alike.)
+local function is_object(v)
+    return type(v) == "table" and v[1] == nil
+end
+
 -- The hex SHA-256 a sha256sum-style manifest ("<hex>  <name>" lines) lists
 -- for `name`, or nil. Same format hl_platform_sig_extract_for_arch reads.
 local function manifest_hash(manifest, name)
@@ -170,10 +210,12 @@ local function main()
     -- newer-format field in it - a platform block, modules_resolved, a
     -- trampoline hash, build - is not covered by that signature, and
     -- hl_sig_read refuses the whole file, so a `--verify-sig` binary will not
-    -- start. Reported here too (audit 15: this said VALID).
-    if type(sig.binary_hash) ~= "string" and
-       (sig.platform ~= nil or sig.modules_resolved ~= nil or
-        type(sig.trampoline_hash) == "string" or sig.build ~= nil) then
+    -- start. Reported here too (audit 15: this said VALID). A field present
+    -- as null counts, as it does for hl_sig_read (audit 16).
+    local shape = decode_shape(sig_data) or {}
+    if type(shape.binary_hash) ~= "string" and
+       (shape.platform ~= nil or shape.modules_resolved ~= nil or
+        type(shape.trampoline_hash) == "string" or shape.build ~= nil) then
         tool.stderr("hull verify: FAILED - a legacy signature (no binary_hash) "
             .. "carries platform / modules_resolved / trampoline_hash / build, "
             .. "which it does not sign\n")
@@ -260,8 +302,16 @@ local function main()
                 gethull_ok = false
             end
             local pd = type(g.composed) == "table" and g.composed.platform_domain
-            if (g.composed ~= nil and type(g.composed) ~= "table") or
-               (pd ~= nil and pd ~= false and type(pd) ~= "table") then
+            -- Presence from the null-aware decode: `"composed": null`,
+            -- `"platform_domain": null` or `false` is present and not an
+            -- object, which --verify-sig refuses (audit 16: these read as
+            -- absent here and verified VALID).
+            local sg = type(shape.platform) == "table" and shape.platform.gethull
+            local scomp, spd = nil, nil
+            if type(sg) == "table" then scomp = sg.composed end
+            if is_object(scomp) then spd = scomp.platform_domain end
+            if (scomp ~= nil and not is_object(scomp)) or
+               (spd ~= nil and not is_object(spd)) then
                 -- present but malformed: refused, as --verify-sig does
                 tool.stderr("gethull layer: FAILED - composed platform_domain "
                             .. "is malformed\n")

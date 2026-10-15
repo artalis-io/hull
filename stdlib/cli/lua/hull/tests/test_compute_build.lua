@@ -33,17 +33,19 @@ tool = {
     end,
     spawn = function(argv)
         spawned[#spawned + 1] = argv
-        local mf, out, is_e
+        local mf, out, is_e, df
         for i, a in ipairs(argv) do
             if a == "-E" then is_e = true end
             if a == "-MF" then mf = argv[i + 1] end
             if a == "-o" then out = argv[i + 1] end
+            if a == "-dependency-file" then df = argv[i + 2] end -- -Xclang pair
         end
         if is_e then
             files[mf] = canned.deps
             files[out] = canned.pre
         else
             files[out] = "\0asm"
+            if df then files[df] = canned.deps2 or "pre: /tmp/hull_x/pre.i\n" end
         end
         return true
     end,
@@ -52,6 +54,8 @@ tool = {
 local cb = require("hull.compute_build")
 
 real["/app/compute/m"]                = "/app/compute/m"
+real["/tmp/hull_x/pre.i"]             = "/tmp/hull_x/pre.i"
+real["/abs/secret"]                   = "/abs/secret"
 real["/app/compute/m/m.c"]            = "/app/compute/m/m.c"
 real["/app/compute/m/hull_compute.h"] = "/app/compute/m/hull_compute.h"
 real["/app/compute/m/data.txt"]       = "/app/compute/m/data.txt"
@@ -62,8 +66,8 @@ real["/app/compute/mm/x.h"]           = "/app/compute/mm/x.h"  -- a sibling dir
 
 local MOD = { name = "m", src = "/app/compute/m/m.c", wasm = "/app/compute/m.wasm" }
 
-local function build(deps, pre)
-    canned.deps, canned.pre = deps, pre
+local function build(deps, pre, deps2)
+    canned.deps, canned.pre, canned.deps2 = deps, pre, deps2
     spawned = {}
     files = {}
     return cb.compile_module("clang", MOD)
@@ -144,6 +148,45 @@ do
     okb = build("x.i: /app/compute/m/m.c\n",
         MARKS .. '__asm__(".incl\\165de \\"/etc/passwd\\"");\n')
     ok(not okb, "asm .include refused")
+end
+
+-- ── a directive made by a macro survives -E (audit 16) ─────────────
+--
+-- `#define E # embed "/abs/secret"` and a line `E` leave ` # embed ...` in
+-- pre.i; the cpp-output compile step runs it. deps.d lists only the source.
+do
+    local DEPS = "x.i: /app/compute/m/m.c\n"
+    local okb, err = build(DEPS,
+        MARKS .. 'const char a[] = {\n # embed "/abs/secret"\n, 0};\n')
+    ok(not okb and err:find("preprocessor directive", 1, true),
+        "macro-made # embed refused (" .. tostring(err) .. ")")
+    ok(#spawned == 1, "no compile step after a macro-made directive")
+    okb = build(DEPS, MARKS .. ' # include "/abs/secret"\nint x;\n')
+    ok(not okb, "macro-made # include refused")
+    okb = build(DEPS, MARKS .. '%: include "/abs/secret"\n')
+    ok(not okb, "macro-made %: digraph directive refused")
+    okb = build(DEPS, MARKS .. '%\\\n: include "/abs/secret"\n')
+    ok(not okb, "directive split by a line splice refused")
+    ok(cb._preprocessed_directive('int x; \\\n# include "x"\n') == nil,
+        "a # spliced onto a line's end is not a directive")
+    okb = build(DEPS, MARKS .. '#pragma GCC dependency "/abs/secret"\n')
+    ok(not okb, "#pragma GCC dependency refused")
+    okb = build(DEPS, MARKS .. '_Pragma("GCC dependency \\"/abs/secret\\"")\n')
+    ok(not okb, "_Pragma left in pre.i refused")
+    okb = build(DEPS, MARKS .. '# 7 "/app/compute/m/m.c" 2 3\n#pragma clang loop unroll(enable)\n'
+        .. '#pragma clang diagnostic push\n#pragma GCC diagnostic pop\n#pragma pack(push, 1)\n'
+        .. '#pragma unroll\nint hull_process(void) { return 0; }\n')
+    ok(okb, "line markers and loop / diagnostic / pack pragmas allowed")
+    ok(cb._preprocessed_directive('# line 3 "x"\n') ~= nil, "#line refused")
+
+    -- defence in depth: the compile step's own dependency list
+    okb, err = build(DEPS, MARKS .. "int x;\n",
+        "pre: /tmp/hull_x/pre.i /abs/secret\n")
+    ok(not okb and err:find("compile step read", 1, true),
+        "compile step reading another file refused (" .. tostring(err) .. ")")
+    ok(files["/app/compute/m.wasm"] == nil, "its output removed")
+    okb = build(DEPS, MARKS .. "int x;\n", "")
+    ok(not okb, "no compile-step dependency list fails closed")
 end
 
 -- ── helpers ──────────────────────────────────────────────────────────
