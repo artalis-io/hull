@@ -10283,7 +10283,11 @@ UTEST(lua_audit15, compute_stream_chunks_are_charged_to_the_run)
 
 /* Buffer-mode output is capped at what is left of the VM heap: it was grown
  * off-heap without bound, then copied into the heap in one piece (unfixed,
- * the 5 MB result was built off-heap and only the push failed). */
+ * the 4 MB result was built off-heap and only the push failed). The input
+ * is made under the default heap - string.rep builds its result in a
+ * buffer and then copies it, so it needs twice its size - and the limit is
+ * then narrowed to 1 MB above what is in use (the allocator reads mem_limit
+ * live), leaving far less than the 4 MB echo. */
 UTEST(lua_audit15, compute_stream_output_is_capped_at_the_heap_limit)
 {
     HlWasmCache cache;
@@ -10291,16 +10295,20 @@ UTEST(lua_audit15, compute_stream_output_is_capped_at_the_heap_limit)
     HlVfs vfs;
     hl_vfs_init(&vfs, a15_wasm_entries, NULL);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
-    cfg.max_heap_bytes = 8 * 1024 * 1024;
     HlLua v;
     memset(&v, 0, sizeof v);
     v.base.wasm_cache = &cache;
     v.base.app_vfs = &vfs;
     ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
     HL_LUA_ARM(&v, v.L);
+    ASSERT_EQ(luaL_dostring(v.L, "compute = require('hull.compute') "
+                                 "ab = string.rep('a', 4 * 1024 * 1024)"),
+              LUA_OK);
+    lua_gc(v.L, LUA_GCCOLLECT);   /* drop string.rep's buffer */
+    size_t saved = v.mem_limit;
+    v.mem_limit = v.mem_used + 1024 * 1024;
+    HL_LUA_ARM(&v, v.L);
     int rc = luaL_dostring(v.L,
-        "local compute = require('hull.compute') "
-        "local ab = string.rep('a', 5 * 1024 * 1024) "
         "local s, err = compute.stream('echo', ab, { chunk_size = 65536 }) "
         "assert(s == nil and err == 'output_too_large', tostring(err))");
     EXPECT_EQ(rc, LUA_OK);
@@ -10308,6 +10316,7 @@ UTEST(lua_audit15, compute_stream_output_is_capped_at_the_heap_limit)
         const char *e = lua_tostring(v.L, -1);
         printf("  got: %s\n", e ? e : "?");
     }
+    v.mem_limit = saved;
 
     hl_lua_free(&v);
     hl_cap_wasm_destroy(&cache);
