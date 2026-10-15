@@ -15,6 +15,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#if !defined(_WIN32)
+#include <pwd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -448,11 +451,40 @@ int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
 
 /* -- How much a directory grant covers ------------------------------ */
 
+/* Only an absolute value names a home ("C:\Users\x" counts, in its rooted
+ * form). A relative one would resolve against the working directory - the
+ * app directory - and make it "the home". */
+static int home_value_usable(const char *h)
+{
+    char norm[HL_HOST_PATH_MAX];
+    return h && *h && hl_host_normalize_path(h, norm, sizeof norm) >= 0 &&
+           norm[0] == '/';
+}
+
 const char *hl_host_home(void)
 {
     const char *home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
-    return (home && *home) ? home : NULL;
+    if (home_value_usable(home)) return home;
+    home = getenv("USERPROFILE");
+    if (home_value_usable(home)) return home;
+#if !defined(_WIN32)
+    /* Neither set (a service started with an empty environment): the
+     * account's home from the password database. Without it every "is this
+     * $HOME or above" check had nothing to compare with and answered no
+     * (audit 15). Copied: getpwuid's record is overwritten by the next
+     * call. */
+    if (!hl_host_is_windows()) {
+        static char pw_home[PATH_MAX];
+        if (!pw_home[0]) {
+            struct passwd *pw = getpwuid(geteuid());
+            if (pw && pw->pw_dir && pw->pw_dir[0] == '/' &&
+                strlen(pw->pw_dir) < sizeof pw_home)
+                memcpy(pw_home, pw->pw_dir, strlen(pw->pw_dir) + 1);
+        }
+        if (pw_home[0]) return pw_home;
+    }
+#endif
+    return NULL;
 }
 
 /* realpath in the rooted form ("C:\x" -> "/C/x"), trailing '/' dropped. */
@@ -526,7 +558,7 @@ static int host_rp_and_home(const char *path, const char *sub,
 {
     const char *home = hl_host_home();
     if (!home || host_realpath_loose(path, rp, 0) != 0 ||
-        host_realpath(home, hr) != 0)
+        host_realpath_loose(home, hr, 0) != 0)
         return -1;
     if (sub && *sub) {
         size_t n = strlen(hr);
@@ -539,17 +571,22 @@ static int host_rp_and_home(const char *path, const char *sub,
     return 0;
 }
 
+/* Both fail closed (1): a home that is unknown, or a path that cannot be
+ * resolved (a '.' / '..' in the part that does not exist yet), cannot be
+ * shown to stay clear of it. They answered 0, so HULL_CACHE_DIR=~/.hull/x/..
+ * /keys/y passed the pre-mkdir check and its directories were made inside
+ * ~/.hull/keys (audit 14). */
 int hl_host_path_covers_home(const char *path, const char *sub)
 {
     char rp[PATH_MAX], hr[PATH_MAX], hr2[PATH_MAX];
-    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 0;
+    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 1;
     return host_rp_covers(rp, hr) || host_rp_covers(rp, hr2);
 }
 
 int hl_host_path_under_home(const char *path, const char *sub)
 {
     char rp[PATH_MAX], hr[PATH_MAX], hr2[PATH_MAX];
-    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 0;
+    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 1;
     return host_rp_covers(hr, rp) || host_rp_covers(hr2, rp);
 }
 
@@ -566,5 +603,10 @@ int hl_host_path_too_broad(const char *path)
         if (letter && rp[1] == ':' && (rp[2] == '\0' || (rp[2] == '/' && rp[3] == '\0')))
             return 1;
     }
+    /* No home known at all: only the root is known to be too broad here.
+     * The app sandbox's app-directory check must still accept an ordinary
+     * directory; tool mode's write grants refuse on an unknown home
+     * themselves (hl_tool_path_too_broad). */
+    if (!hl_host_home()) return 0;
     return hl_host_path_covers_home(rp, NULL);
 }

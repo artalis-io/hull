@@ -137,6 +137,11 @@ static const char *tool_home(void)
  * case-insensitive on Windows, a bare drive root counts as the root). */
 int hl_tool_path_too_broad(const char *path)
 {
+    /* With no home known (no absolute HOME / USERPROFILE and, off Windows,
+     * no password-database entry) no grant can be shown to stay clear of
+     * it: refused (audit 15). The app sandbox's app-directory check does
+     * not take this rule. */
+    if (!tool_home()) return 1;
     return hl_host_path_too_broad(path);
 }
 

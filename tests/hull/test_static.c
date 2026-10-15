@@ -11,7 +11,13 @@
 #include <keel/allocator.h>
 #include <keel/http_request.h>
 #include <keel/http_response.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "test_tmpdir.h"
 
 /* ── MIME type detection ──────────────────────────────────────────── */
 
@@ -401,6 +407,79 @@ UTEST(static_serve, stdlib_vfs_null_is_safe)
     ASSERT_EQ(sizeof(css) - 1, res.body_len);
 
     kl_http_response_free(&res);
+}
+
+/* ── --verify-sig disk gate vs the dev ETag (audit 15) ───────────── */
+
+/* A stand-in digest: the gate only compares what it computes with what was
+ * armed, so a constant digest makes "signed" / "not signed" a choice of the
+ * armed value. */
+static int const_digest(const void *data, size_t len, uint8_t out[32])
+{
+    (void)data; (void)len;
+    memset(out, 0x11, 32);
+    return 0;
+}
+
+static int static_304_under_gate(uint8_t signed_byte, int *status)
+{
+    char dir[HL_TEST_PATH_MAX], sdir[HL_TEST_PATH_MAX + 16];
+    char file[HL_TEST_PATH_MAX + 32], etag[64];
+    if (!hl_test_mkdtemp(dir, sizeof dir, "hull_static_gate")) return -2;
+    snprintf(sdir, sizeof sdir, "%s/static", dir);
+    snprintf(file, sizeof file, "%s/static/a.css", dir);
+    if (mkdir(sdir, 0755) != 0) return -2;
+    FILE *f = fopen(file, "wb");
+    if (!f) return -2;
+    fputs("body{}", f);
+    fclose(f);
+    struct stat st;
+    if (stat(file, &st) != 0) return -2;
+    snprintf(etag, sizeof etag, "W/\"%lx-%llx\"",
+             (unsigned long)st.st_mtime, (unsigned long long)st.st_size);
+
+    static const char *const names[] = { "static/a.css" };
+    uint8_t digests[1][32];
+    memset(digests[0], signed_byte, 32);
+    hl_vfs_disk_gate_arm(names, (const uint8_t (*)[32])digests, 1, const_digest);
+
+    static const HlEntry none[] = { { NULL, NULL, 0 } };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, none, dir);
+    KlAllocator alloc = kl_allocator_default();
+    HlStaticCtx ctx = { .vfs = &vfs };
+    KlHttpRequest req = make_request("GET", "/static/a.css");
+    req.headers[0].name = "If-None-Match";
+    req.headers[0].name_len = strlen("If-None-Match");
+    req.headers[0].value = etag;
+    req.headers[0].value_len = strlen(etag);
+    req.num_headers = 1;
+    KlHttpResponse res;
+    memset(&res, 0, sizeof(res));
+    kl_http_response_init(&res, &alloc);
+
+    int rc = hl_static_middleware(&req, &res, &ctx);
+    *status = res.status;
+    kl_http_response_free(&res);
+    hl_vfs_disk_gate_reset();
+    remove(file);
+    rmdir(sdir);
+    rmdir(dir);
+    return rc;
+}
+
+UTEST(static_serve, dev_etag_304_only_after_the_disk_gate)
+{
+    int status = 0;
+    /* Not signed with these bytes: refused, never a 304 that would keep
+     * the client's copy alive. */
+    int rc = static_304_under_gate(0x22, &status);
+    if (rc == -2) { UTEST_SKIP("cannot create a temp app dir"); }
+    EXPECT_EQ(0, rc);
+    /* Signed: the conditional request is answered 304 as before. */
+    rc = static_304_under_gate(0x11, &status);
+    EXPECT_EQ(1, rc);
+    EXPECT_EQ(304, status);
 }
 
 UTEST_MAIN()

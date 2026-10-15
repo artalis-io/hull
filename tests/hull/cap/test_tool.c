@@ -305,6 +305,17 @@ UTEST(tool, validate_reject_driver_program_flags)
     ASSERT_NE(hl_tool_validate_args(wrapper), 0);
     const char *specs[] = { "cc", "-specs=/tmp/s", NULL };
     ASSERT_NE(hl_tool_validate_args(specs), 0);
+    /* audit 15: the separate-argument forms and --specs abbreviations. */
+    const char *specs_sep[] = { "cc", "-specs", "/tmp/s", NULL };
+    ASSERT_NE(hl_tool_validate_args(specs_sep), 0);
+    const char *specs_long[] = { "cc", "--specs=/tmp/s", NULL };
+    ASSERT_NE(hl_tool_validate_args(specs_long), 0);
+    const char *specs_long_sep[] = { "cc", "--specs", "/tmp/s", NULL };
+    ASSERT_NE(hl_tool_validate_args(specs_long_sep), 0);
+    const char *specs_abbr[] = { "cc", "--spec=/tmp/s", NULL };
+    ASSERT_NE(hl_tool_validate_args(specs_abbr), 0);
+    const char *specs_abbr_sep[] = { "cc", "--sp", "/tmp/s", NULL };
+    ASSERT_NE(hl_tool_validate_args(specs_abbr_sep), 0);
     const char *ldpath[] = { "cc", "--ld-path=/tmp/ld", NULL };
     ASSERT_NE(hl_tool_validate_args(ldpath), 0);
     const char *fuse_path[] = { "cc", "-fuse-ld=/tmp/ld", NULL };

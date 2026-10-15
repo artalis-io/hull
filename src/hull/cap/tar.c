@@ -43,6 +43,8 @@
 #define TAR_LINK_BUF    (TAR_LINK_LEN + 1)
 #define TAR_MAGIC_OFF   257
 #define TAR_VERSION_OFF 263
+#define TAR_PREFIX_OFF  345                   /* POSIX ustar name prefix */
+#define TAR_PREFIX_LEN  155
 #define TAR_NUM_FIELD     8                   /* width of octal uid/gid/mode fields */
 #define TAR_NUM12_FIELD  12                   /* width of octal size/mtime fields */
 
@@ -190,6 +192,19 @@ static int tar_iter(const unsigned char *tar, size_t tar_len,
         if (!tar_checksum_ok(hdr) ||
             tar_octal_strict(hdr + TAR_SIZE_OFF, TAR_SIZE_LEN, &size) != 0)
             return -1;                          /* not a (supported) header */
+        /* Name extensions this reader does not implement change which name a
+         * member really has: a pax header ('x' / 'g'), a GNU long name or
+         * link ('L' / 'K'), or a POSIX ustar prefix (the name is
+         * prefix + "/" + name). Skipping them read a different archive than
+         * tar does - members under the truncated or prefix-less name. Refused
+         * (audit 15). */
+        if (typeflag == 'x' || typeflag == 'g' ||
+            typeflag == 'L' || typeflag == 'K')
+            return -1;
+        if (memcmp(hdr + TAR_MAGIC_OFF, "ustar", 6) == 0) {   /* POSIX "ustar\0" */
+            for (int i = 0; i < TAR_PREFIX_LEN; i++)
+                if (hdr[TAR_PREFIX_OFF + i]) return -1;
+        }
         unsigned mode = (unsigned)(tar_octal(hdr + TAR_MODE_OFF, TAR_MODE_LEN) & 0777);
 
         off += TAR_BLOCK;

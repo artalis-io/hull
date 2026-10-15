@@ -940,13 +940,18 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
      * to work without conflicting with the upstream gethull pubkey. */
     if (sig.platform.signature_hex && sig.platform.public_key_hex) {
         uint8_t platform_pk[32];
-        if (strlen(sig.platform.public_key_hex) == 64 &&
-            hl_hex_decode(sig.platform.public_key_hex, 64, platform_pk, 32) == 32) {
-            if (hl_sig_verify_platform(&sig, platform_pk) != 0) {
-                log_error("[sig] platform signature verification failed");
-                hl_sig_free(&sig);
-                return -1;
-            }
+        /* A malformed key is an error, not a reason to skip the check
+         * (audit 15). */
+        if (strlen(sig.platform.public_key_hex) != 64 ||
+            hl_hex_decode(sig.platform.public_key_hex, 64, platform_pk, 32) != 32) {
+            log_error("[sig] platform.public_key is malformed");
+            hl_sig_free(&sig);
+            return -1;
+        }
+        if (hl_sig_verify_platform(&sig, platform_pk) != 0) {
+            log_error("[sig] platform signature verification failed");
+            hl_sig_free(&sig);
+            return -1;
         }
     }
 
@@ -1069,9 +1074,17 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
             if (sig.platform.gethull_value) {
                 ShJsonValue *composed =
                     sh_json_get(sig.platform.gethull_value, "composed");
-                ShJsonValue *pd = composed
+                ShJsonValue *pd = composed && sh_json_type(composed) == SH_JSON_OBJECT
                     ? sh_json_get(composed, "platform_domain") : NULL;
-                if (pd && sh_json_type(pd) == SH_JSON_OBJECT) {
+                /* Present but not an object is an error, not "absent"
+                 * (audit 15: it skipped the check). */
+                if ((composed && sh_json_type(composed) != SH_JSON_OBJECT) ||
+                    (pd && sh_json_type(pd) != SH_JSON_OBJECT)) {
+                    log_error("[sig] composed platform_domain is malformed");
+                    hl_sig_free(&sig);
+                    return -1;
+                }
+                if (pd) {
                     const char *pman = sh_json_as_string(
                         sh_json_get(pd, "manifest"), NULL);
                     const char *psig = sh_json_as_string(

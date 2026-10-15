@@ -308,16 +308,8 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
             return 0;
         }
 
-        /* ETag check */
         char etag[64];
         int elen = format_etag_file(etag, sizeof(etag), st.st_mtime, st.st_size);
-        if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
-            close(fd);
-            kl_http_response_status(res, 304);
-            kl_http_response_header(res, "ETag", etag);
-            kl_http_response_body_borrow(res, NULL, 0);
-            return 1;
-        }
 
         /* Read the file into a heap buffer and hand it to Keel via
          * kl_http_response_body_copy(). The previous implementation passed
@@ -353,6 +345,17 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
         if (hl_vfs_disk_gate_check(full_name, buf, (size_t)got) != 0) {
             free(buf);
             return 0;
+        }
+
+        /* ETag check - after the gate: a 304 for a file the signature does
+         * not cover told the client its cached copy was still good (audit
+         * 15). */
+        if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
+            free(buf);
+            kl_http_response_status(res, 304);
+            kl_http_response_header(res, "ETag", etag);
+            kl_http_response_body_borrow(res, NULL, 0);
+            return 1;
         }
 
         kl_http_response_status(res, 200);

@@ -629,6 +629,52 @@ UTEST(hl_sig, verify_startup_good)
     ASSERT_EQ(rc, 0);
 }
 
+/* A platform.public_key that is not 64 hex characters is an error; the
+ * self-consistency check was skipped for it (audit 15). The block is inside
+ * the app signature, so only the key's shape is wrong. */
+UTEST(hl_sig, verify_startup_rejects_a_malformed_platform_key)
+{
+    char subdir[512];
+    snprintf(subdir, sizeof(subdir), "%s/badplatkey", test_dir);
+    mkdir(subdir, 0755);
+
+    char app_path[600];
+    snprintf(app_path, sizeof(app_path), "%s/app.lua", subdir);
+    FILE *f = fopen(app_path, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f, "app.get(\"/\", function(req, res) res:json({ok=true}) end)\n");
+    fclose(f);
+
+    char pk_path[600];
+    snprintf(pk_path, sizeof(pk_path), "%s/test.pub", subdir);
+    f = fopen(pk_path, "w");
+    ASSERT_TRUE(f != NULL);
+    fprintf(f, "%s\n", test_pk_hex);
+    fclose(f);
+
+    char files_json[256];
+    snprintf(files_json, sizeof(files_json), "{\"app.lua\":\"%s\"}", app_hash_hex);
+
+    extern const HlEntry hl_app_entries[];
+    HlVfs app_vfs;
+    hl_vfs_init(&app_vfs, hl_app_entries, subdir);
+
+    /* Control: the same package with a well-formed key starts. */
+    create_test_package_sig(subdir, files_json, "null",
+                            "binary0000000000000000000000000000000000000000000000000000000000000000",
+                            "trampoline00000000000000000000000000000000000000000000000000000000");
+    EXPECT_EQ(hl_verify_startup(pk_path, app_path, &app_vfs, 1), 0);
+
+    char saved[65];
+    memcpy(saved, plat_pk_hex, sizeof saved);
+    snprintf(plat_pk_hex, sizeof plat_pk_hex, "%s", "not-a-key");
+    create_test_package_sig(subdir, files_json, "null",
+                            "binary0000000000000000000000000000000000000000000000000000000000000000",
+                            "trampoline00000000000000000000000000000000000000000000000000000000");
+    memcpy(plat_pk_hex, saved, sizeof saved);
+    EXPECT_EQ(hl_verify_startup(pk_path, app_path, &app_vfs, 1), -1);
+}
+
 UTEST(hl_sig, verify_startup_bad_key)
 {
     uint8_t other_pk[32], other_sk[64];

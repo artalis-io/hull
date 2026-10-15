@@ -8353,6 +8353,43 @@ UTEST(lua_audit9, a_broad_cache_dir_override_is_refused)
     hl_lua_bytecode_cache_reset();
 }
 
+/* A '.' / '..' in HULL_CACHE_DIR is refused before anything is made: through
+ * a part that does not exist yet it could not be resolved, so the ~/.hull
+ * checks passed and =~/.hull/nosuch/../keys/new was made inside ~/.hull/keys
+ * (audit 14). */
+UTEST(lua_audit14, a_dotted_cache_dir_override_is_refused_before_mkdir)
+{
+    char tmpdir[512];
+    bc_with_tmp_home(tmpdir, sizeof tmpdir);
+    ASSERT_NE(tmpdir[0], 0);
+    char out[1024], ovr[1024], dir[1024], made[1024];
+    snprintf(dir, sizeof dir, "%s/.hull", tmpdir);
+    mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/.hull/keys", tmpdir);
+    mkdir(dir, 0700);
+    snprintf(made, sizeof made, "%s/.hull/keys/new", tmpdir);
+    struct stat st;
+
+    snprintf(ovr, sizeof ovr, "%s/.hull/nosuch/../keys/new", tmpdir);
+    setenv("HULL_CACHE_DIR", ovr, 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), -1);
+    EXPECT_NE(stat(made, &st), 0);
+    snprintf(ovr, sizeof ovr, "%s/app-cache/./x", tmpdir);
+    setenv("HULL_CACHE_DIR", ovr, 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), -1);
+    snprintf(ovr, sizeof ovr, "%s/app-cache/..", tmpdir);
+    setenv("HULL_CACHE_DIR", ovr, 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), -1);
+    /* A name that merely starts with a dot is fine. */
+    snprintf(ovr, sizeof ovr, "%s/.app-cache", tmpdir);
+    setenv("HULL_CACHE_DIR", ovr, 1);
+    EXPECT_EQ(hl_hull_cache_dir(out, sizeof out), 0);
+
+    unsetenv("HULL_CACHE_DIR");
+    bc_cleanup_tmp_home(tmpdir);
+    hl_lua_bytecode_cache_reset();
+}
+
 /* ── Audit 4: the Lua runtime ─────────────────────────────────────────── */
 
 /* A limited VM whose top level runs `code`; returns its status, leaving the

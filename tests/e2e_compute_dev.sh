@@ -349,6 +349,90 @@ else
     fail "refresh-header (all) did not restore all headers"
 fi
 
+# ── compute sources may not read files from outside the module ──────
+#
+# audit 15: the old check was a lexical scan of the module's sources, which
+# the preprocessor sees through. compute_build.lua now preprocesses first,
+# refuses any file clang opened outside compute/<name>/ (and any #embed), and
+# scans the PREPROCESSED text, string escapes decoded, for .incbin. Each
+# module below tries to pull secret.txt (outside the module) into its .wasm;
+# each must be refused with no .wasm written. Exit status is not used (an APE
+# on Windows reports 0 for every outcome); the artifact and message are.
+
+echo ""
+echo "--- compute sources cannot read outside their module ---"
+
+echo "top secret" > secret.txt
+
+# 1. #include of a file the old scan never read, holding an asm .incbin.
+mkdir -p compute/evil_inc
+cat > compute/evil_inc/evil_inc.c << 'EOF'
+#include "data.txt"
+int hull_process(void) { return 0; }
+EOF
+cat > compute/evil_inc/data.txt << 'EOF'
+__asm__(".section .data,\"\",@\n.incbin \"../../secret.txt\"\n");
+EOF
+
+# 2. The %:embed digraph (a #embed the old scan did not spell).
+mkdir -p compute/evil_digraph
+cat > compute/evil_digraph/evil_digraph.c << 'EOF'
+static const char d[] = {
+%:embed "../../secret.txt"
+};
+int hull_process(void) { return d[0]; }
+EOF
+
+# 3. ".inc\x62in": an escaped asm directive name.
+mkdir -p compute/evil_esc
+cat > compute/evil_esc/evil_esc.c << 'EOF'
+__asm__(".section .data,\"\",@\n.inc\x62in \"../../secret.txt\"\n");
+int hull_process(void) { return 0; }
+EOF
+
+# 4. #embed of a file INSIDE the module is refused outright too.
+mkdir -p compute/evil_embed
+echo "abc" > compute/evil_embed/blob.bin
+cat > compute/evil_embed/evil_embed.c << 'EOF'
+static const char d[] = {
+#embed "blob.bin"
+};
+int hull_process(void) { return d[0]; }
+EOF
+
+# 5. A plain #include of a header outside the module.
+mkdir -p compute/evil_hdr
+echo "#define X 1" > outside.h
+cat > compute/evil_hdr/evil_hdr.c << 'EOF'
+#include "../../outside.h"
+int hull_process(void) { return X; }
+EOF
+
+for m in evil_inc evil_digraph evil_esc evil_embed evil_hdr; do
+    rm -f "compute/$m.wasm"
+    "$HULL_ABS" compute build "$m" > "/tmp/evil_$m.log" 2>&1 || true
+    if [ -f "compute/$m.wasm" ]; then
+        fail "$m: compute build produced a .wasm (must be refused)"
+    elif grep -Eq "compute sources may not|may only include its own files|clang failed preprocessing" "/tmp/evil_$m.log"; then
+        # (a clang without #embed, e.g. llvm@18, fails the preprocessing step)
+        pass "$m: compute build refused"
+    else
+        fail "$m: no .wasm, but not refused for the expected reason; output:"
+        sed 's/^/    /' "/tmp/evil_$m.log" | head -10
+    fi
+done
+rm -rf compute/evil_inc compute/evil_digraph compute/evil_esc compute/evil_embed compute/evil_hdr
+
+# The normal module still builds under the new two-step compile.
+rm -f compute/score.wasm
+"$HULL_ABS" compute build score > /tmp/build_after.log 2>&1 || true
+if [ -f compute/score.wasm ]; then
+    pass "a normal module still builds after the refusals"
+else
+    fail "normal module no longer builds; output:"
+    sed 's/^/    /' /tmp/build_after.log | head -10
+fi
+
 # ── Result summary ──────────────────────────────────────────────────
 
 echo ""

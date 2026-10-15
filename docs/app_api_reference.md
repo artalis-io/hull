@@ -1060,7 +1060,12 @@ extractor. `parse`/`create`/`extract` accept any buffer type (string /
 `MappedBuffer` / `WasmBuffer` / `ArrayBuffer`) for the archive bytes.
 - `tar.parse(bytes)` -> array of `{ name, data, size, mode, is_dir }` (JS:
   `isDir`; `data` is a Lua string / JS `ArrayBuffer`). Malformed / truncated /
-  traversal-bearing archives return `nil, err` (Lua) / throw (JS).
+  traversal-bearing archives return `nil, err` (Lua) / throw (JS). So do
+  archives using a name extension the reader does not implement - pax headers
+  (typeflag `x` / `g`), GNU long names / links (`L` / `K`), or a non-empty
+  POSIX ustar prefix field - since skipping them read members under a
+  different name than `tar` does (audit 15). Member names must fit the
+  100-byte ustar name field.
 - `tar.create(entries)` -> archive bytes (Lua string / JS `ArrayBuffer`). Each
   entry is `{ name, data?, mode?, is_dir? }` (JS: `isDir`; `mode` defaults 0644).
   An absolute or `..`-bearing member name is refused.

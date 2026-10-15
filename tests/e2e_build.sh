@@ -452,6 +452,61 @@ rm -f "$WORKDIR/myapp/migrations/999_planted.sql"
 hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
 check_exit "verify passes once it is removed" 0 $RC
 
+# A legacy signature (no binary_hash) signs only {files, manifest}. A
+# platform block attached to one is unsigned, and hl_sig_read refuses the
+# file; hull verify said VALID (audit 15). The legacy signature is made by
+# signing the canonical {files, manifest} JSON (sorted keys, compact; an empty
+# table encodes as []) with `hull sign-release`.
+if command -v python3 >/dev/null 2>&1; then
+    LEG="$WORKDIR/legacy"
+    mkdir -p "$LEG"
+    python3 - "$WORKDIR/myapp/package.sig" "$LEG" << 'PYEOF'
+import json, sys
+sig = json.load(open(sys.argv[1]))
+def lua(v):
+    if isinstance(v, dict):
+        return [] if not v else {k: lua(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [lua(x) for x in v]
+    return v
+payload = json.dumps(lua({"files": sig["files"], "manifest": sig["manifest"]}),
+                     sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+open(sys.argv[2] + "/payload", "w").write(payload)
+json.dump({"files": sig["files"], "manifest": sig["manifest"],
+           "public_key": sig["public_key"], "platform": sig.get("platform")},
+          open(sys.argv[2] + "/parts.json", "w"))
+PYEOF
+    hull_do "$HULL" sign-release "$LEG/payload" --key "$WORKDIR/developer.key"
+    if [ -f "$LEG/payload.sig" ]; then
+        python3 - "$LEG" << 'PYEOF'
+import json, sys
+d = sys.argv[1]
+p = json.load(open(d + "/parts.json"))
+s = open(d + "/payload.sig").read().strip()
+plain = {"files": p["files"], "manifest": p["manifest"],
+         "public_key": p["public_key"], "signature": s}
+json.dump(plain, open(d + "/plain.sig", "w"))
+extra = dict(plain)
+extra["platform"] = p["platform"] or {"platforms": {}}
+json.dump(extra, open(d + "/extra.sig", "w"))
+PYEOF
+        mv "$WORKDIR/myapp/package.sig" "$LEG/package.sig.orig"
+        cp "$LEG/plain.sig" "$WORKDIR/myapp/hull.sig"
+        hull_do "$HULL" verify --no-verify-platform "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+        check_exit "verify accepts a plain legacy hull.sig" 0 $RC
+        cp "$LEG/extra.sig" "$WORKDIR/myapp/hull.sig"
+        hull_do "$HULL" verify --no-verify-platform "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+        check_exit "verify refuses a legacy sig carrying a platform block (exit 1)" 1 $RC
+        check_contains "verify names the unsigned legacy field" "$VERIFY_OUT" "legacy signature"
+        rm -f "$WORKDIR/myapp/hull.sig"
+        mv "$LEG/package.sig.orig" "$WORKDIR/myapp/package.sig"
+    else
+        fail "sign-release wrote no signature for the legacy payload"
+    fi
+else
+    echo "  SKIP: legacy-signature verify check (no python3)"
+fi
+
 # ── Step 10: Multi-file app ──────────────────────────────────────────
 
 echo ""
