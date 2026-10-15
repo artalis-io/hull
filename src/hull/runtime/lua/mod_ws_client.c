@@ -338,6 +338,10 @@ static int lua_ws_connect(lua_State *L)
 
     if (!lua->server)
         return luaL_error(L, "ws.connect requires running server");
+    /* A __gc finalizer run by lua_close at teardown: the loop is gone
+     * (audit 16). */
+    if (lua->base.shutting_down || !lua->base.async_ctx)
+        return luaL_error(L, "ws.connect: runtime is shutting down");
 
     /* Create userdata */
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)lua_newuserdata(L,

@@ -71,6 +71,13 @@ void hl_js_timer_reschedule(HlJSTimer *t)
     HlJS *js = t->js;
     int64_t delay_ms;
 
+    /* Teardown: the loop is going away, and a handler a done_fn finished
+     * during pool_free must not add a timer to it (audit 16). */
+    if (js->base.shutting_down || !js->base.async_ctx) {
+        t->timer_id = 0;
+        return;
+    }
+
     if (t->daily)
         delay_ms = hl_js_compute_daily_delay_ms(t->hour, t->minute, t->localtime);
     else

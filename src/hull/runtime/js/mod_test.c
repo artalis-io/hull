@@ -33,6 +33,33 @@ typedef struct {
     JSValue cases; /* Array of { desc: string, fn: function } */
 } HlJSTestState;
 
+/* The case list and its entries are built with DEFINE, never set, and the
+ * entries have no prototype: a set consults the prototype chain, so an
+ * indexed setter on Array.prototype ran app code with `this` = the
+ * internal list (audit 16, as mod_app.c). */
+static void tcase_put(JSContext *ctx, JSValueConst obj, const char *key,
+                      JSValue val)
+{
+    JS_DefinePropertyValueStr(ctx, obj, key, val, JS_PROP_C_W_E);
+}
+
+static void tcase_put_idx(JSContext *ctx, JSValueConst arr, uint32_t idx,
+                          JSValue val)
+{
+    JS_DefinePropertyValueUint32(ctx, arr, idx, val, JS_PROP_C_W_E);
+}
+
+/* A list with no prototype: a hole (handler ids leave them in the def
+ * arrays) reads as undefined, never through an Array.prototype getter
+ * (audit 16). */
+static JSValue tcase_new_list(JSContext *ctx)
+{
+    JSValue arr = JS_NewArray(ctx);
+    if (!JS_IsException(arr))
+        JS_SetPrototype(ctx, arr, JS_NULL);
+    return arr;
+}
+
 static HlJSTestState *get_js_test_state(JSContext *ctx)
 {
     JSValue store = hl_js_internals(ctx);
@@ -99,11 +126,11 @@ static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &idx, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "desc", JS_DupValue(ctx, argv[0]));
-    JS_SetPropertyStr(ctx, entry, "fn",   JS_DupValue(ctx, fn_arg));
-    JS_SetPropertyStr(ctx, entry, "timeout_ms", JS_NewInt32(ctx, timeout_ms));
-    JS_SetPropertyUint32(ctx, state->cases, (uint32_t)idx, entry);
+    JSValue entry = JS_NewObjectProto(ctx, JS_NULL);
+    tcase_put(ctx, entry, "desc", JS_DupValue(ctx, argv[0]));
+    tcase_put(ctx, entry, "fn",   JS_DupValue(ctx, fn_arg));
+    tcase_put(ctx, entry, "timeout_ms", JS_NewInt32(ctx, timeout_ms));
+    tcase_put_idx(ctx, state->cases, (uint32_t)idx, entry);
 
     return JS_UNDEFINED;
 }
@@ -438,7 +465,7 @@ void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js)
 
     state->router = router;
     state->js = js;
-    state->cases = JS_NewArray(ctx);
+    state->cases = tcase_new_list(ctx);
 
     /* The state in the runtime's internal store, out of the app's reach */
     JSValue store = hl_js_internals(ctx);
@@ -489,7 +516,7 @@ void hl_js_test_clear(JSContext *ctx)
     if (!state) return;
 
     JS_FreeValue(ctx, state->cases);
-    state->cases = JS_NewArray(ctx);
+    state->cases = tcase_new_list(ctx);
 }
 
 /* Record a FAIL into the writer + results array, with formatted error. */

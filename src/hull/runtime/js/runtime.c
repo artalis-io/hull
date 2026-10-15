@@ -2354,6 +2354,10 @@ static void vt_js_stop_async(HlRuntime *rt)
     rt->shutting_down = 1;
     hl_js_sleep_cancel_pending(js);
     hl_async_teardown_run(&rt->async_live, rt->async_ctx);
+    /* The Keel server goes next: nothing may reach its loop through the
+     * runtime after this (a finalizer's ws.connect, the server stats;
+     * audit 16). */
+    js->server = NULL;
 }
 
 const HlRuntimeVtable hl_js_vtable = {

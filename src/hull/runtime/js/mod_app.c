@@ -7,6 +7,36 @@
 #include "internal.h"
 #include "mod_buffer.h"
 
+/* The internal stores (__hull_routes, the def arrays, the test cases) and
+ * the def objects in them are built with DEFINE, never set: a set consults
+ * the prototype chain, so an indexed setter on Array.prototype (or a
+ * "method" one on Object.prototype) ran app code with `this` = the internal
+ * array, which then reached handlers after registration closed (audit 16).
+ * The def objects have no prototype, so a key a def leaves out (multipart,
+ * on_open_id) is not read through Object.prototype either. */
+static void app_put(JSContext *ctx, JSValueConst obj, const char *key,
+                    JSValue val)
+{
+    JS_DefinePropertyValueStr(ctx, obj, key, val, JS_PROP_C_W_E);
+}
+
+static void app_put_idx(JSContext *ctx, JSValueConst arr, uint32_t idx,
+                        JSValue val)
+{
+    JS_DefinePropertyValueUint32(ctx, arr, idx, val, JS_PROP_C_W_E);
+}
+
+/* A list with no prototype: a hole (handler ids leave them in the def
+ * arrays) reads as undefined, never through an Array.prototype getter
+ * (audit 16). */
+static JSValue app_new_list(JSContext *ctx)
+{
+    JSValue arr = JS_NewArray(ctx);
+    if (!JS_IsException(arr))
+        JS_SetPrototype(ctx, arr, JS_NULL);
+    return arr;
+}
+
 /* Returns 1 if app.main was already registered. */
 static int js_app_main_registered(JSContext *ctx)
 {
@@ -100,14 +130,14 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
     /* Ensure __hull_routes array exists */
     JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
-        routes = JS_NewArray(ctx);
+        routes = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
     /* Ensure __hull_route_defs array exists */
     JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_route_defs");
     if (JS_IsUndefined(defs)) {
-        defs = JS_NewArray(ctx);
+        defs = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_route_defs", JS_DupValue(ctx, defs));
     }
 
@@ -118,14 +148,13 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, len_val);
 
     /* Store handler function */
-    JS_SetPropertyUint32(ctx, routes, (uint32_t)idx, JS_DupValue(ctx, argv[1]));
+    app_put_idx(ctx, routes, (uint32_t)idx, JS_DupValue(ctx, argv[1]));
 
     /* Store route definition */
-    JSValue def = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, def, "method",
-                      JS_NewString(ctx, method_names[magic]));
-    JS_SetPropertyStr(ctx, def, "pattern", JS_NewString(ctx, pattern));
-    JS_SetPropertyStr(ctx, def, "handler_id", JS_NewInt32(ctx, idx));
+    JSValue def = JS_NewObjectProto(ctx, JS_NULL);
+    app_put(ctx, def, "method", JS_NewString(ctx, method_names[magic]));
+    app_put(ctx, def, "pattern", JS_NewString(ctx, pattern));
+    app_put(ctx, def, "handler_id", JS_NewInt32(ctx, idx));
 
     /* Stash opts.multipart (if a plain object) verbatim on the def.
      * routes.c reads the integer caps off this sub-object when
@@ -133,13 +162,13 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
     if (has_opts) {
         JSValue mp = JS_GetPropertyStr(ctx, argv[2], "multipart");
         if (JS_IsObject(mp) && !JS_IsFunction(ctx, mp) && !JS_IsArray(ctx, mp)) {
-            JS_SetPropertyStr(ctx, def, "multipart", mp); /* takes ownership */
+            app_put(ctx, def, "multipart", mp); /* takes ownership */
         } else {
             JS_FreeValue(ctx, mp);
         }
     }
 
-    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, def);
+    app_put_idx(ctx, defs, (uint32_t)idx, def);
 
     JS_FreeValue(ctx, defs);
     JS_FreeValue(ctx, routes);
@@ -171,7 +200,7 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     /* Store handler in __hull_routes (same array as route handlers) */
     JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
-        routes = JS_NewArray(ctx);
+        routes = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
@@ -180,14 +209,14 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &handler_id, routes_len_val);
     JS_FreeValue(ctx, routes_len_val);
 
-    JS_SetPropertyUint32(ctx, routes, (uint32_t)handler_id,
-                         JS_DupValue(ctx, argv[2]));
+    app_put_idx(ctx, routes, (uint32_t)handler_id,
+                JS_DupValue(ctx, argv[2]));
     JS_FreeValue(ctx, routes);
 
     /* Store in __hull_middleware array with handler_id */
     JSValue mw = JS_GetPropertyStr(ctx, store, "__hull_middleware");
     if (JS_IsUndefined(mw)) {
-        mw = JS_NewArray(ctx);
+        mw = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_middleware", JS_DupValue(ctx, mw));
     }
 
@@ -196,11 +225,11 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &idx, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "method", JS_NewString(ctx, method));
-    JS_SetPropertyStr(ctx, entry, "pattern", JS_NewString(ctx, pattern));
-    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
-    JS_SetPropertyUint32(ctx, mw, (uint32_t)idx, entry);
+    JSValue entry = JS_NewObjectProto(ctx, JS_NULL);
+    app_put(ctx, entry, "method", JS_NewString(ctx, method));
+    app_put(ctx, entry, "pattern", JS_NewString(ctx, pattern));
+    app_put(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    app_put_idx(ctx, mw, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, mw);
     JS_FreeValue(ctx, store);
@@ -232,7 +261,7 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     /* Store handler in __hull_routes (same array as route handlers) */
     JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
-        routes = JS_NewArray(ctx);
+        routes = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
@@ -241,14 +270,14 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &handler_id, routes_len_val);
     JS_FreeValue(ctx, routes_len_val);
 
-    JS_SetPropertyUint32(ctx, routes, (uint32_t)handler_id,
-                         JS_DupValue(ctx, argv[2]));
+    app_put_idx(ctx, routes, (uint32_t)handler_id,
+                JS_DupValue(ctx, argv[2]));
     JS_FreeValue(ctx, routes);
 
     /* Store in __hull_post_middleware array with handler_id */
     JSValue mw = JS_GetPropertyStr(ctx, store, "__hull_post_middleware");
     if (JS_IsUndefined(mw)) {
-        mw = JS_NewArray(ctx);
+        mw = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_post_middleware", JS_DupValue(ctx, mw));
     }
 
@@ -257,11 +286,11 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &idx, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "method", JS_NewString(ctx, method));
-    JS_SetPropertyStr(ctx, entry, "pattern", JS_NewString(ctx, pattern));
-    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
-    JS_SetPropertyUint32(ctx, mw, (uint32_t)idx, entry);
+    JSValue entry = JS_NewObjectProto(ctx, JS_NULL);
+    app_put(ctx, entry, "method", JS_NewString(ctx, method));
+    app_put(ctx, entry, "pattern", JS_NewString(ctx, pattern));
+    app_put(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    app_put_idx(ctx, mw, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, mw);
     JS_FreeValue(ctx, store);
@@ -298,7 +327,7 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
     /* Store handler in __hull_timers */
     JSValue timers = JS_GetPropertyStr(ctx, store, "__hull_timers");
     if (JS_IsUndefined(timers)) {
-        timers = JS_NewArray(ctx);
+        timers = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_timers", JS_DupValue(ctx, timers));
     }
 
@@ -307,14 +336,14 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &handler_id, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JS_SetPropertyUint32(ctx, timers, (uint32_t)handler_id,
-                         JS_DupValue(ctx, argv[1]));
+    app_put_idx(ctx, timers, (uint32_t)handler_id,
+                JS_DupValue(ctx, argv[1]));
     JS_FreeValue(ctx, timers);
 
     /* Store timer def in __hull_timer_defs */
     JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_timer_defs");
     if (JS_IsUndefined(defs)) {
-        defs = JS_NewArray(ctx);
+        defs = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_timer_defs", JS_DupValue(ctx, defs));
     }
 
@@ -323,11 +352,11 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &idx, defs_len_val);
     JS_FreeValue(ctx, defs_len_val);
 
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "type", JS_NewString(ctx, "every"));
-    JS_SetPropertyStr(ctx, entry, "interval_ms", JS_NewInt64(ctx, interval_ms));
-    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
-    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+    JSValue entry = JS_NewObjectProto(ctx, JS_NULL);
+    app_put(ctx, entry, "type", JS_NewString(ctx, "every"));
+    app_put(ctx, entry, "interval_ms", JS_NewInt64(ctx, interval_ms));
+    app_put(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    app_put_idx(ctx, defs, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, defs);
     JS_FreeValue(ctx, store);
@@ -379,7 +408,7 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
     /* Store handler in __hull_timers */
     JSValue timers = JS_GetPropertyStr(ctx, store, "__hull_timers");
     if (JS_IsUndefined(timers)) {
-        timers = JS_NewArray(ctx);
+        timers = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_timers", JS_DupValue(ctx, timers));
     }
 
@@ -388,14 +417,14 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &handler_id, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JS_SetPropertyUint32(ctx, timers, (uint32_t)handler_id,
-                         JS_DupValue(ctx, argv[1]));
+    app_put_idx(ctx, timers, (uint32_t)handler_id,
+                JS_DupValue(ctx, argv[1]));
     JS_FreeValue(ctx, timers);
 
     /* Store timer def in __hull_timer_defs */
     JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_timer_defs");
     if (JS_IsUndefined(defs)) {
-        defs = JS_NewArray(ctx);
+        defs = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_timer_defs", JS_DupValue(ctx, defs));
     }
 
@@ -404,13 +433,13 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &idx, defs_len_val);
     JS_FreeValue(ctx, defs_len_val);
 
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "type", JS_NewString(ctx, "daily"));
-    JS_SetPropertyStr(ctx, entry, "hour", JS_NewInt32(ctx, hour));
-    JS_SetPropertyStr(ctx, entry, "minute", JS_NewInt32(ctx, minute));
-    JS_SetPropertyStr(ctx, entry, "localtime", JS_NewBool(ctx, use_localtime));
-    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
-    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+    JSValue entry = JS_NewObjectProto(ctx, JS_NULL);
+    app_put(ctx, entry, "type", JS_NewString(ctx, "daily"));
+    app_put(ctx, entry, "hour", JS_NewInt32(ctx, hour));
+    app_put(ctx, entry, "minute", JS_NewInt32(ctx, minute));
+    app_put(ctx, entry, "localtime", JS_NewBool(ctx, use_localtime));
+    app_put(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    app_put_idx(ctx, defs, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, defs);
     JS_FreeValue(ctx, store);
@@ -425,7 +454,7 @@ static int32_t js_store_handler(JSContext *ctx, JSValueConst func)
     JSValue store = hl_js_internals(ctx);
     JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
-        routes = JS_NewArray(ctx);
+        routes = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
@@ -434,7 +463,7 @@ static int32_t js_store_handler(JSContext *ctx, JSValueConst func)
     JS_ToInt32(ctx, &handler_id, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JS_SetPropertyUint32(ctx, routes, (uint32_t)handler_id, JS_DupValue(ctx, func));
+    app_put_idx(ctx, routes, (uint32_t)handler_id, JS_DupValue(ctx, func));
     JS_FreeValue(ctx, routes);
     JS_FreeValue(ctx, store);
     return handler_id;
@@ -462,7 +491,7 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
     /* Ensure __hull_ws_defs array exists */
     JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_ws_defs");
     if (JS_IsUndefined(defs)) {
-        defs = JS_NewArray(ctx);
+        defs = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_ws_defs", JS_DupValue(ctx, defs));
     }
 
@@ -471,32 +500,32 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &idx, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "path", JS_NewString(ctx, path));
+    JSValue entry = JS_NewObjectProto(ctx, JS_NULL);
+    app_put(ctx, entry, "path", JS_NewString(ctx, path));
 
     /* Extract and store each callback */
     JSValue on_open = JS_GetPropertyStr(ctx, argv[1], "onOpen");
     if (JS_IsFunction(ctx, on_open)) {
         int32_t hid = js_store_handler(ctx, on_open);
-        JS_SetPropertyStr(ctx, entry, "on_open_id", JS_NewInt32(ctx, hid));
+        app_put(ctx, entry, "on_open_id", JS_NewInt32(ctx, hid));
     }
     JS_FreeValue(ctx, on_open);
 
     JSValue on_message = JS_GetPropertyStr(ctx, argv[1], "onMessage");
     if (JS_IsFunction(ctx, on_message)) {
         int32_t hid = js_store_handler(ctx, on_message);
-        JS_SetPropertyStr(ctx, entry, "on_message_id", JS_NewInt32(ctx, hid));
+        app_put(ctx, entry, "on_message_id", JS_NewInt32(ctx, hid));
     }
     JS_FreeValue(ctx, on_message);
 
     JSValue on_close = JS_GetPropertyStr(ctx, argv[1], "onClose");
     if (JS_IsFunction(ctx, on_close)) {
         int32_t hid = js_store_handler(ctx, on_close);
-        JS_SetPropertyStr(ctx, entry, "on_close_id", JS_NewInt32(ctx, hid));
+        app_put(ctx, entry, "on_close_id", JS_NewInt32(ctx, hid));
     }
     JS_FreeValue(ctx, on_close);
 
-    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+    app_put_idx(ctx, defs, (uint32_t)idx, entry);
     JS_FreeValue(ctx, defs);
     JS_FreeValue(ctx, store);
     JS_FreeCString(ctx, path);
@@ -528,7 +557,7 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
     /* Ensure __hull_sse_defs array exists */
     JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_sse_defs");
     if (JS_IsUndefined(defs)) {
-        defs = JS_NewArray(ctx);
+        defs = app_new_list(ctx);
         JS_SetPropertyStr(ctx, store, "__hull_sse_defs", JS_DupValue(ctx, defs));
     }
 
@@ -537,10 +566,10 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &idx, len_val);
     JS_FreeValue(ctx, len_val);
 
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "path", JS_NewString(ctx, path));
-    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
-    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+    JSValue entry = JS_NewObjectProto(ctx, JS_NULL);
+    app_put(ctx, entry, "path", JS_NewString(ctx, path));
+    app_put(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    app_put_idx(ctx, defs, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, defs);
     JS_FreeValue(ctx, store);

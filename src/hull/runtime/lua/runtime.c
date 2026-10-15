@@ -1260,6 +1260,9 @@ static void vt_lua_stop_async(HlRuntime *rt)
 {
     rt->shutting_down = 1;
     hl_async_teardown_run(&rt->async_live, rt->async_ctx);
+    /* The Keel server goes next: nothing may reach its loop through the
+     * runtime after this (a __gc's ws.connect, http_server.stats; audit 16). */
+    ((HlLua *)rt)->server = NULL;
 }
 
 const HlRuntimeVtable hl_lua_vtable = {

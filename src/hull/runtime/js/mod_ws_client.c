@@ -430,6 +430,11 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, url);
         return JS_ThrowTypeError(ctx, "ws.connect requires running server");
     }
+    /* A finalizer run at teardown: the loop is gone (audit 16). */
+    if (js->base.shutting_down || !js->base.async_ctx) {
+        JS_FreeCString(ctx, url);
+        return JS_ThrowTypeError(ctx, "ws.connect: runtime is shutting down");
+    }
 
     /* Extract callbacks from handlers object */
     JSValue on_open = JS_GetPropertyStr(ctx, argv[1], "onOpen");

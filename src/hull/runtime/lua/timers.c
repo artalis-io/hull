@@ -75,6 +75,13 @@ void hl_lua_timer_reschedule(HlLuaTimer *t)
     HlLua *lua = t->lua;
     int64_t delay_ms;
 
+    /* Teardown: the loop is going away, and a handler a done_fn finished
+     * during pool_free must not add a timer to it (audit 16). */
+    if (lua->base.shutting_down || !lua->base.async_ctx) {
+        t->timer_id = 0;
+        return;
+    }
+
     if (t->daily)
         delay_ms = hl_compute_daily_delay_ms(t->hour, t->minute, t->localtime);
     else
