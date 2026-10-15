@@ -839,8 +839,8 @@ UTEST(host, unknown_home_falls_back_or_fails_closed)
     if (home) {
         EXPECT_FALSE(hl_host_is_windows());
         EXPECT_EQ(hl_host_path_too_broad("/"), 1);
-        char rp[HL_TEST_PATH_MAX];
-        if (realpath(home, rp))
+        struct stat hst;
+        if (stat(home, &hst) == 0 && S_ISDIR(hst.st_mode))
             EXPECT_EQ(hl_host_path_too_broad(home), 1);
     } else {
         /* No home known: nothing can be shown to stay clear of it. */
