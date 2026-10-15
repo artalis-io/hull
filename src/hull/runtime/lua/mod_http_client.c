@@ -445,6 +445,9 @@ static int lua_http_fetch(lua_State *L)
         return luaL_error(L, "http.fetch: failed to start request");
     }
     ctx->cont = cont;
+    /* No request holds a detached fetch: teardown cancels it (audit 14). */
+    if (ctx->detached)
+        hl_async_ctx_track(ctx, &lua->base.async_live);
 
     /* Yield the coroutine - on resume, the driver result
      * will be pushed onto the stack by lua_push_async_http_response */

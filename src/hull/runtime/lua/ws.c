@@ -203,7 +203,11 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
 
     HlWsArgs args = { conn, 2, reason, reason_len, 0, code };
     int thread_ref = LUA_NOREF, nargs = 0;
-    lua_State *co = route->on_close_id >= 0
+    /* The server is being torn down (Keel's kl_http_server_free closing the
+     * connections still open after the drain): its event loop is already
+     * gone, so no app code runs - an on_close that sent, slept or fetched
+     * would reach freed memory. The conn is invalidated below (audit 15). */
+    lua_State *co = route->on_close_id >= 0 && !lua->base.shutting_down
         ? hl_lua_entry_prepare(lua, "__hull_routes", route->on_close_id,
                                push_ws_args, &args, &thread_ref, &nargs)
         : NULL;

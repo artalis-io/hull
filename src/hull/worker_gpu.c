@@ -115,11 +115,12 @@ static void gpu_done_fn(void *ud)
 
 static void gpu_cancel_fn(void *ud)
 {
+    /* The continuation too, and an attached op off the server's list,
+     * before the ctx goes (audit 14 G1). */
     HlWorkerGpuOp *op = (HlWorkerGpuOp *)ud;
-    HlAsyncCtx *ctx = op->async_ctx;
+    hl_async_ctx_drop_unrun(op->async_ctx);
     hl_worker_gpu_op_free(op);
     free(op);
-    if (ctx) hl_async_ctx_free(ctx);
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */

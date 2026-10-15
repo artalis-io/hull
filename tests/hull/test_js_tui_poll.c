@@ -18,8 +18,12 @@ static uint64_t test_timer(HlAsyncBackendCtx *ctx, uint64_t ms,
     pending_tick = fn; pending_user = user;
     return (uint64_t)timer_calls;
 }
+static uint64_t cancelled_timer;
+static void test_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
+{ (void)ctx; cancelled_timer = handle; }
 static const HlAsyncBackend test_backend = {
     .monotonic_ms = test_now, .timer_add = test_timer,
+    .timer_cancel = test_timer_cancel,
 };
 const HlAsyncBackend *hl_async_backend(void) { return &test_backend; }
 int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
@@ -79,7 +83,14 @@ HlAsyncCtx *hl_async_ctx_create(KlHttpServer *server, HlNetBackendCtx *net,
     if (ctx) live_contexts++;
     return ctx;
 }
-void hl_async_ctx_free(HlAsyncCtx *ctx) { live_contexts--; free(ctx); }
+static HlAsyncCtx *tracked;
+void hl_async_ctx_track(HlAsyncCtx *ctx, HlAsyncTeardown **list)
+{ (void)list; tracked = ctx; }
+void hl_async_ctx_free(HlAsyncCtx *ctx)
+{
+    if (ctx == tracked) tracked = NULL;
+    live_contexts--; free(ctx);
+}
 void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)
 {
     ctx->cont->resume(ctx->cont, ctx->driver);
@@ -97,6 +108,7 @@ static void setup(HlJS *js, int failure)
     timer_calls = 0; fail_timer = failure;
     live_contexts = 0; live_conts = 0;
     pending_tick = NULL; pending_user = NULL;
+    tracked = NULL; cancelled_timer = 0;
 }
 static void teardown(HlJS *js)
 {
@@ -135,6 +147,30 @@ UTEST(js_tui_poll, reschedule_failure_settles_timeout)
     EXPECT_EQ(live_contexts, 0); EXPECT_EQ(live_conts, 0);
     EXPECT_EQ(js.last_async_cont, NULL);
     JS_FreeValue(js.ctx, result); JS_FreeValue(js.ctx, promise);
+    JS_FreeValue(js.ctx, timeout);
+    teardown(&js);
+}
+/* Audit 14 G1: a poll still pending when the runtime shuts down is on the
+ * teardown list, and stopping it disarms its timer before the continuation is
+ * released - nothing fires into freed memory, and QuickJS frees cleanly. */
+UTEST(js_tui_poll, pending_poll_is_stopped_at_teardown)
+{
+    HlJS js; setup(&js, 0);
+    JSValue timeout = JS_NewInt32(js.ctx, 100);
+    JSValue promise = js_tui_poll(js.ctx, JS_UNDEFINED, 1, &timeout);
+    ASSERT_FALSE(JS_IsException(promise));
+    ASSERT_TRUE(tracked != NULL);
+    ASSERT_TRUE(tracked->on_shutdown != NULL);
+    HlAsyncCtx *c = tracked;
+    c->on_shutdown(c, js.base.async_ctx);
+    EXPECT_EQ(cancelled_timer, (uint64_t)1);
+    /* What hl_async_ctx_cancel does next. */
+    c->free_driver(c->driver);
+    c->cont->destroy(c->cont);
+    hl_async_ctx_free(c);
+    EXPECT_EQ(live_contexts, 0); EXPECT_EQ(live_conts, 0);
+    EXPECT_EQ(JS_PromiseState(js.ctx, promise), JS_PROMISE_PENDING);
+    JS_FreeValue(js.ctx, promise);
     JS_FreeValue(js.ctx, timeout);
     teardown(&js);
 }

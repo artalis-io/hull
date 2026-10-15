@@ -1151,6 +1151,16 @@ app.ws("/ws/chat", {
 });
 ```
 
+**At shutdown** the server's drain sends every open WebSocket a close frame
+(1001). A client that answers within `--drain-timeout` gets `on_close` as
+usual; one still open when the server is torn down is closed WITHOUT
+`on_close` - the event loop is gone by then, so the handler could not send,
+sleep or fetch (audit 15). WebSocket clients (`ws.connect`) are closed
+without callbacks too. An operation still pending outside a request (a
+fetch, sleep, `db.async` or `worker.dispatch` started from a timer, a
+WebSocket callback or `app.main`) is completed if its worker had already
+finished it, and otherwise cancelled: its continuation never runs (audit 14).
+
 **Connection object:**
 - `conn:id()` / `conn.id`. Monotonic connection ID (getter)
 - `conn:path()` / `conn.path`. Endpoint path (getter)

@@ -131,7 +131,15 @@ void hl_async_backend_keel_unwrap(HlAsyncBackendCtx *ctx)
 {
     if (!ctx) return;
     /* No kel_event_ctx_free here - borrowed. */
+    for (size_t i = 0; i < ctx->nboxes; i++) free(ctx->boxes[i]);
+    free(ctx->boxes);
     free(ctx);
+}
+
+void hl_async_backend_keel_orphan(HlAsyncBackendCtx *ctx)
+{
+    if (!ctx || !ctx->borrowed) return;
+    ctx->kel = NULL;   /* every call below checks it */
 }
 
 /* ── Loop driver ───────────────────────────────────────────────────── */
@@ -147,7 +155,7 @@ void hl_async_backend_keel_unwrap(HlAsyncBackendCtx *ctx)
  * tick() returns, all ready timers have fired. */
 static int keel_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
 {
-    if (!ctx) return -1;
+    if (!ctx || !ctx->kel) return -1;
     int rc = kl_event_ctx_run(ctx->kel, 16, timeout_ms);
     if (rc < 0) return -1;
     kl_timer_fire(ctx->kel);
@@ -204,14 +212,14 @@ static uint64_t keel_monotonic_ms(void) { return kl_monotonic_ms(); }
 static uint64_t keel_timer_add(HlAsyncBackendCtx *ctx, uint64_t ms,
                                 HlAsyncTimerFn cb, void *user)
 {
-    if (!ctx || !cb) return 0;
+    if (!ctx || !ctx->kel || !cb) return 0;
     int64_t h = kl_timer_add(ctx->kel, ms, cb, user);
     return (h >= 0) ? (uint64_t)h + 1 : 0;
 }
 
 static void keel_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
 {
-    if (!ctx || handle == 0) return;
+    if (!ctx || !ctx->kel || handle == 0) return;
     kl_timer_cancel(ctx->kel, (int64_t)(handle - 1));
 }
 
@@ -222,7 +230,7 @@ static void keel_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
 static int keel_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
                              HlAsyncWatcherFn cb, void *user)
 {
-    if (!ctx || !cb) return -1;
+    if (!ctx || !ctx->kel || !cb) return -1;
     KlEventMask kmask = 0;
     if (mask & HL_ASYNC_READ)  kmask |= KL_EVENT_READ;
     if (mask & HL_ASYNC_WRITE) kmask |= KL_EVENT_WRITE;
@@ -268,7 +276,7 @@ static int keel_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
 
 static int keel_watcher_mod(HlAsyncBackendCtx *ctx, int fd, unsigned mask)
 {
-    if (!ctx) return -1;
+    if (!ctx || !ctx->kel) return -1;
     KlEventMask kmask = 0;
     if (mask & HL_ASYNC_READ)  kmask |= KL_EVENT_READ;
     if (mask & HL_ASYNC_WRITE) kmask |= KL_EVENT_WRITE;
@@ -278,7 +286,7 @@ static int keel_watcher_mod(HlAsyncBackendCtx *ctx, int fd, unsigned mask)
 static void keel_watcher_del(HlAsyncBackendCtx *ctx, int fd)
 {
     if (!ctx) return;
-    kl_watcher_del(ctx->kel, fd);
+    if (ctx->kel) kl_watcher_del(ctx->kel, fd);
     for (size_t i = 0; i < ctx->nboxes; i++) {
         if (ctx->boxes[i]->fd == fd) {
             free(ctx->boxes[i]);
@@ -297,7 +305,7 @@ struct HlAsyncBackendPool {
 static int keel_pool_create(HlAsyncBackendPool **out, HlAsyncBackendCtx *ctx,
                              int num_workers, int queue_capacity)
 {
-    if (!out || !ctx) return -1;
+    if (!out || !ctx || !ctx->kel) return -1;
     HlAsyncBackendPool *p = calloc(1, sizeof *p);
     if (!p) return -1;
     KlThreadPoolConfig cfg = {
@@ -401,7 +409,7 @@ static void keel_op_resume_timer(void *ud)
 
 static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
-    if (!ctx || !op) return -1;
+    if (!ctx || !ctx->kel || !op) return -1;
     /* Already suspended. Overwriting would leak the old state and orphan its
      * deadline timer, which still points at this op. */
     if (op->_backend_state) return -1;
@@ -434,6 +442,10 @@ static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     if (!ctx || !op) return;
     KeelOpState *s = op->_backend_state;
     if (!s) return;                    /* already completed */
+    if (!ctx->kel) {                   /* the loop is gone: nothing will run */
+        keel_op_detach(op);
+        return;
+    }
     s->resumed = 1;
     if (s->deadline_timer >= 0) {
         kl_timer_cancel(ctx->kel, s->deadline_timer);
@@ -460,8 +472,8 @@ static void keel_op_cancel(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     if (!ctx || !op) return;
     KeelOpState *s = op->_backend_state;
     if (!s) return;
-    if (s->deadline_timer >= 0) kl_timer_cancel(ctx->kel, s->deadline_timer);
-    if (s->resume_timer   >= 0) kl_timer_cancel(ctx->kel, s->resume_timer);
+    if (ctx->kel && s->deadline_timer >= 0) kl_timer_cancel(ctx->kel, s->deadline_timer);
+    if (ctx->kel && s->resume_timer   >= 0) kl_timer_cancel(ctx->kel, s->resume_timer);
     keel_op_detach(op);
 }
 

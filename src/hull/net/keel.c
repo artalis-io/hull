@@ -45,6 +45,7 @@ static int keel_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *
 {
     if (!ctx || !req || !op) return -1;
     struct kl_wrap *w = (struct kl_wrap *)ctx;
+    if (!w->server) return -1;
     return kl_async_suspend(w->server, (KlHttpConn *)req, (KlAsyncOp *)op);
 }
 
@@ -52,6 +53,7 @@ static void keel_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
 {
     if (!ctx || !op) return;
     struct kl_wrap *w = (struct kl_wrap *)ctx;
+    if (!w->server) return;
     kl_async_complete(w->server, (KlAsyncOp *)op);
 }
 
@@ -59,6 +61,7 @@ static void keel_op_cancel(HlNetBackendCtx *ctx, HlSuspendOp *op)
 {
     if (!ctx || !op) return;
     struct kl_wrap *w = (struct kl_wrap *)ctx;
+    if (!w->server) return;
     /* Idempotent per Keel's exactly-one-terminal contract: safe even if the op
      * already retired via kl_async_complete or a prior cancel. */
     kl_async_cancel(w->server, (KlAsyncOp *)op);
@@ -141,4 +144,10 @@ void hl_net_backend_keel_unwrap(HlNetBackendCtx *ctx)
     struct kl_wrap *w = (struct kl_wrap *)ctx;
     /* w->server is borrowed - don't touch it. */
     free(w);
+}
+
+void hl_net_backend_keel_orphan(HlNetBackendCtx *ctx)
+{
+    if (!ctx) return;
+    ((struct kl_wrap *)ctx)->server = NULL;
 }

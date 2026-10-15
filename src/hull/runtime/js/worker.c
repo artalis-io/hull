@@ -615,11 +615,12 @@ static void js_dispatch_done_fn(void *ud)
 
 static void js_dispatch_cancel_fn(void *ud)
 {
+    /* Never ran: release the continuation (an attached op through the
+     * server first) before the ctx goes (audit 14 G1). */
     HlJsWorkerDispatchOp *op = (HlJsWorkerDispatchOp *)ud;
-    HlAsyncCtx *ctx = op->async_ctx;
+    hl_async_ctx_drop_unrun(op->async_ctx);
     hl_js_worker_dispatch_op_free(op);
     free(op);
-    if (ctx) hl_async_ctx_free(ctx);
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */

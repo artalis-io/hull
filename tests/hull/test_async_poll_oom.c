@@ -163,14 +163,16 @@ UTEST_F(async_poll_oom, worker_completion_is_delivered_after_memory_exhaustion)
         pthread_mutex_lock(&utest_fixture->pool->queue_lock);
     }
     pthread_mutex_unlock(&utest_fixture->pool->queue_lock);
+    /* pool_free delivers it, on this thread, with no allocation (audit 14
+     * G1: it used to stay queued for a tick that teardown never ran). */
     poll_pool_free(utest_fixture->pool);
     utest_fixture->pool = NULL;
     ASSERT_EQ(atomic_load(&denied_allocations), 0);
-    ASSERT_EQ(utest_fixture->done, 0);
+    ASSERT_EQ(utest_fixture->done, 1);
+    ASSERT_TRUE(pthread_equal(utest_fixture->done_thread, pthread_self()));
     atomic_store(&allocation_budget, -1);
     ASSERT_EQ(poll_tick(utest_fixture->ctx, 0), 0);
     ASSERT_EQ(utest_fixture->done, 1);
-    ASSERT_TRUE(pthread_equal(utest_fixture->done_thread, pthread_self()));
 }
 
 static void wait_for_shutdown(void *user)
@@ -198,7 +200,7 @@ UTEST_F(async_poll_oom, pending_pool_work_is_cancelled_without_allocation)
     utest_fixture->pool = NULL;
     ASSERT_EQ(atomic_load(&denied_allocations), 0);
     ASSERT_EQ(utest_fixture->cancelled, 2);
-    ASSERT_EQ(utest_fixture->done, 0);
+    ASSERT_EQ(utest_fixture->done, 1);   /* the running item, delivered by pool_free */
     atomic_store(&allocation_budget, -1);
     ASSERT_EQ(poll_tick(utest_fixture->ctx, 0), 0);
     ASSERT_EQ(utest_fixture->done, 1);

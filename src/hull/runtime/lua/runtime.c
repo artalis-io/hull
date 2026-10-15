@@ -19,6 +19,7 @@
 #include "hull/runtime/cache_common.h"   /* hl_runtime_cache_seal_prepare */
 #include "hull/http_feature.h"  /* hl_http_ws_registry_free (HTTP-feature seam) */
 #include "hull/shared/async_backend.h"
+#include "hull/shared/async.h"   /* hl_async_teardown_run */
 #include "hull/manifest.h"
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"
@@ -1254,6 +1255,13 @@ static void vt_lua_request_done(HlRuntime *rt, const KlHttpRequest *req)
 }
 #endif
 
+/* Teardown step one (HlRuntimeVtable.stop_async): the loop is still alive. */
+static void vt_lua_stop_async(HlRuntime *rt)
+{
+    rt->shutting_down = 1;
+    hl_async_teardown_run(&rt->async_live, rt->async_ctx);
+}
+
 const HlRuntimeVtable hl_lua_vtable = {
     .init                = vt_lua_init,
     .load_app            = vt_lua_load_app,
@@ -1274,4 +1282,5 @@ const HlRuntimeVtable hl_lua_vtable = {
 #ifdef HL_ENABLE_HTTP_SERVER
     .request_done        = vt_lua_request_done,
 #endif
+    .stop_async          = vt_lua_stop_async,
 };

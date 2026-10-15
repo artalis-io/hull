@@ -249,6 +249,20 @@ static void ssh_on_request_cancel(KlAsyncOp *kop, void *user_data)
     hl_async_ctx_cancel(ctx);
 }
 
+/* A detached (app.main, timer, task) park still pending when the runtime
+ * shuts down (HlAsyncCtx.on_shutdown, audit 14): the same as a cancelled
+ * request - the stream stops pointing at the ctx and is closed - before
+ * hl_async_ctx_cancel releases the coroutine. */
+static void ssh_on_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    (void)loop;
+    HlLuaSshStream *o = (HlLuaSshStream *)ctx->driver;
+    if (o && o->ctx == ctx) {
+        o->ctx = NULL;
+        if (o->s) hl_net_stream_close(o->s);
+    }
+}
+
 /* Park the calling coroutine on the stream's pending op. Returns 0 on success,
  * -1 if the park could not be armed - the caller must then report an error
  * rather than yield, because nothing would ever resume it.
@@ -314,6 +328,10 @@ static int ssh_park(HlLua *lua, HlLuaSshStream *o)
     /* Published only once both are armed: nothing can reach it before then,
      * because op_complete defers its resume to a later tick. */
     o->ctx = ctx;
+    if (ctx->detached) {
+        ctx->on_shutdown = ssh_on_shutdown;
+        hl_async_ctx_track(ctx, &lua->base.async_live);
+    }
     return 0;
 }
 

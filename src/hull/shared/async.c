@@ -11,7 +11,38 @@
 #include "hull/shared/async.h"
 #include "hull/utils/alloc.h"
 #include "hull/net_backend.h"
+#include <stddef.h>
 #include <string.h>
+
+/* ── Teardown list ────────────────────────────────────────────────── */
+
+void hl_async_teardown_link(HlAsyncTeardown **list, HlAsyncTeardown *t)
+{
+    if (!list || !t || t->pprev) return;
+    t->next = *list;
+    if (t->next) t->next->pprev = &t->next;
+    t->pprev = list;
+    *list = t;
+}
+
+void hl_async_teardown_unlink(HlAsyncTeardown *t)
+{
+    if (!t || !t->pprev) return;
+    *t->pprev = t->next;
+    if (t->next) t->next->pprev = t->pprev;
+    t->next = NULL;
+    t->pprev = NULL;
+}
+
+void hl_async_teardown_run(HlAsyncTeardown **list, HlAsyncBackendCtx *loop)
+{
+    if (!list) return;
+    while (*list) {
+        HlAsyncTeardown *t = *list;
+        hl_async_teardown_unlink(t);
+        if (t->stop) t->stop(t, loop);
+    }
+}
 
 /* ── KlAsyncOp callbacks ──────────────────────────────────────────── */
 
@@ -23,6 +54,7 @@ static void hl_async_on_resume(KlAsyncOp *op, void *user_data)
 {
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     (void)op;
+    hl_async_teardown_unlink(&ctx->track);
 
     /* Resume the runtime handler - it finalizes the response; Keel 3.x drives
      * the send itself after this returns (see HlAsyncCont.resume). */
@@ -76,7 +108,40 @@ HlAsyncCtx *hl_async_ctx_create(KlHttpServer *s, HlNetBackendCtx *net_ctx,
 void hl_async_ctx_free(HlAsyncCtx *ctx)
 {
     if (!ctx) return;
+    hl_async_teardown_unlink(&ctx->track);
     hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+}
+
+/* A runtime is shutting down with this detached op still pending. */
+static void hl_async_ctx_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
+{
+    HlAsyncCtx *ctx = (HlAsyncCtx *)(void *)((char *)t - offsetof(HlAsyncCtx, track));
+    if (ctx->on_shutdown)
+        ctx->on_shutdown(ctx, loop);   /* stop the driver: nothing fires later */
+    hl_async_ctx_cancel(ctx);
+}
+
+void hl_async_ctx_track(HlAsyncCtx *ctx, HlAsyncTeardown **list)
+{
+    if (!ctx || !list) return;
+    ctx->track.stop = hl_async_ctx_teardown_stop;
+    hl_async_teardown_link(list, &ctx->track);
+}
+
+void hl_async_ctx_drop_unrun(HlAsyncCtx *ctx)
+{
+    if (!ctx) return;
+    if (ctx->cont && !ctx->detached) {
+        /* Still suspended on its connection: Keel unlinks the op and runs its
+         * on_cancel, which releases the continuation and leaves the ctx. */
+        hl_net_op_cancel(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+    }
+    if (ctx->cont) {
+        ctx->cont->cancel(ctx->cont);
+        ctx->cont->destroy(ctx->cont);
+        ctx->cont = NULL;
+    }
+    hl_async_ctx_free(ctx);
 }
 
 void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data)
@@ -98,6 +163,7 @@ void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data)
 void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)
 {
     if (!ctx || !ctx->cont) return;
+    hl_async_teardown_unlink(&ctx->track);
 
     ctx->cont->resume(ctx->cont, ctx->driver);
 
@@ -110,6 +176,7 @@ void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)
 void hl_async_ctx_cancel(HlAsyncCtx *ctx)
 {
     if (!ctx) return;
+    hl_async_teardown_unlink(&ctx->track);
     if (ctx->cont)
         ctx->cont->cancel(ctx->cont);
 

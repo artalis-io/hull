@@ -293,6 +293,7 @@ typedef struct TuiPollOpJs {
     int         has_event;
     int         remaining_ms;
     uint64_t    last_byte_ms;
+    uint64_t    timer_id;       /* the scheduled slice; 0 = none */
 } TuiPollOpJs;
 
 /* push_result for JS conts: returns the JSValue to resolve with. */
@@ -310,6 +311,7 @@ static int js_tui_poll_schedule(TuiPollOpJs *op);
 static void js_tui_poll_tick(void *user)
 {
     TuiPollOpJs *op = (TuiPollOpJs *)user;
+    op->timer_id = 0;                   /* this one has fired */
     const HlAsyncBackend *be = hl_async_backend();
     uint64_t now = be->monotonic_ms();
 
@@ -356,8 +358,18 @@ static int js_tui_poll_schedule(TuiPollOpJs *op)
                      ? (uint64_t)op->remaining_ms
                      : HL_TUI_POLL_SLICE_MS;
     if (slice == 0) slice = 1;
-    return be->timer_add(op->js->base.async_ctx, slice, js_tui_poll_tick, op)
-           ? 0 : -1;
+    op->timer_id = be->timer_add(op->js->base.async_ctx, slice,
+                                 js_tui_poll_tick, op);
+    return op->timer_id ? 0 : -1;
+}
+
+/* A poll still pending at teardown (HlAsyncCtx.on_shutdown, audit 14). */
+static void js_tui_poll_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    TuiPollOpJs *op = (TuiPollOpJs *)ctx->driver;
+    if (op && op->timer_id && loop)
+        hl_async_backend()->timer_cancel(loop, op->timer_id);
+    if (op) op->timer_id = 0;
 }
 
 static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
@@ -440,6 +452,8 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, promise);
         return JS_ThrowInternalError(ctx, "tui.poll: could not arm a timer");
     }
+    async->on_shutdown = js_tui_poll_shutdown;
+    hl_async_ctx_track(async, &js->base.async_live);
     return promise;
 }
 

@@ -23,8 +23,10 @@
 #include <keel/url.h>
 
 #include "hull/shared/async_backend.h"
+#include "hull/shared/async.h"   /* HlAsyncTeardown */
 #include "log.h"
 
+#include <stddef.h>
 #include <string.h>
 
 /* Client class id is module-internal - no other file references it. */
@@ -44,7 +46,25 @@ typedef struct {
     int             release_scheduled;  /* self_ref release already queued */
     JSContext      *ctx;
     HlJS           *js;
+    /* On the runtime's teardown list while `client` is held: the Keel
+     * connection lives on the server's event loop, which is freed before the
+     * runtime, so teardown frees it first (audit 14 G1). */
+    HlAsyncTeardown teardown;
 } HlJSWsClientUD;
+
+/* Runtime teardown, the loop still alive: free the Keel connection now. The
+ * object itself (and its callbacks) go with the runtime. */
+static void js_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
+{
+    (void)loop;
+    HlJSWsClientUD *ud = (HlJSWsClientUD *)(void *)
+        ((char *)t - offsetof(HlJSWsClientUD, teardown));
+    ud->closed = 1;
+    if (ud->client) {
+        kl_ws_client_free(ud->client);
+        ud->client = NULL;
+    }
+}
 
 static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
 {
@@ -52,6 +72,7 @@ static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
                                                            js_ws_client_conn_class_id);
     if (!ud) return;
 
+    hl_async_teardown_unlink(&ud->teardown);
     if (ud->client)
         kl_ws_client_free(ud->client);
 
@@ -430,6 +451,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, on_error);
         return JS_EXCEPTION;
     }
+    memset(ud, 0, sizeof *ud);
 
     ud->on_open = JS_IsFunction(ctx, on_open) ? on_open : (JS_FreeValue(ctx, on_open), JS_UNDEFINED);
     ud->on_message = JS_IsFunction(ctx, on_message) ? on_message : (JS_FreeValue(ctx, on_message), JS_UNDEFINED);
@@ -466,6 +488,8 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     }
 
     ud->client = client;
+    ud->teardown.stop = js_ws_client_teardown_stop;
+    hl_async_teardown_link(&js->base.async_live, &ud->teardown);
 
     return obj;
 }

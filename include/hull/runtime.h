@@ -173,6 +173,16 @@ typedef struct HlRuntimeVtable {
      * middleware's req.ctx). Called on the event-loop thread, outside any
      * script run; must not raise. NULL = nothing kept. */
     void  (*request_done)(HlRuntime *rt, const KlHttpRequest *req);
+
+    /* Teardown, step one (audit 14 G1 / audit 15): called by every entry
+     * point that owns an event loop, after the thread pool is freed and
+     * BEFORE the loop, the Keel server and the runtime go. Sets
+     * rt->shutting_down and stops everything the runtime still has pending
+     * on the loop outside a request - detached ops (http.fetch, hull.sleep,
+     * tui.poll, task / ssh parks started from a timer, a WebSocket callback
+     * or app.main) and WebSocket clients - releasing their continuations
+     * while the runtime is alive. Runs no app code. Idempotent. */
+    void  (*stop_async)(HlRuntime *rt);
 } HlRuntimeVtable;
 
 struct HlRuntime {
@@ -301,6 +311,15 @@ struct HlRuntime {
      * (CLI builds don't compile the registration bindings).  Kept on
      * the base struct unconditionally so consumers don't need ifdefs. */
     int registration_closed;
+
+    /* Teardown list (shared/async.h HlAsyncTeardown): every detached op and
+     * WebSocket client still pending on the loop. Drained by
+     * vt->stop_async. */
+    struct HlAsyncTeardown *async_live;
+    /* Set by vt->stop_async: the server is being torn down. A WebSocket
+     * closed by that teardown runs no on_close handler - the event loop is
+     * going away under it (audit 15). */
+    int shutting_down;
 };
 
 #endif /* HL_RUNTIME_H */

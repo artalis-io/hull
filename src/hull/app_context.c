@@ -220,7 +220,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         ctx->db_registry = hl_db_registry_create(NULL, db_path, opts->alloc);
         if (!ctx->db_registry) {
             fprintf(stderr, "hull: out of memory (db registry)\n");
-            free(ctx);
+            hl_app_context_free(ctx);   /* app_dir_copy too (audit 15) */
             return -1;
         }
         /* Open the default connection only when a default DSN exists. With none
@@ -233,7 +233,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                 fprintf(stderr, "hull: %s\n", derr ? derr : "cannot open database");
                 hl_db_registry_destroy(ctx->db_registry);
                 ctx->db_registry = NULL;
-                free(ctx);
+                hl_app_context_free(ctx);
                 return -1;
             }
             ctx->db_open = 1;

@@ -195,7 +195,11 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
 
     conn->closed = 1;
 
-    if (route->on_close_id >= 0) {
+    /* The server is being torn down (Keel's kl_http_server_free closing the
+     * connections still open after the drain): its event loop is already
+     * gone, so no app code runs - an on_close that sent, slept or fetched
+     * would reach freed memory. The conn is invalidated as below (audit 15). */
+    if (route->on_close_id >= 0 && !js->base.shutting_down) {
         js->active_conn = NULL;
         js->active_req = NULL;
         js->active_timer = NULL;

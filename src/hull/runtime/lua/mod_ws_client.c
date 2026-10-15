@@ -17,6 +17,7 @@
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/cap/http.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/async.h"   /* HlAsyncTeardown */
 
 #include <keel/keel.h>
 #include <keel/websocket_client.h>
@@ -24,6 +25,7 @@
 
 #include "log.h"
 
+#include <stddef.h>
 #include <string.h>
 
 /* ════════════════════════════════════════════════════════════════════
@@ -44,7 +46,25 @@ typedef struct HlLuaWsClientUD {
     int             self_ref;    /* registry ref to keep self alive */
     lua_State      *L;           /* main thread */
     HlLua          *lua;
+    /* On the runtime's teardown list while `client` is held: the Keel
+     * connection lives on the server's event loop, which is freed before the
+     * runtime, so teardown frees it first (audit 14 G1). */
+    HlAsyncTeardown teardown;
 } HlLuaWsClientUD;
+
+/* Runtime teardown, the loop still alive: free the Keel connection now. The
+ * userdata (and its refs) go with the Lua state. */
+static void lua_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
+{
+    (void)loop;
+    HlLuaWsClientUD *ud = (HlLuaWsClientUD *)(void *)
+        ((char *)t - offsetof(HlLuaWsClientUD, teardown));
+    ud->closed = 1;
+    if (ud->client) {
+        kl_ws_client_free(ud->client);
+        ud->client = NULL;
+    }
+}
 
 /* Client conn methods */
 
@@ -123,6 +143,7 @@ static int lua_ws_client_gc(lua_State *L)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
+    hl_async_teardown_unlink(&ud->teardown);
     if (ud->client) {
         kl_ws_client_free(ud->client);
         ud->client = NULL;
@@ -336,6 +357,7 @@ static int lua_ws_connect(lua_State *L)
     /* Create userdata */
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)lua_newuserdata(L,
                                                                 sizeof(HlLuaWsClientUD));
+    memset(ud, 0, sizeof *ud);
     ud->client = NULL;
     ud->closed = 0;
     ud->on_open_ref = LUA_NOREF;
@@ -396,6 +418,8 @@ static int lua_ws_connect(lua_State *L)
     }
 
     ud->client = client;
+    ud->teardown.stop = lua_ws_client_teardown_stop;
+    hl_async_teardown_link(&lua->base.async_live, &ud->teardown);
 
     return 1; /* return userdata on stack */
 }

@@ -18,8 +18,39 @@
 #include <keel/async.h>
 
 /* Forward declarations */
-typedef struct HlAllocator     HlAllocator;
-typedef struct HlNetBackendCtx HlNetBackendCtx;
+typedef struct HlAllocator       HlAllocator;
+typedef struct HlNetBackendCtx   HlNetBackendCtx;
+typedef struct HlAsyncBackendCtx HlAsyncBackendCtx;
+
+/* ── HlAsyncTeardown - what a runtime must stop before it goes ────────
+ *
+ * Shutdown order (audit 14 G1 / audit 15): the Keel server is freed BEFORE
+ * the runtime, because its teardown cancels the ops it holds and closes every
+ * connection (a WebSocket's on_close included), and all of that calls back
+ * into the runtime. What the runtime holds on the loop that Keel does NOT
+ * know about - a detached op (an http.fetch, a hull.sleep, a tui.poll started
+ * from a timer, a WebSocket callback or app.main), a WebSocket client - is
+ * linked into the runtime's teardown list (HlRuntime.async_live) and stopped
+ * by hl_async_teardown_run while the runtime and the loop are both alive.
+ * Such an op used to outlive both: its continuation leaked (QuickJS then
+ * asserted in JS_FreeRuntime) and its driver later touched a freed loop.
+ *
+ * Embedded in its owner; the owner unlinks it (hl_async_teardown_unlink)
+ * whenever it retires normally. */
+typedef struct HlAsyncTeardown HlAsyncTeardown;
+struct HlAsyncTeardown {
+    HlAsyncTeardown  *next;
+    HlAsyncTeardown **pprev;          /* NULL = not linked */
+    /* Stop the owner now. @p loop is the runtime's async context (NULL when
+     * it has none). Called once, already unlinked; may free the owner. */
+    void (*stop)(HlAsyncTeardown *self, HlAsyncBackendCtx *loop);
+};
+
+void hl_async_teardown_link(HlAsyncTeardown **list, HlAsyncTeardown *t);
+void hl_async_teardown_unlink(HlAsyncTeardown *t);   /* no-op when unlinked */
+
+/* Stop every linked entry until the list is empty (a stop may unlink others). */
+void hl_async_teardown_run(HlAsyncTeardown **list, HlAsyncBackendCtx *loop);
 
 /* ── HlAsyncCont - runtime continuation vtable ────────────────────── */
 
@@ -101,8 +132,16 @@ typedef struct HlAsyncCtx {
 
     /* A detached op's own deadline (op.deadline_ms is armed only by
      * hl_net_op_suspend, i.e. on the attached path): the Keel timer id + 1,
-     * 0 = none. Set and cleared by the op's owner (http_async.c). */
+     * 0 = none. Set and cleared by the op's owner (http_async.c). Lua's
+     * detached hull.sleep keeps its backend timer handle here. */
     int64_t      detached_timer;
+
+    /* Teardown entry of a tracked detached op (hl_async_ctx_track). Every
+     * path that retires the ctx unlinks it. */
+    HlAsyncTeardown track;
+    /* Optional: stop the op's driver (a timer, an in-flight request) before
+     * a teardown cancels the ctx. Set by the op's owner. */
+    void       (*on_shutdown)(struct HlAsyncCtx *ctx, HlAsyncBackendCtx *loop);
 } HlAsyncCtx;
 
 /*
@@ -148,6 +187,27 @@ void hl_async_ctx_resume_detached(HlAsyncCtx *ctx);
  * list; use this directly only for the detached (connectionless) case.
  */
 void hl_async_ctx_cancel(HlAsyncCtx *ctx);
+
+/*
+ * Link a DETACHED ctx into its runtime's teardown list (HlRuntime.async_live):
+ * a runtime shutting down then cancels it (on_shutdown, then
+ * hl_async_ctx_cancel) while the runtime and the loop are alive. Not for a
+ * pool op (pool_free retires those) nor an attached one (the server's
+ * teardown cancels those).
+ */
+void hl_async_ctx_track(HlAsyncCtx *ctx, HlAsyncTeardown **list);
+
+/*
+ * A pool op's cancel_fn: its work never ran and its done_fn never will.
+ * Releases the continuation - for an ATTACHED op through the net backend
+ * first, which unlinks the op from the server's active list (the op's
+ * on_cancel then releases the continuation and leaves the ctx) - and frees
+ * the ctx. Freeing the ctx while its op was still linked left the server's
+ * teardown walking freed memory, and a detached op's continuation was never
+ * released (audit 14 G1). Call it before freeing the driver (an op's
+ * on_cancel reads it); it does not free the driver.
+ */
+void hl_async_ctx_drop_unrun(HlAsyncCtx *ctx);
 
 /*
  * Timer callback for detached sleep: fires hl_async_ctx_resume_detached.

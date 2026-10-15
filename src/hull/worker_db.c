@@ -84,6 +84,19 @@ static void worker_db_key_create(void)
     pthread_key_create(&worker_db_key, worker_db_destructor);
 }
 
+/* This thread's connection list. The key is created on first use, by
+ * whichever thread gets here first: a pool thread's first op could run
+ * before hl_worker_db_init (which is only called with a default DSN), and
+ * worker_db_key, still 0, then named ANOTHER subsystem's thread-local slot -
+ * the sweep wrote a WorkerConnNode list into the JS worker VM's context and
+ * the next worker.dispatch on that thread jumped through a garbage pointer
+ * (audit 14 G1 e2e, found under ASan). */
+static WorkerConnNode *worker_db_head(void)
+{
+    pthread_once(&worker_db_once, worker_db_key_create);
+    return (WorkerConnNode *)pthread_getspecific(worker_db_key);
+}
+
 void hl_worker_db_init(const char *dsn)
 {
     /* A SQLite file path is resolved to an absolute path so every worker
@@ -139,7 +152,7 @@ static HlWorkerDb *worker_db_get(const char *dsn, int *fresh)
     char keybuf[PATH_MAX];
     const char *key = worker_db_resolve_key(dsn, be, keybuf);
 
-    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    WorkerConnNode *head = worker_db_head();
 
     /* Cache hit: unlink + move to the head (mark MRU) so the tail stays the LRU
      * eviction target. Count nodes on the way for the cap check below. */
@@ -209,7 +222,7 @@ void hl_worker_db_invalidate(const char *dsn)
     char keybuf[PATH_MAX];
     const char *key = worker_db_resolve_key(dsn, be, keybuf);
 
-    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    WorkerConnNode *head = worker_db_head();
     WorkerConnNode *prev = NULL;
     for (WorkerConnNode *n = head; n; prev = n, n = n->next) {
         if (n->dsn && strcmp(n->dsn, key) == 0) {
@@ -232,7 +245,7 @@ void hl_worker_db_invalidate(const char *dsn)
  * handle, outside the process-wide cap on dynamic connections). */
 static void worker_db_sweep_closed_dynamic(void)
 {
-    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    WorkerConnNode *head = worker_db_head();
     WorkerConnNode **link = &head;
     while (*link) {
         WorkerConnNode *n = *link;
@@ -265,7 +278,7 @@ HlWorkerDb *hl_worker_db_get(void)
 int hl_worker_db_end_job(char *err, size_t errsz)
 {
     if (!worker_db_dsn) return 0;   /* never initialized: no connections */
-    WorkerConnNode *head = (WorkerConnNode *)pthread_getspecific(worker_db_key);
+    WorkerConnNode *head = worker_db_head();
     WorkerConnNode **link = &head;
     int found = 0;
     while (*link) {
@@ -588,13 +601,13 @@ static void db_done_fn(void *ud)
 
 static void db_cancel_fn(void *ud)
 {
-    /* Called by kl_thread_pool_free for items that never ran.
-     * The async cancel handler already freed the cont (if it ran). */
+    /* Called by pool_free for items that never ran. The continuation is
+     * released (unless the async cancel handler already did) and an attached
+     * op is taken off the server's list before the ctx goes (audit 14 G1). */
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
-    HlAsyncCtx *ctx = op->async_ctx;
+    hl_async_ctx_drop_unrun(op->async_ctx);
     hl_worker_db_op_free(op);
     free(op);
-    if (ctx) hl_async_ctx_free(ctx);
 }
 
 /* ── Submit / free ─────────────────────────────────────────────────── */

@@ -517,6 +517,14 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
  * Uses KlAsyncOp deadline (no driver, no FD). The Keel deadline sweep
  * fires hl_async_on_deadline_sleep, which calls kl_async_complete.
  */
+/* A detached sleep still pending at teardown (HlAsyncCtx.on_shutdown). */
+static void lua_sleep_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    if (loop && ctx->detached_timer > 0)
+        hl_async_backend()->timer_cancel(loop, (uint64_t)ctx->detached_timer);
+    ctx->detached_timer = 0;
+}
+
 static int lua_hull_sleep(lua_State *L)
 {
     lua_Integer ms = luaL_checkinteger(L, 1);
@@ -576,6 +584,11 @@ static int lua_hull_sleep(lua_State *L)
             hl_async_ctx_free(ctx);
             return luaL_error(L, "hull.sleep(): failed to add timer");
         }
+        /* No request holds it: teardown cancels the timer and releases the
+         * coroutine (audit 14). */
+        ctx->detached_timer = (int64_t)tid;
+        ctx->on_shutdown = lua_sleep_shutdown;
+        hl_async_ctx_track(ctx, &lua->base.async_live);
     }
 
     return lua_yieldk(L, 0, 0, NULL);
@@ -1173,8 +1186,9 @@ static int lua_hull_park(lua_State *L)
 #endif
     {
         /* Detached (app.main, a timer, a task): nothing is armed; only the
-         * wake resumes it. */
+         * wake resumes it - or teardown cancels it (audit 14). */
         ctx->detached = 1;
+        hl_async_ctx_track(ctx, &lua->base.async_live);
     }
     s->ctx = ctx;
     s->refs++;                        /* the ctx's, until slot_ctx_gone */
