@@ -18,7 +18,7 @@ let target = null;
 let fired = false;
 
 // A detached fetch: no request holds it.
-app.every(50, async () => {
+app.every(100, async () => {
     if (!target || fired) return;
     fired = true;
     try { await httpClient.async.get(target); } catch (e) { /* cancelled */ }

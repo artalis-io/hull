@@ -16,7 +16,7 @@ app.manifest({
 local target, fired = nil, false
 
 -- A detached fetch: no request holds it.
-app.every(50, function()
+app.every(100, function()
     if not target or fired then return end
     fired = true
     http_client.async.get(target)
