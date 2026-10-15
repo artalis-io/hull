@@ -910,7 +910,8 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     /* Require a live bound connection: a closed db.open() handle resolves to
      * NULL here, so async-after-close fails closed instead of silently
      * targeting the default database. */
-    if (!js_call_handle(ctx, this_val))
+    HlDbHandle *bound = js_call_handle(ctx, this_val);
+    if (!bound)
         return JS_ThrowInternalError(ctx, "database not available");
 
     /* Input differs by kind: WAIT_NOTIFY takes (channel, timeoutMs); the
@@ -918,19 +919,29 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     HlWorkerDbOp *op = NULL;
 
     if (kind == HL_WORK_DB_WAIT_NOTIFY) {
+        /* A backend with no LISTEN/NOTIFY fails here (audit 14): the worker
+         * opened a connection only to have the wait return at once. */
+        if (!bound->backend || !bound->backend->dialect.supports_notify ||
+            !bound->backend->wait_notify)
+            return JS_ThrowTypeError(ctx, "waitNotify: this database has no "
+                "LISTEN/NOTIFY (check conn.dialect.supportsNotify)");
         if (argc < 1)
             return JS_ThrowTypeError(ctx, "waitNotify requires (channel, timeoutMs?)");
         const char *channel = JS_ToCString(ctx, argv[0]);
         if (!channel)
             return JS_EXCEPTION;
-        int32_t timeout_ms = 1000;
+        /* 0..HL_WORKER_DB_NOTIFY_MAX_MS (audit 14): the wait holds a pool
+         * thread, and an unclamped value held one for ~24 days. Read as a
+         * double: ToInt32 wraps 2**32 - 1 to -1 and 2**32 + 5 to 5. */
+        double t = 1000;
         if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
-            JS_ToInt32(ctx, &timeout_ms, argv[1]) < 0) {
+            JS_ToFloat64(ctx, &t, argv[1]) < 0) {
             /* A throwing valueOf/Symbol.toPrimitive on the timeout arg left a
              * pending exception; propagate it rather than proceeding. */
             JS_FreeCString(ctx, channel);
             return JS_EXCEPTION;
         }
+        int timeout_ms = hl_worker_db_notify_timeout(t);
         op = calloc(1, sizeof(HlWorkerDbOp));
         if (!op) {
             JS_FreeCString(ctx, channel);
@@ -940,7 +951,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         op->server = js->server;
         op->alloc = js->base.alloc;
         op->channel = strdup(channel);
-        op->timeout_ms = (int)timeout_ms;
+        op->timeout_ms = timeout_ms;
         JS_FreeCString(ctx, channel);
         if (!op->channel) {
             free(op);
@@ -1003,6 +1014,15 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         js_free_hl_values(ctx, params, nparams);
     }
 
+    /* The conversions above ran app code (toString / valueOf, a Proxy's
+     * traps), which may have closed a db.open handle: the op would then run
+     * against a closed connection's DSN (audit 15). Resolve it again. */
+    if (!js_call_handle(ctx, this_val)) {
+        hl_worker_db_op_free(op);
+        free(op);
+        return JS_ThrowInternalError(ctx, "database not available");
+    }
+
     /* Target the database this async call is bound to: db.connect(name).async
      * hits that named connection's DSN; db.open(dsn).async its dynamic DSN;
      * db.default().async resolves to the default. js_call_dsn recovers it from
@@ -1010,6 +1030,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     {
         const char *dsn = js_call_dsn(ctx, this_val);
         op->max_instructions = js->max_instructions;   /* the op's own */
+        op->max_result_bytes = js->max_heap_bytes;
         op->no_cache = JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;
         if (op->no_cache) op->dyn_id = hl_db_dynamic_id(js_call_handle(ctx, this_val));
         if (dsn) {
@@ -1111,7 +1132,9 @@ static JSValue js_db_async_exec(JSContext *ctx, JSValueConst this_val,
 /* conn.waitNotify(channel, timeoutMs) -> Promise<boolean>. Yielding
  * low-latency wakeup: parks on the db.async worker pool while a worker blocks
  * on the backend's LISTEN/NOTIFY primitive; resolves true (notified) or false
- * (timeout / unsupported backend). Callers gate on conn.dialect.supportsNotify. */
+ * (timeout, or a dropped connection). Throws on a backend without
+ * LISTEN/NOTIFY: callers gate on conn.dialect.supportsNotify. The timeout is
+ * clamped to 0..HL_WORKER_DB_NOTIFY_MAX_MS. */
 static JSValue js_db_wait_notify(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {

@@ -75,6 +75,42 @@ if ! echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK"; then
 fi
 echo "ok  --with=duckdb composed + ran"
 
+echo "=== a long DuckDB query is stopped by the run's instruction budget ==="
+# Audit 15: the statement ran inside one duckdb_execute_prepared call, which no
+# budget or watchdog saw - this query held the thread for minutes. It now runs
+# task by task, charged to the run, and is interrupted once over the limit (or
+# past the run's deadline, while DuckDB's own threads hold the tasks).
+LONG=$(mktemp -d)
+cat > "$LONG/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1" },
+    databases = { named = { analytics = "duckdb://:memory:" } },
+})
+app.main(function()
+    local d = require("hull.db").connect("analytics")
+    d.query("SELECT count(*) AS n FROM range(100000000000) t(i) WHERE i % 7 = 3")
+    print("LONG QUERY FINISHED")
+    return 0
+end)
+LUA
+LONG_BUILD=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$LONG/bin" "$LONG" 2>&1) || true
+echo "$LONG_BUILD" | grep -q "composed feature 'duckdb'" || { echo "$LONG_BUILD"; echo "FAIL: long-query app not composed"; exit 1; }
+T0=$(date +%s)
+if command -v timeout >/dev/null 2>&1; then
+    LONG_OUT=$(timeout 120 "$LONG/bin" --hull-max-instructions 5000000 --hull-max-run-ms 20000 2>&1) || true
+else
+    LONG_OUT=$("$LONG/bin" --hull-max-instructions 5000000 --hull-max-run-ms 20000 2>&1) || true
+fi
+T1=$(date +%s)
+rm -rf "$LONG"
+echo "$LONG_OUT" | tail -5
+if echo "$LONG_OUT" | grep -q "LONG QUERY FINISHED"; then
+    echo "FAIL: the long DuckDB query ran to completion past the limit"; exit 1
+fi
+echo "$LONG_OUT" | grep -Eq "instruction limit exceeded|run exceeded its time limit" || { echo "FAIL: long DuckDB query not stopped by the run's limits"; exit 1; }
+[ $((T1 - T0)) -lt 60 ] || { echo "FAIL: stopping the query took $((T1 - T0)) s"; exit 1; }
+echo "ok  long DuckDB query interrupted in $((T1 - T0)) s"
+
 echo "=== negative: a plain sqlite app must NOT compose duckdb ==="
 printf 'app.manifest({modules={"hull/db@1"}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
     > "$PLAIN/app.lua"

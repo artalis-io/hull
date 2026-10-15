@@ -219,26 +219,36 @@ static const char *ci_strstr(const char *hay, const char *needle)
  * and treat a later duplicate-index error as success. Sets *handled when the
  * statement was a CREATE INDEX ... IF NOT EXISTS. Returns 0 / -1.
  *
- * The `index` / `if not exists` match is a loose case-insensitive substring
- * scan: acceptable because the ONLY callers are Hull's own stdlib index DDL
- * (trusted, fixed strings), never app-supplied SQL. App queries never reach
- * here as a CREATE INDEX IF NOT EXISTS, and parameter values are bound out of
- * band, so this is not an injection surface.
+ * Every no-parameter exec reaches here, app SQL included, so the match is
+ * exact (audit 14): ONE statement (my_sql_single_statement), whose leading
+ * tokens are CREATE [UNIQUE|FULLTEXT|SPATIAL] INDEX IF NOT EXISTS, read the
+ * way MySQL reads them. A loose substring scan rewrote a procedure body or a
+ * string literal that held the words, and swallowed a duplicate-index error
+ * from one statement of a multi-statement text, reporting the rest as run.
  */
 static int mysql_create_index_shim(HlDbMyCtx *s, const char *sql, int *handled)
 {
     *handled = 0;
-    const char *p = sql;
-    while (isspace((unsigned char)*p)) p++;
-    if (strncasecmp(p, "create ", 7) != 0) return 0;
-    const char *idx = ci_strstr(p, "index");
-    const char *ine = ci_strstr(p, "if not exists");
-    if (!idx || !ine || idx > ine) return 0;   /* not CREATE INDEX IF NOT EXISTS */
+    if (!my_sql_single_statement(sql)) return 0;
+    char w[16];
+    const char *p = hl_sql_next_word_ex(sql, w, sizeof w, 0);
+    if (strcmp(w, "create") != 0) return 0;
+    p = hl_sql_next_word_ex(p, w, sizeof w, 0);
+    if (strcmp(w, "unique") == 0 || strcmp(w, "fulltext") == 0 ||
+        strcmp(w, "spatial") == 0)
+        p = hl_sql_next_word_ex(p, w, sizeof w, 0);
+    if (strcmp(w, "index") != 0) return 0;
+    const char *ine = hl_sql_skip_space_ex(p, 0);   /* start of IF */
+    static const char *const kw[] = { "if", "not", "exists" };
+    for (size_t i = 0; i < sizeof kw / sizeof kw[0]; i++) {
+        p = hl_sql_next_word_ex(p, w, sizeof w, 0);
+        if (strcmp(w, kw[i]) != 0) return 0;
+    }
+    const char *rest = p;
+    while (isspace((unsigned char)*rest)) rest++;
 
     *handled = 1;
     size_t pre = (size_t)(ine - sql);
-    const char *rest = ine + strlen("if not exists");
-    while (*rest == ' ') rest++;
     char *rw = malloc(pre + strlen(rest) + 1);
     if (!rw) { snprintf(s->conn.errmsg, sizeof s->conn.errmsg, "out of memory"); return -1; }
     memcpy(rw, sql, pre);

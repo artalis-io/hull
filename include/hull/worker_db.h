@@ -109,6 +109,18 @@ void hl_db_result_free(HlDbResult *r);
 typedef enum { HL_WORK_DB_QUERY, HL_WORK_DB_EXEC,
                HL_WORK_DB_WAIT_NOTIFY } HlWorkerDbKind;
 
+/* The most a db.async query's materialized result may hold (column data plus
+ * per-cell bookkeeping), whatever the submitting VM's heap limit. */
+#define HL_WORKER_DB_RESULT_MAX_BYTES ((size_t)256 * 1024 * 1024)
+
+/* conn.wait_notify / waitNotify: the timeout is clamped to 0..this many ms
+ * (audit 14), so one call cannot hold a pool thread for days. */
+#define HL_WORKER_DB_NOTIFY_MAX_MS 60000
+
+/* A wait_notify timeout as asked for (any number), clamped to
+ * 0..HL_WORKER_DB_NOTIFY_MAX_MS; NaN is 0. */
+int hl_worker_db_notify_timeout(double ms);
+
 typedef struct HlWorkerDbOp {
     HlWorkerDbKind kind;
     HlAsyncCtx    *async_ctx;
@@ -137,6 +149,12 @@ typedef struct HlWorkerDbOp {
      * charged to an HlDbOpBudget of its own (cap/db_budget.h), so a runaway
      * statement does not hold a pool thread for good. */
     int64_t        max_instructions;
+    /* The submitting VM's heap limit (0 = none): a DB_QUERY result is copied
+     * into plain malloc on the worker thread before the VM converts it, so
+     * the copy is bounded by this (and HL_WORKER_DB_RESULT_MAX_BYTES) and
+     * charged to the op budget at 1 unit per HL_DB_ALLOC_UNIT_BYTES - an
+     * unbounded result exhausted the process's memory (audit 15). */
+    size_t         max_result_bytes;
 
     /* WAIT_NOTIFY input: LISTEN channel (owned) + wait bound in ms. */
     char          *channel;

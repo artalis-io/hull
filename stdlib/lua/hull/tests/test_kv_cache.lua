@@ -179,14 +179,18 @@ end)
 
 test("kv / cache.open refuse a bad ttl, default_ttl, max_items, max_bytes", function()
     local h = kv.open({ backend = "memory", namespace = "t12-ttl" })
-    for _, t in ipairs({ 0/0, 1/0, -1 }) do
+    -- A huge finite ttl overflowed the SQL / Valkey expiry (audit 14).
+    for _, t in ipairs({ 0/0, 1/0, -1, 1e300, 9007199254740 }) do
         assert_eq(err_code(function() h:set("k", "v", { ttl = t }) end), "invalid_argument",
             "ttl " .. tostring(t))
     end
     assert_eq(h:get("k"), nil)
     h:set("k", "v", { ttl = false }); assert_eq(h:get("k"), "v", "false = no expiry")
     local nbad = 0
+    h:set("k2", "v", { ttl = 100 * 365 * 24 * 3600 })
+    assert_eq(h:get("k2"), "v", "the longest ttl is taken")
     for _, o in ipairs({ { default_ttl = 0/0 }, { default_ttl = -1 }, { default_ttl = 1/0 },
+                         { default_ttl = 1e300 },
                          { max_items = 1/0 }, { max_bytes = 1/0 }, { max_items = 0/0 },
                          { max_items = -1 } }) do
         assert_eq(err_code(function()

@@ -14,6 +14,7 @@
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/db_transport.h"
 #include "hull/cap/pgwire.h"
+#include "hull/cap/db_budget.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -421,6 +422,74 @@ UTEST(pg_query, select_rows_and_affected)
     ssize_t n = read(sv[0], got, sizeof got);
     ASSERT_TRUE(n > 0);
     ASSERT_TRUE(bytes_contain(got, (size_t)n, "id > $1"));
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* A budget the row callback trips: the run went over its limit while the
+ * reply was being read. */
+static int pg_tripped;
+static int pg_trip_fn(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return pg_tripped;
+}
+static int pg_trip_row(void *ctx, const char *const *vals, const int32_t *lens,
+                       int nc)
+{
+    (void)vals; (void)lens; (void)nc;
+    (*(int *)ctx)++;
+    pg_tripped = 1;
+    return 0;
+}
+
+/* Once the run's budget or deadline trips, the rest of the reply is not
+ * read to its end (audit 15): the connection is closed and marked broken,
+ * and the query fails, so the backend reconnects on the next call. */
+UTEST(pg_query, a_tripped_run_abandons_the_reply)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'T');
+    hl_pg_put_i16(&s, 1);
+    hl_pg_put_cstr(&s, "x");
+    hl_pg_put_i32(&s, 0); hl_pg_put_i16(&s, 0); hl_pg_put_i32(&s, 25);
+    hl_pg_put_i16(&s, -1); hl_pg_put_i32(&s, -1); hl_pg_put_i16(&s, 0);
+    hl_pg_msg_end(&s, m);
+    for (int i = 0; i < 3; i++) {
+        m = hl_pg_msg_begin(&s, 'D');
+        hl_pg_put_i16(&s, 1);
+        hl_pg_put_i32(&s, 1); hl_pg_put_bytes(&s, "a", 1);
+        hl_pg_msg_end(&s, m);
+    }
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "SELECT 3"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.transport = hl_db_transport_adopt("pg", NULL, sv[1], NULL, conn.errmsg, sizeof conn.errmsg);
+    ASSERT_TRUE(conn.transport != NULL);
+
+    pg_tripped = 0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(pg_trip_fn, NULL);
+    int rows = 0;
+    int rc = hl_pg_query(&conn, "SELECT x FROM t", NULL, 0, NULL, pg_trip_row,
+                         &rows, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, rows);                  /* no row read past the trip */
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL); /* closed, not drained */
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
 
     hl_pg_conn_close(&conn);
     close(sv[0]);

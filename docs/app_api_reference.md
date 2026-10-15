@@ -66,7 +66,16 @@ fails with `a transaction cannot span db.async operations ...`. Use `db.batch`
 on the connection for a transaction. Inside a `worker.dispatch` function,
 `db.batch` works as it does on the event loop: a nested batch is a savepoint,
 and a batch that raises rolls back everything it wrote, nested batches
-included.
+included. A `db.async.query` result is copied on the worker thread before it
+reaches the VM, so it is held to the submitting VM's heap limit (and at most
+256 MB): a bigger one fails with `result too large`, and the copy is charged to
+the op's instruction budget (audit 15).
+
+**`conn.wait_notify(channel, timeout_ms)`** (`conn.waitNotify`) parks on the
+`db.async` pool until a Postgres `NOTIFY` on `channel` (`true`) or the timeout
+(`false`). The timeout is clamped to 0..60000 ms, and on a backend without
+LISTEN/NOTIFY (`conn.dialect.supports_notify` false: SQLite, MySQL, DuckDB) the
+call raises at once instead of returning `false` (audit 14).
 
 Named and dynamic connections are declared in the manifest. A DSN of exactly
 `"$VAR"` / `"${VAR}"` is an env reference resolved at open time.
@@ -192,7 +201,7 @@ Register with `app.use(method, pattern, mw)`:
 | `tar` | `hull.archive.tar` | `hull:archive:tar` | ustar archive parse/create/extract/pack (extract/pack compose the fs capability) |
 | `qrcode` | `hull.qrcode` | `hull:qrcode` | QR Code generator (ISO/IEC 18004), pure Lua/JS |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
-| `kv` | `hull.kv` | `hull:kv` | Portable key/value STORE: `open{backend,namespace}` -> handle (`get/set/delete/exists/incr/cas/scan/clear/cleanup/stats/caps`). Backends: memory / sqlite / postgres (over an existing `hull/db` conn). Durable, no eviction unless asked; binary-safe bytes. See [docs/kv_cache.md](kv_cache.md). Optional `encrypt` keyring seals values at rest. A `ttl` / `default_ttl` is a finite number of seconds >= 0 (or `false` = no expiry) and `max_items` / `max_bytes` a non-negative integer: NaN, infinity and negatives raise `invalid_argument` (audit 12) |
+| `kv` | `hull.kv` | `hull:kv` | Portable key/value STORE: `open{backend,namespace}` -> handle (`get/set/delete/exists/incr/cas/scan/clear/cleanup/stats/caps`). Backends: memory / sqlite / postgres (over an existing `hull/db` conn). Durable, no eviction unless asked; binary-safe bytes. See [docs/kv_cache.md](kv_cache.md). Optional `encrypt` keyring seals values at rest. A `ttl` / `default_ttl` is a finite number of seconds from 0 to 100 years (3153600000; or `false` = no expiry) and `max_items` / `max_bytes` a non-negative integer: NaN, infinity, negatives and a longer ttl raise `invalid_argument` (audit 12, audit 14) |
 | `cache` | `hull.cache` | `hull:cache` | In-process value memoizer (`cache.new`/`get/set/fetch`; `fetch` does not cache a `nil` / `null` / `undefined` result, and in JS a Promise result is dropped once it rejects or resolves to null) PLUS `cache.open{backend,namespace,max_bytes,default_ttl}` -> byte-oriented, LRU-evicting CACHE handle (memory / sqlite). Ephemeral + bounded; distinct from `hull/kv` (see [docs/kv_cache.md](kv_cache.md)). `cache.new`'s `max_entries` (`maxEntries`) is a positive integer and every ttl a finite number of seconds >= 0: NaN, infinity, negatives (and a zero `max_entries`) raise (audit 12) |
 | `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
 | `health` | `hull.web.middleware.health` | `hull:web:middleware:health` | Health check + readiness endpoints |

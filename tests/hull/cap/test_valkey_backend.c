@@ -122,6 +122,59 @@ UTEST(valkey_backend, incr_with_ttl_fresh_is_transactional) {
     close(sv[0]);
 }
 
+/* A MULTI the server does not answer OK, or a command it does not answer
+ * QUEUED, abandons the transaction (audit 14): the commands that followed
+ * ran unqueued - a CAS SET outside its WATCH - and the op reported success.
+ * The connection is left clean (DISCARD, UNWATCH) and usable. */
+UTEST(valkey_backend, multi_replies_are_checked) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    WR(sv[0], HELLO_MAP);
+    /* CAS: WATCH, GET(=v1), MULTI refused */
+    WR(sv[0], "+OK\r\n"); WR(sv[0], "$2\r\nv1\r\n");
+    WR(sv[0], "-ERR MULTI calls can not be nested\r\n");
+    WR(sv[0], "-ERR DISCARD without MULTI\r\n");   /* DISCARD */
+    WR(sv[0], "+OK\r\n");                          /* UNWATCH */
+    /* CAS: WATCH, GET(=v1), MULTI, SET answered at once (not queued) */
+    WR(sv[0], "+OK\r\n"); WR(sv[0], "$2\r\nv1\r\n"); WR(sv[0], "+OK\r\n");
+    WR(sv[0], "+OK\r\n");                          /* SET: ran, not queued */
+    WR(sv[0], "+OK\r\n");                          /* DISCARD */
+    WR(sv[0], "+OK\r\n");                          /* UNWATCH */
+    /* incr with TTL: WATCH, EXISTS, MULTI, INCRBY -> error, not QUEUED */
+    WR(sv[0], "+OK\r\n"); WR(sv[0], ":1\r\n"); WR(sv[0], "+OK\r\n");
+    WR(sv[0], "-ERR wrong number of arguments\r\n");
+    WR(sv[0], "+OK\r\n");                          /* DISCARD */
+    WR(sv[0], "+OK\r\n");                          /* UNWATCH */
+    WR(sv[0], "$5\r\nhello\r\n");                 /* GET: still in step */
+
+    HlValkeyDsn d; char e[128];
+    ASSERT_EQ(0, hl_valkey_dsn_parse("redis://localhost", &d, e, sizeof e));
+    HlValkeyConn *conn = NULL;
+    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, NULL, e, sizeof e));
+    HlKvHandle *h = hl_kv_valkey_wrap(conn);
+    const HlKvBackend *B = &hl_kv_backend_valkey;
+
+    EXPECT_EQ((int)HL_KV_CAS_ERROR,
+              (int)B->cas(h, (const uint8_t *)"c", 1, (const uint8_t *)"v1", 2, 1,
+                          (const uint8_t *)"v2", 2, 0));
+    EXPECT_TRUE(strstr(B->last_error(h), "nested") != NULL);
+    EXPECT_EQ((int)HL_KV_CAS_ERROR,
+              (int)B->cas(h, (const uint8_t *)"c", 1, (const uint8_t *)"v1", 2, 1,
+                          (const uint8_t *)"v2", 2, 0));
+    EXPECT_TRUE(strstr(B->last_error(h), "not queued") != NULL);
+    int64_t nv = 0;
+    EXPECT_EQ(-1, B->incr(h, (const uint8_t *)"n", 1, 5, 1000, &nv));
+    EXPECT_TRUE(strstr(B->last_error(h), "wrong number") != NULL);
+
+    const uint8_t *val; size_t vlen; int found = 0;
+    ASSERT_EQ(0, B->get(h, (const uint8_t *)"k", 1, &val, &vlen, &found));
+    EXPECT_EQ(found, 1);
+    EXPECT_EQ(vlen, (size_t)5);
+
+    B->close(h);
+    close(sv[0]);
+}
+
 UTEST(valkey_backend, caps_and_schemes) {
     const HlKvBackend *B = &hl_kv_backend_valkey;
     ASSERT_TRUE((B->caps & HL_KV_CAP_TTL) != 0);

@@ -110,12 +110,16 @@ test("cache.new refuses a bad maxEntries / defaultTtl / ttl", () => {
 
 test("kv / cache.open refuse a bad ttl, defaultTtl, maxItems, maxBytes", () => {
     const h = kv.open({ backend: "memory", namespace: "t12-ttl" });
-    for (const t of [NaN, Infinity, -1])
+    // A huge finite ttl overflowed the SQL / Valkey expiry (audit 14).
+    for (const t of [NaN, Infinity, -1, 1e300, 9007199254740])
         assertEq(code(() => h.set("k", "v", { ttl: t })), "invalid_argument", "ttl " + t);
     assertEq(h.get("k"), null);
     h.set("k", "v", { ttl: false }); assertEq(h.get("k"), "v", "false = no expiry");
     let i = 0;
+    h.set("k2", "v", { ttl: 100 * 365 * 24 * 3600 });
+    assertEq(h.get("k2"), "v", "the longest ttl is taken");
     for (const o of [{ defaultTtl: NaN }, { defaultTtl: -1 }, { defaultTtl: Infinity },
+                     { defaultTtl: 1e300 },
                      { maxItems: Infinity }, { maxBytes: Infinity }, { maxItems: NaN },
                      { maxItems: -1 }]) {
         o.backend = "memory"; o.namespace = "t12-bad-" + (i++);

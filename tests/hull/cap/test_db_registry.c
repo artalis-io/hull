@@ -240,6 +240,17 @@ UTEST(db_registry, a_network_default_without_internal_is_reported)
     EXPECT_FALSE(hl_db_registry_default_is_network(sq));
     hl_db_registry_destroy(pg);
     hl_db_registry_destroy(sq);
+    /* The scheme is read without case, as the backend selector reads it
+     * (audit 14). */
+    static const char *const upper[] = {
+        "PostgreSQL://u@db/app", "MYSQL://u@db/app", "MariaDB://u@db/app",
+    };
+    for (size_t i = 0; i < sizeof upper / sizeof upper[0]; i++) {
+        HlDbRegistry *r = hl_db_registry_create(NULL, upper[i], NULL);
+        ASSERT_TRUE(r != NULL);
+        EXPECT_TRUE(hl_db_registry_default_is_network(r));
+        hl_db_registry_destroy(r);
+    }
 }
 
 /* hl_db_registry_open_txn names a registry connection inside a transaction

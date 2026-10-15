@@ -51,16 +51,23 @@ function M.check_value(v)
     return v
 end
 
+-- The longest ttl, in seconds (100 years). Past it the expiry (now + ttl in
+-- ms) left the integers a double holds exactly and the backends' ranges: the
+-- Postgres / MySQL expiry columns refused it, and Valkey's PX overflowed.
+M.MAX_TTL = 100 * 365 * 24 * 3600
+
 -- Validate a ttl / default_ttl: nil and false pass through; anything else
--- must be a finite number of seconds >= 0 (audit 12). NaN made a value that
--- never expired on the memory backend (every comparison with it is false),
--- math.huge one that overflowed the SQL expiry, and a negative one a write
--- that was already stale (and was refused by the Valkey backend only).
+-- must be a finite number of seconds in 0..MAX_TTL (audit 12, audit 14). NaN
+-- made a value that never expired on the memory backend (every comparison
+-- with it is false), math.huge (or any huge finite ttl, audit 14) one that
+-- overflowed the SQL expiry, and a negative one a write that was already
+-- stale (and was refused by the Valkey backend only).
 function M.check_ttl(ttl, what)
     if ttl == nil or ttl == false then return ttl end
-    if type(ttl) ~= "number" or ttl ~= ttl or ttl < 0 or ttl == math.huge then
+    if type(ttl) ~= "number" or ttl ~= ttl or ttl < 0 or ttl > M.MAX_TTL then
         M.error("invalid_argument",
-            "kv: " .. (what or "ttl") .. " must be a finite number of seconds >= 0")
+            "kv: " .. (what or "ttl") .. " must be a finite number of seconds in 0.."
+            .. M.MAX_TTL)
     end
     return ttl
 end

@@ -13,7 +13,9 @@
 #include "hull/cap/db_sql_kw.h"
 #include "hull/cap/db.h"
 #include "hull/cap/types.h"
+#include "hull/worker_db.h"     /* hl_worker_db_notify_timeout */
 #include <sqlite3.h>
+#include <math.h>
 #include <string.h>
 
 /* ── Row callback helpers ───────────────────────────────────────────── */
@@ -81,6 +83,22 @@ UTEST(db_backend, sqlite_no_notify)
     ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
     ASSERT_EQ(hl_db_wait_notify(&h, "hull_jobs", 0), -1);
     hl_db_backend_sqlite.close(&h);
+}
+
+/* conn.wait_notify / waitNotify clamp their timeout to 0..60 s (audit 14):
+ * an unclamped value held a pool thread for ~24 days (Lua cast 2^31 - 1 to
+ * int; JS ToInt32 wrapped 2^32 + 5 to 5 and 2^32 - 1 to -1). */
+UTEST(db_backend, notify_timeout_is_clamped)
+{
+    EXPECT_EQ(0, hl_worker_db_notify_timeout(-1));
+    EXPECT_EQ(0, hl_worker_db_notify_timeout(0));
+    EXPECT_EQ(0, hl_worker_db_notify_timeout((double)NAN));
+    EXPECT_EQ(250, hl_worker_db_notify_timeout(250.9));
+    EXPECT_EQ(HL_WORKER_DB_NOTIFY_MAX_MS,
+              hl_worker_db_notify_timeout(HL_WORKER_DB_NOTIFY_MAX_MS));
+    EXPECT_EQ(HL_WORKER_DB_NOTIFY_MAX_MS, hl_worker_db_notify_timeout(2147483647.0));
+    EXPECT_EQ(HL_WORKER_DB_NOTIFY_MAX_MS, hl_worker_db_notify_timeout(4294967301.0));
+    EXPECT_EQ(HL_WORKER_DB_NOTIFY_MAX_MS, hl_worker_db_notify_timeout(1e300));
 }
 
 UTEST(db_backend, sqlite_exec_via_vtable)

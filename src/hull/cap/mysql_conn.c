@@ -174,6 +174,7 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
  * transport-dependent connection layer is wrapped under HL_MY_NO_TLS guards. */
 #ifndef HL_MY_NO_TLS
 #include "hull/cap/db_transport.h"
+#include "hull/cap/db_budget.h"     /* hl_db_budget_charge: a tripped run */
 #include "hull/shared/tls_client.h"
 #endif
 
@@ -639,6 +640,28 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 
 /* ── Queries (COM_QUERY text protocol) ────────────────────────────── */
 
+/* The run this reply is read for is over its instruction budget or past its
+ * wall-clock deadline (cap/db_budget.h; a 0-unit charge only asks): the
+ * binding raises that once the call returns, so the rest of the rows would be
+ * read - at the server's pace, a result of any size - only to be thrown away
+ * (audit 15). Close the connection instead of draining it: the server stops
+ * the statement when its next write fails, the connection stays broken, and
+ * the backend reconnects on the next call (db_mysql.c's my_ready) - or,
+ * inside a transaction, refuses everything but the ROLLBACK the server has
+ * already done with the session. Simpler than KILL QUERY on a side
+ * connection, which would need a new connect (and its auth) from inside the
+ * run. */
+static int my_abandon_if_tripped(HlMyConn *conn)
+{
+    if (hl_db_budget_charge(0) == 0) return 0;
+    hl_my_conn_close(conn);
+    conn->broken = 1;
+    conn_set_err(conn, "interrupted (instruction limit exceeded); the "
+                       "connection was closed rather than read to the end of "
+                       "the reply");
+    return 1;
+}
+
 static int refuse_if_broken(HlMyConn *conn)
 {
     if (!conn->broken) return 0;
@@ -824,6 +847,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
             }
         }
         if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed result row"); goto fail; }
+        if (my_abandon_if_tripped(conn)) goto fail;
         if (row_cb && !stop && row_cb(cb_ctx, vals, lens, ncols) != 0)
             stop = 1;                           /* keep draining to EOF */
     }
@@ -1175,6 +1199,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
                 decode_binary_value(&rc, fields[i].type, fields[i].flags, &vals[i]);
         }
         if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed binary row"); goto close_stmt; }
+        if (my_abandon_if_tripped(conn)) goto close_stmt;
         if (row_cb && !stop && row_cb(cb_ctx, vals, ncols) != 0)
             stop = 1;                                       /* keep draining to EOF */
     }
