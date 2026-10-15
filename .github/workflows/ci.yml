@@ -1499,11 +1499,16 @@ jobs:
 
       - name: HTTP-free Lua and JS CLI regression tests
         if: matrix.name == 'pure-compute (no http at all)'
-        timeout-minutes: 6
+        timeout-minutes: 20
         run: |
           # TEMPORARY (audit 15 teardown debugging): gdb for the crash backtrace.
           sudo apt-get install -y -q gdb >/dev/null 2>&1 || true
-          make ${{ matrix.flags }} e2e-cli-poll
+          make ${{ matrix.flags }} e2e-cli-poll || {
+            echo "=== TEMPORARY: same tests under ASan for the crash ==="
+            make clean >/dev/null
+            ASAN_OPTIONS=detect_leaks=0:abort_on_error=0 make ${{ matrix.flags }} DEBUG=1 e2e-cli-poll 2>&1 | tail -200
+            exit 1
+          }
 
   reproducibility:
     needs: [classify]
