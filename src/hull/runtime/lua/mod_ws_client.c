@@ -33,25 +33,7 @@
  * Client WebSocket conn
  * ════════════════════════════════════════════════════════════════════ */
 
-#define HL_WS_CLIENT_CONN_MT "HlWsClientConn"
-
-typedef struct HlLuaWsClientUD {
-    KlWsClientConn *client;      /* NULL after free (GC only) */
-    int             closed;      /* 1 after on_close: fail methods closed,
-                                  * but keep `client` so __gc still frees it
-                                  * (Keel does not free the conn on close) */
-    int             on_open_ref;
-    int             on_message_ref;
-    int             on_close_ref;
-    int             on_error_ref;
-    int             self_ref;    /* registry ref to keep self alive */
-    lua_State      *L;           /* main thread */
-    HlLua          *lua;
-    /* On the runtime's teardown list while `client` is held: the Keel
-     * connection lives on the server's event loop, which is freed before the
-     * runtime, so teardown frees it first (audit 14 G1). */
-    HlAsyncTeardown teardown;
-} HlLuaWsClientUD;
+/* HL_WS_CLIENT_CONN_MT and HlLuaWsClientUD are in mod_buffer.h. */
 
 /* Runtime teardown, the loop still alive: free the Keel connection now. The
  * userdata (and its refs) go with the Lua state. */

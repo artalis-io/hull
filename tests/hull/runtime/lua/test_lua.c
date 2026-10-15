@@ -10688,6 +10688,47 @@ UTEST(lua_audit14, sse_and_ws_writes_are_charged)
     hl_ws_registry_free(&reg);
     cleanup_lua_caps();
 }
+
+/* The outbound twin (hull.web.ws-client): conn:send / conn:send_binary are
+ * charged the same way before Keel is reached, so a client whose Keel handle
+ * is a placeholder is never written to (audit 15 follow-up: the charge #748
+ * added had no test). */
+UTEST(lua_audit14, ws_client_sends_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char err[512];
+
+    /* Registers the client connection metatable. */
+    luaL_requiref(L, "hull.web.ws-client", luaopen_hull_ws_client, 0);
+    lua_pop(L, 1);
+    ASSERT_EQ(audit10_run("BIG = string.rep('w', 8 * 1000000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+
+    static char placeholder;
+    HlLuaWsClientUD *ud = (HlLuaWsClientUD *)lua_newuserdata(L, sizeof *ud);
+    memset(ud, 0, sizeof *ud);
+    ud->client = (struct KlWsClientConn *)(void *)&placeholder;
+    ud->on_open_ref = ud->on_message_ref = LUA_NOREF;
+    ud->on_close_ref = ud->on_error_ref = ud->self_ref = LUA_NOREF;
+    ud->L = L;
+    ud->lua = &lua_rt;
+    luaL_setmetatable(L, HL_WS_CLIENT_CONN_MT);
+    lua_setglobal(L, "WC");
+
+    EXPECT_NE(audit10_run("WC:send(BIG) return 1", 200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run("WC:send_binary(BIG) return 1", 200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+
+    /* Nothing reached Keel: the finalizer must not free the placeholder. */
+    ud->client = NULL;
+    ud->closed = 1;
+    lua_pushnil(L);
+    lua_setglobal(L, "WC");
+    cleanup_lua_caps();
+}
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 /* A VM freed while its deadline is pending: the watchdog must never write to

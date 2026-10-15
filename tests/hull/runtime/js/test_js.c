@@ -9725,6 +9725,40 @@ UTEST(js_audit14, sse_and_ws_writes_are_charged)
     hl_ws_registry_free(&reg);
     cleanup_js_caps();
 }
+
+/* The outbound twin (hull:web:ws-client): conn.send / conn.sendBinary are
+ * charged the same way before Keel is reached, so a client whose Keel handle
+ * is a placeholder is never written to (audit 15 follow-up: the charge #748
+ * added had no test). */
+UTEST(js_audit14, ws_client_sends_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a10_run_tripped("globalThis.BIG = 'w'.repeat(8000000);", 0), 0);
+
+    static char placeholder;
+    JSValue o = JS_NewObjectClass(js.ctx, (int)js_ws_client_conn_class_id);
+    ASSERT_FALSE(JS_IsException(o));
+    HlJSWsClientUD *ud = js_mallocz(js.ctx, sizeof *ud);
+    ASSERT_TRUE(ud != NULL);
+    ud->client = (struct KlWsClientConn *)(void *)&placeholder;
+    ud->on_open = ud->on_message = JS_UNDEFINED;
+    ud->on_close = ud->on_error = JS_UNDEFINED;
+    ud->self_ref = JS_UNDEFINED;
+    ud->ctx = js.ctx;
+    ud->js = &js;
+    JS_SetOpaque(o, ud);
+    a14_set_global("WC", o);
+
+    EXPECT_EQ(a10_run_tripped("WC.send(BIG);", 200000), 1);
+    EXPECT_EQ(a10_run_tripped("WC.sendBinary(BIG);", 200000), 1);
+    EXPECT_EQ(a10_run_tripped("WC.sendBinary(new ArrayBuffer(8000000));", 200000), 1);
+
+    /* Nothing reached Keel: the finalizer must not free the placeholder. */
+    ud->client = NULL;
+    ud->closed = 1;
+    cleanup_js_caps();
+}
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_HTTP_CLIENT

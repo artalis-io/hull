@@ -30,36 +30,8 @@
 #include <stddef.h>
 #include <string.h>
 
-/* Client class id is module-internal - no other file references it. */
-static JSClassID js_ws_client_conn_class_id;
-
-typedef struct {
-    KlWsClientConn *client;      /* NULL after free (finalizer only) */
-    int             closed;      /* 1 after on_close: fail methods closed,
-                                  * but keep `client` so the finalizer still
-                                  * frees it (Keel does not free the conn on
-                                  * close) */
-    JSValue         on_open;     /* DupValue'd callbacks */
-    JSValue         on_message;
-    JSValue         on_close;
-    JSValue         on_error;
-    /* A reference the object holds on itself while connected. Not reported
-     * by gc_mark, so the cycle collector sees an outside reference and keeps
-     * the object - and the callbacks it marks - as a root, whether or not
-     * the app kept the handle (audit 15: reported, the self-cycle was
-     * garbage, and a dropped client was collected and closed silently).
-     * Dropped one loop turn after the close (js_ws_client_finish), or by
-     * runtime teardown. */
-    JSValue         self_ref;
-    int             release_scheduled;  /* self_ref release already queued */
-    uint64_t        release_timer;      /* its backend timer, 0 once fired */
-    JSContext      *ctx;
-    HlJS           *js;
-    /* On the runtime's teardown list while `client` is held: the Keel
-     * connection lives on the server's event loop, which is freed before the
-     * runtime, so teardown frees it first (audit 14 G1). */
-    HlAsyncTeardown teardown;
-} HlJSWsClientUD;
+/* The client class id and HlJSWsClientUD are declared in mod_buffer.h. */
+JSClassID js_ws_client_conn_class_id;
 
 /* Runtime teardown, the loop still alive: free the Keel connection now and
  * drop the self-reference (a pending release timer is cancelled first), so
