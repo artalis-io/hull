@@ -9651,15 +9651,11 @@ UTEST(js_audit16, tar_extract_is_charged_per_entry)
     A15Fs f;
     ASSERT_EQ(a15_fs_open(&f), 0);
     ASSERT_EQ(a10_run_tripped(
-        "import { tar } from 'hull:archive:tar';
-"
-        "globalThis.tar = tar;
-"
-        "const mb = new ArrayBuffer(1024 * 1024);
-"
+        "import { tar } from 'hull:archive:tar';\n"
+        "globalThis.tar = tar;\n"
+        "const mb = new ArrayBuffer(1024 * 1024);\n"
         "globalThis.TB = tar.create(Array.from({ length: 8 },"
-        " (_, i) => ({ name: 'f' + (i + 1), data: mb })));
-", 0), 0);
+        " (_, i) => ({ name: 'f' + (i + 1), data: mb })));\n", 0), 0);
     /* 8 MB to write: ~1M units; each 1 MB entry is 131073, so the budget
      * runs out at the fourth entry, before it is written. */
     EXPECT_EQ(a10_run_tripped("tar.extract(TB, 'out');", 500000), 1);
