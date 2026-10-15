@@ -118,6 +118,49 @@ UTEST(tar_parse, rejects_base256_size) {
     ASSERT_EQ(seen, 0);
 }
 
+/* Name extensions the reader does not implement are refused, not skipped:
+ * skipping them read members under a different name than tar does (a
+ * truncated GNU long name, a name without its ustar prefix). audit 15. */
+UTEST(tar_parse, rejects_name_extensions) {
+    static const char flags[] = { 'x', 'g', 'L', 'K' };
+    for (size_t k = 0; k < sizeof flags; k++) {
+        unsigned char buf[4096] = {0};
+        size_t off = 0;
+        tar_put_header(buf, "././@LongLink", 5);
+        buf[156] = (unsigned char)flags[k];
+        tar_seal(buf);
+        off = 512;
+        memcpy(buf + off, "x/y/z", 5);
+        off += 512;
+        tar_add_file(buf, &off, "a.txt", "hello", 5);
+        int seen = 0;
+        EXPECT_NE(hl_tar_parse(buf, off + 1024, count_entries_cb, &seen), 0);
+        EXPECT_EQ(seen, 0);
+    }
+
+    /* A POSIX ustar header with a non-empty prefix field. */
+    unsigned char buf[4096] = {0};
+    size_t off = 0;
+    tar_put_header(buf, "a.txt", 5);
+    memcpy(buf + 257, "ustar", 6);       /* "ustar\0" */
+    memcpy(buf + 263, "00", 2);
+    memcpy(buf + 345, "evil/dir", 8);
+    tar_seal(buf);
+    off = 512;
+    memcpy(buf + off, "hello", 5);
+    off += 512;
+    int seen = 0;
+    EXPECT_NE(hl_tar_parse(buf, off + 1024, count_entries_cb, &seen), 0);
+    EXPECT_EQ(seen, 0);
+
+    /* The same header with an empty prefix parses. */
+    memset(buf + 345, 0, 155);
+    tar_seal(buf);
+    seen = 0;
+    EXPECT_EQ(hl_tar_parse(buf, off + 1024, count_entries_cb, &seen), 0);
+    EXPECT_EQ(seen, 1);
+}
+
 /* ── Fixture: per-test sandbox under /tmp ───────────────────────────── */
 
 struct tar_fixture {

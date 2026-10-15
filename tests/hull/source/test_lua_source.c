@@ -277,6 +277,17 @@ UTEST(lua_source, project_discovery)
     EXPECT_GT(pass, 0LL);
 }
 
+/* compute_build's check that a compute module reads no file outside its own
+ * directory (audit 15): clang stubbed, the real-clang leg is e2e_compute_dev. */
+UTEST(lua_source, compute_build_file_reads)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/cli/lua/hull/tests/test_compute_build.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 /* ── the pinned, parser-scoped official Lua 5.4.7 test corpus (docs/lua_official_tests_design.md) ──
  * C verifies the vendored corpus fail-closed (manifest schema / pinned Lua version / archive SHA /
  * per-case source_hash / cases<->manifest bijection), injects the VERIFIED bytes as

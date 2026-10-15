@@ -127,6 +127,28 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
         override = ovr;
 
         if (override[0] != '/') { errno = EINVAL; return -1; }
+        /* A '.' or '..' component is refused before anything is made: in the
+         * part that does not exist yet it cannot be resolved, and
+         * =~/.hull/x/../keys/y had its directories made inside ~/.hull/keys
+         * (audit 14). A cache directory has no reason to spell one. */
+        for (const char *c = override; *c; ) {
+            while (*c == '/') c++;
+            size_t cl = strcspn(c, "/");
+            if ((cl == 1 && c[0] == '.') ||
+                (cl == 2 && c[0] == '.' && c[1] == '.')) {
+                static int warned_dots;
+                if (!warned_dots) {
+                    warned_dots = 1;
+                    log_warn("[cache] HULL_CACHE_DIR %s has a '.' or '..' "
+                             "component; the bytecode / template / AOT caches "
+                             "are off (spell the directory without one)",
+                             override);
+                }
+                errno = EINVAL;
+                return -1;
+            }
+            c += cl;
+        }
         size_t olen = strlen(override);
         /* Strip trailing slashes for canonical form. */
         while (olen > 1 && override[olen - 1] == '/') olen--;

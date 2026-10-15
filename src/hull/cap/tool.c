@@ -461,8 +461,12 @@ int hl_tool_validate_args(const char *const argv[])
         if (long_opt_abbrev(a, "--for-linker", 6)) return -1; /* -Xlinker, spelled out */
         if (is_linker_plugin_flag(a))          return -1;
         if (strcmp(a, "-wrapper") == 0)       return -1; /* runs a program around each tool */
-        if (strncmp(a, "-specs=", 7) == 0 ||
-            strncmp(a, "--specs=", 8) == 0)   return -1; /* GCC spec file: arbitrary commands */
+        /* GCC spec file: arbitrary commands. Joined or as a separate
+         * argument ("-specs FILE"), and --specs in any abbreviation gcc
+         * accepts ("--spec=", "--sp FILE"; audit 15). */
+        if (strcmp(a, "-specs") == 0 ||
+            strncmp(a, "-specs=", 7) == 0 ||
+            long_opt_abbrev(a, "--specs", 4)) return -1;
         if (strncmp(a, "--ld-path=", 10) == 0) return -1; /* linker named by path */
         /* -B<dir>: gcc / clang look up cc1, as and ld there - another way to
          * run a chosen program as part of the compile. Only the lld

@@ -809,6 +809,45 @@ UTEST(host, path_under_home_sub)
     EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 0);
     snprintf(fresh, sizeof fresh, "%s/.hull/keys/../../proj", e.dir);
     EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 0);
+    /* A '..' in the part that does not exist cannot be resolved: both checks
+     * fail closed. They answered 0, and HULL_CACHE_DIR=~/.hull/x/../keys/y
+     * was made inside ~/.hull/keys before the later check refused it
+     * (audit 14). */
+    snprintf(fresh, sizeof fresh, "%s/.hull/nosuch/../keys/new", e.dir);
+    EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 1);
+    EXPECT_EQ(hl_host_path_covers_home(fresh, ".hull"), 1);
+    snprintf(fresh, sizeof fresh, "%s/proj/nosuch/./x", e.dir);
+    EXPECT_EQ(hl_host_path_under_home(fresh, ".hull"), 1);
+    broad_leave(&e);
+}
+
+/* Neither HOME nor USERPROFILE set: off Windows the home comes from the
+ * password database, so the home and above are still too broad; where no
+ * home can be found at all, every grant is (audit 15: an unknown home made
+ * nothing too broad but the root). */
+UTEST(host, unknown_home_falls_back_or_fails_closed)
+{
+    BroadEnv e;
+    ASSERT_EQ(broad_enter(&e), 0);
+    char sub[HL_TEST_PATH_MAX + 32];
+    snprintf(sub, sizeof sub, "%s/proj", e.dir);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+    unsetenv("HOME");
+    unsetenv("USERPROFILE");
+
+    const char *home = hl_host_home();
+    if (home) {
+        EXPECT_FALSE(hl_host_is_windows());
+        EXPECT_EQ(hl_host_path_too_broad("/"), 1);
+        char rp[HL_TEST_PATH_MAX];
+        if (realpath(home, rp))
+            EXPECT_EQ(hl_host_path_too_broad(home), 1);
+    } else {
+        /* No home known: nothing can be shown to stay clear of it. */
+        EXPECT_EQ(hl_host_path_too_broad(sub), 1);
+        EXPECT_EQ(hl_host_path_covers_home(sub, ".hull"), 1);
+        EXPECT_EQ(hl_host_path_under_home(sub, ".hull"), 1);
+    }
     broad_leave(&e);
 }
 

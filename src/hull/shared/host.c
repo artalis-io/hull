@@ -15,6 +15,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#if !defined(_WIN32)
+#include <pwd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -452,7 +455,25 @@ const char *hl_host_home(void)
 {
     const char *home = getenv("HOME");
     if (!home || !*home) home = getenv("USERPROFILE");
-    return (home && *home) ? home : NULL;
+    if (home && *home) return home;
+#if !defined(_WIN32)
+    /* Neither set (a service started with an empty environment): the
+     * account's home from the password database. Without it every "is this
+     * $HOME or above" check had nothing to compare with and answered no
+     * (audit 15). Copied: getpwuid's record is overwritten by the next
+     * call. */
+    if (!hl_host_is_windows()) {
+        static char pw_home[PATH_MAX];
+        if (!pw_home[0]) {
+            struct passwd *pw = getpwuid(geteuid());
+            if (pw && pw->pw_dir && pw->pw_dir[0] == '/' &&
+                strlen(pw->pw_dir) < sizeof pw_home)
+                memcpy(pw_home, pw->pw_dir, strlen(pw->pw_dir) + 1);
+        }
+        if (pw_home[0]) return pw_home;
+    }
+#endif
+    return NULL;
 }
 
 /* realpath in the rooted form ("C:\x" -> "/C/x"), trailing '/' dropped. */
@@ -526,7 +547,7 @@ static int host_rp_and_home(const char *path, const char *sub,
 {
     const char *home = hl_host_home();
     if (!home || host_realpath_loose(path, rp, 0) != 0 ||
-        host_realpath(home, hr) != 0)
+        host_realpath_loose(home, hr, 0) != 0)
         return -1;
     if (sub && *sub) {
         size_t n = strlen(hr);
@@ -539,17 +560,22 @@ static int host_rp_and_home(const char *path, const char *sub,
     return 0;
 }
 
+/* Both fail closed (1): a home that is unknown, or a path that cannot be
+ * resolved (a '.' / '..' in the part that does not exist yet), cannot be
+ * shown to stay clear of it. They answered 0, so HULL_CACHE_DIR=~/.hull/x/..
+ * /keys/y passed the pre-mkdir check and its directories were made inside
+ * ~/.hull/keys (audit 14). */
 int hl_host_path_covers_home(const char *path, const char *sub)
 {
     char rp[PATH_MAX], hr[PATH_MAX], hr2[PATH_MAX];
-    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 0;
+    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 1;
     return host_rp_covers(rp, hr) || host_rp_covers(rp, hr2);
 }
 
 int hl_host_path_under_home(const char *path, const char *sub)
 {
     char rp[PATH_MAX], hr[PATH_MAX], hr2[PATH_MAX];
-    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 0;
+    if (host_rp_and_home(path, sub, rp, hr, hr2) != 0) return 1;
     return host_rp_covers(hr, rp) || host_rp_covers(hr2, rp);
 }
 

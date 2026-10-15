@@ -119,6 +119,161 @@ function M.is_stale(src_path, wasm_path)
 end
 
 -- ── Compile one module ────────────────────────────────────────────────
+--
+-- A module's sources are the app's (a cloned repo's), compiled by hull build
+-- on the developer's machine. `.incbin` (in an asm statement) and C23
+-- `#embed` make the compiler read ANY file into the .wasm - ~/.ssh/id_rsa,
+-- where nothing but a Landlock tool sandbox stops it - and app code can then
+-- read it back at run time. A compute plugin has no use for either.
+--
+-- A lexical scan of the sources cannot see through the preprocessor (a
+-- `#include "data.txt"`, the `%:embed` digraph, `".inc\x62in"`, stringizing;
+-- audit 15), so the module is built in two steps and the compiler itself
+-- reports what it read:
+--
+--   1. `clang -E -MD -MF deps.d -o pre.i`: the preprocessed text plus the
+--      list of every file the preprocessor opened - the #included headers AND
+--      every #embed'ed file. Each must resolve (realpath, so a symlink counts
+--      where it points) inside compute/<name>/, where the freestanding
+--      hull_compute.h lives. A dependency the preprocessed text never entered
+--      (it has no `# N "file"` line marker) was embedded, not included, and is
+--      refused even inside the module.
+--   2. The preprocessed text is searched for `incbin` / `.include` (an asm
+--      directive that reads a file at assembly time), with every string
+--      literal's escapes decoded, then compiled AS IS (`-x cpp-output`), so
+--      what was checked is exactly what is built.
+
+local function is_windows()
+    return tool.host_os and tool.host_os() == "windows"
+end
+
+-- A path as tool.realpath sees it: Windows clang writes backslashes.
+local function host_path(p)
+    if is_windows() then p = p:gsub("\\", "/") end
+    return p
+end
+
+-- Canonical form for comparisons (Windows paths compare without case).
+local function canon(p)
+    local r = tool.realpath(host_path(p))
+    if not r then return nil end
+    if is_windows() then r = r:lower() end
+    return (r:gsub("/+$", ""))
+end
+
+-- The prerequisites of a make rule written by `clang -MD`: one target, then
+-- whitespace-separated paths, `\`-newline continuations, `\ ` / `\#` escapes
+-- and `$$` for `$`. Any other backslash is part of the path (Windows).
+local function parse_deps(text)
+    local t = text:gsub("\\\r?\n", " ")
+    local body = t:match("^.-:%s(.*)$")
+    if not body then return nil end
+    local deps, cur, i = {}, {}, 1
+    while i <= #body do
+        local c = body:sub(i, i)
+        local n = body:sub(i + 1, i + 1)
+        if c == "\\" and (n == " " or n == "#" or n == "\t") then
+            cur[#cur + 1] = n; i = i + 2
+        elseif c == "$" and n == "$" then
+            cur[#cur + 1] = "$"; i = i + 2
+        elseif c:match("%s") then
+            if #cur > 0 then deps[#deps + 1] = table.concat(cur); cur = {} end
+            i = i + 1
+        else
+            cur[#cur + 1] = c; i = i + 1
+        end
+    end
+    if #cur > 0 then deps[#deps + 1] = table.concat(cur) end
+    return deps
+end
+
+local SIMPLE_ESC = {
+    a = "\a", b = "\b", f = "\f", n = "\n", r = "\r", t = "\t", v = "\v",
+    ["\\"] = "\\", ["'"] = "'", ['"'] = '"', ["?"] = "?",
+}
+
+-- Decode the body of a C string / character literal. A code point past
+-- ASCII becomes "?" (no directive name has one).
+local function decode_c_string(s)
+    local out, i = {}, 1
+    while i <= #s do
+        local c = s:sub(i, i)
+        if c ~= "\\" then
+            out[#out + 1] = c; i = i + 1
+        else
+            local n = s:sub(i + 1, i + 1)
+            if SIMPLE_ESC[n] then
+                out[#out + 1] = SIMPLE_ESC[n]; i = i + 2
+            elseif n:match("[0-7]") then
+                local oct = s:match("^[0-7][0-7]?[0-7]?", i + 1)
+                local v = tonumber(oct, 8)
+                out[#out + 1] = v < 128 and string.char(v) or "?"
+                i = i + 1 + #oct
+            elseif n == "x" then
+                local hex = s:match("^%x+", i + 2) or ""
+                local v = tonumber(hex ~= "" and hex:sub(-8) or "0", 16)
+                out[#out + 1] = v < 128 and string.char(v) or "?"
+                i = i + 2 + #hex
+            elseif n == "u" or n == "U" then
+                local len = n == "u" and 4 or 8
+                local hex = s:match("^" .. string.rep("%x", len), i + 2)
+                local v = hex and tonumber(hex, 16) or 0x3f
+                out[#out + 1] = v < 128 and string.char(v) or "?"
+                i = i + 2 + (hex and len or 0)
+            else
+                out[#out + 1] = n; i = i + 2
+            end
+        end
+    end
+    return table.concat(out)
+end
+
+-- Every string and character literal of preprocessed C, decoded and joined
+-- (adjacent literals concatenate, so ".inc" "bin" reads as ".incbin"), plus
+-- the `"file"` of each `# N "file"` line marker. Comments are gone after -E.
+local function scan_preprocessed(text)
+    local lits, markers = {}, {}
+    local i, n = 1, #text
+    local bol = true
+    while i <= n do
+        local c = text:sub(i, i)
+        -- `# N "file" flags`: the file name runs to the line's last quote.
+        local eol, f
+        if bol and c == "#" then
+            eol = text:find("\n", i, true) or (n + 1)
+            f = text:sub(i, eol - 1):match('^#%s*%d+%s+"(.*)"')
+        end
+        if f then
+            markers[#markers + 1] = decode_c_string(f)
+            i = eol
+        elseif c == '"' or c == "'" then
+            local j = i + 1
+            while j <= n do
+                local d = text:sub(j, j)
+                if d == "\\" then j = j + 2
+                elseif d == c or d == "\n" then break
+                else j = j + 1 end
+            end
+            lits[#lits + 1] = decode_c_string(text:sub(i + 1, j - 1))
+            i = j + 1
+            bol = false
+        else
+            bol = (c == "\n") or (bol and (c == " " or c == "\t"))
+            i = i + 1
+        end
+    end
+    return table.concat(lits), markers
+end
+
+-- Does the preprocessed text `pre` ask the assembler to read a file?
+-- Returns a reason or nil.
+local function preprocessed_reads_files(pre)
+    local lits = scan_preprocessed(pre)
+    local hay = (pre .. "\n" .. lits):lower()
+    if hay:find("incbin", 1, true) then return "an .incbin directive" end
+    if lits:lower():find("%.include") then return "an asm .include directive" end
+    return nil
+end
 
 --- Compile a single source file to a WASM module.
 --
@@ -129,42 +284,25 @@ end
 -- @tparam table  module    { name, src, wasm } as returned by discover_modules().
 -- @treturn boolean ok      True on success.
 -- @treturn string  err     Error message on failure, nil on success.
--- A module's sources are the app's (a cloned repo's), compiled by hull build
--- on the developer's machine. `.incbin` (in an asm statement) and C23
--- `#embed` make the compiler read ANY file into the .wasm - ~/.ssh/id_rsa,
--- where nothing but a Landlock tool sandbox stops it - and app code can then
--- read it back at run time. A compute plugin has no use for either, so their
--- sources are refused. Lexical, after undoing the joins that hide a word
--- (adjacent string literals ".inc" "bin", token pasting inc##bin, line
--- continuations), case-insensitive.
-local function embeds_files(text)
-    local t = text:gsub("\\\r?\n", "")        -- line continuations
-    t = t:gsub("\"%s*\"", "")                 -- "a" "b" -> "ab"
-    t = t:gsub("##", "")                        -- token pasting
-    t = t:lower()
-    if t:find("incbin", 1, true) then return "an .incbin directive" end
-    if t:find("#%s*embed") or t:find("__has_embed", 1, true) then
-        return "an #embed directive"
-    end
-    return nil
-end
-
 function M.compile_module(cc, module)
     local src_dir = module.src:match("(.*)/[^/]+$") or "."
-
-    local sources = { module.src }
-    for _, pat in ipairs({ "*.c", "*.h", "*.inc", "*.s", "*.S" }) do
-        for _, f in ipairs(tool.find_files(src_dir, pat) or {}) do
-            sources[#sources + 1] = f
-        end
+    local root = canon(src_dir)
+    if not root then
+        return false, "cannot resolve " .. src_dir
     end
-    for _, f in ipairs(sources) do
-        local text = tool.read_file(f)
-        local what = text and embeds_files(text)
-        if what then
-            return false, f .. " uses " .. what .. ", which can pull a file "
-                .. "from outside the app into the module; compute sources may not"
-        end
+
+    local tmp = tool.tmpdir()
+    if not tmp then return false, "cannot create a temporary directory" end
+    local deps_path = tmp .. "/deps.d"
+    local pre_path  = tmp .. "/pre.i"
+    local function cleanup()
+        tool.remove_file(deps_path)
+        tool.remove_file(pre_path)
+        tool.rmdir(tmp)
+    end
+    local function refuse(msg)
+        cleanup()
+        return false, msg
     end
 
     local ok = tool.spawn({
@@ -172,8 +310,50 @@ function M.compile_module(cc, module)
         "--target=wasm32-unknown-unknown",
         "-nostdlib",
         "-O2",
-        "-flto",
         "-I", src_dir,
+        "-E", "-MD", "-MF", deps_path,
+        "-o", pre_path,
+        module.src,
+    })
+    if not ok then return refuse("clang failed preprocessing " .. module.src) end
+
+    local deps = parse_deps(tool.read_file(deps_path) or "")
+    local pre = tool.read_file(pre_path)
+    if not deps or #deps == 0 or not pre then
+        return refuse("clang wrote no dependency list for " .. module.src)
+    end
+
+    local _, markers = scan_preprocessed(pre)
+    local entered = {}
+    for _, f in ipairs(markers) do
+        local c = canon(f)
+        if c then entered[c] = true end
+    end
+
+    for _, d in ipairs(deps) do
+        local c = canon(d)
+        if not c or c:sub(1, #root + 1) ~= root .. "/" then
+            return refuse(module.src .. " reads " .. d .. ", outside "
+                .. src_dir .. "; a compute module may only include its own files")
+        end
+        if not entered[c] then
+            return refuse(module.src .. " uses an #embed directive (" .. d
+                .. "), which can pull a file into the module; compute sources may not")
+        end
+    end
+
+    local what = preprocessed_reads_files(pre)
+    if what then
+        return refuse(module.src .. " uses " .. what .. ", which can pull a file "
+            .. "from outside the app into the module; compute sources may not")
+    end
+
+    ok = tool.spawn({
+        cc,
+        "--target=wasm32-unknown-unknown",
+        "-nostdlib",
+        "-O2",
+        "-flto",
         "-Wl,--no-entry",
         "-Wl,--export=hull_process",
         "-Wl,--export=hull_version",
@@ -182,14 +362,20 @@ function M.compile_module(cc, module)
         "-Wl,--initial-memory=131072",
         "-Wl,--max-memory=67108864",
         "-o", module.wasm,
-        module.src,
+        "-x", "cpp-output", pre_path,
     })
+    cleanup()
 
     if not ok then
         return false, "clang failed compiling " .. module.src
     end
     return true, nil
 end
+
+-- Exposed for the stdlib self-test (stdlib/cli/lua/hull/tests).
+M._parse_deps = parse_deps
+M._decode_c_string = decode_c_string
+M._preprocessed_reads_files = preprocessed_reads_files
 
 -- ── High-level: build all stale modules ───────────────────────────────
 

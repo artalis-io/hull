@@ -166,6 +166,20 @@ local function main()
         tool.exit(1)
     end
 
+    -- A legacy signature (no binary_hash) signs only {files, manifest}. A
+    -- newer-format field in it - a platform block, modules_resolved, a
+    -- trampoline hash, build - is not covered by that signature, and
+    -- hl_sig_read refuses the whole file, so a `--verify-sig` binary will not
+    -- start. Reported here too (audit 15: this said VALID).
+    if type(sig.binary_hash) ~= "string" and
+       (sig.platform ~= nil or sig.modules_resolved ~= nil or
+        type(sig.trampoline_hash) == "string" or sig.build ~= nil) then
+        tool.stderr("hull verify: FAILED - a legacy signature (no binary_hash) "
+            .. "carries platform / modules_resolved / trampoline_hash / build, "
+            .. "which it does not sign\n")
+        issues = issues + 1
+    end
+
     -- ── gethull layer (v0.1.3) ─────────────────────────────────────
     -- The signed libhull_platform.a manifest carried forward from the
     -- hull binary that ran `hull build`. The signing key is gethull.dev's
@@ -246,7 +260,13 @@ local function main()
                 gethull_ok = false
             end
             local pd = type(g.composed) == "table" and g.composed.platform_domain
-            if type(pd) == "table" then
+            if (g.composed ~= nil and type(g.composed) ~= "table") or
+               (pd ~= nil and pd ~= false and type(pd) ~= "table") then
+                -- present but malformed: refused, as --verify-sig does
+                tool.stderr("gethull layer: FAILED - composed platform_domain "
+                            .. "is malformed\n")
+                gethull_ok = false
+            elseif type(pd) == "table" then
                 if not ed25519_verify_hex(pd.manifest, pd.signature, verify_pubkey_hex) then
                     tool.stderr("gethull layer: FAILED - composed platform_domain "
                                 .. "signature invalid\n")
