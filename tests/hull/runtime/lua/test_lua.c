@@ -86,8 +86,31 @@ static void *platform_vfs_owned = NULL;
  * This helper restores the globals for testing convenience by trying to
  * require each known native module and assigning to `_G`. Modules that
  * aren't available (compile flag off, etc.) are silently skipped. */
+/* __test_hooks(name): the test hooks stdlib module `name` registered with
+ * hull._test_hooks (audit 16: no longer exported on the module, where app
+ * code could call them). That module is stdlib-internal, so the harness loads
+ * both through the runtime's trusted require - C code, which no script can
+ * reach. */
+static int test_hooks_get(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    lua_pushcfunction(L, hl_lua_require_trusted);
+    lua_pushstring(L, name);
+    lua_call(L, 1, 0);
+    lua_pushcfunction(L, hl_lua_require_trusted);
+    lua_pushliteral(L, "hull._test_hooks");
+    lua_call(L, 1, 1);
+    lua_getfield(L, -1, "get");
+    lua_pushstring(L, name);
+    lua_call(L, 1, 1);
+    return 1;
+}
+
 static void install_test_globals(lua_State *L)
 {
+    lua_pushcfunction(L, test_hooks_get);
+    lua_setglobal(L, "__test_hooks");
+
     static const char *PRELUDE =
         "for _, m in ipairs({"
         "  'crypto','db','env','time','fs','http','smtp',"
@@ -2565,7 +2588,7 @@ UTEST(lua_stdlib, totp_rfc_vectors)
     char *b32 = eval_str(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  return totp._test.base32_encode('foobar') "
+        "  return __test_hooks('hull.web.middleware.totp').base32_encode('foobar') "
         "end)()");
     ASSERT_NE(b32, NULL);
     ASSERT_STREQ(b32, "MZXW6YTBOI");
@@ -2574,7 +2597,7 @@ UTEST(lua_stdlib, totp_rfc_vectors)
     /* Base32 round-trip on the 20-byte RFC 6238 key. */
     int rt = eval_int(
         "(function() "
-        "  local t = require('hull.web.middleware.totp')._test "
+        "  local t = __test_hooks('hull.web.middleware.totp') "
         "  local s = '12345678901234567890' "
         "  return t.base32_decode(t.base32_encode(s)) == s and 1 or 0 "
         "end)()");
@@ -2588,29 +2611,29 @@ UTEST(lua_stdlib, totp_rfc_vectors)
      * The HMAC-SHA1 path comes through the hl_crypto_hmac_backend vtable,
      * so this also pins the HMAC integration. */
     char *v1 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".totp_at_step('12345678901234567890', 1, 8)");
     ASSERT_NE(v1, NULL); ASSERT_STREQ(v1, "94287082"); free(v1);
 
     char *v2 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".totp_at_step('12345678901234567890', 37037036, 8)");
     ASSERT_NE(v2, NULL); ASSERT_STREQ(v2, "07081804"); free(v2);
 
     char *v3 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".totp_at_step('12345678901234567890', 41152263, 8)");
     ASSERT_NE(v3, NULL); ASSERT_STREQ(v3, "89005924"); free(v3);
 
     char *v4 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".totp_at_step('12345678901234567890', 66666666, 8)");
     ASSERT_NE(v4, NULL); ASSERT_STREQ(v4, "69279037"); free(v4);
 
     /* 6-digit truncation of the same step uses the same dynamic offset;
      * value should match the last 6 digits of the 8-digit form (mod 10^6). */
     char *v1_6 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".totp_at_step('12345678901234567890', 1, 6)");
     ASSERT_NE(v1_6, NULL); ASSERT_STREQ(v1_6, "287082"); free(v1_6);
 
@@ -2626,27 +2649,27 @@ UTEST(lua_stdlib, totp_enroll_confirm_verify)
      * we generate the same way the verify-side generates -> verify
      * with the next step's code.
      *
-     * Code generation uses totp._test.totp_at_step against the secret
+     * Code generation uses __test_hooks('hull.web.middleware.totp').totp_at_step against the secret
      * the enroll returned (decoded from base32), so the test mirrors
      * what a real authenticator app would do without needing one
      * present. */
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  totp.init({ issuer = 'TestApp' }) "
         "  local r = totp.enroll('user-1') "
         "  if type(r.secret_base32) ~= 'string' then return 0 end "
         "  if not r.qr_svg:find('<svg', 1, true) then return 0 end "
         "  if #r.recovery_codes ~= 10 then return 0 end "
         "  if not r.otpauth_url:find('otpauth://totp/TestApp:user%-1') then return 0 end "
-        "  local secret = totp._test.base32_decode(r.secret_base32) "
-        "  local step = totp._test.current_step() "
-        "  local code = totp._test.totp_at_step(secret, step, 6) "
+        "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "  local step = __test_hooks('hull.web.middleware.totp').current_step() "
+        "  local code = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step, 6) "
         "  if not totp.confirm('user-1', code) then return 0 end "
         "  if not totp.enrolled('user-1') then return 0 end "
         "  if totp.verify('user-1', code) then return 0 end "
-        "  local next_code = totp._test.totp_at_step(secret, step + 1, 6) "
+        "  local next_code = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step + 1, 6) "
         "  local v_ok, kind = totp.verify_with_kind('user-1', next_code) "
         "  if not v_ok or kind ~= 'totp' then return 0 end "
         "  if totp.verify('user-1', next_code) then return 0 end "
@@ -2667,17 +2690,17 @@ UTEST(lua_stdlib, totp_pending_cleanup)
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  totp.init({ pending_ttl = 60, cleanup = false, window = 10, "
         "               recovery_codes = 0 }) "
         "  local r = totp.enroll('u-fresh') "
         "  totp.enroll('u-stale') "
-        "  totp._test.force_pending_stale('u-stale') "
+        "  __test_hooks('hull.web.middleware.totp').force_pending_stale('u-stale') "
         "  if totp.cleanup() ~= 1 then return 0 end "
         "  if totp.cleanup() ~= 0 then return 0 end "
-        "  local secret = totp._test.base32_decode(r.secret_base32) "
-        "  local step = totp._test.current_step() "
-        "  local good = totp._test.totp_at_step(secret, step, 6) "
+        "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "  local step = __test_hooks('hull.web.middleware.totp').current_step() "
+        "  local good = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step, 6) "
         "  if not totp.confirm('u-fresh', good) then return 0 end "
         "  if totp.confirm('u-stale', good) then return 0 end "
         "  return 1 "
@@ -2700,16 +2723,16 @@ UTEST(lua_stdlib, totp_brute_force_lockout)
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         /* recovery_codes = 0: each failed verify would otherwise
          * walk all stored recovery codes with PBKDF2 (10×~1s under
          * MSan). Drop them; the lockout path doesn't care. */
         "  totp.init({ max_failed_attempts = 3, lockout_duration = 60, "
         "               window = 10, recovery_codes = 0 }) "
         "  local r = totp.enroll('u1') "
-        "  local secret = totp._test.base32_decode(r.secret_base32) "
-        "  local step = totp._test.current_step() "
-        "  if not totp.confirm('u1', totp._test.totp_at_step(secret, step, 6)) "
+        "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "  local step = __test_hooks('hull.web.middleware.totp').current_step() "
+        "  if not totp.confirm('u1', __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step, 6)) "
         "    then return 0 end "
         "  if totp.verify('u1', '000000') then return 0 end "
         "  if totp.verify('u1', '000001') then return 0 end "
@@ -2717,13 +2740,13 @@ UTEST(lua_stdlib, totp_brute_force_lockout)
         "  if totp.verify('u1', '000002') then return 0 end "
         "  local remain = totp.lockout_remaining('u1') "
         "  if remain <= 0 or remain > 60 then return 0 end "
-        "  local good = totp._test.totp_at_step(secret, step + 2, 6) "
+        "  local good = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step + 2, 6) "
         "  if totp.verify('u1', good) then return 0 end "
-        "  totp._test.clear_failed_attempts('u1') "
+        "  __test_hooks('hull.web.middleware.totp').clear_failed_attempts('u1') "
         "  if totp.lockout_remaining('u1') ~= 0 then return 0 end "
         "  if totp.verify('u1', '000000') then return 0 end "
         "  if totp.verify('u1', '000001') then return 0 end "
-        "  local good2 = totp._test.totp_at_step(secret, step + 3, 6) "
+        "  local good2 = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step + 3, 6) "
         "  if not totp.verify('u1', good2) then return 0 end "
         "  if totp.verify('u1', '000000') then return 0 end "
         "  if totp.verify('u1', '000001') then return 0 end "
@@ -2745,12 +2768,12 @@ UTEST(lua_stdlib, totp_recovery_code_single_use)
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  totp.init({ issuer = 'TestApp', recovery_codes = 3 }) "
         "  local r = totp.enroll('user-2') "
-        "  local secret = totp._test.base32_decode(r.secret_base32) "
-        "  local code = totp._test.totp_at_step(secret, "
-        "    totp._test.current_step(), 6) "
+        "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "  local code = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, "
+        "    __test_hooks('hull.web.middleware.totp').current_step(), 6) "
         "  if not totp.confirm('user-2', code) then return 0 end "
         "  local rc = r.recovery_codes[1] "
         "  local v_ok, kind = totp.verify_with_kind('user-2', rc) "
@@ -2773,7 +2796,7 @@ UTEST(lua_stdlib, totp_disable_clears_secret_and_recovery)
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  totp.init({ issuer = 'TestApp' }) "
         "  totp.enroll('user-3') "
         "  if not totp.disable('user-3') then return 0 end "
@@ -2797,7 +2820,7 @@ UTEST(lua_stdlib, totp_ct_eq_and_normalize)
      * (returns boolean, no early exit) is. */
     int ok = eval_int(
         "(function() "
-        "  local t = require('hull.web.middleware.totp')._test "
+        "  local t = __test_hooks('hull.web.middleware.totp') "
         "  if not t.ct_eq('287082', '287082') then return 0 end "
         "  if t.ct_eq('287082', '287083') then return 0 end "
         "  if t.ct_eq('287082', '2870820') then return 0 end "
@@ -2808,7 +2831,7 @@ UTEST(lua_stdlib, totp_ct_eq_and_normalize)
 
     int safe = eval_int(
         "(function() "
-        "  local t = require('hull.web.middleware.totp')._test "
+        "  local t = __test_hooks('hull.web.middleware.totp') "
         "  if t.ct_eq(nil, 'x') then return 0 end "
         "  if t.ct_eq('x', nil) then return 0 end "
         "  if t.ct_eq(42, 42) then return 0 end "
@@ -2818,17 +2841,17 @@ UTEST(lua_stdlib, totp_ct_eq_and_normalize)
 
     /* normalize_recovery_code: strip non-alphanumerics, uppercase. */
     char *n1 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".normalize_recovery_code('ABCD-EFGH-IJKL')");
     ASSERT_NE(n1, NULL); ASSERT_STREQ(n1, "ABCDEFGHIJKL"); free(n1);
 
     char *n2 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".normalize_recovery_code('abcdefghijkl')");
     ASSERT_NE(n2, NULL); ASSERT_STREQ(n2, "ABCDEFGHIJKL"); free(n2);
 
     char *n3 = eval_str(
-        "require('hull.web.middleware.totp')._test"
+        "__test_hooks('hull.web.middleware.totp')"
         ".normalize_recovery_code('  abcd efgh ijkl  ')");
     ASSERT_NE(n3, NULL); ASSERT_STREQ(n3, "ABCDEFGHIJKL"); free(n3);
 
@@ -2848,12 +2871,12 @@ UTEST(lua_stdlib, totp_recovery_accepts_user_typed_forms)
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  totp.init({ issuer = 'TestApp', recovery_codes = 4 }) "
         "  local r = totp.enroll('rec-user') "
-        "  local secret = totp._test.base32_decode(r.secret_base32) "
-        "  local code = totp._test.totp_at_step(secret, "
-        "    totp._test.current_step(), 6) "
+        "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "  local code = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, "
+        "    __test_hooks('hull.web.middleware.totp').current_step(), 6) "
         "  if not totp.confirm('rec-user', code) then return 0 end "
         "  local rc = r.recovery_codes[1] "
         "  local plain = rc:gsub('-', '') "
@@ -2896,20 +2919,20 @@ UTEST(lua_stdlib, totp_encryption_at_rest)
          * test of the encrypt/decrypt helpers below. */
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  totp.init({ issuer = 'TestApp', "
         "              encryption_key = ('k'):rep(32) }) "
         "  local r = totp.enroll('user-4') "
-        "  local secret = totp._test.base32_decode(r.secret_base32) "
-        "  local step = totp._test.current_step() "
-        "  local code = totp._test.totp_at_step(secret, step, 6) "
+        "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "  local step = __test_hooks('hull.web.middleware.totp').current_step() "
+        "  local code = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step, 6) "
         "  if not totp.confirm('user-4', code) then return 0 end "
-        "  local next_code = totp._test.totp_at_step(secret, step + 1, 6) "
+        "  local next_code = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step + 1, 6) "
         "  if not totp.verify('user-4', next_code) then return 0 end "
-        "  local blob, enc_flag, version = totp._test.encrypt_secret(secret) "
+        "  local blob, enc_flag, version = __test_hooks('hull.web.middleware.totp').encrypt_secret(secret) "
         "  if enc_flag ~= 1 or version ~= 1 then return 0 end "
         "  if #blob <= #secret then return 0 end "
-        "  local pt, v = totp._test.decrypt_secret(blob, 1) "
+        "  local pt, v = __test_hooks('hull.web.middleware.totp').decrypt_secret(blob, 1) "
         "  if pt ~= secret or v ~= 1 then return 0 end "
         "  return 1 "
         "end)()");
@@ -2932,24 +2955,24 @@ UTEST(lua_stdlib, totp_key_rotation_lazy_on_verify)
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  local k1 = ('a'):rep(32) "
         "  local k2 = ('b'):rep(32) "
         "  totp.init({ encryption_keys = {[1]=k1}, current = 1 }) "
         "  local r = totp.enroll('u') "
-        "  local secret = totp._test.base32_decode(r.secret_base32) "
-        "  local step = totp._test.current_step() "
-        "  if not totp.confirm('u', totp._test.totp_at_step(secret, step, 6)) "
+        "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "  local step = __test_hooks('hull.web.middleware.totp').current_step() "
+        "  if not totp.confirm('u', __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step, 6)) "
         "    then return 2 end "
-        "  local b1 = totp._test.get_blob('u') "
+        "  local b1 = __test_hooks('hull.web.middleware.totp').get_blob('u') "
         "  if not b1 then return 50 end "
         "  local v1 = (string.byte(b1,1) << 24) | (string.byte(b1,2) << 16) "
         "          | (string.byte(b1,3) << 8) | string.byte(b1,4) "
         "  if v1 ~= 1 then return 60 + v1 end "
         "  totp.init({ encryption_keys = {[1]=k1, [2]=k2}, current = 2 }) "
         "  if not totp.verify('u', "
-        "       totp._test.totp_at_step(secret, step + 1, 6)) then return 3 end "
-        "  local b2 = totp._test.get_blob('u') "
+        "       __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step + 1, 6)) then return 3 end "
+        "  local b2 = __test_hooks('hull.web.middleware.totp').get_blob('u') "
         "  if not b2 then return 70 end "
         "  local v2 = (string.byte(b2,1) << 24) | (string.byte(b2,2) << 16) "
         "          | (string.byte(b2,3) << 8) | string.byte(b2,4) "
@@ -3052,15 +3075,15 @@ UTEST(lua_stdlib, totp_rekey_batch_helper)
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  local k1 = ('a'):rep(32) "
         "  local k2 = ('b'):rep(32) "
         "  totp.init({ encryption_keys = {[1]=k1}, current = 1 }) "
         "  for i = 1, 3 do "
         "    local r = totp.enroll('u' .. i) "
-        "    local secret = totp._test.base32_decode(r.secret_base32) "
-        "    local code = totp._test.totp_at_step(secret, "
-        "      totp._test.current_step(), 6) "
+        "    local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
+        "    local code = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, "
+        "      __test_hooks('hull.web.middleware.totp').current_step(), 6) "
         "    if not totp.confirm('u' .. i, code) then return 0 end "
         "  end "
         "  totp.init({ encryption_keys = {[1]=k1, [2]=k2}, current = 2 }) "
@@ -3458,14 +3481,14 @@ UTEST(lua_stdlib, totp_legacy_v1_format_decrypts_via_legacy_key_version)
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
         "  local crypto = require('hull.crypto') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  local k1 = ('a'):rep(32) "
         "  totp.init({ encryption_keys = {[1]=k1}, current = 1, "
         "              legacy_key_version = 1 }) "
         "  local secret = string.rep('S', 20) "
         "  local nonce = crypto.random(24) "
         "  local blob = nonce .. crypto.secretbox(secret, nonce, k1) "
-        "  local pt, version = totp._test.decrypt_secret(blob, 1) "
+        "  local pt, version = __test_hooks('hull.web.middleware.totp').decrypt_secret(blob, 1) "
         "  if pt ~= secret then return 0 end "
         "  if version ~= 0 then return 0 end "
         "  return 1 "
@@ -3486,11 +3509,11 @@ UTEST(lua_stdlib, totp_unknown_key_version_fails_clean)
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
         "  local crypto = require('hull.crypto') "
-        "  totp._test.reset() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
         "  local k1 = ('a'):rep(32) "
         "  totp.init({ encryption_keys = {[1]=k1}, current = 1 }) "
         "  local blob = string.char(0,0,0,99) .. string.rep('x', 24+36) "
-        "  local pt = totp._test.decrypt_secret(blob, 1) "
+        "  local pt = __test_hooks('hull.web.middleware.totp').decrypt_secret(blob, 1) "
         "  if pt ~= nil then return 0 end "
         "  return 1 "
         "end)()");
@@ -3507,7 +3530,7 @@ UTEST(lua_stdlib, totp_unknown_key_version_fails_clean)
  * and inlining only what each test needs. */
 #define AF_INIT_LUA \
 "local af = require('hull.web.auth-flows') " \
-"af._test.reset() " \
+"__test_hooks('hull.web.auth-flows').reset() " \
 "_G._users = {} _G._by_id = {} _G._sent = {} " \
 "af.init({ " \
 "  state_secret = ('k'):rep(32), " \
@@ -3626,13 +3649,13 @@ UTEST(lua_stdlib, auth_flows_origin_is_built_from_the_allowlist)
     int step = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  local o = af._test.origin_for "
+        "  local o = __test_hooks('hull.web.auth-flows').origin_for "
         "  local function req(h) return { headers = h } end "
         "  if o(req{host='app.example.com:8443'}) ~= 'http://app.example.com:8443' then return 1 end "
         "  if o(req{host='app.example.com:@evil.com'}) ~= nil then return 2 end "
         "  if o(req{host='evil.com/x'}) ~= nil then return 3 end "
         "  if o(req{host='app.example.com', ['x-forwarded-host']='evil.com'}) ~= 'http://app.example.com' then return 4 end "
-        "  local st = af._test.state "
+        "  local st = __test_hooks('hull.web.auth-flows').state "
         "  st.trust_request_host = false; st.trusted_hosts = { 'app.example.com' } "
         "  if o(req{host='app.example.com:@evil.com'}) ~= nil then return 5 end "
         "  if o(req{host='app.example.com:8443'}) ~= 'https://app.example.com' then return 6 end "
@@ -3665,8 +3688,8 @@ UTEST(lua_stdlib, auth_flows_cross_site_guard)
     int step = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  local g = af._test.same_origin_request "
-        "  local st = af._test.state "
+        "  local g = __test_hooks('hull.web.auth-flows').same_origin_request "
+        "  local st = __test_hooks('hull.web.auth-flows').state "
         "  st.trust_request_host = false; st.trusted_hosts = { 'app.example.com' } "
         "  local form = 'application/x-www-form-urlencoded' "
         "  local function req(h, body) h['content-type'] = h['content-type'] or form "
@@ -3699,11 +3722,11 @@ UTEST(lua_stdlib, auth_flows_token_round_trip)
     int ok = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  local A = af._test.ACTIONS "
-        "  local tok = af._test.issue_token('u1', A.verify_email, 60) "
-        "  local env, err = af._test.consume_token(tok, A.verify_email) "
+        "  local A = __test_hooks('hull.web.auth-flows').ACTIONS "
+        "  local tok = __test_hooks('hull.web.auth-flows').issue_token('u1', A.verify_email, 60) "
+        "  local env, err = __test_hooks('hull.web.auth-flows').consume_token(tok, A.verify_email) "
         "  if not env or env.sub ~= 'u1' then return 0 end "
-        "  local env2, err2 = af._test.consume_token(tok, A.verify_email) "
+        "  local env2, err2 = __test_hooks('hull.web.auth-flows').consume_token(tok, A.verify_email) "
         "  if env2 or err2 ~= 'replayed' then return 0 end "
         "  return 1 "
         "end)()");
@@ -3712,14 +3735,14 @@ UTEST(lua_stdlib, auth_flows_token_round_trip)
     int rejections = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  local A = af._test.ACTIONS "
-        "  local tok = af._test.issue_token('u1', A.verify_email, 60) "
-        "  local _, err = af._test.consume_token(tok, A.password_reset) "
+        "  local A = __test_hooks('hull.web.auth-flows').ACTIONS "
+        "  local tok = __test_hooks('hull.web.auth-flows').issue_token('u1', A.verify_email, 60) "
+        "  local _, err = __test_hooks('hull.web.auth-flows').consume_token(tok, A.password_reset) "
         "  if err ~= 'wrong action' then return 0 end "
         "  local tampered = tok:sub(1, -3) .. 'zz' "
-        "  local _, err2 = af._test.consume_token(tampered, A.verify_email) "
+        "  local _, err2 = __test_hooks('hull.web.auth-flows').consume_token(tampered, A.verify_email) "
         "  if err2 ~= 'bad tag' then return 0 end "
-        "  local _, err3 = af._test.consume_token('garbage', A.verify_email) "
+        "  local _, err3 = __test_hooks('hull.web.auth-flows').consume_token('garbage', A.verify_email) "
         "  if err3 ~= 'malformed' then return 0 end "
         "  return 1 "
         "end)()");
@@ -3740,14 +3763,14 @@ UTEST(lua_stdlib, auth_flows_register_verify_login)
     int ok = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  local A = af._test.ACTIONS "
+        "  local A = __test_hooks('hull.web.auth-flows').ACTIONS "
         "  af.send_verify_email("
         "    { id='u1', email='a@x.com' }, 'http://t.io') "
         "  if #_G._sent ~= 1 then return 0 end "
         "  local link = _G._sent[1].text "
         "  local tok = link:match('token=(.+)') "
         "  if not tok then return 0 end "
-        "  local env, err = af._test.consume_token(tok, A.verify_email) "
+        "  local env, err = __test_hooks('hull.web.auth-flows').consume_token(tok, A.verify_email) "
         "  if not env or env.sub ~= 'u1' then return 0 end "
         "  return 1 "
         "end)()");
@@ -3764,8 +3787,8 @@ UTEST(lua_stdlib, auth_flows_input_validation)
     int ok = eval_int(
         "(function() "
         "  local af = require('hull.web.auth-flows') "
-        "  af._test.reset() "
-        "  local t = af._test "
+        "  __test_hooks('hull.web.auth-flows').reset() "
+        "  local t = __test_hooks('hull.web.auth-flows') "
         "  if not t.is_email_ish('a@b.co') then return 0 end "
         "  if t.is_email_ish('') then return 0 end "
         "  if t.is_email_ish('no-at-sign') then return 0 end "
@@ -3819,7 +3842,7 @@ UTEST(lua_stdlib, auth_flows_magic_link_auto_signup_opt_in)
     int auto_signup = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  af._test.reset() "
+        "  __test_hooks('hull.web.auth-flows').reset() "
         "  af.init({ "
         "    state_secret = ('k'):rep(32), "
         "    trust_request_host = true, "
@@ -3869,7 +3892,7 @@ UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
     int ok = eval_int(
         "(function() "
         "  local af = require('hull.web.auth-flows') "
-        "  af._test.reset() "
+        "  __test_hooks('hull.web.auth-flows').reset() "
         "  local secret = string.rep(string.char(0x80), 32) "
         "  af.init({ "
         "    state_secret = secret, "
@@ -3890,9 +3913,9 @@ UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
         "    user_set_email_verified = function() end, "
         "    on_login = function() end, "
         "  }) "
-        "  local A = af._test.ACTIONS "
-        "  local tok = af._test.issue_token('u1', A.verify_email, 60) "
-        "  local env, err = af._test.parse_token(tok, A.verify_email) "
+        "  local A = __test_hooks('hull.web.auth-flows').ACTIONS "
+        "  local tok = __test_hooks('hull.web.auth-flows').issue_token('u1', A.verify_email, 60) "
+        "  local env, err = __test_hooks('hull.web.auth-flows').parse_token(tok, A.verify_email) "
         "  if not env or err then return 0 end "
         "  if env.sub ~= 'u1' then return 0 end "
         "  return 1 "
@@ -3915,7 +3938,7 @@ UTEST(lua_stdlib, auth_flows_email_rate_limit_per_recipient)
     int ok = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  af._test.reset() "
+        "  __test_hooks('hull.web.auth-flows').reset() "
         "  af.init({ "
         "    state_secret = ('k'):rep(32), "
         "    trust_request_host = true, "
@@ -3936,13 +3959,13 @@ UTEST(lua_stdlib, auth_flows_email_rate_limit_per_recipient)
         "    user_set_email_verified = function() end, "
         "    on_login = function() end, "
         "  }) "
-        "  local a1 = af._test.email_rate_allow('victim@x.com') "
-        "  local a2 = af._test.email_rate_allow('victim@x.com') "
-        "  local a3 = af._test.email_rate_allow('victim@x.com') "
-        "  local b1 = af._test.email_rate_allow('other@x.com') "
-        "  local c1 = af._test.email_rate_allow('VICTIM@x.com') "
-        "  af._test.email_rate_reset() "
-        "  local d1 = af._test.email_rate_allow('victim@x.com') "
+        "  local a1 = __test_hooks('hull.web.auth-flows').email_rate_allow('victim@x.com') "
+        "  local a2 = __test_hooks('hull.web.auth-flows').email_rate_allow('victim@x.com') "
+        "  local a3 = __test_hooks('hull.web.auth-flows').email_rate_allow('victim@x.com') "
+        "  local b1 = __test_hooks('hull.web.auth-flows').email_rate_allow('other@x.com') "
+        "  local c1 = __test_hooks('hull.web.auth-flows').email_rate_allow('VICTIM@x.com') "
+        "  __test_hooks('hull.web.auth-flows').email_rate_reset() "
+        "  local d1 = __test_hooks('hull.web.auth-flows').email_rate_allow('victim@x.com') "
         "  return (a1 and a2 and not a3 and b1 and not c1 and d1) "
         "    and 1 or 0 "
         "end)()");
@@ -3960,7 +3983,7 @@ UTEST(lua_stdlib, auth_flows_email_rate_limit_drops_send)
     int ok = eval_int(
         "(function() " AF_INIT_LUA
         "  local af = require('hull.web.auth-flows') "
-        "  af._test.reset() "
+        "  __test_hooks('hull.web.auth-flows').reset() "
         "  af.init({ "
         "    state_secret = ('k'):rep(32), "
         "    trust_request_host = true, "
@@ -4846,6 +4869,22 @@ UTEST(lua_stdlib, stdlib_audit15_suite)
         sqlite3_finalize(st);
     }
 
+    cleanup_lua_caps();
+}
+
+/* Stdlib regressions from audit 16: no module exports its test hooks to app
+ * code (hull._test_hooks is stdlib-internal), totp's allow_unbound_secrets
+ * and rekey_status().unbound, and an integral float user id. */
+UTEST(lua_stdlib, stdlib_audit16_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit16.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
 
@@ -7343,7 +7382,7 @@ UTEST(lua_task, auth_flows_register_under_a_batch_defers_its_mail)
         "local af = require('hull.web.auth-flows')\n"
         "local db = require('hull.db').default()\n"
         "local S = { by_id = {}, by_email = {}, sent = {} }\n"
-        "af._test.reset()\n"
+        "__test_hooks('hull.web.auth-flows').reset()\n"
         "af.init({\n"
         "  secret = ('s'):rep(32), trust_request_host = true, email_rate_limit = false,\n"
         "  email_send = function(to) S.sent[#S.sent + 1] = to end,\n"
@@ -7377,7 +7416,7 @@ UTEST(lua_task, auth_flows_register_under_a_batch_defers_its_mail)
         "  headers = { host = 'app.test', ['content-type'] = 'application/json',\n"
         "              ['sec-fetch-site'] = 'same-origin' },\n"
         "  body = json.encode({ email = 'txn@x.test', password = 'some-password-1' }) }\n"
-        "local ok, err = pcall(db.batch, function() af._test.handlers.register(req, res) end)\n"
+        "local ok, err = pcall(db.batch, function() __test_hooks('hull.web.auth-flows').handlers.register(req, res) end)\n"
         "check(ok, 'register under db.batch raised: '..tostring(err))\n"
         "check(res.code == 200, 'status '..tostring(res.code))\n"
         "check(#S.sent == 0 and S.by_email['txn@x.test'] == nil, 'ran inside the request')\n"
@@ -7800,7 +7839,7 @@ UTEST(lua_stdlib, audit3_stdlib_fixes)
         "  if inbox.check_and_mark('m1', 'src') ~= true then return 7 end "
         "  if pcall(inbox.check_and_mark, 'm2', 'src', { ttl = -1 }) then return 8 end "
         "  if inbox.check_and_mark('m2', 'src') ~= false then return 8 end "
-        "  inbox._test.expire('m2', 'src') "
+        "  __test_hooks('hull.web.middleware.inbox').expire('m2', 'src') "
         "  if inbox.check_and_mark('m2', 'src') ~= false then return 9 end "
         "  local rl = require('hull.web.middleware.ratelimit') "
         "  local function hdr() local r = {} "

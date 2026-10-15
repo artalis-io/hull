@@ -20,7 +20,7 @@ local cache     = require("hull.cache")
 local cookie    = require("hull.web.cookie")
 local session   = require("hull.web.middleware.session")
 local idem      = require("hull.web.middleware.idempotency")
-local oauth     = require("hull.web.middleware.oauth")
+require("hull.web.middleware.oauth")   -- registers its test hooks
 
 local pass = 0
 local fail = 0
@@ -78,7 +78,7 @@ local function add_user(id, email, pw, verified)
 end
 
 local function init(extra)
-    af._test.reset()
+    __test_hooks('hull.web.auth-flows').reset()
     local opts = {
         secret = ("s"):rep(32),
         trust_request_host = true,
@@ -121,7 +121,7 @@ local function init(extra)
     af.init(opts)
 end
 
-local H = af._test.handlers
+local H = __test_hooks('hull.web.auth-flows').handlers
 
 local function token_in(to)
     for i = #S.sent, 1, -1 do
@@ -142,8 +142,8 @@ end
 -- ── auth-flows ─────────────────────────────────────────────────────
 
 test("uid_key: integer ids are keyed as text", function()
-    assert_eq(af._test.uid_key(5), "5")
-    assert_eq(af._test.uid_key("u1"), "u1")
+    assert_eq(__test_hooks('hull.web.auth-flows').uid_key(5), "5")
+    assert_eq(__test_hooks('hull.web.auth-flows').uid_key("u1"), "u1")
 end)
 
 test("undo of a confirmed change: unverified old address stays unverified, "
@@ -304,13 +304,13 @@ end)
 -- ── oauth ──────────────────────────────────────────────────────────
 
 test("oauth: a multi-tenant issuer must be the token's own tenant", function()
-    local ok = oauth._test.issuer_ok
-    local common = oauth._test.presets.microsoft({ tenant = "common" })
+    local ok = __test_hooks('hull.web.middleware.oauth').issuer_ok
+    local common = __test_hooks('hull.web.middleware.oauth').presets.microsoft({ tenant = "common" })
     local iss = "https://login.microsoftonline.com/1111-aaaa/v2.0"
     assert_eq(ok(common, { iss = iss, tid = "1111-aaaa" }), true)
     assert_eq(ok(common, { iss = iss, tid = "2222-bbbb" }), false, "other tid")
     assert_eq(ok(common, { iss = iss }), false, "no tid")
-    local orgs = oauth._test.presets.microsoft({ tenant = "organizations" })
+    local orgs = __test_hooks('hull.web.middleware.oauth').presets.microsoft({ tenant = "organizations" })
     local msa = "https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0"
     assert_eq(ok(orgs, { iss = msa, tid = "9188040d-6c67-4c5b-b112-36a304b66dad" }), false)
     local pinned = { issuer = "https://idp.test" }

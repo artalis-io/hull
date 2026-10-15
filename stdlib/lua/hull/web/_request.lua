@@ -98,17 +98,26 @@ end
 -- text): a non-empty string as is, an integer as its decimal string. Apps
 -- key users by INTEGER PRIMARY KEY as often as by text, and every stdlib
 -- entry point that takes a user id goes through this, so 42 and "42" are
--- the same user everywhere - session, audit-log, totp, rbac. Anything else
--- (nil, "", a float, a table) is no id: nil.
+-- the same user everywhere - session, audit-log, totp, rbac. An integral
+-- float within 2^53 (42.0: a REAL column, arithmetic) is that integer, as
+-- in JS, where 42.0 and 42 are one number (audit 16: Lua refused it, so a
+-- user enrolled in TOTP as 42 could not verify as 42.0). Anything else (nil,
+-- "", a fractional or huge float, a table) is no id: nil.
 --
 -- @param user_id
 -- @treturn string|nil
+local SAFE_INT = 2 ^ 53 - 1
 function M.user_id(user_id)
     if type(user_id) == "string" then
         if user_id == "" then return nil end
         return user_id
     end
     if math.type(user_id) == "integer" then return tostring(user_id) end
+    if math.type(user_id) == "float" and user_id >= -SAFE_INT
+       and user_id <= SAFE_INT then
+        local i = math.tointeger(user_id)
+        if i then return tostring(i) end
+    end
     return nil
 end
 

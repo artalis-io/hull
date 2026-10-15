@@ -66,6 +66,12 @@ const _state = {
     keys:               {},   // {[versionId]: keyHex}
     currentKeyVersion:  null, // id used for new encryptions
     legacyKeyVersion:   null, // id for pre-versioning rows, if any
+    // A v2 blob sealed before audit 15, without the account context, still
+    // opens (and is re-sealed bound on the next verify). Such a blob opens
+    // for ANY account, so whoever can write _hull_totp could copy their own
+    // into another account's row. Off once rekeyStatus().unbound is 0
+    // (audit 16).
+    allowUnboundSecrets: true,
     initialized:        false,
 };
 
@@ -135,6 +141,7 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
 import { encoding } from "hull:encoding";
 import { sealbox } from "hull:crypto:sealbox";
 import { otp } from "hull:crypto:otp";
+import { _test_hooks } from "hull:_test_hooks";
 
 // The enrolment secret is shown as RFC 4648 base32, unpadded: 20 bytes are
 // exactly 32 characters. Read back leniently, because people and apps copy
@@ -236,14 +243,18 @@ function encryptSecret(secretBytes, userId) {
 // Returns [plaintext, version, unbound] on success, [null, null] on failure.
 // version=0 signals "plaintext storage" OR "legacy v1 row"; unbound marks a
 // v2 blob sealed without the account context (before audit 15). Callers use
-// both to decide whether to lazily re-encrypt under current.
-function decryptSecret(blob, encrypted, userId) {
+// both to decide whether to lazily re-encrypt under current. An unbound blob
+// opens only while allowUnboundSecrets is on (audit 16); `allowUnbound`
+// overrides that for rekeyStatus, which counts them.
+function decryptSecret(blob, encrypted, userId, allowUnbound) {
     if (encrypted === 0) return [blob, 0];
     if (typeof blob !== "string") return [null, null];
 
     const [value, err, version] = sealbox.open(keyring(), blob, sealContext(userId));
     if (!err) return [value, version];
     if (err === "open_failed" && blob.length >= sealbox.MIN_LEN) {
+        if (allowUnbound === undefined) allowUnbound = _state.allowUnboundSecrets;
+        if (!allowUnbound) return [null, null];
         // A row sealed before secrets were bound to their account. Opened
         // without a context, a blob bound to ANOTHER account opens too, to
         // its frame ("totp", that account, the secret) - a secret whose codes
@@ -492,6 +503,11 @@ function extractIp(req) {
  *                     during the migration window. Once rekey()
  *                     reports zero v1 rows remaining, unset it and
  *                     remove the legacy-version key from the map.
+ *   - allowUnboundSecrets Default true. A secret sealed before audit 15
+ *                     is not bound to its account and opens for any
+ *                     userId (it is re-sealed bound on the next
+ *                     verify). Set false once rekeyStatus().unbound is
+ *                     0: such a blob is then refused (audit 16).
  */
 function init(opts) {
     opts = opts || {};
@@ -592,6 +608,12 @@ function init(opts) {
         } else {
             _state.pendingTtl = opts.pendingTtl;
         }
+    }
+    if (opts.allowUnboundSecrets !== undefined) {
+        if (typeof opts.allowUnboundSecrets !== "boolean") {
+            throw new Error("totp.init: allowUnboundSecrets must be a boolean");
+        }
+        _state.allowUnboundSecrets = opts.allowUnboundSecrets;
     }
     _state.keys                = keys;
     _state.currentKeyVersion   = current;
@@ -949,16 +971,21 @@ function rekey() {
  * rekey() to see how many users are on each version. Returns
  * { [versionId]: count, ..., total: N }. version=0 buckets
  * plaintext rows AND undecryptable rows (legacy v1 without
- * legacyKeyVersion configured, or wrong key).
+ * legacyKeyVersion configured, or wrong key). `unbound` counts the v2
+ * rows sealed without their account context (before audit 15), whether
+ * or not allowUnboundSecrets lets them open: once it is 0 (after rekey(),
+ * or every such user's next verify), turn allowUnboundSecrets off
+ * (audit 16).
  */
 function rekeyStatus() {
     checkInitialized();
     const rows = db.query("SELECT user_id, secret, encrypted FROM _hull_totp");
-    const counts = { total: 0 };
+    const counts = { total: 0, unbound: 0 };
     for (let i = 0; i < (rows || []).length; i++) {
         counts.total++;
         const r = rows[i];
-        const dec = decryptSecret(r.secret, r.encrypted, r.user_id);
+        const dec = decryptSecret(r.secret, r.encrypted, r.user_id, true);
+        if (dec[2]) counts.unbound++;
         const k = (dec && dec[1] != null) ? dec[1] : 0;
         counts[k] = (counts[k] || 0) + 1;
     }
@@ -1012,6 +1039,10 @@ const _test = {
             "SELECT secret, encrypted FROM _hull_totp WHERE user_id = ?", [userId]);
         return rows && rows.length > 0 ? [rows[0].secret, rows[0].encrypted] : null;
     },
+    // Replace a user's stored secret blob (an unbound pre-audit-15 seal).
+    setBlob: (userId, blob) => {
+        db.exec("UPDATE _hull_totp SET secret = ? WHERE user_id = ?", [blob, userId]);
+    },
     totpAtStep,
     currentStep,
     ctEq,
@@ -1053,11 +1084,15 @@ const _test = {
         _state.keys               = {};
         _state.currentKeyVersion  = null;
         _state.legacyKeyVersion   = null;
+        _state.allowUnboundSecrets = true;
         _state.cleanupCatchupDone = false;
         _state.cleanupScheduled   = false;
         _state.initialized        = false;
     },
 };
+// Registered with the stdlib-internal hull:_test_hooks rather than exported
+// (audit 16): app code could call them.
+_test_hooks.register("hull:web:middleware:totp", _test);
 
 function lockoutRemainingPublic(userId) {
     checkInitialized();
@@ -1068,5 +1103,5 @@ function lockoutRemainingPublic(userId) {
 
 const totp = { init, enroll, confirm, verify, verifyWithKind,
                rekey, rekeyStatus, disable, enrolled, cleanup,
-               lockoutRemaining: lockoutRemainingPublic, _test };
+               lockoutRemaining: lockoutRemainingPublic };
 export { totp };

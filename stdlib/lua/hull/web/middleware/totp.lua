@@ -156,6 +156,12 @@ local _state = {
     keys                = {},   -- {[version_id] = key}
     current_key_version = nil,  -- id used for new encryptions
     legacy_key_version  = nil,  -- id for pre-versioning rows, if any
+    -- A v2 blob sealed before audit 15, without the account context, still
+    -- opens (and is re-sealed bound on the next verify). Such a blob opens
+    -- for ANY account, so whoever can write _hull_totp could copy their own
+    -- into another account's row. Off once rekey_status().unbound is 0
+    -- (audit 16).
+    allow_unbound_secrets = true,
     _initialized        = false,
 }
 
@@ -333,8 +339,14 @@ local function keyring()
     return { keys = _state.keys, current = _state.current_key_version }
 end
 
--- The sealbox context of an account's secret.
+-- The sealbox context of an account's secret. The public functions take the
+-- id through _request.user_id (a string by then); an integral float id is
+-- written as the integer here too, as String() does in JS (audit 16: 42.0
+-- sealed as "42.0" in Lua and "42" in JS).
 local function seal_context(user_id)
+    if math.type(user_id) == "float" then
+        user_id = math.tointeger(user_id) or user_id
+    end
     return { "totp", tostring(user_id) }
 end
 -- How the frame of a bound secret begins (sealbox: each context string
@@ -355,13 +367,17 @@ end
 -- on failure. Caller uses the returned version to decide whether to
 -- re-encrypt under current (lazy rekey-on-verify), and `unbound` (a v2 blob
 -- sealed without the account context, before audit 15) to re-seal it bound.
-local function decrypt_secret(blob, encrypted, user_id)
+-- An unbound blob opens only while allow_unbound_secrets is on (audit 16);
+-- `allow_unbound` overrides that for rekey_status, which counts them.
+local function decrypt_secret(blob, encrypted, user_id, allow_unbound)
     if encrypted == 0 then return blob, 0 end
     if type(blob) ~= "string" then return nil end
 
     local pt, version_or_reason = sealbox.open(keyring(), blob, seal_context(user_id))
     if pt then return pt, version_or_reason end
     if version_or_reason == "open_failed" and #blob >= sealbox.MIN_LEN then
+        if allow_unbound == nil then allow_unbound = _state.allow_unbound_secrets end
+        if not allow_unbound then return nil end
         -- A row sealed before secrets were bound to their account. Opened
         -- without a context, a blob bound to ANOTHER account opens too, to
         -- its frame ("totp", that account, the secret) - a secret whose
@@ -680,6 +696,12 @@ end
 --                       rekey() reports zero v1 rows remaining, this
 --                       can be unset and the legacy-version key
 --                       removed from `encryption_keys`.
+--   * `allow_unbound_secrets` Default `true`. A secret sealed before
+--                       audit 15 is not bound to its account and opens
+--                       for any user_id (it is re-sealed bound on the
+--                       next verify). Set `false` once
+--                       `rekey_status().unbound` is 0: such a blob is
+--                       then refused (audit 16).
 function totp.init(opts)
     opts = opts or {}
     if opts.digits and opts.digits ~= 6 and opts.digits ~= 8 then
@@ -784,6 +806,12 @@ function totp.init(opts)
         else
             _state.pending_ttl = opts.pending_ttl
         end
+    end
+    if opts.allow_unbound_secrets ~= nil then
+        if type(opts.allow_unbound_secrets) ~= "boolean" then
+            error("totp.init: allow_unbound_secrets must be a boolean", 2)
+        end
+        _state.allow_unbound_secrets = opts.allow_unbound_secrets
     end
     _state.keys                 = keys
     _state.current_key_version  = current
@@ -1241,16 +1269,21 @@ end
 -- this BEFORE rekey() to see how many users are on each version.
 -- Returns a table { [version_id] = count, ... } plus a `total`
 -- field. version=0 buckets plaintext rows and undecryptable
--- (legacy v1 without legacy_key_version, or wrong key) rows.
+-- (legacy v1 without legacy_key_version, or wrong key) rows. `unbound`
+-- counts the v2 rows sealed without their account context (before audit
+-- 15), whether or not allow_unbound_secrets lets them open: once it is 0
+-- (after rekey(), or every such user's next verify), turn
+-- allow_unbound_secrets off (audit 16).
 -- @treturn table
 function totp.rekey_status()
     check_initialized()
     local rows = db.query(
         "SELECT user_id, secret, encrypted FROM _hull_totp")
-    local counts = { total = 0 }
+    local counts = { total = 0, unbound = 0 }
     for _, r in ipairs(rows or {}) do
         counts.total = counts.total + 1
-        local _, version = decrypt_secret(r.secret, r.encrypted, r.user_id)
+        local _, version, unbound = decrypt_secret(r.secret, r.encrypted, r.user_id, true)
+        if unbound then counts.unbound = counts.unbound + 1 end
         -- version is nil on decrypt failure; use 0 as the "unknown
         -- / unrecoverable" bucket (matches the version=0 used for
         -- plaintext + legacy v1).
@@ -1322,10 +1355,17 @@ local function debug_get_blob(user_id)
     return rows[1].secret, rows[1].encrypted
 end
 
-totp._test = {
+-- Test-only hooks, registered with the stdlib-internal hull._test_hooks
+-- rather than exported (audit 16): app code could call them.
+require("hull._test_hooks").register("hull.web.middleware.totp", {
     base32_encode           = base32_encode,
     base32_decode           = base32_decode,
     get_blob                = debug_get_blob,
+    -- Replace a user's stored secret blob (an unbound pre-audit-15 seal).
+    set_blob                = function(user_id, blob)
+        db.exec("UPDATE _hull_totp SET secret = ? WHERE user_id = ?",
+                { blob, user_id })
+    end,
     totp_at_step            = totp_at_step,
     current_step            = current_step,
     ct_eq                   = ct_eq,
@@ -1369,10 +1409,11 @@ totp._test = {
         _state.keys                = {}
         _state.current_key_version = nil
         _state.legacy_key_version  = nil
+        _state.allow_unbound_secrets = true
         _state._cleanup_catchup_done = false
         _state._cleanup_scheduled    = false
         _state._initialized        = false
     end,
-}
+})
 
 return totp

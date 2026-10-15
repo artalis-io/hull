@@ -102,11 +102,11 @@ test("inbox: init and per-call ttl must be positive numbers", () => {
 test("totp: lockoutDurationPerIp must be a positive number", () => {
     for (const bad of BAD) {
         if (bad === null) continue;  // null keeps the default, like undefined
-        totp._test.reset();
+        __testHooks('hull:web:middleware:totp').reset();
         raises(() => totp.init({ lockoutDurationPerIp: bad }), "lockoutDurationPerIp",
                String(bad));
     }
-    totp._test.reset();
+    __testHooks('hull:web:middleware:totp').reset();
     totp.init({ lockoutDurationPerIp: 60 });
 });
 
@@ -115,39 +115,39 @@ test("totp: lockoutDurationPerIp must be a positive number", () => {
 const KEY = "k".repeat(32);
 
 test("totp: a new seal is bound to its account; an old unbound one still opens", () => {
-    totp._test.reset();
+    __testHooks('hull:web:middleware:totp').reset();
     totp.init({ issuer: "T", encryptionKey: KEY });
     const secret = "S".repeat(20);
-    const enc = totp._test.encryptSecret(secret, "u1");
+    const enc = __testHooks('hull:web:middleware:totp').encryptSecret(secret, "u1");
     assertEq(enc[1], 1); assertEq(enc[2], 1);
-    let dec = totp._test.decryptSecret(enc[0], 1, "u1");
+    let dec = __testHooks('hull:web:middleware:totp').decryptSecret(enc[0], 1, "u1");
     assertEq(dec[0], secret, "opens for its account");
     assertEq(dec[1], 1);
     assertEq(dec[2], undefined, "bound");
-    assertEq(totp._test.decryptSecret(enc[0], 1, "u2")[0], null,
+    assertEq(__testHooks('hull:web:middleware:totp').decryptSecret(enc[0], 1, "u2")[0], null,
              "a blob bound to u1 does not open for u2");
     // A row sealed before audit 15, with no context.
     const ring = sealbox.keyring({ keys: { 1: KEY }, current: 1 });
     const legacy = sealbox.seal(ring, secret);
-    dec = totp._test.decryptSecret(legacy, 1, "u1");
+    dec = __testHooks('hull:web:middleware:totp').decryptSecret(legacy, 1, "u1");
     assertEq(dec[0], secret, "an unbound row still opens");
     assertEq(dec[1], 1);
     assertEq(dec[2], true, "flagged for a re-seal");
 });
 
 test("totp: enroll + confirm store a bound secret", () => {
-    totp._test.reset();
+    __testHooks('hull:web:middleware:totp').reset();
     totp.init({ issuer: "T", encryptionKey: KEY });
     const r = totp.enroll("u15");
-    const secret = totp._test.base32Decode(r.secretBase32);
-    const code = totp._test.totpAtStep(secret, totp._test.currentStep(), 6);
+    const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);
+    const code = __testHooks('hull:web:middleware:totp').totpAtStep(secret, __testHooks('hull:web:middleware:totp').currentStep(), 6);
     assertEq(totp.confirm("u15", code), true, "confirm");
-    const row = totp._test.getBlob("u15");
+    const row = __testHooks('hull:web:middleware:totp').getBlob("u15");
     assertEq(row[1], 1);
-    const dec = totp._test.decryptSecret(row[0], 1, "u15");
+    const dec = __testHooks('hull:web:middleware:totp').decryptSecret(row[0], 1, "u15");
     assertEq(dec[0], secret, "opens for its account");
     assertEq(dec[2], undefined, "sealed bound");
-    assertEq(totp._test.decryptSecret(row[0], 1, "u16")[0], null, "not for another");
+    assertEq(__testHooks('hull:web:middleware:totp').decryptSecret(row[0], 1, "u16")[0], null, "not for another");
 });
 
 globalThis.__test_pass = pass;

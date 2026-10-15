@@ -77,7 +77,7 @@ end
 local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 
 local function init(extra)
-    af._test.reset()
+    __test_hooks('hull.web.auth-flows').reset()
     local opts = {
         secret = ("s"):rep(32),
         trust_request_host = true,
@@ -117,7 +117,7 @@ local function init(extra)
     af.init(opts)
 end
 
-local H = af._test.handlers
+local H = __test_hooks('hull.web.auth-flows').handlers
 
 local function token_in(to)
     for i = #S.sent, 1, -1 do
@@ -282,7 +282,7 @@ test("session logout trusts the origins auth-flows registered", function()
     local res = mkres()
     lo2({ method = "POST", headers = { host = "10.0.0.5", origin = "https://alt.example.com:8443" } }, res)
     assert_eq(res.code, 200, "opts.trusted_hosts, any port")
-    af._test.reset()
+    __test_hooks('hull.web.auth-flows').reset()
     assert_eq(run({ host = "10.0.0.5:8080", origin = "https://app.example.com" }), 403,
               "cleared with the auth-flows state")
 end)

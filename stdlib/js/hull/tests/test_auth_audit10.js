@@ -72,7 +72,7 @@ function addUser(id, email, pw, verified) {
 }
 
 function init(extra) {
-    authFlows._test.reset();
+    __testHooks('hull:web:auth-flows').reset();
     authFlows.init(Object.assign({
         secret: "s".repeat(32),
         trustRequestHost: true,
@@ -108,7 +108,7 @@ function init(extra) {
     }, extra || {}));
 }
 
-const H = authFlows._test.handlers;
+const H = __testHooks('hull:web:auth-flows').handlers;
 
 function tokenIn(to) {
     for (let i = S.sent.length - 1; i >= 0; i--) {
@@ -264,7 +264,7 @@ await test("session logout trusts the origins auth-flows registered", () => {
     const res = mkRes();
     lo2({ method: "POST", headers: { host: "10.0.0.5", origin: "https://alt.example.com:8443" } }, res);
     assertEq(res.code, 200, "opts.trustedHosts, any port");
-    authFlows._test.reset();
+    __testHooks('hull:web:auth-flows').reset();
     assertEq(run({ host: "10.0.0.5:8080", origin: "https://app.example.com" }), 403,
              "cleared with the auth-flows state");
 });

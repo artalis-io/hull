@@ -234,12 +234,14 @@ end
 -- Test-only: mark a message's record expired. A ttl must be positive (audit
 -- 15), so a test can no longer plant an already-expired mark with ttl = -1.
 -- Inside the module so the _hull_* namespace check admits the write.
-inbox._test = {
+-- Test-only hooks, registered with the stdlib-internal hull._test_hooks
+-- rather than exported (audit 16): app code could call them.
+require("hull._test_hooks").register("hull.web.middleware.inbox", {
     expire = function(message_id, source)
         db.exec("UPDATE _hull_inbox_processed SET expires_at = 0 "
                 .. "WHERE source = ? AND message_id = ?",
                 { norm_source(source), norm_id(message_id) })
     end,
-}
+})
 
 return inbox

@@ -799,7 +799,9 @@ end
 
 -- Test helpers (not part of the public contract). Lets tests round-
 -- trip sign/verify without going through the full HTTP flow.
-oauth._test = {
+-- Test-only hooks, registered with the stdlib-internal hull._test_hooks
+-- rather than exported (audit 16): app code could call them.
+require("hull._test_hooks").register("hull.web.middleware.oauth", {
     pkce_pair       = pkce_pair,
     sign_state      = sign_state,
     verify_state    = verify_state,
@@ -815,6 +817,6 @@ oauth._test = {
         _state.on_logout        = nil
         _state._jwks_cache      = {}
     end,
-}
+})
 
 return oauth
