@@ -10554,7 +10554,7 @@ UTEST(lua_audit15, tar_is_capped_at_the_heap_and_charged)
     /* tar.pack: the same 8 MB file ten times is 80 MB - over the heap -
      * refused by the running total before the eighth read. */
     EXPECT_EQ(audit10_run(
-        "collectgarbage() "
+        "MB = nil collectgarbage() "   /* seven files are read: room for 56 MB */
         "local l = {} for i = 1, 10 do l[i] = { path = 'big.bin', name = 'b' .. i } end "
         "local b, msg = tar.pack(l) "
         "assert(b == nil and tostring(msg):find('heap limit', 1, true), tostring(msg)) "
