@@ -451,11 +451,22 @@ int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
 
 /* -- How much a directory grant covers ------------------------------ */
 
+/* Only an absolute value names a home ("C:\Users\x" counts, in its rooted
+ * form). A relative one would resolve against the working directory - the
+ * app directory - and make it "the home". */
+static int home_value_usable(const char *h)
+{
+    char norm[HL_HOST_PATH_MAX];
+    return h && *h && hl_host_normalize_path(h, norm, sizeof norm) >= 0 &&
+           norm[0] == '/';
+}
+
 const char *hl_host_home(void)
 {
     const char *home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
-    if (home && *home) return home;
+    if (home_value_usable(home)) return home;
+    home = getenv("USERPROFILE");
+    if (home_value_usable(home)) return home;
 #if !defined(_WIN32)
     /* Neither set (a service started with an empty environment): the
      * account's home from the password database. Without it every "is this
@@ -592,5 +603,10 @@ int hl_host_path_too_broad(const char *path)
         if (letter && rp[1] == ':' && (rp[2] == '\0' || (rp[2] == '/' && rp[3] == '\0')))
             return 1;
     }
+    /* No home known at all: only the root is known to be too broad here.
+     * The app sandbox's app-directory check must still accept an ordinary
+     * directory; tool mode's write grants refuse on an unknown home
+     * themselves (hl_tool_path_too_broad). */
+    if (!hl_host_home()) return 0;
     return hl_host_path_covers_home(rp, NULL);
 }

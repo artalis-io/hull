@@ -843,11 +843,39 @@ UTEST(host, unknown_home_falls_back_or_fails_closed)
         if (stat(home, &hst) == 0 && S_ISDIR(hst.st_mode))
             EXPECT_EQ(hl_host_path_too_broad(home), 1);
     } else {
-        /* No home known: nothing can be shown to stay clear of it. */
-        EXPECT_EQ(hl_host_path_too_broad(sub), 1);
+        /* No home known: the ~/.hull checks cannot be shown to stay clear of
+         * it and fail closed; an ordinary directory is still not "too
+         * broad" for the app sandbox (tool mode refuses on its own,
+         * hl_tool_path_too_broad). */
+        EXPECT_EQ(hl_host_path_too_broad(sub), 0);
+        EXPECT_EQ(hl_host_path_too_broad("/"), 1);
         EXPECT_EQ(hl_host_path_covers_home(sub, ".hull"), 1);
         EXPECT_EQ(hl_host_path_under_home(sub, ".hull"), 1);
     }
+    broad_leave(&e);
+}
+
+/* A relative HOME is not a home: it resolved against the working directory,
+ * which made an ordinary app directory "the home" and the app sandbox
+ * refused to start (a test script had overwritten HOME with a page body). */
+UTEST(host, relative_home_is_ignored)
+{
+    BroadEnv e;
+    ASSERT_EQ(broad_enter(&e), 0);
+    char sub[HL_TEST_PATH_MAX + 32], cwd[HL_TEST_PATH_MAX];
+    snprintf(sub, sizeof sub, "%s/proj", e.dir);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+    ASSERT_TRUE(getcwd(cwd, sizeof cwd) != NULL);
+    ASSERT_EQ(chdir(e.dir), 0);
+
+    setenv("HOME", "proj", 1);
+    const char *home = hl_host_home();
+    EXPECT_TRUE(home == NULL || strcmp(home, "proj") != 0);
+    EXPECT_EQ(hl_host_path_too_broad(sub), 0);
+    setenv("HOME", "<html><body>x</body></html>", 1);
+    EXPECT_EQ(hl_host_path_too_broad(sub), 0);
+
+    EXPECT_EQ(chdir(cwd), 0);
     broad_leave(&e);
 }
 

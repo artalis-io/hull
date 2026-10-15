@@ -68,6 +68,7 @@ UTEST(asset_checksum, fixed64_equal_and_diffs)
  * hl_tool_sandbox_init refuses such an output directory BEFORE it applies
  * anything, so these calls leave this process unsandboxed. */
 #include "hull/sandbox.h"
+#include "hull/shared/host.h"   /* hl_host_home */
 #include "hull/cap/tool.h"
 #include "../test_tmpdir.h"
 #include <stdlib.h>
@@ -314,6 +315,23 @@ UTEST(tool_sandbox, path_too_broad)
     EXPECT_EQ(hl_tool_path_too_broad(f.home), 1);
     EXPECT_EQ(hl_tool_path_too_broad(sub), 0);
     EXPECT_EQ(hl_tool_path_too_broad(NULL), 1);
+
+    /* No usable home (a relative HOME is none): tool-mode grants are
+     * refused when no home can be found at all (audit 15); off Windows the
+     * password database usually supplies one. */
+    char prof_buf[PATH_MAX], *saved_prof = NULL;
+    if (getenv("USERPROFILE")) {
+        snprintf(prof_buf, sizeof prof_buf, "%s", getenv("USERPROFILE"));
+        saved_prof = prof_buf;
+    }
+    setenv("HOME", "relative/home", 1);
+    unsetenv("USERPROFILE");
+    if (!hl_host_home())
+        EXPECT_EQ(hl_tool_path_too_broad(sub), 1);
+    else
+        EXPECT_EQ(hl_tool_path_too_broad(sub), 0);
+    if (saved_prof) setenv("USERPROFILE", saved_prof, 1);
+    setenv("HOME", f.home, 1);
     fake_home_leave(&f);
 }
 
