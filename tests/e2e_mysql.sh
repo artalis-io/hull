@@ -342,13 +342,16 @@ app.get("/users_exact", function(req, res)
     })
 end)
 -- Through the public API only: the module's test hooks are not exported to
--- app code (audit 16). Four enrolled users take 5 wrong codes each from one
--- IP - each user is then locked, and the IP (20 failures) too: a right code
--- from that IP fails, the same code from another IP passes.
+-- app code (audit 16). Lower thresholds and one recovery code keep the
+-- enrolments (PBKDF2 per code) inside the request's instruction budget: user 1
+-- takes 3 wrong codes from one IP (user lockout), user 2 one more (IP lockout
+-- at 4) - then user 2's right code fails from that IP and passes from another.
 app.get("/totp", function(req, res)
     local otp = require("hull.crypto.otp")
     local enc = require("hull.encoding")
     local now = require("hull.time").now
+    totp.init({ max_failed_attempts = 3, max_failed_attempts_per_ip = 4,
+                recovery_codes = 1 })
     local function enroll(uid)
         local key = enc.base32.decode(totp.enroll(uid).secret_base32, { lenient = true })
         assert(totp.confirm(uid, otp.hotp(key, otp.step(now()))), "confirm " .. uid)
@@ -356,16 +359,15 @@ app.get("/totp", function(req, res)
     end
     local bad_ip  = { headers = {}, remote_addr = "203.0.113.9" }
     local good_ip = { headers = {}, remote_addr = "203.0.113.10" }
-    for i = 1, 4 do
-        enroll("totp-user-" .. i)
-        for _ = 1, 5 do totp.verify("totp-user-" .. i, "bad", bad_ip) end
-    end
+    enroll("totp-user")
     local key = enroll("totp-fresh")
+    for _ = 1, 3 do totp.verify("totp-user", "bad", bad_ip) end
+    totp.verify("totp-fresh", "bad", bad_ip)
     local next_code = otp.hotp(key, otp.step(now()) + 1)
     local from_bad = totp.verify("totp-fresh", next_code, bad_ip)
     local from_good = totp.verify("totp-fresh", next_code, good_ip)
     res:json({
-        user_locked = totp.lockout_remaining("totp-user-1") > 0,
+        user_locked = totp.lockout_remaining("totp-user") > 0,
         ip_locked   = (not from_bad) and from_good,
     })
 end)
