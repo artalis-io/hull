@@ -55,6 +55,15 @@ function checkIdLen(messageId, source) {
         throw new Error("inbox: source too long (max " + MAX_ID_LEN + ")");
 }
 
+// A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
+// ("86400") concatenated onto the expiry (now + "86400"). Same rule as the
+// Lua twin and auth.login; anything else throws.
+function checkTtl(who, v) {
+    if (!(typeof v === "number" && Number.isFinite(v) && v > 0))
+        throw new TypeError(who + " must be a positive number of seconds");
+    return v;
+}
+
 /**
  * Initialize the `_hull_inbox_processed` SQLite table. Idempotent.
  *
@@ -63,7 +72,7 @@ function checkIdLen(messageId, source) {
  */
 function init(opts) {
     const o = opts || {};
-    if (o.ttl !== undefined) inboxTtl = o.ttl;
+    if (o.ttl !== undefined) inboxTtl = checkTtl("inbox.init: ttl", o.ttl);
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_inbox_processed (" +
@@ -139,7 +148,7 @@ function markProcessed(messageId, source, opts) {
     const o = opts || {};
 
     const now = time.now();
-    const ttl = o.ttl !== undefined ? o.ttl : inboxTtl;
+    const ttl = o.ttl !== undefined ? checkTtl("inbox.markProcessed: ttl", o.ttl) : inboxTtl;
 
     db.upsert(
         "_hull_inbox_processed",
@@ -173,7 +182,7 @@ function checkAndMark(messageId, source, opts) {
     checkIdLen(messageId, source);
     const o = opts || {};
     const now = time.now();
-    const ttl = o.ttl !== undefined ? o.ttl : inboxTtl;
+    const ttl = o.ttl !== undefined ? checkTtl("inbox.checkAndMark: ttl", o.ttl) : inboxTtl;
 
     // A mark that has expired no longer counts: drop it, so the message is
     // new again.

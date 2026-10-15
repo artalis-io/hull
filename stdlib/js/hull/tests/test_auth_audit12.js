@@ -13,6 +13,13 @@
 // the state they read. init refuses email_change_notify without
 // onPasswordReset and enableTotp without totpDisable.
 //
+// Audit 14 (the "a14:" tests): a revoke that lands between the confirm's row
+// write and its address switch wins; the confirm mail to the new address is
+// required (no rate limit, an async emailSend awaited, 503 and no pending row
+// when it cannot be sent); a magic-link sign-in with TOTP records
+// "magic_link+totp"; init refuses counts and durations that are not whole
+// numbers above zero.
+//
 // Runs in the caps-bearing context (run_js_test in
 // tests/hull/runtime/js/test_js.c): auth-flows needs the db.
 
@@ -87,6 +94,9 @@ function init(extra) {
             if (subject === "n" && S.failNotice === "throw") throw new Error("smtp down");
             if (subject === "n" && S.failNotice === "false") return false;
             if (subject === "n" && S.failNotice === "reject") return Promise.reject(new Error("smtp down"));
+            if (subject === "e" && S.failConfirm === "throw") throw new Error("smtp down");
+            if (subject === "e" && S.failConfirm === "false") return false;
+            if (subject === "e" && S.failConfirm === "reject") return Promise.reject(new Error("smtp down"));
             S.sent.push({ to, subject, text });
             return undefined;
         },
@@ -111,6 +121,7 @@ function init(extra) {
         },
         userSetPassword: (id, h) => { S.byId.get(String(id)).password_hash = h; },
         userSetEmail: (id, e) => {
+            if (S.onSetEmail) { const f = S.onSetEmail; S.onSetEmail = null; f(); }
             if (S.failSetEmail === e) throw new Error("duplicate key");
             const u = S.byId.get(String(id));
             S.byEmail.delete(fold(u.email));
@@ -118,7 +129,10 @@ function init(extra) {
             S.byEmail.set(fold(e), u);
         },
         userSetEmailVerified: (id, v) => { S.byId.get(String(id)).email_verified = v; },
-        onLogin: (_req, res) => { res.json({ ok: true }); },
+        onLogin: (_req, res, _user, ctx) => {
+            S.factors = ctx && ctx.factors;
+            res.json({ ok: true });
+        },
         onPasswordReset: () => { S.resets++; S.order.push("sessions"); },
         totpDisable: async (id) => {
             S.totpOff.push(id);
@@ -274,7 +288,8 @@ await test("the recovery lock does not expire; unlockRecovery clears it", async 
     const rtok = await confirmedChange(20, "old20@x.test", "new20@x.test");
     addUser(21, "old20@x.test", "squatter-pw-1", true);
     // The undo writes its lock with an expiry already past.
-    init({ emailChangeTtl: -100 });
+    // (init refuses a ttl <= 0 since audit 14, so set the state directly.)
+    init(); authFlows._test.state.emailChangeTtl = -100;
     let res = mkRes();
     await H.emailChangeRevoke(mkReq({ token: rtok }), res);
     assertEq(res.code, 409, "cannot restore");
@@ -379,6 +394,99 @@ await test("init refuses enableTotp without totpDisable", () => {
                userTotpEnrolled: () => false, totpVerify: () => false });
     } catch (e) { msg = String(e && e.message); }
     assertEq(msg.indexOf("totpDisable") >= 0, true);
+});
+
+// ── Audit 14 ───────────────────────────────────────────────────────
+
+await test("a14: a revoke between the confirm's row write and its switch undoes it", async () => {
+    resetStore(); init();
+    const u = addUser(50, "old50@x.test", "first-password-1", true);
+    let res = await startChange(50, "new50@x.test");
+    assertEq(res.body && res.body.ok, true);
+    const ctok = tokenIn("new50@x.test"), rtok = tokenIn("old50@x.test");
+    // The revoke lands (another instance) after the confirm marked the row
+    // confirmed and before it switched the address.
+    let revoke = null;
+    S.onSetEmail = () => { revoke = H.emailChangeRevoke(mkReq({ token: rtok }), mkRes()); };
+    res = mkRes();
+    await H.emailChangeConfirm(mkReq({ token: ctok }), res);
+    await revoke;
+    assertEq(res.code, 409, "the confirm reports the revoke");
+    assertEq(u.email, "old50@x.test", "the old address is back");
+    assertEq(u.email_verified, true, "with its verified state");
+    S.sent = [];
+    await H.passwordResetRequest(mkReq({ email: "new50@x.test" }), mkRes());
+    assertEq(S.sent.length, 0, "no reset mailed to the revoked address");
+});
+
+await test("a14: a confirmation mail that cannot be sent leaves no pending change", async () => {
+    const modes = ["throw", "false", "reject"];
+    for (let i = 0; i < modes.length; i++) {
+        const mode = modes[i];
+        const uid = 51 + i * 100;
+        const oldAddr = "old" + uid + "@x.test", newAddr = "new" + uid + "@x.test";
+        resetStore(); init();
+        const u = addUser(uid, oldAddr, "first-password-1", true);
+        S.failConfirm = mode;
+        let res = await startChange(uid, newAddr);
+        assertEq(res.code, 503, mode + ": 503");
+        S.failConfirm = null;
+        res = await startChange(uid, newAddr);
+        assertEq(res.body && res.body.ok, true, mode + ": a retry is not blocked");
+        res = mkRes();
+        await H.emailChangeConfirm(mkReq({ token: tokenIn(newAddr) }), res);
+        assertEq(u.email, newAddr, mode + ": the retried change confirms");
+    }
+});
+
+await test("a14: the confirmation mail is not rate limited", async () => {
+    resetStore(); init({ emailRateLimit: { limit: 3, window: 900 } });
+    addUser(52, "old52@x.test", "first-password-1", true);
+    // The new address's bucket is full (mails anyone could have caused).
+    for (let i = 0; i < 3; i++) authFlows._test.emailRateAllow("new52@x.test");
+    assertEq(authFlows._test.emailRateAllow("new52@x.test"), false, "bucket full");
+    S.sent = [];
+    const res = await startChange(52, "new52@x.test");
+    assertEq(res.body && res.body.ok, true);
+    assertEq(sentTo("new52@x.test"), 1, "confirmation sent anyway");
+});
+
+await test("a14: magic link + TOTP records magic_link+totp; password records password+totp", async () => {
+    resetStore();
+    init({ enableTotp: true,
+           userTotpEnrolled: () => true,
+           totpVerify: (_u, code) => code === "123456" });
+    addUser(53, "ml53@x.test", "first-password-1", true);
+    await H.magicLink(mkReq({ email: "ml53@x.test" }), mkRes());
+    let res = mkRes();
+    await H.magicLinkConsume(mkReq({ token: tokenIn("ml53@x.test") }), res);
+    assertEq(res.body && res.body.pending_2fa, true, "second factor asked");
+    S.factors = null;
+    await H.totpVerify(mkReq({ token: res.body.totp_token, code: "123456" }), mkRes());
+    assertEq(S.factors, "magic_link+totp");
+    res = mkRes();
+    await H.login(mkReq({ email: "ml53@x.test", password: "first-password-1" }), res);
+    assertEq(res.body && res.body.pending_2fa, true);
+    S.factors = null;
+    await H.totpVerify(mkReq({ token: res.body.totp_token, code: "123456" }), mkRes());
+    assertEq(S.factors, "password+totp");
+});
+
+await test("a14: init refuses counts and durations that are not whole numbers > 0", () => {
+    for (const k of ["maxFailedLogins", "maxFailedLoginsPerAccount", "lockoutDuration",
+                     "verifyTtl", "resetTtl", "magicLinkTtl", "emailChangeTtl",
+                     "totpPendingTtl"]) {
+        for (const bad of [0, -1, 1.5, NaN, Infinity, "60", true]) {
+            resetStore();
+            let msg = "";
+            try { init({ [k]: bad }); } catch (e) { msg = String(e && e.message); }
+            assertEq(msg.indexOf(k) >= 0, true, k + " = " + String(bad));
+        }
+        resetStore();
+        let ok = true;
+        try { init({ [k]: 7 }); } catch (_e) { ok = false; }
+        assertEq(ok, true, k + " = 7 accepted");
+    }
 });
 
 globalThis.__test_pass = pass;

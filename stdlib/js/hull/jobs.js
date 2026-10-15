@@ -187,12 +187,6 @@ function init(opts) {
         "CREATE INDEX IF NOT EXISTS idx_hull_jobs_throttle " +
         "ON _hull_jobs(queue, type, created_at)");
 
-    // Concurrency reconcile path: running jobs of a key, ranked by claim age.
-    // The claim-then-reconcile rank probe (concApply) scans this.
-    db.exec(
-        "CREATE INDEX IF NOT EXISTS idx_hull_jobs_conc " +
-        "ON _hull_jobs(concurrency_key, status, claimed_at, id)");
-
     // Durable cron schedules (jobs.cron). A worker atomically advances a due
     // row's next_run_at (compare-and-set) and enqueues, so exactly one worker
     // fires each tick across the fleet.
@@ -238,6 +232,14 @@ function init(opts) {
     ensureColumn("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0");
     ensureColumn("_hull_jobs", "claim_started_at", "claim_started_at INTEGER");
     ensureColumn("_hull_cron", "last_error", "last_error TEXT");
+
+    // Concurrency reconcile path: running jobs of a key, ranked by claim age.
+    // The claim-then-reconcile rank probe (concApply) scans this. Created
+    // after the additive migrations (audit 15): concurrency_key is one of
+    // them, and on an older table the index failed before it was added.
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_hull_jobs_conc " +
+        "ON _hull_jobs(concurrency_key, status, claimed_at, id)");
 
     // Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     // `name` (not the reserved word `key`), a window start, and the count.

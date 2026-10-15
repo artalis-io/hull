@@ -71,6 +71,16 @@ local function check_id_len(message_id, source)
     end
 end
 
+-- A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
+-- ("86400") was coerced here while the JS twin concatenated it onto the
+-- expiry. Same rule as the JS twin and auth.login; anything else raises.
+local function check_ttl(who, v)
+    if not (type(v) == "number" and v > 0 and v < math.huge) then
+        error(who .. " must be a positive number of seconds", 3)
+    end
+    return v
+end
+
 --- Initialize the `_hull_inbox_processed` SQLite table.
 --
 -- Idempotent - safe to call on every boot.
@@ -80,9 +90,8 @@ end
 -- @tparam[opt=604800] number opts.ttl  Record lifetime in seconds (default = 7 days).
 function inbox.init(opts)
     opts = opts or {}
-    -- M-2: explicit nil check; opts.ttl == 0 must override the default.
     if opts.ttl ~= nil then
-        _ttl = opts.ttl
+        _ttl = check_ttl("inbox.init: ttl", opts.ttl)
     end
 
     db.exec([[
@@ -160,7 +169,7 @@ function inbox.mark_processed(message_id, source, opts)
     opts = opts or {}
 
     local now = time.now()
-    local ttl = opts.ttl or _ttl
+    local ttl = opts.ttl ~= nil and check_ttl("inbox.mark_processed: ttl", opts.ttl) or _ttl
 
     db.upsert(
         "_hull_inbox_processed",
@@ -189,7 +198,7 @@ function inbox.check_and_mark(message_id, source, opts)
     check_id_len(message_id, source)
     opts = opts or {}
     local now = time.now()
-    local ttl = opts.ttl or _ttl
+    local ttl = opts.ttl ~= nil and check_ttl("inbox.check_and_mark: ttl", opts.ttl) or _ttl
 
     -- A mark that has expired no longer counts: drop it, so the message is
     -- new again.

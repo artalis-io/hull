@@ -137,6 +137,16 @@ local _header_name = "idempotency-key"
 -- Matches the `key` column width (VARCHAR(255)); keys over this are rejected.
 local MAX_KEY_LEN = 255
 
+-- A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
+-- ("86400") was coerced here while the JS twin concatenated it onto the
+-- expiry. Same rule as the JS twin and auth.login; anything else raises.
+local function check_ttl(who, v)
+    if not (type(v) == "number" and v > 0 and v < math.huge) then
+        error(who .. " must be a positive number of seconds", 3)
+    end
+    return v
+end
+
 --- Initialize the `_hull_idempotency_keys` SQLite table.
 --
 -- Idempotent - safe to call on every boot.
@@ -146,9 +156,8 @@ local MAX_KEY_LEN = 255
 -- @tparam[opt=86400] number opts.ttl Key lifetime in seconds.
 function idempotency.init(opts)
     opts = opts or {}
-    -- M-2: explicit nil check; opts.ttl == 0 must override the default.
     if opts.ttl ~= nil then
-        _ttl = opts.ttl
+        _ttl = check_ttl("idempotency.init: ttl", opts.ttl)
     end
 
     db.exec([[
@@ -298,9 +307,7 @@ function idempotency.middleware(opts)
     -- L-3: dropped the leading underscore - Lua convention reserves `_x`
     -- for unused locals; this counter is actively mutated below.
     local cleanup_counter = 0
-    -- `~= nil` (not `or`): a caller's ttl = 0 must override the default, matching
-    -- idempotency.init (Lua 0 is truthy, so `opts.ttl or _ttl` would drop it).
-    local ttl = opts.ttl ~= nil and opts.ttl or _ttl
+    local ttl = opts.ttl ~= nil and check_ttl("idempotency.middleware: ttl", opts.ttl) or _ttl
     local header_name = opts.header_name or _header_name
 
     -- Build methods lookup

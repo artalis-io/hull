@@ -1297,7 +1297,7 @@ function defaultTotpFormHtml(token) {
 
 // JSON (login, a JSON magic-link POST), or for a browser (`asPage`: the
 // magic-link page's form) an HTML form or redirect.
-function startTotpPending(req, res, user, asPage) {
+function startTotpPending(req, res, user, asPage, firstFactor) {
     const uid = userId(user);
     // Bound to the password (and address) the first factor was checked
     // against, as a reset token is (audit 9; see the Lua sibling): a pending
@@ -1305,7 +1305,10 @@ function startTotpPending(req, res, user, asPage) {
     const current = typeof user.email === "string" ? findByEmail(user.email) : null;
     const token = issueToken(uid, ACTIONS.totp_pending,
                               _state.totpPendingTtl,
-                              { pwb: passwordBinding(current || user) });
+                              { pwb: passwordBinding(current || user),
+                                // The first factor this sign-in passed
+                                // (audit 14), recorded with the second.
+                                ff: firstFactor });
     if (!asPage) {
         return res.json({
             ok: true, pending_2fa: true, totp_token: token,
@@ -1372,7 +1375,7 @@ function handleLogin(req, res) {
         const enrolled = totpEnrolled(user);
         if (enrolled === null)
             return res.status(500).json({ error: "auth-flows misconfigured" });
-        if (enrolled) return startTotpPending(req, res, user);
+        if (enrolled) return startTotpPending(req, res, user, false, "password");
     }
     return finishLogin(req, res, user, "password");
 }
@@ -1512,7 +1515,7 @@ function handleMagicLinkConsume(req, res) {
         const enrolled = totpEnrolled(user);
         if (enrolled === null)
             return res.status(500).json({ error: "auth-flows misconfigured" });
-        if (enrolled) return startTotpPending(req, res, user, !wantsJson(req));
+        if (enrolled) return startTotpPending(req, res, user, !wantsJson(req), "magic_link");
     }
     return finishLogin(req, res, user, "magic_link");
 }
@@ -1562,7 +1565,11 @@ function handleTotpVerify(req, res) {
         return res.status(400).json({ error: "totp token already used" });
     }
     gcExpired();
-    return finishLogin(req, res, user, "password+totp");
+    // The first factor is the one the pending token was issued after (audit
+    // 14: a magic-link sign-in was recorded as "password+totp"); a token from
+    // before it was carried came from the password path.
+    const first = env.ff === "magic_link" ? "magic_link" : "password";
+    return finishLogin(req, res, user, first + "+totp");
 }
 
 function handlePasswordResetRequest(req, res) {
@@ -1765,14 +1772,25 @@ async function handleEmailChange(req, res) {
     }
     const link = origin + _state.prefix
         + "/email-change/confirm?token=" + token;
-    // A failure leaves no pending row behind (it would block a retry).
+    // Like the notice, the confirmation is required (audit 14): it skips the
+    // per-recipient rate limit (which dropped it silently, answering ok while
+    // the pending row blocked a retry for emailChangeTtl), an async emailSend
+    // is awaited, and when it cannot be sent (a throw, a rejection, false)
+    // the row goes and the request answers 503.
     try {
-        sendEmail(body.new_email, "email_change", {
+        let sent = sendEmail(body.new_email, "email_change", {
             user, link, token, new_email: body.new_email,
-        });
+        }, true);
+        if (sent && typeof sent.then === "function") sent = await sent;
+        if (sent === false) throw new Error("emailSend returned false");
     } catch (e) {
         dropRow();
-        throw e;
+        log.warn("auth-flows: email change of account " + String(uid)
+            + " not started: the confirmation to the new address could not "
+            + "be sent: " + String(e && e.message || e));
+        return res.status(503).json({
+            error: "could not send the confirmation to the new address; email change not started",
+        });
     }
     res.json({ ok: true });
 }
@@ -1968,11 +1986,12 @@ function handleEmailChangeConfirm(req, res) {
     // acted on only when it changed the row; if the switch then fails, the
     // row is deleted (its link is already consumed), not put back to pending.
     const keep = !!_state.templates.email_change_notify;
+    const oldVerified = keep ? oldVerifiedState(user) : null;
     const n = keep
         ? db.exec("UPDATE _hull_auth_pending_email_changes "
                   + "SET confirmed_at = ?, old_email = ?, old_verified = ? "
                   + "WHERE user_id = ? AND token_hash = ? AND confirmed_at IS NULL",
-                  [time.now(), oldEmail, oldVerifiedState(user), key, th])
+                  [time.now(), oldEmail, oldVerified, key, th])
         : db.exec("DELETE FROM _hull_auth_pending_email_changes "
                   + "WHERE user_id = ? AND token_hash = ? AND confirmed_at IS NULL",
                   [key, th]);
@@ -1987,6 +2006,41 @@ function handleEmailChangeConfirm(req, res) {
         throw e;
     }
     setEmailVerified(env.sub, true);
+    // A revoke that ran between the row write above and the switch (audit
+    // 14; see the Lua sibling) restored nothing - the account was still on
+    // its old address - and the switch then moved it anyway. So the row is
+    // read again AFTER the switch: when it is no longer this change's
+    // confirmed row, a revoke undid the change, and the confirm puts the old
+    // address (and its verified state) back itself.
+    if (keep) {
+        const rows = db.query(
+            "SELECT token_hash FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+            [key]);
+        const cur = rows && rows[0];
+        if (cur && cur.token_hash === UNDONE_LOCKED_MARK) {
+            // The revoke found the old address taken and locked recovery.
+            return verifyFail(req, res, 409, "email change failed: it was revoked");
+        }
+        if (!(cur && typeof cur.token_hash === "string"
+              && crypto.constantTimeEq(cur.token_hash, th))) {
+            try {
+                setEmail(env.sub, oldEmail);
+                setEmailVerified(env.sub, oldVerified === 1);
+            } catch (e) {
+                // The old address cannot be put back: lock self-service
+                // recovery, as the revoke does when it cannot restore.
+                log.warn("auth-flows: email change of account " + String(env.sub)
+                    + " was revoked while it was being confirmed and its previous "
+                    + "address could not be restored: " + String(e && e.message || e)
+                    + "; self-service recovery locked - restore the account by hand, "
+                    + "then call authFlows.unlockRecovery(userId)");
+                db.exec("UPDATE _hull_auth_pending_email_changes SET token_hash = ?, "
+                    + "new_email = ? WHERE user_id = ? AND token_hash = ?",
+                    [UNDONE_LOCKED_MARK, env.new_email, key, UNDONE_MARK]);
+            }
+            return verifyFail(req, res, 409, "email change failed: it was revoked");
+        }
+    }
     emitEvent(env.sub, "email_changed", req,
               { metadata: { old_email: oldEmail, new_email: env.new_email } });
     return verifyOk(req, res);
@@ -2284,6 +2338,19 @@ function init(opts) {
         if (typeof opts.totpVerify !== "function") {
             throw new Error("auth-flows.init: totpVerify(user, code) -> "
                 + "boolean required when enableTotp = true");
+        }
+    }
+    // Counts and durations must be whole numbers above zero (audit 14):
+    // maxFailedLogins: 0 fell back to 5 through `||`, NaN turned the lockout
+    // off, and a string ttl concatenated onto the expiry. Same rule as the
+    // Lua twin; undefined / null keeps the default.
+    for (const k of ["maxFailedLogins", "maxFailedLoginsPerAccount",
+                     "lockoutDuration", "verifyTtl", "resetTtl",
+                     "magicLinkTtl", "emailChangeTtl", "totpPendingTtl"]) {
+        const v = opts[k];
+        if (v !== undefined && v !== null && !(Number.isInteger(v) && v > 0)) {
+            throw new Error("auth-flows.init: " + k + " must be a whole number > 0 (got "
+                + String(v) + ")");
         }
     }
 

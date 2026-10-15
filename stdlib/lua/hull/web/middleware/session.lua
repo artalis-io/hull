@@ -42,6 +42,17 @@ local _cleanup_scheduled = false
 -- evade the device-list / new-device audit trail.
 local _trust_proxy = false
 
+-- A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
+-- ("86400") was coerced here while the JS twin concatenated it onto the
+-- expiry, and a NaN one never expired. One rule for both runtimes (and
+-- auth.login); anything else raises.
+local function check_ttl(who, v)
+    if not (type(v) == "number" and v > 0 and v < math.huge) then
+        error(who .. " must be a positive number of seconds", 3)
+    end
+    return v
+end
+
 --- Initialize the sessions table.
 --
 -- Creates the `_hull_sessions` table if absent and sets the module-level
@@ -70,42 +81,24 @@ local _trust_proxy = false
 -- session.init({ ttl = 7 * 24 * 3600 })  -- 1 week
 function session.init(opts)
     opts = opts or {}
-    -- M-2: explicit nil check; `if opts.ttl then` would override the
-    -- default even when the caller passes ttl=0 (0 is truthy in Lua).
     if opts.ttl ~= nil then
-        _ttl = opts.ttl
+        _ttl = check_ttl("session.init: ttl", opts.ttl)
     end
     _trust_proxy = opts.trust_proxy == true
     -- absolute_ttl:
     --   * nil    → keep module default (24h).
     --   * false  → disabled (the canonical opt-out - apps that
     --              intentionally want forever-sessions stay loud).
-    --   * <= 0   → disabled WITH a one-shot warn. Lua 0 is truthy,
-    --              so pre-round-9 `0` slipped through and the check
-    --              `created_at + 0 <= now` killed every session on
-    --              load. JS 0 is falsy, so the same value silently
-    --              disabled. Round-9 HIGH-3 makes both runtimes
-    --              treat any non-positive number the same way.
-    --   * > 0    → hard cap in seconds.
+    --   * > 0    → hard cap in seconds (a finite number).
+    --   * anything else (0, a negative, NaN, math.huge, a string) raises
+    --              (audit 15; before, a non-positive or non-finite number
+    --              disabled the cap with a warn, and a string was taken).
     if opts.absolute_ttl ~= nil then
         if opts.absolute_ttl == false then
             _absolute_ttl = nil
-        elseif type(opts.absolute_ttl) == "number"
-               and (opts.absolute_ttl <= 0
-                    or opts.absolute_ttl ~= opts.absolute_ttl  -- NaN
-                    or opts.absolute_ttl == math.huge) then
-            -- Round-10 MEDIUM-8: NaN and math.huge slipped through
-            -- the `<= 0` check (NaN comparisons are always false,
-            -- math.huge is positive). Stored value would then make
-            -- `created_at + value <= now` always false → cap silently
-            -- disabled. Reject non-finite explicitly with a warn.
-            local log = require("hull.log")
-            log.warn("session.init: absolute_ttl must be finite > 0; "
-                  .. "use `false` for the explicit opt-out so the "
-                  .. "intent is loud.")
-            _absolute_ttl = nil
         else
-            _absolute_ttl = opts.absolute_ttl
+            _absolute_ttl = check_ttl("session.init: absolute_ttl (or false)",
+                                      opts.absolute_ttl)
         end
     end
 
@@ -206,10 +199,9 @@ end
 function session.create(data, opts)
     local id = generate_id()
     local now = time.now()
-    -- Explicit nil check (not `or`): a caller-supplied ttl = 0 is legal and
-    -- must not be silently replaced by the default. Matches session.init and
-    -- the JS sibling. (In Lua 0 is truthy, so `x and 0 or d` keeps the 0.)
-    local ttl = (opts and opts.ttl ~= nil) and opts.ttl or _ttl
+    -- A caller ttl is checked (check_ttl); nil keeps the default.
+    local ttl = (opts and opts.ttl ~= nil)
+                and check_ttl("session.create: ttl", opts.ttl) or _ttl
     local encoded = json.encode(data or {})
 
     -- Capture device columns for hull/web/middleware/audit-log
@@ -314,10 +306,8 @@ function session.load(session_id, opts)
 
     -- Update last_accessed and extend expiry: by the caller's ttl, else the
     -- session's own (create's), else the module TTL.
-    -- Explicit nil check (not `or`): a caller-supplied ttl = 0 is legal and
-    -- must not be silently replaced by the default. Matches session.init and
-    -- the JS sibling. (In Lua 0 is truthy, so `x and 0 or d` keeps the 0.)
-    local ttl = (opts and opts.ttl ~= nil) and opts.ttl
+    -- A caller ttl is checked (check_ttl); nil keeps the default.
+    local ttl = (opts and opts.ttl ~= nil) and check_ttl("session.load: ttl", opts.ttl)
                 or (type(row.ttl) == "number" and row.ttl) or _ttl
     db.exec(
         "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
@@ -346,10 +336,9 @@ function session.update(session_id, data, opts)
     end
 
     local now = time.now()
-    -- Explicit nil check (not `or`): a caller-supplied ttl = 0 is legal and
-    -- must not be silently replaced by the default. Matches session.init and
-    -- the JS sibling. (In Lua 0 is truthy, so `x and 0 or d` keeps the 0.)
-    local ttl = (opts and opts.ttl ~= nil) and opts.ttl or _ttl
+    -- A caller ttl is checked (check_ttl); nil keeps the default.
+    local ttl = (opts and opts.ttl ~= nil)
+                and check_ttl("session.update: ttl", opts.ttl) or _ttl
     local encoded = json.encode(data or {})
 
     -- AND expires_at > ? prevents reviving a session that the user

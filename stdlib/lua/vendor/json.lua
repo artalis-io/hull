@@ -113,7 +113,18 @@ local function encode_number(val)
   if val ~= val or val <= -math.huge or val >= math.huge then
     error("unexpected number value '" .. tostring(val) .. "'")
   end
-  return string.format("%.14g", val)
+  -- HULL PATCH (audit 15): "%.14g" rounded every number to 14 significant
+  -- digits, so an integer id of 1e14 or more (a snowflake) came back as a
+  -- different number. Integers are written exactly; a float is written with
+  -- the fewest digits (15..17) that read back as the same value.
+  if math.type(val) == "integer" then
+    return string.format("%d", val)
+  end
+  for digits = 15, 16 do
+    local s = string.format("%." .. digits .. "g", val)
+    if tonumber(s) == val then return s end
+  end
+  return string.format("%.17g", val)
 end
 
 

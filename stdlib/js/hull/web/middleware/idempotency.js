@@ -110,6 +110,15 @@ function isReplayableHeader(name) {
     return false;
 }
 
+// A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
+// ("86400") concatenated onto the expiry (now + "86400"). Same rule as the
+// Lua twin and auth.login; anything else throws.
+function checkTtl(who, v) {
+    if (!(typeof v === "number" && Number.isFinite(v) && v > 0))
+        throw new TypeError(who + " must be a positive number of seconds");
+    return v;
+}
+
 /**
  * Initialize the `_hull_idempotency_keys` SQLite table. Idempotent.
  *
@@ -118,7 +127,7 @@ function isReplayableHeader(name) {
  */
 function init(opts) {
     const o = opts || {};
-    if (o.ttl !== undefined) idemTtl = o.ttl;
+    if (o.ttl !== undefined) idemTtl = checkTtl("idempotency.init: ttl", o.ttl);
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_idempotency_keys (" +
@@ -258,7 +267,7 @@ function middleware(opts) {
         return p;
     };
 
-    const ttl = o.ttl !== undefined ? o.ttl : idemTtl;
+    const ttl = o.ttl !== undefined ? checkTtl("idempotency.middleware: ttl", o.ttl) : idemTtl;
     const headerName = o.headerName || HEADER_NAME;
 
     const methodList = o.methods || ["POST"];

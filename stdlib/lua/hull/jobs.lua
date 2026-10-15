@@ -216,13 +216,6 @@ function jobs.init(opts)
         ON _hull_jobs(queue, type, created_at)
     ]])
 
-    -- Concurrency reconcile path: running jobs of a key, ranked by claim age.
-    -- The claim-then-reconcile rank probe (conc_apply) scans this.
-    db.exec([[
-        CREATE INDEX IF NOT EXISTS idx_hull_jobs_conc
-        ON _hull_jobs(concurrency_key, status, claimed_at, id)
-    ]])
-
     -- Durable cron schedules (jobs.cron). A worker atomically advances a due
     -- row's next_run_at (compare-and-set) and enqueues, so exactly one worker
     -- fires each tick across the fleet.
@@ -262,7 +255,13 @@ function jobs.init(opts)
         -- (a rolling deploy on Postgres / MySQL): both see the column
         -- missing, and the second ALTER fails on a duplicate column. That
         -- failure is fine when the column now exists (audit 11).
-        local ok, err = pcall(db.exec, "ALTER TABLE " .. tbl .. " ADD COLUMN " .. coldef)
+        -- Called through a closure, not pcall(db.exec, ...) (audit 15): the
+        -- _hull_* namespace check reads the CALLER's frame, and pcall itself
+        -- (a C function) is not a stdlib chunk, so the ALTER was refused and
+        -- jobs.init failed on every database from before these columns.
+        local ok, err = pcall(function()
+            db.exec("ALTER TABLE " .. tbl .. " ADD COLUMN " .. coldef)
+        end)
         if not ok and not has_column(tbl, col) then error(err, 0) end
     end
     ensure_column("_hull_jobs", "progress", "progress INTEGER NOT NULL DEFAULT 0")
@@ -273,6 +272,15 @@ function jobs.init(opts)
     ensure_column("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0")
     ensure_column("_hull_jobs", "claim_started_at", "claim_started_at INTEGER")
     ensure_column("_hull_cron", "last_error", "last_error TEXT")
+
+    -- Concurrency reconcile path: running jobs of a key, ranked by claim age.
+    -- The claim-then-reconcile rank probe (conc_apply) scans this. Created
+    -- after the additive migrations (audit 15): concurrency_key is one of
+    -- them, and on an older table the index failed before it was added.
+    db.exec([[
+        CREATE INDEX IF NOT EXISTS idx_hull_jobs_conc
+        ON _hull_jobs(concurrency_key, status, claimed_at, id)
+    ]])
 
     -- Fleet-wide rate-limit counters (jobs.limit). One row per limited queue;
     -- `name` (not the reserved word `key`), a window start, and the count.

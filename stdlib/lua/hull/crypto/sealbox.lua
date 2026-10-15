@@ -17,9 +17,10 @@
 -- open: a value sealed for one key name cannot be moved to another and still
 -- open. The JS module (hull:crypto:sealbox) produces the same bytes.
 --
--- Whether a context was used is not itself recorded (TOTP's rows predate
--- contexts and must keep opening), so give a keyring one use: either always
--- with a context (hull.kv) or never (TOTP), not both.
+-- Whether a context was used is not itself recorded, so seal with a context
+-- (hull.kv: namespace and key; TOTP: "totp" and the account, since audit 15).
+-- TOTP still opens its older rows sealed with none, as a fallback after the
+-- bound open fails, and re-seals them bound.
 --
 -- Keys are 32 random bytes, grouped in a keyring:
 --

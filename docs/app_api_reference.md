@@ -343,6 +343,14 @@ Authy, 1Password - supports).
   - `opts.encryption_key` - optional 32-byte string. When set,
     secrets are NaCl-secretbox-encrypted at rest with a fresh nonce
     per enrollment. Caller manages the key (env, fs.read, etc.).
+    Each sealed secret is bound to its account (sealbox context
+    `{"totp", user_id}`, audit 15), so a secret copied into another
+    account's row does not open there. Rows sealed before, without that
+    binding, still open and are re-sealed bound on the account's next
+    successful verify or by `totp.rekey()`.
+  - `opts.lockout_duration_per_ip` (`lockoutDurationPerIp`) must be a
+    positive number of seconds; anything else (a string, `0`, NaN) makes
+    `init` raise (audit 15).
 - `totp.enroll(user_id)` → `{ secret_base32, otpauth_url, qr_svg,
   recovery_codes }`. Recovery codes are returned ONCE; only PBKDF2
   hashes persist. Re-enrolling overwrites - intentional, it's the
@@ -393,6 +401,13 @@ verify step between successful first-factor auth and `on_login` when
     DB-backend-agnostic (works on whatever backend `hull/db` is
     wired to). Apps with a custom schema either pass the 6
     callbacks directly or post-process the adapter table.
+    **The adapter runs on the stdlib's internal connection** (audit 15):
+    it reads and writes the users table through `databases.internal`
+    when the manifest declares one (the same connection as the
+    `_hull_*` tables), and through the default connection otherwise. So
+    with `databases.internal` declared, the users table must live in the
+    internal database - or pass the six `user_*` callbacks yourself,
+    querying `db.default()` (`require("hull.db").default()`).
     `user_find_by_email` must return `password_hash` (login and the
     verify step read the hash through it); `user_get` need not, and an
     account whose hash cannot be read that way is treated as having a
@@ -454,6 +469,11 @@ verify step between successful first-factor auth and `on_login` when
     regardless of whether the email exists.
   - `opts.verify_ttl` (86400s), `opts.reset_ttl` (3600s),
     `opts.magic_link_ttl` (600s), `opts.email_change_ttl` (86400s).
+    These, `totp_pending_ttl`, `max_failed_logins`,
+    `max_failed_logins_per_account` and `lockout_duration` must be
+    whole numbers above zero (audit 14): `init` raises otherwise (a `0`
+    count locked every address out after two tries in Lua and fell back
+    to the default in JS; NaN turned the lockout off).
   - `opts.prefix` (default `"/auth"`).
   - Emailed links need an origin: `opts.public_origin` (one canonical
     URL), or `opts.trusted_hosts` (the request's Host must match an entry
@@ -474,6 +494,10 @@ verify step between successful first-factor auth and `on_login` when
     accepts both 6-digit and recovery codes.
   - `opts.totp_pending_ttl` (default `300`). Lifetime of the pending-
     2FA token issued between first-factor success and `/totp-verify`.
+    The token carries the first factor, so `on_login` receives
+    `factors = "magic_link+totp"` for a magic-link sign-in and
+    `"password+totp"` for a password one (audit 14: both were recorded
+    as `"password+totp"`).
   - `opts.totp_pending_redirect`. When set, magic-link sign-ins (the
     page's form POST) that require 2FA redirect to
     `<redirect>?token=<totp_token>` instead of rendering the module's
@@ -543,8 +567,16 @@ verify step between successful first-factor auth and `on_login` when
       Promise that rejects, which is awaited; the template fails; the account
       has no address - the change is not started: no pending row is left and
       the request answers 503 (`{error = "could not notify the current
-      address; email change not started"}`). A failing confirm mail to the
-      new address likewise leaves no pending row. Clicking it (and submitting the
+      address; email change not started"}`). The confirm mail to the new
+      address is held to the same rule (audit 14): it skips the rate limit
+      (which dropped it silently while the request answered ok and the
+      pending row blocked a retry), an async `emailSend` is awaited, and
+      when it cannot be sent no pending row is left and the request answers
+      503 (`{error = "could not send the confirmation to the new address;
+      email change not started"}`). A revoke that lands while the change is
+      being confirmed (between the confirm's row write and its address
+      switch) wins: the confirm sees the row undone after the switch, puts
+      the old address back and answers 409. Clicking it (and submitting the
       page it opens, `/email-change/revoke?token=…`) cancels the change
       while it is pending, and **after it was confirmed restores the old
       address** (the row keeps it until the link expires,
@@ -795,14 +827,15 @@ verify step between successful first-factor auth and `on_login` when
     whose `email_change_ttl` had not passed stays until
     `unlock_recovery`; one already reaped is gone.
   - An email change whose notice cannot be sent answers 503 and starts
-    nothing (it used to start, and the notice could be lost).
+    nothing (it used to start, and the notice could be lost). Since audit
+    14 the same holds for its confirm mail to the new address.
   - Rows already in `_hull_auth_pending_email_changes` carry over;
     `old_verified = 2` (unknown) is new and is held like `1`.
 - Email-change flow re-verifies on the NEW address - old email stays
   active until the user clicks the link sent to the new one.
 
 **session**. Server-side sessions backed by SQLite. Requires `session.init()` at startup.
-- `session.init(opts)`. Creates `hull_sessions` table; runs PRAGMA-checked additive migrations (adds `user_id`, `ip`, `user_agent` columns for the device-management helpers). `opts.ttl` = lifetime in seconds (default: `86400`).
+- `session.init(opts)`. Creates `hull_sessions` table; runs PRAGMA-checked additive migrations (adds `user_id`, `ip`, `user_agent` columns for the device-management helpers). `opts.ttl` = lifetime in seconds (default: `86400`). A ttl - `opts.ttl`, `opts.absolute_ttl` (`absoluteTtl`, or `false` to turn the cap off) and the per-call `{ ttl }` of `create` / `load` / `update` - must be a positive, finite number in both runtimes; anything else (a string such as `"86400"`, `0`, NaN, infinity) raises (audit 15: JS concatenated a string onto the expiry, Lua coerced it, and an invalid `absolute_ttl` used to turn the cap off with a warning).
 - `session.create(data, opts?)` → 64-char hex session ID. `opts.req` lets it capture ip + ua + user_id columns at create time. `data.user_id` is auto-populated into the column.
 - `session.load(session_id)` → data table or nil. Auto-extends expiry.
 - `session.update(session_id, data)`. Updates session data.
@@ -814,7 +847,7 @@ verify step between successful first-factor auth and `on_login` when
 
 **The `on_login(req, res, user, ctx?)` contract.** Both `hull/web/auth-flows` and `hull/web/middleware/oauth` hand off through this single shape. Guarantees:
 - `user` is the **app's** user object (whatever `find_user` / `standard_users` / a custom adapter produced). `user.id` MUST be a non-empty string - `session.login_handler` enforces it and throws otherwise. `user.email` is conventionally present but not required.
-- `ctx` is `nil` for the simplest call sites, or a table carrying source-specific metadata. auth-flows passes `{ factors = "password" | "magic_link" | "password+totp" }`. oauth passes `{ provider, claims, tokens }` (the IdP claims + raw tokens, for apps that want to capture them).
+- `ctx` is `nil` for the simplest call sites, or a table carrying source-specific metadata. auth-flows passes `{ factors = "password" | "magic_link" | "password+totp" | "magic_link+totp" }`. oauth passes `{ provider, claims, tokens }` (the IdP claims + raw tokens, for apps that want to capture them).
 - Returning a string overrides the post-login redirect target (oauth honors this; auth-flows uses the redirect from `login_redirect` opt).
 - `on_logout(req, res)` is the matching shape - no `user` arg because the session row is the source of truth there.
 
@@ -896,7 +929,7 @@ verify step between successful first-factor auth and `on_login` when
 - `transaction.try(fn)` → `(ok, err)`. Like `run` but returns error instead of throwing.
 
 **idempotency**. Idempotency-Key middleware with response caching.
-- `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`).
+- `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`); it and the middleware's own `opts.ttl` must be a positive, finite number, or they raise (audit 15).
 - `idempotency.middleware(opts)`. Post-body middleware intercepting POST (configurable via `opts.methods`).
   - `opts.header_name`. Header to read key from (default: `"idempotency-key"`).
   - `opts.get_principal`. `function(req) -> string|number` for per-user scoping. Whatever it (or the default) returns is stored as text (audit 10): `nil` / `false` / `""` is `"__anon"`, a number its decimal string (a number reached MySQL's VARCHAR column as a number, which compared it numerically), a principal over 255 characters - or one already spelled `sha256:...` - becomes `"sha256:" ..` the hex SHA-256 of itself (it failed the insert, or a lax MySQL truncated it so two principals shared keys), and any other type (a table / object, a Promise) is an error. Default: `"session:" ..` the session's `user_id`, else `"user:" ..` the JWT user's `sub` / `id` / `user_id`, else `"__anon"` (shared by every anonymous caller: mount the middleware after authentication; it logs a warning once when 20 keyed requests in a row were anonymous). A **custom** `get_principal` that returns `nil` / `false` / `""` (JS: `null` / `undefined` / `false` / `""`) no longer shares `"__anon"` (audit 11): that request skips the idempotency layer - the handler runs, nothing is stored or replayed - and a warning is logged once per middleware. A lookup that failed must not let every caller it could not identify replay each other's responses; return `"__anon"` explicitly to share one scope. Session principals were the bare `user_id` before audit 9, so a session user whose id read `user:5` shared JWT user 5's keys; a key stored for a session user before the upgrade is not replayed after it (it simply expires).
@@ -934,7 +967,7 @@ verify step between successful first-factor auth and `on_login` when
 - `outbox.cleanup(max_age)`. Delete old delivered items.
 
 **inbox**. Inbox deduplication for incoming events/webhooks.
-- `inbox.init(opts)`. Creates `_hull_inbox_processed` table. `opts.ttl` = record lifetime (default: `86400`).
+- `inbox.init(opts)`. Creates `_hull_inbox_processed` table. `opts.ttl` = record lifetime (default: `86400`); it and the per-call `{ ttl }` of `mark_processed` / `check_and_mark` must be a positive, finite number, or they raise (audit 15).
 - `inbox.is_duplicate(message_id, source?)` → boolean. Default source: `"default"`. `message_id` and `source` are strings or integers (an integer is stored as its decimal string, so `42` and `"42"` are the same source); any other type, or one over 255 characters, raises (audit 10 added the check for `source`).
 - `inbox.mark_processed(message_id, source?, opts?)`. Record as processed.
 - `inbox.check_and_mark(message_id, source?, opts?)` → boolean (true = duplicate, false = new + marked).

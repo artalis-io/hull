@@ -13,6 +13,12 @@
 -- init refuses email_change_notify without on_password_reset and enable_totp
 -- without totp_disable.
 --
+-- Audit 14 (the "a14:" tests): a revoke that lands between the confirm's row
+-- write and its address switch wins; the confirm mail to the new address is
+-- required (no rate limit, 503 and no pending row when it cannot be sent); a
+-- magic-link sign-in with TOTP records "magic_link+totp"; init refuses counts
+-- and durations that are not whole numbers above zero.
+--
 -- Runs in the caps-bearing state (run_lua_test_in_runtime in
 -- tests/hull/runtime/lua/test_lua.c): auth-flows needs the db.
 
@@ -91,6 +97,8 @@ local function init(extra)
         email_send = function(to, subject, _html, text)
             if subject == "n" and S.fail_notice == "throw" then error("smtp down") end
             if subject == "n" and S.fail_notice == "false" then return false end
+            if subject == "e" and S.fail_confirm == "throw" then error("smtp down") end
+            if subject == "e" and S.fail_confirm == "false" then return false end
             S.sent[#S.sent + 1] = { to = to, subject = subject, text = text }
         end,
         templates = {
@@ -114,6 +122,7 @@ local function init(extra)
         end,
         user_set_password = function(id, h) S.by_id[tostring(id)].password_hash = h end,
         user_set_email = function(id, e)
+            if S.on_set_email then local f = S.on_set_email; S.on_set_email = nil; f() end
             if S.fail_set_email == e then error("duplicate key") end
             local u = S.by_id[tostring(id)]
             S.by_email[fold(u.email)] = nil
@@ -121,7 +130,10 @@ local function init(extra)
             S.by_email[fold(e)] = u
         end,
         user_set_email_verified = function(id, v) S.by_id[tostring(id)].email_verified = v end,
-        on_login = function(_req, res) res:json({ ok = true }) end,
+        on_login = function(_req, res, _user, ctx)
+            S.factors = ctx and ctx.factors
+            res:json({ ok = true })
+        end,
         on_password_reset = function()
             S.resets = S.resets + 1
             S.order[#S.order + 1] = "sessions"
@@ -284,7 +296,8 @@ test("the recovery lock does not expire; unlock_recovery clears it", function()
     local rtok = confirmed_change(20, "old20@x.test", "new20@x.test")
     add_user(21, "old20@x.test", "squatter-pw-1", true)
     -- The undo writes its lock with an expiry already past.
-    init({ email_change_ttl = -100 })
+    -- (init refuses a ttl <= 0 since audit 14, so set the state directly.)
+    init(); af._test.state.email_change_ttl = -100
     local res = mkres()
     H.email_change_revoke(mkreq({ token = rtok }), res)
     assert_eq(res.code, 409, "cannot restore")
@@ -389,6 +402,97 @@ test("init refuses enable_totp without totp_disable", function()
                                   totp_verify = function() return false end })
     assert_eq(ok, false)
     assert_eq(tostring(err):find("totp_disable", 1, true) ~= nil, true)
+end)
+
+-- ── Audit 14 ───────────────────────────────────────────────────────
+
+test("a14: a revoke between the confirm's row write and its switch undoes it", function()
+    reset_store(); init()
+    local u = add_user(50, "old50@x.test", "first-password-1", true)
+    local res = start_change(50, "new50@x.test")
+    assert_eq(res.body and res.body.ok, true)
+    local ctok, rtok = token_in("new50@x.test"), token_in("old50@x.test")
+    -- The revoke lands (another instance) after the confirm marked the row
+    -- confirmed and before it switched the address.
+    S.on_set_email = function()
+        H.email_change_revoke(mkreq({ token = rtok }), mkres())
+    end
+    res = mkres()
+    H.email_change_confirm(mkreq({ token = ctok }), res)
+    assert_eq(res.code, 409, "the confirm reports the revoke")
+    assert_eq(u.email, "old50@x.test", "the old address is back")
+    assert_eq(u.email_verified, true, "with its verified state")
+    S.sent = {}
+    H.password_reset_request(mkreq({ email = "new50@x.test" }), mkres())
+    assert_eq(#S.sent, 0, "no reset mailed to the revoked address")
+end)
+
+test("a14: a confirmation mail that cannot be sent leaves no pending change", function()
+    for i, mode in ipairs({ "throw", "false" }) do
+        local uid = 51 + (i - 1) * 100
+        local old_addr, new_addr = "old" .. uid .. "@x.test", "new" .. uid .. "@x.test"
+        reset_store(); init()
+        local u = add_user(uid, old_addr, "first-password-1", true)
+        S.fail_confirm = mode
+        local res = start_change(uid, new_addr)
+        assert_eq(res.code, 503, mode .. ": 503")
+        S.fail_confirm = nil
+        res = start_change(uid, new_addr)
+        assert_eq(res.body and res.body.ok, true, mode .. ": a retry is not blocked")
+        res = mkres()
+        H.email_change_confirm(mkreq({ token = token_in(new_addr) }), res)
+        assert_eq(u.email, new_addr, mode .. ": the retried change confirms")
+    end
+end)
+
+test("a14: the confirmation mail is not rate limited", function()
+    reset_store(); init({ email_rate_limit = { limit = 3, window = 900 } })
+    add_user(52, "old52@x.test", "first-password-1", true)
+    -- The new address's bucket is full (mails anyone could have caused).
+    for _ = 1, 3 do af._test.email_rate_allow("new52@x.test") end
+    assert_eq(af._test.email_rate_allow("new52@x.test"), false, "bucket full")
+    S.sent = {}
+    local res = start_change(52, "new52@x.test")
+    assert_eq(res.body and res.body.ok, true)
+    assert_eq(sent_to("new52@x.test"), 1, "confirmation sent anyway")
+end)
+
+test("a14: magic link + TOTP records magic_link+totp; password records password+totp", function()
+    reset_store()
+    init({ enable_totp = true, magic_link_auto_signup = false,
+           user_totp_enrolled = function() return true end,
+           totp_verify = function(_u, code) return code == "123456" end })
+    add_user(53, "ml53@x.test", "first-password-1", true)
+    H.magic_link(mkreq({ email = "ml53@x.test" }), mkres())
+    local mtok = token_in("ml53@x.test")
+    local res = mkres()
+    H.magic_link_consume(mkreq({ token = mtok }), res)
+    assert_eq(res.body and res.body.pending_2fa, true, "second factor asked")
+    local ptok = res.body.totp_token
+    S.factors = nil
+    H.totp_verify(mkreq({ token = ptok, code = "123456" }), mkres())
+    assert_eq(S.factors, "magic_link+totp")
+    res = mkres()
+    H.login(mkreq({ email = "ml53@x.test", password = "first-password-1" }), res)
+    assert_eq(res.body and res.body.pending_2fa, true)
+    S.factors = nil
+    H.totp_verify(mkreq({ token = res.body.totp_token, code = "123456" }), mkres())
+    assert_eq(S.factors, "password+totp")
+end)
+
+test("a14: init refuses counts and durations that are not whole numbers > 0", function()
+    for _, k in ipairs({ "max_failed_logins", "max_failed_logins_per_account",
+                         "lockout_duration", "verify_ttl", "reset_ttl",
+                         "magic_link_ttl", "email_change_ttl", "totp_pending_ttl" }) do
+        for _, bad in ipairs({ 0, -1, 1.5, 0/0, math.huge, "60", true }) do
+            reset_store()
+            local ok, err = pcall(init, { [k] = bad })
+            assert_eq(ok, false, k .. " = " .. tostring(bad))
+            assert_eq(tostring(err):find(k, 1, true) ~= nil, true, "names " .. k)
+        end
+        reset_store()
+        assert_eq((pcall(init, { [k] = 7 })), true, k .. " = 7 accepted")
+    end
 end)
 
 print(string.format("auth audit 12: %d passed, %d failed", pass, fail))
