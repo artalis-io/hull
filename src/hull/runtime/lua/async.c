@@ -502,10 +502,12 @@ int hl_lua_can_wait(lua_State *L)
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
+    if (!lua || !lua_isyieldable(L) || L != lua->active_co)
+        return 0;
+    const char *txn = hl_db_registry_open_txn(lua->base.db_registry);
     /* Always NULL only in a DB-less build (the inline stub). */
     // cppcheck-suppress knownConditionTrueFalse
-    return lua && lua_isyieldable(L) && L == lua->active_co &&
-           !hl_db_registry_open_txn(lua->base.db_registry);
+    return txn == NULL;
 }
 
 int hl_lua_check_can_wait(lua_State *L, const char *what)
