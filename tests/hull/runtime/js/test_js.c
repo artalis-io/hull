@@ -9641,6 +9641,38 @@ UTEST(js_audit15, tar_is_capped_at_the_heap_and_charged)
     a15_fs_close(&f);
 }
 
+/* tar.extract wrote every entry to disk with no charge: an archive of any
+ * size (a MappedBuffer of up to 1 GiB) cost a handful of steps. Each entry
+ * is charged before it is written now, as fs.write is (audit 16). */
+UTEST(js_audit16, tar_extract_is_charged_per_entry)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { tar } from 'hull:archive:tar';\n"
+        "globalThis.tar = tar;\n"
+        "const mb = new ArrayBuffer(1024 * 1024);\n"
+        "globalThis.TB = tar.create(Array.from({ length: 8 },"
+        " (_, i) => ({ name: 'f' + (i + 1), data: mb })));\n", 0), 0);
+    /* 8 MB to write: ~1M units; each 1 MB entry is 131073, so the budget
+     * runs out at the fourth entry, before it is written. */
+    EXPECT_EQ(a10_run_tripped("tar.extract(TB, 'out');", 500000), 1);
+    char p[HL_TEST_PATH_MAX + 32];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/out/f1", f.dir);
+    EXPECT_EQ(0, stat(p, &st));
+    snprintf(p, sizeof p, "%s/out/f8", f.dir);
+    EXPECT_NE(0, stat(p, &st));
+    EXPECT_EQ(eval_int("tar.extract(TB, 'out2') === true ? 1 : 0"), 1);
+    snprintf(p, sizeof p, "%s/out2/f8", f.dir);
+    EXPECT_EQ(0, stat(p, &st));
+    EXPECT_EQ(eval_int("(globalThis.TB = undefined, 1)"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* ── Audit 14: SSE and WebSocket writes are charged ────────────────────
  *

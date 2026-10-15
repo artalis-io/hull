@@ -16,6 +16,7 @@
 #include "utest.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_duckdb.h"
+#include "hull/cap/db_budget.h"
 #include "hull/cap/types.h"
 
 #include <string.h>
@@ -168,6 +169,50 @@ UTEST(db_duckdb, transaction_commit_and_rollback)
     ASSERT_EQ(hl_db_query(&h, "SELECT COUNT(*) FROM tx", NULL, 0, count_cb, &n, NULL), 0);
     ASSERT_EQ(n, 1);
 
+    h.backend->close(&h);
+}
+
+/* A budget that is always over: every charge (and every 0-unit ask) trips. */
+static int always_tripped(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return 1;
+}
+
+/* The rollback Hull runs (a failed batch, the end of a db.async op) runs
+ * unbound, as SQLite's does: charged to the tripped budget of the run it
+ * cleans up after, it was interrupted and the transaction stayed open. And a
+ * ROLLBACK that did not run leaves the transaction tracked as open
+ * (audit 16). */
+UTEST(db_duckdb, rollback_runs_after_the_budget_tripped)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE tr (v INTEGER)", NULL, 0), 0);
+    HlValue v = { .type = HL_TYPE_INT, .i = 7 };
+    ASSERT_EQ(hl_db_begin(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h, "INSERT INTO tr VALUES (?)", &v, 1), 0);
+    EXPECT_TRUE(hl_db_in_txn(&h));
+
+    HlDbBudgetBinding prev = hl_db_budget_swap(always_tripped, NULL);
+    /* The app's own ROLLBACK is charged: if the trip stopped it, it ended
+     * nothing. */
+    if (hl_db_exec(&h, "ROLLBACK", NULL, 0) != 0) {
+        EXPECT_TRUE(hl_db_in_txn(&h));
+        EXPECT_EQ(0, hl_db_rollback(&h));
+    }
+    EXPECT_FALSE(hl_db_in_txn(&h));
+    hl_db_budget_restore(prev);
+    ASSERT_EQ(hl_db_begin(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h, "INSERT INTO tr VALUES (?)", &v, 1), 0);
+    prev = hl_db_budget_swap(always_tripped, NULL);
+    EXPECT_EQ(0, hl_db_rollback(&h));
+    EXPECT_FALSE(hl_db_in_txn(&h));
+    hl_db_budget_restore(prev);
+
+    int64_t n = -1;
+    ASSERT_EQ(hl_db_query(&h, "SELECT COUNT(*) FROM tr", NULL, 0, count_cb, &n, NULL), 0);
+    EXPECT_EQ(n, 0);
     h.backend->close(&h);
 }
 

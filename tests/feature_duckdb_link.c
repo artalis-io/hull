@@ -21,15 +21,29 @@
 #include "hull/cap/db_duckdb.h"
 #include <stdio.h>
 
-/* The archive's one reference into the base: duck_execute charges each DuckDB
- * task to the run's budget (cap/db_common.c, audit 15). A composed app gets
- * the real hl_db_budget_charge from the platform lib (tests/
- * e2e_feature_duckdb.sh exercises it); this smoke links the archive alone, so
- * it stands in with "no budget bound" - never an interrupt. */
+/* The archive's references into the base: duck_execute charges each DuckDB
+ * task to the run's budget (cap/db_common.c, audit 15), and duck_rollback
+ * runs unbound (audit 16). A composed app gets the real budget functions
+ * from the platform lib (tests/e2e_feature_duckdb.sh exercises them); this
+ * smoke links the archive alone, so they stand in with "no budget bound" -
+ * never an interrupt. */
 int hl_db_budget_charge(int64_t units)
 {
     (void)units;
     return 0;
+}
+
+HlDbBudgetBinding hl_db_budget_swap(HlDbBudgetFn fn, void *ud)
+{
+    (void)fn;
+    (void)ud;
+    HlDbBudgetBinding none = {0};
+    return none;
+}
+
+void hl_db_budget_restore(HlDbBudgetBinding prev)
+{
+    (void)prev;
 }
 
 int main(void)

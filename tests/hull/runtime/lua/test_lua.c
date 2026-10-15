@@ -10606,6 +10606,41 @@ UTEST(lua_audit15, tar_is_capped_at_the_heap_and_charged)
     a15_fs_close(&f);
 }
 
+/* tar.extract wrote every entry to disk with no charge: an archive of any
+ * size (a MappedBuffer of up to 1 GiB) cost a handful of instructions. Each
+ * entry is charged before it is written now, as fs.write is (audit 16). */
+UTEST(lua_audit16, tar_extract_is_charged_per_entry)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run("tar = require('hull.archive.tar') "
+                          "local mb = string.rep('m', 1024 * 1024) "
+                          "local e = {} for i = 1, 8 do e[i] = { name = 'f' .. i, data = mb } end "
+                          "TB = tar.create(e) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 8 MB to write: ~1M units; each 1 MB entry is 131073, so the budget
+     * runs out at the fourth entry, before it is written. */
+    EXPECT_NE(audit10_run("tar.extract(TB, 'out') return 1",
+                          500000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    char p[HL_TEST_PATH_MAX + 32];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/out/f1", f.dir);
+    EXPECT_EQ(0, stat(p, &st));
+    snprintf(p, sizeof p, "%s/out/f8", f.dir);
+    EXPECT_NE(0, stat(p, &st));
+    EXPECT_EQ(audit10_run("assert(tar.extract(TB, 'out2') == true) "
+                          "TB = nil return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    snprintf(p, sizeof p, "%s/out2/f8", f.dir);
+    EXPECT_EQ(0, stat(p, &st));
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* ── Audit 14: SSE and WebSocket writes are charged ────────────────────
  *

@@ -13,7 +13,7 @@
 #include "hull/cap/db_sql_kw.h"
 #include "hull/cap/db.h"
 #include "hull/cap/types.h"
-#include "hull/worker_db.h"     /* hl_worker_db_notify_timeout */
+#include "hull/worker_db.h"     /* hl_worker_db_notify_timeout, _materialize */
 #include <sqlite3.h>
 #include <math.h>
 #include <string.h>
@@ -99,6 +99,112 @@ UTEST(db_backend, notify_timeout_is_clamped)
     EXPECT_EQ(HL_WORKER_DB_NOTIFY_MAX_MS, hl_worker_db_notify_timeout(2147483647.0));
     EXPECT_EQ(HL_WORKER_DB_NOTIFY_MAX_MS, hl_worker_db_notify_timeout(4294967301.0));
     EXPECT_EQ(HL_WORKER_DB_NOTIFY_MAX_MS, hl_worker_db_notify_timeout(1e300));
+}
+
+/* ── Audit 16: a refused db.async result stops the reply ───────────── */
+
+/* A network backend's reply loop, as pg_conn.c / mysql_conn.c run it: a row
+ * callback's stop only stops the copy - the rest of the reply is still read -
+ * while a tripped budget abandons the connection at the next row. */
+typedef struct {
+    int rows_total;   /* rows the "server" sends */
+    int width_from;   /* from this row on, rows are 2 columns wide (0: never) */
+    int rows_read;
+    int abandoned;
+} DrainCtx;
+
+static DrainCtx drain;
+
+static int drain_query(HlDbHandle *h, const char *sql,
+                       const HlValue *params, int nparams,
+                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
+{
+    (void)h; (void)sql; (void)params; (void)nparams; (void)alloc;
+    static char big[4096];
+    memset(big, 'x', sizeof big);
+    int stop = 0;
+    for (int i = 0; i < drain.rows_total; i++) {
+        if (hl_db_budget_charge(0) != 0) { drain.abandoned = 1; return -1; }
+        drain.rows_read++;
+        HlColumn cols[2];
+        memset(cols, 0, sizeof cols);
+        cols[0].name = "v";
+        cols[0].value.type = HL_TYPE_TEXT;
+        cols[0].value.s = big;
+        cols[0].value.len = sizeof big;
+        cols[1].name = "w";
+        cols[1].value.type = HL_TYPE_INT;
+        int ncols = (drain.width_from && i >= drain.width_from) ? 2 : 1;
+        if (!stop && cb(cb_ctx, cols, ncols) != 0) stop = 1;  /* keep draining */
+    }
+    return 0;
+}
+
+static const char *drain_errmsg(HlDbHandle *h)
+{
+    (void)h;
+    return "drain error";
+}
+
+static const HlDbBackend drain_backend = {
+    .name   = "drain",
+    .query  = drain_query,
+    .errmsg = drain_errmsg,
+};
+
+static int drain_materialize(HlDbOpBudget *b, size_t max_bytes,
+                             char *err, size_t errsz)
+{
+    HlDbHandle h = {0};
+    h.backend = &drain_backend;
+    HlDbResult r;
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, b);
+    int rc = hl_worker_db_materialize(&h, "SELECT", NULL, 0, max_bytes, b,
+                                      &r, err, errsz);
+    hl_db_budget_restore(prev);
+    hl_db_result_free(&r);
+    return rc;
+}
+
+/* A result over its cap failed the op but the backend read every remaining
+ * row of the reply, uncharged and with no deadline (audit 16). */
+UTEST(db_backend, an_oversized_async_result_abandons_the_reply)
+{
+    memset(&drain, 0, sizeof drain);
+    drain.rows_total = 100000;
+    HlDbOpBudget b = { 0, 0, 0 };   /* no instruction limit at all */
+    char err[256] = {0};
+    EXPECT_EQ(-2, drain_materialize(&b, 64 * 1024, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "result too large") != NULL);
+    EXPECT_TRUE(b.tripped);
+    EXPECT_TRUE(drain.abandoned);
+    EXPECT_LT(drain.rows_read, 100);
+}
+
+UTEST(db_backend, a_ragged_async_result_abandons_the_reply)
+{
+    memset(&drain, 0, sizeof drain);
+    drain.rows_total = 100000;
+    drain.width_from = 3;
+    HlDbOpBudget b = { 0, 0, 0 };
+    char err[256] = {0};
+    EXPECT_EQ(-2, drain_materialize(&b, 0, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "differ in column count") != NULL);
+    EXPECT_TRUE(drain.abandoned);
+    EXPECT_EQ(4, drain.rows_read);
+}
+
+/* Under the cap the whole reply is read and copied, and nothing trips. */
+UTEST(db_backend, an_async_result_under_the_cap_is_copied)
+{
+    memset(&drain, 0, sizeof drain);
+    drain.rows_total = 10;
+    HlDbOpBudget b = { 0, 0, 0 };
+    char err[256] = {0};
+    EXPECT_EQ(0, drain_materialize(&b, 0, err, sizeof err));
+    EXPECT_FALSE(b.tripped);
+    EXPECT_FALSE(drain.abandoned);
+    EXPECT_EQ(10, drain.rows_read);
 }
 
 UTEST(db_backend, sqlite_exec_via_vtable)

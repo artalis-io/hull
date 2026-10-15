@@ -69,7 +69,9 @@ and a batch that raises rolls back everything it wrote, nested batches
 included. A `db.async.query` result is copied on the worker thread before it
 reaches the VM, so it is held to the submitting VM's heap limit (and at most
 256 MB): a bigger one fails with `result too large`, and the copy is charged to
-the op's instruction budget (audit 15).
+the op's instruction budget (audit 15). The rest of such a reply is not read: a
+Postgres / MySQL connection is closed at the next row and reopened by the next
+call (audit 16).
 
 **`conn.wait_notify(channel, timeout_ms)`** (`conn.waitNotify`) parks on the
 `db.async` pool until a Postgres `NOTIFY` on `channel` (`true`) or the timeout
@@ -1074,7 +1076,9 @@ extractor. `parse`/`create`/`extract` accept any buffer type (string /
 - `tar.extract(bytes, dest_dir)` -> `true` | `nil, err` (JS: throws on error).
   Writes each member under `dest_dir` via the fs capability (needs
   `manifest.fs.write`). Directory entries are skipped (file writes create their
-  parents; empty dirs are dropped).
+  parents; empty dirs are dropped). Each member is charged to the instruction
+  budget before it is written, as `fs.write` is (1 unit per 8 bytes, plus 1
+  per member; audit 16).
 - `tar.pack(files)` -> archive bytes. `files` is an array of path strings or
   `{ path, name? }` tables; each is read via the fs capability (needs
   `manifest.fs.read`) and added as a member (name defaults to the path).
