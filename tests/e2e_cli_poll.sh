@@ -42,10 +42,6 @@ for mode in resolve reject; do
 done
 for ext in lua js; do
     rc=$(hull_run "$out" "$HULL_BIN" "tests/fixtures/cli_poll/unawaited.$ext")
-    if [ "$rc" != 0 ] && command -v gdb >/dev/null 2>&1; then
-        gdb -q -batch -ex run -ex "thread apply all bt 20" --args \
-            "$HULL_BIN" --no-sandbox "tests/fixtures/cli_poll/unawaited.$ext" 2>&1 | tail -120 || true
-    fi
     [ "$rc" = 0 ] || fail "$ext unawaited work: exit $rc, expected 0 (134 = QuickJS abort)"
     grep -q '^poll-cli: left work behind' "$out" || fail "$ext main did not finish"
     echo "PASS: $ext main returning with unawaited dispatch / db.async / sleep tears down cleanly"
