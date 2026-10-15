@@ -35,7 +35,7 @@ static size_t resolve_chunk_size(const HlStreamOpts *opts)
 }
 
 static int grow_output_buf(uint8_t **buf, size_t *cap, size_t needed,
-                            HlAllocator *alloc)
+                            size_t limit, HlAllocator *alloc)
 {
     size_t new_cap = *cap;
     while (new_cap < needed) {
@@ -43,6 +43,9 @@ static int grow_output_buf(uint8_t **buf, size_t *cap, size_t needed,
         if (doubled < new_cap) return -1; /* overflow */
         new_cap = doubled;
     }
+    /* Doubling past the output cap would reserve up to twice it. */
+    if (limit && new_cap > limit && needed <= limit)
+        new_cap = limit;
     if (new_cap == *cap) return 0;
 
     uint8_t *nb = hl_alloc_realloc(alloc, *buf, *cap, new_cap);
@@ -222,6 +225,16 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
             }
         }
 
+        /* The caller's per-chunk check (budget + run deadline): the chunk
+         * loop is one binding call, so without it a stream of many chunks
+         * held the event loop for as long as UINT32_MAX chunk timeouts. */
+        if (opts && opts->before_chunk &&
+            opts->before_chunk(this_len, opts->before_chunk_ud) != 0) {
+            rc = HL_WASM_ERR_INTERNAL;
+            if (err_msg) *err_msg = "stopped";
+            break;
+        }
+
         int is_first = (ci == 0);
         int is_last  = (in_total == 0) || (offset + this_len >= in_total);
 
@@ -248,8 +261,20 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
         /* Route output chunk */
         if (chunk_out && chunk_out_len > 0) {
             if (!output || output->kind == HL_STREAM_OUT_BUFFER) {
+                /* The whole output is handed to the script in one piece, so
+                 * it may not outgrow the VM heap it lands in: it was grown
+                 * without bound, off-heap unless the process has a cap. */
+                if (opts && opts->max_output &&
+                    chunk_out_len > opts->max_output - out_buf_len) {
+                    rc = HL_WASM_ERR_INTERNAL;
+                    if (err_msg) *err_msg = "output_too_large";
+                    hl_alloc_free(alloc, chunk_out, chunk_out_len);
+                    break;
+                }
                 if (grow_output_buf(&out_buf, &out_buf_cap,
-                                     out_buf_len + chunk_out_len, alloc) != 0) {
+                                     out_buf_len + chunk_out_len,
+                                     opts ? opts->max_output : 0,
+                                     alloc) != 0) {
                     rc = HL_WASM_ERR_INTERNAL;
                     if (err_msg) *err_msg = "alloc_failed";
                     hl_alloc_free(alloc, chunk_out, chunk_out_len);

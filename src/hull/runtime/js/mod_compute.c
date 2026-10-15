@@ -1386,6 +1386,28 @@ static int js_stream_cb_trampoline(const void *data, size_t len,
     return 0;
 }
 
+/* Per-chunk charge (audit 15): a stream runs every chunk inside this one
+ * binding call, each with its own gas and timeout, so the run's budget and
+ * deadline were never consulted - a stream of many chunks held the event
+ * loop for hours. 1 unit per chunk plus 1 per 64 input bytes; over the
+ * budget (or past the deadline) the uncatchable trip is left pending and the
+ * stream stops before the chunk runs. */
+typedef struct {
+    JSContext *ctx;
+    int        tripped;
+} JsStreamBudget;
+
+static int js_stream_before_chunk(size_t chunk_len, void *user_data)
+{
+    JsStreamBudget *b = (JsStreamBudget *)user_data;
+    if (b->tripped) return 1;
+    if (hl_js_budget_charge(b->ctx, 1 + (uint64_t)chunk_len / 64) < 0) {
+        b->tripped = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* Release compute.stream's parsed arguments (every path out after parsing). */
 static void js_stream_free_args(JSContext *ctx, JsStreamCbCtx *cb,
                                 int has_output, HlStreamOutKind out_kind,
@@ -1511,6 +1533,11 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     }
 
     js_wasm_clamp_opts(&stream_opts.call_opts, &js->base);
+    JsStreamBudget stream_budget = { ctx, 0 };
+    stream_opts.before_chunk = js_stream_before_chunk;
+    stream_opts.before_chunk_ud = &stream_budget;
+    /* The buffer-mode result becomes one ArrayBuffer on the VM heap. */
+    stream_opts.max_output = js->max_heap_bytes;
 
     /* ── Resolve the input buffer (after output + opts) ──────────── */
     /* Resolved after the output's and the options' getters (app code), and
@@ -1598,6 +1625,11 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
      * and an app's own error into "callback_failed". */
     if (cb_ctx.error)
         return JS_EXCEPTION;
+    /* The per-chunk charge tripped the budget: its interrupt is pending. */
+    if (stream_budget.tripped) {
+        if (out_data) hl_alloc_free(js->base.alloc, out_data, out_len);
+        return JS_EXCEPTION;
+    }
     if (rc != HL_WASM_OK)
         return JS_ThrowInternalError(ctx, "compute.stream: %s",
                                      err ? err : "stream_failed");

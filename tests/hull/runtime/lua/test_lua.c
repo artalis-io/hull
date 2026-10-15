@@ -38,6 +38,9 @@
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/env.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm.h"   /* HlWasmCache (lua_audit15 compute.stream) */
+#endif
 #include "hull/cap/tool.h"          /* HlToolUnveilCtx (tool-VM sandbox test) */
 
 #include "lua.h"
@@ -10205,6 +10208,111 @@ UTEST(lua_run_watchdog, zero_disables_it)
     EXPECT_EQ(hl_run_watchdog_parse_ms("12x", &v), -1);
     EXPECT_EQ(hl_run_watchdog_parse_ms("", &v), -1);
 }
+
+#ifdef HL_ENABLE_WASM
+/* ── Audit 15: compute.stream chunks are charged to the run ───────────
+ *
+ * compute.stream ran every chunk inside one binding call, each with its own
+ * gas and timeout, and charged nothing to the run: a stream of many chunks
+ * held the event loop for as long as UINT32_MAX chunk timeouts. Each chunk
+ * is charged now (1 unit + 1 per 64 input bytes) and the binding raises the
+ * trip once the stream is down. */
+
+/* echo.wasm (tests/hull/cap/test_wasm.c): copies its input to its output. */
+static const unsigned char a15_echo_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+  0x28, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73,
+  0x69, 0x6f, 0x6e, 0x00, 0x02, 0x0a, 0x20, 0x02, 0x19, 0x00, 0x20, 0x01,
+  0x20, 0x03, 0x4b, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x20,
+  0x00, 0x20, 0x01, 0xfc, 0x0a, 0x00, 0x00, 0x20, 0x01, 0x0b, 0x04, 0x00,
+  0x41, 0x01, 0x0b
+};
+static const HlEntry a15_wasm_entries[] = {
+    { "compute/echo.wasm", a15_echo_wasm, sizeof a15_echo_wasm },
+    { 0, 0, 0 }
+};
+
+/* 1 MB in 256-byte chunks is 4096 chunks: 20480 units charged per chunk,
+ * against 16384 for the 1 MB result string. Under an 18500 limit the stream
+ * is stopped part-way (unfixed, it ran to the end, the result fit the limit,
+ * and `after` was set). Under the default limit it completes. */
+UTEST(lua_audit15, compute_stream_chunks_are_charged_to_the_run)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a15_wasm_entries, NULL);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    ASSERT_EQ(luaL_dostring(v.L, "compute = require('hull.compute') "
+                                 "ab = string.rep('a', 1 << 20)"), LUA_OK);
+
+    int64_t saved = v.max_instructions;
+    v.max_instructions = 18500;
+    HL_LUA_ARM(&v, v.L);
+    int rc = luaL_dostring(v.L,
+        "compute.stream('echo', ab, { chunk_size = 256 }) after = 1");
+    EXPECT_NE(rc, LUA_OK);
+    const char *e = lua_tostring(v.L, -1);
+    EXPECT_TRUE(e && strstr(e, "instruction limit exceeded") != NULL);
+    if (e && !strstr(e, "instruction limit exceeded")) printf("  got: %s\n", e);
+    lua_settop(v.L, 0);
+    EXPECT_EQ(lua_getglobal(v.L, "after"), LUA_TNIL);
+    lua_settop(v.L, 0);
+
+    v.max_instructions = saved;
+    HL_LUA_ARM(&v, v.L);
+    EXPECT_EQ(luaL_dostring(v.L,
+        "local s = compute.stream('echo', ab, { chunk_size = 256 }) "
+        "assert(#s == 1 << 20)"), LUA_OK);
+
+    hl_lua_free(&v);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Buffer-mode output is capped at what is left of the VM heap: it was grown
+ * off-heap without bound, then copied into the heap in one piece (unfixed,
+ * the 5 MB result was built off-heap and only the push failed). */
+UTEST(lua_audit15, compute_stream_output_is_capped_at_the_heap_limit)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a15_wasm_entries, NULL);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_heap_bytes = 8 * 1024 * 1024;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    int rc = luaL_dostring(v.L,
+        "local compute = require('hull.compute') "
+        "local ab = string.rep('a', 5 * 1024 * 1024) "
+        "local s, err = compute.stream('echo', ab, { chunk_size = 65536 }) "
+        "assert(s == nil and err == 'output_too_large', tostring(err))");
+    EXPECT_EQ(rc, LUA_OK);
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(v.L, -1);
+        printf("  got: %s\n", e ? e : "?");
+    }
+
+    hl_lua_free(&v);
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
 
 /* A VM freed while its deadline is pending: the watchdog must never write to
  * the freed watch (ASan reports it if it does). */

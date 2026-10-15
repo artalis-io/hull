@@ -73,7 +73,10 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
 
     /* For a single segment, no chaining needed - just create the heap */
     if (sd->count == 1) {
-        if (sd->segments[0].alloc_size == 0) return -1;
+        if (sd->segments[0].alloc_size == 0) {
+            sd->chain_head = NULL;
+            return -1;
+        }
         sd->segments[0].wasm_addr = addr_ceil - sd->segments[0].alloc_size + 1;
         sd->chain_head = sd->segments[0].shared_heap;
         return 0;
@@ -270,6 +273,35 @@ int hl_cap_wasm_data_load_pinned(HlWasmCache *cache, const char *module_name,
     return rc;
 }
 
+/* An add/replace failed before its segment went in: free a shared_data that
+ * holds no segment (one this call allocated), so the module is back to "no
+ * segments" rather than an empty table. */
+static void drop_if_empty(HlWasmModule *mod)
+{
+    if (mod->shared_data && mod->shared_data->count == 0) {
+        free(mod->shared_data);
+        mod->shared_data = NULL;
+    }
+}
+
+/* Destroy a heap data_load_impl created but could not put in a slot. It was
+ * never attached or chained, so the destroy is expected to succeed; if WAMR
+ * still refuses it, the descriptor stays live and references `backing`, so the
+ * backing is leaked (and a zero-copy pin kept, via *kept) rather than freed
+ * under it - the retain rule of hl_wasm_free_segment. */
+static void discard_new_heap(wasm_shared_heap_t heap, void *backing,
+                             size_t alloc_size, int is_mmap, int *kept)
+{
+    if (!wasm_runtime_destroy_shared_heap(heap)) {
+        log_error("[wasm] new segment heap destroy failed; retaining its backing");
+        if (is_mmap)
+            *kept = 1;
+        return;
+    }
+    if (!is_mmap)
+        munmap(backing, alloc_size);
+}
+
 static int data_load_impl(HlWasmCache *cache, const char *module_name,
                           const char *segment_name,
                           const void *data, size_t data_len,
@@ -282,6 +314,7 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
     static const char *err_not_found = "not_found";
     static const char *err_too_many  = "too_many_segments";
     static const char *err_too_large = "data_too_large";
+    static const char *err_seg_large = "segment_too_large";
     static const char *err_bad_name  = "segment_name_too_long";
     static const char *err_busy      = "async_calls_in_flight";
     static const char *err_in_use    = "segments_in_use";
@@ -446,6 +479,25 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
         return -1;
     }
 
+    /* WAMR requires pre_allocated_addr regions to be page-aligned in size.
+     * If pre_alloc is provided but data_len is not page-aligned, we copy
+     * into a new page-aligned mmap region (not zero-copy in that case). */
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) page_size = 4096;
+    size_t alloc_size = (data_len + (size_t)page_size - 1) & ~((size_t)page_size - 1);
+    if (alloc_size == 0) alloc_size = (size_t)page_size;
+
+    /* One segment is one WAMR shared heap, and WAMR refuses a heap larger
+     * than APP_HEAP_SIZE_MAX (1 GiB) - deterministically, for any data that
+     * size (a 1.5 GB fs.mmap). Refuse it here, before anything is touched
+     * (audit 15): the 3 GB HL_WASM_MAX_SHARED_DATA total spans several
+     * segments, never one. */
+    if (alloc_size > HL_WASM_MAX_SEGMENT_SIZE) {
+        pthread_mutex_unlock(&mod->mutex);
+        if (err_msg) *err_msg = err_seg_large;
+        return -1;
+    }
+
     /* Allocate shared_data struct if needed */
     if (!mod->shared_data) {
         mod->shared_data = calloc(1, sizeof(HlWasmSharedData));
@@ -483,78 +535,38 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
             total += sd->segments[i].size;
     }
     if (total > HL_WASM_MAX_SHARED_DATA) {
+        drop_if_empty(mod);
         pthread_mutex_unlock(&mod->mutex);
         if (err_msg) *err_msg = err_too_large;
         return -1;
     }
 
-    /* Unchain existing chain before modifying (the pool was drained above). */
-    if (sd->chain_head && sd->count > 1) {
-        wasm_runtime_unchain_shared_heaps(
-            (wasm_shared_heap_t)sd->chain_head, true);
-        sd->chain_head = NULL;
-    }
-
-    /* Free old segment at slot if replacing (destroys its heap; detached above).
-     * If the descriptor cannot be destroyed it is RETAINED live -- abort the
-     * replace rather than overwrite the slot, which would strand the old
-     * descriptor on WAMR's list pointing at soon-to-be-freed backing. Re-chain the
-     * retained segments and report failure so the binding keeps the old pin. */
-    if (slot < sd->count && sd->segments[slot].shared_heap) {
-        if (hl_wasm_free_segment(&sd->segments[slot]) != 0) {
-            hl_wasm_rebuild_chain(mod);
-            pthread_mutex_unlock(&mod->mutex);
-            if (err_msg) *err_msg = err_internal;
-            return -1;
-        }
-    }
-
-    /* Create backing memory.
-     * WAMR requires pre_allocated_addr regions to be page-aligned in size.
-     * If pre_alloc is provided but data_len is not page-aligned, we copy
-     * into a new page-aligned mmap region (not zero-copy in that case). */
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) page_size = 4096;
-    size_t alloc_size = (data_len + (size_t)page_size - 1) & ~((size_t)page_size - 1);
-    if (alloc_size == 0) alloc_size = (size_t)page_size;
-
+    /* Build the NEW segment's backing and heap before the old one (if any) is
+     * touched (audit 15). A replace used to free the old segment first, so
+     * a failure here returned with the slot hollow - and, for a lone
+     * segment, chain_head still naming the freed heap, which the next call
+     * attached. Every failure below now leaves the old segments exactly as
+     * they were. */
     void *backing = NULL;
     int is_mmap_backing = 0;
-    if (pre_alloc) {
-        if (data_len == alloc_size) {
-            backing = pre_alloc;
-            is_mmap_backing = 1;
-        } else {
-            backing = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (backing == MAP_FAILED) {
-                pthread_mutex_unlock(&mod->mutex);
-                if (err_msg) *err_msg = err_internal;
-                return -1;
-            }
-            memcpy(backing, pre_alloc, data_len);
-            is_mmap_backing = 0;
-        }
+    if (pre_alloc && data_len == alloc_size) {
+        backing = pre_alloc;
+        is_mmap_backing = 1;
     } else {
         backing = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (backing == MAP_FAILED) {
+            drop_if_empty(mod);
             pthread_mutex_unlock(&mod->mutex);
             if (err_msg) *err_msg = err_internal;
             return -1;
         }
-        memcpy(backing, data, data_len);
+        memcpy(backing, pre_alloc ? pre_alloc : data, data_len);
     }
 
     /* Create WAMR shared heap with pre-allocated backing.
-     * SharedHeapInitArgs.size is uint32_t - guard against overflow. */
-    if (alloc_size > UINT32_MAX) {
-        if (!is_mmap_backing)
-            munmap(backing, alloc_size);
-        pthread_mutex_unlock(&mod->mutex);
-        if (err_msg) *err_msg = err_too_large;
-        return -1;
-    }
+     * SharedHeapInitArgs.size is uint32_t; the segment cap above keeps
+     * alloc_size well inside it. */
     SharedHeapInitArgs heap_args;
     memset(&heap_args, 0, sizeof(heap_args));
     heap_args.size = (uint32_t)alloc_size;
@@ -570,11 +582,35 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
     if (!heap) {
         if (!is_mmap_backing)
             munmap(backing, alloc_size);
+        drop_if_empty(mod);
         pthread_mutex_unlock(&mod->mutex);
         if (err_msg) *err_msg = err_internal;
         log_error("[wasm] failed to create shared heap for segment '%s' (%zu bytes)",
                   segment_name, data_len);
         return -1;
+    }
+
+    /* The new heap exists. Unchain the current chain (the pool was drained
+     * above) so every old heap is standalone, and forget the head: for a
+     * lone segment it IS that segment's heap, which a replace destroys next. */
+    if (sd->chain_head && sd->count > 1)
+        wasm_runtime_unchain_shared_heaps(
+            (wasm_shared_heap_t)sd->chain_head, true);
+    sd->chain_head = NULL;
+
+    /* Free the old segment at slot if replacing. If its descriptor cannot be
+     * destroyed it is RETAINED live -- abort the replace rather than overwrite
+     * the slot, which would strand the old descriptor on WAMR's list pointing
+     * at soon-to-be-freed backing. Drop the new heap, re-chain the retained
+     * segments and report failure so the binding keeps the old pin. */
+    if (slot < sd->count && sd->segments[slot].shared_heap) {
+        if (hl_wasm_free_segment(&sd->segments[slot]) != 0) {
+            discard_new_heap(heap, backing, alloc_size, is_mmap_backing, kept);
+            hl_wasm_rebuild_chain(mod);
+            pthread_mutex_unlock(&mod->mutex);
+            if (err_msg) *err_msg = err_internal;
+            return -1;
+        }
     }
 
     /* Fill segment slot */
@@ -597,24 +633,26 @@ static int data_load_impl(HlWasmCache *cache, const char *module_name,
     int chain_rc = hl_wasm_rebuild_chain(mod);
 
     if (chain_rc != 0) {
-        /* Rollback: destroy the segment we just added. If its descriptor cannot be
-         * destroyed (retained -> non-zero), keep the slot so nothing frees the
-         * backing the live descriptor still references; only drop the slot on a
-         * clean destroy. */
+        /* Rollback: destroy the segment we just put in (a failed rebuild
+         * leaves every heap standalone). If its descriptor cannot be destroyed
+         * (retained -> non-zero), keep the slot so nothing frees the backing
+         * the live descriptor still references; on a clean destroy drop the
+         * slot and close the gap - a replace's old segment is already gone,
+         * so the name is simply not loaded any more, never a hollow slot. */
         if (hl_wasm_free_segment(seg) == 0) {
-            if (slot == sd->count - 1)
-                sd->count--;
-            if (sd->count == 0) {
-                free(sd);
-                mod->shared_data = NULL;
-            }
+            for (int j = slot; j < sd->count - 1; j++)
+                sd->segments[j] = sd->segments[j + 1];
+            sd->count--;
+            memset(&sd->segments[sd->count], 0, sizeof(HlWasmDataSegment));
         }
         /* Re-chain the segments that survive: the failed rebuild left
          * chain_head NULL over them - the broken-chain marker - so every new
          * instance failed segment_attach_failed until all were removed and
-         * re-added. (The case-3 replace abort above already does this.) */
-        if (mod->shared_data && mod->shared_data->count > 0)
+         * re-added. */
+        if (sd->count > 0)
             hl_wasm_rebuild_chain(mod);
+        else
+            drop_if_empty(mod);
         pthread_mutex_unlock(&mod->mutex);
         if (err_msg) *err_msg = err_internal;
         return -1;

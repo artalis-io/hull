@@ -60,9 +60,21 @@ typedef struct {
 
 /* ── Options ──────────────────────────────────────────────────────── */
 
+/* Called before each chunk with that chunk's input length. Nonzero stops
+ * the stream (it fails "stopped") before the chunk runs. The bindings charge
+ * the run's instruction budget here and check its wall-clock deadline: each
+ * chunk has its own gas and timeout_ms, and a stream runs up to UINT32_MAX
+ * chunks inside one binding call, where no script instruction is counted
+ * (audit 15). */
+typedef int (*HlStreamBeforeChunkFn)(size_t chunk_len, void *user_data);
+
 typedef struct {
     size_t          chunk_size;  /* 0 = default (64 KB) */
     HlWasmCallOpts  call_opts;   /* per-chunk gas, heap, stack */
+    HlStreamBeforeChunkFn before_chunk;   /* NULL = none */
+    void           *before_chunk_ud;
+    size_t          max_output;  /* buffer-mode output cap (bytes); 0 = none.
+                                  * Past it the stream fails "output_too_large". */
 } HlStreamOpts;
 
 /* ── Result ───────────────────────────────────────────────────────── */
