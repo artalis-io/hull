@@ -600,6 +600,10 @@ static JSValue js_blob_get(JSContext *ctx, JSValueConst this_val,
     int track = read_track_access(ctx, argc, argv, 1);
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js) {   /* get_store found one, so never; checked once, here */
+        JS_FreeCString(ctx, id);
+        return JS_ThrowInternalError(ctx, "blob.get: no runtime");
+    }
     uint8_t *buf = NULL;
     size_t len = 0;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
@@ -614,7 +618,7 @@ static JSValue js_blob_get(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, id);
         return JS_NULL;
     }
-    size_t heap_max = js ? js->max_heap_bytes : 0;
+    size_t heap_max = js->max_heap_bytes;
     if (heap_max && want > heap_max) {
         JS_FreeCString(ctx, id);
         return JS_ThrowRangeError(ctx, "blob.get: blob larger than the heap limit");
