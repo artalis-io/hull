@@ -388,7 +388,6 @@ static void lua_push_async_http_response(lua_State *L, void *driver)
  * Returns { status, body, headers } on resume. */
 static int lua_http_fetch(lua_State *L)
 {
-    hl_lua_check_can_wait(L, "http.fetch()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.http_cfg)
         return luaL_error(L, "http not configured (no hosts in manifest)");
@@ -423,6 +422,10 @@ static int lua_http_fetch(lua_State *L)
         }
         lua_pop(L, 1);
     }
+
+    /* After the opts (their __index is app code that could BEGIN), before
+     * anything is armed; nothing below runs app code (audit 15). */
+    hl_lua_check_can_wait(L, "http.fetch()");
 
     /* The continuation first: created after the request was started (and
      * the connection suspended), a failed allocation left ctx->cont NULL,

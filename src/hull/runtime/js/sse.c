@@ -54,9 +54,9 @@ void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
     js->async_pending = 0;
 
     /* Get handler function */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue routes_arr = JS_GetPropertyStr(ctx, global, "__hull_routes");
-    JS_FreeValue(ctx, global);
+    JSValue store = hl_js_internals(ctx);
+    JSValue routes_arr = JS_GetPropertyStr(ctx, store, "__hull_routes");
+    JS_FreeValue(ctx, store);
 
     if (JS_IsUndefined(routes_arr) || !JS_IsArray(ctx, routes_arr)) {
         JS_FreeValue(ctx, routes_arr);

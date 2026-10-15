@@ -417,6 +417,19 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
         lc->on_complete(lua, lc->on_complete_ctx);
         lc->on_complete = NULL;
     }
+#ifdef HL_ENABLE_HTTP_SERVER
+    /* A timer handler's wait that is cancelled ends the handler too: clear
+     * in_flight and reschedule, as its completion would. Left set, every
+     * later fire saw it in flight and only retried (audit 15). Not at
+     * shutdown: the loop is going away. */
+    if (lc->timer_ctx) {
+        HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
+        lc->timer_ctx = NULL;
+        t->in_flight = 0;
+        if (!lua->base.shutting_down && lua->base.async_ctx)
+            hl_lua_timer_reschedule(t);
+    }
+#endif
 }
 
 /*
@@ -484,6 +497,19 @@ void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer)
  * after the op is armed. So check first. Not yieldable: module load (require
  * runs under lua_pcall), a C callback such as string.gsub or table.sort.
  * Yieldable but not active_co: a coroutine the app created itself. */
+int hl_lua_can_wait(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!lua || !lua_isyieldable(L) || L != lua->active_co)
+        return 0;
+    const char *txn = hl_db_registry_open_txn(lua->base.db_registry);
+    /* Always NULL only in a DB-less build (the inline stub). */
+    // cppcheck-suppress knownConditionTrueFalse
+    return txn == NULL;
+}
+
 int hl_lua_check_can_wait(lua_State *L, const char *what)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
@@ -666,6 +692,10 @@ static void task_hook_run(HlLua *lua, const char *msg)
     void         (*saved_oc)(struct HlLua *, void *) = lua->active_on_complete;
     void          *saved_oc_ctx = lua->active_on_complete_ctx;
     HlLuaBudget    saved_budget = lua->budget;
+    /* And its wall-clock deadline: the arm below sets the hook's own, as
+     * hull._task's fire does (audit 14: the run the hook interrupted came
+     * back with the hook's deadline, or none). */
+    uint64_t       saved_deadline = hl_run_watch_save(&lua->run_watch);
 #ifdef HL_ENABLE_DB
     HlDbBudgetBinding saved_db_budget = hl_db_budget_current();
 #endif
@@ -698,6 +728,7 @@ static void task_hook_run(HlLua *lua, const char *msg)
     lua->active_on_complete     = saved_oc;
     lua->active_on_complete_ctx = saved_oc_ctx;
     lua->budget                 = saved_budget;
+    hl_run_watch_restore(&lua->run_watch, saved_deadline);
 #ifdef HL_ENABLE_DB
     hl_db_budget_restore(saved_db_budget);
 #endif

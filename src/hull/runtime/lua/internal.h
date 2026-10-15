@@ -186,8 +186,16 @@ static inline void hl_lua_anchor(lua_State *L, int anchor, int idx)
  * resume lua->active_co, and lua_yieldk only raises after the op is armed.
  * Raises unless L is the coroutine the runtime drives and can yield - so not
  * while a module loads, in a C callback (string.gsub, table.sort), or in a
- * coroutine the app made. Defined in async.c. */
+ * coroutine the app made - or while a transaction is open. Call it AFTER the
+ * arguments and options are read, with no app code between it and the arm:
+ * an opts __index, a __tostring or a __gc finalizer (any Lua allocation can
+ * run one) is app code that can BEGIN a transaction after an earlier check
+ * (audit 15). Defined in async.c. */
 int hl_lua_check_can_wait(lua_State *L, const char *what);
+
+/* The same test without raising: 1 when hl_lua_check_can_wait would pass.
+ * For a binding that must free what it copied before it raises. */
+int hl_lua_can_wait(lua_State *L);
 
 /* Wrap coroutine.resume / coroutine.close so they refuse a coroutine the
  * runtime has parked on a Hull operation (async.c). */

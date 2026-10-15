@@ -318,8 +318,12 @@ static void lua_dispatch_work_fn(void *ud)
         return;
     }
     lua_dispatch_run(L, op);
-    hl_run_watch_disarm(&heap.watch);   /* before the stack frame goes */
+    /* lua_close runs the VM's __gc finalizers - app code, still bounded by
+     * the job's deadline; the watch is disarmed after it, before the stack
+     * frame goes (audit 15: disarmed first, a looping finalizer held the
+     * pool thread for good). */
     lua_close(L);
+    hl_run_watch_disarm(&heap.watch);
 #ifdef HL_ENABLE_DB
     hl_db_budget_unbind(&heap.budget);   /* bound by worker_vm_new's arm */
     /* After the close: a finalizer may have run db.* too. */

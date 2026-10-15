@@ -10,11 +10,11 @@
 /* Returns 1 if app.main was already registered. */
 static int js_app_main_registered(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue m = JS_GetPropertyStr(ctx, global, "__hull_main");
+    JSValue store = hl_js_internals(ctx);
+    JSValue m = JS_GetPropertyStr(ctx, store, "__hull_main");
     int has = !JS_IsUndefined(m) && !JS_IsNull(m);
     JS_FreeValue(ctx, m);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     return has;
 }
 
@@ -95,20 +95,20 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
                                  method_names[magic]);
     }
 
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Ensure __hull_routes array exists */
-    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
         routes = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_routes", JS_DupValue(ctx, routes));
+        JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
     /* Ensure __hull_route_defs array exists */
-    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_route_defs");
+    JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_route_defs");
     if (JS_IsUndefined(defs)) {
         defs = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_route_defs", JS_DupValue(ctx, defs));
+        JS_SetPropertyStr(ctx, store, "__hull_route_defs", JS_DupValue(ctx, defs));
     }
 
     /* Get current length (= next index) */
@@ -143,7 +143,7 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
 
     JS_FreeValue(ctx, defs);
     JS_FreeValue(ctx, routes);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     JS_FreeCString(ctx, pattern);
 
     return JS_UNDEFINED;
@@ -166,13 +166,13 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "app.use requires (method, pattern, handler)");
     }
 
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Store handler in __hull_routes (same array as route handlers) */
-    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
         routes = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_routes", JS_DupValue(ctx, routes));
+        JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
     JSValue routes_len_val = JS_GetPropertyStr(ctx, routes, "length");
@@ -185,10 +185,10 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, routes);
 
     /* Store in __hull_middleware array with handler_id */
-    JSValue mw = JS_GetPropertyStr(ctx, global, "__hull_middleware");
+    JSValue mw = JS_GetPropertyStr(ctx, store, "__hull_middleware");
     if (JS_IsUndefined(mw)) {
         mw = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_middleware", JS_DupValue(ctx, mw));
+        JS_SetPropertyStr(ctx, store, "__hull_middleware", JS_DupValue(ctx, mw));
     }
 
     JSValue len_val = JS_GetPropertyStr(ctx, mw, "length");
@@ -203,7 +203,7 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyUint32(ctx, mw, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, mw);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     JS_FreeCString(ctx, pattern);
     JS_FreeCString(ctx, method);
 
@@ -227,13 +227,13 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "app.usePost requires (method, pattern, handler)");
     }
 
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Store handler in __hull_routes (same array as route handlers) */
-    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
         routes = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_routes", JS_DupValue(ctx, routes));
+        JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
     JSValue routes_len_val = JS_GetPropertyStr(ctx, routes, "length");
@@ -246,10 +246,10 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, routes);
 
     /* Store in __hull_post_middleware array with handler_id */
-    JSValue mw = JS_GetPropertyStr(ctx, global, "__hull_post_middleware");
+    JSValue mw = JS_GetPropertyStr(ctx, store, "__hull_post_middleware");
     if (JS_IsUndefined(mw)) {
         mw = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_post_middleware", JS_DupValue(ctx, mw));
+        JS_SetPropertyStr(ctx, store, "__hull_post_middleware", JS_DupValue(ctx, mw));
     }
 
     JSValue len_val = JS_GetPropertyStr(ctx, mw, "length");
@@ -264,7 +264,7 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyUint32(ctx, mw, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, mw);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     JS_FreeCString(ctx, pattern);
     JS_FreeCString(ctx, method);
 
@@ -293,13 +293,13 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
     if (!JS_IsFunction(ctx, argv[1]))
         return JS_ThrowTypeError(ctx, "app.every requires a function handler");
 
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Store handler in __hull_timers */
-    JSValue timers = JS_GetPropertyStr(ctx, global, "__hull_timers");
+    JSValue timers = JS_GetPropertyStr(ctx, store, "__hull_timers");
     if (JS_IsUndefined(timers)) {
         timers = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_timers", JS_DupValue(ctx, timers));
+        JS_SetPropertyStr(ctx, store, "__hull_timers", JS_DupValue(ctx, timers));
     }
 
     JSValue len_val = JS_GetPropertyStr(ctx, timers, "length");
@@ -312,10 +312,10 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, timers);
 
     /* Store timer def in __hull_timer_defs */
-    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");
+    JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_timer_defs");
     if (JS_IsUndefined(defs)) {
         defs = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_timer_defs", JS_DupValue(ctx, defs));
+        JS_SetPropertyStr(ctx, store, "__hull_timer_defs", JS_DupValue(ctx, defs));
     }
 
     JSValue defs_len_val = JS_GetPropertyStr(ctx, defs, "length");
@@ -330,7 +330,7 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, defs);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 
     return JS_UNDEFINED;
 }
@@ -374,13 +374,13 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, lt_val);
     }
 
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Store handler in __hull_timers */
-    JSValue timers = JS_GetPropertyStr(ctx, global, "__hull_timers");
+    JSValue timers = JS_GetPropertyStr(ctx, store, "__hull_timers");
     if (JS_IsUndefined(timers)) {
         timers = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_timers", JS_DupValue(ctx, timers));
+        JS_SetPropertyStr(ctx, store, "__hull_timers", JS_DupValue(ctx, timers));
     }
 
     JSValue len_val = JS_GetPropertyStr(ctx, timers, "length");
@@ -393,10 +393,10 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, timers);
 
     /* Store timer def in __hull_timer_defs */
-    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");
+    JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_timer_defs");
     if (JS_IsUndefined(defs)) {
         defs = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_timer_defs", JS_DupValue(ctx, defs));
+        JS_SetPropertyStr(ctx, store, "__hull_timer_defs", JS_DupValue(ctx, defs));
     }
 
     JSValue defs_len_val = JS_GetPropertyStr(ctx, defs, "length");
@@ -413,7 +413,7 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, defs);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 
     return JS_UNDEFINED;
 }
@@ -422,11 +422,11 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
 
 static int32_t js_store_handler(JSContext *ctx, JSValueConst func)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue store = hl_js_internals(ctx);
+    JSValue routes = JS_GetPropertyStr(ctx, store, "__hull_routes");
     if (JS_IsUndefined(routes)) {
         routes = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_routes", JS_DupValue(ctx, routes));
+        JS_SetPropertyStr(ctx, store, "__hull_routes", JS_DupValue(ctx, routes));
     }
 
     JSValue len_val = JS_GetPropertyStr(ctx, routes, "length");
@@ -436,7 +436,7 @@ static int32_t js_store_handler(JSContext *ctx, JSValueConst func)
 
     JS_SetPropertyUint32(ctx, routes, (uint32_t)handler_id, JS_DupValue(ctx, func));
     JS_FreeValue(ctx, routes);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     return handler_id;
 }
 
@@ -457,13 +457,13 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "app.ws requires handlers object");
     }
 
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Ensure __hull_ws_defs array exists */
-    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_ws_defs");
+    JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_ws_defs");
     if (JS_IsUndefined(defs)) {
         defs = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_ws_defs", JS_DupValue(ctx, defs));
+        JS_SetPropertyStr(ctx, store, "__hull_ws_defs", JS_DupValue(ctx, defs));
     }
 
     JSValue len_val = JS_GetPropertyStr(ctx, defs, "length");
@@ -498,7 +498,7 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
 
     JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
     JS_FreeValue(ctx, defs);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     JS_FreeCString(ctx, path);
 
     return JS_UNDEFINED;
@@ -523,13 +523,13 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
 
     int32_t handler_id = js_store_handler(ctx, argv[1]);
 
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Ensure __hull_sse_defs array exists */
-    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_sse_defs");
+    JSValue defs = JS_GetPropertyStr(ctx, store, "__hull_sse_defs");
     if (JS_IsUndefined(defs)) {
         defs = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_sse_defs", JS_DupValue(ctx, defs));
+        JS_SetPropertyStr(ctx, store, "__hull_sse_defs", JS_DupValue(ctx, defs));
     }
 
     JSValue len_val = JS_GetPropertyStr(ctx, defs, "length");
@@ -543,7 +543,7 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, defs);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     JS_FreeCString(ctx, path);
 
     return JS_UNDEFINED;
@@ -622,13 +622,13 @@ static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
 }
 
 /* Install app.every / app.daily on the exported `app` object.
- * The app object is stashed on globalThis under __hull_app_ref by
- * js_app_module_init so this function can reach it. Mirrors the
- * Lua partial-class pattern. */
+ * The app object is stashed in the internal store (hl_js_internals) under
+ * __hull_app_ref by js_app_module_init so this function can reach it.
+ * Mirrors the Lua partial-class pattern. */
 static void js_install_app_timers(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    JSValue store = hl_js_internals(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, store, "__hull_app_ref");
     if (JS_IsObject(app)) {
         JS_SetPropertyStr(ctx, app, "every",
             JS_NewCFunction(ctx, js_app_every, "every", 2));
@@ -636,7 +636,7 @@ static void js_install_app_timers(JSContext *ctx)
             JS_NewCFunction(ctx, js_app_daily, "daily", 3));
     }
     JS_FreeValue(ctx, app);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 }
 
 /* Install the REST + middleware + router surface. Called when the
@@ -645,8 +645,9 @@ static void js_install_app_timers(JSContext *ctx)
  * the live `app` object. */
 static void js_install_app_http_server(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    JSValue store = hl_js_internals(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, store, "__hull_app_ref");
+    JS_FreeValue(ctx, store);
     if (JS_IsObject(app)) {
         JS_SetPropertyStr(ctx, app, "get",
             JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
@@ -705,6 +706,7 @@ static void js_install_app_http_server(JSContext *ctx)
 "  app.router = function(prefix, opts) { return new Router(prefix, opts); };\n"
 "})();\n";
 
+    JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "__hull_app_for_router",
                       JS_DupValue(ctx, app));
     JSValue rret = JS_Eval(ctx, router_src, sizeof(router_src) - 1,
@@ -720,27 +722,27 @@ static void js_install_app_http_server(JSContext *ctx)
 /* Install app.ws on the exported `app` object. */
 static void js_install_app_ws_server(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    JSValue store = hl_js_internals(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, store, "__hull_app_ref");
     if (JS_IsObject(app)) {
         JS_SetPropertyStr(ctx, app, "ws",
             JS_NewCFunction(ctx, js_app_ws, "ws", 2));
     }
     JS_FreeValue(ctx, app);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 }
 
 /* Install app.sse on the exported `app` object. */
 static void js_install_app_sse(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    JSValue store = hl_js_internals(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, store, "__hull_app_ref");
     if (JS_IsObject(app)) {
         JS_SetPropertyStr(ctx, app, "sse",
             JS_NewCFunction(ctx, js_app_sse, "sse", 2));
     }
     JS_FreeValue(ctx, app);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 }
 
 /* Freeze @p v deeply in C (an app could have replaced Object.freeze):
@@ -922,9 +924,9 @@ static JSValue js_app_main(JSContext *ctx, JSValueConst this_val,
     if (js_app_main_registered(ctx))
         return JS_ThrowTypeError(ctx, "app.main() can only be called once");
 
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "__hull_main", JS_DupValue(ctx, argv[0]));
-    JS_FreeValue(ctx, global);
+    JSValue store = hl_js_internals(ctx);
+    JS_SetPropertyStr(ctx, store, "__hull_main", JS_DupValue(ctx, argv[0]));
+    JS_FreeValue(ctx, store);
 
     return JS_UNDEFINED;
 }
@@ -952,12 +954,11 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, app, "getManifest",
                       JS_NewCFunction(ctx, js_app_get_manifest, "getManifest", 0));
 
-    /* Stash the app object on globalThis under an internal name so
-     * js_app_manifest can find it later to install module-conditional
-     * methods. */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "__hull_app_ref", JS_DupValue(ctx, app));
-    JS_FreeValue(ctx, global);
+    /* Stash the app object in the internal store so js_app_manifest can
+     * find it later to install module-conditional methods. */
+    JSValue store = hl_js_internals(ctx);
+    JS_SetPropertyStr(ctx, store, "__hull_app_ref", JS_DupValue(ctx, app));
+    JS_FreeValue(ctx, store);
 
     JS_SetModuleExport(ctx, m, "app", app);
     return 0;

@@ -35,14 +35,14 @@ typedef struct {
 
 static HlJSTestState *get_js_test_state(JSContext *ctx)
 {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue state_val = JS_GetPropertyStr(ctx, global, "__hull_test_state");
+    JSValue store = hl_js_internals(ctx);
+    JSValue state_val = JS_GetPropertyStr(ctx, store, "__hull_test_state");
     HlJSTestState *state = NULL;
     if (!JS_IsUndefined(state_val)) {
         state = JS_GetOpaque(state_val, 0);
     }
     JS_FreeValue(ctx, state_val);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     return state;
 }
 
@@ -440,12 +440,14 @@ void hl_js_test_register(JSContext *ctx, KlHttpRouter *router, HlJS *js)
     state->js = js;
     state->cases = JS_NewArray(ctx);
 
-    /* Store state on global */
-    JSValue global = JS_GetGlobalObject(ctx);
-
+    /* The state in the runtime's internal store, out of the app's reach */
+    JSValue store = hl_js_internals(ctx);
     JSValue state_obj = JS_NewObjectClass(ctx, 0);
     JS_SetOpaque(state_obj, state);
-    JS_SetPropertyStr(ctx, global, "__hull_test_state", state_obj);
+    JS_SetPropertyStr(ctx, store, "__hull_test_state", state_obj);
+    JS_FreeValue(ctx, store);
+
+    JSValue global = JS_GetGlobalObject(ctx);
 
     /* Create test function (callable + has properties) */
     JSValue test_fn = JS_NewCFunction(ctx, js_test_call, "test", 2);

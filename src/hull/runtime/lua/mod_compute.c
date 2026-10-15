@@ -473,7 +473,6 @@ static int lua_compute_async_k(lua_State *L, int status, lua_KContext kctx)
 
 static int lua_compute_async_call(lua_State *L)
 {
-    hl_lua_check_can_wait(L, "compute.async.call()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "compute.async not available (no thread pool)");
@@ -545,6 +544,9 @@ static int lua_compute_async_call(lua_State *L)
         }
     }
     wasm_clamp_opts(&opts, &lua->base);
+    /* After the opts and input (app code that could BEGIN), before anything
+     * is armed; nothing below runs app code (audit 15). */
+    hl_lua_check_can_wait(L, "compute.async.call()");
 
     /* Pre-load module on event loop thread (cache writes are not thread-safe) */
     {
@@ -767,7 +769,6 @@ static int lua_wasm_inst_call(lua_State *L)
 /* inst:async_call(input, opts?) - dispatch to thread pool, yield */
 static int lua_wasm_inst_async_call(lua_State *L)
 {
-    hl_lua_check_can_wait(L, "instance:async_call()");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "WasmInstance:async_call: not available (no thread pool)");
@@ -829,6 +830,8 @@ static int lua_wasm_inst_async_call(lua_State *L)
     if (check_wasm_inst(L, 1) != pi || pi->closed || atomic_load(&pi->busy))
         return luaL_error(L, "WasmInstance:async_call: instance closed or busy");
     wasm_cap_call_opts(&opts, &lua->base);
+    /* After the opts and input, before anything is armed (audit 15). */
+    hl_lua_check_can_wait(L, "instance:async_call()");
 
     /* Allocate worker op */
     HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));

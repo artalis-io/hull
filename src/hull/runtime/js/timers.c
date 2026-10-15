@@ -117,11 +117,11 @@ void hl_js_timer_trampoline(void *user_data)
     hl_js_budget_arm(js);
 
     /* Look up handler */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue timers = JS_GetPropertyStr(ctx, global, "__hull_timers");
+    JSValue store = hl_js_internals(ctx);
+    JSValue timers = JS_GetPropertyStr(ctx, store, "__hull_timers");
     JSValue handler = JS_GetPropertyUint32(ctx, timers, (uint32_t)t->handler_id);
     JS_FreeValue(ctx, timers);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 
     if (!JS_IsFunction(ctx, handler)) {
         JS_FreeValue(ctx, handler);

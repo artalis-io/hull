@@ -212,9 +212,10 @@ static int js_wire_register(KlHttpRouter *router, KlHttpServer *server,
     return -1;
 }
 
-/* Wire every def in globalThis[key]. A missing / non-array key is "nothing
- * to wire" (0) unless `required`. Returns -1 when anything failed. */
-static int js_wire_defs(HlJS *js, JSValueConst global, const char *key,
+/* Wire every def in store[key] (hl_js_internals). A missing / non-array key
+ * is "nothing to wire" (0) unless `required`. Returns -1 when anything
+ * failed. */
+static int js_wire_defs(HlJS *js, JSValueConst store, const char *key,
                         JsWireKind kind, int required,
                         KlHttpRouter *router, KlHttpServer *server)
 {
@@ -225,7 +226,7 @@ static int js_wire_defs(HlJS *js, JSValueConst global, const char *key,
         [JS_WIRE_POST_MW] = "post-body middleware",
     };
     const char *what = what_names[kind];
-    JSValue defs = JS_GetPropertyStr(ctx, global, key);
+    JSValue defs = JS_GetPropertyStr(ctx, store, key);
     if (JS_IsException(defs)) {
         js_wire_clear_exception(ctx);
         log_error("[hull] could not read %s; refusing to start", key);
@@ -285,13 +286,14 @@ static int js_wire_defs(HlJS *js, JSValueConst global, const char *key,
     return rc;
 }
 
-/* ── Timer / ws / sse defs (app-writable globals) ───────────────────────
+/* ── Timer / ws / sse defs ────────────────────────────────────────────────
  *
- * __hull_timer_defs, __hull_ws_defs and __hull_sse_defs are globals app code
- * can rewrite between app.every / app.ws and the wiring, so the wiring takes
- * nothing on trust (audit 12): each field must be the plain value app.* stored
- * (a number, a string), in range, and a read that throws - a getter the app
- * put there - fails the wiring instead of being ignored. */
+ * __hull_timer_defs, __hull_ws_defs and __hull_sse_defs were globals app code
+ * could rewrite between app.every / app.ws and the wiring. They live in the
+ * internal store now (hl_js_internals, audit 15), out of the app's reach;
+ * the wiring still takes nothing on trust (audit 12): each field must be the
+ * plain value app.* stored (a number, a string), in range, and a read that
+ * throws fails the wiring instead of being ignored. */
 
 /* An integral number in [lo, hi] at @p v (a JS value the caller owns).
  * 0 with *out set; -1 otherwise (any pending exception cleared). */
@@ -420,16 +422,16 @@ static int js_wire_timer(HlJS *js, JSValueConst def)
 int hl_js_wire_routes(HlJS *js, KlHttpRouter *router)
 {
     JSContext *ctx = js->ctx;
-    JSValue global = JS_GetGlobalObject(ctx);
-    int rc = js_wire_defs(js, global, "__hull_route_defs", JS_WIRE_ROUTE, 1,
+    JSValue store = hl_js_internals(ctx);
+    int rc = js_wire_defs(js, store, "__hull_route_defs", JS_WIRE_ROUTE, 1,
                           router, NULL);
     if (rc == 0)
-        rc = js_wire_defs(js, global, "__hull_middleware", JS_WIRE_PRE_MW, 0,
+        rc = js_wire_defs(js, store, "__hull_middleware", JS_WIRE_PRE_MW, 0,
                           router, NULL);
     if (rc == 0)
-        rc = js_wire_defs(js, global, "__hull_post_middleware", JS_WIRE_POST_MW, 0,
+        rc = js_wire_defs(js, store, "__hull_post_middleware", JS_WIRE_POST_MW, 0,
                           router, NULL);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     return rc;
 }
 
@@ -520,20 +522,20 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
     (void)alloc_fn; /* routes always use Hull allocator */
     js->server = server; /* store for async operations (hull.sleep, etc.) */
     JSContext *ctx = js->ctx;
-    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue store = hl_js_internals(ctx);
 
     /* Routes, then pre-body and post-body middleware: any failure refuses
      * the wiring (see "Pointer lifetime" above). */
-    int rc = js_wire_defs(js, global, "__hull_route_defs", JS_WIRE_ROUTE, 1,
+    int rc = js_wire_defs(js, store, "__hull_route_defs", JS_WIRE_ROUTE, 1,
                           NULL, server);
     if (rc == 0)
-        rc = js_wire_defs(js, global, "__hull_middleware", JS_WIRE_PRE_MW, 0,
+        rc = js_wire_defs(js, store, "__hull_middleware", JS_WIRE_PRE_MW, 0,
                           NULL, server);
     if (rc == 0)
-        rc = js_wire_defs(js, global, "__hull_post_middleware", JS_WIRE_POST_MW, 0,
+        rc = js_wire_defs(js, store, "__hull_post_middleware", JS_WIRE_POST_MW, 0,
                           NULL, server);
     if (rc != 0) {
-        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, store);
         return -1;
     }
 
@@ -541,7 +543,7 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
      * so every def is validated again here (audit 12: a tampered def armed
      * a 0 ms repeating timer, or a daily one at hour 99) and any failure
      * refuses the wiring, as for routes and middleware. */
-    JSValue timer_defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");
+    JSValue timer_defs = JS_GetPropertyStr(ctx, store, "__hull_timer_defs");
     if (JS_IsException(timer_defs)) {
         js_wire_clear_exception(ctx);
         rc = -1;
@@ -571,7 +573,7 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
     if (rc != 0) {
         log_error("[hull] could not wire an app.every / app.daily timer; "
                   "refusing to start");
-        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, store);
         return -1;
     }
 
@@ -579,7 +581,7 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
     /* Keel stores the upgrade pattern pointer: it is ws_route->path, a
      * Hull-owned copy, never the JS string (audit 11 H1). */
     rc = 0;
-    JSValue ws_defs = JS_GetPropertyStr(ctx, global, "__hull_ws_defs");
+    JSValue ws_defs = JS_GetPropertyStr(ctx, store, "__hull_ws_defs");
     if (JS_IsException(ws_defs)) {
         js_wire_clear_exception(ctx);
         rc = -1;
@@ -691,13 +693,13 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
     }
     JS_FreeValue(ctx, ws_defs);
     if (rc != 0) {
-        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, store);
         return -1;
     }
 
     /* ── Wire SSE endpoints from __hull_sse_defs ───────────────────── */
     /* As for WebSocket: Keel gets sse_route->path, a Hull-owned copy. */
-    JSValue sse_defs = JS_GetPropertyStr(ctx, global, "__hull_sse_defs");
+    JSValue sse_defs = JS_GetPropertyStr(ctx, store, "__hull_sse_defs");
     if (JS_IsException(sse_defs)) {
         js_wire_clear_exception(ctx);
         rc = -1;
@@ -771,6 +773,6 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
     }
     JS_FreeValue(ctx, sse_defs);
 
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
     return rc;
 }

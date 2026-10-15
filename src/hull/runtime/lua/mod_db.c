@@ -840,7 +840,6 @@ static void lua_push_worker_db_result(lua_State *L, void *driver)
 /* Common implementation for db.async.query and db.async.exec */
 static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
 {
-    hl_lua_check_can_wait(L, "db.async");   /* before anything is armed */
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "db.async not available (no thread pool)");
@@ -881,6 +880,15 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
             if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
                 return luaL_error(L, "params must be a table");
         }
+    }
+
+    /* After the arguments (a number converted to a string allocates, and
+     * an allocation can run a __gc finalizer that BEGINs), before anything
+     * is armed (audit 15). */
+    if (!hl_lua_can_wait(L)) {
+        lua_free_hl_values(L, params, nparams);
+        hl_lua_check_can_wait(L, "db.async");   /* raises */
+        return luaL_error(L, "db.async cannot wait here");
     }
 
     /* Allocate op */

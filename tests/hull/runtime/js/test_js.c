@@ -92,6 +92,19 @@ static void install_test_js_globals(HlJS *jsp)
     hl_js_run_jobs(jsp);
 }
 
+/* The runtime's __hull_* tables live in a store held in C (audit 15), out
+ * of app code's reach. The tests read and tamper with them as before through
+ * a test-only global onto that store. */
+JSValue hl_js_internals(JSContext *ctx);   /* runtime/js/internal.h */
+
+static void expose_internals(HlJS *jsp)
+{
+    JSValue global = JS_GetGlobalObject(jsp->ctx);
+    JS_SetPropertyStr(jsp->ctx, global, "__hull_internals",
+                      hl_js_internals(jsp->ctx));
+    JS_FreeValue(jsp->ctx, global);
+}
+
 static void init_js(void)
 {
     if (js_initialized)
@@ -103,6 +116,7 @@ static void init_js(void)
     js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
+    if (js_initialized) expose_internals(&js);
     if (js_initialized) install_test_js_globals(&js);
 }
 
@@ -123,6 +137,7 @@ static void init_js_bare(void)
     js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
+    if (js_initialized) expose_internals(&js);
 }
 
 static void cleanup_js(void)
@@ -199,6 +214,7 @@ static void init_js_with_caps(void)
     pending_thread_pool = NULL;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
+    if (js_initialized) expose_internals(&js);
     if (js_initialized) install_test_js_globals(&js);
 }
 
@@ -617,23 +633,23 @@ UTEST(js_runtime, hull_app_module)
 
     /* Verify routes were registered */
     int count = eval_int(
-        "globalThis.__hull_route_defs ? globalThis.__hull_route_defs.length : 0");
+        "globalThis.__hull_internals.__hull_route_defs ? globalThis.__hull_internals.__hull_route_defs.length : 0");
     ASSERT_EQ(count, 2);
 
     /* Verify first route */
-    char *method = eval_str("globalThis.__hull_route_defs[0].method");
+    char *method = eval_str("globalThis.__hull_internals.__hull_route_defs[0].method");
     ASSERT_NE(method, NULL);
     ASSERT_STREQ(method, "GET");
     free(method);
 
-    char *pattern = eval_str("globalThis.__hull_route_defs[0].pattern");
+    char *pattern = eval_str("globalThis.__hull_internals.__hull_route_defs[0].pattern");
     ASSERT_NE(pattern, NULL);
     ASSERT_STREQ(pattern, "/test");
     free(pattern);
 
     /* Verify handler functions stored */
     int has_handlers = eval_int(
-        "typeof globalThis.__hull_routes[0] === 'function' ? 1 : 0");
+        "typeof globalThis.__hull_internals.__hull_routes[0] === 'function' ? 1 : 0");
     ASSERT_EQ(has_handlers, 1);
 
     cleanup_js();
@@ -658,12 +674,12 @@ UTEST(js_runtime, app_router_prefixes_routes)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    ASSERT_EQ(eval_int("globalThis.__hull_route_defs.length"), 4);
-    char *p0 = eval_str("globalThis.__hull_route_defs[0].pattern");
+    ASSERT_EQ(eval_int("globalThis.__hull_internals.__hull_route_defs.length"), 4);
+    char *p0 = eval_str("globalThis.__hull_internals.__hull_route_defs[0].pattern");
     ASSERT_STREQ(p0, "/api/v1/items"); free(p0);
-    char *p2 = eval_str("globalThis.__hull_route_defs[2].pattern");
+    char *p2 = eval_str("globalThis.__hull_internals.__hull_route_defs[2].pattern");
     ASSERT_STREQ(p2, "/api/v1/items/:id"); free(p2);
-    char *m3 = eval_str("globalThis.__hull_route_defs[3].method");
+    char *m3 = eval_str("globalThis.__hull_internals.__hull_route_defs[3].method");
     ASSERT_STREQ(m3, "DELETE"); free(m3);
 
     cleanup_js();
@@ -685,10 +701,10 @@ UTEST(js_runtime, app_router_nested_composes_prefixes)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    ASSERT_EQ(eval_int("globalThis.__hull_route_defs.length"), 2);
-    char *p0 = eval_str("globalThis.__hull_route_defs[0].pattern");
+    ASSERT_EQ(eval_int("globalThis.__hull_internals.__hull_route_defs.length"), 2);
+    char *p0 = eval_str("globalThis.__hull_internals.__hull_route_defs[0].pattern");
     ASSERT_STREQ(p0, "/api/v1/admin/users"); free(p0);
-    char *p1 = eval_str("globalThis.__hull_route_defs[1].pattern");
+    char *p1 = eval_str("globalThis.__hull_internals.__hull_route_defs[1].pattern");
     ASSERT_STREQ(p1, "/api/v1/admin/audit"); free(p1);
 
     cleanup_js();
@@ -708,10 +724,10 @@ UTEST(js_runtime, app_router_use_with_handler_only)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    ASSERT_EQ(eval_int("globalThis.__hull_middleware.length"), 1);
-    char *m0 = eval_str("globalThis.__hull_middleware[0].method");
+    ASSERT_EQ(eval_int("globalThis.__hull_internals.__hull_middleware.length"), 1);
+    char *m0 = eval_str("globalThis.__hull_internals.__hull_middleware[0].method");
     ASSERT_STREQ(m0, "*"); free(m0);
-    char *p0 = eval_str("globalThis.__hull_middleware[0].pattern");
+    char *p0 = eval_str("globalThis.__hull_internals.__hull_middleware[0].pattern");
     ASSERT_STREQ(p0, "/api/*"); free(p0);
 
     cleanup_js();
@@ -731,10 +747,10 @@ UTEST(js_runtime, app_router_use_with_explicit_method_pattern)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    ASSERT_EQ(eval_int("globalThis.__hull_middleware.length"), 1);
-    char *m0 = eval_str("globalThis.__hull_middleware[0].method");
+    ASSERT_EQ(eval_int("globalThis.__hull_internals.__hull_middleware.length"), 1);
+    char *m0 = eval_str("globalThis.__hull_internals.__hull_middleware[0].method");
     ASSERT_STREQ(m0, "POST"); free(m0);
-    char *p0 = eval_str("globalThis.__hull_middleware[0].pattern");
+    char *p0 = eval_str("globalThis.__hull_internals.__hull_middleware[0].pattern");
     ASSERT_STREQ(p0, "/api/items"); free(p0);
 
     cleanup_js();
@@ -756,7 +772,7 @@ UTEST(js_runtime, app_router_chainable)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    ASSERT_EQ(eval_int("globalThis.__hull_route_defs.length"), 3);
+    ASSERT_EQ(eval_int("globalThis.__hull_internals.__hull_route_defs.length"), 3);
 
     cleanup_js();
 }
@@ -822,7 +838,7 @@ UTEST(js_runtime, app_timers_register_timer_when_declared)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    ASSERT_EQ(eval_int("globalThis.__hull_timer_defs.length"), 1);
+    ASSERT_EQ(eval_int("globalThis.__hull_internals.__hull_timer_defs.length"), 1);
     cleanup_js();
 }
 
@@ -840,7 +856,7 @@ UTEST(js_runtime, app_router_empty_prefix)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    char *p0 = eval_str("globalThis.__hull_route_defs[0].pattern");
+    char *p0 = eval_str("globalThis.__hull_internals.__hull_route_defs[0].pattern");
     ASSERT_STREQ(p0, "/items"); free(p0);
 
     cleanup_js();
@@ -860,7 +876,7 @@ UTEST(js_runtime, app_main_registers)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    int has = eval_int("typeof globalThis.__hull_main === 'function' ? 1 : 0");
+    int has = eval_int("typeof globalThis.__hull_internals.__hull_main === 'function' ? 1 : 0");
     ASSERT_EQ(has, 1);
     ASSERT_TRUE(hl_js_vtable.has_main(&js.base));
     cleanup_js();
@@ -1273,7 +1289,7 @@ UTEST(js_runtime, free_after_modules_no_gc_leak)
 
     /* Verify globals are populated */
     int routes = eval_int(
-        "globalThis.__hull_route_defs ? globalThis.__hull_route_defs.length : 0");
+        "globalThis.__hull_internals.__hull_route_defs ? globalThis.__hull_internals.__hull_route_defs.length : 0");
     ASSERT_EQ(routes, 2);
 
     /* hl_js_free must clean up all globals without GC assertion */
@@ -1936,25 +1952,25 @@ UTEST(js_middleware, registration_stores_handler_id)
 
     /* Verify __hull_middleware has handler_id */
     int mw_count = eval_int(
-        "globalThis.__hull_middleware ? globalThis.__hull_middleware.length : 0");
+        "globalThis.__hull_internals.__hull_middleware ? globalThis.__hull_internals.__hull_middleware.length : 0");
     ASSERT_EQ(mw_count, 1);
 
-    char *method = eval_str("globalThis.__hull_middleware[0].method");
+    char *method = eval_str("globalThis.__hull_internals.__hull_middleware[0].method");
     ASSERT_NE(method, NULL);
     ASSERT_STREQ(method, "*");
     free(method);
 
-    char *pattern = eval_str("globalThis.__hull_middleware[0].pattern");
+    char *pattern = eval_str("globalThis.__hull_internals.__hull_middleware[0].pattern");
     ASSERT_NE(pattern, NULL);
     ASSERT_STREQ(pattern, "/*");
     free(pattern);
 
-    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    int handler_id = eval_int("globalThis.__hull_internals.__hull_middleware[0].handler_id");
     ASSERT_TRUE(handler_id >= 0);
 
     /* Verify handler is in __hull_routes */
     int has_handler = eval_int(
-        "typeof globalThis.__hull_routes[globalThis.__hull_middleware[0].handler_id] === 'function' ? 1 : 0");
+        "typeof globalThis.__hull_internals.__hull_routes[globalThis.__hull_internals.__hull_middleware[0].handler_id] === 'function' ? 1 : 0");
     ASSERT_EQ(has_handler, 1);
 
     cleanup_js();
@@ -1978,16 +1994,16 @@ UTEST(js_middleware, handler_ids_do_not_collide_with_routes)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    int route_id = eval_int("globalThis.__hull_route_defs[0].handler_id");
-    int mw_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    int route_id = eval_int("globalThis.__hull_internals.__hull_route_defs[0].handler_id");
+    int mw_id = eval_int("globalThis.__hull_internals.__hull_middleware[0].handler_id");
     ASSERT_NE(route_id, mw_id);
 
     /* Both should be valid function entries */
     int route_fn = eval_int(
-        "typeof globalThis.__hull_routes[globalThis.__hull_route_defs[0].handler_id] === 'function' ? 1 : 0");
+        "typeof globalThis.__hull_internals.__hull_routes[globalThis.__hull_internals.__hull_route_defs[0].handler_id] === 'function' ? 1 : 0");
     ASSERT_EQ(route_fn, 1);
     int mw_fn = eval_int(
-        "typeof globalThis.__hull_routes[globalThis.__hull_middleware[0].handler_id] === 'function' ? 1 : 0");
+        "typeof globalThis.__hull_internals.__hull_routes[globalThis.__hull_internals.__hull_middleware[0].handler_id] === 'function' ? 1 : 0");
     ASSERT_EQ(mw_fn, 1);
 
     cleanup_js();
@@ -2010,7 +2026,7 @@ UTEST(js_middleware, dispatch_return_zero_continues)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    int handler_id = eval_int("globalThis.__hull_internals.__hull_middleware[0].handler_id");
 
     KlHttpRequest req = {0};
     KlHttpResponse res = {0};
@@ -2039,7 +2055,7 @@ UTEST(js_middleware, res_kept_past_its_request_fails_closed)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    int handler_id = eval_int("globalThis.__hull_internals.__hull_middleware[0].handler_id");
     KlHttpRequest req = {0};
     KlHttpResponse res = {0};
     ASSERT_EQ(hl_js_dispatch_middleware(&js, handler_id, &req, &res), 0);
@@ -2070,7 +2086,7 @@ static int js_dispatch_last_route(const char *handler_src, KlHttpResponse *res,
         hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
-    int id = eval_int("globalThis.__hull_routes.length - 1");
+    int id = eval_int("globalThis.__hull_internals.__hull_routes.length - 1");
     return hl_js_dispatch(&js, id, req, res);
 }
 
@@ -2127,7 +2143,7 @@ UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    int handler_id = eval_int("globalThis.__hull_internals.__hull_middleware[0].handler_id");
 
     KlHttpRequest req = {0};
     KlHttpResponse res = {0};
@@ -2210,22 +2226,22 @@ UTEST(js_middleware, order_preserved)
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
 
-    int mw_count = eval_int("globalThis.__hull_middleware.length");
+    int mw_count = eval_int("globalThis.__hull_internals.__hull_middleware.length");
     ASSERT_EQ(mw_count, 2);
 
-    char *m1 = eval_str("globalThis.__hull_middleware[0].method");
+    char *m1 = eval_str("globalThis.__hull_internals.__hull_middleware[0].method");
     ASSERT_STREQ(m1, "*");
     free(m1);
 
-    char *p1 = eval_str("globalThis.__hull_middleware[0].pattern");
+    char *p1 = eval_str("globalThis.__hull_internals.__hull_middleware[0].pattern");
     ASSERT_STREQ(p1, "/*");
     free(p1);
 
-    char *m2 = eval_str("globalThis.__hull_middleware[1].method");
+    char *m2 = eval_str("globalThis.__hull_internals.__hull_middleware[1].method");
     ASSERT_STREQ(m2, "GET");
     free(m2);
 
-    char *p2 = eval_str("globalThis.__hull_middleware[1].pattern");
+    char *p2 = eval_str("globalThis.__hull_internals.__hull_middleware[1].pattern");
     ASSERT_STREQ(p2, "/api/*");
     free(p2);
 
@@ -7857,8 +7873,8 @@ static int a5_middleware(const char *handler_src, KlHttpRequest *req,
         hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
-    int id = eval_int("globalThis.__hull_middleware["
-                      "globalThis.__hull_middleware.length - 1].handler_id");
+    int id = eval_int("globalThis.__hull_internals.__hull_middleware["
+                      "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
     return hl_js_dispatch_middleware(&js, id, req, res);
 }
 
@@ -7955,7 +7971,7 @@ UTEST(js_audit5, a_handler_over_budget_is_answered_500)
         hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
-    int last = eval_int("globalThis.__hull_routes.length - 1");
+    int last = eval_int("globalThis.__hull_internals.__hull_routes.length - 1");
     KlHttpRequest req = {0};
     KlHttpResponse res = {0};
     EXPECT_EQ(hl_js_dispatch(&js, last - 1, &req, &res), -1);
@@ -8310,8 +8326,8 @@ UTEST(js_audit7, a_ctx_whose_request_ended_early_is_freed)
                             " return 0; }", &req, &res), 0);
     EXPECT_TRUE(req.ctx != NULL);
     EXPECT_EQ(a7_tracked_ctxs(), (size_t)1);
-    int id = eval_int("globalThis.__hull_middleware["
-                      "globalThis.__hull_middleware.length - 1].handler_id");
+    int id = eval_int("globalThis.__hull_internals.__hull_middleware["
+                      "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
     JSMemoryUsage before, after;
     JS_ComputeMemoryUsage(js.rt, &before);
     for (int i = 0; i < 100; i++) {
@@ -8441,8 +8457,8 @@ UTEST(js_audit7, req_ctx_freed_when_the_response_is_sent)
     JS_ComputeMemoryUsage(js.rt, &base);
     ASSERT_EQ(a5_middleware("(req, res) => { req.ctx.big = 'x'.repeat(200000);"
                             " return 0; }", &reqs[0], &res), 0);
-    int id = eval_int("globalThis.__hull_middleware["
-                      "globalThis.__hull_middleware.length - 1].handler_id");
+    int id = eval_int("globalThis.__hull_internals.__hull_middleware["
+                      "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
     for (int i = 1; i < N; i++)
         ASSERT_EQ(hl_js_dispatch_middleware(&js, id, &reqs[i], &res), 0);
     EXPECT_EQ(a7_tracked_ctxs(), (size_t)N);
@@ -8480,9 +8496,9 @@ UTEST(js_audit7, request_done_leaves_a_running_handler_its_ctx)
         "app.get('/x', (req, res) => { globalThis.__kept = req; res.status(204); });\n",
         &msg), 0);
     free(msg);
-    int mw = eval_int("globalThis.__hull_middleware["
-                      "globalThis.__hull_middleware.length - 1].handler_id");
-    int route = eval_int("globalThis.__hull_routes.length - 1");
+    int mw = eval_int("globalThis.__hull_internals.__hull_middleware["
+                      "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
+    int route = eval_int("globalThis.__hull_internals.__hull_routes.length - 1");
     KlHttpRequest req = {0};
     KlHttpResponse res = {0};
     ASSERT_EQ(hl_js_dispatch_middleware(&js, mw, &req, &res), 0);
@@ -8641,8 +8657,8 @@ UTEST(js_audit8, building_req_runs_no_inherited_setter)
         hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
-    int id = eval_int("globalThis.__hull_middleware["
-                      "globalThis.__hull_middleware.length - 1].handler_id");
+    int id = eval_int("globalThis.__hull_internals.__hull_middleware["
+                      "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
     /* Armed after registration: only the request build can reach them. */
     char *m = eval_str(
         "globalThis.__a8_set = 0;\n"
@@ -10046,9 +10062,9 @@ UTEST(js_audit11, content_type_and_error_headers_span_middleware)
         hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, val);
     hl_js_run_jobs(&js);
-    int mw1 = eval_int("globalThis.__hull_middleware[0].handler_id");
-    int mw2 = eval_int("globalThis.__hull_middleware[1].handler_id");
-    int last = eval_int("globalThis.__hull_routes.length - 1");
+    int mw1 = eval_int("globalThis.__hull_internals.__hull_middleware[0].handler_id");
+    int mw2 = eval_int("globalThis.__hull_internals.__hull_middleware[1].handler_id");
+    int last = eval_int("globalThis.__hull_internals.__hull_routes.length - 1");
     KlAllocator alloc = kl_allocator_default();
 
     /* Middleware res.html, handler res.json: one Content-Type, the JSON's. */
@@ -10109,11 +10125,11 @@ static int a11_pattern_is(const char *p, size_t len, const char *want)
 static void a11_drop_route_globals(void)
 {
     const char *drop =
-        "delete globalThis.__hull_route_defs;"
-        "delete globalThis.__hull_middleware;"
-        "delete globalThis.__hull_post_middleware;"
-        "delete globalThis.__hull_ws_defs;"
-        "delete globalThis.__hull_sse_defs;";
+        "delete globalThis.__hull_internals.__hull_route_defs;"
+        "delete globalThis.__hull_internals.__hull_middleware;"
+        "delete globalThis.__hull_internals.__hull_post_middleware;"
+        "delete globalThis.__hull_internals.__hull_ws_defs;"
+        "delete globalThis.__hull_internals.__hull_sse_defs;";
     JSValue v = JS_Eval(js.ctx, drop, strlen(drop), "<a11drop>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(v)) hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, v);
@@ -10231,7 +10247,7 @@ UTEST(js_audit11, unregistrable_middleware_fails_wiring)
         "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.use('*', '/admin/*', (req, res) => 1);\n"
         "app.get('/admin/x', (req, res) => { res.json({ ok: 1 }); });\n"
-        "globalThis.__hull_middleware[0].pattern = Symbol('unconvertible');\n";
+        "globalThis.__hull_internals.__hull_middleware[0].pattern = Symbol('unconvertible');\n";
     JSValue v = JS_Eval(js.ctx, app, strlen(app), "<a11fail>", JS_EVAL_TYPE_MODULE);
     if (JS_IsException(v)) hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, v);
@@ -10484,9 +10500,9 @@ UTEST(js_audit12, error_reset_snapshots_are_per_request_and_per_runtime)
         "app.use('*', '/*', (req, res) => {\n"
         "  res.header('Set-Cookie', 'sid=1'); throw new Error('mw boom'); });\n"
         "app.use('*', '/*', (req, res) => 0);\n");
-    int mw1 = eval_int("globalThis.__hull_middleware[0].handler_id");
-    int mw2 = eval_int("globalThis.__hull_middleware[1].handler_id");
-    int mw3 = eval_int("globalThis.__hull_middleware[2].handler_id");
+    int mw1 = eval_int("globalThis.__hull_internals.__hull_middleware[0].handler_id");
+    int mw2 = eval_int("globalThis.__hull_internals.__hull_middleware[1].handler_id");
+    int mw3 = eval_int("globalThis.__hull_internals.__hull_middleware[2].handler_id");
     KlAllocator alloc = kl_allocator_default();
 
     /* A failing middleware keeps the earlier middleware's header. */
@@ -10575,24 +10591,24 @@ UTEST(js_audit12, snapshot_forgotten_by_connection_and_capped_by_bytes)
 UTEST(js_audit12, tampered_timer_and_ws_defs_fail_the_wiring)
 {
     static const char *const tamper[] = {
-        "globalThis.__hull_timer_defs[0].interval_ms = 0;",
-        "globalThis.__hull_timer_defs[0].interval_ms = -1;",
-        "globalThis.__hull_timer_defs[0].interval_ms = 99.5;",
-        "globalThis.__hull_timer_defs[0].interval_ms = '1000';",
-        "globalThis.__hull_timer_defs[0].handler_id = -1;",
-        "globalThis.__hull_timer_defs[0].handler_id = 'x';",
-        "globalThis.__hull_timer_defs[0].type = 'hourly';",
-        "Object.defineProperty(globalThis.__hull_timer_defs[0], 'interval_ms',"
+        "globalThis.__hull_internals.__hull_timer_defs[0].interval_ms = 0;",
+        "globalThis.__hull_internals.__hull_timer_defs[0].interval_ms = -1;",
+        "globalThis.__hull_internals.__hull_timer_defs[0].interval_ms = 99.5;",
+        "globalThis.__hull_internals.__hull_timer_defs[0].interval_ms = '1000';",
+        "globalThis.__hull_internals.__hull_timer_defs[0].handler_id = -1;",
+        "globalThis.__hull_internals.__hull_timer_defs[0].handler_id = 'x';",
+        "globalThis.__hull_internals.__hull_timer_defs[0].type = 'hourly';",
+        "Object.defineProperty(globalThis.__hull_internals.__hull_timer_defs[0], 'interval_ms',"
         " { get() { throw new Error('getter'); } });",
-        "globalThis.__hull_timer_defs[1].hour = 99;",
-        "globalThis.__hull_timer_defs[1].minute = 60;",
-        "globalThis.__hull_timer_defs[1].hour = -1;",
-        "globalThis.__hull_timer_defs[1] = { get type() { throw 1; } };",
-        "globalThis.__hull_ws_defs[0].on_message_id = 'x';",
-        "globalThis.__hull_ws_defs[0].on_message_id = -5;",
-        "Object.defineProperty(globalThis.__hull_ws_defs[0], 'on_message_id',"
+        "globalThis.__hull_internals.__hull_timer_defs[1].hour = 99;",
+        "globalThis.__hull_internals.__hull_timer_defs[1].minute = 60;",
+        "globalThis.__hull_internals.__hull_timer_defs[1].hour = -1;",
+        "globalThis.__hull_internals.__hull_timer_defs[1] = { get type() { throw 1; } };",
+        "globalThis.__hull_internals.__hull_ws_defs[0].on_message_id = 'x';",
+        "globalThis.__hull_internals.__hull_ws_defs[0].on_message_id = -5;",
+        "Object.defineProperty(globalThis.__hull_internals.__hull_ws_defs[0], 'on_message_id',"
         " { get() { throw new Error('getter'); } });",
-        "globalThis.__hull_sse_defs[0].handler_id = { valueOf() { return 0; } };",
+        "globalThis.__hull_internals.__hull_sse_defs[0].handler_id = { valueOf() { return 0; } };",
     };
     const HlAsyncBackend *be = hl_async_backend();
     ASSERT_TRUE(be != NULL);
@@ -10691,6 +10707,37 @@ UTEST(js_stdlib, audit13_suite)
     EXPECT_EQ(pass, 40);
     js.base.app_vfs = NULL;
     cleanup_js_caps();
+}
+
+/* ── Audit 15: the __hull_* tables are not app globals ────────────────
+ *
+ * Routes, middleware, timers, ws / sse handlers and app.main were kept on
+ * globalThis, where app code could define them itself: a route or a timer
+ * wired without hull/http-server or hull/timers declared. They live in a
+ * store held in C now (hl_js_internals); a global of the same name is
+ * ignored. */
+UTEST(js_audit15, app_globals_cannot_register_handlers)
+{
+    init_js_bare();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: [] });\n"
+        "globalThis.__hull_routes = [() => {}];\n"
+        "globalThis.__hull_route_defs = [{ method: 'GET', pattern: '/x', handler_id: 0 }];\n"
+        "globalThis.__hull_middleware = [{ method: '*', pattern: '/*', handler_id: 0 }];\n"
+        "globalThis.__hull_timers = [() => {}];\n"
+        "globalThis.__hull_timer_defs = [{ type: 'every', interval_ms: 1000, handler_id: 0 }];\n"
+        "globalThis.__hull_ws_defs = [{ pattern: '/ws', on_message_id: 0 }];\n"
+        "globalThis.__hull_sse_defs = [{ pattern: '/sse', handler_id: 0 }];\n"
+        "globalThis.__hull_main = () => 7;\n";
+    JSValue v = JS_Eval(js.ctx, code, strlen(code), "<a15>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    EXPECT_FALSE(hl_js_vtable.has_server_handlers(&js.base));
+    EXPECT_FALSE(hl_js_vtable.has_main(&js.base));
+    cleanup_js();
 }
 
 UTEST_MAIN();

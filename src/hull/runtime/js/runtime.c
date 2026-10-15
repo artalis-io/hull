@@ -1075,6 +1075,20 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Store HlJS pointer in context opaque for C functions to access */
     JS_SetContextOpaque(js->ctx, js);
 
+    /* The internal store, before any module registers into it. */
+    {
+        JSValue store = JS_NewObjectProto(js->ctx, JS_NULL);
+        JSValue *slot = JS_IsException(store) ? NULL : malloc(sizeof *slot);
+        if (!slot) {
+            JS_FreeValue(js->ctx, store);
+            log_error("[hull:c] could not create the internal store");
+            hl_js_free(js);
+            return -1;
+        }
+        *slot = store;
+        js->internals = slot;
+    }
+
     /* globalThis.__hull_manifest: reserved before any app code runs - a
      * non-configurable getter onto the C-held manifest, with no setter. An
      * app can neither replace it nor define its own before app.manifest(). */
@@ -1557,16 +1571,17 @@ void hl_js_free(HlJS *js)
 #ifdef HL_ENABLE_HTTP_SERVER
         hl_js_test_free(js->ctx);
 #endif
+        /* The internal store, and with it every registered handler. */
+        if (js->internals) {
+            JS_FreeValue(js->ctx, *(JSValue *)js->internals);
+            free(js->internals);
+            js->internals = NULL;
+        }
 
         /* Delete hull internal globals so GC can collect them */
         JSValue global = JS_GetGlobalObject(js->ctx);
         static const char *hull_globals[] = {
-            "console", "hull",
-            "__hull_routes", "__hull_route_defs",
-            "__hull_middleware", "__hull_post_middleware",
-            "__hull_test_state", "__hull_async_promise", "test",
-            "__hull_timers", "__hull_timer_defs",
-            "__hull_ws_defs", "__hull_sse_defs",
+            "console", "hull", "test",
         };
         for (size_t i = 0; i < sizeof(hull_globals)/sizeof(hull_globals[0]); i++) {
             JSAtom atom = JS_NewAtom(js->ctx, hull_globals[i]);
@@ -1594,6 +1609,13 @@ void hl_js_free(HlJS *js)
     }
     hl_arena_free(js->base.alloc, js->scratch);
     js->scratch = NULL;
+}
+
+JSValue hl_js_internals(JSContext *ctx)
+{
+    HlJS *js = ctx ? (HlJS *)JS_GetContextOpaque(ctx) : NULL;
+    if (!js || !js->internals) return JS_UNDEFINED;
+    return JS_DupValue(ctx, *(JSValue *)js->internals);
 }
 
 void hl_js_dump_error(HlJS *js)
@@ -1697,11 +1719,11 @@ static int vt_js_manifest_json(HlRuntime *rt, char **out, size_t *out_len)
  * Shared body for route + middleware enumeration; the visitor differs. */
 typedef struct { const char *method, *pattern; } JsRouteRow;
 
-static int js_read_route_array(JSContext *ctx, JSValue global, const char *prop,
+static int js_read_route_array(JSContext *ctx, JSValue store, const char *prop,
                                void (*emit)(void *user, const JsRouteRow *r, const char *phase),
                                void *user, const char *phase)
 {
-    JSValue arr = JS_GetPropertyStr(ctx, global, prop);
+    JSValue arr = JS_GetPropertyStr(ctx, store, prop);
     int seen = 0;
     if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
         JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
@@ -1740,10 +1762,10 @@ static void vt_js_enumerate_routes(HlRuntime *rt, HlRouteCb cb, void *user)
 {
     if (!cb) return;
     HlJS *js = (HlJS *)rt;
-    JSValue global = JS_GetGlobalObject(js->ctx);
+    JSValue store = hl_js_internals(js->ctx);
     RouteEmitCtx c = { .cb = cb, .user = user };
-    js_read_route_array(js->ctx, global, "__hull_route_defs", route_emit, &c, NULL);
-    JS_FreeValue(js->ctx, global);
+    js_read_route_array(js->ctx, store, "__hull_route_defs", route_emit, &c, NULL);
+    JS_FreeValue(js->ctx, store);
 }
 
 typedef struct { HlMiddlewareCb cb; void *user; } MwEmitCtx;
@@ -1757,11 +1779,11 @@ static void vt_js_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *u
 {
     if (!cb) return;
     HlJS *js = (HlJS *)rt;
-    JSValue global = JS_GetGlobalObject(js->ctx);
+    JSValue store = hl_js_internals(js->ctx);
     MwEmitCtx c = { .cb = cb, .user = user };
-    js_read_route_array(js->ctx, global, "__hull_middleware",      mw_emit, &c, "pre");
-    js_read_route_array(js->ctx, global, "__hull_post_middleware", mw_emit, &c, "post");
-    JS_FreeValue(js->ctx, global);
+    js_read_route_array(js->ctx, store, "__hull_middleware",      mw_emit, &c, "pre");
+    js_read_route_array(js->ctx, store, "__hull_post_middleware", mw_emit, &c, "post");
+    JS_FreeValue(js->ctx, store);
 }
 
 #ifdef HL_ENABLE_HTTP_SERVER
@@ -2043,17 +2065,17 @@ static int vt_js_has_main(HlRuntime *rt)
     if (!rt) return 0;
     HlJS *js = (HlJS *)rt;
     if (!js->ctx) return 0;
-    JSValue global = JS_GetGlobalObject(js->ctx);
-    JSValue m = JS_GetPropertyStr(js->ctx, global, "__hull_main");
+    JSValue store = hl_js_internals(js->ctx);
+    JSValue m = JS_GetPropertyStr(js->ctx, store, "__hull_main");
     int has = !JS_IsUndefined(m) && !JS_IsNull(m);
     JS_FreeValue(js->ctx, m);
-    JS_FreeValue(js->ctx, global);
+    JS_FreeValue(js->ctx, store);
     return has;
 }
 
 /* True iff any route/middleware/timer/ws/sse handler has been
- * registered. Same set of globalThis keys js_app_dispatch_registered
- * walks in mod_app.c. */
+ * registered: a non-empty table in the internal store (hl_js_internals),
+ * which only app.* registration fills. */
 static int vt_js_has_server_handlers(HlRuntime *rt)
 {
     if (!rt) return 0;
@@ -2064,10 +2086,10 @@ static int vt_js_has_server_handlers(HlRuntime *rt)
         "__hull_timer_defs", "__hull_ws_defs", "__hull_sse_defs",
         NULL
     };
-    JSValue global = JS_GetGlobalObject(js->ctx);
+    JSValue store = hl_js_internals(js->ctx);
     int found = 0;
     for (int i = 0; keys[i] && !found; i++) {
-        JSValue v = JS_GetPropertyStr(js->ctx, global, keys[i]);
+        JSValue v = JS_GetPropertyStr(js->ctx, store, keys[i]);
         if (JS_IsArray(js->ctx, v)) {
             JSValue len_val = JS_GetPropertyStr(js->ctx, v, "length");
             uint32_t len = 0;
@@ -2077,7 +2099,7 @@ static int vt_js_has_server_handlers(HlRuntime *rt)
         }
         JS_FreeValue(js->ctx, v);
     }
-    JS_FreeValue(js->ctx, global);
+    JS_FreeValue(js->ctx, store);
     return found;
 }
 
@@ -2114,11 +2136,11 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     if (server) js->server = server;
 
     /* Look up the main function. */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue main_fn = JS_GetPropertyStr(ctx, global, "__hull_main");
+    JSValue store = hl_js_internals(ctx);
+    JSValue main_fn = JS_GetPropertyStr(ctx, store, "__hull_main");
     if (!JS_IsFunction(ctx, main_fn)) {
         JS_FreeValue(ctx, main_fn);
-        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, store);
         return -1;
     }
 
@@ -2197,7 +2219,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         hl_js_dump_error(js);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
-        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, store);
         return -1;
     }
 
@@ -2226,7 +2248,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         hl_js_sleep_cancel_pending(js);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
-        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, store);
         return -1;
     }
 
@@ -2238,7 +2260,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
             hl_js_sleep_cancel_pending(js);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, main_fn);
-            JS_FreeValue(ctx, global);
+            JS_FreeValue(ctx, store);
             return -1;
         }
 
@@ -2279,7 +2301,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
                 JS_FreeValue(ctx, settled_slot);
                 JS_FreeValue(ctx, ret);
                 JS_FreeValue(ctx, main_fn);
-                JS_FreeValue(ctx, global);
+                JS_FreeValue(ctx, store);
                 return -1;
             }
             hl_js_run_jobs(js);  /* drain anything that landed after stop */
@@ -2310,7 +2332,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     if (owned_value) JS_FreeValue(ctx, value);
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, main_fn);
-    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, store);
 
     *exit_code_out = rc;
     return rejected ? -1 : 0;
