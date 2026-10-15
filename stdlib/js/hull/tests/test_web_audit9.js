@@ -76,7 +76,7 @@ function addUser(id, email, pw, verified) {
 }
 
 function init(extra) {
-    authFlows._test.reset();
+    __testHooks('hull:web:auth-flows').reset();
     authFlows.init(Object.assign({
         secret: "s".repeat(32),
         trustRequestHost: true,
@@ -112,7 +112,7 @@ function init(extra) {
     }, extra || {}));
 }
 
-const H = authFlows._test.handlers;
+const H = __testHooks('hull:web:auth-flows').handlers;
 
 function tokenIn(to) {
     for (let i = S.sent.length - 1; i >= 0; i--) {
@@ -134,8 +134,8 @@ function startChange(id, oldEmail, newEmail) {
 // ── auth-flows ─────────────────────────────────────────────────────
 
 await test("uidKey: integer ids are keyed as text", () => {
-    assertEq(authFlows._test.uidKey(5), "5");
-    assertEq(authFlows._test.uidKey("u1"), "u1");
+    assertEq(__testHooks('hull:web:auth-flows').uidKey(5), "5");
+    assertEq(__testHooks('hull:web:auth-flows').uidKey("u1"), "u1");
 });
 
 await test("undo of a confirmed change: unverified old address stays unverified, "
@@ -232,7 +232,7 @@ await test("stripUserSecrets: own allowlisted keys only", () => {
     const proto = { id: "inherited", password_hash: "h" };
     const u = Object.assign(Object.create(proto), {
         email: "a@x.test", constructor: "secret", toString: "secret2", totp_secret: "t" });
-    const out = authFlows._test.stripUserSecrets(u);
+    const out = __testHooks('hull:web:auth-flows').stripUserSecrets(u);
     assertEq(Object.keys(out).join(","), "email");
 });
 
@@ -293,13 +293,13 @@ await test("idempotency: session and JWT principals are prefixed apart", () => {
 // ── oauth ──────────────────────────────────────────────────────────
 
 await test("oauth: a multi-tenant issuer must be the token's own tenant", () => {
-    const ok = oauth._test.issuerOk;
-    const common = oauth._test.presets.microsoft({ tenant: "common" });
+    const ok = __testHooks('hull:web:middleware:oauth').issuerOk;
+    const common = __testHooks('hull:web:middleware:oauth').presets.microsoft({ tenant: "common" });
     const iss = "https://login.microsoftonline.com/1111-aaaa/v2.0";
     assertEq(ok(common, { iss, tid: "1111-aaaa" }), true);
     assertEq(ok(common, { iss, tid: "2222-bbbb" }), false, "other tid");
     assertEq(ok(common, { iss }), false, "no tid");
-    const orgs = oauth._test.presets.microsoft({ tenant: "organizations" });
+    const orgs = __testHooks('hull:web:middleware:oauth').presets.microsoft({ tenant: "organizations" });
     const msa = "https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0";
     assertEq(ok(orgs, { iss: msa, tid: "9188040d-6c67-4c5b-b112-36a304b66dad" }), false);
     assertEq(ok({ issuer: "https://idp.test" }, { iss: "https://idp.test" }), true);

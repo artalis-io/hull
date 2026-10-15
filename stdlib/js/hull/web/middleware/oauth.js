@@ -199,6 +199,7 @@ function issuerOk(cfg, claims) {
 }
 
 import { encoding } from "hull:encoding";
+import { _test_hooks } from "hull:_test_hooks";
 
 // An RSA JWK with no certificate - just the modulus `n` and exponent `e`,
 // base64url (RFC 7518 section 6.3.1) - as an SPKI PEM. Google's JWKS is all
@@ -744,6 +745,9 @@ const _test = {
         _state._jwksCache     = Object.create(null);
     },
 };
+// Registered with the stdlib-internal hull:_test_hooks rather than exported
+// (audit 16): app code could call them.
+_test_hooks.register("hull:web:middleware:oauth", _test);
 
-const oauth = { init, routes, _test };
+const oauth = { init, routes };
 export { oauth };

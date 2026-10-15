@@ -569,11 +569,14 @@ local _email_rl_count = 0
 -- the cap every new recipient re-ran a full O(n) sweep (and sort).
 local _email_rl_sweep_at = 0
 
-local function email_rate_allow(to)
+-- Refused: false and the seconds until the bucket has room again. `exact`
+-- keys the bucket by `to` as given rather than lower-cased (the per-account
+-- email-change bucket, audit 16).
+local function email_rate_allow(to, exact)
     local cfg = _state.email_rate_limit
     if not cfg or type(cfg) ~= "table" then return true end
     if type(to) ~= "string" or to == "" then return true end
-    local key = to:lower()
+    local key = exact and to or to:lower()
     local now = time.now()
     local cutoff = now - (cfg.window or 900)
     local bucket = _email_rl[key]
@@ -663,7 +666,11 @@ local function email_rate_allow(to)
         if t > cutoff then fresh[#fresh + 1] = t end
     end
     bucket.ts = fresh
-    if #fresh >= (cfg.limit or 3) then return false end
+    local limit = cfg.limit or 3
+    if #fresh >= limit then
+        local frees_at = fresh[#fresh - limit + 1] + (cfg.window or 900)
+        return false, math.max(1, math.ceil(frees_at - now))
+    end
     bucket.ts[#bucket.ts + 1] = now
     return true
 end
@@ -2130,6 +2137,25 @@ local function handle_email_change(req, res)
         })
     end
 
+    -- Rate limits (audit 16). The confirmation goes to an address the
+    -- requester picks, so it is held to the per-recipient limit (audit 14
+    -- let it skip that, so the app mailed any address without end: request,
+    -- revoke the pending change from the requester's own inbox, repeat). And
+    -- the account is held to the same limit on requests, which a revoke does
+    -- not reset, so it cannot mail one address after another either. Both
+    -- are checked before anything is stored or sent: refused, nothing is
+    -- pending, no notice goes out, and the answer is 429.
+    local allowed, retry = email_rate_allow("\0email-change:" .. key, true)
+    if allowed then
+        allowed, retry = email_rate_allow(body.new_email)
+    end
+    if not allowed then
+        if retry then res:header("Retry-After", tostring(retry)) end
+        return res:status(429):json({
+            error = "too many email change requests; try again later",
+        })
+    end
+
     local now = time.now()
     local token = issue_token(user_id, ACTIONS.email_change,
         _state.email_change_ttl, { new_email = body.new_email })
@@ -2195,8 +2221,8 @@ local function handle_email_change(req, res)
     local link = origin .. _state.prefix
                  .. "/email-change/confirm?token=" .. token
     -- Send to the NEW address - proves the user controls it. Like the
-    -- notice, it is required (audit 14): it skips the per-recipient rate
-    -- limit (which dropped it silently, answering ok while the pending row
+    -- notice, it is required (audit 14): the per-recipient limit was applied
+    -- above, as a 429 (dropped here it answered ok while the pending row
     -- blocked a retry for email_change_ttl), and when it cannot be sent
     -- (email_send throws or returns false) the row goes and the request
     -- answers 503.
@@ -3137,7 +3163,9 @@ end
 
 -- ── Test helpers (not public; exposed for unit tests) ──────────────
 
-M._test = {
+-- Test-only hooks, registered with the stdlib-internal hull._test_hooks
+-- rather than exported (audit 16): app code could call them.
+require("hull._test_hooks").register("hull.web.auth-flows", {
     origin_for         = origin_for,
     state              = _state,
     issue_token        = issue_token,
@@ -3167,7 +3195,7 @@ M._test = {
         magic_link_consume   = handle_magic_link_consume,
     },
     ACTIONS            = ACTIONS,
-    email_rate_allow   = function(to) return email_rate_allow(to) end,
+    email_rate_allow   = function(to, exact) return email_rate_allow(to, exact) end,
     email_rate_reset   = function()
         _email_rl = {}
         _email_rl_count = 0
@@ -3208,6 +3236,6 @@ M._test = {
         _state.login_ratelimit         = false
         _state._initialized            = false
     end,
-}
+})
 
 return M

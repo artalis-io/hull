@@ -15,7 +15,8 @@
 --
 -- Audit 14 (the "a14:" tests): a revoke that lands between the confirm's row
 -- write and its address switch wins; the confirm mail to the new address is
--- required (no rate limit, 503 and no pending row when it cannot be sent); a
+-- required (503 and no pending row when it cannot be sent; audit 16 holds it
+-- to the rate limits again, as a 429); a
 -- magic-link sign-in with TOTP records "magic_link+totp"; init refuses counts
 -- and durations that are not whole numbers above zero.
 --
@@ -88,7 +89,7 @@ end
 local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 
 local function init(extra)
-    af._test.reset()
+    __test_hooks('hull.web.auth-flows').reset()
     local opts = {
         secret = ("s"):rep(32),
         trust_request_host = true,
@@ -141,7 +142,7 @@ local function init(extra)
         totp_disable = function(id)
             S.totp_off[#S.totp_off + 1] = id
             S.order[#S.order + 1] = "totp"
-            S.locked_at_totp = af._test.recovery_locked(id)
+            S.locked_at_totp = __test_hooks('hull.web.auth-flows').recovery_locked(id)
         end,
         email_change_reauth = function() return true end,
     }
@@ -149,7 +150,7 @@ local function init(extra)
     af.init(opts)
 end
 
-local H = af._test.handlers
+local H = __test_hooks('hull.web.auth-flows').handlers
 
 local function token_in(to)
     for i = #S.sent, 1, -1 do
@@ -184,7 +185,7 @@ end
 -- ── H1: token mails go to the stored address ──────────────────────
 
 test("same_address: equal after ASCII lowercasing, nothing more", function()
-    local sa = af._test.same_address
+    local sa = __test_hooks('hull.web.auth-flows').same_address
     assert_eq(sa("jose@x.test", "jose@x.test"), true)
     assert_eq(sa("jose@X.Test", "jose@x.test"), true, "domain case")
     assert_eq(sa("JOSE@x.test", "jose@x.test"), true, "local-part ASCII case")
@@ -297,13 +298,13 @@ test("the recovery lock does not expire; unlock_recovery clears it", function()
     add_user(21, "old20@x.test", "squatter-pw-1", true)
     -- The undo writes its lock with an expiry already past.
     -- (init refuses a ttl <= 0 since audit 14, so set the state directly.)
-    init(); af._test.state.email_change_ttl = -100
+    init(); __test_hooks('hull.web.auth-flows').state.email_change_ttl = -100
     local res = mkres()
     H.email_change_revoke(mkreq({ token = rtok }), res)
     assert_eq(res.code, 409, "cannot restore")
     init()
-    af._test.gc_expired()
-    assert_eq(af._test.recovery_locked(20), true, "still locked after expiry + gc")
+    __test_hooks('hull.web.auth-flows').gc_expired()
+    assert_eq(__test_hooks('hull.web.auth-flows').recovery_locked(20), true, "still locked after expiry + gc")
     S.sent = {}
     H.password_reset_request(mkreq({ email = "new20@x.test" }), mkres())
     assert_eq(sent_to("new20@x.test"), 0, "no reset while locked")
@@ -337,7 +338,7 @@ test("an undo whose restore the database refuses locks recovery", function()
     H.email_change_revoke(mkreq({ token = rtok }), res)
     assert_eq(res.code, 409, "nothing to restore to after all")
     assert_eq(u.email, "new30@x.test")
-    assert_eq(af._test.recovery_locked(30), true, "recovery locked")
+    assert_eq(__test_hooks('hull.web.auth-flows').recovery_locked(30), true, "recovery locked")
     assert_eq(crypto.verify_password("first-password-1", u.password_hash), false,
               "password made unusable")
     assert_eq(#S.totp_off, 1, "second factor dropped")
@@ -445,16 +446,47 @@ test("a14: a confirmation mail that cannot be sent leaves no pending change", fu
     end
 end)
 
-test("a14: the confirmation mail is not rate limited", function()
+-- Audit 16: the confirmation goes to an address the requester picks, so it is
+-- rate limited after all - as a 429 that starts nothing (audit 14's silent
+-- drop answered ok and left the pending row).
+test("a16: a full bucket for the new address is a 429 that starts nothing", function()
     reset_store(); init({ email_rate_limit = { limit = 3, window = 900 } })
+    local hooks = __test_hooks('hull.web.auth-flows')
+    hooks.email_rate_reset()
     add_user(52, "old52@x.test", "first-password-1", true)
-    -- The new address's bucket is full (mails anyone could have caused).
-    for _ = 1, 3 do af._test.email_rate_allow("new52@x.test") end
-    assert_eq(af._test.email_rate_allow("new52@x.test"), false, "bucket full")
+    for _ = 1, 3 do hooks.email_rate_allow("new52@x.test") end
+    assert_eq(hooks.email_rate_allow("new52@x.test"), false, "bucket full")
     S.sent = {}
-    local res = start_change(52, "new52@x.test")
-    assert_eq(res.body and res.body.ok, true)
-    assert_eq(sent_to("new52@x.test"), 1, "confirmation sent anyway")
+    local res = start_change(52, "NEW52@x.test")
+    assert_eq(res.code, 429, "429")
+    assert_eq(tonumber(res.headers["Retry-After"]) ~= nil, true, "Retry-After")
+    assert_eq(#S.sent, 0, "no notice, no confirmation")
+    res = start_change(52, "other52@x.test")
+    assert_eq(res.body and res.body.ok, true, "no pending row was left")
+    hooks.email_rate_reset()
+end)
+
+test("a16: revoking pending changes does not reset the limits", function()
+    reset_store(); init({ email_rate_limit = { limit = 3, window = 900 } })
+    local hooks = __test_hooks('hull.web.auth-flows')
+    hooks.email_rate_reset()
+    add_user(54, "old54@x.test", "first-password-1", true)
+    for i = 1, 3 do
+        local res = start_change(54, "victim@x.test")
+        assert_eq(res.body and res.body.ok, true, "request " .. i)
+        res = mkres()
+        H.email_change_revoke(mkreq({ token = token_in("old54@x.test") }), res)
+        assert_eq(res.code, 200, "revoke " .. i)
+    end
+    assert_eq(sent_to("victim@x.test"), 3, "three confirmations")
+    local res = start_change(54, "victim@x.test")
+    assert_eq(res.code, 429, "the 4th to the same address")
+    assert_eq(sent_to("victim@x.test"), 3, "no 4th mail")
+    -- Another address: the account's own bucket is full too.
+    res = start_change(54, "victim2@x.test")
+    assert_eq(res.code, 429, "the account's 5th request")
+    assert_eq(sent_to("victim2@x.test"), 0, "nothing to the other address")
+    hooks.email_rate_reset()
 end)
 
 test("a14: magic link + TOTP records magic_link+totp; password records password+totp", function()

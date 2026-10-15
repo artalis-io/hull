@@ -357,6 +357,14 @@ Authy, 1Password - supports).
     account's row does not open there. Rows sealed before, without that
     binding, still open and are re-sealed bound on the account's next
     successful verify or by `totp.rekey()`.
+  - `opts.allow_unbound_secrets` (`allowUnboundSecrets`, default `true`).
+    An unbound secret (sealed before audit 15) opens for ANY account, so
+    whoever can write `_hull_totp` could copy their own into another
+    account's row, and the next verify would seal it bound to that account
+    for good. Set it `false` once `totp.rekey_status().unbound`
+    (`rekeyStatus().unbound`) is `0` - every old row re-sealed by
+    `totp.rekey()` or the user's next verify; unbound secrets are then
+    refused (audit 16). A non-boolean makes `init` raise.
   - `opts.lockout_duration_per_ip` (`lockoutDurationPerIp`) must be a
     positive number of seconds; anything else (a string, `0`, NaN) makes
     `init` raise (audit 15).
@@ -375,6 +383,15 @@ Authy, 1Password - supports).
   codes get `used_at` stamped.
 - `totp.disable(user_id)` - deletes secret + recovery codes.
 - `totp.enrolled(user_id)` → bool. Confirmed enrollment check.
+- `totp.rekey()` → `{ scanned, rekeyed, failed }` re-seals every row under
+  the current key (and bound to its account). `totp.rekey_status()`
+  (`rekeyStatus()`) → `{ total, unbound, [key_version] = count }` without
+  writing; `unbound` counts the rows still sealed without their account
+  (audit 16), whether or not `allow_unbound_secrets` lets them open.
+- A user id is a non-empty string or an integer (a JS safe integer or
+  bigint); an integral float within 2^53 (`42.0`, from a REAL column or
+  arithmetic) is that integer in both runtimes (audit 16: Lua refused it,
+  so a user enrolled as `42` could not verify as `42.0`).
 - Login-time 2FA gating happens via `hull/web/auth-flows`
   (enable_totp + user_totp_enrolled + totp_verify callbacks). There
   is no `totp.middleware` / `pending_2fa` mechanism - the auth-flows
@@ -577,12 +594,19 @@ verify step between successful first-factor auth and `on_login` when
       has no address - the change is not started: no pending row is left and
       the request answers 503 (`{error = "could not notify the current
       address; email change not started"}`). The confirm mail to the new
-      address is held to the same rule (audit 14): it skips the rate limit
-      (which dropped it silently while the request answered ok and the
-      pending row blocked a retry), an async `emailSend` is awaited, and
-      when it cannot be sent no pending row is left and the request answers
-      503 (`{error = "could not send the confirmation to the new address;
-      email change not started"}`). A revoke that lands while the change is
+      address is held to the same rule (audit 14): an async `emailSend` is
+      awaited, and when it cannot be sent no pending row is left and the
+      request answers 503 (`{error = "could not send the confirmation to the
+      new address; email change not started"}`). Unlike the notice it is
+      rate limited, since it goes to an address the requester picks (audit
+      16): the new address's per-recipient `email_rate_limit` bucket, and
+      the account's own bucket of email-change requests (same limit and
+      window; revoking a pending change does not reset it, so request /
+      revoke / repeat cannot mail an address without end), are checked
+      before anything is stored or sent. Refused, nothing is pending, no
+      notice goes out, and the request answers 429 with `Retry-After`
+      (`{error = "too many email change requests; try again later"}`).
+      `email_rate_limit = false` turns both off. A revoke that lands while the change is
       being confirmed (between the confirm's row write and its address
       switch) wins: the confirm sees the row undone after the switch, puts
       the old address back and answers 409. Clicking it (and submitting the

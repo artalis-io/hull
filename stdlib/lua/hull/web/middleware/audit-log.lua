@@ -559,7 +559,9 @@ function audit_log.recompute_fingerprints()
 end
 
 -- Exposed for tests (mocking time, inspecting normalize behavior).
-audit_log._test = {
+-- Test-only hooks, registered with the stdlib-internal hull._test_hooks
+-- rather than exported (audit 16): app code could call them.
+require("hull._test_hooks").register("hull.web.middleware.audit-log", {
     normalize_ua = normalize_ua,
     ip_prefix    = ip_prefix,
     reset = function()
@@ -570,6 +572,6 @@ audit_log._test = {
         _state._cleanup_opted_out = false
         _state._initialized      = false
     end,
-}
+})
 
 return audit_log

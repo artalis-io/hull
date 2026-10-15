@@ -17,6 +17,7 @@
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 import { time } from "hull:time";
+import { _test_hooks } from "hull:_test_hooks";
 
 let inboxTtl = 604800; // default 7 days
 
@@ -226,6 +227,9 @@ const _test = {
                 [normSource(source), normId(messageId)]);
     },
 };
+// Registered with the stdlib-internal hull:_test_hooks rather than exported
+// (audit 16): app code could call them.
+_test_hooks.register("hull:web:middleware:inbox", _test);
 
-const inbox = { init, isDuplicate, markProcessed, checkAndMark, cleanup, _test };
+const inbox = { init, isDuplicate, markProcessed, checkAndMark, cleanup };
 export { inbox };

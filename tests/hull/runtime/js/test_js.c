@@ -90,6 +90,20 @@ static void install_test_js_globals(HlJS *jsp)
                         JS_EVAL_TYPE_MODULE);
     JS_FreeValue(jsp->ctx, v);
     hl_js_run_jobs(jsp);
+
+    /* __testHooks(name): the test hooks stdlib module `name` registered with
+     * hull:_test_hooks (audit 16: no longer exported on the module, where app
+     * code could call them). Only a hull: module may import that internal
+     * module, so the harness evaluates its own under a hull: name - from C,
+     * which no script can do. A module registers its hooks when it loads: the
+     * script asking for them has imported it first. */
+    static const char *HOOKS =
+        "import { _test_hooks } from 'hull:_test_hooks';\n"
+        "globalThis.__testHooks = (name) => _test_hooks.get(name);\n";
+    v = JS_Eval(jsp->ctx, HOOKS, strlen(HOOKS), "hull:__test_harness",
+                JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(jsp->ctx, v);
+    hl_js_run_jobs(jsp);
 }
 
 /* The runtime's __hull_* tables live in a store held in C (audit 15), out
@@ -2537,7 +2551,7 @@ UTEST(js_stdlib, totp_rfc_vectors)
      * suite so any divergence between runtimes shows up immediately. */
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
-        "const t = totp._test;\n"
+        "const t = __testHooks('hull:web:middleware:totp');\n"
         "globalThis.__b32 = t.base32Encode('foobar');\n"
         "globalThis.__b32_rt = "
         "  t.base32Decode(t.base32Encode('12345678901234567890')) === "
@@ -2580,20 +2594,20 @@ UTEST(js_stdlib, totp_enroll_confirm_verify)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  totp.init({ issuer: 'TestApp' });\n"
         "  const r = totp.enroll('user-1');\n"
         "  if (typeof r.secretBase32 !== 'string') return 0;\n"
         "  if (!r.qrSvg.includes('<svg')) return 0;\n"
         "  if (r.recoveryCodes.length !== 10) return 0;\n"
         "  if (!r.otpauthUrl.includes('otpauth://totp/TestApp:user-1')) return 0;\n"
-        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "  const step = totp._test.currentStep();\n"
-        "  const code = totp._test.totpAtStep(secret, step, 6);\n"
+        "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "  const step = __testHooks('hull:web:middleware:totp').currentStep();\n"
+        "  const code = __testHooks('hull:web:middleware:totp').totpAtStep(secret, step, 6);\n"
         "  if (!totp.confirm('user-1', code)) return 0;\n"
         "  if (!totp.enrolled('user-1')) return 0;\n"
         "  if (totp.verify('user-1', code)) return 0;\n"
-        "  const nextCode = totp._test.totpAtStep(secret, step + 1, 6);\n"
+        "  const nextCode = __testHooks('hull:web:middleware:totp').totpAtStep(secret, step + 1, 6);\n"
         "  const v = totp.verifyWithKind('user-1', nextCode);\n"
         "  if (!v[0] || v[1] !== 'totp') return 0;\n"
         "  if (totp.verify('user-1', nextCode)) return 0;\n"
@@ -2620,17 +2634,17 @@ UTEST(js_stdlib, totp_pending_cleanup)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  totp.init({ pendingTtl: 60, cleanup: false, window: 10, "
         "               recoveryCodes: 0 });\n"
         "  const r = totp.enroll('u-fresh');\n"
         "  totp.enroll('u-stale');\n"
-        "  totp._test.forcePendingStale('u-stale');\n"
+        "  __testHooks('hull:web:middleware:totp').forcePendingStale('u-stale');\n"
         "  if (totp.cleanup() !== 1) return 0;\n"
         "  if (totp.cleanup() !== 0) return 0;\n"
-        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "  const step = totp._test.currentStep();\n"
-        "  const good = totp._test.totpAtStep(secret, step, 6);\n"
+        "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "  const step = __testHooks('hull:web:middleware:totp').currentStep();\n"
+        "  const good = __testHooks('hull:web:middleware:totp').totpAtStep(secret, step, 6);\n"
         "  if (!totp.confirm('u-fresh', good)) return 0;\n"
         "  if (totp.confirm('u-stale', good)) return 0;\n"
         "  return 1;\n"
@@ -2657,26 +2671,26 @@ UTEST(js_stdlib, totp_brute_force_lockout)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  totp.init({ maxFailedAttempts: 3, lockoutDuration: 60, "
         "               window: 10, recoveryCodes: 0 });\n"
         "  const r = totp.enroll('u1');\n"
-        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "  const step = totp._test.currentStep();\n"
-        "  if (!totp.confirm('u1', totp._test.totpAtStep(secret, step, 6))) return 0;\n"
+        "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "  const step = __testHooks('hull:web:middleware:totp').currentStep();\n"
+        "  if (!totp.confirm('u1', __testHooks('hull:web:middleware:totp').totpAtStep(secret, step, 6))) return 0;\n"
         "  if (totp.verify('u1', '000000')) return 0;\n"
         "  if (totp.verify('u1', '000001')) return 0;\n"
         "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
         "  if (totp.verify('u1', '000002')) return 0;\n"
         "  const remain = totp.lockoutRemaining('u1');\n"
         "  if (remain <= 0 || remain > 60) return 0;\n"
-        "  const good = totp._test.totpAtStep(secret, step + 2, 6);\n"
+        "  const good = __testHooks('hull:web:middleware:totp').totpAtStep(secret, step + 2, 6);\n"
         "  if (totp.verify('u1', good)) return 0;\n"
-        "  totp._test.clearFailedAttempts('u1');\n"
+        "  __testHooks('hull:web:middleware:totp').clearFailedAttempts('u1');\n"
         "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
         "  if (totp.verify('u1', '000000')) return 0;\n"
         "  if (totp.verify('u1', '000001')) return 0;\n"
-        "  const good2 = totp._test.totpAtStep(secret, step + 3, 6);\n"
+        "  const good2 = __testHooks('hull:web:middleware:totp').totpAtStep(secret, step + 3, 6);\n"
         "  if (!totp.verify('u1', good2)) return 0;\n"
         "  if (totp.verify('u1', '000000')) return 0;\n"
         "  if (totp.verify('u1', '000001')) return 0;\n"
@@ -2703,12 +2717,12 @@ UTEST(js_stdlib, totp_recovery_and_disable)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  totp.init({ issuer: 'TestApp', recoveryCodes: 3 });\n"
         "  const r = totp.enroll('user-2');\n"
-        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "  const code = totp._test.totpAtStep(secret, "
-        "    totp._test.currentStep(), 6);\n"
+        "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "  const code = __testHooks('hull:web:middleware:totp').totpAtStep(secret, "
+        "    __testHooks('hull:web:middleware:totp').currentStep(), 6);\n"
         "  if (!totp.confirm('user-2', code)) return 0;\n"
         "  const rc = r.recoveryCodes[0];\n"
         "  const v1 = totp.verifyWithKind('user-2', rc);\n"
@@ -2740,7 +2754,7 @@ UTEST(js_stdlib, totp_ct_eq_and_normalize)
 
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
-        "const t = totp._test;\n"
+        "const t = __testHooks('hull:web:middleware:totp');\n"
         "function run() {\n"
         "  if (!t.ctEq('287082', '287082')) return 0;\n"
         "  if ( t.ctEq('287082', '287083')) return 0;\n"
@@ -2774,12 +2788,12 @@ UTEST(js_stdlib, totp_recovery_accepts_user_typed_forms)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  totp.init({ issuer: 'TestApp', recoveryCodes: 4 });\n"
         "  const r = totp.enroll('rec-user');\n"
-        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "  const code = totp._test.totpAtStep(secret,\n"
-        "    totp._test.currentStep(), 6);\n"
+        "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "  const code = __testHooks('hull:web:middleware:totp').totpAtStep(secret,\n"
+        "    __testHooks('hull:web:middleware:totp').currentStep(), 6);\n"
         "  if (!totp.confirm('rec-user', code)) return 0;\n"
         "  const rc = r.recoveryCodes[0];\n"
         "  const plain = rc.replace(/-/g, '');\n"
@@ -2812,20 +2826,20 @@ UTEST(js_stdlib, totp_encryption_round_trip)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  totp.init({ issuer: 'TestApp', encryptionKey: 'k'.repeat(32) });\n"
         "  const r = totp.enroll('user-4');\n"
-        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "  const code = totp._test.totpAtStep(secret, "
-        "    totp._test.currentStep(), 6);\n"
+        "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "  const code = __testHooks('hull:web:middleware:totp').totpAtStep(secret, "
+        "    __testHooks('hull:web:middleware:totp').currentStep(), 6);\n"
         "  if (!totp.confirm('user-4', code)) return 0;\n"
-        "  const next = totp._test.totpAtStep(secret, "
-        "    totp._test.currentStep() + 1, 6);\n"
+        "  const next = __testHooks('hull:web:middleware:totp').totpAtStep(secret, "
+        "    __testHooks('hull:web:middleware:totp').currentStep() + 1, 6);\n"
         "  if (!totp.verify('user-4', next)) return 0;\n"
-        "  const enc = totp._test.encryptSecret(secret);\n"
+        "  const enc = __testHooks('hull:web:middleware:totp').encryptSecret(secret);\n"
         "  if (enc[1] !== 1) return 0;\n"
         "  if (enc[0].length <= secret.length) return 0;\n"
-        "  const dec = totp._test.decryptSecret(enc[0], 1);\n"
+        "  const dec = __testHooks('hull:web:middleware:totp').decryptSecret(enc[0], 1);\n"
         "  if (dec[0] !== secret || dec[1] !== 1) return 0;\n"
         "  return 1;\n"
         "}\n"
@@ -2851,16 +2865,16 @@ UTEST(js_stdlib, totp_key_rotation_lazy_on_verify_js)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  const k1 = 'a'.repeat(32);\n"
         "  const k2 = 'b'.repeat(32);\n"
         "  totp.init({ encryptionKeys: {1: k1}, current: 1 });\n"
         "  const r = totp.enroll('u');\n"
-        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "  const step = totp._test.currentStep();\n"
-        "  if (!totp.confirm('u', totp._test.totpAtStep(secret, step, 6))) return 2;\n"
+        "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "  const step = __testHooks('hull:web:middleware:totp').currentStep();\n"
+        "  if (!totp.confirm('u', __testHooks('hull:web:middleware:totp').totpAtStep(secret, step, 6))) return 2;\n"
         "  totp.init({ encryptionKeys: {1: k1, 2: k2}, current: 2 });\n"
-        "  if (!totp.verify('u', totp._test.totpAtStep(secret, step + 1, 6))) return 3;\n"
+        "  if (!totp.verify('u', __testHooks('hull:web:middleware:totp').totpAtStep(secret, step + 1, 6))) return 3;\n"
         "  const r2 = totp.rekey();\n"
         "  if (r2.scanned !== 1) return 100 + r2.scanned;\n"
         "  if (r2.rekeyed !== 0) return 200 + r2.rekeyed;\n"
@@ -3019,14 +3033,14 @@ UTEST(js_stdlib, totp_rekey_batch_helper_js)
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
-        "  totp._test.reset();\n"
+        "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  const k1 = 'a'.repeat(32);\n"
         "  const k2 = 'b'.repeat(32);\n"
         "  totp.init({ encryptionKeys: {1: k1}, current: 1 });\n"
         "  for (let i = 1; i <= 3; i++) {\n"
         "    const r = totp.enroll('u' + i);\n"
-        "    const secret = totp._test.base32Decode(r.secretBase32);\n"
-        "    const code = totp._test.totpAtStep(secret, totp._test.currentStep(), 6);\n"
+        "    const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
+        "    const code = __testHooks('hull:web:middleware:totp').totpAtStep(secret, __testHooks('hull:web:middleware:totp').currentStep(), 6);\n"
         "    if (!totp.confirm('u' + i, code)) return 0;\n"
         "  }\n"
         "  totp.init({ encryptionKeys: {1: k1, 2: k2}, current: 2 });\n"
@@ -3052,7 +3066,7 @@ UTEST(js_stdlib, totp_rekey_batch_helper_js)
 
 #define AF_INIT_JS \
     "import { authFlows } from 'hull:web:auth-flows';\n" \
-    "authFlows._test.reset();\n" \
+    "__testHooks('hull:web:auth-flows').reset();\n" \
     "globalThis._users = {}; globalThis._byId = {}; globalThis._sent = [];\n" \
     "function defaults() { return { " \
     "  stateSecret: 'k'.repeat(32), " \
@@ -3555,7 +3569,7 @@ UTEST(js_stdlib, audit3_stdlib_fixes)
         "  if (inbox.checkAndMark('m1', 'src') !== true) return 7;\n"
         "  try { inbox.checkAndMark('m2', 'src', { ttl: -1 }); return 8; } catch (_e) { }\n"
         "  if (inbox.checkAndMark('m2', 'src') !== false) return 8;\n"
-        "  inbox._test.expire('m2', 'src');\n"
+        "  __testHooks('hull:web:middleware:inbox').expire('m2', 'src');\n"
         "  if (inbox.checkAndMark('m2', 'src') !== false) return 9;\n"
         "  const quiet = { header() { return this; }, status() { return this; }, json() { return this; } };\n"
         "  const shared = (a, b) => {\n"
@@ -3872,26 +3886,26 @@ UTEST(js_stdlib, auth_flows_token_round_trip)
 
     const char *code = AF_INIT_JS
         "authFlows.init(defaults());\n"
-        "const A = authFlows._test.ACTIONS;\n"
+        "const A = __testHooks('hull:web:auth-flows').ACTIONS;\n"
         /* Indexed access instead of array destructuring - QuickJS's
          * js_parse_destructuring_element trips a MSan false-
          * positive that also bit qrcode.js and jwt.js earlier. */
         "function run() {\n"
-        "  const tok = authFlows._test.issueToken('u1', A.verify_email, 60);\n"
-        "  const r1 = authFlows._test.consumeToken(tok, A.verify_email);\n"
+        "  const tok = __testHooks('hull:web:auth-flows').issueToken('u1', A.verify_email, 60);\n"
+        "  const r1 = __testHooks('hull:web:auth-flows').consumeToken(tok, A.verify_email);\n"
         "  if (!r1[0] || r1[0].sub !== 'u1') return 0;\n"
-        "  const r2 = authFlows._test.consumeToken(tok, A.verify_email);\n"
+        "  const r2 = __testHooks('hull:web:auth-flows').consumeToken(tok, A.verify_email);\n"
         "  if (r2[0] || r2[1] !== 'replayed') return 0;\n"
         "  return 1;\n"
         "}\n"
         "function rejections() {\n"
-        "  const tok = authFlows._test.issueToken('u1', A.verify_email, 60);\n"
-        "  const r1 = authFlows._test.consumeToken(tok, A.password_reset);\n"
+        "  const tok = __testHooks('hull:web:auth-flows').issueToken('u1', A.verify_email, 60);\n"
+        "  const r1 = __testHooks('hull:web:auth-flows').consumeToken(tok, A.password_reset);\n"
         "  if (r1[1] !== 'wrong action') return 0;\n"
         "  const tampered = tok.slice(0, -2) + (tok.slice(-1) === 'a' ? 'bb' : 'aa');\n"
-        "  const r2 = authFlows._test.consumeToken(tampered, A.verify_email);\n"
+        "  const r2 = __testHooks('hull:web:auth-flows').consumeToken(tampered, A.verify_email);\n"
         "  if (r2[1] !== 'bad tag') return 0;\n"
-        "  const r3 = authFlows._test.consumeToken('garbage', A.verify_email);\n"
+        "  const r3 = __testHooks('hull:web:auth-flows').consumeToken('garbage', A.verify_email);\n"
         "  if (r3[1] !== 'malformed') return 0;\n"
         "  return 1;\n"
         "}\n"
@@ -3918,8 +3932,8 @@ UTEST(js_stdlib, auth_flows_cross_site_guard)
 
     const char *code = AF_INIT_JS
         "authFlows.init(defaults());\n"
-        "const g = authFlows._test.sameOriginRequest;\n"
-        "const st = authFlows._test.state;\n"
+        "const g = __testHooks('hull:web:auth-flows').sameOriginRequest;\n"
+        "const st = __testHooks('hull:web:auth-flows').state;\n"
         "st.trustRequestHost = false; st.trustedHosts = ['app.example.com'];\n"
         "const form = 'application/x-www-form-urlencoded';\n"
         "function req(h, body) { if (!h['content-type']) h['content-type'] = form;\n"
@@ -3985,13 +3999,13 @@ UTEST(js_stdlib, auth_flows_register_verify_login)
 
     const char *code = AF_INIT_JS
         "authFlows.init(defaults());\n"
-        "const A = authFlows._test.ACTIONS;\n"
+        "const A = __testHooks('hull:web:auth-flows').ACTIONS;\n"
         "function run() {\n"
         "  authFlows.sendVerifyEmail({id: 'u1', email: 'a@x.com'}, 'http://t.io');\n"
         "  if (globalThis._sent.length !== 1) return 0;\n"
         "  const link = globalThis._sent[0].text;\n"
         "  const tok = link.match(/token=(.+)/)[1];\n"
-        "  const r = authFlows._test.consumeToken(tok, A.verify_email);\n"
+        "  const r = __testHooks('hull:web:auth-flows').consumeToken(tok, A.verify_email);\n"
         "  return (r[0] && r[0].sub === 'u1') ? 1 : 0;\n"
         "}\n"
         "globalThis.__af_flow = run();\n";
@@ -4013,8 +4027,8 @@ UTEST(js_stdlib, auth_flows_input_validation)
 
     const char *code =
         "import { authFlows } from 'hull:web:auth-flows';\n"
-        "authFlows._test.reset();\n"
-        "const t = authFlows._test;\n"
+        "__testHooks('hull:web:auth-flows').reset();\n"
+        "const t = __testHooks('hull:web:auth-flows');\n"
         "function run() {\n"
         "  if (!t.isEmailIsh('a@b.co')) return 0;\n"
         "  if ( t.isEmailIsh('')) return 0;\n"
@@ -4047,7 +4061,7 @@ UTEST(js_stdlib, auth_flows_magic_link_auto_signup_opt_in)
         "  authFlows.init(defaults());\n"
         "  authFlows.sendMagicLink('unknown@x.com', 'http://t.io');\n"
         "  if (globalThis._sent.length !== 0) return 0;\n"
-        "  authFlows._test.reset();\n"
+        "  __testHooks('hull:web:auth-flows').reset();\n"
         "  globalThis._sent = []; globalThis._users = {}; globalThis._byId = {};\n"
         "  const o = defaults();\n"
         "  o.magicLinkAutoSignup = true;\n"
@@ -4083,9 +4097,9 @@ UTEST(js_stdlib, auth_flows_state_secret_non_ascii_round_trip)
         "  const o = defaults();\n"
         "  o.stateSecret = String.fromCharCode(0x80).repeat(32);\n"
         "  authFlows.init(o);\n"
-        "  const A = authFlows._test.ACTIONS;\n"
-        "  const tok = authFlows._test.issueToken('u1', A.verify_email, 60);\n"
-        "  const r = authFlows._test.parseToken(tok, A.verify_email);\n"
+        "  const A = __testHooks('hull:web:auth-flows').ACTIONS;\n"
+        "  const tok = __testHooks('hull:web:auth-flows').issueToken('u1', A.verify_email, 60);\n"
+        "  const r = __testHooks('hull:web:auth-flows').parseToken(tok, A.verify_email);\n"
         "  return (r && r[0] && r[1] === null && r[0].sub === 'u1') ? 1 : 0;\n"
         "}\n"
         "globalThis.__af_state = run();\n";
@@ -4115,20 +4129,20 @@ UTEST(js_stdlib, auth_flows_email_rate_limit_per_recipient)
         "  const o = defaults();\n"
         "  o.emailRateLimit = { limit: 2, window: 60 };\n"
         "  authFlows.init(o);\n"
-        "  const a1 = authFlows._test.emailRateAllow('victim@x.com');\n"
-        "  const a2 = authFlows._test.emailRateAllow('victim@x.com');\n"
-        "  const a3 = authFlows._test.emailRateAllow('victim@x.com');\n"
-        "  const b1 = authFlows._test.emailRateAllow('other@x.com');\n"
-        "  const c1 = authFlows._test.emailRateAllow('VICTIM@x.com');\n"
-        "  authFlows._test.emailRateReset();\n"
-        "  const d1 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  const a1 = __testHooks('hull:web:auth-flows').emailRateAllow('victim@x.com');\n"
+        "  const a2 = __testHooks('hull:web:auth-flows').emailRateAllow('victim@x.com');\n"
+        "  const a3 = __testHooks('hull:web:auth-flows').emailRateAllow('victim@x.com');\n"
+        "  const b1 = __testHooks('hull:web:auth-flows').emailRateAllow('other@x.com');\n"
+        "  const c1 = __testHooks('hull:web:auth-flows').emailRateAllow('VICTIM@x.com');\n"
+        "  __testHooks('hull:web:auth-flows').emailRateReset();\n"
+        "  const d1 = __testHooks('hull:web:auth-flows').emailRateAllow('victim@x.com');\n"
         "  /* Disabled cfg: every call allowed. */\n"
         "  const o2 = defaults();\n"
         "  o2.emailRateLimit = false;\n"
         "  authFlows.init(o2);\n"
-        "  const off1 = authFlows._test.emailRateAllow('victim@x.com');\n"
-        "  const off2 = authFlows._test.emailRateAllow('victim@x.com');\n"
-        "  const off3 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  const off1 = __testHooks('hull:web:auth-flows').emailRateAllow('victim@x.com');\n"
+        "  const off2 = __testHooks('hull:web:auth-flows').emailRateAllow('victim@x.com');\n"
+        "  const off3 = __testHooks('hull:web:auth-flows').emailRateAllow('victim@x.com');\n"
         "  return (a1 && a2 && !a3 && b1 && !c1 && d1 "
         "          && off1 && off2 && off3) ? 1 : 0;\n"
         "}\n"
@@ -5348,6 +5362,22 @@ UTEST(js_stdlib, stdlib_audit15_suite)
         sqlite3_finalize(st);
     }
 
+    cleanup_js_caps();
+}
+
+/* Stdlib regressions from audit 16: no module exports its test hooks to app
+ * code (hull:_test_hooks is stdlib-internal), totp's allowUnboundSecrets and
+ * rekeyStatus().unbound, and 42.0 / 42 as one user id. */
+UTEST(js_stdlib, stdlib_audit16_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit16.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
 
@@ -7178,7 +7208,7 @@ UTEST(js_stdlib, auth_flows_origin_is_built_from_the_allowlist)
     int v = run_verdict_module(
         AF_INIT_JS
         "authFlows.init(defaults());\n"
-        "const o = authFlows._test.originFor;\n"
+        "const o = __testHooks('hull:web:auth-flows').originFor;\n"
         "const req = h => ({ headers: h });\n"
         "let step = 0;\n"
         "if (o(req({host: 'app.example.com:8443'})) !== 'http://app.example.com:8443') step = 1;\n"
@@ -7186,7 +7216,7 @@ UTEST(js_stdlib, auth_flows_origin_is_built_from_the_allowlist)
         "else if (o(req({host: 'evil.com/x'})) !== null) step = 3;\n"
         "else if (o(req({host: 'app.example.com', 'x-forwarded-host': 'evil.com'})) !== 'http://app.example.com') step = 4;\n"
         "if (!step) {\n"
-        "  const st = authFlows._test.state;\n"
+        "  const st = __testHooks('hull:web:auth-flows').state;\n"
         "  st.trustRequestHost = false; st.trustedHosts = ['app.example.com'];\n"
         "  if (o(req({host: 'app.example.com:@evil.com'})) !== null) step = 5;\n"
         "  else if (o(req({host: 'app.example.com:8443'})) !== 'https://app.example.com') step = 6;\n"

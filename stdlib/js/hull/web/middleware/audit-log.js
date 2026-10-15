@@ -186,6 +186,7 @@ function extractUa(req) {
 }
 
 import { encoding } from "hull:encoding";
+import { _test_hooks } from "hull:_test_hooks";
 
 // From SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix). Salt is
 // deployment-private (from init's fingerprintSalt opt) so output is only
@@ -445,8 +446,11 @@ const _test = {
         _state.initialized     = false;
     },
 };
+// Registered with the stdlib-internal hull:_test_hooks rather than exported
+// (audit 16): app code could call them.
+_test_hooks.register("hull:web:middleware:audit-log", _test);
 
 const auditLog = { init, record, list, listDevices, isNewDevice,
                     fingerprint, cleanup, isCleanupScheduled,
-                    cleanupStatus, recomputeFingerprints, _test };
+                    cleanupStatus, recomputeFingerprints };
 export { auditLog };

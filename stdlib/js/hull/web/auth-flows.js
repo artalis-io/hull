@@ -173,6 +173,7 @@ const UNDONE_MARK = "undone";
 const UNDONE_LOCKED_MARK = "undone_unrestored";
 
 import { encoding } from "hull:encoding";
+import { _test_hooks } from "hull:_test_hooks";
 
 // Signature framing lives in hull:crypto:envelope; this wrapper
 // just builds the payload and adds optional extra fields. The
@@ -289,11 +290,17 @@ let _emailRl = new Map();
 // over the cap by saturated buckets does not re-sweep for every new key.
 let _emailRlSweepAt = 0;
 
-function emailRateAllow(to) {
+// emailRateAllow: true or false. emailRateRetry: after a refusal, the seconds
+// until the bucket has room again. `exact` keys the bucket by `to` as given
+// rather than lower-cased (the per-account email-change bucket, audit 16).
+let _emailRlRetry = 0;
+function emailRateRetry() { return _emailRlRetry; }
+
+function emailRateAllow(to, exact) {
     const cfg = _state.emailRateLimit;
     if (!cfg || typeof cfg !== "object") return true;
     if (typeof to !== "string" || to === "") return true;
-    const key = to.toLowerCase();
+    const key = exact ? to : to.toLowerCase();
     const now = time.now();
     const window = cfg.window || 900;
     const limit = cfg.limit || 3;
@@ -352,7 +359,11 @@ function emailRateAllow(to) {
         }
     }
     bucket.ts = bucket.ts.filter(t => t > cutoff);
-    if (bucket.ts.length >= limit) return false;
+    if (bucket.ts.length >= limit) {
+        const freesAt = bucket.ts[bucket.ts.length - limit] + window;
+        _emailRlRetry = Math.max(1, Math.ceil(freesAt - now));
+        return false;
+    }
     bucket.ts.push(now);
     return true;
 }
@@ -1720,6 +1731,19 @@ async function handleEmailChange(req, res) {
         });
     }
 
+    // Rate limits (audit 16; see the Lua sibling): the confirmation is held to
+    // the per-recipient limit, and the account to the same limit on requests,
+    // which a revoke does not reset - checked before anything is stored or
+    // sent, refused with a 429.
+    let allowed = emailRateAllow("\0email-change:" + key, true);
+    if (allowed) allowed = emailRateAllow(body.new_email);
+    if (!allowed) {
+        res.header("Retry-After", String(emailRateRetry()));
+        return res.status(429).json({
+            error: "too many email change requests; try again later",
+        });
+    }
+
     const now = time.now();
     const token = issueToken(uid, ACTIONS.email_change,
         _state.emailChangeTtl, { new_email: body.new_email });
@@ -1772,10 +1796,10 @@ async function handleEmailChange(req, res) {
     }
     const link = origin + _state.prefix
         + "/email-change/confirm?token=" + token;
-    // Like the notice, the confirmation is required (audit 14): it skips the
-    // per-recipient rate limit (which dropped it silently, answering ok while
-    // the pending row blocked a retry for emailChangeTtl), an async emailSend
-    // is awaited, and when it cannot be sent (a throw, a rejection, false)
+    // Like the notice, the confirmation is required (audit 14): the
+    // per-recipient limit was applied above, as a 429 (dropped here it
+    // answered ok while the pending row blocked a retry for emailChangeTtl),
+    // an async emailSend is awaited, and when it cannot be sent (a throw, a rejection, false)
     // the row goes and the request answers 503.
     try {
         let sent = sendEmail(body.new_email, "email_change", {
@@ -2586,7 +2610,7 @@ const _test = {
         magicLinkConsume: handleMagicLinkConsume,
     },
     ACTIONS,
-    emailRateAllow: (to) => emailRateAllow(to),
+    emailRateAllow: (to, exact) => emailRateAllow(to, exact),
     emailRateReset: () => { _emailRl = new Map(); },
     reset: () => {
         _state.stateSecret = null;
@@ -2624,11 +2648,13 @@ const _test = {
         _state.initialized          = false;
     },
 };
+// Registered with the stdlib-internal hull:_test_hooks rather than exported
+// (audit 16): app code could call them.
+_test_hooks.register("hull:web:auth-flows", _test);
 
 const authFlows = {
     init, routes, standardUsers,
     sendVerifyEmail, sendPasswordReset, sendMagicLink, emailReserved,
     unlockRecovery,
-    _test,
 };
 export { authFlows };

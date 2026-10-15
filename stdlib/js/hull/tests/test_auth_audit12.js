@@ -15,8 +15,8 @@
 //
 // Audit 14 (the "a14:" tests): a revoke that lands between the confirm's row
 // write and its address switch wins; the confirm mail to the new address is
-// required (no rate limit, an async emailSend awaited, 503 and no pending row
-// when it cannot be sent); a magic-link sign-in with TOTP records
+// required (an async emailSend awaited, 503 and no pending row when it cannot
+// be sent; audit 16 holds it to the rate limits again, as a 429); a magic-link sign-in with TOTP records
 // "magic_link+totp"; init refuses counts and durations that are not whole
 // numbers above zero.
 //
@@ -84,7 +84,7 @@ function addUser(id, email, pw, verified) {
 }
 
 function init(extra) {
-    authFlows._test.reset();
+    __testHooks('hull:web:auth-flows').reset();
     authFlows.init(Object.assign({
         secret: "s".repeat(32),
         trustRequestHost: true,
@@ -137,13 +137,13 @@ function init(extra) {
         totpDisable: async (id) => {
             S.totpOff.push(id);
             S.order.push("totp");
-            S.lockedAtTotp = authFlows._test.recoveryLocked(id);
+            S.lockedAtTotp = __testHooks('hull:web:auth-flows').recoveryLocked(id);
         },
         emailChangeReauth: () => true,
     }, extra || {}));
 }
 
-const H = authFlows._test.handlers;
+const H = __testHooks('hull:web:auth-flows').handlers;
 
 function tokenIn(to) {
     for (let i = S.sent.length - 1; i >= 0; i--) {
@@ -175,7 +175,7 @@ async function confirmedChange(id, oldEmail, newEmail) {
 // ── H1: token mails go to the stored address ──────────────────────
 
 await test("sameAddress: equal after ASCII lowercasing, nothing more", () => {
-    const sa = authFlows._test.sameAddress;
+    const sa = __testHooks('hull:web:auth-flows').sameAddress;
     assertEq(sa("jose@x.test", "jose@x.test"), true);
     assertEq(sa("jose@X.Test", "jose@x.test"), true, "domain case");
     assertEq(sa("JOSE@x.test", "jose@x.test"), true, "local-part ASCII case");
@@ -289,13 +289,13 @@ await test("the recovery lock does not expire; unlockRecovery clears it", async 
     addUser(21, "old20@x.test", "squatter-pw-1", true);
     // The undo writes its lock with an expiry already past.
     // (init refuses a ttl <= 0 since audit 14, so set the state directly.)
-    init(); authFlows._test.state.emailChangeTtl = -100;
+    init(); __testHooks('hull:web:auth-flows').state.emailChangeTtl = -100;
     let res = mkRes();
     await H.emailChangeRevoke(mkReq({ token: rtok }), res);
     assertEq(res.code, 409, "cannot restore");
     init();
-    authFlows._test.gcExpired();
-    assertEq(authFlows._test.recoveryLocked(20), true, "still locked after expiry + gc");
+    __testHooks('hull:web:auth-flows').gcExpired();
+    assertEq(__testHooks('hull:web:auth-flows').recoveryLocked(20), true, "still locked after expiry + gc");
     S.sent = [];
     await H.passwordResetRequest(mkReq({ email: "new20@x.test" }), mkRes());
     assertEq(sentTo("new20@x.test"), 0, "no reset while locked");
@@ -329,7 +329,7 @@ await test("an undo whose restore the database refuses locks recovery", async ()
     await H.emailChangeRevoke(mkReq({ token: rtok }), res);
     assertEq(res.code, 409, "nothing to restore to after all");
     assertEq(u.email, "new30@x.test");
-    assertEq(authFlows._test.recoveryLocked(30), true, "recovery locked");
+    assertEq(__testHooks('hull:web:auth-flows').recoveryLocked(30), true, "recovery locked");
     assertEq(crypto.verifyPassword("first-password-1", u.password_hash), false,
              "password made unusable");
     assertEq(S.totpOff.length, 1, "second factor dropped");
@@ -439,16 +439,47 @@ await test("a14: a confirmation mail that cannot be sent leaves no pending chang
     }
 });
 
-await test("a14: the confirmation mail is not rate limited", async () => {
+// Audit 16: the confirmation goes to an address the requester picks, so it is
+// rate limited after all - as a 429 that starts nothing (audit 14's silent
+// drop answered ok and left the pending row).
+await test("a16: a full bucket for the new address is a 429 that starts nothing", async () => {
     resetStore(); init({ emailRateLimit: { limit: 3, window: 900 } });
+    const hooks = __testHooks('hull:web:auth-flows');
+    hooks.emailRateReset();
     addUser(52, "old52@x.test", "first-password-1", true);
-    // The new address's bucket is full (mails anyone could have caused).
-    for (let i = 0; i < 3; i++) authFlows._test.emailRateAllow("new52@x.test");
-    assertEq(authFlows._test.emailRateAllow("new52@x.test"), false, "bucket full");
+    for (let i = 0; i < 3; i++) hooks.emailRateAllow("new52@x.test");
+    assertEq(hooks.emailRateAllow("new52@x.test"), false, "bucket full");
     S.sent = [];
-    const res = await startChange(52, "new52@x.test");
-    assertEq(res.body && res.body.ok, true);
-    assertEq(sentTo("new52@x.test"), 1, "confirmation sent anyway");
+    let res = await startChange(52, "NEW52@x.test");
+    assertEq(res.code, 429, "429");
+    assertEq(Number(res.headers["Retry-After"]) > 0, true, "Retry-After");
+    assertEq(S.sent.length, 0, "no notice, no confirmation");
+    res = await startChange(52, "other52@x.test");
+    assertEq(res.body && res.body.ok, true, "no pending row was left");
+    hooks.emailRateReset();
+});
+
+await test("a16: revoking pending changes does not reset the limits", async () => {
+    resetStore(); init({ emailRateLimit: { limit: 3, window: 900 } });
+    const hooks = __testHooks('hull:web:auth-flows');
+    hooks.emailRateReset();
+    addUser(54, "old54@x.test", "first-password-1", true);
+    for (let i = 1; i <= 3; i++) {
+        let res = await startChange(54, "victim@x.test");
+        assertEq(res.body && res.body.ok, true, "request " + i);
+        res = mkRes();
+        await H.emailChangeRevoke(mkReq({ token: tokenIn("old54@x.test") }), res);
+        assertEq(res.code, 200, "revoke " + i);
+    }
+    assertEq(sentTo("victim@x.test"), 3, "three confirmations");
+    let res = await startChange(54, "victim@x.test");
+    assertEq(res.code, 429, "the 4th to the same address");
+    assertEq(sentTo("victim@x.test"), 3, "no 4th mail");
+    // Another address: the account's own bucket is full too.
+    res = await startChange(54, "victim2@x.test");
+    assertEq(res.code, 429, "the account's 5th request");
+    assertEq(sentTo("victim2@x.test"), 0, "nothing to the other address");
+    hooks.emailRateReset();
 });
 
 await test("a14: magic link + TOTP records magic_link+totp; password records password+totp", async () => {
