@@ -64,6 +64,16 @@ void *hl_wasm_watch_instantiate(HlWasmWatch *w, void *module,
                                 uint32_t stack_size, uint32_t heap_size,
                                 char *error_buf, uint32_t error_buf_size);
 
+/* hl_wasm_watch_instantiate with the instance's linear memory capped at
+ * @p max_memory_pages (WAMR's InstantiationArgs.max_memory_pages: 0 = the
+ * module's own maximum; never below the module's initial pages nor above its
+ * maximum; the app heap WAMR inserts is added on top). memory.grow past the
+ * cap returns -1 in the guest. */
+void *hl_wasm_watch_instantiate_capped(HlWasmWatch *w, void *module,
+                                       uint32_t stack_size, uint32_t heap_size,
+                                       uint32_t max_memory_pages,
+                                       char *error_buf, uint32_t error_buf_size);
+
 /* Effective timeout: @p ms when non-zero, else the default, clamped to the
  * compile-time maximum. */
 uint32_t hl_wasm_timeout_resolve(uint64_t ms);

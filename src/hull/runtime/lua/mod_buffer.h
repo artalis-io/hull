@@ -114,6 +114,29 @@ struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlHttpResponse *res,
 int luaopen_hull_ws_server(lua_State *L);
 int luaopen_hull_ws_client(lua_State *L);
 
+/* Outbound WebSocket connection userdata (lua/mod_ws_client.c; here so the
+ * binding tests can build one around a placeholder connection). */
+#include "hull/shared/async.h"   /* HlAsyncTeardown */
+#define HL_WS_CLIENT_CONN_MT "HlWsClientConn"
+struct KlWsClientConn;
+typedef struct HlLuaWsClientUD {
+    struct KlWsClientConn *client; /* NULL after free (GC only) */
+    int             closed;      /* 1 after on_close: fail methods closed,
+                                  * but keep `client` so __gc still frees it
+                                  * (Keel does not free the conn on close) */
+    int             on_open_ref;
+    int             on_message_ref;
+    int             on_close_ref;
+    int             on_error_ref;
+    int             self_ref;    /* registry ref to keep self alive */
+    lua_State      *L;           /* main thread */
+    HlLua          *lua;
+    /* On the runtime's teardown list while `client` is held: the Keel
+     * connection lives on the server's event loop, which is freed before the
+     * runtime, so teardown frees it first (audit 14 G1). */
+    HlAsyncTeardown teardown;
+} HlLuaWsClientUD;
+
 /* conn userdata helpers (defined in lua/mod_ws.c) */
 void hl_lua_ws_push_conn(lua_State *L, struct HlWsConn *conn);
 void hl_lua_ws_invalidate_conn(lua_State *L, struct HlWsConn *conn);

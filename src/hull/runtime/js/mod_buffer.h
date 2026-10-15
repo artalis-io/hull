@@ -124,9 +124,41 @@ int hl_js_init_ws_server_module(JSContext *ctx, HlJS *js);
 int hl_js_init_ws_client_module(JSContext *ctx, HlJS *js);
 
 /* Server-side conn class ID (in mod_ws_server.c) - referenced by
- * runtime/js/ws.c (Keel callback dispatcher). The client conn class
- * is internal to mod_ws_client.c. */
+ * runtime/js/ws.c (Keel callback dispatcher). */
 extern JSClassID js_ws_conn_class_id;
+
+/* Outbound WebSocket connection class and opaque (mod_ws_client.c; here so
+ * the binding tests can build one around a placeholder connection). */
+#include "hull/shared/async.h"   /* HlAsyncTeardown */
+extern JSClassID js_ws_client_conn_class_id;
+struct KlWsClientConn;
+typedef struct HlJSWsClientUD {
+    struct KlWsClientConn *client; /* NULL after free (finalizer only) */
+    int             closed;      /* 1 after on_close: fail methods closed,
+                                  * but keep `client` so the finalizer still
+                                  * frees it (Keel does not free the conn on
+                                  * close) */
+    JSValue         on_open;     /* DupValue'd callbacks */
+    JSValue         on_message;
+    JSValue         on_close;
+    JSValue         on_error;
+    /* A reference the object holds on itself while connected. Not reported
+     * by gc_mark, so the cycle collector sees an outside reference and keeps
+     * the object - and the callbacks it marks - as a root, whether or not
+     * the app kept the handle (audit 15: reported, the self-cycle was
+     * garbage, and a dropped client was collected and closed silently).
+     * Dropped one loop turn after the close (js_ws_client_finish), or by
+     * runtime teardown. */
+    JSValue         self_ref;
+    int             release_scheduled;  /* self_ref release already queued */
+    uint64_t        release_timer;      /* its backend timer, 0 once fired */
+    JSContext      *ctx;
+    HlJS           *js;
+    /* On the runtime's teardown list while `client` is held: the Keel
+     * connection lives on the server's event loop, which is freed before the
+     * runtime, so teardown frees it first (audit 14 G1). */
+    HlAsyncTeardown teardown;
+} HlJSWsClientUD;
 
 /* WS conn helpers (defined in js/mod_ws.c) */
 struct HlWsConn;

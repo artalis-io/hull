@@ -58,6 +58,7 @@ typedef struct HlWasmBuffer {
             uint32_t stack_size;
             uint32_t chain_gen;     /* HlWasmChainRef of the checked-out instance */
             int      chain_attached;
+            uint64_t reserved;      /* live-instance bytes reserved for it */
         } wasm;                                            /* pool_release() */
     } u;
 } HlWasmBuffer;
@@ -89,7 +90,9 @@ HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
 
 /**
  * Create a buffer backed by WASM instance linear memory.
- * The instance stays checked out until hl_wasm_buffer_destroy().
+ * The instance stays checked out until hl_wasm_buffer_destroy(), which hands
+ * @p reserved bytes (and the slot) back to the cache's live-instance budget
+ * (hl_wasm_live_instance_release).
  */
 HlWasmBuffer *hl_wasm_buffer_create_wasm(
     void *inst, void *exec_env, void *process_fn,
@@ -97,13 +100,13 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     uint64_t wasm_ptr, const void *native_ptr, size_t len,
     uint32_t heap_size, uint32_t stack_size,
     uint32_t chain_gen, int chain_attached,
-    HlAllocator *alloc);
+    uint64_t reserved, HlAllocator *alloc);
 
 /**
  * Off-VM-heap bytes a live buffer holds, for the runtimes' GC step: an OWNED
- * buffer's bytes, a WASM buffer's checked-out instance (app heap + exec-env
- * stack; its linear memory grows past that), 0 for a kernel mapping or a
- * closed buffer.
+ * buffer's bytes, a WASM buffer's checked-out instance (its whole linear
+ * memory - app heap and any memory.grow included - plus the exec-env stack,
+ * as reserved at checkout), 0 for a kernel mapping or a closed buffer.
  */
 static inline size_t hl_wasm_buffer_footprint(const HlWasmBuffer *buf)
 {
@@ -111,7 +114,8 @@ static inline size_t hl_wasm_buffer_footprint(const HlWasmBuffer *buf)
     switch (buf->kind) {
     case HL_WASM_BUF_OWNED: return buf->len;
     case HL_WASM_BUF_WASM:
-        return (size_t)buf->u.wasm.heap_size + (size_t)buf->u.wasm.stack_size;
+        return buf->u.wasm.reserved > (uint64_t)SIZE_MAX
+                   ? SIZE_MAX : (size_t)buf->u.wasm.reserved;
     default: return 0;
     }
 }
