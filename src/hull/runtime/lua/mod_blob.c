@@ -39,6 +39,8 @@
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
+#include "hull/limits/runtime.h"       /* HL_BLOB_READ_CHUNK_MAX */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "log.h"
 #include "protected.h"   /* pushes that cannot leak the C buffer */
 
@@ -359,27 +361,27 @@ static int lua_reader_read(lua_State *L)
         lua_pushlstring(L, "", 0);
         return 1;
     }
-    HlLua *lua = get_hl_lua(L);
-    /* Route through the Lua memory tracker (lua->base.alloc) so the
-     * runtime's memory cap covers transient read buffers - bare
-     * malloc would silently bypass JS_SetMemoryLimit's Lua sibling. */
-    uint8_t *buf = hl_alloc_malloc(lua->base.alloc, (size_t)cap);
-    if (!buf) return luaL_error(L, "blob.reader: out of memory");
+    /* n is the app's. The buffer was allocated at n, uncharged, from
+     * lua->base.alloc - the server's allocator, which no VM limit covers
+     * (audit 15). n is clamped now (a reader returns up to n bytes a call),
+     * the read is charged before it runs, and it reads into a luaL_Buffer
+     * box, which is VM memory. */
+    if ((lua_Unsigned)cap > HL_BLOB_READ_CHUNK_MAX)
+        cap = HL_BLOB_READ_CHUNK_MAX;
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)cap), 0);
+    luaL_Buffer lb;
+    char *buf = luaL_buffinitsize(L, &lb, (size_t)cap);
+    /* The box allocation can run a GC step, and an app __gc can close
+     * this reader. */
+    if (!ud->r) return luaL_error(L, "blob.reader: read after close");
     size_t got = 0;
-    if (hl_cap_blob_reader_read(ud->r, buf, (size_t)cap, &got) != 0) {
-        hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
+    if (hl_cap_blob_reader_read(ud->r, (uint8_t *)buf, (size_t)cap, &got) != 0)
         return luaL_error(L, "blob.reader: read failed");
-    }
     if (got == 0) {
-        hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
         lua_pushnil(L);
-    } else {
-        if (hl_lua_pushlstring_safe(L, (const char *)buf, got) != 0) {
-            hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
-            return luaL_error(L, "not enough memory for the result");
-        }
-        hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
+        return 1;
     }
+    luaL_pushresultsize(&lb, got);
     return 1;
 }
 
@@ -407,11 +409,30 @@ static int lua_blob_get(lua_State *L)
     int track = read_track_access(L, 2);
 
     HlLua *lua = get_hl_lua(L);
+    /* The cap reads the whole blob (up to 256 MB) into an off-heap buffer
+     * and SHA-256s it before the copy into the heap: a blob the heap could
+     * never hold is refused before that, and the read + hash is charged
+     * before it runs (audit 15). An unknown id is still nil. */
+    size_t want = 0;
+    if (hl_cap_blob_stat(b, id, &want, NULL) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (lua->mem_limit && want > lua->mem_limit)
+        return luaL_error(L, "blob.get: blob larger than the heap limit");
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)want), 0);
+
     uint8_t *buf = NULL;
     size_t len = 0;
     if (hl_cap_blob_get(b, id, track, &buf, &len) != 0) {
         lua_pushnil(L);
         return 1;
+    }
+    /* Sized from the opened file: a blob replaced since the stat (a shared
+     * store) is held to the same limit. */
+    if (lua->mem_limit && len > lua->mem_limit) {
+        hl_alloc_free(lua->base.alloc, buf, len);
+        return luaL_error(L, "blob.get: blob larger than the heap limit");
     }
     /* Empty-blob contract: (NULL, 0) pushes an empty string - no allocation
      * to free. Protected: a plain push that ran out of memory raised past the
@@ -477,12 +498,12 @@ typedef struct {
     size_t  size;
 } IterItem;
 
-/* Iter accumulator and the persisted iterator state both route
- * through `lua->base.alloc` so the runtime's memory cap covers the
- * snapshot array. Bare malloc/realloc/free would bypass the tracker
- * and turn a 10⁶-blob iter() into an off-tracker DoS vector. The
- * matching free in lua_iter_state_gc needs the same allocator and
- * the same capacity it was grown to - stash both on the state. */
+/* Iter accumulator and the persisted iterator state both use
+ * `lua->base.alloc`. That is the server's allocator, NOT the Lua heap
+ * tracker (hl_lua_alloc): the VM limit does not cover the snapshot array,
+ * which is bounded by the store's entry count (~72 bytes a blob). The
+ * matching free in lua_iter_state_gc needs the same allocator and the
+ * same capacity it was grown to - stash both on the state. */
 
 typedef struct {
     HlAllocator *alloc;

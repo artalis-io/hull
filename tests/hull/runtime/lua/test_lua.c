@@ -10407,6 +10407,252 @@ UTEST(lua_audit15, compute_stream_output_is_capped_at_the_heap_limit)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* ── Audit 15: off-heap whole-object reads, tar.create / tar.pack ──────
+ *
+ * fs.read, blob.get, a blob reader's read(n) and tar.pack read whole files
+ * into buffers from the server's allocator (no VM limit) and charged nothing
+ * for the read; tar.create / tar.pack built the archive off-heap, uncapped.
+ * Each is held to the heap limit before it allocates and charged before it
+ * reads now. The budgets below sit between the old cost (the copy into the
+ * heap, 1 unit per 64 bytes) and the new one (1 per 8 bytes read). */
+
+#include "hull/cap/fs_policy.h"   /* HlFsPolicy (a15 fixture) */
+
+typedef struct {
+    char        dir[HL_TEST_PATH_MAX];
+    HlAllocator alloc;
+    HlFsPolicy  policy;
+    HlFsConfig  fs;
+} A15Fs;
+
+#define A15_BIG (8 * 1024 * 1024)
+
+/* A temp app root with fs.read + fs.write over all of it and an 8 MB
+ * big.bin, wired into the caps runtime. */
+static int a15_fs_open(A15Fs *f)
+{
+    static const char *const all[] = { "." };
+    memset(f, 0, sizeof *f);
+    if (!hl_test_mkdtemp(f->dir, sizeof f->dir, "hull_a15")) return -1;
+    hl_alloc_init(&f->alloc, 0);
+    f->policy = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(f->dir, &f->alloc, all, 1, all, 1,
+                                      &f->policy, &perr) != 0)
+        return -1;
+    f->fs.base_dir = f->dir;
+    f->fs.base_len = strlen(f->dir);
+    f->fs.policy = &f->policy;
+    char p[HL_TEST_PATH_MAX + 16];
+    snprintf(p, sizeof p, "%s/big.bin", f->dir);
+    FILE *fp = fopen(p, "wb");
+    if (!fp) return -1;
+    static char chunk[65536];
+    memset(chunk, 'x', sizeof chunk);
+    for (int i = 0; i < A15_BIG / (int)sizeof chunk; i++)
+        fwrite(chunk, 1, sizeof chunk, fp);
+    fclose(fp);
+    lua_rt.base.fs_cfg = &f->fs;
+    return 0;
+}
+
+static void a15_fs_close(A15Fs *f)
+{
+    lua_rt.base.fs_cfg = NULL;
+    hl_fs_policy_free(&f->policy);
+    nftw(f->dir, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(lua_audit15, fs_read_is_charged_and_bounded)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    /* One 8 MB read: 1M units now, ~131k for the copy before. */
+    EXPECT_NE(audit10_run("local s = fs.read('big.bin') return 1",
+                          500000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("assert(#fs.read('big.bin') == 8 * 1024 * 1024) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* A file larger than the heap limit is refused before any allocation. */
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = 4 * 1024 * 1024;
+    EXPECT_EQ(audit10_run("local s, e = fs.read('big.bin') "
+                          "assert(s == nil and e == 'file_too_large', tostring(e)) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    lua_rt.mem_limit = saved;
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit15, blob_reads_are_charged_and_clamped)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "blob = require('hull.blob') blob.init({ dir = 'blobs' }) "
+        "ID = blob.put(string.rep('b', 4 * 1024 * 1024)) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* blob.get of 4 MB: 512k units for the read + hash now. */
+    EXPECT_NE(audit10_run("local s = blob.get(ID) return 1",
+                          300000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* reader:read(n): n was allocated as asked (a terabyte failed), off-heap;
+     * it is clamped now, and charged. */
+    EXPECT_EQ(audit10_run(
+        "local r = blob.reader(ID) local s = r:read(1 << 40) r:close() "
+        "assert(#s == 4 * 1024 * 1024) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run(
+        "local r = blob.reader(ID) local s = r:read(8 * 1024 * 1024) return 1",
+        500000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* A blob larger than the heap limit is refused before it is read. */
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = 2 * 1024 * 1024;
+    EXPECT_NE(audit10_run("local s = blob.get(ID) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "heap limit"), NULL);
+    lua_rt.mem_limit = saved;
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit15, tar_is_capped_at_the_heap_and_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run("tar = require('hull.archive.tar') "
+                          "MB = string.rep('m', 1024 * 1024) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 100 entries naming one 1 MB string: a 100 MB archive, built off-heap
+     * before (the push then failed). Refused before it is built now. */
+    EXPECT_EQ(audit10_run(
+        "local e = {} for i = 1, 100 do e[i] = { name = 'f' .. i, data = MB } end "
+        "local b, msg = tar.create(e) "
+        "assert(b == nil and tostring(msg):find('heap limit', 1, true), tostring(msg)) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* More entries than any archive takes. */
+    EXPECT_EQ(audit10_run(
+        "local e = {} for i = 1, 65537 do e[i] = { name = 'f', is_dir = true } end "
+        "local b, msg = tar.create(e) "
+        "assert(b == nil and tostring(msg):find('too many', 1, true), tostring(msg)) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* The build is charged (1 unit per 64 bytes). */
+    EXPECT_NE(audit10_run(
+        "local e = {} for i = 1, 16 do e[i] = { name = 'f' .. i, data = MB } end "
+        "local b = tar.create(e) return 1", 200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* tar.pack: the same 8 MB file ten times is 80 MB - over the heap -
+     * refused by the running total before the eighth read. */
+    EXPECT_EQ(audit10_run(
+        "collectgarbage() "
+        "local l = {} for i = 1, 10 do l[i] = { path = 'big.bin', name = 'b' .. i } end "
+        "local b, msg = tar.pack(l) "
+        "assert(b == nil and tostring(msg):find('heap limit', 1, true), tostring(msg)) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* ...and each read is charged: one 8 MB file is 1M units now. */
+    EXPECT_NE(audit10_run("local b = tar.pack({ 'big.bin' }) return 1",
+                          500000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("assert(#tar.pack({ 'big.bin' }) > 8 * 1024 * 1024) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* ── Audit 14: SSE and WebSocket writes are charged ────────────────────
+ *
+ * stream:event / stream:comment wrote every line of their text as three
+ * stream writes, conn:send / ws.broadcast framed and queued their message
+ * (to every connection), all inside one uncharged call. Each is charged
+ * before the write now: 1 unit per 8 bytes, plus 1 per SSE line / per frame,
+ * per destination. A tripped charge stops the call before Keel is reached. */
+
+#include "../../../../src/hull/runtime/lua/mod_buffer.h"   /* struct HlSseStreamUD */
+#include "hull/cap/ws.h"                                   /* HlWsRegistry */
+
+static int a14_sse_writes;
+static int a14_sse_write(void *ctx, const char *data, size_t len)
+{
+    (void)ctx; (void)data; (void)len;
+    a14_sse_writes++;
+    return 0;
+}
+
+UTEST(lua_audit14, sse_and_ws_writes_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char err[512];
+
+    /* A stream whose writes land in a counter (no request: a NULL life is
+     * live). */
+    struct HlSseStreamUD *ud = (struct HlSseStreamUD *)lua_newuserdata(L, sizeof *ud);
+    memset(ud, 0, sizeof *ud);
+    ud->sse.write_fn = a14_sse_write;
+    luaL_setmetatable(L, "HlSseStream");
+    lua_setglobal(L, "S");
+    ASSERT_EQ(audit10_run("NL = string.rep('\\n', 1000000) "
+                          "BIG = string.rep('w', 8 * 1000000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    a14_sse_writes = 0;
+    EXPECT_NE(audit10_run("S:event('e', NL) return 1", 200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run("S:comment(NL) return 1", 200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(a14_sse_writes, 0);   /* stopped before Keel wrote a byte */
+    EXPECT_EQ(audit10_run("S:event('e', 'a\\nb', '7') S:comment('hi') return 1",
+                          200000, err, sizeof err), LUA_OK);
+    EXPECT_GT(a14_sse_writes, 0);
+
+    /* ws.broadcast is charged per connection on the path (these have no Keel
+     * connection, so nothing is sent): 100 x 1 MB. */
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    for (int i = 0; i < 100; i++)
+        ASSERT_NE(hl_ws_registry_add(&reg, "/ws", NULL), NULL);
+    lua_rt.base.ws_registry = &reg;
+    ASSERT_EQ(audit10_run("ws = require('hull.web.ws-server') "
+                          "MB = string.rep('m', 1024 * 1024) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run("ws.broadcast('/ws', MB) return 1",
+                          1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("assert(ws.broadcast('/ws', 'hi') == 0) return 1",
+                          1000000, err, sizeof err), LUA_OK);
+
+    /* conn:send: the charge trips before Keel is reached, so a connection
+     * whose Keel handle is a placeholder is never written to. */
+    static char placeholder;
+    HlWsConn *c = hl_ws_registry_add(&reg, "/one", (KlWsServerConn *)(void *)&placeholder);
+    ASSERT_NE(c, NULL);
+    hl_lua_ws_push_conn(L, c);
+    lua_setglobal(L, "C");
+    EXPECT_NE(audit10_run("C:send(BIG) return 1", 200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run("C:send_binary(BIG) return 1", 200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    hl_lua_ws_invalidate_conn(L, c);
+
+    lua_rt.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 /* A VM freed while its deadline is pending: the watchdog must never write to
  * the freed watch (ASan reports it if it does). */
 UTEST(lua_run_watchdog, a_vm_freed_while_armed_is_never_touched)

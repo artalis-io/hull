@@ -12,6 +12,7 @@
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
 #include "internal.h"   /* hl_js_budget_charge */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 static void js_mmap_finalizer(JSRuntime *rt, JSValue val)
 {
@@ -46,6 +47,33 @@ static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, (int64_t)buf->len);
 }
 
+/* Read @p size bytes of @p path into a new ArrayBuffer and return it (a
+ * shorter one when the file shrank since it was sized), or throw. */
+static JSValue js_fs_read_into_new_ab(JSContext *ctx, const HlFsConfig *fs,
+                                      const char *path, size_t size,
+                                      const char **err_msg)
+{
+    JSValue ab = JS_NewArrayBufferCopy(ctx, NULL, size);   /* zeroed store */
+    if (JS_IsException(ab)) return ab;
+    size_t ab_len = 0;
+    uint8_t *store = JS_GetArrayBuffer(ctx, &ab_len, ab);
+    if (!store || ab_len != size) {
+        JS_FreeValue(ctx, ab);
+        return JS_ThrowInternalError(ctx, "fs.read: read_failed");
+    }
+    int64_t got = hl_cap_fs_read(fs, path, (char *)store, size, err_msg);
+    if (got < 0) {
+        JS_FreeValue(ctx, ab);
+        return JS_ThrowInternalError(ctx, "fs.read: %s",
+                                     *err_msg ? *err_msg : "read_failed");
+    }
+    if ((size_t)got == size) return ab;
+    /* What was read, not the size probed before it. */
+    JSValue part = JS_NewArrayBufferCopy(ctx, store, (size_t)got);
+    JS_FreeValue(ctx, ab);
+    return part;
+}
+
 /* fs.read(path) - returns an ArrayBuffer with the whole file contents.
  * Two-pass: first call hl_cap_fs_read with buf=NULL to learn the size,
  * then allocate + read. Throws on error to match Hull JS conventions
@@ -77,22 +105,23 @@ static JSValue js_fs_read(JSContext *ctx, JSValueConst this_val,
         return JS_NewArrayBufferCopy(ctx, (const uint8_t *)"", 0);
     }
 
-    uint8_t *buf = hl_alloc_malloc(js->base.alloc, (size_t)size);
-    if (!buf) {
+    /* A file the heap could never hold is refused before anything is
+     * allocated, and the read is charged before it runs (audit 15): the
+     * buffer came from js->base.alloc - the server's allocator, outside
+     * JS_SetMemoryLimit - and a whole-file read counted as one step. */
+    if (js->max_heap_bytes && (uint64_t)size > (uint64_t)js->max_heap_bytes) {
         JS_FreeCString(ctx, path);
-        return JS_ThrowOutOfMemory(ctx);
+        return JS_ThrowRangeError(ctx, "fs.read: file_too_large");
     }
-    int64_t got = hl_cap_fs_read(js->base.fs_cfg, path,
-                                  (char *)buf, (size_t)size, &err_msg);
-    if (got < 0) {
-        JSValue exc = JS_ThrowInternalError(ctx, "fs.read: %s",
-                                             err_msg ? err_msg : "read_failed");
-        hl_alloc_free(js->base.alloc, buf, (size_t)size);
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)size))) {
         JS_FreeCString(ctx, path);
-        return exc;
+        return JS_EXCEPTION;
     }
-    JSValue ab = JS_NewArrayBufferCopy(ctx, buf, (size_t)got);
-    hl_alloc_free(js->base.alloc, buf, (size_t)size);
+
+    /* Read straight into the ArrayBuffer's own store, which the heap limit
+     * covers. No app code runs between taking its pointer and the read. */
+    JSValue ab = js_fs_read_into_new_ab(ctx, js->base.fs_cfg, path, (size_t)size,
+                                        &err_msg);
     JS_FreeCString(ctx, path);
     return ab;
 }

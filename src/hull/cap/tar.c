@@ -520,22 +520,34 @@ int hl_tar_extract(const unsigned char *tar, size_t tar_len, const char *dest_di
 
 /* ── Creation ──────────────────────────────────────────────────────── */
 
-/* Append `len` bytes to a growing buffer. Returns 0 / -1 (OOM). */
-static int buf_append(unsigned char **buf, size_t *len, size_t *cap,
+int hl_tar_create_size(const HlTarEntry *entries, size_t n, size_t *out_size)
+{
+    if (!out_size || (n && !entries)) return -1;
+    const size_t max = HL_TAR_CREATE_MAX_BYTES;
+    size_t total = 2 * TAR_BLOCK;                      /* the trailer */
+    for (size_t i = 0; i < n; i++) {
+        if (total > max - TAR_BLOCK) return -1;
+        total += TAR_BLOCK;                            /* the header */
+        if (entries[i].is_dir) continue;
+        size_t sz = entries[i].size;
+        if (sz > max) return -1;
+        size_t padded = (sz + (TAR_BLOCK - 1)) & ~(size_t)(TAR_BLOCK - 1);
+        if (padded > max - total) return -1;
+        total += padded;
+    }
+    *out_size = total;
+    return 0;
+}
+
+/* Append `n` bytes to a buffer sized up front by hl_tar_create_size. Never
+ * grows it: an append past its end (entries that changed since it was sized)
+ * fails. Returns 0 / -1. Grown by doubling, it was uncapped and twice the
+ * archive at its peak (audit 15). */
+static int buf_append(unsigned char *buf, size_t *len, size_t cap,
                       const void *src, size_t n)
 {
-    if (*len + n > *cap) {
-        size_t nc = *cap ? *cap * 2 : 8192;
-        while (nc < *len + n) {
-            if (nc > (size_t)-1 / 2) return -1;
-            nc *= 2;
-        }
-        unsigned char *nb = (unsigned char *)realloc(*buf, nc);
-        if (!nb) return -1;
-        *buf = nb;
-        *cap = nc;
-    }
-    if (n) memcpy(*buf + *len, src, n);
+    if (n > cap - *len) return -1;
+    if (n) memcpy(buf + *len, src, n);
     *len += n;
     return 0;
 }
@@ -578,8 +590,11 @@ int hl_tar_create(const HlTarEntry *entries, size_t n,
                   unsigned char **out, size_t *out_len)
 {
     if (!out || !out_len || (n && !entries)) return -1;
-    unsigned char *buf = NULL;
-    size_t len = 0, cap = 0;
+    size_t cap = 0;
+    if (hl_tar_create_size(entries, n, &cap) != 0) { errno = EFBIG; return -1; }
+    unsigned char *buf = (unsigned char *)malloc(cap);
+    if (!buf) return -1;
+    size_t len = 0;
     unsigned char hdr[TAR_BLOCK];
     static const unsigned char zeros[TAR_BLOCK] = {0};
 
@@ -590,18 +605,18 @@ int hl_tar_create(const HlTarEntry *entries, size_t n,
         if (!tar_safe_path(nm) || nm[0] == '\0') { free(buf); return -1; }
 
         if (tar_write_header(hdr, &entries[i]) != 0) { free(buf); return -1; }
-        if (buf_append(&buf, &len, &cap, hdr, TAR_BLOCK) != 0) { free(buf); return -1; }
+        if (buf_append(buf, &len, cap, hdr, TAR_BLOCK) != 0) { free(buf); return -1; }
         if (!entries[i].is_dir && entries[i].size) {
-            if (buf_append(&buf, &len, &cap, entries[i].data, entries[i].size) != 0) {
+            if (buf_append(buf, &len, cap, entries[i].data, entries[i].size) != 0) {
                 free(buf); return -1;
             }
             size_t pad = (TAR_BLOCK - (entries[i].size % TAR_BLOCK)) % TAR_BLOCK;
-            if (pad && buf_append(&buf, &len, &cap, zeros, pad) != 0) { free(buf); return -1; }
+            if (pad && buf_append(buf, &len, cap, zeros, pad) != 0) { free(buf); return -1; }
         }
     }
     /* Two zero blocks terminate a ustar archive. */
-    if (buf_append(&buf, &len, &cap, zeros, TAR_BLOCK) != 0 ||
-        buf_append(&buf, &len, &cap, zeros, TAR_BLOCK) != 0) {
+    if (buf_append(buf, &len, cap, zeros, TAR_BLOCK) != 0 ||
+        buf_append(buf, &len, cap, zeros, TAR_BLOCK) != 0) {
         free(buf); return -1;
     }
     *out = buf;

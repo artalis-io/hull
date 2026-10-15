@@ -66,12 +66,33 @@ int hl_tar_parse(const unsigned char *tar, size_t tar_len,
 int hl_tar_extract(const unsigned char *tar, size_t tar_len,
                    const char *dest_dir);
 
+/** Most entries the stdlib's tar.create / tar.pack take in one call (audit 15:
+ *  the JS binding sized its arrays by the app array's `length`, so a sparse
+ *  array of length 2e8 allocated gigabytes before reading one entry). */
+#define HL_TAR_CREATE_MAX_ENTRIES 65536
+
+/** Largest archive hl_tar_create builds (1 GiB). Its buffer lives outside any
+ *  script heap; the stdlib bindings refuse anything over the VM heap limit
+ *  before they get here, this is the backstop (audit 15). */
+#define HL_TAR_CREATE_MAX_BYTES ((size_t)1 << 30)
+
+/**
+ * @brief The exact size of the archive hl_tar_create would build from these
+ *        entries: a header per entry, each file's data padded to 512 bytes,
+ *        and the two-block trailer.
+ * @returns 0 with @p *out_size set, or -1 when it would exceed
+ *          HL_TAR_CREATE_MAX_BYTES (or @c size_t).
+ */
+int hl_tar_create_size(const HlTarEntry *entries, size_t n, size_t *out_size);
+
 /**
  * @brief Build a ustar archive from @p n entries into a malloc'd buffer.
  *
  * @c name (bare or nested-relative), @c data / @c size, @c mode (0 -> 0644),
- * @c is_dir per entry. Writes @p *out (caller frees) and @p *out_len.
- * @returns 0 on success, -1 on a bad name / overflow / OOM.
+ * @c is_dir per entry. Writes @p *out (caller frees) and @p *out_len. The
+ * buffer is allocated once, at hl_tar_create_size's size.
+ * @returns 0 on success, -1 on a bad name / an archive over
+ *          HL_TAR_CREATE_MAX_BYTES / OOM.
  */
 int hl_tar_create(const HlTarEntry *entries, size_t n,
                   unsigned char **out, size_t *out_len);

@@ -12,6 +12,8 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* hl_work_send_units */
+#include "internal.h"   /* hl_js_budget_charge */
 #include "hull/cap/ws.h"
 #include "hull/cap/http.h"
 #include "hull/utils/alloc.h"
@@ -181,6 +183,12 @@ static JSValue js_ws_conn_send(JSContext *ctx, JSValueConst this_val,
     size_t len;
     const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!data) return JS_EXCEPTION;
+    /* Charged before the send (audit 14): one call frames and queues up to
+     * the whole heap. */
+    if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {
+        JS_FreeCString(ctx, data);
+        return JS_EXCEPTION;
+    }
 
     int rc = kl_ws_server_send_text(ud->conn->kl_ws, data, len);
     JS_FreeCString(ctx, data);
@@ -205,11 +213,17 @@ static JSValue js_ws_conn_send_binary(JSContext *ctx, JSValueConst this_val,
         /* Try string fallback */
         const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
         if (!data) return JS_EXCEPTION;
+        if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {   /* audit 14 */
+            JS_FreeCString(ctx, data);
+            return JS_EXCEPTION;
+        }
         int rc = kl_ws_server_send_binary(ud->conn->kl_ws, data, len);
         JS_FreeCString(ctx, data);
         return rc == 0 ? JS_TRUE : JS_ThrowTypeError(ctx, "send failed");
     }
 
+    if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1)))   /* audit 14 */
+        return JS_EXCEPTION;
     int rc = kl_ws_server_send_binary(ud->conn->kl_ws, (const char *)buf, len);
     return rc == 0 ? JS_TRUE : JS_ThrowTypeError(ctx, "send failed");
 }
@@ -300,6 +314,13 @@ static JSValue js_ws_broadcast(JSContext *ctx, JSValueConst this_val,
     int binary = 0;
     if (argc >= 3)
         binary = JS_ToBool(ctx, argv[2]);
+    /* Charged before the sends, per connection the message goes to (audit
+     * 14): one call framed and queued it to every connection. */
+    if (hl_js_budget_charge(ctx, hl_work_send_units(len, hl_ws_connections(reg, path)))) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
+    }
 
     int sent;
     if (binary)

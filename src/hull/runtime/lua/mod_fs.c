@@ -9,6 +9,7 @@
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_resolve.h"  /* descriptor-relative virtual-root module read */
 #include "hull/limits/core.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
 #include "hull/utils/path_normalize.h"
@@ -61,27 +62,29 @@ static int lua_fs_read(lua_State *L)
         return 1;
     }
 
-    /* Route allocation through the Lua memory tracker so the runtime's
-     * memory cap covers this transient buffer. */
-    uint8_t *buf = hl_alloc_malloc(lua->base.alloc, (size_t)size);
-    if (!buf) {
+    /* A file the heap could never hold is refused before anything is
+     * allocated, and the read is charged before it runs (audit 15): the
+     * buffer came from lua->base.alloc - the server's allocator, which no
+     * VM limit covers - and a whole-file read counted as one instruction. */
+    if (lua->mem_limit && (uint64_t)size > (uint64_t)lua->mem_limit) {
         lua_pushnil(L);
-        lua_pushstring(L, "out_of_memory");
+        lua_pushstring(L, "file_too_large");
         return 2;
     }
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)size), 0);
+
+    /* Read into VM memory: a luaL_Buffer box is a Lua allocation, so the
+     * heap limit covers it (a memory error raises; nothing leaks). */
+    luaL_Buffer b;
+    char *buf = luaL_buffinitsize(L, &b, (size_t)size);
     int64_t got = hl_cap_fs_read(lua->base.fs_cfg, path,
-                                  (char *)buf, (size_t)size, &err_msg);
+                                  buf, (size_t)size, &err_msg);
     if (got < 0) {
-        hl_alloc_free(lua->base.alloc, buf, (size_t)size);
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "read_failed");
         return 2;
     }
-    if (hl_lua_pushlstring_safe(L, (const char *)buf, (size_t)got) != 0) {
-        hl_alloc_free(lua->base.alloc, buf, (size_t)size);
-        return luaL_error(L, "not enough memory for the result");
-    }
-    hl_alloc_free(lua->base.alloc, buf, (size_t)size);
+    luaL_pushresultsize(&b, (size_t)got);
     return 1;
 }
 

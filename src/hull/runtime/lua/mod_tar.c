@@ -18,6 +18,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/tar.h"
 #include "hull/cap/fs.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/utils/alloc.h"
 #include "internal.h"   /* hl_lua_anchor */
 #include "protected.h"   /* pushes that cannot leak the C buffer */
@@ -121,6 +122,27 @@ static HlTarEntry *push_entry_array(lua_State *L, size_t n)
     return ents;
 }
 
+/* The archive is built off-heap (cap/tar.c), then copied into the heap: one
+ * the heap could never hold is refused before it is built, and the build is
+ * charged before it runs, one unit per 64 bytes (audit 15). 0, or -1 with
+ * *msg set. */
+static int tar_check_and_charge(lua_State *L, const HlTarEntry *ents, size_t n,
+                                const char **msg)
+{
+    size_t total = 0;
+    if (hl_tar_create_size(ents, n, &total) != 0) {
+        *msg = "archive too large";
+        return -1;
+    }
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->mem_limit && total > lua->mem_limit) {
+        *msg = "archive larger than the heap limit";
+        return -1;
+    }
+    lua_hlwork(L, total / 64, 0);
+    return 0;
+}
+
 /* Read the entries array at stack index 1 into a C HlTarEntry array. The
  * borrowed name/data pointers stay valid while their strings are anchored.
  * Pushes the array (push_entry_array) and returns it + count, or NULL on a
@@ -133,7 +155,10 @@ static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
         return NULL;
     }
     lua_Unsigned rn = lua_rawlen(L, idx);   /* raw: no __len */
-    if (rn > (lua_Unsigned)INT_MAX) { *msg = "tar.create: bad entry count"; return NULL; }
+    if (rn > (lua_Unsigned)HL_TAR_CREATE_MAX_ENTRIES) {
+        *msg = "tar.create: too many entries";
+        return NULL;
+    }
     lua_Integer n = (lua_Integer)rn;
     if (n == 0) { *out_n = 0; return NULL; }   /* empty -> caller handles */
 
@@ -201,6 +226,11 @@ static int l_tar_create(lua_State *L)
         return 2;
     }
 
+    if (tar_check_and_charge(L, ents, n, &msg) != 0) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "tar.create: %s", msg);
+        return 2;
+    }
     unsigned char *out = NULL;
     size_t out_len = 0;
     int rc = hl_tar_create(ents, n, &out, &out_len);   /* ents: Lua-owned */
@@ -295,9 +325,14 @@ static int l_tar_pack(lua_State *L)
         return 2;
     }
     lua_Unsigned rn = lua_rawlen(L, 1);     /* raw: no __len */
-    if (rn == 0 || rn > (lua_Unsigned)INT_MAX) {
+    if (rn == 0) {
         lua_pushnil(L);
         lua_pushstring(L, "tar.pack: no files");
+        return 2;
+    }
+    if (rn > (lua_Unsigned)HL_TAR_CREATE_MAX_ENTRIES) {
+        lua_pushnil(L);
+        lua_pushstring(L, "tar.pack: too many files");
         return 2;
     }
     lua_Integer n = (lua_Integer)rn;
@@ -312,6 +347,7 @@ static int l_tar_pack(lua_State *L)
 
     const char *err = NULL;
     lua_Integer built = 0;
+    uint64_t archive = 1024;            /* the trailer */
     for (lua_Integer i = 1; i <= n; i++) {
         lua_geti(L, 1, i);
         int pushed = 1;                 /* the entry; path/name stay too */
@@ -331,6 +367,18 @@ static int l_tar_pack(lua_State *L)
 
         int64_t size = hl_cap_fs_read(lua->base.fs_cfg, path, NULL, 0, &err);
         if (size < 0) { lua_pop(L, pushed); break; }
+        /* A running total of the archive, against the heap limit, before
+         * this file is read; the read is charged before it runs (audit 15):
+         * the same path listed many times was read - uncharged - each time,
+         * into an archive built off-heap. */
+        uint64_t padded = ((uint64_t)size + 511) & ~(uint64_t)511;
+        archive += 512 + padded;
+        if (lua->mem_limit && archive > (uint64_t)lua->mem_limit) {
+            lua_pop(L, pushed);
+            err = "tar.pack: archive larger than the heap limit";
+            break;
+        }
+        lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)size), 0);
         char *buf = (char *)lua_newuserdatauv(L, size ? (size_t)size : 1, 0);
         hl_lua_anchor(L, 2, -1);
         lua_pop(L, 1);
@@ -354,6 +402,12 @@ static int l_tar_pack(lua_State *L)
     unsigned char *out = NULL;
     size_t out_len = 0;
     int rc = -1;
+    const char *cmsg = NULL;
+    if (!err && built == n && tar_check_and_charge(L, ents, (size_t)n, &cmsg) != 0) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "tar.pack: %s", cmsg);
+        return 2;
+    }
     if (!err && built == n)
         rc = hl_tar_create(ents, (size_t)n, &out, &out_len);
 

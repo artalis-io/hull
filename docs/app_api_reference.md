@@ -1071,6 +1071,15 @@ extractor. `parse`/`create`/`extract` accept any buffer type (string /
 - `tar.pack(files)` -> archive bytes. `files` is an array of path strings or
   `{ path, name? }` tables; each is read via the fs capability (needs
   `manifest.fs.read`) and added as a member (name defaults to the path).
+- Limits (audit 15): `create` / `pack` take at most 65536 entries
+  (`HL_TAR_CREATE_MAX_ENTRIES`), and refuse (`nil, err` / throw) an archive
+  larger than the VM heap limit before building it (`pack` keeps a running
+  total and stops before the file that would pass it); the C core caps any
+  archive at 1 GiB. Each file `pack` reads is charged to the instruction
+  budget before the read (1 unit per 8 bytes), and the build 1 unit per 64
+  bytes. `fs.read` is held to the same rule: a file larger than the heap limit
+  is refused (`nil, "file_too_large"` / a `RangeError`) and the read charged
+  before it runs.
 
 **qrcode**. QR Code generator (ISO/IEC 18004). Pure Lua / JS, byte
 mode, all four EC levels, versions 1-40, all 8 mask patterns scored

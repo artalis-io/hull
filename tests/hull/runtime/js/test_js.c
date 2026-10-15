@@ -9479,6 +9479,254 @@ UTEST(js_audit10, fs_write_is_charged)
     rmdir(tmpdir);
 }
 
+/* ── Audit 15: off-heap whole-object reads, tar.create / tar.pack ──────
+ *
+ * fs.read, blob.get and tar.pack read whole files into buffers from the
+ * server's allocator (no VM limit) and charged nothing for the read; a blob
+ * reader's read(n) was not charged; tar.create sized arrays by an app
+ * array's `length` and tar.create / tar.pack built the archive off-heap,
+ * uncapped. Each is held to the heap limit before it allocates and charged
+ * before it reads now. The budgets below sit between the old cost (the copy
+ * into the heap, 1 unit per 64 bytes) and the new one (1 per 8 bytes read). */
+
+#include "hull/cap/fs_policy.h"   /* HlFsPolicy (a15 fixture) */
+#include "hull/utils/alloc.h"     /* hl_alloc_init */
+
+typedef struct {
+    char        dir[HL_TEST_PATH_MAX];
+    HlAllocator alloc;
+    HlFsPolicy  policy;
+    HlFsConfig  fs;
+} A15Fs;
+
+#define A15_BIG (8 * 1024 * 1024)
+
+/* A temp app root with fs.read + fs.write over all of it and an 8 MB
+ * big.bin, wired into the caps runtime. */
+static int a15_fs_open(A15Fs *f)
+{
+    static const char *const all[] = { "." };
+    memset(f, 0, sizeof *f);
+    if (!hl_test_mkdtemp(f->dir, sizeof f->dir, "hull_a15")) return -1;
+    hl_alloc_init(&f->alloc, 0);
+    f->policy = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(f->dir, &f->alloc, all, 1, all, 1,
+                                      &f->policy, &perr) != 0)
+        return -1;
+    f->fs.base_dir = f->dir;
+    f->fs.base_len = strlen(f->dir);
+    f->fs.policy = &f->policy;
+    char p[HL_TEST_PATH_MAX + 16];
+    snprintf(p, sizeof p, "%s/big.bin", f->dir);
+    FILE *fp = fopen(p, "wb");
+    if (!fp) return -1;
+    static char chunk[65536];
+    memset(chunk, 'x', sizeof chunk);
+    for (int i = 0; i < A15_BIG / (int)sizeof chunk; i++)
+        fwrite(chunk, 1, sizeof chunk, fp);
+    fclose(fp);
+    js.base.fs_cfg = &f->fs;
+    return 0;
+}
+
+static void a15_fs_close(A15Fs *f)
+{
+    js.base.fs_cfg = NULL;
+    hl_fs_policy_free(&f->policy);
+    nftw(f->dir, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+/* The message of what @p expr throws, or "no throw" (caller frees). */
+static char *a15_throws(const char *expr)
+{
+    char code[1024];
+    snprintf(code, sizeof code,
+             "(() => { try { %s; } catch (e) { return String(e && e.message); } "
+             "return 'no throw'; })()", expr);
+    return eval_str(code);
+}
+
+UTEST(js_audit15, fs_read_is_charged_and_bounded)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    /* One 8 MB read: 1M units now, ~131k for the copy before. */
+    EXPECT_EQ(a10_run_tripped("fs.read('big.bin');", 500000), 1);
+    EXPECT_EQ(eval_int("fs.read('big.bin').byteLength === 8 * 1024 * 1024 ? 1 : 0"), 1);
+    /* A file larger than the heap limit is refused before any allocation. */
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 4 * 1024 * 1024;
+    char *r = a15_throws("fs.read('big.bin')");
+    EXPECT_TRUE(r && strstr(r, "file_too_large") != NULL);
+    if (r && !strstr(r, "file_too_large")) printf("  got: %s\n", r);
+    free(r);
+    js.max_heap_bytes = saved;
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit15, blob_reads_are_charged_and_clamped)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob; blob.init({ dir: 'blobs' });\n"
+        "globalThis.ID = blob.put('b'.repeat(4 * 1024 * 1024)).id;\n", 0), 0);
+    EXPECT_EQ(eval_int("typeof ID === 'string' ? 1 : 0"), 1);
+    /* blob.get of 4 MB: 512k units for the read + hash now. */
+    EXPECT_EQ(a10_run_tripped("blob.get(ID);", 300000), 1);
+    /* reader.read(n): charged by n (clamped) before the read. */
+    EXPECT_EQ(a10_run_tripped("blob.reader(ID).read(8 * 1024 * 1024);", 500000), 1);
+    /* ...and clamped: a terabyte was allocated as asked (and failed). */
+    EXPECT_EQ(eval_int("(() => { const r = blob.reader(ID);"
+                       " const n = r.read(2 ** 40).byteLength; r.close();"
+                       " return n === 4 * 1024 * 1024 ? 1 : 0; })()"), 1);
+    /* A blob larger than the heap limit is refused before it is read. */
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 2 * 1024 * 1024;
+    char *r = a15_throws("blob.get(ID)");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    js.max_heap_bytes = saved;
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit15, tar_is_capped_at_the_heap_and_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { tar } from 'hull:archive:tar';\n"
+        "globalThis.tar = tar; globalThis.MB = new ArrayBuffer(1024 * 1024);\n", 0), 0);
+    /* 100 entries naming one 1 MB buffer: a 100 MB archive, built off-heap
+     * before. Refused before it is built now. */
+    char *r = a15_throws("tar.create(Array.from({ length: 100 },"
+                         " (_, i) => ({ name: 'f' + i, data: MB })))");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    /* A sparse array's length sized six arrays (2e8: gigabytes, off-heap). */
+    r = a15_throws("(() => { const a = []; a.length = 2e8; tar.create(a); })()");
+    EXPECT_TRUE(r && strstr(r, "too many entries") != NULL);
+    if (r && !strstr(r, "too many entries")) printf("  got: %s\n", r);
+    free(r);
+    /* The build is charged (1 unit per 64 bytes). */
+    EXPECT_EQ(a10_run_tripped("tar.create(Array.from({ length: 16 },"
+                              " (_, i) => ({ name: 'f' + i, data: MB })));", 200000), 1);
+    /* tar.pack: the same 8 MB file ten times is 80 MB, read into malloc'd
+     * buffers before; refused by the running total now (here against a
+     * 20 MB limit: at the third file, two read). */
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 20 * 1024 * 1024;
+    r = a15_throws("tar.pack(Array.from({ length: 10 },"
+                   " (_, i) => ({ path: 'big.bin', name: 'b' + i })))");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    js.max_heap_bytes = saved;
+    /* ...and each read is charged: one 8 MB file is 1M units now. */
+    EXPECT_EQ(a10_run_tripped("tar.pack(['big.bin']);", 500000), 1);
+    EXPECT_EQ(eval_int("tar.pack(['big.bin']).byteLength > 8 * 1024 * 1024 ? 1 : 0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* ── Audit 14: SSE and WebSocket writes are charged ────────────────────
+ *
+ * stream.event / stream.comment wrote every line of their text as three
+ * stream writes, conn.send / ws.broadcast framed and queued their message
+ * (to every connection), all inside one uncharged call. Each is charged
+ * before the write now: 1 unit per 8 bytes, plus 1 per SSE line / per frame,
+ * per destination. A tripped charge stops the call before Keel is reached. */
+
+#include "../../../../src/hull/runtime/js/mod_buffer.h"   /* HlJSSseStreamUD */
+#include "hull/cap/ws.h"                                  /* HlWsRegistry */
+
+static int a14_sse_writes;
+static int a14_sse_write(void *ctx, const char *data, size_t len)
+{
+    (void)ctx; (void)data; (void)len;
+    a14_sse_writes++;
+    return 0;
+}
+
+static void a14_set_global(const char *name, JSValue v)
+{
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JS_SetPropertyStr(js.ctx, g, name, v);
+    JS_FreeValue(js.ctx, g);
+}
+
+UTEST(js_audit14, sse_and_ws_writes_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* A stream whose writes land in a counter (no request: a NULL life is
+     * live). */
+    JSValue s = JS_NewObjectClass(js.ctx, (int)js_sse_stream_class_id);
+    ASSERT_FALSE(JS_IsException(s));
+    HlJSSseStreamUD *ud = js_mallocz(js.ctx, sizeof *ud);
+    ASSERT_TRUE(ud != NULL);
+    ud->sse.write_fn = a14_sse_write;
+    JS_SetOpaque(s, ud);
+    a14_set_global("S", s);
+    ASSERT_EQ(a10_run_tripped("globalThis.NL = '\\n'.repeat(1000000);"
+                              " globalThis.BIG = 'w'.repeat(8000000);", 0), 0);
+    a14_sse_writes = 0;
+    EXPECT_EQ(a10_run_tripped("S.event('e', NL);", 200000), 1);
+    EXPECT_EQ(a10_run_tripped("S.comment(NL);", 200000), 1);
+    EXPECT_EQ(a14_sse_writes, 0);   /* stopped before Keel wrote a byte */
+    EXPECT_EQ(a10_run_tripped("S.event('e', 'a\\nb', '7'); S.comment('hi');", 200000), 0);
+    EXPECT_GT(a14_sse_writes, 0);
+
+    /* ws.broadcast is charged per connection on the path (these have no Keel
+     * connection, so nothing is sent): 100 x 1 MB. */
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    for (int i = 0; i < 100; i++)
+        ASSERT_TRUE(hl_ws_registry_add(&reg, "/ws", NULL) != NULL);
+    js.base.ws_registry = &reg;
+    ASSERT_EQ(a10_run_tripped(
+        "import { wsServer } from 'hull:web:ws-server';\n"
+        "globalThis.ws = wsServer; globalThis.MB = 'm'.repeat(1024 * 1024);\n", 0), 0);
+    EXPECT_EQ(a10_run_tripped("ws.broadcast('/ws', MB);", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped("globalThis.__a14_sent = ws.broadcast('/ws', 'hi');",
+                              1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a14_sent"), 0);
+
+    /* conn.send: the charge trips before Keel is reached, so a connection
+     * whose Keel handle is a placeholder is never written to. */
+    static char placeholder;
+    HlWsConn *c = hl_ws_registry_add(&reg, "/one", (KlWsServerConn *)(void *)&placeholder);
+    ASSERT_TRUE(c != NULL);
+    JSValue cv = hl_js_ws_push_conn(js.ctx, c);
+    ASSERT_FALSE(JS_IsException(cv));
+    a14_set_global("C", cv);
+    EXPECT_EQ(a10_run_tripped("C.send(BIG);", 200000), 1);
+    EXPECT_EQ(a10_run_tripped("C.sendBinary(BIG);", 200000), 1);
+    EXPECT_EQ(a10_run_tripped("C.sendBinary(new ArrayBuffer(8000000));", 200000), 1);
+    hl_js_ws_invalidate_conn(js.ctx, c);
+
+    js.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 #ifdef HL_ENABLE_HTTP_CLIENT
 /* L: smtp.send dropped, silently, a cc entry that was not a string or whose
  * conversion failed, and never checked the copy: the message went out to

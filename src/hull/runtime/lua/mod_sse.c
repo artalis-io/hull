@@ -11,6 +11,7 @@
 
 #include "hull/shared/req_life.h"
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* hl_work_sse_units */
 
 #include <string.h>
 
@@ -55,6 +56,11 @@ static int lua_sse_event(lua_State *L)
     const char *data = luaL_checklstring(L, 3, &data_len);
     const char *id = luaL_optstring(L, 4, NULL);
 
+    /* Charged before the write (audit 14): Keel writes every line as its own
+     * field, three stream writes each, in this one call. */
+    lua_hlwork(L, (size_t)hl_work_sse_units(data, data_len,
+                    (event_name ? strlen(event_name) : 0) + (id ? strlen(id) : 0)), 0);
+
     int rc = kl_http_sse_event(&ud->sse, event_name, data, data_len, id);
     if (rc < 0)
         return luaL_error(L, "SSE write failed");
@@ -70,6 +76,7 @@ static int lua_sse_comment(lua_State *L)
 
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
+    lua_hlwork(L, (size_t)hl_work_sse_units(text, len, 0), 0);   /* audit 14 */
 
     int rc = kl_http_sse_comment(&ud->sse, text, len);
     if (rc < 0)

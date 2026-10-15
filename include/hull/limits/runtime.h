@@ -34,4 +34,11 @@
  * res:header calls grew it to all of memory (audit 9 M1). */
 #define HL_RES_HEADER_BYTES_MAX (64 * 1024)
 
+/* ── Blob reader ───────────────────────────────────────────────────── */
+
+/* Most bytes one blob reader read(n) returns: n is the app's, and the buffer
+ * was allocated at n whatever the blob held (audit 15). A reader returns up
+ * to n bytes per call, so a larger n only means more calls. */
+#define HL_BLOB_READ_CHUNK_MAX (16 * 1024 * 1024)
+
 #endif /* HL_LIMITS_RUNTIME_H */
