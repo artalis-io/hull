@@ -302,14 +302,13 @@ CREATE TABLE _hull_sessions (id TEXT PRIMARY KEY, data TEXT);
 CREATE VIEW leak AS SELECT * FROM _hull_sessions;
 EOF
 
-if OUTPUT=$($HULL migrate -d "$TMPDIR/app7/data.db" "$TMPDIR/app7" 2>&1); then
-    fail "a migration over _hull_* tables was applied: $OUTPUT"
-else
-    case "$OUTPUT" in
-        *"_hull_"*) pass "a migration over _hull_* tables is refused" ;;
-        *) fail "refused without naming _hull_*: $OUTPUT" ;;
-    esac
-fi
+# Judged by the output, not the exit status: a cosmo APE's status reads 0
+# from a POSIX shell on Windows (CLAUDE.md), so the refusal looked applied.
+OUTPUT=$($HULL migrate -d "$TMPDIR/app7/data.db" "$TMPDIR/app7" 2>&1) || true
+case "$OUTPUT" in
+    *refused*_hull_*) pass "a migration over _hull_* tables is refused" ;;
+    *) fail "a migration over _hull_* tables was not refused: $OUTPUT" ;;
+esac
 TABLES=$(sqlite3 "$TMPDIR/app7/data.db" ".tables" 2>/dev/null || echo "")
 case "$TABLES" in
     *leak*) fail "refused migration still created its view" ;;
