@@ -9485,6 +9485,68 @@ UTEST(lua_tool_vm, unveil_context_reaches_the_tool_bindings)
     rmdir(granted); rmdir(other);
 }
 
+/* A program named by path runs only from an execute grant - except the very
+ * file Hull's own lookup resolves for that name ($PATH here): tool.find_tool
+ * hands compute_build.lua an absolute clang path, and on Windows no grant
+ * covers C:/msys64/ucrt64/bin, so every wasm32 compute build was refused. A
+ * same-named copy anywhere else is still refused. */
+UTEST(lua_tool_vm, spawn_by_path_admits_only_the_resolved_program)
+{
+    char on_path[HL_TEST_PATH_MAX], elsewhere[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(on_path, sizeof on_path, "hull_tv_path") != NULL);
+    ASSERT_TRUE(hl_test_mkdtemp(elsewhere, sizeof elsewhere, "hull_tv_evil") != NULL);
+    char good[HL_TEST_PATH_MAX + 32], evil[HL_TEST_PATH_MAX + 32];
+    snprintf(good, sizeof good, "%s/clang%s", on_path, hl_host_exe_suffix());
+    snprintf(evil, sizeof evil, "%s/clang%s", elsewhere, hl_host_exe_suffix());
+    ASSERT_EQ(tool_vm_write(good, "#!/bin/sh\nexit 0\n"), 0);
+    ASSERT_EQ(tool_vm_write(evil, "#!/bin/sh\nexit 0\n"), 0);
+    ASSERT_EQ(chmod(good, 0755), 0);
+    ASSERT_EQ(chmod(evil, 0755), 0);
+
+    const char *old = getenv("PATH");
+    char *saved = old ? strdup(old) : NULL;
+    setenv("PATH", on_path, 1);
+
+    HlToolUnveilCtx uctx;
+    hl_tool_unveil_init(&uctx);
+    hl_tool_unveil_seal(&uctx);                 /* nothing granted */
+    HlVfs pvfs;
+    void *pvfs_owned = NULL;
+    hl_platform_vfs_init(&pvfs, &pvfs_owned);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.sandbox = 0;
+    HlLua tv;
+    memset(&tv, 0, sizeof tv);
+    tv.tool_unveil_ctx = &uctx;
+    tv.base.platform_vfs = &pvfs;
+    ASSERT_EQ(hl_lua_init(&tv, &cfg), 0);
+    lua_State *L = tv.L;
+
+    lua_pushstring(L, good);
+    lua_setglobal(L, "GOOD");
+    lua_pushstring(L, evil);
+    lua_setglobal(L, "EVIL");
+    const char *chunk =
+        "local ok, err = pcall(tool.spawn_read, { EVIL, '--version' })\n"
+        "assert(not ok and err:find('outside the tool sandbox', 1, true), tostring(err))\n"
+        /* It may fail to run here; it must not be refused by the sandbox. */
+        "ok, err = pcall(tool.spawn_read, { GOOD, '--version' })\n"
+        "assert(ok or not tostring(err):find('outside the tool sandbox', 1, true), tostring(err))\n"
+        "return true\n";
+    ASSERT_EQ(luaL_loadstring(L, chunk), LUA_OK);
+    int rc = lua_pcall(L, 0, 1, 0);
+    if (rc != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(L, -1));
+    EXPECT_EQ(rc, LUA_OK);
+    lua_pop(L, 1);
+
+    hl_lua_free(&tv);
+    hl_tool_unveil_free(&uctx);
+    hl_platform_vfs_dispose(pvfs_owned);
+    if (saved) { setenv("PATH", saved, 1); free(saved); } else unsetenv("PATH");
+    remove(good); remove(evil);
+    rmdir(on_path); rmdir(elsewhere);
+}
+
 /* audit 8 c_caps L2: tool.rename removes the source's directory entry, so it
  * needs write + create on the source as well as the destination - 'r' let a
  * read-only grant (the app directory, ~/.hull/tools) lose files where only
