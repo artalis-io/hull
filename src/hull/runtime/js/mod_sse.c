@@ -72,7 +72,7 @@ static JSValue js_sse_event(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Charged before the write (audit 14): Keel writes every line as its own
-     * field, three stream writes each, in this one call. */
+     * field (batched into chunks since Keel 3.3.1), in this one call. */
     if (hl_js_budget_charge(ctx, hl_work_sse_units(data, data_len,
             (event_name ? strlen(event_name) : 0) + (id ? strlen(id) : 0)))) {
         if (event_name) JS_FreeCString(ctx, event_name);

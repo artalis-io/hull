@@ -33,10 +33,13 @@ static inline uint64_t hl_work_send_units(size_t len, size_t dests)
 }
 
 /* An SSE event / comment: Keel writes every line of @p text as its own field
- * (prefix, value and newline, each a separate stream write), so a text of
- * newlines cost several writes per byte. One unit per 8 bytes plus one per
- * line - each CR or LF starts one (audit 14). @p extra is the length of the
- * event name and id, written as one field each. */
+ * (prefix, value and newline), so a text of newlines is several framing
+ * bytes per byte. Since Keel 3.3.1 those pieces are batched (32 per HTTP
+ * chunk, coalesced through a 4 KiB buffer into one transport write), so the
+ * cost is the splitting and the framing, no longer a write per piece. One
+ * unit per 8 bytes plus one per line - each CR or LF starts one (audit 14).
+ * @p extra is the length of the event name and id, written as one field
+ * each. */
 static inline uint64_t hl_work_sse_units(const char *text, size_t len, size_t extra)
 {
     uint64_t lines = 1;

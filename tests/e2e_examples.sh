@@ -771,6 +771,15 @@ test_chat() {
     RESP=$(curl -s "http://127.0.0.1:$PORT/ws/connections")
     check_contains "$LABEL chat GET /ws/connections" "$RESP" '"count":0'
 
+    # SSE: the comment, the welcome event and the first tick (2 s in). Read the
+    # raw chunked body with CR shown as ~ and LF as |: each event is one HTTP
+    # chunk, so its fields are contiguous on the wire (Keel 3.3.1).
+    RAW=$(curl -sN --raw --max-time 3 "http://127.0.0.1:$PORT/sse/events" | tr '\r\n' '~|')
+    check_contains "$LABEL chat SSE comment" "$RAW" ': connected|'
+    check_contains "$LABEL chat SSE welcome is one chunk" "$RAW" '~|event: welcome|data: {'
+    check_contains "$LABEL chat SSE tick is one chunk" "$RAW" '~|event: tick|id: 1|data: {"'
+    check_contains "$LABEL chat SSE event terminator" "$RAW" '}||~|'
+
     stop_server; rm -rf "$TMPDIR_CHAT"
 }
 
