@@ -61,6 +61,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -126,10 +127,36 @@ static const char **tool_string_list(lua_State *L, int idx, const char *what)
     return list;
 }
 
+/* Is @p path the program Hull's own lookup (hl_tools_lookup_path: the
+ * managed tools, hull's directory, then $PATH) finds for its name? A
+ * bare name would run that same file, so naming it by path grants nothing
+ * more. Compared after hl_host_normalize_path, without case on Windows. */
+static int tool_is_resolved_program(lua_State *L, const char *path)
+{
+    char base[256];   /* the NAME: clang.exe looks up as clang */
+    if (hl_host_tool_name(path, base, sizeof(base)) != 0 || !base[0]) return 0;
+
+    const char *hull_exe = NULL;
+    lua_getglobal(L, "__hull_exe");
+    if (lua_isstring(L, -1)) hull_exe = lua_tostring(L, -1);
+    char found[PATH_MAX];
+    int rc = hl_tools_lookup_path(base, hull_exe, found, sizeof(found));
+    lua_pop(L, 1);
+    if (rc != 0) return 0;
+
+    char a[PATH_MAX], b[PATH_MAX];
+    if (hl_host_normalize_path(path, a, sizeof(a)) < 0 ||
+        hl_host_normalize_path(found, b, sizeof(b)) < 0)
+        return 0;
+    return hl_host_is_windows() ? strcasecmp(a, b) == 0 : strcmp(a, b) == 0;
+}
+
 /* argv from the array at index 1, or NULL (nothing pushed) for an empty
  * one. A program named by path must lie where the tool sandbox grants
  * execute: only its basename met the allowlist, so on a host with no kernel
- * unveil (macOS, Windows) ~/Downloads/evil/cc ran. */
+ * unveil (macOS, Windows) ~/Downloads/evil/cc ran. The one exception is the
+ * program Hull itself resolved for that name (tool.find_tool's answer, e.g.
+ * a clang on $PATH in C:/msys64/ucrt64/bin, which no plan entry covers). */
 static const char **tool_spawn_argv(lua_State *L, const char *what)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -138,7 +165,8 @@ static const char **tool_spawn_argv(lua_State *L, const char *what)
     const char **argv = tool_string_list(L, 1, what);
     if (strchr(argv[0], '/') || strchr(argv[0], '\\')) {
         HlToolUnveilCtx *uctx = get_unveil_ctx(L);
-        if (uctx && hl_tool_unveil_check(uctx, argv[0], 'x') != 0)
+        if (uctx && hl_tool_unveil_check(uctx, argv[0], 'x') != 0 &&
+            !tool_is_resolved_program(L, argv[0]))
             luaL_error(L, "%s: %s is outside the tool sandbox", what, argv[0]);
     }
     return argv;
