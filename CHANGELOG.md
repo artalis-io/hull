@@ -8,6 +8,113 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-16
+
+Full PR list:
+[GitHub release v0.17.0](https://github.com/artalis-io/hull/releases/tag/v0.17.0).
+
+This release carries security audit rounds 14, 15 and 16, Keel v3.3.1, and fixes for the Windows
+source build. No public API was removed, but some calls that used to succeed or pass silently now
+raise, refuse, or rate-limit. Check the list below before upgrading.
+
+### Behaviour changes
+
+**Stdlib**
+- **ttl options must be positive finite numbers.** This covers:
+  - session `ttl` / `absolute_ttl`, and the per-call ttl of create / load / update;
+  - idempotency init and middleware;
+  - inbox init and mark / check;
+  - totp `lockout_duration_per_ip`.
+
+  A string ttl, `0` or a non-finite value now raises or throws in both runtimes. Before, JS
+  concatenated a string onto the expiry and Lua coerced it. An invalid `absolute_ttl` now raises
+  instead of switching the cap off with a warning; `false` still disables it.
+- **Email change: the confirmation mail is rate-limited**, per recipient and per account. An
+  over-limit request is answered with **429**. Before, the endpoint could be used to mail-bomb an
+  address.
+- **TOTP: new secrets are sealed bound to the user id.** Legacy unbound seals still open, and are
+  re-sealed bound on the next verify or `rekey()`. The new option `allow_unbound_secrets`
+  (default `true`) can turn the legacy fallback off once every secret has been re-sealed;
+  `rekey_status` reports the remaining unbound count.
+- **User ids such as `42.0` are accepted as the integer `42`** by the shared user-id helper.
+- **The `_test` exports are gone** from inbox, totp and auth-flows. Test-only helpers now register
+  with the stdlib-internal `hull._test_hooks` / `hull:_test_hooks`, which app code cannot import.
+
+**Database**
+- **`db.async` results are bounded.** A result larger than the submitting VM's heap limit (or
+  256 MB) fails with `result too large`, and the copy is charged to the run's budget. On Postgres
+  and MySQL an over-cap result now stops reading the reply and closes the connection.
+- **`conn.wait_notify` raises on a backend without LISTEN/NOTIFY**, instead of taking a pool
+  thread. Its timeout is clamped to 0..60 s.
+
+**Files, blobs, tar**
+- **Whole-object reads larger than the VM heap limit are refused before anything is allocated:**
+  `fs.read`, `blob.get` and a blob reader's `read(n)`. `read(n)` is clamped to 16 MB. These reads
+  are now also charged to the instruction budget, at 1 unit per 8 bytes.
+- **`tar.create` / `tar.pack`** take at most 65536 entries and refuse an archive larger than the
+  heap limit. `tar.extract` is now charged.
+- **The tar reader refuses names it would read differently from `tar`:**
+  - GNU long-name / long-link records (`L` / `K`);
+  - a non-empty ustar name prefix;
+  - pax records that set `path`, `linkpath`, `size` or `GNU.sparse.*`.
+
+  Other pax headers (`x` / `g` / `X`, e.g. mtime or uid) are skipped and the archive is accepted.
+  Tool bundles with paths over 100 bytes need `tar --format=ustar`.
+
+**Compute (WASM)**
+- **Persistent instances can no longer grow memory past their heap.** This applies to
+  `compute.instance`, `compute.stream` and WASM-backed `db.udf`. `memory.grow` is capped at the
+  module's initial pages plus `heap_size`, and a grow beyond that returns -1 in the guest. A module
+  that relies on growing its memory needs a larger `heap_size`. A memory the module neither
+  imports nor exports gets no growth.
+- **A `compute.segment` over 1 GiB is refused** with `segment_too_large`. A failed add or replace
+  leaves the old segments loaded.
+- **`hull compute build` is stricter about what a module may read.** It refuses:
+  - a dependency outside `compute/<name>/`;
+  - an `#embed`;
+  - an `incbin` or asm `.include`;
+  - any directive left after preprocessing other than line markers and a short pragma allowlist,
+    which also catches directives assembled by macros.
+
+**WebSocket, SSE, shutdown**
+- **SSE and WebSocket writes are charged to the instruction budget.** SSE `event` / `comment` cost
+  1 unit per 8 bytes plus 1 per line. ws `send` / `send_binary`, `ws.broadcast` and the ws-client
+  sends cost 1 unit per 8 bytes plus 1 per frame, per destination. The charge is taken before the
+  write.
+- **A WebSocket still open at shutdown gets no `on_close`.**
+- **A Lua `ws.connect` during teardown raises.** This includes one called from a `__gc` finalizer.
+  Before, it crashed the process.
+
+**Keel v3.3.1**
+- **SSE events go out as one HTTP chunk and one transport write each**, instead of three chunks per
+  line. Output bytes are unchanged.
+- **A second `end_stream` no longer emits another terminating chunk.**
+- **HTTP/2 streams refuse the streaming entry points** instead of writing HTTP/1.1 framing.
+
+### Fixes worth knowing
+- **HTTPS shutdown no longer double-frees the server TLS context.** The context belongs to Keel
+  once the server is initialised.
+- **Shutdown and teardown order was corrected** for parked handlers, detached fetches, held
+  WebSockets and app.main leftovers. Covered by `make e2e-teardown`.
+- **Windows: `hull compute build` works again.** The tool sandbox now admits the clang that Hull
+  itself resolves on `$PATH`.
+
+
+## [0.16.0] - 2026-10-13
+
+Not itemised here. Headline work: the `hull/net` byte stream (connect, TLS) and
+the `hull/ssh` module (SSH transport, Ed25519 / ECDSA / RSA keys, exec channels,
+SFTP, a known_hosts trust store, WebSocket tunnels), `hull.kv` encryption at
+rest, `hull.encoding` as the one home for hex / base64 / base32, joined
+concurrent work (`hull.async` tasks, `hull.gather`, `hull.map`),
+`databases.internal`, a configurable `http.fetch` timeout, the per-run
+wall-clock watchdog, and a signed manifest that names its release. Two breaking
+changes: `hull.crypto` takes and returns bytes, with no hex anywhere, and JS has
+one shape for checking untrusted input. Full PR list:
+[GitHub release v0.16.0](https://github.com/artalis-io/hull/releases/tag/v0.16.0).
+
+## [0.15.0] - 2026-09-20
+
 Windows first-run developer experience. Installing Hull, scaffolding an app,
 building it, and launching the result now works end to end on a clean Windows
 box without knowing anything about PowerShell PATH refresh, Cosmopolitan
