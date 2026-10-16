@@ -57,7 +57,7 @@ static int lua_sse_event(lua_State *L)
     const char *id = luaL_optstring(L, 4, NULL);
 
     /* Charged before the write (audit 14): Keel writes every line as its own
-     * field, three stream writes each, in this one call. */
+     * field (batched into chunks since Keel 3.3.1), in this one call. */
     lua_hlwork(L, (size_t)hl_work_sse_units(data, data_len,
                     (event_name ? strlen(event_name) : 0) + (id ? strlen(id) : 0)), 0);
 
