@@ -296,13 +296,16 @@ static int l_tar_extract(lua_State *L)
         lua_pushstring(L, "tar.extract: not available (declare fs.write in manifest)");
         return 2;
     }
+    /* The destination first: converting a number allocates, so it can run
+     * a GC step and an app __gc that closes the buffer arg 1 names. The
+     * view is taken last (audit 17). */
+    const char *dir = luaL_optstring(L, 2, "");
     HlBufferView view;
     if (!lua_get_buffer(L, 1, &view)) {
         lua_pushnil(L);
         lua_pushstring(L, "tar.extract: arg 1 must be a buffer");
         return 2;
     }
-    const char *dir = luaL_optstring(L, 2, "");
 
     /* The walk is charged up front, as tar.parse's (audit 17). */
     lua_hlwork(L, (size_t)hl_work_bulk_units((uint64_t)view.len), 0);

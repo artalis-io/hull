@@ -36,7 +36,13 @@ typedef struct {
     int close_pending;
 } HlLuaKvConn;
 
-/* Resolve the live connection at stack arg 1, or raise if closed. */
+/* Resolve the live connection at stack arg 1, or raise if closed.
+ *
+ * Every binding calls it AFTER converting its arguments (and, for scan,
+ * making its result table), with nothing that allocates between it and the
+ * cap call: converting a number key to a string allocates, so it can run a
+ * GC step and an app __gc that calls store:close() - which, with no scan
+ * marked yet, freed the connection the binding already held (audit 17). */
 static HlKvConn *kv_self(lua_State *L)
 {
     HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
@@ -57,8 +63,8 @@ static int64_t kv_opt_ttl_ms(lua_State *L, int idx)
 /* conn:get(key) -> value (bytes) | nil. Copies the borrowed value. */
 static int l_kv_get(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
+    HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     const uint8_t *val; size_t vlen; int found = 0;
     if (hl_cap_kv_get(c, (const uint8_t *)key, klen, &val, &vlen, &found) != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
@@ -70,11 +76,11 @@ static int l_kv_get(lua_State *L)
 /* conn:set(key, val, ttl_ms?) -> true. */
 static int l_kv_set(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     size_t klen, vlen;
     const char *key = luaL_checklstring(L, 2, &klen);
     const char *val = luaL_checklstring(L, 3, &vlen);
     int64_t ttl = kv_opt_ttl_ms(L, 4);
+    HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     if (hl_cap_kv_set(c, (const uint8_t *)key, klen, (const uint8_t *)val, vlen, ttl) != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     lua_pushboolean(L, 1);
@@ -84,8 +90,8 @@ static int l_kv_set(lua_State *L)
 /* conn:del(key) -> bool (existed). */
 static int l_kv_del(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
+    HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int deleted = 0;
     if (hl_cap_kv_del(c, (const uint8_t *)key, klen, &deleted) != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
@@ -96,8 +102,8 @@ static int l_kv_del(lua_State *L)
 /* conn:has(key) -> bool. */
 static int l_kv_has(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
+    HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int present = 0;
     if (hl_cap_kv_exists(c, (const uint8_t *)key, klen, &present) != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
@@ -108,10 +114,10 @@ static int l_kv_has(lua_State *L)
 /* conn:incr(key, by, ttl_ms?) -> integer newval. */
 static int l_kv_incr(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
     int64_t by = (int64_t)luaL_checkinteger(L, 3);
     int64_t ttl = kv_opt_ttl_ms(L, 4);
+    HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int64_t nv = 0;
     if (hl_cap_kv_incr(c, (const uint8_t *)key, klen, by, ttl, &nv) != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
@@ -123,13 +129,13 @@ static int l_kv_incr(lua_State *L)
  * A transport/protocol ERROR raises. The wrapper maps 0->true, else->false. */
 static int l_kv_cas(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     size_t klen, elen = 0, nlen;
     const char *key = luaL_checklstring(L, 2, &klen);
     int has_expected = !lua_isnoneornil(L, 3);
     const char *expected = has_expected ? luaL_checklstring(L, 3, &elen) : NULL;
     const char *newv = luaL_checklstring(L, 4, &nlen);
     int64_t ttl = kv_opt_ttl_ms(L, 5);
+    HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     HlKvCasResult r = hl_cap_kv_cas(c, (const uint8_t *)key, klen,
                                     (const uint8_t *)expected, elen, has_expected,
                                     (const uint8_t *)newv, nlen, ttl);
@@ -141,8 +147,8 @@ static int l_kv_cas(lua_State *L)
 /* conn:clear(prefix) -> integer removed. */
 static int l_kv_clear(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     size_t plen; const char *prefix = luaL_checklstring(L, 2, &plen);
+    HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int64_t removed = 0;
     if (hl_cap_kv_clear(c, (const uint8_t *)prefix, plen, &removed) != 0) {
         /* Its SCAN steps are charged to the run (cap/valkey.c, audit 17):
@@ -175,12 +181,14 @@ static int kv_scan_lua_cb(void *ctx, const uint8_t *key, size_t klen)
 /* conn:scan(prefix, limit?) -> { key, ... } (prefix-stripped app keys). */
 static int l_kv_scan(lua_State *L)
 {
-    HlKvConn *c = kv_self(L);
     HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
     size_t plen; const char *prefix = luaL_checklstring(L, 2, &plen);
     size_t limit = (size_t)luaL_optinteger(L, 3, 0);
     lua_newtable(L);
     struct kv_scan_lua s = { L, lua_gettop(L), 0, 0 };
+    /* Resolved last, and marked scanning before anything else allocates:
+     * from here a close() (or __gc) is deferred until the scan ends. */
+    HlKvConn *c = kv_self(L);
     o->scanning = 1;
     int rc = hl_cap_kv_scan(c, (const uint8_t *)prefix, plen, limit, kv_scan_lua_cb, &s);
     o->scanning = 0;

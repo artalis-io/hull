@@ -362,6 +362,10 @@ static void lua_register_mmap_metatable(lua_State *L)
     lua_pushcfunction(L, lua_mmap_len);
     lua_setfield(L, -2, "__len");
 
+    /* App code gets no handle on it (it could take __gc) (audit 17). */
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
+
     lua_pop(L, 1); /* pop metatable */
 }
 

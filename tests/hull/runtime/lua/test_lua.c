@@ -10972,7 +10972,80 @@ UTEST(lua_audit14, ws_client_sends_are_charged)
     lua_setglobal(L, "WC");
     cleanup_lua_caps();
 }
+
+/* Audit 17: conn.data read or set after the connection closed made a
+ * registry ref nothing freed (the userdata had no __gc), so every remote
+ * reconnect grew the registry. The table is the userdata's user value now:
+ * it is collected with the userdata, a cycle through it included. The
+ * metatable is locked like the others. */
+UTEST(lua_audit17, ws_conn_data_after_close_is_collected)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char err[512];
+
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    lua_rt.base.ws_registry = &reg;
+    ASSERT_EQ(audit10_run("ws = require('hull.web.ws-server') return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    HlWsConn *c = hl_ws_registry_add(&reg, "/d", NULL);
+    ASSERT_NE(c, NULL);
+    hl_lua_ws_push_conn(L, c);
+    lua_setglobal(L, "C");
+    EXPECT_EQ_MSG(audit10_run(
+        "C.data.x = 1 assert(C.data.x == 1) "
+        "C.data = { y = 2 } assert(C.data.y == 2 and C.data.x == nil) "
+        "assert(getmetatable(C) == 'locked') return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+    hl_lua_ws_invalidate_conn(L, c);
+
+    EXPECT_EQ_MSG(audit10_run(
+        "assert(C.data.y == nil) "   /* the close dropped the table */
+        "W = setmetatable({}, { __mode = 'v' }) "
+        "for i = 1, 100 do local t = {} C.data = t W[i] = t end "
+        "W.lazy = C.data C.data.self = C "
+        "C = nil collectgarbage() collectgarbage() "
+        "local n = 0 for _ in pairs(W) do n = n + 1 end "
+        "assert(n == 0, n .. ' data tables kept') return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+
+    lua_rt.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_lua_caps();
+}
 #endif /* HL_ENABLE_HTTP_SERVER */
+
+#ifdef HL_ENABLE_IMAGE
+/* Audit 17: image.encode checked the image before reading its options, so
+ * an opts __index that closed it left the binding a NULL image. The check
+ * runs after the arguments now; the metatable is locked. */
+UTEST(lua_audit17, image_encode_closed_by_its_opts)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(luaL_dostring(lua_rt.L, "return image ~= nil"), LUA_OK);
+    if (!lua_toboolean(lua_rt.L, -1)) {   /* image compiled out */
+        cleanup_lua();
+        return;
+    }
+    lua_settop(lua_rt.L, 0);
+    int rc = luaL_dostring(lua_rt.L,
+        "local img = image.new(2, 2, 'rgba8', string.rep('\\0', 16)) "
+        "assert(getmetatable(img) == 'locked') "
+        "local opts = setmetatable({}, { __index = function() img:close() end }) "
+        "local ok, e = pcall(image.encode, img, 'png', opts) "
+        "if ok then return 'encoded a closed image' end "
+        "return tostring(e):find('already closed', 1, true) and 'ok' or tostring(e)");
+    ASSERT_EQ(rc, LUA_OK);
+    EXPECT_STREQ(lua_tostring(lua_rt.L, -1), "ok");
+    lua_settop(lua_rt.L, 0);
+    cleanup_lua();
+}
+#endif /* HL_ENABLE_IMAGE */
 
 /* A VM freed while its deadline is pending: the watchdog must never write to
  * the freed watch (ASan reports it if it does). */

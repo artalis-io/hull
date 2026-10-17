@@ -217,12 +217,16 @@ static int l_image_from_buffer(lua_State *L)
 /* image.decode(data, format?) -> HlImage userdata */
 static int l_image_decode(lua_State *L)
 {
+    /* The format first: converting a number allocates, so it can run a GC
+     * step and an app __gc that closes the buffer arg 1 names. The view is
+     * taken last, with nothing that runs app code before the decode
+     * (audit 17). */
+    const char *fmt_name = luaL_optstring(L, 2, NULL);
+    const char *err_msg = NULL;
+
     HlBufferView view;
     if (!lua_get_buffer(L, 1, &view))
         return luaL_error(L, "image.decode: arg 1 must be a buffer");
-
-    const char *fmt_name = luaL_optstring(L, 2, NULL);
-    const char *err_msg = NULL;
 
     /* Sized from the header; a header no codec reads fails fast, so only
      * the input is charged. */
@@ -248,8 +252,6 @@ static int l_image_decode(lua_State *L)
 static int l_image_encode(lua_State *L)
 {
     HlImage **imgp = check_image(L, 1);
-    if (!*imgp) return luaL_error(L, "image already closed");
-
     const char *fmt_name = luaL_checkstring(L, 2);
 
     int quality = 90;
@@ -259,6 +261,10 @@ static int l_image_encode(lua_State *L)
             quality = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+
+    /* Checked after the arguments: the opts table's __index (or a __gc a
+     * conversion's allocation runs) can call img:close() (audit 17). */
+    if (!*imgp) return luaL_error(L, "image already closed");
 
     image_charge(L, hl_image_codec_units((*imgp)->width, (*imgp)->height, 0));
 
@@ -387,6 +393,10 @@ int luaopen_hull_image(lua_State *L)
 
     lua_pushcfunction(L, l_image_tostring);
     lua_setfield(L, -2, "__tostring");
+
+    /* App code gets no handle on it (it could take __gc) (audit 17). */
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
 
     lua_pop(L, 1); /* pop metatable */
 
