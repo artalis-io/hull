@@ -1064,6 +1064,79 @@ static int scram_start_with_iters(const char *iters_field)
     return rc;
 }
 
+/* The startup exchange is charged to the run that opens the connection:
+ * a stream of ParameterStatus / Notice frames before ReadyForQuery trips a
+ * small budget, and so does a SCRAM iteration count the run cannot pay for
+ * (audit 17). */
+UTEST(pg_conn, startup_frames_are_charged)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m = hl_pg_msg_begin(&s, 'R'); hl_pg_put_i32(&s, 0); hl_pg_msg_end(&s, m);
+    for (int i = 0; i < 40; i++) {
+        m = hl_pg_msg_begin(&s, 'S');
+        hl_pg_put_cstr(&s, "x"); hl_pg_put_cstr(&s, "y");
+        hl_pg_msg_end(&s, m);
+    }
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgDsn dsn;
+    memset(&dsn, 0, sizeof dsn);
+    snprintf(dsn.user, sizeof dsn.user, "%s", "app");
+
+    HlPgConn conn;
+    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_pg_conn_start(&conn, sv[1], &dsn);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+    close(sv[0]);
+}
+
+UTEST(pg_conn, startup_frames_fit_a_normal_budget)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    static const uint8_t resp[] = {
+        'R', 0,0,0,8,  0,0,0,0,                      /* AuthenticationOk */
+        'S', 0,0,0,8,  'x',0,'y',0,                  /* ParameterStatus  */
+        'Z', 0,0,0,5,  'I',                          /* ReadyForQuery    */
+    };
+    ASSERT_TRUE(write(sv[0], resp, sizeof resp) == (ssize_t)sizeof resp);
+    HlPgDsn dsn;
+    memset(&dsn, 0, sizeof dsn);
+    snprintf(dsn.user, sizeof dsn.user, "%s", "app");
+
+    HlPgConn conn;
+    HlDbOpBudget budget = { 100, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_pg_conn_start(&conn, sv[1], &dsn);
+    hl_db_budget_restore(prev);
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0, budget.tripped);
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+UTEST(pg_scram, iterations_are_charged_before_the_derivation)
+{
+    /* 4096 rounds cost 4096 * 16 units: a budget of 1000 cannot pay, so the
+     * handshake stops before the PBKDF2 with the limit, not a proof. */
+    HlDbOpBudget budget = { 1000, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = scram_start_with_iters("i=4096");
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, rc);
+    EXPECT_EQ(1, budget.tripped);
+}
+
 UTEST(pg_scram, rejects_absurd_iteration_count)
 {
     /* Two billion rounds: the hang this bound exists to prevent. */

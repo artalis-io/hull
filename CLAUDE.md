@@ -876,7 +876,11 @@ roadmap §2.9.)
   - where a 0-unit charge only asked, which a `db.async` op's budget never
   tripped on (audit 17). Postgres refuses `COPY ... TO STDOUT` by dropping the
   connection at the CopyOutResponse (there is no CopyFail for that direction;
-  COPY FROM STDIN still gets a CopyFail). A failed Postgres
+  COPY FROM STDIN still gets a CopyFail). The Postgres startup exchange is
+  charged the same way, frame by frame, and a SCRAM iteration count (the
+  server's) is charged 16 units a round before the key derivation runs
+  (audit 17); the MySQL auth exchange is charged per packet and takes at most
+  `HL_MY_AUTH_MAX_PACKETS` (16) - it had no bound (audit 17). A failed Postgres
   `hl_pg_wait_notify` (the LISTEN wait) marks the connection broken the same
   way (audit 9 L5).
 - **`table_columns` on Postgres** reads `information_schema.columns` of

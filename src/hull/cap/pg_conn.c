@@ -45,6 +45,10 @@
  * ~2400x the real-world value while still bounding the work a hostile or
  * MITM'd peer can ask the client to perform. */
 #define SCRAM_MAX_ITERS 10000000
+/* What one SCRAM PBKDF2 iteration is charged to the run's budget: one 32-byte
+ * block, two HMAC-SHA256 compressions of 64 bytes at 1 unit per 8 bytes - the
+ * rate the Lua crypto binding charges its own PBKDF2 (audit 17). */
+#define HL_PG_SCRAM_UNITS_PER_ITER ((2 * 64) / 8)
 /* Stringified for the rejection message, so the text cannot drift
  * from the bound it reports (set_err takes a plain string). */
 #define HL_STR2(x) #x
@@ -288,6 +292,8 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
 
 /* ── Handshake ────────────────────────────────────────────────────── */
 
+static int pg_abandon_if_tripped(HlPgConn *conn, uint32_t body_len);
+
 static void conn_teardown(HlPgConn *conn)
 {
     /* Best-effort: the transport frees any attached TLS session and closes the
@@ -434,6 +440,16 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
                         : "invalid SCRAM server-first");
             return -1;
         }
+        /* The iteration count is the server's: up to SCRAM_MAX_ITERS rounds
+         * of HMAC run inside this one call, so they are charged to the run
+         * as soon as the count is accepted, and a run that cannot pay does
+         * not start them (audit 17). */
+        if (hl_db_budget_charge((int64_t)iters * HL_PG_SCRAM_UNITS_PER_ITER) != 0) {
+            set_err(conn->errmsg, sizeof conn->errmsg,
+                    "interrupted (instruction limit exceeded) before the "
+                    "SCRAM key derivation");
+            return -1;
+        }
         if (strncmp(rnonce, sc->client_nonce, strlen(sc->client_nonce)) != 0) {
             set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM nonce mismatch");
             return -1;
@@ -555,6 +571,11 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
 
         HlPgFrame f;
         if (conn_next_frame(conn, &f) != 0) { conn_teardown(conn); return -1; }
+        /* The startup exchange is read for the run that opens the connection
+         * (a first query, a reconnect), so its frames are charged like a
+         * reply's: up to 1000 ParameterStatus / Notice frames of any size were
+         * read uncharged (audit 17). */
+        if (pg_abandon_if_tripped(conn, f.body_len)) return -1;
 
         HlPgCursor c;
         hl_pg_cursor_init(&c, &f);

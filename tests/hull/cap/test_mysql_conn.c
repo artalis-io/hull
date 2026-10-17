@@ -265,6 +265,62 @@ UTEST(mysql_conn, caching_sha2_fast_auth)
     close(sv[0]);
 }
 
+/* The auth exchange is bounded and charged (audit 17): a server repeating
+ * FAST_SUCCESS (or any packet that keeps the loop going) used to hold the
+ * client in it for as long as it kept sending. */
+static void put_fast_success(HlMyWriter *s, uint8_t seq)
+{
+    size_t m = hl_my_packet_begin(s, seq);
+    hl_my_put_u8(s, HL_MY_AUTH_MORE_DATA);
+    hl_my_put_u8(s, HL_MY_CACHING_SHA2_FAST_SUCCESS);
+    hl_my_packet_end(s, m);
+}
+
+UTEST(mysql_conn, auth_exchange_is_bounded)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake_plugin(&s, 0, "caching_sha2_password");
+    for (int i = 0; i < 40; i++) put_fast_success(&s, (uint8_t)(2 + i));
+    build_ok(&s, 42);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://alice:pw@localhost/shop",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    EXPECT_NE(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_TRUE(strstr(conn.errmsg, "too many packets") != NULL);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+UTEST(mysql_conn, auth_exchange_is_charged)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake_plugin(&s, 0, "caching_sha2_password");
+    for (int i = 0; i < 8; i++) put_fast_success(&s, (uint8_t)(2 + i));
+    build_ok(&s, 10);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://alice:pw@localhost/shop",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    HlDbOpBudget budget = { 5, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_my_conn_start(&conn, sv[1], &dsn);
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* An AuthSwitchRequest to client_ed25519 (MariaDB) is rejected with a hint
  * pointing at a supported plugin (ed25519 is deferred). */
 UTEST(mysql_conn, ed25519_unsupported)
