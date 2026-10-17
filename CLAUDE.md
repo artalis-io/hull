@@ -1449,7 +1449,9 @@ because an APE's own exec does not search the PATH Windows hands it; a miss is
 `argv[0]` (and a shell-driver's `$0`) the same way and runs the absolute path
 (`execv` / `posix_spawn`), refusing a name it does not find: exec's own search
 took `.` and empty entries as the working directory, so a repo shipping `nm`
-ran it during `hull build` (audit 17). Exposed to
+ran it during `hull build` (audit 17). `hull dev` re-runs hull by its own
+path (`hl_release_io_self_path`, else a pathed `argv[0]`, else the walker) with
+`execv` / `posix_spawn`, for the same reason. Exposed to
 the tool VM as
 `tool.host_os()` / `tool.exe_suffix()` / `tool.render_exec()`. Every "now run
 it" string routes through `render_exec` rather than hard-coding `./x`: neither

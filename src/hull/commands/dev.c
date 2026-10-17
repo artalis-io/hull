@@ -12,6 +12,8 @@
 #include "hull/cap/crypto.h"   /* hl_cap_crypto_random */
 #include "hull/commands/dev.h"
 #include "hull/dev_state.h"
+#include "hull/release_io.h"  /* hl_release_io_self_path */
+#include "hull/shared/host.h" /* hl_host_find_in_path */
 #include "hull/tool.h"
 
 #include <dirent.h>
@@ -158,7 +160,7 @@ static void agent_remove_discovery(const char *app_dir)
  * is REMOVED so `hull agent inspect` falls back to a standalone analysis rather than
  * serving a stale generation as current. */
 #ifdef __COSMOPOLITAN__
-/* Start a hull child with posix_spawnp - never fork()+execvp() - on cosmo. On
+/* Start a hull child with posix_spawn - never fork()+execv() - on cosmo. On
  * Windows cosmo's fork() is EMULATED (a CreateProcess plus a copy of this
  * process's memory), and that child can fault before it reaches exec; it then
  * sits in cosmo's crash handler holding whatever pipe it inherited. See
@@ -211,8 +213,8 @@ static pid_t dev_spawn(const char *exe, const char *const argv[],
 
     pid_t pid = -1;
     if (rc == 0)
-        rc = posix_spawnp(&pid, exe, &fa, &at,
-                          (char *const *)(uintptr_t)argv, environ);
+        rc = posix_spawn(&pid, exe, &fa, &at,
+                         (char *const *)(uintptr_t)argv, environ);
     posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);
     if (rc != 0) { errno = rc; return -1; }
@@ -244,7 +246,7 @@ static void agent_publish_discovery(const char *hull_exe, const char *app_dir, l
             dup2(devnull, STDERR_FILENO);
             if (devnull > 2) close(devnull);
         }
-        execvp(hull_exe, (char *const *)(uintptr_t)pargv);   /* POSIX execvp does not modify argv */
+        execv(hull_exe, (char *const *)(uintptr_t)pargv);   /* POSIX execv does not modify argv */
         _exit(127);
     }
 #endif
@@ -537,7 +539,7 @@ int hl_dev_state_reload(HlDevState *s)
         dup2(pfd_for_child, STDERR_FILENO);
         close(pfd_for_child);
         close(s->pipe_fd);
-        execvp(s->hull_exe, (char *const *)(uintptr_t)s->child_argv);  /* POSIX execvp does not modify argv */
+        execv(s->hull_exe, (char *const *)(uintptr_t)s->child_argv);  /* POSIX execv does not modify argv */
         _exit(127);
     }
 #endif
@@ -605,9 +607,34 @@ static int run_dev_tui(int argc, char **argv,
 
 /* ── Main ─────────────────────────────────────────────────────────── */
 
+/* The hull binary the dev supervisor re-runs, as a path (audit 17). argv[0]
+ * is a bare "hull" when hull was found on PATH, and an exec*p() of a bare
+ * name searches PATH again with an empty or "." entry meaning the working
+ * directory - a cloned app shipping ./hull would run as the child. Take the
+ * running binary's own path, else an argv[0] that already names a path, else
+ * the PATH walker's hit (absolute entries only); the children are started
+ * with execv / posix_spawn, which do not search. */
+static int dev_self_exe(const char *argv0, char *out, size_t out_sz)
+{
+    if (hl_release_io_self_path(out, out_sz) == 0 && out[0])
+        return 0;
+    if (!argv0 || !*argv0) return -1;
+    if (strchr(argv0, '/') || strchr(argv0, '\\')) {
+        int n = snprintf(out, out_sz, "%s", argv0);
+        return (n < 0 || (size_t)n >= out_sz) ? -1 : 0;
+    }
+    return hl_host_find_in_path(argv0, out, out_sz) == 1 ? 0 : -1;
+}
+
 int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 {
-    const char *hull_exe = env->hull_exe;
+    static char hull_exe_buf[PATH_MAX];
+    if (dev_self_exe(env->hull_exe, hull_exe_buf, sizeof(hull_exe_buf)) != 0) {
+        fprintf(stderr, "hull dev: cannot find the hull binary to run (%s)\n",
+                env->hull_exe ? env->hull_exe : "?");
+        return 1;
+    }
+    const char *hull_exe = hull_exe_buf;
     const char *entry_point = NULL;
     int agent_mode = 0;
     int tui_mode = 0;
@@ -754,7 +781,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
             signal(SIGINT, SIG_DFL);
             signal(SIGTERM, SIG_DFL);
             sigprocmask(SIG_SETMASK, &prev, NULL);
-            execvp(hull_exe, (char *const *)(uintptr_t)child_argv);  /* POSIX execvp does not modify argv */
+            execv(hull_exe, (char *const *)(uintptr_t)child_argv);  /* POSIX execv does not modify argv */
             _exit(127);
         }
 #endif

@@ -589,6 +589,43 @@ else
     echo "  SKIP: dev --agent sidecar symlink cases (this shell cannot make symlinks)"
 fi
 
+# ── hull dev re-runs ITSELF by path, never by a PATH search (audit 17) ──
+# argv[0] is a bare "hull" when hull was found on PATH. The supervisor used to
+# exec*p() that name, so a PATH with "." (or an empty entry) ran a ./hull the
+# app directory ships. Start hull as argv[0]="hull" with PATH=".:<original>" in
+# a directory holding a planted ./hull: the dev children (the app, and the
+# discovery publisher) must be the real hull, and the plant must never run.
+case "$(uname -s 2>/dev/null)" in
+MINGW*|MSYS*|CYGWIN*)
+    echo "  SKIP: dev self-path PATH case (Windows runs no planted sh script)" ;;
+*)
+PLANT="$TMP/plantapp"
+mkdir -p "$PLANT"
+cp "$DEVAPP/app.lua" "$PLANT/app.lua"
+PLANT_MARK="$TMP/plant_ran"
+printf '#!/bin/sh\necho ran > "%s"\nexit 1\n' "$PLANT_MARK" > "$PLANT/hull"
+chmod +x "$PLANT/hull"
+HULL_ABS=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
+python3 - "$PLANT" "$HULL_ABS" <<'EOF' >/dev/null 2>&1 &
+import os, sys
+d, exe = sys.argv[1], sys.argv[2]
+os.chdir(d)
+env = dict(os.environ)
+env["PATH"] = ".:" + env.get("PATH", "")
+os.execve(exe, ["hull", "dev", "--agent", "-p", "39815", "app.lua"], env)
+EOF
+DEV_PID=$!
+i=0; while [ "$i" -lt 20 ] && [ ! -f "$PLANT/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
+[ ! -e "$PLANT_MARK" ] \
+    && pass "dev: a ./hull in the app dir is not run through a '.' PATH entry" \
+    || fail "dev ran the app directory's ./hull (PATH search of a bare argv[0])"
+[ -f "$PLANT/.hull/discovery.json" ] \
+    && pass "dev: started as a bare 'hull', the real hull published a generation" \
+    || fail "dev: no generation published when started as a bare 'hull'"
+;;
+esac
+
 echo ""
 echo "=== hull agent inspect E2E: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
