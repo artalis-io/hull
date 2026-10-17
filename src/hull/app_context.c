@@ -443,11 +443,17 @@ void hl_app_context_free(HlAppContext *ctx)
      * later during the runtime destroy are safe against this ordering: a
      * borrowed conn's finalizer is a no-op (the registry owned the handle), and
      * an owned (db.open) conn's finalizer closes only its own handle, which was
-     * never in the registry. */
-    if (ctx->db_registry) {
-        hl_db_registry_destroy(ctx->db_registry);
-        ctx->db_registry = NULL;
-    }
+     * never in the registry.
+     *
+     * Only the CONNECTIONS go here; the registry's memory is freed after the
+     * runtime (audit 17). lua_close runs app __gc finalizers, and a borrowed
+     * connection object holds a pointer into the registry (a handle slot), and
+     * the runtime keeps the registry pointer itself: a finalizer calling
+     * conn:query or db.default() read the unmapped page. Closed, the registry
+     * refuses every lookup and each handle has no backend, so the finalizer
+     * gets an error. */
+    if (ctx->db_registry)
+        hl_db_registry_close_all(ctx->db_registry);
     ctx->db_open = 0;
 #endif
 
@@ -455,6 +461,13 @@ void hl_app_context_free(HlAppContext *ctx)
         ctx->factory->destroy(ctx->rt);
         ctx->rt = NULL;
     }
+
+#ifdef HL_ENABLE_DB
+    if (ctx->db_registry) {
+        hl_db_registry_destroy(ctx->db_registry);
+        ctx->db_registry = NULL;
+    }
+#endif
 
     /* WASM cache AFTER the runtime destroy: the runtime's GC finalizers
      * (WasmBuffer WASM-kind, WasmInstance) dereference WAMR, so it must outlive

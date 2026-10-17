@@ -62,6 +62,9 @@ struct HlDbRegistry {
     HlAllocator      *alloc;       /* borrowed */
     RegSlot           slots[HL_DB_REGISTRY_MAX];
     int               nslots;
+    /* Set by hl_db_registry_close_all: every connection is closed and nothing
+     * opens again. The memory stays until hl_db_registry_destroy (audit 17). */
+    int               closed;
 };
 
 HlDbRegistry *hl_db_registry_create(const HlManifest *manifest,
@@ -125,7 +128,7 @@ const char *hl_db_registry_open_txn(HlDbRegistry *reg)
  * path. */
 HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
 {
-    if (!reg) return NULL;
+    if (!reg || reg->closed) return NULL;
     for (int i = 0; i < reg->nslots; i++)
         if (reg->slots[i].open && strcmp(reg->slots[i].name, "default") == 0)
             return &reg->slots[i].handle;
@@ -269,6 +272,10 @@ int hl_db_registry_manifest_wired(const HlDbRegistry *reg)
 static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
                                 const char **err)
 {
+    if (reg->closed) {
+        if (err) *err = "database connections are closed (shutting down)";
+        return NULL;
+    }
 
     /* Cache hit (includes seeded connections like "default"). */
     for (int i = 0; i < reg->nslots; i++)
@@ -329,19 +336,37 @@ const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h)
 
 const HlManifestDbDynamic *hl_db_registry_dynamic_policy(HlDbRegistry *reg)
 {
-    if (!reg || !reg->manifest) return NULL;
+    if (!reg || reg->closed || !reg->manifest) return NULL;
     return &reg->manifest->databases.dynamic;
+}
+
+int hl_db_registry_is_closed(const HlDbRegistry *reg)
+{
+    return !reg || reg->closed;
+}
+
+void hl_db_registry_close_all(HlDbRegistry *reg)
+{
+    if (!reg) return;
+    reg->closed = 1;   /* first: a backend close cannot reopen through _get */
+    for (int i = 0; i < reg->nslots; i++) {
+        RegSlot *s = &reg->slots[i];
+        if (s->open && s->owned && s->handle.backend)
+            s->handle.backend->close(&s->handle);
+        /* A seeded slot is a value copy of a handle its owner closes; drop
+         * the copy too. A runtime object still holding &s->handle then sees
+         * no backend and fails "not available" (audit 17). */
+        s->open = 0;
+        memset(&s->handle, 0, sizeof s->handle);
+    }
 }
 
 void hl_db_registry_destroy(HlDbRegistry *reg)
 {
     if (!reg) return;
-    for (int i = 0; i < reg->nslots; i++) {
-        RegSlot *s = &reg->slots[i];
-        if (s->open && s->owned && s->handle.backend)
-            s->handle.backend->close(&s->handle);
-        free(s->name);
-    }
+    hl_db_registry_close_all(reg);
+    for (int i = 0; i < reg->nslots; i++)
+        free(reg->slots[i].name);
     if (reg->sealed) hl_policy_page_unseal(reg);
     hl_policy_page_free(reg, sizeof *reg);
 }

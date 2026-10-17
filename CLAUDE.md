@@ -1213,8 +1213,12 @@ refuses while `shutting_down` - reaches the loop once it is freed (audit 16);
 which cancels the ops still suspended on connections and closes every
 connection - a WebSocket that is still open runs NO on_close then (the loop is
 gone; the conn is just invalidated) - after the async / net wraps are orphaned
-(`hl_*_backend_keel_orphan`: later calls are no-ops); (4) the app context
-(runtime, DB, VFS); (5) the client TLS context (a stream the runtime held does
+(`hl_*_backend_keel_orphan`: later calls are no-ops); (4) the app context:
+the DB connections (`hl_db_registry_close_all`, while the runtime is alive for
+the udf xDestroy callbacks), then the runtime, then the registry's memory and
+the VFS - a Lua `__gc` that `lua_close` runs may still hold a connection
+object pointing into the registry, and its `conn.query` / `db.default()` /
+`db.connect` / `db.open` must fail, not read a freed page (audit 17); (5) the client TLS context (a stream the runtime held does
 its close_notify through it); (6) the backend loop (serve_cli). A new detached
 async op must `hl_async_ctx_track` itself (with an `on_shutdown` if it holds a
 timer or a request); a new loop-bound object, an `HlAsyncTeardown` entry.

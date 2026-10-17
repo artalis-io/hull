@@ -193,8 +193,23 @@ hl_db_registry_dynamic_policy(HlDbRegistry *reg)
 { (void)reg; return (const HlManifestDbDynamic *)0; }
 #endif
 
-/* Close every registry-owned connection and free the registry. Seeded
- * (externally-owned) connections are left untouched. */
+/*
+ * Close every registry-owned connection and mark the registry closed, but
+ * keep its memory: runtime connection objects hold pointers to the handles
+ * in it, and a Lua __gc finalizer run by the runtime's destroy may still use
+ * one (audit 17). Afterwards every handle has no backend (its calls fail),
+ * _default / _get / _internal / _dynamic_policy return NULL, and nothing
+ * opens again. The app context runs this BEFORE the runtime's destroy (a
+ * udf's xDestroy needs the runtime alive) and destroy AFTER it. Seeded
+ * (externally-owned) connections are not closed, only dropped. Idempotent.
+ */
+void hl_db_registry_close_all(HlDbRegistry *reg);
+
+/* 1 once hl_db_registry_close_all has run (or for NULL). */
+int hl_db_registry_is_closed(const HlDbRegistry *reg);
+
+/* Close every registry-owned connection (hl_db_registry_close_all) and free
+ * the registry. Seeded (externally-owned) connections are left untouched. */
 void hl_db_registry_destroy(HlDbRegistry *reg);
 
 #endif /* HL_CAP_DB_REGISTRY_H */

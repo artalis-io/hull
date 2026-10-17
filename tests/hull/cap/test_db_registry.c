@@ -138,6 +138,54 @@ UTEST(db_registry, default_dsn_and_accessor)
     hl_db_registry_destroy(reg);   /* owns + closes the default */
 }
 
+/* Closing the registry (the app context's step before the runtime's destroy)
+ * keeps its memory but kills every handle in it: a Lua __gc finalizer that
+ * lua_close runs later still holds a pointer to a slot, and must get an
+ * error, not freed memory or a reopened connection (audit 17). */
+UTEST(db_registry, close_all_keeps_the_memory_and_refuses_everything)
+{
+    HlManifest m = {0};
+    m.databases.named[0].name = "cache";
+    m.databases.named[0].dsn = ":memory:";
+    m.databases.named_count = 1;
+    m.databases.dynamic.declared = 1;
+
+    HlDbRegistry *reg = hl_db_registry_create(&m, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    const char *err = NULL;
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    HlDbHandle *named = hl_db_registry_get(reg, "cache", &err);
+    ASSERT_TRUE(def != NULL && named != NULL);
+    ASSERT_TRUE(hl_db_registry_dynamic_policy(reg) != NULL);
+    ASSERT_FALSE(hl_db_registry_is_closed(reg));
+
+    hl_db_registry_close_all(reg);
+    ASSERT_TRUE(hl_db_registry_is_closed(reg));
+
+    /* The slots are still readable, with no backend: every call fails. */
+    ASSERT_TRUE(def->backend == NULL && def->ctx == NULL);
+    ASSERT_TRUE(named->backend == NULL);
+    ASSERT_EQ(-1, hl_db_exec(def, "SELECT 1", NULL, 0));
+    ASSERT_EQ(-1, hl_db_query(named, "SELECT 1", NULL, 0, NULL, NULL, NULL));
+
+    /* Nothing resolves, and nothing reopens. */
+    ASSERT_TRUE(hl_db_registry_default(reg) == NULL);
+    err = NULL;
+    ASSERT_TRUE(hl_db_registry_get(reg, "default", &err) == NULL);
+    ASSERT_TRUE(err != NULL);
+    err = NULL;
+    ASSERT_TRUE(hl_db_registry_get(reg, "cache", &err) == NULL);
+    ASSERT_TRUE(err != NULL);
+    ASSERT_TRUE(hl_db_registry_internal(reg, &err) == NULL);
+    ASSERT_TRUE(hl_db_registry_dynamic_policy(reg) == NULL);
+    ASSERT_TRUE(hl_db_registry_dsn_for(reg, def) == NULL);
+    ASSERT_TRUE(hl_db_registry_open_txn(reg) == NULL);
+    hl_db_registry_guard_stale_txns(reg);   /* no open slot: a no-op */
+
+    hl_db_registry_close_all(reg);          /* idempotent */
+    hl_db_registry_destroy(reg);
+}
+
 /* The "$VAR" env-reference parser (used to resolve named-connection DSNs). */
 UTEST(db_registry, env_ref_parsing)
 {
