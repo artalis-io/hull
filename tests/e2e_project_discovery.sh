@@ -601,7 +601,10 @@ MINGW*|MSYS*|CYGWIN*)
 *)
 PLANT="$TMP/plantapp"
 mkdir -p "$PLANT"
-cp "$DEVAPP/app.lua" "$PLANT/app.lua"
+printf -- '---@route GET /
+local function home() end
+return home
+' > "$PLANT/app.lua"
 PLANT_MARK="$TMP/plant_ran"
 printf '#!/bin/sh\necho ran > "%s"\nexit 1\n' "$PLANT_MARK" > "$PLANT/hull"
 chmod +x "$PLANT/hull"
