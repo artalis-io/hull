@@ -1288,7 +1288,12 @@ int hl_js_load_app(HlJS *js, const char *filename)
                 memcpy(buf, e->data, e->len);
                 buf[e->len] = '\0';
 
-                JSValue val = JS_Eval(js->ctx, buf, e->len, filename,
+                /* Named by its embedded key ("./app.js"), so the entry's
+                 * relative imports resolve to embedded names, as a nested
+                 * module's do: under the absolute entry path they missed
+                 * every embedded module and were read from disk instead
+                 * (audit 17, now refused). */
+                JSValue val = JS_Eval(js->ctx, buf, e->len, vfs_name,
                                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
                 js->scratch->used = arena_saved;
 
