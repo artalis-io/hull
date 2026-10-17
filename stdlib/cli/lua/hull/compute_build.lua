@@ -53,14 +53,11 @@ function M.find_clang()
     -- The spawn allowlist matches on the BASENAME, so an absolute path is still
     -- admitted as "clang".
     local resolved = tool.find_tool and tool.find_tool("clang")
+    -- No bare-name fallback: a miss here is a miss on PATH too, and the spawn
+    -- resolves a bare name through the same walker (audit 17).
     if resolved and tool.spawn_read({resolved, "--version"}) then
         return resolved
     end
-
-    -- Last resort: let exec search. Keeps POSIX hosts working unchanged if
-    -- find_tool is unavailable or missed.
-    local out = tool.spawn_read({"clang", "--version"})
-    if out then return "clang" end
 
     return nil
 end

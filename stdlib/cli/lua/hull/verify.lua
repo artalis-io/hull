@@ -582,7 +582,20 @@ local function main()
         tool.exit(1)
     end
 
-    print("App layer: VALID")
+    if dev_key_hex then
+        print("App layer: VALID (signed by the pinned developer key)")
+    else
+        print("App layer: VALID (self-consistent)")
+        -- Without --developer-key the signature is checked only against the
+        -- public key the package itself carries: anyone can re-sign a
+        -- modified app with a key of their own and pass (audit 17). The
+        -- exit status is unchanged; the signer is just not pinned.
+        tool.stderr("App layer: WARNING - signer not pinned: the signature "
+                    .. "verifies against the key inside package.sig ("
+                    .. tostring(sig.public_key) .. "), which anyone re-signing "
+                    .. "the app can replace. Pass --developer-key <file|url> to "
+                    .. "check it is the developer's key.\n")
+    end
     print("")
     print("hull verify: OK - all checks passed")
 end

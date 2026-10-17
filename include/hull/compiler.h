@@ -89,11 +89,12 @@ int hl_driver_resolve_native(char *out, size_t outsz);
  * left for exec's own search, which cannot be relied on for this on Windows: a
  * Cosmopolitan APE is handed a POSIX-shaped PATH there and its exec does not
  * search it, so `--compiler=cosmocc` failed on a box whose `hull doctor`
- * listed that exact cosmocc. A miss copies the bare name through, so exec
- * still gets its turn and POSIX behaviour is unchanged.
+ * listed that exact cosmocc. Only the absolute PATH entries are searched,
+ * and a miss is -1 (audit 17: exec's own search took "." and empty entries
+ * as the working directory).
  *
- * Returns 0 on success (out holds the invocation), -1 on a bad argument or if
- * the result does not fit.
+ * Returns 0 on success (out holds the invocation), -1 on a bad argument, a
+ * bare name not found on PATH, or a result that does not fit.
  */
 int hl_driver_resolve_name(const char *name, char *out, size_t outsz);
 

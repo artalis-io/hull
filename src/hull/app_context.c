@@ -327,6 +327,17 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         if (load_rc == 0 && opts->gate_modules) {
             HlManifest m = {0};
             if (ctx->rt->vt->extract_manifest(ctx->rt, &m) == 0) {
+                /* Every "$VAR" reference must name a declared variable, as the
+                 * serve path and the app.main runner check (audit 17: `hull
+                 * test` / `hull agent` resolved databases.internal and the
+                 * other references against any variable). */
+                char ref_err[256] = {0};
+                if (hl_manifest_check_env_refs(&m, ref_err, sizeof ref_err) != 0) {
+                    fprintf(stderr, "[app-context] manifest: %s\n", ref_err);
+                    hl_manifest_free(&m);
+                    hl_app_context_free(ctx);
+                    return -1;
+                }
                 char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
                 int rc = hl_module_resolver_resolve(&m, &ctx->module_set,
                                                      err, sizeof(err));

@@ -138,10 +138,13 @@ int hl_driver_resolve_name(const char *name, char *out, size_t outsz)
          * "not found in PATH" on a box where `hull doctor` listed that very
          * cosmocc - the two surfaces disagreeing about one toolchain.
          *
-         * A miss falls through to the bare name, so POSIX behaviour is
-         * unchanged: exec still gets its turn, and this can only turn a
-         * failure into a success. */
+         * A miss is a miss: the bare name is not handed on for exec to find,
+         * since exec's own search takes "." and empty PATH entries as the
+         * working directory (audit 17; the spawn functions refuse a name
+         * hl_host_find_in_path does not resolve as well). */
         if (hl_host_find_in_path(name, out, outsz) == 1) return 0;
+        out[0] = '\0';
+        return -1;
     }
 
     int n = snprintf(out, outsz, "%s", name);

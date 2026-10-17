@@ -1445,6 +1445,26 @@ static int l_tool_bundle_verify(lua_State *L)
             goto out;
         }
     }
+    /* And the cached manifest must be THIS hull's release (audit 17, as
+     * tool.platform_verify since audit 9): the install fetched from that
+     * tag, so another signed release's manifest + bundle in its place is
+     * refused. A hull that is not a release build verifies nothing from
+     * the cache. A bundle installed before the install recorded the
+     * release's hull.version (.hull-bundle.version) is reinstalled once. */
+    {
+        char tag[64];
+        if (hl_release_io_self_tag(tag, sizeof tag) != 0) {
+            why = "this hull is not a release build, so an installed bundle "
+                  "cannot be checked against its release";
+            goto out;
+        }
+        if (hl_release_io_check_cached_release(dir, ".hull-bundle.sha256",
+                                               manifest, mlen, tag) != 0) {
+            why = "the cached manifest is not this hull's release - reinstall "
+                  "the bundle";
+            goto out;
+        }
+    }
     if (hl_release_io_find_checksum(manifest, mlen, asset, expected) != 0) {
         why = "the bundle is not in its signed manifest";
         goto out;

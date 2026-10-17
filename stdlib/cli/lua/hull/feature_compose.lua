@@ -281,10 +281,23 @@ function M.resolve_lib(libname, asset_name, ctx)
     if asset_name and ctx.plat and tool.feature_cache_dir then
         local cache = tool.feature_cache_dir()
         if cache and file_exists(cache .. "/" .. asset_name) then
-            if not tool.platform_verify or not tool.platform_verify(cache, asset_name) then
+            local src = cache .. "/" .. asset_name
+            -- With ctx.tmpdir, copy FIRST and verify the copy, as the musl
+            -- branch above does: verifying the cache file and handing back
+            -- its path left the caller to copy it later, past the check
+            -- (audit 17). The copy is what links.
+            local use = src
+            if ctx.tmpdir then
+                use = ctx.tmpdir .. "/" .. libname
+                if not tool.copy(src, use) then
+                    return nil, "cache-verify-failed"
+                end
+            end
+            if not tool.platform_verify or
+               not tool.platform_verify(cache, asset_name, use ~= src and use or nil) then
                 return nil, "cache-verify-failed"
             end
-            return cache .. "/" .. asset_name, "cache"
+            return use, "cache"
         end
     end
     return nil, "not-found"
@@ -641,9 +654,18 @@ function M.plan_mandatory(ctx)
 
     local list = {}
     local function add(spec)
-        -- spec: { name (stem), lib, path, sets_base_group, label }
+        -- spec: { name (stem), lib, path, from, sets_base_group, label }
+        -- Attestation domain (docs/composed_feature_signing.md): an archive
+        -- taken from the signed feature cache (`hull feature install`) was
+        -- re-verified against the RELEASE-key manifest, so it is recorded in
+        -- the release domain under its release-asset name - not the platform
+        -- domain, which claims the platform-key manifest covers it (audit 17).
+        local from_cache = spec.from == "cache"
         list[#list + 1] = {
-            record_name    = "libhull_feature-" .. spec.name .. "." .. plat_infix .. ".a",
+            record_name    = from_cache
+                and ("libhull_feature-" .. spec.name .. "-" .. plat_infix .. ".a")
+                or ("libhull_feature-" .. spec.name .. "." .. plat_infix .. ".a"),
+            domain         = from_cache and "release" or "platform",
             lib            = spec.lib,
             path           = spec.path,
             sets_base_group = spec.sets_base_group or false,
@@ -661,21 +683,26 @@ function M.plan_mandatory(ctx)
                         .. why .. "\nhint: build it from source with `make feature-"
                         .. make_stem .. "`\n")
         end
-        return path
+        return path, from
+    end
+    -- add() with the resolved path and where it came from.
+    local function add_resolved(spec, kind, make_stem, fn, ...)
+        spec.path, spec.from = resolve(kind, make_stem, fn, ...)
+        add(spec)
     end
 
     -- 1. Runtime (always; the base is runtime-less). refs base symbols -> group.
-    add({ name = rt, lib = "libhull_feature-" .. rt .. ".a", sets_base_group = true,
-          label = "runtime '" .. rt .. "'",
-          path = resolve("'" .. rt .. "' runtime", rt, M.resolve_runtime_lib, rt, ctx.tmpdir, rctx) })
+    add_resolved({ name = rt, lib = "libhull_feature-" .. rt .. ".a", sets_base_group = true,
+          label = "runtime '" .. rt .. "'" },
+          "'" .. rt .. "' runtime", rt, M.resolve_runtime_lib, rt, ctx.tmpdir, rctx)
 
     -- 2. WASM core + per-runtime compute bridge.
     if needs_wasm then
-        add({ name = "wasm", lib = "libhull_feature-wasm.a", label = "WASM feature",
-              path = resolve("WASM", "wasm", M.resolve_wasm_lib, ctx.tmpdir, rctx) })
-        add({ name = "wasm-" .. rt, lib = "libhull_feature-wasm-" .. rt .. ".a",
-              label = "compute bridge",
-              path = resolve("compute-bindings", "wasm-" .. rt, M.resolve_wasm_rt_lib, rt, ctx.tmpdir, rctx) })
+        add_resolved({ name = "wasm", lib = "libhull_feature-wasm.a", label = "WASM feature" },
+              "WASM", "wasm", M.resolve_wasm_lib, ctx.tmpdir, rctx)
+        add_resolved({ name = "wasm-" .. rt, lib = "libhull_feature-wasm-" .. rt .. ".a",
+              label = "compute bridge" },
+              "compute-bindings", "wasm-" .. rt, M.resolve_wasm_rt_lib, rt, ctx.tmpdir, rctx)
     end
 
     -- 3. Per-runtime SQLite UDF bridge. The bridge and the SQLite ENGINE (a
@@ -686,39 +713,39 @@ function M.plan_mandatory(ctx)
     -- mirrors it via the same base_lacks probe. On the distributed SLIM base the
     -- base lacks SQLite, so both compose (unchanged); on a full base both skip.
     if needs_sqlite and base_lacks("hl_db_backend_sqlite") then
-        add({ name = "sqlite-" .. rt, lib = "libhull_feature-sqlite-" .. rt .. ".a",
-              label = "SQLite udf bridge",
-              path = resolve("SQLite udf-bridge", "sqlite-" .. rt, M.resolve_sqlite_rt_lib, rt, ctx.tmpdir, rctx) })
+        add_resolved({ name = "sqlite-" .. rt, lib = "libhull_feature-sqlite-" .. rt .. ".a",
+              label = "SQLite udf bridge" },
+              "SQLite udf-bridge", "sqlite-" .. rt, M.resolve_sqlite_rt_lib, rt, ctx.tmpdir, rctx)
     end
 
     -- 4. Image codec core + per-runtime image bridge.
     if needs_image then
-        add({ name = "image", lib = "libhull_feature-image.a", label = "image feature",
-              path = resolve("image", "image", M.resolve_image_lib, ctx.tmpdir, rctx) })
-        add({ name = "image-" .. rt, lib = "libhull_feature-image-" .. rt .. ".a",
-              label = "image bridge",
-              path = resolve("image-bindings", "image-" .. rt, M.resolve_image_rt_lib, rt, ctx.tmpdir, rctx) })
+        add_resolved({ name = "image", lib = "libhull_feature-image.a", label = "image feature" },
+              "image", "image", M.resolve_image_lib, ctx.tmpdir, rctx)
+        add_resolved({ name = "image-" .. rt, lib = "libhull_feature-image-" .. rt .. ".a",
+              label = "image bridge" },
+              "image-bindings", "image-" .. rt, M.resolve_image_rt_lib, rt, ctx.tmpdir, rctx)
     end
 
     -- 5. TLS feature (only when the base is actually TLS-less). refs base+Keel.
     if needs_tls and base_lacks("mbedtls_ssl_handshake") then
-        add({ name = "tls", lib = "libhull_feature-tls.a", sets_base_group = true,
-              label = "TLS feature",
-              path = resolve("TLS", "tls", M.resolve_tls_lib, ctx.tmpdir, rctx) })
+        add_resolved({ name = "tls", lib = "libhull_feature-tls.a", sets_base_group = true,
+              label = "TLS feature" },
+              "TLS", "tls", M.resolve_tls_lib, ctx.tmpdir, rctx)
     end
 
     -- 6. HTTP core + (Keel when base-less) + per-runtime web bindings.
     if needs_http then
-        add({ name = "http", lib = "libhull_feature-http.a", label = "HTTP feature",
-              path = resolve("HTTP", "http", M.resolve_http_lib, ctx.tmpdir, rctx) })
+        add_resolved({ name = "http", lib = "libhull_feature-http.a", label = "HTTP feature" },
+              "HTTP", "http", M.resolve_http_lib, ctx.tmpdir, rctx)
         if base_lacks("hl_async_backend_keel") then
-            add({ name = "keel", lib = "libhull_feature-keel.a", sets_base_group = true,
-                  label = "Keel event loop",
-                  path = resolve("Keel", "keel", M.resolve_keel_lib, ctx.tmpdir, rctx) })
+            add_resolved({ name = "keel", lib = "libhull_feature-keel.a", sets_base_group = true,
+                  label = "Keel event loop" },
+                  "Keel", "keel", M.resolve_keel_lib, ctx.tmpdir, rctx)
         end
-        add({ name = "http-" .. rt, lib = "libhull_feature-http-" .. rt .. ".a",
-              label = "web bindings",
-              path = resolve("web-bindings", "http-" .. rt, M.resolve_http_rt_lib, rt, ctx.tmpdir, rctx) })
+        add_resolved({ name = "http-" .. rt, lib = "libhull_feature-http-" .. rt .. ".a",
+              label = "web bindings" },
+              "web-bindings", "http-" .. rt, M.resolve_http_rt_lib, rt, ctx.tmpdir, rctx)
     end
 
     -- needs_wasm is returned so the caller can print the compute-free skip note;

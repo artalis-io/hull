@@ -94,6 +94,44 @@ echo "=== databases.internal ==="
 run_case lua "lua"
 run_case js "js"
 
+# Audit 17: a "$VAR" internal DSN is read from the environment by the registry,
+# and a stdlib init() at top level used it before the load-time check that the
+# variable is declared - so an undeclared one was read. It must be refused
+# there, and the database it names never opened.
+echo "=== undeclared \$VAR databases.internal ==="
+mkdir -p "$TMPDIR/ulua" "$TMPDIR/ujs"
+cat > "$TMPDIR/ulua/app.lua" <<'EOF3'
+app.manifest({
+    modules = { "hull/web/middleware/session@1" },
+    databases = { internal = "$HULL_E2E_UNDECLARED_DSN" },
+})
+local session = require("hull.web.middleware.session")
+session.init({})
+app.main(function() return 0 end)
+EOF3
+cat > "$TMPDIR/ujs/app.js" <<'EOF3'
+import { app } from "hull:app";
+import { session } from "hull:web:middleware:session";
+app.manifest({
+    modules: ["hull/web/middleware/session@1"],
+    databases: { internal: "$HULL_E2E_UNDECLARED_DSN" },
+});
+session.init({});
+app.main(() => 0);
+EOF3
+for ext in lua js; do
+    leak="$WTMP/u$ext-leak.db"
+    out=$(cd "$TMPDIR/u$ext" && HULL_E2E_UNDECLARED_DSN="$leak" \
+          "$OLDPWD/$HULL" --no-sandbox -d "$WTMP/u$ext-app.db" "app.$ext" 2>&1 || true)
+    case "$out" in
+        *"does not declare"*) pass "$ext: an undeclared \$VAR internal DSN is refused at top level" ;;
+        *) fail "$ext: an undeclared \$VAR internal DSN is refused at top level" "$out" ;;
+    esac
+    [ ! -f "$leak" ] \
+        && pass "$ext: the undeclared variable's database is never opened" \
+        || fail "$ext: the undeclared variable's database is never opened" "$out"
+done
+
 # `hull build` reads the manifest by running the app's top level in a VM with
 # no database, where the internal-connection module is a stand-in. A stdlib
 # module that takes the connection at load, and an init() called at top level,

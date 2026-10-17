@@ -1310,11 +1310,23 @@ static int lua_db_internal_conn(lua_State *L)
     if (!final) {
         HlManifest m;
         memset(&m, 0, sizeof m);
+        char ref_err[256] = {0};
+        int ref_bad = 0;
         if (hl_manifest_extract_lua(L, &m, lua->base.alloc) == 0) {
-            if (hl_db_registry_set_internal_dsn(reg, m.databases.internal) != 0)
+            /* A "$VAR" here is read from the environment by the registry, so
+             * it must be declared (env / secrets) BEFORE it is used: the
+             * load-time hl_manifest_check_env_refs runs only after the top
+             * level, and this runs during it (audit 17). */
+            if (hl_manifest_check_env_refs(&m, ref_err, sizeof ref_err) != 0) {
+                ref_bad = 1;
+                (void)hl_db_registry_set_internal_dsn(reg, NULL);
+            } else if (hl_db_registry_set_internal_dsn(reg, m.databases.internal) != 0) {
                 log_warn("[hull:db] databases.internal is too long; ignored");
+            }
         }
         hl_manifest_free(&m);
+        if (ref_bad)
+            return luaL_error(L, "hull internal database: %s", ref_err);
     }
     const char *err = NULL;
     HlDbHandle *h = hl_db_registry_internal(reg, &err);
