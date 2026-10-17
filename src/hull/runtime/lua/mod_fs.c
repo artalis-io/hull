@@ -931,8 +931,10 @@ static int require_impl(lua_State *L, int trusted)
     }
     lua_pop(L, 2); /* pop nil + __hull_modules */
 
-    /* 5. Filesystem fallback (dev mode - relative requires) */
-    if (lua && lua->app_dir &&
+    /* 5. Filesystem fallback (dev mode - relative requires). Development
+     * only: a built binary runs the modules it was built with, not one
+     * planted beside it in its working directory (audit 17). */
+    if (lua && lua->app_dir && !hl_vfs_embedded(lua->base.app_vfs) &&
         (name[0] == '.' || strchr(name, '/') != NULL)) {
 
         char path[HL_MODULE_PATH_MAX];

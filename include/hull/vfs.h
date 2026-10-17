@@ -128,6 +128,22 @@ int hl_vfs_has_prefix(const HlVfs *vfs, const char *prefix);
 int hl_vfs_path(const HlVfs *vfs, const char *name,
                 char *buf, size_t buf_size);
 
+/**
+ * @brief 1 when @p vfs holds embedded app files (a BUILT binary), else 0.
+ *
+ * The one test every app-file loader uses before falling back to disk: a
+ * built binary loads only what it was built with (migrations, static files,
+ * templates, Lua / JS modules, shaders, compute modules), never a file
+ * planted beside it in its working directory - that ran unsigned code
+ * without --verify-sig (#652; templates and modules, audit 17). The disk
+ * fallback is for development, when the app VFS is empty. NULL (no app VFS,
+ * as in unit tests) counts as not embedded.
+ */
+static inline int hl_vfs_embedded(const HlVfs *vfs)
+{
+    return vfs && vfs->count > 0;
+}
+
 /* ── Signed-file gate (--verify-sig) ─────────────────────────────────
  *
  * Under --verify-sig every app file the runtime loads from DISK (a dev-mode

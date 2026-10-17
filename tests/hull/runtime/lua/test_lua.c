@@ -1361,6 +1361,7 @@ static void rm_rf(const char *dir)
     const char *names[] = {
         "mod.lua", "bad.lua", "big.lua", "nilmod.lua",
         "sub/b.lua", "sub", "c.lua", "sibling.lua",
+        "planted.lua", "templates/planted.html", "templates",
         NULL
     };
     for (int i = 0; names[i]; i++) {
@@ -1680,6 +1681,90 @@ UTEST(lua_require_fs, embedded_still_first)
         "return type(j) == 'table' and type(j.encode) == 'function' "
         "and 1 or 0 end)()");
     ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+/* ── Audit 17: a built binary loads modules / templates only from its VFS ─
+ *
+ * A non-empty app VFS is a built binary: its relative requires and its
+ * templates come from what it embedded. Unfixed, a module or template not
+ * embedded was read from <app_dir> on disk - code planted beside the binary
+ * ran, without --verify-sig. With an empty VFS (development) the disk
+ * fallback stays. */
+
+static int expose_template_bridge(lua_State *L);   /* below */
+
+static const unsigned char a17_tpl[] = "embedded template";
+static const HlEntry a17_built_entries[] = {
+    { "templates/embedded.html", a17_tpl, sizeof a17_tpl - 1 },
+    { 0, 0, 0 }
+};
+
+static void a17_plant(const char *dir)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/planted.lua", dir);
+    write_file(path, "return { val = 17 }\n");
+    snprintf(path, sizeof(path), "%s/templates", dir);
+    mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%s/templates/planted.html", dir);
+    write_file(path, "planted template");
+}
+
+UTEST(lua_audit17, relative_require_reads_disk_only_in_development)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a17"), NULL);
+    a17_plant(tmpdir);
+
+    /* Development (no app VFS): the module on disk loads. */
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+    EXPECT_EQ(eval_int("(function() return require('./planted').val end)()"),
+              17);
+
+    /* Built (non-empty app VFS): it does not. */
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a17_built_entries, tmpdir);
+    lua_rt.base.app_vfs = &vfs;
+    EXPECT_EQ(eval_int("(function() local ok = pcall(require, './planted') "
+                       "return ok and 1 or 0 end)()"), 0);
+    lua_rt.base.app_vfs = NULL;
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_audit17, template_reads_disk_only_in_development)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a17"), NULL);
+    a17_plant(tmpdir);
+
+    /* Development: the template on disk is read. */
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(expose_template_bridge(lua_rt.L), LUA_OK);
+    char *got = eval_str("__tb._load_raw('planted.html')");
+    EXPECT_TRUE(got && strcmp(got, "planted template") == 0);
+    free(got);
+
+    /* Built: only what was embedded. */
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a17_built_entries, tmpdir);
+    lua_rt.base.app_vfs = &vfs;
+    ASSERT_EQ(expose_template_bridge(lua_rt.L), LUA_OK);
+    EXPECT_EQ(eval_int("__tb._load_raw('planted.html') == nil and 1 or 0"), 1);
+    got = eval_str("__tb._load_raw('embedded.html')");
+    EXPECT_TRUE(got && strcmp(got, "embedded template") == 0);
+    free(got);
+    lua_rt.base.app_vfs = NULL;
 
     cleanup_lua();
     rm_rf(tmpdir);

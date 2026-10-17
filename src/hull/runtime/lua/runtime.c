@@ -493,6 +493,12 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
             lua_getfield(lua->L, -1, vfs_name);
             if (!lua_isnil(lua->L, -1)) {
                 lua_remove(lua->L, -2); /* remove __hull_modules */
+                /* The entry's own requires resolve against its embedded
+                 * key ("./app"), as a nested module's do: against the
+                 * absolute entry path they missed every embedded module and
+                 * were read from disk instead (audit 17, now refused). */
+                lua_pushstring(lua->L, vfs_name);
+                lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_current_module");
                 if (lua_pcall(lua->L, 0, 0, 0) != LUA_OK) {
                     hl_lua_dump_error(lua);
                     return -1;

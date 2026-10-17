@@ -565,6 +565,13 @@ check_exit "multi-file build exits 0" 0 $RC
 check_contains "multi-file build finds 2 files" "$BUILD_OUT" "2 Lua file"
 check_file_exists "multi-file binary exists" "$WORKDIR/multiapp/multiapp"
 
+# The built binary runs the module it embedded, not the file beside it
+# (audit 17: an entry's relative require missed the VFS and read the disk).
+cp "$WORKDIR/multiapp/lib/greet.lua" "$WORKDIR/multiapp/lib/greet.lua.orig"
+cat > "$WORKDIR/multiapp/lib/greet.lua" << 'LIBEOF'
+return { hello = function() return "planted beside the binary" end }
+LIBEOF
+
 # Serve the multi-file app
 (cd "$WORKDIR/multiapp" && exec ./multiapp -p 19871) >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -580,6 +587,7 @@ else
 fi
 
 stop_server
+mv "$WORKDIR/multiapp/lib/greet.lua.orig" "$WORKDIR/multiapp/lib/greet.lua"
 
 # Verify multi-file signature
 hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/multiapp"; VERIFY_OUT=$OUT

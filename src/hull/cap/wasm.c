@@ -739,7 +739,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
      * outside the WASM sandbox and outside any signature - for a name it
      * did not embed. And under --verify-sig every byte read from disk must
      * be a signed file (hl_vfs_disk_gate_check). */
-    int disk_ok = !(app_vfs && app_vfs->count > 0);
+    int disk_ok = !hl_vfs_embedded(app_vfs);
 
     /* 3. Filesystem AOT: <app_dir>/compute/<name>.aot.<arch> */
     if (!buf && disk_ok && app_dir && arch) {

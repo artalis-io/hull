@@ -113,8 +113,10 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    /* 3. Filesystem fallback (dev mode): app_dir/templates/<name> */
-    if (js && js->app_dir) {
+    /* 3. Filesystem fallback (dev mode): app_dir/templates/<name>.
+     * Development only: a built binary renders the templates it was built
+     * with, not one planted under <cwd>/templates (audit 17). */
+    if (js && js->app_dir && !hl_vfs_embedded(js->base.app_vfs)) {
         /* Reject ".." components to prevent path traversal */
         const char *p = name;
         while (*p) {
