@@ -152,6 +152,11 @@ local mw = mod.middleware(opts)   -- factory returns a middleware function
 --   1 = short-circuit (response already sent)
 ```
 
+Both runtimes read a numeric return the same way (audit 17): truncated toward
+zero, so `1.5` stops and `0.5` continues, and only the sign counts after that
+(`2^32` stops; it used to wrap to `0`). A negative number, a raised error, or
+(JS) a `valueOf` that throws answers 500. `nil` / `undefined` / `NaN` continue.
+
 Middleware is **synchronous**. Keel runs the next middleware and the handler on
 the connection as soon as it returns, so in JS:
 

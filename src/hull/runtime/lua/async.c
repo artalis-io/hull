@@ -772,17 +772,30 @@ static void task_fail_fire(void *user_data)
  * the loop. The thread is at the top of L's stack (popped). */
 static void hl_lua_task_failed_later(HlLua *lua, lua_State *L, const char *msg)
 {
+    /* msg may live on the dead task's stack, and the task is reachable only
+     * through the thread on L's stack until task_take_hook swaps it for the
+     * hook: copy it now. */
+    char mbuf[512];
+    snprintf(mbuf, sizeof mbuf, "%s", msg ? msg : "(an error)");
     if (!task_take_hook(L))
         return;
-    HlLuaTaskFail *f = calloc(1, sizeof *f);
-    if (!f || !lua->base.async_ctx) {
-        free(f);
+    if (!lua->base.async_ctx) {
         lua_pop(L, 1);
         return;   /* no loop: nothing can be waiting on the task */
     }
+    /* The ref first: luaL_ref can raise (out of memory), and nothing is
+     * held yet that the raise would leak (audit 17: the calloc was). Its
+     * caller has already put its own state back. */
+    int hook_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    HlLuaTaskFail *f = calloc(1, sizeof *f);
+    if (!f) {
+        luaL_unref(L, LUA_REGISTRYINDEX, hook_ref);
+        log_error("[hull:async] a failed task's waiters could not be woken");
+        return;
+    }
     f->lua = lua;
-    snprintf(f->msg, sizeof f->msg, "%s", msg ? msg : "(an error)");
-    f->hook_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    f->hook_ref = hook_ref;
+    snprintf(f->msg, sizeof f->msg, "%s", mbuf);
     if (hl_async_backend()->timer_add(lua->base.async_ctx, 0,
                                       task_fail_fire, f) == 0) {
         luaL_unref(L, LUA_REGISTRYINDEX, f->hook_ref);
@@ -866,6 +879,16 @@ int lua_hull_spawn(lua_State *L)
     int sr   = lua_resume(co, L, 0, &nres);
     sr = hl_lua_resume_status(co, sr);   /* a bare yield: an error */
 
+    /* The spawner's state back before anything below that can raise (a
+     * luaL_ref out of memory; the trip): a raise skipped it (audit 17). */
+    lua->active_co              = saved_co;
+    lua->active_thread_ref      = saved_thread_ref;
+    lua->active_conn            = saved_conn;
+    lua->active_req             = saved_req;
+    lua->active_timer           = saved_timer;
+    lua->active_on_complete     = saved_oc;
+    lua->active_on_complete_ctx = saved_oc_ctx;
+
     if (sr == LUA_OK) {
         luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
     } else if (sr == LUA_YIELD) {
@@ -874,21 +897,21 @@ int lua_hull_spawn(lua_State *L)
         char ebuf[512];
         const char *msg = hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf));
         log_error("[hull:async] coroutine error: %s", msg);
-        /* A task's failure hook runs later, from the loop (audit 9 M3). */
-        if (lua_checkstack(L, 4)) {
+        /* A task's failure hook runs later, from the loop (audit 9 M3). The
+         * thread on L's stack keeps the task alive once co_ref is gone. */
+        int pushed = lua_checkstack(L, 4);
+        if (pushed)
             lua_rawgeti(L, LUA_REGISTRYINDEX, co_ref);
-            hl_lua_task_failed_later(lua, L, msg);
-        }
         luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+        if (pushed)
+            hl_lua_task_failed_later(lua, L, msg);
     }
 
-    lua->active_co              = saved_co;
-    lua->active_thread_ref      = saved_thread_ref;
-    lua->active_conn            = saved_conn;
-    lua->active_req             = saved_req;
-    lua->active_timer           = saved_timer;
-    lua->active_on_complete     = saved_oc;
-    lua->active_on_complete_ctx = saved_oc_ctx;
+    /* The task ran on the spawner's budget: a task that tripped it ended
+     * the spawner's run too. The spawner's hook still had its stride to go,
+     * so it ran on past the limit; raise the trip here (audit 17). */
+    if (hl_lua_budget_tripped(L))
+        return hl_lua_budget_raise(L);
     return 0;
 }
 
