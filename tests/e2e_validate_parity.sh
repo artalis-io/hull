@@ -62,6 +62,14 @@ app.main(function(ctx)
     out[#out + 1] = chk(string.rep("a", 8190) .. "é", "^a")       -- P8 8192 bytes (multibyte) -> T
     out[#out + 1] = chk(string.rep("a", 8191) .. "é", "^a")       -- P9 8193 bytes (multibyte) -> F
 
+    -- min / max count characters (code points), not bytes / UTF-16 units (audit 17)
+    out[#out + 1] = b(validate.check({ s = "été" }, { s = { min = 3, max = 3 } }))   -- C1 -> T
+    out[#out + 1] = b(validate.check({ s = "été" }, { s = { max = 2 } }))            -- C2 -> F
+    out[#out + 1] = b(validate.check({ s = "😀😀" }, { s = { max = 2 } }))           -- C3 -> T
+    out[#out + 1] = b(validate.check({ s = "😀" }, { s = { min = 2 } }))             -- C4 -> F
+    -- an inherited property is not input (audit 17)
+    out[#out + 1] = b(validate.check({}, { constructor = { required = true } }))   -- O1 -> F
+
     ctx.stdout:write(table.concat(out, "") .. "\n"); return 0
 end)
 LUA
@@ -98,6 +106,14 @@ app.main((ctx) => {
     out += chk("a".repeat(8190) + "é", "^a");        // P8 8192 bytes (multibyte) -> T
     out += chk("a".repeat(8191) + "é", "^a");        // P9 8193 bytes (multibyte) -> F
 
+    // min / max count characters (code points), not bytes / UTF-16 units (audit 17)
+    out += b(validate.check({ s: "été" }, { s: { min: 3, max: 3 } })[0]);   // C1 -> T
+    out += b(validate.check({ s: "été" }, { s: { max: 2 } })[0]);           // C2 -> F
+    out += b(validate.check({ s: "😀😀" }, { s: { max: 2 } })[0]);          // C3 -> T
+    out += b(validate.check({ s: "😀" }, { s: { min: 2 } })[0]);            // C4 -> F
+    // an inherited property is not input (audit 17)
+    out += b(validate.check({}, { constructor: { required: true } })[0]);  // O1 -> F
+
     ctx.stdout.write(out + "\n"); return 0;
 });
 JS
@@ -111,7 +127,9 @@ js_out="$("$HULL" "$WD/v.js"  2>/dev/null | tail -1)"
 # pattern: P1 at-limit-match / P2 over / P3 clean-prefix+tail / P4 unanchored-over
 #          / P5 short-match / P6 short-anchored-match / P7 short-non-match /
 #          P8 8192B-multibyte / P9 8193B-multibyte
-expect="TFFFFFFTFTFTF""TFFFTTFTF"
+# chars:   C1 3-chars-in-range / C2 3-over-2 / C3 2-emoji-max-2 / C4 1-emoji-min-2
+# own:     O1 an inherited constructor is not input
+expect="TFFFFFFTFTFTF""TFFFTTFTF""TFTF""F"
 
 if [ "$lua_out" = "$expect" ] && [ "$lua_out" = "$js_out" ]; then
     echo "PASS: hull.validate is byte-identical across Lua and JS"

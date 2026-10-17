@@ -62,12 +62,31 @@ function utf8ByteLenExceeds(s, cap) {
     return false;
 }
 
+// String length for min / max: code points, so "été" is 3 characters
+// here and in the Lua sibling (audit 17: JS counted UTF-16 units, so an emoji
+// was 2, and Lua counted bytes). A lone surrogate counts as one.
+function charLen(s) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+            const c2 = s.charCodeAt(i + 1);
+            if (c2 >= 0xDC00 && c2 <= 0xDFFF) i++;   // a pair is one code point
+        }
+        n++;
+    }
+    return n;
+}
+
+const hasOwn = Object.prototype.hasOwnProperty;
+
 /**
  * Validate a data object against a schema.
  *
  * Schema is an object mapping field names to rule objects. Rules
  * (all optional): `required`, `trim`, `type` (`"string"|"number"|"integer"|"boolean"`),
- * `min` / `max` (string length or numeric bound), `pattern` (regex),
+ * `min` / `max` (string length in characters - Unicode code points - or
+ * numeric bound), `pattern` (regex),
  * `oneof` (array of allowed values), `email` (boolean), `fn`
  * (`(value, field, data) => true | false | string | null`: `true` /
  * `null` / `undefined` is valid, `false` is invalid with `message` or
@@ -91,7 +110,10 @@ function check(data, schema) {
     for (let i = 0; i < fields.length; i++) {
         const field = fields[i];
         const rules = schema[field];
-        let value = data[field];
+        // Own properties only: an inherited `constructor` / `toString` is not
+        // the caller's input (audit 17: `{}` passed `{ constructor:
+        // { required: true } }`).
+        let value = hasOwn.call(data, field) ? data[field] : undefined;
         let err = null;
         const customMsg = rules.message || null;
 
@@ -138,7 +160,7 @@ function check(data, schema) {
         // 4. min
         if (rules.min !== undefined) {
             if (typeof value === "string") {
-                if (value.length < rules.min)
+                if (charLen(value) < rules.min)
                     err = customMsg || "must be at least " + rules.min + " characters";
             } else if (typeof value === "number") {
                 if (value < rules.min)
@@ -155,7 +177,7 @@ function check(data, schema) {
         // 5. max
         if (rules.max !== undefined) {
             if (typeof value === "string") {
-                if (value.length > rules.max)
+                if (charLen(value) > rules.max)
                     err = customMsg || "must be at most " + rules.max + " characters";
             } else if (typeof value === "number") {
                 if (value > rules.max)

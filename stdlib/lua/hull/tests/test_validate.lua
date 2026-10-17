@@ -305,4 +305,20 @@ test("oneof: table choices return a validation error", function()
     assert_eq(validate.check({ x = choice }, { x = { oneof = { choice } } }), true)
 end)
 
+-- ── min / max count characters (audit 17) ───────────────────────────
+
+test("min/max: a string's length is its code points, not its bytes", function()
+    assert_eq(validate.check({ s = "été" }, { s = { min = 3, max = 3 } }), true)
+    local ok, errors = validate.check({ s = "été" }, { s = { max = 2 } })
+    assert_eq(ok, false)
+    assert_eq(errors.s, "must be at most 2 characters")
+    assert_eq(validate.check({ s = "😀😀" }, { s = { max = 2 } }), true)
+    assert_eq(validate.check({ s = "😀" }, { s = { min = 2 } }), false)
+end)
+
+test("min/max: a string that is not UTF-8 counts its bytes", function()
+    assert_eq(validate.check({ s = "\255\255\255" }, { s = { min = 3, max = 3 } }), true)
+    assert_eq(validate.check({ s = "\255\255\255" }, { s = { max = 2 } }), false)
+end)
+
 return {pass = pass, fail = fail}

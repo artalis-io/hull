@@ -220,6 +220,20 @@ app.post("/upload-stale", function(req, res)
                second = second:read() })
 end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
 
+-- A handler that fails after its body parked: the 500 keeps the header
+-- earlier middleware set (audit 17; the JS multipart resume dropped it).
+app.use("*", "/upload-throw", function(_req, res)
+    res:header("X-Mw-Kept", "yes")
+    return 0
+end)
+app.post("/upload-throw", function(req, res)
+    res:header("X-Handler-Dropped", "yes")
+    for part in req:multipart() do
+        for _ in part:chunks() do end
+    end
+    error("handler failed after the body")
+end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
+
 -- Size-capped route - anything over 1 KiB rejected mid-stream. We
 -- expect a 5xx (the handler raises on parser error, dispatch writes
 -- 500) and the test asserts on it.
@@ -396,6 +410,19 @@ app.post("/upload-stale", async (req, res) => {
     res.json({ stale_refused: staleRefused, chunks_refused: chunksRefused,
                first_name: first.name, second_name: second.name,
                error, second: bufToString(await second.read()) });
+}, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
+
+// A handler that fails after its body parked (see the Lua sibling).
+app.use("*", "/upload-throw", (_req, res) => {
+    res.header("X-Mw-Kept", "yes");
+    return 0;
+});
+app.post("/upload-throw", async (req, res) => {
+    res.header("X-Handler-Dropped", "yes");
+    for await (const part of req.multipart()) {
+        for await (const _ of part.chunks()) { /* drain */ }
+    }
+    throw new Error("handler failed after the body");
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 
 app.post("/upload-tiny", async (req, res) => {
@@ -703,6 +730,25 @@ run_multipart_tests() {
     check_contains "$LABEL stale part: next name"    "$RESP" '"second_name":"b"'
     if [ "$LABEL" = "js" ]; then
         check_contains "$LABEL stale part: chunks refused" "$RESP" '"chunks_refused":true'
+    fi
+
+    # ── Scenario 19: a handler failing after a parked body (audit 17) ──
+    # The 2 MB upload parks the handler on NEED_DATA, so the failure
+    # surfaces from the multipart resume: the 500 keeps the header the
+    # middleware set and drops the handler's own.
+    STATUS=$(curl --max-time 10 -sS -o /dev/null -D "$TMPDIR_WORK/throw_hdrs" \
+        -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/upload-throw" \
+        -F "f=@$TMPDIR_WORK/medium.bin" 2>/dev/null) || STATUS=000
+    check_contains "$LABEL parked handler error: 500" "$STATUS" "500"
+    if grep -qi "^X-Mw-Kept: yes" "$TMPDIR_WORK/throw_hdrs" 2>/dev/null; then
+        pass "$LABEL parked handler error: middleware header kept"
+    else
+        fail "$LABEL parked handler error: middleware header kept - $(cat "$TMPDIR_WORK/throw_hdrs" 2>/dev/null)"
+    fi
+    if grep -qi "^X-Handler-Dropped" "$TMPDIR_WORK/throw_hdrs" 2>/dev/null; then
+        fail "$LABEL parked handler error: handler header dropped"
+    else
+        pass "$LABEL parked handler error: handler header dropped"
     fi
 
     # ── Sanity: post-multipart requests still work (no per-request

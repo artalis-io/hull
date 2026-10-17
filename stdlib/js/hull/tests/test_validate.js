@@ -273,6 +273,26 @@ test("first rule error wins", () => {
     assertEq(errors.pw, "is required");
 });
 
+// ── min / max count characters; own properties only (audit 17) ─────
+
+test("min/max: a string's length is its code points, not UTF-16 units", () => {
+    assertEq(validate.check({ s: "été" }, { s: { min: 3, max: 3 } })[0], true);
+    const [ok, errors] = validate.check({ s: "été" }, { s: { max: 2 } });
+    assertEq(ok, false);
+    assertEq(errors.s, "must be at most 2 characters");
+    assertEq(validate.check({ s: "😀😀" }, { s: { max: 2 } })[0], true);
+    assertEq(validate.check({ s: "😀" }, { s: { min: 2 } })[0], false);
+    assertEq(validate.check({ s: "\uD800" }, { s: { min: 1, max: 1 } })[0], true);
+});
+
+test("an inherited property is not input", () => {
+    const [ok, errors] = validate.check({}, { constructor: { required: true } });
+    assertEq(ok, false);
+    assertEq(errors.constructor, "is required");
+    assertEq(validate.check({}, { toString: { type: "string" } })[0], true);
+    assertEq(validate.check(Object.create(null), { a: { required: true } })[0], false);
+});
+
 // Counts go back to the C harness (run_js_test in
 // tests/hull/runtime/js/test_js.c), which reads them off the global object --
 // a module's default export is not reachable from there.

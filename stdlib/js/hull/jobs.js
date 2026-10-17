@@ -24,6 +24,7 @@ import { db as dbModule } from "hull:db";
 import { time } from "hull:time";
 import { json } from "hull:json";
 import { crypto } from "hull:crypto";
+import { _test_hooks } from "hull:_test_hooks";
 const db = dbModule.default();
 
 // Outcome sentinels a handler returns. Frozen objects so
@@ -2976,8 +2977,12 @@ export const jobs = {
     pause, resume, purge,
     workflow, start, signal, workflowStatus,
     dead, retry, cancel, cleanup, cron, uncron, events, subscribe, unsubscribe,
-    RETRY, DEAD, DISCARD, _config: _cfg, _cronNext, _tick, _eventsDrain: eventsDrain,
+    RETRY, DEAD, DISCARD, _cronNext, _tick, _eventsDrain: eventsDrain,
 };
+// The live config is a test hook, registered with the stdlib-internal
+// hull:_test_hooks: exported as jobs._config, app code could set any field
+// past init's checks (a NaN eventsGrace, a non-function backoff; audit 17).
+_test_hooks.register("hull:jobs", { config: _cfg });
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,
          purge, workflow, start, signal, workflowStatus,

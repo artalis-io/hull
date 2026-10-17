@@ -5381,6 +5381,21 @@ UTEST(js_stdlib, stdlib_audit16_suite)
     cleanup_js_caps();
 }
 
+/* Stdlib regressions from audit 17: etag helpers with an empty body, and
+ * jobs' live config moved to hull:_test_hooks. */
+UTEST(js_stdlib, stdlib_audit17_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit17.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();
@@ -9950,6 +9965,46 @@ UTEST(js_http_timeout, a_throwing_opts_getter_stops_the_async_call)
         JS_FreeValue(js.ctx, v);
         hl_js_run_jobs(&js);
         EXPECT_EQ_MSG(eval_int("globalThis.__hg|0"), 1, calls[i]);
+    }
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
+
+/* Audit 17: a header whose getter or toString throws was skipped with its
+ * exception left pending, and the request went on without it. The header's
+ * own error is what the call throws now, before the request starts (the
+ * host check's "failed" would show it went on). */
+UTEST(js_http_timeout, a_throwing_header_value_stops_the_call)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlHttpConfig cfg = {0};
+    js.base.http_cfg = &cfg;
+    static const char *const calls[] = {
+        "http.get('http://x.invalid/', { headers: { a: 'ok', "
+        "  b: { toString() { throw new Error('boom-hdr'); } } } })",
+        "http.post('http://x.invalid/', 'b', { headers: "
+        "  { get b() { throw new Error('boom-hdr'); } } })",
+        "http.delete('http://x.invalid/', { headers: "
+        "  { b: { toString() { throw new Error('boom-hdr'); } } } })",
+        "http.request('GET', 'http://x.invalid/', { headers: "
+        "  { get b() { throw new Error('boom-hdr'); } } })",
+        "http.get('http://x.invalid/', "
+        "  { get headers() { throw new Error('boom-hdr'); } })",
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "let r = 0;\n"
+                 "try { %s; r = 2; } catch (e) {\n"
+                 "  r = e.message === 'boom-hdr' ? 1 : 3; }\n"
+                 "globalThis.__hh = r;\n", calls[i]);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<hh>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__hh|0"), 1, calls[i]);
     }
     js.base.http_cfg = NULL;
     cleanup_js_caps();

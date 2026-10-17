@@ -93,13 +93,16 @@ function etag.json(req, res, data, status)
         return
     end
 
+    -- An empty body has no tag: no ETag header and no 304 (audit 17;
+    -- res:header("ETag", nil) raised).
     local tag = etag.compute(body)
-    if etag.matches(req, tag) then
-        res:status(304):header("ETag", tag)
-        return
+    if tag then
+        if etag.matches(req, tag) then
+            res:status(304):header("ETag", tag)
+            return
+        end
+        res:header("ETag", tag)
     end
-
-    res:header("ETag", tag)
     if status then res:status(status) end
     res:json(data)
 end
@@ -125,13 +128,16 @@ function etag.text(req, res, text, status)
         return
     end
 
+    -- An empty body has no tag: no ETag header and no 304 (audit 17;
+    -- res:header("ETag", nil) raised).
     local tag = etag.compute(text)
-    if etag.matches(req, tag) then
-        res:status(304):header("ETag", tag)
-        return
+    if tag then
+        if etag.matches(req, tag) then
+            res:status(304):header("ETag", tag)
+            return
+        end
+        res:header("ETag", tag)
     end
-
-    res:header("ETag", tag)
     if status then res:status(status) end
     res:text(text)
 end
@@ -157,13 +163,16 @@ function etag.html(req, res, html, status)
         return
     end
 
+    -- An empty body has no tag: no ETag header and no 304 (audit 17;
+    -- res:header("ETag", nil) raised).
     local tag = etag.compute(html)
-    if etag.matches(req, tag) then
-        res:status(304):header("ETag", tag)
-        return
+    if tag then
+        if etag.matches(req, tag) then
+            res:status(304):header("ETag", tag)
+            return
+        end
+        res:header("ETag", tag)
     end
-
-    res:header("ETag", tag)
     if status then res:status(status) end
     res:html(html)
 end

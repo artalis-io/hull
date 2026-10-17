@@ -466,6 +466,18 @@ test("a16: a full bucket for the new address is a 429 that starts nothing", func
     hooks.email_rate_reset()
 end)
 
+-- Audit 17: the per-recipient bucket folds ASCII only (the JS twin used
+-- toLowerCase, which folds U+0130 too).
+test("a17: the per-recipient bucket folds ASCII letters only", function()
+    reset_store(); init({ email_rate_limit = { limit = 3, window = 900 } })
+    local hooks = __test_hooks('hull.web.auth-flows')
+    hooks.email_rate_reset()
+    for _ = 1, 3 do hooks.email_rate_allow("\u{130}X@X.test") end
+    assert_eq(hooks.email_rate_allow("\u{130}x@x.test"), false, "ASCII case folds")
+    assert_eq(hooks.email_rate_allow("i\u{307}x@x.test"), true, "a non-ASCII fold is another bucket")
+    hooks.email_rate_reset()
+end)
+
 test("a16: revoking pending changes does not reset the limits", function()
     reset_store(); init({ email_rate_limit = { limit = 3, window = 900 } })
     local hooks = __test_hooks('hull.web.auth-flows')

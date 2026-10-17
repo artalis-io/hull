@@ -60,8 +60,11 @@ local function default_backoff(attempt)
 end
 _cfg.backoff = default_backoff
 
--- Exposed for tests / introspection; not part of the app-facing contract.
-jobs._config = _cfg
+-- The live config is a test hook, registered with the stdlib-internal
+-- hull._test_hooks: exported as jobs._config, app code could set any field
+-- past jobs.init's checks (a NaN events_grace, a non-function backoff;
+-- audit 17).
+require("hull._test_hooks").register("hull.jobs", { config = _cfg })
 
 -- Registered handlers: type -> fn. `_default` is the optional catch-all.
 local _handlers = {}

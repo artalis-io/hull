@@ -51,6 +51,14 @@ local function email_ok(s)
     return true
 end
 
+-- String length for min / max: code points, so "été" is 3 characters
+-- here and in the JS sibling (audit 17: Lua counted bytes, JS UTF-16 units).
+-- A string that is not valid UTF-8 has no code-point count and falls back to
+-- its byte length.
+local function char_len(s)
+    return utf8.len(s) or #s
+end
+
 --- Validate a data table against a schema.
 --
 -- Schema is a table mapping field names to rule tables. Recognised rules:
@@ -58,7 +66,9 @@ end
 --   - `required` (boolean) - error if absent.
 --   - `trim` (boolean) - strip leading/trailing whitespace before other checks.
 --   - `type` (string) - `"string"` / `"number"` / `"integer"` / `"boolean"`.
---   - `min` / `max` (number) - string length (for strings) or numeric bound (for numbers).
+--   - `min` / `max` (number) - string length in characters (Unicode code
+--     points; bytes for a string that is not valid UTF-8) or numeric bound
+--     (for numbers).
 --   - `pattern` (string) - Lua pattern the value must match.
 --   - `oneof` (`{any,...}`) - value must equal one of the listed values.
 --   - `email` (boolean) - practical RFC-5322 subset (good for form screening).
@@ -138,7 +148,7 @@ function validate.check(data, schema)
         -- 4. min
         if rules.min then
             if type(value) == "string" then
-                if #value < rules.min then
+                if char_len(value) < rules.min then
                     err = custom_msg or "must be at least " .. rules.min .. " characters"
                 end
             elseif type(value) == "number" then
@@ -157,7 +167,7 @@ function validate.check(data, schema)
         -- 5. max
         if rules.max then
             if type(value) == "string" then
-                if #value > rules.max then
+                if char_len(value) > rules.max then
                     err = custom_msg or "must be at most " .. rules.max .. " characters"
                 end
             elseif type(value) == "number" then
