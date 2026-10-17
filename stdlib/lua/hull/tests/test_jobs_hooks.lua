@@ -168,9 +168,11 @@ function cases.horizon()
     end)
 end
 
+-- The harness sets the case as a global before it runs the script.
+local case = rawget(_G, "__jobs_case")
 test("the case is known", function()
-    assert_eq(type(cases[__jobs_case]), "function", tostring(__jobs_case))
+    assert_eq(type(cases[case]), "function", tostring(case))
 end)
-if cases[__jobs_case] then cases[__jobs_case]() end
+if cases[case] then cases[case]() end
 
 return { pass = pass, fail = fail }
