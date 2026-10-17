@@ -397,6 +397,14 @@ static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
                  plugin ? plugin : "?");
 }
 
+static int my_abandon_if_tripped(HlMyConn *conn, uint32_t body_len);
+
+/* Packets the auth exchange may take after the HandshakeResponse41: an OK /
+ * ERR, at most one AuthSwitchRequest, a caching_sha2 AuthMoreData or two. The
+ * loop had no bound - a server repeating an empty packet, an AuthSwitch or a
+ * FAST_SUCCESS kept the client in it (audit 17). */
+#define HL_MY_AUTH_MAX_PACKETS 16
+
 /* Run the handshake + auth exchange over @p t, which conn takes ownership of
  * (freed by hl_my_conn_close on every exit path, success or failure). Shared by
  * hl_my_conn_open (passing its connected transport) and hl_my_conn_start (passing
@@ -517,8 +525,15 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
 
     /* Auth result: OK, ERR, an AuthSwitchRequest (0xFE), or an AuthMoreData
      * (0x01) fast/full-auth exchange for caching_sha2_password. */
-    for (;;) {
+    for (int npkt = 0;; npkt++) {
+        if (npkt >= HL_MY_AUTH_MAX_PACKETS) {
+            conn_set_err(conn, "too many packets during authentication");
+            hl_my_conn_close(conn); return -1;
+        }
         if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
+        /* Read for the run that opens the connection, so charged like a
+         * reply's frames (audit 17). */
+        if (my_abandon_if_tripped(conn, f.body_len)) return -1;
         if (f.body_len == 0) continue;
         uint8_t hdr = f.body[0];
 
