@@ -605,7 +605,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
     }
 
     /* Check embedded app JS modules via VFS (hull build / make APP_DIR) */
-    if (js->base.app_vfs && js->base.app_vfs->count > 0) {
+    if (hl_vfs_embedded(js->base.app_vfs)) {
         /* The normalizer may prepend the app dir path to relative imports
          * (e.g. "examples/todo/./locales/en.json").  Embedded entries use
          * the canonical "./" form, so find that suffix. */
@@ -708,7 +708,14 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         }
     }
 
-    /* Load from filesystem (development mode) */
+    /* Load from filesystem (development mode). Development only: a built
+     * binary runs the modules it was built with, not one planted beside it
+     * in its working directory (audit 17). */
+    if (hl_vfs_embedded(js->base.app_vfs)) {
+        JS_ThrowReferenceError(ctx, "module not found: %s (not embedded in "
+                               "this build)", module_name);
+        return NULL;
+    }
     if (!js->app_dir) {
         JS_ThrowReferenceError(ctx, "no app directory configured");
         return NULL;

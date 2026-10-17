@@ -275,7 +275,7 @@ int hl_static_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_dat
     /* ── Try filesystem (dev mode) ────────────────────────────────── */
     /* Development only: a built binary (its app files embedded) serves what it
      * was built with, not whatever lies under <cwd>/static when it runs. */
-    if (ctx->vfs && ctx->vfs->count > 0)
+    if (hl_vfs_embedded(ctx->vfs))
         return 0;
     {
         if (!ctx->vfs || !ctx->vfs->root_dir)

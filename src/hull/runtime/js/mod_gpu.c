@@ -159,7 +159,7 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
         wgsl = (const char *)entry->data;
         wgsl_len = entry->len;
     } else if (js && js->base.app_vfs && js->base.app_vfs->root_dir &&
-               js->base.app_vfs->count == 0) {
+               !hl_vfs_embedded(js->base.app_vfs)) {
         /* Development only: a built binary (app files embedded) runs the
          * shaders it was built with, not whatever lies under its cwd. */
         char path[4096];

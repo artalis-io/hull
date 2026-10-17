@@ -11287,4 +11287,97 @@ UTEST(js_audit16, registration_ignores_prototype_setters)
     cleanup_js();
 }
 
+/* ── Audit 17: a built binary loads modules / templates only from its VFS ─
+ *
+ * A non-empty app VFS is a built binary: its imports and its templates come
+ * from what it embedded. Unfixed, a module or template not embedded was read
+ * from <app_dir> on disk - code planted beside the binary ran, without
+ * --verify-sig. With no app VFS (development) the disk fallback stays. */
+
+static const unsigned char a17_tpl[] = "embedded template";
+static const HlEntry a17_built_entries[] = {
+    { "templates/embedded.html", a17_tpl, sizeof a17_tpl - 1 },
+    { NULL, NULL, 0 }
+};
+
+static void a17_write(const char *dir, const char *rel, const char *text)
+{
+    char path[HL_TEST_PATH_MAX + 64];
+    snprintf(path, sizeof path, "%s/%s", dir, rel);
+    FILE *f = fopen(path, "wb");
+    if (f) { fputs(text, f); fclose(f); }
+}
+
+static void a17_cleanup(const char *dir)
+{
+    const char *names[] = { "mod_app.js", "tpl_app.js", "planted.js",
+                            "templates/planted.html", "templates", NULL };
+    char path[HL_TEST_PATH_MAX + 64];
+    for (int i = 0; names[i]; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        unlink(path);
+        rmdir(path);
+    }
+    rmdir(dir);
+}
+
+/* Load <dir>/<entry> in a fresh runtime, the app VFS embedded or not. */
+static int a17_load(const char *dir, const char *entry, int built, HlVfs *vfs)
+{
+    init_js();
+    if (!js_initialized) return -99;
+    if (built) {
+        hl_vfs_init(vfs, a17_built_entries, dir);
+        js.base.app_vfs = vfs;
+    }
+    char path[HL_TEST_PATH_MAX + 64];
+    snprintf(path, sizeof path, "%s/%s", dir, entry);
+    return hl_js_load_app(&js, path);
+}
+
+UTEST(js_audit17, imports_and_templates_read_disk_only_in_development)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a17"), NULL);
+    char tdir[HL_TEST_PATH_MAX + 16];
+    snprintf(tdir, sizeof tdir, "%s/templates", dir);
+    ASSERT_EQ(mkdir(tdir, 0755), 0);
+    a17_write(dir, "planted.js", "export const val = 17;\n");
+    a17_write(dir, "templates/planted.html", "planted template");
+    a17_write(dir, "mod_app.js",
+        "import { val } from './planted.js';\n"
+        "globalThis.__a17_mod = val;\n");
+    a17_write(dir, "tpl_app.js",
+        "import { template } from 'hull:template';\n"
+        "const t = (n) => { try { return template.render(n, {}); }\n"
+        "                   catch (e) { return 'missing'; } };\n"
+        "globalThis.__a17_planted = t('planted.html');\n"
+        "globalThis.__a17_embedded = t('embedded.html');\n");
+    HlVfs vfs;
+
+    /* Development: the module and the template on disk load. */
+    EXPECT_EQ(a17_load(dir, "mod_app.js", 0, &vfs), 0);
+    EXPECT_EQ(eval_int("globalThis.__a17_mod | 0"), 17);
+    EXPECT_EQ(a17_load(dir, "tpl_app.js", 0, &vfs), 0);
+    char *got = eval_str("globalThis.__a17_planted");
+    EXPECT_TRUE(got && strcmp(got, "planted template") == 0);
+    free(got);
+
+    /* Built: neither does; an embedded template still renders. */
+    EXPECT_NE(a17_load(dir, "mod_app.js", 1, &vfs), 0);
+    EXPECT_EQ(eval_int("globalThis.__a17_mod === undefined ? 1 : 0"), 1);
+    js.base.app_vfs = NULL;
+    EXPECT_EQ(a17_load(dir, "tpl_app.js", 1, &vfs), 0);
+    got = eval_str("globalThis.__a17_planted");
+    EXPECT_TRUE(got && strcmp(got, "missing") == 0);
+    free(got);
+    got = eval_str("globalThis.__a17_embedded");
+    EXPECT_TRUE(got && strcmp(got, "embedded template") == 0);
+    free(got);
+    js.base.app_vfs = NULL;
+
+    cleanup_js();
+    a17_cleanup(dir);
+}
+
 UTEST_MAIN();

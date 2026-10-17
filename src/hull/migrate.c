@@ -592,7 +592,7 @@ static int migrate_run_locked(HlDbHandle *handle, const HlVfs *vfs)
      * (its app files embedded) has exactly the migrations it was built with,
      * none included: reading <cwd>/migrations ran whatever unsigned SQL lay
      * beside the binary when it started, past --verify-sig. */
-    if (!vfs->root_dir || vfs->count > 0)
+    if (!vfs->root_dir || hl_vfs_embedded(vfs))
         return HL_MIGRATE_NO_DIR;
 
     MigrationList ml = {0};

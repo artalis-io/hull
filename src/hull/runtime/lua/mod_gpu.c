@@ -227,7 +227,7 @@ static int l_gpu_load(lua_State *L)
         wgsl = (const char *)entry->data;
         wgsl_len = entry->len;
     } else if (lua && lua->base.app_vfs && lua->base.app_vfs->root_dir &&
-               lua->base.app_vfs->count == 0) {
+               !hl_vfs_embedded(lua->base.app_vfs)) {
         /* Try filesystem: <app_dir>/shaders/<name>.wgsl. Development only:
          * a built binary (app files embedded) runs the shaders it was built
          * with, not whatever lies under its working directory. */
