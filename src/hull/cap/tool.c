@@ -1,7 +1,7 @@
 /*
  * cap/tool.c - Pure-C tool capability (controlled process + filesystem access)
  *
- * All process execution uses fork/execvp with an allowlisted set of
+ * All process execution uses fork/execv with an allowlisted set of
  * compiler binaries. All filesystem operations validate paths against
  * an unveil table. No shell invocation (system/popen) anywhere.
  *
@@ -523,12 +523,43 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
 static int cosmo_spawn_wait(const char *const argv[], const char *const envadd[]);
 #endif
 
+/* The file a spawn executes for @p name, in @p out. A name with a separator
+ * is a path and is used as given (tool_spawn_argv checks those against the
+ * sandbox). A bare name is resolved through hl_host_find_in_path, which
+ * searches only the ABSOLUTE PATH entries: exec's own search (execvp /
+ * posix_spawnp, and a shell running "$0") takes an empty entry or "." as the
+ * working directory - usually the app directory - so a repo shipping `nm` or
+ * `clang` ran it during `hull build` for anyone whose PATH held one (audit
+ * 17). A miss is -1: nothing is run. */
+static int tool_exec_path(const char *name, char *out, size_t outsz)
+{
+    if (!name || !*name) return -1;
+    if (strchr(name, '/') || strchr(name, '\\')) {
+        int n = snprintf(out, outsz, "%s", name);
+        return (n > 0 && (size_t)n < outsz) ? 0 : -1;
+    }
+    return hl_host_find_in_path(name, out, outsz) == 1 ? 0 : -1;
+}
+
+/* Audit a spawn whose program was not found on PATH. */
+static void tool_audit_not_found(const char *what, const char *const argv[])
+{
+    ShJsonWriter w = hl_audit_begin(what);
+    sh_json_write_key(&w, "argv");
+    sh_json_write_array_start(&w);
+    for (int i = 0; argv[i]; i++)
+        sh_json_write_string(&w, argv[i]);
+    sh_json_write_array_end(&w);
+    sh_json_write_kv_string(&w, "result", "not_found");
+    hl_audit_end(&w);
+}
+
 int hl_tool_spawn(const char *const argv[])
 {
     return hl_tool_spawn_env(argv, NULL);
 }
 
-/* fork + (env) + execvp + wait + audit (posix_spawnp on cosmo - see
+/* fork + (env) + execv + wait + audit (posix_spawn on cosmo - see
  * cosmo_spawn_start). NO allowlist/arg validation: callers
  * validate BEFORE calling (hl_tool_spawn_env on argv[0]; the shell-driver path
  * on its shell + driver + args). */
@@ -537,6 +568,11 @@ static int spawn_and_wait(const char *const argv[], const char *const envadd[])
 #ifdef __COSMOPOLITAN__
     return cosmo_spawn_wait(argv, envadd);
 #else
+    char exe[PATH_MAX];
+    if (tool_exec_path(argv[0], exe, sizeof(exe)) != 0) {
+        tool_audit_not_found("tool.spawn", argv);
+        return -1;
+    }
     pid_t pid = fork();
     if (pid < 0) return -1;
 
@@ -547,7 +583,7 @@ static int spawn_and_wait(const char *const argv[], const char *const envadd[])
         if (envadd)
             for (int i = 0; envadd[i]; i++)
                 putenv((char *)(uintptr_t)envadd[i]);
-        execvp(argv[0], (char *const *)(uintptr_t)argv);  /* POSIX execvp takes char*const[] but does not modify argv */
+        execv(exe, (char *const *)(uintptr_t)argv);  /* POSIX execv takes char*const[] but does not modify argv */
         _exit(127);
     }
 
@@ -656,8 +692,17 @@ static const char **build_shell_argv(const char *shell, const char *driver,
      * PROG exports $1 (=tmpdir) then shift's it so $0=driver, $@=args; both PROGs
      * are compile-time literals. Max fixed slots: shell+sh+-c+PROG+tmpdir+driver
      * +NULL = 7. */
-    const char **argv = (const char **)calloc(nargs + 7, sizeof(*argv));
+    /* The shell runs "$0" through ITS OWN PATH search, which takes "." and
+     * empty entries as the cwd, so a bare driver goes in resolved. The path
+     * is kept in the same allocation, after the pointer slots. */
+    const char **argv = (const char **)calloc(1, (nargs + 7) * sizeof(*argv) + PATH_MAX);
     if (!argv) return NULL;
+    char *drv = (char *)(argv + nargs + 7);
+    if (tool_exec_path(driver, drv, PATH_MAX) != 0) {
+        free((void *)(uintptr_t)argv);
+        return NULL;
+    }
+    driver = drv;
     size_t i = 0;
     argv[i++] = shell;
     if (is_busybox) argv[i++] = "sh";
@@ -699,12 +744,19 @@ int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
     return rc;
 }
 
-/* fork + pipe + read child stdout (posix_spawnp on cosmo - see
+/* fork + pipe + read child stdout (posix_spawn on cosmo - see
  * cosmo_spawn_start). NO allowlist check (callers validate first, or route a
  * validated shell-driver argv here). Returns malloc'd output or NULL (child
  * failed / OOM). */
 static char *spawn_read_argv(const char *const argv[], size_t *out_len)
 {
+#ifndef __COSMOPOLITAN__
+    char exe[PATH_MAX];
+    if (tool_exec_path(argv[0], exe, sizeof(exe)) != 0) {
+        tool_audit_not_found("tool.spawn_read", argv);
+        return NULL;
+    }
+#endif
     int pipefd[2];
     if (pipe(pipefd) < 0) return NULL;
 
@@ -728,7 +780,7 @@ static char *spawn_read_argv(const char *const argv[], size_t *out_len)
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
-        execvp(argv[0], (char *const *)(uintptr_t)argv);  /* POSIX execvp takes char*const[] but does not modify argv */
+        execv(exe, (char *const *)(uintptr_t)argv);  /* POSIX execv takes char*const[] but does not modify argv */
         _exit(127);
     }
 #endif
@@ -971,7 +1023,7 @@ static void cosmo_prepare(const char *shell)
     cosmo_plant_sh(shell);
 }
 
-/* Start a child with posix_spawnp - never fork()+execvp() - on cosmo. On
+/* Start a child with posix_spawn - never fork()+execvp() - on cosmo. On
  * Windows cosmo's fork() is EMULATED: a CreateProcess plus a copy of this
  * process's memory. That child can fault before it reaches exec (measured:
  * the compiler probe's child died in RtlAllocateHeap in about one `hull build`
@@ -979,8 +1031,9 @@ static void cosmo_prepare(const char *shell)
  * pipe it had inherited, so a parent reading that pipe blocked for good. The
  * emulated fork also loses the pipe handles cosmocc's driver needs for
  * out2=$(mktemper) (the capture comes back empty). posix_spawn is a direct
- * CreateProcess, which inherits the standard handles cleanly; posix_spawnp
- * searches PATH the way execvp did. envp = envadd (overriding) + environ.
+ * CreateProcess, which inherits the standard handles cleanly. A bare argv[0]
+ * is resolved by tool_exec_path (absolute PATH entries only), not by
+ * posix_spawnp's own search, which takes "." as the cwd. envp = envadd (overriding) + environ.
  * When @p out_fd >= 0 it becomes the child's stdout, and it and @p close_fd
  * (>= 0) are closed in the child. Returns 0, or an errno value. */
 extern char **environ;
@@ -991,6 +1044,11 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
     /* Freed by ownership, never by comparing with environ: posix_spawn can
      * replace environ itself (cosmo on a GitHub Windows runner does), and
      * "envp != environ" then freed the process's own environment array. */
+    char exe[PATH_MAX];
+    if (tool_exec_path(argv[0], exe, sizeof(exe)) != 0) {
+        tool_audit_not_found("tool.spawn", argv);
+        return ENOENT;
+    }
     char **envp = environ;
     char **owned = NULL;
     if (envadd && envadd[0]) {
@@ -1021,7 +1079,7 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
         }
     }
     if (rc == 0)
-        rc = posix_spawnp(pid, argv[0], have_fa ? &fa : NULL, NULL,
+        rc = posix_spawn(pid, exe, have_fa ? &fa : NULL, NULL,
                           (char *const *)(uintptr_t)argv, envp);
     if (have_fa) posix_spawn_file_actions_destroy(&fa);
     free(owned);
@@ -1124,11 +1182,14 @@ int hl_tool_spawn_self(const char *const argv[], unsigned timeout_ms)
         return HL_TOOL_SPAWN_NOSTART;
     }
 
+    char exe[PATH_MAX];
+    if (tool_exec_path(argv[0], exe, sizeof(exe)) != 0)
+        return HL_TOOL_SPAWN_NOSTART;
     pid_t pid;
 #ifdef __COSMOPOLITAN__
     {
         extern char **environ;
-        if (posix_spawn(&pid, argv[0], NULL, NULL,
+        if (posix_spawn(&pid, exe, NULL, NULL,
                         (char *const *)(uintptr_t)argv, environ) != 0)
             return HL_TOOL_SPAWN_NOSTART;
     }
@@ -1136,10 +1197,10 @@ int hl_tool_spawn_self(const char *const argv[], unsigned timeout_ms)
     pid = fork();
     if (pid < 0) return HL_TOOL_SPAWN_NOSTART;
     if (pid == 0) {
-        /* execvp failure exits 127 - a NORMAL exit, so the caller sees "ran
+        /* execv failure exits 127 - a NORMAL exit, so the caller sees "ran
          * and returned 127" rather than "never started". That is the right
          * reading: it did start, it just could not become the target. */
-        execvp(argv[0], (char *const *)(uintptr_t)argv);
+        execv(exe, (char *const *)(uintptr_t)argv);
         _exit(127);
     }
 #endif

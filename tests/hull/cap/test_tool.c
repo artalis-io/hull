@@ -535,6 +535,44 @@ UTEST(tool, spawn_of_a_missing_program_fails)
     rmdir(dir); free(dir);
 }
 
+/* Audit 17: a bare name is looked up in the ABSOLUTE PATH entries only. exec's
+ * own search took "." and an empty entry as the working directory, so a repo
+ * shipping `nm` ran it during `hull build`. Here the cwd holds an allowlisted
+ * "hull" and PATH names only "." and an empty entry: nothing may run. With the
+ * directory on PATH by absolute path, the same bare name runs. */
+UTEST(tool, spawn_bare_name_skips_cwd_path_entries)
+{
+    char *dir = make_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char exe[HL_TEST_PATH_MAX];
+    if (copy_self_as_hull(dir, exe, sizeof exe) != 0) {
+        rmdir(dir); free(dir);
+        UTEST_SKIP("could not copy this test binary");
+    }
+    char oldcwd[PATH_MAX];
+    ASSERT_TRUE(getcwd(oldcwd, sizeof oldcwd) != NULL);
+    const char *op = getenv("PATH");
+    char *oldpath = op ? strdup(op) : NULL;
+    ASSERT_EQ(chdir(dir), 0);
+
+    const char *argv[] = { "hull", "--list-tests", NULL };
+    setenv("PATH", ".::", 1);
+    char *out = hl_tool_spawn_read(argv, NULL);
+    EXPECT_TRUE(out == NULL);
+    free(out);
+    EXPECT_NE(hl_tool_spawn(argv), 0);
+
+    setenv("PATH", dir, 1);
+    out = hl_tool_spawn_read(argv, NULL);
+    EXPECT_TRUE(out != NULL);
+    free(out);
+
+    if (oldpath) setenv("PATH", oldpath, 1); else unsetenv("PATH");
+    free(oldpath);
+    EXPECT_EQ(chdir(oldcwd), 0);
+    remove(exe); rmdir(dir); free(dir);
+}
+
 UTEST(tool, driver_shell_runs_driver_through_sh)
 {
     const char *probe[] = { "cc", "--version", NULL };

@@ -1327,7 +1327,7 @@ local function compose_features(opts, tmpdir, platform_lib, is_cosmo, compute_fi
             for _, d in ipairs(plan.list) do
                 local dest = tmpdir .. "/" .. d.lib
                 if d.path ~= dest then tool.copy(d.path, dest) end
-                record_composed(d.record_name, dest, "platform")
+                record_composed(d.record_name, dest, d.domain or "platform")
                 if d.sets_base_group then needs_base_group = true end
                 for _, f in ipairs(fcompose.whole_archive_flags(dest, is_darwin)) do
                     feature_libs[#feature_libs + 1] = f

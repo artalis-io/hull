@@ -503,6 +503,14 @@ static int local_check_release(const char *dir, const char *mname,
     return rc == 0 ? 0 : -1;
 }
 
+int hl_release_io_check_cached_release(const char *dir, const char *mname,
+                                       const char *manifest, size_t mlen,
+                                       const char *tag)
+{
+    if (!dir || !mname || !manifest || !tag) return -1;
+    return local_check_release(dir, mname, manifest, mlen, tag);
+}
+
 #ifdef HL_RELEASE_IO_TEST_HOOKS
 /* test_release_io: the release binding alone (a real release key makes the
  * signature step before it unreachable from a test). */

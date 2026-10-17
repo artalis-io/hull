@@ -332,7 +332,8 @@ static int install_one(const HlToolSpec *spec, const char *platform,
                        const char *repo, const char *tag,
                        KlAllocator *alloc, KlTlsCtx *tls,
                        const char *manifest, size_t manifest_len,
-                       const char *msig, size_t msig_len)
+                       const char *msig, size_t msig_len,
+                       const char *ver, size_t ver_len)
 {
     if (!hl_tools_published_for(spec, platform)) {
         print_unpublished(spec, platform);
@@ -456,13 +457,17 @@ static int install_one(const HlToolSpec *spec, const char *platform,
             rc = hl_tar_extract((const unsigned char *)body, body_len, tmp);
         }
         /* The install record `hull build` re-verifies the bundle's files
-         * against (tool.bundle_verify): the asset name and the signed
-         * manifest + its signature. The extracted files are not signed one
-         * by one - the .tar is, and it stays in the tools store. */
+         * against (tool.bundle_verify): the asset name, the signed manifest +
+         * its signature, and the release's signed hull.version (audit 17:
+         * bundle_verify requires the cached manifest to be THIS hull's
+         * release, as tool.platform_verify does for feature libs). The
+         * extracted files are not signed one by one - the .tar is, and it
+         * stays in the tools store. */
         if (rc == 0 &&
             (write_bundle_record(tmp, ".hull-bundle-asset", asset, strlen(asset)) != 0 ||
              write_bundle_record(tmp, ".hull-bundle.sha256", manifest, manifest_len) != 0 ||
-             (msig && write_bundle_record(tmp, ".hull-bundle.sha256.sig", msig, msig_len) != 0)))
+             (msig && write_bundle_record(tmp, ".hull-bundle.sha256.sig", msig, msig_len) != 0) ||
+             (ver && write_bundle_record(tmp, ".hull-bundle.version", ver, ver_len) != 0)))
             rc = -1;
         if (rc == 0) {
             struct stat dst;
@@ -611,11 +616,11 @@ static int cmd_install(int argc, char **argv, const char *repo)
     }
 
     /* Fetch + verify manifest once, reuse for every asset. */
-    char *manifest = NULL, *msig = NULL;
-    size_t manifest_len = 0, msig_len = 0;
+    char *manifest = NULL, *msig = NULL, *ver = NULL;
+    size_t manifest_len = 0, msig_len = 0, ver_len = 0;
     if (hl_release_io_fetch_verified_manifest(repo, tag, &alloc, tls,
                                 "hull-tools", &manifest, &manifest_len,
-                                &msig, &msig_len, NULL, NULL) != 0) {
+                                &msig, &msig_len, &ver, &ver_len) != 0) {
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -630,7 +635,8 @@ static int cmd_install(int argc, char **argv, const char *repo)
                 continue;
             }
             if (install_one(t, platform, repo, tag, &alloc, tls,
-                            manifest, manifest_len, msig, msig_len) != 0) {
+                            manifest, manifest_len, msig, msig_len,
+                            ver, ver_len) != 0) {
                 any_failed = 1;
             }
         }
@@ -644,12 +650,14 @@ static int cmd_install(int argc, char **argv, const char *repo)
             rc = 1;
         } else {
             rc = install_one(spec, platform, repo, tag, &alloc, tls,
-                             manifest, manifest_len, msig, msig_len) == 0 ? 0 : 1;
+                             manifest, manifest_len, msig, msig_len,
+                             ver, ver_len) == 0 ? 0 : 1;
         }
     }
 
     hl_release_io_free(&alloc, manifest, manifest_len);
     if (msig) hl_release_io_free(&alloc, msig, msig_len);
+    if (ver) hl_release_io_free(&alloc, ver, ver_len);
     kl_tls_mbedtls_ctx_destroy(tls);
     return rc;
 }

@@ -402,6 +402,17 @@ hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.p
 check_exit "verify exits 0" 0 $RC
 check_contains "verify reports OK" "$VERIFY_OUT" "OK"
 check_contains "verify reports valid" "$VERIFY_OUT" "all checks passed"
+# Audit 17: with no --developer-key the signer is not pinned - say so.
+check_contains "verify warns the signer is not pinned" "$VERIFY_OUT" "signer not pinned"
+
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" \
+    --developer-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+check_exit "verify with --developer-key exits 0" 0 $RC
+check_contains "verify names the pinned developer key" "$VERIFY_OUT" "pinned developer key"
+case "$VERIFY_OUT" in
+    *"signer not pinned"*) fail "verify warned about an unpinned signer with --developer-key" ;;
+    *) pass "no unpinned-signer warning with --developer-key" ;;
+esac
 
 # ── Step 8: hull inspect ──────────────────────────────────────────────
 

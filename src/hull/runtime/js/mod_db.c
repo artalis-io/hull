@@ -1521,11 +1521,22 @@ static JSValue js_db_internal_conn(JSContext *ctx, JSValueConst this_val,
         if (!final) {
             HlManifest m;
             memset(&m, 0, sizeof m);
+            char ref_err[256] = {0};
+            int ref_bad = 0;
             if (hl_manifest_extract_js(ctx, &m, js->base.alloc) == 0) {
-                if (hl_db_registry_set_internal_dsn(reg, m.databases.internal) != 0)
+                /* A "$VAR" is read from the environment by the registry, so it
+                 * must be declared (env / secrets) before it is used: the
+                 * load-time check runs after the top level (audit 17). */
+                if (hl_manifest_check_env_refs(&m, ref_err, sizeof ref_err) != 0) {
+                    ref_bad = 1;
+                    (void)hl_db_registry_set_internal_dsn(reg, NULL);
+                } else if (hl_db_registry_set_internal_dsn(reg, m.databases.internal) != 0) {
                     log_warn("[hull:db] databases.internal is too long; ignored");
+                }
             }
             hl_manifest_free(&m);
+            if (ref_bad)
+                return JS_ThrowInternalError(ctx, "hull internal database: %s", ref_err);
         }
         const char *err = NULL;
         h = hl_db_registry_internal(reg, &err);

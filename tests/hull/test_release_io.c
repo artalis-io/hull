@@ -134,6 +134,34 @@ UTEST(verify_local, cached_manifest_names_this_release) {
     rmdir(dir);
 }
 
+/* Audit 17: an installed tool bundle's record (.hull-bundle.sha256) is bound
+ * to the release the same way, through the public check tool.bundle_verify
+ * runs: the release's hull.version is cached as .hull-bundle.version. */
+UTEST(verify_local, cached_bundle_manifest_names_this_release) {
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hlvb") != NULL);
+
+    const char *ver = "v0.16.0\n";
+    char hex[65];
+    ASSERT_EQ(hl_release_io_sha256_hex((const unsigned char *)ver, strlen(ver), hex), 0);
+    char manifest[256];
+    snprintf(manifest, sizeof(manifest),
+             "%s  hull.version\n%064d  hull-libc-musl-x86_64.tar\n", hex, 0);
+    size_t ml = strlen(manifest);
+    const char *m = ".hull-bundle.sha256";
+
+    /* A bundle installed before the record carried the version: refused. */
+    EXPECT_EQ(hl_release_io_check_cached_release(dir, m, manifest, ml, "v0.16.0"), -1);
+    vl_write(dir, ".hull-bundle.version", ver);
+    EXPECT_EQ(hl_release_io_check_cached_release(dir, m, manifest, ml, "v0.16.0"), 0);
+    /* Another release's signed bundle in this hull's place. */
+    EXPECT_EQ(hl_release_io_check_cached_release(dir, m, manifest, ml, "v0.17.0"), -1);
+    vl_rm(dir, ".hull-bundle.version");
+    EXPECT_EQ(hl_release_io_check_cached_release(NULL, m, manifest, ml, "v0.16.0"), -1);
+
+    rmdir(dir);
+}
+
 /* The tag this hull installs from never doubles the "v". */
 UTEST(release_io, self_tag_shape) {
     char tag[64];

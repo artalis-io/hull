@@ -189,6 +189,18 @@ int hl_release_io_verify_local_asset_release(const char *dir, const char *asset,
 int hl_release_io_self_tag(char *out, size_t out_sz);
 
 /**
+ * The cached manifest @p manifest (stored as @p dir / @p mname, a name ending
+ * in ".sha256") names the release @p tag: its signed hull.version entry must
+ * match the copy cached beside it (the same stem + ".version") and name @p tag,
+ * or the release predates the entry. The check the asset re-verify runs, for a
+ * caller that verified the manifest's signature itself (tool.bundle_verify,
+ * audit 17). @returns 0, or -1 (message printed).
+ */
+int hl_release_io_check_cached_release(const char *dir, const char *mname,
+                                       const char *manifest, size_t mlen,
+                                       const char *tag);
+
+/**
  * Extract a flat `"key":"value"` entry from a JSON blob. Deliberately
  * tiny - sufficient for GitHub release metadata fields like
  * `tag_name`. Not a general parser.
