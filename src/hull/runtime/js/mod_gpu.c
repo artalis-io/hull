@@ -980,6 +980,19 @@ static JSValue js_push_worker_gpu_result(JSContext *ctx, void *driver)
 }
 
 /* Async dispatch - submits GPU work to thread pool, returns Promise */
+/* Frees js_gpu_async_dispatch's copies before an op owns them: each
+ * buffer's data and name, the arrays, and the uniforms. */
+static void js_gpu_async_dispatch_free_copies(HlGpuBufferDesc *descs,
+                                              void **data, int count,
+                                              void *uniforms)
+{
+    for (int i = 0; i < count; i++) {
+        free(data[i]);
+        hl_free_const(descs[i].name);
+    }
+    free(data); free(descs); free(uniforms);
+}
+
 static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
@@ -1165,11 +1178,8 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
         c.uniforms_len = uni_len;
         if (hl_js_budget_charge(ctx, hl_work_bulk_units(
                                     (uint64_t)hl_gpu_dispatch_charge_bytes(&c)))) {
-            for (int i = 0; i < buf_count; i++) {
-                free(buf_data_ptrs[i]);
-                free((void *)(uintptr_t)buf_descs[i].name);
-            }
-            free(buf_data_ptrs); free(buf_descs); free(uni_copy);
+            js_gpu_async_dispatch_free_copies(buf_descs, buf_data_ptrs,
+                                              buf_count, uni_copy);
             JS_FreeCString(ctx, name);
             return JS_EXCEPTION;
         }
@@ -1178,8 +1188,8 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     /* Allocate worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
     if (!op) {
-        for (int i = 0; i < buf_count; i++) free(buf_data_ptrs[i]);
-        free(buf_data_ptrs); free(buf_descs); free(uni_copy);
+        js_gpu_async_dispatch_free_copies(buf_descs, buf_data_ptrs,
+                                          buf_count, uni_copy);
         JS_FreeCString(ctx, name);
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: out of memory");
     }
