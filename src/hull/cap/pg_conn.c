@@ -440,6 +440,16 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
                         : "invalid SCRAM server-first");
             return -1;
         }
+        /* The iteration count is the server's: up to SCRAM_MAX_ITERS rounds
+         * of HMAC run inside this one call, so they are charged to the run
+         * as soon as the count is accepted, and a run that cannot pay does
+         * not start them (audit 17). */
+        if (hl_db_budget_charge((int64_t)iters * HL_PG_SCRAM_UNITS_PER_ITER) != 0) {
+            set_err(conn->errmsg, sizeof conn->errmsg,
+                    "interrupted (instruction limit exceeded) before the "
+                    "SCRAM key derivation");
+            return -1;
+        }
         if (strncmp(rnonce, sc->client_nonce, strlen(sc->client_nonce)) != 0) {
             set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM nonce mismatch");
             return -1;
@@ -458,15 +468,6 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
         if (cfb < 0 || (size_t)cfb >= sizeof cfinal_bare ||
             am < 0 || (size_t)am >= sizeof authmsg) {
             set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM auth message too long");
-            return -1;
-        }
-        /* The iteration count is the server's: up to SCRAM_MAX_ITERS rounds
-         * of HMAC run inside this one call, so they are charged to the run
-         * first, and a run that cannot pay does not start them (audit 17). */
-        if (hl_db_budget_charge((int64_t)iters * HL_PG_SCRAM_UNITS_PER_ITER) != 0) {
-            set_err(conn->errmsg, sizeof conn->errmsg,
-                    "interrupted (instruction limit exceeded) before the "
-                    "SCRAM key derivation");
             return -1;
         }
         uint8_t proof[32];
