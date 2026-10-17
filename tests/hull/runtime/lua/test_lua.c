@@ -4903,6 +4903,29 @@ UTEST(lua_stdlib, stdlib_audit17_suite)
     cleanup_lua_caps();
 }
 
+/* hull.jobs through its clock-injectable test hooks (audit 17: jobs._tick /
+ * _cron_next / _events_drain left the module for hull._test_hooks, so the
+ * deterministic cron and subscription-drain cases moved here from
+ * tests/e2e_jobs.sh). Each case runs the script in a fresh state and a fresh
+ * :memory: database, named in the global __jobs_case. */
+static int run_jobs_hooks_case(const char *name, long long *pass, long long *fail)
+{
+    init_lua_with_caps();
+    if (!lua_initialized) return -1;
+    lua_pushstring(lua_rt.L, name);
+    lua_setglobal(lua_rt.L, "__jobs_case");
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_jobs_hooks.lua", pass, fail);
+    cleanup_lua_caps();
+    return rc;
+}
+
+#define JOBS_HOOKS_CASE(c)                                         UTEST(lua_stdlib, jobs_hooks_##c)                              {                                                                  long long pass = 0, fail = -1;                                 ASSERT_EQ(run_jobs_hooks_case(#c, &pass, &fail), 0);           EXPECT_EQ(fail, 0LL);                                          EXPECT_GT(pass, 1LL);                                      }
+JOBS_HOOKS_CASE(cron)
+JOBS_HOOKS_CASE(events)
+JOBS_HOOKS_CASE(poison)
+JOBS_HOOKS_CASE(horizon)
+#undef JOBS_HOOKS_CASE
+
 UTEST(lua_stdlib, ws_stream_suite)
 {
     long long pass = 0, fail = -1;

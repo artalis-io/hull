@@ -119,7 +119,7 @@ close the peer → returns -1. Extends `test_pg_conn.c` exactly like the existin
 ## 5. Testability (T8 - latency, never correctness)
 
 - **All existing correctness tests are untouched and backend-agnostic** - they use
-  the synchronous `jobs._events_drain` seam and never depend on NOTIFY. The suite
+  the synchronous drain seam (a test hook) and never depend on NOTIFY. The suite
   is green on SQLite/MySQL with zero NOTIFY.
 - **C unit test** (§2): `hl_pg_wait_notify` over a socketpair - notify → 1, nothing
   → 0 (timeout), EOF → -1. Deterministic.

@@ -5396,6 +5396,31 @@ UTEST(js_stdlib, stdlib_audit17_suite)
     cleanup_js_caps();
 }
 
+/* hull:jobs through its clock-injectable test hooks (audit 17: jobs._tick /
+ * _cronNext / _eventsDrain left the module for hull:_test_hooks, so the
+ * deterministic cron and subscription-drain cases moved here from
+ * tests/e2e_jobs.sh). Each case runs the script in a fresh context and a
+ * fresh :memory: database, named in globalThis.__jobs_case. */
+static int run_jobs_hooks_case(const char *name, int *pass, int *fail)
+{
+    init_js_with_caps();
+    if (!js_initialized) return -1;
+    char set[128];
+    snprintf(set, sizeof set, "globalThis.__jobs_case = '%s';", name);
+    JSValue v = JS_Eval(js.ctx, set, strlen(set), "<jobs-case>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, v);
+    int rc = run_js_test("stdlib/js/hull/tests/test_jobs_hooks.js", pass, fail);
+    cleanup_js_caps();
+    return rc;
+}
+
+#define JOBS_HOOKS_CASE(c)                                         UTEST(js_stdlib, jobs_hooks_##c)                               {                                                                  int pass = 0, fail = -1;                                       ASSERT_EQ(run_jobs_hooks_case(#c, &pass, &fail), 0);           EXPECT_EQ(fail, 0);                                            EXPECT_GT(pass, 1);                                        }
+JOBS_HOOKS_CASE(cron)
+JOBS_HOOKS_CASE(events)
+JOBS_HOOKS_CASE(poison)
+JOBS_HOOKS_CASE(horizon)
+#undef JOBS_HOOKS_CASE
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();

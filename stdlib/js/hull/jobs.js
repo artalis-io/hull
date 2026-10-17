@@ -2816,13 +2816,14 @@ function unsubscribe(name) {
     return jobs;
 }
 
-// Synchronous drain seam (the testability keystone): lease the
-// subscription, deliver new events in id order, advance the cursor, release the
-// lease. No timers/sleeps - work() drives it. Returns { delivered, cursor,
-// leased }. Test seams: opts.now (clock), opts.batch, opts.grace (the
-// commit-order horizon, overriding eventsGrace), opts.commitCursor (false =
-// deliver but don't advance -> models a crash before the cursor write),
-// opts.releaseLease (false = hold the lease -> models a worker death mid-drain).
+// Synchronous drain (the testability keystone; a test hook, never on the
+// module - audit 17): lease the subscription, deliver new events in id order,
+// advance the cursor, release the lease. No timers/sleeps - work() drives it.
+// Returns { delivered, cursor, leased }. Test seams: opts.now (clock),
+// opts.batch, opts.grace (the commit-order horizon, overriding eventsGrace),
+// opts.commitCursor (false = deliver but don't advance -> models a crash before
+// the cursor write), opts.releaseLease (false = hold the lease -> models a
+// worker death mid-drain).
 function eventsDrain(name, opts) {
     const o = opts || {};
     const sub = _subscribers[name];
@@ -2964,7 +2965,7 @@ function cleanup(opts) {
     return deleted;
 }
 
-// Internal seams for tests / introspection; not part of the app-facing contract.
+// Test seams (hull:_test_hooks, never on the module; audit 17).
 function _cronNext(spec, from, offset) {
     const p = parseCron(spec);
     return p ? cronNext(p, from !== undefined ? from : time.now(), offset) : null;
@@ -2977,12 +2978,17 @@ export const jobs = {
     pause, resume, purge,
     workflow, start, signal, workflowStatus,
     dead, retry, cancel, cleanup, cron, uncron, events, subscribe, unsubscribe,
-    RETRY, DEAD, DISCARD, _cronNext, _tick, _eventsDrain: eventsDrain,
+    RETRY, DEAD, DISCARD,
 };
-// The live config is a test hook, registered with the stdlib-internal
-// hull:_test_hooks: exported as jobs._config, app code could set any field
-// past init's checks (a NaN eventsGrace, a non-function backoff; audit 17).
-_test_hooks.register("hull:jobs", { config: _cfg });
+// The test hooks, registered with the stdlib-internal hull:_test_hooks: the
+// live config (as jobs._config, app code could set any field past init's
+// checks - a NaN eventsGrace, a non-function backoff), and the clock-injectable
+// cron tick and subscription drain (as jobs._tick / jobs._eventsDrain, app code
+// wrote _hull_* rows at a time it chose - every nextRunAt decades out, a lease
+// held for ever - that its own SQL cannot repair; audit 17).
+_test_hooks.register("hull:jobs", {
+    config: _cfg, cronNext: _cronNext, tick: _tick, eventsDrain,
+});
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,
          purge, workflow, start, signal, workflowStatus,

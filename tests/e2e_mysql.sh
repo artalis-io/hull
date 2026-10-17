@@ -619,13 +619,16 @@ app.main(function(ctx)
   jobs.subscribe("s", function(ev) seen = seen + 1 end, { from = "beginning" })
   -- Commit-order horizon: ids can commit out of order here, so a drain
   -- holds back events younger than the default grace (5 s) and delivers
-  -- them once they are older.
-  local now = time.now()
-  local h = jobs._events_drain("s", { now = now, batch = 100 })
-  local d = jobs._events_drain("s", { now = now + 60, batch = 100 })
+  -- them once they are older. jobs.work drives the drain at the real clock
+  -- (the clock-injectable drain is a test hook since audit 17), on a queue
+  -- with no jobs: now, then once every event is past the grace.
+  jobs.work({ queue = "evdrain" })
+  local held = seen
+  hull.sleep(6500)
+  jobs.work({ queue = "evdrain" })
   ctx.stdout:write(("JEV e=%d c=%d d=%d x=%d held=%d deliv=%d seen=%d\n"):format(
-    n.enqueued or 0, n.completed or 0, n.dead or 0, n.cancelled or 0, h.delivered,
-    d.delivered, seen))
+    n.enqueued or 0, n.completed or 0, n.dead or 0, n.cancelled or 0, held,
+    seen - held, seen))
   return 0
 end)
 LUA
@@ -733,7 +736,9 @@ local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init({ events = true })
-  jobs._tick(); jobs._tick()
+  -- Two cron ticks through jobs.work (at most one a second), on a queue with
+  -- no jobs: the second must not disable the schedule again.
+  jobs.work({ queue = "a10t" }); hull.sleep(1100); jobs.work({ queue = "a10t" })
   local ev = #jobs.events({ types = { "cron_disabled" } })
   ctx.stdout:write(("A10CRON events=%d\n"):format(ev))
   jobs.uncron("a10c")
@@ -784,7 +789,8 @@ local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init()
-  local raised = pcall(jobs._tick) and 0 or 1
+  -- The cron tick, through jobs.work (its enqueue raises out of it).
+  local raised = pcall(jobs.work, { queue = "a12t" }) and 0 or 1
   ctx.stdout:write(("A12CRON raised=%d\n"):format(raised))
   return 0
 end)

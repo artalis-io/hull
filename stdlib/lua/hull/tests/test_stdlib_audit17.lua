@@ -3,7 +3,8 @@
 -- etag.text / etag.html with an empty body: etag.compute returns nil, and
 -- res:header("ETag", nil) raised (a 500). An empty body now goes out with no
 -- ETag and is never answered 304. jobs._config (the live config, settable
--- past jobs.init's checks) is a test hook, no longer on the module.
+-- past jobs.init's checks) and the clock-injectable seams (jobs._tick,
+-- _cron_next, _events_drain) are test hooks, no longer on the module.
 --
 -- Runs in the caps-bearing state (run_lua_test_in_runtime in
 -- tests/hull/runtime/lua/test_lua.c): etag hashes, jobs needs the db.
@@ -81,6 +82,22 @@ test("the config is a test hook", function()
     local hooks = __test_hooks("hull.jobs")
     assert_eq(type(hooks and hooks.config), "table", "hook")
     assert_eq(type(hooks.config.backoff), "function", "live config")
+end)
+
+-- The clock-injectable seams wrote _hull_* rows at a time app code chose
+-- (jobs._tick(1e12): every next_run_at decades out; a drain at now = 1e15:
+-- the lease held for ever). They are test hooks too.
+for _, k in ipairs({ "_tick", "_cron_next", "_events_drain" }) do
+    test("jobs." .. k .. " is not exported", function()
+        assert_eq(jobs[k], nil)
+    end)
+end
+
+test("the cron tick, cron math and drain are test hooks", function()
+    local hooks = __test_hooks("hull.jobs")
+    assert_eq(type(hooks.tick), "function", "tick")
+    assert_eq(type(hooks.cron_next), "function", "cron_next")
+    assert_eq(type(hooks.events_drain), "function", "events_drain")
 end)
 
 return { pass = pass, fail = fail }
