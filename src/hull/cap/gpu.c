@@ -98,6 +98,121 @@ size_t hl_gpu_tex_bytes(uint32_t width, uint32_t height, HlGpuTexFormat fmt)
     return n > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)n;
 }
 
+/* ── Transient (call-scoped) device memory ─────────────────────────────
+ *
+ * gpu.dispatch / gpu.pipeline create inline storage buffers, uniform
+ * buffers and (dispatch) inline textures for the call itself: they were
+ * neither charged to the run nor counted on the device's live total
+ * (audit 17). The sizes follow the wgpu backend's own rounding (a word at
+ * least, a uniform to 16 bytes); a pipeline's named, non-persistent buffer
+ * is made once, at the largest size any stage declares. Saturates at
+ * SIZE_MAX. */
+
+static size_t sat_add(size_t a, size_t b)
+{
+    return a > SIZE_MAX - b ? SIZE_MAX : a + b;
+}
+
+static size_t storage_bytes(size_t n)
+{
+    if (n == 0) return 4;
+    return n > SIZE_MAX - 3 ? SIZE_MAX : (n + 3) & ~(size_t)3;
+}
+
+static size_t uniform_bytes(const void *data, size_t n)
+{
+    if (!data || n == 0) return 0;
+    return n > SIZE_MAX - 15 ? SIZE_MAX : (n + 15) & ~(size_t)15;
+}
+
+static int persistent_buffer(const HlGpuDevice *dev, const char *name)
+{
+    if (!dev || !name) return 0;
+    for (int i = 0; i < dev->buffer_count; i++)
+        if (strcmp(dev->buffers[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+static int persistent_texture(const HlGpuDevice *dev, const char *name)
+{
+    if (!dev || !name) return 0;
+    for (int i = 0; i < dev->texture_count; i++)
+        if (strcmp(dev->textures[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+size_t hl_gpu_dispatch_transient_bytes(const HlGpuDevice *dev,
+                                       const HlGpuDispatchOpts *opts)
+{
+    if (!opts) return 0;
+    size_t n = uniform_bytes(opts->uniforms, opts->uniforms_len);
+    for (int i = 0; opts->buffers && i < opts->buffer_count; i++) {
+        const HlGpuBufferDesc *d = &opts->buffers[i];
+        if (!persistent_buffer(dev, d->name))
+            n = sat_add(n, storage_bytes(d->size));
+    }
+    for (int i = 0; opts->textures && i < opts->texture_count; i++) {
+        const HlGpuTextureDesc *td = &opts->textures[i];
+        if (td->width > 0 && td->height > 0 && !persistent_texture(dev, td->name))
+            n = sat_add(n, hl_gpu_tex_bytes(td->width, td->height, td->format));
+    }
+    return n;
+}
+
+size_t hl_gpu_pipeline_transient_bytes(const HlGpuDevice *dev,
+                                       const HlGpuPipelineOpts *opts)
+{
+    if (!opts || !opts->stages) return 0;
+    size_t n = 0;
+    for (int s = 0; s < opts->stage_count; s++) {
+        const HlGpuPipelineStage *st = &opts->stages[s];
+        n = sat_add(n, uniform_bytes(st->uniforms, st->uniforms_len));
+        for (int b = 0; st->buffers && b < st->buffer_count; b++) {
+            const HlGpuBufferDesc *d = &st->buffers[b];
+            if (!d->name) {
+                n = sat_add(n, storage_bytes(d->size));
+                continue;
+            }
+            if (persistent_buffer(dev, d->name))
+                continue;
+            /* A named buffer counts once, at its first declaration, sized
+             * by the largest declaration of that name in any stage. */
+            int first = 1;
+            size_t max = d->size;
+            for (int s2 = 0; s2 < opts->stage_count && first; s2++) {
+                const HlGpuPipelineStage *o = &opts->stages[s2];
+                for (int b2 = 0; o->buffers && b2 < o->buffer_count; b2++) {
+                    const HlGpuBufferDesc *e = &o->buffers[b2];
+                    if (!e->name || strcmp(e->name, d->name) != 0)
+                        continue;
+                    if (s2 < s || (s2 == s && b2 < b)) { first = 0; break; }
+                    if (e->size > max) max = e->size;
+                }
+            }
+            if (first)
+                n = sat_add(n, storage_bytes(max));
+        }
+    }
+    return n;
+}
+
+static size_t charge_bytes(size_t n)
+{
+    return n > HL_GPU_MAX_LIVE_BYTES ? HL_GPU_MAX_LIVE_BYTES : n;
+}
+
+size_t hl_gpu_dispatch_charge_bytes(const HlGpuDispatchOpts *opts)
+{
+    return charge_bytes(hl_gpu_dispatch_transient_bytes(NULL, opts));
+}
+
+size_t hl_gpu_pipeline_charge_bytes(const HlGpuPipelineOpts *opts)
+{
+    return charge_bytes(hl_gpu_pipeline_transient_bytes(NULL, opts));
+}
+
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
 int hl_cap_gpu_init(HlGpuCtx *ctx, const HlGpuBackend *backend)
@@ -319,11 +434,22 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
         return HL_GPU_ERR_NOT_FOUND;
     }
 
+    /* The call's own buffers, uniforms and inline textures are held on the
+     * device while it runs: reserved against the live ceiling before the
+     * backend makes them, given back after (audit 17). */
+    size_t transient = hl_gpu_dispatch_transient_bytes(dev, opts);
+    if (live_reserve(dev, transient) != 0) {
+        pthread_mutex_unlock(&dev->mutex);
+        if (err_msg) *err_msg = "device_memory_limit";
+        return HL_GPU_ERR_BUFFER;
+    }
+
     /* Dispatch through backend */
     int rc = ctx->backend->dispatch(dev, pipeline, opts,
                                     dev->buffers, dev->buffer_count,
                                     dev->textures, dev->texture_count,
                                     output, output_len, err_msg);
+    live_release(dev, transient);
 
     pthread_mutex_unlock(&dev->mutex);
 
@@ -394,10 +520,20 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
 
     memset(result, 0, sizeof(*result));
 
+    /* As hl_cap_gpu_dispatch: the stages' own buffers are reserved for the
+     * call (audit 17). */
+    size_t transient = hl_gpu_pipeline_transient_bytes(dev, opts);
+    if (live_reserve(dev, transient) != 0) {
+        pthread_mutex_unlock(&dev->mutex);
+        if (err_msg) *err_msg = "device_memory_limit";
+        return HL_GPU_ERR_BUFFER;
+    }
+
     int rc = ctx->backend->dispatch_pipeline(
         dev, pipelines, opts->stage_count, opts,
         dev->buffers, dev->buffer_count,
         dev->textures, dev->texture_count, result, err_msg);
+    live_release(dev, transient);
 
     pthread_mutex_unlock(&dev->mutex);
 

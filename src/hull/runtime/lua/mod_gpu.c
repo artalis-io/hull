@@ -462,6 +462,13 @@ static int l_gpu_dispatch(lua_State *L)
     void **out_ptr = has_output ? &output : NULL;
     size_t *out_len_ptr = has_output ? &output_len : NULL;
 
+    /* The call's own buffers, uniforms and inline textures are charged
+     * before they are made, one unit per 64 bytes, as gpu.buffer's create
+     * is (audit 17). lua_hlwork runs no app code; the pins close on a
+     * raise. */
+    lua_hlwork(L, (size_t)hl_work_bulk_units(
+                      (uint64_t)hl_gpu_dispatch_charge_bytes(&opts)), 0);
+
     int rc = hl_cap_gpu_dispatch(ctx, name, &opts,
                                  out_ptr, out_len_ptr, &err_msg);
     if (rc != HL_GPU_OK) {
@@ -1109,6 +1116,18 @@ static int l_gpu_async_dispatch(lua_State *L)
      * on a refusal `tmp` frees the copies (audit 15). */
     hl_lua_check_can_wait(L, "gpu.async.dispatch()");
 
+    /* Charged here, while `tmp` still owns the copies, as the sync call's
+     * (audit 17). */
+    {
+        HlGpuDispatchOpts c = opts;
+        c.buffers = buf_descs;
+        c.buffer_count = buf_count;
+        c.uniforms = uni_copy;
+        c.uniforms_len = uni_len;
+        lua_hlwork(L, (size_t)hl_work_bulk_units(
+                          (uint64_t)hl_gpu_dispatch_charge_bytes(&c)), 0);
+    }
+
     /* Allocate worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
     if (!op)
@@ -1373,6 +1392,10 @@ static int l_gpu_pipeline(lua_State *L)
         .max_output = gpu_heap_limit(L),   /* audit 17 */
     };
 
+    /* The stages' own buffers are charged before they are made (audit 17). */
+    lua_hlwork(L, (size_t)hl_work_bulk_units(
+                      (uint64_t)hl_gpu_pipeline_charge_bytes(&popts)), 0);
+
     HlGpuPipelineResult result;
     const char *err_msg = NULL;
     int rc = hl_cap_gpu_pipeline(ctx, &popts, &result, &err_msg);
@@ -1522,6 +1545,14 @@ static int l_gpu_async_pipeline(lua_State *L)
     /* After the stages and opts (app code that could BEGIN), before
      * anything is armed (audit 15). */
     hl_lua_check_can_wait(L, "gpu.async.pipeline()");
+
+    /* Charged before the deep copy (nothing is owned yet), as the sync
+     * call's (audit 17). */
+    {
+        HlGpuPipelineOpts c = { .stages = stages, .stage_count = stage_count };
+        lua_hlwork(L, (size_t)hl_work_bulk_units(
+                          (uint64_t)hl_gpu_pipeline_charge_bytes(&c)), 0);
+    }
 
     /* Deep-copy into worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
