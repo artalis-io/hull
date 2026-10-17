@@ -495,6 +495,191 @@ UTEST(pg_query, a_tripped_run_abandons_the_reply)
     close(sv[0]);
 }
 
+/* A reply stream of frames that are not DataRows - NoticeResponses from a
+ * `LOOP RAISE NOTICE`, say - is charged frame by frame (audit 17): only
+ * DataRows were checked, and with a 0-unit charge that a db.async op's
+ * budget never tripped on. Here an op budget (HlDbOpBudget) of 10 units
+ * stops a stream of 40 notices, in both reply loops. */
+static void put_notices(HlPgWriter *s, int n)
+{
+    for (int i = 0; i < n; i++) {
+        size_t m = hl_pg_msg_begin(s, 'N');
+        hl_pg_put_u8(s, 'M'); hl_pg_put_cstr(s, "x");
+        hl_pg_put_u8(s, 0);
+        hl_pg_msg_end(s, m);
+    }
+}
+
+static HlPgConn *pg_adopt(HlPgConn *conn, int fd)
+{
+    memset(conn, 0, sizeof *conn);
+    conn->transport = hl_db_transport_adopt("pg", NULL, fd, NULL, conn->errmsg,
+                                            sizeof conn->errmsg);
+    return conn->transport ? conn : NULL;
+}
+
+UTEST(pg_query, a_notice_stream_is_charged)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+    put_notices(&s, 40);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "DO"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_pg_query(&conn, "DO $$ BEGIN LOOP RAISE NOTICE 'x'; END LOOP; END $$",
+                         NULL, 0, NULL, NULL, NULL, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL); /* closed, not drained */
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+UTEST(pg_exec_simple, a_notice_stream_is_charged)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    put_notices(&s, 40);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "DO"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_pg_exec_simple(&conn, "DO $$ BEGIN LOOP RAISE NOTICE 'x'; END LOOP; END $$");
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* The same op budget is not tripped by a short reply: 1 unit a frame plus
+ * its body, so the event-loop and db.async paths keep working. */
+UTEST(pg_exec_simple, a_short_reply_fits_the_budget)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    put_notices(&s, 2);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "DO"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_pg_exec_simple(&conn, "DO $$ BEGIN RAISE NOTICE 'x'; END $$");
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, budget.tripped);
+    EXPECT_EQ(0, conn.broken);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* `COPY ... TO STDOUT`: CopyOutResponse, then CopyData at the server's pace.
+ * Hull streams no COPY data, and there is no CopyFail for this direction, so
+ * the connection is dropped rather than read (audit 17) - before, CopyOut /
+ * CopyData / CopyDone fell through to the default case and the whole COPY
+ * was read and discarded, unbounded, even with no budget bound at all. */
+static void put_copy_out(HlPgWriter *s, int ndata)
+{
+    size_t m = hl_pg_msg_begin(s, 'H');      /* CopyOutResponse */
+    hl_pg_put_u8(s, 0);                      /* text format */
+    hl_pg_put_i16(s, 1);
+    hl_pg_put_i16(s, 0);
+    hl_pg_msg_end(s, m);
+    for (int i = 0; i < ndata; i++) {
+        m = hl_pg_msg_begin(s, 'd');         /* CopyData */
+        hl_pg_put_bytes(s, "1\n", 2);
+        hl_pg_msg_end(s, m);
+    }
+    m = hl_pg_msg_begin(s, 'c'); hl_pg_msg_end(s, m);   /* CopyDone */
+    m = hl_pg_msg_begin(s, 'C'); hl_pg_put_cstr(s, "COPY 3"); hl_pg_msg_end(s, m);
+    m = hl_pg_msg_begin(s, 'Z'); hl_pg_put_u8(s, 'I'); hl_pg_msg_end(s, m);
+}
+
+UTEST(pg_query, copy_out_is_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+    put_copy_out(&s, 3);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    EXPECT_EQ(-1, hl_pg_query(&conn, "COPY (SELECT 1) TO STDOUT", NULL, 0,
+                              NULL, NULL, NULL, NULL));
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+    EXPECT_TRUE(strstr(conn.errmsg, "COPY TO STDOUT") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+UTEST(pg_exec_simple, copy_out_is_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    put_copy_out(&s, 3);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    EXPECT_EQ(-1, hl_pg_exec_simple(&conn, "COPY t TO STDOUT"));
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+    EXPECT_TRUE(strstr(conn.errmsg, "COPY TO STDOUT") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
 /* An exec-style statement (no rows, no callback) surfaces its CommandComplete
  * row count via the `affected` out-param - the "UPDATE N" tag form, distinct from
  * "SELECT N". This is what db.exec returns on Postgres (fixed: db_postgres.c's

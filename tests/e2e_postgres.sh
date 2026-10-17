@@ -177,6 +177,16 @@ app.get("/reconnect", function(req, res)
     local after_tx = settles()   -- dave's insert went with the transaction
     res:json({ replaced = replaced, tx_failed = not tx_ok, after_tx = after_tx })
 end)
+-- Audit 17: COPY ... TO STDOUT streams CopyData at the server's pace and
+-- has no CopyFail; it is refused by dropping the connection, which the next
+-- call replaces.
+app.get("/copy17", function(req, res)
+    local ok, err = pcall(db.exec, "COPY (SELECT 1) TO STDOUT")
+    res:json({
+        refused = (not ok) and tostring(err):find("COPY TO STDOUT", 1, true) ~= nil,
+        replaced = settles(),
+    })
+end)
 -- Audit 6. L6: COMMIT WORK / END TRANSACTION / a comment-prefixed COMMIT of
 -- an aborted transaction is a rollback the server answers without an error;
 -- each must fail, as a bare COMMIT does. M3: BEGIN through db.async is
@@ -306,6 +316,11 @@ echo "reconnect response: $RESP_RC"
 echo "$RESP_RC" | grep -q '"replaced":true'  || { echo "::error dropped connection not replaced"; fail=1; }
 echo "$RESP_RC" | grep -q '"tx_failed":true' || { echo "::error transaction survived its connection"; fail=1; }
 echo "$RESP_RC" | grep -q '"after_tx":true'  || { echo "::error no recovery after a lost transaction"; fail=1; }
+
+RESP_C17=$(curl -fsS "http://127.0.0.1:${PORT}/copy17" || echo FAIL)
+echo "copy17 response: $RESP_C17"
+echo "$RESP_C17" | grep -q '"refused":true'  || { echo "::error COPY TO STDOUT was not refused"; fail=1; }
+echo "$RESP_C17" | grep -q '"replaced":true' || { echo "::error no recovery after a refused COPY TO STDOUT"; fail=1; }
 
 RESP_T6=$(curl -fsS "http://127.0.0.1:${PORT}/txn6" || echo FAIL)
 echo "txn6 response: $RESP_T6"

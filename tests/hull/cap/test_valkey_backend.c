@@ -13,6 +13,7 @@
 #include "hull/cap/valkey.h"
 #include "hull/cap/valkey_conn.h"
 #include "hull/cap/kv_backend.h"
+#include "hull/cap/db_budget.h"
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -170,6 +171,69 @@ UTEST(valkey_backend, multi_replies_are_checked) {
     ASSERT_EQ(0, B->get(h, (const uint8_t *)"k", 1, &val, &vlen, &found));
     EXPECT_EQ(found, 1);
     EXPECT_EQ(vlen, (size_t)5);
+
+    B->close(h);
+    close(sv[0]);
+}
+
+/* Each SCAN step of a scan / clear is charged to the run's budget (audit
+ * 17): up to 2^20 round trips ran inside one binding call, uncharged, and a
+ * server answering empty pages with a non-zero cursor ran no app code at
+ * all. Here 8 empty pages under an op budget of 5 units stop the scan, and
+ * the clear, before the cursor comes back "0". */
+#define EMPTY_PAGE "*2\r\n$1\r\n1\r\n*0\r\n"
+#define LAST_PAGE  "*2\r\n$1\r\n0\r\n*0\r\n"
+
+UTEST(valkey_backend, scan_steps_are_charged) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    WR(sv[0], HELLO_MAP);
+    for (int i = 0; i < 8; i++) WR(sv[0], EMPTY_PAGE);   /* scan */
+    WR(sv[0], LAST_PAGE);
+    WR(sv[0], "$5\r\nhello\r\n");                        /* GET: still in step */
+
+    HlValkeyDsn d; char e[128];
+    ASSERT_EQ(0, hl_valkey_dsn_parse("redis://localhost", &d, e, sizeof e));
+    HlValkeyConn *conn = NULL;
+    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, NULL, e, sizeof e));
+    HlKvHandle *h = hl_kv_valkey_wrap(conn);
+    const HlKvBackend *B = &hl_kv_backend_valkey;
+
+    struct keys ks = {0};
+    HlDbOpBudget budget = { 5, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = B->scan(h, (const uint8_t *)"kv:ns:", 6, 0, collect, &ks);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(strstr(B->last_error(h), "interrupted") != NULL);
+
+    B->close(h);
+    close(sv[0]);
+}
+
+UTEST(valkey_backend, clear_steps_are_charged) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    WR(sv[0], HELLO_MAP);
+    for (int i = 0; i < 8; i++) WR(sv[0], EMPTY_PAGE);   /* clear */
+    WR(sv[0], LAST_PAGE);
+
+    HlValkeyDsn d; char e[128];
+    ASSERT_EQ(0, hl_valkey_dsn_parse("redis://localhost", &d, e, sizeof e));
+    HlValkeyConn *conn = NULL;
+    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, NULL, e, sizeof e));
+    HlKvHandle *h = hl_kv_valkey_wrap(conn);
+    const HlKvBackend *B = &hl_kv_backend_valkey;
+
+    int64_t removed = -1;
+    HlDbOpBudget budget = { 5, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = B->clear(h, (const uint8_t *)"kv:ns:", 6, &removed);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(strstr(B->last_error(h), "interrupted") != NULL);
 
     B->close(h);
     close(sv[0]);

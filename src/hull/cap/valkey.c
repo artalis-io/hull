@@ -29,6 +29,9 @@
 
 #include "hull/cap/valkey.h"
 #include "hull/cap/respwire.h"
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_budget.h"     /* hl_db_budget_charge: a SCAN step */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -372,6 +375,32 @@ static int copy_cursor(HlKvHandle *h, const HlRespValue *cur, char out[KV_VALKEY
     return 0;
 }
 
+/* One SCAN step is charged to the calling run's budget (cap/db_budget.h,
+ * bound by the runtime when it arms a run): 1 unit, plus 1 per key and 1 per
+ * HL_DB_ALLOC_UNIT_BYTES of key bytes. A scan / clear is up to
+ * VK_SCAN_MAX_ITERS round trips inside one binding call, where neither
+ * runtime's instruction hook fires, and a step the server answers with no
+ * keys and a non-zero cursor ran no app code at all (audit 17). Once the run
+ * is over its budget or past its deadline the scan stops - the step's reply
+ * is read whole, so the connection stays in step - and the binding raises
+ * the trip. -1 then. */
+static int vk_scan_charge(HlKvHandle *h, const HlRespValue *keys) {
+#ifdef HL_ENABLE_DB
+    int64_t bytes = 0;
+    for (size_t i = 0; i < keys->arr.count; i++)
+        if (keys->arr.items[i].type == HL_RESP_STR)
+            bytes += (int64_t)keys->arr.items[i].str.len;
+    int64_t units = 1 + (int64_t)keys->arr.count +
+                    (bytes + HL_DB_ALLOC_UNIT_BYTES - 1) / HL_DB_ALLOC_UNIT_BYTES;
+    if (hl_db_budget_charge(units) == 0) return 0;
+    seterr(h, "SCAN: interrupted (instruction limit exceeded)");
+    return -1;
+#else
+    (void)h; (void)keys;
+    return 0;
+#endif
+}
+
 static int vk_scan(HlKvHandle *h, const uint8_t *prefix, size_t plen, size_t limit,
                    HlKvScanCb cb, void *cbctx) {
     char cursor[KV_VALKEY_CURSOR_MAX]; snprintf(cursor, sizeof cursor, "0");
@@ -385,6 +414,7 @@ static int vk_scan(HlKvHandle *h, const uint8_t *prefix, size_t plen, size_t lim
         /* copy the next cursor before any callback/command can clobber the buffer */
         char next[KV_VALKEY_CURSOR_MAX];
         if (copy_cursor(h, &r.arr.items[0], next) != 0) return -1;
+        if (vk_scan_charge(h, keys) != 0) return -1;
         for (size_t i = 0; i < keys->arr.count; i++) {
             const HlRespValue *k = &keys->arr.items[i];
             if (k->type != HL_RESP_STR) continue;
@@ -411,6 +441,7 @@ static int vk_clear(HlKvHandle *h, const uint8_t *prefix, size_t plen, int64_t *
         const HlRespValue *keys = &r.arr.items[1];
         char next[KV_VALKEY_CURSOR_MAX];
         if (copy_cursor(h, &r.arr.items[0], next) != 0) return -1;
+        if (vk_scan_charge(h, keys) != 0) return -1;
         if (keys->arr.count > 0) {
             /* DEL k1 k2 ...  (cmd_arg copies each key out of rbuf before send) */
             HlRespWriter w; hl_resp_writer_init(&w);

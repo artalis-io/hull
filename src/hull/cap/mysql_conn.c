@@ -640,9 +640,13 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 
 /* ── Queries (COM_QUERY text protocol) ────────────────────────────── */
 
-/* The run this reply is read for is over its instruction budget or past its
- * wall-clock deadline (cap/db_budget.h; a 0-unit charge only asks): the
- * binding raises that once the call returns, so the rest of the rows would be
+/* Each row of a reply - the first result set's and every later one's - is
+ * charged to the run it is read for: 1 unit plus 1 per HL_DB_ALLOC_UNIT_BYTES
+ * of the packet (cap/db_budget.h). A 0-unit charge only ASKED, so a db.async
+ * op's budget (HlDbOpBudget, which a 0 charge never trips) bounded nothing,
+ * and the rows of a 2nd+ result set were discarded unchecked (audit 17). Once
+ * the run is over its instruction budget or past its wall-clock deadline the
+ * binding raises that when the call returns, so the rest of the rows would be
  * read - at the server's pace, a result of any size - only to be thrown away
  * (audit 15). Close the connection instead of draining it: the server stops
  * the statement when its next write fails, the connection stays broken, and
@@ -651,9 +655,11 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
  * already done with the session. Simpler than KILL QUERY on a side
  * connection, which would need a new connect (and its auth) from inside the
  * run. */
-static int my_abandon_if_tripped(HlMyConn *conn)
+static int my_abandon_if_tripped(HlMyConn *conn, uint32_t body_len)
 {
-    if (hl_db_budget_charge(0) == 0) return 0;
+    int64_t units = 1 + ((int64_t)body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                        HL_DB_ALLOC_UNIT_BYTES;
+    if (hl_db_budget_charge(units) == 0) return 0;
     hl_my_conn_close(conn);
     conn->broken = 1;
     conn_set_err(conn, "interrupted (instruction limit exceeded); the "
@@ -847,7 +853,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
             }
         }
         if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed result row"); goto fail; }
-        if (my_abandon_if_tripped(conn)) goto fail;
+        if (my_abandon_if_tripped(conn, f.body_len)) goto fail;
         if (row_cb && !stop && row_cb(cb_ctx, vals, lens, ncols) != 0)
             stop = 1;                           /* keep draining to EOF */
     }
@@ -1090,6 +1096,19 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (drain_defs(conn, prep.num_params) != 0) goto close_stmt;
     if (drain_defs(conn, prep.num_columns) != 0) goto close_stmt;
 
+    /* More values than placeholders is an error, as on SQLite (SQLITE_RANGE)
+     * and Postgres: build_execute bound the first num_params and dropped the
+     * rest without a word (audit 17). Fewer is the trailing-nil padding. The
+     * PREPARE reply is read whole, so the connection is in step and
+     * close_stmt sends the COM_STMT_CLOSE. */
+    if (nparams > (int)prep.num_params) {
+        conn->broken = 0;
+        snprintf(conn->errmsg, sizeof conn->errmsg,
+                 "parameter count mismatch: %u placeholders, %d values",
+                 (unsigned)prep.num_params, nparams);
+        goto close_stmt;
+    }
+
     /* 3. COM_STMT_EXECUTE with the bound parameters. The PREPARE reply has been
      * read whole (its definitions drained above); the EXECUTE's is pending. */
     hl_my_writer_init(&w);
@@ -1199,7 +1218,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
                 decode_binary_value(&rc, fields[i].type, fields[i].flags, &vals[i]);
         }
         if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed binary row"); goto close_stmt; }
-        if (my_abandon_if_tripped(conn)) goto close_stmt;
+        if (my_abandon_if_tripped(conn, f.body_len)) goto close_stmt;
         if (row_cb && !stop && row_cb(cb_ctx, vals, ncols) != 0)
             stop = 1;                                       /* keep draining to EOF */
     }
@@ -1288,7 +1307,8 @@ static int drain_one_result(HlMyConn *conn, int *more)
             conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
             return -2;
         }
-        /* otherwise a data row: discarded */
+        /* otherwise a data row: discarded, but charged (audit 17) */
+        if (my_abandon_if_tripped(conn, f.body_len)) return -1;
     }
 }
 

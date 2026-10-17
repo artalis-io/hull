@@ -321,6 +321,16 @@ app.get("/txn6", function(req, res)
         async_begin_refused = (not async_ok) and tostring(async_err):find("cannot span", 1, true) ~= nil,
     })
 end)
+-- Audit 17: more values than placeholders is refused (they were dropped
+-- silently), as on SQLite / Postgres; the connection stays usable.
+app.get("/params17", function(req, res)
+    local ok, err = pcall(db.query, "SELECT ? AS a", { 1, 2 })
+    local after = db.query("SELECT ? AS a", { 7 })
+    res:json({
+        surplus_refused = (not ok) and tostring(err):find("parameter count mismatch", 1, true) ~= nil,
+        after = tonumber(after[1].a),
+    })
+end)
 -- Audit 12: auth-flows' standard_users lookup is exact. The table keeps the
 -- server's default collation (MySQL 8: utf8mb4_0900_ai_ci), which matches
 -- 'JOSE@x.test' and 'jos\xc3\xa9@x.test' to 'jose@x.test'; a token for the
@@ -425,6 +435,11 @@ echo "txn6 response: $RESP_T6"
 echo "$RESP_T6" | grep -q '"after_ddl":0'               || { echo "::error a write after a failed DDL in a batch was not rolled back"; fail=1; }
 echo "$RESP_T6" | grep -q '"nested_lost":true'          || { echo "::error a nested batch with DDL did not report its transaction lost"; fail=1; }
 echo "$RESP_T6" | grep -q '"async_begin_refused":true'  || { echo "::error BEGIN through db.async was not refused"; fail=1; }
+
+RESP_P17=$(curl -fsS "http://127.0.0.1:${PORT}/params17" || echo FAIL)
+echo "params17 response: $RESP_P17"
+echo "$RESP_P17" | grep -q '"surplus_refused":true' || { echo "::error surplus parameters were not refused"; fail=1; }
+echo "$RESP_P17" | grep -q '"after":7'              || { echo "::error connection unusable after refused parameters"; fail=1; }
 
 # TOTP lockout counters are written on MySQL, so the lockout engages.
 RESP_TOTP=$(curl -fsS "http://127.0.0.1:${PORT}/totp" || echo FAIL)
