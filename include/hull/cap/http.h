@@ -95,4 +95,14 @@ int hl_http_chain_remaining_ms(uint64_t deadline_ms, uint64_t now_ms);
 int hl_http_check_host(const HlHttpConfig *cfg,
                         const char *host, size_t host_len);
 
+/**
+ * @brief A URL as the audit log writes it: scheme://host/path, with any
+ * userinfo and the query string and fragment dropped (audit 17: they carry
+ * credentials and tokens). When the authority cannot be told apart from the
+ * path (an '@' after the first '/'), only "scheme://[redacted]" is written.
+ * Always NUL-terminates @p out when @p outsz > 0 (truncating).
+ * @return the length written.
+ */
+size_t hl_http_url_redact(const char *url, char *out, size_t outsz);
+
 #endif /* HL_CAP_HTTP_H */

@@ -38,6 +38,55 @@ int hl_http_check_host(const HlHttpConfig *cfg,
            ? 0 : -1;
 }
 
+/* ── Audit-log URL redaction ─────────────────────────────────────── */
+
+/* Append @p n bytes of @p p at @p o, truncating to leave room for the NUL. */
+static size_t redact_put(char *out, size_t outsz, size_t o,
+                         const char *p, size_t n)
+{
+    if (n > outsz - 1 - o) n = outsz - 1 - o;
+    memcpy(out + o, p, n);
+    return o + n;
+}
+
+/* The audit log wrote every URL verbatim, so "https://user:pw@host/x?token=y"
+ * put the password and the token in the log (audit 17). */
+size_t hl_http_url_redact(const char *url, char *out, size_t outsz)
+{
+    if (!out || outsz == 0) return 0;
+    out[0] = '\0';
+    if (!url) return 0;
+
+    const char *sep = strstr(url, "://");
+    size_t scheme_len = sep ? (size_t)(sep - url) + 3 : 0;
+    const char *rest = url + scheme_len;
+    size_t end = strcspn(rest, "?#");           /* query and fragment go */
+
+    const char *at = NULL;
+    for (size_t i = 0; i < end; i++)
+        if (rest[i] == '@') at = rest + i;      /* the last one ends userinfo */
+    size_t slash = strcspn(rest, "/");
+    const char *keep = rest;
+    size_t keep_len = end;
+    int ambiguous = 0;
+    if (at) {
+        if ((size_t)(at - rest) < slash) {
+            keep = at + 1;
+            keep_len = end - (size_t)(keep - rest);
+        } else {
+            ambiguous = 1;   /* a password holding '/', or '@' in the path */
+        }
+    }
+
+    size_t o = redact_put(out, outsz, 0, url, scheme_len);
+    if (ambiguous)
+        o = redact_put(out, outsz, o, "[redacted]", sizeof("[redacted]") - 1);
+    else
+        o = redact_put(out, outsz, o, keep, keep_len);
+    out[o] = '\0';
+    return o;
+}
+
 /* ── Redirects ───────────────────────────────────────────────────── */
 
 /* Keel's per-hop redirect check (KlHttpRedirectConfig.on_redirect). The host
@@ -53,7 +102,9 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
     if (!next_url || kl_url_parse(next_url, &parsed) != 0 ||
         hl_http_check_host(cfg, parsed.host, parsed.host_len) != 0) {
         ShJsonWriter w = hl_audit_begin("http.redirect");
-        sh_json_write_kv_string(&w, "url", next_url ? next_url : "");
+        char red_url[512];   /* no userinfo, query or fragment (audit 17) */
+        hl_http_url_redact(next_url, red_url, sizeof red_url);
+        sh_json_write_kv_string(&w, "url", red_url);
         sh_json_write_kv_string(&w, "result", "denied");
         hl_audit_end(&w);
         log_warn("[hull:http] redirect to a host outside manifest.hosts refused");
@@ -123,7 +174,9 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     if (hl_http_check_host(cfg, parsed.host, parsed.host_len) != 0) {
         ShJsonWriter w = hl_audit_begin("http.request");
         sh_json_write_kv_string(&w, "method", method);
-        sh_json_write_kv_string(&w, "url", url);
+        char red_url[512];   /* no userinfo, query or fragment (audit 17) */
+        hl_http_url_redact(url, red_url, sizeof red_url);
+        sh_json_write_kv_string(&w, "url", red_url);
         sh_json_write_kv_string(&w, "result", "denied");
         hl_audit_end(&w);
         return -1;
@@ -182,7 +235,9 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     {
         ShJsonWriter w = hl_audit_begin("http.request");
         sh_json_write_kv_string(&w, "method", method);
-        sh_json_write_kv_string(&w, "url", url);
+        char red_url[512];   /* no userinfo, query or fragment (audit 17) */
+        hl_http_url_redact(url, red_url, sizeof red_url);
+        sh_json_write_kv_string(&w, "url", red_url);
         if (rc == 0)
             sh_json_write_kv_int(&w, "status", resp->status);
         else

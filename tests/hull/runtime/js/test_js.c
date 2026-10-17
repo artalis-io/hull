@@ -9703,6 +9703,67 @@ UTEST(js_audit16, tar_extract_is_charged_per_entry)
     a15_fs_close(&f);
 }
 
+/* Headers of a typeflag the parser skips (here '1', a hard link) were
+ * checksummed and never surfaced, so the per-entry charges missed them: a
+ * 10 MB archive of them cost nothing. The input is charged up front now,
+ * one unit per 64 bytes (audit 17). */
+UTEST(js_audit17, tar_skipped_headers_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { tar } from 'hull:archive:tar';\n"
+        "globalThis.tar = tar;\n"
+        "const h = new Uint8Array(tar.create([{ name: 'l', data: new ArrayBuffer(0) }])"
+        ".slice(0, 512));\n"
+        "let s = ''; for (let i = 148; i < 156; i++) s += String.fromCharCode(h[i]);\n"
+        "const f = (parseInt(s.match(/[0-7]+/)[0], 8) + 1).toString(8).padStart(6, '0');\n"
+        "for (let i = 0; i < 6; i++) h[148 + i] = f.charCodeAt(i);\n"
+        "h[154] = 0; h[155] = 32; h[156] = 49;\n"
+        "const big = new Uint8Array(512 * 20000);\n"
+        "for (let i = 0; i < 20000; i++) big.set(h, i * 512);\n"
+        "globalThis.LB = big.buffer;\n"
+        "globalThis.__a17_n = tar.parse(LB).length;\n", 0), 0);
+    EXPECT_EQ(eval_int("globalThis.LB && globalThis.__a17_n === 0 ? 1 : 0"), 1);
+    /* 10 MB walked: 160000 units. */
+    EXPECT_EQ(a10_run_tripped("tar.parse(LB);", 100000), 1);
+    EXPECT_EQ(a10_run_tripped("tar.extract(LB, 'out');", 100000), 1);
+    EXPECT_EQ(eval_int("tar.extract(LB, 'out') === true ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("(globalThis.LB = undefined, 1)"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+/* hull:encoding's C codecs malloc'd every buffer off the heap and charged
+ * only the final string: an 8 MB hex encode built 16 MB outside the heap
+ * limit for ~262k units of allocation. The output is checked against the
+ * heap limit and the bytes charged before anything is allocated now
+ * (audit 17). */
+UTEST(js_audit17, encoding_codecs_are_bounded_and_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a10_run_tripped(
+        "import { encoding } from 'hull:encoding';\n"
+        "globalThis.enc = encoding;\n"
+        "globalThis.EB = new ArrayBuffer(8 * 1024 * 1024);\n", 0), 0);
+    /* 8 MB in, 16 MB out: 3M units. */
+    EXPECT_EQ(a10_run_tripped("enc.hex.encode(EB);", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped("enc.base64.encode(EB);", 1000000), 1);
+    EXPECT_EQ(eval_int("enc.hex.encode(new Uint8Array([1, 255])) === '01ff' ? 1 : 0"), 1);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 4 * 1024 * 1024;
+    char *r = a15_throws("enc.hex.encode(EB)");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    js.max_heap_bytes = saved;
+    EXPECT_EQ(eval_int("(globalThis.EB = undefined, 1)"), 1);
+    cleanup_js_caps();
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* ── Audit 14: SSE and WebSocket writes are charged ────────────────────
  *

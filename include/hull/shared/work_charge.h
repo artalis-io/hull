@@ -22,6 +22,15 @@ static inline uint64_t hl_work_bytes_units(uint64_t bytes)
     return bytes / 8;
 }
 
+/* Bytes a call walks or places outside the VM heap without copying them
+ * into it (a tar header scan, a GPU buffer or texture create / upload):
+ * one unit per 64, the allocator's rate. Charged up front, before the work
+ * (audit 17). */
+static inline uint64_t hl_work_bulk_units(uint64_t bytes)
+{
+    return bytes / 64;
+}
+
 /* One message of @p len bytes framed and queued to each of @p dests
  * connections (ws send = 1, ws.broadcast = the endpoint's connection count):
  * one unit per 8 bytes plus one per frame, per destination (audit 14). */

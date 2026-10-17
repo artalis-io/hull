@@ -168,11 +168,14 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
     if (wasm_runtime_copy_exception(inst, NULL))
         return -1;
 
+    /* ptr is a wasm32 address: zero-extended, as SPAN_INFO's is. Cast
+     * straight to uint64_t it was sign-extended, so a buffer at or above
+     * 2 GiB was never found (audit 17). */
     if (opcode == HL_WASM_OP_LOG) {
         if (len > 0 && len < 4096) {
-            if (!wasm_runtime_validate_app_addr(inst, (uint64_t)ptr, (uint64_t)len))
+            if (!wasm_runtime_validate_app_addr(inst, (uint64_t)(uint32_t)ptr, (uint64_t)len))
                 return -1;
-            char *msg = wasm_runtime_addr_app_to_native(inst, (uint64_t)ptr);
+            char *msg = wasm_runtime_addr_app_to_native(inst, (uint64_t)(uint32_t)ptr);
             if (msg)
                 log_info("[wasm] %.*s", len, msg);
         }
@@ -186,10 +189,10 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
         /* Extract callback ID from first 4 bytes of ptr data */
         if (len < 4)
             return -1;
-        if (!wasm_runtime_validate_app_addr(inst, (uint64_t)ptr, (uint64_t)len))
+        if (!wasm_runtime_validate_app_addr(inst, (uint64_t)(uint32_t)ptr, (uint64_t)len))
             return -1;
 
-        uint8_t *data = wasm_runtime_addr_app_to_native(inst, (uint64_t)ptr);
+        uint8_t *data = wasm_runtime_addr_app_to_native(inst, (uint64_t)(uint32_t)ptr);
         if (!data)
             return -1;
 

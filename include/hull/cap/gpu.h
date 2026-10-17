@@ -105,6 +105,7 @@ typedef struct HlGpuTexture {
     uint32_t height;
     HlGpuTexFormat format;
     int      storage;    /* 1 = storage texture, 0 = sampled */
+    size_t   bytes;      /* reserved on the device's live total (audit 17) */
 } HlGpuTexture;
 
 /* ── Texture descriptor (for dispatch/pipeline) ───────────────────── */
@@ -162,6 +163,8 @@ typedef struct HlGpuDispatchOpts {
     int              output_texture;  /* texture index to read back as pixels, -1 = none */
     int              device;          /* -1 = default device */
     uint32_t         timeout_ms;     /* 0 = default (HL_GPU_TIMEOUT_MS), min 10ms */
+    size_t           max_output;     /* readback refused past this (the VM heap
+                                      * limit); 0 = none (audit 17) */
 } HlGpuDispatchOpts;
 
 /* Cached compiled pipeline */
@@ -189,6 +192,10 @@ typedef struct HlGpuDevice {
     int            buffer_count;
     HlGpuTexture  textures[HL_GPU_TEXTURE_MAX];
     int            texture_count;
+    /* Bytes the persistent buffers and textures hold on the device, capped
+     * at HL_GPU_MAX_LIVE_BYTES: the slot counts alone let an app hold
+     * 64 x 16384^2 x 8 bytes of textures (audit 17). */
+    size_t         live_bytes;
     pthread_mutex_t mutex;
 } HlGpuDevice;
 
@@ -226,6 +233,8 @@ typedef struct HlGpuPipelineOpts {
     int                  output_count; /* 0 = read last stage's first buffer */
     int                  device;       /* -1 = default */
     uint32_t             timeout_ms;  /* 0 = default (HL_GPU_TIMEOUT_MS), min 10ms */
+    size_t               max_output;  /* all readbacks together refused past
+                                       * this; 0 = none (audit 17) */
 } HlGpuPipelineOpts;
 
 /* Pipeline result: array of readback buffers */
@@ -367,8 +376,10 @@ int  hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,
                               size_t size, int usage);
 int  hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
                              const void *data, size_t len, size_t offset);
+/* A read of a buffer larger than @p max_len (the caller's VM heap limit;
+ * 0 = none) is refused before the backend allocates its copy. */
 int  hl_cap_gpu_buffer_read(HlGpuCtx *ctx, int device, const char *name,
-                            void **data, size_t *len);
+                            size_t max_len, void **data, size_t *len);
 void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name);
 int  hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
                              const char *src_name, const char *dst_name,
@@ -382,10 +393,15 @@ int  hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
 int  hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
                                const void *data, size_t len);
 int  hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
-                              void **data, size_t *len,
+                              size_t max_len, void **data, size_t *len,
                               uint32_t *out_width, uint32_t *out_height,
                               HlGpuTexFormat *out_format);
 void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name);
+
+/* Bytes of a width x height texture of @p fmt (unpadded rows): what a
+ * create reserves, an upload of the whole texture writes and a read-back
+ * returns. */
+size_t hl_gpu_tex_bytes(uint32_t width, uint32_t height, HlGpuTexFormat fmt);
 
 /* Composable-feature hook: the base returns NO backend (weak default in
  * cap/gpu_feature.c); a `hull build --with=gpu` build links a STRONG override

@@ -68,6 +68,36 @@ static HlGpuTexture *find_texture(HlGpuDevice *dev, const char *name)
     return NULL;
 }
 
+/* The device's live-bytes reservation (audit 17): persistent buffers and
+ * textures held memory on the device bounded only by their slot counts, and
+ * a texture's create allocated it with no upload at all. Called under the
+ * device mutex. 0, or -1 when @p n does not fit under the ceiling. */
+static int live_reserve(HlGpuDevice *dev, size_t n)
+{
+    if (n > HL_GPU_MAX_LIVE_BYTES || dev->live_bytes > HL_GPU_MAX_LIVE_BYTES - n)
+        return -1;
+    dev->live_bytes += n;
+    return 0;
+}
+
+static void live_release(HlGpuDevice *dev, size_t n)
+{
+    dev->live_bytes = n > dev->live_bytes ? 0 : dev->live_bytes - n;
+}
+
+size_t hl_gpu_tex_bytes(uint32_t width, uint32_t height, HlGpuTexFormat fmt)
+{
+    size_t bpp = 4;
+    switch (fmt) {
+    case HL_GPU_TEX_R8:      bpp = 1; break;
+    case HL_GPU_TEX_RGBA16F: bpp = 8; break;
+    case HL_GPU_TEX_R32F:    bpp = 4; break;
+    case HL_GPU_TEX_RGBA8:   bpp = 4; break;
+    }
+    uint64_t n = (uint64_t)width * (uint64_t)height * (uint64_t)bpp;
+    return n > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)n;
+}
+
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
 int hl_cap_gpu_init(HlGpuCtx *ctx, const HlGpuBackend *backend)
@@ -424,6 +454,11 @@ int hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_INTERNAL;
     }
+    /* ...and the device's byte ceiling, before the backend allocates. */
+    if (live_reserve(dev, size) != 0) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUFFER;
+    }
 
     HlGpuBuffer *slot = &dev->buffers[dev->buffer_count];
     int rc = ctx->backend->buffer_create(dev, name,
@@ -433,6 +468,8 @@ int hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,
         slot->size = size;
         slot->usage = usage;
         dev->buffer_count++;
+    } else {
+        live_release(dev, size);
     }
 
     pthread_mutex_unlock(&dev->mutex);
@@ -480,7 +517,7 @@ int hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
 }
 
 int hl_cap_gpu_buffer_read(HlGpuCtx *ctx, int device, const char *name,
-                           void **data, size_t *len)
+                           size_t max_len, void **data, size_t *len)
 {
     if (!ctx || !name || !data || !len)
         return HL_GPU_ERR_INTERNAL;
@@ -496,6 +533,13 @@ int hl_cap_gpu_buffer_read(HlGpuCtx *ctx, int device, const char *name,
     if (!buf) {
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_NOT_FOUND;
+    }
+    /* The backend copies the whole buffer off the VM heap before the
+     * binding converts it: a copy the heap could never hold is refused
+     * first (audit 17). */
+    if (max_len && buf->size > max_len) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUFFER;
     }
 
     int rc = ctx->backend->buffer_read(dev, buf, data, len);
@@ -519,6 +563,7 @@ void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name)
         if (strcmp(dev->buffers[i].name, name) == 0) {
             ctx->backend->buffer_destroy(dev,
                                          &dev->buffers[i]);
+            live_release(dev, dev->buffers[i].size);
             /* Compact: move last element into gap */
             if (i < dev->buffer_count - 1)
                 dev->buffers[i] = dev->buffers[dev->buffer_count - 1];
@@ -568,6 +613,11 @@ int hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_INTERNAL;
     }
+    size_t bytes = hl_gpu_tex_bytes(width, height, format);
+    if (live_reserve(dev, bytes) != 0) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUFFER;
+    }
 
     HlGpuTexture *slot = &dev->textures[dev->texture_count];
     int rc = ctx->backend->texture_create(dev, width, height,
@@ -575,7 +625,10 @@ int hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
                                            address_u, address_v, slot);
     if (rc == HL_GPU_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", name);
+        slot->bytes = bytes;
         dev->texture_count++;
+    } else {
+        live_release(dev, bytes);
     }
 
     pthread_mutex_unlock(&dev->mutex);
@@ -609,7 +662,7 @@ int hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
 }
 
 int hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
-                             void **data, size_t *len,
+                             size_t max_len, void **data, size_t *len,
                              uint32_t *out_width, uint32_t *out_height,
                              HlGpuTexFormat *out_format)
 {
@@ -629,6 +682,10 @@ int hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
     if (!tex) {
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_NOT_FOUND;
+    }
+    if (max_len && hl_gpu_tex_bytes(tex->width, tex->height, tex->format) > max_len) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUFFER;   /* as buffer_read (audit 17) */
     }
 
     int rc = ctx->backend->texture_read(dev, tex, data, len);
@@ -660,6 +717,7 @@ void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name)
         if (strcmp(dev->textures[i].name, name) == 0) {
             ctx->backend->texture_destroy(dev,
                                            &dev->textures[i]);
+            live_release(dev, dev->textures[i].bytes);
             /* Compact: move last element into gap */
             if (i < dev->texture_count - 1)
                 dev->textures[i] = dev->textures[dev->texture_count - 1];

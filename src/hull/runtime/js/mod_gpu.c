@@ -15,6 +15,7 @@
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bulk_units */
 #include "hull/vfs.h"
 
 #include <keel/http_server.h>
@@ -83,6 +84,14 @@ static HlGpuCtx *js_get_gpu_ctx(JSContext *ctx)
      * every gpu.* call failed (compile surfaced as a misleading "shader_error"). */
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     return js ? js->base.gpu_ctx : NULL;
+}
+
+/* The VM heap limit (0 = none): a read-back is refused past it before the
+ * backend copies it off the heap (audit 17). */
+static size_t js_gpu_heap_limit(JSContext *ctx)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    return js ? js->max_heap_bytes : 0;
 }
 
 static JSValue js_gpu_available(JSContext *ctx, JSValueConst this_val,
@@ -248,6 +257,7 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     HlGpuDispatchOpts opts;
     memset(&opts, 0, sizeof(opts));
     opts.device = -1;
+    opts.max_output = js_gpu_heap_limit(ctx);   /* audit 17 */
 
     JSValue opts_val = argv[1];
 
@@ -547,6 +557,16 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
     const uint8_t *data = (const uint8_t *)bv.data;
     size_t data_len = bv.len;
 
+    /* The upload (and a create, sized by it) is charged before it runs, one
+     * unit per 64 bytes (audit 17): a MappedBuffer source is off-heap, and
+     * the device memory it fills is outside the heap limit. The charge runs
+     * no app code, so the view stays good. */
+    if (hl_js_budget_charge(ctx, hl_work_bulk_units((uint64_t)data_len))) {
+        if (str_data) JS_FreeCString(ctx, str_data);
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
+
     int rc = hl_cap_gpu_buffer_write(gpu, device, name, data, data_len, offset);
     if (rc == HL_GPU_ERR_NOT_FOUND) {
         rc = hl_cap_gpu_buffer_create(gpu, device, name,
@@ -583,7 +603,8 @@ static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
     void *data = NULL;
     size_t len = 0;
 
-    int rc = hl_cap_gpu_buffer_read(gpu, device, name, &data, &len);
+    int rc = hl_cap_gpu_buffer_read(gpu, device, name, js_gpu_heap_limit(ctx),
+                                    &data, &len);
     JS_FreeCString(ctx, name);
 
     if (rc != HL_GPU_OK)
@@ -789,6 +810,17 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "gpu.texture: width and height required");
     }
 
+    /* The texture's device memory and the upload are charged before they
+     * are made, one unit per 64 bytes: a create with no data allocated up
+     * to 16384^2 x 8 bytes for nothing (audit 17). Runs no app code. */
+    if (hl_js_budget_charge(ctx,
+            hl_work_bulk_units((uint64_t)hl_gpu_tex_bytes(width, height, format)) +
+            hl_work_bulk_units((uint64_t)pixel_len))) {
+        if (str_data) JS_FreeCString(ctx, str_data);
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
+
     int rc = hl_cap_gpu_texture_create(gpu, device, name, width, height,
                                         format, storage, filter,
                                         address_u, address_v);
@@ -825,8 +857,8 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
     uint32_t w = 0, h = 0;
     HlGpuTexFormat fmt = HL_GPU_TEX_RGBA8;
 
-    int rc = hl_cap_gpu_texture_read(gpu, device, name, &data, &len,
-                                      &w, &h, &fmt);
+    int rc = hl_cap_gpu_texture_read(gpu, device, name, js_gpu_heap_limit(ctx),
+                                      &data, &len, &w, &h, &fmt);
     JS_FreeCString(ctx, name);
 
     if (rc != HL_GPU_OK)
@@ -968,6 +1000,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     HlGpuDispatchOpts opts;
     memset(&opts, 0, sizeof(opts));
     opts.device = -1;
+    opts.max_output = js_gpu_heap_limit(ctx);   /* audit 17 */
 
     JSValue opts_val = argv[1];
 
@@ -1419,6 +1452,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         .output_count = output_count,
         .device = device,
         .timeout_ms = pipe_timeout_ms,
+        .max_output = js_gpu_heap_limit(ctx),   /* audit 17 */
     };
 
     HlGpuPipelineResult result;
@@ -1743,6 +1777,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         }
         JS_FreeValue(ctx, tv);
     }
+    op->pipe_opts.max_output = js_gpu_heap_limit(ctx);   /* audit 17 */
 
     /* Abort if any deep-copy hit OOM (M-3) - must happen before the op is
      * handed off to the worker thread, otherwise the worker dereferences

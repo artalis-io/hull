@@ -45,4 +45,10 @@
 #define HL_GPU_MAX_TEXTURE_DIM   16384
 #endif
 
+/* Bytes the persistent buffers and textures of one device may hold between
+ * them (audit 17). A create past it is refused before the backend runs. */
+#ifndef HL_GPU_MAX_LIVE_BYTES
+#define HL_GPU_MAX_LIVE_BYTES    ((size_t)1 << 30)   /* 1 GiB */
+#endif
+
 #endif /* HL_LIMITS_GPU_H */

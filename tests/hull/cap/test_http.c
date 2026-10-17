@@ -190,4 +190,36 @@ UTEST(timeout, redirect_hops_default_to_five)
     ASSERT_EQ(2, hl_http_max_redirects(2));
 }
 
+/* The audit log wrote URLs verbatim, userinfo and query included
+ * (audit 17). */
+static const char *redact(const char *url)
+{
+    static char buf[128];
+    hl_http_url_redact(url, buf, sizeof buf);
+    return buf;
+}
+
+UTEST(audit_url, credentials_and_query_dropped)
+{
+    ASSERT_STREQ("https://api.example.com/v1/x",
+                 redact("https://user:pw@api.example.com/v1/x?token=s3cret#f"));
+    ASSERT_STREQ("https://api.example.com",
+                 redact("https://u:p@api.example.com?k=v"));
+    ASSERT_STREQ("http://host:8080/a/b", redact("http://host:8080/a/b"));
+    ASSERT_STREQ("http://host/p", redact("http://a@b@host/p#x"));
+    /* A '@' after the first '/' could be a password holding '/'. */
+    ASSERT_STREQ("http://[redacted]", redact("http://u:p/w@host/x"));
+    ASSERT_STREQ("host/x", redact("u:p@host/x"));
+    ASSERT_STREQ("", redact(NULL));
+}
+
+UTEST(audit_url, truncates_and_terminates)
+{
+    char small[8];
+    size_t n = hl_http_url_redact("https://example.com/long", small, sizeof small);
+    ASSERT_EQ((size_t)7, n);
+    ASSERT_STREQ("https:/", small);
+    ASSERT_EQ((size_t)0, hl_http_url_redact("x", small, 0));
+}
+
 UTEST_MAIN()
