@@ -50,7 +50,8 @@
 #include <keel/http_body_reader_multipart.h>
 #include <keel/http_connection.h>
 #include <keel/http_request.h>
-#include "hull/shared/res_headers.h" /* hl_res_error_reset */
+#include "hull/shared/res_base.h"   /* hl_res_base_forget_conn */
+#include "hull/http_feature.h"       /* hl_js_http_resume_send / _error */
 
 #include "quickjs.h"
 #include "internal.h"   /* HlJsRunLink and the run helpers */
@@ -716,14 +717,12 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->active_req = NULL;
         if (conn && !hl_js_conn_held_elsewhere(js, conn)) {
             /* This resume runs from the multipart body reader's on_data (not
-             * kl_async_complete), so Hull drives the send: build on
-             * kl_http_conn_response(conn), end any stream, then
-             * kl_http_request_send_response transitions the streaming-async conn
-             * to sending (Keel's write path flushes it). */
-            KlHttpResponse *res = kl_http_conn_response(conn);
-            if (res && res->body_mode == KL_HTTP_BODY_STREAM)
-                kl_http_response_end_stream(res);
-            kl_http_request_send_response(jc->req);
+             * kl_async_complete), so Hull drives the send, as an async
+             * resume does: the entry's header snapshot goes (answered), any
+             * stream ends, and kl_http_request_send_response transitions the
+             * streaming-async conn to sending (Keel's write path flushes it).
+             * Sent by hand, the snapshot stayed in res_bases (audit 17). */
+            hl_js_http_resume_send(js, conn, jc->req);
         }
     } else if (state == JS_PROMISE_REJECTED) {
         const char *msg = NULL;
@@ -755,10 +754,10 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->active_req = NULL;
         if (conn && !hl_js_conn_held_elsewhere(js, conn)) {
-            KlHttpResponse *res = kl_http_conn_response(conn);
-            /* the handler's own headers go (audit 10) */
-            hl_res_error_reset(res, 500, "Internal Server Error", 21);
-            kl_http_request_send_response(jc->req);
+            /* The handler's own headers go (audit 10); the ones earlier
+             * middleware set stay, from the entry's snapshot - a plain
+             * hl_res_error_reset dropped them too (audit 17). */
+            hl_js_http_resume_error(js, conn, jc->req);
         }
     } else if (!JS_IsUndefined(jc->link.handler_promise)) {
         /* PENDING - handler awaited again. A new cont was created

@@ -87,13 +87,16 @@ function jsonEtag(req, res, data, status) {
         return;
     }
 
+    // An empty body has no tag: no ETag header and no 304 (audit 17;
+    // it went out as "ETag: null").
     const tag = compute(body);
-    if (matches(req, tag)) {
-        res.status(304).header("ETag", tag);
-        return;
+    if (tag) {
+        if (matches(req, tag)) {
+            res.status(304).header("ETag", tag);
+            return;
+        }
+        res.header("ETag", tag);
     }
-
-    res.header("ETag", tag);
     if (status) res.status(status);
     res.json(data);
 }
@@ -106,6 +109,7 @@ function jsonEtag(req, res, data, status) {
  * @param {number} [status=200]
  */
 function textEtag(req, res, text, status) {
+    if (text == null) text = "";   // as the Lua twin
     if ((req.method !== "GET" && req.method !== "HEAD") || (status && status !== 200)) {
         if (status) res.status(status);
         res.text(text);
@@ -118,13 +122,16 @@ function textEtag(req, res, text, status) {
         return;
     }
 
+    // An empty body has no tag: no ETag header and no 304 (audit 17;
+    // it went out as "ETag: null").
     const tag = compute(text);
-    if (matches(req, tag)) {
-        res.status(304).header("ETag", tag);
-        return;
+    if (tag) {
+        if (matches(req, tag)) {
+            res.status(304).header("ETag", tag);
+            return;
+        }
+        res.header("ETag", tag);
     }
-
-    res.header("ETag", tag);
     if (status) res.status(status);
     res.text(text);
 }
@@ -137,6 +144,7 @@ function textEtag(req, res, text, status) {
  * @param {number} [status=200]
  */
 function htmlEtag(req, res, html, status) {
+    if (html == null) html = "";   // as the Lua twin
     if ((req.method !== "GET" && req.method !== "HEAD") || (status && status !== 200)) {
         if (status) res.status(status);
         res.html(html);
@@ -149,13 +157,16 @@ function htmlEtag(req, res, html, status) {
         return;
     }
 
+    // An empty body has no tag: no ETag header and no 304 (audit 17;
+    // it went out as "ETag: null").
     const tag = compute(html);
-    if (matches(req, tag)) {
-        res.status(304).header("ETag", tag);
-        return;
+    if (tag) {
+        if (matches(req, tag)) {
+            res.status(304).header("ETag", tag);
+            return;
+        }
+        res.header("ETag", tag);
     }
-
-    res.header("ETag", tag);
     if (status) res.status(status);
     res.html(html);
 }

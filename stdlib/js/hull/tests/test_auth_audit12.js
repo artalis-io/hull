@@ -459,6 +459,19 @@ await test("a16: a full bucket for the new address is a 429 that starts nothing"
     hooks.emailRateReset();
 });
 
+// Audit 17: the per-recipient bucket folds ASCII only, as the Lua twin does.
+// toLowerCase also folded "İ" to "i̇", so JS counted "İx@x.test"
+// against "i̇x@x.test"'s bucket and Lua did not.
+await test("a17: the per-recipient bucket folds ASCII letters only", async () => {
+    resetStore(); init({ emailRateLimit: { limit: 3, window: 900 } });
+    const hooks = __testHooks('hull:web:auth-flows');
+    hooks.emailRateReset();
+    for (let i = 0; i < 3; i++) hooks.emailRateAllow("İX@X.test");
+    assertEq(hooks.emailRateAllow("İx@x.test"), false, "ASCII case folds");
+    assertEq(hooks.emailRateAllow("i̇x@x.test"), true, "a non-ASCII fold is another bucket");
+    hooks.emailRateReset();
+});
+
 await test("a16: revoking pending changes does not reset the limits", async () => {
     resetStore(); init({ emailRateLimit: { limit: 3, window: 900 } });
     const hooks = __testHooks('hull:web:auth-flows');

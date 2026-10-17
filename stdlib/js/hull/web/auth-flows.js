@@ -300,7 +300,9 @@ function emailRateAllow(to, exact) {
     const cfg = _state.emailRateLimit;
     if (!cfg || typeof cfg !== "object") return true;
     if (typeof to !== "string" || to === "") return true;
-    const key = exact ? to : to.toLowerCase();
+    // ASCII-only folding, as the Lua twin's to:lower(): toLowerCase folds
+    // "İ" / "K" too, so one bucket in JS was two in Lua (audit 17).
+    const key = exact ? to : asciiLower(to);
     const now = time.now();
     const window = cfg.window || 900;
     const limit = cfg.limit || 3;

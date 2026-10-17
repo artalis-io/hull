@@ -918,7 +918,8 @@ verify step between successful first-factor auth and `on_login` when
 **validate.check(data, schema)**. Declarative input validation.
 - `schema` maps field names to rule tables.
 - Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator: return `true` / `nil` for valid, `false` for invalid - the error is `message` or "is invalid" - or a string error message; any other return fails closed), `message` (custom error).
-- `min`/`max` apply to string length or numeric value depending on field type.
+- `min`/`max` apply to string length or numeric value depending on field type. A string's length is its characters - Unicode code points - in both runtimes, so `"été"` is 3 and an emoji is 1 (audit 17: Lua counted bytes and JS UTF-16 units); a Lua string that is not valid UTF-8 counts its bytes.
+- JS reads only the data object's own properties: an inherited `constructor` or `toString` is absent (audit 17).
 - Returns `(ok, errors)` where `errors` maps field names to error strings.
 
 **form.parse(body)**. URL-encoded form body parsing.
@@ -1178,6 +1179,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `etag.json(req, res, data, status?)`. Send JSON response with ETag. Sends 304 if `If-None-Match` matches.
 - `etag.text(req, res, text, status?)`. Same for text responses.
 - `etag.html(req, res, html, status?)`. Same for HTML responses.
+- An empty body has no tag: the three helpers send it with no `ETag` header and never answer it 304 (audit 17: Lua raised, JS sent `ETag: null`).
 - `etag.compute(body)` → `W/"<first 16 hex chars of SHA-256>"` or `nil`.
 - `etag.matches(req, tag)` → boolean. Checks `If-None-Match` header (comma-separated, `*` wildcard).
 - Only computes ETags for GET/HEAD requests. Skips bodies > 1 MB.

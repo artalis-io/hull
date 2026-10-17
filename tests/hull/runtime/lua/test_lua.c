@@ -4888,6 +4888,21 @@ UTEST(lua_stdlib, stdlib_audit16_suite)
     cleanup_lua_caps();
 }
 
+/* Stdlib regressions from audit 17: etag helpers with an empty body, and
+ * jobs' live config moved to hull._test_hooks. */
+UTEST(lua_stdlib, stdlib_audit17_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit17.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, ws_stream_suite)
 {
     long long pass = 0, fail = -1;

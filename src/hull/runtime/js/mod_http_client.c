@@ -16,8 +16,11 @@
 
 #include <limits.h>
 
+static void js_free_http_headers(JSContext *ctx, HlHttpHeader *hdrs, int count);
+
 /* Parse JS headers object { name: value } into HlHttpHeader array.
- * Returns count. Caller must free with js_free_http_headers(). */
+ * Returns 0 (caller frees with js_free_http_headers()), or -1 with a JS
+ * exception pending and nothing to free. */
 static int js_parse_http_headers(JSContext *ctx, JSValueConst obj,
                                     HlHttpHeader **out, int *out_count)
 {
@@ -47,24 +50,38 @@ static int js_parse_http_headers(JSContext *ctx, JSValueConst obj,
         return -1;
     }
 
+    /* A getter or toString that throws fails the call: the header used to
+     * be skipped with its exception left pending, and the request went out
+     * without it (audit 17). */
     int count = 0;
+    int failed = 0;
     for (uint32_t i = 0; i < prop_count; i++) {
-        const char *name = JS_AtomToCString(ctx, props[i].atom);
-        JSValue val = JS_GetProperty(ctx, obj, props[i].atom);
-        const char *value = JS_ToCString(ctx, val);
-        JS_FreeValue(ctx, val);
+        if (!failed) {
+            const char *name = JS_AtomToCString(ctx, props[i].atom);
+            JSValue val = name ? JS_GetProperty(ctx, obj, props[i].atom)
+                               : JS_EXCEPTION;
+            const char *value = JS_IsException(val) ? NULL
+                                                    : JS_ToCString(ctx, val);
+            JS_FreeValue(ctx, val);
 
-        if (name && value) {
-            hdrs[count].name = name;
-            hdrs[count].value = value;
-            count++;
-        } else {
-            if (name) JS_FreeCString(ctx, name);
-            if (value) JS_FreeCString(ctx, value);
+            if (name && value) {
+                hdrs[count].name = name;
+                hdrs[count].value = value;
+                count++;
+            } else {
+                if (name) JS_FreeCString(ctx, name);
+                if (value) JS_FreeCString(ctx, value);
+                failed = 1;
+            }
         }
         JS_FreeAtom(ctx, props[i].atom);
     }
     js_free(ctx, props);
+
+    if (failed) {
+        js_free_http_headers(ctx, hdrs, count);
+        return -1;
+    }
 
     *out = hdrs;
     *out_count = count;
@@ -184,9 +201,17 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, body_val);
 
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
-        if (JS_IsObject(hdrs_val))
-            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        int hrc = JS_IsException(hdrs_val) ? -1
+                : JS_IsObject(hdrs_val)
+                    ? js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers)
+                    : 0;
         JS_FreeValue(ctx, hdrs_val);
+        if (hrc != 0) {
+            JS_FreeCString(ctx, method);
+            JS_FreeCString(ctx, url);
+            if (body) JS_FreeCString(ctx, body);
+            return JS_EXCEPTION;
+        }
     }
 
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
@@ -233,9 +258,15 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
     int num_headers = 0;
     if (argc >= 2 && JS_IsObject(argv[1])) {
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[1], "headers");
-        if (JS_IsObject(hdrs_val))
-            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        int hrc = JS_IsException(hdrs_val) ? -1
+                : JS_IsObject(hdrs_val)
+                    ? js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers)
+                    : 0;
         JS_FreeValue(ctx, hdrs_val);
+        if (hrc != 0) {
+            JS_FreeCString(ctx, url);
+            return JS_EXCEPTION;
+        }
     }
 
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
@@ -284,9 +315,16 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
     int num_headers = 0;
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
-        if (JS_IsObject(hdrs_val))
-            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        int hrc = JS_IsException(hdrs_val) ? -1
+                : JS_IsObject(hdrs_val)
+                    ? js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers)
+                    : 0;
         JS_FreeValue(ctx, hdrs_val);
+        if (hrc != 0) {
+            JS_FreeCString(ctx, url);
+            if (body) JS_FreeCString(ctx, body);
+            return JS_EXCEPTION;
+        }
     }
 
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
@@ -343,9 +381,15 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
     int num_headers = 0;
     if (argc >= 2 && JS_IsObject(argv[1])) {
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[1], "headers");
-        if (JS_IsObject(hdrs_val))
-            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        int hrc = JS_IsException(hdrs_val) ? -1
+                : JS_IsObject(hdrs_val)
+                    ? js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers)
+                    : 0;
         JS_FreeValue(ctx, hdrs_val);
+        if (hrc != 0) {
+            JS_FreeCString(ctx, url);
+            return JS_EXCEPTION;
+        }
     }
 
     KlHttpClientResponse resp = {0}; /* zero-init: resp.error is read on the rc!=0
@@ -450,9 +494,17 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, body_val);
 
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
-        if (JS_IsObject(hdrs_val))
-            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        int hrc = JS_IsException(hdrs_val) ? -1
+                : JS_IsObject(hdrs_val)
+                    ? js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers)
+                    : 0;
         JS_FreeValue(ctx, hdrs_val);
+        if (hrc != 0) {   /* before anything is armed (audit 17) */
+            JS_FreeCString(ctx, method);
+            JS_FreeCString(ctx, url);
+            if (body) JS_FreeCString(ctx, body);
+            return JS_EXCEPTION;
+        }
     }
 
     /* The promise and continuation first, as the Lua binding does:
