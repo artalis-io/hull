@@ -619,11 +619,13 @@ os.execve(exe, ["hull", "dev", "--agent", "-p", "39815", d + "/app.lua"], env)
 EOF
 DEV_PID=$!
 i=0; while [ "$i" -lt 20 ] && [ ! -f "$PLANT/.hull/discovery.json" ]; do sleep 0.5; i=$((i + 1)); done
+# dev removes its sidecars when it exits: look before the kill
+PLANT_PUB=0; [ -f "$PLANT/.hull/discovery.json" ] && PLANT_PUB=1
 kill "$DEV_PID" 2>/dev/null || true; wait "$DEV_PID" 2>/dev/null || true; DEV_PID=""
 [ ! -e "$PLANT_MARK" ] \
     && pass "dev: a ./hull in the app dir is not run through a '.' PATH entry" \
     || fail "dev ran the app directory's ./hull (PATH search of a bare argv[0])"
-[ -f "$PLANT/.hull/discovery.json" ] \
+[ "$PLANT_PUB" = 1 ] \
     && pass "dev: started as a bare 'hull', the real hull published a generation" \
     || { fail "dev: no generation published when started as a bare 'hull'"; sed 's/^/    | /' "$TMP/plant_dev.log" | tail -20; }
 ;;
