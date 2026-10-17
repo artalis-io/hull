@@ -1117,19 +1117,25 @@ static int handle_data_row(HlPgCursor *c, HlPgRowCb cb, void *ctx,
     return r ? 1 : 0;
 }
 
-/* The run this reply is read for is over its instruction budget or past its
- * wall-clock deadline (cap/db_budget.h; a 0-unit charge only asks): the
- * binding raises that once the call returns, so the rest of the reply would
- * be read - at the server's pace, a result of any size - only to be thrown
+/* Each frame of a reply is charged to the run it is read for - 1 unit plus 1
+ * per HL_DB_ALLOC_UNIT_BYTES of its body (cap/db_budget.h) - whatever its
+ * type: a NoticeResponse stream (`LOOP RAISE NOTICE`) or a COPY stream costs
+ * the server nothing to send, and a 0-unit charge only ASKED, so a db.async
+ * op's budget (HlDbOpBudget, which a 0 charge never trips) bounded nothing
+ * (audit 17). Once the run is over its instruction budget or past its
+ * wall-clock deadline the binding raises that when the call returns, so the
+ * rest of the reply would be read - at the server's pace, a result of any size - only to be thrown
  * away (audit 15). Drop the connection instead of draining it: the closed
  * socket stops the query at the server's next write, the connection is
  * broken, and the backend reconnects on the next call (db_postgres.c's
  * pg_ready) - or, inside a transaction, refuses everything but the ROLLBACK
  * the server has already done with the session. Simpler than a CancelRequest
  * on a side connection, and it needs no new connect from inside the run. */
-static int pg_abandon_if_tripped(HlPgConn *conn)
+static int pg_abandon_if_tripped(HlPgConn *conn, uint32_t body_len)
 {
-    if (hl_db_budget_charge(0) == 0) return 0;
+    int64_t units = 1 + ((int64_t)body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                        HL_DB_ALLOC_UNIT_BYTES;
+    if (hl_db_budget_charge(units) == 0) return 0;
     conn_teardown(conn);
     conn->broken = 1;
     set_err(conn->errmsg, sizeof conn->errmsg,
@@ -1153,6 +1159,22 @@ static int pg_refuse_copy(HlPgConn *conn)
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_pg_writer_free(&w);
     return se ? -1 : 0;
+}
+
+/* The server answered a statement with CopyOutResponse (`COPY ... TO
+ * STDOUT`): CopyData follows at the server's pace, as much as the query
+ * makes, and there is no CopyFail for this direction. Hull does not stream
+ * COPY data, so the connection is dropped instead of read (audit 17): the
+ * closed socket stops the COPY at the server's next write, and the backend
+ * reconnects on the next call, as after a tripped run. Always -1. */
+static int pg_refuse_copy_out(HlPgConn *conn)
+{
+    conn_teardown(conn);
+    conn->broken = 1;
+    set_err(conn->errmsg, sizeof conn->errmsg,
+            "COPY TO STDOUT is not supported by hull/db; the connection was "
+            "closed rather than read to the end of the reply");
+    return -1;
 }
 
 int hl_pg_query(HlPgConn *conn, const char *sql,
@@ -1274,6 +1296,11 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         HlPgFrame f;
         if (conn_next_frame(conn, &f) != 0) return -1;
 
+        /* Every frame but the last is charged (pg_abandon_if_tripped); a
+         * ReadyForQuery ends the reply, with nothing left to drop. */
+        if (f.type != HL_PG_B_READY && pg_abandon_if_tripped(conn, f.body_len))
+            return -1;
+
         HlPgCursor c;
         hl_pg_cursor_init(&c, &f);
 
@@ -1289,7 +1316,6 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
             if (handle_row_desc(&c, desc_cb, cb_ctx, conn) != 0) had_error = 1;
             break;
         case HL_PG_B_DATA_ROW:
-            if (pg_abandon_if_tripped(conn)) return -1;
             if (!stop_rows) {
                 int r = handle_data_row(&c, row_cb, cb_ctx, conn);
                 if (r < 0) had_error = 1;
@@ -1319,6 +1345,8 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         case HL_PG_B_COPY_BOTH:
             if (pg_refuse_copy(conn) != 0) return -1;
             break;            /* the ErrorResponse that follows fails it */
+        case HL_PG_B_COPY_OUT:
+            return pg_refuse_copy_out(conn);
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
             return had_error ? -1 : 0;
@@ -1362,13 +1390,14 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         HlPgFrame f;
         if (conn_next_frame(conn, &f) != 0) return -1;
 
+        if (f.type != HL_PG_B_READY && pg_abandon_if_tripped(conn, f.body_len))
+            return -1;
+
         HlPgCursor c;
         hl_pg_cursor_init(&c, &f);
 
         switch (f.type) {
         case HL_PG_B_DATA_ROW:
-            if (pg_abandon_if_tripped(conn)) return -1;
-            break;
         case HL_PG_B_ROW_DESC:
         case HL_PG_B_CMD_COMPLETE:
         case HL_PG_B_EMPTY_QUERY:
@@ -1393,6 +1422,8 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         case HL_PG_B_COPY_BOTH:
             if (pg_refuse_copy(conn) != 0) return -1;
             break;            /* the ErrorResponse that follows fails it */
+        case HL_PG_B_COPY_OUT:
+            return pg_refuse_copy_out(conn);
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
             return had_error ? -1 : 0;

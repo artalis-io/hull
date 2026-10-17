@@ -815,6 +815,112 @@ UTEST(mysql_conn, exec_multi_statement)
     close(sv[0]);
 }
 
+/* The rows of a SECOND result set (a multi-statement COM_QUERY, a CALL) are
+ * charged too (audit 17): drain_one_result discarded them unchecked, at the
+ * server's pace, so `SELECT 1; SELECT * FROM huge` read the whole second
+ * result inside one call. An op budget (HlDbOpBudget) of 10 units stops a
+ * 40-row second result set; the connection is closed, not drained. */
+UTEST(mysql_conn, second_result_set_rows_are_charged)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, HL_MY_SERVER_MORE_RESULTS);     /* statement 1: OK, more */
+    { size_t m = hl_my_packet_begin(&s, 2);            /* statement 2: rows */
+      hl_my_put_lenenc_int(&s, 1);
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 3, "x", HL_MY_TYPE_LONG);
+    put_eof(&s, 4);
+    for (int i = 0; i < 40; i++) {
+        size_t m = hl_my_packet_begin(&s, (uint8_t)(5 + i));
+        hl_my_put_lenenc_str(&s, "7", 1);
+        hl_my_packet_end(&s, m);
+    }
+    put_eof(&s, 45);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_my_conn_query(&conn, "UPDATE a SET x=1; SELECT x FROM t",
+                              NULL, NULL, NULL, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL); /* closed, not drained */
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* More values than the statement has placeholders is refused, as SQLite
+ * (SQLITE_RANGE) and Postgres refuse it (audit 17): build_execute bound the
+ * first num_params and dropped the rest without a word. Nothing is executed;
+ * the statement is closed and the connection stays in step. */
+UTEST(mysql_conn, prepared_surplus_params_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    /* PREPARE_OK: stmt 1, 0 columns, 1 param */
+    { size_t m = hl_my_packet_begin(&s, 1);
+      hl_my_put_u8(&s, HL_MY_PKT_OK);
+      hl_my_put_u32(&s, 1);
+      hl_my_put_u16(&s, 0);                            /* num_columns */
+      hl_my_put_u16(&s, 1);                            /* num_params */
+      hl_my_put_u8(&s, 0);
+      hl_my_put_u16(&s, 0);
+      hl_my_packet_end(&s, m); }
+    put_col_def(&s, 2, "p1", HL_MY_TYPE_LONGLONG);     /* 1 param def + EOF */
+    put_eof(&s, 3);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    HlMyParam p[2];
+    memset(p, 0, sizeof p);
+    p[0].type = HL_MY_TYPE_LONGLONG; p[0].v.i = 1;
+    p[1].type = HL_MY_TYPE_LONGLONG; p[1].v.i = 2;
+    EXPECT_EQ(-1, hl_my_conn_query_prepared(&conn, "DELETE FROM t WHERE id = ?",
+                                            p, 2, NULL, NULL, NULL, NULL));
+    EXPECT_TRUE(strstr(conn.errmsg, "parameter count mismatch") != NULL);
+    EXPECT_EQ(0, conn.broken);
+
+    /* The client sent [HandshakeResponse41][COM_STMT_PREPARE][COM_STMT_CLOSE]:
+     * no COM_STMT_EXECUTE. */
+    uint8_t got[512];
+    ssize_t n = read(sv[0], got, sizeof got);
+    ASSERT_TRUE(n > 0);
+    HlMyFrame f; size_t consumed = 0, off = 0;
+    ASSERT_EQ(hl_my_frame_next(got, (size_t)n, &f, &consumed), HL_MY_OK);   /* handshake */
+    off += consumed;
+    ASSERT_EQ(hl_my_frame_next(got + off, (size_t)n - off, &f, &consumed), HL_MY_OK); /* PREPARE */
+    off += consumed;
+    ASSERT_EQ(hl_my_frame_next(got + off, (size_t)n - off, &f, &consumed), HL_MY_OK);
+    ASSERT_TRUE(f.body_len > 0);
+    EXPECT_EQ(f.body[0], HL_MY_COM_STMT_CLOSE);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* A multi-statement COM_QUERY whose SECOND statement fails: the ERR used to
  * be read past and the call reported success. It fails, and the connection
  * stays in step (the reply was read to its end). */

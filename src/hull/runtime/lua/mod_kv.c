@@ -144,8 +144,12 @@ static int l_kv_clear(lua_State *L)
     HlKvConn *c = kv_self(L);
     size_t plen; const char *prefix = luaL_checklstring(L, 2, &plen);
     int64_t removed = 0;
-    if (hl_cap_kv_clear(c, (const uint8_t *)prefix, plen, &removed) != 0)
+    if (hl_cap_kv_clear(c, (const uint8_t *)prefix, plen, &removed) != 0) {
+        /* Its SCAN steps are charged to the run (cap/valkey.c, audit 17):
+         * over the budget or past the deadline, raise the trip. */
+        if (hl_lua_budget_tripped(L)) return hl_lua_budget_raise(L);
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
+    }
     lua_pushinteger(L, (lua_Integer)removed);
     return 1;
 }
@@ -186,6 +190,8 @@ static int l_kv_scan(lua_State *L)
         o->close_pending = 0;
         return luaL_error(L, "kv: connection closed during scan");
     }
+    /* Each SCAN step is charged to the run (cap/valkey.c, audit 17). */
+    if (hl_lua_budget_tripped(L)) return hl_lua_budget_raise(L);
     if (s.oom) return luaL_error(L, "kv.scan: not enough memory for the result");
     if (rc != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));

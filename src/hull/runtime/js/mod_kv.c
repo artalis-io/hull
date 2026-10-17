@@ -17,6 +17,7 @@
  */
 
 #include "mod_buffer.h"        /* get_hl_js, js_get_buffer, HlBufferView */
+#include "internal.h"          /* hl_js_budget_throw */
 #include "hull/cap/kv.h"
 
 #include <string.h>
@@ -186,6 +187,14 @@ static JSValue js_kv_cas(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     return JS_NewInt32(ctx, (int)r);
 }
 
+/* The run this call belongs to is over its instruction budget or past its
+ * deadline (a SCAN step charged it, cap/valkey.c). */
+static int kv_run_tripped(JSContext *ctx)
+{
+    HlJS *js = get_hl_js(ctx);
+    return js && js->budget_tripped;
+}
+
 /* conn.clear(prefixBuf) -> number removed. */
 static JSValue js_kv_clear(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
@@ -196,7 +205,12 @@ static JSValue js_kv_clear(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     int64_t removed = 0;
     int rc = hl_cap_kv_clear(c, (const uint8_t *)pb.data, pb.len, &removed);
     kv_arg_free(ctx, ps, pf);
-    if (rc != 0) return JS_ThrowInternalError(ctx, "%s", hl_cap_kv_error(c));
+    if (rc != 0) {
+        /* Its SCAN steps are charged to the run (cap/valkey.c, audit 17):
+         * over the budget or past the deadline, throw the trip. */
+        if (kv_run_tripped(ctx)) return hl_js_budget_throw(ctx);
+        return JS_ThrowInternalError(ctx, "%s", hl_cap_kv_error(c));
+    }
     return JS_NewInt64(ctx, removed);
 }
 
@@ -226,6 +240,10 @@ static JSValue js_kv_scan(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     struct kv_scan_js s = { ctx, JS_NewArray(ctx), 0, 0 };
     int rc = hl_cap_kv_scan(c, (const uint8_t *)pb.data, pb.len, (size_t)limit, kv_scan_js_cb, &s);
     kv_arg_free(ctx, ps, pf);
+    if (kv_run_tripped(ctx)) {   /* each SCAN step is charged (audit 17) */
+        JS_FreeValue(ctx, s.arr);
+        return hl_js_budget_throw(ctx);
+    }
     if (rc != 0 || s.err) { JS_FreeValue(ctx, s.arr); return JS_ThrowInternalError(ctx, "%s", hl_cap_kv_error(c)); }
     return s.arr;
 }
