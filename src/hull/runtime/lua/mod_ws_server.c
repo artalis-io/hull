@@ -34,9 +34,14 @@
 
 /* ── Conn userdata ─────────────────────────────────────────────────── */
 
+/* conn.data lives in the userdata's user value (slot 1), not a registry
+ * ref: it goes with the userdata, cycles included (data.self = conn). As a
+ * registry ref, a conn.data touched after the close made a ref nothing ever
+ * freed, so each reconnect of a remote client grew the registry (audit 17). */
+#define HL_WS_CONN_DATA_UV 1
+
 typedef struct {
     HlWsConn *conn;      /* NULL after close */
-    int       data_ref;  /* registry ref for conn.data table (LUA_NOREF = none) */
 } HlWsConnUD;
 
 /* Push or create the conn userdata for a given HlWsConn.
@@ -51,9 +56,9 @@ void hl_lua_ws_push_conn(lua_State *L, HlWsConn *conn)
     }
 
     /* Create new userdata */
-    HlWsConnUD *ud = (HlWsConnUD *)lua_newuserdata(L, sizeof(HlWsConnUD));
+    HlWsConnUD *ud = (HlWsConnUD *)lua_newuserdatauv(L, sizeof(HlWsConnUD),
+                                                     HL_WS_CONN_DATA_UV);
     ud->conn = conn;
-    ud->data_ref = LUA_NOREF;
 
     luaL_setmetatable(L, HL_WS_CONN_MT);
 
@@ -73,11 +78,10 @@ void hl_lua_ws_invalidate_conn(lua_State *L, HlWsConn *conn)
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
     if (lua_isuserdata(L, -1)) {
         HlWsConnUD *ud = (HlWsConnUD *)lua_touserdata(L, -1);
-        /* Free the data table ref */
-        if (ud->data_ref != LUA_NOREF) {
-            luaL_unref(L, LUA_REGISTRYINDEX, ud->data_ref);
-            ud->data_ref = LUA_NOREF;
-        }
+        /* Drop the data table (a later conn.data starts a new one, which
+         * goes with the userdata) */
+        lua_pushnil(L);
+        lua_setiuservalue(L, -2, HL_WS_CONN_DATA_UV);
         ud->conn = NULL;
     }
     lua_pop(L, 1);
@@ -186,17 +190,16 @@ static int lua_ws_conn_ping(lua_State *L)
 /* conn.data - lazy-created per-connection table */
 static int lua_ws_conn_index(lua_State *L)
 {
-    HlWsConnUD *ud = (HlWsConnUD *)luaL_checkudata(L, 1, HL_WS_CONN_MT);
+    luaL_checkudata(L, 1, HL_WS_CONN_MT);
     const char *key = luaL_checkstring(L, 2);
 
     if (strcmp(key, "data") == 0) {
-        if (ud->data_ref == LUA_NOREF) {
+        if (lua_getiuservalue(L, 1, HL_WS_CONN_DATA_UV) != LUA_TTABLE) {
             /* Create lazy data table */
+            lua_pop(L, 1);
             lua_newtable(L);
             lua_pushvalue(L, -1);
-            ud->data_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        } else {
-            lua_rawgeti(L, LUA_REGISTRYINDEX, ud->data_ref);
+            lua_setiuservalue(L, 1, HL_WS_CONN_DATA_UV);
         }
         return 1;
     }
@@ -209,16 +212,13 @@ static int lua_ws_conn_index(lua_State *L)
 
 static int lua_ws_conn_newindex(lua_State *L)
 {
-    HlWsConnUD *ud = (HlWsConnUD *)luaL_checkudata(L, 1, HL_WS_CONN_MT);
+    luaL_checkudata(L, 1, HL_WS_CONN_MT);
     const char *key = luaL_checkstring(L, 2);
 
     if (strcmp(key, "data") == 0) {
         luaL_checktype(L, 3, LUA_TTABLE);
-        /* Free old ref */
-        if (ud->data_ref != LUA_NOREF)
-            luaL_unref(L, LUA_REGISTRYINDEX, ud->data_ref);
         lua_pushvalue(L, 3);
-        ud->data_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        lua_setiuservalue(L, 1, HL_WS_CONN_DATA_UV);
         return 0;
     }
 
@@ -248,6 +248,10 @@ void hl_lua_ws_register_conn_mt(lua_State *L)
 
     lua_pushcfunction(L, lua_ws_conn_newindex);
     lua_setfield(L, -2, "__newindex");
+
+    /* App code gets no handle on it (audit 17). */
+    lua_pushliteral(L, "locked");
+    lua_setfield(L, -2, "__metatable");
 
     lua_pop(L, 1); /* pop metatable */
 }
