@@ -7968,6 +7968,32 @@ UTEST(js_audit5, async_middleware_fails_closed)
     }
 }
 
+/* Audit 17: a middleware's number is truncated toward zero, sign kept, as
+ * the Lua runtime reads it. ToInt32 wrapped 2^32 to 0 ("continue"), and a
+ * valueOf that threw continued too. */
+UTEST(js_audit17, middleware_number_return_matches_lua)
+{
+    static const struct { const char *src; int want; } cases[] = {
+        { "(req, res) => 1.5", 1 },         { "(req, res) => 0.5", 0 },
+        { "(req, res) => -0.5", 0 },        { "(req, res) => -1.5", -1 },
+        { "(req, res) => 2 ** 32", 1 },     { "(req, res) => -(2 ** 32)", -1 },
+        { "(req, res) => NaN", 0 },         { "(req, res) => Infinity", 1 },
+        { "(req, res) => '1.5'", 1 },       { "(req, res) => undefined", 0 },
+        { "(req, res) => true", 1 },        { "(req, res) => 2", 1 },
+        { "(req, res) => ({ valueOf() { throw new Error('x'); } })", -1 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        KlHttpRequest req = {0};
+        KlHttpResponse res = {0};
+        EXPECT_EQ_MSG(a5_middleware(cases[i].src, &req, &res), cases[i].want,
+                      cases[i].src);
+        free_req_ctx(&req);
+        cleanup_js();
+    }
+}
+
 /* H3: a Hull async op in middleware suspended the connection Keel then ran
  * the rest of the chain and the handler on. Refused, with a clear error. */
 UTEST(js_audit5, async_op_in_middleware_is_refused)

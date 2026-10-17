@@ -2215,6 +2215,41 @@ UTEST(lua_middleware, dispatch_return_nonzero_short_circuits)
     cleanup_lua();
 }
 
+/* Audit 17: a middleware's number is truncated toward zero, sign kept, as
+ * the JS runtime reads it. 1.5 read as 0 ("continue": JS stops) and 2^32
+ * through the (int) cast as 0. */
+UTEST(lua_middleware, dispatch_number_return_matches_js)
+{
+    static const struct { const char *ret; int want; } cases[] = {
+        { "1.5", 1 }, { "0.5", 0 }, { "-0.5", 0 }, { "-1.5", -1 },
+        { "2^32", 1 }, { "4294967296", 1 }, { "-4294967296", -1 },
+        { "0/0", 0 }, { "1/0", 1 }, { "'1.5'", 1 }, { "0.0", 0 },
+        { "nil", 0 }, { "true", 1 }, { "2", 1 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        char code[256];
+        snprintf(code, sizeof code,
+            "app.manifest({modules = {'hull/http-server@1'}})\n"
+            "app.use('*', '/*', function(req, res) return %s end)\n",
+            cases[i].ret);
+        ASSERT_EQ(luaL_dostring(lua_rt.L, code), LUA_OK);
+        lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+        lua_rawgeti(lua_rt.L, -1, 1);
+        lua_getfield(lua_rt.L, -1, "handler_id");
+        int handler_id = (int)lua_tointeger(lua_rt.L, -1);
+        lua_pop(lua_rt.L, 3);
+        KlHttpRequest req = {0};
+        KlHttpResponse res = {0};
+        EXPECT_EQ_MSG(hl_lua_dispatch_middleware(&lua_rt, handler_id,
+                                                 &req, &res),
+                      cases[i].want, cases[i].ret);
+        free_lua_req_ctx(&req);
+        cleanup_lua();
+    }
+}
+
 /* A `res` kept past its request fails closed: middleware stashes it, the
  * request finishes, and using it later raises instead of writing into a
  * response that was sent (on a connection that may be gone). */
@@ -11216,6 +11251,44 @@ UTEST(lua_audit12, a_task_failure_hook_restores_the_runs_state)
     cleanup_lua();
     be->tick(actx, 0);
     be->free(actx);
+}
+
+/* Audit 17: hull._spawn runs the task's first stretch inline, on the
+ * spawner's budget. A task that tripped it ended the spawner's run too, but
+ * spawn returned normally and the spawner ran on until its own hook's stride
+ * came round. It raises the trip now - through pcall as well. */
+UTEST(lua_audit17, spawn_reraises_a_task_budget_trip)
+{
+    static const char *const srcs[] = {
+        "AFTER = 0\n"
+        "hull._spawn(function() while true do end end)\n"
+        "AFTER = 1\n",
+        "AFTER = 0\n"
+        "local ok = pcall(hull._spawn, function() while true do end end)\n"
+        "AFTER = 1\n",
+        "AFTER = 0\n"
+        "hull._spawn(function() while true do end end, function() end)\n"
+        "AFTER = 1\n",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        lua_State *L = lua_rt.L;
+        lua_rt.max_instructions = 100000;
+        HL_LUA_ARM(&lua_rt, L);
+        int rc = luaL_dostring(L, srcs[i]);
+        EXPECT_NE_MSG(rc, LUA_OK, srcs[i]);
+        const char *e = rc != LUA_OK ? lua_tostring(L, -1) : NULL;
+        EXPECT_NE_MSG(strstr(e ? e : "", "instruction limit"), NULL, srcs[i]);
+        lua_settop(L, 0);
+        lua_rt.max_instructions = 0;
+        HL_LUA_ARM(&lua_rt, L);
+        lua_getglobal(L, "AFTER");
+        EXPECT_EQ_MSG((int)lua_tointeger(L, -1), 0, srcs[i]);
+        lua_pop(L, 1);
+        lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+        cleanup_lua();
+    }
 }
 
 UTEST(lua_stdlib, etag_audit13_suite)

@@ -362,12 +362,18 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
                   "the request is answered 500");
         result = -1;
     } else {
-        /* Capture return value: 0 = continue, non-zero = short-circuit */
-        int32_t val = 0;
-        if (JS_ToInt32(js->ctx, &val, ret) == 0)
-            result = val;
-        else
-            JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+        /* Capture return value: 0 = continue, non-zero = short-circuit.
+         * Truncated toward zero, sign kept: ToInt32 wrapped 2^32 to 0
+         * ("continue"). NaN (undefined, a plain object) continues. The
+         * Lua runtime reads a number the same way (audit 17). A valueOf
+         * that throws fails the request instead of continuing. */
+        double d = 0;
+        if (JS_ToFloat64(js->ctx, &d, ret) == 0) {
+            result = !(d >= 1 || d <= -1) ? 0 : d < 0 ? -1 : 1;
+        } else {
+            hl_js_dump_error(js);
+            result = -1;
+        }
     }
 
     /* Store req.ctx as a JS value ref so the next middleware

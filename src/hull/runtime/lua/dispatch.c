@@ -233,10 +233,17 @@ static int mw_run_k(lua_State *L)
     hl_lua_make_response_life(L, m->res, m->life);        /* ..., res */
     lua_call(L, 2, 1);                                    /* routes,req,ret */
 
-    /* 0 = continue, non-zero = short-circuit */
-    if (lua_isnumber(L, -1))
-        m->result = (int)lua_tointeger(L, -1);
-    else if (lua_isboolean(L, -1))
+    /* 0 = continue, non-zero = short-circuit. A number is truncated toward
+     * zero, as JS's ToInt32 does, and only its sign is kept: lua_tointeger
+     * read 1.5 as 0 ("continue", where JS stops), and the (int) cast read
+     * 2^32 as 0 (audit 17). NaN continues, as JS's does. */
+    if (lua_isinteger(L, -1)) {
+        lua_Integer v = lua_tointeger(L, -1);
+        m->result = v == 0 ? 0 : v < 0 ? -1 : 1;
+    } else if (lua_isnumber(L, -1)) {
+        lua_Number d = lua_tonumber(L, -1);
+        m->result = !(d >= 1 || d <= -1) ? 0 : d < 0 ? -1 : 1;
+    } else if (lua_isboolean(L, -1))
         m->result = lua_toboolean(L, -1) ? 1 : 0;
     lua_pop(L, 1);
 
