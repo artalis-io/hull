@@ -597,14 +597,48 @@ static void mock_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex)
     tex->handle = NULL;
 }
 
+/* The live total the backend saw while a dispatch / pipeline ran. */
+static int mock_dispatches;
+static size_t mock_live_during;
+
+static int mock_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
+                         const HlGpuDispatchOpts *opts,
+                         const HlGpuBuffer *pb, int pc,
+                         const HlGpuTexture *pt, int ptc,
+                         void **output, size_t *output_len,
+                         const char **err_msg)
+{
+    (void)pipeline; (void)opts; (void)pb; (void)pc; (void)pt; (void)ptc;
+    (void)output; (void)output_len; (void)err_msg;
+    mock_dispatches++;
+    mock_live_during = dev->live_bytes;
+    return HL_GPU_OK;
+}
+
+static int mock_dispatch_pipeline(HlGpuDevice *dev, HlGpuPipeline **pipelines,
+                                  int stage_count, const HlGpuPipelineOpts *opts,
+                                  const HlGpuBuffer *pb, int pc,
+                                  const HlGpuTexture *pt, int ptc,
+                                  HlGpuPipelineResult *result,
+                                  const char **err_msg)
+{
+    (void)pipelines; (void)stage_count; (void)opts; (void)pb; (void)pc;
+    (void)pt; (void)ptc; (void)result; (void)err_msg;
+    mock_dispatches++;
+    mock_live_during = dev->live_bytes;
+    return HL_GPU_OK;
+}
+
 static const HlGpuBackend MOCK_BACKEND = {
-    .name            = "mock",
-    .buffer_create   = mock_buffer_create,
-    .buffer_read     = mock_buffer_read,
-    .buffer_destroy  = mock_buffer_destroy,
-    .texture_create  = mock_texture_create,
-    .texture_read    = mock_texture_read,
-    .texture_destroy = mock_texture_destroy,
+    .name              = "mock",
+    .buffer_create     = mock_buffer_create,
+    .buffer_read       = mock_buffer_read,
+    .buffer_destroy    = mock_buffer_destroy,
+    .texture_create    = mock_texture_create,
+    .texture_read      = mock_texture_read,
+    .texture_destroy   = mock_texture_destroy,
+    .dispatch          = mock_dispatch,
+    .dispatch_pipeline = mock_dispatch_pipeline,
 };
 
 static HlGpuCtx *mock_ctx(void)
@@ -716,6 +750,123 @@ UTEST(hull_cap_gpu_live, readback_refused_past_max_len)
     free(data);
     hl_cap_gpu_buffer_destroy(ctx, -1, "b");
     hl_cap_gpu_texture_destroy(ctx, -1, "t");
+    mock_free(ctx);
+}
+
+/* gpu.dispatch / gpu.pipeline's own buffers, uniforms and inline textures
+ * were neither charged nor counted on the device's live total (audit 17):
+ * they are now reserved for the call, and refused past the ceiling before
+ * the backend runs. */
+static void mock_add_shader(HlGpuCtx *ctx, const char *name)
+{
+    HlGpuDevice *dev = &ctx->devices[0];
+    snprintf(dev->pipelines[dev->pipeline_count].name,
+             sizeof(dev->pipelines[0].name), "%s", name);
+    dev->pipeline_count++;
+}
+
+UTEST(hull_cap_gpu_live, dispatch_reserves_inline_buffers)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    mock_add_shader(ctx, "sh");
+    mock_dispatches = 0;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "p", 64, HL_GPU_USAGE_READWRITE));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_texture_create(ctx, -1, "pt", 2, 2,
+                                                   HL_GPU_TEX_RGBA8, 0, 0, 0, 0));
+    EXPECT_EQ((size_t)80, ctx->devices[0].live_bytes);
+
+    HlGpuBufferDesc bufs[3] = {
+        { .name = NULL, .size = 10, .binding = -1 },   /* word-rounded: 12 */
+        { .name = "p",  .size = 100, .binding = -1 },  /* persistent: 0 */
+        { .name = NULL, .size = 0, .binding = -1 },    /* at least a word: 4 */
+    };
+    HlGpuTextureDesc texs[2] = {
+        { .name = NULL, .width = 2, .height = 2, .format = HL_GPU_TEX_RGBA8 },  /* 16 */
+        { .name = "pt", .width = 2, .height = 2, .format = HL_GPU_TEX_RGBA8 },  /* persistent */
+    };
+    static const char uni[5] = "abcd";
+    HlGpuDispatchOpts opts = {
+        .buffers = bufs, .buffer_count = 3,
+        .textures = texs, .texture_count = 2,
+        .uniforms = uni, .uniforms_len = 5,   /* 16-byte rounded: 16 */
+        .output_buffer = -1, .output_texture = -1, .device = -1,
+    };
+    EXPECT_EQ((size_t)48, hl_gpu_dispatch_transient_bytes(&ctx->devices[0], &opts));
+    /* The binding's charge does not know which names are persistent. */
+    EXPECT_EQ((size_t)(12 + 100 + 4 + 16 + 16 + 16), hl_gpu_dispatch_charge_bytes(&opts));
+
+    const char *err = NULL;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ(1, mock_dispatches);
+    EXPECT_EQ((size_t)(80 + 48), mock_live_during);
+    EXPECT_EQ((size_t)80, ctx->devices[0].live_bytes);   /* given back */
+
+    /* Past the ceiling with what is live: refused before the backend. */
+    bufs[0].size = HL_GPU_MAX_LIVE_BYTES - 64;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_BUFFER, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_STREQ("device_memory_limit", err);
+    EXPECT_EQ(1, mock_dispatches);
+    EXPECT_EQ((size_t)80, ctx->devices[0].live_bytes);
+
+    /* The charge saturates at the ceiling (a larger call is refused). */
+    bufs[0].size = SIZE_MAX;
+    EXPECT_EQ((size_t)SIZE_MAX, hl_gpu_dispatch_transient_bytes(NULL, &opts));
+    EXPECT_EQ((size_t)HL_GPU_MAX_LIVE_BYTES, hl_gpu_dispatch_charge_bytes(&opts));
+
+    hl_cap_gpu_buffer_destroy(ctx, -1, "p");
+    hl_cap_gpu_texture_destroy(ctx, -1, "pt");
+    EXPECT_EQ((size_t)0, ctx->devices[0].live_bytes);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_live, pipeline_reserves_stage_buffers)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    mock_add_shader(ctx, "s0");
+    mock_add_shader(ctx, "s1");
+    mock_dispatches = 0;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "p", 64, HL_GPU_USAGE_READWRITE));
+
+    HlGpuBufferDesc b0[2] = {
+        { .name = "a",  .size = 8, .binding = -1 },
+        { .name = NULL, .size = 3, .binding = -1 },    /* 4 */
+    };
+    HlGpuBufferDesc b1[2] = {
+        { .name = "a",  .size = 40, .binding = -1 },   /* "a" once, at 40 */
+        { .name = "p",  .size = 0, .binding = -1 },    /* persistent: 0 */
+    };
+    static const char uni[20] = "0123456789abcdefghi";
+    HlGpuPipelineStage stages[2] = {
+        { .shader = "s0", .buffers = b0, .buffer_count = 2,
+          .uniforms = uni, .uniforms_len = 20 },        /* 32 */
+        { .shader = "s1", .buffers = b1, .buffer_count = 2 },
+    };
+    HlGpuPipelineOpts opts = {
+        .stages = stages, .stage_count = 2,
+        .output_count = HL_GPU_OUTPUT_NONE, .device = -1,
+    };
+    EXPECT_EQ((size_t)(40 + 4 + 32), hl_gpu_pipeline_transient_bytes(&ctx->devices[0], &opts));
+    /* Without the device, "p" counts as made (a word). */
+    EXPECT_EQ((size_t)(40 + 4 + 32 + 4), hl_gpu_pipeline_charge_bytes(&opts));
+
+    HlGpuPipelineResult result;
+    const char *err = NULL;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_pipeline(ctx, &opts, &result, &err));
+    EXPECT_EQ(1, mock_dispatches);
+    EXPECT_EQ((size_t)(64 + 76), mock_live_during);
+    EXPECT_EQ((size_t)64, ctx->devices[0].live_bytes);
+
+    b1[0].size = HL_GPU_MAX_LIVE_BYTES;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_BUFFER, hl_cap_gpu_pipeline(ctx, &opts, &result, &err));
+    EXPECT_STREQ("device_memory_limit", err);
+    EXPECT_EQ(1, mock_dispatches);
+    EXPECT_EQ((size_t)64, ctx->devices[0].live_bytes);
+
+    hl_cap_gpu_buffer_destroy(ctx, -1, "p");
     mock_free(ctx);
 }
 

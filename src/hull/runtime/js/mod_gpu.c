@@ -462,9 +462,14 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     size_t *out_len_ptr = (opts.output_buffer >= 0 || opts.output_texture >= 0)
                            ? &output_len : NULL;
 
-    /* The last getter has run: take the ArrayBuffers' bytes now. */
-    int retake_failed = js_gpu_retake_views(ctx, views, nviews,
-                                            "gpu.dispatch") != 0;
+    /* The call's own buffers, uniforms and inline textures are charged
+     * before they are made, one unit per 64 bytes, as gpu.buffer's create
+     * is (audit 17); a trip leaves its exception pending. Then, the last
+     * getter having run, take the ArrayBuffers' bytes. */
+    int retake_failed =
+        hl_js_budget_charge(ctx, hl_work_bulk_units(
+                                (uint64_t)hl_gpu_dispatch_charge_bytes(&opts))) ||
+        js_gpu_retake_views(ctx, views, nviews, "gpu.dispatch") != 0;
     int rc = retake_failed ? HL_GPU_OK
            : hl_cap_gpu_dispatch(gpu, name, &opts,
                                  out_ptr, out_len_ptr, &err_msg);
@@ -1150,6 +1155,26 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, bufs_val);
 
+    /* The call's own buffers and uniforms are charged before the op is
+     * submitted, as the sync call's (audit 17). */
+    {
+        HlGpuDispatchOpts c = opts;
+        c.buffers = buf_descs;
+        c.buffer_count = buf_count;
+        c.uniforms = uni_copy;
+        c.uniforms_len = uni_len;
+        if (hl_js_budget_charge(ctx, hl_work_bulk_units(
+                                    (uint64_t)hl_gpu_dispatch_charge_bytes(&c)))) {
+            for (int i = 0; i < buf_count; i++) {
+                free(buf_data_ptrs[i]);
+                free((void *)(uintptr_t)buf_descs[i].name);
+            }
+            free(buf_data_ptrs); free(buf_descs); free(uni_copy);
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
+        }
+    }
+
     /* Allocate worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
     if (!op) {
@@ -1457,9 +1482,12 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
 
     HlGpuPipelineResult result;
     const char *err_msg = NULL;
-    /* The last getter has run: take the ArrayBuffers' bytes now. */
-    int retake_failed = js_gpu_retake_views(ctx, views, nviews,
-                                            "gpu.pipeline") != 0;
+    /* The stages' own buffers are charged before they are made (audit 17);
+     * then, the last getter having run, take the ArrayBuffers' bytes. */
+    int retake_failed =
+        hl_js_budget_charge(ctx, hl_work_bulk_units(
+                                (uint64_t)hl_gpu_pipeline_charge_bytes(&opts))) ||
+        js_gpu_retake_views(ctx, views, nviews, "gpu.pipeline") != 0;
     int rc = retake_failed ? HL_GPU_OK
            : hl_cap_gpu_pipeline(gpu, &opts, &result, &err_msg);
 
@@ -1785,6 +1813,31 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     if (oom) {
         hl_worker_gpu_op_free(op); free(op);
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
+    }
+
+    /* The stages' own buffers are charged before the op is submitted, as
+     * the sync call's (audit 17). The worker wires each stage's slice of
+     * op->buffers and its uniforms; a copy of the stages, wired the same
+     * way, is what gets counted here. */
+    {
+        HlGpuPipelineStage cs[HL_GPU_MAX_PIPELINE_STAGES];
+        int off = 0;
+        for (int s = 0; s < op->stage_count; s++) {
+            cs[s] = op->stages[s];
+            int bc = cs[s].buffer_count;
+            if (bc < 0) bc = 0;
+            if (bc > op->buffer_count - off) bc = op->buffer_count - off;
+            cs[s].buffer_count = bc;
+            cs[s].buffers = bc > 0 ? &op->buffers[off] : NULL;
+            off += bc;
+            cs[s].uniforms = op->stage_uniforms ? op->stage_uniforms[s] : NULL;
+        }
+        HlGpuPipelineOpts c = { .stages = cs, .stage_count = op->stage_count };
+        if (hl_js_budget_charge(ctx, hl_work_bulk_units(
+                                    (uint64_t)hl_gpu_pipeline_charge_bytes(&c)))) {
+            hl_worker_gpu_op_free(op); free(op);
+            return JS_EXCEPTION;
+        }
     }
 
     /* Create async ctx + Promise + continuation */

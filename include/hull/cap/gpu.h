@@ -403,6 +403,23 @@ void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name);
  * returns. */
 size_t hl_gpu_tex_bytes(uint32_t width, uint32_t height, HlGpuTexFormat fmt);
 
+/* Device bytes a dispatch / pipeline creates for the call itself (inline
+ * storage buffers, uniform buffers, a dispatch's inline textures; a
+ * pipeline's named buffer once, at its largest declared size). A name that
+ * is a persistent buffer / texture of @p dev adds nothing; @p dev NULL
+ * counts every one. hl_cap_gpu_dispatch / _pipeline reserve this on the
+ * device's live total for the call and refuse it past HL_GPU_MAX_LIVE_BYTES
+ * ("device_memory_limit") before the backend runs (audit 17). */
+size_t hl_gpu_dispatch_transient_bytes(const HlGpuDevice *dev,
+                                       const HlGpuDispatchOpts *opts);
+size_t hl_gpu_pipeline_transient_bytes(const HlGpuDevice *dev,
+                                       const HlGpuPipelineOpts *opts);
+/* What a binding charges (1 unit per 64 bytes) before a dispatch / pipeline:
+ * the dev-NULL count, at most HL_GPU_MAX_LIVE_BYTES (more is refused before
+ * any work). */
+size_t hl_gpu_dispatch_charge_bytes(const HlGpuDispatchOpts *opts);
+size_t hl_gpu_pipeline_charge_bytes(const HlGpuPipelineOpts *opts);
+
 /* Composable-feature hook: the base returns NO backend (weak default in
  * cap/gpu_feature.c); a `hull build --with=gpu` build links a STRONG override
  * returning the wgpu backend. Mirrors hl_db_feature_backends. */
