@@ -27,6 +27,8 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"                  /* hl_js_budget_charge */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "../../utils/base64.h"
 #include "../../utils/hex.h"
 
@@ -95,12 +97,31 @@ static int get_bytes(JSContext *ctx, JSValueConst v,
     return 0;
 }
 
+/* Every codec buffer here is malloc'd off the JS heap, and the loops run
+ * inside one call: only the final JS_NewStringLen used to count (audit 17).
+ * So each call first refuses an output larger than the heap limit (it
+ * could never become a string) and charges the bytes it will read and
+ * write, one unit per 8, before anything is allocated. 0, or -1 with an
+ * exception pending (a RangeError, or the uncatchable interrupt). */
+static int enc_guard(JSContext *ctx, size_t in_len, size_t out_len)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->max_heap_bytes && out_len > js->max_heap_bytes) {
+        JS_ThrowRangeError(ctx, "encoding: value larger than the heap limit");
+        return -1;
+    }
+    uint64_t units = hl_work_bytes_units((uint64_t)in_len) +
+                     hl_work_bytes_units((uint64_t)out_len);
+    return hl_js_budget_charge(ctx, units) ? -1 : 0;
+}
+
 /* A byte string from raw bytes: each byte >= 0x80 is written as its two-byte
  * UTF-8 form, which JS_NewStringLen reads back as that one character. */
 static JSValue new_byte_string(JSContext *ctx, const uint8_t *b, size_t n)
 {
     if (n > (SIZE_MAX - 1) / 2)
         return JS_ThrowRangeError(ctx, "encoding: value too large");
+    if (enc_guard(ctx, n, n * 2)) return JS_EXCEPTION;
     char *u = malloc(n * 2 + 1);
     if (!u) return JS_ThrowOutOfMemory(ctx);
     size_t o = 0;
@@ -127,6 +148,7 @@ static JSValue js_hex_encode(JSContext *ctx, JSValueConst this_val,
     if (got < 0) return JS_ThrowOutOfMemory(ctx);
     if (got == 0) return JS_UNDEFINED;
     if (n > (SIZE_MAX - 1) / 2) { free(owned); return JS_ThrowRangeError(ctx, "encoding: value too large"); }
+    if (enc_guard(ctx, n, n * 2)) { free(owned); return JS_EXCEPTION; }
     char *out = malloc(n * 2 + 1);
     if (!out) { free(owned); return JS_ThrowOutOfMemory(ctx); }
     int rc = hl_hex_encode(in, n, out, n * 2 + 1);
@@ -144,6 +166,7 @@ static JSValue js_hex_decode(JSContext *ctx, JSValueConst this_val,
     size_t n;
     const char *text = JS_ToCStringLen(ctx, &n, argv[0]);
     if (!text) return JS_EXCEPTION;
+    if (enc_guard(ctx, n, n / 2)) { JS_FreeCString(ctx, text); return JS_EXCEPTION; }
     uint8_t *out = malloc(n / 2 + 1);
     if (!out) { JS_FreeCString(ctx, text); return JS_ThrowOutOfMemory(ctx); }
     int got = hl_hex_decode(text, n, out, n / 2 + 1);
@@ -167,6 +190,7 @@ static JSValue js_base64_encode(JSContext *ctx, JSValueConst this_val,
     if (got == 0) return JS_UNDEFINED;
     size_t len = hl_base64_encoded_len(n, flags);
     if (len == 0 && n != 0) { free(owned); return JS_ThrowRangeError(ctx, "encoding: value too large"); }
+    if (enc_guard(ctx, n, len)) { free(owned); return JS_EXCEPTION; }
     char *out = malloc(len + 1);
     if (!out) { free(owned); return JS_ThrowOutOfMemory(ctx); }
     int rc = hl_base64_encode(in, n, out, len + 1, flags);
@@ -188,6 +212,7 @@ static JSValue js_base64_decode(JSContext *ctx, JSValueConst this_val,
     const char *text = JS_ToCStringLen(ctx, &n, argv[0]);
     if (!text) return JS_EXCEPTION;
     size_t cap = n / 4 * 3 + 3, got = 0;
+    if (enc_guard(ctx, n, cap)) { JS_FreeCString(ctx, text); return JS_EXCEPTION; }
     uint8_t *out = malloc(cap);
     if (!out) { JS_FreeCString(ctx, text); return JS_ThrowOutOfMemory(ctx); }
     int rc = hl_base64_decode(text, n, out, cap, &got, flags);

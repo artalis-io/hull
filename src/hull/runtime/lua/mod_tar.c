@@ -89,6 +89,11 @@ static int l_tar_parse(lua_State *L)
         lua_pushstring(L, "tar.parse: arg 1 must be a buffer (string/mmap/wasm)");
         return 2;
     }
+    /* The whole input is charged before the walk, while the collector still
+     * runs (audit 17): headers of a typeflag the parser skips are
+     * checksummed but never surfaced, so no per-entry charge saw them, and a
+     * MappedBuffer of up to 1 GiB is off-heap. */
+    lua_hlwork(L, (size_t)hl_work_bulk_units((uint64_t)j.view.len), 0);
     int gc_was_running = lua_gc(L, LUA_GCISRUNNING);
     lua_gc(L, LUA_GCSTOP);
     lua_pushcfunction(L, l_tar_parse_k);
@@ -299,6 +304,8 @@ static int l_tar_extract(lua_State *L)
     }
     const char *dir = luaL_optstring(L, 2, "");
 
+    /* The walk is charged up front, as tar.parse's (audit 17). */
+    lua_hlwork(L, (size_t)hl_work_bulk_units((uint64_t)view.len), 0);
     struct extract_ctx c = { L, lua->base.fs_cfg, dir, NULL };
     int rc = hl_tar_parse((const unsigned char *)view.data, view.len,
                           extract_write, &c);

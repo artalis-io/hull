@@ -10757,6 +10757,40 @@ UTEST(lua_audit16, tar_extract_is_charged_per_entry)
     a15_fs_close(&f);
 }
 
+/* Headers of a typeflag the parser skips (here '1', a hard link) were
+ * checksummed and never surfaced, so the per-entry charges missed them: a
+ * 10 MB archive of them cost nothing. The input is charged up front now,
+ * one unit per 64 bytes (audit 17). */
+UTEST(lua_audit17, tar_skipped_headers_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run("tar = require('hull.archive.tar') "
+                          "local h = tar.create({ { name = 'l', data = '' } }):sub(1, 512) "
+                          "local sum = tonumber(h:sub(149, 156):match('[0-7]+'), 8) + 1 "
+                          "h = h:sub(1, 148) .. string.format('%06o', sum) .. '\\0 1' "
+                          "    .. h:sub(158) "
+                          "assert(#h == 512) "
+                          "LB = string.rep(h, 20000) "
+                          "assert(#tar.parse(LB) == 0) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 10 MB walked: 160000 units. */
+    EXPECT_NE(audit10_run("tar.parse(LB) return 1", 100000, err, sizeof err),
+              LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run("tar.extract(LB, 'out') return 1", 100000,
+                          err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("assert(tar.extract(LB, 'out') == true) LB = nil "
+                          "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err),
+              LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* ── Audit 14: SSE and WebSocket writes are charged ────────────────────
  *

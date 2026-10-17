@@ -65,7 +65,8 @@ static int ci_starts_with(const uint8_t *buf, size_t buf_len,
 
 /* Skip ASCII whitespace (space, tab, CR, LF, FF). Returns the offset
  * of the first non-whitespace byte, or `len` if all bytes are
- * whitespace. */
+ * whitespace. Callers pass at most the sniff window (audit 17: the skip
+ * ran over the whole buffer, three times, uncharged over a MappedBuffer). */
 static size_t skip_whitespace(const uint8_t *buf, size_t len)
 {
     size_t i = 0;
@@ -97,13 +98,16 @@ static int contains_ci(const uint8_t *buf, size_t len, const char *needle,
 }
 
 /* Offset past a UTF-8 BOM and leading whitespace. A BOM used to stop both
- * detectors at byte 0, so "\xEF\xBB\xBF<html><script>..." sniffed as text. */
+ * detectors at byte 0, so "\xEF\xBB\xBF<html><script>..." sniffed as text.
+ * Looks no further than the sniff window: HL_MIME_SNIFF_WINDOW with len
+ * past it means the window held nothing but whitespace. */
 static size_t skip_bom_ws(const uint8_t *buf, size_t len)
 {
+    size_t cap = len < HL_MIME_SNIFF_WINDOW ? len : HL_MIME_SNIFF_WINDOW;
     size_t off = 0;
-    if (len >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF)
+    if (cap >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF)
         off = 3;
-    return off + skip_whitespace(buf + off, len - off);
+    return off + skip_whitespace(buf + off, cap - off);
 }
 
 /* A WHATWG "HTML signature": the tag, case-insensitive, then a
@@ -124,10 +128,8 @@ static int ci_tag(const uint8_t *p, size_t plen, const char *tag)
  * leading comment within the first 4 KiB. Case-insensitive. "<!DOCTYPE svg
  * ...><svg onload=...>" and a comment-led SVG sniffed as text, so an
  * allowlist that permits text but bans svg accepted them. */
-static int looks_like_svg(const uint8_t *buf, size_t len)
+static int looks_like_svg(const uint8_t *buf, size_t len, size_t off)
 {
-    if (!len) return 0;
-    size_t off = skip_bom_ws(buf, len);
     if (off >= len) return 0;
 
     if (ci_starts_with(buf + off, len - off, "<svg"))
@@ -135,7 +137,9 @@ static int looks_like_svg(const uint8_t *buf, size_t len)
     if (ci_starts_with(buf + off, len - off, "<?xml") ||
         ci_starts_with(buf + off, len - off, "<!doctype svg") ||
         ci_starts_with(buf + off, len - off, "<!--"))
-        return contains_ci(buf, len, "<svg", HL_MIME_SNIFF_WINDOW);
+        /* From the markup's start, not buf[0] (audit 17): leading
+         * whitespace used to eat into the window. */
+        return contains_ci(buf + off, len - off, "<svg", HL_MIME_SNIFF_WINDOW);
     return 0;
 }
 
@@ -143,10 +147,8 @@ static int looks_like_svg(const uint8_t *buf, size_t len)
  * load active content (img/object/embed/form/meta/link/base/frame...),
  * after a BOM and whitespace. "<iframe srcdoc=...>" and "<img src=x
  * onerror=...>" sniffed as text. */
-static int looks_like_html(const uint8_t *buf, size_t len)
+static int looks_like_html(const uint8_t *buf, size_t len, size_t off)
 {
-    if (!len) return 0;
-    size_t off = skip_bom_ws(buf, len);
     if (off >= len) return 0;
     const uint8_t *p = buf + off;
     size_t plen = len - off;
@@ -265,8 +267,14 @@ const char *hl_cap_mime_sniff(const uint8_t *buf, size_t len)
     /* 2. Text-shape heuristics. SVG before HTML - some SVGs lack the
      *    XML declaration and start directly with "<svg", which we must
      *    not classify as HTML by accident. */
-    if (looks_like_svg(buf, len))  return "image/svg+xml";
-    if (looks_like_html(buf, len)) return "text/html";
+    size_t off = skip_bom_ws(buf, len);
+    /* A window of nothing but whitespace with more bytes behind it: any
+     * markup is out of sight, so the buffer is unknown, not text (audit 17:
+     * the skip was unbounded before; bounded, "<svg" after 5 KiB of spaces
+     * would otherwise sniff as text/plain). */
+    if (off >= HL_MIME_SNIFF_WINDOW && len > off) return NULL;
+    if (looks_like_svg(buf, len, off))  return "image/svg+xml";
+    if (looks_like_html(buf, len, off)) return "text/html";
 
     /* 2b. Markup that neither detector placed. An XML declaration or a
      *     "<!" construct (doctype, CDATA) leads XHTML and SVG as well, and
@@ -276,10 +284,10 @@ const char *hl_cap_mime_sniff(const uint8_t *buf, size_t len)
      *     accepted. Such a buffer is never plain text: XHTML whose root is
      *     in the window is html, anything else is XML. */
     {
-        size_t off = skip_bom_ws(buf, len);
         if (off + 1 < len && buf[off] == '<' &&
             (buf[off + 1] == '?' || buf[off + 1] == '!')) {
-            if (contains_ci(buf, len, "<html", HL_MIME_SNIFF_WINDOW))
+            if (contains_ci(buf + off, len - off, "<html",
+                            HL_MIME_SNIFF_WINDOW))
                 return "text/html";
             return "application/xml";
         }

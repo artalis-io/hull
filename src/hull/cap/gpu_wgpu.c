@@ -899,6 +899,13 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
 
         WGPUBuffer out_buf = entries[out_idx + binding_offset].buffer;
         size_t out_size = (size_t)entries[out_idx + binding_offset].size;
+        /* The copy is malloc'd off the VM heap before the binding converts
+         * it: one the heap could never hold is refused first (audit 17). */
+        if (opts->max_output && out_size > opts->max_output) {
+            if (err_msg) *err_msg = "output_too_large";
+            rc = HL_GPU_ERR_READBACK;
+            goto cleanup;
+        }
 
         rc = readback_buffer(dctx, out_buf, out_size, output, output_len);
         if (rc != HL_GPU_OK && err_msg)
@@ -910,6 +917,12 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             (ti < opts->texture_count && ti < 64) ? desc_tex[ti] : NULL;
         if (!tex) {
             if (err_msg) *err_msg = "output_texture_not_found";
+            goto cleanup;
+        }
+        if (opts->max_output &&
+            hl_gpu_tex_bytes(tex->width, tex->height, tex->format) > opts->max_output) {
+            if (err_msg) *err_msg = "output_too_large";
+            rc = HL_GPU_ERR_READBACK;
             goto cleanup;
         }
         /* readback reads the texture, never mutates it; the backend vtable
@@ -1475,6 +1488,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
             out_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
 
         result->count = out_count;
+        size_t read_total = 0;
         /* When out_count==1 and outs aliases &default_out, the loop
          * only reads outs[0]; cppcheck can't see that invariant. */
         for (int i = 0; i < out_count; i++) {
@@ -1492,6 +1506,16 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 if (err_msg) *err_msg = "output_buffer_not_found";
                 goto cleanup;
             }
+            /* Every readback together stays under the VM heap limit, checked
+             * before each copy is malloc'd off the heap (audit 17). */
+            if (opts->max_output &&
+                (out_size > opts->max_output ||
+                 read_total > opts->max_output - out_size)) {
+                if (err_msg) *err_msg = "output_too_large";
+                rc = HL_GPU_ERR_READBACK;
+                goto cleanup;
+            }
+            read_total += out_size;
 
             rc = readback_buffer(dctx, out_buf, out_size,
                                   &result->data[i], &result->len[i]);

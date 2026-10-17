@@ -266,7 +266,7 @@ UTEST(hull_cap_gpu, persistent_buffer_roundtrip)
     /* Read it back */
     void *read_data = NULL;
     size_t read_len = 0;
-    rc = hl_cap_gpu_buffer_read(&ctx, -1, "test_buf", &read_data, &read_len);
+    rc = hl_cap_gpu_buffer_read(&ctx, -1, "test_buf", 0, &read_data, &read_len);
     ASSERT_EQ(HL_GPU_OK, rc);
     ASSERT_TRUE(read_data != NULL);
     ASSERT_EQ(sizeof(data), read_len);
@@ -283,7 +283,7 @@ UTEST(hull_cap_gpu, persistent_buffer_roundtrip)
     hl_cap_gpu_buffer_destroy(&ctx, -1, "test_buf");
 
     /* Reading destroyed buffer should fail */
-    rc = hl_cap_gpu_buffer_read(&ctx, -1, "test_buf",
+    rc = hl_cap_gpu_buffer_read(&ctx, -1, "test_buf", 0,
                                  &read_data, &read_len);
     ASSERT_EQ(HL_GPU_ERR_NOT_FOUND, rc);
 
@@ -393,7 +393,7 @@ UTEST(hull_cap_gpu, texture_create_destroy)
     size_t len = 0;
     uint32_t w, h;
     HlGpuTexFormat fmt;
-    rc = hl_cap_gpu_texture_read(&ctx, -1, "test_tex",
+    rc = hl_cap_gpu_texture_read(&ctx, -1, "test_tex", 0,
                                   &data, &len, &w, &h, &fmt);
     ASSERT_EQ(HL_GPU_ERR_NOT_FOUND, rc);
 
@@ -428,7 +428,7 @@ UTEST(hull_cap_gpu, texture_write_read_roundtrip)
     size_t len = 0;
     uint32_t w = 0, h = 0;
     HlGpuTexFormat fmt;
-    rc = hl_cap_gpu_texture_read(&ctx, -1, "rt_tex",
+    rc = hl_cap_gpu_texture_read(&ctx, -1, "rt_tex", 0,
                                   &data, &len, &w, &h, &fmt);
     ASSERT_EQ(HL_GPU_OK, rc);
     ASSERT_TRUE(data != NULL);
@@ -526,6 +526,197 @@ UTEST(hull_cap_gpu, tex_binding_bounds_checked)
     ASSERT_EQ(-1, hl_gpu_tex_binding_check(1, 1, 6, 5, &err));
     /* NULL err is allowed */
     ASSERT_EQ(-1, hl_gpu_tex_binding_check(1, 0, 0, 2, NULL));
+}
+
+/* ── Live-bytes reservation and read-back caps (audit 17) ─────────────
+ *
+ * Persistent buffers and textures were bounded only by their slot counts,
+ * and a read-back was copied off the VM heap whatever its size. The
+ * accounting is in the dispatch layer, so a mock backend (no device, no
+ * allocation) exercises it on every CI runner. */
+
+#include <pthread.h>
+
+static int mock_buf_creates, mock_tex_creates, mock_reads, mock_fail_create;
+
+static int mock_buffer_create(HlGpuDevice *dev, const char *name, size_t size,
+                              int usage, HlGpuBuffer *out)
+{
+    (void)dev; (void)name; (void)size; (void)usage;
+    mock_buf_creates++;
+    if (mock_fail_create) return HL_GPU_ERR_BUFFER;
+    out->handle = (void *)1;
+    return HL_GPU_OK;
+}
+
+static void mock_buffer_destroy(HlGpuDevice *dev, HlGpuBuffer *buf)
+{
+    (void)dev;
+    buf->handle = NULL;
+}
+
+static int mock_buffer_read(HlGpuDevice *dev, HlGpuBuffer *buf,
+                            void **data, size_t *len)
+{
+    (void)dev;
+    mock_reads++;
+    *data = calloc(1, buf->size);
+    *len = buf->size;
+    return *data ? HL_GPU_OK : HL_GPU_ERR_INTERNAL;
+}
+
+static int mock_texture_create(HlGpuDevice *dev, uint32_t w, uint32_t h,
+                               HlGpuTexFormat fmt, int storage, int filter,
+                               int au, int av, HlGpuTexture *out)
+{
+    (void)dev; (void)filter; (void)au; (void)av;
+    mock_tex_creates++;
+    if (mock_fail_create) return HL_GPU_ERR_BUFFER;
+    out->handle = (void *)1;
+    out->width = w;
+    out->height = h;
+    out->format = fmt;
+    out->storage = storage;
+    return HL_GPU_OK;
+}
+
+static int mock_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
+                             void **data, size_t *len)
+{
+    (void)dev;
+    mock_reads++;
+    size_t n = hl_gpu_tex_bytes(tex->width, tex->height, tex->format);
+    *data = calloc(1, n);
+    *len = n;
+    return *data ? HL_GPU_OK : HL_GPU_ERR_INTERNAL;
+}
+
+static void mock_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex)
+{
+    (void)dev;
+    tex->handle = NULL;
+}
+
+static const HlGpuBackend MOCK_BACKEND = {
+    .name            = "mock",
+    .buffer_create   = mock_buffer_create,
+    .buffer_read     = mock_buffer_read,
+    .buffer_destroy  = mock_buffer_destroy,
+    .texture_create  = mock_texture_create,
+    .texture_read    = mock_texture_read,
+    .texture_destroy = mock_texture_destroy,
+};
+
+static HlGpuCtx *mock_ctx(void)
+{
+    HlGpuCtx *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return NULL;
+    ctx->backend = &MOCK_BACKEND;
+    ctx->device_count = 1;
+    pthread_mutex_init(&ctx->devices[0].mutex, NULL);
+    mock_buf_creates = mock_tex_creates = mock_reads = mock_fail_create = 0;
+    return ctx;
+}
+
+static void mock_free(HlGpuCtx *ctx)
+{
+    pthread_mutex_destroy(&ctx->devices[0].mutex);
+    free(ctx);
+}
+
+UTEST(hull_cap_gpu_live, buffers_are_capped_by_bytes)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    size_t half = HL_GPU_MAX_LIVE_BYTES / 2;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "a", half, HL_GPU_USAGE_READWRITE));
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", half, HL_GPU_USAGE_READWRITE));
+    EXPECT_EQ(HL_GPU_MAX_LIVE_BYTES, ctx->devices[0].live_bytes);
+    /* Over the ceiling: refused before the backend runs. */
+    EXPECT_EQ(HL_GPU_ERR_BUFFER, hl_cap_gpu_buffer_create(ctx, -1, "c", 4, HL_GPU_USAGE_READWRITE));
+    EXPECT_EQ(2, mock_buf_creates);
+    /* Destroying one gives its bytes back. */
+    hl_cap_gpu_buffer_destroy(ctx, -1, "a");
+    EXPECT_EQ(half, ctx->devices[0].live_bytes);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "c", 4, HL_GPU_USAGE_READWRITE));
+    /* A create the backend fails reserves nothing. */
+    mock_fail_create = 1;
+    EXPECT_NE(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "d", 64, HL_GPU_USAGE_READWRITE));
+    EXPECT_EQ(half + 4, ctx->devices[0].live_bytes);
+    /* One larger than the ceiling on its own. */
+    mock_fail_create = 0;
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    hl_cap_gpu_buffer_destroy(ctx, -1, "c");
+    EXPECT_EQ((size_t)0, ctx->devices[0].live_bytes);
+    EXPECT_EQ(HL_GPU_ERR_BUFFER,
+              hl_cap_gpu_buffer_create(ctx, -1, "e", HL_GPU_MAX_LIVE_BYTES + 1,
+                                       HL_GPU_USAGE_READWRITE));
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_live, textures_reserve_their_bytes)
+{
+    EXPECT_EQ((size_t)16, hl_gpu_tex_bytes(2, 2, HL_GPU_TEX_RGBA8));
+    EXPECT_EQ((size_t)4, hl_gpu_tex_bytes(2, 2, HL_GPU_TEX_R8));
+    EXPECT_EQ((size_t)32, hl_gpu_tex_bytes(2, 2, HL_GPU_TEX_RGBA16F));
+    EXPECT_EQ((size_t)16, hl_gpu_tex_bytes(2, 2, HL_GPU_TEX_R32F));
+
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    /* 16384^2 x 8 = 2 GiB: refused, no backend create (it allocated the
+     * whole texture with no upload). */
+    EXPECT_EQ(HL_GPU_ERR_BUFFER,
+              hl_cap_gpu_texture_create(ctx, -1, "big", 16384, 16384,
+                                        HL_GPU_TEX_RGBA16F, 0, 0, 0, 0));
+    EXPECT_EQ(0, mock_tex_creates);
+    /* 16384 x 8192 x 4 = 512 MiB fits, twice; a third does not. */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_texture_create(ctx, -1, "t1", 16384, 8192,
+                                                   HL_GPU_TEX_RGBA8, 0, 0, 0, 0));
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_texture_create(ctx, -1, "t2", 16384, 8192,
+                                                   HL_GPU_TEX_RGBA8, 0, 0, 0, 0));
+    EXPECT_EQ(HL_GPU_ERR_BUFFER,
+              hl_cap_gpu_texture_create(ctx, -1, "t3", 1, 1,
+                                        HL_GPU_TEX_RGBA8, 0, 0, 0, 0));
+    EXPECT_EQ(2, mock_tex_creates);
+    hl_cap_gpu_texture_destroy(ctx, -1, "t1");
+    hl_cap_gpu_texture_destroy(ctx, -1, "t2");
+    EXPECT_EQ((size_t)0, ctx->devices[0].live_bytes);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_live, readback_refused_past_max_len)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    void *data = NULL;
+    size_t len = 0;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 64, HL_GPU_USAGE_READWRITE));
+    /* Larger than the caller's heap limit: no backend copy is made. */
+    EXPECT_EQ(HL_GPU_ERR_BUFFER, hl_cap_gpu_buffer_read(ctx, -1, "b", 32, &data, &len));
+    EXPECT_EQ(0, mock_reads);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_read(ctx, -1, "b", 64, &data, &len));
+    EXPECT_EQ((size_t)64, len);
+    free(data);
+    data = NULL;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_read(ctx, -1, "b", 0, &data, &len));
+    free(data);
+    data = NULL;
+
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_texture_create(ctx, -1, "t", 4, 4,
+                                                   HL_GPU_TEX_RGBA8, 0, 0, 0, 0));
+    uint32_t w = 0, h = 0;
+    HlGpuTexFormat fmt;
+    mock_reads = 0;
+    EXPECT_EQ(HL_GPU_ERR_BUFFER,
+              hl_cap_gpu_texture_read(ctx, -1, "t", 63, &data, &len, &w, &h, &fmt));
+    EXPECT_EQ(0, mock_reads);
+    EXPECT_EQ(HL_GPU_OK,
+              hl_cap_gpu_texture_read(ctx, -1, "t", 64, &data, &len, &w, &h, &fmt));
+    EXPECT_EQ((size_t)64, len);
+    free(data);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    hl_cap_gpu_texture_destroy(ctx, -1, "t");
+    mock_free(ctx);
 }
 
 UTEST_MAIN();

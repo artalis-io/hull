@@ -41,14 +41,41 @@ static int js_parse_collect(const HlTarEntry *e, void *vctx)
      * bytes it could close or unmap. */
     JSValue o = JS_NewObject(ctx);
     if (JS_IsException(o)) { c->oom = 1; return -1; }
-    JS_DefinePropertyValueStr(ctx, o, "name", JS_NewString(ctx, e->name), JS_PROP_C_W_E);
-    JS_DefinePropertyValueStr(ctx, o, "data",
-                      JS_NewArrayBufferCopy(ctx, e->data ? e->data : (const uint8_t *)"",
-                                            e->size), JS_PROP_C_W_E);
-    JS_DefinePropertyValueStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)e->size), JS_PROP_C_W_E);
-    JS_DefinePropertyValueStr(ctx, o, "mode", JS_NewInt32(ctx, (int32_t)e->mode), JS_PROP_C_W_E);
-    JS_DefinePropertyValueStr(ctx, o, "isDir", JS_NewBool(ctx, e->is_dir), JS_PROP_C_W_E);
-    JS_DefinePropertyValueUint32(ctx, c->arr, c->n++, o, JS_PROP_C_W_E);
+    /* Every value is checked (audit 17): an out-of-memory name or data copy
+     * was defined as the exception value, with the error left pending, and
+     * the parse went on as if it had worked. A define consumes its value,
+     * failed or not. */
+    JSValue name = JS_NewString(ctx, e->name);
+    JSValue data = JS_IsException(name) ? JS_EXCEPTION
+                 : JS_NewArrayBufferCopy(ctx, e->data ? e->data : (const uint8_t *)"",
+                                         e->size);
+    if (JS_IsException(name) || JS_IsException(data)) {
+        JS_FreeValue(ctx, name);
+        JS_FreeValue(ctx, o);
+        c->oom = 1;
+        return -1;
+    }
+    if (JS_DefinePropertyValueStr(ctx, o, "name", name, JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, data);
+        JS_FreeValue(ctx, o);
+        c->oom = 1;
+        return -1;
+    }
+    if (JS_DefinePropertyValueStr(ctx, o, "data", data, JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, o, "size",
+                                  JS_NewInt64(ctx, (int64_t)e->size), JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, o, "mode",
+                                  JS_NewInt32(ctx, (int32_t)e->mode), JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, o, "isDir",
+                                  JS_NewBool(ctx, e->is_dir), JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, o);
+        c->oom = 1;
+        return -1;
+    }
+    if (JS_DefinePropertyValueUint32(ctx, c->arr, c->n++, o, JS_PROP_C_W_E) < 0) {
+        c->oom = 1;
+        return -1;
+    }
     return 0;
 }
 
@@ -62,7 +89,19 @@ static JSValue js_tar_parse(JSContext *ctx, JSValueConst this_val,
     if (argc < 1 || !js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
         return JS_ThrowTypeError(ctx, "tar.parse: arg 1 must be a buffer");
 
+    /* The whole input is charged before the walk (audit 17): headers of a
+     * typeflag the parser skips are checksummed but never surfaced, so the
+     * per-entry charges missed them, and a MappedBuffer of up to 1 GiB is
+     * off-heap. */
+    if (hl_js_budget_charge(ctx, hl_work_bulk_units((uint64_t)view.len))) {
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
     JSValue arr = JS_NewArray(ctx);
+    if (JS_IsException(arr)) {
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
     struct js_parse_ctx c = { ctx, arr, 0, 0 };
     int rc = hl_tar_parse((const unsigned char *)view.data, view.len,
                           js_parse_collect, &c);
@@ -269,6 +308,12 @@ static JSValue js_tar_extract(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "tar.extract: arg 1 must be a buffer");
     }
 
+    /* The walk is charged up front, as tar.parse's (audit 17). */
+    if (hl_js_budget_charge(ctx, hl_work_bulk_units((uint64_t)view.len))) {
+        if (dir) JS_FreeCString(ctx, dir);
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
     struct js_extract_ctx c = { ctx, js->base.fs_cfg, dir ? dir : "", NULL, 0 };
     int rc = hl_tar_parse((const unsigned char *)view.data, view.len,
                           js_extract_write, &c);

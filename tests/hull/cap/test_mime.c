@@ -469,3 +469,45 @@ UTEST(hl_cap_mime, xml_led_markup_is_never_plain_text)
     /* A "<" that leads neither is still plain text. */
     ASSERT_STREQ(sniff_str("<3 you"), "text/plain");
 }
+
+/* Audit 17: the "<svg" / "<html" searches ran from buf[0], so leading
+ * whitespace before an XML prolog pushed the root past the window (an SVG
+ * then sniffed as application/xml, not image/svg+xml); and the whitespace
+ * skip itself was unbounded. */
+UTEST(hl_cap_mime, svg_search_starts_after_leading_whitespace)
+{
+    static char doc[8000];
+    size_t n = 0;
+    while (n < 3000) doc[n++] = ' ';
+    const char *head = "<?xml version=\"1.0\"?><!--";
+    memcpy(doc + n, head, strlen(head));
+    n += strlen(head);
+    while (n < 4500) doc[n++] = 'a';
+    const char *tail = "--><svg onload=\"alert(1)\"/>";
+    memcpy(doc + n, tail, strlen(tail));
+    n += strlen(tail);
+    doc[n] = '\0';
+    ASSERT_STREQ(sniff_str(doc), "image/svg+xml");
+
+    /* Same shape with an XHTML root. */
+    const char *xhtml = "--><html><script>x</script></html>";
+    memcpy(doc + 4500, xhtml, strlen(xhtml));
+    doc[4500 + strlen(xhtml)] = '\0';
+    ASSERT_STREQ(sniff_str(doc), "text/html");
+}
+
+UTEST(hl_cap_mime, whitespace_filling_the_window_is_not_text)
+{
+    static char doc[6000];
+    size_t n = 0;
+    while (n < 5000) doc[n++] = '\n';
+    const char *tail = "<svg onload=\"alert(1)\"/>";
+    memcpy(doc + n, tail, strlen(tail));
+    n += strlen(tail);
+    doc[n] = '\0';
+    /* The markup is out of the window: unknown, never text/plain. */
+    ASSERT_TRUE(sniff_str(doc) == NULL);
+
+    /* Short all-whitespace buffers are still text. */
+    ASSERT_STREQ(sniff_str("   \n\t "), "text/plain");
+}

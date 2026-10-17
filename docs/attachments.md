@@ -155,6 +155,13 @@ configured. Callers that need bullet-proof sniffing on those inputs
 should buffer the first 512 bytes themselves before constructing a
 Part-like object for `store`.
 
+The shape checks (SVG, HTML, XML) look at a 4 KiB window that starts
+after any BOM and leading whitespace. A buffer whose first 4 KiB are
+nothing but whitespace, with more bytes behind it, is unknown (so
+`application/octet-stream`), never `text/plain`: whatever markup it
+holds is out of sight (audit 17). An XML prolog or `<!` construct whose
+root is not found in the window sniffs as `application/xml`.
+
 ## Refcount semantics
 
 `store` always returns a **fresh** attachment id with `refcount=1`.

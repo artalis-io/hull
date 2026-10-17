@@ -20,6 +20,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
                                     HlGpuTextureDesc *out, int max, int anchor);
 
 #include "hull/utils/alloc.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bulk_units */
 #include "internal.h"   /* hl_lua_anchor, hl_lua_check_can_wait */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
@@ -164,6 +165,14 @@ static HlGpuCtx *lua_get_gpu_ctx(lua_State *L)
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return lua ? lua->base.gpu_ctx : NULL;
+}
+
+/* The VM heap limit (0 = none): a read-back is refused past it before the
+ * backend copies it off the heap (audit 17). */
+static size_t gpu_heap_limit(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    return lua ? lua->mem_limit : 0;
 }
 
 static int l_gpu_available(lua_State *L)
@@ -316,6 +325,7 @@ static int l_gpu_dispatch(lua_State *L)
     HlGpuDispatchOpts opts;
     memset(&opts, 0, sizeof(opts));
     opts.device = -1;
+    opts.max_output = gpu_heap_limit(L);   /* audit 17 */
 
     /* Parse device */
     lua_getfield(L, 2, "device");
@@ -523,6 +533,12 @@ static int l_gpu_buffer(lua_State *L)
     const void *data = bv.data;
     size_t data_len = bv.len;
 
+    /* The upload (and a create, sized by it) is charged before it runs, one
+     * unit per 64 bytes (audit 17): a MappedBuffer source is off-heap, and
+     * the device memory it fills is outside the heap limit. lua_hlwork
+     * raises at once when the run is over; it runs no app code. */
+    lua_hlwork(L, (size_t)hl_work_bulk_units((uint64_t)data_len), 0);
+
     /* Try to write to existing buffer first */
     int rc = hl_cap_gpu_buffer_write(ctx, device, name, data, data_len, offset);
     if (rc == HL_GPU_ERR_NOT_FOUND) {
@@ -557,7 +573,10 @@ static int l_gpu_buffer_read(lua_State *L)
 
     void *data = NULL;
     size_t len = 0;
-    int rc = hl_cap_gpu_buffer_read(ctx, device, name, &data, &len);
+    /* Refused before the backend copies it, when the heap could never hold
+     * it (audit 17). */
+    int rc = hl_cap_gpu_buffer_read(ctx, device, name, gpu_heap_limit(L),
+                                    &data, &len);
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
         lua_pushstring(L, "buffer_read_error");
@@ -727,6 +746,13 @@ static int l_gpu_texture(lua_State *L)
     if (width == 0 || height == 0)
         return luaL_error(L, "gpu.texture: width and height required");
 
+    /* The texture's device memory and the upload are charged before they
+     * are made, one unit per 64 bytes: a create with no data allocated up
+     * to 16384^2 x 8 bytes for nothing (audit 17). Runs no app code. */
+    lua_hlwork(L, (size_t)(hl_work_bulk_units(
+                       (uint64_t)hl_gpu_tex_bytes(width, height, format)) +
+                   hl_work_bulk_units((uint64_t)pixel_len)), 0);
+
     /* Create texture (idempotent) */
     int rc = hl_cap_gpu_texture_create(ctx, device, name, width, height,
                                         format, storage, filter,
@@ -770,7 +796,8 @@ static int l_gpu_texture_read(lua_State *L)
     uint32_t w = 0, h = 0;
     HlGpuTexFormat fmt = HL_GPU_TEX_RGBA8;
 
-    int rc = hl_cap_gpu_texture_read(ctx, device, name, &data, &len, &w, &h, &fmt);
+    int rc = hl_cap_gpu_texture_read(ctx, device, name, gpu_heap_limit(L),
+                                     &data, &len, &w, &h, &fmt);
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
         lua_pushstring(L, "texture_read_failed");
@@ -953,6 +980,7 @@ static int l_gpu_async_dispatch(lua_State *L)
     HlGpuDispatchOpts opts;
     memset(&opts, 0, sizeof(opts));
     opts.device = -1;
+    opts.max_output = lua->mem_limit;   /* audit 17 */
 
     lua_getfield(L, 2, "device");
     if (!lua_isnil(L, -1)) opts.device = (int)lua_tointeger(L, -1);
@@ -1342,6 +1370,7 @@ static int l_gpu_pipeline(lua_State *L)
         .output_count = output_count,
         .device = device,
         .timeout_ms = pipe_timeout_ms,
+        .max_output = gpu_heap_limit(L),   /* audit 17 */
     };
 
     HlGpuPipelineResult result;
@@ -1504,6 +1533,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     op->stage_count = stage_count;
     op->pipe_opts.device = device;
     op->pipe_opts.timeout_ms = pipe_timeout_ms;
+    op->pipe_opts.max_output = lua->mem_limit;   /* audit 17 */
     op->pipe_opts.output_count = output_count;
 
     /* Deep-copy output specs */
