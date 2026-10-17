@@ -432,64 +432,10 @@ echo "== v1.1 concurrency: Lua =="; check_conc "lua" "lua" "$LUA_CONC"
 echo "== v1.1 concurrency: JS =="; check_conc "js" "js" "$JS_CONC"
 
 # ── v1.1: durable cron (jobs.cron) ──────────────────────────────────────────
-# cron_next math on a fixed epoch; a due schedule fires exactly one job; a
-# second tick at the same time does NOT double-fire (CAS + missed-tick skip);
-# uncron removes it. Uses the _tick/_cronNext test seams for determinism.
-check_cron() {
-    label="$1"; ext="$2"; app="$3"
-    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
-    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
-    case "$out" in
-        *"CRON math=1 fired=1 nodup=1 uncron=1"*)
-            pass "$label: cron (math / fire / no-double-fire / uncron)" ;;
-        *) fail "$label: v1.1 cron" "$out" ;;
-    esac
-    rm -rf "$T"
-}
-
-LUA_CRON='local jobs = require("hull.jobs")
-local time = require("hull.time")
-app.manifest({ modules = { "hull/jobs@1" } })
-app.main(function(ctx)
-  jobs.init()
-  local b = 1609459200   -- 2021-01-01 00:00:00 UTC
-  local math_ok = (jobs._cron_next("*/15 * * * *",b)-b==900
-    and jobs._cron_next("0 0 * * *",b)-b==86400
-    and jobs._cron_next("30 2 * * *",b)-b==9000) and 1 or 0
-  local fired = 0
-  jobs.handler("beep", function(j) fired = fired + 1 end)
-  jobs.cron("beep", "* * * * *")
-  jobs._tick(time.now()+120); jobs.work({batch=10})
-  local f1 = fired
-  jobs._tick(time.now()+120); jobs.work({batch=10})   -- must not double-fire
-  local nodup = (fired == f1) and 1 or 0
-  local uncron = jobs.uncron("beep") and 1 or 0
-  ctx.stdout:write(("CRON math=%d fired=%d nodup=%d uncron=%d\n"):format(math_ok, f1, nodup, uncron))
-  return 0
-end)'
-
-JS_CRON='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
-app.manifest({ modules: ["hull/jobs@1"] });
-app.main(async (ctx) => {
-  jobs.init();
-  const b = 1609459200;
-  const math_ok = (jobs._cronNext("*/15 * * * *",b)-b===900
-    && jobs._cronNext("0 0 * * *",b)-b===86400
-    && jobs._cronNext("30 2 * * *",b)-b===9000) ? 1 : 0;
-  let fired = 0;
-  jobs.handler("beep", (j) => { fired++; });
-  jobs.cron("beep", "* * * * *");
-  jobs._tick(time.now()+120); await jobs.work({batch:10});
-  const f1 = fired;
-  jobs._tick(time.now()+120); await jobs.work({batch:10});
-  const nodup = (fired === f1) ? 1 : 0;
-  const uncron = jobs.uncron("beep") ? 1 : 0;
-  ctx.stdout.write(`CRON math=${math_ok} fired=${f1} nodup=${nodup} uncron=${uncron}\n`);
-  return 0;
-});'
-
-echo "== v1.1 cron: Lua =="; check_cron "lua" "lua" "$LUA_CRON"
-echo "== v1.1 cron: JS =="; check_cron "js" "js" "$JS_CRON"
+# The cron math / fire / no-double-fire / uncron cases drive the clock-injectable
+# cron tick, a test hook since audit 17 (app code cannot reach it), so they run
+# in the C unit-test harness: stdlib/{lua,js}/hull/tests/test_jobs_hooks.{lua,js}
+# (UTEST lua_stdlib / js_stdlib jobs_hooks_cron).
 
 # ── v1.1: jobs.get(id) + jobs.heartbeat(job) ────────────────────────────────
 # get() returns a job's status view (pending -> done; nil for a missing id).
@@ -723,91 +669,17 @@ echo "== durable events Phase 1: Lua =="; check_durable_events "lua" "lua" "$LUA
 echo "== durable events Phase 1: JS  =="; check_durable_events "js"  "js"  "$JS_DUR_EVENTS"
 
 # ── durable events Phase 2 (subscriptions: cursor + lease drain) ─────────────
-# The jobs._events_drain seam is synchronous + clock-injectable, so at-least-once,
-# lease reclaim, and retention are asserted at exact instants with NO sleeps.
-# Covers: deterministic in-order capture (T3), crash-before-cursor -> re-delivery
-# (T5a), worker-death lease reclaim (T5b), retention-never-past-min(cursor) (T6).
-check_events_p2() {
-    label="$1"; ext="$2"; app="$3"
-    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
-    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
-    case "$out" in
-        *"EV deliv=3 order=y recaught=0 dup=6 held=false reclaim=3 retain=y purged=y"*)
-            pass "$label: durable subscriptions (capture + at-least-once + lease reclaim + retention)" ;;
-        *) fail "$label: durable events Phase 2" "$out" ;;
-    esac
-    rm -rf "$T"
-}
-
-LUA_EV2='local jobs = require("hull.jobs")
-local time = require("hull.time")
-app.manifest({ modules = { "hull/jobs@1", "hull/time@1" } })
-app.main(function(ctx)
-  jobs.init({ events = true })
-  local future = time.now() + 100   -- > every event ts, within int4 (PG-safe)
-  jobs.enqueue("ok", {}); jobs.enqueue("ok", {}); jobs.enqueue("ok", {})
-  local seen = {}
-  jobs.subscribe("cap", function(ev) seen[#seen+1] = ev.id end, { from = "beginning" })
-  local r  = jobs._events_drain("cap", { now = 1000 })
-  local re = jobs._events_drain("cap", { now = 1000 })
-  local order = (seen[1]==1 and seen[2]==2 and seen[3]==3) and "y" or "n"
-  local dc = 0
-  jobs.subscribe("dup", function() dc = dc + 1 end, { from = "beginning" })
-  jobs._events_drain("dup", { now = 1000, commit_cursor = false })
-  jobs._events_drain("dup", { now = 1000 })
-  jobs.subscribe("lease", function() end, { from = "beginning" })
-  jobs._events_drain("lease", { now = 1000, commit_cursor = false, release_lease = false })
-  local held = jobs._events_drain("lease", { now = 1000 })
-  local rec  = jobs._events_drain("lease", { now = 1040 })
-  jobs.subscribe("lag", function() end, { from = "beginning" })
-  local before = #jobs.events({ limit = 100 })
-  jobs.cleanup({ before = future })
-  local after = #jobs.events({ limit = 100 })
-  jobs._events_drain("lag", { now = 1000 })
-  jobs.cleanup({ before = future })
-  local final = #jobs.events({ limit = 100 })
-  ctx.stdout:write(("EV deliv=%d order=%s recaught=%d dup=%d held=%s reclaim=%d retain=%s purged=%s\n"):format(
-    r.delivered, order, re.delivered, dc, tostring(held.leased), rec.delivered,
-    (after==before) and "y" or "n", (final==0) and "y" or "n"))
-  return 0
-end)'
-
-JS_EV2='import { app } from "hull:app"; import { jobs } from "hull:jobs"; import { time } from "hull:time";
-app.manifest({ modules: ["hull/jobs@1", "hull/time@1"] });
-app.main(async (ctx) => {
-  jobs.init({ events: true });
-  const future = time.now() + 100;   // > every event ts, within int4 (PG-safe)
-  jobs.enqueue("ok", {}); jobs.enqueue("ok", {}); jobs.enqueue("ok", {});
-  const seen = [];
-  jobs.subscribe("cap", (ev) => seen.push(ev.id), { from: "beginning" });
-  const r  = jobs._eventsDrain("cap", { now: 1000 });
-  const re = jobs._eventsDrain("cap", { now: 1000 });
-  const order = (seen[0]===1 && seen[1]===2 && seen[2]===3) ? "y" : "n";
-  let dc = 0;
-  jobs.subscribe("dup", () => { dc++; }, { from: "beginning" });
-  jobs._eventsDrain("dup", { now: 1000, commitCursor: false });
-  jobs._eventsDrain("dup", { now: 1000 });
-  jobs.subscribe("lease", () => {}, { from: "beginning" });
-  jobs._eventsDrain("lease", { now: 1000, commitCursor: false, releaseLease: false });
-  const held = jobs._eventsDrain("lease", { now: 1000 });
-  const rec  = jobs._eventsDrain("lease", { now: 1040 });
-  jobs.subscribe("lag", () => {}, { from: "beginning" });
-  const before = jobs.events({ limit: 100 }).length;
-  jobs.cleanup({ before: future });
-  const after = jobs.events({ limit: 100 }).length;
-  jobs._eventsDrain("lag", { now: 1000 });
-  jobs.cleanup({ before: future });
-  const final = jobs.events({ limit: 100 }).length;
-  ctx.stdout.write(`EV deliv=${r.delivered} order=${order} recaught=${re.delivered} dup=${dc} held=${held.leased} reclaim=${rec.delivered} retain=${after===before?"y":"n"} purged=${final===0?"y":"n"}\n`);
-  return 0;
-});'
-
-echo "== durable events Phase 2: Lua =="; check_events_p2 "lua" "lua" "$LUA_EV2"
-echo "== durable events Phase 2: JS  =="; check_events_p2 "js"  "js"  "$JS_EV2"
+# In-order capture (T3), crash-before-cursor re-delivery (T5a), lease reclaim
+# (T5b) and retention-never-past-min(cursor) (T6) are asserted at exact
+# instants through the clock-injectable drain, a test hook since audit 17: they
+# run in stdlib/{lua,js}/hull/tests/test_jobs_hooks.{lua,js}
+# (UTEST jobs_hooks_events).
 
 # Fleet gate: K processes drain ONE shared subscription. The per-subscription
 # lease + monotonic cursor mean each event is delivered exactly once across the
-# fleet - the union of per-process deliveries is all N ids, no duplicates.
+# fleet - the union of per-process deliveries is all N ids, no duplicates. The
+# drain runs through jobs.work (at most once a second, at the real clock), on a
+# queue with no jobs, so each process drains a few times over ~4 s.
 echo "== durable events fleet gate ($CONC processes, one subscription) =="
 EW="$(mktemp -d)"; EDB="$EW/e.db"
 cat > "$EW/seed.lua" <<LUA
@@ -826,7 +698,7 @@ app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init({ events = true })
   jobs.subscribe("g", function(ev) ctx.stdout:write(ev.id .. "\n") end, { from = "beginning" })
-  for _=1,40 do jobs._events_drain("g", {}) end     -- drain to exhaustion (lease-serialized)
+  for _=1,4 do jobs.work({ queue = "evfleet" }); hull.sleep(1100) end  -- lease-serialized
   return 0
 end)
 LUA
@@ -843,62 +715,9 @@ fi
 rm -rf "$EW"
 
 # ── durable events Phase 3 (poison-event skip-after-N + metrics) ─────────────
-# A subscription with max_failures=N skips a poison event after N consecutive
-# handler failures (advancing past it + recording a durable subscription_skipped
-# event), so one bad event can't wedge the subscription or block retention.
-# jobs.metrics gains an events block (log depth + per-subscription lag/failures).
-check_events_p3() {
-    label="$1"; ext="$2"; app="$3"
-    T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
-    out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
-    case "$out" in
-        *"POISON seen=1,3,4 d1=1 d2skip=true skips=1 lag=0 fail=0 depth=4"*)
-            pass "$label: poison-event skip-after-N + subscription_skipped + metrics" ;;
-        *) fail "$label: durable events Phase 3" "$out" ;;
-    esac
-    rm -rf "$T"
-}
-
-LUA_EV3='local jobs = require("hull.jobs")
-app.manifest({ modules = { "hull/jobs@1" } })
-app.main(function(ctx)
-  jobs.init({ events = true })
-  jobs.enqueue("ok",{}); jobs.enqueue("ok",{}); jobs.enqueue("ok",{})
-  local seen = {}
-  jobs.subscribe("p", function(ev) if ev.id == 2 then error("poison") end seen[#seen+1] = ev.id end,
-    { from = "beginning", max_failures = 2 })
-  local d1 = jobs._events_drain("p", { now = 1000 })
-  local d2 = jobs._events_drain("p", { now = 1000 })
-  jobs._events_drain("p", { now = 1000 })
-  local skips = #jobs.events({ types = { "subscription_skipped" } })
-  local m = jobs.metrics()
-  local sub = m.events and m.events.subscriptions[1]
-  ctx.stdout:write(("POISON seen=%s d1=%d d2skip=%s skips=%d lag=%s fail=%s depth=%s\n"):format(
-    table.concat(seen, ","), d1.delivered, tostring(d2.skipped), skips,
-    tostring(sub and sub.lag), tostring(sub and sub.failures), tostring(m.events and m.events.log_depth)))
-  return 0
-end)'
-
-JS_EV3='import { app } from "hull:app"; import { jobs } from "hull:jobs";
-app.manifest({ modules: ["hull/jobs@1"] });
-app.main(async (ctx) => {
-  jobs.init({ events: true });
-  jobs.enqueue("ok",{}); jobs.enqueue("ok",{}); jobs.enqueue("ok",{});
-  const seen = [];
-  jobs.subscribe("p", (ev) => { if (ev.id === 2) throw new Error("poison"); seen.push(ev.id); },
-    { from: "beginning", maxFailures: 2 });
-  const d1 = jobs._eventsDrain("p", { now: 1000 });
-  const d2 = jobs._eventsDrain("p", { now: 1000 });
-  jobs._eventsDrain("p", { now: 1000 });
-  const skips = jobs.events({ types: ["subscription_skipped"] }).length;
-  const m = jobs.metrics();
-  const sub = m.events && m.events.subscriptions[0];
-  ctx.stdout.write(`POISON seen=${seen.join(",")} d1=${d1.delivered} d2skip=${d2.skipped} skips=${skips} lag=${sub&&sub.lag} fail=${sub&&sub.failures} depth=${m.events&&m.events.logDepth}\n`);
-  return 0;
-});'
-
-echo "== durable events Phase 3: Lua =="; check_events_p3 "lua" "lua" "$LUA_EV3"
-echo "== durable events Phase 3: JS  =="; check_events_p3 "js"  "js"  "$JS_EV3"
+# The poison skip, its subscription_skipped event and the metrics events block
+# are asserted through the clock-injectable drain, a test hook since audit 17:
+# stdlib/{lua,js}/hull/tests/test_jobs_hooks.{lua,js} (UTEST jobs_hooks_poison).
 
 # ── strict per-key concurrency (counter-backed hard cap) ────────────────────
 # The opt-in `concurrency_strict` path reserves a slot in _hull_job_concurrency
@@ -1309,14 +1128,15 @@ app.main(async (ctx) => {
 echo "== v1.5 job events: Lua =="; check_events "lua" "lua" "$LUA_EVENTS"
 echo "== v1.5 job events: JS =="; check_events "js" "js" "$JS_EVENTS"
 
-# ── v1.5: polish - absolute at, progress, windowed throttle, fixed-offset tz ──
+# ── v1.5: polish - absolute at, progress, windowed throttle, IANA tz refused ─
+# (The fixed-offset cron hour moved to test_jobs_hooks, jobs_hooks_cron.)
 check_polish() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
     out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
     case "$out" in
-        *"POLISH claimed=1 prog=43 throttle=ok tzhh=7 iana_reject=true"*)
-            pass "$label: polish (absolute at / progress / throttle window / tz-offset cron + IANA reject)" ;;
+        *"POLISH claimed=1 prog=43 throttle=ok iana_reject=true"*)
+            pass "$label: polish (absolute at / progress / throttle window / IANA tz reject)" ;;
         *) fail "$label: v1.5 polish" "$out" ;;
     esac
     rm -rf "$T"
@@ -1333,11 +1153,9 @@ app.main(function(ctx)
   local prog = jobs.get(now_id).progress
   local a = jobs.enqueue("th", {}, { throttle = 60 })
   local b = jobs.enqueue("th", {}, { throttle = 60 })
-  local nx = jobs._cron_next("0 9 * * *", 1735689600, 2*3600)
-  local hh = math.floor((nx % 86400) / 3600)
   local ok_iana = pcall(function() jobs.cron("x", "0 9 * * *", nil, { tz = "Europe/Budapest" }) end)
-  ctx.stdout:write(("POLISH claimed=%d prog=%s throttle=%s tzhh=%d iana_reject=%s\n"):format(
-    #claimed, tostring(prog), (a~=nil and b==nil) and "ok" or "bad", hh, tostring(not ok_iana)))
+  ctx.stdout:write(("POLISH claimed=%d prog=%s throttle=%s iana_reject=%s\n"):format(
+    #claimed, tostring(prog), (a~=nil and b==nil) and "ok" or "bad", tostring(not ok_iana)))
   return 0
 end)'
 
@@ -1352,10 +1170,8 @@ app.main((ctx) => {
   const prog = jobs.get(nowId).progress;
   const a = jobs.enqueue("th", {}, { throttle: 60 });
   const b = jobs.enqueue("th", {}, { throttle: 60 });
-  const nx = jobs._cronNext("0 9 * * *", 1735689600, 2*3600);
-  const hh = Math.floor((nx % 86400) / 3600);
   let okIana = true; try { jobs.cron("x", "0 9 * * *", null, { tz: "Europe/Budapest" }); } catch(e){ okIana = false; }
-  ctx.stdout.write(`POLISH claimed=${claimed.length} prog=${prog} throttle=${a!==null&&b===null?"ok":"bad"} tzhh=${hh} iana_reject=${!okIana}\n`);
+  ctx.stdout.write(`POLISH claimed=${claimed.length} prog=${prog} throttle=${a!==null&&b===null?"ok":"bad"} iana_reject=${!okIana}\n`);
   return 0;
 });'
 
@@ -2267,8 +2083,8 @@ echo "== observability B: JS =="; check_history "js" "js" "$JS_HISTORY"
 # PATCHRETRY: jobs.retry deletes rows the old run counted (its uuid memo, the
 #   compensated step); the patch frontier keeps the old run's count, so a
 #   ctx.patched the old code had already run past keeps the old branch.
-# HORIZON: with a commit-order grace, a drain holds back events younger than
-#   the grace and delivers them once they are older.
+# (HORIZON, the commit-order grace, drives the clock-injectable drain - a test
+#   hook since audit 17 - and runs in test_jobs_hooks, jobs_hooks_horizon.)
 check_audit9() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
@@ -2292,11 +2108,6 @@ check_audit9() {
         *"PATCHRETRY st=dead res=old"*)
             pass "$label: the patch frontier survives jobs.retry's deletes" ;;
         *) fail "$label: patch frontier after retry" "$out" ;;
-    esac
-    case "$out" in
-        *"HORIZON young=0 old=3 cfg_young=0"*)
-            pass "$label: a subscription drain holds back events younger than the grace" ;;
-        *) fail "$label: event drain horizon" "$out" ;;
     esac
     rm -rf "$T"
 }
@@ -2369,18 +2180,6 @@ app.main(function(ctx)
   jobs.retry(p)
   jobs.work({ queue = "pr", batch = 1 })
   ctx.stdout:write(("PATCHRETRY st=%s res=%s\n"):format(pst, tostring(jobs.result(p).result)))
-
-  local got = 0
-  jobs.subscribe("h", function() got = got + 1 end, { from = "now" })
-  jobs.enqueue("e1", {}); jobs.enqueue("e2", {}); jobs.enqueue("e3", {})
-  local now = time.now()
-  local y = jobs._events_drain("h", { now = now, grace = 5 }).delivered
-  local o = jobs._events_drain("h", { now = now + 60, grace = 5 }).delivered
-  jobs.init({ events_grace = 5 })
-  jobs.subscribe("h2", function() end, { from = "now" })
-  jobs.enqueue("e4", {})
-  local cy = jobs._events_drain("h2", { now = now }).delivered
-  ctx.stdout:write(("HORIZON young=%d old=%d cfg_young=%d\n"):format(y, o, cy))
   return 0
 end)'
 
@@ -2450,18 +2249,6 @@ app.main(async (ctx) => {
   jobs.retry(p);
   await jobs.work({ queue: "pr", batch: 1 });
   ctx.stdout.write(`PATCHRETRY st=${pst} res=${jobs.result(p).result}\n`);
-
-  let got = 0;
-  jobs.subscribe("h", () => { got++; }, { from: "now" });
-  jobs.enqueue("e1", {}); jobs.enqueue("e2", {}); jobs.enqueue("e3", {});
-  const now = time.now();
-  const y = jobs._eventsDrain("h", { now, grace: 5 }).delivered;
-  const o = jobs._eventsDrain("h", { now: now + 60, grace: 5 }).delivered;
-  jobs.init({ eventsGrace: 5 });
-  jobs.subscribe("h2", () => {}, { from: "now" });
-  jobs.enqueue("e4", {});
-  const cy = jobs._eventsDrain("h2", { now }).delivered;
-  ctx.stdout.write(`HORIZON young=${y} old=${o} cfg_young=${cy}\n`);
   return 0;
 });'
 
@@ -2472,24 +2259,22 @@ check_audit9 "js" "js" "$JS_AUDIT9"
 
 # ── audit 10: cron tz on local boundaries, a disabled schedule, batch-mates,
 #    soft-concurrency rank, event limits / grace / async subscribers ─────────
-# CRONTZ: with a fixed offset the day / hour skips land on LOCAL boundaries
-#   (they used UTC ones: "0 9 * * *" at +05:30 never matched 09:00, a +02:00
-#   Monday-midnight and a -03:00 Sunday 01:00 schedule skipped their day).
-#   From 2025-01-01T00:00Z: 09:00+05:30 = +12600; Mon 00:00+02:00 = +424800;
-#   "0 9 * * 1-5" at -05:00 fires Wed Thu Fri Mon Tue; Sun 01:00-03:00 = +360000.
-# STRICT: a cron number is plain digits in both runtimes ("5abc", "0x5", "5.0",
-#   "1,,2" refused); a NaN / out-of-range tz is refused.
+# (CRONTZ - a tz offset skips on LOCAL day / hour boundaries -, STRICT - cron
+#   numbers are plain digits, a NaN / out-of-range tz is refused, "+18:59"
+#   included - and the JS ASYNCSUB case drive the clock-injectable cron math
+#   and drain, test hooks since audit 17: they run in test_jobs_hooks,
+#   jobs_hooks_cron / jobs_hooks_horizon.)
 # CRONOFF: a stored spec that no longer parses is disabled, not fired every
 #   minute (nor given a NULL next_run_at): nothing enqueued, one cron_disabled
-#   event, next_run_at parked, last_error set (checked from the DB below).
+#   event, next_run_at parked, last_error set (checked from the DB below). The
+#   two ticks run through jobs.work, a second apart.
 # MATE: a batch job that heartbeats past visibility_timeout does not leave its
 #   unstarted batch-mate to be dead-lettered "worker lost" (on its last
 #   attempt) - and since audit 11 does not hold it either: the heartbeat
 #   releases the mate back to pending with its attempt undone, and the next
 #   jobs.work runs it.
 # VTOPT (audit 11): jobs.init refuses a non-numeric / NaN / negative
-#   visibility_timeout or reap_interval (a numeric string is converted);
-#   a cron tz past 18:00 ("+18:59") is refused (in STRICT's list).
+#   visibility_timeout or reap_interval (a numeric string is converted).
 # RANK: a soft-concurrency peer that heartbeated still counts as ahead (the
 #   rank uses the claim's start, which heartbeats do not move).
 # EVLIM: jobs.events limit is clamped to 1..1000 (-1 was "no limit" on
@@ -2498,16 +2283,6 @@ check_audit10() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
     out="$("$HULL" "$T/app.$ext" -d "$T/a.db" 2>/dev/null)" || true
-    case "$out" in
-        *"CRONTZ a=12600 b=424800 c=50400,136800,223200,482400,568800 d=360000"*)
-            pass "$label: cron with a tz offset skips on local day / hour boundaries" ;;
-        *) fail "$label: cron tz local boundaries" "$out" ;;
-    esac
-    case "$out" in
-        *"STRICT bad=0 good=1 tz=0"*)
-            pass "$label: cron fields are plain decimal digits; a bad tz is refused" ;;
-        *) fail "$label: cron field / tz strictness" "$out" ;;
-    esac
     case "$out" in
         *"MATE st=pending at=0 ran=0 then=done ran2=1"*)
             pass "$label: a heartbeat releases the unstarted batch-mates, which run next" ;;
@@ -2528,13 +2303,6 @@ check_audit10() {
             pass "$label: jobs.events limit clamped; events_grace refuses NaN / infinity" ;;
         *) fail "$label: events limit / grace" "$out" ;;
     esac
-    if [ "$ext" = "js" ]; then
-        case "$out" in
-            *"ASYNCSUB refused=1 delivered=0 failures=1"*)
-                pass "$label: an async subscriber is refused; a returned Promise is a failure" ;;
-            *) fail "$label: async subscriber" "$out" ;;
-        esac
-    fi
 
     # CRONOFF: register a schedule, corrupt its stored spec the way an older,
     # laxer parser would have accepted it, and make it due.
@@ -2567,25 +2335,6 @@ LUA_AUDIT10='local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init({ events = true })
-  local b = 1735689600
-  local a = jobs._cron_next("0 9 * * *", b, 19800) - b
-  local bb = jobs._cron_next("0 0 * * 1", b, 7200) - b
-  local chain, t = {}, b
-  for _ = 1, 5 do t = jobs._cron_next("0 9 * * 1-5", t, -18000); chain[#chain + 1] = t - b end
-  local d = jobs._cron_next("0 1 * * 0", b, -10800) - b
-  ctx.stdout:write(("CRONTZ a=%d b=%d c=%s d=%d\n"):format(a, bb, table.concat(chain, ","), d))
-
-  local bad = 0
-  for _, s in ipairs({ "5abc * * * *", "0x5 * * * *", "5.0 * * * *", "1e1 * * * *",
-                       "1,,2 * * * *", ",1 * * * *", "*/5/2 * * * *", "1-2-3 * * * *" }) do
-    if jobs._cron_next(s, b) ~= nil then bad = bad + 1 end
-  end
-  local good = jobs._cron_next("5,10-12 */2 * * 1-5", b) ~= nil and 1 or 0
-  local tzok = 0
-  for _, tz in ipairs({ 0/0, 1/0, 2000, 1.5, "+25:00", "+05:75", "+18:59", "-1801" }) do
-    if pcall(jobs.cron, "tzx", "0 9 * * *", nil, { tz = tz }) then tzok = tzok + 1 end
-  end
-  ctx.stdout:write(("STRICT bad=%d good=%d tz=%d\n"):format(bad, good, tzok))
 
   jobs.init({ visibility_timeout = 1 })
   local mate_ran = 0
@@ -2637,7 +2386,9 @@ LUA_AUDIT10_TICK='local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init({ events = true })
-  jobs._tick(); jobs._tick()
+  -- Two cron ticks through jobs.work (at most one a second), on a queue with
+  -- no jobs: the second must not disable the schedule again.
+  jobs.work({ queue = "tickq" }); hull.sleep(1100); jobs.work({ queue = "tickq" })
   local ev = #jobs.events({ types = { "cron_disabled" } })
   ctx.stdout:write(("CRONOFF pending=%d events=%d\n"):format(jobs.stats().pending or 0, ev))
   return 0
@@ -2647,25 +2398,6 @@ JS_AUDIT10='import { app } from "hull:app"; import { jobs } from "hull:jobs";
 app.manifest({ modules: ["hull/jobs@1"] });
 app.main(async (ctx) => {
   jobs.init({ events: true });
-  const b = 1735689600;
-  const a = jobs._cronNext("0 9 * * *", b, 19800) - b;
-  const bb = jobs._cronNext("0 0 * * 1", b, 7200) - b;
-  const chain = []; let t = b;
-  for (let i = 0; i < 5; i++) { t = jobs._cronNext("0 9 * * 1-5", t, -18000); chain.push(t - b); }
-  const d = jobs._cronNext("0 1 * * 0", b, -10800) - b;
-  ctx.stdout.write(`CRONTZ a=${a} b=${bb} c=${chain.join(",")} d=${d}\n`);
-
-  let bad = 0;
-  for (const s of ["5abc * * * *", "0x5 * * * *", "5.0 * * * *", "1e1 * * * *",
-                   "1,,2 * * * *", ",1 * * * *", "*/5/2 * * * *", "1-2-3 * * * *"]) {
-    if (jobs._cronNext(s, b) !== null) bad++;
-  }
-  const good = jobs._cronNext("5,10-12 */2 * * 1-5", b) !== null ? 1 : 0;
-  let tzok = 0;
-  for (const tz of [NaN, Infinity, 2000, 1.5, "+25:00", "+05:75", "+18:59", "-1801"]) {
-    try { jobs.cron("tzx", "0 9 * * *", null, { tz }); tzok++; } catch (_e) { /* refused */ }
-  }
-  ctx.stdout.write(`STRICT bad=${bad} good=${good} tz=${tzok}\n`);
 
   jobs.init({ visibilityTimeout: 1 });
   let mateRan = 0;
@@ -2705,13 +2437,6 @@ app.main(async (ctx) => {
   try { jobs.init({ eventsGrace: NaN }); } catch (_e) { nan = 1; }
   try { jobs.init({ eventsGrace: Infinity }); } catch (_e) { inf = 1; }
   ctx.stdout.write(`EVLIM neg=${neg} nan=${nan} inf=${inf}\n`);
-
-  let refused = 0;
-  try { jobs.subscribe("as", async () => {}); } catch (_e) { refused = 1; }
-  jobs.subscribe("ps", () => Promise.resolve(1), { from: "beginning" });
-  const r = jobs._eventsDrain("ps", { grace: 0 });
-  const failures = jobs._eventsDrain("ps", { grace: 0 }).delivered === 0 ? 1 : 0;
-  ctx.stdout.write(`ASYNCSUB refused=${refused} delivered=${r.delivered} failures=${failures}\n`);
   return 0;
 });'
 
@@ -2721,9 +2446,11 @@ app.main(() => { jobs.init({ events: true }); jobs.cron("c1", "*/5 * * * *"); re
 
 JS_AUDIT10_TICK='import { app } from "hull:app"; import { jobs } from "hull:jobs";
 app.manifest({ modules: ["hull/jobs@1"] });
-app.main((ctx) => {
+app.main(async (ctx) => {
   jobs.init({ events: true });
-  jobs._tick(); jobs._tick();
+  // Two cron ticks through jobs.work (at most one a second), on a queue with
+  // no jobs: the second must not disable the schedule again.
+  await jobs.work({ queue: "tickq" }); await hull.sleep(1100); await jobs.work({ queue: "tickq" });
   const ev = jobs.events({ types: ["cron_disabled"] }).length;
   ctx.stdout.write(`CRONOFF pending=${jobs.stats().pending || 0} events=${ev}\n`);
   return 0;
@@ -2860,7 +2587,8 @@ LUA_AUDIT12_TICK='local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init()
-  local raised = pcall(jobs._tick) and 0 or 1
+  -- The cron tick, through jobs.work (its enqueue raises out of it).
+  local raised = pcall(jobs.work, { queue = "tickq" }) and 0 or 1
   jobs.reap()
   local d = jobs.dead({ limit = 10 })
   local st, removed = "none", 0
@@ -2927,10 +2655,11 @@ app.main(() => {
 
 JS_AUDIT12_TICK='import { app } from "hull:app"; import { jobs } from "hull:jobs";
 app.manifest({ modules: ["hull/jobs@1"] });
-app.main((ctx) => {
+app.main(async (ctx) => {
   jobs.init();
+  // The cron tick, through jobs.work (its enqueue raises out of it).
   let raised = 0;
-  try { jobs._tick(); } catch (_e) { raised = 1; }
+  try { await jobs.work({ queue: "tickq" }); } catch (_e) { raised = 1; }
   jobs.reap();
   let st = "none", removed = 0;
   for (const j of jobs.dead({ limit: 10 })) {

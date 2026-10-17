@@ -49,7 +49,7 @@ local _cfg = {
 
 -- Default commit-order grace for subscription drains on a backend whose
 -- auto-increment ids can commit out of order (Postgres / MySQL; see
--- jobs._events_drain).
+-- the subscription drain).
 local EVENTS_GRACE_DEFAULT = 5
 
 -- Exponential backoff: 2^attempt * 10s, capped at 1h (shared with outbox math).
@@ -60,11 +60,15 @@ local function default_backoff(attempt)
 end
 _cfg.backoff = default_backoff
 
--- The live config is a test hook, registered with the stdlib-internal
--- hull._test_hooks: exported as jobs._config, app code could set any field
--- past jobs.init's checks (a NaN events_grace, a non-function backoff;
--- audit 17).
-require("hull._test_hooks").register("hull.jobs", { config = _cfg })
+-- The test hooks, registered with the stdlib-internal hull._test_hooks (the
+-- seams are filled in below, where they are defined): the live config (as
+-- jobs._config, app code could set any field past jobs.init's checks - a NaN
+-- events_grace, a non-function backoff), and the clock-injectable cron tick
+-- and subscription drain (as jobs._tick / jobs._events_drain, app code wrote
+-- _hull_* rows at a time it chose - every next_run_at decades out, a lease
+-- held for ever - that its own SQL cannot repair; audit 17).
+local _hooks = { config = _cfg }
+require("hull._test_hooks").register("hull.jobs", _hooks)
 
 -- Registered handlers: type -> fn. `_default` is the optional catch-all.
 local _handlers = {}
@@ -85,6 +89,8 @@ local _workflows = {}
 -- homogeneous fleet re-registers every subscription at startup, so any worker can
 -- drain any subscription (the per-subscription lease serializes them).
 local _subscribers = {}
+-- The subscription drain (defined with jobs.subscribe, driven by jobs.work).
+local events_drain
 
 -- Unix ts of the last reaper sweep (throttled in jobs.work via _cfg.reap_interval).
 local _last_reap = 0
@@ -1669,12 +1675,12 @@ function jobs.uncron(name)
     return (db.exec("DELETE FROM _hull_cron WHERE name=?", { name }) or 0) > 0
 end
 
--- Internal seams for tests / introspection; not part of the app-facing contract.
-jobs._cron_next = function(spec, from, offset)
+-- Test seams (hull._test_hooks, never on the module; audit 17).
+_hooks.cron_next = function(spec, from, offset)
     local p = parse_cron(spec)
     return p and cron_next(p, from or time.now(), offset) or nil
 end
-jobs._tick = function(now) process_cron(now or time.now()) end
+_hooks.tick = function(now) process_cron(now or time.now()) end
 
 -- jobs.work's refresh before starting each batch job after the first: the
 -- job's claim and its still-unstarted mates' are extended to now, so a mate
@@ -1750,7 +1756,7 @@ function jobs.work(opts)
     -- Drain durable event subscriptions (throttled; the per-subscription lease
     -- makes this fleet-safe). Only workers that registered subscribers do work.
     if next(_subscribers) and now - _last_edrain >= 1 then
-        for name in pairs(_subscribers) do jobs._events_drain(name, { now = now }) end
+        for name in pairs(_subscribers) do events_drain(name, { now = now }) end
         _last_edrain = now
     end
     local batch = jobs.claim(opts)
@@ -3023,14 +3029,14 @@ function jobs.unsubscribe(name)
     return jobs
 end
 
--- Synchronous drain seam (the testability keystone): lease the
--- subscription, deliver new events in id order, advance the cursor, release the
--- lease. No timers/sleeps - jobs.work drives it. Returns { delivered, cursor,
+-- Synchronous drain (the testability keystone; a test hook, never on the
+-- module - audit 17): lease the subscription, deliver new events in id order,
+-- advance the cursor, release the lease. No timers/sleeps - jobs.work drives it. Returns { delivered, cursor,
 -- leased }. Test seams: opts.now (clock), opts.batch, opts.grace (the
 -- commit-order horizon, overriding events_grace), opts.commit_cursor (false =
 -- deliver but don't advance -> models a crash before the cursor write),
 -- opts.release_lease (false = hold the lease -> models a worker death mid-drain).
-function jobs._events_drain(name, opts)
+events_drain = function(name, opts)
     opts = opts or {}
     local sub = _subscribers[name]
     if not sub then return { delivered = 0, leased = false } end
@@ -3127,6 +3133,7 @@ function jobs._events_drain(name, opts)
     return { delivered = delivered, cursor = new_cursor, leased = true,
              skipped = (poison ~= nil and new_cursor == poison.id) or false }
 end
+_hooks.events_drain = events_drain
 
 --- Purge terminal jobs (done + dead by default) whose last update is older than
 -- a retention age. Run it from `app.daily` to bound table growth. Only touches

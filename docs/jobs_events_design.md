@@ -15,7 +15,7 @@ live dashboard and low-latency reactions need.
 > at-least-once + idempotent consumers, no new external broker. Pure stdlib Lua/JS
 > over the caps we already ship; zero new C. **Testable by construction** (§10) -
 > the mechanism is a synchronous, clock-injectable function; scheduling is a thin
-> driver on top, exactly like `process_cron` / `jobs._tick`.
+> driver on top, exactly like `process_cron` / the cron-tick test hook.
 
 ---
 
@@ -168,7 +168,7 @@ only on a latency assertion.
 - The lease-token + visibility-timeout reclaim = `jobs.reap`.
 - The CAS-advance-under-contention = `process_cron`'s `next_run_at` compare-and-set.
 - The transactional coupling = `enqueue`'s plain-INSERT-in-a-batch.
-- The clock-injectable synchronous seam = `process_cron(now)` / `jobs._tick(now)`.
+- The clock-injectable synchronous seam = `process_cron(now)` / the `tick(now)` test hook.
 - Emission points = the existing `emit()` call sites.
 
 ## 10. Testability (designed in, not bolted on)
@@ -180,12 +180,25 @@ a `run_at > now` boundary on a loaded CI runner - is the anti-pattern this secti
 exists to prevent: **no wall-clock sleeps drive correctness assertions**.)
 
 **T1. A synchronous, side-effect-free drain seam.** The core mechanism is
-`jobs._events_drain(name, { now, batch })` - it fetches, delivers, advances the
-cursor, and returns a summary `{ delivered, cursor, leased }` - with **no timers,
-no sleeps, no async**. Scheduling (the `jobs.work` tick, `run_worker`) is a thin
-driver that calls it. Every correctness test calls `_events_drain` directly and
-asserts on the return + DB state. (Exactly how `jobs._tick(now)` makes cron
-testable without waiting for a real minute.)
+the drain `events_drain(name, { now, batch })` - it fetches, delivers, advances
+the cursor, and returns a summary `{ delivered, cursor, leased }` - with **no
+timers, no sleeps, no async**. Scheduling (the `jobs.work` tick, `run_worker`) is
+a thin driver that calls it. Every correctness test calls the drain directly and
+asserts on the return + DB state. (Exactly how the cron tick `tick(now)` makes
+cron testable without waiting for a real minute.)
+
+The seams are **test hooks, never on the module** (audit 17). Exported as
+`jobs._events_drain` / `jobs._tick` / `jobs._cron_next` (JS `_eventsDrain` /
+`_tick` / `_cronNext`), they ran from a stdlib frame with a clock app code chose:
+`jobs._tick(1e12)` pushed every schedule's `next_run_at` decades out, a drain at
+`now = 1e15` held its subscription's lease for ever, and the app's own SQL cannot
+repair a `_hull_*` row. They are registered with the stdlib-internal
+`hull._test_hooks` / `hull:_test_hooks` (`tick`, `cron_next` / `cronNext`,
+`events_drain` / `eventsDrain`), which only the C unit-test harness reaches
+(`__test_hooks("hull.jobs")` / `__testHooks("hull:jobs")`); the deterministic
+cases live in `stdlib/{lua,js}/hull/tests/test_jobs_hooks.{lua,js}`. An app-level
+e2e (the fleet gate, the Postgres / MySQL legs) drives the drain and the cron
+tick through `jobs.work` at the real clock instead.
 
 **T2. Injectable clock.** Every time input - lease expiry, retention `before`,
 `ts` - is a parameter, never a bare `time.now()` inside the mechanism. Tests pass
@@ -195,13 +208,13 @@ zero sleeping. Emit records `ts`; drain/retention take `now`/`before`.
 **T3. Deterministic capture harness.** A test subscription whose handler appends
 each `ev` to a Lua table / JS array (or a scratch table). Because drain is
 cursor-ordered and synchronous, the delivered sequence is **deterministic**:
-after `enqueue -> work -> _events_drain`, assert the capture equals exactly
+after `enqueue -> work -> drain`, assert the capture equals exactly
 `[enqueued, started, completed]` in order, with the right `job_id`/`job_type`.
 Both runtimes assert the identical sequence (parity).
 
 **T4. In-process fleet simulation + one real fleet gate.** "Fleet-wide" is tested
 at two levels:
-- *Deterministic (unit):* interleave several `_events_drain` calls against one
+- *Deterministic (unit):* interleave several drain calls against one
   shared SQLite DB to simulate N workers, asserting the lease serializes them -
   every event is delivered, none is delivered twice **in the same drain window**,
   and a second concurrent drainer sees the subscription leased and no-ops.
@@ -213,7 +226,7 @@ at two levels:
 
 **T5. Fault-injection seams for the at-least-once contract.** The hard guarantees
 get explicit, deterministic tests via seams that model a crash:
-- *Duplicate delivery / crash-before-cursor:* `jobs._events_drain(name, { commit_cursor = false })` delivers but does **not** advance the cursor (models a
+- *Duplicate delivery / crash-before-cursor:* the drain hook with `{ commit_cursor = false }` delivers but does **not** advance the cursor (models a
   process death between handler success and the cursor write). Re-drain -> assert
   the same events are re-delivered (at-least-once) and that an **idempotent**
   handler (dedup on `ev.id`) produces one net effect.
@@ -259,7 +272,7 @@ guard), like every other jobs feature.
   `jobs.events(opts)` read-only tail. Tests: T5-atomicity, T3-capture (tail form),
   T7-parity. *Ships value alone:* a dashboard can poll `jobs.events`.
 - **Phase 2 - durable subscriptions.** `_hull_job_subscriptions`, `jobs.subscribe`
-  / `unsubscribe`, the `jobs._events_drain(name, {now})` seam, drain from
+  / `unsubscribe`, the drain `(name, {now})` seam (a test hook), drain from
   `jobs.work` + `jobs.run_worker`, retention-safe `cleanup`. Tests: T1-T7 in full
   (the fleet gate, fault injection, retention).
 - **Phase 3 - reliability policy.** Per-subscription failure backoff + skip-after-N
