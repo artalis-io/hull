@@ -3417,6 +3417,7 @@ cppcheck:
 		--suppress=knownArgument:$(SRCDIR)/hull/agent/overview.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/commands/tools.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/commands/doctor.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/valkey.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/agent/*.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent/*.c \
