@@ -35,8 +35,9 @@
 static HlDbHandle *db_call_handle(lua_State *L)
 {
     int uv = lua_upvalueindex(1);
-    return lua_islightuserdata(L, uv)
+    HlDbHandle *h = lua_islightuserdata(L, uv)
         ? (HlDbHandle *)lua_touserdata(L, uv) : NULL;
+    return h && h->backend ? h : NULL;   /* no backend: registry closed (audit 17) */
 }
 
 /* Context for Lua scalar UDF trampoline */

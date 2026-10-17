@@ -275,8 +275,12 @@ static int push_row_loop_guard(lua_State *L)
 static HlDbHandle *db_resolve_handle(lua_State *L)
 {
     int uv = lua_upvalueindex(1);
-    if (lua_islightuserdata(L, uv))
-        return (HlDbHandle *)lua_touserdata(L, uv);
+    if (lua_islightuserdata(L, uv)) {
+        /* A registry slot. Once the registry is closed at teardown (a __gc
+         * finalizer lua_close runs) the slot has no backend (audit 17). */
+        HlDbHandle *h = (HlDbHandle *)lua_touserdata(L, uv);
+        return h && h->backend ? h : NULL;
+    }
     HlLuaOwnedConn *o = luaL_testudata(L, uv, HL_LUA_DB_OWNED_MT);
     if (o)
         return o->h;   /* NULL after close() → methods error "not available" */
@@ -1241,6 +1245,9 @@ static int lua_db_open(lua_State *L)
         return luaL_error(L, "no runtime");
     if (!lua->base.db_registry)
         return luaL_error(L, "no database registry available");
+    if (hl_db_registry_is_closed(lua->base.db_registry))   /* audit 17 */
+        return luaL_error(L, "db.open: database connections are closed "
+                             "(shutting down)");
     const HlManifestDbDynamic *policy =
         hl_db_registry_dynamic_policy(lua->base.db_registry);
     const char *err = NULL;

@@ -1,7 +1,7 @@
 #!/bin/sh
 # e2e_teardown.sh: shutting down with work in flight exits cleanly.
 #
-# Audit 14 G1 / audit 15. The serve teardown freed the runtime before Keel's
+# Audit 14 G1 / audit 15 / audit 17. The serve teardown freed the runtime before Keel's
 # kl_http_server_free cancelled the ops still suspended on connections and
 # closed the connections still open, so:
 #   - a handler parked on hull.sleep past the drain deadline was cancelled
@@ -11,7 +11,9 @@
 #   - a detached http.fetch (from a timer, a WebSocket callback, app.main)
 #     leaked its continuation, and QuickJS aborted in JS_FreeRuntime;
 #   - an unawaited worker.dispatch / db.async left by app.main did the same;
-#   - and an HTTPS server freed its TLS context twice (Hull, then Keel).
+#   - an HTTPS server freed its TLS context twice (Hull, then Keel);
+#   - and the app context freed the DB registry before the runtime, whose
+#     lua_close runs __gc finalizers that may still use a connection.
 # Each run below must exit 0 - not 134 (abort) or 139 (segfault) - and log
 # no sanitizer / assertion report.
 #
@@ -198,6 +200,20 @@ if start_server target "$port" http "$FIX/server.lua"; then
                        || { fail "fetch target: exit $STOP_RC"; tail -20 "$WORK/target.log"; }
 else
     fail "fetch target did not start"; cat "$WORK/target.log"
+fi
+
+# __gc finalizers that lua_close runs at teardown use the database: the
+# registry's connections are closed by then, but its memory must still be
+# there, and every call must fail cleanly (audit 17).
+echo "=== lua: __gc finalizers use the database at teardown ==="
+rc=0
+"$HULL" --no-sandbox -d "$WORK/gc.db" "$FIX/gc_db.lua" >"$WORK/gc-db.log" 2>&1 || rc=$?
+if [ "$rc" = 0 ] && grep -q "teardown-gc: main ran 1" "$WORK/gc-db.log" \
+   && grep -q "teardown-gc: conn=refused default=refused connect=refused open=refused" "$WORK/gc-db.log" \
+   && clean_log "$WORK/gc-db.log"; then
+    pass "lua: a finalizer's db calls at teardown are refused, exit 0"
+else
+    fail "lua: gc_db exit $rc"; tail -20 "$WORK/gc-db.log"
 fi
 
 echo ""
