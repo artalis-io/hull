@@ -122,24 +122,6 @@ int hl_tool_spawn_env(const char *const argv[], const char *const envadd[]);
 int hl_tool_spawn_self(const char *const argv[], unsigned timeout_ms);
 
 /*
- * Drive an allowlisted compiler @p driver THROUGH a POSIX shell @p shell,
- * running `<shell> [sh] -c 'exec "$0" "$@"' <driver> <args...>` (the "sh"
- * applet selector is inserted only when @p shell is busybox). Used only on the
- * cosmo/Windows build path, where cosmocc's driver is a `#!/bin/sh` script that
- * Windows cannot execvp directly: a bundled busybox-w64 supplies the shell.
- *
- * This does NOT widen the "no arbitrary shell" invariant: @p shell's basename
- * must be sh / busybox, @p driver must pass hl_tool_check_allowlist, @p args are
- * dangerous-flag-validated, and the `-c` program is a COMPILE-TIME LITERAL - so
- * no app-derived byte is ever parsed as shell code (driver is $0, args are $@,
- * all positional). @p args / @p envadd are NULL-terminated arrays (NULL = none).
- * Returns the driver's exit code, or -1 on a validation / spawn failure.
- */
-int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
-                               const char *const args[],
-                               const char *const envadd[]);
-
-/*
  * Resolve the bundled busybox shell used to drive cosmocc on Windows (the
  * cosmo/Windows build path). @p driver is the cosmocc invocation about to be
  * spawned: busybox.exe is looked for BESIDE it first (the bundle ships them as

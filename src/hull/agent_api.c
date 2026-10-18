@@ -76,7 +76,17 @@ static int agent_api_middleware(KlHttpRequest *req, KlHttpResponse *res, void *u
     sh_json_buf_init(&out);
 
     if (strcmp(endpoint, "routes") == 0) {
-        hl_agent_routes(ctx->app_dir, &out);
+        /* The running app's routes. Loading a fresh app context here
+         * re-ran the app's top level (and migrations, WAMR init) with no
+         * module gate and no limits on every request (audit 18). */
+        if (!ctx->app || hl_agent_routes_ctx(ctx->app, &out) != 0) {
+            sh_json_buf_free(&out);
+            static const char body[] = "{\"error\":\"no live app context\"}";
+            kl_http_response_status(res, 500);
+            kl_http_response_header(res, "Content-Type", "application/json");
+            kl_http_response_body_copy(res, body, sizeof body - 1);
+            return 1;
+        }
 #ifdef HL_ENABLE_DB
     } else if (strcmp(endpoint, "schema") == 0) {
         hl_agent_db_schema(ctx->app_dir, ctx->db_path, &out);

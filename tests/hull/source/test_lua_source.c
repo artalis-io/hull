@@ -288,6 +288,17 @@ UTEST(lua_source, compute_build_file_reads)
     EXPECT_GT(pass, 0LL);
 }
 
+/* hull verify reads a signed manifest as hl_release_io_find_checksum does:
+ * exact lines, a duplicate name has no entry (audit 18). */
+UTEST(lua_source, release_manifest_reader)
+{
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test("stdlib/cli/lua/hull/tests/test_release_manifest.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+}
+
 /* feature_compose's signed-cache tier copies an archive before verifying it,
  * and records a cache-sourced archive in the release domain (audit 17). */
 UTEST(lua_source, feature_compose_cache_tier)

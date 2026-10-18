@@ -2038,7 +2038,8 @@ static int hl_serve_wire_routes(HlServerState *s)
 
     /* Register agent diagnostic endpoints (opt-in via --agent-api) */
     s->agent_api_ctx = (HlAgentApiCtx){ .app_dir = s->app_dir,
-                                        .db_path = s->cfg.no_db ? NULL : s->cfg.db_path };
+                                        .db_path = s->cfg.no_db ? NULL : s->cfg.db_path,
+                                        .app     = s->app };
     if (s->cfg.agent_api_mode) {
         /* Unauthenticated (schema, migrate, errors): loopback only. With
          * -b 0.0.0.0 they were reachable from the network. */

@@ -690,6 +690,20 @@ local function validate_module_name(name)
     end
 end
 
+-- Discover the modules under compute/, refusing a tree that holds a module
+-- source under a name validate_module_name would refuse (audit 18).
+local function discover_valid(cmd)
+    local modules, invalid = cbuild.discover_modules(".")
+    if #invalid > 0 then
+        for _, n in ipairs(invalid) do
+            tool.stderr("hull compute " .. cmd .. ": compute/" .. n .. ": " ..
+                        cbuild.invalid_name_message(n) .. "\n")
+        end
+        tool.exit(1)
+    end
+    return modules
+end
+
 -- ── Helpers ────────────────────────────────────────────────────────────
 -- Compilation lookup, module discovery, and per-module clang invocation
 -- live in stdlib/lua/hull/compute_build.lua so they can be reused by
@@ -859,7 +873,7 @@ local function cmd_build(name)
     if name then validate_module_name(name) end
 
     -- Discover all modules; filter to one if `name` was given.
-    local all_modules = cbuild.discover_modules(".")
+    local all_modules = discover_valid("build")
     local todo
     if name then
         for _, m in ipairs(all_modules) do
@@ -1094,7 +1108,7 @@ local function cmd_refresh_header(name)
         end
         modules = { { name = name } }
     else
-        modules = cbuild.discover_modules(".")
+        modules = discover_valid("refresh-header")
         if #modules == 0 then
             tool.stderr("hull compute refresh-header: no modules under compute/\n")
             tool.exit(1)

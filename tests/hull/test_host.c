@@ -354,6 +354,52 @@ UTEST(host, find_in_path_finds_a_real_executable)
     ASSERT_TRUE(strstr(out, "hulltestprobe") != NULL);
 }
 
+UTEST(host, is_batch_file_only_on_windows)
+{
+    /* audit 18: a .bat / .cmd spawn runs under cmd.exe, which re-parses the
+     * arguments. Only Windows treats the extension that way. */
+    int win = hl_host_is_windows();
+    ASSERT_EQ(win, hl_host_is_batch_file("cc.bat"));
+    ASSERT_EQ(win, hl_host_is_batch_file("C:\\tools\\CC.CMD"));
+    ASSERT_EQ(win, hl_host_is_batch_file("/C/tools/cc.Bat. "));
+    ASSERT_EQ(0, hl_host_is_batch_file("cc.exe"));
+    ASSERT_EQ(0, hl_host_is_batch_file("cc"));
+    ASSERT_EQ(0, hl_host_is_batch_file("bat"));
+    ASSERT_EQ(0, hl_host_is_batch_file("cc.batx"));
+    ASSERT_EQ(0, hl_host_is_batch_file(NULL));
+}
+
+UTEST(host, find_in_path_never_resolves_a_batch_file)
+{
+    /* audit 18: on Windows the walker tried ".bat" / ".cmd" after ".exe" /
+     * ".com", so a spawn of `cc` could run cc.bat through cmd.exe. Now a
+     * batch file is never a hit - by its bare name or named outright. */
+    char dir[512];
+    if (!host_make_probe("batch", dir, sizeof(dir), "hullbatprobe.bat"))
+        UTEST_SKIP("cannot create a temp probe");
+    char cmd[700];
+    snprintf(cmd, sizeof(cmd), "%s/hullbatprobe.cmd", dir);
+    FILE *f = fopen(cmd, "w");
+    if (f) { fputs("@exit 0\r\n", f); fclose(f); (void)chmod(cmd, 0755); }
+
+    char out[700];
+    int bare_bat = hl_host_find_in_path_ex(dir, "hullbatprobe", out, sizeof(out));
+    int named    = hl_host_find_in_path_ex(dir, "hullbatprobe.bat", out, sizeof(out));
+    int named_c  = hl_host_find_in_path_ex(dir, "hullbatprobe.cmd", out, sizeof(out));
+    (void)unlink(cmd);
+    host_drop_probe(dir, "hullbatprobe.bat");
+
+    ASSERT_EQ(0, bare_bat);           /* no extension probing reaches it */
+    if (hl_host_is_windows()) {
+        ASSERT_EQ(0, named);
+        ASSERT_EQ(0, named_c);
+    } else {
+        /* Off Windows the extension means nothing: an exact name is a file. */
+        ASSERT_EQ(1, named);
+        ASSERT_EQ(1, named_c);
+    }
+}
+
 UTEST(host, find_in_path_splits_a_posix_shaped_list_on_any_host)
 {
     /* THE WINDOWS BUG, in one assertion. A Cosmopolitan APE on Windows is

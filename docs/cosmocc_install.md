@@ -182,8 +182,10 @@ A/D bug, that's a C-code fix, not a wiring change.
 
 ### A - drive cosmocc through busybox `sh` (the invocation change)
 
-> **AS BUILT (landed).** The primitive is `hl_tool_spawn_driver_shell` +
-> `hl_tool_cosmo_shell` (`src/hull/cap/tool.c`). The reroute is **transparent in
+> **AS BUILT (landed).** The primitive is the private `build_shell_argv` +
+> `hl_tool_cosmo_shell` (`src/hull/cap/tool.c`; a public
+> `hl_tool_spawn_driver_shell`, which had no caller and skipped the spawn env
+> allowlist, was removed in audit 18). The reroute is **transparent in
 > the C spawn layer**, not threaded through `build.lua`: `hl_tool_spawn_env` and
 > `hl_tool_spawn_read` detect a `cosmocc` `argv[0]` on cosmo+Windows and, when a
 > bundled busybox resolves, run it through the shell-driver form. That was chosen
@@ -193,9 +195,9 @@ A/D bug, that's a C-code fix, not a wiring change.
 > every call site is covered uniformly. All of it is `#ifdef __COSMOPOLITAN__`, so
 > native/POSIX builds are byte-identical (the reroute compiles out; `cosmo_shell`
 > returns -1). `cosmo_prepare` shares one `TMPDIR`/`TMP`/`TEMP` (load-bearing) and
-> best-effort-plants `/bin/sh.exe = busybox` (ignored on failure). Unit tests in
-> `test_tool` cover the primitive on POSIX (reject non-allowlisted driver /
-> non-sh shell / dangerous args; run `cc --version` through `/bin/sh`). Windows
+> best-effort-plants `/bin/sh.exe = busybox` (ignored on failure). The reroute
+> runs only after `hl_tool_spawn_env` / `hl_tool_spawn_read` have checked the
+> driver, its args and the env additions. Windows
 > end-to-end is validated at E (needs the bundle). The original per-call-site
 > design below is kept for context.
 

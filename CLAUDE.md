@@ -1431,7 +1431,8 @@ parser does not take (unknown, or missing its value) is an error, never an app a
 value as the next argument (--hull-d PATH; --hull-d=PATH is refused).
 --agent-api additionally requires a loopback bind (its endpoints are unauthenticated), and answers only a request whose
 Host is localhost / 127.0.0.1 / [::1] (any port) and that carries no Origin - DNS rebinding let a web page read it
-through a name resolved to 127.0.0.1 (audit 9; 403 otherwise).
+through a name resolved to 127.0.0.1 (audit 9; 403 otherwise). /routes answers from the server's own app context
+(HlAgentApiCtx.app): it loaded the app again, top level and migrations included, on every request (audit 18).
 Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help), --verbose, --json, --app-dir
 ```
 
@@ -1444,7 +1445,9 @@ elsewhere), `hl_host_render_exec()` (`./app` vs `.\app.com`), and
 not the host's - on Windows a Cosmopolitan APE is handed a POSIX-shaped
 `/C/a:/C/b`, an MSYS2 shell exports the same, and a native shell gives Win32
 `C:\a;C:\b` - joins each hit with that component's own separator, and tries the
-`.exe`/`.com` forms on Windows). It is the ONE PATH walker: a second private
+`.exe`/`.com` forms on Windows - never a `.bat`/`.cmd`, which cmd.exe would run
+and re-parse; `hl_host_is_batch_file`, also refused as a named path by every
+spawn, audit 18). It is the ONE PATH walker: a second private
 copy in `tools_install.c` was why `hull doctor` and `hull tools list` could
 disagree about the same tool on the same box. `hl_driver_resolve_name()`
 (`compiler.c`) resolves a bare toolchain name through it before spawning,
@@ -1593,7 +1596,7 @@ bundled QuickJS tool session (never the app runtime), not in C. Tests:
 
 **`hull verify-release <manifest> <signature> [--pubkey <hex>]`**. Verify an Ed25519 signature over a release manifest using the embedded release public key (or an explicit override). Exit 0 = valid, 1 = invalid / placeholder. For offline auditing of a downloaded release.
 
-**`hull compute new <name> [--lang c]`**. Scaffold a new WASM compute module under `compute/<name>/`. Writes `<name>.c` (with a 30-line `hull_process` skeleton), `hull_compute.h` (the freestanding ABI header with libc shim + bump allocator + UDF wire format), and `test_fixtures.json`. Errors if the directory already exists. Names must match `[A-Za-z0-9_-]+`. C is the only supported language today.
+**`hull compute new <name> [--lang c]`**. Scaffold a new WASM compute module under `compute/<name>/`. Writes `<name>.c` (with a 30-line `hull_process` skeleton), `hull_compute.h` (the freestanding ABI header with libc shim + bump allocator + UDF wire format), and `test_fixtures.json`. Errors if the directory already exists. Names must match `[A-Za-z0-9_-]+`; a module found under `compute/` with any other name is refused by `hull compute build` / `refresh-header` and `hull build`, nothing compiled (audit 18). C is the only supported language today.
 
 **`hull compute build [name]`**. Compile `compute/<name>/<name>.c` → `compute/<name>.wasm` via `clang --target=wasm32-unknown-unknown -nostdlib -O2 -flto`. With no name, builds every discovered module. Toolchain lookup prefers Homebrew `llvm@18` then falls back to system `clang` with `wasm-ld` in PATH. The same logic runs automatically as part of `hull build` for stale sources. `hull compute build` is the manual rebuild entry point. Implementation: `stdlib/cli/lua/hull/compute.lua` + the shared helper at `stdlib/cli/lua/hull/compute_build.lua`.
 
