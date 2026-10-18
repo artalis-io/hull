@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
 
@@ -605,6 +606,113 @@ UTEST(pg_exec_simple, a_short_reply_fits_the_budget)
     EXPECT_EQ(0, rc);
     EXPECT_EQ(0, budget.tripped);
     EXPECT_EQ(0, conn.broken);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* A budget that trips on its @p pg_trip_at'th charge (0-unit asks included). */
+static int pg_charges, pg_trip_at;
+static int pg_count_trip_fn(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return ++pg_charges >= pg_trip_at;
+}
+
+static int64_t pg_test_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A server that says nothing (pg_sleep, a lock wait) no longer holds the
+ * call in recv for the whole read timeout - here none at all - with no
+ * budget or run deadline checked (audit 18): the wait is polled in slices
+ * that ask the budget, and a trip closes the connection. */
+UTEST(pg_query, a_silent_server_is_stopped_by_a_tripped_budget)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 0;            /* no read timeout: wait for ever */
+
+    pg_charges = 0;
+    pg_trip_at = 3;                      /* the third slice's ask trips */
+    HlDbBudgetBinding prev = hl_db_budget_swap(pg_count_trip_fn, NULL);
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_query(&conn, "SELECT pg_sleep(3600)", NULL, 0,
+                         NULL, NULL, NULL, NULL);
+    int64_t spent = pg_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(3, pg_charges);
+    EXPECT_TRUE(spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* ?read_timeout= still bounds the whole wait, sliced or not. */
+UTEST(pg_query, the_read_timeout_still_bounds_a_silent_server)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 250;
+
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_query(&conn, "SELECT pg_sleep(3600)", NULL, 0,
+                         NULL, NULL, NULL, NULL);
+    int64_t spent = pg_test_ms() - t0;
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent >= 200 && spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(strstr(conn.errmsg, "timed out") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* A run whose budget trips exactly on COMMIT's CommandComplete: the server
+ * has committed, so the reply is read on to its ReadyForQuery and the call
+ * reports what the server did (audit 18). The connection used to be dropped
+ * there with tx_status still 'T', so the commit was reported failed and the
+ * next call was told the server had rolled the transaction back. */
+UTEST(pg_query, a_trip_on_commit_complete_reports_the_commit)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);   /* ParseComplete */
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);   /* BindComplete  */
+    m = hl_pg_msg_begin(&s, 'n'); hl_pg_msg_end(&s, m);   /* NoData        */
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "COMMIT"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.tx_status = 'T';
+
+    pg_charges = 0;
+    pg_trip_at = 4;                      /* the CommandComplete's charge */
+    HlDbBudgetBinding prev = hl_db_budget_swap(pg_count_trip_fn, NULL);
+    int rc = hl_pg_query(&conn, "COMMIT", NULL, 0, NULL, NULL, NULL, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ('I', conn.tx_status);      /* committed, as the server said */
+    EXPECT_EQ(0, conn.broken);
+    EXPECT_TRUE(conn.transport != NULL);
 
     hl_pg_conn_close(&conn);
     close(sv[0]);

@@ -239,6 +239,17 @@ static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
     return 0;
 }
 
+static void pg_abandon(HlPgConn *conn);
+
+/* Asked between the slices of a wait for the server (audit 18): a 0-unit
+ * charge, which trips once the run's budget is spent or its wall-clock
+ * deadline has passed. */
+static int pg_wait_stop(void *ud)
+{
+    (void)ud;
+    return hl_db_budget_charge(0) != 0;
+}
+
 /* Read one frame. The returned body is valid until the next call, which
  * compacts the previously-consumed bytes. Returns 0 / -1. */
 static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
@@ -277,8 +288,18 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
             conn->rbuf = nb;
             conn->rcap = ncap;
         }
-        ssize_t n = io_recv(conn, conn->rbuf + conn->rlen,
-                            conn->rcap - conn->rlen);
+        /* Wait for the server in slices, asking the run's budget between
+         * them: a recv blocked for the whole ?read_timeout= (300 s by
+         * default, 0 = for ever) while the server ran pg_sleep or waited on a
+         * lock, with no budget and no run deadline checked (audit 18). A trip
+         * closes the connection, as a trip mid-reply does. */
+        int wr = hl_db_transport_wait_readable(conn->transport,
+                                               conn->read_timeout_ms,
+                                               conn->finishing ? NULL : pg_wait_stop,
+                                               NULL);
+        if (wr == -2) { pg_abandon(conn); return -1; }
+        ssize_t n = wr == 1 ? io_recv(conn, conn->rbuf + conn->rlen,
+                                      conn->rcap - conn->rlen) : -1;
         if (n <= 0) {
             conn->broken = 1;
             set_err(conn->errmsg, sizeof conn->errmsg,
@@ -541,6 +562,7 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
 {
     memset(conn, 0, sizeof(*conn));
     conn->transport = transport;
+    conn->read_timeout_ms = dsn->read_timeout_ms;
 
     HlPgWriter w;
     hl_pg_writer_init(&w);
@@ -1152,16 +1174,56 @@ static int handle_data_row(HlPgCursor *c, HlPgRowCb cb, void *ctx,
  * pg_ready) - or, inside a transaction, refuses everything but the ROLLBACK
  * the server has already done with the session. Simpler than a CancelRequest
  * on a side connection, and it needs no new connect from inside the run. */
-static int pg_abandon_if_tripped(HlPgConn *conn, uint32_t body_len)
+static void pg_abandon(HlPgConn *conn)
 {
-    int64_t units = 1 + ((int64_t)body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
-                        HL_DB_ALLOC_UNIT_BYTES;
-    if (hl_db_budget_charge(units) == 0) return 0;
     conn_teardown(conn);
     conn->broken = 1;
     set_err(conn->errmsg, sizeof conn->errmsg,
             "interrupted (instruction limit exceeded); the connection was "
             "closed rather than read to the end of the reply");
+}
+
+static int64_t pg_frame_units(uint32_t body_len)
+{
+    return 1 + ((int64_t)body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
+               HL_DB_ALLOC_UNIT_BYTES;
+}
+
+static int pg_abandon_if_tripped(HlPgConn *conn, uint32_t body_len)
+{
+    if (hl_db_budget_charge(pg_frame_units(body_len)) == 0) return 0;
+    pg_abandon(conn);
+    return 1;
+}
+
+/* Frames a reply may still carry after a tripped run's COMMIT completed
+ * (a ParameterStatus, a Notice, the ReadyForQuery). */
+#define HL_PG_FINISH_MAX_FRAMES 16
+
+/* Charge one frame of a query's reply; 1 when the connection was abandoned.
+ * A ReadyForQuery ends the reply, with nothing left to drop. A trip on the
+ * CommandComplete of a COMMIT is not abandoned: the server has committed, and
+ * a connection dropped there kept tx_status 'T', so the commit was reported
+ * failed and then "rolled back" by the server (audit 18). The reply is read
+ * on to its ReadyForQuery instead - without asking the budget again while
+ * waiting for it, and for at most HL_PG_FINISH_MAX_FRAMES frames - and the
+ * binding raises the trip once the call returns. */
+static int pg_reply_charge(HlPgConn *conn, const HlPgFrame *f)
+{
+    if (f->type == HL_PG_B_READY) return 0;
+    if (conn->finishing) {
+        if (++conn->finishing <= HL_PG_FINISH_MAX_FRAMES) return 0;
+        conn->finishing = 0;
+        pg_abandon(conn);
+        return 1;
+    }
+    if (hl_db_budget_charge(pg_frame_units(f->body_len)) == 0) return 0;
+    if (f->type == HL_PG_B_CMD_COMPLETE && f->body_len >= 6 &&
+        memcmp(f->body, "COMMIT", 6) == 0) {
+        conn->finishing = 1;
+        return 0;
+    }
+    pg_abandon(conn);
     return 1;
 }
 
@@ -1214,6 +1276,7 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         return -1;
     }
     conn->errmsg[0] = '\0';
+    conn->finishing = 0;
     if (nparams < 0 || nparams > 65535) {
         set_err(conn->errmsg, sizeof conn->errmsg, "invalid parameter count");
         return -1;
@@ -1317,10 +1380,8 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         HlPgFrame f;
         if (conn_next_frame(conn, &f) != 0) return -1;
 
-        /* Every frame but the last is charged (pg_abandon_if_tripped); a
-         * ReadyForQuery ends the reply, with nothing left to drop. */
-        if (f.type != HL_PG_B_READY && pg_abandon_if_tripped(conn, f.body_len))
-            return -1;
+        /* Every frame but the last is charged (pg_reply_charge). */
+        if (pg_reply_charge(conn, &f)) return -1;
 
         HlPgCursor c;
         hl_pg_cursor_init(&c, &f);
@@ -1370,6 +1431,7 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
             return pg_refuse_copy_out(conn);
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
+            conn->finishing = 0;
             return had_error ? -1 : 0;
         default:
             break;
@@ -1389,6 +1451,7 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         return -1;
     }
     conn->errmsg[0] = '\0';
+    conn->finishing = 0;
 
     HlPgWriter w;
     hl_pg_writer_init(&w);
@@ -1411,8 +1474,7 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         HlPgFrame f;
         if (conn_next_frame(conn, &f) != 0) return -1;
 
-        if (f.type != HL_PG_B_READY && pg_abandon_if_tripped(conn, f.body_len))
-            return -1;
+        if (pg_reply_charge(conn, &f)) return -1;
 
         HlPgCursor c;
         hl_pg_cursor_init(&c, &f);
@@ -1447,6 +1509,7 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
             return pg_refuse_copy_out(conn);
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
+            conn->finishing = 0;
             return had_error ? -1 : 0;
         default:
             break;

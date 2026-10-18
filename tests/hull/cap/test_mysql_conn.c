@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ── Canned server packets ────────────────────────────────────────── */
@@ -913,6 +914,178 @@ UTEST(mysql_conn, second_result_set_rows_are_charged)
     EXPECT_EQ(1, conn.broken);
     EXPECT_TRUE(conn.transport == NULL); /* closed, not drained */
     EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* Every packet of a reply is charged, not only the data rows (audit 18): a
+ * server answering with an endless stream of EMPTY result sets (a procedure
+ * looping over a SELECT that finds nothing) sent only column counts, column
+ * definitions and EOFs, which were read uncharged past the budget and the
+ * run deadline. 60 empty result sets against an op budget of 40 units: it
+ * trips, and the connection is closed, not drained. */
+static void put_eof_status(HlMyWriter *w, uint8_t seq, uint16_t status)
+{
+    size_t m = hl_my_packet_begin(w, seq);
+    hl_my_put_u8(w, HL_MY_PKT_EOF);
+    hl_my_put_u16(w, 0);        /* warnings */
+    hl_my_put_u16(w, status);   /* status */
+    hl_my_packet_end(w, m);
+}
+
+UTEST(mysql_conn, empty_result_sets_are_charged)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    uint8_t seq = 1;
+    for (int i = 0; i < 60; i++) {
+        size_t m = hl_my_packet_begin(&s, seq++);       /* column count */
+        hl_my_put_lenenc_int(&s, 1);
+        hl_my_packet_end(&s, m);
+        put_col_def(&s, seq++, "x", HL_MY_TYPE_LONG);
+        put_eof(&s, seq++);                             /* end of col defs */
+        put_eof_status(&s, seq++, i < 59 ? HL_MY_SERVER_MORE_RESULTS : 0);
+    }
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    HlDbOpBudget budget = { 40, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_my_conn_query(&conn, "CALL empty_forever()", NULL, NULL, NULL, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL); /* closed, not drained */
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* The same stream through exec_multi (migrations' path). */
+UTEST(mysql_conn, exec_multi_empty_result_sets_are_charged)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    uint8_t seq = 1;
+    for (int i = 0; i < 60; i++)
+        put_ok_more(&s, seq++, i < 59 ? HL_MY_SERVER_MORE_RESULTS : 0);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    HlDbOpBudget budget = { 40, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_my_conn_exec_multi(&conn, "CALL ok_forever()");
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(conn.transport == NULL);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A budget that trips on its @p my_trip_at'th charge (0-unit asks included). */
+static int my_charges, my_trip_at;
+static int my_count_trip_fn(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return ++my_charges >= my_trip_at;
+}
+
+static int64_t my_test_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A server that says nothing (SLEEP(), a lock wait) no longer holds the call
+ * in recv for the whole read timeout - here none at all - with no budget or
+ * run deadline checked (audit 18): the wait is polled in slices that ask the
+ * budget, and a trip closes the connection. */
+UTEST(mysql_conn, a_silent_server_is_stopped_by_a_tripped_budget)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db?read_timeout=0",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_EQ(0, conn.read_timeout_ms);
+
+    my_charges = 0;
+    my_trip_at = 3;                      /* the third slice's ask trips */
+    HlDbBudgetBinding prev = hl_db_budget_swap(my_count_trip_fn, NULL);
+    int64_t t0 = my_test_ms();
+    int rc = hl_my_conn_query(&conn, "SELECT SLEEP(3600)", NULL, NULL, NULL, NULL);
+    int64_t spent = my_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(3, my_charges);
+    EXPECT_TRUE(spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* ?read_timeout= now bounds an adopted connection's wait too (it was only
+ * installed as SO_RCVTIMEO by hl_my_conn_open). */
+UTEST(mysql_conn, the_read_timeout_bounds_a_silent_server)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db?read_timeout=250",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    int64_t t0 = my_test_ms();
+    int rc = hl_my_conn_query(&conn, "SELECT SLEEP(3600)", NULL, NULL, NULL, NULL);
+    int64_t spent = my_test_ms() - t0;
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent >= 200 && spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(strstr(conn.errmsg, "timed out") != NULL);
 
     hl_my_conn_close(&conn);
     hl_my_writer_free(&s);

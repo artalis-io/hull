@@ -263,6 +263,17 @@ static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
     return 0;
 }
 
+static void my_abandon(HlMyConn *conn);
+
+/* Asked between the slices of a wait for the server (audit 18): a 0-unit
+ * charge, which trips once the run's budget is spent or its wall-clock
+ * deadline has passed. */
+static int my_wait_stop(void *ud)
+{
+    (void)ud;
+    return hl_db_budget_charge(0) != 0;
+}
+
 /* Read one packet. The returned body is valid until the next call, which
  * compacts the previously-consumed bytes. Returns 0 / -1. */
 static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
@@ -305,9 +316,20 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
             if (!nb) { conn_set_err(conn, "out of memory"); return -1; }
             conn->rbuf = nb; conn->rcap = ncap;
         }
-        ssize_t n;
-        do { n = conn_read_raw(conn, conn->rbuf + conn->rlen, conn->rcap - conn->rlen); }
-        while (n < 0 && errno == EINTR);
+        /* Wait for the server in slices, asking the run's budget between
+         * them: a recv blocked for the whole ?read_timeout= (300 s by
+         * default, 0 = for ever) while the server ran SLEEP() or waited on a
+         * lock, with no budget and no run deadline checked (audit 18). A trip
+         * closes the connection, as a trip mid-reply does. */
+        int wr = hl_db_transport_wait_readable(conn->transport,
+                                               conn->read_timeout_ms,
+                                               my_wait_stop, NULL);
+        if (wr == -2) { my_abandon(conn); return -1; }
+        ssize_t n = -1;
+        if (wr == 1) {
+            do { n = conn_read_raw(conn, conn->rbuf + conn->rlen, conn->rcap - conn->rlen); }
+            while (n < 0 && errno == EINTR);
+        }
         if (n <= 0) {
             conn_set_err(conn, n < 0 ? "read failed or timed out (see ?read_timeout=)"
                                      : "connection closed by server");
@@ -397,7 +419,7 @@ static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
                  plugin ? plugin : "?");
 }
 
-static int my_abandon_if_tripped(HlMyConn *conn, uint32_t body_len);
+static int reply_frame(HlMyConn *conn, HlMyFrame *f);
 
 /* Packets the auth exchange may take after the HandshakeResponse41: an OK /
  * ERR, at most one AuthSwitchRequest, a caching_sha2 AuthMoreData or two. The
@@ -414,6 +436,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
 {
     memset(conn, 0, sizeof *conn);
     conn->transport = t;
+    conn->read_timeout_ms = dsn->read_timeout_ms;
     /* Set once a TLS session whose certificate chain and host name were
      * VERIFIED (sslmode=verify-ca / verify-full) is attached to the transport:
      * the only channel the password itself may cross (caching_sha2 full auth). */
@@ -530,10 +553,9 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
             conn_set_err(conn, "too many packets during authentication");
             hl_my_conn_close(conn); return -1;
         }
-        if (conn_next_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
         /* Read for the run that opens the connection, so charged like a
          * reply's frames (audit 17). */
-        if (my_abandon_if_tripped(conn, f.body_len)) return -1;
+        if (reply_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
         if (f.body_len == 0) continue;
         uint8_t hdr = f.body[0];
 
@@ -655,8 +677,8 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 
 /* ── Queries (COM_QUERY text protocol) ────────────────────────────── */
 
-/* Each row of a reply - the first result set's and every later one's - is
- * charged to the run it is read for: 1 unit plus 1 per HL_DB_ALLOC_UNIT_BYTES
+/* Each packet of a reply - the first result set's and every later one's - is
+ * charged (reply_frame) to the run it is read for: 1 unit plus 1 per HL_DB_ALLOC_UNIT_BYTES
  * of the packet (cap/db_budget.h). A 0-unit charge only ASKED, so a db.async
  * op's budget (HlDbOpBudget, which a 0 charge never trips) bounded nothing,
  * and the rows of a 2nd+ result set were discarded unchecked (audit 17). Once
@@ -670,17 +692,35 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
  * already done with the session. Simpler than KILL QUERY on a side
  * connection, which would need a new connect (and its auth) from inside the
  * run. */
-static int my_abandon_if_tripped(HlMyConn *conn, uint32_t body_len)
+static void my_abandon(HlMyConn *conn)
 {
-    int64_t units = 1 + ((int64_t)body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
-                        HL_DB_ALLOC_UNIT_BYTES;
-    if (hl_db_budget_charge(units) == 0) return 0;
     hl_my_conn_close(conn);
     conn->broken = 1;
     conn_set_err(conn, "interrupted (instruction limit exceeded); the "
                        "connection was closed rather than read to the end of "
                        "the reply");
+}
+
+static int my_abandon_if_tripped(HlMyConn *conn, uint32_t body_len)
+{
+    int64_t units = 1 + ((int64_t)body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                        HL_DB_ALLOC_UNIT_BYTES;
+    if (hl_db_budget_charge(units) == 0) return 0;
+    my_abandon(conn);
     return 1;
+}
+
+/* Read the next packet of a command's reply and charge it. Only the data
+ * rows were charged: the OK packets, column counts, column definitions and
+ * EOFs between them were not, so a server answering with an endless stream
+ * of empty result sets (a stored procedure looping over an empty SELECT)
+ * kept the call reading, uncharged, past the budget and the run deadline
+ * (audit 18). Every packet of a reply goes through here. 0 / -1. */
+static int reply_frame(HlMyConn *conn, HlMyFrame *f)
+{
+    if (conn_next_frame(conn, f) != 0) return -1;
+    if (my_abandon_if_tripped(conn, f->body_len)) return -1;
+    return 0;
 }
 
 static int refuse_if_broken(HlMyConn *conn)
@@ -774,7 +814,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     if (se) { conn_set_err(conn, "failed to send query"); return -1; }
 
     HlMyFrame f;
-    if (conn_next_frame(conn, &f) != 0) return -1;
+    if (reply_frame(conn, &f) != 0) return -1;
     if (f.body_len == 0) { conn_set_err(conn, "empty query response"); return -1; }
     uint8_t hdr = f.body[0];
 
@@ -820,7 +860,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
         conn_set_err(conn, "out of memory"); goto fail;
     }
     for (int i = 0; i < ncols; i++) {
-        if (conn_next_frame(conn, &f) != 0) goto fail;
+        if (reply_frame(conn, &f) != 0) goto fail;
         HlMyColumn col;
         if (hl_my_parse_column_def(&f, &col) != 0) {
             conn_set_err(conn, "malformed column definition"); goto fail;
@@ -836,12 +876,12 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
 
     /* No CLIENT_DEPRECATE_EOF was advertised, so an EOF terminates the column
      * defs (and, below, the rows). */
-    if (conn_next_frame(conn, &f) != 0) goto fail;   /* intermediate EOF */
+    if (reply_frame(conn, &f) != 0) goto fail;   /* intermediate EOF */
     if (desc_cb) desc_cb(cb_ctx, fields, ncols);
 
     int stop = 0;
     for (;;) {
-        if (conn_next_frame(conn, &f) != 0) goto fail;
+        if (reply_frame(conn, &f) != 0) goto fail;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
             if (reply_done(conn, eof_status(&f)) != 0) goto fail;   /* end of rows */
             break;
@@ -868,7 +908,6 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
             }
         }
         if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed result row"); goto fail; }
-        if (my_abandon_if_tripped(conn, f.body_len)) goto fail;
         if (row_cb && !stop && row_cb(cb_ctx, vals, lens, ncols) != 0)
             stop = 1;                           /* keep draining to EOF */
     }
@@ -897,8 +936,8 @@ static int drain_defs(HlMyConn *conn, int n)
 {
     HlMyFrame f;
     for (int i = 0; i < n; i++)
-        if (conn_next_frame(conn, &f) != 0) return -1;
-    if (n > 0 && conn_next_frame(conn, &f) != 0) return -1;   /* EOF */
+        if (reply_frame(conn, &f) != 0) return -1;
+    if (n > 0 && reply_frame(conn, &f) != 0) return -1;   /* EOF */
     return 0;
 }
 
@@ -1083,7 +1122,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (se) { conn_set_err(conn, "failed to send prepare"); return -1; }
 
     HlMyFrame f;
-    if (conn_next_frame(conn, &f) != 0) return -1;
+    if (reply_frame(conn, &f) != 0) return -1;
     if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
         HlMyErr e;
         if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
@@ -1146,7 +1185,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (se) { conn_set_err(conn, "failed to send execute"); goto close_stmt; }
 
     /* 4. EXECUTE response: OK (no result), ERR, or a binary result set. */
-    if (conn_next_frame(conn, &f) != 0) goto close_stmt;
+    if (reply_frame(conn, &f) != 0) goto close_stmt;
     if (f.body_len == 0) { conn_set_err(conn, "empty execute response"); goto close_stmt; }
     uint8_t hdr = f.body[0];
 
@@ -1185,7 +1224,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (!names || !fields || !vals) { conn_set_err(conn, "out of memory"); goto close_stmt; }
 
     for (int i = 0; i < ncols; i++) {
-        if (conn_next_frame(conn, &f) != 0) goto close_stmt;
+        if (reply_frame(conn, &f) != 0) goto close_stmt;
         HlMyColumn col;
         if (hl_my_parse_column_def(&f, &col) != 0) {
             conn_set_err(conn, "malformed column definition"); goto close_stmt;
@@ -1199,13 +1238,13 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
         fields[i].flags = col.flags;
     }
 
-    if (conn_next_frame(conn, &f) != 0) goto close_stmt;   /* EOF after col defs */
+    if (reply_frame(conn, &f) != 0) goto close_stmt;   /* EOF after col defs */
     if (desc_cb) desc_cb(cb_ctx, fields, ncols);
 
     /* 5. Binary result rows until the terminating EOF. */
     int stop = 0;
     for (;;) {
-        if (conn_next_frame(conn, &f) != 0) goto close_stmt;
+        if (reply_frame(conn, &f) != 0) goto close_stmt;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
             if (reply_done(conn, eof_status(&f)) != 0) goto close_stmt;   /* end of rows */
             break;
@@ -1233,7 +1272,6 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
                 decode_binary_value(&rc, fields[i].type, fields[i].flags, &vals[i]);
         }
         if (hl_my_cursor_err(&rc)) { conn_set_err(conn, "malformed binary row"); goto close_stmt; }
-        if (my_abandon_if_tripped(conn, f.body_len)) goto close_stmt;
         if (row_cb && !stop && row_cb(cb_ctx, vals, ncols) != 0)
             stop = 1;                                       /* keep draining to EOF */
     }
@@ -1266,7 +1304,7 @@ static int drain_one_result(HlMyConn *conn, int *more)
 {
     *more = 0;
     HlMyFrame f;
-    if (conn_next_frame(conn, &f) != 0) return -1;
+    if (reply_frame(conn, &f) != 0) return -1;
     if (f.body_len == 0) { conn_set_err(conn, "empty script response"); return -1; }
     uint8_t hdr = f.body[0];
 
@@ -1303,10 +1341,10 @@ static int drain_one_result(HlMyConn *conn, int *more)
         conn_set_err(conn, "malformed column count"); return -1;
     }
     for (uint64_t i = 0; i < ncols; i++)
-        if (conn_next_frame(conn, &f) != 0) return -1;   /* column defs */
-    if (conn_next_frame(conn, &f) != 0) return -1;       /* EOF after col defs */
+        if (reply_frame(conn, &f) != 0) return -1;   /* column defs */
+    if (reply_frame(conn, &f) != 0) return -1;       /* EOF after col defs */
     for (;;) {
-        if (conn_next_frame(conn, &f) != 0) return -1;
+        if (reply_frame(conn, &f) != 0) return -1;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
             uint16_t status = eof_status(&f);
             conn->server_status = status;
@@ -1322,8 +1360,7 @@ static int drain_one_result(HlMyConn *conn, int *more)
             conn->last_err_code = (hl_my_parse_err(&f, 1, &e) == 0) ? e.code : 0;
             return -2;
         }
-        /* otherwise a data row: discarded, but charged (audit 17) */
-        if (my_abandon_if_tripped(conn, f.body_len)) return -1;
+        /* otherwise a data row: discarded (charged by reply_frame) */
     }
 }
 

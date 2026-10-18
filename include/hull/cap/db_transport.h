@@ -173,6 +173,21 @@ ssize_t hl_db_transport_recv(HlDbTransport *t, uint8_t *buf, size_t len);
 size_t  hl_db_transport_pending(HlDbTransport *t);
 
 /**
+ * Wait until a recv on @p t would not block: up to @p timeout_ms in all
+ * (<= 0: no bound), polled in HL_DB_WAIT_SLICE_MS slices, asking @p stop(@p ud)
+ * (may be NULL) after each slice that saw nothing. A recv that blocked for the
+ * whole ?read_timeout= (300 s by default, 0 = for ever) on a server running
+ * pg_sleep or waiting on a lock checked no budget and no run deadline: the
+ * event loop sat in recv (audit 18). Returns 1 when readable (or hung up /
+ * failed: the recv says which), 0 when @p timeout_ms ran out, -2 when @p stop
+ * said to stop, -1 on a poll error or no descriptor.
+ */
+#define HL_DB_WAIT_SLICE_MS 100
+typedef int (*HlDbWaitStopFn)(void *ud);
+int hl_db_transport_wait_readable(HlDbTransport *t, int timeout_ms,
+                                  HlDbWaitStopFn stop, void *ud);
+
+/**
  * Send every byte of @p buf (all-or-error), looping over hl_db_transport_send.
  * This is conn_send's semantics: returns 0 iff all @p len bytes were written, -1
  * on any short/failed write.

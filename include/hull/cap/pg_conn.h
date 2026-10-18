@@ -66,6 +66,13 @@ typedef struct HlPgConn {
      * next would answer an earlier query. Every later query refuses; the
      * backend reconnects (db_postgres.c). */
     int      broken;
+    /* The DSN's ?read_timeout= (0 = none): bounds each wait for the server,
+     * polled in slices that ask the run's budget (audit 18). */
+    int      read_timeout_ms;
+    /* A tripped run's COMMIT completed on the server: the reply is read on
+     * to ReadyForQuery (frames counted, bounded) instead of dropped, so the
+     * reported outcome is the server's (audit 18). */
+    int      finishing;
     char     errmsg[256];
 } HlPgConn;
 
