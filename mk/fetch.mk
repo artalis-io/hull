@@ -267,6 +267,9 @@ fetch-duckdb:
 COSMOCC_VERSION := 4.0.2
 COSMOCC_SHA256 := 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
 COSMOCC_URL := https://cosmo.zip/pub/cosmocc/cosmocc-$(COSMOCC_VERSION).zip
+# The same zip from the upstream GitHub release, tried when cosmo.zip fails;
+# the SHA-256 check is what makes either source acceptable.
+COSMOCC_MIRROR := https://github.com/jart/cosmopolitan/releases/download/$(COSMOCC_VERSION)/cosmocc-$(COSMOCC_VERSION).zip
 COSMOCC_DIR ?= /opt/cosmo
 
 fetch-cosmocc:
@@ -274,7 +277,9 @@ fetch-cosmocc:
 		echo "cosmocc already installed: $$(which cosmocc)"; \
 	else \
 		echo "=== Fetching cosmocc $(COSMOCC_VERSION) to $(COSMOCC_DIR) ==="; \
-		curl $(CURL_RETRY_LARGE) -sL -o /tmp/cosmocc.zip "$(COSMOCC_URL)"; \
+		curl --connect-timeout 30 --retry 3 --retry-all-errors -fsL -o /tmp/cosmocc.zip "$(COSMOCC_URL)" \
+			|| { echo "cosmo.zip failed; falling back to $(COSMOCC_MIRROR)"; \
+			     curl $(CURL_RETRY_LARGE) -fsL -o /tmp/cosmocc.zip "$(COSMOCC_MIRROR)"; }; \
 		echo "Verifying SHA-256..."; \
 		ACTUAL=$$($(SHA256CMD) /tmp/cosmocc.zip | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(COSMOCC_SHA256)" ]; then \

@@ -62,9 +62,15 @@ verify() {  # <file> <expected-sha>
 }
 
 # ── cosmocc ──────────────────────────────────────────────────────────────
+# cosmo.zip first, then the same zip from the upstream GitHub release; the
+# SHA-256 check below is what makes either source acceptable.
 url="https://cosmo.zip/pub/cosmocc/cosmocc-${version}.zip"
+mirror="https://github.com/jart/cosmopolitan/releases/download/${version}/cosmocc-${version}.zip"
 echo "build_cosmocc_bundle: fetching $url"
-curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "$url" -o "$work/cosmocc.zip"
+if ! curl -fsSL --connect-timeout 30 --retry 3 --retry-all-errors --retry-delay 2 "$url" -o "$work/cosmocc.zip"; then
+    echo "build_cosmocc_bundle: falling back to $mirror"
+    curl -fsSL --connect-timeout 30 --retry 3 --retry-all-errors --retry-delay 2 "$mirror" -o "$work/cosmocc.zip"
+fi
 verify "$work/cosmocc.zip" "$sha"
 echo "build_cosmocc_bundle: cosmocc SHA-256 OK"
 
