@@ -67,7 +67,11 @@ RUN git config --system --add safe.directory '*'
 # bump procedure.
 ARG COSMOCC_VERSION=4.0.2
 ARG COSMOCC_SHA256=85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
-RUN curl -fsSL --retry 5 --retry-all-errors -o /tmp/cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-${COSMOCC_VERSION}.zip" \
+# cosmo.zip first, then the same zip from the upstream GitHub release (it was
+# unreachable for the v0.17.1 release run). The SHA-256 check is what makes
+# either source acceptable.
+RUN { curl -fsSL --connect-timeout 30 --retry 3 --retry-all-errors -o /tmp/cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-${COSMOCC_VERSION}.zip" \
+   || curl -fsSL --connect-timeout 30 --retry 5 --retry-all-errors -o /tmp/cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/${COSMOCC_VERSION}/cosmocc-${COSMOCC_VERSION}.zip"; } \
  && echo "${COSMOCC_SHA256}  /tmp/cosmocc.zip" | sha256sum -c - \
  && mkdir -p /opt/cosmo \
  && unzip -q -o /tmp/cosmocc.zip -d /opt/cosmo \
