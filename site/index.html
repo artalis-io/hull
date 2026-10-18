@@ -33,7 +33,7 @@
     "applicationSubCategory": "Runtime",
     "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
     "description": "Secure execution for AI-generated applications and tools. Every external capability is declared in the manifest and checked at an OS-enforced boundary the script cannot cross. Local-first, deploy-anywhere, and packaged as a signed static binary.",
-    "softwareVersion": "0.17.0",
+    "softwareVersion": "0.17.1",
     "url": "https://gethull.dev/",
     "downloadUrl": "https://github.com/artalis-io/hull/releases",
     "codeRepository": "https://github.com/artalis-io/hull",
@@ -226,7 +226,7 @@
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
         <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          <span data-hull-version>v0.17.0</span>
+          <span data-hull-version>v0.17.1</span>
         </a>
       </a>
 
@@ -540,17 +540,17 @@
 <pre class="code-tab-panel" id="install-panel-linux" role="tabpanel" aria-labelledby="install-tab-linux" tabindex="0" data-tab-panel="linux"><span class="tk-com"># Install over TLS. install.sh SHA-256-checks each binary against the</span>
 <span class="tk-com"># release manifest as it downloads. Verify the installer/signature below.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (<span data-hull-version>v0.17.0</span>)
+hull installed to ~/.local/bin/hull  (<span data-hull-version>v0.17.1</span>)
 </pre>
 <pre class="code-tab-panel hidden" id="install-panel-macos" role="tabpanel" aria-labelledby="install-tab-macos" tabindex="0" data-tab-panel="macos"><span class="tk-com"># Same signed installer; it auto-detects macOS arm64 (or the universal</span>
 <span class="tk-com"># Cosmopolitan APE fallback) and SHA-256-checks each binary it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (<span data-hull-version>v0.17.0</span>)
+hull installed to ~/.local/bin/hull  (<span data-hull-version>v0.17.1</span>)
 </pre>
 <pre class="code-tab-panel hidden" id="install-panel-windows" role="tabpanel" aria-labelledby="install-tab-windows" tabindex="0" data-tab-panel="windows"><span class="tk-com"># PowerShell, no admin or Developer Mode needed. Installs hull.com and</span>
 <span class="tk-com"># adds it to your user PATH; SHA-256-checked against the manifest.</span>
 PS&gt; <span class="tk-fn">irm</span> <span class="tk-str">https://gethull.dev/install.ps1</span> | <span class="tk-fn">iex</span>
-hull installed to %LOCALAPPDATA%\Programs\Hull\hull.com  (<span data-hull-version>v0.17.0</span>)
+hull installed to %LOCALAPPDATA%\Programs\Hull\hull.com  (<span data-hull-version>v0.17.1</span>)
 Hull is ready in this PowerShell session.
 </pre>
           </div>
@@ -1743,7 +1743,7 @@ PS&gt; hull verify-release hull.sha256 hull.sha256.sig
           <div class="bg-ink-900 p-6">
             <div class="flex items-center gap-2 mb-4">
               <i data-lucide="check-circle-2" class="w-4 h-4 text-accent"></i>
-              <span class="text-sm font-semibold text-paper-50" data-hull-version>Shipped through v0.17.0</span>
+              <span class="text-sm font-semibold text-paper-50" data-hull-version>Shipped through v0.17.1</span>
             </div>
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
@@ -2032,7 +2032,7 @@ $ hull agent routes my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100" data-hull-version>v0.17.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100" data-hull-version>v0.17.1</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
         Page last updated <time datetime="2026-08">August&nbsp;2026</time>.
