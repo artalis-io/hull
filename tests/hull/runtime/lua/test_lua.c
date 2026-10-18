@@ -6487,12 +6487,14 @@ static void ssh_tick_until_done(const HlAsyncBackend *be, HlAsyncBackendCtx *ctx
 typedef struct {
     const HlAsyncBackend *be;
     int lfd, peer, port;
+    int with_db;            /* the runtime has a default database (caps) */
 } SshBridgeFix;
 
 /* Returns 0, or the step that failed. */
-static int ssh_bridge_open(SshBridgeFix *bf)
+static int ssh_bridge_open_ex(SshBridgeFix *bf, int with_db)
 {
     memset(bf, 0, sizeof *bf);
+    bf->with_db = with_db;
     bf->lfd = bf->peer = -1;
     bf->be = hl_async_backend();
     if (!bf->be) return 1;
@@ -6509,16 +6511,19 @@ static int ssh_bridge_open(SshBridgeFix *bf)
         getsockname(bf->lfd, (struct sockaddr *)&a, &alen) != 0) return 3;
     bf->port = ntohs(a.sin_port);
 
-    init_lua();
+    if (with_db) init_lua_with_caps();
+    else         init_lua();
+    if (!lua_initialized) return 4;
     if (bf->be->init(&lua_rt.base.async_ctx, NULL) != 0) return 4;
     if (bf->be->pool_create(&lua_rt.base.thread_pool, lua_rt.base.async_ctx,
                             2, 16) != 0) return 5;
 
     char src[320];
     snprintf(src, sizeof src,
-        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "app.manifest({ modules = { 'hull/ssh@1'%s },\n"
         "  ssh = { connect = { hosts = { '127.0.0.1' }, ports = { %d },\n"
-        "                      users = { 'operator' } } } })\n", bf->port);
+        "                      users = { 'operator' } } } })\n",
+        with_db ? ", 'hull/db@1'" : "", bf->port);
     if (ssh_declare(src) != 0) return 6;
 
     snprintf(src, sizeof src,
@@ -6535,6 +6540,8 @@ static int ssh_bridge_open(SshBridgeFix *bf)
     bf->peer = accept(bf->lfd, NULL, NULL);
     return bf->peer >= 0 ? 0 : 9;
 }
+
+static int ssh_bridge_open(SshBridgeFix *bf) { return ssh_bridge_open_ex(bf, 0); }
 
 /* Start `src` in its own coroutine and run the loop until it finishes.
  * Returns the coroutine, finished or not. */
@@ -6553,7 +6560,8 @@ static void ssh_bridge_close(SshBridgeFix *bf)
     HlAsyncBackendCtx  *actx = lua_rt.base.async_ctx;
     HlAsyncBackendPool *pool = lua_rt.base.thread_pool;
     ssh_undeclare();
-    cleanup_lua();
+    if (bf->with_db) cleanup_lua_caps();
+    else             cleanup_lua();
     if (bf->be && actx) {
         bf->be->tick(actx, 0);
         if (pool) bf->be->pool_free(pool);
@@ -6609,6 +6617,46 @@ UTEST(lua_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
     EXPECT_EQ_MSG(lua_status(co_b), LUA_OK, "the first reader resumes");
     if (lua_status(co_b) == LUA_OK)
         EXPECT_STREQ(lua_tostring(co_b, -1), "ping");
+    ssh_bridge_close(&bf);
+}
+
+UTEST(lua_ssh_bridge, a_close_wakes_its_waiter_from_the_loop)
+{
+    /* Audit 18 M3. Closing a stream another coroutine is parked on used to
+     * resume that coroutine right there, inside the closer's run: the
+     * resume's stale-transaction guard rolled back the CLOSER's open
+     * transaction, and clearing active_co left the closer unable to wait.
+     * The waiter is woken from the loop now, after the closer's run. */
+    SshBridgeFix bf;
+    ASSERT_EQ(ssh_bridge_open_ex(&bf, 1), 0);
+
+    lua_State *co_b, *co_c;
+    ASSERT_EQ_MSG(ssh_co_start(&lua_rt,
+        "local d, m, code = H:read(16)\n"
+        "return code\n", &co_b), LUA_YIELD, "the reader parks");
+
+    int st = ssh_co_start(&lua_rt,
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE sc (x INTEGER)')\n"
+        "db.exec('BEGIN')\n"
+        "db.exec('INSERT INTO sc VALUES (1)')\n"
+        "H:close()\n"
+        "assert(db.in_transaction(), 'the close ended the closer\\'s transaction')\n"
+        "db.exec('COMMIT')\n"
+        "hull.sleep(5)\n"
+        "return db.query('SELECT COUNT(*) AS n FROM sc')[1].n\n", &co_c);
+    if (st != LUA_YIELD && st != LUA_OK)
+        fprintf(stderr, "closer: %s\n", lua_tostring(co_c, -1));
+    EXPECT_EQ_MSG(st, LUA_YIELD, "the closer keeps its transaction and can wait");
+    EXPECT_EQ_MSG(lua_status(co_b), LUA_YIELD,
+                  "the reader is not resumed inside the closer's run");
+
+    ssh_tick_until_done(bf.be, lua_rt.base.async_ctx, co_c);
+    ssh_tick_until_done(bf.be, lua_rt.base.async_ctx, co_b);
+    EXPECT_EQ(lua_status(co_c), LUA_OK);
+    if (lua_status(co_c) == LUA_OK) EXPECT_EQ(lua_tointeger(co_c, -1), 1);
+    EXPECT_EQ_MSG(lua_status(co_b), LUA_OK, "the reader is woken");
+    if (lua_status(co_b) == LUA_OK) EXPECT_STREQ(lua_tostring(co_b, -1), "closed");
     ssh_bridge_close(&bf);
 }
 
@@ -10697,6 +10745,52 @@ UTEST(lua_audit15, compute_stream_output_is_capped_at_the_heap_limit)
         printf("  got: %s\n", e ? e : "?");
     }
     v.mem_limit = saved;
+
+    hl_lua_free(&v);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 18: compute.stream took a registry ref of its output callback
+ * before reading the opts table, and an opts __index that raised leaked it
+ * (one registry slot per call). The callback stays in its argument slot now.
+ * Probed through the registry free list: a slot freed just before the call
+ * is the next one handed out, unless the call took it and never gave it
+ * back. */
+UTEST(lua_audit18, compute_stream_raising_opts_leak_no_registry_ref)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a15_wasm_entries, NULL);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    ASSERT_EQ(luaL_dostring(v.L, "compute = require('hull.compute')"), LUA_OK);
+
+    lua_pushboolean(v.L, 1);
+    int r1 = luaL_ref(v.L, LUA_REGISTRYINDEX);
+    luaL_unref(v.L, LUA_REGISTRYINDEX, r1);
+    int rc = luaL_dostring(v.L,
+        "local o = setmetatable({}, { __index = function() error('opts boom') end }) "
+        "local ok, e = pcall(compute.stream, 'echo', 'abc', function() end, o) "
+        "assert(not ok and tostring(e):find('opts boom', 1, true), tostring(e))");
+    EXPECT_EQ(rc, LUA_OK);
+    if (rc != LUA_OK) printf("  got: %s\n", lua_tostring(v.L, -1));
+    lua_settop(v.L, 0);
+    lua_pushboolean(v.L, 1);
+    int r2 = luaL_ref(v.L, LUA_REGISTRYINDEX);
+    EXPECT_EQ_MSG(r2, r1, "the raising call kept a registry slot");
+    luaL_unref(v.L, LUA_REGISTRYINDEX, r2);
+
+    /* The callback still receives the output. */
+    EXPECT_EQ(luaL_dostring(v.L,
+        "local got = {} "
+        "compute.stream('echo', 'hello', function(d) got[#got + 1] = d end) "
+        "assert(table.concat(got) == 'hello', table.concat(got))"), LUA_OK);
 
     hl_lua_free(&v);
     hl_cap_wasm_destroy(&cache);

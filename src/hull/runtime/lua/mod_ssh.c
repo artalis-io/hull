@@ -82,7 +82,8 @@ extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
 
 typedef struct {
     HlNetStream *s;     /* owned; NULL after close (idempotent, __gc-safe) */
-    HlAsyncCtx  *ctx;   /* live only while parked */
+    HlAsyncCtx  *ctx;   /* live only while parked (or its wake is pending) */
+    HlAsyncBackendCtx *loop;   /* the loop a pending wake timer is on */
     size_t       want;  /* size a parked read is retrying */
 } HlLuaSshStream;
 
@@ -152,22 +153,18 @@ static int push_net_err(lua_State *L, int rc)
     return 3;
 }
 
-/* Hand a parked coroutine back, once.
- *
- * Declared before close because close has to use it: a read parked on this
- * stream is waiting for a wake-up that closing will never deliver, and
- * clearing the user pointer first - which is what stops ssh_on_resume from
- * touching a stream that is going away - also stopped it from un-parking
- * anybody. The coroutine then waited forever and its context leaked.
- *
- * Called with the stream still alive and already marked closing, so the
- * retry the coroutine performs reads the closed state and returns an error
- * rather than parking again. */
+/* Hand a parked coroutine back, once. Only ever from the loop: the stream's
+ * own op resuming (ssh_on_resume), or the wake a close scheduled
+ * (ssh_wake_fire). hl_lua_async_resume assumes a loop-level call - it runs the
+ * stale-transaction guard, re-arms the budget and deadline, and clears
+ * active_co / active_conn - so resuming from inside another coroutine's run
+ * would roll back THAT run's transaction and leave it unable to wait. */
 static void ssh_unpark(HlLuaSshStream *o)
 {
     HlAsyncCtx *ctx = o->ctx;
     if (!ctx) return;
     o->ctx = NULL;                 /* one resume per park */
+    ctx->detached_timer = 0;
 
     /* Same split as worker_wasm.c: a detached (app.main) caller has no
      * connection to hand back, an attached one does. */
@@ -177,17 +174,52 @@ static void ssh_unpark(HlLuaSshStream *o)
         hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
 }
 
+/* The deferred half of a close that had a coroutine parked on the stream, on
+ * the loop (the shape of hull._wake's slot_wake_fire). The ctx is still parked:
+ * a cancelled request or a teardown cancels this timer before it frees the
+ * ctx. ctx->driver is the handle, which the parked coroutine's own stack
+ * keeps alive. */
+static void ssh_wake_fire(void *user_data)
+{
+    HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
+    HlLuaSshStream *o = (HlLuaSshStream *)ctx->driver;
+    ctx->detached_timer = 0;       /* fired: nothing to cancel any more */
+    if (o && o->ctx == ctx) ssh_unpark(o);
+}
+
+/* Stop a close's pending wake (the ctx is being cancelled instead). */
+static void ssh_cancel_wake(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
+{
+    if (ctx->detached_timer > 0 && loop)
+        hl_async_backend()->timer_cancel(loop, (uint64_t)ctx->detached_timer);
+    ctx->detached_timer = 0;
+}
+
 static int lua_ssh_close(lua_State *L)
 {
     require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
     if (o->s) {
-        /* Order is the whole content of this function. Close FIRST so the
-         * stream reports closed, THEN un-park so the resumed coroutine's
-         * retry sees that and returns "connection closed" instead of parking
-         * again, and only then drop the user pointer and release. */
+        /* A read or write parked on this stream is waiting for a wake-up the
+         * close below retracts with the stream's op, so it has to be handed
+         * back explicitly - but from the loop, not from inside this caller's
+         * run (audit 18 M3: resumed here, the waiter's resume rolled back the
+         * CLOSER's transaction, re-armed its budget and cleared active_co, so
+         * the closer could no longer wait). Scheduled before anything is
+         * touched, so a failure leaves the stream as it was. The ctx stays
+         * parked (o->ctx) until the timer fires; a cancelled request or a
+         * teardown cancels the timer first. */
+        if (o->ctx && o->ctx->detached_timer == 0) {
+            uint64_t tid = o->loop
+                ? hl_async_backend()->timer_add(o->loop, 0, ssh_wake_fire, o->ctx)
+                : 0;
+            if (tid == 0)
+                return luaL_error(L, "ssh: failed to schedule the close");
+            o->ctx->detached_timer = (int64_t)tid;
+        }
+        /* The resumed coroutine's retry finds the stream gone and returns
+         * "connection closed" instead of parking again. */
         hl_net_stream_close(o->s);
-        ssh_unpark(o);
         hl_net_stream_set_user(o->s, NULL);
         hl_net_stream_free(o->s);
         o->s = NULL;
@@ -244,6 +276,7 @@ static void ssh_on_request_cancel(KlAsyncOp *kop, void *user_data)
     HlLuaSshStream *o = (HlLuaSshStream *)ctx->driver;
     if (o && o->ctx == ctx) {
         o->ctx = NULL;
+        ssh_cancel_wake(ctx, o->loop);    /* a close's pending wake */
         if (o->s) hl_net_stream_close(o->s);
     }
     hl_async_ctx_cancel(ctx);
@@ -255,10 +288,10 @@ static void ssh_on_request_cancel(KlAsyncOp *kop, void *user_data)
  * hl_async_ctx_cancel releases the coroutine. */
 static void ssh_on_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
 {
-    (void)loop;
     HlLuaSshStream *o = (HlLuaSshStream *)ctx->driver;
     if (o && o->ctx == ctx) {
         o->ctx = NULL;
+        ssh_cancel_wake(ctx, loop);       /* a close's pending wake */
         if (o->s) hl_net_stream_close(o->s);
     }
 }
@@ -328,6 +361,7 @@ static int ssh_park(HlLua *lua, HlLuaSshStream *o)
     /* Published only once both are armed: nothing can reach it before then,
      * because op_complete defers its resume to a later tick. */
     o->ctx = ctx;
+    o->loop = lua->base.async_ctx;
     if (ctx->detached) {
         ctx->on_shutdown = ssh_on_shutdown;
         hl_async_ctx_track(ctx, &lua->base.async_live);
@@ -343,7 +377,9 @@ static int ssh_park(HlLua *lua, HlLuaSshStream *o)
  * refusal names the caller's mistake rather than queueing behind it. */
 static int ssh_busy(lua_State *L, const HlLuaSshStream *o)
 {
-    if (!o->ctx) return 0;
+    /* A closed stream's waiter may still be due its wake; a new caller just
+     * gets "closed" from the step below. */
+    if (!o->ctx || !o->s) return 0;
     push_err(L, "busy: another coroutine is waiting on this connection");
     return 1;
 }
@@ -365,7 +401,7 @@ static int lua_ssh_read_k(lua_State *L, int status, lua_KContext kctx)
 
 static int ssh_read_step(lua_State *L, HlLuaSshStream *o)
 {
-    if (!o->s) return push_err(L, "closed");
+    if (!o->s) return push_net_err(L, HL_NET_E_CLOSED);
 
     luaL_Buffer b;
     char *p = luaL_buffinitsize(L, &b, o->want);
@@ -419,7 +455,7 @@ static int lua_ssh_write_k(lua_State *L, int status, lua_KContext kctx)
 
 static int ssh_write_step(lua_State *L, HlLuaSshStream *o, int ud_idx)
 {
-    if (!o->s) return push_err(L, "closed");
+    if (!o->s) return push_net_err(L, HL_NET_E_CLOSED);
 
     if (lua_getiuservalue(L, ud_idx, SSH_UV_WRITE_BUF) != LUA_TSTRING) {
         lua_pop(L, 1);
