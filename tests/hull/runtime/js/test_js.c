@@ -10027,8 +10027,16 @@ UTEST(js_audit14, sse_and_ws_writes_are_charged)
  * pinned at what it holds, so the conn object cannot be allocated. */
 static void a18_ws_route_handler(int id, const char *src)
 {
+    /* The routes table is made by the first app.get / app.ws; a bare test
+     * context has none yet. */
     JSValue store = hl_js_internals(js.ctx);
     JSValue routes = JS_GetPropertyStr(js.ctx, store, "__hull_routes");
+    if (!JS_IsArray(js.ctx, routes)) {
+        JS_FreeValue(js.ctx, routes);
+        routes = JS_NewArray(js.ctx);
+        JS_SetPropertyStr(js.ctx, store, "__hull_routes",
+                          JS_DupValue(js.ctx, routes));
+    }
     JSValue fn = JS_Eval(js.ctx, src, strlen(src), "<a18ws>",
                          JS_EVAL_TYPE_GLOBAL);
     JS_SetPropertyUint32(js.ctx, routes, (uint32_t)id, fn);
@@ -10046,32 +10054,61 @@ UTEST(js_audit18, ws_callbacks_skip_a_conn_that_could_not_be_made)
     hl_ws_registry_init(&reg, &wa);
     js.base.ws_registry = &reg;
     ASSERT_EQ(eval_int("globalThis.calls = 0; 1"), 1);
-    a18_ws_route_handler(900, "(c) => { calls++; }");
-    a18_ws_route_handler(901, "(c, m) => { calls++; }");
-    a18_ws_route_handler(902, "(c, code) => { calls++; }");
+    a18_ws_route_handler(0, "(c) => { calls++; }");
+    a18_ws_route_handler(1, "(c, m) => { calls++; }");
+    a18_ws_route_handler(2, "(c, code) => { calls++; }");
+    ASSERT_FALSE(JS_HasException(js.ctx));
     HlJSWsRoute route;
     memset(&route, 0, sizeof route);
     route.js = &js;
-    route.on_open_id = 900;
-    route.on_message_id = 901;
-    route.on_close_id = 902;
+    route.on_open_id = 0;
+    route.on_message_id = 1;
+    route.on_close_id = 2;
     snprintf(route.path, sizeof route.path, "/a18");
-    static char placeholder;
-    KlWsServerConn *kc = (KlWsServerConn *)(void *)&placeholder;
+    static char p1, p2;
+    KlWsServerConn *kc = (KlWsServerConn *)(void *)&p1;
 
+    /* Control: with memory to spare, every callback reaches its handler. */
+    KlWsServerConn *ok = (KlWsServerConn *)(void *)&p2;
+    hl_js_ws_on_open(ok, &route);
+    hl_js_ws_on_message(ok, "hello", 5, 0, &route);
+    hl_js_ws_on_close(ok, 1000, NULL, 0, &route);
+    EXPECT_EQ(eval_int("calls"), 3);
+    EXPECT_TRUE(hl_ws_registry_find(&reg, "/a18", ok) == NULL);
+    ASSERT_EQ(eval_int("globalThis.calls = 0; 1"), 1);
+
+    /* QuickJS serves small blocks from arenas, and the memory limit is
+     * checked only when a new arena is needed: pin the limit, then fill the
+     * free object slots with a chain of objects (kept alive) until the next
+     * arena is refused. The conn object then cannot be made. */
+    ASSERT_EQ(eval_int("globalThis.keep = null;"
+                       " globalThis.fill = function () { let h = null;"
+                       "   try { for (;;) h = { n: h }; } catch (e) {}"
+                       "   globalThis.keep = h; };"
+                       " 1"), 1);
     JS_RunGC(js.rt);
     JSMemoryUsage u;
     JS_ComputeMemoryUsage(js.rt, &u);
-    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_size);
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_size + (256u << 10));
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue fill = JS_GetPropertyStr(js.ctx, g, "fill");
+    JS_FreeValue(js.ctx, JS_Call(js.ctx, fill, JS_UNDEFINED, 0, NULL));
+    JS_FreeValue(js.ctx, fill);
+    JS_FreeValue(js.ctx, g);
+    JS_FreeValue(js.ctx, JS_GetException(js.ctx));
     hl_js_ws_on_open(kc, &route);
+    EXPECT_FALSE(JS_HasException(js.ctx));
     HlWsConn *c = hl_ws_registry_find(&reg, "/a18", kc);
     EXPECT_TRUE(c != NULL);
     if (c) EXPECT_TRUE(c->user_data == NULL);
     hl_js_ws_on_message(kc, "hello", 5, 0, &route);
-    hl_js_ws_on_close(kc, 1000, NULL, 0, &route);
-    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_limit);
-
     EXPECT_FALSE(JS_HasException(js.ctx));
+    hl_js_ws_on_close(kc, 1000, NULL, 0, &route);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_limit);
+    ASSERT_EQ(eval_int("globalThis.keep = null; 1"), 1);
+    JS_RunGC(js.rt);
+
     EXPECT_TRUE(hl_ws_registry_find(&reg, "/a18", kc) == NULL);
     EXPECT_EQ(eval_int("calls"), 0);
 
