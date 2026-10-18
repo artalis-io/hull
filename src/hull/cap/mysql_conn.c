@@ -419,7 +419,10 @@ static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
                  plugin ? plugin : "?");
 }
 
-static int reply_frame(HlMyConn *conn, HlMyFrame *f);
+static int reply_frame(HlMyConn *conn, HlMyFrame *f, unsigned may_end);
+#define MY_END_OK  1u   /* an OK here may end the reply */
+#define MY_END_EOF 2u   /* an EOF here may end the reply (a result set's last) */
+#define MY_END_ERR 4u   /* an ERR here ends the reply */
 
 /* Packets the auth exchange may take after the HandshakeResponse41: an OK /
  * ERR, at most one AuthSwitchRequest, a caching_sha2 AuthMoreData or two. The
@@ -555,7 +558,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         }
         /* Read for the run that opens the connection, so charged like a
          * reply's frames (audit 17). */
-        if (reply_frame(conn, &f) != 0) { hl_my_conn_close(conn); return -1; }
+        if (reply_frame(conn, &f, 0) != 0) { hl_my_conn_close(conn); return -1; }
         if (f.body_len == 0) continue;
         uint8_t hdr = f.body[0];
 
@@ -701,13 +704,27 @@ static void my_abandon(HlMyConn *conn)
                        "the reply");
 }
 
-static int my_abandon_if_tripped(HlMyConn *conn, uint32_t body_len)
+/* 1 when @p f, read where @p may_end allows, is the last packet of the
+ * reply: an ERR, or an OK / the EOF closing a result set's rows with no
+ * SERVER_MORE_RESULTS to follow. */
+static int my_packet_ends_reply(const HlMyFrame *f, unsigned may_end)
 {
-    int64_t units = 1 + ((int64_t)body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
-                        HL_DB_ALLOC_UNIT_BYTES;
-    if (hl_db_budget_charge(units) == 0) return 0;
-    my_abandon(conn);
-    return 1;
+    if (f->body_len == 0) return 0;
+    uint8_t hdr = f->body[0];
+    if (hdr == HL_MY_PKT_ERR) return (may_end & MY_END_ERR) != 0;
+    if (hdr == HL_MY_PKT_OK && (may_end & MY_END_OK)) {
+        HlMyOk ok;
+        return hl_my_parse_ok(f, &ok) == 0 &&
+               !(ok.status_flags & HL_MY_SERVER_MORE_RESULTS);
+    }
+    if (hdr == HL_MY_PKT_EOF && f->body_len < 9 && (may_end & MY_END_EOF)) {
+        HlMyCursor ec; hl_my_cursor_init(&ec, f);
+        (void)hl_my_get_u8(&ec);
+        (void)hl_my_get_u16(&ec);
+        uint16_t status = hl_my_get_u16(&ec);
+        return !hl_my_cursor_err(&ec) && !(status & HL_MY_SERVER_MORE_RESULTS);
+    }
+    return 0;
 }
 
 /* Read the next packet of a command's reply and charge it. Only the data
@@ -715,12 +732,21 @@ static int my_abandon_if_tripped(HlMyConn *conn, uint32_t body_len)
  * EOFs between them were not, so a server answering with an endless stream
  * of empty result sets (a stored procedure looping over an empty SELECT)
  * kept the call reading, uncharged, past the budget and the run deadline
- * (audit 18). Every packet of a reply goes through here. 0 / -1. */
-static int reply_frame(HlMyConn *conn, HlMyFrame *f)
+ * (audit 18). Every packet of a reply goes through here. A trip on the
+ * packet that ENDS the reply (@p may_end says where one can) is not
+ * abandoned: nothing is left to read, and dropping the connection there
+ * reported a COMMIT the server had made as failed, its transaction "lost".
+ * The call finishes and the trip, which is sticky, is raised by the run.
+ * 0 / -1. */
+static int reply_frame(HlMyConn *conn, HlMyFrame *f, unsigned may_end)
 {
     if (conn_next_frame(conn, f) != 0) return -1;
-    if (my_abandon_if_tripped(conn, f->body_len)) return -1;
-    return 0;
+    int64_t units = 1 + ((int64_t)f->body_len + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                        HL_DB_ALLOC_UNIT_BYTES;
+    if (hl_db_budget_charge(units) == 0) return 0;
+    if (my_packet_ends_reply(f, may_end)) return 0;
+    my_abandon(conn);
+    return -1;
 }
 
 static int refuse_if_broken(HlMyConn *conn)
@@ -814,7 +840,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     if (se) { conn_set_err(conn, "failed to send query"); return -1; }
 
     HlMyFrame f;
-    if (reply_frame(conn, &f) != 0) return -1;
+    if (reply_frame(conn, &f, MY_END_OK | MY_END_ERR) != 0) return -1;
     if (f.body_len == 0) { conn_set_err(conn, "empty query response"); return -1; }
     uint8_t hdr = f.body[0];
 
@@ -860,7 +886,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
         conn_set_err(conn, "out of memory"); goto fail;
     }
     for (int i = 0; i < ncols; i++) {
-        if (reply_frame(conn, &f) != 0) goto fail;
+        if (reply_frame(conn, &f, 0) != 0) goto fail;
         HlMyColumn col;
         if (hl_my_parse_column_def(&f, &col) != 0) {
             conn_set_err(conn, "malformed column definition"); goto fail;
@@ -876,12 +902,12 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
 
     /* No CLIENT_DEPRECATE_EOF was advertised, so an EOF terminates the column
      * defs (and, below, the rows). */
-    if (reply_frame(conn, &f) != 0) goto fail;   /* intermediate EOF */
+    if (reply_frame(conn, &f, 0) != 0) goto fail;   /* intermediate EOF */
     if (desc_cb) desc_cb(cb_ctx, fields, ncols);
 
     int stop = 0;
     for (;;) {
-        if (reply_frame(conn, &f) != 0) goto fail;
+        if (reply_frame(conn, &f, MY_END_EOF | MY_END_ERR) != 0) goto fail;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
             if (reply_done(conn, eof_status(&f)) != 0) goto fail;   /* end of rows */
             break;
@@ -936,8 +962,8 @@ static int drain_defs(HlMyConn *conn, int n)
 {
     HlMyFrame f;
     for (int i = 0; i < n; i++)
-        if (reply_frame(conn, &f) != 0) return -1;
-    if (n > 0 && reply_frame(conn, &f) != 0) return -1;   /* EOF */
+        if (reply_frame(conn, &f, 0) != 0) return -1;
+    if (n > 0 && reply_frame(conn, &f, 0) != 0) return -1;   /* EOF */
     return 0;
 }
 
@@ -1122,7 +1148,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (se) { conn_set_err(conn, "failed to send prepare"); return -1; }
 
     HlMyFrame f;
-    if (reply_frame(conn, &f) != 0) return -1;
+    if (reply_frame(conn, &f, MY_END_ERR) != 0) return -1;   /* PREPARE_OK: more follows */
     if (f.body_len > 0 && f.body[0] == HL_MY_PKT_ERR) {
         HlMyErr e;
         if (hl_my_parse_err(&f, 1, &e) == 0 && e.message_len)
@@ -1185,7 +1211,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (se) { conn_set_err(conn, "failed to send execute"); goto close_stmt; }
 
     /* 4. EXECUTE response: OK (no result), ERR, or a binary result set. */
-    if (reply_frame(conn, &f) != 0) goto close_stmt;
+    if (reply_frame(conn, &f, MY_END_OK | MY_END_ERR) != 0) goto close_stmt;
     if (f.body_len == 0) { conn_set_err(conn, "empty execute response"); goto close_stmt; }
     uint8_t hdr = f.body[0];
 
@@ -1224,7 +1250,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
     if (!names || !fields || !vals) { conn_set_err(conn, "out of memory"); goto close_stmt; }
 
     for (int i = 0; i < ncols; i++) {
-        if (reply_frame(conn, &f) != 0) goto close_stmt;
+        if (reply_frame(conn, &f, 0) != 0) goto close_stmt;
         HlMyColumn col;
         if (hl_my_parse_column_def(&f, &col) != 0) {
             conn_set_err(conn, "malformed column definition"); goto close_stmt;
@@ -1238,13 +1264,13 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
         fields[i].flags = col.flags;
     }
 
-    if (reply_frame(conn, &f) != 0) goto close_stmt;   /* EOF after col defs */
+    if (reply_frame(conn, &f, 0) != 0) goto close_stmt;   /* EOF after col defs */
     if (desc_cb) desc_cb(cb_ctx, fields, ncols);
 
     /* 5. Binary result rows until the terminating EOF. */
     int stop = 0;
     for (;;) {
-        if (reply_frame(conn, &f) != 0) goto close_stmt;
+        if (reply_frame(conn, &f, MY_END_EOF | MY_END_ERR) != 0) goto close_stmt;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
             if (reply_done(conn, eof_status(&f)) != 0) goto close_stmt;   /* end of rows */
             break;
@@ -1304,7 +1330,7 @@ static int drain_one_result(HlMyConn *conn, int *more)
 {
     *more = 0;
     HlMyFrame f;
-    if (reply_frame(conn, &f) != 0) return -1;
+    if (reply_frame(conn, &f, MY_END_OK | MY_END_ERR) != 0) return -1;
     if (f.body_len == 0) { conn_set_err(conn, "empty script response"); return -1; }
     uint8_t hdr = f.body[0];
 
@@ -1341,10 +1367,10 @@ static int drain_one_result(HlMyConn *conn, int *more)
         conn_set_err(conn, "malformed column count"); return -1;
     }
     for (uint64_t i = 0; i < ncols; i++)
-        if (reply_frame(conn, &f) != 0) return -1;   /* column defs */
-    if (reply_frame(conn, &f) != 0) return -1;       /* EOF after col defs */
+        if (reply_frame(conn, &f, 0) != 0) return -1;   /* column defs */
+    if (reply_frame(conn, &f, 0) != 0) return -1;       /* EOF after col defs */
     for (;;) {
-        if (reply_frame(conn, &f) != 0) return -1;
+        if (reply_frame(conn, &f, MY_END_EOF | MY_END_ERR) != 0) return -1;
         if (f.body_len > 0 && f.body[0] == HL_MY_PKT_EOF && f.body_len < HL_MY_EOF_MAX_LEN) {
             uint16_t status = eof_status(&f);
             conn->server_status = status;

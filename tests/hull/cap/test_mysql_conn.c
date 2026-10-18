@@ -1006,6 +1006,50 @@ UTEST(mysql_conn, exec_multi_empty_result_sets_are_charged)
     close(sv[0]);
 }
 
+/* A trip on the packet that ENDS a reply is not abandoned (audit 18): here
+ * the OK answering a COMMIT. Nothing is left to read, and dropping the
+ * connection reported a commit the server had made as failed, its
+ * transaction "lost". The call succeeds, the connection stays in step and
+ * usable, and the trip is still there for the run to raise. A trip on a
+ * packet that more of the reply follows still abandons it (the tests
+ * above). */
+UTEST(mysql_conn, a_trip_on_the_final_ok_finishes_the_commit)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);                     /* auth */
+    build_ok(&s, 1);                     /* COMMIT's OK: 7 bytes, 2 units */
+    build_ok(&s, 1);                     /* the next statement's */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+    HlDbOpBudget budget = { 1, 0, 0 };   /* passed by the OK's charge */
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_my_conn_query(&conn, "COMMIT", NULL, NULL, NULL, NULL);
+    int still = hl_db_budget_charge(0);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_NE(0, still);                 /* the run still sees the trip */
+    EXPECT_EQ(0, conn.broken);
+    EXPECT_TRUE(conn.transport != NULL);
+    EXPECT_EQ(0, conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);
+
+    /* In step: the next statement reads its own reply. */
+    EXPECT_EQ(0, hl_my_conn_query(&conn, "SELECT 1", NULL, NULL, NULL, NULL));
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* A budget that trips on its @p my_trip_at'th charge (0-unit asks included). */
 static int my_charges, my_trip_at;
 static int my_count_trip_fn(void *ud, int64_t units)

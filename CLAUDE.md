@@ -867,7 +867,7 @@ roadmap §2.9.)
   `e2e_mysql` (each kills its own session). A run whose budget or deadline
   trips while the reply arrives does not read the rest of it: the connection
   is closed and marked broken (`pg_abandon_if_tripped` /
-  `my_abandon_if_tripped`) - the server stops the query at its next write, and
+  `reply_frame`) - the server stops the query at its next write, and
   the same reconnect / refuse-until-ROLLBACK rule applies; simpler than a
   CancelRequest / KILL QUERY on a side connection (audit 15). Every frame is
   charged 1 unit plus 1 per `HL_DB_ALLOC_UNIT_BYTES` of its body - on
@@ -883,7 +883,10 @@ roadmap §2.9.)
   abandon path, instead of holding the loop in recv for the whole read timeout
   (audit 18). A Postgres trip on the CommandComplete of a COMMIT is not
   abandoned: the reply is read on to its ReadyForQuery, so the commit the
-  server made is reported, not a "lost" transaction (audit 18). Postgres refuses `COPY ... TO STDOUT` by dropping the
+  server made is reported, not a "lost" transaction; likewise a MySQL trip on
+  the packet that ends a reply (its OK / ERR, or the EOF of the last result
+  set) finishes the call, nothing being left to read. The trip is sticky, so
+  the run raises it at its next poll (audit 18). Postgres refuses `COPY ... TO STDOUT` by dropping the
   connection at the CopyOutResponse (there is no CopyFail for that direction;
   COPY FROM STDIN still gets a CopyFail). The Postgres startup exchange is
   charged the same way, frame by frame, and a SCRAM iteration count (the

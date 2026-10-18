@@ -704,12 +704,17 @@ UTEST(pg_query, a_trip_on_commit_complete_reports_the_commit)
     ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
     conn.tx_status = 'T';
 
-    pg_charges = 0;
-    pg_trip_at = 4;                      /* the CommandComplete's charge */
-    HlDbBudgetBinding prev = hl_db_budget_swap(pg_count_trip_fn, NULL);
+    /* ParseComplete, BindComplete and NoData cost 1 unit each, the
+     * CommandComplete 2: a limit of 4 is passed exactly there. */
+    HlDbOpBudget budget = { 4, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_pg_query(&conn, "COMMIT", NULL, 0, NULL, NULL, NULL, NULL);
+    /* The trip is still there for the run to raise once the call returns. */
+    int still = hl_db_budget_charge(0);
     hl_db_budget_restore(prev);
     EXPECT_EQ(0, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_NE(0, still);
     EXPECT_EQ('I', conn.tx_status);      /* committed, as the server said */
     EXPECT_EQ(0, conn.broken);
     EXPECT_TRUE(conn.transport != NULL);

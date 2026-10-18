@@ -1206,8 +1206,8 @@ static int pg_abandon_if_tripped(HlPgConn *conn, uint32_t body_len)
  * a connection dropped there kept tx_status 'T', so the commit was reported
  * failed and then "rolled back" by the server (audit 18). The reply is read
  * on to its ReadyForQuery instead - without asking the budget again while
- * waiting for it, and for at most HL_PG_FINISH_MAX_FRAMES frames - and the
- * binding raises the trip once the call returns. */
+ * waiting for it, and for at most HL_PG_FINISH_MAX_FRAMES frames. The trip
+ * is sticky, so the run raises it at its next poll once the call returns. */
 static int pg_reply_charge(HlPgConn *conn, const HlPgFrame *f)
 {
     if (f->type == HL_PG_B_READY) return 0;
