@@ -777,7 +777,9 @@ fi
 if [ "$RUNTIME" != "lua" ]; then
     echo ""
     echo "=== E2E multipart: js part.read() under a small heap ==="
-    dd if=/dev/urandom of="$TMPDIR_WORK/huge.bin" bs=1024 count=12288 2>/dev/null
+    # Text fields (curl -F "name=<file" sends a file's bytes as a field value).
+    head -c 12582912 /dev/zero | tr '\0' 'h' > "$TMPDIR_WORK/huge.txt"
+    head -c 2097152 /dev/zero | tr '\0' 'm' > "$TMPDIR_WORK/medium.txt"
     cat > "$TMPDIR_WORK/heap_app.js" <<'EOF2'
 import { app } from "hull:app";
 
@@ -801,23 +803,31 @@ app.post("/read", async (req, res) => {
         res.status(413);
         res.json({ ok: false, error: String(e && e.message || e) });
     }
-});
+// A streaming multipart route needs the multipart option (any caps); without
+// it the body is buffered under the default body limit and req.multipart()
+// has nothing to read.
+}, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 EOF2
-    "$HULL" -m 8M -p 17813 -l debug "$TMPDIR_WORK/heap_app.js" >/dev/null 2>&1 &
+    "$HULL" -m 8M -p 17813 -l debug "$TMPDIR_WORK/heap_app.js" \
+        >"$TMPDIR_WORK/heap_server.log" 2>&1 &
     SERVER_PID=$!
     if wait_for_server 17813; then
         RESP=$(curl --max-time 20 -sS -X POST "http://127.0.0.1:17813/read" \
-            -F "big=<$TMPDIR_WORK/huge.bin" 2>/dev/null || true)
+            -F "big=<$TMPDIR_WORK/huge.txt" 2>/dev/null || true)
         check_contains "js part.read over the heap: rejected" "$RESP" '"ok":false'
         check_contains "js part.read over the heap: reason" "$RESP" 'heap limit'
         RESP=$(curl --max-time 20 -sS -X POST "http://127.0.0.1:17813/read" \
-            -F "small=<$TMPDIR_WORK/medium.bin" 2>/dev/null || true)
+            -F "small=<$TMPDIR_WORK/medium.txt" 2>/dev/null || true)
         check_contains "js part.read under the heap: whole" "$RESP" '"size":2097152'
     else
         fail "js small-heap server startup"
     fi
     stop_pid "$SERVER_PID"
     SERVER_PID=""
+    if [ "$FAIL" -gt 0 ]; then
+        echo "  --- small-heap server log (tail) ---"
+        tail -n 30 "$TMPDIR_WORK/heap_server.log" 2>/dev/null || true
+    fi
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────
