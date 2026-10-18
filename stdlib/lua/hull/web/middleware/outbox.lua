@@ -129,8 +129,20 @@ function outbox.enqueue(opts)
     return db.last_id()
 end
 
+-- The runtime's refusals to wait (runtime/lua/async.c hl_lua_check_can_wait;
+-- the same test as hull.web.pwned's). They say where flush was called, not
+-- how the destination answered, so they are raised, never recorded as a
+-- failed attempt (audit 18: every flush from such a place burned an attempt
+-- until the row was 'failed', unsent).
+local function is_wait_refusal(err)
+    local s = tostring(err)
+    return s:find("cannot wait while a transaction is open", 1, true) ~= nil
+        or s:find("can only wait in a handler", 1, true) ~= nil
+end
+
 --- Attempt to deliver a single outbox item.
--- Returns true on success, false on failure.
+-- Returns true on success, false on failure, and `false, err, true` when the
+-- runtime refused to wait (see is_wait_refusal).
 local function deliver_item(item)
     if item.kind == "webhook" or item.kind == "http" then
         local req_headers = {}
@@ -158,6 +170,9 @@ local function deliver_item(item)
 
         if send_ok and result and result.status and result.status >= 200 and result.status < 300 then
             return true, nil
+        end
+        if not send_ok and is_wait_refusal(result) then
+            return false, result, true
         end
 
         local err_msg
@@ -199,6 +214,12 @@ end
 -- @treturn table  `{ delivered = N, failed = N, retried = N }`.
 -- @note Delivery is at-least-once - design receivers to be idempotent.
 function outbox.flush(opts)
+    -- Delivery waits on http.fetch, which the runtime refuses inside a
+    -- transaction; refused here, before any row is claimed (audit 18).
+    if db.in_transaction() then
+        error("outbox.flush cannot run inside db.batch or an open transaction: "
+              .. "delivery waits on the network. Call it after the commit", 2)
+    end
     opts = opts or {}
     local limit = opts.limit or 50
     local now = time.now()
@@ -229,7 +250,16 @@ function outbox.flush(opts)
             "AND state = 'pending' AND next_attempt_at <= ?",
             { lease, item.id, claim_now })
         if claimed == 1 then
-            local ok, err = deliver_item(item)
+            local ok, err, refused = deliver_item(item)
+            if refused then
+                -- Give the claim back (the row is due again at once) and
+                -- raise: nothing was sent, so no attempt is counted.
+                db.exec(
+                    "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " ..
+                    "AND state = 'pending' AND next_attempt_at = ?",
+                    { claim_now, item.id, lease })
+                error(err, 0)
+            end
 
             -- Every outcome is written only while the row still holds THIS
             -- flush's lease. A delivery that outran it was reclaimed and sent

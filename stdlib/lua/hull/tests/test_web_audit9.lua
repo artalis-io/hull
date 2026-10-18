@@ -243,6 +243,25 @@ test("a pending-2FA token dies with the password it was issued against", functio
     assert_eq(S.logins, 1)
 end)
 
+test("audit 18: only a literal true from totp_verify is a second factor", function()
+    for i, v in ipairs({ 0, 1, "yes", {} }) do
+        reset_store()
+        init({ enable_totp = true, totp_disable = function() end,
+               user_totp_enrolled = function() return true end,
+               totp_verify = function() return v end })
+        local email = "t18-" .. i .. "@x.test"
+        add_user(180 + i, email, "first-password-1", true)
+        local res = mkres()
+        H.login(mkreq({ email = email, password = "first-password-1" }), res)
+        local tok = res.body and res.body.totp_token
+        assert_eq(type(tok), "string", "pending token " .. i)
+        res = mkres()
+        H.totp_verify(mkreq({ token = tok, code = "123456" }), res)
+        assert_eq(res.code, 401, "truthy non-true result " .. i .. " refused")
+        assert_eq(S.logins, 0, "no login " .. i)
+    end
+end)
+
 -- ── ratelimit ──────────────────────────────────────────────────────
 
 test("ratelimit: a spent bucket (count == limit) survives eviction", function()

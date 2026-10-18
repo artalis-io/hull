@@ -187,11 +187,13 @@ import { _test_hooks } from "hull:_test_hooks";
 // issue and confirm see the same field.
 // The account's email is part of it too: a link sent to the old mailbox
 // stayed good after an email change (the password hash was unchanged), so
-// whoever still reads that mailbox could reset the password.
+// whoever still reads that mailbox could reset the password. Folded ASCII
+// only, as the Lua twin's email:lower() (audit 18: toLowerCase folds a
+// Kelvin sign to "k", so links survived a change to such an address).
 function emailBinding(user) {
     const e = user && user.email;
     return encoding.hex.encode(crypto.sha256(
-        typeof e === "string" ? e.toLowerCase() : "")).slice(0, 16);
+        typeof e === "string" ? asciiLower(e) : "")).slice(0, 16);
 }
 
 function passwordBinding(user) {

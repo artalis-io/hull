@@ -1002,7 +1002,7 @@ verify step between successful first-factor auth and `on_login` when
   - `opts.payload`. Payload string.
   - `opts.headers`. JSON-encoded headers (optional).
   - `opts.idempotency_key`. Dedup key for delivery (optional).
-- `outbox.flush(opts)`. Deliver pending items. Exponential backoff (`2^attempt * 10s`, capped at 1hr).
+- `outbox.flush(opts)`. Deliver pending items. Exponential backoff (`2^attempt * 10s`, capped at 1hr). Delivery waits on the network, so flush raises inside `db.batch` / an open transaction, and the runtime's refusal to wait (middleware, outside a handler) is raised with the row left pending, never counted as a failed attempt (audit 18).
 - `outbox.middleware()`. Sets `req.ctx._outbox_flush = true` for auto-flush.
 - `outbox.stats()` → `{ pending, delivered, failed }` counts.
 - `outbox.cleanup(max_age)`. Delete old delivered items.
@@ -1181,7 +1181,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - The DB ping uses the default connection in both runtimes. **JS:** `health.setDb(x)` (or `opts.db`) selects another: a connection (`dbModule.connect("name")`), or the `hull:db` module itself, whose default connection is then used.
 
 **etag** (ETag response helpers. Not a middleware) provides wrapper functions for route handlers.
-- `etag.json(req, res, data, status?)`. Send JSON response with ETag. Sends 304 if `If-None-Match` matches.
+- `etag.json(req, res, data, status?)`. Send JSON response with ETag. Sends 304 if `If-None-Match` matches. Data that encodes to nothing (JS `undefined`) is tagged as `null` (audit 18).
 - `etag.text(req, res, text, status?)`. Same for text responses.
 - `etag.html(req, res, html, status?)`. Same for HTML responses.
 - An empty body has no tag: the three helpers send it with no `ETag` header and never answer it 304 (audit 17: Lua raised, JS sent `ETag: null`).
