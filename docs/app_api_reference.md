@@ -1209,7 +1209,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `image.new(w, h, format, pixels)` → HlImage. Formats: `"rgba8"`, `"r8"`, `"rgba16float"`, `"r32float"`.
 - `image.from_buffer(buf, w, h, format)` → HlImage. Zero-copy borrow from a `MappedBuffer`/`WasmBuffer` (the source's bytes back the image directly). The borrow is refcounted: closing the source (`buf:close()`) while the image is alive is safe and defers the source's actual munmap/free until the last borrowing image is freed (no dangling pixels). Other sources (string, `ArrayBuffer`/typed array, another image) have no refcountable object to pin and are copied.
 - `image.decode(data, format?)` → HlImage. Auto-detects PNG/JPEG/BMP from magic bytes. A JPEG with more than 100 scans is refused (audit 18).
-- `image.encode(img, format, opts?)` → bytes. `opts.quality` for JPEG (default 90).
+- `image.encode(img, format, opts?)` → bytes. `opts.quality` for JPEG (default 90). The encoder works outside the VM heap, so an image larger than the heap limit (a zero-copy view of a mapping or a `WasmBuffer` can be) is refused with `image_too_large` before it runs (audit 18).
 - An image's own pixels (`image.new`, a copying `from_buffer`, `decode`, `from_wasm`, `gpu.texture_read`) are allocated from the VM's heap, so they count against its memory limit (64 MB by default): an image that does not fit fails like any other allocation (`decode` fails with `out_of_memory`). A borrowing `from_buffer` costs nothing extra.
 - `img:width()`, `img:height()`, `img:format()`, `img:size()`. Properties.
 - `img:pixels()`. Raw pixel bytes.
@@ -1366,6 +1366,8 @@ app.post("/upload", async (req, res) => {
 ```
 
 **Caps** (all default to `0` = unlimited): `max_part_size` / `maxPartSize`, `max_total_size` / `maxTotalSize`, `max_parts` / `maxParts`, `max_headers_size` / `maxHeadersSize`, `max_input_buffer` / `maxInputBuffer`. Exceeding any cap raises a parser error which the handler can `pcall` / try-catch to write a structured 4xx response; uncaught errors → 500. Works for both single-read and multi-read bodies - Keel v2.2.0's streaming-async dispatch invokes the handler BEFORE feeding leftover body bytes, so the handler is alive when the cap trips in `on_data`. JS accepts both naming conventions; snake_case wins if both appear.
+
+**`read()` and the heap:** `read()` holds a whole part in memory, so a part larger than the VM heap limit fails the read (Lua raises `out of memory reading a part`; JS rejects with `multipart: part is larger than the heap limit`) and its bytes are charged to the run's instruction budget, in both runtimes (JS since audit 18: it buffered the part off the heap, uncharged). Use `chunks()` for big uploads.
 
 **Part fields:** `name` (always), `filename` (`nil`/`null` for text fields), `content_type` (Lua) / `contentType` (JS).
 
@@ -1729,6 +1731,14 @@ compute.load("score");
 // Create a WasmBuffer from a string (for zero-copy chaining)
 const buf = compute.buffer("input data");
 ```
+
+**Buffers and the heap.** A `WasmBuffer` that owns its bytes (`compute.buffer`,
+a `buffer = true` call whose output was copied, a GPU result) holds them
+outside the VM heap, so the buffers a VM keeps alive together are held to its
+heap limit: past it, making one more raises (after a full collection), and
+`close()` gives the bytes back at once. `compute.buffer` charges its copy to
+the instruction budget, 1 unit per 8 bytes (audit 18). A guest that reports
+more output than `max_output` / `maxOutput` fails with `output_too_small`.
 
 **Gas vs timeout - two different bounds.** `gas` is WAMR instruction
 metering: exact, but it applies to the **interpreter only** - WAMR never

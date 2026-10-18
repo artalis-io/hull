@@ -14,6 +14,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/worker_wasm.h"
 #include "hull/vfs.h"
 #include "internal.h"   /* hl_lua_check_can_wait */
@@ -128,6 +129,23 @@ static void lua_register_wasm_buf_metatable(lua_State *L)
 /* Helper: push an HlWasmBuffer* as Lua userdata. Takes ownership of buf. */
 void lua_push_wasm_buffer(lua_State *L, HlWasmBuffer *buf)
 {
+    /* An OWNED buffer's bytes live on the server allocator, which no VM
+     * limit covers: count them against the heap limit (audit 18). Buffers
+     * dropped but not yet collected still count, so a refusal collects once
+     * and asks again before it raises. */
+    HlLua *lua = get_hl_lua(L);
+    if (lua && hl_wasm_buffer_account(buf, &lua->wasm_buf_bytes,
+                                      lua->mem_limit) != 0) {
+        lua_gc(L, LUA_GCCOLLECT);
+        if (hl_wasm_buffer_account(buf, &lua->wasm_buf_bytes,
+                                   lua->mem_limit) != 0) {
+            size_t n = hl_wasm_buffer_len(buf);
+            hl_wasm_buffer_close(buf);
+            luaL_error(L, "buffer of %I bytes would take the VM's buffers "
+                          "past its heap limit (close unused buffers)",
+                       (lua_Integer)n);
+        }
+    }
     /* The userdata cannot be made first (callers already hold buf), so it
      * is made without raising: a failure releases buf, then raises. */
     size_t kb = hl_wasm_buffer_footprint(buf) >> 10;
@@ -150,6 +168,9 @@ static int lua_compute_buffer(lua_State *L)
     size_t len = 0;
     const char *str = luaL_checklstring(L, 1, &len);
 
+    /* The copy is charged before it is made, 1 unit per 8 bytes (audit 18),
+     * and lua_push_wasm_buffer counts it against the heap limit. */
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)len), 0);
     HlLua *lua_ctx = get_hl_lua(L);
     HlWasmBuffer *buf = hl_wasm_buffer_create_owned(str, len,
                                                       lua_ctx ? lua_ctx->base.alloc : NULL);

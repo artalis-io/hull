@@ -310,6 +310,15 @@ HlImage *hl_image_decode(const void *data, size_t len,
     return img;
 }
 
+uint64_t hl_image_encode_bytes(const HlImage *img)
+{
+    if (!img) return 0;
+    int bpp = hl_image_bpp(img->format);
+    if (bpp <= 0) bpp = 4;
+    /* w, h <= HL_IMAGE_MAX_DIM and bpp <= 16: no overflow in 64 bits. */
+    return ((uint64_t)img->width * (uint64_t)bpp + 1u) * (uint64_t)img->height;
+}
+
 int hl_image_encode(const HlImage *img, const char *fmt_name,
                      int quality,
                      void **out, size_t *out_len,

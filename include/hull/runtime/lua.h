@@ -83,6 +83,9 @@ typedef struct HlLua {
     /* Lua sub-limit tracking */
     size_t          mem_used;
     size_t          mem_limit;
+    /* OWNED WasmBuffer bytes the VM's userdata hold off the Lua heap (server
+     * allocator), capped at mem_limit (hl_wasm_buffer_account, audit 18). */
+    size_t          wasm_buf_bytes;
     int64_t         max_instructions;  /* 0 = no limit */
     HlLuaBudget     budget;            /* shared by all threads of L */
     HlRunWatch      run_watch;         /* the run's wall-clock deadline */

@@ -7495,6 +7495,34 @@ UTEST(js_runtime, image_pixels_count_against_the_heap_limit)
     free(r);
     cleanup_js();
 }
+
+/* Audit 18 L7: stb_image_write works off the VM heap, a few times the image
+ * at its peak, and nothing refused an encode before the work. An image whose
+ * encode input is larger than the heap limit is refused with
+ * image_too_large (here the limit Hull checks is lowered under a 1 MB
+ * image); under the limit it encodes. */
+UTEST(js_audit18, image_encode_refused_past_the_heap_limit)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    if (eval_int("typeof image === 'object' && image !== null ? 1 : 0") != 1) {
+        cleanup_js();   /* image compiled out */
+        return;
+    }
+    ASSERT_EQ(eval_int("globalThis.img = image.new(1024, 1024, 'r8',"
+                       " new ArrayBuffer(1 << 20)); 1"), 1);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 512u << 10;
+    char *r = eval_str("(() => { try { image.encode(img, 'png'); "
+                       "return 'encoded'; } catch (e) { return String(e.message); } })()");
+    js.max_heap_bytes = saved;
+    EXPECT_TRUE(r && strstr(r, "image_too_large") != NULL);
+    if (r && !strstr(r, "image_too_large")) printf("  got: %s\n", r);
+    free(r);
+    EXPECT_EQ(eval_int("image.encode(img, 'png').byteLength > 0 ? 1 : 0"), 1);
+    ASSERT_EQ(eval_int("img.close(); 1"), 1);
+    cleanup_js();
+}
 #endif /* HL_ENABLE_IMAGE */
 
 JS_WORKER_CASE(the_function_s_own_toString_is_not_what_runs, (void)0,
@@ -9273,6 +9301,66 @@ UTEST(js_audit15, compute_stream_output_is_capped_at_the_heap_limit)
     cleanup_js();
     hl_cap_wasm_destroy(&cache);
 }
+
+/* Audit 18 M4: an OWNED WasmBuffer holds its bytes on the server allocator,
+ * which no VM limit covers; they are counted against the heap limit now
+ * (refused past it, given back on close), and compute.buffer's copy is
+ * charged 1 unit per 8 bytes. */
+UTEST(js_audit18, owned_buffers_are_bounded_by_the_heap_limit)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 8u << 20;
+    char *r = eval_str(
+        "(() => {\n"
+        "  const ab = new ArrayBuffer(1 << 20);\n"
+        "  const held = []; let msg = 'not refused';\n"
+        "  try { for (let i = 0; i < 64; i++) held.push(compute.buffer(ab)); }\n"
+        "  catch (e) { msg = String(e.message); }\n"
+        "  const n = held.length;\n"
+        "  for (const b of held) b.close();\n"
+        "  const b = compute.buffer(ab); const len = b.length; b.close();\n"
+        "  return (msg.includes('heap limit') ? 'refused' : msg) + ' ' + n +\n"
+        "         ' ' + len;\n"
+        "})()");
+    EXPECT_TRUE(r && strcmp(r, "refused 8 1048576") == 0);
+    if (r && strcmp(r, "refused 8 1048576") != 0) printf("  got: %s\n", r);
+    free(r);
+    EXPECT_EQ(js.wasm_buf_bytes, (size_t)0);
+    js.max_heap_bytes = saved;
+
+    /* The copy is charged: 1 MB is 131072 units, over a 100000 budget. */
+    EXPECT_EQ(eval_int("globalThis.ab = new ArrayBuffer(1 << 20); 1"), 1);
+    int64_t saved_ins = js.max_instructions;
+    js.max_instructions = 100000;
+    hl_js_budget_arm(&js);
+    static const char code[] =
+        "compute.buffer(ab);\n"
+        "globalThis.after = 1;\n";
+    JSValue v = JS_Eval(js.ctx, code, sizeof code - 1, "<a18>",
+                        JS_EVAL_TYPE_GLOBAL);
+    EXPECT_TRUE(JS_IsException(v));
+    JS_FreeValue(js.ctx, v);
+    JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    EXPECT_TRUE(js.budget_tripped);
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue a = JS_GetPropertyStr(js.ctx, g, "after");
+    EXPECT_TRUE(JS_IsUndefined(a));
+    JS_FreeValue(js.ctx, a);
+    JS_FreeValue(js.ctx, g);
+    js.max_instructions = saved_ins;
+    hl_js_budget_arm(&js);
+
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
 #endif /* HL_ENABLE_WASM */
 
 /* M1: a rejection's toString is app code, and the resume ran it after its
@@ -9930,6 +10018,66 @@ UTEST(js_audit14, sse_and_ws_writes_are_charged)
     js.base.ws_registry = NULL;
     hl_ws_registry_free(&reg);
     cleanup_js_caps();
+}
+
+/* Audit 18 L11: when the conn object (or the message string) could not be
+ * made - out of memory - on_open / on_message / on_close passed JS_EXCEPTION
+ * to the handler as its connection. They skip the call now, with the
+ * exception cleared, and on_close still removes the connection. The heap is
+ * pinned at what it holds, so the conn object cannot be allocated. */
+static void a18_ws_route_handler(int id, const char *src)
+{
+    JSValue store = hl_js_internals(js.ctx);
+    JSValue routes = JS_GetPropertyStr(js.ctx, store, "__hull_routes");
+    JSValue fn = JS_Eval(js.ctx, src, strlen(src), "<a18ws>",
+                         JS_EVAL_TYPE_GLOBAL);
+    JS_SetPropertyUint32(js.ctx, routes, (uint32_t)id, fn);
+    JS_FreeValue(js.ctx, routes);
+    JS_FreeValue(js.ctx, store);
+}
+
+UTEST(js_audit18, ws_callbacks_skip_a_conn_that_could_not_be_made)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    js.base.ws_registry = &reg;
+    ASSERT_EQ(eval_int("globalThis.calls = 0; 1"), 1);
+    a18_ws_route_handler(900, "(c) => { calls++; }");
+    a18_ws_route_handler(901, "(c, m) => { calls++; }");
+    a18_ws_route_handler(902, "(c, code) => { calls++; }");
+    HlJSWsRoute route;
+    memset(&route, 0, sizeof route);
+    route.js = &js;
+    route.on_open_id = 900;
+    route.on_message_id = 901;
+    route.on_close_id = 902;
+    snprintf(route.path, sizeof route.path, "/a18");
+    static char placeholder;
+    KlWsServerConn *kc = (KlWsServerConn *)(void *)&placeholder;
+
+    JS_RunGC(js.rt);
+    JSMemoryUsage u;
+    JS_ComputeMemoryUsage(js.rt, &u);
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_size);
+    hl_js_ws_on_open(kc, &route);
+    HlWsConn *c = hl_ws_registry_find(&reg, "/a18", kc);
+    EXPECT_TRUE(c != NULL);
+    if (c) EXPECT_TRUE(c->user_data == NULL);
+    hl_js_ws_on_message(kc, "hello", 5, 0, &route);
+    hl_js_ws_on_close(kc, 1000, NULL, 0, &route);
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_limit);
+
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    EXPECT_TRUE(hl_ws_registry_find(&reg, "/a18", kc) == NULL);
+    EXPECT_EQ(eval_int("calls"), 0);
+
+    js.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_js();
 }
 
 /* The outbound twin (hull:web:ws-client): conn.send / conn.sendBinary are

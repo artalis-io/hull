@@ -302,6 +302,16 @@ static JSValue js_image_encode_fn(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "image.encode: arg 1 must be an Image");
     }
 
+    /* stb_image_write works off the VM heap, a few times the image at its
+     * peak: an image larger than the heap limit (a zero-copy view of a
+     * mapping or a WASM buffer can be) is refused before it runs (audit 18). */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->max_heap_bytes &&
+        hl_image_encode_bytes(img) > (uint64_t)js->max_heap_bytes) {
+        JS_FreeCString(ctx, fmt_name);
+        return JS_ThrowInternalError(ctx, "image.encode: image_too_large");
+    }
+
     /* The encode is one call over every pixel (audit 10). */
     if (hl_js_budget_charge(ctx, hl_image_codec_units(img->width,
                                                       img->height, 0)) < 0) {

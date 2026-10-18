@@ -23,6 +23,25 @@
 
 #include "log.h"
 
+/* An argument that could not be made (the conn object, the message string:
+ * out of memory) is JS_EXCEPTION, and the handler was handed the exception
+ * value as its connection (audit 18). Log it, clear the pending exception,
+ * free what was made, and tell the caller to skip the call. */
+static int ws_args_failed(JSContext *ctx, const char *what,
+                          JSValue *args, int n)
+{
+    int bad = 0;
+    for (int i = 0; i < n; i++)
+        if (JS_IsException(args[i])) bad = 1;
+    if (!bad) return 0;
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    log_error("[hull:ws] %s: could not build the handler's arguments "
+              "(out of memory); the handler was not called", what);
+    for (int i = 0; i < n; i++)
+        JS_FreeValue(ctx, args[i]);
+    return 1;
+}
+
 void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
 {
     HlJSWsRoute *route = (HlJSWsRoute *)user_data;
@@ -61,6 +80,10 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
 
     /* Push conn object */
     JSValue conn_obj = hl_js_ws_push_conn(ctx, conn);
+    if (ws_args_failed(ctx, "on_open", &conn_obj, 1)) {
+        JS_FreeValue(ctx, handler);
+        return;
+    }
 
     js->last_async_cont = NULL;   /* only this run's continuations chain */
     JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 1, &conn_obj);
@@ -136,6 +159,10 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     JSValue is_bin_val = JS_NewBool(ctx, is_binary);
 
     JSValue args[3] = { conn_obj, msg_val, is_bin_val };
+    if (ws_args_failed(ctx, "on_message", args, 3)) {
+        JS_FreeValue(ctx, handler);
+        return;
+    }
     js->last_async_cont = NULL;   /* only this run's continuations chain */
     JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 3, args);
     JS_FreeValue(ctx, handler);
@@ -230,6 +257,15 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                                      : JS_NULL;
 
             JSValue args[3] = { conn_obj, code_val, reason_val };
+            if (ws_args_failed(ctx, "on_close", args, 3)) {
+                /* Not called; the conn is still invalidated and removed. */
+                JS_FreeValue(ctx, handler);
+                js->active_on_complete     = NULL;
+                js->active_on_complete_ctx = NULL;
+                hl_js_ws_invalidate_conn(ctx, conn);
+                hl_ws_registry_remove(js->base.ws_registry, conn);
+                return;
+            }
             js->last_async_cont = NULL;   /* only this run's continuations chain */
             JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 3, args);
             JS_FreeValue(ctx, conn_obj);

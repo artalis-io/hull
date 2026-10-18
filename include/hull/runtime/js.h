@@ -99,6 +99,10 @@ typedef struct HlJS {
      * last forced GC. QuickJS has no incremental step to charge them as
      * debt, so past HL_JS_OFFHEAP_GC_DEBT a full GC runs (audit 12). */
     size_t          offheap_gc_debt;
+    /* OWNED WasmBuffer bytes JS objects hold off the QuickJS heap (server
+     * allocator), capped at max_heap_bytes (hl_wasm_buffer_account,
+     * audit 18). */
+    size_t          wasm_buf_bytes;
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
