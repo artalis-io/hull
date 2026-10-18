@@ -5396,6 +5396,23 @@ UTEST(js_stdlib, stdlib_audit17_suite)
     cleanup_js_caps();
 }
 
+/* Stdlib regressions from audit 18: jobs.events / purge / cleanup / subscribe
+ * build SQL placeholders from a counted loop over checked strings, never by a
+ * method on the caller's array (an own `map` / `join` returned SQL run from
+ * the stdlib frame). */
+UTEST(js_stdlib, stdlib_audit18_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit18.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+    cleanup_js_caps();
+}
+
 /* hull:jobs through its clock-injectable test hooks (audit 17: jobs._tick /
  * _cronNext / _eventsDrain left the module for hull:_test_hooks, so the
  * deterministic cron and subscription-drain cases moved here from

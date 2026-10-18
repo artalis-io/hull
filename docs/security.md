@@ -206,6 +206,11 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 - **Prevention:** All database access goes through `hl_cap_db_query()` / `hl_cap_db_exec()` which use SQLite parameterized binding (`sqlite3_bind_*`). SQL is always a literal string from app code. No string concatenation, ever. SQL injection is structurally impossible.
 
+**Attack: reach Hull's internal `_hull_*` tables from app code**
+
+- **Prevention:** `hl_cap_db_check_namespace()` refuses app SQL that names a `_hull_*` table; the stdlib passes the check because it runs from a stdlib frame (Lua `hull.*` chunk, JS `hull:` module). So SQL text the stdlib builds must never come from an app value. The Lua stdlib runs in a private environment: its own copies of the base functions and of `table` / `string` / `math` / `utf8` / `coroutine`, with string methods behind a locked metatable, so an app replacing `table.concat` or `string.format` does not change what the stdlib runs. The JS stdlib builds placeholder lists by a counted loop over a checked array, never by a method on the caller's value (audit 18: `jobs.events` / `purge` / `cleanup` called `.map(...).join(...)` on the caller's array, and an array with its own `map` handed back SQL that ran from the stdlib frame).
+- **Remaining risk:** the JS stdlib uses the SHARED intrinsics, which app code can write: a global `Array.prototype.join` or `String.prototype.replace` patch reaches the strings the stdlib builds with them (there is no JS counterpart of Lua's private environment yet). Capturing the intrinsics before app code runs is a planned follow-up. The namespace check is lexical in any case, so the real boundary is `databases.internal`: a database role the app's connection has no grants on (a startup WARN names it on Postgres / MySQL when none is declared).
+
 **Attack: Path traversal to read /etc/passwd**
 
 - **Prevention:** `hl_cap_fs_validate()` rejects:
