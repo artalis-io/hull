@@ -875,4 +875,63 @@ UTEST(hl_cap_asym, rsa_private_pem_unbalanced_primes_large_e)
     ASSERT_TRUE(strncmp(pem, "-----BEGIN RSA PRIVATE KEY-----\n", 32) == 0);
 }
 
+/* An RSA-1024 key whose public exponent is 2^127 + 1 (128 bits), made with
+ * plain modular arithmetic (mbedTLS's generator takes an int exponent), and
+ * a valid RS256 signature under it over MSG. The RSA charge assumes
+ * e = 65537, so an exponent past 64 bits is refused on both paths, signature
+ * valid or not (audit 18). */
+static const char HUGE_E_RSA_PUB_PEM[] =
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MIGtMA0GCSqGSIb3DQEBAQUAA4GbADCBlwKBgQCjSztzvdgxj0tbwAjcvf9UjuVP\n"
+    "U2hWPafrNzqg+WN7USkV2nSKbAPAHC2wQcwj/IsG8BqGkLWNNBMMoBVnGlOPRxsy\n"
+    "BbK8jUMRsOwlRqUDiJALatPFqvs25Tv8puSGK7AkIX6eOx0Yq+nqXklHMyDh6ZzA\n"
+    "7x8+6Tay4AQb39BP6wIRAIAAAAAAAAAAAAAAAAAAAAM=\n"
+    "-----END PUBLIC KEY-----\n";
+
+static const char HUGE_E_RSA_PRIV_PEM[] =
+    "-----BEGIN RSA PRIVATE KEY-----\n"
+    "MIICagIBAAKBgQCjSztzvdgxj0tbwAjcvf9UjuVPU2hWPafrNzqg+WN7USkV2nSK\n"
+    "bAPAHC2wQcwj/IsG8BqGkLWNNBMMoBVnGlOPRxsyBbK8jUMRsOwlRqUDiJALatPF\n"
+    "qvs25Tv8puSGK7AkIX6eOx0Yq+nqXklHMyDh6ZzA7x8+6Tay4AQb39BP6wIRAIAA\n"
+    "AAAAAAAAAAAAAAAAAAMCgYAmrlXQFEwjXjKdEClQXM/j9O9zf7t2sQFWtuuxdAGF\n"
+    "yI9ijgKxvd7YAD09czSVkt1I5uuhe5OLzrW8EaToWjdk39zQYBqC1pBJ6VdmaUni\n"
+    "Sn7XQG9n4agf7aWMHmEkJrcAfgG3SovCPwprakxlzjgGlwu0QMurPEzqT12C4t1W\n"
+    "ewJBANM3hFLUOM3/M3p6q5gTIyylEsBlkx7uJq8QbT9bhY+E/GSJA17/67vRt1YP\n"
+    "E6DVbsGLjx0MruJNYvcflz/FlkkCQQDF6ooGNY9S3MyWmT9X1KfuHt4QoLi9Y29Q\n"
+    "aJXMVP0s5rxXWh2alSpqxpemKqgh0DX34v694JcOq3kmlQKDcuSTAkAp0vlGKW4r\n"
+    "fCkujO3krLHqAGcaIS+gVV6/1D3MYEqeafTVnYSDjbGWL+kSJ7UTjy/jUgYl5dtn\n"
+    "ctHtoGdRJFxDAkAOtOrYABu/6jw1IAnfW+dws53yDwH/Oe0ukCfc+FhDfq03V7Ed\n"
+    "ODxL7CQC9RGwuR7yEhXOsKUe0syxbSAIxgljAkEAqUQJjNg6Tuk50e6sxmq7MASL\n"
+    "+iK02pIgKq7IhmgagUZ+RDfPuM61c2BmYVaTNll5lcxVWQKiV0aQEbipnmEWBA==\n"
+    "-----END RSA PRIVATE KEY-----\n";
+
+static const unsigned char HUGE_E_SIG_RS256[] = {
+    0x24, 0xf3, 0xee, 0x13, 0x47, 0xf7, 0xa3, 0x6d, 0x28, 0xa7, 0xa7, 0x59,
+    0x88, 0xaf, 0x57, 0x7a, 0x23, 0x96, 0xdc, 0xb1, 0xbd, 0xd2, 0x20, 0x79,
+    0x93, 0x80, 0x2a, 0xe7, 0x4c, 0x4f, 0x7a, 0x81, 0xdd, 0xa1, 0x12, 0x39,
+    0xd7, 0x20, 0xa6, 0xdf, 0xae, 0xb5, 0x5b, 0xc4, 0x30, 0x0b, 0x00, 0xdd,
+    0xe2, 0x66, 0x3c, 0xcf, 0x5f, 0x19, 0x22, 0x09, 0x0c, 0x8d, 0x8b, 0x3e,
+    0x2e, 0xea, 0x7d, 0x04, 0x74, 0xe1, 0x25, 0xbc, 0x65, 0x67, 0xb2, 0x41,
+    0xaa, 0xea, 0x30, 0x9b, 0x8e, 0x95, 0x2a, 0x6c, 0x31, 0x7a, 0x12, 0x03,
+    0x8b, 0xab, 0x22, 0x62, 0x86, 0x87, 0xdb, 0x2d, 0xb4, 0x8f, 0x50, 0x30,
+    0x1a, 0xc8, 0xcd, 0x2b, 0x06, 0x00, 0x79, 0xd4, 0x11, 0x2b, 0xd7, 0xd3,
+    0xe3, 0xae, 0x3c, 0x0f, 0xb1, 0xee, 0xf5, 0x80, 0xa7, 0x56, 0xbf, 0x91,
+    0x87, 0xd8, 0x1e, 0x14, 0x2e, 0x51, 0xe3, 0x1b,
+};
+
+UTEST(hl_cap_asym, rsa_huge_public_exponent_refused)
+{
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        HUGE_E_RSA_PUB_PEM, sizeof(HUGE_E_RSA_PUB_PEM) - 1,
+        HL_CRYPTO_ASYM_RS256, MSG, MSG_LEN,
+        HUGE_E_SIG_RS256, sizeof(HUGE_E_SIG_RS256)));
+
+    uint8_t sig[HL_CRYPTO_SIGN_MAX];
+    size_t len = 0;
+    ASSERT_EQ(-1, hl_cap_crypto_asym_sign_default(
+        HUGE_E_RSA_PRIV_PEM, strlen(HUGE_E_RSA_PRIV_PEM),
+        HL_CRYPTO_ASYM_RS256, MSG, MSG_LEN, sig, sizeof sig, &len));
+    ASSERT_EQ((size_t)0, len);
+}
+
 UTEST_MAIN();

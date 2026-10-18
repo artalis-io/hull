@@ -69,6 +69,56 @@ static int stb_info(const void *src, size_t src_len,
     return 0;
 }
 
+/* A progressive JPEG may carry any number of scans, and stb walks every
+ * block of the image for each one: a few bytes per refinement scan bought a
+ * full pass over up to HL_IMAGE_MAX_PIXELS pixels, so a small file cost far
+ * more than the codec charge (1 unit per 8 pixel bytes) paid for (audit 18).
+ * A real progressive JPEG has about ten scans; libjpeg-turbo's tools take
+ * 100 as a generous ceiling, and so does Hull. */
+#define HL_JPEG_MAX_SCANS 100
+
+/* Count the SOS segments of a JPEG the way stb reaches them: marker
+ * segments are skipped by their length (an APPn payload, e.g. an EXIF
+ * thumbnail, may hold FF DA bytes that are not this image's scans), and
+ * entropy-coded data ends at the first 0xFF that is followed (after fill
+ * 0xFF bytes) by anything but a stuffed 0x00 or an RSTn. Anything
+ * malformed is resynced at the next 0xFF, which can only count more scans
+ * than stb decodes, never fewer. Returns the count, stopping early once
+ * it passes `limit`. */
+static unsigned jpeg_scan_count(const unsigned char *b, size_t len,
+                                unsigned limit)
+{
+    unsigned scans = 0;
+    size_t i = 2; /* past SOI */
+    while (i < len) {
+        if (b[i] != 0xFF) { i++; continue; }
+        while (i < len && b[i] == 0xFF) i++;
+        if (i >= len) break;
+        unsigned char m = b[i++];
+        if (m == 0xD9) break;                     /* EOI */
+        if (m == 0x00 || m == 0x01 || (m >= 0xD0 && m <= 0xD7))
+            continue;                             /* no length */
+        if (len - i < 2) break;
+        size_t seg = ((size_t)b[i] << 8) | b[i + 1];
+        if (seg < 2) continue;
+        if (seg > len - i) break;
+        i += seg;
+        if (m != 0xDA) continue;
+        if (++scans > limit) break;
+        while (i < len) {                         /* entropy-coded data */
+            if (b[i] != 0xFF) { i++; continue; }
+            size_t k = i + 1;
+            while (k < len && b[k] == 0xFF) k++;
+            if (k < len && (b[k] == 0x00 || (b[k] >= 0xD0 && b[k] <= 0xD7))) {
+                i = k + 1;
+                continue;
+            }
+            break;                                /* i is at the marker */
+        }
+    }
+    return scans;
+}
+
 static int stb_decode(const void *src, size_t src_len,
                       void **pixels, uint32_t *w, uint32_t *h,
                       int requested_channels, HlAllocator *alloc)
@@ -87,6 +137,11 @@ static int stb_decode(const void *src, size_t src_len,
     if (iw <= 0 || ih <= 0 || (uint32_t)iw > HL_IMAGE_MAX_DIM ||
         (uint32_t)ih > HL_IMAGE_MAX_DIM ||
         (uint64_t)iw * (uint64_t)ih > HL_IMAGE_MAX_PIXELS)
+        return -1;
+    if (src_len >= 2 && ((const unsigned char *)src)[0] == 0xFF &&
+        ((const unsigned char *)src)[1] == 0xD8 &&
+        jpeg_scan_count((const unsigned char *)src, src_len,
+                        HL_JPEG_MAX_SCANS) > HL_JPEG_MAX_SCANS)
         return -1;
     /* Bound what stb holds AT ONCE for this decode by what the header
      * allows (stb_impl.c caps the sum of its live blocks, not each one):

@@ -10934,6 +10934,38 @@ UTEST(lua_audit17, tar_skipped_headers_are_charged)
     a15_fs_close(&f);
 }
 
+/* The hull.encoding C codecs were charged only through their result
+ * buffer, at the allocator's rate (1 unit per 64 bytes), and their input
+ * scan not at all. They charge input + output 1 unit per 8 bytes before the
+ * work now, the hull:encoding rate in JS (audit 18). The medium decode
+ * passing under the limit shows the native path ran (the pure-Lua codec
+ * costs several instructions per byte). */
+UTEST(lua_audit18, encoding_codecs_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    ASSERT_EQ(audit10_run("enc = require('hull.encoding') "
+                          "MID = string.rep('00', 200000) "
+                          "HEX = string.rep('00', 2000000) "
+                          "RAW = string.rep('x', 3000000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 400 KB in, 200 KB out: 75000 units. */
+    EXPECT_EQ(audit10_run("assert(#enc.hex.decode(MID) == 200000) return 1",
+                          400000, err, sizeof err), LUA_OK);
+    /* 4 MB in, 2 MB out: 750000 units. */
+    EXPECT_NE(audit10_run("enc.hex.decode(HEX) return 1", 400000,
+                          err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* 3 MB in, 4 MB out: 875000 units. */
+    EXPECT_NE(audit10_run("enc.base64.encode(RAW) return 1", 400000,
+                          err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("MID, HEX, RAW = nil, nil, nil return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* ── Audit 14: SSE and WebSocket writes are charged ────────────────────
  *
