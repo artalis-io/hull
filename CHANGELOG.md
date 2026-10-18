@@ -8,6 +8,96 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-10-18
+
+Full PR list:
+[GitHub release v0.17.1](https://github.com/artalis-io/hull/releases/tag/v0.17.1).
+
+This release carries security audit round 17 (#758-#770). No public API was added or removed, but
+some calls that used to pass silently now refuse or are charged to the instruction budget. Check
+the list below before upgrading.
+
+### Upgrade notes
+- **Reinstall tool bundles once.** `hull tools install` now records which release a bundle came
+  from, and `hull build` checks it against the running hull. A bundle installed by an earlier
+  release (`zig`, the `libc-musl-<arch>` floors) fails that check: run `hull tools install <name>`
+  again after upgrading.
+- **A built binary reads nothing from disk beside it.** Templates and relative `require` /
+  `import` modules that are not embedded in the binary are no longer read from its working
+  directory (migrations and static files already worked this way). A built app's entry now
+  resolves its relative requires against the embedded copies; before, they were silently read
+  from the disk beside the binary. Development (`hull app.lua`, `hull dev`) is unchanged.
+
+### Behaviour changes
+
+**Runtime**
+- **Middleware numeric returns mean the same in both runtimes.** The value is truncated toward
+  zero and only its sign counts: 0 continues, positive stops, negative answers 500. `NaN`, `nil`
+  and `undefined` continue. So Lua `1.5` now stops (it continued) and `2^32` stops in both (it
+  wrapped to 0). A JS `valueOf` that throws answers 500 instead of continuing.
+- **A `hull.async` task that trips the instruction limit while `hull._spawn` runs it inline now
+  raises the trip in its spawner too.** Before, the spawner ran on until its own hook came round.
+
+**Stdlib**
+- **`validate` `min` / `max` on strings count code points in both runtimes.** Lua counted bytes,
+  JS UTF-16 units. JS `validate` also reads only the data's own properties, not its prototype.
+- **`etag` sends no ETag for an empty body, and never answers it 304.** Lua raised (a 500) and JS
+  sent `ETag: null`.
+- **`hull.jobs` / `hull:jobs` no longer export `_tick`, `_cron_next` / `_cronNext`,
+  `_events_drain` / `_eventsDrain` or `_config`.** They wrote `_hull_*` rows with a caller-chosen
+  clock. Drive jobs through the public API (`jobs.work`).
+- **JS `http.fetch` & co fail when a header's getter or `toString` throws.** The header used to be
+  skipped and the request sent.
+
+**Database**
+- **Postgres and MySQL replies are charged frame by frame** (1 unit plus 1 per 64 bytes), every
+  frame type included, so a `LOOP RAISE NOTICE` stream or the rows of a 2nd+ result set stop at
+  the run's limit. This also bounds `db.async` ops.
+- **Postgres refuses `COPY ... TO STDOUT`** by dropping the connection.
+- **The connection startup is charged.** Postgres startup frames are charged like reply frames,
+  and a SCRAM login 16 units per round before the key derivation (the default 4096 rounds cost
+  65536 units). The MySQL auth exchange takes at most 16 packets and charges each one.
+- **MySQL refuses more parameters than placeholders** (`parameter count mismatch`), as SQLite and
+  Postgres do. The surplus used to be dropped.
+- **Valkey `scan` / `clear` charge every SCAN step** and stop at the run's limit.
+
+**GPU**
+- **Each device holds at most 1 GiB of GPU memory.** This covers persistent buffers and textures
+  and the buffers, uniforms and inline textures a `gpu.dispatch` / `gpu.pipeline` creates for the
+  call, sync or async; past it the call fails with `device_memory_limit`. The creates, uploads and
+  inline buffers are charged 1 unit per 64 bytes.
+- **A GPU read-back larger than the VM heap limit is refused** with `output_too_large`.
+
+**Files, tar, mime, encoding**
+- **`tar.parse` / `tar.extract` charge the whole input up front**, 1 unit per 64 bytes.
+- **Content sniffing:** a window of nothing but whitespace has no type, and an SVG or HTML
+  document after leading whitespace is sniffed as such (it came out `application/xml`).
+- **JS `hull:encoding` codecs refuse an output larger than the heap limit** and charge input and
+  output 1 unit per 8 bytes.
+
+**Tooling**
+- **Tool spawns never run a program from the working directory.** A bare tool name (`nm`,
+  `clang`, ...) is resolved through absolute `PATH` entries only and refused when not found;
+  `hull dev` re-runs hull by its own path. Before, an empty or `.` `PATH` entry let a repo's own
+  `nm` or `hull` run during `hull build` / `hull dev`.
+- **`hull verify` without `--developer-key` reports the app layer `VALID (self-consistent)`** and
+  warns that the signer is not pinned. Exit status unchanged.
+- **A `"$VAR"` `databases.internal` must be declared** in `env` or `secrets` before it is read,
+  also under `hull test` and `hull agent`.
+- **The audit log writes outbound URLs as scheme://host/path** (no userinfo, query or fragment).
+
+### Fixes worth knowing
+- **Shutdown no longer crashes when a Lua `__gc` finalizer uses a database connection.** The
+  connection registry now outlives the runtime; a finalizer's `conn.query`, `db.default()`,
+  `db.connect` or `db.open` is refused.
+- **A JS handler resumed by `req.multipart()` that fails keeps the headers earlier middleware
+  set** on its 500.
+- **Lua binding lifetime:** a kv `scan` closed by a finalizer mid-call, an `image.encode` closed by
+  its options' `__index`, and image / tar views closed during argument conversion no longer touch
+  freed memory. `conn.data` set on a closed WebSocket no longer leaks.
+- **A cache-sourced feature archive is copied, then verified**, and recorded in the release trust
+  domain.
+
 ## [0.17.0] - 2026-10-16
 
 Full PR list:
