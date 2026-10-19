@@ -11608,4 +11608,232 @@ UTEST(js_audit17, imports_and_templates_read_disk_only_in_development)
     a17_cleanup(dir);
 }
 
+/* ───────────────────────────────────────────────────────────────────────
+ * audit 18: the JS stdlib shares its intrinsics with app code.
+ *
+ * The Lua stdlib runs in a private environment; the JS stdlib had none, so an
+ * app that patched a shared intrinsic observed or steered values the stdlib
+ * built from private data - a leak databases.internal did not stop, because it
+ * was in-process, not in the SQL text. These cases drive the attack through a
+ * real stdlib path and read what leaked. They are regression tests for
+ * hl_js_harden_intrinsics: before it, each attack succeeded; after it, the
+ * mutation throws or has no effect and nothing private is observed.
+ * ─────────────────────────────────────────────────────────────────────── */
+
+/* Eval a module, drain its jobs, and return whether it loaded cleanly (0) or
+ * threw / rejected (-1). The attack cases below read their result from a
+ * globalThis flag the module sets. */
+static int a18_module(const char *code)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<a18>",
+                          JS_EVAL_TYPE_MODULE);
+    int bad = JS_IsException(val);
+    if (bad) {
+        JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    } else {
+        hl_js_run_jobs(&js);
+        if (JS_IsObject(val) &&
+            JS_PromiseState(js.ctx, val) == JS_PROMISE_REJECTED)
+            bad = 1;
+    }
+    JS_FreeValue(js.ctx, val);
+    return bad ? -1 : 0;
+}
+
+/* (a) A patched Array.prototype.join alters the SQL the stdlib builds. jobs.enqueue
+ * assembles its INSERT column list with `cols.join(", ")`; a global patch sees
+ * (and could rewrite) that internal array. After the fix the assignment throws. */
+UTEST(js_audit18_intrinsics, array_join_cannot_alter_stdlib_sql)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { jobs } from 'hull:jobs';\n"
+        "const orig = Array.prototype.join;\n"
+        "Array.prototype.join = function (sep) {\n"
+        "  const s = orig.call(this, sep);\n"
+        "  if (typeof s === 'string' && s.indexOf('queue') >= 0 &&\n"
+        "      s.indexOf('dedup_key') >= 0) globalThis.__a18_join = s;\n"
+        "  return s;\n"
+        "};\n"
+        "jobs.init();\n"
+        "jobs.enqueue('t', { x: 1 });\n");
+    /* After the fix: the module throws at the frozen-prototype assignment, so
+     * it never reaches enqueue and nothing is captured. */
+    EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_join === 'undefined' ? 1 : 0"), 1);
+    /* The real join still works for ordinary code. */
+    EXPECT_EQ(eval_int("[1,2,3].join('-') === '1-2-3' ? 1 : 0"), 1);
+    cleanup_js_caps();
+}
+
+/* (b) A patched array-iterator next captures a value the stdlib destructures
+ * from private data. totp.decryptSecret does
+ * `const [value, err, version] = sealbox.open(...)`, so %ArrayIteratorPrototype%.next
+ * sees the decrypted 20-byte TOTP secret. After the fix the patch throws. */
+UTEST(js_audit18_intrinsics, array_iterator_cannot_capture_a_destructured_secret)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "const H = __testHooks('hull:web:middleware:totp');\n"
+        "const ap = Object.getPrototypeOf([][Symbol.iterator]());\n"
+        "const nextOrig = ap.next;\n"
+        "let leak = null;\n"
+        "ap.next = function () {\n"
+        "  const r = nextOrig.call(this);\n"
+        "  if (!r.done && typeof r.value === 'string' && r.value.length === 20 &&\n"
+        "      leak === null) leak = r.value;\n"
+        "  return r;\n"
+        "};\n"
+        "H.reset();\n"
+        "totp.init({ issuer: 'T', encryptionKey: 'k'.repeat(32) });\n"
+        "const r = totp.enroll('u1');\n"
+        "const secret = H.base32Decode(r.secretBase32);\n"
+        "const step = H.currentStep();\n"
+        "totp.confirm('u1', H.totpAtStep(secret, step, 6));\n"
+        "totp.verify('u1', H.totpAtStep(secret, step + 1, 6));\n"
+        "globalThis.__a18_leaked = (leak !== null && leak === secret) ? 1 : 0;\n");
+    EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("globalThis.__a18_leaked | 0"), 0);
+    /* Ordinary destructuring still works. */
+    EXPECT_EQ(eval_int("(() => { const [a, b] = [7, 8]; return a + b; })()"), 15);
+    cleanup_js_caps();
+}
+
+/* (c) A patched Promise.prototype.then / .constructor observing internal rows
+ * in an async stdlib path. jobs.await_ polls _hull_jobs and `await hull.sleep`s
+ * between tries. Measured value recorded in the report. After the fix the patch
+ * throws. */
+UTEST(js_audit18_intrinsics, promise_then_cannot_observe_internal_rows)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { jobs } from 'hull:jobs';\n"
+        "let seen = 0;\n"
+        "const thenOrig = Promise.prototype.then;\n"
+        "Promise.prototype.then = function (a, b) {\n"
+        "  seen++;\n"
+        "  return thenOrig.call(this, a, b);\n"
+        "};\n"
+        "jobs.init();\n"
+        "const id = jobs.enqueue('t', { x: 1 });\n"
+        "globalThis.__a18_then = jobs.await(id, { timeout: 0.05 }).then(\n"
+        "  () => { globalThis.__a18_then_seen = seen; return 1; },\n"
+        "  () => { globalThis.__a18_then_seen = seen; return 1; });\n");
+    printf("  [a18 measure] patched then calls before the app's own: %d\n",
+           eval_int("globalThis.__a18_then_seen | 0"));
+    EXPECT_EQ(rc, -1);
+    cleanup_js_caps();
+}
+
+/* (d) A replaced global (globalThis.Array) is called by the stdlib. csv.encode
+ * guards its input with `Array.isArray`, resolved through the global binding;
+ * replacing the global redirects the stdlib's call. After the fix the
+ * reassignment throws. */
+UTEST(js_audit18_intrinsics, replaced_global_array_is_not_seen_by_the_stdlib)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { csv } from 'hull:csv';\n"
+        "const real = Array.isArray.bind(Array);\n"
+        "globalThis.Array = { isArray: (x) => { globalThis.__a18_arr = 1; return real(x); } };\n"
+        "csv.encode([{ a: 1, b: 2 }], { headers: true });\n");
+    EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_arr === 'undefined' ? 1 : 0"), 1);
+    /* csv still works. */
+    char *out = eval_str(
+        "(() => { try { return 'ok'; } catch (e) { return String(e); } })()");
+    EXPECT_TRUE(out && strcmp(out, "ok") == 0);
+    free(out);
+    cleanup_js();
+}
+
+/* Every reachable standard intrinsic is frozen, and the standard globals are
+ * non-writable + non-configurable. */
+UTEST(js_audit18_intrinsics, intrinsics_are_frozen_and_globals_locked)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "(() => {\n"
+        "  const protos = [Object.prototype, Array.prototype, Object.getPrototypeOf(Object),\n"
+        "    String.prototype, Number.prototype, Boolean.prototype,\n"
+        "    RegExp.prototype, Error.prototype, TypeError.prototype,\n"
+        "    Promise.prototype, Map.prototype, Set.prototype, Date.prototype,\n"
+        "    Object.getPrototypeOf([][Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())),\n"
+        "    Object.getPrototypeOf(''[Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(new Map()[Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(new Set()[Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(function* () {}),\n"
+        "    Object.getPrototypeOf(async function () {}),\n"
+        "    Object.getPrototypeOf(Int8Array), Int8Array.prototype,\n"
+        "    JSON, Math, Reflect];\n"
+        "  for (const p of protos) if (p && !Object.isFrozen(p)) return 0;\n"
+        "  return 1;\n"
+        "})()"), 1);
+    /* Globals are non-writable and non-configurable. */
+    EXPECT_EQ(eval_int(
+        "(() => {\n"
+        "  for (const n of ['Object','Array','JSON','Promise','Math','String',\n"
+        "      'Reflect','parseInt','encodeURIComponent','globalThis']) {\n"
+        "    const d = Object.getOwnPropertyDescriptor(globalThis, n);\n"
+        "    if (!d || d.configurable) return 0;\n"
+        "    if ('value' in d && d.writable) return 0;\n"
+        "  }\n"
+        "  return 1;\n"
+        "})()"), 1);
+    /* globalThis itself is NOT frozen - apps still define globals. */
+    EXPECT_EQ(eval_int(
+        "(() => { globalThis.__a18_app_global = 42;\n"
+        "  return globalThis.__a18_app_global === 42 ? 1 : 0; })()"), 1);
+    cleanup_js();
+}
+
+/* The override-mistake enablement: a subclass constructor assigns name/message,
+ * and an instance overrides toString, both against frozen prototypes; assigning
+ * to the prototype itself throws. */
+UTEST(js_audit18_intrinsics, override_mistake_is_enabled)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "(() => {\n"
+        "  class X extends Error { constructor() { super('boom'); this.name = 'X'; } }\n"
+        "  const e = new X();\n"
+        "  if (e.name !== 'X' || e.message !== 'boom') return 0;\n"
+        "  const o = {}; o.toString = () => 'custom';\n"
+        "  if (o.toString() !== 'custom') return 0;\n"
+        "  function Foo() {} Foo.prototype.toString = () => 'foo';\n"
+        "  if (new Foo().toString() !== 'foo') return 0;\n"
+        "  return 1;\n"
+        "})()"), 1);
+    /* Assigning to the prototype itself throws. */
+    EXPECT_EQ(eval_int(
+        "(() => { try { Object.prototype.toString = () => 'x'; return 0; }\n"
+        "  catch (e) { return e instanceof TypeError ? 1 : 0; } })()"), 1);
+    cleanup_js();
+}
+
+/* A worker.dispatch VM runs app functions, so it is hardened too. */
+UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
+{
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+    char out[512] = "(no verdict)";
+    js_worker_run(be, actx,
+        "  const r = await worker.dispatch(() => Object.isFrozen(Array.prototype) &&\n"
+        "    Object.isFrozen(Object.prototype) ? 'frozen' : 'open');\n"
+        "  check(r === 'frozen', 'worker: ' + r);\n",
+        out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    js_worker_close(be, actx, pool);
+}
+
 UTEST_MAIN();
