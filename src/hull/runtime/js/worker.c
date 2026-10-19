@@ -220,6 +220,13 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
         JS_FreeContext(ctx);
         return NULL;
     }
+    /* Freeze the intrinsics here too: a worker.dispatch VM runs app
+     * functions, so it gets the same wall as the main runtime (audit 18). */
+    if (hl_js_harden_intrinsics(ctx) != 0) {
+        log_error("[hull:worker] could not harden the intrinsics");
+        JS_FreeContext(ctx);
+        return NULL;
+    }
 
     /* The registered hooks install `db`: only for an app that declared it. */
     if (op->with_db) {

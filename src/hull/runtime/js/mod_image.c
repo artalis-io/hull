@@ -464,7 +464,7 @@ static int js_image_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, image_obj, "fromWasm",
                       JS_NewCFunction(ctx, js_image_from_wasm, "fromWasm", 1));
 
-    JS_SetModuleExport(ctx, m, "image", image_obj);
+    hl_js_export_frozen(ctx, m, "image", image_obj);
     return 0;
 }
 
@@ -481,7 +481,7 @@ int hl_js_init_image_module(JSContext *ctx, HlJS *js)
     JSValue proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, proto, js_image_proto,
                                sizeof(js_image_proto) / sizeof(js_image_proto[0]));
-    JS_SetClassProto(ctx, js_image_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, js_image_class_id, proto);
 
     /* Register the "hull:image" module so `import { image } from "hull:image"`
      * resolves through the standard QuickJS module system. The init callback

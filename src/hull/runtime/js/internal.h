@@ -366,6 +366,25 @@ int hl_js_is_thenable(JSContext *ctx, JSValueConst v);
  * by the main runtime and the worker VMs. */
 int hl_js_poison_code_constructors(JSContext *ctx);
 
+/* Freeze the standard intrinsics + lock the standard globals before any app
+ * code runs (audit 18, runtime/js/harden.c). Fatal on failure. */
+int hl_js_harden_intrinsics(JSContext *ctx);
+
+/* Freeze a Hull-owned object and what its own properties reach (stops at
+ * non-extensible objects; does not follow [[Prototype]]). 0 / -1. */
+int hl_js_freeze_value(JSContext *ctx, JSValueConst v);
+/* JS_SetModuleExport of a frozen value (a native module's export object is
+ * shared by app code and the stdlib). Exports undefined if freezing fails. */
+int hl_js_export_frozen(JSContext *ctx, JSModuleDef *m, const char *name,
+                        JSValue val);
+/* A js_malloc'd, NUL-terminated copy of an embedded stdlib module's source
+ * with the footer that freezes its exports appended (*out_len excludes the
+ * NUL). NULL with an exception pending on failure. */
+char *hl_js_stdlib_source_frozen(JSContext *ctx, const char *module_name,
+                                 const char *src, size_t len, size_t *out_len);
+/* JS_SetClassProto of a frozen prototype (shared by every instance). */
+void hl_js_set_class_proto_frozen(JSContext *ctx, JSClassID id, JSValue proto);
+
 /* Reserve globalThis.__hull_manifest (mod_app.c): a non-configurable getter
  * onto HlJS.manifest, defined before any app code runs. 0 / -1. */
 int hl_js_define_manifest_global(JSContext *ctx);

@@ -1468,7 +1468,7 @@ void hl_js_request_register(JSContext *ctx)
         JS_FreeValue(ctx, asyncIter);
         JS_FreeValue(ctx, Symbol);
         JS_FreeValue(ctx, global);
-        JS_SetClassProto(ctx, hl_mp_iter_class_id, proto);
+        hl_js_set_class_proto_frozen(ctx, hl_mp_iter_class_id, proto);
     }
 
     /* MultipartPart prototype: read(), chunks(), name/filename/contentType */
@@ -1493,7 +1493,7 @@ void hl_js_request_register(JSContext *ctx)
         JS_FreeAtom(ctx, name_atom);
         JS_FreeAtom(ctx, filename_atom);
         JS_FreeAtom(ctx, content_type_atom);
-        JS_SetClassProto(ctx, hl_mp_part_class_id, proto);
+        hl_js_set_class_proto_frozen(ctx, hl_mp_part_class_id, proto);
     }
 
     /* MultipartChunks prototype: next() + [Symbol.asyncIterator]() */
@@ -1515,6 +1515,6 @@ void hl_js_request_register(JSContext *ctx)
         JS_FreeValue(ctx, asyncIter);
         JS_FreeValue(ctx, Symbol);
         JS_FreeValue(ctx, global);
-        JS_SetClassProto(ctx, hl_mp_chunks_class_id, proto);
+        hl_js_set_class_proto_frozen(ctx, hl_mp_chunks_class_id, proto);
     }
 }

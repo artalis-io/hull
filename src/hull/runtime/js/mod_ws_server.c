@@ -367,7 +367,7 @@ static int js_ws_server_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_ws_broadcast, "broadcast", 2));
     JS_SetPropertyStr(ctx, ws, "connections",
                       JS_NewCFunction(ctx, js_ws_connections, "connections", 1));
-    JS_SetModuleExport(ctx, m, "wsServer", ws);
+    hl_js_export_frozen(ctx, m, "wsServer", ws);
     return 0;
 }
 
@@ -381,7 +381,7 @@ int hl_js_init_ws_server_module(JSContext *ctx, HlJS *js)
     JS_SetPropertyFunctionList(ctx, proto, js_ws_conn_proto_funcs,
                                sizeof(js_ws_conn_proto_funcs) /
                                sizeof(js_ws_conn_proto_funcs[0]));
-    JS_SetClassProto(ctx, js_ws_conn_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, js_ws_conn_class_id, proto);
 
     JSModuleDef *m = JS_NewCModule(ctx, "hull:web:ws-server", js_ws_server_module_init);
     if (!m) return -1;

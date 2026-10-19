@@ -578,7 +578,7 @@ static int js_tui_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, o, "MOD_CTRL",  JS_NewUint32(ctx, HL_TUI_MOD_CTRL));
     JS_SetPropertyStr(ctx, o, "MOD_SUPER", JS_NewUint32(ctx, HL_TUI_MOD_SUPER));
 
-    JS_SetModuleExport(ctx, m, "tui", o);
+    hl_js_export_frozen(ctx, m, "tui", o);
     return 0;
 }
 

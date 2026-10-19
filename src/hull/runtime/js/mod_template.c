@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
 /* _template.compile(code, name?) - compile generated JS source to a function */
 static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
@@ -202,7 +203,7 @@ static int js_template_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_template_compile, "compile", 2));
     JS_SetPropertyStr(ctx, tpl, "loadRaw",
                       JS_NewCFunction(ctx, js_template_load_raw, "loadRaw", 1));
-    JS_SetModuleExport(ctx, m, "_template", tpl);
+    hl_js_export_frozen(ctx, m, "_template", tpl);
     return 0;
 }
 

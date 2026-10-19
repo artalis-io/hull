@@ -457,7 +457,7 @@ static int js_tar_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, tar_obj, "pack",
                       JS_NewCFunction(ctx, js_tar_pack, "pack", 2));
 
-    JS_SetModuleExport(ctx, m, "tar", tar_obj);
+    hl_js_export_frozen(ctx, m, "tar", tar_obj);
     return 0;
 }
 

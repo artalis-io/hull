@@ -175,7 +175,7 @@ static void js_register_wasm_buf_class(JSContext *ctx)
                             JS_UNDEFINED, 0);
     JS_FreeAtom(ctx, length_atom);
 
-    JS_SetClassProto(ctx, js_wasm_buf_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, js_wasm_buf_class_id, proto);
 }
 
 /* Clamp per-call opts to runtime ceiling */
@@ -1202,7 +1202,7 @@ static void js_register_wasm_inst_class(JSContext *ctx)
                             JS_UNDEFINED, 0);
     JS_FreeAtom(ctx, closed_atom);
 
-    JS_SetClassProto(ctx, js_wasm_inst_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, js_wasm_inst_class_id, proto);
 }
 
 /* compute.instance(name, opts?) -> WasmInstance | throws */
@@ -1706,7 +1706,7 @@ static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_compute_async_call, "call", 3));
     JS_SetPropertyStr(ctx, compute, "async", async_obj);
 
-    JS_SetModuleExport(ctx, m, "compute", compute);
+    hl_js_export_frozen(ctx, m, "compute", compute);
     return 0;
 }
 

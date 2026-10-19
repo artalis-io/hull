@@ -176,7 +176,7 @@ void hl_js_sse_register_class(JSContext *ctx)
     JS_SetPropertyFunctionList(ctx, proto, js_sse_stream_proto_funcs,
                                sizeof(js_sse_stream_proto_funcs) /
                                sizeof(js_sse_stream_proto_funcs[0]));
-    JS_SetClassProto(ctx, js_sse_stream_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, js_sse_stream_class_id, proto);
 }
 
 /* Create and return an SSE stream JS object. Calls kl_http_sse_begin.

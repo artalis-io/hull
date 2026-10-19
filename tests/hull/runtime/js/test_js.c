@@ -8236,13 +8236,19 @@ UTEST(js_audit6, manifest_fields_are_read_as_own_properties)
     EXPECT_EQ(a5_module_named("<test>",
         "import { app } from 'hull:app';\n"
         "app.manifest({ fs: [], databases: [], kv: [], cors: [], env: ['A'] });\n"
-        "Array.prototype.write = ['.'];\n"
-        "Array.prototype.read = ['/'];\n"
-        "Array.prototype.origins = ['*'];\n"
-        "Array.prototype.dynamic = { schemes: ['sqlite'], hosts: ['*'] };\n"
-        "Array.prototype.named = { x: ':memory:' };\n"
-        "Object.prototype.hosts = ['*'];\n", &msg), 0);
+        /* Since audit 18 the prototypes are frozen: every pollution is
+         * refused, and the extractor's own-property reads still hold. */
+        "let refused = 0;\n"
+        "const tryit = (f) => { try { f(); } catch (e) { if (e instanceof TypeError) refused++; } };\n"
+        "tryit(() => { Array.prototype.write = ['.']; });\n"
+        "tryit(() => { Array.prototype.read = ['/']; });\n"
+        "tryit(() => { Array.prototype.origins = ['*']; });\n"
+        "tryit(() => { Array.prototype.dynamic = { schemes: ['sqlite'], hosts: ['*'] }; });\n"
+        "tryit(() => { Array.prototype.named = { x: ':memory:' }; });\n"
+        "tryit(() => { Object.prototype.hosts = ['*']; });\n"
+        "globalThis.__a6_refused = refused;\n", &msg), 0);
     free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a6_refused"), 6);
     HlManifest m;
     ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
     EXPECT_EQ(m.fs_read_count, 0);
@@ -8255,12 +8261,6 @@ UTEST(js_audit6, manifest_fields_are_read_as_own_properties)
     EXPECT_EQ(m.kv.dynamic.declared, 0);
     EXPECT_EQ(m.env_count, 1);
     hl_manifest_free(&m);
-    static const char undo[] =
-        "delete Array.prototype.write; delete Array.prototype.read;"
-        "delete Array.prototype.origins; delete Array.prototype.dynamic;"
-        "delete Array.prototype.named; delete Object.prototype.hosts;";
-    JS_FreeValue(js.ctx, JS_Eval(js.ctx, undo, sizeof undo - 1, "<c>",
-                                 JS_EVAL_TYPE_GLOBAL));
     cleanup_js();
 }
 
@@ -8272,10 +8272,10 @@ UTEST(js_audit6, an_array_manifest_is_refused)
     char *msg = NULL;
     EXPECT_EQ(a5_module_named("<test>",
         "import { app } from 'hull:app';\n"
-        "Array.prototype.hosts = ['*'];\n"
         "let r = 0;\n"
-        "try { app.manifest([]); } catch (e) { r = e instanceof TypeError ? 1 : 2; }\n"
-        "delete Array.prototype.hosts;\n"
+        /* Frozen since audit 18; the array manifest is refused regardless. */
+        "try { Array.prototype.hosts = ['*']; r = 8; } catch (e) {}\n"
+        "try { app.manifest([]); } catch (e) { r |= e instanceof TypeError ? 1 : 2; }\n"
         "globalThis.__a6 = r;\n", &msg), 0);
     free(msg);
     EXPECT_EQ(eval_int("globalThis.__a6"), 1);
@@ -8801,14 +8801,17 @@ UTEST(js_audit8, building_req_runs_no_inherited_setter)
     int id = eval_int("globalThis.__hull_internals.__hull_middleware["
                       "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
     /* Armed after registration: only the request build can reach them. */
+    /* Since audit 18 Object.prototype is frozen: each setter is refused (9
+     * of 9), and the request build still defines rather than sets. */
     char *m = eval_str(
         "globalThis.__a8_set = 0;\n"
+        "let refused = 0;\n"
         "for (const k of ['method', 'path', 'query', 'params', 'headers',\n"
         "                 'body', 'ctx', 'header', 'remote_addr'])\n"
-        "  Object.defineProperty(Object.prototype, k, { configurable: true,\n"
-        "    set(v) { globalThis.__a8_set++; } });\n"
-        "'ok'");
-    EXPECT_TRUE(m && strcmp(m, "ok") == 0);
+        "  try { Object.defineProperty(Object.prototype, k, { configurable: true,\n"
+        "    set(v) { globalThis.__a8_set++; } }); } catch (e) { refused++; }\n"
+        "String(refused)");
+    EXPECT_TRUE(m && strcmp(m, "9") == 0);
     free(m);
     KlHttpRequest req = {0};
     KlHttpResponse res = {0};
@@ -11375,18 +11378,19 @@ UTEST(js_audit12, polluted_object_prototype_does_not_reach_fetch_opts)
     a12_eval_app(
         "import { httpClient as http } from 'hull:http-client';\n"
         "globalThis.__hits = 0;\n"
+        /* Frozen since audit 18: each accessor is refused (3 of 3). */
+        "globalThis.__refused = 0;\n"
         "for (const k of ['body', 'headers', 'timeoutMs'])\n"
-        "  Object.defineProperty(Object.prototype, k, { configurable: true,\n"
+        "  try { Object.defineProperty(Object.prototype, k, { configurable: true,\n"
         "    get() { globalThis.__hits++; return k === 'timeoutMs' ? -1 : {}; },\n"
-        "    set(v) { globalThis.__hits++; } });\n"
+        "    set(v) { globalThis.__hits++; } }); } catch (e) { globalThis.__refused++; }\n"
         "let msgs = [];\n"
         "for (const f of [() => http.async.post('http://x.invalid/', 'b'),\n"
         "                 () => http.async.put('http://x.invalid/'),\n"
         "                 () => http.async.patch('http://x.invalid/', 'b')])\n"
         "  try { f(); msgs.push('none'); } catch (e) { msgs.push(String(e.message)); }\n"
-        "for (const k of ['body', 'headers', 'timeoutMs'])\n"
-        "  delete Object.prototype[k];\n"
         "globalThis.__msgs = msgs;\n");
+    EXPECT_EQ(eval_int("globalThis.__refused"), 3);
     /* No inherited accessor ran: not while building opts, nor when fetch
      * read them back (a timeoutMs of -1 would have been refused). */
     EXPECT_EQ(eval_int("globalThis.__hits"), 0);
@@ -11471,11 +11475,14 @@ UTEST(js_audit16, registration_ignores_prototype_setters)
         "const grab = (k) => ({ configurable: true,\n"
         "  get() { globalThis.r = this; return undefined; },\n"
         "  set(v) { globalThis.r = this; } });\n"
-        "for (const i of ['0', '1', '2'])\n"
-        "  Object.defineProperty(Array.prototype, i, grab(i));\n"
+        /* Frozen since audit 18: all 8 accessors are refused. */
+        "globalThis.__refused = 0;\n"
+        "const def = (o, k) => { try { Object.defineProperty(o, k, grab(k)); }\n"
+        "  catch (e) { globalThis.__refused++; } };\n"
+        "for (const i of ['0', '1', '2']) def(Array.prototype, i);\n"
         "for (const k of ['method', 'pattern', 'handler_id', 'multipart',\n"
         "                 'on_open_id'])\n"
-        "  Object.defineProperty(Object.prototype, k, grab(k));\n"
+        "  def(Object.prototype, k);\n"
         "app.get('/a', (req, res) => res.text('a'));\n"
         "app.use('*', '/*', (req, res) => 0);\n"
         "app.post('/b', (req, res) => res.text('b'));\n";
@@ -11512,6 +11519,7 @@ UTEST(js_audit16, registration_ignores_prototype_setters)
         "  const o = Object.getOwnPropertyDescriptor(d, '0').value;\n"
         "  return ('multipart' in o) ? 0 : 1; })()"), 1);
     EXPECT_EQ(eval_int("typeof globalThis.r === 'undefined' ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("globalThis.__refused"), 8);
     cleanup_js();
 }
 
@@ -11702,10 +11710,11 @@ UTEST(js_audit18_intrinsics, array_iterator_cannot_capture_a_destructured_secret
     cleanup_js_caps();
 }
 
-/* (c) A patched Promise.prototype.then / .constructor observing internal rows
- * in an async stdlib path. jobs.await_ polls _hull_jobs and `await hull.sleep`s
- * between tries. Measured value recorded in the report. After the fix the patch
- * throws. */
+/* (c) Promise.prototype.then could be replaced, but before the fix no
+ * stdlib-internal call went through the replacement on jobs.await's path:
+ * QuickJS's native `await` on a native promise does not look `then` up, and
+ * the row jobs.await resolves with is its public result. Defence in depth:
+ * the replacement now throws, so no future stdlib path can depend on it. */
 UTEST(js_audit18_intrinsics, promise_then_cannot_observe_internal_rows)
 {
     init_js_with_caps();
@@ -11723,9 +11732,8 @@ UTEST(js_audit18_intrinsics, promise_then_cannot_observe_internal_rows)
         "globalThis.__a18_then = jobs.await(id, { timeout: 0.05 }).then(\n"
         "  () => { globalThis.__a18_then_seen = seen; return 1; },\n"
         "  () => { globalThis.__a18_then_seen = seen; return 1; });\n");
-    printf("  [a18 measure] patched then calls before the app's own: %d\n",
-           eval_int("globalThis.__a18_then_seen | 0"));
     EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_then === 'undefined' ? 1 : 0"), 1);
     cleanup_js_caps();
 }
 
@@ -11810,6 +11818,11 @@ UTEST(js_audit18_intrinsics, override_mistake_is_enabled)
         "  if (o.toString() !== 'custom') return 0;\n"
         "  function Foo() {} Foo.prototype.toString = () => 'foo';\n"
         "  if (new Foo().toString() !== 'foo') return 0;\n"
+        "  const f = Object.assign(() => 1, { toString: () => 'f' });\n"
+        "  if (String(f) !== 'f') return 0;\n"
+        "  class E2 extends TypeError { constructor() { super('m'); this.name = 'E2'; } }\n"
+        "  if (new E2().name !== 'E2') return 0;\n"
+        "  if (({}).toString() !== '[object Object]') return 0;\n"
         "  return 1;\n"
         "})()"), 1);
     /* Assigning to the prototype itself throws. */
@@ -11817,6 +11830,49 @@ UTEST(js_audit18_intrinsics, override_mistake_is_enabled)
         "(() => { try { Object.prototype.toString = () => 'x'; return 0; }\n"
         "  catch (e) { return e instanceof TypeError ? 1 : 0; } })()"), 1);
     cleanup_js();
+}
+
+/* A native module's export object is shared by app code and the stdlib that
+ * imports the same module: an app that replaced crypto.random would run inside
+ * totp.enroll's secret generation. The exports are frozen when created. */
+UTEST(js_audit18_intrinsics, native_module_exports_are_frozen)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { crypto } from 'hull:crypto';\n"
+        "import { db } from 'hull:db';\n"
+        "import { json } from 'hull:json';\n"
+        "let r = 0;\n"
+        "try { crypto.random = () => 'x'; } catch (e) { if (e instanceof TypeError) r |= 1; }\n"
+        "try { db.default = () => null; } catch (e) { if (e instanceof TypeError) r |= 2; }\n"
+        "try { json.encode = () => ''; } catch (e) { if (e instanceof TypeError) r |= 4; }\n"
+        "if (Object.isFrozen(crypto) && Object.isFrozen(db) && Object.isFrozen(json)) r |= 8;\n"
+        "if (typeof crypto.random(4) === 'object') r |= 16;\n"
+        "globalThis.__a18_exp = r;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a18_exp"), 31);
+    cleanup_js_caps();
+}
+
+/* A stdlib JS module's export object is shared the same way: totp calls
+ * sealbox.open(keyring(), ...) through hull:crypto:sealbox's exported object,
+ * so an app that replaced sealbox.open received the keyring. The loader
+ * freezes every embedded stdlib module's exports at the end of its body. */
+UTEST(js_audit18_intrinsics, stdlib_module_exports_are_frozen)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { sealbox } from 'hull:crypto:sealbox';\n"
+        "import { jobs } from 'hull:jobs';\n"
+        "let r = 0;\n"
+        "try { sealbox.open = () => [null, 'x']; } catch (e) { if (e instanceof TypeError) r |= 1; }\n"
+        "try { jobs.enqueue = () => 0; } catch (e) { if (e instanceof TypeError) r |= 2; }\n"
+        "if (Object.isFrozen(sealbox) && Object.isFrozen(jobs)) r |= 4;\n"
+        "if (typeof sealbox.open === 'function') r |= 8;\n"
+        "globalThis.__a18_sexp = r;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a18_sexp"), 15);
+    cleanup_js_caps();
 }
 
 /* A worker.dispatch VM runs app functions, so it is hardened too. */

@@ -517,7 +517,7 @@ static int js_ws_client_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue ws = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ws, "connect",
                       JS_NewCFunction(ctx, js_ws_connect, "connect", 2));
-    JS_SetModuleExport(ctx, m, "wsClient", ws);
+    hl_js_export_frozen(ctx, m, "wsClient", ws);
     return 0;
 }
 
@@ -532,7 +532,7 @@ int hl_js_init_ws_client_module(JSContext *ctx, HlJS *js)
     JS_SetPropertyFunctionList(ctx, client_proto, js_ws_client_conn_proto_funcs,
                                sizeof(js_ws_client_conn_proto_funcs) /
                                sizeof(js_ws_client_conn_proto_funcs[0]));
-    JS_SetClassProto(ctx, js_ws_client_conn_class_id, client_proto);
+    hl_js_set_class_proto_frozen(ctx, js_ws_client_conn_class_id, client_proto);
 
     JSModuleDef *m = JS_NewCModule(ctx, "hull:web:ws-client", js_ws_client_module_init);
     if (!m) return -1;

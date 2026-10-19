@@ -224,13 +224,13 @@ static JSValue js_base64_decode(JSContext *ctx, JSValueConst this_val,
 
 static int js_encoding_module_init(JSContext *ctx, JSModuleDef *m)
 {
-    JS_SetModuleExport(ctx, m, "hexEncode",
+    hl_js_export_frozen(ctx, m, "hexEncode",
                        JS_NewCFunction(ctx, js_hex_encode, "hexEncode", 1));
-    JS_SetModuleExport(ctx, m, "hexDecode",
+    hl_js_export_frozen(ctx, m, "hexDecode",
                        JS_NewCFunction(ctx, js_hex_decode, "hexDecode", 1));
-    JS_SetModuleExport(ctx, m, "base64Encode",
+    hl_js_export_frozen(ctx, m, "base64Encode",
                        JS_NewCFunction(ctx, js_base64_encode, "base64Encode", 3));
-    JS_SetModuleExport(ctx, m, "base64Decode",
+    hl_js_export_frozen(ctx, m, "base64Decode",
                        JS_NewCFunction(ctx, js_base64_decode, "base64Decode", 2));
     return 0;
 }

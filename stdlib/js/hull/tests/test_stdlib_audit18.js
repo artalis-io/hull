@@ -38,15 +38,19 @@ function assertThrows(fn, msg) {
 }
 
 // A real array (Array.isArray is true) whose own map / join / slice / concat
-// return attacker SQL. `called` records whether any of them ran.
+// return attacker SQL. `called` records whether any of them ran. Defined, not
+// assigned: Array.prototype is frozen (audit 18), so `a.map = ...` throws -
+// an own property is still an app's to define.
 function crafted(items, sql) {
     const a = items.slice();
     const st = { called: false };
     const join = () => { st.called = true; return sql; };
-    a.map = () => { st.called = true; return { join }; };
-    a.join = join;
-    a.slice = () => { st.called = true; return items.slice(); };
-    a.concat = () => { st.called = true; return items.slice(); };
+    const own = (k, v) => Object.defineProperty(a, k,
+        { value: v, writable: true, enumerable: false, configurable: true });
+    own("map", () => { st.called = true; return { join }; });
+    own("join", join);
+    own("slice", () => { st.called = true; return items.slice(); });
+    own("concat", () => { st.called = true; return items.slice(); });
     return { a, st };
 }
 

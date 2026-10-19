@@ -497,7 +497,7 @@ static int hl_js_ensure_response_class(HlJS *js)
     JS_DefinePropertyValueStr(js->ctx, proto, "redirect",
                       JS_NewCFunction(js->ctx, js_res_redirect, "redirect", 2), JS_PROP_C_W_E);
 
-    JS_SetClassProto(js->ctx, class_id, proto);
+    hl_js_set_class_proto_frozen(js->ctx, class_id, proto);
     js->response_class_registered = 1;
 
     return 0;

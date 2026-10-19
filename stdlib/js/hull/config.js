@@ -25,6 +25,17 @@
 import { env } from "hull:env";
 import { fs } from "hull:fs";
 import { encoding } from "hull:encoding";
+import { _test_hooks } from "hull:_test_hooks";
+
+// The env / fs calls config makes. Tests swap them through hull:_test_hooks:
+// the env and fs exports are frozen (audit 18), so they can no longer be
+// stubbed by assignment - and an app could not stub them either.
+const realIo = {
+    get: (name) => env.get(name),
+    read: (path) => fs.read(path),
+    allowed: (name) => env.allowed(name),
+};
+let io = realIo;
 
 const config = {};
 
@@ -74,7 +85,7 @@ config.get = function(name, opts) {
     // Precedence: the real process env (allowlisted env cap) wins; a .env value
     // (also allowlist-gated at load time) backs a declared-but-unset name; then
     // the default.
-    let raw = env.get(name);
+    let raw = io.get(name);
     if ((raw === null || raw === undefined || raw === "") &&
         Object.prototype.hasOwnProperty.call(_dotenv, name)) {
         raw = _dotenv[name];
@@ -110,7 +121,7 @@ function stripQuotes(v) {
 config.loadDotenv = function(path) {
     path = path || ".env";
     let ab;
-    try { ab = fs.read(path); } catch (e) { return 0; }   // denied / missing
+    try { ab = io.read(path); } catch (e) { return 0; }   // denied / missing
     const content = encoding.utf8.decode(ab);
     if (content === null) throw new Error("config: .env is not valid UTF-8");
     let n = 0;
@@ -123,7 +134,7 @@ config.loadDotenv = function(path) {
         if (eq < 0) continue;
         const k = s.slice(0, eq).replace(/\s+$/, "");
         const v = stripQuotes(s.slice(eq + 1).replace(/^\s+/, ""));
-        if (k !== "" && env.allowed(k)) { _dotenv[k] = v; n++; }
+        if (k !== "" && io.allowed(k)) { _dotenv[k] = v; n++; }
     }
     return n;
 };
@@ -138,6 +149,10 @@ config.require = function(name, opts) {
     opts = opts || {};
     return config.get(name, { type: opts.type, required: true });
 };
+
+_test_hooks.register("hull:config", {
+    setIo(o) { io = o ? Object.assign({}, realIo, o) : realIo; },
+});
 
 export { config };
 export default config;

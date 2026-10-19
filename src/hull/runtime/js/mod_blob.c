@@ -880,7 +880,7 @@ static void register_writer_class(JSContext *ctx)
         JS_NewCFunction(ctx, js_writer_finalize, "finalize", 0));
     JS_SetPropertyStr(ctx, proto, "abort",
         JS_NewCFunction(ctx, js_writer_abort, "abort", 0));
-    JS_SetClassProto(ctx, hl_js_blob_writer_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, hl_js_blob_writer_class_id, proto);
 }
 
 static void register_reader_class(JSContext *ctx)
@@ -894,7 +894,7 @@ static void register_reader_class(JSContext *ctx)
         JS_NewCFunction(ctx, js_reader_read, "read", 1));
     JS_SetPropertyStr(ctx, proto, "close",
         JS_NewCFunction(ctx, js_reader_close, "close", 0));
-    JS_SetClassProto(ctx, hl_js_blob_reader_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, hl_js_blob_reader_class_id, proto);
 }
 
 static int js_blob_module_init(JSContext *ctx, JSModuleDef *m)
@@ -932,7 +932,7 @@ static int js_blob_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, blob, "cleanup",
         JS_NewCFunction(ctx, js_blob_cleanup, "cleanup", 1));
 
-    JS_SetModuleExport(ctx, m, "blob", blob);
+    hl_js_export_frozen(ctx, m, "blob", blob);
     return 0;
 }
 

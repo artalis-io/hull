@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/env.h"
+#include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
 static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
@@ -60,7 +61,7 @@ static int js_env_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_env_get, "get", 1));
     JS_SetPropertyStr(ctx, env, "allowed",
                       JS_NewCFunction(ctx, js_env_allowed, "allowed", 1));
-    JS_SetModuleExport(ctx, m, "env", env);
+    hl_js_export_frozen(ctx, m, "env", env);
     return 0;
 }
 

@@ -348,7 +348,7 @@ static int js_fs_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_fs_list, "list", 1));
     JS_SetPropertyStr(ctx, fs, "mmap",
                       JS_NewCFunction(ctx, js_fs_mmap, "mmap", 2));
-    JS_SetModuleExport(ctx, m, "fs", fs);
+    hl_js_export_frozen(ctx, m, "fs", fs);
     return 0;
 }
 
@@ -369,7 +369,7 @@ int hl_js_init_fs_module(JSContext *ctx, HlJS *js)
                             JS_UNDEFINED, 0);
     JS_FreeAtom(ctx, length_atom);
 
-    JS_SetClassProto(ctx, js_mmap_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, js_mmap_class_id, proto);
 
     (void)js;
     JSModuleDef *m = JS_NewCModule(ctx, "hull:fs", js_fs_module_init);
