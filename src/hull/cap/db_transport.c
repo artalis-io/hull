@@ -54,6 +54,7 @@
 #include <sys/socket.h>   /* AF_INET / AF_INET6 (cosmo needs it explicit) */
 #include "hull/cap/net_resolve.h"
 #include <sys/time.h>     /* struct timeval for SO_RCVTIMEO/SNDTIMEO (set_io_timeout) */
+#include <poll.h>         /* hl_db_transport_wait_readable's sliced wait */
 
 #include <errno.h>
 #include <pthread.h>
@@ -794,6 +795,37 @@ ssize_t hl_db_transport_recv(HlDbTransport *t, uint8_t *buf, size_t len)
 size_t hl_db_transport_pending(HlDbTransport *t)
 {
     return (t && t->tls) ? hl_tls_client_pending(t->tls) : 0;
+}
+
+int hl_db_transport_wait_readable(HlDbTransport *t, int timeout_ms,
+                                  HlDbWaitStopFn stop, void *ud)
+{
+    int fd = hl_db_transport_fd(t);
+    if (fd < 0)
+        return -1;
+    /* Plaintext the TLS session already holds: poll would not see it. */
+    if (hl_db_transport_pending(t) > 0)
+        return 1;
+    uint64_t start = kl_monotonic_ms();
+    for (;;) {
+        int slice = HL_DB_WAIT_SLICE_MS;
+        if (timeout_ms > 0) {
+            uint64_t spent = kl_monotonic_ms() - start;
+            if (spent >= (uint64_t)timeout_ms)
+                return 0;
+            if ((uint64_t)slice > (uint64_t)timeout_ms - spent)
+                slice = (int)((uint64_t)timeout_ms - spent);
+        }
+        /* Intentional native-FD escape, as set_io_timeout (KL_SOCK_CAP_NATIVE_FD). */
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        int pr = poll(&pfd, 1, slice);
+        if (pr > 0)
+            return 1;
+        if (pr < 0 && errno != EINTR)
+            return -1;
+        if (stop && stop(ud))
+            return -2;
+    }
 }
 
 int hl_db_transport_send_all(HlDbTransport *t, const uint8_t *buf, size_t len)
