@@ -51,6 +51,7 @@
 #include <keel/http_connection.h>
 #include <keel/http_request.h>
 #include "hull/shared/res_base.h"   /* hl_res_base_forget_conn */
+#include "hull/shared/work_charge.h" /* hl_work_bulk_units */
 #include "hull/http_feature.h"       /* hl_js_http_resume_send / _error */
 
 #include "quickjs.h"
@@ -182,8 +183,8 @@ typedef struct HlJsMpCont {
     HlJsMpIter   *iter;           /* not owned; ref-bumped at construction */
     MpMode        mode;
     /* MP_MODE_READ accumulator: grows as PART_DATA events arrive across
-     * park-resume cycles. Built from the runtime allocator so the
-     * runtime's memory cap applies. */
+     * park-resume cycles. On the server allocator (no VM limit), so
+     * read_buf_append holds it to the JS heap limit (audit 18). */
     char         *read_buf;
     size_t        read_len;
     size_t        read_cap;
@@ -274,17 +275,25 @@ static int hl_mp_iter_copy_meta(HlJsMpIter *it, const KlHttpMultipartPartMeta *m
 }
 
 /* Grow the MP_MODE_READ accumulator to fit at least `add` more bytes.
- * Doubles capacity to amortize. Returns 0 on success, -1 on OOM. */
+ * Doubles capacity to amortize. Returns 0 on success, -1 on OOM, -2 when the
+ * part would outgrow the VM heap limit. The accumulator is on the server
+ * allocator, which no VM limit covers (nor the route's multipart caps, 0 =
+ * unlimited by default): a part is held to max_heap_bytes - the size of the
+ * ArrayBuffer it becomes - and its bytes are charged to the run by the
+ * caller, as Lua's mp_part_acc_add does (audit 18). */
 static int read_buf_append(HlJsMpCont *jc, const char *data, size_t add)
 {
     if (add == 0) return 0;
     if (jc->read_len + add > SIZE_MAX / 2) return -1;
+    size_t limit = jc->js ? jc->js->max_heap_bytes : 0;
+    if (limit && jc->read_len + add > limit) return -2;
     if (jc->read_len + add > jc->read_cap) {
         size_t new_cap = jc->read_cap ? jc->read_cap * 2 : 1024;
         while (new_cap < jc->read_len + add) {
             if (new_cap > SIZE_MAX / 2) return -1;
             new_cap *= 2;
         }
+        if (limit && new_cap > limit) new_cap = limit;
         char *nb = hl_alloc_realloc(jc->alloc, jc->read_buf,
                                      jc->read_cap, new_cap);
         if (!nb) return -1;
@@ -296,9 +305,11 @@ static int read_buf_append(HlJsMpCont *jc, const char *data, size_t add)
     return 0;
 }
 
-/* Build a {value, done} iter-result object. Consumes `value`. */
+/* Build a {value, done} iter-result object. Consumes `value`; a value that
+ * is JS_EXCEPTION (its construction failed) stays the exception. */
 static JSValue make_iter_result(JSContext *ctx, JSValue value, int done)
 {
+    if (JS_IsException(value)) return value;
     JSValue obj = JS_NewObject(ctx);
     if (JS_IsException(obj)) { JS_FreeValue(ctx, value); return obj; }
     JS_DefinePropertyValueStr(ctx, obj, "value", value, JS_PROP_C_W_E);
@@ -390,6 +401,24 @@ static void mp_js_cont_set_handler_promise_impl(HlAsyncCont *self,
  * Each MpMode has its own pump.
  */
 typedef struct { int ready; JSValue result; JSValue error; } PumpStep;
+
+/* A step whose result or error could not be built (JS_NewArrayBufferCopy /
+ * make_js_part / a chunk copy past the heap, a tripped charge) holds
+ * JS_EXCEPTION: settle with the pending exception as the rejection, never
+ * resolve with the exception value itself (audit 18). */
+static PumpStep pump_settle(JSContext *ctx, PumpStep s)
+{
+    if (!s.ready) return s;
+    if (JS_IsException(s.error)) {
+        s.error = JS_GetException(ctx);
+    } else if (JS_IsUndefined(s.error) && JS_IsException(s.result)) {
+        s.result = JS_UNDEFINED;
+        s.error = JS_GetException(ctx);
+    }
+    if (JS_IsUninitialized(s.error))   /* none was pending */
+        s.error = make_mp_error(ctx, "multipart: out of memory");
+    return s;
+}
 
 static PumpStep pump_iter_step(JSContext *ctx, HlJsMpCont *jc)
 {
@@ -538,9 +567,22 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
         switch (ev) {
         case KL_HTTP_MP_EVT_PART_DATA:
             if (data && data_len > 0) {
-                if (read_buf_append(jc, data, data_len) != 0) {
+                /* Charged before the copy, 1 unit per 64 bytes (Lua's
+                 * mp_part_acc_add rate); a trip leaves the interrupt
+                 * pending, which pump_settle rejects with. */
+                if (hl_js_budget_charge(ctx, hl_work_bulk_units(data_len))) {
+                    it->errored = 1;
                     s.ready = 1;
-                    s.error = make_mp_error(ctx, "multipart: out of memory");
+                    s.error = JS_EXCEPTION;
+                    return s;
+                }
+                int arc = read_buf_append(jc, data, data_len);
+                if (arc != 0) {
+                    it->errored = 1;
+                    s.ready = 1;
+                    s.error = make_mp_error(ctx, arc == -2
+                        ? "multipart: part is larger than the heap limit"
+                        : "multipart: out of memory");
                     return s;
                 }
             }
@@ -620,9 +662,9 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         s.result = JS_UNDEFINED;
         s.error = JS_UNDEFINED;
     } else switch (jc->mode) {
-    case MP_MODE_ITER:   s = pump_iter_step(ctx, jc);   break;
-    case MP_MODE_CHUNKS: s = pump_chunks_step(ctx, jc); break;
-    case MP_MODE_READ:   s = pump_read_step(ctx, jc);   break;
+    case MP_MODE_ITER:   s = pump_settle(ctx, pump_iter_step(ctx, jc));   break;
+    case MP_MODE_CHUNKS: s = pump_settle(ctx, pump_chunks_step(ctx, jc)); break;
+    case MP_MODE_READ:   s = pump_settle(ctx, pump_read_step(ctx, jc));   break;
     default:
         s.ready = 1;
         s.result = JS_UNDEFINED;
@@ -1025,7 +1067,7 @@ static JSValue js_iter_next(JSContext *ctx, JSValueConst this_val,
     stage.iter            = it; /* not refcounted - stage is stack only */
     stage.mode            = MP_MODE_ITER;
 
-    PumpStep s = pump_iter_step(ctx, &stage);
+    PumpStep s = pump_settle(ctx, pump_iter_step(ctx, &stage));
     if (s.ready) {
         if (!JS_IsUndefined(s.error)) return reject_with(ctx, s.error);
         return resolve_with(ctx, s.result);
@@ -1106,7 +1148,7 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
 
     /* Run the first pump synchronously; if it completes with no NEED_DATA,
      * resolve immediately and skip the park dance. */
-    PumpStep s = pump_read_step(ctx, jc);
+    PumpStep s = pump_settle(ctx, pump_read_step(ctx, jc));
     if (s.ready) {
         if (!JS_IsUndefined(s.error)) {
             JSValue r = JS_Call(ctx, jc->reject, JS_UNDEFINED, 1, &s.error);
@@ -1168,7 +1210,7 @@ static JSValue js_chunks_next(JSContext *ctx, JSValueConst this_val,
     stage.resolve = stage.reject = stage.link.handler_promise = JS_UNDEFINED;
     stage.conn   = it->js->active_conn;
 
-    PumpStep s = pump_chunks_step(ctx, &stage);
+    PumpStep s = pump_settle(ctx, pump_chunks_step(ctx, &stage));
     if (s.ready) {
         if (!JS_IsUndefined(s.error)) return reject_with(ctx, s.error);
         return resolve_with(ctx, s.result);

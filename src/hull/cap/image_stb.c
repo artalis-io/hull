@@ -18,17 +18,39 @@ typedef struct {
     unsigned char *data;
     size_t         len;
     size_t         cap;
+    size_t         max;      /* the encoded image may not outgrow this */
     int            failed;   /* a chunk could not be stored */
 } WriteCtx;
+
+/* stb_image_write allocates through stb_impl.c's capped allocator; the cap
+ * is the most an encode may hold at once (audit 18). A PNG encode keeps the
+ * filtered copy of the image (`raw` = rows plus a filter byte each) while
+ * its deflate output grows by doubling (old and new block live together),
+ * about 4.2x raw for incompressible pixels; 5x plus 8 MB for the hash
+ * chains covers it. The encoded output itself is held to 2x raw. Before,
+ * stbiw used plain malloc, with nothing bounding its peak. */
+extern _Thread_local size_t hl_stb_alloc_cap;
+
+static size_t encode_raw_bytes(uint32_t w, uint32_t h, int channels)
+{
+    return ((size_t)w * (size_t)channels + 1u) * (size_t)h;
+}
+
+static size_t encode_stb_cap(size_t raw)
+{
+    return 5u * raw + ((size_t)8 << 20);
+}
 
 static void write_cb(void *context, void *data, int size)
 {
     WriteCtx *wc = (WriteCtx *)context;
     if (size <= 0) return;
     size_t needed = wc->len + (size_t)size;
+    if (wc->max && needed > wc->max) { wc->failed = 1; return; }
     if (needed > wc->cap) {
         size_t newcap = wc->cap * 2;
         if (newcap < needed) newcap = needed;
+        if (wc->max && newcap > wc->max) newcap = wc->max;
         unsigned char *p = realloc(wc->data, newcap);
         /* stbi_write's return does not see this (the PNG writer encodes in
          * memory first, but the JPEG writer streams chunk by chunk), so a
@@ -154,7 +176,6 @@ static int stb_decode(const void *src, size_t src_len,
      * a limit of its own, so a zlib bomb inside a small image ran past the
      * pixel cap above; per-block caps alone let a decode hold ~3 cap-sized
      * buffers (audit 12). */
-    extern _Thread_local size_t hl_stb_alloc_cap;
     size_t pw = ((size_t)iw + 15u) & ~(size_t)15u;
     size_t ph = ((size_t)ih + 15u) & ~(size_t)15u;
     hl_stb_alloc_cap = 3u * (pw * ph * 8u + ph * 8u) +
@@ -182,7 +203,9 @@ static int stb_encode_png(const void *pixels, uint32_t w, uint32_t h,
 {
     (void)quality;
     (void)alloc;
-    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0, .failed = 0 };
+    size_t raw = encode_raw_bytes(w, h, channels);
+    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0,
+                    .max = 2u * raw + 1024u, .failed = 0 };
     /* Pre-allocate a reasonable buffer (overflow-safe) */
     uint64_t est = (uint64_t)w * h * (uint64_t)channels / 2 + 256;
     if (est > SIZE_MAX / 2) est = (uint64_t)w * h + 256;
@@ -191,9 +214,11 @@ static int stb_encode_png(const void *pixels, uint32_t w, uint32_t h,
     if (!wc.data) return -1;
 
     int stride = (int)((size_t)w * (size_t)channels);
+    hl_stb_alloc_cap = encode_stb_cap(raw);
     int rc = stbi_write_png_to_func(write_cb, &wc,
                                      (int)w, (int)h, channels,
                                      pixels, stride);
+    hl_stb_alloc_cap = 0;
     if (rc == 0 || wc.failed) {
         free(wc.data);
         return -1;
@@ -234,16 +259,20 @@ static int stb_encode_jpeg(const void *pixels, uint32_t w, uint32_t h,
     if (quality <= 0) quality = 90;
     if (quality > 100) quality = 100;
 
-    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0, .failed = 0 };
+    size_t raw = encode_raw_bytes(w, h, channels);
+    WriteCtx wc = { .data = NULL, .len = 0, .cap = 0,
+                    .max = 2u * raw + 1024u, .failed = 0 };
     uint64_t jest = (uint64_t)w * h * (uint64_t)channels / 4 + 256;
     if (jest > SIZE_MAX / 2) jest = (uint64_t)w * h + 256;
     wc.cap = (size_t)jest;
     wc.data = malloc(wc.cap);
     if (!wc.data) return -1;
 
+    hl_stb_alloc_cap = encode_stb_cap(raw);
     int rc = stbi_write_jpg_to_func(write_cb, &wc,
                                      (int)w, (int)h, channels,
                                      pixels, quality);
+    hl_stb_alloc_cap = 0;
     if (rc == 0 || wc.failed) {
         free(wc.data);
         return -1;

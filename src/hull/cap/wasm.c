@@ -1410,6 +1410,14 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
         }
     }
 
+    /* A guest that reports more bytes than the output buffer it was given
+     * holds is an output error, not an empty success (audit 18). */
+    if ((uint64_t)result > max_output) {
+        if (err_msg) *err_msg = err_output;
+        ret = HL_WASM_ERR_OUTPUT;
+        goto cleanup_bufs_err;
+    }
+
     /* Free input allocation - no longer needed */
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
@@ -1422,7 +1430,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
 
     /* Create output buffer */
-    if (result > 0 && (uint32_t)result <= max_output) {
+    if (result > 0) {
         int poolable = (heap_size <= HL_WASM_POOL_HEAP_THRESHOLD);
         /* A zero-copy buffer keeps the instance - its linear memory, app
          * heap and exec-env stack, none of it on the VM heap - checked out
@@ -1980,6 +1988,14 @@ static int instance_call_buf_run(HlWasmInstance *pi,
         }
     }
 
+    /* A guest that reports more bytes than the output buffer it was given
+     * holds is an output error, not an empty success (audit 18). */
+    if ((uint64_t)result > max_output) {
+        if (err_msg) *err_msg = err_output;
+        ret = HL_WASM_ERR_OUTPUT;
+        goto cleanup_bufs_err;
+    }
+
     /* Success - free input, create OWNED output buffer */
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
@@ -1989,7 +2005,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
      * copied (create_owned), so no instance-checked-out ordering concern. */
     if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
 
-    if (result > 0 && (uint32_t)result <= max_output) {
+    if (result > 0) {
         *output_buf = hl_wasm_buffer_create_owned(native_out, (size_t)result, alloc);
     } else {
         *output_buf = hl_wasm_buffer_create_owned(NULL, 0, alloc);

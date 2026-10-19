@@ -217,8 +217,9 @@ UTEST(hl_wasm_buffer, zero_copy_checkout_counted_falls_back_to_copy)
 }
 
 /* Audit 12: a GPU readback (plain malloc, sized by the app) is copied into
- * the tracked allocator, so it counts against the VM heap limit and is
- * refused past it; the malloc'd block is freed only on success. */
+ * the tracked allocator and refused past ITS limit; the malloc'd block is
+ * freed only on success. (The VM heap limit is applied by the runtime,
+ * hl_wasm_buffer_account - audit 18.) */
 UTEST(hl_wasm_buffer, adopted_bytes_counted_against_allocator)
 {
     HlAllocator a;
@@ -242,6 +243,47 @@ UTEST(hl_wasm_buffer, adopted_bytes_counted_against_allocator)
     ASSERT_TRUE(hl_wasm_buffer_create_adopted(data, 4096, &tight) == NULL);
     ASSERT_EQ(hl_alloc_used(&tight), (size_t)0);
     free(data);
+}
+
+/* Audit 18: OWNED bytes live on the server allocator (no limit by default),
+ * so the runtimes count them in a per-VM total capped at the heap limit;
+ * destroy takes them back, and a refused buffer counts nothing. */
+UTEST(hl_wasm_buffer, owned_bytes_accounted_against_heap_limit)
+{
+    char data[4096];
+    memset(data, 'a', sizeof data);
+    size_t total = 0;
+
+    HlWasmBuffer *a = hl_wasm_buffer_create_owned(data, 4096, NULL);
+    HlWasmBuffer *b = hl_wasm_buffer_create_owned(data, 4096, NULL);
+    HlWasmBuffer *c = hl_wasm_buffer_create_owned(data, 4096, NULL);
+    ASSERT_TRUE(a && b && c);
+    ASSERT_EQ(hl_wasm_buffer_account(a, &total, 10000), 0);
+    ASSERT_EQ(hl_wasm_buffer_account(b, &total, 10000), 0);
+    ASSERT_EQ(total, (size_t)8192);
+    ASSERT_EQ(hl_wasm_buffer_account(c, &total, 10000), -1);
+    ASSERT_EQ(total, (size_t)8192);
+    ASSERT_TRUE(c->acct == NULL);
+
+    hl_wasm_buffer_close(a);
+    ASSERT_EQ(total, (size_t)4096);
+    ASSERT_EQ(hl_wasm_buffer_account(c, &total, 10000), 0);
+    ASSERT_EQ(total, (size_t)8192);
+    hl_wasm_buffer_close(b);
+    hl_wasm_buffer_close(c);
+    ASSERT_EQ(total, (size_t)0);
+
+    /* No limit: counted, never refused. One larger than the limit alone is
+     * refused. */
+    HlWasmBuffer *d = hl_wasm_buffer_create_owned(data, 4096, NULL);
+    ASSERT_EQ(hl_wasm_buffer_account(d, &total, 0), 0);
+    ASSERT_EQ(total, (size_t)4096);
+    hl_wasm_buffer_close(d);
+    ASSERT_EQ(total, (size_t)0);
+    d = hl_wasm_buffer_create_owned(data, 4096, NULL);
+    ASSERT_EQ(hl_wasm_buffer_account(d, &total, 4095), -1);
+    hl_wasm_buffer_close(d);
+    ASSERT_EQ(total, (size_t)0);
 }
 
 UTEST(hl_wasm_buffer, call_buf_non_poolable)

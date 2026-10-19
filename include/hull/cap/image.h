@@ -123,6 +123,14 @@ int hl_image_info(const void *data, size_t len, const char *fmt_name,
  * event loop for seconds per iteration (audit 10). Saturates. */
 uint64_t hl_image_codec_units(uint32_t w, uint32_t h, size_t coded_len);
 
+/* Bytes an encode of @p img works over: its pixel rows plus one filter byte
+ * a row (the PNG writer's filtered copy of the image). stb_image_write
+ * allocates off the VM heap - a PNG encode holds a few times this at its
+ * peak - so the runtimes refuse an encode whose input is larger than the VM
+ * heap limit before it runs, and the stb encoders cap what they hold at once
+ * at a fixed multiple of it (audit 18). Saturates. */
+uint64_t hl_image_encode_bytes(const HlImage *img);
+
 /* Encode to bytes */
 int hl_image_encode(const HlImage *img, const char *fmt_name,
                      int quality,

@@ -43,6 +43,10 @@ typedef struct HlWasmBuffer {
     int            borrow_count; /* live zero-copy borrowers (e.g. images) */
     int            pending_free; /* close()/gc deferred while borrowed */
     HlAllocator   *alloc;     /* tracked allocator (NULL = raw malloc) */
+    /* The VM's running total of OWNED bytes this buffer is counted in
+     * (hl_wasm_buffer_account), or NULL; destroy takes acct_bytes back. */
+    size_t        *acct;
+    size_t         acct_bytes;
 
     union {
         struct { void *alloc; } owned;                    /* hl_alloc_free(alloc) */
@@ -81,8 +85,9 @@ HlWasmBuffer *hl_wasm_buffer_create_mmap(HlMappedBuffer *mbuf,
 
 /**
  * Create an OWNED buffer from a malloc'd pointer (the GPU readback). The bytes
- * are COPIED into `alloc` (so they count against the VM heap limit) and, on
- * success, `data` is free()d. On failure returns NULL and the caller still
+ * are COPIED into `alloc` and, on success, `data` is free()d. `alloc` is the
+ * server allocator, not the VM's: the VM heap limit applies only once the
+ * runtime counts the buffer (hl_wasm_buffer_account, audit 18). On failure returns NULL and the caller still
  * owns `data`. data must have been allocated with malloc/calloc.
  */
 HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
@@ -118,6 +123,30 @@ static inline size_t hl_wasm_buffer_footprint(const HlWasmBuffer *buf)
                    ? SIZE_MAX : (size_t)buf->u.wasm.reserved;
     default: return 0;
     }
+}
+
+/**
+ * Count an OWNED buffer's bytes in a VM's running total of off-heap buffer
+ * bytes (`*total`), refusing (-1, nothing counted) when that would take the
+ * total past `limit` (the VM heap limit; 0 = none). Each runtime calls it when
+ * it wraps a buffer for app code; hl_wasm_buffer_destroy takes the bytes back.
+ * OWNED buffers are allocated from the server allocator, which no VM limit
+ * covers, so without this a loop keeping compute.buffer / compute.call{buffer}
+ * / GPU results alive grew without bound (audit 18). Other kinds return 0:
+ * a WASM buffer's instance is bounded by the live-instance reservation, a
+ * mapping by the kernel. Must run on the VM's thread.
+ */
+static inline int hl_wasm_buffer_account(HlWasmBuffer *buf, size_t *total,
+                                         size_t limit)
+{
+    if (!buf || buf->closed || buf->kind != HL_WASM_BUF_OWNED || !total)
+        return 0;
+    size_t n = buf->len;
+    if (limit && (n > limit || *total > limit - n)) return -1;
+    *total += n;
+    buf->acct = total;
+    buf->acct_bytes = n;
+    return 0;
 }
 
 /**

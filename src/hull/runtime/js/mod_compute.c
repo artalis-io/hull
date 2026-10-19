@@ -18,6 +18,7 @@
 #include "hull/worker_wasm.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/utils/alloc.h"
 
 #include <keel/http_server.h>
@@ -84,6 +85,25 @@ static JSValue js_push_wasm_buffer(JSContext *ctx, HlWasmBuffer *buf)
      * malloc counter to a collection. Charge them as debt and run a full GC
      * past HL_JS_OFFHEAP_GC_DEBT (audit 12), before the new object exists. */
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    /* An OWNED buffer's bytes live on the server allocator, which no VM
+     * limit covers: count them against the heap limit (audit 18). Buffers
+     * dropped but not yet collected still count, so a refusal collects once
+     * and asks again before it throws. */
+    if (js && hl_wasm_buffer_account(buf, &js->wasm_buf_bytes,
+                                     js->max_heap_bytes) != 0) {
+        JS_RunGC(JS_GetRuntime(ctx));
+        js->offheap_gc_debt = 0;
+        if (hl_wasm_buffer_account(buf, &js->wasm_buf_bytes,
+                                   js->max_heap_bytes) != 0) {
+            size_t n = hl_wasm_buffer_len(buf);
+            HlAllocator *a = buf->alloc;
+            hl_wasm_buffer_destroy(buf);
+            hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
+            return JS_ThrowRangeError(ctx,
+                "buffer of %zu bytes would take the VM's buffers past its "
+                "heap limit (close unused buffers)", n);
+        }
+    }
     if (js) {
         size_t fp = hl_wasm_buffer_footprint(buf);
         js->offheap_gc_debt = js->offheap_gc_debt > SIZE_MAX - fp
@@ -121,6 +141,12 @@ static JSValue js_compute_buffer(JSContext *ctx, JSValueConst this_val,
         is_string = 1;
     }
 
+    /* The copy is charged before it is made, 1 unit per 8 bytes (audit 18),
+     * and js_push_wasm_buffer counts it against the heap limit. */
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)len))) {
+        if (is_string) JS_FreeCString(ctx, (const char *)data);
+        return JS_EXCEPTION;
+    }
     HlJS *js_ctx = (HlJS *)JS_GetContextOpaque(ctx);
     HlWasmBuffer *buf = hl_wasm_buffer_create_owned(data, len,
                                                       js_ctx ? js_ctx->base.alloc : NULL);

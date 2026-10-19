@@ -266,6 +266,17 @@ static int l_image_encode(lua_State *L)
      * conversion's allocation runs) can call img:close() (audit 17). */
     if (!*imgp) return luaL_error(L, "image already closed");
 
+    /* stb_image_write works off the VM heap, a few times the image at its
+     * peak: an image larger than the heap limit (a zero-copy view of a
+     * mapping or a WASM buffer can be) is refused before it runs (audit 18). */
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->mem_limit &&
+        hl_image_encode_bytes(*imgp) > (uint64_t)lua->mem_limit) {
+        lua_pushnil(L);
+        lua_pushstring(L, "image_too_large");
+        return 2;
+    }
+
     image_charge(L, hl_image_codec_units((*imgp)->width, (*imgp)->height, 0));
 
     void *out = NULL;

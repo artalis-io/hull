@@ -592,4 +592,40 @@ UTEST(hull_cap_image, codec_units)
     ASSERT_TRUE(hl_image_codec_units(UINT32_MAX, UINT32_MAX, SIZE_MAX) > 0);
 }
 
+/* Audit 18: stb_image_write runs through the capped allocator now (it used
+ * plain malloc, with nothing bounding its peak). The cap must still let a
+ * worst-case (incompressible) PNG and a JPEG encode through, and every stb
+ * block must be handed back. */
+UTEST(hull_cap_image, encode_of_noise_fits_the_encoder_cap)
+{
+    enum { W = 512, H = 512 };
+    uint8_t *px = malloc((size_t)W * H * 4);
+    ASSERT_TRUE(px != NULL);
+    uint32_t x = 0x9e3779b9u;
+    for (size_t i = 0; i < (size_t)W * H * 4; i++) {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        px[i] = (uint8_t)x;
+    }
+    HlImage *img = hl_image_new(W, H, HL_IMAGE_RGBA8, px, (size_t)W * H * 4,
+                                NULL);
+    free(px);
+    ASSERT_TRUE(img != NULL);
+    ASSERT_EQ(hl_image_encode_bytes(img), (uint64_t)(W * 4 + 1) * H);
+
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    ASSERT_EQ(0, hl_image_encode(img, "png", 0, &out, &out_len, NULL, &err));
+    ASSERT_TRUE(out_len > (size_t)W * H * 4);   /* noise does not compress */
+    free(out);
+    EXPECT_EQ(hl_stb_live, (size_t)0);
+
+    out = NULL;
+    ASSERT_EQ(0, hl_image_encode(img, "jpeg", 90, &out, &out_len, NULL, &err));
+    ASSERT_TRUE(out_len > 0);
+    free(out);
+    EXPECT_EQ(hl_stb_live, (size_t)0);
+    hl_image_free(img);
+}
+
 UTEST_MAIN();

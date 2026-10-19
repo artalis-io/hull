@@ -768,6 +768,68 @@ if [ "$RUNTIME" != "lua" ]; then
     run_multipart_tests "js"  17812 "$TMPDIR_WORK/app.js"
 fi
 
+# ── Scenario 20 (JS): part.read() is bounded by the JS heap (audit 18) ──
+# part.read() buffered a whole part on the server allocator, uncharged and
+# with no cap (the route's multipart caps default to unlimited), and past
+# the heap the ArrayBuffer copy's JS_EXCEPTION was RESOLVED as the value.
+# Under an 8 MB heap a 12 MB field is refused with a rejection the handler
+# catches; a 1 MB one still reads whole.
+if [ "$RUNTIME" != "lua" ]; then
+    echo ""
+    echo "=== E2E multipart: js part.read() under a small heap ==="
+    # Text fields (curl -F "name=<file" sends a file's bytes as a field value).
+    head -c 12582912 /dev/zero | tr '\0' 'h' > "$TMPDIR_WORK/huge.txt"
+    head -c 2097152 /dev/zero | tr '\0' 'm' > "$TMPDIR_WORK/medium.txt"
+    cat > "$TMPDIR_WORK/heap_app.js" <<'EOF2'
+import { app } from "hull:app";
+
+app.manifest({
+    name    : "mp-heap-js",
+    version : "0.0.1",
+    modules : ["hull/http-server@1"],
+});
+
+app.get("/health", async (req, res) => res.text("ok"));
+
+app.post("/read", async (req, res) => {
+    try {
+        for await (const part of req.multipart()) {
+            const buf = await part.read();
+            res.json({ ok: true, size: buf.byteLength });
+            return;
+        }
+        res.json({ ok: true, size: -1 });
+    } catch (e) {
+        res.status(413);
+        res.json({ ok: false, error: String(e && e.message || e) });
+    }
+// A streaming multipart route needs the multipart option (any caps); without
+// it the body is buffered under the default body limit and req.multipart()
+// has nothing to read.
+}, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
+EOF2
+    "$HULL" -m 8M -p 17813 -l debug "$TMPDIR_WORK/heap_app.js" \
+        >"$TMPDIR_WORK/heap_server.log" 2>&1 &
+    SERVER_PID=$!
+    if wait_for_server 17813; then
+        RESP=$(curl --max-time 20 -sS -X POST "http://127.0.0.1:17813/read" \
+            -F "big=<$TMPDIR_WORK/huge.txt" 2>/dev/null || true)
+        check_contains "js part.read over the heap: rejected" "$RESP" '"ok":false'
+        check_contains "js part.read over the heap: reason" "$RESP" 'heap limit'
+        RESP=$(curl --max-time 20 -sS -X POST "http://127.0.0.1:17813/read" \
+            -F "small=<$TMPDIR_WORK/medium.txt" 2>/dev/null || true)
+        check_contains "js part.read under the heap: whole" "$RESP" '"size":2097152'
+    else
+        fail "js small-heap server startup"
+    fi
+    stop_pid "$SERVER_PID"
+    SERVER_PID=""
+    if [ "$FAIL" -gt 0 ]; then
+        echo "  --- small-heap server log (tail) ---"
+        tail -n 30 "$TMPDIR_WORK/heap_server.log" 2>/dev/null || true
+    fi
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 
 TOTAL=$((PASS + FAIL))

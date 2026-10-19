@@ -78,6 +78,12 @@ static void *hl_stb_realloc(void *p, size_t n)
 #define STBI_MAX_DIMENSIONS 65536
 #include "stb_image.h"
 
+/* Hull: stb_image_write through the same capped allocator, so an encode's
+ * working set is bounded too (image_stb.c sets the cap; audit 18). */
+#define STBIW_MALLOC(sz)          hl_stb_malloc(sz)
+#define STBIW_REALLOC(p, newsz)   hl_stb_realloc(p, newsz)
+#define STBIW_FREE(p)             hl_stb_free(p)
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
 #include "stb_image_write.h"

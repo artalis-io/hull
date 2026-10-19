@@ -43,12 +43,12 @@ HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
                                               HlAllocator *alloc)
 {
     /* The bytes come from plain malloc (the GPU readback), sized by the app
-     * and never counted against `alloc`. Holding them as-is kept up to the
-     * GPU buffer ceiling per result off the VM heap limit, uncounted, until
-     * the buffer was closed or collected (audit 12). They are copied into the
-     * tracked allocator instead - refused like any allocation when the heap
-     * cannot hold them - and the malloc'd block freed. On failure the caller
-     * keeps `data`. */
+     * and never counted against `alloc` (audit 12). They are copied into the
+     * tracked allocator and the malloc'd block freed; on failure the caller
+     * keeps `data`. `alloc` is the server allocator, which has no limit by
+     * default (-M unset), so the copy is NOT bounded by the VM heap here: the
+     * runtime counts it against the heap limit when it wraps the buffer
+     * (hl_wasm_buffer_account, audit 18). */
     HlWasmBuffer *buf = hl_wasm_buffer_create_owned(data, len, alloc);
     if (!buf) return NULL;
     free(data);
@@ -154,6 +154,12 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
     case HL_WASM_BUF_OWNED:
         hl_alloc_free(buf->alloc, buf->u.owned.alloc, buf->len);
         buf->u.owned.alloc = NULL;
+        if (buf->acct) {
+            *buf->acct = *buf->acct > buf->acct_bytes
+                             ? *buf->acct - buf->acct_bytes : 0;
+            buf->acct = NULL;
+            buf->acct_bytes = 0;
+        }
         break;
 
     case HL_WASM_BUF_MMAP:

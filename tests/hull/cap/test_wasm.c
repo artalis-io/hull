@@ -280,6 +280,19 @@ static const unsigned char grow_wasm[] = {
 };
 static const unsigned int grow_wasm_len = 68;
 
+/* overrun.wasm: hull_process(in, in_len, out, out_cap) returns out_cap + 1 -
+ * a guest that reports more output than the buffer it was given holds.
+ * grow_wasm with the body `local.get 3; i32.const 1; i32.add`. */
+static const unsigned char overrun_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x01, 0x60,
+  0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05,
+  0x03, 0x01, 0x00, 0x01, 0x07, 0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f,
+  0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72,
+  0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00,
+  0x20, 0x03, 0x41, 0x01, 0x6a, 0x0b,
+};
+static const unsigned int overrun_wasm_len = 66;
+
 /* VFS with embedded WASM modules for testing (sorted by name) */
 static const HlEntry test_entries[] = {
     { "compute/echo.wasm", echo_wasm, echo_wasm_len },
@@ -287,6 +300,7 @@ static const HlEntry test_entries[] = {
     { "compute/grow.wasm", grow_wasm, grow_wasm_len },
     { "compute/kv_store.wasm", kv_store_wasm, kv_store_wasm_len },
     { "compute/loop_forever.wasm", loop_forever_wasm, loop_forever_wasm_len },
+    { "compute/overrun.wasm", overrun_wasm, overrun_wasm_len },
     { "compute/shared_read.wasm", shared_read_wasm, shared_read_wasm_len },
     { "compute/simd_dot.wasm", simd_dot_wasm, simd_dot_wasm_len },
     { "compute/start_loop.wasm", start_loop_wasm, start_loop_wasm_len },
@@ -1553,6 +1567,50 @@ UTEST(hl_cap_wasm, zero_copy_checkout_reserves_grown_memory)
     hl_wasm_buffer_close(b);
     ASSERT_EQ(cache.live_instances, 0);
     ASSERT_EQ(cache.live_instance_bytes, (uint64_t)0);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 18: a guest returning more bytes than max_output is an output error
+ * on every call path, not an OK with an empty output. */
+UTEST(hl_cap_wasm, output_over_max_output_is_an_error)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts o = {0};
+    o.max_output = 64;
+    const char *err = NULL;
+
+    HlWasmBuffer *b = NULL;
+    ASSERT_EQ(hl_cap_wasm_call_buf(&cache, "overrun", "x", 1, &b, &o,
+                                   NULL, NULL, &vfs, NULL, NULL, &err),
+              HL_WASM_ERR_OUTPUT);
+    ASSERT_TRUE(b == NULL);
+    ASSERT_STREQ(err, "output_too_small");
+    ASSERT_EQ(cache.live_instances, 0);
+
+    void *out = NULL;
+    size_t out_len = 0;
+    err = NULL;
+    ASSERT_EQ(hl_cap_wasm_call(&cache, "overrun", "x", 1, &out, &out_len, &o,
+                               NULL, NULL, &vfs, NULL, NULL, &err),
+              HL_WASM_ERR_OUTPUT);
+    ASSERT_TRUE(out == NULL);
+    ASSERT_EQ(out_len, (size_t)0);
+
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "overrun", &o, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+    b = NULL;
+    err = NULL;
+    ASSERT_EQ(hl_cap_wasm_instance_call_buf(pi, "x", 1, &b, &o, NULL, NULL,
+                                            NULL, &err),
+              HL_WASM_ERR_OUTPUT);
+    ASSERT_TRUE(b == NULL);
+    ASSERT_STREQ(err, "output_too_small");
+    hl_cap_wasm_instance_destroy(pi);
     hl_cap_wasm_destroy(&cache);
 }
 

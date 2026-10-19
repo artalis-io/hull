@@ -10795,6 +10795,112 @@ UTEST(lua_audit18, compute_stream_raising_opts_leak_no_registry_ref)
     hl_lua_free(&v);
     hl_cap_wasm_destroy(&cache);
 }
+
+/* Audit 18 M4: an OWNED WasmBuffer (compute.buffer, the compute.call{buffer}
+ * copy fallback, a GPU readback) holds its bytes on the server allocator,
+ * which no VM limit covers: a loop keeping them alive grew without bound.
+ * They are counted against the heap limit now (refused past it, given back
+ * on close), and compute.buffer's copy is charged 1 unit per 8 bytes. */
+UTEST(lua_audit18, owned_buffers_are_bounded_by_the_heap_limit)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a15_wasm_entries, NULL);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    ASSERT_EQ(luaL_dostring(v.L, "compute = require('hull.compute') "
+                                 "s = string.rep('a', 1 << 20)"), LUA_OK);
+    size_t saved = v.mem_limit;
+    v.mem_limit = 8u << 20;   /* 8 MB of buffers, the strings fit too */
+    HL_LUA_ARM(&v, v.L);
+    int rc = luaL_dostring(v.L,
+        "held = {}\n"
+        "local ok, err = pcall(function()\n"
+        "  for i = 1, 64 do held[i] = compute.buffer(s) end\n"
+        "end)\n"
+        "assert(not ok and tostring(err):find('heap limit'), tostring(err))\n"
+        "assert(#held >= 7 and #held < 9, #held)\n"
+        "for i = 1, #held do held[i]:close() end\n"
+        "held = nil\n"
+        "local b = compute.buffer(s); assert(#b == 1 << 20); b:close()");
+    EXPECT_EQ(rc, LUA_OK);
+    if (rc != LUA_OK) printf("  got: %s\n", lua_tostring(v.L, -1));
+    lua_settop(v.L, 0);
+    EXPECT_EQ(v.wasm_buf_bytes, (size_t)0);
+    v.mem_limit = saved;
+
+    /* The copy is charged: 1 MB is 131072 units, over a 100000 budget. */
+    int64_t saved_ins = v.max_instructions;
+    v.max_instructions = 100000;
+    HL_LUA_ARM(&v, v.L);
+    rc = luaL_dostring(v.L, "local b = compute.buffer(s) after = 1");
+    EXPECT_NE(rc, LUA_OK);
+    const char *e = lua_tostring(v.L, -1);
+    EXPECT_TRUE(e && strstr(e, "instruction limit exceeded") != NULL);
+    lua_settop(v.L, 0);
+    EXPECT_EQ(lua_getglobal(v.L, "after"), LUA_TNIL);
+    lua_settop(v.L, 0);
+    v.max_instructions = saved_ins;
+
+    hl_lua_free(&v);
+    hl_cap_wasm_destroy(&cache);
+}
+
+#ifdef HL_ENABLE_IMAGE
+/* Audit 18 L7: stb_image_write works off the VM heap, a few times the image
+ * at its peak, and nothing refused an encode before the work. A zero-copy
+ * image (here a view of a 16 MB WasmBuffer) can be larger than the heap
+ * limit; its encode is refused with image_too_large. */
+UTEST(lua_audit18, image_encode_refused_past_the_heap_limit)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a15_wasm_entries, NULL);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    if (luaL_dostring(v.L, "image = require('hull.image') "
+                           "compute = require('hull.compute')") != LUA_OK) {
+        lua_settop(v.L, 0);   /* image compiled out */
+        hl_lua_free(&v);
+        hl_cap_wasm_destroy(&cache);
+        return;
+    }
+    ASSERT_EQ(luaL_dostring(v.L,
+        "local s = string.rep('a', 16 << 20) "
+        "buf = compute.buffer(s) s = nil "
+        "img = image.from_buffer(buf, 4096, 4096, 'r8')"), LUA_OK);
+    lua_gc(v.L, LUA_GCCOLLECT, 0);
+    size_t saved = v.mem_limit;
+    v.mem_limit = v.mem_used + (4u << 20);
+    HL_LUA_ARM(&v, v.L);
+    int rc = luaL_dostring(v.L,
+        "local out, err = image.encode(img, 'png') "
+        "assert(out == nil and err == 'image_too_large', tostring(err))");
+    EXPECT_EQ(rc, LUA_OK);
+    if (rc != LUA_OK) printf("  got: %s (mem_used %zu)\n",
+                             lua_tostring(v.L, -1), v.mem_used);
+    lua_settop(v.L, 0);
+    v.mem_limit = saved;
+    HL_LUA_ARM(&v, v.L);
+    EXPECT_EQ(luaL_dostring(v.L, "img:close() buf:close()"), LUA_OK);
+    lua_settop(v.L, 0);
+
+    hl_lua_free(&v);
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_IMAGE */
 #endif /* HL_ENABLE_WASM */
 
 /* ── Audit 15: off-heap whole-object reads, tar.create / tar.pack ──────
