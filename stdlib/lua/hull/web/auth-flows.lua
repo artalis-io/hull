@@ -1923,8 +1923,10 @@ local function handle_totp_verify(req, res)
     -- can extract the remote IP and gate per-IP attempts in addition
     -- to per-user. The default totp.verify accepts the 3rd arg;
     -- custom callbacks that ignore it keep round-8 behaviour.
+    -- Only a literal true passes (audit 18): a callback returning 0, a
+    -- table or a string was a second factor, unlike the JS twin's === true.
     local ok = _state.totp_verify(user, body.code, req)
-    if not ok then
+    if ok ~= true then
         return res:status(401):json({ error = "invalid code" })
     end
     -- Round-8 MEDIUM-6: the prior code discarded mark_token_used's

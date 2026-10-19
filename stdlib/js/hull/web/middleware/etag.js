@@ -80,7 +80,10 @@ function jsonEtag(req, res, data, status) {
         return;
     }
 
-    const body = JSON.stringify(data);
+    // JSON.stringify(undefined) (or a function) is undefined, not a string
+    // (audit 18: body.length threw); tag it as the "null" Lua's
+    // json.encode(nil) gives.
+    const body = JSON.stringify(data) ?? "null";
     if (body.length > MAX_BODY_SIZE) {
         if (status) res.status(status);
         res.json(data);

@@ -117,9 +117,22 @@ function enqueue(opts) {
     return db.lastId();
 }
 
+// The runtime's refusals to wait (runtime/js/db_wait.h, async.c async gate;
+// the same test as hull:web:pwned's). They say where flush was called, not
+// how the destination answered, so they are rethrown, never recorded as a
+// failed attempt (audit 18: every flush from such a place burned an attempt
+// until the row was 'failed', unsent).
+function isWaitRefusal(e) {
+    const s = String(e && e.message !== undefined ? e.message : e);
+    return s.indexOf("cannot wait while a transaction is open") >= 0
+        || s.indexOf("cannot run in middleware") >= 0
+        || s.indexOf("cannot start while req.multipart()") >= 0;
+}
+
 /**
  * Attempt to deliver a single outbox item.
- * @returns {[boolean, string|null]} [success, errorMessage]
+ * @returns {[boolean, string|null, *]} [success, errorMessage, refusal]:
+ *   refusal is the runtime's refusal to wait (see isWaitRefusal), if any.
  */
 async function deliverItem(item) {
     if (item.kind === "webhook" || item.kind === "http") {
@@ -145,6 +158,7 @@ async function deliverItem(item) {
                 return [true, null];
             return [false, "HTTP " + result.status];
         } catch (e) {
+            if (isWaitRefusal(e)) return [false, String(e), e];
             return [false, String(e)];
         }
     }
@@ -185,6 +199,12 @@ function backoffDelay(attempt) {
 const CLAIM_LEASE = 300;
 
 async function flush(opts) {
+    // Delivery waits on http.fetch, which the runtime refuses inside a
+    // transaction; refused here, before any row is claimed (audit 18).
+    if (db.inTransaction()) {
+        throw new Error("outbox.flush cannot run inside db.batch or an open " +
+            "transaction: delivery waits on the network. Call it after the commit");
+    }
     const o = opts || {};
     const limit = o.limit || 50;
     const now = time.now();
@@ -215,7 +235,16 @@ async function flush(opts) {
             "AND state = 'pending' AND next_attempt_at <= ?",
             [lease, item.id, claimNow]);
         if (claimed !== 1) continue;
-        const [ok, err] = await deliverItem(item);
+        const [ok, err, refusal] = await deliverItem(item);
+        if (refusal !== undefined) {
+            // Give the claim back (the row is due again at once) and rethrow:
+            // nothing was sent, so no attempt is counted.
+            db.exec(
+                "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " +
+                "AND state = 'pending' AND next_attempt_at = ?",
+                [claimNow, item.id, lease]);
+            throw refusal;
+        }
 
         // Every outcome is written only while the row still holds THIS flush's
         // lease: a delivery that outran it was reclaimed and sent again by

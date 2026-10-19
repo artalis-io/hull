@@ -516,6 +516,23 @@ await test("a14: magic link + TOTP records magic_link+totp; password records pas
     assertEq(S.factors, "password+totp");
 });
 
+await test("audit 18: a magic link does not survive a change to an address toLowerCase folds to", async () => {
+    resetStore();
+    init({});
+    const kelvin = "aK181@x.test";
+    const u = addUser(181, kelvin, "first-password-1", true);
+    await H.magicLink(mkReq({ email: kelvin }), mkRes());
+    const tok = tokenIn(kelvin);
+    assertEq(typeof tok, "string", "link mailed");
+    // The account moves to the ASCII spelling, which toLowerCase equates
+    // with the Kelvin sign: the old mailbox's link must stop working.
+    u.email = "ak181@x.test";
+    const res = mkRes();
+    await H.magicLinkConsume(mkReq({ token: tok }), res);
+    assertEq(res.code, 400, "old link refused");
+    assertEq(res.body && res.body.ok, undefined, "not signed in");
+});
+
 await test("a14: init refuses counts and durations that are not whole numbers > 0", () => {
     for (const k of ["maxFailedLogins", "maxFailedLoginsPerAccount", "lockoutDuration",
                      "verifyTtl", "resetTtl", "magicLinkTtl", "emailChangeTtl",

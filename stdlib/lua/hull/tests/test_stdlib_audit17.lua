@@ -5,6 +5,8 @@
 -- ETag and is never answered 304. jobs._config (the live config, settable
 -- past jobs.init's checks) and the clock-injectable seams (jobs._tick,
 -- _cron_next, _events_drain) are test hooks, no longer on the module.
+-- Audit 18 adds outbox.flush: refused inside a transaction, and the runtime's
+-- refusal to wait raised rather than counted as a failed attempt.
 --
 -- Runs in the caps-bearing state (run_lua_test_in_runtime in
 -- tests/hull/runtime/lua/test_lua.c): etag hashes, jobs needs the db.
@@ -98,6 +100,56 @@ test("the cron tick, cron math and drain are test hooks", function()
     assert_eq(type(hooks.tick), "function", "tick")
     assert_eq(type(hooks.cron_next), "function", "cron_next")
     assert_eq(type(hooks.events_drain), "function", "events_drain")
+end)
+
+-- ── outbox.flush and the runtime's refusal to wait (audit 18) ───────
+-- A refusal said where flush was called, not how the destination answered,
+-- yet it was recorded as a failed delivery: with max_attempts = 1 one flush
+-- from such a place marked the row failed, unsent.
+
+local outbox = require("hull.web.middleware.outbox")
+local http_client = require("hull.http-client")
+local db = require("hull.db").default()
+
+local function counts()
+    local s = outbox.stats()
+    return s.pending or 0, s.failed or 0
+end
+
+test("audit 18: outbox.flush refuses inside a transaction, before any claim", function()
+    outbox.init()
+    local p0, f0 = counts()
+    outbox.enqueue({ kind = "webhook", destination = "http://a18.test/txn",
+                     payload = "{}", max_attempts = 1 })
+    local ok, err = pcall(db.batch, function() outbox.flush() end)
+    assert_eq(ok, false, "refused")
+    assert_eq(tostring(err):find("outbox.flush cannot run inside", 1, true) ~= nil,
+              true, "message: " .. tostring(err))
+    local p, f = counts()
+    assert_eq(p, p0 + 1, "still pending")
+    assert_eq(f, f0, "not failed")
+end)
+
+test("audit 18: a wait refusal is raised, not counted as an attempt", function()
+    outbox.init()
+    local p0, f0 = counts()
+    outbox.enqueue({ kind = "webhook", destination = "http://a18.test/refused",
+                     payload = "{}", max_attempts = 1 })
+    local real = http_client.async.post
+    http_client.async.post = function()
+        error("http.fetch: can only wait in a handler", 0)
+    end
+    local ok1, err1 = pcall(outbox.flush)
+    -- The claim was given back: the next flush takes the row again at once.
+    local ok2 = pcall(outbox.flush)
+    http_client.async.post = real
+    assert_eq(ok1, false, "raised")
+    assert_eq(tostring(err1):find("can only wait in a handler", 1, true) ~= nil,
+              true, "message: " .. tostring(err1))
+    assert_eq(ok2, false, "due again and raised again")
+    local p, f = counts()
+    assert_eq(p, p0 + 1, "still pending")
+    assert_eq(f, f0, "not failed")
 end)
 
 return { pass = pass, fail = fail }
