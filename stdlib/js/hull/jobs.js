@@ -427,6 +427,32 @@ function resolveDeps(id, ok) {
     }
 }
 
+// A caller-supplied list of strings (statuses, event types), copied by a
+// counted loop (audit 18). SQL text is built from its LENGTH only, never by a
+// method on the caller's value: an array with its own `map` / `join` passes
+// Array.isArray, and what it returned became SQL run from this stdlib frame,
+// past the `_hull_*` namespace check. Mirrors auditLog.list.
+function callerStrings(v, what) {
+    if (!Array.isArray(v)) throw new TypeError(what + " must be an array of strings");
+    const n = v.length;
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 0)   // a Proxy's length
+        throw new TypeError(what + " must be an array of strings");
+    const out = [];
+    for (let i = 0; i < n; i++) {
+        const s = v[i];
+        if (typeof s !== "string") throw new TypeError(what + " must be an array of strings");
+        out[i] = s;
+    }
+    return out;
+}
+
+// "?,?,...": n placeholders, from a count alone.
+function placeholders(n) {
+    let s = "";
+    for (let i = 0; i < n; i++) s += (i === 0 ? "?" : ",?");
+    return s;
+}
+
 // A job removed before it ended (jobs.cancel / jobs.purge) never completes, so
 // the edges its dependents still wait on are resolved as FAILED, in the
 // removal's transaction (audit 12): the dependents cascade-fail, or run under
@@ -870,10 +896,12 @@ function resume(queue) { return setPaused(queue, 0); }
  */
 function purge(queue, opts) {
     const o = opts || {};
-    const statuses = o.statuses || ["pending"];
-    const params = [queue].concat(statuses);
-    const ph = statuses.map(() => "?");
-    const where = "queue=? AND status IN (" + ph.join(",") + ")";
+    const statuses = o.statuses !== undefined && o.statuses !== null
+        ? callerStrings(o.statuses, "jobs.purge: statuses") : ["pending"];
+    if (statuses.length === 0) return 0;
+    const params = [queue];
+    for (let i = 0; i < statuses.length; i++) params.push(statuses[i]);
+    const where = "queue=? AND status IN (" + placeholders(statuses.length) + ")";
     let n = 0;
     db.batch(() => {
         // The rows about to go that carry dependency edges: a dependency some
@@ -2745,9 +2773,12 @@ function events(opts) {
     const o = opts || {};
     const where = ["1=1"], params = [];
     if (o.since !== undefined) { where.push("id > ?"); params.push(o.since); }
-    if (Array.isArray(o.types) && o.types.length) {
-        where.push("type IN (" + o.types.map(() => "?").join(",") + ")");
-        for (const t of o.types) params.push(t);
+    if (o.types !== undefined && o.types !== null) {
+        const types = callerStrings(o.types, "jobs.events: types");
+        if (types.length) {
+            where.push("type IN (" + placeholders(types.length) + ")");
+            for (let i = 0; i < types.length; i++) params.push(types[i]);
+        }
     }
     // 1..1000: a negative LIMIT is "no limit" on SQLite, and NaN / a fraction
     // is not an integer bind.
@@ -2789,7 +2820,14 @@ function subscribe(name, handler, opts) {
         Object.prototype.toString.call(handler) === "[object AsyncGeneratorFunction]")
         throw new Error("jobs.subscribe: handler must be synchronous (not an async function)");
     const o = opts || {};
-    const typesCsv = (Array.isArray(o.types) && o.types.length) ? o.types.join(",") : null;
+    // Joined by a loop over checked strings, not the caller's own `join`
+    // (audit 18; the csv is bound as data, but no caller method runs here).
+    let typesCsv = null;
+    if (o.types !== undefined && o.types !== null) {
+        const types = callerStrings(o.types, "jobs.subscribe: types");
+        for (let i = 0; i < types.length; i++)
+            typesCsv = typesCsv === null ? types[i] : typesCsv + "," + types[i];
+    }
     const maxF = (typeof o.maxFailures === "number" && o.maxFailures > 0) ? o.maxFailures : null;
     // Start cursor: "now" (default) skips existing history; "beginning" replays all.
     let start = 0;
@@ -2935,13 +2973,15 @@ function eventsDrain(name, opts) {
  */
 function cleanup(opts) {
     const o = opts || {};
-    const statuses = o.statuses || ["done", "dead"];
+    const statuses = o.statuses !== undefined && o.statuses !== null
+        ? callerStrings(o.statuses, "jobs.cleanup: statuses") : ["done", "dead"];
     const cutoff = o.before !== undefined ? o.before : (time.now() - (o.olderThan !== undefined ? o.olderThan : 604800));
-    const placeholders = statuses.map(() => "?");
     const params = statuses.slice();
     params.push(cutoff);
-    let sql = "DELETE FROM _hull_jobs WHERE status IN (" +
-        placeholders.join(",") + ") AND updated_at < ?";
+    // An empty list deletes no job (the hygiene below still runs).
+    let sql = "DELETE FROM _hull_jobs WHERE " +
+        (statuses.length ? "status IN (" + placeholders(statuses.length) + ")" : "1=0") +
+        " AND updated_at < ?";
     if (o.queue) { sql += " AND queue=?"; params.push(o.queue); }
     const deleted = db.exec(sql, params) || 0;
     // Drop results whose producing job is gone (workflow result store hygiene).

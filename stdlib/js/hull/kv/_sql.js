@@ -184,7 +184,10 @@ class SqlStore {
     scan(prefix, limit) {
         prefix = prefix || "";
         let sql = "SELECT k FROM _hull_kv WHERE ns = ? AND k LIKE ? AND expires_at > ?";
-        if (limit && limit > 0) sql += " LIMIT " + String(Math.floor(limit));
+        // Only a number reaches the SQL text (audit 18): the handle checks the
+        // limit, but `_store.scan` is reachable with any value.
+        if (typeof limit === "number" && Number.isInteger(limit) && limit > 0)
+            sql += " LIMIT " + String(limit);
         const rows = this.conn.query(sql, [this.ns, util.hexencode(prefix) + "%", util.nowMs()]);
         const out = [];
         for (let i = 0; i < (rows ? rows.length : 0); i++) out.push(util.hexdecode(rows[i].k));
