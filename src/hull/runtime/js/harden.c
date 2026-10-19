@@ -25,9 +25,12 @@
  *      prototypes, the generator / async-generator / async-function prototypes
  *      and their constructors, %AsyncIteratorPrototype%, %TypedArray% and its
  *      prototype, %ThrowTypeError%, and the Iterator global's helpers);
- *   2. makes every standard global binding on globalThis non-writable and
- *      non-configurable (globalThis itself is NOT frozen - apps define
- *      globals); and
+ *   2. makes EVERY global binding present when it runs non-writable and
+ *      non-configurable, and freezes what each one holds - the standard
+ *      globals and Hull's own (`hull`, whose sleep the stdlib awaits,
+ *      `console`, the worker VM's `db`); globalThis itself is NOT frozen,
+ *      apps define globals. It then verifies every visited object is frozen
+ *      and every binding locked, and throws on any gap; and
  *   3. applies the SES-style "override mistake" enablement on a short list of
  *      commonly assigned prototype data properties, so ordinary code such as
  *      `class X extends Error { constructor(){ super(); this.name = "X"; } }`
@@ -220,31 +223,31 @@ static int install_enablement(JSContext *ctx)
 static const char HL_JS_HARDEN_SRC[] =
 "(function () {\n"
 "  'use strict';\n"
-"  const freeze = Object.freeze, gp = Object.getPrototypeOf,\n"
-"        gopn = Object.getOwnPropertyNames, gops = Object.getOwnPropertySymbols,\n"
+"  const freeze = Object.freeze, isFrozen = Object.isFrozen,\n"
+"        gp = Object.getPrototypeOf, own = Reflect.ownKeys,\n"
 "        gopd = Object.getOwnPropertyDescriptor, defp = Object.defineProperty;\n"
 "  const seen = new WeakSet();\n"
+"  const visited = [];\n"
 "  const queue = [];\n"
 "  const enq = (v) => {\n"
 "    const t = typeof v;\n"
 "    if (v !== null && (t === 'object' || t === 'function') && !seen.has(v)) {\n"
-"      seen.add(v); queue.push(v);\n"
+"      seen.add(v); visited.push(v); queue.push(v);\n"
 "    }\n"
 "  };\n"
-"  const names = ['Object','Function','Array','Number','Boolean','String',\n"
-"    'Symbol','BigInt','Math','Date','RegExp','Error','EvalError','RangeError',\n"
-"    'ReferenceError','SyntaxError','TypeError','URIError','AggregateError',\n"
-"    'JSON','Promise','Proxy','Reflect','Map','Set','WeakMap','WeakSet',\n"
-"    'ArrayBuffer','SharedArrayBuffer','DataView','Int8Array','Uint8Array',\n"
-"    'Uint8ClampedArray','Int16Array','Uint16Array','Int32Array','Uint32Array',\n"
-"    'Float32Array','Float64Array','BigInt64Array','BigUint64Array','Atomics',\n"
-"    'Iterator'];\n"
-"  for (const n of names) {\n"
-"    try { const c = globalThis[n];\n"
-"      if (c !== undefined && c !== null) { enq(c);\n"
-"        try { if (c.prototype) enq(c.prototype); } catch (e) {} }\n"
-"    } catch (e) {}\n"
+"  /* globalThis itself is never frozen: apps define their own globals. */\n"
+"  seen.add(globalThis);\n"
+"  /* Roots 1: every own property of globalThis present now - the standard\n"
+"   * globals AND Hull's own (hull, console, the worker VM's db). Everything\n"
+"   * here was installed by host code; app code has not run yet. */\n"
+"  const gkeys = own(globalThis);\n"
+"  for (const k of gkeys) {\n"
+"    const d = gopd(globalThis, k);\n"
+"    if ('value' in d) enq(d.value); else { enq(d.get); enq(d.set); }\n"
 "  }\n"
+"  /* Roots 2: the hidden intrinsics no global property reaches. A lookup may\n"
+"   * legitimately fail when this build lacks the feature (matchAll, async\n"
+"   * generators), so only the LOOKUP is guarded - never the freeze. */\n"
 "  const hidden = [\n"
 "    () => gp(gp([][Symbol.iterator]())),       /* %IteratorPrototype% */\n"
 "    () => gp([][Symbol.iterator]()),           /* %ArrayIteratorPrototype% */\n"
@@ -266,40 +269,49 @@ static const char HL_JS_HARDEN_SRC[] =
 "    /* The Function global is deleted by the sandbox: reach its prototype\n"
 "     * (and %ThrowTypeError%, its caller/arguments getter) through Object. */\n"
 "    () => gp(Object),                            /* %Function.prototype% */\n"
-"    () => { const d = gopd(gp(Object), 'caller'); return d && d.get; },\n"
-"    () => { const d = gopd(gp(Object), 'arguments'); return d && d.get; },\n"
+"    () => gopd(gp(Object), 'caller').get,        /* %ThrowTypeError% */\n"
+"    () => gopd(gp(Object), 'arguments').get,\n"
+"    () => [].values().map(x => x),               /* %IteratorHelperPrototype% */\n"
+"    () => Iterator.from({ next() { return { done: true }; } }), /* %WrapForValidIteratorPrototype% */\n"
 "  ];\n"
-"  for (const fn of hidden) { try { enq(fn()); } catch (e) {} }\n"
+"  for (const fn of hidden) {\n"
+"    let v; try { v = fn(); } catch (e) { continue; }   /* absent in this build */\n"
+"    enq(v);\n"
+"    if (v !== null && typeof v === 'object') enq(gp(v));\n"
+"  }\n"
+"  /* The walk: no try/catch - a freeze that fails throws, and init fails. */\n"
 "  while (queue.length) {\n"
 "    const o = queue.pop();\n"
-"    try { enq(gp(o)); } catch (e) {}\n"
-"    let keys = []; try { keys = gopn(o); } catch (e) {}\n"
-"    let syms = []; try { syms = gops(o); } catch (e) {}\n"
-"    for (const k of keys) {\n"
-"      let d; try { d = gopd(o, k); } catch (e) { continue; }\n"
+"    enq(gp(o));\n"
+"    for (const k of own(o)) {\n"
+"      const d = gopd(o, k);\n"
 "      if (!d) continue;\n"
 "      if ('value' in d) enq(d.value); else { enq(d.get); enq(d.set); }\n"
 "    }\n"
-"    for (const k of syms) {\n"
-"      let d; try { d = gopd(o, k); } catch (e) { continue; }\n"
-"      if (!d) continue;\n"
-"      if ('value' in d) enq(d.value); else { enq(d.get); enq(d.set); }\n"
-"    }\n"
-"    try { freeze(o); } catch (e) {}\n"
+"    freeze(o);\n"
 "  }\n"
-"  /* Lock the standard global bindings: non-writable + non-configurable, so\n"
-"   * an app cannot replace Array / JSON / Promise out from under the stdlib.\n"
-"   * globalThis ITSELF is not frozen - apps define their own globals. */\n"
-"  const globals = names.concat(['globalThis','parseInt','parseFloat','isNaN',\n"
-"    'isFinite','decodeURI','decodeURIComponent','encodeURI',\n"
-"    'encodeURIComponent','escape','unescape']);\n"
-"  for (const n of globals) {\n"
-"    try {\n"
-"      const d = gopd(globalThis, n);\n"
-"      if (!d || !d.configurable) continue;\n"
-"      if ('value' in d) defp(globalThis, n, { configurable: false, writable: false });\n"
-"      else defp(globalThis, n, { configurable: false });\n"
-"    } catch (e) {}\n"
+"  /* Lock EVERY global binding present now: non-writable + non-configurable,\n"
+"   * so an app can replace neither Array / JSON / Promise nor Hull's own\n"
+"   * `hull` (whose sleep the stdlib awaits) / `console` / worker `db`.\n"
+"   * Nothing is excluded: every binding here is host-installed, and a binding\n"
+"   * already non-configurable (undefined, NaN, Infinity, the __hull_manifest\n"
+"   * getter) keeps its own attributes. Globals Hull defines LATER stay\n"
+"   * app-visible by design: `test` (hull test), the test harness's globals,\n"
+"   * mod_app's transient __hull_app_for_router (deleted again at once). */\n"
+"  for (const k of gkeys) {\n"
+"    const d = gopd(globalThis, k);\n"
+"    if ('value' in d) {\n"
+"      if (d.configurable || d.writable)\n"
+"        defp(globalThis, k, { configurable: false, writable: false });\n"
+"    } else if (d.configurable) defp(globalThis, k, { configurable: false });\n"
+"  }\n"
+"  /* Verify, and throw on any gap: the contract is fail-closed. */\n"
+"  for (const o of visited)\n"
+"    if (!isFrozen(o)) throw new TypeError('harden: an intrinsic is not frozen');\n"
+"  for (const k of gkeys) {\n"
+"    const d = gopd(globalThis, k);\n"
+"    if (d.configurable || ('value' in d && d.writable))\n"
+"      throw new TypeError('harden: global ' + String(k) + ' is not locked');\n"
 "  }\n"
 "})();\n";
 
@@ -465,8 +477,11 @@ int hl_js_harden_intrinsics(JSContext *ctx)
     JSValue r = JS_Eval(ctx, HL_JS_HARDEN_SRC, sizeof HL_JS_HARDEN_SRC - 1,
                         "<hull:harden>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) {
-        JS_FreeValue(ctx, JS_GetException(ctx));
-        log_error("[hull:c] intrinsic freeze failed");
+        JSValue exc = JS_GetException(ctx);
+        const char *m = JS_ToCString(ctx, exc);
+        log_error("[hull:c] intrinsic freeze failed: %s", m ? m : "?");
+        if (m) JS_FreeCString(ctx, m);
+        JS_FreeValue(ctx, exc);
         return -1;
     }
     JS_FreeValue(ctx, r);

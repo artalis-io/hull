@@ -11875,6 +11875,59 @@ UTEST(js_audit18_intrinsics, stdlib_module_exports_are_frozen)
     cleanup_js_caps();
 }
 
+/* Hull's own globals are locked and frozen with the standard ones: the
+ * stdlib awaits the bare `hull.sleep` (retry.run, jobs.await), so an app that
+ * replaced it - or the whole `hull` / `console` binding - ran inside the
+ * stdlib's calls. The stdlib still reaches the real hull.sleep. */
+UTEST(js_audit18_intrinsics, hull_globals_are_locked)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { retry } from 'hull:retry';\n"
+        "const realSleep = hull.sleep;\n"
+        "const fake = () => { globalThis.__a18_fake = 1; return Promise.resolve(); };\n"
+        "let r = 0;\n"
+        "try { hull.sleep = fake; } catch (e) { if (e instanceof TypeError) r |= 1; }\n"
+        "try { globalThis.hull = { sleep: fake, map: fake }; } catch (e) { if (e instanceof TypeError) r |= 2; }\n"
+        "try { globalThis.console = { log: fake }; } catch (e) { if (e instanceof TypeError) r |= 4; }\n"
+        "try { delete globalThis.hull; } catch (e) { if (e instanceof TypeError) r |= 8; }\n"
+        "if (Object.isFrozen(hull) && Object.isFrozen(console) &&\n"
+        "    hull.sleep === realSleep) r |= 16;\n"
+        "globalThis.__a18_hg = r;\n"
+        /* One failed attempt, then the stdlib's own `await hull.sleep(...)`. */
+        "let n = 0;\n"
+        "retry.run(() => { n++; if (n === 1) throw new Error('x'); return 1; },\n"
+        "          { maxAttempts: 2, baseMs: 1, jitter: 0 }).catch(() => {});\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a18_hg"), 31);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_fake === 'undefined' ? 1 : 0"), 1);
+    cleanup_js_caps();
+}
+
+/* Hardening fails closed: an object it cannot freeze fails the call (and so
+ * init), never leaves the object mutable with init succeeding. */
+UTEST(js_audit18_intrinsics, harden_fails_closed)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    ASSERT_TRUE(rt != NULL);
+    JSContext *ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    static const char plant[] =
+        "globalThis.unfreezable = new Proxy({}, { preventExtensions() { return false; } });";
+    JSValue v = JS_Eval(ctx, plant, sizeof plant - 1, "<a18>", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_FALSE(JS_IsException(v));
+    JS_FreeValue(ctx, v);
+    EXPECT_EQ(hl_js_harden_intrinsics(ctx), -1);
+    JS_FreeContext(ctx);
+
+    /* A clean context hardens. */
+    ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    EXPECT_EQ(hl_js_harden_intrinsics(ctx), 0);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
 /* A worker.dispatch VM runs app functions, so it is hardened too. */
 UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
 {
@@ -11882,11 +11935,19 @@ UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
     HlAsyncBackendCtx *actx;
     HlAsyncBackendPool *pool;
     ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+    a7_worker_db();   /* declare hull/db, so the worker VM gets its `db` */
     char out[512] = "(no verdict)";
     js_worker_run(be, actx,
         "  const r = await worker.dispatch(() => Object.isFrozen(Array.prototype) &&\n"
         "    Object.isFrozen(Object.prototype) ? 'frozen' : 'open');\n"
-        "  check(r === 'frozen', 'worker: ' + r);\n",
+        "  check(r === 'frozen', 'worker: ' + r);\n"
+        /* The `db` global the worker hooks install is locked and frozen. */
+        "  const d = await worker.dispatch(() => {\n"
+        "    if (typeof db !== 'object') return 'no db';\n"
+        "    const g = Object.getOwnPropertyDescriptor(globalThis, 'db');\n"
+        "    return Object.isFrozen(db) && !g.writable && !g.configurable ? 'locked' : 'open';\n"
+        "  });\n"
+        "  check(d === 'locked', 'worker db: ' + d);\n",
         out, sizeof out);
     EXPECT_STREQ(out, "ok");
     js_worker_close(be, actx, pool);
