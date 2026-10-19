@@ -8,6 +8,8 @@
 #include "hull/cap/crypto.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 
 /* ── SHA-256 tests ──────────────────────────────────────────────────── */
 
@@ -754,6 +756,54 @@ UTEST(hl_cap_crypto, pbkdf2_null_args)
     rc = hl_cap_crypto_pbkdf2("pw", 2, NULL, 0,
                                 100000, out, sizeof(out));
     ASSERT_EQ(rc, -1);
+}
+
+/* A password longer than HMAC's 64-byte block is hashed once, not on every
+ * iteration (audit 18). The output must stay standard PBKDF2-HMAC-SHA256:
+ * this vector is Python's hashlib.pbkdf2_hmac("sha256", pw, salt, 100000,
+ * 40) with pw[i] = (i * 7 + 3) & 0xff, 100 bytes (two output blocks). */
+UTEST(hl_cap_crypto, pbkdf2_long_password_vector)
+{
+    uint8_t pw[100];
+    for (size_t i = 0; i < sizeof(pw); i++)
+        pw[i] = (uint8_t)((i * 7 + 3) & 0xff);
+    const uint8_t salt[] = "saltSALTsaltSALT";
+    static const uint8_t want[40] = {
+        0x3d,0x74,0x76,0x4a,0xef,0xc5,0xa0,0x21,0x4f,0x63,0x05,0xd0,0xab,0x22,
+        0xec,0x01,0xc4,0x16,0xe9,0x48,0xb7,0xef,0x2d,0x1a,0xa2,0x26,0x89,0xc8,
+        0x5f,0x03,0x6f,0xdd,0x60,0x0d,0x48,0x90,0x3b,0x47,0xf3,0x93,
+    };
+    uint8_t out[40];
+    ASSERT_EQ(0, hl_cap_crypto_pbkdf2((const char *)pw, sizeof(pw),
+                                      salt, sizeof(salt) - 1,
+                                      100000, out, sizeof(out)));
+    ASSERT_EQ(0, memcmp(out, want, sizeof(want)));
+}
+
+/* A 1 MB password costs one SHA-256 pass, not iterations x 1 MB: before
+ * audit 18 this took ~200 GB of hashing. Its output equals PBKDF2 keyed by
+ * the password's digest (HMAC's K' = H(K)). */
+UTEST(hl_cap_crypto, pbkdf2_huge_password_hashed_once)
+{
+    size_t n = 1u << 20;
+    char *pw = malloc(n);
+    ASSERT_TRUE(pw != NULL);
+    memset(pw, 'p', n);
+    uint8_t salt[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    uint8_t out[32], ref[32], digest[32];
+
+    time_t t0 = time(NULL);
+    ASSERT_EQ(0, hl_cap_crypto_pbkdf2(pw, n, salt, sizeof(salt),
+                                      100000, out, sizeof(out)));
+    time_t t1 = time(NULL);
+    ASSERT_LT((double)(t1 - t0), 30.0);
+
+    ASSERT_EQ(0, hl_cap_crypto_sha256(pw, n, digest));
+    ASSERT_EQ(0, hl_cap_crypto_pbkdf2((const char *)digest, sizeof(digest),
+                                      salt, sizeof(salt),
+                                      100000, ref, sizeof(ref)));
+    ASSERT_EQ(0, memcmp(out, ref, sizeof(ref)));
+    free(pw);
 }
 
 /* ── Ed25519 tests ─────────────────────────────────────────────────── */

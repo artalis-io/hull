@@ -266,6 +266,72 @@ UTEST(hull_cap_image, decode_empty)
     ASSERT_STREQ("empty input", err);
 }
 
+/* An 8x8 greyscale progressive JPEG with `scans` scans: one DC first scan
+ * (a one-code Huffman table, every block's DC difference 0), then DC
+ * refinement scans of one bit each. When `app_ffda` is set an APP1 segment
+ * full of FF DA bytes comes first: it is skipped by its length, as stb
+ * skips it, and holds no scans. Returns the length written to `out`. */
+static size_t make_progressive_jpeg(unsigned char *out, unsigned scans,
+                                    int app_ffda)
+{
+    size_t n = 0;
+    out[n++] = 0xFF; out[n++] = 0xD8;                     /* SOI */
+    if (app_ffda) {
+        out[n++] = 0xFF; out[n++] = 0xE1;                 /* APP1 */
+        out[n++] = 0x01; out[n++] = 0x02;                 /* 258 */
+        for (int i = 0; i < 128; i++) { out[n++] = 0xFF; out[n++] = 0xDA; }
+    }
+    out[n++] = 0xFF; out[n++] = 0xDB; out[n++] = 0x00; out[n++] = 67;
+    out[n++] = 0x00;                                       /* DQT 8-bit, 0 */
+    for (int i = 0; i < 64; i++) out[n++] = 0x01;
+    static const unsigned char sof2[] = {
+        0xFF, 0xC2, 0x00, 0x0B, 0x08, 0x00, 0x08, 0x00, 0x08,
+        0x01, 0x01, 0x11, 0x00,
+    };
+    memcpy(out + n, sof2, sizeof sof2); n += sizeof sof2;
+    out[n++] = 0xFF; out[n++] = 0xC4; out[n++] = 0x00; out[n++] = 20;
+    out[n++] = 0x00;                                       /* DC table 0 */
+    out[n++] = 0x01;                                       /* one 1-bit code */
+    for (int i = 1; i < 16; i++) out[n++] = 0x00;
+    out[n++] = 0x00;                                       /* -> symbol 0 */
+    for (unsigned s = 0; s < scans; s++) {
+        static const unsigned char sos[] = {
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00,
+        };
+        memcpy(out + n, sos, sizeof sos); n += sizeof sos;
+        out[n++] = s == 0 ? 0x00 : 0x10;                   /* Ah/Al */
+        out[n++] = 0x00;                                   /* entropy data */
+    }
+    out[n++] = 0xFF; out[n++] = 0xD9;                     /* EOI */
+    return n;
+}
+
+/* stb walks every block once per scan, so a JPEG made of cheap refinement
+ * scans cost far more than its charge: past 100 scans it is refused before
+ * stb decodes it (audit 18). 100 still decodes, and FF DA bytes inside a
+ * marker segment are not counted as scans. */
+UTEST(hull_cap_image, jpeg_scan_count_is_bounded)
+{
+    unsigned char *buf = malloc(4096);
+    ASSERT_TRUE(buf != NULL);
+    const char *err = NULL;
+
+    size_t n = make_progressive_jpeg(buf, 100, 1);
+    HlImage *img = hl_image_decode(buf, n, NULL, NULL, &err);
+    ASSERT_TRUE(img != NULL);
+    EXPECT_EQ(8u, img->width);
+    EXPECT_EQ(8u, img->height);
+    hl_image_free(img);
+
+    n = make_progressive_jpeg(buf, 101, 0);
+    err = NULL;
+    img = hl_image_decode(buf, n, NULL, NULL, &err);
+    EXPECT_TRUE(img == NULL);
+    EXPECT_TRUE(err != NULL);
+    if (img) hl_image_free(img);
+    free(buf);
+}
+
 UTEST(hull_cap_image, encode_unsupported_format)
 {
     /* R32F cannot be encoded - only RGBA8 and R8 */

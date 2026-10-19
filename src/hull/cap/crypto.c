@@ -1185,6 +1185,23 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
     if (salt_len > 64)
         return -1;
 
+    /* HMAC replaces a key longer than its 64-byte block with H(key), and
+     * would do so on every one of the 2 x iterations calls below: a 1 MB
+     * password cost iterations x 1 MB of SHA-256 while the runtimes charge
+     * ~128 bytes per iteration (audit 18). Hash it once here; the output
+     * is byte-identical (HMAC's K' = H(K)). */
+    uint8_t pw_hash[32];
+    const uint8_t *key = (const uint8_t *)password;
+    size_t key_len = pw_len;
+    if (pw_len > 64) {
+        if (hl_cap_crypto_sha256(password, pw_len, pw_hash) != 0) {
+            hull_secure_zero(pw_hash, sizeof(pw_hash));
+            return -1;
+        }
+        key = pw_hash;
+        key_len = sizeof(pw_hash);
+    }
+
     uint8_t work[68];
 
     memcpy(work, salt, salt_len);
@@ -1200,19 +1217,21 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
         work[salt_len + 3] = (uint8_t)(block_num);
 
         uint8_t u[32], t[32];
-        if (hl_cap_crypto_hmac_sha256((const uint8_t *)password, pw_len,
+        if (hl_cap_crypto_hmac_sha256(key, key_len,
                         work, salt_len + 4, u) != 0) {
             hull_secure_zero(u, sizeof(u));
             hull_secure_zero(t, sizeof(t));
+            hull_secure_zero(pw_hash, sizeof(pw_hash));
             return -1;
         }
         memcpy(t, u, 32);
 
         for (int i = 1; i < iterations; i++) {
-            if (hl_cap_crypto_hmac_sha256((const uint8_t *)password, pw_len,
+            if (hl_cap_crypto_hmac_sha256(key, key_len,
                             u, 32, u) != 0) {
                 hull_secure_zero(u, sizeof(u));
                 hull_secure_zero(t, sizeof(t));
+                hull_secure_zero(pw_hash, sizeof(pw_hash));
                 return -1;
             }
             for (int j = 0; j < 32; j++)
@@ -1231,6 +1250,7 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
         block_num++;
     }
 
+    hull_secure_zero(pw_hash, sizeof(pw_hash));
     return 0;
 }
 

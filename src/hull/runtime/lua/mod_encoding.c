@@ -23,7 +23,10 @@
  * one ran. The url alphabet takes no padding, as in hull.encoding.
  *
  * No capability and no authority: pure computation over the caller's bytes,
- * so it needs no manifest gate.
+ * so it needs no manifest gate. Each codec charges its input and output, 1
+ * unit per 8 bytes, before the work (enc_charge; the hull:encoding rate in
+ * JS): the buffer growth alone charged the output at the allocator's rate
+ * and the input scan not at all (audit 18).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -31,8 +34,18 @@
 #include "mod_buffer.h"        /* luaopen decls */
 #include "../../utils/base64.h"
 #include "../../utils/hex.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 #include <stdint.h>
+
+/* Charge reading `in_len` bytes and writing `out_len`, before the work; the
+ * count hook raises the limit here when the run is over it. */
+static void enc_charge(lua_State *L, size_t in_len, size_t out_len)
+{
+    uint64_t units = hl_work_bytes_units((uint64_t)in_len) +
+                     hl_work_bytes_units((uint64_t)out_len);
+    lua_hlwork(L, units > SIZE_MAX ? SIZE_MAX : (size_t)units, 0);
+}
 
 static int l_hex_encode(lua_State *L)
 {
@@ -40,6 +53,7 @@ static int l_hex_encode(lua_State *L)
     const char *in = luaL_checklstring(L, 1, &n);
     if (n > (SIZE_MAX - 1) / 2)
         return luaL_error(L, "encoding: value too large");
+    enc_charge(L, n, n * 2);
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, n * 2 + 1);
     if (hl_hex_encode((const uint8_t *)in, n, out, n * 2 + 1) != 0)
@@ -52,6 +66,7 @@ static int l_hex_decode(lua_State *L)
 {
     size_t n;
     const char *in = luaL_checklstring(L, 1, &n);
+    enc_charge(L, n, n / 2);
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, n / 2 + 1);
     int got = hl_hex_decode(in, n, (uint8_t *)out, n / 2 + 1);
@@ -73,6 +88,7 @@ static int l_base64_encode(lua_State *L)
     size_t len = hl_base64_encoded_len(n, flags);
     if (len == 0 && n != 0)
         return luaL_error(L, "encoding: value too large");
+    enc_charge(L, n, len);
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, len + 1);
     if (hl_base64_encode(in, n, out, len + 1, flags) < 0)
@@ -88,6 +104,7 @@ static int l_base64_decode(lua_State *L)
     /* The url alphabet is unpadded, so any '=' is refused there. */
     unsigned flags = lua_toboolean(L, 2) ? (HL_BASE64_URL | HL_BASE64_NOPAD) : 0;
     size_t cap = n / 4 * 3 + 3;
+    enc_charge(L, n, cap);
     luaL_Buffer b;
     char *out = luaL_buffinitsize(L, &b, cap);
     size_t got = 0;

@@ -206,6 +206,26 @@ out:
     return rc;
 }
 
+/* The public exponent sets the cost of every public-key operation (verify,
+ * and the blinding and result check inside sign), and nothing bounded it:
+ * the RSA charge is sized by the modulus, assuming e = 65537, so a key with
+ * an e as long as its modulus cost several times what it was charged
+ * (audit 18). Real keys use 65537 (17 bits); anything past 64 bits is
+ * refused. */
+#define HL_RSA_MAX_E_BITS 64
+
+static int rsa_e_bounded(const mbedtls_pk_context *pk)
+{
+    const mbedtls_rsa_context *rsa = mbedtls_pk_rsa(*pk);
+    if (!rsa) return 0;
+    mbedtls_mpi e;
+    mbedtls_mpi_init(&e);
+    int ok = mbedtls_rsa_export(rsa, NULL, NULL, NULL, NULL, &e) == 0
+             && mbedtls_mpi_bitlen(&e) <= HL_RSA_MAX_E_BITS;
+    mbedtls_mpi_free(&e);
+    return ok;
+}
+
 static int mbed_supports(HlCryptoAsymAlg alg)
 {
     return desc_for(alg) != NULL ? 1 : 0;
@@ -251,7 +271,7 @@ static int mbed_verify(const void *pubkey_pem, size_t pubkey_len,
         if (!ec || ec->MBEDTLS_PRIVATE(grp).id != desc->curve)
             goto done;
     } else {
-        if (mbedtls_pk_get_type(&pk) != MBEDTLS_PK_RSA)
+        if (mbedtls_pk_get_type(&pk) != MBEDTLS_PK_RSA || !rsa_e_bounded(&pk))
             goto done;
         /* PSS uses the same RSA key as PKCS1v15 - mbedTLS's PK layer
          * doesn't distinguish at parse time; the scheme switch is on
@@ -352,7 +372,7 @@ static int key_matches(const mbedtls_pk_context *pk, const AlgDesc *desc)
         const mbedtls_ecp_keypair *ec = mbedtls_pk_ec(*pk);
         return ec && ec->MBEDTLS_PRIVATE(grp).id == desc->curve;
     }
-    return mbedtls_pk_get_type(pk) == MBEDTLS_PK_RSA;
+    return mbedtls_pk_get_type(pk) == MBEDTLS_PK_RSA && rsa_e_bounded(pk);
 }
 
 static int mbed_sign(const void *privkey_pem, size_t privkey_len,
