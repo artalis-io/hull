@@ -1237,6 +1237,11 @@ object pointing into the registry, and its `conn.query` / `db.default()` /
 its close_notify through it); (6) the backend loop (serve_cli). A new detached
 async op must `hl_async_ctx_track` itself (with an `on_shutdown` if it holds a
 timer or a request); a new loop-bound object, an `HlAsyncTeardown` entry.
+A binding never resumes another coroutine's wait inline from app code: a
+resume is loop-level (it runs the stale-transaction guard, re-arms the budget
+and clears `active_co`), so a wake made inside a run goes through a 0 ms
+backend timer that a request cancel or a teardown cancels (`hull._wake`, and
+the Lua ssh stream's `close` of a stream another coroutine waits on; audit 18).
 **The server TLS context belongs to Keel once `kl_http_server_init` succeeds**
 (it copies the `KlTlsConfig`, `ctx_destroy` included, and destroys it in
 `kl_http_server_free` after every connection's close_notify); Hull destroys it

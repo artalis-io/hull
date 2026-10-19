@@ -1223,9 +1223,13 @@ static int lua_compute_segment(lua_State *L)
 
 /* ── compute.stream ────────────────────────────────────────────────── */
 
+/* The callback is not put in the registry: it stays in its argument slot
+ * (func_idx) of lua_compute_stream's frame, which is the frame the cap call
+ * and so the trampoline run in. A registry ref taken before the opts table
+ * was read leaked when an opts __index raised (audit 18). */
 typedef struct {
     lua_State *L;
-    int        func_ref;
+    int        func_idx;   /* absolute stack index of the callback */
     int        error;
 } LuaStreamCbCtx;
 
@@ -1240,12 +1244,12 @@ typedef struct {
 /* The callback call, pushes and all, under the trampoline's lua_pcall: it
  * runs inside hl_cap_wasm_stream's loop, and a memory error raised by a
  * push made outside the pcall (a chunk is up to HL_WASM_STREAM_MAX_CHUNK)
- * longjmp'd out of that loop, leaking the instance, fds, buffers and the
- * registry ref - all outside the VM's memory limit. */
+ * longjmp'd out of that loop, leaking the instance, fds and buffers - all
+ * outside the VM's memory limit. */
 static int lua_stream_cb_call(lua_State *L)
 {
     const LuaStreamChunk *c = (const LuaStreamChunk *)lua_touserdata(L, 1);
-    lua_rawgeti(L, LUA_REGISTRYINDEX, c->ctx->func_ref);
+    lua_pushvalue(L, 2);                           /* the callback */
     lua_pushlstring(L, (const char *)c->data, c->len);
     lua_pushinteger(L, (lua_Integer)c->index + 1); /* 1-indexed for Lua */
     lua_pushboolean(L, c->is_last);
@@ -1261,13 +1265,14 @@ static int lua_stream_cb_trampoline(const void *data, size_t len,
     if (ctx->error) return -1;
 
     LuaStreamChunk chunk = { ctx, data, len, index, is_last };
-    if (!lua_checkstack(ctx->L, 2)) {
+    if (!lua_checkstack(ctx->L, 3)) {
         ctx->error = 1;
         return -1;
     }
     lua_pushcfunction(ctx->L, lua_stream_cb_call);   /* no allocation */
     lua_pushlightuserdata(ctx->L, &chunk);
-    if (lua_pcall(ctx->L, 1, 0, 0) != LUA_OK) {
+    lua_pushvalue(ctx->L, ctx->func_idx);
+    if (lua_pcall(ctx->L, 2, 0, 0) != LUA_OK) {
         ctx->error = 1;
         lua_pop(ctx->L, 1);
         return -1;
@@ -1336,7 +1341,6 @@ static int lua_compute_stream(lua_State *L)
     void *out_data = NULL;
     size_t out_len = 0;
     LuaStreamCbCtx cb_ctx = {0};
-    cb_ctx.func_ref = LUA_NOREF;
     /* Parse output (arg 3): nil/absent → buffer, function → callback,
      * table with "file" → file, table without "file" → treat as opts */
     int has_output = 0;
@@ -1345,8 +1349,7 @@ static int lua_compute_stream(lua_State *L)
     if (lua_isfunction(L, 3)) {
         has_output = 1;
         cb_ctx.L = L;
-        lua_pushvalue(L, 3);
-        cb_ctx.func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        cb_ctx.func_idx = 3;      /* slot 3 is fixed: lua_settop(L, 4) above */
         out_storage.kind = HL_STREAM_OUT_CALLBACK;
         out_storage.callback.fn = lua_stream_cb_trampoline;
         out_storage.callback.user_data = &cb_ctx;
@@ -1428,8 +1431,6 @@ static int lua_compute_stream(lua_State *L)
         } else {
             /* It was a buffer when checked above; the app code run since has
              * closed it. */
-            if (cb_ctx.func_ref != LUA_NOREF)
-                luaL_unref(L, LUA_REGISTRYINDEX, cb_ctx.func_ref);
             return luaL_error(L, "compute.stream: input buffer is closed");
         }
         HlMappedBuffer **mp = luaL_testudata(L, 2, HL_MMAP_MT);
@@ -1445,8 +1446,6 @@ static int lua_compute_stream(lua_State *L)
             in_copy_len = input.buffer.len;
             in_copy = hl_alloc_malloc(lua->base.alloc, in_copy_len);
             if (!in_copy) {
-                if (cb_ctx.func_ref != LUA_NOREF)
-                    luaL_unref(L, LUA_REGISTRYINDEX, cb_ctx.func_ref);
                 return luaL_error(L, "compute.stream: out of memory");
             }
             memcpy(in_copy, input.buffer.data, in_copy_len);
@@ -1469,10 +1468,6 @@ static int lua_compute_stream(lua_State *L)
     if (in_mmap) hl_cap_fs_mmap_release(in_mmap);
     if (in_wbuf) hl_wasm_buffer_release(in_wbuf);
     if (in_copy) hl_alloc_free(lua->base.alloc, in_copy, in_copy_len);
-
-    /* Clean up callback reference */
-    if (cb_ctx.func_ref != LUA_NOREF)
-        luaL_unref(L, LUA_REGISTRYINDEX, cb_ctx.func_ref);
 
     /* Over the budget or past the run's deadline - charged per chunk, or
      * tripped inside the output callback: raise the trip, never a
