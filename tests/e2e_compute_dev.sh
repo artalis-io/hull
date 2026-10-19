@@ -456,6 +456,39 @@ else
     sed 's/^/    /' /tmp/build_after.log | head -10
 fi
 
+# ── a discovered module name must follow the `compute new` rule ─────
+#
+# audit 18: discovery took any directory name ([^/]+) as a module name and
+# put it into the paths handed to clang and wamrc. A name outside
+# [A-Za-z0-9_-] is refused by `hull compute build` (every module) and by
+# `hull build`'s auto-rebuild, with nothing compiled.
+
+echo ""
+echo "--- compute module names discovered in the tree are validated ---"
+
+mkdir -p "compute/bad.name"
+cat > "compute/bad.name/bad.name.c" << 'EOF'
+int hull_process(void) { return 0; }
+EOF
+rm -f "compute/bad.name.wasm"
+"$HULL_ABS" compute build > /tmp/badname_compute.log 2>&1 || true
+if [ -f "compute/bad.name.wasm" ]; then
+    fail "compute build compiled a module with an invalid name"
+elif grep -q "invalid compute module name 'bad.name'" /tmp/badname_compute.log; then
+    pass "compute build refuses an invalid discovered module name"
+else
+    fail "compute build: no refusal message for 'bad.name'; output:"
+    sed 's/^/    /' /tmp/badname_compute.log | head -10
+fi
+"$HULL_ABS" build --no-verify-platform -o badname_app . > /tmp/badname_build.log 2>&1 || true
+if grep -q "invalid compute module name 'bad.name'" /tmp/badname_build.log; then
+    pass "hull build refuses an invalid discovered module name"
+else
+    fail "hull build: no refusal message for 'bad.name'; output:"
+    sed 's/^/    /' /tmp/badname_build.log | head -10
+fi
+rm -rf "compute/bad.name" badname_app
+
 # ── Result summary ──────────────────────────────────────────────────
 
 echo ""

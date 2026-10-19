@@ -69,12 +69,27 @@ end
 -- A module is `<app_dir>/compute/<name>/<name>.c`. The convention is
 -- documented in CLAUDE.md and `docs/wamr_architecture.md`.
 --
+-- A module name is the rule `hull compute new` enforces: letters, digits,
+-- `_` and `-`. A name discovered in a cloned app tree is held to it too: it
+-- becomes part of the paths handed to clang and wamrc (audit 18).
+function M.valid_module_name(name)
+    return type(name) == "string" and name:match("^[A-Za-z0-9_%-]+$") ~= nil
+end
+
+function M.invalid_name_message(name)
+    return "invalid compute module name '" .. tostring(name) ..
+           "' (names may contain only letters, digits, underscores and hyphens)"
+end
+
 -- @tparam string app_dir   Application directory (`.` for cwd).
 -- @treturn {[i]: {name=string, src=string, wasm=string}, ...}  Sorted by name.
+-- @treturn {[i]: string}  Directory names under compute/ holding a module
+--   source whose name is not valid (see valid_module_name). Sorted.
 function M.discover_modules(app_dir)
     local compute_dir = (app_dir or ".") .. "/compute"
     local modules = {}
-    if not tool.file_exists(compute_dir) then return modules end
+    local invalid = {}
+    if not tool.file_exists(compute_dir) then return modules, invalid end
 
     local files = tool.find_files(compute_dir, "*.c")
     local seen = {}
@@ -82,7 +97,10 @@ function M.discover_modules(app_dir)
         -- path is like compute/<name>/<name>.c
         local rel = path:sub(#(app_dir or ".") + 2)
         local name = rel:match("^compute/([^/]+)/([^/]+)%.c$")
-        if name and not seen[name] then
+        if name and not seen[name] and not M.valid_module_name(name) then
+            seen[name] = true
+            invalid[#invalid + 1] = name
+        elseif name and not seen[name] then
             seen[name] = true
             modules[#modules + 1] = {
                 name = name,
@@ -94,7 +112,8 @@ function M.discover_modules(app_dir)
 
     -- Stable ordering (helps reproducible builds + readable logs).
     table.sort(modules, function(a, b) return a.name < b.name end)
-    return modules
+    table.sort(invalid)
+    return modules, invalid
 end
 
 --- Is the WASM artifact stale relative to its source?
@@ -476,7 +495,7 @@ M._preprocessed_directive = preprocessed_directive
 --                 }
 function M.build_all(app_dir, mode)
     mode = mode or "stale"
-    local modules = M.discover_modules(app_dir)
+    local modules, invalid = M.discover_modules(app_dir)
     local result = {
         modules  = modules,
         built    = {},
@@ -484,6 +503,15 @@ function M.build_all(app_dir, mode)
         errors   = {},
         no_clang = false,
     }
+    -- A source under a name the rule refuses is an error, never compiled.
+    if #invalid > 0 then
+        for _, name in ipairs(invalid) do
+            result.errors[#result.errors + 1] = {
+                name = name, err = M.invalid_name_message(name),
+            }
+        end
+        return result
+    end
     if #modules == 0 then return result end
 
     -- Determine the list to actually compile.

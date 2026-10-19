@@ -119,6 +119,54 @@ else
 fi
 rm -rf "$TMPDIR_API"
 
+# ── /routes answers from the live app (audit 18) ───────────────────────
+#
+# The app registers a route named after the time its top level ran and
+# reports that name at /stamp. /routes must list exactly that route: a
+# fresh app context (the old behaviour) re-ran the top level later and
+# listed a different one.
+
+echo ""
+echo "--- agent-api: /routes reuses the live app context ---"
+
+PORT_LIVE=39897
+TMPDIR_LIVE=$(mktemp -d)
+cat > "$TMPDIR_LIVE/app.lua" <<'LUAEOF'
+local time = require("hull.time")
+app.manifest({ modules = { "hull/http-server@1", "hull/time@1" } })
+local stamp = "/r" .. tostring(time.now_ms())
+app.get("/health", function(_req, res) res:text("ok") end)
+app.get("/stamp", function(_req, res) res:text(stamp) end)
+app.get(stamp, function(_req, res) res:text("ok") end)
+LUAEOF
+cat > "$TMPDIR_LIVE/app.js" <<'JSEOF'
+import { app } from "hull:app";
+import { time } from "hull:time";
+app.manifest({ modules: ["hull/http-server@1", "hull/time@1"] });
+const stamp = "/r" + String(time.nowMs());
+app.get("/health", (_req, res) => res.text("ok"));
+app.get("/stamp", (_req, res) => res.text(stamp));
+app.get(stamp, (_req, res) => res.text("ok"));
+JSEOF
+
+$HULL -p "$PORT_LIVE" --no-db --agent-api "$TMPDIR_LIVE/app.$APP_EXT" >/dev/null 2>&1 &
+SERVER_PID=$!
+
+if ! wait_for_server "$PORT_LIVE"; then
+    fail "agent-api live - server startup"
+    stop_server
+else
+    sleep 0.2
+    STAMP=$(curl -s "http://127.0.0.1:$PORT_LIVE/stamp")
+    OUT=$(curl -s "http://127.0.0.1:$PORT_LIVE/_hull/agent/routes")
+    case "$STAMP" in
+        /r[0-9]*) check_contains "api routes lists the live app's routes" "$OUT" "\"pattern\":\"$STAMP\"" ;;
+        *)        fail "agent-api live - /stamp returned '$STAMP'" ;;
+    esac
+    stop_server
+fi
+rm -rf "$TMPDIR_LIVE"
+
 # ── Without --agent-api flag ────────────────────────────────────────────
 
 echo ""

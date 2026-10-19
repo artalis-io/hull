@@ -345,6 +345,23 @@ static int try_candidate(const char *dir, size_t dlen, char sep,
     return 1;
 }
 
+int hl_host_is_batch_file(const char *path)
+{
+    if (!path || !hl_host_is_windows()) return 0;
+    size_t len = strlen(path);
+    /* Windows drops trailing dots and spaces from a file name, so
+     * "x.bat. " opens x.bat. */
+    while (len > 0 && (path[len - 1] == '.' || path[len - 1] == ' ')) len--;
+    if (len < 4 || path[len - 4] != '.') return 0;
+    char ext[4];
+    for (int i = 0; i < 3; i++) {
+        char c = path[len - 3 + i];
+        ext[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    ext[3] = '\0';
+    return strcmp(ext, "bat") == 0 || strcmp(ext, "cmd") == 0;
+}
+
 int hl_host_find_in_path(const char *name, char *out, size_t out_sz)
 {
     return hl_host_find_in_path_ex(getenv("PATH"), name, out, out_sz);
@@ -363,8 +380,12 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
 
     /* The PATHEXT forms worth probing for a toolchain binary. An entry with
      * an explicit extension already (e.g. "busybox.exe") still tries the bare
-     * form first, so an exact name always wins. */
-    static const char *win_ext[] = { "", ".exe", ".com", ".bat", ".cmd", NULL };
+     * form first, so an exact name always wins. Never ".bat" / ".cmd": a
+     * batch file runs under cmd.exe, which parses its arguments again (% and
+     * " expansion: BatBadBut), and every caller of this walker either spawns
+     * the hit or reports what a spawn would run (audit 18). */
+    if (hl_host_is_batch_file(name)) return 0;
+    static const char *win_ext[] = { "", ".exe", ".com", NULL };
     static const char *posix_ext[] = { "", NULL };
     const char **exts = win ? win_ext : posix_ext;
 

@@ -128,6 +128,10 @@ HlCompiler *hl_compiler_system_new(const char *cc_path)
 int hl_driver_resolve_name(const char *name, char *out, size_t outsz)
 {
     if (!name || !*name || !out || outsz == 0) return -1;
+    out[0] = '\0';
+    /* A Windows batch file runs under cmd.exe, which re-parses the
+     * arguments Hull passes it (audit 18). */
+    if (hl_host_is_batch_file(name)) return -1;
 
     /* Already a path: the caller named a specific file, so use it verbatim. */
     if (!strchr(name, '/') && !strchr(name, '\\')) {

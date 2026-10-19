@@ -102,15 +102,10 @@ local function is_object(v)
 end
 
 -- The hex SHA-256 a sha256sum-style manifest ("<hex>  <name>" lines) lists
--- for `name`, or nil. Same format hl_platform_sig_extract_for_arch reads.
-local function manifest_hash(manifest, name)
-    if type(manifest) ~= "string" or type(name) ~= "string" then return nil end
-    for line in manifest:gmatch("[^\n]+") do
-        local h, n = line:match("^(%x+)%s+%*?(.-)%s*$")
-        if h and n == name and #h == 64 then return h:lower() end
-    end
-    return nil
-end
+-- for `name`, or nil. Read as the runtime reads it (hl_platform_sig_extract_
+-- for_arch -> hl_release_io_find_checksum): exact lines, and a name listed
+-- twice has no entry (audit 18).
+local manifest_hash = require("hull.release_manifest").hash
 
 -- Resolve a key SOURCE to its hex pubkey. Returns nil ONLY when no source was
 -- given (the caller then legitimately skips that key check). A source that IS

@@ -18,10 +18,15 @@
 
 #include <keel/http_server.h>
 
-/* Context passed to the middleware */
+typedef struct HlAppContext HlAppContext;
+
+/* Context passed to the middleware. `app` is the server's own, live app
+ * context: /routes answers from it instead of loading the app again
+ * (audit 18). */
 typedef struct {
-    const char *app_dir;
-    const char *db_path;
+    const char   *app_dir;
+    const char   *db_path;
+    HlAppContext *app;
 } HlAgentApiCtx;
 
 /*

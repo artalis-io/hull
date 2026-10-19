@@ -143,13 +143,23 @@ int hl_host_normalize_path(const char *path, char *out, size_t out_sz);
  * `/C/a:/C/b` occur, and the second is what a Cosmopolitan APE - the only Hull
  * build that runs there - is actually handed. Each hit is composed with the
  * separator its own PATH component uses, so a POSIX-shaped entry stays
- * POSIX-shaped. On Windows the ".exe" / ".com" / ".bat" / ".cmd" forms are
- * tried too (the PATHEXT entries that matter for a toolchain probe). Writes
- * the resolved absolute-ish path to @p out.
+ * POSIX-shaped. On Windows the ".exe" / ".com" forms are tried too; a batch
+ * file (".bat" / ".cmd") is never a hit, since cmd.exe re-parses its
+ * arguments (audit 18). Writes the resolved absolute-ish path to @p out.
  *
  * @returns 1 when found, 0 otherwise.
  */
 int hl_host_find_in_path(const char *name, char *out, size_t out_sz);
+
+/**
+ * @brief 1 when @p path names a Windows batch file (".bat" / ".cmd", any
+ *        case, trailing dots and spaces ignored) and this host is Windows.
+ *
+ * Running one goes through cmd.exe, which parses the command line a second
+ * time (% expansion, quote handling), so no spawn takes one (audit 18).
+ * Always 0 off Windows.
+ */
+int hl_host_is_batch_file(const char *path);
 
 /**
  * @brief Reduce a toolchain invocation to the tool's NAME.

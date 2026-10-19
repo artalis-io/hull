@@ -199,4 +199,30 @@ do
         "plain text is not refused")
 end
 
+-- ── discovered module names follow the `compute new` rule (audit 18) ─
+do
+    local tree = {
+        "/app/compute/good_mod-1/good_mod-1.c",
+        "/app/compute/bad.name/bad.name.c",
+        "/app/compute/sp ace/sp ace.c",
+        "/app/compute/a$(id)/a$(id).c",
+    }
+    tool.file_exists = function(p) return p == "/app/compute" end
+    tool.find_files = function() return tree end
+    local mods, invalid = cb.discover_modules("/app")
+    ok(#mods == 1 and mods[1].name == "good_mod-1", "a valid name is discovered")
+    ok(#invalid == 3 and invalid[1] == "a$(id)" and invalid[2] == "bad.name"
+        and invalid[3] == "sp ace", "invalid names are reported, not discovered")
+    ok(cb.valid_module_name("Ab_9-z") and not cb.valid_module_name("")
+        and not cb.valid_module_name("a/b") and not cb.valid_module_name(".."),
+        "valid_module_name")
+
+    -- build_all compiles nothing when an invalid name is present.
+    spawned = {}
+    local r = cb.build_all("/app", "force")
+    ok(#r.errors == 3 and #spawned == 0, "build_all refuses, nothing spawned")
+    ok(r.errors[2].err:find("invalid compute module name 'bad.name'", 1, true) ~= nil,
+        "the refusal names the module")
+end
+
 return { pass = pass, fail = fail }

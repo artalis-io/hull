@@ -530,10 +530,11 @@ static int cosmo_spawn_wait(const char *const argv[], const char *const envadd[]
  * posix_spawnp, and a shell running "$0") takes an empty entry or "." as the
  * working directory - usually the app directory - so a repo shipping `nm` or
  * `clang` ran it during `hull build` for anyone whose PATH held one (audit
- * 17). A miss is -1: nothing is run. */
+ * 17). A miss is -1: nothing is run. A Windows batch file is refused, named
+ * or found: cmd.exe would re-parse its arguments (audit 18). */
 static int tool_exec_path(const char *name, char *out, size_t outsz)
 {
-    if (!name || !*name) return -1;
+    if (!name || !*name || hl_host_is_batch_file(name)) return -1;
     if (strchr(name, '/') || strchr(name, '\\')) {
         int n = snprintf(out, outsz, "%s", name);
         return (n > 0 && (size_t)n < outsz) ? 0 : -1;
@@ -646,6 +647,7 @@ int hl_tool_spawn_env(const char *const argv[], const char *const envadd[])
     return spawn_and_wait(argv, envadd);
 }
 
+#ifdef __COSMOPOLITAN__
 /* Is @p base one of the accepted shell basenames? */
 static int is_shell_basename(const char *base)
 {
@@ -661,7 +663,9 @@ static int is_shell_basename(const char *base)
  * TMPDIR/TMP/TEMP itself (a forward-slash path passed as a positional, then
  * shift'd off) - a cosmo hull's setenv does not survive the exec to native
  * busybox as forward-slash, so busybox must set it in its own env (§0.6).
- * Shared by the exec (hl_tool_spawn_driver_shell) and read (spawn_read) paths. */
+ * Shared by the cosmocc reroutes of hl_tool_spawn_env and hl_tool_spawn_read,
+ * which check the env additions first. (A public hl_tool_spawn_driver_shell,
+ * which skipped that check and had no caller, was removed in audit 18.) */
 static const char **build_shell_argv(const char *shell, const char *driver,
                                      const char *const args[],
                                      const char *tmpdir)
@@ -732,17 +736,7 @@ static const char **build_shell_argv(const char *shell, const char *driver,
     argv[i] = NULL;
     return argv;
 }
-
-int hl_tool_spawn_driver_shell(const char *shell, const char *driver,
-                               const char *const args[],
-                               const char *const envadd[])
-{
-    const char **argv = build_shell_argv(shell, driver, args, NULL);
-    if (!argv) return -1;
-    int rc = spawn_and_wait(argv, envadd);
-    free((void *)(uintptr_t)argv);
-    return rc;
-}
+#endif /* __COSMOPOLITAN__ */
 
 /* fork + pipe + read child stdout (posix_spawn on cosmo - see
  * cosmo_spawn_start). NO allowlist check (callers validate first, or route a
