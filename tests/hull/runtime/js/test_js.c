@@ -342,6 +342,12 @@ static int run_js_test(const char *script_path, int *pass_out, int *fail_out)
         "<reset>", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(js.ctx, reset);
 
+    /* A script is a whole suite in one uninterrupted run, not one entry, so
+     * the run watchdog's per-run deadline (60 s) does not apply to it: under
+     * MSan the audit-16 suites run past it. Off for the script (and the runs
+     * nested in it), any deadline already armed cleared. */
+    hl_run_watchdog_configure(0);
+    hl_run_watch_disarm(&js.run_watch);
     JSValue val = JS_Eval(js.ctx, buf, got, script_path, JS_EVAL_TYPE_MODULE);
     int failed = JS_IsException(val);
     if (failed) hl_js_dump_error(&js);
@@ -371,6 +377,7 @@ static int run_js_test(const char *script_path, int *pass_out, int *fail_out)
     }
 
     JS_FreeValue(js.ctx, val);
+    hl_run_watchdog_configure(-1);
     if (failed) return -1;
 
     if (eval_int("typeof globalThis.__test_pass === 'number' ? 1 : 0") != 1) {

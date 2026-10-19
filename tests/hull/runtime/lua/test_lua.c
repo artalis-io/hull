@@ -332,7 +332,15 @@ static int run_lua_test_in_runtime(const char *script_path, long long *pass_out,
         lua_pop(lua_rt.L, 1);
         return -1;
     }
-    if (lua_pcall(lua_rt.L, 0, 1, 0) != LUA_OK) {
+    /* A script is a whole suite in one uninterrupted run, not one entry, so
+     * the run watchdog's per-run deadline (60 s) does not apply to it: under
+     * MSan test_stdlib_audit16.lua alone runs past it. Off for the script
+     * (and the runs nested in it), any deadline already armed cleared. */
+    hl_run_watchdog_configure(0);
+    hl_run_watch_disarm(&lua_rt.run_watch);
+    rc = lua_pcall(lua_rt.L, 0, 1, 0);
+    hl_run_watchdog_configure(-1);
+    if (rc != LUA_OK) {
         fprintf(stderr, "\n%s: %s\n", script_path, lua_tostring(lua_rt.L, -1));
         lua_pop(lua_rt.L, 1);
         return -1;
