@@ -15,7 +15,6 @@
 import { etag } from "hull:web:middleware:etag";
 import { jobs } from "hull:jobs";
 import { outbox } from "hull:web:middleware:outbox";
-import { httpClient } from "hull:http-client";
 import { db as dbModule } from "hull:db";
 
 const db = dbModule.default();
@@ -159,19 +158,20 @@ await testAsync("audit 18: a wait refusal is rethrown, not counted as an attempt
     const [p0, f0] = outboxCounts();
     outbox.enqueue({ kind: "webhook", destination: "http://a18.test/refused",
                      payload: "{}", maxAttempts: 1 });
-    const real = httpClient.async.post;
-    httpClient.async.post = () => {
+    // The httpClient export is frozen (audit 18): outbox's own seam stands
+    // in for it.
+    const hooks = __testHooks("hull:web:middleware:outbox");
+    hooks.setPost(() => {
         throw new Error("http.fetch cannot run in middleware");
-    };
+    });
     let msg1 = "", msg2 = "";
     try {
         try { await outbox.flush(); } catch (e) { msg1 = String(e && e.message); }
         // The claim was given back: the next flush takes the row again at once.
         try { await outbox.flush(); } catch (e) { msg2 = String(e && e.message); }
     } finally {
-        httpClient.async.post = real;
+        hooks.setPost(null);
     }
-    assertEq(httpClient.async.post, real, "stub removed");
     assertEq(msg1.indexOf("cannot run in middleware") >= 0, true, "rethrown: " + msg1);
     assertEq(msg2.indexOf("cannot run in middleware") >= 0, true, "due again: " + msg2);
     const [p, f] = outboxCounts();

@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
 static JSValue js_json_encode(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
@@ -47,7 +48,7 @@ static int js_json_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_json_encode, "encode", 1));
     JS_SetPropertyStr(ctx, json, "decode",
                       JS_NewCFunction(ctx, js_json_decode, "decode", 1));
-    JS_SetModuleExport(ctx, m, "json", json);
+    hl_js_export_frozen(ctx, m, "json", json);
     return 0;
 }
 

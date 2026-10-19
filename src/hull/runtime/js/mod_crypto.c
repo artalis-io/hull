@@ -1266,7 +1266,7 @@ static void js_register_sha256_hasher_class(JSContext *ctx)
         JS_NewCFunction(ctx, js_sha256_hasher_update, "update", 1));
     JS_SetPropertyStr(ctx, proto, "digest",
         JS_NewCFunction(ctx, js_sha256_hasher_digest, "digest", 0));
-    JS_SetClassProto(ctx, hl_js_sha256_hasher_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, hl_js_sha256_hasher_class_id, proto);
 }
 
 /* ── Keys held in C ─────────────────────────────────────────────────── *
@@ -1459,7 +1459,7 @@ static void js_register_crypto_key_class(JSContext *ctx)
         JS_NewCFunction(ctx, js_crypto_key_destroy, "destroy", 0));
     JS_SetPropertyStr(ctx, proto, "toString",
         JS_NewCFunction(ctx, js_crypto_key_to_string, "toString", 0));
-    JS_SetClassProto(ctx, hl_js_crypto_key_class_id, proto);
+    hl_js_set_class_proto_frozen(ctx, hl_js_crypto_key_class_id, proto);
 }
 
 static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
@@ -1530,7 +1530,7 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_hmac_sha256_verify, "hmacSha256Verify", 3));
     JS_SetPropertyStr(ctx, crypto, "constantTimeEq",
                       JS_NewCFunction(ctx, js_crypto_constant_time_eq, "constantTimeEq", 2));
-    JS_SetModuleExport(ctx, m, "crypto", crypto);
+    hl_js_export_frozen(ctx, m, "crypto", crypto);
     return 0;
 }
 

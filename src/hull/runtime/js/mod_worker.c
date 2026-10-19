@@ -335,7 +335,7 @@ static int js_worker_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue worker = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, worker, "dispatch",
                       JS_NewCFunction(ctx, js_worker_dispatch, "dispatch", 2));
-    JS_SetModuleExport(ctx, m, "worker", worker);
+    hl_js_export_frozen(ctx, m, "worker", worker);
     return 0;
 }
 

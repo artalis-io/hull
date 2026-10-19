@@ -1284,7 +1284,7 @@ static int js_task_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue task = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, task, "spawn",
                       JS_NewCFunction(ctx, js_task_spawn, "spawn", 1));
-    JS_SetModuleExport(ctx, m, "_task", task);
+    hl_js_export_frozen(ctx, m, "_task", task);
     return 0;
 }
 

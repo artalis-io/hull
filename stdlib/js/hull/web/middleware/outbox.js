@@ -23,8 +23,15 @@ const db = dbModule.default();
 import { httpClient } from "hull:http-client";
 import { time } from "hull:time";
 import { json } from "hull:json";
+import { _test_hooks } from "hull:_test_hooks";
 
 let maxAttempts = 5;
+
+// The delivery call. Tests swap it through hull:_test_hooks: the httpClient
+// export is frozen (audit 18), so it can no longer be stubbed by assignment -
+// and an app could not stub it either.
+const realPost = (url, body, opts) => httpClient.async.post(url, body, opts);
+let post = realPost;
 
 /**
  * Initialize the `_hull_outbox` SQLite table. Idempotent.
@@ -151,7 +158,7 @@ async function deliverItem(item) {
             reqHeaders["Idempotency-Key"] = item.idempotency_key;
 
         try {
-            const result = await httpClient.async.post(item.destination, item.payload, {
+            const result = await post(item.destination, item.payload, {
                 headers: reqHeaders
             });
             if (result && result.status >= 200 && result.status < 300)
@@ -361,3 +368,7 @@ function cleanup(maxAge, opts) {
 
 const outbox = { init, enqueue, flush, middleware, flushIfNeeded, stats, cleanup };
 export { outbox };
+
+_test_hooks.register("hull:web:middleware:outbox", {
+    setPost(fn) { post = fn || realPost; },
+});

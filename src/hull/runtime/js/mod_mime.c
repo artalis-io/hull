@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/mime.h"
+#include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
 /* mime.sniff(bytes) -> string | null
  *
@@ -44,7 +45,7 @@ static int js_mime_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue mime = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, mime, "sniff",
                       JS_NewCFunction(ctx, js_mime_sniff, "sniff", 1));
-    JS_SetModuleExport(ctx, m, "mime", mime);
+    hl_js_export_frozen(ctx, m, "mime", mime);
     return 0;
 }
 

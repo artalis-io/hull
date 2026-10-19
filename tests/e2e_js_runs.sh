@@ -192,30 +192,27 @@ app.get("/ticks", (_req, res) => res.json({ ticks }));
 /* Audit 8 H1: an op made while a resume settles its promise - a `then`
  * getter on Object.prototype, read from db.async's row array by the
  * resolve - suspended the connection uncounted: the response went out at
- * once and the op later completed on a recycled slot. It belongs to the
- * run now, which waits for it. */
-let thenArmed = false, thenFired = 0;
-Object.defineProperty(Object.prototype, "then", { configurable: true,
-    get() { if (thenArmed) { thenArmed = false; thenFired++; hull.sleep(300); }
-            return undefined; } });
+ * once and the op later completed on a recycled slot. An inherited
+ * `remote_addr` setter likewise ran app code while `req` was built.
+ * Audit 18: the intrinsics are frozen, so neither accessor can be defined
+ * any more - the app records the refusals (/h1-refused), and the resume path
+ * itself (db.async settling a handler, beside a keep-alive client) is still
+ * exercised by /h1then. */
+const h1Refused = {};
+for (const k of ["then", "remote_addr"]) {
+    try {
+        Object.defineProperty(Object.prototype, k, { configurable: true,
+            get() { return undefined; }, set(_v) {} });
+        h1Refused[k] = false;
+    } catch (e) {
+        h1Refused[k] = e instanceof TypeError;
+    }
+}
+app.get("/h1-refused", (_req, res) => res.json(h1Refused));
 app.get("/h1then", async (_req, res) => {
     const p = conn.async.query("SELECT 1 AS one");
-    thenArmed = true;
     res.json(await p);
 });
-app.get("/h1then-fired", (_req, res) => res.json({ fired: thenFired }));
-
-/* ...and an inherited setter run while `req` is built (in middleware, before
- * the async gate was armed): `req` is built with defined properties now. */
-let setArmed = false, setFired = 0;
-Object.defineProperty(Object.prototype, "remote_addr", { configurable: true,
-    set(v) {
-        Object.defineProperty(this, "remote_addr", { value: v, writable: true,
-                                                     enumerable: true, configurable: true });
-        if (setArmed) { setArmed = false; setFired++; try { hull.sleep(1000); } catch (_e) {} }
-    } });
-app.get("/h1set-arm", (_req, res) => { setArmed = true; res.text("armed"); });
-app.get("/h1set-fired", (_req, res) => res.json({ fired: setFired }));
 
 /* Audit 8 M7: a resumed handler that opens a transaction and then waits on an
  * op made BEFORE it (no new op in that segment) was not checked: the
@@ -359,7 +356,15 @@ sleep 0.5
 out=$(curl -s -m 10 "$URL/dropgot")
 [ "$out" = after-gc ] && pass "the dropped client still receives after a GC"     || fail "the dropped client still receives after a GC" "$out"
 
-echo "=== audit 8 H1: an op made while a resume settles its promise ==="
+echo "=== audit 8 H1 / audit 18: the inherited accessors cannot be defined ==="
+# Audit 18: the intrinsics are frozen, so the Object.prototype `then` getter
+# and `remote_addr` setter the H1 legs planted are refused at load.
+out=$(curl -s -m 10 "$URL/h1-refused")
+[ "$out" = '{"then":true,"remote_addr":true}' ] \
+    && pass "Object.prototype then / remote_addr are refused" \
+    || fail "Object.prototype then / remote_addr are refused" "$out"
+
+echo "=== audit 8 H1: a resume settling its promise beside a keep-alive client ==="
 # A keep-alive client (one connection, many requests) runs meanwhile: the
 # stray op used to complete on a slot it was being served from.
 KA_URLS=""
@@ -379,29 +384,19 @@ wait $KA || true
 for i in 1 2 3; do
     out=$(cat "$TMPDIR/ht.$i")
     body=${out%% *}
-    t=$(printf '%s' "$out" | awk '{print $3}')
-    if [ "$body" = '[{"one":1}]' ] && awk "BEGIN{exit !($t >= 0.28)}"; then
-        pass "/h1then #$i answered after the op its resolve started (${t}s)"
+    code=$(printf '%s' "$out" | awk '{print $2}')
+    if [ "$body" = '[{"one":1}]' ] && [ "$code" = 200 ]; then
+        pass "/h1then #$i answered with its own rows"
     else
-        fail "/h1then #$i answered after the op its resolve started" "$out"
+        fail "/h1then #$i answered with its own rows" "$out"
     fi
 done
-out=$(curl -s -m 10 "$URL/h1then-fired")
-[ "$out" = '{"fired":3}' ] && pass "the getter ran in each resume" || fail "the getter ran in each resume" "$out"
 nka=$(grep -o fast "$TMPDIR/ka.out" | wc -l | tr -d ' ')
 [ "$nka" = 40 ] && pass "the keep-alive client got all 40 of its own responses" \
     || fail "the keep-alive client got its own responses" "$nka: $(cat "$TMPDIR/ka.out")"
 sleep 0.4
 out=$(curl -s -m 10 "$URL/fast")
 [ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
-
-echo "=== audit 8 H1: an inherited setter while req is built ==="
-curl -s -m 10 -o /dev/null "$URL/h1set-arm"
-code=$(curl -s -m 10 -o "$TMPDIR/h1set" -w '%{http_code}' "$URL/fast")
-[ "$code" = 200 ] && [ "$(cat "$TMPDIR/h1set")" = fast ] \
-    && pass "the next request is served" || fail "the next request is served" "$code"
-out=$(curl -s -m 10 "$URL/h1set-fired")
-[ "$out" = '{"fired":0}' ] && pass "building req ran no setter" || fail "building req ran no setter" "$out"
 
 echo "=== audit 8 M7: waiting, in a transaction, on an op made before it ==="
 before=$(grep -c "waited while a transaction was open" "$TMPDIR/log" || true)

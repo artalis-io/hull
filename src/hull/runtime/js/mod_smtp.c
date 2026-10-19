@@ -371,7 +371,7 @@ static int js_smtp_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue smtp = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, smtp, "send",
                       JS_NewCFunction(ctx, js_smtp_send, "send", 1));
-    JS_SetModuleExport(ctx, m, "smtp", smtp);
+    hl_js_export_frozen(ctx, m, "smtp", smtp);
     return 0;
 }
 

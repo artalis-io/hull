@@ -534,13 +534,15 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
             const HlEntry *e = hl_vfs_find(js->base.platform_vfs, module_name);
             if (e) {
                 /* QuickJS lexer requires a '\0' sentinel after the
-                 * source buffer; xxd arrays lack one, so copy. */
-                char *src = js_malloc(ctx, (size_t)e->len + 1);
+                 * source buffer; xxd arrays lack one, so copy. The copy also
+                 * carries the export-freezing footer (audit 18). */
+                size_t flen = 0;
+                char *src = hl_js_stdlib_source_frozen(ctx, module_name,
+                                                       (const char *)e->data,
+                                                       (size_t)e->len, &flen);
                 if (!src) return NULL;
-                memcpy(src, e->data, e->len);
-                src[e->len] = '\0';
                 JSValue func = hl_js_compile_module_cached(
-                    ctx, src, e->len, module_name);
+                    ctx, src, flen, module_name);
                 js_free(ctx, src);
                 if (JS_IsException(func))
                     return NULL;
@@ -1121,6 +1123,18 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
 
     /* Register embedded JS stdlib modules */
     if (hl_js_register_stdlib(js) != 0) {
+        hl_js_free(js);
+        return -1;
+    }
+
+    /* Freeze the standard intrinsics and lock the standard globals - after
+     * every Hull module/global is registered and before ANY app code runs
+     * (audit 18). The JS stdlib has no private environment the way the Lua
+     * one does, so without this an app could patch a shared intrinsic
+     * (%ArrayIteratorPrototype%.next, Array.prototype.join, a replaced
+     * globalThis.JSON) and observe or steer values the stdlib builds from
+     * private data - which databases.internal did not stop. */
+    if (hl_js_harden_intrinsics(js->ctx) != 0) {
         hl_js_free(js);
         return -1;
     }

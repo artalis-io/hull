@@ -8236,13 +8236,19 @@ UTEST(js_audit6, manifest_fields_are_read_as_own_properties)
     EXPECT_EQ(a5_module_named("<test>",
         "import { app } from 'hull:app';\n"
         "app.manifest({ fs: [], databases: [], kv: [], cors: [], env: ['A'] });\n"
-        "Array.prototype.write = ['.'];\n"
-        "Array.prototype.read = ['/'];\n"
-        "Array.prototype.origins = ['*'];\n"
-        "Array.prototype.dynamic = { schemes: ['sqlite'], hosts: ['*'] };\n"
-        "Array.prototype.named = { x: ':memory:' };\n"
-        "Object.prototype.hosts = ['*'];\n", &msg), 0);
+        /* Since audit 18 the prototypes are frozen: every pollution is
+         * refused, and the extractor's own-property reads still hold. */
+        "let refused = 0;\n"
+        "const tryit = (f) => { try { f(); } catch (e) { if (e instanceof TypeError) refused++; } };\n"
+        "tryit(() => { Array.prototype.write = ['.']; });\n"
+        "tryit(() => { Array.prototype.read = ['/']; });\n"
+        "tryit(() => { Array.prototype.origins = ['*']; });\n"
+        "tryit(() => { Array.prototype.dynamic = { schemes: ['sqlite'], hosts: ['*'] }; });\n"
+        "tryit(() => { Array.prototype.named = { x: ':memory:' }; });\n"
+        "tryit(() => { Object.prototype.hosts = ['*']; });\n"
+        "globalThis.__a6_refused = refused;\n", &msg), 0);
     free(msg);
+    EXPECT_EQ(eval_int("globalThis.__a6_refused"), 6);
     HlManifest m;
     ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
     EXPECT_EQ(m.fs_read_count, 0);
@@ -8255,12 +8261,6 @@ UTEST(js_audit6, manifest_fields_are_read_as_own_properties)
     EXPECT_EQ(m.kv.dynamic.declared, 0);
     EXPECT_EQ(m.env_count, 1);
     hl_manifest_free(&m);
-    static const char undo[] =
-        "delete Array.prototype.write; delete Array.prototype.read;"
-        "delete Array.prototype.origins; delete Array.prototype.dynamic;"
-        "delete Array.prototype.named; delete Object.prototype.hosts;";
-    JS_FreeValue(js.ctx, JS_Eval(js.ctx, undo, sizeof undo - 1, "<c>",
-                                 JS_EVAL_TYPE_GLOBAL));
     cleanup_js();
 }
 
@@ -8272,10 +8272,10 @@ UTEST(js_audit6, an_array_manifest_is_refused)
     char *msg = NULL;
     EXPECT_EQ(a5_module_named("<test>",
         "import { app } from 'hull:app';\n"
-        "Array.prototype.hosts = ['*'];\n"
         "let r = 0;\n"
-        "try { app.manifest([]); } catch (e) { r = e instanceof TypeError ? 1 : 2; }\n"
-        "delete Array.prototype.hosts;\n"
+        /* Frozen since audit 18; the array manifest is refused regardless. */
+        "try { Array.prototype.hosts = ['*']; r = 8; } catch (e) {}\n"
+        "try { app.manifest([]); } catch (e) { r |= e instanceof TypeError ? 1 : 2; }\n"
         "globalThis.__a6 = r;\n", &msg), 0);
     free(msg);
     EXPECT_EQ(eval_int("globalThis.__a6"), 1);
@@ -8801,14 +8801,17 @@ UTEST(js_audit8, building_req_runs_no_inherited_setter)
     int id = eval_int("globalThis.__hull_internals.__hull_middleware["
                       "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
     /* Armed after registration: only the request build can reach them. */
+    /* Since audit 18 Object.prototype is frozen: each setter is refused (9
+     * of 9), and the request build still defines rather than sets. */
     char *m = eval_str(
         "globalThis.__a8_set = 0;\n"
+        "let refused = 0;\n"
         "for (const k of ['method', 'path', 'query', 'params', 'headers',\n"
         "                 'body', 'ctx', 'header', 'remote_addr'])\n"
-        "  Object.defineProperty(Object.prototype, k, { configurable: true,\n"
-        "    set(v) { globalThis.__a8_set++; } });\n"
-        "'ok'");
-    EXPECT_TRUE(m && strcmp(m, "ok") == 0);
+        "  try { Object.defineProperty(Object.prototype, k, { configurable: true,\n"
+        "    set(v) { globalThis.__a8_set++; } }); } catch (e) { refused++; }\n"
+        "String(refused)");
+    EXPECT_TRUE(m && strcmp(m, "9") == 0);
     free(m);
     KlHttpRequest req = {0};
     KlHttpResponse res = {0};
@@ -11375,18 +11378,19 @@ UTEST(js_audit12, polluted_object_prototype_does_not_reach_fetch_opts)
     a12_eval_app(
         "import { httpClient as http } from 'hull:http-client';\n"
         "globalThis.__hits = 0;\n"
+        /* Frozen since audit 18: each accessor is refused (3 of 3). */
+        "globalThis.__refused = 0;\n"
         "for (const k of ['body', 'headers', 'timeoutMs'])\n"
-        "  Object.defineProperty(Object.prototype, k, { configurable: true,\n"
+        "  try { Object.defineProperty(Object.prototype, k, { configurable: true,\n"
         "    get() { globalThis.__hits++; return k === 'timeoutMs' ? -1 : {}; },\n"
-        "    set(v) { globalThis.__hits++; } });\n"
+        "    set(v) { globalThis.__hits++; } }); } catch (e) { globalThis.__refused++; }\n"
         "let msgs = [];\n"
         "for (const f of [() => http.async.post('http://x.invalid/', 'b'),\n"
         "                 () => http.async.put('http://x.invalid/'),\n"
         "                 () => http.async.patch('http://x.invalid/', 'b')])\n"
         "  try { f(); msgs.push('none'); } catch (e) { msgs.push(String(e.message)); }\n"
-        "for (const k of ['body', 'headers', 'timeoutMs'])\n"
-        "  delete Object.prototype[k];\n"
         "globalThis.__msgs = msgs;\n");
+    EXPECT_EQ(eval_int("globalThis.__refused"), 3);
     /* No inherited accessor ran: not while building opts, nor when fetch
      * read them back (a timeoutMs of -1 would have been refused). */
     EXPECT_EQ(eval_int("globalThis.__hits"), 0);
@@ -11471,11 +11475,14 @@ UTEST(js_audit16, registration_ignores_prototype_setters)
         "const grab = (k) => ({ configurable: true,\n"
         "  get() { globalThis.r = this; return undefined; },\n"
         "  set(v) { globalThis.r = this; } });\n"
-        "for (const i of ['0', '1', '2'])\n"
-        "  Object.defineProperty(Array.prototype, i, grab(i));\n"
+        /* Frozen since audit 18: all 8 accessors are refused. */
+        "globalThis.__refused = 0;\n"
+        "const def = (o, k) => { try { Object.defineProperty(o, k, grab(k)); }\n"
+        "  catch (e) { globalThis.__refused++; } };\n"
+        "for (const i of ['0', '1', '2']) def(Array.prototype, i);\n"
         "for (const k of ['method', 'pattern', 'handler_id', 'multipart',\n"
         "                 'on_open_id'])\n"
-        "  Object.defineProperty(Object.prototype, k, grab(k));\n"
+        "  def(Object.prototype, k);\n"
         "app.get('/a', (req, res) => res.text('a'));\n"
         "app.use('*', '/*', (req, res) => 0);\n"
         "app.post('/b', (req, res) => res.text('b'));\n";
@@ -11512,6 +11519,7 @@ UTEST(js_audit16, registration_ignores_prototype_setters)
         "  const o = Object.getOwnPropertyDescriptor(d, '0').value;\n"
         "  return ('multipart' in o) ? 0 : 1; })()"), 1);
     EXPECT_EQ(eval_int("typeof globalThis.r === 'undefined' ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("globalThis.__refused"), 8);
     cleanup_js();
 }
 
@@ -11606,6 +11614,343 @@ UTEST(js_audit17, imports_and_templates_read_disk_only_in_development)
 
     cleanup_js();
     a17_cleanup(dir);
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+ * audit 18: the JS stdlib shares its intrinsics with app code.
+ *
+ * The Lua stdlib runs in a private environment; the JS stdlib had none, so an
+ * app that patched a shared intrinsic observed or steered values the stdlib
+ * built from private data - a leak databases.internal did not stop, because it
+ * was in-process, not in the SQL text. These cases drive the attack through a
+ * real stdlib path and read what leaked. They are regression tests for
+ * hl_js_harden_intrinsics: before it, each attack succeeded; after it, the
+ * mutation throws or has no effect and nothing private is observed.
+ * ─────────────────────────────────────────────────────────────────────── */
+
+/* Eval a module, drain its jobs, and return whether it loaded cleanly (0) or
+ * threw / rejected (-1). The attack cases below read their result from a
+ * globalThis flag the module sets. */
+static int a18_module(const char *code)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<a18>",
+                          JS_EVAL_TYPE_MODULE);
+    int bad = JS_IsException(val);
+    if (bad) {
+        JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    } else {
+        hl_js_run_jobs(&js);
+        if (JS_IsObject(val) &&
+            JS_PromiseState(js.ctx, val) == JS_PROMISE_REJECTED)
+            bad = 1;
+    }
+    JS_FreeValue(js.ctx, val);
+    return bad ? -1 : 0;
+}
+
+/* (a) A patched Array.prototype.join alters the SQL the stdlib builds. jobs.enqueue
+ * assembles its INSERT column list with `cols.join(", ")`; a global patch sees
+ * (and could rewrite) that internal array. After the fix the assignment throws. */
+UTEST(js_audit18_intrinsics, array_join_cannot_alter_stdlib_sql)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { jobs } from 'hull:jobs';\n"
+        "const orig = Array.prototype.join;\n"
+        "Array.prototype.join = function (sep) {\n"
+        "  const s = orig.call(this, sep);\n"
+        "  if (typeof s === 'string' && s.indexOf('queue') >= 0 &&\n"
+        "      s.indexOf('dedup_key') >= 0) globalThis.__a18_join = s;\n"
+        "  return s;\n"
+        "};\n"
+        "jobs.init();\n"
+        "jobs.enqueue('t', { x: 1 });\n");
+    /* After the fix: the module throws at the frozen-prototype assignment, so
+     * it never reaches enqueue and nothing is captured. */
+    EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_join === 'undefined' ? 1 : 0"), 1);
+    /* The real join still works for ordinary code. */
+    EXPECT_EQ(eval_int("[1,2,3].join('-') === '1-2-3' ? 1 : 0"), 1);
+    cleanup_js_caps();
+}
+
+/* (b) A patched array-iterator next captures a value the stdlib destructures
+ * from private data. totp.decryptSecret does
+ * `const [value, err, version] = sealbox.open(...)`, so %ArrayIteratorPrototype%.next
+ * sees the decrypted 20-byte TOTP secret. After the fix the patch throws. */
+UTEST(js_audit18_intrinsics, array_iterator_cannot_capture_a_destructured_secret)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "const H = __testHooks('hull:web:middleware:totp');\n"
+        "const ap = Object.getPrototypeOf([][Symbol.iterator]());\n"
+        "const nextOrig = ap.next;\n"
+        "let leak = null;\n"
+        "ap.next = function () {\n"
+        "  const r = nextOrig.call(this);\n"
+        "  if (!r.done && typeof r.value === 'string' && r.value.length === 20 &&\n"
+        "      leak === null) leak = r.value;\n"
+        "  return r;\n"
+        "};\n"
+        "H.reset();\n"
+        "totp.init({ issuer: 'T', encryptionKey: 'k'.repeat(32) });\n"
+        "const r = totp.enroll('u1');\n"
+        "const secret = H.base32Decode(r.secretBase32);\n"
+        "const step = H.currentStep();\n"
+        "totp.confirm('u1', H.totpAtStep(secret, step, 6));\n"
+        "totp.verify('u1', H.totpAtStep(secret, step + 1, 6));\n"
+        "globalThis.__a18_leaked = (leak !== null && leak === secret) ? 1 : 0;\n");
+    EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("globalThis.__a18_leaked | 0"), 0);
+    /* Ordinary destructuring still works. */
+    EXPECT_EQ(eval_int("(() => { const [a, b] = [7, 8]; return a + b; })()"), 15);
+    cleanup_js_caps();
+}
+
+/* (c) Promise.prototype.then could be replaced, but before the fix no
+ * stdlib-internal call went through the replacement on jobs.await's path:
+ * QuickJS's native `await` on a native promise does not look `then` up, and
+ * the row jobs.await resolves with is its public result. Defence in depth:
+ * the replacement now throws, so no future stdlib path can depend on it. */
+UTEST(js_audit18_intrinsics, promise_then_cannot_observe_internal_rows)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { jobs } from 'hull:jobs';\n"
+        "let seen = 0;\n"
+        "const thenOrig = Promise.prototype.then;\n"
+        "Promise.prototype.then = function (a, b) {\n"
+        "  seen++;\n"
+        "  return thenOrig.call(this, a, b);\n"
+        "};\n"
+        "jobs.init();\n"
+        "const id = jobs.enqueue('t', { x: 1 });\n"
+        "globalThis.__a18_then = jobs.await(id, { timeout: 0.05 }).then(\n"
+        "  () => { globalThis.__a18_then_seen = seen; return 1; },\n"
+        "  () => { globalThis.__a18_then_seen = seen; return 1; });\n");
+    EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_then === 'undefined' ? 1 : 0"), 1);
+    cleanup_js_caps();
+}
+
+/* (d) A replaced global (globalThis.Array) is called by the stdlib. csv.encode
+ * guards its input with `Array.isArray`, resolved through the global binding;
+ * replacing the global redirects the stdlib's call. After the fix the
+ * reassignment throws. */
+UTEST(js_audit18_intrinsics, replaced_global_array_is_not_seen_by_the_stdlib)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    int rc = a18_module(
+        "import { csv } from 'hull:csv';\n"
+        "const real = Array.isArray.bind(Array);\n"
+        "globalThis.Array = { isArray: (x) => { globalThis.__a18_arr = 1; return real(x); } };\n"
+        "csv.encode([{ a: 1, b: 2 }], { headers: true });\n");
+    EXPECT_EQ(rc, -1);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_arr === 'undefined' ? 1 : 0"), 1);
+    /* csv still works. */
+    char *out = eval_str(
+        "(() => { try { return 'ok'; } catch (e) { return String(e); } })()");
+    EXPECT_TRUE(out && strcmp(out, "ok") == 0);
+    free(out);
+    cleanup_js();
+}
+
+/* Every reachable standard intrinsic is frozen, and the standard globals are
+ * non-writable + non-configurable. */
+UTEST(js_audit18_intrinsics, intrinsics_are_frozen_and_globals_locked)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "(() => {\n"
+        "  const protos = [Object.prototype, Array.prototype, Object.getPrototypeOf(Object),\n"
+        "    String.prototype, Number.prototype, Boolean.prototype,\n"
+        "    RegExp.prototype, Error.prototype, TypeError.prototype,\n"
+        "    Promise.prototype, Map.prototype, Set.prototype, Date.prototype,\n"
+        "    Object.getPrototypeOf([][Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())),\n"
+        "    Object.getPrototypeOf(''[Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(new Map()[Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(new Set()[Symbol.iterator]()),\n"
+        "    Object.getPrototypeOf(function* () {}),\n"
+        "    Object.getPrototypeOf(async function () {}),\n"
+        "    Object.getPrototypeOf(Int8Array), Int8Array.prototype,\n"
+        "    JSON, Math, Reflect];\n"
+        "  for (const p of protos) if (p && !Object.isFrozen(p)) return 0;\n"
+        "  return 1;\n"
+        "})()"), 1);
+    /* Globals are non-writable and non-configurable. */
+    EXPECT_EQ(eval_int(
+        "(() => {\n"
+        "  for (const n of ['Object','Array','JSON','Promise','Math','String',\n"
+        "      'Reflect','parseInt','encodeURIComponent','globalThis']) {\n"
+        "    const d = Object.getOwnPropertyDescriptor(globalThis, n);\n"
+        "    if (!d || d.configurable) return 0;\n"
+        "    if ('value' in d && d.writable) return 0;\n"
+        "  }\n"
+        "  return 1;\n"
+        "})()"), 1);
+    /* globalThis itself is NOT frozen - apps still define globals. */
+    EXPECT_EQ(eval_int(
+        "(() => { globalThis.__a18_app_global = 42;\n"
+        "  return globalThis.__a18_app_global === 42 ? 1 : 0; })()"), 1);
+    cleanup_js();
+}
+
+/* The override-mistake enablement: a subclass constructor assigns name/message,
+ * and an instance overrides toString, both against frozen prototypes; assigning
+ * to the prototype itself throws. */
+UTEST(js_audit18_intrinsics, override_mistake_is_enabled)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "(() => {\n"
+        "  class X extends Error { constructor() { super('boom'); this.name = 'X'; } }\n"
+        "  const e = new X();\n"
+        "  if (e.name !== 'X' || e.message !== 'boom') return 0;\n"
+        "  const o = {}; o.toString = () => 'custom';\n"
+        "  if (o.toString() !== 'custom') return 0;\n"
+        "  function Foo() {} Foo.prototype.toString = () => 'foo';\n"
+        "  if (new Foo().toString() !== 'foo') return 0;\n"
+        "  const f = Object.assign(() => 1, { toString: () => 'f' });\n"
+        "  if (String(f) !== 'f') return 0;\n"
+        "  class E2 extends TypeError { constructor() { super('m'); this.name = 'E2'; } }\n"
+        "  if (new E2().name !== 'E2') return 0;\n"
+        "  if (({}).toString() !== '[object Object]') return 0;\n"
+        "  return 1;\n"
+        "})()"), 1);
+    /* Assigning to the prototype itself throws. */
+    EXPECT_EQ(eval_int(
+        "(() => { try { Object.prototype.toString = () => 'x'; return 0; }\n"
+        "  catch (e) { return e instanceof TypeError ? 1 : 0; } })()"), 1);
+    cleanup_js();
+}
+
+/* A native module's export object is shared by app code and the stdlib that
+ * imports the same module: an app that replaced crypto.random would run inside
+ * totp.enroll's secret generation. The exports are frozen when created. */
+UTEST(js_audit18_intrinsics, native_module_exports_are_frozen)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { crypto } from 'hull:crypto';\n"
+        "import { db } from 'hull:db';\n"
+        "import { json } from 'hull:json';\n"
+        "let r = 0;\n"
+        "try { crypto.random = () => 'x'; } catch (e) { if (e instanceof TypeError) r |= 1; }\n"
+        "try { db.default = () => null; } catch (e) { if (e instanceof TypeError) r |= 2; }\n"
+        "try { json.encode = () => ''; } catch (e) { if (e instanceof TypeError) r |= 4; }\n"
+        "if (Object.isFrozen(crypto) && Object.isFrozen(db) && Object.isFrozen(json)) r |= 8;\n"
+        "if (typeof crypto.random(4) === 'object') r |= 16;\n"
+        "globalThis.__a18_exp = r;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a18_exp"), 31);
+    cleanup_js_caps();
+}
+
+/* A stdlib JS module's export object is shared the same way: totp calls
+ * sealbox.open(keyring(), ...) through hull:crypto:sealbox's exported object,
+ * so an app that replaced sealbox.open received the keyring. The loader
+ * freezes every embedded stdlib module's exports at the end of its body. */
+UTEST(js_audit18_intrinsics, stdlib_module_exports_are_frozen)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { sealbox } from 'hull:crypto:sealbox';\n"
+        "import { jobs } from 'hull:jobs';\n"
+        "let r = 0;\n"
+        "try { sealbox.open = () => [null, 'x']; } catch (e) { if (e instanceof TypeError) r |= 1; }\n"
+        "try { jobs.enqueue = () => 0; } catch (e) { if (e instanceof TypeError) r |= 2; }\n"
+        "if (Object.isFrozen(sealbox) && Object.isFrozen(jobs)) r |= 4;\n"
+        "if (typeof sealbox.open === 'function') r |= 8;\n"
+        "globalThis.__a18_sexp = r;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a18_sexp"), 15);
+    cleanup_js_caps();
+}
+
+/* Hull's own globals are locked and frozen with the standard ones: the
+ * stdlib awaits the bare `hull.sleep` (retry.run, jobs.await), so an app that
+ * replaced it - or the whole `hull` / `console` binding - ran inside the
+ * stdlib's calls. The stdlib still reaches the real hull.sleep. */
+UTEST(js_audit18_intrinsics, hull_globals_are_locked)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { retry } from 'hull:retry';\n"
+        "const realSleep = hull.sleep;\n"
+        "const fake = () => { globalThis.__a18_fake = 1; return Promise.resolve(); };\n"
+        "let r = 0;\n"
+        "try { hull.sleep = fake; } catch (e) { if (e instanceof TypeError) r |= 1; }\n"
+        "try { globalThis.hull = { sleep: fake, map: fake }; } catch (e) { if (e instanceof TypeError) r |= 2; }\n"
+        "try { globalThis.console = { log: fake }; } catch (e) { if (e instanceof TypeError) r |= 4; }\n"
+        "try { delete globalThis.hull; } catch (e) { if (e instanceof TypeError) r |= 8; }\n"
+        "if (Object.isFrozen(hull) && Object.isFrozen(console) &&\n"
+        "    hull.sleep === realSleep) r |= 16;\n"
+        "globalThis.__a18_hg = r;\n"
+        /* One failed attempt, then the stdlib's own `await hull.sleep(...)`. */
+        "let n = 0;\n"
+        "retry.run(() => { n++; if (n === 1) throw new Error('x'); return 1; },\n"
+        "          { maxAttempts: 2, baseMs: 1, jitter: 0 }).catch(() => {});\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a18_hg"), 31);
+    EXPECT_EQ(eval_int("typeof globalThis.__a18_fake === 'undefined' ? 1 : 0"), 1);
+    cleanup_js_caps();
+}
+
+/* Hardening fails closed: an object it cannot freeze fails the call (and so
+ * init), never leaves the object mutable with init succeeding. */
+UTEST(js_audit18_intrinsics, harden_fails_closed)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    ASSERT_TRUE(rt != NULL);
+    JSContext *ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    static const char plant[] =
+        "globalThis.unfreezable = new Proxy({}, { preventExtensions() { return false; } });";
+    JSValue v = JS_Eval(ctx, plant, sizeof plant - 1, "<a18>", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_FALSE(JS_IsException(v));
+    JS_FreeValue(ctx, v);
+    EXPECT_EQ(hl_js_harden_intrinsics(ctx), -1);
+    JS_FreeContext(ctx);
+
+    /* A clean context hardens. */
+    ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    EXPECT_EQ(hl_js_harden_intrinsics(ctx), 0);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+/* A worker.dispatch VM runs app functions, so it is hardened too. */
+UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
+{
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+    a7_worker_db();   /* declare hull/db, so the worker VM gets its `db` */
+    char out[512] = "(no verdict)";
+    js_worker_run(be, actx,
+        "  const r = await worker.dispatch(() => Object.isFrozen(Array.prototype) &&\n"
+        "    Object.isFrozen(Object.prototype) ? 'frozen' : 'open');\n"
+        "  check(r === 'frozen', 'worker: ' + r);\n"
+        /* The `db` global the worker hooks install is locked and frozen. */
+        "  const d = await worker.dispatch(() => {\n"
+        "    if (typeof db !== 'object') return 'no db';\n"
+        "    const g = Object.getOwnPropertyDescriptor(globalThis, 'db');\n"
+        "    return Object.isFrozen(db) && !g.writable && !g.configurable ? 'locked' : 'open';\n"
+        "  });\n"
+        "  check(d === 'locked', 'worker db: ' + d);\n",
+        out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    js_worker_close(be, actx, pool);
 }
 
 UTEST_MAIN();

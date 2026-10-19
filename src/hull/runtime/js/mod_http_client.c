@@ -722,7 +722,7 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_http_async_delete, "delete", 2));
     JS_SetPropertyStr(ctx, http, "async", async_obj);
 
-    JS_SetModuleExport(ctx, m, "httpClient", http);
+    hl_js_export_frozen(ctx, m, "httpClient", http);
     return 0;
 }
 

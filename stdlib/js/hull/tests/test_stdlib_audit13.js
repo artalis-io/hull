@@ -3,8 +3,6 @@ import { template } from "hull:template";
 import { etag } from "hull:web:middleware:etag";
 import { config } from "hull:config";
 import { encoding } from "hull:encoding";
-import { fs } from "hull:fs";
-import { env } from "hull:env";
 
 let pass = 0, fail = 0;
 function test(name, fn) {
@@ -65,20 +63,23 @@ for (const helper of ["json", "text", "html"]) {
 }
 
 test("dotenv preserves UTF-8 and rejects malformed input before applying keys", () => {
-    const read = fs.read, get = env.get, allowed = env.allowed;
+    // The env / fs exports are frozen (audit 18): config's own seam stands
+    // in for them.
+    const hooks = __testHooks("hull:config");
     try {
-        env.get = () => null;
-        env.allowed = name => name === "AUDIT_UTF8";
-        fs.read = () => encoding.bytes.toU8(encoding.utf8.encode("AUDIT_UTF8=árvíz 😀\nDENIED=bad\n")).buffer;
+        const base = { get: () => null, allowed: name => name === "AUDIT_UTF8" };
+        hooks.setIo(Object.assign({}, base, {
+            read: () => encoding.bytes.toU8(encoding.utf8.encode("AUDIT_UTF8=árvíz 😀\nDENIED=bad\n")).buffer }));
         eq(config.loadDotenv("audit.env"), 1);
         eq(config.get("AUDIT_UTF8"), "árvíz 😀");
-        fs.read = () => new Uint8Array([65, 61, 255]).buffer;
+        hooks.setIo(Object.assign({}, base, {
+            read: () => new Uint8Array([65, 61, 255]).buffer }));
         let rejected = false;
         try { config.loadDotenv("bad.env"); }
         catch (e) { rejected = /UTF-8/.test(String(e)); }
         eq(rejected, true);
         eq(config.get("AUDIT_UTF8"), "árvíz 😀");
-    } finally { fs.read = read; env.get = get; env.allowed = allowed; }
+    } finally { hooks.setIo(null); }
 });
 
 globalThis.__test_pass = pass;

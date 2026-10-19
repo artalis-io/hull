@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/time.h"
+#include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
 static JSValue js_time_now(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
@@ -63,7 +64,7 @@ static int js_time_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_time_date, "date", 0));
     JS_SetPropertyStr(ctx, time_obj, "datetime",
                       JS_NewCFunction(ctx, js_time_datetime, "datetime", 0));
-    JS_SetModuleExport(ctx, m, "time", time_obj);
+    hl_js_export_frozen(ctx, m, "time", time_obj);
     return 0;
 }
 

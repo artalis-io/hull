@@ -1948,7 +1948,7 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_gpu_async_pipeline, "pipeline", 2));
     JS_SetPropertyStr(ctx, gpu, "async", async_obj);
 
-    JS_SetModuleExport(ctx, m, "gpu", gpu);
+    hl_js_export_frozen(ctx, m, "gpu", gpu);
     return 0;
 }
 

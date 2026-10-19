@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "log.h"
+#include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
 static JSValue js_log_level(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
@@ -53,7 +54,7 @@ static int js_log_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, log, "debug",
         JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_log_level,
                              "debug", 1, JS_CFUNC_generic_magic, 3));
-    JS_SetModuleExport(ctx, m, "log", log);
+    hl_js_export_frozen(ctx, m, "log", log);
     return 0;
 }
 

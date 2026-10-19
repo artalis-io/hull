@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include <keel/http_server.h>
+#include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
 /* server.stats() -> { activeConnections, maxConnections, asyncSuspended,
  *                     listenPaused } */
@@ -43,7 +44,7 @@ static int js_server_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue server = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, server, "stats",
                       JS_NewCFunction(ctx, js_server_stats, "stats", 0));
-    JS_SetModuleExport(ctx, m, "httpServer", server);
+    hl_js_export_frozen(ctx, m, "httpServer", server);
     return 0;
 }
 

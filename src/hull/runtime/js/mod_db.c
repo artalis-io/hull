@@ -1577,7 +1577,7 @@ static int js_db_internal_conn_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue o = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, o, "connection",
                       JS_NewCFunction(ctx, js_db_internal_conn, "connection", 0));
-    JS_SetModuleExport(ctx, m, "_internal_conn", o);
+    hl_js_export_frozen(ctx, m, "_internal_conn", o);
     return 0;
 }
 
@@ -1599,7 +1599,7 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, db, "open",
                       JS_NewCFunction(ctx, js_db_open, "open", 1));
 
-    JS_SetModuleExport(ctx, m, "db", db);
+    hl_js_export_frozen(ctx, m, "db", db);
     return 0;
 }
 

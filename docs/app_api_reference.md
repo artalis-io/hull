@@ -6,6 +6,18 @@ WebSocket / SSE / multipart / static / SMTP / timer / WASM compute / GPU /
 buffer / TUI surfaces that apps call. Lua and JS are functionally
 equivalent; JS uses camelCase.
 
+**JS compatibility note (audit 18):** in the JS runtime the built-in
+prototypes (`Object.prototype`, `Array.prototype`, `Promise.prototype`, the
+iterator prototypes, ...) are frozen and the standard global bindings
+(`Object`, `Array`, `JSON`, `Promise`, `parseInt`, ...) are non-writable +
+non-configurable before any app code runs, so the stdlib cannot have an
+intrinsic patched out from under it. Ordinary code is unaffected: subclassing a
+built-in, assigning `this.name`/`this.message` in an `Error` subclass, and
+overriding a method on your OWN object or prototype all work. Only a *polyfill
+that mutates a built-in prototype or reassigns a standard global* (e.g.
+`Array.prototype.flatMap = ...`, `globalThis.Promise = MyPromise`) now throws a
+`TypeError` at load - define such helpers as your own functions instead.
+
 ## Database connections (`hull/db`)
 
 Handles-only API: there is no top-level `db.*`; every query goes through a

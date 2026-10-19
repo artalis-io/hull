@@ -334,9 +334,9 @@ static int js_kv_module_init(JSContext *ctx, JSModuleDef *m)
         JSValue proto = JS_NewObject(ctx);
         JS_SetPropertyFunctionList(ctx, proto, js_kv_conn_methods,
                                    (int)(sizeof js_kv_conn_methods / sizeof js_kv_conn_methods[0]));
-        JS_SetClassProto(ctx, hull_kv_conn_class_id, proto);
+        hl_js_set_class_proto_frozen(ctx, hull_kv_conn_class_id, proto);
     }
-    JS_SetModuleExport(ctx, m, "open", JS_NewCFunction(ctx, js_kv_open, "open", 1));
+    hl_js_export_frozen(ctx, m, "open", JS_NewCFunction(ctx, js_kv_open, "open", 1));
     return 0;
 }
 
