@@ -5443,6 +5443,7 @@ JOBS_HOOKS_CASE(cron)
 JOBS_HOOKS_CASE(events)
 JOBS_HOOKS_CASE(poison)
 JOBS_HOOKS_CASE(horizon)
+JOBS_HOOKS_CASE(audit20)
 #undef JOBS_HOOKS_CASE
 
 UTEST(js_stdlib, toast_suite)
@@ -12032,6 +12033,30 @@ UTEST(js_audit19_stdlib, name_maps_have_no_prototype)
         "health.unregister('__proto__');\n"
         "globalThis.__a19_maps = r;\n"), 0);
     EXPECT_EQ(eval_int("globalThis.__a19_maps"), 3);
+    cleanup_js_caps();
+}
+
+/* Audit 20: retry.run with maxAttempts -1 / 0.5 never called fn (the Lua
+ * twin agrees now); cookie.serialize refused only ';' CR LF NUL in a path and
+ * wrote Max-Age=Infinity. */
+UTEST(js_audit20_stdlib, retry_and_cookie_parity)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { retry } from 'hull:retry';\n"
+        "import { cookie } from 'hull:web:cookie';\n"
+        "let r = 0;\n"
+        "let calls = 0;\n"
+        "for (const m of [-1, 0.5]) {\n"
+        "  retry.run(() => { calls++; return 9; }, { maxAttempts: m })\n"
+        "    .then((v) => { if (v === 9) r += 1; });\n"
+        "}\n"
+        "try { cookie.serialize('a', 'b', { path: '/x\\x01' }); } catch (e) { r += 10; }\n"
+        "try { cookie.serialize('a', 'b', { path: '/x\\x7f' }); } catch (e) { r += 100; }\n"
+        "try { cookie.serialize('a', 'b', { maxAge: Infinity }); } catch (e) { r += 1000; }\n"
+        "globalThis.__a20_r = () => r + calls * 10000;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a20_r()"), 21112);
     cleanup_js_caps();
 }
 

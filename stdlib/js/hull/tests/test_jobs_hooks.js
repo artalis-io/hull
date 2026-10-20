@@ -173,6 +173,38 @@ cases.horizon = () => {
     });
 };
 
+// Audit 20: metrics threw for a queue named after an Object.prototype member;
+// enqueue wrote its row before a bad dependency edge failed; a cron spec with
+// NBSP between fields was valid here and invalid in the Lua twin.
+cases.audit20 = () => {
+    jobs.init();
+    test("metrics with queues named constructor / toString", () => {
+        jobs.enqueue("t", {}, { queue: "constructor" });
+        jobs.enqueue("t", {}, { queue: "toString" });
+        const m = jobs.metrics();
+        assertEq(m.queues["constructor"].pending, 1, "constructor bucket");
+        assertEq(m.queues["toString"].pending, 1, "toString bucket");
+    });
+    test("dependsOn with a duplicate or a non-id is refused, no row written", () => {
+        const a = jobs.enqueue("dep", {});
+        const before = jobs.metrics().totals.blocked;
+        for (const bad of [[a, a], [null], [a, 1.5], ["x"]]) {
+            let threw = false;
+            try { jobs.enqueue("child", {}, { dependsOn: bad }); }
+            catch (e) { threw = /distinct job ids/.test(String(e && e.message)); }
+            assertEq(threw, true, "refused " + JSON.stringify(bad));
+        }
+        assertEq(jobs.metrics().totals.blocked, before, "no blocked row left");
+        const ok = jobs.enqueue("child", {}, { dependsOn: [a] });
+        assertEq(typeof ok, "number", "a valid dependsOn still enqueues");
+        assertEq(jobs.metrics().totals.blocked, before + 1, "one blocked row");
+    });
+    test("a cron spec splits on ASCII white space only", () => {
+        assertEq(hooks.cronNext("0\u00a00 * * *", 1609459200), null, "NBSP is not a separator");
+        assertEq(hooks.cronNext(" 0  0 * * * ", 1609459200) - 1609459200, 86400, "ASCII spaces");
+    });
+};
+
 test("the case is known", () => {
     assertEq(typeof cases[globalThis.__jobs_case], "function", String(globalThis.__jobs_case));
 });

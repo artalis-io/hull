@@ -71,6 +71,15 @@ function getSessionCtx(req) {
  *   (`"success"`, `"error"`, `"info"`, `"warn"`).
  * @throws if no session is wired or `text` is missing.
  */
+// A kind is a short tag, capped as the Lua twin caps it: it was outside the
+// text cap (audit 20).
+const FLASH_MAX_KIND = 64;
+function flashKind(kind) {
+    if (kind == null) return "info";
+    const k = String(kind);
+    return k.length > FLASH_MAX_KIND ? k.slice(0, FLASH_MAX_KIND) : k;
+}
+
 function set(req, text, kind) {
     if (text == null) {
         throw new Error("flash.set: text is required");
@@ -93,7 +102,7 @@ function set(req, text, kind) {
     }
     sess.flash.push({
         text: s,
-        kind: kind == null ? "info" : String(kind),
+        kind: flashKind(kind),
     });
     session.update(sid, sess);
 }
@@ -145,7 +154,7 @@ function trigger(res, text, kind) {
     const payload = json.encode({
         flash: {
             text: String(text),
-            kind: kind == null ? "info" : String(kind),
+            kind: flashKind(kind),
         },
     });
     res.header("HX-Trigger", payload);

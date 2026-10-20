@@ -182,7 +182,7 @@ function middleware(opts) {
 
             let checks = result.checks;
             if (!details) {
-                checks = {};
+                checks = Object.create(null);   // "__proto__" stays a key (audit 20)
                 for (const name of Object.keys(result.checks))
                     checks[name] = { status: result.checks[name].status };
             }

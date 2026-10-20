@@ -140,6 +140,7 @@ const _state = {
 // ── Provider presets ───────────────────────────────────────────────
 
 const PRESETS = {
+    __proto__: null,   // an unknown preset is unknown, never an intrinsic (audit 20)
     google: (_opts) => ({
         authorizationEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
         tokenEndpoint:         "https://oauth2.googleapis.com/token",

@@ -5052,6 +5052,7 @@ JOBS_HOOKS_CASE(cron)
 JOBS_HOOKS_CASE(events)
 JOBS_HOOKS_CASE(poison)
 JOBS_HOOKS_CASE(horizon)
+JOBS_HOOKS_CASE(audit20)
 #undef JOBS_HOOKS_CASE
 
 UTEST(lua_stdlib, ws_stream_suite)
@@ -8021,6 +8022,27 @@ UTEST(lua_stdlib, audit19_stdlib_parity)
         "  local rok, err = pcall(tui.run, { draw = function() end }) "
         "  if rok or not tostring(err):find('poll failed', 1, true) then return 3 end "
         "  if left ~= 1 then return 4 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* Audit 20: retry.run with max_attempts below 1 (-1, 0.5) never called fn
+ * and raised nil; any non-number or value under 1 takes the default now. */
+UTEST(lua_stdlib, audit20_retry_below_one)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local retry = require('hull.retry') "
+        "  for _, m in ipairs({ -1, 0.5, '3' }) do "
+        "    local calls = 0 "
+        "    local r = retry.run(function() calls = calls + 1; return 9 end, "
+        "                        { max_attempts = m }) "
+        "    if r ~= 9 or calls ~= 1 then return 1 end "
+        "  end "
         "  return 0 "
         "end)()");
     EXPECT_EQ(v, 0);

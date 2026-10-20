@@ -562,5 +562,30 @@ test("a19: user_totp_enrolled returning 0 is not enrolled", function()
     assert_eq(res.body and res.body.pending_2fa, true, "1 is enrolled")
 end)
 
+-- Audit 20: email_rate_limit 0 was kept here (limit 0 dropped every mail)
+-- and took the default in the JS twin; init refuses it in both now. The email
+-- check refuses Unicode white space, as the JS twin's \s does.
+test("a20: email_rate_limit must be whole numbers > 0", function()
+    for _, bad in ipairs({ { limit = 0 }, { window = 0 }, { limit = -1 },
+                           { limit = 1.5 }, "x" }) do
+        local ok, err = pcall(init, { email_rate_limit = bad })
+        assert_eq(ok, false, "refused")
+        assert_eq(tostring(err):find("email_rate_limit", 1, true) ~= nil, true,
+                  tostring(err))
+    end
+    init({ email_rate_limit = { limit = 2 } })
+    local st = __test_hooks('hull.web.auth-flows').state
+    assert_eq(st.email_rate_limit.limit, 2, "limit kept")
+    assert_eq(st.email_rate_limit.window, 900, "window defaulted")
+end)
+test("a20: is_email_ish refuses Unicode white space", function()
+    local is_email_ish = __test_hooks('hull.web.auth-flows').is_email_ish
+    assert_eq(is_email_ish("a@x.test\xC2\xA0"), false, "NBSP")
+    assert_eq(is_email_ish("a\xE3\x80\x80b@x.test"), false, "ideographic space")
+    assert_eq(is_email_ish("a\xE2\x80\xAFb@x.test"), false, "narrow NBSP")
+    assert_eq(is_email_ish(("\xE4\xB8\xAD"):rep(20) .. "@x.test"), true, "CJK")
+    assert_eq(is_email_ish("a@x.test"), true, "plain")
+end)
+
 print(string.format("auth audit 12: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail }

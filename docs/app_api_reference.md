@@ -625,7 +625,10 @@ verify step between successful first-factor auth and `on_login` when
       before anything is stored or sent. Refused, nothing is pending, no
       notice goes out, and the request answers 429 with `Retry-After`
       (`{error = "too many email change requests; try again later"}`).
-      `email_rate_limit = false` turns both off. A revoke that lands while the change is
+      `email_rate_limit = false` turns both off; otherwise it is
+      `{ limit, window }` (`emailRateLimit` in JS), whole numbers above zero
+      (defaults 3 and 900 s), and `init` refuses anything else - `0` used to
+      drop every mail in Lua and mean the default in JS (audit 20). A revoke that lands while the change is
       being confirmed (between the confirm's row write and its address
       switch) wins: the confirm sees the row undone after the switch, puts
       the old address back and answers 409. Clicking it (and submitting the

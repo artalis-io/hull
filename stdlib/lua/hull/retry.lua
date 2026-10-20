@@ -81,8 +81,14 @@ function retry.run(fn, opts)
     -- 0 and NaN take the default too, as in the JS twin (`maxAttempts ||
     -- 3`): with them the loop never ran, `fn` was never called, and the
     -- call raised a nil error (audit 19).
+    -- Anything that is not a number of at least 1 takes the default (audit
+    -- 20: #790 covered 0 and NaN; -1 or 0.5 still never called fn). The JS
+    -- twin reads it the same way.
     local max = opts.max_attempts
-    if not max or max == 0 or max ~= max then max = DEFAULTS.max_attempts end
+    if type(max) ~= "number" or max ~= max or max < 1 then
+        max = DEFAULTS.max_attempts
+    end
+    max = math.floor(max)
     local last = { n = 1, false }
     for attempt = 1, max do
         local r = table.pack(pcall(fn))
