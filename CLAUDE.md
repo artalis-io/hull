@@ -2172,6 +2172,7 @@ Hull ships a built-in `hull.tui` module for interactive terminal apps. The desig
 - **Per-process singleton**: one `HlTuiCtx` per process (the controlling tty is singleton). Second `acquire` returns `-EBUSY`.
 - **Cell-diff rendering**: shadow + pending buffers in the cap layer; only changed cells are emitted on flush. Flicker-free over ssh / mosh without app-side work. Unicode width comes from an embedded data table at `vendor/unicode/eaw.h`. Identical behavior across glibc / musl / cosmo / macOS. Refresh via `make fetch-unicode`.
 - **Async-integrated `tui.poll`**: yields to the runtime's event loop while waiting for input. Background `tui.async` coroutines / Promises keep ticking, so an app can `http.fetch` or `db.async.query` while the main coroutine awaits a keystroke.
+- **Each event is a new run**: Lua's `tui.poll` resume re-arms the instruction budget and the run deadline; JS `tui.run` (synchronous, over `pollSync`) re-arms them when each wait returns, so a long session is not one 10-minute app.main run (audit 21).
 - **Lone-ESC commit**: bare `\x1b` is committed as a synthetic `"escape"` event after a 50 ms quiet window. Resolves the classic "ESC vs. start of CSI" ambiguity without making the user wait for a follow-up byte.
 
 API surface: see [docs/app_api_reference.md](docs/app_api_reference.md#terminal-ui-api-surface).

@@ -302,6 +302,37 @@ else
     check_async_proof "lua" "lua"
     check_async_proof "js"  "js"
 
+    # ── A long tui.run session is not one run (audit 21) ──────────
+    #
+    # JS tui.run polls synchronously (pollSync) and never yields, so the
+    # whole session was ONE app.main run: the run deadline killed it. With
+    # a 300 ms deadline, a session of four keys 400 ms apart must finish.
+    echo "--- a long tui.run is re-armed per event ---"
+    cat > "${TMP}/long_run.js" <<'JSEOF'
+import { app } from "hull:app";
+import { tui } from "hull:tui";
+app.manifest({ tui: true, modules: ["hull/tui@1"] });
+app.main((ctx) => {
+    let keys = 0;
+    const r = tui.run({
+        draw: (d) => { d.clear(); d.print(1, 1, "long_run waiting"); },
+        onEvent: (ev) => {
+            if (ev.kind !== "key") return;
+            keys++;
+            if (ev.key === "q") return "done";
+        },
+    });
+    ctx.stdout.write(`long_run: ${r} keys=${keys}\n`);
+    return 0;
+});
+JSEOF
+    if HULL_MAX_RUN_MS=300 "${DRIVE}" "long_run: done" "%s400x%s400x%s400x%s400q" -- \
+           "${HULL_BIN}" "${TMP}/long_run.js" >/dev/null 2>&1; then
+        pass "js: a tui.run session longer than the run deadline completes"
+    else
+        fail "js: a tui.run session longer than the run deadline completes"
+    fi
+
     # ── hull doctor --tui (Phase 2 dogfood) ────────────────────────
     #
     # Drives the C dispatcher → hull_tool → stdlib/lua/hull/doctor_tui
