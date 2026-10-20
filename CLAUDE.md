@@ -1249,6 +1249,11 @@ object pointing into the registry, and its `conn.query` / `db.default()` /
 its close_notify through it); (6) the backend loop (serve_cli). A new detached
 async op must `hl_async_ctx_track` itself (with an `on_shutdown` if it holds a
 timer or a request); a new loop-bound object, an `HlAsyncTeardown` entry.
+A cancelled continuation ends its handler in both runtimes: it runs the
+completion hook (a ws on_close's deferred conn teardown) and clears a timer's
+`in_flight` - in JS once per run (`hl_js_run_claim`). JS's cancel skipped both,
+so a ws on_close parked across a teardown kept its conn object alive and
+QuickJS aborted in `JS_FreeRuntime` (audit 19).
 A binding never resumes another coroutine's wait inline from app code: a
 resume is loop-level (it runs the stale-transaction guard, re-arms the budget
 and clears `active_co`), so a wake made inside a run goes through a 0 ms

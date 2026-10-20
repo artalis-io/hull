@@ -811,6 +811,28 @@ static void hl_js_async_cancel(HlAsyncCont *self)
     /* The connection is gone: so is the request every `res` / stream object
      * of this handler points into. */
     hl_req_life_kill(jc->life);
+
+    /* The handler will never complete, so this is its end too, as in Lua's
+     * cancel: run the completion hook (a ws on_close's conn teardown) and
+     * end a timer handler's flight. Skipped, a ws on_close parked across a
+     * teardown kept its conn object alive, and JS_FreeRuntime aborted on
+     * the leaked object (audit 19). Once per run: another continuation of
+     * it may already have completed the handler. */
+    if (hl_js_run_claim(&jc->link)) {
+        if (jc->on_complete)
+            jc->on_complete(js, jc->on_complete_ctx);
+#ifdef HL_ENABLE_HTTP_SERVER
+        /* Rescheduled unless the runtime is shutting down
+         * (hl_js_timer_reschedule refuses then). */
+        if (jc->timer_ctx) {
+            HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
+            t->in_flight = 0;
+            hl_js_timer_reschedule(t);
+        }
+#endif
+    }
+    jc->on_complete = NULL;
+    jc->timer_ctx = NULL;
 }
 
 /*

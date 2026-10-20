@@ -13,7 +13,10 @@
 #   - an unawaited worker.dispatch / db.async left by app.main did the same;
 #   - an HTTPS server freed its TLS context twice (Hull, then Keel);
 #   - and the app context freed the DB registry before the runtime, whose
-#     lua_close runs __gc finalizers that may still use a connection.
+#     lua_close runs __gc finalizers that may still use a connection;
+#   - a JS WebSocket on_close still parked on hull.sleep was cancelled
+#     without its deferred conn teardown, and QuickJS aborted in
+#     JS_FreeRuntime on the conn object it kept alive (audit 19).
 # Each run below must exit 0 - not 134 (abort) or 139 (segfault) - and log
 # no sanitizer / assertion report.
 #
@@ -71,6 +74,25 @@ s.sendall(("GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n"
            "Sec-WebSocket-Version: 13\r\n\r\n").encode())
 resp = s.recv(4096)
 print("UPGRADED" if b" 101 " in resp else "REFUSED", flush=True)
+time.sleep(60)
+PY
+
+# A WebSocket client that upgrades, then sends a close frame (masked, no
+# payload) and holds the socket: the server's on_close runs and parks.
+cat > "$WORK/ws_close.py" <<'PY'
+import base64, os, socket, sys, time
+port = int(sys.argv[1])
+s = socket.create_connection(("127.0.0.1", port))
+key = base64.b64encode(os.urandom(16)).decode()
+s.sendall(("GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n"
+           "Connection: Upgrade\r\nSec-WebSocket-Key: " + key + "\r\n"
+           "Sec-WebSocket-Version: 13\r\n\r\n").encode())
+resp = s.recv(4096)
+if b" 101 " not in resp:
+    print("REFUSED", flush=True)
+    sys.exit(0)
+s.sendall(bytes([0x88, 0x80]) + os.urandom(4))
+print("CLOSED", flush=True)
 time.sleep(60)
 PY
 
@@ -201,6 +223,42 @@ if start_server target "$port" http "$FIX/server.lua"; then
 else
     fail "fetch target did not start"; cat "$WORK/target.log"
 fi
+
+# A WebSocket on_close parked on hull.sleep at SIGTERM: the cancel ends the
+# handler, running its deferred conn teardown (audit 19: JS skipped it and
+# aborted in JS_FreeRuntime, exit 134).
+for rt in lua js; do
+    port=$((port + 1))
+    name="$rt-ws-close-parked"
+    echo "=== $rt: SIGTERM with a WebSocket on_close parked ==="
+    if [ "$HAVE_PY" != 1 ]; then
+        skip "$name: python3 missing"
+        continue
+    fi
+    if ! start_server "$name" "$port" http "$FIX/ws_close_park.$rt" --drain-timeout 100; then
+        fail "$name: server did not start"; cat "$WORK/$name.log"; continue
+    fi
+    python3 "$WORK/ws_close.py" "$port" >"$WORK/$name.ws" 2>&1 &
+    HELPERS="$HELPERS $!"
+    parked=0
+    for _ in $(seq 1 40); do
+        grep -q "teardown-ws: on_close parked" "$WORK/$name.log" 2>/dev/null && { parked=1; break; }
+        sleep 0.1
+    done
+    if [ "$parked" != 1 ]; then
+        fail "$name: on_close never parked ($(cat "$WORK/$name.ws" 2>/dev/null))"
+        stop_server
+        tail -20 "$WORK/$name.log"
+        continue
+    fi
+    stop_server
+    if [ "$STOP_RC" = 0 ] && clean_log "$WORK/$name.log" \
+       && ! grep -q "teardown-ws: on_close resumed" "$WORK/$name.log"; then
+        pass "$name: exit 0, the parked on_close cancelled"
+    else
+        fail "$name: exit $STOP_RC"; tail -20 "$WORK/$name.log"
+    fi
+done
 
 # __gc finalizers that lua_close runs at teardown use the database: the
 # registry's connections are closed by then, but its memory must still be
