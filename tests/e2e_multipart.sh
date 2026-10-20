@@ -819,6 +819,31 @@ EOF2
         RESP=$(curl --max-time 20 -sS -X POST "http://127.0.0.1:17813/read" \
             -F "small=<$TMPDIR_WORK/medium.txt" 2>/dev/null || true)
         check_contains "js part.read under the heap: whole" "$RESP" '"size":2097152'
+
+        # Audit 19: the cap was per part, so concurrent slow uploads each
+        # held up to the heap limit off the heap (256 connections x 64 MB).
+        # Two 4.5 MB fields read at once, each under the 8 MB heap alone,
+        # are more than it together: one is refused. Rate-limited so the
+        # two overlap for their whole length.
+        head -c 4718592 /dev/zero | tr '\0' 'c' > "$TMPDIR_WORK/four.txt"
+        curl --max-time 40 -sS --limit-rate 1M -X POST \
+            "http://127.0.0.1:17813/read" -F "a=<$TMPDIR_WORK/four.txt" \
+            > "$TMPDIR_WORK/conc_a.json" 2>/dev/null &
+        CA=$!
+        curl --max-time 40 -sS --limit-rate 1M -X POST \
+            "http://127.0.0.1:17813/read" -F "b=<$TMPDIR_WORK/four.txt" \
+            > "$TMPDIR_WORK/conc_b.json" 2>/dev/null &
+        CB=$!
+        wait "$CA" 2>/dev/null || true
+        wait "$CB" 2>/dev/null || true
+        RESP="$(cat "$TMPDIR_WORK/conc_a.json" "$TMPDIR_WORK/conc_b.json" 2>/dev/null)"
+        check_contains "js concurrent part.read over the heap: one refused" \
+            "$RESP" 'larger than the heap limit together'
+        # The refused read's buffer is handed back: a read still fits.
+        RESP=$(curl --max-time 20 -sS -X POST "http://127.0.0.1:17813/read" \
+            -F "small=<$TMPDIR_WORK/medium.txt" 2>/dev/null || true)
+        check_contains "js part.read after the concurrent refusal: whole" \
+            "$RESP" '"size":2097152'
     else
         fail "js small-heap server startup"
     fi
