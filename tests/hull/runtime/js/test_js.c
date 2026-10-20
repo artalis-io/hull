@@ -12104,6 +12104,52 @@ UTEST(js_audit20, free_with_a_timer_parked_on_sleep)
 }
 #endif
 
+/* Audit 21: an op a synchronous entry did not await (`http.fetch(x)` in a
+ * ws on_close) captured the entry's completion hook - the ws conn teardown.
+ * The entry ran that teardown itself when it returned (freeing the conn);
+ * cancelling the op later (a teardown, a hull.sleep cancel) ran it again on
+ * the freed conn, since hl_js_run_claim lets a never-wired continuation
+ * complete. Only a continuation wired into a run completes its handler. */
+static int a21_hook_calls;
+static void a21_hook(HlJS *j, void *ud) { (void)j; (void)ud; a21_hook_calls++; }
+
+UTEST(js_audit21, cancel_of_an_unawaited_op_runs_no_completion_hook)
+{
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js, JSValue resolve,
+        JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    a21_hook_calls = 0;
+
+    /* Never wired: the entry returned without awaiting it. */
+    js.active_on_complete     = a21_hook;
+    js.active_on_complete_ctx = NULL;
+    HlAsyncCont *c = hl_js_async_cont_create(&js, JS_UNDEFINED, JS_UNDEFINED,
+                                             NULL, NULL);
+    js.active_on_complete = NULL;
+    js.last_async_cont    = NULL;     /* as the entry does when it returns */
+    ASSERT_TRUE(c != NULL);
+    c->cancel(c);
+    c->destroy(c);
+    EXPECT_EQ(a21_hook_calls, 0);
+
+    /* Wired into a run the entry parked on: its cancel ends the handler. */
+    js.active_on_complete = a21_hook;
+    c = hl_js_async_cont_create(&js, JS_UNDEFINED, JS_UNDEFINED, NULL, NULL);
+    js.active_on_complete = NULL;
+    ASSERT_TRUE(c != NULL);
+    JSValue p = JS_Eval(js.ctx, "new Promise(() => {})", 21, "<a21>",
+                        JS_EVAL_TYPE_GLOBAL);
+    hl_js_run_wire(hl_js_cont_link(c), js.ctx, p, NULL);
+    JS_FreeValue(js.ctx, p);
+    js.last_async_cont = NULL;
+    c->cancel(c);
+    c->destroy(c);
+    EXPECT_EQ(a21_hook_calls, 1);
+    cleanup_js();
+}
+
 /* A worker.dispatch VM runs app functions, so it is hardened too. */
 UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
 {
