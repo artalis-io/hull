@@ -12008,6 +12008,8 @@ UTEST(js_audit19_intrinsics, router_needs_no_temporary_global)
         "if (typeof app.router === 'function' && app.router('/x').prefix === '/x') r |= 2;\n"
         "globalThis.__a19_router = r;\n"), 0);
     EXPECT_EQ(eval_int("globalThis.__a19_router"), 3);
+    cleanup_js_caps();
+}
 
 /* Audit 19: jobs' listener map and health's check map were plain objects,
  * so jobs.on("toString", fn) found Object.prototype.toString instead of
