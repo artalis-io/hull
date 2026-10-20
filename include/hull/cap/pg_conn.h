@@ -52,6 +52,10 @@ void hl_pg_dsn_scrub(HlPgDsn *dsn);
 struct HlDbTransport;   /* cap/db_transport.h: the owned byte transport */
 
 /* An open connection, ready for queries once hl_pg_conn_open returns 0. */
+/* A NotificationResponse for @p channel: one hl_pg_wait_notify was not
+ * waiting for, or one that arrived during another query. */
+typedef void (*HlPgNotifyOtherFn)(void *ud, const char *channel);
+
 typedef struct HlPgConn {
     struct HlDbTransport *transport;  /* owned byte transport (bytes + optional TLS) */
     uint8_t *rbuf;        /* receive accumulation buffer                */
@@ -73,6 +77,12 @@ typedef struct HlPgConn {
      * to ReadyForQuery (frames counted, bounded) instead of dropped, so the
      * reported outcome is the server's (audit 18). */
     int      finishing;
+    /* Told of every NotificationResponse a query or a script reads (a db.async
+     * op on a worker's LISTEN connection): they were dropped, so the next
+     * wait_notify on that channel missed its wake-up (audit 20). NULL = none;
+     * the backend sets it when it LISTENs. */
+    HlPgNotifyOtherFn on_notify;
+    void            *on_notify_ud;
     char     errmsg[256];
 } HlPgConn;
 
@@ -137,6 +147,7 @@ int hl_pg_cleartext_allowed(int tls_verified, int sslmode);
  * plaintext downgrade). Exposed for tests (drive it with an adopted socketpair).
  */
 HlPgSslDecision hl_pg_ssl_negotiate(struct HlDbTransport *t, HlPgSslMode mode,
+                                    int read_timeout_ms,
                                     char *errbuf, size_t errlen);
 
 /* ── SCRAM-SHA-256 primitives (exposed for tests) ─────────────────── */
@@ -230,7 +241,6 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql);
  * returns 1. One for another channel LISTENed on the same connection is
  * passed to @p on_other (may be NULL) and the wait goes on to its deadline.
  */
-typedef void (*HlPgNotifyOtherFn)(void *ud, const char *channel);
 int hl_pg_wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
                       HlPgNotifyOtherFn on_other, void *ud);
 

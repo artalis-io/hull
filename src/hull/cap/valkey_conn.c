@@ -298,10 +298,6 @@ static ssize_t io_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
     return hl_db_transport_send(c->transport, buf, len);
 }
 
-static ssize_t io_recv(HlValkeyConn *c, uint8_t *buf, size_t len) {
-    return hl_db_transport_recv(c->transport, buf, len);
-}
-
 /* The run this command belongs to is over its budget or past its deadline
  * (a 0-unit charge only asks). */
 static int run_stopped(void) {
@@ -310,6 +306,27 @@ static int run_stopped(void) {
 #else
     return 0;
 #endif
+}
+
+/* run_stopped as a transport / TLS stop callback. */
+static int run_stopped_cb(void *ud) {
+    (void)ud;
+    /* cppcheck-suppress knownConditionTrueFalse */
+    return run_stopped();   /* constant 0 without HL_ENABLE_DB */
+}
+
+/* Over TLS the read is sliced, asking the run between slices, for at most
+ * what is left of the command's deadline: a record's first byte made the
+ * socket readable, and the read then blocked for the rest (audit 20). */
+static ssize_t io_recv(HlValkeyConn *c, uint8_t *buf, size_t len) {
+    int left = 0;
+    if (c->deadline_ms) {
+        uint64_t now = kl_monotonic_ms();
+        uint64_t rem = c->deadline_ms > now ? c->deadline_ms - now : 1;
+        left = rem > (uint64_t)INT32_MAX ? INT32_MAX : (int)rem;
+    }
+    return hl_db_transport_recv_sliced(c->transport, buf, len, left,
+                                       run_stopped_cb, NULL);
 }
 
 /* Wait until the socket is ready for `events` or the command's deadline
@@ -412,7 +429,9 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
         ssize_t n = io_recv(c, c->rbuf + c->rlen, c->rcap - c->rlen);
         if (n <= 0) {
             c->dead = 1;
-            set_err(c, n < 0 ? "read failed or timed out" : "connection closed by server");
+            set_err(c, n == -2 ? "interrupted (instruction limit exceeded)"
+                     : n < 0 ? "read failed or timed out"
+                     : "connection closed by server");
             return -1;
         }
         c->rlen += (size_t)n;
@@ -560,8 +579,13 @@ int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
     int tmo = dsn->connect_timeout_ms;
     if (tmo <= 0) tmo = HL_VALKEY_TIMEOUT_DEFAULT_MS;
     else if (tmo < HL_VALKEY_TIMEOUT_MIN_MS) tmo = HL_VALKEY_TIMEOUT_MIN_MS;
-    HlDbTransport *t = hl_db_transport_connect("valkey", alloc, dsn->host, dsn->port,
-                                               tmo, NULL, NULL, 0);
+    /* The connect and the TLS handshake ask the run between their steps, as
+     * every command wait does since audit 19: each held the event loop for
+     * up to connect_timeout (10 min) with no budget or deadline checked
+     * (audit 20). */
+    HlDbTransport *t = hl_db_transport_connect_stop("valkey", alloc, dsn->host,
+                                                    dsn->port, tmo, NULL,
+                                                    run_stopped_cb, NULL, NULL, 0);
     if (!t) {
         if (errbuf && errlen) snprintf(errbuf, errlen, "connect to %s:%s failed", dsn->host, dsn->port);
         return -1;
@@ -573,8 +597,9 @@ int hl_valkey_conn_open(HlValkeyConn **out, const HlValkeyDsn *dsn,
     /* Implicit TLS (rediss / valkeys): handshake immediately, before any RESP byte,
      * then hand the session to the transport so every subsequent byte tunnels it. */
     if (dsn->tls) {
-        HlTlsClient *tls = hl_tls_client_handshake(hl_db_transport_fd(t), dsn->host,
-                                                   dsn->verify, tmo);
+        HlTlsClient *tls = hl_tls_client_handshake_stop(hl_db_transport_fd(t),
+                                                        dsn->host, dsn->verify, tmo,
+                                                        run_stopped_cb, NULL);
         if (!tls || hl_db_transport_attach_tls(t, tls) != 0) {
             if (tls) hl_tls_client_free(tls);   /* attach rejected: we still own it */
             if (errbuf && errlen) snprintf(errbuf, errlen, "TLS handshake to %s failed", dsn->host);

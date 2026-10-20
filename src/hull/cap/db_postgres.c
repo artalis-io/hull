@@ -693,6 +693,11 @@ static int pg_wait_notify(HlDbHandle *h, const char *channel, int timeout_ms)
     HlDbPgCtx *s = h->ctx;
     if (!pg_channel_ok(channel)) return -1;
     if (pg_ready(s, NULL, h->session_pinned) != 0) return -1;
+    /* Notifications a later query on this connection reads mark their
+     * channel pending too (audit 20). Set on every wait: a reconnect starts
+     * the connection over. */
+    s->conn.on_notify = pg_listen_note;
+    s->conn.on_notify_ud = s;
     HlPgListen *l = pg_listen_find(s, channel);
     if (!l) {
         char sql[80];

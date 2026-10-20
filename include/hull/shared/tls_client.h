@@ -32,6 +32,15 @@ typedef struct HlTlsClient HlTlsClient;
 HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
                                      int verify, int timeout_ms);
 
+/* hl_tls_client_handshake, asking @p stop(@p ud) (may be NULL) between the
+ * 100 ms steps of its wait: a server that accepted and then stalled the
+ * handshake held the caller's thread - the event loop, for a sync DB / KV
+ * connect - for the whole @p timeout_ms (Valkey's up to 10 min) with no
+ * budget or run deadline checked (audit 20). A stop fails the handshake. */
+HlTlsClient *hl_tls_client_handshake_stop(int fd, const char *host,
+                                          int verify, int timeout_ms,
+                                          int (*stop)(void *), void *ud);
+
 /*
  * Like hl_tls_client_handshake, but the KlTls session is created by a
  * caller-provided config (@p tls_cfg is a `KlTlsConfig *`: a factory + a

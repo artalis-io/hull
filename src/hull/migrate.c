@@ -423,12 +423,14 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
             /* L3: distinguish short read from underlying read error. */
             int read_err = ferror(f);
             if (read_err || nread != (size_t)flen) {
-                free(sql);
-                fclose(f);
-                migration_list_free(ml);
+                /* Logged before the list goes: migration_list_free clears
+                 * ml->names, so the name was read through NULL (audit 20). */
                 log_error("[migrate] %s on %s (%zu/%ld bytes)",
                           read_err ? "read error" : "short read",
                           ml->names[i], nread, flen);
+                free(sql);
+                fclose(f);
+                migration_list_free(ml);
                 return -1;
             }
             sql[flen] = '\0';

@@ -948,6 +948,43 @@ UTEST(pg_query, wait_notify_wakes_only_its_channel)
     close(sv[0]);
 }
 
+/* Audit 20: a NotificationResponse a query (or a script) read - a db.async
+ * op on a worker's LISTEN connection - was dropped, so the next wait on that
+ * channel slept to its timeout. It goes to the connection's on_notify. */
+UTEST(pg_query, a_notification_read_by_a_query_is_handed_on)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+    put_notify(&s, "hull_jobs");
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "SELECT 0"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    put_notify(&s, "orders");                              /* the script's */
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "DO"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    char got[64] = "";
+    conn.on_notify = note_other;
+    conn.on_notify_ud = got;
+    ASSERT_EQ(0, hl_pg_query(&conn, "SELECT 1", NULL, 0, NULL, NULL, NULL, NULL));
+    EXPECT_STREQ(got, "hull_jobs");
+    got[0] = '\0';
+    ASSERT_EQ(0, hl_pg_exec_simple(&conn, "DO $$ BEGIN END $$"));
+    EXPECT_STREQ(got, "orders");
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
 UTEST(pg_query, server_error_then_ready)
 {
     int sv[2];
@@ -1071,7 +1108,7 @@ static HlPgSslDecision negotiate_with(HlPgSslMode mode, int have_resp, char resp
     HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[1], NULL, NULL, 0);
     if (!t) { close(sv[0]); close(sv[1]); return HL_PG_SSL_FAIL; }
     char e[128] = {0};
-    HlPgSslDecision d = hl_pg_ssl_negotiate(t, mode, e, sizeof e);
+    HlPgSslDecision d = hl_pg_ssl_negotiate(t, mode, 2000, e, sizeof e);
     hl_db_transport_close(t);   /* closes sv[1] */
     close(sv[0]);
     return d;
@@ -1091,6 +1128,33 @@ UTEST(pg_ssl, negotiation_matrix)
     ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_VERIFY, 1, 'N'), HL_PG_SSL_FAIL);
     /* unexpected reply byte is an error. */
     ASSERT_EQ(negotiate_with(HL_PG_SSLMODE_PREFER, 1, 'X'), HL_PG_SSL_FAIL);
+}
+
+/* Audit 20: the SSLRequest answer was a blocking recv bounded only by the
+ * read timeout (none under ?read_timeout=0). It is waited for in slices that
+ * ask the run's budget: a tripped one fails the negotiation at the first. */
+static int pg_ssl_tripped(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return 1;
+}
+UTEST(pg_ssl, unanswered_sslrequest_stops_on_a_tripped_budget)
+{
+    int sv[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[1], NULL, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+    HlDbBudgetBinding prev = hl_db_budget_swap(pg_ssl_tripped, NULL);
+    char e[128] = {0};
+    time_t t0 = time(NULL);
+    HlPgSslDecision d = hl_pg_ssl_negotiate(t, HL_PG_SSLMODE_PREFER,
+                                            0 /* no read timeout */, e, sizeof e);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(d, HL_PG_SSL_FAIL);
+    EXPECT_TRUE(strstr(e, "connect stopped") != NULL);
+    EXPECT_TRUE(time(NULL) - t0 < 5);   /* not the old unbounded wait */
+    hl_db_transport_close(t);
+    close(sv[0]);
 }
 
 /* ── SCRAM-SHA-256 ────────────────────────────────────────────────── */
