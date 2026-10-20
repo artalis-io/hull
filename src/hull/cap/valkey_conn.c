@@ -336,7 +336,8 @@ static int wait_io(HlValkeyConn *c, short events) {
         if (pr > 0) return 0;
         if (pr == 0) {
             if (slice == ms) return -1;
-            if (run_stopped()) return -2;
+            /* cppcheck-suppress knownConditionTrueFalse */
+            if (run_stopped()) return -2;   /* constant 0 without HL_ENABLE_DB */
             continue;
         }
         if (errno != EINTR) return 0;   /* let the I/O report it */
