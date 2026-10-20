@@ -463,7 +463,14 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
  * sync JS code never yields the thread for the microtask drain to
  * resolve it). Returns the event object directly or null on timeout.
  * tui.poll above remains the public async-aware entry point for
- * callers that own an async context. */
+ * callers that own an async context.
+ *
+ * Each event starts a new run, as each tui.poll resume does in Lua: the
+ * instruction budget and the run deadline are re-armed when the wait
+ * returns. tui.run never yields, so its whole session was ONE app.main run -
+ * killed by the 10-minute deadline (or the 100M-instruction budget) however
+ * the user paced it (audit 21). A run already over its budget is not
+ * re-armed: its trip is raised instead. */
 static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
@@ -472,8 +479,12 @@ static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
     int32_t timeout_ms = -1;
     if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
         if (JS_ToInt32(ctx, &timeout_ms, argv[0])) return JS_EXCEPTION;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->budget_tripped) return hl_js_budget_throw(ctx);
     HlTuiEvent ev = {0};
     int rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
+    if (js)
+        hl_js_budget_arm_kind(js, js->active_cli_main ? HL_RUN_MAIN : HL_RUN_ENTRY);
     if (rc < 0) return JS_ThrowInternalError(ctx, "tui.pollSync failed");
     if (rc == 1) return JS_NULL;
     return event_to_js(ctx, &ev);
