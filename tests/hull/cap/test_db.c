@@ -14,6 +14,11 @@
 #include "hull/cap/db_budget.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/db_udf.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm.h"
+#include "hull/vfs.h"
+#include "hull/entry.h"
+#endif
 #endif
 #include <sqlite3.h>
 #include <string.h>
@@ -842,6 +847,81 @@ UTEST(hl_cap_db, udf_wasm_rejects_bad_prefix)
     hl_db_sqlite_unwrap(&handle);
 
     teardown_db();
+}
+
+/* An arity or a name sqlite3_create_function_v2 refuses is refused up front.
+ * The registration used to reach create_function_v2, which frees the udf ctx
+ * through its xDestroy on failure, and then freed it again: a double free any
+ * app with a compute module could trigger (audit 19). */
+static const unsigned char udf_echo_wasm[] = { /* test_wasm.c's echo.wasm */
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+  0x28, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73,
+  0x69, 0x6f, 0x6e, 0x00, 0x02, 0x0a, 0x20, 0x02, 0x19, 0x00, 0x20, 0x01,
+  0x20, 0x03, 0x4b, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x20,
+  0x00, 0x20, 0x01, 0xfc, 0x0a, 0x00, 0x00, 0x20, 0x01, 0x0b, 0x04, 0x00,
+  0x41, 0x01, 0x0b
+};
+static const HlEntry udf_entries[] = {
+    { "compute/echo.wasm", udf_echo_wasm, sizeof udf_echo_wasm },
+    { 0, 0, 0 }
+};
+
+UTEST(hl_cap_db, udf_wasm_refuses_bad_arity_and_long_name)
+{
+    setup_db();
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, udf_entries, NULL);
+    HlDbHandle handle = {0};
+    ASSERT_EQ(hl_db_sqlite_wrap(&handle, test_db), 0);
+
+    const char *err_msg = NULL;
+    HlDbUdfOpts opts = { .sql_name = "hull_echo", .module_name = "echo",
+                         .nargs = -5 };
+    EXPECT_NE(hl_cap_db_udf_register_wasm(&handle, &cache, &opts, &vfs, NULL,
+                                          NULL, &err_msg), 0);
+    EXPECT_TRUE(err_msg && strcmp(err_msg, "invalid arguments") == 0);
+
+    opts.nargs = 1001; /* over SQLITE_MAX_FUNCTION_ARG */
+    err_msg = NULL;
+    EXPECT_NE(hl_cap_db_udf_register_wasm(&handle, &cache, &opts, &vfs, NULL,
+                                          NULL, &err_msg), 0);
+    EXPECT_TRUE(err_msg && strcmp(err_msg, "invalid arguments") == 0);
+
+    opts.is_aggregate = 1; /* the aggregate path too */
+    err_msg = NULL;
+    EXPECT_NE(hl_cap_db_udf_register_wasm(&handle, &cache, &opts, &vfs, NULL,
+                                          NULL, &err_msg), 0);
+    opts.is_aggregate = 0;
+
+    char long_name[300];
+    memcpy(long_name, "hull_", 5);
+    memset(long_name + 5, 'x', sizeof long_name - 6);
+    long_name[sizeof long_name - 1] = '\0';
+    opts.sql_name = long_name;
+    opts.nargs = 1;
+    err_msg = NULL;
+    EXPECT_NE(hl_cap_db_udf_register_wasm(&handle, &cache, &opts, &vfs, NULL,
+                                          NULL, &err_msg), 0);
+    EXPECT_TRUE(err_msg && strcmp(err_msg, "invalid arguments") == 0);
+
+    /* A valid one still registers, and unregisters. */
+    opts.sql_name = "hull_echo";
+    err_msg = NULL;
+    EXPECT_EQ(hl_cap_db_udf_register_wasm(&handle, &cache, &opts, &vfs, NULL,
+                                          NULL, &err_msg), 0);
+    EXPECT_EQ(hl_cap_db_udf_unregister(&handle, "hull_echo"), 0);
+
+    hl_db_sqlite_unwrap(&handle);
+    teardown_db();
+    hl_cap_wasm_destroy(&cache);
 }
 
 UTEST(hl_cap_db, udf_wasm_rejects_null_args)

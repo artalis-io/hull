@@ -407,6 +407,16 @@ int hl_cap_db_udf_register_wasm(HlDbHandle *handle,
         return -1;
     }
 
+    /* Refuse what sqlite3_create_function_v2 would refuse (a name over 255
+     * bytes, an arity outside -1..SQLITE_LIMIT_FUNCTION_ARG) before anything
+     * is allocated: both come from app code (audit 19). */
+    int nargs = opts->nargs != 0 ? opts->nargs : 1;
+    if (strlen(opts->sql_name) > 255 || nargs < -1 ||
+        nargs > sqlite3_limit(db, SQLITE_LIMIT_FUNCTION_ARG, -1)) {
+        if (err_msg) *err_msg = err_invalid;
+        return -1;
+    }
+
     /* Auto-load module into cache */
     int load_rc = hl_cap_wasm_load(cache, opts->module_name, app_vfs, app_dir);
     if (load_rc != 0) {
@@ -434,8 +444,6 @@ int hl_cap_db_udf_register_wasm(HlDbHandle *handle,
     udf_ctx->stack_size   = opts->stack_size;
     udf_ctx->timeout_ms   = opts->timeout_ms;
     udf_ctx->is_aggregate = opts->is_aggregate;
-
-    int nargs = opts->nargs != 0 ? opts->nargs : 1;
 
     /* For scalar UDFs, create persistent instance at registration time */
     if (!opts->is_aggregate) {
@@ -485,8 +493,9 @@ int hl_cap_db_udf_register_wasm(HlDbHandle *handle,
     if (rc != SQLITE_OK) {
         log_error("[db_udf] sqlite3_create_function_v2 failed for '%s': %s",
                   opts->sql_name, sqlite3_errmsg(db));
-        /* SQLite won't call xDestroy if registration fails, so clean up */
-        wasm_udf_destroy(udf_ctx);
+        /* SQLite has already called xDestroy (wasm_udf_destroy) on udf_ctx:
+         * create_function_v2 runs the destructor itself on every failure.
+         * Freeing it here too was a double free (audit 19). */
         if (err_msg) *err_msg = err_sqlite;
         return -1;
     }
