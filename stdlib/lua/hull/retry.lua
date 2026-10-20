@@ -78,7 +78,11 @@ end
 --   Re-raises the last error if all attempts errored.
 function retry.run(fn, opts)
     opts = opts or {}
-    local max = opts.max_attempts or DEFAULTS.max_attempts
+    -- 0 and NaN take the default too, as in the JS twin (`maxAttempts ||
+    -- 3`): with them the loop never ran, `fn` was never called, and the
+    -- call raised a nil error (audit 19).
+    local max = opts.max_attempts
+    if not max or max == 0 or max ~= max then max = DEFAULTS.max_attempts end
     local last = { n = 1, false }
     for attempt = 1, max do
         local r = table.pack(pcall(fn))

@@ -67,7 +67,9 @@ let _default = null;
 // In-process lifecycle listeners (jobs.on). Fired synchronously by work() in the
 // worker that processed the job, for jobs THAT worker ran. Not fleet-wide - a
 // durable cross-process event stream is the LISTEN/NOTIFY epic (#235).
-const _listeners = { completed: [], retried: [], dead: [] };
+// No prototype: jobs.on("toString", fn) / jobs.on("__proto__", fn) found an
+// Object.prototype member instead of "unknown event" (audit 19).
+const _listeners = { __proto__: null, completed: [], retried: [], dead: [] };
 
 // Registered durable workflows: name -> fn(ctx). jobs.workflow registers a
 // reserved-type handler that runs the workflow through a memoizing ctx.

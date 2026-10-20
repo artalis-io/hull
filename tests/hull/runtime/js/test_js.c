@@ -12008,6 +12008,28 @@ UTEST(js_audit19_intrinsics, router_needs_no_temporary_global)
         "if (typeof app.router === 'function' && app.router('/x').prefix === '/x') r |= 2;\n"
         "globalThis.__a19_router = r;\n"), 0);
     EXPECT_EQ(eval_int("globalThis.__a19_router"), 3);
+
+/* Audit 19: jobs' listener map and health's check map were plain objects,
+ * so jobs.on("toString", fn) found Object.prototype.toString instead of
+ * "unknown event", and health.register("__proto__", fn) replaced the map's
+ * prototype instead of registering a check. */
+UTEST(js_audit19_stdlib, name_maps_have_no_prototype)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { jobs } from 'hull:jobs';\n"
+        "import { health } from 'hull:web:middleware:health';\n"
+        "let r = 0;\n"
+        "try { jobs.on('toString', () => {}); }\n"
+        "catch (e) { if (/unknown event/.test(String(e && e.message))) r |= 1; }\n"
+        "health.register('__proto__', () => true);\n"
+        "const out = health.runChecks({ dbCheck: false });\n"
+        "const c = Object.getOwnPropertyDescriptor(out.checks, '__proto__');\n"
+        "if (c && c.value && c.value.status === 'ok') r |= 2;\n"
+        "health.unregister('__proto__');\n"
+        "globalThis.__a19_maps = r;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a19_maps"), 3);
     cleanup_js_caps();
 }
 

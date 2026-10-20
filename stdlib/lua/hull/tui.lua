@@ -127,49 +127,43 @@ function tui.run(opts)
 
     -- Render once before waiting for the first event so the user
     -- sees the UI immediately.
-    local ok, err = pcall(draw, ctx)
-    if ok then
+    -- The whole loop runs under one pcall, as the JS twin's try does: a
+    -- raise from tui.poll, tui.flush or the resize refresh (not only from
+    -- draw / on_event) left the terminal in raw mode, tui.leave never
+    -- called (audit 19).
+    local function loop()
+        draw(ctx)
         tui.flush()
-    else
-        tui.leave()
-        error(err, 0)
-    end
-
-    while not has_exit do
-        local ev = tui.poll(tick_ms)
-        if ev then
-            if ev.kind == "resize" then
-                refresh_dims(ctx)
-            end
-            if on_event then
-                local eok, r = pcall(on_event, ev)
-                if not eok then
-                    tui.leave()
-                    error(r, 0)
+        while not has_exit do
+            local ev = tui.poll(tick_ms)
+            if ev then
+                if ev.kind == "resize" then
+                    refresh_dims(ctx)
                 end
-                if r ~= nil then
-                    exit_token = r
+                if on_event then
+                    local r = on_event(ev)
+                    if r ~= nil then
+                        exit_token = r
+                        has_exit = true
+                    end
+                end
+                -- The terminal went away: every later poll returns "hangup"
+                -- at once, so the loop would spin (audit 10). Exit with nil
+                -- unless on_event chose a token.
+                if ev.kind == "hangup" and not has_exit then
                     has_exit = true
                 end
             end
-            -- The terminal went away: every later poll returns "hangup"
-            -- at once, so the loop would spin (audit 10). Exit with nil
-            -- unless on_event chose a token.
-            if ev.kind == "hangup" and not has_exit then
-                has_exit = true
+            if not has_exit then
+                draw(ctx)
+                tui.flush()
             end
-        end
-        if not has_exit then
-            ok, err = pcall(draw, ctx)
-            if not ok then
-                tui.leave()
-                error(err, 0)
-            end
-            tui.flush()
         end
     end
 
+    local ok, err = pcall(loop)
     tui.leave()
+    if not ok then error(err, 0) end
     return exit_token
 end
 

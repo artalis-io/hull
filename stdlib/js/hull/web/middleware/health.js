@@ -35,7 +35,9 @@ function resolveDb(m) {
     return dbModule.default();
 }
 
-const _checks = {};
+// No prototype: a check named "__proto__" replaced the map's prototype
+// instead of being registered (audit 19).
+const _checks = Object.create(null);
 let _startTime = null;
 
 /**
@@ -71,7 +73,7 @@ function unregister(name) {
  */
 function runChecks(opts) {
     const o = opts || {};
-    const results = {};
+    const results = Object.create(null);   /* keyed by check name, as _checks */
     let allOk = true;
 
     // DB check
