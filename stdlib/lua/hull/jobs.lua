@@ -600,8 +600,23 @@ function jobs.enqueue(job_type, data, opts)
             { opts.queue or "default", job_type, now - opts.throttle })
         if hit and #hit > 0 then return nil end
     end
-    local deps = opts.depends_on
-    local has_deps = type(deps) == "table" and #deps > 0
+    -- The dependency ids, copied and checked: whole, positive, distinct. A
+    -- duplicate (the edge's primary key) or a non-id failed its edge INSERT
+    -- after the row was written (audit 20).
+    local deps
+    if type(opts.depends_on) == "table" then
+        deps = {}
+        local seen = {}
+        for _, d in ipairs(opts.depends_on) do
+            local dep_id = math.tointeger(d)
+            if not dep_id or dep_id <= 0 or seen[dep_id] then
+                error("jobs.enqueue: depends_on must hold distinct job ids", 2)
+            end
+            seen[dep_id] = true
+            deps[#deps + 1] = dep_id
+        end
+    end
+    local has_deps = deps ~= nil and #deps > 0
     local vals = {
         opts.queue or "default",
         job_type,
@@ -632,58 +647,68 @@ function jobs.enqueue(job_type, data, opts)
             cols[#cols + 1] = "concurrency_strict"; vals[#vals + 1] = 1
         end
     end
-    local id
-    if opts.dedup_key ~= nil then
-        -- A key dedups against jobs that have not finished. The unique index
-        -- also covered done / dead rows, so a completed job's key refused every
-        -- re-enqueue until cleanup purged the row (7 days). A finished job
-        -- gives its key up here: one statement, portable (MySQL has no partial
-        -- index), and it needs no change to an existing database's index.
-        db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? "
-            .. "AND status IN ('done', 'dead', 'compensated')",
-            { opts.queue or "default", opts.dedup_key })
-        -- INSERT ... ON CONFLICT(queue,dedup_key) DO NOTHING / INSERT OR IGNORE.
-        local n = db.insert_if_absent("_hull_jobs", { "queue", "dedup_key" }, cols, vals)
-        if not (n and n > 0) then
-            return nil   -- an un-run job with this (queue, dedup_key) already exists
-        end
-        -- Portable id fetch: the unique (queue, dedup_key) identifies the new row.
-        -- (db.last_id is unsupported on Postgres, which has no last-insert-rowid.)
-        local rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
-            { opts.queue or "default", opts.dedup_key })
-        id = rows and rows[1] and rows[1].id
-    else
-        local ph = {}
-        for i = 1, #cols do ph[i] = "?" end
-        local sql = "INSERT INTO _hull_jobs (" .. table.concat(cols, ", ")
-            .. ") VALUES (" .. table.concat(ph, ", ") .. ")"
-        if db.dialect.supports_returning then
-            -- SQLite + Postgres: read the id back from the INSERT itself.
-            local rows = db.query(sql .. " RETURNING id", vals)
+    -- The row and its dependency edges commit together (a savepoint inside a
+    -- caller's batch). The row committed first, so a failed edge left a
+    -- 'blocked' row with no (or only some) edges: one the reaper's
+    -- stuck-dependent sweep - it joins the edges - never saw, or one that ran
+    -- once its other dependency ended though enqueue had raised (audit 20).
+    local id, collapsed
+    local function write()
+        if opts.dedup_key ~= nil then
+            -- A key dedups against jobs that have not finished. The unique index
+            -- also covered done / dead rows, so a completed job's key refused every
+            -- re-enqueue until cleanup purged the row (7 days). A finished job
+            -- gives its key up here: one statement, portable (MySQL has no partial
+            -- index), and it needs no change to an existing database's index.
+            db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? "
+                .. "AND status IN ('done', 'dead', 'compensated')",
+                { opts.queue or "default", opts.dedup_key })
+            -- INSERT ... ON CONFLICT(queue,dedup_key) DO NOTHING / INSERT OR IGNORE.
+            local n = db.insert_if_absent("_hull_jobs", { "queue", "dedup_key" }, cols, vals)
+            if not (n and n > 0) then
+                collapsed = true   -- an un-run job with this (queue, dedup_key) already exists
+                return
+            end
+            -- Portable id fetch: the unique (queue, dedup_key) identifies the new row.
+            -- (db.last_id is unsupported on Postgres, which has no last-insert-rowid.)
+            local rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
+                { opts.queue or "default", opts.dedup_key })
             id = rows and rows[1] and rows[1].id
         else
-            db.exec(sql, vals)   -- MySQL: LAST_INSERT_ID via db.last_id
-            id = db.last_id()
+            local ph = {}
+            for i = 1, #cols do ph[i] = "?" end
+            local sql = "INSERT INTO _hull_jobs (" .. table.concat(cols, ", ")
+                .. ") VALUES (" .. table.concat(ph, ", ") .. ")"
+            if db.dialect.supports_returning then
+                -- SQLite + Postgres: read the id back from the INSERT itself.
+                local rows = db.query(sql .. " RETURNING id", vals)
+                id = rows and rows[1] and rows[1].id
+            else
+                db.exec(sql, vals)   -- MySQL: LAST_INSERT_ID via db.last_id
+                id = db.last_id()
+            end
         end
-    end
-    if has_deps then
-        -- Record edges first, then re-check each dependency's current state: this
-        -- closes the enqueue/complete race (a dep that finished between the check
-        -- and the insert is caught by whichever side runs second - both idempotent).
-        local fail_mode = (opts.on_dep_failure == "run") and "run" or nil
-        for i, dep in ipairs(deps) do
-            db.exec("INSERT INTO _hull_job_deps (dependent_id, dep_id, ord, fail_mode) "
-                .. "VALUES (?, ?, ?, ?)", { id, dep, i, fail_mode })
-        end
-        for _, dep in ipairs(deps) do
-            local g = jobs.get(dep)
-            if g == nil or g.status == "done" then
-                resolve_edge(id, dep, true, fail_mode)   -- already satisfied
-            elseif g.status == "dead" then
-                resolve_edge(id, dep, false, fail_mode)  -- already failed
+        if has_deps then
+            -- Record edges first, then re-check each dependency's current state: this
+            -- closes the enqueue/complete race (a dep that finished between the check
+            -- and the insert is caught by whichever side runs second - both idempotent).
+            local fail_mode = (opts.on_dep_failure == "run") and "run" or nil
+            for i, dep in ipairs(deps) do
+                db.exec("INSERT INTO _hull_job_deps (dependent_id, dep_id, ord, fail_mode) "
+                    .. "VALUES (?, ?, ?, ?)", { id, dep, i, fail_mode })
+            end
+            for _, dep in ipairs(deps) do
+                local g = jobs.get(dep)
+                if g == nil or g.status == "done" then
+                    resolve_edge(id, dep, true, fail_mode)   -- already satisfied
+                elseif g.status == "dead" then
+                    resolve_edge(id, dep, false, fail_mode)  -- already failed
+                end
             end
         end
     end
+    if has_deps then db.batch(write) else write() end
+    if collapsed then return nil end
     -- Durable "enqueued" event (opt-in). Emitted here so it joins the caller's
     -- db.batch when enqueue is called inside one (transactional coupling).
     emit_durable("enqueued",

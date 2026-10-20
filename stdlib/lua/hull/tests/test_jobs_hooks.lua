@@ -168,6 +168,30 @@ function cases.horizon()
     end)
 end
 
+-- Audit 20: enqueue wrote its row before a bad dependency edge failed; the
+-- JS twin's metrics / cron split are fixed to match this one.
+function cases.audit20()
+    jobs.init()
+    test("depends_on with a duplicate or a non-id is refused, no row written", function()
+        local a = jobs.enqueue("dep", {})
+        local before = jobs.metrics().totals.blocked
+        for _, bad in ipairs({ { a, a }, { "x" }, { a, 1.5 }, { -1 } }) do
+            local ok, err = pcall(jobs.enqueue, "child", {}, { depends_on = bad })
+            assert_eq(ok, false, "refused")
+            assert_eq(tostring(err):find("distinct job ids", 1, true) ~= nil, true,
+                      tostring(err))
+        end
+        assert_eq(jobs.metrics().totals.blocked, before, "no blocked row left")
+        local id = jobs.enqueue("child", {}, { depends_on = { a } })
+        assert_eq(math.type(id), "integer", "a valid depends_on still enqueues")
+        assert_eq(jobs.metrics().totals.blocked, before + 1, "one blocked row")
+    end)
+    test("metrics with a queue named constructor", function()
+        jobs.enqueue("t", {}, { queue = "constructor" })
+        assert_eq(jobs.metrics().queues["constructor"].pending, 1, "bucket")
+    end)
+end
+
 -- The harness sets the case as a global before it runs the script.
 local case = rawget(_G, "__jobs_case")
 test("the case is known", function()

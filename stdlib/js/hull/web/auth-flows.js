@@ -652,15 +652,46 @@ function parseBody(req) {
     return out;
 }
 
+// { limit, window }: whole numbers > 0, or false to disable. 0 took the
+// default here (`cfg.limit || 3`) and was kept by the Lua twin, which then
+// dropped every mail - limit 0 - or limited nothing - window 0 (audit 20).
+function checkEmailRateLimit(v) {
+    if (v === false || v === null) return false;
+    if (typeof v !== "object")
+        throw new Error("auth-flows: emailRateLimit must be false or { limit, window }");
+    const out = { limit: 3, window: 900 };
+    const lim = v.limit, win = v.window;
+    if (lim !== undefined) {
+        if (!Number.isInteger(lim) || lim <= 0)
+            throw new Error("auth-flows: emailRateLimit.limit must be a whole number > 0");
+        out.limit = lim;
+    }
+    if (win !== undefined) {
+        if (!Number.isInteger(win) || win <= 0)
+            throw new Error("auth-flows: emailRateLimit.window must be a whole number > 0");
+        out.window = win;
+    }
+    return out;
+}
+
 function isEmailIsh(s) {
     if (typeof s !== "string") return false;
-    if (s.length < 3 || s.length > 254) return false;
     // Round-9 MEDIUM-8: reject control chars (< 0x20 or 0x7f). See
     // Lua sibling for the rate-limit-bypass + SMTP-truncation attack.
+    // The length is counted in UTF-8 bytes, as the Lua twin counts it: in
+    // UTF-16 units a ~200-character CJK address (~600 bytes) passed, and an
+    // account whose address is over SMTP's 254-byte envelope limit can never
+    // be mailed (audit 20).
+    let bytes = 0;
     for (let i = 0; i < s.length; i++) {
         const c = s.charCodeAt(i);
         if (c < 0x20 || c === 0x7f) return false;
+        if (c < 0x80) bytes += 1;
+        else if (c < 0x800) bytes += 2;
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) { bytes += 4; i++; }
+        else bytes += 3;
     }
+    if (bytes < 3 || bytes > 254) return false;
     // One address, exactly: a single '@' and none of the characters that
     // separate or quote addresses (see the Lua sibling).
     if (/[,;<>"()\s]/.test(s)) return false;
@@ -2442,7 +2473,7 @@ function init(opts) {
     // undefined keeps the default. Reset the per-process sliding-window
     // state so re-init in tests starts with a clean bucket pool.
     if (opts.emailRateLimit !== undefined) {
-        _state.emailRateLimit = opts.emailRateLimit;
+        _state.emailRateLimit = checkEmailRateLimit(opts.emailRateLimit);
     }
     _emailRl = new Map();
 

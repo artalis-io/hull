@@ -102,9 +102,10 @@ function serialize(name, value, opts) {
     // `; HttpOnly=false`) or split the Set-Cookie header.
     const path = o.path !== undefined ? o.path : "/";
     if (path) {
-        if (/[;\r\n\x00]/.test(path))
-            throw new Error("cookie: invalid path (contains ';', "
-                + "CR, LF, or NUL)");
+        // Every control byte, as the Lua twin's [%c;] (audit 20).
+        if (/[\x00-\x1f\x7f;]/.test(path))
+            throw new Error("cookie: invalid path (contains ';' or a "
+                + "control character)");
         str += "; Path=" + path;
     }
 
@@ -118,15 +119,15 @@ function serialize(name, value, opts) {
     // MaxAge
     if (o.maxAge !== undefined && o.maxAge !== null) {
         const maxAge = Math.floor(o.maxAge);
-        if (isNaN(maxAge))
-            throw new Error("maxAge must be a number");
+        if (!Number.isFinite(maxAge))   // "Max-Age=Infinity" (audit 20)
+            throw new Error("maxAge must be a finite number");
         str += "; Max-Age=" + maxAge;
     }
 
     // Expires
     if (o.expires) {
         if (typeof o.expires === "string") {
-            if (/[\x00-\x1f;]/.test(o.expires))
+            if (/[\x00-\x1f\x7f;]/.test(o.expires))
                 throw new Error("cookie: invalid expires value");
             str += "; Expires=" + o.expires;
         } else if (typeof o.expires === "number")

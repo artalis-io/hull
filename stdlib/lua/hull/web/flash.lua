@@ -71,6 +71,17 @@ end
 --   `"error"`, `"info"`, `"warn"`). Default `"info"`.
 --
 -- @raise Error if no session is wired or `text` is missing.
+-- A kind is a short tag: a string (as the JS twin's String(kind)), capped,
+-- since it was stored as given - a table, or kilobytes - outside the text cap
+-- (audit 20).
+local FLASH_MAX_KIND_BYTES = 64
+local function flash_kind(kind)
+    if kind == nil then return "info" end
+    local k = tostring(kind)
+    if #k > FLASH_MAX_KIND_BYTES then k = k:sub(1, FLASH_MAX_KIND_BYTES) end
+    return k
+end
+
 function flash.set(req, text, kind)
     if text == nil then
         error("flash.set: text is required", 2)
@@ -93,7 +104,7 @@ function flash.set(req, text, kind)
     end
     table.insert(sess.flash, {
         text = s,
-        kind = kind or "info",
+        kind = flash_kind(kind),
     })
     session.update(sid, sess)
 end
@@ -142,7 +153,7 @@ function flash.trigger(res, text, kind)
         error("flash.trigger: text is required", 2)
     end
     local payload = json.encode({
-        flash = { text = tostring(text), kind = kind or "info" },
+        flash = { text = tostring(text), kind = flash_kind(kind) },
     })
     res:header("HX-Trigger", payload)
 end

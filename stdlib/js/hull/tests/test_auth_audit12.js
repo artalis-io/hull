@@ -550,6 +550,33 @@ await test("a14: init refuses counts and durations that are not whole numbers > 
     }
 });
 
+// Audit 20: emailRateLimit 0 took the default here and was kept by the Lua
+// twin (limit 0 dropped every mail); init refuses it in both now. The email
+// check counts UTF-8 bytes (254) and refuses Unicode white space in both.
+await test("a20: emailRateLimit must be whole numbers > 0", async () => {
+    for (const bad of [{ limit: 0 }, { window: 0 }, { limit: -1 }, { limit: 1.5 }, "x"]) {
+        let threw = false;
+        try { init({ emailRateLimit: bad }); }
+        catch (e) { threw = /emailRateLimit/.test(String(e && e.message)); }
+        assertEq(threw, true, "refused " + JSON.stringify(bad));
+    }
+    init({ emailRateLimit: { limit: 2 } });
+    const st = __testHooks('hull:web:auth-flows').state;
+    assertEq(st.emailRateLimit.limit, 2, "limit kept");
+    assertEq(st.emailRateLimit.window, 900, "window defaulted");
+    init({ emailRateLimit: false });
+    assertEq(st.emailRateLimit, false, "false disables");
+});
+await test("a20: isEmailIsh counts UTF-8 bytes and refuses Unicode spaces", async () => {
+    const isEmailIsh = __testHooks('hull:web:auth-flows').isEmailIsh;
+    const local = "\u4e2d".repeat(100);        // 100 characters, 300 bytes
+    assertEq(isEmailIsh(local + "@x.test"), false, "over 254 bytes");
+    assertEq(isEmailIsh("\u4e2d".repeat(20) + "@x.test"), true, "67 bytes");
+    assertEq(isEmailIsh("a@x.test\u00a0"), false, "NBSP");
+    assertEq(isEmailIsh("a\u3000b@x.test"), false, "ideographic space");
+    assertEq(isEmailIsh("a@x.test"), true, "plain");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;
 console.log("auth audit 12: " + pass + " passed, " + fail + " failed");

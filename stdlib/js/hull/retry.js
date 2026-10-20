@@ -71,7 +71,12 @@ retry.backoff = function(attempt, opts) {
  */
 retry.run = async function(fn, opts) {
     opts = opts || {};
-    const max = opts.maxAttempts || DEFAULTS.maxAttempts;
+    // Anything that is not a number of at least 1 takes the default, as in
+    // the Lua twin: with -1 or 0.5 the loop never ran, fn was never called,
+    // and the call threw undefined (audit 20).
+    let max = opts.maxAttempts;
+    if (typeof max !== "number" || !(max >= 1)) max = DEFAULTS.maxAttempts;
+    max = Math.floor(max);
     let lastOk = false, lastVal;
     for (let attempt = 1; attempt <= max; attempt++) {
         let ok, val;

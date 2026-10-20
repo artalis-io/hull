@@ -1143,6 +1143,39 @@ end
 -- Trivial email shape check. The actual deliverability is
 -- determined by the email provider - we just guard against
 -- obviously-garbage input.
+-- { limit, window }: whole numbers > 0, or false to disable. 0 was kept
+-- here and took the default in the JS twin: limit 0 dropped every verify /
+-- reset / magic-link / welcome mail while the responses said ok, and window 0
+-- limited nothing (audit 20).
+local function check_email_rate_limit(v)
+    if v == false then return false end
+    if type(v) ~= "table" then
+        error("auth-flows: email_rate_limit must be false or { limit, window }", 3)
+    end
+    local out = { limit = 3, window = 900 }
+    for _, k in ipairs({ "limit", "window" }) do
+        local n = v[k]
+        if n ~= nil then
+            local i = math.tointeger(n)
+            if not i or i <= 0 then
+                error("auth-flows: email_rate_limit." .. k
+                      .. " must be a whole number > 0", 3)
+            end
+            out[k] = i
+        end
+    end
+    return out
+end
+
+-- The Unicode white space JS's \s matches, as UTF-8 byte patterns (NEL,
+-- NBSP, U+1680, U+2000-200A, U+2028 / 2029, U+202F, U+205F, U+3000, U+FEFF):
+-- %s is ASCII only, so an address ending in NBSP passed here, and a provider
+-- that trims it mailed one mailbox under two rate-limit keys (audit 20).
+local UNICODE_SPACE = {
+    "\xC2[\x85\xA0]", "\xE1\x9A\x80", "\xE2\x80[\x80-\x8A\xA8\xA9\xAF]",
+    "\xE2\x81\x9F", "\xE3\x80\x80", "\xEF\xBB\xBF",
+}
+
 local function is_email_ish(s)
     if type(s) ~= "string" then return false end
     if #s < 3 or #s > 254 then return false end
@@ -1163,6 +1196,9 @@ local function is_email_ish(s)
     -- the shape check, and an app whose email_send hands the string to an
     -- HTTP provider (which splits on commas) mailed the link to both.
     if s:find('[,;<>"()%s]') then return false end
+    for _, sp in ipairs(UNICODE_SPACE) do
+        if s:find(sp) then return false end
+    end
     local at = s:find("@", 1, true)
     if not at or at == 1 or at == #s then return false end
     if s:find("@", at + 1, true) then return false end
@@ -2964,7 +3000,7 @@ function M.init(opts)
     -- per-process sliding-window state so re-init in tests starts
     -- with a clean bucket pool.
     if opts.email_rate_limit ~= nil then
-        _state.email_rate_limit = opts.email_rate_limit
+        _state.email_rate_limit = check_email_rate_limit(opts.email_rate_limit)
     end
     _email_rl = {}
     _email_rl_count = 0

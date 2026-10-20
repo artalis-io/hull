@@ -582,8 +582,21 @@ function enqueue(jobType, data, opts) {
             [o.queue || "default", jobType, now - o.throttle]);
         if (hit.length) return null;
     }
-    const deps = o.dependsOn;
-    const hasDeps = Array.isArray(deps) && deps.length > 0;
+    // The dependency ids, copied by a counted loop and checked: whole,
+    // positive, distinct. A duplicate (the edge's primary key) or a null
+    // failed its edge INSERT after the row was written (audit 20).
+    let deps = null;
+    if (Array.isArray(o.dependsOn)) {
+        const src = o.dependsOn, n = src.length;
+        deps = [];
+        for (let i = 0; i < n; i++) {
+            const d = src[i];
+            if (!Number.isInteger(d) || d <= 0 || deps.indexOf(d) >= 0)
+                throw new Error("jobs.enqueue: dependsOn must hold distinct job ids");
+            deps.push(d);
+        }
+    }
+    const hasDeps = deps !== null && deps.length > 0;
     const vals = [
         o.queue || "default",
         jobType,
@@ -609,49 +622,58 @@ function enqueue(jobType, data, opts) {
         cols.push("concurrency_limit"); vals.push(o.concurrency);
         if (o.concurrencyStrict) { cols.push("concurrency_strict"); vals.push(1); }
     }
-    let id;
-    if (o.dedupKey !== undefined && o.dedupKey !== null) {
-        // A key dedups against jobs that have not finished. The unique index
-        // also covered done / dead rows, so a completed job's key refused every
-        // re-enqueue until cleanup purged the row (7 days). A finished job
-        // gives its key up here: one statement, portable (MySQL has no partial
-        // index), and it needs no change to an existing database's index.
-        db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? " +
-            "AND status IN ('done', 'dead', 'compensated')",
-            [o.queue || "default", o.dedupKey]);
-        const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
-        if (!(n && n > 0)) return null;   // an un-run job with this (queue, dedupKey) exists
-        // Portable id fetch: the unique (queue, dedup_key) identifies the new row.
-        // (db.lastId is unsupported on Postgres, which has no last-insert-rowid.)
-        const rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
-            [o.queue || "default", o.dedupKey]);
-        id = rows.length ? rows[0].id : null;
-    } else {
-        const ph = cols.map(() => "?");
-        const sql = "INSERT INTO _hull_jobs (" + cols.join(", ") + ") VALUES (" + ph.join(", ") + ")";
-        if (db.dialect.supportsReturning) {
-            // SQLite + Postgres: read the id back from the INSERT itself.
-            const rows = db.query(sql + " RETURNING id", vals);
+    // The row and its dependency edges commit together (a savepoint inside a
+    // caller's batch). The row committed first, so a failed edge left a
+    // 'blocked' row with no (or only some) edges: one the reaper's
+    // stuck-dependent sweep - it joins the edges - never saw, or one that ran
+    // once its other dependency ended though enqueue had thrown (audit 20).
+    let id, collapsed = false;
+    const write = () => {
+        if (o.dedupKey !== undefined && o.dedupKey !== null) {
+            // A key dedups against jobs that have not finished. The unique index
+            // also covered done / dead rows, so a completed job's key refused every
+            // re-enqueue until cleanup purged the row (7 days). A finished job
+            // gives its key up here: one statement, portable (MySQL has no partial
+            // index), and it needs no change to an existing database's index.
+            db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? " +
+                "AND status IN ('done', 'dead', 'compensated')",
+                [o.queue || "default", o.dedupKey]);
+            const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
+            if (!(n && n > 0)) { collapsed = true; return; }   // an un-run job with this (queue, dedupKey) exists
+            // Portable id fetch: the unique (queue, dedup_key) identifies the new row.
+            // (db.lastId is unsupported on Postgres, which has no last-insert-rowid.)
+            const rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
+                [o.queue || "default", o.dedupKey]);
             id = rows.length ? rows[0].id : null;
         } else {
-            db.exec(sql, vals);   // MySQL: LAST_INSERT_ID via db.lastId
-            id = db.lastId();
+            const ph = cols.map(() => "?");
+            const sql = "INSERT INTO _hull_jobs (" + cols.join(", ") + ") VALUES (" + ph.join(", ") + ")";
+            if (db.dialect.supportsReturning) {
+                // SQLite + Postgres: read the id back from the INSERT itself.
+                const rows = db.query(sql + " RETURNING id", vals);
+                id = rows.length ? rows[0].id : null;
+            } else {
+                db.exec(sql, vals);   // MySQL: LAST_INSERT_ID via db.lastId
+                id = db.lastId();
+            }
         }
-    }
-    if (hasDeps) {
-        // Record edges, then re-check each dep: closes the enqueue/complete race
-        // (whichever side runs second is a no-op - both idempotent).
-        const failMode = o.onDepFailure === "run" ? "run" : null;
-        deps.forEach((dep, i) => {
-            db.exec("INSERT INTO _hull_job_deps (dependent_id, dep_id, ord, fail_mode) " +
-                "VALUES (?, ?, ?, ?)", [id, dep, i + 1, failMode]);
-        });
-        for (const dep of deps) {
-            const g = get(dep);
-            if (g === null || g.status === "done") resolveEdge(id, dep, true, failMode);
-            else if (g.status === "dead") resolveEdge(id, dep, false, failMode);
+        if (hasDeps) {
+            // Record edges, then re-check each dep: closes the enqueue/complete race
+            // (whichever side runs second is a no-op - both idempotent).
+            const failMode = o.onDepFailure === "run" ? "run" : null;
+            deps.forEach((dep, i) => {
+                db.exec("INSERT INTO _hull_job_deps (dependent_id, dep_id, ord, fail_mode) " +
+                    "VALUES (?, ?, ?, ?)", [id, dep, i + 1, failMode]);
+            });
+            for (const dep of deps) {
+                const g = get(dep);
+                if (g === null || g.status === "done") resolveEdge(id, dep, true, failMode);
+                else if (g.status === "dead") resolveEdge(id, dep, false, failMode);
+            }
         }
-    }
+    };
+    if (hasDeps) db.batch(write); else write();
+    if (collapsed) return null;
     // Durable "enqueued" event (opt-in). Emitted here so it joins the caller's
     // db.batch when enqueue is called inside one (transactional coupling).
     emitDurable("enqueued",
@@ -937,7 +959,7 @@ function resolveQueueOrder(opts) {
     const qs = opts.queues;
     if (qs == null) return [opts.queue || "default"];
     if (Array.isArray(qs)) return qs.slice();                 // list (strict priority)
-    const names = [], weights = {};                           // map (weighted)
+    const names = [], weights = Object.create(null);          // map (weighted; no prototype, audit 20)
     let total = 0;
     for (const name of Object.keys(qs)) {
         const w = qs[name];
@@ -1393,7 +1415,10 @@ function parseField(f, lo, hi) {
 // Parse a 5-field cron spec (min hour dom month dow; dow 0/7=Sunday).
 function parseCron(spec) {
     if (typeof spec !== "string") return null;
-    const f = spec.trim().split(/\s+/);
+    // ASCII white space only, as the Lua twin's %S+: \s also split on
+    // NBSP and the other Unicode spaces, so a spec valid on a JS worker was
+    // invalid - and disabled - on a Lua one of the same fleet (audit 20).
+    const f = spec.replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, "").split(/[ \t\n\v\f\r]+/);
     if (f.length !== 5) return null;
     const min = parseField(f[0], 0, 59), hour = parseField(f[1], 0, 23);
     const dom = parseField(f[2], 1, 31), month = parseField(f[3], 1, 12);
@@ -1914,7 +1939,10 @@ function metrics(opts) {
     const now = time.now();
     const LIVE = { pending: 1, running: 1, waiting: 1, blocked: 1, dead: 1 };
     const newBucket = () => ({ pending: 0, running: 0, waiting: 0, blocked: 0, dead: 0 });
-    const queues = {}, totals = newBucket();
+    // No prototype: a queue named "constructor" or "toString" found the
+    // inherited (frozen) intrinsic and the bucket write threw, for the whole
+    // fleet's metrics (audit 20; #790 fixed the listener map only).
+    const queues = Object.create(null), totals = newBucket();
     const rows = o.queue
         ? db.query("SELECT queue, status, COUNT(*) AS n FROM _hull_jobs WHERE queue=? GROUP BY queue, status", [o.queue])
         : db.query("SELECT queue, status, COUNT(*) AS n FROM _hull_jobs GROUP BY queue, status");

@@ -60,6 +60,7 @@ const MAX_KEY_LEN = 255;
  * replay. NO blanket X-* - the previous version was too permissive
  * (would replay X-Auth-Token, X-API-Key, X-CSRF-Token, etc.). */
 const REPLAYABLE_HEADERS = {
+    __proto__: null,   // "constructor" etc. are not replayable (audit 20)
     "content-type": 1,
     "content-language": 1,
     "content-encoding": 1,

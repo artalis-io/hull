@@ -86,7 +86,7 @@ function keyring(opts) {
     if (!opts || typeof opts.keys !== "object" || opts.keys === null) {
         throw new Error("sealbox.keyring: expected { keys: {[id]: key, ...}, current: id }");
     }
-    const keys = {};
+    const keys = Object.create(null);   // ids only, never an intrinsic (audit 20)
     for (const idStr of Object.keys(opts.keys)) {
         const id = keyId(idStr);
         if (id === null) {
@@ -125,7 +125,7 @@ function keyringFromEnv(opts) {
     if (!opts || typeof opts.keys !== "object" || opts.keys === null) {
         throw new Error('sealbox.keyringFromEnv: expected { keys: {[id]: "VAR", ...}, current: id }');
     }
-    const keys = {};
+    const keys = Object.create(null);   // ids only, never an intrinsic (audit 20)
     for (const id of Object.keys(opts.keys)) {
         const v = opts.keys[id];
         if (typeof v !== "string" || v === "") {
