@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/host.h"   /* hl_host_home */
 #include "hull/shared/cache_registry.h"
 #include "hull/shared/cache_dir.h"
 
@@ -69,8 +70,12 @@ int hl_cache_resolve_path(const HlCacheKind *kind, char *out, size_t out_sz)
     /* System stores: always under $HOME/.hull/blobs/<name>/.
      * HULL_CACHE_DIR doesn't apply - these are not per-app caches,
      * they're durable signed downloads with a stable system home. */
-    const char *home = getenv("HOME");
-    if (!home || !*home) { errno = ENOENT; return -1; }
+    /* The user's home (hl_host_home: an absolute $HOME / $USERPROFILE, else
+     * the password database's). A relative $HOME (HOME=. in a unit file) put
+     * the store under the working directory - the app directory - where a
+     * cloned app could ship entries of its own (audit 20). */
+    const char *home = hl_host_home();
+    if (!home) { errno = ENOENT; return -1; }
     int n = snprintf(out, out_sz, "%s/.hull/blobs/%s", home, kind->name);
     if (n < 0 || (size_t)n >= out_sz) { errno = ENAMETOOLONG; return -1; }
     return 0;

@@ -599,6 +599,26 @@ static int l_tool_path_kind(lua_State *L)
     return 1;
 }
 
+/* ── tool.is_symlink(path) → true | false (nil when not readable) ──────
+ * lstat(): whether @p path itself is a symbolic link. find_files skips links
+ * BELOW its root but opens the root by name, following it, so hull build
+ * embedded whatever a symlinked static/ (templates/, migrations/, compute/,
+ * shaders/) pointed at - other projects under the invocation directory,
+ * served publicly from the signed binary (audit 20). build.lua refuses such
+ * a root with this, as the dev server's static serving does. */
+static int l_tool_is_symlink(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx && hl_tool_unveil_check(ctx, path, 'r') != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    struct stat st;
+    lua_pushboolean(L, lstat(path, &st) == 0 && S_ISLNK(st.st_mode));
+    return 1;
+}
+
 /* tool.realpath(path) -> canonical_abs | (nil, "missing"|"denied"|"error").
  * Resolves symlinks + . / .. to a canonical absolute path. Used by hull analyze to
  * enforce containment on the REAL location of an explicit target (a symlink whose
@@ -2118,6 +2138,7 @@ static const luaL_Reg tool_funcs[] = {
     { "write_file",             l_tool_write_file },
     { "file_exists",            l_tool_file_exists },
     { "path_kind",              l_tool_path_kind },
+    { "is_symlink",             l_tool_is_symlink },
     { "realpath",               l_tool_realpath },
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },

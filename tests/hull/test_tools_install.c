@@ -244,12 +244,20 @@ UTEST_F(tools_fixture, dir_is_idempotent) {
     ASSERT_STREQ(a, b);
 }
 
-UTEST_F(tools_fixture, dir_fails_without_home) {
+/* Audit 20: the tools store, the code caches and their seal key took $HOME
+ * as given, so a relative one (HOME=. in a unit file) put them under the
+ * working directory - the app directory - where a cloned app could ship its
+ * own. The home is hl_host_home's now: an absolute $HOME or $USERPROFILE, else
+ * the password database's, never a relative path. */
+UTEST_F(tools_fixture, relative_home_is_never_used) {
     (void)utest_fixture;
     char out[PATH_MAX];
-    unsetenv("HOME");
-    unsetenv("USERPROFILE");   /* neither home var set → fail closed */
-    ASSERT_EQ(hl_tools_dir(out, sizeof(out)), -1);
+    setenv("HOME", "relative-home", 1);
+    unsetenv("USERPROFILE");
+    if (hl_tools_install_path("cosmocc", out, sizeof(out)) == 0) {
+        EXPECT_EQ(out[0], '/');              /* the password database's */
+        EXPECT_TRUE(strncmp(out, "relative-home", 13) != 0);
+    }   /* else no usable home at all (Windows): nothing resolved */
 }
 
 /* Spec item D: a cosmo hull on Windows has no $HOME; $USERPROFILE is the home

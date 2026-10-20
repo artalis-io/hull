@@ -205,8 +205,12 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
      * env-var surface (HULL_NO_CACHE etc.) keeps "cache"
      * nomenclature - these directories ARE caches even though the
      * disk layout is the blob shape. */
-    const char *home = getenv("HOME");
-    if (!home || !*home) { errno = ENOENT; return -1; }
+    /* The user's home (hl_host_home: an absolute $HOME / $USERPROFILE, else
+     * the password database's). A relative $HOME (HOME=. in a unit file) put
+     * the cache under the working directory - the app directory - where a
+     * cloned app could ship entries of its own (audit 20). */
+    const char *home = hl_host_home();
+    if (!home) { errno = ENOENT; return -1; }
 
     char hull_dir[PATH_MAX];
     int n = snprintf(hull_dir, sizeof(hull_dir), "%s/.hull", home);

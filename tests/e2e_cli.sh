@@ -579,6 +579,54 @@ LUA
         fail "hull keygen produced no developer.key"
     fi
     rm -rf "$d"
+
+    # (audit 20) An error RAISED inside the signing step - json.decode of a
+    # malformed platform.sig - skipped that cleanup and left the unsigned
+    # binary behind too; the whole step now runs under pcall.
+    d=$(mktemp -d)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = {} })
+app.main(function() return 0 end)
+LUA
+    ( cd "$d" && "${hull_abs}" keygen >/dev/null 2>&1 ) || true
+    printf '{"x":' > "${d}/bad.sig"
+    if [ -f "${d}/developer.key" ]; then
+        bin=$(build_cli "$d" --sign "${d}/developer.key" --platform-sig "${d}/bad.sig")
+        if grep -q "hull build --sign:" "${d}/build.log"; then
+            pass "hull build --sign: malformed platform.sig refused"
+        else
+            fail "hull build --sign: malformed platform.sig (got '$(tail -3 "${d}/build.log")')"
+        fi
+        [ -z "$bin" ] && pass "hull build --sign: no unsigned binary after a raised error" \
+            || fail "hull build --sign: left an unsigned binary after a raised error"
+    else
+        fail "hull keygen produced no developer.key"
+    fi
+    rm -rf "$d"
+
+    # (audit 20) find_files skips links below its root but followed the root:
+    # an app whose static/ was a symlink had the tree it pointed at embedded
+    # and served. Refused now, as the dev server refuses it.
+    d=$(mktemp -d)
+    mkdir -p "${d}/app" "${d}/elsewhere"
+    echo 'not the app' > "${d}/elsewhere/secret.txt"
+    cat > "${d}/app/app.lua" <<'LUA'
+app.manifest({ modules = {} })
+app.main(function() return 0 end)
+LUA
+    if ln -s ../elsewhere "${d}/app/static" 2>/dev/null && [ -L "${d}/app/static" ]; then
+        bin=$(build_cli "${d}/app")
+        if grep -q "is a symbolic link" "${d}/app/build.log"; then
+            pass "hull build: symlinked static/ refused"
+        else
+            fail "hull build: symlinked static/ (got '$(tail -3 "${d}/app/build.log")')"
+        fi
+        [ -z "$bin" ] && pass "hull build: no binary from a symlinked static/" \
+            || fail "hull build: embedded a symlinked static/"
+    else
+        echo "  SKIP: hull build symlinked static/ (no symlinks here)"
+    fi
+    rm -rf "$d"
 }
 
 run_built_cli
