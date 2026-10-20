@@ -47,12 +47,21 @@ static void smtp_secure_zero(void *p, size_t n)
 
 /* ── CRLF injection guard ────────────────────────────────────────── */
 
-/* An address usable inside <...> on an SMTP command line. */
+/* RFC 5321 4.5.3.1.3: a path is at most 256 octets, its angle brackets
+ * included. */
+#define HL_SMTP_ENVELOPE_MAX 254
+
+/* An address usable inside <...> on an SMTP command line. Its length is
+ * bounded too: MAIL FROM:<%s>\r\n is formatted into a fixed command buffer,
+ * and a longer address was cut short there - the server got no CRLF and the
+ * send waited out its whole timeout (audit 19). */
 static int smtp_envelope_ok(const char *a)
 {
     if (!a) return 1;   /* optional fields are checked by their callers */
-    for (const unsigned char *p = (const unsigned char *)a; *p; p++)
-        if (*p <= 0x20 || *p == 0x7f || *p == '<' || *p == '>')
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)a; *p; p++, n++)
+        if (*p <= 0x20 || *p == 0x7f || *p == '<' || *p == '>' ||
+            n >= HL_SMTP_ENVELOPE_MAX)
             return 0;
     return 1;
 }

@@ -1,0 +1,31 @@
+diff --git a/core/iwasm/common/wasm_runtime_common.c b/core/iwasm/common/wasm_runtime_common.c
+index 5031b94..50ca0a2 100644
+--- a/core/iwasm/common/wasm_runtime_common.c
++++ b/core/iwasm/common/wasm_runtime_common.c
+@@ -8181,15 +8181,23 @@ wasm_runtime_check_and_update_last_used_shared_heap(
+      * so the permission always belongs to the heap that formed the address --
+      * never a stale value from a different attached span. */
+     for (cur = heap; cur; cur = cur->chain_next) {
+-        shared_heap_start =
++        /* Hull ext (0008): the ACCESS window is the valid sub-range 0004
++         * carves ([rstart + valid_offset, + valid_size); valid_size 0 => the
++         * full heap), as in the single-heap bounds of wasm_memory.c. This
++         * chain lookup matched the whole reserved region, so a chain-enabled
++         * AOT read the page slop of a mapped span around its window.
++         * base_addr_adj stays keyed off the reserved start. */
++        uint64 rstart =
+             is_memory64 ? cur->start_off_mem64 : cur->start_off_mem32;
+-        shared_heap_end = shared_heap_start - 1 + cur->size;
++        uint64 vsize = cur->valid_size ? cur->valid_size : cur->size;
++        shared_heap_start = rstart + cur->valid_offset;
++        shared_heap_end = shared_heap_start - 1 + vsize;
+         if (bytes - 1 <= shared_heap_end && app_offset >= shared_heap_start
+             && app_offset <= shared_heap_end - bytes + 1) {
+             *shared_heap_start_off_p = (uintptr_t)shared_heap_start;
+             *shared_heap_end_off_p = (uintptr_t)shared_heap_end;
+             *shared_heap_base_addr_adj_p =
+-                cur->base_addr - (uintptr_t)shared_heap_start;
++                cur->base_addr - (uintptr_t)rstart;
+             *shared_heap_read_only_p = cur->read_only;
+             return true;
+         }

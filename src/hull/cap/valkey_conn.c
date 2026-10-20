@@ -29,6 +29,7 @@
 
 #ifndef HL_VALKEY_NO_TLS
 #include "hull/cap/db_transport.h"   /* shared Keel-v3 byte transport (bytes + TLS) */
+#include "hull/cap/db_budget.h"      /* hl_db_budget_charge: a sliced wait asks the run */
 #include "hull/shared/tls_client.h"
 #include <keel/clock.h>              /* kl_monotonic_ms: per-command deadline */
 #include <errno.h>
@@ -301,9 +302,23 @@ static ssize_t io_recv(HlValkeyConn *c, uint8_t *buf, size_t len) {
     return hl_db_transport_recv(c->transport, buf, len);
 }
 
+/* The run this command belongs to is over its budget or past its deadline
+ * (a 0-unit charge only asks). */
+static int run_stopped(void) {
+#ifdef HL_ENABLE_DB
+    return hl_db_budget_charge(0) != 0;
+#else
+    return 0;
+#endif
+}
+
 /* Wait until the socket is ready for `events` or the command's deadline
  * passes. 0 = go ahead (ready, an error / hangup the next I/O will report, or
- * no deadline), -1 = timed out. */
+ * no deadline), -1 = timed out, -2 = the run's budget or deadline stopped it.
+ * Polled in HL_DB_WAIT_SLICE_MS slices that ask the run's budget, as the
+ * Postgres / MySQL waits are (audit 18): one poll for the whole command
+ * deadline (connect_timeout, up to 10 min) held the event loop with no
+ * budget or run-deadline check (audit 19). */
 static int wait_io(HlValkeyConn *c, short events) {
     if (!c->deadline_ms) return 0;
     if ((events & POLLIN) && hl_db_transport_pending(c->transport) > 0) return 0;
@@ -314,11 +329,16 @@ static int wait_io(HlValkeyConn *c, short events) {
         if (now >= c->deadline_ms) return -1;
         uint64_t left = c->deadline_ms - now;
         int ms = left > (uint64_t)INT32_MAX ? INT32_MAX : (int)left;
+        int slice = ms > HL_DB_WAIT_SLICE_MS ? HL_DB_WAIT_SLICE_MS : ms;
         if (c->own_socket) hl_db_transport_set_io_timeout(c->transport, ms);
         struct pollfd pfd = { .fd = fd, .events = events, .revents = 0 };
-        int pr = poll(&pfd, 1, ms);
+        int pr = poll(&pfd, 1, slice);
         if (pr > 0) return 0;
-        if (pr == 0) return -1;
+        if (pr == 0) {
+            if (slice == ms) return -1;
+            if (run_stopped()) return -2;
+            continue;
+        }
         if (errno != EINTR) return 0;   /* let the I/O report it */
     }
 }
@@ -336,7 +356,13 @@ static int more_waiting(HlValkeyConn *c) {
 static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        if (wait_io(c, POLLOUT) != 0) { c->dead = 1; set_err(c, "write timed out"); return -1; }
+        int w = wait_io(c, POLLOUT);
+        if (w != 0) {
+            c->dead = 1;
+            set_err(c, w == -2 ? "interrupted (instruction limit exceeded)"
+                               : "write timed out");
+            return -1;
+        }
         ssize_t n = io_send(c, buf + sent, len - sent);
         if (n <= 0) { c->dead = 1; set_err(c, "socket write failed"); return -1; }
         sent += (size_t)n;
@@ -375,7 +401,13 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
             if (!nb) { c->dead = 1; set_err(c, "out of memory"); return -1; }
             c->rbuf = nb; c->rcap = ncap;
         }
-        if (wait_io(c, POLLIN) != 0) { c->dead = 1; set_err(c, "read timed out"); return -1; }
+        int w = wait_io(c, POLLIN);
+        if (w != 0) {
+            c->dead = 1;
+            set_err(c, w == -2 ? "interrupted (instruction limit exceeded)"
+                               : "read timed out");
+            return -1;
+        }
         ssize_t n = io_recv(c, c->rbuf + c->rlen, c->rcap - c->rlen);
         if (n <= 0) {
             c->dead = 1;

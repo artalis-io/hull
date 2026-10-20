@@ -38,6 +38,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>   /* strncasecmp */
 #include <string.h>
 #include <time.h>       /* nanosleep */
 
@@ -206,7 +207,9 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
      * "duckdb:///var/db.duckdb" -> "/var/db.duckdb", "duckdb://:memory:" ->
      * ":memory:". A NULL/empty path opens a private in-memory database. */
     const char *path = dsn ? dsn : ":memory:";
-    if (strncmp(path, "duckdb://", 9) == 0)
+    /* Any case, as the selector matched it (db_select.c lowercases the
+     * scheme): "DuckDB://x" was opened as the file "DuckDB://x" (audit 19). */
+    if (strncasecmp(path, "duckdb://", 9) == 0)
         path += 9;
     if (path[0] == '\0')
         path = ":memory:";

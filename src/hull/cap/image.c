@@ -202,6 +202,20 @@ uint64_t hl_image_codec_units(uint32_t w, uint32_t h, size_t coded_len)
     return units > UINT64_MAX - coded ? UINT64_MAX : units + coded;
 }
 
+/* image_stb.c: the scans of a JPEG, 0 for anything else. */
+unsigned hl_image_stb_jpeg_scans(const void *src, size_t len);
+
+uint64_t hl_image_decode_units(const void *data, size_t len,
+                               uint32_t w, uint32_t h)
+{
+    uint64_t one = hl_image_codec_units(w, h, 0);
+    uint64_t coded = (uint64_t)len / 8;
+    unsigned scans = data ? hl_image_stb_jpeg_scans(data, len) : 0;
+    if (scans < 1) scans = 1;
+    uint64_t px = one > UINT64_MAX / scans ? UINT64_MAX : one * scans;
+    return px > UINT64_MAX - coded ? UINT64_MAX : px + coded;
+}
+
 HlImage *hl_image_decode(const void *data, size_t len,
                           const char *fmt_name,
                           const HlImageAlloc *alloc, const char **err_msg)

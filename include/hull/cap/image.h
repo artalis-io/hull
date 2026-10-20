@@ -123,6 +123,14 @@ int hl_image_info(const void *data, size_t len, const char *fmt_name,
  * event loop for seconds per iteration (audit 10). Saturates. */
 uint64_t hl_image_codec_units(uint32_t w, uint32_t h, size_t coded_len);
 
+/* Instruction-budget units for DECODING @p data (a w x h image, sized from
+ * its header): hl_image_codec_units, with the pixel part paid once per scan
+ * of a progressive JPEG. stb walks every block of the image for each scan,
+ * so a file of up to HL_JPEG_MAX_SCANS (100) small refinement scans cost
+ * ~100 decodes for the price of one (audit 19). Saturates. */
+uint64_t hl_image_decode_units(const void *data, size_t len,
+                               uint32_t w, uint32_t h);
+
 /* Bytes an encode of @p img works over: its pixel rows plus one filter byte
  * a row (the PNG writer's filtered copy of the image). stb_image_write
  * allocates off the VM heap - a PNG encode holds a few times this at its

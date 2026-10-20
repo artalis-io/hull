@@ -233,7 +233,7 @@ static int l_image_decode(lua_State *L)
     uint32_t iw = 0, ih = 0;
     if (hl_image_info(view.data, view.len, fmt_name, &iw, &ih) != 0)
         iw = ih = 0;
-    image_charge(L, hl_image_codec_units(iw, ih, view.len));
+    image_charge(L, hl_image_decode_units(view.data, view.len, iw, ih));
 
     HlImageAlloc ia;
     hl_lua_image_alloc(L, &ia);
