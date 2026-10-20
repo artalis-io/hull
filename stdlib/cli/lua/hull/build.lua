@@ -519,6 +519,19 @@ local function collect_app_entries(app_dir, files)
         end
         entries[#entries + 1] = { name = item.entry_name, data = data }
     end
+    -- Two files must not embed under one name, as in generate_app_registry:
+    -- this (the default, compiler-free) path had no such check, and the
+    -- built binary aborted at startup on hl_vfs_init's sorted-order assert
+    -- (audit 19).
+    local seen_names = {}
+    for _, e in ipairs(entries) do
+        if seen_names[e.name] then
+            tool.stderr("hull build: two files embed under the same name '"
+                        .. e.name .. "' (rename one, e.g. x.json.lua vs x.json)\n")
+            tool.exit(1)
+        end
+        seen_names[e.name] = true
+    end
     table.sort(entries, function(a, b) return a.name < b.name end)
     return entries
 end
@@ -819,9 +832,10 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
         end
     end
     if not platform then
-        tool.stderr("hull build: cannot read platform.sig (required for --sign)\n")
-        tool.stderr("hint: run `hull sign-platform <key>` first\n")
-        tool.exit(1)
+        -- Through sign_fail, as every other --sign failure: a bare exit left
+        -- the unsigned binary at the output path (audit 19).
+        sign_fail("hull build: cannot read platform.sig (required for --sign)\n"
+                  .. "hint: run `hull sign-platform <key>` first\n", tmpdir, output)
     end
 
     -- ── v0.1.3: embed the gethull-signed platform manifest blob ──
