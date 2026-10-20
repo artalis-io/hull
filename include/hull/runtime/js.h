@@ -103,6 +103,11 @@ typedef struct HlJS {
      * allocator), capped at max_heap_bytes (hl_wasm_buffer_account,
      * audit 18). */
     size_t          wasm_buf_bytes;
+    /* Capacity of every part.read() accumulator of this VM's multipart
+     * readers (server allocator, off the QuickJS heap), capped in SUM at
+     * max_heap_bytes (read_buf_append, audit 19: the cap was per part, so
+     * concurrent uploads held max_heap_bytes each). */
+    size_t          mp_read_bytes;
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */

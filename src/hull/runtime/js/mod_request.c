@@ -276,11 +276,15 @@ static int hl_mp_iter_copy_meta(HlJsMpIter *it, const KlHttpMultipartPartMeta *m
 
 /* Grow the MP_MODE_READ accumulator to fit at least `add` more bytes.
  * Doubles capacity to amortize. Returns 0 on success, -1 on OOM, -2 when the
- * part would outgrow the VM heap limit. The accumulator is on the server
- * allocator, which no VM limit covers (nor the route's multipart caps, 0 =
- * unlimited by default): a part is held to max_heap_bytes - the size of the
- * ArrayBuffer it becomes - and its bytes are charged to the run by the
- * caller, as Lua's mp_part_acc_add does (audit 18). */
+ * part would outgrow the VM heap limit, -3 when this VM's accumulators
+ * together would. The accumulator is on the server allocator, which no VM
+ * limit covers (nor the route's multipart caps, 0 = unlimited by default): a
+ * part is held to max_heap_bytes - the size of the ArrayBuffer it becomes -
+ * and its bytes are charged to the run by the caller, as Lua's
+ * mp_part_acc_add does (audit 18). The cap is also on the SUM of every
+ * accumulator of the VM (HlJS.mp_read_bytes): per part only, N slow uploads
+ * held N x max_heap_bytes off the heap - 256 connections x 64 MB - where
+ * Lua's accumulators all sit in its one VM heap (audit 19). */
 static int read_buf_append(HlJsMpCont *jc, const char *data, size_t add)
 {
     if (add == 0) return 0;
@@ -294,9 +298,18 @@ static int read_buf_append(HlJsMpCont *jc, const char *data, size_t add)
             new_cap *= 2;
         }
         if (limit && new_cap > limit) new_cap = limit;
+        /* The other accumulators' capacity (this one's is replaced). */
+        size_t others = jc->js ? jc->js->mp_read_bytes - jc->read_cap : 0;
+        if (limit && others > limit - new_cap) {
+            /* Grow to exactly what this part needs, if that fits. */
+            new_cap = jc->read_len + add;
+            if (others > limit - new_cap) return -3;
+        }
         char *nb = hl_alloc_realloc(jc->alloc, jc->read_buf,
                                      jc->read_cap, new_cap);
         if (!nb) return -1;
+        if (jc->js)
+            jc->js->mp_read_bytes = others + new_cap;
         jc->read_buf = nb;
         jc->read_cap = new_cap;
     }
@@ -582,6 +595,9 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
                     s.ready = 1;
                     s.error = make_mp_error(ctx, arc == -2
                         ? "multipart: part is larger than the heap limit"
+                        : arc == -3
+                        ? "multipart: the parts being read are larger than "
+                          "the heap limit together"
                         : "multipart: out of memory");
                     return s;
                 }
@@ -874,6 +890,8 @@ static void mp_js_cont_destroy(HlAsyncCont *self)
     HlJsMpCont *jc = (HlJsMpCont *)self;
     if (jc->read_buf) {
         hl_alloc_free(jc->alloc, jc->read_buf, jc->read_cap);
+        if (jc->js && jc->js->mp_read_bytes >= jc->read_cap)
+            jc->js->mp_read_bytes -= jc->read_cap;
         jc->read_buf = NULL;
         jc->read_cap = 0;
         jc->read_len = 0;
