@@ -12060,6 +12060,50 @@ UTEST(js_audit20_stdlib, retry_and_cookie_parity)
     cleanup_js_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 20: since #786 a cancelled hull.sleep completes its run, which for a
+ * timer handler clears the HlJSTimer's in_flight and reschedules it. Freed
+ * on its own, hl_js_free freed the timers first and cancelled the pending
+ * sleeps after, writing into a freed HlJSTimer (ASan reports it). The
+ * shipped teardowns run stop_async first; hl_js_free must be safe without. */
+UTEST(js_audit20, free_with_a_timer_parked_on_sleep)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    js.base.async_ctx = actx;
+    a12_eval_app(
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1', 'hull/timers@1'] });\n"
+        "app.get('/x', (req, res) => {});\n"
+        "app.every(100, async () => {\n"
+        "  globalThis.__a20_fired = 1;\n"
+        "  try { await hull.sleep(60000); }\n"
+        "  catch (e) { globalThis.__a20_err = String(e && e.message); }\n"
+        "});\n");
+    KlHttpServer server;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 1, .alloc = NULL };
+    kl_http_server_init(&server, &cfg);
+    ASSERT_EQ(hl_js_wire_routes_server(&js, &server, NULL), 0);
+    for (int i = 0; i < 100 && !js.sleep_timers; i++)
+        be->tick(actx, 20);
+    EXPECT_EQ(eval_int("globalThis.__a20_fired | 0"), 1);
+    char *err = eval_str("String(globalThis.__a20_err)");
+    EXPECT_STREQ(err, "undefined");
+    free(err);
+    EXPECT_TRUE(js.sleep_timers != NULL);   /* the handler is parked */
+    kl_http_server_free(&server);
+    cleanup_js();                            /* no stop_async first */
+    /* A timer the cancel rescheduled onto a freed HlJSTimer would fire
+     * here; with the runtime shutting down none is added. */
+    be->tick(actx, 200);
+    be->free(actx);
+}
+#endif
+
 /* A worker.dispatch VM runs app functions, so it is hardened too. */
 UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
 {
@@ -12080,6 +12124,30 @@ UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
         "    return Object.isFrozen(db) && !g.writable && !g.configurable ? 'locked' : 'open';\n"
         "  });\n"
         "  check(d === 'locked', 'worker db: ' + d);\n",
+        out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    js_worker_close(be, actx, pool);
+}
+
+/* Audit 20: the worker built the job's ctx by assignment, and the worker VM's
+ * Object.prototype is frozen: a key naming one of its inherited properties
+ * threw (left pending into the call, the key dropped), and `__proto__` set
+ * the prototype instead of a key. Both arrive as own data properties now. */
+UTEST(js_audit20, worker_ctx_keys_are_own_properties)
+{
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+    char out[512] = "(no verdict)";
+    js_worker_run(be, actx,
+        "  const r = await worker.dispatch((c) => {\n"
+        "    const g = Object.getOwnPropertyDescriptor(c, '__defineGetter__');\n"
+        "    const p = Object.getOwnPropertyDescriptor(c, '__proto__');\n"
+        "    return (g ? g.value : 'none') + ',' + (p ? p.value : 'none') + ','\n"
+        "      + (Object.getPrototypeOf(c) === Object.prototype);\n"
+        "  }, { __defineGetter__: 7, ['__proto__']: 8, plain: 9 });\n"
+        "  check(r === '7,8,true', 'worker ctx: ' + r);\n",
         out, sizeof out);
     EXPECT_STREQ(out, "ok");
     js_worker_close(be, actx, pool);

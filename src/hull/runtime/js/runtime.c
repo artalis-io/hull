@@ -1484,6 +1484,18 @@ void hl_js_free(HlJS *js)
      * list was file-static and outlived every runtime). */
     hl_res_base_clear(&js->res_bases);
 
+    /* Spawned tasks that never got their loop turn, and pending hull.sleep
+     * waits - before the timers and the WebSocket registry go: a sleep's
+     * cancel completes its run (hl_js_async_cancel, since #786), which
+     * reschedules a timer handler's HlJSTimer and runs an async ws on_close's
+     * teardown on its HlWsConn, both freed below (audit 20). Shutting down
+     * first, so the reschedule is refused (hl_js_timer_reschedule). Every
+     * shipped teardown runs stop_async before, which empties the list; this
+     * keeps hl_js_free safe on its own. */
+    js->base.shutting_down = 1;
+    hl_js_tasks_free(js);
+    hl_js_sleep_cancel_pending(js);
+
     /* Cancel and free tracked timers - via async backend vtable. */
     {
         const HlAsyncBackend *be = hl_async_backend();
@@ -1563,10 +1575,6 @@ void hl_js_free(HlJS *js)
      * destroy callbacks (fired by sqlite3_close) don't call JS_FreeValue
      * on a dead runtime */
     js->udf_runtime_alive = 0;
-
-    /* Spawned tasks that never got their loop turn. */
-    hl_js_tasks_free(js);
-    hl_js_sleep_cancel_pending(js);
 
     if (js->ctx && js->fn_to_string) {
         JS_FreeValue(js->ctx, *(JSValue *)js->fn_to_string);

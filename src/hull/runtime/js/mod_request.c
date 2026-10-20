@@ -57,6 +57,7 @@
 #include "quickjs.h"
 #include "internal.h"   /* HlJsRunLink and the run helpers */
 #include "db_wait.h"   /* hl_js_db_refuse_wait */
+#include "log.h"
 
 #include <stdlib.h>
 #include <stddef.h>   /* offsetof */
@@ -823,16 +824,40 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
          * via the cont's vtable (could be HlJsMpCont or the standard
          * HlJsAsyncCont - the slot dispatches to the right setter). */
         HlJsRunOnce *run = jc->link.once;
+        int rewired = 0;
         if (js->last_async_cont) {
             HlJsRunLink *nl = hl_js_cont_link((HlAsyncCont *)js->last_async_cont);
             hl_js_run_wire(nl, ctx, jc->link.handler_promise, jc->link.once);
             if (!run) run = nl->once;
             js->last_async_cont = NULL;
+            rewired = 1;
         }
         /* Waiting again - on a new op or one made earlier (audit 8 M7): not
          * holding a transaction. A run deferred to its holder has settled. */
         if (handler_pending)
             hl_js_run_yield_check(js, run);
+        /* Waiting on a promise Hull does not drive (`await gate` after the
+         * multipart loop): no op holds the connection, no read is parked on
+         * it, and no continuation was wired - nothing is left that will
+         * answer it. A multipart request's connection stays streaming until
+         * Hull sends, so it was held until the client gave up, and the res
+         * stayed live for the handler to write into once the promise
+         * settled, by then inside another entry, into a connection that may
+         * serve another client (audit 20). End it as hl_js_async_resume
+         * does, and answer it: the handler never finished its response.
+         * (An op cannot be in flight here unheld: a read refuses to park
+         * while one is attached, and an op refuses to start while a read
+         * is parked - hl_js_async_gate.) */
+        if (handler_pending && conn && !rewired && jc->life &&
+            hl_req_life_live(jc->life) && !jc->life->held &&
+            jc->life->parked == 0 && jc->life->attached == 0) {
+            log_warn("[hull:c] multipart handler awaits a promise Hull does "
+                     "not drive; the request ends now with a 500");
+            hl_req_life_kill(jc->life);
+            if (run) run->done = 1;
+            if (!hl_js_conn_held_elsewhere(js, conn))
+                hl_js_http_resume_error(js, conn, jc->req);
+        }
         JS_FreeValue(ctx, jc->link.handler_promise);
         jc->link.handler_promise = JS_UNDEFINED;
         jc->conn = NULL;

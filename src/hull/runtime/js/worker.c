@@ -248,33 +248,29 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
 
 /* ── KV helpers: JS object ↔ HlKV array ──────────────────────────── */
 
+/* The ctx object a dispatch job receives. Each key is DEFINED as an own data
+ * property: assigned, a key naming an inherited property of the frozen
+ * Object.prototype (`__defineGetter__`, `__lookupSetter__`, ...) threw and
+ * left the exception pending into JS_Call, and `__proto__` set the object's
+ * prototype instead of adding the key (audit 20). */
 static void push_kv_object(JSContext *ctx, JSValue obj,
                            const HlKV *kvs, int count)
 {
     for (int i = 0; i < count; i++) {
+        JSValue v;
         switch (kvs[i].value.type) {
-        case HL_TYPE_INT:
-            JS_SetPropertyStr(ctx, obj, kvs[i].key,
-                              JS_NewInt64(ctx, kvs[i].value.i));
-            break;
-        case HL_TYPE_DOUBLE:
-            JS_SetPropertyStr(ctx, obj, kvs[i].key,
-                              JS_NewFloat64(ctx, kvs[i].value.d));
-            break;
+        case HL_TYPE_INT:    v = JS_NewInt64(ctx, kvs[i].value.i); break;
+        case HL_TYPE_DOUBLE: v = JS_NewFloat64(ctx, kvs[i].value.d); break;
         case HL_TYPE_TEXT:
-            JS_SetPropertyStr(ctx, obj, kvs[i].key,
-                              JS_NewStringLen(ctx, kvs[i].value.s,
-                                              kvs[i].value.len));
+            v = JS_NewStringLen(ctx, kvs[i].value.s, kvs[i].value.len);
             break;
-        case HL_TYPE_BOOL:
-            JS_SetPropertyStr(ctx, obj, kvs[i].key,
-                              JS_NewBool(ctx, kvs[i].value.b));
-            break;
+        case HL_TYPE_BOOL:   v = JS_NewBool(ctx, kvs[i].value.b); break;
         case HL_TYPE_NIL:
-        default:
-            JS_SetPropertyStr(ctx, obj, kvs[i].key, JS_NULL);
-            break;
+        default:             v = JS_NULL; break;
         }
+        if (JS_DefinePropertyValueStr(ctx, obj, kvs[i].key, v,
+                                      JS_PROP_C_W_E) < 0)
+            JS_FreeValue(ctx, JS_GetException(ctx));   /* out of memory */
     }
 }
 
