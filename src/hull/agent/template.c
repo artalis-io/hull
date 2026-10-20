@@ -76,6 +76,9 @@ static int render_lua(HlLua *lua, const char *template_name,
         return rc;
     }
     lua_pushstring(L, data_json ? data_json : "{}");
+    /* A run of its own: on a warm context the budget and the deadline of
+     * the context's last entry carried over (audit 21). */
+    hl_lua_arm_entry(lua);
     if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
         const char *err = lua_tostring(L, -1);
         int rc = hl_agent_write_error(out, err ? err : "render failed");
@@ -126,6 +129,7 @@ static int render_js(HlJS *js, const char *template_name,
         "globalThis.__hull_agent_tpl_result = template.render("
             "globalThis.__hull_agent_tpl_name, "
             "globalThis.__hull_agent_tpl_data);\n";
+    hl_js_budget_arm(js);   /* a run of its own (see render_lua) */
     JSValue v = JS_Eval(ctx, code, strlen(code), "<agent-template>",
                         JS_EVAL_TYPE_MODULE);
     int err_path = JS_IsException(v);

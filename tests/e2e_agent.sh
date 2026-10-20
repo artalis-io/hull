@@ -421,6 +421,32 @@ EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent test /nonexistent)
 OUT=$(cat "$RC_TMP")
 check_exit     "test bad dir exit"         "$EXIT_CODE" "1"
 
+# ── agent eval (audit 21) ─────────────────────────────────────────────
+#
+# The statement form fell back to `load`, which the app VM does not have:
+# statements never ran, and every runtime error came back as "attempt to
+# call a nil value (global 'load')".
+
+echo ""
+echo "--- agent eval ---"
+if [ "$APP_EXT" = "lua" ]; then
+EVAL_APP=$(mktemp -d)
+cat > "$EVAL_APP/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/json@1" } })
+app.main(function() return 0 end)
+LUA
+OUT=$($HULL agent eval "1 + 1" "$EVAL_APP" 2>&1 || true)
+check_contains "eval: an expression"        "$OUT" '"result":2'
+OUT=$($HULL agent eval "local x = 2 return x * 3" "$EVAL_APP" 2>&1 || true)
+check_contains "eval: statements"           "$OUT" '"result":6'
+OUT=$($HULL agent eval "error('boom')" "$EVAL_APP" 2>&1 || true)
+check_contains "eval: the error is the snippet's" "$OUT" 'boom'
+check_not_contains "eval: no 'load' in the error" "$OUT" "global 'load'"
+rm -rf "$EVAL_APP"
+else
+    echo "  SKIP: agent eval legs are Lua (this hull runs js)"
+fi
+
 # ── help / usage ──────────────────────────────────────────────────────
 
 echo ""

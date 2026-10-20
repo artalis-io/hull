@@ -843,8 +843,7 @@ static int agent_inspect_stream_live(const char *app_dir)
     free(dev);
     if (sp_dev <= 0 || !nonce[0]) return -1;
     {
-        const char *home = getenv("HOME");
-        if (!home || !*home) home = getenv("USERPROFILE");
+        const char *home = hl_host_home();
         if (!home || !*home) return -1;
         char sp[PATH_MAX];
         int n = snprintf(sp, sizeof sp, "%s/.hull/dev-sessions/%ld", home, sp_dev);

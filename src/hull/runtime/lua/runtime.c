@@ -563,6 +563,11 @@ void hl_lua_route_destroy(HlLua *lua, HlLuaRoute *route)
     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
 }
 
+void hl_lua_arm_entry(HlLua *lua)
+{
+    if (lua && lua->L) HL_LUA_ARM(lua, lua->L);
+}
+
 void hl_lua_free(HlLua *lua)
 {
     if (!lua)

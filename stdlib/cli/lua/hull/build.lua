@@ -957,7 +957,13 @@ local function sign_app(app_dir, key_file, sign_ctx, files, tmpdir, output)
     }
 
     local pkg_sig = json.encode(sig_table)
-    write_file(app_dir .. "/package.sig", pkg_sig .. "\n")
+    -- A write that fails (unveil, I/O, a package.sig that is a symlink -
+    -- tool.write_file does not follow one) left the build "signed" with
+    -- exit 0 and whatever package.sig was there before (audit 21).
+    if not write_file(app_dir .. "/package.sig", pkg_sig .. "\n") then
+        sign_fail("hull build: cannot write " .. app_dir .. "/package.sig\n",
+                  tmpdir, output)
+    end
     print("wrote " .. app_dir .. "/package.sig")
 end
 
@@ -1950,6 +1956,10 @@ typedef struct {
     -- error - the developer asked for an integrated build but we cannot
     -- produce the artifact they expect.
     if opts.build_compute then
+        -- Before anything is compiled into it: a symlinked compute/ had its
+        -- sources compiled and its .wasm written through the link, outside
+        -- the app, before the root check below refused it (audit 21).
+        check_asset_root(compute_dir, tmpdir)
         local cbuild = require("hull.compute_build")
         local r = cbuild.build_all(opts.app_dir, "stale")
         if #r.errors > 0 then
@@ -2812,6 +2822,12 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         -- in C: the binary can exceed the tool VM's 64 MB heap (a
         -- --with=duckdb app), which reading it whole would need.
         sign_ctx.binary_hash = tool.sha256_file(opts.output)
+        -- Unhashed, package.sig had no binary_hash: the legacy shape with the
+        -- new fields, which every reader refuses (audit 21).
+        if type(sign_ctx.binary_hash) ~= "string" or sign_ctx.binary_hash == "" then
+            sign_fail("hull build --sign: cannot hash " .. opts.output .. "\n",
+                      tmpdir, opts.output)
+        end
 
         -- Under pcall: an error raised inside (json.decode of a malformed
         -- platform.sig, a hash of a file that could not be read) skipped

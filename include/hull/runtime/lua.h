@@ -233,6 +233,12 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
  */
 void hl_lua_free(HlLua *lua);
 
+/* Arm a new run on the main state (instruction budget + run deadline), as
+ * every entry does: for host code outside the runtime that runs app-VM code
+ * of its own (`hull agent eval` / `template`, MCP's warm context). The JS
+ * twin is hl_js_budget_arm. */
+void hl_lua_arm_entry(HlLua *lua);
+
 /*
  * Read the manifest of the Lua app at @p path by running its top level in a
  * fresh, sandboxed runtime of its own (runtime/lua/manifest_extract.c), never

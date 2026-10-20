@@ -21,6 +21,7 @@
  */
 
 #include "hull/commands/feature.h"
+#include "hull/shared/host.h"   /* hl_host_home */
 
 #ifdef HL_ENABLE_HTTP_CLIENT
 
@@ -116,7 +117,7 @@ static int compose_tag(char *out, size_t out_sz)
 /* $HOME/.hull/feature, created 0700. */
 static int feature_cache_dir(char *out, size_t out_sz)
 {
-    const char *home = getenv("HOME");
+    const char *home = hl_host_home();
     if (!home || !*home) {
         fprintf(stderr, "hull feature: HOME is not set\n");
         return -1;

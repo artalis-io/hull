@@ -1168,6 +1168,14 @@ local function main()
         tool.exit(1)
     end
 
+    -- compute/ must be the app's own directory, as `hull build` requires:
+    -- through a link, a build compiled and wrote outside the app (audit 21).
+    if tool.is_symlink("compute") then
+        tool.stderr("hull compute: compute/ is a symbolic link; an app's " ..
+                    "compute/ directory must be its own\n")
+        tool.exit(1)
+    end
+
     if opts.subcmd == "new" then
         cmd_new(opts.name, opts.lang)
     elseif opts.subcmd == "build" then

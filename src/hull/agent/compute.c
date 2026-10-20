@@ -12,6 +12,7 @@
  */
 
 #include "internal.h"
+#include "hull/shared/host.h"   /* hl_host_home */
 #include "limits.h"
 #include "hull/app_context.h"
 #include "hull/entry.h"
@@ -229,7 +230,7 @@ static void emit_wamrc_state(ShJsonWriter *w, const char *hull_exe)
          * managed location is the only one `hull tools uninstall`
          * touches. */
         int managed = 0;
-        const char *home = getenv("HOME");
+        const char *home = hl_host_home();
         if (home && *home) {
             char prefix[HL_AGENT_PATH_MAX];
             int pn = snprintf(prefix, sizeof(prefix), "%s/.hull/tools/", home);

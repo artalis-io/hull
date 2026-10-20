@@ -41,38 +41,41 @@ static int eval_lua(HlLua *lua, const char *code, ShJsonBuf *out)
     lua_State *L = lua->L;
 
     /* Wrap the snippet so we can capture its return value via the
-     * runtime's own JSON encoder. */
-    luaL_Buffer b;
-    luaL_buffinit(L, &b);
-    luaL_addstring(&b, "local json = require('hull.json')\n");
-    luaL_addstring(&b, "local fn = function() return ");
-    luaL_addstring(&b, code);
-    luaL_addstring(&b, " end\n");
-    luaL_addstring(&b, "local ok, v = pcall(fn)\n");
-    luaL_addstring(&b, "if not ok then\n");
-    /* Fall back to executing as statement(s) if the expression form fails. */
-    luaL_addstring(&b, "  local fn2 = load(... or '')\n");
-    luaL_addstring(&b, "  if fn2 then ok, v = pcall(fn2) end\n");
-    luaL_addstring(&b, "end\n");
-    luaL_addstring(&b, "if not ok then return nil, tostring(v) end\n");
-    luaL_addstring(&b, "return json.encode(v), nil\n");
-    luaL_pushresult(&b);
-    size_t wrap_len;
-    const char *wrap = lua_tolstring(L, -1, &wrap_len);
-
-    int load_rc = luaL_loadbuffer(L, wrap, wrap_len, "<agent-eval>");
-    /* Pop the wrap buffer string */
-    lua_remove(L, -2);
+     * runtime's own JSON encoder: as an expression first, and - when that
+     * does not compile - as statement(s). The statement form used to be a
+     * runtime fallback through `load`, which the app VM does not have, so
+     * every runtime error came back as "attempt to call a nil value (global
+     * 'load')" and statements never ran (audit 21). */
+    int load_rc = LUA_ERRSYNTAX;
+    for (int form = 0; form < 2 && load_rc != LUA_OK; form++) {
+        if (form == 1) lua_pop(L, 1);   /* the expression form's error */
+        luaL_Buffer b;
+        luaL_buffinit(L, &b);
+        luaL_addstring(&b, "local json = require('hull.json')\n");
+        luaL_addstring(&b, form == 0 ? "local fn = function() return "
+                                     : "local fn = function()\n");
+        luaL_addstring(&b, code);
+        luaL_addstring(&b, "\nend\n");
+        luaL_addstring(&b, "local ok, v = pcall(fn)\n");
+        luaL_addstring(&b, "if not ok then return nil, tostring(v) end\n");
+        luaL_addstring(&b, "return json.encode(v), nil\n");
+        luaL_pushresult(&b);
+        size_t wrap_len;
+        const char *wrap = lua_tolstring(L, -1, &wrap_len);
+        load_rc = luaL_loadbuffer(L, wrap, wrap_len, "<agent-eval>");
+        lua_remove(L, -2);   /* the wrap buffer string */
+    }
     if (load_rc != LUA_OK) {
         const char *err = lua_tostring(L, -1);
         int rc = hl_agent_write_error(out, err ? err : "load failed");
         lua_pop(L, 1);
         return rc;
     }
-    /* Pass the original `code` as varargs so the statement-form fallback
-     * has access to the source. */
-    lua_pushstring(L, code);
-    if (lua_pcall(L, 1, 2, 0) != LUA_OK) {
+    /* A run of its own: on a warm context (MCP) the budget kept counting
+     * across calls and the run deadline of the context's last entry kept
+     * running, so every eval failed once it was about a minute old. */
+    hl_lua_arm_entry(lua);
+    if (lua_pcall(L, 0, 2, 0) != LUA_OK) {
         const char *err = lua_tostring(L, -1);
         int rc = hl_agent_write_error(out, err ? err : "eval failed");
         lua_pop(L, 1);
@@ -124,6 +127,7 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
         free(snippet);
         return hl_agent_write_error(out, "code too large");
     }
+    hl_js_budget_arm(js);   /* a run of its own (see eval_lua) */
     JSValue v = JS_Eval(ctx, snippet, (size_t)snip_n, "<agent-eval>",
                         JS_EVAL_TYPE_GLOBAL);
     free(snippet);

@@ -146,7 +146,7 @@ HlLinker *hl_linker_select(const char *explicit_linker, const char *hull_exe)
         const char *arch = NULL;
 #endif
         {
-            const char *home = getenv("HOME");
+            const char *home = hl_host_home();
             if (arch && home && *home)
                 snprintf(bundle, sizeof bundle, "%s/.hull/tools/libc-musl-%s",
                          home, arch);
