@@ -140,9 +140,11 @@ static int tls_handshake_loop(KlTls *tls, int fd, int timeout_ms,
             rc = -1; break;
         }
         /* pr == 0 (poll timed out) or pr > 0 (ready): loop; the top-of-loop
-         * deadline check is the sole timeout authority. A step that saw
-         * nothing asks the caller's run whether to go on (audit 20). */
-        if (pr == 0 && stop && stop(ud)) { rc = -1; break; }
+         * deadline check is the sole timeout authority. Every step asks the
+         * caller's run whether to go on (audit 20), a ready one too: a peer
+         * dripping the handshake a byte per poll was asked nothing until the
+         * handshake deadline (audit 21). */
+        if (stop && stop(ud)) { rc = -1; break; }
     }
 
     if (tls_fd_restore(fd, saved) != 0)

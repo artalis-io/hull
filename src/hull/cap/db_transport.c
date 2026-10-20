@@ -55,6 +55,7 @@
 #include "hull/cap/net_resolve.h"
 #include <sys/time.h>     /* struct timeval for SO_RCVTIMEO/SNDTIMEO (set_io_timeout) */
 #include <poll.h>         /* hl_db_transport_wait_readable's sliced wait */
+#include <fcntl.h>        /* O_NONBLOCK for the sliced TLS read */
 
 #include <errno.h>
 #include <pthread.h>
@@ -825,13 +826,17 @@ ssize_t hl_db_transport_recv(HlDbTransport *t, uint8_t *buf, size_t len)
     return (ssize_t)n;
 }
 
-/* SO_RCVTIMEO alone (a sliced TLS read narrows it, then puts it back). */
-static void set_rcv_timeout(int fd, int ms)
+int hl_db_transport_time_left(uint64_t *start, int timeout_ms)
 {
-    struct timeval to;
-    to.tv_sec  = ms / 1000;
-    to.tv_usec = (ms % 1000) * 1000;
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+    if (timeout_ms <= 0)
+        return 0;
+    uint64_t now = kl_monotonic_ms();
+    if (*start == 0)
+        *start = now ? now : 1;
+    uint64_t spent = now >= *start ? now - *start : 0;
+    if (spent >= (uint64_t)timeout_ms)
+        return -1;
+    return (int)((uint64_t)timeout_ms - spent);
 }
 
 ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
@@ -849,29 +854,37 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
      * the read then blocked for the rest under SO_RCVTIMEO - the whole
      * ?read_timeout= (300 s by default, 0 = for ever) - with no budget or
      * deadline checked, so a server sending half a record held the event
-     * loop (audit 20). Read with a one-slice socket timeout instead; the
-     * TLS session keeps the partial record across the retries. */
-    set_rcv_timeout(fd, HL_DB_WAIT_SLICE_MS);
-    uint64_t start = kl_monotonic_ms();
+     * loop (audit 20). A one-slice SO_RCVTIMEO was not enough: a peer that
+     * sent the record a byte at a time, each within the slice, kept the one
+     * TLS read collecting it with nothing asked (audit 21). So the socket is
+     * read non-blocking: every chunk returns control (the TLS session keeps
+     * the partial record), and the run is asked after each. */
+    int saved = fcntl(fd, F_GETFL, 0);
+    if (saved < 0 ||
+        ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved | O_NONBLOCK) < 0))
+        return -1;
+    uint64_t start = 0;
     ssize_t n;
     for (int empty = 0; ; ) {
         errno = 0;
         n = hl_tls_client_read(fd, t->tls, buf, len);
         if (n != 0)
             break;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {   /* a slice passed */
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {   /* nothing more yet */
             if (stop(ud)) { n = -2; break; }
-            if (timeout_ms > 0 &&
-                kl_monotonic_ms() - start >= (uint64_t)timeout_ms) {
-                n = -1;
-                break;
-            }
+            int left = hl_db_transport_time_left(&start, timeout_ms);
+            if (left < 0) { n = -1; break; }
+            int slice = HL_DB_WAIT_SLICE_MS;
+            if (left > 0 && left < slice) slice = left;
+            struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+            if (poll(&pfd, 1, slice) < 0 && errno != EINTR) { n = -1; break; }
             continue;
         }
         /* A record with no application data (see hl_db_transport_recv). */
         if (++empty >= 64) { n = -1; break; }
     }
-    set_rcv_timeout(fd, t->io_timeout_ms);
+    if ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved) < 0)
+        n = -1;   /* a descriptor left non-blocking would fail later reads */
     return n;
 }
 

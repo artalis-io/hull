@@ -420,6 +420,40 @@ UTEST(db_duckdb, one_instance_per_file)
     unlink(wal);
 }
 
+/* Audit 21: the registry matched the DSN's spelling, so "/tmp/x" and
+ * "/tmp/./x" (or a relative and an absolute spelling) each got an instance of
+ * their own - the split the registry exists to prevent. */
+UTEST(db_duckdb, one_instance_whatever_the_spelling)
+{
+    char path[] = "/tmp/hull_duck_spell_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT_TRUE(fd >= 0);
+    close(fd);
+    unlink(path);
+    const char *name = strrchr(path, '/') + 1;
+    char dsn_a[160], dsn_b[160];
+    snprintf(dsn_a, sizeof dsn_a, "duckdb://%s", path);
+    snprintf(dsn_b, sizeof dsn_b, "duckdb:///tmp/./%s", name);
+
+    HlDbHandle a = { .backend = &hl_db_backend_duckdb };
+    HlDbHandle b = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(hl_db_backend_duckdb.open(&a.ctx, dsn_a, NULL), 0);
+    ASSERT_EQ(hl_db_backend_duckdb.open(&b.ctx, dsn_b, NULL), 0);
+    ASSERT_EQ(hl_db_exec(&a, "CREATE TABLE t (x INTEGER)", NULL, 0), 0);
+    ASSERT_EQ(hl_db_exec(&a, "INSERT INTO t VALUES (40), (2)", NULL, 0), 0);
+    int64_t sum = 0;
+    ASSERT_EQ(hl_db_query(&b, "SELECT CAST(SUM(x) AS BIGINT) FROM t", NULL, 0,
+                          count_cb, &sum, NULL), 0);
+    EXPECT_EQ(sum, (int64_t)42);   /* b is a's instance */
+    a.backend->close(&a);
+    b.backend->close(&b);
+
+    unlink(path);
+    char wal[160];
+    snprintf(wal, sizeof wal, "%s.wal", path);
+    unlink(wal);
+}
+
 UTEST_MAIN()
 
 #else  /* !HL_ENABLE_DUCKDB - no-op so the file is harmless in every flavor */

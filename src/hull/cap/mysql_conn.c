@@ -280,6 +280,8 @@ static int my_wait_stop(void *ud)
  * compacts the previously-consumed bytes. Returns 0 / -1. */
 static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
 {
+    uint64_t started = 0;   /* this frame's reads share one ?read_timeout= */
+    int got = 0;            /* a chunk of it came in */
     if (conn->consumed > 0) {
         memmove(conn->rbuf, conn->rbuf + conn->consumed,
                 conn->rlen - conn->consumed);
@@ -303,6 +305,10 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
         }
         if (r == HL_MY_ERR) { conn_set_err(conn, "malformed message from server");
                               return -1; }
+        /* Still incomplete after a chunk: the run is asked after every one,
+         * not only after a quiet slice - a server sending a large packet a
+         * byte at a time, each within a slice, was never stopped (audit 21). */
+        if (got && my_wait_stop(NULL)) { my_abandon(conn); return -1; }
         /* NEED_MORE: grow if full (bounded by the 24-bit packet cap), then read. */
         if (conn->rlen == conn->rcap) {
             /* Up to one whole packet (header + 24-bit payload), clamped:
@@ -323,8 +329,12 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
          * default, 0 = for ever) while the server ran SLEEP() or waited on a
          * lock, with no budget and no run deadline checked (audit 18). A trip
          * closes the connection, as a trip mid-reply does. */
-        int wr = hl_db_transport_wait_readable(conn->transport,
-                                               conn->read_timeout_ms,
+        int left = hl_db_transport_time_left(&started, conn->read_timeout_ms);
+        if (left < 0) {
+            conn_set_err(conn, "read failed or timed out (see ?read_timeout=)");
+            return -1;
+        }
+        int wr = hl_db_transport_wait_readable(conn->transport, left,
                                                my_wait_stop, NULL);
         if (wr == -2) { my_abandon(conn); return -1; }
         ssize_t n = -1;
@@ -334,8 +344,7 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
             do { n = hl_db_transport_recv_sliced(conn->transport,
                                                  conn->rbuf + conn->rlen,
                                                  conn->rcap - conn->rlen,
-                                                 conn->read_timeout_ms,
-                                                 my_wait_stop, NULL); }
+                                                 left, my_wait_stop, NULL); }
             while (n == -1 && errno == EINTR);
             if (n == -2) { my_abandon(conn); return -1; }
         }
@@ -345,6 +354,7 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
             return -1;
         }
         conn->rlen += (size_t)n;
+        got = 1;
     }
 }
 

@@ -203,13 +203,24 @@ HlDbTransport *hl_db_transport_connect_stop(const char *tag,
                                             char *errbuf, size_t errlen);
 
 /**
+ * What is left of @p timeout_ms, measured from *@p start (set by the first
+ * call, which passes 0): 0 when there is no bound (@p timeout_ms <= 0), -1
+ * once it has run out, else the milliseconds left. A reply frame's reads share
+ * one deadline: each wait restarting ?read_timeout= let a peer that sent a
+ * byte now and then hold a read for ever (audit 21).
+ */
+int hl_db_transport_time_left(uint64_t *start, int timeout_ms);
+
+/**
  * The recv after hl_db_transport_wait_readable said readable. Over TLS the
  * read decrypts whole records and blocked, once readable, for the rest of one
- * under SO_RCVTIMEO (the whole ?read_timeout=): it reads in HL_DB_WAIT_SLICE_MS
- * slices instead, asking @p stop(@p ud) between them, up to @p timeout_ms in
- * all (<= 0: no bound) - audit 20. Plaintext (or @p stop NULL) is a plain
- * hl_db_transport_recv. Returns as hl_db_transport_recv, or -2 when @p stop
- * said to stop (the connection is then mid-record: close it).
+ * under SO_RCVTIMEO (the whole ?read_timeout=): it reads the socket
+ * non-blocking instead, so each chunk of a record returns control, and asks
+ * @p stop(@p ud) after every one, up to @p timeout_ms in all (<= 0: no bound)
+ * - audits 20 / 21 (a peer dripping a record's bytes faster than a slice was
+ * never stopped). Plaintext (or @p stop NULL) is a plain hl_db_transport_recv.
+ * Returns as hl_db_transport_recv, or -2 when @p stop said to stop (the
+ * connection is then mid-record: close it).
  */
 ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
                                     int timeout_ms, HlDbWaitStopFn stop,
