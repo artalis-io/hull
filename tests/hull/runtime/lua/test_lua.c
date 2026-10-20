@@ -11840,4 +11840,76 @@ UTEST(lua_audit15, a_cancelled_timer_wait_clears_in_flight)
 }
 #endif
 
+/* ── Audit 21 G6: store walks, mmap retry, segment copies ── */
+
+UTEST(lua_audit21, blob_store_walks_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "blob = require('hull.blob') blob.init({ dir = 'blobs' }) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 200 walks x 256 shard directories > 40k units. */
+    EXPECT_NE(audit10_run("for i = 1, 200 do blob.count() end return 1",
+                          40000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run("for i = 1, 200 do blob.total_size() end return 1",
+                          40000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+/* A MappedBuffer dropped without close() is a small userdata: 256 of them
+ * between collections filled the SIGBUS guard table for the process. */
+UTEST(lua_audit21, mmap_collects_and_retries_when_the_guard_table_is_full)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "collectgarbage('stop') "
+        "for i = 1, 300 do local m, e = fs.mmap('big.bin') assert(m, e) end "
+        "collectgarbage('restart') collectgarbage() return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    if (err[0]) printf("  err: %s\n", err);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+#ifdef HL_ENABLE_WASM
+UTEST(lua_audit21, compute_segment_copies_are_charged)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a15_wasm_entries, NULL);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    ASSERT_EQ(luaL_dostring(v.L, "compute = require('hull.compute') "
+                                 "big = string.rep('x', 4 << 20)"), LUA_OK);
+    v.max_instructions = 300000;
+    HL_LUA_ARM(&v, v.L);
+    /* 4 MB copied into the segment: 512k units. */
+    int rc = luaL_dostring(v.L, "compute.segment('echo', 's', big) after = 1");
+    EXPECT_NE(rc, LUA_OK);
+    const char *e = lua_tostring(v.L, -1);
+    EXPECT_TRUE(e && strstr(e, "instruction limit exceeded") != NULL);
+    if (e && !strstr(e, "instruction limit exceeded")) printf("  got: %s\n", e);
+    hl_lua_free(&v);
+    hl_cap_wasm_destroy(&cache);
+}
+
+#endif /* HL_ENABLE_WASM */
+
 UTEST_MAIN();

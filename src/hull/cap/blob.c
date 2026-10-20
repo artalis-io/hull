@@ -236,6 +236,16 @@ uint64_t hl_cap_blob_count(HlBlob *b)
     return hl_blob_store_count(b);
 }
 
+uint64_t hl_cap_blob_walk_units_before(HlBlob *b)
+{
+    return hl_blob_store_walk_shards(b);
+}
+
+uint64_t hl_cap_blob_walk_units_after(HlBlob *b)
+{
+    return hl_blob_store_last_walk_entries(b);
+}
+
 int hl_cap_blob_cleanup(HlBlob *b, const HlBlobCleanupOpts *opts,
                         uint64_t *removed_out, uint64_t *freed_out)
 {

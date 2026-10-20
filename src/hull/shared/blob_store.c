@@ -67,6 +67,7 @@ struct HlBlobStore {
     char        *root;        /* absolute path, no trailing slash */
     size_t       root_len;
     int          shard_depth; /* 1 or 2 */
+    uint64_t     last_walk;   /* entries the last collect_entries found */
 };
 
 struct HlBlobStoreWriter {
@@ -1024,6 +1025,7 @@ static int collect_entries(HlBlobStore *s, StoreEntries *e)
     e->alloc    = s->alloc;
 
     static const char HEX[] = "0123456789abcdef";
+    s->last_walk = 0;
     int blobs = lookup_blobs_dir(s);
     if (blobs < 0)   /* no blobs/ yet (or not a real directory): empty */
         return (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) ? 0 : -1;
@@ -1042,12 +1044,25 @@ static int collect_entries(HlBlobStore *s, StoreEntries *e)
         }
         if (walk_shard(blobs, hex, depth, e) != 0) {
             close(blobs);
+            s->last_walk = e->count;
             entries_free(e);
             return -1;
         }
     }
     close(blobs);
+    s->last_walk = e->count;
     return 0;
+}
+
+uint64_t hl_blob_store_walk_shards(const HlBlobStore *s)
+{
+    if (!s) return 0;
+    return s->shard_depth >= 2 ? 65536u : 256u;
+}
+
+uint64_t hl_blob_store_last_walk_entries(const HlBlobStore *s)
+{
+    return s ? s->last_walk : 0;
 }
 
 int hl_blob_store_iter(HlBlobStore *s, HlBlobStoreIterCb cb, void *user)

@@ -585,6 +585,9 @@ static int lua_blob_iter(lua_State *L)
     }
     lua_setmetatable(L, -2);
 
+    /* The walk is charged: 1 unit per shard directory before it, 1 per
+     * entry after (audit 21). lua_hlwork raises once the run is over. */
+    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
     IterAcc acc = { lua->base.alloc, NULL, 0, 0 };
     if (hl_cap_blob_iter(b, iter_collect_cb, &acc) != 0) {
         if (acc.items)
@@ -598,6 +601,7 @@ static int lua_blob_iter(lua_State *L)
     st->count    = acc.count;
     st->capacity = acc.capacity;
     st->pos      = 0;
+    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_after(b), 0);
 
     /* Push the iterator function with the state as upvalue. */
     lua_pushcclosure(L, lua_iter_step, 1);
@@ -607,14 +611,20 @@ static int lua_blob_iter(lua_State *L)
 static int lua_blob_total_size(lua_State *L)
 {
     HlBlob *b = get_store(L);
-    lua_pushinteger(L, (lua_Integer)hl_cap_blob_total_size(b));
+    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
+    uint64_t total = hl_cap_blob_total_size(b);
+    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_after(b), 0);
+    lua_pushinteger(L, (lua_Integer)total);
     return 1;
 }
 
 static int lua_blob_count(lua_State *L)
 {
     HlBlob *b = get_store(L);
-    lua_pushinteger(L, (lua_Integer)hl_cap_blob_count(b));
+    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
+    uint64_t n = hl_cap_blob_count(b);
+    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_after(b), 0);
+    lua_pushinteger(L, (lua_Integer)n);
     return 1;
 }
 
@@ -650,9 +660,11 @@ static int lua_blob_cleanup(lua_State *L)
     opts.dry_run = lua_toboolean(L, -1);
     lua_pop(L, 1);
 
+    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
     uint64_t removed = 0, freed = 0;
     if (hl_cap_blob_cleanup(b, &opts, &removed, &freed) != 0)
         return luaL_error(L, "blob.cleanup: failed");
+    lua_hlwork(L, (size_t)(hl_cap_blob_walk_units_after(b) + removed), 0);
 
     lua_newtable(L);
     lua_pushinteger(L, (lua_Integer)removed);

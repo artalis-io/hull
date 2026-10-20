@@ -24,6 +24,7 @@
 #include <keel/http_server.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <unistd.h>   /* sysconf: a segment's page size */
 
 /* ── WasmBuffer JS class ──────────────────────────────────────────── */
 
@@ -1403,6 +1404,20 @@ static JSValue js_compute_segment(JSContext *ctx, JSValueConst this_val,
         }
     }
 
+    /* The cap copies the data unless it is a page-aligned MappedBuffer used
+     * in place: up to HL_WASM_MAX_SEGMENT_SIZE (1 GiB) a call, charged
+     * nothing (audit 21). Charged 1 unit per 8 bytes, as every bulk copy. */
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) page = 4096;
+    if (!(pre_alloc && data_len > 0 && data_len % (size_t)page == 0) &&
+        hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)data_len))) {
+        if (JS_IsString(argv[2]))
+            JS_FreeCString(ctx, (const char *)data);
+        JS_FreeCString(ctx, module_name);
+        JS_FreeCString(ctx, segment_name);
+        return JS_EXCEPTION;
+    }
+
     /* A MappedBuffer used in place is borrowed for as long as the segment
      * uses it: without the pin, mmap.close() (or GC) unmapped memory the
      * WASM shared heap still pointed at. The cap owns the borrow from here. */
@@ -1625,12 +1640,33 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     HlWasmBuffer   *in_wbuf = NULL;
     HlMappedBuffer *in_mmap = NULL;
     uint8_t        *in_copy = NULL;
+    HlOffheapHold   in_hold = {0};
     if (input.kind != HL_STREAM_IN_FILE) {
         size_t ilen = 0;
         const uint8_t *idata = hl_js_array_buffer_probe(ctx, &ilen, argv[1]);
         if (idata) {
+            /* The copy is off the heap for the whole stream, and the output
+             * callback (app code, between chunks) can start another stream
+             * of the same buffer: held on the VM's off-heap total and
+             * charged, as the async inputs are (audit 21; Lua's image copy
+             * here already was). */
+            if (hl_offheap_take(&in_hold, &js->wasm_buf_bytes,
+                                js->max_heap_bytes, ilen) != 0) {
+                js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,
+                                    in_file_str, out_file_str, name);
+                return JS_ThrowRangeError(ctx, "compute.stream: input of %zu "
+                                          "bytes would take the VM's buffers "
+                                          "past its heap limit", ilen);
+            }
+            if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)ilen))) {
+                hl_offheap_drop(&in_hold);
+                js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,
+                                    in_file_str, out_file_str, name);
+                return JS_EXCEPTION;
+            }
             in_copy = malloc(ilen ? ilen : 1);
             if (!in_copy) {
+                hl_offheap_drop(&in_hold);
                 js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,
                                     in_file_str, out_file_str, name);
                 return JS_ThrowInternalError(ctx, "compute.stream: out of memory");
@@ -1689,6 +1725,7 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     if (in_wbuf) hl_wasm_buffer_release(in_wbuf);
     if (in_mmap) hl_cap_fs_mmap_release(in_mmap);
     free(in_copy);
+    hl_offheap_drop(&in_hold);
     if (input_is_string)
         JS_FreeCString(ctx, (const char *)input.buffer.data);
     js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,

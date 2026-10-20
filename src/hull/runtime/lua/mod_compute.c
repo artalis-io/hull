@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>   /* sysconf: a segment's page size */
 
 /* ════════════════════════════════════════════════════════════════════
  * hull.compute module - WASM compute plugins
@@ -1236,6 +1237,15 @@ static int lua_compute_segment(lua_State *L)
         lua_pushliteral(L, "data_empty");
         return 2;
     }
+
+    /* The cap copies the data unless it is a page-aligned MappedBuffer used
+     * in place: up to HL_WASM_MAX_SEGMENT_SIZE (1 GiB) a call, charged
+     * nothing (audit 21). Charged 1 unit per 8 bytes before the copy;
+     * lua_hlwork raises at once, with nothing borrowed yet. */
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) page = 4096;
+    if (!(pre_alloc && data_len % (size_t)page == 0))
+        lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)data_len), 0);
 
     /* A MappedBuffer used in place is borrowed for as long as the segment
      * uses it: the registry pin below keeps the object from being collected,

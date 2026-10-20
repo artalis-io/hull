@@ -130,6 +130,12 @@ int hl_cap_blob_iter(HlBlob *b, HlBlobIterCb cb, void *user);
 uint64_t hl_cap_blob_total_size(HlBlob *b);
 uint64_t hl_cap_blob_count(HlBlob *b);
 
+/* Budget units of a whole-store walk (hl_blob_store_walk_shards /
+ * _last_walk_entries): 1 per shard directory, charged before the walk, and 1
+ * per entry the last walk found, charged after it (audit 21). */
+uint64_t hl_cap_blob_walk_units_before(HlBlob *b);
+uint64_t hl_cap_blob_walk_units_after(HlBlob *b);
+
 /* ── Eviction ────────────────────────────────────────────────────── */
 
 int hl_cap_blob_cleanup(HlBlob *b, const HlBlobCleanupOpts *opts,
