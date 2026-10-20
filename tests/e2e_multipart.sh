@@ -855,6 +855,50 @@ EOF2
     fi
 fi
 
+# Audit 20: a JS multipart handler that reads its parts and then awaits a
+# promise Hull does not drive was never answered: no op held the
+# connection, no read was parked on it, and the multipart resume (unlike
+# an async one) neither ended the request nor answered it. The client
+# waited until it gave up, and the res stayed live for the handler to write
+# into later. It is ended now, with a 500.
+if [ "$RUNTIME" != "lua" ]; then
+    echo ""
+    echo "=== E2E multipart: js handler awaiting an undriven promise after the parts ==="
+    cat > "$TMPDIR_WORK/gate_app.js" <<'EOF2'
+import { app } from "hull:app";
+
+app.manifest({
+    name    : "mp-gate-js",
+    version : "0.0.1",
+    modules : ["hull/http-server@1"],
+});
+
+app.get("/health", async (req, res) => res.text("ok"));
+
+app.post("/gate", async (req, res) => {
+    for await (const part of req.multipart()) {
+        await part.read();
+    }
+    await new Promise(() => {});   /* settled by nothing Hull drives */
+    res.json({ ok: true });
+}, { multipart: { maxPartSize: 1024 * 1024 } });
+EOF2
+    "$HULL" -p 17814 "$TMPDIR_WORK/gate_app.js" \
+        >"$TMPDIR_WORK/gate_server.log" 2>&1 &
+    SERVER_PID=$!
+    if wait_for_server 17814; then
+        CODE=$(curl --max-time 10 -sS -o /dev/null -w '%{http_code}' -X POST \
+            "http://127.0.0.1:17814/gate" -F "a=hello" 2>/dev/null || echo "timeout")
+        check_contains "js multipart then an undriven await: answered 500" "$CODE" "500"
+        RESP=$(curl --max-time 5 -sS "http://127.0.0.1:17814/health" 2>/dev/null || true)
+        check_contains "js multipart then an undriven await: server still serves" "$RESP" "ok"
+    else
+        fail "js multipart gate server startup"
+    fi
+    stop_pid "$SERVER_PID"
+    SERVER_PID=""
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 
 TOTAL=$((PASS + FAIL))
