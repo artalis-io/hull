@@ -123,5 +123,42 @@ test("query: with snippet", function()
     search.drop_index("docs")
 end)
 
+-- ── Audit 19: every caller value is read once ─────────────────────────
+-- The module's SQL runs from a stdlib chunk, past the C-level _hull_*
+-- guard. A table whose __index answered the validation with a safe name and
+-- table.concat (or the option's second read) with another reached any
+-- statement. Each value must be read exactly once.
+
+test("create_index: reads each column once", function()
+    local real = { "title", "body" }
+    local reads = { 0, 0 }
+    local cols = setmetatable({}, { __index = function(_, i)
+        if real[i] == nil then return nil end
+        reads[i] = reads[i] + 1
+        return reads[i] == 1 and real[i] or "x) ; DROP TABLE nothing; --"
+    end })
+    search.create_index("once_cols", cols)
+    assert_eq(reads[1], 1, "column 1 reads")
+    assert_eq(reads[2], 1, "column 2 reads")
+    search.drop_index("once_cols")
+end)
+
+test("create_index: reads content / content_rowid once", function()
+    local c, r = 0, 0
+    local opts = setmetatable({}, { __index = function(_, k)
+        if k == "content" then
+            c = c + 1
+            return c == 1 and "once_src" or "_hull_sessions"
+        elseif k == "content_rowid" then
+            r = r + 1
+            return r == 1 and "id" or "_hull_x"
+        end
+    end })
+    search.create_index("once_content", { "title" }, opts)
+    assert_eq(c, 1, "content reads")
+    assert_eq(r, 1, "content_rowid reads")
+    search.drop_index("once_content")
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

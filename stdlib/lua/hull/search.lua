@@ -67,15 +67,24 @@ local function validate_identifier(name, label)
     end
 end
 
---- Validate a list of column names. Returns the validated list.
+--- Validate a list of column names. Returns a validated COPY: each entry
+-- is read once, and the copy is what goes into the SQL. That SQL runs from a
+-- stdlib chunk, past the C-level _hull_* guard, and a table whose __index
+-- answered the validation with one name and table.concat with another
+-- reached any statement (audit 19).
 local function validate_columns(columns)
-    if type(columns) ~= "table" or #columns == 0 then
+    if type(columns) ~= "table" then
         error("search: columns must be a non-empty array of strings")
     end
+    local out = {}
     for i, col in ipairs(columns) do
         validate_identifier(col, "column[" .. i .. "]")
+        out[i] = col
     end
-    return columns
+    if #out == 0 then
+        error("search: columns must be a non-empty array of strings")
+    end
+    return out
 end
 
 --- Build the FTS5 table name from a user-facing index name.
@@ -98,7 +107,7 @@ end
 function search.create_index(name, columns, opts)
     require_sqlite()
     validate_identifier(name, "index name")
-    validate_columns(columns)
+    columns = validate_columns(columns)
     opts = opts or {}
 
     local tbl = fts_table(name)
@@ -140,14 +149,17 @@ function search.create_index(name, columns, opts)
     end
     fts_opts[#fts_opts + 1] = "tokenize='" .. tokenize .. "'"
 
-    if opts.content then
-        validate_identifier(opts.content, "content table")
-        fts_opts[#fts_opts + 1] = "content='" .. opts.content .. "'"
+    -- Read once: an opts __index could answer each read differently.
+    local content = opts.content
+    if content then
+        validate_identifier(content, "content table")
+        fts_opts[#fts_opts + 1] = "content='" .. content .. "'"
     end
 
-    if opts.content_rowid then
-        validate_identifier(opts.content_rowid, "content_rowid")
-        fts_opts[#fts_opts + 1] = "content_rowid='" .. opts.content_rowid .. "'"
+    local content_rowid = opts.content_rowid
+    if content_rowid then
+        validate_identifier(content_rowid, "content_rowid")
+        fts_opts[#fts_opts + 1] = "content_rowid='" .. content_rowid .. "'"
     end
 
     local sql = "CREATE VIRTUAL TABLE IF NOT EXISTS " .. tbl ..
