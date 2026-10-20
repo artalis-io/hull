@@ -273,6 +273,7 @@ static const char HL_JS_HARDEN_SRC[] =
 "    () => gopd(gp(Object), 'arguments').get,\n"
 "    () => [].values().map(x => x),               /* %IteratorHelperPrototype% */\n"
 "    () => Iterator.from({ next() { return { done: true }; } }), /* %WrapForValidIteratorPrototype% */\n"
+"    () => Iterator.concat([]),                    /* %IteratorConcatPrototype% (audit 19) */\n"
 "  ];\n"
 "  for (const fn of hidden) {\n"
 "    let v; try { v = fn(); } catch (e) { continue; }   /* absent in this build */\n"
@@ -296,8 +297,7 @@ static const char HL_JS_HARDEN_SRC[] =
 "   * Nothing is excluded: every binding here is host-installed, and a binding\n"
 "   * already non-configurable (undefined, NaN, Infinity, the __hull_manifest\n"
 "   * getter) keeps its own attributes. Globals Hull defines LATER stay\n"
-"   * app-visible by design: `test` (hull test), the test harness's globals,\n"
-"   * mod_app's transient __hull_app_for_router (deleted again at once). */\n"
+"   * app-visible by design: `test` (hull test), the test harness's globals. */\n"
 "  for (const k of gkeys) {\n"
 "    const d = gopd(globalThis, k);\n"
 "    if ('value' in d) {\n"
@@ -402,6 +402,47 @@ void hl_js_set_class_proto_frozen(JSContext *ctx, JSClassID id, JSValue proto)
     JS_SetClassProto(ctx, id, proto);
 }
 
+/* Every class prototype the context holds, frozen and checked: the walk
+ * above reaches an intrinsic only through a path from a global or the
+ * hidden list, and it missed %IteratorConcatPrototype% (audit 19). Class
+ * prototypes are where QuickJS keeps the shared prototype of every object
+ * kind, so freezing whatever is still extensible closes any intrinsic the
+ * list does not name, and the check then fails init on any gap. Hull's own
+ * class prototypes are set later and frozen as they are set
+ * (hl_js_set_class_proto_frozen). */
+static int harden_class_protos(JSContext *ctx)
+{
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue object = JS_GetPropertyStr(ctx, global, "Object");
+    JSValue is_frozen = JS_GetPropertyStr(ctx, object, "isFrozen");
+    JS_FreeValue(ctx, object);
+    JS_FreeValue(ctx, global);
+    int rc = JS_IsFunction(ctx, is_frozen) ? 0 : -1;
+    /* Class ids are small and dense; JS_IsRegisteredClass bounds-checks. */
+    for (JSClassID id = 1; rc == 0 && id < 4096; id++) {
+        if (!JS_IsRegisteredClass(rt, id))
+            continue;
+        JSValue proto = JS_GetClassProto(ctx, id);
+        if (JS_IsObject(proto)) {
+            if (hl_js_freeze_value(ctx, proto) != 0) {
+                rc = -1;
+            } else {
+                JSValue f = JS_Call(ctx, is_frozen, JS_UNDEFINED, 1, &proto);
+                if (JS_IsException(f) || !JS_ToBool(ctx, f)) {
+                    log_error("[hull:c] class %u prototype is not frozen",
+                              (unsigned)id);
+                    rc = -1;
+                }
+                JS_FreeValue(ctx, f);
+            }
+        }
+        JS_FreeValue(ctx, proto);
+    }
+    JS_FreeValue(ctx, is_frozen);
+    return rc;
+}
+
 /* A stdlib JS module's export objects (`export const sealbox = {...}`) are,
  * like the native ones, shared by app code and every stdlib module that
  * imports them: an app that set `sealbox.open = ...` received the keyring
@@ -417,10 +458,24 @@ static const char HL_JS_STDLIB_FOOTER_B[] =
     "(function (ns) {\n"
     "  const freeze = Object.freeze, isExt = Object.isExtensible,\n"
     "        own = Reflect.ownKeys, gopd = Object.getOwnPropertyDescriptor;\n"
+    "  /* Object.freeze does not freeze an internal slot: an exported Map, Set\n"
+    "   * or Date would stay mutable through its methods. None is exported; one\n"
+    "   * added later fails the module's load instead (audit 19). */\n"
+    "  const slots = [[Map, Map.prototype.has], [Set, Set.prototype.has],\n"
+    "                 [WeakMap, WeakMap.prototype.has], [WeakSet, WeakSet.prototype.has],\n"
+    "                 [Date, Date.prototype.getTime]];\n"
+    "  const slotted = (v) => {\n"
+    "    for (const [, m] of slots) {\n"
+    "      try { m.call(v, v); return true; } catch (e) { /* not this kind */ }\n"
+    "    }\n"
+    "    return false;\n"
+    "  };\n"
     "  const walk = (v) => {\n"
     "    const t = typeof v;\n"
     "    if (v === null || (t !== 'object' && t !== 'function') || !isExt(v)) return;\n"
-    "    freeze(v);\n"
+    "    if (t === 'object' && slotted(v))\n"
+    "      throw new TypeError('stdlib export holds a Map / Set / Date, which freezing cannot lock');\n"
+"    freeze(v);\n"
     "    for (const k of own(v)) {\n"
     "      const d = gopd(v, k);\n"
     "      if (!d) continue;\n"
@@ -485,5 +540,11 @@ int hl_js_harden_intrinsics(JSContext *ctx)
         return -1;
     }
     JS_FreeValue(ctx, r);
+
+    if (harden_class_protos(ctx) != 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        log_error("[hull:c] intrinsic freeze failed: a class prototype");
+        return -1;
+    }
     return 0;
 }

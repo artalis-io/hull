@@ -705,11 +705,12 @@ static void js_install_app_http_server(JSContext *ctx)
             JS_NewCFunction(ctx, js_app_use_post, "usePost", 3));
     }
 
-    /* Router (pure JS, evaluated against the freshly-decorated app
-     * via a temporary globalThis stash that we clear immediately). */
+    /* Router (pure JS). The source evaluates to a function that is called
+     * with the freshly-decorated app. It used to read the app from a
+     * temporary globalThis property, which app code could define first as
+     * a getter / setter and see or swap (audit 19). */
     static const char router_src[] =
-"(function() {\n"
-"  const app = globalThis.__hull_app_for_router;\n"
+"(function(app) {\n"
 "  class Router {\n"
 "    constructor(prefix, opts) { this.prefix = prefix || ''; this.opts = opts; }\n"
 "    get(p, h)     { app.get    (this.prefix + p, h); return this; }\n"
@@ -733,19 +734,20 @@ static void js_install_app_http_server(JSContext *ctx)
 "    router(sub, opts) { return new Router(this.prefix + (sub || ''), opts); }\n"
 "  }\n"
 "  app.router = function(prefix, opts) { return new Router(prefix, opts); };\n"
-"})();\n";
+"})\n";
 
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "__hull_app_for_router",
-                      JS_DupValue(ctx, app));
-    JSValue rret = JS_Eval(ctx, router_src, sizeof(router_src) - 1,
+    JSValue init = JS_Eval(ctx, router_src, sizeof(router_src) - 1,
                            "<hull-router-init>", JS_EVAL_TYPE_GLOBAL);
-    JS_FreeValue(ctx, rret);
-    JSAtom temp_atom = JS_NewAtom(ctx, "__hull_app_for_router");
-    JS_DeleteProperty(ctx, global, temp_atom, 0);
-    JS_FreeAtom(ctx, temp_atom);
+    if (JS_IsFunction(ctx, init)) {
+        JSValue rret = JS_Call(ctx, init, JS_UNDEFINED, 1, &app);
+        if (JS_IsException(rret))
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        JS_FreeValue(ctx, rret);
+    } else if (JS_IsException(init)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    JS_FreeValue(ctx, init);
     JS_FreeValue(ctx, app);
-    JS_FreeValue(ctx, global);
 }
 
 /* Install app.ws on the exported `app` object. */
