@@ -195,7 +195,7 @@ static int lua_compute_buffer(lua_State *L)
 static void *lua_async_input_copy(lua_State *L, HlLua *lua, const void *input,
                                   size_t len, uint64_t limit, HlOffheapHold *hold)
 {
-    if (len == 0) return NULL;
+    if (len == 0 || !input) return NULL;
     if ((uint64_t)len > limit)
         luaL_error(L, "compute.async: input_too_large");
     /* Charged first: lua_hlwork raises at once when it puts the run over,
@@ -209,6 +209,7 @@ static void *lua_async_input_copy(lua_State *L, HlLua *lua, const void *input,
     if (!copy) {
         hl_offheap_drop(hold);
         luaL_error(L, "compute.async: out of memory");
+        return NULL;   /* not reached: luaL_error does not return */
     }
     memcpy(copy, input, len);
     return copy;
