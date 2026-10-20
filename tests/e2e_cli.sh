@@ -482,6 +482,58 @@ LUA
         pass "hull build: no binary produced"
     fi
     rm -rf "$d"
+
+    # (audit 19 H3) AOT committed in the app tree is native code from
+    # whoever wrote the tree; its stamp only says it claims to come from
+    # Hull's wamrc. A build embeds only the AOT it compiles itself unless
+    # --trust-prebuilt-aot: STAMPED AOT under a .wasm name fails the build,
+    # and a committed compute/*.aot.* is left out.
+    stamped_aot() {
+        # "\0aot", version 7, target-info section (type 0, size 48), then the
+        # stamp at offset 40: version 1, magic "HULL" (0x48554C4C, LE).
+        printf '\000aot\007\000\000\000\000\000\000\000\060\000\000\000' > "$1"
+        head -c 24 /dev/zero >> "$1"
+        printf '\001\000\000\000LLUH' >> "$1"
+        head -c 80 /dev/zero >> "$1"
+    }
+    d=$(mktemp -d)
+    mkdir -p "${d}/compute"
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/compute@1" } })
+app.main(function() return 0 end)
+LUA
+    stamped_aot "${d}/compute/x.wasm"
+    # shellcheck disable=SC2086
+    hull_run "$HULL_RC_TMP" "${HULL_BIN}" build --no-verify-platform --no-aot $_cc \
+        -o "${d}/tool" "$d" >/dev/null
+    case "$(cat "$HULL_RC_TMP")" in
+        *"--trust-prebuilt-aot"*) pass "hull build: stamped AOT named .wasm is refused" ;;
+        *) fail "hull build: stamped AOT-as-.wasm (got '$(tail -3 "$HULL_RC_TMP")')" ;;
+    esac
+    if [ -f "${d}/tool" ] || [ -f "${d}/tool.com" ]; then
+        fail "hull build: embedded committed AOT without --trust-prebuilt-aot"
+    else
+        pass "hull build: no binary from committed AOT"
+    fi
+    rm -rf "$d"
+
+    d=$(mktemp -d)
+    mkdir -p "${d}/compute"
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/compute@1" } })
+app.main(function() return 0 end)
+LUA
+    cp tests/fixtures/compute/echo.wasm "${d}/compute/echo.wasm"
+    stamped_aot "${d}/compute/echo.aot.x86_64"
+    bin=$(build_cli "$d" --no-aot)
+    if grep -q "not embedding 1 committed AOT" "${d}/build.log"; then
+        pass "hull build: committed compute/*.aot.* left out"
+    else
+        fail "hull build: committed AOT (got '$(tail -3 "${d}/build.log")')"
+    fi
+    [ -n "$bin" ] && pass "hull build: app with committed AOT still builds" \
+        || fail "hull build: app with committed AOT failed to build"
+    rm -rf "$d"
 }
 
 run_built_cli

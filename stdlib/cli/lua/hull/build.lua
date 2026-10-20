@@ -60,6 +60,10 @@ local function parse_args()
         output = nil,
         app_dir = ".",
         aot = true,       -- AOT compile WASM modules (--no-aot to disable)
+        trust_prebuilt_aot = false, -- embed AOT committed in the app tree
+                          -- (compute/*.aot.*, AOT code saved as .wasm);
+                          -- by default only AOT this build compiles is
+                          -- embedded (--trust-prebuilt-aot)
         cache = true,     -- Use the AOT artifact cache at
                           -- $HOME/.hull/cache/compute-aot/. --no-cache
                           -- forces a fresh wamrc invocation (still
@@ -121,6 +125,8 @@ local function parse_args()
             opts.output = arg[i]
         elseif a == "--no-aot" then
             opts.aot = false
+        elseif a == "--trust-prebuilt-aot" then
+            opts.trust_prebuilt_aot = true
         elseif a == "--no-cache" then
             opts.cache = false
         elseif a == "--no-build-compute" then
@@ -1938,19 +1944,33 @@ typedef struct {
         end
     end
 
-    -- The runtime classifies a compute module by its bytes and refuses AOT
-    -- code without the stamp of Hull's patched wamrc (cap/wasm.c): check the
-    -- same here, so a build does not ship, unannounced, a module the runtime
-    -- refuses. A committed *.aot.* without the stamp is named (it is still
-    -- embedded and signed - everything under compute/ is - but the runtime
-    -- runs the module's .wasm instead); a *.wasm holding unstamped AOT
-    -- code has nothing to fall back to, so the build fails. Stamped AOT under
-    -- a .wasm name loads as AOT and is not fed to wamrc again.
+    -- AOT committed in the app tree is native code from whoever wrote the
+    -- tree (a cloned repository): the stamp only says it CLAIMS to come from
+    -- Hull's wamrc (wasm_aot_stamp.h). So by default a build embeds only the
+    -- AOT it compiles itself, from the .wasm bytecode, with its own wamrc
+    -- (audit 19): a committed compute/*.aot.* is left out (the module still
+    -- gets AOT when wamrc is found), and a *.wasm that holds AOT code - it
+    -- has no bytecode to compile or fall back to - fails the build.
+    -- --trust-prebuilt-aot embeds both as before. Either way the runtime
+    -- classifies a module by its bytes and refuses AOT code without the
+    -- stamp of Hull's patched wamrc (cap/wasm.c), so the same check runs
+    -- here: an unstamped *.aot.* is named (the runtime runs the .wasm
+    -- instead), an unstamped AOT *.wasm fails the build.
     local compute_files = {}
+    local prebuilt_aot = {}  -- entry names ("compute/x.aot.<arch>") embedded as committed
     if file_exists(compute_dir) then
         local wasm = tool.find_files(compute_dir, "*.wasm")
         for _, f in ipairs(wasm) do
             if has_aot_magic(f) then
+                if not opts.trust_prebuilt_aot then
+                    tool.stderr("hull build: " .. f .. " holds AOT code, not " ..
+                                "WebAssembly bytecode. A build embeds only the " ..
+                                "AOT it compiles itself: ship the module's " ..
+                                "bytecode as .wasm, or pass --trust-prebuilt-aot " ..
+                                "to embed committed AOT code.\n")
+                    tool.rmdir(tmpdir)
+                    tool.exit(1)
+                end
                 local why = aot_stamp_status(f)
                 if why then
                     tool.stderr("hull build: " .. f .. " holds AOT code, not " ..
@@ -1965,15 +1985,27 @@ typedef struct {
             compute_files[#compute_files + 1] = f
         end
         local aot = tool.find_files(compute_dir, "*.aot.*")
+        local skipped = {}
         for _, f in ipairs(aot) do
-            local why = aot_stamp_status(f)
-            if why then
-                print("hull build: warning: " .. f .. " is unusable (" ..
-                      why .. "): the runtime refuses it and runs the " ..
-                      "module's .wasm in the interpreter. Delete it, or " ..
-                      "rebuild it with Hull's wamrc (`hull tools install wamrc`).")
+            if not opts.trust_prebuilt_aot then
+                skipped[#skipped + 1] = f
+            else
+                local why = aot_stamp_status(f)
+                if why then
+                    print("hull build: warning: " .. f .. " is unusable (" ..
+                          why .. "): the runtime refuses it and runs the " ..
+                          "module's .wasm in the interpreter. Delete it, or " ..
+                          "rebuild it with Hull's wamrc (`hull tools install wamrc`).")
+                end
+                compute_files[#compute_files + 1] = f
+                prebuilt_aot[f:sub(#opts.app_dir + 2)] = true
             end
-            compute_files[#compute_files + 1] = f
+        end
+        if #skipped > 0 then
+            print("hull build: not embedding " .. #skipped .. " committed AOT " ..
+                  "file(s) (" .. table.concat(skipped, ", ") .. "): a build " ..
+                  "embeds only the AOT it compiles itself. Pass " ..
+                  "--trust-prebuilt-aot to embed them.")
         end
     end
     if #compute_files > 0 then
@@ -2287,6 +2319,10 @@ local function main()
                     for _, arch in ipairs(targets) do
                         local aot_name = rel:gsub("%.wasm$", ".aot." .. arch) -- "compute/score.aot.x86_64"
                         local aot_path = tmpdir .. "/" .. aot_name
+                        -- A committed one embedded under --trust-prebuilt-aot
+                        -- takes the name: two entries of one name would not
+                        -- start.
+                        if prebuilt_aot[aot_name] then goto next_arch end
                         tool.mkdir(tmpdir .. "/compute")
 
                         local mem64 = is_memory64_wasm(wasm_path)
@@ -2373,6 +2409,7 @@ local function main()
                             print("hull build: warning: AOT failed for " .. rel ..
                                   " (target " .. arch .. ")")
                         end
+                        ::next_arch::
                     end
                 end
                 if #compute_aot > 0 then

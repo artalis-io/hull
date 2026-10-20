@@ -733,7 +733,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         }
     }
 
-    /* The filesystem steps are for development only. A built binary (its
+    /* The filesystem step is for development only. A built binary (its
      * app files embedded) runs the modules it was built with: it used to
      * fall back to <cwd>/compute/<name>.aot.<arch> - native code, loaded
      * outside the WASM sandbox and outside any signature - for a name it
@@ -741,54 +741,15 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
      * be a signed file (hl_vfs_disk_gate_check). */
     int disk_ok = !hl_vfs_embedded(app_vfs);
 
-    /* 3. Filesystem AOT: <app_dir>/compute/<name>.aot.<arch> */
-    if (!buf && disk_ok && app_dir && arch) {
-        char path[4096];
-        int n = snprintf(path, sizeof(path), "%s/compute/%s.aot.%s", app_dir, name, arch);
-        FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
-        if (f) {
-            long fsize = -1;
-            if (fseek(f, 0, SEEK_END) == 0) {
-                fsize = ftell(f);
-                if (fseek(f, 0, SEEK_SET) != 0) fsize = -1;
-            }
-            if (fsize > 0 && (uint64_t)fsize < HL_WASM_MAX_IO_SIZE
-                && (uint64_t)fsize <= UINT32_MAX) {
-                /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
-                buf = malloc((size_t)fsize);
-                if (buf) {
-                    size_t nr = fread(buf, 1, (size_t)fsize, f);
-                    char rel[600];
-                    int rn = snprintf(rel, sizeof(rel), "compute/%s.aot.%s", name, arch);
-                    if (nr == (size_t)fsize &&
-                        (rn < 0 || (size_t)rn >= sizeof(rel) ||
-                         hl_vfs_disk_gate_check(rel, buf, nr) != 0)) {
-                        log_error("[wasm] refusing compute/%s.aot.%s: not a signed "
-                                  "file (--verify-sig)", name, arch);
-                        free(buf);
-                        fclose(f);
-                        return HL_WASM_ERR_LOAD;
-                    }
-                    if (nr == (size_t)fsize && !aot_stamp_usable(name, buf, nr)) {
-                        aot_refused = 1;
-                        free(buf);
-                        buf = NULL;
-                    } else if (nr == (size_t)fsize) {
-                        buf_len = (uint32_t)fsize;
-                        is_aot = 1;
-                        log_debug("[wasm] loaded AOT module '%s' from disk (%u bytes)",
-                                  name, buf_len);
-                    } else {
-                        free(buf);
-                        buf = NULL;
-                    }
-                }
-            }
-            fclose(f);
-        }
-    }
+    /* No AOT is ever read from disk (audit 19). A compute/<name>.aot.<arch>
+     * in the app tree is native code from whoever wrote the tree - a cloned
+     * repository - and the stamp only says it CLAIMS to come from Hull's
+     * wamrc (wasm_aot_stamp.h), so `hull dev` / `hull test` ran it as the
+     * user, outside the WASM sandbox. In development a module runs its
+     * .wasm in the interpreter; AOT comes only embedded, from `hull build`,
+     * which compiles it with its own wamrc. */
 
-    /* 4. Filesystem WASM fallback: <app_dir>/compute/<name>.wasm */
+    /* 3. Filesystem WASM fallback: <app_dir>/compute/<name>.wasm */
     if (!buf && disk_ok && app_dir) {
         char path[4096];
         int n = snprintf(path, sizeof(path), "%s/compute/%s.wasm", app_dir, name);
@@ -812,6 +773,18 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                          hl_vfs_disk_gate_check(rel, buf, nr) != 0)) {
                         log_error("[wasm] refusing compute/%s.wasm: not a signed "
                                   "file (--verify-sig)", name);
+                        free(buf);
+                        fclose(f);
+                        return HL_WASM_ERR_LOAD;
+                    }
+                    if (nr == (size_t)fsize && nr >= 4 &&
+                        hl_aot_le32(buf) == HL_AOT_FILE_MAGIC) {
+                        /* AOT code saved under the .wasm name: native code
+                         * from disk all the same, stamp or none. */
+                        log_error("[wasm] refusing module '%s': compute/%s.wasm "
+                                  "holds AOT code, which is never loaded from "
+                                  "disk. Ship WebAssembly bytecode as .wasm; "
+                                  "`hull build` compiles the AOT", name, name);
                         free(buf);
                         fclose(f);
                         return HL_WASM_ERR_LOAD;
@@ -842,8 +815,10 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     /* WAMR picks its loader by the magic, not the name: AOT bytes saved as
      * compute/<name>.wasm (`wamrc -o x.wasm`, a "precompiled" plugin) loaded
      * as native code with is_aot = 0, past the stamp check the .aot.<arch>
-     * steps make (round 7). Classify by the bytes; such a module has no
-     * bytecode to fall back to, so an unstamped one is refused. */
+     * step makes (round 7). Classify by the bytes; such a module has no
+     * bytecode to fall back to, so an unstamped one is refused. Only an
+     * embedded one gets here (step 3 refuses one read from disk), which a
+     * build embeds only under --trust-prebuilt-aot. */
     if (!is_aot && buf_len >= 4 && hl_aot_le32(buf) == HL_AOT_FILE_MAGIC) {
         if (hl_aot_stamp_check(buf, buf_len) != HL_AOT_STAMP_OK) {
             log_error("[wasm] refusing module '%s': compute/%s.wasm holds AOT "
@@ -974,7 +949,11 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
      *
      * Suppress the warning when HULL_QUIET_AOT=1 (set by tests + CI that
      * intentionally exercise the interpreter path). */
-    if (!is_aot && !aot_refused && getenv("HULL_QUIET_AOT") == NULL) {
+    if (!is_aot && disk_ok) {
+        /* Development: AOT is never read from disk, so this is expected. */
+        log_debug("[wasm] module '%s' runs in the fast interpreter in "
+                  "development; `hull build` compiles it to AOT", name);
+    } else if (!is_aot && !aot_refused && getenv("HULL_QUIET_AOT") == NULL) {
         log_warn("[wasm] module '%s' is running in the fast interpreter "
                  "(no AOT artifact found). Compile with `wamrc` (make wamrc) "
                  "and rebuild - AOT is typically ~50x faster.",

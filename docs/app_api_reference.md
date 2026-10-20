@@ -1856,7 +1856,7 @@ hull build myapp --target=x86_64   # cross-compile AOT for different arch
 
 For cosmocc builds, both x86_64 and aarch64 AOT files are generated automatically.
 
-**Dev mode AOT:** In `hull dev`, place pre-compiled `.aot.<arch>` files next to `.wasm` files in `compute/` and they'll be loaded automatically (four-tier lookup: VFS AOT → VFS WASM → filesystem AOT → filesystem WASM).
+**Dev mode runs the interpreter:** `hull dev` / `hull test` never load AOT from the app directory - a `.aot.<arch>` there is native code from whoever wrote the tree, so it is ignored and the `.wasm` runs in the interpreter (AOT bytes saved as a `.wasm` are refused). Lookup: VFS AOT → VFS WASM → filesystem WASM. AOT comes from `hull build`, which compiles it with its own wamrc and embeds only that, unless `--trust-prebuilt-aot` (then committed `compute/*.aot.*` and AOT-as-`.wasm` are embedded as found). A Memory64 module needs AOT, so it runs only in a built binary.
 
 **wamrc build:** `make wamrc` builds the WAMR AOT compiler from `vendor/wamr/wamr-compiler`. Requires cmake and LLVM (`brew install llvm` on macOS, `apt install llvm` on Linux). Override LLVM path: `make wamrc WAMRC_CMAKE_FLAGS="-DLLVM_DIR=/path/to/llvm/cmake"`. Output: `build/wamrc`.
 

@@ -133,6 +133,7 @@ _hull() {
                         '--sign[Signing key file]:file:_files' \
                         '--developer-key[Developer public key]:file:_files' \
                         '--no-aot[Skip AOT compilation of WASM modules]' \
+                        '--trust-prebuilt-aot[Embed AOT committed in the app tree]' \
                         '*:app dir:_files -/'
                     ;;
 
