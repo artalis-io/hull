@@ -19,7 +19,10 @@
 #include "hull/cap/db_budget.h"
 #include "hull/cap/types.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Open a fresh in-memory DuckDB handle. */
 static int duck_open_mem(HlDbHandle *h)
@@ -359,6 +362,62 @@ UTEST(db_duckdb, table_columns)
     ASSERT_STREQ(c.names[2], "note");
 
     h.backend->close(&h);
+}
+
+/* Audit 20: every open was an instance of its own, so the db.async pool
+ * threads' connections to a file were separate DuckDB instances from the
+ * event loop's: a pool thread read what its instance had replayed at open,
+ * not what the other had committed since. One instance per file now, shared
+ * by refcount; the last close closes it, and :memory: stays private. */
+UTEST(db_duckdb, one_instance_per_file)
+{
+    char path[] = "/tmp/hull_duck_shared_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT_TRUE(fd >= 0);
+    close(fd);
+    unlink(path);   /* DuckDB makes the file itself */
+    char dsn[128];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", path);
+
+    HlDbHandle a = { .backend = &hl_db_backend_duckdb };
+    HlDbHandle b = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(hl_db_backend_duckdb.open(&a.ctx, dsn, NULL), 0);
+    ASSERT_EQ(hl_db_backend_duckdb.open(&b.ctx, dsn, NULL), 0);
+    ASSERT_EQ(hl_db_exec(&a, "CREATE TABLE t (x INTEGER)", NULL, 0), 0);
+    ASSERT_EQ(hl_db_exec(&a, "INSERT INTO t VALUES (41), (1)", NULL, 0), 0);
+    int64_t sum = 0;
+    ASSERT_EQ(hl_db_query(&b, "SELECT CAST(SUM(x) AS BIGINT) FROM t", NULL, 0,
+                          count_cb, &sum, NULL), 0);
+    EXPECT_EQ(sum, (int64_t)42);           /* b sees a's committed rows */
+    a.backend->close(&a);
+    sum = 0;
+    ASSERT_EQ(hl_db_query(&b, "SELECT CAST(SUM(x) AS BIGINT) FROM t", NULL, 0,
+                          count_cb, &sum, NULL), 0);
+    EXPECT_EQ(sum, (int64_t)42);           /* the instance outlives a */
+    b.backend->close(&b);
+
+    /* The last close closed it: a new open is a new instance of the file. */
+    HlDbHandle c = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(hl_db_backend_duckdb.open(&c.ctx, dsn, NULL), 0);
+    sum = 0;
+    ASSERT_EQ(hl_db_query(&c, "SELECT CAST(SUM(x) AS BIGINT) FROM t", NULL, 0,
+                          count_cb, &sum, NULL), 0);
+    EXPECT_EQ(sum, (int64_t)42);
+    c.backend->close(&c);
+
+    /* :memory: stays private to its open. */
+    HlDbHandle m1 = {0}, m2 = {0};
+    ASSERT_EQ(duck_open_mem(&m1), 0);
+    ASSERT_EQ(duck_open_mem(&m2), 0);
+    ASSERT_EQ(hl_db_exec(&m1, "CREATE TABLE only_m1 (x INTEGER)", NULL, 0), 0);
+    EXPECT_NE(hl_db_exec(&m2, "SELECT * FROM only_m1", NULL, 0), 0);
+    m1.backend->close(&m1);
+    m2.backend->close(&m2);
+
+    unlink(path);
+    char wal[160];
+    snprintf(wal, sizeof wal, "%s.wal", path);
+    unlink(wal);
 }
 
 UTEST_MAIN()

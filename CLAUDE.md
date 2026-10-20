@@ -778,7 +778,14 @@ end and `worker_end_txn` reset the handle's batch depth. A
 WAIT_NOTIFY on a `db.open` handle keeps its LISTEN connection only while the
 handle is open: the op carries the handle's id (`hl_db_dynamic_id`) and every
 op sweeps the thread's connections whose handle was closed
-(`hl_db_dynamic_id_live`).
+(`hl_db_dynamic_id_live`). A NotificationResponse a query or a script reads on
+a LISTEN connection marks its channel pending (`HlPgConn.on_notify`), as one
+for another channel read during a wait does - it was dropped, and the next
+wait slept to its timeout (audit 20). Every connection to one DuckDB file - the
+event loop's and each pool thread's - shares one database instance (refcounted
+in `db_duckdb.c`, the security configuration applied and locked by the first
+open): each open was an instance of its own, so a pool thread read what its
+instance had replayed at open, and both could write the file (audit 20).
 `hl_db_batch_enter/leave` detect a transaction that ended under an open batch
 (a raw COMMIT / ROLLBACK in fn, a nested in-process dispatch): leave fails with
 a clear message, a nested batch starts a fresh transaction.
@@ -881,7 +888,13 @@ roadmap §2.9.)
   the run's budget with a 0-unit charge, so a `pg_sleep` / `SLEEP()` / lock
   wait is stopped by a tripped budget or the run deadline, through the same
   abandon path, instead of holding the loop in recv for the whole read timeout
-  (audit 18). A Postgres trip on the CommandComplete of a COMMIT is not
+  (audit 18). So are the waits around it (audit 20): the TCP connect
+  (`hl_db_transport_connect_stop`, asked between pump steps), the TLS handshake
+  (`hl_tls_client_handshake_stop`), the Postgres SSLRequest answer, and a TLS
+  read once its record's first byte arrived (`hl_db_transport_recv_sliced`:
+  the read decrypts whole records and blocked for the rest under SO_RCVTIMEO,
+  for ever with `read_timeout=0`); Valkey's connect and handshake likewise,
+  which waited up to `connect_timeout` (10 min). A Postgres trip on the CommandComplete of a COMMIT is not
   abandoned: the reply is read on to its ReadyForQuery, so the commit the
   server made is reported, not a "lost" transaction; likewise a MySQL trip on
   the packet that ends a reply (its OK / ERR, or the EOF of the last result

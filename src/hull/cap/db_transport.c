@@ -115,6 +115,16 @@ struct HlDbTransport {
     /* Owned: optional attached TLS session. When non-NULL, send/recv tunnel
      * through it (design D2); the transport frees it in close. */
     struct HlTlsClient *tls;
+
+    /* Asked after every connect pump step (hl_db_transport_connect_stop):
+     * the run's budget / deadline. NULL for none. */
+    HlDbWaitStopFn connect_stop;
+    void          *connect_stop_ud;
+    int            connect_stopped;
+
+    /* The I/O timeout hl_db_transport_set_io_timeout last set (0 = none):
+     * what a sliced TLS read puts back. */
+    int            io_timeout_ms;
 };
 
 /* SIGPIPE suppression on send has parity with the wire client: the winning / adopted fd
@@ -507,6 +517,14 @@ static int pump_connect(HlDbTransport *t)
         if (kl_event_ctx_run(&t->ev, 64, DBTP_PUMP_STEP_MS) < 0) return -1;
         if (done_connect(t)) return 0;
         if (dl && kl_monotonic_ms() >= dl) return -1;
+        /* The caller's run is over its budget or past its deadline: a connect
+         * to a host that never answers held the event loop for the whole
+         * connect timeout (Valkey's up to 10 min) with neither checked
+         * (audit 20). */
+        if (t->connect_stop && t->connect_stop(t->connect_stop_ud)) {
+            t->connect_stopped = 1;
+            return -1;
+        }
     }
 }
 
@@ -619,6 +637,17 @@ HlDbTransport *hl_db_transport_connect(const char *tag, HlAllocator *alloc,
                                        const KlSocketProvider *sp_or_NULL,
                                        char *errbuf, size_t errlen)
 {
+    return hl_db_transport_connect_stop(tag, alloc, host, port, timeout_ms,
+                                        sp_or_NULL, NULL, NULL, errbuf, errlen);
+}
+
+HlDbTransport *hl_db_transport_connect_stop(const char *tag, HlAllocator *alloc,
+                                            const char *host, const char *port,
+                                            int timeout_ms,
+                                            const KlSocketProvider *sp_or_NULL,
+                                            HlDbWaitStopFn stop, void *stop_ud,
+                                            char *errbuf, size_t errlen)
+{
     if (!host || !port) {
         set_err(errbuf, errlen, "invalid connect arguments");
         return NULL;
@@ -644,6 +673,8 @@ HlDbTransport *hl_db_transport_connect(const char *tag, HlAllocator *alloc,
 
     HlDbTransport *t = transport_new(sp, tag, alloc);
     if (!t) { set_err(errbuf, errlen, "out of memory"); return NULL; }
+    t->connect_stop = stop;
+    t->connect_stop_ud = stop_ud;
     /* Event-ctx scratch rides the embedder allocator (D6) via the canonical
      * hl_alloc_kl adapter; hl_alloc_kl(NULL) delegates to libc, so pg/mysql keep
      * their prior (libc) behavior. */
@@ -681,7 +712,9 @@ HlDbTransport *hl_db_transport_connect(const char *tag, HlAllocator *alloc,
 
     if (pump_connect(t) != 0 ||
         t->connect_result != KL_CONNECT_SUCCESS || !kl_handle_valid(t->fd))
-        return connect_fail(t, errbuf, errlen, "connection failed");
+        return connect_fail(t, errbuf, errlen, t->connect_stopped
+            ? "connect stopped (instruction or time limit exceeded)"
+            : "connection failed");
 
     /* Connect succeeded: the winning fd is already blocking and handed to us, but
      * the op still needs confirmed detachment before its embedded storage is
@@ -792,6 +825,56 @@ ssize_t hl_db_transport_recv(HlDbTransport *t, uint8_t *buf, size_t len)
     return (ssize_t)n;
 }
 
+/* SO_RCVTIMEO alone (a sliced TLS read narrows it, then puts it back). */
+static void set_rcv_timeout(int fd, int ms)
+{
+    struct timeval to;
+    to.tv_sec  = ms / 1000;
+    to.tv_usec = (ms % 1000) * 1000;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+}
+
+ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
+                                    int timeout_ms, HlDbWaitStopFn stop,
+                                    void *ud)
+{
+    /* Plaintext: the caller's hl_db_transport_wait_readable saw bytes, so a
+     * recv returns at once. TLS plaintext already decrypted: the same. */
+    if (!t || !t->tls || !stop || len == 0 || hl_db_transport_pending(t) > 0)
+        return hl_db_transport_recv(t, buf, len);
+    int fd = hl_db_transport_fd(t);
+    if (fd < 0)
+        return -1;
+    /* A TLS read decrypts whole records: readable on a record's first byte,
+     * the read then blocked for the rest under SO_RCVTIMEO - the whole
+     * ?read_timeout= (300 s by default, 0 = for ever) - with no budget or
+     * deadline checked, so a server sending half a record held the event
+     * loop (audit 20). Read with a one-slice socket timeout instead; the
+     * TLS session keeps the partial record across the retries. */
+    set_rcv_timeout(fd, HL_DB_WAIT_SLICE_MS);
+    uint64_t start = kl_monotonic_ms();
+    ssize_t n;
+    for (int empty = 0; ; ) {
+        errno = 0;
+        n = hl_tls_client_read(fd, t->tls, buf, len);
+        if (n != 0)
+            break;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {   /* a slice passed */
+            if (stop(ud)) { n = -2; break; }
+            if (timeout_ms > 0 &&
+                kl_monotonic_ms() - start >= (uint64_t)timeout_ms) {
+                n = -1;
+                break;
+            }
+            continue;
+        }
+        /* A record with no application data (see hl_db_transport_recv). */
+        if (++empty >= 64) { n = -1; break; }
+    }
+    set_rcv_timeout(fd, t->io_timeout_ms);
+    return n;
+}
+
 size_t hl_db_transport_pending(HlDbTransport *t)
 {
     return (t && t->tls) ? hl_tls_client_pending(t->tls) : 0;
@@ -851,6 +934,7 @@ void hl_db_transport_set_io_timeout(HlDbTransport *t, int ms)
 {
     if (!t || ms <= 0)
         return;                              /* ms <= 0 is an explicit no-op (D3) */
+    t->io_timeout_ms = ms;
     int fd = hl_db_transport_fd(t);
     if (fd < 0)
         return;                              /* no descriptor held */

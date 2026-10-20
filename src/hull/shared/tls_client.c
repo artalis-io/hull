@@ -105,7 +105,8 @@ static int tls_fd_restore(int fd, int saved)
 /* Drive tls->handshake to completion, bounded by @p timeout_ms (<= 0 = wait
  * indefinitely) against ONE monotonic absolute deadline. 0 on success, -1 on
  * error / timeout / an fd-mode setup or restore failure. */
-static int tls_handshake_loop(KlTls *tls, int fd, int timeout_ms)
+static int tls_handshake_loop(KlTls *tls, int fd, int timeout_ms,
+                              int (*stop)(void *), void *ud)
 {
     int saved;
     if (tls_fd_set_nonblocking(fd, &saved) != 0)
@@ -139,7 +140,9 @@ static int tls_handshake_loop(KlTls *tls, int fd, int timeout_ms)
             rc = -1; break;
         }
         /* pr == 0 (poll timed out) or pr > 0 (ready): loop; the top-of-loop
-         * deadline check is the sole timeout authority. */
+         * deadline check is the sole timeout authority. A step that saw
+         * nothing asks the caller's run whether to go on (audit 20). */
+        if (pr == 0 && stop && stop(ud)) { rc = -1; break; }
     }
 
     if (tls_fd_restore(fd, saved) != 0)
@@ -160,6 +163,13 @@ static HlTlsClient *tls_client_wrap(KlTlsCtx *ctx, KlTls *tls)
 
 HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
                                      int verify, int timeout_ms)
+{
+    return hl_tls_client_handshake_stop(fd, host, verify, timeout_ms, NULL, NULL);
+}
+
+HlTlsClient *hl_tls_client_handshake_stop(int fd, const char *host,
+                                          int verify, int timeout_ms,
+                                          int (*stop)(void *), void *ud)
 {
     KlAllocator *alloc = default_alloc();   /* persistent; outlives the KlTls/ctx */
 
@@ -210,7 +220,7 @@ HlTlsClient *hl_tls_client_handshake(int fd, const char *host,
     }
 
     HlTlsClient *c = NULL;
-    if (tls_handshake_loop(tls, fd, timeout_ms) != 0 ||
+    if (tls_handshake_loop(tls, fd, timeout_ms, stop, ud) != 0 ||
         (c = tls_client_wrap(ctx, tls)) == NULL) {
         tls->destroy(tls);
         kl_tls_mbedtls_ctx_destroy(ctx);
@@ -241,7 +251,7 @@ HlTlsClient *hl_tls_client_handshake_cfg(int fd, const char *host,
 
     /* ctx is user-owned (cfg->ctx): wrap with ctx=NULL so free leaves it. */
     HlTlsClient *c = NULL;
-    if (tls_handshake_loop(tls, fd, timeout_ms) != 0 ||
+    if (tls_handshake_loop(tls, fd, timeout_ms, NULL, NULL) != 0 ||
         (c = tls_client_wrap(NULL, tls)) == NULL) {
         tls->destroy(tls);
         return NULL;

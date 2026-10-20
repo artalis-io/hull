@@ -188,6 +188,34 @@ int hl_db_transport_wait_readable(HlDbTransport *t, int timeout_ms,
                                   HlDbWaitStopFn stop, void *ud);
 
 /**
+ * hl_db_transport_connect, asking @p stop(@p stop_ud) (may be NULL) after
+ * every connect step (DBTP_PUMP_STEP_MS): a connect to a host that never
+ * answers held the event loop for the whole connect timeout with no budget or
+ * run deadline checked (audit 20). A stop fails the connect ("connect
+ * stopped").
+ */
+HlDbTransport *hl_db_transport_connect_stop(const char *tag,
+                                            struct HlAllocator *alloc,
+                                            const char *host, const char *port,
+                                            int timeout_ms,
+                                            const struct KlSocketProvider *sp_or_NULL,
+                                            HlDbWaitStopFn stop, void *stop_ud,
+                                            char *errbuf, size_t errlen);
+
+/**
+ * The recv after hl_db_transport_wait_readable said readable. Over TLS the
+ * read decrypts whole records and blocked, once readable, for the rest of one
+ * under SO_RCVTIMEO (the whole ?read_timeout=): it reads in HL_DB_WAIT_SLICE_MS
+ * slices instead, asking @p stop(@p ud) between them, up to @p timeout_ms in
+ * all (<= 0: no bound) - audit 20. Plaintext (or @p stop NULL) is a plain
+ * hl_db_transport_recv. Returns as hl_db_transport_recv, or -2 when @p stop
+ * said to stop (the connection is then mid-record: close it).
+ */
+ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
+                                    int timeout_ms, HlDbWaitStopFn stop,
+                                    void *ud);
+
+/**
  * Send every byte of @p buf (all-or-error), looping over hl_db_transport_send.
  * This is conn_send's semantics: returns 0 iff all @p len bytes were written, -1
  * on any short/failed write.

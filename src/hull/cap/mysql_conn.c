@@ -252,11 +252,6 @@ static ssize_t conn_write_raw(HlMyConn *conn, const uint8_t *buf, size_t len)
     return hl_db_transport_send(conn->transport, buf, len);
 }
 
-static ssize_t conn_read_raw(HlMyConn *conn, uint8_t *buf, size_t len)
-{
-    return hl_db_transport_recv(conn->transport, buf, len);
-}
-
 static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
 {
     size_t sent = 0;
@@ -334,8 +329,15 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
         if (wr == -2) { my_abandon(conn); return -1; }
         ssize_t n = -1;
         if (wr == 1) {
-            do { n = conn_read_raw(conn, conn->rbuf + conn->rlen, conn->rcap - conn->rlen); }
-            while (n < 0 && errno == EINTR);
+            /* Over TLS, sliced too: a record's first byte made it readable,
+             * and the read then blocked for the rest (audit 20). */
+            do { n = hl_db_transport_recv_sliced(conn->transport,
+                                                 conn->rbuf + conn->rlen,
+                                                 conn->rcap - conn->rlen,
+                                                 conn->read_timeout_ms,
+                                                 my_wait_stop, NULL); }
+            while (n == -1 && errno == EINTR);
+            if (n == -2) { my_abandon(conn); return -1; }
         }
         if (n <= 0) {
             conn_set_err(conn, n < 0 ? "read failed or timed out (see ?read_timeout=)"
@@ -520,7 +522,8 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         int rawfd = hl_db_transport_fd(conn->transport);
         int verify = (sslmode == HL_MY_SSL_VERIFY);
         struct HlTlsClient *tls =
-            hl_tls_client_handshake(rawfd, dsn->host, verify, HL_MY_TLS_TIMEOUT_MS);
+            hl_tls_client_handshake_stop(rawfd, dsn->host, verify,
+                                         HL_MY_TLS_TIMEOUT_MS, my_wait_stop, NULL);
         if (!tls) {
             snprintf(conn->errmsg, sizeof conn->errmsg,
                      "TLS handshake with %s failed", dsn->host);
@@ -672,8 +675,9 @@ int hl_my_conn_start(HlMyConn *conn, int fd, const HlMyDsn *dsn)
 
 int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
 {
-    HlDbTransport *t = hl_db_transport_connect("mysql", NULL, dsn->host, dsn->port, timeout_ms,
-                                             NULL, conn->errmsg, sizeof conn->errmsg);
+    HlDbTransport *t = hl_db_transport_connect_stop("mysql", NULL, dsn->host, dsn->port,
+                                                  timeout_ms, NULL, my_wait_stop, NULL,
+                                                  conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         memset(conn, 0, sizeof *conn);
         conn->transport = NULL;

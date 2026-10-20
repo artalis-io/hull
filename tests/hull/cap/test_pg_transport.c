@@ -434,6 +434,36 @@ UTEST(pg_transport_connect, unbounded_no_hidden_ceiling)
     seam_clear(); tp_disarm_watchdog();
 }
 
+/* ── audit 20: a connect asks its caller between pump steps. An unbounded
+ *    connect to an address that never completes held the event loop with no
+ *    budget or run deadline checked; a stop now fails it at once (the 5 s
+ *    watchdog trips on the old hang). ──────────────────────────────────────── */
+static int g_tp_stop_calls;
+static int tp_stop_on_third(void *ud)
+{
+    (void)ud;
+    return ++g_tp_stop_calls >= 3;
+}
+UTEST(pg_transport_connect, stop_ends_a_connect_that_never_completes)
+{
+    TP_NEEDS_UNIX_SOCKETS();
+    fk_reset(); tp_arm_watchdog();
+    g_fk_naddr = 1; g_fk_disp[0] = FK_PENDING;   /* never completes on its own */
+    db_transport_test_resolve = fk_resolve; db_transport_test_socket_provider = &FK_PROVIDER;
+    g_tp_stop_calls = 0;
+
+    char err[128] = {0};
+    HlDbTransport *t = hl_db_transport_connect_stop("pg", NULL, "h", "5432",
+                                                    0 /* unbounded */, &FK_PROVIDER,
+                                                    tp_stop_on_third, NULL,
+                                                    err, sizeof err);
+    ASSERT_TRUE(t == NULL);
+    ASSERT_EQ(g_tp_stop_calls, 3);
+    ASSERT_TRUE(strstr(err, "connect stopped") != NULL);
+    ASSERT_TRUE(fk_all_fds_closed());
+    seam_clear(); tp_disarm_watchdog();
+}
+
 /* ── provider io_status classification with an IRRELEVANT hosted errno ─
  *    connect leaves errno = EPERM (a FATAL-looking code) but io_status reports
  *    KL_IO_PENDING, so the transport must treat it as pending (consulting

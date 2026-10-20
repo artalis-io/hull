@@ -248,6 +248,19 @@ static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
 }
 
 static void pg_abandon(HlPgConn *conn);
+static int notify_is_for(const HlPgFrame *f, const char *channel, char *got,
+                         size_t gotsz);
+
+/* A NotificationResponse a query or a script read: hand it to the backend's
+ * listen table (conn->on_notify), as wait_notify does for another channel's.
+ * Dropped, the next wait on that channel slept to its timeout (audit 20). */
+static void pg_note_notify(HlPgConn *conn, const HlPgFrame *f)
+{
+    char got[64];
+    if (!conn->on_notify) return;
+    (void)notify_is_for(f, NULL, got, sizeof got);
+    if (got[0]) conn->on_notify(conn->on_notify_ud, got);
+}
 
 /* Asked between the slices of a wait for the server (audit 18): a 0-unit
  * charge, which trips once the run's budget is spent or its wall-clock
@@ -306,8 +319,16 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
                                                conn->finishing ? NULL : pg_wait_stop,
                                                NULL);
         if (wr == -2) { pg_abandon(conn); return -1; }
-        ssize_t n = wr == 1 ? io_recv(conn, conn->rbuf + conn->rlen,
-                                      conn->rcap - conn->rlen) : -1;
+        /* Over TLS, sliced too: a record's first byte made it readable, and
+         * the read then blocked for the rest under SO_RCVTIMEO (audit 20). */
+        ssize_t n = wr == 1
+            ? hl_db_transport_recv_sliced(conn->transport, conn->rbuf + conn->rlen,
+                                          conn->rcap - conn->rlen,
+                                          conn->read_timeout_ms,
+                                          conn->finishing ? NULL : pg_wait_stop,
+                                          NULL)
+            : -1;
+        if (n == -2) { pg_abandon(conn); return -1; }
         if (n <= 0) {
             conn->broken = 1;
             set_err(conn->errmsg, sizeof conn->errmsg,
@@ -778,6 +799,7 @@ int hl_pg_sslmode_parse(const char *s)
 #ifndef HL_PG_NO_TLS
 
 HlPgSslDecision hl_pg_ssl_negotiate(HlDbTransport *t, HlPgSslMode mode,
+                                    int read_timeout_ms,
                                     char *errbuf, size_t errlen)
 {
     if (mode == HL_PG_SSLMODE_DISABLE) return HL_PG_SSL_PLAINTEXT;
@@ -792,8 +814,16 @@ HlPgSslDecision hl_pg_ssl_negotiate(HlDbTransport *t, HlPgSslMode mode,
         return HL_PG_SSL_FAIL;
     }
 
+    /* Waited for in slices that ask the run's budget, as every later read
+     * is: a server that accepted and never answered the SSLRequest (sent by
+     * default, sslmode=prefer) held the event loop for the whole read
+     * timeout - for ever under ?read_timeout=0 (audit 20). */
     uint8_t resp;
-    ssize_t n = hl_db_transport_recv(t, &resp, 1);
+    int wr = hl_db_transport_wait_readable(t, read_timeout_ms, pg_wait_stop, NULL);
+    if (wr == -2) { set_err(errbuf, errlen,
+                            "connect stopped (instruction or time limit exceeded)");
+                    return HL_PG_SSL_FAIL; }
+    ssize_t n = wr == 1 ? hl_db_transport_recv(t, &resp, 1) : -1;
     if (n <= 0) { set_err(errbuf, errlen, "no SSLRequest response from server");
                   return HL_PG_SSL_FAIL; }
 
@@ -812,8 +842,9 @@ HlPgSslDecision hl_pg_ssl_negotiate(HlDbTransport *t, HlPgSslMode mode,
 
 int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
 {
-    HlDbTransport *t = hl_db_transport_connect("pg", NULL, dsn->host, dsn->port, timeout_ms,
-                                             NULL, conn->errmsg, sizeof conn->errmsg);
+    HlDbTransport *t = hl_db_transport_connect_stop("pg", NULL, dsn->host, dsn->port,
+                                                  timeout_ms, NULL, pg_wait_stop, NULL,
+                                                  conn->errmsg, sizeof conn->errmsg);
     if (!t) {
         memset(conn, 0, sizeof(*conn));
         conn->transport = NULL;
@@ -839,7 +870,8 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
     if (mode != HL_PG_SSLMODE_DISABLE) {
         /* SSLRequest pre-TLS probe rides the transport (plaintext, no TLS yet). */
         char e[128] = {0};
-        HlPgSslDecision d = hl_pg_ssl_negotiate(t, (HlPgSslMode)mode, e, sizeof e);
+        HlPgSslDecision d = hl_pg_ssl_negotiate(t, (HlPgSslMode)mode,
+                                                dsn->read_timeout_ms, e, sizeof e);
         if (d == HL_PG_SSL_FAIL) {
             memset(conn, 0, sizeof(*conn));
             conn->transport = NULL;
@@ -858,7 +890,8 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
             int fd = hl_db_transport_fd(t);
             int verify = (mode == HL_PG_SSLMODE_VERIFY);
             struct HlTlsClient *tls =
-                hl_tls_client_handshake(fd, dsn->host, verify, timeout_ms);
+                hl_tls_client_handshake_stop(fd, dsn->host, verify, timeout_ms,
+                                             pg_wait_stop, NULL);
             if (!tls) {
                 memset(conn, 0, sizeof(*conn));
                 conn->transport = NULL;
@@ -1441,6 +1474,9 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
             conn->tx_status = hl_pg_get_u8(&c);
             conn->finishing = 0;
             return had_error ? -1 : 0;
+        case HL_PG_B_NOTIFY:
+            pg_note_notify(conn, &f);
+            break;
         default:
             break;
         }
@@ -1519,6 +1555,9 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
             conn->tx_status = hl_pg_get_u8(&c);
             conn->finishing = 0;
             return had_error ? -1 : 0;
+        case HL_PG_B_NOTIFY:
+            pg_note_notify(conn, &f);
+            break;
         default:
             break;
         }

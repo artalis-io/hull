@@ -41,14 +41,35 @@
 #include <strings.h>   /* strncasecmp */
 #include <string.h>
 #include <time.h>       /* nanosleep */
+#include <pthread.h>    /* the shared-instance registry */
 
 /* VARCHAR/BLOB inline threshold: a duckdb_string_t of length <= 12 stores its
  * bytes inline; longer strings live behind value.pointer.ptr. See duckdb.h. */
 #define HL_DUCKDB_STRING_INLINE_MAX 12
 
+/* One DuckDB database instance per file, shared by every connection the
+ * process opens to it (the event loop's and each db.async / worker.dispatch
+ * pool thread's). Each open used to be a duckdb_open_ext of its own: separate
+ * instances of one file, each with its own buffer manager, WAL and 2 GB /
+ * 4-thread budget - DuckDB's file lock is an fcntl lock, which does not stop a
+ * second instance in the same process - so a pool thread read what its
+ * instance had replayed at open, not what the event loop's had committed
+ * since, and both could write the file (audit 20). :memory: stays private to
+ * its open, as SQLite's does. */
+typedef struct HlDuckShared {
+    char                *path;
+    duckdb_database      db;
+    int                  refs;
+    struct HlDuckShared *next;
+} HlDuckShared;
+
+static pthread_mutex_t g_duck_shared_mu = PTHREAD_MUTEX_INITIALIZER;
+static HlDuckShared   *g_duck_shared;   /* under g_duck_shared_mu */
+
 typedef struct HlDbDuckCtx {
     duckdb_database    db;
     duckdb_connection  con;
+    HlDuckShared      *shared;   /* the file's instance, NULL for :memory: */
     HlAllocator       *alloc;
     /* Whether a transaction is open. DuckDB's C API cannot report it, so it
      * is tracked from the TRANSACTION statements this connection runs (an
@@ -196,6 +217,63 @@ static int duck_apply_allowed_dirs(duckdb_connection con)
 
 /* ── Open / close ─────────────────────────────────────────────────── */
 
+/* A new instance of @p path with the security configuration applied and
+ * frozen (lock_configuration is database-wide in DuckDB, as the settings it
+ * freezes are): connected through @p con, which the caller keeps. 0 / -1
+ * with @p s->errmsg set and nothing left open. */
+static int duck_open_instance(HlDbDuckCtx *s, const char *path,
+                              duckdb_database *db, duckdb_connection *con)
+{
+    duckdb_config config;
+    if (duckdb_create_config(&config) != DuckDBSuccess) {
+        duck_set_err(s, "duckdb_create_config failed");
+        return -1;
+    }
+    if (duck_apply_config_security(config) != 0) {
+        duckdb_destroy_config(&config);
+        duck_set_err(s, "duckdb security config rejected");
+        return -1;
+    }
+
+    char *open_err = NULL;
+    duckdb_state rc = duckdb_open_ext(path, db, config, &open_err);
+    duckdb_destroy_config(&config);
+    if (rc != DuckDBSuccess) {
+        duck_set_err(s, open_err ? open_err : "duckdb_open_ext failed");
+        if (open_err) duckdb_free(open_err);
+        return -1;
+    }
+
+    if (duckdb_connect(*db, con) != DuckDBSuccess) {
+        duck_set_err(s, "duckdb_connect failed");
+        duckdb_close(db);
+        return -1;
+    }
+
+    /* Mode B: bound external file access to the manifest-declared directories
+     * (before the lock, so it sticks). No-op under mode A. */
+    if (duck_apply_allowed_dirs(*con) != 0) {
+        duck_set_err(s, "duckdb allowed_directories failed");
+        duckdb_disconnect(con);
+        duckdb_close(db);
+        return -1;
+    }
+
+    /* Keystone: freeze the configuration so a handler's SQL can no longer
+     * re-enable external access or extension loading for this database's
+     * life. Run as a plain statement (no params). */
+    duckdb_result r;
+    if (duckdb_query(*con, "SET lock_configuration = true;", &r) != DuckDBSuccess) {
+        duck_set_err(s, "duckdb lock_configuration failed");
+        duckdb_destroy_result(&r);
+        duckdb_disconnect(con);
+        duckdb_close(db);
+        return -1;
+    }
+    duckdb_destroy_result(&r);
+    return 0;
+}
+
 static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
 {
     HlDbDuckCtx *s = calloc(1, sizeof *s);
@@ -214,59 +292,47 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     if (path[0] == '\0')
         path = ":memory:";
 
-    duckdb_config config;
-    if (duckdb_create_config(&config) != DuckDBSuccess) {
-        duck_set_err(s, "duckdb_create_config failed");
-        free(s);
-        return -1;
-    }
-    if (duck_apply_config_security(config) != 0) {
-        duckdb_destroy_config(&config);
-        duck_set_err(s, "duckdb security config rejected");
-        free(s);
-        return -1;
+    if (strncmp(path, ":memory:", 8) == 0) {
+        if (duck_open_instance(s, path, &s->db, &s->con) != 0) {
+            free(s);
+            return -1;
+        }
+        *out_ctx = s;
+        return 0;
     }
 
-    char *open_err = NULL;
-    duckdb_state rc = duckdb_open_ext(path, &s->db, config, &open_err);
-    duckdb_destroy_config(&config);
-    if (rc != DuckDBSuccess) {
-        duck_set_err(s, open_err ? open_err : "duckdb_open_ext failed");
-        if (open_err) duckdb_free(open_err);
-        free(s);
-        return -1;
+    /* A file: its one instance, made by the first open (held under the lock,
+     * so two threads opening at once cannot make two). */
+    pthread_mutex_lock(&g_duck_shared_mu);
+    HlDuckShared *sh = g_duck_shared;
+    while (sh && strcmp(sh->path, path) != 0) sh = sh->next;
+    if (sh) {
+        if (duckdb_connect(sh->db, &s->con) != DuckDBSuccess) {
+            pthread_mutex_unlock(&g_duck_shared_mu);
+            duck_set_err(s, "duckdb_connect failed");
+            free(s);
+            return -1;
+        }
+        sh->refs++;
+    } else {
+        sh = calloc(1, sizeof *sh);
+        char *key = sh ? strdup(path) : NULL;
+        if (!key || duck_open_instance(s, path, &sh->db, &s->con) != 0) {
+            pthread_mutex_unlock(&g_duck_shared_mu);
+            if (!key && sh) duck_set_err(s, "out of memory");
+            free(key);
+            free(sh);
+            free(s);
+            return -1;
+        }
+        sh->path = key;
+        sh->refs = 1;
+        sh->next = g_duck_shared;
+        g_duck_shared = sh;
     }
-
-    if (duckdb_connect(s->db, &s->con) != DuckDBSuccess) {
-        duck_set_err(s, "duckdb_connect failed");
-        duckdb_close(&s->db);
-        free(s);
-        return -1;
-    }
-
-    /* Mode B: bound external file access to the manifest-declared directories
-     * (before the lock, so it sticks). No-op under mode A. */
-    if (duck_apply_allowed_dirs(s->con) != 0) {
-        duck_set_err(s, "duckdb allowed_directories failed");
-        duckdb_disconnect(&s->con);
-        duckdb_close(&s->db);
-        free(s);
-        return -1;
-    }
-
-    /* Keystone: freeze the configuration so a handler's SQL can no longer
-     * re-enable external access or extension loading for this connection's
-     * life. Run as a plain statement (no params). */
-    duckdb_result r;
-    if (duckdb_query(s->con, "SET lock_configuration = true;", &r) != DuckDBSuccess) {
-        duck_set_err(s, "duckdb lock_configuration failed");
-        duckdb_destroy_result(&r);
-        duckdb_disconnect(&s->con);
-        duckdb_close(&s->db);
-        free(s);
-        return -1;
-    }
-    duckdb_destroy_result(&r);
+    pthread_mutex_unlock(&g_duck_shared_mu);
+    s->shared = sh;
+    s->db = sh->db;
 
     *out_ctx = s;
     return 0;
@@ -277,7 +343,21 @@ static void duck_close(HlDbHandle *h)
     if (!h || !h->ctx) return;
     HlDbDuckCtx *s = h->ctx;
     duckdb_disconnect(&s->con);
-    duckdb_close(&s->db);
+    if (s->shared) {
+        /* The last connection to the file closes its instance. */
+        pthread_mutex_lock(&g_duck_shared_mu);
+        if (--s->shared->refs == 0) {
+            HlDuckShared **pp = &g_duck_shared;
+            while (*pp && *pp != s->shared) pp = &(*pp)->next;
+            if (*pp) *pp = s->shared->next;
+            duckdb_close(&s->shared->db);
+            free(s->shared->path);
+            free(s->shared);
+        }
+        pthread_mutex_unlock(&g_duck_shared_mu);
+    } else {
+        duckdb_close(&s->db);
+    }
     free(s);
     h->ctx = NULL;
 }
