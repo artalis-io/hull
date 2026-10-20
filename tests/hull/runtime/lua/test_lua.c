@@ -7989,6 +7989,44 @@ UTEST(lua_cap, stdlib_helpers_do_not_lend_their_identity)
     cleanup_lua_caps();
 }
 
+/* Audit 19, Lua / JS stdlib parity. retry.run with max_attempts 0 or NaN
+ * never called fn and raised a nil error (JS: `maxAttempts || 3`). tui.run
+ * left the terminal in raw mode when tui.poll / tui.flush raised: only draw
+ * and on_event were under pcall (JS wraps the whole loop). run() returns 0,
+ * or the number of the first check that failed. */
+UTEST(lua_stdlib, audit19_stdlib_parity)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local retry = require('hull.retry') "
+        "  local calls = 0 "
+        "  local r = retry.run(function() calls = calls + 1; return 7 end, "
+        "                      { max_attempts = 0 }) "
+        "  if r ~= 7 or calls ~= 1 then return 1 end "
+        "  r = retry.run(function() return 8 end, { max_attempts = 0/0 }) "
+        "  if r ~= 8 then return 2 end "
+        /* tui is a composed feature: absent from this build, skip its part. */
+        "  local ok, tui = pcall(require, 'hull.tui') "
+        "  if not ok or type(tui) ~= 'table' or type(tui.run) ~= 'function' then "
+        "    return 0 "
+        "  end "
+        "  local left = 0 "
+        "  tui.enter = function() end "
+        "  tui.leave = function() left = left + 1 end "
+        "  tui.size = function() return 80, 24 end "
+        "  tui.flush = function() end "
+        "  tui.poll = function() error('poll failed') end "
+        "  local rok, err = pcall(tui.run, { draw = function() end }) "
+        "  if rok or not tostring(err):find('poll failed', 1, true) then return 3 end "
+        "  if left ~= 1 then return 4 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
 /* Stdlib fixes from the second audit (D2): jwt verify options and strict
  * splitting; template quoting before a tag; the safe_url filter. run() returns
  * 0, or the number of the first check that failed. */

@@ -779,9 +779,12 @@ static void hl_lua_task_failed_later(HlLua *lua, lua_State *L, const char *msg)
     snprintf(mbuf, sizeof mbuf, "%s", msg ? msg : "(an error)");
     if (!task_take_hook(L))
         return;
-    if (!lua->base.async_ctx) {
+    if (!lua->base.async_ctx || lua->base.shutting_down) {
         lua_pop(L, 1);
-        return;   /* no loop: nothing can be waiting on the task */
+        /* No loop, or one going away: nothing can be waiting on the task,
+         * and a 0 ms timer armed now would never fire - its record was
+         * left behind (audit 19). */
+        return;
     }
     /* The ref first: luaL_ref can raise (out of memory), and nothing is
      * held yet that the raise would leak (audit 17: the calloc was). Its
@@ -1069,6 +1072,10 @@ static int lua_task_spawn(lua_State *L)
     lua_pop(L, 1);
     if (!lua || !lua->base.async_ctx)
         return luaL_error(L, "hull._task.spawn() requires an active event loop");
+    /* At teardown (a __gc finalizer lua_close runs) the loop is going away:
+     * the task's timer would never fire (audit 19), as ws.connect refuses. */
+    if (lua->base.shutting_down)
+        return luaL_error(L, "hull._task.spawn(): the runtime is shutting down");
 
     /* The ref first: luaL_ref can raise (out of memory), and nothing is
      * allocated yet to leak. */
@@ -1277,6 +1284,9 @@ static int lua_hull_wake(lua_State *L)
     if (!s->ctx) return 0;            /* nobody parked yet: park returns at once */
 
     HlLua *lua = s->lua;
+    /* At teardown the parked coroutine is cancelled, not resumed: a wake
+     * timer would never fire (audit 19). */
+    if (lua->base.shutting_down || !lua->base.async_ctx) return 0;
     s->refs++;                        /* the timer's, until slot_wake_fire */
     uint64_t tid = hl_async_backend()->timer_add(lua->base.async_ctx, 0,
                                                  slot_wake_fire, s);

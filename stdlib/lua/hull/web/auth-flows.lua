@@ -416,6 +416,14 @@ local function is_verified(user)
     return v == true or (type(v) == "number" and v ~= 0)
 end
 
+-- The app's user_totp_enrolled answer, read as the JS twin reads it (`!!v`):
+-- a database 0 or "" means not enrolled. Any value but nil / false counted
+-- as enrolled, so a user whose column held 0 was sent to a 2FA step they
+-- could not pass (audit 19; it failed closed).
+local function enrolled_value(v)
+    return v ~= nil and v ~= false and v ~= 0 and v ~= "" and v == v
+end
+
 -- The account's stored password hash, read the way /login reads it: through
 -- user_find_by_email, whose contract carries password_hash. user_get need not
 -- return it (keeping the hash out of the model is a common habit), and reading
@@ -1313,7 +1321,7 @@ local function drop_preverify_totp(uid)
     end
     if _state.enable_totp then
         local ok, enrolled = pcall(_state.user_totp_enrolled, uid)
-        if ok and enrolled then
+        if ok and enrolled_value(enrolled) then
             require("hull.log").warn("auth-flows: account " .. tostring(uid)
                 .. " has a TOTP enrolment made before its email was verified "
                 .. "and no totp_disable hook is configured; remove it in "
@@ -1723,7 +1731,7 @@ local function handle_login(req, res)
     clear_failed_logins(ip_key)
     clear_failed_logins(uid)
     if _state.enable_totp
-       and _state.user_totp_enrolled(user_uid(user)) then
+       and enrolled_value(_state.user_totp_enrolled(user_uid(user))) then
         return start_totp_pending(req, res, user, false, "password")
     end
     finish_login(req, res, user, "password")
@@ -1886,7 +1894,7 @@ local function handle_magic_link_consume(req, res)
     end
     gc_expired()
     if _state.enable_totp
-       and _state.user_totp_enrolled(user_uid(user)) then
+       and enrolled_value(_state.user_totp_enrolled(user_uid(user))) then
         return start_totp_pending(req, res, user, not wants_json(req), "magic_link")
     end
     finish_login(req, res, user, "magic_link")

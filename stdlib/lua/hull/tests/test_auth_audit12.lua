@@ -539,5 +539,28 @@ test("a14: init refuses counts and durations that are not whole numbers > 0", fu
     end
 end)
 
+-- Audit 19: user_totp_enrolled is read as the JS twin reads it (`!!v`):
+-- a database 0 means not enrolled. Any value but nil / false counted as
+-- enrolled, so such a user was sent to a 2FA step they could not pass.
+test("a19: user_totp_enrolled returning 0 is not enrolled", function()
+    reset_store()
+    init({ enable_totp = true,
+           user_totp_enrolled = function() return 0 end,
+           totp_verify = function() return false end })
+    add_user(91, "z91@x.test", "first-password-1", true)
+    local res = mkres()
+    H.login(mkreq({ email = "z91@x.test", password = "first-password-1" }), res)
+    assert_eq(res.body and res.body.pending_2fa, nil, "no second factor asked")
+    assert_eq(res.code == nil or res.code < 400, true, "signed in")
+    reset_store()
+    init({ enable_totp = true,
+           user_totp_enrolled = function() return 1 end,
+           totp_verify = function() return false end })
+    add_user(92, "z92@x.test", "first-password-1", true)
+    res = mkres()
+    H.login(mkreq({ email = "z92@x.test", password = "first-password-1" }), res)
+    assert_eq(res.body and res.body.pending_2fa, true, "1 is enrolled")
+end)
+
 print(string.format("auth audit 12: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail }
