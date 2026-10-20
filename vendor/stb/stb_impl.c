@@ -1,3 +1,4 @@
+#include <setjmp.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -79,11 +80,131 @@ static void *hl_stb_realloc(void *p, size_t n)
 #include "stb_image.h"
 
 /* Hull: stb_image_write through the same capped allocator, so an encode's
- * working set is bounded too (image_stb.c sets the cap; audit 18). */
-#define STBIW_MALLOC(sz)          hl_stb_malloc(sz)
-#define STBIW_REALLOC(p, newsz)   hl_stb_realloc(p, newsz)
-#define STBIW_FREE(p)             hl_stb_free(p)
+ * working set is bounded too (image_stb.c sets the cap; audit 18).
+ *
+ * stb_image_write does not survive a failed allocation: its growable
+ * buffers (stbiw__sbgrowf, the PNG zlib stream) STBIW_ASSERT the new block
+ * and push into the old one regardless, so a refused growth was an abort()
+ * - or, built with NDEBUG, a write past the block (audit 19). So every
+ * STBIW block is also linked into a per-thread list, a failed STBIW_ASSERT
+ * longjmps back to the hl_stbiw_*_to_func wrapper below instead of
+ * aborting, and the wrapper frees what the encode still held. */
+typedef union HlStbwLink {
+    struct { union HlStbwLink *prev, *next; } l;
+    max_align_t align;   /* keep the block malloc-aligned */
+} HlStbwLink;
+
+static _Thread_local HlStbwLink *hl_stbw_head;
+static _Thread_local jmp_buf    *hl_stbw_jmp;
+
+static void hl_stbw_link(HlStbwLink *b)
+{
+    b->l.prev = NULL;
+    b->l.next = hl_stbw_head;
+    if (hl_stbw_head) hl_stbw_head->l.prev = b;
+    hl_stbw_head = b;
+}
+
+static void hl_stbw_unlink(HlStbwLink *b)
+{
+    if (b->l.prev) b->l.prev->l.next = b->l.next;
+    else hl_stbw_head = b->l.next;
+    if (b->l.next) b->l.next->l.prev = b->l.prev;
+}
+
+static void *hl_stbw_malloc(size_t n)
+{
+    if (n > (size_t)-1 - sizeof(HlStbwLink)) return NULL;
+    HlStbwLink *b = (HlStbwLink *)hl_stb_malloc(n + sizeof *b);
+    if (!b) return NULL;
+    hl_stbw_link(b);
+    return b + 1;
+}
+
+static void hl_stbw_free(void *p)
+{
+    if (!p) return;
+    HlStbwLink *b = (HlStbwLink *)p - 1;
+    hl_stbw_unlink(b);
+    hl_stb_free(b);
+}
+
+static void *hl_stbw_realloc(void *p, size_t n)
+{
+    if (!p) return hl_stbw_malloc(n);
+    if (n > (size_t)-1 - sizeof(HlStbwLink)) return NULL;
+    HlStbwLink *b = (HlStbwLink *)p - 1;
+    hl_stbw_unlink(b);
+    HlStbwLink *nb = (HlStbwLink *)hl_stb_realloc(b, n + sizeof *b);
+    if (!nb) {
+        hl_stbw_link(b);   /* still live; freed by the caller or the wrapper */
+        return NULL;
+    }
+    hl_stbw_link(nb);
+    return nb + 1;
+}
+
+/* A failed STBIW_ASSERT: back to the wrapper, which reports the encode
+ * failed. Outside one (nothing else calls stb_image_write) it aborts, as
+ * stb's own assert did. */
+static void hl_stbw_fail(void)
+{
+    if (hl_stbw_jmp) longjmp(*hl_stbw_jmp, 1);
+    abort();
+}
+
+#define STBIW_MALLOC(sz)          hl_stbw_malloc(sz)
+#define STBIW_REALLOC(p, newsz)   hl_stbw_realloc(p, newsz)
+#define STBIW_FREE(p)             hl_stbw_free(p)
+#define STBIW_ASSERT(x)           ((x) ? (void)0 : hl_stbw_fail())
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
 #include "stb_image_write.h"
+
+/* Free every STBIW block still linked: what an encode held when it failed. */
+static void hl_stbw_release_all(void)
+{
+    while (hl_stbw_head) {
+        HlStbwLink *b = hl_stbw_head;
+        hl_stbw_head = b->l.next;
+        hl_stb_free(b);
+    }
+}
+
+/* stbi_write_png_to_func / stbi_write_jpg_to_func that return 0 instead of
+ * aborting when stb_image_write cannot get the memory it needs (the cap is
+ * hl_stb_alloc_cap), with everything it allocated freed. */
+int hl_stbiw_png_to_func(stbi_write_func *func, void *context, int w, int h,
+                         int comp, const void *data, int stride_bytes)
+{
+    jmp_buf jb;
+    jmp_buf *volatile saved = hl_stbw_jmp;
+    volatile int rc = 0;
+    if (setjmp(jb) == 0) {
+        hl_stbw_jmp = &jb;
+        rc = stbi_write_png_to_func(func, context, w, h, comp, data, stride_bytes);
+    } else {
+        rc = 0;
+        hl_stbw_release_all();
+    }
+    hl_stbw_jmp = saved;
+    return rc;
+}
+
+int hl_stbiw_jpg_to_func(stbi_write_func *func, void *context, int w, int h,
+                         int comp, const void *data, int quality)
+{
+    jmp_buf jb;
+    jmp_buf *volatile saved = hl_stbw_jmp;
+    volatile int rc = 0;
+    if (setjmp(jb) == 0) {
+        hl_stbw_jmp = &jb;
+        rc = stbi_write_jpg_to_func(func, context, w, h, comp, data, quality);
+    } else {
+        rc = 0;
+        hl_stbw_release_all();
+    }
+    hl_stbw_jmp = saved;
+    return rc;
+}

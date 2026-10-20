@@ -88,6 +88,33 @@ UTEST(validate, header_fields_refuse_cr_lf_on_every_path)
     EXPECT_TRUE(r.token != NULL && strcmp(r.token, "validation_failed") == 0);
 }
 
+/* Audit 19: an envelope address is formatted into MAIL FROM:<%s>\r\n in a
+ * fixed command buffer; a longer one was cut short there, the server got no
+ * CRLF and the send waited out its timeout. RFC 5321 bounds a path at 256
+ * octets with its brackets, so a longer address is refused up front. */
+UTEST(validate, envelope_addresses_are_length_bounded)
+{
+    static char addr[400];
+    HlSmtpMessage ok = {
+        .host = "smtp.example.com", .port = 587,
+        .from = "a@b.com", .to = "c@d.com", .subject = "S", .body = "b",
+    };
+    memset(addr, 'a', 250);
+    memcpy(addr + 250, "@b.c", 5);           /* 254 octets: the limit */
+    HlSmtpMessage m = ok; m.to = addr;
+    EXPECT_EQ(hl_smtp_validate_message(&m), 0);
+
+    memset(addr, 'a', 251);
+    memcpy(addr + 251, "@b.c", 5);           /* 255 */
+    m = ok; m.to = addr;
+    EXPECT_EQ(hl_smtp_validate_message(&m), -1);
+    m = ok; m.from = addr;
+    EXPECT_EQ(hl_smtp_validate_message(&m), -1);
+    const char *cc[1] = { addr };
+    m = ok; m.cc = cc; m.cc_count = 1;
+    EXPECT_EQ(hl_smtp_validate_message(&m), -1);
+}
+
 UTEST(format, html_content_type)
 {
     HlSmtpMessage msg = {

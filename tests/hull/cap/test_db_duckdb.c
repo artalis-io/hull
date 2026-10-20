@@ -235,6 +235,20 @@ UTEST(db_duckdb, security_lockdown)
     h.backend->close(&h);
 }
 
+/* Audit 19: the selector matches a DSN's scheme in any case (db_select.c
+ * lowercases it), but the backend stripped only a lowercase "duckdb://", so
+ * "DuckDB://:memory:" was opened as a file of that name. */
+UTEST(db_duckdb, dsn_scheme_is_matched_in_any_case)
+{
+    void *ctx = NULL;
+    ASSERT_EQ(hl_db_backend_duckdb.open(&ctx, "DuckDB://:memory:", NULL), 0);
+    HlDbHandle h = {0};
+    h.backend = &hl_db_backend_duckdb;
+    h.ctx = ctx;
+    EXPECT_EQ(hl_db_exec(&h, "CREATE TABLE t (x INTEGER)", NULL, 0), 0);
+    h.backend->close(&h);
+}
+
 /* The dialect descriptor matches the design table + the backend identity. */
 UTEST(db_duckdb, dialect_descriptor)
 {

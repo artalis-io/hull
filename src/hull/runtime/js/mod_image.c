@@ -251,7 +251,8 @@ static JSValue js_image_decode_fn(JSContext *ctx, JSValueConst this_val,
     uint32_t iw = 0, ih = 0;
     if (hl_image_info(view.data, view.len, fmt_name, &iw, &ih) != 0)
         iw = ih = 0;
-    if (hl_js_budget_charge(ctx, hl_image_codec_units(iw, ih, view.len)) < 0) {
+    if (hl_js_budget_charge(ctx, hl_image_decode_units(view.data, view.len,
+                                                       iw, ih)) < 0) {
         if (needs_free) JS_FreeCString(ctx, str_out);
         if (fmt_name) JS_FreeCString(ctx, fmt_name);
         return JS_EXCEPTION;

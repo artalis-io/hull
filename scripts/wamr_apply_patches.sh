@@ -1,7 +1,7 @@
 #!/bin/sh
 # Hull ext: deterministic carriage for the out-of-tree WAMR patches.
 #
-# Applies patches/wamr/0001 + 0002 + 0003 + 0004 + 0005 + 0006 + 0007 onto a CLEAN checkout of the pinned base into
+# Applies patches/wamr/0001 + 0002 + 0003 + 0004 + 0005 + 0006 + 0007 + 0008 onto a CLEAN checkout of the pinned base into
 # an isolated staged tree that Hull builds against (WAMR_DIR=build/wamr-patched).
 # vendor/wamr is NEVER mutated. The step fails loudly on:
 #   - vendor/wamr not at the pinned base commit, or dirty      (verify-base)
@@ -29,6 +29,7 @@ P4=$PATCHDIR/0004-shared-heap-guarded-subrange.patch
 P5=$PATCHDIR/0005-memory64-public-accessor.patch
 P6=$PATCHDIR/0006-quick-aot-signature-msan-unpoison.patch
 P7=$PATCHDIR/0007-hull-terminate-and-post-instantiate-hook.patch
+P8=$PATCHDIR/0008-shared-heap-chain-valid-window.patch
 SHA1=423beeae0e94454381ce0d805e9985c5cd94e14e511981c629af186676411698
 SHA2=310706eb6a36ae33756c85997b6599b4855d279e350ba7dae7c5b0353a6c8177
 SHA3=e8f3362cfef0dccc975c3e687390429f06a0d0c63d73f3959be7a5c36f1f1d2c
@@ -36,6 +37,7 @@ SHA4=e5bf6e04b89d878745198421ad9cbf94ac567edf07297887354b35d98b7f4dbd
 SHA5=b7d211638ebb9fc44602819134111709fe88c0f89a2533aac776ce0b002f9924
 SHA6=a9b72f211084737317d39a5872161db27d799f09a59cd4d1c16acc4bb53379d2
 SHA7=1a783e2f3aa3ecfcbe26ce94e0d70ace4770c33184309aeb9499b5edd3701897
+SHA8=0c8c50854dc31eeb28d0e583974280f06c074c0f574d1ff1065c61e34eded4c1
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
@@ -141,6 +143,7 @@ stage_base_into() {
 [ -f "$P5" ] || fail "missing $P5"
 [ -f "$P6" ] || fail "missing $P6"
 [ -f "$P7" ] || fail "missing $P7"
+[ -f "$P8" ] || fail "missing $P8"
 g1=$(sha256 "$P1"); [ "$g1" = "$SHA1" ] || fail "0001 sha256 $g1 != recorded $SHA1 (stale patch)"
 g2=$(sha256 "$P2"); [ "$g2" = "$SHA2" ] || fail "0002 sha256 $g2 != recorded $SHA2 (stale patch)"
 g3=$(sha256 "$P3"); [ "$g3" = "$SHA3" ] || fail "0003 sha256 $g3 != recorded $SHA3 (stale patch)"
@@ -148,6 +151,7 @@ g4=$(sha256 "$P4"); [ "$g4" = "$SHA4" ] || fail "0004 sha256 $g4 != recorded $SH
 g5=$(sha256 "$P5"); [ "$g5" = "$SHA5" ] || fail "0005 sha256 $g5 != recorded $SHA5 (stale patch)"
 g6=$(sha256 "$P6"); [ "$g6" = "$SHA6" ] || fail "0006 sha256 $g6 != recorded $SHA6 (stale patch)"
 g7=$(sha256 "$P7"); [ "$g7" = "$SHA7" ] || fail "0007 sha256 $g7 != recorded $SHA7 (stale patch)"
+g8=$(sha256 "$P8"); [ "$g8" = "$SHA8" ] || fail "0008 sha256 $g8 != recorded $SHA8 (stale patch)"
 
 # --- staged-copy (clean checkout of the base; vendor/wamr untouched) ----------
 rm -rf "$STAGED"; mkdir -p "$STAGED"
@@ -178,18 +182,21 @@ git -C "$STAGED" apply --whitespace=nowarn "$ROOT/$P6"
 git -C "$STAGED" apply --check --whitespace=nowarn "$ROOT/$P7" \
     || fail "0007 does not apply cleanly (offset/stale vs base+0001..0006)"
 git -C "$STAGED" apply --whitespace=nowarn "$ROOT/$P7"
+git -C "$STAGED" apply --check --whitespace=nowarn "$ROOT/$P8" \
+    || fail "0008 does not apply cleanly (offset/stale vs base+0001..0007)"
+git -C "$STAGED" apply --whitespace=nowarn "$ROOT/$P8"
 
 # --- tamper check: the applied tree must revert cleanly to the TOP patch -------
-# 0007 is the top of the stack. Reversing the top patch proves the staged tree
-# carries exactly 0007's content; lower patches are covered by their
+# 0008 is the top of the stack. Reversing the top patch proves the staged tree
+# carries exactly 0008's content; lower patches are covered by their
 # exact-context forward --check above plus the unexpected-source audit below.
-git -C "$STAGED" apply --reverse --check --whitespace=nowarn "$ROOT/$P7" \
-    || fail "applied tree does not reverse-match 0007 (tampered/extra content)"
+git -C "$STAGED" apply --reverse --check --whitespace=nowarn "$ROOT/$P8" \
+    || fail "applied tree does not reverse-match 0008 (tampered/extra content)"
 
 # --- unexpected-source audit: changed/new file SET must equal the patch set ---
 declared=$(mktemp); actual=$(mktemp)
 CLEAN_TMP="$declared $actual"   # picked up by the single cleanup() trap
-{ grep -E '^\+\+\+ b/' "$ROOT/$P1" "$ROOT/$P2" "$ROOT/$P3" "$ROOT/$P4" "$ROOT/$P5" "$ROOT/$P6" "$ROOT/$P7"; } \
+{ grep -E '^\+\+\+ b/' "$ROOT/$P1" "$ROOT/$P2" "$ROOT/$P3" "$ROOT/$P4" "$ROOT/$P5" "$ROOT/$P6" "$ROOT/$P7" "$ROOT/$P8"; } \
     | sed -E 's/^.*\+\+\+ b\///' | sort -u > "$declared"
 # every declared file exists in the staged tree
 while IFS= read -r f; do
@@ -217,7 +224,7 @@ fi
 # Drop the scratch .git so the staged tree is a plain source dir for the build.
 rm -rf "$STAGED/.git"
 
-echo "OK: pinned base $BASE + 0001 + 0002 + 0003 + 0004 + 0005 + 0006 + 0007 -> $STAGED"
+echo "OK: pinned base $BASE + 0001 + 0002 + 0003 + 0004 + 0005 + 0006 + 0007 + 0008 -> $STAGED"
 echo "     $(wc -l < "$declared" | tr -d ' ') changed/new files, all declared; reverse-check clean."
 [ "$DRY_RUN" -eq 1 ] && echo "     (dry-run: staged tree discarded)"
 exit 0

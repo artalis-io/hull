@@ -16,6 +16,7 @@
 #include "hull/cap/db_budget.h"
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define HELLO_MAP "%1\r\n$6\r\nserver\r\n$5\r\nredis\r\n"
@@ -233,6 +234,44 @@ UTEST(valkey_backend, clear_steps_are_charged) {
     hl_db_budget_restore(prev);
     EXPECT_EQ(-1, rc);
     EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(strstr(B->last_error(h), "interrupted") != NULL);
+
+    B->close(h);
+    close(sv[0]);
+}
+
+/* Audit 19: a command waited for its whole deadline (connect_timeout, up
+ * to 10 min) in one poll, with no budget or run-deadline check. The wait is
+ * now sliced, each idle slice asking the run's budget: a run over its budget
+ * stops within a slice, the connection marked broken, not at the deadline. */
+static uint64_t vk_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+UTEST(valkey_backend, a_silent_server_stops_at_the_runs_budget) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    WR(sv[0], HELLO_MAP);                        /* and then nothing */
+
+    HlValkeyDsn d; char e[128];
+    ASSERT_EQ(0, hl_valkey_dsn_parse("redis://localhost?connect_timeout=5000",
+                                     &d, e, sizeof e));
+    HlValkeyConn *conn = NULL;
+    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, NULL, e, sizeof e));
+    HlKvHandle *h = hl_kv_valkey_wrap(conn);
+    const HlKvBackend *B = &hl_kv_backend_valkey;
+
+    HlDbOpBudget budget = { 1, 2, 1 };           /* the run is over its budget */
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    const uint8_t *val; size_t vlen; int found = 0;
+    uint64_t t0 = vk_now_ms();
+    int rc = B->get(h, (const uint8_t *)"k", 1, &val, &vlen, &found);
+    uint64_t took = vk_now_ms() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, rc);
+    EXPECT_TRUE(took < 2000);                    /* not the 5 s deadline */
     EXPECT_TRUE(strstr(B->last_error(h), "interrupted") != NULL);
 
     B->close(h);

@@ -432,6 +432,82 @@ UTEST(hull_cap_image, stb_cap_bounds_the_sum_of_live_blocks)
     free(enc);
 }
 
+/* Audit 19: stb_image_write does not survive a refused allocation - its
+ * growable buffers STBIW_ASSERT the new block (an abort()) and, built with
+ * NDEBUG, push into the old one past its end. stb_impl.c's wrappers turn the
+ * failure into a 0 return and free what the encode held. Driven directly
+ * with a cap far below what the encode needs: before, this aborted the test
+ * binary. */
+typedef void hl_test_stbiw_func(void *context, void *data, int size);
+int hl_stbiw_png_to_func(hl_test_stbiw_func *func, void *context, int w, int h,
+                         int comp, const void *data, int stride_bytes);
+int hl_stbiw_jpg_to_func(hl_test_stbiw_func *func, void *context, int w, int h,
+                         int comp, const void *data, int quality);
+static void count_stbiw_bytes(void *context, void *data, int size)
+{
+    (void)data;
+    *(size_t *)context += (size_t)size;
+}
+
+UTEST(hull_cap_image, stb_write_fails_cleanly_when_an_allocation_is_refused)
+{
+    enum { W = 256, H = 256 };
+    uint8_t *px = malloc((size_t)W * H * 4u);
+    ASSERT_TRUE(px != NULL);
+    for (size_t i = 0; i < (size_t)W * H * 4u; i++)
+        px[i] = (uint8_t)((i * 2654435761u) >> 13);
+
+    size_t before = hl_stb_live;
+    size_t written = 0;
+    hl_stb_alloc_cap = 4096u;   /* far below what the zlib stream needs */
+    int rc = hl_stbiw_png_to_func(count_stbiw_bytes, &written, W, H, 4,
+                                  px, W * 4);
+    hl_stb_alloc_cap = 0;
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(before, hl_stb_live);   /* every block the encode held is freed */
+
+    /* Uncapped, the same encodes work through the same wrappers (the JPEG
+     * writer allocates nothing, so only its success path is shown). */
+    written = 0;
+    EXPECT_NE(0, hl_stbiw_png_to_func(count_stbiw_bytes, &written, W, H, 4,
+                                      px, W * 4));
+    EXPECT_TRUE(written > 0);
+    EXPECT_EQ(before, hl_stb_live);
+    written = 0;
+    EXPECT_NE(0, hl_stbiw_jpg_to_func(count_stbiw_bytes, &written, W, H, 4,
+                                      px, 90));
+    EXPECT_TRUE(written > 0);
+    EXPECT_EQ(before, hl_stb_live);
+    free(px);
+}
+
+/* Audit 19: stb walks every block once per scan, so a progressive JPEG's
+ * decode charge pays the pixels once per scan - it was charged as one pass
+ * whatever the scan count (up to 100). Anything else is charged as before. */
+UTEST(hull_cap_image, jpeg_decode_charge_pays_every_scan)
+{
+    unsigned char *buf = malloc(4096);
+    ASSERT_TRUE(buf != NULL);
+    uint64_t one = hl_image_codec_units(8, 8, 0);
+    ASSERT_TRUE(one > 0);
+
+    size_t n = make_progressive_jpeg(buf, 40, 0);
+    uint64_t u = hl_image_decode_units(buf, n, 8, 8);
+    EXPECT_GE(u, 40u * one);
+    EXPECT_LE(u, 41u * one + n / 8u);
+    /* FF DA bytes inside a marker segment are not scans. */
+    size_t n2 = make_progressive_jpeg(buf, 40, 1);
+    EXPECT_LE(hl_image_decode_units(buf, n2, 8, 8), 41u * one + n2 / 8u);
+    free(buf);
+
+    void *enc = NULL;
+    size_t enc_len = 0;
+    ASSERT_EQ(0, encode_test_png(16, 16, &enc, &enc_len));
+    EXPECT_EQ(hl_image_codec_units(16, 16, enc_len),
+              hl_image_decode_units(enc, enc_len, 16, 16));
+    free(enc);
+}
+
 UTEST(hull_cap_image, stb_total_cap_admits_a_real_decode)
 {
     /* Through hl_image_decode: image_stb.c sets the total cap from the

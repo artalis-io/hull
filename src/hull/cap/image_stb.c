@@ -30,6 +30,12 @@ typedef struct {
  * chains covers it. The encoded output itself is held to 2x raw. Before,
  * stbiw used plain malloc, with nothing bounding its peak. */
 extern _Thread_local size_t hl_stb_alloc_cap;
+/* vendor/stb/stb_impl.c: the stb_image_write entry points that fail (0)
+ * instead of aborting when an allocation is refused (audit 19). */
+int hl_stbiw_png_to_func(stbi_write_func *func, void *context, int w, int h,
+                         int comp, const void *data, int stride_bytes);
+int hl_stbiw_jpg_to_func(stbi_write_func *func, void *context, int w, int h,
+                         int comp, const void *data, int quality);
 
 static size_t encode_raw_bytes(uint32_t w, uint32_t h, int channels)
 {
@@ -141,6 +147,16 @@ static unsigned jpeg_scan_count(const unsigned char *b, size_t len,
     return scans;
 }
 
+/* The scans of a JPEG (0 when @p src is not one), counted as above and
+ * stopping past HL_JPEG_MAX_SCANS - which stb_decode refuses. */
+unsigned hl_image_stb_jpeg_scans(const void *src, size_t len)
+{
+    const unsigned char *b = (const unsigned char *)src;
+    if (!b || len < 2 || b[0] != 0xFF || b[1] != 0xD8)
+        return 0;
+    return jpeg_scan_count(b, len, HL_JPEG_MAX_SCANS);
+}
+
 static int stb_decode(const void *src, size_t src_len,
                       void **pixels, uint32_t *w, uint32_t *h,
                       int requested_channels, HlAllocator *alloc)
@@ -215,7 +231,7 @@ static int stb_encode_png(const void *pixels, uint32_t w, uint32_t h,
 
     int stride = (int)((size_t)w * (size_t)channels);
     hl_stb_alloc_cap = encode_stb_cap(raw);
-    int rc = stbi_write_png_to_func(write_cb, &wc,
+    int rc = hl_stbiw_png_to_func(write_cb, &wc,
                                      (int)w, (int)h, channels,
                                      pixels, stride);
     hl_stb_alloc_cap = 0;
@@ -269,7 +285,7 @@ static int stb_encode_jpeg(const void *pixels, uint32_t w, uint32_t h,
     if (!wc.data) return -1;
 
     hl_stb_alloc_cap = encode_stb_cap(raw);
-    int rc = stbi_write_jpg_to_func(write_cb, &wc,
+    int rc = hl_stbiw_jpg_to_func(write_cb, &wc,
                                      (int)w, (int)h, channels,
                                      pixels, quality);
     hl_stb_alloc_cap = 0;
