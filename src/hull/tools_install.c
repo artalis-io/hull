@@ -246,10 +246,10 @@ int hl_tools_asset_name(const HlToolSpec *spec, const char *platform,
  * Windows (see docs/cosmocc_install.md, spec item D). */
 static const char *tools_home(void)
 {
-    const char *home = getenv("HOME");
-    if (home && *home) return home;
-    home = getenv("USERPROFILE");
-    return (home && *home) ? home : NULL;
+    /* hl_host_home: an absolute $HOME, else $USERPROFILE, else the password
+     * database's - a relative $HOME put the tools store, whose binaries
+     * hull runs, under the working directory (audit 20). */
+    return hl_host_home();
 }
 
 int hl_tools_dir(char *out, size_t out_sz)

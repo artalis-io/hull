@@ -70,9 +70,10 @@ static char g_dev_nonce[65];
 
 static int dev_session_path(char *out, size_t out_sz, int mkdirs)
 {
-    const char *home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
-    if (!home || !*home) return -1;
+    /* hl_host_home: a relative $HOME put the sessions under the working
+     * directory (audit 20). */
+    const char *home = hl_host_home();
+    if (!home) return -1;
     char dir[PATH_MAX];
     int n = snprintf(dir, sizeof dir, "%s/.hull/dev-sessions", home);
     if (n < 0 || (size_t)n >= sizeof dir) return -1;

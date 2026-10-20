@@ -439,6 +439,22 @@ local function find_html_files(dir)
     return tool.find_files(dir, "*.html")
 end
 
+-- An asset directory of the app (templates/, static/, migrations/,
+-- compute/, shaders/) must be its own: find_files skips symbolic links below
+-- its root but follows the root itself, so a cloned app whose static/ ->
+-- ".." had every file under the invocation directory embedded in the signed
+-- binary and served (a symlinked migrations/ ran another tree's SQL). The
+-- dev server refuses the same layout (audit 20).
+local function check_asset_root(dir, tmpdir)
+    if tool.is_symlink(dir) then
+        print("hull build: " .. dir .. " is a symbolic link; an app's " ..
+              "templates/, static/, migrations/, compute/ and shaders/ " ..
+              "directories must be its own (links are not followed)")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+end
+
 -- List all files recursively in a directory. Used for static-asset
 -- enumeration where `static/vendor/htmx.min.js` etc. are legitimate
 -- vendored assets that must be embedded - pass include_vendor=true
@@ -1895,6 +1911,7 @@ typedef struct {
     local templates_dir = opts.app_dir .. "/templates"
     local html_files = {}
     if file_exists(templates_dir) then
+        check_asset_root(templates_dir, tmpdir)
         html_files = find_html_files(templates_dir)
     end
     if #html_files > 0 then
@@ -1904,6 +1921,7 @@ typedef struct {
     local static_dir = opts.app_dir .. "/static"
     local static_files = {}
     if file_exists(static_dir) then
+        check_asset_root(static_dir, tmpdir)
         static_files = find_all_files(static_dir)
     end
     if #static_files > 0 then
@@ -1913,6 +1931,7 @@ typedef struct {
     local migrations_dir = opts.app_dir .. "/migrations"
     local migration_files = {}
     if file_exists(migrations_dir) then
+        check_asset_root(migrations_dir, tmpdir)
         migration_files = find_sql_files(migrations_dir)
     end
     if #migration_files > 0 then
@@ -1973,6 +1992,7 @@ typedef struct {
     local compute_files = {}
     local prebuilt_aot = {}  -- entry names ("compute/x.aot.<arch>") embedded as committed
     if file_exists(compute_dir) then
+        check_asset_root(compute_dir, tmpdir)
         local wasm = tool.find_files(compute_dir, "*.wasm")
         for _, f in ipairs(wasm) do
             if has_aot_magic(f) then
@@ -2029,6 +2049,7 @@ typedef struct {
     local shaders_dir = opts.app_dir .. "/shaders"
     local shader_files = {}
     if file_exists(shaders_dir) then
+        check_asset_root(shaders_dir, tmpdir)
         shader_files = tool.find_files(shaders_dir, "*.wgsl")
     end
     if #shader_files > 0 then
@@ -2792,7 +2813,13 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
         -- --with=duckdb app), which reading it whole would need.
         sign_ctx.binary_hash = tool.sha256_file(opts.output)
 
-        sign_app(opts.app_dir, opts.sign, sign_ctx, {
+        -- Under pcall: an error raised inside (json.decode of a malformed
+        -- platform.sig, a hash of a file that could not be read) skipped
+        -- sign_fail and left the linked but unsigned binary at the output
+        -- path - what #789 set out to stop, for its "cannot read" branch
+        -- only (audit 20). sign_fail's own tool.exit is exit(): pcall does
+        -- not catch it.
+        local sok, serr = pcall(sign_app, opts.app_dir, opts.sign, sign_ctx, {
             js = js_files,
             json = json_files,
             lua = lua_files,
@@ -2803,6 +2830,9 @@ int main(int argc, char **argv) { return hl_app_run(argc, argv); }
             shaders = shader_files,
             compute_aot = compute_aot,
         }, tmpdir, opts.output)
+        if not sok then
+            sign_fail("hull build --sign: " .. tostring(serr), tmpdir, opts.output)
+        end
     end
 
     -- Cleanup

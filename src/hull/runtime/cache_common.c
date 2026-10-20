@@ -170,8 +170,13 @@ static int seal_read_key(const char *path, uint8_t key[32])
 
 static void seal_init_key(SealKey *k)
 {
-    const char *home = getenv("HOME");
-    if (!home || !*home) return;
+    /* The seal key lives in the user's home (hl_host_home: an absolute
+     * $HOME / $USERPROFILE, else the password database's). A relative $HOME
+     * (HOME=. in a unit file) put the key, and the cache it seals, under the
+     * working directory - the app directory - where a cloned app could ship
+     * its own key and bytecode sealed with it, which then loaded (audit 20). */
+    const char *home = hl_host_home();
+    if (!home) return;   /* no key: the code caches are off */
     char dir[PATH_MAX], path[PATH_MAX];
     if ((size_t)snprintf(dir, sizeof dir, "%s/.hull", home) >= sizeof dir ||
         (size_t)snprintf(path, sizeof path, "%s/%s", dir, k->file) >= sizeof path)
