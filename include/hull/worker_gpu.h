@@ -13,6 +13,7 @@
 
 #include "hull/cap/gpu.h"
 #include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE (HL_GPU_NAME_MAX via cap/gpu.h) */
+#include "hull/shared/offheap.h"
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -50,6 +51,7 @@ typedef struct HlWorkerGpuOp {
     int              buffer_count;
     void            *uniforms;        /* deep-copied uniform data (dispatch only) */
     size_t           uniforms_len;
+    HlOffheapHold    copy_hold;       /* the copies, on the VM's off-heap total */
 
     /* Output (set by worker thread) */
     void          *output;

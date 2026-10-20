@@ -84,7 +84,9 @@ typedef struct HlLua {
     size_t          mem_used;
     size_t          mem_limit;
     /* OWNED WasmBuffer bytes the VM's userdata hold off the Lua heap (server
-     * allocator), capped at mem_limit (hl_wasm_buffer_account, audit 18). */
+     * allocator), capped at mem_limit (hl_wasm_buffer_account, audit 18),
+     * and the copies in-flight compute.async / gpu.async ops, compute.stream
+     * and the GPU image pins hold (HlOffheapHold, shared/offheap.h, audit 20). */
     size_t          wasm_buf_bytes;
     int64_t         max_instructions;  /* 0 = no limit */
     HlLuaBudget     budget;            /* shared by all threads of L */

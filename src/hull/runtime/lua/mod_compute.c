@@ -181,6 +181,40 @@ static int lua_compute_buffer(lua_State *L)
     return 1;
 }
 
+/* Copy an async op's input off the VM heap (the worker reads it after the
+ * binding returns). A MappedBuffer / WasmBuffer input is not on the heap at
+ * all, and nothing bounded the copies: one call copied a whole 1 GiB mapping
+ * that the worker then refused (max_input, 1 MB by default), and N in-flight
+ * calls held N copies (audit 20). So an input the call would refuse is
+ * refused here, before it is copied, with the worker's own message; the copy
+ * is charged 1 unit per 8 bytes, and it holds bytes on the VM's off-heap total
+ * (`wasm_buf_bytes`, shared with OWNED WasmBuffers) under the heap limit until
+ * the op is freed. No collection is run to make room: a finalizer is app code,
+ * and nothing between the input's resolution and this copy may run any.
+ * Returns the copy (NULL for an empty input); raises otherwise. */
+static void *lua_async_input_copy(lua_State *L, HlLua *lua, const void *input,
+                                  size_t len, uint64_t limit, HlOffheapHold *hold)
+{
+    if (len == 0 || !input) return NULL;
+    if ((uint64_t)len > limit)
+        luaL_error(L, "compute.async: input_too_large");
+    /* Charged first: lua_hlwork raises at once when it puts the run over,
+     * and nothing is held yet. */
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)len), 0);
+    if (hl_offheap_take(hold, &lua->wasm_buf_bytes, lua->mem_limit, len) != 0)
+        luaL_error(L, "compute.async: input of %I bytes would take the VM's "
+                      "buffers past its heap limit (close unused buffers)",
+                   (lua_Integer)len);
+    void *copy = malloc(len);
+    if (!copy) {
+        hl_offheap_drop(hold);
+        luaL_error(L, "compute.async: out of memory");
+        return NULL;   /* not reached: luaL_error does not return */
+    }
+    memcpy(copy, input, len);
+    return copy;
+}
+
 /* Clamp per-call opts to runtime ceiling (three-tier: per-call <= CLI/manifest <= compile-time) */
 static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
 {
@@ -583,10 +617,20 @@ static int lua_compute_async_call(lua_State *L)
                               rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
     }
 
+    /* The input copy first: it raises, and nothing is allocated yet. */
+    HlOffheapHold in_hold = {0};
+    void *in_copy = lua_async_input_copy(L, lua, input, input_len,
+        hl_cap_wasm_input_limit(
+            hl_cap_wasm_module_lookup(lua->base.wasm_cache, name), NULL, &opts),
+        &in_hold);
+
     /* Allocate worker op */
     HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
-    if (!op)
+    if (!op) {
+        free(in_copy);
+        hl_offheap_drop(&in_hold);
         return luaL_error(L, "compute.async.call: out of memory");
+    }
 
     op->server = lua->server;
     op->wasm_cache = lua->base.wasm_cache;
@@ -597,15 +641,9 @@ static int lua_compute_async_call(lua_State *L)
     op->opts = opts;
     op->want_buffer = want_buffer;
 
-    /* Deep-copy input (Lua string lives on GC heap) */
-    if (input_len > 0) {
-        op->input = malloc(input_len);
-        if (!op->input) {
-            free(op);
-            return luaL_error(L, "compute.async.call: out of memory");
-        }
-        memcpy(op->input, input, input_len);
-    }
+    /* The input copy (lua_async_input_copy) goes with the op. */
+    op->input = in_copy;
+    op->input_hold = in_hold;
     op->input_len = input_len;
 
     /* Deep-copy + submission-pin the spans into the op. Any failure after this
@@ -858,10 +896,18 @@ static int lua_wasm_inst_async_call(lua_State *L)
     /* After the opts and input, before anything is armed (audit 15). */
     hl_lua_check_can_wait(L, "instance:async_call()");
 
+    /* The input copy first: it raises, and nothing is allocated yet. */
+    HlOffheapHold in_hold = {0};
+    void *in_copy = lua_async_input_copy(L, lua, input, input_len,
+        hl_cap_wasm_input_limit(pi->module, pi, &opts), &in_hold);
+
     /* Allocate worker op */
     HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
-    if (!op)
+    if (!op) {
+        free(in_copy);
+        hl_offheap_drop(&in_hold);
         return luaL_error(L, "WasmInstance:async_call: out of memory");
+    }
 
     op->server = lua->server;
     op->persistent_inst = pi;
@@ -870,15 +916,9 @@ static int lua_wasm_inst_async_call(lua_State *L)
     op->opts = opts;
     op->want_buffer = want_buffer;
 
-    /* Deep-copy input */
-    if (input_len > 0) {
-        op->input = malloc(input_len);
-        if (!op->input) {
-            free(op);
-            return luaL_error(L, "WasmInstance:async_call: out of memory");
-        }
-        memcpy(op->input, input, input_len);
-    }
+    /* The input copy (lua_async_input_copy) goes with the op. */
+    op->input = in_copy;
+    op->input_hold = in_hold;
     op->input_len = input_len;
 
     /* Deep-copy + submission-pin the spans into the op (released by
@@ -1445,6 +1485,7 @@ static int lua_compute_stream(lua_State *L)
     HlWasmBuffer   *in_wbuf = NULL;
     void           *in_copy = NULL;
     size_t          in_copy_len = 0;
+    HlOffheapHold   in_hold = {0};
     if (input.kind == HL_STREAM_IN_BUFFER) {
         HlBufferView view;
         if (lua_get_buffer(L, 2, &view)) {
@@ -1464,9 +1505,20 @@ static int lua_compute_stream(lua_State *L)
             in_wbuf = *wp;
             hl_wasm_buffer_borrow(in_wbuf);
         } else if (ip && *ip && input.buffer.len > 0) {
+            /* An image from image.from_buffer can borrow a mapping's bytes,
+             * so its pixels need not fit the heap: the copy is held on the
+             * VM's off-heap total and charged, as the async inputs are
+             * (audit 20). */
             in_copy_len = input.buffer.len;
+            lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)in_copy_len), 0);
+            if (hl_offheap_take(&in_hold, &lua->wasm_buf_bytes, lua->mem_limit,
+                                in_copy_len) != 0)
+                return luaL_error(L, "compute.stream: input of %I bytes would "
+                                     "take the VM's buffers past its heap limit",
+                                  (lua_Integer)in_copy_len);
             in_copy = hl_alloc_malloc(lua->base.alloc, in_copy_len);
             if (!in_copy) {
+                hl_offheap_drop(&in_hold);
                 return luaL_error(L, "compute.stream: out of memory");
             }
             memcpy(in_copy, input.buffer.data, in_copy_len);
@@ -1489,6 +1541,7 @@ static int lua_compute_stream(lua_State *L)
     if (in_mmap) hl_cap_fs_mmap_release(in_mmap);
     if (in_wbuf) hl_wasm_buffer_release(in_wbuf);
     if (in_copy) hl_alloc_free(lua->base.alloc, in_copy, in_copy_len);
+    hl_offheap_drop(&in_hold);
 
     /* Over the budget or past the run's deadline - charged per chunk, or
      * tripped inside the output callback: raise the trip, never a

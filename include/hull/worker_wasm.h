@@ -16,6 +16,7 @@
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_spans.h" /* HL_WASM_MAX_SPANS */
 #include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE */
+#include "hull/shared/offheap.h"
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -41,6 +42,7 @@ typedef struct HlWorkerWasmOp {
     char           name[256];     /* module name (for logging) */
     void          *input;         /* deep-copied input bytes */
     size_t         input_len;
+    HlOffheapHold  input_hold;    /* input counted on the VM's off-heap total */
     HlWasmCallOpts opts;          /* value-copied options */
     HlAllocator   *alloc;         /* tracked allocator for output (NULL = raw malloc) */
 

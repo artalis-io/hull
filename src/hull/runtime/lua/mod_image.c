@@ -8,6 +8,7 @@
 #include "hull/cap/image.h"
 #include "hull/cap/fs.h"
 #include "protected.h"   /* pushes that cannot leak the C buffer */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
 #endif
@@ -311,19 +312,34 @@ static const luaL_Reg image_methods[] = {
     { NULL, NULL }
 };
 
-/* image.to_wasm(img) → string: [w:u32 LE][h:u32 LE][fmt:u8][pixels...] */
+/* image.to_wasm(img) → string: [w:u32 LE][h:u32 LE][fmt:u8][pixels...]
+ *
+ * Built straight into a luaL_Buffer on the VM heap. It went through a plain
+ * malloc first - outside the heap limit, uncharged - and an image borrowed
+ * from a mapping (image.from_buffer) can be far larger than the heap; the JS
+ * twin allocates on its heap (audit 20). Refused past the heap limit, charged
+ * 1 unit per 8 bytes, before the copy. */
 static int l_image_to_wasm(lua_State *L)
 {
     HlImage **imgp = check_image(L, 1);
     if (!*imgp) return luaL_error(L, "image already closed");
-    HlImage *img = *imgp;
 
     size_t hdr = 9; /* 4 + 4 + 1 */
-    if (img->pixel_len > SIZE_MAX - hdr)
+    if ((*imgp)->pixel_len > SIZE_MAX - hdr)
         return luaL_error(L, "image.to_wasm: image too large");
-    size_t total = hdr + img->pixel_len;
-    char *buf = malloc(total);
-    if (!buf) return luaL_error(L, "out of memory");
+    size_t total = hdr + (*imgp)->pixel_len;
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->mem_limit && total > lua->mem_limit)
+        return luaL_error(L, "image.to_wasm: image too large for the VM heap");
+    image_charge(L, hl_work_bytes_units((uint64_t)total));
+
+    luaL_Buffer b;
+    char *buf = luaL_buffinitsize(L, &b, total);
+    /* That allocation can run a collection, and a finalizer is app code that
+     * could close the image: read it again. */
+    if (!*imgp || (*imgp)->pixel_len != total - hdr)
+        return luaL_error(L, "image already closed");
+    HlImage *img = *imgp;
 
     /* Little-endian width, height */
     buf[0] = (char)(img->width & 0xFF);
@@ -336,12 +352,7 @@ static int l_image_to_wasm(lua_State *L)
     buf[7] = (char)((img->height >> 24) & 0xFF);
     buf[8] = (char)(img->format + 1); /* 1-based: RGBA8=1, R8=2, RGBA16F=3, R32F=4 */
     memcpy(buf + hdr, img->pixels, img->pixel_len);
-
-    if (hl_lua_pushlstring_safe(L, buf, total) != 0) {
-        free(buf);
-        return luaL_error(L, "not enough memory for the result");
-    }
-    free(buf);
+    luaL_pushresultsize(&b, total);
     return 1;
 }
 

@@ -156,6 +156,7 @@ void hl_worker_gpu_op_free(HlWorkerGpuOp *op)
 
     free(op->uniforms);
     op->uniforms = NULL;
+    hl_offheap_drop(&op->copy_hold);
 
     /* Pipeline-specific cleanup */
     if (op->stage_uniforms) {
