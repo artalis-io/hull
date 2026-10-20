@@ -136,6 +136,35 @@ UTEST(hl_cap_blob, init_creates_layout)
     env_free(&e);
 }
 
+/* Audit 20: the store opens its root by absolute path, following links,
+ * while the fs policy confines a path to its grant's anchor. With data/
+ * granted and a planted data/blobs -> ../migrations, blob.init("data/blobs")
+ * made its store in migrations/. A root through a link is refused now. */
+UTEST(hl_cap_blob, init_refuses_a_root_through_a_symlink)
+{
+    TestEnv e;
+    static const char *const grant[] = { "data/" };
+    ASSERT_EQ(env_init_grants(&e, grant, 1), 0);
+    char data[512], mig[512], link[512];
+    snprintf(data, sizeof data, "%s/data", e.base_dir);
+    snprintf(mig, sizeof mig, "%s/migrations", e.base_dir);
+    snprintf(link, sizeof link, "%s/data/blobs", e.base_dir);
+    (void)mkdir(data, 0700);
+    ASSERT_EQ(mkdir(mig, 0700), 0);
+    if (symlink("../migrations", link) != 0) {
+        env_free(&e);
+        UTEST_SKIP("the host cannot make a symbolic link");
+    }
+    HlBlob *b = NULL;
+    EXPECT_EQ(hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "data/blobs", 1, 0), -1);
+    EXPECT_TRUE(b == NULL);
+    char made[600];
+    struct stat st;
+    snprintf(made, sizeof made, "%s/blobs", mig);
+    EXPECT_NE(stat(made, &st), 0);      /* nothing made through the link */
+    env_free(&e);
+}
+
 /* The store writes names of its own choosing under its directory, so it needs
  * an fs.write grant covering that directory as a subtree - what fs.write would
  * need for any file the store writes. Inside the app root was all it took. */
