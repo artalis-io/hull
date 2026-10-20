@@ -18,15 +18,22 @@
 
 /* ── DSN parsing (pure; mirrors hl_pg_dsn_parse) ──────────────────── */
 
+
+/* A DSN scheme, matched without case: the selector lowercases the scheme it
+ * routes by, so "MySQL://" chose this backend and then failed here. */
+static int starts_with_ci(const char *s, const char *prefix)
+{
+    for (; *prefix; s++, prefix++) {
+        unsigned char a = (unsigned char)*s, b = (unsigned char)*prefix;
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
 static void set_err(char *errbuf, size_t errlen, const char *msg)
 {
     if (errbuf && errlen) snprintf(errbuf, errlen, "%s", msg);
-}
-
-static int starts_with(const char *s, const char *pfx)
-{
-    size_t n = strlen(pfx);
-    return strncmp(s, pfx, n) == 0;
 }
 
 int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
@@ -38,8 +45,8 @@ int hl_my_dsn_parse(const char *dsn, HlMyDsn *out, char *errbuf, size_t errlen)
     if (!dsn) { set_err(errbuf, errlen, "null DSN"); return -1; }
 
     const char *p = dsn;
-    if (starts_with(p, "mysql://"))        p += strlen("mysql://");
-    else if (starts_with(p, "mariadb://")) p += strlen("mariadb://");
+    if (starts_with_ci(p, "mysql://"))        p += strlen("mysql://");
+    else if (starts_with_ci(p, "mariadb://")) p += strlen("mariadb://");
     else { set_err(errbuf, errlen, "DSN must start with mysql:// or mariadb://");
            return -1; }
 
@@ -473,7 +480,10 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                   | HL_MY_CLIENT_MULTI_STATEMENTS | HL_MY_CLIENT_MULTI_RESULTS
                   | HL_MY_CLIENT_FOUND_ROWS;
     if (dsn->dbname[0]) caps |= HL_MY_CLIENT_CONNECT_WITH_DB;
-    uint8_t charset = hs.charset ? hs.charset : HL_MY_DEFAULT_CHARSET;
+    /* utf8mb4, not the server's default whatever it was: latin1 double-
+     * encoded UTF-8 text, and a gbk-like default broke quote_identifier
+     * (hl_my_client_charset, audit 20). */
+    uint8_t charset = hl_my_client_charset(hs.charset);
 
     /* TLS negotiation (SSLRequest): consult sslmode, then upgrade before the
      * credentialed HandshakeResponse41 goes on the wire. The response's

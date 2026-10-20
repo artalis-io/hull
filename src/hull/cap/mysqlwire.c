@@ -355,6 +355,14 @@ static void copy_bounded(char *dst, size_t dstsz, const char *src)
     dst[i] = '\0';
 }
 
+uint8_t hl_my_client_charset(uint8_t server_default)
+{
+    uint8_t id = server_default;
+    if (id == 45 || id == 46 || (id >= 224 && id <= 247) || id == 255)
+        return id;
+    return HL_MY_DEFAULT_CHARSET;
+}
+
 int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out)
 {
     if (!out) return -1;

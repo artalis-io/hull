@@ -197,6 +197,15 @@ typedef struct HlMyHandshake {
  * returns 0 / -1 (malformed or unsupported protocol version). */
 int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out);
 
+/* The character set (collation id) the client announces for a server whose
+ * handshake named @p server_default: that one when it is a utf8mb4
+ * collation (45 / 46, 224-247, 255), else HL_MY_DEFAULT_CHARSET. Taking the
+ * server's default whatever it was double-encoded UTF-8 text under latin1,
+ * and under gbk / sjis / cp932 / big5 / gb18030 - whose trail byte can be
+ * 0x60 - let a backtick hl_db_quote_ident doubled be read as part of a
+ * character, closing the identifier (audit 20). */
+uint8_t hl_my_client_charset(uint8_t server_default);
+
 /* ── Result-set column definitions (UNTRUSTED) ────────────────────── */
 
 /* Column type codes (MYSQL_TYPE_*), subset Hull maps to HlValue. */

@@ -69,9 +69,15 @@ static void set_err(char *dst, size_t cap, const char *msg)
 
 /* ── DSN parsing ──────────────────────────────────────────────────── */
 
-static int starts_with(const char *s, const char *p)
+/* @p p is lowercase; @p s matches it without case. */
+static int starts_with_ci(const char *s, const char *p)
 {
-    return strncmp(s, p, strlen(p)) == 0;
+    for (; *p; s++, p++) {
+        unsigned char a = (unsigned char)*s;
+        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+        if (a != (unsigned char)*p) return 0;
+    }
+    return 1;
 }
 
 int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
@@ -83,8 +89,10 @@ int hl_pg_dsn_parse(const char *dsn, HlPgDsn *out, char *errbuf, size_t errlen)
     if (!dsn) { set_err(errbuf, errlen, "null DSN"); return -1; }
 
     const char *p = dsn;
-    if (starts_with(p, "postgres://"))         p += strlen("postgres://");
-    else if (starts_with(p, "postgresql://"))  p += strlen("postgresql://");
+    /* The scheme without case: the selector lowercases the one it routes
+     * by, so "PostgreSQL://" chose this backend and then failed here. */
+    if (starts_with_ci(p, "postgres://"))         p += strlen("postgres://");
+    else if (starts_with_ci(p, "postgresql://"))  p += strlen("postgresql://");
     else { set_err(errbuf, errlen, "DSN must start with postgres:// or postgresql://");
            return -1; }
 
