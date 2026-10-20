@@ -277,24 +277,29 @@ if [ -x "$WAMRC" ]; then
     "$WAMRC" --target="$ARCH" -o "$AOTDIR/compute/echo.aot.$ARCH" "$AOTDIR/compute/echo.wasm" >/dev/null 2>&1
 
     if [ -f "$AOTDIR/compute/echo.aot.$ARCH" ]; then
-        # Lua test that exercises AOT path
+        # Audit 19: no AOT is loaded from the app tree in development - a
+        # committed .aot is native code from whoever wrote the tree. Cut the
+        # artifact short: its stamp survives, its body does not load, so a
+        # runtime that still read it fails the call instead of running the
+        # .wasm in the interpreter.
+        head -c 200 "$AOTDIR/compute/echo.aot.$ARCH" > "$AOTDIR/compute/echo.aot.tmp"
+        mv "$AOTDIR/compute/echo.aot.tmp" "$AOTDIR/compute/echo.aot.$ARCH"
         cat > "$AOTDIR/app.lua" << 'EOF'
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 EOF
         mkdir -p "$AOTDIR/tests"
         cat > "$AOTDIR/tests/test_aot.lua" << 'EOF'
-test("compute.call echo via AOT", function()
+test("compute.call echo ignores the committed AOT", function()
     local out, err = compute.call("echo", "aot test")
     assert(not err, "err: " .. tostring(err))
     assert(out == "aot test", "mismatch: " .. tostring(out))
 end)
 EOF
         OUTPUT=$($HULL test "$AOTDIR" 2>&1) || true
-        # Check that AOT was actually loaded (log shows "aot=1")
         if echo "$OUTPUT" | grep -qE "0 failed|tests passed$"; then
-            pass "AOT filesystem lookup (Lua)"
+            pass "committed AOT is not loaded in development (Lua)"
         else
-            fail "AOT filesystem lookup (Lua)"
+            fail "committed AOT is not loaded in development (Lua)"
             echo "$OUTPUT"
         fi
     else

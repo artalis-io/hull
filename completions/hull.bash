@@ -68,7 +68,7 @@ _hull() {
                 return
             fi
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "-o --output --compiler --sign --runtime --target --no-aot --developer-key" -- "$cur"))
+                COMPREPLY=($(compgen -W "-o --output --compiler --sign --runtime --target --no-aot --trust-prebuilt-aot --developer-key" -- "$cur"))
             else
                 COMPREPLY=($(compgen -d -- "$cur"))
             fi

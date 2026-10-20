@@ -63,4 +63,4 @@ Completions take effect immediately on a new shell.
 * `hull doctor` → `--json`, `--tui`, `--fix`
 * `hull version` → `--json`
 * `hull dev` → `-p`, `-d`, `--agent`, `--no-migrate`, `--no-sandbox`, `--audit`
-* `hull build` → `-o`, `--cc`, `--compiler`, `--sign`, `--developer-key`, `--target`, `--no-aot`
+* `hull build` → `-o`, `--cc`, `--compiler`, `--sign`, `--developer-key`, `--target`, `--no-aot`, `--trust-prebuilt-aot`

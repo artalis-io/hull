@@ -611,7 +611,7 @@ ships the `.wasm`; an unstamped file it compiled is never embedded. WAMR
 selects the AOT loader by the file's magic, not its name, so the runtime and
 `hull build` classify by the bytes: AOT code under a `.wasm` name is held to
 the stamp (`unstamped_aot_named_wasm_refused`; the build fails on one), and
-`hull build` warns about a committed `*.aot.*` without it. The AOT cache keys on
+`hull build` warns about a committed `*.aot.*` without it (one it embeds under `--trust-prebuilt-aot`; by default it embeds no committed AOT, and the runtime loads no AOT from disk - the stamp says where a file claims to come from, not who made it; audit 19). The AOT cache keys on
 the wamrc binary's content, so entries from another wamrc are never hits.
 **Bump** `HULL_AOT_STAMP_VERSION` here and `HL_AOT_STAMP_VERSION` in the
 header together whenever the code-generation contract changes. The stamp

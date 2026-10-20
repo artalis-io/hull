@@ -3742,8 +3742,8 @@ UTEST(hl_cap_wasm, built_binary_does_not_load_modules_from_disk)
 }
 
 /* Under --verify-sig (the disk gate armed) only a signed module, with its
- * signed bytes, loads from disk; a planted AOT artifact is refused rather
- * than run - or skipped in favour of the .wasm. */
+ * signed bytes, loads from disk; a planted AOT artifact is never read (no AOT
+ * is loaded from disk, audit 19), so the signed .wasm runs. */
 UTEST(hl_cap_wasm, verify_sig_refuses_unsigned_disk_modules)
 {
     char dir[512];
@@ -3771,7 +3771,11 @@ UTEST(hl_cap_wasm, verify_sig_refuses_unsigned_disk_modules)
         ASSERT_EQ(wr_file(p, "NOT-SIGNED-NATIVE", 17), 0);
     }
     ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
-    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_LOAD);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), 0);
+    pthread_mutex_lock(&cache.pool_mutex);
+    int planted_aot = cache.count == 1 ? cache.modules[0].is_aot : -1;
+    pthread_mutex_unlock(&cache.pool_mutex);
+    EXPECT_EQ(planted_aot, 0);
     hl_cap_wasm_destroy(&cache);
     for (int k = 0; k < 2; k++) {
         char p[700];
@@ -3909,17 +3913,21 @@ static void count_aot_as_wasm(log_Event *ev)
     if (ev->fmt && strstr(ev->fmt, "holds AOT"))
         g_aot_as_wasm_refusals++;
 }
+static int count_aot_as_wasm_on(void)
+{
+    static int registered;
+    if (registered) return 0;
+    if (log_add_callback(count_aot_as_wasm, NULL, LOG_ERROR) != 0) return -1;
+    registered = 1;
+    return 0;
+}
 
 /* Round 7 (L2): WAMR loads AOT code from any file whose bytes start "\0aot",
  * whatever its name. AOT bytes saved as compute/<name>.wasm used to load
  * without the stamp check (is_aot = 0): the loader classifies by magic. */
 UTEST(hl_cap_wasm, unstamped_aot_named_wasm_refused)
 {
-    static int registered;
-    if (!registered) {
-        ASSERT_EQ(log_add_callback(count_aot_as_wasm, NULL, LOG_ERROR), 0);
-        registered = 1;
-    }
+    ASSERT_EQ(count_aot_as_wasm_on(), 0);
     static uint8_t unstamped[128];
     mk_aot_head(unstamped, sizeof unstamped, 0, 0);
 
@@ -3957,6 +3965,65 @@ UTEST(hl_cap_wasm, unstamped_aot_named_wasm_refused)
     hl_vfs_init(&vfs, none, dir);
     EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), 0);
     hl_cap_wasm_destroy(&cache);
+}
+
+/* Audit 19 (H3): no AOT is loaded from disk, stamp or none. A STAMPED
+ * compute/<name>.aot.<arch> in the app tree - native code from whoever wrote
+ * the tree, a cloned repository - was run by `hull dev` / `hull test`; the
+ * stamp only says the file claims to come from Hull's wamrc. Now the .wasm
+ * beside it runs in the interpreter, and stamped AOT under the .wasm name is
+ * refused. Embedded AOT (from `hull build`) still loads. */
+UTEST(hl_cap_wasm, stamped_aot_never_loaded_from_disk)
+{
+    ASSERT_EQ(count_aot_as_wasm_on(), 0);
+    /* A stamped head with no valid body: WAMR fails to load it, so before
+     * the fix the load below returned HL_WASM_ERR_LOAD instead of falling
+     * back to the .wasm. */
+    static uint8_t stamped[128];
+    mk_aot_head(stamped, sizeof stamped, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    ASSERT_EQ(hl_aot_stamp_check(stamped, sizeof stamped), HL_AOT_STAMP_OK);
+
+    char dir[512];
+    ASSERT_EQ(mk_compute_app(dir, sizeof dir), 0);
+    const char *archs[] = { "x86_64", "aarch64" };
+    for (int k = 0; k < 2; k++) {
+        char p[700];
+        snprintf(p, sizeof p, "%s/compute/echo.aot.%s", dir, archs[k]);
+        ASSERT_EQ(wr_file(p, stamped, sizeof stamped), 0);
+    }
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    HlWasmCache cache;
+    HlVfs vfs;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, none, dir);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), 0);
+    pthread_mutex_lock(&cache.pool_mutex);
+    int is_aot = cache.count == 1 ? cache.modules[0].is_aot : -1;
+    pthread_mutex_unlock(&cache.pool_mutex);
+    EXPECT_EQ(is_aot, 0);
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    EXPECT_EQ(hl_cap_wasm_call(&cache, "echo", "hi", 2, &out, &out_len,
+                               NULL, NULL, NULL, &vfs, dir, NULL, &err), 0);
+    EXPECT_EQ(out_len, (size_t)2);
+    free(out);
+    hl_cap_wasm_destroy(&cache);
+    for (int k = 0; k < 2; k++) {
+        char p[700];
+        snprintf(p, sizeof p, "%s/compute/echo.aot.%s", dir, archs[k]);
+        unlink(p);
+    }
+
+    /* Stamped AOT saved as the .wasm: refused, not loaded. */
+    char p[700];
+    snprintf(p, sizeof p, "%s/compute/echo.wasm", dir);
+    ASSERT_EQ(wr_file(p, stamped, sizeof stamped), 0);
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, none, dir);
+    int before = g_aot_as_wasm_refusals;
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_LOAD);
+    EXPECT_EQ(g_aot_as_wasm_refusals, before + 1);
+    hl_cap_wasm_destroy(&cache);
+    unlink(p);
 }
 
 int main(int argc, const char *const argv[])

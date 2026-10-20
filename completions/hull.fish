@@ -122,6 +122,7 @@ complete -c hull -n '__hull_subcommand build' -l target       -r -d 'Cross-compi
 complete -c hull -n '__hull_subcommand build' -l sign         -r -d 'Signing key file'
 complete -c hull -n '__hull_subcommand build' -l developer-key -r -d 'Developer public key'
 complete -c hull -n '__hull_subcommand build' -l no-aot       -d 'Skip AOT compilation'
+complete -c hull -n '__hull_subcommand build' -l trust-prebuilt-aot -d 'Embed AOT committed in the app tree'
 
 # ── dev ──────────────────────────────────────────────────────────────
 
