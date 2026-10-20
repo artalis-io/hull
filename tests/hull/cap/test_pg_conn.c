@@ -22,6 +22,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
 
 /* ── DSN parsing ──────────────────────────────────────────────────── */
 
@@ -664,6 +667,90 @@ UTEST(pg_query, a_silent_server_is_stopped_by_a_tripped_budget)
     EXPECT_EQ(1, conn.broken);
     EXPECT_TRUE(conn.transport == NULL);
     EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+
+/* Audit 21: a peer that sends a frame a byte at a time, each sooner than one
+ * wait slice, kept the read going: the run was asked only after a QUIET slice,
+ * and every wait restarted ?read_timeout=. A thread drips the frame. */
+typedef struct {
+    int            fd;
+    const uint8_t *head;
+    size_t         head_len;
+    _Atomic int    stop;
+} PgDrip;
+
+static void *pg_drip_main(void *p)
+{
+    PgDrip *d = p;
+    if (write(d->fd, d->head, d->head_len) != (ssize_t)d->head_len)
+        return NULL;
+    for (int i = 0; i < 250 && !atomic_load(&d->stop); i++) {
+        struct timespec ts = { 0, 20 * 1000000L };
+        nanosleep(&ts, NULL);
+        uint8_t b = 'x';
+        if (write(d->fd, &b, 1) != 1)
+            break;
+    }
+    return NULL;
+}
+
+/* A DataRow announcing 1 MB, then its body a byte every 20 ms (5 s). */
+static const uint8_t pg_drip_head[] = { 'D', 0x00, 0x10, 0x00, 0x00 };
+
+UTEST(pg_query, a_dripping_server_is_stopped_by_a_tripped_budget)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 0;
+    PgDrip d = { .fd = sv[0], .head = pg_drip_head, .head_len = sizeof pg_drip_head };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, pg_drip_main, &d));
+
+    pg_charges = 0;
+    pg_trip_at = 3;                      /* the third chunk's ask trips */
+    HlDbBudgetBinding prev = hl_db_budget_swap(pg_count_trip_fn, NULL);
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_query(&conn, "SELECT big", NULL, 0, NULL, NULL, NULL, NULL);
+    int64_t spent = pg_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    atomic_store(&d.stop, 1);
+    pthread_join(th, NULL);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent < 2000);           /* not the 5 s of the drip */
+    EXPECT_EQ(1, conn.broken);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+UTEST(pg_query, the_read_timeout_bounds_a_dripping_server)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 300;          /* for the whole frame */
+    PgDrip d = { .fd = sv[0], .head = pg_drip_head, .head_len = sizeof pg_drip_head };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, pg_drip_main, &d));
+
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_query(&conn, "SELECT big", NULL, 0, NULL, NULL, NULL, NULL);
+    int64_t spent = pg_test_ms() - t0;
+    atomic_store(&d.stop, 1);
+    pthread_join(th, NULL);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent >= 250 && spent < 2000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(strstr(conn.errmsg, "timed out") != NULL);
 
     hl_pg_conn_close(&conn);
     close(sv[0]);

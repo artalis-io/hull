@@ -894,7 +894,12 @@ roadmap §2.9.)
   read once its record's first byte arrived (`hl_db_transport_recv_sliced`:
   the read decrypts whole records and blocked for the rest under SO_RCVTIMEO,
   for ever with `read_timeout=0`); Valkey's connect and handshake likewise,
-  which waited up to `connect_timeout` (10 min). A Postgres trip on the CommandComplete of a COMMIT is not
+  which waited up to `connect_timeout` (10 min). The run is asked after
+  every chunk of a frame that is still incomplete, not only after a quiet
+  slice, the TLS read is non-blocking so each chunk returns, and the reads of
+  one frame share one `read_timeout` (`hl_db_transport_time_left`): a peer
+  that sent a big frame a byte at a time, each sooner than a slice, was never
+  stopped, since every wait restarted the timeout (audit 21). A Postgres trip on the CommandComplete of a COMMIT is not
   abandoned: the reply is read on to its ReadyForQuery, so the commit the
   server made is reported, not a "lost" transaction; likewise a MySQL trip on
   the packet that ends a reply (its OK / ERR, or the EOF of the last result

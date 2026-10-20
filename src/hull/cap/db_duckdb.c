@@ -42,6 +42,7 @@
 #include <string.h>
 #include <time.h>       /* nanosleep */
 #include <pthread.h>    /* the shared-instance registry */
+#include <limits.h>     /* PATH_MAX */
 
 /* VARCHAR/BLOB inline threshold: a duckdb_string_t of length <= 12 stores its
  * bytes inline; longer strings live behind value.pointer.ptr. See duckdb.h. */
@@ -55,16 +56,73 @@
  * second instance in the same process - so a pool thread read what its
  * instance had replayed at open, not what the event loop's had committed
  * since, and both could write the file (audit 20). :memory: stays private to
- * its open, as SQLite's does. */
+ * its open, as SQLite's does.
+ *
+ * Keyed by the file, not the DSN's spelling: "a.duckdb", "./a.duckdb" and the
+ * absolute path each made an instance of their own (audit 21) - the key is the
+ * resolved path (duck_canon). The lock guards only the list: the open (WAL
+ * replay) and the last close (a checkpoint) can take seconds, and holding it
+ * across them stalled every other DuckDB open and close in the process, the
+ * event loop's included. An instance being opened is in the list as OPENING;
+ * another open of the same file waits for it on the condition variable. */
+enum { HL_DUCK_OPENING = 0, HL_DUCK_READY = 1 };
+
 typedef struct HlDuckShared {
-    char                *path;
+    char                *path;   /* canonical */
     duckdb_database      db;
     int                  refs;
+    int                  state;  /* HL_DUCK_OPENING / HL_DUCK_READY */
     struct HlDuckShared *next;
 } HlDuckShared;
 
 static pthread_mutex_t g_duck_shared_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_duck_shared_cv = PTHREAD_COND_INITIALIZER;
 static HlDuckShared   *g_duck_shared;   /* under g_duck_shared_mu */
+
+/* The registry key for @p path: its resolved path, or - for a file that does
+ * not exist yet - its resolved directory plus the name. NULL on OOM. */
+static char *duck_canon(const char *path)
+{
+    char buf[PATH_MAX];
+    if (realpath(path, buf))
+        return strdup(buf);
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;
+    char dir[PATH_MAX];
+    if (!slash) {
+        dir[0] = '.'; dir[1] = '\0';
+    } else {
+        size_t n = (size_t)(slash - path);
+        if (n == 0) n = 1;   /* "/x" */
+        if (n >= sizeof dir) return strdup(path);
+        memcpy(dir, path, n);
+        dir[n] = '\0';
+    }
+    if (*base == '\0' || !realpath(dir, buf))
+        return strdup(path);
+    size_t bl = strlen(buf), nl = strlen(base);
+    char *out = malloc(bl + 1 + nl + 1);
+    if (!out) return NULL;
+    memcpy(out, buf, bl);
+    size_t o = bl;
+    if (o == 0 || out[o - 1] != '/') out[o++] = '/';
+    memcpy(out + o, base, nl + 1);
+    return out;
+}
+
+static HlDuckShared *duck_find(const char *key)
+{
+    HlDuckShared *sh = g_duck_shared;
+    while (sh && strcmp(sh->path, key) != 0) sh = sh->next;
+    return sh;
+}
+
+static void duck_unlink(HlDuckShared *sh)
+{
+    HlDuckShared **pp = &g_duck_shared;
+    while (*pp && *pp != sh) pp = &(*pp)->next;
+    if (*pp) *pp = sh->next;
+}
 
 typedef struct HlDbDuckCtx {
     duckdb_database    db;
@@ -301,12 +359,16 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
         return 0;
     }
 
-    /* A file: its one instance, made by the first open (held under the lock,
-     * so two threads opening at once cannot make two). */
+    /* A file: its one instance, made by the first open. An open of a file
+     * another thread is opening waits for it, so two cannot make two. */
+    char *key = duck_canon(path);
+    if (!key) { free(s); return -1; }
     pthread_mutex_lock(&g_duck_shared_mu);
-    HlDuckShared *sh = g_duck_shared;
-    while (sh && strcmp(sh->path, path) != 0) sh = sh->next;
+    HlDuckShared *sh;
+    while ((sh = duck_find(key)) && sh->state == HL_DUCK_OPENING)
+        pthread_cond_wait(&g_duck_shared_cv, &g_duck_shared_mu);
     if (sh) {
+        free(key);
         if (duckdb_connect(sh->db, &s->con) != DuckDBSuccess) {
             pthread_mutex_unlock(&g_duck_shared_mu);
             duck_set_err(s, "duckdb_connect failed");
@@ -314,23 +376,40 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
             return -1;
         }
         sh->refs++;
+        pthread_mutex_unlock(&g_duck_shared_mu);
     } else {
         sh = calloc(1, sizeof *sh);
-        char *key = sh ? strdup(path) : NULL;
-        if (!key || duck_open_instance(s, path, &sh->db, &s->con) != 0) {
+        if (!sh) {
             pthread_mutex_unlock(&g_duck_shared_mu);
-            if (!key && sh) duck_set_err(s, "out of memory");
             free(key);
+            free(s);
+            return -1;
+        }
+        sh->path  = key;
+        sh->refs  = 1;
+        sh->state = HL_DUCK_OPENING;
+        sh->next  = g_duck_shared;
+        g_duck_shared = sh;
+        pthread_mutex_unlock(&g_duck_shared_mu);
+
+        /* Outside the lock: only openers of this file wait for it. */
+        int rc = duck_open_instance(s, path, &sh->db, &s->con);
+
+        pthread_mutex_lock(&g_duck_shared_mu);
+        if (rc != 0) {
+            duck_unlink(sh);
+        } else {
+            sh->state = HL_DUCK_READY;
+        }
+        pthread_cond_broadcast(&g_duck_shared_cv);
+        pthread_mutex_unlock(&g_duck_shared_mu);
+        if (rc != 0) {
+            free(sh->path);
             free(sh);
             free(s);
             return -1;
         }
-        sh->path = key;
-        sh->refs = 1;
-        sh->next = g_duck_shared;
-        g_duck_shared = sh;
     }
-    pthread_mutex_unlock(&g_duck_shared_mu);
     s->shared = sh;
     s->db = sh->db;
 
@@ -344,17 +423,20 @@ static void duck_close(HlDbHandle *h)
     HlDbDuckCtx *s = h->ctx;
     duckdb_disconnect(&s->con);
     if (s->shared) {
-        /* The last connection to the file closes its instance. */
+        /* The last connection to the file closes its instance - taken off
+         * the list under the lock, closed (a checkpoint) outside it. */
+        HlDuckShared *gone = NULL;
         pthread_mutex_lock(&g_duck_shared_mu);
         if (--s->shared->refs == 0) {
-            HlDuckShared **pp = &g_duck_shared;
-            while (*pp && *pp != s->shared) pp = &(*pp)->next;
-            if (*pp) *pp = s->shared->next;
-            duckdb_close(&s->shared->db);
-            free(s->shared->path);
-            free(s->shared);
+            duck_unlink(s->shared);
+            gone = s->shared;
         }
         pthread_mutex_unlock(&g_duck_shared_mu);
+        if (gone) {
+            duckdb_close(&gone->db);
+            free(gone->path);
+            free(gone);
+        }
     } else {
         duckdb_close(&s->db);
     }
