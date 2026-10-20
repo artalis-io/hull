@@ -209,7 +209,7 @@ function Store:incr(k, by, ttl)
         else
             local cur = u.to_int(vdec(rows[1].v))
             local ver = tonumber(rows[1].version)
-            local nv = cur + by
+            local nv = u.add_int(cur, by)
             local n = self.conn.exec(
                 "UPDATE _hull_kv SET v = ?, version = version + 1, updated_at = ? "
                 .. "WHERE ns = ? AND k = ? AND version = ? AND v = ? AND expires_at > ?",

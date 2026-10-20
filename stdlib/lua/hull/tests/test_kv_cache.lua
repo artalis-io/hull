@@ -225,4 +225,18 @@ test("rbac refuses a missing / non-string / over-long name", function()
     assert_eq(rbac.has_permission("u1", nil), false)
 end)
 
+-- ── incr: integers only, no wrap (audit 21) ──────────────────────────
+
+test("kv incr refuses math.huge and a numeric string, and does not wrap", function()
+    local h = kv.open({ backend = "memory", namespace = "t21-incr" })
+    assert_eq(err_code(function() h:incr("k", math.huge) end), "invalid_argument")
+    assert_eq(err_code(function() h:incr("k", "1") end), "invalid_argument")
+    assert_eq(h:incr("k", math.maxinteger), math.maxinteger)
+    assert_eq(err_code(function() h:incr("k", 1) end), "overflow")
+    assert_eq(h:incr("k", -1), math.maxinteger - 1)
+    local s = cache.open({ backend = "sqlite", database = db, namespace = "t21-incr-sql" })
+    assert_eq(s:incr("k", math.maxinteger), math.maxinteger)
+    assert_eq(err_code(function() s:incr("k", 1) end), "overflow")
+end)
+
 return { pass = pass, fail = fail }

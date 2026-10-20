@@ -191,7 +191,8 @@ function M.map(items, fn, opts)
     local limit = opts and opts.limit
     if limit == nil then limit = M.DEFAULT_LIMIT end
     if limit ~= math.huge then
-        limit = math.tointeger(limit)   -- 4.0 is 4; 4.5 and "4" are not
+        -- 4.0 is 4; 4.5 and "4" are not (math.tointeger alone took "4").
+        limit = type(limit) == "number" and math.tointeger(limit)
         if not limit or limit < 1 then
             error("hull.map: limit must be a positive integer (or math.huge)", 2)
         end

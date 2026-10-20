@@ -164,7 +164,7 @@ class SqlStore {
             } else {
                 const cur = util.toInt(util.b64decode(rows[0].v));
                 const ver = Number(rows[0].version);
-                const nv = cur + by;
+                const nv = util.addInt(cur, by);
                 // Guarded by the row being live and still holding the value
                 // read (see the Lua sibling): an expired row was incremented in
                 // place, and a re-inserted one restarts at version 1.

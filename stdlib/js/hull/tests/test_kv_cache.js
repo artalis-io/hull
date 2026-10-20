@@ -146,5 +146,18 @@ test("rbac refuses bad names, lookups answer false", () => {
     assertEq(rbac.hasPermission("u1", 1), false);
 });
 
+// ── incr: safe integers only (audit 21) ───────────────────────────────
+
+test("kv incr refuses an unsafe amount and leaving the safe range", () => {
+    const h = kv.open({ backend: "memory", namespace: "t21-incr" });
+    assertEq(code(() => h.incr("k", 1e300)), "invalid_argument");
+    assertEq(h.incr("k", Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+    assertEq(code(() => h.incr("k", 1)), "overflow");
+    assertEq(h.incr("k", -1), Number.MAX_SAFE_INTEGER - 1);
+    const s = cache.open({ backend: "sqlite", database: db, namespace: "t21-incr-sql" });
+    assertEq(s.incr("k", Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+    assertEq(code(() => s.incr("k", 1)), "overflow");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;

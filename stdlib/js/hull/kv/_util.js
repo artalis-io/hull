@@ -91,7 +91,20 @@ function toInt(bytes) {
     const n = Number(bytes);
     if (!Number.isInteger(n))
         codedError("invalid_argument", "kv: value is not an integer for incr()");
+    // Past 2^53 the double is a neighbour of the stored value (a counter the
+    // Lua runtime incremented there): refused, not rounded (audit 21).
+    if (!Number.isSafeInteger(n))
+        codedError("overflow", "kv: value is too large for incr() in JS");
     return n;
+}
+
+// a + b, refused outside the safe-integer range: past it `+ 1` is a no-op on
+// a double, where Valkey's INCRBY refuses (audit 21).
+function addInt(a, b) {
+    const r = a + b;
+    if (!Number.isSafeInteger(r))
+        codedError("overflow", "kv: incr would leave the safe-integer range");
+    return r;
 }
 
 // Validate an optional non-negative integer (a count/limit); undefined/null
@@ -125,7 +138,7 @@ function hexdecode(hex) {
 
 const util = {
     MAX_KEY, MAX_TTL, NO_EXPIRY, KEEP_TTL, error: codedError, checkKey, checkValue, checkCount, checkTtl,
-    expiryMs, nowMs, toInt, b64encode, b64decode, hexencode, hexdecode,
+    expiryMs, nowMs, toInt, addInt, b64encode, b64decode, hexencode, hexdecode,
 };
 
 export default util;

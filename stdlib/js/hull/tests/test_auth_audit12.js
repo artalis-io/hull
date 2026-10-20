@@ -577,6 +577,13 @@ await test("a20: isEmailIsh counts UTF-8 bytes and refuses Unicode spaces", asyn
     assertEq(isEmailIsh("a@x.test"), true, "plain");
 });
 
+await test("a21: isEmailIsh checks the unit after a lone high surrogate", async () => {
+    const isEmailIsh = __testHooks('hull:web:auth-flows').isEmailIsh;
+    assertEq(isEmailIsh("a@x.test\uD800\u0000x"), false, "NUL after a lone high surrogate");
+    assertEq(isEmailIsh("a@x.test\uD800\u001bx"), false, "ESC after a lone high surrogate");
+    assertEq(isEmailIsh("a😀@x.test"), true, "a real pair still counts");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;
 console.log("auth audit 12: " + pass + " passed, " + fail + " failed");

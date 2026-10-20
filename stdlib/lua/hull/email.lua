@@ -47,6 +47,8 @@ local smtp = require("hull.smtp")
 
 local email = {}
 
+local _text = require("hull._text")   -- has_unicode_space
+
 -- Throw a coded error table. __tostring keeps an uncaught throw readable;
 -- err.code is the stable, branch-on identity (docs/stdlib_style.md section 1).
 local _err_mt = { __tostring = function(e) return e.message end }
@@ -65,6 +67,9 @@ local function addr_ok(a)
        -- separate or quote addresses ("a@x.co,b" was one address with one
        -- '@'; an HTTP provider that splits on commas mailed both).
        and a:match('^[^%s%c@,;<>"()]+@[^%s%c@,;<>"()]+%.[^%s%c@,;<>"()]+$') ~= nil
+       -- and no Unicode white space, which the JS twin's \s refuses
+       -- (audit 21; auth-flows' check since audit 20).
+       and not _text.has_unicode_space(a)
 end
 
 -- opts.cc as a list of strings: a string is one recipient. (postmark raised

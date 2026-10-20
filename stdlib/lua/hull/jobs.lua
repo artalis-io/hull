@@ -604,11 +604,26 @@ function jobs.enqueue(job_type, data, opts)
     -- duplicate (the edge's primary key) or a non-id failed its edge INSERT
     -- after the row was written (audit 20).
     local deps
-    if type(opts.depends_on) == "table" then
+    -- Not a table is an error, not "no dependencies" (a single id enqueued
+    -- the job pending, to run before its parent), and a hole is too: ipairs
+    -- stopped at a nil (a failed lookup) and dropped the ids after it. Ids
+    -- are numbers - math.tointeger takes the string "5", which the JS twin
+    -- refuses (audit 21).
+    local src = opts.depends_on
+    if src ~= nil and type(src) ~= "table" then
+        error("jobs.enqueue: depends_on must be a list of job ids", 2)
+    end
+    if src ~= nil then
         deps = {}
         local seen = {}
-        for _, d in ipairs(opts.depends_on) do
-            local dep_id = math.tointeger(d)
+        local n, count = #src, 0
+        for _ in pairs(src) do count = count + 1 end
+        if count ~= n then
+            error("jobs.enqueue: depends_on must be a list of job ids", 2)
+        end
+        for i = 1, n do
+            local d = src[i]
+            local dep_id = type(d) == "number" and math.tointeger(d)
             if not dep_id or dep_id <= 0 or seen[dep_id] then
                 error("jobs.enqueue: depends_on must hold distinct job ids", 2)
             end

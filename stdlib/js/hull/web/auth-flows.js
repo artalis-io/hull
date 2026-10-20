@@ -688,7 +688,11 @@ function isEmailIsh(s) {
         if (c < 0x20 || c === 0x7f) return false;
         if (c < 0x80) bytes += 1;
         else if (c < 0x800) bytes += 2;
-        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) { bytes += 4; i++; }
+        // A surrogate pair is one 4-byte character - only when the next unit
+        // IS a low surrogate: skipped unchecked, "\uD800\u0000" put a NUL
+        // past the control-character check (audit 21).
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
+                 (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { bytes += 4; i++; }
         else bytes += 3;
     }
     if (bytes < 3 || bytes > 254) return false;
