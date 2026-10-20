@@ -538,8 +538,13 @@ function Transport:message_ready()
     if not self.stream.wait then return false end
 
     self.stream:wait(1)
-    local chunk, err, code = self:stream_call("read", READ_CHUNK)
+    -- The wait is put back however the read ends: a raise (another
+    -- coroutine holds the connection, a wait refused in a transaction) left
+    -- it at 1 ms, and the next quiet stretch then marked a healthy
+    -- connection dead (audit 21).
+    local ok, chunk, err, code = pcall(self.stream_call, self, "read", READ_CHUNK)
     self.stream:wait(self.wait_ms > 0 and self.wait_ms or 0)
+    if not ok then error(chunk, 0) end
     if chunk == nil then
         if code == "timeout" then return false end
         if code == "deadline" then fail("deadline", "deadline reached") end

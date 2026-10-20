@@ -28,6 +28,14 @@ int hl_cap_ssh_open(const HlSshEnv *env, const HlSshOpen *req,
                                           req->user);
     if (auth == HL_SSH_ALLOW && req->via)
         auth = hl_ssh_check_tunnel(env->policy, req->via_host, req->via_port);
+    /* The relay's NAME is granted too: it is the TLS SNI, the name its
+     * certificate is checked against, and the upgrade's Host - what a CDN or
+     * a shared-IP virtual host routes by. Checked only by address, an app
+     * granted one relay behind a CDN reached any origin on it (audit 21). */
+    if (auth == HL_SSH_ALLOW && req->via && req->via_tls_hostname &&
+        req->via_tls_hostname[0])
+        auth = hl_ssh_check_tunnel(env->policy, req->via_tls_hostname,
+                                   req->via_port);
     if (auth != HL_SSH_ALLOW) {
         if (why) *why = hl_ssh_auth_reason(auth);
         return HL_NET_E_DENIED;

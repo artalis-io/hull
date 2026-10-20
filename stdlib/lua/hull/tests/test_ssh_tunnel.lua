@@ -191,6 +191,17 @@ test("the well-known destination header is checked even when another is configur
     end
 end)
 
+test("tunnel.headers may not set the upgrade's own headers", function()
+    -- A caller Host routes a CDN-fronted relay to another origin (audit 21).
+    for _, h in ipairs({ "Host: other.zone.example", "upgrade: x",
+                         "Connection: close", "Sec-WebSocket-Key: AAAA" }) do
+        local r = relay(upgraded())
+        local err, seen = connect_via(r, { host = "ssh.example.com", headers = { h } })
+        assert_eq(err and err.code, "denied", h)
+        assert_eq(seen, nil, "nothing may be dialled: " .. h)
+    end
+end)
+
 test("an IPv6 destination is bracketed", function()
     local r = relay(upgraded())
     ssh.connect{

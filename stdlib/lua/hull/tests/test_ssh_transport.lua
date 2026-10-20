@@ -2217,4 +2217,16 @@ test("run_kex applies the full strict rule only to the first exchange (SSH-L3)",
     assert_eq(filter_seen(true), "rekey", "rekey:")
 end)
 
+
+test("message_ready puts the wait back when the read raises", function()
+    -- Another coroutine holding the connection made the read raise: the 1 ms
+    -- probe wait stayed, and the next quiet stretch looked like a dead peer
+    -- (audit 21).
+    local s = scripted_stream({})
+    local t = transport.new(s, stub_crypto(), { keepalive_ms = 30000 })
+    t.io_busy = true
+    assert_eq(raised_code(function() t:message_ready() end), "busy")
+    assert_eq(s.waits[#s.waits], 30000, "wait after the raise:")
+end)
+
 return {pass = pass, fail = fail}
