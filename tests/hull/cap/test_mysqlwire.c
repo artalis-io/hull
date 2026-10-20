@@ -13,6 +13,24 @@
 
 /* ── Writer / reader round-trips ──────────────────────────────────── */
 
+/* Audit 20: the client announces utf8mb4 unless the server's default
+ * already is a utf8mb4 collation (latin1 double-encoded UTF-8 text; a gbk
+ * default broke the byte-wise backtick doubling of quote_identifier). */
+UTEST(mysqlwire, client_charset_is_utf8mb4)
+{
+    EXPECT_EQ(hl_my_client_charset(8),   (uint8_t)HL_MY_DEFAULT_CHARSET); /* latin1 */
+    EXPECT_EQ(hl_my_client_charset(28),  (uint8_t)HL_MY_DEFAULT_CHARSET); /* gbk */
+    EXPECT_EQ(hl_my_client_charset(13),  (uint8_t)HL_MY_DEFAULT_CHARSET); /* sjis */
+    EXPECT_EQ(hl_my_client_charset(33),  (uint8_t)HL_MY_DEFAULT_CHARSET); /* utf8mb3 */
+    EXPECT_EQ(hl_my_client_charset(0),   (uint8_t)HL_MY_DEFAULT_CHARSET);
+    EXPECT_EQ(hl_my_client_charset(45),  (uint8_t)45);
+    EXPECT_EQ(hl_my_client_charset(46),  (uint8_t)46);
+    EXPECT_EQ(hl_my_client_charset(224), (uint8_t)224);
+    EXPECT_EQ(hl_my_client_charset(247), (uint8_t)247);
+    EXPECT_EQ(hl_my_client_charset(248), (uint8_t)HL_MY_DEFAULT_CHARSET);
+    EXPECT_EQ(hl_my_client_charset(255), (uint8_t)255);   /* MySQL 8 */
+}
+
 UTEST(mysqlwire, int_roundtrip_little_endian)
 {
     HlMyWriter w; hl_my_writer_init(&w);

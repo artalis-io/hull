@@ -958,6 +958,15 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   over the shared `shared/tls_client.c` (the resolved trust anchor; `verify-*` checks
   chain + hostname), then sends the credentialed HandshakeResponse41 over TLS.
   All post-handshake I/O tunnels through `KlTls`.
+- **Connection character set:** utf8mb4 (`HL_MY_DEFAULT_CHARSET`, 45) unless
+  the server's default already is a utf8mb4 collation (`hl_my_client_charset`).
+  The client announced the server's default whatever it was: MySQL 5.7 /
+  MariaDB's latin1 stored UTF-8 text double-encoded, and a gbk / sjis / cp932
+  / big5 / gb18030 default - whose trail byte can be 0x60 - let a backtick
+  `hl_db_quote_ident` doubled be read as part of a character, closing the
+  identifier (`conn.quote_identifier` was not injection-safe there; audit 20).
+  The Postgres and MySQL DSN parsers match the scheme without case, as the
+  selector does.
 - **Queries / types:** param-less statements use the text `COM_QUERY` protocol;
   **parameterized** statements use the binary prepared-statement protocol
   (`COM_STMT_PREPARE` / `EXECUTE` / `CLOSE`) so values never touch the SQL text

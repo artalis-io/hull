@@ -51,6 +51,18 @@ UTEST(pg_dsn, minimal_defaults_port)
     ASSERT_STREQ(d.password, "");
 }
 
+/* Audit 20: the selector lowercases the scheme it routes by, so
+ * "PostgreSQL://" chose this backend; the parser then refused it. */
+UTEST(pg_dsn, scheme_without_case)
+{
+    HlPgDsn d;
+    ASSERT_EQ(0, hl_pg_dsn_parse("PostgreSQL://bob@localhost/mydb", &d, NULL, 0));
+    ASSERT_STREQ(d.user, "bob");
+    ASSERT_STREQ(d.dbname, "mydb");
+    ASSERT_EQ(0, hl_pg_dsn_parse("POSTGRES://bob@localhost/mydb", &d, NULL, 0));
+    ASSERT_NE(0, hl_pg_dsn_parse("postgre://bob@localhost/mydb", &d, NULL, 0));
+}
+
 UTEST(pg_dsn, percent_decoded_password)
 {
     HlPgDsn d;

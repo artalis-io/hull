@@ -22,8 +22,8 @@
 
 /* ── Canned server packets ────────────────────────────────────────── */
 
-static void build_handshake_caps(HlMyWriter *w, uint8_t seq, const char *plugin,
-                                 uint32_t extra_caps)
+static void build_handshake_cs(HlMyWriter *w, uint8_t seq, const char *plugin,
+                               uint32_t extra_caps, uint8_t charset)
 {
     size_t m = hl_my_packet_begin(w, seq);
     hl_my_put_u8(w, 10);                       /* protocol v10 */
@@ -35,7 +35,7 @@ static void build_handshake_caps(HlMyWriter *w, uint8_t seq, const char *plugin,
     uint32_t caps = HL_MY_CLIENT_SECURE_CONNECTION | HL_MY_CLIENT_PLUGIN_AUTH
                   | HL_MY_CLIENT_PROTOCOL_41 | extra_caps;
     hl_my_put_u16(w, (uint16_t)(caps & 0xFFFF));
-    hl_my_put_u8(w, HL_MY_DEFAULT_CHARSET);
+    hl_my_put_u8(w, charset);                  /* the server's default */
     hl_my_put_u16(w, 2);                       /* status */
     hl_my_put_u16(w, (uint16_t)(caps >> 16));
     hl_my_put_u8(w, 21);                       /* auth-plugin-data length */
@@ -45,6 +45,12 @@ static void build_handshake_caps(HlMyWriter *w, uint8_t seq, const char *plugin,
     hl_my_put_u8(w, 0);                        /* part-2 NUL */
     hl_my_put_cstr(w, plugin);
     hl_my_packet_end(w, m);
+}
+
+static void build_handshake_caps(HlMyWriter *w, uint8_t seq, const char *plugin,
+                                 uint32_t extra_caps)
+{
+    build_handshake_cs(w, seq, plugin, extra_caps, HL_MY_DEFAULT_CHARSET);
 }
 
 static void build_handshake_plugin(HlMyWriter *w, uint8_t seq, const char *plugin)
@@ -114,6 +120,50 @@ UTEST(mysql_conn, handshake_native_ok)
     hl_my_conn_close(&conn);
     hl_my_writer_free(&hs); hl_my_writer_free(&ok);
     close(sv[0]);
+}
+
+/* Audit 20: the client announced the server's default character set,
+ * whatever it was. Under latin1 (8) UTF-8 text was stored double-encoded;
+ * under gbk (28) - whose trail byte can be 0x60 - a backtick
+ * hl_db_quote_ident doubled was read as part of a character, closing the
+ * identifier. It is utf8mb4 (45) now, unless the server's default already
+ * is a utf8mb4 collation. The DSN's scheme is matched without case. */
+UTEST(mysql_conn, connection_charset_is_utf8mb4)
+{
+    static const struct { uint8_t server, sent; } cases[] = {
+        { 8, 45 }, { 28, 45 }, { 0, 45 }, { 255, 255 }, { 224, 224 }, { 45, 45 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int sv[2];
+        ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+        HlMyWriter hs; hl_my_writer_init(&hs);
+        build_handshake_cs(&hs, 0, "mysql_native_password", 0, cases[i].server);
+        ASSERT_TRUE(write(sv[0], hs.buf, hs.len) == (ssize_t)hs.len);
+        HlMyWriter ok; hl_my_writer_init(&ok); build_ok(&ok, 2);
+        ASSERT_TRUE(write(sv[0], ok.buf, ok.len) == (ssize_t)ok.len);
+
+        HlMyDsn dsn; char err[128];
+        ASSERT_EQ(0, hl_my_dsn_parse("MySQL://alice:pw@localhost/shop",
+                                     &dsn, err, sizeof err));
+        HlMyConn conn;
+        ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+
+        uint8_t got[512];
+        ssize_t n = read(sv[0], got, sizeof got);
+        ASSERT_TRUE(n > 4);
+        HlMyFrame f; size_t consumed = 0;
+        ASSERT_EQ(hl_my_frame_next(got, (size_t)n, &f, &consumed), HL_MY_OK);
+        HlMyCursor c; hl_my_cursor_init(&c, &f);
+        (void)hl_my_get_u32(&c);                      /* client caps */
+        (void)hl_my_get_u32(&c);                      /* max packet */
+        EXPECT_EQ(hl_my_get_u8(&c), cases[i].sent);   /* charset */
+
+        hl_my_conn_close(&conn);
+        hl_my_writer_free(&hs); hl_my_writer_free(&ok);
+        close(sv[0]);
+    }
+    HlMyDsn dsn; char err[128];
+    EXPECT_EQ(0, hl_my_dsn_parse("MARIADB://u@h/db", &dsn, err, sizeof err));
 }
 
 UTEST(mysql_conn, handshake_auth_error)
