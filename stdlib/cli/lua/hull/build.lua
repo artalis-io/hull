@@ -2145,6 +2145,7 @@ typedef struct {
         tmpdir = tmpdir, html_files = html_files, static_files = static_files,
         migration_files = migration_files, compute_files = compute_files,
         shader_files = shader_files, cc = cc, is_cosmo = is_cosmo,
+        prebuilt_aot = prebuilt_aot,
     }
 end
 
@@ -2212,6 +2213,7 @@ local function main()
         ctx.lua_files, ctx.js_files, ctx.json_files, ctx.tmpdir, ctx.html_files,
         ctx.static_files, ctx.migration_files, ctx.compute_files, ctx.shader_files,
         ctx.cc, ctx.is_cosmo
+    local prebuilt_aot = ctx.prebuilt_aot
     -- ── Build flavor (--flavor) ──
     -- Validate the requested flavor and (for non-default flavors) check the
     -- app's manifest against the TARGET flavor's caps, aborting if a declared
