@@ -103,7 +103,7 @@ UTEST(tls_handshake, getfl_failure_fails_closed_no_step)
     seam_reset();
     g_fail_getfl = 1;
     KlTls tls = make_fake_tls();
-    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 100), -1);
+    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 100, NULL, NULL), -1);
     ASSERT_EQ(g_hs_calls, 0);                    /* handshake never called */
     tls_test_fcntl = NULL;
     close(sv[0]); close(sv[1]);
@@ -117,7 +117,7 @@ UTEST(tls_handshake, enable_nonblocking_failure_fails_closed)
     seam_reset();
     g_fail_setfl_nth = 1;
     KlTls tls = make_fake_tls();
-    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 100), -1);
+    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 100, NULL, NULL), -1);
     ASSERT_EQ(g_hs_calls, 0);
     tls_test_fcntl = NULL;
     close(sv[0]); close(sv[1]);
@@ -133,7 +133,7 @@ UTEST(tls_handshake, restore_failure_after_ok_fails_handshake)
     g_hs_seq[0] = KL_TLS_OK; g_hs_n = 1;         /* first step succeeds */
     g_fail_setfl_nth = 2;                        /* the 2nd F_SETFL (the restore) fails */
     KlTls tls = make_fake_tls();
-    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 100), -1);
+    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 100, NULL, NULL), -1);
     ASSERT_EQ(g_hs_calls, 1);                    /* handshake ran once, returned OK */
     tls_test_fcntl = NULL;
     close(sv[0]); close(sv[1]);
@@ -160,7 +160,7 @@ UTEST(tls_handshake, result_after_deadline_is_rejected)
     seam_reset();
     g_spin_ms = 30;
     KlTls tls; memset(&tls, 0, sizeof tls); tls.handshake = fake_handshake_spin_then_ok;
-    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 10), -1);   /* 10ms budget, first step spins 30ms */
+    ASSERT_EQ(tls_handshake_loop(&tls, sv[0], 10, NULL, NULL), -1);   /* 10ms budget, first step spins 30ms */
     ASSERT_EQ(g_hs_calls, 1);                             /* the post-expiry OK step never ran */
     tls_test_fcntl = NULL;
     close(sv[0]); close(sv[1]);
