@@ -818,7 +818,9 @@ void hl_cap_fs_list_free(HlFsDirEntry *entries, size_t count, HlAllocator *alloc
  * else goes to the previous disposition, so a real fault still crashes.
  *
  * The registry is a fixed table of atomics: the handler only loads, and maps
- * one page. A mapping that finds the table full is still made, unguarded. */
+ * one page. A mapping that finds the table full is refused
+ * (`too_many_mappings`): it used to be made unguarded, so past 256 live
+ * mappings a shrinking file crashed the server again (audit 20). */
 
 #define MMAP_GUARD_SLOTS 256
 static _Atomic uintptr_t g_guard_base[MMAP_GUARD_SLOTS];
@@ -956,6 +958,12 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
     buf->map_len = (size_t)st.st_size;
     buf->foffset = 0;
     buf->guard_slot = mmap_guard_register(addr, (size_t)st.st_size);
+    if (buf->guard_slot < 0) {
+        munmap(addr, (size_t)st.st_size);
+        hl_alloc_free(alloc, buf, sizeof(HlMappedBuffer));
+        buf = NULL;
+        if (err_msg) *err_msg = "too_many_mappings";
+    }
 
 audit:
     {
@@ -1140,6 +1148,12 @@ HlMappedBuffer *hl_cap_fs_mmap_window(const HlFsConfig *cfg, const char *path,
     atomic_init(&buf->borrow_count, 0);
     atomic_init(&buf->pending_free, 0);
     buf->guard_slot = mmap_guard_register(base, (size_t)map_len);
+    if (buf->guard_slot < 0) {   /* no unguarded mapping (see above) */
+        munmap(base, (size_t)map_len);
+        hl_alloc_free(alloc, buf, sizeof(HlMappedBuffer));
+        buf = NULL;
+        if (err_msg) *err_msg = "too_many_mappings";
+    }
 
 audit:
     {

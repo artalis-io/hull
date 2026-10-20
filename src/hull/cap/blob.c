@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>   /* lstat: root_has_symlink */
 
 /* ── Init: manifest validation + path resolution ─────────────────── */
 
@@ -74,6 +75,32 @@ static int blob_dir_granted(const HlFsConfig *cfg, const char *dir)
     return sel.entry && sel.entry->kind == HL_FS_ENTRY_CREATE;
 }
 
+/* 1 when a component of @p abs_root below the app directory (@p base_len
+ * bytes of it) is a symbolic link. The store opens its root by absolute path,
+ * following links, while the fs policy that granted the directory confines a
+ * path to its grant's anchor: with `data/` granted and a planted
+ * `data/blobs -> ../migrations`, blob.init("data/blobs") put the store - and
+ * its 64-hex files, blobs/ and tmp/ - outside the grant (audit 20). A
+ * component that does not exist yet is the store's to make, not a link. */
+static int root_has_symlink(const char *abs_root, size_t base_len)
+{
+    char prefix[PATH_MAX];
+    size_t len = strlen(abs_root);
+    if (len >= sizeof prefix) return 1;
+    memcpy(prefix, abs_root, len + 1);
+    for (size_t i = base_len + 1; i <= len; i++) {
+        if (prefix[i] != '/' && prefix[i] != '\0') continue;
+        char c = prefix[i];
+        prefix[i] = '\0';
+        struct stat st;
+        int r = lstat(prefix, &st);
+        prefix[i] = c;
+        if (r != 0) return 0;              /* the rest does not exist yet */
+        if (S_ISLNK(st.st_mode)) return 1;
+    }
+    return 0;
+}
+
 int hl_cap_blob_init(HlBlob **out,
                      const HlFsConfig *fs_cfg,
                      HlAllocator *alloc,
@@ -99,6 +126,8 @@ int hl_cap_blob_init(HlBlob **out,
 
     char abs_root[PATH_MAX];
     if (resolve_root(fs_cfg, trimmed, abs_root, sizeof(abs_root)) != 0)
+        return -1;
+    if (root_has_symlink(abs_root, fs_cfg->base_len))
         return -1;
 
     return hl_blob_store_open(out, alloc, abs_root,

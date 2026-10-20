@@ -50,7 +50,7 @@ static const char *const test_grants[] = {
     "mmap_borrow.txt", "mmap_rel.txt", "mmap_test.txt", "no_such_file.txt",
     "nope.txt", "size.txt", "test.txt", "whole.txt",
     "win_borrow.bin", "win_cross.bin", "win_eof.bin", "win_rej.bin", "win_zero.bin",
-    "shrink.bin",
+    "shrink.bin", "many.bin",
 };
 
 static void setup_fs(void)
@@ -505,6 +505,36 @@ UTEST(hl_cap_fs, mmap_truncated_file_reads_zeros)
         UTEST_SKIP("the host refuses to shrink a mapped file");
     ASSERT_TRUE(WIFEXITED(status));
     EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
+/* Audit 20: past MMAP_GUARD_SLOTS (256) live mappings a new one was made
+ * unguarded, so a file that shrank under it crashed the server with the
+ * SIGBUS the guard exists to absorb. It is refused now, and a slot a
+ * close frees is used again. */
+UTEST(hl_cap_fs, mmap_refused_past_the_guard_table)
+{
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "many.bin", "abc", 3, NULL), 0);
+    enum { TRY = 300 };
+    HlMappedBuffer *bufs[TRY];
+    const char *err = NULL;
+    int n = 0;
+    for (; n < TRY; n++) {
+        err = NULL;
+        bufs[n] = hl_cap_fs_mmap(&test_cfg, "many.bin", NULL, &err);
+        if (!bufs[n]) break;
+    }
+    EXPECT_LT(n, TRY);                 /* refused before 300 */
+    EXPECT_LE(n, 256);
+    ASSERT_TRUE(err != NULL);
+    EXPECT_STREQ(err, "too_many_mappings");
+    ASSERT_GT(n, 0);
+    hl_cap_fs_munmap(bufs[--n]);       /* frees a slot */
+    bufs[n] = hl_cap_fs_mmap(&test_cfg, "many.bin", NULL, &err);
+    EXPECT_TRUE(bufs[n] != NULL);
+    if (bufs[n]) n++;
+    while (n > 0) hl_cap_fs_munmap(bufs[--n]);
+    teardown_fs();
 }
 
 UTEST(hl_cap_fs, mmap_basic)
