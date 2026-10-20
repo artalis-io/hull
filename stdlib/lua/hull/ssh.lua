@@ -436,6 +436,19 @@ local function tunnel_headers(tunnel, host, port)
     local want = destination_value(host, port)
     local seen = false
     for _, line in ipairs(out) do
+        -- The upgrade's own headers are Hull's: a caller Host routes the
+        -- relay to another origin past the ssh.tunnel grant (audit 21), and
+        -- Upgrade / Connection / Sec-WebSocket-* would change the handshake.
+        local s0 = tostring(line)
+        local c0 = s0:find(":", 1, true)
+        local n0 = c0 and _text.trim(s0:sub(1, c0 - 1)):lower() or ""
+        if n0 == "host" or n0 == "upgrade" or n0 == "connection"
+           or n0:sub(1, 14) == "sec-websocket-" then
+            return nil, { code = "denied", detail = "tunnel.headers may not set "
+                .. n0 .. " (the relay is reached as the granted tunnel.host)" }
+        end
+    end
+    for _, line in ipairs(out) do
         -- Split at the first colon, then trim each side: the one-pattern form
         -- ("^%s*([^:]-)%s*:%s*(.-)%s*$") is quadratic in a run of spaces.
         local s = tostring(line)

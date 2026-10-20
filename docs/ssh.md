@@ -77,7 +77,11 @@ Three properties worth being precise about:
 - **`tunnel` is a second grant, not a widening of the first.** Reaching a host
   through a relay requires BOTH the destination to be in `connect` and the
   relay to be in `tunnel`. An allowed relay is not a way to reach everything
-  behind it; that case has its own test in `tests/e2e_ssh_tunnel.sh`.
+  behind it; that case has its own test in `tests/e2e_ssh_tunnel.sh`. The
+  relay's NAME is checked as well as its address: `tunnel.tls_hostname` (the
+  TLS SNI, the certificate name and the upgrade's `Host`) must also be in
+  `tunnel.hosts`, and `tunnel.headers` may not set `Host`, `Upgrade`,
+  `Connection` or `Sec-WebSocket-*` - behind a CDN those choose the origin.
 
 Only `hosts` entries may be `"$VAR"` env references. Ports are integers,
 because a port read from the environment is a grant that changes shape after

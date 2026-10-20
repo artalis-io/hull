@@ -73,6 +73,28 @@ UTEST(cap_ssh, a_relay_needs_its_own_grant)
     ASSERT_TRUE(strstr(why, "ssh.tunnel") != NULL);
 }
 
+/* Audit 21: the relay's TLS name (its SNI, certificate name and the
+ * upgrade's Host) is what a CDN routes by, so it needs the grant too. */
+UTEST(cap_ssh, a_relay_name_outside_the_grant_is_denied)
+{
+    HlManifestSsh g; grant(&g);
+    g.tunnel.declared = 1;
+    g.tunnel.hosts[g.tunnel.host_count++] = "ssh.example.com";
+    g.tunnel.ports[g.tunnel.port_count++] = 443;
+    HlSshEnv env = { .policy = &g };
+    HlSshOpen r = direct();
+    r.via = 1;
+    r.via_host = "ssh.example.com";
+    r.via_port = 443;
+    r.via_tls = 1;
+    r.via_tls_hostname = "other.zone.example";
+    HlNetStream *s = NULL;
+    const char *why = NULL;
+    ASSERT_EQ(hl_cap_ssh_open(&env, &r, &s, &why), HL_NET_E_DENIED);
+    ASSERT_TRUE(s == NULL);
+    ASSERT_STREQ(why, "tunnel host is not in ssh.tunnel.hosts");
+}
+
 UTEST(cap_ssh, a_relay_without_a_host_is_refused_not_dialled_directly)
 {
     /* The destination is granted, so reading "no relay host" as "no relay"
