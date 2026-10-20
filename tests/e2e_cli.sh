@@ -534,6 +534,51 @@ LUA
     [ -n "$bin" ] && pass "hull build: app with committed AOT still builds" \
         || fail "hull build: app with committed AOT failed to build"
     rm -rf "$d"
+
+    # (audit 19) Two files that embed under one name ("x.json.lua" and
+    # "x.json" are both "./x.json") fail the build on the default,
+    # compiler-free path too: only the C-emitting path checked, and the
+    # binary the other built aborted at startup on the VFS order assert.
+    d=$(mktemp -d)
+    mkdir -p "${d}/lib"
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = {} })
+app.main(function() return 0 end)
+LUA
+    echo 'return {}' > "${d}/lib/x.json.lua"
+    echo '{}' > "${d}/lib/x.json"
+    bin=$(build_cli "$d")
+    if grep -q "two files embed under the same name" "${d}/build.log"; then
+        pass "hull build: duplicate entry names refused"
+    else
+        fail "hull build: duplicate entry names (got '$(tail -3 "${d}/build.log")')"
+    fi
+    [ -z "$bin" ] && pass "hull build: no binary with duplicate entry names" \
+        || fail "hull build: produced a binary with duplicate entry names"
+    rm -rf "$d"
+
+    # (audit 19) A --sign that cannot read platform.sig removes the binary it
+    # linked, as every other --sign failure does: it left it unsigned.
+    d=$(mktemp -d)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = {} })
+app.main(function() return 0 end)
+LUA
+    ( cd "$d" && "${hull_abs}" keygen >/dev/null 2>&1 ) || true
+    echo 'null' > "${d}/null.sig"
+    if [ -f "${d}/developer.key" ]; then
+        bin=$(build_cli "$d" --sign "${d}/developer.key" --platform-sig "${d}/null.sig")
+        if grep -q "cannot read platform.sig" "${d}/build.log"; then
+            pass "hull build --sign: unreadable platform.sig refused"
+        else
+            fail "hull build --sign: platform.sig (got '$(tail -3 "${d}/build.log")')"
+        fi
+        [ -z "$bin" ] && pass "hull build --sign: no unsigned binary left behind" \
+            || fail "hull build --sign: left an unsigned binary at the output path"
+    else
+        fail "hull keygen produced no developer.key"
+    fi
+    rm -rf "$d"
 }
 
 run_built_cli

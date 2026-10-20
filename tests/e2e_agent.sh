@@ -386,6 +386,36 @@ check_exit     "test no files exit"        "$EXIT_CODE" "1"
 
 rm -rf "$TMPDIR_NOTEST"
 
+# (audit 19) agent test runs the app's tests as `hull test` does, under the
+# module gate: a test file importing a module the manifest does not declare
+# is refused. It ran ungated, so the import loaded.
+TMPDIR_GATE=$(mktemp -d)
+mkdir -p "$TMPDIR_GATE/tests"
+if [ "$APP_EXT" = "js" ]; then
+    cat > "$TMPDIR_GATE/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1"] });
+app.get("/", (req, res) => res.text("ok"));
+JS
+    cat > "$TMPDIR_GATE/tests/test_gate.js" <<'JS'
+import { crypto } from "hull:crypto";
+test("undeclared import loaded", () => { if (!crypto) throw new Error("x"); });
+JS
+else
+    cat > "$TMPDIR_GATE/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/http-server@1" } })
+app.get("/", function(_req, res) res:text("ok") end)
+LUA
+    cat > "$TMPDIR_GATE/tests/test_gate.lua" <<'LUA'
+local crypto = require("hull.crypto")
+test("undeclared require loaded", function() assert(crypto) end)
+LUA
+fi
+OUT=$($HULL agent test "$TMPDIR_GATE" 2>&1)
+check_not_contains "test gate: undeclared module not loaded" "$OUT" '"status":"pass"'
+check_contains     "test gate: refused as undeclared"       "$OUT" 'not declared'
+rm -rf "$TMPDIR_GATE"
+
 # No entry point → error
 EXIT_CODE=$(hull_run "$RC_TMP" "$HULL" agent test /nonexistent)
 OUT=$(cat "$RC_TMP")

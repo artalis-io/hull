@@ -145,7 +145,11 @@ int hl_agent_test(const char *app_dir, ShJsonBuf *out)
         return hl_agent_write_error(out, "no entry point found");
 
     HlAppContext *ctx = NULL;
-    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
+    /* Gated as `hull test` is (commands/test.c): the tests run app code, so
+     * they get the module gate, the "$VAR" check and the WASM ceilings. They
+     * ran with none of them (audit 19). */
+    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry,
+                              .gate_modules = 1 };
     if (hl_app_context_init(&ctx, &opts) != 0)
         return hl_agent_write_error(out, "runtime init failed");
 
