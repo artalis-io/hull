@@ -14,6 +14,8 @@
 #include "internal.h"   /* hl_js_budget_charge */
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
+#include <string.h>   /* strcmp: the mmap retry */
+
 static void js_mmap_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
@@ -289,8 +291,8 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
      * mapping (mapped-spans). A bare path stays whole-file. */
     const char *err_msg = NULL;
     HlMappedBuffer *buf;
+    int64_t off = 0, length = 0;
     if (argc >= 2 && JS_IsObject(argv[1])) {
-        int64_t off = 0, length = 0;
         JSValue vo = JS_GetPropertyStr(ctx, argv[1], "offset");
         if (!JS_IsUndefined(vo) && JS_ToInt64(ctx, &off, vo) < 0) {
             JS_FreeValue(ctx, vo); JS_FreeCString(ctx, path);
@@ -317,6 +319,19 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
                                     js->base.alloc, &err_msg);
     } else {
         buf = hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc, &err_msg);
+    }
+    /* Every mapping takes one of the SIGBUS guard's slots until its buffer is
+     * freed, and a full table refuses the mapping (audit 20). Buffers held
+     * only by a dropped cycle wait for the collector: collect once and retry
+     * (audit 21). */
+    if (!buf && err_msg && strcmp(err_msg, "too_many_mappings") == 0) {
+        JS_RunGC(JS_GetRuntime(ctx));
+        err_msg = NULL;
+        buf = argc >= 2 && JS_IsObject(argv[1])
+            ? hl_cap_fs_mmap_window(js->base.fs_cfg, path,
+                                    (uint64_t)off, (uint64_t)length,
+                                    js->base.alloc, &err_msg)
+            : hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc, &err_msg);
     }
     JS_FreeCString(ctx, path);
 

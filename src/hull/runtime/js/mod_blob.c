@@ -760,10 +760,16 @@ static JSValue js_blob_iter(JSContext *ctx, JSValueConst this_val,
     HlBlob *b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
 
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
+        return JS_EXCEPTION;
     IterAcc acc = { ctx, NULL, 0, 0, 0 };
     if (hl_cap_blob_iter(b, iter_collect_cb, &acc) != 0 || acc.oom) {
         if (acc.items) js_free(ctx, acc.items);
         return JS_ThrowInternalError(ctx, "blob.iter: walk failed");
+    }
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b))) {
+        if (acc.items) js_free(ctx, acc.items);
+        return JS_EXCEPTION;
     }
 
     /* Build a JS array of {id, size} objects. Snapshot semantics: the
@@ -797,7 +803,12 @@ static JSValue js_blob_total_size(JSContext *ctx, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     HlBlob *b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
-    return JS_NewInt64(ctx, (int64_t)hl_cap_blob_total_size(b));
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
+        return JS_EXCEPTION;
+    uint64_t total = hl_cap_blob_total_size(b);
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b)))
+        return JS_EXCEPTION;
+    return JS_NewInt64(ctx, (int64_t)total);
 }
 
 static JSValue js_blob_count(JSContext *ctx, JSValueConst this_val,
@@ -806,7 +817,12 @@ static JSValue js_blob_count(JSContext *ctx, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     HlBlob *b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
-    return JS_NewInt64(ctx, (int64_t)hl_cap_blob_count(b));
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
+        return JS_EXCEPTION;
+    uint64_t n = hl_cap_blob_count(b);
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b)))
+        return JS_EXCEPTION;
+    return JS_NewInt64(ctx, (int64_t)n);
 }
 
 /* ── Cleanup ─────────────────────────────────────────────────────── */
@@ -855,9 +871,13 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
      * function does after its conversions. */
     b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
+        return JS_EXCEPTION;
     uint64_t removed = 0, freed = 0;
     if (hl_cap_blob_cleanup(b, &opts, &removed, &freed) != 0)
         return JS_ThrowInternalError(ctx, "blob.cleanup: failed");
+    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b) + removed))
+        return JS_EXCEPTION;
 
     JSValue out = JS_NewObject(ctx);
     JS_DefinePropertyValueStr(ctx, out, "removed", JS_NewInt64(ctx, (int64_t)removed), JS_PROP_C_W_E);

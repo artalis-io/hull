@@ -9299,7 +9299,7 @@ UTEST(js_audit15, compute_stream_output_is_capped_at_the_heap_limit)
     js.max_heap_bytes = 64 * 1024;
     char *r = eval_str(
         "(() => {\n"
-        "  try { compute.stream('echo', new ArrayBuffer(256 * 1024)); }\n"
+        "  try { compute.stream('echo', 'a'.repeat(256 * 1024)); }\n"
         "  catch (e) { return String(e.message); }\n"
         "  return 'not refused';\n"
         "})()");
@@ -12149,6 +12149,99 @@ UTEST(js_audit21, cancel_of_an_unawaited_op_runs_no_completion_hook)
     EXPECT_EQ(a21_hook_calls, 1);
     cleanup_js();
 }
+
+/* ── Audit 21 G6: off-heap copies and store walks are charged / capped ── */
+
+/* res.bytes copied a view of any size onto Keel's (unlimited) allocator. */
+UTEST(js_audit21, res_bytes_refuses_a_body_past_the_heap_limit)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 1 << 20;
+    KlAllocator alloc = kl_allocator_default();
+    KlHttpResponse res;
+    ASSERT_EQ(kl_http_response_init(&res, &alloc), 0);
+    KlHttpRequest req = {0};
+    EXPECT_EQ(a5_middleware(
+        "(req, res) => { globalThis.__a21 = 0;"
+        " try { res.bytes(new ArrayBuffer(2 << 20)); }"
+        " catch (e) { globalThis.__a21 = String(e.message).includes('heap limit') ? 7 : 8; }"
+        " return 1; }", &req, &res), 1);
+    EXPECT_EQ(eval_int("globalThis.__a21"), 7);
+    js.max_heap_bytes = saved;
+    free_req_ctx(&req);
+    kl_http_response_free(&res);
+    cleanup_js();
+}
+
+/* blob.count / totalSize / iter / cleanup walked every shard directory
+ * (256, or 65536 with shardDepth 2) for a few instructions of charge. */
+UTEST(js_audit21, blob_store_walks_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob; blob.init({ dir: 'blobs' });\n", 0), 0);
+    /* 200 walks x 256 shard directories > 40k units. */
+    EXPECT_EQ(a10_run_tripped("for (let i = 0; i < 200; i++) blob.count();", 40000), 1);
+    EXPECT_EQ(a10_run_tripped("for (let i = 0; i < 200; i++) blob.totalSize();", 40000), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+/* A full SIGBUS guard table (256 live mappings) refused fs.mmap for the
+ * whole process; buffers held only by dropped cycles waited for the GC. */
+UTEST(js_audit21, mmap_collects_and_retries_when_the_guard_table_is_full)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char *r = a15_throws(
+        "for (let i = 0; i < 300; i++) {"
+        "  const o = { m: fs.mmap('big.bin') }; o.self = o; }");
+    EXPECT_TRUE(r && strcmp(r, "no throw") == 0);
+    if (r && strcmp(r, "no throw") != 0) printf("  got: %s\n", r);
+    free(r);
+    JS_RunGC(JS_GetRuntime(js.ctx));
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+#ifdef HL_ENABLE_WASM
+/* compute.stream's ArrayBuffer copy was neither charged nor held on the
+ * VM's off-heap total; compute.segment's copy (up to 1 GiB) was not charged. */
+UTEST(js_audit21, compute_stream_and_segment_copies_are_bounded)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 1 << 20;
+    char *r = a15_throws("compute.stream('echo', new ArrayBuffer(2 << 20),"
+                         " () => {}, { chunkSize: 65536 })");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    js.max_heap_bytes = saved;
+    EXPECT_EQ(js.wasm_buf_bytes, (size_t)0);   /* nothing left held */
+    /* 4 MB string: ~65k units to build, 512k more for the segment copy. */
+    EXPECT_EQ(a10_run_tripped(
+        "compute.segment('echo', 's', 'x'.repeat(4 << 20));", 300000), 1);
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
+
+#endif /* HL_ENABLE_WASM */
 
 /* A worker.dispatch VM runs app functions, so it is hardened too. */
 UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)

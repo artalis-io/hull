@@ -129,25 +129,39 @@ static int lua_fs_mmap(lua_State *L)
      * page-aligned mapping (mapped-spans). A bare path stays whole-file. */
     const char *err_msg = NULL;
     HlMappedBuffer *buf;
-    if (lua_type(L, 2) == LUA_TTABLE) {
+    int window = lua_type(L, 2) == LUA_TTABLE;
+    lua_Integer off = 0, length = 0;
+    if (window) {
         lua_getfield(L, 2, "offset");
-        lua_Integer off = luaL_optinteger(L, -1, 0);
+        off = luaL_optinteger(L, -1, 0);
         lua_pop(L, 1);
         lua_getfield(L, 2, "length");
         if (lua_isnil(L, -1)) {
             lua_pop(L, 1);
             return luaL_error(L, "fs.mmap: window requires a length");
         }
-        lua_Integer length = lua_tointeger(L, -1);
+        length = lua_tointeger(L, -1);
         lua_pop(L, 1);
         if (off < 0 || length <= 0)
             return luaL_error(L, "fs.mmap: offset must be >= 0 and length > 0");
-        buf = hl_cap_fs_mmap_window(lua->base.fs_cfg, path,
+    }
+    /* Every mapping takes one of the SIGBUS guard's slots until its buffer is
+     * freed, and a full table refuses the mapping (audit 20). A buffer the
+     * app dropped without close() is a small userdata the collector is in no
+     * hurry to free, so a run of them filled the table for the whole
+     * process: collect once and retry (audit 21). */
+    for (int attempt = 0; ; attempt++) {
+        err_msg = NULL;
+        buf = window
+            ? hl_cap_fs_mmap_window(lua->base.fs_cfg, path,
                                     (uint64_t)off, (uint64_t)length,
-                                    lua->base.alloc, &err_msg);
-    } else {
-        buf = hl_cap_fs_mmap(lua->base.fs_cfg, path,
+                                    lua->base.alloc, &err_msg)
+            : hl_cap_fs_mmap(lua->base.fs_cfg, path,
                              lua->base.alloc, &err_msg);
+        if (buf || attempt > 0 || !err_msg ||
+            strcmp(err_msg, "too_many_mappings") != 0)
+            break;
+        lua_gc(L, LUA_GCCOLLECT);
     }
     if (!buf) {
         lua_pushnil(L);

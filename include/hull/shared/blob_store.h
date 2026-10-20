@@ -215,6 +215,14 @@ int hl_blob_store_iter(HlBlobStore *s, HlBlobStoreIterCb cb, void *user);
 uint64_t hl_blob_store_total_size(HlBlobStore *s);
 uint64_t hl_blob_store_count(HlBlobStore *s);
 
+/* What a whole-store walk (iter / total_size / count / cleanup) costs, for
+ * the bindings to charge the run's budget (audit 21: a `blob.count()` loop
+ * with shard_depth=2 made ~65536 syscalls a call for a few instructions):
+ * the shard directories it opens, known before the walk, and the entries
+ * the LAST walk of @p s found, known after it. */
+uint64_t hl_blob_store_walk_shards(const HlBlobStore *s);
+uint64_t hl_blob_store_last_walk_entries(const HlBlobStore *s);
+
 /* ── Eviction ────────────────────────────────────────────────────── */
 
 typedef enum {

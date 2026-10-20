@@ -409,6 +409,18 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx,
             "res.bytes: expected ArrayBuffer, TypedArray, or string");
 
+    /* A view of off-heap memory (a MappedBuffer, a WasmBuffer, an image) can
+     * be any size, and the copy goes onto Keel's allocator, which has no
+     * limit by default: refused past the VM heap limit, as fs.read and
+     * blob.get refuse a read (audit 21). Lua's res:bytes takes a Lua string,
+     * on the heap already. */
+    HlJS *bjs = (HlJS *)JS_GetContextOpaque(ctx);
+    if (bjs && bjs->max_heap_bytes &&
+        (uint64_t)view.len > (uint64_t)bjs->max_heap_bytes) {
+        if (needs_free && str) JS_FreeCString(ctx, str);
+        return JS_ThrowRangeError(ctx, "res.bytes: a body of %zu bytes is "
+                                  "larger than the VM heap limit", view.len);
+    }
     /* The copy, charged before it (audit 9 M2; Lua: lua_hlwork(L, 0, len)). */
     if (hl_js_budget_charge(ctx, (uint64_t)view.len / 64)) {
         if (needs_free && str) JS_FreeCString(ctx, str);
