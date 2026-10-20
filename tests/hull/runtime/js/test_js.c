@@ -11935,6 +11935,82 @@ UTEST(js_audit18_intrinsics, harden_fails_closed)
     JS_FreeRuntime(rt);
 }
 
+/* Audit 19: the walk reaches an intrinsic only through a global or the
+ * hidden list, and it missed %IteratorConcatPrototype% - the prototype of
+ * every Iterator.concat result - so its `next` / `return` stayed writable
+ * for every iterator Iterator.concat makes. It is in the list now, and every
+ * class prototype the context holds is frozen and checked from C. */
+UTEST(js_audit19_intrinsics, iterator_concat_prototype_is_frozen)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "(() => {\n"
+        "  if (typeof Iterator === 'undefined' || typeof Iterator.concat !== 'function')\n"
+        "    return 1;   /* not in this build */\n"
+        "  const p = Object.getPrototypeOf(Iterator.concat([]));\n"
+        "  if (!Object.isFrozen(p)) return 0;\n"
+        "  const next = p.next;\n"
+        "  try { p.next = () => ({ done: true }); } catch (e) { /* strict */ }\n"
+        "  return p.next === next ? 1 : 0;\n"
+        "})()"), 1);
+    cleanup_js();
+}
+
+/* The C check: a class prototype harden cannot freeze fails init, and one
+ * the walk never reached is frozen. */
+UTEST(js_audit19_intrinsics, every_class_prototype_is_frozen_or_init_fails)
+{
+    JSRuntime *rt = JS_NewRuntime();
+    ASSERT_TRUE(rt != NULL);
+    JSClassID id = 0;
+    JS_NewClassID(&id);
+    JSClassDef def = { .class_name = "A19Probe" };
+    ASSERT_EQ(JS_NewClass(rt, id, &def), 0);
+
+    /* A plain prototype no global reaches: frozen. */
+    JSContext *ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, proto, "m", JS_NewInt32(ctx, 1));
+    JS_SetClassProto(ctx, id, proto);
+    EXPECT_EQ(hl_js_harden_intrinsics(ctx), 0);
+    JSValue got = JS_GetClassProto(ctx, id);
+    EXPECT_EQ(JS_IsExtensible(ctx, got), 0);
+    JS_FreeValue(ctx, got);
+    JS_FreeContext(ctx);
+
+    /* One that cannot be frozen: init fails. */
+    ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    static const char mk[] =
+        "new Proxy({}, { preventExtensions() { return false; } })";
+    JSValue bad = JS_Eval(ctx, mk, sizeof mk - 1, "<a19>", JS_EVAL_TYPE_GLOBAL);
+    ASSERT_FALSE(JS_IsException(bad));
+    JS_SetClassProto(ctx, id, bad);
+    EXPECT_EQ(hl_js_harden_intrinsics(ctx), -1);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+/* The router used to be built from a temporary global, __hull_app_for_router,
+ * which app code could define first; the app is now passed as an argument,
+ * and no such global is left behind. */
+UTEST(js_audit19_intrinsics, router_needs_no_temporary_global)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a18_module(
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "let r = 0;\n"
+        "if (!('__hull_app_for_router' in globalThis)) r |= 1;\n"
+        "if (typeof app.router === 'function' && app.router('/x').prefix === '/x') r |= 2;\n"
+        "globalThis.__a19_router = r;\n"), 0);
+    EXPECT_EQ(eval_int("globalThis.__a19_router"), 3);
+    cleanup_js_caps();
+}
+
 /* A worker.dispatch VM runs app functions, so it is hardened too. */
 UTEST(js_audit18_intrinsics, worker_dispatch_vm_is_hardened)
 {
