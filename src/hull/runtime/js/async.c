@@ -792,6 +792,13 @@ static void hl_js_async_cancel(HlAsyncCont *self)
     jc->resolve = JS_UNDEFINED;
     jc->reject = JS_UNDEFINED;
 
+    /* Wired into a run: the entry parked on it, so the handler's end is
+     * this run's. A continuation never wired is an op the entry did not
+     * await (`http.fetch(x)` in a synchronous ws on_close or timer handler):
+     * that entry already ended, and ran its own completion, when it
+     * returned (audit 21). */
+    int wired = !JS_IsUndefined(jc->link.handler_promise);
+
     /* Free the per-continuation handler promise */
     if (!JS_IsUndefined(jc->link.handler_promise)) {
         JS_FreeValue(ctx, jc->link.handler_promise);
@@ -817,8 +824,11 @@ static void hl_js_async_cancel(HlAsyncCont *self)
      * end a timer handler's flight. Skipped, a ws on_close parked across a
      * teardown kept its conn object alive, and JS_FreeRuntime aborted on
      * the leaked object (audit 19). Once per run: another continuation of
-     * it may already have completed the handler. */
-    if (hl_js_run_claim(&jc->link)) {
+     * it may already have completed the handler. Only for a wired one: an
+     * un-awaited op's hook named a ws conn the synchronous on_close had
+     * already freed, so the cancel tore down freed memory, and its
+     * timer_ctx ended a later flight of the timer (audit 21). */
+    if (wired && hl_js_run_claim(&jc->link)) {
         if (jc->on_complete)
             jc->on_complete(js, jc->on_complete_ctx);
 #ifdef HL_ENABLE_HTTP_SERVER
