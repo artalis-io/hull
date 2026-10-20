@@ -96,19 +96,30 @@ function createIndex(name, columns, opts) {
     requireSqlite();
     validateIdent(name, "index name");
 
-    if (!Array.isArray(columns) || columns.length === 0)
+    if (!Array.isArray(columns))
         throw new Error("columns must be a non-empty array");
 
-    for (let i = 0; i < columns.length; i++)
-        validateIdent(columns[i], "column name");
+    // Every caller value is read ONCE, into a local that is validated and
+    // then built into the SQL: this SQL runs from a stdlib frame, past the
+    // C-level _hull_* guard, and a getter or Proxy answered the validation
+    // with one name and the SQL with another (audit 19).
+    const n = columns.length;
+    if (!(n > 0))
+        throw new Error("columns must be a non-empty array");
+    const cols = [];
+    for (let i = 0; i < n; i++) {
+        const c = columns[i];
+        validateIdent(c, "column name");
+        cols[i] = c;
+    }
 
     const o = opts || {};
     const table = ftsTable(name);
 
     // Build column list: id + user columns
     let colDefs = "id";
-    for (let j = 0; j < columns.length; j++)
-        colDefs += ", " + columns[j];
+    for (let j = 0; j < cols.length; j++)
+        colDefs += ", " + cols[j];
 
     // FTS5 options
     let ftsOpts = "";
@@ -129,14 +140,16 @@ function createIndex(name, columns, opts) {
         throw new Error("search: invalid tokenize option");
     ftsOpts += ", tokenize=\"" + tokenize + "\"";
 
-    if (o.content) {
-        validateIdent(o.content, "content table name");
-        ftsOpts += ", content=\"" + o.content + "\"";
+    const content = o.content;
+    if (content) {
+        validateIdent(content, "content table name");
+        ftsOpts += ", content=\"" + content + "\"";
     }
 
-    if (o.contentRowid) {
-        validateIdent(o.contentRowid, "content rowid column");
-        ftsOpts += ", content_rowid=\"" + o.contentRowid + "\"";
+    const contentRowid = o.contentRowid;
+    if (contentRowid) {
+        validateIdent(contentRowid, "content rowid column");
+        ftsOpts += ", content_rowid=\"" + contentRowid + "\"";
     }
 
     db.exec(
@@ -367,17 +380,23 @@ function reindex(name, sourceTable, opts) {
 
     const table = ftsTable(name);
 
-    // Determine column mapping
-    let columnMap = o.columns || {};
-    let ftsColumns = Object.keys(columnMap);
+    // Determine column mapping. Each source column is read ONCE and the
+    // validated copy is what goes into the SQL: it runs from a stdlib frame,
+    // past the C-level _hull_* guard, and a getter or Proxy that answered
+    // the validation with one name and the SQL with another copied any
+    // _hull_* table into an index the app could query (audit 19).
+    const columnMap = o.columns || {};
+    const ftsColumns = Object.keys(columnMap);
 
     if (ftsColumns.length === 0)
         throw new Error("opts.columns is required: maps FTS columns to source columns");
 
-    // Validate all column names
+    const srcColumns = [];
     for (let i = 0; i < ftsColumns.length; i++) {
         validateIdent(ftsColumns[i], "FTS column name");
-        validateIdent(columnMap[ftsColumns[i]], "source column name");
+        const src = columnMap[ftsColumns[i]];
+        validateIdent(src, "source column name");
+        srcColumns[i] = src;
     }
 
     // Build INSERT ... SELECT
@@ -385,7 +404,7 @@ function reindex(name, sourceTable, opts) {
     let srcColList = idCol;
     for (let j = 0; j < ftsColumns.length; j++) {
         ftsColList += ", " + ftsColumns[j];
-        srcColList += ", " + columnMap[ftsColumns[j]];
+        srcColList += ", " + srcColumns[j];
     }
 
     // Clear and repopulate in one transaction: a failure part-way used to
