@@ -27,6 +27,7 @@ tool = {
     read_file = function(p) return files[p] end,
     remove_file = function(p) files[p] = nil; return true end,
     rmdir = function() return true end,
+    is_symlink = function(p) return false end,
     realpath = function(p)
         if real[p] then return real[p] end
         return nil, "missing"
@@ -223,6 +224,13 @@ do
     ok(#r.errors == 3 and #spawned == 0, "build_all refuses, nothing spawned")
     ok(r.errors[2].err:find("invalid compute module name 'bad.name'", 1, true) ~= nil,
         "the refusal names the module")
+
+    -- A symlinked compute/ is not walked: through the link, clang read and
+    -- wrote outside the app (audit 21).
+    tool.is_symlink = function(p) return p == "/app/compute" end
+    mods, invalid = cb.discover_modules("/app")
+    ok(#mods == 0 and #invalid == 0, "a symlinked compute/ finds nothing")
+    tool.is_symlink = function() return false end
 end
 
 return { pass = pass, fail = fail }
