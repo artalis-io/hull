@@ -45,6 +45,7 @@ enum { GPU_PIN_MMAP = 1, GPU_PIN_WBUF, GPU_PIN_COPY };
 typedef struct {
     int n;
     struct { int kind; void *p; size_t len; } e[GPU_PINS_MAX];
+    HlOffheapHold hold;     /* the image copies (gpu_offheap_copy) */
 } GpuPins;
 
 static int gpu_pins_close(lua_State *L)
@@ -62,6 +63,7 @@ static int gpu_pins_close(lua_State *L)
         }
     }
     ps->n = 0;
+    hl_offheap_drop(&ps->hold);
     return 0;
 }
 
@@ -70,6 +72,7 @@ static void gpu_pins_open(lua_State *L, int anchor)
 {
     GpuPins *ps = (GpuPins *)lua_newuserdatauv(L, sizeof *ps, 0);
     ps->n = 0;
+    ps->hold = (HlOffheapHold){0};
     if (luaL_newmetatable(L, "hull.gpu.pins")) {
         lua_pushcfunction(L, gpu_pins_close);
         lua_setfield(L, -2, "__close");
@@ -99,6 +102,38 @@ static void gpu_pin_add(lua_State *L, GpuPins *ps, int kind, void *p, size_t len
     ps->n++;
 }
 
+/* A copy of @p len bytes made off the VM heap for a call (an image pin) or an
+ * async op (its uniforms and buffer data, which a worker reads after the
+ * binding returns). A MappedBuffer, WasmBuffer or borrowed image is not on
+ * the heap, and nothing bounded these copies: one gpu.async.dispatch of 16
+ * buffers over a 1 GiB mapping copied 16 GiB, and a copy whose malloc failed
+ * ran as an empty buffer (audit 20). The copy holds its bytes on the VM's
+ * off-heap total (`wasm_buf_bytes`, shared with OWNED WasmBuffers) under the
+ * heap limit, through @p hold, and is charged 1 unit per 8 bytes. Returns the
+ * copy, or NULL with @p *err set (nothing held for it). Only the charge can
+ * raise (lua_hlwork, at once when it puts the run over), and it runs before
+ * anything is held: call it only where every copy made so far has an owner a
+ * raise closes (a to-be-closed slot). */
+static void *gpu_offheap_copy(lua_State *L, HlLua *lua, HlOffheapHold *hold,
+                              const void *src, size_t len, const char **err)
+{
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)len), 0);
+    if (hl_offheap_take(hold, lua ? &lua->wasm_buf_bytes : NULL,
+                        lua ? lua->mem_limit : 0, len) != 0) {
+        *err = "its buffers would take the VM past its heap limit "
+               "(close unused buffers)";
+        return NULL;
+    }
+    void *p = malloc(len);
+    if (!p) {
+        hl_offheap_give(hold, len);
+        *err = "out of memory";
+        return NULL;
+    }
+    memcpy(p, src, len);
+    return p;
+}
+
 /* Pin the buffer at @p idx, whose view @p bv was just taken. */
 static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
 {
@@ -122,9 +157,10 @@ static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
     }
 #endif
     if (luaL_testudata(L, idx, HL_IMAGE_MT)) {
-        void *copy = malloc(bv->len);
-        if (!copy) { luaL_error(L, "gpu: out of memory"); return; }
-        memcpy(copy, bv->data, bv->len);
+        const char *err = NULL;
+        void *copy = gpu_offheap_copy(L, get_hl_lua(L), &ps->hold, bv->data,
+                                      bv->len, &err);
+        if (!copy) { luaL_error(L, "gpu: %s", err); return; }
         gpu_pin_add(L, ps, GPU_PIN_COPY, copy, bv->len);
         bv->data = copy;
     }
@@ -937,6 +973,7 @@ typedef struct {
     HlGpuBufferDesc *descs;
     void           **datas;
     int              count;
+    HlOffheapHold    hold;      /* the copies (gpu_offheap_copy) */
 } GpuAsyncTmp;
 
 static int gpu_async_tmp_close(lua_State *L)
@@ -950,6 +987,7 @@ static int gpu_async_tmp_close(lua_State *L)
     free(t->descs);
     free(t->datas);
     free(t->uni);
+    hl_offheap_drop(&t->hold);
     memset(t, 0, sizeof *t);
     return 0;
 }
@@ -1027,11 +1065,10 @@ static int l_gpu_async_dispatch(lua_State *L)
     if (lua_isstring(L, -1)) {
         const char *uni = lua_tolstring(L, -1, &uni_len);
         if (uni && uni_len > 0) {
-            uni_copy = malloc(uni_len);
-            if (uni_copy)
-                memcpy(uni_copy, uni, uni_len);
-            else
-                uni_len = 0; /* prevent NULL-with-nonzero-len */
+            const char *err = NULL;
+            uni_copy = gpu_offheap_copy(L, lua, &tmp->hold, uni, uni_len, &err);
+            if (!uni_copy)
+                return luaL_error(L, "gpu.async.dispatch: %s", err);
             tmp->uni = uni_copy;
         }
     }
@@ -1080,13 +1117,17 @@ static int l_gpu_async_dispatch(lua_State *L)
                         const void *d = bv.data;
                         size_t dlen = bv.len;
                         if (d && dlen > 0) {
-                            buf_data_ptrs[i] = malloc(dlen);
-                            if (buf_data_ptrs[i]) {
-                                memcpy(buf_data_ptrs[i], d, dlen);
-                                buf_descs[i].data = buf_data_ptrs[i];
-                                buf_descs[i].data_len = dlen;
-                                buf_descs[i].size = dlen;
-                            }
+                            /* A failed copy fails the call: it ran as an
+                             * empty buffer (audit 20). `tmp` frees. */
+                            const char *err = NULL;
+                            buf_data_ptrs[i] = gpu_offheap_copy(L, lua,
+                                &tmp->hold, d, dlen, &err);
+                            if (!buf_data_ptrs[i])
+                                return luaL_error(L, "gpu.async.dispatch: %s",
+                                                  err);
+                            buf_descs[i].data = buf_data_ptrs[i];
+                            buf_descs[i].data_len = dlen;
+                            buf_descs[i].size = dlen;
                         }
                     }
                     lua_pop(L, 1);
@@ -1142,6 +1183,7 @@ static int l_gpu_async_dispatch(lua_State *L)
     op->buffer_count = buf_count;
     op->uniforms = uni_copy;
     op->uniforms_len = uni_len;
+    op->copy_hold = tmp->hold;
     /* The op owns the copies now (hl_worker_gpu_op_free releases them on
      * every path below); the slot is closed here, before the yield. */
     memset(tmp, 0, sizeof *tmp);
@@ -1554,9 +1596,37 @@ static int l_gpu_async_pipeline(lua_State *L)
                           (uint64_t)hl_gpu_pipeline_charge_bytes(&c)), 0);
     }
 
+    /* The copies the op makes below (uniforms and buffer data), counted on
+     * the VM's off-heap total under the heap limit and charged 1 unit per 8
+     * bytes, before the op exists: nothing bounded them, up to 64 buffers of
+     * a 1 GiB mapping per call (audit 20). Charged first - lua_hlwork raises
+     * at once when it puts the run over - and taken while nothing is owned. */
+    HlOffheapHold copy_hold = {0};
+    {
+        size_t copy_bytes = 0;
+        for (int s = 0; s < stage_count; s++) {
+            size_t n = stages[s].uniforms ? stages[s].uniforms_len : 0;
+            copy_bytes = copy_bytes <= SIZE_MAX - n ? copy_bytes + n : SIZE_MAX;
+        }
+        for (int b = 0; b < total_bufs; b++) {
+            size_t n = all_bufs[b].data ? all_bufs[b].data_len : 0;
+            copy_bytes = copy_bytes <= SIZE_MAX - n ? copy_bytes + n : SIZE_MAX;
+        }
+        lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)copy_bytes), 0);
+        if (hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes, lua->mem_limit,
+                            copy_bytes) != 0)
+            return luaL_error(L, "gpu.async.pipeline: its buffers would take "
+                                 "the VM past its heap limit (close unused "
+                                 "buffers)");
+    }
+
     /* Deep-copy into worker op */
     HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
-    if (!op) return luaL_error(L, "gpu.async.pipeline: out of memory");
+    if (!op) {
+        hl_offheap_drop(&copy_hold);
+        return luaL_error(L, "gpu.async.pipeline: out of memory");
+    }
+    op->copy_hold = copy_hold;   /* hl_worker_gpu_op_free gives it back */
 
     op->server = lua->server;
     op->gpu_ctx = lua->base.gpu_ctx;

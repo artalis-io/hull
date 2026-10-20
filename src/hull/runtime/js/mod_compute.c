@@ -514,6 +514,48 @@ static JSValue js_compute_load(JSContext *ctx, JSValueConst this_val,
     return JS_TRUE;
 }
 
+/* Copy an async op's input off the VM heap (the worker reads it after the
+ * binding returns). A MappedBuffer / WasmBuffer input is not on the heap at
+ * all, and nothing bounded the copies: one call copied a whole 1 GiB mapping
+ * that the worker then refused (max_input, 1 MB by default), and N in-flight
+ * calls held N copies (audit 20). So an input the call would refuse is
+ * refused here, before it is copied, with the worker's own message; the copy
+ * is charged 1 unit per 8 bytes, and it holds bytes on the VM's off-heap
+ * total (`wasm_buf_bytes`, shared with OWNED WasmBuffers) under the heap
+ * limit until the op is freed. Returns 0 with *@p out the copy (NULL for an
+ * empty input), or -1 with an exception pending and nothing held. */
+static int js_async_input_copy(JSContext *ctx, HlJS *js, const char *who,
+                               const void *input, size_t len, uint64_t limit,
+                               HlOffheapHold *hold, void **out)
+{
+    *out = NULL;
+    if (len == 0) return 0;
+    if ((uint64_t)len > limit) {
+        JS_ThrowInternalError(ctx, "%s: input_too_large", who);
+        return -1;
+    }
+    if (hl_offheap_take(hold, &js->wasm_buf_bytes, js->max_heap_bytes,
+                        len) != 0) {
+        JS_ThrowRangeError(ctx, "%s: input of %zu bytes would take the VM's "
+                           "buffers past its heap limit (close unused "
+                           "buffers)", who, len);
+        return -1;
+    }
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)len)) < 0) {
+        hl_offheap_drop(hold);
+        return -1;
+    }
+    void *copy = malloc(len);
+    if (!copy) {
+        hl_offheap_drop(hold);
+        JS_ThrowInternalError(ctx, "%s: out of memory", who);
+        return -1;
+    }
+    memcpy(copy, input, len);
+    *out = copy;
+    return 0;
+}
+
 /* ── compute.async.call (Promise-based, thread pool dispatch) ──────── */
 
 static JSValue js_push_worker_wasm_result(JSContext *ctx, void *driver)
@@ -632,10 +674,25 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
                                      rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
     }
 
+    /* The input copy first: nothing is allocated yet. */
+    HlOffheapHold in_hold = {0};
+    void *in_copy = NULL;
+    int crc = js_async_input_copy(ctx, js, "compute.async.call", input,
+        input_len,
+        hl_cap_wasm_input_limit(
+            hl_cap_wasm_module_lookup(js->base.wasm_cache, name), NULL, &opts),
+        &in_hold, &in_copy);
+    if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+    if (crc != 0) {
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
+
     /* Allocate op */
     HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
     if (!op) {
-        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        free(in_copy);
+        hl_offheap_drop(&in_hold);
         JS_FreeCString(ctx, name);
         return JS_ThrowInternalError(ctx, "compute.async.call: out of memory");
     }
@@ -649,20 +706,11 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     op->opts = opts;
     op->want_buffer = want_buffer;
 
-    /* Deep-copy input */
-    if (input_len > 0) {
-        op->input = malloc(input_len);
-        if (!op->input) {
-            if (input_is_string) JS_FreeCString(ctx, (const char *)input);
-            JS_FreeCString(ctx, name);
-            free(op);
-            return JS_ThrowInternalError(ctx, "compute.async.call: out of memory");
-        }
-        memcpy(op->input, input, input_len);
-    }
+    /* The input copy (js_async_input_copy) goes with the op. */
+    op->input = in_copy;
+    op->input_hold = in_hold;
     op->input_len = input_len;
 
-    if (input_is_string) JS_FreeCString(ctx, (const char *)input);
     JS_FreeCString(ctx, name);
 
     /* Parse + validate spans (owned name copies), deep-copy + submission-pin them
@@ -1041,10 +1089,20 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     }
     js_wasm_cap_call_opts(&opts, &js->base);
 
+    /* The input copy first: nothing is allocated yet. */
+    HlOffheapHold in_hold = {0};
+    void *in_copy = NULL;
+    int crc = js_async_input_copy(ctx, js, "WasmInstance.asyncCall", input,
+        input_len, hl_cap_wasm_input_limit(pi->module, pi, &opts), &in_hold,
+        &in_copy);
+    if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+    if (crc != 0) return JS_EXCEPTION;
+
     /* Allocate op */
     HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
     if (!op) {
-        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        free(in_copy);
+        hl_offheap_drop(&in_hold);
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: out of memory");
     }
 
@@ -1055,19 +1113,10 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     op->opts = opts;
     op->want_buffer = want_buffer;
 
-    /* Deep-copy input */
-    if (input_len > 0) {
-        op->input = malloc(input_len);
-        if (!op->input) {
-            if (input_is_string) JS_FreeCString(ctx, (const char *)input);
-            free(op);
-            return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: out of memory");
-        }
-        memcpy(op->input, input, input_len);
-    }
+    /* The input copy (js_async_input_copy) goes with the op. */
+    op->input = in_copy;
+    op->input_hold = in_hold;
     op->input_len = input_len;
-
-    if (input_is_string) JS_FreeCString(ctx, (const char *)input);
 
     /* Parse + validate spans, deep-copy + submission-pin into the op, free the
      * parse copies. On bad input free the op (busy not yet set) and throw. */

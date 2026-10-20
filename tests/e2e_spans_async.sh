@@ -170,6 +170,128 @@ run_rt() {
 run_rt "lua" "lua"
 run_rt "js"  "js"
 
+# (audit 20) An async call copies its input off the VM heap before it submits
+# the op, and a MappedBuffer input is not on the heap at all: the whole mapping
+# was copied before anything checked it (the worker then refused it past
+# max_input), and every in-flight copy was outside the heap limit. Now an input
+# over max_input is refused before the copy, and each copy holds its bytes on
+# the VM's off-heap total (the one OWNED WasmBuffers count on) under the heap
+# limit until the op is freed. Run under -m 8M:
+#   over_max - a 2 MB mapping, default max_input (1 MB): input_too_large
+#   held     - a 3 MB OWNED buffer held + a 6 MB input: past the heap limit
+#              (it was copied and run)
+#   seq      - five 2 MB inputs one after another: each copy's hold is given
+#              back when its op ends, so all five run (kept, the fifth would
+#              pass 8 MB)
+OFF="$TMP/offheap"; mkdir -p "$OFF/compute"
+cp examples/compute/compute/echo.wasm "$OFF/compute/echo.wasm"
+head -c 2097152 /dev/zero > "$OFF/big2.bin"
+head -c 6291456 /dev/zero > "$OFF/big6.bin"
+
+cat > "$OFF/app.lua" << 'EOF'
+local compute = require("hull.compute")
+local fs = require("hull.fs")
+app.manifest({ modules = { "hull/compute@1", "hull/fs@1", "hull/http-server@1" },
+               fs = { read = { "big2.bin", "big6.bin" } } })
+local MB = 1024 * 1024
+local function call(m, opts)
+    local ok, r = pcall(compute.async.call, "echo", m, opts)
+    return ok and ("len:" .. #r) or tostring(r)
+end
+app.get("/over_max", function(req, res)
+    local m = fs.mmap("big2.bin")
+    local out = call(m, {})
+    m:close()
+    res:json({ out = out })
+end)
+app.get("/held", function(req, res)
+    local b = compute.buffer(string.rep("x", 3 * MB))
+    local m = fs.mmap("big6.bin")
+    local out = call(m, { max_input = 16 * MB, max_output = 16 * MB })
+    m:close(); b:close()
+    res:json({ out = out })
+end)
+app.get("/seq", function(req, res)
+    local outs = {}
+    for i = 1, 5 do
+        local m = fs.mmap("big2.bin")
+        outs[i] = call(m, { max_input = 4 * MB, max_output = 4 * MB,
+                            heap = 8 * MB })
+        m:close()
+    end
+    res:json({ out = table.concat(outs, ",") })
+end)
+EOF
+
+cat > "$OFF/app.js" << 'EOF'
+import { app } from "hull:app";
+import { compute } from "hull:compute";
+import { fs } from "hull:fs";
+app.manifest({ modules: ["hull/compute@1", "hull/fs@1", "hull/http-server@1"],
+               fs: { read: ["big2.bin", "big6.bin"] } });
+const MB = 1024 * 1024;
+async function call(m, opts) {
+    try {
+        const r = await compute.async.call("echo", m, opts);
+        return "len:" + r.byteLength;
+    } catch (e) {
+        return String(e && e.message);
+    }
+}
+app.get("/over_max", async (req, res) => {
+    const m = fs.mmap("big2.bin");
+    const out = await call(m, {});
+    m.close();
+    res.json({ out });
+});
+app.get("/held", async (req, res) => {
+    const b = compute.buffer(new ArrayBuffer(3 * MB));
+    const m = fs.mmap("big6.bin");
+    const out = await call(m, { maxInput: 16 * MB, maxOutput: 16 * MB });
+    m.close(); b.close();
+    res.json({ out });
+});
+app.get("/seq", async (req, res) => {
+    const outs = [];
+    for (let i = 0; i < 5; i++) {
+        const m = fs.mmap("big2.bin");
+        outs.push(await call(m, { maxInput: 4 * MB, maxOutput: 4 * MB,
+                                  heap: 8 * MB }));
+        m.close();
+    }
+    res.json({ out: outs.join(",") });
+});
+EOF
+
+run_offheap() {
+    runtime="$1"; ext="$2"
+    echo "--- async input copies under the heap limit (${runtime}) ---"
+    PORT=$((20400 + $$ % 500))
+    "$HULL" -m 8M -p "$PORT" --no-sandbox "$OFF/app.${ext}" >"$OFF/srv.log" 2>&1 &
+    PID=$!
+    sleep 2
+    if ! kill -0 $PID 2>/dev/null; then fail "${runtime} offheap server failed to start"; cat "$OFF/srv.log"; return; fi
+    over=$(curl -sf --max-time 20 "http://127.0.0.1:$PORT/over_max" 2>/dev/null || echo FAIL)
+    held=$(curl -sf --max-time 20 "http://127.0.0.1:$PORT/held" 2>/dev/null || echo FAIL)
+    seq=$(curl -sf --max-time 30 "http://127.0.0.1:$PORT/seq" 2>/dev/null || echo FAIL)
+    kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
+    case "$over" in
+        *input_too_large*) pass "${runtime} mapping over max_input refused before it is copied" ;;
+        *) fail "${runtime} over max_input (got: $over)" ;;
+    esac
+    case "$held" in
+        *"past its heap limit"*) pass "${runtime} input copy counted with held buffers against the heap limit" ;;
+        *) fail "${runtime} held buffers + input copy (got: $held)" ;;
+    esac
+    case "$seq" in
+        *'"out":"len:2097152,len:2097152,len:2097152,len:2097152,len:2097152"'*) pass "${runtime} each input copy's hold is given back when its op ends" ;;
+        *) fail "${runtime} sequential input copies (got: $seq)" ; cat "$OFF/srv.log" ;;
+    esac
+}
+
+run_offheap "lua" "lua"
+run_offheap "js"  "js"
+
 echo ""
 echo "spans-async: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

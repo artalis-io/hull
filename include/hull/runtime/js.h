@@ -101,7 +101,8 @@ typedef struct HlJS {
     size_t          offheap_gc_debt;
     /* OWNED WasmBuffer bytes JS objects hold off the QuickJS heap (server
      * allocator), capped at max_heap_bytes (hl_wasm_buffer_account,
-     * audit 18). */
+     * audit 18), and the input / buffer copies in-flight compute.async and
+     * gpu.async ops hold (HlOffheapHold, shared/offheap.h, audit 20). */
     size_t          wasm_buf_bytes;
     /* Capacity of every part.read() accumulator of this VM's multipart
      * readers (server allocator, off the QuickJS heap), capped in SUM at

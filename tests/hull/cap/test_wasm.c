@@ -15,6 +15,7 @@
 #include "hull/cap/wasm_watchdog.h"
 #include "hull/utils/alloc.h"
 #include "hull/limits/wasm.h"
+#include "hull/shared/offheap.h"
 #include "wasm_export.h"
 #include <time.h>
 #include "hull/shared/log_lock.h"
@@ -4024,6 +4025,50 @@ UTEST(hl_cap_wasm, stamped_aot_never_loaded_from_disk)
     EXPECT_EQ(g_aot_as_wasm_refusals, before + 1);
     hl_cap_wasm_destroy(&cache);
     unlink(p);
+}
+
+/* Audit 20: an async binding refuses an input over the call's limit BEFORE
+ * it copies it, by the limit the call paths apply (per-call, then the
+ * instance's default, then the global default, clamped to the module's I/O
+ * ceiling); and the copy holds its bytes on the VM's off-heap total, under
+ * the heap limit, until the op gives them back. */
+UTEST(hl_cap_wasm, async_input_limit_and_offheap_hold)
+{
+    HlWasmCallOpts opts = {0};
+    HlWasmModule m32 = {0}, m64 = {0};
+    m64.is_memory64 = 1;
+    EXPECT_EQ(hl_cap_wasm_input_limit(NULL, NULL, NULL),
+              (uint64_t)HL_WASM_DEFAULT_MAX_INPUT);
+    opts.max_input = 4096;
+    EXPECT_EQ(hl_cap_wasm_input_limit(&m32, NULL, &opts), (uint64_t)4096);
+    HlWasmInstance pi = {0};
+    pi.default_max_input = 777;
+    EXPECT_EQ(hl_cap_wasm_input_limit(&m32, &pi, NULL), (uint64_t)777);
+    EXPECT_EQ(hl_cap_wasm_input_limit(&m32, &pi, &opts), (uint64_t)4096);
+    opts.max_input = HL_WASM64_MAX_IO_SIZE;
+    EXPECT_EQ(hl_cap_wasm_input_limit(&m32, NULL, &opts),
+              (uint64_t)HL_WASM_MAX_IO_SIZE);
+    EXPECT_EQ(hl_cap_wasm_input_limit(&m64, NULL, &opts),
+              (uint64_t)HL_WASM64_MAX_IO_SIZE);
+
+    size_t total = 0;
+    HlOffheapHold a = {0}, b = {0};
+    EXPECT_EQ(hl_offheap_take(&a, &total, 100, 60), 0);
+    EXPECT_EQ(total, (size_t)60);
+    EXPECT_EQ(hl_offheap_take(&b, &total, 100, 41), -1);   /* 101 > 100 */
+    EXPECT_EQ(total, (size_t)60);
+    EXPECT_EQ(hl_offheap_take(&b, &total, 100, 40), 0);
+    EXPECT_EQ(hl_offheap_take(&b, &total, 100, 1), -1);
+    hl_offheap_give(&b, 15);
+    EXPECT_EQ(total, (size_t)85);
+    hl_offheap_drop(&a);
+    hl_offheap_drop(&a);                                    /* twice: no-op */
+    EXPECT_EQ(total, (size_t)25);
+    hl_offheap_drop(&b);
+    EXPECT_EQ(total, (size_t)0);
+    EXPECT_EQ(hl_offheap_take(&a, &total, 0, (size_t)1 << 40), 0); /* no limit */
+    hl_offheap_drop(&a);
+    EXPECT_EQ(total, (size_t)0);
 }
 
 int main(int argc, const char *const argv[])

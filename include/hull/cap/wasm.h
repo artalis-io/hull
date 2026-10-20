@@ -349,6 +349,23 @@ typedef struct HlWasmInstance {
     HlAllocator *alloc;
 } HlWasmInstance;
 
+/* The largest input a call accepts: per-call max_input, else the instance's
+ * default (@p pi, NULL for a pooled call), else HL_WASM_DEFAULT_MAX_INPUT,
+ * clamped to the module's I/O ceiling (@p mod NULL: the Memory64 one). The
+ * resolution the call paths in cap/wasm.c apply, so an async binding refuses
+ * an input the worker would refuse BEFORE it copies it (audit 20). */
+static inline uint64_t hl_cap_wasm_input_limit(const HlWasmModule *mod,
+                                               const HlWasmInstance *pi,
+                                               const HlWasmCallOpts *opts)
+{
+    uint64_t lim = opts && opts->max_input ? opts->max_input
+                 : pi && pi->default_max_input ? pi->default_max_input
+                 : HL_WASM_DEFAULT_MAX_INPUT;
+    uint64_t io_max = mod && !mod->is_memory64 ? HL_WASM_MAX_IO_SIZE
+                                               : HL_WASM64_MAX_IO_SIZE;
+    return lim > io_max ? io_max : lim;
+}
+
 /* ── API ───────────────────────────────────────────────────────────── */
 
 /* hl_cap_wasm_init return codes. 0 = ok; a NEGATIVE value is a genuine WAMR
