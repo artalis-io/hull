@@ -112,8 +112,17 @@ function M.build_request(opts)
         return v
     end
 
+    -- Origin-form only: an absolute-form target ("http://other/") is routed
+    -- by its own authority, not Host (RFC 9112 section 3.2.2; audit 22).
+    local path = opts.path or "/"
+    if type(path) ~= "string" or path:sub(1, 1) ~= "/" or path:sub(1, 2) == "//"
+       or path:find("[%s%c]") then
+        error("ssh.ws_stream: path must start with one '/' and hold no spaces"
+              .. " or control characters", 2)
+    end
+
     local lines = {
-        "GET " .. no_crlf("path", opts.path or "/") .. " HTTP/1.1",
+        "GET " .. no_crlf("path", path) .. " HTTP/1.1",
         "Host: " .. no_crlf("host", opts.host),
         "Upgrade: websocket",
         "Connection: Upgrade",

@@ -12354,4 +12354,35 @@ UTEST(js_audit22, a_failed_string_conversion_leaks_nothing)
     cleanup_js_caps();
 }
 
+/* Audit 22: http.* sent a caller Host / Transfer-Encoding / Connection
+ * as given - a second Host line, or a smuggled request. */
+UTEST(js_audit22, http_refuses_headers_hulls_client_writes)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    js.base.http_cfg = &cfg;
+    static const char *const cases[] = {
+        "http.get('http://x.invalid/', { headers: { Host: 'other.example' } })",
+        "http.post('http://x.invalid/', 'b', { headers: { 'Transfer-Encoding': 'chunked' } })",
+        "http.request('GET', 'http://x.invalid/', { headers: { 'bad name': 'v' } })",
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "let r = 0;\n"
+                 "try { %s; r = 2; } catch (e) {\n"
+                 "  r = /may not be set/.test(e.message) ? 1 : 3; }\n"
+                 "globalThis.__h22 = r;\n", cases[i]);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<h22>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__h22|0"), 1, cases[i]);
+    }
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

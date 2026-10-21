@@ -202,6 +202,35 @@ test("tunnel.headers may not set the upgrade's own headers", function()
     end
 end)
 
+test("tunnel.path is origin-form only", function()
+    -- An absolute-form target is routed by its own authority, not Host
+    -- (RFC 9112 section 3.2.2): the relay was reached as another host
+    -- (audit 22).
+    for _, p in ipairs({ "http://internal.example/", "//internal.example/",
+                         "relay", "/a b", "/a\tb" }) do
+        local ok, e = pcall(connect_via, relay(upgraded()),
+                            { host = "ssh.example.com", path = p })
+        assert_eq(ok, false, p)
+        assert_match(tostring(e), "tunnel.path", p)
+    end
+    local r = relay(upgraded())
+    connect_via(r, { host = "ssh.example.com", path = "/ssh?x=1" })
+    assert_match(r.written[1] or "", "GET /ssh?x=1 HTTP/1.1\r\n")
+end)
+
+test("tunnel.headers entries are header lines", function()
+    -- No name, a name that is not a token, or a continuation line a relay
+    -- could unfold onto the destination header (audit 22).
+    for _, h in ipairs({ "no colon here", " evil:22", ": empty",
+                         "Bad Name: x", "\tX-A: b" }) do
+        local r = relay(upgraded())
+        local err, seen = connect_via(r, { host = "ssh.example.com",
+            headers = { "Cf-Access-Jump-Destination: spark-7468:22", h } })
+        assert_eq(err and err.code, "denied", h)
+        assert_eq(seen, nil, "nothing may be dialled: " .. h)
+    end
+end)
+
 test("an IPv6 destination is bracketed", function()
     local r = relay(upgraded())
     ssh.connect{

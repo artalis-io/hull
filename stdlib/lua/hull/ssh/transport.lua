@@ -823,12 +823,14 @@ function Transport:run_kex(opts, i_s)
     -- the OLD keys, and the peer switches its send side the moment it sends
     -- its own.
     self:send_packet(string.char(kex.SSH_MSG_NEWKEYS))
+    self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", filter)
     -- Strict KEX resets each direction's sequence number at its NEWKEYS, so
     -- nothing that crossed the wire before the keys changed can be counted
-    -- after it.
-    if self.strict_kex then self.send_seq = 0 end
-    self:expect(kex.SSH_MSG_NEWKEYS, "NEWKEYS", filter)
-    if self.strict_kex then self.recv_seq = 0 end
+    -- after it. The send side resets here, with its cipher, not before the
+    -- wait for the peer's NEWKEYS: an uncatchable trip in that wait left the
+    -- OLD key at sequence 0, and the next packet reused its first nonce
+    -- (audit 22). Nothing is sent in between (replies are held).
+    if self.strict_kex then self.send_seq, self.recv_seq = 0, 0 end
     self.c2s = self:new_cipher(neg.cipher_c2s, keys.key_c2s, keys.iv_c2s)
     self.s2c = self:new_cipher(neg.cipher_s2c, keys.key_s2c, keys.iv_s2c)
     if rekey then self.rekeys = self.rekeys + 1 end

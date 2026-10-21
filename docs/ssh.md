@@ -256,6 +256,13 @@ sends none, for a relay that routes some other way (a path, a fixed
 backend) - and then the grant does not constrain what the relay reaches, so
 that is a statement about the relay, not a default.
 
+The upgrade request's own lines are Hull's too. `tunnel.headers` entries must
+be `Name: value` lines (a token name, no leading whitespace), and may not set
+`Host`, `Upgrade`, `Connection` or `Sec-WebSocket-*`. `tunnel.path` must be an
+origin-form path (`/ssh`, `/ssh?x=1`): an absolute-form target such as
+`http://other/` is routed by its own authority rather than `Host` (RFC 9112
+section 3.2.2), so it would reach a host the grant never named.
+
 `tls = true` verifies the relay's certificate against Hull's trust anchor (the
 embedded Mozilla bundle, or `--ca-bundle PATH` for an internal CA; see
 [`../CLAUDE.md`](../CLAUDE.md) "HTTPS / CA bundle"). A relay that refuses the

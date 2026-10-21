@@ -84,6 +84,14 @@ static int js_parse_http_headers(JSContext *ctx, JSValueConst obj,
         return -1;
     }
 
+    const char *bad = hl_http_reserved_header(hdrs, count);
+    if (bad) {
+        JS_ThrowTypeError(ctx, "http: header '%s' may not be set (Hull's "
+                          "client writes it, or it is not a header name)", bad);
+        js_free_http_headers(ctx, hdrs, count);
+        return -1;
+    }
+
     *out = hdrs;
     *out_count = count;
     return 0;

@@ -203,6 +203,8 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
 {
     if (!server || !http_cfg || !method || !url)
         return NULL;
+    if (hl_http_reserved_header(headers, num_headers))
+        return NULL;   /* the bindings say which (audit 22) */
 
     /* Parse URL for allowlist check */
     KlUrl parsed;

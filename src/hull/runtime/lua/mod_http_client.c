@@ -112,6 +112,12 @@ static int lua_parse_http_headers(lua_State *L, int idx,
         lua_pop(L, 1); /* pop value, keep key */
     }
 
+    /* Raises: the headers are in the scratch arena, nothing else is held. */
+    const char *bad = hl_http_reserved_header(hdrs, i);
+    if (bad)
+        luaL_error(L, "http: header '%s' may not be set (Hull's client writes "
+                   "it, or it is not a header name)", bad);
+
     *out_headers = hdrs;
     *out_count = i;
     return 0;
