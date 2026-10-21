@@ -203,6 +203,17 @@ char **hl_tool_find_files_ex(const char *dir, const char *pattern,
                              int include_vendor, const char *const *extra);
 
 /*
+ * `include_vendor` is a set of flags: HL_TOOL_FIND_VENDOR (1, the old
+ * boolean) walks into `vendor/`; HL_TOOL_FIND_ALL (2) lists EVERY entry
+ * that is not a directory - dot-names, symbolic links (not followed), FIFOs
+ * - and recurses into every real directory, dot / vendor / node_modules
+ * ones included, so a walk sees what `--verify-sig`'s startup scan
+ * (signature.c sig_scan_unsigned) sees (audit 22). `pattern` still applies.
+ */
+#define HL_TOOL_FIND_VENDOR 1
+#define HL_TOOL_FIND_ALL    2
+
+/*
  * Copy a file (binary-safe).
  * Returns 0 on success, -1 on error.
  */

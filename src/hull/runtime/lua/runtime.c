@@ -664,13 +664,21 @@ void hl_lua_free(HlLua *lua)
      * (fired by sqlite3_close) don't call luaL_unref on a dead state */
     lua->udf_runtime_alive = 0;
 
-    /* No deadline over the close (its finalizers are no run), and the
-     * watchdog must be done with the watch before its storage goes. */
-    hl_run_watch_disarm(&lua->run_watch);
+    /* The __gc finalizers lua_close runs are app code: they get one run's
+     * budget and deadline, armed afresh (an earlier trip would otherwise
+     * stop them all, and with the watch disarmed first a looping finalizer
+     * under no instruction limit hung teardown for good; audit 22). The
+     * watch is disarmed only after the close - the watchdog must be done
+     * with it before its storage goes - as the worker VM does (audit 15). */
     if (lua->L) {
+        HL_LUA_ARM(lua, lua->L);
         lua_close(lua->L);
         lua->L = NULL;
+#ifdef HL_ENABLE_DB
+        hl_db_budget_unbind(&lua->budget);   /* bound by that arm */
+#endif
     }
+    hl_run_watch_disarm(&lua->run_watch);
     if (lua->app_dir) {
         hl_alloc_free_const(lua->base.alloc, lua->app_dir, lua->app_dir_size);
         lua->app_dir = NULL;

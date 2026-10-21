@@ -140,6 +140,46 @@ else
     pass "notification handled"
 fi
 
+# ── hull_eval on the warm context (audit 22) ────────────────────────────
+#
+# One serve session, two evals: an eval is an entry, so a transaction one
+# leaves open is rolled back before the next runs (Lua), and the jobs one
+# queues run within it (JS) rather than being left for whatever runs next.
+
+echo ""
+echo "--- mcp: hull_eval on the warm context ---"
+
+EVAL_TMP=$(mktemp -d)
+mkdir -p "$EVAL_TMP/lua" "$EVAL_TMP/js"
+cat > "$EVAL_TMP/lua/app.lua" <<'EOF'
+app.manifest({ modules = { "hull/db@1", "hull/json@1" } })  -- the eval wrapper encodes with hull.json
+EOF
+cat > "$EVAL_TMP/js/app.js" <<'EOF'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/db@1"] });
+EOF
+
+# mcp_session DIR LINE...: one serve process, every LINE as a request.
+mcp_session() {
+    dir=$1; shift
+    printf '%s\n' "$@" | $HULL mcp serve --app-dir="$dir" 2>/dev/null
+}
+
+OUT=$(mcp_session "$EVAL_TMP/lua" \
+  '{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"hull_eval","arguments":{"code":"local c = require(\"hull.db\").default() c.exec(\"BEGIN\") return c.in_transaction()"}}}' \
+  '{"jsonrpc":"2.0","id":202,"method":"tools/call","params":{"name":"hull_eval","arguments":{"code":"require(\"hull.db\").default().in_transaction()"}}}')
+L1=$(echo "$OUT" | grep '"id":201' || true)
+L2=$(echo "$OUT" | grep '"id":202' || true)
+check_contains "eval (lua): the first eval is inside its BEGIN" "$L1" 'result\":true'
+check_contains "eval (lua): the next eval is not"               "$L2" 'result\":false'
+
+OUT=$(mcp_session "$EVAL_TMP/js" \
+  '{"jsonrpc":"2.0","id":203,"method":"tools/call","params":{"name":"hull_eval","arguments":{"code":"(Promise.resolve().then(() => { globalThis.__queued = 7; }), 0)"}}}' \
+  '{"jsonrpc":"2.0","id":204,"method":"tools/call","params":{"name":"hull_eval","arguments":{"code":"globalThis.__queued_seen_by_next = globalThis.__queued"}}}')
+L2=$(echo "$OUT" | grep '"id":204' || true)
+check_contains "eval (js): a queued job ran within its eval" "$L2" 'result\":7'
+rm -rf "$EVAL_TMP"
+
 # ── Summary ─────────────────────────────────────────────────────────────
 
 echo ""

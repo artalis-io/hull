@@ -18,6 +18,7 @@
 #include "limits.h"
 #include "hull/app_context.h"
 #include "hull/runtime.h"
+#include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -140,6 +141,10 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
                      JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
     }
     JSValue v = JS_IsException(fn) ? fn : JS_EvalFunction(ctx, fn);
+    /* The jobs the snippet queued are its own code (`await null; ...`):
+     * run while the eval is the active run, as an entry's are, not left
+     * for whatever runs next on a warm context (audit 22). */
+    hl_js_run_jobs(js);
 
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);
@@ -180,6 +185,9 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
 }
 #endif
 
+static int eval_dispatch(HlRuntime *rt, HlAppContext *ctx, const char *code,
+                         ShJsonBuf *out);
+
 int hl_agent_eval_ctx(HlAppContext *ctx, const char *code, ShJsonBuf *out)
 {
     if (!code || !*code) return hl_agent_write_error(out, "code required");
@@ -187,6 +195,20 @@ int hl_agent_eval_ctx(HlAppContext *ctx, const char *code, ShJsonBuf *out)
     HlRuntime *rt = hl_app_context_runtime(ctx);
     if (!rt || !rt->vt) return hl_agent_write_error(out, "no runtime");
 
+    /* An eval is an entry: a transaction left open on a warm context's
+     * connections is rolled back at both ends, as for every other entry -
+     * the snippet neither joins one an earlier call left nor leaves its own
+     * for the next request or eval (audit 22). */
+    hl_db_registry_guard_stale_txns(rt->db_registry);
+    int rc = eval_dispatch(rt, ctx, code, out);
+    hl_db_registry_guard_stale_txns(rt->db_registry);
+    return rc;
+}
+
+static int eval_dispatch(HlRuntime *rt, HlAppContext *ctx, const char *code,
+                         ShJsonBuf *out)
+{
+    (void)rt; (void)ctx; (void)code;
 #ifdef HL_ENABLE_LUA
     if (rt->vt->kind == HL_RT_LUA) {
         HlLua *lua = hl_app_context_lua(ctx);

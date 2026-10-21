@@ -1269,6 +1269,8 @@ char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
 static int should_skip_dir(const char *name, int include_vendor,
                            const char *const *extra)
 {
+    if (include_vendor & HL_TOOL_FIND_ALL)
+        return strcmp(name, ".") == 0 || strcmp(name, "..") == 0;
     if (name[0] == '.') return 1;
     if (strcmp(name, "node_modules") == 0) return 1;
     if (!include_vendor && strcmp(name, "vendor") == 0) return 1;
@@ -1318,7 +1320,7 @@ static int find_files_recurse(const char *dir, const char *pattern,
              * a partial "success". */
             if (find_files_recurse(path, pattern, results, count, cap,
                                    include_vendor, extra) < 0) { rc = -1; break; }
-        } else if (S_ISREG(st.st_mode)) {
+        } else if (S_ISREG(st.st_mode) || (include_vendor & HL_TOOL_FIND_ALL)) {
             if (fnmatch(pattern, ent->d_name, 0) == 0) {
                 /* Add to results */
                 if (*count >= *cap) {

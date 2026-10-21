@@ -160,4 +160,9 @@ __attribute__((weak)) void hl_js_request_done(HlJS *js, const KlHttpRequest *req
 {
     (void)js; (void)req;
 }
+
+__attribute__((weak)) void hl_js_ws_conns_release(HlJS *js)
+{
+    (void)js;
+}
 #endif /* HL_ENABLE_JS */
