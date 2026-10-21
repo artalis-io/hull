@@ -152,6 +152,34 @@ static int hl_http_sync_redirect_hop(const char *next_url, void *data)
     return 0;
 }
 
+static int http_is_token(const char *s)
+{
+    if (!s || !*s) return 0;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z')) continue;
+        if (!strchr("!#$%&'*+-.^_`|~", c)) return 0;
+    }
+    return 1;
+}
+
+const char *hl_http_reserved_header(const HlHttpHeader *headers, int n)
+{
+    static const char *const owned[] = {
+        "host", "content-length", "transfer-encoding", "te", "trailer",
+        "connection", "keep-alive", "upgrade", NULL
+    };
+    for (int i = 0; headers && i < n; i++) {
+        const char *name = headers[i].name;
+        if (!http_is_token(name)) return name ? name : "";
+        if (strncasecmp(name, "proxy-", 6) == 0) return name;
+        for (int k = 0; owned[k]; k++)
+            if (strcasecmp(name, owned[k]) == 0) return name;
+    }
+    return NULL;
+}
+
 /* ── Public API ──────────────────────────────────────────────────── */
 
 int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
@@ -164,6 +192,8 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
         return -1;
 
     memset(resp, 0, sizeof(*resp));
+    if (hl_http_reserved_header(headers, num_headers))
+        return -1;   /* the bindings say which (audit 22) */
 
     /* Parse URL for allowlist check */
     KlUrl parsed;

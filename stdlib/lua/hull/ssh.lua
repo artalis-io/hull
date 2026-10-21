@@ -436,12 +436,20 @@ local function tunnel_headers(tunnel, host, port)
     local want = destination_value(host, port)
     local seen = false
     for _, line in ipairs(out) do
+        -- A header line is `token ":" value` (RFC 9110): one with no name,
+        -- a name that is not a token, or leading whitespace (obs-fold) is
+        -- refused - a relay that unfolds a line onto the one above read the
+        -- destination it checked as another (audit 22).
+        local s0 = tostring(line)
+        local name0 = s0:match("^([%w!#$%%&'*+%-.^_`|~]+):")
+        if not name0 then
+            return nil, { code = "denied", detail = "tunnel.headers entries are "
+                .. "'Name: value' lines; refused: " .. s0:gsub("%c", "?") }
+        end
         -- The upgrade's own headers are Hull's: a caller Host routes the
         -- relay to another origin past the ssh.tunnel grant (audit 21), and
         -- Upgrade / Connection / Sec-WebSocket-* would change the handshake.
-        local s0 = tostring(line)
-        local c0 = s0:find(":", 1, true)
-        local n0 = c0 and _text.trim(s0:sub(1, c0 - 1)):lower() or ""
+        local n0 = name0:lower()
         if n0 == "host" or n0 == "upgrade" or n0 == "connection"
            or n0:sub(1, 14) == "sec-websocket-" then
             return nil, { code = "denied", detail = "tunnel.headers may not set "
@@ -480,6 +488,16 @@ local function tunnel_opener(tunnel, crypto, dial)
     local dh = tunnel.destination_header
     if dh ~= nil and dh ~= false and (type(dh) ~= "string" or dh == "") then
         error("ssh.connect: tunnel.destination_header must be a header name or false", 3)
+    end
+    -- Origin-form only ("/x", not "//x" and not "http://other/"): an origin
+    -- or proxy routes an absolute-form request target by ITS authority and
+    -- ignores Host (RFC 9112 section 3.2.2), so the relay was reached as
+    -- whatever host the path named, past the ssh.tunnel grant (audit 22).
+    local path = tunnel.path
+    if path ~= nil and (type(path) ~= "string" or path:sub(1, 1) ~= "/"
+                        or path:sub(1, 2) == "//" or path:find("[%s%c]")) then
+        error("ssh.connect: tunnel.path must be a path starting with one '/'"
+              .. " and holding no spaces or control characters", 3)
     end
     local ws   = require('hull.ssh.ws_stream')
     local port = tunnel.port or 443

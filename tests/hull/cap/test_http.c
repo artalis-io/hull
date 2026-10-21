@@ -222,4 +222,25 @@ UTEST(audit_url, truncates_and_terminates)
     ASSERT_EQ((size_t)0, hl_http_url_redact("x", small, 0));
 }
 
+/* Audit 22: a caller Host went out as a second Host line, and a caller
+ * Transfer-Encoding beside Keel's Content-Length smuggled a request. */
+UTEST(request_headers, hulls_own_and_malformed_names_are_refused)
+{
+    HlHttpHeader ok[] = { { "Authorization", "Bearer x" }, { "X-Req", "1" },
+                          { "Content-Type", "application/json" } };
+    EXPECT_TRUE(hl_http_reserved_header(ok, 3) == NULL);
+    EXPECT_TRUE(hl_http_reserved_header(NULL, 0) == NULL);
+    static const char *const bad[] = {
+        "Host", "host", "Content-Length", "TRANSFER-ENCODING", "TE",
+        "Trailer", "Connection", "Keep-Alive", "Upgrade",
+        "Proxy-Authorization", "proxy-connection",
+        "Bad Name", "X:Y", "", "X\tY",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        HlHttpHeader h[] = { { "X-Ok", "1" }, { bad[i], "v" } };
+        const char *r = hl_http_reserved_header(h, 2);
+        EXPECT_TRUE_MSG(r != NULL && strcmp(r, bad[i]) == 0, bad[i]);
+    }
+}
+
 UTEST_MAIN()

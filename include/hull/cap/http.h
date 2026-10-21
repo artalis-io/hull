@@ -105,4 +105,13 @@ int hl_http_check_host(const HlHttpConfig *cfg,
  */
 size_t hl_http_url_redact(const char *url, char *out, size_t outsz);
 
+/* NULL when every request header may be sent, else the name of the first
+ * that may not: one that is not an RFC 9110 token, or one Hull's client
+ * owns - Host (the allowlist checked the URL's; a second Host, or a front
+ * end routing by the caller's, reached another origin), Content-Length /
+ * Transfer-Encoding / TE / Trailer (framing: a caller TE: chunked beside
+ * Keel's Content-Length smuggled a second request), Connection / Keep-Alive /
+ * Upgrade, and Proxy-* (audit 22). Case-insensitive. */
+const char *hl_http_reserved_header(const HlHttpHeader *headers, int n);
+
 #endif /* HL_CAP_HTTP_H */

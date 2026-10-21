@@ -11951,4 +11951,30 @@ UTEST(lua_audit22, async_param_and_ctx_copies_are_held_to_the_heap_limit)
     f.be->free(f.actx);
 }
 
+/* Audit 22: http.* sent a caller Host / Transfer-Encoding / Connection
+ * as given - a second Host line, or a smuggled request. */
+UTEST(lua_audit22, http_refuses_headers_hulls_client_writes)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    static const char *const cases[] = {
+        "http.get('http://x.invalid/', { headers = { Host = 'other.example' } })",
+        "http.post('http://x.invalid/', 'b', { headers = { ['Transfer-Encoding'] = 'chunked' } })",
+        "http.request('GET', 'http://x.invalid/', { headers = { ['bad name'] = 'v' } })",
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') %s", cases[i]);
+        EXPECT_NE_MSG(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err),
+                      LUA_OK, cases[i]);
+        EXPECT_NE_MSG(strstr(err, "may not be set"), NULL, cases[i]);
+    }
+    lua_rt.base.http_cfg = NULL;
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();
