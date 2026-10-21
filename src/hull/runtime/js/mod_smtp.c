@@ -263,7 +263,10 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     /* Active loop: model 2 (regardless of cap). Validate (CR/LF in a header
      * field, missing fields) and authorize the host on the submit side (audited
      * once here) before any reservation or worker submission. */
-    if (hl_js_async_gate(ctx, js, "smtp.send") != 0) {
+    /* Again, after the message getters (app code that could BEGIN), as
+     * http.fetch does (audit 22). */
+    if (hl_js_async_gate(ctx, js, "smtp.send") != 0 ||
+        hl_js_db_refuse_wait(ctx, "smtp.send()")) {
         result = JS_EXCEPTION;
         goto cleanup;
     }

@@ -646,8 +646,8 @@ manifest-authoring time (a per-tenant shard, a user-supplied endpoint),
 against `manifest.databases.dynamic`: the scheme must be in `dynamic.schemes`,
 and a network backend's host must match `dynamic.hosts` (exact, `*`, `*.suffix`
 subdomain glob, or a CIDR; IP-literal hosts only, no DNS) while a file backend's
-path must pass the same fs-sandbox gate as `fs.read`. `hosts` / `schemes`
-entries may be `"$VAR"` env refs. Both lists fail closed: no `dynamic` policy (or
+path must pass the same fs-sandbox gate as `fs.read`. `hosts` entries may be
+`"$VAR"` env refs; `schemes` are compared literally. Both lists fail closed: no `dynamic` policy (or
 an empty one) rejects every `db.open`. A process-wide cap (16) bounds concurrent
 dynamic connections. Unlike `db.connect`, the app **owns** the returned handle:
 call `conn.close()` (`conn.close()` in JS) when done, or let GC finalize it

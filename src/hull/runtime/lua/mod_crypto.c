@@ -145,18 +145,14 @@ static int lua_crypto_random(lua_State *L)
     if (n <= 0 || n > HL_RANDOM_MAX_BYTES)
         return luaL_error(L, "random bytes must be 1-%d", HL_RANDOM_MAX_BYTES);
 
-    HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
-        return luaL_error(L, "runtime not available");
-
-    uint8_t *buf = sh_arena_alloc(lua->scratch, (size_t)n);
-    if (!buf)
-        return luaL_error(L, "out of memory");
-
+    /* On the VM heap, not the scratch arena: the arena is reset only when
+     * a run starts, so 160 calls of 64 KiB in one run filled it and every
+     * later scratch user in the run failed (audit 22). */
+    luaL_Buffer b;
+    uint8_t *buf = (uint8_t *)luaL_buffinitsize(L, &b, (size_t)n);
     if (hl_cap_crypto_random(buf, (size_t)n) != 0)
         return luaL_error(L, "random failed");
-
-    lua_pushlstring(L, (const char *)buf, (size_t)n);
+    luaL_pushresultsize(&b, (size_t)n);
     return 1;
 }
 

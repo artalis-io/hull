@@ -752,6 +752,12 @@ static int json_equal(const ShJsonValue *a, const ShJsonValue *b, int depth)
             ShJsonValue *o = sh_json_get_n(b, m->key, m->key_len);
             if (!o || !json_equal(m->value, o, depth + 1)) return 0;
         }
+        /* Both ways: with a duplicate key, {x:1,x:1} found every key in
+         * {x:1,y:5} (audit 22). */
+        for (size_t i = 0; i < b->u.object_val.count; i++) {
+            const ShJsonMember *m = &b->u.object_val.members[i];
+            if (!sh_json_get_n(a, m->key, m->key_len)) return 0;
+        }
         return 1;
     }
     return 0;

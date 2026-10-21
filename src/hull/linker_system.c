@@ -60,10 +60,17 @@ static int sys_link(HlLinker *l, const char *output,
      * Build-ID is handled by GNU ld's content-addressed default (see the
      * matching note in compiler.c::sys_link). */
     (void)tgt;
-    for (int i = 0; objs && objs[i] && n < HL_LINKER_MAX_ARGS - 2; i++)
-        argv[n++] = objs[i];
-    for (int i = 0; libs && libs[i] && n < HL_LINKER_MAX_ARGS - 2; i++)
-        argv[n++] = libs[i];
+    int oi = 0, li = 0;
+    for (; objs && objs[oi] && n < HL_LINKER_MAX_ARGS - 2; oi++)
+        argv[n++] = objs[oi];
+    for (; libs && libs[li] && n < HL_LINKER_MAX_ARGS - 2; li++)
+        argv[n++] = libs[li];
+    /* What does not fit is an error, not a link without it (audit 22). */
+    if ((objs && objs[oi]) || (libs && libs[li])) {
+        fprintf(stderr, "hull: link: too many objects and libraries for one "
+                        "link (max %d arguments)\n", HL_LINKER_MAX_ARGS);
+        return -1;
+    }
     argv[n] = NULL;
     return hl_tool_spawn(argv) == 0 ? 0 : -1;
 }

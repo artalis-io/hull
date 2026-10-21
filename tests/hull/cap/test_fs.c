@@ -50,7 +50,7 @@ static const char *const test_grants[] = {
     "mmap_borrow.txt", "mmap_rel.txt", "mmap_test.txt", "no_such_file.txt",
     "nope.txt", "size.txt", "test.txt", "whole.txt",
     "win_borrow.bin", "win_cross.bin", "win_eof.bin", "win_rej.bin", "win_zero.bin",
-    "shrink.bin", "many.bin",
+    "shrink.bin", "many.bin", "suid.bin",
 };
 
 static void setup_fs(void)
@@ -239,6 +239,23 @@ UTEST(hl_cap_fs, write_keeps_the_mode_of_a_replaced_file)
     teardown_fs();
 }
 
+/* Audit 22: the atomic replace copied setuid / setgid onto new content (an
+ * in-place write had the kernel clear them). */
+UTEST(hl_cap_fs, write_drops_setuid_and_setgid_of_a_replaced_file)
+{
+    if (hl_host_is_windows()) return;          /* no POSIX permission bits */
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "suid.bin", "old", 3, NULL), 0);
+    char p[512];
+    snprintf(p, sizeof(p), "%s/suid.bin", test_dir);
+    ASSERT_EQ(chmod(p, 06755), 0);
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "suid.bin", "new", 3, NULL), 0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("suid.bin", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0755);
+    teardown_fs();
+}
+
 UTEST(hl_cap_fs, write_to_a_directory_fails_and_leaves_no_temp)
 {
     setup_fs();
@@ -410,6 +427,24 @@ UTEST(hl_cap_fs, windows_separators_are_refused_on_windows)
     err = NULL;
     EXPECT_EQ(hl_cap_fs_write(&test_cfg, "sub/C:x", "x", 1, &err), -1);
     EXPECT_STREQ(err ? err : "(null)", "invalid_path");
+    teardown_fs();
+}
+
+/* Audit 22: Windows drops a trailing dot or space and opens an 8.3 short
+ * name as its long name, so a pattern grant matched one spelling and the OS
+ * opened another file. Such a component is refused there. */
+UTEST(hl_cap_fs, windows_name_aliases_are_refused_on_windows)
+{
+    if (!hl_host_is_windows()) UTEST_SKIP("Windows-only name aliasing");
+    setup_fs();
+    static const char *const bad[] = { "sub/a.txt.", "sub/a.txt ", "sub/x./y",
+                                       "sub/secret~1.htm" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        const char *err = NULL;
+        EXPECT_EQ_MSG(hl_cap_fs_write(&test_cfg, bad[i], "x", 1, &err), -1, bad[i]);
+        EXPECT_STREQ(err ? err : "(null)", "invalid_path");
+    }
+    EXPECT_EQ(hl_cap_fs_write(&test_cfg, "sub/a~b.txt", "x", 1, NULL), 0);
     teardown_fs();
 }
 

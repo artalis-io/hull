@@ -12475,4 +12475,18 @@ UTEST(js_audit22, a_test_file_whose_top_level_throws_is_a_load_error)
     cleanup_js();
 }
 
+/* Audit 22: json.decode parsed up to the string's first NUL. */
+UTEST(js_audit22, json_decode_reads_the_whole_string)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a10_run_tripped(
+        "import { json } from 'hull:json';\n"
+        "let r = 0;\n"
+        "try { json.decode('{\"a\":1}\\u0000junk'); r = 2; } catch (e) { r = 1; }\n"
+        "globalThis.__a22j = r + (json.decode('{\"b\":2}').b === 2 ? 10 : 0);\n", 0), 0);
+    EXPECT_EQ(eval_int("globalThis.__a22j | 0"), 11);
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

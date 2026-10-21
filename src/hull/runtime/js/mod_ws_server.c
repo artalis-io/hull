@@ -207,24 +207,21 @@ static JSValue js_ws_conn_send_binary(JSContext *ctx, JSValueConst this_val,
     if (!ud || !ud->conn || ud->conn->closed || !ud->conn->kl_ws)
         return JS_ThrowTypeError(ctx, "connection closed");
 
-    size_t len;
-    uint8_t *buf = hl_js_array_buffer_probe(ctx, &len, argv[0]);
-    if (!buf) {
-        /* Try string fallback */
-        const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
-        if (!data) return JS_EXCEPTION;
-        if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {   /* audit 14 */
-            JS_FreeCString(ctx, data);
-            return JS_EXCEPTION;
-        }
-        int rc = kl_ws_server_send_binary(ud->conn->kl_ws, data, len);
-        JS_FreeCString(ctx, data);
-        return rc == 0 ? JS_TRUE : JS_ThrowTypeError(ctx, "send failed");
-    }
-
-    if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1)))   /* audit 14 */
+    /* Any byte view (a TypedArray or DataView too, not only a bare
+     * ArrayBuffer - a Uint8Array went out as its toString, "1,2,3"), or a
+     * string; no app code runs (audit 22). */
+    HlBufferView view = {0};
+    const char *str = NULL;
+    int needs_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
+        return JS_ThrowTypeError(ctx, "ws.sendBinary: expected ArrayBuffer, TypedArray "
+                                 "or string");
+    if (hl_js_budget_charge(ctx, hl_work_send_units(view.len, 1))) {   /* audit 14 */
+        if (needs_free && str) JS_FreeCString(ctx, str);
         return JS_EXCEPTION;
-    int rc = kl_ws_server_send_binary(ud->conn->kl_ws, (const char *)buf, len);
+    }
+    int rc = kl_ws_server_send_binary(ud->conn->kl_ws, (const char *)view.data, view.len);
+    if (needs_free && str) JS_FreeCString(ctx, str);
     return rc == 0 ? JS_TRUE : JS_ThrowTypeError(ctx, "send failed");
 }
 

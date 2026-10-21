@@ -30,11 +30,15 @@ static JSValue js_json_decode(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "json.decode requires (str)");
 
-    const char *str = JS_ToCString(ctx, argv[0]);
+    size_t len = 0;
+    const char *str = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!str)
         return JS_EXCEPTION;
 
-    JSValue result = JS_ParseJSON(ctx, str, strlen(str), "<json>");
+    /* The whole string: strlen stopped at an embedded NUL, so
+     * '{"a":1}\u0000junk' decoded as {"a":1} where JSON.parse and the Lua
+     * decoder refuse it (audit 22). */
+    JSValue result = JS_ParseJSON(ctx, str, len, "<json>");
     JS_FreeCString(ctx, str);
     return result;
 }
