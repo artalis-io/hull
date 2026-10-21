@@ -373,6 +373,10 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         return 1;
     }
 
+    /* No bytecode from the runtime-key caches in a build or a signing: an
+     * app process holds that key (cache_common.h, audit 22). */
+    hl_runtime_cache_code_off(1);
+
     /* Parse --cc/--compiler option for configurable compiler */
     const char *cc_explicit = parse_cc_option(argc, argv);
     const char *cc = cc_explicit ? cc_explicit : HL_DEFAULT_CC;

@@ -9027,6 +9027,48 @@ UTEST(cache_seal, tool_key_is_not_the_runtime_key)
     bc_cleanup_tmp_home(tmp);
 }
 
+/* Audit 22: the tool process (hull build / sign) loaded stdlib and CLI
+ * plugin bytecode sealed under the RUNTIME key, which every app process
+ * holds. hl_runtime_cache_code_off turns those caches off there; the tool
+ * key's caches are untouched. */
+UTEST(cache_seal, a_tool_process_reads_no_runtime_key_code)
+{
+    char tmp[256];
+    bc_with_tmp_home(tmp, sizeof tmp);
+    ASSERT_NE(tmp[0], ' ');
+    char root[512];
+    snprintf(root, sizeof root, "%s/store", tmp);
+    HlBlobStore *st = NULL;
+    ASSERT_EQ(0, hl_blob_store_open(&st, NULL, root, 1, 0));
+
+    static const char k1[] =
+        "3333333333333333333333333333333333333333333333333333333333333333";
+    static const char k2[] =
+        "4444444444444444444444444444444444444444444444444444444444444444";
+    static const uint8_t payload[] = "bytecode";
+    uint8_t *out = NULL;
+    size_t n = 0;
+
+    hl_runtime_cache_put_sealed(st, "lua-bytecode", k1, payload, sizeof payload);
+    hl_runtime_cache_code_off(1);
+    EXPECT_EQ(-1, hl_runtime_cache_get_sealed(st, "lua-bytecode", k1, &out, &n));
+    EXPECT_TRUE(out == NULL);
+    hl_runtime_cache_put_sealed(st, "lua-bytecode", k2, payload, sizeof payload);
+    /* the tool key's cache still works */
+    hl_tool_cache_put_sealed(st, "compute-aot", k2, payload, sizeof payload);
+    ASSERT_EQ(0, hl_tool_cache_get_sealed(st, "compute-aot", k2, &out, &n));
+    free(out);
+    out = NULL;
+    hl_runtime_cache_code_off(0);
+    /* k1 was left in the store (not dropped) */
+    ASSERT_EQ(0, hl_runtime_cache_get_sealed(st, "lua-bytecode", k1, &out, &n));
+    free(out);
+    out = NULL;
+
+    hl_blob_store_close(st);
+    bc_cleanup_tmp_home(tmp);
+}
+
 /* ── Audit 6: the Lua runtime ─────────────────────────────────────────── */
 
 /* A limited VM whose top level runs `code`, then (if @p second is set, after

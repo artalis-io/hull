@@ -248,11 +248,21 @@ static int seal_mac(const SealKey *k, const char *kind, const char *key,
     return hl_cap_crypto_hmac_sha256(k->key, sizeof k->key, msg, off, mac);
 }
 
+/* The runtime-key code caches are off in a tool process
+ * (hl_runtime_cache_code_off). Set once, before any VM or thread. */
+static volatile int g_code_cache_off;
+
+void hl_runtime_cache_code_off(int off)
+{
+    g_code_cache_off = off ? 1 : 0;
+}
+
 static int cache_get_sealed(int tool, HlBlobStore *store, const char *kind,
                             const char *key, uint8_t **out, size_t *out_len)
 {
     *out = NULL;
     *out_len = 0;
+    if (!tool && g_code_cache_off) return -1;
     const SealKey *k = (store && kind && key) ? seal_key(tool) : NULL;
     if (!k) return -1;
     uint8_t *buf = NULL;
@@ -282,6 +292,7 @@ static void cache_put_sealed(int tool, HlBlobStore *store, const char *kind,
                              const char *key, const uint8_t *data, size_t len)
 {
     if (!store || !kind || !key || !data || len == 0) return;
+    if (!tool && g_code_cache_off) return;
     const SealKey *k = seal_key(tool);
     if (!k) return;
     if (len > SIZE_MAX - SEAL_MAC_LEN) return;

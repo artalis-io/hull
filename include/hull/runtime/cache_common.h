@@ -175,4 +175,18 @@ void hl_tool_cache_put_sealed(HlBlobStore *store, const char *kind,
 /** @brief Load (or create) the tool key now - before the tool sandbox. */
 void hl_tool_cache_seal_prepare(void);
 
+/**
+ * @brief Turn the runtime-key code caches (Lua / QuickJS bytecode, compiled
+ *        templates) off for this process (@p off = 1), or back on (0).
+ *
+ * Called first thing by the tool process (hull_tool) and the JS manifest
+ * extraction child: their VMs load the stdlib and the CLI plugins
+ * (`hull.build`, `hull.sign_platform`, ...) as bytecode, and a cache entry
+ * sealed under the RUNTIME key - which every app process holds - is code an
+ * app compromised at native level could have planted, run inside a build or
+ * a signing (audit 22: the AOT cache moved to the tool key for this in
+ * audit 5; the bytecode caches had not). They compile from source instead.
+ */
+void hl_runtime_cache_code_off(int off);
+
 #endif /* HL_RUNTIME_CACHE_COMMON_H */
