@@ -211,8 +211,9 @@ uint8_t hl_my_client_charset(uint8_t server_default);
  * utf8mb4_0900_bin on MySQL 8.0.17+, else utf8mb4_bin. utf8mb4_bin is PAD
  * SPACE - 'alice' = 'alice ' - so string keys differing only in trailing
  * spaces collided in rbac, totp, session and inbox, while the app's own
- * tables (MySQL 8's NO PAD default) kept them apart (audit 22). MySQL 5.7
- * has no NO PAD collation. */
+ * tables (MySQL 8's NO PAD default) kept them apart (audit 22). MySQL
+ * before 8.0.17 and MariaDB before 10.2.2 have no NO PAD binary collation:
+ * they get utf8mb4_bin, and db_mysql.c WARNs once (audit 23). */
 const char *hl_my_bin_collation(const char *server_version);
 
 /* ── Result-set column definitions (UNTRUSTED) ────────────────────── */

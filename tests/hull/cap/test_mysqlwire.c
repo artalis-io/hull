@@ -45,6 +45,11 @@ UTEST(mysqlwire, hull_tables_get_a_no_pad_binary_collation)
     EXPECT_STREQ(hl_my_bin_collation("5.5.5-10.11.6-MariaDB-1:10.11.6+maria"),
                  "utf8mb4_nopad_bin");
     EXPECT_STREQ(hl_my_bin_collation("11.4.2-MariaDB"), "utf8mb4_nopad_bin");
+    /* audit 23: MariaDB before 10.2.2 has no utf8mb4_nopad_bin */
+    EXPECT_STREQ(hl_my_bin_collation("5.5.5-10.2.2-MariaDB"), "utf8mb4_nopad_bin");
+    EXPECT_STREQ(hl_my_bin_collation("5.5.5-10.2.1-MariaDB"), "utf8mb4_bin");
+    EXPECT_STREQ(hl_my_bin_collation("5.5.5-10.1.48-MariaDB-0+deb9u2"), "utf8mb4_bin");
+    EXPECT_STREQ(hl_my_bin_collation("5.5.68-MariaDB"), "utf8mb4_bin");
     EXPECT_STREQ(hl_my_bin_collation(""),        "utf8mb4_bin");
     EXPECT_STREQ(hl_my_bin_collation(NULL),      "utf8mb4_bin");
 }

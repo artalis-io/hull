@@ -82,6 +82,7 @@ static int lua_parse_http_headers(lua_State *L, int idx,
     if (count == 0)
         return 0;
 
+    size_t mark = scratch ? scratch->used : 0;   /* given back on failure */
     HlHttpHeader *hdrs = sh_arena_calloc(scratch, (size_t)count, sizeof(HlHttpHeader));
     if (!hdrs)
         return -1;
@@ -141,6 +142,7 @@ static int lua_parse_http_headers(lua_State *L, int idx,
                 /* Out of scratch space: fail, never send the request without
                  * the header (an Authorization quietly dropped). */
                 lua_pop(L, 2);   /* value and key: the traversal ends here */
+                scratch->used = mark;
                 return -1;
             }
             memcpy(nc, n, nlen + 1);
@@ -154,6 +156,7 @@ static int lua_parse_http_headers(lua_State *L, int idx,
 
     /* Raises: the headers are in the scratch arena, nothing else is held. */
     const char *bad = hl_http_reserved_header(hdrs, i);
+    if (bad) scratch->used = mark;   /* nothing else holds it */
     if (bad)
         luaL_error(L, "http: header '%s' may not be set (Hull's client writes "
                    "it, or it is not a header name)", bad);
@@ -161,6 +164,20 @@ static int lua_parse_http_headers(lua_State *L, int idx,
     *out_headers = hdrs;
     *out_count = i;
     return 0;
+}
+
+/* Give back the scratch a sync call's headers took, once the request is
+ * done: the arena is reset only when a run starts, so a run making
+ * requests in a loop filled it, and every later scratch user of the run
+ * (db, smtp, a module load) failed (audit 23, after #812). @p headers is
+ * the parse's first allocation. */
+static void lua_http_scratch_release(HlLua *lua, const HlHttpHeader *headers)
+{
+    SHArena *a = lua ? lua->scratch : NULL;
+    const char *p = (const char *)headers;
+    if (!a || !p || p < a->buffer || (size_t)(p - a->buffer) > a->used)
+        return;
+    a->used = (size_t)(p - a->buffer);
 }
 
 /* Push HTTP response as Lua table: { status, body, headers } */
@@ -177,25 +194,24 @@ static void lua_push_http_response(lua_State *L, const KlHttpClientResponse *res
         lua_pushstring(L, "");
     lua_setfield(L, -2, "body");
 
-    /* Headers as { ["name"] = "value" } table */
+    /* Headers as { ["name"] = "value" } table, names lowercased on the Lua
+     * stack (as the async response's are): in the scratch arena they took
+     * from it for the rest of the run, and once it was full a name kept
+     * its case, so resp.headers["location"] was silently nil (audit 23). */
     lua_newtable(L);
     for (int i = 0; i < resp->num_headers; i++) {
-        lua_pushstring(L, resp->headers[i].value);
-        /* Lowercase the header name for consistent access */
-        size_t nlen = strlen(resp->headers[i].name);
-        char *lower = sh_arena_alloc(
-            ((HlLua *)get_hl_lua(L))->scratch, nlen + 1);
-        if (lower) {
-            for (size_t j = 0; j < nlen; j++)
-                lower[j] = (char)((resp->headers[i].name[j] >= 'A' &&
-                                    resp->headers[i].name[j] <= 'Z')
-                    ? resp->headers[i].name[j] + 32
-                    : resp->headers[i].name[j]);
-            lower[nlen] = '\0';
-            lua_setfield(L, -2, lower);
-        } else {
-            lua_setfield(L, -2, resp->headers[i].name);
+        const char *name = resp->headers[i].name;
+        size_t nlen = strlen(name);
+        luaL_Buffer buf;
+        luaL_buffinit(L, &buf);
+        for (size_t j = 0; j < nlen; j++) {
+            char ch = (name[j] >= 'A' && name[j] <= 'Z')
+                        ? (char)(name[j] + 32) : name[j];
+            luaL_addchar(&buf, ch);
         }
+        luaL_pushresult(&buf);
+        lua_pushstring(L, resp->headers[i].value);
+        lua_settable(L, -3);
     }
     lua_setfield(L, -2, "headers");
 }
@@ -266,6 +282,7 @@ static int lua_http_request(lua_State *L)
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
+    lua_http_scratch_release(lua, headers);
     if (rc != 0)
         return luaL_error(L, "http request failed: %s",
                           kl_strerror(resp.error));
@@ -302,6 +319,7 @@ static int lua_http_get(lua_State *L)
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
+    lua_http_scratch_release(lua, headers);
     if (rc != 0)
         return luaL_error(L, "http.get failed: %s", kl_strerror(resp.error));
 
@@ -342,6 +360,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, method, url,
                                     headers, num_headers, body, body_len, &resp);
+    lua_http_scratch_release(lua, headers);
     if (rc != 0)
         return luaL_error(L, "http.%s failed: %s", method,
                           kl_strerror(resp.error));
@@ -382,6 +401,7 @@ static int lua_http_delete(lua_State *L)
                                   * internal memset ordering. */
     int rc = hl_cap_http_request(lua->base.http_cfg, timeout_ms, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
+    lua_http_scratch_release(lua, headers);
     if (rc != 0)
         return luaL_error(L, "http.delete failed: %s",
                           kl_strerror(resp.error));
