@@ -447,6 +447,51 @@ else
     echo "  SKIP: agent eval legs are Lua (this hull runs js)"
 fi
 
+# ── agent eval / template, JS (audit 22) ──────────────────────────────
+#
+# A JS snippet that threw at run time was run again as statements (its side
+# effects twice); a JS template render that threw rejected its module
+# promise unseen and answered with the last result (or "undefined").
+
+echo ""
+echo "--- agent eval / template (JS) ---"
+JS_APP=$(mktemp -d)
+mkdir -p "$JS_APP/templates"
+cat > "$JS_APP/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/template@1"] });
+app.main(() => 0);
+JS
+printf '{{ x | no_such_filter }}\n' > "$JS_APP/templates/bad.html"
+printf '{}' > "$JS_APP/data.json"
+OUT=$($HULL agent eval "(globalThis.__n = (globalThis.__n | 0) + 1, (() => { throw new Error('ran ' + globalThis.__n) })())" "$JS_APP" 2>&1 || true)
+check_contains     "eval (js): a throwing snippet runs once" "$OUT" 'ran 1'
+check_not_contains "eval (js): not run again as statements"  "$OUT" 'ran 2'
+OUT=$($HULL agent eval "1 + 1" "$JS_APP" 2>&1 || true)
+check_contains     "eval (js): an expression"               "$OUT" '"result":2'
+OUT=$($HULL agent eval "let x = 2; x * 3" "$JS_APP" 2>&1 || true)
+check_contains     "eval (js): statements"                  "$OUT" '"ok":true'
+OUT=$($HULL agent template bad.html "$JS_APP/data.json" "$JS_APP" 2>&1 || true)
+check_contains     "template (js): a failed render is an error" "$OUT" '"error"'
+check_not_contains "template (js): no stand-in output"          "$OUT" '"output":"undefined"'
+
+# A cloned repo's links and FIFOs (audit 22): the capabilities walk follows
+# no link, and `agent inspect` does not block on a planted sidecar FIFO.
+if command -v timeout >/dev/null 2>&1 && command -v mkfifo >/dev/null 2>&1; then
+    mkdir -p "$JS_APP/lib" "$JS_APP/.hull"
+    for i in 0 1 2 3 4 5 6 7 8 9; do ln -s .. "$JS_APP/lib/l$i"; done
+    timeout 60 $HULL agent capabilities "$JS_APP" >/dev/null 2>&1
+    RC=$?
+    if [ "$RC" = 124 ]; then fail "capabilities: hung on a link loop"; else pass "capabilities: a link loop does not hang the walk"; fi
+    mkfifo "$JS_APP/.hull/dev.json"
+    timeout 60 $HULL agent inspect "$JS_APP" >/dev/null 2>&1
+    RC=$?
+    if [ "$RC" = 124 ]; then fail "inspect: blocked on a FIFO sidecar"; else pass "inspect: a FIFO sidecar does not block"; fi
+else
+    echo "  SKIP: no timeout / mkfifo"
+fi
+rm -rf "$JS_APP"
+
 # ── help / usage ──────────────────────────────────────────────────────
 
 echo ""

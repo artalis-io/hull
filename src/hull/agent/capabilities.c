@@ -93,7 +93,11 @@ static void agg_free(Aggregate *a) { free(a->buf); }
 
 static int read_file_into(Aggregate *a, const char *path, size_t max_bytes)
 {
-    FILE *f = fopen(path, "rb");
+    /* The whole walk is bounded too, not only each file (audit 22). */
+    if (a->len >= HL_AGENT_CAPS_MAX_TOTAL) return 0;
+    if (max_bytes > HL_AGENT_CAPS_MAX_TOTAL - a->len)
+        max_bytes = HL_AGENT_CAPS_MAX_TOTAL - a->len;
+    FILE *f = hl_agent_open_sidecar(path);   /* no link, no FIFO */
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
     long n = ftell(f);
@@ -149,8 +153,10 @@ static void walk_dir(const char *dir, Aggregate *a, int depth)
         char path[HL_AGENT_PATH_DEEP];
         if (snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name) >= (int)sizeof(path))
             continue;
+        /* lstat: a link is not followed - ten links to `.` made the walk
+         * 10^8 directories deep in all (audit 22). */
         struct stat st;
-        if (stat(path, &st) != 0) continue;
+        if (lstat(path, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
             if (is_skip_dir(ent->d_name)) continue;
             walk_dir(path, a, depth + 1);

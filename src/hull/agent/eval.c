@@ -128,16 +128,18 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
         return hl_agent_write_error(out, "code too large");
     }
     hl_js_budget_arm(js);   /* a run of its own (see eval_lua) */
-    JSValue v = JS_Eval(ctx, snippet, (size_t)snip_n, "<agent-eval>",
-                        JS_EVAL_TYPE_GLOBAL);
+    /* The form is chosen by COMPILING: the expression form when it parses,
+     * else the statement block. Falling back after a run re-ran a snippet
+     * that threw at run time - its writes twice (audit 22; Lua since #803). */
+    JSValue fn = JS_Eval(ctx, snippet, (size_t)snip_n, "<agent-eval>",
+                         JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
     free(snippet);
-
-    if (JS_IsException(v)) {
-        /* Fall back: try evaluating as a statement block. */
-        JS_FreeValue(ctx, v);
-        v = JS_Eval(ctx, code, strlen(code), "<agent-eval-stmts>",
-                    JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(fn)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        fn = JS_Eval(ctx, code, strlen(code), "<agent-eval-stmts>",
+                     JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
     }
+    JSValue v = JS_IsException(fn) ? fn : JS_EvalFunction(ctx, fn);
 
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);

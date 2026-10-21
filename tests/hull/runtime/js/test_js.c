@@ -12385,4 +12385,42 @@ UTEST(js_audit22, http_refuses_headers_hulls_client_writes)
     cleanup_js_caps();
 }
 
+/* Audit 22: a test file whose top level threw rejected its module promise
+ * rather than raising, and the runner freed it unexamined - the tests before
+ * the throw ran, the rest never existed, and the file passed. */
+UTEST(js_audit22, a_test_file_whose_top_level_throws_is_a_load_error)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_http_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a22t"), NULL);
+    char path[HL_TEST_PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/test_boom.js", dir);
+    FILE *f = fopen(path, "wb");
+    ASSERT_TRUE(f != NULL);
+    fputs("test('before', () => {});\n"
+          "throw new Error('boom at the top level');\n"
+          "test('after', () => { throw new Error('never registered'); });\n", f);
+    fclose(f);
+
+    HlTestCaseResult results[4] = {{0}};
+    int total = 0, passed = 0, failed = 0;
+    const char *err = NULL;
+    int rc = hl_js_vtable.run_test_file(&js.base, path, results, 4,
+                                        &total, &passed, &failed, &err);
+    EXPECT_EQ(rc, -1);
+    EXPECT_TRUE(err && strstr(err, "boom at the top level") != NULL);
+    if (err && !strstr(err, "boom")) printf("  got: %s\n", err);
+
+    remove(path);
+    rmdir(dir);
+    kl_http_router_free(&router);
+    cleanup_js();
+}
+
 UTEST_MAIN();

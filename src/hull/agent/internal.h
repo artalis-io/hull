@@ -53,13 +53,6 @@ int hl_agent_prepare_readonly(struct sqlite3 *db, const char *sql, int len,
 const char *hl_agent_detect_entry(const char *app_dir, const char *ext,
                                   char *buf, size_t buf_size);
 
-/*
- * Open a dev sidecar (<app>/.hull/...) for reading: O_NOFOLLOW, O_NONBLOCK
- * (a planted FIFO blocked `agent errors` / `status` / `logs`), regular files
- * only. NULL when it cannot be opened that way.
- */
-#include <stdio.h>
-FILE *hl_agent_open_sidecar(const char *path);
 
 /* 1 when `buf` holds no terminal control bytes (C0 other than tab / CR / LF,
  * DEL, or a UTF-8-encoded C1 control) - safe to copy to a terminal. */

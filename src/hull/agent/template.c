@@ -120,6 +120,9 @@ static int render_js(HlJS *js, const char *template_name,
 
     /* Call: (await import("hull:template")).template.render(name, data) */
     JSValue global = JS_GetGlobalObject(ctx);
+    /* The last render's output must not stand in for this one's (audit 22:
+     * on the warm MCP context a failed render answered with it). */
+    JS_SetPropertyStr(ctx, global, "__hull_agent_tpl_result", JS_UNDEFINED);
     /* Stash args on globalThis for the eval call to pick up. */
     JS_SetPropertyStr(ctx, global, "__hull_agent_tpl_name", tpl_arg);
     JS_SetPropertyStr(ctx, global, "__hull_agent_tpl_data", data_arg);
@@ -133,6 +136,16 @@ static int render_js(HlJS *js, const char *template_name,
     JSValue v = JS_Eval(ctx, code, strlen(code), "<agent-template>",
                         JS_EVAL_TYPE_MODULE);
     int err_path = JS_IsException(v);
+    /* A module's runtime error (the render threw) rejects its promise
+     * rather than raising here. */
+    if (!err_path) {
+        hl_js_run_jobs(js);
+        if (JS_IsObject(v) &&
+            JS_PromiseState(ctx, v) == JS_PROMISE_REJECTED) {
+            JS_Throw(ctx, JS_PromiseResult(ctx, v));
+            err_path = 1;
+        }
+    }
     JS_FreeValue(ctx, v);
 
     if (err_path) {

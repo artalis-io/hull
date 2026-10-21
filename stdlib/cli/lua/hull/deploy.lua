@@ -522,7 +522,10 @@ local function write_file(path, data, opts)
         tool.stderr("  skip: " .. path .. " (exists, use --force to overwrite)\n")
         return false
     end
-    tool.write_file(path, data)
+    if not tool.write_file(path, data) then
+        tool.stderr("  error: could not write " .. path .. "\n")
+        tool.exit(1)
+    end
     print("  wrote: " .. path)
     return true
 end
