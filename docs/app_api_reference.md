@@ -120,11 +120,15 @@ app.manifest({
 ```
 
 **MySQL / MariaDB: `_hull_*` collation.** Hull creates its own tables with
-`COLLATE utf8mb4_bin` so role names, inbox ids and dedup keys compare
-exactly (the server default `utf8mb4_0900_ai_ci` makes `'Admin' = 'admin'`).
+a NO PAD binary collation (`utf8mb4_0900_bin` on MySQL 8.0.17+,
+`utf8mb4_nopad_bin` on MariaDB) so role names, inbox ids, user ids and dedup
+keys compare exactly (the server default `utf8mb4_0900_ai_ci` makes
+`'Admin' = 'admin'`, and `utf8mb4_bin`, which Hull used before, makes
+`'alice' = 'alice '`).
 Tables created by an older Hull keep the case- and accent-insensitive
 collation - nothing converts them and nothing warns. Convert them once with
-`ALTER TABLE <t> CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin` for
+`ALTER TABLE <t> CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin`
+(MariaDB: `utf8mb4_nopad_bin`) for
 each `_hull_*` table (with `FOREIGN_KEY_CHECKS = 0` around it); CLAUDE.md
 ("MySQL/MariaDB specifics") has the generator query.
 

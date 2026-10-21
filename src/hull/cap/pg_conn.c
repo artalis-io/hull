@@ -334,6 +334,11 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
                                                conn->finishing ? NULL : pg_wait_stop,
                                                NULL);
         if (wr == -2) { pg_abandon(conn); return -1; }
+        /* What the wait left: passed its own `left`, the read could spend as
+         * long again (audit 22). */
+        if (wr == 1 &&
+            (left = hl_db_transport_time_left(&started, conn->read_timeout_ms)) < 0)
+            wr = 0;
         /* Over TLS, sliced too: a record's first byte made it readable, and
          * the read then blocked for the rest under SO_RCVTIMEO (audit 20). */
         ssize_t n = wr == 1

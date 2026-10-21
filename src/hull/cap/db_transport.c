@@ -845,7 +845,7 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
 {
     /* Plaintext: the caller's hl_db_transport_wait_readable saw bytes, so a
      * recv returns at once. TLS plaintext already decrypted: the same. */
-    if (!t || !t->tls || !stop || len == 0 || hl_db_transport_pending(t) > 0)
+    if (!t || !t->tls || len == 0 || hl_db_transport_pending(t) > 0)
         return hl_db_transport_recv(t, buf, len);
     int fd = hl_db_transport_fd(t);
     if (fd < 0)
@@ -858,7 +858,10 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
      * sent the record a byte at a time, each within the slice, kept the one
      * TLS read collecting it with nothing asked (audit 21). So the socket is
      * read non-blocking: every chunk returns control (the TLS session keeps
-     * the partial record), and the run is asked after each. */
+     * the partial record), and the run is asked after each. Without a stop
+     * function (a Postgres COMMIT's reply read on past a trip) the reads are
+     * sliced the same way: it fell back to the one blocking read, and the
+     * timeout was checked only between records (audit 22). */
     int saved = fcntl(fd, F_GETFL, 0);
     if (saved < 0 ||
         ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved | O_NONBLOCK) < 0))
@@ -871,7 +874,7 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
         if (n != 0)
             break;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {   /* nothing more yet */
-            if (stop(ud)) { n = -2; break; }
+            if (stop && stop(ud)) { n = -2; break; }
             int left = hl_db_transport_time_left(&start, timeout_ms);
             if (left < 0) { n = -1; break; }
             int slice = HL_DB_WAIT_SLICE_MS;

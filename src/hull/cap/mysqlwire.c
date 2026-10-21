@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 
 /* ── Client message writer ────────────────────────────────────────── */
 
@@ -353,6 +354,25 @@ static void copy_bounded(char *dst, size_t dstsz, const char *src)
     if (dstsz == 0) return;
     while (src[i] && i + 1 < dstsz) { dst[i] = src[i]; i++; }
     dst[i] = '\0';
+}
+
+const char *hl_my_bin_collation(const char *server_version)
+{
+    const char *v = server_version ? server_version : "";
+    for (const char *p = v; *p; p++)
+        if (strncasecmp(p, "mariadb", 7) == 0)
+            return "utf8mb4_nopad_bin";       /* MariaDB 10.2.2+ */
+    unsigned long maj = 0, min = 0, pat = 0;
+    char *e;
+    maj = strtoul(v, &e, 10);
+    if (e != v && *e == '.') {
+        const char *m = e + 1;
+        min = strtoul(m, &e, 10);
+        if (e != m && *e == '.') pat = strtoul(e + 1, NULL, 10);
+    }
+    if (maj > 8 || (maj == 8 && (min > 0 || pat >= 17)))
+        return "utf8mb4_0900_bin";
+    return "utf8mb4_bin";
 }
 
 uint8_t hl_my_client_charset(uint8_t server_default)

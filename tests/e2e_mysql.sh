@@ -247,6 +247,9 @@ end)
 app.get("/stdlib2", function(req, res)
     local inbox_new = inbox.check_and_mark("evt-1", "webhook")   -- false = new
     local inbox_dup = inbox.check_and_mark("evt-1", "webhook")   -- true  = duplicate
+    -- Audit 22: utf8mb4_bin is PAD SPACE, so 'evt-1 ' was a duplicate of
+    -- 'evt-1'; the _hull_* tables use a NO PAD binary collation now.
+    local inbox_pad = inbox.check_and_mark("evt-1 ", "webhook")  -- false = new
 
     rbac.define_role("editor", { "posts.write" })
     rbac.assign("u1", "editor")
@@ -276,6 +279,7 @@ app.get("/stdlib2", function(req, res)
         insert_if_absent = ins_val,
         inbox_new    = inbox_new,
         inbox_dup    = inbox_dup,
+        inbox_pad    = inbox_pad,
         rbac_write   = can_write,
         rbac_delete  = can_delete,
         audit_count  = #events,
@@ -459,6 +463,7 @@ RESP_STDLIB2=$(curl -fsS "http://127.0.0.1:${PORT}/stdlib2" || echo FAIL)
 echo "stdlib2 response: $RESP_STDLIB2"
 echo "$RESP_STDLIB2" | grep -q '"inbox_new":false'   || { echo "::error inbox first-seen not new"; fail=1; }
 echo "$RESP_STDLIB2" | grep -q '"inbox_dup":true'    || { echo "::error inbox dedup"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"inbox_pad":false'   || { echo "::error _hull_* keys compare trailing spaces (PAD SPACE collation)"; fail=1; }
 echo "$RESP_STDLIB2" | grep -q '"rbac_write":true'   || { echo "::error rbac has_permission grant"; fail=1; }
 echo "$RESP_STDLIB2" | grep -q '"rbac_delete":false' || { echo "::error rbac has_permission deny"; fail=1; }
 echo "$RESP_STDLIB2" | grep -q '"audit_count":1'     || { echo "::error audit-log record/list"; fail=1; }

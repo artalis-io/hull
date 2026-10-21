@@ -206,6 +206,15 @@ int hl_my_parse_handshake(const HlMyFrame *f, HlMyHandshake *out);
  * character, closing the identifier (audit 20). */
 uint8_t hl_my_client_charset(uint8_t server_default);
 
+/* The exact-compare collation for Hull's own `_hull_*` tables on a server
+ * whose handshake named @p server_version: utf8mb4_nopad_bin on MariaDB,
+ * utf8mb4_0900_bin on MySQL 8.0.17+, else utf8mb4_bin. utf8mb4_bin is PAD
+ * SPACE - 'alice' = 'alice ' - so string keys differing only in trailing
+ * spaces collided in rbac, totp, session and inbox, while the app's own
+ * tables (MySQL 8's NO PAD default) kept them apart (audit 22). MySQL 5.7
+ * has no NO PAD collation. */
+const char *hl_my_bin_collation(const char *server_version);
+
 /* ── Result-set column definitions (UNTRUSTED) ────────────────────── */
 
 /* Column type codes (MYSQL_TYPE_*), subset Hull maps to HlValue. */

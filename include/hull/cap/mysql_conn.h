@@ -100,6 +100,9 @@ typedef struct HlMyConn {
     int      broken;
     uint16_t server_status; /* status flags of the latest OK / EOF */
     uint16_t last_err_code; /* server error code of the latest command's ERR, or 0 */
+    /* The `_hull_*` tables' collation for this server (hl_my_bin_collation
+     * of its handshake's version), set at open. */
+    const char *bin_collation;
     /* The DSN's ?read_timeout= (0 = none): bounds each wait for the server,
      * polled in slices that ask the run's budget (audit 18). */
     int      read_timeout_ms;

@@ -402,7 +402,7 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
      * since the last attempt, or when nothing more is waiting (the reply may
      * be whole): geometric, so the parses add up to a few times the reply. */
     size_t parsed_at = 0;
-    int parse = 1;
+    int parse = 1, got = 0;
     for (;;) {
         if (parse) {
             sh_arena_reset(c->arena);
@@ -418,6 +418,17 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
             uint8_t *nb = hl_alloc_realloc(c->alloc, c->rbuf, c->rcap, ncap);
             if (!nb) { c->dead = 1; set_err(c, "out of memory"); return -1; }
             c->rbuf = nb; c->rcap = ncap;
+        }
+        /* After every chunk of a reply still incomplete, not only after a
+         * quiet slice: a server sending it a byte at a time, each sooner
+         * than a slice, was stopped only by the command deadline
+         * (connect_timeout, up to 10 min; audit 22, as the Postgres / MySQL
+         * frame readers since audit 21). */
+        /* cppcheck-suppress knownConditionTrueFalse */
+        if (got && run_stopped()) {   /* constant 0 without HL_ENABLE_DB */
+            c->dead = 1;
+            set_err(c, "interrupted (instruction limit exceeded)");
+            return -1;
         }
         int w = wait_io(c, POLLIN);
         if (w != 0) {
@@ -435,6 +446,7 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
             return -1;
         }
         c->rlen += (size_t)n;
+        got = 1;
         parse = (c->rlen - parsed_at >= parsed_at / 2) || !more_waiting(c);
     }
 }
