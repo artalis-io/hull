@@ -384,6 +384,14 @@ Authy, 1Password - supports).
     (`rekeyStatus().unbound`) is `0` - every old row re-sealed by
     `totp.rekey()` or the user's next verify; unbound secrets are then
     refused (audit 16). A non-boolean makes `init` raise.
+  - `opts.allow_plaintext_secrets` (`allowPlaintextSecrets`, default
+    `true`). With encryption keys configured, a row stored in plaintext
+    (`encrypted = 0`: enrolled before encryption was turned on - or written
+    by someone with access to `_hull_totp`, with a secret whose codes they
+    can compute) still verifies, and that verify seals it bound to the
+    account. Set it `false` once `totp.rekey_status().plaintext`
+    (`rekeyStatus().plaintext`) is `0` (after `totp.rekey()`); plaintext
+    rows are then refused (audit 22). A non-boolean makes `init` raise.
   - `opts.lockout_duration_per_ip` (`lockoutDurationPerIp`) must be a
     positive number of seconds; anything else (a string, `0`, NaN) makes
     `init` raise (audit 15).
@@ -404,9 +412,10 @@ Authy, 1Password - supports).
 - `totp.enrolled(user_id)` → bool. Confirmed enrollment check.
 - `totp.rekey()` → `{ scanned, rekeyed, failed }` re-seals every row under
   the current key (and bound to its account). `totp.rekey_status()`
-  (`rekeyStatus()`) → `{ total, unbound, [key_version] = count }` without
+  (`rekeyStatus()`) → `{ total, unbound, plaintext, [key_version] = count }` without
   writing; `unbound` counts the rows still sealed without their account
-  (audit 16), whether or not `allow_unbound_secrets` lets them open.
+  (audit 16), whether or not `allow_unbound_secrets` lets them open;
+  `plaintext` the rows stored with `encrypted = 0` (audit 22).
 - A user id is a non-empty string or an integer (a JS safe integer or
   bigint); an integral float within 2^53 (`42.0`, from a REAL column or
   arithmetic) is that integer in both runtimes (audit 16: Lua refused it,

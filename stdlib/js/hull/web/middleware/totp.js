@@ -72,6 +72,12 @@ const _state = {
     // into another account's row. Off once rekeyStatus().unbound is 0
     // (audit 16).
     allowUnboundSecrets: true,
+    // A plaintext row (encrypted = 0) while a key is configured: written
+    // before encryption was turned on, or planted by whoever can write
+    // _hull_totp - a secret whose codes the writer knows, which the next
+    // verify re-seals bound to the account. Off once
+    // rekeyStatus().plaintext is 0 (audit 22).
+    allowPlaintextSecrets: true,
     initialized:        false,
 };
 
@@ -244,10 +250,17 @@ function encryptSecret(secretBytes, userId) {
 // version=0 signals "plaintext storage" OR "legacy v1 row"; unbound marks a
 // v2 blob sealed without the account context (before audit 15). Callers use
 // both to decide whether to lazily re-encrypt under current. An unbound blob
-// opens only while allowUnboundSecrets is on (audit 16); `allowUnbound`
-// overrides that for rekeyStatus, which counts them.
+// opens only while allowUnboundSecrets is on (audit 16), a plaintext row
+// with a key configured only while allowPlaintextSecrets is (audit 22);
+// `allowUnbound` = true overrides both for rekeyStatus, which counts them.
 function decryptSecret(blob, encrypted, userId, allowUnbound) {
-    if (encrypted === 0) return [blob, 0];
+    if (encrypted === 0) {
+        if (_state.currentKeyVersion != null && !_state.allowPlaintextSecrets
+            && allowUnbound !== true) {
+            return [null, null];
+        }
+        return [blob, 0];
+    }
     if (typeof blob !== "string") return [null, null];
 
     const [value, err, version] = sealbox.open(keyring(), blob, sealContext(userId));
@@ -508,6 +521,13 @@ function extractIp(req) {
  *                     userId (it is re-sealed bound on the next
  *                     verify). Set false once rekeyStatus().unbound is
  *                     0: such a blob is then refused (audit 16).
+ *   - allowPlaintextSecrets Default true. With encryption keys
+ *                     configured, a row stored in plaintext (enrolled
+ *                     before encryption was on - or written by someone
+ *                     with access to _hull_totp) still verifies, and is
+ *                     sealed on that verify. Set false once
+ *                     rekeyStatus().plaintext is 0 (run rekey()): such a
+ *                     row is then refused (audit 22).
  */
 function init(opts) {
     opts = opts || {};
@@ -614,6 +634,12 @@ function init(opts) {
             throw new Error("totp.init: allowUnboundSecrets must be a boolean");
         }
         _state.allowUnboundSecrets = opts.allowUnboundSecrets;
+    }
+    if (opts.allowPlaintextSecrets !== undefined) {
+        if (typeof opts.allowPlaintextSecrets !== "boolean") {
+            throw new Error("totp.init: allowPlaintextSecrets must be a boolean");
+        }
+        _state.allowPlaintextSecrets = opts.allowPlaintextSecrets;
     }
     _state.keys                = keys;
     _state.currentKeyVersion   = current;
@@ -980,10 +1006,11 @@ function rekey() {
 function rekeyStatus() {
     checkInitialized();
     const rows = db.query("SELECT user_id, secret, encrypted FROM _hull_totp");
-    const counts = { total: 0, unbound: 0 };
+    const counts = { total: 0, unbound: 0, plaintext: 0 };
     for (let i = 0; i < (rows || []).length; i++) {
         counts.total++;
         const r = rows[i];
+        if (r.encrypted === 0) counts.plaintext++;
         const dec = decryptSecret(r.secret, r.encrypted, r.user_id, true);
         if (dec[2]) counts.unbound++;
         const k = (dec && dec[1] != null) ? dec[1] : 0;
@@ -1040,8 +1067,11 @@ const _test = {
         return rows && rows.length > 0 ? [rows[0].secret, rows[0].encrypted] : null;
     },
     // Replace a user's stored secret blob (an unbound pre-audit-15 seal).
-    setBlob: (userId, blob) => {
+    setBlob: (userId, blob, encrypted) => {
         db.exec("UPDATE _hull_totp SET secret = ? WHERE user_id = ?", [blob, userId]);
+        if (encrypted !== undefined) {
+            db.exec("UPDATE _hull_totp SET encrypted = ? WHERE user_id = ?", [encrypted, userId]);
+        }
     },
     totpAtStep,
     currentStep,
@@ -1085,6 +1115,7 @@ const _test = {
         _state.currentKeyVersion  = null;
         _state.legacyKeyVersion   = null;
         _state.allowUnboundSecrets = true;
+        _state.allowPlaintextSecrets = true;
         _state.cleanupCatchupDone = false;
         _state.cleanupScheduled   = false;
         _state.initialized        = false;

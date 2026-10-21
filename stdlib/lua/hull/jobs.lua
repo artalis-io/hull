@@ -1823,89 +1823,102 @@ function jobs.work(opts)
             end)
         else
             local ok, result = pcall(h, job)
-            if ok and type(result) == "table" and rawget(result, WF_YIELD) then
-                -- Durable workflow yielded - no terminal outcome, no event. A
-                -- yield is not a failed attempt, so undo the claim's attempt
-                -- increment (a workflow may sleep / wait many times without
-                -- exhausting max_attempts).
-                local wf_now = time.now()
-                -- Claim-guarded like every transition: 0 rows means the job
-                -- was reaped (and maybe re-claimed) while the body ran, so the
-                -- run that owns it now also owns its concurrency slot and its
-                -- signal re-check - this one leaves both alone.
-                local parked
-                if result.waiting then
-                    -- ctx.wait_signal: park in the non-terminal 'waiting' status
-                    -- (excluded by the claim query). run_at carries the optional
-                    -- timeout deadline (0 = none); the reaper wakes a timed-out
-                    -- wait, jobs.signal wakes a delivered one.
-                    db.batch(function()
-                        parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
-                            .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
-                            .. CLAIMED,
-                            { result.deadline or 0, wf_now, job.id, job.claim_token })
-                        if (parked or 0) > 0 then release_slot(job) end
-                    end)
-                    if (parked or 0) == 0 then job._lost = true end
-                    -- Close the deliver-before-park race: a signal delivered in the
-                    -- check->park window couldn't re-activate us (we were 'running'),
-                    -- so re-check now that we are 'waiting'.
-                    -- The memo row counts too: a run of this job whose claim
-                    -- was lost (it does not know yet) can consume the signal
-                    -- after this run looked, leaving no unconsumed row - only
-                    -- the memo, which a re-run replays. Without it this wait
-                    -- parked for good.
-                    if result.signal_name and not job._lost then
-                        local sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals "
-                            .. "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
-                            { job.id, result.signal_name })
-                        if not (sig and #sig > 0) and result.signal_key then
-                            sig = db.query("SELECT 1 AS x FROM _hull_workflow_steps "
-                                .. "WHERE workflow_id=? AND step_key=?",
-                                { job.id, result.signal_key })
+            -- The transition after the handler is protected too, as the JS
+            -- worker's one try is: a result json.encode refuses (a sparse
+            -- array, a NaN) or a park that cannot be written raised out of
+            -- jobs.work, killing the worker loop with the job and its batch
+            -- still 'running' until the reaper, its error never recorded
+            -- (audit 22). It is retried with that error instead.
+            local tok, terr = pcall(function()
+                if ok and type(result) == "table" and rawget(result, WF_YIELD) then
+                    -- Durable workflow yielded - no terminal outcome, no event. A
+                    -- yield is not a failed attempt, so undo the claim's attempt
+                    -- increment (a workflow may sleep / wait many times without
+                    -- exhausting max_attempts).
+                    local wf_now = time.now()
+                    -- Claim-guarded like every transition: 0 rows means the job
+                    -- was reaped (and maybe re-claimed) while the body ran, so the
+                    -- run that owns it now also owns its concurrency slot and its
+                    -- signal re-check - this one leaves both alone.
+                    local parked
+                    if result.waiting then
+                        -- ctx.wait_signal: park in the non-terminal 'waiting' status
+                        -- (excluded by the claim query). run_at carries the optional
+                        -- timeout deadline (0 = none); the reaper wakes a timed-out
+                        -- wait, jobs.signal wakes a delivered one.
+                        db.batch(function()
+                            parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
+                                .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
+                                .. CLAIMED,
+                                { result.deadline or 0, wf_now, job.id, job.claim_token })
+                            if (parked or 0) > 0 then release_slot(job) end
+                        end)
+                        if (parked or 0) == 0 then job._lost = true end
+                        -- Close the deliver-before-park race: a signal delivered in the
+                        -- check->park window couldn't re-activate us (we were 'running'),
+                        -- so re-check now that we are 'waiting'.
+                        -- The memo row counts too: a run of this job whose claim
+                        -- was lost (it does not know yet) can consume the signal
+                        -- after this run looked, leaving no unconsumed row - only
+                        -- the memo, which a re-run replays. Without it this wait
+                        -- parked for good.
+                        if result.signal_name and not job._lost then
+                            local sig = db.query("SELECT 1 AS x FROM _hull_workflow_signals "
+                                .. "WHERE workflow_id=? AND name=? AND consumed_at IS NULL",
+                                { job.id, result.signal_name })
+                            if not (sig and #sig > 0) and result.signal_key then
+                                sig = db.query("SELECT 1 AS x FROM _hull_workflow_steps "
+                                    .. "WHERE workflow_id=? AND step_key=?",
+                                    { job.id, result.signal_key })
+                            end
+                            if sig and #sig > 0 then
+                                db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+                                    .. "updated_at=? WHERE id=? AND status='waiting'",
+                                    { wf_now, wf_now, job.id })
+                            end
                         end
-                        if sig and #sig > 0 then
-                            db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
-                                .. "updated_at=? WHERE id=? AND status='waiting'",
-                                { wf_now, wf_now, job.id })
-                        end
+                    else
+                        -- ctx.sleep: future-dated pending job.
+                        db.batch(function()
+                            parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+                                .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
+                                .. CLAIMED,
+                                { result.wake_at or wf_now, wf_now, job.id, job.claim_token })
+                            if (parked or 0) > 0 then release_slot(job) end
+                        end)
+                        if (parked or 0) == 0 then job._lost = true end
                     end
-                else
-                    -- ctx.sleep: future-dated pending job.
-                    db.batch(function()
-                        parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
-                            .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
-                            .. CLAIMED,
-                            { result.wake_at or wf_now, wf_now, job.id, job.claim_token })
-                        if (parked or 0) > 0 then release_slot(job) end
+                elseif not ok then
+                    err_str = tostring(result)
+                    outcome = finish(job, { error = err_str, attempt = job.attempts },
+                        function() return mark_retry(job, err_str) end)
+                elseif result == jobs.DEAD
+                    or (type(result) == "table" and rawget(result, WF_DEAD)) then
+                    err_str = result == jobs.DEAD and "handler returned jobs.DEAD"
+                        or rawget(result, "error")
+                    outcome = finish(job, { error = err_str }, function()
+                        return mark_dead(job, err_str)
                     end)
-                    if (parked or 0) == 0 then job._lost = true end
+                elseif result == jobs.RETRY then
+                    err_str = "handler requested retry"
+                    outcome = finish(job, { error = err_str, attempt = job.attempts },
+                        function() return mark_retry(job, err_str) end)
+                else
+                    -- nil / true / jobs.DISCARD -> done, no result; any other return
+                    -- value is stored as the job's result (for dependents).
+                    local res
+                    if result ~= nil and result ~= true and result ~= jobs.DISCARD then
+                        res = result
+                    end
+                    outcome = finish(job, { result = res }, function()
+                        return mark_done(job, res)
+                    end)
                 end
-            elseif not ok then
-                err_str = tostring(result)
+            end)
+            if not tok then
+                err_str = tostring(terr)
                 outcome = finish(job, { error = err_str, attempt = job.attempts },
                     function() return mark_retry(job, err_str) end)
-            elseif result == jobs.DEAD
-                or (type(result) == "table" and rawget(result, WF_DEAD)) then
-                err_str = result == jobs.DEAD and "handler returned jobs.DEAD"
-                    or rawget(result, "error")
-                outcome = finish(job, { error = err_str }, function()
-                    return mark_dead(job, err_str)
-                end)
-            elseif result == jobs.RETRY then
-                err_str = "handler requested retry"
-                outcome = finish(job, { error = err_str, attempt = job.attempts },
-                    function() return mark_retry(job, err_str) end)
-            else
-                -- nil / true / jobs.DISCARD -> done, no result; any other return
-                -- value is stored as the job's result (for dependents).
-                local res
-                if result ~= nil and result ~= true and result ~= jobs.DISCARD then
-                    res = result
-                end
-                outcome = finish(job, { result = res }, function()
-                    return mark_done(job, res)
-                end)
             end
         end
         -- Opt-in attempt history (a yield leaves outcome nil -> not recorded).
@@ -2334,6 +2347,15 @@ end
 -- records the wake time and raises the yield sentinel (the runner reschedules the
 -- job to run_at = wake_at); on a resume the recorded wake time is read, and once
 -- it has passed the call returns and the body continues past it.
+-- A finite-or-infinite number, NaN and non-numbers as 0: JS's
+-- `Number(x) || 0`. A NaN wake_at / deadline bound as NULL into a NOT NULL
+-- column and raised in the park (audit 22).
+local function num_or_zero(v)
+    local n = tonumber(v)
+    if n == nil or n ~= n then return 0 end
+    return n
+end
+
 local function run_sleep(workflow_id, n, seconds)
     local key = "__sleep:" .. n
     local rows = db.query(
@@ -2343,7 +2365,7 @@ local function run_sleep(workflow_id, n, seconds)
     if rows and #rows > 0 then
         wake_at = tonumber(rows[1].result)
     else
-        wake_at = time.now() + (tonumber(seconds) or 0)
+        wake_at = time.now() + num_or_zero(seconds)
         db.exec(
             "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
             .. "VALUES (?, ?, ?, 'sleeping', ?)",
@@ -2411,7 +2433,8 @@ local function run_wait_signal(workflow_id, n, name, opts, replay_only)
     end)
     if got then return decode_payload(enc) end
     local deadline = 0
-    if opts and opts.timeout then
+    local timeout = opts and num_or_zero(opts.timeout) or 0
+    if timeout ~= 0 then
         -- Per wait, like the memo key: a later timed wait on the same name
         -- must not read this one's (expired) deadline.
         local dkey = "__waitdl:" .. n .. ":" .. name
@@ -2421,7 +2444,7 @@ local function run_wait_signal(workflow_id, n, name, opts, replay_only)
         if drows and #drows > 0 then
             deadline = tonumber(drows[1].result) or 0
         else
-            deadline = time.now() + opts.timeout
+            deadline = time.now() + timeout
             db.exec(
                 "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
                 .. "VALUES (?, ?, ?, 'waiting', ?)",

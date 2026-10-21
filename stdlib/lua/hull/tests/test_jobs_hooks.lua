@@ -205,6 +205,30 @@ function cases.audit20()
     end)
 end
 
+-- Audit 22: only the handler ran under pcall. A raise after it returned - a
+-- result json.encode refuses, a park a NaN made unwritable - escaped jobs.work
+-- (the worker loop died, the job stayed 'running'); JS retries it.
+function cases.audit22()
+    jobs.init()
+    test("a result json.encode refuses is retried, not raised", function()
+        jobs.handler("nanres", function() return { ratio = 0/0 } end)
+        local id = jobs.enqueue("nanres", {})
+        local ok, err = pcall(jobs.work, { batch = 1 })
+        assert_eq(ok, true, tostring(err))
+        local j = jobs.get(id)
+        assert_eq(j.status ~= "running", true, "left " .. tostring(j.status))
+        assert_eq(type(j.last_error) == "string" and #j.last_error > 0, true,
+                  "the error is recorded")
+    end)
+    test("a NaN ctx.sleep sleeps for no time", function()
+        jobs.workflow("nansleep", function(w) w.sleep(0/0); return { ok = true } end)
+        local id = jobs.start("nansleep", {})
+        local ok, err = pcall(jobs.work, { batch = 1 })
+        assert_eq(ok, true, tostring(err))
+        assert_eq(jobs.workflow_status(id).status, "done", "finished")
+    end)
+end
+
 -- The harness sets the case as a global before it runs the script.
 local case = rawget(_G, "__jobs_case")
 test("the case is known", function()
