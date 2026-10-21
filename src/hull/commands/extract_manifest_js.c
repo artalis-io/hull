@@ -23,6 +23,7 @@
 
 #include "hull/commands/extract_manifest_js.h"
 #include "hull/manifest_extract_file.h"
+#include "hull/runtime/cache_common.h"   /* hl_runtime_cache_code_off */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +45,10 @@ int hl_cmd_extract_manifest_js(int argc, char **argv, const HlCommandEnv *env)
 
     const char *path        = argv[1];
     const char *result_path = argv[2];
+
+    /* Its manifest is what hull build signs: no stdlib bytecode from the
+     * runtime-key caches an app process can write (audit 22). */
+    hl_runtime_cache_code_off(1);
 
     /* Claim the result file BEFORE running anything. The parent cannot tell a
      * child that never launched from one that launched and died: hl_tool_spawn
