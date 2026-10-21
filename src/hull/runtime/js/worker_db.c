@@ -13,6 +13,7 @@
 
 #include "hull/runtime/js.h"
 #include "internal.h"
+#include "mod_buffer.h"        /* hl_js_db_param_other */
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -37,6 +38,9 @@
  * borrow QuickJS C-strings which must outlive the query, so their owning
  * pointers are returned in @p *out_strs for the caller to free afterward
  * via worker_js_free_values. Returns 0 / -1. */
+static void worker_js_free_values(JSContext *ctx, HlValue *params,
+                                  const char **strs, int count);
+
 static int worker_js_to_hl_values(JSContext *ctx, JSValueConst arr,
                                   HlValue **out_params, const char ***out_strs,
                                   int *out_count)
@@ -82,10 +86,7 @@ static int worker_js_to_hl_values(JSContext *ctx, JSValueConst arr,
     for (int64_t i = 0; i < len; i++) {
         JSValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
         if (JS_IsException(elem)) {      /* a throwing element getter */
-            for (int64_t j = 0; j < i; j++)
-                if (strs[j]) JS_FreeCString(ctx, strs[j]);
-            free(strs);
-            free(params);
+            worker_js_free_values(ctx, params, strs, (int)i);
             return -1;
         }
 
@@ -110,10 +111,7 @@ static int worker_js_to_hl_values(JSContext *ctx, JSValueConst arr,
             const char *s = JS_ToCStringLen(ctx, &slen, elem);
             if (!s) {
                 JS_FreeValue(ctx, elem);
-                for (int64_t j = 0; j < i; j++)
-                    if (strs[j]) JS_FreeCString(ctx, strs[j]);
-                free(strs);
-                free(params);
+                worker_js_free_values(ctx, params, strs, (int)i);
                 return -1;
             }
             strs[i] = s;   /* freed by worker_js_free_values */
@@ -121,7 +119,25 @@ static int worker_js_to_hl_values(JSContext *ctx, JSValueConst arr,
             params[i].s = s;
             params[i].len = slen;
         } else {
-            params[i].type = HL_TYPE_NIL;
+            const uint8_t *view = NULL;
+            if (hl_js_db_param_other(ctx, elem, &params[i], &view) != 0) {
+                params[i].type = HL_TYPE_NIL;
+                JS_FreeValue(ctx, elem);
+                worker_js_free_values(ctx, params, strs, (int)i);
+                return -1;
+            }
+            if (params[i].type == HL_TYPE_BLOB) {
+                char *copy = malloc(params[i].len ? params[i].len : 1);
+                if (!copy) {
+                    params[i].type = HL_TYPE_NIL;
+                    JS_FreeValue(ctx, elem);
+                    worker_js_free_values(ctx, params, strs, (int)i);
+                    JS_ThrowOutOfMemory(ctx);
+                    return -1;
+                }
+                if (params[i].len) memcpy(copy, view, params[i].len);
+                params[i].s = copy;
+            }
         }
 
         JS_FreeValue(ctx, elem);
@@ -141,6 +157,9 @@ static void worker_js_free_values(JSContext *ctx, HlValue *params,
             if (strs[i]) JS_FreeCString(ctx, strs[i]);
         free(strs);
     }
+    for (int i = 0; params && i < count; i++)   /* the blob copies */
+        if (params[i].type == HL_TYPE_BLOB && params[i].s)
+            free((void *)(uintptr_t)params[i].s);
     free(params);
 }
 

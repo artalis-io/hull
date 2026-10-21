@@ -225,7 +225,14 @@ The eleventh audit added the work the first pass missed:
 - **String to number** (deferred): `JS_ToCStringLen2` charges the string's
   length - its ASCII path scans the whole string and returns the string's own
   buffer, so no allocation charged it (`for (;;) +s` on a 16 MB string, and
-  every Hull binding converting an app string). `ToNumber` /
+  every Hull binding converting an app string). Since audit 23 a charge
+  there that finds the run over budget FAILS the conversion with the
+  interrupt (`js_work_check`, then the 0007 fail path): only counted, a C
+  binding looping over an array that named one big string rescanned it once
+  per element with nothing polled in between - `db.query(sql,
+  new Array(32766).fill(s16MB))`, `http.fetch` headers, `tar.create` names
+  - one call holding the loop for hours, past the budget and the run
+  deadline. `ToNumber` /
   `JS_StringToBigInt` / `parseInt` / `parseFloat` charge the length again for
   the `skip_spaces` + `js_atof` parse.
 - **RegExp flags** (deferred): `Symbol.match` / `matchAll` / `replace` /

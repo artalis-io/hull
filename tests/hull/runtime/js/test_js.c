@@ -12580,6 +12580,69 @@ UTEST(js_audit20, worker_ctx_keys_are_own_properties)
     js_worker_close(be, actx, pool);
 }
 
+/* ── Audit 23 G2: a binding's loop over app strings stops at the budget ─ */
+
+/* JS_ToCStringLen's ASCII path charged its scan but ignored the trip, so a
+ * binding converting an array that names one big string N times rescanned
+ * it N times with nothing polled in between: 32766 x 16 MB here, hours of
+ * one call, past the budget and the run deadline. */
+UTEST(js_audit23, a_string_conversion_past_the_budget_fails_the_call)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a10_run_tripped("globalThis.__a23big = 'x'.repeat(16 << 20);", 0), 0);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    EXPECT_EQ(a10_run_tripped(
+        "try { db.query('SELECT 1', new Array(32766).fill(__a23big)); } catch (e) {}\n"
+        "globalThis.__a23_after = 1;\n", 1000000), 1);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    EXPECT_LT((double)(t1.tv_sec - t0.tv_sec), 10.0);
+    EXPECT_EQ(eval_int("globalThis.__a23_after | 0"), 0);   /* uncatchable */
+    cleanup_js_caps();
+}
+
+/* A db param that was not a string, number, boolean or null bound as NULL,
+ * silently: a blob round-trip stored NULL. Buffers bind as a BLOB, a BigInt
+ * in range as an integer, and anything else throws. */
+UTEST(js_audit23, db_params_bind_buffers_and_refuse_other_objects)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "db.exec('CREATE TABLE a23b (v)');"
+        "db.exec('INSERT INTO a23b VALUES (?)', [new Uint8Array([1, 2, 3])]);"
+        "db.exec('INSERT INTO a23b VALUES (?)', [new Uint8Array([9, 8, 7, 6]).buffer]);"
+        "db.exec('INSERT INTO a23b VALUES (?)', [new Uint16Array([1, 2]).subarray(1)]);"
+        "db.exec('INSERT INTO a23b VALUES (?)', [5n]);"
+        "const r = db.query('SELECT typeof(v) AS t, hex(v) AS h FROM a23b ORDER BY rowid');"
+        "r.map(x => x.t + ':' + x.h).join(',') ==="
+        " 'blob:010203,blob:09080706,blob:0200,integer:35' ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int(
+        "let n = 0;"
+        "for (const v of [{}, new Date(0), Symbol('s'), 2n ** 70n, () => 1]) {"
+        "  try { db.exec('INSERT INTO a23b VALUES (?)', [v]); } catch (e) {"
+        "    if (e instanceof TypeError || e instanceof RangeError) n++; } }"
+        "n"), 5);
+    EXPECT_EQ(eval_int("db.query('SELECT count(*) AS c FROM a23b')[0].c"), 4);
+    /* and through db.async's copy */
+    EXPECT_EQ(eval_int("db.query('SELECT ? AS v', [new Uint8Array([7])])[0].v"
+                       ".byteLength"), 1);
+    cleanup_js_caps();
+}
+
+/* The worker.dispatch VM's db binding did the same. */
+JS_WORKER_CASE(db_params_bind_buffers_in_a_worker,
+    a7_worker_db(),
+    "  const r = await worker.dispatch(() => {\n"
+    "    db.exec('CREATE TABLE a23w (v)');\n"
+    "    db.exec('INSERT INTO a23w VALUES (?)', [new Uint8Array([1, 2])]);\n"
+    "    let m = 'none';\n"
+    "    try { db.exec('INSERT INTO a23w VALUES (?)', [{}]); } catch (e) { m = e.name; }\n"
+    "    const row = db.query('SELECT typeof(v) AS t, hex(v) AS h FROM a23w')[0];\n"
+    "    return row.t + ':' + row.h + ',' + m; });\n"
+    "  check(r === 'blob:0102,TypeError', String(JSON.stringify(r)));\n")
+
 /* ── Audit 22 G1: async input copies are held to the heap limit ──────── */
 
 /* db.async params and a worker.dispatch ctx were copied into plain malloc,
