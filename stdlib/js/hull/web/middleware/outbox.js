@@ -371,4 +371,11 @@ export { outbox };
 
 _test_hooks.register("hull:web:middleware:outbox", {
     setPost(fn) { post = fn || realPost; },
+    // The suite reads its rows back from inside the module, where the
+    // _hull_* namespace check admits the query.
+    rows(id) {
+        return db.query("SELECT state, kind, destination, idempotency_key, " +
+                        "next_attempt_at, created_at FROM _hull_outbox WHERE id = ?", [id]);
+    },
+    clear() { db.exec("DELETE FROM _hull_outbox"); },
 });

@@ -132,5 +132,4 @@ test("report_only=true uses CSP-Report-Only header", function()
               "regular CSP header must NOT be set in report-only mode")
 end)
 
-print(string.format("hull.web.middleware.csp: %d passed, %d failed", pass, fail))
-if fail > 0 then error("csp tests failed") end
+return {pass = pass, fail = fail}

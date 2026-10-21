@@ -9,3 +9,4 @@ ignore = { "21./_.*" }
 -- stdlib test scripts __test_hooks(name): a module's test hooks, which it
 -- no longer exports (audit 16).
 files["stdlib/lua/hull/tests/"] = { read_globals = { "__test_hooks" } }
+files["stdlib/lua/hull/web/middleware/tests/"] = { read_globals = { "__test_hooks" } }

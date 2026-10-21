@@ -13,7 +13,7 @@ function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + e.message);
+        console.log("FAIL: " + name + ": " + e.message);
     }
 }
 
@@ -71,7 +71,8 @@ test("checkAndMark returns true for second call", () => {
 
 test("default source works", () => {
     inbox.markProcessed("js-msg-default-1");
-    assertEq(inbox.isDuplicate("js-msg-default-1"), false);
+    // No source is the "default" source (audit 10), so both spellings see it.
+    assertEq(inbox.isDuplicate("js-msg-default-1"), true);
     assertEq(inbox.isDuplicate("js-msg-default-1", "default"), true);
 });
 
@@ -82,4 +83,5 @@ test("cleanup returns count", () => {
     assertEq(typeof count, "number");
 });
 
-export default { pass, fail };
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

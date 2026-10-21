@@ -599,4 +599,14 @@ function idempotency.cleanup()
     return db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", { now })
 end
 
+-- Test-only hooks, registered with the stdlib-internal hull._test_hooks
+-- rather than exported (audit 16): the suite reads a key's row back from
+-- inside the module, where the _hull_* namespace check admits the query.
+require("hull._test_hooks").register("hull.web.middleware.idempotency", {
+    rows = function(key)
+        return db.query("SELECT state, status FROM _hull_idempotency_keys WHERE key = ?",
+                        { key })
+    end,
+})
+
 return idempotency

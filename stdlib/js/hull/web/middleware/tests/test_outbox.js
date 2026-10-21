@@ -6,6 +6,7 @@
 import { outbox } from "hull:web:middleware:outbox";
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
+const H = __testHooks('hull:web:middleware:outbox');
 let pass = 0;
 let fail = 0;
 
@@ -15,7 +16,7 @@ function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + e.message);
+        console.log("FAIL: " + name + ": " + e.message);
     }
 }
 
@@ -40,7 +41,7 @@ test("enqueue inserts a pending item", () => {
     });
     if (id <= 0) throw new Error("expected positive ID");
 
-    const rows = db.query("SELECT state, kind, destination FROM _hull_outbox WHERE id = ?", [id]);
+    const rows = H.rows(id);
     assertEq(rows.length, 1);
     assertEq(rows[0].state, "pending");
     assertEq(rows[0].kind, "webhook");
@@ -53,7 +54,7 @@ test("enqueue with idempotency key", () => {
         payload: '{"event":"test2"}',
         idempotencyKey: "evt-1-wh-1",
     });
-    const rows = db.query("SELECT idempotency_key FROM _hull_outbox WHERE id = ?", [id]);
+    const rows = H.rows(id);
     assertEq(rows[0].idempotency_key, "evt-1-wh-1");
 });
 
@@ -64,7 +65,7 @@ test("enqueue with delay", () => {
         payload: "{}",
         delay: 300,
     });
-    const rows = db.query("SELECT next_attempt_at, created_at FROM _hull_outbox WHERE id = ?", [id]);
+    const rows = H.rows(id);
     if (rows[0].next_attempt_at <= rows[0].created_at)
         throw new Error("delay should push next_attempt_at");
 });
@@ -99,22 +100,29 @@ test("enqueue requires payload", () => {
     assertEq(caught, true);
 });
 
-// ── flush (delivery fails in test mode) ──────────────────────────────
+// ── flush (delivery stubbed to fail) ─────────────────────────────────
 
-test("flush processes pending items", () => {
-    db.exec("DELETE FROM _hull_outbox");
-
+// flush is async and the harness drives no network, so delivery goes
+// through outbox's own seam: a 503 the flush retries.
+try {
+    H.clear();
     outbox.enqueue({
         kind: "webhook",
         destination: "http://127.0.0.1:9999/test-flush",
         payload: '{"event":"flush"}',
     });
-
-    const result = outbox.flush();
+    H.setPost(async () => ({ status: 503 }));
+    let result;
+    try { result = await outbox.flush(); } finally { H.setPost(null); }
     assertEq(typeof result.delivered, "number", "has delivered count");
     assertEq(typeof result.failed, "number", "has failed count");
     assertEq(typeof result.retried, "number", "has retried count");
-});
+    assertEq(result.delivered + result.failed + result.retried, 1, "one item handled");
+    pass++;
+} catch (e) {
+    fail++;
+    console.log("FAIL: flush processes pending items: " + e.message);
+}
 
 // ── stats ───────────────────────────────────────────────────────────
 
@@ -143,4 +151,5 @@ test("cleanup returns count", () => {
     assertEq(typeof count, "number");
 });
 
-export default { pass, fail };
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

@@ -5046,6 +5046,151 @@ UTEST(lua_stdlib, csrf_suite)
     cleanup_lua_caps();
 }
 
+/* The other middleware suites under web/middleware/tests, which no
+ * harness ran either. */
+UTEST(lua_stdlib, middleware_auth_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_auth.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_cors_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_cors.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_csp_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_csp.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_idempotency_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_idempotency.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_inbox_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_inbox.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_logger_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_logger.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_outbox_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_outbox.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_ratelimit_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_ratelimit.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_rbac_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_rbac.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_session_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_session.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, middleware_transaction_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/web/middleware/tests/test_transaction.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
 /* Stdlib regressions from audit 17: etag helpers with an empty body, and
  * jobs' live config moved to hull._test_hooks. */
 UTEST(lua_stdlib, stdlib_audit17_suite)

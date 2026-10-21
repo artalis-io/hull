@@ -1,8 +1,10 @@
 -- test_idempotency.lua - Tests for hull.web.middleware.idempotency
 --
--- Requires db, crypto, time, json globals (run via hull test harness).
+-- Runs in the C harness's caps-bearing runtime (lua_stdlib.middleware_*).
+local json = require('hull.json')
 
 local idempotency = require('hull.web.middleware.idempotency')
+local H = __test_hooks('hull.web.middleware.idempotency')
 
 local pass = 0
 local fail = 0
@@ -87,10 +89,7 @@ test("first request with key inserts inflight record", function()
     assert_eq(req.ctx._idem_principal, "__anon")
 
     -- Verify inflight record exists
-    local rows = db.query(
-        "SELECT state FROM _hull_idempotency_keys WHERE key = ?",
-        { "key-first-1" }
-    )
+    local rows = H.rows("key-first-1")
     assert_eq(#rows, 1)
     assert_eq(rows[1].state, "inflight")
 end)
@@ -164,10 +163,7 @@ test("complete marks key done without caching response", function()
     idempotency.complete(req)
 
     -- Verify state is complete but no status cached
-    local rows = db.query(
-        "SELECT state, status FROM _hull_idempotency_keys WHERE key = ?",
-        { "key-complete-1" }
-    )
+    local rows = H.rows("key-complete-1")
     assert_eq(#rows, 1)
     assert_eq(rows[1].state, "complete")
 end)

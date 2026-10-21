@@ -13,7 +13,7 @@ function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + e.message);
+        console.log("FAIL: " + name + ": " + e.message);
     }
 }
 
@@ -122,5 +122,5 @@ test("reportOnly: true uses CSP-Report-Only header", () => {
              "regular CSP header must NOT be set in report-only mode");
 });
 
-print(`hull:web:middleware:csp: ${pass} passed, ${fail} failed`);
-if (fail > 0) throw new Error("csp tests failed");
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

@@ -4,6 +4,7 @@
 -- Note: outbound HTTP calls will fail in test mode (no actual server).
 
 local outbox = require('hull.web.middleware.outbox')
+local H = __test_hooks('hull.web.middleware.outbox')
 
 local pass = 0
 local fail = 0
@@ -40,7 +41,7 @@ test("enqueue inserts a pending item", function()
     })
     assert(id > 0, "expected positive ID")
 
-    local rows = db.query("SELECT state, kind, destination FROM _hull_outbox WHERE id = ?", { id })
+    local rows = H.rows(id)
     assert_eq(#rows, 1)
     assert_eq(rows[1].state, "pending")
     assert_eq(rows[1].kind, "webhook")
@@ -53,7 +54,7 @@ test("enqueue with idempotency key", function()
         payload = '{"event":"test2"}',
         idempotency_key = "evt-1-wh-1",
     })
-    local rows = db.query("SELECT idempotency_key FROM _hull_outbox WHERE id = ?", { id })
+    local rows = H.rows(id)
     assert_eq(rows[1].idempotency_key, "evt-1-wh-1")
 end)
 
@@ -64,7 +65,7 @@ test("enqueue with delay", function()
         payload = "{}",
         delay = 300,
     })
-    local rows = db.query("SELECT next_attempt_at, created_at FROM _hull_outbox WHERE id = ?", { id })
+    local rows = H.rows(id)
     assert(rows[1].next_attempt_at > rows[1].created_at, "delay should push next_attempt_at")
 end)
 
@@ -93,7 +94,7 @@ end)
 
 test("flush processes pending items", function()
     -- Clear outbox
-    db.exec("DELETE FROM _hull_outbox")
+    H.clear()
 
     outbox.enqueue({
         kind = "webhook",
