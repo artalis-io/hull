@@ -776,7 +776,7 @@ static long json_int_field(const char *buf, const char *key)
  * it (not strlen) to the parser + emitter so an embedded NUL cannot hide trailing bytes. */
 static char *read_whole_file(const char *path, size_t cap, size_t *out_len)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = hl_agent_open_sidecar(path);   /* no link, no FIFO (audit 22) */
     if (!f) return NULL;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
     long sz = ftell(f);

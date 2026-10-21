@@ -1901,6 +1901,29 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
         if (load_err) *load_err = load_err_buf;
         return -1;
     }
+    /* A module's runtime error is not an exception here: evaluation rejects
+     * the module's promise and returns it. Freed unexamined, a file whose
+     * top level threw ran the tests registered before the throw and
+     * reported a pass, the rest silently missing (audit 22) - as for app
+     * load (hl_js_settle_module), it is a load error. */
+    hl_js_run_jobs(js);
+    if (JS_IsObject(result) &&
+        JS_PromiseState(js->ctx, result) == JS_PROMISE_REJECTED) {
+        JSValue reason = JS_PromiseResult(js->ctx, result);
+        JSValue msg_val = JS_IsObject(reason)
+            ? JS_GetPropertyStr(js->ctx, reason, "message")
+            : JS_DupValue(js->ctx, reason);
+        const char *msg = JS_ToCString(js->ctx, msg_val);
+        snprintf(load_err_buf, sizeof(load_err_buf), "%s",
+                 msg ? msg : "the test file's top level threw");
+        if (msg) JS_FreeCString(js->ctx, msg);
+        else JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+        JS_FreeValue(js->ctx, msg_val);
+        JS_FreeValue(js->ctx, reason);
+        JS_FreeValue(js->ctx, result);
+        if (load_err) *load_err = load_err_buf;
+        return -1;
+    }
     JS_FreeValue(js->ctx, result);
 
     /* hl_js_test_run unconditionally writes to file_total/passed/failed.

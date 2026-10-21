@@ -1106,6 +1106,13 @@ local function cmd_refresh_header(name)
                         "/ does not exist\n")
             tool.exit(1)
         end
+        -- Discovery skips links; the named form wrote the headers through
+        -- one, into its target (audit 22).
+        if tool.is_symlink("compute") or tool.is_symlink("compute/" .. name) then
+            tool.stderr("hull compute refresh-header: compute/" .. name ..
+                        " is a symbolic link; refusing\n")
+            tool.exit(1)
+        end
         modules = { { name = name } }
     else
         modules = discover_valid("refresh-header")

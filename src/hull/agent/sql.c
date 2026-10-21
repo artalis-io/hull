@@ -47,7 +47,7 @@ static char *read_queries_file(const char *app_dir, size_t *out_len)
     for (int i = 0; names[i]; i++) {
         char path[HL_AGENT_PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", app_dir, names[i]);
-        FILE *f = fopen(path, "rb");
+        FILE *f = hl_agent_open_sidecar(path);   /* no link, no FIFO (audit 22) */
         if (!f) continue;
         if (fseek(f, 0, SEEK_END) != 0) { fclose(f); continue; }
         long n = ftell(f);

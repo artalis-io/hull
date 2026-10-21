@@ -28,6 +28,16 @@
 #define HL_AGENT_LIB_H
 
 #include <sh_json.h>
+#include <stdio.h>
+
+/*
+ * Open a file in an app's tree for reading (a dev sidecar under <app>/.hull,
+ * queries.json, a source file): O_NOFOLLOW, O_NONBLOCK (a planted FIFO
+ * blocked `agent errors` / `status` / `logs`, and `agent inspect` / `sql
+ * named` - audit 22), regular files only. NULL when it cannot be opened
+ * that way.
+ */
+FILE *hl_agent_open_sidecar(const char *path);
 
 /* Forward declaration */
 typedef struct HlAppContext HlAppContext;
