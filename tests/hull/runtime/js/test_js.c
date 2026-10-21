@@ -12104,6 +12104,43 @@ UTEST(js_audit20, free_with_a_timer_parked_on_sleep)
 }
 #endif
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 22: a timer handler whose last Hull op resumed while it still
+ * awaited a promise nothing drives was never completed: in_flight stayed 1
+ * and the timer never fired again (a ws on_close the same way never tore
+ * its conn down). Its run ends at that resume now. */
+UTEST(js_audit22, a_timer_waiting_on_nothing_hull_drives_fires_again)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    js.base.async_ctx = actx;
+    a12_eval_app(
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1', 'hull/timers@1'] });\n"
+        "app.get('/x', (req, res) => {});\n"
+        "app.every(100, async () => {\n"
+        "  globalThis.__a22_fired = (globalThis.__a22_fired | 0) + 1;\n"
+        "  await hull.sleep(5);\n"
+        "  await new Promise(() => {});\n"
+        "});\n");
+    KlHttpServer server;
+    KlHttpServerConfig cfg = { .port = 0, .max_connections = 1, .alloc = NULL };
+    kl_http_server_init(&server, &cfg);
+    ASSERT_EQ(hl_js_wire_routes_server(&js, &server, NULL), 0);
+    for (int i = 0; i < 200 && eval_int("globalThis.__a22_fired | 0") < 3; i++)
+        be->tick(actx, 20);
+    EXPECT_GE(eval_int("globalThis.__a22_fired | 0"), 3);
+    kl_http_server_free(&server);
+    cleanup_js();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+#endif
+
 /* Audit 21: an op a synchronous entry did not await (`http.fetch(x)` in a
  * ws on_close) captured the entry's completion hook - the ws conn teardown.
  * The entry ran that teardown itself when it returned (freeing the conn);
