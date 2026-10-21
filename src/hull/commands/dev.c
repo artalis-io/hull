@@ -225,6 +225,10 @@ static pid_t dev_spawn(const char *exe, const char *const argv[],
 
 static void agent_publish_discovery(const char *hull_exe, const char *app_dir, long generation)
 {
+    /* The publisher writes .hull/discovery.json: through a committed
+     * `.hull -> <dir>` link, as every other sidecar write here refuses to
+     * (audit 23). */
+    if (!agent_dir_safe(app_dir)) return;
     char gen_arg[64], sp_arg[64];
     snprintf(gen_arg, sizeof(gen_arg), "--generation=%ld", generation);
     snprintf(sp_arg, sizeof(sp_arg), "--session-pid=%d", (int)getpid());

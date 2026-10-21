@@ -86,6 +86,11 @@ static HlToolUnveilCtx *get_unveil_ctx(lua_State *L)
     return ctx;
 }
 
+HlToolUnveilCtx *hl_lua_tool_unveil_ctx(lua_State *L)
+{
+    return get_unveil_ctx(L);
+}
+
 /* The path argument at @p idx of a binding that writes there (a file, or a
  * directory it fills), or NULL when the tool sandbox does not grant writing
  * and creating it. Audit 10: these bindings wrote wherever the script named,

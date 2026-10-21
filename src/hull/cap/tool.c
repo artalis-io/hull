@@ -1279,11 +1279,24 @@ static int should_skip_dir(const char *name, int include_vendor,
     return 0;
 }
 
+/* How deep find_files walks below its root: each level holds a PATH_MAX
+ * buffer on the stack, and a ~2000-deep tree overflowed it (audit 23). In
+ * HL_TOOL_FIND_ALL mode (hull verify) the bound is the --verify-sig scan's
+ * (sig_scan_unsigned, 16), so the two cannot disagree about a tree. */
+#define HL_TOOL_FIND_MAX_DEPTH     64
+#define HL_TOOL_FIND_ALL_MAX_DEPTH 16
+
 /* Recursive helper for find_files */
 static int find_files_recurse(const char *dir, const char *pattern,
                                char ***results, size_t *count, size_t *cap,
-                               int include_vendor, const char *const *extra)
+                               int include_vendor, const char *const *extra,
+                               int depth)
 {
+    int all = (include_vendor & HL_TOOL_FIND_ALL) != 0;
+    if (depth > (all ? HL_TOOL_FIND_ALL_MAX_DEPTH : HL_TOOL_FIND_MAX_DEPTH)) {
+        errno = ELOOP;
+        return -1;
+    }
     DIR *d = opendir(dir);
     if (!d) {
         /* ENOENT = the directory does not exist / raced away: an explicitly-classified
@@ -1303,11 +1316,19 @@ static int find_files_recurse(const char *dir, const char *pattern,
         /* Build full path */
         size_t dlen = strlen(dir);
         size_t nlen = strlen(ent->d_name);
-        if (dlen + 1 + nlen + 1 > PATH_MAX) continue;
+        /* An entry whose path does not fit: skipped by a build walk, but a
+         * verify walk must see every entry, as --verify-sig fails on one. */
+        if (dlen + 1 + nlen + 1 > PATH_MAX) {
+            if (all) { rc = -1; break; }
+            continue;
+        }
 
         char path[PATH_MAX];
         int pn = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
-        if (pn < 0 || (size_t)pn >= sizeof(path)) continue;
+        if (pn < 0 || (size_t)pn >= sizeof(path)) {
+            if (all) { rc = -1; break; }
+            continue;
+        }
 
         struct stat st;
         if (lstat(path, &st) != 0) {
@@ -1319,7 +1340,10 @@ static int find_files_recurse(const char *dir, const char *pattern,
             /* Propagate a subdirectory failure (traversal OR allocation): never return
              * a partial "success". */
             if (find_files_recurse(path, pattern, results, count, cap,
-                                   include_vendor, extra) < 0) { rc = -1; break; }
+                                   include_vendor, extra, depth + 1) < 0) {
+                rc = -1;
+                break;
+            }
         } else if (S_ISREG(st.st_mode) || (include_vendor & HL_TOOL_FIND_ALL)) {
             if (fnmatch(pattern, ent->d_name, 0) == 0) {
                 /* Add to results */
@@ -1368,7 +1392,7 @@ char **hl_tool_find_files_ex(const char *dir, const char *pattern,
     /* An allocation failure anywhere in the walk returns NULL (an error), never a
      * partial or unpruned "success" -- callers must fail closed on NULL. */
     if (find_files_recurse(dir, pattern, &results, &count, &cap,
-                           include_vendor, extra) < 0) {
+                           include_vendor, extra, 0) < 0) {
         for (size_t i = 0; i < count; i++) free(results[i]);
         free(results);
         return NULL;
