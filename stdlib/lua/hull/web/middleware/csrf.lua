@@ -153,7 +153,9 @@ function csrf.middleware(opts)
     local ttl = opts.ttl
     if ttl == nil then ttl = opts.max_age end
     if ttl == nil then ttl = 3600 end
-    local header_name = opts.header_name or "x-csrf-token"
+    -- req.headers keys are lowercase: "X-CSRF-Token" never matched, where
+    -- JS's req.header() ignores case (audit 22).
+    local header_name = (opts.header_name or "x-csrf-token"):lower()
     local field_name = opts.field_name or "_csrf"
     -- Fallback session-cookie name when upstream session middleware hasn't
     -- populated req.ctx[session_key]. Matches the session/auth default so the

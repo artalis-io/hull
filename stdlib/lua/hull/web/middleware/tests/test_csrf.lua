@@ -56,4 +56,19 @@ test("verify rejects malformed token", function()
     assert_eq(csrf.verify("no-dot-here", "sess", "secret", 3600), false)
 end)
 
+-- Audit 22: req.headers keys are lowercase, so a mixed-case header_name
+-- ("X-CSRF-Token") never matched and every header-token request got 403.
+test("a mixed-case header_name matches", function()
+    local mw = csrf.middleware({ secret = "s3cret", header_name = "X-CSRF-Token" })
+    local tok = csrf.generate("sess1", "s3cret")
+    local status
+    local res = {}
+    function res:status(c) status = c; return self end
+    function res:json() return self end
+    local rc = mw({ method = "POST", ctx = { session_id = "sess1" },
+                    headers = { ["x-csrf-token"] = tok } }, res)
+    assert_eq(rc, 0)
+    assert_eq(status, nil)
+end)
+
 return {pass = pass, fail = fail}

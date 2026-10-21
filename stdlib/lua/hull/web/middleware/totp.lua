@@ -162,6 +162,12 @@ local _state = {
     -- into another account's row. Off once rekey_status().unbound is 0
     -- (audit 16).
     allow_unbound_secrets = true,
+    -- A plaintext row (encrypted = 0) while a key is configured: written
+    -- before encryption was turned on, or planted by whoever can write
+    -- _hull_totp - a secret whose codes the writer knows, which the next
+    -- verify re-seals bound to the account. Off once
+    -- rekey_status().plaintext is 0 (audit 22).
+    allow_plaintext_secrets = true,
     _initialized        = false,
 }
 
@@ -367,10 +373,18 @@ end
 -- on failure. Caller uses the returned version to decide whether to
 -- re-encrypt under current (lazy rekey-on-verify), and `unbound` (a v2 blob
 -- sealed without the account context, before audit 15) to re-seal it bound.
--- An unbound blob opens only while allow_unbound_secrets is on (audit 16);
--- `allow_unbound` overrides that for rekey_status, which counts them.
+-- An unbound blob opens only while allow_unbound_secrets is on (audit 16),
+-- a plaintext row with a key configured only while allow_plaintext_secrets
+-- is (audit 22); `allow_unbound` = true overrides both for rekey_status,
+-- which counts them.
 local function decrypt_secret(blob, encrypted, user_id, allow_unbound)
-    if encrypted == 0 then return blob, 0 end
+    if encrypted == 0 then
+        if _state.current_key_version and not _state.allow_plaintext_secrets
+           and allow_unbound ~= true then
+            return nil
+        end
+        return blob, 0
+    end
     if type(blob) ~= "string" then return nil end
 
     local pt, version_or_reason = sealbox.open(keyring(), blob, seal_context(user_id))
@@ -702,6 +716,13 @@ end
 --                       next verify). Set `false` once
 --                       `rekey_status().unbound` is 0: such a blob is
 --                       then refused (audit 16).
+--   * `allow_plaintext_secrets` Default `true`. With encryption keys
+--                       configured, a row stored in plaintext (enrolled
+--                       before encryption was on - or written by someone
+--                       with access to `_hull_totp`) still verifies, and
+--                       is sealed on that verify. Set `false` once
+--                       `rekey_status().plaintext` is 0 (run `rekey()`):
+--                       such a row is then refused (audit 22).
 function totp.init(opts)
     opts = opts or {}
     if opts.digits and opts.digits ~= 6 and opts.digits ~= 8 then
@@ -812,6 +833,12 @@ function totp.init(opts)
             error("totp.init: allow_unbound_secrets must be a boolean", 2)
         end
         _state.allow_unbound_secrets = opts.allow_unbound_secrets
+    end
+    if opts.allow_plaintext_secrets ~= nil then
+        if type(opts.allow_plaintext_secrets) ~= "boolean" then
+            error("totp.init: allow_plaintext_secrets must be a boolean", 2)
+        end
+        _state.allow_plaintext_secrets = opts.allow_plaintext_secrets
     end
     _state.keys                 = keys
     _state.current_key_version  = current
@@ -1279,9 +1306,10 @@ function totp.rekey_status()
     check_initialized()
     local rows = db.query(
         "SELECT user_id, secret, encrypted FROM _hull_totp")
-    local counts = { total = 0, unbound = 0 }
+    local counts = { total = 0, unbound = 0, plaintext = 0 }
     for _, r in ipairs(rows or {}) do
         counts.total = counts.total + 1
+        if r.encrypted == 0 then counts.plaintext = counts.plaintext + 1 end
         local _, version, unbound = decrypt_secret(r.secret, r.encrypted, r.user_id, true)
         if unbound then counts.unbound = counts.unbound + 1 end
         -- version is nil on decrypt failure; use 0 as the "unknown
@@ -1362,9 +1390,13 @@ require("hull._test_hooks").register("hull.web.middleware.totp", {
     base32_decode           = base32_decode,
     get_blob                = debug_get_blob,
     -- Replace a user's stored secret blob (an unbound pre-audit-15 seal).
-    set_blob                = function(user_id, blob)
+    set_blob                = function(user_id, blob, encrypted)
         db.exec("UPDATE _hull_totp SET secret = ? WHERE user_id = ?",
                 { blob, user_id })
+        if encrypted ~= nil then
+            db.exec("UPDATE _hull_totp SET encrypted = ? WHERE user_id = ?",
+                    { encrypted, user_id })
+        end
     end,
     totp_at_step            = totp_at_step,
     current_step            = current_step,
@@ -1410,6 +1442,7 @@ require("hull._test_hooks").register("hull.web.middleware.totp", {
         _state.current_key_version = nil
         _state.legacy_key_version  = nil
         _state.allow_unbound_secrets = true
+        _state.allow_plaintext_secrets = true
         _state._cleanup_catchup_done = false
         _state._cleanup_scheduled    = false
         _state._initialized        = false

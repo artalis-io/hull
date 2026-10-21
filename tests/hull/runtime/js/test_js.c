@@ -5388,6 +5388,21 @@ UTEST(js_stdlib, stdlib_audit16_suite)
     cleanup_js_caps();
 }
 
+/* Stdlib regressions from audit 22: totp's allowPlaintextSecrets and
+ * rekeyStatus().plaintext. */
+UTEST(js_stdlib, stdlib_audit22_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit22.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+    cleanup_js_caps();
+}
+
 /* Stdlib regressions from audit 17: etag helpers with an empty body, and
  * jobs' live config moved to hull:_test_hooks. */
 UTEST(js_stdlib, stdlib_audit17_suite)
