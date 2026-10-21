@@ -649,7 +649,7 @@ static void tools_put_header(unsigned char *b, const char *name, size_t size,
     memset(b + 148, ' ', 8);
     for (int i = 0; i < 512; i++) sum += b[i];
     snprintf((char *)(b + 148), 7, "%06o", sum);
-    b[154] = ' ';
+    b[154] = '\0';
     b[155] = ' ';
 }
 

@@ -127,6 +127,14 @@ local function main()
         tool.stderr("hull sign-platform: invalid public key format\n")
         tool.exit(1)
     end
+    -- The .pub must be the .key's own public half (the last 32 bytes of an
+    -- Ed25519 secret key): a mismatched pair wrote a platform.sig whose
+    -- public_key does not verify its own signature (audit 21).
+    if pk_hex:lower() ~= sk_hex:sub(65, 128):lower() then
+        tool.stderr("hull sign-platform: " .. pk_file .. " is not the public " ..
+                    "key of " .. key_file .. "\n")
+        tool.exit(1)
+    end
 
     -- Find platform library files.
     --

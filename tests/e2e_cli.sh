@@ -627,6 +627,62 @@ LUA
         echo "  SKIP: hull build symlinked static/ (no symlinks here)"
     fi
     rm -rf "$d"
+
+    # (audit 21) A symlinked compute/ was compiled - its sources read and its
+    # .wasm written through the link, outside the app - before the build
+    # refused the root; `hull compute build` never checked at all.
+    d=$(mktemp -d)
+    mkdir -p "${d}/app" "${d}/elsewhere/m"
+    printf 'int hull_process(void) { return 0; }\n' > "${d}/elsewhere/m/m.c"
+    cat > "${d}/app/app.lua" <<'LUA'
+app.manifest({ modules = {} })
+app.main(function() return 0 end)
+LUA
+    if ln -s ../elsewhere "${d}/app/compute" 2>/dev/null && [ -L "${d}/app/compute" ]; then
+        bin=$(build_cli "${d}/app")
+        if grep -q "is a symbolic link" "${d}/app/build.log"; then
+            pass "hull build: symlinked compute/ refused"
+        else
+            fail "hull build: symlinked compute/ (got '$(tail -3 "${d}/app/build.log")')"
+        fi
+        [ ! -e "${d}/elsewhere/m.wasm" ] && pass "hull build: nothing compiled through compute/" \
+            || fail "hull build: wrote a .wasm through a symlinked compute/"
+        ( cd "${d}/app" && "${hull_abs}" compute build > "${d}/cb.log" 2>&1 ) || true
+        if grep -q "is a symbolic link" "${d}/cb.log"; then
+            pass "hull compute build: symlinked compute/ refused"
+        else
+            fail "hull compute build: symlinked compute/ (got '$(tail -3 "${d}/cb.log")')"
+        fi
+    else
+        echo "  SKIP: hull build symlinked compute/ (no symlinks here)"
+    fi
+    rm -rf "$d"
+
+    # (audit 21) --sign ignored a package.sig it could not write (a symlink -
+    # tool.write_file does not follow one): exit 0, "wrote package.sig".
+    d=$(mktemp -d)
+    cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = {} })
+app.main(function() return 0 end)
+LUA
+    ( cd "$d" && "${hull_abs}" keygen >/dev/null 2>&1 ) || true
+    if [ -f "${d}/developer.key" ] &&
+       ln -s "${d}/nowhere/package.sig" "${d}/package.sig" 2>/dev/null &&
+       [ -L "${d}/package.sig" ]; then
+        bin=$(build_cli "$d" --sign "${d}/developer.key")
+        if grep -q "cannot read platform.sig" "${d}/build.log"; then
+            echo "  SKIP: hull build --sign unwritable package.sig (no platform.sig for this hull)"
+        elif grep -q "cannot write" "${d}/build.log"; then
+            pass "hull build --sign: an unwritable package.sig fails the build"
+        else
+            fail "hull build --sign: unwritable package.sig (got '$(tail -3 "${d}/build.log")')"
+        fi
+        [ -z "$bin" ] && pass "hull build --sign: no unsigned binary when package.sig is not written" \
+            || fail "hull build --sign: left a binary without its package.sig"
+    else
+        echo "  SKIP: hull build --sign unwritable package.sig (no keygen or symlinks here)"
+    fi
+    rm -rf "$d"
 }
 
 run_built_cli

@@ -388,7 +388,7 @@ static int tool_bdir_trusted(const char *dir)
     if (!dir || !*dir || !realpath(dir, real)) return 0;
 
     int trusted = 0;
-    const char *home = getenv("HOME");
+    const char *home = hl_host_home();
     if (home && *home) {
         char tools[PATH_MAX], rtools[PATH_MAX];
         int n = snprintf(tools, sizeof tools, "%s/.hull/tools", home);
@@ -863,8 +863,7 @@ int hl_tool_cosmo_shell(const char *driver, char *out, size_t outsz)
         }
     }
 
-    const char *home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
+    const char *home = hl_host_home();
     if (!home || !*home) return -1;
     /* busybox rides inside the cosmocc bundle (item E: bin/busybox.exe). */
     static const char *rel[] = {
@@ -918,8 +917,7 @@ void hl_tool_cosmo_prepare_tmpdir(void)
         done = 1;
         return;
     }
-    const char *home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
+    const char *home = hl_host_home();
     if (home && *home) {
         /* Normalize the home path to DRIVE-COLON form (C:/Users/me), the one
          * form BOTH cosmo and the bundled busybox-w64 accept:

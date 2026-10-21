@@ -179,8 +179,7 @@ int hl_driver_resolve_native(char *out, size_t outsz)
     {
         /* $HOME, falling back to $USERPROFILE: a cosmo hull running natively on
          * Windows has no $HOME (see docs/cosmocc_install.md, spec item D). */
-        const char *home = getenv("HOME");
-        if (!home || !*home) home = getenv("USERPROFILE");
+        const char *home = hl_host_home();
         char path[512];
         if (home && *home) {
             /* The `hull tools install cosmocc` bundle (spec item E) installs to

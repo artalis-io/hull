@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
 #include "test_tmpdir.h"
 
 /* ── Host identity ─────────────────────────────────────────────────── */
@@ -955,6 +956,60 @@ UTEST(host, symlinked_home_sub_is_matched_through_its_target)
     unlink(dot);
     rmdir(rkeys);
     broad_leave(&e);
+}
+
+/* ── The home directory has one reader (audit 20 / 21) ─────────────── */
+
+/* Every path under ~/.hull comes from hl_host_home(): an absolute $HOME or
+ * $USERPROFILE, else the password database. Read raw, a relative HOME
+ * (`HOME=.` in a unit file) put the cache key (audit 20) and then the cosmocc
+ * driver hull runs, the libc floor it links and the -B dirs it trusts
+ * (audit 21) under the working directory - a cloned app's own tree. Any
+ * src/hull/ file but shared/host.c reading HOME or USERPROFILE fails this. */
+static int home_reads_in(const char *dir, char *bad, size_t badsz)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent *e;
+    while (!found && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        char path[1024];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            found = home_reads_in(path, bad, badsz);
+            continue;
+        }
+        size_t n = strlen(e->d_name);
+        if (n < 2 || strcmp(e->d_name + n - 2, ".c") != 0) continue;
+        if (strstr(path, "shared/host.c")) continue;
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+        char line[4096];
+        while (fgets(line, sizeof line, f)) {
+            if (strstr(line, "getenv(\"HOME\")") ||
+                strstr(line, "getenv(\"USERPROFILE\")")) {
+                snprintf(bad, badsz, "%s: %s", path, line);
+                found = 1;
+                break;
+            }
+        }
+        fclose(f);
+    }
+    closedir(d);
+    return found;
+}
+
+UTEST(host, home_is_read_only_through_hl_host_home)
+{
+    struct stat st;
+    if (stat("src/hull/shared/host.c", &st) != 0)
+        UTEST_SKIP("not run from the source tree");
+    char bad[2048] = "";
+    EXPECT_EQ(home_reads_in("src/hull", bad, sizeof bad), 0);
+    if (bad[0]) printf("  raw home read: %s\n", bad);
 }
 
 UTEST_MAIN()

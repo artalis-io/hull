@@ -1316,7 +1316,7 @@ static int l_tool_hull_cache_dir(lua_State *L)
  * look for a cached lib there; nil when HOME is unset. */
 static int l_tool_platform_cache_dir(lua_State *L)
 {
-    const char *home = getenv("HOME");
+    const char *home = hl_host_home();
     if (!home || !*home) { lua_pushnil(L); return 1; }
     char out[PATH_MAX];
     int n = snprintf(out, sizeof(out), "%s/.hull/platform", home);
@@ -1334,7 +1334,7 @@ static int l_tool_platform_cache_dir(lua_State *L)
  * which is generic over the cache dir. */
 static int l_tool_feature_cache_dir(lua_State *L)
 {
-    const char *home = getenv("HOME");
+    const char *home = hl_host_home();
     if (!home || !*home) { lua_pushnil(L); return 1; }
     char out[PATH_MAX];
     int n = snprintf(out, sizeof(out), "%s/.hull/feature", home);

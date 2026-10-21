@@ -90,6 +90,10 @@ function M.discover_modules(app_dir)
     local modules = {}
     local invalid = {}
     if not tool.file_exists(compute_dir) then return modules, invalid end
+    -- An app's compute/ is its own: through a link, clang read sources from
+    -- and wrote .wasm / hull_compute.h into wherever it pointed (audit 21).
+    -- The commands refuse such a root with a message; nothing is found here.
+    if tool.is_symlink(compute_dir) then return modules, invalid end
 
     local files = tool.find_files(compute_dir, "*.c")
     local seen = {}
