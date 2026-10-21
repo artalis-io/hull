@@ -133,6 +133,17 @@ void hl_js_run_wire(HlJsRunLink *last, JSContext *ctx, JSValue promise,
             c->once = once;
             once->refs++;
         }
+        if (!once) {
+            /* No run record (out of memory): nothing shares a claim, so
+             * every wired continuation would complete the run - a ws conn
+             * torn down twice, a timer rescheduled twice (audit 22). Only
+             * the newest is wired; the earlier ones belong to no run. */
+            while (prev) {
+                HlJsRunLink *pp = prev->unwired_prev;
+                prev->unwired_prev = NULL;
+                prev = pp;
+            }
+        }
         c = prev;
     }
     if (once && once->refs == 0) free(once);
@@ -705,6 +716,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
          * join THIS run, so the run still completes exactly once across old
          * and new continuations. */
         HlJsRunOnce *run = jc->link.once;
+        int rewired = js->last_async_cont != NULL;
         if (js->last_async_cont) {
             HlAsyncCont *nc = (HlAsyncCont *)js->last_async_cont;
             hl_js_run_wire(hl_js_cont_link(nc), ctx, jc->link.handler_promise,
@@ -755,6 +767,29 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
                 run->done = 1;
                 release = (HlAsyncCtx *)run->hold;
             }
+        }
+        /* A detached run (a timer, a ws on_close) waiting on nothing Hull
+         * drives: this resume wired no continuation, and no other one of the
+         * run is left (this one is its only reference) to finish it. A
+         * timer stayed in_flight - never to fire again - and an on_close
+         * never tore its conn down, which then leaked into JS_FreeRuntime
+         * (audit 22). It ends here, as a request's run does above. */
+        if (!conn && wired && !rewired && run && run->refs == 1 && !run->hold &&
+            (jc->on_complete || jc->timer_ctx) && hl_js_run_claim(&jc->link)) {
+            log_warn("[hull:js] async callback awaits a promise Hull does not "
+                     "drive; its run ends now");
+            if (jc->on_complete) {
+                jc->on_complete(js, jc->on_complete_ctx);
+                jc->on_complete = NULL;
+            }
+#ifdef HL_ENABLE_HTTP_SERVER
+            if (jc->timer_ctx) {
+                HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
+                t->in_flight = 0;
+                hl_js_timer_reschedule(t);
+            }
+#endif
+            jc->timer_ctx = NULL;
         }
         JS_FreeValue(ctx, jc->link.handler_promise);
         jc->link.handler_promise = JS_UNDEFINED;
