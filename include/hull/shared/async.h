@@ -16,6 +16,7 @@
 #define HL_ASYNC_H
 
 #include <keel/async.h>
+#include "hull/shared/offheap.h"
 
 /* Forward declarations */
 typedef struct HlAllocator       HlAllocator;
@@ -142,6 +143,11 @@ typedef struct HlAsyncCtx {
     /* Optional: stop the op's driver (a timer, an in-flight request) before
      * a teardown cancels the ctx. Set by the op's owner. */
     void       (*on_shutdown)(struct HlAsyncCtx *ctx, HlAsyncBackendCtx *loop);
+
+    /* Off-heap bytes the op's input copy holds on the submitting VM's
+     * total (offheap.h): an http.fetch body Keel copied. Given back when
+     * the ctx goes, on every path (audit 22). */
+    HlOffheapHold hold;
 } HlAsyncCtx;
 
 /*

@@ -19,6 +19,7 @@
 #include "hull/cap/db_backend.h"  /* HlDbHandle */
 #include "hull/cap/db_budget.h"   /* HlDbOpBudget */
 #include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE */
+#include "hull/shared/offheap.h"  /* HlOffheapHold */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -183,6 +184,12 @@ typedef struct HlWorkerDbOp {
     int            error;
     char           error_msg[HL_WORKER_ERR_SIZE];
     int            cancelled;     /* set by async cancel, checked by done_fn */
+
+    /* The SQL and params copies, held on the submitting VM's off-heap total
+     * under its heap limit (hl_worker_db_copy_bytes): uncounted, one call
+     * whose params named one big string 32766 times copied it 32766 times
+     * (audit 22). Given back by hl_worker_db_op_free. */
+    HlOffheapHold  copy_hold;
 } HlWorkerDbOp;
 
 /* Submit a db.async operation to the thread pool.
@@ -203,5 +210,10 @@ void hl_worker_db_async_cancel(KlAsyncOp *op, void *user_data);
 /* Deep-copy HlValue params array. String/blob values get heap copies.
  * Returns NULL on failure or if n <= 0. Caller frees strings + array. */
 HlValue *hl_deep_copy_params(const HlValue *src, int n);
+
+/* The bytes hl_deep_copy_params copies for @p src, plus @p sql_len (the
+ * SQL's copy) - SIZE_MAX when the sum overflows. A binding takes an
+ * HlOffheapHold for it, and charges it, before it copies. */
+size_t hl_worker_db_copy_bytes(const HlValue *src, int n, size_t sql_len);
 
 #endif /* HL_WORKER_DB_H */

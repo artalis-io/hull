@@ -706,6 +706,20 @@ int hl_worker_db_submit(HlAsyncBackendPool *pool, HlWorkerDbOp *op)
     return be->pool_submit(pool, db_work_fn, db_done_fn, db_cancel_fn, op);
 }
 
+size_t hl_worker_db_copy_bytes(const HlValue *src, int n, size_t sql_len)
+{
+    size_t total = sql_len;
+    for (int i = 0; src && i < n; i++) {
+        if ((src[i].type != HL_TYPE_TEXT && src[i].type != HL_TYPE_BLOB) ||
+            !src[i].s)
+            continue;
+        size_t one = src[i].len + 1;
+        if (one == 0 || total > SIZE_MAX - one) return SIZE_MAX;
+        total += one;
+    }
+    return total;
+}
+
 /* Deep-copy helper for HlValue params */
 HlValue *hl_deep_copy_params(const HlValue *src, int n)
 {
@@ -750,8 +764,10 @@ void hl_worker_db_op_free(HlWorkerDbOp *op)
                 hl_free_const(op->params[i].s);
         }
         free(op->params);
+        op->params = NULL;
     }
     hl_db_result_free(&op->result);
+    hl_offheap_drop(&op->copy_hold);
 }
 
 void hl_worker_db_op_free_all(void *ptr)

@@ -8,6 +8,7 @@
 #include "hull/shared/async.h"
 #include "hull/module_resolver.h"
 #include "hull/net_backend.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 #include <keel/http_server.h>
 
@@ -19,6 +20,24 @@
  *
  * worker.dispatch(fn, ctx) - dispatch fn to a worker thread
  * ════════════════════════════════════════════════════════════════════ */
+
+/* The bytes lua_table_to_kv copies for the table at @p idx (no conversion
+ * runs: keys are strings, a value is copied only when it is one). */
+static size_t lua_table_kv_bytes(lua_State *L, int idx)
+{
+    size_t total = 0;
+    if (lua_isnoneornil(L, idx)) return 0;
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0) {
+        if (lua_type(L, -2) == LUA_TSTRING) {
+            size_t one = lua_rawlen(L, -2) + 1;
+            if (lua_type(L, -1) == LUA_TSTRING) one += lua_rawlen(L, -1) + 1;
+            total = total > SIZE_MAX - one ? SIZE_MAX : total + one;
+        }
+        lua_pop(L, 1);
+    }
+    return total;
+}
 
 /* Deep-copy a Lua table (string keys only, flat) to an HlKV array.
  * Caller owns the returned array (free with hl_kv_free). */
@@ -209,6 +228,16 @@ static int lua_worker_dispatch(lua_State *L)
     if (!lua_isnoneornil(L, 2))
         luaL_checktype(L, 2, LUA_TTABLE);
 
+    /* The ctx copy lives outside the heap until the op is freed: charged
+     * and checked against the heap limit before anything is copied - every
+     * key naming one big string copied it once per key (audit 22). Raises
+     * with nothing allocated; no app code runs (no __index, no conversion). */
+    size_t ctx_bytes = lua_table_kv_bytes(L, 2);
+    if (lua->mem_limit && ctx_bytes > lua->mem_limit)
+        return luaL_error(L, "worker.dispatch: ctx is larger than the VM's "
+                          "heap limit");
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)ctx_bytes), 0);
+
     /* Serialize function to bytecode via lua_dump */
     LuaBytecodeWriter bw = {0};
     lua_pushvalue(L, 1); /* push function copy for dump */
@@ -239,13 +268,33 @@ static int lua_worker_dispatch(lua_State *L)
         return luaL_error(L, "worker.dispatch() cannot wait here");
     }
 
+    /* Both copies are held on the VM's off-heap total under its heap limit
+     * (the bytecode charged here, without raising past what is allocated;
+     * a trip is sticky, so the error below cannot be caught). */
+    HlOffheapHold copy_hold = {0};
+    size_t copy_bytes = ctx_bytes > SIZE_MAX - bw.len ? SIZE_MAX
+                                                      : ctx_bytes + bw.len;
+    int charged = hl_lua_budget_charge(L,
+        (int64_t)hl_work_bytes_units((uint64_t)bw.len));
+    if (charged || hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes,
+                                   lua->mem_limit, copy_bytes) != 0) {
+        free(bw.buf);
+        hl_kv_free(ctx_kvs, ctx_count);
+        return luaL_error(L, charged
+            ? "worker.dispatch: run exceeded its instruction limit"
+            : "worker.dispatch: fn and ctx would take the VM's off-heap "
+              "copies past its heap limit");
+    }
+
     /* Allocate dispatch op */
     HlLuaWorkerDispatchOp *op = calloc(1, sizeof(HlLuaWorkerDispatchOp));
     if (!op) {
+        hl_offheap_drop(&copy_hold);
         free(bw.buf);
         hl_kv_free(ctx_kvs, ctx_count);
         return luaL_error(L, "worker.dispatch: out of memory");
     }
+    op->copy_hold = copy_hold;
 
     op->server = lua->server;
     op->alloc = lua->base.alloc;

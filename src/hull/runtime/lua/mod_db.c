@@ -7,6 +7,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"   /* hl_lua_source_is_stdlib */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "protected.h"  /* rows built without raising inside the backend */
 #include "hull/utils/secure_zero.h"
 #include "hull/cap/db.h"
@@ -902,12 +903,32 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         return luaL_error(L, "db.async cannot wait here");
     }
 
+    /* The copies below live outside the heap until the op is freed: charged
+     * and held on the VM's off-heap total under its heap limit before they
+     * are made - a table naming one big string 32766 times was copied
+     * 32766 times (audit 22). Both raise with nothing allocated (the
+     * params live in the scratch arena), and neither runs app code. */
+    HlOffheapHold copy_hold = {0};
+    if (kind != HL_WORK_DB_WAIT_NOTIFY) {
+        size_t copy_bytes = hl_worker_db_copy_bytes(params, nparams,
+                                                    strlen(sql) + 1);
+        lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)copy_bytes), 0);
+        if (hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes, lua->mem_limit,
+                            copy_bytes) != 0)
+            return luaL_error(L, "db.async: %I bytes of SQL and params would "
+                              "take the VM's off-heap copies past its heap "
+                              "limit", (lua_Integer)(copy_bytes > (size_t)LUA_MAXINTEGER
+                                  ? LUA_MAXINTEGER : copy_bytes));
+    }
+
     /* Allocate op */
     HlWorkerDbOp *op = calloc(1, sizeof(HlWorkerDbOp));
     if (!op) {
+        hl_offheap_drop(&copy_hold);
         lua_free_hl_values(L, params, nparams);
         return luaL_error(L, "db.async: out of memory");
     }
+    op->copy_hold = copy_hold;
 
     op->kind = kind;
     op->server = lua->server;
@@ -924,6 +945,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         op->sql = strdup(sql);
         if (!op->sql) {
             lua_free_hl_values(L, params, nparams);
+            hl_worker_db_op_free(op);
             free(op);
             return luaL_error(L, "db.async: out of memory");
         }
@@ -933,7 +955,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
             op->nparams = nparams;
             if (!op->params) {
                 lua_free_hl_values(L, params, nparams);
-                free(op->sql);
+                hl_worker_db_op_free(op);
                 free(op);
                 return luaL_error(L, "db.async: out of memory");
             }

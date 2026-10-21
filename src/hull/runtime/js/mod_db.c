@@ -8,6 +8,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "mod_db.h"               /* js_call_handle / new_bound_subobject seam */
 #include "log.h"
 #include "hull/utils/secure_zero.h"
@@ -133,6 +134,15 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
         case JS_TAG_STRING_ROPE: { /* a concatenation result (QuickJS 2025+) */
             size_t slen;
             const char *s = JS_ToCStringLen(ctx, &slen, v);
+            if (!s) {
+                /* Out of memory: bound as NULL, the statement ran with a
+                 * value the app never supplied and reported success
+                 * (audit 22). */
+                JS_FreeValue(ctx, v);
+                JS_FreeValue(ctx, JS_GetException(ctx));
+                js_free_hl_values(ctx, params, i);
+                return -1;
+            }
             params[i].type = HL_TYPE_TEXT;
             params[i].s = s; /* kept alive until JS_FreeCString */
             params[i].len = slen;
@@ -981,13 +991,38 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
             }
         }
 
+        /* The copies below live outside the heap until the op is freed:
+         * held on the VM's off-heap total under its heap limit, and
+         * charged, before they are made. An ASCII string param converts
+         * without a copy, so 32766 references to one 32 MB string cost one
+         * string here and were copied 32766 times (audit 22). */
+        HlOffheapHold copy_hold = {0};
+        size_t copy_bytes = hl_worker_db_copy_bytes(params, nparams,
+                                                    strlen(sql) + 1);
+        if (hl_offheap_take(&copy_hold, &js->wasm_buf_bytes,
+                            js->max_heap_bytes, copy_bytes) != 0) {
+            js_free_hl_values(ctx, params, nparams);
+            JS_FreeCString(ctx, sql);
+            return JS_ThrowRangeError(ctx, "db.async: %zu bytes of SQL and "
+                "params would take the VM's off-heap copies past its heap "
+                "limit", copy_bytes);
+        }
+        if (hl_js_budget_charge(ctx, hl_work_bytes_units(copy_bytes)) < 0) {
+            hl_offheap_drop(&copy_hold);
+            js_free_hl_values(ctx, params, nparams);
+            JS_FreeCString(ctx, sql);
+            return JS_EXCEPTION;
+        }
+
         /* Allocate op */
         op = calloc(1, sizeof(HlWorkerDbOp));
         if (!op) {
+            hl_offheap_drop(&copy_hold);
             js_free_hl_values(ctx, params, nparams);
             JS_FreeCString(ctx, sql);
             return JS_ThrowInternalError(ctx, "db.async: out of memory");
         }
+        op->copy_hold = copy_hold;
 
         op->kind = kind;
         op->server = js->server;
@@ -996,6 +1031,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, sql);
         if (!op->sql) {
             js_free_hl_values(ctx, params, nparams);
+            hl_worker_db_op_free(op);
             free(op);
             return JS_ThrowInternalError(ctx, "db.async: out of memory");
         }
@@ -1006,7 +1042,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
             op->nparams = nparams;
             if (!op->params) {
                 js_free_hl_values(ctx, params, nparams);
-                free(op->sql);
+                hl_worker_db_op_free(op);
                 free(op);
                 return JS_ThrowInternalError(ctx, "db.async: out of memory");
             }

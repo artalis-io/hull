@@ -647,6 +647,7 @@ void hl_js_worker_dispatch_op_free(HlJsWorkerDispatchOp *op)
     free(op->result_str);
     hl_kv_free(op->result_kvs, op->result_count);
     op->result_kvs = NULL;
+    hl_offheap_drop(&op->copy_hold);
 }
 
 void hl_js_worker_dispatch_op_free_all(void *ptr)
