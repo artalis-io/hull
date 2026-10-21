@@ -109,6 +109,32 @@ test("flush processes pending items", function()
     assert(type(result.retried) == "number", "has retried count")
 end)
 
+-- Audit 23: an app header "idempotency-key" was sent beside the row's
+-- "Idempotency-Key" - two headers.
+test("flush adds no second Idempotency-Key in another case", function()
+    H.clear()
+    outbox.enqueue({
+        kind = "webhook",
+        destination = "http://127.0.0.1:9999/test-flush",
+        payload = '{"event":"case"}',
+        headers = require('hull.json').encode({ ["idempotency-key"] = "app-key" }),
+        idempotency_key = "row-key",
+    })
+    local seen
+    H.set_post(function(_url, _body, opts)
+        seen = opts.headers
+        return { status = 200 }
+    end)
+    local ok, err = pcall(outbox.flush)
+    H.set_post(nil)
+    assert(ok, tostring(err))
+    assert(seen, "posted")
+    local n = 0
+    for k in pairs(seen) do if k:lower() == "idempotency-key" then n = n + 1 end end
+    assert_eq(n, 1, "one Idempotency-Key")
+    assert_eq(seen["idempotency-key"], "app-key", "the app's own")
+end)
+
 -- ── stats ───────────────────────────────────────────────────────────
 
 test("stats returns counts by state", function()

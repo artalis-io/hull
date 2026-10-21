@@ -124,6 +124,30 @@ try {
     console.log("FAIL: flush processes pending items: " + e.message);
 }
 
+// Audit 23: an app header "idempotency-key" was sent beside the row's
+// "Idempotency-Key" - two headers.
+try {
+    H.clear();
+    outbox.enqueue({
+        kind: "webhook",
+        destination: "http://127.0.0.1:9999/test-flush",
+        payload: '{"event":"case"}',
+        headers: JSON.stringify({ "idempotency-key": "app-key" }),
+        idempotencyKey: "row-key",
+    });
+    let seen = null;
+    H.setPost(async (_url, _body, opts) => { seen = opts.headers; return { status: 200 }; });
+    try { await outbox.flush(); } finally { H.setPost(null); }
+    assertEq(seen !== null, true, "posted");
+    const keys = Object.keys(seen).filter((k) => k.toLowerCase() === "idempotency-key");
+    assertEq(keys.length, 1, "one Idempotency-Key");
+    assertEq(seen["idempotency-key"], "app-key", "the app's own");
+    pass++;
+} catch (e) {
+    fail++;
+    console.log("FAIL: flush adds no second Idempotency-Key in another case: " + e.message);
+}
+
 // ── stats ───────────────────────────────────────────────────────────
 
 test("stats returns counts by state", () => {

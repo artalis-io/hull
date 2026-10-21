@@ -94,6 +94,17 @@ test("first request with key inserts inflight record", function()
     assert_eq(rows[1].state, "inflight")
 end)
 
+-- Audit 23: req.headers keys are lowercase, and a mixed-case header_name
+-- never matched them.
+test("a mixed-case header_name matches the lowercased header", function()
+    local mw = idempotency.middleware({ header_name = "X-Idem-Key" })
+    local req = mock_req("POST", "/api/items", '{"name":"M"}', { ["x-idem-key"] = "key-mixed-1" })
+    local res = mock_res()
+    assert_eq(mw(req, res), 0, "should continue to handler")
+    assert_eq(req.ctx._idem_key, "key-mixed-1", "the key was read")
+    assert_eq(#H.rows("key-mixed-1"), 1, "inflight record")
+end)
+
 -- ── respond + cache hit ──────────────────────────────────────────────
 
 test("respond caches response and retry returns cached", function()
