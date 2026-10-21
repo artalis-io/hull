@@ -587,5 +587,14 @@ test("a20: is_email_ish refuses Unicode white space", function()
     assert_eq(is_email_ish("a@x.test"), true, "plain")
 end)
 
+test("a21: email_rate_limit refuses a numeric string, as the JS twin does", function()
+    for _, bad in ipairs({ { limit = "3" }, { window = "900" } }) do
+        local ok, err = pcall(init, { email_rate_limit = bad })
+        assert_eq(ok, false, "refused")
+        assert_eq(tostring(err):find("email_rate_limit", 1, true) ~= nil, true,
+                  tostring(err))
+    end
+end)
+
 print(string.format("auth audit 12: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail }

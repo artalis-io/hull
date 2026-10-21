@@ -153,6 +153,11 @@ expect_code("resend requires api_key",
 
 -- ── results ─────────────────────────────────────────────────────────
 
+-- Unicode white space is refused, as the JS twin's \s refuses it (audit 21).
+expect_code("an address ending in NBSP throws",
+    { from = "x@y.com", to = "y@z.com\xC2\xA0", subject = "s", body = "b" },
+    "invalid_argument", "invalid to address")
+
 print(pass .. " passed, " .. fail .. " failed")
 -- Results go back to the C harness. This suite runs INSIDE the Hull Lua
 -- runtime (hull.email pulls in hull.http-client and hull.smtp, both

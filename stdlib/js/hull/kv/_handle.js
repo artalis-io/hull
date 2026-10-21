@@ -50,7 +50,9 @@ function build(store, meta) {
                     + "handle; store the counter as a value and update it with cas");
             }
             if (by === undefined) by = 1;
-            if (typeof by !== "number" || !Number.isInteger(by))
+            // A safe integer: past 2^53 a double cannot hold every integer,
+            // so 1e300 was stored as "1e+300" (audit 21).
+            if (typeof by !== "number" || !Number.isSafeInteger(by))
                 util.error("invalid_argument", "kv: incr amount must be an integer");
             return store.incr(k, by, opts && opts.ttl);
         },

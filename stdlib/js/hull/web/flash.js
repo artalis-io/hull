@@ -74,10 +74,27 @@ function getSessionCtx(req) {
 // A kind is a short tag, capped as the Lua twin caps it: it was outside the
 // text cap (audit 20).
 const FLASH_MAX_KIND = 64;
+// @p s cut to at most @p n bytes of UTF-8 on a character boundary, as the
+// Lua twin cuts it: a UTF-16 slice counted units, not bytes, and could split
+// a surrogate pair (audit 21).
+function utf8Cut(s, n) {
+    let bytes = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        let w = 1, u = 1;
+        if (c >= 0x80) w = c < 0x800 ? 2 : 3;
+        if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
+            (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { w = 4; u = 2; }
+        if (bytes + w > n) return s.slice(0, i);
+        bytes += w;
+        i += u - 1;
+    }
+    return s;
+}
+
 function flashKind(kind) {
     if (kind == null) return "info";
-    const k = String(kind);
-    return k.length > FLASH_MAX_KIND ? k.slice(0, FLASH_MAX_KIND) : k;
+    return utf8Cut(String(kind), FLASH_MAX_KIND);
 }
 
 function set(req, text, kind) {
@@ -97,9 +114,7 @@ function set(req, text, kind) {
     // row to multiple KB on every render is worse than dropping.
     if (sess.flash.length >= FLASH_MAX_ENTRIES) return;
     let s = String(text);
-    if (s.length > FLASH_MAX_TEXT_BYTES) {
-        s = s.slice(0, FLASH_MAX_TEXT_BYTES);
-    }
+    s = utf8Cut(s, FLASH_MAX_TEXT_BYTES);
     sess.flash.push({
         text: s,
         kind: flashKind(kind),

@@ -99,6 +99,12 @@ await (async () => {
         "invalid_argument", "api_key required");
 
     // ── results ─────────────────────────────────────────────────────
+    // Counted in UTF-8 bytes, as the Lua twin counts it (audit 21): 200 CJK
+    // characters are 600 bytes, past the 254-byte path limit.
+    await expectCode("a CJK address over 254 bytes throws",
+        { from: "x@y.com", to: "中".repeat(200) + "@x.test", subject: "s", body: "b" },
+        "invalid_argument", "invalid to address");
+
     console.log(pass + " passed, " + fail + " failed");
     // Published from INSIDE the async IIFE, after every await has settled --
     // the harness reads these once the module's evaluation promise resolves.

@@ -171,7 +171,7 @@ function Store:incr(k, by, ttl)
     if e then
         -- Preserve the existing expiry (matches the SQL backend and Redis
         -- INCR); only the value changes.
-        local newv = tostring(u.to_int(e.v) + by)
+        local newv = tostring(u.add_int(u.to_int(e.v), by))
         local nb = #k + #newv + ENTRY_OVERHEAD
         local delta = nb - e.bytes
         check_fits(self, nb)

@@ -53,11 +53,25 @@ function emailError(code, message) {
 // send "succeeded" and nothing went out.
 const providers = Object.create(null);
 
-// An address: at most 254 characters (RFC 5321's path limit), checked before
-// the pattern.
+// An address: at most 254 BYTES of UTF-8 (RFC 5321's path limit), checked
+// before the pattern - as the Lua twin counts it. In UTF-16 units a ~250-
+// character CJK address (~750 bytes) passed (audit 21).
 const MAX_ADDR = 254;
+function utf8Length(s) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
+                 (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+        else n += 3;
+    }
+    return n;
+}
 function addrOk(a) {
-    return typeof a === "string" && a.length <= MAX_ADDR && ADDR_RE.test(a);
+    return typeof a === "string" && a.length <= MAX_ADDR &&
+        utf8Length(a) <= MAX_ADDR && ADDR_RE.test(a);
 }
 
 // opts.cc as a list of strings; a string is one recipient.

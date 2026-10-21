@@ -59,7 +59,10 @@ function H:incr(k, by, opts)
                 .. "store the counter as a value and update it with cas")
     end
     by = by or 1
-    if type(by) ~= "number" or by ~= math.floor(by) then
+    -- An integer: math.huge passed `by == math.floor(by)` and was stored as
+    -- "inf", which every later incr on the key refused (audit 21).
+    by = type(by) == "number" and math.tointeger(by)
+    if not by then
         u.error("invalid_argument", "kv: incr amount must be an integer")
     end
     return self._s:incr(k, by, opts and opts.ttl)

@@ -190,6 +190,19 @@ function cases.audit20()
         jobs.enqueue("t", {}, { queue = "constructor" })
         assert_eq(jobs.metrics().queues["constructor"].pending, 1, "bucket")
     end)
+    test("a21: a non-list or holed depends_on, or an id given as a string, is refused", function()
+        local a = jobs.enqueue("dep", {})
+        local before = jobs.metrics().totals.pending
+        for _, bad in ipairs({ a, tostring(a), { a, nil, a + 1 }, { [2] = a },
+                               { tostring(a) } }) do
+            local ok, err = pcall(jobs.enqueue, "child", {}, { depends_on = bad })
+            assert_eq(ok, false, "refused")
+            local msg = tostring(err)
+            assert_eq(msg:find("list of job ids", 1, true) ~= nil
+                      or msg:find("distinct job ids", 1, true) ~= nil, true, msg)
+        end
+        assert_eq(jobs.metrics().totals.pending, before, "no pending row left")
+    end)
 end
 
 -- The harness sets the case as a global before it runs the script.

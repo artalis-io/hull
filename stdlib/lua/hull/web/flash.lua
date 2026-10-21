@@ -31,6 +31,7 @@
 
 local json = require("hull.json")
 local session = require("hull.web.middleware.session")
+local _text = require("hull._text")   -- utf8_cut
 
 -- Bounds the flash queue so a misbehaving handler (or a tight
 -- POST → validate-error → flash.set → redirect loop without
@@ -78,7 +79,9 @@ local FLASH_MAX_KIND_BYTES = 64
 local function flash_kind(kind)
     if kind == nil then return "info" end
     local k = tostring(kind)
-    if #k > FLASH_MAX_KIND_BYTES then k = k:sub(1, FLASH_MAX_KIND_BYTES) end
+    -- Cut on a character boundary (audit 21: a split UTF-8 sequence made
+    -- the session write fail on Postgres / MySQL).
+    k = _text.utf8_cut(k, FLASH_MAX_KIND_BYTES)
     return k
 end
 
@@ -99,9 +102,7 @@ function flash.set(req, text, kind)
     -- row to several KB on every render.
     if #sess.flash >= FLASH_MAX_ENTRIES then return end
     local s = tostring(text)
-    if #s > FLASH_MAX_TEXT_BYTES then
-        s = s:sub(1, FLASH_MAX_TEXT_BYTES)
-    end
+    s = _text.utf8_cut(s, FLASH_MAX_TEXT_BYTES)   -- on a character boundary
     table.insert(sess.flash, {
         text = s,
         kind = flash_kind(kind),

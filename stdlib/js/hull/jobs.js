@@ -586,6 +586,10 @@ function enqueue(jobType, data, opts) {
     // positive, distinct. A duplicate (the edge's primary key) or a null
     // failed its edge INSERT after the row was written (audit 20).
     let deps = null;
+    // Not an array is an error, not "no dependencies": `dependsOn: parentId`
+    // enqueued the job pending, to run before its parent (audit 21).
+    if (o.dependsOn !== undefined && o.dependsOn !== null && !Array.isArray(o.dependsOn))
+        throw new Error("jobs.enqueue: dependsOn must be an array of job ids");
     if (Array.isArray(o.dependsOn)) {
         const src = o.dependsOn, n = src.length;
         deps = [];

@@ -104,11 +104,20 @@ end
 
 -- Parse a stored value as a base-10 integer for incr(); a fresh key is 0.
 function M.to_int(bytes)
-    local n = tonumber(bytes)
-    if not n or n ~= math.floor(n) then
+    local n = math.tointeger(tonumber(bytes))
+    if not n then
         M.error("invalid_argument", "kv: value is not an integer for incr()")
     end
-    return math.floor(n)
+    return n
+end
+
+-- @p a + @p b, refused past the 64-bit range: Lua integers wrap (the maximum
+-- plus one is the minimum), where Valkey's INCRBY refuses (audit 21).
+function M.add_int(a, b)
+    if (b > 0 and a > math.maxinteger - b) or (b < 0 and a < math.mininteger - b) then
+        M.error("overflow", "kv: incr would overflow a 64-bit integer")
+    end
+    return a + b
 end
 
 -- ---- the store's encodings: standard padded base64 for values, lowercase

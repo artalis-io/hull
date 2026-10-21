@@ -203,6 +203,17 @@ cases.audit20 = () => {
         assertEq(hooks.cronNext("0\u00a00 * * *", 1609459200), null, "NBSP is not a separator");
         assertEq(hooks.cronNext(" 0  0 * * * ", 1609459200) - 1609459200, 86400, "ASCII spaces");
     });
+    test("a21: a dependsOn that is not an array is refused", () => {
+        const a = jobs.enqueue("dep", {});
+        const before = jobs.metrics().totals.pending;
+        for (const bad of [a, String(a), { 0: a }]) {
+            let threw = false;
+            try { jobs.enqueue("child", {}, { dependsOn: bad }); }
+            catch (e) { threw = /array of job ids/.test(String(e && e.message)); }
+            assertEq(threw, true, "refused " + JSON.stringify(bad));
+        }
+        assertEq(jobs.metrics().totals.pending, before, "no pending row left");
+    });
 };
 
 test("the case is known", () => {

@@ -115,7 +115,7 @@ class Store {
         if (e) {
             // Preserve the existing expiry (matches the SQL backend and Redis
             // INCR); only the value changes.
-            const newv = String(util.toInt(e.v) + by);
+            const newv = String(util.addInt(util.toInt(e.v), by));
             const nb = k.length + newv.length + ENTRY_OVERHEAD;
             const delta = nb - e.bytes;
             this._checkFits(nb);
