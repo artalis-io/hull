@@ -50,6 +50,14 @@ void hl_async_teardown_run(HlAsyncTeardown **list, HlAsyncBackendCtx *loop)
  * Called by kl_async_complete() when the async operation finishes.
  * Resumes the runtime handler via the cont vtable, then cleans up.
  */
+/* Every path that retires a ctx ends here: its off-heap hold goes back
+ * first (the VM is alive - teardown drains every op before it goes). */
+static void hl_async_ctx_release(HlAsyncCtx *ctx)
+{
+    hl_offheap_drop(&ctx->hold);
+    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+}
+
 static void hl_async_on_resume(KlAsyncOp *op, void *user_data)
 {
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
@@ -65,7 +73,7 @@ static void hl_async_on_resume(KlAsyncOp *op, void *user_data)
     if (ctx->free_driver && ctx->driver)
         ctx->free_driver(ctx->driver);
     ctx->cont->destroy(ctx->cont);
-    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+    hl_async_ctx_release(ctx);
 }
 
 /*
@@ -109,7 +117,7 @@ void hl_async_ctx_free(HlAsyncCtx *ctx)
 {
     if (!ctx) return;
     hl_async_teardown_unlink(&ctx->track);
-    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+    hl_async_ctx_release(ctx);
 }
 
 /* A runtime is shutting down with this detached op still pending. */
@@ -170,7 +178,7 @@ void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)
     if (ctx->free_driver && ctx->driver)
         ctx->free_driver(ctx->driver);
     ctx->cont->destroy(ctx->cont);
-    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+    hl_async_ctx_release(ctx);
 }
 
 void hl_async_ctx_cancel(HlAsyncCtx *ctx)
@@ -184,7 +192,7 @@ void hl_async_ctx_cancel(HlAsyncCtx *ctx)
         ctx->free_driver(ctx->driver);
     if (ctx->cont)
         ctx->cont->destroy(ctx->cont);
-    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+    hl_async_ctx_release(ctx);
 }
 
 void hl_detached_timer_fire(void *user_data)

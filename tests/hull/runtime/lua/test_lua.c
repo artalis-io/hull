@@ -11912,4 +11912,43 @@ UTEST(lua_audit21, compute_segment_copies_are_charged)
 
 #endif /* HL_ENABLE_WASM */
 
+/* ── Audit 22 G1: async input copies are held to the heap limit ──────── */
+
+UTEST(lua_audit22, async_param_and_ctx_copies_are_held_to_the_heap_limit)
+{
+    LuaWorkerFix f;
+    memset(&f, 0, sizeof f);
+    f.be = hl_async_backend();
+    ASSERT_EQ(f.be->init(&f.actx, NULL), 0);
+    ASSERT_EQ(f.be->pool_create(&f.pool, f.actx, 1, 16), 0);
+    pending_async_ctx   = f.actx;
+    pending_thread_pool = f.pool;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = 16u << 20;
+    char out[512];
+    lua_worker_run(&f,
+        "local s = string.rep('x', 1 << 20)\n"
+        "local t = {} for i = 1, 64 do t[i] = s end\n"
+        "local ok1, e1 = pcall(db.async.exec, 'SELECT ?', t)\n"
+        "local c = {} for i = 1, 32 do c['k' .. i] = s end\n"
+        "local ok2, e2 = pcall(require('hull.worker').dispatch,\n"
+        "                      function() return 1 end, c)\n"
+        "return tostring(ok1) .. '|' .. tostring(e1) .. '|'\n"
+        "    .. tostring(ok2) .. '|' .. tostring(e2)\n", out, sizeof out);
+    lua_rt.mem_limit = saved;
+    EXPECT_NE_MSG(strstr(out, "false|"), NULL, out);
+    EXPECT_EQ_MSG(strstr(out, "true"), NULL, out);
+    const char *first = strstr(out, "heap limit");
+    EXPECT_NE_MSG(first, NULL, out);
+    EXPECT_NE_MSG(first ? strstr(first + 1, "heap limit") : NULL, NULL, out);
+    EXPECT_EQ(lua_rt.wasm_buf_bytes, (size_t)0);
+    pending_async_ctx = NULL;
+    cleanup_lua_caps();
+    f.be->tick(f.actx, 0);
+    f.be->pool_free(f.pool);
+    f.be->free(f.actx);
+}
+
 UTEST_MAIN();

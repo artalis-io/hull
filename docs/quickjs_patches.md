@@ -301,3 +301,22 @@ watchdog bounds loops of them.
 round-12 triggers under a 200 ms deadline and no instruction limit are
 stopped; the trip is not caught by try / catch; a worker.dispatch job is
 stopped).
+
+## Patch 0007 - a failed string conversion frees its reference
+
+**Files:** `vendor/quickjs/quickjs.c` (`JS_ToCStringLen2`, the `fail:` label)
+**Found by:** round-22 audit (G1)
+**Upstream:** a bug in 2026-06-04; worth sending upstream.
+
+`JS_ToCStringLen2` takes a reference to the string it converts (a
+`JS_DupValue`, or `JS_ToString`'s result) and gives it back in
+`JS_FreeCString`. When the UTF-8 copy of a non-ASCII or wide string cannot be
+allocated it jumped to `fail:` and returned NULL with that reference still
+held, so every conversion that hit the heap limit leaked its string for good.
+A worker.dispatch pool thread reuses its JSRuntime across jobs, so the leaks
+added up until every dispatch on that thread failed. The patch frees the
+reference at `fail:` (`JS_FreeValue` of `JS_EXCEPTION`, the first `goto`, is a
+no-op).
+
+**Guard:** `tests/hull/runtime/js/test_js.c`,
+`js_audit22.a_failed_string_conversion_leaks_nothing`.

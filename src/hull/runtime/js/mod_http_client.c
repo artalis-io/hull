@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/cap/http.h"
 #include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "hull/cap/http_async.h"
@@ -536,6 +537,27 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
+    /* Keel copies the body and keeps it until the request is done: held on
+     * the VM's off-heap total under its heap limit, and charged - N
+     * fetches in flight held N copies of one big body (audit 22). */
+    HlOffheapHold body_hold = {0};
+    int over = hl_offheap_take(&body_hold, &js->wasm_buf_bytes,
+                               js->max_heap_bytes, body_len) != 0;
+    if (over || hl_js_budget_charge(ctx, hl_work_bytes_units(body_len)) < 0) {
+        hl_offheap_drop(&body_hold);
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        JS_FreeCString(ctx, method);
+        JS_FreeCString(ctx, url);
+        if (body) JS_FreeCString(ctx, body);
+        js_free_http_headers(ctx, headers, num_headers);
+        if (over)
+            return JS_ThrowRangeError(ctx, "http.fetch: a %zu-byte body would "
+                "take the VM's off-heap copies past its heap limit", body_len);
+        return JS_EXCEPTION;
+    }
+
     extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
         JSValue resolve, JSValue reject, HlAllocator *alloc,
         JSValue (*push_result)(JSContext *, void *));
@@ -545,6 +567,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
                                                   js->base.alloc,
                                                   js_push_async_http_response);
     if (!cont) {
+        hl_offheap_drop(&body_hold);
         JS_FreeValue(ctx, resolving_funcs[0]);
         JS_FreeValue(ctx, resolving_funcs[1]);
         JS_FreeValue(ctx, promise);
@@ -570,11 +593,13 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     if (!async_ctx) {
         /* Never armed: destroy frees resolve / reject (cancel would also
          * end this still-running handler's request life). */
+        hl_offheap_drop(&body_hold);
         cont->destroy(cont);
         JS_FreeValue(ctx, promise);
         return JS_ThrowInternalError(ctx, "http.fetch: failed to start request");
     }
     async_ctx->cont = cont;
+    async_ctx->hold = body_hold;   /* given back when the ctx goes */
     /* No request holds a detached fetch: teardown cancels it (audit 14). */
     if (async_ctx->detached)
         hl_async_ctx_track(async_ctx, &js->base.async_live);

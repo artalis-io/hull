@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include "hull/runtime/lua.h"
 #include "hull/cap/types.h"   /* HlKV for worker dispatch op */
+#include "hull/shared/offheap.h"   /* HlOffheapHold */
 #include "hull/limits/core.h" /* HL_WORKER_ERR_SIZE */
 #include "lua.h"
 #include <sh_arena.h>
@@ -62,6 +63,11 @@ typedef struct HlLuaWorkerDispatchOp {
     size_t        mem_limit;
     int64_t       max_instructions;
     int           with_db;
+
+    /* The fn and ctx copies, held on the submitting VM's off-heap total
+     * under its heap limit: uncounted, a ctx whose keys all named one big
+     * string copied it once per key (audit 22). Given back by op_free. */
+    HlOffheapHold copy_hold;
 
     /* Output (set by worker thread) */
     int           result_kind;       /* 0=nil,1=bool,2=int,3=double,4=text,5=table */

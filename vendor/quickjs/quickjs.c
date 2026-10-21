@@ -4645,6 +4645,11 @@ const char *JS_ToCStringLen2(JSContext *ctx, size_t *plen, JSValueConst val1, BO
         *plen = str_new->len;
     return (const char *)str_new->u.str8;
  fail:
+    /* HULL PATCH 0007 (audit 22): the reference taken above (a dup, or
+       JS_ToString's result) was kept when the UTF-8 copy could not be
+       allocated - one string leaked per failed conversion. JS_EXCEPTION
+       (the first goto) frees nothing. */
+    JS_FreeValue(ctx, val);
     if (plen)
         *plen = 0;
     return NULL;

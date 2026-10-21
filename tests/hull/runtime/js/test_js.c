@@ -12292,4 +12292,66 @@ UTEST(js_audit20, worker_ctx_keys_are_own_properties)
     js_worker_close(be, actx, pool);
 }
 
+/* ── Audit 22 G1: async input copies are held to the heap limit ──────── */
+
+/* db.async params and a worker.dispatch ctx were copied into plain malloc,
+ * uncounted: an ASCII string converts without a copy, so 64 references to one
+ * 1 MB string cost one string on the heap and 64 MB off it. */
+UTEST(js_audit22, async_param_and_ctx_copies_are_held_to_the_heap_limit)
+{
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+    ASSERT_EQ(eval_int("globalThis.__s = 'x'.repeat(1 << 20); 1"), 1);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 16u << 20;
+    char *r = a15_throws("db.async.exec('SELECT ?', new Array(64).fill(__s))");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    r = a15_throws("const c = {}; for (let i = 0; i < 32; i++) c['k' + i] = __s;"
+                   " worker.dispatch(() => 1, c)");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    EXPECT_EQ(js.wasm_buf_bytes, (size_t)0);
+    /* One copy is held while its op is in flight, and given back with it. */
+    ASSERT_EQ(eval_int("globalThis.__p = worker.dispatch(() => 1, { a: __s });"
+                       " __p.catch(() => {}); 1"), 1);
+    EXPECT_GE(js.wasm_buf_bytes, (size_t)(1u << 20));
+    for (int i = 0; i < 200 && js.wasm_buf_bytes; i++) {
+        be->tick(actx, 20);
+        hl_js_run_jobs(&js);
+    }
+    EXPECT_EQ(js.wasm_buf_bytes, (size_t)0);
+    js.max_heap_bytes = saved;
+    js_worker_close(be, actx, pool);
+}
+
+/* A wide string param whose UTF-8 copy did not fit the heap was bound as
+ * NULL and the statement reported success; and JS_ToCStringLen2 kept its
+ * reference to the string (QuickJS HULL PATCH 0007). */
+UTEST(js_audit22, a_failed_string_conversion_leaks_nothing)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(eval_int("db.exec('CREATE TABLE a22 (v TEXT)');"
+                       " globalThis.__w = '一'.repeat(1 << 20); 1"), 1);
+    JSMemoryUsage u0;
+    JS_ComputeMemoryUsage(js.rt, &u0);
+    JS_SetMemoryLimit(js.rt, (size_t)u0.malloc_size + (1u << 20));
+    int rc = eval_int("(() => { try { db.exec('INSERT INTO a22 VALUES (?)', [__w]);"
+                      " return 1; } catch (e) { return 2; } })()");
+    JS_SetMemoryLimit(js.rt, (size_t)u0.malloc_limit);
+    EXPECT_EQ(rc, 2);
+    EXPECT_EQ(eval_int("db.query('SELECT count(*) AS n FROM a22')[0].n"), 0);
+    ASSERT_EQ(eval_int("globalThis.__w = undefined; 1"), 1);
+    JS_RunGC(js.rt);
+    JSMemoryUsage u1;
+    JS_ComputeMemoryUsage(js.rt, &u1);
+    EXPECT_LT(u1.malloc_size, u0.malloc_size - (1 << 20));
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

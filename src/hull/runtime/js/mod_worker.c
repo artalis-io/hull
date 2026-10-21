@@ -12,15 +12,21 @@
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 #include <keel/http_server.h>
 
-/* Deep-copy a JS object (own string properties only, flat) to HlKV array. */
+/* Deep-copy a JS object (own string properties only, flat) to HlKV array.
+ * @p bytes gets what the copies hold; past @p limit (0 = none) the copy
+ * stops and fails with -2 - an ASCII string converts without a copy, so
+ * every key naming one big string made a copy of it (audit 22). */
 static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
-                            HlKV **out_kvs, int *out_count)
+                            HlKV **out_kvs, int *out_count,
+                            size_t limit, size_t *bytes)
 {
     *out_kvs = NULL;
     *out_count = 0;
+    *bytes = 0;
 
     if (JS_IsNull(obj) || JS_IsUndefined(obj))
         return 0;
@@ -46,12 +52,23 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
     }
 
     int count = 0;
+    size_t total = 0;
     for (uint32_t i = 0; i < tab_len; i++) {
         const char *key = JS_AtomToCString(ctx, tab[i].atom);
         if (!key) {
             JS_FreeAtom(ctx, tab[i].atom);
             continue;
         }
+        size_t klen = strlen(key) + 1;
+        if (total > SIZE_MAX - klen || (limit && total + klen > limit)) {
+            JS_FreeCString(ctx, key);
+            for (uint32_t j = i; j < tab_len; j++)
+                JS_FreeAtom(ctx, tab[j].atom);
+            js_free(ctx, tab);
+            hl_kv_free(kvs, count);
+            return -2;
+        }
+        total += klen;
 
         kvs[count].key = strdup(key);
         JS_FreeCString(ctx, key);
@@ -87,7 +104,20 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
             size_t slen;
             const char *sv = JS_ToCStringLen(ctx, &slen, val);
             kvs[count].value.type = HL_TYPE_TEXT;
+            if (sv && (slen >= SIZE_MAX - total ||
+                       (limit && total + slen + 1 > limit))) {
+                kvs[count].value.type = HL_TYPE_NIL;
+                count++;   /* releases the key */
+                JS_FreeCString(ctx, sv);
+                JS_FreeValue(ctx, val);
+                for (uint32_t j = i + 1; j < tab_len; j++)
+                    JS_FreeAtom(ctx, tab[j].atom);
+                js_free(ctx, tab);
+                hl_kv_free(kvs, count);
+                return -2;
+            }
             if (sv) {
+                total += slen + 1;
                 char *buf = malloc(slen + 1);
                 if (!buf) {
                     /* OOM on string dup: mark NIL, bump count so op_free
@@ -118,6 +148,7 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
 
     *out_kvs = kvs;
     *out_count = count;
+    *bytes = total;
     return 0;
 }
 
@@ -216,21 +247,50 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     /* Deep-copy ctx object */
     HlKV *ctx_kvs = NULL;
     int ctx_count = 0;
+    size_t ctx_bytes = 0;
     if (argc >= 2 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
-        if (js_object_to_kv(ctx, argv[1], &ctx_kvs, &ctx_count) != 0) {
+        int krc = js_object_to_kv(ctx, argv[1], &ctx_kvs, &ctx_count,
+                                  js->max_heap_bytes, &ctx_bytes);
+        if (krc != 0) {
             JS_FreeCString(ctx, src_cstr);
+            if (krc == -2)
+                return JS_ThrowRangeError(ctx, "worker.dispatch: ctx is "
+                    "larger than the VM's heap limit");
             return JS_ThrowInternalError(ctx,
                 "worker.dispatch: failed to serialize ctx object");
         }
     }
 
+    /* The source and ctx copies live outside the heap until the op is
+     * freed: held on the VM's off-heap total under its heap limit, and
+     * charged (audit 22). */
+    HlOffheapHold copy_hold = {0};
+    size_t copy_bytes = ctx_bytes > SIZE_MAX - src_len - 1
+                      ? SIZE_MAX : ctx_bytes + src_len + 1;
+    if (hl_offheap_take(&copy_hold, &js->wasm_buf_bytes, js->max_heap_bytes,
+                        copy_bytes) != 0) {
+        JS_FreeCString(ctx, src_cstr);
+        hl_kv_free(ctx_kvs, ctx_count);
+        return JS_ThrowRangeError(ctx, "worker.dispatch: %zu bytes of fn and "
+            "ctx would take the VM's off-heap copies past its heap limit",
+            copy_bytes);
+    }
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(copy_bytes)) < 0) {
+        hl_offheap_drop(&copy_hold);
+        JS_FreeCString(ctx, src_cstr);
+        hl_kv_free(ctx_kvs, ctx_count);
+        return JS_EXCEPTION;
+    }
+
     /* Allocate dispatch op */
     HlJsWorkerDispatchOp *op = calloc(1, sizeof(HlJsWorkerDispatchOp));
     if (!op) {
+        hl_offheap_drop(&copy_hold);
         JS_FreeCString(ctx, src_cstr);
         hl_kv_free(ctx_kvs, ctx_count);
         return JS_ThrowInternalError(ctx, "worker.dispatch: out of memory");
     }
+    op->copy_hold = copy_hold;
 
     op->server = js->server;
     op->alloc = js->base.alloc;
@@ -244,6 +304,7 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     if (!op->fn_source) {
         JS_FreeCString(ctx, src_cstr);
         hl_kv_free(ctx_kvs, ctx_count);
+        hl_offheap_drop(&op->copy_hold);
         free(op);
         return JS_ThrowInternalError(ctx, "worker.dispatch: out of memory");
     }

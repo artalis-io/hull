@@ -8,6 +8,7 @@
 #include "hull/cap/http_async.h"
 #include "hull/shared/async.h"
 #include "internal.h"   /* hl_lua_check_can_wait */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 #include <keel/http_server.h>
 
@@ -427,6 +428,18 @@ static int lua_http_fetch(lua_State *L)
      * anything is armed; nothing below runs app code (audit 15). */
     hl_lua_check_can_wait(L, "http.fetch()");
 
+    /* Keel copies the body and keeps it until the request is done: charged
+     * and held on the VM's off-heap total under its heap limit - N fetches
+     * in flight held N copies of one big body (audit 22). Both raise with
+     * nothing allocated, and run no app code. */
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
+    HlOffheapHold body_hold = {0};
+    if (hl_offheap_take(&body_hold, &lua->wasm_buf_bytes, lua->mem_limit,
+                        body_len) != 0)
+        return luaL_error(L, "http.fetch: a %I-byte body would take the VM's "
+                          "off-heap copies past its heap limit",
+                          (lua_Integer)body_len);
+
     /* The continuation first: created after the request was started (and
      * the connection suspended), a failed allocation left ctx->cont NULL,
      * and the completion dereferenced it. */
@@ -434,8 +447,10 @@ static int lua_http_fetch(lua_State *L)
                                                    HlLuaPushResultFn push_result);
     HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
                                                    lua_push_async_http_response);
-    if (!cont)
+    if (!cont) {
+        hl_offheap_drop(&body_hold);
         return luaL_error(L, "http.fetch: out of memory");
+    }
 
     /* Start the async HTTP request - checks allowlist, creates KlHttpClient,
      * creates HlAsyncCtx, and suspends the inbound connection */
@@ -444,10 +459,12 @@ static int lua_http_fetch(lua_State *L)
         lua->base.http_cfg, timeout_ms, method, url, headers, num_headers,
         body, body_len);
     if (!ctx) {
+        hl_offheap_drop(&body_hold);
         cont->destroy(cont);
         return luaL_error(L, "http.fetch: failed to start request");
     }
     ctx->cont = cont;
+    ctx->hold = body_hold;   /* given back when the ctx goes */
     /* No request holds a detached fetch: teardown cancels it (audit 14). */
     if (ctx->detached)
         hl_async_ctx_track(ctx, &lua->base.async_live);
