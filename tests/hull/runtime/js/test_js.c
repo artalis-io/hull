@@ -5695,6 +5695,7 @@ JOBS_HOOKS_CASE(events)
 JOBS_HOOKS_CASE(poison)
 JOBS_HOOKS_CASE(horizon)
 JOBS_HOOKS_CASE(audit20)
+JOBS_HOOKS_CASE(audit23)
 #undef JOBS_HOOKS_CASE
 
 UTEST(js_stdlib, toast_suite)
