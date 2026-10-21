@@ -104,6 +104,10 @@ typedef struct HlJS {
      * audit 18), and the input / buffer copies in-flight compute.async and
      * gpu.async ops hold (HlOffheapHold, shared/offheap.h, audit 20). */
     size_t          wasm_buf_bytes;
+    /* What in-flight db.async results and worker.dispatch return values
+     * hold off the heap, copied on the pool threads (HlOffheapShared,
+     * shared/offheap.h, audit 23). Atomic access only. */
+    size_t          async_result_bytes;
     /* Capacity of every part.read() accumulator of this VM's multipart
      * readers (server allocator, off the QuickJS heap), capped in SUM at
      * max_heap_bytes (read_buf_append, audit 19: the cap was per part, so

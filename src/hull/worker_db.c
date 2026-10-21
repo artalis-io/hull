@@ -435,6 +435,7 @@ typedef struct {
     size_t        bytes;
     size_t        max_bytes;
     HlDbOpBudget *budget;   /* the op's, bound on this thread (or NULL) */
+    HlOffheapShared *hold;  /* the VM's in-flight results (or NULL) */
 } MaterializeCtx;
 
 /* The copy failed with @p msg: the rest of the reply would only be thrown
@@ -458,6 +459,10 @@ static int materialize_account(MaterializeCtx *mc, size_t n)
 {
     if (n > mc->max_bytes || mc->bytes > mc->max_bytes - n)
         return materialize_fail(mc, "result too large (it exceeds the heap "
+                                    "limit)");
+    if (hl_offheap_shared_take(mc->hold, n) != 0)
+        return materialize_fail(mc, "result too large (the VM's in-flight "
+                                    "async results would exceed its heap "
                                     "limit)");
     mc->bytes += n;
     int64_t units = (int64_t)((n + HL_DB_ALLOC_UNIT_BYTES - 1) /
@@ -525,18 +530,20 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
 int hl_worker_db_materialize(HlDbHandle *h, const char *sql,
                              const HlValue *params, int nparams,
                              size_t max_bytes, HlDbOpBudget *budget,
+                             HlOffheapShared *hold,
                              HlDbResult *out, char *err, size_t errsz)
 {
     memset(out, 0, sizeof(*out));
     size_t cap = HL_WORKER_DB_RESULT_MAX_BYTES;
     if (max_bytes > 0 && max_bytes < cap) cap = max_bytes;
     MaterializeCtx mc = { .r = out, .err = NULL, .bytes = 0, .max_bytes = cap,
-                          .budget = budget };
+                          .budget = budget, .hold = hold };
     int rc = hl_db_query(h, sql, params, nparams,
                          db_materialize_row_cb, &mc, NULL);
     if (mc.err) {
         snprintf(err, errsz, "%s", mc.err);
         hl_db_result_free(out);   /* give the partial copy back now */
+        hl_offheap_shared_drop(hold);
         return -2;
     }
     if (rc < 0) {
@@ -594,7 +601,10 @@ static int worker_end_txn(HlWorkerDbOp *op, HlDbHandle *h)
     h->batch_depth = 0;   /* no batch spans ops (hl_db_guard_stale_txn) */
     if (!hl_db_in_txn(h)) return 0;
     int lost = hl_db_rollback(h) != 0 || hl_db_in_txn(h);
-    if (op->kind == HL_WORK_DB_QUERY) hl_db_result_free(&op->result);
+    if (op->kind == HL_WORK_DB_QUERY) {
+        hl_db_result_free(&op->result);
+        hl_offheap_shared_drop(&op->result_hold);
+    }
     if (!op->error)   /* a statement's own error says more */
         snprintf(op->error_msg, sizeof(op->error_msg),
                  "a transaction cannot span db.async operations (each runs "
@@ -658,7 +668,7 @@ static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh,
     /* HL_WORK_DB_QUERY: materialize all rows through the vtable. */
     int rc = hl_worker_db_materialize(h, op->sql, op->params, op->nparams,
                                       op->max_result_bytes, budget,
-                                      &op->result, op->error_msg,
+                                      &op->result_hold, &op->result, op->error_msg,
                                       sizeof(op->error_msg));
     if (rc != 0) {
         op->error = 1;
@@ -722,6 +732,11 @@ int hl_worker_db_submit(HlAsyncBackendPool *pool, HlWorkerDbOp *op)
 size_t hl_worker_db_copy_bytes(const HlValue *src, int n, size_t sql_len)
 {
     size_t total = sql_len;
+    /* The array itself too (audit 23: 32766 params are ~0.8 MB of it). */
+    if (src && n > 0) {
+        if ((size_t)n > (SIZE_MAX - total) / sizeof(HlValue)) return SIZE_MAX;
+        total += (size_t)n * sizeof(HlValue);
+    }
     for (int i = 0; src && i < n; i++) {
         if ((src[i].type != HL_TYPE_TEXT && src[i].type != HL_TYPE_BLOB) ||
             !src[i].s)
@@ -780,6 +795,7 @@ void hl_worker_db_op_free(HlWorkerDbOp *op)
         op->params = NULL;
     }
     hl_db_result_free(&op->result);
+    hl_offheap_shared_drop(&op->result_hold);
     hl_offheap_drop(&op->copy_hold);
 }
 

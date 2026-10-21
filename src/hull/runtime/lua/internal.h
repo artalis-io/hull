@@ -68,6 +68,11 @@ typedef struct HlLuaWorkerDispatchOp {
      * under its heap limit: uncounted, a ctx whose keys all named one big
      * string copied it once per key (audit 22). Given back by op_free. */
     HlOffheapHold copy_hold;
+    /* The return value's copy, on the VM's async_result_bytes under its
+     * heap limit, taken on the pool thread: it had no bound at all, so a
+     * table of 500k keys naming one 30 MB string was copied 500k times
+     * (audit 23). Given back by op_free. */
+    HlOffheapShared result_hold;
 
     /* Output (set by worker thread) */
     int           result_kind;       /* 0=nil,1=bool,2=int,3=double,4=text,5=table */

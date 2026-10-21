@@ -184,8 +184,15 @@ static void push_kv_table(lua_State *L, const HlKV *kvs, int count)
     }
 }
 
+/* Take @p n bytes of the result copy from the VM's in-flight results:
+ * 0, or -2 when that would pass its heap limit. */
+static int capture_take(HlLuaWorkerDispatchOp *op, size_t n)
+{
+    return hl_offheap_shared_take(&op->result_hold, n) == 0 ? 0 : -2;
+}
+
 /* Capture the Lua value at stack top into the dispatch op result fields.
- * Returns 0 on success. */
+ * Returns 0 on success, -1 out of memory, -2 too large (capture_take). */
 static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
 {
     int t = lua_type(L, -1);
@@ -210,6 +217,7 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
         op->result_kind = 4;
         size_t len;
         const char *s = lua_tolstring(L, -1, &len);
+        if (capture_take(op, len + 1) != 0) return -2;
         op->result_str = malloc(len + 1);
         if (!op->result_str) return -1;
         memcpy(op->result_str, s, len);
@@ -231,6 +239,7 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
             op->result_count = 0;
             break;
         }
+        if (capture_take(op, (size_t)count * sizeof(HlKV)) != 0) return -2;
         op->result_kvs = calloc((size_t)count, sizeof(HlKV));
         if (!op->result_kvs) return -1;
         op->result_count = 0;
@@ -241,7 +250,12 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
                 continue;
             }
             int idx = op->result_count;
-            const char *key = lua_tostring(L, -2);
+            size_t klen;
+            const char *key = lua_tolstring(L, -2, &klen);
+            if (capture_take(op, klen + 1) != 0) {
+                lua_pop(L, 2);
+                return -2;
+            }
             op->result_kvs[idx].key = strdup(key);
             if (!op->result_kvs[idx].key) {
                 /* OOM on key dup: leave partial state - caller (op_free)
@@ -269,7 +283,8 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
                 size_t slen;
                 const char *sv = lua_tolstring(L, -1, &slen);
                 op->result_kvs[idx].value.type = HL_TYPE_TEXT;
-                char *buf = malloc(slen + 1);
+                int big = capture_take(op, slen + 1);
+                char *buf = big ? NULL : malloc(slen + 1);
                 if (!buf) {
                     /* OOM on string dup: mark slot NIL but bump count so
                      * the key allocation is released by op_free. */
@@ -277,7 +292,7 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
                     op->result_kvs[idx].value.type = HL_TYPE_NIL;
                     op->result_count++;
                     lua_pop(L, 2);
-                    return -1;
+                    return big ? -2 : -1;
                 }
                 memcpy(buf, sv, slen);
                 buf[slen] = '\0';
@@ -355,9 +370,13 @@ static int lua_dispatch_body_k(lua_State *L)
     else
         lua_newtable(L); /* empty ctx */
     lua_call(L, 1, 1);   /* fn(ctx) - an error propagates to our pcall */
-    if (capture_result(L, op) != 0) {
+    int crc = capture_result(L, op);
+    if (crc != 0) {
         op->error = 1;
-        snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
+        snprintf(op->error_msg, sizeof(op->error_msg), "%s", crc == -2
+                 ? "dispatch: result too large (the VM's in-flight async "
+                   "results would exceed its heap limit)"
+                 : "out of memory");
     }
     return 0;
 }
@@ -422,6 +441,7 @@ void hl_lua_worker_dispatch_op_free(HlLuaWorkerDispatchOp *op)
     free(op->result_str);
     hl_kv_free(op->result_kvs, op->result_count);
     op->result_kvs = NULL;
+    hl_offheap_shared_drop(&op->result_hold);
     hl_offheap_drop(&op->copy_hold);
 }
 

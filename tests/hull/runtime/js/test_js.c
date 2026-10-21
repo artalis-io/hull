@@ -12711,6 +12711,58 @@ UTEST(js_audit22, a_test_file_whose_top_level_throws_is_a_load_error)
     cleanup_js();
 }
 
+/* ── Audit 23 G1: async RESULT copies are held to the heap limit ─────── */
+
+/* A worker.dispatch return value was copied off the heap with no bound (an
+ * object of keys naming one big string, once per key), and a db.async
+ * result was capped per op, so the ops in flight held that cap many times
+ * over. Both now take their bytes from the VM's async_result_bytes. */
+UTEST(js_audit23, async_result_copies_are_held_to_the_heap_limit)
+{
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    ASSERT_EQ(js_worker_open(&be, &actx, &pool), 0);
+    a3_worker_db();
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 16u << 20;
+    char out[512] = "(no verdict)";
+    js_worker_run(be, actx,
+        "  const m = await fails(() => {\n"
+        "    const s = 'x'.repeat(1 << 20), o = {};\n"
+        "    for (let i = 0; i < 64; i++) o['k' + i] = s;\n"
+        "    return o; });\n"
+        "  check(m.includes('result too large'), m);\n"
+        "  const small = await worker.dispatch(() => ({ a: 'b' }));\n"
+        "  check(small.a === 'b', JSON.stringify(small));\n",
+        out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    EXPECT_EQ(js.async_result_bytes, (size_t)0);
+
+    /* Other results in flight already hold all but 64 KiB of the limit. */
+    js.async_result_bytes = (16u << 20) - (64u << 10);
+    snprintf(out, sizeof out, "(no verdict)");
+    eval_int("delete globalThis.__wk; 1");
+    js_worker_run(be, actx,
+        "  let m = '(resolved)';\n"
+        "  try { await db.async.query('SELECT zeroblob(262144) AS z'); }\n"
+        "  catch (e) { m = String(e && e.message || e); }\n"
+        "  check(m.includes('in-flight'), m);\n",
+        out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    EXPECT_EQ(js.async_result_bytes, (size_t)((16u << 20) - (64u << 10)));
+    js.async_result_bytes = 0;
+    eval_int("delete globalThis.__wk; 1");
+    js_worker_run(be, actx,
+        "  const rows = await db.async.query('SELECT zeroblob(262144) AS z');\n"
+        "  check(rows[0].z.byteLength === 262144, String(rows[0].z));\n",
+        out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    EXPECT_EQ(js.async_result_bytes, (size_t)0);
+    js.max_heap_bytes = saved;
+    js_worker_close(be, actx, pool);
+}
+
 /* Audit 22: json.decode parsed up to the string's first NUL. */
 UTEST(js_audit22, json_decode_reads_the_whole_string)
 {
