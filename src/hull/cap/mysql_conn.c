@@ -337,6 +337,11 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
         int wr = hl_db_transport_wait_readable(conn->transport, left,
                                                my_wait_stop, NULL);
         if (wr == -2) { my_abandon(conn); return -1; }
+        /* What the wait left: passed its own `left`, the read could spend as
+         * long again (audit 22). */
+        if (wr == 1 &&
+            (left = hl_db_transport_time_left(&started, conn->read_timeout_ms)) < 0)
+            wr = 0;
         ssize_t n = -1;
         if (wr == 1) {
             /* Over TLS, sliced too: a record's first byte made it readable,
@@ -496,6 +501,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
      * encoded UTF-8 text, and a gbk-like default broke quote_identifier
      * (hl_my_client_charset, audit 20). */
     uint8_t charset = hl_my_client_charset(hs.charset);
+    conn->bin_collation = hl_my_bin_collation(hs.server_version);
 
     /* TLS negotiation (SSLRequest): consult sslmode, then upgrade before the
      * credentialed HandshakeResponse41 goes on the wire. The response's

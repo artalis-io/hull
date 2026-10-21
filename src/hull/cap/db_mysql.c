@@ -278,13 +278,20 @@ static int mysql_create_index_shim(HlDbMyCtx *s, const char *sql, int *handled)
  * 'jose', so rbac.has_role matched a role differing in case and two inbox
  * ids differing in case were one duplicate. Every `CREATE TABLE [IF NOT
  * EXISTS] _hull_...(...)` in @p sql gets `DEFAULT CHARSET=utf8mb4
- * COLLATE=utf8mb4_bin` after its column list, unless it names a collation
- * already. Tables created before keep theirs. Returns a malloc'd rewrite, or
- * NULL when nothing changed (or out of memory: the SQL then runs as given).
+ * COLLATE=<collation>` after its column list, unless it names a collation
+ * already: @p collation is the server's NO PAD binary one
+ * (hl_my_bin_collation) - utf8mb4_bin is PAD SPACE, so 'alice' and 'alice '
+ * were one key (audit 22). Tables created before keep theirs. Returns a
+ * malloc'd rewrite, or NULL when nothing changed (or out of memory: the SQL
+ * then runs as given).
  */
-static char *mysql_bin_collate_hull_tables(const char *sql)
+static char *mysql_bin_collate_hull_tables(const char *sql,
+                                           const char *collation)
 {
-    static const char opt[] = " DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin";
+    char opt[96];
+    snprintf(opt, sizeof opt, " DEFAULT CHARSET=utf8mb4 COLLATE=%s",
+             collation ? collation : "utf8mb4_bin");
+    size_t optlen = strlen(opt);
     size_t len = strlen(sql);
     char *out = NULL;
     size_t olen = 0, ocap = 0, copied = 0;
@@ -320,7 +327,7 @@ static char *mysql_bin_collate_hull_tables(const char *sql)
         p = r + 1;
         if (named) continue;
         size_t chunk = (size_t)(r + 1 - (sql + copied));
-        size_t need = olen + chunk + sizeof opt;
+        size_t need = olen + chunk + optlen + 1;
         if (need > ocap) {
             size_t ncap = ocap ? ocap * 2 : len + 256;
             while (ncap < need) ncap *= 2;
@@ -330,8 +337,8 @@ static char *mysql_bin_collate_hull_tables(const char *sql)
         }
         memcpy(out + olen, sql + copied, chunk);
         olen += chunk;
-        memcpy(out + olen, opt, sizeof opt - 1);
-        olen += sizeof opt - 1;
+        memcpy(out + olen, opt, optlen);
+        olen += optlen;
         copied = (size_t)(r + 1 - sql);
     }
     if (!out) return NULL;
@@ -631,7 +638,7 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
         int handled = 0;
         int shim = mysql_create_index_shim(s, sql, &handled);
         if (handled) return shim == 0 ? 0 : -1;   /* DDL: 0 rows affected */
-        collated = mysql_bin_collate_hull_tables(sql);
+        collated = mysql_bin_collate_hull_tables(sql, s->conn.bin_collation);
     }
 
     if (nparams > 0) {
@@ -806,7 +813,7 @@ static int mysql_exec_script(HlDbHandle *h, const char *sql)
     HlDbMyCtx *s = h->ctx;
     int ready = my_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
-    char *collated = mysql_bin_collate_hull_tables(sql);
+    char *collated = mysql_bin_collate_hull_tables(sql, s->conn.bin_collation);
     int rc = hl_my_conn_exec_multi(&s->conn, collated ? collated : sql);
     free(collated);
     return rc;

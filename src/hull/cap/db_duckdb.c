@@ -64,14 +64,19 @@
  * replay) and the last close (a checkpoint) can take seconds, and holding it
  * across them stalled every other DuckDB open and close in the process, the
  * event loop's included. An instance being opened is in the list as OPENING;
- * another open of the same file waits for it on the condition variable. */
-enum { HL_DUCK_OPENING = 0, HL_DUCK_READY = 1 };
+ * another open of the same file waits for it on the condition variable. An
+ * instance its last connection is closing stays in the list as CLOSING until
+ * duckdb_close returns, and an open waits for that too: unlinked first, a new
+ * open made a second instance of the file while the checkpoint still wrote
+ * it, and the old instance's close dropped the process's fcntl lock on the
+ * file - the new instance's included (audit 22). */
+enum { HL_DUCK_OPENING = 0, HL_DUCK_READY = 1, HL_DUCK_CLOSING = 2 };
 
 typedef struct HlDuckShared {
     char                *path;   /* canonical */
     duckdb_database      db;
     int                  refs;
-    int                  state;  /* HL_DUCK_OPENING / HL_DUCK_READY */
+    int                  state;  /* HL_DUCK_OPENING / _READY / _CLOSING */
     struct HlDuckShared *next;
 } HlDuckShared;
 
@@ -365,7 +370,7 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     if (!key) { free(s); return -1; }
     pthread_mutex_lock(&g_duck_shared_mu);
     HlDuckShared *sh;
-    while ((sh = duck_find(key)) && sh->state == HL_DUCK_OPENING)
+    while ((sh = duck_find(key)) && sh->state != HL_DUCK_READY)
         pthread_cond_wait(&g_duck_shared_cv, &g_duck_shared_mu);
     if (sh) {
         free(key);
@@ -423,17 +428,22 @@ static void duck_close(HlDbHandle *h)
     HlDbDuckCtx *s = h->ctx;
     duckdb_disconnect(&s->con);
     if (s->shared) {
-        /* The last connection to the file closes its instance - taken off
-         * the list under the lock, closed (a checkpoint) outside it. */
+        /* The last connection to the file closes its instance: CLOSING in
+         * the list while duckdb_close (a checkpoint) runs outside the lock,
+         * taken off it after - an open of the file waits for that. */
         HlDuckShared *gone = NULL;
         pthread_mutex_lock(&g_duck_shared_mu);
         if (--s->shared->refs == 0) {
-            duck_unlink(s->shared);
+            s->shared->state = HL_DUCK_CLOSING;
             gone = s->shared;
         }
         pthread_mutex_unlock(&g_duck_shared_mu);
         if (gone) {
             duckdb_close(&gone->db);
+            pthread_mutex_lock(&g_duck_shared_mu);
+            duck_unlink(gone);
+            pthread_cond_broadcast(&g_duck_shared_cv);
+            pthread_mutex_unlock(&g_duck_shared_mu);
             free(gone->path);
             free(gone);
         }

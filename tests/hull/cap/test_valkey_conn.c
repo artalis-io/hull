@@ -243,6 +243,60 @@ UTEST(valkey_conn, command_deadline_bounds_a_dripping_reply) {
     close(sv[0]);
 }
 
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_budget.h"
+
+static int vk_charges, vk_trip_at;
+static int vk_count_trip_fn(void *ud, int64_t units) {
+    (void)ud; (void)units;
+    return ++vk_charges >= vk_trip_at;
+}
+
+/* Audit 22: the run was asked only after a quiet 100 ms slice, so a reply
+ * sent a byte every 20 ms ran for the whole command deadline (10 s here)
+ * with a tripped budget. It is asked after every chunk now. */
+UTEST(valkey_conn, a_dripping_reply_is_stopped_by_a_tripped_budget) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    write(sv[0], HELLO_MAP, strlen(HELLO_MAP));
+    HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost?connect_timeout=10000", &d));
+    HlValkeyConn *c = NULL; char e[128];
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
+
+    static char body[256];
+    memset(body, 'a', sizeof body);
+    memcpy(body, "$100000\r\n", 9);
+    Dripper dr = { .fd = sv[0], .data = body, .len = sizeof body,
+                   .chunk = 1, .delay_ms = 20 };
+    atomic_init(&dr.stop, 0);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, drip, &dr));
+
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 2);
+    hl_resp_cmd_arg_cstr(&w, "GET");
+    hl_resp_cmd_arg_cstr(&w, "k");
+    HlRespValue reply;
+    vk_charges = 0;
+    vk_trip_at = 5;
+    HlDbBudgetBinding prev = hl_db_budget_swap(vk_count_trip_fn, NULL);
+    uint64_t t0 = now_ms();
+    int rc = hl_valkey_command(c, &w, &reply);
+    uint64_t took = now_ms() - t0;
+    hl_db_budget_restore(prev);
+    hl_resp_writer_free(&w);
+    atomic_store(&dr.stop, 1);
+    pthread_join(th, NULL);
+
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(strstr(hl_valkey_conn_error(c), "interrupted") != NULL);
+    EXPECT_TRUE(took < 2000);   /* the drip alone runs 256 x 20 ms = 5 s */
+
+    hl_valkey_conn_close(c);
+    close(sv[0]);
+}
+#endif
+
 /* A large aggregate arriving 7 bytes at a time still decodes whole: the
  * re-parse is deferred while more bytes are waiting, never skipped once the
  * reply is complete. */

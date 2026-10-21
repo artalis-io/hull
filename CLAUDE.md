@@ -1018,13 +1018,21 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   `VARCHAR(255)`, not `TEXT` (TEXT affinity on SQLite, varchar on Postgres,
   indexable on MySQL); data-only columns stay `TEXT`.
 - **Binary collation on `_hull_*` tables (existing deployments: migrate by
-  hand).** `db_mysql.c` appends `DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`
-  to every `CREATE TABLE _hull_*` it runs, so role names, inbox ids, dedup
-  keys and job / cron names compare exactly (under MySQL 8's default
-  `utf8mb4_0900_ai_ci`, `'Admin' = 'admin'` and `'josé' = 'jose'`). That only
+  hand).** `db_mysql.c` appends `DEFAULT CHARSET=utf8mb4 COLLATE=<c>` to every
+  `CREATE TABLE _hull_*` it runs, `<c>` being the server's NO PAD binary
+  collation (`hl_my_bin_collation`, from the handshake's version):
+  `utf8mb4_0900_bin` on MySQL 8.0.17+, `utf8mb4_nopad_bin` on MariaDB,
+  `utf8mb4_bin` on MySQL 5.7 (which has no NO PAD collation). So role names,
+  inbox ids, dedup keys, user ids and job / cron names compare exactly (under
+  MySQL 8's default `utf8mb4_0900_ai_ci`, `'Admin' = 'admin'` and
+  `'josé' = 'jose'`; under the PAD SPACE `utf8mb4_bin` Hull used before
+  audit 22, `'alice' = 'alice '`, so a user id with a trailing space shared
+  another's roles, TOTP row and sessions). That only
   reaches tables created after the change: `CREATE TABLE IF NOT EXISTS` leaves
   an existing table as it was, and nothing converts or warns. An existing
-  deployment converts them once (converting to `_bin` only makes keys
+  deployment converts them once - to `utf8mb4_0900_bin` below, or
+  `utf8mb4_nopad_bin` on MariaDB, including tables an earlier Hull made
+  `utf8mb4_bin` (converting to a binary NO PAD collation only makes keys
   stricter, so no unique key can newly collide; FK checks are off for the
   duration because the rbac join tables reference `_hull_roles` /
   `_hull_permissions`):
@@ -1032,16 +1040,16 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   SET FOREIGN_KEY_CHECKS = 0;
   -- generate one statement per Hull table in this schema:
   SELECT CONCAT('ALTER TABLE `', table_name,
-                '` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;')
+                '` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;')
     FROM information_schema.tables
    WHERE table_schema = DATABASE() AND table_name LIKE '\_hull\_%';
   -- run the statements it prints, e.g.:
-  ALTER TABLE `_hull_roles` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-  ALTER TABLE `_hull_permissions` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-  ALTER TABLE `_hull_user_roles` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-  ALTER TABLE `_hull_role_permissions` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-  ALTER TABLE `_hull_inbox_processed` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-  ALTER TABLE `_hull_jobs` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+  ALTER TABLE `_hull_roles` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+  ALTER TABLE `_hull_permissions` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+  ALTER TABLE `_hull_user_roles` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+  ALTER TABLE `_hull_role_permissions` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+  ALTER TABLE `_hull_inbox_processed` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+  ALTER TABLE `_hull_jobs` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
   SET FOREIGN_KEY_CHECKS = 1;
   ```
   Check the current state with `SELECT table_name, table_collation FROM

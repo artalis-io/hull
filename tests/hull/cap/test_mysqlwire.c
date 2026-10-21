@@ -31,6 +31,24 @@ UTEST(mysqlwire, client_charset_is_utf8mb4)
     EXPECT_EQ(hl_my_client_charset(255), (uint8_t)255);   /* MySQL 8 */
 }
 
+/* Audit 22: utf8mb4_bin is PAD SPACE ('alice' = 'alice '), so _hull_* keys
+ * differing only in trailing spaces were one key. A NO PAD binary collation
+ * where the server has one. */
+UTEST(mysqlwire, hull_tables_get_a_no_pad_binary_collation)
+{
+    EXPECT_STREQ(hl_my_bin_collation("8.0.36"),  "utf8mb4_0900_bin");
+    EXPECT_STREQ(hl_my_bin_collation("8.0.17"),  "utf8mb4_0900_bin");
+    EXPECT_STREQ(hl_my_bin_collation("8.4.0-commercial"), "utf8mb4_0900_bin");
+    EXPECT_STREQ(hl_my_bin_collation("9.1.0"),   "utf8mb4_0900_bin");
+    EXPECT_STREQ(hl_my_bin_collation("8.0.16"),  "utf8mb4_bin");
+    EXPECT_STREQ(hl_my_bin_collation("5.7.44-log"), "utf8mb4_bin");
+    EXPECT_STREQ(hl_my_bin_collation("5.5.5-10.11.6-MariaDB-1:10.11.6+maria"),
+                 "utf8mb4_nopad_bin");
+    EXPECT_STREQ(hl_my_bin_collation("11.4.2-MariaDB"), "utf8mb4_nopad_bin");
+    EXPECT_STREQ(hl_my_bin_collation(""),        "utf8mb4_bin");
+    EXPECT_STREQ(hl_my_bin_collation(NULL),      "utf8mb4_bin");
+}
+
 UTEST(mysqlwire, int_roundtrip_little_endian)
 {
     HlMyWriter w; hl_my_writer_init(&w);

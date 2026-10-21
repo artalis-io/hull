@@ -93,7 +93,14 @@ function makeStore(conn, storeNs, opts) {
         },
         del(k) { return conn.del(physKey(k)); },
         has(k) { return conn.has(physKey(k)); },
-        incr(k, by, ttl) { return conn.incr(physKey(k), by, ttlMs(this, ttl)); },
+        incr(k, by, ttl) {
+            const n = conn.incr(physKey(k), by, ttlMs(this, ttl));
+            // Valkey counts to 2^63; past 2^53 the int64 arrives as a rounded
+            // double, where the memory and SQL stores refuse (audit 22).
+            if (!Number.isSafeInteger(n))
+                util.error("overflow", "kv: incr would leave the safe-integer range");
+            return n;
+        },
         // native cas -> 0 ok / 1 mismatch / 2 conflict; boolean store contract is
         // "did the swap happen" (a retry-exhausted conflict is a non-swap); an
         // ERROR throws inside the native call.
