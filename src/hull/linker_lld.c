@@ -58,6 +58,16 @@ static int lld_is_available(HlLinker *l)
     return ctx->bprefix[0] != '\0'; /* and an lld was resolved */
 }
 
+/* More objects / libraries than fit HL_LINKER_MAX_ARGS: an error, not a
+ * link without the rest - a dropped --whole-archive feature lib linked its
+ * weak no-op defaults instead (audit 22). */
+static int lld_too_many(void)
+{
+    fprintf(stderr, "hull: link: too many objects and libraries for one "
+                    "link (max %d arguments)\n", HL_LINKER_MAX_ARGS);
+    return -1;
+}
+
 static int lld_link(HlLinker *l, const char *output,
                     const char **objs, const char **libs,
                     const HlLinkTarget *tgt)
@@ -81,8 +91,10 @@ static int lld_link(HlLinker *l, const char *output,
         argv[n++] = "-o"; argv[n++] = output;
         argv[n++] = ctx->crt1;
         argv[n++] = ctx->crti;
-        for (int i = 0; objs && objs[i] && n < HL_LINKER_MAX_ARGS - 8; i++)
-            argv[n++] = objs[i];
+        int oi = 0;
+        for (; objs && objs[oi] && n < HL_LINKER_MAX_ARGS - 8; oi++)
+            argv[n++] = objs[oi];
+        if (objs && objs[oi]) return lld_too_many();
         argv[n++] = "--start-group";
         /* build.lua emits linker flags in the compiler-driver convention
          * (-Wl,X) because every OTHER backend is a driver (cc, `zig cc`). We
@@ -97,13 +109,15 @@ static int lld_link(HlLinker *l, const char *output,
          * the group. ELF -Wl, flags are single-token; the comma'd
          * -Wl,-force_load,<a> form is macOS/ld64-only and never reaches this
          * ELF-only path. */
-        for (int i = 0; libs && libs[i] && n < HL_LINKER_MAX_ARGS - 8; i++) {
-            const char *a = libs[i];
+        int li = 0;
+        for (; libs && libs[li] && n < HL_LINKER_MAX_ARGS - 8; li++) {
+            const char *a = libs[li];
             if (strncmp(a, "-Wl,", 4) == 0) a += 4;
             if (strcmp(a, "--start-group") == 0 || strcmp(a, "--end-group") == 0)
                 continue;
             argv[n++] = a;
         }
+        if (libs && libs[li]) return lld_too_many();
         /* The compiler runtime (libgcc / compiler-rt) supplies soft-float and
          * other builtins (e.g. 128-bit long double __multf3) that a cc/zig-cc
          * driver would auto-link but a raw ld.lld does not. Inside the group so
@@ -122,10 +136,12 @@ static int lld_link(HlLinker *l, const char *output,
     argv[n++] = ctx->bprefix;       /* -B<lld_dir>: cc finds ld.lld here */
     argv[n++] = "-fuse-ld=lld";
     argv[n++] = "-o"; argv[n++] = output;
-    for (int i = 0; objs && objs[i] && n < HL_LINKER_MAX_ARGS - 2; i++)
-        argv[n++] = objs[i];
-    for (int i = 0; libs && libs[i] && n < HL_LINKER_MAX_ARGS - 2; i++)
-        argv[n++] = libs[i];
+    int oi = 0, li = 0;
+    for (; objs && objs[oi] && n < HL_LINKER_MAX_ARGS - 2; oi++)
+        argv[n++] = objs[oi];
+    for (; libs && libs[li] && n < HL_LINKER_MAX_ARGS - 2; li++)
+        argv[n++] = libs[li];
+    if ((objs && objs[oi]) || (libs && libs[li])) return lld_too_many();
     argv[n] = NULL;
     return hl_tool_spawn(argv) == 0 ? 0 : -1;
 }

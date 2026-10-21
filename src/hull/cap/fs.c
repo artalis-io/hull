@@ -413,9 +413,12 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
         fail = "io_error";
         goto out;
     }
-    /* A replaced file keeps its permission bits (a 0600 secret stays 0600). */
+    /* A replaced file keeps its permission bits (a 0600 secret stays 0600),
+     * not setuid / setgid: an in-place write had the kernel clear them, so
+     * copied onto new content they made it a setuid executable of the app's
+     * choosing (audit 22). */
     if (have_target)
-        (void)fchmod(tfd, target.st_mode & 07777);
+        (void)fchmod(tfd, target.st_mode & 01777);
 
     if ((len > 0 && data && fs_write_all(tfd, data, len) != 0)
         || (!(flags & HL_FS_WRITE_NO_SYNC) && fsync(tfd) != 0)) {

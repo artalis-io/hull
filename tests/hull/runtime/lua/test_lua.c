@@ -12050,4 +12050,22 @@ UTEST(lua_audit22, http_refuses_headers_hulls_client_writes)
     cleanup_lua_caps();
 }
 
+/* Audit 22: the scratch arena is reset only when a run starts, and
+ * crypto.random / db params took from it for good, so one run filled it and
+ * every later scratch user in that run failed. */
+UTEST(lua_audit22, one_run_does_not_exhaust_the_scratch_arena)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    EXPECT_EQ_MSG(audit10_run(
+        "for i = 1, 400 do assert(#crypto.random(65536) == 65536) end "
+        "local sql = 'SELECT ' .. string.rep('?, ', 99) .. '? AS last' "
+        "local p = {} for i = 1, 100 do p[i] = i end "
+        "for i = 1, 5000 do assert(db.query(sql, p)[1].last == 100) end "
+        "return 1",
+        0, err, sizeof err), LUA_OK, err);
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();

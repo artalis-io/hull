@@ -142,9 +142,18 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
     if (!params)
         return;
     /* Pop the values we left on the stack in lua_to_hl_values.
-     * No free() - params live in the per-request scratch arena. */
+     * No free() - params live in the per-request scratch arena, which gets
+     * them back: it is reset only when a run starts, so a bulk import's
+     * thousands of statements in one run filled it, and every later scratch
+     * user in the run failed ("params must be a table"; audit 22). The
+     * params are the call's first scratch allocation and nothing after
+     * them is used past this point. */
     if (count > 0)
         lua_pop(L, count);
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->scratch && (const char *)params >= lua->scratch->buffer &&
+        (size_t)((const char *)params - lua->scratch->buffer) <= lua->scratch->used)
+        lua->scratch->used = (size_t)((const char *)params - lua->scratch->buffer);
 }
 
 /* Check if the immediate Lua caller is a stdlib module (chunk name starts
@@ -595,6 +604,8 @@ static int lua_db_insert_if_absent(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not configured");
+    /* The scratch arrays below are this call's: given back at its end. */
+    size_t scratch_mark_at = lua->scratch ? lua->scratch->used : 0;
 
     const char *table = luaL_checkstring(L, 1);
     int n_conflict = 0;
@@ -616,6 +627,7 @@ static int lua_db_insert_if_absent(lua_State *L)
 
     int rc = hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
                                      cols, vals, n_cols);
+    if (lua->scratch) lua->scratch->used = scratch_mark_at;
     if (rc < 0) {
         return hl_lua_raise_copy(L, "db.insert_if_absent: ", hl_db_errmsg(h));
     }
@@ -632,6 +644,8 @@ static int lua_db_upsert(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not configured");
+    /* The scratch arrays below are this call's: given back at its end. */
+    size_t scratch_mark_at = lua->scratch ? lua->scratch->used : 0;
 
     const char *table = luaL_checkstring(L, 1);
     int n_conflict = 0;
@@ -652,6 +666,7 @@ static int lua_db_upsert(lua_State *L)
 
     int rc = hl_db_upsert(h, table, conflict_cols, n_conflict,
                            cols, vals, n_cols);
+    if (lua->scratch) lua->scratch->used = scratch_mark_at;
     if (rc < 0) {
         return hl_lua_raise_copy(L, "db.upsert: ", hl_db_errmsg(h));
     }

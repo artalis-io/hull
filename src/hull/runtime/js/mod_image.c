@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "internal.h"            /* hl_js_budget_charge */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/cap/image.h"
 #include "hull/cap/fs.h"
 #ifdef HL_ENABLE_WASM
@@ -72,7 +73,14 @@ static JSValue js_image_pixels(JSContext *ctx, JSValueConst this_val,
     HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
     if (!img) return JS_ThrowInternalError(ctx, "image already closed");
 
-    /* Return a copy as ArrayBuffer */
+    /* Return a copy as ArrayBuffer: refused past the heap limit and charged
+     * 1 unit per 8 bytes before it, as Lua's image copies (audit 22; an
+     * image borrowed from a mapping can be far larger than the heap). */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->max_heap_bytes && img->pixel_len > js->max_heap_bytes)
+        return JS_ThrowRangeError(ctx, "image.pixels: image too large for the VM heap");
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)img->pixel_len)))
+        return JS_EXCEPTION;
     return JS_NewArrayBufferCopy(ctx, (const uint8_t *)img->pixels,
                                   img->pixel_len);
 }
@@ -363,6 +371,13 @@ static JSValue js_image_to_wasm(JSContext *ctx, JSValueConst this_val,
     if (img->pixel_len > SIZE_MAX - hdr)
         return JS_ThrowRangeError(ctx, "image.toWasm: image too large");
     size_t total = hdr + img->pixel_len;
+    /* Refused past the heap limit and charged before the copy, as Lua's
+     * image.to_wasm (audit 22). */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->max_heap_bytes && total > js->max_heap_bytes)
+        return JS_ThrowRangeError(ctx, "image.toWasm: image too large for the VM heap");
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)total)))
+        return JS_EXCEPTION;
     uint8_t *buf = js_malloc(ctx, total);
     if (!buf) return JS_EXCEPTION;
 
