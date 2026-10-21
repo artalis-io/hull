@@ -10885,6 +10885,19 @@ UTEST(lua_run_watchdog, a_run_under_its_deadline_is_not_stopped)
     EXPECT_STREQ(err, "");
 }
 
+/* The finalizers lua_close runs at teardown are under a deadline of their
+ * own (audit 22): the watch was disarmed before the close, so a finalizer
+ * looping under no instruction limit hung hl_lua_free for good. The loop
+ * here is the only thing that could stop it; a hang is the failure. */
+UTEST(lua_run_watchdog, a_looping_finalizer_does_not_hang_teardown)
+{
+    char err[512];
+    EXPECT_EQ(wd_lua_run("KEEP = setmetatable({}, { __gc = function() "
+                         "  while true do end end }) return 1",
+                         err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+}
+
 /* A run that waits (a parked handler) is not over its deadline when it is
  * resumed: each entry re-arms it. Simulated: the deadline passes while the
  * VM is idle, and the next arm clears it. */

@@ -663,6 +663,58 @@ UTEST(tool, find_files_skips_vendor)
     free(tmpdir);
 }
 
+/* HL_TOOL_FIND_ALL lists what --verify-sig's startup scan counts: dot-names,
+ * vendor / node_modules / dot directories, and symbolic links (not followed)
+ * - `hull verify` skipped them all and said OK for an app the runtime then
+ * refused (audit 22). The default walk is unchanged. */
+UTEST(tool, find_files_all_entries)
+{
+    char *tmpdir = make_tmpdir();
+    ASSERT_TRUE(tmpdir != NULL);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/.hidden", tmpdir);
+    mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%s/node_modules", tmpdir);
+    mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%s/a.css", tmpdir);
+    write_test_file(path, "a");
+    snprintf(path, sizeof(path), "%s/.planted", tmpdir);
+    write_test_file(path, "b");
+    snprintf(path, sizeof(path), "%s/.hidden/c.css", tmpdir);
+    write_test_file(path, "c");
+    snprintf(path, sizeof(path), "%s/node_modules/d.css", tmpdir);
+    write_test_file(path, "d");
+    int want = 4;
+    char link[512];
+    snprintf(link, sizeof(link), "%s/linked.css", tmpdir);
+    if (symlink("a.css", link) == 0) want++;   /* no symlinks on some hosts */
+
+    char **files = hl_tool_find_files(tmpdir, "*", NULL);
+    ASSERT_TRUE(files != NULL);
+    int count = 0;
+    for (char **p = files; *p; p++) { count++; free(*p); }
+    free(files);
+    EXPECT_EQ(count, 1);   /* a.css only: dot-names, node_modules and links skipped */
+
+    files = hl_tool_find_files_ex(tmpdir, "*", NULL, HL_TOOL_FIND_ALL, NULL);
+    ASSERT_TRUE(files != NULL);
+    count = 0;
+    int saw_dot = 0;
+    for (char **p = files; *p; p++) {
+        count++;
+        if (strstr(*p, "/.planted")) saw_dot = 1;
+        free(*p);
+    }
+    free(files);
+    EXPECT_EQ(count, want);
+    EXPECT_TRUE(saw_dot);
+
+    unlink(link);
+    hl_tool_rmdir(tmpdir, NULL);
+    free(tmpdir);
+}
+
 UTEST(tool, find_files_pattern_match)
 {
     char *tmpdir = make_tmpdir();

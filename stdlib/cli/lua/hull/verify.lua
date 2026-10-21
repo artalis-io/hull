@@ -476,8 +476,9 @@ local function main()
     -- sig_scan_unsigned). The migration runner applies EVERY *.sql in
     -- migrations/ and the compute loader prefers compute/<name>.aot.<arch>,
     -- so a file planted beside a signed app ran although verify said OK.
-    -- (find_files skips dot-entries; the runtime's per-file disk gate still
-    -- refuses those.)
+    -- The walk lists what that scan lists - dot-names, symbolic links and
+    -- every directory included (all_entries) - so the two agree: a planted
+    -- symlink or dot-file passed here and then refused to start (audit 22).
     local unsigned = {}
     local scans = {
         { dir = "migrations", want = function(n)
@@ -492,7 +493,8 @@ local function main()
     local root_prefix = app_dir .. "/"
     for _, sc in ipairs(scans) do
         local found, ferr = tool.find_files(root_prefix .. sc.dir, "*",
-                                            { include_vendor = true })
+                                            { include_vendor = true,
+                                              all_entries = true })
         if ferr then
             tool.stderr("  cannot scan " .. sc.dir .. "/: " .. ferr .. "\n")
             issues = issues + 1

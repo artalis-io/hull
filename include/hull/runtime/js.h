@@ -397,6 +397,15 @@ int hl_js_wire_routes_server(HlJS *js, KlHttpServer *server,
 void hl_js_request_done(HlJS *js, const KlHttpRequest *req);
 
 /*
+ * Teardown backstop (hl_js_free, before the WebSocket registry goes):
+ * release the conn object every connection still in the registry holds.
+ * The on_close path (or its deferred completion hook) releases it; a conn
+ * whose teardown never ran would otherwise keep its object alive into
+ * JS_FreeRuntime, which aborts on it (audit 22). Never raises.
+ */
+void hl_js_ws_conns_release(HlJS *js);
+
+/*
  * Dispatch a middleware call to the JS handler.
  * Returns 0 (continue), positive (short-circuit), or -1 (error).
  */

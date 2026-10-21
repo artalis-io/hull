@@ -463,6 +463,28 @@ rm -f "$WORKDIR/myapp/migrations/999_planted.sql"
 hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
 check_exit "verify passes once it is removed" 0 $RC
 
+# verify walks what --verify-sig's startup scan walks: a dot-file and a
+# symbolic link count as files too (audit 22: verify skipped both, so it
+# said OK for an app the runtime then refused to start).
+mkdir -p "$WORKDIR/myapp/static"
+echo 'planted' > "$WORKDIR/myapp/static/.planted"
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+check_exit "verify refuses a planted dot-file (exit 1)" 1 $RC
+check_contains "verify names the dot-file" "$VERIFY_OUT" "static/.planted"
+rm -f "$WORKDIR/myapp/static/.planted"
+mkdir -p "$WORKDIR/myapp/templates"
+if ln -s ../app.lua "$WORKDIR/myapp/templates/linked.html" 2>/dev/null &&
+   [ -L "$WORKDIR/myapp/templates/linked.html" ]; then
+    hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+    check_exit "verify refuses a planted symlink (exit 1)" 1 $RC
+    check_contains "verify names the symlink" "$VERIFY_OUT" "templates/linked.html"
+else
+    echo "  SKIP: symbolic links unavailable here"
+fi
+rm -f "$WORKDIR/myapp/templates/linked.html"
+hull_do "$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp"; VERIFY_OUT=$OUT
+check_exit "verify passes once they are removed" 0 $RC
+
 # A legacy signature (no binary_hash) signs only {files, manifest}. A
 # platform block attached to one is unsigned, and hl_sig_read refuses the
 # file; hull verify said VALID (audit 15). The legacy signature is made by

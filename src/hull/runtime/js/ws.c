@@ -322,3 +322,16 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
     hl_js_ws_invalidate_conn(ctx, conn);
     hl_ws_registry_remove(js->base.ws_registry, conn);
 }
+
+void hl_js_ws_conns_release(HlJS *js)
+{
+    HlWsRegistry *reg = js ? js->base.ws_registry : NULL;
+    if (!reg || !js->ctx) return;
+    for (HlWsEndpoint *ep = reg->endpoints; ep; ep = ep->next)
+        for (HlWsConn *conn = ep->conns; conn; conn = conn->next)
+            if (conn->user_data) {
+                log_warn("[hull:js] ws conn %llu still held at teardown",
+                         (unsigned long long)conn->id);
+                hl_js_ws_invalidate_conn(js->ctx, conn);
+            }
+}

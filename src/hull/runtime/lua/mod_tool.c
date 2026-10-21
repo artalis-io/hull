@@ -252,7 +252,11 @@ static int l_tool_spawn_read(lua_State *L)
  * opts.include_vendor (bool, default false): walk into directories
  * named "vendor". Useful for `static/vendor/*` asset enumeration;
  * source walks should leave it at the default. node_modules and
- * dotfiles are still always skipped. */
+ * dotfiles are still always skipped, unless
+ * opts.all_entries (bool, default false): every entry that is not a
+ * directory, dot-names and symbolic links included, with every real
+ * directory walked (HL_TOOL_FIND_ALL) - the view `hull verify` needs to
+ * agree with --verify-sig's startup scan (audit 22). */
 
 static int find_files_push_k(lua_State *L)
 {
@@ -275,7 +279,10 @@ static int l_tool_find_files(lua_State *L)
     int exclude_requested = 0, exclude_ok = 1;
     if (lua_type(L, 3) == LUA_TTABLE) {
         lua_getfield(L, 3, "include_vendor");
-        include_vendor = lua_toboolean(L, -1);
+        include_vendor = lua_toboolean(L, -1) ? HL_TOOL_FIND_VENDOR : 0;
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "all_entries");
+        if (lua_toboolean(L, -1)) include_vendor |= HL_TOOL_FIND_ALL;
         lua_pop(L, 1);
         lua_getfield(L, 3, "exclude_dirs");
         if (lua_type(L, -1) == LUA_TTABLE) {
