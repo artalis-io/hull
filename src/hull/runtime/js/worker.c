@@ -275,9 +275,11 @@ static void push_kv_object(JSContext *ctx, JSValue obj,
 }
 
 /* Take @p n bytes of the result copy from the VM's in-flight results:
- * 0, or -2 when that would pass its heap limit. */
+ * 0, or -2 when that would pass its heap limit. Every copy is at least a
+ * byte, so @p n of 0 is a length + 1 that wrapped: refused too. */
 static int capture_take(HlJsWorkerDispatchOp *op, size_t n)
 {
+    if (n == 0) return -2;
     return hl_offheap_shared_take(&op->result_hold, n) == 0 ? 0 : -2;
 }
 
