@@ -72,7 +72,8 @@ end)
 
 test("default source works", function()
     inbox.mark_processed("msg-default-1")
-    assert_eq(inbox.is_duplicate("msg-default-1"), false)
+    -- No source is the "default" source (audit 10), so both spellings see it.
+    assert_eq(inbox.is_duplicate("msg-default-1"), true)
     assert_eq(inbox.is_duplicate("msg-default-1", "default"), true)
 end)
 

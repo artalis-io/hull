@@ -1,10 +1,11 @@
 // test_idempotency.js - Tests for hull:web:middleware:idempotency
 //
-// Requires db, crypto, time, json globals (run via hull test harness).
+// Runs in the C harness's caps-bearing context (js_stdlib.middleware_*).
 
 import { idempotency } from "hull:web:middleware:idempotency";
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
+const H = __testHooks('hull:web:middleware:idempotency');
 import { json } from "hull:json";
 
 let pass = 0;
@@ -16,7 +17,7 @@ function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + e.message);
+        console.log("FAIL: " + name + ": " + e.message);
     }
 }
 
@@ -102,10 +103,7 @@ test("first request with key inserts inflight record", () => {
     assertEq(req.ctx._idem_key, "js-key-first-1");
     assertEq(req.ctx._idem_principal, "__anon");
 
-    const rows = db.query(
-        "SELECT state FROM _hull_idempotency_keys WHERE key = ?",
-        ["js-key-first-1"]
-    );
+    const rows = H.rows("js-key-first-1");
     assertEq(rows.length, 1);
     assertEq(rows[0].state, "inflight");
 });
@@ -177,10 +175,7 @@ test("complete marks key done without caching response", () => {
     mw(req, res);
     idempotency.complete(req);
 
-    const rows = db.query(
-        "SELECT state, status FROM _hull_idempotency_keys WHERE key = ?",
-        ["js-key-complete-1"]
-    );
+    const rows = H.rows("js-key-complete-1");
     assertEq(rows.length, 1);
     assertEq(rows[0].state, "complete");
 });
@@ -214,4 +209,5 @@ test("cleanup returns count", () => {
     assertEq(typeof count, "number");
 });
 
-export default { pass, fail };
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

@@ -28,6 +28,7 @@ const db = dbInternal.connection();
 import { crypto } from "hull:crypto";
 import { encoding } from "hull:encoding";
 import { time } from "hull:time";
+import { _test_hooks } from "hull:_test_hooks";
 import { json } from "hull:json";
 import { log } from "hull:log";
 
@@ -589,3 +590,12 @@ const idempotency = { init, middleware, respond, respondHtml, complete, cleanup,
                       _defaultPrincipal: defaultPrincipal,
                       _normPrincipal: normPrincipal };
 export { idempotency };
+
+// Test-only hooks, registered with the stdlib-internal hull:_test_hooks
+// rather than exported (audit 16): the suite reads a key's row back from
+// inside the module, where the _hull_* namespace check admits the query.
+_test_hooks.register("hull:web:middleware:idempotency", {
+    rows(key) {
+        return db.query("SELECT state, status FROM _hull_idempotency_keys WHERE key = ?", [key]);
+    },
+});

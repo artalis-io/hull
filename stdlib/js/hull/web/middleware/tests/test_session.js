@@ -13,7 +13,7 @@ function test(name, fn) {
         pass++;
     } catch (e) {
         fail++;
-        print("FAIL: " + name + ": " + e.message);
+        console.log("FAIL: " + name + ": " + e.message);
     }
 }
 
@@ -59,4 +59,5 @@ test("cleanup returns count", () => {
     assertEq(typeof count, "number");
 });
 
-export default { pass, fail };
+globalThis.__test_pass = pass;
+globalThis.__test_fail = fail;

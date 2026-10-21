@@ -351,4 +351,16 @@ function outbox.cleanup(max_age)
     )
 end
 
+-- Test-only hooks, registered with the stdlib-internal hull._test_hooks
+-- rather than exported (audit 16): the suite reads its rows back from inside
+-- the module, where the _hull_* namespace check admits the query.
+require("hull._test_hooks").register("hull.web.middleware.outbox", {
+    rows = function(id)
+        return db.query("SELECT state, kind, destination, idempotency_key, "
+                        .. "next_attempt_at, created_at FROM _hull_outbox WHERE id = ?",
+                        { id })
+    end,
+    clear = function() db.exec("DELETE FROM _hull_outbox") end,
+})
+
 return outbox

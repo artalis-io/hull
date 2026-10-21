@@ -5097,6 +5097,176 @@ UTEST(js_stdlib, csv_suite)
     cleanup_js_caps();
 }
 
+/* The middleware suites under web/middleware/tests, which no harness
+ * ran (they ended in `export default`, which the loader cannot read). */
+UTEST(js_stdlib, middleware_auth_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_auth.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_cors_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_cors.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_csp_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_csp.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_csrf_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_csrf.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_idempotency_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_idempotency.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_inbox_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_inbox.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_logger_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_logger.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_outbox_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_outbox.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_ratelimit_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_ratelimit.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_rbac_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_rbac.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_session_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_session.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, middleware_transaction_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/web/middleware/tests/test_transaction.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 /* The rest of the co-located JS stdlib suites -- same story as csv_suite
  * above: written, committed, and never run by anything.
  *
