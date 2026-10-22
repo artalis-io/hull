@@ -19,7 +19,7 @@ local ratelimit = require("hull.web.middleware.ratelimit")
 local cache     = require("hull.cache")
 local cookie    = require("hull.web.cookie")
 local session   = require("hull.web.middleware.session")
-local idem      = require("hull.web.middleware.idempotency")
+require("hull.web.middleware.idempotency")   -- registers its test hooks
 require("hull.web.middleware.oauth")   -- registers its test hooks
 
 local pass = 0
