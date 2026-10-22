@@ -227,6 +227,22 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
                                     void *ud);
 
 /**
+ * Send every byte of @p buf (all-or-error) with the socket non-blocking: the
+ * run is asked (@p stop(@p ud), may be NULL) after every chunk that leaves
+ * bytes to go and after every HL_DB_WAIT_SLICE_MS slice the peer took nothing,
+ * and the whole message is bounded by @p timeout_ms (<= 0: no bound; the stop
+ * function is still asked). A blocking send waited under SO_SNDTIMEO alone -
+ * for ever with ?read_timeout=0 - so a peer that stopped reading held the
+ * event loop with no budget or run deadline checked (audit 23). Returns 0
+ * when every byte was written, -1 on an error or the timeout, -2 when @p stop
+ * said to stop. On -1 / -2 part of the message may have gone: the stream is
+ * out of step, so the caller must not use the connection again.
+ */
+int hl_db_transport_send_sliced(HlDbTransport *t, const uint8_t *buf,
+                                size_t len, int timeout_ms,
+                                HlDbWaitStopFn stop, void *ud);
+
+/**
  * Send every byte of @p buf (all-or-error), looping over hl_db_transport_send.
  * This is conn_send's semantics: returns 0 iff all @p len bytes were written, -1
  * on any short/failed write.

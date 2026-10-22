@@ -891,6 +891,76 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
     return n;
 }
 
+int hl_db_transport_send_sliced(HlDbTransport *t, const uint8_t *buf,
+                                size_t len, int timeout_ms,
+                                HlDbWaitStopFn stop, void *ud)
+{
+    if (len == 0)
+        return 0;
+    int fd = hl_db_transport_fd(t);
+    if (fd < 0 || !buf)
+        return -1;
+    /* A blocking send (or TLS write) waited for the peer to take the bytes
+     * under SO_SNDTIMEO alone - the whole ?read_timeout=, for ever with 0 -
+     * asking no budget and no run deadline: a server that stopped reading a
+     * large conn.exec held the event loop (audit 23). As the TLS read in
+     * hl_db_transport_recv_sliced, the socket is written non-blocking: every
+     * chunk the kernel takes returns control, the run is asked after each one
+     * that leaves bytes to go and after each quiet slice, and the whole
+     * message shares one deadline (a peer taking a byte now and then cannot
+     * restart it). */
+    int saved = fcntl(fd, F_GETFL, 0);
+    if (saved < 0 ||
+        ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved | O_NONBLOCK) < 0))
+        return -1;
+    uint64_t start = 0;
+    size_t sent = 0;
+    int rc = 0;
+    while (sent < len) {
+        int blocked = 0;
+        if (t->tls) {
+            /* 0 = WANT_WRITE / WANT_READ: the TLS session keeps the record it
+             * built and wants the same bytes again, which the loop resends. */
+            errno = 0;
+            ssize_t n = hl_tls_client_write(fd, t->tls, buf + sent, len - sent);
+            if (n < 0) { rc = -1; break; }
+            if (n == 0) blocked = 1;
+            else        sent += (size_t)n;
+        } else {
+            kl_ssize_t n = sp_send(t, t->fd, buf + sent, len - sent);
+            if (n < 0) {
+                KlIoStatus st = sp_io_status(t);
+                if (st == KL_IO_INTERRUPTED) continue;
+                /* sp_io_status's errno fallback reports EAGAIN as PENDING
+                 * (its connect use); a send has no EINPROGRESS. */
+                if (st != KL_IO_WOULD_BLOCK && st != KL_IO_PENDING) {
+                    rc = -1; break;
+                }
+                blocked = 1;
+            } else if (n == 0) {
+                rc = -1; break;
+            } else {
+                sent += (size_t)n;
+            }
+        }
+        if (sent >= len)
+            break;
+        if (stop && stop(ud)) { rc = -2; break; }
+        int left = hl_db_transport_time_left(&start, timeout_ms);
+        if (left < 0) { rc = -1; break; }
+        if (!blocked)
+            continue;
+        int slice = HL_DB_WAIT_SLICE_MS;
+        if (left > 0 && left < slice) slice = left;
+        /* Intentional native-FD escape, as set_io_timeout (KL_SOCK_CAP_NATIVE_FD). */
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT, .revents = 0 };
+        if (poll(&pfd, 1, slice) < 0 && errno != EINTR) { rc = -1; break; }
+    }
+    if ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved) < 0)
+        rc = -1;   /* a descriptor left non-blocking would fail later I/O */
+    return rc;
+}
+
 size_t hl_db_transport_pending(HlDbTransport *t)
 {
     return (t && t->tls) ? hl_tls_client_pending(t->tls) : 0;

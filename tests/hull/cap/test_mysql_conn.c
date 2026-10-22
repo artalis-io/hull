@@ -1285,6 +1285,91 @@ UTEST(mysql_conn, the_read_timeout_bounds_a_silent_server)
     close(sv[0]);
 }
 
+/* Audit 23: the request went out with a blocking send under SO_SNDTIMEO
+ * alone (none with ?read_timeout=0), so a server that stopped reading a large
+ * statement held the call with no budget or run deadline asked. The write is
+ * sliced now: a tripped budget stops it and closes the connection, and
+ * ?read_timeout= bounds the whole write. */
+static char *my_big_sql(size_t n)
+{
+    char *sql = malloc(n + 1);
+    if (!sql) return NULL;
+    memcpy(sql, "SELECT 1", 8);
+    memset(sql + 8, ' ', n - 8);
+    sql[n] = '\0';
+    return sql;
+}
+
+UTEST(mysql_conn, a_server_that_never_reads_is_stopped_by_a_tripped_budget)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db?read_timeout=0",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    char *sql = my_big_sql((size_t)8 << 20);   /* far past the socket buffer */
+    ASSERT_TRUE(sql != NULL);
+
+    my_charges = 0;
+    my_trip_at = 3;
+    HlDbBudgetBinding prev = hl_db_budget_swap(my_count_trip_fn, NULL);
+    int64_t t0 = my_test_ms();
+    int rc = hl_my_conn_query(&conn, sql, NULL, NULL, NULL, NULL);
+    int64_t spent = my_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    free(sql);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(3, my_charges);
+    EXPECT_TRUE(spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+UTEST(mysql_conn, the_read_timeout_bounds_a_server_that_never_reads)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db?read_timeout=250",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    char *sql = my_big_sql((size_t)8 << 20);
+    ASSERT_TRUE(sql != NULL);
+
+    int64_t t0 = my_test_ms();
+    int rc = hl_my_conn_query(&conn, sql, NULL, NULL, NULL, NULL);
+    int64_t spent = my_test_ms() - t0;
+    free(sql);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent >= 200 && spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 /* More values than the statement has placeholders is refused, as SQLite
  * (SQLITE_RANGE) and Postgres refuse it (audit 17): build_execute bound the
  * first num_params and dropped the rest without a word. Nothing is executed;

@@ -402,6 +402,7 @@ typedef struct {
     int           nfields;
     int           nnames;   /* entries allocated in names (what free walks) */
     int           bad_row;  /* a row did not match its column definitions */
+    int           oom;      /* an allocation failed: the query fails (audit 23) */
 } MyAdapter;
 
 static void free_names(char **names, int n)
@@ -430,6 +431,7 @@ static void adapter_desc(void *ctx, const HlMyField *fields, int nf)
         free(a->names); free(a->types);
         a->names = NULL; a->types = NULL;
         a->nfields = -1;
+        a->oom = 1;
         return;
     }
     a->nnames = nf;
@@ -437,6 +439,8 @@ static void adapter_desc(void *ctx, const HlMyField *fields, int nf)
     for (int i = 0; i < nf; i++) {
         a->names[i] = strdup(fields[i].name ? fields[i].name : "");
         a->types[i] = fields[i].type;
+        /* Not copied: the column was handed over named "" (audit 23). */
+        if (!a->names[i]) a->oom = 1;
     }
 }
 
@@ -448,10 +452,13 @@ static int adapter_row(void *ctx, const char *const *vals,
     /* Every row carries its result set's column count. Clamped only from
      * above, a short row reached a consumer that sized its rows from the
      * first (db.async's collector), which read past it. */
+    if (a->oom) return 1;
     if (nc != a->nfields) { a->bad_row = 1; return 1; }
 
+    /* A failed allocation stopped the rows and the query succeeded with the
+     * rest of the result missing (audit 23): it fails now. */
     HlColumn *cols = calloc((size_t)(nc > 0 ? nc : 1), sizeof *cols);
-    if (!cols) return 1;
+    if (!cols) { a->oom = 1; return 1; }
     for (int i = 0; i < nc; i++) {
         cols[i].name = (a->names && a->names[i]) ? a->names[i] : "";
         uint8_t type = a->types ? a->types[i] : HL_MY_TYPE_STRING;
@@ -471,6 +478,7 @@ typedef struct {
     int           nfields;
     int           nnames;
     int           bad_row;
+    int           oom;      /* see MyAdapter */
 } MyBinAdapter;
 
 static void bin_adapter_desc(void *ctx, const HlMyField *fields, int nf)
@@ -481,21 +489,24 @@ static void bin_adapter_desc(void *ctx, const HlMyField *fields, int nf)
     a->nfields = 0;
     if (nf <= 0) return;
     a->names = calloc((size_t)nf, sizeof *a->names);
-    if (!a->names) { a->nfields = -1; return; }
+    if (!a->names) { a->nfields = -1; a->oom = 1; return; }
     a->nnames = nf;
     a->nfields = nf;
-    for (int i = 0; i < nf; i++)
+    for (int i = 0; i < nf; i++) {
         a->names[i] = strdup(fields[i].name ? fields[i].name : "");
+        if (!a->names[i]) a->oom = 1;   /* see adapter_desc */
+    }
 }
 
 static int bin_adapter_row(void *ctx, const HlMyVal *vals, int nc)
 {
     MyBinAdapter *a = ctx;
     if (!a->user_cb) return 0;
+    if (a->oom) return 1;
     if (nc != a->nfields) { a->bad_row = 1; return 1; }   /* see adapter_row */
 
     HlColumn *cols = calloc((size_t)(nc > 0 ? nc : 1), sizeof *cols);
-    if (!cols) return 1;
+    if (!cols) { a->oom = 1; return 1; }                  /* see adapter_row */
     for (int i = 0; i < nc; i++) {
         cols[i].name = (a->names && a->names[i]) ? a->names[i] : "";
         switch (vals[i].kind) {
@@ -596,7 +607,10 @@ static int mysql_query_raw(HlDbHandle *h, const char *sql,
                                            cb ? bin_adapter_row : NULL, &ba, NULL);
         free_names(ba.names, ba.nnames);
         free(pp);
-        if (rc == 0 && ba.bad_row) {
+        if (rc == 0 && ba.oom) {
+            snprintf(s->conn.errmsg, sizeof s->conn.errmsg, "out of memory");
+            rc = -1;
+        } else if (rc == 0 && ba.bad_row) {
             snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                      "server sent a row whose column count does not match "
                      "its column definitions");
@@ -615,7 +629,10 @@ static int mysql_query_raw(HlDbHandle *h, const char *sql,
                               cb ? adapter_row : NULL, &a, NULL);
     free_names(a.names, a.nnames);
     free(a.types);
-    if (rc == 0 && a.bad_row) {
+    if (rc == 0 && a.oom) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg, "out of memory");
+        rc = -1;
+    } else if (rc == 0 && a.bad_row) {
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "server sent a row whose column count does not match its "
                  "column definitions");

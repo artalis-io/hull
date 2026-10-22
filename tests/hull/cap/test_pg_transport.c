@@ -882,6 +882,80 @@ UTEST(db_transport_io_timeout, stalled_read_expires)
     tp_disarm_watchdog();
 }
 
+/* Audit 23: hl_db_transport_send_sliced writes non-blocking, asks the stop
+ * function after each chunk / quiet slice, and leaves the descriptor as it
+ * found it. */
+static int g_ss_stops, g_ss_trip_at;
+static int ss_stop(void *ud) { (void)ud; return ++g_ss_stops >= g_ss_trip_at; }
+
+UTEST(db_transport_send_sliced, small_message_goes_and_fd_stays_blocking)
+{
+    tp_arm_watchdog();
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+    const uint8_t out[5] = { 1, 2, 3, 4, 5 };
+    g_ss_stops = 0; g_ss_trip_at = 1;
+    ASSERT_EQ(hl_db_transport_send_sliced(t, out, sizeof out, 0, ss_stop, NULL), 0);
+    ASSERT_EQ(g_ss_stops, 0);            /* one chunk: nothing left to ask about */
+    uint8_t got[5] = {0};
+    ASSERT_EQ((int)recv(sv[1], got, sizeof got, 0), 5);
+    ASSERT_EQ(got[4], 5);
+    ASSERT_EQ(fcntl(sv[0], F_GETFL, 0) & O_NONBLOCK, 0);
+    hl_db_transport_close(t);
+    close(sv[1]);
+    tp_disarm_watchdog();
+}
+
+UTEST(db_transport_send_sliced, a_peer_that_never_reads_is_stopped)
+{
+    signal(SIGPIPE, SIG_IGN);
+    tp_arm_watchdog();
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+    size_t n = (size_t)8 << 20;
+    uint8_t *big = calloc(1, n);
+    ASSERT_TRUE(big != NULL);
+    g_ss_stops = 0; g_ss_trip_at = 3;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = hl_db_transport_send_sliced(t, big, n, 0, ss_stop, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    free(big);
+    ASSERT_EQ(rc, -2);
+    ASSERT_EQ(g_ss_stops, 3);
+    ASSERT_TRUE(ms < 2000);
+    ASSERT_EQ(fcntl(sv[0], F_GETFL, 0) & O_NONBLOCK, 0);
+    hl_db_transport_close(t);
+    close(sv[1]);
+    tp_disarm_watchdog();
+}
+
+UTEST(db_transport_send_sliced, the_timeout_bounds_the_whole_message)
+{
+    signal(SIGPIPE, SIG_IGN);
+    tp_arm_watchdog();
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+    size_t n = (size_t)8 << 20;
+    uint8_t *big = calloc(1, n);
+    ASSERT_TRUE(big != NULL);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = hl_db_transport_send_sliced(t, big, n, 250, NULL, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    free(big);
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(ms >= 200 && ms < 2000);
+    hl_db_transport_close(t);
+    close(sv[1]);
+    tp_disarm_watchdog();
+}
+
 UTEST(db_transport_alloc, block_from_embedder_allocator)
 {
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
