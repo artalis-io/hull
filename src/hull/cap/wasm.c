@@ -842,6 +842,45 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_LOAD;
     }
 
+    /* A module that supplies its own allocator is refused (audit 23). WAMR
+     * looks for function exports named malloc / free (or AssemblyScript's
+     * __new with __retain / __pin, and __release / __unpin) and, when it
+     * finds them, inserts no app heap: every wasm_runtime_module_malloc Hull
+     * makes for a call's input and output then runs the guest's malloc and
+     * returns memory_data + the offset it handed back, unchecked - a hostile
+     * guest aimed the host's memcpy outside linear memory - and every
+     * module_free runs guest code too, outside the call's watch (an AOT
+     * guest is not gas-metered either, so a looping free hung the thread).
+     * Hull's compute ABI exports only hull_process / hull_version / memory
+     * and allocates from the runtime's app heap; refusing by name, whatever
+     * the signature, keeps WAMR's own detection from ever matching. */
+    {
+        static const char *const alloc_exports[] = {
+            "malloc", "free", "__new", "__retain", "__release",
+            "__pin", "__unpin",
+        };
+        int32_t nexp = wasm_runtime_get_export_count(module);
+        for (int32_t i = 0; i < nexp; i++) {
+            wasm_export_t ex;
+            wasm_runtime_get_export_type(module, i, &ex);
+            if (ex.kind != WASM_IMPORT_EXPORT_KIND_FUNC || !ex.name)
+                continue;
+            for (size_t k = 0;
+                 k < sizeof(alloc_exports) / sizeof(alloc_exports[0]); k++) {
+                if (strcmp(ex.name, alloc_exports[k]) != 0)
+                    continue;
+                log_error("[wasm] refusing module '%s': it exports its own "
+                          "allocator function '%s'. Hull compute modules must "
+                          "use the runtime's app heap; do not export malloc / "
+                          "free (or __new / __retain / __release / __pin / "
+                          "__unpin)", name, ex.name);
+                wasm_runtime_unload(module);
+                free(buf);
+                return HL_WASM_ERR_LOAD;
+            }
+        }
+    }
+
     /* Probe ABI version and Memory64 flag before taking the lock. The probe
      * runs guest code - the module's own start / ctor functions at
      * instantiation, then hull_version - on whatever thread loads the module
@@ -1035,6 +1074,23 @@ static uint64_t linear_memory_bytes(wasm_module_inst_t inst)
     return mem ? (uint64_t)wasm_memory_get_cur_page_count(mem) *
                  (uint64_t)wasm_memory_get_bytes_per_page(mem)
                : 0;
+}
+
+/* Whether [app, app + len) lies inside the instance's default linear memory
+ * as it is now. Pure arithmetic - unlike wasm_runtime_validate_app_addr it
+ * sets no exception and does not accept the shared heaps (segments, mapped
+ * spans) above linear memory. The buffers Hull allocates with
+ * wasm_runtime_module_malloc and the output the guest reports writing are
+ * checked with it before the host copies into or out of them (audit 23):
+ * when the module supplies its own allocator WAMR returns memory_data +
+ * whatever offset the guest's malloc handed back, unchecked, and
+ * addr_app_to_native checks only the first byte. hl_cap_wasm_load refuses
+ * such modules; this is the second line. */
+static int range_in_linear_memory(wasm_module_inst_t inst, uint64_t app,
+                                  uint64_t len)
+{
+    uint64_t lin = linear_memory_bytes(inst);
+    return app <= lin && len <= lin - app;
 }
 
 /* The call, under @p watch (armed by hl_cap_wasm_call_buf, unbound): bound to
@@ -1281,7 +1337,8 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     uint64_t wasm_in_ptr = 0;
     if (input_len > 0) {
         wasm_in_ptr = wasm_runtime_module_malloc(inst, (uint64_t)input_len, &native_in);
-        if (!wasm_in_ptr || !native_in) {
+        if (!wasm_in_ptr || !native_in ||
+            !range_in_linear_memory(inst, wasm_in_ptr, (uint64_t)input_len)) {
             log_error("[wasm] failed to allocate input buffer (%zu bytes)", input_len);
             if (err_msg) *err_msg = err_internal;
             if (spans_active) hl_wasm_span_set_teardown(&span_set);
@@ -1297,7 +1354,8 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     uint64_t wasm_out_ptr = 0;
     if (max_output > 0) {
         wasm_out_ptr = wasm_runtime_module_malloc(inst, (uint64_t)max_output, &native_out);
-        if (!wasm_out_ptr || !native_out) {
+        if (!wasm_out_ptr || !native_out ||
+            !range_in_linear_memory(inst, wasm_out_ptr, max_output)) {
             log_error("[wasm] failed to allocate output buffer (%" PRIu64 " bytes)", max_output);
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
@@ -1394,6 +1452,15 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     if ((uint64_t)result > max_output) {
         if (err_msg) *err_msg = err_output;
         ret = HL_WASM_ERR_OUTPUT;
+        goto cleanup_bufs_err;
+    }
+
+    /* The bytes the host is about to read (or hand out zero-copy) must lie in
+     * linear memory as it is after the call - addr_app_to_native above
+     * checked only the first one (audit 23). */
+    if (wasm_out_ptr &&
+        !range_in_linear_memory(inst, wasm_out_ptr, (uint64_t)result)) {
+        if (err_msg) *err_msg = err_internal;
         goto cleanup_bufs_err;
     }
 
@@ -1856,7 +1923,8 @@ static int instance_call_buf_run(HlWasmInstance *pi,
     uint64_t wasm_in_ptr = 0;
     if (input_len > 0) {
         wasm_in_ptr = wasm_runtime_module_malloc(inst, (uint64_t)input_len, &native_in);
-        if (!wasm_in_ptr || !native_in) {
+        if (!wasm_in_ptr || !native_in ||
+            !range_in_linear_memory(inst, wasm_in_ptr, (uint64_t)input_len)) {
             if (err_msg) *err_msg = err_internal;
             if (spans_active) hl_wasm_span_set_teardown(&span_set);
             return HL_WASM_ERR_INTERNAL;
@@ -1868,7 +1936,8 @@ static int instance_call_buf_run(HlWasmInstance *pi,
     uint64_t wasm_out_ptr = 0;
     if (max_output > 0) {
         wasm_out_ptr = wasm_runtime_module_malloc(inst, (uint64_t)max_output, &native_out);
-        if (!wasm_out_ptr || !native_out) {
+        if (!wasm_out_ptr || !native_out ||
+            !range_in_linear_memory(inst, wasm_out_ptr, max_output)) {
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
             if (spans_active) hl_wasm_span_set_teardown(&span_set);
@@ -1972,6 +2041,15 @@ static int instance_call_buf_run(HlWasmInstance *pi,
     if ((uint64_t)result > max_output) {
         if (err_msg) *err_msg = err_output;
         ret = HL_WASM_ERR_OUTPUT;
+        goto cleanup_bufs_err;
+    }
+
+    /* The bytes the host is about to read (or hand out zero-copy) must lie in
+     * linear memory as it is after the call - addr_app_to_native above
+     * checked only the first one (audit 23). */
+    if (wasm_out_ptr &&
+        !range_in_linear_memory(inst, wasm_out_ptr, (uint64_t)result)) {
+        if (err_msg) *err_msg = err_internal;
         goto cleanup_bufs_err;
     }
 

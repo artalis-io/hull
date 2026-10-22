@@ -165,6 +165,15 @@ int32_t hull_version(void);  // Returns ABI version (currently 1)
 - Plugin reads input, writes output, returns byte count
 - Host copies output back to Lua string
 - Host frees both buffers via `wasm_runtime_module_free()`
+- Both buffers come from the app heap WAMR inserts into linear memory - host
+  code, no guest code runs. A module that exports its own allocator (`malloc`
+  / `free`, or AssemblyScript's `__new` / `__retain` / `__release` / `__pin` /
+  `__unpin`) is refused at load: WAMR would then skip the app heap and run the
+  guest's `malloc` for every buffer, trusting the offset it returned (a host
+  write outside linear memory) and running guest code outside the call's
+  timeout watch (audit 23). As a second line, the host checks every buffer it
+  allocates, and the output range the guest reports, lies inside linear memory
+  before it copies.
 
 ### Error encoding
 
