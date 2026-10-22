@@ -257,11 +257,13 @@ static void js_agg_udf_destroy(void *data)
     free(udf);
 }
 
-/* Parse UDF options from JS object */
-static void js_parse_udf_opts(JSContext *ctx, JSValueConst opts,
-                               int *deterministic, int *nargs,
-                               int *aggregate, int64_t *gas,
-                               uint32_t *heap, uint32_t *stack_sz)
+/* Parse UDF options from JS object. 0, or -1 with the exception pending: a
+ * getter or valueOf that threw (or the budget interrupt) fails the
+ * registration rather than registering it with defaults (audit 23). */
+static int js_parse_udf_opts(JSContext *ctx, JSValueConst opts,
+                             int *deterministic, int *nargs,
+                             int *aggregate, int64_t *gas,
+                             uint32_t *heap, uint32_t *stack_sz)
 {
     *deterministic = 0;
     *nargs = -1;
@@ -271,33 +273,31 @@ static void js_parse_udf_opts(JSContext *ctx, JSValueConst opts,
     *stack_sz = 0;
 
     if (JS_IsUndefined(opts) || JS_IsNull(opts))
-        return;
+        return 0;
 
     JSValue v;
+    int32_t n; int64_t g; uint32_t u; int r;
 
     v = JS_GetPropertyStr(ctx, opts, "deterministic");
+    if (JS_IsException(v)) return -1;
     if (JS_IsBool(v)) *deterministic = JS_VALUE_GET_BOOL(v);
     JS_FreeValue(ctx, v);
 
-    v = JS_GetPropertyStr(ctx, opts, "args");
-    if (!JS_IsUndefined(v)) { int32_t n; JS_ToInt32(ctx, &n, v); *nargs = n; }
-    JS_FreeValue(ctx, v);
+    if ((r = hl_js_opt_int32(ctx, opts, "args", &n)) < 0) return -1;
+    if (r) *nargs = n;
 
     v = JS_GetPropertyStr(ctx, opts, "aggregate");
+    if (JS_IsException(v)) return -1;
     if (JS_IsBool(v)) *aggregate = JS_VALUE_GET_BOOL(v);
     JS_FreeValue(ctx, v);
 
-    v = JS_GetPropertyStr(ctx, opts, "gas");
-    if (!JS_IsUndefined(v)) { int64_t g; JS_ToInt64(ctx, &g, v); *gas = g; }
-    JS_FreeValue(ctx, v);
-
-    v = JS_GetPropertyStr(ctx, opts, "heap");
-    if (!JS_IsUndefined(v)) { uint32_t h; JS_ToUint32(ctx, &h, v); *heap = h; }
-    JS_FreeValue(ctx, v);
-
-    v = JS_GetPropertyStr(ctx, opts, "stack");
-    if (!JS_IsUndefined(v)) { uint32_t s; JS_ToUint32(ctx, &s, v); *stack_sz = s; }
-    JS_FreeValue(ctx, v);
+    if ((r = hl_js_opt_int64(ctx, opts, "gas", &g)) < 0) return -1;
+    if (r) *gas = g;
+    if ((r = hl_js_opt_uint32(ctx, opts, "heap", &u)) < 0) return -1;
+    if (r) *heap = u;
+    if ((r = hl_js_opt_uint32(ctx, opts, "stack", &u)) < 0) return -1;
+    if (r) *stack_sz = u;
+    return 0;
 }
 
 /*
@@ -349,8 +349,12 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
             return JS_ThrowInternalError(ctx, "WASM compute not available");
         }
 
-        js_parse_udf_opts(ctx, opts, &deterministic, &nargs, &aggregate,
-                          &gas, &heap, &stack_sz);
+        if (js_parse_udf_opts(ctx, opts, &deterministic, &nargs, &aggregate,
+                              &gas, &heap, &stack_sz) < 0) {
+            JS_FreeCString(ctx, module_name);
+            JS_FreeCString(ctx, sql_name);
+            return JS_EXCEPTION;
+        }
 
         /* The manifest / CLI ceilings bind a UDF's instances like any other
          * compute call (round-6 L2); its own defaults stay below them. */
@@ -392,8 +396,11 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 #endif
     } else if (JS_IsFunction(ctx, argv[1])) {
         /* ── JS scalar UDF ─────────────────────────────────────── */
-        js_parse_udf_opts(ctx, opts, &deterministic, &nargs, &aggregate,
-                          &gas, &heap, &stack_sz);
+        if (js_parse_udf_opts(ctx, opts, &deterministic, &nargs, &aggregate,
+                              &gas, &heap, &stack_sz) < 0) {
+            JS_FreeCString(ctx, sql_name);
+            return JS_EXCEPTION;
+        }
 
         JsScalarUdfCtx *udf_ctx = calloc(1, sizeof(*udf_ctx));
         if (!udf_ctx) {
@@ -435,7 +442,16 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
     } else if (JS_IsObject(argv[1])) {
         /* ── JS aggregate UDF ({step, finalize}) ───────────────── */
         JSValue step_fn = JS_GetPropertyStr(ctx, argv[1], "step");
+        if (JS_IsException(step_fn)) {   /* audit 23: not "requires step" */
+            JS_FreeCString(ctx, sql_name);
+            return JS_EXCEPTION;
+        }
         JSValue final_fn = JS_GetPropertyStr(ctx, argv[1], "finalize");
+        if (JS_IsException(final_fn)) {
+            JS_FreeValue(ctx, step_fn);
+            JS_FreeCString(ctx, sql_name);
+            return JS_EXCEPTION;
+        }
 
         int has_step = JS_IsFunction(ctx, step_fn);
         int has_final = JS_IsFunction(ctx, final_fn);
@@ -448,8 +464,13 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
                 "db.udf.register: aggregate requires step and finalize functions");
         }
 
-        js_parse_udf_opts(ctx, opts, &deterministic, &nargs, &aggregate,
-                          &gas, &heap, &stack_sz);
+        if (js_parse_udf_opts(ctx, opts, &deterministic, &nargs, &aggregate,
+                              &gas, &heap, &stack_sz) < 0) {
+            JS_FreeValue(ctx, step_fn);
+            JS_FreeValue(ctx, final_fn);
+            JS_FreeCString(ctx, sql_name);
+            return JS_EXCEPTION;
+        }
 
         JsAggUdfCtx *udf_ctx = calloc(1, sizeof(*udf_ctx));
         if (!udf_ctx) {

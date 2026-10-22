@@ -147,19 +147,24 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
 
     JSValueConst opts = argv[0];
 
-    /* Extract fields */
-    JSValue v_host = JS_GetPropertyStr(ctx, opts, "host");
-    JSValue v_port = JS_GetPropertyStr(ctx, opts, "port");
-    JSValue v_user = JS_GetPropertyStr(ctx, opts, "username");
-    JSValue v_pass = JS_GetPropertyStr(ctx, opts, "password");
-    JSValue v_tls  = JS_GetPropertyStr(ctx, opts, "tls");
-    JSValue v_from = JS_GetPropertyStr(ctx, opts, "from");
-    JSValue v_to   = JS_GetPropertyStr(ctx, opts, "to");
-    JSValue v_subj = JS_GetPropertyStr(ctx, opts, "subject");
-    JSValue v_body = JS_GetPropertyStr(ctx, opts, "body");
-    JSValue v_ct   = JS_GetPropertyStr(ctx, opts, "content_type");
-    JSValue v_rto  = JS_GetPropertyStr(ctx, opts, "reply_to");
-    JSValue v_cc   = JS_GetPropertyStr(ctx, opts, "cc");
+    /* Extract fields. A getter that throws (or the budget interrupt) fails
+     * the call with its exception, and no later getter runs (audit 23: the
+     * field read as absent - a resolved "host required" - with the
+     * exception left pending). So does a string that failed to convert. */
+    static const char *const keys[12] = {
+        "host", "port", "username", "password", "tls", "from", "to",
+        "subject", "body", "content_type", "reply_to", "cc",
+    };
+    JSValue vals[12];
+    int got_exc = 0;
+    for (int i = 0; i < 12; i++) {
+        vals[i] = got_exc ? JS_UNDEFINED : JS_GetPropertyStr(ctx, opts, keys[i]);
+        if (JS_IsException(vals[i])) { vals[i] = JS_UNDEFINED; got_exc = 1; }
+    }
+    JSValue v_host = vals[0], v_port = vals[1], v_user = vals[2],
+            v_pass = vals[3], v_tls = vals[4], v_from = vals[5],
+            v_to = vals[6], v_subj = vals[7], v_body = vals[8],
+            v_ct = vals[9], v_rto = vals[10], v_cc = vals[11];
 
     const char *host = JS_IsString(v_host) ? JS_ToCString(ctx, v_host) : NULL;
     int32_t port = 587;
@@ -183,12 +188,18 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     const char *body = JS_IsString(v_body) ? JS_ToCString(ctx, v_body) : NULL;
     const char *content_type = JS_IsString(v_ct) ? JS_ToCString(ctx, v_ct) : NULL;
     const char *reply_to = JS_IsString(v_rto) ? JS_ToCString(ctx, v_rto) : NULL;
+    if ((JS_IsString(v_host) && !host) || (JS_IsString(v_user) && !username) ||
+        (JS_IsString(v_pass) && !password) || (JS_IsString(v_from) && !from) ||
+        (JS_IsString(v_to) && !to) || (JS_IsString(v_subj) && !subject) ||
+        (JS_IsString(v_body) && !body) || (JS_IsString(v_ct) && !content_type) ||
+        (JS_IsString(v_rto) && !reply_to))
+        got_exc = 1;
 
     /* CC array: copied whole, or smtp.send throws (audit 10). */
     const char **cc = NULL;
     int cc_count = 0;
     int cc_failed = 0;
-    if (!JS_IsUndefined(v_cc) && !JS_IsNull(v_cc)) {
+    if (!got_exc && !JS_IsUndefined(v_cc) && !JS_IsNull(v_cc)) {
         int is_arr = JS_IsArray(ctx, v_cc);
         if (is_arr < 0) {
             cc_failed = 1;
@@ -217,7 +228,7 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     /* smtp.send ALWAYS returns a Promise for SMTP outcomes (resolving to
      * {ok,error}); it rejects/throws only for argument/type/binding failures. */
     JSValue result;
-    if (cc_failed) {
+    if (cc_failed || got_exc) {
         result = JS_EXCEPTION;
         goto cleanup;
     }

@@ -261,85 +261,16 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
 
     JSValue opts_val = argv[1];
 
-    /* Parse device */
-    JSValue dev_val = JS_GetPropertyStr(ctx, opts_val, "device");
-    if (!JS_IsUndefined(dev_val)) {
-        int32_t d;
-        JS_ToInt32(ctx, &d, dev_val);
-        opts.device = d;
-    }
-    JS_FreeValue(ctx, dev_val);
-
-    /* Parse workgroups */
-    JSValue wg_val = JS_GetPropertyStr(ctx, opts_val, "workgroups");
-    if (JS_IsObject(wg_val)) {
-        JSValue xv = JS_GetPropertyStr(ctx, wg_val, "x");
-        JSValue yv = JS_GetPropertyStr(ctx, wg_val, "y");
-        JSValue zv = JS_GetPropertyStr(ctx, wg_val, "z");
-        uint32_t x = 1, y = 1, z = 1;
-        JS_ToUint32(ctx, &x, xv);
-        JS_ToUint32(ctx, &y, yv);
-        JS_ToUint32(ctx, &z, zv);
-        opts.workgroups.x = x;
-        opts.workgroups.y = y;
-        opts.workgroups.z = z;
-        JS_FreeValue(ctx, xv);
-        JS_FreeValue(ctx, yv);
-        JS_FreeValue(ctx, zv);
-    }
-    JS_FreeValue(ctx, wg_val);
-
-    /* Parse output buffer index (0-indexed in JS).
-     * output = N     → read back buffer N
-     * output = false → fire-and-forget (skip readback)
-     * output absent  → default to 0 (backward compat) */
-    JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
-    if (JS_IsBool(out_val) && !JS_ToBool(ctx, out_val)) {
-        opts.output_buffer = HL_GPU_OUTPUT_NONE;
-    } else if (!JS_IsUndefined(out_val)) {
-        int32_t o;
-        JS_ToInt32(ctx, &o, out_val);
-        opts.output_buffer = o;
-    }
-    JS_FreeValue(ctx, out_val);
-
-    /* Parse timeout */
-    JSValue timeout_val = JS_GetPropertyStr(ctx, opts_val, "timeout");
-    if (!JS_IsUndefined(timeout_val)) {
-        uint32_t t = 0;
-        JS_ToUint32(ctx, &t, timeout_val);
-        opts.timeout_ms = t;
-    }
-    JS_FreeValue(ctx, timeout_val);
-
-    /* Every ArrayBuffer pointer is re-taken after the last getter (see
-     * HlJsGpuView): uniforms + 16 buffers + 8 textures. */
+    /* A getter, valueOf or conversion that throws (or the budget interrupt)
+     * fails the call with its exception: perr skips the parse that is left
+     * and the dispatch (audit 23 - the results were ignored, so the dispatch
+     * ran on defaults with the exception pending). Everything the cleanup
+     * below releases is initialised here, before the first getter. */
+    int perr = 0;
     HlJsGpuView views[1 + 16 + 8];
     int nviews = 0;
-
-    /* Parse uniforms (string or ArrayBuffer) */
     const char *uni_str = NULL;  /* non-NULL if JS_ToCStringLen was used */
-    JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
-    if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
-        size_t uni_len;
-        uint8_t *uni_ab = hl_js_array_buffer_probe(ctx, &uni_len, uni_val);
-        if (uni_ab) {
-            opts.uniforms = uni_ab;
-            opts.uniforms_len = uni_len;
-            js_gpu_note_view(views, &nviews, 1 + 16 + 8, uni_val,
-                             &opts.uniforms, uni_len);
-        } else {
-            uni_str = JS_ToCStringLen(ctx, &uni_len, uni_val);
-            if (uni_str) {
-                opts.uniforms = uni_str;
-                opts.uniforms_len = uni_len;
-            }
-        }
-    }
-    /* uni_val is released after the dispatch: opts.uniforms may point into
-     * its ArrayBuffer. */
-
-    /* Parse buffers array */
+    JSValue uni_val = JS_UNDEFINED;
     HlGpuBufferDesc bufs[16];
     memset(bufs, 0, sizeof(bufs));
     int buf_count = 0;
@@ -351,107 +282,194 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
      * dispatch then read freed memory. */
     JSValue buf_data_vals[16];
     for (int i = 0; i < 16; i++) buf_data_vals[i] = JS_UNDEFINED;
+    HlGpuTextureDesc tex_descs[8];
+    const char *tex_strs[32] = {0};
+    int tex_str_count = 0;
+    JSValue tex_keep[8];
+    for (int i = 0; i < 8; i++) tex_keep[i] = JS_UNDEFINED;
 
+    /* Parse device */
+    int32_t d32;
+    int r = hl_js_opt_int32(ctx, opts_val, "device", &d32);
+    if (r < 0) { perr = 1; goto parsed; }
+    if (r) opts.device = d32;
+
+    /* Parse workgroups */
+    JSValue wg_val = JS_GetPropertyStr(ctx, opts_val, "workgroups");
+    if (JS_IsException(wg_val)) { perr = 1; goto parsed; }
+    if (JS_IsObject(wg_val)) {
+        uint32_t x = 1, y = 1, z = 1;
+        if (hl_js_get_uint32(ctx, wg_val, "x", &x) < 0 ||
+            hl_js_get_uint32(ctx, wg_val, "y", &y) < 0 ||
+            hl_js_get_uint32(ctx, wg_val, "z", &z) < 0) {
+            JS_FreeValue(ctx, wg_val);
+            perr = 1;
+            goto parsed;
+        }
+        opts.workgroups.x = x;
+        opts.workgroups.y = y;
+        opts.workgroups.z = z;
+    }
+    JS_FreeValue(ctx, wg_val);
+
+    /* Parse output buffer index (0-indexed in JS).
+     * output = N     → read back buffer N
+     * output = false → fire-and-forget (skip readback)
+     * output absent  → default to 0 (backward compat) */
+    JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
+    if (JS_IsException(out_val)) { perr = 1; goto parsed; }
+    if (JS_IsBool(out_val) && !JS_ToBool(ctx, out_val)) {
+        opts.output_buffer = HL_GPU_OUTPUT_NONE;
+    } else if (!JS_IsUndefined(out_val)) {
+        int32_t o;
+        if (JS_ToInt32(ctx, &o, out_val) < 0) {
+            JS_FreeValue(ctx, out_val);
+            perr = 1;
+            goto parsed;
+        }
+        opts.output_buffer = o;
+    }
+    JS_FreeValue(ctx, out_val);
+
+    /* Parse timeout */
+    uint32_t t32;
+    r = hl_js_opt_uint32(ctx, opts_val, "timeout", &t32);
+    if (r < 0) { perr = 1; goto parsed; }
+    if (r) opts.timeout_ms = t32;
+
+    /* Every ArrayBuffer pointer is re-taken after the last getter (see
+     * HlJsGpuView): uniforms + 16 buffers + 8 textures. */
+
+    /* Parse uniforms (string or ArrayBuffer) */
+    uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
+    if (JS_IsException(uni_val)) {
+        uni_val = JS_UNDEFINED;
+        perr = 1;
+        goto parsed;
+    }
+    if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
+        size_t uni_len;
+        uint8_t *uni_ab = hl_js_array_buffer_probe(ctx, &uni_len, uni_val);
+        if (uni_ab) {
+            opts.uniforms = uni_ab;
+            opts.uniforms_len = uni_len;
+            js_gpu_note_view(views, &nviews, 1 + 16 + 8, uni_val,
+                             &opts.uniforms, uni_len);
+        } else {
+            uni_str = JS_ToCStringLen(ctx, &uni_len, uni_val);
+            if (!uni_str) { perr = 1; goto parsed; }
+            opts.uniforms = uni_str;
+            opts.uniforms_len = uni_len;
+        }
+    }
+    /* uni_val is released after the dispatch: opts.uniforms may point into
+     * its ArrayBuffer. */
+
+    /* Parse buffers array */
     JSValue bufs_val = JS_GetPropertyStr(ctx, opts_val, "buffers");
+    if (JS_IsException(bufs_val)) { perr = 1; goto parsed; }
     if (JS_IsArray(ctx, bufs_val)) {
-        JSValue len_val = JS_GetPropertyStr(ctx, bufs_val, "length");
         int32_t len = 0;
-        JS_ToInt32(ctx, &len, len_val);
-        JS_FreeValue(ctx, len_val);
+        if (hl_js_get_length32(ctx, bufs_val, &len) < 0) perr = 1;
         if (len > 16) len = 16;
 
-        for (int32_t i = 0; i < len; i++) {
+        for (int32_t i = 0; i < len && !perr; i++) {
             JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)i);
+            if (JS_IsException(elem)) { perr = 1; break; }
             if (JS_IsObject(elem)) {
+                /* An entry's strings and buffer are released by index up
+                 * to buf_count, so count it before it can fail. */
+                int bi = buf_count++;
+                bufs[bi].binding = -1;
                 JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
-                if (JS_IsString(nv)) {
-                    buf_name_strs[buf_count] = JS_ToCString(ctx, nv);
-                    bufs[buf_count].name = buf_name_strs[buf_count];
+                if (JS_IsException(nv)) perr = 1;
+                else if (JS_IsString(nv)) {
+                    buf_name_strs[bi] = JS_ToCString(ctx, nv);
+                    if (!buf_name_strs[bi]) perr = 1;
+                    bufs[bi].name = buf_name_strs[bi];
                 }
                 JS_FreeValue(ctx, nv);
 
-                JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
-                if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                JSValue dv = perr ? JS_UNDEFINED
+                                  : JS_GetPropertyStr(ctx, elem, "data");
+                if (JS_IsException(dv)) perr = 1;
+                else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                     size_t dlen;
                     uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                     if (dab) {
-                        buf_data_vals[buf_count] = JS_DupValue(ctx, dv);
-                        bufs[buf_count].data = dab;
-                        bufs[buf_count].data_len = dlen;
-                        bufs[buf_count].size = dlen;
+                        buf_data_vals[bi] = JS_DupValue(ctx, dv);
+                        bufs[bi].data = dab;
+                        bufs[bi].data_len = dlen;
+                        bufs[bi].size = dlen;
                         js_gpu_note_view(views, &nviews, 1 + 16 + 8,
-                                         buf_data_vals[buf_count],
-                                         &bufs[buf_count].data, dlen);
+                                         buf_data_vals[bi],
+                                         &bufs[bi].data, dlen);
                     } else {
-                        buf_data_strs[buf_count] = JS_ToCStringLen(ctx, &dlen, dv);
-                        if (buf_data_strs[buf_count]) {
-                            bufs[buf_count].data = buf_data_strs[buf_count];
-                            bufs[buf_count].data_len = dlen;
-                            bufs[buf_count].size = dlen;
+                        buf_data_strs[bi] = JS_ToCStringLen(ctx, &dlen, dv);
+                        if (buf_data_strs[bi]) {
+                            bufs[bi].data = buf_data_strs[bi];
+                            bufs[bi].data_len = dlen;
+                            bufs[bi].size = dlen;
+                        } else {
+                            perr = 1;
                         }
                     }
                 }
                 JS_FreeValue(ctx, dv);
 
-                JSValue sv = JS_GetPropertyStr(ctx, elem, "size");
-                if (!JS_IsUndefined(sv)) {
-                    int64_t sz;
-                    JS_ToInt64(ctx, &sz, sv);
-                    bufs[buf_count].size = (size_t)sz;
-                }
-                JS_FreeValue(ctx, sv);
+                int64_t sz;
+                int sr = perr ? 0 : hl_js_opt_int64(ctx, elem, "size", &sz);
+                if (sr < 0) perr = 1;
+                else if (sr) bufs[bi].size = (size_t)sz;
 
-                JSValue uv = JS_GetPropertyStr(ctx, elem, "usage");
-                if (JS_IsString(uv)) {
+                JSValue uv = perr ? JS_UNDEFINED
+                                  : JS_GetPropertyStr(ctx, elem, "usage");
+                if (JS_IsException(uv)) perr = 1;
+                else if (JS_IsString(uv)) {
                     const char *us = JS_ToCString(ctx, uv);
                     if (us) {
                         if (strcmp(us, "read") == 0)
-                            bufs[buf_count].usage = HL_GPU_USAGE_READ;
+                            bufs[bi].usage = HL_GPU_USAGE_READ;
                         else if (strcmp(us, "write") == 0)
-                            bufs[buf_count].usage = HL_GPU_USAGE_WRITE;
+                            bufs[bi].usage = HL_GPU_USAGE_WRITE;
                         else if (strcmp(us, "readwrite") == 0)
-                            bufs[buf_count].usage = HL_GPU_USAGE_READWRITE;
+                            bufs[bi].usage = HL_GPU_USAGE_READWRITE;
                         JS_FreeCString(ctx, us);
+                    } else {
+                        perr = 1;
                     }
                 }
                 JS_FreeValue(ctx, uv);
-
-                bufs[buf_count].binding = -1;
-                buf_count++;
             }
             JS_FreeValue(ctx, elem);
         }
     }
     JS_FreeValue(ctx, bufs_val);
+    if (perr) goto parsed;
 
     opts.buffers = bufs;
     opts.buffer_count = buf_count;
     opts.output_texture = -1;
 
     /* Parse textures */
-    HlGpuTextureDesc tex_descs[8];
-    const char *tex_strs[32] = {0};
-    int tex_str_count = 0;
-    JSValue tex_keep[8];
-    for (int i = 0; i < 8; i++) tex_keep[i] = JS_UNDEFINED;
     JSValue tex_arr = JS_GetPropertyStr(ctx, opts_val, "textures");
+    if (JS_IsException(tex_arr)) { perr = 1; goto parsed; }
     int tex_count = js_parse_texture_descs(ctx, tex_arr, tex_descs, 8,
                                             tex_strs, &tex_str_count, 32,
                                             tex_keep, views, &nviews,
                                             1 + 16 + 8);
     JS_FreeValue(ctx, tex_arr);
+    if (tex_count < 0) { perr = 1; goto parsed; }
     opts.textures = tex_descs;
     opts.texture_count = tex_count;
 
     /* Parse output_texture (0-indexed in JS) */
-    JSValue ot_val = JS_GetPropertyStr(ctx, opts_val, "outputTexture");
-    if (!JS_IsUndefined(ot_val)) {
-        int32_t ot;
-        JS_ToInt32(ctx, &ot, ot_val);
-        opts.output_texture = ot;
-    }
-    JS_FreeValue(ctx, ot_val);
+    int32_t ot;
+    r = hl_js_opt_int32(ctx, opts_val, "outputTexture", &ot);
+    if (r < 0) { perr = 1; goto parsed; }
+    if (r) opts.output_texture = ot;
 
+parsed:;
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
@@ -466,7 +484,7 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
      * before they are made, one unit per 64 bytes, as gpu.buffer's create
      * is (audit 17); a trip leaves its exception pending. Then, the last
      * getter having run, take the ArrayBuffers' bytes. */
-    int retake_failed =
+    int retake_failed = perr ||
         hl_js_budget_charge(ctx, hl_work_bulk_units(
                                 (uint64_t)hl_gpu_dispatch_charge_bytes(&opts))) ||
         js_gpu_retake_views(ctx, views, nviews, "gpu.dispatch") != 0;
@@ -533,20 +551,13 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
 
     size_t offset = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
-        JSValue off_val = JS_GetPropertyStr(ctx, argv[2], "offset");
-        if (!JS_IsUndefined(off_val)) {
-            int64_t o;
-            JS_ToInt64(ctx, &o, off_val);
-            offset = (size_t)o;
-        }
-        JS_FreeValue(ctx, off_val);
-        JSValue dev_val = JS_GetPropertyStr(ctx, argv[2], "device");
-        if (!JS_IsUndefined(dev_val)) {
-            int32_t d;
-            JS_ToInt32(ctx, &d, dev_val);
-            device = d;
-        }
-        JS_FreeValue(ctx, dev_val);
+        /* A throwing getter / valueOf fails the call (audit 23). */
+        int64_t o; int32_t d; int r1, r2 = 0;
+        r1 = hl_js_opt_int64(ctx, argv[2], "offset", &o);
+        if (r1 >= 0) r2 = hl_js_opt_int32(ctx, argv[2], "device", &d);
+        if (r1 < 0 || r2 < 0) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+        if (r1) offset = (size_t)o;
+        if (r2) device = d;
     }
 
     /* The source view after the options: their getters are app code, which
@@ -640,19 +651,17 @@ static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
     int device = -1;
 
     if (argc > 2 && JS_IsObject(argv[2])) {
-        JSValue v;
-        v = JS_GetPropertyStr(ctx, argv[2], "srcOffset");
-        if (!JS_IsUndefined(v)) { int64_t x; JS_ToInt64(ctx, &x, v); src_offset = (size_t)x; }
-        JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[2], "dstOffset");
-        if (!JS_IsUndefined(v)) { int64_t x; JS_ToInt64(ctx, &x, v); dst_offset = (size_t)x; }
-        JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[2], "size");
-        if (!JS_IsUndefined(v)) { int64_t x; JS_ToInt64(ctx, &x, v); size = (size_t)x; }
-        JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[2], "device");
-        if (!JS_IsUndefined(v)) { int32_t d; JS_ToInt32(ctx, &d, v); device = d; }
-        JS_FreeValue(ctx, v);
+        /* A throwing getter / valueOf fails the call: the copy ran on the
+         * defaults with the exception pending (audit 23). */
+        int64_t x; int32_t d; int r;
+        if ((r = hl_js_opt_int64(ctx, argv[2], "srcOffset", &x)) < 0) goto opt_fail;
+        if (r) src_offset = (size_t)x;
+        if ((r = hl_js_opt_int64(ctx, argv[2], "dstOffset", &x)) < 0) goto opt_fail;
+        if (r) dst_offset = (size_t)x;
+        if ((r = hl_js_opt_int64(ctx, argv[2], "size", &x)) < 0) goto opt_fail;
+        if (r) size = (size_t)x;
+        if ((r = hl_js_opt_int32(ctx, argv[2], "device", &d)) < 0) goto opt_fail;
+        if (r) device = d;
     }
 
     int rc = hl_cap_gpu_buffer_copy(gpu, device, src, dst,
@@ -667,6 +676,11 @@ static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
                  : "copy_failed");
 
     return JS_TRUE;
+
+opt_fail:
+    JS_FreeCString(ctx, src);
+    JS_FreeCString(ctx, dst);
+    return JS_EXCEPTION;
 }
 
 /* ── Texture format helper ─────────────────────────────────────────── */
@@ -739,26 +753,27 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
 
     /* Parse opts */
     if (argc > 2 && JS_IsObject(argv[2])) {
+        /* A getter or valueOf that throws fails the call (audit 23): its
+         * result was ignored and the texture made with the defaults. */
         JSValue v;
-        v = JS_GetPropertyStr(ctx, argv[2], "device");
-        if (!JS_IsUndefined(v)) { int32_t d; JS_ToInt32(ctx, &d, v); device = d; }
-        JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[2], "width");
-        if (!JS_IsUndefined(v)) { uint32_t w; JS_ToUint32(ctx, &w, v); width = w; }
-        JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[2], "height");
-        if (!JS_IsUndefined(v)) { uint32_t h; JS_ToUint32(ctx, &h, v); height = h; }
-        JS_FreeValue(ctx, v);
+        int32_t d; uint32_t u; int r;
+        if ((r = hl_js_opt_int32(ctx, argv[2], "device", &d)) < 0) goto opt_fail;
+        if (r) device = d;
+        if ((r = hl_js_opt_uint32(ctx, argv[2], "width", &u)) < 0) goto opt_fail;
+        if (r) width = u;
+        if ((r = hl_js_opt_uint32(ctx, argv[2], "height", &u)) < 0) goto opt_fail;
+        if (r) height = u;
         v = JS_GetPropertyStr(ctx, argv[2], "format");
+        if (JS_IsException(v)) goto opt_fail;
         if (JS_IsString(v)) {
             const char *f = JS_ToCString(ctx, v);
             if (f) { format = js_parse_tex_format(f); JS_FreeCString(ctx, f); }
         }
         JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[2], "storage");
-        if (JS_ToBool(ctx, v)) storage = 1;
-        JS_FreeValue(ctx, v);
+        if ((r = hl_js_opt_bool(ctx, argv[2], "storage")) < 0) goto opt_fail;
+        if (r) storage = 1;
         v = JS_GetPropertyStr(ctx, argv[2], "filter");
+        if (JS_IsException(v)) goto opt_fail;
         if (JS_IsString(v)) {
             const char *f = JS_ToCString(ctx, v);
             if (f && strcmp(f, "linear") == 0) filter = HL_GPU_FILTER_LINEAR;
@@ -766,6 +781,7 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
         }
         JS_FreeValue(ctx, v);
         v = JS_GetPropertyStr(ctx, argv[2], "wrap");
+        if (JS_IsException(v)) goto opt_fail;
         if (JS_IsString(v)) {
             const char *w = JS_ToCString(ctx, v);
             if (w) {
@@ -838,6 +854,11 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
     if (rc != HL_GPU_OK)
         return JS_ThrowInternalError(ctx, "gpu.texture failed");
     return JS_TRUE;
+
+opt_fail:
+    if (str_data) JS_FreeCString(ctx, str_data);
+    JS_FreeCString(ctx, name);
+    return JS_EXCEPTION;
 }
 
 /* ── gpu.textureRead(name, opts?) → HlImage ──────────────────────── */
@@ -899,49 +920,59 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                                    int str_max, JSValue *keep,
                                    HlJsGpuView *views, int *nviews, int max_views)
 {
+    /* Returns the count, or -1 with the exception pending: a getter, a
+     * valueOf or a conversion that threw stays the call's error (audit 23;
+     * it was ignored and the dispatch went on). Every name / data string
+     * taken so far is in tracked_strs and every kept buffer in keep[], for
+     * the caller to release either way. */
     if (!JS_IsArray(ctx, arr))
         return 0;
-    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
     int32_t count = 0;
-    JS_ToInt32(ctx, &count, len_val);
-    JS_FreeValue(ctx, len_val);
+    if (hl_js_get_length32(ctx, arr, &count) < 0) return -1;
     if (count > max_descs) count = max_descs;
 
     for (int32_t i = 0; i < count; i++) {
-        JSValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
         memset(&descs[i], 0, sizeof(descs[i]));
         descs[i].binding = -1;
+        JSValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        if (JS_IsException(elem)) return -1;
 
         if (JS_IsObject(elem)) {
             JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
+            if (JS_IsException(nv)) goto fail;
             if (JS_IsString(nv)) {
                 descs[i].name = JS_ToCString(ctx, nv);
-                if (descs[i].name && *str_count < str_max)
+                if (!descs[i].name) { JS_FreeValue(ctx, nv); goto fail; }
+                if (*str_count < str_max)
                     tracked_strs[(*str_count)++] = descs[i].name;
             }
             JS_FreeValue(ctx, nv);
 
-            JSValue sv2 = JS_GetPropertyStr(ctx, elem, "storage");
-            descs[i].storage = JS_ToBool(ctx, sv2);
-            JS_FreeValue(ctx, sv2);
+            int st = hl_js_opt_bool(ctx, elem, "storage");
+            if (st < 0) goto fail;
+            descs[i].storage = st;
 
-            JSValue wv = JS_GetPropertyStr(ctx, elem, "width");
-            if (!JS_IsUndefined(wv)) { uint32_t w; JS_ToUint32(ctx, &w, wv); descs[i].width = w; }
-            JS_FreeValue(ctx, wv);
-
-            JSValue hv = JS_GetPropertyStr(ctx, elem, "height");
-            if (!JS_IsUndefined(hv)) { uint32_t h; JS_ToUint32(ctx, &h, hv); descs[i].height = h; }
-            JS_FreeValue(ctx, hv);
+            uint32_t u;
+            int r = hl_js_opt_uint32(ctx, elem, "width", &u);
+            if (r < 0) goto fail;
+            if (r) descs[i].width = u;
+            r = hl_js_opt_uint32(ctx, elem, "height", &u);
+            if (r < 0) goto fail;
+            if (r) descs[i].height = u;
 
             JSValue fv = JS_GetPropertyStr(ctx, elem, "format");
+            if (JS_IsException(fv)) goto fail;
             if (JS_IsString(fv)) {
                 const char *f = JS_ToCString(ctx, fv);
-                if (f) { descs[i].format = js_parse_tex_format(f); JS_FreeCString(ctx, f); }
+                if (!f) { JS_FreeValue(ctx, fv); goto fail; }
+                descs[i].format = js_parse_tex_format(f);
+                JS_FreeCString(ctx, f);
             }
             JS_FreeValue(ctx, fv);
 
             /* data: ArrayBuffer or string */
             JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
+            if (JS_IsException(dv)) goto fail;
             if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                 size_t dlen;
                 uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
@@ -953,17 +984,20 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
                                      &descs[i].data, dlen);
                 } else {
                     const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
-                    if (ds) {
-                        descs[i].data = ds;
-                        descs[i].data_len = dlen;
-                        if (*str_count < str_max)
-                            tracked_strs[(*str_count)++] = ds;
-                    }
+                    if (!ds) { JS_FreeValue(ctx, dv); goto fail; }
+                    descs[i].data = ds;
+                    descs[i].data_len = dlen;
+                    if (*str_count < str_max)
+                        tracked_strs[(*str_count)++] = ds;
                 }
             }
             JS_FreeValue(ctx, dv);
         }
         JS_FreeValue(ctx, elem);
+        continue;
+    fail:
+        JS_FreeValue(ctx, elem);
+        return -1;
     }
     return count;
 }
@@ -1076,33 +1110,32 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
 
     JSValue opts_val = argv[1];
 
-    JSValue dev_val = JS_GetPropertyStr(ctx, opts_val, "device");
-    if (!JS_IsUndefined(dev_val)) { int32_t d; JS_ToInt32(ctx, &d, dev_val); opts.device = d; }
-    JS_FreeValue(ctx, dev_val);
+    /* A getter, valueOf or conversion that throws (or the budget interrupt)
+     * fails the call with its exception (audit 23: the results were ignored
+     * and the op submitted on defaults with the exception pending). */
+    int32_t i32; uint32_t u32; int r;
+    if ((r = hl_js_opt_int32(ctx, opts_val, "device", &i32)) < 0) goto early_fail;
+    if (r) opts.device = i32;
 
     JSValue wg_val = JS_GetPropertyStr(ctx, opts_val, "workgroups");
+    if (JS_IsException(wg_val)) goto early_fail;
     if (JS_IsObject(wg_val)) {
-        JSValue xv = JS_GetPropertyStr(ctx, wg_val, "x");
-        JSValue yv = JS_GetPropertyStr(ctx, wg_val, "y");
-        JSValue zv = JS_GetPropertyStr(ctx, wg_val, "z");
         uint32_t x = 1, y = 1, z = 1;
-        JS_ToUint32(ctx, &x, xv); JS_ToUint32(ctx, &y, yv); JS_ToUint32(ctx, &z, zv);
+        if (hl_js_get_uint32(ctx, wg_val, "x", &x) < 0 ||
+            hl_js_get_uint32(ctx, wg_val, "y", &y) < 0 ||
+            hl_js_get_uint32(ctx, wg_val, "z", &z) < 0) {
+            JS_FreeValue(ctx, wg_val);
+            goto early_fail;
+        }
         opts.workgroups.x = x; opts.workgroups.y = y; opts.workgroups.z = z;
-        JS_FreeValue(ctx, xv); JS_FreeValue(ctx, yv); JS_FreeValue(ctx, zv);
     }
     JS_FreeValue(ctx, wg_val);
 
-    JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
-    if (!JS_IsUndefined(out_val)) { int32_t o; JS_ToInt32(ctx, &o, out_val); opts.output_buffer = o; }
-    JS_FreeValue(ctx, out_val);
+    if ((r = hl_js_opt_int32(ctx, opts_val, "output", &i32)) < 0) goto early_fail;
+    if (r) opts.output_buffer = i32;
 
-    JSValue async_timeout_val = JS_GetPropertyStr(ctx, opts_val, "timeout");
-    if (!JS_IsUndefined(async_timeout_val)) {
-        uint32_t t = 0;
-        JS_ToUint32(ctx, &t, async_timeout_val);
-        opts.timeout_ms = t;
-    }
-    JS_FreeValue(ctx, async_timeout_val);
+    if ((r = hl_js_opt_uint32(ctx, opts_val, "timeout", &u32)) < 0) goto early_fail;
+    if (r) opts.timeout_ms = u32;
 
     /* Deep-copy uniforms */
     void *uni_copy = NULL;
@@ -1110,7 +1143,9 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     HlOffheapHold hold = {0};   /* every copy below (js_gpu_offheap_copy) */
     int copy_failed = 0;
     JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
-    if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
+    if (JS_IsException(uni_val)) {
+        copy_failed = 1;
+    } else if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
         uint8_t *uni_ab = hl_js_array_buffer_probe(ctx, &uni_len, uni_val);
         if (uni_ab && uni_len > 0) {
             uni_copy = js_gpu_offheap_copy(ctx, js, &hold, uni_ab, uni_len,
@@ -1125,11 +1160,15 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                     if (!uni_copy) copy_failed = 1;
                 }
                 JS_FreeCString(ctx, uni_str);
+            } else {
+                copy_failed = 1;
             }
         }
     }
     JS_FreeValue(ctx, uni_val);
     if (copy_failed) {
+        free(uni_copy);
+        hl_offheap_drop(&hold);
         JS_FreeCString(ctx, name);
         return JS_EXCEPTION;
     }
@@ -1140,11 +1179,14 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     void **buf_data_ptrs = NULL;
 
     JSValue bufs_val = JS_GetPropertyStr(ctx, opts_val, "buffers");
-    if (JS_IsArray(ctx, bufs_val)) {
-        JSValue len_val = JS_GetPropertyStr(ctx, bufs_val, "length");
+    if (JS_IsException(bufs_val)) {
+        copy_failed = 1;
+    } else if (JS_IsArray(ctx, bufs_val)) {
         int32_t len = 0;
-        JS_ToInt32(ctx, &len, len_val);
-        JS_FreeValue(ctx, len_val);
+        if (hl_js_get_length32(ctx, bufs_val, &len) < 0) {
+            copy_failed = 1;
+            len = 0;
+        }
         if (len > 16) len = 16;
         if (len > 0) {
             buf_descs = calloc((size_t)len, sizeof(HlGpuBufferDesc));
@@ -1156,37 +1198,48 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                 JS_FreeCString(ctx, name);
                 return JS_ThrowInternalError(ctx, "gpu.async.dispatch: out of memory");
             }
-            for (int32_t i = 0; i < len; i++) {
+            for (int32_t i = 0; i < len && !copy_failed; i++) {
                 JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)i);
+                if (JS_IsException(elem)) { copy_failed = 1; break; }
                 if (JS_IsObject(elem)) {
+                    /* Counted before anything can fail, so the cleanup
+                     * below frees this entry's copies too. */
+                    int bi = buf_count++;
+                    buf_descs[bi].binding = -1;
                     /* Deep-copy buffer name for thread safety */
                     JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
-                    if (JS_IsString(nv)) {
+                    if (JS_IsException(nv)) {
+                        copy_failed = 1;
+                    } else if (JS_IsString(nv)) {
                         size_t nlen;
                         const char *ns = JS_ToCStringLen(ctx, &nlen, nv);
+                        if (!ns) copy_failed = 1;
                         if (ns && nlen > 0 && nlen < HL_GPU_NAME_MAX) {
                             char *ncopy = malloc(nlen + 1);
                             if (ncopy) {
                                 memcpy(ncopy, ns, nlen);
                                 ncopy[nlen] = '\0';
-                                buf_descs[buf_count].name = ncopy;
+                                buf_descs[bi].name = ncopy;
                             }
                         }
                         if (ns) JS_FreeCString(ctx, ns);
                     }
                     JS_FreeValue(ctx, nv);
 
-                    JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
-                    if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                    JSValue dv = copy_failed ? JS_UNDEFINED
+                                             : JS_GetPropertyStr(ctx, elem, "data");
+                    if (JS_IsException(dv)) {
+                        copy_failed = 1;
+                    } else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
                         uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                         if (dab && dlen > 0) {
-                            buf_data_ptrs[buf_count] = js_gpu_offheap_copy(
+                            buf_data_ptrs[bi] = js_gpu_offheap_copy(
                                 ctx, js, &hold, dab, dlen, "gpu.async.dispatch");
-                            if (buf_data_ptrs[buf_count]) {
-                                buf_descs[buf_count].data = buf_data_ptrs[buf_count];
-                                buf_descs[buf_count].data_len = dlen;
-                                buf_descs[buf_count].size = dlen;
+                            if (buf_data_ptrs[bi]) {
+                                buf_descs[bi].data = buf_data_ptrs[bi];
+                                buf_descs[bi].data_len = dlen;
+                                buf_descs[bi].size = dlen;
                             } else {
                                 copy_failed = 1;
                             }
@@ -1194,58 +1247,62 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                             const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
                             if (ds) {
                                 if (dlen > 0) {
-                                    buf_data_ptrs[buf_count] = js_gpu_offheap_copy(
+                                    buf_data_ptrs[bi] = js_gpu_offheap_copy(
                                         ctx, js, &hold, ds, dlen,
                                         "gpu.async.dispatch");
-                                    if (buf_data_ptrs[buf_count]) {
-                                        buf_descs[buf_count].data = buf_data_ptrs[buf_count];
-                                        buf_descs[buf_count].data_len = dlen;
-                                        buf_descs[buf_count].size = dlen;
+                                    if (buf_data_ptrs[bi]) {
+                                        buf_descs[bi].data = buf_data_ptrs[bi];
+                                        buf_descs[bi].data_len = dlen;
+                                        buf_descs[bi].size = dlen;
                                     } else {
                                         copy_failed = 1;
                                     }
                                 }
                                 JS_FreeCString(ctx, ds);
+                            } else {
+                                copy_failed = 1;
                             }
                         }
                     }
                     JS_FreeValue(ctx, dv);
-                    if (copy_failed) {
-                        /* A failed copy fails the call: it ran as an empty
-                         * buffer (audit 20). This element's name is set. */
-                        JS_FreeValue(ctx, elem);
-                        js_gpu_async_dispatch_free_copies(buf_descs,
-                            buf_data_ptrs, buf_count + 1, uni_copy);
-                        hl_offheap_drop(&hold);
-                        JS_FreeValue(ctx, bufs_val);
-                        JS_FreeCString(ctx, name);
-                        return JS_EXCEPTION;
-                    }
 
-                    JSValue sv = JS_GetPropertyStr(ctx, elem, "size");
-                    if (!JS_IsUndefined(sv)) { int64_t sz; JS_ToInt64(ctx, &sz, sv); buf_descs[buf_count].size = (size_t)sz; }
-                    JS_FreeValue(ctx, sv);
+                    int64_t sz;
+                    int sr = copy_failed ? 0
+                           : hl_js_opt_int64(ctx, elem, "size", &sz);
+                    if (sr < 0) copy_failed = 1;
+                    else if (sr) buf_descs[bi].size = (size_t)sz;
 
-                    JSValue uv = JS_GetPropertyStr(ctx, elem, "usage");
-                    if (JS_IsString(uv)) {
+                    JSValue uv = copy_failed ? JS_UNDEFINED
+                                             : JS_GetPropertyStr(ctx, elem, "usage");
+                    if (JS_IsException(uv)) {
+                        copy_failed = 1;
+                    } else if (JS_IsString(uv)) {
                         const char *us = JS_ToCString(ctx, uv);
                         if (us) {
-                            if (strcmp(us, "read") == 0) buf_descs[buf_count].usage = HL_GPU_USAGE_READ;
-                            else if (strcmp(us, "write") == 0) buf_descs[buf_count].usage = HL_GPU_USAGE_WRITE;
-                            else if (strcmp(us, "readwrite") == 0) buf_descs[buf_count].usage = HL_GPU_USAGE_READWRITE;
+                            if (strcmp(us, "read") == 0) buf_descs[bi].usage = HL_GPU_USAGE_READ;
+                            else if (strcmp(us, "write") == 0) buf_descs[bi].usage = HL_GPU_USAGE_WRITE;
+                            else if (strcmp(us, "readwrite") == 0) buf_descs[bi].usage = HL_GPU_USAGE_READWRITE;
                             JS_FreeCString(ctx, us);
+                        } else {
+                            copy_failed = 1;
                         }
                     }
                     JS_FreeValue(ctx, uv);
-
-                    buf_descs[buf_count].binding = -1;
-                    buf_count++;
                 }
                 JS_FreeValue(ctx, elem);
             }
         }
     }
     JS_FreeValue(ctx, bufs_val);
+    if (copy_failed) {
+        /* A failed copy fails the call: it ran as an empty buffer (audit
+         * 20); so does a getter that threw (audit 23). */
+        js_gpu_async_dispatch_free_copies(buf_descs, buf_data_ptrs,
+                                          buf_count, uni_copy);
+        hl_offheap_drop(&hold);
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
 
     /* The call's own buffers and uniforms are charged before the op is
      * submitted, as the sync call's (audit 17). */
@@ -1346,6 +1403,10 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     }
 
     return promise;
+
+early_fail:
+    JS_FreeCString(ctx, name);
+    return JS_EXCEPTION;
 }
 
 /* ── gpu.pipeline() ──────────────────────────────────────────────── */
@@ -1364,10 +1425,9 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "gpu.pipeline: first arg must be array");
 
     /* Parse stages */
-    JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
     int32_t stage_count = 0;
-    JS_ToInt32(ctx, &stage_count, len_val);
-    JS_FreeValue(ctx, len_val);
+    if (hl_js_get_length32(ctx, argv[0], &stage_count) < 0)
+        return JS_EXCEPTION;   /* audit 23 */
     if (stage_count <= 0 || stage_count > HL_GPU_MAX_PIPELINE_STAGES)
         return JS_ThrowRangeError(ctx, "gpu.pipeline: invalid stage count");
 
@@ -1395,31 +1455,46 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
     int nviews = 0;
     const int max_views = HL_GPU_MAX_PIPELINE_STAGES + HL_GPU_MAX_PIPELINE_BUFFERS;
 
-    for (int32_t s = 0; s < stage_count; s++) {
+    /* The options (second argument), declared before the first getter so a
+     * failed parse can skip to the cleanup. */
+    HlGpuPipelineOutput outputs[HL_GPU_MAX_PIPELINE_OUTPUTS];
+    int output_count = 0;
+    int device = -1;
+    uint32_t pipe_timeout_ms = 0;
+    /* A getter, valueOf or conversion that throws (or the budget interrupt)
+     * fails the call with its exception: perr skips the rest of the parse
+     * and the dispatch (audit 23 - the results were ignored). */
+    int perr = 0;
+
+    for (int32_t s = 0; s < stage_count && !perr; s++) {
         JSValue stage_val = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
+        if (JS_IsException(stage_val)) { perr = 1; break; }
         if (!JS_IsObject(stage_val)) { JS_FreeValue(ctx, stage_val); continue; }
 
         /* shader */
         JSValue sv2 = JS_GetPropertyStr(ctx, stage_val, "shader");
-        stages[s].shader = JS_ToCString(ctx, sv2);
-        JS_TRACK_STR(stages[s].shader);
+        stages[s].shader = JS_IsException(sv2) ? NULL : JS_ToCString(ctx, sv2);
         JS_FreeValue(ctx, sv2);
+        if (!stages[s].shader) { JS_FreeValue(ctx, stage_val); perr = 1; break; }
+        JS_TRACK_STR(stages[s].shader);
 
         /* workgroups */
         JSValue wg = JS_GetPropertyStr(ctx, stage_val, "workgroups");
+        if (JS_IsException(wg)) { JS_FreeValue(ctx, stage_val); perr = 1; break; }
         if (JS_IsObject(wg)) {
-            JSValue xv = JS_GetPropertyStr(ctx, wg, "x");
-            JSValue yv = JS_GetPropertyStr(ctx, wg, "y");
-            JSValue zv = JS_GetPropertyStr(ctx, wg, "z");
             uint32_t x = 1, y = 1, z = 1;
-            JS_ToUint32(ctx, &x, xv); JS_ToUint32(ctx, &y, yv); JS_ToUint32(ctx, &z, zv);
+            if (hl_js_get_uint32(ctx, wg, "x", &x) < 0 ||
+                hl_js_get_uint32(ctx, wg, "y", &y) < 0 ||
+                hl_js_get_uint32(ctx, wg, "z", &z) < 0)
+                perr = 1;
             stages[s].workgroups = (HlGpuWorkgroups){ x, y, z };
-            JS_FreeValue(ctx, xv); JS_FreeValue(ctx, yv); JS_FreeValue(ctx, zv);
         }
         JS_FreeValue(ctx, wg);
+        if (perr) { JS_FreeValue(ctx, stage_val); break; }
 
         /* uniforms */
         JSValue uni = JS_GetPropertyStr(ctx, stage_val, "uniforms");
+        if (JS_IsException(uni)) { JS_FreeValue(ctx, stage_val); perr = 1; break; }
         if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
             size_t ulen;
             uint8_t *uab = hl_js_array_buffer_probe(ctx, &ulen, uni);
@@ -1437,18 +1512,20 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
                     stages[s].uniforms = us;
                     stages[s].uniforms_len = ulen;
                     JS_TRACK_STR(us);
+                } else {
+                    perr = 1;
                 }
             }
         }
         JS_FreeValue(ctx, uni);
+        if (perr) { JS_FreeValue(ctx, stage_val); break; }
 
         /* buffers */
         JSValue bufs_val = JS_GetPropertyStr(ctx, stage_val, "buffers");
+        if (JS_IsException(bufs_val)) { JS_FreeValue(ctx, stage_val); perr = 1; break; }
         if (JS_IsArray(ctx, bufs_val)) {
-            JSValue blen_val = JS_GetPropertyStr(ctx, bufs_val, "length");
             int32_t bc = 0;
-            JS_ToInt32(ctx, &bc, blen_val);
-            JS_FreeValue(ctx, blen_val);
+            if (hl_js_get_length32(ctx, bufs_val, &bc) < 0) perr = 1;
             /* A Proxy can report any length. A negative one moved buf_offset
              * below zero, and the next stage wrote before all_bufs. */
             if (bc < 0) bc = 0;
@@ -1459,18 +1536,25 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
             stages[s].buffers = &all_bufs[buf_offset];
             stages[s].buffer_count = bc;
 
-            for (int32_t b = 0; b < bc; b++) {
+            for (int32_t b = 0; b < bc && !perr; b++) {
                 JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)b);
+                if (JS_IsException(elem)) { perr = 1; break; }
                 if (JS_IsObject(elem)) {
                     JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
-                    if (JS_IsString(nv)) {
+                    if (JS_IsException(nv)) {
+                        perr = 1;
+                    } else if (JS_IsString(nv)) {
                         all_bufs[buf_offset + b].name = JS_ToCString(ctx, nv);
+                        if (!all_bufs[buf_offset + b].name) perr = 1;
                         JS_TRACK_STR(all_bufs[buf_offset + b].name);
                     }
                     JS_FreeValue(ctx, nv);
 
-                    JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
-                    if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                    JSValue dv = perr ? JS_UNDEFINED
+                                      : JS_GetPropertyStr(ctx, elem, "data");
+                    if (JS_IsException(dv)) {
+                        perr = 1;
+                    } else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
                         uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                         if (dab) {
@@ -1490,17 +1574,17 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
                                 all_bufs[buf_offset + b].data_len = dlen;
                                 all_bufs[buf_offset + b].size = dlen;
                                 JS_TRACK_STR(ds);
+                            } else {
+                                perr = 1;
                             }
                         }
                     }
                     JS_FreeValue(ctx, dv);
 
-                    JSValue szv = JS_GetPropertyStr(ctx, elem, "size");
-                    if (!JS_IsUndefined(szv)) {
-                        int64_t sz; JS_ToInt64(ctx, &sz, szv);
-                        all_bufs[buf_offset + b].size = (size_t)sz;
-                    }
-                    JS_FreeValue(ctx, szv);
+                    int64_t sz;
+                    int sr = perr ? 0 : hl_js_opt_int64(ctx, elem, "size", &sz);
+                    if (sr < 0) perr = 1;
+                    else if (sr) all_bufs[buf_offset + b].size = (size_t)sz;
 
                     all_bufs[buf_offset + b].binding = -1;
                 }
@@ -1511,40 +1595,45 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, bufs_val);
         JS_FreeValue(ctx, stage_val);
     }
+    if (perr) goto parsed;
 
     /* Parse opts (second argument) */
-    HlGpuPipelineOutput outputs[HL_GPU_MAX_PIPELINE_OUTPUTS];
-    int output_count = 0;
-    int device = -1;
-    uint32_t pipe_timeout_ms = 0;
-
     if (argc > 1 && JS_IsObject(argv[1])) {
-        JSValue dv = JS_GetPropertyStr(ctx, argv[1], "device");
-        if (!JS_IsUndefined(dv)) { int32_t d; JS_ToInt32(ctx, &d, dv); device = d; }
-        JS_FreeValue(ctx, dv);
+        int32_t d;
+        int r = hl_js_opt_int32(ctx, argv[1], "device", &d);
+        if (r < 0) { perr = 1; goto parsed; }
+        if (r) device = d;
 
         /* output: false → fire-and-forget pipeline */
         JSValue out_flag = JS_GetPropertyStr(ctx, argv[1], "output");
+        if (JS_IsException(out_flag)) { perr = 1; goto parsed; }
         if (JS_IsBool(out_flag) && !JS_ToBool(ctx, out_flag))
             output_count = HL_GPU_OUTPUT_NONE;
         JS_FreeValue(ctx, out_flag);
 
         /* outputs: [{stage: 0, buffer: 0}, ...] (0-indexed) */
         JSValue ov = JS_GetPropertyStr(ctx, argv[1], "outputs");
+        if (JS_IsException(ov)) { perr = 1; goto parsed; }
         if (output_count != HL_GPU_OUTPUT_NONE && JS_IsArray(ctx, ov)) {
-            JSValue olen = JS_GetPropertyStr(ctx, ov, "length");
-            JS_ToInt32(ctx, &output_count, olen);
-            JS_FreeValue(ctx, olen);
+            if (hl_js_get_length32(ctx, ov, &output_count) < 0) {
+                output_count = 0;
+                perr = 1;
+            }
             if (output_count > HL_GPU_MAX_PIPELINE_OUTPUTS)
                 output_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
-            for (int i = 0; i < output_count; i++) {
+            for (int i = 0; i < output_count && !perr; i++) {
                 JSValue oe = JS_GetPropertyUint32(ctx, ov, (uint32_t)i);
                 outputs[i].stage = 0; outputs[i].buffer = 0;
+                if (JS_IsException(oe)) { perr = 1; break; }
                 if (JS_IsObject(oe)) {
                     JSValue sv3 = JS_GetPropertyStr(ctx, oe, "stage");
-                    JSValue bv = JS_GetPropertyStr(ctx, oe, "buffer");
+                    JSValue bv = JS_IsException(sv3) ? JS_UNDEFINED
+                                                     : JS_GetPropertyStr(ctx, oe, "buffer");
                     int32_t si = 0, bi = 0;
-                    JS_ToInt32(ctx, &si, sv3); JS_ToInt32(ctx, &bi, bv);
+                    if (JS_IsException(sv3) || JS_IsException(bv) ||
+                        JS_ToInt32(ctx, &si, sv3) < 0 ||
+                        JS_ToInt32(ctx, &bi, bv) < 0)
+                        perr = 1;
                     outputs[i].stage = si; outputs[i].buffer = bi;
                     JS_FreeValue(ctx, sv3); JS_FreeValue(ctx, bv);
                 }
@@ -1552,15 +1641,15 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
             }
         }
         JS_FreeValue(ctx, ov);
+        if (perr) goto parsed;
 
-        JSValue tv = JS_GetPropertyStr(ctx, argv[1], "timeout");
-        if (!JS_IsUndefined(tv)) {
-            uint32_t t = 0;
-            JS_ToUint32(ctx, &t, tv);
-            pipe_timeout_ms = t;
-        }
-        JS_FreeValue(ctx, tv);
+        uint32_t t;
+        r = hl_js_opt_uint32(ctx, argv[1], "timeout", &t);
+        if (r < 0) { perr = 1; goto parsed; }
+        if (r) pipe_timeout_ms = t;
     }
+
+parsed:;
 
     HlGpuPipelineOpts opts = {
         .stages = stages,
@@ -1576,7 +1665,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
     const char *err_msg = NULL;
     /* The stages' own buffers are charged before they are made (audit 17);
      * then, the last getter having run, take the ArrayBuffers' bytes. */
-    int retake_failed =
+    int retake_failed = perr ||
         hl_js_budget_charge(ctx, hl_work_bulk_units(
                                 (uint64_t)hl_gpu_pipeline_charge_bytes(&opts))) ||
         js_gpu_retake_views(ctx, views, nviews, "gpu.pipeline") != 0;
@@ -1639,10 +1728,9 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "gpu.async.pipeline requires stages array");
 
     /* Parse stage count */
-    JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
     int32_t stage_count = 0;
-    JS_ToInt32(ctx, &stage_count, len_val);
-    JS_FreeValue(ctx, len_val);
+    if (hl_js_get_length32(ctx, argv[0], &stage_count) < 0)
+        return JS_EXCEPTION;   /* audit 23 */
     if (stage_count <= 0 || stage_count > HL_GPU_MAX_PIPELINE_STAGES)
         return JS_ThrowRangeError(ctx, "gpu.async.pipeline: invalid stage count");
 
@@ -1662,16 +1750,23 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
     }
 
+    /* A getter, valueOf or conversion that throws (or the budget interrupt)
+     * fails the call with its exception: perr stops the parse, and the op
+     * is freed before it is submitted (audit 23 - the results were ignored
+     * and the op submitted on defaults with the exception pending). */
+    int perr = 0;
+
     /* Count total buffers across all stages for flat allocation */
     int total_bufs = 0;
-    for (int32_t s = 0; s < stage_count; s++) {
+    for (int32_t s = 0; s < stage_count && !perr; s++) {
         JSValue sv = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
+        if (JS_IsException(sv)) { perr = 1; break; }
         if (JS_IsObject(sv)) {
             JSValue bv = JS_GetPropertyStr(ctx, sv, "buffers");
-            if (JS_IsArray(ctx, bv)) {
-                JSValue bl = JS_GetPropertyStr(ctx, bv, "length");
-                int32_t bc = 0; JS_ToInt32(ctx, &bc, bl);
-                JS_FreeValue(ctx, bl);
+            if (JS_IsException(bv)) perr = 1;
+            else if (JS_IsArray(ctx, bv)) {
+                int32_t bc = 0;
+                if (hl_js_get_length32(ctx, bv, &bc) < 0) perr = 1;
                 if (bc < 0) bc = 0;
                 if (bc > 16) bc = 16;
                 total_bufs += bc;
@@ -1688,6 +1783,11 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
             JS_FreeValue(ctx, bv);
         }
         JS_FreeValue(ctx, sv);
+    }
+
+    if (perr) {
+        hl_worker_gpu_op_free(op); free(op);
+        return JS_EXCEPTION;
     }
 
     if (total_bufs > 0) {
@@ -1710,36 +1810,44 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     int oom = 0;
     int over = 0;   /* a copy would pass the heap limit (audit 20) */
     int buf_off = 0;
-    for (int32_t s = 0; s < stage_count; s++) {
+    for (int32_t s = 0; s < stage_count && !perr; s++) {
         JSValue stage_val = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
+        if (JS_IsException(stage_val)) { perr = 1; break; }
         if (!JS_IsObject(stage_val)) { JS_FreeValue(ctx, stage_val); continue; }
 
         /* Shader name (deep-copy) */
         JSValue sv2 = JS_GetPropertyStr(ctx, stage_val, "shader");
-        const char *sname = JS_ToCString(ctx, sv2);
+        const char *sname = JS_IsException(sv2) ? NULL : JS_ToCString(ctx, sv2);
         if (sname) {
             op->stages[s].shader = strdup(sname);
             if (!op->stages[s].shader) oom = 1;
             JS_FreeCString(ctx, sname);
+        } else {
+            perr = 1;
         }
         JS_FreeValue(ctx, sv2);
+        if (perr) { JS_FreeValue(ctx, stage_val); break; }
 
         /* Workgroups */
         JSValue wg = JS_GetPropertyStr(ctx, stage_val, "workgroups");
-        if (JS_IsObject(wg)) {
-            JSValue xv = JS_GetPropertyStr(ctx, wg, "x");
-            JSValue yv = JS_GetPropertyStr(ctx, wg, "y");
-            JSValue zv = JS_GetPropertyStr(ctx, wg, "z");
+        if (JS_IsException(wg)) {
+            perr = 1;
+        } else if (JS_IsObject(wg)) {
             uint32_t x = 1, y = 1, z = 1;
-            JS_ToUint32(ctx, &x, xv); JS_ToUint32(ctx, &y, yv); JS_ToUint32(ctx, &z, zv);
+            if (hl_js_get_uint32(ctx, wg, "x", &x) < 0 ||
+                hl_js_get_uint32(ctx, wg, "y", &y) < 0 ||
+                hl_js_get_uint32(ctx, wg, "z", &z) < 0)
+                perr = 1;
             op->stages[s].workgroups = (HlGpuWorkgroups){ x, y, z };
-            JS_FreeValue(ctx, xv); JS_FreeValue(ctx, yv); JS_FreeValue(ctx, zv);
         }
         JS_FreeValue(ctx, wg);
+        if (perr) { JS_FreeValue(ctx, stage_val); break; }
 
         /* Per-stage uniforms (deep-copy) */
         JSValue uni = JS_GetPropertyStr(ctx, stage_val, "uniforms");
-        if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
+        if (JS_IsException(uni)) {
+            perr = 1;
+        } else if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
             size_t ulen;
             uint8_t *uab = hl_js_array_buffer_probe(ctx, &ulen, uni);
             if (uab && ulen > 0) {
@@ -1749,6 +1857,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                     op->stages[s].uniforms_len = ulen;
             } else {
                 const char *us = JS_ToCStringLen(ctx, &ulen, uni);
+                if (!us) perr = 1;
                 if (us && ulen > 0) {
                     op->stage_uniforms[s] = js_gpu_offheap_take_copy(js,
                         &op->copy_hold, us, ulen, &over, &oom);
@@ -1759,35 +1868,44 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
             }
         }
         JS_FreeValue(ctx, uni);
+        if (perr) { JS_FreeValue(ctx, stage_val); break; }
 
         /* Buffers (deep-copy) */
         JSValue bufs_val = JS_GetPropertyStr(ctx, stage_val, "buffers");
+        if (JS_IsException(bufs_val)) { JS_FreeValue(ctx, stage_val); perr = 1; break; }
         if (JS_IsArray(ctx, bufs_val)) {
-            JSValue blen = JS_GetPropertyStr(ctx, bufs_val, "length");
-            int32_t bc = 0; JS_ToInt32(ctx, &bc, blen);
-            JS_FreeValue(ctx, blen);
+            int32_t bc = 0;
+            if (hl_js_get_length32(ctx, bufs_val, &bc) < 0) perr = 1;
             if (bc < 0) bc = 0;
             if (bc > 16) bc = 16;
             int first_buf = buf_off;
 
-            for (int32_t b = 0; b < bc && buf_off < total_bufs; b++) {
+            for (int32_t b = 0; b < bc && buf_off < total_bufs && !perr; b++) {
                 JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)b);
+                if (JS_IsException(elem)) { perr = 1; break; }
                 if (JS_IsObject(elem)) {
                     /* Name (deep-copy) */
                     JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
-                    if (JS_IsString(nv)) {
+                    if (JS_IsException(nv)) {
+                        perr = 1;
+                    } else if (JS_IsString(nv)) {
                         const char *ns = JS_ToCString(ctx, nv);
                         if (ns) {
                             op->buffers[buf_off].name = strdup(ns);
                             if (!op->buffers[buf_off].name) oom = 1;
                             JS_FreeCString(ctx, ns);
+                        } else {
+                            perr = 1;
                         }
                     }
                     JS_FreeValue(ctx, nv);
 
                     /* Data (deep-copy) */
-                    JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
-                    if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                    JSValue dv = perr ? JS_UNDEFINED
+                                      : JS_GetPropertyStr(ctx, elem, "data");
+                    if (JS_IsException(dv)) {
+                        perr = 1;
+                    } else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
                         uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
                         if (dab && dlen > 0) {
@@ -1811,18 +1929,18 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                                     }
                                 }
                                 JS_FreeCString(ctx, ds);
+                            } else {
+                                perr = 1;
                             }
                         }
                     }
                     JS_FreeValue(ctx, dv);
 
                     /* Size override */
-                    JSValue szv = JS_GetPropertyStr(ctx, elem, "size");
-                    if (!JS_IsUndefined(szv)) {
-                        int64_t sz; JS_ToInt64(ctx, &sz, szv);
-                        op->buffers[buf_off].size = (size_t)sz;
-                    }
-                    JS_FreeValue(ctx, szv);
+                    int64_t sz;
+                    int sr = perr ? 0 : hl_js_opt_int64(ctx, elem, "size", &sz);
+                    if (sr < 0) perr = 1;
+                    else if (sr) op->buffers[buf_off].size = (size_t)sz;
                     op->buffers[buf_off].binding = -1;
                 }
                 JS_FreeValue(ctx, elem);
@@ -1839,36 +1957,43 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
 
     /* Parse opts (second argument) */
     op->pipe_opts.device = -1;
-    if (argc > 1 && JS_IsObject(argv[1])) {
-        JSValue dv = JS_GetPropertyStr(ctx, argv[1], "device");
-        if (!JS_IsUndefined(dv)) { int32_t d; JS_ToInt32(ctx, &d, dv); op->pipe_opts.device = d; }
-        JS_FreeValue(ctx, dv);
+    if (!perr && argc > 1 && JS_IsObject(argv[1])) {
+        int32_t d;
+        int r = hl_js_opt_int32(ctx, argv[1], "device", &d);
+        if (r < 0) goto opts_done;
+        if (r) op->pipe_opts.device = d;
 
         /* output: false → fire-and-forget */
         JSValue of = JS_GetPropertyStr(ctx, argv[1], "output");
+        if (JS_IsException(of)) goto opts_done;
         if (JS_IsBool(of) && !JS_ToBool(ctx, of))
             op->pipe_opts.output_count = HL_GPU_OUTPUT_NONE;
         JS_FreeValue(ctx, of);
 
         /* outputs array */
         JSValue ov = JS_GetPropertyStr(ctx, argv[1], "outputs");
+        if (JS_IsException(ov)) goto opts_done;
         if (op->pipe_opts.output_count != HL_GPU_OUTPUT_NONE && JS_IsArray(ctx, ov)) {
-            JSValue olen = JS_GetPropertyStr(ctx, ov, "length");
-            int32_t oc = 0; JS_ToInt32(ctx, &oc, olen);
-            JS_FreeValue(ctx, olen);
+            int32_t oc = 0;
+            if (hl_js_get_length32(ctx, ov, &oc) < 0) { oc = 0; perr = 1; }
             if (oc > HL_GPU_MAX_PIPELINE_OUTPUTS) oc = HL_GPU_MAX_PIPELINE_OUTPUTS;
             if (oc > 0) {
                 op->pipe_outputs = calloc((size_t)oc, sizeof(HlGpuPipelineOutput));
                 if (op->pipe_outputs) {
                     op->pipe_opts.output_count = oc;
                     op->pipe_opts.outputs = op->pipe_outputs;
-                    for (int i = 0; i < oc; i++) {
+                    for (int i = 0; i < oc && !perr; i++) {
                         JSValue oe = JS_GetPropertyUint32(ctx, ov, (uint32_t)i);
+                        if (JS_IsException(oe)) { perr = 1; break; }
                         if (JS_IsObject(oe)) {
                             JSValue sv3 = JS_GetPropertyStr(ctx, oe, "stage");
-                            JSValue bv2 = JS_GetPropertyStr(ctx, oe, "buffer");
+                            JSValue bv2 = JS_IsException(sv3) ? JS_UNDEFINED
+                                        : JS_GetPropertyStr(ctx, oe, "buffer");
                             int32_t si = 0, bi = 0;
-                            JS_ToInt32(ctx, &si, sv3); JS_ToInt32(ctx, &bi, bv2);
+                            if (JS_IsException(sv3) || JS_IsException(bv2) ||
+                                JS_ToInt32(ctx, &si, sv3) < 0 ||
+                                JS_ToInt32(ctx, &bi, bv2) < 0)
+                                perr = 1;
                             op->pipe_outputs[i].stage = si;
                             op->pipe_outputs[i].buffer = bi;
                             JS_FreeValue(ctx, sv3); JS_FreeValue(ctx, bv2);
@@ -1879,16 +2004,23 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
             }
         }
         JS_FreeValue(ctx, ov);
+        if (perr) goto opts_done;
 
-        JSValue tv = JS_GetPropertyStr(ctx, argv[1], "timeout");
-        if (!JS_IsUndefined(tv)) {
-            uint32_t t = 0;
-            JS_ToUint32(ctx, &t, tv);
-            op->pipe_opts.timeout_ms = t;
-        }
-        JS_FreeValue(ctx, tv);
+        uint32_t t;
+        r = hl_js_opt_uint32(ctx, argv[1], "timeout", &t);
+        if (r < 0) goto opts_done;
+        if (r) op->pipe_opts.timeout_ms = t;
+    }
+    if (0) {
+opts_done:
+        perr = 1;
     }
     op->pipe_opts.max_output = js_gpu_heap_limit(ctx);   /* audit 17 */
+
+    if (perr) {
+        hl_worker_gpu_op_free(op); free(op);
+        return JS_EXCEPTION;
+    }
 
     /* Abort if any deep-copy hit OOM (M-3) - must happen before the op is
      * handed off to the worker thread, otherwise the worker dereferences

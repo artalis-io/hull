@@ -421,8 +421,10 @@ static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowRangeError(ctx, "res.bytes: a body of %zu bytes is "
                                   "larger than the VM heap limit", view.len);
     }
-    /* The copy, charged before it (audit 9 M2; Lua: lua_hlwork(L, 0, len)). */
-    if (hl_js_budget_charge(ctx, (uint64_t)view.len / 64)) {
+    /* The copy, charged before it (audit 9 M2), at res.json / html /
+     * text's rate of a unit per 8 bytes (audit 23: it was a unit per 64,
+     * so res.bytes was the cheap way to copy a body). */
+    if (res_charge_body(ctx, view.len)) {
         if (needs_free && str) JS_FreeCString(ctx, str);
         return JS_EXCEPTION;
     }

@@ -115,6 +115,12 @@ static JSValue js_ws_client_send(JSContext *ctx, JSValueConst this_val,
     size_t len;
     const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!data) return JS_EXCEPTION;
+    /* The toString above is app code, which may have closed the client
+     * (audit 23). */
+    if (!ud->client || ud->closed) {
+        JS_FreeCString(ctx, data);
+        return JS_ThrowTypeError(ctx, "client connection closed");
+    }
     if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {   /* audit 14 */
         JS_FreeCString(ctx, data);
         return JS_EXCEPTION;
@@ -160,14 +166,24 @@ static JSValue js_ws_client_close(JSContext *ctx, JSValueConst this_val,
     if (!ud || !ud->client || ud->closed)
         return JS_UNDEFINED;
 
+    /* A valueOf / toString that throws fails the call (audit 23: the
+     * exception was left pending and the close went out with a default),
+     * and, being app code, may itself have closed the client. */
     uint32_t code = 1000;
-    if (argc >= 1 && !JS_IsUndefined(argv[0]))
-        JS_ToUint32(ctx, &code, argv[0]);
+    if (argc >= 1 && !JS_IsUndefined(argv[0]) &&
+        JS_ToUint32(ctx, &code, argv[0]) < 0)
+        return JS_EXCEPTION;
 
     const char *reason = NULL;
     size_t reason_len = 0;
-    if (argc >= 2 && !JS_IsUndefined(argv[1]))
+    if (argc >= 2 && !JS_IsUndefined(argv[1])) {
         reason = JS_ToCStringLen(ctx, &reason_len, argv[1]);
+        if (!reason) return JS_EXCEPTION;
+    }
+    if (!ud->client || ud->closed) {
+        if (reason) JS_FreeCString(ctx, reason);
+        return JS_UNDEFINED;
+    }
 
     kl_ws_client_close(ud->client, (uint16_t)code, reason, reason_len);
     if (reason) JS_FreeCString(ctx, reason);
@@ -184,8 +200,15 @@ static JSValue js_ws_client_ping(JSContext *ctx, JSValueConst this_val,
 
     const char *data = NULL;
     size_t len = 0;
-    if (argc >= 1 && !JS_IsUndefined(argv[0]))
+    if (argc >= 1 && !JS_IsUndefined(argv[0])) {
         data = JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!data) return JS_EXCEPTION;   /* audit 23 */
+    }
+    /* The toString is app code: it may have closed the client. */
+    if (!ud->client || ud->closed) {
+        if (data) JS_FreeCString(ctx, data);
+        return JS_UNDEFINED;
+    }
 
     kl_ws_client_send_ping(ud->client, data, len);
     if (data) JS_FreeCString(ctx, data);
@@ -437,9 +460,21 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 
     /* Extract callbacks from handlers object */
     JSValue on_open = JS_GetPropertyStr(ctx, argv[1], "onOpen");
-    JSValue on_message = JS_GetPropertyStr(ctx, argv[1], "onMessage");
-    JSValue on_close = JS_GetPropertyStr(ctx, argv[1], "onClose");
-    JSValue on_error = JS_GetPropertyStr(ctx, argv[1], "onError");
+    JSValue on_message = JS_IsException(on_open) ? JS_EXCEPTION
+                       : JS_GetPropertyStr(ctx, argv[1], "onMessage");
+    JSValue on_close = JS_IsException(on_message) ? JS_EXCEPTION
+                     : JS_GetPropertyStr(ctx, argv[1], "onClose");
+    JSValue on_error = JS_IsException(on_close) ? JS_EXCEPTION
+                     : JS_GetPropertyStr(ctx, argv[1], "onError");
+    /* A throwing getter fails the call (audit 23: the client connected
+     * without that handler and the exception pending). */
+    if (JS_IsException(on_error)) {
+        JS_FreeCString(ctx, url);
+        JS_FreeValue(ctx, on_open);
+        JS_FreeValue(ctx, on_message);
+        JS_FreeValue(ctx, on_close);
+        return JS_EXCEPTION;
+    }
 
     /* Create JS client conn object */
     JSValue obj = JS_NewObjectClass(ctx, (int)js_ws_client_conn_class_id);

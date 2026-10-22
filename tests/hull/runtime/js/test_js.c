@@ -12659,4 +12659,98 @@ UTEST(js_audit22, json_decode_reads_the_whole_string)
     cleanup_js_caps();
 }
 
+/* Audit 23: option getters whose conversion result was ignored - a throwing
+ * getter or valueOf left its exception pending while the binding carried on
+ * with a default (tar built the archive with mode 0, blob.cleanup made a
+ * throwing dryRun a real, deleting run). The call now fails with the
+ * getter's own exception. */
+UTEST(js_audit23, tar_option_getters_that_throw_fail_the_call)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a10_run_tripped(
+        "import { tar } from 'hull:archive:tar';\n"
+        "const msg = (f) => { try { f(); return 'no throw'; }"
+        " catch (e) { return String(e && e.message); } };\n"
+        "globalThis.__a23t = [\n"
+        "  msg(() => tar.create([{ name: 'f', data: 'x',"
+        " get mode() { throw new Error('mode boom'); } }])),\n"
+        "  msg(() => tar.create([{ name: 'f', data: 'x',"
+        " mode: { valueOf() { throw new Error('valueOf boom'); } } }])),\n"
+        "  msg(() => tar.create([{ get name() { throw new Error('name boom'); } }])),\n"
+        "  msg(() => tar.create([{ name: 'f', get isDir() { throw new Error('dir boom'); } }])),\n"
+        "  msg(() => tar.create([{ name: 'f', get data() { throw new Error('data boom'); } }])),\n"
+        "].join('|');\n", 0), 0);
+    char *r = eval_str("globalThis.__a23t");
+    EXPECT_TRUE(r && strcmp(r, "mode boom|valueOf boom|name boom|dir boom|data boom") == 0);
+    if (r && strcmp(r, "mode boom|valueOf boom|name boom|dir boom|data boom") != 0)
+        printf("  got: %s\n", r);
+    free(r);
+    cleanup_js_caps();
+}
+
+UTEST(js_audit23, blob_cleanup_with_a_throwing_dry_run_deletes_nothing)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob; blob.init({ dir: 'blobs' });\n"
+        "blob.put('one'); blob.put('two');\n", 0), 0);
+    EXPECT_EQ(eval_int("blob.count()"), 2);
+    char *r = a15_throws("blob.cleanup({ maxTotalSize: 0,"
+                         " get dryRun() { throw new Error('dry boom'); } })");
+    EXPECT_TRUE(r && strcmp(r, "dry boom") == 0);
+    if (r && strcmp(r, "dry boom") != 0) printf("  got: %s\n", r);
+    free(r);
+    EXPECT_EQ(eval_int("blob.count()"), 2);
+    r = a15_throws("blob.init({ dir: 'blobs',"
+                   " get shardDepth() { throw new Error('depth boom'); } })");
+    EXPECT_TRUE(r && strcmp(r, "depth boom") == 0);
+    free(r);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+#ifdef HL_ENABLE_WASM
+UTEST(js_audit23, compute_option_getters_that_throw_fail_the_call)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    static const struct { const char *expr; const char *want; } cases[] = {
+        { "compute.call('echo', 'x', { get gas() { throw new Error('gas boom'); } })",
+          "gas boom" },
+        { "compute.call('echo', 'x', { timeoutMs: { valueOf() {"
+          " throw new Error('tmo boom'); } } })", "tmo boom" },
+        { "compute.call('echo', 'x', { get buffer() { throw new Error('buf boom'); } })",
+          "buf boom" },
+        /* spans: the name taken before them was leaked on this path. */
+        { "compute.call('echo', 'x', { get spans() { throw new Error('spans boom'); } })",
+          "spans boom" },
+        { "compute.instance('echo', { get heap() { throw new Error('heap boom'); } })",
+          "heap boom" },
+        { "compute.stream('echo', 'x', { get chunkSize() {"
+          " throw new Error('chunk boom'); } })", "chunk boom" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *r = a15_throws(cases[i].expr);
+        EXPECT_TRUE_MSG(r && strcmp(r, cases[i].want) == 0, cases[i].expr);
+        if (r && strcmp(r, cases[i].want) != 0) printf("  got: %s\n", r);
+        free(r);
+    }
+    /* The plain call still works. */
+    EXPECT_EQ(eval_int("compute.call('echo', 'abc', { gas: 1000000 }).byteLength"), 3);
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
+
 UTEST_MAIN();

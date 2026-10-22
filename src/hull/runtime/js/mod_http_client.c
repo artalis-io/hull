@@ -205,9 +205,20 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     /* Parse opts */
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue body_val = JS_GetPropertyStr(ctx, argv[2], "body");
-        if (JS_IsString(body_val))
+        /* A throwing getter (or a failed conversion) fails the call: the
+         * request went out with no body and the exception pending (audit
+         * 23). */
+        int body_failed = JS_IsException(body_val);
+        if (JS_IsString(body_val)) {
             body = JS_ToCStringLen(ctx, &body_len, body_val);
+            if (!body) body_failed = 1;
+        }
         JS_FreeValue(ctx, body_val);
+        if (body_failed) {
+            JS_FreeCString(ctx, method);
+            JS_FreeCString(ctx, url);
+            return JS_EXCEPTION;
+        }
 
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
         int hrc = JS_IsException(hdrs_val) ? -1
@@ -498,9 +509,20 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     /* Parse opts */
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue body_val = JS_GetPropertyStr(ctx, argv[2], "body");
-        if (JS_IsString(body_val))
+        /* A throwing getter (or a failed conversion) fails the call: the
+         * request went out with no body and the exception pending (audit
+         * 23). */
+        int body_failed = JS_IsException(body_val);
+        if (JS_IsString(body_val)) {
             body = JS_ToCStringLen(ctx, &body_len, body_val);
+            if (!body) body_failed = 1;
+        }
         JS_FreeValue(ctx, body_val);
+        if (body_failed) {
+            JS_FreeCString(ctx, method);
+            JS_FreeCString(ctx, url);
+            return JS_EXCEPTION;
+        }
 
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
         int hrc = JS_IsException(hdrs_val) ? -1
