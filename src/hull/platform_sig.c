@@ -226,7 +226,10 @@ int hl_platform_sig_verify_composed(const char *manifest, size_t manifest_len,
             return -1;
         /* Hashes are public; a plain fixed-length compare is fine (no secret
          * material, so no timing channel worth defending). */
-        if (strncmp(hex, assets[i].hash_hex, 64) != 0) return -1;
+        /* Exactly 64 chars: a prefix compare passed a recorded hash with
+         * trailing bytes after a matching 64 (audit 23). */
+        if (strlen(assets[i].hash_hex) != 64 ||
+            strncmp(hex, assets[i].hash_hex, 64) != 0) return -1;
     }
     return 0;
 }

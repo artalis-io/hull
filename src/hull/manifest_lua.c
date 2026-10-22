@@ -234,11 +234,29 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         lua_getfield(L, -1, "devices");
         if (lua_istable(L, -1)) {
             int len = (int)luaL_len(L, -1);
+            int listed = 0;
             for (int i = 1; i <= len && out->gpu_device_count < HL_GPU_MAX_DEVICES; i++) {
                 lua_rawgeti(L, -1, i);
-                if (lua_isinteger(L, -1))
-                    out->gpu_devices[out->gpu_device_count++] = (int)lua_tointeger(L, -1);
+                if (lua_isinteger(L, -1)) {
+                    listed++;
+                    /* A device index is 0..HL_GPU_MAX_DEVICES-1: the sandbox
+                     * builds /dev/dri/renderD<128 + d> from it, which
+                     * overflowed for a huge one (audit 23). */
+                    lua_Integer d = lua_tointeger(L, -1);
+                    if (d >= 0 && d < HL_GPU_MAX_DEVICES)
+                        out->gpu_devices[out->gpu_device_count++] = (int)d;
+                    else
+                        log_warn("[manifest] gpu.devices[%d] = %lld - expected "
+                                 "0..%d, ignored", i, (long long)d,
+                                 HL_GPU_MAX_DEVICES - 1);
+                }
                 lua_pop(L, 1);
+            }
+            /* Every listed device ignored: an empty list means "all devices",
+             * so fail closed instead of widening to every device. */
+            if (listed > 0 && out->gpu_device_count == 0) {
+                log_warn("[manifest] gpu.devices lists no valid device - gpu disabled");
+                out->gpu = 0;
             }
         }
         lua_pop(L, 1); /* pop devices */

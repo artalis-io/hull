@@ -18,6 +18,7 @@
 #include "hull/sandbox.h"
 #include "hull/shared/cache_dir.h"
 #include "hull/shared/host.h"   /* hl_host_path_too_broad */
+#include "hull/limits/gpu.h"     /* HL_GPU_MAX_DEVICES */
 #include "log.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_backend.h"   /* hl_db_feature_backends: detect a composed DuckDB feature */
@@ -1182,9 +1183,14 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         if (policy->gpu_device_count > 0) {
             /* Unveil only specific render nodes for allowed devices */
             for (int i = 0; i < policy->gpu_device_count; i++) {
+                int d = policy->gpu_devices[i];
+                /* The manifest parsers keep only 0..HL_GPU_MAX_DEVICES-1;
+                 * refuse anything else here too (audit 23: 128 + d was a
+                 * signed overflow for a huge d). */
+                if (d < 0 || d >= HL_GPU_MAX_DEVICES)
+                    continue;
                 char node[64];
-                snprintf(node, sizeof(node), "/dev/dri/renderD%d",
-                         128 + policy->gpu_devices[i]);
+                snprintf(node, sizeof(node), "/dev/dri/renderD%d", 128 + d);
                 if (unveil(node, "rw") != 0)
                     log_warn("[sandbox] unveil failed for %s", node);
             }

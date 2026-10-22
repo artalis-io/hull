@@ -103,6 +103,11 @@ typedef struct {
 
 static void plan_free(Plan *pl) { free(pl->sec.p); free(pl->relocs); }
 
+/* The entry length is emitted as a u32 (HlEntry.len): HlEmitEntry.len must
+ * never hold more (audit 23). */
+_Static_assert(sizeof(((HlEmitEntry *)0)->len) <= sizeof(uint32_t),
+               "HlEmitEntry.len must fit the u32 HlEntry.len field");
+
 static int plan_build(const HlEmitEntry *entries, size_t n, Plan *pl) {
     memset(pl, 0, sizeof *pl);
     uint64_t *name_off = NULL, *blob_off = NULL;
@@ -137,6 +142,10 @@ static int plan_build(const HlEmitEntry *entries, size_t n, Plan *pl) {
     pl->nreloc = 2 * n;
     free(name_off); free(blob_off);
     if (pl->sec.oom) { plan_free(pl); return -1; }
+    /* COFF's SizeOfRawData / section Length are u32 and would truncate a
+     * section past 4 GiB: refuse it rather than emit a corrupt object
+     * (audit 23). */
+    if ((uint64_t)pl->sec.len > UINT32_MAX) { plan_free(pl); return -1; }
     return 0;
 oom:
     free(name_off); free(blob_off); plan_free(pl); return -1;

@@ -21,6 +21,7 @@
 #include <keel/timer.h>
 #include <keel/url.h>
 
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -36,15 +37,19 @@
 
 /* ── Static default allocator (outlives all async clients) ────────── */
 
-static KlAllocator s_kl_alloc;
-static int s_kl_alloc_inited;
+/* Keel keeps the KlAllocator BY POINTER (non-const) and reads it at free
+ * time, so it lives in static storage; it cannot be const (passing a const
+ * object would need a qualifier-dropping cast). Initialised once through
+ * pthread_once: the lazy flag it replaced was an unsynchronized write of a
+ * function-pointer table (audit 23), the same pattern smtp_transport.c and
+ * shared/tls_client.c use. */
+static KlAllocator    s_kl_alloc;
+static pthread_once_t s_kl_alloc_once = PTHREAD_ONCE_INIT;
+static void init_kl_alloc(void) { s_kl_alloc = kl_allocator_default(); }
 
 static KlAllocator *get_kl_alloc(void)
 {
-    if (!s_kl_alloc_inited) {
-        s_kl_alloc = kl_allocator_default();
-        s_kl_alloc_inited = 1;
-    }
+    pthread_once(&s_kl_alloc_once, init_kl_alloc);
     return &s_kl_alloc;
 }
 
@@ -205,6 +210,8 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
         return NULL;
     if (hl_http_reserved_header(headers, num_headers))
         return NULL;   /* the bindings say which (audit 22) */
+    if (!hl_http_method_valid(method))
+        return NULL;   /* not an RFC 9110 token (audit 23) */
 
     /* Parse URL for allowlist check */
     KlUrl parsed;
