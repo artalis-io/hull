@@ -219,15 +219,28 @@ local function codepoint_to_utf8(n)
 end
 
 
-local function parse_unicode_escape(s)
-  local n1 = tonumber( s:sub(1, 4),  16 )
-  local n2 = tonumber( s:sub(7, 10), 16 )
-   -- Surrogate pair?
-  if n2 then
-    return codepoint_to_utf8((n1 - 0xd800) * 0x400 + (n2 - 0xdc00) + 0x10000)
-  else
-    return codepoint_to_utf8(n1)
+-- \uXXXX (and a \uXXXX\uXXXX surrogate pair) as UTF-8. A high surrogate
+-- must be followed by a \u low surrogate, and a low surrogate must follow a
+-- high one (audit 23): a lone one has no UTF-8 encoding, and the pair was
+-- combined whatever the second escape held. JSON.parse keeps a lone
+-- surrogate as a UTF-16 unit; a Lua string is UTF-8, so here it is a decode
+-- error. `j` is the index of the `u`; returns the UTF-8 and the index of the
+-- escape's last hex digit.
+local function parse_unicode_escape(str, j)
+  local hex = str:match("^%x%x%x%x", j + 1)
+           or decode_error(str, j - 1, "invalid unicode escape in string")
+  local n1 = tonumber(hex, 16)
+  if n1 >= 0xd800 and n1 <= 0xdbff then
+    local lo = str:match("^\\u(%x%x%x%x)", j + 5)
+    local n2 = lo and tonumber(lo, 16)
+    if not n2 or n2 < 0xdc00 or n2 > 0xdfff then
+      decode_error(str, j - 1, "unpaired unicode surrogate in string")
+    end
+    return codepoint_to_utf8((n1 - 0xd800) * 0x400 + (n2 - 0xdc00) + 0x10000), j + 10
+  elseif n1 >= 0xdc00 and n1 <= 0xdfff then
+    decode_error(str, j - 1, "unpaired unicode surrogate in string")
   end
+  return codepoint_to_utf8(n1), j + 4
 end
 
 
@@ -252,12 +265,8 @@ local function parse_string(str, i)
       j = j + 1
       local c = str:sub(j, j)
       if c == "u" then
-        local hex = str:match("^[dD][89aAbB]%x%x\\u%x%x%x%x", j + 1)
-                 or str:match("^%x%x%x%x", j + 1)
-                 or decode_error(str, j - 1, "invalid unicode escape in string")
         n_parts = n_parts + 1
-        parts[n_parts] = parse_unicode_escape(hex)
-        j = j + #hex
+        parts[n_parts], j = parse_unicode_escape(str, j)
       else
         if not escape_chars[c] then
           decode_error(str, j - 1, "invalid escape char '" .. c .. "' in string")
@@ -280,11 +289,23 @@ local function parse_string(str, i)
 end
 
 
+-- Does `s` follow the JSON number grammar,
+-- -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)? ? tonumber also took hex
+-- ("0x10"), "inf" / "nan" spellings, leading zeros, "1." and ".5" (audit 23).
+local function is_json_number(s)
+  local p = s:match("^%-?0()") or s:match("^%-?[1-9]%d*()")
+  if not p then return false end
+  p = s:match("^%.%d+()", p) or p
+  p = s:match("^[eE][%+%-]?%d+()", p) or p
+  return p == #s + 1
+end
+
 local function parse_number(str, i)
   local x = next_char(str, i, delim_chars)
   local s = str:sub(i, x - 1)
-  local n = tonumber(s)
-  if not n then
+  local n = is_json_number(s) and tonumber(s)
+  -- A number too large for a double ("1e400") is out of range, not infinity.
+  if not n or n ~= n or n == math.huge or n == -math.huge then
     decode_error(str, i, "invalid number '" .. s .. "'")
   end
   return n, x

@@ -154,6 +154,11 @@ function serveAllowed(req, res, meta) {
     // means this is a genuine cryptographic fingerprint of the bytes.
     const etag = '"' + meta.blob_id + '"';
 
+    // The response passed an access check: a shared cache must not keep it
+    // for the next requester, and a private one revalidates (the check runs
+    // again) before reusing it - the 304 included (audit 23).
+    res.header("Cache-Control", "private, no-cache");
+
     // If-None-Match → 304. Accepts comma-separated values + `*` wildcard.
     const inm = req.headers && req.headers["if-none-match"];
     if (inm) {

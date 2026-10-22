@@ -872,6 +872,15 @@ end
 
 local cache_count = 0
 
+-- The generated function takes (data, escape, filters); compile hands out
+-- the documented `function(data) -> string` (audit 23: it returned the raw
+-- form, so `template.compile(name)(data)` called with no escape and raised).
+local function wrap_render(raw)
+    return function(data)
+        return raw(data or {}, html_escape, filters)
+    end
+end
+
 --- Compile a named template into a render function.
 --
 -- Loads the template source from the embedded VFS (built binaries) or
@@ -896,7 +905,7 @@ function template.compile(name)
         error("template not found: " .. name)
     end
 
-    local fn = compile_source(source, name)
+    local fn = wrap_render(compile_source(source, name))
 
     -- Cache full → flush, then insert. Single-threaded Lua means there's
     -- no observable window where the cache holds more than MAX_CACHE_SIZE
@@ -923,8 +932,7 @@ end
 -- @usage
 -- res:html(template.render("pages/home.html", { user = req.ctx.user }))
 function template.render(name, data)
-    local fn = template.compile(name)
-    return fn(data or {}, html_escape, filters)
+    return template.compile(name)(data)
 end
 
 --- Compile and render a template from a source string (not cached).
@@ -944,5 +952,13 @@ function template.clear_cache()
     cache = {}
     cache_count = 0
 end
+
+-- Test seam (hull._test_hooks, never on the module): the wrapper compile
+-- returns, over a source string.
+require("hull._test_hooks").register("hull.template", {
+    compile_string = function(source)
+        return wrap_render(compile_source(source, nil))
+    end,
+})
 
 return template

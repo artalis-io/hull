@@ -90,5 +90,36 @@ test("NaN and infinities are still refused", function()
     end
 end)
 
+-- ── audit 23: the decoder takes the JSON grammar only ─────────────────
+
+test("numbers outside the JSON grammar are refused", function()
+    for _, s in ipairs({ "0x10", "01", "-01", "1.", ".5", "-", "+1", "1e", "1e+",
+                         "1.e5", "0x1p4", "1_000", "--1", "1e400", "-1e400",
+                         "[1e999]", "[0x10]" }) do
+        local ok = pcall(json.decode, s)
+        assert_eq(ok, false, s)
+    end
+end)
+
+test("numbers in the JSON grammar still decode", function()
+    local cases = { ["0"] = 0, ["-0"] = 0, ["7"] = 7, ["-12"] = -12, ["1.5"] = 1.5,
+                    ["-0.25"] = -0.25, ["1e3"] = 1000.0, ["2E-2"] = 0.02,
+                    ["1.5e+2"] = 150.0, ["10"] = 10 }
+    for s, want in pairs(cases) do
+        assert_eq(json.decode(s), want, s)
+    end
+    assert_eq(json.decode("[1,2.5]")[2], 2.5, "inside an array")
+end)
+
+test("a surrogate pair decodes; a lone surrogate is an error", function()
+    assert_eq(json.decode('"\\ud83d\\ude00"'), "\240\159\152\128", "U+1F600")
+    assert_eq(json.decode('"\\u00e9"'), "\195\169", "U+00E9")
+    for _, s in ipairs({ '"\\ud83d"', '"\\ud83dx"', '"\\ude00"', '"\\ud83d\\u0041"',
+                         '"\\ud83d\\ud83d"', '"a\\udfffb"' }) do
+        local ok = pcall(json.decode, s)
+        assert_eq(ok, false, s)
+    end
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

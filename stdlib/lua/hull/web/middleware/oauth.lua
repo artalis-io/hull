@@ -616,9 +616,14 @@ local function handle_callback(req, res)
     if type(claims.aud) == "string" then
         aud_ok = (claims.aud == cfg.client_id)
     elseif type(claims.aud) == "table" then
+        local n = 0
         for _, a in ipairs(claims.aud) do
-            if a == cfg.client_id then aud_ok = true; break end
+            n = n + 1
+            if a == cfg.client_id then aud_ok = true end
         end
+        -- A token for several audiences is ours only when we are its
+        -- authorized party (OIDC Core 3.1.3.7; audit 23).
+        if aud_ok and n > 1 and claims.azp ~= cfg.client_id then aud_ok = false end
     end
     if not aud_ok then return res:status(400):html("auth failed") end
     if claims.nonce ~= env.nonce then

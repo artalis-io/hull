@@ -313,7 +313,7 @@ end)
 -- ── idempotency ────────────────────────────────────────────────────
 
 test("idempotency: session and JWT principals are prefixed apart", function()
-    local p = idem._default_principal
+    local p = __test_hooks("hull.web.middleware.idempotency").default_principal
     assert_eq(p({ ctx = { session = { user_id = 5 } } }), "session:5")
     assert_eq(p({ ctx = { user = { sub = 5 } } }), "user:5")
     assert_eq(p({ ctx = { session = { user_id = "user:5" } } }) ~= "user:5", true)

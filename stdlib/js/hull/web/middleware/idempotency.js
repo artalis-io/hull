@@ -31,6 +31,7 @@ import { time } from "hull:time";
 import { _test_hooks } from "hull:_test_hooks";
 import { json } from "hull:json";
 import { log } from "hull:log";
+import { _request } from "hull:web:_request";
 
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
@@ -210,21 +211,26 @@ function computeFingerprint(req) {
 // The default principal: "session:<user_id>" for a session user, else
 // "user:<id>" for a JWT user, else "__anon". The two kinds of user are
 // prefixed apart (audit 9; see the Lua sibling).
+//
+// Both ids go through hull:web:_request's userId, as the Lua twin's do
+// (audit 23): "" is no id, an object is no id, 0 is a user. The JWT id is the
+// first of sub / id / user_id that is one.
 function defaultPrincipal(req) {
-    // User id 0 is a user: a truthiness test sent it to the shared
-    // "__anon" principal, where anonymous callers could replay or squat
-    // its keys.
-    const sid = req.ctx && req.ctx.session ? req.ctx.session.user_id : undefined;
-    if (sid !== undefined && sid !== null && sid !== "")
-        return "session:" + String(sid);
+    const ctx = req.ctx;
+    const sess = ctx && typeof ctx === "object" ? ctx.session : undefined;
+    if (sess && typeof sess === "object") {
+        const sid = _request.userId(sess.user_id);
+        if (sid !== null) return "session:" + sid;
+    }
     // A JWT-authenticated user (auth.jwtMiddleware). Without this every
     // bearer-token user shared "__anon", so one could replay another's
     // stored response, or squat their key, by knowing key and body.
-    const u = req.ctx && req.ctx.user;
+    const u = ctx && typeof ctx === "object" ? ctx.user : undefined;
     if (u && typeof u === "object") {
-        const id = u.sub !== undefined ? u.sub
-                 : u.id !== undefined ? u.id : u.user_id;
-        if (id !== undefined && id !== null) return "user:" + String(id);
+        for (const k of ["sub", "id", "user_id"]) {
+            const id = _request.userId(u[k]);
+            if (id !== null) return "user:" + id;
+        }
     }
     return "__anon";
 }
@@ -586,9 +592,7 @@ function cleanup() {
     return db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", [now]);
 }
 
-const idempotency = { init, middleware, respond, respondHtml, complete, cleanup,
-                      _defaultPrincipal: defaultPrincipal,
-                      _normPrincipal: normPrincipal };
+const idempotency = { init, middleware, respond, respondHtml, complete, cleanup };
 export { idempotency };
 
 // Test-only hooks, registered with the stdlib-internal hull:_test_hooks
@@ -598,4 +602,7 @@ _test_hooks.register("hull:web:middleware:idempotency", {
     rows(key) {
         return db.query("SELECT state, status FROM _hull_idempotency_keys WHERE key = ?", [key]);
     },
+    // The principal helpers (audit 23: they were exported on the module).
+    defaultPrincipal,
+    normPrincipal,
 });

@@ -376,5 +376,14 @@ test("currency with inf / NaN / huge does not raise", function()
     assert_eq(ok4, true, "number -inf")
 end)
 
+-- ── audit 23 ─────────────────────────────────────────────────────────
+
+test("a placeholder name may hold underscores", function()
+    i18n.load("en", { hi = "Hi ${first_name}, ${x_1}!" })
+    i18n.locale("en")
+    assert_eq(i18n.t("hi", { first_name = "Ada", x_1 = "one" }), "Hi Ada, one!")
+    assert_eq(i18n.t("hi", {}), "Hi ${first_name}, ${x_1}!", "missing stays as written")
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

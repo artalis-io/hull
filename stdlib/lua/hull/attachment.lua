@@ -328,13 +328,27 @@ end
 -- and for each, in its own transaction, re-checks that no row references
 -- the blob, drops the queue entry and unlinks the blob. `attachment.delete`
 -- runs it after every delete; an app may also schedule it (app.every).
+-- `limit` must be an integer (raises otherwise); below 1 sweeps nothing,
+-- above 10000 is 10000.
 -- @tparam[opt] table opts  { grace, limit }
 -- @treturn integer  number of blobs unlinked
+local SWEEP_MAX_LIMIT = 10000
+local SAFE_INT = 2 ^ 53 - 1
+
 function attachment.sweep(opts)
     opts = opts or {}
     local grace = opts.grace or _orphan_grace
-    local limit = math.floor(tonumber(opts.limit) or 100)
+    -- An integer within 2^53, at most SWEEP_MAX_LIMIT, as the JS twin
+    -- (audit 23): math.huge / NaN / 1e300 went into the LIMIT text as
+    -- "inf" / "nan" / "1e+300", and a string was coerced.
+    local raw = opts.limit
+    if raw == nil then raw = 100 end
+    local limit = type(raw) == "number" and math.tointeger(raw) or nil
+    if not limit or limit > SAFE_INT or limit < -SAFE_INT then
+        error("attachment.sweep: limit must be an integer", 2)
+    end
     if limit < 1 then return 0 end
+    if limit > SWEEP_MAX_LIMIT then limit = SWEEP_MAX_LIMIT end
     local rows = db.query(
         "SELECT blob_id FROM _hull_attachment_orphans WHERE queued_at <= ? "
         .. "ORDER BY queued_at LIMIT " .. limit,

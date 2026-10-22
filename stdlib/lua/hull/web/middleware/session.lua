@@ -190,6 +190,19 @@ local function generate_id()
     return crypto.random_token(32, "hex")
 end
 
+-- The audit log's reference to a session: the id is a bearer credential, so
+-- the log keeps the first 32 hex characters of its SHA-256 - enough to tell
+-- sessions apart, nothing to sign in with (audit 23: the raw id was stored).
+local function session_ref(sid)
+    if type(sid) ~= "string" or sid == "" then return nil end
+    local digest = crypto.sha256(sid)
+    local out = {}
+    for i = 1, 16 do
+        out[i] = string.format("%02x", digest:byte(i))
+    end
+    return table.concat(out)
+end
+
 --- Create a new session.
 --
 -- @tparam[opt] table data  Initial session data. JSON-encoded for storage.
@@ -620,7 +633,7 @@ function session.login_handler(cookie_mod, opts)
             end
             local rec_ok, rec_err = pcall(audit_log.record,
                 user.id, audit_kind, req,
-                { session_id = sid,
+                { session_id = session_ref(sid),
                   metadata = scrub(audit_meta(user, ctx)) })
             if not rec_ok then
                 local log = require("hull.log")

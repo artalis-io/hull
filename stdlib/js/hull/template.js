@@ -29,6 +29,7 @@
  */
 
 import { _template } from "hull:_template";
+import { _test_hooks } from "hull:_test_hooks";
 
 // ── Limits ──────────────────────────────────────────────────────────
 
@@ -660,10 +661,19 @@ function compile(name) {
         cacheCount = 0;
     }
 
-    const fn = compileSource(source, name);
+    const fn = wrapRender(compileSource(source, name));
     cache[name] = fn;
     cacheCount++;
     return fn;
+}
+
+// The generated function takes (data, escape, filters); compile hands out
+// the documented `(data) => string` (audit 23: it returned the raw form, so
+// `template.compile(name)(data)` called with no escape and threw).
+function wrapRender(raw) {
+    return function (data) {
+        return raw(data || {}, htmlEscape, filters);
+    };
 }
 
 /**
@@ -677,8 +687,7 @@ function compile(name) {
  * res.html(template.render("pages/home.html", { user: req.ctx.user }));
  */
 function render(name, data) {
-    const fn = compile(name);
-    return fn(data || {}, htmlEscape, filters);
+    return compile(name)(data);
 }
 
 /**
@@ -698,6 +707,12 @@ function clearCache() {
     for (const k in cache) delete cache[k];
     cacheCount = 0;
 }
+
+// Test seam (hull:_test_hooks, never on the module): the wrapper compile
+// returns, over a source string.
+_test_hooks.register("hull:template", {
+    compileString: (source) => wrapRender(compileSource(source, null)),
+});
 
 const template = { render, renderString, compile, clearCache };
 export { template };

@@ -191,10 +191,11 @@ function M.health()
     }
 end
 
--- Exposed for tests + ad-hoc uses (e.g. probing whether a
--- password the app already has access to is in HIBP, separate
--- from the registration path).
-M._sha1_hex = sha1_hex
-M._in_local_blocklist = in_local_blocklist
+-- Test seams, registered with the stdlib-internal hull._test_hooks rather
+-- than exported on the module (audit 23).
+require("hull._test_hooks").register("hull.web.pwned", {
+    sha1_hex = sha1_hex,
+    in_local_blocklist = in_local_blocklist,
+})
 
 return M

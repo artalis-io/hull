@@ -566,6 +566,9 @@ async function handleCallback(req, res) {
         for (const a of claims.aud) {
             if (a === cfg.clientId) { audOk = true; break; }
         }
+        // A token for several audiences is ours only when we are its
+        // authorized party (OIDC Core 3.1.3.7; audit 23).
+        if (audOk && claims.aud.length > 1 && claims.azp !== cfg.clientId) audOk = false;
     }
     if (!audOk) { res.status(400).html("auth failed"); return; }
     if (claims.nonce !== env.nonce) {

@@ -35,10 +35,12 @@ local function deep_get(tbl, key)
     return node
 end
 
--- Replace ${key} placeholders with values from params table.
+-- Replace ${key} placeholders with values from params table. A key is
+-- letters, digits and underscores, as the JS twin's \w (audit 23: %w has
+-- no underscore, so ${first_name} was left as written).
 local function interpolate(str, params)
     if not params then return str end
-    return (str:gsub("%${(%w+)}", function(k)
+    return (str:gsub("%${([%w_]+)}", function(k)
         local v = params[k]
         if v == nil then return "${" .. k .. "}" end
         return tostring(v)

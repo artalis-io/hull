@@ -2895,8 +2895,15 @@ end
 --                            last_error, created_at, updated_at }
 function jobs.dead(opts)
     opts = opts or {}
-    local limit  = opts.limit or 100
-    local offset = opts.offset or 0
+    -- limit 1..1000 and offset >= 0, as jobs.events (audit 23): a negative
+    -- LIMIT is "no limit" on SQLite, and NaN / a fraction is not an integer
+    -- bind.
+    local limit = tonumber(opts.limit) or 100
+    if limit ~= limit then limit = 100 end
+    limit = math.floor(math.max(1, math.min(limit, 1000)))
+    local offset = tonumber(opts.offset) or 0
+    if offset ~= offset then offset = 0 end
+    offset = math.floor(math.max(0, math.min(offset, 2 ^ 53 - 1)))
     local rows
     if opts.queue then
         rows = db.query(

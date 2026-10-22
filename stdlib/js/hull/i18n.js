@@ -24,13 +24,17 @@ let active = null;     // current locale name
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-// Traverse a nested object by dotted key path.
+// Traverse a nested object by dotted key path. Own properties only, per
+// segment (audit 23): "constructor" / "a.toString" resolved to an
+// Object.prototype member, and t() returned a function, not the key.
+const hasOwn = Object.prototype.hasOwnProperty;
 function deepGet(obj, key) {
     const parts = key.split(".");
     let node = obj;
     for (let i = 0; i < parts.length; i++) {
         if (node === null || node === undefined || typeof node !== "object")
             return undefined;
+        if (!hasOwn.call(node, parts[i])) return undefined;
         node = node[parts[i]];
     }
     return node;

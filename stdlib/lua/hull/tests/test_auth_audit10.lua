@@ -290,7 +290,7 @@ end)
 -- ── idempotency ────────────────────────────────────────────────────
 
 test("idempotency: principals are text, capped at the column width", function()
-    local n = idem._norm_principal
+    local n = __test_hooks("hull.web.middleware.idempotency").norm_principal
     assert_eq(n(5), "5")
     assert_eq(n(nil), "__anon")
     assert_eq(n(""), "__anon")
