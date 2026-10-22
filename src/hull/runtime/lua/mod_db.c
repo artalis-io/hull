@@ -921,19 +921,29 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     /* The copies below live outside the heap until the op is freed: charged
      * and held on the VM's off-heap total under its heap limit before they
      * are made - a table naming one big string 32766 times was copied
-     * 32766 times (audit 22). Both raise with nothing allocated (the
-     * params live in the scratch arena), and neither runs app code. */
+     * 32766 times (audit 22). Neither runs app code. Both failures give
+     * the params' scratch space back before they raise (audit 23: raised
+     * with it held, a pcall loop over a refused call filled the arena for
+     * the rest of the run) - so the charge is the non-raising one, and the
+     * trip is raised once the params are released. */
     HlOffheapHold copy_hold = {0};
     if (kind != HL_WORK_DB_WAIT_NOTIFY) {
         size_t copy_bytes = hl_worker_db_copy_bytes(params, nparams,
                                                     strlen(sql) + 1);
-        lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)copy_bytes), 0);
+        uint64_t units = hl_work_bytes_units((uint64_t)copy_bytes);
+        if (hl_lua_budget_charge(L, units > (uint64_t)INT64_MAX
+                                    ? INT64_MAX : (int64_t)units)) {
+            lua_free_hl_values(L, params, nparams);
+            return hl_lua_budget_raise(L);
+        }
         if (hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes, lua->mem_limit,
-                            copy_bytes) != 0)
+                            copy_bytes) != 0) {
+            lua_free_hl_values(L, params, nparams);
             return luaL_error(L, "db.async: %I bytes of SQL and params would "
                               "take the VM's off-heap copies past its heap "
                               "limit", (lua_Integer)(copy_bytes > (size_t)LUA_MAXINTEGER
                                   ? LUA_MAXINTEGER : copy_bytes));
+        }
     }
 
     /* Allocate op */
