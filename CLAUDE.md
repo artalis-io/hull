@@ -863,7 +863,12 @@ roadmap §2.9.)
   rather than reported done (audit 12).
 - **Lost connections (Postgres and MySQL):** every read is bounded by the
   DSN's `?read_timeout=<ms>` (default 300000, `0` = none), from the startup
-  exchange on. A connection whose reply was left part-read - a failed or
+  exchange on. So is every send (`hl_db_transport_send_sliced`, audit 23):
+  non-blocking writes, one `read_timeout` for the whole message, the run asked
+  after each chunk and each quiet `HL_DB_WAIT_SLICE_MS` slice, and the
+  connection closed and marked broken on a stop - a blocking `send()` held the
+  event loop for a peer that stopped reading, for ever with `read_timeout=0`.
+  A connection whose reply was left part-read - a failed or
   timed-out read, a malformed packet, a dropped socket - refuses further use
   rather than hand the next query this one's reply. The backend keeps the DSN
   (scrubbed on close) and reconnects on the next call when the connection was

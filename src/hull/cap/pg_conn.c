@@ -224,32 +224,38 @@ void hl_pg_dsn_scrub(HlPgDsn *dsn)
 /* Transport helpers. All bytes go through the owned HlDbTransport, which routes
  * through an attached TLS session when one has been handed to it (see
  * hl_pg_conn_open) or plain provider send/recv otherwise. */
-static ssize_t io_send(HlPgConn *conn, const uint8_t *buf, size_t len)
-{
-    return hl_db_transport_send(conn->transport, buf, len);
-}
-
-static ssize_t io_recv(HlPgConn *conn, uint8_t *buf, size_t len)
-{
-    return hl_db_transport_recv(conn->transport, buf, len);
-}
-
-static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
-{
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n = io_send(conn, buf + sent, len - sent);
-        if (n <= 0) { conn->broken = 1;
-                      set_err(conn->errmsg, sizeof conn->errmsg, "socket write failed");
-                      return -1; }
-        sent += (size_t)n;
-    }
-    return 0;
-}
-
 static void pg_abandon(HlPgConn *conn);
+static void conn_teardown(HlPgConn *conn);
+static int pg_wait_stop(void *ud);
 static int notify_is_for(const HlPgFrame *f, const char *channel, char *got,
                          size_t gotsz);
+
+/* Send a whole message. The write is sliced like the reads (audit 23): a
+ * blocking send waited for the server to take the bytes under SO_SNDTIMEO
+ * alone - for ever with ?read_timeout=0 - so a server that stopped reading a
+ * large conn.exec held the event loop with no budget or run deadline asked.
+ * A trip closes the connection, as a trip mid-reply does; a timeout or a
+ * failed write leaves it broken (part of the message may have gone). */
+static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
+{
+    int rc = hl_db_transport_send_sliced(conn->transport, buf, len,
+                                         conn->read_timeout_ms,
+                                         conn->finishing ? NULL : pg_wait_stop,
+                                         NULL);
+    if (rc == 0) return 0;
+    if (rc == -2) {
+        conn_teardown(conn);
+        conn->broken = 1;
+        set_err(conn->errmsg, sizeof conn->errmsg,
+                "interrupted (instruction limit exceeded); the connection was "
+                "closed with the request part-sent");
+        return -1;
+    }
+    conn->broken = 1;
+    set_err(conn->errmsg, sizeof conn->errmsg,
+            "socket write failed or timed out (see ?read_timeout=)");
+    return -1;
+}
 
 /* A NotificationResponse a query or a script read: hand it to the backend's
  * listen table (conn->on_notify), as wait_notify does for another channel's.
@@ -829,8 +835,13 @@ HlPgSslDecision hl_pg_ssl_negotiate(HlDbTransport *t, HlPgSslMode mode,
      * go through the provider - the same production I/O path as the rest of the
      * protocol, not a separate raw send/recv. */
     static const uint8_t req[8] = { 0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f };
-    if (hl_db_transport_send_all(t, req, sizeof req) != 0) {
-        set_err(errbuf, errlen, "failed to send SSLRequest");
+    /* Sliced like every later write (audit 23). */
+    int sr = hl_db_transport_send_sliced(t, req, sizeof req, read_timeout_ms,
+                                         pg_wait_stop, NULL);
+    if (sr != 0) {
+        set_err(errbuf, errlen, sr == -2
+                ? "connect stopped (instruction or time limit exceeded)"
+                : "failed to send SSLRequest");
         return HL_PG_SSL_FAIL;
     }
 
@@ -940,11 +951,17 @@ int hl_pg_conn_open(HlPgConn *conn, const HlPgDsn *dsn, int timeout_ms)
 void hl_pg_conn_close(HlPgConn *conn)
 {
     if (!conn) return;
-    if (conn->transport) {
+    /* Best effort, and never a wait: a blocking Terminate on a socket the
+     * server had stopped reading waited out SO_SNDTIMEO (for ever with
+     * ?read_timeout=0), and on a broken connection it would land in the
+     * middle of a part-sent message anyway (audit 23). */
+    if (conn->transport && !conn->broken) {
         HlPgWriter w;
         hl_pg_writer_init(&w);
         hl_pg_build_terminate(&w);
-        if (!w.err) (void)conn_send(conn, w.buf, w.len);   /* best effort */
+        if (!w.err)
+            (void)hl_db_transport_send_sliced(conn->transport, w.buf, w.len,
+                                              1, NULL, NULL);
         hl_pg_writer_free(&w);
     }
     conn_teardown(conn);   /* closes + frees the transport, idempotent */
@@ -1676,8 +1693,19 @@ static int wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
             conn->rbuf = nb;
             conn->rcap = ncap;
         }
-        ssize_t n = io_recv(conn, conn->rbuf + conn->rlen, conn->rcap - conn->rlen);
-        if (n <= 0) { set_err(conn->errmsg, sizeof conn->errmsg, "connection closed by server");
+        /* Sliced, bounded by what is left of the wait: over TLS a record's
+         * first byte made the socket readable, and a blocking read then waited
+         * for the rest of it under SO_RCVTIMEO - past the wait's own timeout,
+         * for ever with ?read_timeout=0 (audit 23). */
+        remaining = (int)(deadline - mono_ms());
+        if (remaining <= 0) remaining = 1;
+        ssize_t n = hl_db_transport_recv_sliced(conn->transport,
+                                                conn->rbuf + conn->rlen,
+                                                conn->rcap - conn->rlen,
+                                                remaining, NULL, NULL);
+        if (n <= 0) { set_err(conn->errmsg, sizeof conn->errmsg,
+                              n < 0 ? "read failed or timed out"
+                                    : "connection closed by server");
                       return -1; }
         conn->rlen += (size_t)n;
     }

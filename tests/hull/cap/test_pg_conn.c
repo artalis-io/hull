@@ -778,6 +778,75 @@ UTEST(pg_query, the_read_timeout_still_bounds_a_silent_server)
     close(sv[0]);
 }
 
+/* Audit 23: the request went out with a blocking send under SO_SNDTIMEO
+ * alone (none with ?read_timeout=0), so a server that stopped reading a large
+ * statement held the call with no budget or run deadline asked. The write is
+ * sliced now: a tripped budget stops it and closes the connection. */
+static char *pg_big_sql(size_t n)
+{
+    char *sql = malloc(n + 1);
+    if (!sql) return NULL;
+    memcpy(sql, "SELECT 1", 8);
+    memset(sql + 8, ' ', n - 8);
+    sql[n] = '\0';
+    return sql;
+}
+
+UTEST(pg_query, a_server_that_never_reads_is_stopped_by_a_tripped_budget)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 0;            /* no timeout: only the budget stops it */
+    char *sql = pg_big_sql((size_t)8 << 20);   /* far past the socket buffer */
+    ASSERT_TRUE(sql != NULL);
+
+    pg_charges = 0;
+    pg_trip_at = 3;
+    HlDbBudgetBinding prev = hl_db_budget_swap(pg_count_trip_fn, NULL);
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_exec_simple(&conn, sql);
+    int64_t spent = pg_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    free(sql);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(3, pg_charges);
+    EXPECT_TRUE(spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+    EXPECT_TRUE(strstr(conn.errmsg, "interrupted") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
+/* ?read_timeout= bounds the whole write too. */
+UTEST(pg_query, the_read_timeout_bounds_a_server_that_never_reads)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 250;
+    char *sql = pg_big_sql((size_t)8 << 20);
+    ASSERT_TRUE(sql != NULL);
+
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_exec_simple(&conn, sql);
+    int64_t spent = pg_test_ms() - t0;
+    free(sql);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent >= 200 && spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(strstr(conn.errmsg, "timed out") != NULL);
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
 /* A run whose budget trips exactly on COMMIT's CommandComplete: the server
  * has committed, so the reply is read on to its ReadyForQuery and the call
  * reports what the server did (audit 18). The connection used to be dropped

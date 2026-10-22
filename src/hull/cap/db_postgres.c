@@ -227,25 +227,28 @@ oom:
 /* Decode one text-format value by type OID. For BLOB, *freeme receives a
  * heap buffer the caller frees after the row callback; otherwise NULL. TEXT
  * values borrow the wire bytes (valid for the callback's duration). */
-static void decode_value(int32_t oid, const char *text, int32_t len,
-                         HlValue *out, char **freeme)
+/* 0, or -1 when a bytea's buffer could not be allocated: the row is then
+ * refused (the query fails "out of memory") rather than handed over with
+ * the column as its hex text (audit 23). */
+static int decode_value(int32_t oid, const char *text, int32_t len,
+                        HlValue *out, char **freeme)
 {
     *freeme = NULL;
-    if (!text) { out->type = HL_TYPE_NIL; return; }
+    if (!text) { out->type = HL_TYPE_NIL; return 0; }
 
     char numbuf[64];
     switch (oid) {
     case 16:  /* bool */
         out->type = HL_TYPE_BOOL;
         out->b = (len >= 1 && (text[0] == 't' || text[0] == 'T' || text[0] == '1'));
-        return;
+        return 0;
     case 20: case 21: case 23:  /* int8 / int2 / int4 */
         if (len >= 0 && len < (int32_t)sizeof numbuf) {
             memcpy(numbuf, text, (size_t)len);
             numbuf[len] = '\0';
             out->type = HL_TYPE_INT;
             out->i = (int64_t)strtoll(numbuf, NULL, 10);
-            return;
+            return 0;
         }
         break;
     case 700: case 701:  /* float4 / float8 */
@@ -254,24 +257,23 @@ static void decode_value(int32_t oid, const char *text, int32_t len,
             numbuf[len] = '\0';
             out->type = HL_TYPE_DOUBLE;
             out->d = strtod(numbuf, NULL);
-            return;
+            return 0;
         }
         break;
     case 17:  /* bytea, text format "\x...." */
         if (len >= 2 && text[0] == '\\' && text[1] == 'x') {
             size_t blen = ((size_t)len - 2) / 2;
             char *buf = malloc(blen ? blen : 1);
-            if (buf) {
-                /* An odd digit count is malformed too, not truncated. */
-                if (hl_hex_decode(text + 2, (size_t)len - 2,
-                                  (uint8_t *)buf, blen) >= 0) {
-                    out->type = HL_TYPE_BLOB;
-                    out->s = buf; out->len = blen;
-                    *freeme = buf;
-                    return;
-                }
-                free(buf);
+            if (!buf) return -1;
+            /* An odd digit count is malformed too, not truncated. */
+            if (hl_hex_decode(text + 2, (size_t)len - 2,
+                              (uint8_t *)buf, blen) >= 0) {
+                out->type = HL_TYPE_BLOB;
+                out->s = buf; out->len = blen;
+                *freeme = buf;
+                return 0;
             }
+            free(buf);
         }
         break;
     default:
@@ -281,6 +283,7 @@ static void decode_value(int32_t oid, const char *text, int32_t len,
     out->type = HL_TYPE_TEXT;
     out->s = text;
     out->len = (size_t)(len < 0 ? 0 : len);
+    return 0;
 }
 
 /* ── Query / exec ─────────────────────────────────────────────────── */
@@ -293,6 +296,7 @@ typedef struct {
     int           nfields;
     int           nnames;   /* entries allocated in names (what free walks) */
     int           bad_row;  /* a DataRow did not match the RowDescription */
+    int           oom;      /* an allocation failed: the query fails (audit 23) */
 } PgAdapter;
 
 static void adapter_free_desc(PgAdapter *a)
@@ -323,6 +327,7 @@ static void adapter_desc(void *ctx, const HlPgField *fields, int nf)
         free(a->names); free(a->oids);
         a->names = NULL; a->oids = NULL;
         a->nfields = -1;
+        a->oom = 1;
         return;
     }
     a->nnames = nf;
@@ -331,6 +336,9 @@ static void adapter_desc(void *ctx, const HlPgField *fields, int nf)
         const char *nm = fields[i].name ? fields[i].name : "";
         a->names[i] = strdup(nm);
         a->oids[i]  = fields[i].oid;
+        /* A name that could not be copied: the column was handed over named
+         * "" (audit 23). Refuse the rows instead. */
+        if (!a->names[i]) a->oom = 1;
     }
 }
 
@@ -343,20 +351,29 @@ static int adapter_row(void *ctx, const char *const *vals,
      * from above let a hostile (or TLS-stripped) server send fewer, and a
      * consumer that sized its rows from the first one (db.async's collector)
      * then read past this row's array. A mismatch fails the query. */
+    if (a->oom) return 1;
     if (nc != a->nfields) {   /* also: a DataRow with no RowDescription */
         a->bad_row = 1;
         return 1;
     }
 
+    /* An allocation failure stopped the rows and the query succeeded with
+     * the rest of the result missing (audit 23): it fails now. */
     HlColumn *cols = calloc((size_t)(nc > 0 ? nc : 1), sizeof *cols);
     char **frees = calloc((size_t)(nc > 0 ? nc : 1), sizeof *frees);
-    if (!cols || !frees) { free(cols); free(frees); return 1; }
+    if (!cols || !frees) { free(cols); free(frees); a->oom = 1; return 1; }
 
     for (int i = 0; i < nc; i++) {
         cols[i].name = (a->names && a->names[i]) ? a->names[i] : "";
         int32_t oid = a->oids ? a->oids[i] : 0;
-        decode_value(oid, vals[i], vals[i] ? lens[i] : -1,
-                     &cols[i].value, &frees[i]);
+        if (decode_value(oid, vals[i], vals[i] ? lens[i] : -1,
+                         &cols[i].value, &frees[i]) != 0) {
+            for (int j = 0; j < i; j++) free(frees[j]);
+            free(cols);
+            free(frees);
+            a->oom = 1;
+            return 1;
+        }
     }
     int rc = a->user_cb(a->user_ctx, cols, nc);
     for (int i = 0; i < nc; i++) free(frees[i]);
@@ -408,7 +425,10 @@ static int pg_query(HlDbHandle *h, const char *sql,
         s->conn.tx_status = 'I';
         rc = 0;
     }
-    if (rc == 0 && a.bad_row) {
+    if (rc == 0 && a.oom) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg, "out of memory");
+        rc = -1;
+    } else if (rc == 0 && a.bad_row) {
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "server sent a row whose column count does not match its "
                  "row description");

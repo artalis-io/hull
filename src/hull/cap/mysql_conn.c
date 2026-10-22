@@ -244,28 +244,34 @@ static void conn_set_err(HlMyConn *conn, const char *msg)
     if (conn) snprintf(conn->errmsg, sizeof conn->errmsg, "%s", msg);
 }
 
-/* Raw byte I/O over the owned transport, which routes through an attached TLS
- * session when one has been handed to it (see hl_my_conn_start) or plain provider
- * send/recv otherwise. */
-static ssize_t conn_write_raw(HlMyConn *conn, const uint8_t *buf, size_t len)
-{
-    return hl_db_transport_send(conn->transport, buf, len);
-}
+static void my_abandon(HlMyConn *conn);
+static int my_wait_stop(void *ud);
 
+/* Send a whole packet over the owned transport (through an attached TLS
+ * session when one has been handed to it). The write is sliced like the reads
+ * (audit 23): a blocking send waited for the server to take the bytes under
+ * SO_SNDTIMEO alone - for ever with ?read_timeout=0 - so a server that
+ * stopped reading a large statement held the event loop with no budget or
+ * run deadline asked. A trip closes the connection, as a trip mid-reply
+ * does; a timeout or a failed write leaves it broken (part of the packet may
+ * have gone, so the stream is out of step). */
 static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
 {
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n;
-        do { n = conn_write_raw(conn, buf + sent, len - sent); }
-        while (n < 0 && errno == EINTR);
-        if (n <= 0) { conn_set_err(conn, "socket write failed"); return -1; }
-        sent += (size_t)n;
+    int rc = hl_db_transport_send_sliced(conn->transport, buf, len,
+                                         conn->read_timeout_ms,
+                                         my_wait_stop, NULL);
+    if (rc == 0) return 0;
+    if (rc == -2) {
+        hl_my_conn_close(conn);
+        conn->broken = 1;
+        conn_set_err(conn, "interrupted (instruction limit exceeded); the "
+                           "connection was closed with the request part-sent");
+        return -1;
     }
-    return 0;
+    conn->broken = 1;
+    conn_set_err(conn, "socket write failed or timed out (see ?read_timeout=)");
+    return -1;
 }
-
-static void my_abandon(HlMyConn *conn);
 
 /* Asked between the slices of a wait for the server (audit 18): a 0-unit
  * charge, which trips once the run's budget is spent or its wall-clock
