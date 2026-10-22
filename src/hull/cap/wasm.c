@@ -37,6 +37,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* WAMR is compiled uninstrumented under MSan (see patches/wamr/0006), so what
+ * it writes - an export descriptor, the export's name in its own module
+ * memory - carries no shadow, and reading it from this instrumented TU is a
+ * false positive. The export walk below un-poisons exactly those bytes. */
+#if defined(__has_feature)
+#  if __has_feature(memory_sanitizer)
+#    include <sanitizer/msan_interface.h>
+#    define HL_WASM_UNPOISON_WAMR 1
+#  endif
+#endif
+
 _Static_assert(sizeof(uint32_t) == 4, "WASM32 ABI requires 4-byte uint32_t");
 _Static_assert(HL_WASM_CALLBACK_BUF_SIZE <= 65536,
                "callback buffer must fit on stack (max 64 KB)");
@@ -863,6 +874,10 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         for (int32_t i = 0; i < nexp; i++) {
             wasm_export_t ex;
             wasm_runtime_get_export_type(module, i, &ex);
+#ifdef HL_WASM_UNPOISON_WAMR
+            __msan_unpoison(&ex, sizeof ex);
+            if (ex.name) __msan_unpoison_string(ex.name);
+#endif
             if (ex.kind != WASM_IMPORT_EXPORT_KIND_FUNC || !ex.name)
                 continue;
             for (size_t k = 0;
