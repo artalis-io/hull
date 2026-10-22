@@ -12226,4 +12226,47 @@ UTEST(lua_audit22, one_run_does_not_exhaust_the_scratch_arena)
     cleanup_lua_caps();
 }
 
+/* Audit 23 L4: a db.async call refused for its off-heap copies raised with
+ * its params still on the scratch arena, so a pcall loop over it filled the
+ * arena for the rest of the run and every later scratch user failed. */
+UTEST(lua_audit23, refused_db_async_gives_its_params_scratch_back)
+{
+    LuaWorkerFix f;
+    memset(&f, 0, sizeof f);
+    f.be = hl_async_backend();
+    ASSERT_EQ(f.be->init(&f.actx, NULL), 0);
+    ASSERT_EQ(f.be->pool_create(&f.pool, f.actx, 1, 16), 0);
+    pending_async_ctx   = f.actx;
+    pending_thread_pool = f.pool;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = 16u << 20;
+    char out[512];
+    /* 32766 params a call (about 1 MB of scratch each), naming one 600-byte
+     * string: ~19 MB of copies, refused. 30 calls are several times the
+     * arena, and their copy charges stay under the instruction budget. */
+    lua_worker_run(&f,
+        "local s = string.rep('x', 600)\n"
+        "local t = {} for i = 1, 32766 do t[i] = s end\n"
+        "for i = 1, 30 do\n"
+        "  local ok, e = pcall(db.async.exec, 'SELECT ?', t)\n"
+        "  if ok or not tostring(e):find('heap limit', 1, true) then\n"
+        "    return 'call ' .. i .. ': ' .. tostring(e)\n"
+        "  end\n"
+        "end\n"
+        "assert(#crypto.random(65536) == 65536)\n"
+        "local sql = 'SELECT ' .. string.rep('?, ', 99) .. '? AS last'\n"
+        "local p = {} for i = 1, 100 do p[i] = i end\n"
+        "return tostring(db.query(sql, p)[1].last)\n", out, sizeof out);
+    lua_rt.mem_limit = saved;
+    EXPECT_STREQ(out, "100");
+    EXPECT_EQ(lua_rt.wasm_buf_bytes, (size_t)0);
+    pending_async_ctx = NULL;
+    cleanup_lua_caps();
+    f.be->tick(f.actx, 0);
+    f.be->pool_free(f.pool);
+    f.be->free(f.actx);
+}
+
 UTEST_MAIN();

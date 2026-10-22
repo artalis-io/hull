@@ -202,14 +202,35 @@ static int lua_tui_flush(lua_State *L)
 
 /* ── Input ─────────────────────────────────────────────────────── */
 
-/* Push the current cap-layer event onto Lua as a table. */
+/* Push the current cap-layer event onto Lua as a table.
+ *
+ * ev->key and ev->text are BORROWED from the TUI ctx (the parser's
+ * published buffers), valid only until the next cap call. Any Lua
+ * allocation can run a collection step and with it an app __gc
+ * finalizer, which may call tui.leave() (frees the ctx) or tui.poll()
+ * (overwrites the buffers). So the borrowed string is copied onto the
+ * Lua stack FIRST - lua_pushstring / lua_pushlstring make the string
+ * and put it on the stack before their own luaC_checkGC, and the
+ * allocation inside them can only run an emergency collection, which
+ * calls no finalizer - and the table is built from that copy. audit 23. */
 static void push_event(lua_State *L, const HlTuiEvent *ev)
 {
+    int has_str = 0;
+    (void)lua_checkstack(L, 3);
+    if (ev->kind == HL_TUI_EV_KEY) {
+        lua_pushstring(L, ev->key ? ev->key : "");
+        has_str = 1;
+    } else if (ev->kind == HL_TUI_EV_PASTE) {
+        lua_pushlstring(L, ev->text ? ev->text : "",
+                        ev->text ? ev->text_len : 0);
+        has_str = 1;
+    }
+    /* Nothing below reads ev->key / ev->text. */
     lua_newtable(L);
     switch (ev->kind) {
     case HL_TUI_EV_KEY:
         lua_pushstring(L, "key");       lua_setfield(L, -2, "kind");
-        lua_pushstring(L, ev->key ? ev->key : "");
+        lua_pushvalue(L, -2);           /* the copied key */
         lua_setfield(L, -2, "key");
         if (ev->codepoint) {
             lua_pushinteger(L, (lua_Integer)ev->codepoint);
@@ -235,7 +256,7 @@ static void push_event(lua_State *L, const HlTuiEvent *ev)
         break;
     case HL_TUI_EV_PASTE:
         lua_pushstring(L, "paste");     lua_setfield(L, -2, "kind");
-        lua_pushlstring(L, ev->text ? ev->text : "", ev->text_len);
+        lua_pushvalue(L, -2);           /* the copied text */
         lua_setfield(L, -2, "text");
         break;
     case HL_TUI_EV_FOCUS:
@@ -251,6 +272,7 @@ static void push_event(lua_State *L, const HlTuiEvent *ev)
         lua_pushstring(L, "none");      lua_setfield(L, -2, "kind");
         break;
     }
+    if (has_str) lua_remove(L, -2);     /* leave only the table */
 }
 
 /* ── Async-integrated poll ─────────────────────────────────────
