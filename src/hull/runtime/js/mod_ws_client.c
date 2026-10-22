@@ -117,6 +117,7 @@ static JSValue js_ws_client_send(JSContext *ctx, JSValueConst this_val,
     if (!data) return JS_EXCEPTION;
     /* The toString above is app code, which may have closed the client
      * (audit 23). */
+    // cppcheck-suppress knownConditionTrueFalse
     if (!ud->client || ud->closed) {
         JS_FreeCString(ctx, data);
         return JS_ThrowTypeError(ctx, "client connection closed");
@@ -180,6 +181,7 @@ static JSValue js_ws_client_close(JSContext *ctx, JSValueConst this_val,
         reason = JS_ToCStringLen(ctx, &reason_len, argv[1]);
         if (!reason) return JS_EXCEPTION;
     }
+    // cppcheck-suppress knownConditionTrueFalse
     if (!ud->client || ud->closed) {
         if (reason) JS_FreeCString(ctx, reason);
         return JS_UNDEFINED;
@@ -205,6 +207,7 @@ static JSValue js_ws_client_ping(JSContext *ctx, JSValueConst this_val,
         if (!data) return JS_EXCEPTION;   /* audit 23 */
     }
     /* The toString is app code: it may have closed the client. */
+    // cppcheck-suppress knownConditionTrueFalse
     if (!ud->client || ud->closed) {
         if (data) JS_FreeCString(ctx, data);
         return JS_UNDEFINED;

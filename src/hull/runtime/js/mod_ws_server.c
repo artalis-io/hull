@@ -185,6 +185,7 @@ static JSValue js_ws_conn_send(JSContext *ctx, JSValueConst this_val,
     if (!data) return JS_EXCEPTION;
     /* The toString above is app code, which may have closed the
      * connection (audit 23). */
+    // cppcheck-suppress knownConditionTrueFalse
     if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {
         JS_FreeCString(ctx, data);
         return JS_ThrowTypeError(ctx, "connection closed");
@@ -253,6 +254,7 @@ static JSValue js_ws_conn_close(JSContext *ctx, JSValueConst this_val,
         reason = JS_ToCStringLen(ctx, &reason_len, argv[1]);
         if (!reason) return JS_EXCEPTION;
     }
+    // cppcheck-suppress knownConditionTrueFalse
     if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {
         if (reason) JS_FreeCString(ctx, reason);
         return JS_UNDEFINED;
@@ -280,6 +282,7 @@ static JSValue js_ws_conn_ping(JSContext *ctx, JSValueConst this_val,
         if (!data) return JS_EXCEPTION;   /* audit 23 */
     }
     /* The toString is app code: it may have closed the connection. */
+    // cppcheck-suppress knownConditionTrueFalse
     if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {
         if (data) JS_FreeCString(ctx, data);
         return JS_UNDEFINED;
