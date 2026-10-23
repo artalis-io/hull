@@ -311,6 +311,13 @@ static int l_gpu_load(lua_State *L)
         return 2;
     }
 
+    /* Charged before the compile, which runs on the event loop in this one
+     * call (audit 24). Non-raising: file_buf is freed before the trip. */
+    if (hl_lua_budget_charge(L, (int64_t)hl_work_bytes_units(
+            (uint64_t)wgsl_len))) {
+        free(file_buf);
+        return hl_lua_budget_raise(L);
+    }
     int rc = hl_cap_gpu_compile(ctx, -1, name, wgsl, wgsl_len);
     free(file_buf);
 
@@ -337,6 +344,10 @@ static int l_gpu_compile(lua_State *L)
             device = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+
+    /* The compile runs on the event loop in this one call: charged before
+     * it, 1 unit per 8 WGSL bytes (audit 24). */
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)wgsl_len), 0);
 
     int rc = hl_cap_gpu_compile(ctx, device, name, wgsl, wgsl_len);
     if (rc != HL_GPU_OK) {

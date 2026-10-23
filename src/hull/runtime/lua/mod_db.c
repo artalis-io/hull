@@ -25,6 +25,7 @@
 #include <sh_arena.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ════════════════════════════════════════════════════════════════════
@@ -137,6 +138,17 @@ static int lua_to_hl_values(lua_State *L, int idx,
     return 0;
 }
 
+/* Give the scratch arena back down to @p mark (the call's first scratch
+ * allocation), without touching the stack: the raise paths use it, whose
+ * stack the error discards anyway. */
+static void lua_scratch_release(lua_State *L, const void *mark)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (mark && lua && lua->scratch && (const char *)mark >= lua->scratch->buffer &&
+        (size_t)((const char *)mark - lua->scratch->buffer) <= lua->scratch->used)
+        lua->scratch->used = (size_t)((const char *)mark - lua->scratch->buffer);
+}
+
 static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
 {
     if (!params)
@@ -150,10 +162,7 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
      * them is used past this point. */
     if (count > 0)
         lua_pop(L, count);
-    HlLua *lua = get_hl_lua(L);
-    if (lua && lua->scratch && (const char *)params >= lua->scratch->buffer &&
-        (size_t)((const char *)params - lua->scratch->buffer) <= lua->scratch->used)
-        lua->scratch->used = (size_t)((const char *)params - lua->scratch->buffer);
+    lua_scratch_release(L, params);
 }
 
 /* Check if the immediate Lua caller is a stdlib module (chunk name starts
@@ -189,24 +198,37 @@ static int lua_is_stdlib_caller(lua_State *L, const char *method)
     return strcmp(self.name, method) == 0;
 }
 
+#define HL_LUA_DB_RESERVED_MSG "access denied: _hull_* tables are reserved"
+
 /* Refuse an app caller's identifier that names a reserved `_hull_*` table.
  * insert_if_absent / upsert / table_columns build their SQL from these names,
  * so the query/exec text check never sees them; every name is checked, since
- * a column name lands in the same statement. */
-static void check_app_identifiers(lua_State *L, const char *method,
-                                  const char *table,
-                                  const char **a, int na,
-                                  const char **b, int nb)
+ * a column name lands in the same statement. 0 when the caller may name
+ * these identifiers, -1 when one is reserved. Does not raise:
+ * insert_if_absent / upsert give their scratch arrays back first (audit 24);
+ * check_app_identifiers is the raising form. */
+static int app_identifiers_ok(lua_State *L, const char *method,
+                              const char *table,
+                              const char **a, int na,
+                              const char **b, int nb)
 {
     if (lua_is_stdlib_caller(L, method))
-        return;
+        return 0;
     int bad = hl_cap_db_check_namespace(table) != 0;
     for (int i = 0; !bad && i < na; i++)
         bad = hl_cap_db_check_namespace(a[i]) != 0;
     for (int i = 0; !bad && i < nb; i++)
         bad = hl_cap_db_check_namespace(b[i]) != 0;
-    if (bad)
-        luaL_error(L, "access denied: _hull_* tables are reserved");
+    return bad ? -1 : 0;
+}
+
+static void check_app_identifiers(lua_State *L, const char *method,
+                                  const char *table,
+                                  const char **a, int na,
+                                  const char **b, int nb)
+{
+    if (app_identifiers_ok(L, method, table, a, na, b, nb) != 0)
+        luaL_error(L, HL_LUA_DB_RESERVED_MSG);
 }
 
 /* The default connection, resolved from the registry (there is no separate
@@ -364,8 +386,10 @@ static int lua_db_query_impl(lua_State *L)
      * params' conversion, the result table and the guard can all run app
      * code (an __index, a __gc) that closes a db.open connection. */
     HlDbHandle *h = db_resolve_handle(L);
-    if (!h)
+    if (!h) {
+        lua_scratch_release(L, params);   /* audit 24: raised with it held */
         return luaL_error(L, "query: the connection was closed");
+    }
     int rc = hl_db_query(h, sql, params, nparams,
                          lua_query_row_cb, &qc, lua->base.alloc);
     lua_settop(L, guard - 1);   /* closes the guard; the result table is on top */
@@ -420,8 +444,10 @@ static int lua_db_exec_impl(lua_State *L)
      * as far as re-entry is concerned. */
     int guard = push_row_loop_guard(L);
     HlDbHandle *h = db_resolve_handle(L);       /* see lua_db_query_impl */
-    if (!h)
+    if (!h) {
+        lua_scratch_release(L, params);   /* audit 24, as lua_db_query_impl */
         return luaL_error(L, "exec: the connection was closed");
+    }
     int rc = hl_db_exec(h, sql, params, nparams);
     lua_settop(L, guard - 1);
 
@@ -503,31 +529,36 @@ static int lua_db_batch(lua_State *L)
  * HlValue / C-string arrays the backend method expects. */
 
 /* Marshal a Lua array of strings into a C string array allocated on
- * the scratch arena. Returns NULL on bad input (puts an error on the
- * Lua stack via lua_pushstring + raises). */
+ * the scratch arena. Returns NULL on bad input with the reason in @p err.
+ * It does not raise (audit 24): its callers give the call's scratch back
+ * before they do - raised with it held, a pcall loop over a refused call
+ * filled the arena for the rest of the run. Nothing here allocates on the
+ * Lua heap or runs app code. */
 static const char **lua_strings_from_array(lua_State *L, int idx, int *out_n,
-                                            HlLua *lua)
+                                            HlLua *lua, char *err, size_t errsz)
 {
     if (lua_type(L, idx) != LUA_TTABLE) {
-        luaL_error(L, "expected array of strings at arg %d", idx);
+        snprintf(err, errsz, "expected array of strings at arg %d", idx);
         return NULL;
     }
     /* Raw length, no __len: a metamethod is app code, and app code
      * running here could drop the strings already taken. */
-    int n = (int)lua_rawlen(L, idx);
-    if (n < 0) {
-        luaL_error(L, "negative array length at arg %d", idx);
+    lua_Unsigned rl = lua_rawlen(L, idx);
+    if (rl > (lua_Unsigned)INT_MAX) {
+        snprintf(err, errsz, "array too long at arg %d", idx);
         return NULL;
     }
+    int n = (int)rl;
     const char **arr = sh_arena_alloc(lua->scratch, (size_t)n * sizeof(*arr));
     if (!arr) {
-        luaL_error(L, "out of memory");
+        snprintf(err, errsz, "out of memory");
         return NULL;
     }
     for (int i = 0; i < n; i++) {
         lua_rawgeti(L, idx, i + 1);
         if (lua_type(L, -1) != LUA_TSTRING) {
-            luaL_error(L, "non-string element at index %d", i + 1);
+            lua_pop(L, 1);
+            snprintf(err, errsz, "non-string element at index %d", i + 1);
             return NULL;
         }
         arr[i] = lua_tostring(L, -1);
@@ -541,16 +572,21 @@ static const char **lua_strings_from_array(lua_State *L, int idx, int *out_n,
  * Mirrors the conversion already done in lua_db_query / lua_db_exec
  * but extracted so insert_if_absent / upsert can use it. */
 static HlValue *lua_values_from_array(lua_State *L, int idx, int *out_n,
-                                       HlLua *lua)
+                                       HlLua *lua, char *err, size_t errsz)
 {
     if (lua_type(L, idx) != LUA_TTABLE) {
-        luaL_error(L, "expected values array at arg %d", idx);
+        snprintf(err, errsz, "expected values array at arg %d", idx);
         return NULL;
     }
-    int n = (int)lua_rawlen(L, idx);
+    lua_Unsigned rl = lua_rawlen(L, idx);
+    if (rl > (lua_Unsigned)INT_MAX) {
+        snprintf(err, errsz, "values array too long at arg %d", idx);
+        return NULL;
+    }
+    int n = (int)rl;
     HlValue *vals = sh_arena_alloc(lua->scratch, (size_t)n * sizeof(*vals));
     if (!vals) {
-        luaL_error(L, "out of memory");
+        snprintf(err, errsz, "out of memory");
         return NULL;
     }
     for (int i = 0; i < n; i++) {
@@ -581,7 +617,8 @@ static HlValue *lua_values_from_array(lua_State *L, int idx, int *out_n,
                 break;
             }
             default:
-                luaL_error(L, "unsupported value type at index %d", i + 1);
+                lua_pop(L, 1);
+                snprintf(err, errsz, "unsupported value type at index %d", i + 1);
                 return NULL;
         }
         lua_pop(L, 1);
@@ -607,21 +644,44 @@ static int lua_db_insert_if_absent(lua_State *L)
     /* The scratch arrays below are this call's: given back at its end. */
     size_t scratch_mark_at = lua->scratch ? lua->scratch->used : 0;
 
+    /* Every refusal below gives the scratch back before it raises (audit
+     * 24: raised with it held, as lua_db_async_common's were in audit 23). */
     const char *table = luaL_checkstring(L, 1);
+    char err[96];
+    err[0] = '\0';
     int n_conflict = 0;
     const char **conflict_cols = NULL;
+    const char **cols = NULL;
+    HlValue *vals = NULL;
+    int n_cols = 0, n_vals = 0;
+    int ok = 1;
     if (!lua_isnil(L, 2)) {
-        conflict_cols = lua_strings_from_array(L, 2, &n_conflict, lua);
+        conflict_cols = lua_strings_from_array(L, 2, &n_conflict, lua,
+                                               err, sizeof err);
+        ok = conflict_cols != NULL;
     }
-    int n_cols = 0;
-    const char **cols = lua_strings_from_array(L, 3, &n_cols, lua);
-    int n_vals = 0;
-    HlValue *vals = lua_values_from_array(L, 4, &n_vals, lua);
-    if (n_cols != n_vals)
-        return luaL_error(L, "columns/values length mismatch (%d vs %d)",
-                          n_cols, n_vals);
-    check_app_identifiers(L, "insert_if_absent", table,
-                          conflict_cols, n_conflict, cols, n_cols);
+    if (ok) {
+        cols = lua_strings_from_array(L, 3, &n_cols, lua, err, sizeof err);
+        ok = cols != NULL;
+    }
+    if (ok) {
+        vals = lua_values_from_array(L, 4, &n_vals, lua, err, sizeof err);
+        ok = vals != NULL;
+    }
+    if (ok && n_cols != n_vals) {
+        snprintf(err, sizeof err, "columns/values length mismatch (%d vs %d)",
+                 n_cols, n_vals);
+        ok = 0;
+    }
+    if (ok && app_identifiers_ok(L, "insert_if_absent", table,
+                                 conflict_cols, n_conflict, cols, n_cols) != 0) {
+        snprintf(err, sizeof err, "%s", HL_LUA_DB_RESERVED_MSG);
+        ok = 0;
+    }
+    if (!ok) {
+        if (lua->scratch) lua->scratch->used = scratch_mark_at;
+        return luaL_error(L, "%s", err);
+    }
 
     HlDbHandle *h = db_call_handle(L);
 
@@ -647,20 +707,43 @@ static int lua_db_upsert(lua_State *L)
     /* The scratch arrays below are this call's: given back at its end. */
     size_t scratch_mark_at = lua->scratch ? lua->scratch->used : 0;
 
+    /* Every refusal gives the scratch back first (audit 24; see
+     * lua_db_insert_if_absent). */
     const char *table = luaL_checkstring(L, 1);
-    int n_conflict = 0;
-    const char **conflict_cols = lua_strings_from_array(L, 2, &n_conflict, lua);
-    if (n_conflict < 1)
-        return luaL_error(L, "db.upsert: conflict_cols must be non-empty");
-    int n_cols = 0;
-    const char **cols = lua_strings_from_array(L, 3, &n_cols, lua);
-    int n_vals = 0;
-    HlValue *vals = lua_values_from_array(L, 4, &n_vals, lua);
-    if (n_cols != n_vals)
-        return luaL_error(L, "columns/values length mismatch (%d vs %d)",
-                          n_cols, n_vals);
-    check_app_identifiers(L, "upsert", table,
-                          conflict_cols, n_conflict, cols, n_cols);
+    char err[96];
+    err[0] = '\0';
+    int n_conflict = 0, n_cols = 0, n_vals = 0;
+    const char **cols = NULL;
+    HlValue *vals = NULL;
+    const char **conflict_cols = lua_strings_from_array(L, 2, &n_conflict, lua,
+                                                        err, sizeof err);
+    int ok = conflict_cols != NULL;
+    if (ok && n_conflict < 1) {
+        snprintf(err, sizeof err, "db.upsert: conflict_cols must be non-empty");
+        ok = 0;
+    }
+    if (ok) {
+        cols = lua_strings_from_array(L, 3, &n_cols, lua, err, sizeof err);
+        ok = cols != NULL;
+    }
+    if (ok) {
+        vals = lua_values_from_array(L, 4, &n_vals, lua, err, sizeof err);
+        ok = vals != NULL;
+    }
+    if (ok && n_cols != n_vals) {
+        snprintf(err, sizeof err, "columns/values length mismatch (%d vs %d)",
+                 n_cols, n_vals);
+        ok = 0;
+    }
+    if (ok && app_identifiers_ok(L, "upsert", table,
+                                 conflict_cols, n_conflict, cols, n_cols) != 0) {
+        snprintf(err, sizeof err, "%s", HL_LUA_DB_RESERVED_MSG);
+        ok = 0;
+    }
+    if (!ok) {
+        if (lua->scratch) lua->scratch->used = scratch_mark_at;
+        return luaL_error(L, "%s", err);
+    }
 
     HlDbHandle *h = db_call_handle(L);
 
@@ -1223,20 +1306,33 @@ static int lua_owned_conn_close(lua_State *L)
     return 0;
 }
 
-/* Push a caller-owned connection object wrapping @p h (from hl_db_dynamic_open),
- * opened from @p dsn. Unlike push_conn_object, this object owns its handle: it
- * adds a close() method and a __gc finalizer that both release it via
+/* Push an empty owner box (h = NULL, dsn = NULL) with its __gc installed. It
+ * is made BEFORE the handle is opened (audit 24): a LUA_ERRMEM from
+ * lua_newuserdatauv after hl_db_dynamic_open leaked the handle - one of the
+ * HL_DB_DYNAMIC_MAX slots - for the life of the process. The __gc releases a
+ * NULL handle as a no-op. */
+static HlLuaOwnedConn *push_owned_box(lua_State *L)
+{
+    HlLuaOwnedConn *o = lua_newuserdatauv(L, sizeof *o, 0);
+    o->h = NULL;
+    o->dsn = NULL;
+    luaL_setmetatable(L, HL_LUA_DB_OWNED_MT);   /* installs __gc */
+    return o;
+}
+
+/* Turn the owner box @p o at the top of the stack (holding a handle from
+ * hl_db_dynamic_open, opened from @p dsn) into a caller-owned connection
+ * object. Unlike push_conn_object, this object owns its handle: it adds a
+ * close() method and a __gc finalizer that both release it via
  * hl_db_dynamic_close. It carries sync methods + async (bound to the owner box,
  * so conn.async targets @p dsn through the worker pool). udf is intentionally
  * absent: worker-side udf re-registration is keyed off the registry a dynamic
  * handle is not in (tracked follow-up, §2.2). */
-static int push_owned_conn_object(lua_State *L, HlDbHandle *h, const char *dsn)
+static int push_owned_conn_object(lua_State *L, HlLuaOwnedConn *o,
+                                  const char *dsn)
 {
-    HlLuaOwnedConn *o = lua_newuserdatauv(L, sizeof *o, 0);
-    o->h = h;
-    o->dsn = NULL;
-    luaL_setmetatable(L, HL_LUA_DB_OWNED_MT);   /* installs __gc */
     int owner = lua_gettop(L);
+    HlDbHandle *h = o->h;
     if (dsn) {
         o->dsn = strdup(dsn);
         /* On OOM the box (on the stack) is GC'd, whose __gc closes h + frees the
@@ -1302,11 +1398,14 @@ static int lua_db_open(lua_State *L)
      * conn.async opens its worker connection from this, so both name the same
      * database. */
     char opened[HL_DB_DYNAMIC_DSN_MAX];
+    HlLuaOwnedConn *o = push_owned_box(L);
+    /* Nothing allocates on the Lua heap between the open and o->h. */
     HlDbHandle *h = hl_db_dynamic_open_ex(dsn, policy, lua->base.fs_cfg,
                                           opened, sizeof opened, &err);
     if (!h)
         return luaL_error(L, "%s", err ? err : "db.open: denied");
-    return push_owned_conn_object(L, h, opened);
+    o->h = h;
+    return push_owned_conn_object(L, o, opened);
 }
 
 /* db.default() → connection object for the "default" connection. Returns an
