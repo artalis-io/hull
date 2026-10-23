@@ -56,6 +56,42 @@ function defaultBackoff(attempt) {
     return d > 3600 ? 3600 : d;
 }
 
+// run_at (and every wake / deadline / backoff added to `now` to make one)
+// is an INTEGER column: a fractional second went to Postgres as a double
+// ("2.5"), which it refuses for an INTEGER, so ctx.sleep(0.5) dead-lettered
+// the workflow and a fractional backoff threw out of work() (audit 23).
+// Whole seconds, rounded up; NaN and non-numbers as 0; bounded so an
+// infinite value cannot bind "Infinity".
+const WHOLE_SECS_MAX = 2 ** 52;
+function wholeSecs(v) {
+    let n = typeof v === "number" ? v : Number(v);
+    if (n !== n) return 0;
+    if (n > WHOLE_SECS_MAX) n = WHOLE_SECS_MAX;
+    if (n < -WHOLE_SECS_MAX) n = -WHOLE_SECS_MAX;
+    return Math.ceil(n);
+}
+
+// The configured backoff's delay for a retry. It is app code that runs in
+// the failure path: one that threw, or returned NaN / a non-number, made
+// work() itself throw with the job still claimed (audit 23). Such a result
+// falls back to the default backoff.
+function backoffDelay(attempts) {
+    let d;
+    try { d = _cfg.backoff(attempts); } catch (_e) { d = undefined; }
+    if (typeof d !== "number" || !Number.isFinite(d)) d = defaultBackoff(attempts);
+    return wholeSecs(d);
+}
+
+// An error value as text, for last_error. Its message getter and toString
+// are app code that may throw (audit 23: the throw escaped work()).
+function errText(e) {
+    try {
+        return String((e && e.message) || e);
+    } catch (_e) {
+        return "(an error value that could not be converted to text)";
+    }
+}
+
 // Registered handlers: type -> fn. `_default` is the optional catch-all.
 // Prototype-free so a job whose `type` matches an Object.prototype name
 // ("toString", "constructor", ...) resolves to undefined (no handler -> default
@@ -146,7 +182,11 @@ function init(opts) {
             throw new Error("jobs.init: eventsGrace must be a non-negative number of seconds");
         _cfg.eventsGrace = o.eventsGrace;
     }
-    if (o.backoff !== undefined) _cfg.backoff = o.backoff;
+    if (o.backoff !== undefined) {
+        if (typeof o.backoff !== "function")
+            throw new TypeError("jobs.init: backoff must be a function (attempt -> seconds)");
+        _cfg.backoff = o.backoff;
+    }
 
     // Keyed/indexed text columns are VARCHAR(255) so MySQL can index them;
     // data-only columns (payload, last_error) stay TEXT.
@@ -1194,7 +1234,7 @@ function markRetry(job, err) {
     const n = db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, " +
         "updated_at=? WHERE id=?" + CLAIMED,
-        [now + _cfg.backoff(attempts), err, now, job.id, job.claimToken]);
+        [now + backoffDelay(attempts), err, now, job.id, job.claimToken]);
     if ((n || 0) === 0) return "lost";
     return "retried";
 }
@@ -1706,7 +1746,7 @@ async function work(opts) {
                     db.batch(() => {
                         parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, " +
                             "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
-                            [result.deadline || 0, now, job.id, job.claimToken]);
+                            [wholeSecs(result.deadline), now, job.id, job.claimToken]);
                         if (parked) releaseSlot(job);
                     });
                     if (!parked) job._lost = true;
@@ -1737,7 +1777,8 @@ async function work(opts) {
                     db.batch(() => {
                         parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
                             "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
-                            [result.wakeAt || now, now, job.id, job.claimToken]);
+                            [result.wakeAt ? wholeSecs(result.wakeAt) : now, now,
+                             job.id, job.claimToken]);
                         if (parked) releaseSlot(job);
                     });
                     if (!parked) job._lost = true;
@@ -1758,7 +1799,7 @@ async function work(opts) {
                 outcome = finish(job, { result: res }, () => markDone(job, res));
             }
         } catch (e) {
-            errStr = String((e && e.message) || e);
+            errStr = errText(e);
             outcome = finish(job, { error: errStr, attempt: job.attempts },
                 () => markRetry(job, errStr));
         }
@@ -2202,7 +2243,7 @@ function runSleep(workflowId, n, seconds) {
     if (rows.length) {
         wakeAt = Number(rows[0].result);
     } else {
-        wakeAt = time.now() + (Number(seconds) || 0);
+        wakeAt = time.now() + wholeSecs(seconds);
         db.exec(
             "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
             "VALUES (?, ?, ?, 'sleeping', ?)",
@@ -2270,7 +2311,10 @@ function runWaitSignal(workflowId, n, name, opts, replayOnly) {
     });
     if (got) return decodePayload(enc);
     let deadline = 0;
-    if (opts && opts.timeout) {
+    // A number of seconds, as Lua reads it: a string "2" concatenated onto
+    // time.now() (audit 23), and a fraction Postgres refused.
+    const timeout = opts ? wholeSecs(opts.timeout) : 0;
+    if (timeout !== 0) {
         // Per wait, like the memo key: a later timed wait on the same name
         // must not read this one's (expired) deadline.
         const dkey = "__waitdl:" + n + ":" + name;
@@ -2280,7 +2324,7 @@ function runWaitSignal(workflowId, n, name, opts, replayOnly) {
         if (drows.length) {
             deadline = Number(drows[0].result) || 0;
         } else {
-            deadline = time.now() + opts.timeout;
+            deadline = time.now() + timeout;
             db.exec(
                 "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
                 "VALUES (?, ?, ?, 'waiting', ?)",

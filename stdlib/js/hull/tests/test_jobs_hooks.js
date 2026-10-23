@@ -216,10 +216,89 @@ cases.audit20 = () => {
     });
 };
 
+// Audit 23: run_at is INTEGER, and a fractional second went to Postgres as
+// a double it refuses (SQLite stores it as REAL, which shows here as a
+// fractional runAt); the failure path ran app code - the backoff, an
+// error's message getter - unprotected, so a throw there escaped work(); and
+// waitSignal concatenated a string timeout onto time.now().
+async function atest(name, fn) {
+    try {
+        await fn();
+        pass++;
+    } catch (e) {
+        fail++;
+        console.log("FAIL: " + name + ": " + (e && e.message));
+    }
+}
+
+cases.audit23 = async () => {
+    jobs.init();
+    await atest("a fractional ctx.sleep parks on a whole second", async () => {
+        jobs.workflow("halfsleep", async (w) => { await w.sleep(0.5); return { ok: true }; });
+        const id = jobs.start("halfsleep", {});
+        await jobs.work({ batch: 1 });
+        const j = jobs.get(id);
+        assertEq(j.status, "pending", "parked");
+        assertEq(Number.isInteger(j.runAt), true, "runAt " + j.runAt);
+    });
+    await atest("a string or fractional waitSignal timeout is a number of seconds", async () => {
+        jobs.workflow("strwait", async (w) => {
+            await w.waitSignal("go", { timeout: "2" }); return { ok: true }; });
+        const before = time.now();
+        const id = jobs.start("strwait", {});
+        await jobs.work({ batch: 1 });
+        const j = jobs.get(id);
+        assertEq(j.status, "waiting", "parked");
+        assertEq(typeof j.runAt, "number", "runAt " + j.runAt);
+        assertEq(j.runAt >= before + 2 && j.runAt <= time.now() + 2, true, "runAt " + j.runAt);
+        jobs.workflow("halfwait", async (w) => {
+            await w.waitSignal("go", { timeout: 1.5 }); return { ok: true }; });
+        const id2 = jobs.start("halfwait", {});
+        await jobs.work({ batch: 1 });
+        assertEq(Number.isInteger(jobs.get(id2).runAt), true, "runAt " + jobs.get(id2).runAt);
+    });
+    await atest("a fractional backoff retries on a whole second", async () => {
+        jobs.init({ backoff: () => 2.5 });
+        jobs.handler("fails1", () => { throw new Error("boom"); });
+        const id = jobs.enqueue("fails1", {});
+        await jobs.work({ batch: 1 });
+        const j = jobs.get(id);
+        assertEq(j.status, "pending", "retried");
+        assertEq(Number.isInteger(j.runAt), true, "runAt " + j.runAt);
+    });
+    await atest("a throwing or NaN backoff falls back to the default", async () => {
+        const bads = [() => { throw new Error("bad backoff"); }, () => NaN, () => "soon"];
+        for (let i = 0; i < bads.length; i++) {
+            jobs.init({ backoff: bads[i] });
+            jobs.handler("failsB" + i, () => { throw new Error("boom"); });
+            const id = jobs.enqueue("failsB" + i, {});
+            await jobs.work({ batch: 1 });
+            const j = jobs.get(id);
+            assertEq(j.status, "pending", "retried " + i);
+            assertEq(Number.isInteger(j.runAt), true, "runAt " + i);
+        }
+        jobs.init({ backoff: () => 1 });
+    });
+    await atest("init refuses a backoff that is not a function", async () => {
+        let threw = false;
+        try { jobs.init({ backoff: 5 }); } catch (e) { threw = e instanceof TypeError; }
+        assertEq(threw, true, "refused");
+    });
+    await atest("an error whose message getter throws is still recorded", async () => {
+        const bad = { get message() { throw new Error("again"); } };
+        jobs.handler("badmsg", () => { throw bad; });
+        const id = jobs.enqueue("badmsg", {});
+        await jobs.work({ batch: 1 });
+        const j = jobs.get(id);
+        assertEq(j.status, "pending", "retried");
+        assertEq(typeof j.lastError, "string", "recorded");
+    });
+};
+
 test("the case is known", () => {
     assertEq(typeof cases[globalThis.__jobs_case], "function", String(globalThis.__jobs_case));
 });
-if (cases[globalThis.__jobs_case]) cases[globalThis.__jobs_case]();
+if (cases[globalThis.__jobs_case]) await cases[globalThis.__jobs_case]();
 
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;

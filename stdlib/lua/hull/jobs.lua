@@ -60,6 +60,42 @@ local function default_backoff(attempt)
 end
 _cfg.backoff = default_backoff
 
+-- run_at (and every wake / deadline / backoff added to `now` to make one)
+-- is an INTEGER column: a fractional second went to Postgres as a double
+-- ("2.5"), which it refuses for an INTEGER, so ctx.sleep(0.5) dead-lettered
+-- the workflow and a fractional backoff raised out of jobs.work (audit 23).
+-- Whole seconds, rounded up; NaN and non-numbers as 0; bounded so an
+-- infinite value cannot bind "inf".
+local WHOLE_SECS_MAX = 2 ^ 52
+local function whole_secs(v)
+    local n = tonumber(v)
+    if n == nil or n ~= n then return 0 end
+    if n > WHOLE_SECS_MAX then n = WHOLE_SECS_MAX end
+    if n < -WHOLE_SECS_MAX then n = -WHOLE_SECS_MAX end
+    return math.ceil(n)
+end
+
+-- The configured backoff's delay for a retry. It is app code that runs in
+-- the failure path: one that raised, or returned NaN / a non-number, made
+-- jobs.work itself raise with the job still claimed (audit 23). Such a
+-- result falls back to the default backoff.
+local function backoff_delay(attempts)
+    local ok, d = pcall(_cfg.backoff, attempts)
+    if not ok or type(d) ~= "number" or d ~= d or d == math.huge
+       or d == -math.huge then
+        d = default_backoff(attempts)
+    end
+    return whole_secs(d)
+end
+
+-- An error value as text, for last_error. tostring runs an app __tostring,
+-- which may raise (audit 23: the raise escaped jobs.work).
+local function err_text(e)
+    local ok, s = pcall(tostring, e)
+    if ok and type(s) == "string" then return s end
+    return "(an error value that could not be converted to text)"
+end
+
 -- The test hooks, registered with the stdlib-internal hull._test_hooks (the
 -- seams are filled in below, where they are defined): the live config (as
 -- jobs._config, app code could set any field past jobs.init's checks - a NaN
@@ -184,7 +220,12 @@ function jobs.init(opts)
     if opts.reap_interval ~= nil then
         _cfg.reap_interval = duration_opt("reap_interval", opts.reap_interval)
     end
-    if opts.backoff ~= nil then _cfg.backoff = opts.backoff end
+    if opts.backoff ~= nil then
+        if type(opts.backoff) ~= "function" then
+            error("jobs.init: backoff must be a function (attempt -> seconds)")
+        end
+        _cfg.backoff = opts.backoff
+    end
     if opts.history ~= nil then _cfg.history = opts.history end
     if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
     if opts.events ~= nil then _cfg.events = opts.events end
@@ -1285,7 +1326,7 @@ local function mark_retry(job, err)
     local n = db.exec(
         "UPDATE _hull_jobs SET status='pending', run_at=?, last_error=?, claim_token=NULL, "
         .. "updated_at=? WHERE id=?" .. CLAIMED,
-        { now + _cfg.backoff(attempts), err, now, job.id, job.claim_token })
+        { now + backoff_delay(attempts), err, now, job.id, job.claim_token })
     if (n or 0) == 0 then return "lost" end
     return "retried"
 end
@@ -1888,7 +1929,8 @@ function jobs.work(opts)
                             parked = db.exec("UPDATE _hull_jobs SET status='waiting', run_at=?, "
                                 .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
                                 .. CLAIMED,
-                                { result.deadline or 0, wf_now, job.id, job.claim_token })
+                                { whole_secs(result.deadline), wf_now, job.id,
+                                  job.claim_token })
                             if (parked or 0) > 0 then release_slot(job) end
                         end)
                         if (parked or 0) == 0 then job._lost = true end
@@ -1921,13 +1963,14 @@ function jobs.work(opts)
                             parked = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
                                 .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?"
                                 .. CLAIMED,
-                                { result.wake_at or wf_now, wf_now, job.id, job.claim_token })
+                                { result.wake_at and whole_secs(result.wake_at) or wf_now,
+                                  wf_now, job.id, job.claim_token })
                             if (parked or 0) > 0 then release_slot(job) end
                         end)
                         if (parked or 0) == 0 then job._lost = true end
                     end
                 elseif not ok then
-                    err_str = tostring(result)
+                    err_str = err_text(result)
                     outcome = finish(job, { error = err_str, attempt = job.attempts },
                         function() return mark_retry(job, err_str) end)
                 elseif result == jobs.DEAD
@@ -1954,7 +1997,7 @@ function jobs.work(opts)
                 end
             end)
             if not tok then
-                err_str = tostring(terr)
+                err_str = err_text(terr)
                 outcome = finish(job, { error = err_str, attempt = job.attempts },
                     function() return mark_retry(job, err_str) end)
             end
@@ -2385,15 +2428,6 @@ end
 -- records the wake time and raises the yield sentinel (the runner reschedules the
 -- job to run_at = wake_at); on a resume the recorded wake time is read, and once
 -- it has passed the call returns and the body continues past it.
--- A finite-or-infinite number, NaN and non-numbers as 0: JS's
--- `Number(x) || 0`. A NaN wake_at / deadline bound as NULL into a NOT NULL
--- column and raised in the park (audit 22).
-local function num_or_zero(v)
-    local n = tonumber(v)
-    if n == nil or n ~= n then return 0 end
-    return n
-end
-
 local function run_sleep(workflow_id, n, seconds)
     local key = "__sleep:" .. n
     local rows = db.query(
@@ -2403,7 +2437,10 @@ local function run_sleep(workflow_id, n, seconds)
     if rows and #rows > 0 then
         wake_at = tonumber(rows[1].result)
     else
-        wake_at = time.now() + num_or_zero(seconds)
+        -- whole_secs: NaN and non-numbers as 0 (a NaN wake_at bound NULL
+        -- into a NOT NULL column, audit 22), rounded up to a second (a
+        -- fractional one Postgres refused, audit 23).
+        wake_at = time.now() + whole_secs(seconds)
         db.exec(
             "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
             .. "VALUES (?, ?, ?, 'sleeping', ?)",
@@ -2471,7 +2508,7 @@ local function run_wait_signal(workflow_id, n, name, opts, replay_only)
     end)
     if got then return decode_payload(enc) end
     local deadline = 0
-    local timeout = opts and num_or_zero(opts.timeout) or 0
+    local timeout = opts and whole_secs(opts.timeout) or 0
     if timeout ~= 0 then
         -- Per wait, like the memo key: a later timed wait on the same name
         -- must not read this one's (expired) deadline.
