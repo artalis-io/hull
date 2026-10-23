@@ -23,6 +23,7 @@
 #include "hull/cap/mysqlwire.h"
 #include "hull/cap/db_sql_kw.h"
 
+#include "log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>   /* strncasecmp */
@@ -291,6 +292,14 @@ static char *mysql_bin_collate_hull_tables(const char *sql,
     char opt[96];
     snprintf(opt, sizeof opt, " DEFAULT CHARSET=utf8mb4 COLLATE=%s",
              collation ? collation : "utf8mb4_bin");
+    static int warned;
+    if ((!collation || strcmp(collation, "utf8mb4_bin") == 0) &&
+        ci_strstr(sql, "_hull_") &&
+        !__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED))
+        log_warn("[db] this MySQL / MariaDB server has no NO PAD binary "
+                 "collation (MySQL 8.0.17+, MariaDB 10.2.2+): Hull's _hull_* "
+                 "tables use utf8mb4_bin, where 'alice' = 'alice ' - keys "
+                 "that differ only in trailing spaces collide");
     size_t optlen = strlen(opt);
     size_t len = strlen(sql);
     char *out = NULL;

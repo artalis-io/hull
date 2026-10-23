@@ -296,6 +296,13 @@ static int fs_write_in_place(const HlFsConfig *cfg, const char *path,
     int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
     if (fd < 0)
         return -1;
+    /* Not setuid / setgid on new content, as the atomic replace already
+     * drops them (audit 22): the kernel clears them on a write only when
+     * the writer lacks CAP_FSETID, so a Hull run as root kept them - a
+     * setuid executable of the app's choosing (audit 23). */
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (st.st_mode & (S_ISUID | S_ISGID)))
+        (void)fchmod(fd, st.st_mode & 01777);
     int rc = (len > 0 && data) ? fs_write_all(fd, data, len) : 0;
     if (rc == 0 && !(flags & HL_FS_WRITE_NO_SYNC) && fsync(fd) != 0)
         rc = -1;

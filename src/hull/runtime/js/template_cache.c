@@ -174,12 +174,11 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
                 /* JS_EvalFunction takes ownership of `chunk`. On
                  * success it returns the script's result value -
                  * for our IIFE that's the render fn. */
-                JSValue rv = JS_EvalFunction(ctx, chunk);
-                if (!JS_IsException(rv)) return rv;
-                /* Runtime error from a cached chunk: drop the
-                 * exception. `rv` is the JS_EXCEPTION sentinel
-                 * (no refcount). */
-                JS_FreeValue(ctx, JS_GetException(ctx));
+                /* Its own error (a throw, the budget's interrupt) is the
+                 * result: the entry was read back fine, so recompiling
+                 * and running it again only ran the template's code
+                 * twice (audit 23). */
+                return JS_EvalFunction(ctx, chunk);
             } else {
                 /* Stale / corrupt entry. */
                 JS_FreeValue(ctx, JS_GetException(ctx));

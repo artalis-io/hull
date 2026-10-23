@@ -312,6 +312,29 @@ UTEST(hl_cap_fs, write_goes_through_an_in_root_symlink_under_a_subtree)
     teardown_fs();
 }
 
+/* Audit 23: the in-place write (through an in-root link under a subtree
+ * grant) kept setuid / setgid when Hull ran as root - the kernel clears
+ * them on a write only for a writer without CAP_FSETID. */
+UTEST(hl_cap_fs, an_in_place_write_drops_setuid_and_setgid)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    char p[512];
+    snprintf(p, sizeof(p), "%s/sub/real.bin", test_dir);
+    FILE *f = fopen(p, "wb");
+    ASSERT_TRUE(f != NULL);
+    fputs("old", f);
+    fclose(f);
+    ASSERT_EQ(chmod(p, 06755), 0);
+    snprintf(p, sizeof(p), "%s/sub/alias.bin", test_dir);
+    ASSERT_EQ(symlink("real.bin", p), 0);
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "sub/alias.bin", "new", 3, NULL), 0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("sub/real.bin", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0755);
+    teardown_fs();
+}
+
 UTEST(hl_cap_fs, write_ex_without_sync_is_still_a_whole_replace)
 {
     setup_fs();

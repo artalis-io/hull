@@ -356,21 +356,37 @@ static void copy_bounded(char *dst, size_t dstsz, const char *src)
     dst[i] = '\0';
 }
 
-const char *hl_my_bin_collation(const char *server_version)
+/* "maj.min.pat" at the start of @p v: 1 when at least @p a.@p b.@p c. */
+static int my_version_at_least(const char *v, unsigned long a,
+                               unsigned long b, unsigned long c)
 {
-    const char *v = server_version ? server_version : "";
-    for (const char *p = v; *p; p++)
-        if (strncasecmp(p, "mariadb", 7) == 0)
-            return "utf8mb4_nopad_bin";       /* MariaDB 10.2.2+ */
     unsigned long maj = 0, min = 0, pat = 0;
     char *e;
     maj = strtoul(v, &e, 10);
-    if (e != v && *e == '.') {
+    if (e == v) return 0;
+    if (*e == '.') {
         const char *m = e + 1;
         min = strtoul(m, &e, 10);
         if (e != m && *e == '.') pat = strtoul(e + 1, NULL, 10);
     }
-    if (maj > 8 || (maj == 8 && (min > 0 || pat >= 17)))
+    if (maj != a) return maj > a;
+    if (min != b) return min > b;
+    return pat >= c;
+}
+
+const char *hl_my_bin_collation(const char *server_version)
+{
+    const char *v = server_version ? server_version : "";
+    for (const char *p = v; *p; p++)
+        if (strncasecmp(p, "mariadb", 7) == 0) {
+            /* MariaDB 10.x reports "5.5.5-10.x.y-MariaDB" (the 5.5.5 for old
+             * clients); utf8mb4_nopad_bin is 10.2.2+, and naming it on an
+             * older server failed every CREATE TABLE _hull_* (audit 23). */
+            const char *mv = strncmp(v, "5.5.5-", 6) == 0 ? v + 6 : v;
+            return my_version_at_least(mv, 10, 2, 2) ? "utf8mb4_nopad_bin"
+                                                     : "utf8mb4_bin";
+        }
+    if (my_version_at_least(v, 8, 0, 17))
         return "utf8mb4_0900_bin";
     return "utf8mb4_bin";
 }

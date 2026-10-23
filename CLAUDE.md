@@ -1043,8 +1043,11 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   hand).** `db_mysql.c` appends `DEFAULT CHARSET=utf8mb4 COLLATE=<c>` to every
   `CREATE TABLE _hull_*` it runs, `<c>` being the server's NO PAD binary
   collation (`hl_my_bin_collation`, from the handshake's version):
-  `utf8mb4_0900_bin` on MySQL 8.0.17+, `utf8mb4_nopad_bin` on MariaDB,
-  `utf8mb4_bin` on MySQL 5.7 (which has no NO PAD collation). So role names,
+  `utf8mb4_0900_bin` on MySQL 8.0.17+, `utf8mb4_nopad_bin` on MariaDB
+  10.2.2+, `utf8mb4_bin` on MySQL before 8.0.17 and MariaDB before 10.2.2
+  (neither has a NO PAD binary collation; naming nopad_bin on an old MariaDB
+  failed every `_hull_*` CREATE TABLE - audit 23 - and a WARN now says the
+  keys there compare without trailing spaces). So role names,
   inbox ids, dedup keys, user ids and job / cron names compare exactly (under
   MySQL 8's default `utf8mb4_0900_ai_ci`, `'Admin' = 'admin'` and
   `'josé' = 'jose'`; under the PAD SPACE `utf8mb4_bin` Hull used before

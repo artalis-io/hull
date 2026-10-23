@@ -12176,6 +12176,33 @@ UTEST(lua_audit21, compute_segment_copies_are_charged)
 
 #endif /* HL_ENABLE_WASM */
 
+/* ── Audit 23 G6: the sync http client gives its scratch back ───────── */
+
+/* #812 missed it: a sync call's header copies (and the response's
+ * lowercased names) stayed in the scratch arena for the rest of the run,
+ * so a run making requests in a loop filled it - then every scratch user
+ * (headers, db params, smtp) failed. */
+UTEST(lua_audit23, sync_http_gives_its_scratch_back)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    EXPECT_EQ_MSG(audit10_run(
+        "local http = require('hull.http-client') "
+        "local h = { ['X-Big'] = string.rep('a', 65536) } "
+        "for i = 1, 400 do "
+        "  local ok, e = pcall(http.get, 'http://x.invalid/', { headers = h }) "
+        "  assert(not ok and not tostring(e):find('scratch'), i .. ': ' .. tostring(e)) "
+        "end "
+        "assert(db.query('SELECT ? AS v', { 1 })[1].v == 1) "
+        "return 1",
+        0, err, sizeof err), LUA_OK, err);
+    lua_rt.base.http_cfg = NULL;
+    cleanup_lua_caps();
+}
+
 /* ── Audit 22 G1: async input copies are held to the heap limit ──────── */
 
 UTEST(lua_audit22, async_param_and_ctx_copies_are_held_to_the_heap_limit)
