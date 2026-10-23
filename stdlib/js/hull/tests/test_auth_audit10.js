@@ -262,8 +262,12 @@ await test("session logout trusts the origins auth-flows registered", () => {
     assertEq(run({ host: "10.0.0.5:8080", origin: "https://evil.test" }), 403);
     const lo2 = session.logoutHandler(cookie, { trustedHosts: ["alt.example.com"] });
     const res = mkRes();
-    lo2({ method: "POST", headers: { host: "10.0.0.5", origin: "https://alt.example.com:8443" } }, res);
-    assertEq(res.code, 200, "opts.trustedHosts, any port");
+    lo2({ method: "POST", headers: { host: "10.0.0.5", origin: "https://alt.example.com:443" } }, res);
+    assertEq(res.code, 200, "opts.trustedHosts, the default port");
+    // A bare entry no longer covers another port (audit 24).
+    const res2 = mkRes();
+    lo2({ method: "POST", headers: { host: "10.0.0.5", origin: "https://alt.example.com:8443" } }, res2);
+    assertEq(res2.code, 403, "opts.trustedHosts, another port");
     __testHooks('hull:web:auth-flows').reset();
     assertEq(run({ host: "10.0.0.5:8080", origin: "https://app.example.com" }), 403,
              "cleared with the auth-flows state");

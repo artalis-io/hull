@@ -95,8 +95,9 @@ function userId(id) {
  * hull.web._request.same_origin: `Sec-Fetch-Site` must be `same-origin` or
  * `none` (cross-site and same-site refused); without it `Origin` - or failing
  * it `Referer` - must name the request's own host (`X-Forwarded-Host` behind a
- * trusted proxy) or one of `opts.origins`, or its host (with or without a
- * port) is one of `opts.hosts`; with no provenance header at all the request
+ * trusted proxy) or one of `opts.origins`, or its authority is one of
+ * `opts.hosts` (a bare host entry matches that host on its scheme's default
+ * port only); with no provenance header at all the request
  * passes only with `opts.allowBare`. What registerAppOrigins registered
  * (auth-flows' publicOrigin / trustedHosts / trustProxy) is trusted on every
  * call too (audit 10; see the Lua sibling): auth-flows' /logout and the
@@ -134,14 +135,30 @@ function sameOrigin(req, opts) {
     for (const allowed of origins) {
         if (originOf(allowed) === origin) return true;
     }
-    const noPort = /^(.*):\d+$/.exec(authority);
+    const bare = authorityDefaultPortStripped(origin);
     const trusted = (Array.isArray(o.hosts) ? o.hosts : []).concat(_app.hosts);
     for (const allowed of trusted) {
         if (typeof allowed !== "string") continue;
         const a = allowed.toLowerCase();
-        if (authority === a || (noPort && noPort[1] === a)) return true;
+        if (authority === a || bare === a) return true;
     }
     return false;
+}
+
+/**
+ * The authority of a lower-cased "scheme://authority" origin, with its port
+ * dropped only when it is the scheme's default (443 for https, 80 for http):
+ * a bare host entry in a trusted-hosts list names that host on its default
+ * port, never on another one (audit 24: any port was dropped, so
+ * "app.example.com" trusted app.example.com:8443).
+ */
+function authorityDefaultPortStripped(origin) {
+    const m = /^(https?):\/\/(.*)$/.exec(origin);
+    if (!m) return null;
+    const hp = /^(.*):(\d+)$/.exec(m[2]);
+    if (hp && ((m[1] === "https" && hp[2] === "443") || (m[1] === "http" && hp[2] === "80")))
+        return hp[1];
+    return m[2];
 }
 
 // The app's own origins, registered by auth-flows.init (see sameOrigin).
@@ -157,5 +174,6 @@ function registerAppOrigins(t) {
     _app = { origins: strs(x.origins), hosts: strs(x.hosts), trustProxy: x.trustProxy === true };
 }
 
-export const _request = { clientIp, limitKey, userId, sameOrigin, registerAppOrigins };
+export const _request = { clientIp, limitKey, userId, sameOrigin, registerAppOrigins,
+                          authorityDefaultPortStripped };
 export default _request;

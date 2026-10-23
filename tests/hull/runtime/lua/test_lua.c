@@ -5047,6 +5047,22 @@ UTEST(lua_stdlib, stdlib_audit23_suite)
     cleanup_lua_caps();
 }
 
+/* Stdlib regressions from audit 24: csv nil cells, clamped LIMITs, strict
+ * status lists, session device refs, the outbox delivery timeout, jwt / totp
+ * / validate number checks, trusted-host ports, the email-change user id. */
+UTEST(lua_stdlib, stdlib_audit24_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit24.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
 /* The csrf middleware's own suite (generate / verify, and audit 22's
  * mixed-case header_name). It sat under web/middleware/tests unrun. */
 UTEST(lua_stdlib, csrf_suite)

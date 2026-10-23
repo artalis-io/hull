@@ -274,9 +274,14 @@ function jwt.verify(token, key_or_resolver, opts)
     -- exp / nbf must be numbers per RFC 7519 §4.1.4 / §4.1.5. A token
     -- crafted with `"exp": "not-a-number"` would otherwise raise on
     -- `time.now() >= payload.exp` (string vs number compare) and the
-    -- handler would surface as a 500 instead of a clean reject.
+    -- handler would surface as a 500 instead of a clean reject. A number
+    -- must also be finite: JSON's 1e999 decodes to inf, an exp that never
+    -- passes (audit 24), and NaN compares false both ways.
+    local function finite(v)
+        return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+    end
     if payload.exp ~= nil then
-        if type(payload.exp) ~= "number" then
+        if not finite(payload.exp) then
             return nil, "invalid exp claim"
         end
         if time.now() >= payload.exp + leeway then return nil, "token expired" end
@@ -285,7 +290,7 @@ function jwt.verify(token, key_or_resolver, opts)
     end
 
     if payload.nbf ~= nil then
-        if type(payload.nbf) ~= "number" then
+        if not finite(payload.nbf) then
             return nil, "invalid nbf claim"
         end
         if time.now() + leeway < payload.nbf then

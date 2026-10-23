@@ -131,6 +131,40 @@ local function duration_opt(name, v, who)
     return n
 end
 
+-- A caller-supplied list of strings (statuses), copied with raw access into
+-- a fresh array: every key must be an integer 1..n with no hole and every
+-- value a string, else it raises - the JS sibling's callerStrings rule
+-- (audit 24: ipairs over an unchecked table stopped at a hole, took a
+-- non-string as a bind value, and an empty list built "IN ()", a syntax
+-- error).
+local function caller_strings(v, what)
+    if type(v) ~= "table" then error(what .. " must be an array of strings", 3) end
+    local out, n, max = {}, 0, 0
+    local k, s = next(v)
+    while k ~= nil do
+        if math.type(k) ~= "integer" or k < 1 or type(s) ~= "string" then
+            error(what .. " must be an array of strings", 3)
+        end
+        out[k] = s
+        n = n + 1
+        if k > max then max = k end
+        k, s = next(v, k)
+    end
+    if n ~= max then error(what .. " must be an array of strings", 3) end
+    return out, n
+end
+
+-- A count option (limit / offset / batch) as an integer in lo..hi: a number
+-- or a numeric string counts, anything else and NaN take the default, and
+-- +/-inf clamps to the bound. The JS sibling (countOpt) applies the same
+-- rule (audit 24: an unclamped batch reached LIMIT as a negative "no limit"
+-- on SQLite or a fraction).
+local function count_opt(v, def, lo, hi)
+    local n = tonumber(v) or def
+    if n ~= n then n = def end
+    return math.floor(math.max(lo, math.min(n, hi)))
+end
+
 --- Create the `_hull_jobs` table and its indexes. Idempotent - safe to call on
 -- every boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
 -- form, so the same call runs unchanged on SQLite, PostgreSQL, and MySQL.
@@ -898,9 +932,13 @@ function jobs.resume(queue) return set_paused(queue, 0) end
 -- @treturn number
 function jobs.purge(queue, opts)
     opts = opts or {}
-    local statuses = opts.statuses or { "pending" }
+    local statuses, ns = { "pending" }, 1
+    if opts.statuses ~= nil then
+        statuses, ns = caller_strings(opts.statuses, "jobs.purge: statuses")
+    end
+    if ns == 0 then return 0 end
     local ph, params = {}, { queue }
-    for _, s in ipairs(statuses) do ph[#ph + 1] = "?"; params[#params + 1] = s end
+    for i = 1, ns do ph[i] = "?"; params[i + 1] = statuses[i] end
     local where = "queue=? AND status IN (" .. table.concat(ph, ",") .. ")"
     local n = 0
     db.batch(function()
@@ -1130,7 +1168,7 @@ end
 -- @treturn table  array of claimed jobs { id, type, data, attempts, max_attempts }
 function jobs.claim(opts)
     opts = opts or {}
-    local batch = opts.batch or 10
+    local batch = count_opt(opts.batch, 10, 1, 1000)
     for _, q in ipairs(resolve_queue_order(opts)) do
         local got = claim_one(q, batch)
         if #got > 0 then return got end
@@ -2898,12 +2936,8 @@ function jobs.dead(opts)
     -- limit 1..1000 and offset >= 0, as jobs.events (audit 23): a negative
     -- LIMIT is "no limit" on SQLite, and NaN / a fraction is not an integer
     -- bind.
-    local limit = tonumber(opts.limit) or 100
-    if limit ~= limit then limit = 100 end
-    limit = math.floor(math.max(1, math.min(limit, 1000)))
-    local offset = tonumber(opts.offset) or 0
-    if offset ~= offset then offset = 0 end
-    offset = math.floor(math.max(0, math.min(offset, 2 ^ 53 - 1)))
+    local limit = count_opt(opts.limit, 100, 1, 1000)
+    local offset = count_opt(opts.offset, 0, 0, 2 ^ 53 - 1)
     local rows
     if opts.queue then
         rows = db.query(
@@ -3036,10 +3070,7 @@ function jobs.events(opts)
     end
     -- 1..1000: a negative LIMIT is "no limit" on SQLite, and NaN / a fraction
     -- is not an integer bind.
-    local limit = tonumber(opts.limit) or 100
-    if limit ~= limit then limit = 100 end
-    limit = math.floor(math.max(1, math.min(limit, 1000)))
-    params[#params + 1] = limit
+    params[#params + 1] = count_opt(opts.limit, 100, 1, 1000)
     local rows = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
         .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id DESC LIMIT ?", params)
@@ -3158,7 +3189,7 @@ events_drain = function(name, opts)
         for t in tostring(row[1].types):gmatch("[^,]+") do ph[#ph + 1] = "?"; params[#params + 1] = t end
         where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
     end
-    params[#params + 1] = opts.batch or 100
+    params[#params + 1] = count_opt(opts.batch, 100, 1, 1000)
     local evs = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
         .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id LIMIT ?", params)
@@ -3216,16 +3247,22 @@ _hooks.events_drain = events_drain
 -- @treturn number  rows deleted
 function jobs.cleanup(opts)
     opts = opts or {}
-    local statuses = opts.statuses or { "done", "dead" }
+    local statuses, ns = { "done", "dead" }, 2
+    if opts.statuses ~= nil then
+        statuses, ns = caller_strings(opts.statuses, "jobs.cleanup: statuses")
+    end
     local cutoff = opts.before or (time.now() - (opts.older_than or 604800))
     local placeholders, params = {}, {}
-    for _, s in ipairs(statuses) do
-        placeholders[#placeholders + 1] = "?"
-        params[#params + 1] = s
+    for i = 1, ns do
+        placeholders[i] = "?"
+        params[i] = statuses[i]
     end
-    params[#params + 1] = cutoff
-    local sql = "DELETE FROM _hull_jobs WHERE status IN ("
-        .. table.concat(placeholders, ",") .. ") AND updated_at < ?"
+    params[ns + 1] = cutoff
+    -- An empty list deletes no job (1=0), as in JS; the store hygiene below
+    -- still runs.
+    local sql = "DELETE FROM _hull_jobs WHERE "
+        .. (ns > 0 and ("status IN (" .. table.concat(placeholders, ",") .. ")") or "1=0")
+        .. " AND updated_at < ?"
     if opts.queue then
         sql = sql .. " AND queue=?"
         params[#params + 1] = opts.queue

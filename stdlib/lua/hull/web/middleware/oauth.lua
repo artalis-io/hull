@@ -616,11 +616,22 @@ local function handle_callback(req, res)
     if type(claims.aud) == "string" then
         aud_ok = (claims.aud == cfg.client_id)
     elseif type(claims.aud) == "table" then
-        local n = 0
-        for _, a in ipairs(claims.aud) do
+        -- Every entry must be a string, counted over the whole array: a
+        -- JSON null ends ipairs, so ["ours", null, "theirs"] counted one
+        -- audience and skipped the azp check (audit 24).
+        local n, max, well_formed = 0, 0, true
+        local k, a = next(claims.aud)
+        while k ~= nil do
+            if math.type(k) ~= "integer" or k < 1 or type(a) ~= "string" then
+                well_formed = false
+                break
+            end
             n = n + 1
+            if k > max then max = k end
             if a == cfg.client_id then aud_ok = true end
+            k, a = next(claims.aud, k)
         end
+        if not well_formed or n ~= max then aud_ok = false end
         -- A token for several audiences is ours only when we are its
         -- authorized party (OIDC Core 3.1.3.7; audit 23).
         if aud_ok and n > 1 and claims.azp ~= cfg.client_id then aud_ok = false end

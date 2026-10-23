@@ -845,9 +845,15 @@ local function origin_trusted(o, h)
     end
     local authority = o:match("^https?://(.*)$")
     if _state.trusted_hosts then
+        -- A trusted_hosts entry names a host (its scheme's default port)
+        -- or "host:port": only the DEFAULT port is dropped before the
+        -- bare-host match. Any port was, so an entry "app.example.com"
+        -- trusted a page served from app.example.com:8443 - another
+        -- service on the same host (audit 24).
+        local bare = _request.authority_default_port_stripped(o)
         for _, allowed in ipairs(_state.trusted_hosts) do
             local a = allowed:lower()
-            if authority == a or authority:match("^(.-):%d+$") == a then
+            if authority == a or bare == a then
                 return true
             end
         end
@@ -2077,7 +2083,9 @@ local function handle_email_change(req, res)
     -- on req.ctx.user_id. The module doesn't depend on a specific
     -- session shape - apps wire this in.
     local user_id = req.ctx and req.ctx.user_id
-    if not user_id then
+    -- A user id is a non-empty string or a safe integer (audit 24): "" or
+    -- a table passed `not user_id` here; same test as the JS sibling.
+    if _request.user_id(user_id) == nil then
         return res:status(401):json({ error = "not authenticated" })
     end
     if refuse_cross_site(req, res) then return end

@@ -176,9 +176,16 @@ function queryPart(q) {
  * made.
  */
 function computeFingerprint(req) {
-    const data = (req.method || "") + "\0" + (req.path || "") + "\0"
-        + queryPart(req.query) + "\0" + (req.body || "");
-    return encoding.hex.encode(crypto.sha256(data));
+    const head = (req.method || "") + "\0" + (req.path || "") + "\0"
+        + queryPart(req.query) + "\0";
+    // A body that is not valid UTF-8 reads with every invalid sequence as
+    // U+FFFD, so two binary bodies could fingerprint the same and a key
+    // reused across them replayed the first response (audit 24): hash its
+    // bytes. The leading \x01 (never in a method) keeps the two forms apart.
+    if (req.bodyBytes instanceof ArrayBuffer)
+        return encoding.hex.encode(crypto.sha256("\x01" + head
+            + encoding.hex.encode(crypto.sha256(req.bodyBytes))));
+    return encoding.hex.encode(crypto.sha256(head + (req.body || "")));
 }
 
 /**
@@ -605,4 +612,5 @@ _test_hooks.register("hull:web:middleware:idempotency", {
     // The principal helpers (audit 23: they were exported on the module).
     defaultPrincipal,
     normPrincipal,
+    computeFingerprint,
 });

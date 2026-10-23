@@ -145,7 +145,7 @@ app.get("/_devices", function(req, res)
         return res:status(401):json({})
     end
     res:json({
-        sessions = session.list_for_user(req.ctx.user_id),
+        sessions = session.list_for_user(req.ctx.user_id, req),
         events   = audit_log.list(req.ctx.user_id, { limit = 50 }),
         devices  = audit_log.list_devices(req.ctx.user_id),
     })

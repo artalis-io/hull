@@ -223,6 +223,17 @@ run_flow() {
     check_eq "$_label: 2 devices after B logs in" "$D" "2"
     SES=$(count_sessions "$COOKIES_A" "$UA_A" "$IP_A" "$BASE")
     check_eq "$_label: 2 active sessions for user" "$SES" "2"
+    # The device list names sessions by ref, never by id (the bearer
+    # credential; audit 24), and marks the caller's own.
+    SHAPE=$(curl -sS -b "$COOKIES_A" \
+        -H "User-Agent: $UA_A" -H "X-Forwarded-For: $IP_A" \
+        "$BASE/_devices" | python3 -c "
+import json, re, sys
+s = json.load(sys.stdin).get('sessions', [])
+ok = all('id' not in r and re.fullmatch('[0-9a-f]{32}', r.get('ref') or '') for r in s)
+print('%s:%d' % ('refs' if ok else 'bad', sum(1 for r in s if r.get('current') is True)))
+")
+    check_eq "$_label: sessions carry refs, one current" "$SHAPE" "refs:1"
 
     # 4. Re-login from A - same fingerprint, no new alert.
     R=$(curl -sS -c "$COOKIES_A" \

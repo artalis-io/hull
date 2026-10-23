@@ -143,6 +143,21 @@ end
 --- Attempt to deliver a single outbox item.
 -- Returns true on success, false on failure, and `false, err, true` when the
 -- runtime refused to wait (see is_wait_refusal).
+-- How long a flush's claim on a row lasts before another flush may take it
+-- (seconds): longer than any delivery can run - http.fetch's ceiling
+-- (HL_HTTP_FETCH_MAX_TIMEOUT_MS, 10 min) plus a minute. It was 300 s, under
+-- the 10 min a manifest `http.timeout_ms` may give a delivery, so another
+-- flush took the row and sent it again while the first was still waiting
+-- (audit 24). The app's own timeout still bounds each delivery.
+local CLAIM_LEASE = 660
+
+-- The delivery call; the suite stands in for it through the test hooks
+-- (set_post), as the JS twin's setPost.
+local function real_post(url, body, opts)
+    return http_client.async.post(url, body, opts)
+end
+local post = real_post
+
 local function deliver_item(item)
     if item.kind == "webhook" or item.kind == "http" then
         local req_headers = {}
@@ -163,8 +178,8 @@ local function deliver_item(item)
         end
 
         local send_ok, result = pcall(function()
-            return http_client.async.post(item.destination, item.payload, {
-                headers = req_headers
+            return post(item.destination, item.payload, {
+                headers = req_headers,
             })
         end)
 
@@ -190,9 +205,6 @@ local function deliver_item(item)
     return false, "unsupported outbox kind: " .. tostring(item.kind)
 end
 
--- How long a flush's claim on a row lasts before another flush may take it
--- (seconds): longer than any delivery should run.
-local CLAIM_LEASE = 300
 
 --- Compute exponential backoff delay (in seconds) for attempt N.
 -- 2^attempt * 10 seconds, capped at 1 hour.
@@ -221,7 +233,12 @@ function outbox.flush(opts)
               .. "delivery waits on the network. Call it after the commit", 2)
     end
     opts = opts or {}
-    local limit = opts.limit or 50
+    -- 1..1000 (default 50): a number or numeric string counts, anything
+    -- else and NaN take the default; a negative LIMIT is "no limit" on
+    -- SQLite (audit 24).
+    local limit = tonumber(opts.limit) or 50
+    if limit ~= limit then limit = 50 end
+    limit = math.floor(math.max(1, math.min(limit, 1000)))
     local now = time.now()
 
     local items = db.query(
@@ -361,6 +378,8 @@ require("hull._test_hooks").register("hull.web.middleware.outbox", {
                         { id })
     end,
     clear = function() db.exec("DELETE FROM _hull_outbox") end,
+    set_post = function(fn) post = fn or real_post end,
+    claim_lease = CLAIM_LEASE,
 })
 
 return outbox

@@ -534,6 +534,31 @@ function init(opts) {
     if (opts.digits !== undefined && opts.digits !== 6 && opts.digits !== 8) {
         throw new Error("totp.init: digits must be 6 or 8");
     }
+    // Counts and durations must be whole numbers above zero, recoveryCodes
+    // and window whole numbers from 0 (window up to 10) (audit 24, as
+    // auth-flows since audit 14): a NaN
+    // maxFailedAttempts turned the lockout off (n >= NaN is false), a
+    // string period concatenated into the step, a fractional window made the
+    // offset loop skip the current step. Same rule as the Lua twin;
+    // undefined / null keeps the default.
+    for (const k of ["maxFailedAttempts", "maxFailedAttemptsPerIp",
+                     "lockoutDuration", "period"]) {
+        const v = opts[k];
+        if (v !== undefined && v !== null && !(Number.isInteger(v) && v > 0)) {
+            throw new Error("totp.init: " + k + " must be a whole number > 0 (got "
+                + String(v) + ")");
+        }
+    }
+    const rc = opts.recoveryCodes;
+    if (rc !== undefined && rc !== null && !(Number.isInteger(rc) && rc >= 0)) {
+        throw new Error("totp.init: recoveryCodes must be a whole number >= 0 (got "
+            + String(rc) + ")");
+    }
+    if (opts.window !== undefined && opts.window !== null
+        && !(Number.isInteger(opts.window) && opts.window >= 0 && opts.window <= 10)) {
+        throw new Error("totp.init: window must be a whole number 0..10 (got "
+            + String(opts.window) + ")");
+    }
 
     // Build the keys map. Three input shapes:
     //   1. encryptionKeys + current  -> multi-key (explicit)
@@ -581,8 +606,9 @@ function init(opts) {
     _state.issuer         = opts.issuer         || _state.issuer;
     _state.digits         = opts.digits         || _state.digits;
     _state.period         = opts.period         || _state.period;
-    _state.window         = opts.window         !== undefined ? opts.window : _state.window;
-    _state.recoveryCodes  = opts.recoveryCodes  || _state.recoveryCodes;
+    _state.window         = opts.window !== undefined && opts.window !== null
+                            ? opts.window : _state.window;
+    _state.recoveryCodes  = rc !== undefined && rc !== null ? rc : _state.recoveryCodes;
     _state.maxFailedAttempts = opts.maxFailedAttempts
                                || _state.maxFailedAttempts;
     _state.lockoutDuration   = opts.lockoutDuration

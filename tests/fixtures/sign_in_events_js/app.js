@@ -120,7 +120,7 @@ app.get("/_me", (req, res) => {
 app.get("/_devices", (req, res) => {
     if (!req.ctx || !req.ctx.user_id) return res.status(401).json({});
     res.json({
-        sessions: session.listForUser(req.ctx.user_id),
+        sessions: session.listForUser(req.ctx.user_id, req),
         events:   auditLog.list(req.ctx.user_id, { limit: 50 }),
         devices:  auditLog.listDevices(req.ctx.user_id),
     });

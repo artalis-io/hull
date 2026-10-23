@@ -280,8 +280,12 @@ test("session logout trusts the origins auth-flows registered", function()
     assert_eq(run({ host = "10.0.0.5:8080", origin = "https://evil.test" }), 403)
     local lo2 = session.logout_handler(cookie, { trusted_hosts = { "alt.example.com" } })
     local res = mkres()
+    lo2({ method = "POST", headers = { host = "10.0.0.5", origin = "https://alt.example.com:443" } }, res)
+    assert_eq(res.code, 200, "opts.trusted_hosts, the default port")
+    -- A bare entry no longer covers another port (audit 24).
+    res = mkres()
     lo2({ method = "POST", headers = { host = "10.0.0.5", origin = "https://alt.example.com:8443" } }, res)
-    assert_eq(res.code, 200, "opts.trusted_hosts, any port")
+    assert_eq(res.code, 403, "opts.trusted_hosts, another port")
     __test_hooks('hull.web.auth-flows').reset()
     assert_eq(run({ host = "10.0.0.5:8080", origin = "https://app.example.com" }), 403,
               "cleared with the auth-flows state")

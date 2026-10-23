@@ -320,13 +320,34 @@ function audit_log.record(user_id, kind, req, opts)
           opts.session_id, meta })
 end
 
+-- opts.limit as an integer 1..1000 (default 50): a number or a numeric
+-- string counts, anything else and NaN take the default, +/-inf clamps.
+-- It reached LIMIT as given, and a negative LIMIT is "no limit" on SQLite
+-- (audit 24).
+local function list_limit(v)
+    local n = tonumber(v) or 50
+    if n ~= n then n = 50 end
+    return math.floor(math.max(1, math.min(n, 1000)))
+end
+
+-- opts.window_days as a finite number > 0 (default `def`), else it raises:
+-- NaN made the cutoff NaN, which matches no row (every device "new"), and
+-- inf or a negative window reached past the retention (audit 24).
+local function window_days(v, def, who)
+    if v == nil then return def end
+    if type(v) ~= "number" or v ~= v or v <= 0 or v == math.huge then
+        error(who .. ": window_days must be a finite number > 0", 3)
+    end
+    return v
+end
+
 --- List recent events for a user, newest first.
 -- opts.limit (default 50), opts.kinds (filter - array of kinds).
 function audit_log.list(user_id, opts)
     user_id = _request.user_id(user_id)
     if not user_id then return {} end
     opts = opts or {}
-    local limit = opts.limit or 50
+    local limit = list_limit(opts.limit)
     local rows
     -- The IN list comes from the array part only, read raw (an app table's
     -- __len / __index cannot shape it), and holds strings only.
@@ -374,7 +395,8 @@ function audit_log.list_devices(user_id, opts)
     user_id = _request.user_id(user_id)
     if not user_id then return {} end
     opts = opts or {}
-    local cutoff = time.now() - ((opts.window_days or 90) * 86400)
+    local cutoff = time.now()
+        - window_days(opts.window_days, 90, "audit_log.list_devices") * 86400
     local rows = db.query(
         "SELECT fingerprint, "
         .. "  MIN(event_at) AS first_seen, "
@@ -397,7 +419,8 @@ function audit_log.is_new_device(user_id, req, opts)
     user_id = _request.user_id(user_id)
     if not user_id then return false end
     opts = opts or {}
-    local cutoff = time.now() - ((opts.window_days or 30) * 86400)
+    local cutoff = time.now()
+        - window_days(opts.window_days, 30, "audit_log.is_new_device") * 86400
     local fp = audit_log.fingerprint(req)
     local rows = db.query(
         "SELECT 1 FROM _hull_audit_log "

@@ -408,16 +408,8 @@ function session.cleanup()
     return count
 end
 
---- List the currently active sessions for a user.
--- Returns rows `{ id, created_at, last_accessed, ip, user_agent }`,
--- newest-accessed first. Excludes expired rows. The session
--- DATA blob is NOT included (apps don't typically need it for a
--- device list - they want ip/ua/recency).
--- @tparam string user_id
--- @treturn table  Array (possibly empty).
-function session.list_for_user(user_id)
-    user_id = _request.user_id(user_id)
-    if not user_id then return {} end
+-- The rows of a user's live sessions (id included), newest-accessed first.
+local function live_sessions(user_id)
     local now = time.now()
     -- Round-10 MEDIUM-9: filter rows past the absolute_ttl cap too.
     -- Pre-fix, the /devices UI showed sessions that load() would
@@ -446,6 +438,64 @@ function session.list_for_user(user_id)
         .. "WHERE user_id = ? AND expires_at > ? "
         .. "ORDER BY last_accessed DESC",
         { user_id, now }) or {}
+end
+
+--- List the currently active sessions for a user.
+-- Returns rows `{ ref, current, created_at, last_accessed, ip,
+-- user_agent }`, newest-accessed first. Excludes expired rows. The
+-- session DATA blob is NOT included (apps don't typically need it for a
+-- device list - they want ip/ua/recency).
+--
+-- No row carries the session id: it is the bearer credential, and a
+-- device list rendered it for every live session of the account
+-- (audit 24). `ref` is the session's reference - the first 32 hex
+-- characters of the id's SHA-256, the value the audit log records as
+-- `session_id` - and `session.destroy_ref(user_id, ref)` signs that one
+-- session out. `current` is true for the caller's own session, given as
+-- @p current (its id, or the request whose `req.ctx.session_id` holds it).
+-- @tparam string user_id
+-- @tparam[opt] string|table current  The caller's session id, or the request.
+-- @treturn table  Array (possibly empty).
+function session.list_for_user(user_id, current)
+    user_id = _request.user_id(user_id)
+    if not user_id then return {} end
+    if type(current) == "table" then
+        local ctx = current.ctx
+        current = type(ctx) == "table" and ctx.session_id or nil
+    end
+    if type(current) ~= "string" or current == "" then current = nil end
+    local out = {}
+    for i, r in ipairs(live_sessions(user_id)) do
+        out[i] = {
+            ref           = session_ref(r.id),
+            current       = current ~= nil and r.id == current,
+            created_at    = r.created_at,
+            last_accessed = r.last_accessed,
+            ip            = r.ip,
+            user_agent    = r.user_agent,
+        }
+    end
+    return out
+end
+
+--- Destroy ONE of a user's sessions, named by the `ref` that
+-- `session.list_for_user` reports. Scoped to @p user_id: a ref of another
+-- account's session removes nothing. Returns the count (0 or 1).
+-- @tparam string user_id
+-- @tparam string ref  32 lower-case hex characters.
+-- @treturn number
+function session.destroy_ref(user_id, ref)
+    user_id = _request.user_id(user_id)
+    if not user_id then return 0 end
+    if type(ref) ~= "string" or #ref ~= 32 or ref:find("[^0-9a-f]") then return 0 end
+    for _, r in ipairs(live_sessions(user_id)) do
+        if session_ref(r.id) == ref then
+            return db.exec(
+                "DELETE FROM _hull_sessions WHERE user_id = ? AND id = ?",
+                { user_id, r.id }) or 0
+        end
+    end
+    return 0
 end
 
 --- Destroy every session for a user EXCEPT `current_sid`.

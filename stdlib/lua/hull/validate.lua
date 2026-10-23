@@ -59,6 +59,12 @@ local function char_len(s)
     return utf8.len(s) or #s
 end
 
+-- a < b for a bound check that fails closed: a NaN on either side is out
+-- of bounds, where a plain < let it through (audit 24).
+local function below(a, b)
+    return a ~= a or b ~= b or a < b
+end
+
 --- Validate a data table against a schema.
 --
 -- Schema is a table mapping field names to rule tables. Recognised rules:
@@ -127,7 +133,11 @@ function validate.check(data, schema)
                     err = custom_msg or "must be a string"
                 end
             elseif rt == "number" then
-                if type(value) ~= "number" then
+                -- Finite only (audit 24): NaN and +/-inf are numbers to
+                -- type() but no form value means them, and NaN passes
+                -- every bound.
+                if type(value) ~= "number" or value ~= value
+                   or value == math.huge or value == -math.huge then
                     err = custom_msg or "must be a number"
                 end
             elseif rt == "integer" then
@@ -148,11 +158,11 @@ function validate.check(data, schema)
         -- 4. min
         if rules.min then
             if type(value) == "string" then
-                if char_len(value) < rules.min then
+                if below(char_len(value), rules.min) then
                     err = custom_msg or "must be at least " .. rules.min .. " characters"
                 end
             elseif type(value) == "number" then
-                if value < rules.min then
+                if below(value, rules.min) then
                     err = custom_msg or "must be at least " .. rules.min
                 end
             else
@@ -167,11 +177,11 @@ function validate.check(data, schema)
         -- 5. max
         if rules.max then
             if type(value) == "string" then
-                if char_len(value) > rules.max then
+                if below(rules.max, char_len(value)) then
                     err = custom_msg or "must be at most " .. rules.max .. " characters"
                 end
             elseif type(value) == "number" then
-                if value > rules.max then
+                if below(rules.max, value) then
                     err = custom_msg or "must be at most " .. rules.max
                 end
             else

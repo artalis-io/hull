@@ -359,14 +359,8 @@ function cleanup() {
     );
 }
 
-/**
- * List currently active sessions for a user.
- * Returns rows {id, created_at, last_accessed, ip, user_agent}, newest
- * first. Excludes expired rows.
- */
-function listForUser(userId) {
-    userId = _request.userId(userId);
-    if (userId === null) return [];
+// The rows of a user's live sessions (id included), newest-accessed first.
+function liveSessions(userId) {
     const now = time.now();
     // Round-10 MEDIUM-9: filter past-absolute-ttl rows so list+load
     // stay in sync. See Lua sibling.
@@ -387,6 +381,64 @@ function listForUser(userId) {
         + "WHERE user_id = ? AND expires_at > ? "
         + "ORDER BY last_accessed DESC",
         [userId, now]) || [];
+}
+
+/**
+ * List currently active sessions for a user.
+ * Returns rows {ref, current, created_at, last_accessed, ip, user_agent},
+ * newest first. Excludes expired rows.
+ *
+ * No row carries the session id: it is the bearer credential, and a device
+ * list rendered it for every live session of the account (audit 24). `ref`
+ * is the session's reference - the first 32 hex characters of the id's
+ * SHA-256, the value the audit log records as `session_id` - and
+ * `session.destroyRef(userId, ref)` signs that one session out. `current`
+ * is true for the caller's own session, given as `current` (its id, or the
+ * request whose `req.ctx.session_id` holds it).
+ */
+function listForUser(userId, current) {
+    userId = _request.userId(userId);
+    if (userId === null) return [];
+    let cur = current;
+    if (typeof cur === "object" && cur !== null) {
+        const ctx = cur.ctx;
+        cur = (typeof ctx === "object" && ctx !== null) ? ctx.session_id : undefined;
+    }
+    if (typeof cur !== "string" || cur === "") cur = null;
+    const rows = liveSessions(userId);
+    const out = [];
+    for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        out.push({
+            ref: sessionRef(r.id),
+            current: cur !== null && r.id === cur,
+            created_at: r.created_at,
+            last_accessed: r.last_accessed,
+            ip: r.ip,
+            user_agent: r.user_agent,
+        });
+    }
+    return out;
+}
+
+/**
+ * Destroy ONE of a user's sessions, named by the `ref` that listForUser
+ * reports. Scoped to `userId`: a ref of another account's session removes
+ * nothing. Returns the count (0 or 1).
+ */
+function destroyRef(userId, ref) {
+    userId = _request.userId(userId);
+    if (userId === null) return 0;
+    if (typeof ref !== "string" || !/^[0-9a-f]{32}$/.test(ref)) return 0;
+    const rows = liveSessions(userId);
+    for (let i = 0; i < rows.length; i++) {
+        if (sessionRef(rows[i].id) === ref) {
+            return db.exec(
+                "DELETE FROM _hull_sessions WHERE user_id = ? AND id = ?",
+                [userId, rows[i].id]) || 0;
+        }
+    }
+    return 0;
 }
 
 /**
@@ -622,6 +674,6 @@ function logoutHandler(cookieMod, opts) {
 }
 
 const session = { init, create, load, update, destroy, cleanup,
-                  listForUser, destroyOthers, destroyAll,
+                  listForUser, destroyRef, destroyOthers, destroyAll,
                   rotate, loginHandler, logoutHandler };
 export { session };

@@ -596,6 +596,7 @@ JS uses identical names: `app.use`, `app.usePost`, `app.ws`, `app.sse`,
 - `req.method`, `req.path`, `req.url`, `req.query` (table)
 - `req.headers[name]`. Keys are lowercased
 - `req.body`. String (lazy; reading triggers body capture)
+- `req.bodyBytes` (JS only). The raw body as an `ArrayBuffer`, present only when the body is not valid UTF-8 (`req.body` then has every invalid sequence replaced by U+FFFD)
 - `req.params[name]`. Captured route parameters
 - `req.ctx`. Per-request mutable table for middleware-to-handler data
 
