@@ -5,7 +5,9 @@
 
 #include "mod_buffer.h"
 
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "log.h"
+#include <stdint.h>
 #include <string.h>
 
 /* ════════════════════════════════════════════════════════════════════
@@ -35,9 +37,37 @@ static int lua_log_level(lua_State *L, int level)
 
     int n = lua_gettop(L);
     for (int i = 1; i <= n; i++) {
-        const char *s = luaL_tolstring(L, i, NULL);
-        if (s)
+        size_t len = 0;
+        const char *s = luaL_tolstring(L, i, &len);
+        if (!s) {
+            lua_pop(L, 1);
+            continue;
+        }
+        /* Charged before the write (audit 24): log_log formats and writes
+         * the whole message in this one call. */
+        uint64_t u = hl_work_bytes_units((uint64_t)len);
+        lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
+        /* CR / LF go out as the two characters \r / \n (audit 24, as the
+         * JS runtime): a message holding a newline wrote a second log line
+         * of the app's choosing - a forged "[hull:lua]" record. */
+        if (memchr(s, '\n', len) || memchr(s, '\r', len)) {
+            luaL_Buffer b;
+            luaL_buffinit(L, &b);
+            for (size_t k = 0; k < len; k++) {
+                if (s[k] == '\n')
+                    luaL_addlstring(&b, "\\n", 2);
+                else if (s[k] == '\r')
+                    luaL_addlstring(&b, "\\r", 2);
+                else
+                    luaL_addchar(&b, s[k]);
+            }
+            luaL_pushresult(&b);
+            s = lua_tostring(L, -1);
             log_log(level, src, line, "%s %s", tag, s);
+            lua_pop(L, 2);   /* the escaped copy and luaL_tolstring's */
+            continue;
+        }
+        log_log(level, src, line, "%s %s", tag, s);
         lua_pop(L, 1);
     }
     return 0;

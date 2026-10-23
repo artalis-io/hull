@@ -60,6 +60,12 @@ static int lua_sse_event(lua_State *L)
      * field (batched into chunks since Keel 3.3.1), in this one call. */
     lua_hlwork(L, (size_t)hl_work_sse_units(data, data_len,
                     (event_name ? strlen(event_name) : 0) + (id ? strlen(id) : 0)), 0);
+    /* Again, now that the arguments are converted (audit 24): a number
+     * converted to a string allocates, and an allocation can run a __gc
+     * finalizer that calls stream:close() - the event went out after the
+     * stream's terminator. */
+    if (stream_dead(ud))
+        return luaL_error(L, "SSE stream is closed");
 
     int rc = kl_http_sse_event(&ud->sse, event_name, data, data_len, id);
     if (rc < 0)
@@ -77,6 +83,8 @@ static int lua_sse_comment(lua_State *L)
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
     lua_hlwork(L, (size_t)hl_work_sse_units(text, len, 0), 0);   /* audit 14 */
+    if (stream_dead(ud))   /* audit 24, see lua_sse_event */
+        return luaL_error(L, "SSE stream is closed");
 
     int rc = kl_http_sse_comment(&ud->sse, text, len);
     if (rc < 0)

@@ -14,6 +14,7 @@
 
 #include <sh_arena.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -85,16 +86,55 @@ static int lua_parse_http_headers(lua_State *L, int idx,
     if (!hdrs)
         return -1;
 
+    /* Nothing in this walk may allocate on the Lua heap (audit 24):
+     * lua_tolstring on a NUMBER value converts it in place, which can run
+     * the collector - and an app __gc finalizer that adds keys to this
+     * table, so the walk met more entries than it counted and wrote past
+     * hdrs. A number is formatted into a C buffer instead, and the walk
+     * fails past `count` entries (the table changed under it). */
     int i = 0;
     lua_pushnil(L);
     while (lua_next(L, idx) != 0) {
         /* A string KEY only: lua_tolstring converts a number key in place,
          * and lua_next then fails on the changed key ("invalid key to
          * 'next'"). */
-        if (lua_type(L, -2) == LUA_TSTRING && lua_isstring(L, -1)) {
+        int vt = lua_type(L, -1);
+        if (lua_type(L, -2) == LUA_TSTRING
+            && (vt == LUA_TSTRING || vt == LUA_TNUMBER)) {
+            if (i >= count) {
+                lua_pop(L, 2);
+                return -1;
+            }
             size_t nlen, vlen;
+            char num[64];
             const char *n = lua_tolstring(L, -2, &nlen);
-            const char *v = lua_tolstring(L, -1, &vlen);
+            const char *v;
+            if (vt == LUA_TSTRING) {
+                v = lua_tolstring(L, -1, &vlen);
+            } else {
+                int w;
+                if (lua_isinteger(L, -1)) {
+                    w = snprintf(num, sizeof(num), LUA_INTEGER_FMT,
+                                 (LUAI_UACINT)lua_tointeger(L, -1));
+                } else {
+                    w = snprintf(num, sizeof(num), LUA_NUMBER_FMT,
+                                 (LUAI_UACNUMBER)lua_tonumber(L, -1));
+                    /* As Lua's tostring: a float that reads as an integer
+                     * keeps a ".0". */
+                    if (w > 0 && (size_t)w + 2 < sizeof(num)
+                        && num[strspn(num, "-0123456789")] == '\0') {
+                        num[w++] = '.';
+                        num[w++] = '0';
+                        num[w] = '\0';
+                    }
+                }
+                if (w < 0 || (size_t)w >= sizeof(num)) {
+                    lua_pop(L, 2);
+                    return -1;
+                }
+                v = num;
+                vlen = (size_t)w;
+            }
             char *nc = sh_arena_alloc(scratch, nlen + 1);
             char *vc = sh_arena_alloc(scratch, vlen + 1);
             if (!nc || !vc) {

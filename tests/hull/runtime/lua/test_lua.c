@@ -12285,4 +12285,129 @@ UTEST(lua_audit23, refused_db_async_gives_its_params_scratch_back)
     f.be->free(f.actx);
 }
 
+/* Audit 24 R2: db.upsert / insert_if_absent refused (bad arrays, a length
+ * mismatch, a reserved identifier) raised with their scratch arrays held,
+ * so a pcall loop over a refused call filled the arena for the rest of the
+ * run and every later scratch user failed. */
+UTEST(lua_audit24, refused_db_helpers_give_their_scratch_back)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    /* 32766 columns a call: ~256 KB of names, ~768 KB of values. 200 calls
+     * of each kind are many times the arena. */
+    EXPECT_EQ_MSG(audit10_run(
+        "db.exec('CREATE TABLE a24 (id INTEGER PRIMARY KEY, v TEXT)') "
+        "local cols, vals = {}, {} "
+        "for i = 1, 32766 do cols[i] = 'c' .. i; vals[i] = i end "
+        "local bad = {} for i = 1, 32765 do bad[i] = 'c' .. i end bad[32766] = 1 "
+        "local res = {} for i = 1, 32766 do res[i] = '_hull_x' end "
+        "for i = 1, 200 do "
+        "  assert(not pcall(db.upsert, 'a24', {'id'}, cols, {1}))\n"
+        "  assert(not pcall(db.insert_if_absent, 'a24', nil, cols, {1}))\n"
+        "  assert(not pcall(db.upsert, 'a24', cols, bad, vals))\n"
+        "  assert(not pcall(db.upsert, 'a24', {'id'}, res, vals))\n"
+        "  assert(not pcall(db.insert_if_absent, 'a24', cols, res, vals))\n"
+        "  assert(not pcall(db.upsert, 'a24', {'id'}, cols, {{}}))\n"
+        "end "
+        "assert(#crypto.random(65536) == 65536) "
+        "local sql = 'SELECT ' .. string.rep('?, ', 99) .. '? AS last' "
+        "local p = {} for i = 1, 100 do p[i] = i end "
+        "assert(db.query(sql, p)[1].last == 100) "
+        "assert(db.upsert('a24', {'id'}, {'id', 'v'}, {1, 'x'}) == 1) "
+        "assert(db.query('SELECT v FROM a24 WHERE id = 1')[1].v == 'x') "
+        "local ok, e = pcall(db.upsert, 'a24', {'id'}, {'id'}, {1, 2}) "
+        "assert(not ok and tostring(e):find('length mismatch', 1, true), e) "
+        "ok, e = pcall(db.upsert, '_hull_x', {'id'}, {'id'}, {1}) "
+        "assert(not ok and tostring(e):find('_hull_', 1, true), e) "
+        "ok, e = pcall(db.upsert, 'a24', {}, {'id'}, {1}) "
+        "assert(not ok and tostring(e):find('non-empty', 1, true), e) "
+        "return 1",
+        0, err, sizeof err), LUA_OK, err);
+    cleanup_lua_caps();
+}
+
+/* Audit 24 H1: the header copy counted the table, then converted numeric
+ * values in place - an allocation that could run a __gc finalizer adding
+ * keys to the same table, so the walk wrote past the array it had sized.
+ * Numbers are formatted without touching the Lua heap now, and the walk is
+ * bounded by its count. */
+UTEST(lua_audit24, http_header_numbers_do_not_run_app_code)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    EXPECT_NE(audit10_run(
+        "local http = require('hull.http-client') "
+        "local h = {} "
+        "for i = 1, 64 do h['X-N' .. i] = i + 0.5 end "
+        "for i = 1, 64 do h['X-I' .. i] = i end "
+        "local n = 0 "
+        "for i = 1, 2000 do "
+        "  setmetatable({}, { __gc = function() "
+        "    n = n + 1 h['X-G' .. n] = n end }) "
+        "end "
+        "collectgarbage('incremental', 1, 1000) "
+        "http.get('http://x.invalid/', { headers = h })",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* Refused for the host, not the headers. */
+    EXPECT_EQ_MSG(strstr(err, "invalid headers"), NULL, err);
+    (void)luaL_dostring(lua_rt.L, "collectgarbage('incremental', 200, 100)");
+    lua_settop(lua_rt.L, 0);
+    lua_rt.base.http_cfg = NULL;
+    cleanup_lua_caps();
+}
+
+/* Audit 24 R4: log.* passed CR / LF through, so a message could write a log
+ * line of its own (a forged record). They go out as \r / \n now. */
+static char g_a24_log[2048];
+static void a24_log_collect(log_Event *ev)
+{
+    if (!ev->fmt)
+        return;
+    char line[1024];
+    vsnprintf(line, sizeof line, ev->fmt, ev->ap);
+    if (!strstr(line, "a24mark"))
+        return;
+    size_t n = strlen(g_a24_log);
+    snprintf(g_a24_log + n, sizeof g_a24_log - n, "%s|", line);
+}
+
+UTEST(lua_audit24, log_escapes_cr_lf)
+{
+    static int registered;
+    if (!registered) {
+        log_add_callback(a24_log_collect, NULL, LOG_TRACE);
+        registered = 1;
+    }
+    g_a24_log[0] = '\0';
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    EXPECT_EQ_MSG(audit10_run(
+        "local log = require('hull.log') "
+        "log.info('a24mark one\\n[hull:lua] forged\\r\\nend') "
+        "log.warn('a24mark', 42) "
+        "return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+    EXPECT_EQ_MSG(strchr(g_a24_log, '\n'), NULL, g_a24_log);
+    EXPECT_EQ_MSG(strchr(g_a24_log, '\r'), NULL, g_a24_log);
+    EXPECT_NE_MSG(strstr(g_a24_log,
+                         "a24mark one\\n[hull:lua] forged\\r\\nend"), NULL,
+                  g_a24_log);
+    EXPECT_NE_MSG(strstr(g_a24_log, "a24mark|"), NULL, g_a24_log);
+    /* A long message is charged: 64 KiB logged 64 times is 2^19 units, past
+     * a 100000-instruction limit. */
+    log_set_quiet(true);
+    EXPECT_NE(audit10_run(
+        "local log = require('hull.log') "
+        "local s = string.rep('x', 1 << 16) "
+        "for i = 1, 64 do log.debug(s) end return 1",
+        100000, err, sizeof err), LUA_OK);
+    log_set_quiet(false);
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();
