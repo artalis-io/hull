@@ -1156,14 +1156,16 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         unveil("/etc/hosts",         "r");
         unveil("/etc/nsswitch.conf", "r");
         unveil("/etc/services",      "r");
+        unveil("/etc/gai.conf",      "r");   /* glibc getaddrinfo sorting */
+        unveil("/etc/host.conf",     "r");   /* glibc resolver options */
         /* systemd-resolved IPC socket (modern Linux) and nscd socket */
         unveil("/run/systemd/resolve", "r");
         unveil("/var/run/nscd",        "r");
-        /* /etc/ssl/certs is needed when CA bundle uses the system path
-         * (mbedTLS doesn't read it directly, but glibc nss modules may
-         * touch /etc files generally - give the whole /etc readonly to
-         * cover gai_conf, hosts.d, etc.). */
-        unveil("/etc",               "r");
+        /* Named files only (audit 24): this granted all of /etc as well -
+         * /etc/shadow where readable, SSH host keys, every service's
+         * config. No CA store needs it: hl_ca_trust_resolve reads the
+         * bundle into memory before the sandbox applies, and an explicit
+         * --ca-bundle is unveiled above. */
     }
 
     /* TLS certificate and private key for HTTPS server */
