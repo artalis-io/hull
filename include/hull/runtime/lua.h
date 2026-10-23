@@ -88,6 +88,10 @@ typedef struct HlLua {
      * and the copies in-flight compute.async / gpu.async ops, compute.stream
      * and the GPU image pins hold (HlOffheapHold, shared/offheap.h, audit 20). */
     size_t          wasm_buf_bytes;
+    /* What in-flight db.async results and worker.dispatch return values
+     * hold off the heap, copied on the pool threads (HlOffheapShared,
+     * shared/offheap.h, audit 23). Atomic access only. */
+    size_t          async_result_bytes;
     int64_t         max_instructions;  /* 0 = no limit */
     HlLuaBudget     budget;            /* shared by all threads of L */
     HlRunWatch      run_watch;         /* the run's wall-clock deadline */

@@ -958,9 +958,15 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
                 "LISTEN/NOTIFY (check conn.dialect.supportsNotify)");
         if (argc < 1)
             return JS_ThrowTypeError(ctx, "waitNotify requires (channel, timeoutMs?)");
-        const char *channel = JS_ToCString(ctx, argv[0]);
+        size_t channel_len;
+        const char *channel = JS_ToCStringLen(ctx, &channel_len, argv[0]);
         if (!channel)
             return JS_EXCEPTION;
+        if (channel_len > HL_WORKER_DB_CHANNEL_MAX) {
+            JS_FreeCString(ctx, channel);
+            return JS_ThrowRangeError(ctx, "waitNotify: a channel name is at "
+                                      "most %d bytes", HL_WORKER_DB_CHANNEL_MAX);
+        }
         /* 0..HL_WORKER_DB_NOTIFY_MAX_MS (audit 14): the wait holds a pool
          * thread, and an unclamped value held one for ~24 days. Read as a
          * double: ToInt32 wraps 2**32 - 1 to -1 and 2**32 + 5 to 5. */
@@ -1088,6 +1094,8 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         const char *dsn = js_call_dsn(ctx, this_val);
         op->max_instructions = js->max_instructions;   /* the op's own */
         op->max_result_bytes = js->max_heap_bytes;
+        hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
+                               js->max_heap_bytes);
         op->no_cache = JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;
         if (op->no_cache) op->dyn_id = hl_db_dynamic_id(js_call_handle(ctx, this_val));
         if (dsn) {

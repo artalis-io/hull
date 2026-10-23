@@ -286,6 +286,8 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     op->server = js->server;
     op->alloc = js->base.alloc;
     op->max_heap_bytes = js->max_heap_bytes;
+    hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
+                           js->max_heap_bytes);
     op->max_stack_bytes = js->max_stack_bytes;
     op->max_instructions = js->max_instructions;
     op->with_db = js->base.module_set &&

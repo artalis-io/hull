@@ -12214,6 +12214,68 @@ UTEST(lua_audit22, async_param_and_ctx_copies_are_held_to_the_heap_limit)
     f.be->free(f.actx);
 }
 
+/* ── Audit 23 G1: async RESULT copies are held to the heap limit ─────── */
+
+/* A worker.dispatch return value was copied off the heap with no bound (a
+ * table of keys naming one big string, once per key), and a db.async result
+ * was capped per op, so the ops in flight held that cap many times over.
+ * Both now take their bytes from the VM's async_result_bytes. */
+static char lua_a23_worker_dsn[HL_TEST_PATH_MAX + 16];
+
+UTEST(lua_audit23, async_result_copies_are_held_to_the_heap_limit)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a23wdb"), NULL);
+    snprintf(lua_a23_worker_dsn, sizeof lua_a23_worker_dsn, "%s/w.db", dir);
+    hl_worker_db_init(lua_a23_worker_dsn);
+    LuaWorkerFix f;
+    memset(&f, 0, sizeof f);
+    f.be = hl_async_backend();
+    ASSERT_EQ(f.be->init(&f.actx, NULL), 0);
+    ASSERT_EQ(f.be->pool_create(&f.pool, f.actx, 1, 16), 0);
+    pending_async_ctx   = f.actx;
+    pending_thread_pool = f.pool;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = 16u << 20;
+    char out[512];
+    lua_worker_run(&f,
+        "local w = require('hull.worker')\n"
+        "local r = w.dispatch(function()\n"
+        "  local s = string.rep('x', 1 << 20) local t = {}\n"
+        "  for i = 1, 64 do t['k' .. i] = s end return t end)\n"
+        "local small = w.dispatch(function() return { a = 'b' } end)\n"
+        "return (type(r) == 'table' and tostring(r.error) or '?') .. '|'\n"
+        "    .. tostring(small.a)\n", out, sizeof out);
+    EXPECT_NE_MSG(strstr(out, "result too large"), NULL, out);
+    EXPECT_NE_MSG(strstr(out, "|b"), NULL, out);
+    EXPECT_EQ(lua_rt.async_result_bytes, (size_t)0);
+
+    /* Other results in flight already hold all but 64 KiB of the limit. */
+    lua_rt.async_result_bytes = (16u << 20) - (64u << 10);
+    lua_worker_run(&f,
+        "local ok, a, b = pcall(db.async.query,\n"
+        "                       'SELECT zeroblob(262144) AS z')\n"
+        "return tostring(ok) .. '|' .. tostring(a) .. '|' .. tostring(b)\n",
+        out, sizeof out);
+    EXPECT_NE_MSG(strstr(out, "in-flight"), NULL, out);
+    EXPECT_EQ(lua_rt.async_result_bytes, (size_t)((16u << 20) - (64u << 10)));
+    lua_rt.async_result_bytes = 0;
+    lua_worker_run(&f,
+        "local rows = db.async.query('SELECT zeroblob(262144) AS z')\n"
+        "return tostring(#rows[1].z)\n", out, sizeof out);
+    EXPECT_STREQ(out, "262144");
+    EXPECT_EQ(lua_rt.async_result_bytes, (size_t)0);
+
+    lua_rt.mem_limit = saved;
+    pending_async_ctx = NULL;
+    cleanup_lua_caps();
+    f.be->tick(f.actx, 0);
+    f.be->pool_free(f.pool);
+    f.be->free(f.actx);
+}
+
 /* Audit 22: http.* sent a caller Host / Transfer-Encoding / Connection
  * as given - a second Host line, or a smuggled request. */
 UTEST(lua_audit22, http_refuses_headers_hulls_client_writes)

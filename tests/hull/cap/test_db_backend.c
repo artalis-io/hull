@@ -16,6 +16,7 @@
 #include "hull/worker_db.h"     /* hl_worker_db_notify_timeout, _materialize */
 #include <sqlite3.h>
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 /* ── Row callback helpers ───────────────────────────────────────────── */
@@ -160,7 +161,7 @@ static int drain_materialize(HlDbOpBudget *b, size_t max_bytes,
     HlDbResult r;
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, b);
     int rc = hl_worker_db_materialize(&h, "SELECT", NULL, 0, max_bytes, b,
-                                      &r, err, errsz);
+                                      NULL, &r, err, errsz);
     hl_db_budget_restore(prev);
     hl_db_result_free(&r);
     return rc;
@@ -205,6 +206,63 @@ UTEST(db_backend, an_async_result_under_the_cap_is_copied)
     EXPECT_FALSE(b.tripped);
     EXPECT_FALSE(drain.abandoned);
     EXPECT_EQ(10, drain.rows_read);
+}
+
+/* ── Audit 23: in-flight db.async results share one ceiling ─────────── */
+
+static int drain_materialize_held(HlOffheapShared *hold, char *err,
+                                  size_t errsz)
+{
+    HlDbHandle h = {0};
+    h.backend = &drain_backend;
+    HlDbResult r;
+    HlDbOpBudget b = { 0, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    int rc = hl_worker_db_materialize(&h, "SELECT", NULL, 0, 0, &b, hold,
+                                      &r, err, errsz);
+    hl_db_budget_restore(prev);
+    hl_db_result_free(&r);
+    return rc;
+}
+
+/* Each result was capped on its own, so the ops one run kept in flight held
+ * that cap many times over. A copy takes its bytes from the VM's total and
+ * is refused once the total is full; a refusal gives its share back. */
+UTEST(db_backend, in_flight_async_results_share_the_heap_limit)
+{
+    size_t total = 0;
+    HlOffheapShared hold;
+    char err[256] = {0};
+
+    memset(&drain, 0, sizeof drain);
+    drain.rows_total = 10;
+    hl_offheap_shared_init(&hold, &total, 1u << 20);
+    EXPECT_EQ(0, drain_materialize_held(&hold, err, sizeof err));
+    EXPECT_GT(hold.bytes, (size_t)(10 * 4096));
+    EXPECT_EQ(total, hold.bytes);
+    hl_offheap_shared_drop(&hold);
+    EXPECT_EQ(total, (size_t)0);
+
+    /* Other ops already hold all but 64 KiB of the limit. */
+    memset(&drain, 0, sizeof drain);
+    drain.rows_total = 100;
+    total = (1u << 20) - (64u << 10);
+    hl_offheap_shared_init(&hold, &total, 1u << 20);
+    EXPECT_EQ(-2, drain_materialize_held(&hold, err, sizeof err));
+    EXPECT_NE_MSG(strstr(err, "in-flight"), NULL, err);
+    EXPECT_TRUE(drain.abandoned);
+    EXPECT_EQ(hold.bytes, (size_t)0);
+    EXPECT_EQ(total, (size_t)((1u << 20) - (64u << 10)));
+}
+
+/* hl_worker_db_copy_bytes counted the strings but not the array. */
+UTEST(db_backend, async_copy_bytes_count_the_param_array)
+{
+    HlValue p[4];
+    memset(p, 0, sizeof p);
+    EXPECT_EQ(hl_worker_db_copy_bytes(p, 4, 10), 10 + 4 * sizeof(HlValue));
+    EXPECT_EQ(hl_worker_db_copy_bytes(NULL, 0, 10), (size_t)10);
+    EXPECT_EQ(hl_worker_db_copy_bytes(p, INT32_MAX, SIZE_MAX - 8), SIZE_MAX);
 }
 
 UTEST(db_backend, sqlite_exec_via_vtable)

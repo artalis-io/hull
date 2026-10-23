@@ -114,10 +114,13 @@ void hl_db_result_free(HlDbResult *r);
  * thread - is tripped, so a network backend closes the connection at its next
  * row instead of reading the rest of the reply (audit 16). Returns 0; -1 when
  * the query failed (@p err "query: ..."); -2 when the result was refused
- * (@p err says why, @p out is empty). */
+ * (@p err says why, @p out is empty). The copy also takes its bytes from
+ * @p hold (NULL: none), the VM's share of every in-flight result, and is
+ * refused once that is full; on a refusal @p hold is given back. */
 int hl_worker_db_materialize(HlDbHandle *h, const char *sql,
                              const HlValue *params, int nparams,
                              size_t max_bytes, HlDbOpBudget *budget,
+                             HlOffheapShared *hold,
                              HlDbResult *out, char *err, size_t errsz);
 
 /* ── Worker DB operation ───────────────────────────────────────────── */
@@ -132,6 +135,12 @@ typedef enum { HL_WORK_DB_QUERY, HL_WORK_DB_EXEC,
 /* conn.wait_notify / waitNotify: the timeout is clamped to 0..this many ms
  * (audit 14), so one call cannot hold a pool thread for days. */
 #define HL_WORKER_DB_NOTIFY_MAX_MS 60000
+
+/* The longest LISTEN channel name a wait_notify takes (Postgres's
+ * identifier limit). The bindings refuse a longer one before they copy it:
+ * the copy is off the heap until the op ends, and only the backend
+ * checked the length (audit 23). */
+#define HL_WORKER_DB_CHANNEL_MAX 63
 
 /* A wait_notify timeout as asked for (any number), clamped to
  * 0..HL_WORKER_DB_NOTIFY_MAX_MS; NaN is 0. */
@@ -190,6 +199,12 @@ typedef struct HlWorkerDbOp {
      * whose params named one big string 32766 times copied it 32766 times
      * (audit 22). Given back by hl_worker_db_op_free. */
     HlOffheapHold  copy_hold;
+
+    /* The result copy, on the submitting VM's async_result_bytes under its
+     * heap limit: capped per op only, the ~68 ops one run kept in flight
+     * held 68 heap limits between them (audit 23). Taken on the pool
+     * thread as rows are copied, given back by hl_worker_db_op_free. */
+    HlOffheapShared result_hold;
 } HlWorkerDbOp;
 
 /* Submit a db.async operation to the thread pool.
@@ -211,8 +226,9 @@ void hl_worker_db_async_cancel(KlAsyncOp *op, void *user_data);
  * Returns NULL on failure or if n <= 0. Caller frees strings + array. */
 HlValue *hl_deep_copy_params(const HlValue *src, int n);
 
-/* The bytes hl_deep_copy_params copies for @p src, plus @p sql_len (the
- * SQL's copy) - SIZE_MAX when the sum overflows. A binding takes an
+/* The bytes hl_deep_copy_params copies for @p src (the array and its
+ * strings), plus @p sql_len (the SQL's copy) - SIZE_MAX when the sum
+ * overflows. A binding takes an
  * HlOffheapHold for it, and charges it, before it copies. */
 size_t hl_worker_db_copy_bytes(const HlValue *src, int n, size_t sql_len);
 

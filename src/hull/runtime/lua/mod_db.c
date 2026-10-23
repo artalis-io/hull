@@ -969,7 +969,11 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
             !bound->backend->wait_notify)
             return luaL_error(L, "wait_notify: this database has no "
                               "LISTEN/NOTIFY (check conn.dialect.supports_notify)");
-        channel = luaL_checkstring(L, 1);
+        size_t channel_len;
+        channel = luaL_checklstring(L, 1, &channel_len);
+        if (channel_len > HL_WORKER_DB_CHANNEL_MAX)
+            return luaL_error(L, "wait_notify: a channel name is at most %d "
+                              "bytes", HL_WORKER_DB_CHANNEL_MAX);
         /* 0..HL_WORKER_DB_NOTIFY_MAX_MS (audit 14): the wait holds a pool
          * thread, and an unclamped value held one for ~24 days. */
         timeout_ms = hl_worker_db_notify_timeout(
@@ -1080,6 +1084,8 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         const char *dsn = db_call_dsn(L);
         op->max_instructions = lua->max_instructions;   /* the op's own */
         op->max_result_bytes = lua->mem_limit;
+        hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
+                               lua->mem_limit);
         op->no_cache = luaL_testudata(L, lua_upvalueindex(1),
                                       HL_LUA_DB_OWNED_MT) != NULL;
         if (op->no_cache) op->dyn_id = hl_db_dynamic_id(db_resolve_handle(L));

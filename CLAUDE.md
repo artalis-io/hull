@@ -803,10 +803,18 @@ at the next row instead of reading the rest of the reply, uncharged and with
 no deadline (audit 16; `hl_worker_db_materialize`); the op keeps the copy's
 own message. A TEXT / BLOB cell whose copy cannot be allocated fails
 the op (`out of memory`) instead of reading as NULL in a result that
-succeeded (audit 24). Both bindings resolve the bound handle again after converting
+succeeded (audit 24). That cap is per op, and a run keeps up to the queue plus the
+workers (~68) in flight, so every result copy - and a `worker.dispatch` job's
+return value, which had no bound at all (a table of 500k keys naming one
+30 MB string) - also takes its bytes from one per-VM total, HlLua / HlJS
+`async_result_bytes`, updated with atomics from the pool threads
+(`HlOffheapShared`, `shared/offheap.h`) and capped at the heap limit (1 GiB
+with none); past it the op fails with `result too large`, and the op gives
+its share back when it is freed (audit 23). Both bindings resolve the bound handle again after converting
 their arguments (app code there - a JS getter, a Lua `__gc` run by the
 conversion's allocation - could close a `db.open` handle; Lua audit 16).
-`conn.wait_notify` clamps its
+`conn.wait_notify` refuses a channel name over 63 bytes before it copies it
+(`HL_WORKER_DB_CHANNEL_MAX`; audit 23) and clamps its
 timeout to 0..`HL_WORKER_DB_NOTIFY_MAX_MS` (60 s; `hl_worker_db_notify_timeout`)
 and raises on a backend without LISTEN/NOTIFY instead of taking a pool thread
 (audit 14).

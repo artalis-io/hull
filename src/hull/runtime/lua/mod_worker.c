@@ -299,6 +299,8 @@ static int lua_worker_dispatch(lua_State *L)
     op->server = lua->server;
     op->alloc = lua->base.alloc;
     op->mem_limit = lua->mem_limit;
+    hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
+                           lua->mem_limit);
     op->max_instructions = lua->max_instructions;
     op->with_db = lua->base.module_set &&
                   hl_module_set_contains_short(lua->base.module_set, "db");

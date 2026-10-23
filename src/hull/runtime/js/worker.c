@@ -274,8 +274,17 @@ static void push_kv_object(JSContext *ctx, JSValue obj,
     }
 }
 
+/* Take @p n bytes of the result copy from the VM's in-flight results:
+ * 0, or -2 when that would pass its heap limit. Every copy is at least a
+ * byte, so @p n of 0 is a length + 1 that wrapped: refused too. */
+static int capture_take(HlJsWorkerDispatchOp *op, size_t n)
+{
+    if (n == 0) return -2;
+    return hl_offheap_shared_take(&op->result_hold, n) == 0 ? 0 : -2;
+}
+
 /* Capture a JS value into the dispatch op result fields.
- * Returns 0 on success. */
+ * Returns 0 on success, -1 out of memory, -2 too large (capture_take). */
 static int capture_result(JSContext *ctx, JSValue val,
                           HlJsWorkerDispatchOp *op)
 {
@@ -307,6 +316,10 @@ static int capture_result(JSContext *ctx, JSValue val,
         size_t len;
         const char *s = JS_ToCStringLen(ctx, &len, val);
         if (!s) return -1;
+        if (capture_take(op, len + 1) != 0) {
+            JS_FreeCString(ctx, s);
+            return -2;
+        }
         op->result_str = malloc(len + 1);
         if (!op->result_str) {
             JS_FreeCString(ctx, s);
@@ -339,6 +352,12 @@ static int capture_result(JSContext *ctx, JSValue val,
             return 0;
         }
 
+        if (capture_take(op, (size_t)tab_len * sizeof(HlKV)) != 0) {
+            for (uint32_t i = 0; i < tab_len; i++)
+                JS_FreeAtom(ctx, tab[i].atom);
+            js_free(ctx, tab);
+            return -2;
+        }
         op->result_kvs = calloc(tab_len, sizeof(HlKV));
         if (!op->result_kvs) {
             for (uint32_t i = 0; i < tab_len; i++)
@@ -356,9 +375,10 @@ static int capture_result(JSContext *ctx, JSValue val,
             if (!key) { rc = -1; break; }
 
             int idx = op->result_count;
-            op->result_kvs[idx].key = strdup(key);
+            int big = capture_take(op, strlen(key) + 1);
+            op->result_kvs[idx].key = big ? NULL : strdup(key);
             JS_FreeCString(ctx, key);
-            if (!op->result_kvs[idx].key) { rc = -1; break; }
+            if (!op->result_kvs[idx].key) { rc = big ? -2 : -1; break; }
             HlValue *v = &op->result_kvs[idx].value;
             v->type = HL_TYPE_NIL;
             op->result_count++;
@@ -383,11 +403,12 @@ static int capture_result(JSContext *ctx, JSValue val,
             } else if (JS_IsString(pval)) {
                 size_t slen;
                 const char *sv = JS_ToCStringLen(ctx, &slen, pval);
-                char *buf = sv ? malloc(slen + 1) : NULL;
+                if (sv) big = capture_take(op, slen + 1);
+                char *buf = (sv && !big) ? malloc(slen + 1) : NULL;
                 if (!buf) {
                     if (sv) JS_FreeCString(ctx, sv);
                     JS_FreeValue(ctx, pval);
-                    rc = -1;
+                    rc = (sv && big) ? -2 : -1;
                     break;
                 }
                 memcpy(buf, sv, slen);
@@ -579,14 +600,18 @@ static void js_dispatch_run(HlJsWorkerCtx *wctx, JSContext *ctx,
      * over the budget left a partly captured result (the rest read as
      * null), which used to be reported as success (L4); one that threw
      * fails the dispatch with its error (audit 24). */
-    if (capture_result(ctx, result, op) != 0 && !wctx->tripped) {
-        if (JS_HasException(ctx)) {
+    int crc = capture_result(ctx, result, op);
+    if (crc != 0 && !wctx->tripped) {
+        if (crc == -1 && JS_HasException(ctx)) {
             JSValue exc = JS_GetException(ctx);
             js_dispatch_fail(wctx, ctx, op, exc);
             JS_FreeValue(ctx, exc);
         } else {
             op->error = 1;
-            snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
+            snprintf(op->error_msg, sizeof(op->error_msg), "%s", crc == -2
+                     ? "dispatch: result too large (the VM's in-flight async "
+                       "results would exceed its heap limit)"
+                     : "out of memory");
         }
     }
     if (wctx->tripped) {
@@ -643,6 +668,7 @@ void hl_js_worker_dispatch_op_free(HlJsWorkerDispatchOp *op)
     free(op->result_str);
     hl_kv_free(op->result_kvs, op->result_count);
     op->result_kvs = NULL;
+    hl_offheap_shared_drop(&op->result_hold);
     hl_offheap_drop(&op->copy_hold);
 }
 
