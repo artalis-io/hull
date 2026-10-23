@@ -110,14 +110,15 @@ static JSValue js_sse_comment(JSContext *ctx, JSValueConst this_val,
     const char *text = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!text) return JS_EXCEPTION;
 
-    /* Re-checked: the toString above may have closed the stream. */
-    if (stream_dead(ud)) {
-        JS_FreeCString(ctx, text);
-        return JS_ThrowTypeError(ctx, "SSE stream is closed");
-    }
     if (hl_js_budget_charge(ctx, hl_work_sse_units(text, len, 0))) {   /* audit 14 */
         JS_FreeCString(ctx, text);
         return JS_EXCEPTION;
+    }
+    /* Re-checked right before the write, as stream.event does: the
+     * toString above may have closed the stream (audit 24). */
+    if (stream_dead(ud)) {
+        JS_FreeCString(ctx, text);
+        return JS_ThrowTypeError(ctx, "SSE stream is closed");
     }
     int rc = kl_http_sse_comment(&ud->sse, text, len);
     JS_FreeCString(ctx, text);

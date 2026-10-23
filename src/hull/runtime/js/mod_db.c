@@ -77,7 +77,10 @@ static int js_query_row_cb(void *opaque, HlColumn *cols, int ncols)
 
 static void js_free_hl_values(JSContext *ctx, HlValue *params, int count);
 
-/* Marshal JS values to HlValue array for parameter binding */
+/* Marshal JS values to HlValue array for parameter binding. Returns 0, or
+ * -1 with an exception pending: the app's own (a throwing length trap or
+ * element getter), else a TypeError / RangeError naming the problem - every
+ * failure used to become "params must be an array" (audit 24). */
 static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
                               HlValue **out_params, int *out_count)
 {
@@ -87,36 +90,44 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
     if (JS_IsUndefined(arr) || JS_IsNull(arr))
         return 0;
 
-    if (!JS_IsArray(ctx, arr))
-        return -1;
-
-    int32_t len = 0;
-    if (hl_js_get_length32(ctx, arr, &len) < 0) {
-        /* A Proxy's throwing length trap: it bound no params, and ran the
-         * statement with the exception pending (audit 23). Refused, as a
-         * throwing element getter is below. */
-        JS_FreeValue(ctx, JS_GetException(ctx));
+    if (JS_IsArray(ctx, arr) != 1) {
+        if (!JS_HasException(ctx))   /* a revoked Proxy throws its own */
+            JS_ThrowTypeError(ctx, "params must be an array");
         return -1;
     }
+
+    /* The length as an int64: read as int32, a length in [2^31, 2^32)
+     * wrapped negative and bound no params, and a Proxy reporting 2^32 + 1
+     * bound one - the limit below never fired (audit 24). A throwing length
+     * trap is refused with its own error (audit 23). */
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    if (JS_IsException(len_val))
+        return -1;
+    int64_t len = 0;
+    int lrc = JS_ToInt64(ctx, &len, len_val);
+    JS_FreeValue(ctx, len_val);
+    if (lrc != 0)
+        return -1;
 
     if (len <= 0)
         return 0;
 
     /* SQLite's variable limit: a sparse [] with length 1e9 drove a billion
      * uninterruptible element reads. */
-    if (len > 32766)
+    if (len > 32766) {
+        JS_ThrowRangeError(ctx, "params: too many (at most 32766)");
         return -1;
+    }
 
     HlValue *params = js_mallocz(ctx, (size_t)len * sizeof(HlValue));
     if (!params)
-        return -1;
+        return -1;   /* js_mallocz threw */
 
-    for (int32_t i = 0; i < len; i++) {
+    for (int32_t i = 0; i < (int32_t)len; i++) {
         JSValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
         if (JS_IsException(v)) {
             /* A throwing element getter: bound as NULL, it ran the statement
              * with a value the app never supplied. */
-            JS_FreeValue(ctx, JS_GetException(ctx));
             js_free_hl_values(ctx, params, i);
             return -1;
         }
@@ -143,7 +154,6 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
                  * value the app never supplied and reported success
                  * (audit 22). */
                 JS_FreeValue(ctx, v);
-                JS_FreeValue(ctx, JS_GetException(ctx));
                 js_free_hl_values(ctx, params, i);
                 return -1;
             }
@@ -166,7 +176,7 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
     }
 
     *out_params = params;
-    *out_count = len;
+    *out_count = (int)len;
     return 0;
 }
 
@@ -201,8 +211,12 @@ static int js_to_string_array(JSContext *ctx, JSValueConst arr,
     if (len <= 0)
         return -1;
 
-    if ((size_t)len > SIZE_MAX / sizeof(char *))
+    /* SQLite's variable limit, as for params: a sparse [] with a huge
+     * length drove that many uninterruptible element reads (audit 24). */
+    if (len > 32766) {
+        JS_ThrowRangeError(ctx, "too many columns (at most 32766)");
         return -1;
+    }
 
     const char **strs = js_mallocz(ctx, (size_t)len * sizeof(char *));
     if (!strs)
@@ -395,7 +409,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) {
         if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
             JS_FreeCString(ctx, sql);
-            return JS_ThrowTypeError(ctx, "params must be an array");
+            return JS_EXCEPTION;   /* the conversion's own error */
         }
     }
 
@@ -463,7 +477,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) {
         if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
             JS_FreeCString(ctx, sql);
-            return JS_ThrowTypeError(ctx, "params must be an array");
+            return JS_EXCEPTION;   /* the conversion's own error */
         }
     }
 
@@ -669,19 +683,23 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
 
     if (js_to_string_array(ctx, argv[1], &conflict_cols, &n_conflict) != 0) {
         JS_FreeCString(ctx, table);
+        if (JS_HasException(ctx)) return JS_EXCEPTION;   /* an app getter's own (audit 24) */
         return JS_ThrowTypeError(ctx, "conflictCols must be a non-empty array");
     }
     if (js_to_string_array(ctx, argv[2], &cols, &n_cols) != 0) {
         js_free_string_array(ctx, conflict_cols, n_conflict);
         JS_FreeCString(ctx, table);
+        if (JS_HasException(ctx)) return JS_EXCEPTION;   /* an app getter's own (audit 24) */
         return JS_ThrowTypeError(ctx, "cols must be a non-empty array");
     }
-    if (js_to_hl_values(ctx, argv[3], &values, &n_values) != 0
-        || n_values != n_cols) {
+    int vrc = js_to_hl_values(ctx, argv[3], &values, &n_values);
+    if (vrc != 0 || n_values != n_cols) {
         js_free_hl_values(ctx, values, n_values);
         js_free_string_array(ctx, cols, n_cols);
         js_free_string_array(ctx, conflict_cols, n_conflict);
         JS_FreeCString(ctx, table);
+        if (vrc != 0)
+            return JS_EXCEPTION;   /* the conversion's own error */
         return JS_ThrowTypeError(ctx, "values length must match cols length");
     }
 
@@ -990,7 +1008,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         if (argc >= 2) {
             if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
                 JS_FreeCString(ctx, sql);
-                return JS_ThrowTypeError(ctx, "params must be an array");
+                return JS_EXCEPTION;   /* the conversion's own error */
             }
         }
 

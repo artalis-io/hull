@@ -19,7 +19,12 @@
 /* Deep-copy a JS object (own string properties only, flat) to HlKV array.
  * @p bytes gets what the copies hold; past @p limit (0 = none) the copy
  * stops and fails with -2 - an ASCII string converts without a copy, so
- * every key naming one big string made a copy of it (audit 22). */
+ * every key naming one big string made a copy of it (audit 22).
+ * Returns -1 with an exception pending when a getter throws or a
+ * conversion fails: a throwing getter was stored as nil and the dispatch
+ * went ahead with the exception pending, a key that would not convert was
+ * skipped, and a string that would not convert was a TEXT value with no
+ * bytes (audit 24). */
 static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
                             HlKV **out_kvs, int *out_count,
                             size_t limit, size_t *bytes)
@@ -48,103 +53,90 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
         for (uint32_t i = 0; i < tab_len; i++)
             JS_FreeAtom(ctx, tab[i].atom);
         js_free(ctx, tab);
+        JS_ThrowOutOfMemory(ctx);
         return -1;
     }
 
     int count = 0;
+    int rc = 0;
     size_t total = 0;
     for (uint32_t i = 0; i < tab_len; i++) {
         const char *key = JS_AtomToCString(ctx, tab[i].atom);
-        if (!key) {
-            JS_FreeAtom(ctx, tab[i].atom);
-            continue;
-        }
+        if (!key) { rc = -1; break; }
         size_t klen = strlen(key) + 1;
         if (total > SIZE_MAX - klen || (limit && total + klen > limit)) {
             JS_FreeCString(ctx, key);
-            for (uint32_t j = i; j < tab_len; j++)
-                JS_FreeAtom(ctx, tab[j].atom);
-            js_free(ctx, tab);
-            hl_kv_free(kvs, count);
-            return -2;
+            rc = -2;
+            break;
         }
         total += klen;
 
         kvs[count].key = strdup(key);
         JS_FreeCString(ctx, key);
         if (!kvs[count].key) {
-            /* OOM on key dup: release tab slot, then everything copied so
-             * far, and bail (M-2). */
-            JS_FreeAtom(ctx, tab[i].atom);
-            for (uint32_t j = i + 1; j < tab_len; j++)
-                JS_FreeAtom(ctx, tab[j].atom);
-            js_free(ctx, tab);
-            hl_kv_free(kvs, count);
-            return -1;
+            JS_ThrowOutOfMemory(ctx);
+            rc = -1;
+            break;
         }
+        /* The key is owned from here: count it, so a failure below
+         * releases it with the rest. */
+        HlValue *v = &kvs[count].value;
+        v->type = HL_TYPE_NIL;
+        count++;
 
         JSValue val = JS_GetProperty(ctx, obj, tab[i].atom);
-        JS_FreeAtom(ctx, tab[i].atom);
+        if (JS_IsException(val)) { rc = -1; break; }
 
         if (JS_IsBool(val)) {
-            kvs[count].value.type = HL_TYPE_BOOL;
-            kvs[count].value.b = JS_ToBool(ctx, val);
+            v->type = HL_TYPE_BOOL;
+            v->b = JS_ToBool(ctx, val);
         } else if (JS_IsNumber(val)) {
             double d;
             JS_ToFloat64(ctx, &d, val);
             if (d >= -9007199254740992.0 && d <= 9007199254740992.0 &&  /* range first: casting NaN / out-of-range is UB */
                 d == (double)(int64_t)d) {
-                kvs[count].value.type = HL_TYPE_INT;
-                kvs[count].value.i = (int64_t)d;
+                v->type = HL_TYPE_INT;
+                v->i = (int64_t)d;
             } else {
-                kvs[count].value.type = HL_TYPE_DOUBLE;
-                kvs[count].value.d = d;
+                v->type = HL_TYPE_DOUBLE;
+                v->d = d;
             }
         } else if (JS_IsString(val)) {
             size_t slen;
             const char *sv = JS_ToCStringLen(ctx, &slen, val);
-            kvs[count].value.type = HL_TYPE_TEXT;
-            if (sv && (slen >= SIZE_MAX - total ||
-                       (limit && total + slen + 1 > limit))) {
-                kvs[count].value.type = HL_TYPE_NIL;
-                count++;   /* releases the key */
+            if (!sv) { JS_FreeValue(ctx, val); rc = -1; break; }
+            if (slen >= SIZE_MAX - total ||
+                (limit && total + slen + 1 > limit)) {
                 JS_FreeCString(ctx, sv);
                 JS_FreeValue(ctx, val);
-                for (uint32_t j = i + 1; j < tab_len; j++)
-                    JS_FreeAtom(ctx, tab[j].atom);
-                js_free(ctx, tab);
-                hl_kv_free(kvs, count);
-                return -2;
+                rc = -2;
+                break;
             }
-            if (sv) {
-                total += slen + 1;
-                char *buf = malloc(slen + 1);
-                if (!buf) {
-                    /* OOM on string dup: mark NIL, bump count so op_free
-                     * releases the already-strdup'd key. */
-                    kvs[count].value.type = HL_TYPE_NIL;
-                    count++;
-                    JS_FreeCString(ctx, sv);
-                    JS_FreeValue(ctx, val);
-                    for (uint32_t j = i + 1; j < tab_len; j++)
-                        JS_FreeAtom(ctx, tab[j].atom);
-                    js_free(ctx, tab);
-                    hl_kv_free(kvs, count);
-                    return -1;
-                }
-                memcpy(buf, sv, slen);
-                buf[slen] = '\0';
-                kvs[count].value.s = buf;
-                kvs[count].value.len = slen;
+            total += slen + 1;
+            char *buf = malloc(slen + 1);
+            if (!buf) {
                 JS_FreeCString(ctx, sv);
+                JS_FreeValue(ctx, val);
+                JS_ThrowOutOfMemory(ctx);
+                rc = -1;
+                break;
             }
-        } else {
-            kvs[count].value.type = HL_TYPE_NIL;
+            memcpy(buf, sv, slen);
+            buf[slen] = '\0';
+            v->type = HL_TYPE_TEXT;
+            v->s = buf;
+            v->len = slen;
+            JS_FreeCString(ctx, sv);
         }
         JS_FreeValue(ctx, val);
-        count++;
     }
+    for (uint32_t j = 0; j < tab_len; j++)
+        JS_FreeAtom(ctx, tab[j].atom);
     js_free(ctx, tab);
+    if (rc != 0) {
+        hl_kv_free(kvs, count);
+        return rc;
+    }
 
     *out_kvs = kvs;
     *out_count = count;
@@ -256,8 +248,7 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
             if (krc == -2)
                 return JS_ThrowRangeError(ctx, "worker.dispatch: ctx is "
                     "larger than the VM's heap limit");
-            return JS_ThrowInternalError(ctx,
-                "worker.dispatch: failed to serialize ctx object");
+            return JS_EXCEPTION;   /* the getter's / conversion's own error */
         }
     }
 

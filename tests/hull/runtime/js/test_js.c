@@ -12769,4 +12769,143 @@ UTEST(js_audit23, compute_option_getters_that_throw_fail_the_call)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* Audit 24: worker.dispatch's ctx copy stored a throwing getter as null and
+ * dispatched with the exception pending; a getter that threw on the
+ * returned object was a null field of a successful result. Both fail now,
+ * with the getter's own error. */
+JS_WORKER_CASE(a24_throwing_ctx_and_result_getters_fail_the_dispatch, (void)0,
+    "  let m = 'no throw';\n"
+    "  try { await worker.dispatch(() => 1,"
+    " { a: 1, get b() { throw new Error('ctx boom'); } }); }\n"
+    "  catch (e) { m = e.message; }\n"
+    "  check(m === 'ctx boom', 'ctx getter: ' + m);\n"
+    "  const r = await worker.dispatch(() =>"
+    " ({ a: 1, get b() { throw new Error('ret boom'); } }));\n"
+    "  check(r && typeof r.error === 'string' && r.error.includes('ret boom'),"
+    " 'result getter: ' + JSON.stringify(r));\n"
+    "  const ok = await worker.dispatch((c) => c.a + 1, { a: 41 });\n"
+    "  check(ok === 42, 'plain dispatch: ' + ok);\n")
+
+/* Audit 24: the params array's length was read as int32 - 2**31 wrapped
+ * negative and bound no params, 2**32 + 1 bound one - and an element
+ * getter's error was replaced by "params must be an array". */
+UTEST(js_audit24, db_params_length_is_not_wrapped)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const struct { const char *expr; const char *want; } cases[] = {
+        { "(() => { const a = []; a.length = 2 ** 31;"
+          " return db.query('SELECT 1', a); })()", "too many" },
+        { "db.query('SELECT 1', new Proxy([], { get: (t, k) =>"
+          " k === 'length' ? 2 ** 32 + 1 : undefined }))", "too many" },
+        { "db.exec('SELECT ?', new Proxy([], { get: (t, k) =>"
+          " k === 'length' ? 1 : (() => { throw new Error('elem boom'); })() }))",
+          "elem boom" },
+        { "db.query('SELECT ?', { length: 1, 0: 1 })", "params must be an array" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *r = a15_throws(cases[i].expr);
+        EXPECT_TRUE_MSG(r && strstr(r, cases[i].want) != NULL, cases[i].expr);
+        if (r && !strstr(r, cases[i].want)) printf("  got: %s\n", r);
+        free(r);
+    }
+    EXPECT_EQ(eval_int("db.query('SELECT ? AS v', [5])[0].v"), 5);
+    cleanup_js_caps();
+}
+
+/* The [app] records log.c printed while a24_log_collect was on. */
+static char g_a24_log[2048];
+static int g_a24_log_on;
+static void a24_log_collect(log_Event *ev)
+{
+    if (!g_a24_log_on || !ev->fmt) return;
+    size_t n = strlen(g_a24_log);
+    if (n + 2 >= sizeof g_a24_log) return;
+    vsnprintf(g_a24_log + n, sizeof g_a24_log - n - 1, ev->fmt, ev->ap);
+    n = strlen(g_a24_log);
+    g_a24_log[n] = '|';
+    g_a24_log[n + 1] = '\0';
+}
+
+/* Audit 24: log.* / console.* skipped an argument whose toString threw and
+ * returned with the exception pending; a CR / LF in app text started a
+ * forged log line. */
+UTEST(js_audit24, log_and_console_fail_on_a_throwing_tostring_and_escape_newlines)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static int registered;
+    if (!registered) {
+        log_add_callback(a24_log_collect, NULL, LOG_TRACE);
+        registered = 1;
+    }
+    ASSERT_EQ(a10_run_tripped(
+        "import { log } from 'hull:log';\n"
+        "const msg = (f) => { try { f(); return 'no throw'; }"
+        " catch (e) { return String(e && e.message); } };\n"
+        "const bad = { toString() { throw new Error('str boom'); } };\n"
+        "globalThis.__a24l = [msg(() => log.info('a', bad)),"
+        " msg(() => console.log(bad)), msg(() => log.warn('fine'))].join('|');\n"
+        "globalThis.__a24log = log;\n", 0), 0);
+    char *r = eval_str("globalThis.__a24l");
+    EXPECT_TRUE(r && strcmp(r, "str boom|str boom|no throw") == 0);
+    if (r && strcmp(r, "str boom|str boom|no throw") != 0) printf("  got: %s\n", r);
+    free(r);
+
+    g_a24_log[0] = '\0';
+    g_a24_log_on = 1;
+    char *v = eval_str("(globalThis.__a24log.info('one\\r\\nINFO forged'),"
+                       " console.log('two\\nthree'), 'done')");
+    g_a24_log_on = 0;
+    free(v);
+    EXPECT_TRUE(strstr(g_a24_log, "[app] one\\r\\nINFO forged|") != NULL);
+    EXPECT_TRUE(strstr(g_a24_log, "[app] two\\nthree|") != NULL);
+    EXPECT_TRUE(strchr(g_a24_log, '\n') == NULL && strchr(g_a24_log, '\r') == NULL);
+    if (!strstr(g_a24_log, "two\\nthree")) printf("  got: %s\n", g_a24_log);
+
+    /* Charged: a large message trips a small budget. */
+    EXPECT_EQ(a10_run_tripped("globalThis.__a24big = 'x'.repeat(4000000);", 0), 0);
+    g_a24_log_on = 0;
+    EXPECT_EQ(a10_run_tripped("console.log(__a24big);", 100000), 1);
+    cleanup_js_caps();
+}
+
+/* Audit 24: Hull called whatever main's promise's `then` was - an own
+ * `then` ran app code after main's entry was parked and was handed the
+ * settle callbacks, so it could end main at once with any exit code. */
+UTEST(js_audit24, an_own_then_on_mains_promise_does_not_settle_main)
+{
+    init_js();
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main("import { app } from 'hull:app';"
+        "app.main(() => { const p = hull.sleep(1).then(() => 7);"
+        " Object.defineProperty(p, 'then', { value(ok) { globalThis.__a24t = 1;"
+        " ok(42); } });"
+        " return p; });"));
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), -1);
+    EXPECT_NE(exit_code, 42);
+    EXPECT_EQ(eval_int("globalThis.__a24t | 0"), 0);
+    EXPECT_TRUE(js.sleep_timers == NULL);
+    EXPECT_EQ(js.cli_main_active, 0);
+    cleanup_js();
+    EXPECT_EQ(be->tick(loop, 0), 0);
+    be->free(loop);
+
+    /* An untouched async main still waits and exits with its value. */
+    init_js();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main("import { app } from 'hull:app';"
+        "app.main(async () => { await hull.sleep(1); return 9; });"));
+    exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    EXPECT_EQ(exit_code, 9);
+    cleanup_js();
+    be->free(loop);
+}
+
 UTEST_MAIN();
