@@ -261,9 +261,7 @@ end)
 
 -- Return results for C test harness
 test("integer: non-finite values fail", function()
-    local json = require("hull.json")
-    for _, value in ipairs({ math.huge, -math.huge, 0/0,
-                             json.decode('{"n":1e999}').n }) do
+    for _, value in ipairs({ math.huge, -math.huge, 0/0, 1e999 }) do
         local ok, errors = validate.check({ n = value }, {
             n = { type = "integer", min = 0 },
         })

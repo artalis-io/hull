@@ -272,7 +272,7 @@ await test("session logout trusts the origins auth-flows registered", () => {
 // ── idempotency ────────────────────────────────────────────────────
 
 await test("idempotency: principals are text, capped at the column width", () => {
-    const n = idempotency._normPrincipal;
+    const n = __testHooks("hull:web:middleware:idempotency").normPrincipal;
     assertEq(n(5), "5");
     assertEq(n(null), "__anon");
     assertEq(n(""), "__anon");

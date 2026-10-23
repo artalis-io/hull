@@ -305,14 +305,24 @@ function readToFile(id, dst) {
  * init's `orphanGrace`), each re-checked for references in its own
  * transaction. `attachment.delete` runs it after every delete; an app may
  * also schedule it (app.every).
+ * `limit` must be an integer (TypeError otherwise); below 1 sweeps nothing,
+ * above 10000 is 10000.
  * @param {Object} [opts]  { grace, limit }
  * @returns {number}  blobs unlinked
  */
+// The most queue entries one sweep takes.
+const SWEEP_MAX_LIMIT = 10000;
+
 function sweep(opts) {
     const o = opts || {};
     const grace = o.grace !== undefined ? o.grace : orphanGrace;
-    const limit = Math.floor(Number(o.limit !== undefined ? o.limit : 100));
-    if (!(limit >= 1)) return 0;
+    // A safe integer, at most SWEEP_MAX_LIMIT (audit 23): a string, a
+    // fraction, Infinity or 1e300 went into the LIMIT text as it coerced.
+    const rawLimit = o.limit !== undefined ? o.limit : 100;
+    if (!Number.isSafeInteger(rawLimit))
+        throw new TypeError("attachment.sweep: limit must be an integer");
+    if (rawLimit < 1) return 0;
+    const limit = Math.min(rawLimit, SWEEP_MAX_LIMIT);
     const rows = db.query(
         "SELECT blob_id FROM _hull_attachment_orphans WHERE queued_at <= ? " +
         "ORDER BY queued_at LIMIT " + limit,

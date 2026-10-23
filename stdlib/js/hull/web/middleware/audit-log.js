@@ -212,7 +212,10 @@ function record(userId, kind, req, opts) {
     userId = _request.userId(userId);
     if (userId === null || typeof kind !== "string" || kind === "") return;
     opts = opts || {};
-    const ip = opts.ip !== undefined ? opts.ip : extractIp(req);
+    let ip = opts.ip !== undefined ? opts.ip : extractIp(req);
+    // A caller-supplied ip is capped at 64 chars, as clientIp caps the
+    // derived one (audit 23).
+    if (typeof ip === "string" && ip.length > 64) ip = ip.substring(0, 64);
     let ua = opts.user_agent !== undefined ? opts.user_agent : extractUa(req);
     // Bound the user_agent column the same way session.create does.
     // Real UAs top out around 500 chars; bots and scanners can send

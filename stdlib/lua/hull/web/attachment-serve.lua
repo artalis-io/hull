@@ -115,6 +115,11 @@ function M.serve(req, res, id, opts)
     -- means this is a genuine cryptographic fingerprint of the bytes.
     local etag = '"' .. meta.blob_id .. '"'
 
+    -- The response passed an access check: a shared cache must not keep it
+    -- for the next requester, and a private one revalidates (the check runs
+    -- again) before reusing it - the 304 included (audit 23).
+    res:header("Cache-Control", "private, no-cache")
+
     -- If-None-Match → 304. Accepts comma-separated values + `*` wildcard.
     local inm = req.headers and req.headers["if-none-match"]
     if inm then

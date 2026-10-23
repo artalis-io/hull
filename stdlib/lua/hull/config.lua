@@ -35,6 +35,13 @@ local _dotenv = {}
 local TRUTHY = { ["1"] = true, ["true"] = true, ["yes"] = true, ["on"] = true }
 local FALSY = { ["0"] = true, ["false"] = true, ["no"] = true, ["off"] = true, [""] = true }
 
+-- n when it is a finite number, else nil: "1e400" is inf and NaN is not a
+-- number, as the JS twin's Number.isFinite (audit 23).
+local function finite(n)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then return nil end
+    return n
+end
+
 local function coerce(name, raw, ty)
     if ty == nil or ty == "string" then
         return raw
@@ -44,11 +51,11 @@ local function coerce(name, raw, ty)
         if FALSY[k] then return false end
         error("config: " .. name .. " is not a boolean: '" .. raw .. "'")
     elseif ty == "number" then
-        local n = tonumber(raw)
+        local n = finite(tonumber(raw))
         if n == nil then error("config: " .. name .. " is not a number: '" .. raw .. "'") end
         return n
     elseif ty == "integer" then
-        local n = tonumber(raw)
+        local n = finite(tonumber(raw))
         if n == nil or n ~= math.floor(n) then
             error("config: " .. name .. " is not an integer: '" .. raw .. "'")
         end
@@ -144,5 +151,9 @@ function config.require(name, opts)
     opts = opts or {}
     return config.get(name, { type = opts.type, required = true })
 end
+
+-- Test seam (hull._test_hooks, never on the module): the coercion alone, so
+-- a suite needs no allowlisted variable.
+require("hull._test_hooks").register("hull.config", { coerce = coerce })
 
 return config

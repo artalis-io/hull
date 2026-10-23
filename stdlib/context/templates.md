@@ -31,7 +31,7 @@ const html = template.render("pages/home.html", { title: "Hello", user: { name: 
 
 - **`template.render(name, data)`** - load, compile, render (cached after first call)
 - **`template.render_string(source, data)`** / `template.renderString(...)` - compile from string
-- **`template.compile(name)`** - returns compiled function for repeated rendering
+- **`template.compile(name)`** - returns a cached `(data) -> string` render function for repeated rendering
 - **`template.clear_cache()`** / `template.clearCache()` - clear compiled cache
 
 ## Filters

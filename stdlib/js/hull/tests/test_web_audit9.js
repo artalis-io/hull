@@ -283,7 +283,7 @@ await test("session.logoutHandler: same-site and foreign Origin refused", () => 
 // ── idempotency ────────────────────────────────────────────────────
 
 await test("idempotency: session and JWT principals are prefixed apart", () => {
-    const p = idempotency._defaultPrincipal;
+    const p = __testHooks("hull:web:middleware:idempotency").defaultPrincipal;
     assertEq(p({ ctx: { session: { user_id: 5 } } }), "session:5");
     assertEq(p({ ctx: { user: { sub: 5 } } }), "user:5");
     assertEq(p({ ctx: { session: { user_id: "user:5" } } }) !== "user:5", true);

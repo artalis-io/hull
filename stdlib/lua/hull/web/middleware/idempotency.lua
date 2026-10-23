@@ -46,6 +46,7 @@ local encoding = require("hull.encoding")
 local db = require("hull.db._internal").connection()
 local time = require("hull.time")
 local log = require("hull.log")
+local _request = require("hull.web._request")
 
 local idempotency = {}
 
@@ -237,21 +238,29 @@ end
 -- "__anon". The two kinds of user are prefixed apart (audit 9): a session
 -- user_id was used bare, so a session user whose id was the string "user:5"
 -- shared JWT user 5's principal and could replay or squat their keys.
+--
+-- Both ids go through hull.web._request.user_id, as the JS twin's do (audit
+-- 23): "" is no id, 42.0 is "42", a table is no id. The JWT id is the first
+-- of sub / id / user_id that is one.
 local function default_principal(req)
-    if req.ctx and req.ctx.session and req.ctx.session.user_id then
-        return "session:" .. tostring(req.ctx.session.user_id)
+    local ctx = req.ctx
+    local sess = type(ctx) == "table" and ctx.session or nil
+    if type(sess) == "table" then
+        local sid = _request.user_id(sess.user_id)
+        if sid then return "session:" .. sid end
     end
     -- A JWT-authenticated user (auth.jwt_middleware). Without this every
     -- bearer-token user shared "__anon", so one could replay another's
     -- stored response, or squat their key, by knowing key and body.
-    local u = req.ctx and req.ctx.user
+    local u = type(ctx) == "table" and ctx.user or nil
     if type(u) == "table" then
-        local id = u.sub or u.id or u.user_id
-        if id ~= nil then return "user:" .. tostring(id) end
+        for _, k in ipairs({ "sub", "id", "user_id" }) do
+            local id = _request.user_id(u[k])
+            if id then return "user:" .. id end
+        end
     end
     return "__anon"
 end
-idempotency._default_principal = default_principal
 
 -- The principal as the principal_id column (VARCHAR(255)) stores it, for the
 -- default and a custom get_principal alike (audit 10). A number reached the
@@ -275,7 +284,6 @@ local function norm_principal(p)
     end
     return p
 end
-idempotency._norm_principal = norm_principal
 
 -- How many keyed requests in a row may all be "__anon" before the default
 -- principal warns (once per middleware) that it is mounted where no
@@ -607,6 +615,9 @@ require("hull._test_hooks").register("hull.web.middleware.idempotency", {
         return db.query("SELECT state, status FROM _hull_idempotency_keys WHERE key = ?",
                         { key })
     end,
+    -- The principal helpers (audit 23: they were exported on the module).
+    default_principal = default_principal,
+    norm_principal = norm_principal,
 })
 
 return idempotency

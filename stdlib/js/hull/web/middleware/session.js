@@ -158,6 +158,17 @@ function generateId() {
     return crypto.randomToken(32, "hex");
 }
 
+// The audit log's reference to a session: the id is a bearer credential, so
+// the log keeps the first 32 hex characters of its SHA-256 - enough to tell
+// sessions apart, nothing to sign in with (audit 23: the raw id was stored).
+function sessionRef(sid) {
+    if (typeof sid !== "string" || sid === "") return null;
+    const bytes = new Uint8Array(crypto.sha256(sid));
+    let hex = "";
+    for (let i = 0; i < 16; i++) hex += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+    return hex;
+}
+
 /**
  * Create a new session with the given data.
  * opts.ttl: override module-level TTL for this session (optional)
@@ -558,7 +569,7 @@ function loginHandler(cookieMod, opts) {
             }
             try {
                 auditLog.record(user.id, auditKind, req,
-                    { session_id: sid, metadata: scrub(auditMeta(user, ctx)) });
+                    { session_id: sessionRef(sid), metadata: scrub(auditMeta(user, ctx)) });
             } catch (e) {
                 log.warn("session.loginHandler: auditLog.record threw: "
                     + (e && e.message || e));

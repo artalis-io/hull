@@ -280,6 +280,9 @@ function audit_log.record(user_id, kind, req, opts)
     if not user_id or type(kind) ~= "string" or kind == "" then return end
     opts = opts or {}
     local ip = opts.ip ~= nil and opts.ip or extract_ip(req)
+    -- A caller-supplied ip is capped at 64 chars, as client_ip caps the
+    -- derived one (audit 23).
+    if type(ip) == "string" and #ip > 64 then ip = ip:sub(1, 64) end
     local ua = opts.user_agent ~= nil and opts.user_agent or extract_ua(req)
     -- Bound the user_agent column the same way session.create does.
     -- Real UAs top out around 500 chars; bots and scanners can send

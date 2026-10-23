@@ -2682,8 +2682,14 @@ function heartbeat(job) {
  */
 function dead(opts) {
     const o = opts || {};
-    const limit = o.limit !== undefined ? o.limit : 100;
-    const offset = o.offset !== undefined ? o.offset : 0;
+    // limit 1..1000 and offset >= 0, as jobs.events (audit 23): a negative
+    // LIMIT is "no limit" on SQLite, and NaN / a fraction is not an integer
+    // bind.
+    const lim = Number(o.limit);
+    const limit = Number.isFinite(lim) ? Math.floor(Math.max(1, Math.min(lim, 1000))) : 100;
+    const off = Number(o.offset);
+    const offset = Number.isFinite(off)
+        ? Math.floor(Math.max(0, Math.min(off, Number.MAX_SAFE_INTEGER))) : 0;
     const rows = o.queue
         ? db.query("SELECT * FROM _hull_jobs WHERE status='dead' AND queue=? " +
                    "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?", [o.queue, limit, offset])

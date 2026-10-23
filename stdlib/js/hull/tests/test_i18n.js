@@ -364,6 +364,27 @@ test("currency / number with Infinity / NaN / huge", () => {
     assertEq(typeof i18n.currency(1e300, "USD"), "string");
 });
 
+// ── audit 23 ─────────────────────────────────────────────────────────
+
+test("a key resolves own properties only, per segment", () => {
+    const tbl = Object.create({ inherited: "from the prototype" });
+    tbl.nested = Object.create({ deep: "inherited too" });
+    tbl.nested.own = "mine";
+    i18n.load("en", tbl);
+    i18n.locale("en");
+    assertEq(i18n.t("nested.own"), "mine");
+    assertEq(i18n.t("inherited"), "inherited", "an inherited key is the key");
+    assertEq(i18n.t("nested.deep"), "nested.deep", "an inherited segment is the key");
+    assertEq(i18n.t("constructor"), "constructor");
+    assertEq(i18n.t("__proto__.toString"), "__proto__.toString");
+});
+
+test("a placeholder name may hold underscores", () => {
+    i18n.load("en", { hi: "Hi ${first_name}!" });
+    i18n.locale("en");
+    assertEq(i18n.t("hi", { first_name: "Ada" }), "Hi Ada!");
+});
+
 // Counts go back to the C harness (run_js_test in
 // tests/hull/runtime/js/test_js.c), which reads them off the global object --
 // a module's default export is not reachable from there.

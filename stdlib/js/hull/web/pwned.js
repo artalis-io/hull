@@ -24,6 +24,7 @@ import { httpClient } from "hull:http-client";
 import { log }        from "hull:log";
 import { time }       from "hull:time";
 import { blocklist }  from "hull:web:_pwned_blocklist";
+import { _test_hooks } from "hull:_test_hooks";
 
 const DEFAULT_ENDPOINT = "https://api.pwnedpasswords.com/range/";
 
@@ -171,9 +172,9 @@ function health() {
     };
 }
 
-const pwned = {
-    check, health,
-    _sha1Hex: sha1Hex,
-    _inLocalBlocklist: inLocalBlocklist,
-};
+const pwned = { check, health };
 export { pwned };
+
+// Test seams, registered with the stdlib-internal hull:_test_hooks rather
+// than exported on the module (audit 23).
+_test_hooks.register("hull:web:pwned", { sha1Hex, inLocalBlocklist });
