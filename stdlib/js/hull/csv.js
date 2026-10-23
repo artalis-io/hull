@@ -150,6 +150,8 @@ function parse(text, opts) {
  *   are objects (keys become the header row). Otherwise arrays.
  * @param {Object} [opts]
  * @param {boolean} [opts.headers=false]
+ * @param {Array<string|number>} [opts.columns]  Header order for object rows
+ *   (default: every row's keys, sorted).
  * @param {string}  [opts.separator=","]
  * @param {string}  [opts.quote='"']
  * @param {boolean} [opts.sanitizeFormulas=true]  Prefix a "'" to any cell
@@ -212,16 +214,51 @@ function encode(rows, opts) {
     let out = "";
 
     if (useHeaders) {
-        // rows is array of objects; derive headers from first object keys
-        if (typeof rows[0] !== "object" || rows[0] === null) return "";
-
-        const headers = Object.keys(rows[0]);
+        // rows is an array of objects. The header row is opts.columns when
+        // given (an array of names, as Lua's csv.encode takes it), else the
+        // union of every row's own keys, sorted - Lua's rule. It came from
+        // the first row's keys only, and opts.columns was ignored, so a key
+        // missing from row 1 dropped its column in every row (audit 24).
+        let headers;
+        if (opts && opts.columns !== undefined && opts.columns !== null) {
+            const cols = opts.columns;
+            if (!Array.isArray(cols))
+                throw new TypeError("csv.encode: opts.columns must be an array of column names");
+            headers = [];
+            for (let i = 0; i < cols.length; i++) {
+                const k = cols[i];
+                if (typeof k !== "string" && typeof k !== "number")
+                    throw new TypeError("csv.encode: opts.columns[" + i +
+                                        "] must be a string or a number");
+                headers.push(String(k));
+            }
+        } else {
+            const seen = new Set();
+            headers = [];
+            for (let r = 0; r < rows.length; r++) {
+                const row = rows[r];
+                if (typeof row !== "object" || row === null) continue;
+                const keys = Object.keys(row);
+                for (let i = 0; i < keys.length; i++) {
+                    if (!seen.has(keys[i])) {
+                        seen.add(keys[i]);
+                        headers.push(keys[i]);
+                    }
+                }
+            }
+            headers.sort();
+        }
         out += encodeRow(headers) + "\n";
 
         for (let r = 0; r < rows.length; r++) {
+            const row = rows[r];
+            const isObj = typeof row === "object" && row !== null;
             const values = [];
             for (let c = 0; c < headers.length; c++) {
-                values.push(rows[r][headers[c]]);
+                // Own properties only: a column named "constructor" read
+                // the row's prototype.
+                values.push(isObj && Object.prototype.hasOwnProperty.call(row, headers[c])
+                    ? row[headers[c]] : undefined);
             }
             out += encodeRow(values) + "\n";
         }

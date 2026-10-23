@@ -728,6 +728,34 @@ function totp.init(opts)
     if opts.digits and opts.digits ~= 6 and opts.digits ~= 8 then
         error("totp.init: digits must be 6 or 8")
     end
+    -- Counts and durations must be whole numbers above zero, recovery_codes
+    -- and window whole numbers from 0 (window up to 10) (audit 24, as
+    -- auth-flows since audit 14): a NaN
+    -- max_failed_attempts turned the lockout off (n >= NaN is false), a
+    -- string period failed at the first code, a fractional window made the
+    -- offset loop skip the current step. Same rule as the JS twin; nil
+    -- keeps the default.
+    for _, k in ipairs({ "max_failed_attempts", "max_failed_attempts_per_ip",
+                         "lockout_duration", "period" }) do
+        local v = opts[k]
+        if v ~= nil and not (type(v) == "number" and v > 0 and v < math.huge
+                             and v == math.floor(v)) then
+            error("totp.init: " .. k .. " must be a whole number > 0 (got "
+                  .. tostring(v) .. ")", 2)
+        end
+    end
+    local rc = opts.recovery_codes
+    if rc ~= nil and not (type(rc) == "number" and rc >= 0 and rc < math.huge
+                          and rc == math.floor(rc)) then
+        error("totp.init: recovery_codes must be a whole number >= 0 (got "
+              .. tostring(rc) .. ")", 2)
+    end
+    if opts.window ~= nil and not (type(opts.window) == "number"
+            and opts.window >= 0 and opts.window <= 10
+            and opts.window == math.floor(opts.window)) then
+        error("totp.init: window must be a whole number 0..10 (got "
+              .. tostring(opts.window) .. ")", 2)
+    end
 
     -- Build the keys map. Three input shapes:
     --   1. encryption_keys + current  → multi-key (explicit).

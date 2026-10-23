@@ -103,6 +103,20 @@ function durationOpt(name, v, who) {
     return n;
 }
 
+// A count option (limit / offset / batch) as an integer in lo..hi, Lua's
+// `tonumber(v) or def` rule: a number or a numeric string counts, anything
+// else (undefined, null, true, an object) and NaN take the default, and
+// +/-Infinity clamps to the bound (audit 24: Number(null) and Number(true)
+// are 0 and 1, so `limit: null` returned one row, and an unclamped batch
+// reached LIMIT as a negative "no limit" or a fraction).
+function countOpt(v, def, lo, hi) {
+    let n = def;
+    if (typeof v === "number") n = v;
+    else if (typeof v === "string" && v.trim() !== "") n = Number(v);
+    if (Number.isNaN(n)) n = def;
+    return Math.floor(Math.max(lo, Math.min(n, hi)));
+}
+
 /**
  * Create the `_hull_jobs` table and its indexes. Idempotent - safe on every
  * boot. Uses the connection's portable identity DDL + IF-NOT-EXISTS index
@@ -1062,7 +1076,7 @@ function claimOne(queue, batch) {
  */
 function claim(opts) {
     const o = opts || {};
-    const batch = o.batch || 10;
+    const batch = countOpt(o.batch, 10, 1, 1000);
     for (const q of resolveQueueOrder(o)) {
         const got = claimOne(q, batch);
         if (got.length) return got;
@@ -2685,11 +2699,8 @@ function dead(opts) {
     // limit 1..1000 and offset >= 0, as jobs.events (audit 23): a negative
     // LIMIT is "no limit" on SQLite, and NaN / a fraction is not an integer
     // bind.
-    const lim = Number(o.limit);
-    const limit = Number.isFinite(lim) ? Math.floor(Math.max(1, Math.min(lim, 1000))) : 100;
-    const off = Number(o.offset);
-    const offset = Number.isFinite(off)
-        ? Math.floor(Math.max(0, Math.min(off, Number.MAX_SAFE_INTEGER))) : 0;
+    const limit = countOpt(o.limit, 100, 1, 1000);
+    const offset = countOpt(o.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const rows = o.queue
         ? db.query("SELECT * FROM _hull_jobs WHERE status='dead' AND queue=? " +
                    "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?", [o.queue, limit, offset])
@@ -2822,8 +2833,7 @@ function events(opts) {
     }
     // 1..1000: a negative LIMIT is "no limit" on SQLite, and NaN / a fraction
     // is not an integer bind.
-    const lim = Number(o.limit);
-    params.push(Number.isFinite(lim) ? Math.floor(Math.max(1, Math.min(lim, 1000))) : 100);
+    params.push(countOpt(o.limit, 100, 1, 1000));
     const rows = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events " +
         "WHERE " + where.join(" AND ") + " ORDER BY id DESC LIMIT ?", params);
@@ -2950,7 +2960,7 @@ function eventsDrain(name, opts) {
             for (const t of parts) params.push(t);
         }
     }
-    params.push(o.batch || 100);
+    params.push(countOpt(o.batch, 100, 1, 1000));
     const evs = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events " +
         "WHERE " + where.join(" AND ") + " ORDER BY id LIMIT ?", params);

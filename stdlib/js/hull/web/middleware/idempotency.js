@@ -322,6 +322,18 @@ function middleware(opts) {
             }
             return 0;
         }
+        // req.body is the raw body decoded as UTF-8 with every invalid
+        // sequence replaced by U+FFFD, so two binary bodies that differ
+        // only in those bytes read as the same text, hash the same, and a
+        // key reused across them replayed the first response instead of
+        // answering 409 (audit 24). With no raw body bytes to hash, such a
+        // keyed request is refused: neither replayed nor run twice. (A
+        // valid body that contains U+FFFD itself is refused too.)
+        if (typeof req.body === "string" && req.body.indexOf("\uFFFD") !== -1) {
+            res.status(422);
+            res.json({ error: "idempotency-key requires a request body that is valid UTF-8" });
+            return 1;
+        }
         const principalId = normPrincipal(rawPrincipal);
         const fingerprint = computeFingerprint(req);
         const endpoint = req.method + " " + req.path;

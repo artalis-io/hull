@@ -452,10 +452,15 @@ function resolveIncludes(ast, loadFn, visited, depth, nest, budget) {
 
 // ── JS code generator ───────────────────────────────────────────────
 
-// Generate optional-chaining dot path access
-// "user.name" → "__d.user?.name"
-// "title" → "__d.title"
+// Generate dot path access, one own-property read per segment:
+// "user.name" → '__g(__g(__d, "user"), "name")'
+// "title" → '__g(__d, "title")'
 // If the first segment is a loop-local variable, use it directly.
+// __g (emitted by codegen) reads only an OWN property of a non-nullish
+// value: `{{ user.constructor }}` resolved through the prototype chain and
+// rendered the Object constructor's source, as i18n's deepGet did before
+// audit 23 (audit 24). A string's or an array's `length` is an own property,
+// so `{{ name.length }}` keeps working.
 function genDotPath(path, prefix, localsSet) {
     prefix = prefix || "__d";
     const parts = path.split(".");
@@ -465,14 +470,17 @@ function genDotPath(path, prefix, localsSet) {
         validateIdent(p, "dot path '" + path + "'");
     }
 
+    let code;
+    let i = 0;
     // Check if first segment is a loop-local variable
     if (localsSet && localsSet[parts[0]]) {
-        if (parts.length === 1) return parts[0];
-        return parts[0] + parts.slice(1).map(p => "?." + p).join("");
+        code = parts[0];
+        i = 1;
+    } else {
+        code = prefix;
     }
-
-    if (parts.length === 1) return prefix + "." + parts[0];
-    return prefix + "." + parts[0] + parts.slice(1).map(p => "?." + p).join("");
+    for (; i < parts.length; i++) code = "__g(" + code + ", " + jsQuote(parts[i]) + ")";
+    return code;
 }
 
 function genExpr(exprInfo, escaped, localsSet) {
@@ -614,6 +622,8 @@ function codegen(ast) {
     // render function, re-read on every call - nothing for a cache to lose.
     // Names starting "__" are reserved, so no template variable can take these.
     lines.push("  const __isArray = Array.isArray, __String = String, __entries = Object.entries;");
+    lines.push("  const __hasOwn = Object.prototype.hasOwnProperty;");
+    lines.push("  const __g = (o, k) => (o !== null && o !== undefined && __hasOwn.call(o, k)) ? o[k] : undefined;");
     genBody(ast);
     lines.push("  return __p.join(\"\");");
     lines.push("})");

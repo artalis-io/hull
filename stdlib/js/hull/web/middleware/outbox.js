@@ -136,6 +136,16 @@ function isWaitRefusal(e) {
         || s.indexOf("cannot start while req.multipart()") >= 0;
 }
 
+// How long a flush's claim on a row lasts before another flush may take it
+// (seconds): longer than any delivery can run.
+const CLAIM_LEASE = 300;
+
+// Every delivery is bounded below the lease (audit 24): http.fetch's timeout
+// is the app default (manifest `http.timeoutMs`, up to 10 min), so a delivery
+// could outlive its claim, and another flush took the row and sent it again
+// while the first was still waiting.
+const DELIVERY_TIMEOUT_MS = 240000;
+
 /**
  * Attempt to deliver a single outbox item.
  * @returns {[boolean, string|null, *]} [success, errorMessage, refusal]:
@@ -159,7 +169,8 @@ async function deliverItem(item) {
 
         try {
             const result = await post(item.destination, item.payload, {
-                headers: reqHeaders
+                headers: reqHeaders,
+                timeoutMs: DELIVERY_TIMEOUT_MS,
             });
             if (result && result.status >= 200 && result.status < 300)
                 return [true, null];
@@ -201,9 +212,6 @@ function backoffDelay(attempt) {
  * @param {number} [opts.limit=50]  Max items to process per call.
  * @returns {Promise<{ delivered: number, failed: number, retried: number }>}
  */
-// How long a flush's claim on a row lasts before another flush may take it
-// (seconds): longer than any delivery should run.
-const CLAIM_LEASE = 300;
 
 async function flush(opts) {
     // Delivery waits on http.fetch, which the runtime refuses inside a
@@ -213,7 +221,14 @@ async function flush(opts) {
             "transaction: delivery waits on the network. Call it after the commit");
     }
     const o = opts || {};
-    const limit = o.limit || 50;
+    // 1..1000 (default 50): a number or numeric string counts, anything else
+    // and NaN take the default; a negative LIMIT is "no limit" on SQLite
+    // (audit 24).
+    let limit = 50;
+    if (typeof o.limit === "number") limit = o.limit;
+    else if (typeof o.limit === "string" && o.limit.trim() !== "") limit = Number(o.limit);
+    if (Number.isNaN(limit)) limit = 50;
+    limit = Math.floor(Math.max(1, Math.min(limit, 1000)));
     const now = time.now();
 
     const items = db.query(

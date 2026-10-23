@@ -252,11 +252,33 @@ function record(userId, kind, req, opts) {
          meta]);
 }
 
+// opts.limit as an integer 1..1000 (default 50): a number or a numeric
+// string counts, anything else and NaN take the default, +/-Infinity clamps
+// - the Lua sibling's rule. It reached LIMIT as given, and a negative LIMIT
+// is "no limit" on SQLite (audit 24).
+function listLimit(v) {
+    let n = 50;
+    if (typeof v === "number") n = v;
+    else if (typeof v === "string" && v.trim() !== "") n = Number(v);
+    if (Number.isNaN(n)) n = 50;
+    return Math.floor(Math.max(1, Math.min(n, 1000)));
+}
+
+// opts.window_days as a finite number > 0 (default `def`), else it throws:
+// NaN made the cutoff NaN, which matches no row (every device "new"), and
+// Infinity or a negative window reached past the retention (audit 24).
+function windowDays(v, def, who) {
+    if (v === undefined || v === null) return def;
+    if (typeof v !== "number" || !Number.isFinite(v) || !(v > 0))
+        throw new TypeError(who + ": window_days must be a finite number > 0");
+    return v;
+}
+
 function list(userId, opts) {
     userId = _request.userId(userId);
     if (userId === null) return [];
     opts = opts || {};
-    const limit = opts.limit || 50;
+    const limit = listLimit(opts.limit);
     let rows;
     // The IN list is built by a counted loop over a real array of strings,
     // never by calling the app's `.map` / `.join` (or a patched
@@ -303,7 +325,8 @@ function listDevices(userId, opts) {
     userId = _request.userId(userId);
     if (userId === null) return [];
     opts = opts || {};
-    const cutoff = time.now() - ((opts.window_days || 90) * 86400);
+    const cutoff = time.now()
+        - windowDays(opts.window_days, 90, "auditLog.listDevices") * 86400;
     return db.query(
         "SELECT fingerprint, "
         + "  MIN(event_at) AS first_seen, "
@@ -322,7 +345,8 @@ function isNewDevice(userId, req, opts) {
     userId = _request.userId(userId);
     if (userId === null) return false;
     opts = opts || {};
-    const cutoff = time.now() - ((opts.window_days || 30) * 86400);
+    const cutoff = time.now()
+        - windowDays(opts.window_days, 30, "auditLog.isNewDevice") * 86400;
     const fp = fingerprint(req);
     const rows = db.query(
         "SELECT 1 FROM _hull_audit_log "

@@ -1062,10 +1062,13 @@ function originTrusted(o, headers) {
     if (_state.publicOrigin && o === headerOrigin(_state.publicOrigin)) return true;
     const authority = o.replace(/^https?:\/\//, "");
     if (_state.trustedHosts) {
-        const hostOnly = authority.replace(/:\d+$/, "");
+        // Only the scheme's DEFAULT port is dropped before the bare-host
+        // match (audit 24; see the Lua sibling): any port was, so an entry
+        // "app.example.com" trusted app.example.com:8443.
+        const bare = _request.authorityDefaultPortStripped(o);
         for (const allowed of _state.trustedHosts) {
             const a = allowed.toLowerCase();
-            if (authority === a || hostOnly === a) return true;
+            if (authority === a || bare === a) return true;
         }
     }
     const hp = requestHost(headers);
@@ -1690,8 +1693,10 @@ async function handlePasswordResetConfirm(req, res) {
 }
 
 async function handleEmailChange(req, res) {
-    const uid = req.ctx && req.ctx.user_id;
-    if (!uid) return res.status(401).json({ error: "not authenticated" });
+    const uid = req.ctx ? req.ctx.user_id : undefined;
+    // A user id is a non-empty string or a safe integer, 0 included (audit
+    // 24: `!uid` refused user 0; same test as the Lua sibling).
+    if (_request.userId(uid) === null) return res.status(401).json({ error: "not authenticated" });
     if (refuseCrossSite(req, res)) return;
     const body = parseBody(req);
     if (!isEmailIsh(body.new_email)) {

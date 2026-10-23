@@ -248,16 +248,18 @@ function verify(token, keyOrResolver, opts) {
     // crafted with `"exp": "not-a-number"` would otherwise compare
     // string vs number (JS implicit-coerces, but the result is NaN
     // and the >= test returns false, silently treating the token as
-    // valid forever). Reject malformed claims explicitly.
+    // valid forever). Reject malformed claims explicitly. A number must
+    // also be finite: JSON's 1e999 decodes to Infinity, an exp that never
+    // passes (audit 24).
     if (payload.exp !== undefined) {
-        if (typeof payload.exp !== "number")
+        if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp))
             return [null, "invalid exp claim"];
         if (time.now() >= payload.exp + leeway) return [null, "token expired"];
     } else if (opts.requireExp || opts.require_exp) {
         return [null, "token missing required exp claim"];
     }
     if (payload.nbf !== undefined) {
-        if (typeof payload.nbf !== "number")
+        if (typeof payload.nbf !== "number" || !Number.isFinite(payload.nbf))
             return [null, "invalid nbf claim"];
         if (time.now() + leeway < payload.nbf) return [null, "token not yet valid"];
     }

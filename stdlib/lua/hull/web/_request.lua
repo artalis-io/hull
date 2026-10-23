@@ -147,11 +147,28 @@ local function origin_listed(o, list)
     return false
 end
 
-local function host_listed(authority, list)
+--- The authority of a lower-cased "scheme://authority" origin, with its
+-- port dropped only when it is the scheme's default (443 for https, 80
+-- for http): a bare host entry in a trusted-hosts list names that host on
+-- its default port, never on another one (audit 24: any port was
+-- dropped, so "app.example.com" trusted app.example.com:8443).
+function M.authority_default_port_stripped(o)
+    local scheme, authority = o:match("^(https?)://(.*)$")
+    if not authority then return nil end
+    local host, port = authority:match("^(.-):(%d+)$")
+    if host and ((scheme == "https" and port == "443")
+                 or (scheme == "http" and port == "80")) then
+        return host
+    end
+    return authority
+end
+
+local function host_listed(o, authority, list)
+    local bare = M.authority_default_port_stripped(o)
     for _, allowed in ipairs(list or {}) do
         if type(allowed) == "string" then
             local a = allowed:lower()
-            if authority == a or authority:match("^(.-):%d+$") == a then
+            if authority == a or bare == a then
                 return true
             end
         end
@@ -167,8 +184,8 @@ end
 -- `cross-site` AND `same-site` (a sibling subdomain, often less trusted than
 -- the app) are refused. Without it, `Origin` - or failing it `Referer` - must
 -- name the request's own host (`X-Forwarded-Host` behind a trusted proxy) or
--- one of `opts.origins`, or its host (with or without a port) is one of
--- `opts.hosts`. With no provenance header at all the client is not a
+-- one of `opts.origins`, or its authority is one of `opts.hosts` (a bare
+-- host entry matches that host on its scheme's default port only). With no provenance header at all the client is not a
 -- browser: it passes only with `opts.allow_bare`.
 --
 -- What the app registered through `M.register_app_origins` (auth-flows'
@@ -206,7 +223,7 @@ function M.same_origin(req, opts)
         end
     end
     return origin_listed(o, opts.origins) or origin_listed(o, _app.origins)
-        or host_listed(authority, opts.hosts) or host_listed(authority, _app.hosts)
+        or host_listed(o, authority, opts.hosts) or host_listed(o, authority, _app.hosts)
 end
 
 return M

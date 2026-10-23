@@ -308,13 +308,28 @@ function csv.encode(rows, opts)
         return val
     end
 
-    -- Encode a single row from an array of values
-    local function encode_row(values)
+    -- Encode a single row from an array of values. n is the cell count:
+    -- the length operator stops at a nil cell, so a row with a missing
+    -- value lost that cell and every one after it (audit 24).
+    local function encode_row(values, n)
         local fields = {}
-        for i = 1, #values do
+        for i = 1, n do
             fields[i] = encode_field(values[i])
         end
         return table.concat(fields, sep)
+    end
+
+    -- The cell count of an array row: its `n` field when that is a whole
+    -- number (table.pack's convention), else its largest positive integer
+    -- key, so a nil cell in the middle is written as an empty field.
+    local function row_count(row)
+        local n = row.n
+        if math.type(n) == "integer" and n >= 0 then return n end
+        local max = 0
+        for k in pairs(row) do
+            if math.type(k) == "integer" and k > max then max = k end
+        end
+        return max
     end
 
     local lines = {}
@@ -324,8 +339,21 @@ function csv.encode(rows, opts)
         local keys = {}
         if opts.columns then
             -- Allow explicit column ordering
-            for i = 1, #opts.columns do
-                keys[i] = opts.columns[i]
+            -- Every entry must be a column name: the length operator
+            -- stopped at a nil entry (audit 24).
+            local cols = opts.columns
+            if type(cols) ~= "table" then
+                error("csv.encode: opts.columns must be an array of column names", 2)
+            end
+            local n = row_count(cols)
+            for i = 1, n do
+                local k = cols[i]
+                local tk = type(k)
+                if tk ~= "string" and tk ~= "number" then
+                    error("csv.encode: opts.columns[" .. i ..
+                          "] must be a string or a number", 2)
+                end
+                keys[i] = k
             end
         else
             -- Collect keys from all rows for consistent output
@@ -353,20 +381,21 @@ function csv.encode(rows, opts)
         end
 
         -- Header row
-        lines[#lines + 1] = encode_row(keys)
+        local nkeys = #keys
+        lines[#lines + 1] = encode_row(keys, nkeys)
 
         -- Data rows
         for _, row in ipairs(rows) do
             local values = {}
-            for i = 1, #keys do
+            for i = 1, nkeys do
                 values[i] = row[keys[i]]
             end
-            lines[#lines + 1] = encode_row(values)
+            lines[#lines + 1] = encode_row(values, nkeys)
         end
     else
         -- Array of arrays
         for _, row in ipairs(rows) do
-            lines[#lines + 1] = encode_row(row)
+            lines[#lines + 1] = encode_row(row, row_count(row))
         end
     end
 

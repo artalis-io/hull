@@ -144,7 +144,10 @@ function check(data, schema) {
                 if (typeof value !== "string")
                     err = customMsg || "must be a string";
             } else if (rt === "number") {
-                if (typeof value !== "number")
+                // Finite only (audit 24): NaN and +/-Infinity are numbers to
+                // typeof but no form value means them, and NaN passes every
+                // bound.
+                if (typeof value !== "number" || !Number.isFinite(value))
                     err = customMsg || "must be a number";
             } else if (rt === "integer") {
                 if (typeof value !== "number" || !Number.isInteger(value))
@@ -160,10 +163,12 @@ function check(data, schema) {
         // 4. min
         if (rules.min !== undefined) {
             if (typeof value === "string") {
-                if (charLen(value) < rules.min)
+                if (!(charLen(value) >= rules.min))
                     err = customMsg || "must be at least " + rules.min + " characters";
             } else if (typeof value === "number") {
-                if (value < rules.min)
+                // !(>=): a NaN value or bound fails, where < let it through
+                // (audit 24).
+                if (!(value >= rules.min))
                     err = customMsg || "must be at least " + rules.min;
             } else {
                 // min/max only bound string length or numeric value; a boolean
@@ -177,10 +182,10 @@ function check(data, schema) {
         // 5. max
         if (rules.max !== undefined) {
             if (typeof value === "string") {
-                if (charLen(value) > rules.max)
+                if (!(charLen(value) <= rules.max))
                     err = customMsg || "must be at most " + rules.max + " characters";
             } else if (typeof value === "number") {
-                if (value > rules.max)
+                if (!(value <= rules.max))
                     err = customMsg || "must be at most " + rules.max;
             } else {
                 err = customMsg || "must be a string or number";

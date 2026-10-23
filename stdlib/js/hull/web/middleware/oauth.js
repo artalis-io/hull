@@ -563,9 +563,15 @@ async function handleCallback(req, res) {
     if (typeof claims.aud === "string") {
         audOk = (claims.aud === cfg.clientId);
     } else if (Array.isArray(claims.aud)) {
-        for (const a of claims.aud) {
-            if (a === cfg.clientId) { audOk = true; break; }
+        // Every entry must be a string (audit 24, parity with Lua, where a
+        // JSON null ended the count and skipped the azp check).
+        let wellFormed = true;
+        for (let i = 0; i < claims.aud.length; i++) {
+            const a = claims.aud[i];
+            if (typeof a !== "string") { wellFormed = false; break; }
+            if (a === cfg.clientId) audOk = true;
         }
+        if (!wellFormed) audOk = false;
         // A token for several audiences is ours only when we are its
         // authorized party (OIDC Core 3.1.3.7; audit 23).
         if (audOk && claims.aud.length > 1 && claims.azp !== cfg.clientId) audOk = false;
