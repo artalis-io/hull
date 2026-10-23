@@ -137,14 +137,12 @@ function isWaitRefusal(e) {
 }
 
 // How long a flush's claim on a row lasts before another flush may take it
-// (seconds): longer than any delivery can run.
-const CLAIM_LEASE = 300;
-
-// Every delivery is bounded below the lease (audit 24): http.fetch's timeout
-// is the app default (manifest `http.timeoutMs`, up to 10 min), so a delivery
-// could outlive its claim, and another flush took the row and sent it again
-// while the first was still waiting.
-const DELIVERY_TIMEOUT_MS = 240000;
+// (seconds): longer than any delivery can run - http.fetch's ceiling
+// (HL_HTTP_FETCH_MAX_TIMEOUT_MS, 10 min) plus a minute. It was 300 s, under
+// the 10 min a manifest `http.timeoutMs` may give a delivery, so another
+// flush took the row and sent it again while the first was still waiting
+// (audit 24). The app's own timeout still bounds each delivery.
+const CLAIM_LEASE = 660;
 
 /**
  * Attempt to deliver a single outbox item.
@@ -169,8 +167,7 @@ async function deliverItem(item) {
 
         try {
             const result = await post(item.destination, item.payload, {
-                headers: reqHeaders,
-                timeoutMs: DELIVERY_TIMEOUT_MS,
+                headers: reqHeaders
             });
             if (result && result.status >= 200 && result.status < 300)
                 return [true, null];
@@ -386,6 +383,7 @@ export { outbox };
 
 _test_hooks.register("hull:web:middleware:outbox", {
     setPost(fn) { post = fn || realPost; },
+    claimLease: CLAIM_LEASE,
     // The suite reads its rows back from inside the module, where the
     // _hull_* namespace check admits the query.
     rows(id) {

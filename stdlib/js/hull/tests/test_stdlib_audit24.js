@@ -3,8 +3,8 @@
 // csv.encode takes opts.columns and the union of every row's keys (Lua's
 // rule); the jobs / audit-log / outbox LIMITs are clamped integers that
 // treat null / true as the default; session.listForUser names sessions by
-// ref (never by id) and session.destroyRef signs one out; outbox deliveries
-// carry a timeout below the claim lease; idempotency fingerprints a body
+// ref (never by id) and session.destroyRef signs one out; outbox claims
+// outlast http.fetch's 10 min ceiling; idempotency fingerprints a body
 // that is not valid UTF-8 by its bytes; jwt refuses a non-finite exp /
 // nbf; totp.init refuses malformed counts; validate's number type and bounds
 // refuse NaN / Infinity; a trusted host no longer matches a non-default
@@ -174,7 +174,8 @@ await test("outbox.flush: limit clamped, delivery timeout below the lease", asyn
     assertEq(r2.delivered, 2, "null is the default");
     assertEq(seen.length, 3);
     for (const t of seen)
-        assertEq(typeof t === "number" && t > 0 && t < 300000, true, "timeout " + t);
+        assertEq(t, undefined, "the app's own http timeout is kept");
+    assertEq(hooks.claimLease > 600, true, "the lease outlasts http.fetch's 10 min ceiling");
 });
 
 // ── idempotency ────────────────────────────────────────────────────

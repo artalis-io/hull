@@ -4,8 +4,8 @@
 -- every cell after it; the jobs / audit-log / outbox LIMITs are clamped
 -- integers; jobs.purge / cleanup copy their status list strictly;
 -- session.list_for_user names sessions by ref (never by id) and
--- session.destroy_ref signs one out; outbox deliveries carry a timeout
--- below the claim lease; jwt refuses a non-finite exp / nbf; totp.init
+-- session.destroy_ref signs one out; outbox claims outlast http.fetch's
+-- 10 min ceiling; jwt refuses a non-finite exp / nbf; totp.init
 -- refuses malformed counts; validate's number type and bounds refuse NaN /
 -- inf; a trusted_hosts entry no longer matches a non-default port; and the
 -- email-change handler refuses an id that is not one.
@@ -150,7 +150,7 @@ end)
 
 -- ── outbox ─────────────────────────────────────────────────────────
 
-test("outbox.flush: limit clamped, delivery timeout below the lease", function()
+test("outbox.flush: limit clamped, the lease outlasts any delivery", function()
     outbox.init()
     local hooks = __test_hooks("hull.web.middleware.outbox")
     hooks.clear()
@@ -160,7 +160,7 @@ test("outbox.flush: limit clamped, delivery timeout below the lease", function()
     end
     local seen = {}
     hooks.set_post(function(_url, _body, opts)
-        seen[#seen + 1] = opts.timeout_ms
+        seen[#seen + 1] = opts.timeout_ms or false
         return { status = 200 }
     end)
     local ok, r = pcall(outbox.flush, { limit = -1 })
@@ -171,9 +171,10 @@ test("outbox.flush: limit clamped, delivery timeout below the lease", function()
     assert_eq(ok2, true, tostring(r2))
     assert_eq(r2.delivered, 2, "NaN is the default")
     assert_eq(#seen, 3)
-    for _, t in ipairs(seen) do
-        assert_eq(type(t) == "number" and t > 0 and t < 300000, true, "timeout " .. tostring(t))
+    for i = 1, 3 do
+        assert_eq(seen[i], false, "the app's own http timeout is kept")
     end
+    assert_eq(hooks.claim_lease > 600, true, "the lease outlasts http.fetch's 10 min ceiling")
 end)
 
 -- ── jwt ────────────────────────────────────────────────────────────

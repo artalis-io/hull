@@ -144,14 +144,12 @@ end
 -- Returns true on success, false on failure, and `false, err, true` when the
 -- runtime refused to wait (see is_wait_refusal).
 -- How long a flush's claim on a row lasts before another flush may take it
--- (seconds): longer than any delivery can run.
-local CLAIM_LEASE = 300
-
--- Every delivery is bounded below the lease (audit 24): http.fetch's
--- timeout is the app default (manifest `http.timeout_ms`, up to 10 min),
--- so a delivery could outlive its claim, and another flush took the row
--- and sent it again while the first was still waiting.
-local DELIVERY_TIMEOUT_MS = 240000
+-- (seconds): longer than any delivery can run - http.fetch's ceiling
+-- (HL_HTTP_FETCH_MAX_TIMEOUT_MS, 10 min) plus a minute. It was 300 s, under
+-- the 10 min a manifest `http.timeout_ms` may give a delivery, so another
+-- flush took the row and sent it again while the first was still waiting
+-- (audit 24). The app's own timeout still bounds each delivery.
+local CLAIM_LEASE = 660
 
 -- The delivery call; the suite stands in for it through the test hooks
 -- (set_post), as the JS twin's setPost.
@@ -182,7 +180,6 @@ local function deliver_item(item)
         local send_ok, result = pcall(function()
             return post(item.destination, item.payload, {
                 headers = req_headers,
-                timeout_ms = DELIVERY_TIMEOUT_MS,
             })
         end)
 
@@ -382,6 +379,7 @@ require("hull._test_hooks").register("hull.web.middleware.outbox", {
     end,
     clear = function() db.exec("DELETE FROM _hull_outbox") end,
     set_post = function(fn) post = fn or real_post end,
+    claim_lease = CLAIM_LEASE,
 })
 
 return outbox
