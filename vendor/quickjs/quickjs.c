@@ -4569,8 +4569,12 @@ const char *JS_ToCStringLen2(JSContext *ctx, size_t *plen, JSValueConst val1, BO
     /* HULL PATCH 0005 (audit 11): the ASCII path scans the whole string and
        returns its own buffer - no allocation, so nothing else charged it
        (`for (;;) +s` on a 16 MB string, every Hull binding converting an
-       app string) */
-    js_work_add(ctx->rt, len);
+       app string). Audit 23: a charge that finds the run over budget fails
+       the conversion with the interrupt - only counted, a C binding looping
+       over an array naming one big string rescanned it once per element
+       with nothing polled between, past the budget and the run deadline. */
+    if (js_work_check(ctx, len) < 0)
+        goto fail;
     if (!str->is_wide_char) {
         const uint8_t *src = str->u.str8;
         int count;

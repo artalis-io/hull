@@ -67,6 +67,63 @@ static inline uint8_t *hl_js_array_buffer_probe(JSContext *ctx, size_t *len,
     return p;
 }
 
+/* A db param that is not a string, number, boolean, null or undefined. An
+ * ArrayBuffer or a typed array is a BLOB: @p *view names its bytes, which
+ * the caller copies at once (a later element's getter could detach or
+ * resize the buffer) into out->s. A BigInt in the int64 range is an
+ * integer. Anything else is a TypeError: they were bound as NULL, silently,
+ * so a blob round-trip stored NULL (audit 23). 0, or -1 with an exception
+ * pending. */
+static inline int hl_js_db_param_other(JSContext *ctx, JSValueConst v,
+                                       HlValue *out, const uint8_t **view)
+{
+    *view = NULL;
+    if (JS_IsBigInt(ctx, v)) {
+        int64_t i = 0;
+        if (JS_ToBigInt64(ctx, &i, v) < 0) return -1;
+        JSValue back = JS_NewBigInt64(ctx, i);
+        if (JS_IsException(back)) return -1;
+        int same = JS_StrictEq(ctx, back, v);
+        JS_FreeValue(ctx, back);
+        if (!same) {
+            JS_ThrowRangeError(ctx, "db params: a BigInt outside the 64-bit "
+                               "integer range");
+            return -1;
+        }
+        out->type = HL_TYPE_INT;
+        out->i = i;
+        return 0;
+    }
+    if (JS_IsObject(v)) {
+        size_t n = 0;
+        uint8_t *p = hl_js_array_buffer_probe(ctx, &n, v);
+        if (!p) {
+            size_t off = 0, blen = 0, per = 0;
+            JSValue ab = JS_GetTypedArrayBuffer(ctx, v, &off, &blen, &per);
+            if (JS_IsException(ab)) {
+                JS_FreeValue(ctx, JS_GetException(ctx));   /* not a view */
+            } else {
+                size_t ab_len = 0;
+                uint8_t *raw = hl_js_array_buffer_probe(ctx, &ab_len, ab);
+                JS_FreeValue(ctx, ab);
+                if (raw && off <= ab_len && blen <= ab_len - off) {
+                    p = raw + off;
+                    n = blen;
+                }
+            }
+        }
+        if (p) {
+            out->type = HL_TYPE_BLOB;
+            out->len = n;
+            *view = p;
+            return 0;
+        }
+    }
+    JS_ThrowTypeError(ctx, "db params: a value must be a string, number, "
+                      "boolean, BigInt, null, ArrayBuffer or typed array");
+    return -1;
+}
+
 /* ── Unified buffer protocol ─────────────────────────────────────── */
 
 /*

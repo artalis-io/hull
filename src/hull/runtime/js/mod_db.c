@@ -79,8 +79,9 @@ static void js_free_hl_values(JSContext *ctx, HlValue *params, int count);
 
 /* Marshal JS values to HlValue array for parameter binding. Returns 0, or
  * -1 with an exception pending: the app's own (a throwing length trap or
- * element getter), else a TypeError / RangeError naming the problem - every
- * failure used to become "params must be an array" (audit 24). */
+ * element getter, the budget's interrupt from a string conversion - audit
+ * 23), else a TypeError / RangeError naming the problem - every failure
+ * used to become "params must be an array" (audit 24). */
 static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
                               HlValue **out_params, int *out_count)
 {
@@ -168,9 +169,28 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
             break;
         case JS_TAG_NULL:
         case JS_TAG_UNDEFINED:
-        default:
             params[i].type = HL_TYPE_NIL;
             break;
+        default: {
+            const uint8_t *view = NULL;
+            if (hl_js_db_param_other(ctx, v, &params[i], &view) != 0) {
+                JS_FreeValue(ctx, v);
+                js_free_hl_values(ctx, params, i);
+                return -1;
+            }
+            if (params[i].type == HL_TYPE_BLOB) {
+                char *copy = js_malloc(ctx, params[i].len ? params[i].len : 1);
+                if (!copy) {
+                    params[i].type = HL_TYPE_NIL;
+                    JS_FreeValue(ctx, v);
+                    js_free_hl_values(ctx, params, i);
+                    return -1;
+                }
+                if (params[i].len) memcpy(copy, view, params[i].len);
+                params[i].s = copy;
+            }
+            break;
+        }
         }
         JS_FreeValue(ctx, v);
     }
@@ -184,10 +204,13 @@ static void js_free_hl_values(JSContext *ctx, HlValue *params, int count)
 {
     if (!params)
         return;
-    /* Free any strings we borrowed via JS_ToCStringLen */
+    /* Free any strings we borrowed via JS_ToCStringLen, and the blob
+     * copies */
     for (int i = 0; i < count; i++) {
         if (params[i].type == HL_TYPE_TEXT && params[i].s)
             JS_FreeCString(ctx, params[i].s);
+        else if (params[i].type == HL_TYPE_BLOB && params[i].s)
+            js_free(ctx, (void *)(uintptr_t)params[i].s);
     }
     js_free(ctx, params);
 }
