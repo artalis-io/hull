@@ -176,9 +176,16 @@ function queryPart(q) {
  * made.
  */
 function computeFingerprint(req) {
-    const data = (req.method || "") + "\0" + (req.path || "") + "\0"
-        + queryPart(req.query) + "\0" + (req.body || "");
-    return encoding.hex.encode(crypto.sha256(data));
+    const head = (req.method || "") + "\0" + (req.path || "") + "\0"
+        + queryPart(req.query) + "\0";
+    // A body that is not valid UTF-8 reads with every invalid sequence as
+    // U+FFFD, so two binary bodies could fingerprint the same and a key
+    // reused across them replayed the first response (audit 24): hash its
+    // bytes. The leading \x01 (never in a method) keeps the two forms apart.
+    if (req.bodyBytes instanceof ArrayBuffer)
+        return encoding.hex.encode(crypto.sha256("\x01" + head
+            + encoding.hex.encode(crypto.sha256(req.bodyBytes))));
+    return encoding.hex.encode(crypto.sha256(head + (req.body || "")));
 }
 
 /**
@@ -321,18 +328,6 @@ function middleware(opts) {
                     + "(return \"__anon\" to share one scope)");
             }
             return 0;
-        }
-        // req.body is the raw body decoded as UTF-8 with every invalid
-        // sequence replaced by U+FFFD, so two binary bodies that differ
-        // only in those bytes read as the same text, hash the same, and a
-        // key reused across them replayed the first response instead of
-        // answering 409 (audit 24). With no raw body bytes to hash, such a
-        // keyed request is refused: neither replayed nor run twice. (A
-        // valid body that contains U+FFFD itself is refused too.)
-        if (typeof req.body === "string" && req.body.indexOf("\uFFFD") !== -1) {
-            res.status(422);
-            res.json({ error: "idempotency-key requires a request body that is valid UTF-8" });
-            return 1;
         }
         const principalId = normPrincipal(rawPrincipal);
         const fingerprint = computeFingerprint(req);
@@ -617,4 +612,5 @@ _test_hooks.register("hull:web:middleware:idempotency", {
     // The principal helpers (audit 23: they were exported on the module).
     defaultPrincipal,
     normPrincipal,
+    computeFingerprint,
 });

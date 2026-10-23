@@ -4,8 +4,8 @@
 // rule); the jobs / audit-log / outbox LIMITs are clamped integers that
 // treat null / true as the default; session.listForUser names sessions by
 // ref (never by id) and session.destroyRef signs one out; outbox deliveries
-// carry a timeout below the claim lease; a keyed request whose body is not
-// valid UTF-8 is refused by idempotency; jwt refuses a non-finite exp /
+// carry a timeout below the claim lease; idempotency fingerprints a body
+// that is not valid UTF-8 by its bytes; jwt refuses a non-finite exp /
 // nbf; totp.init refuses malformed counts; validate's number type and bounds
 // refuse NaN / Infinity; a trusted host no longer matches a non-default
 // port; template paths read own properties only; and the email-change
@@ -179,20 +179,17 @@ await test("outbox.flush: limit clamped, delivery timeout below the lease", asyn
 
 // ── idempotency ────────────────────────────────────────────────────
 
-await test("idempotency: a keyed body that is not valid UTF-8 is refused", () => {
-    idempotency.init();
-    const mw = idempotency.middleware();
-    const run = (body) => {
-        const res = mkRes();
-        const rc = mw({ method: "POST", path: "/a24", query: {}, body, ctx: {},
-                        headers: { "idempotency-key": "k-a24" },
-                        header: (n) => (n.toLowerCase() === "idempotency-key" ? "k-a24" : null) },
-                      res);
-        return [rc, res.code];
-    };
-    const [rc, code] = run("ab�cd");
-    assertEq(rc, 1, "handled");
-    assertEq(code, 422, "refused");
+await test("idempotency: a body that is not valid UTF-8 is fingerprinted by its bytes", () => {
+    const fp = __testHooks("hull:web:middleware:idempotency").computeFingerprint;
+    const base = { method: "POST", path: "/a24", query: {} };
+    // Both read as the same lossy text; only their bytes differ.
+    const a = fp({ ...base, body: "ab\uFFFDcd", bodyBytes: new Uint8Array([97, 98, 0xff, 99, 100]).buffer });
+    const b = fp({ ...base, body: "ab\uFFFDcd", bodyBytes: new Uint8Array([97, 98, 0xfe, 99, 100]).buffer });
+    const a2 = fp({ ...base, body: "ab\uFFFDcd", bodyBytes: new Uint8Array([97, 98, 0xff, 99, 100]).buffer });
+    assertEq(a !== b, true, "different bytes, different fingerprints");
+    assertEq(a, a2, "same bytes, same fingerprint");
+    assertEq(fp({ ...base, body: "abc" }), fp({ ...base, body: "abc" }), "text bodies unchanged");
+    assertEq(fp({ ...base, body: "ab\uFFFDcd" }) !== a, true, "bytes and text forms differ");
 });
 
 // ── jwt ────────────────────────────────────────────────────────────

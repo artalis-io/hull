@@ -72,6 +72,33 @@ static JSValue js_req_header(JSContext *ctx, JSValueConst this_val,
 /* Numeric client IP from the connection's peer address, "" on failure.
  * Sibling copy in src/hull/runtime/lua/bindings.c (request_peer_ip). See there
  * for the rationale; best-effort, absent when unavailable. */
+/* Strict UTF-8 (no overlongs, surrogates or code points past U+10FFFF): the
+ * bytes JS_NewStringLen decodes without replacing anything. */
+static int body_is_utf8(const unsigned char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = s[i];
+        size_t n;
+        uint32_t cp;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) { n = 1; cp = c & 0x1F; }
+        else if (c >= 0xE0 && c <= 0xEF) { n = 2; cp = c & 0x0F; }
+        else if (c >= 0xF0 && c <= 0xF4) { n = 3; cp = c & 0x07; }
+        else return 0;
+        if (len - i - 1 < n) return 0;
+        for (size_t k = 1; k <= n; k++) {
+            if ((s[i + k] & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (s[i + k] & 0x3F);
+        }
+        if ((n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000)
+            || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+            return 0;
+        i += n + 1;
+    }
+    return 1;
+}
+
 static void hl_request_peer_ip_js(KlHttpRequest *req, char *buf, size_t buflen)
 {
     buf[0] = '\0';
@@ -237,10 +264,18 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
     if (req->body_reader && !is_multipart_stream) {
         const char *data;
         size_t len = hl_cap_body_data(req->body_reader, &data);
-        if (len > 0)
+        if (len > 0) {
             JS_DefinePropertyValueStr(ctx, obj, "body",
                               JS_NewStringLen(ctx, data, len), JS_PROP_C_W_E);
-        else
+            /* req.body decodes the bytes as UTF-8, replacing every invalid
+             * sequence with U+FFFD, so two binary bodies could read as the
+             * same text (the idempotency fingerprint matched across them;
+             * audit 24). Such a body is also handed over as its bytes. */
+            if (!body_is_utf8((const unsigned char *)data, len))
+                JS_DefinePropertyValueStr(ctx, obj, "bodyBytes",
+                    JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len),
+                    JS_PROP_C_W_E);
+        } else
             JS_DefinePropertyValueStr(ctx, obj, "body", JS_NewString(ctx, ""), JS_PROP_C_W_E);
     } else {
         JS_DefinePropertyValueStr(ctx, obj, "body", JS_NULL, JS_PROP_C_W_E);

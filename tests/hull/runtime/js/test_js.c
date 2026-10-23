@@ -2129,6 +2129,39 @@ UTEST(js_dispatch, a_microtask_only_handler_completes_and_closes_res)
     cleanup_js();
 }
 
+/* A body that is not valid UTF-8 also arrives as its bytes (audit 24):
+ * req.body replaces every invalid sequence with U+FFFD, so the idempotency
+ * fingerprint read two different binary bodies as the same text. */
+static int js_dispatch_body(const char *body, size_t len)
+{
+    char buf[16];
+    memcpy(buf, body, len);
+    KlHttpBufReader br;
+    memset(&br, 0, sizeof br);
+    br.data = buf;
+    br.len = len;
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    req.body_reader = &br.base;
+    int rc = js_dispatch_last_route(
+        "(req, res) => { const b = req.bodyBytes;"
+        " res.status(b === undefined ? 200"
+        " : b instanceof ArrayBuffer ? 300 + b.byteLength : 500); }", &res, &req);
+    free_req_ctx(&req);
+    return rc == 0 ? res.status : -1;
+}
+
+UTEST(js_audit24, a_body_that_is_not_utf8_also_arrives_as_bytes)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(js_dispatch_body("ab\xff" "cd", 5), 305);     /* lossy: bytes too */
+    EXPECT_EQ(js_dispatch_body("h\xc3\xa9", 3), 200);      /* valid: text only */
+    EXPECT_EQ(js_dispatch_body("\xed\xa0\x80", 3), 303);  /* a surrogate */
+    EXPECT_EQ(js_dispatch_body("\xc0\xaf", 2), 302);         /* an overlong */
+    cleanup_js();
+}
+
 UTEST(js_dispatch, a_handler_awaiting_an_undriven_promise_ends_its_request)
 {
     init_js();
