@@ -187,6 +187,80 @@ UTEST(async_backend_poll, timers_fire_in_deadline_order)
     fixture_free(&f);
 }
 
+/* ── A 0 ms timer re-added by its own callback waits a tick ─────────
+ * Audit 24: step 5 fired every timer due at the time it looked, so a 0 ms
+ * timer re-added from its callback (a self-re-spawning task, two tasks
+ * waking each other) fired again in the same tick without end - the tick
+ * never returned to completions, watchers or run_until's stop check. The
+ * cap keeps the old behaviour finite so the test fails instead of hanging. */
+
+typedef struct {
+    Fixture *f;
+    int      fired;
+} Respawn;
+
+static void respawn_timer(void *u)
+{
+    Respawn *r = u;
+    if (++r->fired < 100000) r->f->be->timer_add(r->f->ctx, 0, respawn_timer, r);
+}
+
+static int respawn_stop_calls;
+static int respawn_stop(void *u)
+{
+    Respawn *r = u;
+    respawn_stop_calls++;
+    return r->fired >= 3;
+}
+
+UTEST(async_backend_poll, zero_ms_timer_readded_by_callback_waits_a_tick)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+    Respawn r = {.f = &f};
+    ASSERT_GT(f.be->timer_add(f.ctx, 0, respawn_timer, &r), (uint64_t)0);
+    f.be->tick(f.ctx, 0);
+    ASSERT_EQ(r.fired, 1);
+    f.be->tick(f.ctx, 0);
+    ASSERT_EQ(r.fired, 2);
+
+    /* run_until's stop check runs between ticks, so it sees the respawner. */
+    respawn_stop_calls = 0;
+    ASSERT_EQ(f.be->run_until(f.ctx, respawn_stop, &r), 0);
+    ASSERT_EQ(r.fired, 3);
+    ASSERT_GT(respawn_stop_calls, 0);
+    fixture_free(&f);
+}
+
+/* Older due timers still fire in the tick a callback adds a new one in,
+ * ahead of it even at an equal deadline (the heap breaks ties by id). */
+static Fixture *tie_fixture;
+static void tie_add_new(void *u)
+{
+    log_timer(u);
+    tie_fixture->be->timer_add(tie_fixture->ctx, 0, log_timer, (void *)(intptr_t)9);
+}
+
+UTEST(async_backend_poll, older_due_timers_fire_before_a_new_one)
+{
+    Fixture f;
+    ASSERT_EQ(fixture_init(&f), 0);
+    tie_fixture = &f;
+    order_n = 0;
+    ASSERT_GT(f.be->timer_add(f.ctx, 0, tie_add_new, (void *)(intptr_t)1), (uint64_t)0);
+    ASSERT_GT(f.be->timer_add(f.ctx, 0, log_timer, (void *)(intptr_t)2), (uint64_t)0);
+    ASSERT_GT(f.be->timer_add(f.ctx, 0, log_timer, (void *)(intptr_t)3), (uint64_t)0);
+    f.be->tick(f.ctx, 0);
+    ASSERT_EQ(order_n, 3);
+    ASSERT_EQ(order_log[0], 1);
+    ASSERT_EQ(order_log[1], 2);
+    ASSERT_EQ(order_log[2], 3);
+    f.be->tick(f.ctx, 0);
+    ASSERT_EQ(order_n, 4);
+    ASSERT_EQ(order_log[3], 9);
+    fixture_free(&f);
+}
+
 /* ── Async op suspend / complete ───────────────────────────────────── */
 
 static int op_resumed;

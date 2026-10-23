@@ -275,11 +275,20 @@ static void heap_swap(HlAsyncBackendCtx *ctx, size_t a, size_t b)
     ctx->timers[b] = tmp;
 }
 
+/* Order by deadline, ties by id (ids grow monotonically), so a timer added
+ * while step 5 fires sorts after every older timer already due - the
+ * watermark there relies on it (audit 24). */
+static int timer_less(const PollTimer *a, const PollTimer *b)
+{
+    if (a->deadline_ms != b->deadline_ms) return a->deadline_ms < b->deadline_ms;
+    return a->id < b->id;
+}
+
 static void heap_sift_up(HlAsyncBackendCtx *ctx, size_t idx)
 {
     while (idx > 0) {
         size_t parent = (idx - 1) / 2;
-        if (ctx->timers[parent]->deadline_ms <= ctx->timers[idx]->deadline_ms)
+        if (!timer_less(ctx->timers[idx], ctx->timers[parent]))
             break;
         heap_swap(ctx, parent, idx);
         idx = parent;
@@ -293,9 +302,9 @@ static void heap_sift_down(HlAsyncBackendCtx *ctx, size_t idx)
         size_t left = 2 * idx + 1;
         size_t right = 2 * idx + 2;
         size_t smallest = idx;
-        if (left < n && ctx->timers[left]->deadline_ms < ctx->timers[smallest]->deadline_ms)
+        if (left < n && timer_less(ctx->timers[left], ctx->timers[smallest]))
             smallest = left;
-        if (right < n && ctx->timers[right]->deadline_ms < ctx->timers[smallest]->deadline_ms)
+        if (right < n && timer_less(ctx->timers[right], ctx->timers[smallest]))
             smallest = right;
         if (smallest == idx) break;
         heap_swap(ctx, idx, smallest);
@@ -524,10 +533,20 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
     ctx->draining = drain.prev;
     pthread_mutex_unlock(&ctx->lock);
 
-    /* ── Step 5: fire expired timers. Pop under the lock, fire after. */
+    /* ── Step 5: fire expired timers. Pop under the lock, fire after.
+     * Only timers that existed when the step began (id below the watermark):
+     * a 0 ms timer a callback adds is due at once, so a self-re-spawning
+     * task or two tasks waking each other fired here without end, starving
+     * completions, fd watchers and run_until's stop check (audit 24; Keel's
+     * kl_timer_fire does the same). The heap breaks deadline ties by id, so
+     * the first new timer at the top means every older due one has fired. */
+    pthread_mutex_lock(&ctx->lock);
+    const uint64_t watermark = ctx->next_timer_id;
+    pthread_mutex_unlock(&ctx->lock);
     for (;;) {
         pthread_mutex_lock(&ctx->lock);
         if (ctx->timer_count == 0
+            || ctx->timers[0]->id >= watermark
             || ctx->timers[0]->deadline_ms > poll_monotonic_ms()) {
             pthread_mutex_unlock(&ctx->lock);
             break;
