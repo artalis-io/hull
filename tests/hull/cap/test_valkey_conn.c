@@ -17,6 +17,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -291,6 +292,52 @@ UTEST(valkey_conn, a_dripping_reply_is_stopped_by_a_tripped_budget) {
     EXPECT_EQ(-1, rc);
     EXPECT_TRUE(strstr(hl_valkey_conn_error(c), "interrupted") != NULL);
     EXPECT_TRUE(took < 2000);   /* the drip alone runs 256 x 20 ms = 5 s */
+
+    hl_valkey_conn_close(c);
+    close(sv[0]);
+}
+
+/* Audit 24: after a POLLOUT wait the command went out in one blocking send,
+ * so a server that stopped reading a large SET held the loop until the
+ * socket's send timeout (none at all on an embedder's socket), the run asked
+ * only between quiet poll slices. The write is sliced: a tripped budget stops
+ * it and the connection is dead. */
+UTEST(valkey_conn, a_send_to_a_server_that_stopped_reading_is_stopped) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    write(sv[0], HELLO_MAP, strlen(HELLO_MAP));
+    HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost?connect_timeout=10000", &d));
+    HlValkeyConn *c = NULL; char e[128];
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
+
+    size_t n = (size_t)8 << 20;
+    char *big = calloc(1, n);
+    ASSERT_TRUE(big != NULL);
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 3);
+    hl_resp_cmd_arg_cstr(&w, "SET");
+    hl_resp_cmd_arg_cstr(&w, "k");
+    hl_resp_cmd_arg(&w, big, n);
+    free(big);
+    HlRespValue reply;
+    vk_charges = 0;
+    vk_trip_at = 3;
+    HlDbBudgetBinding prev = hl_db_budget_swap(vk_count_trip_fn, NULL);
+    uint64_t t0 = now_ms();
+    int rc = hl_valkey_command(c, &w, &reply);
+    uint64_t took = now_ms() - t0;
+    hl_db_budget_restore(prev);
+    hl_resp_writer_free(&w);
+
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(strstr(hl_valkey_conn_error(c), "interrupted") != NULL);
+    EXPECT_TRUE(took < 2000);
+    /* Dead: the next command is refused without touching the socket. */
+    HlRespWriter w2; hl_resp_writer_init(&w2);
+    hl_resp_cmd_begin(&w2, 1);
+    hl_resp_cmd_arg_cstr(&w2, "PING");
+    EXPECT_EQ(-1, hl_valkey_command(c, &w2, &reply));
+    hl_resp_writer_free(&w2);
 
     hl_valkey_conn_close(c);
     close(sv[0]);

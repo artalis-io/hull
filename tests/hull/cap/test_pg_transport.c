@@ -956,6 +956,95 @@ UTEST(db_transport_send_sliced, the_timeout_bounds_the_whole_message)
     tp_disarm_watchdog();
 }
 
+/* Audit 24: close sends a TLS close_notify only on a healthy stream, and then
+ * once, non-blocking - a blocking close_notify after a stopped send flushed
+ * the part-sent record to a peer that had stopped reading and held the event
+ * loop for SO_SNDTIMEO. A fake session (white-box: the HlTlsClient layout of
+ * shared/tls_client.c, NULL ctx) records whether shutdown ran and whether the
+ * descriptor was non-blocking when it did. */
+#include <keel/tls.h>
+struct HlTlsClient { KlTlsCtx *ctx; KlTls *tls; };
+static int g_ct_shutdowns, g_ct_shutdown_nonblock, g_ct_destroys;
+static KlTlsResult ct_shutdown(KlTls *self, KlSocketHandle fd)
+{
+    (void)self;
+    g_ct_shutdowns++;
+    g_ct_shutdown_nonblock = (fcntl((int)fd, F_GETFL, 0) & O_NONBLOCK) != 0;
+    return KL_TLS_WANT_WRITE;
+}
+static void ct_destroy(KlTls *self) { (void)self; g_ct_destroys++; }
+static KlTls g_ct_tls;
+static struct HlTlsClient *ct_fake_session(void)
+{
+    memset(&g_ct_tls, 0, sizeof g_ct_tls);
+    g_ct_tls.shutdown = ct_shutdown;
+    g_ct_tls.destroy  = ct_destroy;
+    struct HlTlsClient *c = calloc(1, sizeof *c);   /* freed by hl_tls_client_free */
+    if (c) c->tls = &g_ct_tls;
+    g_ct_shutdowns = g_ct_shutdown_nonblock = g_ct_destroys = 0;
+    return c;
+}
+
+UTEST(db_transport_tls_close, healthy_close_notifies_once_non_blocking)
+{
+    tp_arm_watchdog();
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+    struct HlTlsClient *c = ct_fake_session();
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(hl_db_transport_attach_tls(t, c), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
+    ASSERT_EQ(g_ct_shutdowns, 1);
+    ASSERT_EQ(g_ct_shutdown_nonblock, 1);   /* never a wait on the peer */
+    ASSERT_EQ(g_ct_destroys, 1);
+    close(sv[1]);
+    tp_disarm_watchdog();
+}
+
+UTEST(db_transport_tls_close, abort_sends_no_close_notify)
+{
+    tp_arm_watchdog();
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+    struct HlTlsClient *c = ct_fake_session();
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(hl_db_transport_attach_tls(t, c), 0);
+    ASSERT_EQ(hl_db_transport_abort(t), 0);
+    ASSERT_EQ(g_ct_shutdowns, 0);
+    ASSERT_EQ(g_ct_destroys, 1);            /* the session is still freed */
+    close(sv[1]);
+    tp_disarm_watchdog();
+}
+
+UTEST(db_transport_tls_close, a_stopped_send_leaves_the_stream_broken)
+{
+    signal(SIGPIPE, SIG_IGN);
+    tp_arm_watchdog();
+    int sv[2]; ASSERT_EQ(tp_socketpair(sv), 0);
+    HlDbTransport *t = hl_db_transport_adopt("pg", NULL, sv[0], NULL, NULL, 0);
+    ASSERT_TRUE(t != NULL);
+    size_t n = (size_t)8 << 20;
+    uint8_t *big = calloc(1, n);
+    ASSERT_TRUE(big != NULL);
+    g_ss_stops = 0; g_ss_trip_at = 2;
+    int rc = hl_db_transport_send_sliced(t, big, n, 0, ss_stop, NULL);
+    free(big);
+    ASSERT_EQ(rc, -2);
+    ASSERT_EQ(t->broken, 1);
+    /* Even a plain close of it now sends no close_notify (white-box: a session
+     * attached after the fact stands in for the one the send went through). */
+    struct HlTlsClient *c = ct_fake_session();
+    ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(hl_db_transport_attach_tls(t, c), 0);
+    ASSERT_EQ(hl_db_transport_close(t), 0);
+    ASSERT_EQ(g_ct_shutdowns, 0);
+    ASSERT_EQ(g_ct_destroys, 1);
+    close(sv[1]);
+    tp_disarm_watchdog();
+}
+
 UTEST(db_transport_alloc, block_from_embedder_allocator)
 {
     int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);

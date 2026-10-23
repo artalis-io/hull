@@ -25,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sys/types.h>   /* ssize_t (io_send/io_recv) */
+#include <sys/types.h>   /* ssize_t (io_recv) */
 
 #ifndef HL_VALKEY_NO_TLS
 #include "hull/cap/db_transport.h"   /* shared Keel-v3 byte transport (bytes + TLS) */
@@ -291,13 +291,6 @@ static void *reply_alloc(void *ctx, size_t n) {
     return sh_arena_alloc(c->arena, n);
 }
 
-/* All bytes ride the shared Keel-v3 byte transport, which is EINTR-retried,
- * SIGPIPE-suppressed, and (when a TLS session is attached) TLS-aware internally -
- * so these are thin single-op wrappers, one per direction. */
-static ssize_t io_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
-    return hl_db_transport_send(c->transport, buf, len);
-}
-
 /* The run this command belongs to is over its budget or past its deadline
  * (a 0-unit charge only asks). */
 static int run_stopped(void) {
@@ -315,18 +308,23 @@ static int run_stopped_cb(void *ud) {
     return run_stopped();   /* constant 0 without HL_ENABLE_DB */
 }
 
-/* Over TLS the read is sliced, asking the run between slices, for at most
- * what is left of the command's deadline: a record's first byte made the
- * socket readable, and the read then blocked for the rest (audit 20). */
+/* What is left of the command's deadline, for a sliced transport call
+ * (0 = no deadline; a passed one leaves 1 ms). */
+static int deadline_left(const HlValkeyConn *c) {
+    if (!c->deadline_ms) return 0;
+    uint64_t now = kl_monotonic_ms();
+    uint64_t rem = c->deadline_ms > now ? c->deadline_ms - now : 1;
+    return rem > (uint64_t)INT32_MAX ? INT32_MAX : (int)rem;
+}
+
+/* All bytes ride the shared Keel-v3 byte transport, which is EINTR-retried,
+ * SIGPIPE-suppressed, and (when a TLS session is attached) TLS-aware
+ * internally. Over TLS the read is sliced, asking the run between slices, for
+ * at most what is left of the command's deadline: a record's first byte made
+ * the socket readable, and the read then blocked for the rest (audit 20). */
 static ssize_t io_recv(HlValkeyConn *c, uint8_t *buf, size_t len) {
-    int left = 0;
-    if (c->deadline_ms) {
-        uint64_t now = kl_monotonic_ms();
-        uint64_t rem = c->deadline_ms > now ? c->deadline_ms - now : 1;
-        left = rem > (uint64_t)INT32_MAX ? INT32_MAX : (int)rem;
-    }
-    return hl_db_transport_recv_sliced(c->transport, buf, len, left,
-                                       run_stopped_cb, NULL);
+    return hl_db_transport_recv_sliced(c->transport, buf, len,
+                                       deadline_left(c), run_stopped_cb, NULL);
 }
 
 /* Wait until the socket is ready for `events` or the command's deadline
@@ -371,21 +369,22 @@ static int more_waiting(HlValkeyConn *c) {
     return poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN);
 }
 
+/* Send a whole command, sliced as the Postgres / MySQL writes are (audit 24):
+ * after a POLLOUT wait the write was a blocking send (or TLS write) of the
+ * rest, which waited for the server to take every byte under SO_SNDTIMEO -
+ * the run asked only after a quiet poll slice - so a server that stopped
+ * reading a large SET held the event loop. Non-blocking, the run is asked
+ * after every chunk and every quiet slice, under the command's one deadline
+ * (none on an embedder's socket without a DSN timeout). Any failure leaves
+ * the stream out of step: the connection is dead. */
 static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
-    size_t sent = 0;
-    while (sent < len) {
-        int w = wait_io(c, POLLOUT);
-        if (w != 0) {
-            c->dead = 1;
-            set_err(c, w == -2 ? "interrupted (instruction limit exceeded)"
-                               : "write timed out");
-            return -1;
-        }
-        ssize_t n = io_send(c, buf + sent, len - sent);
-        if (n <= 0) { c->dead = 1; set_err(c, "socket write failed"); return -1; }
-        sent += (size_t)n;
-    }
-    return 0;
+    int rc = hl_db_transport_send_sliced(c->transport, buf, len,
+                                         deadline_left(c), run_stopped_cb, NULL);
+    if (rc == 0) return 0;
+    c->dead = 1;
+    set_err(c, rc == -2 ? "interrupted (instruction limit exceeded)"
+                        : "socket write failed or timed out");
+    return -1;
 }
 
 /* Read exactly one reply into *out (borrows into rbuf + the reply arena, valid
@@ -642,7 +641,12 @@ int hl_valkey_conn_is_resp3(HlValkeyConn *c) { return c ? c->resp3 : 0; }
 
 void hl_valkey_conn_close(HlValkeyConn *c) {
     if (!c) return;
-    hl_db_transport_close(c->transport);   /* TLS shutdown/free + provider close + free */
+    /* TLS shutdown/free + provider close + free. A dead connection is
+     * aborted: no close_notify into a stream that is out of step (audit 24). */
+    if (c->dead)
+        hl_db_transport_abort(c->transport);
+    else
+        hl_db_transport_close(c->transport);
     if (c->rbuf) {
         memset(c->rbuf, 0, c->rcap);                 /* scrub residual bytes */
         hl_alloc_free(c->alloc, c->rbuf, c->rcap);
