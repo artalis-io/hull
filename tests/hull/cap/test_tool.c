@@ -715,6 +715,43 @@ UTEST(tool, find_files_all_entries)
     free(tmpdir);
 }
 
+/* Audit 23: the walk had no depth bound (each level a PATH_MAX buffer on
+ * the stack), and a verify (ALL) walk went deeper than --verify-sig's scan,
+ * which fails past 16 levels - so verify said OK for an app that then
+ * refused to start. */
+UTEST(tool, find_files_depth_is_bounded)
+{
+    char *tmpdir = make_tmpdir();
+    ASSERT_TRUE(tmpdir != NULL);
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s", tmpdir);
+    for (int i = 0; i < 20; i++) {
+        n += snprintf(path + n, sizeof(path) - (size_t)n, "/d");
+        ASSERT_EQ(mkdir(path, 0755), 0);
+    }
+    char file[1100];
+    snprintf(file, sizeof(file), "%s/x.css", path);
+    write_test_file(file, "x");
+
+    char **files = hl_tool_find_files(tmpdir, "*", NULL);
+    ASSERT_TRUE(files != NULL);   /* 20 levels: within a build walk's bound */
+    int count = 0;
+    for (char **p = files; *p; p++) { count++; free(*p); }
+    free(files);
+    EXPECT_EQ(count, 1);
+    EXPECT_TRUE(hl_tool_find_files_ex(tmpdir, "*", NULL, HL_TOOL_FIND_ALL,
+                                      NULL) == NULL);   /* past 16 */
+
+    for (int i = 20; i < 70; i++) {
+        n += snprintf(path + n, sizeof(path) - (size_t)n, "/d");
+        ASSERT_EQ(mkdir(path, 0755), 0);
+    }
+    EXPECT_TRUE(hl_tool_find_files(tmpdir, "*", NULL) == NULL);   /* past 64 */
+
+    hl_tool_rmdir(tmpdir, NULL);
+    free(tmpdir);
+}
+
 UTEST(tool, find_files_pattern_match)
 {
     char *tmpdir = make_tmpdir();

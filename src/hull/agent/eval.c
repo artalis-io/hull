@@ -141,6 +141,32 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
                      JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
     }
     JSValue v = JS_IsException(fn) ? fn : JS_EvalFunction(ctx, fn);
+
+    /* The error or the result as text FIRST: the error is taken before any
+     * job runs (the drain ran with it pending), and stringifying runs app
+     * code (toJSON, getters) whose jobs the drain below then runs too -
+     * stringified after it, they were left queued (audit 23). */
+    const char *err = NULL;
+    JSValue jv = JS_UNDEFINED;
+    size_t jlen = 0;
+    const char *jstr = NULL;
+    int failed = JS_IsException(v);
+    if (failed) {
+        JSValue exc = JS_GetException(ctx);
+        err = JS_ToCString(ctx, exc);
+        if (!err) JS_FreeValue(ctx, JS_GetException(ctx));
+        JS_FreeValue(ctx, exc);
+    } else {
+        /* Use JSON.stringify to serialise the result. */
+        jv = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
+        if (JS_IsException(jv)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            jv = JS_UNDEFINED;
+        } else if (!JS_IsUndefined(jv)) {
+            jstr = JS_ToCStringLen(ctx, &jlen, jv);
+            if (!jstr) JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+    }
     /* The jobs the snippet queued are its own code (`await null; ...`):
      * run while the eval is the active run, as an entry's are, not left
      * for whatever runs next on a warm context (audit 22). */
@@ -150,24 +176,14 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
     sh_json_writer_init(&w, sh_json_buf_write, out);
     sh_json_write_object_start(&w);
 
-    if (JS_IsException(v)) {
-        JSValue exc = JS_GetException(ctx);
-        const char *err = JS_ToCString(ctx, exc);
+    if (failed) {
         sh_json_write_kv_bool(&w, "ok", false);
         sh_json_write_kv_string(&w, "error", err ? err : "unknown error");
         if (err) JS_FreeCString(ctx, err);
-        JS_FreeValue(ctx, exc);
         JS_FreeValue(ctx, v);
         sh_json_write_object_end(&w);
         return 0;
     }
-
-    /* Use JSON.stringify to serialise the result. */
-    JSValue jv = JS_JSONStringify(ctx, v, JS_UNDEFINED, JS_UNDEFINED);
-    size_t jlen = 0;
-    const char *jstr = NULL;
-    if (!JS_IsException(jv) && !JS_IsUndefined(jv))
-        jstr = JS_ToCStringLen(ctx, &jlen, jv);
 
     sh_json_write_kv_bool(&w, "ok", true);
     sh_json_write_key(&w, "result");

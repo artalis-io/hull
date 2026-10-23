@@ -394,7 +394,10 @@ static int l_tool_agent_context(lua_State *L)
 
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/tool.h"
 #include "hull/migrate.h"
+#include "hull/runtime/tool.h"     /* hl_lua_tool_unveil_ctx */
+#include "hull/sandbox.h"          /* hl_sandbox_db_path */
 #include "hull/vfs.h"
 
 extern const HlEntry hl_app_entries[];
@@ -405,6 +408,26 @@ static int l_tool_migrate_status(lua_State *L)
 {
     const char *app_dir = luaL_optstring(L, 1, ".");
     const char *db_path = luaL_optstring(L, 2, "data.db");
+
+    /* A SQLite file the tool sandbox lets this VM read, nothing else
+     * (audit 23): the open went past the allowlist every other tool path
+     * checks, and a network DSN was dialled from the tool VM, whose sandbox
+     * grants no network. (The status creates _hull_migrations: where the
+     * kernel enforces the tool sandbox, that write is bounded by it, as
+     * before - the app directory itself is granted read-only.) */
+    const char *file = hl_sandbox_db_path(db_path);
+    if (!file) {
+        lua_pushnil(L);
+        lua_pushstring(L, "migrate status --tui reads a SQLite database "
+                          "file only (use `hull migrate status` for others)");
+        return 2;
+    }
+    HlToolUnveilCtx *uctx = hl_lua_tool_unveil_ctx(L);
+    if (uctx && hl_tool_unveil_check(uctx, file, 'r') != 0) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "the tool sandbox does not grant %s", file);
+        return 2;
+    }
 
     const char *db_err = NULL;
     const HlDbBackend *be = hl_db_backend_select(db_path, &db_err);

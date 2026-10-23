@@ -16,7 +16,7 @@ local tui = require("hull.tui")
 
 local function find_args(args)
     local app_dir = "."
-    local db_path = "data.db"
+    local db_path = nil
     local i = 2  -- arg[1] = "status"
     while args[i] do
         local a = args[i]
@@ -28,7 +28,9 @@ local function find_args(args)
             app_dir = a; i = i + 1
         end
     end
-    return app_dir, db_path
+    -- The app's database, as the plain `hull migrate status` opens it: the
+    -- default was data.db in the WORKING directory (audit 23).
+    return app_dir, db_path or (app_dir .. "/data.db")
 end
 
 local app_dir, db_path = find_args(arg or {})

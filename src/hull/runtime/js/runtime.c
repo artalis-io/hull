@@ -1921,6 +1921,18 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
         if (load_err) *load_err = load_err_buf;
         return -1;
     }
+    /* A top level that awaits what nothing settles stops there: the tests
+     * it would have registered after the await are missing, and the ones
+     * before it ran and passed (audit 23, after #809). */
+    if (JS_IsObject(result) &&
+        JS_PromiseState(js->ctx, result) == JS_PROMISE_PENDING) {
+        snprintf(load_err_buf, sizeof(load_err_buf), "%s",
+                 "the test file's top level never finished (it awaits a "
+                 "promise nothing settles)");
+        JS_FreeValue(js->ctx, result);
+        if (load_err) *load_err = load_err_buf;
+        return -1;
+    }
     JS_FreeValue(js->ctx, result);
 
     /* hl_js_test_run unconditionally writes to file_total/passed/failed.

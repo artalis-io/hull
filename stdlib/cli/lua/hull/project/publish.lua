@@ -66,7 +66,11 @@ local function main()
     local p = projection.project(disc)
     p.session_pid = session_pid                      -- dev-session identity (D7)
 
-    -- CANONICAL output only -- derived from app_dir, never a caller-supplied path.
+    -- CANONICAL output only -- derived from app_dir, never a caller-supplied path,
+    -- and never through a committed `.hull -> <dir>` link (audit 23).
+    if tool.is_symlink(app_dir .. "/.hull") == true then
+        usage_error("publish: " .. app_dir .. "/.hull is a symbolic link")
+    end
     local path = app_dir .. "/.hull/discovery.json"
     local okw, reason = atomic_write(path, json.encode(p) .. "\n")
     if not okw then usage_error("publish: " .. tostring(reason)) end

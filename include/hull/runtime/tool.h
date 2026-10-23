@@ -47,6 +47,10 @@ typedef struct HlLinker         HlLinker;
  */
 void hl_lua_tool_register(lua_State *L, HlToolUnveilCtx *ctx);
 
+/* The unveil context hl_lua_tool_register stored, or NULL - for tool
+ * bindings registered outside mod_tool.c that read or write a path. */
+HlToolUnveilCtx *hl_lua_tool_unveil_ctx(lua_State *L);
+
 /*
  * Expose the compiler vtable as tool.compiler in the Lua tool global.
  * Must be called after hl_lua_tool_register(). compiler must not be NULL.
