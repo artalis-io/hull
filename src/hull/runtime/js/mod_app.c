@@ -124,6 +124,17 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "app.%s opts must be an object",
                                  method_names[magic]);
     }
+    /* opts.multipart is read before anything is registered: a throwing
+     * getter fails the call, rather than registering the route without it
+     * and leaving the exception pending (audit 23). */
+    JSValue mp = JS_UNDEFINED;
+    if (has_opts) {
+        mp = JS_GetPropertyStr(ctx, argv[2], "multipart");
+        if (JS_IsException(mp)) {
+            JS_FreeCString(ctx, pattern);
+            return JS_EXCEPTION;
+        }
+    }
 
     JSValue store = hl_js_internals(ctx);
 
@@ -160,7 +171,6 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
      * routes.c reads the integer caps off this sub-object when
      * materializing the KlHttpMultipartConfig. */
     if (has_opts) {
-        JSValue mp = JS_GetPropertyStr(ctx, argv[2], "multipart");
         if (JS_IsObject(mp) && !JS_IsFunction(ctx, mp) && !JS_IsArray(ctx, mp)) {
             app_put(ctx, def, "multipart", mp); /* takes ownership */
         } else {
@@ -398,6 +408,7 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
     int use_localtime = 0;
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue lt_val = JS_GetPropertyStr(ctx, argv[2], "localtime");
+        if (JS_IsException(lt_val)) return JS_EXCEPTION;   /* audit 23 */
         if (JS_IsBool(lt_val))
             use_localtime = JS_ToBool(ctx, lt_val);
         JS_FreeValue(ctx, lt_val);
@@ -486,6 +497,21 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "app.ws requires handlers object");
     }
 
+    /* The handlers are read before anything is registered: a throwing
+     * getter fails the call (audit 23 - the endpoint was registered
+     * without that handler, the exception left pending). */
+    JSValue on_open = JS_GetPropertyStr(ctx, argv[1], "onOpen");
+    JSValue on_message = JS_IsException(on_open) ? JS_EXCEPTION
+                       : JS_GetPropertyStr(ctx, argv[1], "onMessage");
+    JSValue on_close = JS_IsException(on_message) ? JS_EXCEPTION
+                     : JS_GetPropertyStr(ctx, argv[1], "onClose");
+    if (JS_IsException(on_close)) {
+        JS_FreeValue(ctx, on_open);
+        JS_FreeValue(ctx, on_message);
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
+    }
+
     JSValue store = hl_js_internals(ctx);
 
     /* Ensure __hull_ws_defs array exists */
@@ -504,21 +530,18 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
     app_put(ctx, entry, "path", JS_NewString(ctx, path));
 
     /* Extract and store each callback */
-    JSValue on_open = JS_GetPropertyStr(ctx, argv[1], "onOpen");
     if (JS_IsFunction(ctx, on_open)) {
         int32_t hid = js_store_handler(ctx, on_open);
         app_put(ctx, entry, "on_open_id", JS_NewInt32(ctx, hid));
     }
     JS_FreeValue(ctx, on_open);
 
-    JSValue on_message = JS_GetPropertyStr(ctx, argv[1], "onMessage");
     if (JS_IsFunction(ctx, on_message)) {
         int32_t hid = js_store_handler(ctx, on_message);
         app_put(ctx, entry, "on_message_id", JS_NewInt32(ctx, hid));
     }
     JS_FreeValue(ctx, on_message);
 
-    JSValue on_close = JS_GetPropertyStr(ctx, argv[1], "onClose");
     if (JS_IsFunction(ctx, on_close)) {
         int32_t hid = js_store_handler(ctx, on_close);
         app_put(ctx, entry, "on_close_id", JS_NewInt32(ctx, hid));

@@ -90,10 +90,14 @@ static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
     if (!JS_IsArray(ctx, arr))
         return -1;
 
-    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
     int32_t len = 0;
-    JS_ToInt32(ctx, &len, len_val);
-    JS_FreeValue(ctx, len_val);
+    if (hl_js_get_length32(ctx, arr, &len) < 0) {
+        /* A Proxy's throwing length trap: it bound no params, and ran the
+         * statement with the exception pending (audit 23). Refused, as a
+         * throwing element getter is below. */
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return -1;
+    }
 
     if (len <= 0)
         return 0;
@@ -190,10 +194,9 @@ static int js_to_string_array(JSContext *ctx, JSValueConst arr,
     if (!JS_IsArray(ctx, arr))
         return -1;
 
-    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
     int32_t len = 0;
-    JS_ToInt32(ctx, &len, len_val);
-    JS_FreeValue(ctx, len_val);
+    if (hl_js_get_length32(ctx, arr, &len) < 0)   /* audit 23 */
+        return -1;
 
     if (len <= 0)
         return -1;

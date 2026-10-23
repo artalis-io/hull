@@ -109,10 +109,9 @@ static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
     } else if (argc >= 3 && JS_IsFunction(ctx, argv[2])) {
         fn_arg = argv[2];
         if (JS_IsObject(argv[1]) && !JS_IsNull(argv[1])) {
-            JSValue t_val = JS_GetPropertyStr(ctx, argv[1], "timeout");
-            if (!JS_IsUndefined(t_val))
-                JS_ToInt32(ctx, &timeout_ms, t_val);
-            JS_FreeValue(ctx, t_val);
+            /* A throwing getter fails the registration (audit 23). */
+            if (hl_js_opt_int32(ctx, argv[1], "timeout", &timeout_ms) < 0)
+                return JS_EXCEPTION;
             if (timeout_ms <= 0) timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
         }
     } else {

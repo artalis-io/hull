@@ -147,8 +147,9 @@ static JSValue js_tui_move(JSContext *ctx, JSValueConst this_val,
     (void)this_val;
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
     int x = 1, y = 1;
-    if (argc >= 1) JS_ToInt32(ctx, &x, argv[0]);
-    if (argc >= 2) JS_ToInt32(ctx, &y, argv[1]);
+    /* A valueOf that throws fails the call (audit 23). */
+    if (argc >= 1 && JS_ToInt32(ctx, &x, argv[0]) < 0) return JS_EXCEPTION;
+    if (argc >= 2 && JS_ToInt32(ctx, &y, argv[1]) < 0) return JS_EXCEPTION;
     hl_cap_tui_move(g_ctx, x, y);
     return JS_UNDEFINED;
 }
@@ -171,15 +172,27 @@ static JSValue js_tui_style(JSContext *ctx, JSValueConst this_val,
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
     uint32_t fg = HL_TUI_COLOR_DEFAULT, bg = HL_TUI_COLOR_DEFAULT, attr = 0;
     if (argc >= 1 && JS_IsObject(argv[0])) {
+        /* A getter that throws fails the call (audit 23: it was left
+         * pending and the style applied without it). */
+        static const struct { const char *key; uint32_t bit; } flags[] = {
+            { "bold", HL_TUI_ATTR_BOLD }, { "dim", HL_TUI_ATTR_DIM },
+            { "italic", HL_TUI_ATTR_ITALIC },
+            { "underline", HL_TUI_ATTR_UNDERLINE },
+            { "reverse", HL_TUI_ATTR_REVERSE },
+            { "strike", HL_TUI_ATTR_STRIKE },
+        };
         JSValue v;
-        v = JS_GetPropertyStr(ctx, argv[0], "fg"); fg = color_from_js(ctx, v); JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[0], "bg"); bg = color_from_js(ctx, v); JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[0], "bold");      if (JS_ToBool(ctx, v) > 0) attr |= HL_TUI_ATTR_BOLD;      JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[0], "dim");       if (JS_ToBool(ctx, v) > 0) attr |= HL_TUI_ATTR_DIM;       JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[0], "italic");    if (JS_ToBool(ctx, v) > 0) attr |= HL_TUI_ATTR_ITALIC;    JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[0], "underline"); if (JS_ToBool(ctx, v) > 0) attr |= HL_TUI_ATTR_UNDERLINE; JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[0], "reverse");   if (JS_ToBool(ctx, v) > 0) attr |= HL_TUI_ATTR_REVERSE;   JS_FreeValue(ctx, v);
-        v = JS_GetPropertyStr(ctx, argv[0], "strike");    if (JS_ToBool(ctx, v) > 0) attr |= HL_TUI_ATTR_STRIKE;    JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[0], "fg");
+        if (JS_IsException(v)) return JS_EXCEPTION;
+        fg = color_from_js(ctx, v); JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[0], "bg");
+        if (JS_IsException(v)) return JS_EXCEPTION;
+        bg = color_from_js(ctx, v); JS_FreeValue(ctx, v);
+        for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+            int on = hl_js_opt_bool(ctx, argv[0], flags[i].key);
+            if (on < 0) return JS_EXCEPTION;
+            if (on) attr |= flags[i].bit;
+        }
     }
     hl_cap_tui_style(g_ctx, fg, bg, attr);
     return JS_UNDEFINED;
@@ -192,8 +205,9 @@ static JSValue js_tui_print(JSContext *ctx, JSValueConst this_val,
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
     if (argc < 3) return JS_ThrowTypeError(ctx, "tui.print(x, y, str)");
     int32_t x = 1, y = 1;
-    JS_ToInt32(ctx, &x, argv[0]);
-    JS_ToInt32(ctx, &y, argv[1]);
+    if (JS_ToInt32(ctx, &x, argv[0]) < 0 ||   /* audit 23 */
+        JS_ToInt32(ctx, &y, argv[1]) < 0)
+        return JS_EXCEPTION;
     size_t len = 0;
     const char *s = JS_ToCStringLen(ctx, &len, argv[2]);
     if (!s) return JS_EXCEPTION;

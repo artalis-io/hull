@@ -104,7 +104,10 @@ static int read_track_access(JSContext *ctx, int argc, JSValueConst *argv, int i
     if (idx >= argc) return 1;
     JSValueConst v = argv[idx];
     if (JS_IsUndefined(v) || JS_IsNull(v) || !JS_IsObject(v)) return 1;
+    /* -1: the getter threw (audit 23 - JS_ToBool of the exception is -1,
+     * which read as "true" with the exception left pending). */
     JSValue ta = JS_GetPropertyStr(ctx, v, "trackAccess");
+    if (JS_IsException(ta)) return -1;
     int track = JS_IsUndefined(ta) ? 1 : JS_ToBool(ctx, ta);
     JS_FreeValue(ctx, ta);
     return track;
@@ -117,6 +120,7 @@ static int read_durable(JSContext *ctx, int argc, JSValueConst *argv, int idx)
     JSValueConst v = argv[idx];
     if (JS_IsUndefined(v) || JS_IsNull(v) || !JS_IsObject(v)) return 0;
     JSValue d = JS_GetPropertyStr(ctx, v, "durable");
+    if (JS_IsException(d)) return -1;   /* audit 23 */
     int durable = JS_IsUndefined(d) ? 0 : JS_ToBool(ctx, d);
     JS_FreeValue(ctx, d);
     return durable;
@@ -206,23 +210,23 @@ static JSValue js_blob_init(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, dir_v);
     if (!dir) return JS_EXCEPTION;
 
-    JSValue sd_v = JS_GetPropertyStr(ctx, argv[0], "shardDepth");
+    /* A getter or valueOf that throws fails the call (audit 23: it was
+     * left pending and the store opened with the defaults). */
     int shard_depth = 1;
-    if (!JS_IsUndefined(sd_v)) {
-        int32_t v = 1;
-        JS_ToInt32(ctx, &v, sd_v);
-        shard_depth = (int)v;
-    }
-    JS_FreeValue(ctx, sd_v);
-
-    JSValue tma_v = JS_GetPropertyStr(ctx, argv[0], "tmpMaxAge");
     uint64_t tmp_max_age = 0;
-    if (!JS_IsUndefined(tma_v)) {
-        int64_t v = 0;
-        JS_ToInt64(ctx, &v, tma_v);
-        tmp_max_age = (uint64_t)v;
+    {
+        int32_t sd; int64_t tma; int r;
+        if ((r = hl_js_opt_int32(ctx, argv[0], "shardDepth", &sd)) < 0) {
+            JS_FreeCString(ctx, dir);
+            return JS_EXCEPTION;
+        }
+        if (r) shard_depth = (int)sd;
+        if ((r = hl_js_opt_int64(ctx, argv[0], "tmpMaxAge", &tma)) < 0) {
+            JS_FreeCString(ctx, dir);
+            return JS_EXCEPTION;
+        }
+        if (r) tmp_max_age = (uint64_t)tma;
     }
-    JS_FreeValue(ctx, tma_v);
 
     HlBlob *b = NULL;
     int rc = hl_cap_blob_init(&b, js->base.fs_cfg, js->base.alloc,
@@ -290,6 +294,7 @@ static JSValue js_blob_put(JSContext *ctx, JSValueConst this_val,
      * then hashed and wrote freed memory. Nothing runs app code after
      * bytes_arg (it never calls an object's toString). */
     int durable = read_durable(ctx, argc, argv, 1);
+    if (durable < 0) return JS_EXCEPTION;
     size_t len = 0;
     const char *cstr = NULL;
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
@@ -324,6 +329,7 @@ static JSValue js_blob_put_verified(JSContext *ctx, JSValueConst this_val,
     const char *expected = check_id(ctx, argv[1]);
     if (!expected) return JS_EXCEPTION;
     int durable = read_durable(ctx, argc, argv, 2);
+    if (durable < 0) { JS_FreeCString(ctx, expected); return JS_EXCEPTION; }
     size_t len = 0;
     const char *cstr = NULL;
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
@@ -387,8 +393,10 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
     const char *expected = NULL;
     char id_buf[HL_BLOB_ID_BUF_SIZE];
     int durable = read_durable(ctx, argc, argv, 0);
+    if (durable < 0) return JS_EXCEPTION;
     if (argc > 0 && JS_IsObject(argv[0])) {
         JSValue ev = JS_GetPropertyStr(ctx, argv[0], "expected");
+        if (JS_IsException(ev)) return JS_EXCEPTION;
         if (!JS_IsUndefined(ev) && !JS_IsNull(ev)) {
             const char *e = check_id(ctx, ev);
             if (!e) { JS_FreeValue(ctx, ev); return JS_EXCEPTION; }
@@ -512,6 +520,7 @@ static JSValue js_blob_reader_new(JSContext *ctx, JSValueConst this_val,
     const char *id = check_id(ctx, argv[0]);
     if (!id) return JS_EXCEPTION;
     int track = read_track_access(ctx, argc, argv, 1);
+    if (track < 0) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
 
@@ -598,6 +607,7 @@ static JSValue js_blob_get(JSContext *ctx, JSValueConst this_val,
     const char *id = check_id(ctx, argv[0]);
     if (!id) return JS_EXCEPTION;
     int track = read_track_access(ctx, argc, argv, 1);
+    if (track < 0) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js) {   /* get_store found one, so never; checked once, here */
@@ -838,22 +848,20 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
 
     HlBlobCleanupOpts opts = {0};
 
+    /* A getter or valueOf that throws fails the call (audit 23): it was
+     * left pending and the cleanup ran on defaults - a throwing `dryRun`
+     * made it a real, deleting run. */
     JSValue v;
-    v = JS_GetPropertyStr(ctx, argv[0], "maxTotalSize");
-    if (!JS_IsUndefined(v)) {
-        int64_t n = 0; JS_ToInt64(ctx, &n, v);
-        opts.max_total_size = (uint64_t)n;
-    }
-    JS_FreeValue(ctx, v);
-
-    v = JS_GetPropertyStr(ctx, argv[0], "maxAge");
-    if (!JS_IsUndefined(v)) {
-        int64_t n = 0; JS_ToInt64(ctx, &n, v);
-        opts.max_age_sec = (uint64_t)n;
-    }
-    JS_FreeValue(ctx, v);
+    int64_t n; int r;
+    if ((r = hl_js_opt_int64(ctx, argv[0], "maxTotalSize", &n)) < 0)
+        return JS_EXCEPTION;
+    if (r) opts.max_total_size = (uint64_t)n;
+    if ((r = hl_js_opt_int64(ctx, argv[0], "maxAge", &n)) < 0)
+        return JS_EXCEPTION;
+    if (r) opts.max_age_sec = (uint64_t)n;
 
     v = JS_GetPropertyStr(ctx, argv[0], "strategy");
+    if (JS_IsException(v)) return JS_EXCEPTION;
     opts.strategy = HL_BLOB_LRU;
     if (JS_IsString(v)) {
         const char *s = JS_ToCString(ctx, v);
@@ -862,9 +870,9 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, v);
 
-    v = JS_GetPropertyStr(ctx, argv[0], "dryRun");
-    opts.dry_run = JS_ToBool(ctx, v);
-    JS_FreeValue(ctx, v);
+    if ((r = hl_js_opt_bool(ctx, argv[0], "dryRun")) < 0)
+        return JS_EXCEPTION;
+    opts.dry_run = r;
 
     /* The option getters are app code: blob.init() from one replaces the
      * store, and the old one is freed. Fetched again, as every other blob

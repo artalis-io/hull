@@ -173,29 +173,45 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
     for (int64_t j = 0; j < n; j++) datas[j] = JS_UNDEFINED;
 
     const char *err = NULL;
+    /* A getter, toString or valueOf that threw (or the budget interrupt):
+     * its exception is the call's error, never replaced by a TypeError or
+     * ignored (audit 23 - a throwing `mode` left it pending and the archive
+     * was built with mode 0). */
+    int threw = 0;
     int64_t i;
     for (i = 0; i < n; i++) {
         JSValue ent = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)i);
+        if (JS_IsException(ent)) { threw = 1; break; }
         if (!JS_IsObject(ent)) { JS_FreeValue(ctx, ent); err = "each entry must be an object"; break; }
 
         JSValue nv = JS_GetPropertyStr(ctx, ent, "name");
-        names[i] = JS_ToCString(ctx, nv);
+        names[i] = JS_IsException(nv) ? NULL : JS_ToCString(ctx, nv);
         JS_FreeValue(ctx, nv);
-        if (!names[i]) { JS_FreeValue(ctx, ent); err = "entry missing 'name'"; break; }
+        /* NULL only with an exception: undefined converts to "undefined". */
+        if (!names[i]) { JS_FreeValue(ctx, ent); threw = 1; break; }
         ents[i].name = names[i];
 
-        JSValue dv = JS_GetPropertyStr(ctx, ent, "isDir");
-        ents[i].is_dir = JS_ToBool(ctx, dv);
-        JS_FreeValue(ctx, dv);
+        int is_dir = hl_js_opt_bool(ctx, ent, "isDir");
+        if (is_dir < 0) { JS_FreeValue(ctx, ent); threw = 1; break; }
+        ents[i].is_dir = is_dir;
 
-        JSValue mv = JS_GetPropertyStr(ctx, ent, "mode");
         int32_t mode = 0;
-        if (!JS_IsUndefined(mv)) JS_ToInt32(ctx, &mode, mv);
-        JS_FreeValue(ctx, mv);
+        if (hl_js_opt_int32(ctx, ent, "mode", &mode) < 0) {
+            JS_FreeValue(ctx, ent);
+            threw = 1;
+            break;
+        }
         ents[i].mode = (unsigned)mode;
 
-        if (!ents[i].is_dir)
+        if (!ents[i].is_dir) {
             datas[i] = JS_GetPropertyStr(ctx, ent, "data");   /* held */
+            if (JS_IsException(datas[i])) {
+                datas[i] = JS_UNDEFINED;
+                JS_FreeValue(ctx, ent);
+                threw = 1;
+                break;
+            }
+        }
         JS_FreeValue(ctx, ent);
     }
 
@@ -204,7 +220,7 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
      * a later entry's getter could free (a fresh ArrayBuffer, released at
      * once) or close (a WasmBuffer / MappedBuffer) what an earlier view
      * named, before hl_tar_create read it. */
-    for (int64_t j = 0; !err && j < i; j++) {
+    for (int64_t j = 0; !err && !threw && j < i; j++) {
         if (ents[j].is_dir || JS_IsUndefined(datas[j]) || JS_IsNull(datas[j]))
             continue;
         if (!js_get_buffer(ctx, datas[j], &views[j], &dstrs[j], &dfree[j])) {
@@ -219,7 +235,7 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
     size_t out_len = 0;
     int rc = -1;
     int charged = 0;   /* -1: the charge threw; 1: refused (err set) */
-    if (!err && i == n) {
+    if (!err && !threw && i == n) {
         charged = js_tar_check_and_charge(ctx, ents, (size_t)n, &err);
         if (charged == 0)
             rc = hl_tar_create(ents, (size_t)n, &out, &out_len);
@@ -233,7 +249,7 @@ static JSValue js_tar_create(JSContext *ctx, JSValueConst this_val,
     js_free(ctx, ents); js_free(ctx, names); js_free(ctx, views);
     js_free(ctx, dstrs); js_free(ctx, dfree); js_free(ctx, datas);
 
-    if (charged < 0) return JS_EXCEPTION;
+    if (threw || charged < 0) return JS_EXCEPTION;
     if (charged > 0) return JS_ThrowRangeError(ctx, "tar.create: %s", err);
     if (rc != 0) {
         return err ? JS_ThrowTypeError(ctx, "tar.create: %s", err)
@@ -364,20 +380,29 @@ static JSValue js_tar_pack(JSContext *ctx, JSValueConst this_val,
     }
 
     const char *err = NULL;
-    int threw = 0;              /* the budget charge tripped */
+    int threw = 0;              /* an exception is pending (charge, getter) */
     uint64_t archive = 1024;    /* running archive size: the trailer */
     int64_t i;
     for (i = 0; i < n; i++) {
         JSValue el = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)i);
+        /* A getter or toString that threw is the call's error: it was
+         * replaced by "needs a path", or (`name`) left pending while the
+         * path was used (audit 23). */
+        if (JS_IsException(el)) { threw = 1; break; }
         if (JS_IsString(el)) {
             paths[i] = JS_ToCString(ctx, el);       /* member name = path */
+            if (!paths[i]) { JS_FreeValue(ctx, el); threw = 1; break; }
         } else if (JS_IsObject(el)) {
             JSValue pv = JS_GetPropertyStr(ctx, el, "path");
-            paths[i] = JS_ToCString(ctx, pv);
+            paths[i] = JS_IsException(pv) ? NULL : JS_ToCString(ctx, pv);
             JS_FreeValue(ctx, pv);
+            if (!paths[i]) { JS_FreeValue(ctx, el); threw = 1; break; }
             JSValue nv = JS_GetPropertyStr(ctx, el, "name");
+            if (JS_IsException(nv)) { JS_FreeValue(ctx, el); threw = 1; break; }
             names[i] = JS_IsUndefined(nv) ? NULL : JS_ToCString(ctx, nv);
+            int name_failed = !JS_IsUndefined(nv) && !names[i];
             JS_FreeValue(ctx, nv);
+            if (name_failed) { JS_FreeValue(ctx, el); threw = 1; break; }
         }
         JS_FreeValue(ctx, el);
         if (!paths[i]) { err = "tar.pack: entry needs a path"; break; }

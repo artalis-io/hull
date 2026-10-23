@@ -411,4 +411,104 @@ JSValue hl_js_internals(JSContext *ctx);
  * tracked (dispatch.c). Idempotent. */
 void hl_js_req_ctx_free(HlJS *js, KlHttpRequest *req);
 
+/* Read an optional integer option obj[key] (audit 23). 1 = present (*out
+ * set), 0 = absent / undefined (*out untouched), -1 = an exception is
+ * pending: a throwing getter, a valueOf that throws, or the uncatchable
+ * budget interrupt. A binding must return JS_EXCEPTION on -1 - carrying on
+ * with a default left the exception pending while the call proceeded. */
+static inline int hl_js_opt_int64(JSContext *ctx, JSValueConst obj,
+                                  const char *key, int64_t *out)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    if (JS_IsException(v)) return -1;
+    if (JS_IsUndefined(v)) return 0;
+    int64_t n;
+    int rc = JS_ToInt64(ctx, &n, v);
+    JS_FreeValue(ctx, v);
+    if (rc < 0) return -1;
+    *out = n;
+    return 1;
+}
+
+/* As hl_js_opt_int64, with JS_ToInt32's (modular) conversion. */
+static inline int hl_js_opt_int32(JSContext *ctx, JSValueConst obj,
+                                  const char *key, int32_t *out)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    if (JS_IsException(v)) return -1;
+    if (JS_IsUndefined(v)) return 0;
+    int32_t n;
+    int rc = JS_ToInt32(ctx, &n, v);
+    JS_FreeValue(ctx, v);
+    if (rc < 0) return -1;
+    *out = n;
+    return 1;
+}
+
+/* As hl_js_opt_int32, with JS_ToUint32's conversion. */
+static inline int hl_js_opt_uint32(JSContext *ctx, JSValueConst obj,
+                                   const char *key, uint32_t *out)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    if (JS_IsException(v)) return -1;
+    if (JS_IsUndefined(v)) return 0;
+    uint32_t n;
+    int rc = JS_ToUint32(ctx, &n, v);
+    JS_FreeValue(ctx, v);
+    if (rc < 0) return -1;
+    *out = n;
+    return 1;
+}
+
+/* obj[key] converted with JS_ToUint32 whether present or not (undefined
+ * converts to 0). 0, or -1 with the exception pending (audit 23). */
+static inline int hl_js_get_uint32(JSContext *ctx, JSValueConst obj,
+                                   const char *key, uint32_t *out)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    if (JS_IsException(v)) return -1;
+    int rc = JS_ToUint32(ctx, out, v);
+    JS_FreeValue(ctx, v);
+    return rc < 0 ? -1 : 0;
+}
+
+/* An array's length (JS_ToInt32 of arr.length): 0, or -1 with the
+ * exception pending - a Proxy's length trap is app code (audit 23). */
+static inline int hl_js_get_length32(JSContext *ctx, JSValueConst arr,
+                                     int32_t *out)
+{
+    JSValue v = JS_GetPropertyStr(ctx, arr, "length");
+    if (JS_IsException(v)) return -1;
+    int rc = JS_ToInt32(ctx, out, v);
+    JS_FreeValue(ctx, v);
+    return rc < 0 ? -1 : 0;
+}
+
+/* As hl_js_opt_int64, for a double option. */
+static inline int hl_js_opt_float64(JSContext *ctx, JSValueConst obj,
+                                    const char *key, double *out)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    if (JS_IsException(v)) return -1;
+    if (JS_IsUndefined(v)) return 0;
+    double n;
+    int rc = JS_ToFloat64(ctx, &n, v);
+    JS_FreeValue(ctx, v);
+    if (rc < 0) return -1;
+    *out = n;
+    return 1;
+}
+
+/* An optional boolean option (audit 23): 1 / 0 = its truthiness (absent is
+ * 0), -1 = the getter threw. */
+static inline int hl_js_opt_bool(JSContext *ctx, JSValueConst obj,
+                                 const char *key)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    if (JS_IsException(v)) return -1;
+    int b = JS_ToBool(ctx, v);
+    JS_FreeValue(ctx, v);
+    return b;
+}
+
 #endif /* HL_RUNTIME_JS_INTERNAL_H */

@@ -183,6 +183,13 @@ static JSValue js_ws_conn_send(JSContext *ctx, JSValueConst this_val,
     size_t len;
     const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!data) return JS_EXCEPTION;
+    /* The toString above is app code, which may have closed the
+     * connection (audit 23). */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {
+        JS_FreeCString(ctx, data);
+        return JS_ThrowTypeError(ctx, "connection closed");
+    }
     /* Charged before the send (audit 14): one call frames and queues up to
      * the whole heap. */
     if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {
@@ -233,14 +240,25 @@ static JSValue js_ws_conn_close(JSContext *ctx, JSValueConst this_val,
     if (!ud || !ud->conn || ud->conn->closed || !ud->conn->kl_ws)
         return JS_UNDEFINED;
 
+    /* A valueOf / toString that throws fails the call (audit 23: the
+     * exception was left pending and the close went out with a default),
+     * and, being app code, may itself have closed the connection. */
     uint32_t code = 1000;
-    if (argc >= 1 && !JS_IsUndefined(argv[0]))
-        JS_ToUint32(ctx, &code, argv[0]);
+    if (argc >= 1 && !JS_IsUndefined(argv[0]) &&
+        JS_ToUint32(ctx, &code, argv[0]) < 0)
+        return JS_EXCEPTION;
 
     const char *reason = NULL;
     size_t reason_len = 0;
-    if (argc >= 2 && !JS_IsUndefined(argv[1]))
+    if (argc >= 2 && !JS_IsUndefined(argv[1])) {
         reason = JS_ToCStringLen(ctx, &reason_len, argv[1]);
+        if (!reason) return JS_EXCEPTION;
+    }
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {
+        if (reason) JS_FreeCString(ctx, reason);
+        return JS_UNDEFINED;
+    }
 
     kl_ws_server_close(ud->conn->kl_ws, (uint16_t)code, reason, reason_len);
     ud->conn->closed = 1;
@@ -259,8 +277,16 @@ static JSValue js_ws_conn_ping(JSContext *ctx, JSValueConst this_val,
 
     const char *data = NULL;
     size_t len = 0;
-    if (argc >= 1 && !JS_IsUndefined(argv[0]))
+    if (argc >= 1 && !JS_IsUndefined(argv[0])) {
         data = JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!data) return JS_EXCEPTION;   /* audit 23 */
+    }
+    /* The toString is app code: it may have closed the connection. */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {
+        if (data) JS_FreeCString(ctx, data);
+        return JS_UNDEFINED;
+    }
 
     kl_ws_server_send_ping(ud->conn->kl_ws, data, len);
     if (data) JS_FreeCString(ctx, data);

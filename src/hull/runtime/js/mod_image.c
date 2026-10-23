@@ -295,9 +295,15 @@ static JSValue js_image_encode_fn(JSContext *ctx, JSValueConst this_val,
     int quality = 90;
     if (argc >= 3 && JS_IsObject(argv[2])) {
         JSValue qval = JS_GetPropertyStr(ctx, argv[2], "quality");
+        /* A throwing getter fails the call (audit 23: it was left pending
+         * and the image encoded at the default quality). */
+        if (JS_IsException(qval)) {
+            JS_FreeCString(ctx, fmt_name);
+            return JS_EXCEPTION;
+        }
         if (JS_IsNumber(qval)) {
             int32_t q;
-            JS_ToInt32(ctx, &q, qval);
+            JS_ToInt32(ctx, &q, qval);   /* a number: cannot throw */
             quality = q;
         }
         JS_FreeValue(ctx, qval);

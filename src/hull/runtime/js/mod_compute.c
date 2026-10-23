@@ -207,6 +207,37 @@ static uint32_t js_wasm_timeout_arg(int64_t v)
     return v > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)v;
 }
 
+#define JS_WOPT_IO  1   /* maxInput / maxOutput */
+#define JS_WOPT_MEM 2   /* heap / stack */
+
+/* Read the numeric call options (gas and timeoutMs always; maxInput /
+ * maxOutput and heap / stack per `which`) from the options object o. 0, or
+ * -1 with the exception pending: a getter or valueOf that threw, or the
+ * budget interrupt (audit 23 - the conversions' results were ignored, so the
+ * call went on with a default and the exception left pending). */
+static int js_wasm_parse_opts(JSContext *ctx, JSValueConst o,
+                              HlWasmCallOpts *opts, int which)
+{
+    int64_t v; int r;
+    if (which & JS_WOPT_IO) {
+        if ((r = hl_js_opt_int64(ctx, o, "maxInput", &v)) < 0) return -1;
+        if (r) opts->max_input = (uint32_t)v;
+        if ((r = hl_js_opt_int64(ctx, o, "maxOutput", &v)) < 0) return -1;
+        if (r) opts->max_output = (uint32_t)v;
+    }
+    if (which & JS_WOPT_MEM) {
+        if ((r = hl_js_opt_int64(ctx, o, "heap", &v)) < 0) return -1;
+        if (r) opts->heap_size = (uint32_t)v;
+        if ((r = hl_js_opt_int64(ctx, o, "stack", &v)) < 0) return -1;
+        if (r) opts->stack_size = (uint32_t)v;
+    }
+    if ((r = hl_js_opt_int64(ctx, o, "gas", &v)) < 0) return -1;
+    if (r) opts->gas = v;
+    if ((r = hl_js_opt_int64(ctx, o, "timeoutMs", &v)) < 0) return -1;
+    if (r) opts->timeout_ms = js_wasm_timeout_arg(v);
+    return 0;
+}
+
 /* Free the OWNED (JS_ToCString) name copies in reqs[0..n). Idempotent. */
 static void js_free_span_names(JSContext *ctx, HlWasmSpanReq *reqs,
                                JSValue *holders, int n)
@@ -239,6 +270,9 @@ static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs
                           JSValue *holders)
 {
     JSValue arr = JS_GetPropertyStr(ctx, opts, "spans");
+    /* A getter's exception (or the budget interrupt) stays the error: the
+     * TypeErrors below would replace it (audit 23). */
+    if (JS_IsException(arr)) return -1;
     if (JS_IsUndefined(arr) || JS_IsNull(arr)) { JS_FreeValue(ctx, arr); return 0; }
     if (!JS_IsArray(ctx, arr)) {
         JS_FreeValue(ctx, arr);
@@ -247,8 +281,10 @@ static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs
     }
     JSValue lenv = JS_GetPropertyStr(ctx, arr, "length");
     uint32_t n = 0;
-    JS_ToUint32(ctx, &n, lenv);
+    /* A Proxy array's length trap is app code that can throw (audit 23). */
+    int lrc = JS_IsException(lenv) ? -1 : JS_ToUint32(ctx, &n, lenv);
     JS_FreeValue(ctx, lenv);
+    if (lrc < 0) { JS_FreeValue(ctx, arr); return -1; }
     if (n > (uint32_t)HL_WASM_MAX_SPANS) {
         JS_FreeValue(ctx, arr);
         JS_ThrowRangeError(ctx, "compute: at most %d spans (got %u)",
@@ -258,12 +294,14 @@ static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs
     int count = 0;
     for (uint32_t i = 0; i < n; i++) {
         JSValue entry = JS_GetPropertyUint32(ctx, arr, i);
+        if (JS_IsException(entry)) goto fail;
         if (!JS_IsObject(entry)) {
             JS_FreeValue(ctx, entry);
             JS_ThrowTypeError(ctx, "compute: spans[%u] must be an object", i);
             goto fail;
         }
         JSValue nv = JS_GetPropertyStr(ctx, entry, "name");
+        if (JS_IsException(nv)) { JS_FreeValue(ctx, entry); goto fail; }
         if (!JS_IsString(nv)) {
             JS_FreeValue(ctx, nv); JS_FreeValue(ctx, entry);
             JS_ThrowTypeError(ctx, "compute: spans[%u].name must be a string", i);
@@ -287,6 +325,11 @@ static int js_parse_spans(JSContext *ctx, JSValueConst opts, HlWasmSpanReq *reqs
             }
         }
         JSValue bv = JS_GetPropertyStr(ctx, entry, "buffer");
+        if (JS_IsException(bv)) {
+            JS_FreeValue(ctx, entry);
+            JS_FreeCString(ctx, nm);
+            goto fail;
+        }
         HlMappedBuffer *mb = JS_GetOpaque2(ctx, bv, js_mmap_class_id);
         JS_FreeValue(ctx, entry);
         if (!mb) {
@@ -341,44 +384,11 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
 
     /* Parse opts object if provided */
     if (argc > 2 && JS_IsObject(argv[2])) {
-        JSValue val;
-
-        val = JS_GetPropertyStr(ctx, argv[2], "maxInput");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v;
+        if (js_wasm_parse_opts(ctx, argv[2], &opts, JS_WOPT_IO | JS_WOPT_MEM) < 0 ||
+            (want_buffer = hl_js_opt_bool(ctx, argv[2], "buffer")) < 0) {
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
         }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[2], "maxOutput");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v;
-        }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[2], "heap");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val); opts.heap_size = (uint32_t)v;
-        }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[2], "stack");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val); opts.stack_size = (uint32_t)v;
-        }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[2], "gas");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v;
-        }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "timeoutMs");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[2], "buffer");
-        if (JS_ToBool(ctx, val)) want_buffer = 1;
-        JS_FreeValue(ctx, val);
     }
 
     /* per-invocation mapped spans. The sync path consumes the BORROWED request
@@ -391,7 +401,11 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     int span_count = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
         span_count = js_parse_spans(ctx, argv[2], span_reqs, span_holders);
-        if (span_count < 0) return JS_EXCEPTION;
+        if (span_count < 0) {
+            /* audit 23: the name was leaked here. */
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
+        }
     }
     if (span_count > 0) {
         opts.spans = span_reqs;
@@ -605,28 +619,11 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     HlWasmCallOpts opts = {0};
     int want_buffer = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
-        JSValue val;
-        val = JS_GetPropertyStr(ctx, argv[2], "maxInput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "maxOutput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "heap");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.heap_size = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "stack");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.stack_size = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "gas");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "timeoutMs");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[2], "buffer");
-        if (JS_ToBool(ctx, val)) want_buffer = 1;
-        JS_FreeValue(ctx, val);
+        if (js_wasm_parse_opts(ctx, argv[2], &opts, JS_WOPT_IO | JS_WOPT_MEM) < 0 ||
+            (want_buffer = hl_js_opt_bool(ctx, argv[2], "buffer")) < 0) {
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
+        }
     }
 
     /* The input is resolved after the options: an options getter is app
@@ -835,22 +832,9 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
     HlWasmCallOpts opts = {0};
     int want_buffer = 0;
     if (argc > 1 && JS_IsObject(argv[1])) {
-        JSValue val;
-        val = JS_GetPropertyStr(ctx, argv[1], "gas");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "timeoutMs");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxOutput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "buffer");
-        if (JS_ToBool(ctx, val)) want_buffer = 1;
-        JS_FreeValue(ctx, val);
+        if (js_wasm_parse_opts(ctx, argv[1], &opts, JS_WOPT_IO) < 0 ||
+            (want_buffer = hl_js_opt_bool(ctx, argv[1], "buffer")) < 0)
+            return JS_EXCEPTION;
     }
 
     /* inst:call spans. Synchronous: consume the BORROWED request array directly
@@ -1036,22 +1020,9 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     HlWasmCallOpts opts = {0};
     int want_buffer = 0;
     if (argc > 1 && JS_IsObject(argv[1])) {
-        JSValue val;
-        val = JS_GetPropertyStr(ctx, argv[1], "gas");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "timeoutMs");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxOutput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "buffer");
-        if (JS_ToBool(ctx, val)) want_buffer = 1;
-        JS_FreeValue(ctx, val);
+        if (js_wasm_parse_opts(ctx, argv[1], &opts, JS_WOPT_IO) < 0 ||
+            (want_buffer = hl_js_opt_bool(ctx, argv[1], "buffer")) < 0)
+            return JS_EXCEPTION;
     }
     /* The input is resolved after the options: an options getter is app
      * code, and could close or drop the buffer a pointer taken earlier
@@ -1273,25 +1244,10 @@ static JSValue js_compute_instance(JSContext *ctx, JSValueConst this_val,
 
     HlWasmCallOpts opts = {0};
     if (argc > 1 && JS_IsObject(argv[1])) {
-        JSValue val;
-        val = JS_GetPropertyStr(ctx, argv[1], "heap");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.heap_size = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "stack");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.stack_size = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "gas");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "timeoutMs");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.timeout_ms = js_wasm_timeout_arg(v); }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxInput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[1], "maxOutput");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
-        JS_FreeValue(ctx, val);
+        if (js_wasm_parse_opts(ctx, argv[1], &opts, JS_WOPT_IO | JS_WOPT_MEM) < 0) {
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
+        }
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
@@ -1532,12 +1488,18 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
 
     if (JS_IsObject(argv[1])) {
         JSValue fv = JS_GetPropertyStr(ctx, argv[1], "file");
+        /* A throwing getter / failed conversion is the call's error, not
+         * "no file" with the exception left pending (audit 23). */
+        if (JS_IsException(fv)) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
         if (JS_IsString(fv)) {
             in_file_str = JS_ToCString(ctx, fv);
-            if (in_file_str) {
-                input.kind = HL_STREAM_IN_FILE;
-                input.path = in_file_str;
+            if (!in_file_str) {
+                JS_FreeValue(ctx, fv);
+                JS_FreeCString(ctx, name);
+                return JS_EXCEPTION;
             }
+            input.kind = HL_STREAM_IN_FILE;
+            input.path = in_file_str;
         }
         JS_FreeValue(ctx, fv);
     }
@@ -1561,14 +1523,23 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
         out_ptr = &out_storage;
     } else if (argc > 2 && JS_IsObject(argv[2]) && !JS_IsNull(argv[2])) {
         JSValue fv = JS_GetPropertyStr(ctx, argv[2], "file");
+        if (JS_IsException(fv)) {   /* audit 23 */
+            if (in_file_str) JS_FreeCString(ctx, in_file_str);
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
+        }
         if (JS_IsString(fv)) {
             out_file_str = JS_ToCString(ctx, fv);
-            if (out_file_str) {
-                has_output = 1;
-                out_storage.kind = HL_STREAM_OUT_FILE;
-                out_storage.path = out_file_str;
-                out_ptr = &out_storage;
+            if (!out_file_str) {
+                JS_FreeValue(ctx, fv);
+                if (in_file_str) JS_FreeCString(ctx, in_file_str);
+                JS_FreeCString(ctx, name);
+                return JS_EXCEPTION;
             }
+            has_output = 1;
+            out_storage.kind = HL_STREAM_OUT_FILE;
+            out_storage.path = out_file_str;
+            out_ptr = &out_storage;
         }
         JS_FreeValue(ctx, fv);
         if (!has_output) {
@@ -1589,37 +1560,16 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     /* ── Parse opts ──────────────────────────────────────────────── */
     HlStreamOpts stream_opts = {0};
     if (opts_idx < argc && JS_IsObject(argv[opts_idx])) {
-        JSValue val;
-        val = JS_GetPropertyStr(ctx, argv[opts_idx], "chunkSize");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val);
-            stream_opts.chunk_size = (size_t)v;
+        int64_t v;
+        int r = hl_js_opt_int64(ctx, argv[opts_idx], "chunkSize", &v);
+        if (r > 0) stream_opts.chunk_size = (size_t)v;
+        if (r < 0 || js_wasm_parse_opts(ctx, argv[opts_idx],
+                                        &stream_opts.call_opts, JS_WOPT_MEM) < 0) {
+            /* audit 23: a throwing option getter fails the call. */
+            js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,
+                                in_file_str, out_file_str, name);
+            return JS_EXCEPTION;
         }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[opts_idx], "gas");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val);
-            stream_opts.call_opts.gas = v;
-        }
-        JS_FreeValue(ctx, val);
-        val = JS_GetPropertyStr(ctx, argv[opts_idx], "timeoutMs");
-        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); stream_opts.call_opts.timeout_ms = js_wasm_timeout_arg(v); }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[opts_idx], "heap");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val);
-            stream_opts.call_opts.heap_size = (uint32_t)v;
-        }
-        JS_FreeValue(ctx, val);
-
-        val = JS_GetPropertyStr(ctx, argv[opts_idx], "stack");
-        if (!JS_IsUndefined(val)) {
-            int64_t v; JS_ToInt64(ctx, &v, val);
-            stream_opts.call_opts.stack_size = (uint32_t)v;
-        }
-        JS_FreeValue(ctx, val);
     }
 
     js_wasm_clamp_opts(&stream_opts.call_opts, &js->base);
