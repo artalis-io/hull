@@ -8838,6 +8838,42 @@ UTEST(js_runtime, manifest_http_timeout)
     }
 }
 
+/* Audit 24: gpu.devices entries of the wrong type were skipped and not
+ * counted as listed, so a list of nothing but strings / fractions was the
+ * empty list - every device (/dev/dri unveiled whole). Each element counts
+ * now, so a list with no valid index disables gpu; a devices value that is
+ * not an array does too. */
+UTEST(js_runtime, manifest_gpu_devices_fail_closed)
+{
+    static const struct { const char *decl; int gpu; int count; } cases[] = {
+        { "app.manifest({ gpu: { devices: [0, 2] } });",       1, 2 },
+        { "app.manifest({ gpu: { devices: [] } });",           1, 0 },
+        { "app.manifest({ gpu: {} });",                        1, 0 },
+        { "app.manifest({ gpu: { devices: ['0'] } });",        0, 0 },
+        { "app.manifest({ gpu: { devices: [0.5] } });",        0, 0 },
+        { "app.manifest({ gpu: { devices: [, ] } });",         0, 0 },
+        { "app.manifest({ gpu: { devices: [1, '0'] } });",     1, 1 },
+        { "app.manifest({ gpu: { devices: '0' } });",          0, 0 },
+        { "app.manifest({ gpu: { devices: { 0: 0 } } });",     0, 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        char src[512];
+        snprintf(src, sizeof src, "import { app } from 'hull:app';\n%s\n",
+                 cases[i].decl);
+        char *msg = NULL;
+        EXPECT_EQ(a5_module_named("<test>", src, &msg), 0);
+        free(msg);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.gpu, cases[i].gpu, cases[i].decl);
+        EXPECT_EQ_MSG(m.gpu_device_count, cases[i].count, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_js();
+    }
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* H2 follow-up: the ctx of a request that passed middleware and was then
  * answered by Keel itself (a 404 / 405) stayed until its connection slot

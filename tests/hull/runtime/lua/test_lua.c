@@ -2134,6 +2134,37 @@ UTEST(lua_runtime, manifest_http_timeout)
     }
 }
 
+/* Audit 24: gpu.devices entries of the wrong type were skipped and not
+ * counted as listed, so a list of nothing but strings / floats was the
+ * empty list - every device (/dev/dri unveiled whole). Each entry counts
+ * now, so a list with no valid index disables gpu; a devices value that is
+ * not a list does too. */
+UTEST(lua_runtime, manifest_gpu_devices_fail_closed)
+{
+    static const struct { const char *decl; int gpu; int count; } cases[] = {
+        { "app.manifest({ gpu = { devices = { 0, 2 } } })",        1, 2 },
+        { "app.manifest({ gpu = { devices = {} } })",              1, 0 },
+        { "app.manifest({ gpu = {} })",                            1, 0 },
+        { "app.manifest({ gpu = { devices = { '0' } } })",         0, 0 },
+        { "app.manifest({ gpu = { devices = { 0.5 } } })",         0, 0 },
+        { "app.manifest({ gpu = { devices = { 1, '0' } } })",      1, 1 },
+        { "app.manifest({ gpu = { devices = { x = 0 } } })",       0, 0 },
+        { "app.manifest({ gpu = { devices = '0' } })",             0, 0 },
+        { "app.manifest({ gpu = { devices = 0 } })",               0, 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        ASSERT_EQ(luaL_dostring(lua_rt.L, cases[i].decl), LUA_OK);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_lua(lua_rt.L, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.gpu, cases[i].gpu, cases[i].decl);
+        EXPECT_EQ_MSG(m.gpu_device_count, cases[i].count, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_lua();
+    }
+}
+
 UTEST(lua_runtime, manifest_basic)
 {
     init_lua();

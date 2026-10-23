@@ -299,8 +299,15 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             int listed = 0;
             for (int32_t i = 0; i < len && out->gpu_device_count < HL_GPU_MAX_DEVICES; i++) {
                 JSValue elem = mjs_elem(ctx, devs, (uint32_t)i);
-                if (JS_IsNumber(elem)) {
-                    listed++;
+                /* Every element counts as listed, whatever its type (audit
+                 * 24: only numbers did, so ["0"] listed nothing and meant
+                 * every device); a non-number is ignored like a bad index. */
+                listed++;
+                if (!JS_IsNumber(elem)) {
+                    log_warn("[manifest] gpu.devices[%d] - expected an "
+                             "integer 0..%d, ignored", (int)i,
+                             HL_GPU_MAX_DEVICES - 1);
+                } else {
                     /* A device index is an integer 0..HL_GPU_MAX_DEVICES-1:
                      * the sandbox builds /dev/dri/renderD<128 + d> from it,
                      * which overflowed for a huge one (audit 23). */
@@ -321,6 +328,12 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                 log_warn("[manifest] gpu.devices lists no valid device - gpu disabled");
                 out->gpu = 0;
             }
+        } else if (!JS_IsUndefined(devs)) {
+            /* devices: "0" or 0: a restriction that is not a list must not
+             * read as "no restriction" (audit 24). */
+            log_warn("[manifest] gpu.devices must be an array of device "
+                     "indices - gpu disabled");
+            out->gpu = 0;
         }
         JS_FreeValue(ctx, devs);
     } else if (JS_IsBool(gpu_val)) {
