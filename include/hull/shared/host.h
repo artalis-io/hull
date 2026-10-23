@@ -188,6 +188,22 @@ int hl_host_find_in_path_ex(const char *path_list, const char *name,
                             char *out, size_t out_sz);
 
 /**
+ * @brief @p path_list with only its ABSOLUTE components, for a child's PATH.
+ *
+ * Splits and judges each component exactly as @ref hl_host_find_in_path_ex
+ * does (the list's own separator; a quoted Windows component unquoted for
+ * the test) and keeps the components it would search, joined by that
+ * separator: an empty component, "." and every other relative one name the
+ * working directory - usually the app directory - and a spawned driver
+ * searches PATH itself (gcc runs `as` / collect2 through it, an empty entry
+ * meaning ./; clang honours "."), so they are dropped (audit 24).
+ *
+ * @returns a malloc'd string (possibly empty), or NULL when @p path_list is
+ *          NULL or on allocation failure.
+ */
+char *hl_host_path_absolute_only(const char *path_list);
+
+/**
  * @brief The user's home directory: $HOME, else $USERPROFILE (a Windows
  *        shell that is not MSYS2 exports only the latter). NULL when neither
  *        is set.

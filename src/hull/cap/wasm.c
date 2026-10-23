@@ -17,6 +17,7 @@
 #include "hull/cap/wasm_watchdog.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
+#include "hull/cap/fs_resolve.h"
 #include "hull/limits/wasm.h"
 #include "hull/utils/macros.h"
 #include <sh_seal_arena.h>
@@ -762,9 +763,14 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
 
     /* 3. Filesystem WASM fallback: <app_dir>/compute/<name>.wasm */
     if (!buf && disk_ok && app_dir) {
-        char path[4096];
-        int n = snprintf(path, sizeof(path), "%s/compute/%s.wasm", app_dir, name);
-        FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
+        /* Opened under the app root (audit 24): a plain fopen followed a
+         * symlink anywhere, blocked on a FIFO, and took any file type. The
+         * module loaders' containment re-roots a symlink and refuses a
+         * leaf that is not a regular file, opened O_NONBLOCK. */
+        char relpath[600];
+        int n = snprintf(relpath, sizeof(relpath), "compute/%s.wasm", name);
+        FILE *f = (n > 0 && (size_t)n < sizeof(relpath))
+                ? hl_fs_fopen_read(app_dir, relpath) : NULL;
         if (f) {
             long fsize = -1;
             if (fseek(f, 0, SEEK_END) == 0) {
@@ -777,11 +783,8 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                 buf = malloc((size_t)fsize);
                 if (buf) {
                     size_t nr = fread(buf, 1, (size_t)fsize, f);
-                    char rel[600];
-                    int rn = snprintf(rel, sizeof(rel), "compute/%s.wasm", name);
                     if (nr == (size_t)fsize &&
-                        (rn < 0 || (size_t)rn >= sizeof(rel) ||
-                         hl_vfs_disk_gate_check(rel, buf, nr) != 0)) {
+                        hl_vfs_disk_gate_check(relpath, buf, nr) != 0) {
                         log_error("[wasm] refusing compute/%s.wasm: not a signed "
                                   "file (--verify-sig)", name);
                         free(buf);

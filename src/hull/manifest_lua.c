@@ -237,8 +237,11 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             int listed = 0;
             for (int i = 1; i <= len && out->gpu_device_count < HL_GPU_MAX_DEVICES; i++) {
                 lua_rawgeti(L, -1, i);
+                /* Every entry counts as listed, whatever its type (audit 24:
+                 * only integers did, so { "0" } or { 0.5 } listed nothing and
+                 * meant every device). */
+                if (!lua_isnil(L, -1)) listed++;
                 if (lua_isinteger(L, -1)) {
-                    listed++;
                     /* A device index is 0..HL_GPU_MAX_DEVICES-1: the sandbox
                      * builds /dev/dri/renderD<128 + d> from it, which
                      * overflowed for a huge one (audit 23). */
@@ -249,8 +252,20 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                         log_warn("[manifest] gpu.devices[%d] = %lld - expected "
                                  "0..%d, ignored", i, (long long)d,
                                  HL_GPU_MAX_DEVICES - 1);
+                } else if (!lua_isnil(L, -1)) {
+                    log_warn("[manifest] gpu.devices[%d] is a %s - expected an "
+                             "integer 0..%d, ignored", i, luaL_typename(L, -1),
+                             HL_GPU_MAX_DEVICES - 1);
                 }
                 lua_pop(L, 1);
+            }
+            /* A table with no array part ({ x = 0 }) lists something too. */
+            if (len == 0) {
+                lua_pushnil(L);
+                if (lua_next(L, -2)) {
+                    lua_pop(L, 2);
+                    listed = 1;
+                }
             }
             /* Every listed device ignored: an empty list means "all devices",
              * so fail closed instead of widening to every device. */
@@ -258,6 +273,12 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                 log_warn("[manifest] gpu.devices lists no valid device - gpu disabled");
                 out->gpu = 0;
             }
+        } else if (!lua_isnil(L, -1)) {
+            /* devices = "0" or 0: a restriction that is not a list must not
+             * read as "no restriction" (audit 24). */
+            log_warn("[manifest] gpu.devices must be a list of device "
+                     "indices - gpu disabled");
+            out->gpu = 0;
         }
         lua_pop(L, 1); /* pop devices */
     } else {

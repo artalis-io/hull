@@ -2134,6 +2134,37 @@ UTEST(lua_runtime, manifest_http_timeout)
     }
 }
 
+/* Audit 24: gpu.devices entries of the wrong type were skipped and not
+ * counted as listed, so a list of nothing but strings / floats was the
+ * empty list - every device (/dev/dri unveiled whole). Each entry counts
+ * now, so a list with no valid index disables gpu; a devices value that is
+ * not a list does too. */
+UTEST(lua_runtime, manifest_gpu_devices_fail_closed)
+{
+    static const struct { const char *decl; int gpu; int count; } cases[] = {
+        { "app.manifest({ gpu = { devices = { 0, 2 } } })",        1, 2 },
+        { "app.manifest({ gpu = { devices = {} } })",              1, 0 },
+        { "app.manifest({ gpu = {} })",                            1, 0 },
+        { "app.manifest({ gpu = { devices = { '0' } } })",         0, 0 },
+        { "app.manifest({ gpu = { devices = { 0.5 } } })",         0, 0 },
+        { "app.manifest({ gpu = { devices = { 1, '0' } } })",      1, 1 },
+        { "app.manifest({ gpu = { devices = { x = 0 } } })",       0, 0 },
+        { "app.manifest({ gpu = { devices = '0' } })",             0, 0 },
+        { "app.manifest({ gpu = { devices = 0 } })",               0, 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        ASSERT_EQ(luaL_dostring(lua_rt.L, cases[i].decl), LUA_OK);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_lua(lua_rt.L, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.gpu, cases[i].gpu, cases[i].decl);
+        EXPECT_EQ_MSG(m.gpu_device_count, cases[i].count, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_lua();
+    }
+}
+
 UTEST(lua_runtime, manifest_basic)
 {
     init_lua();
@@ -12513,6 +12544,35 @@ UTEST(lua_audit24, log_escapes_cr_lf)
         "for i = 1, 64 do log.debug(s) end return 1",
         100000, err, sizeof err), LUA_OK);
     log_set_quiet(false);
+    cleanup_lua_caps();
+}
+
+/* Audit 24: ws.connect passed Keel no config, so every wss:// failed with a
+ * generic error. It takes the client TLS config http.fetch uses now, and with
+ * none says so up front (the allowlist still runs first). */
+UTEST(lua_audit24, wss_connect_needs_the_client_tls_config)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static const char *hosts[] = { "ws.example" };
+    HlHttpConfig cfg = {0};
+    cfg.allowed_hosts = hosts;
+    cfg.count = 1;
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    const char *pre = "local ws = require('hull.web.ws-client') ";
+    char code[512];
+    snprintf(code, sizeof code, "%sws.connect('wss://ws.example/x', {}) return 1", pre);
+    EXPECT_NE(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE_MSG(strstr(err, "wss:// needs TLS"), NULL, err);
+    snprintf(code, sizeof code, "%sws.connect('wss://other.example/x', {}) return 1", pre);
+    EXPECT_NE(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE_MSG(strstr(err, "not in allowlist"), NULL, err);
+    /* ws:// needs no TLS: it gets past both checks to the server one. */
+    snprintf(code, sizeof code, "%sws.connect('ws://ws.example/x', {}) return 1", pre);
+    EXPECT_NE(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE_MSG(strstr(err, "requires running server"), NULL, err);
+    lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
 

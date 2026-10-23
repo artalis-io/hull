@@ -8838,6 +8838,42 @@ UTEST(js_runtime, manifest_http_timeout)
     }
 }
 
+/* Audit 24: gpu.devices entries of the wrong type were skipped and not
+ * counted as listed, so a list of nothing but strings / fractions was the
+ * empty list - every device (/dev/dri unveiled whole). Each element counts
+ * now, so a list with no valid index disables gpu; a devices value that is
+ * not an array does too. */
+UTEST(js_runtime, manifest_gpu_devices_fail_closed)
+{
+    static const struct { const char *decl; int gpu; int count; } cases[] = {
+        { "app.manifest({ gpu: { devices: [0, 2] } });",       1, 2 },
+        { "app.manifest({ gpu: { devices: [] } });",           1, 0 },
+        { "app.manifest({ gpu: {} });",                        1, 0 },
+        { "app.manifest({ gpu: { devices: ['0'] } });",        0, 0 },
+        { "app.manifest({ gpu: { devices: [0.5] } });",        0, 0 },
+        { "app.manifest({ gpu: { devices: [, ] } });",         0, 0 },
+        { "app.manifest({ gpu: { devices: [1, '0'] } });",     1, 1 },
+        { "app.manifest({ gpu: { devices: '0' } });",          0, 0 },
+        { "app.manifest({ gpu: { devices: { 0: 0 } } });",     0, 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        char src[512];
+        snprintf(src, sizeof src, "import { app } from 'hull:app';\n%s\n",
+                 cases[i].decl);
+        char *msg = NULL;
+        EXPECT_EQ(a5_module_named("<test>", src, &msg), 0);
+        free(msg);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.gpu, cases[i].gpu, cases[i].decl);
+        EXPECT_EQ_MSG(m.gpu_device_count, cases[i].count, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_js();
+    }
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* H2 follow-up: the ctx of a request that passed middleware and was then
  * answered by Keel itself (a 404 / 405) stayed until its connection slot
@@ -13110,6 +13146,41 @@ UTEST(js_audit24, an_own_then_on_mains_promise_does_not_settle_main)
     EXPECT_EQ(exit_code, 9);
     cleanup_js();
     be->free(loop);
+}
+
+/* Audit 24: ws.connect passed Keel no config, so every wss:// failed with a
+ * generic error. It takes the client TLS config http.fetch uses now, and with
+ * none says so up front (the allowlist still runs first). */
+UTEST(js_audit24, wss_connect_needs_the_client_tls_config)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const char *hosts[] = { "ws.example" };
+    HlHttpConfig cfg = {0};
+    cfg.allowed_hosts = hosts;
+    cfg.count = 1;
+    js.base.http_cfg = &cfg;
+    static const struct { const char *url; const char *msg; } cases[] = {
+        { "wss://ws.example/x",    "wss:// needs TLS" },
+        { "wss://other.example/x", "not in allowlist" },
+        { "ws://ws.example/x",     "requires running server" },
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { wsClient as ws } from 'hull:web:ws-client';\n"
+                 "let r = 0;\n"
+                 "try { ws.connect('%s', {}); r = 2; } catch (e) {\n"
+                 "  r = String(e.message).includes('%s') ? 1 : 3; }\n"
+                 "globalThis.__wss = r;\n", cases[i].url, cases[i].msg);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<wss>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__wss|0"), 1, cases[i].url);
+    }
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
 }
 
 UTEST_MAIN();

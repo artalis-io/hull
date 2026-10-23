@@ -331,6 +331,11 @@ static int lua_ws_connect(lua_State *L)
         hl_http_check_host(lua->base.http_cfg, parsed.host,
                            parsed.host_len) != 0)
         return luaL_error(L, "host not in allowlist");
+    /* wss:// takes the client TLS config http.fetch uses (audit 24: Keel
+     * needs cfg->tls for it and NULL was passed, so every wss:// failed). */
+    if (parsed.is_https && !lua->base.http_cfg->tls)
+        return luaL_error(L, "ws.connect: wss:// needs TLS, and this "
+                             "process has no client TLS configuration");
 #else
     return luaL_error(L,
         "ws.connect requires HL_ENABLE_HTTP_CLIENT (build-time)");
@@ -396,8 +401,15 @@ static int lua_ws_connect(lua_State *L)
         .on_error = lua_ws_client_on_error,
     };
 
+    /* Keel keeps the tls pointer for the connection's life; the runtime's
+     * client TLS config outlives every client (teardown stops them first). */
+    KlWsClientConfig wcfg;
+    memset(&wcfg, 0, sizeof wcfg);
+#ifdef HL_ENABLE_HTTP_CLIENT
+    wcfg.tls = parsed.is_https ? lua->base.http_cfg->tls : NULL;
+#endif
     KlWsClientConn *client = kl_ws_client_connect(
-        &lua->server->ev, &lua->server->alloc_storage, NULL, url, &cbs, ud);
+        &lua->server->ev, &lua->server->alloc_storage, &wcfg, url, &cbs, ud);
 
     if (!client) {
         /* Clean up self_ref */
