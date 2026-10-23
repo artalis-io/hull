@@ -294,11 +294,34 @@ static const unsigned char overrun_wasm[] = {
 };
 static const unsigned int overrun_wasm_len = 66;
 
+/* guest_alloc.wasm (102 bytes): exports memory, malloc, free and
+ * hull_process. Its malloc returns 0x7fffff00 - far outside its one page -
+ * which WAMR would hand back as memory_data + offset, unchecked, for every
+ * wasm_runtime_module_malloc Hull makes. Built with wat2wasm from:
+ *   (module (memory (export "memory") 1)
+ *     (func (export "malloc") (param i32) (result i32) i32.const 0x7fffff00)
+ *     (func (export "free") (param i32))
+ *     (func (export "hull_process") (param i32 i32 i32 i32) (result i32)
+ *       i32.const 0)) */
+static const unsigned char guest_alloc_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x12, 0x03, 0x60,
+  0x01, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x04, 0x7f, 0x7f,
+  0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x04, 0x03, 0x00, 0x01, 0x02, 0x05, 0x03,
+  0x01, 0x00, 0x01, 0x07, 0x29, 0x04, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72,
+  0x79, 0x02, 0x00, 0x06, 0x6d, 0x61, 0x6c, 0x6c, 0x6f, 0x63, 0x00, 0x00,
+  0x04, 0x66, 0x72, 0x65, 0x65, 0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c,
+  0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x02, 0x0a, 0x12,
+  0x03, 0x08, 0x00, 0x41, 0x80, 0xfe, 0xff, 0xff, 0x07, 0x0b, 0x02, 0x00,
+  0x0b, 0x04, 0x00, 0x41, 0x00, 0x0b
+};
+static const unsigned int guest_alloc_wasm_len = 102;
+
 /* VFS with embedded WASM modules for testing (sorted by name) */
 static const HlEntry test_entries[] = {
     { "compute/echo.wasm", echo_wasm, echo_wasm_len },
     { "compute/echo64.wasm", echo64_wasm, echo64_wasm_len },
     { "compute/grow.wasm", grow_wasm, grow_wasm_len },
+    { "compute/guest_alloc.wasm", guest_alloc_wasm, guest_alloc_wasm_len },
     { "compute/kv_store.wasm", kv_store_wasm, kv_store_wasm_len },
     { "compute/loop_forever.wasm", loop_forever_wasm, loop_forever_wasm_len },
     { "compute/overrun.wasm", overrun_wasm, overrun_wasm_len },
@@ -3039,6 +3062,44 @@ UTEST(hl_cap_wasm, load_refuses_module_whose_start_never_returns)
     ASSERT_EQ(rc, HL_WASM_ERR_LOAD);
     ASSERT_EQ(cache.count, 0);
     ASSERT_LT(took, (uint64_t)HL_WASM_DEFAULT_TIMEOUT_MS + 5000);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* A module that exports its own malloc / free is refused at load (audit 23):
+ * WAMR would insert no app heap and run the guest's malloc for every buffer
+ * Hull allocates, trusting the offset it returns. WAMR itself loads the
+ * module - the refusal is Hull's. */
+UTEST(hl_cap_wasm, load_refuses_module_exporting_allocator)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    char ebuf[256];
+    uint8_t *copy = malloc(guest_alloc_wasm_len);
+    ASSERT_TRUE(copy != NULL);
+    memcpy(copy, guest_alloc_wasm, guest_alloc_wasm_len);
+    wasm_module_t m = wasm_runtime_load(copy, guest_alloc_wasm_len,
+                                        ebuf, sizeof ebuf);
+    ASSERT_TRUE(m != NULL);
+    wasm_runtime_unload(m);
+    free(copy);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "guest_alloc", &vfs, NULL),
+              HL_WASM_ERR_LOAD);
+    ASSERT_EQ(cache.count, 0);
+
+    /* A call loads on demand: it fails without running the guest. */
+    HlWasmBuffer *out = NULL;
+    const char *err = NULL;
+    ASSERT_NE(hl_cap_wasm_call_buf(&cache, "guest_alloc", "abc", 3, &out,
+                                   NULL, NULL, NULL, &vfs, NULL, NULL, &err),
+              HL_WASM_OK);
+    ASSERT_TRUE(out == NULL);
+
+    /* An ordinary module still loads. */
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
     hl_cap_wasm_destroy(&cache);
 }
 

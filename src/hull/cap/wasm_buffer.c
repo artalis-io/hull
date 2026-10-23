@@ -172,7 +172,11 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
     case HL_WASM_BUF_WASM: {
         wasm_module_inst_t inst = (wasm_module_inst_t)buf->u.wasm.instance;
 
-        /* Free the output allocation in WASM linear memory */
+        /* Free the output allocation in WASM linear memory. Host code only,
+         * with no watch bound: it returns the block to WAMR's app heap.
+         * A module exporting its own free (which WAMR would call here,
+         * running guest code on the freeing thread) is refused at load
+         * (hl_cap_wasm_load, audit 23). */
         if (buf->u.wasm.wasm_ptr)
             wasm_runtime_module_free(inst, buf->u.wasm.wasm_ptr);
 
