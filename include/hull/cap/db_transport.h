@@ -271,8 +271,9 @@ int hl_db_transport_fd(const HlDbTransport *t);
 void hl_db_transport_set_io_timeout(HlDbTransport *t, int ms);
 
 /**
- * Close and free the transport. One close path: TLS shutdown (if attached), TLS
- * free, then provider close of the winning descriptor. Drives a still-live raced
+ * Close and free the transport. One close path: TLS shutdown (if attached and
+ * the stream is not broken; one non-blocking attempt), TLS free, then provider
+ * close of the winning descriptor. Drives a still-live raced
  * connect op to confirmed detachment first (frozen rule 4).
  *
  * Returns 0 on full success: the descriptor is retired and the heap allocation is
@@ -285,5 +286,16 @@ void hl_db_transport_set_io_timeout(HlDbTransport *t, int ms);
  * references is never done. NULL-safe (returns 0).
  */
 int hl_db_transport_close(HlDbTransport *t);
+
+/**
+ * hl_db_transport_close for a connection that is out of step: a part-sent or
+ * part-read message, a stopped run, a reply abandoned mid-way. No TLS
+ * close_notify is attempted (the session may hold the rest of a part-sent
+ * record, and the peer may not be reading). A transport whose sliced send or
+ * read failed is treated so by hl_db_transport_close too; a healthy one gets a
+ * single non-blocking close_notify there - close never waits on the peer
+ * (audit 24). Same return contract as hl_db_transport_close.
+ */
+int hl_db_transport_abort(HlDbTransport *t);
 
 #endif /* HL_CAP_DB_TRANSPORT_H */

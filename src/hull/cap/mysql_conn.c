@@ -262,8 +262,8 @@ static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
                                          my_wait_stop, NULL);
     if (rc == 0) return 0;
     if (rc == -2) {
+        conn->broken = 1;      /* first: the close sends no close_notify */
         hl_my_conn_close(conn);
-        conn->broken = 1;
         conn_set_err(conn, "interrupted (instruction limit exceeded); the "
                            "connection was closed with the request part-sent");
         return -1;
@@ -376,8 +376,14 @@ void hl_my_conn_close(HlMyConn *conn)
         /* Best-effort Terminate-equivalent: MySQL has no explicit close packet,
          * so just retire the transport. A -1 (a live connect op that will not
          * confirm detachment) is an accepted rare intentional leak, the same
-         * contract as the transport. */
-        hl_db_transport_close(conn->transport);
+         * contract as the transport. A broken connection (a reply in
+         * progress, a part-sent packet, a stopped run) is aborted: no TLS
+         * close_notify into a stream that is out of step, which blocked on a
+         * peer that had stopped reading (audit 24). */
+        if (conn->broken)
+            hl_db_transport_abort(conn->transport);
+        else
+            hl_db_transport_close(conn->transport);
         conn->transport = NULL;
     }
     free(conn->rbuf);
@@ -733,8 +739,8 @@ int hl_my_conn_open(HlMyConn *conn, const HlMyDsn *dsn, int timeout_ms)
  * run. */
 static void my_abandon(HlMyConn *conn)
 {
+    conn->broken = 1;      /* first: the close sends no close_notify */
     hl_my_conn_close(conn);
-    conn->broken = 1;
     conn_set_err(conn, "interrupted (instruction limit exceeded); the "
                        "connection was closed rather than read to the end of "
                        "the reply");

@@ -377,8 +377,9 @@ static int db_result_grow(HlDbResult *r)
 }
 
 /* Deep-copy one HlValue (a transient row cell from the backend) into the
- * owned HlDbValue that crosses the worker->event-loop thread boundary. */
-static void materialize_value(const HlValue *in, HlDbValue *out)
+ * owned HlDbValue that crosses the worker->event-loop thread boundary.
+ * Returns 0, or -1 when a TEXT / BLOB copy could not be allocated. */
+static int materialize_value(const HlValue *in, HlDbValue *out)
 {
     memset(out, 0, sizeof(*out));
     switch (in->type) {
@@ -402,13 +403,15 @@ static void materialize_value(const HlValue *in, HlDbValue *out)
         out->type = in->type;
         size_t len = in->len;
         out->s = malloc(len + 1);
-        if (out->s) {
-            memcpy(out->s, in->s, len);
-            out->s[len] = '\0';
-            out->len = len;
-        } else {
+        if (!out->s) {
+            /* A failed copy was a NULL cell in a result that succeeded: the
+             * app read NULL for a value the database holds (audit 24). */
             out->type = HL_TYPE_NIL;
+            return -1;
         }
+        memcpy(out->s, in->s, len);
+        out->s[len] = '\0';
+        out->len = len;
         break;
     }
     case HL_TYPE_NIL:
@@ -416,6 +419,7 @@ static void materialize_value(const HlValue *in, HlDbValue *out)
         out->type = HL_TYPE_NIL;
         break;
     }
+    return 0;
 }
 
 /* ── Materializing row callback (backend-agnostic) ─────────────────── */
@@ -503,8 +507,17 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
     if (db_result_grow(r) != 0) return materialize_fail(mc, "too many rows");
 
     HlDbValue *row = &r->values[r->nrows * r->ncols];
-    for (int i = 0; i < r->ncols; i++)
-        materialize_value(&cols[i].value, &row[i]);
+    for (int i = 0; i < r->ncols; i++) {
+        if (materialize_value(&cols[i].value, &row[i]) != 0) {
+            /* The row is not counted, so its cells copied so far are not
+             * freed with the result: free them here. */
+            for (int j = 0; j < i; j++) {
+                free(row[j].s);
+                row[j].s = NULL;
+            }
+            return materialize_fail(mc, "out of memory");
+        }
+    }
     r->nrows++;
     return 0;
 }

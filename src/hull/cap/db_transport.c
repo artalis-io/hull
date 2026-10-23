@@ -126,6 +126,12 @@ struct HlDbTransport {
     /* The I/O timeout hl_db_transport_set_io_timeout last set (0 = none):
      * what a sliced TLS read puts back. */
     int            io_timeout_ms;
+
+    /* 1 once a sliced send or read stopped or failed part-way, or the owner
+     * aborted the connection (hl_db_transport_abort): the TLS stream is out
+     * of step - a part-sent record may be pending (ssl->out_left) and the
+     * peer may not be reading - so close sends no close_notify (audit 24). */
+    int            broken;
 };
 
 /* SIGPIPE suppression on send has parity with the wire client: the winning / adopted fd
@@ -888,6 +894,8 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
     }
     if ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved) < 0)
         n = -1;   /* a descriptor left non-blocking would fail later reads */
+    if (n < 0)
+        t->broken = 1;   /* the session may hold a part-read record */
     return n;
 }
 
@@ -958,6 +966,8 @@ int hl_db_transport_send_sliced(HlDbTransport *t, const uint8_t *buf,
     }
     if ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved) < 0)
         rc = -1;   /* a descriptor left non-blocking would fail later I/O */
+    if (rc != 0)
+        t->broken = 1;   /* part of the message (a TLS record) may be pending */
     return rc;
 }
 
@@ -1034,6 +1044,13 @@ void hl_db_transport_set_io_timeout(HlDbTransport *t, int ms)
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof to);
 }
 
+int hl_db_transport_abort(HlDbTransport *t)
+{
+    if (t)
+        t->broken = 1;
+    return hl_db_transport_close(t);
+}
+
 int hl_db_transport_close(HlDbTransport *t)
 {
     if (!t)
@@ -1041,10 +1058,24 @@ int hl_db_transport_close(HlDbTransport *t)
 
     /* One close path: TLS shutdown, then TLS free, then provider close (the one
      * documented close path). TLS teardown is idempotent (t->tls cleared), so a retry after
-     * a preserved non-detachment does not repeat it. */
+     * a preserved non-detachment does not repeat it.
+     *
+     * The close_notify was a blocking write: after a sliced send stopped or
+     * timed out mid-record, the session flushed the rest of that record first,
+     * to a peer that had stopped reading, and the event loop waited out
+     * SO_SNDTIMEO (the whole ?read_timeout=, for ever with 0) (audit 24). A
+     * broken stream gets none - the record it would finish is part of a
+     * message the peer can no longer use - and a healthy one gets a single
+     * non-blocking attempt: the descriptor is closed next either way. */
     if (t->tls) {
-        if (kl_handle_valid(t->fd))
-            hl_tls_client_shutdown((int)t->fd, t->tls);
+        if (kl_handle_valid(t->fd) && !t->broken) {
+            /* Intentional native-FD escape, as set_io_timeout (KL_SOCK_CAP_NATIVE_FD). */
+            int fd = (int)t->fd;
+            int fl = fcntl(fd, F_GETFL, 0);
+            if (fl >= 0 &&
+                ((fl & O_NONBLOCK) || fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0))
+                hl_tls_client_shutdown(fd, t->tls);
+        }
         hl_tls_client_free(t->tls);
         t->tls = NULL;
     }

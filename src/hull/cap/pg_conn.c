@@ -244,8 +244,8 @@ static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
                                          NULL);
     if (rc == 0) return 0;
     if (rc == -2) {
+        conn->broken = 1;      /* first: the teardown sends no close_notify */
         conn_teardown(conn);
-        conn->broken = 1;
         set_err(conn->errmsg, sizeof conn->errmsg,
                 "interrupted (instruction limit exceeded); the connection was "
                 "closed with the request part-sent");
@@ -374,9 +374,14 @@ static void conn_teardown(HlPgConn *conn)
 {
     /* Best-effort: the transport frees any attached TLS session and closes the
      * descriptor. A -1 (a live connect op that will not confirm detachment) is an
-     * accepted rare intentional leak, the same contract as the transport. */
+     * accepted rare intentional leak, the same contract as the transport. A
+     * broken connection is aborted: no TLS close_notify into a stream that is
+     * out of step, which blocked on a peer that had stopped reading (audit 24). */
     if (conn->transport) {
-        hl_db_transport_close(conn->transport);
+        if (conn->broken)
+            hl_db_transport_abort(conn->transport);
+        else
+            hl_db_transport_close(conn->transport);
         conn->transport = NULL;
     }
     free(conn->rbuf);
@@ -1254,8 +1259,8 @@ static int handle_data_row(HlPgCursor *c, HlPgRowCb cb, void *ctx,
  * on a side connection, and it needs no new connect from inside the run. */
 static void pg_abandon(HlPgConn *conn)
 {
+    conn->broken = 1;      /* first: the teardown sends no close_notify */
     conn_teardown(conn);
-    conn->broken = 1;
     set_err(conn->errmsg, sizeof conn->errmsg,
             "interrupted (instruction limit exceeded); the connection was "
             "closed rather than read to the end of the reply");
@@ -1330,8 +1335,8 @@ static int pg_refuse_copy(HlPgConn *conn)
  * reconnects on the next call, as after a tripped run. Always -1. */
 static int pg_refuse_copy_out(HlPgConn *conn)
 {
+    conn->broken = 1;      /* first: the teardown sends no close_notify */
     conn_teardown(conn);
-    conn->broken = 1;
     set_err(conn->errmsg, sizeof conn->errmsg,
             "COPY TO STDOUT is not supported by hull/db; the connection was "
             "closed rather than read to the end of the reply");
