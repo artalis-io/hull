@@ -3826,11 +3826,13 @@ UTEST(hl_cap_wasm, dev_disk_module_is_opened_under_the_app_root)
     hl_cap_wasm_destroy(&cache);
 
     ASSERT_EQ(unlink(p), 0);
+#if !defined(__COSMOPOLITAN__)   /* cosmo does not declare mkfifo under -std=c11 */
     ASSERT_EQ(mkfifo(p, 0600), 0);   /* no writer: a blocking open hangs */
     ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
     EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_NOT_FOUND);
     hl_cap_wasm_destroy(&cache);
     unlink(p);
+#endif
 }
 
 /* Under --verify-sig (the disk gate armed) only a signed module, with its
