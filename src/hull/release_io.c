@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strncasecmp */
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -147,7 +148,12 @@ typedef struct {
 
 static int release_io_redirect_hop(const char *next_url, void *data)
 {
-    (void)next_url;
+    /* Every hop stays on TLS (audit 23): a redirect to http:// fetched the
+     * release metadata, the manifest or an asset in the clear (an asset's
+     * SHA-256 is checked afterwards, the API metadata is not). Keel hands an
+     * absolute, resolved URL. */
+    if (!next_url || strncasecmp(next_url, "https://", 8) != 0)
+        return -1;
     ReleaseIoChain *chain = data;
     uint64_t now = kl_monotonic_ms();
     if (now >= chain->deadline_ms)
@@ -273,6 +279,7 @@ int hl_release_io_check_release_tag(const char *repo, const char *tag,
                 "%s: the signed manifest for %s has no hull.version entry,\n"
                 "  which every release since %s carries; refusing to proceed\n",
                 ua, tag, HL_RELEASE_SIGNED_VERSION_SINCE);
+        if (ver) hl_release_io_free(alloc, ver, ver_len);   /* audit 23: leaked */
         return -1;
     }
     if (vrc == 0)

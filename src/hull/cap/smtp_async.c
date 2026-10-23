@@ -32,6 +32,11 @@ struct HlSmtpAsyncOp {
     void               *req_handle;  /* active connection (attached) */
     int                 detached;
     int                 audited;     /* audit-once guard */
+    int                 done_ran;    /* the pool's done_fn reached smtp_async_resume
+                                        (it never fires again for this op) */
+    int                 orphaned;    /* continuation cancelled while the pool still
+                                        held sctx as its `user`; reaped by done_fn
+                                        or the sweep (audit 23) */
     HlSmtpInflightNode  node;        /* registry link */
 };
 
@@ -97,6 +102,23 @@ static void smtp_async_audit_once(HlSmtpAsyncOp *op, const char *terminal)
 static void smtp_async_free_driver(void *driver)
 {
     HlSmtpAsyncOp *op = (HlSmtpAsyncOp *)driver;
+    /* Audit 23: a per-request cancel (the connection went away) reaches here
+     * while the pool still holds sctx as the `user` of submit_work / submit_done
+     * / submit_cancel - the worker may be queued or running, or its done_fn not
+     * yet dispatched. Releasing sctx then was a use-after-free (section 5: no
+     * path releases the runtime ref before the worker publishes terminal, and
+     * done_fn still reads the ctx after that). Safe to free only once done_fn
+     * has run (the resume path) or the op was swept (unlinked, after
+     * pool_free()). Otherwise request cancellation, drop the continuation (the
+     * machinery frees the actx after this returns) and keep the op registered:
+     * done_fn reaps it (smtp_async_resume), or the sweep does if the backend
+     * drops the completion. */
+    if (!op->done_ran && op->node.linked && op->sctx) {
+        hl_smtp_submit_ctx_cancel(op->sctx);   /* non-resumable + CANCEL_REQUESTED */
+        op->actx = NULL;
+        op->orphaned = 1;
+        return;
+    }
     hl_smtp_inflight_remove(&op->node);
     /* If we reach here un-audited, the op ended by cancellation (the resume path
      * always audits first via finish), so tag terminal:cancelled. */
@@ -154,6 +176,15 @@ static int smtp_async_suspend(void *suspend_user, HlSmtpSubmitCtx *sctx)
 static void smtp_async_resume(void *resume_user)
 {
     HlSmtpAsyncOp *op = (HlSmtpAsyncOp *)resume_user;
+    op->done_ran = 1;   /* done_fn fires once: free_driver may now free directly */
+    if (op->orphaned) {
+        /* The continuation was cancelled while the worker still held sctx
+         * (audit 23). done_fn is the pool's last use of it (submit_done reads
+         * nothing after this returns), so release the op now: unlink, audit
+         * the cancelled terminal, drop the runtime ref, free the shell. */
+        smtp_async_free_driver(op);
+        return;
+    }
     if (!op->sctx || !hl_smtp_submit_ctx_resumable(op->sctx))
         return;
     if (op->detached)

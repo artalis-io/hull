@@ -174,6 +174,7 @@ UTEST(smtp_async, normally_removed_op_is_not_swept)
     /* A completes normally: run its worker (success), then its free_driver (what
      * the resume path's machinery would invoke) - unlinks + releases + frees. */
     a.work(a.work_user);
+    oa->done_ran = 1;                 /* on_resume follows done_fn -> resume */
     smtp_async_free_driver(oa);       /* stands in for on_resume -> free_driver */
     ASSERT_EQ(hl_smtp_inflight_count(&s.inflight), 1);   /* A gone */
     ASSERT_EQ(g_ao_frees, 1);                              /* A freed once */
@@ -223,6 +224,81 @@ UTEST(smtp_async, resume_guard_noops_when_nonresumable)
     a.work(a.work_user);
     ASSERT_EQ(hl_smtp_server_sweep(&s), 1);
     ASSERT_EQ(g_ao_frees, 1);
+    smtp_async_test_free = 0; smtp_async_test_alloc = 0;
+}
+
+/* Audit 23: a per-request cancel (on_cancel -> free_driver) while the pool
+ * still holds the submit ctx must NOT release it. Mint an op whose submit ctx
+ * resumes through the real smtp_async_resume, so the pool's done_fn reaches it. */
+typedef struct { HlSmtpAsyncOp *op; Minted m; } MintedOp;
+static MintedOp mint_op_real_resume(HlSmtpServerCtx *s)
+{
+    MintedOp r; memset(&r, 0, sizeof r);
+    HlSmtpAsyncOp *op = (HlSmtpAsyncOp *)ao_alloc(sizeof *op);
+    memset(op, 0, sizeof *op);
+    op->server = s;
+    op->detached = 1;
+    memset(&g_pool, 0, sizeof g_pool);
+    g_suspend_rc = 0;
+    HlSmtpSubmitReq req = {
+        .inputs = make_inputs(), .admission = &s->admission,
+        .execute = exec_success, .pool = &g_pool, .pool_submit = fake_pool_submit,
+        .suspend = fake_suspend, .resume = smtp_async_resume, .resume_user = op,
+    };
+    HlSmtpSubmitOutcome so;
+    hl_smtp_submit(&req, &so);
+    op->sctx = so.ctx;
+    hl_smtp_inflight_add(&s->inflight, &op->node, op, smtp_async_sweep_release);
+    r.op = op;
+    r.m.sctx = so.ctx; r.m.work = g_pool.work; r.m.work_user = g_pool.user;
+    return r;
+}
+
+UTEST(smtp_async, cancel_before_terminal_defers_release_to_done)
+{
+    setup_hooks();
+    HlSmtpServerCtx s;
+    hl_smtp_server_ctx_init(&s, 4, NULL, 0, NULL);
+    MintedOp a = mint_op_real_resume(&s);
+    ASSERT_TRUE(a.m.sctx != NULL);
+    void (*done)(void *) = g_pool.done;
+
+    /* The connection went away while the worker is still QUEUED. */
+    smtp_async_free_driver(a.op);
+    ASSERT_EQ(g_ao_frees, 0);                              /* not freed yet */
+    ASSERT_EQ(hl_smtp_inflight_count(&s.inflight), 1);     /* still tracked */
+    ASSERT_EQ(a.op->orphaned, 1);
+    ASSERT_EQ(hl_smtp_submit_ctx_resumable(a.m.sctx), 0);
+
+    /* The worker observes the cancel: cancelled terminal, transport not run. */
+    a.m.work(a.m.work_user);
+    HlSmtpResult r;
+    ASSERT_TRUE(hl_smtp_submit_ctx_terminal(a.m.sctx, &r));
+    ASSERT_EQ(r.rc, -1);
+
+    /* done_fn reaps the orphan: unlinked, freed exactly once. */
+    done(a.m.work_user);
+    ASSERT_EQ(g_ao_frees, 1);
+    ASSERT_EQ(hl_smtp_inflight_count(&s.inflight), 0);
+    ASSERT_EQ(hl_smtp_server_sweep(&s), 0);
+    ASSERT_EQ(g_ao_frees, 1);
+    smtp_async_test_free = 0; smtp_async_test_alloc = 0;
+}
+
+UTEST(smtp_async, cancel_before_terminal_done_dropped_is_swept)
+{
+    setup_hooks();
+    HlSmtpServerCtx s;
+    hl_smtp_server_ctx_init(&s, 4, NULL, 0, NULL);
+    MintedOp a = mint_op_real_resume(&s);
+
+    smtp_async_free_driver(a.op);      /* per-request cancel, worker QUEUED */
+    ASSERT_EQ(g_ao_frees, 0);
+    a.m.work(a.m.work_user);           /* worker runs (the pool join) */
+    /* The backend dropped the completion (poll at shutdown): the sweep frees. */
+    ASSERT_EQ(hl_smtp_server_sweep(&s), 1);
+    ASSERT_EQ(g_ao_frees, 1);
+    ASSERT_EQ(hl_smtp_inflight_count(&s.inflight), 0);
     smtp_async_test_free = 0; smtp_async_test_alloc = 0;
 }
 

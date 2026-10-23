@@ -243,4 +243,30 @@ UTEST(request_headers, hulls_own_and_malformed_names_are_refused)
     }
 }
 
+/* Audit 23: Keel refuses only CR / LF in the method; a space or a control
+ * byte reached the request line. */
+UTEST(request_method, only_rfc9110_tokens_are_accepted)
+{
+    static const char *const good[] = { "GET", "POST", "PATCH", "M-SEARCH", "x!#$%&'*+.^_`|~" };
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++)
+        EXPECT_TRUE_MSG(hl_http_method_valid(good[i]) == 1, good[i]);
+    static const char *const bad[] = {
+        "", "GET /x HTTP/1.1", "GE T", "GET\t", "G\x01T", "GET:", "G(T", "G\x7fT", "G\xc3\xa9T",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        EXPECT_TRUE_MSG(hl_http_method_valid(bad[i]) == 0, bad[i]);
+    EXPECT_EQ(0, hl_http_method_valid(NULL));
+
+    /* The cap entry point refuses it before any network work. */
+    const char *hosts[] = { "*" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    KlHttpClientResponse resp;
+    EXPECT_EQ(-1, hl_cap_http_request(&cfg, 1000, "GET /evil HTTP/1.1\r\nX:",
+                                      "http://127.0.0.1:1/", NULL, 0, NULL, 0,
+                                      &resp));
+    EXPECT_EQ(-1, hl_cap_http_request(&cfg, 1000, "",
+                                      "http://127.0.0.1:1/", NULL, 0, NULL, 0,
+                                      &resp));
+}
+
 UTEST_MAIN()

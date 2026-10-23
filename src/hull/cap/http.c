@@ -164,6 +164,11 @@ static int http_is_token(const char *s)
     return 1;
 }
 
+int hl_http_method_valid(const char *method)
+{
+    return http_is_token(method);
+}
+
 const char *hl_http_reserved_header(const HlHttpHeader *headers, int n)
 {
     static const char *const owned[] = {
@@ -194,6 +199,8 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     memset(resp, 0, sizeof(*resp));
     if (hl_http_reserved_header(headers, num_headers))
         return -1;   /* the bindings say which (audit 22) */
+    if (!hl_http_method_valid(method))
+        return -1;   /* not an RFC 9110 token (audit 23) */
 
     /* Parse URL for allowlist check */
     KlUrl parsed;

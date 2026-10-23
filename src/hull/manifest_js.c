@@ -296,14 +296,30 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         JSValue devs = mjs_own(ctx, gpu_val, "devices");
         if (JS_IsArray(ctx, devs) == 1) {
             int32_t len = mjs_len(ctx, devs);
+            int listed = 0;
             for (int32_t i = 0; i < len && out->gpu_device_count < HL_GPU_MAX_DEVICES; i++) {
                 JSValue elem = mjs_elem(ctx, devs, (uint32_t)i);
                 if (JS_IsNumber(elem)) {
-                    int32_t d = 0;
-                    JS_ToInt32(ctx, &d, elem);
-                    out->gpu_devices[out->gpu_device_count++] = d;
+                    listed++;
+                    /* A device index is an integer 0..HL_GPU_MAX_DEVICES-1:
+                     * the sandbox builds /dev/dri/renderD<128 + d> from it,
+                     * which overflowed for a huge one (audit 23). */
+                    double d = -1;
+                    if (JS_ToFloat64(ctx, &d, elem) == 0 && d >= 0 &&
+                        d < HL_GPU_MAX_DEVICES && d == (double)(int)d)
+                        out->gpu_devices[out->gpu_device_count++] = (int)d;
+                    else
+                        log_warn("[manifest] gpu.devices[%d] - expected an "
+                                 "integer 0..%d, ignored", (int)i,
+                                 HL_GPU_MAX_DEVICES - 1);
                 }
                 JS_FreeValue(ctx, elem);
+            }
+            /* Every listed device ignored: an empty list means "all devices",
+             * so fail closed instead of widening to every device. */
+            if (listed > 0 && out->gpu_device_count == 0) {
+                log_warn("[manifest] gpu.devices lists no valid device - gpu disabled");
+                out->gpu = 0;
             }
         }
         JS_FreeValue(ctx, devs);

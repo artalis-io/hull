@@ -70,21 +70,26 @@ int hl_cap_test_dispatch(KlHttpRouter *router, const char *method,
     req.keep_alive = 0;
 
     /* Set headers - lowercase names to match llhttp parser behavior */
+    /* A skipped header leaves no slot behind: num_headers counts only the
+     * slots filled (audit 23 - an oversized name left a NULL-name slot that
+     * was still counted, as was every header past KL_MAX_HEADERS). */
     char lowered_names[KL_MAX_HEADERS][64];
-    for (int i = 0; i < num_headers && i < KL_MAX_HEADERS; i++) {
+    int nh = 0;
+    for (int i = 0; i < num_headers && nh < KL_MAX_HEADERS; i++) {
         size_t nlen = strlen(header_names[i]);
         if (nlen >= sizeof(lowered_names[0])) continue; /* skip oversized */
         for (size_t j = 0; j < nlen; j++) {
             char c = header_names[i][j];
-            lowered_names[i][j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+            lowered_names[nh][j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
         }
-        lowered_names[i][nlen] = '\0';
-        req.headers[i].name = lowered_names[i];
-        req.headers[i].name_len = nlen;
-        req.headers[i].value = header_values[i];
-        req.headers[i].value_len = strlen(header_values[i]);
+        lowered_names[nh][nlen] = '\0';
+        req.headers[nh].name = lowered_names[nh];
+        req.headers[nh].name_len = nlen;
+        req.headers[nh].value = header_values[i];
+        req.headers[nh].value_len = strlen(header_values[i]);
+        nh++;
     }
-    req.num_headers = num_headers;
+    req.num_headers = nh;
 
     KlAllocator alloc = kl_allocator_default();
 

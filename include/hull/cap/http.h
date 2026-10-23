@@ -114,4 +114,9 @@ size_t hl_http_url_redact(const char *url, char *out, size_t outsz);
  * Upgrade, and Proxy-* (audit 22). Case-insensitive. */
 const char *hl_http_reserved_header(const HlHttpHeader *headers, int n);
 
+/* 1 when @p method is an RFC 9110 token (non-empty, tchar only), else 0.
+ * Keel refuses only CR / LF in the method, so a space or a control byte went
+ * into the request line (audit 23). */
+int hl_http_method_valid(const char *method);
+
 #endif /* HL_CAP_HTTP_H */
