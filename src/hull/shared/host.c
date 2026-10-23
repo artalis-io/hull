@@ -431,6 +431,35 @@ int hl_host_find_in_path_ex(const char *path_env, const char *name,
     return 0;
 }
 
+char *hl_host_path_absolute_only(const char *path_env)
+{
+    if (!path_env) return NULL;
+    size_t total = strlen(path_env);
+    char *out = malloc(total + 1);       /* the result is never longer */
+    if (!out) return NULL;
+    size_t olen = 0;
+    int  win      = hl_host_is_windows();
+    char list_sep = detect_list_sep(path_env);
+    for (const char *dir = path_env; dir; ) {
+        const char *sep = strchr(dir, list_sep);
+        size_t dlen = sep ? (size_t)(sep - dir) : strlen(dir);
+        const char *d = dir;
+        size_t tlen = dlen;
+        if (tlen >= 2 && d[0] == '"' && d[tlen - 1] == '"') {
+            d++;
+            tlen -= 2;
+        }
+        if (tlen > 0 && component_is_absolute(d, tlen, win)) {
+            if (olen > 0) out[olen++] = list_sep;
+            memcpy(out + olen, dir, dlen);   /* as written, quotes kept */
+            olen += dlen;
+        }
+        dir = sep ? sep + 1 : NULL;
+    }
+    out[olen] = '\0';
+    return out;
+}
+
 /* -- Path form ----------------------------------------------------- */
 
 int hl_host_normalize_path(const char *path, char *out, size_t out_sz)

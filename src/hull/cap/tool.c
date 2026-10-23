@@ -555,6 +555,79 @@ static void tool_audit_not_found(const char *what, const char *const argv[])
     hl_audit_end(&w);
 }
 
+/* Same variable? Keys compare up to '='; without case on Windows, where
+ * the environment is case-insensitive ("Path" is PATH). */
+static int tool_env_key_eq(const char *a, const char *b)
+{
+    int win = hl_host_is_windows();
+    for (;; a++, b++) {
+        int ea = (*a == '=' || *a == '\0'), eb = (*b == '=' || *b == '\0');
+        if (ea || eb) return ea && eb;
+        char ca = *a, cb = *b;
+        if (win) {
+            if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 'a' + 'A');
+            if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 'a' + 'A');
+        }
+        if (ca != cb) return 0;
+    }
+}
+
+/* The environment a spawned tool runs with (audit 24): @p envadd (already
+ * vetted by tool_env_ok), then PATH reduced to its absolute components
+ * (hl_host_path_absolute_only), then the rest of environ minus PATH and the
+ * keys envadd sets. tool_exec_path finds the program only through absolute
+ * entries, but the child inherited the raw PATH and searches it itself: gcc
+ * runs `as` and collect2 through it (an empty entry meaning ./), clang
+ * honours ".", so a repo shipping `as` or `ld` ran during `hull build`.
+ * Built BEFORE fork (no allocation in the child of a threaded process).
+ * Returns a calloc'd array the caller frees with tool_child_env_free, or
+ * NULL on allocation failure. */
+extern char **environ;
+static char **tool_child_env(const char *const envadd[], char **path_kv)
+{
+    *path_kv = NULL;
+    size_t nenv = 0, nadd = 0;
+    for (char **e = environ; e && *e; e++) nenv++;
+    while (envadd && envadd[nadd]) nadd++;
+    char **envp = (char **)calloc(nenv + nadd + 2, sizeof(char *));
+    if (!envp) return NULL;
+    size_t i = 0;
+    for (size_t j = 0; j < nadd; j++) envp[i++] = (char *)(uintptr_t)envadd[j];
+    int path_done = 0;
+    for (char **e = environ; e && *e; e++) {
+        if (tool_env_key_eq(*e, "PATH")) {
+            if (path_done) continue;          /* getenv reads the first one */
+            path_done = 1;
+            const char *eq = strchr(*e, '=');
+            char *abs_path = hl_host_path_absolute_only(eq ? eq + 1 : "");
+            if (!abs_path) { free(envp); return NULL; }
+            size_t klen = eq ? (size_t)(eq - *e) : strlen(*e);
+            size_t vlen = strlen(abs_path);
+            char *kv = malloc(klen + 1 + vlen + 1);
+            if (!kv) { free(abs_path); free(envp); return NULL; }
+            memcpy(kv, *e, klen);
+            kv[klen] = '=';
+            memcpy(kv + klen + 1, abs_path, vlen + 1);
+            free(abs_path);
+            *path_kv = kv;
+            envp[i++] = kv;
+            continue;
+        }
+        int overridden = 0;
+        for (size_t j = 0; j < nadd && !overridden; j++)
+            if (tool_env_key_eq(*e, envadd[j])) overridden = 1;
+        if (!overridden) envp[i++] = *e;
+    }
+    envp[i] = NULL;
+    return envp;
+}
+
+static void tool_child_env_free(char **envp, char *path_kv)
+{
+    free(envp);
+    free(path_kv);
+}
+
 int hl_tool_spawn(const char *const argv[])
 {
     return hl_tool_spawn_env(argv, NULL);
@@ -574,19 +647,19 @@ static int spawn_and_wait(const char *const argv[], const char *const envadd[])
         tool_audit_not_found("tool.spawn", argv);
         return -1;
     }
+    char *path_kv;
+    char **envp = tool_child_env(envadd, &path_kv);
+    if (!envp) return -1;
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) { tool_child_env_free(envp, path_kv); return -1; }
 
     if (pid == 0) {
-        /* Child: apply extra env (KEY=VALUE strings), then exec. putenv points
-         * into envadd, which lives in the parent's memory the child shares
-         * post-fork until execvp - fine for this immediate exec. */
-        if (envadd)
-            for (int i = 0; envadd[i]; i++)
-                putenv((char *)(uintptr_t)envadd[i]);
-        execv(exe, (char *const *)(uintptr_t)argv);  /* POSIX execv takes char*const[] but does not modify argv */
+        /* Child: exec with the environment built above (envadd + PATH
+         * reduced to absolute entries + the rest). */
+        execve(exe, (char *const *)(uintptr_t)argv, envp);  /* POSIX execve takes char*const[] but does not modify argv */
         _exit(127);
     }
+    tool_child_env_free(envp, path_kv);
 
     /* Parent: wait */
     int status;
@@ -762,8 +835,16 @@ static char *spawn_read_argv(const char *const argv[], size_t *out_len)
         return NULL;
     }
 #else
+    char *path_kv;
+    char **envp = tool_child_env(NULL, &path_kv);
+    if (!envp) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return NULL;
+    }
     pid_t pid = fork();
     if (pid < 0) {
+        tool_child_env_free(envp, path_kv);
         close(pipefd[0]);
         close(pipefd[1]);
         return NULL;
@@ -774,9 +855,10 @@ static char *spawn_read_argv(const char *const argv[], size_t *out_len)
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
-        execv(exe, (char *const *)(uintptr_t)argv);  /* POSIX execv takes char*const[] but does not modify argv */
+        execve(exe, (char *const *)(uintptr_t)argv, envp);  /* POSIX execve takes char*const[] but does not modify argv */
         _exit(127);
     }
+    tool_child_env_free(envp, path_kv);
 #endif
 
     /* Parent: read from pipe */
@@ -1025,10 +1107,10 @@ static void cosmo_prepare(const char *shell)
  * out2=$(mktemper) (the capture comes back empty). posix_spawn is a direct
  * CreateProcess, which inherits the standard handles cleanly. A bare argv[0]
  * is resolved by tool_exec_path (absolute PATH entries only), not by
- * posix_spawnp's own search, which takes "." as the cwd. envp = envadd (overriding) + environ.
+ * posix_spawnp's own search, which takes "." as the cwd. envp is
+ * tool_child_env's (envadd + PATH reduced to absolute entries + environ).
  * When @p out_fd >= 0 it becomes the child's stdout, and it and @p close_fd
  * (>= 0) are closed in the child. Returns 0, or an errno value. */
-extern char **environ;
 static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
                              const char *const envadd[], int out_fd,
                              int close_fd)
@@ -1041,21 +1123,9 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
         tool_audit_not_found("tool.spawn", argv);
         return ENOENT;
     }
-    char **envp = environ;
-    char **owned = NULL;
-    if (envadd && envadd[0]) {
-        size_t nenv = 0;
-        for (char **e = environ; *e; e++) nenv++;
-        size_t nadd = 0;
-        while (envadd[nadd]) nadd++;
-        envp = (char **)calloc(nenv + nadd + 1, sizeof(char *));
-        if (!envp) return ENOMEM;
-        size_t i = 0;
-        for (size_t j = 0; j < nadd; j++) envp[i++] = (char *)(uintptr_t)envadd[j];
-        for (char **e = environ; *e; e++) envp[i++] = *e;   /* envadd overrides */
-        envp[i] = NULL;
-        owned = envp;
-    }
+    char *path_kv;
+    char **envp = tool_child_env(envadd, &path_kv);
+    if (!envp) return ENOMEM;
 
     posix_spawn_file_actions_t fa;
     int have_fa = 0, rc = 0;
@@ -1074,7 +1144,7 @@ static int cosmo_spawn_start(pid_t *pid, const char *const argv[],
         rc = posix_spawn(pid, exe, have_fa ? &fa : NULL, NULL,
                           (char *const *)(uintptr_t)argv, envp);
     if (have_fa) posix_spawn_file_actions_destroy(&fa);
-    free(owned);
+    tool_child_env_free(envp, path_kv);
     return rc;
 }
 
@@ -1177,24 +1247,31 @@ int hl_tool_spawn_self(const char *const argv[], unsigned timeout_ms)
     char exe[PATH_MAX];
     if (tool_exec_path(argv[0], exe, sizeof(exe)) != 0)
         return HL_TOOL_SPAWN_NOSTART;
+    char *path_kv;
+    char **envp = tool_child_env(NULL, &path_kv);
+    if (!envp) return HL_TOOL_SPAWN_NOSTART;
     pid_t pid;
 #ifdef __COSMOPOLITAN__
     {
-        extern char **environ;
-        if (posix_spawn(&pid, exe, NULL, NULL,
-                        (char *const *)(uintptr_t)argv, environ) != 0)
-            return HL_TOOL_SPAWN_NOSTART;
+        int src = posix_spawn(&pid, exe, NULL, NULL,
+                              (char *const *)(uintptr_t)argv, envp);
+        tool_child_env_free(envp, path_kv);
+        if (src != 0) return HL_TOOL_SPAWN_NOSTART;
     }
 #else
     pid = fork();
-    if (pid < 0) return HL_TOOL_SPAWN_NOSTART;
+    if (pid < 0) {
+        tool_child_env_free(envp, path_kv);
+        return HL_TOOL_SPAWN_NOSTART;
+    }
     if (pid == 0) {
-        /* execv failure exits 127 - a NORMAL exit, so the caller sees "ran
+        /* execve failure exits 127 - a NORMAL exit, so the caller sees "ran
          * and returned 127" rather than "never started". That is the right
          * reading: it did start, it just could not become the target. */
-        execv(exe, (char *const *)(uintptr_t)argv);
+        execve(exe, (char *const *)(uintptr_t)argv, envp);
         _exit(127);
     }
+    tool_child_env_free(envp, path_kv);
 #endif
 
     int status = 0;

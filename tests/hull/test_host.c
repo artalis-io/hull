@@ -355,6 +355,35 @@ UTEST(host, find_in_path_finds_a_real_executable)
     ASSERT_TRUE(strstr(out, "hulltestprobe") != NULL);
 }
 
+/* Audit 24: a spawned tool inherited the raw PATH, and searches it itself
+ * (gcc runs `as` / collect2 through it, an empty entry meaning ./; clang
+ * honours "."). The child's PATH keeps only the absolute components. */
+UTEST(host, path_absolute_only_drops_cwd_relative_components)
+{
+    char *p = hl_host_path_absolute_only("/usr/bin:.::rel/bin:/opt/x/bin:");
+    ASSERT_TRUE(p != NULL);
+    EXPECT_STREQ(p, "/usr/bin:/opt/x/bin");
+    free(p);
+    p = hl_host_path_absolute_only(".:..:bin:");
+    ASSERT_TRUE(p != NULL);
+    EXPECT_STREQ(p, "");
+    free(p);
+    p = hl_host_path_absolute_only("");
+    ASSERT_TRUE(p != NULL);
+    EXPECT_STREQ(p, "");
+    free(p);
+    p = hl_host_path_absolute_only("/a");
+    ASSERT_TRUE(p != NULL);
+    EXPECT_STREQ(p, "/a");
+    free(p);
+    EXPECT_TRUE(hl_host_path_absolute_only(NULL) == NULL);
+    /* A ';' list keeps its separator (a Windows-shaped PATH). */
+    p = hl_host_path_absolute_only("/a;.;;/b");
+    ASSERT_TRUE(p != NULL);
+    EXPECT_STREQ(p, "/a;/b");
+    free(p);
+}
+
 UTEST(host, is_batch_file_only_on_windows)
 {
     /* audit 18: a .bat / .cmd spawn runs under cmd.exe, which re-parses the

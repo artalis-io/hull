@@ -542,6 +542,50 @@ UTEST(tool, spawn_bare_name_skips_cwd_path_entries)
     remove(exe); rmdir(dir); free(dir);
 }
 
+/* Audit 24: tool_exec_path found the program through absolute PATH entries
+ * only, but the child inherited the raw PATH and searched it itself (gcc's
+ * `as` / collect2, clang honouring "."). The child sees PATH reduced to its
+ * absolute components. The probe is this test binary, copied as "hull" and
+ * run with --filter on the child half below, which prints its PATH. */
+UTEST(tool, path_probe_child)
+{
+    (void)utest_result;
+    const char *probe = getenv("HULL_TOOL_PATH_PROBE");
+    if (!probe || strcmp(probe, "1") != 0) return;   /* only as the child */
+    const char *p = getenv("PATH");
+    printf("CHILD-PATH=[%s]\n", p ? p : "(unset)");
+}
+
+UTEST(tool, spawned_child_sees_only_absolute_path_entries)
+{
+    char *dir = make_tmpdir();
+    ASSERT_TRUE(dir != NULL);
+    char exe[HL_TEST_PATH_MAX];
+    if (copy_self_as_hull(dir, exe, sizeof exe) != 0) {
+        rmdir(dir); free(dir);
+        UTEST_SKIP("could not copy this test binary");
+    }
+    const char *op = getenv("PATH");
+    char *oldpath = op ? strdup(op) : NULL;
+    char newpath[HL_TEST_PATH_MAX + 64];
+    snprintf(newpath, sizeof newpath, ".::rel/bin:%s:", dir);
+    setenv("PATH", newpath, 1);
+    setenv("HULL_TOOL_PATH_PROBE", "1", 1);
+
+    const char *argv[] = { "hull", "--filter=tool.path_probe_child", NULL };
+    char *out = hl_tool_spawn_read(argv, NULL);
+    char want[HL_TEST_PATH_MAX + 64];
+    snprintf(want, sizeof want, "CHILD-PATH=[%s]", dir);
+    EXPECT_TRUE(out != NULL);
+    if (out) EXPECT_TRUE_MSG(strstr(out, want) != NULL, out);
+    free(out);
+
+    unsetenv("HULL_TOOL_PATH_PROBE");
+    if (oldpath) setenv("PATH", oldpath, 1); else unsetenv("PATH");
+    free(oldpath);
+    remove(exe); rmdir(dir); free(dir);
+}
+
 /* ── find_files tests ─────────────────────────────────────────────── */
 
 UTEST(tool, find_files_basic)
