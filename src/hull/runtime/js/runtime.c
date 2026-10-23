@@ -919,13 +919,9 @@ static JSValue js_console_log_impl(JSContext *ctx, JSValueConst this_val,
     (void)this_val;
     static const int levels[] = { LOG_INFO, LOG_WARN, LOG_ERROR, LOG_INFO };
     int level = (magic >= 0 && magic < 4) ? levels[magic] : LOG_INFO;
-    for (int i = 0; i < argc; i++) {
-        const char *str = JS_ToCString(ctx, argv[i]);
-        if (str) {
-            log_log(level, "js", 0, "[app] %s", str);
-            JS_FreeCString(ctx, str);
-        }
-    }
+    /* A throwing toString fails the call (audit 24). */
+    if (hl_js_log_args(ctx, level, "js", "[app]", argc, argv) < 0)
+        return JS_EXCEPTION;
     return JS_UNDEFINED;
 }
 
@@ -2118,6 +2114,68 @@ static JSValue js_cli_main_settle(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* Attach js_cli_main_settle's two callbacks to main's pending promise @p p
+ * through the intrinsic Promise.prototype.then, running no app code. Hull
+ * called whatever `p.then` read: an own `then` on the promise
+ * (Object.defineProperty(p, "then", { value: f })) ran app code after
+ * main's entry was parked, and was handed the callbacks - so it could end
+ * main early with any exit code - and a throw from it was ignored, leaving
+ * the CLI waiting (audit 24). So @p p must have the intrinsic prototype
+ * and no own properties: then the `then` read from that (frozen) prototype
+ * is the intrinsic one, and its species lookup reads only frozen intrinsics
+ * (p.constructor -> Promise, Promise[Symbol.species]). Anything else fails
+ * main. 0, or -1 with an exception pending. */
+static int js_cli_main_watch(JSContext *ctx, JSValueConst p,
+                             JSValueConst ok, JSValueConst bad)
+{
+    JSValue funcs[2];
+    JSValue fresh = JS_NewPromiseCapability(ctx, funcs);
+    if (JS_IsException(fresh)) return -1;
+    JS_FreeValue(ctx, funcs[0]);
+    JS_FreeValue(ctx, funcs[1]);
+    JSValue iproto = JS_GetPrototype(ctx, fresh);   /* %Promise.prototype% */
+    JS_FreeValue(ctx, fresh);
+    JSValue proto = JS_GetPrototype(ctx, p);
+    int same = JS_IsObject(iproto) && JS_IsObject(proto) &&
+               JS_VALUE_GET_PTR(proto) == JS_VALUE_GET_PTR(iproto);
+    JS_FreeValue(ctx, proto);
+    if (!same) {
+        JS_FreeValue(ctx, iproto);
+        JS_ThrowTypeError(ctx, "app.main returned a promise whose "
+                          "prototype was changed");
+        return -1;
+    }
+    JSPropertyEnum *tab = NULL;
+    uint32_t n = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &n, p,
+                               JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) < 0) {
+        JS_FreeValue(ctx, iproto);
+        return -1;
+    }
+    JS_FreePropertyEnum(ctx, tab, n);
+    if (n != 0) {
+        JS_FreeValue(ctx, iproto);
+        JS_ThrowTypeError(ctx, "app.main returned a promise with properties "
+                          "of its own (a then or constructor of its own is "
+                          "not waited through)");
+        return -1;
+    }
+    JSValue then_fn = JS_GetPropertyStr(ctx, iproto, "then");
+    JS_FreeValue(ctx, iproto);
+    if (JS_IsException(then_fn)) return -1;
+    if (!JS_IsFunction(ctx, then_fn)) {
+        JS_FreeValue(ctx, then_fn);
+        JS_ThrowInternalError(ctx, "Promise.prototype.then is missing");
+        return -1;
+    }
+    JSValueConst args[2] = { ok, bad };
+    JSValue chained = JS_Call(ctx, then_fn, p, 2, args);
+    JS_FreeValue(ctx, then_fn);
+    if (JS_IsException(chained)) return -1;
+    JS_FreeValue(ctx, chained);
+    return 0;
+}
+
 static int vt_js_has_main(HlRuntime *rt)
 {
     if (!rt) return 0;
@@ -2327,19 +2385,33 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         js->cli_main_rejected = 0;
         js->cli_main_value    = &settled_slot;
 
-        JSValue then_fn = JS_GetPropertyStr(ctx, ret, "then");
         JSValue resolve_cb = JS_NewCFunctionMagic(
             ctx, (JSCFunctionMagic *)js_cli_main_settle,
             "__hull_main_resolved", 1, JS_CFUNC_generic_magic, 0);
         JSValue reject_cb = JS_NewCFunctionMagic(
             ctx, (JSCFunctionMagic *)js_cli_main_settle,
             "__hull_main_rejected", 1, JS_CFUNC_generic_magic, 1);
-        JSValue then_args[2] = { resolve_cb, reject_cb };
-        JSValue chained = JS_Call(ctx, then_fn, ret, 2, then_args);
-        JS_FreeValue(ctx, then_fn);
+        int wrc = (JS_IsException(resolve_cb) || JS_IsException(reject_cb))
+                ? -1 : js_cli_main_watch(ctx, ret, resolve_cb, reject_cb);
         JS_FreeValue(ctx, resolve_cb);
         JS_FreeValue(ctx, reject_cb);
-        JS_FreeValue(ctx, chained);
+        if (wrc != 0) {
+            JSValue exc = JS_GetException(ctx);
+            const char *msg = JS_ToCString(ctx, exc);
+            fprintf(stderr, "[hull:main] %s\n",
+                    msg ? msg : "cannot wait for main's promise");
+            if (msg) JS_FreeCString(ctx, msg);
+            else JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_FreeValue(ctx, exc);
+            js->cli_main_value = NULL;
+            js->cli_main_active = 0;
+            hl_js_sleep_cancel_pending(js);
+            JS_FreeValue(ctx, settled_slot);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, main_fn);
+            JS_FreeValue(ctx, store);
+            return -1;
+        }
 
         hl_js_run_jobs(js);  /* in case both already settled via microtasks */
         js->last_async_cont = NULL;

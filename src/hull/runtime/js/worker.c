@@ -321,7 +321,10 @@ static int capture_result(JSContext *ctx, JSValue val,
     if (JS_IsObject(val)) {
         op->result_kind = 5;
 
-        /* Enumerate own string properties */
+        /* Enumerate own string properties. A getter that throws, or a key
+         * or string that will not convert, fails the capture with the
+         * exception pending: it was stored as null and the dispatch
+         * reported success (audit 24). */
         JSPropertyEnum *tab = NULL;
         uint32_t tab_len = 0;
         if (JS_GetOwnPropertyNames(ctx, &tab, &tab_len, val,
@@ -345,75 +348,61 @@ static int capture_result(JSContext *ctx, JSValue val,
         }
         op->result_count = 0;
 
+        /* On failure, op_free releases everything already in result_kvs
+         * (result_count counts every owned key). */
+        int rc = 0;
         for (uint32_t i = 0; i < tab_len; i++) {
             const char *key = JS_AtomToCString(ctx, tab[i].atom);
-            if (!key) {
-                JS_FreeAtom(ctx, tab[i].atom);
-                continue;
-            }
+            if (!key) { rc = -1; break; }
 
             int idx = op->result_count;
             op->result_kvs[idx].key = strdup(key);
             JS_FreeCString(ctx, key);
-            if (!op->result_kvs[idx].key) {
-                /* OOM on key dup: caller's op_free will release everything
-                 * already in result_kvs (M-2). */
-                JS_FreeAtom(ctx, tab[i].atom);
-                for (uint32_t j = i + 1; j < tab_len; j++)
-                    JS_FreeAtom(ctx, tab[j].atom);
-                js_free(ctx, tab);
-                return -1;
-            }
+            if (!op->result_kvs[idx].key) { rc = -1; break; }
+            HlValue *v = &op->result_kvs[idx].value;
+            v->type = HL_TYPE_NIL;
+            op->result_count++;
 
             JSValue pval = JS_GetProperty(ctx, val, tab[i].atom);
-            JS_FreeAtom(ctx, tab[i].atom);
+            if (JS_IsException(pval)) { rc = -1; break; }
 
             if (JS_IsBool(pval)) {
-                op->result_kvs[idx].value.type = HL_TYPE_BOOL;
-                op->result_kvs[idx].value.b = JS_ToBool(ctx, pval);
+                v->type = HL_TYPE_BOOL;
+                v->b = JS_ToBool(ctx, pval);
             } else if (JS_IsNumber(pval)) {
                 double dv;
                 JS_ToFloat64(ctx, &dv, pval);
                 if (dv >= -9007199254740992.0 && dv <= 9007199254740992.0 &&  /* range first: casting NaN / out-of-range is UB */
                     dv == (double)(int64_t)dv) {
-                    op->result_kvs[idx].value.type = HL_TYPE_INT;
-                    op->result_kvs[idx].value.i = (int64_t)dv;
+                    v->type = HL_TYPE_INT;
+                    v->i = (int64_t)dv;
                 } else {
-                    op->result_kvs[idx].value.type = HL_TYPE_DOUBLE;
-                    op->result_kvs[idx].value.d = dv;
+                    v->type = HL_TYPE_DOUBLE;
+                    v->d = dv;
                 }
             } else if (JS_IsString(pval)) {
                 size_t slen;
                 const char *sv = JS_ToCStringLen(ctx, &slen, pval);
-                op->result_kvs[idx].value.type = HL_TYPE_TEXT;
-                if (sv) {
-                    char *buf = malloc(slen + 1);
-                    if (!buf) {
-                        /* OOM on string dup: mark NIL, bump count so
-                         * op_free releases the strdup'd key. */
-                        op->result_kvs[idx].value.type = HL_TYPE_NIL;
-                        op->result_count++;
-                        JS_FreeCString(ctx, sv);
-                        JS_FreeValue(ctx, pval);
-                        for (uint32_t j = i + 1; j < tab_len; j++)
-                            JS_FreeAtom(ctx, tab[j].atom);
-                        js_free(ctx, tab);
-                        return -1;
-                    }
-                    memcpy(buf, sv, slen);
-                    buf[slen] = '\0';
-                    op->result_kvs[idx].value.s = buf;
-                    op->result_kvs[idx].value.len = slen;
-                    JS_FreeCString(ctx, sv);
+                char *buf = sv ? malloc(slen + 1) : NULL;
+                if (!buf) {
+                    if (sv) JS_FreeCString(ctx, sv);
+                    JS_FreeValue(ctx, pval);
+                    rc = -1;
+                    break;
                 }
-            } else {
-                op->result_kvs[idx].value.type = HL_TYPE_NIL;
+                memcpy(buf, sv, slen);
+                buf[slen] = '\0';
+                v->type = HL_TYPE_TEXT;
+                v->s = buf;
+                v->len = slen;
+                JS_FreeCString(ctx, sv);
             }
             JS_FreeValue(ctx, pval);
-            op->result_count++;
         }
+        for (uint32_t j = 0; j < tab_len; j++)
+            JS_FreeAtom(ctx, tab[j].atom);
         js_free(ctx, tab);
-        return 0;
+        return rc;
     }
 
     /* Unsupported type → nil */
@@ -588,10 +577,17 @@ static void js_dispatch_run(HlJsWorkerCtx *wctx, JSContext *ctx,
 
     /* Capture the return value. Its getters run app code: one that went
      * over the budget left a partly captured result (the rest read as
-     * null), which used to be reported as success (L4). */
+     * null), which used to be reported as success (L4); one that threw
+     * fails the dispatch with its error (audit 24). */
     if (capture_result(ctx, result, op) != 0 && !wctx->tripped) {
-        op->error = 1;
-        snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
+        if (JS_HasException(ctx)) {
+            JSValue exc = JS_GetException(ctx);
+            js_dispatch_fail(wctx, ctx, op, exc);
+            JS_FreeValue(ctx, exc);
+        } else {
+            op->error = 1;
+            snprintf(op->error_msg, sizeof(op->error_msg), "out of memory");
+        }
     }
     if (wctx->tripped) {
         JS_FreeValue(ctx, JS_GetException(ctx));

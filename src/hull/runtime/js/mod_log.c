@@ -7,6 +7,58 @@
 #include "mod_buffer.h"
 #include "log.h"
 #include "internal.h"   /* hl_js_export_frozen (audit 18) */
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
+
+/* Write each argument as one log record: converted (a toString / valueOf
+ * that throws fails the call - it was skipped and the call returned with
+ * the exception pending), charged 1 unit per 8 bytes before the write (log
+ * output was free), and with CR and LF written as the two characters \r
+ * and \n, so app text cannot start a forged log line (audit 24). Shared by
+ * hull:log and the console polyfill. Returns 0, or -1 with an exception
+ * pending. */
+int hl_js_log_args(JSContext *ctx, int level, const char *file,
+                   const char *tag, int argc, JSValueConst *argv)
+{
+    for (int i = 0; i < argc; i++) {
+        size_t len = 0;
+        const char *str = JS_ToCStringLen(ctx, &len, argv[i]);
+        if (!str) return -1;
+        if (hl_js_budget_charge(ctx, hl_work_bytes_units(len)) < 0) {
+            JS_FreeCString(ctx, str);
+            return -1;
+        }
+        size_t extra = 0;
+        for (size_t k = 0; k < len; k++)
+            if (str[k] == '\r' || str[k] == '\n') extra++;
+        if (extra == 0) {
+            log_log(level, file, 0, "%s %s", tag, str);
+            JS_FreeCString(ctx, str);
+            continue;
+        }
+        char *esc = (len > SIZE_MAX - extra - 1) ? NULL
+                  : js_malloc(ctx, len + extra + 1);
+        if (!esc) {
+            JS_FreeCString(ctx, str);
+            if (!JS_HasException(ctx)) JS_ThrowOutOfMemory(ctx);
+            return -1;
+        }
+        size_t o = 0;
+        for (size_t k = 0; k < len; k++) {
+            char c = str[k];
+            if (c == '\r' || c == '\n') {
+                esc[o++] = '\\';
+                esc[o++] = c == '\r' ? 'r' : 'n';
+            } else {
+                esc[o++] = c;
+            }
+        }
+        esc[o] = '\0';
+        log_log(level, file, 0, "%s %s", tag, esc);
+        js_free(ctx, esc);
+        JS_FreeCString(ctx, str);
+    }
+    return 0;
+}
 
 static JSValue js_log_level(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
@@ -26,15 +78,9 @@ static JSValue js_log_level(JSContext *ctx, JSValueConst this_val,
     if (mod && strncmp(mod, "hull:", 5) == 0)
         tag = "[hull:js]";
 
-    for (int i = 0; i < argc; i++) {
-        const char *str = JS_ToCString(ctx, argv[i]);
-        if (str) {
-            log_log(level, mod ? mod : "js", 0, "%s %s", tag, str);
-            JS_FreeCString(ctx, str);
-        }
-    }
+    int rc = hl_js_log_args(ctx, level, mod ? mod : "js", tag, argc, argv);
     if (mod) JS_FreeCString(ctx, mod);
-    return JS_UNDEFINED;
+    return rc < 0 ? JS_EXCEPTION : JS_UNDEFINED;
 }
 
 static int js_log_module_init(JSContext *ctx, JSModuleDef *m)

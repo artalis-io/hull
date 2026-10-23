@@ -292,6 +292,12 @@ JSValue hl_js_budget_throw(JSContext *ctx);
  * is lua_hlcharge (runtime/lua/mod_crypto.c crypto_charge). */
 int hl_js_budget_charge(JSContext *ctx, uint64_t units);
 
+/* Log each argument as one record at @p level, "<tag> <text>": converted,
+ * charged, CR / LF escaped (mod_log.c; hull:log and console.*). 0, or -1
+ * with an exception pending. */
+int hl_js_log_args(JSContext *ctx, int level, const char *file,
+                   const char *tag, int argc, JSValueConst *argv);
+
 /* ── Async-op gate (async.c) ────────────────────────────────────────── */
 
 /* Every Hull async op (hull.sleep, db.async, compute.async, gpu.async,
@@ -472,16 +478,24 @@ static inline int hl_js_get_uint32(JSContext *ctx, JSValueConst obj,
     return rc < 0 ? -1 : 0;
 }
 
-/* An array's length (JS_ToInt32 of arr.length): 0, or -1 with the
- * exception pending - a Proxy's length trap is app code (audit 23). */
+/* An array's length, saturated to [0, INT32_MAX]: 0, or -1 with the
+ * exception pending - a Proxy's length trap is app code (audit 23). Read
+ * as JS_ToInt32 it wrapped: a length in [2^31, 2^32) went negative and
+ * 2^32 + 1 read as 1, so a caller's cap never saw it (audit 24). Callers
+ * clamp to their own maximum, so a saturated length is refused or capped,
+ * never wrapped. */
 static inline int hl_js_get_length32(JSContext *ctx, JSValueConst arr,
                                      int32_t *out)
 {
+    *out = 0;
     JSValue v = JS_GetPropertyStr(ctx, arr, "length");
     if (JS_IsException(v)) return -1;
-    int rc = JS_ToInt32(ctx, out, v);
+    int64_t n = 0;
+    int rc = JS_ToInt64(ctx, &n, v);
     JS_FreeValue(ctx, v);
-    return rc < 0 ? -1 : 0;
+    if (rc < 0) return -1;
+    *out = n < 0 ? 0 : n > INT32_MAX ? INT32_MAX : (int32_t)n;
+    return 0;
 }
 
 /* As hl_js_opt_int64, for a double option. */

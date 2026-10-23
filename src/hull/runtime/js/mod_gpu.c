@@ -22,6 +22,9 @@
 #include <stdio.h>
 #include <stdatomic.h>
 
+/* The largest WGSL source gpu.load reads or gpu.compile takes. */
+#define JS_GPU_WGSL_MAX ((size_t)10 * 1024 * 1024)
+
 /* ── Two-pass ArrayBuffer views (audit 9 H1) ──────────────────────
  *
  * A synchronous call parses its options with getters, valueOf and toString
@@ -178,7 +181,7 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
                 flen = ftell(f);
                 if (fseek(f, 0, SEEK_SET) != 0) flen = -1;
             }
-            if (flen > 0 && flen < 10 * 1024 * 1024) {
+            if (flen > 0 && flen < (long)JS_GPU_WGSL_MAX) {
                 file_buf = malloc((size_t)flen + 1);
                 if (file_buf && fread(file_buf, 1, (size_t)flen, f) == (size_t)flen) {
                     file_buf[flen] = '\0';
@@ -205,6 +208,13 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
         return err;
     }
 
+    /* The read and the compile are charged before the compile: WGSL
+     * compilation was free (audit 24). */
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(wgsl_len)) < 0) {
+        free(file_buf);
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_gpu_compile(gpu, -1, name, wgsl, wgsl_len);
     free(file_buf);
     JS_FreeCString(ctx, name);
@@ -230,6 +240,18 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
     const char *wgsl = JS_ToCStringLen(ctx, &wgsl_len, argv[1]);
     if (!wgsl) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
 
+    /* Capped as gpu.load's file read is, and charged before the compile:
+     * WGSL of any length compiled free of the budget (audit 24). */
+    if (wgsl_len >= JS_GPU_WGSL_MAX) {
+        JS_FreeCString(ctx, name);
+        JS_FreeCString(ctx, wgsl);
+        return JS_ThrowRangeError(ctx, "gpu.compile: WGSL source too large");
+    }
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(wgsl_len)) < 0) {
+        JS_FreeCString(ctx, name);
+        JS_FreeCString(ctx, wgsl);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_gpu_compile(gpu, -1, name, wgsl, wgsl_len);
     JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, wgsl);
