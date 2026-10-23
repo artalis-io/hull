@@ -82,7 +82,9 @@ static int lua_parse_http_headers(lua_State *L, int idx,
     if (count == 0)
         return 0;
 
-    size_t mark = scratch ? scratch->used : 0;   /* given back on failure */
+    if (!scratch)   /* sh_arena_calloc would fail the parse all the same */
+        return -1;
+    size_t mark = scratch->used;   /* given back on failure */
     HlHttpHeader *hdrs = sh_arena_calloc(scratch, (size_t)count, sizeof(HlHttpHeader));
     if (!hdrs)
         return -1;
