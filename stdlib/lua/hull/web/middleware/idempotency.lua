@@ -316,7 +316,14 @@ function idempotency.middleware(opts)
     -- for unused locals; this counter is actively mutated below.
     local cleanup_counter = 0
     local ttl = opts.ttl ~= nil and check_ttl("idempotency.middleware: ttl", opts.ttl) or _ttl
+    -- req.headers keys are lowercased by the runtime, so a mixed-case
+    -- header_name ("Idempotency-Key", what JS's req.header() accepts) never
+    -- matched: every retry ran the handler again (audit 23).
     local header_name = opts.header_name or _header_name
+    if type(header_name) ~= "string" or header_name == "" then
+        error("idempotency.middleware: header_name must be a non-empty string")
+    end
+    header_name = header_name:lower()
 
     -- Build methods lookup
     local method_list = opts.methods or { "POST" }

@@ -33,6 +33,17 @@ let maxAttempts = 5;
 const realPost = (url, body, opts) => httpClient.async.post(url, body, opts);
 let post = realPost;
 
+// Whether `headers` already names `want`, in any case: the app's own
+// "idempotency-key" was sent beside the row's "Idempotency-Key" as two
+// headers (audit 23).
+function hasHeader(headers, want) {
+    want = want.toLowerCase();
+    const keys = Object.keys(headers);
+    for (let i = 0; i < keys.length; i++)
+        if (keys[i].toLowerCase() === want) return true;
+    return false;
+}
+
 /**
  * Initialize the `_hull_outbox` SQLite table. Idempotent.
  *
@@ -162,7 +173,7 @@ async function deliverItem(item) {
         // drop a repeat: the row's idempotency key, unless the app set the
         // header itself.
         if (typeof item.idempotency_key === "string" && item.idempotency_key !== ""
-            && reqHeaders["Idempotency-Key"] === undefined)
+            && !hasHeader(reqHeaders, "Idempotency-Key"))
             reqHeaders["Idempotency-Key"] = item.idempotency_key;
 
         try {

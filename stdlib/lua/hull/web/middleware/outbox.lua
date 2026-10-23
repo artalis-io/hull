@@ -38,6 +38,17 @@
 local json = require("hull.json")
 local db = require("hull.db").default()
 local http_client = require("hull.http-client")
+
+-- Whether @p headers already names @p want, in any case: the app's own
+-- "idempotency-key" was sent beside the row's "Idempotency-Key" as two
+-- headers (audit 23).
+local function has_header(headers, want)
+    want = want:lower()
+    for k in pairs(headers) do
+        if type(k) == "string" and k:lower() == want then return true end
+    end
+    return false
+end
 local time = require("hull.time")
 
 local outbox = {}
@@ -173,7 +184,7 @@ local function deliver_item(item)
         -- drop a repeat: the row's idempotency key, unless the app set the
         -- header itself.
         if type(item.idempotency_key) == "string" and item.idempotency_key ~= ""
-           and req_headers["Idempotency-Key"] == nil then
+           and not has_header(req_headers, "Idempotency-Key") then
             req_headers["Idempotency-Key"] = item.idempotency_key
         end
 
