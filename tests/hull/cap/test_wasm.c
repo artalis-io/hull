@@ -3803,6 +3803,36 @@ UTEST(hl_cap_wasm, built_binary_does_not_load_modules_from_disk)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* Audit 24: the dev fallback opened <app_dir>/compute/<name>.wasm with a
+ * plain fopen - a symlink was followed out of the app tree and a FIFO
+ * blocked the loop. It opens under the app root now: neither loads. */
+UTEST(hl_cap_wasm, dev_disk_module_is_opened_under_the_app_root)
+{
+    char dir[512], outside[512];
+    ASSERT_EQ(mk_compute_app(dir, sizeof dir), 0);
+    ASSERT_EQ(mk_compute_app(outside, sizeof outside), 0);
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, none, dir);
+    char p[700], target[700];
+    snprintf(p, sizeof p, "%s/compute/echo.wasm", dir);
+    snprintf(target, sizeof target, "%s/compute/echo.wasm", outside);
+
+    ASSERT_EQ(unlink(p), 0);
+    ASSERT_EQ(symlink(target, p), 0);
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_NOT_FOUND);
+    hl_cap_wasm_destroy(&cache);
+
+    ASSERT_EQ(unlink(p), 0);
+    ASSERT_EQ(mkfifo(p, 0600), 0);   /* no writer: a blocking open hangs */
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, dir), HL_WASM_ERR_NOT_FOUND);
+    hl_cap_wasm_destroy(&cache);
+    unlink(p);
+}
+
 /* Under --verify-sig (the disk gate armed) only a signed module, with its
  * signed bytes, loads from disk; a planted AOT artifact is never read (no AOT
  * is loaded from disk, audit 19), so the signed .wasm runs. */
