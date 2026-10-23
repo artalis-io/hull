@@ -442,6 +442,13 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, url);
         return JS_ThrowTypeError(ctx, "host not in allowlist");
     }
+    /* wss:// takes the client TLS config http.fetch uses (audit 24: Keel
+     * needs cfg->tls for it and NULL was passed, so every wss:// failed). */
+    if (parsed.is_https && !js->base.http_cfg->tls) {
+        JS_FreeCString(ctx, url);
+        return JS_ThrowTypeError(ctx, "ws.connect: wss:// needs TLS, and this "
+                                      "process has no client TLS configuration");
+    }
 #else
     /* Without HL_ENABLE_HTTP_CLIENT the host allowlist function isn't
      * compiled in. ws.connect on a server-only build can't dial out
@@ -524,8 +531,15 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
         .on_error = js_ws_client_on_error,
     };
 
+    /* Keel keeps the tls pointer for the connection's life; the runtime's
+     * client TLS config outlives every client (teardown stops them first). */
+    KlWsClientConfig wcfg;
+    memset(&wcfg, 0, sizeof wcfg);
+#ifdef HL_ENABLE_HTTP_CLIENT
+    wcfg.tls = parsed.is_https ? js->base.http_cfg->tls : NULL;
+#endif
     KlWsClientConn *client = kl_ws_client_connect(
-        &js->server->ev, &js->server->alloc_storage, NULL, url, &cbs, ud);
+        &js->server->ev, &js->server->alloc_storage, &wcfg, url, &cbs, ud);
 
     JS_FreeCString(ctx, url);
 

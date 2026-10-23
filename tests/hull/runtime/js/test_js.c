@@ -13112,4 +13112,39 @@ UTEST(js_audit24, an_own_then_on_mains_promise_does_not_settle_main)
     be->free(loop);
 }
 
+/* Audit 24: ws.connect passed Keel no config, so every wss:// failed with a
+ * generic error. It takes the client TLS config http.fetch uses now, and with
+ * none says so up front (the allowlist still runs first). */
+UTEST(js_audit24, wss_connect_needs_the_client_tls_config)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const char *hosts[] = { "ws.example" };
+    HlHttpConfig cfg = {0};
+    cfg.allowed_hosts = hosts;
+    cfg.count = 1;
+    js.base.http_cfg = &cfg;
+    static const struct { const char *url; const char *msg; } cases[] = {
+        { "wss://ws.example/x",    "wss:// needs TLS" },
+        { "wss://other.example/x", "not in allowlist" },
+        { "ws://ws.example/x",     "requires running server" },
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { wsClient as ws } from 'hull:web:ws-client';\n"
+                 "let r = 0;\n"
+                 "try { ws.connect('%s', {}); r = 2; } catch (e) {\n"
+                 "  r = String(e.message).includes('%s') ? 1 : 3; }\n"
+                 "globalThis.__wss = r;\n", cases[i].url, cases[i].msg);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<wss>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__wss|0"), 1, cases[i].url);
+    }
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();
