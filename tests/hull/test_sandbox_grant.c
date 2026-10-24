@@ -229,4 +229,109 @@ UTEST(sandbox_grant, db_path_only_for_file_schemes)
     EXPECT_STREQ("./x://y.db", hl_sandbox_db_path("./x://y.db"));
 }
 
-UTEST_MAIN();
+/* Audit 25: the app.main runner did not grant outbound network for a network
+ * -d DSN, as serve.c did; both now go through one helper. */
+UTEST(sandbox_grant, default_dsn_grants_outbound_only_when_it_dials)
+{
+    HlSandboxPolicy p;
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    EXPECT_EQ(p.network_outbound, 0);
+
+    hl_sandbox_policy_add_default_dsn(&p, NULL);
+    EXPECT_EQ(p.network_outbound, 0);
+    hl_sandbox_policy_add_default_dsn(&p, "data.db");
+    EXPECT_EQ(p.network_outbound, 0);
+    hl_sandbox_policy_add_default_dsn(&p, ":memory:");
+    EXPECT_EQ(p.network_outbound, 0);
+    hl_sandbox_policy_add_default_dsn(&p, "sqlite:///srv/a.db");
+    EXPECT_EQ(p.network_outbound, 0);
+
+    hl_sandbox_policy_add_default_dsn(&p, "postgres://u:p@db/app");
+    EXPECT_EQ(p.network_outbound, 1);
+
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    hl_sandbox_policy_add_default_dsn(&p, "$DATABASE_URL");
+    EXPECT_EQ(p.network_outbound, 1);
+
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    hl_sandbox_policy_add_default_dsn(&p, "mysql://db/app");
+    EXPECT_EQ(p.network_outbound, 1);
+}
+
+/* Audit 25: a TUI's terminal grant names only real tty device paths. */
+UTEST(sandbox_tty, path_validation)
+{
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/ttys003"), 1);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/ttyp0"), 1);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/tty"), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok(NULL), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok(""), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/pts/3"), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/ttys003/../disk0"), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/ttys\"))(allow default"), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/ttys 1"), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/ttyaaaaaaaaaaaaaaaaaaaa"), 0);
+    EXPECT_EQ(hl_sandbox_tty_path_ok("/dev/console"), 0);
+}
+
+UTEST(sandbox_tty, own_ttys_are_valid_and_unique)
+{
+    char out[HL_SANDBOX_TTY_MAX][HL_SANDBOX_TTY_PATH_MAX];
+    int n = hl_sandbox_own_ttys(out);
+    ASSERT_TRUE(n >= 0 && n <= HL_SANDBOX_TTY_MAX);
+    for (int i = 0; i < n; i++) {
+        EXPECT_EQ(hl_sandbox_tty_path_ok(out[i]), 1);
+        for (int j = 0; j < i; j++)
+            EXPECT_STRNE(out[i], out[j]);
+    }
+}
+
+#if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
+/* Audit 25: the macOS TUI profile granted every /dev/ttys[0-9]+ and an
+ * unrestricted file-ioctl. It now names /dev/tty and the process's own
+ * terminals, each by literal param, and ioctl only on those. */
+UTEST(sandbox_tty, seatbelt_profile_names_only_own_ttys)
+{
+    static char buf[8192];
+    const char *params[256];
+    HlSandboxPolicy p;
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    p.tui = 1;
+
+    const char *ttys[] = { "/dev/ttys004", "/dev/ttys\")(allow default" };
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, ttys, 2, buf, sizeof buf,
+                                                   params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "regex") == NULL);
+    EXPECT_TRUE(strstr(buf, "ttys") == NULL);   /* never interpolated */
+    EXPECT_TRUE(strstr(buf, "(allow file-ioctl)") == NULL);
+    EXPECT_TRUE(strstr(buf, "(allow file-ioctl (literal \"/dev/tty\") "
+                            "(literal (param \"TTY_0\")))") != NULL);
+    EXPECT_TRUE(strstr(buf, "(allow file-read* file-write* (literal \"/dev/tty\") "
+                            "(literal (param \"TTY_0\")))") != NULL);
+    EXPECT_TRUE(strstr(buf, "TTY_1") == NULL);   /* the bad path is dropped */
+
+    int found = 0;
+    for (int i = 0; params[i]; i += 2) {
+        if (strcmp(params[i], "TTY_0") == 0) {
+            EXPECT_STREQ(params[i + 1], "/dev/ttys004");
+            found = 1;
+        }
+        EXPECT_STRNE(params[i], "TTY_1");
+    }
+    EXPECT_EQ(found, 1);
+
+    /* No terminal: /dev/tty alone. */
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, NULL, 0, buf, sizeof buf,
+                                                   params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "(allow file-ioctl (literal \"/dev/tty\"))") != NULL);
+
+    /* Not a TUI: no terminal grant at all. */
+    p.tui = 0;
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, ttys, 1, buf, sizeof buf,
+                                                   params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "/dev/tty\"") == NULL);
+    EXPECT_TRUE(strstr(buf, "TTY_0") == NULL);
+}
+#endif
+
+UTEST_MAIN()

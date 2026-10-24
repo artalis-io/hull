@@ -1941,8 +1941,8 @@ static int hl_serve_apply_sandbox(HlServerState *s)
          * hl_sandbox_policy_from_manifest can't see it. A `-d postgres://...`
          * (or `-d $DATABASE_URL`) app needs outbound network to reach its DB;
          * grant it here so a DB-only app isn't SIGKILLed on connect. */
-        if (!s->cfg.no_db && hl_sandbox_dsn_is_network(s->cfg.db_path))
-            sandbox_policy.network_outbound = 1;
+        hl_sandbox_policy_add_default_dsn(&sandbox_policy,
+                                          s->cfg.no_db ? NULL : s->cfg.db_path);
 
         /* CLI-mode apps (app.main registered) never accept inbound
          * connections - narrow the sandbox accordingly. The runtime
