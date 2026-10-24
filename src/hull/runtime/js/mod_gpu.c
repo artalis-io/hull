@@ -648,6 +648,12 @@ static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
     if (rc != HL_GPU_OK)
         return JS_ThrowInternalError(ctx, "gpu.bufferRead failed");
 
+    /* As textureRead: 1 unit per 8 bytes before the copy (audit 26). */
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)len)) < 0) {
+        free(data);
+        return JS_EXCEPTION;
+    }
+
     JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len);
     free(data);
     return ab;
@@ -911,6 +917,13 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
 
     if (rc != HL_GPU_OK)
         return JS_ThrowInternalError(ctx, "gpu.textureRead failed");
+
+    /* The read-back and its copy into the image: 1 unit per 8 bytes, before
+     * the copy (audit 26). */
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)len)) < 0) {
+        free(data);
+        return JS_EXCEPTION;
+    }
 
     /* Create HlImage, then wrap as JS object */
     HlImageAlloc ia;

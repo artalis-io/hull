@@ -1049,8 +1049,12 @@ static int require_impl(lua_State *L, int trusted)
                     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
                     lua_getfield(L, -1, "decode");
                     lua_remove(L, -2); /* remove json table */
-                    lua_pushlstring(L, buf, nread);
+                    /* Protected (audit 26): a LUA_ERRMEM longjmp out of
+                     * a plain push left the arena advanced. */
+                    int pushed = hl_lua_pushlstring_safe(L, buf, nread);
                     lua->scratch->used = arena_saved;
+                    if (pushed != 0)
+                        return luaL_error(L, "out of memory loading: %s", path);
                     if (lua_pcall(L, 1, 1, 0) != LUA_OK)
                         return lua_error(L);
 
