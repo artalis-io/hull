@@ -5109,6 +5109,21 @@ UTEST(lua_stdlib, stdlib_audit25_suite)
     cleanup_lua_caps();
 }
 
+/* Stdlib regressions from audit 26: safe_url raw output, Lua template dot
+ * paths (rawget, no functions), search snippet / highlight escaping. */
+UTEST(lua_stdlib, stdlib_audit26_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit26.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
 /* The csrf middleware's own suite (generate / verify, and audit 22's
  * mixed-case header_name). It sat under web/middleware/tests unrun. */
 UTEST(lua_stdlib, csrf_suite)

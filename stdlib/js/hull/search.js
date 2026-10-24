@@ -247,9 +247,32 @@ function remove(name, id) {
  * @param {{column:number,tokens:number,before:string,after:string,ellipsis:string}}
  *                 [opts.snippet]
  * @param {{column:number,before:string,after:string}} [opts.highlight]
+ *   The indexed text in `snippet` / `highlight` is HTML-escaped; only the
+ *   before / after / ellipsis markers are inserted as given, so the result
+ *   is safe to render raw (audit 26).
  * @param {("rank"|"rowid")} [opts.order="rank"]
  * @returns {Array<{id:any, rank:number, snippet?:string, highlight?:string}>}
  */
+// snippet() / highlight() return the INDEXED text, unescaped, with the
+// markers spliced in: a document holding `<img src=x onerror=...>` came back
+// as markup, and the `<b>` default forced apps to render the result raw
+// (stored XSS; audit 26). So FTS5 is handed private-use sentinels as the
+// markers, the text is HTML-escaped, and the sentinels are then replaced by
+// the caller's before / after / ellipsis (app-chosen, trusted markup). A
+// document that itself contains U+E000-U+E002 gets an extra caller marker
+// there - still only the app's own markup, though it can unbalance tags.
+const MARK_BEFORE = "", MARK_AFTER = "", MARK_ELLIPSIS = "";
+
+function escapeMarked(text, before, after, ellipsis) {
+    if (typeof text !== "string") return text;
+    return text.replace(/[&<>"'-]/g, (c) =>
+        c === MARK_BEFORE ? before
+            : c === MARK_AFTER ? after
+            : c === MARK_ELLIPSIS ? (ellipsis === null ? c : ellipsis)
+            : c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;"
+            : c === "\"" ? "&quot;" : "&#39;");
+}
+
 function query(name, q, opts) {
     requireSqlite();
     validateIdent(name, "index name");
@@ -285,19 +308,22 @@ function query(name, q, opts) {
     let selectCols = "id, rank";
     let snippetParams = null;
     let highlightParams = null;
+    let snippetMarks = null;
+    let highlightMarks = null;
 
     if (o.snippet) {
         const s = o.snippet;
         const sCol = Number(s.column !== undefined ? s.column : 0);
         if (!Number.isInteger(sCol) || sCol < 0)
             throw new Error("search: snippet column must be a non-negative integer");
-        const sBefore = s.before || "<b>";
-        const sAfter = s.after || "</b>";
-        const sEllipsis = s.ellipsis || "...";
+        const sBefore = String(s.before || "<b>");
+        const sAfter = String(s.after || "</b>");
+        const sEllipsis = String(s.ellipsis || "...");
         const sTokens = s.tokens !== undefined ? s.tokens : 32;
         selectCols += ", snippet(" + table + ", " + sCol +
             ", ?, ?, ?, ?) AS snippet";
-        snippetParams = [sBefore, sAfter, sEllipsis, sTokens];
+        snippetParams = [MARK_BEFORE, MARK_AFTER, MARK_ELLIPSIS, sTokens];
+        snippetMarks = [sBefore, sAfter, sEllipsis];
     }
 
     if (o.highlight) {
@@ -305,11 +331,12 @@ function query(name, q, opts) {
         const hCol = Number(h.column !== undefined ? h.column : 0);
         if (!Number.isInteger(hCol) || hCol < 0)
             throw new Error("search: highlight column must be a non-negative integer");
-        const hBefore = h.before || "<b>";
-        const hAfter = h.after || "</b>";
+        const hBefore = String(h.before || "<b>");
+        const hAfter = String(h.after || "</b>");
         selectCols += ", highlight(" + table + ", " + hCol +
             ", ?, ?) AS highlight";
-        highlightParams = [hBefore, hAfter];
+        highlightParams = [MARK_BEFORE, MARK_AFTER];
+        highlightMarks = [hBefore, hAfter];
     }
 
     let orderBy = "rank";
@@ -342,8 +369,9 @@ function query(name, q, opts) {
     // returns no rows, with the reason as `.error` on the array, where it
     // used to throw (a 500 for any search box fed "foo AND"). Other errors
     // still throw.
+    let rows;
     try {
-        return db.query(sql, params);
+        rows = db.query(sql, params);
     } catch (e) {
         const msg = String(e && e.message !== undefined ? e.message : e);
         if (/fts5:|syntax error|no such column|unterminated|malformed MATCH/.test(msg)) {
@@ -353,6 +381,18 @@ function query(name, q, opts) {
         }
         throw e;
     }
+    if (snippetMarks || highlightMarks) {
+        for (let k = 0; k < rows.length; k++) {
+            const row = rows[k];
+            if (snippetMarks)
+                row.snippet = escapeMarked(row.snippet, snippetMarks[0],
+                                           snippetMarks[1], snippetMarks[2]);
+            if (highlightMarks)
+                row.highlight = escapeMarked(row.highlight, highlightMarks[0],
+                                             highlightMarks[1], null);
+        }
+    }
+    return rows;
 }
 
 /**
