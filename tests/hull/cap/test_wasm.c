@@ -331,6 +331,32 @@ static const HlEntry test_entries[] = {
     { 0, 0, 0 }
 };
 
+/* Audit 26: a guest's LOG message went to the log with CR / LF raw. */
+UTEST(hl_cap_wasm, log_escape_controls)
+{
+    char out[64];
+    const char msg[] = "a\nb\rc\x01" "d\x7f" "e";
+    size_t n = hl_cap_wasm_log_escape(msg, sizeof msg - 1, out, sizeof out);
+    ASSERT_STREQ("a\\nb\\rc\\x01d\\x7fe", out);
+    ASSERT_EQ(strlen(out), n);
+    /* An embedded NUL no longer cuts the message short. */
+    const char nul[] = { 'x', '\0', 'y' };
+    hl_cap_wasm_log_escape(nul, 3, out, sizeof out);
+    ASSERT_STREQ("x\\x00y", out);
+    /* UTF-8 passes through. */
+    hl_cap_wasm_log_escape("\xc3\xa9", 2, out, sizeof out);
+    ASSERT_STREQ("\xc3\xa9", out);
+}
+
+UTEST(hl_cap_wasm, log_escape_truncates)
+{
+    char out[8];
+    hl_cap_wasm_log_escape("\n\n\n\n\n\n", 6, out, sizeof out);
+    ASSERT_TRUE(strlen(out) < sizeof out);
+    ASSERT_TRUE(strstr(out, "...") != NULL);
+    ASSERT_TRUE(strchr(out, '\n') == NULL);
+}
+
 UTEST(hl_cap_wasm, init_destroy)
 {
     HlWasmCache cache;

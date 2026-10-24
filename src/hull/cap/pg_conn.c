@@ -277,6 +277,19 @@ static int pg_wait_stop(void *ud)
     return hl_db_budget_charge(0) != 0;
 }
 
+/* Bound on the whole read that finishes a tripped run's COMMIT reply: the
+ * DSN's ?read_timeout=, but never more than this (and this when it is 0). */
+#define HL_PG_FINISH_MAX_MS 2000
+
+/* What is left of the finishing bound, -1 once it has passed (never 0). */
+static int pg_finish_left(HlPgConn *conn)
+{
+    int bound = HL_PG_FINISH_MAX_MS;
+    if (conn->read_timeout_ms > 0 && conn->read_timeout_ms < bound)
+        bound = conn->read_timeout_ms;
+    return hl_db_transport_time_left(&conn->finish_started, bound);
+}
+
 /* Read one frame. The returned body is valid until the next call, which
  * compacts the previously-consumed bytes. Returns 0 / -1. */
 static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
@@ -336,6 +349,16 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
                     "read failed or timed out (see ?read_timeout=)");
             return -1;
         }
+        /* Finishing a tripped run's COMMIT reply asks no budget, so its whole
+         * read is held to a short absolute bound instead (audit 26): a server
+         * that stalled between CommandComplete and ReadyForQuery held the
+         * loop for ?read_timeout= (300 s; for ever with 0). On expiry the
+         * connection is abandoned, tx_status still 'T': refuse until ROLLBACK. */
+        if (conn->finishing) {
+            int fleft = pg_finish_left(conn);
+            if (fleft < 0) { pg_abandon(conn); return -1; }
+            if (left == 0 || fleft < left) left = fleft;
+        }
         int wr = hl_db_transport_wait_readable(conn->transport, left,
                                                conn->finishing ? NULL : pg_wait_stop,
                                                NULL);
@@ -354,6 +377,7 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
                                           NULL)
             : -1;
         if (n == -2) { pg_abandon(conn); return -1; }
+        if (n < 0 && conn->finishing) { pg_abandon(conn); return -1; }
         if (n <= 0) {
             conn->broken = 1;
             set_err(conn->errmsg, sizeof conn->errmsg,
@@ -1304,6 +1328,7 @@ static int pg_reply_charge(HlPgConn *conn, const HlPgFrame *f)
     if (f->type == HL_PG_B_CMD_COMPLETE && f->body_len >= 6 &&
         memcmp(f->body, "COMMIT", 6) == 0) {
         conn->finishing = 1;
+        conn->finish_started = 0;   /* the bound starts at the next read */
         return 0;
     }
     pg_abandon(conn);

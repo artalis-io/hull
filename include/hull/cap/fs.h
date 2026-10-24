@@ -87,6 +87,11 @@ int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
  * set and could not be cleared. */
 int hl_fs_strip_setid(int fd);
 
+/* Whether a failed fchmod in hl_fs_strip_setid still lets the write go on:
+ * only EPERM for a non-root writer (it does not own the file; the kernel
+ * clears the bits on its write). Root always fails closed (audit 26). */
+int hl_fs_setid_fchmod_failure_ok(int err, int euid_is_root);
+
 /**
  * @brief Read a file's full contents into a caller-supplied buffer.
  *

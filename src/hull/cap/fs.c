@@ -193,10 +193,18 @@ int hl_cap_fs_open_read_fd(const HlFsConfig *cfg, const char *path,
     return fs_resolve_fd(cfg, path, HL_FS_OPEN_READ, 0, err_msg);
 }
 
+int hl_fs_setid_fchmod_failure_ok(int err, int euid_is_root)
+{
+    return err == EPERM && !euid_is_root;
+}
+
 /* Drop setuid / setgid from a file about to get new content. The kernel
  * clears them on a write only when the writer lacks CAP_FSETID, so a Hull run
  * as root kept them - a setuid executable of the app's choosing (audit 23).
- * -1 when they are set and cannot be cleared: the caller must not write. */
+ * -1 when they are set and cannot be cleared: the caller must not write.
+ * A non-root writer of a file it does not own cannot fchmod it (EPERM) and
+ * may still write it (audit 26: refusing regressed such writes): the kernel
+ * clears the bits on its write, and they confer nothing on that writer. */
 int hl_fs_strip_setid(int fd)
 {
     struct stat st;
@@ -204,7 +212,9 @@ int hl_fs_strip_setid(int fd)
         return -1;
     if (!(st.st_mode & (S_ISUID | S_ISGID)))
         return 0;
-    return fchmod(fd, st.st_mode & 01777) == 0 ? 0 : -1;
+    if (fchmod(fd, st.st_mode & 01777) == 0)
+        return 0;
+    return hl_fs_setid_fchmod_failure_ok(errno, geteuid() == 0) ? 0 : -1;
 }
 
 /* Every in-place writer opens through here or fs_write_in_place, so neither

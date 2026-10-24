@@ -111,6 +111,74 @@ static void redirect_refused(const char *next_url, const char *reason,
     log_warn("[hull:http] %s", msg);
 }
 
+int hl_http_header_redirect_safe(const char *name)
+{
+    /* Content negotiation and cache validators carry nothing a server could
+     * use as a credential; Authorization / Cookie / Proxy-Authorization are
+     * dropped by Keel itself on a cross-origin hop. Anything else - an
+     * X-Api-Key, a request signature, a tenant token - would be re-sent to
+     * the next origin as is. */
+    static const char *const safe[] = {
+        "accept", "accept-language", "accept-encoding", "user-agent",
+        "content-type", "content-language", "cache-control", "pragma",
+        "if-none-match", "if-modified-since", "if-match",
+        "if-unmodified-since", "if-range", "range",
+        "authorization", "cookie", "proxy-authorization", NULL
+    };
+    if (!name) return 0;
+    for (int i = 0; safe[i]; i++)
+        if (strcasecmp(name, safe[i]) == 0) return 1;
+    return 0;
+}
+
+void hl_http_redirect_guard_init(HlHttpRedirectGuard *g,
+                                 const HlHttpConfig *cfg, const KlUrl *origin,
+                                 const HlHttpHeader *headers, int num_headers,
+                                 size_t body_len)
+{
+    memset(g, 0, sizeof *g);
+    g->cfg = cfg;
+    if (!origin) {
+        g->carries_secrets = 1;   /* no origin to compare: every hop moves */
+        return;
+    }
+    g->origin_https = origin->is_https;
+    g->origin_unix  = origin->is_unix;
+    g->origin_port  = origin->port;
+    const char *h = origin->is_unix ? origin->unix_path : origin->host;
+    size_t hl = origin->is_unix ? strlen(origin->unix_path) : origin->host_len;
+    if (hl < sizeof g->origin_host && (h || hl == 0)) {
+        if (hl) memcpy(g->origin_host, h, hl);
+        g->origin_host[hl] = '\0';
+        g->origin_len   = hl;
+        g->origin_known = 1;
+    }
+    if (body_len > 0)
+        g->carries_secrets = 1;
+    for (int i = 0; headers && i < num_headers; i++)
+        if (!hl_http_header_redirect_safe(headers[i].name))
+            g->carries_secrets = 1;
+}
+
+/* 1 when @p next is the guard's first origin. An http -> https upgrade to the
+ * same host on the default ports counts as the same server: what it carries
+ * went out in cleartext already, and the next hop only encrypts it. */
+static int redirect_same_origin(const HlHttpRedirectGuard *g, const KlUrl *next)
+{
+    if (!g->origin_known || g->origin_unix != next->is_unix)
+        return 0;
+    if (g->origin_unix)
+        return strcmp(g->origin_host, next->unix_path) == 0 &&
+               g->origin_https == next->is_https;
+    if (next->host_len != g->origin_len ||
+        (g->origin_len && strncasecmp(g->origin_host, next->host,
+                                      g->origin_len) != 0))
+        return 0;
+    if (g->origin_https == next->is_https)
+        return g->origin_port == next->port;
+    return !g->origin_https && g->origin_port == 80 && next->port == 443;
+}
+
 int hl_http_redirect_allowed(const char *next_url, void *data)
 {
     const HlHttpRedirectGuard *g = (const HlHttpRedirectGuard *)data;
@@ -124,6 +192,16 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
     if (g->origin_https && !parsed.is_https) {
         redirect_refused(next_url, "downgrade",
                          "redirect from https to http refused");
+        return -1;
+    }
+    /* Audit 26: Keel re-sends a 307 / 308 body and every header but
+     * Authorization / Cookie / Proxy-Authorization to the next origin, so a
+     * request carrying either may not leave its first origin, even for an
+     * allowed host. */
+    if (g->carries_secrets && !redirect_same_origin(g, &parsed)) {
+        redirect_refused(next_url, "cross_origin",
+                         "cross-origin redirect refused: the request carries "
+                         "a body or a header that would be re-sent there");
         return -1;
     }
     return 0;
@@ -253,11 +331,12 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     int rc;
     if (cfg->follow_redirects) {
         HlHttpSyncChain chain = {
-            .guard       = { .cfg = cfg, .origin_https = parsed.is_https },
             .kl_cfg      = &kl_cfg,
             .deadline_ms = kl_monotonic_ms() + (uint64_t)timeout,
             .timed_out   = 0,
         };
+        hl_http_redirect_guard_init(&chain.guard, cfg, &parsed,
+                                    headers, num_headers, body_len);
         KlHttpRedirectConfig redir = {
             .max_redirects    = hl_http_max_redirects(cfg->max_redirects),
             .on_redirect      = hl_http_sync_redirect_hop,
