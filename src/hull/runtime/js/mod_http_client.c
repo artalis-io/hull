@@ -16,6 +16,7 @@
 #include <keel/http_server.h>
 
 #include <limits.h>
+#include <stdint.h>
 
 static void js_free_http_headers(JSContext *ctx, HlHttpHeader *hdrs, int count);
 
@@ -173,6 +174,60 @@ static int js_http_timeout_opt(JSContext *ctx, int argc, JSValueConst *argv,
     return 0;
 }
 
+/* A request body: a string (sent as its UTF-8 bytes), an ArrayBuffer or a
+ * typed array (its bytes, copied at once - a later getter could
+ * detach or resize the buffer), or undefined / null (no body). Anything else
+ * is a TypeError: it was dropped silently, and the request went out with no
+ * body (audit 25). */
+typedef struct {
+    const char *p;
+    size_t      len;
+    int         kind;   /* 0 none, 1 JS_ToCStringLen, 2 malloc'd copy */
+} JsHttpBody;
+
+static void js_http_body_free(JSContext *ctx, JsHttpBody *b)
+{
+    if (b->kind == 1) JS_FreeCString(ctx, b->p);
+    else if (b->kind == 2) free((void *)(uintptr_t)b->p);
+    b->p = NULL;
+    b->len = 0;
+    b->kind = 0;
+}
+
+/* 0, or -1 with an exception pending (the conversion's own - the budget's
+ * interrupt, out of memory - or the TypeError). */
+static int js_http_body_get(JSContext *ctx, JSValueConst v, JsHttpBody *b,
+                            const char *fn)
+{
+    b->p = NULL;
+    b->len = 0;
+    b->kind = 0;
+    if (JS_IsUndefined(v) || JS_IsNull(v)) return 0;
+    if (JS_IsString(v)) {
+        b->p = JS_ToCStringLen(ctx, &b->len, v);
+        if (!b->p) return -1;
+        b->kind = 1;
+        return 0;
+    }
+    size_t n = 0;
+    const uint8_t *view = hl_js_bytes_view(ctx, &n, v);
+    if (view) {
+        char *copy = malloc(n ? n : 1);
+        if (!copy) {
+            JS_ThrowOutOfMemory(ctx);
+            return -1;
+        }
+        if (n) memcpy(copy, view, n);
+        b->p = copy;
+        b->len = n;
+        b->kind = 2;
+        return 0;
+    }
+    JS_ThrowTypeError(ctx, "%s: body must be a string, ArrayBuffer or typed "
+                      "array", fn);
+    return -1;
+}
+
 /* http.request(method, url, opts?) */
 static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
@@ -199,6 +254,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
 
     const char *body = NULL;
     size_t body_len = 0;
+    JsHttpBody jbody = {0};
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
 
@@ -208,11 +264,10 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         /* A throwing getter (or a failed conversion) fails the call: the
          * request went out with no body and the exception pending (audit
          * 23). */
-        int body_failed = JS_IsException(body_val);
-        if (JS_IsString(body_val)) {
-            body = JS_ToCStringLen(ctx, &body_len, body_val);
-            if (!body) body_failed = 1;
-        }
+        int body_failed = JS_IsException(body_val) ||
+            js_http_body_get(ctx, body_val, &jbody, "http.request") != 0;
+        body = jbody.p;
+        body_len = jbody.len;
         JS_FreeValue(ctx, body_val);
         if (body_failed) {
             JS_FreeCString(ctx, method);
@@ -229,7 +284,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         if (hrc != 0) {
             JS_FreeCString(ctx, method);
             JS_FreeCString(ctx, url);
-            if (body) JS_FreeCString(ctx, body);
+            js_http_body_free(ctx, &jbody);
             return JS_EXCEPTION;
         }
     }
@@ -242,8 +297,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
 
     JS_FreeCString(ctx, method);
     JS_FreeCString(ctx, url);
-    // cppcheck-suppress knownConditionTrueFalse
-    if (body) JS_FreeCString(ctx, body);
+    js_http_body_free(ctx, &jbody);
     js_free_http_headers(ctx, headers, num_headers);
 
     if (rc != 0)
@@ -326,10 +380,16 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url) return JS_EXCEPTION;
 
-    const char *body = NULL;
-    size_t body_len = 0;
-    if (argc >= 2 && JS_IsString(argv[1]))
-        body = JS_ToCStringLen(ctx, &body_len, argv[1]);
+    /* A failed conversion (the budget's interrupt, out of memory) fails the
+     * call: the request went out with an empty body (audit 25). */
+    JsHttpBody jbody = {0};
+    if (argc >= 2 && js_http_body_get(ctx, argv[1], &jbody,
+                                      "http.post/put/patch") != 0) {
+        JS_FreeCString(ctx, url);
+        return JS_EXCEPTION;
+    }
+    const char *body = jbody.p;
+    size_t body_len = jbody.len;
 
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
@@ -342,7 +402,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
         JS_FreeValue(ctx, hdrs_val);
         if (hrc != 0) {
             JS_FreeCString(ctx, url);
-            if (body) JS_FreeCString(ctx, body);
+            js_http_body_free(ctx, &jbody);
             return JS_EXCEPTION;
         }
     }
@@ -353,8 +413,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
     int rc = hl_cap_http_request(js->base.http_cfg, timeout_ms, method_name, url,
                                     headers, num_headers, body, body_len, &resp);
     JS_FreeCString(ctx, url);
-    // cppcheck-suppress knownConditionTrueFalse
-    if (body) JS_FreeCString(ctx, body);
+    js_http_body_free(ctx, &jbody);
     js_free_http_headers(ctx, headers, num_headers);
 
     if (rc != 0)
@@ -503,6 +562,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
 
     const char *body = NULL;
     size_t body_len = 0;
+    JsHttpBody jbody = {0};
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
 
@@ -512,11 +572,10 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         /* A throwing getter (or a failed conversion) fails the call: the
          * request went out with no body and the exception pending (audit
          * 23). */
-        int body_failed = JS_IsException(body_val);
-        if (JS_IsString(body_val)) {
-            body = JS_ToCStringLen(ctx, &body_len, body_val);
-            if (!body) body_failed = 1;
-        }
+        int body_failed = JS_IsException(body_val) ||
+            js_http_body_get(ctx, body_val, &jbody, "http.fetch") != 0;
+        body = jbody.p;
+        body_len = jbody.len;
         JS_FreeValue(ctx, body_val);
         if (body_failed) {
             JS_FreeCString(ctx, method);
@@ -533,7 +592,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         if (hrc != 0) {   /* before anything is armed (audit 17) */
             JS_FreeCString(ctx, method);
             JS_FreeCString(ctx, url);
-            if (body) JS_FreeCString(ctx, body);
+            js_http_body_free(ctx, &jbody);
             return JS_EXCEPTION;
         }
     }
@@ -547,7 +606,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(promise)) {
         JS_FreeCString(ctx, method);
         JS_FreeCString(ctx, url);
-        if (body) JS_FreeCString(ctx, body);
+        js_http_body_free(ctx, &jbody);
         js_free_http_headers(ctx, headers, num_headers);
         return JS_EXCEPTION;
     }
@@ -562,7 +621,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, promise);
         JS_FreeCString(ctx, method);
         JS_FreeCString(ctx, url);
-        if (body) JS_FreeCString(ctx, body);
+        js_http_body_free(ctx, &jbody);
         js_free_http_headers(ctx, headers, num_headers);
         return JS_EXCEPTION;
     }
@@ -580,7 +639,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, promise);
         JS_FreeCString(ctx, method);
         JS_FreeCString(ctx, url);
-        if (body) JS_FreeCString(ctx, body);
+        js_http_body_free(ctx, &jbody);
         js_free_http_headers(ctx, headers, num_headers);
         if (over)
             return JS_ThrowRangeError(ctx, "http.fetch: a %zu-byte body would "
@@ -603,7 +662,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, promise);
         JS_FreeCString(ctx, method);
         JS_FreeCString(ctx, url);
-        if (body) JS_FreeCString(ctx, body);
+        js_http_body_free(ctx, &jbody);
         js_free_http_headers(ctx, headers, num_headers);
         return JS_ThrowInternalError(ctx, "http.fetch: out of memory");
     }
@@ -616,8 +675,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
 
     JS_FreeCString(ctx, method);
     JS_FreeCString(ctx, url);
-    // cppcheck-suppress knownConditionTrueFalse
-    if (body) JS_FreeCString(ctx, body);
+    js_http_body_free(ctx, &jbody);
     js_free_http_headers(ctx, headers, num_headers);
 
     if (!async_ctx) {
