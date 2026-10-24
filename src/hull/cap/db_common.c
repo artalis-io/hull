@@ -14,6 +14,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_budget.h"
 #include <stdatomic.h>
+#include <string.h>
 #include <strings.h>
 
 /* ── The calling run's budget (cap/db_budget.h) ────────────────────── */
