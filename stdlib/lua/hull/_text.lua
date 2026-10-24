@@ -44,6 +44,13 @@ local UNICODE_SPACE = {
     "\xE2\x81\x9F", "\xE3\x80\x80", "\xEF\xBB\xBF",
 }
 
+-- A C1 control character (U+0080-009F, encoded \xC2\x80-\xC2\x9F; NEL is
+-- U+0085): the address checks refuse them with the C0 ones, as the JS
+-- twins do (audit 26).
+function M.has_c1_control(s)
+    return s:find("\xC2[\x80-\x9F]") ~= nil
+end
+
 function M.has_unicode_space(s)
     for _, sp in ipairs(UNICODE_SPACE) do
         if s:find(sp) then return true end

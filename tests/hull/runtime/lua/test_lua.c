@@ -5124,6 +5124,22 @@ UTEST(lua_stdlib, stdlib_audit26_suite)
     cleanup_lua_caps();
 }
 
+/* Stdlib option validation from audit 26: audit_log retain_days,
+ * attachment max_size, search limit / offset, jobs max_attempts / cleanup
+ * before, idempotency / inbox ttl bounds, email C1 controls, htmx form. */
+UTEST(lua_stdlib, stdlib_options_audit26_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_options_audit26.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
 /* The csrf middleware's own suite (generate / verify, and audit 22's
  * mixed-case header_name). It sat under web/middleware/tests unrun. */
 UTEST(lua_stdlib, csrf_suite)

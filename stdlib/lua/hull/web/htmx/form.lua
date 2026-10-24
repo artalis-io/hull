@@ -75,6 +75,13 @@ local function error_id(name)
     return "hull-form-error-" .. safe
 end
 
+-- The field's own message (raw access, so an errors table with an __index
+-- metatable cannot supply one - the JS twin's own-property rule, audit 26).
+local function own_error(errors, name)
+    if type(errors) ~= "table" or name == nil then return nil end
+    return rawget(errors, name)
+end
+
 --- Render a whole-form error summary as an `<ul role="alert">`.
 --
 -- One `<li>` per failing field. `role="alert"` causes assistive
@@ -110,9 +117,10 @@ end
 -- @tparam string name    Field name to render the error for.
 -- @treturn string  `<span>...</span>` or "".
 function form.field_error(errors, name)
-    if not errors or not errors[name] then return "" end
+    local msg = own_error(errors, name)
+    if not msg then return "" end
     return '<span id="' .. error_id(name)
-        .. '" class="hull-form-error">' .. esc(errors[name]) .. '</span>'
+        .. '" class="hull-form-error">' .. esc(msg) .. '</span>'
 end
 
 --- Render the a11y attribute set to splice into an `<input>` tag.
@@ -125,7 +133,7 @@ end
 -- @tparam string name    Field name.
 -- @treturn string  Attribute string, ready for `| raw` splicing.
 function form.field_attrs(errors, name)
-    if not errors or not errors[name] then return "" end
+    if not own_error(errors, name) then return "" end
     return 'aria-invalid="true" aria-describedby="' .. error_id(name) .. '"'
 end
 

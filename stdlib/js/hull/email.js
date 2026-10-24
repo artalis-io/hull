@@ -239,8 +239,10 @@ providers.resend = async function(opts) {
 
 // One address: no control character, and none of the characters that
 // separate or quote addresses ("a@x.co,b" passed; an HTTP provider that
-// splits on commas mailed both). Lua parity.
-const ADDR_RE = /^[^\s\x00-\x1f\x7f@,;<>"()]+@[^\s\x00-\x1f\x7f@,;<>"()]+\.[^\s\x00-\x1f\x7f@,;<>"()]+$/;
+// splits on commas mailed both). Lua parity. The C1 controls (U+0080-009F)
+// are refused with the C0 ones: \s does not match U+0085 (NEL), a line
+// break to some mail software, which the Lua twin already refused (audit 26).
+const ADDR_RE = /^[^\s\x00-\x1f\x7f-\x9f@,;<>"()]+@[^\s\x00-\x1f\x7f-\x9f@,;<>"()]+\.[^\s\x00-\x1f\x7f-\x9f@,;<>"()]+$/;
 
 /**
  * Send an email via the selected provider.

@@ -80,8 +80,16 @@ function audit_log.init(opts)
               .. "rotating it invalidates existing fingerprints.")
     end
     _state.fingerprint_salt = opts.fingerprint_salt
+    -- retain_days: nil keeps the default (365). Anything else must be a
+    -- finite number in (0, 36500]: a cutoff of "now" deletes every row,
+    -- and a non-number broke pruning (audit 26).
     if opts.retain_days ~= nil then
-        _state.retain_days = opts.retain_days
+        local d = opts.retain_days
+        if math.type(d) == nil or d ~= d or d <= 0 or d > 36500 then
+            error("audit_log.init: retain_days must be a number in "
+                  .. "(0, 36500] (days); omit it for the default 365", 2)
+        end
+        _state.retain_days = d
     end
     _state.trust_proxy = opts.trust_proxy == true
     db.exec(
