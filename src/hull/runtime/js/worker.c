@@ -252,8 +252,11 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
  * property: assigned, a key naming an inherited property of the frozen
  * Object.prototype (`__defineGetter__`, `__lookupSetter__`, ...) threw and
  * left the exception pending into JS_Call, and `__proto__` set the object's
- * prototype instead of adding the key (audit 20). */
-static void push_kv_object(JSContext *ctx, JSValue obj,
+ * prototype instead of adding the key (audit 20). A value or key that cannot
+ * be made fails the job: it was dropped silently, the function running with
+ * part of its ctx missing (audit 26). Returns 0, or -1 with the exception
+ * pending. */
+static int push_kv_object(JSContext *ctx, JSValue obj,
                            const HlKV *kvs, int count)
 {
     for (int i = 0; i < count; i++) {
@@ -268,10 +271,12 @@ static void push_kv_object(JSContext *ctx, JSValue obj,
         case HL_TYPE_NIL:
         default:             v = JS_NULL; break;
         }
+        if (JS_IsException(v)) return -1;
         if (JS_DefinePropertyValueStr(ctx, obj, kvs[i].key, v,
                                       JS_PROP_C_W_E) < 0)
-            JS_FreeValue(ctx, JS_GetException(ctx));   /* out of memory */
+            return -1;
     }
+    return 0;
 }
 
 /* Take @p n bytes of the result copy from the VM's in-flight results:
@@ -546,8 +551,15 @@ static void js_dispatch_run(HlJsWorkerCtx *wctx, JSContext *ctx,
 
     /* Reconstruct ctx object from HlKV array */
     JSValue ctx_obj = JS_NewObject(ctx);
-    if (op->ctx_kvs && op->ctx_count > 0) {
-        push_kv_object(ctx, ctx_obj, op->ctx_kvs, op->ctx_count);
+    if (JS_IsException(ctx_obj) ||
+        (op->ctx_kvs && op->ctx_count > 0 &&
+         push_kv_object(ctx, ctx_obj, op->ctx_kvs, op->ctx_count) != 0)) {
+        JS_FreeValue(ctx, ctx_obj);
+        JS_FreeValue(ctx, eval_fn);
+        JSValue exc = JS_GetException(ctx);
+        js_dispatch_fail(wctx, ctx, op, exc);
+        JS_FreeValue(ctx, exc);
+        return;
     }
 
     /* Call fn(ctx) */

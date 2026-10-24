@@ -134,16 +134,31 @@ static int js_fixed_arg(JSContext *ctx, JSValueConst v, JsMsg *m, size_t want,
 }
 
 /* { publicKey, secretKey } as ArrayBuffers; the stack copy of the secret key
- * is scrubbed whichever way it goes. */
+ * is scrubbed whichever way it goes. A buffer that cannot be made fails the
+ * call (audit 26: it was stored unchecked, an object missing a key). */
 static JSValue js_keypair_object(JSContext *ctx, const uint8_t *pk, size_t pklen,
                                  uint8_t *sk, size_t sklen)
 {
     JSValue obj = JS_NewObject(ctx);
-    if (!JS_IsException(obj)) {
-        JS_DefinePropertyValueStr(ctx, obj, "publicKey", JS_NewArrayBufferCopy(ctx, pk, pklen), JS_PROP_C_W_E);
-        JS_DefinePropertyValueStr(ctx, obj, "secretKey", JS_NewArrayBufferCopy(ctx, sk, sklen), JS_PROP_C_W_E);
-    }
+    JSValue pkv = JS_IsException(obj) ? JS_EXCEPTION
+                                      : JS_NewArrayBufferCopy(ctx, pk, pklen);
+    JSValue skv = JS_IsException(pkv) ? JS_EXCEPTION
+                                      : JS_NewArrayBufferCopy(ctx, sk, sklen);
     secure_zero(sk, sklen);
+    if (JS_IsException(skv)) {
+        JS_FreeValue(ctx, pkv);
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+    if (JS_DefinePropertyValueStr(ctx, obj, "publicKey", pkv, JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, skv);
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+    if (JS_DefinePropertyValueStr(ctx, obj, "secretKey", skv, JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
     return obj;
 }
 
