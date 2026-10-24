@@ -477,6 +477,23 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
 
 typedef enum { MIG_LOCK_NONE = 0, MIG_LOCK_PG, MIG_LOCK_MY } MigLockKind;
 
+/* An embedded "migrations/<name>" entry that is a migration: a top-level
+ * .sql file, as discover_fs_migrations reads them in development. `hull
+ * build` embeds only those since audit 25, but a nested entry
+ * ("migrations/down/001.sql") must never run in a built binary when the
+ * same tree never ran it in dev / `hull test` / `hull migrate` (audit 25).
+ * Returns the name past the prefix, or NULL to skip the entry. */
+static const char *embedded_migration_name(const HlEntry *e)
+{
+    const char *name = e->name + 11; /* strip "migrations/" */
+    size_t len = strlen(name);
+    if (len < 5 || strcmp(name + len - 4, ".sql") != 0)
+        return NULL;
+    if (strchr(name, '/') || strchr(name, '\\'))
+        return NULL;
+    return name;
+}
+
 static MigLockKind mig_lock_kind(const HlDbHandle *h)
 {
     const char *n = h->backend ? h->backend->name : NULL;
@@ -573,7 +590,9 @@ static int migrate_run_locked(HlDbHandle *handle, const HlVfs *vfs)
     if (mig_count > 0) {
         int applied = 0;
         for (size_t i = 0; i < mig_count; i++) {
-            const char *mig_name = first[i].name + 11; /* strip "migrations/" */
+            const char *mig_name = embedded_migration_name(&first[i]);
+            if (!mig_name)
+                continue;
             int ia = is_applied(handle, mig_name, (const char *)first[i].data,
                                 first[i].len);
             if (ia < 0)
@@ -673,13 +692,25 @@ int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
         if (!names)
             return -1;
 
+        int kept = 0;
         for (int i = 0; i < count; i++) {
-            names[i] = strdup(first[i].name + 11); /* strip "migrations/" */
-            if (!names[i]) {
-                for (int j = 0; j < i; j++) free(names[j]);
+            const char *mig_name = embedded_migration_name(&first[i]);
+            if (!mig_name)
+                continue;
+            names[kept] = strdup(mig_name);
+            if (!names[kept]) {
+                for (int j = 0; j < kept; j++) free(names[j]);
                 free(names);
                 return -1;
             }
+            kept++;
+        }
+        count = kept;
+        if (count == 0) {
+            free(names);
+            *out = NULL;
+            *out_count = 0;
+            return 0;
         }
     } else {
         /* Discover from filesystem */

@@ -36,6 +36,11 @@ ifeq ($(HL_ENABLE_DB),0)
       $(TEST_SRCS))
 endif
 
+# The migration runner test opens SQLite (test_migrate.c, audit 25).
+ifneq ($(HL_ENABLE_SQLITE),1)
+  TEST_SRCS := $(filter-out %/test_migrate.c,$(TEST_SRCS))
+endif
+
 # Drop the image codec test when the image subsystem is compiled out; it
 # exercises hl_cap_image_* / stb directly and would fail to link.
 ifeq ($(HL_ENABLE_IMAGE),0)
@@ -824,6 +829,12 @@ endif
 $(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(STATIC_OBJ) $(TEST_COMMON_LIBS)
+
+# Migration runner + default-DB path check (audit 25) - migrate.o + the cap
+# layer (SQLite). Discovery drops it on a SQLite-less build (above).
+$(BUILDDIR)/test_migrate: $(TESTDIR)/hull/test_migrate.c $(MIGRATE_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
+		$(MIGRATE_OBJ) $(TEST_COMMON_LIBS)
 
 # VFS test - standalone module, no runtime deps
 $(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(SH_SEAL_ARENA_OBJ) | $(BUILDDIR)
