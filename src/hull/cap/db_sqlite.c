@@ -310,24 +310,40 @@ static int sqlite_in_txn(HlDbHandle *h)
  * fallback pattern so a 4 KB SQL string fits without heap, and longer
  * ones don't overflow the stack. */
 
-/* Conservative upper bound for a generated SQL string: every column
- * name contributes once for the column list, once for VALUES (with a
- * `?`), and in the upsert case once more for the DO UPDATE clause.
- * We cap each identifier at 63 chars (SQL standard) and add fixed
- * overhead for keywords. */
+/* Upper bound for a generated SQL string, from the identifiers' real
+ * lengths (as db_postgres.c's build_and_run_insert sizes it): every column
+ * name appears once in the column list with a "?, " in VALUES, the conflict
+ * columns once in ON CONFLICT(...), and in the upsert case every column
+ * twice more in "col=excluded.col, ". It assumed identifiers of at most 63
+ * bytes, so a longer name failed the build with no error message of its own
+ * - the caller read the connection's previous one (audit 25). 0 = overflow
+ * or a NULL name. */
 static size_t sqlite_estimate_sql_size(const char *table,
-                                        int n_conflict, int n_cols,
+                                        const char *const *conflict_cols,
+                                        int n_conflict,
+                                        const char *const *cols, int n_cols,
                                         int include_update)
 {
-    size_t per_ident = 64;       /* col name + comma + space */
-    size_t fixed = 200;          /* keywords, parens */
-    size_t cols_part = (size_t)n_cols * (per_ident + 4);   /* + "?, " */
-    size_t conflict_part = (size_t)n_conflict * per_ident;
-    size_t update_part = include_update
-        ? (size_t)n_cols * (per_ident * 2 + 16)  /* "col=excluded.col, " */
-        : 0;
-    return strlen(table) + fixed + cols_part + conflict_part + update_part;
+    const size_t lim = SIZE_MAX / 4;
+    size_t cap = 200 + strlen(table);           /* keywords, parens */
+    for (int i = 0; i < n_cols; i++) {
+        if (!cols[i]) return 0;
+        size_t l = strlen(cols[i]);
+        if (l > lim / 4 || cap > lim) return 0;
+        cap += (l + 2) + 3;                     /* "col, " + "?, " */
+        if (include_update) cap += 2 * l + 16;  /* "col=excluded.col, " */
+    }
+    for (int i = 0; i < n_conflict; i++) {
+        if (!conflict_cols || !conflict_cols[i]) return 0;
+        size_t l = strlen(conflict_cols[i]);
+        if (l > lim / 4 || cap > lim) return 0;
+        cap += l + 2;
+    }
+    return cap > lim ? 0 : cap;
 }
+
+static const char SQL_BUILD_MSG[] =
+    "could not build the statement (out of memory)";
 
 /* Append helper - bounded snprintf into an offset cursor. Returns
  * remaining capacity (or -1 on overflow). */
@@ -355,7 +371,10 @@ static int sqlite_insert_if_absent(HlDbHandle *h, const char *table,
      * which SQLite treats as "any constraint violation". */
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (sqlite_refuse_broken(s)) return -1;
-    size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 0);
+    s->own_err = SQL_BUILD_MSG;      /* until the statement runs */
+    size_t cap = sqlite_estimate_sql_size(table, conflict_cols, n_conflict,
+                                          cols, n_cols, 0);
+    if (cap == 0) return -1;
     char stack_buf[4096];
     char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
     if (!buf) return -1;
@@ -376,6 +395,7 @@ static int sqlite_insert_if_absent(HlDbHandle *h, const char *table,
     if (sqlite_append(buf, cap, &off, ")") < 0) goto done;
 
     rc = hl_cap_db_exec(&s->cache, buf, values, n_cols);
+    s->own_err = rc == HL_DB_ERR_REENTERED ? REENTERED_MSG : NULL;
 done:
     if (buf != stack_buf) free(buf);
     return rc;
@@ -390,7 +410,10 @@ static int sqlite_upsert(HlDbHandle *h, const char *table,
         || n_conflict < 1 || !conflict_cols) return -1;
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (sqlite_refuse_broken(s)) return -1;
-    size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 1);
+    s->own_err = SQL_BUILD_MSG;      /* until the statement runs */
+    size_t cap = sqlite_estimate_sql_size(table, conflict_cols, n_conflict,
+                                          cols, n_cols, 1);
+    if (cap == 0) return -1;
     char stack_buf[4096];
     char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
     if (!buf) return -1;
@@ -439,6 +462,7 @@ static int sqlite_upsert(HlDbHandle *h, const char *table,
     }
 
     rc = hl_cap_db_exec(&s->cache, buf, values, n_cols);
+    s->own_err = rc == HL_DB_ERR_REENTERED ? REENTERED_MSG : NULL;
 done:
     if (buf != stack_buf) free(buf);
     return rc;
