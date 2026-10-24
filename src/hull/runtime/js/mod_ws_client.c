@@ -153,9 +153,9 @@ static JSValue js_ws_client_send_binary(JSContext *ctx, JSValueConst this_val,
     if (!ud || !ud->client || ud->closed)
         return JS_ThrowTypeError(ctx, "client connection closed");
 
-    /* Any byte view (a TypedArray or DataView too, not only a bare
-     * ArrayBuffer - a Uint8Array went out as its toString, "1,2,3"), or a
-     * string; no app code runs (audit 22). */
+    /* An ArrayBuffer or a TypedArray (a Uint8Array went out as its
+     * toString, "1,2,3"), or a string; no app code runs (audit 22). A
+     * DataView is not a byte view js_get_buffer takes: it is refused. */
     HlBufferView view = {0};
     const char *str = NULL;
     int needs_free = 0;
@@ -311,13 +311,21 @@ static void js_ws_client_on_message(KlWsClientConn *ws, const char *data,
     if (JS_IsUndefined(ud->on_message))
         return;
 
-    JSValue conn_obj = JS_DupValue(ud->ctx, ud->self_ref);
     JSValue msg_val;
     if (is_binary) {
         msg_val = JS_NewArrayBufferCopy(ud->ctx, (const uint8_t *)data, len);
     } else {
         msg_val = JS_NewStringLen(ud->ctx, data, len);
     }
+    /* A message that could not be made (out of memory) is dropped, logged:
+     * the exception value went to the callback as its message (audit 26). */
+    if (JS_IsException(msg_val)) {
+        JS_FreeValue(ud->ctx, JS_GetException(ud->ctx));
+        log_error("[hull:ws:client] dropped a %zu-byte message: out of memory",
+                  len);
+        return;
+    }
+    JSValue conn_obj = JS_DupValue(ud->ctx, ud->self_ref);
     JSValue is_bin_val = JS_NewBool(ud->ctx, is_binary);
 
     JSValue args[3] = { conn_obj, msg_val, is_bin_val };
@@ -385,6 +393,10 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         JSValue reason_val = (reason && reason_len > 0)
                                  ? JS_NewStringLen(ud->ctx, reason, reason_len)
                                  : JS_NULL;
+        if (JS_IsException(reason_val)) {   /* audit 26: reason reads as null */
+            JS_FreeValue(ud->ctx, JS_GetException(ud->ctx));
+            reason_val = JS_NULL;
+        }
 
         JSValue args[3] = { conn_obj, code_val, reason_val };
         js_ws_client_call(ud, ud->on_close, 3, args, "on_close");
@@ -408,8 +420,14 @@ static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
         return;
     }
 
-    JSValue conn_obj = JS_DupValue(ud->ctx, ud->self_ref);
     JSValue msg_val = JS_NewString(ud->ctx, msg ? msg : "unknown");
+    if (JS_IsException(msg_val)) {   /* audit 26: logged, not passed on */
+        JS_FreeValue(ud->ctx, JS_GetException(ud->ctx));
+        log_error("[hull:ws:client] error: %s", msg ? msg : "unknown");
+        js_ws_client_finish(ud);
+        return;
+    }
+    JSValue conn_obj = JS_DupValue(ud->ctx, ud->self_ref);
 
     JSValue args[2] = { conn_obj, msg_val };
     js_ws_client_call(ud, ud->on_error, 2, args, "on_error callback");

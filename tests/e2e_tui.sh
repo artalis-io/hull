@@ -333,6 +333,39 @@ JSEOF
         fail "js: a tui.run session longer than the run deadline completes"
     fi
 
+    # A poll that returns no event re-arms only after a real wait (audit 26):
+    # a tickMs = 1 loop re-armed its own deadline for ever, while a 100 ms
+    # clock still gets a new run per tick.
+    echo "--- a tickMs=1 tui.run is not re-armed per tick ---"
+    for tick in 1 100; do
+        sed "s/TICK/${tick}/" > "${TMP}/tick_${tick}.js" <<'JSEOF'
+import { app } from "hull:app";
+import { tui } from "hull:tui";
+app.manifest({ tui: true, modules: ["hull/tui@1"] });
+app.main((ctx) => {
+    const r = tui.run({
+        tickMs: TICK,
+        draw: (d) => { d.clear(); d.print(1, 1, "tick waiting"); },
+        onEvent: (ev) => { if (ev.kind === "key" && ev.key === "q") return "done"; },
+    });
+    ctx.stdout.write(`tick: ${r}\n`);
+    return 0;
+});
+JSEOF
+    done
+    if HULL_MAX_RUN_MS=300 "${DRIVE}" "js error" "%s1500q" -- \
+           "${HULL_BIN}" "${TMP}/tick_1.js" >/dev/null 2>&1; then
+        pass "js: a tickMs=1 tui.run is stopped by the run deadline"
+    else
+        fail "js: a tickMs=1 tui.run is stopped by the run deadline"
+    fi
+    if HULL_MAX_RUN_MS=300 "${DRIVE}" "tick: done" "%s1200q" -- \
+           "${HULL_BIN}" "${TMP}/tick_100.js" >/dev/null 2>&1; then
+        pass "js: a tickMs=100 tui.run clock outlives the run deadline"
+    else
+        fail "js: a tickMs=100 tui.run clock outlives the run deadline"
+    fi
+
     # ── hull doctor --tui (Phase 2 dogfood) ────────────────────────
     #
     # Drives the C dispatcher → hull_tool → stdlib/lua/hull/doctor_tui
