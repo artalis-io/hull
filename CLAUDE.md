@@ -260,7 +260,9 @@ env-refs, invisible at build time) rather than auto-inferred; e.g. a `mysql://`
 DSN on a plain base fails with a `hull feature install mysql` hint. The kernel
 sandbox grants `network_outbound` for a declared network DB connection
 (`databases.named` net-DSN / env-ref, `databases.dynamic` net scheme, or a `-d`
-net DSN), so a sandboxed DB-only app can reach its database.
+net DSN - in both serve.c and the `app.main` runner, via
+`hl_sandbox_policy_add_default_dsn`; audit 25), so a sandboxed DB-only app can
+reach its database.
 
 **Install (end users):** `hull feature install <name>` / `hull feature list` /
 `hull feature uninstall <name>` fetch + Ed25519-verify + cache the signed lib to
@@ -2226,7 +2228,7 @@ Hull ships a built-in `hull.tui` module for interactive terminal apps. The desig
 
 - **One canonical entry point**: `tui.run({ draw, on_event, tick_ms })`. Raw primitives (`tui.move`, `tui.print`, `tui.poll`, …) are exposed but the immediate-mode loop is what apps lead with.
 - **CLI mode only**: TUI requires `app.main`. Server apps (`app.get/post/...`) cannot also call `tui.run`. Same rationale as CLI mode itself.
-- **Manifest gate**: `app.manifest({ tui = true, modules = { "hull/tui@1" } })`. The resolver enforces both. The build flag at compile time, the manifest field at app-load time.
+- **Manifest gate**: `app.manifest({ tui = true, modules = { "hull/tui@1" } })`. The resolver enforces both. The build flag at compile time, the manifest field at app-load time. The kernel grant is `/dev/tty` plus, on macOS, only the process's OWN terminal devices (`ttyname` of fds 0-2, passed as Seatbelt params, `hl_sandbox_own_ttys`), with `file-ioctl` limited to the same paths - not every `/dev/ttys*` and every ioctl, which reached other Terminal tabs (audit 25).
 - **Per-process singleton**: one `HlTuiCtx` per process (the controlling tty is singleton). Second `acquire` returns `-EBUSY`.
 - **Cell-diff rendering**: shadow + pending buffers in the cap layer; only changed cells are emitted on flush. Flicker-free over ssh / mosh without app-side work. Unicode width comes from an embedded data table at `vendor/unicode/eaw.h`. Identical behavior across glibc / musl / cosmo / macOS. Refresh via `make fetch-unicode`.
 - **Async-integrated `tui.poll`**: yields to the runtime's event loop while waiting for input. Background `tui.async` coroutines / Promises keep ticking, so an app can `http.fetch` or `db.async.query` while the main coroutine awaits a keystroke.

@@ -461,6 +461,8 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                                    const char *ca_bundle_path,
                                    const char *tls_cert_path,
                                    const char *tls_key_path,
+                                   const char *const *ttys,
+                                   int tty_count,
                                    char *profile_buf,
                                    size_t profile_size,
                                    const char **params,
@@ -724,11 +726,32 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
 
     /* ── Terminal UI ─────────────────────────────────────────── */
 
+    /* /dev/tty plus the process's OWN terminal devices only, each by
+     * literal path passed as a parameter (audit 25): a /dev/ttys[0-9]+
+     * regex and a bare (allow file-ioctl) let a TUI app open, read, write
+     * and ioctl (TIOCSTI) any pty the user owns - another Terminal tab.
+     * Linux / OpenBSD likewise grant /dev/tty alone. */
     if (policy->tui) {
-        SBPL_LIT("; Terminal UI (tcsetattr, alt screen, TIOCGWINSZ)\n"
-                 "(allow file-read* file-write* (literal \"/dev/tty\"))\n"
-                 "(allow file-read* file-write* (regex #\"^/dev/ttys[0-9]+\"))\n"
-                 "(allow file-ioctl)\n\n");
+        static const char *const tty_keys[HL_SANDBOX_TTY_MAX] = {
+            "TTY_0", "TTY_1", "TTY_2"
+        };
+        char tty_rules[256];
+        size_t tl = 0;
+        tty_rules[0] = '\0';
+        for (int i = 0; i < tty_count && i < HL_SANDBOX_TTY_MAX; i++) {
+            if (!ttys || !hl_sandbox_tty_path_ok(ttys[i]))
+                continue;
+            PARAM_ADD(tty_keys[i], ttys[i]);
+            int n = snprintf(tty_rules + tl, sizeof tty_rules - tl,
+                             " (literal (param \"%s\"))", tty_keys[i]);
+            if (n < 0 || (size_t)n >= sizeof tty_rules - tl) return -1;
+            tl += (size_t)n;
+        }
+        SBPL_LIT("; Terminal UI (tcsetattr, alt screen, TIOCGWINSZ)\n");
+        SBPL_FMT("(allow file-read* file-write* (literal \"/dev/tty\")%s)\n",
+                 tty_rules);
+        SBPL_FMT("(allow file-ioctl (literal \"/dev/tty\")%s)\n\n",
+                 tty_rules);
     }
 
     /* ── Signals, sysctl ────────────────────────────────────── */
@@ -791,6 +814,70 @@ static int sb_supported(void) { return 0; }
 #endif /* platform dispatch */
 
 int hl_sandbox_kernel_available(void) { return sb_supported(); }
+
+int hl_sandbox_tty_path_ok(const char *path)
+{
+    static const char prefix[] = "/dev/tty";
+    if (!path || strncmp(path, prefix, sizeof prefix - 1) != 0)
+        return 0;
+    const char *rest = path + sizeof prefix - 1;
+    size_t n = 0;
+    for (; rest[n]; n++) {
+        unsigned char c = (unsigned char)rest[n];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9')))
+            return 0;
+    }
+    return n >= 1 && n <= 16;
+}
+
+int hl_sandbox_own_ttys(char out[HL_SANDBOX_TTY_MAX][HL_SANDBOX_TTY_PATH_MAX])
+{
+    static const int fds[HL_SANDBOX_TTY_MAX] = {
+        STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO
+    };
+    int count = 0;
+    for (int i = 0; i < HL_SANDBOX_TTY_MAX; i++) {
+        char name[HL_SANDBOX_TTY_PATH_MAX];
+        if (ttyname_r(fds[i], name, sizeof name) != 0)
+            continue;
+        if (!hl_sandbox_tty_path_ok(name))
+            continue;
+        int dup = 0;
+        for (int j = 0; j < count; j++)
+            if (strcmp(out[j], name) == 0) dup = 1;
+        if (dup) continue;
+        snprintf(out[count], HL_SANDBOX_TTY_PATH_MAX, "%s", name);
+        count++;
+    }
+    return count;
+}
+
+int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
+                                         const char *const *ttys, int tty_count,
+                                         char *buf, size_t buf_size,
+                                         const char **params, size_t max_params)
+{
+#if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
+    SeatbeltScratch *scratch = calloc(1, sizeof *scratch);
+    if (!scratch) return -1;
+    int rc = seatbelt_build_profile(policy, NULL, NULL, NULL, NULL, NULL,
+                                    ttys, tty_count, buf, buf_size,
+                                    params, max_params, scratch);
+    free(scratch);
+    return rc;
+#else
+    (void)policy; (void)ttys; (void)tty_count;
+    (void)buf; (void)buf_size; (void)params; (void)max_params;
+    return -1;
+#endif
+}
+
+void hl_sandbox_policy_add_default_dsn(HlSandboxPolicy *policy, const char *dsn)
+{
+    if (policy && dsn && hl_sandbox_dsn_is_network(dsn))
+        policy->network_outbound = 1;
+}
 
 /* ── Phase 1: pre-load pledge ──────────────────────────────────────── */
 
@@ -1010,9 +1097,19 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         if (db_path && realpath(db_path, real_db))
             resolved_db = real_db;
 
+        /* The TUI's own terminals, resolved before sandbox_init (macOS
+         * phase 1 applies nothing, so ttyname() still works here). */
+        char tty_buf[HL_SANDBOX_TTY_MAX][HL_SANDBOX_TTY_PATH_MAX];
+        const char *ttys[HL_SANDBOX_TTY_MAX];
+        int tty_count = 0;
+        if (policy->tui) {
+            tty_count = hl_sandbox_own_ttys(tty_buf);
+            for (int i = 0; i < tty_count; i++) ttys[i] = tty_buf[i];
+        }
+
         if (seatbelt_build_profile(policy, resolved_app, resolved_db,
                                     ca_bundle_path, tls_cert_path,
-                                    tls_key_path,
+                                    tls_key_path, ttys, tty_count,
                                     profile_buf, sizeof(profile_buf),
                                     params, SEATBELT_MAX_PARAMS,
                                     &scratch) != 0) {
@@ -1404,7 +1501,8 @@ static int kv_scheme_is_network(const char *s)
  * databases.dynamic policy admitting a network scheme. Grants network_outbound
  * for a DB-only app that has no http `hosts` - without it the kernel sandbox
  * blocks the connect (pledge SIGKILL on Linux). The `-d` default DSN is not in
- * the manifest (it lives in cfg); serve.c ORs that in separately. */
+ * the manifest (it lives in cfg); both entry points OR it in through
+ * hl_sandbox_policy_add_default_dsn. */
 int hl_sandbox_manifest_has_network_db(const HlManifest *m)
 {
     if (!m) return 0;

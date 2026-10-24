@@ -749,6 +749,10 @@ int hull_serve(int argc, char **argv)
         sandbox_policy.allow_degraded = allow_degraded_sandbox;
         /* CLI mode → no inbound network. */
         sandbox_policy.network_inbound = 0;
+        /* A `-d postgres://...` (or `-d $DATABASE_URL`) database dials out:
+         * db.async's worker connection and a reconnect need the socket
+         * (audit 25 - serve.c granted it, this runner did not). */
+        hl_sandbox_policy_add_default_dsn(&sandbox_policy, db_path);
 
         /* The file the DSN names, never the DSN: a network one carries its
          * password into unveil and the sandbox's log lines (audit 10). */

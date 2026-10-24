@@ -260,4 +260,43 @@ int hl_sandbox_kernel_available(void);
 int hl_sandbox_resolve_grant(const char *app_dir, const char *relpath,
                              char *out_abs, size_t out_cap, int for_write);
 
+/*
+ * The process's own terminal devices (audit 25). A TUI app's macOS Seatbelt
+ * profile grants /dev/tty plus ONLY these - it used to grant every
+ * /dev/ttys[0-9]+ and an unrestricted file-ioctl, so a TUI app could open
+ * and read / write any pty the user owns (another Terminal tab).
+ *
+ * hl_sandbox_tty_path_ok: 1 when @p path is "/dev/tty" followed by 1..16
+ * ASCII letters / digits (e.g. /dev/ttys003), else 0.
+ *
+ * hl_sandbox_own_ttys: ttyname() of stdin, stdout and stderr, each kept only
+ * when hl_sandbox_tty_path_ok, duplicates dropped. Returns the count (0..3).
+ */
+#define HL_SANDBOX_TTY_MAX       3
+#define HL_SANDBOX_TTY_PATH_MAX  32
+int hl_sandbox_tty_path_ok(const char *path);
+int hl_sandbox_own_ttys(char out[HL_SANDBOX_TTY_MAX][HL_SANDBOX_TTY_PATH_MAX]);
+
+/*
+ * Test seam: build the macOS Seatbelt profile for @p policy (no app dir, no
+ * database, no TLS files) with @p ttys as the TUI's own terminals, into
+ * @p buf, and the SBPL parameters into @p params (NULL-terminated). 0, or -1
+ * on overflow or on a platform without Seatbelt.
+ */
+int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
+                                         const char *const *ttys, int tty_count,
+                                         char *buf, size_t buf_size,
+                                         const char **params, size_t max_params);
+
+/*
+ * OR the `-d` default database into @p policy: a DSN that dials out (network
+ * scheme or "$VAR" env-ref) needs outbound network. The default DSN lives in
+ * the entry point's config, not the manifest, so
+ * hl_sandbox_policy_from_manifest cannot see it; serve.c and the app.main
+ * runner (serve_cli.c) both call this (audit 25: the runner did not, so
+ * db.async / a reconnect to a `-d postgres://` database died in the sandbox).
+ * NULL @p dsn (no database) is a no-op.
+ */
+void hl_sandbox_policy_add_default_dsn(HlSandboxPolicy *policy, const char *dsn);
+
 #endif /* HL_SANDBOX_H */
