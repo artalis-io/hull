@@ -23,6 +23,7 @@
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
 #include "hull/migrate.h"
 #include "hull/shared/host.h"
+#include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
 #include <sqlite3.h>
 
 #include <limits.h>
@@ -38,6 +39,11 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
 
     if (!db_path) {
         snprintf(default_path, sizeof(default_path), "%s/data.db", app_dir);
+        /* The implicit default must be the app's own file: a committed
+         * data.db symlink had the agent read (and report) another
+         * database (audit 25). An explicit db_path is followed. */
+        if (hl_default_db_path_check(default_path, NULL, 0) != 0)
+            return NULL;
         if (access(default_path, F_OK) == 0)
             db_path = default_path;
     }

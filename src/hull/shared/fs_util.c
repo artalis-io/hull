@@ -7,6 +7,7 @@
 #include "hull/shared/fs_util.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <limits.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -47,6 +48,45 @@ int hl_mkdir_p(const char *path, mode_t mode)
             buf[i] = '\0';
             if (hl_ensure_dir(buf, mode) != 0) return -1;
             buf[i] = saved;
+        }
+    }
+    return 0;
+}
+
+int hl_default_db_path_check(const char *path, char *err, size_t err_sz)
+{
+    static const char *const suffixes[] = { "", "-wal", "-shm", "-journal" };
+    if (err && err_sz) err[0] = '\0';
+    if (!path || !*path) {
+        if (err && err_sz) snprintf(err, err_sz, "no database path");
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof suffixes / sizeof suffixes[0]; i++) {
+        char p[PATH_MAX];
+        int n = snprintf(p, sizeof p, "%s%s", path, suffixes[i]);
+        if (n < 0 || (size_t)n >= sizeof p) {
+            if (err && err_sz) snprintf(err, err_sz, "database path too long");
+            return -1;
+        }
+        struct stat st;
+        if (lstat(p, &st) != 0) {
+            if (errno == ENOENT) continue;   /* absent: SQLite creates it */
+            if (err && err_sz)
+                snprintf(err, err_sz, "cannot inspect %s: %s", p,
+                         strerror(errno));
+            return -1;
+        }
+        if (S_ISLNK(st.st_mode)) {
+            if (err && err_sz)
+                snprintf(err, err_sz, "%s is a symbolic link; the default "
+                         "database must be the app's own file (pass -d to "
+                         "name another database explicitly)", p);
+            return -1;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            if (err && err_sz)
+                snprintf(err, err_sz, "%s is not a regular file", p);
+            return -1;
         }
     }
     return 0;

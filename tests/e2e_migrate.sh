@@ -315,6 +315,66 @@ case "$TABLES" in
     *) pass "refused migration created nothing" ;;
 esac
 
+# ── Test: the implicit default data.db may not be a symlink (audit 25) ──
+#
+# A cloned app that commits data.db -> ../other.sqlite had `hull migrate`
+# (no sandbox) run its migrations against that database. The implicit
+# default is refused; an explicit -d still follows links.
+
+echo ""
+echo "--- default data.db symlink refused ---"
+
+mkdir -p "$TMPDIR/app8/migrations"
+cp "$TMPDIR/app2/app.lua" "$TMPDIR/app8/app.lua"
+cat > "$TMPDIR/app8/migrations/001_evil.sql" << 'EOF'
+CREATE TABLE evil (x INTEGER);
+EOF
+sqlite3 "$TMPDIR/victim.db" "CREATE TABLE precious (x INTEGER);" 2>/dev/null \
+    || : > "$TMPDIR/victim.db"
+ln -s ../victim.db "$TMPDIR/app8/data.db"
+
+OUTPUT=$($HULL migrate "$TMPDIR/app8" 2>&1) || true
+case "$OUTPUT" in
+    *"symbolic link"*) pass "hull migrate refuses a symlinked default data.db" ;;
+    *) fail "hull migrate followed a symlinked default data.db: $OUTPUT" ;;
+esac
+OUTPUT=$($HULL migrate status "$TMPDIR/app8" 2>&1) || true
+case "$OUTPUT" in
+    *"symbolic link"*) pass "hull migrate status refuses a symlinked default data.db" ;;
+    *) fail "hull migrate status followed a symlinked default data.db: $OUTPUT" ;;
+esac
+TABLES=$(sqlite3 "$TMPDIR/victim.db" ".tables" 2>/dev/null || echo "")
+case "$TABLES" in
+    *evil*|*_hull_migrations*) fail "the symlink target was migrated" ;;
+    *) pass "the symlink target was not touched" ;;
+esac
+
+# The dev server refuses the same default (judged by output: it must exit).
+$HULL -p 18933 "$TMPDIR/app8/app.lua" > "$TMPDIR/app8.log" 2>&1 &
+SERVER_PID=$!
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 $SERVER_PID 2>/dev/null || break
+    sleep 0.3
+done
+if kill -0 $SERVER_PID 2>/dev/null; then
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    fail "hull served with a symlinked default data.db"
+else
+    wait $SERVER_PID 2>/dev/null || true
+    case "$(cat "$TMPDIR/app8.log")" in
+        *"symbolic link"*) pass "hull refuses to serve a symlinked default data.db" ;;
+        *) fail "hull exited without naming the symlink: $(cat "$TMPDIR/app8.log")" ;;
+    esac
+fi
+
+# An explicit -d is the operator's choice: followed.
+OUTPUT=$($HULL migrate -d "$TMPDIR/app8/data.db" "$TMPDIR/app8" 2>&1) || true
+case "$OUTPUT" in
+    *"applied 1 migration"*) pass "an explicit -d through a symlink is followed" ;;
+    *) fail "explicit -d through a symlink was refused: $OUTPUT" ;;
+esac
+
 # ── Summary ───────────────────────────────────────────────────────
 
 echo ""
