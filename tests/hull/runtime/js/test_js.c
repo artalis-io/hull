@@ -13183,4 +13183,326 @@ UTEST(js_audit24, wss_connect_needs_the_client_tls_config)
     cleanup_js_caps();
 }
 
+/* ── Audit 25 ────────────────────────────────────────────────────────── */
+
+/* M4: db.batch's async probe reads fn's prototype, which runs a Proxy
+ * getPrototypeOf trap - app code that can close the db.open connection the
+ * batch is on. The handle read again after it was passed to
+ * hl_db_batch_enter unchecked: a NULL dereference. */
+UTEST(js_audit25, batch_on_a_connection_closed_by_the_async_probe)
+{
+    /* The cap-level guard: a closed connection is a failure, not a crash. */
+    EXPECT_EQ(hl_db_batch_enter(NULL), -1);
+    EXPECT_EQ(hl_db_batch_leave(NULL, 1), -1);
+    EXPECT_EQ(hl_db_batch_leave(NULL, 0), -1);
+
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    memset(&m, 0, sizeof m);
+    m.databases.dynamic.declared = 1;
+    m.databases.dynamic.schemes[0] = "sqlite";
+    m.databases.dynamic.scheme_count = 1;
+    hl_db_registry_set_manifest(test_db_registry, &m);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.open(':memory:');\n"
+        "const fp = Object.getPrototypeOf(() => {});\n"
+        "const fn = new Proxy(() => {}, {\n"
+        "  getPrototypeOf() { c.close(); return fp; } });\n"
+        "let msg = 'no error';\n"
+        "try { c.batch(fn); } catch (e) { msg = String(e && e.message || e); }\n"
+        "globalThis.__a25_batch = msg;\n"), 0);
+    char *msg = eval_str("globalThis.__a25_batch");
+    ASSERT_NE(msg, NULL);
+    EXPECT_NE_MSG(strstr(msg, "closed"), NULL, msg);
+    free(msg);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_js_caps();
+}
+
+/* L4 / L5: a request body that is an ArrayBuffer or a typed array is sent;
+ * anything else that is not a string / undefined / null throws a TypeError
+ * - it was dropped silently and the request went out with no body. */
+UTEST(js_audit25, http_body_types)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    js.base.http_cfg = &cfg;
+    static const char *const bad[] = {
+        "http.post('http://x.invalid/', {})",
+        "http.put('http://x.invalid/', 42)",
+        "http.patch('http://x.invalid/', [1, 2])",
+        "http.request('POST', 'http://x.invalid/', { body: { a: 1 } })",
+        "http.request('POST', 'http://x.invalid/', { body: 7 })",
+    };
+    static const char *const good[] = {
+        "http.post('http://x.invalid/', 'text')",
+        "http.post('http://x.invalid/', new Uint8Array([0, 255, 1]))",
+        "http.put('http://x.invalid/', new ArrayBuffer(4))",
+        "http.post('http://x.invalid/', undefined)",
+        "http.post('http://x.invalid/', null)",
+        "http.request('POST', 'http://x.invalid/', { body: new Uint8Array(3) })",
+        "http.request('POST', 'http://x.invalid/', { body: null })",
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "let r = 0;\n"
+                 "try { %s; r = 2; } catch (e) {\n"
+                 "  r = e instanceof TypeError && /body must be/.test(e.message)"
+                 " ? 1 : 3; }\n"
+                 "globalThis.__hb = r;\n", bad[i]);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<hb>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__hb|0"), 1, bad[i]);
+    }
+    /* Accepted: the call gets as far as the host check, which refuses. */
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "let r = 0;\n"
+                 "try { %s; r = 2; } catch (e) {\n"
+                 "  r = /failed/.test(e.message) && !/body/.test(e.message)"
+                 " ? 1 : 3; }\n"
+                 "globalThis.__hb = r;\n", good[i]);
+        JSValue v = JS_Eval(js.ctx, code, strlen(code), "<hb>", JS_EVAL_TYPE_MODULE);
+        if (JS_IsException(v)) hl_js_dump_error(&js);
+        JS_FreeValue(js.ctx, v);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(eval_int("globalThis.__hb|0"), 1, good[i]);
+    }
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
+
+/* L6: a binary WebSocket frame reaches onMessage as an ArrayBuffer with its
+ * bytes intact; it was a UTF-8-decoded string. A text frame stays a string. */
+UTEST(js_audit25, ws_binary_frame_is_an_array_buffer)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    js.base.ws_registry = &reg;
+    a18_ws_route_handler(0, "(c) => {}");
+    a18_ws_route_handler(1,
+        "(c, m, b) => { globalThis.__a25ws = (m instanceof ArrayBuffer)"
+        "  ? 'ab:' + Array.from(new Uint8Array(m)).join(',') + ':' + b"
+        "  : typeof m + ':' + m + ':' + b; }");
+    a18_ws_route_handler(2, "(c, code) => {}");
+    HlJSWsRoute route;
+    memset(&route, 0, sizeof route);
+    route.js = &js;
+    route.on_open_id = 0;
+    route.on_message_id = 1;
+    route.on_close_id = 2;
+    snprintf(route.path, sizeof route.path, "/a25");
+    static char p1;
+    KlWsServerConn *kc = (KlWsServerConn *)(void *)&p1;
+    hl_js_ws_on_open(kc, &route);
+    hl_js_ws_on_message(kc, "\xff\x00\x80", 3, 1, &route);
+    char *s = eval_str("globalThis.__a25ws");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "ab:255,0,128:true");
+    free(s);
+    hl_js_ws_on_message(kc, "hi", 2, 0, &route);
+    s = eval_str("globalThis.__a25ws");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "string:hi:false");
+    free(s);
+    hl_js_ws_on_close(kc, 1000, NULL, 0, &route);
+    js.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_js();
+}
+
+/* L7: a row value that cannot be made (out of memory here) fails the query
+ * with that exception; it was stored as the column's value and the partial
+ * result returned with the exception left pending. */
+UTEST(js_audit25, query_row_value_that_cannot_be_made_fails_the_query)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(eval_int("globalThis.__a25q = 'unset'; 1"), 1);
+    JS_RunGC(js.rt);
+    JSMemoryUsage u;
+    JS_ComputeMemoryUsage(js.rt, &u);
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_size + (2u << 20));
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "let r = 'returned';\n"
+        "try { c.query('SELECT zeroblob(8000000) AS b'); }\n"
+        "catch (e) { r = 'threw'; }\n"
+        "globalThis.__a25q = r;\n"), 0);
+    JS_SetMemoryLimit(js.rt, (size_t)u.malloc_limit);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    char *s = eval_str("globalThis.__a25q");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "threw");
+    free(s);
+    /* The connection still works. */
+    EXPECT_EQ(eval_int("db.query('SELECT 5 AS n')[0].n"), 5);
+    cleanup_js_caps();
+}
+
+/* L8: a UDF returning a BigInt binds an integer and a buffer a BLOB; a value
+ * with no SQL counterpart is an error. All three were NULL silently. */
+UTEST(js_audit25, udf_result_types)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "c.udf.register('hull_a25_big', () => 9007199254740993n);\n"
+        "c.udf.register('hull_a25_huge', () => 2n ** 70n);\n"
+        "c.udf.register('hull_a25_buf', () => new Uint8Array([1, 2, 3]));\n"
+        "c.udf.register('hull_a25_ab', () => new Uint8Array([9, 8, 7, 6]).buffer);\n"
+        "c.udf.register('hull_a25_obj', () => ({ a: 1 }));\n"
+        "const out = [];\n"
+        "let r = c.query('SELECT hull_a25_big() = 9007199254740993 AS v,'\n"
+        "                + ' typeof(hull_a25_big()) AS t')[0];\n"
+        "out.push(r.t, String(r.v));\n"
+        "r = c.query('SELECT hex(hull_a25_buf()) AS h, typeof(hull_a25_buf()) AS t')[0];\n"
+        "out.push(r.t, r.h);\n"
+        "r = c.query('SELECT hex(hull_a25_ab()) AS h')[0];\n"
+        "out.push(r.h);\n"
+        "for (const f of ['hull_a25_huge', 'hull_a25_obj']) {\n"
+        "  let m = 'no error';\n"
+        "  try { c.query('SELECT ' + f + '() AS v'); } catch (e) { m = 'error'; }\n"
+        "  out.push(m);\n"
+        "}\n"
+        "for (const f of ['hull_a25_big', 'hull_a25_huge', 'hull_a25_buf', 'hull_a25_ab', 'hull_a25_obj'])\n"
+        "  c.udf.unregister(f);\n"
+        "globalThis.__a25udf = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__a25udf");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "integer|1|blob|010203|09080706|error|error");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    cleanup_js_caps();
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* L9: test.get's opts getters and conversions can throw; the call threw
+ * nothing (the exception was swallowed or left pending) and a header whose
+ * value did not convert leaked its name. The exception is the call's now. */
+UTEST(js_audit25, test_request_opts_exceptions_propagate)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *app =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.get('/a25', (req, res) => { res.json({ ok: true }); });\n";
+    JSValue v = JS_Eval(js.ctx, app, strlen(app), "<a25app>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    ASSERT_EQ(hl_js_wire_routes(&js, &router), 0);
+    hl_js_test_register(js.ctx, &router, &js);
+    const char *cases =
+        "function err(o) { try { test.get('/a25', o); return 'none'; }"
+        "  catch (e) { return String(e && e.message); } }\n"
+        "test('opts exceptions', () => {\n"
+        "  const r = [\n"
+        "    err({ get middleware() { throw new Error('mw'); } }),\n"
+        "    err({ get body() { throw new Error('body'); } }),\n"
+        "    err({ get headers() { throw new Error('hdrs'); } }),\n"
+        "    err({ headers: { a: 'x', get b() { throw new Error('hval'); } } }),\n"
+        "    err({ headers: { a: { toString() { throw new Error('hstr'); } } } }),\n"
+        "    err({ get ctx() { throw new Error('ctx'); } }),\n"
+        "    err({ ctx: { toJSON() { throw new Error('json'); } } }),\n"
+        "  ].join(',');\n"
+        "  if (r !== 'mw,body,hdrs,hval,hstr,ctx,json') throw new Error(r);\n"
+        "  if (test.get('/a25', { headers: { a: 'x' } }).status !== 200)\n"
+        "    throw new Error('status');\n"
+        "});\n";
+    v = JS_Eval(js.ctx, cases, strlen(cases), "<a25cases>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[2];
+    memset(results, 0, sizeof results);
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 2);
+    EXPECT_EQ(total, 1);
+    EXPECT_TRUE_MSG(results[0].passed, results[0].error);
+
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+#endif
+
+#ifdef HL_ENABLE_IMAGE
+/* Audit 25 (Lua parity): image.new, image.fromWasm and image.fromBuffer's
+ * copy branch copied w * h * bpp bytes uncharged. The copy is refused past
+ * the VM heap limit and charged 1 unit per 8 bytes before it: a large copy
+ * trips a small instruction limit, a small one fits. */
+UTEST(js_audit25, image_pixel_copies_are_charged)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    if (eval_int("typeof image === 'object' && image !== null ? 1 : 0") != 1) {
+        cleanup_js();   /* image compiled out */
+        return;
+    }
+    /* 4096 x 4096 r8 = 16 MiB = 2M units; a 64 x 64 copy is 512. */
+    ASSERT_EQ(eval_int(
+        "globalThis.big = new ArrayBuffer(1 << 24);"
+        " globalThis.small = new ArrayBuffer(64 * 64);"
+        " globalThis.wasmImg = (w, h) => { const b = new Uint8Array(9 + w * h);"
+        "   b[0] = w & 255; b[1] = w >> 8; b[4] = h & 255; b[5] = h >> 8;"
+        "   b[8] = 2; return b.buffer; };"
+        " globalThis.bigW = wasmImg(4096, 4096);"
+        " globalThis.smallW = wasmImg(64, 64); 1"), 1);
+    static const char *const small[] = {
+        "image.new(64, 64, 'r8', small).close(); 1",
+        "image.fromBuffer(small, 64, 64, 'r8').close(); 1",
+        "image.fromWasm(smallW).close(); 1",
+    };
+    static const char *const large[] = {
+        "image.new(4096, 4096, 'r8', big); 1",
+        "image.fromBuffer(big, 4096, 4096, 'r8'); 1",
+        "image.fromWasm(bigW); 1",
+    };
+    for (size_t i = 0; i < 3; i++) {
+        js.max_instructions = 1000000;
+        hl_js_budget_arm(&js);
+        EXPECT_EQ_MSG(eval_int(small[i]), 1, small[i]);
+        EXPECT_EQ_MSG(js.budget_tripped, 0, small[i]);
+        EXPECT_EQ_MSG(eval_int(large[i]), -9999, large[i]);
+        EXPECT_EQ_MSG(js.budget_tripped, 1, large[i]);
+        js.max_instructions = 0;
+        hl_js_budget_arm(&js);
+    }
+    /* Past the heap limit: refused before the copy, as a RangeError. */
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 1u << 20;
+    char *r = eval_str("(() => { try { image.new(4096, 4096, 'r8', big); "
+                       "return 'made'; } catch (e) { return e.name + ': ' + e.message; } })()");
+    js.max_heap_bytes = saved;
+    EXPECT_TRUE(r && strstr(r, "RangeError") && strstr(r, "too large"));
+    free(r);
+    /* Dimensions hl_image_new rejects are not charged: the usual error. */
+    r = eval_str("(() => { try { image.new(0, 4096, 'r8', big); "
+                 "return 'made'; } catch (e) { return e.name; } })()");
+    EXPECT_STREQ(r ? r : "(null)", "RangeError");
+    free(r);
+    cleanup_js();
+}
+#endif /* HL_ENABLE_IMAGE */
+
 UTEST_MAIN();
