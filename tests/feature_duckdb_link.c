@@ -23,10 +23,11 @@
 
 /* The archive's references into the base: duck_execute charges each DuckDB
  * task to the run's budget (cap/db_common.c, audit 15), and duck_rollback
- * runs unbound (audit 16). A composed app gets the real budget functions
+ * runs unbound (audit 16); duck_query / duck_exec_script refuse SQL that
+ * calls a dynamic-SQL function (audit 25). A composed app gets the real budget functions
  * from the platform lib (tests/e2e_feature_duckdb.sh exercises them); this
  * smoke links the archive alone, so they stand in with "no budget bound" -
- * never an interrupt. */
+ * never an interrupt - and "no dynamic SQL". */
 int hl_db_budget_charge(int64_t units)
 {
     (void)units;
@@ -44,6 +45,13 @@ HlDbBudgetBinding hl_db_budget_swap(HlDbBudgetFn fn, void *ud)
 void hl_db_budget_restore(HlDbBudgetBinding prev)
 {
     (void)prev;
+}
+
+int hl_cap_db_sql_calls_dynamic_sql(const char *sql);
+int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
+{
+    (void)sql;
+    return 0;
 }
 
 int main(void)
