@@ -145,9 +145,12 @@ int hl_db_registry_set_internal_dsn(HlDbRegistry *reg, const char *dsn);
  * connection is final and may be cached. */
 int hl_db_registry_manifest_wired(const HlDbRegistry *reg);
 
-/* Whether the default connection is a network database (Postgres / MySQL),
- * where a database role - not Hull's SQL-text check - is what can keep the
- * app away from the stdlib's _hull_* tables. */
+/* Whether the default connection is a database where Hull's SQL-text check
+ * cannot keep the app away from the stdlib's _hull_* tables, so
+ * databases.internal is the real separation: a network database (Postgres /
+ * MySQL: dynamic SQL builds a name at run time - a database role separates),
+ * or DuckDB (audit 25: its dynamic-SQL table functions did the same; Hull
+ * refuses the ones it knows, and a separate database file separates). */
 int hl_db_registry_default_is_network(const HlDbRegistry *reg);
 
 /*

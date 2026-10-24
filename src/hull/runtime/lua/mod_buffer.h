@@ -135,6 +135,11 @@ typedef struct HlLuaWsClientUD {
      * connection lives on the server's event loop, which is freed before the
      * runtime, so teardown frees it first (audit 14 G1). */
     HlAsyncTeardown teardown;
+    /* Connect + handshake deadline (audit 25): a backend timer armed by
+     * ws.connect, cancelled by on_open / on_error / on_close / teardown.
+     * Keel has none, so a host that never answered the upgrade held the
+     * client and its fd until close. 0 = not armed. */
+    uint64_t        connect_timer;
 } HlLuaWsClientUD;
 
 /* conn userdata helpers (defined in lua/mod_ws.c) */

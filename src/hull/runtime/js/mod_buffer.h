@@ -220,6 +220,11 @@ typedef struct HlJSWsClientUD {
     JSValue         self_ref;
     int             release_scheduled;  /* self_ref release already queued */
     uint64_t        release_timer;      /* its backend timer, 0 once fired */
+    /* Connect + handshake deadline (audit 25): a backend timer armed by
+     * ws.connect, cancelled by on_open / on_error / on_close / teardown.
+     * Keel has none, so a host that never answered the upgrade held the
+     * client and its fd until close. 0 = not armed. */
+    uint64_t        connect_timer;
     JSContext      *ctx;
     HlJS           *js;
     /* On the runtime's teardown list while `client` is held: the Keel

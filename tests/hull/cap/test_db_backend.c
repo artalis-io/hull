@@ -761,6 +761,43 @@ UTEST(db_backend, upsert_composite_conflict_key)
     hl_db_backend_sqlite.close(&h);
 }
 
+/* Audit 25: the SQL size estimate assumed identifiers of at most 63 bytes,
+ * so long column names failed the build - with the connection's previous
+ * error message, not one of its own. */
+UTEST(db_backend, upsert_and_insert_take_long_column_names)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+
+    char k[201], v[201], ddl[600];
+    memset(k, 'k', 200); k[200] = '\0';
+    memset(v, 'v', 200); v[200] = '\0';
+    snprintf(ddl, sizeof ddl, "CREATE TABLE u (%s TEXT PRIMARY KEY, %s INTEGER)",
+             k, v);
+    ASSERT_EQ(hl_db_exec(&h, ddl, NULL, 0), 0);
+
+    const char *conflict[] = { k };
+    const char *cols[]     = { k, v };
+    HlValue vals[] = {
+        { .type = HL_TYPE_TEXT, .s = "alpha", .len = 5 },
+        { .type = HL_TYPE_INT,  .i = 1 },
+    };
+    ASSERT_EQ(hl_db_upsert(&h, "u", conflict, 1, cols, vals, 2), 1);
+    vals[1].i = 2;
+    ASSERT_TRUE(hl_db_upsert(&h, "u", conflict, 1, cols, vals, 2) >= 1);
+    HlValue vals2[] = {
+        { .type = HL_TYPE_TEXT, .s = "beta", .len = 4 },
+        { .type = HL_TYPE_INT,  .i = 3 },
+    };
+    ASSERT_EQ(hl_db_insert_if_absent(&h, "u", conflict, 1, cols, vals2, 2), 1);
+
+    /* A failure reports its own error, not a stale one. */
+    ASSERT_NE(hl_db_upsert(&h, "nope", conflict, 1, cols, vals, 2), 1);
+    ASSERT_TRUE(strstr(hl_db_errmsg(&h), "no such table") != NULL);
+
+    hl_db_backend_sqlite.close(&h);
+}
+
 typedef struct {
     char names[8][32];
     int  n;

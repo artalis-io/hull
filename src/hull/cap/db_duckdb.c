@@ -21,6 +21,7 @@
 
 #ifdef HL_ENABLE_DUCKDB
 
+#include "hull/cap/db.h"         /* hl_cap_db_sql_calls_dynamic_sql */
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_budget.h"     /* hl_db_budget_charge */
 #include "hull/cap/db_duckdb.h"
@@ -637,6 +638,13 @@ static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
     return rc;
 }
 
+/* query(sql) / query_table(name) / json_execute_serialized_sql(plan) build
+ * a statement or a table name at run time, out of reach of the _hull_* text
+ * check (audit 25). No stdlib SQL uses them; app SQL that does is refused. */
+static const char DUCK_DYNAMIC_SQL_MSG[] =
+    "duckdb: query(), query_table() and json_execute_serialized_sql() are "
+    "not available (they build SQL at run time, past Hull's _hull_* check)";
+
 static int duck_query(HlDbHandle *h, const char *sql,
                       const HlValue *params, int nparams,
                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
@@ -644,6 +652,10 @@ static int duck_query(HlDbHandle *h, const char *sql,
     (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbDuckCtx *s = h->ctx;
+    if (hl_cap_db_sql_calls_dynamic_sql(sql)) {
+        duck_set_err(s, DUCK_DYNAMIC_SQL_MSG);
+        return -1;
+    }
 
     duckdb_prepared_statement stmt;
     if (duckdb_prepare(s->con, sql, &stmt) != DuckDBSuccess) {
@@ -723,6 +735,10 @@ static int duck_exec_script(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
     HlDbDuckCtx *s = h->ctx;
+    if (hl_cap_db_sql_calls_dynamic_sql(sql)) {
+        duck_set_err(s, DUCK_DYNAMIC_SQL_MSG);
+        return -1;
+    }
     duckdb_result r;
     if (duckdb_query(s->con, sql, &r) != DuckDBSuccess) {
         duck_set_err(s, duckdb_result_error(&r));

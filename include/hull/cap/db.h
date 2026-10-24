@@ -282,6 +282,18 @@ int hl_cap_db_guard_stale_txn(sqlite3 *db);
 int hl_cap_db_check_namespace(const char *sql);
 
 /**
+ * @brief Whether @p sql calls one of DuckDB's dynamic-SQL table functions -
+ * `query(sql)`, `query_table(name)`, `json_execute_serialized_sql(plan)` -
+ * which assemble a statement or a table name at run time and so get past
+ * #hl_cap_db_check_namespace (audit 25). The DuckDB backend refuses such a
+ * statement. Read conservatively: the name, bare or as a "quoted"
+ * identifier (any case), followed by `(` past whitespace and comments
+ * (nesting or not); string literals are NOT skipped, so the text inside one
+ * is refused too, and a U&"..." identifier always counts. 1 = calls one.
+ */
+int hl_cap_db_sql_calls_dynamic_sql(const char *sql);
+
+/**
  * @brief Install Hull's SQL guard on a connection: the authorizer that refuses
  *        ATTACH of a file / VACUUM INTO and the file-moving pragmas,
  *        SQLITE_DBCONFIG_DEFENSIVE, the progress handler that charges the

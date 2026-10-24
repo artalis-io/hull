@@ -292,6 +292,9 @@ UTEST(db_registry, a_network_default_without_internal_is_reported)
      * (audit 14). */
     static const char *const upper[] = {
         "PostgreSQL://u@db/app", "MYSQL://u@db/app", "MariaDB://u@db/app",
+        /* DuckDB: its dynamic-SQL table functions also got past the text
+         * check (audit 25), so the databases.internal WARN fires for it. */
+        "duckdb:///tmp/app.duckdb", "DuckDB://./app.duckdb",
     };
     for (size_t i = 0; i < sizeof upper / sizeof upper[0]; i++) {
         HlDbRegistry *r = hl_db_registry_create(NULL, upper[i], NULL);

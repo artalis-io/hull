@@ -193,10 +193,32 @@ int hl_cap_fs_open_read_fd(const HlFsConfig *cfg, const char *path,
     return fs_resolve_fd(cfg, path, HL_FS_OPEN_READ, 0, err_msg);
 }
 
+/* Drop setuid / setgid from a file about to get new content. The kernel
+ * clears them on a write only when the writer lacks CAP_FSETID, so a Hull run
+ * as root kept them - a setuid executable of the app's choosing (audit 23).
+ * -1 when they are set and cannot be cleared: the caller must not write. */
+int hl_fs_strip_setid(int fd)
+{
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+        return -1;
+    if (!(st.st_mode & (S_ISUID | S_ISGID)))
+        return 0;
+    return fchmod(fd, st.st_mode & 01777) == 0 ? 0 : -1;
+}
+
+/* Every in-place writer opens through here or fs_write_in_place, so neither
+ * can leave the bits on (audit 25: compute.stream's output did). */
 int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
                             const char **err_msg)
 {
-    return fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
+    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
+    if (fd >= 0 && hl_fs_strip_setid(fd) != 0) {
+        close(fd);
+        if (err_msg) *err_msg = "write_failed";
+        return -1;
+    }
+    return fd;
 }
 
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
@@ -293,16 +315,12 @@ static int fs_write_in_place(const HlFsConfig *cfg, const char *path,
                              const char *data, size_t len, unsigned flags,
                              const char **err_msg)
 {
-    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
+    /* Not setuid / setgid on new content, as the atomic replace already
+     * drops them (audit 22); hl_cap_fs_open_write_fd strips them (audit 23,
+     * fail closed since audit 25). */
+    int fd = hl_cap_fs_open_write_fd(cfg, path, err_msg);
     if (fd < 0)
         return -1;
-    /* Not setuid / setgid on new content, as the atomic replace already
-     * drops them (audit 22): the kernel clears them on a write only when
-     * the writer lacks CAP_FSETID, so a Hull run as root kept them - a
-     * setuid executable of the app's choosing (audit 23). */
-    struct stat st;
-    if (fstat(fd, &st) == 0 && (st.st_mode & (S_ISUID | S_ISGID)))
-        (void)fchmod(fd, st.st_mode & 01777);
     int rc = (len > 0 && data) ? fs_write_all(fd, data, len) : 0;
     if (rc == 0 && !(flags & HL_FS_WRITE_NO_SYNC) && fsync(fd) != 0)
         rc = -1;

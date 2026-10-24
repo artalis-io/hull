@@ -98,6 +98,18 @@ static void http_detached_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
     disarm_detached_deadline(ctx);
 }
 
+/* Keel's per-hop check: @p data is the ctx, which outlives its redirect
+ * client (free_driver frees the client before the ctx goes). */
+static int http_async_redirect_hop(const char *next_url, void *data)
+{
+    const HlAsyncCtx *ctx = data;
+    HlHttpRedirectGuard g = {
+        .cfg          = ctx->http_cfg,
+        .origin_https = ctx->http_origin_https,
+    };
+    return hl_http_redirect_allowed(next_url, &g);
+}
+
 /* ── KlHttpRedirectClient on_done callback ───────────────────────────── */
 
 static void on_redirect_done(KlHttpRedirectClient *rc, void *user_data)
@@ -268,9 +280,11 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
     if (http_cfg->follow_redirects) {
         KlHttpRedirectConfig redir = {
             .max_redirects    = hl_http_max_redirects(http_cfg->max_redirects),
-            .on_redirect      = hl_http_redirect_allowed,   /* every hop */
-            .on_redirect_data = http_cfg,
+            .on_redirect      = http_async_redirect_hop,    /* every hop */
+            .on_redirect_data = ctx,
         };
+        ctx->http_cfg          = http_cfg;
+        ctx->http_origin_https = parsed.is_https;
 
         ctx->free_driver = free_redirect_client;
 

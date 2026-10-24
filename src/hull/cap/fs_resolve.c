@@ -405,7 +405,6 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 while (depth > 1) close(stack[--depth]);
             memcpy(rem, next, strlen(next) + 1);
             cur = rem;
-            continue;
         }
     }
 

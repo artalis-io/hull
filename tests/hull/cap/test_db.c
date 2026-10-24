@@ -589,6 +589,44 @@ UTEST(hl_cap_db, namespace_check_blocks_hull_tables)
     ASSERT_EQ(hl_cap_db_check_namespace(NULL), HL_DB_ERR_DENIED);
 }
 
+/* Audit 25: DuckDB's query() / query_table() build a statement or a table
+ * name at run time ('_hu' || 'll_sessions'), past the text check above. */
+UTEST(hl_cap_db, dynamic_sql_calls_are_found)
+{
+    static const char *const hit[] = {
+        "SELECT * FROM query('SELECT * FROM _hu' || 'll_sessions')",
+        "SELECT * FROM query_table('_hu' || 'll_sessions')",
+        "select * from QUERY_TABLE ('x')",
+        "SELECT * FROM query/* gap */('x')",
+        "SELECT * FROM query -- gap\n ('x')",
+        "SELECT * FROM query /* /* nested */ */ ('x')",
+        "SELECT * FROM query /* /* not nested */ ('x')",
+        "SELECT * FROM \"query\"('x')",
+        "SELECT * FROM \"Query_Table\"('x')",
+        "SELECT * FROM main.query('x')",
+        "SELECT * FROM system.main.\"query\"('x')",
+        "SELECT json_execute_serialized_sql(j) FROM t",
+        "CREATE MACRO m() AS TABLE FROM query('x')",
+        "SELECT * FROM U&\"\\0071uery\"('x')",
+        "SELECT 'query(' AS s",          /* literals are not skipped: refused */
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql(hit[i]));
+
+    static const char *const miss[] = {
+        "SELECT query FROM t",
+        "SELECT query, query_table FROM t WHERE query = 1",
+        "SELECT myquery('x'), query_tables('y'), query_x('z')",
+        "SELECT \"query\" FROM t",
+        "CREATE TABLE t (query TEXT, query_table TEXT)",
+        "SELECT * FROM t",
+        "",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(miss[i]));
+    EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(NULL));
+}
+
 /* Postgres decodes U&"\005fhull_sessions" to _hull_sessions after this text
  * check has looked, so the Unicode-escape identifier form is refused. The
  * U&'...' string literal is not an identifier and stays allowed. */
