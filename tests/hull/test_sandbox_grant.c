@@ -289,7 +289,8 @@ UTEST(sandbox_tty, own_ttys_are_valid_and_unique)
 #if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
 /* Audit 25: the macOS TUI profile granted every /dev/ttys[0-9]+ and an
  * unrestricted file-ioctl. It now names /dev/tty and the process's own
- * terminals, each by literal param, and ioctl only on those. */
+ * terminals, each by literal param, and ioctl only on those - and, since
+ * audit 26, only the ioctl commands the TUI issues (no TIOCSTI). */
 UTEST(sandbox_tty, seatbelt_profile_names_only_own_ttys)
 {
     static char buf[8192];
@@ -304,8 +305,13 @@ UTEST(sandbox_tty, seatbelt_profile_names_only_own_ttys)
     EXPECT_TRUE(strstr(buf, "regex") == NULL);
     EXPECT_TRUE(strstr(buf, "ttys") == NULL);   /* never interpolated */
     EXPECT_TRUE(strstr(buf, "(allow file-ioctl)") == NULL);
-    EXPECT_TRUE(strstr(buf, "(allow file-ioctl (literal \"/dev/tty\") "
-                            "(literal (param \"TTY_0\")))") != NULL);
+    EXPECT_TRUE(strstr(buf, "(allow file-ioctl (require-all\n"
+                            "    (require-any (literal \"/dev/tty\") "
+                            "(literal (param \"TTY_0\")))\n") != NULL);
+    /* Audit 26: only the commands the TUI issues - no TIOCSTI. */
+    EXPECT_TRUE(strstr(buf, "    (ioctl-command TIOCGWINSZ TIOCGETA TIOCSETA"
+                            " TIOCSETAW TIOCSETAF)))") != NULL);
+    EXPECT_TRUE(strstr(buf, "TIOCSTI") == NULL);
     EXPECT_TRUE(strstr(buf, "(allow file-read* file-write* (literal \"/dev/tty\") "
                             "(literal (param \"TTY_0\")))") != NULL);
     EXPECT_TRUE(strstr(buf, "TTY_1") == NULL);   /* the bad path is dropped */
@@ -323,7 +329,8 @@ UTEST(sandbox_tty, seatbelt_profile_names_only_own_ttys)
     /* No terminal: /dev/tty alone. */
     ASSERT_EQ(hl_sandbox_seatbelt_profile_for_test(&p, NULL, 0, buf, sizeof buf,
                                                    params, 256), 0);
-    EXPECT_TRUE(strstr(buf, "(allow file-ioctl (literal \"/dev/tty\"))") != NULL);
+    EXPECT_TRUE(strstr(buf, "(allow file-ioctl (require-all\n"
+                            "    (require-any (literal \"/dev/tty\"))\n") != NULL);
 
     /* Not a TUI: no terminal grant at all. */
     p.tui = 0;
