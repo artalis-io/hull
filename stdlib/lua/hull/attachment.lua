@@ -69,7 +69,14 @@ local _orphan_grace = 300      -- seconds an orphaned blob waits before unlink
 function attachment.init(opts)
     opts = opts or {}
     if opts.max_size ~= nil then
-        _max_size = opts.max_size
+        -- A finite number > 0. A non-number raised mid-upload (or, a NaN,
+        -- disabled the cap) (audit 26).
+        local m = opts.max_size
+        if math.type(m) == nil or m ~= m or m <= 0 or m == math.huge then
+            error("attachment.init: max_size must be a finite number > 0 "
+                  .. "(bytes)", 2)
+        end
+        _max_size = m
     end
     if opts.orphan_grace ~= nil then
         -- > 0: delete sweeps inline, and with no grace the blob a delete

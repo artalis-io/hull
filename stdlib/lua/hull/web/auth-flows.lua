@@ -1205,7 +1205,7 @@ local function is_email_ish(s)
     -- The Unicode white space JS's \s matches too: %s is ASCII only, so an
     -- address ending in NBSP passed here, and a provider that trims it mailed
     -- one mailbox under two rate-limit keys (audit 20).
-    if _text.has_unicode_space(s) then return false end
+    if _text.has_unicode_space(s) or _text.has_c1_control(s) then return false end
     local at = s:find("@", 1, true)
     if not at or at == 1 or at == #s then return false end
     if s:find("@", at + 1, true) then return false end

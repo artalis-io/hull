@@ -207,7 +207,7 @@ Register with `app.use(method, pattern, mw)`:
 | `otp` | `hull.crypto.otp` | `hull:crypto:otp` | HOTP (RFC 4226): `hotp(key, counter, digits?)` and `step(now, period?)` for TOTP (RFC 6238). The algorithm under `hull/web/middleware/totp` |
 | `sealbox` | `hull.crypto.sealbox` | `hull:crypto:sealbox` | Versioned secretbox sealing under a keyring (`keyring` / `seal` / `open`), with an optional context bound into the sealed frame. Keys may be 32-byte strings or `crypto.key_from_env` handles; `keyring_from_env{ keys = { [1] = "VAR" }, current = 1 }` (JS `keyringFromEnv`) builds a keyring of held keys. `open` returns `value, version` or `nil, reason` in Lua and `[value, null, version]` or `[null, reason]` in JS (reason `unknown_version` or `open_failed`). Backs `hull/kv`'s `encrypt` option (see [kv_cache.md](kv_cache.md#encryption-at-rest)) and TOTP's encrypted secrets |
 | `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage (a network failure or non-200); the runtime refusing the wait (called with a transaction open, or from middleware), and a `manifest.hosts` that certainly does not admit the endpoint, are raised, not taken for an outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
-| `audit-log` | `hull.web.middleware.audit-log` | `hull:web:middleware:audit-log` | Append-only sign-in / auth event log + per-device grouping. `record(user_id, kind, req, opts)`, `list(user_id, opts)`, `list_devices(user_id, opts)`, `is_new_device(user_id, req, opts)`. Fingerprint = `sha256(family_os|ip_prefix)[:16]`. Owns `_hull_audit_log`. Composes with auth-flows (emits events when `sign_in_log = true`), with session (per-device summary via `list_devices`), or standalone for app-recorded kinds (`api_token_issued`, `admin_impersonate`, etc.) |
+| `audit-log` | `hull.web.middleware.audit-log` | `hull:web:middleware:audit-log` | Append-only sign-in / auth event log + per-device grouping. `record(user_id, kind, req, opts)`, `list(user_id, opts)`, `list_devices(user_id, opts)`, `is_new_device(user_id, req, opts)`. Fingerprint = `sha256(family_os|ip_prefix)[:16]`. Owns `_hull_audit_log`. Composes with auth-flows (emits events when `sign_in_log = true`), with session (per-device summary via `list_devices`), or standalone for app-recorded kinds (`api_token_issued`, `admin_impersonate`, etc.). `init`'s `retain_days` (`retainDays`, default 365) must be a finite number in (0, 36500]; anything else raises - `null` / `false` used to delete every row and a string disabled pruning (audit 26) |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
@@ -1009,7 +1009,7 @@ verify step between successful first-factor auth and `on_login` when
 - `transaction.try(fn)` → `(ok, err)`. Like `run` but returns error instead of throwing.
 
 **idempotency**. Idempotency-Key middleware with response caching.
-- `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`); it and the middleware's own `opts.ttl` must be a positive, finite number, or they raise (audit 15).
+- `idempotency.init(opts)`. Creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`); it and the middleware's own `opts.ttl` must be a whole number of seconds in 1..31622400 (366 days), or they raise (audit 15; the upper bound, audit 26, keeps the expiry inside a 32-bit INTEGER column on PostgreSQL / MySQL).
 - `idempotency.middleware(opts)`. Post-body middleware intercepting POST (configurable via `opts.methods`).
   - `opts.header_name`. Header to read key from (default: `"idempotency-key"`).
   - `opts.get_principal`. `function(req) -> string|number` for per-user scoping. Whatever it (or the default) returns is stored as text (audit 10): `nil` / `false` / `""` is `"__anon"`, a number its decimal string (a number reached MySQL's VARCHAR column as a number, which compared it numerically), a principal over 255 characters - or one already spelled `sha256:...` - becomes `"sha256:" ..` the hex SHA-256 of itself (it failed the insert, or a lax MySQL truncated it so two principals shared keys), and any other type (a table / object, a Promise) is an error. Default: `"session:" ..` the session's `user_id`, else `"user:" ..` the first of the JWT user's `sub` / `id` / `user_id` that is an id, else `"__anon"` - each id read as the stdlib reads user ids everywhere (a non-empty string as is, an integer - Lua `42.0` too - as its decimal string; `""`, a fraction or a table is no id), the same in both runtimes (audit 23) (shared by every anonymous caller: mount the middleware after authentication; it logs a warning once when 20 keyed requests in a row were anonymous). A **custom** `get_principal` that returns `nil` / `false` / `""` (JS: `null` / `undefined` / `false` / `""`) no longer shares `"__anon"` (audit 11): that request skips the idempotency layer - the handler runs, nothing is stored or replayed - and a warning is logged once per middleware. A lookup that failed must not let every caller it could not identify replay each other's responses; return `"__anon"` explicitly to share one scope. Session principals were the bare `user_id` before audit 9, so a session user whose id read `user:5` shared JWT user 5's keys; a key stored for a session user before the upgrade is not replayed after it (it simply expires).
@@ -1048,7 +1048,7 @@ verify step between successful first-factor auth and `on_login` when
 - `outbox.cleanup(max_age)`. Delete old delivered items.
 
 **inbox**. Inbox deduplication for incoming events/webhooks.
-- `inbox.init(opts)`. Creates `_hull_inbox_processed` table. `opts.ttl` = record lifetime (default: `86400`); it and the per-call `{ ttl }` of `mark_processed` / `check_and_mark` must be a positive, finite number, or they raise (audit 15).
+- `inbox.init(opts)`. Creates `_hull_inbox_processed` table. `opts.ttl` = record lifetime (default: `86400`); it and the per-call `{ ttl }` of `mark_processed` / `check_and_mark` must be a whole number of seconds in 1..31622400 (366 days), or they raise (audit 15, audit 26).
 - `inbox.is_duplicate(message_id, source?)` → boolean. Default source: `"default"`. `message_id` and `source` are strings or integers (an integer is stored as its decimal string, so `42` and `"42"` are the same source); any other type, or one over 255 characters, raises (audit 10 added the check for `source`).
 - `inbox.mark_processed(message_id, source?, opts?)`. Record as processed.
 - `inbox.check_and_mark(message_id, source?, opts?)` → boolean (true = duplicate, false = new + marked).
@@ -1194,8 +1194,30 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `search.remove(name, id)`. Delete document.
 - `search.query(name, query, opts?)`. Full-text search. Returns `{id, rank}` array.
   - `opts.limit` (default: 20), `opts.offset` (default: 0)
+  - `opts.limit` is an integer in 1..1000, `opts.offset` an integer >= 0,
+    and `opts.max_query_len` (`maxQueryLen`, default 1024) /
+    `opts.max_query_terms` (`maxQueryTerms`, default 64) positive integers;
+    a string (`"-1"` from a query parameter), a fraction, NaN or a value out
+    of range raises - convert and clamp request input first (audit 26).
 - `search.reindex(name, source_table, opts?)`. Bulk re-index from table.
 - `search.drop_index(name)`. Drop FTS5 table.
+
+**Option validation (audit 26).** Options that bound work or retention raise
+on a bad value instead of silently turning the bound off:
+- `attachment.init`'s `max_size` (`maxSize`) is a finite number > 0 (JS:
+  or `null` for unlimited).
+- `jobs`: `max_attempts` (`maxAttempts`; `init`, `enqueue`, `cron`) is an
+  integer in 1..10000 (a NaN or string retried for ever); `enqueue`'s
+  `priority` an integer, `throttle` a finite number of seconds >= 0 and
+  `concurrency` a whole number >= 0; `cleanup`'s `before` a finite unix
+  timestamp (a string deleted every terminal job) and `older_than`
+  (`olderThan`) a finite number of seconds >= 0.
+- `email.send` refuses an address holding a C1 control character
+  (U+0080-009F, including NEL) or a Unicode line / space separator, as the
+  auth-flows address check does, in both runtimes.
+- `htmx.form`'s `field_error` / `field_attrs` (`fieldError` / `fieldAttrs`)
+  read only the errors object's own keys: a field named `constructor` or
+  `toString` no longer renders an inherited value.
 
 **rbac**. Role-based access control backed by SQLite.
 - `rbac.init()`. Creates `_hull_roles`, `_hull_permissions`, `_hull_role_permissions`, `_hull_user_roles` tables.

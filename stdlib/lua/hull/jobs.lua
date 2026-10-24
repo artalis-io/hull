@@ -179,6 +179,31 @@ local function duration_opt(name, v, who)
     return n
 end
 
+-- max_attempts (init / enqueue / cron): an integer in 1..MAX_ATTEMPTS_CAP. A
+-- non-number raised mid-retry, NaN made `attempts >= max` always false - the
+-- job retried for ever - and 0 or a negative dead-lettered it before its
+-- first run (audit 26). The JS twin's attemptsOpt.
+local MAX_ATTEMPTS_CAP = 10000
+local function attempts_opt(v, who)
+    local n = type(v) == "number" and math.tointeger(v) or nil
+    if n == nil or n < 1 or n > MAX_ATTEMPTS_CAP then
+        error(who .. ": max_attempts must be an integer in [1, "
+              .. MAX_ATTEMPTS_CAP .. "], got " .. tostring(v), 3)
+    end
+    return n
+end
+
+-- priority (enqueue / cron): nil is 0, else an integer that fits the INTEGER
+-- column (audit 26).
+local function priority_opt(v, who)
+    if v == nil then return 0 end
+    local n = type(v) == "number" and math.tointeger(v) or nil
+    if n == nil or n < -2147483647 or n > 2147483647 then
+        error(who .. ": priority must be an integer, got " .. tostring(v), 3)
+    end
+    return n
+end
+
 -- A caller-supplied list of strings (statuses), copied with raw access into
 -- a fresh array: every key must be an integer 1..n with no hole and every
 -- value a string, else it raises - the JS sibling's callerStrings rule
@@ -225,7 +250,9 @@ end
 -- @treturn table the jobs module (for chaining)
 function jobs.init(opts)
     opts = opts or {}
-    if opts.max_attempts ~= nil then _cfg.max_attempts = opts.max_attempts end
+    if opts.max_attempts ~= nil then
+        _cfg.max_attempts = attempts_opt(opts.max_attempts, "jobs.init")
+    end
     if opts.visibility_timeout ~= nil then
         _cfg.visibility_timeout = duration_opt("visibility_timeout", opts.visibility_timeout)
     end
@@ -684,10 +711,23 @@ function jobs.enqueue(job_type, data, opts)
     -- Windowed throttle: skip (return nil) if a job of this (queue, type) was
     -- created within the last `throttle` seconds. Best-effort - keyed by
     -- (queue, type), no unique constraint (use dedup_key for exact-once).
-    if opts.throttle and opts.throttle > 0 then
+    -- A throttle that is not a finite number >= 0 is refused (audit 26).
+    local throttle = opts.throttle ~= nil
+        and duration_opt("throttle", opts.throttle, "jobs.enqueue") or 0
+    local priority = priority_opt(opts.priority, "jobs.enqueue")
+    local max_attempts = opts.max_attempts ~= nil
+        and attempts_opt(opts.max_attempts, "jobs.enqueue") or _cfg.max_attempts
+    -- concurrency: a whole number >= 0 (0 = no cap) (audit 26).
+    if opts.concurrency ~= nil then
+        local c = type(opts.concurrency) == "number" and math.tointeger(opts.concurrency)
+        if not c or c < 0 or c > 2147483647 then
+            error("jobs.enqueue: concurrency must be a whole number >= 0", 2)
+        end
+    end
+    if throttle > 0 then
         local hit = db.query(
             "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
-            { opts.queue or "default", job_type, now - opts.throttle })
+            { opts.queue or "default", job_type, now - throttle })
         if hit and #hit > 0 then return nil end
     end
     -- The dependency ids, copied and checked: whole, positive, distinct. A
@@ -726,8 +766,8 @@ function jobs.enqueue(job_type, data, opts)
         opts.queue or "default",
         job_type,
         data ~= nil and json.encode(data) or nil,
-        opts.priority or 0,
-        opts.max_attempts or _cfg.max_attempts,
+        priority,
+        max_attempts,
         run_at,
         opts.dedup_key,
         now, now,
@@ -1791,14 +1831,16 @@ function jobs.cron(name, spec, data, opts)
     local job_type = opts.type or name
     local payload  = data ~= nil and json.encode(data) or nil
     local queue    = opts.queue or "default"
-    local priority = opts.priority or 0
+    local priority = priority_opt(opts.priority, "jobs.cron")
+    local max_attempts = opts.max_attempts ~= nil
+        and attempts_opt(opts.max_attempts, "jobs.cron") or nil
     -- One statement: UPDATE-then-INSERT raced - two callers both updated
     -- nothing and the second INSERT failed on the key.
     db.upsert("_hull_cron", { "name" },
         { "name", "spec", "type", "payload", "queue", "priority",
           "max_attempts", "next_run_at", "tz_offset", "last_error", "updated_at" },
         { name, spec, job_type, payload, queue, priority,
-          opts.max_attempts, nxt, tz_offset, nil, now })
+          max_attempts, nxt, tz_offset, nil, now })
     return jobs
 end
 
@@ -3303,7 +3345,17 @@ function jobs.cleanup(opts)
     if opts.statuses ~= nil then
         statuses, ns = caller_strings(opts.statuses, "jobs.cleanup: statuses")
     end
-    local cutoff = opts.before or (time.now() - (opts.older_than or 604800))
+    -- `before` must be a finite number (a unix timestamp): a string compared
+    -- greater than every integer `updated_at` and deleted every terminal job
+    -- (audit 26). `older_than` is a duration >= 0.
+    local before = opts.before
+    if before ~= nil and (type(before) ~= "number" or before ~= before
+                          or before == math.huge or before == -math.huge) then
+        error("jobs.cleanup: before must be a finite unix timestamp", 2)
+    end
+    local older_than = opts.older_than ~= nil
+        and duration_opt("older_than", opts.older_than, "jobs.cleanup") or nil
+    local cutoff = before or (time.now() - (older_than or 604800))
     local placeholders, params = {}, {}
     for i = 1, ns do
         placeholders[i] = "?"
@@ -3326,7 +3378,7 @@ function jobs.cleanup(opts)
     db.exec("DELETE FROM _hull_workflow_signals WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)")
     -- Attempt history is retained by AGE (it outlives the job on purpose, for
     -- post-hoc metrics), not by orphan-ness.
-    local hr = _cfg.history_retention or opts.older_than or 604800
+    local hr = _cfg.history_retention or older_than or 604800
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", { (time.now() - hr) * 1000 })
     -- Durable event log: retained by age, but NEVER past an unconsumed event -
     -- min(cursor) across subscriptions is the safe watermark. No subscriptions ->
