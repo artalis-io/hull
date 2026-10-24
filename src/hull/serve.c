@@ -84,6 +84,7 @@
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
 #include "hull/static.h"
 #include "hull/tool.h"
+#include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
@@ -921,6 +922,14 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
                          s->app_dir, HL_DEFAULT_DB_PATH);
         if (n > 0 && (size_t)n < sizeof(s->default_db))
             s->cfg.db_path = s->default_db;
+        /* The implicit default only (an explicit -d is the operator's): a
+         * cloned app committing data.db -> ../other.sqlite had it opened,
+         * migrated and served (audit 25). */
+        char why[sizeof(s->default_db) + 160];
+        if (hl_default_db_path_check(s->cfg.db_path, why, sizeof why) != 0) {
+            fprintf(stderr, "hull: %s\n", why);
+            return -1;
+        }
     }
 
     return 0;

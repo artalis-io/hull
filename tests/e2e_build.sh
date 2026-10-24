@@ -778,11 +778,21 @@ APPEOF
 printf '<p>{{ x }}</p>\n' > "$RICH/templates/base.html"
 printf 'body { margin: 0 }\n' > "$RICH/static/style.css"
 printf 'CREATE TABLE rich (x INTEGER);\n' > "$RICH/migrations/001_init.sql"
+# A nested .sql never runs in dev / hull test / hull migrate (one level), so
+# the build must not embed it either (audit 25).
+mkdir -p "$RICH/migrations/down"
+printf 'DROP TABLE rich;\n' > "$RICH/migrations/down/001_init.sql"
 printf '@compute @workgroup_size(1) fn main() {}\n' > "$RICH/shaders/noop.wgsl"
 cp "$SRCDIR/examples/compute/compute/echo.wasm" "$RICH/compute/echo.wasm"
 
 hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$RICH/richapp" "$RICH"; BUILD_OUT=$OUT
 check_exit "rich signed build exits 0" 0 $RC
+check_contains "build names the nested .sql it skips" "$BUILD_OUT" "down/001_init.sql"
+if grep -a -q 'migrations/down/001_init.sql' "$RICH/richapp"; then
+    fail "build embedded migrations/down/001_init.sql"
+else
+    pass "build embeds only top-level migrations"
+fi
 
 (cd "$RICH" && exec ./richapp --verify-sig "$WORKDIR/developer.pub" --hull-no-verify-platform -p 19879) >"$WORKDIR/rich.log" 2>&1 &
 SERVER_PID=$!

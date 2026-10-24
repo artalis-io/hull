@@ -464,10 +464,29 @@ local function find_all_files(dir)
     return tool.find_files(dir, "*", { include_vendor = true })
 end
 
--- List .sql files in a directory (non-recursive, sorted)
+-- List the top-level .sql files in a migrations directory, sorted: the set
+-- `hull dev` / `hull test` / `hull migrate` read (discover_fs_migrations).
+-- tool.find_files recurses, so a nested migrations/down/*.sql was embedded
+-- and run only in the built binary (audit 25); those are skipped, named.
 local function find_sql_files(dir)
-    local files = tool.find_files(dir, "*.sql")
+    local files, skipped = {}, {}
+    local prefix = dir .. "/"
+    for _, f in ipairs(tool.find_files(dir, "*.sql")) do
+        local rest = f:sub(1, #prefix) == prefix and f:sub(#prefix + 1) or f
+        if rest:find("[/\\]") then
+            skipped[#skipped + 1] = rest
+        else
+            files[#files + 1] = f
+        end
+    end
     table.sort(files)
+    if #skipped > 0 then
+        table.sort(skipped)
+        print("hull build: warning: skipping " .. #skipped .. " .sql file(s) " ..
+              "in subdirectories of " .. dir .. " (only top-level " ..
+              "migrations run, as in development): " ..
+              table.concat(skipped, ", "))
+    end
     return files
 end
 

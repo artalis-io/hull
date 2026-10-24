@@ -28,9 +28,10 @@ local function find_args(args)
             app_dir = a; i = i + 1
         end
     end
-    -- The app's database, as the plain `hull migrate status` opens it: the
-    -- default was data.db in the WORKING directory (audit 23).
-    return app_dir, db_path or (app_dir .. "/data.db")
+    -- No -d: tool.migrate_status opens the app's <app_dir>/data.db, as the
+    -- plain `hull migrate status` does (audit 23), and refuses it when it is
+    -- a symbolic link (audit 25).
+    return app_dir, db_path
 end
 
 local app_dir, db_path = find_args(arg or {})

@@ -450,11 +450,21 @@ local function main()
             goto continue_files
         end
         local path = app_dir .. "/" .. name
-        local data = read_file(path)
-        if not data and name:match("^compute/.+%.aot%.") then
+        local is_aot = name:match("^compute/.+%.aot%.") ~= nil
+        local data
+        if is_aot and sig.binary_hash then
             -- A build artifact (made in the build's tmpdir, only embedded):
-            -- not beside the source. Covered by binary_hash below - which
-            -- must then actually be checked.
+            -- covered by binary_hash below - which must then actually be
+            -- checked. Never hashed from disk: a committed compute/<m>.aot.<arch>
+            -- is left out of the binary (unless --trust-prebuilt-aot, when
+            -- binary_hash covers it as embedded), the build signs the AOT it
+            -- compiled under the same name, and the disk file reported a
+            -- correctly signed app as modified (audit 25).
+            aot_unchecked = aot_unchecked + 1
+            goto continue_files
+        end
+        data = read_file(path)
+        if not data and is_aot then
             aot_unchecked = aot_unchecked + 1
         elseif not data then
             missing[#missing + 1] = name

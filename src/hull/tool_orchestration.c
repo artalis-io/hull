@@ -399,6 +399,8 @@ static int l_tool_agent_context(lua_State *L)
 #include "hull/runtime/tool.h"     /* hl_lua_tool_unveil_ctx */
 #include "hull/sandbox.h"          /* hl_sandbox_db_path */
 #include "hull/vfs.h"
+#include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
+#include <limits.h>
 
 extern const HlEntry hl_app_entries[];
 
@@ -407,7 +409,27 @@ extern const HlEntry hl_app_entries[];
 static int l_tool_migrate_status(lua_State *L)
 {
     const char *app_dir = luaL_optstring(L, 1, ".");
-    const char *db_path = luaL_optstring(L, 2, "data.db");
+    const char *db_path = luaL_optstring(L, 2, NULL);
+
+    /* No db_path: the app's <app_dir>/data.db, which must be the app's own
+     * file - a committed symlink pointed it at another database (audit 25).
+     * An explicit db_path is followed. */
+    char default_db[PATH_MAX];
+    if (!db_path) {
+        int n = snprintf(default_db, sizeof default_db, "%s/data.db", app_dir);
+        if (n < 0 || (size_t)n >= sizeof default_db) {
+            lua_pushnil(L);
+            lua_pushstring(L, "app directory path too long");
+            return 2;
+        }
+        char why[PATH_MAX + 160];
+        if (hl_default_db_path_check(default_db, why, sizeof why) != 0) {
+            lua_pushnil(L);
+            lua_pushstring(L, why);
+            return 2;
+        }
+        db_path = default_db;
+    }
 
     /* A SQLite file the tool sandbox lets this VM read, nothing else
      * (audit 23): the open went past the allowlist every other tool path

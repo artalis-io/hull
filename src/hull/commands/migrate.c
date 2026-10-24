@@ -18,6 +18,8 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap + raw */
 #include "hull/tool.h"
+#include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
+#include <limits.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -187,6 +189,13 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
             return 1;
         }
         db_path = default_db;
+        /* Only the implicit default: a committed data.db symlink pointed
+         * this (unsandboxed) command at another database (audit 25). */
+        char why[PATH_MAX + 160];
+        if (hl_default_db_path_check(db_path, why, sizeof why) != 0) {
+            fprintf(stderr, "hull migrate: %s\n", why);
+            return 1;
+        }
     }
 
     /* Status subcommand */
