@@ -584,6 +584,69 @@ await test("a21: isEmailIsh checks the unit after a lone high surrogate", async 
     assertEq(isEmailIsh("a😀@x.test"), true, "a real pair still counts");
 });
 
+// ── Audit 25: a verify link is bound to the account's address ────────
+
+function mkGet(query) {
+    return { method: "GET", path: "/auth/verify", query: query || {},
+             headers: { host: "app.test", "sec-fetch-site": "same-origin" },
+             ctx: {}, remote_addr: "192.0.2.7" };
+}
+
+await test("a25: a verify link mailed before an email change is refused", async () => {
+    resetStore(); init();
+    const u = addUser(25, "old25@x.test", "first-password-1", false);
+    const keptHash = u.password_hash;
+    await H.verifyResend(mkReq({ email: "old25@x.test" }), mkRes());
+    const old = tokenIn("old25@x.test");
+    assertEq(typeof old, "string", "verify link mailed");
+    // The address changes while the account is unverified (the app's own
+    // flow, an admin); the old mailbox still holds the link.
+    S.byEmail.delete(fold(u.email)); u.email = "new25@x.test"; S.byEmail.set(fold(u.email), u);
+    let res = mkRes();
+    H.verifyPage(mkGet({ token: old }), res);
+    assertEq(res.code, 400, "GET refused");
+    res = mkRes();
+    await H.verify(mkReq({ token: old, new_password: "attacker-password-1" }), res);
+    assertEq(res.code, 400, "new_password refused");
+    assertEq(u.password_hash, keptHash, "password kept");
+    assertEq(u.email_verified, false, "still unverified");
+    res = mkRes();
+    await H.verify(mkReq({ token: old, password: "first-password-1" }), res);
+    assertEq(res.code, 400, "password refused");
+    assertEq(u.email_verified, false, "still unverified");
+    // A link mailed to the current address works.
+    await H.verifyResend(mkReq({ email: "new25@x.test" }), mkRes());
+    const cur = tokenIn("new25@x.test");
+    res = mkRes();
+    H.verifyPage(mkGet({ token: cur }), res);
+    assertEq(res.code, 200, "current link renders");
+    res = mkRes();
+    await H.verify(mkReq({ token: cur, password: "first-password-1" }), res);
+    assertEq(res.body && res.body.ok, true, "current link verifies");
+    assertEq(u.email_verified, true, "verified");
+});
+
+await test("a25: an ASCII case change of the address keeps the link", async () => {
+    resetStore(); init();
+    const u = addUser(26, "case26@x.test", "first-password-1", false);
+    await H.verifyResend(mkReq({ email: "case26@x.test" }), mkRes());
+    const tok = tokenIn("case26@x.test");
+    u.email = "Case26@X.test";
+    const res = mkRes();
+    await H.verify(mkReq({ token: tok, password: "first-password-1" }), res);
+    assertEq(res.body && res.body.ok, true, "verifies");
+});
+
+await test("a25: sendVerifyEmail takes a user whose id is 0", async () => {
+    resetStore(); init();
+    const u = addUser(0, "zero@x.test", "first-password-1", false);
+    authFlows.sendVerifyEmail(u, "https://app.test");
+    assertEq(sentTo("zero@x.test"), 1, "mailed");
+    let threw = false;
+    try { authFlows.sendVerifyEmail({ email: "x@x.test" }, ""); } catch (_e) { threw = true; }
+    assertEq(threw, true, "no id still refused");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;
 console.log("auth audit 12: " + pass + " passed, " + fail + " failed");

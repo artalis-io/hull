@@ -204,6 +204,11 @@ function passwordBinding(user) {
 
 function resetTokenExtra(user) { return { pwb: passwordBinding(user) }; }
 
+// A verify link is bound to the address it was mailed to, as a magic link
+// is (audit 25): after an unverified account's email changes, the holder of
+// the old mailbox could otherwise verify it - with new_password, take it.
+function verifyTokenExtra(user) { return { eb: emailBinding(user) }; }
+
 function resetBindingHolds(env, user) {
     const current = user && typeof user.email === "string"
         ? findByEmail(user.email) : null;
@@ -1156,7 +1161,8 @@ function registerAccount(req, res, body) {
         const uid = createUser(body.email, pwHash);
         const user = getUser(uid);
         if (!user) throw new Error("userCreate returned an id that userGet cannot resolve");
-        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl,
+            verifyTokenExtra(user));
         if (origin) {
             const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
             sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
@@ -1182,7 +1188,8 @@ function handleVerifyResend(req, res) {
     const to = user.email;
     const origin = originFor(req);
     afterResponse(() => {
-        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+        const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl,
+            verifyTokenExtra(user));
         if (origin) {
             const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
             sendEmail(to, "welcome", { user, verify_url: verifyUrl, token });
@@ -1250,7 +1257,8 @@ function handleVerifyPage(req, res) {
         return secureHtml(res).status(400).html("verification failed: replayed");
     }
     const user = getUser(r[0].sub);
-    if (!user) return secureHtml(res).status(400).html("verification failed");
+    if (!user || r[0].eb !== emailBinding(user))
+        return secureHtml(res).status(400).html("verification failed");
     if (isVerified(user)) return res.redirect(_state.verifyRedirect);
     if (_state.verifyFormRedirect) {
         const sep = _state.verifyFormRedirect.indexOf("?") >= 0 ? "&" : "?";
@@ -1273,7 +1281,8 @@ async function handleVerify(req, res) {
         return verifyFail(req, res, 400, "verification failed: replayed");
     }
     const user = getUser(env.sub);
-    if (!user) return verifyFail(req, res, 400, "verification failed");
+    if (!user || env.eb !== emailBinding(user))
+        return verifyFail(req, res, 400, "verification failed");
     const uid = userId(user);
     if (isVerified(user)) {
         markTokenUsed(token, env.exp);
@@ -1552,7 +1561,8 @@ function handleMagicLinkConsume(req, res) {
     if (!isVerified(user)) {
         const uid = userId(user);
         if (storedPasswordHash(user) !== null) {
-            const vtok = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+            const vtok = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl,
+                verifyTokenExtra(user));
             gcExpired();
             if (_state.verifyFormRedirect) {
                 const sep = _state.verifyFormRedirect.indexOf("?") >= 0 ? "&" : "?";
@@ -2555,8 +2565,11 @@ function routes(app) {
 function sendVerifyEmail(user, verifyUrlPrefix) {
     if (!_state.initialized) throw new Error("auth-flows: call init() first");
     const uid = userId(user);
-    if (!uid) throw new Error("auth-flows.sendVerifyEmail: user with id required");
-    const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+    // An id of 0 is an id (audit 25), as handleEmailChange reads it.
+    if (_request.userId(uid) === null)
+        throw new Error("auth-flows.sendVerifyEmail: user with id required");
+    const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl,
+        verifyTokenExtra(user));
     const verifyUrl = (verifyUrlPrefix || "") + _state.prefix
         + "/verify?token=" + token;
     sendEmail(user.email, "welcome", { user, verify_url: verifyUrl, token });
@@ -2652,6 +2665,8 @@ const _test = {
         passwordResetRequest: handlePasswordResetRequest,
         verifyResend: handleVerifyResend,
         magicLinkConsume: handleMagicLinkConsume,
+        verifyPage: handleVerifyPage,
+        verify: handleVerify,
     },
     ACTIONS,
     emailRateAllow: (to, exact) => emailRateAllow(to, exact),

@@ -55,6 +55,33 @@ local outbox = {}
 
 local _max_attempts = 5
 
+-- max_attempts lands in an INTEGER column and is compared with the attempt
+-- count: a whole number, 0 (no retries) up to int4's maximum - the JS
+-- twin's rule (audit 25; a string or a fraction was bound as given).
+local MAX_ATTEMPTS_MAX = 2147483647
+local function check_max_attempts(v, where)
+    local n = type(v) == "number" and math.tointeger(v) or nil
+    if n == nil or n < 0 or n > MAX_ATTEMPTS_MAX then
+        error(where .. ": max_attempts must be a whole number >= 0", 3)
+    end
+    return n
+end
+
+-- The first attempt's delay: a finite number of seconds or a numeric
+-- string, as whole seconds (next_attempt_at is an INTEGER column; a
+-- fractional delay went to Postgres as a double; audit 25).
+local DELAY_MAX = 2 ^ 52
+local function delay_secs(v)
+    if v == nil then return 0 end
+    local n = (type(v) == "number" or type(v) == "string") and tonumber(v) or nil
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error("outbox.enqueue: delay must be a finite number of seconds", 3)
+    end
+    if n > DELAY_MAX then n = DELAY_MAX end
+    if n < -DELAY_MAX then n = -DELAY_MAX end
+    return math.ceil(n)
+end
+
 --- Initialize the `_hull_outbox` table.
 --
 -- Idempotent - safe to call on every boot.
@@ -68,7 +95,7 @@ function outbox.init(opts)
     -- M-2: explicit nil check; opts.max_attempts == 0 (no retries) must
     -- override the default.
     if opts.max_attempts ~= nil then
-        _max_attempts = opts.max_attempts
+        _max_attempts = check_max_attempts(opts.max_attempts, "outbox.init")
     end
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_outbox ("
@@ -124,8 +151,11 @@ function outbox.enqueue(opts)
     end
 
     local now = time.now()
-    local max = opts.max_attempts or _max_attempts
-    local delay = opts.delay or 0
+    local max = _max_attempts
+    if opts.max_attempts ~= nil then
+        max = check_max_attempts(opts.max_attempts, "outbox.enqueue")
+    end
+    local delay = delay_secs(opts.delay)
 
     local sql = "INSERT INTO _hull_outbox (kind, destination, payload, headers, idempotency_key, max_attempts, next_attempt_at, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)"
     local vals = { opts.kind, opts.destination, opts.payload, opts.headers, opts.idempotency_key, max, now + delay, now }

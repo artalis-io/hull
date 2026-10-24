@@ -44,6 +44,31 @@ function hasHeader(headers, want) {
     return false;
 }
 
+// maxAttempts lands in an INTEGER column and is compared with the attempt
+// count: a whole number, 0 (no retries) up to int4's maximum. A string or a
+// fraction was bound as given (audit 25).
+const MAX_ATTEMPTS_MAX = 2147483647;
+function checkMaxAttempts(v, where) {
+    if (!Number.isInteger(v) || v < 0 || v > MAX_ATTEMPTS_MAX)
+        throw new TypeError(where + ": maxAttempts must be a whole number >= 0");
+    return v;
+}
+
+// The first attempt's delay: a finite number of seconds or a numeric string,
+// as whole seconds (next_attempt_at is an INTEGER column). `now + "60"`
+// concatenated to "170000000060" (audit 25).
+const DELAY_MAX = 2 ** 52;
+function delaySecs(v) {
+    if (v === undefined || v === null) return 0;
+    let n = v;
+    if (typeof n === "string" && n.trim() !== "") n = Number(n);
+    if (typeof n !== "number" || !Number.isFinite(n))
+        throw new TypeError("outbox.enqueue: delay must be a finite number of seconds");
+    if (n > DELAY_MAX) n = DELAY_MAX;
+    if (n < -DELAY_MAX) n = -DELAY_MAX;
+    return Math.ceil(n);
+}
+
 /**
  * Initialize the `_hull_outbox` SQLite table. Idempotent.
  *
@@ -53,7 +78,7 @@ function hasHeader(headers, want) {
  */
 function init(opts) {
     const o = opts || {};
-    if (o.maxAttempts !== undefined) maxAttempts = o.maxAttempts;
+    if (o.maxAttempts !== undefined) maxAttempts = checkMaxAttempts(o.maxAttempts, "outbox.init");
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_outbox (" +
@@ -116,8 +141,9 @@ function enqueue(opts) {
         throw new Error("outbox.enqueue requires opts.payload");
 
     const now = time.now();
-    const max = opts.maxAttempts !== undefined ? opts.maxAttempts : maxAttempts;
-    const delay = opts.delay || 0;
+    const max = opts.maxAttempts !== undefined
+        ? checkMaxAttempts(opts.maxAttempts, "outbox.enqueue") : maxAttempts;
+    const delay = delaySecs(opts.delay);
 
     const sql = "INSERT INTO _hull_outbox " +
         "(kind, destination, payload, headers, idempotency_key, max_attempts, next_attempt_at, state, created_at) " +

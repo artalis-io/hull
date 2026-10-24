@@ -838,6 +838,9 @@ verify step between successful first-factor auth and `on_login` when
     `opts.totp_disable(user_id)`, typically `totp.disable`; without the
     hook an existing enrolment is only logged and `on_password_reset` must
     remove it), and sessions (`on_password_reset`). Verified is set last.
+  A verify link is bound to the address it was mailed to, as magic and
+  reset links are: once the account's email changes, a link still in the
+  old mailbox is refused like an invalid token (audit 25).
   An already-verified account just consumes the token. A magic link to an
   unverified account that has a password shows the same verify step
   instead of signing in (a passwordless account is simply verified), and
@@ -1031,13 +1034,14 @@ verify step between successful first-factor auth and `on_login` when
 - `idempotency.cleanup()` → count of deleted expired keys.
 
 **outbox**. Transactional outbox for reliable side-effect delivery.
-- `outbox.init(opts)`. Creates `_hull_outbox` table. `opts.max_attempts` (default: `5`).
+- `outbox.init(opts)`. Creates `_hull_outbox` table. `opts.max_attempts` (default: `5`; a whole number >= 0, else an error - audit 25).
 - `outbox.enqueue(opts)`. Enqueue a delivery (call inside a transaction).
   - `opts.kind`. Delivery type (e.g. `"webhook"`, `"email"`).
   - `opts.destination`. Target URL or address.
   - `opts.payload`. Payload string.
   - `opts.headers`. JSON-encoded headers (optional).
   - `opts.idempotency_key`. Dedup key for delivery (optional).
+  - `opts.max_attempts` (whole number >= 0) and `opts.delay` (seconds: a finite number or a numeric string, rounded up to whole seconds; anything else is an error / TypeError - audit 25).
 - `outbox.flush(opts)`. Deliver pending items. Exponential backoff (`2^attempt * 10s`, capped at 1hr). Delivery waits on the network, so flush raises inside `db.batch` / an open transaction, and the runtime's refusal to wait (middleware, outside a handler) is raised with the row left pending, never counted as a failed attempt (audit 18).
 - `outbox.middleware()`. Sets `req.ctx._outbox_flush = true` for auto-flush.
 - `outbox.stats()` → `{ pending, delivered, failed }` counts.

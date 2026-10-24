@@ -617,6 +617,10 @@ Returns the new job id, or `nil` when a `dedup_key` collapsed it (or a
 `throttle` window suppressed it). JS keys are camelCase (`runAt`, `maxAttempts`,
 `dedupKey`, `concurrencyKey`, `concurrencyStrict`). `throttle` is best-effort (keyed by `(queue, type)`, no unique
 constraint - use `dedup_key` for exact-once).
+`delay` / `at` / `run_at` are seconds: a finite number or a numeric string,
+rounded up to whole seconds; anything else is an error (a TypeError in JS) -
+a string `delay` concatenated onto `now` in JS (audit 25). `nil` / `null` is
+absent.
 A `dedup_key` blocks only while a job with it is unfinished: the next enqueue of
 a key whose job is `done`, `dead` or `compensated` releases it from that row and
 inserts a new job. (Before, the finished row kept the key until cleanup purged
