@@ -141,11 +141,18 @@ local MAX_KEY_LEN = 255
 -- A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
 -- ("86400") was coerced here while the JS twin concatenated it onto the
 -- expiry. Same rule as the JS twin and auth.login; anything else raises.
+--
+-- It is also a whole number of seconds no larger than MAX_TTL (366 days;
+-- audit 26): an unbounded one made `now + ttl` overflow a 32-bit INTEGER
+-- expiry column on PostgreSQL / MySQL (and run past 2038).
+local MAX_TTL = 31622400
 local function check_ttl(who, v)
-    if not (type(v) == "number" and v > 0 and v < math.huge) then
-        error(who .. " must be a positive number of seconds", 3)
+    local n = type(v) == "number" and math.tointeger(v) or nil
+    if not (n and n > 0 and n <= MAX_TTL) then
+        error(who .. " must be a whole number of seconds in [1, "
+              .. MAX_TTL .. "]", 3)
     end
-    return v
+    return n
 end
 
 --- Initialize the `_hull_idempotency_keys` SQLite table.

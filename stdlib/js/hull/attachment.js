@@ -57,7 +57,18 @@ let orphanGrace = 300;       // seconds an orphaned blob waits before unlink
  */
 function init(opts) {
     const o = opts || {};
-    if (o.maxSize !== undefined) maxSize = o.maxSize;
+    if (o.maxSize !== undefined) {
+        // null = unlimited; anything else must be a finite number > 0. A
+        // string or NaN made `size > maxSize` always false and silently
+        // disabled the cap (audit 26).
+        if (o.maxSize !== null
+            && (typeof o.maxSize !== "number" || !Number.isFinite(o.maxSize)
+                || o.maxSize <= 0)) {
+            throw new Error("attachment.init: maxSize must be a finite number > 0 "
+                + "(bytes), or null for unlimited");
+        }
+        maxSize = o.maxSize;
+    }
     if (o.orphanGrace !== undefined) {
         // > 0: delete sweeps inline, and with no grace the blob a delete
         // queued inside the app's own (uncommitted) db.batch was unlinked at

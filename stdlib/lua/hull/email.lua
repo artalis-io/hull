@@ -70,6 +70,7 @@ local function addr_ok(a)
        -- and no Unicode white space, which the JS twin's \s refuses
        -- (audit 21; auth-flows' check since audit 20).
        and not _text.has_unicode_space(a)
+       and not _text.has_c1_control(a)
 end
 
 -- opts.cc as a list of strings: a string is one recipient. (postmark raised

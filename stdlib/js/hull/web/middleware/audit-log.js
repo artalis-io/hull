@@ -55,7 +55,18 @@ function init(opts) {
             + "it invalidates existing fingerprints.");
     }
     _state.fingerprintSalt = opts.fingerprintSalt;
-    if (opts.retainDays !== undefined) _state.retainDays = opts.retainDays;
+    // retainDays: undefined keeps the default (365). Anything else must be
+    // a finite number in (0, 36500]: null / false used to coerce to 0 and
+    // a cutoff of "now" deleted every row, and a string made the cutoff NaN
+    // and disabled pruning (audit 26).
+    if (opts.retainDays !== undefined) {
+        const d = opts.retainDays;
+        if (typeof d !== "number" || !Number.isFinite(d) || d <= 0 || d > 36500) {
+            throw new Error("auditLog.init: retainDays must be a number in "
+                + "(0, 36500] (days); omit it for the default 365");
+        }
+        _state.retainDays = d;
+    }
     if (opts.trustProxy !== undefined) _state.trustProxy = opts.trustProxy === true;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("

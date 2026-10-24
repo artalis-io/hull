@@ -151,6 +151,26 @@ function durationOpt(name, v, who) {
     return n;
 }
 
+// maxAttempts (init / enqueue / cron): an integer in 1..MAX_ATTEMPTS_CAP. A
+// string or NaN made `attempts >= max` always false - the job retried for
+// ever - and 0 or a negative dead-lettered it before its first run (audit 26).
+const MAX_ATTEMPTS_CAP = 10000;
+function attemptsOpt(v, who) {
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > MAX_ATTEMPTS_CAP)
+        throw new Error(who + ": maxAttempts must be an integer in [1, "
+            + MAX_ATTEMPTS_CAP + "], got " + String(v));
+    return v;
+}
+
+// priority (enqueue / cron): undefined / null is 0, else an integer that fits
+// the INTEGER column (a string went into it as text) (audit 26).
+function priorityOpt(v, who) {
+    if (v === undefined || v === null) return 0;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < -2147483647 || v > 2147483647)
+        throw new Error(who + ": priority must be an integer, got " + String(v));
+    return v;
+}
+
 // A count option (limit / offset / batch) as an integer in lo..hi, Lua's
 // `tonumber(v) or def` rule: a number or a numeric string counts, anything
 // else (undefined, null, true, an object) and NaN take the default, and
@@ -178,7 +198,7 @@ function countOpt(v, def, lo, hi) {
  */
 function init(opts) {
     const o = opts || {};
-    if (o.maxAttempts !== undefined) _cfg.maxAttempts = o.maxAttempts;
+    if (o.maxAttempts !== undefined) _cfg.maxAttempts = attemptsOpt(o.maxAttempts, "jobs.init");
     if (o.visibilityTimeout !== undefined)
         _cfg.visibilityTimeout = durationOpt("visibilityTimeout", o.visibilityTimeout);
     if (o.reapInterval !== undefined)
@@ -643,10 +663,21 @@ function enqueue(jobType, data, opts) {
     // Windowed throttle: skip (return null) if a job of this (queue, type) was
     // created within the last `throttle` seconds. Best-effort - keyed by
     // (queue, type), no unique constraint (use dedupKey for exact-once).
-    if (o.throttle && o.throttle > 0) {
+    // A throttle that is not a finite number >= 0 is refused (audit 26).
+    const throttle = o.throttle !== undefined && o.throttle !== null
+        ? durationOpt("throttle", o.throttle, "jobs.enqueue") : 0;
+    const priority = priorityOpt(o.priority, "jobs.enqueue");
+    const maxAttempts = o.maxAttempts !== undefined
+        ? attemptsOpt(o.maxAttempts, "jobs.enqueue") : _cfg.maxAttempts;
+    // concurrency: a whole number >= 0 (0 = no cap) (audit 26).
+    if (o.concurrency !== undefined && o.concurrency !== null &&
+        (typeof o.concurrency !== "number" || !Number.isInteger(o.concurrency) ||
+         o.concurrency < 0 || o.concurrency > 2147483647))
+        throw new Error("jobs.enqueue: concurrency must be a whole number >= 0");
+    if (throttle > 0) {
         const hit = db.query(
             "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
-            [o.queue || "default", jobType, now - o.throttle]);
+            [o.queue || "default", jobType, now - throttle]);
         if (hit.length) return null;
     }
     // The dependency ids, copied by a counted loop and checked: whole,
@@ -672,8 +703,8 @@ function enqueue(jobType, data, opts) {
         o.queue || "default",
         jobType,
         data !== undefined && data !== null ? json.encode(data) : null,
-        o.priority || 0,
-        o.maxAttempts !== undefined ? o.maxAttempts : _cfg.maxAttempts,
+        priority,
+        maxAttempts,
         runAt,
         o.dedupKey !== undefined ? o.dedupKey : null,
         now, now,
@@ -1631,8 +1662,9 @@ function cron(name, spec, data, opts) {
     const jobType = o.type || name;
     const payload = data !== undefined && data !== null ? json.encode(data) : null;
     const queue = o.queue || "default";
-    const priority = o.priority || 0;
-    const ma = o.maxAttempts !== undefined ? o.maxAttempts : null;
+    const priority = priorityOpt(o.priority, "jobs.cron");
+    const ma = o.maxAttempts !== undefined && o.maxAttempts !== null
+        ? attemptsOpt(o.maxAttempts, "jobs.cron") : null;
     // One statement: UPDATE-then-INSERT raced - two callers both updated
     // nothing and the second INSERT failed on the key.
     db.upsert("_hull_cron", ["name"],
@@ -3082,7 +3114,16 @@ function cleanup(opts) {
     const o = opts || {};
     const statuses = o.statuses !== undefined && o.statuses !== null
         ? callerStrings(o.statuses, "jobs.cleanup: statuses") : ["done", "dead"];
-    const cutoff = o.before !== undefined ? o.before : (time.now() - (o.olderThan !== undefined ? o.olderThan : 604800));
+    // `before` must be a finite number (a unix timestamp): a string compared
+    // greater than every integer `updated_at` and deleted every terminal job
+    // (audit 26). `olderThan` is a duration >= 0.
+    if (o.before !== undefined && o.before !== null &&
+        (typeof o.before !== "number" || !Number.isFinite(o.before)))
+        throw new Error("jobs.cleanup: before must be a finite unix timestamp");
+    const olderThan = o.olderThan !== undefined && o.olderThan !== null
+        ? durationOpt("olderThan", o.olderThan, "jobs.cleanup") : undefined;
+    const cutoff = o.before !== undefined && o.before !== null ? o.before
+        : (time.now() - (olderThan !== undefined ? olderThan : 604800));
     const params = statuses.slice();
     params.push(cutoff);
     // An empty list deletes no job (the hygiene below still runs).
@@ -3097,7 +3138,7 @@ function cleanup(opts) {
     db.exec("DELETE FROM _hull_workflow_signals WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)");
     // Attempt history is retained by AGE (it outlives the job on purpose, for
     // post-hoc metrics), not by orphan-ness.
-    const hr = _cfg.historyRetention || o.olderThan || 604800;
+    const hr = _cfg.historyRetention || olderThan || 604800;
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", [(time.now() - hr) * 1000]);
     // Durable event log: retained by age, but NEVER past an unconsumed event -
     // min(cursor) across subscriptions is the safe watermark. No subscriptions ->

@@ -690,7 +690,8 @@ function isEmailIsh(s) {
     let bytes = 0;
     for (let i = 0; i < s.length; i++) {
         const c = s.charCodeAt(i);
-        if (c < 0x20 || c === 0x7f) return false;
+        // C1 controls too (U+0080-009F; NEL is a line break; audit 26).
+        if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) return false;
         if (c < 0x80) bytes += 1;
         else if (c < 0x800) bytes += 2;
         // A surrogate pair is one 4-byte character - only when the next unit

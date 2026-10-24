@@ -246,6 +246,21 @@ end
 --   adds a `highlight` column.
 -- @tparam[opt="rank"] string opts.order  `"rank"` or `"rowid"`.
 -- @treturn {table,...}  Array of `{id, rank, snippet?, highlight?}` rows.
+-- Integer option in [min, max], or `def` when nil. A string, NaN or a
+-- fraction is refused: "-1" bound as LIMIT returned every row (audit 26).
+local function int_opt(opts, key, def, min, max)
+    local v = opts[key]
+    if v == nil then return def end
+    if math.type(v) == nil or v ~= math.floor(v) or v < min or v > max then
+        error("search.query: " .. key .. " must be an integer in ["
+              .. min .. ", " .. max .. "]", 3)
+    end
+    return math.tointeger(v)
+end
+
+local SEARCH_MAX_LIMIT = 1000
+local SEARCH_MAX_OFFSET = 2147483647
+
 function search.query(name, query, opts)
     require_sqlite()
     validate_identifier(name, "index name")
@@ -260,8 +275,10 @@ function search.query(name, query, opts)
     -- search box forwards untrusted `req.query.q` verbatim. Cap length and
     -- boolean-operator/paren count; callers that legitimately need more can
     -- raise opts.max_query_len / opts.max_query_terms.
-    local max_len = opts.max_query_len or 1024
-    local max_terms = opts.max_query_terms or 64
+    local max_len = int_opt(opts, "max_query_len", 1024, 1, 1048576)
+    local max_terms = int_opt(opts, "max_query_terms", 64, 1, 65536)
+    local limit = int_opt(opts, "limit", 20, 1, SEARCH_MAX_LIMIT)
+    local offset = int_opt(opts, "offset", 0, 0, SEARCH_MAX_OFFSET)
     if #query > max_len then
         error("search.query: query too long (" .. #query .. " > " .. max_len .. ")")
     end
@@ -277,8 +294,6 @@ function search.query(name, query, opts)
     end
 
     local tbl = fts_table(name)
-    local limit = opts.limit or 20
-    local offset = opts.offset or 0
 
     -- Build SELECT columns and params
     local select_cols = { "id" }

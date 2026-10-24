@@ -250,6 +250,21 @@ function remove(name, id) {
  * @param {("rank"|"rowid")} [opts.order="rank"]
  * @returns {Array<{id:any, rank:number, snippet?:string, highlight?:string}>}
  */
+// Integer option in [min, max], or `def` when undefined. A string, NaN or a
+// fraction is refused: "-1" bound as LIMIT returned every row, and a string
+// cap made the query bounds compare false (audit 26).
+function intOpt(o, key, def, min, max) {
+    const v = o[key];
+    if (v === undefined) return def;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max)
+        throw new Error("search.query: " + key + " must be an integer in ["
+                        + min + ", " + max + "]");
+    return v;
+}
+
+const SEARCH_MAX_LIMIT = 1000;
+const SEARCH_MAX_OFFSET = 2147483647;
+
 function query(name, q, opts) {
     requireSqlite();
     validateIdent(name, "index name");
@@ -263,8 +278,10 @@ function query(name, q, opts) {
     // `?`-parameterized (no injection), but a pathological expression (thousands
     // of OR terms, deeply nested NEAR/parens) is a CPU-amplification DoS when a
     // public search box forwards untrusted input verbatim.
-    const maxLen = o.maxQueryLen !== undefined ? o.maxQueryLen : 1024;
-    const maxTerms = o.maxQueryTerms !== undefined ? o.maxQueryTerms : 64;
+    const maxLen = intOpt(o, "maxQueryLen", 1024, 1, 1048576);
+    const maxTerms = intOpt(o, "maxQueryTerms", 64, 1, 65536);
+    const limit = intOpt(o, "limit", 20, 1, SEARCH_MAX_LIMIT);
+    const offset = intOpt(o, "offset", 0, 0, SEARCH_MAX_OFFSET);
     if (q.length > maxLen)
         throw new Error("query too long (" + q.length + " > " + maxLen + ")");
     // Every word is a term (implicit AND costs as much as OR), every prefix
@@ -278,8 +295,6 @@ function query(name, q, opts) {
         throw new Error("query too complex (>" + maxTerms +
                         " operators/groups); bound untrusted input");
     const table = ftsTable(name);
-    let limit = o.limit !== undefined ? o.limit : 20;
-    let offset = o.offset !== undefined ? o.offset : 0;
 
     // Build SELECT columns and collect snippet/highlight params
     let selectCols = "id, rank";

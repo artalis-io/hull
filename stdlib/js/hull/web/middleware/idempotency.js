@@ -116,9 +116,15 @@ function isReplayableHeader(name) {
 // A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
 // ("86400") concatenated onto the expiry (now + "86400"). Same rule as the
 // Lua twin and auth.login; anything else throws.
+//
+// It is also a whole number of seconds no larger than MAX_TTL (366 days;
+// audit 26): an unbounded one made `now + ttl` overflow a 32-bit INTEGER
+// expiry column on PostgreSQL / MySQL (and run past 2038).
+const MAX_TTL = 31622400;
 function checkTtl(who, v) {
-    if (!(typeof v === "number" && Number.isFinite(v) && v > 0))
-        throw new TypeError(who + " must be a positive number of seconds");
+    if (!(typeof v === "number" && Number.isInteger(v) && v > 0 && v <= MAX_TTL))
+        throw new TypeError(who + " must be a whole number of seconds in [1, "
+            + MAX_TTL + "]");
     return v;
 }
 
