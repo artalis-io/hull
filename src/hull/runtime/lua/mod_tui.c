@@ -20,6 +20,7 @@
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/cap/tui.h"
+#include "hull/shared/work_charge.h"
 #include "hull/runtime/lua.h"
 #include "internal.h"
 #include "log.h"
@@ -172,6 +173,13 @@ static int lua_tui_style(lua_State *L)
     return 0;
 }
 
+/* print / write / clipboard_set copy, diff or encode the text: 1 unit per 8
+ * bytes before the work (audit 26). Holds nothing, so the hook may raise. */
+static void tui_charge(lua_State *L, size_t len)
+{
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)len), 0);
+}
+
 static int lua_tui_print(lua_State *L)
 {
     ensure_acquired(L);
@@ -179,6 +187,7 @@ static int lua_tui_print(lua_State *L)
     int y = (int)luaL_checkinteger(L, 2);
     size_t len = 0;
     const char *s = luaL_checklstring(L, 3, &len);
+    tui_charge(L, len);
     hl_cap_tui_move(g_ctx, x, y);
     hl_cap_tui_write(g_ctx, s, len);
     return 0;
@@ -189,6 +198,7 @@ static int lua_tui_write(lua_State *L)
     ensure_acquired(L);
     size_t len = 0;
     const char *s = luaL_checklstring(L, 1, &len);
+    tui_charge(L, len);
     hl_cap_tui_write(g_ctx, s, len);
     return 0;
 }
@@ -476,6 +486,7 @@ static int lua_tui_clipboard_set(lua_State *L)
     ensure_acquired(L);
     size_t len = 0;
     const char *s = luaL_checklstring(L, 1, &len);
+    tui_charge(L, len);
     int rc = hl_cap_tui_clipboard_set(g_ctx, s, len);
     if (rc < 0) {
         if (errno == ENOTSUP)

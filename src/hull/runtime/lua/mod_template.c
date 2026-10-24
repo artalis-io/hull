@@ -8,6 +8,7 @@
 #include "hull/limits/core.h"
 #include "hull/runtime/lua_template_cache.h"
 #include "hull/vfs.h"
+#include "protected.h"   /* hl_lua_pushlstring_safe */
 
 #include <sh_arena.h>
 #include <limits.h>
@@ -166,8 +167,12 @@ static int lua_template_load_raw(lua_State *L)
                                       "(--verify-sig)", rel);
                 }
 
-                lua_pushlstring(L, buf, nread);
+                /* A LUA_ERRMEM longjmp out of the push left the arena
+                 * advanced (audit 26): push protected, reset, then raise. */
+                int pushed = hl_lua_pushlstring_safe(L, buf, nread);
                 lua->scratch->used = arena_saved;
+                if (pushed != 0)
+                    return luaL_error(L, "out of memory loading: %s", name);
                 return 1;
             }
         }

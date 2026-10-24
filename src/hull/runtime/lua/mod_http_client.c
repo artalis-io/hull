@@ -106,6 +106,7 @@ static int lua_parse_http_headers(lua_State *L, int idx,
             && (vt == LUA_TSTRING || vt == LUA_TNUMBER)) {
             if (i >= count) {
                 lua_pop(L, 2);
+                scratch->used = mark;   /* the copies so far (audit 26) */
                 return -1;
             }
             size_t nlen, vlen;
@@ -133,6 +134,7 @@ static int lua_parse_http_headers(lua_State *L, int idx,
                 }
                 if (w < 0 || (size_t)w >= sizeof(num)) {
                     lua_pop(L, 2);
+                    scratch->used = mark;   /* as above (audit 26) */
                     return -1;
                 }
                 v = num;

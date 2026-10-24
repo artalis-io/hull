@@ -8,6 +8,7 @@
 
 #include "hull/cap/smtp_op.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -82,6 +83,38 @@ static void op_destroy(HlSmtpOp *op)
 void hl_smtp_op_free(HlSmtpOp *op)
 {
     op_destroy(op);
+}
+
+static size_t add_sat(size_t a, size_t b)
+{
+    return a > SIZE_MAX - b ? SIZE_MAX : a + b;
+}
+
+static size_t str_bytes(const char *s)
+{
+    return s ? add_sat(strlen(s), 1) : 0;
+}
+
+size_t hl_smtp_message_bytes(const HlSmtpMessage *msg)
+{
+    if (!msg)
+        return 0;
+    size_t n = sizeof(HlSmtpOp);
+    n = add_sat(n, str_bytes(msg->host));
+    n = add_sat(n, str_bytes(msg->username));
+    n = add_sat(n, str_bytes(msg->password));
+    n = add_sat(n, str_bytes(msg->from));
+    n = add_sat(n, str_bytes(msg->to));
+    n = add_sat(n, str_bytes(msg->reply_to));
+    n = add_sat(n, str_bytes(msg->subject));
+    n = add_sat(n, str_bytes(msg->body));
+    n = add_sat(n, str_bytes(msg->content_type));
+    if (msg->cc && msg->cc_count > 0) {
+        n = add_sat(n, (size_t)msg->cc_count * sizeof(char *));
+        for (int i = 0; i < msg->cc_count; i++)
+            n = add_sat(n, str_bytes(msg->cc[i]));
+    }
+    return n;
 }
 
 HlSmtpOp *hl_smtp_op_create(const HlSmtpMessage *msg, int timeout_ms)
