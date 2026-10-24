@@ -183,16 +183,26 @@ local function decode_refs(s)
     return s
 end
 
+-- The URL that is kept has `"`, `'`, `<`, `>`, backtick, whitespace and
+-- control characters percent-encoded: returned verbatim, raw output
+-- ({{{ u | safe_url }}}) emitted `https://a"><script>x</script>` as markup
+-- (audit 26). Encoded, the URL means the same and is inert in either context.
+local function url_encode_unsafe(s)
+    return (s:gsub("[%c%s\"'<>`]", function(c)
+        return string.format("%%%02X", c:byte())
+    end))
+end
+
 function filters.safe_url(val)
     local s = tostring(val or "")
     local probe = decode_refs(s):gsub("[%c%s]", ""):lower()
     local scheme = probe:match("^([%a][%w+.-]*):")
     if scheme == "http" or scheme == "https" or scheme == "mailto" then
-        return s
+        return url_encode_unsafe(s)
     end
     if scheme == nil then
         local head = probe:match("^[^/?#]*")
-        if not head:find("&", 1, true) then return s end
+        if not head:find("&", 1, true) then return url_encode_unsafe(s) end
     end
     return "#"
 end
@@ -624,10 +634,16 @@ end
 
 -- ── Lua code generator ──────────────────────────────────────────────
 
--- Generate nil-safe dot path access for Lua
--- "user.name" → "(__d.user and __d.user.name)"
--- "title" → "__d.title"
+-- Generate dot path access, one raw table read per segment:
+-- "user.name" → '__g(__g(__d, "user"), "name")'
+-- "title" → '__g(__d, "title")'
 -- If the first segment is a loop-local variable, use it directly instead of __d.
+-- __g (emitted by codegen) reads a field only of a TABLE, with rawget, and
+-- never hands back a function: plain `__d.a.b` indexed a string through its
+-- metatable, so `{{ title.rep }}` reached string.rep and rendered its native
+-- address ("function: 0x..."), as the JS sibling's prototype walk did before
+-- audit 24 (audit 26). A field read through a data table's own __index is no
+-- longer followed either - the JS twin reads own properties only.
 local function gen_dot_path(path, prefix, locals_set)
     prefix = prefix or "__d"
     local parts = {}
@@ -639,39 +655,14 @@ local function gen_dot_path(path, prefix, locals_set)
         error("empty expression in template")
     end
 
-    -- Check if first segment is a loop-local variable
+    local code, i = prefix, 1
     if locals_set and locals_set[parts[1]] then
-        if #parts == 1 then
-            return parts[1]
-        end
-        -- Build nil-safe chain using the local directly: item and item.name
-        local checks = {}
-        local chain = parts[1]
-        for i = 2, #parts - 1 do
-            chain = chain .. "." .. parts[i]
-            checks[#checks + 1] = chain
-        end
-        chain = chain .. "." .. parts[#parts]
-        if #checks == 0 then
-            return "(" .. parts[1] .. " and " .. chain .. ")"
-        end
-        return "(" .. parts[1] .. " and " .. table.concat(checks, " and ") .. " and " .. chain .. ")"
+        code, i = parts[1], 2
     end
-
-    if #parts == 1 then
-        return prefix .. "." .. parts[1]
+    for j = i, #parts do
+        code = "__g(" .. code .. ", \"" .. parts[j] .. "\")"
     end
-
-    -- Build nil-safe chain: a and a.b and a.b.c
-    local checks = {}
-    local chain = prefix
-    for i = 1, #parts - 1 do
-        chain = chain .. "." .. parts[i]
-        checks[#checks + 1] = chain
-    end
-    chain = chain .. "." .. parts[#parts]
-
-    return "(" .. table.concat(checks, " and ") .. " and " .. chain .. ")"
+    return code
 end
 
 -- Generate expression with filters
@@ -841,6 +832,12 @@ local function codegen(ast)
     lines[#lines + 1] = "return function(__d, __e, __f)"
     lines[#lines + 1] = "  local __ipairs, __pairs, __type, __tostring, __concat"
                         .. " = ipairs, pairs, type, tostring, table.concat"
+    lines[#lines + 1] = "  local __rawget = rawget"
+    lines[#lines + 1] = "  local function __g(o, k)"
+                        .. " if __type(o) ~= \"table\" then return nil end"
+                        .. " local v = __rawget(o, k)"
+                        .. " if __type(v) == \"function\" then return nil end"
+                        .. " return v end"
     lines[#lines + 1] = "  local __p = {}"
     gen_body(ast)
     lines[#lines + 1] = "  return __concat(__p)"

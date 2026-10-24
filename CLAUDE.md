@@ -2220,6 +2220,12 @@ must preserve:
   (auth-flows, and `_request.same_origin`'s hosts, used by session / oauth
   logout) matches that host on its scheme's default port only; another port
   needs an exact `host:port` entry (any port used to be stripped).
+- **Template / search output is inert (audit 26)**: `safe_url` percent-encodes
+  `"` `'` `<` `>` backtick, whitespace and controls in the URL it keeps (raw
+  `{{{ u | safe_url }}}` emitted `https://a"><script>`); a dot path reads only
+  own / raw-table fields and renders no function (Lua `{{ s.rep }}` printed a
+  native address); `search` snippet / highlight hand FTS5 U+E000-E002
+  sentinels, HTML-escape the text, then splice in the caller's markers.
 - **Audit-metadata scrub**: `session.login_handler` strips `tokens`, `claims`,
   `password*`, `secret`, etc. from `audit_metadata` before `audit_log.record`.
 - **CSRF body caps**: 1 MiB body, 256 pairs, 4 KiB per pair (Lua); 413 over cap.

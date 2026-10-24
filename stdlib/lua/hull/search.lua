@@ -229,6 +229,29 @@ function search.remove(name, id)
     db.exec("DELETE FROM " .. fts_table(name) .. " WHERE id = ?", { id })
 end
 
+-- snippet() / highlight() return the INDEXED text, unescaped, with the
+-- markers spliced in: a document holding `<img src=x onerror=...>` came back
+-- as markup, and the `<b>` default forced apps to render the result raw
+-- (stored XSS; audit 26). So FTS5 is handed private-use sentinels as the
+-- markers, the text is HTML-escaped, and the sentinels are then replaced by
+-- the caller's before / after / ellipsis (app-chosen, trusted markup). A
+-- document that itself contains U+E000-U+E002 gets an extra caller marker
+-- there - still only the app's own markup, though it can unbalance tags.
+local MARK_BEFORE, MARK_AFTER, MARK_ELLIPSIS = "\238\128\128", "\238\128\129", "\238\128\130"
+local SNIPPET_ESCAPES = { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
+                          ['"'] = "&quot;", ["'"] = "&#39;" }
+
+local function escape_marked(text, before, after, ellipsis)
+    if type(text) ~= "string" then return text end
+    text = text:gsub("[&<>\"']", SNIPPET_ESCAPES)
+    text = text:gsub(MARK_BEFORE, function() return before end)
+    text = text:gsub(MARK_AFTER, function() return after end)
+    if ellipsis then
+        text = text:gsub(MARK_ELLIPSIS, function() return ellipsis end)
+    end
+    return text
+end
+
 --- Query the FTS5 index.
 --
 -- @function search.query
@@ -240,10 +263,12 @@ end
 -- @tparam[opt=0]  number opts.offset
 -- @tparam[opt] table opts.snippet
 --   `{ column = N, tokens = N, before = "<b>", after = "</b>", ellipsis = "..." }`
---   Adds a `snippet` column to each result row.
+--   Adds a `snippet` column to each result row. The indexed text in it is
+--   HTML-escaped; only `before` / `after` / `ellipsis` are inserted as given,
+--   so the result is safe to render raw (audit 26).
 -- @tparam[opt] table opts.highlight
 --   `{ column = N, before = "<b>", after = "</b>" }` -
---   adds a `highlight` column.
+--   adds a `highlight` column (HTML-escaped like `snippet`).
 -- @tparam[opt="rank"] string opts.order  `"rank"` or `"rowid"`.
 -- @treturn {table,...}  Array of `{id, rank, snippet?, highlight?}` rows.
 function search.query(name, query, opts)
@@ -283,6 +308,7 @@ function search.query(name, query, opts)
     -- Build SELECT columns and params
     local select_cols = { "id" }
     local params = {}
+    local marks = nil   -- { column, before, after, ellipsis? }
 
     if opts.snippet then
         local s = opts.snippet
@@ -291,17 +317,20 @@ function search.query(name, query, opts)
         local tokens = tonumber(s.tokens) or 32
         select_cols[#select_cols + 1] = "snippet(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?, ?, " .. tostring(tokens) .. ") AS snippet"
-        params[#params + 1] = s.before or "<b>"
-        params[#params + 1] = s.after or "</b>"
-        params[#params + 1] = s.ellipsis or "..."
+        params[#params + 1] = MARK_BEFORE
+        params[#params + 1] = MARK_AFTER
+        params[#params + 1] = MARK_ELLIPSIS
+        marks = { "snippet", tostring(s.before or "<b>"), tostring(s.after or "</b>"),
+                  tostring(s.ellipsis or "...") }
     elseif opts.highlight then
         local h = opts.highlight
         local col = math.floor(tonumber(h.column) or 1)
         if col < 0 then error("search: highlight column must be non-negative") end
         select_cols[#select_cols + 1] = "highlight(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?) AS highlight"
-        params[#params + 1] = h.before or "<b>"
-        params[#params + 1] = h.after or "</b>"
+        params[#params + 1] = MARK_BEFORE
+        params[#params + 1] = MARK_AFTER
+        marks = { "highlight", tostring(h.before or "<b>"), tostring(h.after or "</b>") }
     end
 
     select_cols[#select_cols + 1] = "rank"
@@ -330,7 +359,15 @@ function search.query(name, query, opts)
     -- _hull_fts_* tables only in a call that names the method, and
     -- pcall(db.query, ...) does not.
     local ok, rows = pcall(function() return db.query(sql, params) end)
-    if ok then return rows end
+    if ok then
+        if marks then
+            local col = marks[1]
+            for _, row in ipairs(rows) do
+                row[col] = escape_marked(row[col], marks[2], marks[3], marks[4])
+            end
+        end
+        return rows
+    end
     local msg = tostring(rows)
     if msg:find("fts5:", 1, true) or msg:find("syntax error", 1, true)
        or msg:find("no such column", 1, true) or msg:find("unterminated", 1, true)

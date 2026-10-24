@@ -135,15 +135,23 @@ const filters = {
     // output ({{{ u | safe_url }}}) the browser decodes "javascript&colon;x"
     // or "jav&#x61;script:x" into a javascript: URL, and they used to pass
     // as scheme-less. A reference left in the scheme part is refused.
+    //
+    // The URL that is kept has `"`, `'`, `<`, `>`, backtick, whitespace and
+    // control characters percent-encoded: returned verbatim, raw output
+    // ({{{ u | safe_url }}}) emitted `https://a"><script>x</script>` as markup
+    // (audit 26). Encoded, the URL means the same and is inert in either
+    // context.
     safe_url(val) {
         const s = String(val ?? "");
+        const enc = () => s.replace(/[\u0000-\u0020\u007f"'<>`]/g, (c) =>
+            "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
         const probe = decodeRefs(s).replace(/[\u0000-\u0020\u007f]/g, "").toLowerCase();
         const m = /^([a-z][a-z0-9+.-]*):/.exec(probe);
         if (m) {
-            return (m[1] === "http" || m[1] === "https" || m[1] === "mailto") ? s : "#";
+            return (m[1] === "http" || m[1] === "https" || m[1] === "mailto") ? enc() : "#";
         }
         const head = /^[^/?#]*/.exec(probe)[0];
-        return head.indexOf("&") < 0 ? s : "#";
+        return head.indexOf("&") < 0 ? enc() : "#";
     },
 };
 
@@ -460,7 +468,8 @@ function resolveIncludes(ast, loadFn, visited, depth, nest, budget) {
 // value: `{{ user.constructor }}` resolved through the prototype chain and
 // rendered the Object constructor's source, as i18n's deepGet did before
 // audit 23 (audit 24). A string's or an array's `length` is an own property,
-// so `{{ name.length }}` keeps working.
+// so `{{ name.length }}` keeps working. A function value reads as undefined
+// (parity with the Lua twin, which renders no native address; audit 26).
 function genDotPath(path, prefix, localsSet) {
     prefix = prefix || "__d";
     const parts = path.split(".");
@@ -623,7 +632,8 @@ function codegen(ast) {
     // Names starting "__" are reserved, so no template variable can take these.
     lines.push("  const __isArray = Array.isArray, __String = String, __entries = Object.entries;");
     lines.push("  const __hasOwn = Object.prototype.hasOwnProperty;");
-    lines.push("  const __g = (o, k) => (o !== null && o !== undefined && __hasOwn.call(o, k)) ? o[k] : undefined;");
+    lines.push("  const __g = (o, k) => { if (o === null || o === undefined || !__hasOwn.call(o, k)) return undefined;"
+        + " const v = o[k]; return typeof v === \"function\" ? undefined : v; };");
     genBody(ast);
     lines.push("  return __p.join(\"\");");
     lines.push("})");
