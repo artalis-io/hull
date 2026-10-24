@@ -71,7 +71,15 @@ static JSValue js_from_sqlite_value(JSContext *ctx, sqlite3_value *val)
     }
 }
 
-/* Convert JS value to sqlite3_result */
+static void js_udf_report_error(JSContext *ctx, sqlite3_context *sctx,
+                                const char *fallback);
+
+/* Convert JS value to sqlite3_result. A BigInt in the int64 range is an
+ * integer and an ArrayBuffer / typed array a BLOB; a value with no SQL
+ * counterpart (an object, a symbol, a BigInt out of range) is an error, and
+ * so is a string whose conversion failed (out of memory, the budget's
+ * interrupt) - each became NULL silently, the failed conversion leaving its
+ * exception pending (audit 25). undefined / null are NULL. */
 static void js_to_sqlite_result(JSContext *ctx, sqlite3_context *sctx,
                                  JSValue val)
 {
@@ -79,34 +87,68 @@ static void js_to_sqlite_result(JSContext *ctx, sqlite3_context *sctx,
     switch (tag) {
     case JS_TAG_INT:
         sqlite3_result_int64(sctx, (sqlite3_int64)JS_VALUE_GET_INT(val));
-        break;
+        return;
     case JS_TAG_FLOAT64: {
         double d;
         JS_ToFloat64(ctx, &d, val);
         sqlite3_result_double(sctx, d);
-        break;
+        return;
     }
     case JS_TAG_STRING:
     case JS_TAG_STRING_ROPE: { /* a concatenation result (QuickJS 2025+) */
         size_t len;
         const char *s = JS_ToCStringLen(ctx, &len, val);
-        if (s) {
-            sqlite3_result_text(sctx, s, (int)len, SQLITE_TRANSIENT);
-            JS_FreeCString(ctx, s);
-        } else {
-            sqlite3_result_null(sctx);
+        if (!s) {
+            js_udf_report_error(ctx, sctx, "JS UDF: the result string could "
+                                "not be converted");
+            return;
         }
-        break;
+        sqlite3_result_text64(sctx, s, (sqlite3_uint64)len, SQLITE_TRANSIENT,
+                              SQLITE_UTF8);
+        JS_FreeCString(ctx, s);
+        return;
     }
     case JS_TAG_BOOL:
         sqlite3_result_int(sctx, JS_VALUE_GET_BOOL(val));
-        break;
+        return;
     case JS_TAG_NULL:
     case JS_TAG_UNDEFINED:
-    default:
         sqlite3_result_null(sctx);
+        return;
+    default:
         break;
     }
+    if (JS_IsBigInt(ctx, val)) {
+        int64_t i = 0;
+        if (JS_ToBigInt64(ctx, &i, val) < 0) {
+            js_udf_report_error(ctx, sctx, "JS UDF: bad BigInt result");
+            return;
+        }
+        JSValue back = JS_NewBigInt64(ctx, i);
+        if (JS_IsException(back)) {
+            js_udf_report_error(ctx, sctx, "JS UDF: bad BigInt result");
+            return;
+        }
+        int same = JS_StrictEq(ctx, back, val);
+        JS_FreeValue(ctx, back);
+        if (!same) {
+            sqlite3_result_error(sctx, "JS UDF: a BigInt result outside the "
+                                 "64-bit integer range", -1);
+            return;
+        }
+        sqlite3_result_int64(sctx, (sqlite3_int64)i);
+        return;
+    }
+    size_t n = 0;
+    const uint8_t *p = hl_js_bytes_view(ctx, &n, val);
+    if (p) {
+        /* Copied by SQLite before any app code can run. */
+        sqlite3_result_blob64(sctx, p, (sqlite3_uint64)n, SQLITE_TRANSIENT);
+        return;
+    }
+    sqlite3_result_error(sctx, "JS UDF: the result must be a number, string, "
+                         "boolean, BigInt, null, ArrayBuffer or typed array",
+                         -1);
 }
 
 /* The UDF's function threw: make it the statement's error. When it was the
@@ -143,8 +185,19 @@ static void js_scalar_udf_func(sqlite3_context *sctx, int argc,
             sqlite3_result_error_nomem(sctx);
             return;
         }
-        for (int i = 0; i < argc; i++)
-            args[i] = js_from_sqlite_value(ctx, argv[i]);
+        /* An argument that could not be made (out of memory) fails the
+         * call: it was passed as JS_EXCEPTION (audit 25). */
+        int bad = 0;
+        for (int i = 0; i < argc; i++) {
+            args[i] = bad ? JS_UNDEFINED : js_from_sqlite_value(ctx, argv[i]);
+            if (JS_IsException(args[i])) { args[i] = JS_UNDEFINED; bad = 1; }
+        }
+        if (bad) {
+            for (int i = 0; i < argc; i++) JS_FreeValue(ctx, args[i]);
+            js_free(ctx, args);
+            js_udf_report_error(ctx, sctx, "JS UDF: out of memory");
+            return;
+        }
     }
 
     JSValue result = JS_Call(ctx, udf->func, JS_UNDEFINED, argc, args);
@@ -188,7 +241,12 @@ static void js_agg_step_func(sqlite3_context *sctx, int argc,
 
     /* Create context object on first call for this group */
     if (!gs->initialized) {
-        gs->ctx_obj = JS_NewObject(ctx);
+        JSValue o = JS_NewObject(ctx);
+        if (JS_IsException(o)) {   /* audit 25 */
+            js_udf_report_error(ctx, sctx, "JS UDF: out of memory");
+            return;
+        }
+        gs->ctx_obj = o;
         gs->initialized = 1;
     }
 
@@ -200,8 +258,17 @@ static void js_agg_step_func(sqlite3_context *sctx, int argc,
         return;
     }
     args[0] = JS_DupValue(ctx, gs->ctx_obj);
-    for (int i = 0; i < argc; i++)
-        args[i + 1] = js_from_sqlite_value(ctx, argv[i]);
+    int bad = 0;   /* as in the scalar callback (audit 25) */
+    for (int i = 0; i < argc; i++) {
+        args[i + 1] = bad ? JS_UNDEFINED : js_from_sqlite_value(ctx, argv[i]);
+        if (JS_IsException(args[i + 1])) { args[i + 1] = JS_UNDEFINED; bad = 1; }
+    }
+    if (bad) {
+        for (int i = 0; i < total_args; i++) JS_FreeValue(ctx, args[i]);
+        js_free(ctx, args);
+        js_udf_report_error(ctx, sctx, "JS UDF: out of memory");
+        return;
+    }
 
     JSValue result = JS_Call(ctx, udf->step_fn, JS_UNDEFINED, total_args, args);
 
