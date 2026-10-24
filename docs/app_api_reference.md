@@ -1280,6 +1280,11 @@ app.ws("/ws/chat", {
 });
 ```
 
+`msg` is a string for a text frame. For a binary frame (`is_binary` /
+`isBinary` true) Lua gets the frame's bytes as a byte-clean string; JS gets
+an `ArrayBuffer` (it was a UTF-8-decoded string, which mangled the bytes -
+audit 25). Echo one back with `conn.sendBinary(msg)`.
+
 **At shutdown** the server's drain sends every open WebSocket a close frame
 (1001). A client that answers within `--drain-timeout` gets `on_close` as
 usual; one still open when the server is torn down is closed WITHOUT
