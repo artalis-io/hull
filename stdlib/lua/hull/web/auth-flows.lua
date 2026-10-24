@@ -490,6 +490,13 @@ local function reset_token_extra(user)
     return { pwb = password_binding(user) }
 end
 
+-- A verify link is bound to the address it was mailed to, as a magic link
+-- is (audit 25): after an unverified account's email changes, the holder of
+-- the old mailbox could otherwise verify it - with new_password, take it.
+local function verify_token_extra(user)
+    return { eb = email_binding(user) }
+end
+
 local function reset_binding_holds(env, user)
     local current = user and type(user.email) == "string"
                     and _state.user_find_by_email(user.email)
@@ -1444,7 +1451,7 @@ local function handle_register(req, res)
             error("user_create returned an id that user_get cannot resolve")
         end
         local token = issue_token(user_id,
-            ACTIONS.verify_email, _state.verify_ttl)
+            ACTIONS.verify_email, _state.verify_ttl, verify_token_extra(user))
         if origin then
             local verify_url = origin .. _state.prefix
                                .. "/verify?token=" .. token
@@ -1479,7 +1486,7 @@ local function handle_verify_resend(req, res)
     local origin = origin_for(req)
     after_response(function()
         local token = issue_token(user_id, ACTIONS.verify_email,
-                                   _state.verify_ttl)
+                                   _state.verify_ttl, verify_token_extra(user))
         if origin then
             local verify_url = origin .. _state.prefix
                                .. "/verify?token=" .. token
@@ -1570,7 +1577,7 @@ local function handle_verify_page(req, res)
         return secure_html(res):status(400):html("verification failed: replayed")
     end
     local user = _state.user_get(env.sub)
-    if not user then
+    if not user or env.eb ~= email_binding(user) then
         return secure_html(res):status(400):html("verification failed")
     end
     if is_verified(user) then
@@ -1598,7 +1605,7 @@ local function handle_verify(req, res)
         return verify_fail(req, res, 400, "verification failed: replayed")
     end
     local user = _state.user_get(env.sub)
-    if not user then
+    if not user or env.eb ~= email_binding(user) then
         return verify_fail(req, res, 400, "verification failed")
     end
     local uid = user_uid(user)
@@ -1917,7 +1924,8 @@ local function handle_magic_link_consume(req, res)
     if not is_verified(user) then
         local uid = user_uid(user)
         if stored_password_hash(user) ~= nil then
-            local vtok = issue_token(uid, ACTIONS.verify_email, _state.verify_ttl)
+            local vtok = issue_token(uid, ACTIONS.verify_email, _state.verify_ttl,
+                                     verify_token_extra(user))
             gc_expired()
             if _state.verify_form_redirect then
                 local sep = _state.verify_form_redirect:find("?", 1, true) and "&" or "?"
@@ -3117,7 +3125,7 @@ function M.send_verify_email(user, verify_url_prefix)
     end
     local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.verify_email,
-                               _state.verify_ttl)
+                               _state.verify_ttl, verify_token_extra(user))
     local verify_url = (verify_url_prefix or "")
                        .. _state.prefix .. "/verify?token=" .. token
     send_email(user.email, "welcome", {
@@ -3241,6 +3249,8 @@ require("hull._test_hooks").register("hull.web.auth-flows", {
         password_reset_request = handle_password_reset_request,
         verify_resend        = handle_verify_resend,
         magic_link_consume   = handle_magic_link_consume,
+        verify_page          = handle_verify_page,
+        verify               = handle_verify,
     },
     ACTIONS            = ACTIONS,
     email_rate_allow   = function(to, exact) return email_rate_allow(to, exact) end,

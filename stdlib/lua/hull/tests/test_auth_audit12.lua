@@ -596,5 +596,57 @@ test("a21: email_rate_limit refuses a numeric string, as the JS twin does", func
     end
 end)
 
+-- ── Audit 25: a verify link is bound to the account's address ────────
+
+local function mkget(query)
+    return { method = "GET", path = "/auth/verify", query = query or {},
+             headers = { host = "app.test", ["sec-fetch-site"] = "same-origin" },
+             ctx = {}, remote_addr = "192.0.2.7" }
+end
+
+test("a25: a verify link mailed before an email change is refused", function()
+    reset_store(); init()
+    local u = add_user(25, "old25@x.test", "first-password-1", false)
+    local kept = u.password_hash
+    H.verify_resend(mkreq({ email = "old25@x.test" }), mkres())
+    local old = token_in("old25@x.test")
+    assert_eq(type(old), "string", "verify link mailed")
+    -- The address changes while the account is unverified; the old mailbox
+    -- still holds the link.
+    S.by_email[fold(u.email)] = nil; u.email = "new25@x.test"; S.by_email[fold(u.email)] = u
+    local res = mkres()
+    H.verify_page(mkget({ token = old }), res)
+    assert_eq(res.code, 400, "GET refused")
+    res = mkres()
+    H.verify(mkreq({ token = old, new_password = "attacker-password-1" }), res)
+    assert_eq(res.code, 400, "new_password refused")
+    assert_eq(u.password_hash, kept, "password kept")
+    assert_eq(u.email_verified, false, "still unverified")
+    res = mkres()
+    H.verify(mkreq({ token = old, password = "first-password-1" }), res)
+    assert_eq(res.code, 400, "password refused")
+    assert_eq(u.email_verified, false, "still unverified")
+    H.verify_resend(mkreq({ email = "new25@x.test" }), mkres())
+    local cur = token_in("new25@x.test")
+    res = mkres()
+    H.verify_page(mkget({ token = cur }), res)
+    assert_eq(res.code, 200, "current link renders")
+    res = mkres()
+    H.verify(mkreq({ token = cur, password = "first-password-1" }), res)
+    assert_eq(res.body and res.body.ok, true, "current link verifies")
+    assert_eq(u.email_verified, true, "verified")
+end)
+
+test("a25: an ASCII case change of the address keeps the link", function()
+    reset_store(); init()
+    local u = add_user(26, "case26@x.test", "first-password-1", false)
+    H.verify_resend(mkreq({ email = "case26@x.test" }), mkres())
+    local tok = token_in("case26@x.test")
+    u.email = "Case26@X.test"
+    local res = mkres()
+    H.verify(mkreq({ token = tok, password = "first-password-1" }), res)
+    assert_eq(res.body and res.body.ok, true, "verifies")
+end)
+
 print(string.format("auth audit 12: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail }
