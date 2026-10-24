@@ -7,6 +7,8 @@
  *    run in a built binary either.
  *  - hl_default_db_path_check refuses an implicit <app_dir>/data.db (or a
  *    SQLite sidecar of it) that is a symbolic link or not a regular file.
+ *  - a development (filesystem) migrations/ that is a symbolic link, or a
+ *    .sql in it that is one, fails the run (audit 26).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -224,6 +226,108 @@ UTEST(default_db, directory_refused)
     EXPECT_NE(NULL, strstr(why, "not a regular file"));
     rmdir(db);
     rmdir(dir);
+}
+
+/* ── filesystem migrations/: no symlinks (audit 26) ───────────────── */
+
+static const HlEntry no_entries[] = { { NULL, NULL, 0 } };
+
+static void write_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    if (f) { fputs(text, f); fclose(f); }
+}
+
+static int open_mem(sqlite3 **db, HlDbHandle *h)
+{
+    hl_cap_db_sqlite_setup();
+    if (sqlite3_open(":memory:", db) != SQLITE_OK) return -1;
+    if (hl_cap_db_init(*db) != 0) return -1;
+    return hl_db_sqlite_wrap(h, *db);
+}
+
+UTEST(migrate_fs, real_directory_applies)
+{
+    char app[PATH_MAX], p[PATH_MAX + 64];
+    make_dir(app, sizeof app, "fs_real");
+    snprintf(p, sizeof p, "%s/migrations", app);
+    mkdir(p, 0700);
+    snprintf(p, sizeof p, "%s/migrations/001_t.sql", app);
+    write_file(p, SQL_UP);
+
+    sqlite3 *db = NULL;
+    HlDbHandle h = {0};
+    ASSERT_EQ(0, open_mem(&db, &h));
+    HlVfs vfs;
+    hl_vfs_init(&vfs, no_entries, app);
+    EXPECT_EQ(1, hl_migrate_run(&h, &vfs));
+    EXPECT_EQ(0, scalar(db, "SELECT count(*) FROM t"));
+    hl_db_sqlite_unwrap(&h);
+    sqlite3_close(db);
+
+    unlink(p);
+    snprintf(p, sizeof p, "%s/migrations", app);
+    rmdir(p);
+    rmdir(app);
+}
+
+UTEST(migrate_fs, symlinked_directory_refused)
+{
+    char app[PATH_MAX], other[PATH_MAX], p[PATH_MAX + 64];
+    make_dir(app, sizeof app, "fs_link_app");
+    make_dir(other, sizeof other, "fs_link_other");
+    snprintf(p, sizeof p, "%s/001_evil.sql", other);
+    write_file(p, SQL_UP);
+    char link[PATH_MAX + 64];
+    snprintf(link, sizeof link, "%s/migrations", app);
+    ASSERT_EQ(0, symlink(other, link));
+
+    sqlite3 *db = NULL;
+    HlDbHandle h = {0};
+    ASSERT_EQ(0, open_mem(&db, &h));
+    HlVfs vfs;
+    hl_vfs_init(&vfs, no_entries, app);
+    /* Refused - the run fails rather than reading "no migrations". */
+    EXPECT_EQ(HL_MIGRATE_ERR, hl_migrate_run(&h, &vfs));
+    EXPECT_EQ(-2, scalar(db, "SELECT count(*) FROM t"));   /* no table t */
+
+    HlMigrationStatus *st = NULL;
+    int n = -1;
+    EXPECT_EQ(-1, hl_migrate_status(&h, &vfs, &st, &n));
+    hl_db_sqlite_unwrap(&h);
+    sqlite3_close(db);
+
+    unlink(link);
+    unlink(p);
+    rmdir(other);
+    rmdir(app);
+}
+
+UTEST(migrate_fs, symlinked_leaf_refused)
+{
+    char app[PATH_MAX], p[PATH_MAX + 64], tgt[PATH_MAX + 64], link[PATH_MAX + 64];
+    make_dir(app, sizeof app, "fs_leaf");
+    snprintf(p, sizeof p, "%s/migrations", app);
+    mkdir(p, 0700);
+    snprintf(tgt, sizeof tgt, "%s/elsewhere.txt", app);
+    write_file(tgt, SQL_UP);
+    snprintf(link, sizeof link, "%s/migrations/001_t.sql", app);
+    ASSERT_EQ(0, symlink(tgt, link));
+
+    sqlite3 *db = NULL;
+    HlDbHandle h = {0};
+    ASSERT_EQ(0, open_mem(&db, &h));
+    HlVfs vfs;
+    hl_vfs_init(&vfs, no_entries, app);
+    EXPECT_EQ(HL_MIGRATE_ERR, hl_migrate_run(&h, &vfs));
+    EXPECT_EQ(-2, scalar(db, "SELECT count(*) FROM t"));
+    hl_db_sqlite_unwrap(&h);
+    sqlite3_close(db);
+
+    unlink(link);
+    unlink(tgt);
+    rmdir(p);
+    rmdir(app);
 }
 
 UTEST_MAIN();

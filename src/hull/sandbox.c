@@ -750,7 +750,15 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
         SBPL_LIT("; Terminal UI (tcsetattr, alt screen, TIOCGWINSZ)\n");
         SBPL_FMT("(allow file-read* file-write* (literal \"/dev/tty\")%s)\n",
                  tty_rules);
-        SBPL_FMT("(allow file-ioctl (literal \"/dev/tty\")%s)\n\n",
+        /* ioctl limited to what cap/tui.c issues (audit 26): TIOCGWINSZ,
+         * and tcgetattr / isatty (TIOCGETA) + tcsetattr TCSANOW / TCSADRAIN
+         * / TCSAFLUSH (TIOCSETA / TIOCSETAW / TIOCSETAF). A path-only rule
+         * allowed TIOCSTI, which pushes bytes into the terminal's input
+         * queue - typed commands for the shell that gets the tty next. */
+        SBPL_FMT("(allow file-ioctl (require-all\n"
+                 "    (require-any (literal \"/dev/tty\")%s)\n"
+                 "    (ioctl-command TIOCGWINSZ TIOCGETA TIOCSETA"
+                 " TIOCSETAW TIOCSETAF)))\n\n",
                  tty_rules);
     }
 

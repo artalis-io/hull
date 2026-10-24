@@ -20,6 +20,7 @@
 #include "utils/hex.h"        /* hl_hex_encode */
 
 #include <dirent.h>
+#include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -307,14 +308,61 @@ static void migration_list_free(MigrationList *ml)
     ml->count = 0;
 }
 
+/* Open <root_dir>/migrations as a directory descriptor, relative to the app
+ * root and without following a symlink: dev, `hull migrate`, `hull test` and
+ * the agent run these files before the sandbox applies, so a cloned app's
+ * `migrations -> /elsewhere` ran another tree's SQL (audit 26; `hull build`
+ * already refused the layout, audit 20). The app root itself is followed
+ * once, as the fs resolver does.
+ * Returns the fd, -1 when there is no migrations directory, -2 on a refusal
+ * or error (logged). */
+static int open_migrations_dir(const char *root_dir)
+{
+    int rfd = open(root_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rfd < 0)
+        return -1;
+    int dfd = openat(rfd, "migrations",
+                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int oerr = errno;
+    struct stat st;
+    int is_link = dfd < 0 &&
+                  fstatat(rfd, "migrations", &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+                  S_ISLNK(st.st_mode);
+    close(rfd);
+    if (dfd >= 0)
+        return dfd;
+    if (is_link) {
+        log_error("[hull:migrate] %s/migrations is a symbolic link; "
+                  "refusing to run migrations from outside the app "
+                  "directory (make it a real directory)", root_dir);
+        return -2;
+    }
+    if (oerr == ENOENT)
+        return -1;
+    log_error("[hull:migrate] cannot open %s/migrations: %s",
+              root_dir, strerror(oerr));
+    return -2;
+}
+
+/* Returns 0 (ml filled; count may be 0), -1 when there is no migrations
+ * directory, -2 on a refusal / read error (logged). */
 static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
 {
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/migrations", root_dir);
-
-    DIR *dir = opendir(path);
-    if (!dir)
-        return -1; /* no directory */
+    int dfd = open_migrations_dir(root_dir);
+    if (dfd < 0)
+        return dfd;
+    /* A second descriptor for the leaf opens: closedir() closes dfd. */
+    int lfd = dup(dfd);
+    if (lfd < 0) {
+        close(dfd);
+        return -2;
+    }
+    DIR *dir = fdopendir(dfd);
+    if (!dir) {
+        close(dfd);
+        close(lfd);
+        return -2;
+    }
 
     /* Collect .sql filenames */
     int capacity = 16;
@@ -323,7 +371,8 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
     ml->count = 0;
     if (!ml->names) {
         closedir(dir);
-        return -1;
+        close(lfd);
+        return -2;
     }
 
     struct dirent *ent;
@@ -337,14 +386,16 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
             if ((size_t)capacity > SIZE_MAX / (2 * sizeof(char *))) {
                 migration_list_free(ml);
                 closedir(dir);
-                return -1;
+                close(lfd);
+                return -2;
             }
             capacity *= 2;
             char **tmp = realloc(ml->names, (size_t)capacity * sizeof(char *));
             if (!tmp) {
                 migration_list_free(ml);
                 closedir(dir);
-                return -1;
+                close(lfd);
+                return -2;
             }
             ml->names = tmp;
         }
@@ -352,7 +403,8 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
         if (!ml->names[ml->count]) {
             migration_list_free(ml);
             closedir(dir);
-            return -1;
+            close(lfd);
+            return -2;
         }
         ml->count++;
     }
@@ -361,6 +413,7 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
     if (ml->count == 0) {
         free(ml->names);
         ml->names = NULL;
+        close(lfd);
         return 0;
     }
 
@@ -371,7 +424,8 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
     ml->sqls = calloc((size_t)ml->count, sizeof(char *));
     if (!ml->sqls) {
         migration_list_free(ml);
-        return -1;
+        close(lfd);
+        return -2;
     }
 
     for (int i = 0; i < ml->count; i++) {
@@ -379,9 +433,11 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
         snprintf(filepath, sizeof(filepath), "%s/migrations/%s",
                  root_dir, ml->names[i]);
 
-        /* A regular file only, opened without blocking: a FIFO named
-         * NNN_x.sql hung startup in fopen. */
-        int mfd = open(filepath, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        /* A regular file only, opened without blocking (a FIFO named
+         * NNN_x.sql hung startup in fopen), relative to the directory
+         * descriptor and never through a symlink. */
+        int mfd = openat(lfd, ml->names[i],
+                         O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         struct stat mst;
         FILE *f = NULL;
         if (mfd >= 0 && fstat(mfd, &mst) == 0 && S_ISREG(mst.st_mode))
@@ -390,32 +446,37 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
             if (mfd >= 0) close(mfd);
             log_error("[hull:migrate] cannot read %s", filepath);
             migration_list_free(ml);
-            return -1;
+            close(lfd);
+            return -2;
         }
 
         if (fseek(f, 0, SEEK_END) != 0) {
             fclose(f);
             migration_list_free(ml);
-            return -1;
+            close(lfd);
+            return -2;
         }
         long flen = ftell(f);
         if (fseek(f, 0, SEEK_SET) != 0) {
             fclose(f);
             migration_list_free(ml);
-            return -1;
+            close(lfd);
+            return -2;
         }
 
         if (flen < 0) {
             fclose(f);
             migration_list_free(ml);
-            return -1;
+            close(lfd);
+            return -2;
         }
 
         char *sql = malloc((size_t)flen + 1);
         if (!sql) {
             fclose(f);
             migration_list_free(ml);
-            return -1;
+            close(lfd);
+            return -2;
         }
 
         if (flen > 0) {
@@ -431,7 +492,8 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
                 free(sql);
                 fclose(f);
                 migration_list_free(ml);
-                return -1;
+                close(lfd);
+                return -2;
             }
             sql[flen] = '\0';
         } else {
@@ -449,12 +511,14 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
                       ml->names[i]);
             free(sql);
             migration_list_free(ml);
-            return -1;
+            close(lfd);
+            return -2;
         }
 
         ml->sqls[i] = sql;
     }
 
+    close(lfd);
     return 0;
 }
 
@@ -618,6 +682,8 @@ static int migrate_run_locked(HlDbHandle *handle, const HlVfs *vfs)
 
     MigrationList ml = {0};
     int rc = discover_fs_migrations(vfs->root_dir, &ml);
+    if (rc == -2)
+        return HL_MIGRATE_ERR;   /* refused (a symlinked dir) or unreadable */
     if (rc < 0)
         return HL_MIGRATE_NO_DIR;
 
@@ -721,7 +787,10 @@ int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
         }
 
         MigrationList ml = {0};
-        if (discover_fs_migrations(vfs->root_dir, &ml) < 0 || ml.count == 0) {
+        int drc = discover_fs_migrations(vfs->root_dir, &ml);
+        if (drc == -2)
+            return -1;   /* refused (a symlinked dir) or unreadable */
+        if (drc < 0 || ml.count == 0) {
             *out = NULL;
             *out_count = 0;
             migration_list_free(&ml);
