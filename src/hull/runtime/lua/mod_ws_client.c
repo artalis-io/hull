@@ -19,6 +19,7 @@
 #include "hull/cap/http.h"
 #include "hull/utils/alloc.h"
 #include "hull/shared/async.h"   /* HlAsyncTeardown */
+#include "hull/shared/async_backend.h"
 
 #include <keel/keel.h>
 #include <keel/websocket_client.h>
@@ -35,14 +36,25 @@
 
 /* HL_WS_CLIENT_CONN_MT and HlLuaWsClientUD are in mod_buffer.h. */
 
+/* Drop the connect deadline (on_open, on_error, on_close, teardown). */
+static void lua_ws_client_disarm_connect(HlLuaWsClientUD *ud,
+                                         HlAsyncBackendCtx *loop)
+{
+    if (ud->connect_timer && loop) {
+        const HlAsyncBackend *be = hl_async_backend();
+        if (be) be->timer_cancel(loop, ud->connect_timer);
+    }
+    ud->connect_timer = 0;
+}
+
 /* Runtime teardown, the loop still alive: free the Keel connection now. The
  * userdata (and its refs) go with the Lua state. */
 static void lua_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
 {
-    (void)loop;
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)(void *)
         ((char *)t - offsetof(HlLuaWsClientUD, teardown));
     ud->closed = 1;
+    lua_ws_client_disarm_connect(ud, loop);
     if (ud->client) {
         kl_ws_client_free(ud->client);
         ud->client = NULL;
@@ -129,6 +141,9 @@ static int lua_ws_client_gc(lua_State *L)
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
     hl_async_teardown_unlink(&ud->teardown);
+    if (ud->lua && !ud->lua->base.shutting_down)
+        lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
+    ud->connect_timer = 0;
     if (ud->client) {
         kl_ws_client_free(ud->client);
         ud->client = NULL;
@@ -236,6 +251,7 @@ static void lua_ws_client_on_open(KlWsClientConn *ws, void *user_data)
 {
     (void)ws;
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
+    lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
     if (ud->on_open_ref == LUA_NOREF)
         return;
 
@@ -279,6 +295,7 @@ static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
 {
     (void)ws;
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
+    lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
 
     if (ud->on_close_ref != LUA_NOREF) {
         HlWscCall c = { ud->on_close_ref, ud->self_ref, 2, reason, reason_len,
@@ -294,6 +311,7 @@ static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
 {
     (void)ws;
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
+    lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
     if (ud->on_error_ref == LUA_NOREF) {
         log_error("[hull:ws:client] error: %s", msg ? msg : "unknown");
         lua_ws_client_finish(ud);
@@ -306,6 +324,19 @@ static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
      * this is where the client is released (it stayed pinned until VM
      * teardown). */
     lua_ws_client_finish(ud);
+}
+
+/* The connect deadline passed before the upgrade completed: free the Keel
+ * client (a timer callback, not one of Keel's: safe) and report it as the
+ * connection's terminal error, as Keel reports a failed connect. */
+static void lua_ws_client_connect_expired(void *user_data)
+{
+    HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
+    ud->connect_timer = 0;   /* fired */
+    if (ud->closed || !ud->client) return;
+    kl_ws_client_free(ud->client);
+    ud->client = NULL;
+    lua_ws_client_on_error(NULL, "connect timeout", ud);
 }
 
 /* ws.connect(url, handlers [, opts]) */
@@ -421,6 +452,27 @@ static int lua_ws_connect(lua_State *L)
     ud->client = client;
     ud->teardown.stop = lua_ws_client_teardown_stop;
     hl_async_teardown_link(&lua->base.async_live, &ud->teardown);
+
+    /* Connect + handshake deadline (audit 25): the manifest's http timeout,
+     * else 30 s, as http.fetch. Without one the connect is not started. */
+    int ms = HL_HTTP_DEFAULT_TIMEOUT_MS;
+#ifdef HL_ENABLE_HTTP_CLIENT
+    ms = hl_http_timeout_resolve(0, lua->base.http_cfg->timeout_ms,
+                                 HL_HTTP_FETCH_MAX_TIMEOUT_MS);
+#endif
+    const HlAsyncBackend *be = hl_async_backend();
+    ud->connect_timer = be ? be->timer_add(lua->base.async_ctx, (uint64_t)ms,
+                                           lua_ws_client_connect_expired, ud)
+                           : 0;
+    if (ud->connect_timer == 0) {
+        hl_async_teardown_unlink(&ud->teardown);
+        kl_ws_client_free(ud->client);   /* not inside a Keel event */
+        ud->client = NULL;
+        ud->closed = 1;
+        luaL_unref(L, LUA_REGISTRYINDEX, ud->self_ref);
+        ud->self_ref = LUA_NOREF;
+        return luaL_error(L, "WebSocket connect failed");
+    }
 
     return 1; /* return userdata on stack */
 }

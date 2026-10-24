@@ -33,6 +33,17 @@
 /* The client class id and HlJSWsClientUD are declared in mod_buffer.h. */
 JSClassID js_ws_client_conn_class_id;
 
+/* Drop the connect deadline (on_open, on_error, on_close, teardown). */
+static void js_ws_client_disarm_connect(HlJSWsClientUD *ud,
+                                        HlAsyncBackendCtx *loop)
+{
+    if (ud->connect_timer && loop) {
+        const HlAsyncBackend *be = hl_async_backend();
+        if (be) be->timer_cancel(loop, ud->connect_timer);
+    }
+    ud->connect_timer = 0;
+}
+
 /* Runtime teardown, the loop still alive: free the Keel connection now and
  * drop the self-reference (a pending release timer is cancelled first), so
  * the object goes with the runtime. Releasing it can run the finalizer,
@@ -42,6 +53,7 @@ static void js_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *lo
     HlJSWsClientUD *ud = (HlJSWsClientUD *)(void *)
         ((char *)t - offsetof(HlJSWsClientUD, teardown));
     ud->closed = 1;
+    js_ws_client_disarm_connect(ud, loop);
     if (ud->client) {
         kl_ws_client_free(ud->client);
         ud->client = NULL;
@@ -282,6 +294,7 @@ static void js_ws_client_on_open(KlWsClientConn *ws, void *user_data)
 {
     (void)ws;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
+    js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
     if (JS_IsUndefined(ud->on_open))
         return;
 
@@ -364,6 +377,7 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
 {
     (void)ws;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
+    js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
 
     if (!JS_IsUndefined(ud->on_close)) {
         JSValue conn_obj = JS_DupValue(ud->ctx, ud->self_ref);
@@ -387,6 +401,7 @@ static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
 {
     (void)ws;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
+    js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
     if (JS_IsUndefined(ud->on_error)) {
         log_error("[hull:ws:client] error: %s", msg ? msg : "unknown");
         js_ws_client_finish(ud);
@@ -404,6 +419,19 @@ static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
      * this is where the client is released (it stayed pinned until VM
      * teardown). */
     js_ws_client_finish(ud);
+}
+
+/* The connect deadline passed before the upgrade completed: free the Keel
+ * client (a timer callback, not one of Keel's: safe) and report it as the
+ * connection's terminal error, as Keel reports a failed connect. */
+static void js_ws_client_connect_expired(void *user_data)
+{
+    HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
+    ud->connect_timer = 0;   /* fired */
+    if (ud->closed || !ud->client) return;
+    kl_ws_client_free(ud->client);
+    ud->client = NULL;
+    js_ws_client_on_error(NULL, "connect timeout", ud);
 }
 
 /* ── ws module functions ───────────────────────────────────────────── */
@@ -554,6 +582,32 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     ud->client = client;
     ud->teardown.stop = js_ws_client_teardown_stop;
     hl_async_teardown_link(&js->base.async_live, &ud->teardown);
+
+    /* Connect + handshake deadline (audit 25): the manifest's http timeout,
+     * else 30 s, as http.fetch. Without one the connect is not started. */
+    {
+        int ms = HL_HTTP_DEFAULT_TIMEOUT_MS;
+#ifdef HL_ENABLE_HTTP_CLIENT
+        ms = hl_http_timeout_resolve(0, js->base.http_cfg->timeout_ms,
+                                     HL_HTTP_FETCH_MAX_TIMEOUT_MS);
+#endif
+        const HlAsyncBackend *be = hl_async_backend();
+        ud->connect_timer = be ? be->timer_add(js->base.async_ctx,
+                                               (uint64_t)ms,
+                                               js_ws_client_connect_expired,
+                                               ud)
+                               : 0;
+        if (ud->connect_timer == 0) {
+            JSValue self = ud->self_ref;
+            ud->self_ref = JS_UNDEFINED;
+            ud->closed = 1;
+            kl_ws_client_free(ud->client);   /* not inside a Keel event */
+            ud->client = NULL;
+            JS_FreeValue(ctx, self);         /* obj still holds ud */
+            JS_FreeValue(ctx, obj);
+            return JS_ThrowTypeError(ctx, "WebSocket connect failed");
+        }
+    }
 
     return obj;
 }

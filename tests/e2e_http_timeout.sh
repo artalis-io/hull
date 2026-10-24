@@ -25,6 +25,12 @@
 #   - the same chain with a per-call 10000 ms succeeds (4 hops are allowed)
 #   - at most 5 hops are followed: /hop/5/0 succeeds, /hop/6/0 fails
 #
+# ws.connect has the same deadline over its connect + upgrade (audit 25):
+# Keel has none, so a host that accepted the TCP connection and never
+# answered the upgrade held the client and its fd until close. A black-hole
+# listener accepts and never writes; the client's on_error fires with
+# "connect timeout" after the manifest's 1000 ms, not before.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -32,6 +38,7 @@ set -e
 HULL="${HULL:-build/hull}"
 PORT="${PORT:-19894}"
 SLOW_PORT="${SLOW_PORT:-19895}"
+HOLE_PORT="${HOLE_PORT:-19896}"
 PASS=0
 FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
@@ -45,9 +52,11 @@ fi
 TMPDIR=$(mktemp -d)
 SERVER_PID=""
 SLOW_PID=""
+HOLE_PID=""
 cleanup() {
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
     [ -n "$SLOW_PID" ] && kill "$SLOW_PID" 2>/dev/null || true
+    [ -n "$HOLE_PID" ] && kill "$HOLE_PID" 2>/dev/null || true
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -97,6 +106,22 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 done
 [ "$up" = 1 ] || { echo "FAIL: slow server did not start"; cat "$TMPDIR/slow.log"; exit 1; }
 
+# ── The black hole: accepts, reads nothing back, never answers ──────
+cat > "$TMPDIR/hole.py" <<'EOF'
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(16)
+held = []
+while True:
+    c, _ = s.accept()
+    held.append(c)
+EOF
+python3 -I "$TMPDIR/hole.py" "$HOLE_PORT" >"$TMPDIR/hole.log" 2>&1 &
+HOLE_PID=$!
+WS_HOLE="ws://127.0.0.1:$HOLE_PORT/ws"
+
 SLOW="http://127.0.0.1:$SLOW_PORT/slow"
 BASE="http://127.0.0.1:$SLOW_PORT"
 
@@ -104,11 +129,23 @@ BASE="http://127.0.0.1:$SLOW_PORT"
 mkdir -p "$TMPDIR/lua" "$TMPDIR/js"
 cat > "$TMPDIR/lua/app.lua" <<EOF
 app.manifest({
-    modules = { "hull/http-server@1", "hull/http-client@1" },
+    modules = { "hull/http-server@1", "hull/http-client@1",
+                "hull/web/ws-client@1" },
     hosts = { "127.0.0.1" },
     http = { timeout_ms = 1000 },
 })
 local http = require("hull.http-client")
+local wsc = require("hull.web.ws-client")
+local ws_state = "unset"
+app.get("/wsgo", function(_req, res)
+    ws_state = "pending"
+    wsc.connect("$WS_HOLE", {
+        on_open = function(_c) ws_state = "open" end,
+        on_error = function(_c, msg) ws_state = "error:" .. tostring(msg) end,
+    })
+    res:text("started")
+end)
+app.get("/wsstate", function(_req, res) res:text(ws_state) end)
 local URL = "$SLOW"
 local BASE = "$BASE"
 
@@ -155,12 +192,24 @@ EOF
 cat > "$TMPDIR/js/app.js" <<EOF
 import { app } from "hull:app";
 import { httpClient as http } from "hull:http-client";
+import { wsClient } from "hull:web:ws-client";
 
 app.manifest({
-    modules: ["hull/http-server@1", "hull/http-client@1"],
+    modules: ["hull/http-server@1", "hull/http-client@1",
+              "hull/web/ws-client@1"],
     hosts: ["127.0.0.1"],
     http: { timeoutMs: 1000 },
 });
+let wsState = "unset";
+app.get("/wsgo", (_req, res) => {
+    wsState = "pending";
+    wsClient.connect("$WS_HOLE", {
+        onOpen(_c) { wsState = "open"; },
+        onError(_c, msg) { wsState = "error:" + msg; },
+    });
+    res.text("started");
+});
+app.get("/wsstate", (_req, res) => res.text(wsState));
 const URL = "$SLOW";
 const BASE = "$BASE";
 
@@ -266,6 +315,19 @@ run_app() {
             && pass "$rt $kind: a 6th redirect hop is refused" \
             || fail "$rt $kind: a 6th redirect hop is refused" "$out"
     done
+
+    # ws.connect to a host that never answers the upgrade (audit 25).
+    curl -s -m 10 -o /dev/null "http://127.0.0.1:$PORT/wsgo"
+    sleep 0.3
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/wsstate")
+    [ "$out" = "pending" ] \
+        && pass "$rt ws.connect: still connecting inside the deadline" \
+        || fail "$rt ws.connect: still connecting inside the deadline" "$out"
+    sleep 1.5
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/wsstate")
+    [ "$out" = "error:connect timeout" ] \
+        && pass "$rt ws.connect: a silent upgrade fails at the deadline" \
+        || fail "$rt ws.connect: a silent upgrade fails at the deadline" "$out"
 
     out=$(curl -s -m 10 "http://127.0.0.1:$PORT/detached?k=long")
     [ "$out" = "error" ] \
