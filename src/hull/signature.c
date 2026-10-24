@@ -604,16 +604,19 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
         const char *name = sig->entries[i].name;
         const char *expected_hash = sig->entries[i].hash_hex;
 
+        /* An AOT artifact is made in the build's tmpdir and only ever
+         * embedded: an unbuilt app's tree does not have it, and a committed
+         * compute/<m>.aot.<arch> under the same name is not what the build
+         * signed (it embeds its own AOT; audit 25). The runtime never loads
+         * AOT from disk, so a disk copy is neither checked nor run. */
+        if (strncmp(name, "compute/", 8) == 0 && strstr(name, ".aot."))
+            continue;
+
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", app_dir, name);
 
         FILE *f = fopen(path, "rb");
         if (!f) {
-            /* An AOT artifact is made in the build's tmpdir and only ever
-             * embedded: an unbuilt app's tree does not have it. */
-            if (strncmp(name, "compute/", 8) == 0 && strstr(name, ".aot.") &&
-                errno == ENOENT)
-                continue;
             log_error("[sig] cannot open file: %s", path);
             return -1;
         }
