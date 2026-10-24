@@ -67,6 +67,32 @@ static inline uint8_t *hl_js_array_buffer_probe(JSContext *ctx, size_t *len,
     return p;
 }
 
+/* The bytes of an ArrayBuffer or a typed array, or NULL with NO
+ * exception pending when @p v is neither (or is detached). Borrowed: the
+ * caller copies them before any app code can run (a getter could detach or
+ * resize the buffer). */
+static inline uint8_t *hl_js_bytes_view(JSContext *ctx, size_t *len,
+                                        JSValueConst v)
+{
+    *len = 0;
+    if (!JS_IsObject(v)) return NULL;
+    size_t n = 0;
+    uint8_t *p = hl_js_array_buffer_probe(ctx, &n, v);
+    if (p) { *len = n; return p; }
+    size_t off = 0, blen = 0, per = 0;
+    JSValue ab = JS_GetTypedArrayBuffer(ctx, v, &off, &blen, &per);
+    if (JS_IsException(ab)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));   /* not a view */
+        return NULL;
+    }
+    size_t ab_len = 0;
+    uint8_t *raw = hl_js_array_buffer_probe(ctx, &ab_len, ab);
+    JS_FreeValue(ctx, ab);
+    if (!raw || off > ab_len || blen > ab_len - off) return NULL;
+    *len = blen;
+    return raw + off;
+}
+
 /* A db param that is not a string, number, boolean, null or undefined. An
  * ArrayBuffer or a typed array is a BLOB: @p *view names its bytes, which
  * the caller copies at once (a later element's getter could detach or
@@ -96,22 +122,7 @@ static inline int hl_js_db_param_other(JSContext *ctx, JSValueConst v,
     }
     if (JS_IsObject(v)) {
         size_t n = 0;
-        uint8_t *p = hl_js_array_buffer_probe(ctx, &n, v);
-        if (!p) {
-            size_t off = 0, blen = 0, per = 0;
-            JSValue ab = JS_GetTypedArrayBuffer(ctx, v, &off, &blen, &per);
-            if (JS_IsException(ab)) {
-                JS_FreeValue(ctx, JS_GetException(ctx));   /* not a view */
-            } else {
-                size_t ab_len = 0;
-                uint8_t *raw = hl_js_array_buffer_probe(ctx, &ab_len, ab);
-                JS_FreeValue(ctx, ab);
-                if (raw && off <= ab_len && blen <= ab_len - off) {
-                    p = raw + off;
-                    n = blen;
-                }
-            }
-        }
+        uint8_t *p = hl_js_bytes_view(ctx, &n, v);
         if (p) {
             out->type = HL_TYPE_BLOB;
             out->len = n;

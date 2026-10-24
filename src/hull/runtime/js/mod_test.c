@@ -134,6 +134,19 @@ static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+static void js_test_http_free(JSContext *ctx, const char *path,
+                              const char *body_str, const char *ctx_json,
+                              const char **names, const char **values, int n)
+{
+    if (ctx_json) JS_FreeCString(ctx, ctx_json);
+    if (body_str) JS_FreeCString(ctx, body_str);
+    for (int i = 0; i < n; i++) {
+        JS_FreeCString(ctx, names[i]);
+        JS_FreeCString(ctx, values[i]);
+    }
+    JS_FreeCString(ctx, path);
+}
+
 /* test.get/post/put/delete/patch */
 static JSValue js_test_http(JSContext *ctx, const char *method,
                             int argc, JSValueConst *argv)
@@ -154,45 +167,70 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     const char *ctx_json = NULL;
     int run_middleware = 0;
 
-    /* Parse opts (arg 1) */
+    /* Parse opts (arg 1). Every getter and conversion can throw (app code,
+     * out of memory, the budget's interrupt): the call fails with that
+     * exception and frees what it gathered - they were swallowed, and a
+     * header whose value did not convert leaked its name (audit 25). */
     if (argc >= 2 && JS_IsObject(argv[1])) {
         /* opts.middleware */
         JSValue mw_val = JS_GetPropertyStr(ctx, argv[1], "middleware");
-        if (JS_ToBool(ctx, mw_val))
-            run_middleware = 1;
+        if (JS_IsException(mw_val)) goto fail;
+        int mw = JS_ToBool(ctx, mw_val);
         JS_FreeValue(ctx, mw_val);
+        if (mw < 0) goto fail;
+        run_middleware = mw ? 1 : 0;
+
         JSValue body_val = JS_GetPropertyStr(ctx, argv[1], "body");
-        if (JS_IsString(body_val))
+        if (JS_IsException(body_val)) goto fail;
+        if (JS_IsString(body_val)) {
             body_str = JS_ToCStringLen(ctx, &body_len, body_val);
+            if (!body_str) { JS_FreeValue(ctx, body_val); goto fail; }
+        }
         JS_FreeValue(ctx, body_val);
 
         JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[1], "headers");
+        if (JS_IsException(hdrs_val)) goto fail;
         if (JS_IsObject(hdrs_val)) {
             JSPropertyEnum *props = NULL;
             uint32_t prop_count = 0;
-            if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, hdrs_val,
-                                        JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
-                for (uint32_t i = 0; i < prop_count && num_headers < KL_MAX_HEADERS; i++) {
-                    header_names[num_headers] = JS_AtomToCString(ctx, props[i].atom);
-                    JSValue val = JS_GetProperty(ctx, hdrs_val, props[i].atom);
-                    header_values[num_headers] = JS_ToCString(ctx, val);
-                    JS_FreeValue(ctx, val);
-                    if (header_names[num_headers] && header_values[num_headers])
-                        num_headers++;
-                }
+            int bad = JS_GetOwnPropertyNames(ctx, &props, &prop_count, hdrs_val,
+                                        JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0;
+            for (uint32_t i = 0; !bad && i < prop_count &&
+                                 num_headers < KL_MAX_HEADERS; i++) {
+                const char *name = JS_AtomToCString(ctx, props[i].atom);
+                if (!name) { bad = 1; break; }
+                JSValue val = JS_GetProperty(ctx, hdrs_val, props[i].atom);
+                const char *value = JS_IsException(val) ? NULL
+                                  : JS_ToCString(ctx, val);
+                JS_FreeValue(ctx, val);
+                if (!value) { JS_FreeCString(ctx, name); bad = 1; break; }
+                header_names[num_headers] = name;
+                header_values[num_headers] = value;
+                num_headers++;
+            }
+            if (props) {
                 for (uint32_t i = 0; i < prop_count; i++)
                     JS_FreeAtom(ctx, props[i].atom);
                 js_free(ctx, props);
             }
+            if (bad) { JS_FreeValue(ctx, hdrs_val); goto fail; }
         }
         JS_FreeValue(ctx, hdrs_val);
 
         /* opts.ctx - JSON-stringify to pass through as req.ctx */
         JSValue ctx_val = JS_GetPropertyStr(ctx, argv[1], "ctx");
+        if (JS_IsException(ctx_val)) goto fail;
         if (JS_IsObject(ctx_val)) {
             JSValue json_val = JS_JSONStringify(ctx, ctx_val, JS_UNDEFINED, JS_UNDEFINED);
-            if (JS_IsString(json_val))
+            if (JS_IsException(json_val)) { JS_FreeValue(ctx, ctx_val); goto fail; }
+            if (JS_IsString(json_val)) {
                 ctx_json = JS_ToCString(ctx, json_val);
+                if (!ctx_json) {
+                    JS_FreeValue(ctx, json_val);
+                    JS_FreeValue(ctx, ctx_val);
+                    goto fail;
+                }
+            }
             JS_FreeValue(ctx, json_val);
         }
         JS_FreeValue(ctx, ctx_val);
@@ -231,17 +269,8 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
         tjs->budget_timed_out = 1;
     }
 
-    /* Free C strings */
-    // cppcheck-suppress knownConditionTrueFalse
-    if (ctx_json) JS_FreeCString(ctx, ctx_json);
-    // cppcheck-suppress knownConditionTrueFalse
-    if (body_str) JS_FreeCString(ctx, body_str);
-    // cppcheck-suppress knownConditionTrueFalse
-    for (int i = 0; i < num_headers; i++) {
-        if (header_names[i]) JS_FreeCString(ctx, header_names[i]);
-        if (header_values[i]) JS_FreeCString(ctx, header_values[i]);
-    }
-    JS_FreeCString(ctx, path);
+    js_test_http_free(ctx, path, body_str, ctx_json, header_names,
+                      header_values, num_headers);
 
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "test dispatch failed");
@@ -309,6 +338,11 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     }
 
     return obj;
+
+fail:
+    js_test_http_free(ctx, path, body_str, ctx_json, header_names,
+                      header_values, num_headers);
+    return JS_EXCEPTION;
 }
 
 static JSValue js_test_get(JSContext *ctx, JSValueConst this_val,

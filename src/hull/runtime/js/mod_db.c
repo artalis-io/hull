@@ -30,13 +30,19 @@ typedef struct {
     JSContext *ctx;
     JSValue    array;
     int32_t    row_count;
+    int        failed;   /* a value could not be made: the row loop stopped */
 } JsQueryCtx;
 
+/* A value or a define that failed (out of memory, the budget's interrupt)
+ * stops the row loop with the exception pending: it was stored as a column
+ * value (JS_EXCEPTION) and the query returned the partial result (audit
+ * 25). The binding sees `failed` and returns JS_EXCEPTION. */
 static int js_query_row_cb(void *opaque, HlColumn *cols, int ncols)
 {
     JsQueryCtx *qc = (JsQueryCtx *)opaque;
 
     JSValue row = JS_NewObject(qc->ctx);
+    if (JS_IsException(row)) { qc->failed = 1; return 1; }
     for (int i = 0; i < ncols; i++) {
         JSValue val;
         switch (cols[i].value.type) {
@@ -66,13 +72,34 @@ static int js_query_row_cb(void *opaque, HlColumn *cols, int ncols)
         /* Defined, never set: a set runs any Object.prototype setter -
          * app code, inside the statement's row loop, where it could close
          * the connection or evict the statement being stepped. */
-        JS_DefinePropertyValueStr(qc->ctx, row, cols[i].name, val, JS_PROP_C_W_E);
+        if (JS_IsException(val) ||
+            JS_DefinePropertyValueStr(qc->ctx, row, cols[i].name, val,
+                                      JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(qc->ctx, row);
+            qc->failed = 1;
+            return 1;
+        }
     }
 
-    JS_DefinePropertyValueUint32(qc->ctx, qc->array, (uint32_t)qc->row_count,
-                                 row, JS_PROP_C_W_E);
+    if (JS_DefinePropertyValueUint32(qc->ctx, qc->array,
+                                     (uint32_t)qc->row_count,
+                                     row, JS_PROP_C_W_E) < 0) {
+        qc->failed = 1;
+        return 1;
+    }
     qc->row_count++;
     return 0;
+}
+
+/* The exception a failed row / column callback left: the budget's interrupt
+ * when the run is over its limit, else the pending one (out of memory). */
+static JSValue js_db_cb_failed(JSContext *ctx, HlJS *js)
+{
+    if (js->budget_tripped)
+        return hl_js_budget_throw(ctx);
+    if (!JS_HasException(ctx))
+        return JS_ThrowOutOfMemory(ctx);
+    return JS_EXCEPTION;
 }
 
 static void js_free_hl_values(JSContext *ctx, HlValue *params, int count);
@@ -450,12 +477,22 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
         .array = JS_NewArray(ctx),
         .row_count = 0,
     };
+    if (JS_IsException(qc.array)) {
+        js_free_hl_values(ctx, params, nparams);
+        JS_FreeCString(ctx, sql);
+        return JS_EXCEPTION;
+    }
 
     int rc = hl_db_query(h, sql, params, nparams,
                          js_query_row_cb, &qc, js->base.alloc);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
+
+    if (qc.failed) {
+        JS_FreeValue(ctx, qc.array);
+        return js_db_cb_failed(ctx, js);
+    }
 
     if (rc != 0) {
         JS_FreeValue(ctx, qc.array);
@@ -621,7 +658,11 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
             "statements after its first await would run outside the "
             "transaction");
 
+    /* Resolved again: the async probe can run app code (a Proxy fn's
+     * getPrototypeOf trap) that closes a db.open handle (audit 25). */
     HlDbHandle *h = js_call_handle(ctx, this_val);
+    if (!h)
+        return JS_ThrowInternalError(ctx, "database connection is closed");
 
     /* Nested inside another batch: a savepoint (see hl_db_batch_enter). */
     if (hl_db_batch_enter(h) != 0)
@@ -787,13 +828,20 @@ typedef struct {
     JSContext *ctx;
     JSValue    array;
     uint32_t   n;
+    int        failed;   /* see JsQueryCtx (audit 25) */
 } JsColumnsCtx;
 
 static void js_table_columns_cb(void *cb_ctx, const char *col_name)
 {
     JsColumnsCtx *cc = (JsColumnsCtx *)cb_ctx;
-    JS_DefinePropertyValueUint32(cc->ctx, cc->array, cc->n,
-                                 JS_NewString(cc->ctx, col_name), JS_PROP_C_W_E);
+    if (cc->failed) return;   /* the exception stays the first one */
+    JSValue name = JS_NewString(cc->ctx, col_name);
+    if (JS_IsException(name) ||
+        JS_DefinePropertyValueUint32(cc->ctx, cc->array, cc->n, name,
+                                     JS_PROP_C_W_E) < 0) {
+        cc->failed = 1;
+        return;
+    }
     cc->n++;
 }
 
@@ -827,8 +875,16 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
     }
 
     JsColumnsCtx cc = { .ctx = ctx, .array = JS_NewArray(ctx), .n = 0 };
+    if (JS_IsException(cc.array)) {
+        JS_FreeCString(ctx, table);
+        return JS_EXCEPTION;
+    }
     int rc = hl_db_table_columns(h, table, js_table_columns_cb, &cc);
     JS_FreeCString(ctx, table);
+    if (cc.failed) {
+        JS_FreeValue(ctx, cc.array);
+        return js_db_cb_failed(ctx, js);
+    }
 
     if (rc != 0) {
         JS_FreeValue(ctx, cc.array);

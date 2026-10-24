@@ -474,6 +474,7 @@ static inline int hl_db_batch_lost_(HlDbHandle *h)
 
 static inline int hl_db_batch_enter(HlDbHandle *h)
 {
+    if (!h) return -1;   /* a closed connection (audit 25) */
     h->batch_err = NULL;
     /* An enclosing batch whose transaction is gone: a SAVEPOINT now would run
      * outside any transaction (SQLite silently opens one that RELEASE then
@@ -493,6 +494,7 @@ static inline int hl_db_batch_enter(HlDbHandle *h)
 
 static inline int hl_db_batch_leave(HlDbHandle *h, int ok)
 {
+    if (!h) return -1;   /* a closed connection (audit 25) */
     h->batch_err = NULL;
     if (h->batch_depth <= 0) {
         /* The depth was reset under this batch (the guard, or a nested batch

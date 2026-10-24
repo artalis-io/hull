@@ -155,7 +155,11 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
 
     /* Build args: conn, message, is_binary */
     JSValue conn_obj = hl_js_ws_push_conn(ctx, conn);
-    JSValue msg_val = JS_NewStringLen(ctx, data, len);
+    /* A binary frame is an ArrayBuffer: decoded as UTF-8 text its bytes
+     * were mangled (audit 25). A text frame stays a string. */
+    JSValue msg_val = is_binary
+        ? JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len)
+        : JS_NewStringLen(ctx, data, len);
     JSValue is_bin_val = JS_NewBool(ctx, is_binary);
 
     JSValue args[3] = { conn_obj, msg_val, is_bin_val };

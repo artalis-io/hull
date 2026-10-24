@@ -484,7 +484,8 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
  * returns. tui.run never yields, so its whole session was ONE app.main run -
  * killed by the 10-minute deadline (or the 100M-instruction budget) however
  * the user paced it (audit 21). A run already over its budget is not
- * re-armed: its trip is raised instead. */
+ * re-armed: its trip is raised instead, and a non-blocking pollSync(0) that
+ * returns no event is not a wait, so it re-arms nothing (audit 25). */
 static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
@@ -497,7 +498,11 @@ static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
     if (js && js->budget_tripped) return hl_js_budget_throw(ctx);
     HlTuiEvent ev = {0};
     int rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
-    if (js)
+    /* Only a wait that delivered an event or actually blocked starts a new
+     * run: a non-blocking pollSync(0) that found nothing is not a wait, and
+     * re-arming on it let a loop of them reset its own budget and deadline
+     * for ever (audit 25). */
+    if (js && rc >= 0 && (rc == 0 || timeout_ms != 0))
         hl_js_budget_arm_kind(js, js->active_cli_main ? HL_RUN_MAIN : HL_RUN_ENTRY);
     if (rc < 0) return JS_ThrowInternalError(ctx, "tui.pollSync failed");
     if (rc == 1) return JS_NULL;

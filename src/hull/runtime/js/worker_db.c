@@ -169,12 +169,17 @@ typedef struct {
     JSContext *ctx;
     JSValue    rows;
     int        row_num;
+    int        failed;   /* a value could not be made (audit 25) */
 } WorkerJsQueryCtx;
 
+/* As mod_db.c's row callback: a value or define that failed stops the row
+ * loop with its exception pending - it was stored as a column value and the
+ * partial result returned (audit 25). */
 static int worker_js_row_cb(void *opaque, HlColumn *cols, int ncols)
 {
     WorkerJsQueryCtx *qc = (WorkerJsQueryCtx *)opaque;
     JSValue row = JS_NewObject(qc->ctx);
+    if (JS_IsException(row)) { qc->failed = 1; return 1; }
     for (int i = 0; i < ncols; i++) {
         JSValue val;
         switch (cols[i].value.type) {
@@ -204,11 +209,20 @@ static int worker_js_row_cb(void *opaque, HlColumn *cols, int ncols)
          * Object.prototype setter - the dispatched function's code, inside
          * the statement's step loop, where a query could evict the stepping
          * statement - and a column named __proto__ replaced the prototype. */
-        JS_DefinePropertyValueStr(qc->ctx, row, cols[i].name ? cols[i].name : "?",
-                                  val, JS_PROP_C_W_E);
+        if (JS_IsException(val) ||
+            JS_DefinePropertyValueStr(qc->ctx, row,
+                                      cols[i].name ? cols[i].name : "?",
+                                      val, JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(qc->ctx, row);
+            qc->failed = 1;
+            return 1;
+        }
     }
-    JS_DefinePropertyValueUint32(qc->ctx, qc->rows, (uint32_t)qc->row_num, row,
-                                 JS_PROP_C_W_E);
+    if (JS_DefinePropertyValueUint32(qc->ctx, qc->rows, (uint32_t)qc->row_num,
+                                     row, JS_PROP_C_W_E) < 0) {
+        qc->failed = 1;
+        return 1;
+    }
     qc->row_num++;
     return 0;
 }
@@ -244,11 +258,22 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
     }
 
     JSValue rows = JS_NewArray(ctx);
+    if (JS_IsException(rows)) {
+        worker_js_free_values(ctx, params, strs, nparams);
+        JS_FreeCString(ctx, sql);
+        return JS_EXCEPTION;
+    }
     WorkerJsQueryCtx qc = { .ctx = ctx, .rows = rows, .row_num = 0 };
     int rc = hl_db_query(h, sql, params, nparams, worker_js_row_cb, &qc, NULL);
 
     worker_js_free_values(ctx, params, strs, nparams);
     JS_FreeCString(ctx, sql);
+
+    if (qc.failed) {
+        JS_FreeValue(ctx, rows);
+        if (hl_js_worker_budget_tripped()) return hl_js_budget_throw(ctx);
+        return JS_HasException(ctx) ? JS_EXCEPTION : JS_ThrowOutOfMemory(ctx);
+    }
 
     if (rc != 0) {
         JS_FreeValue(ctx, rows);
