@@ -637,6 +637,13 @@ static int l_gpu_buffer_read(lua_State *L)
         return 2;
     }
 
+    /* The read-back and its copy into the string: 1 unit per 8 bytes, as
+     * texture_read (audit 26). */
+    if (hl_lua_budget_charge(L, (int64_t)hl_work_bytes_units((uint64_t)len))) {
+        free(data);
+        return hl_lua_budget_raise(L);
+    }
+
     if (hl_lua_pushlstring_safe(L, (const char *)data, len) != 0) {
         free(data);
         return luaL_error(L, "not enough memory for the result");
@@ -856,6 +863,13 @@ static int l_gpu_texture_read(lua_State *L)
         lua_pushnil(L);
         lua_pushstring(L, "texture_read_failed");
         return 2;
+    }
+
+    /* The read-back and its copy into the image: 1 unit per 8 bytes, before
+     * the copy (audit 26). The backend's buffer goes back before a raise. */
+    if (hl_lua_budget_charge(L, (int64_t)hl_work_bytes_units((uint64_t)len))) {
+        free(data);
+        return hl_lua_budget_raise(L);
     }
 
     /* Wrap as HlImage (takes ownership of data) */

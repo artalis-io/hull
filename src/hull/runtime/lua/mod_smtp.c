@@ -9,6 +9,8 @@
 #include "hull/cap/smtp_async.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
+#include "hull/shared/offheap.h"
+#include "hull/shared/work_charge.h"
 #include "internal.h"   /* hl_lua_check_can_wait */
 
 #include <sh_arena.h>
@@ -210,6 +212,17 @@ static int lua_smtp_send(lua_State *L)
         .content_type = content_type,
     };
 
+    /* The send copies the message (into the owned op, or onto the wire on
+     * the sync path): charged 1 unit per 8 bytes before the work, without
+     * raising while the cc copies are in the scratch arena (audit 26: a
+     * pcall'd loop of sends refused at admission copied the message on
+     * every call, uncharged). */
+    size_t copy_bytes = hl_smtp_message_bytes(&msg);
+    if (hl_lua_budget_charge(L, (int64_t)hl_work_bytes_units(copy_bytes))) {
+        smtp_scratch_release(lua, scratch_mark);
+        return hl_lua_budget_raise(L);
+    }
+
     /* No active event loop (app.main CLI / in-process test harness / direct C):
      * synchronous model 1 on the calling thread. This is the ONLY sync path -
      * we never fall back to it merely because admission or the pool is
@@ -247,17 +260,33 @@ static int lua_smtp_send(lua_State *L)
 
     /* Deep-copy the message into an owned op (crosses to the worker thread).
      * Nothing reads the scratch copies after it, whatever happens next. */
+    /* The owned copy lives until the op is done: held on the VM's off-heap
+     * total under its heap limit, given back when the async ctx goes (every
+     * path that retires it, the immediate scheduling failures included) -
+     * N sends in flight held N copies of one big body (audit 26). */
+    HlOffheapHold copy_hold = {0};
+    if (hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes, lua->mem_limit,
+                        copy_bytes) != 0) {
+        smtp_scratch_release(lua, scratch_mark);
+        return luaL_error(L, "smtp.send: a %I-byte message would take the "
+                          "VM's off-heap copies past its heap limit",
+                          (lua_Integer)copy_bytes);
+    }
     int timeout_ms = lua->base.smtp_cfg->timeout_ms > 0
                          ? lua->base.smtp_cfg->timeout_ms : 0;
     HlSmtpOp *op = hl_smtp_op_create(&msg, timeout_ms);
     smtp_scratch_release(lua, scratch_mark);
-    if (!op)
+    if (!op) {
+        hl_offheap_drop(&copy_hold);
         return lua_smtp_fail(L, "connect_failed");
+    }
 
     /* Create the continuation vehicle (the runtime cont captures this coroutine). */
     HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.net_ctx,
                                            lua->base.alloc);
-    if (!actx) { hl_smtp_op_free(op); return lua_smtp_fail(L, "connect_failed"); }
+    if (!actx) { hl_smtp_op_free(op); hl_offheap_drop(&copy_hold);
+                 return lua_smtp_fail(L, "connect_failed"); }
+    actx->hold = copy_hold;   /* given back when the ctx goes */
     extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
                                                  HlLuaPushResultFn);
     HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,

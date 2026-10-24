@@ -12,6 +12,8 @@
 #include "hull/cap/smtp_async.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
+#include "hull/shared/offheap.h"
+#include "hull/shared/work_charge.h"
 
 #include <stdio.h>
 
@@ -261,6 +263,16 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
         .content_type = content_type,
     };
 
+    /* The send copies the message (into the owned op, or onto the wire on
+     * the sync path): charged 1 unit per 8 bytes before the work (audit 26:
+     * a loop of sends refused at admission copied it on every call,
+     * uncharged). */
+    size_t copy_bytes = hl_smtp_message_bytes(&msg);
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(copy_bytes)) < 0) {
+        result = JS_EXCEPTION;
+        goto cleanup;
+    }
+
     /* No active event loop (app.main CLI / in-process test harness): synchronous
      * model 1, returned as an already-resolved Promise. The ONLY sync path; we
      * never fall back to it merely because admission or the pool is unavailable. */
@@ -294,13 +306,26 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     /* Deep-copy the message into an owned op (crosses to the worker; no JS
      * value/context ever does). */
     int to_ms = js->base.smtp_cfg->timeout_ms > 0 ? js->base.smtp_cfg->timeout_ms : 0;
+    /* The owned copy lives until the op is done: held on the VM's off-heap
+     * total under its heap limit, given back when the async ctx goes - N
+     * sends in flight held N copies of one big body (audit 26). */
+    HlOffheapHold copy_hold = {0};
+    if (hl_offheap_take(&copy_hold, &js->wasm_buf_bytes, js->max_heap_bytes,
+                        copy_bytes) != 0) {
+        result = JS_ThrowRangeError(ctx, "smtp.send: a %zu-byte message would "
+                                    "take the VM's off-heap copies past its "
+                                    "heap limit", copy_bytes);
+        goto cleanup;
+    }
     HlSmtpOp *op = hl_smtp_op_create(&msg, to_ms);
-    if (!op) { result = js_resolved_result(ctx, 0, "connect_failed"); goto cleanup; }
+    if (!op) { hl_offheap_drop(&copy_hold);
+               result = js_resolved_result(ctx, 0, "connect_failed"); goto cleanup; }
 
     HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx,
                                            js->base.alloc);
-    if (!actx) { hl_smtp_op_free(op);
+    if (!actx) { hl_smtp_op_free(op); hl_offheap_drop(&copy_hold);
                  result = js_resolved_result(ctx, 0, "connect_failed"); goto cleanup; }
+    actx->hold = copy_hold;   /* given back when the ctx goes */
 
     /* One promise, created up front and returned; resolved either by the cont (on
      * the async resume) or by us (on an immediate scheduling failure). We keep our

@@ -17,6 +17,8 @@
 
 #include "hull/cap/smtp.h"   /* HlSmtpMessage */
 
+#include <stddef.h>
+
 typedef struct HlSmtpOp {
     char  *host;
     int    port;
@@ -33,6 +35,14 @@ typedef struct HlSmtpOp {
     char  *content_type;     /* NULL = default */
     int    timeout_ms;
 } HlSmtpOp;
+
+/**
+ * The bytes hl_smtp_op_create would copy out of @p msg (every string field and
+ * cc entry, each with its NUL, plus the cc vector), saturating at SIZE_MAX.
+ * The bindings charge it to the run's budget and hold it on the VM's off-heap
+ * total before the copy (audit 26).
+ */
+size_t hl_smtp_message_bytes(const HlSmtpMessage *msg);
 
 /**
  * Deep-copy @p msg (plus the resolved @p timeout_ms) into a newly allocated op

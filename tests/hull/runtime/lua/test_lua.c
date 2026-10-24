@@ -10428,6 +10428,7 @@ UTEST(lua_audit9, a_task_that_trips_the_budget_still_finishes)
 /* ── Audit 10: the Lua runtime ────────────────────────────────────────── */
 
 #include "hull/cap/smtp.h"   /* HlSmtpConfig */
+#include "hull/cap/smtp_op.h"   /* hl_smtp_message_bytes */
 #include "hull/cap/http.h"   /* HlHttpConfig */
 #include "hull/cap/fs.h"     /* HlFsConfig */
 
@@ -10593,6 +10594,48 @@ UTEST(lua_audit10, smtp_cc_is_copied_whole_or_refused)
              "assert(type(r) == 'table') return 1", base);
     EXPECT_EQ(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
 
+    lua_rt.base.smtp_cfg = NULL;
+    cleanup_lua_caps();
+}
+
+/* Audit 26 L-M: smtp.send copied the message (into the owned op the worker
+ * sends) uncharged, so a pcall'd loop of sends refused at admission copied
+ * a big body on every call for one instruction each. The copy is charged
+ * 1 unit per 8 bytes before it now, on the sync path too, and the size it
+ * charges counts every field the op copies. */
+UTEST(lua_audit26, smtp_send_copy_is_charged)
+{
+    HlSmtpMessage m = { .host = "h", .from = "f", .to = "t", .subject = "s",
+                        .body = "0123456789" };
+    const char *cc[] = { "c1", "c22" };
+    m.cc = cc;
+    m.cc_count = 2;
+    size_t want = sizeof(HlSmtpOp) + 2 + 2 + 2 + 2 + 11
+                + 2 * sizeof(char *) + 3 + 4;
+    EXPECT_EQ(hl_smtp_message_bytes(&m), want);
+    EXPECT_EQ(hl_smtp_message_bytes(NULL), (size_t)0);
+
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlSmtpConfig smtp = {0};   /* no hosts: every send is refused */
+    lua_rt.base.smtp_cfg = &smtp;
+    char err[512];
+    ASSERT_EQ(audit10_run("BIG = string.rep('x', 8 * 1000000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 10 sends of an 8 MB body: 10M units, over a 200k limit. */
+    EXPECT_NE(audit10_run(
+        "local o = { host = 'mail.invalid', from = 'a@x.test', to = 'b@x.test', "
+        "            subject = 's', body = BIG } "
+        "for i = 1, 10 do pcall(smtp.send, o) end return 1",
+        200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* A small message is cheap (and refused: the host is not allowed). */
+    EXPECT_EQ(audit10_run(
+        "local r = smtp.send({ host = 'mail.invalid', from = 'a@x.test', "
+        "  to = 'b@x.test', subject = 's', body = 'b' }) "
+        "assert(type(r) == 'table' and not r.ok) return 1",
+        200000, err, sizeof err), LUA_OK);
+    audit10_run("BIG = nil return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err);
     lua_rt.base.smtp_cfg = NULL;
     cleanup_lua_caps();
 }
