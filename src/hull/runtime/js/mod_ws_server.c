@@ -214,9 +214,9 @@ static JSValue js_ws_conn_send_binary(JSContext *ctx, JSValueConst this_val,
     if (!ud || !ud->conn || ud->conn->closed || !ud->conn->kl_ws)
         return JS_ThrowTypeError(ctx, "connection closed");
 
-    /* Any byte view (a TypedArray or DataView too, not only a bare
-     * ArrayBuffer - a Uint8Array went out as its toString, "1,2,3"), or a
-     * string; no app code runs (audit 22). */
+    /* An ArrayBuffer or a TypedArray (a Uint8Array went out as its
+     * toString, "1,2,3"), or a string; no app code runs (audit 22). A
+     * DataView is not a byte view js_get_buffer takes: it is refused. */
     HlBufferView view = {0};
     const char *str = NULL;
     int needs_free = 0;

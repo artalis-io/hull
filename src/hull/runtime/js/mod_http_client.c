@@ -108,42 +108,55 @@ static void js_free_http_headers(JSContext *ctx, HlHttpHeader *hdrs, int count)
     js_free(ctx, hdrs);
 }
 
-/* Push HTTP response as JS object: { status, body, headers } */
+/* Define @p val as own property @p name of @p obj, taking @p val. A value
+ * that could not be made (JS_EXCEPTION) or a define that failed leaves the
+ * exception pending and returns -1 (audit 26: they were stored unchecked). */
+static int js_http_define(JSContext *ctx, JSValue obj, const char *name,
+                          JSValue val)
+{
+    if (JS_IsException(val)) return -1;
+    return JS_DefinePropertyValueStr(ctx, obj, name, val, JS_PROP_C_W_E) < 0
+        ? -1 : 0;
+}
+
+/* HTTP response as a JS object: { status, body, headers }, header names
+ * lowercased. Own properties are DEFINED (a header named "__proto__" is a
+ * key, not a prototype). Returns JS_EXCEPTION, nothing leaked, when any part
+ * cannot be made. */
 static JSValue js_push_http_response(JSContext *ctx, const KlHttpClientResponse *resp)
 {
     JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
+    if (JS_IsException(obj)) return JS_EXCEPTION;
+    if (js_http_define(ctx, obj, "status", JS_NewInt32(ctx, resp->status)) != 0)
+        goto fail;
+    if (js_http_define(ctx, obj, "body",
+                       (resp->body && resp->body_len > 0)
+                           ? JS_NewStringLen(ctx, resp->body, resp->body_len)
+                           : JS_NewString(ctx, "")) != 0)
+        goto fail;
 
-    if (resp->body && resp->body_len > 0)
-        JS_SetPropertyStr(ctx, obj, "body",
-                          JS_NewStringLen(ctx, resp->body, resp->body_len));
-    else
-        JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
-
-    /* Headers as { "name": "value" } - lowercase names */
     JSValue headers = JS_NewObject(ctx);
+    if (JS_IsException(headers)) goto fail;
     for (int i = 0; i < resp->num_headers; i++) {
-        /* Lowercase header name */
         size_t nlen = strlen(resp->headers[i].name);
         char *lower = js_malloc(ctx, nlen + 1);
-        if (lower) {
-            for (size_t j = 0; j < nlen; j++)
-                lower[j] = (char)((resp->headers[i].name[j] >= 'A' &&
-                                    resp->headers[i].name[j] <= 'Z')
-                    ? resp->headers[i].name[j] + 32
-                    : resp->headers[i].name[j]);
-            lower[nlen] = '\0';
-            JS_SetPropertyStr(ctx, headers, lower,
-                              JS_NewString(ctx, resp->headers[i].value));
-            js_free(ctx, lower);
-        } else {
-            JS_SetPropertyStr(ctx, headers, resp->headers[i].name,
-                              JS_NewString(ctx, resp->headers[i].value));
+        if (!lower) { JS_FreeValue(ctx, headers); goto fail; }
+        for (size_t j = 0; j < nlen; j++) {
+            char c = resp->headers[i].name[j];
+            lower[j] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
         }
+        lower[nlen] = '\0';
+        int rc = js_http_define(ctx, headers, lower,
+                                JS_NewString(ctx, resp->headers[i].value));
+        js_free(ctx, lower);
+        if (rc != 0) { JS_FreeValue(ctx, headers); goto fail; }
     }
-    JS_SetPropertyStr(ctx, obj, "headers", headers);
-
+    if (js_http_define(ctx, obj, "headers", headers) != 0) goto fail;
     return obj;
+
+fail:
+    JS_FreeValue(ctx, obj);
+    return JS_EXCEPTION;
 }
 
 /* opts.timeoutMs of @p opts (if it is an object): ONE deadline for the whole
@@ -495,39 +508,7 @@ static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
     const KlHttpClientResponse *resp = hl_http_async_response(driver);
     if (!resp)
         return JS_UNDEFINED;
-
-    JSValue obj = JS_NewObject(ctx);
-    JS_DefinePropertyValueStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status), JS_PROP_C_W_E);
-
-    if (resp->body && resp->body_len > 0)
-        JS_DefinePropertyValueStr(ctx, obj, "body",
-                          JS_NewStringLen(ctx, resp->body, resp->body_len), JS_PROP_C_W_E);
-    else
-        JS_DefinePropertyValueStr(ctx, obj, "body", JS_NewString(ctx, ""), JS_PROP_C_W_E);
-
-    /* Headers as { "name": "value" } - lowercase names */
-    JSValue headers = JS_NewObject(ctx);
-    for (int i = 0; i < resp->num_headers; i++) {
-        size_t nlen = strlen(resp->headers[i].name);
-        char *lower = js_malloc(ctx, nlen + 1);
-        if (lower) {
-            for (size_t j = 0; j < nlen; j++)
-                lower[j] = (char)((resp->headers[i].name[j] >= 'A' &&
-                                    resp->headers[i].name[j] <= 'Z')
-                    ? resp->headers[i].name[j] + 32
-                    : resp->headers[i].name[j]);
-            lower[nlen] = '\0';
-            JS_DefinePropertyValueStr(ctx, headers, lower,
-                              JS_NewString(ctx, resp->headers[i].value), JS_PROP_C_W_E);
-            js_free(ctx, lower);
-        } else {
-            JS_DefinePropertyValueStr(ctx, headers, resp->headers[i].name,
-                              JS_NewString(ctx, resp->headers[i].value), JS_PROP_C_W_E);
-        }
-    }
-    JS_DefinePropertyValueStr(ctx, obj, "headers", headers, JS_PROP_C_W_E);
-
-    return obj;
+    return js_push_http_response(ctx, resp);
 }
 
 /* http.fetch(method, url, opts?) - async non-blocking HTTP request. */
