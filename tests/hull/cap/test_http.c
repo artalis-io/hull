@@ -102,7 +102,8 @@ UTEST(redirect, a_hop_to_an_allowed_host_is_followed)
 {
     const char *hosts[] = { "api.example.com" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    ASSERT_EQ(0, hl_http_redirect_allowed("https://api.example.com/v2/x", &cfg));
+    HlHttpRedirectGuard g = { .cfg = &cfg, .origin_https = 0 };
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://api.example.com/v2/x", &g));
 }
 
 UTEST(redirect, a_hop_elsewhere_is_refused)
@@ -111,18 +112,42 @@ UTEST(redirect, a_hop_elsewhere_is_refused)
      * metadata endpoint or an internal service. */
     const char *hosts[] = { "api.example.com" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    HlHttpRedirectGuard g = { .cfg = &cfg, .origin_https = 0 };
     ASSERT_EQ(-1, hl_http_redirect_allowed(
-        "http://169.254.169.254/latest/meta-data/", &cfg));
-    ASSERT_EQ(-1, hl_http_redirect_allowed("http://10.0.0.5:6379/", &cfg));
-    ASSERT_EQ(-1, hl_http_redirect_allowed("http://api.example.com.evil.net/", &cfg));
+        "http://169.254.169.254/latest/meta-data/", &g));
+    ASSERT_EQ(-1, hl_http_redirect_allowed("http://10.0.0.5:6379/", &g));
+    ASSERT_EQ(-1, hl_http_redirect_allowed("http://api.example.com.evil.net/", &g));
 }
 
 UTEST(redirect, an_unparseable_hop_is_refused)
 {
     const char *hosts[] = { "*" };
     HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    ASSERT_EQ(-1, hl_http_redirect_allowed("not a url", &cfg));
-    ASSERT_EQ(-1, hl_http_redirect_allowed(NULL, &cfg));
+    HlHttpRedirectGuard g = { .cfg = &cfg, .origin_https = 0 };
+    ASSERT_EQ(-1, hl_http_redirect_allowed("not a url", &g));
+    ASSERT_EQ(-1, hl_http_redirect_allowed(NULL, &g));
+}
+
+/* Audit 25: an https chain redirected to http:// re-sent a 307/308 body and
+ * every custom credential header (X-Api-Key) in cleartext. */
+UTEST(redirect, an_https_chain_may_not_drop_to_http)
+{
+    const char *hosts[] = { "api.example.com" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    HlHttpRedirectGuard tls = { .cfg = &cfg, .origin_https = 1 };
+    ASSERT_EQ(-1, hl_http_redirect_allowed("http://api.example.com/x", &tls));
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://api.example.com/x", &tls));
+    /* A chain that began on http may go either way. */
+    HlHttpRedirectGuard plain = { .cfg = &cfg, .origin_https = 0 };
+    ASSERT_EQ(0, hl_http_redirect_allowed("http://api.example.com/x", &plain));
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://api.example.com/x", &plain));
+}
+
+UTEST(redirect, no_guard_refuses)
+{
+    ASSERT_EQ(-1, hl_http_redirect_allowed("https://api.example.com/x", NULL));
+    HlHttpRedirectGuard g = { .cfg = NULL, .origin_https = 0 };
+    ASSERT_EQ(-1, hl_http_redirect_allowed("https://api.example.com/x", &g));
 }
 
 /* ════════════════════════════════════════════════════════════════════

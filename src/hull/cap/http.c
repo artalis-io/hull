@@ -65,11 +65,11 @@ size_t hl_http_url_redact(const char *url, char *out, size_t outsz)
     const char *at = NULL;
     for (size_t i = 0; i < end; i++)
         if (rest[i] == '@') at = rest + i;      /* the last one ends userinfo */
-    size_t slash = strcspn(rest, "/");
     const char *keep = rest;
     size_t keep_len = end;
     int ambiguous = 0;
     if (at) {
+        size_t slash = strcspn(rest, "/");
         if ((size_t)(at - rest) < slash) {
             keep = at + 1;
             keep_len = end - (size_t)(keep - rest);
@@ -93,21 +93,37 @@ size_t hl_http_url_redact(const char *url, char *out, size_t outsz)
  * allowlist used to be checked against the FIRST URL only: Keel followed every
  * Location after it, so an allowed host could redirect http.fetch to a cloud
  * metadata endpoint (169.254.169.254) or an internal service, and the body
- * came back to the app. Every hop now passes the same check. @p data is the
- * HlHttpConfig, which lives (sealed) for the whole process. */
+ * came back to the app. Every hop now passes the same check. A chain that
+ * began on https may not continue on http (audit 25): Keel re-sends a 307 /
+ * 308 body and every header but Authorization / Cookie / Proxy-Authorization,
+ * so an X-Api-Key went out in cleartext. @p data is the request's
+ * HlHttpRedirectGuard. */
+static void redirect_refused(const char *next_url, const char *reason,
+                             const char *msg)
+{
+    ShJsonWriter w = hl_audit_begin("http.redirect");
+    char red_url[512];   /* no userinfo, query or fragment (audit 17) */
+    hl_http_url_redact(next_url, red_url, sizeof red_url);
+    sh_json_write_kv_string(&w, "url", red_url);
+    sh_json_write_kv_string(&w, "result", "denied");
+    sh_json_write_kv_string(&w, "reason", reason);
+    hl_audit_end(&w);
+    log_warn("[hull:http] %s", msg);
+}
+
 int hl_http_redirect_allowed(const char *next_url, void *data)
 {
-    const HlHttpConfig *cfg = (const HlHttpConfig *)data;
+    const HlHttpRedirectGuard *g = (const HlHttpRedirectGuard *)data;
     KlUrl parsed;
-    if (!next_url || kl_url_parse(next_url, &parsed) != 0 ||
-        hl_http_check_host(cfg, parsed.host, parsed.host_len) != 0) {
-        ShJsonWriter w = hl_audit_begin("http.redirect");
-        char red_url[512];   /* no userinfo, query or fragment (audit 17) */
-        hl_http_url_redact(next_url, red_url, sizeof red_url);
-        sh_json_write_kv_string(&w, "url", red_url);
-        sh_json_write_kv_string(&w, "result", "denied");
-        hl_audit_end(&w);
-        log_warn("[hull:http] redirect to a host outside manifest.hosts refused");
+    if (!g || !g->cfg || !next_url || kl_url_parse(next_url, &parsed) != 0 ||
+        hl_http_check_host(g->cfg, parsed.host, parsed.host_len) != 0) {
+        redirect_refused(next_url, "host",
+                         "redirect to a host outside manifest.hosts refused");
+        return -1;
+    }
+    if (g->origin_https && !parsed.is_https) {
+        redirect_refused(next_url, "downgrade",
+                         "redirect from https to http refused");
         return -1;
     }
     return 0;
@@ -122,7 +138,7 @@ int hl_http_redirect_allowed(const char *next_url, void *data)
  * hop sets the config's timeout to what is left of it (the loop re-reads the
  * config on each hop), refusing the hop once nothing is left. */
 typedef struct {
-    const HlHttpConfig *cfg;
+    HlHttpRedirectGuard guard;       /* allowlist + the chain's first scheme */
     KlHttpClientConfig *kl_cfg;      /* the config Keel re-reads per hop */
     uint64_t            deadline_ms; /* absolute, monotonic */
     int                 timed_out;
@@ -139,7 +155,7 @@ int hl_http_chain_remaining_ms(uint64_t deadline_ms, uint64_t now_ms)
 static int hl_http_sync_redirect_hop(const char *next_url, void *data)
 {
     HlHttpSyncChain *chain = (HlHttpSyncChain *)data;
-    if (hl_http_redirect_allowed(next_url, (void *)(uintptr_t)chain->cfg) != 0)
+    if (hl_http_redirect_allowed(next_url, &chain->guard) != 0)
         return -1;
     int left = hl_http_chain_remaining_ms(chain->deadline_ms,
                                           kl_monotonic_ms());
@@ -237,7 +253,7 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     int rc;
     if (cfg->follow_redirects) {
         HlHttpSyncChain chain = {
-            .cfg         = cfg,
+            .guard       = { .cfg = cfg, .origin_https = parsed.is_https },
             .kl_cfg      = &kl_cfg,
             .deadline_ms = kl_monotonic_ms() + (uint64_t)timeout,
             .timed_out   = 0,

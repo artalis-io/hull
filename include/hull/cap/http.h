@@ -74,9 +74,22 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 
 /**
+ * @brief One request's redirect policy: the (sealed, process-lifetime)
+ * config whose allowlist every hop must pass, and whether the chain began on
+ * https - a chain that did may not be redirected to http:// (audit 25: a
+ * 307/308 body or an X-Api-Key header went out in cleartext; Keel strips only
+ * Authorization / Cookie / Proxy-Authorization on a scheme change).
+ */
+typedef struct HlHttpRedirectGuard {
+    const HlHttpConfig *cfg;
+    int                 origin_https;
+} HlHttpRedirectGuard;
+
+/**
  * @brief Per-hop redirect check for Keel (KlHttpRedirectConfig.on_redirect):
- * the next URL's host must pass the same allowlist as the first one.
- * @p data is the HlHttpConfig. 0 to follow, -1 to refuse (audited).
+ * the next URL's host must pass the same allowlist as the first one, and an
+ * https chain may not drop to http. @p data is an HlHttpRedirectGuard that
+ * lives as long as the request. 0 to follow, -1 to refuse (audited).
  */
 int hl_http_redirect_allowed(const char *next_url, void *data);
 
