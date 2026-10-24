@@ -29,6 +29,27 @@ static void image_charge(lua_State *L, uint64_t units)
     lua_hlwork(L, units > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)units, 0);
 }
 
+/* Charge an image COPY (image.new, image.from_wasm, the copy branch of
+ * image.from_buffer) before it runs (audit 25): hl_image_new copies
+ * w * h * bpp bytes through the raw VM allocator, which checks the heap limit
+ * but charges nothing, so a loop of copies of a large buffer ran uncharged.
+ * Refused past the heap limit up front, as to_wasm is, and charged 1 unit per
+ * 8 bytes. Dimensions hl_image_new would refuse are not charged (it fails
+ * before copying). Raises; call it with no app code between it and the copy. */
+static void image_copy_charge(lua_State *L, const char *fn, int w, int h,
+                              int fmt)
+{
+    int bpp = hl_image_bpp((HlImageFormat)fmt);
+    if (w <= 0 || h <= 0 || bpp <= 0 ||
+        w > HL_IMAGE_MAX_DIM || h > HL_IMAGE_MAX_DIM)
+        return;
+    uint64_t bytes = (uint64_t)w * (uint64_t)h * (uint64_t)bpp;
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->mem_limit && bytes > (uint64_t)lua->mem_limit)
+        luaL_error(L, "%s: image too large for the VM heap", fn);
+    image_charge(L, hl_work_bytes_units(bytes));
+}
+
 static HlImage **check_image(lua_State *L, int idx)
 {
     return (HlImage **)luaL_checkudata(L, idx, HL_IMAGE_MT);
@@ -142,6 +163,8 @@ static int l_image_new(lua_State *L)
     if (!lua_get_buffer(L, 4, &view))
         return luaL_error(L, "image.new: arg 4 must be a buffer (string, MappedBuffer, or WasmBuffer)");
 
+    image_copy_charge(L, "image.new", w, h, fmt);
+
     HlImageAlloc ia;
     hl_lua_image_alloc(L, &ia);
     HlImage *img = hl_image_new((uint32_t)w, (uint32_t)h,
@@ -204,6 +227,7 @@ static int l_image_from_buffer(lua_State *L)
     }
 #endif
     else {
+        image_copy_charge(L, "image.from_buffer", w, h, fmt);
         HlImageAlloc ia;
         hl_lua_image_alloc(L, &ia);
         img = hl_image_new((uint32_t)w, (uint32_t)h, (HlImageFormat)fmt,
@@ -381,6 +405,8 @@ static int l_image_from_wasm(lua_State *L)
     size_t pixel_len = len - 9;
     if (pixel_len < expected)
         return luaL_error(L, "image.from_wasm: pixel data too short (%zu < %zu)", pixel_len, expected);
+
+    image_copy_charge(L, "image.from_wasm", (int)w, (int)h, (int)fmt);
 
     HlImageAlloc ia;
     hl_lua_image_alloc(L, &ia);

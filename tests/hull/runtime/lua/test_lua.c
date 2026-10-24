@@ -12576,4 +12576,44 @@ UTEST(lua_audit24, wss_connect_needs_the_client_tls_config)
     cleanup_lua_caps();
 }
 
+#ifdef HL_ENABLE_IMAGE
+/* Audit 25 L10: image.new / from_wasm / from_buffer's copy branch copied
+ * w * h * bpp bytes through the raw VM allocator uncharged; decode, encode
+ * and to_wasm were charged before the work. */
+UTEST(lua_audit25, image_copies_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "px = string.rep('a', 4 << 20) "
+        "wasm = string.pack('<I4I4B', 1024, 1024, 1) .. px "
+        "return image ~= nil"), LUA_OK);
+    int have = lua_toboolean(lua_rt.L, -1);
+    lua_settop(lua_rt.L, 0);
+    if (!have) {   /* image compiled out */
+        cleanup_lua_caps();
+        return;
+    }
+    /* 4 MB copied: 512k units each, over a 300k limit. */
+    static const char *const calls[] = {
+        "image.new(1024, 1024, 'rgba8', px) return 1",
+        "image.from_buffer(px, 1024, 1024, 'rgba8') return 1",
+        "image.from_wasm(wasm) return 1",
+        NULL
+    };
+    for (int i = 0; calls[i]; i++) {
+        EXPECT_NE_MSG(audit10_run(calls[i], 300000, err, sizeof err), LUA_OK,
+                      calls[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit exceeded"), NULL, err);
+    }
+    /* Small copies still work under that limit. */
+    EXPECT_EQ_MSG(audit10_run(
+        "local im = image.new(16, 16, 'rgba8', string.rep('b', 1024)) "
+        "assert(im:width() == 16) return 1", 300000, err, sizeof err),
+        LUA_OK, err);
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_IMAGE */
+
 UTEST_MAIN();
