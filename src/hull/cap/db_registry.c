@@ -261,7 +261,8 @@ int hl_db_registry_default_is_network(const HlDbRegistry *reg)
     /* Without case (audit 14): the backend selector reads the scheme that
      * way, so "PostgreSQL://..." is a network database too. */
     return strncasecmp(dsn, "postgres", 8) == 0 || strncasecmp(dsn, "mysql", 5) == 0
-        || strncasecmp(dsn, "mariadb", 7) == 0;
+        || strncasecmp(dsn, "mariadb", 7) == 0
+        || strncasecmp(dsn, "duckdb", 6) == 0;   /* audit 25 */
 }
 
 int hl_db_registry_manifest_wired(const HlDbRegistry *reg)
