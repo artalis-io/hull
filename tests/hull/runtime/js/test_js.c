@@ -5654,6 +5654,22 @@ UTEST(js_stdlib, stdlib_audit25_suite)
     cleanup_js_caps();
 }
 
+/* TOTP regressions from audit 26: a stripped (v1-shaped) bound blob is not
+ * another account's secret, unbound / legacy secrets are 20 bytes, a success
+ * keeps the per-IP count, maxLockoutDuration / pendingTtl are numbers. */
+UTEST(js_stdlib, totp_audit26_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_totp_audit26.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+    cleanup_js_caps();
+}
+
 /* Stdlib regressions from audit 17: etag helpers with an empty body, and
  * jobs' live config moved to hull:_test_hooks. */
 UTEST(js_stdlib, stdlib_audit17_suite)
