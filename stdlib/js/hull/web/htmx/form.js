@@ -41,6 +41,15 @@ function hasAny(errors) {
     return errors != null && Object.keys(errors).length > 0;
 }
 
+// The field's own message, or undefined: `errs[name]` read through the
+// prototype chain, so a field named "constructor" / "toString" /
+// "__proto__" rendered as invalid with the inherited function's source as
+// its message (audit 26). Lua's plain tables have no such chain.
+function ownError(errs, name) {
+    if (errs == null || typeof errs !== "object") return undefined;
+    return Object.hasOwn(errs, name) ? errs[name] : undefined;
+}
+
 /**
  * Render a whole-form error summary as a `<ul role="alert">`.
  * One `<li>` per failing field, each linking to the inline span.
@@ -62,8 +71,9 @@ function errors(errs) {
  * `id` is referenced by `fieldAttrs` via `aria-describedby`.
  */
 function fieldError(errs, name) {
-    if (!errs || !errs[name]) return "";
-    return `<span id="${errorId(name)}" class="hull-form-error">${esc(errs[name])}</span>`;
+    const msg = ownError(errs, name);
+    if (!msg) return "";
+    return `<span id="${errorId(name)}" class="hull-form-error">${esc(msg)}</span>`;
 }
 
 /**
@@ -72,7 +82,7 @@ function fieldError(errs, name) {
  * inputs don't carry stale aria-invalid on success.
  */
 function fieldAttrs(errs, name) {
-    if (!errs || !errs[name]) return "";
+    if (!ownError(errs, name)) return "";
     return `aria-invalid="true" aria-describedby="${errorId(name)}"`;
 }
 
