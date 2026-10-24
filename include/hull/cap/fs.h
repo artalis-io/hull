@@ -82,6 +82,11 @@ int hl_cap_fs_open_read_fd(const HlFsConfig *cfg, const char *path,
 int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
                             const char **err_msg);
 
+/* Clear setuid / setgid on @p fd if set (the write open does this itself, so
+ * a root writer cannot leave them on new content). 0 = clear, -1 = they are
+ * set and could not be cleared. */
+int hl_fs_strip_setid(int fd);
+
 /**
  * @brief Read a file's full contents into a caller-supplied buffer.
  *

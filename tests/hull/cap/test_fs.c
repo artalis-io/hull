@@ -335,6 +335,28 @@ UTEST(hl_cap_fs, an_in_place_write_drops_setuid_and_setgid)
     teardown_fs();
 }
 
+/* Audit 25: compute.stream writes through hl_cap_fs_open_write_fd, which
+ * left setuid / setgid on for a root writer. The open itself now clears
+ * them - observable before any write, whoever the writer is. */
+UTEST(hl_cap_fs, the_write_open_drops_setuid_and_setgid)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "suid.bin", "old", 3, NULL), 0);
+    char p[512];
+    snprintf(p, sizeof(p), "%s/suid.bin", test_dir);
+    ASSERT_EQ(chmod(p, 06755), 0);
+    const char *err = NULL;
+    int fd = hl_cap_fs_open_write_fd(&test_cfg, "suid.bin", &err);
+    ASSERT_GE(fd, 0);
+    struct stat st;
+    ASSERT_EQ(fstat(fd, &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0755);
+    EXPECT_EQ(hl_fs_strip_setid(fd), 0);       /* nothing left to clear */
+    close(fd);
+    teardown_fs();
+}
+
 UTEST(hl_cap_fs, write_ex_without_sync_is_still_a_whole_replace)
 {
     setup_fs();
