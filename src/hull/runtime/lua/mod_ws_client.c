@@ -95,6 +95,8 @@ static int lua_ws_client_send_binary(lua_State *L)
     return 1;
 }
 
+static void lua_ws_client_close_expired(void *user_data);
+
 static int lua_ws_client_close(lua_State *L)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
@@ -107,6 +109,22 @@ static int lua_ws_client_close(lua_State *L)
     const char *reason = luaL_optlstring(L, 3, NULL, &reason_len);
 
     kl_ws_client_close(ud->client, code, reason, reason_len);
+
+    /* Close-handshake deadline (audit 26): Keel waits in CLOSING for the
+     * peer's Close with no timer, so a peer that never answered held the
+     * client, its fd and the userdata until teardown. Armed only once the
+     * connection is open (the connect deadline still runs before that, and
+     * Keel's close does nothing then) and only once. */
+    if (!ud->closed && ud->client && !ud->close_armed &&
+        ud->connect_timer == 0 && ud->lua && !ud->lua->base.shutting_down &&
+        ud->lua->base.async_ctx) {
+        const HlAsyncBackend *be = hl_async_backend();
+        ud->connect_timer = be ? be->timer_add(ud->lua->base.async_ctx,
+                                               HL_WS_CLIENT_CLOSE_TIMEOUT_MS,
+                                               lua_ws_client_close_expired, ud)
+                               : 0;
+        ud->close_armed = ud->connect_timer != 0;
+    }
     return 0;
 }
 
@@ -337,6 +355,21 @@ static void lua_ws_client_connect_expired(void *user_data)
     kl_ws_client_free(ud->client);
     ud->client = NULL;
     lua_ws_client_on_error(NULL, "connect timeout", ud);
+}
+
+/* The peer never answered conn:close() (audit 26): free the Keel client (a
+ * timer callback, not one of Keel's: safe) and end the connection as Keel
+ * would on its close - on_close once, with 1006, then finish. Keel fires no
+ * callback for a freed client, and a normal close cancelled this timer. */
+static void lua_ws_client_close_expired(void *user_data)
+{
+    HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
+    ud->connect_timer = 0;   /* fired */
+    if (ud->closed || !ud->client) return;
+    kl_ws_client_free(ud->client);
+    ud->client = NULL;
+    static const char why[] = "close timeout";
+    lua_ws_client_on_close(NULL, 1006, why, sizeof why - 1, ud);
 }
 
 /* ws.connect(url, handlers [, opts]) */

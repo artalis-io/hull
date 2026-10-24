@@ -140,6 +140,9 @@ typedef struct HlLuaWsClientUD {
      * Keel has none, so a host that never answered the upgrade held the
      * client and its fd until close. 0 = not armed. */
     uint64_t        connect_timer;
+    /* conn:close() re-armed connect_timer as the close-handshake deadline
+     * (audit 26); set once, so a second close does not extend it. */
+    int             close_armed;
 } HlLuaWsClientUD;
 
 /* conn userdata helpers (defined in lua/mod_ws.c) */

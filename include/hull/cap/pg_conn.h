@@ -77,6 +77,9 @@ typedef struct HlPgConn {
      * to ReadyForQuery (frames counted, bounded) instead of dropped, so the
      * reported outcome is the server's (audit 18). */
     int      finishing;
+    /* When finishing began (monotonic ms, 0 = not yet): the whole read to
+     * ReadyForQuery is bounded by HL_PG_FINISH_MAX_MS (audit 26). */
+    uint64_t finish_started;
     /* Told of every NotificationResponse a query or a script reads (a db.async
      * op on a worker's LISTEN connection): they were dropped, so the next
      * wait_notify on that channel missed its wake-up (audit 20). NULL = none;

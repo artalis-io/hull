@@ -102,12 +102,8 @@ static void http_detached_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
  * client (free_driver frees the client before the ctx goes). */
 static int http_async_redirect_hop(const char *next_url, void *data)
 {
-    const HlAsyncCtx *ctx = data;
-    HlHttpRedirectGuard g = {
-        .cfg          = ctx->http_cfg,
-        .origin_https = ctx->http_origin_https,
-    };
-    return hl_http_redirect_allowed(next_url, &g);
+    HlAsyncCtx *ctx = data;
+    return hl_http_redirect_allowed(next_url, &ctx->http_guard);
 }
 
 /* ── KlHttpRedirectClient on_done callback ───────────────────────────── */
@@ -262,10 +258,13 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
         .system_dns        = 1,
     };
 
-    /* HTTPS requires TLS; plain HTTP must not use TLS */
+    /* HTTPS requires TLS. A plain-http request keeps the TLS config when it
+     * may follow redirects: Keel copies this config into every hop, so
+     * dropping it here failed an http -> https redirect (audit 26). Keel
+     * itself uses no TLS for an http:// hop (it clears tls_cfg per URL). */
     if (parsed.is_https && !kl_cfg.tls)
         return NULL;
-    if (!parsed.is_https)
+    if (!parsed.is_https && !http_cfg->follow_redirects)
         kl_cfg.tls = NULL;
 
     /* Create async context */
@@ -283,8 +282,8 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
             .on_redirect      = http_async_redirect_hop,    /* every hop */
             .on_redirect_data = ctx,
         };
-        ctx->http_cfg          = http_cfg;
-        ctx->http_origin_https = parsed.is_https;
+        hl_http_redirect_guard_init(&ctx->http_guard, http_cfg, &parsed,
+                                    headers, num_headers, body_len);
 
         ctx->free_driver = free_redirect_client;
 

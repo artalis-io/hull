@@ -17,6 +17,7 @@
 
 #include <keel/async.h>
 #include "hull/shared/offheap.h"
+#include "hull/cap/http_redirect_guard.h"
 
 /* Forward declarations */
 typedef struct HlAllocator       HlAllocator;
@@ -150,10 +151,11 @@ typedef struct HlAsyncCtx {
     HlOffheapHold hold;
 
     /* http.fetch's redirect policy, read by its per-hop hook (http_async.c):
-     * the sealed HlHttpConfig, and whether the chain began on https - such a
-     * chain may not continue on http (audit 25). */
-    const struct HlHttpConfig *http_cfg;
-    int          http_origin_https;
+     * the sealed HlHttpConfig, whether the chain began on https - such a
+     * chain may not continue on http (audit 25) - and its first origin, which
+     * a request with a body or a credential-like header may not leave
+     * (audit 26). */
+    HlHttpRedirectGuard http_guard;
 } HlAsyncCtx;
 
 /*
