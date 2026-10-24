@@ -358,6 +358,11 @@ end
 -- How the frame of a bound secret begins (sealbox: each context string
 -- length-prefixed, 4 bytes big-endian).
 local BOUND_PREFIX = string.pack(">s4", "totp")
+-- Every secret this module makes is 20 bytes (totp.enroll). A secret opened
+-- WITHOUT the account context - an unbound v2 blob or a legacy v1 one - must
+-- be exactly that long (audit 26): the frame of a blob bound to another
+-- account is longer, so a stripped or transplanted blob cannot pass as one.
+local SECRET_LEN = 20
 
 -- encrypt_secret returns (blob, encrypted_flag, version). When no
 -- encryption keys are configured, secret is stored plaintext;
@@ -399,7 +404,8 @@ local function decrypt_secret(blob, encrypted, user_id, allow_unbound)
         -- that frame is refused (a random legacy secret starts so with
         -- odds of 2^-64).
         pt, version_or_reason = sealbox.open(keyring(), blob)
-        if pt and pt:sub(1, #BOUND_PREFIX) ~= BOUND_PREFIX then
+        if pt and #pt == SECRET_LEN
+           and pt:sub(1, #BOUND_PREFIX) ~= BOUND_PREFIX then
             return pt, version_or_reason, true
         end
         -- A v2 blob with a recognized version that fails to open is real
@@ -408,11 +414,24 @@ local function decrypt_secret(blob, encrypted, user_id, allow_unbound)
     end
 
     -- v1 (legacy, no prefix). Only attempted if a legacy_key_version is
-    -- configured; apps without legacy data never reach it.
+    -- configured; apps without legacy data never reach it. A v1 blob is
+    -- unbound like a pre-audit-15 v2 one, so it is held to the same rules
+    -- (audit 26): it opens only while allow_unbound_secrets is on, to
+    -- exactly a SECRET_LEN-byte secret that is not a bound frame. A v2 blob
+    -- with its 4-byte version stripped reads here as nonce || box, and its
+    -- nonce's first bytes as an unknown version - so the v2 "open_failed"
+    -- gate above was skipped, and another account's bound blob (or an
+    -- unbound one with allow_unbound_secrets off) opened as this account's
+    -- secret under the encryption_key shorthand's legacy key.
     local legacy_v = _state.legacy_key_version
     if legacy_v == nil then return nil end
+    if allow_unbound == nil then allow_unbound = _state.allow_unbound_secrets end
+    if not allow_unbound then return nil end
     pt = sealbox.open_unversioned(keyring(), legacy_v, blob)
-    if pt then return pt, 0 end  -- version=0 signals "legacy v1"
+    if pt and #pt == SECRET_LEN
+       and pt:sub(1, #BOUND_PREFIX) ~= BOUND_PREFIX then
+        return pt, 0, true  -- version=0 signals "legacy v1"; unbound
+    end
     return nil
 end
 
@@ -621,9 +640,16 @@ local function bump_failed_attempt_ip(ip)
     local now = time.now()
     db.batch(function()
         local r = db.query(
-            "SELECT failed_count FROM _hull_totp_attempts_by_ip "
+            "SELECT failed_count, last_failed_at FROM _hull_totp_attempts_by_ip "
             .. "WHERE ip = ?", { ip })
         local fc = (r and r[1] and r[1].failed_count) or 0
+        -- A success no longer clears the count (audit 26), so it ages out
+        -- instead: failures more than lockout_duration_per_ip apart start
+        -- the count again.
+        local last = r and r[1] and r[1].last_failed_at
+        if type(last) == "number" and now - last > _state.lockout_duration_per_ip then
+            fc = 0
+        end
         local new_fc = fc + 1
         local locked_until = 0   -- not locked (see bump_failed_attempt)
         if new_fc >= _state.max_failed_attempts_per_ip then
@@ -805,7 +831,17 @@ function totp.init(opts)
     _state.issuer         = opts.issuer         or _state.issuer
     _state.digits         = opts.digits         or _state.digits
     _state.period         = opts.period         or _state.period
-    _state.max_lockout_duration = opts.max_lockout_duration or _state.max_lockout_duration
+    -- A finite number of seconds >= 0 (0 = no escalation) (audit 26: a
+    -- string one disabled the lockout in JS and raised at the first failure
+    -- here).
+    if opts.max_lockout_duration ~= nil then
+        local v = opts.max_lockout_duration
+        if not (type(v) == "number" and v >= 0 and v < math.huge) then
+            error("totp.init: max_lockout_duration must be a number of "
+                  .. "seconds >= 0 (got " .. tostring(v) .. ")", 2)
+        end
+        _state.max_lockout_duration = v
+    end
     if opts.on_lockout ~= nil and type(opts.on_lockout) ~= "function" then
         error("totp.init: on_lockout must be a function(user_id, locked_until, n)")
     end
@@ -844,6 +880,14 @@ function totp.init(opts)
     -- silently breaking enrollment for any operator who passed `0`
     -- intending "off". Same asymmetry as session.absolute_ttl.
     if opts.pending_ttl ~= nil then
+        -- false, or a finite number of seconds (audit 26: a string or NaN
+        -- pending_ttl never expired a pending row).
+        local v = opts.pending_ttl
+        if v ~= false and not (type(v) == "number" and v == v
+                               and v > -math.huge and v < math.huge) then
+            error("totp.init: pending_ttl must be a number of seconds or "
+                  .. "false (got " .. tostring(v) .. ")", 2)
+        end
         if opts.pending_ttl == false then
             _state.pending_ttl = nil
         elseif type(opts.pending_ttl) == "number"
@@ -899,7 +943,7 @@ function totp.init(opts)
             .. "WHERE encrypted = 1 LIMIT 1")
         if sample and sample[1] then
             local pt = decrypt_secret(sample[1].secret, sample[1].encrypted,
-                                      sample[1].user_id)
+                                      sample[1].user_id, true)
             if not pt then
                 error("totp.init: encryption_key shorthand cannot decrypt "
                       .. "existing _hull_totp rows. This is silent data "
@@ -1209,8 +1253,10 @@ function totp.verify_with_kind(user_id, code, req)
         if step > row.last_used_step
            and ct_eq(totp_at_step(row.secret, step, row.digits), code) then
             if mark_step_used(user_id, step) == 1 then
+                -- The per-IP count is NOT cleared (audit 26): one IP could
+                -- spread wrong codes over many accounts and reset its count
+                -- by verifying its own. It ages out (bump_failed_attempt_ip).
                 clear_failed_attempts(user_id)
-                if ip then clear_failed_attempts_ip(ip) end
                 -- Lazy rekey: if the row's secret was decrypted under
                 -- a key version other than the current one (legacy v1
                 -- or an older v2 version after rotation), re-encrypt
@@ -1245,8 +1291,7 @@ function totp.verify_with_kind(user_id, code, req)
                 .. "WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
                 { time.now(), user_id, r.code_hash })
             if consumed ~= 1 then return false, nil end
-            clear_failed_attempts(user_id)
-            if ip then clear_failed_attempts_ip(ip) end
+            clear_failed_attempts(user_id)  -- per-IP count kept (see above)
             -- Same lazy rekey on the recovery-code path - the
             -- decrypted secret is in hand so we might as well
             -- migrate it forward.
