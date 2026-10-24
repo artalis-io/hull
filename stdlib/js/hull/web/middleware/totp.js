@@ -239,6 +239,10 @@ function sealContext(userId) {
 // How the frame of a bound secret begins (sealbox: each context string
 // length-prefixed, 4 bytes big-endian).
 const BOUND_PREFIX = "\x00\x00\x00\x04totp";
+// Every secret this module makes is 20 bytes (enroll). A secret opened
+// WITHOUT the account context - an unbound v2 blob or a legacy v1 one - must
+// be exactly that long (audit 26): see the Lua sibling.
+const SECRET_LEN = 20;
 
 function encryptSecret(secretBytes, userId) {
     const cur = _state.currentKeyVersion;
@@ -274,17 +278,29 @@ function decryptSecret(blob, encrypted, userId, allowUnbound) {
         // its maker can compute - so a plaintext that starts with that frame
         // is refused (a random legacy secret starts so with odds of 2^-64).
         const old = sealbox.open(keyring(), blob);
-        if (!old[1] && !old[0].startsWith(BOUND_PREFIX)) return [old[0], old[2], true];
+        if (!old[1] && old[0].length === SECRET_LEN && !old[0].startsWith(BOUND_PREFIX)) {
+            return [old[0], old[2], true];
+        }
         // A v2 blob with a recognized version that fails to open is real
         // corruption or a wrong key; don't paper over it with a legacy attempt.
         return [null, null];
     }
 
-    // v1 (legacy) fallback. Only if a legacy_key_version is configured.
+    // v1 (legacy) fallback. Only if a legacy_key_version is configured. A
+    // v1 blob is unbound, so it is held to the unbound rules (audit 26):
+    // allowUnboundSecrets on, exactly SECRET_LEN bytes, not a bound frame -
+    // a v2 blob with its version stripped reached here past the v2 gate, and
+    // another account's bound blob opened as this account's secret. See the
+    // Lua sibling.
     const legacyV = _state.legacyKeyVersion;
     if (legacyV == null) return [null, null];
+    if (allowUnbound === undefined) allowUnbound = _state.allowUnboundSecrets;
+    if (!allowUnbound) return [null, null];
     const pt = sealbox.openUnversioned(keyring(), legacyV, blob);
-    return pt !== null ? [pt, 0] : [null, null];
+    if (typeof pt === "string" && pt.length === SECRET_LEN && !pt.startsWith(BOUND_PREFIX)) {
+        return [pt, 0, true];
+    }
+    return [null, null];
 }
 
 function urlenc(s) {
@@ -457,9 +473,13 @@ function bumpFailedAttemptIp(ip) {
     const now = time.now();
     db.batch(() => {
         const r = db.query(
-            "SELECT failed_count FROM _hull_totp_attempts_by_ip "
+            "SELECT failed_count, last_failed_at FROM _hull_totp_attempts_by_ip "
             + "WHERE ip = ?", [ip]);
-        const fc = (r && r[0] && r[0].failed_count) || 0;
+        let fc = (r && r[0] && r[0].failed_count) || 0;
+        // A success no longer clears the count (audit 26), so it ages out:
+        // failures more than lockoutDurationPerIp apart start it again.
+        const last = r && r[0] && r[0].last_failed_at;
+        if (typeof last === "number" && now - last > _state.lockoutDurationPerIp) fc = 0;
         let newFc = fc + 1;
         let lockedUntil = 0;   // not locked (see bumpFailedAttempt)
         if (newFc >= _state.maxFailedAttemptsPerIp) {
@@ -615,9 +635,16 @@ function init(opts) {
                                || _state.lockoutDuration;
     // !== undefined, not ||: 0 means "no escalation" (each lockout lasts
     // lockoutDuration), as in Lua; || replaced it with the 24 h default.
-    _state.maxLockoutDuration = opts.maxLockoutDuration !== undefined
-                                ? opts.maxLockoutDuration
-                                : _state.maxLockoutDuration;
+    // A finite number of seconds >= 0 (audit 26: a string one made the
+    // lockout's end NaN, so it never held). Same rule as the Lua twin.
+    if (opts.maxLockoutDuration !== undefined && opts.maxLockoutDuration !== null) {
+        const v = opts.maxLockoutDuration;
+        if (!(typeof v === "number" && Number.isFinite(v) && v >= 0)) {
+            throw new TypeError("totp.init: maxLockoutDuration must be a number of "
+                + "seconds >= 0 (got " + String(v) + ")");
+        }
+        _state.maxLockoutDuration = v;
+    }
     if (opts.onLockout !== undefined && opts.onLockout !== null
         && typeof opts.onLockout !== "function") {
         throw new Error("totp.init: onLockout must be a function(userId, lockedUntil, n)");
@@ -643,7 +670,14 @@ function init(opts) {
         _xffWarnDone = false;
     }
     // Round-9 LOW-12: <= 0 or `false` → disabled. See Lua sibling.
-    if (opts.pendingTtl !== undefined) {
+    if (opts.pendingTtl !== undefined && opts.pendingTtl !== null) {
+        // false, or a finite number of seconds (audit 26: a string or NaN
+        // pendingTtl never expired a pending row). Same rule as the Lua twin.
+        const v = opts.pendingTtl;
+        if (v !== false && !(typeof v === "number" && Number.isFinite(v))) {
+            throw new TypeError("totp.init: pendingTtl must be a number of seconds "
+                + "or false (got " + String(v) + ")");
+        }
         if (opts.pendingTtl === false) {
             _state.pendingTtl = null;
         } else if (typeof opts.pendingTtl === "number"
@@ -690,7 +724,7 @@ function init(opts) {
             + "WHERE encrypted = 1 LIMIT 1");
         if (sample && sample[0]) {
             const dec = decryptSecret(sample[0].secret, sample[0].encrypted,
-                                      sample[0].user_id);
+                                      sample[0].user_id, true);
             if (!dec[0]) {
                 throw new Error("totp.init: encryptionKey shorthand cannot "
                     + "decrypt existing _hull_totp rows. This is silent "
@@ -933,8 +967,9 @@ function verifyWithKind(userId, code, req) {
         if (step > row.lastUsedStep
             && ctEq(totpAtStep(row.secret, step, row.digits), code)) {
             if (markStepUsed(userId, step) === 1) {
+                // The per-IP count is NOT cleared (audit 26): see the Lua
+                // sibling. It ages out (bumpFailedAttemptIp).
                 clearFailedAttempts(userId);
-                if (ip) clearFailedAttemptsIp(ip);
                 // Lazy rekey: re-encrypt under current if the row was
                 // stored under an older version.
                 if (_state.currentKeyVersion != null
@@ -961,8 +996,7 @@ function verifyWithKind(userId, code, req) {
                 + "WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
                 [time.now(), userId, rows[i].code_hash]);
             if (consumed !== 1) return [false, null];
-            clearFailedAttempts(userId);
-            if (ip) clearFailedAttemptsIp(ip);
+            clearFailedAttempts(userId);  // per-IP count kept (see above)
             // Same lazy rekey on the recovery-code path.
             if (_state.currentKeyVersion != null
                 && (row.version !== _state.currentKeyVersion || row.unbound)) {

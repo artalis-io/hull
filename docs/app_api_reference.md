@@ -367,7 +367,8 @@ Authy, 1Password - supports).
     (default `900`s), `opts.max_lockout_duration` (default `86400`s): every
     `max_failed_attempts` wrong codes lock the user out, each lockout twice
     as long as the last, up to the cap (`0` = no escalation, in both
-    runtimes). A successful verify or a confirmed (re-)enrolment resets
+    runtimes; anything but a finite number >= 0 makes `init` raise, audit
+    26). A successful verify or a confirmed (re-)enrolment resets
     it. `opts.on_lockout(user_id, locked_until, n)` (`onLockout`) is
     called when a lockout starts, so the app can tell the user: someone
     holding the password can otherwise keep them out of TOTP and recovery
@@ -387,7 +388,14 @@ Authy, 1Password - supports).
     for good. Set it `false` once `totp.rekey_status().unbound`
     (`rekeyStatus().unbound`) is `0` - every old row re-sealed by
     `totp.rekey()` or the user's next verify; unbound secrets are then
-    refused (audit 16). A non-boolean makes `init` raise.
+    refused (audit 16). A non-boolean makes `init` raise. A legacy v1
+    row (pre-versioning, read through `legacy_key_version` - which the
+    `encryption_key` shorthand always sets) is unbound too, so it follows
+    the same rule, and `rekey_status().unbound` counts it. A secret opened
+    without its account binding (unbound v2 or v1) must be the 20 bytes
+    `enroll` makes and not another account's bound frame: a v2 blob with
+    its version prefix stripped read as v1 and opened to its owner's frame,
+    which then became the victim account's secret (audit 26).
   - `opts.allow_plaintext_secrets` (`allowPlaintextSecrets`, default
     `true`). With encryption keys configured, a row stored in plaintext
     (`encrypted = 0`: enrolled before encryption was turned on - or written
@@ -398,7 +406,15 @@ Authy, 1Password - supports).
     rows are then refused (audit 22). A non-boolean makes `init` raise.
   - `opts.lockout_duration_per_ip` (`lockoutDurationPerIp`) must be a
     positive number of seconds; anything else (a string, `0`, NaN) makes
-    `init` raise (audit 15).
+    `init` raise (audit 15). With a `req`, `verify` also counts wrong codes
+    per client IP (`max_failed_attempts_per_ip`, default `20`); the count
+    is NOT reset by a successful verify (audit 26: one IP spread wrong
+    codes over many accounts and reset its count by verifying its own) -
+    failures more than `lockout_duration_per_ip` apart start it again.
+  - `opts.pending_ttl` (`pendingTtl`, default `3600`s) - how long an
+    unconfirmed enrolment stays valid. A number (`<= 0` disables it, with
+    a warning) or `false`; anything else (a string, NaN, infinity) makes
+    `init` raise (audit 26: a string never expired).
 - `totp.enroll(user_id)` → `{ secret_base32, otpauth_url, qr_svg,
   recovery_codes }`. Recovery codes are returned ONCE; only PBKDF2
   hashes persist. Re-enrolling overwrites - intentional, it's the
