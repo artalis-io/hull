@@ -891,6 +891,47 @@ UTEST(pg_query, a_trip_on_commit_complete_reports_the_commit)
     close(sv[0]);
 }
 
+/* Audit 26: the finishing read after a tripped COMMIT asks no budget, so a
+ * server that sent CommandComplete and then stalled held the call for the
+ * whole ?read_timeout= (for ever with 0). The finishing read is now bounded
+ * (HL_PG_FINISH_MAX_MS, 2 s) and the connection abandoned on expiry. */
+UTEST(pg_query, a_stall_after_commit_complete_is_bounded)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'n'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "COMMIT"); hl_pg_msg_end(&s, m);
+    /* ... and no ReadyForQuery. */
+    ASSERT_FALSE(s.err);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    hl_pg_writer_free(&s);
+
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.tx_status = 'T';
+    conn.read_timeout_ms = 0;            /* no read timeout: wait for ever */
+
+    HlDbOpBudget budget = { 4, 0, 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_query(&conn, "COMMIT", NULL, 0, NULL, NULL, NULL, NULL);
+    int64_t spent = pg_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent >= 1500 && spent < 5000);
+    EXPECT_EQ(1, conn.broken);
+    EXPECT_TRUE(conn.transport == NULL);
+    EXPECT_EQ('T', conn.tx_status);      /* the outcome is unknown */
+
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
 /* `COPY ... TO STDOUT`: CopyOutResponse, then CopyData at the server's pace.
  * Hull streams no COPY data, and there is no CopyFail for this direction, so
  * the connection is dropped rather than read (audit 17) - before, CopyOut /

@@ -143,6 +143,66 @@ UTEST(redirect, an_https_chain_may_not_drop_to_http)
     ASSERT_EQ(0, hl_http_redirect_allowed("https://api.example.com/x", &plain));
 }
 
+/* Audit 26: between two ALLOWED hosts Keel still re-sends a 307/308 body and
+ * every header but Authorization / Cookie / Proxy-Authorization. */
+static void guard_for(HlHttpRedirectGuard *g, const HlHttpConfig *cfg,
+                      const char *url, const HlHttpHeader *h, int n,
+                      size_t body_len)
+{
+    KlUrl u;
+    if (kl_url_parse(url, &u) != 0) { memset(g, 0, sizeof *g); return; }
+    hl_http_redirect_guard_init(g, cfg, &u, h, n, body_len);
+}
+
+UTEST(redirect, a_credential_header_may_not_change_origin)
+{
+    const char *hosts[] = { "a.example.com", "b.example.com" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 2 };
+    HlHttpHeader h[] = { { "Accept", "*/*" }, { "X-Api-Key", "s3cret" } };
+    HlHttpRedirectGuard g;
+    guard_for(&g, &cfg, "https://a.example.com/x", h, 2, 0);
+    ASSERT_EQ(1, g.carries_secrets);
+    ASSERT_EQ(-1, hl_http_redirect_allowed("https://b.example.com/y", &g));
+    ASSERT_EQ(-1, hl_http_redirect_allowed("https://a.example.com:8443/y", &g));
+    /* Same origin (host case aside) is fine. */
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://A.example.com/y", &g));
+}
+
+UTEST(redirect, a_body_may_not_change_origin)
+{
+    const char *hosts[] = { "a.example.com", "b.example.com" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 2 };
+    HlHttpRedirectGuard g;
+    guard_for(&g, &cfg, "https://a.example.com/x", NULL, 0, 12);
+    ASSERT_EQ(-1, hl_http_redirect_allowed("https://b.example.com/y", &g));
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://a.example.com/z", &g));
+}
+
+UTEST(redirect, safe_headers_may_change_origin)
+{
+    const char *hosts[] = { "a.example.com", "b.example.com" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 2 };
+    /* Authorization is dropped by Keel on a cross-origin hop. */
+    HlHttpHeader h[] = { { "accept", "*/*" }, { "User-Agent", "x" },
+                         { "If-None-Match", "\"1\"" },
+                         { "Authorization", "Bearer t" } };
+    HlHttpRedirectGuard g;
+    guard_for(&g, &cfg, "https://a.example.com/x", h, 4, 0);
+    ASSERT_EQ(0, g.carries_secrets);
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://b.example.com/y", &g));
+}
+
+UTEST(redirect, an_http_to_https_upgrade_keeps_the_origin)
+{
+    const char *hosts[] = { "a.example.com" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    HlHttpHeader h[] = { { "X-Api-Key", "s3cret" } };
+    HlHttpRedirectGuard g;
+    guard_for(&g, &cfg, "http://a.example.com/x", h, 1, 0);
+    ASSERT_EQ(0, hl_http_redirect_allowed("https://a.example.com/x", &g));
+    ASSERT_EQ(-1, hl_http_redirect_allowed("https://a.example.com:8443/x", &g));
+}
+
 UTEST(redirect, no_guard_refuses)
 {
     ASSERT_EQ(-1, hl_http_redirect_allowed("https://api.example.com/x", NULL));

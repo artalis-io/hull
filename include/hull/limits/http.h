@@ -41,6 +41,10 @@
 #define HL_HTTP_FETCH_MAX_TIMEOUT_MS  600000   /* 10 min: async http.fetch */
 #define HL_HTTP_SYNC_MAX_TIMEOUT_MS   60000    /* 60 s: sync calls block the loop */
 #define HL_HTTP_MAX_REDIRECTS         5        /* hops followed (Keel's default is 10) */
+/* ws-client close handshake: after conn:close() the peer's Close must come
+ * back within this, or the connection is dropped and on_close runs with 1006
+ * (audit 26: Keel sets CLOSING with no timer of its own). */
+#define HL_WS_CLIENT_CLOSE_TIMEOUT_MS 5000
 
 /* The effective whole-request timeout. @p per_call and @p app_default are
  * 0 when not given (anything <= 0 counts as not given); @p ceiling is

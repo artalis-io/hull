@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "hull/limits/http.h"
+#include "hull/cap/http_redirect_guard.h"
 
 /* Forward declarations for optional modules */
 typedef struct KlHttpClientPool KlHttpClientPool;
@@ -73,22 +74,33 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
 
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 
+/* HlHttpRedirectGuard: hull/cap/http_redirect_guard.h */
+
 /**
- * @brief One request's redirect policy: the (sealed, process-lifetime)
- * config whose allowlist every hop must pass, and whether the chain began on
- * https - a chain that did may not be redirected to http:// (audit 25: a
- * 307/308 body or an X-Api-Key header went out in cleartext; Keel strips only
- * Authorization / Cookie / Proxy-Authorization on a scheme change).
+ * @brief Fill @p g for a request to @p origin: its allowlist config, the
+ * chain's first scheme and origin, and whether it carries a body or a caller
+ * header outside the redirect-safe list (hl_http_header_redirect_safe). Such
+ * a request is refused a cross-origin hop (audit 26).
  */
-typedef struct HlHttpRedirectGuard {
-    const HlHttpConfig *cfg;
-    int                 origin_https;
-} HlHttpRedirectGuard;
+void hl_http_redirect_guard_init(HlHttpRedirectGuard *g,
+                                 const HlHttpConfig *cfg, const KlUrl *origin,
+                                 const HlHttpHeader *headers, int num_headers,
+                                 size_t body_len);
+
+/**
+ * @brief 1 when a caller header may follow a redirect to another origin:
+ * content negotiation, cache validators, User-Agent, and the three
+ * credentials Keel itself drops on a cross-origin hop (Authorization, Cookie,
+ * Proxy-Authorization). Any other header (X-Api-Key, a signature) may be a
+ * credential Keel would re-send.
+ */
+int hl_http_header_redirect_safe(const char *name);
 
 /**
  * @brief Per-hop redirect check for Keel (KlHttpRedirectConfig.on_redirect):
- * the next URL's host must pass the same allowlist as the first one, and an
- * https chain may not drop to http. @p data is an HlHttpRedirectGuard that
+ * the next URL's host must pass the same allowlist as the first one, an
+ * https chain may not drop to http, and a request carrying a body or a
+ * non-safe header may not move to another origin (audit 26). @p data is an HlHttpRedirectGuard that
  * lives as long as the request. 0 to follow, -1 to refuse (audited).
  */
 int hl_http_redirect_allowed(const char *next_url, void *data);

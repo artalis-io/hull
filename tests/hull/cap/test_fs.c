@@ -357,6 +357,18 @@ UTEST(hl_cap_fs, the_write_open_drops_setuid_and_setgid)
     teardown_fs();
 }
 
+/* Audit 26: a non-root writer of a file it does not own got EPERM from the
+ * fchmod and the write was refused - a regression; root still fails closed.
+ * (Making a file owned by another user needs root, so the policy is tested
+ * directly.) */
+UTEST(hl_cap_fs, setid_strip_eperm_is_ok_only_for_non_root)
+{
+    EXPECT_EQ(1, hl_fs_setid_fchmod_failure_ok(EPERM, 0));
+    EXPECT_EQ(0, hl_fs_setid_fchmod_failure_ok(EPERM, 1));
+    EXPECT_EQ(0, hl_fs_setid_fchmod_failure_ok(EIO, 0));
+    EXPECT_EQ(0, hl_fs_setid_fchmod_failure_ok(EROFS, 0));
+}
+
 UTEST(hl_cap_fs, write_ex_without_sync_is_still_a_whole_replace)
 {
     setup_fs();

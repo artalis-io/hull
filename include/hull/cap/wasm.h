@@ -670,5 +670,15 @@ void hl_cap_wasm_set_stream_ctx(uint32_t flags, uint32_t chunk_index);
  */
 void hl_cap_wasm_clear_stream_ctx(void);
 
+/**
+ * Escape a guest's HL_WASM_OP_LOG message for the log (audit 26): CR / LF
+ * become the two characters \r / \n, every other C0 control (NUL included)
+ * and DEL become \xNN, so a guest cannot write a log line of its own. The
+ * output is NUL-terminated and truncated (ending "...") to fit @p outsz.
+ * Returns the bytes written, excluding the NUL.
+ */
+size_t hl_cap_wasm_log_escape(const char *msg, size_t len,
+                              char *out, size_t outsz);
+
 #endif /* HL_ENABLE_WASM */
 #endif /* HL_CAP_WASM_H */

@@ -31,6 +31,14 @@
 # listener accepts and never writes; the client's on_error fires with
 # "connect timeout" after the manifest's 1000 ms, not before.
 #
+# Audit 26: after conn:close() Keel waits in CLOSING for the peer's Close
+# with no timer. A mute listener completes the upgrade and then never
+# answers; on_close fires with 1006 after HL_WS_CLIENT_CLOSE_TIMEOUT_MS (5 s).
+#
+# Audit 26: a request carrying a non-safe header (X-Api-Key) is refused a
+# redirect to another allowed origin (127.0.0.1 -> localhost); without the
+# header the same redirect is followed.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -39,6 +47,7 @@ HULL="${HULL:-build/hull}"
 PORT="${PORT:-19894}"
 SLOW_PORT="${SLOW_PORT:-19895}"
 HOLE_PORT="${HOLE_PORT:-19896}"
+MUTE_PORT="${MUTE_PORT:-19897}"
 PASS=0
 FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
@@ -53,7 +62,9 @@ TMPDIR=$(mktemp -d)
 SERVER_PID=""
 SLOW_PID=""
 HOLE_PID=""
+MUTE_PID=""
 cleanup() {
+    [ -n "$MUTE_PID" ] && kill "$MUTE_PID" 2>/dev/null || true
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
     [ -n "$SLOW_PID" ] && kill "$SLOW_PID" 2>/dev/null || true
     [ -n "$HOLE_PID" ] && kill "$HOLE_PID" 2>/dev/null || true
@@ -68,6 +79,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/xo":
+            self.send_response(302)
+            self.send_header("Location",
+                             "http://localhost:%d/fast" % self.server.server_port)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path.startswith("/hop/"):
             _, _, n, d = self.path.split("/")
             n, d = int(n), int(d)
@@ -122,6 +140,41 @@ python3 -I "$TMPDIR/hole.py" "$HOLE_PORT" >"$TMPDIR/hole.log" 2>&1 &
 HOLE_PID=$!
 WS_HOLE="ws://127.0.0.1:$HOLE_PORT/ws"
 
+# ── The mute peer: completes the upgrade, then never answers a Close ─
+cat > "$TMPDIR/mute.py" <<'EOF'
+import base64, hashlib, socket, sys, threading
+G = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(16)
+held = []
+def serve(c):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = c.recv(4096)
+        if not chunk:
+            return
+        data += chunk
+    key = ""
+    for line in data.decode("latin-1").split("\r\n"):
+        if line.lower().startswith("sec-websocket-key:"):
+            key = line.split(":", 1)[1].strip()
+    acc = base64.b64encode(hashlib.sha1((key + G).encode()).digest()).decode()
+    c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+               "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n"
+               % acc).encode())
+    while c.recv(4096):
+        pass                      # read and drop everything, answer nothing
+while True:
+    c, _ = s.accept()
+    held.append(c)
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+EOF
+python3 -I "$TMPDIR/mute.py" "$MUTE_PORT" >"$TMPDIR/mute.log" 2>&1 &
+MUTE_PID=$!
+WS_MUTE="ws://127.0.0.1:$MUTE_PORT/ws"
+
 SLOW="http://127.0.0.1:$SLOW_PORT/slow"
 BASE="http://127.0.0.1:$SLOW_PORT"
 
@@ -131,7 +184,7 @@ cat > "$TMPDIR/lua/app.lua" <<EOF
 app.manifest({
     modules = { "hull/http-server@1", "hull/http-client@1",
                 "hull/web/ws-client@1" },
-    hosts = { "127.0.0.1" },
+    hosts = { "127.0.0.1", "localhost" },
     http = { timeout_ms = 1000 },
 })
 local http = require("hull.http-client")
@@ -146,6 +199,22 @@ app.get("/wsgo", function(_req, res)
     res:text("started")
 end)
 app.get("/wsstate", function(_req, res) res:text(ws_state) end)
+local mute_state, mute_conn = "unset", nil
+app.get("/mutego", function(_req, res)
+    mute_state = "pending"
+    mute_conn = wsc.connect("$WS_MUTE", {
+        on_open = function(_c) mute_state = "open" end,
+        on_close = function(_c, code) mute_state = "closed:" .. tostring(code) end,
+        on_error = function(_c, msg) mute_state = "error:" .. tostring(msg) end,
+    })
+    res:text("started")
+end)
+app.get("/muteclose", function(_req, res)
+    mute_conn:close()
+    mute_state = "closing"
+    res:text("closing")
+end)
+app.get("/mutestate", function(_req, res) res:text(mute_state) end)
 local URL = "$SLOW"
 local BASE = "$BASE"
 
@@ -153,6 +222,11 @@ local function report(res, ok, r)
     if ok and r and r.status == 200 then return res:text("ok=" .. r.body) end
     res:text("error")
 end
+app.get("/xo", function(req, res)
+    local h = req.query.key and { ["X-Api-Key"] = "s3cret" } or nil
+    local fn = req.query.sync and http.get or http.async.get
+    report(res, pcall(fn, BASE .. "/xo", { headers = h }))
+end)
 local function opts(req)
     local t = tonumber(req.query and req.query.t)
     return t and { timeout_ms = t } or nil
@@ -197,7 +271,7 @@ import { wsClient } from "hull:web:ws-client";
 app.manifest({
     modules: ["hull/http-server@1", "hull/http-client@1",
               "hull/web/ws-client@1"],
-    hosts: ["127.0.0.1"],
+    hosts: ["127.0.0.1", "localhost"],
     http: { timeoutMs: 1000 },
 });
 let wsState = "unset";
@@ -210,6 +284,22 @@ app.get("/wsgo", (_req, res) => {
     res.text("started");
 });
 app.get("/wsstate", (_req, res) => res.text(wsState));
+let muteState = "unset", muteConn = null;
+app.get("/mutego", (_req, res) => {
+    muteState = "pending";
+    muteConn = wsClient.connect("$WS_MUTE", {
+        onOpen(_c) { muteState = "open"; },
+        onClose(_c, code) { muteState = "closed:" + code; },
+        onError(_c, msg) { muteState = "error:" + msg; },
+    });
+    res.text("started");
+});
+app.get("/muteclose", (_req, res) => {
+    muteConn.close();
+    muteState = "closing";
+    res.text("closing");
+});
+app.get("/mutestate", (_req, res) => res.text(muteState));
 const URL = "$SLOW";
 const BASE = "$BASE";
 
@@ -222,6 +312,15 @@ function opts(req) {
     return t ? { timeoutMs: Number(t) } : undefined;
 }
 app.get("/up", (_req, res) => res.text("up"));
+app.get("/xo", async (req, res) => {
+    const o = req.query.key ? { headers: { "X-Api-Key": "s3cret" } } : {};
+    let r;
+    try {
+        r = req.query.sync ? http.get(BASE + "/xo", o)
+                           : await http.async.get(BASE + "/xo", o);
+    } catch (e) { r = null; }
+    report(res, r);
+});
 app.get("/fetch", async (req, res) => {
     let r;
     try { r = await http.async.get(URL, opts(req)); } catch (e) { r = null; }
@@ -328,6 +427,37 @@ run_app() {
     [ "$out" = "error:connect timeout" ] \
         && pass "$rt ws.connect: a silent upgrade fails at the deadline" \
         || fail "$rt ws.connect: a silent upgrade fails at the deadline" "$out"
+
+    # Audit 26: a credential-like header may not follow a cross-origin hop.
+    for q in "" "&sync=1"; do
+        out=$(curl -s -m 10 "http://127.0.0.1:$PORT/xo?x=1$q")
+        [ "$out" = "ok=slow-ok" ] \
+            && pass "$rt xo$q: a plain request follows a cross-origin redirect" \
+            || fail "$rt xo$q: a plain request follows a cross-origin redirect" "$out"
+        out=$(curl -s -m 10 "http://127.0.0.1:$PORT/xo?key=1$q")
+        [ "$out" = "error" ] \
+            && pass "$rt xo$q: an X-Api-Key request is refused the cross-origin hop" \
+            || fail "$rt xo$q: an X-Api-Key request is refused the cross-origin hop" "$out"
+    done
+
+    # Audit 26: conn:close() to a peer that never answers ends at a deadline.
+    curl -s -m 10 -o /dev/null "http://127.0.0.1:$PORT/mutego"
+    sleep 0.5
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/mutestate")
+    [ "$out" = "open" ] \
+        && pass "$rt ws close: the mute peer accepts the upgrade" \
+        || fail "$rt ws close: the mute peer accepts the upgrade" "$out"
+    curl -s -m 10 -o /dev/null "http://127.0.0.1:$PORT/muteclose"
+    sleep 2
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/mutestate")
+    [ "$out" = "closing" ] \
+        && pass "$rt ws close: still closing inside the deadline" \
+        || fail "$rt ws close: still closing inside the deadline" "$out"
+    sleep 4
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/mutestate")
+    [ "$out" = "closed:1006" ] \
+        && pass "$rt ws close: an unanswered close ends at the deadline (1006)" \
+        || fail "$rt ws close: an unanswered close ends at the deadline (1006)" "$out"
 
     out=$(curl -s -m 10 "http://127.0.0.1:$PORT/detached?k=long")
     [ "$out" = "error" ] \
