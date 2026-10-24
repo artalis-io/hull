@@ -75,6 +75,18 @@ local function whole_secs(v)
     return math.ceil(n)
 end
 
+-- An enqueue schedule value (`delay`, `at`, `run_at`): a finite number of
+-- seconds or a numeric string, as whole seconds - the JS twin's rule
+-- (audit 25). A fractional `at` went to Postgres as a double, an infinite
+-- one as "inf", a non-numeric string raised a bare arithmetic error.
+local function sched_secs(v, name)
+    local n = (type(v) == "number" or type(v) == "string") and tonumber(v) or nil
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error("jobs.enqueue: " .. name .. " must be a finite number of seconds", 3)
+    end
+    return whole_secs(n)
+end
+
 -- The configured backoff's delay for a retry. It is app code that runs in
 -- the failure path: one that raised, or returned NaN / a non-number, made
 -- jobs.work itself raise with the job still claimed (audit 23). Such a
@@ -665,7 +677,10 @@ function jobs.enqueue(job_type, data, opts)
     opts = opts or {}
     local now    = time.now()
     -- Schedule: absolute `at` (unix ts) wins, else `run_at`, else now + `delay`.
-    local run_at = opts.at or opts.run_at or (now + (opts.delay or 0))
+    local run_at
+    if opts.at ~= nil then run_at = sched_secs(opts.at, "at")
+    elseif opts.run_at ~= nil then run_at = sched_secs(opts.run_at, "run_at")
+    else run_at = now + (opts.delay ~= nil and sched_secs(opts.delay, "delay") or 0) end
     -- Windowed throttle: skip (return nil) if a job of this (queue, type) was
     -- created within the last `throttle` seconds. Best-effort - keyed by
     -- (queue, type), no unique constraint (use dedup_key for exact-once).

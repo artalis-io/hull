@@ -71,6 +71,18 @@ function wholeSecs(v) {
     return Math.ceil(n);
 }
 
+// An enqueue schedule value (`delay`, `at`, `runAt`): a finite number of
+// seconds or a numeric string, as whole seconds. `now + "5"` concatenated
+// to "17000000005" and an `at` of "soon" or Infinity was bound as given
+// (audit 25); anything else is a TypeError.
+function schedSecs(v, name) {
+    let n = v;
+    if (typeof n === "string" && n.trim() !== "") n = Number(n);
+    if (typeof n !== "number" || !Number.isFinite(n))
+        throw new TypeError("jobs.enqueue: " + name + " must be a finite number of seconds");
+    return wholeSecs(n);
+}
+
 // The configured backoff's delay for a retry. It is app code that runs in
 // the failure path: one that threw, or returned NaN / a non-number, made
 // work() itself throw with the job still claimed (audit 23). Such a result
@@ -625,8 +637,9 @@ function enqueue(jobType, data, opts) {
     const o = opts || {};
     const now = time.now();
     // Schedule: absolute `at` (unix ts) wins, else `runAt`, else now + `delay`.
-    const runAt = o.at !== undefined ? o.at
-        : (o.runAt !== undefined ? o.runAt : now + (o.delay || 0));
+    const runAt = o.at !== undefined && o.at !== null ? schedSecs(o.at, "at")
+        : (o.runAt !== undefined && o.runAt !== null ? schedSecs(o.runAt, "runAt")
+        : now + (o.delay !== undefined && o.delay !== null ? schedSecs(o.delay, "delay") : 0));
     // Windowed throttle: skip (return null) if a job of this (queue, type) was
     // created within the last `throttle` seconds. Best-effort - keyed by
     // (queue, type), no unique constraint (use dedupKey for exact-once).
