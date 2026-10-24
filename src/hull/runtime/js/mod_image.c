@@ -112,6 +112,34 @@ static JSValue js_wrap_image(JSContext *ctx, HlImage *img)
 
 /* ── Module functions ──────────────────────────────────────────────── */
 
+/* A pixel copy into a new image (image.new, image.fromWasm, the copy
+ * branch of image.fromBuffer): refused up front past the VM heap limit and
+ * charged 1 unit per 8 bytes before it, sized on w * h * bpp (as toWasm and
+ * pixels are, and as Lua's image_copy_charge). Dimensions or data that
+ * hl_image_new would reject are not charged - it refuses them. 0, or -1
+ * with an exception pending. */
+static int js_image_copy_charge(JSContext *ctx, uint32_t w, uint32_t h,
+                                HlImageFormat fmt, size_t have,
+                                const char *fn)
+{
+    int bpp = hl_image_bpp(fmt);
+    if (w == 0 || h == 0 || bpp <= 0 ||
+        w > HL_IMAGE_MAX_DIM || h > HL_IMAGE_MAX_DIM ||
+        (uint64_t)w * (uint64_t)h > HL_IMAGE_MAX_PIXELS)
+        return 0;
+    uint64_t total = (uint64_t)w * (uint64_t)h * (uint64_t)bpp;
+    if (total > SIZE_MAX / 2 || have < total)
+        return 0;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->max_heap_bytes && total > (uint64_t)js->max_heap_bytes) {
+        JS_ThrowRangeError(ctx, "%s: image too large for the VM heap", fn);
+        return -1;
+    }
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(total)))
+        return -1;
+    return 0;
+}
+
 /* image.new(w, h, format, data) */
 static JSValue js_image_new(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
@@ -140,6 +168,11 @@ static JSValue js_image_new(JSContext *ctx, JSValueConst this_val,
     int needs_free;
     if (!js_get_buffer(ctx, argv[3], &view, &str_out, &needs_free))
         return JS_ThrowTypeError(ctx, "image.new: arg 4 must be a buffer");
+    if (js_image_copy_charge(ctx, w, h, (HlImageFormat)fmt, view.len,
+                             "image.new") != 0) {
+        if (needs_free) JS_FreeCString(ctx, str_out);
+        return JS_EXCEPTION;
+    }
 
     HlImageAlloc ia;
     hl_js_image_alloc(ctx, &ia);
@@ -217,6 +250,11 @@ static JSValue js_image_from_buffer(JSContext *ctx, JSValueConst this_val,
     }
 #endif
     else {
+        if (js_image_copy_charge(ctx, w, h, (HlImageFormat)fmt, view.len,
+                                 "image.fromBuffer") != 0) {
+            if (needs_free) JS_FreeCString(ctx, str_out);
+            return JS_EXCEPTION;
+        }
         HlImageAlloc ia;
         hl_js_image_alloc(ctx, &ia);
         img = hl_image_new(w, h, (HlImageFormat)fmt, view.data, view.len, &ia);
@@ -450,6 +488,11 @@ static JSValue js_image_from_wasm(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowRangeError(ctx, "image.fromWasm: pixel data too short");
     }
 
+    if (js_image_copy_charge(ctx, w, h, fmt, expected,
+                             "image.fromWasm") != 0) {
+        if (str_data) JS_FreeCString(ctx, str_data);
+        return JS_EXCEPTION;
+    }
     HlImageAlloc ia;
     hl_js_image_alloc(ctx, &ia);
     HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, &ia);
