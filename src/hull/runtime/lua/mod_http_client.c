@@ -495,7 +495,15 @@ static int lua_http_fetch(lua_State *L)
 
     /* After the opts (their __index is app code that could BEGIN), before
      * anything is armed; nothing below runs app code (audit 15). */
-    hl_lua_check_can_wait(L, "http.fetch()");
+    /* The header copies in the scratch arena are given back on every exit
+     * that does not start the request, and once it has started (Keel
+     * serializes them into its request buffer, a redirect client deep-copies
+     * them): the arena is reset only when a run starts, so a pcall'd loop of
+     * refused fetches filled it (audit 25). */
+    if (!hl_lua_can_wait(L)) {
+        lua_http_scratch_release(lua, headers);
+        hl_lua_check_can_wait(L, "http.fetch()");
+    }
 
     /* Keel copies the body and keeps it until the request is done: charged
      * and held on the VM's off-heap total under its heap limit - N fetches
@@ -504,10 +512,12 @@ static int lua_http_fetch(lua_State *L)
     lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
     HlOffheapHold body_hold = {0};
     if (hl_offheap_take(&body_hold, &lua->wasm_buf_bytes, lua->mem_limit,
-                        body_len) != 0)
+                        body_len) != 0) {
+        lua_http_scratch_release(lua, headers);
         return luaL_error(L, "http.fetch: a %I-byte body would take the VM's "
                           "off-heap copies past its heap limit",
                           (lua_Integer)body_len);
+    }
 
     /* The continuation first: created after the request was started (and
      * the connection suspended), a failed allocation left ctx->cont NULL,
@@ -518,6 +528,7 @@ static int lua_http_fetch(lua_State *L)
                                                    lua_push_async_http_response);
     if (!cont) {
         hl_offheap_drop(&body_hold);
+        lua_http_scratch_release(lua, headers);
         return luaL_error(L, "http.fetch: out of memory");
     }
 
@@ -527,6 +538,7 @@ static int lua_http_fetch(lua_State *L)
         lua->server, lua->active_conn, lua->base.net_ctx, lua->base.alloc,
         lua->base.http_cfg, timeout_ms, method, url, headers, num_headers,
         body, body_len);
+    lua_http_scratch_release(lua, headers);   /* copied, or refused */
     if (!ctx) {
         hl_offheap_drop(&body_hold);
         cont->destroy(cont);

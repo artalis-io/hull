@@ -12616,4 +12616,81 @@ UTEST(lua_audit25, image_copies_are_charged)
 }
 #endif /* HL_ENABLE_IMAGE */
 
+#ifdef HL_ENABLE_HTTP_CLIENT
+/* Audit 25 L11: a refused http.fetch (here: inside a transaction) and a
+ * failed smtp.send kept their header / cc copies in the scratch arena, which
+ * is reset only when a run starts, so a pcall'd loop of failures filled it
+ * and every later scratch user of the run failed. */
+UTEST(lua_audit25, refused_fetch_gives_its_scratch_back)
+{
+    LuaWorkerFix f;
+    memset(&f, 0, sizeof f);
+    f.be = hl_async_backend();
+    ASSERT_EQ(f.be->init(&f.actx, NULL), 0);
+    ASSERT_EQ(f.be->pool_create(&f.pool, f.actx, 1, 16), 0);
+    pending_async_ctx   = f.actx;
+    pending_thread_pool = f.pool;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};
+    lua_rt.base.http_cfg = &cfg;
+    char out[512];
+    /* 400 x 64 KB of header copies: many times the arena. */
+    lua_worker_run(&f,
+        "local http = require('hull.http-client')\n"
+        "local h = { ['X-Big'] = string.rep('a', 65536) }\n"
+        "db.exec('BEGIN')\n"
+        "for i = 1, 400 do\n"
+        "  local ok, e = pcall(http.async.request, 'GET', 'http://x.invalid/',\n"
+        "                      { headers = h })\n"
+        "  if ok or not tostring(e):find('transaction') then\n"
+        "    db.exec('ROLLBACK') return 'call ' .. i .. ': ' .. tostring(e)\n"
+        "  end\n"
+        "end\n"
+        "db.exec('ROLLBACK')\n"
+        "local sql = 'SELECT ' .. string.rep('?, ', 99) .. '? AS last'\n"
+        "local p = {} for i = 1, 100 do p[i] = i end\n"
+        "return tostring(db.query(sql, p)[1].last)\n", out, sizeof out);
+    EXPECT_STREQ(out, "100");
+    lua_rt.base.http_cfg = NULL;
+    pending_async_ctx = NULL;
+    cleanup_lua_caps();
+    f.be->tick(f.actx, 0);
+    f.be->pool_free(f.pool);
+    f.be->free(f.actx);
+}
+
+UTEST(lua_audit25, failed_smtp_gives_its_scratch_back)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlSmtpConfig smtp = {0};          /* no hosts: every send is refused */
+    lua_rt.base.smtp_cfg = &smtp;
+    char err[512];
+    /* 1000 x 1 KB cc entries a call (~1 MB of scratch), 60 calls of each
+     * failure: a missing field, a refused host, a bad cc entry. */
+    EXPECT_EQ_MSG(audit10_run(
+        "local cc = {} for i = 1, 1000 do cc[i] = string.rep('c', 1024) end "
+        "local bad = {} for i = 1, 999 do bad[i] = cc[i] end bad[1000] = 1 "
+        "for i = 1, 60 do "
+        "  local r = smtp.send({ from = 'a@x.test', to = 'b@x.test', "
+        "                        subject = 's', body = 'b', cc = cc }) "
+        "  assert(r.ok == false and r.error == 'host required', tostring(r.error)) "
+        "  r = smtp.send({ host = 'mail.invalid', from = 'a@x.test', "
+        "                  to = 'b@x.test', subject = 's', body = 'b', cc = cc }) "
+        "  assert(r.ok == false and not tostring(r.error):find('scratch'), "
+        "         tostring(r.error)) "
+        "  local ok, e = pcall(smtp.send, { host = 'mail.invalid', "
+        "      from = 'a@x.test', to = 'b@x.test', subject = 's', body = 'b', "
+        "      cc = bad }) "
+        "  assert(not ok and tostring(e):find('must be a string'), tostring(e)) "
+        "end "
+        "assert(db.query('SELECT ? AS v', { 1 })[1].v == 1) "
+        "return 1",
+        0, err, sizeof err), LUA_OK, err);
+    lua_rt.base.smtp_cfg = NULL;
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_HTTP_CLIENT */
+
 UTEST_MAIN();

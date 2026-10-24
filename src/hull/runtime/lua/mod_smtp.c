@@ -26,6 +26,21 @@
  * take), and the list is copied into the scratch arena. */
 #define HL_LUA_SMTP_CC_MAX 1000
 
+/* The scratch arena is reset only when a run starts: what a call copied
+ * into it is given back on every exit that does not leave it in use, or a
+ * pcall'd loop of failing sends filled it for the rest of the run, and every
+ * later scratch user (db, http, a module load) failed (audit 25). */
+static size_t smtp_scratch_mark(HlLua *lua)
+{
+    return (lua && lua->scratch) ? lua->scratch->used : 0;
+}
+
+static void smtp_scratch_release(HlLua *lua, size_t mark)
+{
+    if (lua && lua->scratch && mark <= lua->scratch->used)
+        lua->scratch->used = mark;
+}
+
 /* Helper: copy the string array at stack index @p idx into the scratch
  * arena. Every entry is copied or the whole call fails (audit 10): it used
  * to read the length through __len (app code, and an int cast of whatever it
@@ -51,19 +66,27 @@ static int lua_get_string_array(lua_State *L, int idx, const char *what,
     if (!lua || !lua->scratch)
         return luaL_error(L, "smtp.send: no scratch space for %s", what);
 
+    /* Given back before every raise below (audit 25). */
+    size_t mark = smtp_scratch_mark(lua);
     const char **arr = sh_arena_calloc(lua->scratch, len, sizeof(const char *));
-    if (!arr)
+    if (!arr) {
+        smtp_scratch_release(lua, mark);
         return luaL_error(L, "smtp.send: out of scratch space for %s", what);
+    }
 
     for (size_t i = 1; i <= len; i++) {
         lua_rawgeti(L, idx, (lua_Integer)i);
-        if (lua_type(L, -1) != LUA_TSTRING)
+        if (lua_type(L, -1) != LUA_TSTRING) {
+            smtp_scratch_release(lua, mark);
             return luaL_error(L, "smtp.send: %s[%d] must be a string", what, (int)i);
+        }
         size_t slen;
         const char *s = lua_tolstring(L, -1, &slen);
         char *copy = sh_arena_alloc(lua->scratch, slen + 1);
-        if (!copy)
+        if (!copy) {
+            smtp_scratch_release(lua, mark);
             return luaL_error(L, "smtp.send: out of scratch space for %s", what);
+        }
         memcpy(copy, s, slen + 1);
         arr[i - 1] = copy;
         lua_pop(L, 1);
@@ -154,6 +177,7 @@ static int lua_smtp_send(lua_State *L)
     /* CC array (optional) */
     const char **cc = NULL;
     int cc_count = 0;
+    size_t scratch_mark = smtp_scratch_mark(lua);   /* given back on every exit */
     lua_getfield(L, 1, "cc");
     if (lua_istable(L, -1))
         lua_get_string_array(L, lua_gettop(L), "cc", &cc, &cc_count);
@@ -161,6 +185,8 @@ static int lua_smtp_send(lua_State *L)
         return luaL_error(L, "smtp.send: cc must be an array of strings");
 
     /* Validate required fields */
+    if (!host || !from || !to || !subject || !body)
+        smtp_scratch_release(lua, scratch_mark);
     if (!host)    { lua_newtable(L); lua_pushboolean(L, 0); lua_setfield(L, -2, "ok"); lua_pushstring(L, "host required"); lua_setfield(L, -2, "error"); return 1; }
     if (!from)    { lua_newtable(L); lua_pushboolean(L, 0); lua_setfield(L, -2, "ok"); lua_pushstring(L, "from required"); lua_setfield(L, -2, "error"); return 1; }
     if (!to)      { lua_newtable(L); lua_pushboolean(L, 0); lua_setfield(L, -2, "ok"); lua_pushstring(L, "to required"); lua_setfield(L, -2, "error"); return 1; }
@@ -191,6 +217,7 @@ static int lua_smtp_send(lua_State *L)
     if (!lua->base.async_ctx || !lua->base.smtp_async) {
         const char *err_msg = NULL;
         int rc = hl_cap_smtp_send(lua->base.smtp_cfg, &msg, &err_msg);
+        smtp_scratch_release(lua, scratch_mark);
         if (rc == 0) {
             lua_newtable(L);
             lua_pushboolean(L, 1); lua_setfield(L, -2, "ok");
@@ -202,19 +229,28 @@ static int lua_smtp_send(lua_State *L)
     /* Active event loop: model 2. Validate (CR/LF in a header field, missing
      * fields) and authorize the host on the submit side (audited exactly once
      * here) BEFORE any reservation or worker submission. */
-    if (hl_smtp_validate_message(&msg) != 0)
+    if (hl_smtp_validate_message(&msg) != 0) {
+        smtp_scratch_release(lua, scratch_mark);
         return lua_smtp_fail(L, "validation_failed");
+    }
     if (hl_smtp_check_host(lua->base.smtp_cfg, msg.host) != 0) {
         hl_smtp_audit_denied(&msg);
+        smtp_scratch_release(lua, scratch_mark);
         return lua_smtp_fail(L, "host_not_allowed");
     }
 
-    hl_lua_check_can_wait(L, "smtp.send()");   /* before anything is armed */
+    /* Before anything is armed; the cc copies go back before it raises. */
+    if (!hl_lua_can_wait(L)) {
+        smtp_scratch_release(lua, scratch_mark);
+        hl_lua_check_can_wait(L, "smtp.send()");
+    }
 
-    /* Deep-copy the message into an owned op (crosses to the worker thread). */
+    /* Deep-copy the message into an owned op (crosses to the worker thread).
+     * Nothing reads the scratch copies after it, whatever happens next. */
     int timeout_ms = lua->base.smtp_cfg->timeout_ms > 0
                          ? lua->base.smtp_cfg->timeout_ms : 0;
     HlSmtpOp *op = hl_smtp_op_create(&msg, timeout_ms);
+    smtp_scratch_release(lua, scratch_mark);
     if (!op)
         return lua_smtp_fail(L, "connect_failed");
 
