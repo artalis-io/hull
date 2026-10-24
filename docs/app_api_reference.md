@@ -1090,9 +1090,11 @@ template.clearCache();                           // clear compiled function cach
 - **Compilation:** Templates are parsed (lexer → recursive-descent parser → AST), then code-generated to native Lua/JS source and compiled via `luaL_loadbuffer` (Lua) or `JS_Eval` (JS). Compiled functions are cached. Compile once, render many.
 - **XSS safety:** All `{{ }}` output is HTML-escaped by default (`& < > " '` → entities). Only `{{{ }}}` and `| raw` bypass escaping.
 - **Dot paths are nil-safe:** `{{ user.address.city }}` returns empty string if any intermediate is nil/undefined. No errors.
+- **Dot paths read data only:** each segment is an own property (JS) / a raw table field (Lua, `rawget`, no `__index`); a function value renders empty, so `{{ title.rep }}` cannot print a native address (audit 26).
 - **For-loop variables are scoped:** Inside `{% for item in items %}`, `item` refers to the loop variable, not `data.item`.
 - **Lua truthiness caveat:** In Lua, empty tables `{}` and `0` are truthy. Use a boolean flag like `has_items = #items > 0` when checking emptiness in `{% if %}`.
 - **Filters:** `upper`, `lower`, `trim`, `length`, `default: "value"`, `json`, `raw`. Filters chain: `{{ name | trim | upper }}`.
+- **`safe_url`:** for a URL in `href` / `src` / `action`. Keeps http(s), mailto and relative URLs (anything else becomes `#`) and percent-encodes `"` `'` `<` `>` backtick, whitespace and control characters, so the result is inert in both `{{ }}` and `{{{ }}}` output (audit 26).
 - **Inheritance:** `{% extends "base.html" %}` loads parent, child overrides `{% block name %}` content. Multi-level inheritance supported. Circular extends detected.
 - **Includes:** `{% include "partials/nav.html" %}` inlines the partial's AST. Included templates share the same data context.
 - **Template directory:** Place templates in `app_dir/templates/`. Names are relative paths (e.g. `"pages/home.html"`, `"partials/nav.html"`, `"base.html"`).
@@ -1194,6 +1196,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `search.remove(name, id)`. Delete document.
 - `search.query(name, query, opts?)`. Full-text search. Returns `{id, rank}` array.
   - `opts.limit` (default: 20), `opts.offset` (default: 0)
+  - `opts.snippet = {column, tokens, before, after, ellipsis}` / `opts.highlight = {column, before, after}` add a `snippet` / `highlight` field. The indexed text in it is HTML-escaped; only `before` / `after` (default `<b>` / `</b>`) and `ellipsis` are inserted as given, so the field is safe to render raw (`{{{ r.snippet }}}`) as long as those markers are your own markup (audit 26).
 - `search.reindex(name, source_table, opts?)`. Bulk re-index from table.
 - `search.drop_index(name)`. Drop FTS5 table.
 
