@@ -736,7 +736,7 @@ in phase 2:
 |----------|---------------|------------|
 | Linux/Cosmo pledge | no `tty` promise | adds `tty` |
 | Linux unveil | no `/dev/tty` access | unveils `/dev/tty`, `/dev/pts/*` (rwc, but the syscalls are still pledged) |
-| macOS Seatbelt | no terminal allow clauses | adds read / write / ioctl on `/dev/tty` and the process's own terminal devices only (`ttyname` of fds 0-2, as `literal` params; audit 25) |
+| macOS Seatbelt | no terminal allow clauses | adds read / write / ioctl on `/dev/tty` and the process's own terminal devices only (`ttyname` of fds 0-2, as `literal` params; audit 25), ioctl limited to TIOCGWINSZ / TIOCGETA / TIOCSETA / TIOCSETAW / TIOCSETAF (no TIOCSTI; audit 26) |
 | OpenBSD | no `tty` promise | adds `tty` |
 
 Signals: `SIGWINCH`, `SIGTSTP`, `SIGCONT`, `SIGINT`, `SIGTERM`,

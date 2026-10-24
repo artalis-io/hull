@@ -375,6 +375,54 @@ case "$OUTPUT" in
     *) fail "explicit -d through a symlink was refused: $OUTPUT" ;;
 esac
 
+# ── Test: a symlinked migrations/ is refused (audit 26) ──────────
+#
+# Development reads <app>/migrations before the sandbox applies, so a
+# cloned app's migrations -> /elsewhere ran another tree's SQL. `hull build`
+# already refused the layout (audit 20); dev / hull migrate now do too.
+
+echo ""
+echo "--- symlinked migrations dir refused ---"
+
+mkdir -p "$TMPDIR/app9" "$TMPDIR/foreign_migrations"
+cp "$TMPDIR/app2/app.lua" "$TMPDIR/app9/app.lua"
+cat > "$TMPDIR/foreign_migrations/001_foreign.sql" << 'EOF2'
+CREATE TABLE foreign_sql (x INTEGER);
+EOF2
+ln -s ../foreign_migrations "$TMPDIR/app9/migrations"
+
+if OUTPUT=$($HULL migrate "$TMPDIR/app9" 2>&1); then
+    fail "hull migrate succeeded with a symlinked migrations dir: $OUTPUT"
+else
+    case "$OUTPUT" in
+        *"symbolic link"*) pass "hull migrate refuses a symlinked migrations dir" ;;
+        *) fail "hull migrate failed without naming the symlink: $OUTPUT" ;;
+    esac
+fi
+TABLES=$(sqlite3 "$TMPDIR/app9/data.db" ".tables" 2>/dev/null || echo "")
+case "$TABLES" in
+    *foreign_sql*) fail "the foreign migration ran" ;;
+    *) pass "the foreign migration did not run" ;;
+esac
+
+$HULL -p 18934 "$TMPDIR/app9/app.lua" > "$TMPDIR/app9.log" 2>&1 &
+SERVER_PID=$!
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 $SERVER_PID 2>/dev/null || break
+    sleep 0.3
+done
+if kill -0 $SERVER_PID 2>/dev/null; then
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    fail "hull served with a symlinked migrations dir"
+else
+    wait $SERVER_PID 2>/dev/null || true
+    case "$(cat "$TMPDIR/app9.log")" in
+        *"symbolic link"*) pass "hull refuses to serve with a symlinked migrations dir" ;;
+        *) fail "hull exited without naming the symlink: $(cat "$TMPDIR/app9.log")" ;;
+    esac
+fi
+
 # ── Summary ───────────────────────────────────────────────────────
 
 echo ""
