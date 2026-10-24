@@ -77,10 +77,9 @@ int hl_smtp_inflight_sweep(HlSmtpInflight *r)
         /* Unlink BEFORE release: the release callback may free the storage that
          * embeds this node, so it must already be off the list. */
         HlSmtpInflightRelease release = n->release;
-        void *owner = n->owner;
-        hl_smtp_inflight_remove(n);
+        hl_smtp_inflight_remove(n);   /* unlinks only: n is still readable */
         if (release)
-            release(owner);
+            release(n->owner);
         swept++;
     }
     return swept;

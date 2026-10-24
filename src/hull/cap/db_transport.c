@@ -367,9 +367,8 @@ static void co_cancel_attempt(void *ctx, int idx)
 
 static void co_dispose_fd(void *ctx, KlSocketHandle fd)
 {
-    HlDbTransport *t = ctx;
     if (kl_handle_valid(fd))
-        sp_close(t, fd);
+        sp_close((HlDbTransport *)ctx, fd);
 }
 
 static void co_on_deadline_fired(void *user_data)
