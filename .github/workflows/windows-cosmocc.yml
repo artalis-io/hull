@@ -53,7 +53,11 @@ jobs:
       - name: cosmocc driver is a POSIX shell script (not an APE)
         shell: pwsh
         run: |
-          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first (cosmo.zip was unreachable from
+          # runners for days, Oct 2026); same bytes, the SHA pin below checks.
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$env:COSMOCC_VERSION/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { curl.exe -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip" }
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc download failed (GitHub and cosmo.zip)" }
           $actual = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: $actual" }
           $dest = "$env:USERPROFILE\.cosmocc"
@@ -113,7 +117,11 @@ jobs:
       - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch the APE bash
         shell: pwsh
         run: |
-          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first (cosmo.zip was unreachable from
+          # runners for days, Oct 2026); same bytes, the SHA pin below checks.
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$env:COSMOCC_VERSION/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { curl.exe -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip" }
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc download failed (GitHub and cosmo.zip)" }
           if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
           tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
@@ -198,7 +206,11 @@ jobs:
       - name: Extract cosmocc (bsdtar) + fetch busybox-w64
         shell: pwsh
         run: |
-          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first (cosmo.zip was unreachable from
+          # runners for days, Oct 2026); same bytes, the SHA pin below checks.
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$env:COSMOCC_VERSION/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { curl.exe -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip" }
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc download failed (GitHub and cosmo.zip)" }
           if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
           tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
@@ -257,7 +269,11 @@ jobs:
       - name: Extract cosmocc (bsdtar, symlink-preserving) + fetch busybox-w64
         shell: pwsh
         run: |
-          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first (cosmo.zip was unreachable from
+          # runners for days, Oct 2026); same bytes, the SHA pin below checks.
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$env:COSMOCC_VERSION/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { curl.exe -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip" }
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc download failed (GitHub and cosmo.zip)" }
           if ((Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower() -ne $env:COSMOCC_SHA256) { throw "sha mismatch" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
           tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
@@ -373,7 +389,9 @@ jobs:
       - name: Fetch/verify/extract cosmocc + inventory
         shell: bash
         run: |
-          curl -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first, cosmo.zip as fallback; the SHA pin checks.
+          curl -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$COSMOCC_VERSION/cosmocc-$COSMOCC_VERSION.zip" \
+            || curl -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
           [ "$(sha256sum cosmocc.zip | cut -d' ' -f1)" = "$COSMOCC_SHA256" ] || { echo "sha mismatch"; exit 1; }
           mkdir -p tree && ( cd tree && unzip -q -o "$GITHUB_WORKSPACE/cosmocc.zip" )
           root=$(ls -d tree/*/ 2>/dev/null | head -1); [ -n "$root" ] || root=tree
@@ -402,7 +420,9 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update -qq && sudo apt-get install -y strace >/dev/null
-          curl -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first, cosmo.zip as fallback; the SHA pin checks.
+          curl -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$COSMOCC_VERSION/cosmocc-$COSMOCC_VERSION.zip" \
+            || curl -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$COSMOCC_VERSION.zip"
           actual=$(sha256sum cosmocc.zip | cut -d' ' -f1)
           [ "$actual" = "$COSMOCC_SHA256" ] || { echo "sha mismatch: $actual"; exit 1; }
           mkdir -p "$HOME/.cosmocc"
@@ -519,7 +539,11 @@ jobs:
       - name: Download + symlink-preserving extract (bsdtar)
         shell: pwsh
         run: |
-          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first (cosmo.zip was unreachable from
+          # runners for days, Oct 2026); same bytes, the SHA pin below checks.
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$env:COSMOCC_VERSION/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { curl.exe -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip" }
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc download failed (GitHub and cosmo.zip)" }
           $actual = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: $actual" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null

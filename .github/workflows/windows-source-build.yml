@@ -340,7 +340,11 @@ jobs:
       - name: Fetch + verify cosmocc
         shell: pwsh
         run: |
-          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first (cosmo.zip was unreachable from
+          # runners for days, Oct 2026); same bytes, the SHA pin below checks.
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$env:COSMOCC_VERSION/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { curl.exe -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip" }
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc download failed (GitHub and cosmo.zip)" }
           $h = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
           if ($h -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: got $h" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
@@ -1288,7 +1292,11 @@ jobs:
       - name: Fetch + verify cosmocc (+ busybox, required to spawn it)
         shell: pwsh
         run: |
-          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip"
+          # Upstream's GitHub release first (cosmo.zip was unreachable from
+          # runners for days, Oct 2026); same bytes, the SHA pin below checks.
+          curl.exe -fsSL --retry 3 -o cosmocc.zip "https://github.com/jart/cosmopolitan/releases/download/$env:COSMOCC_VERSION/cosmocc-$env:COSMOCC_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { curl.exe -fsSL --retry 3 --max-time 600 -o cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-$env:COSMOCC_VERSION.zip" }
+          if ($LASTEXITCODE -ne 0) { throw "cosmocc download failed (GitHub and cosmo.zip)" }
           $h = (Get-FileHash cosmocc.zip -Algorithm SHA256).Hash.ToLower()
           if ($h -ne $env:COSMOCC_SHA256) { throw "cosmocc sha mismatch: got $h" }
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
