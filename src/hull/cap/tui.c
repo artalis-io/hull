@@ -587,7 +587,10 @@ int hl_cap_tui_acquire(HlTuiCtx **out)
     /* Without a terminal at startup the sandbox granted no `tty`, so isatty's
      * ioctl would be killed by the Linux seccomp filter before it could say
      * ENOTTY: take the unsandboxed probe's answer when there is one. */
+    /* cppcheck sees only the weak default (-1); sandbox.c overrides it. */
+    // cppcheck-suppress knownConditionTrueFalse
     if (hl_sandbox_std_tty(STDIN_FILENO) == 0 ||
+        // cppcheck-suppress knownConditionTrueFalse
         hl_sandbox_std_tty(STDOUT_FILENO) == 0) {
         errno = ENOTTY;
         return -1;
