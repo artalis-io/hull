@@ -236,6 +236,37 @@ static void wasm_cap_call_opts(HlWasmCallOpts *opts, const HlRuntime *base)
         base->wasm_config.gas, base->wasm_config.timeout_ms);
 }
 
+/* A synchronous call's input and output (audit 27): neither was charged,
+ * and the string result is copied onto the VM heap. The input is charged
+ * before the call (lua_hlwork: raises with nothing held), the output's
+ * max_output clamped to what is left of the heap (as compute.stream and the
+ * GPU reads are) so the guest cannot hand back more than the heap could hold,
+ * and the copy charged 1 unit per 8 bytes before it is made. @p effective
+ * is the max_output the call would otherwise use. */
+static void lua_sync_call_charge_input(lua_State *L, size_t input_len)
+{
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)input_len), 0);
+}
+
+static void lua_sync_call_clamp_output(const HlLua *lua, HlWasmCallOpts *opts,
+                                       uint64_t effective)
+{
+    if (!lua || !lua->mem_limit) return;
+    uint64_t left = lua->mem_limit > lua->mem_used
+                    ? (uint64_t)(lua->mem_limit - lua->mem_used) : 1;
+    if (effective == 0) effective = HL_WASM_DEFAULT_MAX_OUTPUT;
+    opts->max_output = effective < left ? effective : left;
+}
+
+/* Charge the output copy without raising: the caller frees the output, then
+ * raises the trip with hl_lua_budget_raise. 1 when the run is over. */
+static int lua_sync_call_charge_output(lua_State *L, size_t output_len)
+{
+    uint64_t units = hl_work_bytes_units((uint64_t)output_len);
+    return hl_lua_budget_charge(L, units > INT64_MAX ? INT64_MAX
+                                                     : (int64_t)units);
+}
+
 /* opts.timeout_ms: a positive number of milliseconds; anything else is "the
  * default" (never "unbounded" - a negative cast to uint32_t became ~49 days). */
 static uint32_t wasm_timeout_arg(lua_Integer v)
@@ -406,6 +437,7 @@ static int lua_compute_call(lua_State *L)
         }
     }
     wasm_clamp_opts(&opts, &lua->base);
+    lua_sync_call_charge_input(L, input_len);   /* audit 27 */
 
     if (want_buffer) {
         HlWasmBuffer *out_buf = NULL;
@@ -429,6 +461,7 @@ static int lua_compute_call(lua_State *L)
     }
 
     /* Non-buffer path (original behavior) */
+    lua_sync_call_clamp_output(lua, &opts, opts.max_output);   /* audit 27 */
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
@@ -447,6 +480,10 @@ static int lua_compute_call(lua_State *L)
         return 2;
     }
 
+    if (output && lua_sync_call_charge_output(L, output_len)) {   /* audit 27 */
+        hl_alloc_free(lua->base.alloc, output, output_len);
+        return hl_lua_budget_raise(L);
+    }
     /* Protected: a plain push that ran out of memory raised past the free
      * below and leaked the output. */
     int pushed = hl_lua_pushlstring_safe(L, output ? (const char *)output : "",
@@ -789,6 +826,7 @@ static int lua_wasm_inst_call(lua_State *L)
     if (check_wasm_inst(L, 1) != pi || pi->closed)
         return luaL_error(L, "WasmInstance:call: instance closed");
     if (lua) wasm_cap_call_opts(&opts, &lua->base);
+    lua_sync_call_charge_input(L, input_len);   /* audit 27 */
 
     if (want_buffer) {
         HlWasmBuffer *out_buf = NULL;
@@ -806,6 +844,9 @@ static int lua_wasm_inst_call(lua_State *L)
         return 2;
     }
 
+    /* audit 27: per-call max_output, else the instance's default. */
+    lua_sync_call_clamp_output(lua, &opts, opts.max_output ? opts.max_output
+                                           : pi->default_max_output);
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
@@ -819,6 +860,11 @@ static int lua_wasm_inst_call(lua_State *L)
         return 2;
     }
 
+    if (output && lua_sync_call_charge_output(L, output_len)) {   /* audit 27 */
+        if (lua) hl_alloc_free(lua->base.alloc, output, output_len);
+        else free(output);
+        return hl_lua_budget_raise(L);
+    }
     /* Protected: a plain push that ran out of memory raised past the free
      * below and leaked the output. */
     int pushed = hl_lua_pushlstring_safe(L, output ? (const char *)output : "",
@@ -1302,6 +1348,7 @@ typedef struct {
     lua_State *L;
     int        func_idx;   /* absolute stack index of the callback */
     int        error;
+    int        err_idx;    /* stack index of the callback's error, 0 = none */
 } LuaStreamCbCtx;
 
 typedef struct {
@@ -1344,8 +1391,12 @@ static int lua_stream_cb_trampoline(const void *data, size_t len,
     lua_pushlightuserdata(ctx->L, &chunk);
     lua_pushvalue(ctx->L, ctx->func_idx);
     if (lua_pcall(ctx->L, 2, 0, 0) != LUA_OK) {
+        /* The error stays on the stack (nothing more is pushed: every later
+         * chunk returns at ctx->error), so the binding can raise the app's
+         * own error once the stream is down, as JS rethrows it (audit 27):
+         * it was replaced with "callback_failed". */
         ctx->error = 1;
-        lua_pop(ctx->L, 1);
+        ctx->err_idx = lua_gettop(ctx->L);
         return -1;
     }
     return 0;
@@ -1559,6 +1610,13 @@ static int lua_compute_stream(lua_State *L)
     if (hl_lua_budget_tripped(L)) {
         if (out_data) hl_alloc_free(lua->base.alloc, out_data, out_len);
         return hl_lua_budget_raise(L);
+    }
+
+    /* The output callback raised: its own error, re-raised (audit 27). */
+    if (cb_ctx.err_idx > 0) {
+        if (out_data) hl_alloc_free(lua->base.alloc, out_data, out_len);
+        lua_pushvalue(L, cb_ctx.err_idx);
+        return lua_error(L);
     }
 
     if (rc != HL_WASM_OK) {

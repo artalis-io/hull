@@ -12814,4 +12814,177 @@ UTEST(lua_audit25, failed_smtp_gives_its_scratch_back)
 }
 #endif /* HL_ENABLE_HTTP_CLIENT */
 
+/* ── Audit 27: the Lua runtime ────────────────────────────────────────── */
+
+/* M1: HMAC charged only its data; a key over the 64-byte block is hashed in
+ * full first, so `hmac("", big_key)` in a loop was free. */
+UTEST(lua_audit27, hmac_key_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    ASSERT_EQ(audit10_run("BIGK = string.rep('k', 8 * 1000000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    static const char *const loops[] = {
+        "for i = 1, 10 do crypto.hmac_sha256('', BIGK) end return 1",
+        "for i = 1, 10 do crypto.hmac_sha1('', BIGK) end return 1",
+        "for i = 1, 10 do crypto.hmac_sha256_verify('', BIGK, string.rep('x', 32)) end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 200000, err, sizeof err), LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    /* A short key stays cheap. */
+    EXPECT_EQ(audit10_run("for i = 1, 100 do crypto.hmac_sha256('d', 'key') end return 1",
+                          200000, err, sizeof err), LUA_OK);
+    audit10_run("BIGK = nil return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err);
+    cleanup_lua_caps();
+}
+
+/* L: a table / function / userdata param bound NULL, silently. Refused now,
+ * with the params' scratch given back first (a pcall loop over a refused
+ * call must not fill the arena), and a query with no params still works
+ * (the result table and guard are made before the params now). */
+UTEST(lua_audit27, db_params_refuse_unsupported_types)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    EXPECT_EQ_MSG(audit10_run(
+        "local ok, e = pcall(db.query, 'SELECT ? AS v', { {} }) "
+        "assert(not ok and tostring(e):find(\"unsupported value type 'table'\", 1, true), tostring(e)) "
+        "ok, e = pcall(db.exec, 'SELECT ?', { print }) "
+        "assert(not ok and tostring(e):find(\"unsupported value type 'function'\", 1, true), tostring(e)) "
+        "local p = {} for i = 1, 32765 do p[i] = i end p[32766] = {} "
+        "local sql = 'SELECT ' .. string.rep('?, ', 32765) .. '?' "
+        "for i = 1, 200 do assert(not pcall(db.query, sql, p)) "
+        "                  assert(not pcall(db.exec, sql, p)) end "
+        "assert(db.query('SELECT 7 AS v')[1].v == 7) "
+        "assert(db.query('SELECT ? AS v', nil) ~= nil) "
+        "assert(db.query('SELECT ? AS v', { 'x' })[1].v == 'x') "
+        "db.exec('CREATE TABLE a27 (x)') "
+        "assert(db.exec('INSERT INTO a27 VALUES (?)', { 3 }) == 1) "
+        "assert(db.exec('DELETE FROM a27') == 1) "
+        "local q = {} for i = 1, 100 do q[i] = i end "
+        "local s2 = 'SELECT ' .. string.rep('?, ', 99) .. '? AS last' "
+        "assert(db.query(s2, q)[1].last == 100) "
+        "return 1", 0, err, sizeof err), LUA_OK, err);
+    cleanup_lua_caps();
+}
+
+/* L: a Lua UDF that returned a table wrote NULL. A SQL error now. */
+UTEST(lua_audit27, udf_unsupported_result_is_an_error)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    EXPECT_EQ_MSG(audit10_run(
+        "if not db or not db.udf then return 1 end "
+        "db.udf.register('hull_a27_tbl', function() return {} end) "
+        "db.udf.register('hull_a27_nil', function() return nil end) "
+        "local ok, e = pcall(db.query, 'SELECT hull_a27_tbl() AS v') "
+        "assert(not ok and tostring(e):find('unsupported return type', 1, true), tostring(e)) "
+        "assert(db.query('SELECT hull_a27_nil() AS v')[1].v == nil) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+    cleanup_lua_caps();
+}
+
+/* L: tar.create wrote an empty member for non-string data. A data value
+ * that is neither a string nor a buffer is refused now. */
+UTEST(lua_audit27, tar_create_refuses_unsupported_data)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    EXPECT_EQ_MSG(audit10_run(
+        "local tar = require('hull.archive.tar') "
+        "local b, msg = tar.create({ { name = 'a', data = {} } }) "
+        "assert(b == nil and tostring(msg):find('string or a buffer', 1, true), tostring(msg)) "
+        "b = tar.create({ { name = 'a', data = 42 }, { name = 'e' } }) "
+        "local e = tar.parse(b) "
+        "assert(e[1].data == '42' and e[2].data == '', tostring(e[1].data)) "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+    cleanup_lua_caps();
+}
+
+#ifdef HL_ENABLE_IMAGE
+/* L: img:pixels() copied the pixels onto the heap uncharged, with no
+ * heap-limit refusal; JS has both. */
+UTEST(lua_audit27, image_pixels_copy_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    ASSERT_EQ(audit10_run("if not image then return 1 end "
+                          "IMG = image.new(1024, 1024, 'r8', string.rep('a', 1 << 20)) "
+                          "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 64 copies of 1 MB: 8M units, over a 200k limit (unfixed, each cost a
+     * unit per 64 bytes through the allocator: 1M in all). */
+    EXPECT_NE(audit10_run("if not IMG then error('instruction limit (no image)') end "
+                          "for i = 1, 64 do local p = IMG:pixels() end return 1",
+                          200000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* One copy fits a default budget. (The heap-limit refusal is for an
+     * image borrowed off-heap - from_buffer over a mapping - larger than
+     * the whole heap; a heap-backed image can never trip it.) */
+    EXPECT_EQ(audit10_run("if IMG then assert(#IMG:pixels() == 1 << 20) end return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    audit10_run("IMG = nil return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err);
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_IMAGE */
+
+#ifdef HL_ENABLE_WASM
+/* L: sync compute.call / inst:call charged neither input nor output. 1 MB
+ * echoed 20 times is 5M units now (input + output at 1 per 8 bytes), over a
+ * 1M limit; unfixed only the result string's allocation was charged (~330k).
+ * A callback error from compute.stream is the app's own error now, not
+ * "callback_failed". */
+UTEST(lua_audit27, sync_compute_call_is_charged)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a15_wasm_entries, NULL);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    ASSERT_EQ(luaL_dostring(v.L, "compute = require('hull.compute') "
+                                 "ab = string.rep('a', 1000000)"), LUA_OK);
+    static const char *const loops[] = {
+        "for i = 1, 20 do local s = assert(compute.call('echo', ab)) end",
+        "local inst = compute.instance('echo') "
+        "for i = 1, 20 do local s = assert(inst:call(ab)) end",
+    };
+    int64_t saved = v.max_instructions;
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        v.max_instructions = 1000000;
+        HL_LUA_ARM(&v, v.L);
+        int rc = luaL_dostring(v.L, loops[i]);
+        EXPECT_NE_MSG(rc, LUA_OK, loops[i]);
+        const char *e = lua_tostring(v.L, -1);
+        EXPECT_TRUE_MSG(e && strstr(e, "instruction limit") != NULL, e ? e : loops[i]);
+        lua_settop(v.L, 0);
+    }
+    v.max_instructions = saved;
+    HL_LUA_ARM(&v, v.L);
+    int rc = luaL_dostring(v.L,
+        "assert(compute.call('echo', ab) == ab) "
+        "local ok, e = pcall(compute.stream, 'echo', 'hello', "
+        "                    function() error({ code = 42 }) end) "
+        "assert(not ok and type(e) == 'table' and e.code == 42, tostring(e)) "
+        "ok, e = pcall(compute.stream, 'echo', 'hello', function() error('boom27') end) "
+        "assert(not ok and tostring(e):find('boom27', 1, true), tostring(e))");
+    EXPECT_EQ_MSG(rc, LUA_OK, lua_tostring(v.L, -1));
+    lua_settop(v.L, 0);
+
+    hl_lua_free(&v);
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
+
 UTEST_MAIN();

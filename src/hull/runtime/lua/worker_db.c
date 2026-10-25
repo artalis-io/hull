@@ -63,7 +63,8 @@ static int worker_lua_to_hl_values(lua_State *L, int idx,
 
     for (int i = 0; i < len; i++) {
         lua_rawgeti(L, idx, i + 1); /* Lua tables are 1-based */
-        switch (lua_type(L, -1)) {
+        int t = lua_type(L, -1);
+        switch (t) {
         case LUA_TNUMBER:
             if (lua_isinteger(L, -1)) {
                 params[i].type = HL_TYPE_INT;
@@ -85,9 +86,16 @@ static int worker_lua_to_hl_values(lua_State *L, int idx,
             params[i].type = HL_TYPE_BOOL;
             params[i].b = lua_toboolean(L, -1);
             break;
-        default:
+        case LUA_TNIL:
             params[i].type = HL_TYPE_NIL;
             break;
+        default:
+            /* A table / function / userdata bound NULL, silently (audit
+             * 27): refused, as the event loop's binding refuses it. The
+             * array is freed before the raise. */
+            free(params);
+            return luaL_error(L, "params: unsupported value type '%s' at "
+                              "index %d", lua_typename(L, t), i + 1);
         }
         /* Leave value on the stack; keeps string pointers alive. */
     }

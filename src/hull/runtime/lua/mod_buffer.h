@@ -143,6 +143,15 @@ typedef struct HlLuaWsClientUD {
     /* conn:close() re-armed connect_timer as the close-handshake deadline
      * (audit 26); set once, so a second close does not extend it. */
     int             close_armed;
+    /* 1 once on_open ran. conn:close() before it was a no-op (Keel's close
+     * does nothing until WSC_OPEN) and left the connection open with no close
+     * deadline (audit 27): it is recorded instead, and on_open closes with it
+     * (the app's on_open is not run). */
+    int             opened;
+    int             close_requested;
+    uint16_t        close_code;
+    size_t          close_reason_len;
+    char            close_reason[123];   /* a Close frame's reason limit */
 } HlLuaWsClientUD;
 
 /* conn userdata helpers (defined in lua/mod_ws.c) */

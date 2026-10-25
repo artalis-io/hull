@@ -93,6 +93,14 @@ static int l_image_pixels(lua_State *L)
 {
     HlImage **imgp = check_image(L, 1);
     if (!*imgp) return luaL_error(L, "image already closed");
+    /* The copy onto the heap: refused past the heap limit and charged 1 unit
+     * per 8 bytes before it, as JS img.pixels() (audit 27; an image borrowed
+     * from a mapping can be far larger than the heap). */
+    size_t n = (*imgp)->pixel_len;
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->mem_limit && n > lua->mem_limit)
+        return luaL_error(L, "image:pixels: image too large for the VM heap");
+    image_charge(L, hl_work_bytes_units((uint64_t)n));
     lua_pushlstring(L, (const char *)(*imgp)->pixels, (*imgp)->pixel_len);
     return 1;
 }
