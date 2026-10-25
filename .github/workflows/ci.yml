@@ -178,6 +178,12 @@ jobs:
         timeout-minutes: 2
         run: make e2e
 
+      # Ran only on the Windows job, where a cosmo APE's exit status reads as 0
+      # from a POSIX shell, so a set -e abort mid-script went unnoticed.
+      - name: Agent tooling E2E tests
+        timeout-minutes: 5
+        run: make e2e-agent
+
       - name: Blob storage E2E tests
         timeout-minutes: 2
         run: make e2e-blob
