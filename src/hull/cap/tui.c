@@ -570,9 +570,15 @@ fallback:
 
 /* ── Public API: lifecycle ──────────────────────────────────────── */
 
-/* sandbox.c, when linked: the startup terminal probe (include/hull/sandbox.h).
- * Weak, so a binary without the sandbox (unit tests) falls back to isatty. */
-extern int hl_sandbox_std_tty(int fd) __attribute__((weak));
+/* The startup terminal probe (include/hull/sandbox.h): sandbox.c's strong
+ * definition overrides this weak "not probed" default, so a binary without
+ * the sandbox (unit tests) falls back to isatty. A weak reference instead
+ * left the symbol undefined, which ld64 refuses to link. */
+__attribute__((weak)) int hl_sandbox_std_tty(int fd)
+{
+    (void)fd;
+    return -1;
+}
 
 int hl_cap_tui_acquire(HlTuiCtx **out)
 {
@@ -581,9 +587,8 @@ int hl_cap_tui_acquire(HlTuiCtx **out)
     /* Without a terminal at startup the sandbox granted no `tty`, so isatty's
      * ioctl would be killed by the Linux seccomp filter before it could say
      * ENOTTY: take the unsandboxed probe's answer when there is one. */
-    if (hl_sandbox_std_tty &&
-        (hl_sandbox_std_tty(STDIN_FILENO) == 0 ||
-         hl_sandbox_std_tty(STDOUT_FILENO) == 0)) {
+    if (hl_sandbox_std_tty(STDIN_FILENO) == 0 ||
+        hl_sandbox_std_tty(STDOUT_FILENO) == 0) {
         errno = ENOTTY;
         return -1;
     }
