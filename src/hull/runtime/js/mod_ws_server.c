@@ -151,7 +151,11 @@ static JSValue js_ws_conn_get_data(JSContext *ctx, JSValueConst this_val)
     if (!ud)
         return JS_UNDEFINED;
     if (JS_IsUndefined(ud->data_val)) {
-        ud->data_val = JS_NewObject(ctx);
+        /* A failed JS_NewObject was cached, and every later read returned
+         * JS_EXCEPTION with nothing pending (audit 27). */
+        JSValue o = JS_NewObject(ctx);
+        if (JS_IsException(o)) return JS_EXCEPTION;
+        ud->data_val = o;
     }
     return JS_DupValue(ctx, ud->data_val);
 }

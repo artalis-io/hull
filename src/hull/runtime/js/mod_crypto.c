@@ -339,7 +339,9 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
     /* PBKDF2-HMAC-SHA256, 32-byte output */
     uint8_t hash[32];
     int iterations = HL_PBKDF2_ITERATIONS;
-    if (js_pbkdf2_charge(ctx, iterations, sizeof hash)) {
+    /* The password's own pre-hash too, as Lua's hash_password (audit 27). */
+    if (js_crypto_charge(ctx, pw_len) ||
+        js_pbkdf2_charge(ctx, iterations, sizeof hash)) {
         JS_FreeCString(ctx, pw);
         return JS_EXCEPTION;
     }
@@ -430,7 +432,8 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
 
     /* Recompute hash: charged first - the count came from the stored string */
     uint8_t computed[32];
-    if (js_pbkdf2_charge(ctx, iterations, sizeof computed)) {
+    if (js_crypto_charge(ctx, pw_len) ||   /* the pre-hash (audit 27) */
+        js_pbkdf2_charge(ctx, iterations, sizeof computed)) {
         secure_zero(salt, sizeof(salt));
         JS_FreeCString(ctx, pw);
         return JS_EXCEPTION;

@@ -127,12 +127,15 @@ static int worker_js_to_hl_values(JSContext *ctx, JSValueConst arr,
                 return -1;
             }
             if (params[i].type == HL_TYPE_BLOB) {
-                char *copy = malloc(params[i].len ? params[i].len : 1);
+                /* On the VM heap, as mod_db.c's copy: a plain malloc was
+                 * neither charged nor held to the heap limit, so 1000
+                 * params naming one 32 MB buffer copied 32 GB (audit 27).
+                 * js_malloc throws its own out-of-memory. */
+                char *copy = js_malloc(ctx, params[i].len ? params[i].len : 1);
                 if (!copy) {
                     params[i].type = HL_TYPE_NIL;
                     JS_FreeValue(ctx, elem);
                     worker_js_free_values(ctx, params, strs, (int)i);
-                    JS_ThrowOutOfMemory(ctx);
                     return -1;
                 }
                 if (params[i].len) memcpy(copy, view, params[i].len);
@@ -159,7 +162,7 @@ static void worker_js_free_values(JSContext *ctx, HlValue *params,
     }
     for (int i = 0; params && i < count; i++)   /* the blob copies */
         if (params[i].type == HL_TYPE_BLOB && params[i].s)
-            free((void *)(uintptr_t)params[i].s);
+            js_free(ctx, (void *)(uintptr_t)params[i].s);
     free(params);
 }
 

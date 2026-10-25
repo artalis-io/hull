@@ -627,6 +627,8 @@ static int js_spec_chain_matches(const HlModuleSpec *spec, const char *prefix,
     return 0;
 }
 
+/* 1 when the manifest declares a module matching @p prefix (directly or
+ * through its deps), 0 when not, -1 with an exception pending. */
 static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
                                        const char *prefix)
 {
@@ -634,20 +636,30 @@ static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
     size_t plen = strlen(prefix);
 
     JSValue modules = JS_GetPropertyStr(ctx, manifest, "modules");
+    if (JS_IsException(modules)) return -1;
     if (JS_IsArray(ctx, modules)) {
         JSValue len_val = JS_GetPropertyStr(ctx, modules, "length");
         uint32_t len = 0;
-        JS_ToUint32(ctx, &len, len_val);
+        int lrc = JS_IsException(len_val) ? -1 : JS_ToUint32(ctx, &len, len_val);
         JS_FreeValue(ctx, len_val);
+        if (lrc < 0) { JS_FreeValue(ctx, modules); return -1; }
         for (uint32_t i = 0; i < len; i++) {
             JSValue item = JS_GetPropertyUint32(ctx, modules, i);
+            if (JS_IsException(item)) { found = -1; break; }
             if (JS_IsString(item)) {
                 const char *s = JS_ToCString(ctx, item);
-                if (s && strncmp(s, prefix, plen) == 0) {
+                if (!s) {
+                    /* A conversion the budget or the allocator failed is
+                     * not "not declared" (audit 27). */
+                    JS_FreeValue(ctx, item);
+                    found = -1;
+                    break;
+                }
+                if (strncmp(s, prefix, plen) == 0) {
                     /* Fast path: direct prefix match on the declared
                      * string (e.g. "hull/http-server@1"). */
                     found = 1;
-                } else if (s) {
+                } else {
                     /* Slow path: walk transitive deps so middleware
                      * declarations decorate the app intrinsic the same
                      * way explicit declarations do. */
@@ -663,7 +675,7 @@ static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
                             found = 1;
                     }
                 }
-                if (s) JS_FreeCString(ctx, s);
+                JS_FreeCString(ctx, s);
             }
             JS_FreeValue(ctx, item);
             if (found) break;
@@ -930,17 +942,22 @@ static JSValue js_app_manifest_store(JSContext *ctx, HlJS *js,
 
     /* Module-conditional method installation. Each declared module
      * may decorate the `app` intrinsic with additional methods. */
-    if (js_manifest_declares_module(ctx, copy, "hull/http-server")) {
-        js_install_app_http_server(ctx);
-    }
-    if (js_manifest_declares_module(ctx, copy, "hull/web/ws-server")) {
-        js_install_app_ws_server(ctx);
-    }
-    if (js_manifest_declares_module(ctx, copy, "hull/web/sse")) {
-        js_install_app_sse(ctx);
-    }
-    if (js_manifest_declares_module(ctx, copy, "hull/timers")) {
-        js_install_app_timers(ctx);
+    static const struct {
+        const char *prefix;
+        void (*install)(JSContext *);
+    } decorations[] = {
+        { "hull/http-server",   js_install_app_http_server },
+        { "hull/web/ws-server", js_install_app_ws_server },
+        { "hull/web/sse",       js_install_app_sse },
+        { "hull/timers",        js_install_app_timers },
+    };
+    for (size_t i = 0; i < sizeof decorations / sizeof decorations[0]; i++) {
+        int d = js_manifest_declares_module(ctx, copy, decorations[i].prefix);
+        if (d < 0) {   /* the exception is pending (audit 27) */
+            JS_FreeValue(ctx, copy);
+            return JS_EXCEPTION;
+        }
+        if (d) decorations[i].install(ctx);
     }
 
     JS_FreeValue(ctx, copy);

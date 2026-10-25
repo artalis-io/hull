@@ -13583,4 +13583,174 @@ UTEST(js_audit25, image_pixel_copies_are_charged)
 }
 #endif /* HL_ENABLE_IMAGE */
 
+/* ── Audit 27 ──────────────────────────────────────────────────────── */
+
+/* verifyPassword charged the PBKDF2 rounds but not the password's own
+ * pre-hash (Lua charges both): a 24 MB password over the minimum count cost
+ * ~2M units and hashed 24 MB on top. 1 unit per 8 password bytes now. */
+UTEST(js_audit27, password_prehash_is_charged)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(eval_int("(globalThis.PW = 'x'.repeat(24 << 20),"
+                       " globalThis.ST = 'pbkdf2:100000:' + '0'.repeat(32)"
+                       " + ':' + '0'.repeat(64), 1)"), 1);
+    js.max_instructions = 3000000;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int("crypto.verifyPassword(PW, ST) ? 1 : 2"), -9999);
+    EXPECT_EQ(js.budget_tripped, 1);
+    /* A short password over the same count fits. */
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int("crypto.verifyPassword('pw', ST) ? 1 : 2"), 2);
+    EXPECT_EQ(js.budget_tripped, 0);
+    js.max_instructions = 0;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int("(globalThis.PW = undefined, 1)"), 1);
+    cleanup_js();
+}
+
+/* http.request / post / put / patch never charged a body, and an
+ * ArrayBuffer body was copied with malloc before anything sized it. The body
+ * is charged (1 unit per 8 bytes) and refused past the heap limit before it
+ * is copied, so it trips the budget before the host check refuses it. */
+UTEST(js_audit27, http_bodies_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    js.base.http_cfg = &cfg;
+    ASSERT_EQ(a10_run_tripped(
+        "import { httpClient as http } from 'hull:http-client';\n"
+        "globalThis.http = http;\n"
+        "globalThis.HB = new ArrayBuffer(8 << 20);\n"
+        "globalThis.HS = 'y'.repeat(8 << 20);\n", 0), 0);
+    /* 8 MB is 1M units. */
+    static const char *const big[] = {
+        "try { http.post('http://x.invalid/', HB); } catch (e) {}",
+        "try { http.put('http://x.invalid/', new Uint8Array(HB)); } catch (e) {}",
+        "try { http.patch('http://x.invalid/', HS); } catch (e) {}",
+        "try { http.request('POST', 'http://x.invalid/', { body: HB }); }"
+        " catch (e) {}",
+    };
+    for (size_t i = 0; i < sizeof big / sizeof big[0]; i++)
+        EXPECT_EQ_MSG(a10_run_tripped(big[i], 500000), 1, big[i]);
+    EXPECT_EQ(a10_run_tripped(
+        "try { http.post('http://x.invalid/', new ArrayBuffer(64)); }"
+        " catch (e) {}", 500000), 0);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 4 << 20;
+    char *r = a15_throws("http.post('http://x.invalid/', HB)");
+    js.max_heap_bytes = saved;
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    EXPECT_EQ(eval_int("(globalThis.HB = globalThis.HS = undefined, 1)"), 1);
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
+
+/* tar.extract(buf, undefined) converted the directory to the text
+ * "undefined" and extracted into ./undefined/. undefined / null is no
+ * directory, as in Lua. */
+UTEST(js_audit27, tar_extract_undefined_dir_is_the_root)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { tar } from 'hull:archive:tar';\n"
+        "globalThis.tar = tar;\n"
+        "globalThis.TB = tar.create([{ name: 'a27u', data: 'u' },"
+        " { name: 'a27n', data: 'n' }]);\n", 0), 0);
+    EXPECT_EQ(eval_int("tar.extract(TB, undefined) === true ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("tar.extract(TB, null) === true ? 1 : 0"), 1);
+    char p[HL_TEST_PATH_MAX + 32];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/a27u", f.dir);
+    EXPECT_EQ(0, stat(p, &st));
+    snprintf(p, sizeof p, "%s/undefined", f.dir);
+    EXPECT_NE(0, stat(p, &st));
+    snprintf(p, sizeof p, "%s/null", f.dir);
+    EXPECT_NE(0, stat(p, &st));
+    EXPECT_EQ(eval_int("(globalThis.TB = undefined, 1)"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+#ifdef HL_ENABLE_WASM
+/* The synchronous compute.call / instance.call charged neither input nor
+ * output: a 512 KB echo cost a handful of steps. Input and output are each
+ * charged 1 unit per 8 bytes now, and a maxOutput above the heap limit comes
+ * down to it. */
+UTEST(js_audit27, sync_compute_calls_are_charged)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(eval_int("(globalThis.CB = new ArrayBuffer(512 << 10),"
+                       " globalThis.CI = compute.instance('echo'), 1)"), 1);
+    /* Unbudgeted, the echo works. */
+    EXPECT_EQ(eval_int("compute.call('echo', CB).byteLength"), 512 << 10);
+    EXPECT_EQ(eval_int("CI.call(CB).byteLength"), 512 << 10);
+    /* 512 KB in + 512 KB out: 131072 units. */
+    static const char *const big[] = {
+        "compute.call('echo', CB).byteLength",
+        "CI.call(CB).byteLength",
+    };
+    for (size_t i = 0; i < sizeof big / sizeof big[0]; i++) {
+        js.max_instructions = 100000;
+        hl_js_reset_request(&js);
+        EXPECT_EQ_MSG(eval_int(big[i]), -9999, big[i]);
+        EXPECT_EQ_MSG(js.budget_tripped, 1, big[i]);
+    }
+    js.max_instructions = 100000;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int("compute.call('echo', 'abc').byteLength"), 3);
+    EXPECT_EQ(eval_int("CI.call('abcd').byteLength"), 4);
+    EXPECT_EQ(js.budget_tripped, 0);
+    js.max_instructions = 0;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int("(CI.close(), globalThis.CB = globalThis.CI ="
+                       " undefined, 1)"), 1);
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
+
+#ifdef HL_ENABLE_IMAGE
+/* image.fromWasm took an ArrayBuffer or converted anything else with
+ * toString: a Uint8Array view of compute output was parsed as the text
+ * "2,0,0,...". It takes any byte view now (the unified buffer protocol). */
+UTEST(js_audit27, image_from_wasm_takes_a_typed_array)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    if (eval_int("typeof image === 'object' && image !== null ? 1 : 0") != 1) {
+        cleanup_js();   /* image compiled out */
+        return;
+    }
+    EXPECT_EQ(eval_int(
+        "(() => { const b = new Uint8Array(9 + 6);"
+        " b[0] = 3; b[4] = 2; b[8] = 2;"
+        " const img = image.fromWasm(b);"
+        " const ok = img.width === 3 && img.height === 2;"
+        " img.close(); return ok ? 1 : 0; })()"), 1);
+    /* A view into a larger buffer reads its own window. */
+    EXPECT_EQ(eval_int(
+        "(() => { const ab = new ArrayBuffer(4 + 9 + 1);"
+        " const b = new Uint8Array(ab, 4, 10);"
+        " b[0] = 1; b[4] = 1; b[8] = 2;"
+        " const img = image.fromWasm(b);"
+        " const ok = img.width === 1 && img.height === 1;"
+        " img.close(); return ok ? 1 : 0; })()"), 1);
+    cleanup_js();
+}
+#endif /* HL_ENABLE_IMAGE */
+
 UTEST_MAIN();

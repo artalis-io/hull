@@ -300,6 +300,19 @@ app.get("/muteclose", (_req, res) => {
     res.text("closing");
 });
 app.get("/mutestate", (_req, res) => res.text(muteState));
+let earlyState = "unset";
+app.get("/earlygo", (_req, res) => {
+    earlyState = "pending";
+    const c = wsClient.connect("$WS_MUTE", {
+        onOpen(_c) { earlyState = "open"; },
+        onClose(_c, code) { earlyState += "|closed:" + code; },
+        onError(_c, msg) { earlyState += "|error:" + msg; },
+    });
+    c.close();
+    earlyState = "closing";
+    res.text("closing");
+});
+app.get("/earlystate", (_req, res) => res.text(earlyState));
 const URL = "$SLOW";
 const BASE = "$BASE";
 
@@ -458,6 +471,23 @@ run_app() {
     [ "$out" = "closed:1006" ] \
         && pass "$rt ws close: an unanswered close ends at the deadline (1006)" \
         || fail "$rt ws close: an unanswered close ends at the deadline (1006)" "$out"
+
+    # Audit 27: close() before the upgrade completed was dropped by Keel and
+    # the connection then stayed open. It is sent once the upgrade is done,
+    # onOpen is not called, and onClose fires once at the close deadline.
+    if [ "$rt" = js ]; then
+        curl -s -m 10 -o /dev/null "http://127.0.0.1:$PORT/earlygo"
+        sleep 2
+        out=$(curl -s -m 10 "http://127.0.0.1:$PORT/earlystate")
+        [ "$out" = "closing" ] \
+            && pass "$rt ws early close: no onOpen, still closing" \
+            || fail "$rt ws early close: no onOpen, still closing" "$out"
+        sleep 4.5
+        out=$(curl -s -m 10 "http://127.0.0.1:$PORT/earlystate")
+        [ "$out" = "closing|closed:1006" ] \
+            && pass "$rt ws early close: onClose once at the deadline (1006)" \
+            || fail "$rt ws early close: onClose once at the deadline (1006)" "$out"
+    fi
 
     out=$(curl -s -m 10 "http://127.0.0.1:$PORT/detached?k=long")
     [ "$out" = "error" ] \

@@ -71,6 +71,13 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
         }
         total += klen;
 
+        /* Each copy is charged before it is made (audit 27: the whole
+         * ctx was copied, then charged). */
+        if (hl_js_budget_charge(ctx, hl_work_bytes_units(klen)) < 0) {
+            JS_FreeCString(ctx, key);
+            rc = -1;
+            break;
+        }
         kvs[count].key = strdup(key);
         JS_FreeCString(ctx, key);
         if (!kvs[count].key) {
@@ -113,6 +120,12 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
                 break;
             }
             total += slen + 1;
+            if (hl_js_budget_charge(ctx, hl_work_bytes_units(slen + 1)) < 0) {
+                JS_FreeCString(ctx, sv);
+                JS_FreeValue(ctx, val);
+                rc = -1;
+                break;
+            }
             char *buf = malloc(slen + 1);
             if (!buf) {
                 JS_FreeCString(ctx, sv);
@@ -144,15 +157,26 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
     return 0;
 }
 
-/* push_result callback: convert HlJsWorkerDispatchOp result to JSValue */
+/* push_result callback: convert HlJsWorkerDispatchOp result to JSValue.
+ * Every value made and every property defined is checked: an unchecked
+ * JS_NewObject / JS_NewString(Len) or define left a field holding
+ * JS_EXCEPTION, resolving the dispatch with a broken object (audit 27).
+ * JS_EXCEPTION rejects the dispatch with the pending error. */
 static JSValue js_push_worker_dispatch_result(JSContext *ctx, void *driver)
 {
     HlJsWorkerDispatchOp *op = (HlJsWorkerDispatchOp *)driver;
 
     if (op->error) {
         JSValue obj = JS_NewObject(ctx);
-        JS_DefinePropertyValueStr(ctx, obj, "error",
-                          JS_NewString(ctx, op->error_msg), JS_PROP_C_W_E);
+        if (JS_IsException(obj))
+            return JS_EXCEPTION;
+        JSValue msg = JS_NewString(ctx, op->error_msg);
+        if (JS_IsException(msg) ||
+            JS_DefinePropertyValueStr(ctx, obj, "error", msg,
+                                      JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, obj);
+            return JS_EXCEPTION;
+        }
         return obj;
     }
 
@@ -169,6 +193,8 @@ static JSValue js_push_worker_dispatch_result(JSContext *ctx, void *driver)
         return JS_NewStringLen(ctx, op->result_str, op->result_str_len);
     case 5: { /* table/object */
         JSValue obj = JS_NewObject(ctx);
+        if (JS_IsException(obj))
+            return JS_EXCEPTION;
         for (int i = 0; i < op->result_count; i++) {
             JSValue val;
             switch (op->result_kvs[i].value.type) {
@@ -189,7 +215,13 @@ static JSValue js_push_worker_dispatch_result(JSContext *ctx, void *driver)
                 val = JS_NULL;
                 break;
             }
-            JS_DefinePropertyValueStr(ctx, obj, op->result_kvs[i].key, val, JS_PROP_C_W_E);
+            /* The define consumes val, failed or not. */
+            if (JS_IsException(val) ||
+                JS_DefinePropertyValueStr(ctx, obj, op->result_kvs[i].key,
+                                          val, JS_PROP_C_W_E) < 0) {
+                JS_FreeValue(ctx, obj);
+                return JS_EXCEPTION;
+            }
         }
         return obj;
     }
@@ -266,7 +298,9 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
             "ctx would take the VM's off-heap copies past its heap limit",
             copy_bytes);
     }
-    if (hl_js_budget_charge(ctx, hl_work_bytes_units(copy_bytes)) < 0) {
+    /* The ctx copies were charged as they were made; this is the
+     * source's. */
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(src_len + 1)) < 0) {
         hl_offheap_drop(&copy_hold);
         JS_FreeCString(ctx, src_cstr);
         hl_kv_free(ctx_kvs, ctx_count);
