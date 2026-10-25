@@ -411,7 +411,7 @@ local crypto = require("hull.crypto")
 test("undeclared require loaded", function() assert(crypto) end)
 LUA
 fi
-OUT=$($HULL agent test "$TMPDIR_GATE" 2>&1)
+OUT=$($HULL agent test "$TMPDIR_GATE" 2>&1 || true)
 check_not_contains "test gate: undeclared module not loaded" "$OUT" '"status":"pass"'
 check_contains     "test gate: refused as undeclared"       "$OUT" 'not declared'
 rm -rf "$TMPDIR_GATE"
@@ -479,10 +479,17 @@ check_not_contains "template (js): no stand-in output"          "$OUT" '"output"
 # no link, and `agent inspect` does not block on a planted sidecar FIFO.
 if command -v timeout >/dev/null 2>&1 && command -v mkfifo >/dev/null 2>&1; then
     mkdir -p "$JS_APP/lib" "$JS_APP/.hull"
-    for i in 0 1 2 3 4 5 6 7 8 9; do ln -s .. "$JS_APP/lib/l$i"; done
-    timeout 60 $HULL agent capabilities "$JS_APP" >/dev/null 2>&1
-    RC=$?
-    if [ "$RC" = 124 ]; then fail "capabilities: hung on a link loop"; else pass "capabilities: a link loop does not hang the walk"; fi
+    # Where `ln -s` copies instead (a Windows shell without symlink privilege)
+    # `ln -s ..` recurses into itself and fails; no loop exists to test there.
+    if ln -s .. "$JS_APP/lib/l0" 2>/dev/null && [ -L "$JS_APP/lib/l0" ]; then
+        for i in 1 2 3 4 5 6 7 8 9; do ln -s .. "$JS_APP/lib/l$i"; done
+        timeout 60 $HULL agent capabilities "$JS_APP" >/dev/null 2>&1
+        RC=$?
+        if [ "$RC" = 124 ]; then fail "capabilities: hung on a link loop"; else pass "capabilities: a link loop does not hang the walk"; fi
+    else
+        rm -rf "$JS_APP/lib/l0"
+        echo "  SKIP: capabilities link loop (this shell's ln -s does not make links - UNTESTED here)"
+    fi
     mkfifo "$JS_APP/.hull/dev.json"
     timeout 60 $HULL agent inspect "$JS_APP" >/dev/null 2>&1
     RC=$?
