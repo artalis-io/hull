@@ -570,10 +570,23 @@ fallback:
 
 /* ── Public API: lifecycle ──────────────────────────────────────── */
 
+/* sandbox.c, when linked: the startup terminal probe (include/hull/sandbox.h).
+ * Weak, so a binary without the sandbox (unit tests) falls back to isatty. */
+extern int hl_sandbox_std_tty(int fd) __attribute__((weak));
+
 int hl_cap_tui_acquire(HlTuiCtx **out)
 {
     if (!out) { errno = EINVAL; return -1; }
     if (g_singleton) { errno = EBUSY; return -1; }
+    /* Without a terminal at startup the sandbox granted no `tty`, so isatty's
+     * ioctl would be killed by the Linux seccomp filter before it could say
+     * ENOTTY: take the unsandboxed probe's answer when there is one. */
+    if (hl_sandbox_std_tty &&
+        (hl_sandbox_std_tty(STDIN_FILENO) == 0 ||
+         hl_sandbox_std_tty(STDOUT_FILENO) == 0)) {
+        errno = ENOTTY;
+        return -1;
+    }
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
         errno = ENOTTY;
         return -1;

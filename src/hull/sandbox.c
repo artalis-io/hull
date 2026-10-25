@@ -894,6 +894,13 @@ void hl_sandbox_policy_add_default_dsn(HlSandboxPolicy *policy, const char *dsn)
  * itself: phase-1 pledge is already active there, and isatty()'s ioctl(TCGETS)
  * is not permitted by the `stdio` promise). See the probe site below. */
 static int g_stdio_is_tty = 0;
+/* Per-descriptor result of the same unsandboxed probe: -1 not probed yet. */
+static int g_std_tty[3] = { -1, -1, -1 };
+
+int hl_sandbox_std_tty(int fd)
+{
+    return (fd >= 0 && fd <= 2) ? g_std_tty[fd] : -1;
+}
 
 int hl_sandbox_apply_pledge(void)
 {
@@ -906,8 +913,9 @@ int hl_sandbox_apply_pledge(void)
      * `tty` when a terminal is present (seccomp can only restrict, not widen,
      * so phase 1 must be a superset of phase 2). Piped/redirected fds are not
      * terminals, so a server/CI process gets nothing extra. */
-    g_stdio_is_tty = (isatty(STDIN_FILENO) || isatty(STDOUT_FILENO) ||
-                      isatty(STDERR_FILENO)) ? 1 : 0;
+    for (int fd = 0; fd <= 2; fd++)
+        g_std_tty[fd] = isatty(fd) ? 1 : 0;
+    g_stdio_is_tty = (g_std_tty[0] || g_std_tty[1] || g_std_tty[2]) ? 1 : 0;
 
     if (!sb_supported()) {
         /* Terse here on purpose: this is a step note, and phase 2 carries the
