@@ -446,7 +446,8 @@ end
 -- binary and served (a symlinked migrations/ ran another tree's SQL). The
 -- dev server refuses the same layout (audit 20).
 local function check_asset_root(dir, tmpdir)
-    if tool.is_symlink(dir) then
+    -- nil (the check was refused) counts as a link: fail closed.
+    if tool.is_symlink(dir) ~= false then
         print("hull build: " .. dir .. " is a symbolic link; an app's " ..
               "templates/, static/, migrations/, compute/ and shaders/ " ..
               "directories must be its own (links are not followed)")
@@ -1946,8 +1947,10 @@ typedef struct {
     -- Discover all file types
     local templates_dir = opts.app_dir .. "/templates"
     local html_files = {}
+    -- Before the existence test, which follows the link (its target may
+    -- be outside the tool grants and read as absent).
+    check_asset_root(templates_dir, tmpdir)
     if file_exists(templates_dir) then
-        check_asset_root(templates_dir, tmpdir)
         html_files = find_html_files(templates_dir)
     end
     if #html_files > 0 then
@@ -1956,8 +1959,8 @@ typedef struct {
 
     local static_dir = opts.app_dir .. "/static"
     local static_files = {}
+    check_asset_root(static_dir, tmpdir)
     if file_exists(static_dir) then
-        check_asset_root(static_dir, tmpdir)
         static_files = find_all_files(static_dir)
     end
     if #static_files > 0 then
@@ -1966,8 +1969,8 @@ typedef struct {
 
     local migrations_dir = opts.app_dir .. "/migrations"
     local migration_files = {}
+    check_asset_root(migrations_dir, tmpdir)
     if file_exists(migrations_dir) then
-        check_asset_root(migrations_dir, tmpdir)
         migration_files = find_sql_files(migrations_dir)
     end
     if #migration_files > 0 then
@@ -2031,8 +2034,8 @@ typedef struct {
     -- instead), an unstamped AOT *.wasm fails the build.
     local compute_files = {}
     local prebuilt_aot = {}  -- entry names ("compute/x.aot.<arch>") embedded as committed
+    check_asset_root(compute_dir, tmpdir)
     if file_exists(compute_dir) then
-        check_asset_root(compute_dir, tmpdir)
         local wasm = tool.find_files(compute_dir, "*.wasm")
         for _, f in ipairs(wasm) do
             if has_aot_magic(f) then
@@ -2088,8 +2091,8 @@ typedef struct {
 
     local shaders_dir = opts.app_dir .. "/shaders"
     local shader_files = {}
+    check_asset_root(shaders_dir, tmpdir)
     if file_exists(shaders_dir) then
-        check_asset_root(shaders_dir, tmpdir)
         shader_files = tool.find_files(shaders_dir, "*.wgsl")
     end
     if #shader_files > 0 then

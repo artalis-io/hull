@@ -1108,7 +1108,7 @@ local function cmd_refresh_header(name)
         end
         -- Discovery skips links; the named form wrote the headers through
         -- one, into its target (audit 22).
-        if tool.is_symlink("compute") or tool.is_symlink("compute/" .. name) then
+        if tool.is_symlink("compute") ~= false or tool.is_symlink("compute/" .. name) ~= false then
             tool.stderr("hull compute refresh-header: compute/" .. name ..
                         " is a symbolic link; refusing\n")
             tool.exit(1)
@@ -1177,7 +1177,7 @@ local function main()
 
     -- compute/ must be the app's own directory, as `hull build` requires:
     -- through a link, a build compiled and wrote outside the app (audit 21).
-    if tool.is_symlink("compute") then
+    if tool.is_symlink("compute") ~= false then
         tool.stderr("hull compute: compute/ is a symbolic link; an app's " ..
                     "compute/ directory must be its own\n")
         tool.exit(1)
