@@ -1846,8 +1846,15 @@ e2e-onboarding: $(BUILDDIR)/hull
 # --tui commands); skipped only on a fully TUI-less build.
 
 ifeq ($(HULL_HAS_TUI),1)
+# forkpty is in libutil on Linux (libSystem on macOS / BSD; cosmo has none).
+E2E_TUI_DRIVE_LIBS :=
+ifeq ($(UNAME_S),Linux)
+ifndef COSMO
+E2E_TUI_DRIVE_LIBS := -lutil
+endif
+endif
 $(BUILDDIR)/e2e_tui_drive: $(TESTDIR)/e2e_tui_drive.c | $(BUILDDIR)
-	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ $<
+	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ $< $(E2E_TUI_DRIVE_LIBS)
 E2E_TUI_DEPS := $(BUILDDIR)/hull $(BUILDDIR)/e2e_tui_drive
 else
 E2E_TUI_DEPS := $(BUILDDIR)/hull
