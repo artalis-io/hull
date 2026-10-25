@@ -65,13 +65,36 @@ void hl_db_budget_unbind(const void *ud);
  * binding is never an interrupt. */
 int hl_db_budget_charge(int64_t units);
 
-/* A plain budget for code with no VM of its own (a db.async op). */
+/* A plain budget for code with no VM of its own (a db.async op).
+ *
+ * Units alone never stopped a wait: a Postgres / MySQL / Valkey wait asks
+ * with a 0-unit charge, so pg_sleep(1e6), a lock wait or a silent server with
+ * ?read_timeout=0 pinned a pool thread for good, and the SIGTERM pool join
+ * waited on it (audit 27). So the budget also trips - on any charge, 0
+ * included - once its wall-clock deadline has passed, once *cancelled is set
+ * (the op's continuation went: request cancelled), or once the process is
+ * shutting its worker pool down (hl_db_op_shutdown). The backends' trip
+ * paths then close the connection. Fields past `tripped` may be left zero. */
 typedef struct {
-    int64_t limit;     /* 0 = none */
-    int64_t used;
-    int     tripped;
+    int64_t     limit;        /* 0 = none */
+    int64_t     used;
+    int         tripped;
+    int         reason;       /* HL_DB_OP_STOP_*, once tripped */
+    uint64_t    deadline_ms;  /* CLOCK_MONOTONIC ms, 0 = none */
+    const int  *cancelled;    /* read atomically, NULL = none */
 } HlDbOpBudget;
+#define HL_DB_OP_STOP_UNITS    1
+#define HL_DB_OP_STOP_DEADLINE 2
+#define HL_DB_OP_STOP_CANCEL   3
 int hl_db_op_budget_charge(void *ud, int64_t units);
+
+/* CLOCK_MONOTONIC in ms (never 0), for HlDbOpBudget.deadline_ms. */
+uint64_t hl_db_monotonic_ms(void);
+
+/* Set while the process frees its worker pool (on before pool_free, off once
+ * it has returned): every HlDbOpBudget trips at its next charge, so an op
+ * waiting on the server does not hold the join. */
+void hl_db_op_shutdown(int on);
 
 /* The largest string or blob a SQLite connection Hull opens may build
  * (SQLITE_LIMIT_LENGTH): randomblob(1e9) / zeroblob allocate outside the VM

@@ -364,7 +364,7 @@ UTEST(mysql_conn, auth_exchange_is_charged)
     ASSERT_EQ(0, hl_my_dsn_parse("mysql://alice:pw@localhost/shop",
                                  &dsn, err, sizeof err));
     HlMyConn conn;
-    HlDbOpBudget budget = { 5, 0, 0 };
+    HlDbOpBudget budget = { .limit = 5, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_my_conn_start(&conn, sv[1], &dsn);
     hl_db_budget_restore(prev);
@@ -957,7 +957,7 @@ UTEST(mysql_conn, second_result_set_rows_are_charged)
     HlMyConn conn;
     ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
 
-    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbOpBudget budget = { .limit = 10, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_my_conn_query(&conn, "UPDATE a SET x=1; SELECT x FROM t",
                               NULL, NULL, NULL, NULL);
@@ -1012,7 +1012,7 @@ UTEST(mysql_conn, empty_result_sets_are_charged)
     HlMyConn conn;
     ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
 
-    HlDbOpBudget budget = { 40, 0, 0 };
+    HlDbOpBudget budget = { .limit = 40, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_my_conn_query(&conn, "CALL empty_forever()", NULL, NULL, NULL, NULL);
     hl_db_budget_restore(prev);
@@ -1046,7 +1046,7 @@ UTEST(mysql_conn, exec_multi_empty_result_sets_are_charged)
     HlMyConn conn;
     ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
 
-    HlDbOpBudget budget = { 40, 0, 0 };
+    HlDbOpBudget budget = { .limit = 40, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_my_conn_exec_multi(&conn, "CALL ok_forever()");
     hl_db_budget_restore(prev);
@@ -1083,7 +1083,7 @@ UTEST(mysql_conn, a_trip_on_the_final_ok_finishes_the_commit)
     HlMyConn conn;
     ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
 
-    HlDbOpBudget budget = { 1, 0, 0 };   /* passed by the OK's charge */
+    HlDbOpBudget budget = { .limit = 1, .used = 0, .tripped = 0 };   /* passed by the OK's charge */
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_my_conn_query(&conn, "COMMIT", NULL, NULL, NULL, NULL);
     int still = hl_db_budget_charge(0);

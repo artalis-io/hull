@@ -305,7 +305,8 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             for (;;) {
                 struct stat lst;
                 if (fstatat(stack[depth - 1], comp, &lst, AT_SYMLINK_NOFOLLOW) != 0) {
-                    if (errno == ENOENT && mode == HL_FS_OPEN_WRITE) {
+                    if (errno == ENOENT && (mode == HL_FS_OPEN_WRITE ||
+                                            mode == HL_FS_OPEN_WRITE_KEEP)) {
                         if (mkdirat(stack[depth - 1], comp, 0755) != 0 && errno != EEXIST) {
                             map_errno(errno, err); goto fail;
                         }
@@ -373,7 +374,8 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
              * handled by the symlink policy below, unchanged. */
             int flags = (mode == HL_FS_OPEN_READ)
                           ? (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-                          : (O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+                          : (O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+                             | (mode == HL_FS_OPEN_WRITE ? O_TRUNC : 0));
             int fd = openat(stack[depth - 1], comp, flags, cmode);
             if (fd >= 0) {
                 result_fd = finalize_regular_leaf(fd, err);  /* closes fd + sets *err on reject */

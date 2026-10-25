@@ -330,4 +330,18 @@ UTEST(migrate_fs, symlinked_leaf_refused)
     rmdir(app);
 }
 
+/* Audit 27: the predicate the runner skips nested embedded entries with is
+ * shared (the agent's schema-diff read them all). */
+UTEST(migrate_embedded, only_top_level_sql_is_a_migration)
+{
+    HlEntry top    = { "migrations/001_init.sql", NULL, 0 };
+    HlEntry nested = { "migrations/down/001_init.sql", NULL, 0 };
+    HlEntry other  = { "migrations/README.md", NULL, 0 };
+    HlEntry bare   = { "migrations/.sql", NULL, 0 };
+    EXPECT_STREQ("001_init.sql", hl_migrate_embedded_name(&top));
+    EXPECT_TRUE(hl_migrate_embedded_name(&nested) == NULL);
+    EXPECT_TRUE(hl_migrate_embedded_name(&other) == NULL);
+    EXPECT_TRUE(hl_migrate_embedded_name(&bare) == NULL);
+}
+
 UTEST_MAIN();

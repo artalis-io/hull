@@ -39,6 +39,8 @@
 #ifndef HL_SHARED_CLI_LOG_H
 #define HL_SHARED_CLI_LOG_H
 
+#include <stddef.h>
+
 /**
  * @brief Install the CLI logging policy. Idempotent.
  *
@@ -112,5 +114,14 @@ int hl_cli_log_app_phase(void);
  * @returns 1 when @p file looks like a Hull C translation unit, else 0.
  */
 int hl_cli_log_is_native_source(const char *file);
+
+/* Copy the formatted record @p in into @p out (NUL-terminated, truncated to
+ * @p outsz) with every CR / LF written as the two characters \r / \n, as
+ * log.* / console.* write them: one record is one line. Both log callbacks
+ * (this one and serve.c's) pass every message through it, so app text that
+ * reaches a log call by another path - an uncaught exception's message, a
+ * ws / SSE error - cannot forge a line (audit 27). A message log.* already
+ * escaped holds no CR / LF, so nothing is escaped twice. */
+void hl_log_escape_line(const char *in, char *out, size_t outsz);
 
 #endif /* HL_SHARED_CLI_LOG_H */

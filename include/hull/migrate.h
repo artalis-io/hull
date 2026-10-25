@@ -17,6 +17,8 @@
 #ifndef HL_MIGRATE_H
 #define HL_MIGRATE_H
 
+#include "hull/entry.h"
+
 /* Forward declarations */
 typedef struct HlVfs       HlVfs;
 typedef struct HlDbHandle  HlDbHandle;
@@ -37,6 +39,15 @@ typedef struct HlDbHandle  HlDbHandle;
  * Returns: count of applied migrations (>=0), HL_MIGRATE_ERR, or HL_MIGRATE_NO_DIR.
  */
 int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs);
+
+/*
+ * Whether an embedded "migrations/..." entry is a migration: a top-level
+ * .sql file, as development reads them. Returns its name past the prefix, or
+ * NULL to skip it (a nested "migrations/down/001.sql", a non-.sql file).
+ * Every reader of embedded migrations takes the same set (audit 27: the
+ * agent's schema-diff still read the nested ones).
+ */
+const char *hl_migrate_embedded_name(const HlEntry *e);
 
 /* ── Status query ──────────────────────────────────────────────────── */
 

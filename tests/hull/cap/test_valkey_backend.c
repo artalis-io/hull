@@ -14,6 +14,7 @@
 #include "hull/cap/valkey_conn.h"
 #include "hull/cap/kv_backend.h"
 #include "hull/cap/db_budget.h"
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -201,7 +202,7 @@ UTEST(valkey_backend, scan_steps_are_charged) {
     const HlKvBackend *B = &hl_kv_backend_valkey;
 
     struct keys ks = {0};
-    HlDbOpBudget budget = { 5, 0, 0 };
+    HlDbOpBudget budget = { .limit = 5, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = B->scan(h, (const uint8_t *)"kv:ns:", 6, 0, collect, &ks);
     hl_db_budget_restore(prev);
@@ -228,7 +229,7 @@ UTEST(valkey_backend, clear_steps_are_charged) {
     const HlKvBackend *B = &hl_kv_backend_valkey;
 
     int64_t removed = -1;
-    HlDbOpBudget budget = { 5, 0, 0 };
+    HlDbOpBudget budget = { .limit = 5, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = B->clear(h, (const uint8_t *)"kv:ns:", 6, &removed);
     hl_db_budget_restore(prev);
@@ -263,7 +264,7 @@ UTEST(valkey_backend, a_silent_server_stops_at_the_runs_budget) {
     HlKvHandle *h = hl_kv_valkey_wrap(conn);
     const HlKvBackend *B = &hl_kv_backend_valkey;
 
-    HlDbOpBudget budget = { 1, 2, 1 };           /* the run is over its budget */
+    HlDbOpBudget budget = { .limit = 1, .used = 2, .tripped = 1 };           /* the run is over its budget */
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     const uint8_t *val; size_t vlen; int found = 0;
     uint64_t t0 = vk_now_ms();
@@ -272,6 +273,40 @@ UTEST(valkey_backend, a_silent_server_stops_at_the_runs_budget) {
     hl_db_budget_restore(prev);
     EXPECT_NE(0, rc);
     EXPECT_TRUE(took < 2000);                    /* not the 5 s deadline */
+    EXPECT_TRUE(strstr(B->last_error(h), "interrupted") != NULL);
+
+    B->close(h);
+    close(sv[0]);
+}
+
+/* Audit 27: a reply's bytes were asked about (a 0-unit charge) but never
+ * charged, so a run could read replies of up to 512 MB each for one unit.
+ * Each chunk now costs 1 unit plus 1 per 64 bytes: a 2 KiB bulk reply is
+ * over a budget of 10 units. */
+UTEST(valkey_backend, reply_bytes_are_charged) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    WR(sv[0], HELLO_MAP);
+    char big[2048 + 32];
+    int off = snprintf(big, sizeof big, "$2048\r\n");
+    memset(big + off, 'x', 2048);
+    memcpy(big + off + 2048, "\r\n", 3);
+
+    HlValkeyDsn d; char e[128];
+    ASSERT_EQ(0, hl_valkey_dsn_parse("redis://localhost", &d, e, sizeof e));
+    HlValkeyConn *conn = NULL;
+    ASSERT_EQ(0, hl_valkey_conn_start(&conn, sv[1], &d, NULL, e, sizeof e));
+    WR(sv[0], big);           /* after the handshake read: the GET's own read */
+    HlKvHandle *h = hl_kv_valkey_wrap(conn);
+    const HlKvBackend *B = &hl_kv_backend_valkey;
+
+    HlDbOpBudget budget = { .limit = 10, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    const uint8_t *val; size_t vlen; int found = 0;
+    int rc = B->get(h, (const uint8_t *)"k", 1, &val, &vlen, &found);
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, rc);
+    EXPECT_EQ(1, budget.tripped);
     EXPECT_TRUE(strstr(B->last_error(h), "interrupted") != NULL);
 
     B->close(h);

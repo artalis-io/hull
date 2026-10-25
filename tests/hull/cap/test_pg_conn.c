@@ -552,7 +552,7 @@ UTEST(pg_query, a_notice_stream_is_charged)
 
     HlPgConn conn;
     ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
-    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbOpBudget budget = { .limit = 10, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_pg_query(&conn, "DO $$ BEGIN LOOP RAISE NOTICE 'x'; END LOOP; END $$",
                          NULL, 0, NULL, NULL, NULL, NULL);
@@ -583,7 +583,7 @@ UTEST(pg_exec_simple, a_notice_stream_is_charged)
 
     HlPgConn conn;
     ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
-    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbOpBudget budget = { .limit = 10, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_pg_exec_simple(&conn, "DO $$ BEGIN LOOP RAISE NOTICE 'x'; END LOOP; END $$");
     hl_db_budget_restore(prev);
@@ -614,7 +614,7 @@ UTEST(pg_exec_simple, a_short_reply_fits_the_budget)
 
     HlPgConn conn;
     ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
-    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbOpBudget budget = { .limit = 10, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_pg_exec_simple(&conn, "DO $$ BEGIN RAISE NOTICE 'x'; END $$");
     hl_db_budget_restore(prev);
@@ -874,7 +874,7 @@ UTEST(pg_query, a_trip_on_commit_complete_reports_the_commit)
 
     /* ParseComplete, BindComplete and NoData cost 1 unit each, the
      * CommandComplete 2: a limit of 4 is passed exactly there. */
-    HlDbOpBudget budget = { 4, 0, 0 };
+    HlDbOpBudget budget = { .limit = 4, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_pg_query(&conn, "COMMIT", NULL, 0, NULL, NULL, NULL, NULL);
     /* The trip is still there for the run to raise once the call returns. */
@@ -916,7 +916,7 @@ UTEST(pg_query, a_stall_after_commit_complete_is_bounded)
     conn.tx_status = 'T';
     conn.read_timeout_ms = 0;            /* no read timeout: wait for ever */
 
-    HlDbOpBudget budget = { 4, 0, 0 };
+    HlDbOpBudget budget = { .limit = 4, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int64_t t0 = pg_test_ms();
     int rc = hl_pg_query(&conn, "COMMIT", NULL, 0, NULL, NULL, NULL, NULL);
@@ -930,6 +930,52 @@ UTEST(pg_query, a_stall_after_commit_complete_is_bounded)
 
     hl_pg_conn_close(&conn);
     close(sv[0]);
+}
+
+/* Audit 27: after the wait, the TLS read's bound was recomputed from
+ * ?read_timeout= alone, so while finishing (no budget asked) it ran for the
+ * whole read timeout - for ever with 0 - instead of the 2 s finishing bound.
+ * Every read and write while finishing now takes hl_pg_conn_io_left. */
+UTEST(pg_query, finishing_io_is_held_to_the_finishing_bound)
+{
+    HlPgConn conn;
+    memset(&conn, 0, sizeof conn);
+    uint64_t st = 0;
+
+    conn.read_timeout_ms = 0;            /* not finishing: no bound */
+    EXPECT_EQ(0, hl_pg_conn_io_left(&conn, &st));
+
+    st = 0;
+    conn.read_timeout_ms = 60000;
+    int l = hl_pg_conn_io_left(&conn, &st);
+    EXPECT_TRUE(l > 50000 && l <= 60000);
+
+    /* Finishing with read_timeout=0: the finishing bound alone. */
+    st = 0;
+    conn.read_timeout_ms = 0;
+    conn.finishing = 1;
+    conn.finish_started = 0;
+    l = hl_pg_conn_io_left(&conn, &st);
+    EXPECT_TRUE(l > 0 && l <= 2000);
+
+    /* Finishing with a long read timeout: still the finishing bound. */
+    st = 0;
+    conn.read_timeout_ms = 300000;
+    l = hl_pg_conn_io_left(&conn, &st);
+    EXPECT_TRUE(l > 0 && l <= 2000);
+
+    /* A shorter read timeout is the bound itself. */
+    st = 0;
+    conn.read_timeout_ms = 500;
+    conn.finish_started = 0;
+    l = hl_pg_conn_io_left(&conn, &st);
+    EXPECT_TRUE(l > 0 && l <= 500);
+
+    /* The finishing bound has passed: -1, whatever read_timeout says. */
+    st = 0;
+    conn.read_timeout_ms = 0;
+    conn.finish_started = 1;             /* long ago (monotonic ms) */
+    EXPECT_EQ(-1, hl_pg_conn_io_left(&conn, &st));
 }
 
 /* `COPY ... TO STDOUT`: CopyOutResponse, then CopyData at the server's pace.
@@ -1476,7 +1522,7 @@ UTEST(pg_conn, startup_frames_are_charged)
     snprintf(dsn.user, sizeof dsn.user, "%s", "app");
 
     HlPgConn conn;
-    HlDbOpBudget budget = { 10, 0, 0 };
+    HlDbOpBudget budget = { .limit = 10, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_pg_conn_start(&conn, sv[1], &dsn);
     hl_db_budget_restore(prev);
@@ -1501,7 +1547,7 @@ UTEST(pg_conn, startup_frames_fit_a_normal_budget)
     snprintf(dsn.user, sizeof dsn.user, "%s", "app");
 
     HlPgConn conn;
-    HlDbOpBudget budget = { 100, 0, 0 };
+    HlDbOpBudget budget = { .limit = 100, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = hl_pg_conn_start(&conn, sv[1], &dsn);
     hl_db_budget_restore(prev);
@@ -1515,7 +1561,7 @@ UTEST(pg_scram, iterations_are_charged_before_the_derivation)
 {
     /* 4096 rounds cost 4096 * 16 units: a budget of 1000 cannot pay, so the
      * handshake stops before the PBKDF2 with the limit, not a proof. */
-    HlDbOpBudget budget = { 1000, 0, 0 };
+    HlDbOpBudget budget = { .limit = 1000, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int rc = scram_start_with_iters("i=4096");
     hl_db_budget_restore(prev);

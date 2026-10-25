@@ -16,6 +16,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
 /* ── The calling run's budget (cap/db_budget.h) ────────────────────── */
 
@@ -55,14 +56,42 @@ int hl_db_budget_charge(int64_t units)
     return tl_budget_fn ? tl_budget_fn(tl_budget_ud, units) : 0;
 }
 
+static atomic_int g_op_shutdown;
+
+void hl_db_op_shutdown(int on)
+{
+    atomic_store(&g_op_shutdown, on ? 1 : 0);
+}
+
+uint64_t hl_db_monotonic_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 1;
+    uint64_t ms = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    return ms ? ms : 1;
+}
+
+static int op_budget_trip(HlDbOpBudget *b, int reason)
+{
+    b->tripped = 1;
+    b->reason = reason;
+    return 1;
+}
+
 int hl_db_op_budget_charge(void *ud, int64_t units)
 {
     HlDbOpBudget *b = (HlDbOpBudget *)ud;
     if (b->tripped) return 1;
+    /* Stops that hold for a 0-unit charge too (audit 27). */
+    if ((b->cancelled && __atomic_load_n(b->cancelled, __ATOMIC_ACQUIRE)) ||
+        atomic_load_explicit(&g_op_shutdown, memory_order_acquire))
+        return op_budget_trip(b, HL_DB_OP_STOP_CANCEL);
+    if (b->deadline_ms && hl_db_monotonic_ms() >= b->deadline_ms)
+        return op_budget_trip(b, HL_DB_OP_STOP_DEADLINE);
     if (b->limit <= 0) return 0;
     b->used = units > INT64_MAX - b->used ? INT64_MAX : b->used + units;
-    if (b->used > b->limit) b->tripped = 1;
-    return b->tripped;
+    if (b->used > b->limit) return op_budget_trip(b, HL_DB_OP_STOP_UNITS);
+    return 0;
 }
 
 static _Atomic size_t g_max_value_bytes;

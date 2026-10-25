@@ -53,6 +53,7 @@
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_budget.h"   /* hl_db_op_shutdown */
 #include "hull/cap/db_duckdb.h"   /* hl_db_duckdb_set_fs_policy (mode B) */
 #include "hull/migrate.h"
 #endif
@@ -135,11 +136,15 @@ static void hl_log_callback(log_Event *ev) {
     char ts[16];
     ts[strftime(ts, sizeof(ts), "%H:%M:%S", ev->time)] = '\0';
 
-    char msg[1024];
+    char raw[1024], msg[1024];
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
-    vsnprintf(msg, sizeof(msg), ev->fmt, ev->ap);
+    vsnprintf(raw, sizeof(raw), ev->fmt, ev->ap);
 #pragma GCC diagnostic pop
+    /* CR / LF as \r / \n (audit 27): an uncaught exception's message, a ws
+     * or SSE error, reaches a log call with app text in it, and a newline
+     * there wrote a second record of the app's choosing. */
+    hl_log_escape_line(raw, msg, sizeof msg);
 
 #ifdef DEBUG
     fprintf((FILE *)ev->udata, "%s %-5s %s:%d: %s\n",
@@ -2113,6 +2118,20 @@ static void hl_serve_free_server(HlServerState *s)
     s->server_tls_ctx = NULL;   /* the server destroyed it */
 }
 
+/* Free the worker pool with every running db.async op told to stop: its
+ * budget trips at the next charge, so an op waiting on a silent server does
+ * not hold the join (audit 27). */
+static void serve_pool_free(HlAsyncBackendPool *pool)
+{
+#ifdef HL_ENABLE_DB
+    hl_db_op_shutdown(1);
+#endif
+    hl_async_backend()->pool_free(pool);
+#ifdef HL_ENABLE_DB
+    hl_db_op_shutdown(0);
+#endif
+}
+
 /* Phase 5: tear down all resources after the event loop returns. */
 static void hl_serve_teardown_after_serve(HlServerState *s)
 {
@@ -2136,7 +2155,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     if (s->thread_pool) {
         HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
         if (rt) { rt->thread_pool = NULL; rt->shutting_down = 1; }
-        hl_async_backend()->pool_free(s->thread_pool);
+        serve_pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
 
@@ -2405,7 +2424,7 @@ static void hl_serve_cleanup(HlServerState *s)
     if (s->thread_pool) {
         HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
         if (rt) { rt->thread_pool = NULL; rt->shutting_down = 1; }
-        hl_async_backend()->pool_free(s->thread_pool);
+        serve_pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
 

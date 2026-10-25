@@ -173,7 +173,7 @@ UTEST(db_backend, an_oversized_async_result_abandons_the_reply)
 {
     memset(&drain, 0, sizeof drain);
     drain.rows_total = 100000;
-    HlDbOpBudget b = { 0, 0, 0 };   /* no instruction limit at all */
+    HlDbOpBudget b = { .limit = 0, .used = 0, .tripped = 0 };   /* no instruction limit at all */
     char err[256] = {0};
     EXPECT_EQ(-2, drain_materialize(&b, 64 * 1024, err, sizeof err));
     EXPECT_TRUE(strstr(err, "result too large") != NULL);
@@ -187,7 +187,7 @@ UTEST(db_backend, a_ragged_async_result_abandons_the_reply)
     memset(&drain, 0, sizeof drain);
     drain.rows_total = 100000;
     drain.width_from = 3;
-    HlDbOpBudget b = { 0, 0, 0 };
+    HlDbOpBudget b = { .limit = 0, .used = 0, .tripped = 0 };
     char err[256] = {0};
     EXPECT_EQ(-2, drain_materialize(&b, 0, err, sizeof err));
     EXPECT_TRUE(strstr(err, "differ in column count") != NULL);
@@ -200,7 +200,7 @@ UTEST(db_backend, an_async_result_under_the_cap_is_copied)
 {
     memset(&drain, 0, sizeof drain);
     drain.rows_total = 10;
-    HlDbOpBudget b = { 0, 0, 0 };
+    HlDbOpBudget b = { .limit = 0, .used = 0, .tripped = 0 };
     char err[256] = {0};
     EXPECT_EQ(0, drain_materialize(&b, 0, err, sizeof err));
     EXPECT_FALSE(b.tripped);
@@ -216,7 +216,7 @@ static int drain_materialize_held(HlOffheapShared *hold, char *err,
     HlDbHandle h = {0};
     h.backend = &drain_backend;
     HlDbResult r;
-    HlDbOpBudget b = { 0, 0, 0 };
+    HlDbOpBudget b = { .limit = 0, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
     int rc = hl_worker_db_materialize(&h, "SELECT", NULL, 0, 0, &b, hold,
                                       &r, err, errsz);

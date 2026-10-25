@@ -13,6 +13,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_dynamic.h"   /* hl_db_dynamic_id_live */
 #include "hull/cap/db_budget.h"     /* db.async ops: a budget of their own */
+#include "hull/cap/run_watchdog.h"  /* hl_run_watchdog_limit_ms: the op deadline */
 #include "hull/shared/async.h"
 #include "hull/shared/thread_affinity.h"
 #include "hull/shared/async_backend.h"
@@ -570,14 +571,26 @@ static void db_work_fn(void *ud)
     HlWorkerDbOp *op = (HlWorkerDbOp *)ud;
     int fresh = 0;
     worker_db_sweep_closed_dynamic();
-    HlDbOpBudget budget = { op->max_instructions, 0, 0 };
+    /* The op's wall-clock bound (audit 27): it holds a pool thread, not the
+     * event loop, so it gets app.main's run limit - 10 min by default, the
+     * operator's --max-run-ms / HULL_MAX_RUN_MS when set, none for 0 - and it
+     * stops when its continuation is cancelled or the pool is shutting down.
+     * Before, only units tripped the budget, and a wait (pg_sleep, a lock, a
+     * silent server under ?read_timeout=0) charges none. */
+    HlDbOpBudget budget = { op->max_instructions, 0, 0, 0, 0, &op->cancelled };
+    uint32_t limit_ms = hl_run_watchdog_limit_ms(HL_RUN_MAIN);
+    if (limit_ms) budget.deadline_ms = hl_db_monotonic_ms() + limit_ms;
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int refused = 0;   /* the result was refused: keep that message */
     HlWorkerDb *wdb = db_work_run(op, &fresh, &budget, &refused);
     hl_db_budget_restore(prev);
     if (budget.tripped && op->error && !refused)
-        snprintf(op->error_msg, sizeof(op->error_msg),
-                 "interrupted (instruction limit exceeded)");
+        snprintf(op->error_msg, sizeof(op->error_msg), "%s",
+                 budget.reason == HL_DB_OP_STOP_DEADLINE
+                     ? "interrupted (db.async op exceeded its time limit)"
+                 : budget.reason == HL_DB_OP_STOP_CANCEL
+                     ? "interrupted (cancelled)"
+                     : "interrupted (instruction limit exceeded)");
     if (op->no_cache && fresh && op->dsn) {
         if (wdb && op->kind == HL_WORK_DB_WAIT_NOTIFY &&
             hl_db_dynamic_id_live(op->dyn_id)) {
@@ -812,8 +825,9 @@ void hl_worker_db_async_cancel(KlAsyncOp *kl_op, void *user_data)
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     HlWorkerDbOp *op = (HlWorkerDbOp *)ctx->driver;
 
-    /* Mark as cancelled - done_fn will handle cleanup */
-    op->cancelled = 1;
+    /* Mark as cancelled - done_fn will handle cleanup. Atomic: the op's
+     * budget on the pool thread reads it to stop a running op (audit 27). */
+    __atomic_store_n(&op->cancelled, 1, __ATOMIC_RELEASE);
 
     /* Cancel and destroy the runtime continuation */
     if (ctx->cont) {

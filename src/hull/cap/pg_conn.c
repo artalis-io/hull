@@ -238,8 +238,12 @@ static int notify_is_for(const HlPgFrame *f, const char *channel, char *got,
  * failed write leaves it broken (part of the message may have gone). */
 static int conn_send(HlPgConn *conn, const uint8_t *buf, size_t len)
 {
-    int rc = hl_db_transport_send_sliced(conn->transport, buf, len,
-                                         conn->read_timeout_ms,
+    /* While finishing (no budget asked) the write is held to what is left of
+     * the finishing bound too, not ?read_timeout= alone (audit 27). */
+    uint64_t started = 0;
+    int timeout = hl_pg_conn_io_left(conn, &started);
+    if (timeout < 0) { pg_abandon(conn); return -1; }
+    int rc = hl_db_transport_send_sliced(conn->transport, buf, len, timeout,
                                          conn->finishing ? NULL : pg_wait_stop,
                                          NULL);
     if (rc == 0) return 0;
@@ -288,6 +292,17 @@ static int pg_finish_left(HlPgConn *conn)
     if (conn->read_timeout_ms > 0 && conn->read_timeout_ms < bound)
         bound = conn->read_timeout_ms;
     return hl_db_transport_time_left(&conn->finish_started, bound);
+}
+
+int hl_pg_conn_io_left(HlPgConn *conn, uint64_t *started)
+{
+    int left = hl_db_transport_time_left(started, conn->read_timeout_ms);
+    if (left < 0 || !conn->finishing)
+        return left;
+    int fleft = pg_finish_left(conn);
+    if (fleft < 0)
+        return -1;
+    return (left == 0 || fleft < left) ? fleft : left;
 }
 
 /* Read one frame. The returned body is valid until the next call, which
@@ -364,9 +379,10 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
                                                NULL);
         if (wr == -2) { pg_abandon(conn); return -1; }
         /* What the wait left: passed its own `left`, the read could spend as
-         * long again (audit 22). */
-        if (wr == 1 &&
-            (left = hl_db_transport_time_left(&started, conn->read_timeout_ms)) < 0)
+         * long again (audit 22). While finishing that is the finishing bound
+         * too: recomputed from ?read_timeout= alone, the TLS read below ran
+         * with no stop and, with read_timeout=0, no bound (audit 27). */
+        if (wr == 1 && (left = hl_pg_conn_io_left(conn, &started)) < 0)
             wr = 0;
         /* Over TLS, sliced too: a record's first byte made it readable, and
          * the read then blocked for the rest under SO_RCVTIMEO (audit 20). */
@@ -1703,10 +1719,18 @@ static int wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
          * the session: poll would not see it, and the wait ran out with a
          * notification sitting in the buffer. Read it instead. */
         if (hl_db_transport_pending(conn->transport) == 0) {
+            /* In slices that ask the op's budget (audit 27): a cancelled op or
+             * a pool shutting down ends the wait as a timeout instead of
+             * holding the pool thread - and the SIGTERM join - for up to a
+             * minute. Only whole frames have been consumed, so the connection
+             * stays usable. */
+            if (pg_wait_stop(NULL)) return 0;
+            int slice = remaining < HL_DB_WAIT_SLICE_MS ? remaining
+                                                        : HL_DB_WAIT_SLICE_MS;
             struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
-            int pr = poll(&pfd, 1, remaining);
+            int pr = poll(&pfd, 1, slice);
             if (pr < 0) { if (errno == EINTR) continue; return -1; }
-            if (pr == 0) return 0;          /* timed out */
+            if (pr == 0) continue;          /* the loop re-checks the deadline */
             if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;   /* dead conn */
         }
 

@@ -192,7 +192,9 @@ typedef struct HlWorkerDbOp {
     int            notified;      /* DB_WAIT_NOTIFY: 1 notified, 0 timeout */
     int            error;
     char           error_msg[HL_WORKER_ERR_SIZE];
-    int            cancelled;     /* set by async cancel, checked by done_fn */
+    int            cancelled;     /* set by async cancel, checked by done_fn;
+                                   * also read (atomically) by the op's budget
+                                   * on the pool thread to stop it (audit 27) */
 
     /* The SQL and params copies, held on the submitting VM's off-heap total
      * under its heap limit (hl_worker_db_copy_bytes): uncounted, one call

@@ -301,6 +301,17 @@ static int run_stopped(void) {
 #endif
 }
 
+/* Charge @p n bytes of a reply to the run; 1 when that tripped it. */
+static int reply_charge(size_t n) {
+#ifdef HL_ENABLE_DB
+    return hl_db_budget_charge(1 + (int64_t)((n + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                                             HL_DB_ALLOC_UNIT_BYTES)) != 0;
+#else
+    (void)n;
+    return 0;
+#endif
+}
+
 /* run_stopped as a transport / TLS stop callback. */
 static int run_stopped_cb(void *ud) {
     (void)ud;
@@ -446,7 +457,18 @@ static int read_reply(HlValkeyConn *c, HlRespValue *out) {
         }
         c->rlen += (size_t)n;
         got = 1;
-        parse = (c->rlen - parsed_at >= parsed_at / 2) || !more_waiting(c);
+        /* Each chunk is charged to the run, 1 unit plus 1 per
+         * HL_DB_ALLOC_UNIT_BYTES, as the Postgres / MySQL frame readers
+         * charge theirs: only a 0-unit ask stood between a reply of up to
+         * HL_VALKEY_MAX_REPLY (or a long SCAN of them) and the run's budget
+         * (audit 27). */
+        /* cppcheck-suppress knownConditionTrueFalse */
+        if (reply_charge((size_t)n)) {   /* constant 0 without HL_ENABLE_DB */
+            c->dead = 1;
+            set_err(c, "interrupted (instruction limit exceeded)");
+            return -1;
+        }
+        parse =(c->rlen - parsed_at >= parsed_at / 2) || !more_waiting(c);
     }
 }
 
