@@ -1437,4 +1437,18 @@ UTEST(hl_cap_db, stale_txn_guard_breaks_a_connection_it_cannot_reopen)
     hl_db_backend_sqlite.close(&h);
 }
 
+/* Running as root, SQLite fchown()s every WAL / journal / shm file it creates,
+ * and the kernel sandbox grants no chown: on Linux the seccomp filter killed a
+ * root process (a container) at its first write. Hull's setup replaces it. */
+UTEST(hl_cap_db, sqlite_fchown_is_replaced)
+{
+    hl_cap_db_sqlite_setup();
+    sqlite3_vfs *vfs = sqlite3_vfs_find("unix");
+    ASSERT_TRUE(vfs != NULL);
+    ASSERT_TRUE(vfs->iVersion >= 3 && vfs->xGetSystemCall != NULL);
+    sqlite3_syscall_ptr cur = vfs->xGetSystemCall(vfs, "fchown");
+    EXPECT_TRUE(cur != NULL);
+    EXPECT_TRUE(cur != (sqlite3_syscall_ptr)fchown);
+}
+
 UTEST_MAIN();
