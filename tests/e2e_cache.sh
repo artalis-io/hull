@@ -249,7 +249,9 @@ HULL_CACHE_DIR="relative/path" "$HULL" cache list >/dev/null 2>&1 || RC=$?
 rm -rf "$ISOLATED"
 
 # ── 12. `hull doctor` surfaces the cache section ─────────────────
-OUT=$("$HULL" doctor 2>&1)
+# doctor exits 1 when this build cannot link apps (no embedded platform
+# library, as in a plain `make`); only its output is checked here.
+OUT=$("$HULL" doctor 2>&1 || true)
 case "$OUT" in
     *"Caches  (runtime + tools storage)"*)
         pass "doctor shows Caches section" ;;
@@ -270,7 +272,7 @@ case "$OUT" in
 esac
 
 # 13. doctor --json includes caches array + hull_cache_dir field
-JSON=$("$HULL" doctor --json 2>&1)
+JSON=$("$HULL" doctor --json 2>&1 || true)
 case "$JSON" in
     *'"caches":'*) pass "doctor --json includes caches array" ;;
     *) fail "doctor --json caches" ;;
@@ -283,7 +285,7 @@ esac
 
 # 14. HULL_CACHE_DIR surfaces in doctor output too
 ISO2=$(mktemp -d)
-OUT=$(HULL_CACHE_DIR="$ISO2" "$HULL" doctor 2>&1)
+OUT=$(HULL_CACHE_DIR="$ISO2" "$HULL" doctor 2>&1 || true)
 case "$OUT" in
     *"HULL_CACHE_DIR active"*) pass "doctor surfaces active override" ;;
     *) fail "doctor override surface" ;;
@@ -460,7 +462,7 @@ mkdir -p "$LARGE_HOME/.hull/blobs/runtime/lua-bytecode/blobs/aa"
 # bs=1m is a macOS-ism (Linux uses 1M); use 1024*1024 bytes for both.
 dd if=/dev/zero of="$LARGE_HOME/.hull/blobs/runtime/lua-bytecode/blobs/aa/aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899" \
     bs=1048576 count=300 >/dev/null 2>&1
-OUT=$(HOME="$LARGE_HOME" "$HULL" doctor 2>&1)
+OUT=$(HOME="$LARGE_HOME" "$HULL" doctor 2>&1 || true)
 case "$OUT" in
     *"lua-bytecode"*"large"*) pass "doctor flags large per-kind cache" ;;
     *) fail "doctor large-kind warning" ;;

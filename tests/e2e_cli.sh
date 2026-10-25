@@ -45,7 +45,9 @@ run_hello_cli() {
     rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" run "${app}" -- world)
     out=$(cat "$HULL_RC_TMP")
     expect_eq "${runtime} hello_cli exit code on valid argv" "0" "${rc}"
-    line1=$(echo "${out}" | head -1)
+    # hull_run captures stderr too: skip Hull's own log records ("HH:MM:SS
+    # LEVEL ...", e.g. the macOS sandbox notice) to reach the app's first line.
+    line1=$(echo "${out}" | grep -v '^[0-9][0-9]:[0-9][0-9]:[0-9][0-9] ' | head -1)
     expect_eq "${runtime} hello_cli greeting line" "hello world" "${line1}"
 
     # 2. No args → exit 1, usage on stderr

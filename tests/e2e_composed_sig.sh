@@ -54,7 +54,7 @@ cleanup() {
     rm -rf "$WORK"
     rm -f "$ROOT/build/embedded_platform_sig.h" "$ROOT/build/platform.sig" \
           "$ROOT/build/signature.o" "$ROOT/build/platform_sig.o" \
-          "$ROOT/build/mod_tool.o" "$ROOT/build/embedded_platform_sig.o" \
+          "$ROOT/build/lua_rt_mod_tool.o" "$ROOT/build/embedded_platform_sig.o" \
           "$ROOT/build/build_assets.o" "$ROOT/build/hull" \
           "$ROOT/build/libhull_platform.a"
     echo "(cleaned test-key build artifacts; run 'make' to restore a normal build)"
@@ -78,10 +78,10 @@ XCF="-DHL_PLATFORM_PUBKEY_HEX=\\\"$PUB\\\""
 
 # ── 2. build the test-key platform lib + the embedded feature archives ──
 # EXTRA_CFLAGS changing does not invalidate existing .o's, so remove the objects
-# that bake in HL_PLATFORM_PUBKEY_HEX (signature/platform_sig/mod_tool) + the
+# that bake in HL_PLATFORM_PUBKEY_HEX (signature/platform_sig/lua_rt_mod_tool) + the
 # platform lib + hull so they recompile with the TEST key.
 echo "-- building platform lib (test key) + feature archives --"
-rm -f build/signature.o build/platform_sig.o build/mod_tool.o \
+rm -f build/signature.o build/platform_sig.o build/lua_rt_mod_tool.o \
       build/embedded_platform_sig.o build/build_assets.o \
       build/hull build/libhull_platform.a
 make EXTRA_CFLAGS="$XCF" >/dev/null 2>&1 || fail "make (hull + feature archives) failed"
@@ -212,16 +212,45 @@ pass "validly-signed app verifies (5b base + 5c composed) + exits 3 (test key)"
 # ── Phase 3: a tampered composed hash is FATAL at runtime (5c) ───────────
 # Flip the recorded runtime-archive hash in package.sig's composed block. The
 # platform-key manifest is untouched, so 5b still passes; 5c then finds the
-# recorded hash absent from the signed manifest and must refuse to boot. 5c runs
-# before the app-signature step, so the refusal is specifically the composed
-# attestation (message contains "composed"), not a generic app-sig failure.
+# recorded hash absent from the signed manifest and must refuse to boot.
+#
+# The app signature is checked first (step 4b, before anything reads the
+# platform blocks), so the edited package.sig is re-signed with the developer
+# key: its payload is package.sig without signature / public_key, in canonical
+# (sorted, compact) JSON, and `hull sign-release` signs a file's bytes. Ed25519
+# is deterministic, so re-signing the untouched package.sig must reproduce its
+# signature - proof the payload here is the one --verify-sig checks.
+resign_pkg() {
+    jq -cjS 'del(.signature, .public_key)' "$1" > "$WORK/payload.json"
+    "$HULL" sign-release "$WORK/payload.json" --key "$WORK/developer.key" >/dev/null 2>&1 \
+        || fail "sign-release could not sign the package.sig payload"
+    jq --arg s "$(tr -d ' \n' < "$WORK/payload.json.sig")" '.signature = $s' "$1"
+}
 if command -v jq >/dev/null 2>&1; then
     cp "$APP/package.sig" "$WORK/package.sig.orig"
+    # hull verify agrees with --verify-sig on the untouched package: its
+    # gethull check refused the 129-character signature (128 hex + the
+    # newline sign-release writes) that every signed release build recorded.
+    VOUT=$("$HULL" verify "$APP" 2>&1 || true)
+    printf '%s' "$VOUT" | grep -q "gethull layer: VALID" \
+        || { echo "$VOUT"; fail "hull verify did not accept the gethull layer of a validly-signed app"; }
+    # ...and so does a package built before hull build stripped that newline.
+    jq '.platform.gethull.signature += "\n"' "$WORK/package.sig.orig" > "$WORK/package.sig.nl"
+    resign_pkg "$WORK/package.sig.nl" > "$APP/package.sig"
+    VOUT=$("$HULL" verify "$APP" 2>&1 || true)
+    cp "$WORK/package.sig.orig" "$APP/package.sig"
+    printf '%s' "$VOUT" | grep -q "gethull layer: VALID" \
+        || { echo "$VOUT"; fail "hull verify refused a gethull signature ending in a newline"; }
+    pass "hull verify accepts the gethull layer (with and without the trailing newline)"
+    ORIG_SIG=$(jq -r .signature "$WORK/package.sig.orig")
+    [ "$(resign_pkg "$WORK/package.sig.orig" | jq -r .signature)" = "$ORIG_SIG" ] \
+        || fail "re-signing the untouched package.sig did not reproduce its signature"
     BAD="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     jq --arg n "$RT_ASSET" --arg h "$BAD" \
         '(.platform.gethull.composed.platform_domain.assets[]
           | select(.name==$n) | .sha256) = $h' \
-        "$WORK/package.sig.orig" > "$APP/package.sig"
+        "$WORK/package.sig.orig" > "$WORK/package.sig.tampered"
+    resign_pkg "$WORK/package.sig.tampered" > "$APP/package.sig"
     run_app ""
     if [ "$RC" = 3 ]; then
         cat "$RUN_OUT"; rm -f "$RUN_OUT"
@@ -242,14 +271,15 @@ fi
 # `"platform_domain": false` / `null` and `"composed": null` are present to
 # --verify-sig (sh_json), which refuses them; hull verify read null as absent
 # and skipped `false`, so it reported VALID for a package the binary will not
-# start. Both must now name the malformed block. (The edit also breaks the app
-# signature, so the message, not the status, is what this asserts.)
+# start. Both must now name the malformed block. Each edit is re-signed (see
+# resign_pkg above), so the app signature holds and the block itself is judged.
 if command -v jq >/dev/null 2>&1; then
     cp "$APP/package.sig" "$WORK/package.sig.orig"
     for edit in '.platform.gethull.composed.platform_domain = false' \
                 '.platform.gethull.composed.platform_domain = null' \
                 '.platform.gethull.composed = null'; do
-        jq "$edit" "$WORK/package.sig.orig" > "$APP/package.sig"
+        jq "$edit" "$WORK/package.sig.orig" > "$WORK/package.sig.edited"
+        resign_pkg "$WORK/package.sig.edited" > "$APP/package.sig"
         VOUT=$("$HULL" verify "$APP" 2>&1 || true)
         if ! printf '%s' "$VOUT" | grep -q "composed platform_domain is malformed"; then
             echo "$VOUT"; cp "$WORK/package.sig.orig" "$APP/package.sig"

@@ -546,6 +546,71 @@ jobs:
         timeout-minutes: 2
         run: make hull-test-examples
 
+      # Suites that ran only on the Windows source-build job (where a cosmo
+      # APE's exit status reads as 0 from a POSIX shell) and so drifted:
+      # stale expectations, set -e aborts, and a hull verify bug.
+      - name: HTTP routing E2E tests
+        timeout-minutes: 2
+        run: make e2e-http
+
+      - name: Template engine E2E tests
+        timeout-minutes: 2
+        run: make e2e-templates
+
+      - name: Migration E2E tests
+        timeout-minutes: 2
+        run: make e2e-migrate
+
+      - name: CLI (app.main) E2E tests
+        timeout-minutes: 3
+        run: make e2e-cli
+
+      - name: MCP E2E tests
+        timeout-minutes: 2
+        run: make e2e-mcp
+
+      - name: TUI E2E tests
+        timeout-minutes: 3
+        run: make e2e-tui
+
+      - name: Cache E2E tests
+        timeout-minutes: 3
+        run: make e2e-cache
+
+      - name: Agent context E2E tests
+        timeout-minutes: 5
+        run: make e2e-context
+
+      - name: Tools install E2E tests
+        timeout-minutes: 2
+        run: make e2e-tools
+
+      - name: hull analyze E2E tests
+        timeout-minutes: 2
+        run: make e2e-analyze
+
+      - name: AOT cache E2E tests
+        timeout-minutes: 2
+        run: make e2e-aot-cache
+
+      - name: Agent API E2E tests
+        timeout-minutes: 2
+        run: make e2e-agent-api
+
+      - name: Compute dev-workflow E2E tests
+        timeout-minutes: 3
+        run: make e2e-compute-dev
+
+      - name: SQLite feature E2E tests
+        timeout-minutes: 3
+        run: make e2e-feature-sqlite
+
+      # Last: it rebuilds hull and the platform lib with a throwaway test key,
+      # then removes those artifacts.
+      - name: Composed-feature signature E2E tests
+        timeout-minutes: 10
+        run: make e2e-composed-sig
+
   # (docs/ci_architecture_design.md Appendix D): the wamrc PRODUCER.
   # Builds wamrc ONCE (LLVM-18 + the WAMR patch carriage), emits an identity +
   # provenance manifest, and uploads an immutable, run-scoped artifact. In this
@@ -2216,6 +2281,13 @@ jobs:
       - name: Compute E2E tests
         timeout-minutes: 2
         run: make e2e-compute CC=cosmocc
+
+      # The cache suite against the cosmo hull built above. Not `make
+      # e2e-cache-cosmo`: that rebuilds platform-cosmo, and a second cosmo
+      # platform build in one job corrupts this runner's loader.
+      - name: Cache E2E tests (cosmo)
+        timeout-minutes: 5
+        run: HULL=build/hull sh tests/e2e_cache_cosmo.sh
 
       # Regression guard for the exit-256 class: a PRODUCED cosmo app must boot
       # with a populated runtime VFS (require "hull.json" resolves). The strong

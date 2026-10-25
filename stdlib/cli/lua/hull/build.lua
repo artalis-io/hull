@@ -1541,6 +1541,17 @@ end
 -- cross-check. Extracted from main() (docs/build_modularization.md).
 -- Inputs: opts, tmpdir, cc, is_cosmo, flavor_asset. Returns the platform archive
 -- path, its dir, and the cross-checked sig blob + per-arch hashes (for signing).
+-- tool.platform_sig_get() with the signature's trailing newline (sign-release
+-- writes one, and release.yml embeds the file as is) stripped, so package.sig
+-- records the bare 128 hex characters.
+local function platform_sig_get()
+    local blob = tool.platform_sig_get()
+    if blob and type(blob.signature) == "string" then
+        blob.signature = blob.signature:match("^%s*(.-)%s*$")
+    end
+    return blob
+end
+
 local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
     local platform_extracted = false
     local platform_lib = tmpdir .. "/libhull_platform.a"
@@ -1803,7 +1814,7 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
     local platform_sig_blob = nil    -- {manifest, signature} or nil
     local platform_arch_hashes = nil -- {arch: hex, ...} the cross-checked entries
     if opts.verify_platform then
-        platform_sig_blob = tool.platform_sig_get()
+        platform_sig_blob = platform_sig_get()
         if not platform_sig_blob then
             tool.stderr(
                 "hull build: this hull has no embedded platform manifest\n" ..
@@ -1875,7 +1886,7 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
         -- built with this flag still inherit the manifest (just without
         -- the cross-check guarantee). If there's no embedded blob, the
         -- app's package.sig.platform omits the new fields entirely.
-        platform_sig_blob = tool.platform_sig_get()
+        platform_sig_blob = platform_sig_get()
     end
 
     -- Validate compiler matches platform (cc already resolved above)

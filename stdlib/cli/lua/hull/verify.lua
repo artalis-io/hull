@@ -44,6 +44,13 @@ local hex = require("hull.encoding").hex
 -- Verify a hex ed25519 signature over `payload` with a hex public key, as
 -- stored in package.sig / platform.sig. Malformed hex is a failed check.
 local function ed25519_verify_hex(payload, sig_hex, pk_hex)
+    -- Surrounding whitespace is ignored, as the C reader ignores it:
+    -- `hull sign-release` ends its .sig with a newline, and the gethull
+    -- signature an app records came from that file, so every signed release
+    -- build carried 129 characters that hex.decode refused ("signature
+    -- invalid" for a package --verify-sig starts).
+    if type(sig_hex) == "string" then sig_hex = sig_hex:match("^%s*(.-)%s*$") end
+    if type(pk_hex) == "string" then pk_hex = pk_hex:match("^%s*(.-)%s*$") end
     local sig = type(sig_hex) == "string" and hex.decode(sig_hex)
     local pk  = type(pk_hex) == "string" and hex.decode(pk_hex)
     if not sig or not pk or #sig ~= 64 or #pk ~= 32 then return false end
