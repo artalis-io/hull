@@ -331,49 +331,55 @@ CREATE TABLE evil (x INTEGER);
 EOF
 sqlite3 "$TMPDIR/victim.db" "CREATE TABLE precious (x INTEGER);" 2>/dev/null \
     || : > "$TMPDIR/victim.db"
-ln -s ../victim.db "$TMPDIR/app8/data.db"
+# On a Windows shell without symlink privilege `ln -s` silently COPIES
+# (see e2e_modular_resolution.sh); a copy is not a symlink, so Hull is right
+# to use it and the cases below would report failures that are not.
+if ln -s ../victim.db "$TMPDIR/app8/data.db" 2>/dev/null && [ -L "$TMPDIR/app8/data.db" ]; then
 
-OUTPUT=$($HULL migrate "$TMPDIR/app8" 2>&1) || true
-case "$OUTPUT" in
-    *"symbolic link"*) pass "hull migrate refuses a symlinked default data.db" ;;
-    *) fail "hull migrate followed a symlinked default data.db: $OUTPUT" ;;
-esac
-OUTPUT=$($HULL migrate status "$TMPDIR/app8" 2>&1) || true
-case "$OUTPUT" in
-    *"symbolic link"*) pass "hull migrate status refuses a symlinked default data.db" ;;
-    *) fail "hull migrate status followed a symlinked default data.db: $OUTPUT" ;;
-esac
-TABLES=$(sqlite3 "$TMPDIR/victim.db" ".tables" 2>/dev/null || echo "")
-case "$TABLES" in
-    *evil*|*_hull_migrations*) fail "the symlink target was migrated" ;;
-    *) pass "the symlink target was not touched" ;;
-esac
-
-# The dev server refuses the same default (judged by output: it must exit).
-$HULL -p 18933 "$TMPDIR/app8/app.lua" > "$TMPDIR/app8.log" 2>&1 &
-SERVER_PID=$!
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 $SERVER_PID 2>/dev/null || break
-    sleep 0.3
-done
-if kill -0 $SERVER_PID 2>/dev/null; then
-    kill $SERVER_PID 2>/dev/null || true
-    wait $SERVER_PID 2>/dev/null || true
-    fail "hull served with a symlinked default data.db"
-else
-    wait $SERVER_PID 2>/dev/null || true
-    case "$(cat "$TMPDIR/app8.log")" in
-        *"symbolic link"*) pass "hull refuses to serve a symlinked default data.db" ;;
-        *) fail "hull exited without naming the symlink: $(cat "$TMPDIR/app8.log")" ;;
+    OUTPUT=$($HULL migrate "$TMPDIR/app8" 2>&1) || true
+    case "$OUTPUT" in
+        *"symbolic link"*) pass "hull migrate refuses a symlinked default data.db" ;;
+        *) fail "hull migrate followed a symlinked default data.db: $OUTPUT" ;;
     esac
-fi
+    OUTPUT=$($HULL migrate status "$TMPDIR/app8" 2>&1) || true
+    case "$OUTPUT" in
+        *"symbolic link"*) pass "hull migrate status refuses a symlinked default data.db" ;;
+        *) fail "hull migrate status followed a symlinked default data.db: $OUTPUT" ;;
+    esac
+    TABLES=$(sqlite3 "$TMPDIR/victim.db" ".tables" 2>/dev/null || echo "")
+    case "$TABLES" in
+        *evil*|*_hull_migrations*) fail "the symlink target was migrated" ;;
+        *) pass "the symlink target was not touched" ;;
+    esac
 
-# An explicit -d is the operator's choice: followed.
-OUTPUT=$($HULL migrate -d "$TMPDIR/app8/data.db" "$TMPDIR/app8" 2>&1) || true
-case "$OUTPUT" in
-    *"applied 1 migration"*) pass "an explicit -d through a symlink is followed" ;;
-    *) fail "explicit -d through a symlink was refused: $OUTPUT" ;;
-esac
+    # The dev server refuses the same default (judged by output: it must exit).
+    $HULL -p 18933 "$TMPDIR/app8/app.lua" > "$TMPDIR/app8.log" 2>&1 &
+    SERVER_PID=$!
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 $SERVER_PID 2>/dev/null || break
+        sleep 0.3
+    done
+    if kill -0 $SERVER_PID 2>/dev/null; then
+        kill $SERVER_PID 2>/dev/null || true
+        wait $SERVER_PID 2>/dev/null || true
+        fail "hull served with a symlinked default data.db"
+    else
+        wait $SERVER_PID 2>/dev/null || true
+        case "$(cat "$TMPDIR/app8.log")" in
+            *"symbolic link"*) pass "hull refuses to serve a symlinked default data.db" ;;
+            *) fail "hull exited without naming the symlink: $(cat "$TMPDIR/app8.log")" ;;
+        esac
+    fi
+
+    # An explicit -d is the operator's choice: followed.
+    OUTPUT=$($HULL migrate -d "$TMPDIR/app8/data.db" "$TMPDIR/app8" 2>&1) || true
+    case "$OUTPUT" in
+        *"applied 1 migration"*) pass "an explicit -d through a symlink is followed" ;;
+        *) fail "explicit -d through a symlink was refused: $OUTPUT" ;;
+    esac
+else
+    echo "  SKIP: symlinked default data.db (this shell's ln -s made a copy, not a link - UNTESTED here)"
+fi
 
 # ── Test: a symlinked migrations/ is refused (audit 26) ──────────
 #
@@ -389,38 +395,42 @@ cp "$TMPDIR/app2/app.lua" "$TMPDIR/app9/app.lua"
 cat > "$TMPDIR/foreign_migrations/001_foreign.sql" << 'EOF2'
 CREATE TABLE foreign_sql (x INTEGER);
 EOF2
-ln -s ../foreign_migrations "$TMPDIR/app9/migrations"
+# Skipped where `ln -s` copies, as above.
+if ln -s ../foreign_migrations "$TMPDIR/app9/migrations" 2>/dev/null && [ -L "$TMPDIR/app9/migrations" ]; then
 
-if OUTPUT=$($HULL migrate "$TMPDIR/app9" 2>&1); then
-    fail "hull migrate succeeded with a symlinked migrations dir: $OUTPUT"
-else
-    case "$OUTPUT" in
-        *"symbolic link"*) pass "hull migrate refuses a symlinked migrations dir" ;;
-        *) fail "hull migrate failed without naming the symlink: $OUTPUT" ;;
+    if OUTPUT=$($HULL migrate "$TMPDIR/app9" 2>&1); then
+        fail "hull migrate succeeded with a symlinked migrations dir: $OUTPUT"
+    else
+        case "$OUTPUT" in
+            *"symbolic link"*) pass "hull migrate refuses a symlinked migrations dir" ;;
+            *) fail "hull migrate failed without naming the symlink: $OUTPUT" ;;
+        esac
+    fi
+    TABLES=$(sqlite3 "$TMPDIR/app9/data.db" ".tables" 2>/dev/null || echo "")
+    case "$TABLES" in
+        *foreign_sql*) fail "the foreign migration ran" ;;
+        *) pass "the foreign migration did not run" ;;
     esac
-fi
-TABLES=$(sqlite3 "$TMPDIR/app9/data.db" ".tables" 2>/dev/null || echo "")
-case "$TABLES" in
-    *foreign_sql*) fail "the foreign migration ran" ;;
-    *) pass "the foreign migration did not run" ;;
-esac
 
-$HULL -p 18934 "$TMPDIR/app9/app.lua" > "$TMPDIR/app9.log" 2>&1 &
-SERVER_PID=$!
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 $SERVER_PID 2>/dev/null || break
-    sleep 0.3
-done
-if kill -0 $SERVER_PID 2>/dev/null; then
-    kill $SERVER_PID 2>/dev/null || true
-    wait $SERVER_PID 2>/dev/null || true
-    fail "hull served with a symlinked migrations dir"
+    $HULL -p 18934 "$TMPDIR/app9/app.lua" > "$TMPDIR/app9.log" 2>&1 &
+    SERVER_PID=$!
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 $SERVER_PID 2>/dev/null || break
+        sleep 0.3
+    done
+    if kill -0 $SERVER_PID 2>/dev/null; then
+        kill $SERVER_PID 2>/dev/null || true
+        wait $SERVER_PID 2>/dev/null || true
+        fail "hull served with a symlinked migrations dir"
+    else
+        wait $SERVER_PID 2>/dev/null || true
+        case "$(cat "$TMPDIR/app9.log")" in
+            *"symbolic link"*) pass "hull refuses to serve with a symlinked migrations dir" ;;
+            *) fail "hull exited without naming the symlink: $(cat "$TMPDIR/app9.log")" ;;
+        esac
+    fi
 else
-    wait $SERVER_PID 2>/dev/null || true
-    case "$(cat "$TMPDIR/app9.log")" in
-        *"symbolic link"*) pass "hull refuses to serve with a symlinked migrations dir" ;;
-        *) fail "hull exited without naming the symlink: $(cat "$TMPDIR/app9.log")" ;;
-    esac
+    echo "  SKIP: symlinked migrations dir (this shell's ln -s made a copy, not a link - UNTESTED here)"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────
