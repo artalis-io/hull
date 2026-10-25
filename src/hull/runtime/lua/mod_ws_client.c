@@ -73,6 +73,12 @@ static int lua_ws_client_send(lua_State *L)
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
     lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);   /* audit 14 */
+    /* Again, after the conversion (audit 27): a number converted to a
+     * string allocates, and the allocation can run a __gc that closes this
+     * connection. */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->client || ud->closed)
+        return luaL_error(L, "client connection closed");
 
     int rc = kl_ws_client_send_text(ud->client, data, len);
     lua_pushboolean(L, rc == 0);
@@ -89,6 +95,9 @@ static int lua_ws_client_send_binary(lua_State *L)
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
     lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);   /* audit 14 */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->client || ud->closed)   /* audit 27, as send */
+        return luaL_error(L, "client connection closed");
 
     int rc = kl_ws_client_send_binary(ud->client, data, len);
     lua_pushboolean(L, rc == 0);
@@ -96,6 +105,24 @@ static int lua_ws_client_send_binary(lua_State *L)
 }
 
 static void lua_ws_client_close_expired(void *user_data);
+
+/* Close-handshake deadline (audit 26): Keel waits in CLOSING for the peer's
+ * Close with no timer, so a peer that never answered held the client, its fd
+ * and the userdata until teardown. Armed only once the connection is open
+ * (the connect deadline still runs before that) and only once. */
+static void lua_ws_client_arm_close(HlLuaWsClientUD *ud)
+{
+    if (!ud->closed && ud->client && !ud->close_armed &&
+        ud->connect_timer == 0 && ud->lua && !ud->lua->base.shutting_down &&
+        ud->lua->base.async_ctx) {
+        const HlAsyncBackend *be = hl_async_backend();
+        ud->connect_timer = be ? be->timer_add(ud->lua->base.async_ctx,
+                                               HL_WS_CLIENT_CLOSE_TIMEOUT_MS,
+                                               lua_ws_client_close_expired, ud)
+                               : 0;
+        ud->close_armed = ud->connect_timer != 0;
+    }
+}
 
 static int lua_ws_client_close(lua_State *L)
 {
@@ -107,24 +134,29 @@ static int lua_ws_client_close(lua_State *L)
     uint16_t code = (uint16_t)luaL_optinteger(L, 2, 1000);
     size_t reason_len = 0;
     const char *reason = luaL_optlstring(L, 3, NULL, &reason_len);
+    /* Again, after the conversions (a number argument allocates, and the
+     * allocation can run a __gc that closes or frees the client). */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->client || ud->closed)
+        return 0;
+
+    if (!ud->opened) {
+        /* Before the upgrade completed Keel's close does nothing (audit 27):
+         * record it; on_open sends it and arms the close deadline. The
+         * first request wins. */
+        if (!ud->close_requested) {
+            if (reason_len > sizeof ud->close_reason)
+                reason_len = sizeof ud->close_reason;
+            if (reason && reason_len) memcpy(ud->close_reason, reason, reason_len);
+            ud->close_reason_len = reason ? reason_len : 0;
+            ud->close_code = code;
+            ud->close_requested = 1;
+        }
+        return 0;
+    }
 
     kl_ws_client_close(ud->client, code, reason, reason_len);
-
-    /* Close-handshake deadline (audit 26): Keel waits in CLOSING for the
-     * peer's Close with no timer, so a peer that never answered held the
-     * client, its fd and the userdata until teardown. Armed only once the
-     * connection is open (the connect deadline still runs before that, and
-     * Keel's close does nothing then) and only once. */
-    if (!ud->closed && ud->client && !ud->close_armed &&
-        ud->connect_timer == 0 && ud->lua && !ud->lua->base.shutting_down &&
-        ud->lua->base.async_ctx) {
-        const HlAsyncBackend *be = hl_async_backend();
-        ud->connect_timer = be ? be->timer_add(ud->lua->base.async_ctx,
-                                               HL_WS_CLIENT_CLOSE_TIMEOUT_MS,
-                                               lua_ws_client_close_expired, ud)
-                               : 0;
-        ud->close_armed = ud->connect_timer != 0;
-    }
+    lua_ws_client_arm_close(ud);
     return 0;
 }
 
@@ -267,9 +299,20 @@ static void ws_client_call(HlLuaWsClientUD *ud, HlWscCall *c, const char *what)
 
 static void lua_ws_client_on_open(KlWsClientConn *ws, void *user_data)
 {
-    (void)ws;
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
     lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
+    ud->opened = 1;
+    /* conn:close() ran before the upgrade completed (audit 27): close now,
+     * with its code and reason, and arm the close deadline. The app's
+     * on_open is not run - it asked for the connection to end - and
+     * on_close fires once, from Keel's close or the deadline. */
+    if (ud->close_requested) {
+        kl_ws_client_close(ws, ud->close_code,
+                           ud->close_reason_len ? ud->close_reason : NULL,
+                           ud->close_reason_len);
+        lua_ws_client_arm_close(ud);
+        return;
+    }
     if (ud->on_open_ref == LUA_NOREF)
         return;
 

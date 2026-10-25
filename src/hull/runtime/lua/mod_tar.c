@@ -198,14 +198,50 @@ static HlTarEntry *read_entries(lua_State *L, int idx, size_t *out_n,
 
         if (!e->is_dir) {
             lua_getfield(L, -1, "data");
-            size_t len = 0;
-            const char *d = lua_tolstring(L, -1, &len);  /* borrowed */
+            if (lua_isnil(L, -1)) {
+                e->data = (const unsigned char *)"";
+                e->size = 0;
+            } else if (lua_isstring(L, -1)) {
+                size_t len = 0;
+                const char *d = lua_tolstring(L, -1, &len);  /* borrowed */
+                e->data = (const unsigned char *)d;
+                e->size = len;
+            } else {
+                /* A MappedBuffer / WasmBuffer / image wrote an empty member
+                 * (audit 27: lua_tolstring gave NULL). Its bytes are taken
+                 * once every entry has been read (below): a later entry's
+                 * __index could close() it, and a view taken now would read
+                 * an unmapped range. Marked by data == NULL, the anchor slot
+                 * in size. Anything else is refused. */
+                HlBufferView v;
+                if (!lua_get_buffer(L, -1, &v)) {
+                    lua_pop(L, 2);
+                    *msg = "tar.create: entry 'data' must be a string or a buffer";
+                    return NULL;
+                }
+                e->data = NULL;
+                e->size = (size_t)lua_rawlen(L, anchor) + 1;
+            }
             hl_lua_anchor(L, anchor, -1);
             lua_pop(L, 1);
-            e->data = (const unsigned char *)(d ? d : "");
-            e->size = d ? len : 0;
         }
         lua_pop(L, 1);                           /* entry table */
+    }
+    /* The buffer views, now that no app code runs before hl_tar_create:
+     * lua_rawgeti and lua_get_buffer call none. */
+    for (lua_Integer i = 0; i < n; i++) {
+        HlTarEntry *e = &ents[i];
+        if (e->is_dir || e->data) continue;
+        lua_rawgeti(L, anchor, (lua_Integer)e->size);
+        HlBufferView v;
+        int ok = lua_get_buffer(L, -1, &v);
+        lua_pop(L, 1);
+        if (!ok) {
+            *msg = "tar.create: an entry's data buffer was closed";
+            return NULL;
+        }
+        e->data = (const unsigned char *)(v.len ? v.data : "");
+        e->size = v.len;
     }
     *out_n = (size_t)n;
     return ents;

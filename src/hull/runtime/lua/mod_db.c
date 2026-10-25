@@ -62,6 +62,8 @@ static int lua_query_row_cb(void *opaque, HlColumn *cols, int ncols)
     return 0;
 }
 
+static void lua_scratch_release(lua_State *L, const void *mark);
+
 /* Marshal Lua table values to HlValue array for parameter binding */
 static int lua_to_hl_values(lua_State *L, int idx,
                                HlValue **out_params, int *out_count)
@@ -126,9 +128,17 @@ static int lua_to_hl_values(lua_State *L, int idx,
             params[i].b = lua_toboolean(L, -1);
             break;
         case LUA_TNIL:
-        default:
             params[i].type = HL_TYPE_NIL;
             break;
+        default: {
+            /* A table / function / userdata bound NULL, silently (audit 27):
+             * refused, as upsert's values and the JS bindings refuse it. The
+             * scratch goes back before the raise. */
+            const char *tn = lua_typename(L, t);
+            lua_scratch_release(L, params);
+            return luaL_error(L, "params: unsupported value type '%s' at "
+                              "index %d", tn, i + 1);
+        }
         }
         /* Leave values on stack - they keep strings alive */
     }
@@ -363,15 +373,11 @@ static int lua_db_query_impl(lua_State *L)
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
+    lua_settop(L, 2);   /* sql, params (or nil): the slots pushed below follow */
 
-    HlValue *params = NULL;
-    int nparams = 0;
-    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
-        if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
-            return luaL_error(L, "params must be a table");
-    }
-
-    /* Create result table */
+    /* The result table and the guard come BEFORE the params are marshalled
+     * (audit 27): both allocate, and a LUA_ERRMEM raised after the params
+     * left the scratch arena advanced for the rest of the run. */
     lua_newtable(L);
     int table_idx = lua_gettop(L);
 
@@ -381,7 +387,15 @@ static int lua_db_query_impl(lua_State *L)
         .row_count = 0,
     };
 
-    int guard = push_row_loop_guard(L);
+    (void)push_row_loop_guard(L);   /* closed by the settop below */
+
+    HlValue *params = NULL;
+    int nparams = 0;
+    if (!lua_isnil(L, 2)) {
+        if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
+            return luaL_error(L, "params must be a table");
+    }
+
     /* The handle again, now that nothing more runs before the call: the
      * params' conversion, the result table and the guard can all run app
      * code (an __index, a __gc) that closes a db.open connection. */
@@ -392,21 +406,11 @@ static int lua_db_query_impl(lua_State *L)
     }
     int rc = hl_db_query(h, sql, params, nparams,
                          lua_query_row_cb, &qc, lua->base.alloc);
-    lua_settop(L, guard - 1);   /* closes the guard; the result table is on top */
-
-    /*
-     * lua_to_hl_values left nparams values on the stack (to keep string
-     * pointers alive during the query).  The result table sits on top of
-     * them.  Rotate it below the param values so lua_free_hl_values pops
-     * the right things.
-     *
-     * Before rotate: [... param_1 .. param_n result_table]
-     * After rotate:  [... result_table param_1 .. param_n]
-     */
-    if (nparams > 0)
-        lua_rotate(L, table_idx - nparams, 1);
-
-    lua_free_hl_values(L, params, nparams);
+    /* Closes the guard and pops the params lua_to_hl_values left on the
+     * stack (they kept the string pointers alive during the query): the
+     * result table is on top. */
+    lua_settop(L, table_idx);
+    lua_scratch_release(L, params);
 
     if (qc.failed)
         return luaL_error(L, "db.query: not enough memory for the result");
@@ -432,26 +436,28 @@ static int lua_db_exec_impl(lua_State *L)
 
     if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
+    lua_settop(L, 2);   /* sql, params (or nil): the slots pushed below follow */
+
+    /* A Lua UDF runs inside the statement's step, so this is a row loop too
+     * as far as re-entry is concerned. The guard allocates, so it is made
+     * before the params take scratch space (audit 27, as lua_db_query_impl). */
+    int guard = push_row_loop_guard(L);
 
     HlValue *params = NULL;
     int nparams = 0;
-    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+    if (!lua_isnil(L, 2)) {
         if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
             return luaL_error(L, "params must be a table");
     }
 
-    /* A Lua UDF runs inside the statement's step, so this is a row loop too
-     * as far as re-entry is concerned. */
-    int guard = push_row_loop_guard(L);
     HlDbHandle *h = db_resolve_handle(L);       /* see lua_db_query_impl */
     if (!h) {
         lua_scratch_release(L, params);   /* audit 24, as lua_db_query_impl */
         return luaL_error(L, "exec: the connection was closed");
     }
     int rc = hl_db_exec(h, sql, params, nparams);
-    lua_settop(L, guard - 1);
-
-    lua_free_hl_values(L, params, nparams);
+    lua_settop(L, guard - 1);   /* closes the guard, pops the params */
+    lua_scratch_release(L, params);
 
     if (rc < 0)
         return hl_lua_raise_copy(L, "exec failed: ", hl_db_errmsg(h));

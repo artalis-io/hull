@@ -287,7 +287,9 @@ static int lua_res_bytes(lua_State *L)
     KlHttpResponse *res = ud->res;
     size_t len;
     const char *bytes = luaL_checklstring(L, 2, &len);
-    lua_hlwork(L, 0, len);   /* the copy (audit 9 M2) */
+    /* The copy (audit 9 M2), at res:json / html / text's rate - a unit per
+     * 8 bytes, as JS res.bytes; it was a unit per 64 (audit 27). */
+    res_charge_body(L, len);
     /* The headers an earlier res:json / html / text left describe that body,
      * not these bytes (audit 10): its gzip's Content-Encoding and Vary, and
      * the Content-Type Hull chose for it. An app-set Content-Type stays. */

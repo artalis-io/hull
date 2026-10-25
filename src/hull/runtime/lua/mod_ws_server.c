@@ -125,6 +125,15 @@ static int lua_ws_conn_send(lua_State *L)
     /* Charged before the send (audit 14): one call frames and queues up to
      * the whole heap. */
     lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);
+    /* Again, after the conversion (audit 27): a number converted to a
+     * string allocates, and the allocation can run a __gc that closes this
+     * connection. */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {
+        lua_pushnil(L);
+        lua_pushstring(L, "connection closed");
+        return 2;
+    }
 
     int rc = kl_ws_server_send_text(ud->conn->kl_ws, data, len);
     if (rc == 0) {
@@ -148,6 +157,12 @@ static int lua_ws_conn_send_binary(lua_State *L)
     size_t len;
     const char *data = luaL_checklstring(L, 2, &len);
     lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);   /* audit 14 */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws) {   /* audit 27 */
+        lua_pushnil(L);
+        lua_pushstring(L, "connection closed");
+        return 2;
+    }
 
     int rc = kl_ws_server_send_binary(ud->conn->kl_ws, data, len);
     if (rc == 0) {

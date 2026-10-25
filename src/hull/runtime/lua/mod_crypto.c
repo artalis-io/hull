@@ -30,10 +30,14 @@
 /* Charge a digest over @p n bytes to the instruction budget (Lua HULL PATCH
  * 0004, docs/lua_patches.md): one call hashes up to the whole heap, and it
  * counted as one instruction, so a loop of them was not bounded in time.
- * One unit per 8 bytes, a hash costing about an instruction per few bytes. */
+ * One unit per 8 bytes, a hash costing about an instruction per few bytes.
+ * Checked (lua_hlwork), so a run over its budget raises BEFORE the work, as
+ * the KDF / asym charges do (audit 27: lua_hlcharge only tripped at the next
+ * instruction, after the digest had run). Every caller charges before it
+ * allocates, so the raise leaks nothing. */
 static void crypto_charge(lua_State *L, size_t n)
 {
-    lua_hlcharge(L, n / 8, 0);
+    lua_hlwork(L, n / 8, 0);
 }
 
 /* Charge a key derivation of @p rounds rounds at @p per_round units each,
@@ -802,7 +806,10 @@ static int lua_crypto_hmac_sha256(lua_State *L)
     size_t data_len, key_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
     const char *key  = luaL_checklstring(L, 2, &key_len);
+    /* The key too (audit 27): a key over the 64-byte block is hashed in
+     * full first, so `hmac("", big_key)` in a loop was free. */
     crypto_charge(L, data_len);
+    crypto_charge(L, key_len);
     if (key_len == 0)
         return luaL_error(L, "hmac_sha256: key must not be empty");
     uint8_t out[32];
@@ -821,7 +828,10 @@ static int lua_crypto_hmac_sha1(lua_State *L)
     size_t data_len, key_len;
     const char *data = luaL_checklstring(L, 1, &data_len);
     const char *key  = luaL_checklstring(L, 2, &key_len);
+    /* The key too (audit 27): a key over the 64-byte block is hashed in
+     * full first, so `hmac("", big_key)` in a loop was free. */
     crypto_charge(L, data_len);
+    crypto_charge(L, key_len);
     if (key_len == 0)
         return luaL_error(L, "hmac_sha1: key must not be empty");
     uint8_t out[20];
@@ -840,7 +850,10 @@ static int lua_crypto_hmac_sha256_verify(lua_State *L)
     const char *data     = luaL_checklstring(L, 1, &data_len);
     const char *key      = luaL_checklstring(L, 2, &key_len);
     const char *expected = luaL_checklstring(L, 3, &expected_len);
+    /* The key too (audit 27): a key over the 64-byte block is hashed in
+     * full first, so `hmac("", big_key)` in a loop was free. */
     crypto_charge(L, data_len);
+    crypto_charge(L, key_len);
     if (key_len == 0)
         return luaL_error(L, "hmac_sha256_verify: key must not be empty");
     if (expected_len != 32) {

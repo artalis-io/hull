@@ -104,8 +104,13 @@ static void lua_to_sqlite_result(lua_State *L, sqlite3_context *ctx)
         sqlite3_result_int(ctx, lua_toboolean(L, -1));
         break;
     case LUA_TNIL:
-    default:
         sqlite3_result_null(ctx);
+        break;
+    default:
+        /* A table / function / userdata result wrote NULL, silently (audit
+         * 27): a SQL error, as the JS UDF bridge reports one. */
+        sqlite3_result_error(ctx, "udf: unsupported return type (expected "
+                             "a number, string, boolean or nil)", -1);
         break;
     }
 }

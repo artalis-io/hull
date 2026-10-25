@@ -20,6 +20,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
                                     HlGpuTextureDesc *out, int max, int anchor);
 
 #include "hull/utils/alloc.h"
+#include <pthread.h>
 #include "hull/shared/work_charge.h"   /* hl_work_bulk_units */
 #include "internal.h"   /* hl_lua_anchor, hl_lua_check_can_wait */
 #ifdef HL_ENABLE_WASM
@@ -652,6 +653,38 @@ static int l_gpu_buffer_read(lua_State *L)
     return 1;
 }
 
+/* The bytes a gpu.buffer_copy would move: @p size, or the rest of the
+ * source from @p src_offset when it is 0, never more than the source holds
+ * (a bogus size is refused by the cap, and must not trip the budget first).
+ * 0 when the device or the buffer cannot be found (the cap refuses those).
+ * Read under the device's lock, as the cap reads it; the cap has no size
+ * accessor (audit 27). */
+static size_t lua_gpu_copy_bytes(HlGpuCtx *ctx, int device, const char *src,
+                                 size_t src_offset, size_t size)
+{
+    if (!ctx || !src) return 0;
+    int idx = device < 0 ? ctx->default_device : device;
+    if (idx < 0 || idx >= ctx->device_count || idx >= HL_GPU_MAX_DEVICES)
+        return 0;
+    if (ctx->device_restriction && !ctx->allowed_devices[idx])
+        return 0;
+    HlGpuDevice *dev = &ctx->devices[idx];
+    size_t src_size = 0;
+    int found = 0;
+    pthread_mutex_lock(&dev->mutex);
+    for (int i = 0; i < dev->buffer_count; i++) {
+        if (strcmp(dev->buffers[i].name, src) == 0) {
+            src_size = dev->buffers[i].size;
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&dev->mutex);
+    if (!found || src_offset >= src_size) return 0;
+    size_t rest = src_size - src_offset;
+    return (size == 0 || size > rest) ? rest : size;
+}
+
 static int l_gpu_buffer_copy(lua_State *L)
 {
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
@@ -675,6 +708,12 @@ static int l_gpu_buffer_copy(lua_State *L)
         if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+
+    /* The device-side copy, one unit per 64 bytes before it runs, as a
+     * gpu.buffer upload (audit 27: uncharged, and size 0 copies the whole
+     * source). lua_hlwork runs no app code. */
+    lua_hlwork(L, (size_t)hl_work_bulk_units(
+        (uint64_t)lua_gpu_copy_bytes(ctx, device, src, src_offset, size)), 0);
 
     int rc = hl_cap_gpu_buffer_copy(ctx, device, src, dst,
                                      src_offset, dst_offset, size);
