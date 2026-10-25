@@ -8,6 +8,59 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Behaviour changes (security audits 24-27)
+
+Audits 24-26 tightened stdlib inputs; some apps will see different output or a new error.
+Audit 27 walked back the changes that broke ordinary calls (CSV column order, search paging) and
+kept the rest. Check the list below before upgrading.
+
+**Stdlib - output**
+- **Template dot paths read own properties only.** `{{ user.name }}` reads a field the value
+  itself holds: a JS getter defined on a class (its prototype), or a Lua table that gets the field
+  through an `__index` metatable, now renders empty, and a function value renders nothing. Pass
+  plain data (`{ name: user.name }`) to the template.
+- **`search` snippets and highlights are HTML-escaped.** The indexed text in `snippet` /
+  `highlight` is escaped and only your `before` / `after` / `ellipsis` markers are inserted as
+  given, so render the field raw (`{{{ r.snippet }}}`); `{{ r.snippet }}` now escapes it twice.
+- **CSV header order (`csv.encode` with `headers`).** Without `opts.columns`, the header is the
+  union of every row's keys (a key missing from the first row no longer drops its column). JS
+  keeps first-seen order - the first row's keys in their order, then each new key as a later row
+  brings it - so `[{title, id, done}]` still gives `title,id,done` (audit 24 had sorted it,
+  `done,id,title`; audit 27 restores the order). Lua sorts the keys by their text, as Lua tables
+  have no key order. Pass `opts.columns` for a fixed order in both.
+
+**Stdlib - inputs that used to fall back to a default now raise**
+- `jobs.enqueue`: `throttle` that is not a finite number of seconds >= 0 (`false`, negative,
+  NaN); `delay` / `at` / `run_at` that is not a finite number or numeric string (`false`,
+  `"soon"`, infinity); `max_attempts` (`maxAttempts`) outside 1..10000 (0 dead-lettered the job
+  before its first run). `nil` / JS `null` / `undefined` still mean "use the default", in
+  `init`, `enqueue` and `cron` alike (JS `enqueue` / `init` threw on `null` until audit 27).
+- `jobs.cleanup`: `before` that is not a finite unix timestamp; `older_than` (`olderThan`) that is
+  not a finite number of seconds >= 0. `older_than = 0` deletes every terminal job in both
+  runtimes (JS took 0 as unset and kept seven days until audit 27).
+
+**Stdlib - clamped, not refused**
+- **`search.query` paging clamps.** `limit` / `offset` accept a number or a numeric string
+  (`req.query.offset`) and clamp to 1..1000 / 0..2147483647; anything else takes the default
+  (20 / 0). Audit 26 raised on them, so `{ limit = 5000 }`, `{ limit = 0 }` or a query-string
+  offset answered 500. `max_query_len` / `max_query_terms` still raise on a bad value.
+- **Count options read numbers the way Lua's `tonumber` does in both runtimes** (jobs `limit` /
+  `offset` / `batch`, outbox `flush` `limit`, search paging): JS `"Infinity"`, `"0b11"` and
+  `"0o7"` now take the default instead of a clamped or parsed value. `outbox.flush({ limit = 0 })`
+  processes one item in both runtimes (JS used to fall back to 50 before audit 24).
+
+**Stdlib - other audit 27 fixes**
+- `jobs` `throttle`, `cleanup`'s `before` / `older_than` and the attempt-history retention are
+  rounded up to whole seconds, as `run_at` is: a fraction went to Postgres as a double, which it
+  refuses for an INTEGER column.
+- `attachment.init { max_size = false }` resets the per-upload cap to unlimited (JS: `null` or
+  `false`); Lua had no way to lift a cap on re-init.
+- `auth-flows` verify with `new_password` runs the pwned-password lookup before it reads the user
+  and checks the link's address binding, as password-reset confirm does, so it never acts on a
+  record that changed during the network wait.
+- Lua `auth-flows` and `email` refuse an address that is not valid UTF-8, as the JS twins
+  (whose strings cannot hold invalid bytes) effectively do.
+
 ## [0.17.1] - 2026-10-18
 
 Full PR list:

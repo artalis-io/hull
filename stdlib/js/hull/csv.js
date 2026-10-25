@@ -216,9 +216,13 @@ function encode(rows, opts) {
     if (useHeaders) {
         // rows is an array of objects. The header row is opts.columns when
         // given (an array of names, as Lua's csv.encode takes it), else the
-        // union of every row's own keys, sorted - Lua's rule. It came from
-        // the first row's keys only, and opts.columns was ignored, so a key
-        // missing from row 1 dropped its column in every row (audit 24).
+        // union of every row's own keys in first-seen order: the first row's
+        // keys in their order, then each new key as a later row brings it.
+        // It came from the first row's keys only, and opts.columns was
+        // ignored, so a key missing from row 1 dropped its column in every
+        // row (audit 24); audit 24's fix sorted the union, which reordered
+        // every existing export's columns (audit 27). Lua sorts: its tables
+        // have no key order.
         let headers;
         if (opts && opts.columns !== undefined && opts.columns !== null) {
             const cols = opts.columns;
@@ -246,7 +250,6 @@ function encode(rows, opts) {
                     }
                 }
             }
-            headers.sort();
         }
         out += encodeRow(headers) + "\n";
 

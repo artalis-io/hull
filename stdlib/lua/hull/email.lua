@@ -63,6 +63,8 @@ local MAX_ADDR = 254
 
 local function addr_ok(a)
     return type(a) == "string" and #a <= MAX_ADDR
+       -- Valid UTF-8 only, as the JS twin's strings always are (audit 27).
+       and utf8.len(a) ~= nil
        -- One address: no control byte, and none of the characters that
        -- separate or quote addresses ("a@x.co,b" was one address with one
        -- '@'; an HTTP provider that splits on commas mailed both).

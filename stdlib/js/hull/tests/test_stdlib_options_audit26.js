@@ -68,7 +68,7 @@ await test("auditLog.init: a bad retainDays throws and deletes nothing", () => {
 
 await test("attachment.init: maxSize must be a finite number > 0 (or null)", () => {
     for (const bad of BAD_NUMS) {
-        if (bad === null) continue;   // null = unlimited
+        if (bad === null || bad === false) continue;   // unlimited (audit 27)
         assertEq(refused(() => attachment.init({ maxSize: bad })), true, String(bad));
     }
     attachment.init({ maxSize: 1024 });
@@ -84,14 +84,7 @@ await test("search.query: limit / offset / caps are bounded integers", () => {
     search.index("a26docs", "3", { body: "alpha three" });
     assertEq(search.query("a26docs", "alpha", { limit: 2 }).length, 2, "limit 2");
     assertEq(search.query("a26docs", "alpha", { limit: 2, offset: 2 }).length, 1, "offset 2");
-    for (const bad of ["-1", -1, 0, 1.5, NaN, Infinity, 1001, null, true]) {
-        assertEq(refused(() => search.query("a26docs", "alpha", { limit: bad })), true,
-                 "limit " + String(bad));
-    }
-    for (const bad of ["1", -1, 1.5, NaN, Infinity, null]) {
-        assertEq(refused(() => search.query("a26docs", "alpha", { offset: bad })), true,
-                 "offset " + String(bad));
-    }
+    // limit / offset clamp since audit 27 (test_stdlib_audit27.js).
     for (const k of ["maxQueryLen", "maxQueryTerms"]) {
         for (const bad of ["1024", 0, -1, 1.5, NaN, Infinity, null]) {
             assertEq(refused(() => search.query("a26docs", "alpha", { [k]: bad })), true,
@@ -104,13 +97,13 @@ await test("search.query: limit / offset / caps are bounded integers", () => {
 
 await test("jobs: maxAttempts is an integer in 1..10000", async () => {
     jobs.init();
-    for (const bad of ["5", 0, -1, 1.5, NaN, Infinity, 10001, true, {}, null]) {
+    // null = unset everywhere, as Lua's nil (audit 27).
+    for (const bad of ["5", 0, -1, 1.5, NaN, Infinity, 10001, true, {}]) {
         assertEq(refused(() => jobs.init({ maxAttempts: bad })), true, "init " + String(bad));
         assertEq(refused(() => jobs.enqueue("a26", {}, { queue: "a26q", maxAttempts: bad })),
                  true, "enqueue " + String(bad));
-        if (bad !== null)   // null = no override on a cron schedule
-            assertEq(refused(() => jobs.cron("a26cron", "* * * * *", null, { maxAttempts: bad })),
-                     true, "cron " + String(bad));
+        assertEq(refused(() => jobs.cron("a26cron", "* * * * *", null, { maxAttempts: bad })),
+                 true, "cron " + String(bad));
     }
     // A valid one is honoured: maxAttempts 1 dead-letters on the first failure.
     jobs.handler("a26fail", () => { throw new Error("boom"); });
