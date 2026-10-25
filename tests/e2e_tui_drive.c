@@ -50,7 +50,12 @@
 #include <time.h>
 #include <unistd.h>
 
-#if defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+/* forkpty(3): <pty.h> (link -lutil) on glibc / musl Linux, <util.h> on macOS
+ * and the BSDs - as tests/hull/cap/test_tui_lifecycle.c picks it. */
+#if defined(__linux__)
+#include <pty.h>
+#define HAVE_FORKPTY 1
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <util.h>
 #define HAVE_FORKPTY 1
 #endif

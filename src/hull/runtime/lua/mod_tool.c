@@ -622,9 +622,30 @@ static int l_tool_is_symlink(lua_State *L)
 {
     const char *path = luaL_checkstring(L, 1);
     HlToolUnveilCtx *ctx = get_unveil_ctx(L);
-    if (ctx && hl_tool_unveil_check(ctx, path, 'r') != 0) {
-        lua_pushnil(L);
-        return 1;
+    /* lstat reads only the directory entry, so the grant that matters is the
+     * PARENT directory's. Checking the path itself resolved it - following the
+     * very link being asked about - so a link pointing outside the grants was
+     * "denied", read as nil, and every caller took nil for "not a link": a
+     * cloned app's static/ -> ../elsewhere was embedded (macOS, whose temp
+     * dirs are outside the tool grants). */
+    if (ctx) {
+        size_t n = strlen(path);
+        while (n > 1 && path[n - 1] == '/') n--;
+        size_t slash = n;
+        while (slash > 0 && path[slash - 1] != '/') slash--;
+        char parent[PATH_MAX];
+        if (slash == 0) {
+            parent[0] = '.'; parent[1] = '\0';
+        } else {
+            size_t plen = slash > 1 ? slash - 1 : 1;   /* keep "/" for root */
+            if (plen >= sizeof(parent)) { lua_pushnil(L); return 1; }
+            memcpy(parent, path, plen);
+            parent[plen] = '\0';
+        }
+        if (hl_tool_unveil_check(ctx, parent, 'r') != 0) {
+            lua_pushnil(L);
+            return 1;
+        }
     }
     struct stat st;
     lua_pushboolean(L, lstat(path, &st) == 0 && S_ISLNK(st.st_mode));

@@ -1737,27 +1737,34 @@ e2e-cache-concurrent: $(BUILDDIR)/hull
 	sh tests/e2e_cache_concurrent.sh
 
 # Run the cache e2e suite against a cosmopolitan-built hull. Slow
-# (rebuilds platform + hull with cosmocc). CI invokes on a Linux
-# x86_64 runner. The wrapper script verifies the binary is a cosmo
-# APE, then delegates to e2e_cache.sh with HULL overridden.
+# (rebuilds platform + hull with cosmocc). The wrapper script verifies
+# the binary is a cosmo APE, then delegates to e2e_cache.sh with HULL
+# overridden.
+#
+# The SKIP must end the whole recipe: as a recipe line of its own, its
+# `exit 0` left only that line's shell and make ran platform-cosmo anyway
+# (which rebuilds build/ under a native hull).
+#
+# NO `$(MAKE) clean` HERE. platform-cosmo ends by copying the two
+# arch archives INTO $(BUILDDIR) (Makefile: `cp $(COSMO_STAGE)/*`),
+# and clean is `rm -rf $(BUILDDIR)` - so cleaning here deleted the
+# very files the next line needs, and the target died on
+# No rule to make target 'build/libhull_platform.x86_64-cosmo.a'
+# It was also redundant: platform-cosmo cleans internally between
+# its two arch passes, so what it leaves is already a clean tree
+# plus the archives.
+#
+# The config-sentinel still fires on the flag flip below, which is
+# fine: it removes named Hull objects plus PLATFORM_LIB_PURGE, and
+# that is only libhull_platform.a - the *-cosmo.a archives survive.
 e2e-cache-cosmo:
-	@command -v cosmocc >/dev/null 2>&1 || { \
-		echo "SKIP: cosmocc not on PATH"; exit 0; }
-	$(MAKE) platform-cosmo
-	@# NO `$(MAKE) clean` HERE. platform-cosmo ends by copying the two
-	@# arch archives INTO $(BUILDDIR) (Makefile: `cp $(COSMO_STAGE)/*`),
-	@# and clean is `rm -rf $(BUILDDIR)` - so cleaning here deleted the
-	@# very files the next line needs, and the target died on
-	@#   No rule to make target 'build/libhull_platform.x86_64-cosmo.a'
-	@# It was also redundant: platform-cosmo cleans internally between
-	@# its two arch passes, so what it leaves is already a clean tree
-	@# plus the archives.
-	@#
-	@# The config-sentinel still fires on the flag flip below, which is
-	@# fine: it removes named Hull objects plus PLATFORM_LIB_PURGE, and
-	@# that is only libhull_platform.a - the *-cosmo.a archives survive.
-	$(MAKE) CC=cosmocc EMBED_PLATFORM=cosmo -j8
-	HULL=$(BUILDDIR)/hull sh tests/e2e_cache_cosmo.sh
+	@if ! command -v cosmocc >/dev/null 2>&1; then \
+		echo "SKIP: cosmocc not on PATH"; \
+	else \
+		$(MAKE) platform-cosmo && \
+		$(MAKE) CC=cosmocc EMBED_PLATFORM=cosmo -j8 && \
+		HULL=$(BUILDDIR)/hull sh tests/e2e_cache_cosmo.sh; \
+	fi
 
 e2e-compiler-free: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 	sh tests/e2e_compiler_free.sh
@@ -1839,8 +1846,15 @@ e2e-onboarding: $(BUILDDIR)/hull
 # --tui commands); skipped only on a fully TUI-less build.
 
 ifeq ($(HULL_HAS_TUI),1)
+# forkpty is in libutil on Linux (libSystem on macOS / BSD; cosmo has none).
+E2E_TUI_DRIVE_LIBS :=
+ifeq ($(UNAME_S),Linux)
+ifndef COSMO
+E2E_TUI_DRIVE_LIBS := -lutil
+endif
+endif
 $(BUILDDIR)/e2e_tui_drive: $(TESTDIR)/e2e_tui_drive.c | $(BUILDDIR)
-	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ $<
+	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ $< $(E2E_TUI_DRIVE_LIBS)
 E2E_TUI_DEPS := $(BUILDDIR)/hull $(BUILDDIR)/e2e_tui_drive
 else
 E2E_TUI_DEPS := $(BUILDDIR)/hull

@@ -446,7 +446,8 @@ end
 -- binary and served (a symlinked migrations/ ran another tree's SQL). The
 -- dev server refuses the same layout (audit 20).
 local function check_asset_root(dir, tmpdir)
-    if tool.is_symlink(dir) then
+    -- nil (the check was refused) counts as a link: fail closed.
+    if tool.is_symlink(dir) ~= false then
         print("hull build: " .. dir .. " is a symbolic link; an app's " ..
               "templates/, static/, migrations/, compute/ and shaders/ " ..
               "directories must be its own (links are not followed)")
@@ -1541,6 +1542,17 @@ end
 -- cross-check. Extracted from main() (docs/build_modularization.md).
 -- Inputs: opts, tmpdir, cc, is_cosmo, flavor_asset. Returns the platform archive
 -- path, its dir, and the cross-checked sig blob + per-arch hashes (for signing).
+-- tool.platform_sig_get() with the signature's trailing newline (sign-release
+-- writes one, and release.yml embeds the file as is) stripped, so package.sig
+-- records the bare 128 hex characters.
+local function platform_sig_get()
+    local blob = tool.platform_sig_get()
+    if blob and type(blob.signature) == "string" then
+        blob.signature = blob.signature:match("^%s*(.-)%s*$")
+    end
+    return blob
+end
+
 local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
     local platform_extracted = false
     local platform_lib = tmpdir .. "/libhull_platform.a"
@@ -1803,7 +1815,7 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
     local platform_sig_blob = nil    -- {manifest, signature} or nil
     local platform_arch_hashes = nil -- {arch: hex, ...} the cross-checked entries
     if opts.verify_platform then
-        platform_sig_blob = tool.platform_sig_get()
+        platform_sig_blob = platform_sig_get()
         if not platform_sig_blob then
             tool.stderr(
                 "hull build: this hull has no embedded platform manifest\n" ..
@@ -1875,7 +1887,7 @@ local function prepare_platform(opts, tmpdir, cc, is_cosmo, flavor_asset)
         -- built with this flag still inherit the manifest (just without
         -- the cross-check guarantee). If there's no embedded blob, the
         -- app's package.sig.platform omits the new fields entirely.
-        platform_sig_blob = tool.platform_sig_get()
+        platform_sig_blob = platform_sig_get()
     end
 
     -- Validate compiler matches platform (cc already resolved above)
@@ -1935,8 +1947,10 @@ typedef struct {
     -- Discover all file types
     local templates_dir = opts.app_dir .. "/templates"
     local html_files = {}
+    -- Before the existence test, which follows the link (its target may
+    -- be outside the tool grants and read as absent).
+    check_asset_root(templates_dir, tmpdir)
     if file_exists(templates_dir) then
-        check_asset_root(templates_dir, tmpdir)
         html_files = find_html_files(templates_dir)
     end
     if #html_files > 0 then
@@ -1945,8 +1959,8 @@ typedef struct {
 
     local static_dir = opts.app_dir .. "/static"
     local static_files = {}
+    check_asset_root(static_dir, tmpdir)
     if file_exists(static_dir) then
-        check_asset_root(static_dir, tmpdir)
         static_files = find_all_files(static_dir)
     end
     if #static_files > 0 then
@@ -1955,8 +1969,8 @@ typedef struct {
 
     local migrations_dir = opts.app_dir .. "/migrations"
     local migration_files = {}
+    check_asset_root(migrations_dir, tmpdir)
     if file_exists(migrations_dir) then
-        check_asset_root(migrations_dir, tmpdir)
         migration_files = find_sql_files(migrations_dir)
     end
     if #migration_files > 0 then
@@ -2020,8 +2034,8 @@ typedef struct {
     -- instead), an unstamped AOT *.wasm fails the build.
     local compute_files = {}
     local prebuilt_aot = {}  -- entry names ("compute/x.aot.<arch>") embedded as committed
+    check_asset_root(compute_dir, tmpdir)
     if file_exists(compute_dir) then
-        check_asset_root(compute_dir, tmpdir)
         local wasm = tool.find_files(compute_dir, "*.wasm")
         for _, f in ipairs(wasm) do
             if has_aot_magic(f) then
@@ -2077,8 +2091,8 @@ typedef struct {
 
     local shaders_dir = opts.app_dir .. "/shaders"
     local shader_files = {}
+    check_asset_root(shaders_dir, tmpdir)
     if file_exists(shaders_dir) then
-        check_asset_root(shaders_dir, tmpdir)
         shader_files = tool.find_files(shaders_dir, "*.wgsl")
     end
     if #shader_files > 0 then

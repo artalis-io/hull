@@ -45,7 +45,9 @@ run_hello_cli() {
     rc=$(hull_run "$HULL_RC_TMP" "${HULL_BIN}" run "${app}" -- world)
     out=$(cat "$HULL_RC_TMP")
     expect_eq "${runtime} hello_cli exit code on valid argv" "0" "${rc}"
-    line1=$(echo "${out}" | head -1)
+    # hull_run captures stderr too: skip Hull's own log records ("HH:MM:SS
+    # LEVEL ...", e.g. the macOS sandbox notice) to reach the app's first line.
+    line1=$(echo "${out}" | grep -v '^[0-9][0-9]:[0-9][0-9]:[0-9][0-9] ' | head -1)
     expect_eq "${runtime} hello_cli greeting line" "hello world" "${line1}"
 
     # 2. No args → exit 1, usage on stderr
@@ -352,12 +354,20 @@ LUA
     if [ -z "$bin" ]; then
         fail "built tool: hull build failed ($(tail -3 "${d}/build.log"))"
     else
-        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" -s pattern -m msg --tls-cert c --read-timeout 9)
-        expect_eq "built tool: -s/-m/--tls-cert/--read-timeout reach the app (exit)" "0" "$rc"
-        case "$(cat "$HULL_RC_TMP")" in
-            *"-s pattern -m msg --tls-cert c --read-timeout 9"*) pass "built tool: the app saw its options" ;;
-            *) fail "built tool: app options (got '$(cat "$HULL_RC_TMP")')" ;;
-        esac
+        # Only the app.main runner (serve_cli.c) leaves these to the app. A
+        # tool built against the full `make platform` library (not the slim
+        # base a release composes from) links the Keel server runner, whose
+        # parser takes them - so the check needs the slim composition.
+        if command -v nm >/dev/null 2>&1 && nm "$bin" 2>/dev/null | grep -q kl_http_server_init; then
+            echo "  SKIP: built tool options (this platform library links the server runner, not the slim base)"
+        else
+            rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" -s pattern -m msg --tls-cert c --read-timeout 9)
+            expect_eq "built tool: -s/-m/--tls-cert/--read-timeout reach the app (exit)" "0" "$rc"
+            case "$(cat "$HULL_RC_TMP")" in
+                *"-s pattern -m msg --tls-cert c --read-timeout 9"*) pass "built tool: the app saw its options" ;;
+                *) fail "built tool: app options (got '$(cat "$HULL_RC_TMP")')" ;;
+            esac
+        fi
         # (audit 7 M2) The runner parses the --wasm-* ceilings (round 6), so
         # they are reserved like every downgrade it implements: a bare
         # --wasm-timeout-ms used to lift the manifest's compute ceilings to
@@ -415,8 +425,21 @@ LUA
     if [ ! -f "${d}/dev.key" ]; then
         fail "verify-sig tool: hull keygen failed"
     else
-        bin=$(build_cli "$d" --sign "${d}/dev.key")
-        if [ -z "$bin" ]; then
+        # --sign needs a platform.sig (the developer platform layer); make one
+        # over this build's platform library, as e2e_composed_sig.sh does.
+        sigarg=""
+        plat="$(dirname "${HULL_BIN}")/libhull_platform.a"
+        if [ -f "$plat" ]; then
+            cp "$plat" "${d}/"
+            cp "$(dirname "${HULL_BIN}")/platform_canary_hash" "${d}/" 2>/dev/null || true
+            "$hull_abs" sign-platform --dir "${d}/" "${d}/dev" >/dev/null 2>&1 \
+                && sigarg="--platform-sig ${d}/platform.sig"
+        fi
+        # shellcheck disable=SC2086
+        bin=$(build_cli "$d" --sign "${d}/dev.key" $sigarg)
+        if [ -z "$bin" ] && grep -q "cannot read platform.sig" "${d}/build.log"; then
+            echo "  SKIP: verify-sig tool (no platform.sig for this hull)"
+        elif [ -z "$bin" ]; then
             fail "verify-sig tool: hull build failed ($(tail -3 "${d}/build.log"))"
         else
             rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --verify-sig "${d}/dev.pub" --hull-no-verify-platform)

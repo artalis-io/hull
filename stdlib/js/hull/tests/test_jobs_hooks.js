@@ -235,11 +235,16 @@ cases.audit23 = async () => {
     jobs.init();
     await atest("a fractional ctx.sleep parks on a whole second", async () => {
         jobs.workflow("halfsleep", async (w) => { await w.sleep(0.5); return { ok: true }; });
-        const id = jobs.start("halfsleep", {});
-        await jobs.work({ batch: 1 });
+        // Its own queue: parked, it falls due at the next whole second, and a
+        // later batch-1 claim on "default" in that second took it (lower id)
+        // instead of the job that case was about.
+        const before = time.now();
+        const id = jobs.start("halfsleep", {}, { queue: "halfsleep" });
+        await jobs.work({ batch: 1, queue: "halfsleep" });
         const j = jobs.get(id);
         assertEq(j.status, "pending", "parked");
         assertEq(Number.isInteger(j.runAt), true, "runAt " + j.runAt);
+        assertEq(j.runAt >= before + 1, true, "ran and parked: runAt " + j.runAt);
     });
     await atest("a string or fractional waitSignal timeout is a number of seconds", async () => {
         jobs.workflow("strwait", async (w) => {
@@ -287,9 +292,6 @@ cases.audit23 = async () => {
     await atest("an error whose message getter throws is still recorded", async () => {
         const bad = { get message() { throw new Error("again"); } };
         jobs.handler("badmsg", () => { throw bad; });
-        // Its own queue: the halfsleep job above is due a second after it
-        // parked, and a claim on "default" in that next second took it
-        // (lower id) instead of this one.
         const id = jobs.enqueue("badmsg", {}, { queue: "badmsg" });
         await jobs.work({ batch: 1, queue: "badmsg" });
         const j = jobs.get(id);

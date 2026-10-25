@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/types.h>   /* uid_t / gid_t (db_no_fchown) */
 
 /* ── Prepared statement cache ──────────────────────────────────────── */
 
@@ -282,6 +283,13 @@ static void db_mem_shutdown(void *ud) { (void)ud; g_sqlite_mem.xShutdown(g_sqlit
 
 static pthread_once_t g_sqlite_setup_once = PTHREAD_ONCE_INIT;
 
+/* SQLite's fchown, replaced (db_sqlite_setup_once): success, no syscall. */
+static int db_no_fchown(int fd, uid_t uid, gid_t gid)
+{
+    (void)fd; (void)uid; (void)gid;
+    return 0;
+}
+
 static void db_sqlite_setup_once(void)
 {
     /* Process-wide work, not the first opener's: whichever run happens to
@@ -314,6 +322,16 @@ static void db_sqlite_setup_once(void)
     const char *tmp = hl_hull_sqlite_temp_dir();
     if (tmp && !sqlite3_temp_directory)
         sqlite3_temp_directory = sqlite3_mprintf("%s", tmp);
+    /* Running as root, SQLite fchown()s each WAL / journal / shm file it
+     * creates to the database file's owner. The kernel sandbox grants no
+     * chown, so on Linux the seccomp filter killed the process at the first
+     * write (a hull app in a container, which runs as root unless told
+     * otherwise). Hull's files are its own: keep the creator as owner.
+     * (After the sqlite3_config calls above: the lookup initializes SQLite.) */
+    sqlite3_vfs *unix_vfs = sqlite3_vfs_find("unix");
+    if (unix_vfs && unix_vfs->iVersion >= 3 && unix_vfs->xSetSystemCall)
+        (void)unix_vfs->xSetSystemCall(unix_vfs, "fchown",
+                                       (sqlite3_syscall_ptr)db_no_fchown);
     hl_db_budget_restore(budget);
 }
 

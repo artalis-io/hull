@@ -530,20 +530,18 @@ APP
 
     # ── tui_log_tailer example ────────────────────────────────────
     echo "--- tui_log_tailer ---"
-    TAIL_LOG=/tmp/hull-tui-tail-e2e.log
-    rm -f "${TAIL_LOG}"
-    echo "seed" > "${TAIL_LOG}"
+    # The example watches the in-root relative path watched.log (its fs.read
+    # grant); it no longer reads a fixed /tmp file.
     OUT=$("${DRIVE}" "hull tui-tailer" "%s200%q" -- \
           "${HULL_BIN}" examples/tui_log_tailer/app.lua 2>/dev/null)
     case "${OUT}" in
-        *"hull tui-tailer"*"/tmp/hull-tail.log"*)
+        *"hull tui-tailer"*"watched.log"*)
             pass "tui_log_tailer renders title + watched path"
             ;;
         *)
             fail "tui_log_tailer missing expected output"
             ;;
     esac
-    rm -f "${TAIL_LOG}"
 
     # ── tui_chat example ──────────────────────────────────────────
     echo "--- tui_chat ---"
