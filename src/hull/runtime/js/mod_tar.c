@@ -310,7 +310,9 @@ static JSValue js_tar_extract(JSContext *ctx, JSValueConst this_val,
      * read unmapped or freed memory. The view is taken last, with nothing
      * between it and the parse. */
     const char *dir = NULL;
-    if (argc >= 2) {
+    /* undefined / null is "no directory", as in Lua: it was converted to
+     * the text "undefined" and extracted into ./undefined/ (audit 27). */
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
         dir = JS_ToCString(ctx, argv[1]);
         if (!dir)
             return JS_EXCEPTION;

@@ -209,10 +209,20 @@ static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
 
     JSValue o = JS_NewObject(ctx);
     if (JS_IsException(o)) return o;
-    JS_SetPropertyStr(ctx, o, "type", JS_NewString(ctx, js_fs_node_type_name(info.type)));
-    JS_SetPropertyStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)info.size));
-    JS_SetPropertyStr(ctx, o, "mode", JS_NewInt32(ctx, (int32_t)info.mode));
-    JS_SetPropertyStr(ctx, o, "mtime", JS_NewInt64(ctx, (int64_t)info.mtime));
+    /* Checked: a type string that could not be made was stored as
+     * JS_EXCEPTION (audit 27). */
+    JSValue tv = JS_NewString(ctx, js_fs_node_type_name(info.type));
+    if (JS_IsException(tv) ||
+        JS_DefinePropertyValueStr(ctx, o, "type", tv, JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, o, "size",
+            JS_NewInt64(ctx, (int64_t)info.size), JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, o, "mode",
+            JS_NewInt32(ctx, (int32_t)info.mode), JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, o, "mtime",
+            JS_NewInt64(ctx, (int64_t)info.mtime), JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, o);
+        return JS_EXCEPTION;
+    }
     return o;
 }
 
@@ -263,11 +273,25 @@ static JSValue js_fs_list(JSContext *ctx, JSValueConst this_val,
             hl_cap_fs_list_free(entries, count, js->base.alloc);
             return JS_EXCEPTION;
         }
-        JS_SetPropertyStr(ctx, o, "name", nm);
-        JS_SetPropertyStr(ctx, o, "type",
-                          JS_NewString(ctx, js_fs_node_type_name(entries[i].type)));
-        JS_SetPropertyStr(ctx, o, "size", JS_NewInt64(ctx, (int64_t)entries[i].size));
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, o);
+        /* The type string and every define too (audit 27). */
+        JSValue tv;
+        if (JS_DefinePropertyValueStr(ctx, o, "name", nm, JS_PROP_C_W_E) < 0 ||
+            JS_IsException(tv = JS_NewString(ctx,
+                               js_fs_node_type_name(entries[i].type))) ||
+            JS_DefinePropertyValueStr(ctx, o, "type", tv, JS_PROP_C_W_E) < 0 ||
+            JS_DefinePropertyValueStr(ctx, o, "size",
+                JS_NewInt64(ctx, (int64_t)entries[i].size), JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, o);
+            JS_FreeValue(ctx, arr);
+            hl_cap_fs_list_free(entries, count, js->base.alloc);
+            return JS_EXCEPTION;
+        }
+        if (JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)i, o,
+                                         JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, arr);
+            hl_cap_fs_list_free(entries, count, js->base.alloc);
+            return JS_EXCEPTION;
+        }
     }
     hl_cap_fs_list_free(entries, count, js->base.alloc);
     return arr;

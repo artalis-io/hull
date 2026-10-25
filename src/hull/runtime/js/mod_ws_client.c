@@ -89,6 +89,7 @@ static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
     if (!JS_IsUndefined(ud->on_message)) JS_FreeValueRT(rt, ud->on_message);
     if (!JS_IsUndefined(ud->on_close))   JS_FreeValueRT(rt, ud->on_close);
     if (!JS_IsUndefined(ud->on_error))   JS_FreeValueRT(rt, ud->on_error);
+    if (ud->close_reason) js_free_rt(rt, ud->close_reason);   /* audit 27 */
     /* self_ref is undefined here: while it is held the object cannot be
      * finalized (gc_mark does not report it). */
     js_free_rt(rt, ud);
@@ -173,6 +174,25 @@ static JSValue js_ws_client_send_binary(JSContext *ctx, JSValueConst this_val,
 
 static void js_ws_client_close_expired(void *user_data);
 
+/* Close-handshake deadline (audit 26): Keel waits in CLOSING for the peer's
+ * Close with no timer, so a peer that never answered held the client, its fd
+ * and the object until teardown. Armed only once the connection is open (the
+ * connect deadline still runs before that, and Keel's close does nothing
+ * then) and only once. */
+static void js_ws_client_arm_close(HlJSWsClientUD *ud)
+{
+    if (!ud->closed && ud->client && !ud->close_armed &&
+        ud->connect_timer == 0 && ud->js && !ud->js->base.shutting_down &&
+        ud->js->base.async_ctx) {
+        const HlAsyncBackend *be = hl_async_backend();
+        ud->connect_timer = be ? be->timer_add(ud->js->base.async_ctx,
+                                               HL_WS_CLIENT_CLOSE_TIMEOUT_MS,
+                                               js_ws_client_close_expired, ud)
+                               : 0;
+        ud->close_armed = ud->connect_timer != 0;
+    }
+}
+
 static JSValue js_ws_client_close(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
@@ -201,24 +221,32 @@ static JSValue js_ws_client_close(JSContext *ctx, JSValueConst this_val,
         return JS_UNDEFINED;
     }
 
+    /* Still connecting: Keel's close does nothing before the connection is
+     * open, and the connection then stayed open (audit 27). Record the
+     * first close; on_open sends it instead of calling onOpen. */
+    if (!ud->opened) {
+        if (!ud->close_requested) {
+            char *copy = NULL;
+            if (reason_len) {
+                copy = js_malloc(ctx, reason_len);
+                if (!copy) {
+                    JS_FreeCString(ctx, reason);
+                    return JS_EXCEPTION;
+                }
+                memcpy(copy, reason, reason_len);
+            }
+            ud->close_requested = 1;
+            ud->close_code = (uint16_t)code;
+            ud->close_reason = copy;
+            ud->close_reason_len = reason_len;
+        }
+        if (reason) JS_FreeCString(ctx, reason);
+        return JS_UNDEFINED;
+    }
+
     kl_ws_client_close(ud->client, (uint16_t)code, reason, reason_len);
     if (reason) JS_FreeCString(ctx, reason);
-
-    /* Close-handshake deadline (audit 26): Keel waits in CLOSING for the
-     * peer's Close with no timer, so a peer that never answered held the
-     * client, its fd and the object until teardown. Armed only once the
-     * connection is open (the connect deadline still runs before that, and
-     * Keel's close does nothing then) and only once. */
-    if (!ud->closed && ud->client && !ud->close_armed &&
-        ud->connect_timer == 0 && ud->js && !ud->js->base.shutting_down &&
-        ud->js->base.async_ctx) {
-        const HlAsyncBackend *be = hl_async_backend();
-        ud->connect_timer = be ? be->timer_add(ud->js->base.async_ctx,
-                                               HL_WS_CLIENT_CLOSE_TIMEOUT_MS,
-                                               js_ws_client_close_expired, ud)
-                               : 0;
-        ud->close_armed = ud->connect_timer != 0;
-    }
+    js_ws_client_arm_close(ud);
     return JS_UNDEFINED;
 }
 
@@ -313,6 +341,19 @@ static void js_ws_client_on_open(KlWsClientConn *ws, void *user_data)
     (void)ws;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
     js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
+    ud->opened = 1;
+    /* conn.close() ran while connecting (audit 27): send that close now,
+     * under the close deadline, and do not report the connection open -
+     * onClose follows, once (the peer's answer, or 1006 on the deadline). */
+    if (ud->close_requested) {
+        kl_ws_client_close(ud->client, ud->close_code, ud->close_reason,
+                           ud->close_reason_len);
+        if (ud->close_reason) js_free(ud->ctx, ud->close_reason);
+        ud->close_reason = NULL;
+        ud->close_reason_len = 0;
+        js_ws_client_arm_close(ud);
+        return;
+    }
     if (JS_IsUndefined(ud->on_open))
         return;
 

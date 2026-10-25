@@ -364,6 +364,39 @@ fail:
     return -1;
 }
 
+/* The synchronous compute.call / instance.call charged neither their input
+ * nor their output (audit 27). The input is charged 1 unit per 8 bytes before
+ * the call, and a maxOutput above the VM heap limit comes down to it (as
+ * gpu / compute.stream clamp theirs): the output is copied onto that heap. */
+static int js_wasm_sync_prepare(JSContext *ctx, const HlJS *js,
+                                HlWasmCallOpts *opts, size_t input_len)
+{
+    if (js && js->max_heap_bytes && opts->max_output > js->max_heap_bytes)
+        opts->max_output = js->max_heap_bytes;
+    return hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)input_len))
+           < 0 ? -1 : 0;
+}
+
+/* The output copied into an ArrayBuffer, charged 1 unit per 8 bytes before
+ * the copy and refused past the heap limit; @p output is freed either way. */
+static JSValue js_wasm_output_to_ab(JSContext *ctx, const HlJS *js,
+                                    void *output, size_t output_len,
+                                    const char *fn)
+{
+    JSValue ab;
+    if (!output) output_len = 0;
+    if (js && js->max_heap_bytes && output_len > js->max_heap_bytes)
+        ab = JS_ThrowRangeError(ctx, "%s: output_too_large (%zu bytes is "
+                                "more than the VM heap limit)", fn, output_len);
+    else if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)output_len)) < 0)
+        ab = JS_EXCEPTION;
+    else
+        ab = JS_NewArrayBufferCopy(ctx, output_len ? output : NULL, output_len);
+    if (js) hl_alloc_free(js->base.alloc, output, output_len);
+    else free(output);
+    return ab;
+}
+
 static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
@@ -447,6 +480,12 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
+    if (js_wasm_sync_prepare(ctx, js, &opts, input_len) != 0) {   /* audit 27 */
+        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        JS_FreeCString(ctx, name);
+        js_free_span_names(ctx, span_reqs, span_holders, span_count);
+        return JS_EXCEPTION;
+    }
 
     if (want_buffer) {
         HlWasmBuffer *out_buf = NULL;
@@ -493,13 +532,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
                                      err_msg ? err_msg : "unknown error");
 
     /* Return result as ArrayBuffer */
-    if (output && output_len > 0) {
-        JSValue ab = JS_NewArrayBufferCopy(ctx, output, output_len);
-        hl_alloc_free(js->base.alloc, output, output_len);
-        return ab;
-    }
-    hl_alloc_free(js->base.alloc, output, output_len);
-    return JS_NewArrayBufferCopy(ctx, NULL, 0);
+    return js_wasm_output_to_ab(ctx, js, output, output_len, "compute.call");
 }
 
 static JSValue js_compute_load(JSContext *ctx, JSValueConst this_val,
@@ -883,6 +916,11 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
     }
 
     if (js) js_wasm_cap_call_opts(&opts, &js->base);
+    if (js_wasm_sync_prepare(ctx, js, &opts, input_len) != 0) {   /* audit 27 */
+        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        js_free_span_names(ctx, span_reqs, span_holders, span_count);
+        return JS_EXCEPTION;
+    }
 
     /* Option and span getters and the input's toString are app code and can
      * close this instance, which frees it: `pi` must not be read until the
@@ -921,15 +959,8 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "WasmInstance.call: %s",
                                      err_msg ? err_msg : "unknown error");
 
-    if (output && output_len > 0) {
-        JSValue ab = JS_NewArrayBufferCopy(ctx, output, output_len);
-        if (js) hl_alloc_free(js->base.alloc, output, output_len);
-        else free(output);
-        return ab;
-    }
-    if (js) hl_alloc_free(js->base.alloc, output, output_len);
-    else free(output);
-    return JS_NewArrayBufferCopy(ctx, NULL, 0);
+    return js_wasm_output_to_ab(ctx, js, output, output_len,
+                                "WasmInstance.call");
 }
 
 static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
@@ -1415,6 +1446,13 @@ static int js_stream_cb_trampoline(const void *data, size_t len,
 
     JSValue args[3];
     args[0] = JS_NewArrayBufferCopy(cb->ctx, (const uint8_t *)data, len);
+    if (JS_IsException(args[0])) {
+        /* The chunk could not be made (out of memory, the heap limit):
+         * the callback got JS_EXCEPTION as its data (audit 27). Fail the
+         * stream with that exception pending. */
+        cb->error = 1;
+        return -1;
+    }
     args[1] = JS_NewUint32(cb->ctx, index);
     args[2] = JS_NewBool(cb->ctx, is_last);
 

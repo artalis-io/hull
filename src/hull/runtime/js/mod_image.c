@@ -448,15 +448,18 @@ static JSValue js_image_from_wasm(JSContext *ctx, JSValueConst this_val,
     (void)this_val;
     if (argc < 1) return JS_ThrowTypeError(ctx, "image.fromWasm: data required");
 
-    size_t len;
-    const uint8_t *data = hl_js_array_buffer_probe(ctx, &len, argv[0]);
-    const char *str_data = NULL;
-    if (!data) {
-        /* Try string */
-        str_data = JS_ToCStringLen(ctx, &len, argv[0]);
-        if (!str_data) return JS_ThrowTypeError(ctx, "image.fromWasm: ArrayBuffer or string required");
-        data = (const uint8_t *)str_data;
-    }
+    /* The unified buffer protocol: a typed array (a Uint8Array view of
+     * compute output) was converted with toString and parsed as the text
+     * "1,0,0,..." (audit 27). */
+    HlBufferView bv;
+    const char *bstr = NULL;
+    int bstr_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &bv, &bstr, &bstr_free))
+        return JS_ThrowTypeError(ctx, "image.fromWasm: a buffer or string "
+                                 "required");
+    size_t len = bv.len;
+    const uint8_t *data = (const uint8_t *)bv.data;
+    const char *str_data = bstr_free ? bstr : NULL;
 
     if (len < 9) {
         if (str_data) JS_FreeCString(ctx, str_data);

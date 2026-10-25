@@ -195,20 +195,24 @@ static int js_http_timeout_opt(JSContext *ctx, int argc, JSValueConst *argv,
 typedef struct {
     const char *p;
     size_t      len;
-    int         kind;   /* 0 none, 1 JS_ToCStringLen, 2 malloc'd copy */
+    int         kind;   /* 0 none, 1 JS_ToCStringLen, 2 js_malloc'd copy */
 } JsHttpBody;
 
 static void js_http_body_free(JSContext *ctx, JsHttpBody *b)
 {
     if (b->kind == 1) JS_FreeCString(ctx, b->p);
-    else if (b->kind == 2) free((void *)(uintptr_t)b->p);
+    else if (b->kind == 2) js_free(ctx, (void *)(uintptr_t)b->p);
     b->p = NULL;
     b->len = 0;
     b->kind = 0;
 }
 
 /* 0, or -1 with an exception pending (the conversion's own - the budget's
- * interrupt, out of memory - or the TypeError). */
+ * interrupt, out of memory - or the TypeError).
+ * The body is charged here, 1 unit per 8 bytes, before a buffer is copied,
+ * and the copy is made on the VM heap: an ArrayBuffer body was malloc'd and
+ * copied uncharged before anything sized it, and the sync request / post /
+ * put / patch never charged a body at all (audit 27). */
 static int js_http_body_get(JSContext *ctx, JSValueConst v, JsHttpBody *b,
                             const char *fn)
 {
@@ -220,16 +224,28 @@ static int js_http_body_get(JSContext *ctx, JSValueConst v, JsHttpBody *b,
         b->p = JS_ToCStringLen(ctx, &b->len, v);
         if (!b->p) return -1;
         b->kind = 1;
+        if (hl_js_budget_charge(ctx, hl_work_bytes_units(b->len)) < 0) {
+            js_http_body_free(ctx, b);
+            return -1;
+        }
         return 0;
     }
     size_t n = 0;
     const uint8_t *view = hl_js_bytes_view(ctx, &n, v);
     if (view) {
-        char *copy = malloc(n ? n : 1);
-        if (!copy) {
-            JS_ThrowOutOfMemory(ctx);
+        HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+        if (js && js->max_heap_bytes && n > js->max_heap_bytes) {
+            JS_ThrowRangeError(ctx, "%s: a %zu-byte body is larger than the "
+                               "VM's heap limit", fn, n);
             return -1;
         }
+        if (hl_js_budget_charge(ctx, hl_work_bytes_units(n)) < 0)
+            return -1;
+        /* js_malloc throws its own out-of-memory. No app code ran since
+         * the view was taken. */
+        char *copy = js_malloc(ctx, n ? n : 1);
+        if (!copy)
+            return -1;
         if (n) memcpy(copy, view, n);
         b->p = copy;
         b->len = n;
@@ -609,11 +625,12 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
 
     /* Keel copies the body and keeps it until the request is done: held on
      * the VM's off-heap total under its heap limit, and charged - N
-     * fetches in flight held N copies of one big body (audit 22). */
+     * fetches in flight held N copies of one big body (audit 22). The
+     * body was charged when it was read (js_http_body_get, audit 27). */
     HlOffheapHold body_hold = {0};
     int over = hl_offheap_take(&body_hold, &js->wasm_buf_bytes,
                                js->max_heap_bytes, body_len) != 0;
-    if (over || hl_js_budget_charge(ctx, hl_work_bytes_units(body_len)) < 0) {
+    if (over) {
         hl_offheap_drop(&body_hold);
         JS_FreeValue(ctx, resolving_funcs[0]);
         JS_FreeValue(ctx, resolving_funcs[1]);
@@ -622,10 +639,8 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, url);
         js_http_body_free(ctx, &jbody);
         js_free_http_headers(ctx, headers, num_headers);
-        if (over)
-            return JS_ThrowRangeError(ctx, "http.fetch: a %zu-byte body would "
-                "take the VM's off-heap copies past its heap limit", body_len);
-        return JS_EXCEPTION;
+        return JS_ThrowRangeError(ctx, "http.fetch: a %zu-byte body would "
+            "take the VM's off-heap copies past its heap limit", body_len);
     }
 
     extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,

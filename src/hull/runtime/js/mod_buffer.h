@@ -228,6 +228,15 @@ typedef struct HlJSWsClientUD {
     /* conn.close() re-armed connect_timer as the close-handshake deadline
      * (audit 26); set once, so a second close does not extend it. */
     int             close_armed;
+    /* on_open has run (Keel's state is OPEN). A conn.close() before that
+     * was dropped by Keel and the connection then stayed open with no close
+     * deadline (audit 27): it is recorded here and sent from on_open, which
+     * the app's onOpen then does not see. close_reason is js_malloc'd. */
+    int             opened;
+    int             close_requested;
+    uint16_t        close_code;
+    char           *close_reason;
+    size_t          close_reason_len;
     JSContext      *ctx;
     HlJS           *js;
     /* On the runtime's teardown list while `client` is held: the Keel

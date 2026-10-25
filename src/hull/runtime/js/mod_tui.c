@@ -17,6 +17,7 @@
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/cap/tui.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 #include <errno.h>
 #include <limits.h>
@@ -83,6 +84,26 @@ static JSValue js_tui_leave(JSContext *ctx, JSValueConst this_val,
 
 /* ── Query ─────────────────────────────────────────────────────── */
 
+/* Define @p v on @p o, once nothing has failed yet (*bad == 0): a value
+ * that could not be made (out of memory) was stored as JS_EXCEPTION in
+ * the event / size / caps objects (audit 27). The define consumes @p v. */
+static void tui_put(JSContext *ctx, JSValue o, const char *k, JSValue v,
+                    int *bad)
+{
+    if (*bad) { JS_FreeValue(ctx, v); return; }
+    if (JS_IsException(v) ||
+        JS_DefinePropertyValueStr(ctx, o, k, v, JS_PROP_C_W_E) < 0)
+        *bad = 1;
+}
+
+/* @p o, or JS_EXCEPTION (freeing it) when a tui_put failed. */
+static JSValue tui_obj_done(JSContext *ctx, JSValue o, int bad)
+{
+    if (!bad) return o;
+    JS_FreeValue(ctx, o);
+    return JS_EXCEPTION;
+}
+
 static JSValue js_tui_size(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -91,9 +112,11 @@ static JSValue js_tui_size(JSContext *ctx, JSValueConst this_val,
     int cols = 0, rows = 0;
     hl_cap_tui_size(g_ctx, &cols, &rows);
     JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "cols", JS_NewInt32(ctx, cols));
-    JS_SetPropertyStr(ctx, obj, "rows", JS_NewInt32(ctx, rows));
-    return obj;
+    if (JS_IsException(obj)) return JS_EXCEPTION;
+    int bad = 0;
+    tui_put(ctx, obj, "cols", JS_NewInt32(ctx, cols), &bad);
+    tui_put(ctx, obj, "rows", JS_NewInt32(ctx, rows), &bad);
+    return tui_obj_done(ctx, obj, bad);
 }
 
 static JSValue js_tui_caps(JSContext *ctx, JSValueConst this_val,
@@ -103,14 +126,16 @@ static JSValue js_tui_caps(JSContext *ctx, JSValueConst this_val,
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
     uint32_t caps = hl_cap_tui_caps(g_ctx);
     JSValue o = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, o, "truecolor", JS_NewBool(ctx, !!(caps & HL_TUI_CAP_TRUECOLOR)));
-    JS_SetPropertyStr(ctx, o, "color256",  JS_NewBool(ctx, !!(caps & HL_TUI_CAP_256COLOR)));
-    JS_SetPropertyStr(ctx, o, "color",     JS_NewBool(ctx, !!(caps & HL_TUI_CAP_BASIC_COLOR)));
-    JS_SetPropertyStr(ctx, o, "mouse",     JS_NewBool(ctx, !!(caps & HL_TUI_CAP_MOUSE)));
-    JS_SetPropertyStr(ctx, o, "focus",     JS_NewBool(ctx, !!(caps & HL_TUI_CAP_FOCUS)));
-    JS_SetPropertyStr(ctx, o, "kittyKbd",  JS_NewBool(ctx, !!(caps & HL_TUI_CAP_KITTY_KBD)));
-    JS_SetPropertyStr(ctx, o, "clipboard", JS_NewBool(ctx, !!(caps & HL_TUI_CAP_OSC52)));
-    return o;
+    if (JS_IsException(o)) return JS_EXCEPTION;
+    int bad = 0;
+    tui_put(ctx, o, "truecolor", JS_NewBool(ctx, !!(caps & HL_TUI_CAP_TRUECOLOR)), &bad);
+    tui_put(ctx, o, "color256",  JS_NewBool(ctx, !!(caps & HL_TUI_CAP_256COLOR)), &bad);
+    tui_put(ctx, o, "color",     JS_NewBool(ctx, !!(caps & HL_TUI_CAP_BASIC_COLOR)), &bad);
+    tui_put(ctx, o, "mouse",     JS_NewBool(ctx, !!(caps & HL_TUI_CAP_MOUSE)), &bad);
+    tui_put(ctx, o, "focus",     JS_NewBool(ctx, !!(caps & HL_TUI_CAP_FOCUS)), &bad);
+    tui_put(ctx, o, "kittyKbd",  JS_NewBool(ctx, !!(caps & HL_TUI_CAP_KITTY_KBD)), &bad);
+    tui_put(ctx, o, "clipboard", JS_NewBool(ctx, !!(caps & HL_TUI_CAP_OSC52)), &bad);
+    return tui_obj_done(ctx, o, bad);
 }
 
 static JSValue js_tui_theme(JSContext *ctx, JSValueConst this_val,
@@ -211,6 +236,11 @@ static JSValue js_tui_print(JSContext *ctx, JSValueConst this_val,
     size_t len = 0;
     const char *s = JS_ToCStringLen(ctx, &len, argv[2]);
     if (!s) return JS_EXCEPTION;
+    /* 1 unit per 8 bytes, as Lua's tui.print (audit 27). */
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(len)) < 0) {
+        JS_FreeCString(ctx, s);
+        return JS_EXCEPTION;
+    }
     hl_cap_tui_move(g_ctx, x, y);
     hl_cap_tui_write(g_ctx, s, len);
     JS_FreeCString(ctx, s);
@@ -226,6 +256,10 @@ static JSValue js_tui_write(JSContext *ctx, JSValueConst this_val,
     size_t len = 0;
     const char *s = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!s) return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(len)) < 0) {   /* audit 27 */
+        JS_FreeCString(ctx, s);
+        return JS_EXCEPTION;
+    }
     hl_cap_tui_write(g_ctx, s, len);
     JS_FreeCString(ctx, s);
     return JS_UNDEFINED;
@@ -245,49 +279,51 @@ static JSValue js_tui_flush(JSContext *ctx, JSValueConst this_val,
 static JSValue event_to_js(JSContext *ctx, const HlTuiEvent *ev)
 {
     JSValue o = JS_NewObject(ctx);
+    if (JS_IsException(o)) return JS_EXCEPTION;
+    int bad = 0;
     switch (ev->kind) {
     case HL_TUI_EV_KEY:
-        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "key"));
-        JS_SetPropertyStr(ctx, o, "key",
-            JS_NewString(ctx, ev->key ? ev->key : ""));
+        tui_put(ctx, o, "kind", JS_NewString(ctx, "key"), &bad);
+        tui_put(ctx, o, "key",
+            JS_NewString(ctx, ev->key ? ev->key : ""), &bad);
         if (ev->codepoint)
-            JS_SetPropertyStr(ctx, o, "codepoint",
-                JS_NewUint32(ctx, ev->codepoint));
-        JS_SetPropertyStr(ctx, o, "mods",  JS_NewUint32(ctx, ev->mods));
-        JS_SetPropertyStr(ctx, o, "shift", JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_SHIFT)));
-        JS_SetPropertyStr(ctx, o, "alt",   JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_ALT)));
-        JS_SetPropertyStr(ctx, o, "ctrl",  JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_CTRL)));
-        JS_SetPropertyStr(ctx, o, "super", JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_SUPER)));
+            tui_put(ctx, o, "codepoint",
+                JS_NewUint32(ctx, ev->codepoint), &bad);
+        tui_put(ctx, o, "mods",  JS_NewUint32(ctx, ev->mods), &bad);
+        tui_put(ctx, o, "shift", JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_SHIFT)), &bad);
+        tui_put(ctx, o, "alt",   JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_ALT)), &bad);
+        tui_put(ctx, o, "ctrl",  JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_CTRL)), &bad);
+        tui_put(ctx, o, "super", JS_NewBool(ctx, !!(ev->mods & HL_TUI_MOD_SUPER)), &bad);
         break;
     case HL_TUI_EV_RESIZE:
-        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "resize"));
-        JS_SetPropertyStr(ctx, o, "cols", JS_NewInt32(ctx, ev->cols));
-        JS_SetPropertyStr(ctx, o, "rows", JS_NewInt32(ctx, ev->rows));
+        tui_put(ctx, o, "kind", JS_NewString(ctx, "resize"), &bad);
+        tui_put(ctx, o, "cols", JS_NewInt32(ctx, ev->cols), &bad);
+        tui_put(ctx, o, "rows", JS_NewInt32(ctx, ev->rows), &bad);
         break;
     case HL_TUI_EV_MOUSE:
-        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "mouse"));
-        JS_SetPropertyStr(ctx, o, "x", JS_NewInt32(ctx, ev->x));
-        JS_SetPropertyStr(ctx, o, "y", JS_NewInt32(ctx, ev->y));
-        JS_SetPropertyStr(ctx, o, "button", JS_NewInt32(ctx, ev->button));
+        tui_put(ctx, o, "kind", JS_NewString(ctx, "mouse"), &bad);
+        tui_put(ctx, o, "x", JS_NewInt32(ctx, ev->x), &bad);
+        tui_put(ctx, o, "y", JS_NewInt32(ctx, ev->y), &bad);
+        tui_put(ctx, o, "button", JS_NewInt32(ctx, ev->button), &bad);
         break;
     case HL_TUI_EV_PASTE:
-        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "paste"));
-        JS_SetPropertyStr(ctx, o, "text",
-            JS_NewStringLen(ctx, ev->text ? ev->text : "", ev->text_len));
+        tui_put(ctx, o, "kind", JS_NewString(ctx, "paste"), &bad);
+        tui_put(ctx, o, "text",
+            JS_NewStringLen(ctx, ev->text ? ev->text : "", ev->text_len), &bad);
         break;
     case HL_TUI_EV_FOCUS:
-        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "focus"));
-        JS_SetPropertyStr(ctx, o, "in",   JS_NewBool(ctx, ev->focus_in));
+        tui_put(ctx, o, "kind", JS_NewString(ctx, "focus"), &bad);
+        tui_put(ctx, o, "in",   JS_NewBool(ctx, ev->focus_in), &bad);
         break;
     case HL_TUI_EV_HANGUP:
         /* the terminal went away (stdin EOF); sticky - audit 10 */
-        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "hangup"));
+        tui_put(ctx, o, "kind", JS_NewString(ctx, "hangup"), &bad);
         break;
     default:
-        JS_SetPropertyStr(ctx, o, "kind", JS_NewString(ctx, "none"));
+        tui_put(ctx, o, "kind", JS_NewString(ctx, "none"), &bad);
         break;
     }
-    return o;
+    return tui_obj_done(ctx, o, bad);
 }
 
 /* ── Async-integrated poll ─────────────────────────────────────
@@ -527,6 +563,10 @@ static JSValue js_tui_clipboard_set(JSContext *ctx, JSValueConst this_val,
     size_t len = 0;
     const char *s = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!s) return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(len)) < 0) {   /* audit 27 */
+        JS_FreeCString(ctx, s);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_tui_clipboard_set(g_ctx, s, len);
     JS_FreeCString(ctx, s);
     if (rc < 0) {

@@ -222,7 +222,13 @@ static int kv_scan_js_cb(void *ctx_, const uint8_t *key, size_t klen)
     struct kv_scan_js *s = (struct kv_scan_js *)ctx_;
     JSValue ab = JS_NewArrayBufferCopy(s->ctx, key, klen);   /* COPY inside cb */
     if (JS_IsException(ab)) { s->err = 1; return 1; }
-    JS_DefinePropertyValueUint32(s->ctx, s->arr, s->n++, ab, JS_PROP_C_W_E);
+    /* The define consumes ab; a failure (out of memory) fails the scan
+     * (audit 27). */
+    if (JS_DefinePropertyValueUint32(s->ctx, s->arr, s->n++, ab,
+                                     JS_PROP_C_W_E) < 0) {
+        s->err = 1;
+        return 1;
+    }
     return 0;
 }
 
@@ -238,13 +244,15 @@ static JSValue js_kv_scan(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     struct kv_scan_js s = { ctx, JS_NewArray(ctx), 0, 0 };
+    if (JS_IsException(s.arr)) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     int rc = hl_cap_kv_scan(c, (const uint8_t *)pb.data, pb.len, (size_t)limit, kv_scan_js_cb, &s);
     kv_arg_free(ctx, ps, pf);
     if (kv_run_tripped(ctx)) {   /* each SCAN step is charged (audit 17) */
         JS_FreeValue(ctx, s.arr);
         return hl_js_budget_throw(ctx);
     }
-    if (rc != 0 || s.err) { JS_FreeValue(ctx, s.arr); return JS_ThrowInternalError(ctx, "%s", hl_cap_kv_error(c)); }
+    if (s.err) { JS_FreeValue(ctx, s.arr); return JS_EXCEPTION; }   /* its own error */
+    if (rc != 0) { JS_FreeValue(ctx, s.arr); return JS_ThrowInternalError(ctx, "%s", hl_cap_kv_error(c)); }
     return s.arr;
 }
 

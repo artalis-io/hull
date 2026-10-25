@@ -659,6 +659,31 @@ static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
     return ab;
 }
 
+/* The bytes a size-0 gpu.bufferCopy moves: what the source holds past
+ * @p src_offset, 0 when the device or buffer is not there (the copy then
+ * fails). Read under the device lock, the way hl_cap_gpu_buffer_copy
+ * resolves them. */
+static size_t js_gpu_copy_src_bytes(HlGpuCtx *gpu, int device,
+                                    const char *src, size_t src_offset)
+{
+    int idx = device < 0 ? gpu->default_device : device;
+    if (idx < 0 || idx >= gpu->device_count ||
+        (gpu->device_restriction && !gpu->allowed_devices[idx]))
+        return 0;
+    HlGpuDevice *dev = &gpu->devices[idx];
+    size_t n = 0;
+    pthread_mutex_lock(&dev->mutex);
+    for (int i = 0; i < dev->buffer_count; i++) {
+        if (strcmp(dev->buffers[i].name, src) == 0) {
+            if (src_offset < dev->buffers[i].size)
+                n = dev->buffers[i].size - src_offset;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&dev->mutex);
+    return n;
+}
+
 static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
@@ -691,6 +716,13 @@ static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
         if ((r = hl_js_opt_int32(ctx, argv[2], "device", &d)) < 0) goto opt_fail;
         if (r) device = d;
     }
+
+    /* Charged before it runs, as gpu.buffer is (audit 27: a copy of up to
+     * the device's whole live memory was free). */
+    uint64_t copy_bytes = size ? size
+                        : js_gpu_copy_src_bytes(gpu, device, src, src_offset);
+    if (hl_js_budget_charge(ctx, hl_work_bulk_units(copy_bytes)) < 0)
+        goto opt_fail;
 
     int rc = hl_cap_gpu_buffer_copy(gpu, device, src, dst,
                                      src_offset, dst_offset, size);
@@ -794,8 +826,12 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
         v = JS_GetPropertyStr(ctx, argv[2], "format");
         if (JS_IsException(v)) goto opt_fail;
         if (JS_IsString(v)) {
+            /* A failed conversion (the budget, out of memory) fails the
+             * call: it read as the option being absent (audit 27). */
             const char *f = JS_ToCString(ctx, v);
-            if (f) { format = js_parse_tex_format(f); JS_FreeCString(ctx, f); }
+            if (!f) { JS_FreeValue(ctx, v); goto opt_fail; }
+            format = js_parse_tex_format(f);
+            JS_FreeCString(ctx, f);
         }
         JS_FreeValue(ctx, v);
         if ((r = hl_js_opt_bool(ctx, argv[2], "storage")) < 0) goto opt_fail;
@@ -804,24 +840,24 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
         if (JS_IsException(v)) goto opt_fail;
         if (JS_IsString(v)) {
             const char *f = JS_ToCString(ctx, v);
-            if (f && strcmp(f, "linear") == 0) filter = HL_GPU_FILTER_LINEAR;
-            if (f) JS_FreeCString(ctx, f);
+            if (!f) { JS_FreeValue(ctx, v); goto opt_fail; }
+            if (strcmp(f, "linear") == 0) filter = HL_GPU_FILTER_LINEAR;
+            JS_FreeCString(ctx, f);
         }
         JS_FreeValue(ctx, v);
         v = JS_GetPropertyStr(ctx, argv[2], "wrap");
         if (JS_IsException(v)) goto opt_fail;
         if (JS_IsString(v)) {
             const char *w = JS_ToCString(ctx, v);
-            if (w) {
-                if (strcmp(w, "repeat") == 0) {
-                    address_u = HL_GPU_ADDRESS_REPEAT;
-                    address_v = HL_GPU_ADDRESS_REPEAT;
-                } else if (strcmp(w, "mirror") == 0) {
-                    address_u = HL_GPU_ADDRESS_MIRROR;
-                    address_v = HL_GPU_ADDRESS_MIRROR;
-                }
-                JS_FreeCString(ctx, w);
+            if (!w) { JS_FreeValue(ctx, v); goto opt_fail; }
+            if (strcmp(w, "repeat") == 0) {
+                address_u = HL_GPU_ADDRESS_REPEAT;
+                address_v = HL_GPU_ADDRESS_REPEAT;
+            } else if (strcmp(w, "mirror") == 0) {
+                address_u = HL_GPU_ADDRESS_MIRROR;
+                address_v = HL_GPU_ADDRESS_MIRROR;
             }
+            JS_FreeCString(ctx, w);
         }
         JS_FreeValue(ctx, v);
     }

@@ -36,10 +36,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int enc_guard(JSContext *ctx, size_t in_len, size_t out_len);
+
 /* The bytes of a byte string, ArrayBuffer or typed array. Returns 1 with
  * *data / *len set (and *owned = a malloc'd copy to free, or NULL), 0 when the
- * value is not one of those, -1 when out of memory. Never leaves an exception
- * pending on the 0 path. */
+ * value is not one of those, -1 with an exception pending (the conversion's
+ * own - the budget's interrupt - out of memory, or the guard's). Never leaves
+ * an exception pending on the 0 path. A string's copy is guarded and charged
+ * (its input bytes) before it is made: it was copied first, and a failed
+ * conversion was reported as out of memory (audit 27). */
 static int get_bytes(JSContext *ctx, JSValueConst v,
                      const uint8_t **data, size_t *len, uint8_t **owned)
 {
@@ -48,8 +53,13 @@ static int get_bytes(JSContext *ctx, JSValueConst v,
         size_t n;
         const char *s = JS_ToCStringLen(ctx, &n, v);
         if (!s) return -1;
+        if (enc_guard(ctx, n, n)) { JS_FreeCString(ctx, s); return -1; }
         uint8_t *out = malloc(n ? n : 1);
-        if (!out) { JS_FreeCString(ctx, s); return -1; }
+        if (!out) {
+            JS_FreeCString(ctx, s);
+            JS_ThrowOutOfMemory(ctx);
+            return -1;
+        }
         size_t o = 0;
         for (size_t i = 0; i < n; i++) {
             unsigned char c = (unsigned char)s[i];
@@ -145,10 +155,11 @@ static JSValue js_hex_encode(JSContext *ctx, JSValueConst this_val,
     if (argc < 1) return JS_UNDEFINED;
     const uint8_t *in; size_t n; uint8_t *owned;
     int got = get_bytes(ctx, argv[0], &in, &n, &owned);
-    if (got < 0) return JS_ThrowOutOfMemory(ctx);
+    if (got < 0) return JS_EXCEPTION;   /* its own error (audit 27) */
     if (got == 0) return JS_UNDEFINED;
     if (n > (SIZE_MAX - 1) / 2) { free(owned); return JS_ThrowRangeError(ctx, "encoding: value too large"); }
-    if (enc_guard(ctx, n, n * 2)) { free(owned); return JS_EXCEPTION; }
+    /* An owned copy's input was charged by get_bytes. */
+    if (enc_guard(ctx, owned ? 0 : n, n * 2)) { free(owned); return JS_EXCEPTION; }
     char *out = malloc(n * 2 + 1);
     if (!out) { free(owned); return JS_ThrowOutOfMemory(ctx); }
     int rc = hl_hex_encode(in, n, out, n * 2 + 1);
@@ -186,11 +197,11 @@ static JSValue js_base64_encode(JSContext *ctx, JSValueConst this_val,
     if (!(argc > 2 && JS_ToBool(ctx, argv[2]))) flags |= HL_BASE64_NOPAD;
     const uint8_t *in; size_t n; uint8_t *owned;
     int got = get_bytes(ctx, argv[0], &in, &n, &owned);
-    if (got < 0) return JS_ThrowOutOfMemory(ctx);
+    if (got < 0) return JS_EXCEPTION;   /* its own error (audit 27) */
     if (got == 0) return JS_UNDEFINED;
     size_t len = hl_base64_encoded_len(n, flags);
     if (len == 0 && n != 0) { free(owned); return JS_ThrowRangeError(ctx, "encoding: value too large"); }
-    if (enc_guard(ctx, n, len)) { free(owned); return JS_EXCEPTION; }
+    if (enc_guard(ctx, owned ? 0 : n, len)) { free(owned); return JS_EXCEPTION; }
     char *out = malloc(len + 1);
     if (!out) { free(owned); return JS_ThrowOutOfMemory(ctx); }
     int rc = hl_base64_encode(in, n, out, len + 1, flags);

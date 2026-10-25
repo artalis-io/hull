@@ -257,13 +257,20 @@ static JSValue js_blob_init(JSContext *ctx, JSValueConst this_val,
 
 /* ── Result object helpers ───────────────────────────────────────── */
 
+/* {id, size}, or JS_EXCEPTION: an id string that could not be made was
+ * stored as JS_EXCEPTION (audit 27). Used by put and iter. */
 static JSValue make_put_result(JSContext *ctx, const char *id, size_t size)
 {
     JSValue obj = JS_NewObject(ctx);
     if (JS_IsException(obj)) return obj;
-    JS_DefinePropertyValueStr(ctx, obj, "id",
-                      JS_NewStringLen(ctx, id, HL_BLOB_ID_HEX_LEN), JS_PROP_C_W_E);
-    JS_DefinePropertyValueStr(ctx, obj, "size", JS_NewInt64(ctx, (int64_t)size), JS_PROP_C_W_E);
+    JSValue idv = JS_NewStringLen(ctx, id, HL_BLOB_ID_HEX_LEN);
+    if (JS_IsException(idv) ||
+        JS_DefinePropertyValueStr(ctx, obj, "id", idv, JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, obj, "size",
+            JS_NewInt64(ctx, (int64_t)size), JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
     return obj;
 }
 
@@ -774,11 +781,11 @@ static JSValue js_blob_iter(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     IterAcc acc = { ctx, NULL, 0, 0, 0 };
     if (hl_cap_blob_iter(b, iter_collect_cb, &acc) != 0 || acc.oom) {
-        if (acc.items) js_free(ctx, acc.items);
+        js_free(ctx, acc.items);
         return JS_ThrowInternalError(ctx, "blob.iter: walk failed");
     }
     if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b))) {
-        if (acc.items) js_free(ctx, acc.items);
+        js_free(ctx, acc.items);
         return JS_EXCEPTION;
     }
 
@@ -787,23 +794,21 @@ static JSValue js_blob_iter(JSContext *ctx, JSValueConst this_val,
      * are invisible. */
     JSValue arr = JS_NewArray(ctx);
     if (JS_IsException(arr)) {
-        if (acc.items) js_free(ctx, acc.items);
+        js_free(ctx, acc.items);
         return arr;
     }
     for (size_t i = 0; i < acc.count; i++) {
-        JSValue item = JS_NewObject(ctx);
-        if (JS_IsException(item)) {
+        JSValue item = make_put_result(ctx, acc.items[i].id,
+                                       (size_t)acc.items[i].size);
+        if (JS_IsException(item) ||
+            JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)i, item,
+                                         JS_PROP_C_W_E) < 0) {
             JS_FreeValue(ctx, arr);
-            if (acc.items) js_free(ctx, acc.items);
-            return item;
+            js_free(ctx, acc.items);
+            return JS_EXCEPTION;
         }
-        JS_DefinePropertyValueStr(ctx, item, "id",
-            JS_NewStringLen(ctx, acc.items[i].id, HL_BLOB_ID_HEX_LEN), JS_PROP_C_W_E);
-        JS_DefinePropertyValueStr(ctx, item, "size",
-            JS_NewInt64(ctx, (int64_t)acc.items[i].size), JS_PROP_C_W_E);
-        JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)i, item, JS_PROP_C_W_E);
     }
-    if (acc.items) js_free(ctx, acc.items);
+    js_free(ctx, acc.items);
     return arr;
 }
 
@@ -865,8 +870,12 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
     opts.strategy = HL_BLOB_LRU;
     if (JS_IsString(v)) {
         const char *s = JS_ToCString(ctx, v);
-        if (s && strcmp(s, "fifo") == 0) opts.strategy = HL_BLOB_FIFO;
-        if (s) JS_FreeCString(ctx, s);
+        if (!s) {   /* a failed conversion is not "lru" (audit 27) */
+            JS_FreeValue(ctx, v);
+            return JS_EXCEPTION;
+        }
+        if (strcmp(s, "fifo") == 0) opts.strategy = HL_BLOB_FIFO;
+        JS_FreeCString(ctx, s);
     }
     JS_FreeValue(ctx, v);
 
@@ -887,9 +896,15 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
     if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b) + removed))
         return JS_EXCEPTION;
 
-    JSValue out = JS_NewObject(ctx);
-    JS_DefinePropertyValueStr(ctx, out, "removed", JS_NewInt64(ctx, (int64_t)removed), JS_PROP_C_W_E);
-    JS_DefinePropertyValueStr(ctx, out, "freedBytes", JS_NewInt64(ctx, (int64_t)freed), JS_PROP_C_W_E);
+    JSValue out = JS_NewObject(ctx);   /* checked (audit 27) */
+    if (JS_IsException(out) ||
+        JS_DefinePropertyValueStr(ctx, out, "removed",
+            JS_NewInt64(ctx, (int64_t)removed), JS_PROP_C_W_E) < 0 ||
+        JS_DefinePropertyValueStr(ctx, out, "freedBytes",
+            JS_NewInt64(ctx, (int64_t)freed), JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, out);
+        return JS_EXCEPTION;
+    }
     return out;
 }
 
