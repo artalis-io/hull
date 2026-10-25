@@ -171,17 +171,29 @@ function priorityOpt(v, who) {
     return v;
 }
 
+// Lua's tonumber(v) for a number or a string: a decimal numeral (optional
+// sign, fraction, exponent) or a 0x hex integer, surrounded by optional
+// whitespace; anything else is undefined. Number(v) also read "Infinity",
+// "0b11" and "0o7", which Lua's tonumber refuses (audit 27).
+function luaToNumber(v) {
+    if (typeof v === "number") return v;
+    if (typeof v !== "string") return undefined;
+    const t = v.trim();
+    if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return Number(t);
+    const m = /^([+-]?)0[xX]([0-9a-fA-F]+)$/.exec(t);
+    if (m) { const h = parseInt(m[2], 16); return m[1] === "-" ? -h : h; }
+    return undefined;
+}
+
 // A count option (limit / offset / batch) as an integer in lo..hi, Lua's
 // `tonumber(v) or def` rule: a number or a numeric string counts, anything
-// else (undefined, null, true, an object) and NaN take the default, and
-// +/-Infinity clamps to the bound (audit 24: Number(null) and Number(true)
-// are 0 and 1, so `limit: null` returned one row, and an unclamped batch
-// reached LIMIT as a negative "no limit" or a fraction).
+// else (undefined, null, true, an object, "Infinity") and NaN take the
+// default, and +/-Infinity clamps to the bound (audit 24: Number(null) and
+// Number(true) are 0 and 1, so `limit: null` returned one row, and an
+// unclamped batch reached LIMIT as a negative "no limit" or a fraction).
 function countOpt(v, def, lo, hi) {
-    let n = def;
-    if (typeof v === "number") n = v;
-    else if (typeof v === "string" && v.trim() !== "") n = Number(v);
-    if (Number.isNaN(n)) n = def;
+    let n = luaToNumber(v);
+    if (n === undefined || Number.isNaN(n)) n = def;
     return Math.floor(Math.max(lo, Math.min(n, hi)));
 }
 
@@ -198,7 +210,10 @@ function countOpt(v, def, lo, hi) {
  */
 function init(opts) {
     const o = opts || {};
-    if (o.maxAttempts !== undefined) _cfg.maxAttempts = attemptsOpt(o.maxAttempts, "jobs.init");
+    // null is unset, as Lua's nil (audit 27: enqueue / init threw on null
+    // while cron took it).
+    if (o.maxAttempts !== undefined && o.maxAttempts !== null)
+        _cfg.maxAttempts = attemptsOpt(o.maxAttempts, "jobs.init");
     if (o.visibilityTimeout !== undefined)
         _cfg.visibilityTimeout = durationOpt("visibilityTimeout", o.visibilityTimeout);
     if (o.reapInterval !== undefined)
@@ -664,10 +679,12 @@ function enqueue(jobType, data, opts) {
     // created within the last `throttle` seconds. Best-effort - keyed by
     // (queue, type), no unique constraint (use dedupKey for exact-once).
     // A throttle that is not a finite number >= 0 is refused (audit 26).
+    // Whole seconds (rounded up), as run_at: a fractional cutoff went to
+    // Postgres as a double, which it refuses for an INTEGER (audit 27).
     const throttle = o.throttle !== undefined && o.throttle !== null
-        ? durationOpt("throttle", o.throttle, "jobs.enqueue") : 0;
+        ? wholeSecs(durationOpt("throttle", o.throttle, "jobs.enqueue")) : 0;
     const priority = priorityOpt(o.priority, "jobs.enqueue");
-    const maxAttempts = o.maxAttempts !== undefined
+    const maxAttempts = o.maxAttempts !== undefined && o.maxAttempts !== null
         ? attemptsOpt(o.maxAttempts, "jobs.enqueue") : _cfg.maxAttempts;
     // concurrency: a whole number >= 0 (0 = no cap) (audit 26).
     if (o.concurrency !== undefined && o.concurrency !== null &&
@@ -3120,9 +3137,11 @@ function cleanup(opts) {
     if (o.before !== undefined && o.before !== null &&
         (typeof o.before !== "number" || !Number.isFinite(o.before)))
         throw new Error("jobs.cleanup: before must be a finite unix timestamp");
+    // Both as whole seconds (rounded up): a fractional cutoff went to
+    // Postgres as a double, which it refuses for an INTEGER (audit 27).
     const olderThan = o.olderThan !== undefined && o.olderThan !== null
-        ? durationOpt("olderThan", o.olderThan, "jobs.cleanup") : undefined;
-    const cutoff = o.before !== undefined && o.before !== null ? o.before
+        ? wholeSecs(durationOpt("olderThan", o.olderThan, "jobs.cleanup")) : undefined;
+    const cutoff = o.before !== undefined && o.before !== null ? wholeSecs(o.before)
         : (time.now() - (olderThan !== undefined ? olderThan : 604800));
     const params = statuses.slice();
     params.push(cutoff);
@@ -3138,7 +3157,13 @@ function cleanup(opts) {
     db.exec("DELETE FROM _hull_workflow_signals WHERE workflow_id NOT IN (SELECT id FROM _hull_jobs)");
     // Attempt history is retained by AGE (it outlives the job on purpose, for
     // post-hoc metrics), not by orphan-ness.
-    const hr = _cfg.historyRetention || olderThan || 604800;
+    // Lua's `history_retention or older_than or 604800`: only an unset
+    // (null / undefined / false) value falls through, so 0 means 0 - `||`
+    // took olderThan 0 as unset and kept seven days (audit 27).
+    const hrCfg = _cfg.historyRetention;
+    let hr = hrCfg !== undefined && hrCfg !== null && hrCfg !== false ? hrCfg
+        : (olderThan !== undefined ? olderThan : 604800);
+    if (typeof hr === "number") hr = wholeSecs(hr);
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", [(time.now() - hr) * 1000]);
     // Durable event log: retained by age, but NEVER past an unconsumed event -
     // min(cursor) across subscriptions is the safe watermark. No subscriptions ->

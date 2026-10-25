@@ -70,7 +70,9 @@ end)
 
 test("attachment.init: max_size must be a finite number > 0", function()
     for _, bad in ipairs(BAD_NUMS) do
-        assert_eq(refused(attachment.init, { max_size = bad }), true, tostring(bad))
+        if bad ~= false then   -- false = unlimited (audit 27)
+            assert_eq(refused(attachment.init, { max_size = bad }), true, tostring(bad))
+        end
     end
     attachment.init({ max_size = 1024 })
 end)
@@ -84,14 +86,7 @@ test("search.query: limit / offset / caps are bounded integers", function()
     search.index("a26docs", "3", { body = "alpha three" })
     assert_eq(#search.query("a26docs", "alpha", { limit = 2 }), 2, "limit 2")
     assert_eq(#search.query("a26docs", "alpha", { limit = 2, offset = 2 }), 1, "offset 2")
-    for _, bad in ipairs({ "-1", -1, 0, 1.5, 0 / 0, math.huge, 1001, true }) do
-        assert_eq(refused(search.query, "a26docs", "alpha", { limit = bad }), true,
-                  "limit " .. tostring(bad))
-    end
-    for _, bad in ipairs({ "1", -1, 1.5, 0 / 0, math.huge }) do
-        assert_eq(refused(search.query, "a26docs", "alpha", { offset = bad }), true,
-                  "offset " .. tostring(bad))
-    end
+    -- limit / offset clamp since audit 27 (test_stdlib_audit27.lua).
     for _, k in ipairs({ "max_query_len", "max_query_terms" }) do
         for _, bad in ipairs({ "1024", 0, -1, 1.5, 0 / 0, math.huge }) do
             assert_eq(refused(search.query, "a26docs", "alpha", { [k] = bad }), true,

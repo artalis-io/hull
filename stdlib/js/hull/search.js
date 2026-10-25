@@ -285,6 +285,31 @@ function intOpt(o, key, def, min, max) {
     return v;
 }
 
+// Lua's tonumber(v) for a number or a string: a decimal numeral (optional
+// sign, fraction, exponent) or a 0x hex integer, surrounded by optional
+// whitespace; anything else is undefined. Number(v) also read "Infinity",
+// "0b11" and "0o7", which Lua's tonumber refuses (audit 27).
+function luaToNumber(v) {
+    if (typeof v === "number") return v;
+    if (typeof v !== "string") return undefined;
+    const t = v.trim();
+    if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return Number(t);
+    const m = /^([+-]?)0[xX]([0-9a-fA-F]+)$/.exec(t);
+    if (m) { const h = parseInt(m[2], 16); return m[1] === "-" ? -h : h; }
+    return undefined;
+}
+
+// Paging (limit / offset) clamps, as jobs' countOpt does: a number or a
+// numeric string (req.query.offset) counts, anything else and NaN take the
+// default, and an out-of-range value clamps to the bound. Audit 26 refused
+// them, so `{ limit: 5000 }` or a query-string offset became a 500 (audit
+// 27). The values are bound parameters, never interpolated.
+function countOpt(v, def, lo, hi) {
+    let n = luaToNumber(v);
+    if (n === undefined || Number.isNaN(n)) n = def;
+    return Math.floor(Math.max(lo, Math.min(n, hi)));
+}
+
 const SEARCH_MAX_LIMIT = 1000;
 const SEARCH_MAX_OFFSET = 2147483647;
 
@@ -303,8 +328,8 @@ function query(name, q, opts) {
     // public search box forwards untrusted input verbatim.
     const maxLen = intOpt(o, "maxQueryLen", 1024, 1, 1048576);
     const maxTerms = intOpt(o, "maxQueryTerms", 64, 1, 65536);
-    const limit = intOpt(o, "limit", 20, 1, SEARCH_MAX_LIMIT);
-    const offset = intOpt(o, "offset", 0, 0, SEARCH_MAX_OFFSET);
+    const limit = countOpt(o.limit, 20, 1, SEARCH_MAX_LIMIT);
+    const offset = countOpt(o.offset, 0, 0, SEARCH_MAX_OFFSET);
     if (q.length > maxLen)
         throw new Error("query too long (" + q.length + " > " + maxLen + ")");
     // Every word is a term (implicit AND costs as much as OR), every prefix

@@ -1185,6 +1185,11 @@ end
 local function is_email_ish(s)
     if type(s) ~= "string" then return false end
     if #s < 3 or #s > 254 then return false end
+    -- Valid UTF-8 only (audit 27): the JS twin cannot receive invalid
+    -- bytes (they decode to U+FFFD), and an overlong / truncated sequence
+    -- is a second spelling of an address that the store and the mail
+    -- transport read differently.
+    if utf8.len(s) == nil then return false end
     -- Round-9 MEDIUM-8: reject any control byte (< 0x20 or 0x7f).
     -- Pre-fix, `"victim@x.com\0filler"` passed the @ + . shape check;
     -- many SMTP transports truncate at NUL so the upstream actually
@@ -1604,6 +1609,20 @@ local function handle_verify(req, res)
     if token_already_used(token) then
         return verify_fail(req, res, 400, "verification failed: replayed")
     end
+    -- A new_password is checked (length, then the pwned-password lookup,
+    -- which waits on the network) BEFORE the user is read, as reset-confirm
+    -- does: read first, the address binding was checked against a record
+    -- the wait left stale - an email change confirmed meanwhile still let
+    -- this link set the password and verify the account (audit 27).
+    if body.new_password ~= nil then
+        if not password_len_ok(body.new_password) then
+            return verify_fail(req, res, 400, "invalid password length")
+        end
+        if check_pwned(body.new_password) then
+            return verify_fail(req, res, 400,
+                "password appears in known data breaches; choose another")
+        end
+    end
     local user = _state.user_get(env.sub)
     if not user or env.eb ~= email_binding(user) then
         return verify_fail(req, res, 400, "verification failed")
@@ -1615,15 +1634,7 @@ local function handle_verify(req, res)
     end
 
     if body.new_password ~= nil then
-        local pw = body.new_password
-        if not password_len_ok(pw) then
-            return verify_fail(req, res, 400, "invalid password length")
-        end
-        if check_pwned(pw) then
-            return verify_fail(req, res, 400,
-                "password appears in known data breaches; choose another")
-        end
-        local new_hash = crypto.hash_password(pw)
+        local new_hash = crypto.hash_password(body.new_password)
         if not mark_token_used(token, env.exp) then
             return verify_fail(req, res, 400, "verification failed: replayed")
         end

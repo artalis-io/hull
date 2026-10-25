@@ -247,6 +247,20 @@ function backoffDelay(attempt) {
  * @returns {Promise<{ delivered: number, failed: number, retried: number }>}
  */
 
+// Lua's tonumber(v) for a number or a string: a decimal numeral (optional
+// sign, fraction, exponent) or a 0x hex integer, surrounded by optional
+// whitespace; anything else is undefined. Number(v) also read "Infinity",
+// "0b11" and "0o7", which Lua's tonumber refuses (audit 27).
+function luaToNumber(v) {
+    if (typeof v === "number") return v;
+    if (typeof v !== "string") return undefined;
+    const t = v.trim();
+    if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return Number(t);
+    const m = /^([+-]?)0[xX]([0-9a-fA-F]+)$/.exec(t);
+    if (m) { const h = parseInt(m[2], 16); return m[1] === "-" ? -h : h; }
+    return undefined;
+}
+
 async function flush(opts) {
     // Delivery waits on http.fetch, which the runtime refuses inside a
     // transaction; refused here, before any row is claimed (audit 18).
@@ -255,13 +269,11 @@ async function flush(opts) {
             "transaction: delivery waits on the network. Call it after the commit");
     }
     const o = opts || {};
-    // 1..1000 (default 50): a number or numeric string counts, anything else
-    // and NaN take the default; a negative LIMIT is "no limit" on SQLite
-    // (audit 24).
-    let limit = 50;
-    if (typeof o.limit === "number") limit = o.limit;
-    else if (typeof o.limit === "string" && o.limit.trim() !== "") limit = Number(o.limit);
-    if (Number.isNaN(limit)) limit = 50;
+    // 1..1000 (default 50): a number or numeric string counts (Lua's
+    // tonumber), anything else and NaN take the default, and 0 clamps to 1
+    // as in Lua; a negative LIMIT is "no limit" on SQLite (audit 24).
+    let limit = luaToNumber(o.limit);
+    if (limit === undefined || Number.isNaN(limit)) limit = 50;
     limit = Math.floor(Math.max(1, Math.min(limit, 1000)));
     const now = time.now();
 

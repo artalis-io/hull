@@ -64,10 +64,11 @@ function mkRes() {
 
 // ── csv ────────────────────────────────────────────────────────────
 
-await test("csv.encode: headers are every row's keys, sorted; columns honoured", () => {
+await test("csv.encode: headers are every row's keys, first-seen; columns honoured", () => {
     const out = csv.encode([{ a: 1, b: 2, c: 3 }, { a: 1, c: 3 }, { c: 3 }], { headers: true });
     assertEq(out, "a,b,c\n1,2,3\n1,,3\n,,3\n", "headers mode");
-    assertEq(csv.encode([{ c: 1 }, { a: 2 }], { headers: true }), "a,c\n,1\n2,\n",
+    // First-seen order since audit 27 (audit 24 sorted the union).
+    assertEq(csv.encode([{ c: 1 }, { a: 2 }], { headers: true }), "c,a\n1,\n,2\n",
              "a key missing from row 1");
     assertEq(csv.encode([{ a: 1, b: 2 }], { headers: true, columns: ["b", "a"] }),
              "b,a\n2,1\n", "columns order");

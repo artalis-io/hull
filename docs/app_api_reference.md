@@ -1128,8 +1128,15 @@ template.clearCache();                           // clear compiled function cach
 
 **csv.encode(rows, opts?)**. Encode rows as CSV text.
 - `opts.headers`. Rows are objects; emit header row (default: `false`).
-  Lua: the header is the union of the rows' string and number keys, sorted
-  by their text (other keys are skipped); `opts.columns` sets it explicitly.
+  `opts.columns` (an array of names) sets the header explicitly in both
+  runtimes. Without it, the header is the union of every row's keys:
+  - Lua: the rows' string and number keys, sorted by their text (other keys
+    are skipped) - Lua tables have no key order.
+  - JS: own enumerable keys in first-seen order - the first row's keys in
+    their `Object.keys` order (integer-like keys first, ascending, then
+    string keys in insertion order), then each key a later row adds, in the
+    order it appears. `[{title:"t", id:1}]` gives `title,id`.
+  A row missing a header key gets an empty cell.
 - `opts.separator` / `opts.quote`. As for `parse` (one ASCII character each).
 - `opts.sanitize_formulas` (`sanitizeFormulas` in JS, default **`true`**).
   A cell beginning with `= + - @` (or a tab / CR) gets a leading `'`, so a
@@ -1213,24 +1220,34 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `search.query(name, query, opts?)`. Full-text search. Returns `{id, rank}` array.
   - `opts.limit` (default: 20), `opts.offset` (default: 0)
   - `opts.snippet = {column, tokens, before, after, ellipsis}` / `opts.highlight = {column, before, after}` add a `snippet` / `highlight` field. The indexed text in it is HTML-escaped; only `before` / `after` (default `<b>` / `</b>`) and `ellipsis` are inserted as given, so the field is safe to render raw (`{{{ r.snippet }}}`) as long as those markers are your own markup (audit 26).
-  - `opts.limit` is an integer in 1..1000, `opts.offset` an integer >= 0,
-    and `opts.max_query_len` (`maxQueryLen`, default 1024) /
-    `opts.max_query_terms` (`maxQueryTerms`, default 64) positive integers;
-    a string (`"-1"` from a query parameter), a fraction, NaN or a value out
-    of range raises - convert and clamp request input first (audit 26).
+  - `opts.limit` and `opts.offset` clamp: a number or a numeric string
+    (`req.query.offset`) counts, is floored and clamped to 1..1000 (limit) /
+    0..2147483647 (offset); anything else (a non-numeric string, NaN, a
+    boolean) takes the default. They are bound parameters, never
+    interpolated (audit 27; audit 26 raised on them, so `{limit = 5000}`
+    became a 500).
+  - `opts.max_query_len` (`maxQueryLen`, default 1024) /
+    `opts.max_query_terms` (`maxQueryTerms`, default 64) are positive
+    integers; a string, a fraction, NaN or a value out of range raises
+    (audit 26).
 - `search.reindex(name, source_table, opts?)`. Bulk re-index from table.
 - `search.drop_index(name)`. Drop FTS5 table.
 
 **Option validation (audit 26).** Options that bound work or retention raise
 on a bad value instead of silently turning the bound off:
-- `attachment.init`'s `max_size` (`maxSize`) is a finite number > 0 (JS:
-  or `null` for unlimited).
+- `attachment.init`'s `max_size` (`maxSize`) is a finite number > 0, or
+  `false` (JS: `null` or `false`) to reset it to unlimited on a re-init.
 - `jobs`: `max_attempts` (`maxAttempts`; `init`, `enqueue`, `cron`) is an
   integer in 1..10000 (a NaN or string retried for ever); `enqueue`'s
   `priority` an integer, `throttle` a finite number of seconds >= 0 and
   `concurrency` a whole number >= 0; `cleanup`'s `before` a finite unix
   timestamp (a string deleted every terminal job) and `older_than`
-  (`olderThan`) a finite number of seconds >= 0.
+  (`olderThan`) a finite number of seconds >= 0 (`0` deletes every
+  terminal job last updated before this second, in both runtimes).
+  `throttle`, `before` and `older_than` are rounded up to whole seconds,
+  as `run_at` is (audit 27: Postgres refused a fraction). `nil` / JS
+  `null` `max_attempts` means "the default" in `init`, `enqueue` and
+  `cron`.
 - `email.send` refuses an address holding a C1 control character
   (U+0080-009F, including NEL) or a Unicode line / space separator, as the
   auth-flows address check does, in both runtimes.

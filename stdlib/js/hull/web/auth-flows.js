@@ -1281,6 +1281,19 @@ async function handleVerify(req, res) {
     if (tokenAlreadyUsed(token)) {
         return verifyFail(req, res, 400, "verification failed: replayed");
     }
+    // A new_password is checked (length, then the pwned-password lookup,
+    // which waits on the network) BEFORE the user is read, as reset-confirm
+    // does: read first, the address binding was checked against a record
+    // the wait left stale (audit 27; see the Lua sibling).
+    if (body.new_password !== undefined) {
+        if (!passwordLenOk(body.new_password)) {
+            return verifyFail(req, res, 400, "invalid password length");
+        }
+        if (await checkPwned(body.new_password)) {
+            return verifyFail(req, res, 400,
+                "password appears in known data breaches; choose another");
+        }
+    }
     const user = getUser(env.sub);
     if (!user || env.eb !== emailBinding(user))
         return verifyFail(req, res, 400, "verification failed");
@@ -1291,15 +1304,7 @@ async function handleVerify(req, res) {
     }
 
     if (body.new_password !== undefined) {
-        const pw = body.new_password;
-        if (!passwordLenOk(pw)) {
-            return verifyFail(req, res, 400, "invalid password length");
-        }
-        if (await checkPwned(pw)) {
-            return verifyFail(req, res, 400,
-                "password appears in known data breaches; choose another");
-        }
-        const newHash = crypto.hashPassword(pw);
+        const newHash = crypto.hashPassword(body.new_password);
         if (!markTokenUsed(token, env.exp)) {
             return verifyFail(req, res, 400, "verification failed: replayed");
         }

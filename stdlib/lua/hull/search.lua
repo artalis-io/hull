@@ -283,6 +283,17 @@ local function int_opt(opts, key, def, min, max)
     return math.tointeger(v)
 end
 
+-- Paging (limit / offset) clamps, as jobs' count_opt does: a number or a
+-- numeric string (req.query.offset) counts, anything else and NaN take the
+-- default, and an out-of-range value clamps to the bound. Audit 26 refused
+-- them, so `{ limit = 5000 }` or a query-string offset became a 500 (audit
+-- 27). The values are bound parameters, never interpolated.
+local function count_opt(v, def, lo, hi)
+    local n = (type(v) == "number" or type(v) == "string") and tonumber(v) or nil
+    if n == nil or n ~= n then n = def end
+    return math.tointeger(math.floor(math.max(lo, math.min(n, hi))))
+end
+
 local SEARCH_MAX_LIMIT = 1000
 local SEARCH_MAX_OFFSET = 2147483647
 
@@ -302,8 +313,8 @@ function search.query(name, query, opts)
     -- raise opts.max_query_len / opts.max_query_terms.
     local max_len = int_opt(opts, "max_query_len", 1024, 1, 1048576)
     local max_terms = int_opt(opts, "max_query_terms", 64, 1, 65536)
-    local limit = int_opt(opts, "limit", 20, 1, SEARCH_MAX_LIMIT)
-    local offset = int_opt(opts, "offset", 0, 0, SEARCH_MAX_OFFSET)
+    local limit = count_opt(opts.limit, 20, 1, SEARCH_MAX_LIMIT)
+    local offset = count_opt(opts.offset, 0, 0, SEARCH_MAX_OFFSET)
     if #query > max_len then
         error("search.query: query too long (" .. #query .. " > " .. max_len .. ")")
     end

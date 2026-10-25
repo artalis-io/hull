@@ -42,7 +42,8 @@ let orphanGrace = 300;       // seconds an orphaned blob waits before unlink
  * separately via `blob.init({ dir: "..." })`.
  *
  * @param {Object} [opts]
- * @param {number} [opts.maxSize]  Per-attachment byte cap. Default: unlimited.
+ * @param {number} [opts.maxSize]  Per-attachment byte cap. Default: unlimited;
+ *   `null` or `false` resets it to unlimited (Lua: `false`).
  * @param {number} [opts.orphanGrace]  Seconds an unreferenced blob stays
  *   queued before `attachment.sweep` may unlink it (default 300). Must
  *   outlast the longest app transaction that deletes attachments.
@@ -58,16 +59,20 @@ let orphanGrace = 300;       // seconds an orphaned blob waits before unlink
 function init(opts) {
     const o = opts || {};
     if (o.maxSize !== undefined) {
-        // null = unlimited; anything else must be a finite number > 0. A
-        // string or NaN made `size > maxSize` always false and silently
-        // disabled the cap (audit 26).
-        if (o.maxSize !== null
-            && (typeof o.maxSize !== "number" || !Number.isFinite(o.maxSize)
-                || o.maxSize <= 0)) {
-            throw new Error("attachment.init: maxSize must be a finite number > 0 "
-                + "(bytes), or null for unlimited");
+        // null or false = unlimited (false as in Lua, audit 27); anything
+        // else must be a finite number > 0. A string or NaN made
+        // `size > maxSize` always false and silently disabled the cap
+        // (audit 26).
+        if (o.maxSize === null || o.maxSize === false) {
+            maxSize = null;
+        } else {
+            if (typeof o.maxSize !== "number" || !Number.isFinite(o.maxSize)
+                || o.maxSize <= 0) {
+                throw new Error("attachment.init: maxSize must be a finite number > 0 "
+                    + "(bytes), or null / false for unlimited");
+            }
+            maxSize = o.maxSize;
         }
-        maxSize = o.maxSize;
     }
     if (o.orphanGrace !== undefined) {
         // > 0: delete sweeps inline, and with no grace the blob a delete

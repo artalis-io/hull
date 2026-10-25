@@ -53,7 +53,8 @@ local _orphan_grace = 300      -- seconds an orphaned blob waits before unlink
 -- initialized separately via `blob.init({ dir = "..." })`.
 --
 -- @tparam[opt] table opts
---   `max_size` - per-attachment byte cap (integer, default unlimited).
+--   `max_size` - per-attachment byte cap (integer, default unlimited);
+--     `false` resets it to unlimited (JS: `null` / `false`).
 --   `orphan_grace` - seconds an unreferenced blob stays queued before
 --     `attachment.sweep` may unlink it (default 300). It must outlast the
 --     longest app transaction that deletes attachments: the sweep cannot
@@ -69,14 +70,20 @@ local _orphan_grace = 300      -- seconds an orphaned blob waits before unlink
 function attachment.init(opts)
     opts = opts or {}
     if opts.max_size ~= nil then
-        -- A finite number > 0. A non-number raised mid-upload (or, a NaN,
-        -- disabled the cap) (audit 26).
+        -- false = unlimited (nil means "leave as is", so a re-init could not
+        -- lift a cap the way JS's maxSize: null does; audit 27). Anything
+        -- else must be a finite number > 0: a non-number raised mid-upload
+        -- (or, a NaN, disabled the cap) (audit 26).
         local m = opts.max_size
-        if math.type(m) == nil or m ~= m or m <= 0 or m == math.huge then
-            error("attachment.init: max_size must be a finite number > 0 "
-                  .. "(bytes)", 2)
+        if m == false then
+            _max_size = nil
+        else
+            if math.type(m) == nil or m ~= m or m <= 0 or m == math.huge then
+                error("attachment.init: max_size must be a finite number > 0 "
+                      .. "(bytes), or false for unlimited", 2)
+            end
+            _max_size = m
         end
-        _max_size = m
     end
     if opts.orphan_grace ~= nil then
         -- > 0: delete sweeps inline, and with no grace the blob a delete

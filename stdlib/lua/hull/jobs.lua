@@ -712,8 +712,10 @@ function jobs.enqueue(job_type, data, opts)
     -- created within the last `throttle` seconds. Best-effort - keyed by
     -- (queue, type), no unique constraint (use dedup_key for exact-once).
     -- A throttle that is not a finite number >= 0 is refused (audit 26).
+    -- Whole seconds (rounded up), as run_at: a fractional cutoff went to
+    -- Postgres as a double, which it refuses for an INTEGER (audit 27).
     local throttle = opts.throttle ~= nil
-        and duration_opt("throttle", opts.throttle, "jobs.enqueue") or 0
+        and whole_secs(duration_opt("throttle", opts.throttle, "jobs.enqueue")) or 0
     local priority = priority_opt(opts.priority, "jobs.enqueue")
     local max_attempts = opts.max_attempts ~= nil
         and attempts_opt(opts.max_attempts, "jobs.enqueue") or _cfg.max_attempts
@@ -3353,8 +3355,11 @@ function jobs.cleanup(opts)
                           or before == math.huge or before == -math.huge) then
         error("jobs.cleanup: before must be a finite unix timestamp", 2)
     end
+    -- Both as whole seconds (rounded up): a fractional cutoff went to
+    -- Postgres as a double, which it refuses for an INTEGER (audit 27).
     local older_than = opts.older_than ~= nil
-        and duration_opt("older_than", opts.older_than, "jobs.cleanup") or nil
+        and whole_secs(duration_opt("older_than", opts.older_than, "jobs.cleanup")) or nil
+    if before ~= nil then before = whole_secs(before) end
     local cutoff = before or (time.now() - (older_than or 604800))
     local placeholders, params = {}, {}
     for i = 1, ns do
@@ -3379,6 +3384,7 @@ function jobs.cleanup(opts)
     -- Attempt history is retained by AGE (it outlives the job on purpose, for
     -- post-hoc metrics), not by orphan-ness.
     local hr = _cfg.history_retention or older_than or 604800
+    if type(hr) == "number" then hr = whole_secs(hr) end
     db.exec("DELETE FROM _hull_job_attempts WHERE finished_ms < ?", { (time.now() - hr) * 1000 })
     -- Durable event log: retained by age, but NEVER past an unconsumed event -
     -- min(cursor) across subscriptions is the safe watermark. No subscriptions ->
