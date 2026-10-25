@@ -21,6 +21,7 @@
 #include "../utils/base64.h"
 #include "hull/cap/smtp_transport.h"
 #include "hull/cap/audit.h"
+#include "hull/cap/db_budget.h"   /* hl_db_budget_charge: the sync send asks the run */
 #include "hull/host_match.h"
 #include "hull/limits/core.h"
 
@@ -654,6 +655,19 @@ void hl_smtp_audit_complete(const HlSmtpMessage *msg, const HlSmtpResult *r,
     hl_audit_end(&w);
 }
 
+/* The sync send's cancel poll: the calling run is over its instruction
+ * budget or past its wall-clock deadline (a 0-unit charge only asks; the
+ * trip is sticky, so the run raises it once the send returns). */
+static int smtp_run_stopped(void *ud)
+{
+    (void)ud;
+#ifdef HL_ENABLE_DB
+    return hl_db_budget_charge(0) != 0;
+#else
+    return 0;
+#endif
+}
+
 int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
                      const char **err_msg)
 {
@@ -680,10 +694,12 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
                                          : HL_SMTP_DEFAULT_TIMEOUT_MS;
 
     /* Execute-phase: inline on the calling thread here (the sync / no-loop
-     * path; the SMTP worker runs the same function in model 2). No cancel poll on
-     * the synchronous path (no other thread requests cancellation). No audit. */
+     * path; the SMTP worker runs the same function in model 2). The cancel
+     * poll asks the calling run (audit 27): the conversation holds the event
+     * loop for up to its timeout (30 s), and a run over its budget or past
+     * its deadline is stopped at the next pump step instead. No audit. */
     HlSmtpResult r;
-    hl_smtp_execute(msg, cfg->tls, timeout_ms, NULL, NULL, &r);
+    hl_smtp_execute(msg, cfg->tls, timeout_ms, smtp_run_stopped, NULL, &r);
     if (err_msg && r.token)
         *err_msg = r.token;
 

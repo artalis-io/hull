@@ -156,6 +156,27 @@ UTEST(fs_resolve, write_truncates)
     teardown();
 }
 
+/* Audit 27: WRITE_KEEP opens (and creates) like WRITE but leaves the content,
+ * so hl_cap_fs_open_write_fd can refuse a file whose setid bits it cannot
+ * clear without having emptied it first. */
+UTEST(fs_resolve, write_keep_does_not_truncate)
+{
+    setup();
+    wfile("f.txt", "abcdef");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    int fd = hl_fs_open_at(root, "f.txt", HL_FS_OPEN_WRITE_KEEP, 0644, &err);
+    ASSERT_GE(fd, 0);
+    close(fd);
+    fd = hl_fs_open_at(root, "f.txt", HL_FS_OPEN_READ, 0, &err);
+    char b[64]; ASSERT_STREQ("abcdef", slurp(fd, b, sizeof(b)));
+    close(fd);
+    fd = hl_fs_open_at(root, "new/dir/g.txt", HL_FS_OPEN_WRITE_KEEP, 0644, &err);
+    ASSERT_GE(fd, 0);                          /* creates parents and leaf */
+    close(fd); close(root);
+    teardown();
+}
+
 /* ── symlinks: virtual-root ───────────────────────────────────────────── */
 UTEST(fs_resolve, symlink_in_base_followed)
 {

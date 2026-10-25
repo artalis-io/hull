@@ -153,6 +153,13 @@ HlPgSslDecision hl_pg_ssl_negotiate(struct HlDbTransport *t, HlPgSslMode mode,
                                     int read_timeout_ms,
                                     char *errbuf, size_t errlen);
 
+/* What a read or write of `conn` may still take, in ms: what is left of
+ * ?read_timeout= counted from *started (0 = no bound), and while the
+ * connection is finishing a tripped run's COMMIT reply never more than what
+ * is left of the finishing bound (2 s, or a shorter read_timeout). -1 once
+ * either has passed. Exposed for tests (audit 27). */
+int hl_pg_conn_io_left(HlPgConn *conn, uint64_t *started);
+
 /* ── SCRAM-SHA-256 primitives (exposed for tests) ─────────────────── */
 
 /*

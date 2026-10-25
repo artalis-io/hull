@@ -218,4 +218,36 @@ UTEST(cli_log, suspend_silences_the_cli_callback)
     remove(path);
 }
 
+/* Audit 27: app text that reaches a log call by a path other than log.*
+ * (an uncaught exception's message) wrote raw newlines, so it could forge
+ * records. Both callbacks escape CR / LF; a message already escaped is left
+ * as it is. */
+UTEST(cli_log, escape_line_writes_crlf_as_two_characters)
+{
+    char out[64];
+    hl_log_escape_line("x\n12:00:00 INFO  forged\r", out, sizeof out);
+    ASSERT_STREQ("x\\n12:00:00 INFO  forged\\r", out);
+    hl_log_escape_line("already \\n escaped", out, sizeof out);
+    ASSERT_STREQ("already \\n escaped", out);
+    hl_log_escape_line("ab\ncd", out, 4);         /* truncated, never split */
+    ASSERT_STREQ("ab", out);
+    hl_log_escape_line(NULL, out, sizeof out);
+    ASSERT_STREQ("", out);
+}
+
+UTEST(cli_log, a_record_with_a_newline_is_one_line)
+{
+    FILE *saved = NULL;
+    char path[512];
+    capture_path(path, sizeof(path), "crlf");
+    hl_cli_log_init(0);
+    capture_begin(&saved, path);
+    log_log(LOG_ERROR, "./app.lua", 1, "boom\nhull: error: forged");
+    capture_end(path);
+    (void)saved;
+    ASSERT_TRUE(strstr(captured, "boom\\nhull: error: forged\n") != NULL);
+    ASSERT_TRUE(strchr(captured, '\n') == captured + strlen(captured) - 1);
+    remove(path);
+}
+
 UTEST_MAIN()

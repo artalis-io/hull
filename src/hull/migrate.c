@@ -547,7 +547,7 @@ typedef enum { MIG_LOCK_NONE = 0, MIG_LOCK_PG, MIG_LOCK_MY } MigLockKind;
  * ("migrations/down/001.sql") must never run in a built binary when the
  * same tree never ran it in dev / `hull test` / `hull migrate` (audit 25).
  * Returns the name past the prefix, or NULL to skip the entry. */
-static const char *embedded_migration_name(const HlEntry *e)
+const char *hl_migrate_embedded_name(const HlEntry *e)
 {
     const char *name = e->name + 11; /* strip "migrations/" */
     size_t len = strlen(name);
@@ -654,7 +654,7 @@ static int migrate_run_locked(HlDbHandle *handle, const HlVfs *vfs)
     if (mig_count > 0) {
         int applied = 0;
         for (size_t i = 0; i < mig_count; i++) {
-            const char *mig_name = embedded_migration_name(&first[i]);
+            const char *mig_name = hl_migrate_embedded_name(&first[i]);
             if (!mig_name)
                 continue;
             int ia = is_applied(handle, mig_name, (const char *)first[i].data,
@@ -760,7 +760,7 @@ int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
 
         int kept = 0;
         for (int i = 0; i < count; i++) {
-            const char *mig_name = embedded_migration_name(&first[i]);
+            const char *mig_name = hl_migrate_embedded_name(&first[i]);
             if (!mig_name)
                 continue;
             names[kept] = strdup(mig_name);

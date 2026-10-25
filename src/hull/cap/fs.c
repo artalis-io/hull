@@ -177,7 +177,8 @@ static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
 {
     char scratch[HL_FS_PATH_MAX];
     FsTarget t;
-    if (fs_select(cfg, path, mode, scratch, sizeof(scratch), &t, err_msg) != 0)
+    HlFsOpenMode sel_mode = mode == HL_FS_OPEN_WRITE_KEEP ? HL_FS_OPEN_WRITE : mode;
+    if (fs_select(cfg, path, sel_mode, scratch, sizeof(scratch), &t, err_msg) != 0)
         return -1;
     const char *e = NULL;
     int fd = hl_fs_open_at_ex(t.anchor_fd, t.residual, mode, t.sym, cmode, &e);
@@ -218,12 +219,17 @@ int hl_fs_strip_setid(int fd)
 }
 
 /* Every in-place writer opens through here or fs_write_in_place, so neither
- * can leave the bits on (audit 25: compute.stream's output did). */
+ * can leave the bits on (audit 25: compute.stream's output did). The leaf is
+ * opened without O_TRUNC and truncated only once the bits are gone: opened
+ * O_TRUNC, a write refused for bits it could not clear had already emptied
+ * the file (audit 27). */
 int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
                             const char **err_msg)
 {
-    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE, 0644, err_msg);
-    if (fd >= 0 && hl_fs_strip_setid(fd) != 0) {
+    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE_KEEP, 0644, err_msg);
+    if (fd < 0)
+        return -1;
+    if (hl_fs_strip_setid(fd) != 0 || ftruncate(fd, 0) != 0) {
         close(fd);
         if (err_msg) *err_msg = "write_failed";
         return -1;

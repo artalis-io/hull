@@ -50,7 +50,7 @@ static const char *const test_grants[] = {
     "mmap_borrow.txt", "mmap_rel.txt", "mmap_test.txt", "no_such_file.txt",
     "nope.txt", "size.txt", "test.txt", "whole.txt",
     "win_borrow.bin", "win_cross.bin", "win_eof.bin", "win_rej.bin", "win_zero.bin",
-    "shrink.bin", "many.bin", "suid.bin",
+    "shrink.bin", "many.bin", "suid.bin", "trunc.bin",
 };
 
 static void setup_fs(void)
@@ -354,6 +354,28 @@ UTEST(hl_cap_fs, the_write_open_drops_setuid_and_setgid)
     EXPECT_EQ((int)(st.st_mode & 07777), 0755);
     EXPECT_EQ(hl_fs_strip_setid(fd), 0);       /* nothing left to clear */
     close(fd);
+    teardown_fs();
+}
+
+/* Audit 27: the write open no longer truncates before the setid check (a
+ * refused write had already emptied the file); it truncates after it, so a
+ * write through it still replaces the whole content. */
+UTEST(hl_cap_fs, the_write_open_still_truncates)
+{
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "trunc.bin", "abcdef", 6, NULL), 0);
+    const char *err = NULL;
+    int fd = hl_cap_fs_open_write_fd(&test_cfg, "trunc.bin", &err);
+    ASSERT_GE(fd, 0);
+    struct stat st;
+    ASSERT_EQ(fstat(fd, &st), 0);
+    EXPECT_EQ((long long)st.st_size, 0LL);
+    ASSERT_EQ((ssize_t)2, write(fd, "xy", 2));
+    close(fd);
+    char buf[16];
+    int64_t n = hl_cap_fs_read(&test_cfg, "trunc.bin", buf, sizeof(buf), NULL);
+    ASSERT_EQ(n, (int64_t)2);
+    EXPECT_EQ(0, memcmp(buf, "xy", 2));
     teardown_fs();
 }
 

@@ -49,6 +49,10 @@ typedef enum {
                        * followed, contained); a non-directory target -> not_a_directory.
                        * Never creates. Used to resolve a SUBTREE grant anchor
                        * (fs_policy) and, later, stat/list. */
+    HL_FS_OPEN_WRITE_KEEP, /* as WRITE, but without O_TRUNC: the caller checks
+                       * the opened leaf (strips setuid / setgid) and truncates
+                       * it only then, so a refused write leaves the file as it
+                       * was (audit 27). Open-only: policy selection takes WRITE. */
 } HlFsOpenMode;
 
 /*

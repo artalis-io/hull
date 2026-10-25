@@ -421,7 +421,7 @@ static int count_cb(void *ctx, HlColumn *cols, int ncols)
 UTEST(hl_cap_db, runaway_statement_is_interrupted_by_the_bound_budget)
 {
     setup_db();
-    HlDbOpBudget b = { 200000, 0, 0 };
+    HlDbOpBudget b = { .limit = 200000, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
     int64_t n = 0;
     int rc = hl_cap_db_query(&test_cache,
@@ -489,7 +489,7 @@ UTEST(hl_cap_db, guard_alone_refuses_attach_and_vacuum_into)
 UTEST(hl_cap_db, a_large_allocation_is_charged_and_stops_the_statement)
 {
     setup_db();
-    HlDbOpBudget b = { 5000, 0, 0 };   /* ~320 KB of allocations */
+    HlDbOpBudget b = { .limit = 5000, .used = 0, .tripped = 0 };   /* ~320 KB of allocations */
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
     int64_t n = 0;
     int rc = hl_cap_db_query(&test_cache, "SELECT length(randomblob(600000))",
@@ -504,7 +504,7 @@ UTEST(hl_cap_db, a_large_allocation_is_charged_and_stops_the_statement)
 UTEST(hl_cap_db, allocations_are_charged_by_size)
 {
     setup_db();
-    HlDbOpBudget b = { 100000000, 0, 0 };
+    HlDbOpBudget b = { .limit = 100000000, .used = 0, .tripped = 0 };
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
     int64_t n = 0;
     int rc = hl_cap_db_query(&test_cache, "SELECT length(randomblob(640000))",
@@ -525,7 +525,7 @@ UTEST(hl_cap_db, rollback_runs_after_the_budget_tripped)
     ASSERT_EQ(0, hl_cap_db_begin(test_db));
     ASSERT_EQ(0, sqlite3_exec(test_db, "INSERT INTO users (name) VALUES ('a')",
                               NULL, NULL, NULL));
-    HlDbOpBudget b = { 1, 0, 1 };   /* tripped */
+    HlDbOpBudget b = { .limit = 1, .used = 0, .tripped = 1 };   /* tripped */
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
     EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, "SELECT length(randomblob(100000))",
                                       NULL, NULL, NULL));
@@ -537,6 +537,40 @@ UTEST(hl_cap_db, rollback_runs_after_the_budget_tripped)
                                  NULL, 0, count_cb, &n, NULL));
     EXPECT_EQ(0, (int)n);
     teardown_db();
+}
+
+/* Audit 27: a db.async op's budget tripped only on units, and a wait for the
+ * server charges none - a pg_sleep held a pool thread for good, and the
+ * SIGTERM join with it. A 0-unit charge now trips once the op's deadline has
+ * passed, once its continuation was cancelled, or while the pool shuts down. */
+UTEST(hl_cap_db, op_budget_stops_on_deadline_cancel_and_shutdown)
+{
+    HlDbOpBudget b = { 0, 0, 0, 0, 0, NULL };
+    EXPECT_EQ(0, hl_db_op_budget_charge(&b, 0));          /* nothing set */
+
+    b.deadline_ms = hl_db_monotonic_ms() + 60000;
+    EXPECT_EQ(0, hl_db_op_budget_charge(&b, 0));          /* not yet */
+    b.deadline_ms = hl_db_monotonic_ms() - 1;
+    EXPECT_EQ(1, hl_db_op_budget_charge(&b, 0));
+    EXPECT_EQ(HL_DB_OP_STOP_DEADLINE, b.reason);
+    EXPECT_EQ(1, hl_db_op_budget_charge(&b, 0));          /* sticky */
+
+    int cancelled = 0;
+    HlDbOpBudget c = { 1000, 0, 0, 0, 0, &cancelled };
+    EXPECT_EQ(0, hl_db_op_budget_charge(&c, 0));
+    cancelled = 1;
+    EXPECT_EQ(1, hl_db_op_budget_charge(&c, 0));
+    EXPECT_EQ(HL_DB_OP_STOP_CANCEL, c.reason);
+
+    HlDbOpBudget d = { 1000, 0, 0, 0, 0, NULL };
+    hl_db_op_shutdown(1);
+    EXPECT_EQ(1, hl_db_op_budget_charge(&d, 0));
+    hl_db_op_shutdown(0);
+    EXPECT_EQ(HL_DB_OP_STOP_CANCEL, d.reason);
+    HlDbOpBudget e = { 1000, 0, 0, 0, 0, NULL };
+    EXPECT_EQ(0, hl_db_op_budget_charge(&e, 0));          /* flag cleared */
+    EXPECT_EQ(1, hl_db_op_budget_charge(&e, 2000));       /* units still trip */
+    EXPECT_EQ(HL_DB_OP_STOP_UNITS, e.reason);
 }
 
 /* The pragmas that set how much memory or how many threads SQLite uses are

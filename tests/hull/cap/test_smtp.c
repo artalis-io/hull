@@ -9,8 +9,14 @@
 
 #include "utest.h"
 #include "hull/cap/smtp.h"
+#include "hull/cap/db_budget.h"
 
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 /* ════════════════════════════════════════════════════════════════════
  * Message formatting tests
@@ -381,5 +387,51 @@ UTEST(smtp_send, invalid_port)
     };
     ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg, NULL));
 }
+
+#ifdef HL_ENABLE_DB
+/* Audit 27: the synchronous send ran its conversation with no cancel poll,
+ * so a server that accepted and never greeted held the calling run (and the
+ * event loop) for the whole timeout. The poll now asks the run's budget: a
+ * run already over it is stopped at the first pump step. */
+static int smtp_test_tripped(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return 1;
+}
+
+UTEST(smtp_send, a_tripped_run_stops_a_silent_server)
+{
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(lfd >= 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(0, bind(lfd, (struct sockaddr *)&a, sizeof a));
+    ASSERT_EQ(0, listen(lfd, 4));          /* accepted by the kernel, never greeted */
+    socklen_t al = sizeof a;
+    ASSERT_EQ(0, getsockname(lfd, (struct sockaddr *)&a, &al));
+
+    const char *hosts[] = { "127.0.0.1" };
+    HlSmtpConfig cfg = { .allowed_hosts = hosts, .host_count = 1,
+                         .timeout_ms = 10000 };
+    HlSmtpMessage msg = {
+        .host = "127.0.0.1", .port = ntohs(a.sin_port),
+        .from = "a@b.com", .to = "c@d.com",
+        .subject = "test", .body = "body",
+    };
+    HlDbBudgetBinding prev = hl_db_budget_swap(smtp_test_tripped, NULL);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = hl_cap_smtp_send(&cfg, &msg, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    hl_db_budget_restore(prev);
+    long ms = (long)(t1.tv_sec - t0.tv_sec) * 1000 +
+              (long)(t1.tv_nsec - t0.tv_nsec) / 1000000;
+    EXPECT_NE(0, rc);
+    EXPECT_TRUE(ms < 3000);                /* not the 10 s timeout */
+    close(lfd);
+}
+#endif
 
 UTEST_MAIN()

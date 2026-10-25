@@ -49,6 +49,23 @@ int hl_cli_log_is_native_source(const char *file)
     return 0;
 }
 
+void hl_log_escape_line(const char *in, char *out, size_t outsz)
+{
+    if (!out || outsz == 0) return;
+    size_t o = 0;
+    for (const char *p = in ? in : ""; *p; p++) {
+        if (*p == '\n' || *p == '\r') {
+            if (o + 2 >= outsz) break;
+            out[o++] = '\\';
+            out[o++] = *p == '\n' ? 'n' : 'r';
+        } else {
+            if (o + 1 >= outsz) break;
+            out[o++] = *p;
+        }
+    }
+    out[o] = '\0';
+}
+
 /* Lower-case level word for the terse default line ("warn", "error"). */
 static const char *level_word(int level)
 {
@@ -86,11 +103,12 @@ static void cli_log_callback(log_Event *ev)
         if (!native && ev->level < LOG_INFO) return;
     }
 
-    char msg[1024];
+    char raw[1024], msg[1024];
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
-    vsnprintf(msg, sizeof(msg), ev->fmt, ev->ap);
+    vsnprintf(raw, sizeof(raw), ev->fmt, ev->ap);
 #pragma GCC diagnostic pop
+    hl_log_escape_line(raw, msg, sizeof msg);   /* one record, one line */
 
     if (g_verbose) {
         /* Full diagnostics: level, source coordinates, and an explicit marker

@@ -52,6 +52,7 @@
 #endif
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_budget.h"   /* hl_db_op_shutdown */
 #endif
 
 #ifdef HL_ENABLE_HTTP_CLIENT
@@ -299,6 +300,20 @@ static int hl_check_signed_policy(HlRuntime *rt)
     return 0;
 }
 
+/* Free the worker pool with every running db.async op told to stop: its
+ * budget trips at the next charge, so an op waiting on a silent server does
+ * not hold the join (audit 27). */
+static void cli_pool_free(const HlAsyncBackend *be, HlAsyncBackendPool *pool)
+{
+#ifdef HL_ENABLE_DB
+    hl_db_op_shutdown(1);
+#endif
+    be->pool_free(pool);
+#ifdef HL_ENABLE_DB
+    hl_db_op_shutdown(0);
+#endif
+}
+
 /* Every error exit after the app context exists, in the one order teardown
  * may run in. The runtime's async pointers are detached while the runtime
  * still exists (it lives in a page hl_app_context_free unmaps, so writing it
@@ -315,7 +330,7 @@ static int cli_fail(HlAppContext *ctx, HlRuntime *rt,
     /* Shutting down from here on, before the pool: a cancel_fn it runs must
      * not reschedule a timer or reach the loop (audit 16). */
     if (rt) { rt->thread_pool = NULL; rt->shutting_down = 1; }
-    if (pool) be->pool_free(pool);
+    if (pool) cli_pool_free(be, pool);
     /* What the runtime still holds on the loop, released while both are
      * alive (audit 14 G1). */
     if (rt && rt->vt && rt->vt->stop_async) rt->vt->stop_async(rt);
@@ -785,7 +800,7 @@ int hull_serve(int argc, char **argv)
      * QuickJS aborted in JS_FreeRuntime (exit 134). */
     rt->thread_pool = NULL;
     rt->shutting_down = 1;   /* before the pool's done / cancel fns (audit 16) */
-    if (pool) be->pool_free(pool);
+    if (pool) cli_pool_free(be, pool);
     if (rt->vt->stop_async) rt->vt->stop_async(rt);
 
     /* Detach borrowed pointers before tearing down (mirrors serve.c). The

@@ -174,6 +174,11 @@ static int schema_diff_impl(sqlite3 *db, const HlVfs *vfs, ShJsonBuf *out)
     const HlEntry *first = NULL;
     int mig_count = hl_vfs_prefix(vfs, "migrations/", &first);
     for (int i = 0; i < mig_count; i++) {
+        /* Only the entries the runner applies (audit 27): a nested
+         * migrations/<dir>/x.sql never runs, so its CREATEs are not
+         * expected. */
+        if (!hl_migrate_embedded_name(&first[i]))
+            continue;
         /* HlEntry::data is NOT NUL-terminated; use the entry's len. */
         collect_creates((const char *)first[i].data, first[i].len,
                         &expected_tables, &expected_indexes);
