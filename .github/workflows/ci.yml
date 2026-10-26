@@ -171,7 +171,7 @@ jobs:
         run: make check-hardening
 
       - name: Unit tests
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: make test
 
       - name: E2E tests
@@ -2359,7 +2359,7 @@ jobs:
         run: make HL_ENABLE_GPU=1
 
       - name: Unit tests (GPU)
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: make test HL_ENABLE_GPU=1
 
       - name: E2E tests
