@@ -2065,7 +2065,7 @@ $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/integrations/tls/mbedtls -I$(KEEL_DIR)/integrations/codec/miniz -I$(KEEL_DIR)/vendor/llhttp -I$(VENDDIR)/sh_seal_arena -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(STB_DIR) -I$(VENDDIR) -I$(BUILDDIR) $(WAMR_INC)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/integrations/tls/mbedtls -I$(KEEL_DIR)/integrations/codec/miniz -I$(KEEL_DIR)/vendor/llhttp -I$(VENDDIR)/sh_seal_arena -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR) -DMBEDTLS_CONFIG_FILE='"hull_config.h"' -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(STB_DIR) -I$(VENDDIR) -I$(BUILDDIR) $(WAMR_INC)
 
 # ── Build-flag fingerprint (force-rebuild on flag change) ───────────
 #

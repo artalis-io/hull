@@ -42,6 +42,10 @@ release-artifact layout).
   tickets, PKCS#7, LMS, FFDH, X.509 writing): CVE-2025-48965, CVE-2026-25832, CVE-2026-50640, CVE-2026-50713, CVE-2026-50586,
   CVE-2026-50588, CVE-2026-50579, CVE-2026-50585, CVE-2025-49600, CVE-2025-49601, CVE-2025-47917,
   the TLS 1.3 early-data and ECDHE-PSK overflow fixes, and the PKCS#7 weak-hash rejection.
+- Hull's own mbedTLS translation units (`cap/crypto_*_mbedtls.c`, the TLS client and transport)
+  are now compiled with `MBEDTLS_CONFIG_FILE=hull_config.h`, like the library and Keel; they
+  were compiled against mbedTLS's default configuration, so the two halves could disagree on
+  struct layouts. `MBEDTLS_HAVE_ASM` is left off under MemorySanitizer (3.6.3+ refuses it).
 
 ### Behaviour changes (security audits 24-28)
 
