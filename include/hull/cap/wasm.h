@@ -36,6 +36,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/limits/wasm.h"
+#include "hull/shared/offheap.h"  /* HlOffheapShared (audit 29) */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -206,6 +207,11 @@ typedef struct {
      * D; parsed + validated by the binding in item C. */
     const HlWasmSpanReq *spans;
     int                  span_count;
+    /* An async op's result share (audit 29): the output's size is taken on
+     * the submitting VM's async_result_bytes before the host copies it, and
+     * the call fails "result too large" when the take is refused. NULL = not
+     * counted (sync calls, whose copy lands on the VM heap). */
+    HlOffheapShared     *result_hold;
 } HlWasmCallOpts;
 
 /* Clamp options to the configured ceilings (rt->wasm_config: CLI > manifest >

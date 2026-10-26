@@ -52,6 +52,8 @@ typedef struct HlWorkerGpuOp {
     void            *uniforms;        /* deep-copied uniform data (dispatch only) */
     size_t           uniforms_len;
     HlOffheapHold    copy_hold;       /* the copies, on the VM's off-heap total */
+    HlOffheapShared  result_hold;     /* the read-backs, on the VM's
+                                       * async_result_bytes (audit 29) */
 
     /* Output (set by worker thread) */
     void          *output;

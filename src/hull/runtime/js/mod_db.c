@@ -413,6 +413,14 @@ HlDbHandle *js_call_handle(JSContext *ctx, JSValueConst this_val)
     return js ? default_db(js) : NULL;
 }
 
+/* Whether @p this_val is a caller-owned (db.open) connection object, open or
+ * closed. The udf bridge refuses one (audit 29): udf is absent on a dynamic
+ * handle, and the call could close it during its own conversions. */
+bool js_call_is_owned(JSValueConst this_val)
+{
+    return JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;
+}
+
 /* Resolve the DSN this call's connection opened from, symmetric with
  * js_call_handle: an owner box (db.open) carries its own validated DSN; a
  * borrowed handle (db.connect/default) is matched in the registry. Used only by
@@ -936,11 +944,19 @@ static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
     }
 
     if (op->kind == HL_WORK_DB_EXEC) {
+        /* Defined and checked (audit 29): an object that cannot be built
+         * fails the op, not resolves it half-made. */
         JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "changes",
-                          JS_NewInt32(ctx, op->exec_changes));
-        JS_SetPropertyStr(ctx, obj, "lastId",
-                          JS_NewInt64(ctx, op->last_id));
+        if (JS_IsException(obj)) return obj;
+        if (JS_DefinePropertyValueStr(ctx, obj, "changes",
+                                      JS_NewInt32(ctx, op->exec_changes),
+                                      JS_PROP_C_W_E) < 0 ||
+            JS_DefinePropertyValueStr(ctx, obj, "lastId",
+                                      JS_NewInt64(ctx, op->last_id),
+                                      JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, obj);
+            return JS_EXCEPTION;
+        }
         return obj;
     }
 

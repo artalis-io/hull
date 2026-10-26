@@ -622,6 +622,19 @@ static JSValue js_tui_async(JSContext *ctx, JSValueConst this_val,
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx, "tui.async(fn): expected a function");
     JSValue ret = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+    if (JS_IsException(ret)) {
+        /* Audit 29: the exception was left pending with undefined
+         * returned. A tripped budget stays the uncatchable trip; any other
+         * error is logged and taken, as the comment above promises. */
+        HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+        if (js && js->budget_tripped) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            return hl_js_budget_throw(ctx);
+        }
+        if (js) hl_js_dump_error(js);
+        else JS_FreeValue(ctx, JS_GetException(ctx));
+        return JS_UNDEFINED;
+    }
     /* If the function returned a Promise, we just let the engine run
      * it - rejections will propagate to QuickJS's unhandled-rejection
      * handler, which logs to stderr. We deliberately don't await. */

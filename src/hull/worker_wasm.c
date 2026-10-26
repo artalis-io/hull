@@ -205,6 +205,7 @@ void hl_worker_wasm_op_free(HlWorkerWasmOp *op)
     op->opts.span_count = 0;
     free(op->input);
     hl_offheap_drop(&op->input_hold);
+    hl_offheap_shared_drop(&op->result_hold);
     hl_alloc_free(op->alloc, op->output, op->output_len);
     if (op->output_buf) {
         hl_wasm_buffer_destroy(op->output_buf);

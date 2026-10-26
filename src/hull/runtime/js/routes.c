@@ -461,8 +461,8 @@ static int js_read_int_field(JSContext *ctx, JSValueConst obj,
     int out = 0;
     if (JS_IsNumber(v)) {
         int64_t i = 0;
-        if (JS_ToInt64(ctx, &i, v) == 0 && i > 0 && i <= INT_MAX)
-            out = (int)i;
+        if (JS_ToInt64(ctx, &i, v) == 0 && i > 0)
+            out = i > INT_MAX ? INT_MAX : (int)i;   /* not 0 = unlimited */
     }
     JS_FreeValue(ctx, v);
     return out;
@@ -476,19 +476,15 @@ static KlHttpMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst m
                                               sizeof(KlHttpMultipartConfig));
     if (!cfg) return NULL;
     JSContext *ctx = js->ctx;
-    /* Accept both snake_case and camelCase for cross-runtime ergonomics -
-     * Lua uses snake_case in the same opt names; JS app code idiomatically
-     * passes camelCase. Snake-case takes priority if both are present. */
+    /* @p mp is the plain null-prototype object of numbers js_app_route
+     * built at registration (js_app_multipart_caps: both spellings read and
+     * validated there, stored under the snake_case names), so these reads
+     * run no app code and cannot throw (audit 29). */
     size_t mps = js_read_size_field(ctx, mp, "max_part_size");
-    if (!mps) mps = js_read_size_field(ctx, mp, "maxPartSize");
     size_t mts = js_read_size_field(ctx, mp, "max_total_size");
-    if (!mts) mts = js_read_size_field(ctx, mp, "maxTotalSize");
     int    mp_ = js_read_int_field (ctx, mp, "max_parts");
-    if (!mp_) mp_ = js_read_int_field (ctx, mp, "maxParts");
     size_t mhs = js_read_size_field(ctx, mp, "max_headers_size");
-    if (!mhs) mhs = js_read_size_field(ctx, mp, "maxHeadersSize");
     size_t mib = js_read_size_field(ctx, mp, "max_input_buffer");
-    if (!mib) mib = js_read_size_field(ctx, mp, "maxInputBuffer");
     cfg->max_part_size    = mps;
     cfg->max_total_size   = mts;
     cfg->max_parts        = mp_;

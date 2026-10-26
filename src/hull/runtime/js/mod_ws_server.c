@@ -331,20 +331,31 @@ static JSValue js_ws_broadcast(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
-    size_t len;
-    const char *data = JS_ToCStringLen(ctx, &len, argv[1]);
-    if (!data) {
-        JS_FreeCString(ctx, path);
-        return JS_EXCEPTION;
-    }
-
     int binary = 0;
     if (argc >= 3)
-        binary = JS_ToBool(ctx, argv[2]);
+        binary = JS_ToBool(ctx, argv[2]);   /* ToBoolean: no app code */
+
+    /* The data last, after the path's conversion (app code), as
+     * js_ws_conn_send_binary takes it: an ArrayBuffer or a typed array's
+     * bytes, or a primitive string (audit 29: it went through
+     * JS_ToCStringLen, so relaying an onMessage ArrayBuffer sent
+     * "[object ArrayBuffer]"). Any other object is refused. */
+    HlBufferView view = {0};
+    const char *str = NULL;
+    int needs_free = 0;
+    if (!js_get_buffer(ctx, argv[1], &view, &str, &needs_free)) {
+        JS_FreeCString(ctx, path);
+        if (JS_HasException(ctx)) return JS_EXCEPTION;
+        return JS_ThrowTypeError(ctx, "ws.broadcast: expected a string, "
+                                 "ArrayBuffer or TypedArray");
+    }
+    const char *data = (const char *)view.data;
+    size_t len = view.len;
+
     /* Charged before the sends, per connection the message goes to (audit
      * 14): one call framed and queued it to every connection. */
     if (hl_js_budget_charge(ctx, hl_work_send_units(len, hl_ws_connections(reg, path)))) {
-        JS_FreeCString(ctx, data);
+        if (needs_free && str) JS_FreeCString(ctx, str);
         JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
@@ -355,7 +366,7 @@ static JSValue js_ws_broadcast(JSContext *ctx, JSValueConst this_val,
     else
         sent = hl_ws_broadcast_text(reg, path, data, len);
 
-    JS_FreeCString(ctx, data);
+    if (needs_free && str) JS_FreeCString(ctx, str);
     JS_FreeCString(ctx, path);
 
     return JS_NewInt32(ctx, sent);

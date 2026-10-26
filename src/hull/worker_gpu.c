@@ -32,6 +32,11 @@ static void gpu_work_fn(void *ud)
     const char *err_msg = NULL;
     int rc;
 
+    /* Every read-back is taken on the submitting VM's in-flight result total
+     * before the backend copies it (audit 29). */
+    op->opts.result_hold = &op->result_hold;
+    op->pipe_opts.result_hold = &op->result_hold;
+
     if (op->is_pipeline) {
         /* Wire deep-copied stages and buffers into pipeline opts */
         op->pipe_opts.stages = op->stages;
@@ -157,6 +162,7 @@ void hl_worker_gpu_op_free(HlWorkerGpuOp *op)
     free(op->uniforms);
     op->uniforms = NULL;
     hl_offheap_drop(&op->copy_hold);
+    hl_offheap_shared_drop(&op->result_hold);
 
     /* Pipeline-specific cleanup */
     if (op->stage_uniforms) {

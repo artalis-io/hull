@@ -4243,6 +4243,67 @@ UTEST(hl_cap_wasm, async_input_limit_and_offheap_hold)
     EXPECT_EQ(total, (size_t)0);
 }
 
+/* Audit 29: an async op's output is taken on its VM's in-flight result total
+ * (opts.result_hold) before the host copies it; past the ceiling the call
+ * fails "result too large" and nothing stays taken. Both call paths. */
+UTEST(hl_cap_wasm, async_result_hold)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    const char *input = "0123456789abcdef";   /* 16 bytes, echoed */
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    for (int path = 0; path < 2; path++) {
+        size_t total = 0;
+        HlOffheapShared hold;
+        hl_offheap_shared_init(&hold, &total, 24);
+        HlWasmCallOpts opts = {0};
+        opts.result_hold = &hold;
+        void *out = NULL;
+        size_t out_len = 0;
+        err = NULL;
+        int rc = path == 0
+            ? hl_cap_wasm_call(&cache, "echo", input, 16, &out, &out_len,
+                               &opts, NULL, NULL, &vfs, NULL, NULL, &err)
+            : hl_cap_wasm_instance_call(pi, input, 16, &out, &out_len,
+                                        &opts, NULL, NULL, NULL, &err);
+        ASSERT_EQ(rc, 0);
+        EXPECT_EQ(out_len, (size_t)16);
+        EXPECT_EQ(total, (size_t)16);
+        EXPECT_EQ(hold.bytes, (size_t)16);
+        free(out);
+        out = NULL;
+
+        /* 16 more would take the total to 32 > 24: refused. */
+        HlOffheapShared hold2;
+        hl_offheap_shared_init(&hold2, &total, 24);
+        opts.result_hold = &hold2;
+        err = NULL;
+        rc = path == 0
+            ? hl_cap_wasm_call(&cache, "echo", input, 16, &out, &out_len,
+                               &opts, NULL, NULL, &vfs, NULL, NULL, &err)
+            : hl_cap_wasm_instance_call(pi, input, 16, &out, &out_len,
+                                        &opts, NULL, NULL, NULL, &err);
+        EXPECT_NE(rc, 0);
+        EXPECT_TRUE(err && strcmp(err, "result too large") == 0);
+        EXPECT_EQ(out, NULL);
+        EXPECT_EQ(total, (size_t)16);
+        EXPECT_EQ(hold2.bytes, (size_t)0);
+
+        hl_offheap_shared_drop(&hold);
+        hl_offheap_shared_drop(&hold);   /* twice: no-op */
+        EXPECT_EQ(total, (size_t)0);
+    }
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
 int main(int argc, const char *const argv[])
 {
     hl_log_make_threadsafe();

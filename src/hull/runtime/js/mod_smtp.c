@@ -93,12 +93,22 @@ fail:
 /* Build the { ok, error? } SMTP result object. */
 static JSValue js_smtp_result_obj(JSContext *ctx, int ok, const char *err)
 {
+    /* Defined and checked (audit 29): JS_EXCEPTION when it cannot be made. */
     JSValue o = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, o, "ok", ok ? JS_TRUE : JS_FALSE);
-    if (!ok)
-        JS_SetPropertyStr(ctx, o, "error",
-                          JS_NewString(ctx, err ? err : "smtp send failed"));
+    if (JS_IsException(o)) return o;
+    if (JS_DefinePropertyValueStr(ctx, o, "ok", ok ? JS_TRUE : JS_FALSE,
+                                  JS_PROP_C_W_E) < 0)
+        goto fail;
+    if (!ok) {
+        JSValue e = JS_NewString(ctx, err ? err : "smtp send failed");
+        if (JS_IsException(e) ||
+            JS_DefinePropertyValueStr(ctx, o, "error", e, JS_PROP_C_W_E) < 0)
+            goto fail;
+    }
     return o;
+fail:
+    JS_FreeValue(ctx, o);
+    return JS_EXCEPTION;
 }
 
 /* Wrap @p value in an already-resolved Promise (consumes @p value). Every SMTP
@@ -107,6 +117,7 @@ static JSValue js_smtp_result_obj(JSContext *ctx, int ok, const char *err)
  * Returns JS_EXCEPTION only if the promise capability itself cannot be created. */
 static JSValue js_resolved_promise(JSContext *ctx, JSValue value)
 {
+    if (JS_IsException(value)) return value;   /* audit 29 */
     JSValue rf[2];
     JSValue promise = JS_NewPromiseCapability(ctx, rf);
     if (JS_IsException(promise)) { JS_FreeValue(ctx, value); return JS_EXCEPTION; }
@@ -382,10 +393,16 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     {
         JSValue rv = js_smtp_result_obj(ctx, 0,
             aout.result.token ? aout.result.token : "connect_failed");
-        JSValue rr = JS_Call(ctx, rf[0], JS_UNDEFINED, 1, (JSValueConst *)&rv);
-        JS_FreeValue(ctx, rr); JS_FreeValue(ctx, rv);
-        JS_FreeValue(ctx, rf[0]); JS_FreeValue(ctx, rf[1]);
-        result = promise;
+        if (JS_IsException(rv)) {   /* audit 29: not resolved with it */
+            JS_FreeValue(ctx, rf[0]); JS_FreeValue(ctx, rf[1]);
+            JS_FreeValue(ctx, promise);
+            result = JS_EXCEPTION;
+        } else {
+            JSValue rr = JS_Call(ctx, rf[0], JS_UNDEFINED, 1, (JSValueConst *)&rv);
+            JS_FreeValue(ctx, rr); JS_FreeValue(ctx, rv);
+            JS_FreeValue(ctx, rf[0]); JS_FreeValue(ctx, rf[1]);
+            result = promise;
+        }
     }
 
 cleanup:

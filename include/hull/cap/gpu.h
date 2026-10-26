@@ -39,6 +39,7 @@
  * supplies that backend instead. */
 
 #include "hull/limits/gpu.h"
+#include "hull/shared/offheap.h"  /* HlOffheapShared (audit 29) */
 
 #include <pthread.h>
 #include <stddef.h>
@@ -165,6 +166,9 @@ typedef struct HlGpuDispatchOpts {
     uint32_t         timeout_ms;     /* 0 = default (HL_GPU_TIMEOUT_MS), min 10ms */
     size_t           max_output;     /* readback refused past this (the VM heap
                                       * limit); 0 = none (audit 17) */
+    HlOffheapShared *result_hold;    /* an async op's result share: each
+                                      * readback is taken on it before the
+                                      * copy (audit 29); NULL = sync call */
 } HlGpuDispatchOpts;
 
 /* Cached compiled pipeline */
@@ -235,6 +239,7 @@ typedef struct HlGpuPipelineOpts {
     uint32_t             timeout_ms;  /* 0 = default (HL_GPU_TIMEOUT_MS), min 10ms */
     size_t               max_output;  /* all readbacks together refused past
                                        * this; 0 = none (audit 17) */
+    HlOffheapShared     *result_hold; /* as HlGpuDispatchOpts (audit 29) */
 } HlGpuPipelineOpts;
 
 /* Pipeline result: array of readback buffers */

@@ -682,6 +682,10 @@ static int lua_compute_async_call(lua_State *L)
     /* The input copy (lua_async_input_copy) goes with the op. */
     op->input = in_copy;
     op->input_hold = in_hold;
+    /* The output, on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
+                           lua->mem_limit);
+    op->opts.result_hold = &op->result_hold;
     op->input_len = input_len;
 
     /* Deep-copy + submission-pin the spans into the op. Any failure after this
@@ -966,6 +970,10 @@ static int lua_wasm_inst_async_call(lua_State *L)
     /* The input copy (lua_async_input_copy) goes with the op. */
     op->input = in_copy;
     op->input_hold = in_hold;
+    /* The output, on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
+                           lua->mem_limit);
+    op->opts.result_hold = &op->result_hold;
     op->input_len = input_len;
 
     /* Deep-copy + submission-pin the spans into the op (released by

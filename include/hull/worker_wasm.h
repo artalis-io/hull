@@ -43,6 +43,8 @@ typedef struct HlWorkerWasmOp {
     void          *input;         /* deep-copied input bytes */
     size_t         input_len;
     HlOffheapHold  input_hold;    /* input counted on the VM's off-heap total */
+    HlOffheapShared result_hold;  /* the output, on the VM's async_result_bytes
+                                   * (audit 29; opts.result_hold points here) */
     HlWasmCallOpts opts;          /* value-copied options */
     HlAllocator   *alloc;         /* tracked allocator for output (NULL = raw malloc) */
 

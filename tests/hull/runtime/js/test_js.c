@@ -9647,8 +9647,11 @@ UTEST(js_audit9, compute_stream_resolves_input_after_options)
         "  const ab = new ArrayBuffer(512);\n"
         "  new Uint8Array(ab).fill(0x41);\n"
         "  const opts = { get chunkSize() { ab.transfer(0); return 256; } };\n"
-        "  const got = new Uint8Array(compute.stream('echo', ab, opts));\n"
-        "  /* Detached first: the input is no longer the 512 bytes of 'A'. */\n"
+        "  /* Detached first: the input is no longer the 512 bytes of 'A' -\n"
+        "   * since audit 29 a detached buffer is refused, not stringified. */\n"
+        "  let got;\n"
+        "  try { got = new Uint8Array(compute.stream('echo', ab, opts)); }\n"
+        "  catch (e) { return e instanceof TypeError ? 'fresh' : 'other'; }\n"
         "  return got.length === 512 ? 'stale' : 'fresh';\n"
         "})()");
     EXPECT_TRUE(r && strcmp(r, "fresh") == 0);
@@ -13843,5 +13846,204 @@ UTEST(js_audit27, image_from_wasm_takes_a_typed_array)
     cleanup_js();
 }
 #endif /* HL_ENABLE_IMAGE */
+
+/* ── Audit 29 ──────────────────────────────────────────────────────── */
+
+/* H1: db.udf.register / unregister took a db.open (caller-owned) `this` -
+ * udf is meant to be absent on a dynamic handle - and resolved the handle
+ * before the name's toString and the opts' getters ran: a getter that
+ * closed it left the call using a freed handle. A db.open `this` is
+ * refused now, and the handle is resolved again after the last app code. */
+UTEST(js_audit29, udf_refuses_a_db_open_this)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifest m;
+    memset(&m, 0, sizeof m);
+    m.databases.declared = 1;
+    m.databases.dynamic.declared = 1;
+    m.databases.dynamic.schemes[0] = "sqlite";
+    m.databases.dynamic.scheme_count = 1;
+    HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
+    ASSERT_TRUE(reg != NULL);
+    hl_db_registry_seed(reg, "default", &test_db_handle);
+    js.base.db_registry = reg;
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const out = [];\n"
+        "const d = dbMod.open(':memory:');\n"
+        "out.push(typeof d.udf);\n"
+        "const c = dbMod.default();\n"
+        "const reg = c.udf.register, unreg = c.udf.unregister;\n"
+        "const tryit = (f) => { try { f(); return 'ran'; }\n"
+        "  catch (e) { return e instanceof TypeError ? 'type' : 'other'; } };\n"
+        "out.push(tryit(() => reg.call(d, 'hull_a29', () => 1)));\n"
+        "out.push(tryit(() => reg.call(d, 'hull_a29', () => 1,\n"
+        "  { get nargs() { d.close(); return 0; } })));\n"
+        "out.push(tryit(() => unreg.call(d, 'hull_a29')));\n"
+        "out.push(tryit(() => reg.call(d, 'hull_a29', 'echo')));\n"
+        "d.close();\n"
+        "out.push(tryit(() => reg.call(d, 'hull_a29', () => 1)));\n"
+        "c.udf.register('hull_a29ok', () => 7);\n"
+        "out.push(String(c.query('SELECT hull_a29ok() AS v')[0].v));\n"
+        "c.udf.unregister('hull_a29ok');\n"
+        "globalThis.__a29udf = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__a29udf");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "undefined|type|type|type|type|type|7");
+    free(s);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    js.base.db_registry = test_db_registry;
+    hl_db_registry_destroy(reg);
+    cleanup_js_caps();
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* L1: opts.multipart was stored live and its caps read through the app's
+ * getters at wiring (a throw -> 0 = unlimited, exception pending). They are
+ * read once at registration now, validated, and stored as plain numbers. */
+UTEST(js_audit29, multipart_caps_read_at_registration)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a4_module(
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "const out = [];\n"
+        "const h = (req, res) => res.text('x');\n"
+        "const tryit = (f) => { try { f(); return 'ok'; }\n"
+        "  catch (e) { return e instanceof TypeError ? 'type' : String(e.message); } };\n"
+        "out.push(tryit(() => app.post('/a', h, { multipart:\n"
+        "  { get maxPartSize() { throw new Error('getter'); } } })));\n"
+        "out.push(tryit(() => app.post('/b', h, { multipart: { maxPartSize: '9' } })));\n"
+        "out.push(tryit(() => app.post('/c', h, { multipart: { maxParts: -1 } })));\n"
+        "globalThis.__a29gets = 0;\n"
+        "out.push(tryit(() => app.post('/d', h, { multipart: {\n"
+        "  get maxPartSize() { globalThis.__a29gets++; return 1024; },\n"
+        "  max_parts: 3 } })));\n"
+        "globalThis.__a29mp = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__a29mp");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "getter|type|type|ok");
+    free(s);
+    EXPECT_EQ(eval_int("globalThis.__a29gets"), 1);
+    /* The def holds a plain null-prototype object of numbers. */
+    EXPECT_EQ(eval_int(
+        "(() => { const d = globalThis.__hull_internals.__hull_route_defs;\n"
+        "  const def = Object.getOwnPropertyDescriptor(d, '0').value;\n"
+        "  const mp = def.multipart;\n"
+        "  return Object.getPrototypeOf(mp) === null && mp.max_part_size === 1024\n"
+        "    && mp.max_parts === 3 && !('maxPartSize' in mp) ? 1 : 0; })()"), 1);
+    EXPECT_EQ(eval_int("globalThis.__a29gets"), 1);
+    EXPECT_FALSE(JS_HasException(js.ctx));
+    cleanup_js();
+}
+
+/* L2: app.use / app.usePost converted the pattern after a method conversion
+ * that threw, and threw a TypeError over the app's own error. */
+UTEST(js_audit29, app_use_keeps_the_conversion_error)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a4_module(
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "const out = [];\n"
+        "globalThis.__a29pat = 0;\n"
+        "const bad = { toString() { throw new Error('own'); } };\n"
+        "const pat = { toString() { globalThis.__a29pat++; return '/*'; } };\n"
+        "for (const f of [app.use, app.usePost]) {\n"
+        "  try { f('*', bad, () => 0); out.push('ran'); } catch (e) { out.push(e.message); }\n"
+        "  try { f(bad, pat, () => 0); out.push('ran'); } catch (e) { out.push(e.message); }\n"
+        "}\n"
+        "globalThis.__a29use = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__a29use");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "own|own|own|own");
+    free(s);
+    EXPECT_EQ(eval_int("globalThis.__a29pat"), 0);   /* never converted */
+    cleanup_js();
+}
+
+/* M2: ws.broadcast took its data through JS_ToCStringLen, so relaying an
+ * ArrayBuffer sent "[object ArrayBuffer]". Byte views are sent as bytes, a
+ * primitive as a string, and any other object is refused. */
+UTEST(js_audit29, ws_broadcast_takes_byte_views)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    js.base.ws_registry = &reg;
+    ASSERT_EQ(a4_module(
+        "import { wsServer } from 'hull:web:ws-server';\n"
+        "const out = [];\n"
+        "const tryit = (f) => { try { return String(f()); }\n"
+        "  catch (e) { return e instanceof TypeError ? 'type' : 'other'; } };\n"
+        "out.push(tryit(() => wsServer.broadcast('/ws', new ArrayBuffer(4), true)));\n"
+        "out.push(tryit(() => wsServer.broadcast('/ws', new Uint8Array(4), true)));\n"
+        "out.push(tryit(() => wsServer.broadcast('/ws', 'hi')));\n"
+        "out.push(tryit(() => wsServer.broadcast('/ws', 42)));\n"
+        "out.push(tryit(() => wsServer.broadcast('/ws', { toString() { return 'x'; } })));\n"
+        "globalThis.__a29ws = out.join('|');\n"), 0);
+    char *s = eval_str("globalThis.__a29ws");
+    ASSERT_NE(s, NULL);
+    EXPECT_STREQ(s, "0|0|0|0|type");
+    free(s);
+    js.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+#ifdef HL_ENABLE_WASM
+/* M1: compute inputs took an ArrayBuffer, a WasmBuffer or a MappedBuffer and
+ * converted anything else with toString: a Uint8Array went in as "1,2,3".
+ * A typed array is bytes now (its own window), and any other object is
+ * refused. */
+UTEST(js_audit29, compute_inputs_take_typed_arrays)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int("compute.call('echo', new Uint8Array([65, 66, 67])).byteLength"), 3);
+    EXPECT_EQ(eval_int(
+        "(() => { const ab = new ArrayBuffer(8);\n"
+        "  new Uint8Array(ab).set([1, 2, 3, 4, 5, 6, 7, 8]);\n"
+        "  const r = new Uint8Array(compute.call('echo', new Uint8Array(ab, 2, 3)));\n"
+        "  return r.length === 3 && r[0] === 3 && r[2] === 5 ? 1 : 0; })()"), 1);
+    EXPECT_EQ(eval_int("compute.call('echo', new Float32Array([1, 2])).byteLength"), 8);
+    EXPECT_EQ(eval_int("(() => { const b = compute.buffer(new Uint16Array([1, 2, 3]));"
+                       " const n = b.length; b.close(); return n; })()"), 6);
+    EXPECT_EQ(eval_int(
+        "(() => { const i = compute.instance('echo');\n"
+        "  const n = i.call(new Int8Array(5)).byteLength; i.close(); return n; })()"), 5);
+    static const char *const refused[] = {
+        "compute.call('echo', { toString() { return 'abc'; } })",
+        "compute.call('echo', [1, 2, 3])",
+        "compute.buffer({})",
+        "(() => { const i = compute.instance('echo');"
+        " try { return i.call({}); } finally { i.close(); } })()",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "(() => { try { %s; return 0; }"
+                 " catch (e) { return e instanceof TypeError ? 1 : 2; } })()",
+                 refused[i]);
+        EXPECT_EQ_MSG(eval_int(code), 1, refused[i]);
+    }
+    EXPECT_EQ(eval_int("compute.call('echo', 'abc').byteLength"), 3);
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
 
 UTEST_MAIN();

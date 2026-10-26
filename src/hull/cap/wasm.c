@@ -1515,6 +1515,15 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
         goto cleanup_bufs_err;
     }
 
+    /* An async op's output is taken on its VM's in-flight result total
+     * before the host copies it off the heap (audit 29). */
+    if (result > 0 && opts &&
+        hl_offheap_shared_take(opts->result_hold, (size_t)result) != 0) {
+        if (err_msg) *err_msg = "result too large";
+        ret = HL_WASM_ERR_OUTPUT;
+        goto cleanup_bufs_err;
+    }
+
     /* Free input allocation - no longer needed */
     tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
@@ -2101,6 +2110,15 @@ static int instance_call_buf_run(HlWasmInstance *pi,
     if (wasm_out_ptr &&
         !range_in_linear_memory(inst, wasm_out_ptr, (uint64_t)result)) {
         if (err_msg) *err_msg = err_internal;
+        goto cleanup_bufs_err;
+    }
+
+    /* An async op's output is taken on its VM's in-flight result total
+     * before the host copies it off the heap (audit 29). */
+    if (result > 0 && opts &&
+        hl_offheap_shared_take(opts->result_hold, (size_t)result) != 0) {
+        if (err_msg) *err_msg = "result too large";
+        ret = HL_WASM_ERR_OUTPUT;
         goto cleanup_bufs_err;
     }
 

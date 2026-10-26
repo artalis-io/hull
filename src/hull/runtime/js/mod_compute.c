@@ -125,6 +125,31 @@ static JSValue js_push_wasm_buffer(JSContext *ctx, HlWasmBuffer *buf)
     return obj;
 }
 
+/* An input that is not a WasmBuffer / MappedBuffer (audit 29): an
+ * ArrayBuffer's or a typed array's bytes (borrowed - the caller takes them
+ * after its last app code), a primitive converted as a string (*is_string,
+ * JS_FreeCString it), any other object a TypeError: a Float32Array went in
+ * as its toString "1,2,3", any object as "[object Object]". NULL with an
+ * exception pending on failure. */
+static const uint8_t *js_compute_input_bytes(JSContext *ctx, JSValueConst v,
+                                             size_t *len, int *is_string,
+                                             const char *what)
+{
+    *is_string = 0;
+    *len = 0;
+    if (JS_IsObject(v)) {
+        const uint8_t *p = hl_js_bytes_view(ctx, len, v);
+        if (p) return p;
+        JS_ThrowTypeError(ctx, "%s: input must be a string, ArrayBuffer, "
+                               "typed array, WasmBuffer, or MappedBuffer", what);
+        return NULL;
+    }
+    const char *s = JS_ToCStringLen(ctx, len, v);
+    if (!s) return NULL;
+    *is_string = 1;
+    return (const uint8_t *)s;
+}
+
 static JSValue js_compute_buffer(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
@@ -133,14 +158,11 @@ static JSValue js_compute_buffer(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "compute.buffer requires (input)");
 
     size_t len = 0;
-    const uint8_t *data = hl_js_array_buffer_probe(ctx, &len, argv[0]);
     int is_string = 0;
-    if (!data) {
-        data = (const uint8_t *)JS_ToCStringLen(ctx, &len, argv[0]);
-        if (!data)
-            return JS_ThrowTypeError(ctx, "compute.buffer: input must be a string or ArrayBuffer");
-        is_string = 1;
-    }
+    const uint8_t *data = js_compute_input_bytes(ctx, argv[0], &len,
+                                                 &is_string, "compute.buffer");
+    if (!data)
+        return JS_EXCEPTION;
 
     /* The copy is charged before it is made, 1 unit per 8 bytes (audit 18),
      * and js_push_wasm_buffer counts it against the heap limit. */
@@ -465,16 +487,12 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
             input = (const uint8_t *)mmap_buf->addr;
             input_len = mmap_buf->len;
         } else {
-            input = hl_js_array_buffer_probe(ctx, &input_len, argv[1]);
+            input = js_compute_input_bytes(ctx, argv[1], &input_len,
+                                           &input_is_string, "compute.call");
             if (!input) {
-                /* Try as string */
-                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
-                if (!input) {
-                    js_free_span_names(ctx, span_reqs, span_holders, span_count);
-                    JS_FreeCString(ctx, name);
-                    return JS_ThrowTypeError(ctx, "compute.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
-                }
-                input_is_string = 1;
+                js_free_span_names(ctx, span_reqs, span_holders, span_count);
+                JS_FreeCString(ctx, name);
+                return JS_EXCEPTION;
             }
         }
     }
@@ -677,17 +695,12 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
         } else {
-            size_t ab_len;
-            input = hl_js_array_buffer_probe(ctx, &ab_len, argv[1]);
-            if (input) {
-                input_len = ab_len;
-            } else {
-                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
-                if (!input) {
-                    JS_FreeCString(ctx, name);
-                    return JS_ThrowTypeError(ctx, "compute.async.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
-                }
-                input_is_string = 1;
+            input = js_compute_input_bytes(ctx, argv[1], &input_len,
+                                           &input_is_string,
+                                           "compute.async.call");
+            if (!input) {
+                JS_FreeCString(ctx, name);
+                return JS_EXCEPTION;
             }
         }
     }
@@ -740,6 +753,10 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     /* The input copy (js_async_input_copy) goes with the op. */
     op->input = in_copy;
     op->input_hold = in_hold;
+    /* The output, on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
+                           js->max_heap_bytes);
+    op->opts.result_hold = &op->result_hold;
     op->input_len = input_len;
 
     JS_FreeCString(ctx, name);
@@ -903,14 +920,12 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
         } else {
-            input = hl_js_array_buffer_probe(ctx, &input_len, argv[0]);
+            input = js_compute_input_bytes(ctx, argv[0], &input_len,
+                                           &input_is_string,
+                                           "WasmInstance.call");
             if (!input) {
-                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[0]);
-                if (!input) {
-                    js_free_span_names(ctx, span_reqs, span_holders, span_count);
-                    return JS_ThrowTypeError(ctx, "WasmInstance.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
-                }
-                input_is_string = 1;
+                js_free_span_names(ctx, span_reqs, span_holders, span_count);
+                return JS_EXCEPTION;
             }
         }
     }
@@ -1085,13 +1100,11 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
             input = (const uint8_t *)mmap_in->addr;
             input_len = mmap_in->len;
         } else {
-            input = hl_js_array_buffer_probe(ctx, &input_len, argv[0]);
-            if (!input) {
-                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[0]);
-                if (!input)
-                    return JS_ThrowTypeError(ctx, "WasmInstance.async.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
-                input_is_string = 1;
-            }
+            input = js_compute_input_bytes(ctx, argv[0], &input_len,
+                                           &input_is_string,
+                                           "WasmInstance.async.call");
+            if (!input)
+                return JS_EXCEPTION;
         }
     }
 
@@ -1131,6 +1144,10 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     /* The input copy (js_async_input_copy) goes with the op. */
     op->input = in_copy;
     op->input_hold = in_hold;
+    /* The output, on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
+                           js->max_heap_bytes);
+    op->opts.result_hold = &op->result_hold;
     op->input_len = input_len;
 
     /* Parse + validate spans, deep-copy + submission-pin into the op, free the
@@ -1392,13 +1409,13 @@ static JSValue js_compute_segment(JSContext *ctx, JSValueConst this_val,
             pre_alloc = mmap_buf->addr;
         } else {
             /* Try ArrayBuffer */
-            ab_buf = hl_js_array_buffer_probe(ctx, &data_len, argv[2]);
+            ab_buf = hl_js_bytes_view(ctx, &data_len, argv[2]);   /* + typed arrays (audit 29) */
             if (ab_buf) {
                 data = ab_buf;
             } else {
                 JS_FreeCString(ctx, module_name);
                 JS_FreeCString(ctx, segment_name);
-                return JS_ThrowTypeError(ctx, "compute.segment: data must be a string, ArrayBuffer, or MappedBuffer");
+                return JS_ThrowTypeError(ctx, "compute.segment: data must be a string, ArrayBuffer, typed array, or MappedBuffer");
             }
         }
     }
@@ -1643,7 +1660,9 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     HlOffheapHold   in_hold = {0};
     if (input.kind != HL_STREAM_IN_FILE) {
         size_t ilen = 0;
-        const uint8_t *idata = hl_js_array_buffer_probe(ctx, &ilen, argv[1]);
+        /* An ArrayBuffer or a typed array (audit 29: a typed array went in
+         * as its toString). */
+        const uint8_t *idata = hl_js_bytes_view(ctx, &ilen, argv[1]);
         if (idata) {
             /* The copy is off the heap for the whole stream, and the output
              * callback (app code, between chunks) can start another stream
@@ -1692,13 +1711,17 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
                     in_mmap = mmap;
                     hl_cap_fs_mmap_borrow(in_mmap);
                 } else {
-                    /* An object's toString is app code: nothing is held yet. */
-                    const char *s = JS_ToCStringLen(ctx, &ilen, argv[1]);
+                    /* Any other object is refused (audit 29): it went in as
+                     * its toString. A primitive's runs no app code. */
+                    const char *s = JS_IsObject(argv[1]) ? NULL
+                                  : JS_ToCStringLen(ctx, &ilen, argv[1]);
                     if (!s) {
                         js_stream_free_args(ctx, &cb_ctx, has_output,
                                             out_storage.kind, in_file_str,
                                             out_file_str, name);
-                        return JS_ThrowTypeError(ctx, "compute.stream: invalid input");
+                        return JS_ThrowTypeError(ctx, "compute.stream: input must "
+                            "be a string, ArrayBuffer, typed array, WasmBuffer, "
+                            "MappedBuffer or {file}");
                     }
                     input.kind = HL_STREAM_IN_BUFFER;
                     input.buffer.data = s;

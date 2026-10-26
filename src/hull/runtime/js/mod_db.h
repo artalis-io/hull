@@ -13,6 +13,7 @@
 
 #ifdef HL_ENABLE_DB
 
+#include <stdbool.h>
 #include <quickjs.h>
 #include "hull/cap/db_backend.h"
 
@@ -20,6 +21,10 @@
  * this_val (db.connect/default sub-objects), an owner box (db.open), else the
  * runtime default. Defined in mod_db.c. */
 HlDbHandle *js_call_handle(JSContext *ctx, JSValueConst this_val);
+
+/* True when @p this_val is a db.open() (caller-owned) connection object, open
+ * or closed. Defined in mod_db.c (audit 29). */
+bool js_call_is_owned(JSValueConst this_val);
 
 /* Build a connection sub-object (HullDbConnection instance) carrying @p h as
  * its opaque, so js_call_handle resolves it. Defined in mod_db.c. */

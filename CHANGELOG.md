@@ -248,6 +248,46 @@ kept the rest. Check the list below before upgrading.
   `db.async`, compute, gpu, ssh, smtp, `worker.dispatch`, `tui.poll`) now refuses then, and
   `hl_lua_free` marks the runtime shutting down before `lua_close` on every path.
 
+**Runtime (JS) - audit 29 fixes**
+- **`db.udf.register` / `unregister` refuse a `db.open()` connection.** Called with a `db.open`
+  handle as `this` (`c.udf.register.call(d, ...)`), they registered a UDF on the dynamic handle,
+  where `udf` is meant to be absent, and an options getter that closed it left the call using a
+  freed handle. Both now throw a TypeError for such a `this`, and resolve the handle again after
+  the last argument conversion.
+- **GPU buffer data, uniforms and texture data take typed arrays and buffers as bytes.** Only an
+  ArrayBuffer was taken as bytes: a `Float32Array` uploaded its text `"1,2,3"` and a WasmBuffer /
+  MappedBuffer `"[object WasmBuffer]"`. Typed arrays, WasmBuffer, MappedBuffer and images are now
+  bytes in `gpu.dispatch` / `gpu.pipeline` (sync and async) and inline textures; any other object
+  is a TypeError. A string still uploads its text.
+- **Compute inputs take typed arrays as bytes.** `compute.call` / `compute.async.call` /
+  `WasmInstance.call` / its async call / `compute.stream` / `compute.buffer` (and
+  `compute.segment` data) read a typed array's own bytes; any other object (a plain object, an
+  array, a detached buffer) is a TypeError instead of its `toString`.
+- **`ws.broadcast` sends an ArrayBuffer or typed array as bytes**, as `conn.sendBinary` does:
+  relaying an `onMessage` ArrayBuffer sent `"[object ArrayBuffer]"`. Any other object is refused.
+- **Route `opts.multipart` caps are read once, when the route is registered.** The app's object
+  was kept and its getters read when the server wired the routes: one that threw left the cap at
+  0 (Keel's "unlimited") with the exception pending. A getter that throws, or a cap that is not a
+  non-negative number, now fails `app.post(...)` itself.
+- `app.use` / `app.usePost` throw the app's own error when the method or pattern conversion
+  throws, instead of a TypeError over it.
+- `tui.async(fn)` logs an error `fn` throws (it was left pending), and re-raises a tripped
+  instruction budget.
+- **`gpu.async.dispatch` reads its options as `gpu.dispatch` does:** `output: false` means no
+  read-back (it read buffer 0), `textures` / `outputTexture` are refused rather than ignored, and
+  a buffer `name` is kept whatever its length (one over 63 bytes was dropped).
+- **`gpu.async.pipeline` with more than one output** resolves to an array of ArrayBuffers in JS
+  and a table of strings in Lua (`result`), as the sync form returns; it resolved to an empty
+  buffer.
+- **Async GPU read-backs and async compute outputs count toward the in-flight result total**
+  (both runtimes): each is taken on the VM's `async_result_bytes`, under its heap limit, on the
+  worker thread before the copy is made, and the op fails `result too large` past it - as
+  `db.async` results and `worker.dispatch` returns already did (audit 23).
+- `db.async` exec results, `gpu.devices()`, the multi-output `gpu.pipeline` array and the
+  `smtp.send` result object fail with an exception when a value cannot be made, instead of
+  returning a half-built object.
+- `key.secretboxOpen` zeroes its plaintext scratch buffer before freeing it.
+
 ## [0.17.1] - 2026-10-18
 
 Full PR list:
