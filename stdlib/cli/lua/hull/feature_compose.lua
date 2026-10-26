@@ -305,6 +305,27 @@ end
 
 -- ── Per-app feature registry codegen ─────────────────────────────────
 
+
+--- Escape a string for safe embedding in a C string literal.
+--
+-- App file paths come from tool.find_files (raw on-disk names) and may hold
+-- ", \, or control bytes; without escaping a crafted filename could break
+-- out of the generated app_registry.c string literal. `?` is escaped too
+-- (audit 29): that file is compiled with -std=c11, where trigraphs are on,
+-- so a name holding `??/` became a backslash that escaped the closing quote
+-- (`-w` hid the warning). Octal escapes are at most three digits, so a digit
+-- after one stays a separate character.
+--
+-- @param s string
+-- @return string  the literal's body (no surrounding quotes).
+function M.c_string_escape(s)
+    return (s:gsub('[%z\1-\31"\\?\127]', function(ch)
+        if ch == '"' then return '\\"' end
+        if ch == '\\' then return '\\\\' end
+        return string.format('\\%03o', ch:byte())
+    end))
+end
+
 --- Emit the per-app feature registry C source.
 --
 -- Every produced app needs STRONG hl_stdlib_feature_entries() +

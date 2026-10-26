@@ -106,4 +106,17 @@ do
        "under its embedded-asset name")
 end
 
+-- ── C string escaping for the generated app_registry.c (audit 29) ────
+do
+    local e = fc.c_string_escape
+    ok(e("./routes/users") == "./routes/users", "plain name unchanged")
+    ok(e('a"b\\c') == 'a\\"b\\\\c', "quote and backslash escaped")
+    ok(e("a\nb") == "a\\012b", "control byte as octal")
+    -- `??/` is the backslash trigraph under -std=c11: no `?` may survive
+    local esc = e('x??/"y??=')
+    ok(not esc:find("?", 1, true), "every ? escaped (" .. esc .. ")")
+    ok(esc == 'x\\077\\077/\\"y\\077\\077=', "trigraph name escaped exactly")
+    ok(e("?1") == "\\0771", "a digit after an octal escape stays separate")
+end
+
 return { pass = pass, fail = fail }

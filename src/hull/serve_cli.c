@@ -781,7 +781,7 @@ int hull_serve(int argc, char **argv)
          * password into unveil and the sandbox's log lines (audit 10). */
         if (hl_sandbox_apply(&sandbox_policy, app_dir,
                              hl_sandbox_db_path(db_path),
-                             NULL, NULL, NULL) != 0) {
+                             NULL, NULL) != 0) {
             log_error("[hull:cli] sandbox enforcement failed");
 #ifdef HL_ENABLE_HTTP_CLIENT
             if (tls_ctx) hl_tls_ctx_destroy(tls_ctx);

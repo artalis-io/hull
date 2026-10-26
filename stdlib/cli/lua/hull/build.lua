@@ -509,18 +509,9 @@ end
 
 -- ── Build steps ──────────────────────────────────────────────────────
 
--- Escape a string for safe embedding in a C string literal. App file paths
--- come from tool.find_files (raw on-disk names) and may contain ", \, or
--- control bytes; without escaping a crafted filename could break out of the
--- generated app_registry.c string literal. Belt-and-suspenders with the
--- varname sanitizer below (which forces a valid C identifier).
-local function c_string_escape(s)
-    return (s:gsub('[%z\1-\31"\\]', function(ch)
-        if ch == '"' then return '\\"' end
-        if ch == '\\' then return '\\\\' end
-        return string.format('\\%03o', ch:byte())
-    end))
-end
+-- Escape a string for a C string literal (shared with eject's codegen
+-- tests; audit 29 added `?` against trigraphs).
+local c_string_escape = fcompose.c_string_escape
 
 -- Collect the { name = <VFS entry name>, data = <file bytes> } list for the
 -- compiler-free build (fed to tool.emit_app_registry). Mirrors the exact

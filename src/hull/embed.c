@@ -240,7 +240,7 @@ int hl_embed_seal(HlEmbed *e, const char *db_path)
 
     /* 3. Apply the kernel sandbox against the sealed base_dir. */
     int rc = hl_sandbox_apply(&policy, e->fs.base_dir, db_path,
-                              NULL, NULL, NULL);
+                              NULL, NULL);
     if (rc != 0) return -1;        /* fail closed: leave state NEW */
 
     /* 4. Success. Drop every writable alias of the policy - the sealed

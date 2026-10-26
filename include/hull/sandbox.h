@@ -159,17 +159,17 @@ int hl_sandbox_pledged(void);
  *   policy         - pre-resolved capability bundle (see HlSandboxPolicy)
  *   app_dir        - application directory (always unveiled read-only)
  *   db_path        - SQLite database path (always allowed rw)
- *   ca_bundle_path - CA certificate bundle (unveiled read-only, may be NULL)
  *   tls_cert_path  - TLS certificate file (unveiled read-only, may be NULL)
  *   tls_key_path   - TLS private key file (unveiled read-only, may be NULL)
  *
  * The sandbox always applies (default-deny).  The app directory is
  * always unveiled for reading (templates, static assets, source files).
+ * The CA bundle gets no grant (audit 29): every outbound anchor is read
+ * into memory before this runs (ca_trust.c).
  * Returns 0 on success, -1 on error (logged).
  */
 int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                       const char *db_path,
-                      const char *ca_bundle_path,
                       const char *tls_cert_path,
                       const char *tls_key_path);
 

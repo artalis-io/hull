@@ -139,6 +139,24 @@ kept the rest. Check the list below before upgrading.
   could cut one short (`a\x0...`). Found by the new `fuzz_wasm_log_escape`; `fuzz_migrate_name`
   covers the embedded-migration filter. The escaper moved to `cap/wasm_log.c`.
 
+**Tooling / sandbox - audit 29 fixes**
+- **The CA bundle gets no kernel sandbox grant.** The anchor is read into memory before the
+  sandbox applies, but the resolved source was still unveiled read-only (and granted in the
+  macOS Seatbelt profile) - including the embedded bundle's label `(embedded)`, a relative path
+  that resolved against the working directory: a cloned app shipping a `(embedded) -> /` symlink
+  widened the read grant to the whole filesystem. `hl_sandbox_apply` no longer takes a CA path.
+- **`hull build` / `hull compute build` refuse inline assembly in a compute module.** The
+  assembler's own macro language (`.macro` with `\()` concatenation) builds an `.incbin` at
+  assembly time, past every scan of the preprocessed text, so the auto-rebuild could embed any
+  file the developer can read. An `asm` / `__asm` / `__asm__` token outside a string literal now
+  fails the build; a freestanding `hull_process` module has no use for it.
+- The generated `app_registry.c` escapes `?` (`\077`) in entry names: it is compiled with
+  `-std=c11`, where a file name holding the `??/` trigraph became a backslash that escaped the
+  literal's closing quote.
+- DuckDB's read-only `/proc`, `/sys` and `/etc/localtime` grants are made only when a linked
+  backend claims the `duckdb://` scheme; a `--with=postgres` or `--with=mysql` app (any composed
+  backend) got them too.
+
 ## [0.17.1] - 2026-10-18
 
 Full PR list:
