@@ -2707,33 +2707,45 @@ UTEST(js_stdlib, totp_brute_force_lockout)
     ASSERT_TRUE(js_initialized);
 
     /* Round-8 HIGH-3: brute-force lockout baked into the module.
-     * Mirror of lua_stdlib.totp_brute_force_lockout. */
+     * Mirror of lua_stdlib.totp_brute_force_lockout (wrong codes chosen to
+     * differ from every real code near the current step; audit 29). */
     const char *code =
         "import { totp } from 'hull:web:middleware:totp';\n"
         "function run() {\n"
         "  __testHooks('hull:web:middleware:totp').reset();\n"
         "  totp.init({ maxFailedAttempts: 3, lockoutDuration: 60, "
-        "               window: 10, recoveryCodes: 0 });\n"
+        "               window: 3, recoveryCodes: 0 });\n"
         "  const r = totp.enroll('u1');\n"
         "  const secret = __testHooks('hull:web:middleware:totp').base32Decode(r.secretBase32);\n"
         "  const step = __testHooks('hull:web:middleware:totp').currentStep();\n"
+        "  const at = __testHooks('hull:web:middleware:totp').totpAtStep;\n"
+        "  const wrong = (seed) => {\n"
+        "    for (let c = seed; c <= 999999; c++) {\n"
+        "      const code = String(c).padStart(6, '0');\n"
+        "      let hit = false;\n"
+        "      for (let s = step - 5; s <= step + 6; s++)\n"
+        "        if (at(secret, s, 6) === code) { hit = true; break; }\n"
+        "      if (!hit) return code;\n"
+        "    }\n"
+        "  };\n"
+        "  const w0 = wrong(0), w1 = wrong(100), w2 = wrong(200);\n"
         "  if (!totp.confirm('u1', __testHooks('hull:web:middleware:totp').totpAtStep(secret, step, 6))) return 0;\n"
-        "  if (totp.verify('u1', '000000')) return 0;\n"
-        "  if (totp.verify('u1', '000001')) return 0;\n"
+        "  if (totp.verify('u1', w0)) return 0;\n"
+        "  if (totp.verify('u1', w1)) return 0;\n"
         "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
-        "  if (totp.verify('u1', '000002')) return 0;\n"
+        "  if (totp.verify('u1', w2)) return 0;\n"
         "  const remain = totp.lockoutRemaining('u1');\n"
-        "  if (remain <= 0 || remain > 60) return 0;\n"
+        "  if (remain < 1 || remain > 61) return 0;\n"
         "  const good = __testHooks('hull:web:middleware:totp').totpAtStep(secret, step + 2, 6);\n"
         "  if (totp.verify('u1', good)) return 0;\n"
         "  __testHooks('hull:web:middleware:totp').clearFailedAttempts('u1');\n"
         "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
-        "  if (totp.verify('u1', '000000')) return 0;\n"
-        "  if (totp.verify('u1', '000001')) return 0;\n"
+        "  if (totp.verify('u1', w0)) return 0;\n"
+        "  if (totp.verify('u1', w1)) return 0;\n"
         "  const good2 = __testHooks('hull:web:middleware:totp').totpAtStep(secret, step + 3, 6);\n"
         "  if (!totp.verify('u1', good2)) return 0;\n"
-        "  if (totp.verify('u1', '000000')) return 0;\n"
-        "  if (totp.verify('u1', '000001')) return 0;\n"
+        "  if (totp.verify('u1', w0)) return 0;\n"
+        "  if (totp.verify('u1', w1)) return 0;\n"
         "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
         "  return 1;\n"
         "}\n"
@@ -5726,6 +5738,21 @@ UTEST(js_stdlib, stdlib_audit28_suite)
 
     int pass = 0, fail = -1;
     int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit28.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+    cleanup_js_caps();
+}
+
+/* Stdlib regressions from audit 29: jobs keys stored as strings and capped
+ * at the column, csrf 413 / empty header, one Bearer rule. */
+UTEST(js_stdlib, stdlib_audit29_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit29.js", &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0);
     EXPECT_GT(pass, 0);

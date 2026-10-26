@@ -163,8 +163,31 @@ function auth.jwt_middleware(opts)
             return 1
         end
 
-        -- Extract Bearer token
-        local token = auth_header:match("^[Bb]earer%s+(.+)$")
+        -- Extract Bearer token. One rule in both runtimes (audit 29): the
+        -- scheme is case-insensitive (RFC 7235), spaces / tabs separate it
+        -- from the token and are dropped around it, and an empty token is no
+        -- token. Lua took "[Bb]earer" and any whitespace, JS only "Bearer ".
+        -- Scanned by hand, not by a pattern with a lazy capture that
+        -- backtracks over a long run of spaces.
+        local token
+        if type(auth_header) == "string" and #auth_header > 7
+            and auth_header:sub(1, 6):lower() == "bearer" then
+            local i, j = 7, #auth_header
+            local b = auth_header:byte(i)
+            if b == 32 or b == 9 then
+                while i <= j do
+                    b = auth_header:byte(i)
+                    if b ~= 32 and b ~= 9 then break end
+                    i = i + 1
+                end
+                while j >= i do
+                    b = auth_header:byte(j)
+                    if b ~= 32 and b ~= 9 then break end
+                    j = j - 1
+                end
+                if i <= j then token = auth_header:sub(i, j) end
+            end
+        end
         if not token then
             if optional then
                 return 0

@@ -227,6 +227,32 @@ local function caller_strings(v, what)
     return out, n
 end
 
+-- A key that lands in a VARCHAR(255) column (dedup_key, concurrency_key, a
+-- step or signal name), as stored (audit 29): an integer is its decimal
+-- string where `allow_int`, any other non-string is an error, and one longer
+-- than `max` bytes (default 255) is refused rather than truncated or failed
+-- by the backend. Bound raw, an integer key compared NUMERICALLY with the
+-- VARCHAR column on MySQL ('7' = 7, but so do '07' and '7abc'), so the
+-- dedup read-back could return another job's id. The JS sibling (keyOpt)
+-- counts the same UTF-8 bytes.
+local MAX_KEY = 255
+-- A signal name is stored as is (_hull_workflow_signals.name) and inside the
+-- wait's memo key "__sig:<n>:<name>" (step_key): 200 bytes leaves the prefix
+-- room in the 255.
+local MAX_SIGNAL_NAME = 200
+local function key_opt(v, what, who, allow_int, max)
+    max = max or MAX_KEY
+    if allow_int and math.type(v) == "integer" then v = tostring(v) end
+    if type(v) ~= "string" then
+        error(who .. ": " .. what .. " must be a string"
+            .. (allow_int and " or an integer" or ""), 3)
+    end
+    if #v > max then
+        error(who .. ": " .. what .. " too long (max " .. max .. " bytes)", 3)
+    end
+    return v
+end
+
 -- A count option (limit / offset / batch) as an integer in lo..hi: a number
 -- or a numeric string counts, anything else and NaN take the default, and
 -- +/-inf clamps to the bound. The JS sibling (countOpt) applies the same
@@ -764,6 +790,10 @@ function jobs.enqueue(job_type, data, opts)
         end
     end
     local has_deps = deps ~= nil and #deps > 0
+    local dedup_key = opts.dedup_key ~= nil
+        and key_opt(opts.dedup_key, "dedup_key", "jobs.enqueue", true) or nil
+    local conc_key = opts.concurrency_key ~= nil
+        and key_opt(opts.concurrency_key, "concurrency_key", "jobs.enqueue", true) or nil
     local vals = {
         opts.queue or "default",
         job_type,
@@ -771,7 +801,7 @@ function jobs.enqueue(job_type, data, opts)
         priority,
         max_attempts,
         run_at,
-        opts.dedup_key,
+        dedup_key,
         now, now,
     }
     local cols = { "queue", "type", "payload", "priority", "max_attempts",
@@ -787,8 +817,8 @@ function jobs.enqueue(job_type, data, opts)
     -- `concurrency_key` run at once. Soft (default) reconciles at claim (may
     -- briefly overshoot); `concurrency_strict = true` opts into the counter-backed
     -- hard cap. All jobs of a key should agree on the strict flag.
-    if opts.concurrency_key ~= nil and opts.concurrency and opts.concurrency > 0 then
-        cols[#cols + 1] = "concurrency_key";   vals[#vals + 1] = opts.concurrency_key
+    if conc_key ~= nil and opts.concurrency and opts.concurrency > 0 then
+        cols[#cols + 1] = "concurrency_key";   vals[#vals + 1] = conc_key
         cols[#cols + 1] = "concurrency_limit"; vals[#vals + 1] = opts.concurrency
         if opts.concurrency_strict then
             cols[#cols + 1] = "concurrency_strict"; vals[#vals + 1] = 1
@@ -801,7 +831,7 @@ function jobs.enqueue(job_type, data, opts)
     -- once its other dependency ended though enqueue had raised (audit 20).
     local id, collapsed
     local function write()
-        if opts.dedup_key ~= nil then
+        if dedup_key ~= nil then
             -- A key dedups against jobs that have not finished. The unique index
             -- also covered done / dead rows, so a completed job's key refused every
             -- re-enqueue until cleanup purged the row (7 days). A finished job
@@ -809,7 +839,7 @@ function jobs.enqueue(job_type, data, opts)
             -- index), and it needs no change to an existing database's index.
             db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? "
                 .. "AND status IN ('done', 'dead', 'compensated')",
-                { opts.queue or "default", opts.dedup_key })
+                { opts.queue or "default", dedup_key })
             -- INSERT ... ON CONFLICT(queue,dedup_key) DO NOTHING / INSERT OR IGNORE.
             local n = db.insert_if_absent("_hull_jobs", { "queue", "dedup_key" }, cols, vals)
             if not (n and n > 0) then
@@ -819,7 +849,7 @@ function jobs.enqueue(job_type, data, opts)
             -- Portable id fetch: the unique (queue, dedup_key) identifies the new row.
             -- (db.last_id is unsupported on Postgres, which has no last-insert-rowid.)
             local rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
-                { opts.queue or "default", opts.dedup_key })
+                { opts.queue or "default", dedup_key })
             id = rows and rows[1] and rows[1].id
         else
             local ph = {}
@@ -2461,6 +2491,7 @@ local function run_step(workflow_id, step_key, fn)
     if type(step_key) ~= "string" or step_key == "" then
         error("ctx.step: name must be a non-empty string")
     end
+    key_opt(step_key, "name", "ctx.step", false)
     if type(fn) ~= "function" then error("ctx.step: fn must be a function") end
     local rows = db.query(
         "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
@@ -2536,6 +2567,7 @@ local function run_wait_signal(workflow_id, n, name, opts, replay_only)
     if type(name) ~= "string" or name == "" then
         error("ctx.wait_signal: name must be a non-empty string")
     end
+    key_opt(name, "name", "ctx.wait_signal", false, MAX_SIGNAL_NAME)
     local key = "__sig:" .. n .. ":" .. name
     local memo = db.query(
         "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
@@ -2874,6 +2906,7 @@ function jobs.signal(id, name, payload, opts)
     if type(name) ~= "string" or name == "" then
         error("jobs.signal: name must be a non-empty string")
     end
+    key_opt(name, "name", "jobs.signal", false, MAX_SIGNAL_NAME)
     if opts ~= nil and type(opts) ~= "table" then
         error("jobs.signal: opts must be a table")
     end

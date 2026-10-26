@@ -551,6 +551,40 @@ function callerStrings(v, what) {
     return out;
 }
 
+// A key that lands in a VARCHAR(255) column (dedupKey, concurrencyKey, a step
+// or signal name), as stored (audit 29; see the Lua sibling key_opt): an
+// integer is its decimal string where `allowInt`, any other non-string is an
+// error, and one longer than `max` UTF-8 bytes (default 255, the bytes the Lua
+// twin counts) is refused. Bound raw, an integer key compared NUMERICALLY with
+// the VARCHAR column on MySQL, so the dedup read-back could return another
+// job's id. An unpaired surrogate has no UTF-8 form: refused as too long.
+const MAX_KEY = 255;
+// A signal name is stored as is and inside the wait's memo key
+// "__sig:<n>:<name>": 200 bytes leaves the prefix room in the 255.
+const MAX_SIGNAL_NAME = 200;
+function utf8Length(s) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
+                 (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+        else if (c >= 0xd800 && c <= 0xdfff) return Infinity;
+        else n += 3;
+    }
+    return n;
+}
+function keyOpt(v, what, who, allowInt, max) {
+    const lim = max || MAX_KEY;
+    if (allowInt && typeof v === "number" && Number.isSafeInteger(v)) v = String(v);
+    if (typeof v !== "string")
+        throw new Error(who + ": " + what + " must be a string" + (allowInt ? " or an integer" : ""));
+    if (v.length > lim || utf8Length(v) > lim)
+        throw new Error(who + ": " + what + " too long (max " + lim + " bytes)");
+    return v;
+}
+
 // "?,?,...": n placeholders, from a count alone.
 function placeholders(n) {
     let s = "";
@@ -718,6 +752,10 @@ function enqueue(jobType, data, opts) {
         }
     }
     const hasDeps = deps !== null && deps.length > 0;
+    const dedupKey = o.dedupKey !== undefined && o.dedupKey !== null
+        ? keyOpt(o.dedupKey, "dedupKey", "jobs.enqueue", true) : null;
+    const concKey = o.concurrencyKey !== undefined && o.concurrencyKey !== null
+        ? keyOpt(o.concurrencyKey, "concurrencyKey", "jobs.enqueue", true) : null;
     const vals = [
         o.queue || "default",
         jobType,
@@ -725,7 +763,7 @@ function enqueue(jobType, data, opts) {
         priority,
         maxAttempts,
         runAt,
-        o.dedupKey !== undefined ? o.dedupKey : null,
+        dedupKey,
         now, now,
     ];
     const cols = ["queue", "type", "payload", "priority", "max_attempts",
@@ -737,9 +775,8 @@ function enqueue(jobType, data, opts) {
     // `concurrencyKey` run at once. Soft (default) reconciles at claim (may
     // briefly overshoot); `concurrencyStrict: true` opts into the counter-backed
     // hard cap. All jobs of a key should agree on the strict flag.
-    if (o.concurrencyKey !== undefined && o.concurrencyKey !== null &&
-        o.concurrency && o.concurrency > 0) {
-        cols.push("concurrency_key");   vals.push(o.concurrencyKey);
+    if (concKey !== null && o.concurrency && o.concurrency > 0) {
+        cols.push("concurrency_key");   vals.push(concKey);
         cols.push("concurrency_limit"); vals.push(o.concurrency);
         if (o.concurrencyStrict) { cols.push("concurrency_strict"); vals.push(1); }
     }
@@ -750,7 +787,7 @@ function enqueue(jobType, data, opts) {
     // once its other dependency ended though enqueue had thrown (audit 20).
     let id, collapsed = false;
     const write = () => {
-        if (o.dedupKey !== undefined && o.dedupKey !== null) {
+        if (dedupKey !== null) {
             // A key dedups against jobs that have not finished. The unique index
             // also covered done / dead rows, so a completed job's key refused every
             // re-enqueue until cleanup purged the row (7 days). A finished job
@@ -758,13 +795,13 @@ function enqueue(jobType, data, opts) {
             // index), and it needs no change to an existing database's index.
             db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? " +
                 "AND status IN ('done', 'dead', 'compensated')",
-                [o.queue || "default", o.dedupKey]);
+                [o.queue || "default", dedupKey]);
             const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
             if (!(n && n > 0)) { collapsed = true; return; }   // an un-run job with this (queue, dedupKey) exists
             // Portable id fetch: the unique (queue, dedup_key) identifies the new row.
             // (db.lastId is unsupported on Postgres, which has no last-insert-rowid.)
             const rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
-                [o.queue || "default", o.dedupKey]);
+                [o.queue || "default", dedupKey]);
             id = rows.length ? rows[0].id : null;
         } else {
             const ph = cols.map(() => "?");
@@ -2259,6 +2296,7 @@ function wfAbort() { const e = new Error("__hull_wf_abort"); e[WF_ABORT] = true;
 async function runStep(workflowId, stepKey, fn) {
     if (typeof stepKey !== "string" || stepKey === "")
         throw new Error("ctx.step: name must be a non-empty string");
+    keyOpt(stepKey, "name", "ctx.step", false);
     if (typeof fn !== "function") throw new Error("ctx.step: fn must be a function");
     const rows = db.query(
         "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
@@ -2344,6 +2382,7 @@ function decodePayload(enc) {
 function runWaitSignal(workflowId, n, name, opts, replayOnly) {
     if (typeof name !== "string" || name === "")
         throw new Error("ctx.waitSignal: name must be a non-empty string");
+    keyOpt(name, "name", "ctx.waitSignal", false, MAX_SIGNAL_NAME);
     const key = "__sig:" + n + ":" + name;
     const memo = db.query(
         "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
@@ -2655,6 +2694,7 @@ function start(name, input, opts) {
 function signal(id, name, payload, opts) {
     if (typeof name !== "string" || name === "")
         throw new Error("jobs.signal: name must be a non-empty string");
+    keyOpt(name, "name", "jobs.signal", false, MAX_SIGNAL_NAME);
     if (opts !== undefined && opts !== null && typeof opts !== "object")
         throw new Error("jobs.signal: opts must be an object");
     const delivery = opts ? opts.deliveryId : undefined;

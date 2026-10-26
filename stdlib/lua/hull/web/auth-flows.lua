@@ -995,60 +995,41 @@ end
 local function bump_failed_login(user_id, max)
     user_id = uid_key(user_id)
     local now = time.now()
-    -- Portable conditional upsert. The original used INSERT ... ON CONFLICT
-    -- DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
-    -- do it in two portable steps that hold on every backend: an atomic
-    -- CASE-based UPDATE (standard SQL), then an INSERT only when no row
-    -- matched (first failure). No explicit transaction, so it composes safely
-    -- even if the login handler already runs inside one.
+    -- Read-modify-write under db.batch (as totp's bump_failed_attempt): the
+    -- new count and lock are computed here and bound, so no backend's SET
+    -- evaluation order matters. A single UPDATE whose locked_until CASE read
+    -- failed_count + 1 locked one attempt early on MySQL, which evaluates a
+    -- single-table SET left to right (failed_count already incremented;
+    -- audit 29). db.batch nests as a savepoint inside an app transaction, and
+    -- db.upsert writes each backend's own dialect.
     --
-    -- The CASE logic mirrors the original (Round-9 HIGH-2): when the previous
-    -- lockout window has expired (locked_until IS NOT NULL AND < now) but the
-    -- row hasn't been gc'd yet (gc_expired needs last_failed_at < now-86400),
-    -- the stale failed_count = max-from-prior-cycle would push
-    -- `failed_count + 1 >= max` straight into a fresh lockout on the next bad
-    -- attempt (pre-fix: one attempt per 15-min window for the next 24h, not
-    -- five). Reset to 1 when the prior window has elapsed; else increment and
-    -- lock once failed_count+1 reaches the threshold.
-    local update_sql =
-        "UPDATE _hull_auth_login_attempts SET "
-        .. "  failed_count = CASE "
-        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN 1 "
-        .. "    ELSE failed_count + 1 "
-        .. "  END, "
-        .. "  last_failed_at = ?, "
-        .. "  locked_until = CASE "
-        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN NULL "
-        .. "    WHEN failed_count + 1 >= ? THEN ? + ? "
-        .. "    ELSE NULL "
-        .. "  END "
-        .. "WHERE user_id = ?"
-    local update_args = {
-        now,           -- failed_count CASE: window-expired check
-        now,           -- last_failed_at
-        now,           -- locked_until CASE: window-expired check
-        max, now, _state.lockout_duration,
-        user_id }
-    if db.exec(update_sql, update_args) > 0 then return end
-    -- No existing row: first failure for this user. INSERT; if a concurrent
-    -- request won the insert race (duplicate PK), fall back to the atomic
-    -- UPDATE so the increment still lands.
-    --
-    -- The exec is wrapped in a CLOSURE, not pcall(db.exec, ...): the _hull_*
-    -- namespace guard bypasses stdlib by inspecting db.exec's immediate Lua
-    -- caller's chunk source for a "hull." prefix (lua_is_stdlib_caller). A bare
-    -- pcall(db.exec, ...) puts pcall -- a C frame -- at that level, so the
-    -- guard would deny this write to the reserved _hull_auth_login_attempts.
-    local ok = pcall(function()
-        db.exec(
-            "INSERT INTO _hull_auth_login_attempts "
-            .. "(user_id, failed_count, last_failed_at, locked_until) "
-            .. "VALUES (?, 1, ?, NULL)",
-            { user_id, now })
+    -- Round-9 HIGH-2: when the previous lockout window has expired but the
+    -- row has not been gc'd yet (gc_expired needs last_failed_at < now-86400),
+    -- the stale count from the prior cycle would push straight into a fresh
+    -- lockout on the next bad attempt. So the count starts again at 1 once
+    -- the prior window has elapsed; else it increments and locks when it
+    -- reaches the threshold. 0 is stored for "not locked" (lockout_remaining
+    -- reads anything not in the future as unlocked; a nil would end the
+    -- values array).
+    db.batch(function()
+        local r = db.query(
+            "SELECT failed_count, locked_until FROM _hull_auth_login_attempts "
+            .. "WHERE user_id = ?", { user_id })
+        local row = r and r[1]
+        local fc = (row and tonumber(row.failed_count)) or 0
+        local lu = (row and tonumber(row.locked_until)) or 0
+        local new_fc
+        local new_lu = 0
+        if lu ~= 0 and lu < now then
+            new_fc = 1
+        else
+            new_fc = fc + 1
+            if new_fc >= max then new_lu = now + _state.lockout_duration end
+        end
+        db.upsert("_hull_auth_login_attempts", { "user_id" },
+            { "user_id", "failed_count", "last_failed_at", "locked_until" },
+            { user_id, new_fc, now, new_lu })
     end)
-    if not ok then
-        db.exec(update_sql, update_args)
-    end
 end
 
 local function clear_failed_logins(user_id)
