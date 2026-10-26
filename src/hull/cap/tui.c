@@ -99,6 +99,10 @@ struct HlTuiCtx {
     /* Pending cursor + style. */
     int      cursor_x;            /* 0-indexed internally */
     int      cursor_y;
+    /* Where the last flush left the terminal's cursor; 0 = not known (a
+     * resize, an invalidate, a resume, or nothing flushed yet). */
+    int      shown_valid;
+    int      shown_x, shown_y;
     uint32_t cur_fg;
     uint32_t cur_bg;
     uint32_t cur_attr;
@@ -396,6 +400,7 @@ static void resume_terminal(HlTuiCtx *ctx)
     static const char k[]  = "\x1b[>15u";
     apply_raw(ctx);
     enter_alt_screen(ctx);
+    ctx->shown_valid = 0;
     if (ctx->mouse_on)     raw_write(ctx->out_fd, m, sizeof m - 1);
     if (ctx->paste_on)     raw_write(ctx->out_fd, pz, sizeof pz - 1);
     if (ctx->focus_on)     raw_write(ctx->out_fd, f, sizeof f - 1);
@@ -461,6 +466,7 @@ static int alloc_cells(HlTuiCtx *ctx, int cols, int rows)
     ctx->shadow  = new_shadow;
     ctx->pending = new_pending;
     ctx->cells_alloc = need;
+    ctx->shown_valid = 0;
     return 0;
 }
 
@@ -721,6 +727,7 @@ int hl_cap_tui_invalidate(HlTuiCtx *ctx)
     if (ctx->shadow && ctx->cells_alloc) {
         memset(ctx->shadow, 0, ctx->cells_alloc * sizeof(HlTuiCell));
     }
+    ctx->shown_valid = 0;
     return 0;
 }
 
@@ -958,9 +965,18 @@ int hl_cap_tui_flush(HlTuiCtx *ctx)
         }
     }
 
-    /* Position the visible cursor at the pending cursor location. */
-    if (out_appendf(ctx, "\x1b[%d;%dH", ctx->cursor_y + 1, ctx->cursor_x + 1) < 0)
-        return -1;
+    /* Position the visible cursor at the pending cursor location - unless
+     * nothing was drawn and it is already there: an unchanged frame writes
+     * nothing (audit 28: a tickMs 0 redraw loop wrote a cursor move per
+     * frame, flooding the terminal and blocking in write on a slow one). */
+    if (ctx->out_len > 0 || !ctx->shown_valid ||
+        ctx->shown_x != ctx->cursor_x || ctx->shown_y != ctx->cursor_y) {
+        if (out_appendf(ctx, "\x1b[%d;%dH", ctx->cursor_y + 1, ctx->cursor_x + 1) < 0)
+            return -1;
+        ctx->shown_valid = 1;
+        ctx->shown_x = ctx->cursor_x;
+        ctx->shown_y = ctx->cursor_y;
+    }
 
     if (ctx->out_len > 0) {
         if (raw_write(ctx->out_fd, ctx->out_buf, ctx->out_len) < 0) return -1;

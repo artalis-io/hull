@@ -85,6 +85,9 @@ kept the rest. Check the list below before upgrading.
 - **JS `WasmInstance.call` without `maxOutput` is clamped to the VM heap limit.** The instance's
   own default skipped the clamp, so an oversized output was copied off the heap before it was
   refused; the guest now fails `output_too_small` first, as in Lua.
+- **An unchanged TUI frame writes nothing.** `flush` moved the cursor on every call even when no
+  cell changed, so a `tickMs: 0` redraw loop flooded the terminal and, on one that read slowly,
+  sat blocked in `write` where neither the run deadline nor the budget could stop it.
 
 ## [0.17.1] - 2026-10-18
 

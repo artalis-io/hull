@@ -162,7 +162,7 @@ static size_t drain_for(int master, char *buf, size_t cap, int total_ms)
     millis_since_epoch_ms(&start);
     long long deadline = start + total_ms;
 
-    while (got + 1 < cap) {
+    for (;;) {   /* past cap, read on and drop: see the drain loop below */
         long long now;
         millis_since_epoch_ms(&now);
         int remaining = (int)(deadline - now);
@@ -265,7 +265,10 @@ int main(int argc, char **argv)
 
         struct pollfd pfd = { .fd = master, .events = POLLIN };
         int pr = poll(&pfd, 1, DRAIN_POLL_MS);
-        if (pr > 0 && total + 1 < sizeof buf) {
+        /* Keep reading once buf is full (the rest is dropped): a child
+         * that out-writes it then blocked in write() on a full PTY, where
+         * no deadline or budget of its own could stop it. */
+        if (pr > 0) {
             char chunk[READ_CHUNK_BYTES];
             ssize_t n = read(master, chunk, sizeof chunk);
             if (n > 0) {
