@@ -8,6 +8,41 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Security - vendored dependencies
+
+- **Vendored mbedTLS 3.6.2 -> 3.6.7** (3.6 LTS; official release tarball, SHA-256 checked
+  against the published `mbedtls-3.6.7-sha256sum.txt`). No Hull-local changes to mbedTLS; the
+  trimmed `include/` + `library/` layout and `hull_config.h` are unchanged. The SBOM entry now
+  carries the exact version (`3.6.7`, CPE `cpe:2.3:a:arm:mbed_tls:3.6.7`). Upstream security fixes
+  in between that reach code Hull's `hull_config.h` compiles in (TLS 1.2 client + server,
+  ECDHE-RSA / ECDHE-ECDSA, X.509, PEM, RSA, ECC, ChaCha20, CBC):
+  - X.509: a malformed basicConstraints extension could parse an end-entity certificate as a CA
+    (CVE-2026-49300); buffer underflow in `x509_inet_pton_ipv6()` (CVE-2026-25833).
+  - TLS 1.2: extended-master-secret transcript-hash errors ignored (CVE-2026-50581); Finished
+    message miscalculated after an allocation / hardware failure (CVE-2025-27810); the client
+    accepted a ServerKeyExchange signed with an algorithm it had disallowed (CVE-2026-25834);
+    `mbedtls_ssl_conf_sig_algs()` restrictions are not applied to the certificate chain, now
+    documented (CVE-2026-54441).
+  - A verifying TLS client that never called `mbedtls_ssl_set_hostname()` now fails the
+    handshake (CVE-2025-27809). Keel's client and `shared/tls_client.c` already set the name
+    (and fail closed when it does not take), so no Hull behaviour changes.
+  - RSA: PKCS#1 v1.5 decryption timing side channel (Bleichenbacher; CVE-2026-50587); timing
+    side channel in key / prime generation.
+  - ECC / bignum: `mbedtls_ecdh_calc_secret()` buffer overflow (CVE-2026-35336); 1-byte overread
+    parsing a malformed ECC public key (CVE-2026-50583); optimized-modp side channel
+    (CVE-2026-54435); modular inversion / GCD timing side channel (CVE-2025-54764).
+  - Ciphers: ChaCha20 32-bit block-counter wrap reused keystream (CVE-2026-50584); CBC-PKCS7
+    padding timing side channels (CVE-2025-49087, CVE-2025-59438).
+  - PEM: integer underflow parsing malformed encrypted PEM keys (CVE-2025-52497).
+  - AES on x86/amd64: a thread-scheduling adversary could force the software AES / GCM fallback
+    over AES-NI at startup and time it (CVE-2025-52496).
+  - RNG: random state duplicated across `fork()` after `psa_crypto_init()`, now reseeded in the
+    child (CVE-2026-25835).
+  Fixed upstream in modules Hull does not compile in (TLS 1.3, DTLS, PSK, EC J-PAKE, session
+  tickets, PKCS#7, LMS, FFDH, X.509 writing): CVE-2025-48965, CVE-2026-25832, CVE-2026-50640, CVE-2026-50713, CVE-2026-50586,
+  CVE-2026-50588, CVE-2026-50579, CVE-2026-50585, CVE-2025-49600, CVE-2025-49601, CVE-2025-47917,
+  the TLS 1.3 early-data and ECDHE-PSK overflow fixes, and the PKCS#7 weak-hash rejection.
+
 ### Behaviour changes (security audits 24-28)
 
 Audits 24-26 tightened stdlib inputs; some apps will see different output or a new error.
