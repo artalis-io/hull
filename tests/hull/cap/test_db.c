@@ -1528,9 +1528,147 @@ UTEST(hl_cap_db, sqlite_bookkeeping_tables_are_not_writable)
                                       NULL, NULL, NULL));
     EXPECT_EQ(1, (int)seq_of("people"));
     EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "ANALYZE", NULL, NULL, NULL));
-    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "DELETE FROM sqlite_stat1", NULL, NULL, NULL));
     EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "DROP TABLE people", NULL, NULL, NULL));
     EXPECT_EQ(-1, (int)seq_of("people"));
+    teardown_db();
+}
+
+static int64_t count_of(const char *sql)
+{
+    sqlite3_stmt *st = NULL;
+    int64_t v = -1;
+    if (sqlite3_prepare_v2(test_db, sql, -1, &st, NULL) != SQLITE_OK)
+        return -2;
+    if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return v;
+}
+
+/* Audit 29 follow-up: an app DELETE of sqlite_sequence rows made the
+ * _hull_jobs / _hull_job_events ids restart after a purge (a jobs subscriber
+ * whose cursor was past them missed events), so app SQL may not DELETE from
+ * sqlite_sequence / sqlite_stat* either - in a script, through the statement
+ * cache, from a CTE, or from a trigger the app defines on its own table. The
+ * DELETEs SQLite runs itself (DROP TABLE / DROP INDEX / ANALYZE t) still run,
+ * and one statement's DROP does not let the next statement through. */
+UTEST(hl_cap_db, sqlite_bookkeeping_delete_refused)
+{
+    setup_db();
+    ASSERT_EQ(0, hl_cap_db_exec_script(test_db,
+        "INSERT INTO users(name) VALUES ('a'), ('b');"
+        "CREATE INDEX users_age ON users(age); ANALYZE;"
+        "CREATE TABLE log(id INTEGER PRIMARY KEY AUTOINCREMENT, v);"
+        "INSERT INTO log(v) VALUES (1), (2), (3);"));
+    EXPECT_EQ(2, (int)seq_of("users"));
+    EXPECT_EQ(3, (int)seq_of("log"));
+    int64_t stats = count_of("SELECT count(*) FROM sqlite_stat1");
+    EXPECT_TRUE(stats > 0);
+
+    static const char *const refused[] = {
+        "DELETE FROM sqlite_sequence",
+        "DELETE FROM sqlite_sequence WHERE name = 'log'",
+        "DELETE FROM main.sqlite_sequence",
+        "delete from SQLITE_SEQUENCE where seq > 0",
+        "WITH c(n) AS (SELECT 'log') DELETE FROM sqlite_sequence WHERE name IN c",
+        "DELETE FROM sqlite_sequence WHERE name IN (SELECT name FROM sqlite_master)",
+        "DELETE FROM sqlite_sequence RETURNING *",
+        "DELETE FROM sqlite_stat1",
+        "DELETE FROM main.sqlite_stat1 WHERE tbl = 'users'",
+        "WITH c(t) AS (SELECT 'users') DELETE FROM sqlite_stat1 WHERE tbl IN c",
+        "DROP TABLE sqlite_stat1",
+        /* a covering DROP earlier in the same script does not carry over */
+        "CREATE TABLE z(id INTEGER PRIMARY KEY AUTOINCREMENT); INSERT INTO z DEFAULT VALUES; DROP TABLE z; DELETE FROM sqlite_sequence",
+        "DROP INDEX users_age; DELETE FROM sqlite_stat1",
+        "ANALYZE users; DELETE FROM sqlite_stat1 WHERE tbl = 'users'",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        EXPECT_EQ(-1, hl_cap_db_exec_script(test_db, refused[i]));
+        EXPECT_EQ(SQLITE_AUTH, sqlite3_errcode(test_db));
+        /* The cached single-statement path refuses it too. */
+        if (!strchr(refused[i], ';'))
+            EXPECT_LT(hl_cap_db_exec(&test_cache, refused[i], NULL, 0), 0);
+    }
+    EXPECT_EQ(2, (int)seq_of("users"));
+    EXPECT_EQ(3, (int)seq_of("log"));
+    EXPECT_TRUE(count_of("SELECT count(*) FROM sqlite_stat1") > 0);
+
+    /* A DROP prepared (never run) leaves nothing behind for the next one. */
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(SQLITE_OK, hl_cap_db_prepare(test_db, "DROP TABLE log", -1, &st, NULL));
+    sqlite3_finalize(st);
+    st = NULL;
+    EXPECT_EQ(SQLITE_AUTH, hl_cap_db_prepare(test_db, "DELETE FROM sqlite_sequence",
+                                             -1, &st, NULL));
+    EXPECT_TRUE(st == NULL);
+    EXPECT_EQ(SQLITE_AUTH, hl_cap_db_prepare(test_db, "DELETE FROM sqlite_stat1",
+                                             -1, &st, NULL));
+    EXPECT_TRUE(st == NULL);
+
+    /* A trigger the app defines on its own table: refused when the statement
+     * that fires it is prepared, so the INSERT fails and nothing is deleted. */
+    ASSERT_EQ(0, hl_cap_db_exec_script(test_db,
+        "CREATE TRIGGER log_reset AFTER INSERT ON log BEGIN "
+        "DELETE FROM sqlite_sequence WHERE name = 'log'; END;"
+        "CREATE TRIGGER users_reset AFTER UPDATE ON users BEGIN "
+        "DELETE FROM sqlite_stat1; END;"));
+    EXPECT_EQ(-1, hl_cap_db_exec_script(test_db, "INSERT INTO log(v) VALUES (4)"));
+    EXPECT_EQ(SQLITE_AUTH, sqlite3_errcode(test_db));
+    EXPECT_LT(hl_cap_db_exec(&test_cache, "INSERT INTO log(v) VALUES (4)", NULL, 0), 0);
+    EXPECT_EQ(-1, hl_cap_db_exec_script(test_db, "UPDATE users SET age = 1"));
+    EXPECT_EQ(3, (int)seq_of("log"));
+    EXPECT_EQ(3, (int)count_of("SELECT count(*) FROM log"));
+    EXPECT_TRUE(count_of("SELECT count(*) FROM sqlite_stat1") > 0);
+    /* Even raw sqlite3_exec (no hl_cap_db_prepare) refuses the trigger. */
+    EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, "INSERT INTO log(v) VALUES (4)",
+                                      NULL, NULL, NULL));
+    ASSERT_EQ(0, hl_cap_db_exec_script(test_db,
+        "DROP TRIGGER log_reset; DROP TRIGGER users_reset"));
+    teardown_db();
+}
+
+/* The DELETEs SQLite runs itself while it drops, analyzes, vacuums or renames
+ * keep working, through both prepare paths. */
+UTEST(hl_cap_db, sqlite_bookkeeping_internal_deletes_allowed)
+{
+    setup_db();
+    ASSERT_EQ(0, hl_cap_db_exec_script(test_db,
+        "INSERT INTO users(name, age) VALUES ('a', 1), ('b', 2);"
+        "CREATE INDEX users_age ON users(age);"
+        "CREATE TABLE log(id INTEGER PRIMARY KEY AUTOINCREMENT, v);"
+        "CREATE INDEX log_v ON log(v);"
+        "INSERT INTO log(v) VALUES (1), (2);"
+        "CREATE TRIGGER log_t AFTER INSERT ON log BEGIN SELECT 1; END;"));
+    /* ANALYZE, then ANALYZE <table> / <index> (their DELETE of the old rows
+     * comes before their own authorizer callback). */
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "ANALYZE"));
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "ANALYZE users"));
+    EXPECT_GE(hl_cap_db_exec(&test_cache, "ANALYZE log", NULL, 0), 0);
+    EXPECT_GE(hl_cap_db_exec(&test_cache, "ANALYZE log", NULL, 0), 0); /* cached */
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "ANALYZE users_age"));
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "PRAGMA optimize"));
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "VACUUM"));
+    /* RENAME of an AUTOINCREMENT table moves its sequence row. */
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "ALTER TABLE log RENAME TO journal"));
+    EXPECT_EQ(2, (int)seq_of("journal"));
+    /* DROP INDEX / DROP TABLE (with a trigger, after ANALYZE) delete their
+     * stat and sequence rows. */
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "DROP INDEX log_v"));
+    EXPECT_EQ(0, (int)count_of("SELECT count(*) FROM sqlite_stat1 WHERE idx = 'log_v'"));
+    EXPECT_GE(hl_cap_db_exec(&test_cache, "DROP TABLE journal", NULL, 0), 0);
+    EXPECT_EQ(-1, (int)seq_of("journal"));
+    EXPECT_EQ(0, (int)count_of("SELECT count(*) FROM sqlite_stat1 WHERE tbl = 'journal'"));
+    /* A migration-shaped script: CREATE ... AUTOINCREMENT, use it, DROP it. */
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db,
+        "CREATE TABLE tmp(id INTEGER PRIMARY KEY AUTOINCREMENT, v);"
+        "INSERT INTO tmp(v) VALUES (1);"
+        "INSERT INTO users(name) SELECT 'm' || v FROM tmp;"
+        "DROP TABLE tmp;"));
+    EXPECT_EQ(-1, (int)seq_of("tmp"));
+    /* A TEMP AUTOINCREMENT table. */
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db,
+        "CREATE TEMP TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT);"
+        "INSERT INTO t DEFAULT VALUES; DROP TABLE t;"));
+    EXPECT_EQ(3, (int)count_of("SELECT seq FROM main.sqlite_sequence WHERE name = 'users'"));
     teardown_db();
 }
 

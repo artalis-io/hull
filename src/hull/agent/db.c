@@ -177,7 +177,7 @@ int hl_agent_prepare_readonly(sqlite3 *db, const char *sql, int len,
      * that re-prepare asks the authorizer again (audit 29).
      * hl_agent_finalize_readonly removes it. */
     hl_cap_db_refuse_txn_control(db, 1);
-    int rc = sqlite3_prepare_v2(db, sql, len, &stmt, NULL);
+    int rc = hl_cap_db_prepare(db, sql, len, &stmt, NULL);
     if (rc != SQLITE_OK) {
         sqlite3_finalize(stmt);
         hl_cap_db_refuse_txn_control(db, 0);

@@ -67,7 +67,7 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
 
     /* Miss - prepare new statement */
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(cache->db, sql, -1, &stmt, NULL);
+    int rc = hl_cap_db_prepare(cache->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK)
         return NULL;
 
@@ -178,21 +178,57 @@ static int db_synchronous_ok(const char *v)
     return 0;
 }
 
+
 /* SQLite's own bookkeeping tables (audit 29). sqlite_sequence holds every
  * AUTOINCREMENT table's high-water mark: an app `UPDATE sqlite_sequence SET
  * seq = 9223372036854775807` (or an INSERT of a row naming '_hull_jobs')
  * made every later insert into a _hull_* table fail SQLITE_FULL without the
- * SQL ever naming one. The sqlite_stat* tables steer the planner. SQLite
- * writes both with direct VDBE ops that never reach the authorizer, except
- * for three nested statements it parses itself: DROP TABLE and ANALYZE
- * DELETE their rows (so DELETE stays legal: removing a row only lets
- * AUTOINCREMENT fall back to the table's largest rowid), and ALTER TABLE ...
- * RENAME updates sqlite_sequence.name. That rename is recognised by its
- * shape - an SQLITE_ALTER_TABLE followed by the sqlite_rename_table function -
- * and admits ONE update of sqlite_sequence.name; any callback outside the
- * rename's own (sqlite_master / sqlite_temp_master reads and writes,
- * functions, subselects) withdraws it. */
+ * SQL ever naming one, and a `DELETE FROM sqlite_sequence` made the
+ * _hull_jobs / _hull_job_events ids restart after a purge, so a jobs event
+ * subscriber whose cursor was past the reused ids missed events. The
+ * sqlite_stat* tables steer the planner. SQLite writes both with direct VDBE
+ * ops that never reach the authorizer, except for a few nested statements it
+ * parses itself:
+ *
+ *  - DROP TABLE DELETEs the table's sqlite_sequence row and sqlite_stat*
+ *    rows, after its SQLITE_DROP_TABLE / _TEMP_TABLE callback; DROP INDEX
+ *    the index's sqlite_stat* rows, after SQLITE_DROP_INDEX.
+ *  - `ANALYZE <table or index>` DELETEs that object's sqlite_stat* rows
+ *    BEFORE its SQLITE_ANALYZE callback.
+ *  - ALTER TABLE ... RENAME updates sqlite_sequence.name. That rename is
+ *    recognised by its shape - an SQLITE_ALTER_TABLE followed by the
+ *    sqlite_rename_table function - and admits ONE update of
+ *    sqlite_sequence.name; any callback outside the rename's own
+ *    (sqlite_master / sqlite_temp_master reads and writes, functions,
+ *    subselects) withdraws it.
+ *
+ * So an INSERT / UPDATE (but the rename's) is refused outright, and a DELETE
+ * is refused unless the statement being prepared is one of those: it has
+ * issued a "covering" callback (a DROP of a table / index / view, or an
+ * ANALYZE). A DELETE inside a trigger - the authorizer's 6th argument names
+ * the trigger, and SQLite's nested parses always pass NULL there - is refused
+ * outright: a trigger body is app SQL, and no trigger can DROP or ANALYZE.
+ *
+ * A sqlite_sequence DELETE always comes after its covering callback, so it is
+ * decided in the callback. A sqlite_stat* DELETE can come before it (ANALYZE
+ * t), so it is only noted (`pending`), and hl_cap_db_prepare - the prepare
+ * every app statement goes through - refuses the statement when the prepare
+ * ends with a pending DELETE and no covering callback. The state is per
+ * thread (a prepare runs on one thread, and the authorizer only runs inside a
+ * prepare) and hl_cap_db_prepare clears it before and after each prepare, so
+ * one statement's covering callback never reaches another statement. A
+ * prepare that does not go through hl_cap_db_prepare is SQLite's re-prepare
+ * of a statement that passed it (the same SQL resolves to the same tables:
+ * the DELETE rule holds in every database, so a schema change cannot turn the
+ * name into one the first prepare did not check, and a trigger added since is
+ * caught by the trigger rule), SQLite's OP_SqlExec (PRAGMA optimize's
+ * ANALYZEs), or Hull's own fixed SQL. */
 static _Thread_local int db_rename_state; /* 0 none, 1 ALTER seen, 2 rename */
+static _Thread_local struct {
+    int covered;   /* a DROP / ANALYZE callback in this prepare */
+    int pending;   /* a sqlite_stat* DELETE seen before any such callback */
+    int strict;    /* refuse an uncovered sqlite_stat* DELETE in the callback */
+} db_prep;
 
 static int db_sqlite_stat_table(const char *t)
 {
@@ -207,8 +243,27 @@ static int db_schema_table(const char *t)
                  strcasecmp(t, "sqlite_temp_schema") == 0);
 }
 
+/* The callbacks of the statements whose own nested SQL deletes
+ * sqlite_sequence / sqlite_stat* rows. */
+static int db_covering_action(int action)
+{
+    switch (action) {
+    case SQLITE_DROP_TABLE:
+    case SQLITE_DROP_TEMP_TABLE:
+    case SQLITE_DROP_INDEX:
+    case SQLITE_DROP_TEMP_INDEX:
+    case SQLITE_DROP_VIEW:
+    case SQLITE_DROP_TEMP_VIEW:
+    case SQLITE_DROP_VTABLE:
+    case SQLITE_ANALYZE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int db_bookkeeping_write(int action, const char *a1, const char *a2,
-                                const char *a3)
+                                const char *a3, const char *a4)
 {
     int seq = a1 && strcasecmp(a1, "sqlite_sequence") == 0;
     int stat = db_sqlite_stat_table(a1);
@@ -229,7 +284,28 @@ static int db_bookkeeping_write(int action, const char *a1, const char *a2,
                               (db_schema_table(a1) || seq))))
         db_rename_state = 0;
 
+    if (db_covering_action(action)) {
+        /* DROP TABLE sqlite_stat1 removes the planner statistics as surely
+         * as deleting every row; SQLite itself never drops one. */
+        if ((action == SQLITE_DROP_TABLE || action == SQLITE_DROP_TEMP_TABLE) &&
+            stat)
+            return 1;
+        db_prep.covered = 1;
+        return 0;
+    }
+
     if (!seq && !stat) return 0;
+
+    /* DELETE: in every database (a re-prepare must not resolve the name to a
+     * table the first prepare did not check), and never from a trigger. */
+    if (action == SQLITE_DELETE) {
+        if (a4) return 1;
+        if (db_prep.covered) return 0;
+        if (seq || db_prep.strict) return 1;
+        db_prep.pending = 1;   /* ANALYZE t: its callback comes after */
+        return 0;
+    }
+
     /* Only main's and temp's: VACUUM copies these tables into the database
      * it attaches as "vacuum_<hex>" with INSERTs that reach this callback,
      * and the only other attachable databases ('' / ":memory:") are
@@ -245,11 +321,66 @@ static int db_bookkeeping_write(int action, const char *a1, const char *a2,
     return 1;
 }
 
+static void db_prep_clear(void)
+{
+    memset(&db_prep, 0, sizeof db_prep);
+    db_rename_state = 0;
+}
+
+int hl_cap_db_prepare(sqlite3 *db, const char *sql, int len,
+                      sqlite3_stmt **out, const char **tail)
+{
+    *out = NULL;
+    db_prep_clear();
+    int rc = sqlite3_prepare_v2(db, sql, len, out, tail);
+    if (rc == SQLITE_OK && db_prep.pending && !db_prep.covered) {
+        /* An app DELETE of sqlite_stat* rows. Prepare it again with that
+         * DELETE refused in the callback, so the error (SQLITE_AUTH, "not
+         * authorized") is SQLite's own, readable through sqlite3_errmsg. */
+        sqlite3_finalize(*out);
+        *out = NULL;
+        db_prep_clear();
+        db_prep.strict = 1;
+        rc = sqlite3_prepare_v2(db, sql, len, out, tail);
+        if (rc == SQLITE_OK) {   /* the same SQL gives the same callbacks */
+            sqlite3_finalize(*out);
+            *out = NULL;
+            rc = SQLITE_AUTH;
+        }
+    }
+    db_prep_clear();
+    return rc;
+}
+
+int hl_cap_db_exec_script(sqlite3 *db, const char *sql)
+{
+    const char *z = sql;
+    while (z && *z) {
+        sqlite3_stmt *stmt = NULL;
+        const char *tail = NULL;
+        if (hl_cap_db_prepare(db, z, -1, &stmt, &tail) != SQLITE_OK)
+            return -1;
+        if (stmt) {
+            int rc;
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+                ;
+            /* finalize keeps the step's error for sqlite3_errmsg */
+            int frc = sqlite3_finalize(stmt);
+            if (rc != SQLITE_DONE || frc != SQLITE_OK)
+                return -1;
+        }
+        if (!tail || tail == z)
+            break;
+        z = tail;
+    }
+    return 0;
+}
+
 static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
                          const char *a3, const char *a4)
 {
     (void)a3; (void)a4;
-    if (db_bookkeeping_write(action, a1, a2, a3))
+    if (db_bookkeeping_write(action, a1, a2, a3, a4))
         return SQLITE_DENY;
     static const char *const set_refused[] = {
         "hard_heap_limit", "soft_heap_limit", "cache_size", "cache_spill",
