@@ -12,7 +12,16 @@
 
 /* ── System support ──────────────────────────────────────────────── */
 
+/* Not under MemorySanitizer: mbedTLS 3.6.3+ check_config.h refuses
+ * MBEDTLS_HAVE_ASM there (MSan cannot see what inline asm writes), and the
+ * portable C bignum path is what an MSan build should exercise anyway. */
+#if defined(__has_feature)
+#if !__has_feature(memory_sanitizer)
 #define MBEDTLS_HAVE_ASM
+#endif
+#else
+#define MBEDTLS_HAVE_ASM
+#endif
 #define MBEDTLS_HAVE_TIME
 #define MBEDTLS_HAVE_TIME_DATE
 #define MBEDTLS_PLATFORM_C
