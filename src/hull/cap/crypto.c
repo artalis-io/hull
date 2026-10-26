@@ -1278,11 +1278,38 @@ void randombytes(unsigned char *buf, unsigned long long len)
     }
 }
 
+/* 1 when the 32-byte little-endian scalar @p s is below the Ed25519 group
+ * order L = 2^252 + 27742317777372353535851937790883648493 (libsodium's
+ * sc25519_is_canonical, constant time). */
+static int ed25519_scalar_canonical(const uint8_t s[32])
+{
+    static const uint8_t L[32] = {
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+        0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    };
+    unsigned c = 0, n = 1;
+    unsigned i = 32;
+    do {
+        i--;
+        c |= (((unsigned)s[i] - L[i]) >> 8) & n;
+        n &= (((unsigned)s[i] ^ L[i]) - 1) >> 8;
+    } while (i != 0);
+    return c != 0;
+}
+
 int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
                                    const uint8_t sig[64],
                                    const uint8_t pubkey[32])
 {
     if (!msg || !sig || !pubkey)
+        return -1;
+
+    /* TweetNaCl does not check S < L, so R || (S + L) verified too: one
+     * signature, many encodings - a token or a dedup key built from the
+     * signature bytes could be replayed under another (audit 29). */
+    if (!ed25519_scalar_canonical(sig + 32))
         return -1;
 
     /* Guard against overflow: sm_len = 64 + msg_len, need sm_len * 2 */

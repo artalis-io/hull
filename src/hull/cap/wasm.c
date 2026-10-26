@@ -481,11 +481,29 @@ static int pool_acquire(HlWasmModule *mod,
     return 0;
 }
 
+static uint64_t linear_memory_bytes(wasm_module_inst_t inst);
+
+/* The most linear memory a pooled instance of @p mod may hold: what the probe
+ * instance had at load (initial memory, start function, an 8 KiB heap) plus
+ * @p heap_size in pages and one page of alignment slack. 0 (nothing pools)
+ * when the probe did not instantiate. */
+static uint64_t pool_linear_bound(const HlWasmModule *mod, uint32_t heap_size)
+{
+    if (!mod->probe_linear_bytes) return 0;
+    return mod->probe_linear_bytes +
+           (hl_wasm_grow_pages(heap_size) + 1) * (uint64_t)HL_WASM_PAGE_BYTES;
+}
+
 /* Return an instance to the pool, or destroy it.
  * Pools only on success, small heaps, a free slot, and a chain generation
  * that is still current: an instance that was out of the pool (a zero-copy
  * result held it) across a segment change carries the old chain - or none -
- * and pooled, the next call ran without the segments DATA_INFO advertised. */
+ * and pooled, the next call ran without the segments DATA_INFO advertised.
+ * Nor one that grew: pooling went by the heap_size asked for, never the
+ * memory the instance holds after the call, so a guest that grew to ~4 GiB
+ * was pooled holding it - up to HL_WASM_POOL_MAX of them per module, outside
+ * every live-instance bound (audit 29). The zero-copy release (a WasmBuffer
+ * that held the instance) comes through here too. */
 void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
                           void *inst_v, void *exec_env_v, void *process_fn_v,
                           uint32_t heap_size, uint32_t stack_size,
@@ -503,7 +521,8 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
     int want_chain = hl_wasm_chain_snapshot(mod->shared_data) != NULL;
     if (success && heap_size <= HL_WASM_POOL_HEAP_THRESHOLD &&
         chain.gen == mod->chain_gen && chain.attached == want_chain &&
-        pool->count < HL_WASM_POOL_MAX) {
+        pool->count < HL_WASM_POOL_MAX &&
+        linear_memory_bytes(inst) <= pool_linear_bound(mod, heap_size)) {
         /* Clear any stale exception before returning to pool */
         wasm_runtime_clear_exception(inst);
         HlWasmPoolEntry *e = &pool->entries[pool->count++];
@@ -911,6 +930,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
      * meters only the interpreter, and nothing meters a start function. */
     uint32_t abi_version = 0;
     int detected_memory64 = 0;
+    uint64_t probe_linear = 0;
     {
         HlWasmWatch watch = {0};
         if (hl_wasm_watch_arm(&watch, 0, NULL) != 0) {
@@ -922,6 +942,13 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         wasm_module_inst_t tmp_inst = hl_wasm_watch_instantiate(
             &watch, module, 8192, 8192, error_buf, sizeof(error_buf));
         if (tmp_inst) {
+            /* The pool bound (pool_linear_bound) starts from this: initial
+             * memory, the start function and a fixed 8 KiB heap - measured
+             * before hull_version runs, so no call can widen it. A module
+             * with no memory measures 0 and is given one page so it still
+             * pools (audit 29). */
+            probe_linear = linear_memory_bytes(tmp_inst);
+            if (!probe_linear) probe_linear = HL_WASM_PAGE_BYTES;
             wasm_function_inst_t ver_fn = wasm_runtime_lookup_function(
                 tmp_inst, "hull_version");
             if (ver_fn) {
@@ -990,6 +1017,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     cached->is_aot = is_aot;
     cached->is_memory64 = detected_memory64;
     cached->abi_version = abi_version;
+    cached->probe_linear_bytes = probe_linear;
     if (pthread_mutex_init(&cached->mutex, NULL) != 0) {
         pthread_mutex_unlock(&cache->pool_mutex);
         log_error("[wasm] per-module mutex init failed for '%s'", name);

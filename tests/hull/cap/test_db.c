@@ -1484,4 +1484,86 @@ UTEST(hl_cap_db, sqlite_fchown_is_replaced)
     EXPECT_TRUE(cur != (sqlite3_syscall_ptr)fchown);
 }
 
+/* ── Audit 29 ─────────────────────────────────────────────────────────── */
+
+static int64_t seq_of(const char *name)
+{
+    sqlite3_stmt *st = NULL;
+    int64_t v = -1;
+    if (sqlite3_prepare_v2(test_db, "SELECT seq FROM sqlite_sequence WHERE name = ?",
+                           -1, &st, NULL) != SQLITE_OK)
+        return -2;
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return v;
+}
+
+/* App SQL may not write SQLite's bookkeeping tables: a forged
+ * sqlite_sequence.seq made every later AUTOINCREMENT insert fail SQLITE_FULL.
+ * The statements SQLite runs itself (DROP TABLE / ANALYZE deleting rows,
+ * ALTER TABLE ... RENAME renaming the sequence row) keep working. */
+UTEST(hl_cap_db, sqlite_bookkeeping_tables_are_not_writable)
+{
+    setup_db();
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(test_db,
+        "INSERT INTO users(name) VALUES ('a');"
+        "CREATE INDEX users_age ON users(age); ANALYZE", NULL, NULL, NULL));
+    EXPECT_EQ(1, (int)seq_of("users"));
+    static const char *const refused[] = {
+        "UPDATE sqlite_sequence SET seq = 9223372036854775807",
+        "UPDATE sqlite_sequence SET name = 'other' WHERE name = 'users'",
+        "INSERT INTO sqlite_sequence(name, seq) VALUES ('_hull_jobs', 9223372036854775807)",
+        "INSERT OR REPLACE INTO main.sqlite_sequence VALUES ('users', 9223372036854775807)",
+        "UPDATE sqlite_stat1 SET stat = '1 1'",
+        "INSERT INTO sqlite_stat1 VALUES ('users', 'users_age', '1000000 1')",
+        "ALTER TABLE users ADD COLUMN z; UPDATE sqlite_sequence SET name = 'x'",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db, refused[i], NULL, NULL, NULL));
+    EXPECT_EQ(1, (int)seq_of("users"));
+    EXPECT_EQ(-1, (int)seq_of("x"));
+    /* SQLite's own nested statements still run. */
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "ALTER TABLE users RENAME TO people",
+                                      NULL, NULL, NULL));
+    EXPECT_EQ(1, (int)seq_of("people"));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "ANALYZE", NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "DELETE FROM sqlite_stat1", NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "DROP TABLE people", NULL, NULL, NULL));
+    EXPECT_EQ(-1, (int)seq_of("people"));
+    teardown_db();
+}
+
+/* The agent's read-only gate checks argument-less pragmas too (PRAGMA
+ * optimize runs ANALYZE and writes) and refuses ATTACH of any name, DETACH
+ * and ANALYZE. */
+UTEST(hl_cap_db, agent_gate_refuses_bare_pragmas_attach_and_analyze)
+{
+    setup_db();
+    hl_cap_db_refuse_txn_control(test_db, 1);
+    static const char *const refused[] = {
+        "PRAGMA optimize", "PRAGMA shrink_memory", "PRAGMA wal_checkpoint",
+        "PRAGMA incremental_vacuum", "ATTACH ':memory:' AS m", "ATTACH '' AS t",
+        "DETACH temp", "ANALYZE", "PRAGMA main.optimize",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        EXPECT_NE(SQLITE_OK, sqlite3_prepare_v2(test_db, refused[i], -1, &st, NULL));
+        sqlite3_finalize(st);
+    }
+    static const char *const allowed[] = {
+        "PRAGMA user_version", "PRAGMA page_count", "PRAGMA table_info(users)",
+        "PRAGMA quick_check",
+    };
+    for (size_t i = 0; i < sizeof allowed / sizeof allowed[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        EXPECT_EQ(SQLITE_OK, sqlite3_prepare_v2(test_db, allowed[i], -1, &st, NULL));
+        sqlite3_finalize(st);
+    }
+    hl_cap_db_refuse_txn_control(test_db, 0);
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "ATTACH ':memory:' AS m; DETACH m",
+                                      NULL, NULL, NULL));
+    teardown_db();
+}
+
 UTEST_MAIN();

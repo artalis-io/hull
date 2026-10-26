@@ -232,6 +232,15 @@ int hl_valkey_dsn_parse(const char *dsn, HlValkeyDsn *out, char *errbuf, size_t 
         querylen -= pairlen + 1;
     }
 
+    /* sslmode=require is TLS that verifies nothing, and the handshake sends
+     * HELLO 3 AUTH <user> <password> over it: a MITM finishes TLS with any
+     * certificate and reads the password (audit 29). With a password it is
+     * refused, as Postgres / MySQL send a cleartext password only over a
+     * verified connection; require without credentials stays allowed. */
+    if (out->tls && !out->verify && out->password[0])
+        FAIL("valkey dsn: sslmode=require verifies no certificate, so it would "
+             "send the password to any man in the middle; use sslmode=verify-full");
+
     return 0;
 #undef FAIL
 }

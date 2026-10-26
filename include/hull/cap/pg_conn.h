@@ -80,6 +80,12 @@ typedef struct HlPgConn {
     /* When finishing began (monotonic ms, 0 = not yet): the whole read to
      * ReadyForQuery is bounded by HL_PG_FINISH_MAX_MS (audit 26). */
     uint64_t finish_started;
+    /* The statement whose reply is being read is a lone COMMIT, sent whole:
+     * a trip on any frame of its reply (ParseComplete / BindComplete /
+     * NoData, not only CommandComplete) or during a wait for it switches to
+     * finishing instead of dropping the connection, since the server commits
+     * whatever the client does (audit 29). */
+    int      commit_sent;
     /* Told of every NotificationResponse a query or a script reads (a db.async
      * op on a worker's LISTEN connection): they were dropped, so the next
      * wait_notify on that channel missed its wake-up (audit 20). NULL = none;

@@ -891,6 +891,55 @@ UTEST(pg_query, a_trip_on_commit_complete_reports_the_commit)
     close(sv[0]);
 }
 
+/* Audit 29: a trip on an early frame of a COMMIT's extended-protocol reply
+ * (BindComplete) finishes the reply too - the server commits whatever the
+ * client does. Any other statement is still abandoned there. */
+static int pg_trip_on_bind_complete(const char *sql, char *tx, int *broken)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -99;
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'n'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "COMMIT"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    if (s.err || write(sv[0], s.buf, s.len) != (ssize_t)s.len) {
+        hl_pg_writer_free(&s); close(sv[0]); close(sv[1]); return -98;
+    }
+    hl_pg_writer_free(&s);
+    HlPgConn conn;
+    if (!pg_adopt(&conn, sv[1])) { close(sv[0]); close(sv[1]); return -97; }
+    conn.tx_status = 'T';
+    /* ParseComplete costs 1 unit: BindComplete is over the limit. */
+    HlDbOpBudget budget = { .limit = 1, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int rc = hl_pg_query(&conn, sql, NULL, 0, NULL, NULL, NULL, NULL);
+    hl_db_budget_restore(prev);
+    *tx = (char)conn.tx_status;
+    *broken = conn.broken;
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+    return rc;
+}
+
+UTEST(pg_query, a_trip_on_commit_bind_complete_reports_the_commit)
+{
+    char tx = 0;
+    int broken = -1;
+    EXPECT_EQ(0, pg_trip_on_bind_complete("COMMIT", &tx, &broken));
+    EXPECT_EQ('I', tx);
+    EXPECT_EQ(0, broken);
+    EXPECT_EQ(0, pg_trip_on_bind_complete("/* c */ end transaction", &tx, &broken));
+    EXPECT_EQ('I', tx);
+    /* Not a lone COMMIT: abandoned at the trip, as before. */
+    EXPECT_EQ(-1, pg_trip_on_bind_complete("SELECT 1", &tx, &broken));
+    EXPECT_EQ('T', tx);
+    EXPECT_EQ(1, broken);
+}
+
 /* Audit 26: the finishing read after a tripped COMMIT asks no budget, so a
  * server that sent CommandComplete and then stalled held the call for the
  * whole ?read_timeout= (for ever with 0). The finishing read is now bounded
@@ -1587,6 +1636,126 @@ UTEST(pg_scram, rejects_non_numeric_iteration_count)
     ASSERT_NE(0, scram_start_with_iters("i=4096x"));
     ASSERT_NE(0, scram_start_with_iters("i=-1"));
     ASSERT_NE(0, scram_start_with_iters("i="));
+}
+
+/* Audit 29: a fake server that reads the client's nonce and answers with a
+ * chosen extension and iteration count, so the checks after the nonce one
+ * are reached. The client then fails at the missing SASLFinal; what matters
+ * is WHICH error it stops with. */
+typedef struct {
+    int fd;
+    const char *suffix;   /* appended to the client nonce */
+    int iters;
+} ScramPeer;
+
+static void scram_peer_body(ScramPeer *p)
+{
+    /* Startup message: length-prefixed, no type byte. */
+    uint8_t hdr[4];
+    if (read(p->fd, hdr, 4) != 4) return;
+    uint32_t len = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
+                   ((uint32_t)hdr[2] << 8) | hdr[3];
+    uint8_t skip[512];
+    if (len < 4 || len - 4 > sizeof skip ||
+        read(p->fd, skip, len - 4) != (ssize_t)(len - 4)) return;
+
+    HlPgWriter w;
+    hl_pg_writer_init(&w);
+    size_t m = hl_pg_msg_begin(&w, 'R');
+    hl_pg_put_i32(&w, 10);                 /* AuthenticationSASL */
+    hl_pg_put_cstr(&w, "SCRAM-SHA-256");
+    hl_pg_put_u8(&w, 0);
+    hl_pg_msg_end(&w, m);
+    if (write(p->fd, w.buf, w.len) != (ssize_t)w.len) { hl_pg_writer_free(&w); return; }
+    hl_pg_writer_free(&w);
+
+    /* SASLInitialResponse: 'p' len "SCRAM-SHA-256\0" i32 "n,,n=,r=<nonce>" */
+    uint8_t buf[512];
+    size_t got = 0;
+    while (got < 5 || got < 1 + (((size_t)buf[1] << 24) | ((size_t)buf[2] << 16) |
+                                  ((size_t)buf[3] << 8) | buf[4])) {
+        ssize_t n = read(p->fd, buf + got, sizeof buf - 1 - got);
+        if (n <= 0) return;
+        got += (size_t)n;
+    }
+    buf[got] = 0;
+    const char *r = NULL;
+    for (size_t i = 0; i + 2 < got; i++)
+        if (buf[i] == 'r' && buf[i + 1] == '=') { r = (const char *)buf + i + 2; break; }
+    if (!r) return;
+
+    char first[256];
+    int fn = snprintf(first, sizeof first, "r=%s%s,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=%d",
+                      r, p->suffix, p->iters);
+    hl_pg_writer_init(&w);
+    m = hl_pg_msg_begin(&w, 'R');
+    hl_pg_put_i32(&w, 11);                 /* AuthenticationSASLContinue */
+    hl_pg_put_bytes(&w, first, (size_t)fn);
+    hl_pg_msg_end(&w, m);
+    if (write(p->fd, w.buf, w.len) != (ssize_t)w.len) { /* client gone */ }
+    hl_pg_writer_free(&w);
+    /* Drain whatever the client sends, then hang up. */
+    struct timeval tv = { 0, 200000 };
+    setsockopt(p->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    while (read(p->fd, buf, sizeof buf) > 0) {}
+    return;
+}
+
+/* Hang up on every path: the client waits for the server's next word. */
+static void *scram_peer(void *arg)
+{
+    ScramPeer *p = arg;
+    scram_peer_body(p);
+    shutdown(p->fd, SHUT_RDWR);
+    return NULL;
+}
+
+static int scram_peer_run(const char *suffix, int iters, const char *sslmode,
+                          char *err, size_t errsz)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -99;
+    ScramPeer peer = { sv[0], suffix, iters };
+    pthread_t th;
+    if (pthread_create(&th, NULL, scram_peer, &peer) != 0) {
+        close(sv[0]); close(sv[1]); return -98;
+    }
+    HlPgDsn dsn;
+    memset(&dsn, 0, sizeof dsn);
+    snprintf(dsn.user, sizeof dsn.user, "%s", "user");
+    snprintf(dsn.password, sizeof dsn.password, "%s", "pencil");
+    snprintf(dsn.sslmode, sizeof dsn.sslmode, "%s", sslmode);
+    HlPgConn conn;
+    int rc = hl_pg_conn_start(&conn, sv[1], &dsn);
+    snprintf(err, errsz, "%s", conn.errmsg);
+    if (rc == 0) hl_pg_conn_close(&conn); else close(sv[1]);
+    pthread_join(th, NULL);
+    close(sv[0]);
+    return rc;
+}
+
+UTEST(pg_scram, server_nonce_must_extend_the_client_nonce)
+{
+    char e[256];
+    EXPECT_NE(0, scram_peer_run("", 4096, "", e, sizeof e));
+    EXPECT_TRUE(strstr(e, "nonce mismatch") != NULL);
+    /* A real extension gets past the nonce check. */
+    EXPECT_NE(0, scram_peer_run("srv", 4096, "", e, sizeof e));
+    EXPECT_TRUE(strstr(e, "nonce mismatch") == NULL);
+}
+
+UTEST(pg_scram, low_iteration_count_needs_a_verified_connection)
+{
+    char e[256];
+    EXPECT_NE(0, scram_peer_run("srv", 1, "", e, sizeof e));
+    EXPECT_TRUE(strstr(e, "iteration count below 4096") != NULL);
+    EXPECT_NE(0, scram_peer_run("srv", 4095, "require", e, sizeof e));
+    EXPECT_TRUE(strstr(e, "iteration count below 4096") != NULL);
+    /* sslmode=disable is the cleartext case: the operator chose it. */
+    EXPECT_NE(0, scram_peer_run("srv", 1, "disable", e, sizeof e));
+    EXPECT_TRUE(strstr(e, "iteration count") == NULL);
+    EXPECT_NE(0, scram_peer_run("srv", 4096, "", e, sizeof e));
+    EXPECT_TRUE(strstr(e, "iteration count") == NULL);
 }
 
 UTEST_MAIN()

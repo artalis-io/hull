@@ -708,17 +708,32 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
 static int my_sql_commits_implicitly(const char *sql)
 {
     static const char *const any[] = {   /* every form of the statement */
-        "alter", "analyze", "cache", "check", "flush", "grant", "optimize",
+        "alter", "cache", "check", "flush", "grant", "optimize",
         "rename", "repair", "revoke", "truncate",
     };
     /* Unreadable, or more than one statement (audit 10): refused, never
      * resumed. */
     if (!my_sql_single_statement(sql)) return 0;
-    char w[16], w2[16], w3[16];
+    char w[16], w2[24], w3[16];
     const char *p = hl_sql_next_word_ex(sql, w, sizeof w, 0);
     p = hl_sql_next_word_ex(p, w2, sizeof w2, 0);
     for (size_t i = 0; i < sizeof any / sizeof any[0]; i++)
         if (strcmp(w, any[i]) == 0) return 1;
+    /* ANALYZE [NO_WRITE_TO_BINLOG | LOCAL] TABLE commits; MariaDB's
+     * ANALYZE SELECT / UPDATE / DELETE / FORMAT=JSON (an EXPLAIN that runs the
+     * statement) commits nothing (audit 29). */
+    if (strcmp(w, "analyze") == 0) {
+        if (strcmp(w2, "no_write_to_binlog") == 0 || strcmp(w2, "local") == 0)
+            (void)hl_sql_next_word_ex(p, w2, sizeof w2, 0);
+        return strcmp(w2, "table") == 0 || strcmp(w2, "tables") == 0;
+    }
+    /* MariaDB's CREATE OR REPLACE TEMPORARY TABLE is still temporary: look
+     * past OR REPLACE (audit 29). */
+    if (strcmp(w, "create") == 0 && strcmp(w2, "or") == 0) {
+        p = hl_sql_next_word_ex(p, w3, sizeof w3, 0);
+        if (strcmp(w3, "replace") != 0) return 1;
+        (void)hl_sql_next_word_ex(p, w2, sizeof w2, 0);
+    }
     if (strcmp(w, "create") == 0 || strcmp(w, "drop") == 0)
         return strcmp(w2, "temporary") != 0;
     if (strcmp(w, "lock") == 0 || strcmp(w, "unlock") == 0)

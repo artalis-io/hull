@@ -43,6 +43,11 @@ struct sqlite3_stmt;
  * query` and the named queries of `hull agent sql named`. */
 int hl_agent_prepare_readonly(struct sqlite3 *db, const char *sql, int len,
                               struct sqlite3_stmt **out, const char **err);
+/* Finalize a statement hl_agent_prepare_readonly returned. The strict
+ * authorizer stays installed from the prepare through every step (a schema
+ * change makes sqlite3_step re-prepare, which consults the authorizer again)
+ * until this call removes it (audit 29). */
+void hl_agent_finalize_readonly(struct sqlite3 *db, struct sqlite3_stmt *stmt);
 #endif
 
 /*

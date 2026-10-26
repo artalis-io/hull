@@ -275,10 +275,25 @@ HlWorkerDb *hl_worker_db_get(void)
  * writer, ran later jobs inside it, and was rolled back - their writes with
  * it - by the next db.async op, which failed with an error about itself.
  * Roll back every open transaction on the thread; a connection whose
- * rollback did not end it is dropped. */
+ * rollback did not end it is dropped.
+ *
+ * The rollbacks ran unbound (the job's VM is gone), and an unbound charge
+ * never stops - not even for the pool's shutdown - so a Postgres / MySQL
+ * server that went silent under ?read_timeout=0 pinned this pool thread, and
+ * the SIGTERM join with it. They now run under a cleanup budget of their own
+ * that stops at HL_WORKER_DB_CLEANUP_MAX_MS or once the pool is shutting
+ * down; a stopped ROLLBACK abandons the connection, which is then dropped
+ * (audit 29). worker_end_txn needs none: it runs under the op's own budget,
+ * which stops the same way. */
+#define HL_WORKER_DB_CLEANUP_MAX_MS 2000
+
 int hl_worker_db_end_job(char *err, size_t errsz)
 {
     if (!worker_db_dsn) return 0;   /* never initialized: no connections */
+    HlDbOpBudget cleanup = {
+        .deadline_ms = hl_db_monotonic_ms() + HL_WORKER_DB_CLEANUP_MAX_MS,
+    };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &cleanup);
     WorkerConnNode *head = worker_db_head();
     WorkerConnNode **link = &head;
     int found = 0;
@@ -300,6 +315,7 @@ int hl_worker_db_end_job(char *err, size_t errsz)
         }
         link = &n->next;
     }
+    hl_db_budget_restore(prev);
     pthread_setspecific(worker_db_key, head);
     if (found && err && errsz)
         snprintf(err, errsz,

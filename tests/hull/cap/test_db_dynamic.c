@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 static HlManifestDbDynamic policy_sqlite(void)
 {
@@ -148,6 +149,65 @@ UTEST(db_dynamic, file_dsn_needs_a_write_grant_and_opens_under_the_app_dir)
     remove("dyn_grant_probe.db");
     remove("dyn_grant_probe.db-wal");
     remove("dyn_grant_probe.db-shm");
+    hl_fs_policy_free(&pol);
+}
+
+/* Audit 29: a file DSN whose path runs through a symbolic link - a directory
+ * component, the leaf, or a SQLite sidecar - is refused, even when the link
+ * stays inside the app directory and the path has an fs.write grant: SQLite
+ * opens the absolute path following links, so the grant named one file and
+ * the open reached another. */
+UTEST(db_dynamic, file_dsn_through_a_symlink_is_refused)
+{
+    char cwd[1024];
+    ASSERT_TRUE(getcwd(cwd, sizeof cwd) != NULL);
+    const char *wr[] = { "dyn29_link.db", "dyn29_ldir/x.db", "dyn29_side.db",
+                         "dyn29_real/ok.db" };
+    HlAllocator alloc = {0};
+    HlFsPolicy pol = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    ASSERT_EQ(0, hl_fs_policy_compile_manifest(cwd, &alloc, NULL, 0, wr, 4, &pol, &perr));
+    HlFsConfig fs = { .base_dir = cwd, .base_len = strlen(cwd), .policy = &pol };
+    HlManifestDbDynamic p = policy_sqlite();
+    char opened[HL_DB_DYNAMIC_DSN_MAX];
+    const char *err = NULL;
+
+    (void)mkdir("dyn29_real", 0700);
+    FILE *f = fopen("dyn29_real/target.db", "wb");
+    if (f) fclose(f);
+    unlink("dyn29_link.db");
+    unlink("dyn29_ldir");
+    ASSERT_EQ(0, symlink("dyn29_real/target.db", "dyn29_link.db"));
+    ASSERT_EQ(0, symlink("dyn29_real", "dyn29_ldir"));
+    f = fopen("dyn29_side.db", "wb");
+    if (f) fclose(f);
+    unlink("dyn29_side.db-wal");
+    ASSERT_EQ(0, symlink("dyn29_real/target.db", "dyn29_side.db-wal"));
+
+    static const char *const refused[] = {
+        "dyn29_link.db", "dyn29_ldir/x.db", "dyn29_side.db",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        err = NULL;
+        EXPECT_TRUE(hl_db_dynamic_open_ex(refused[i], &p, &fs, opened,
+                                          sizeof opened, &err) == NULL);
+        EXPECT_TRUE(err != NULL && strstr(err, "symbolic link") != NULL);
+    }
+    /* A plain path under a real directory still opens. */
+    HlDbHandle *h = hl_db_dynamic_open_ex("dyn29_real/ok.db", &p, &fs, opened,
+                                          sizeof opened, &err);
+    EXPECT_TRUE(h != NULL);
+    if (h) hl_db_dynamic_close(h);
+
+    unlink("dyn29_link.db");
+    unlink("dyn29_ldir");
+    unlink("dyn29_side.db-wal");
+    unlink("dyn29_side.db");
+    unlink("dyn29_real/ok.db");
+    unlink("dyn29_real/ok.db-wal");
+    unlink("dyn29_real/ok.db-shm");
+    unlink("dyn29_real/target.db");
+    rmdir("dyn29_real");
     hl_fs_policy_free(&pol);
 }
 
