@@ -136,7 +136,7 @@ mkdir -p data
 # Both `|| true` are required: hull may exit non-zero (set -e would
 # kill us mid-script otherwise), and grep returns 1 when no matches.
 LUA_RAW=$($HULL app.lua 2>&1) || true
-LUA_OUT=$(printf '%s\n' "$LUA_RAW" | grep -E "^(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
+LUA_OUT=$(printf '%s\n' "$LUA_RAW" | grep -E "(^|\[app\] )(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
 cd - >/dev/null
 
 # Debug: if hull produced no matching output, dump the raw stderr+stdout
@@ -275,7 +275,7 @@ echo "=== E2E: cross-runtime SHA parity ==="
 # well-known constants). One more positive assertion to make the
 # guarantee explicit:
 # JS output is prefixed by the hull logger ("HH:MM:SS INFO [app] "),
-# Lua's print is raw. Match on PUT_ID= anywhere on the line and take
+# as is Lua's print (audit 29). Match on PUT_ID= anywhere on the line and take
 # the value past the LAST '=' so we strip any prefix junk.
 LUA_HELLO=$(echo "$LUA_OUT" | grep 'PUT_ID=' | head -1 | sed -E 's/.*PUT_ID=//')
 JS_HELLO=$(echo "$JS_OUT"   | grep 'PUT_ID=' | head -1 | sed -E 's/.*PUT_ID=//')
@@ -316,7 +316,7 @@ EOF
 
 cd "$TMPDIR"
 mkdir -p data   # See earlier Lua/JS sections for the Landlock rationale.
-SHARD_OUT=$($HULL app.lua 2>&1 | grep ^SHARD2_ID=) || true
+SHARD_OUT=$($HULL app.lua 2>&1 | grep -E "(^|\[app\] )SHARD2_ID=") || true
 cd - >/dev/null
 
 SHARD_ID=$(echo "$SHARD_OUT" | cut -d= -f2)

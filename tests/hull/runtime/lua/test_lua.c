@@ -1888,6 +1888,63 @@ UTEST(lua_cap, log_does_not_error)
     cleanup_lua_caps();
 }
 
+/* Audit 29: print wrote app text straight to stderr - a CR / LF / ESC forged
+ * log or terminal lines - and charged nothing. It is one log record now,
+ * escaped, tagged [app], and charged 1 unit per 8 bytes before the write. */
+static char g_lua_print_log[1024];
+static void lua_print_log_collect(log_Event *ev)
+{
+    char buf[1024];
+    va_list ap;
+    va_copy(ap, ev->ap);
+    vsnprintf(buf, sizeof buf, ev->fmt, ap);
+    va_end(ap);
+    if (strstr(buf, "PRINTPROBE"))
+        snprintf(g_lua_print_log, sizeof g_lua_print_log, "%s", buf);
+}
+
+UTEST(lua_audit29, print_is_an_escaped_log_record)
+{
+    static int registered;
+    if (!registered) {
+        log_add_callback(lua_print_log_collect, NULL, LOG_TRACE);
+        registered = 1;
+    }
+    g_lua_print_log[0] = '\0';
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "print('PRINTPROBE a\\nforged\\r\\27[2J', 7, nil)"), LUA_OK);
+    EXPECT_NE_MSG(strstr(g_lua_print_log, "[app] PRINTPROBE a\\nforged\\r"
+                                          "\\x1b[2J\t7\tnil"), NULL,
+                  g_lua_print_log);
+    EXPECT_EQ(strchr(g_lua_print_log, '\n'), NULL);
+    EXPECT_EQ(strchr(g_lua_print_log, '\r'), NULL);
+    EXPECT_EQ(strchr(g_lua_print_log, '\x1b'), NULL);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_audit29, print_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    ASSERT_EQ(luaL_dostring(lua_rt.L,
+        "S = string.rep('x', 8 * 1024 * 1024)"), LUA_OK);
+    /* 8 MB is 1M units: over this run's limit before a byte is written. */
+    lua_rt.max_instructions = 200000;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    int rc = luaL_dostring(lua_rt.L, "pcall(print, S) return 1");
+    EXPECT_NE(rc, LUA_OK);
+    const char *e = lua_tostring(lua_rt.L, -1);
+    EXPECT_NE_MSG(strstr(e ? e : "", "instruction limit"), NULL, e ? e : "");
+    lua_settop(lua_rt.L, 0);
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    cleanup_lua_caps();
+}
+
 /* ── Env tests ─────────────────────────────────────────────────────── */
 
 UTEST(lua_cap, env_get_allowed)
@@ -7731,6 +7788,43 @@ UTEST(lua_async, a_timer_fires_while_a_task_waits)
     HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
     cleanup_lua();
     be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* Audit 29: at teardown (a __gc finalizer lua_close runs) hull.async ran
+ * its task inline and a wait in it armed a timer and tracked its ctx after
+ * the teardown sweep. Both refuse once the runtime is shutting down. */
+UTEST(lua_audit29, no_task_or_wait_while_shutting_down)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_rt.base.shutting_down = 1;
+
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "local ok1, e1 = pcall(hull.async, function() hull.sleep(10) end)\n"
+        "local ok2, e2 = pcall(hull.sleep, 10)\n"
+        "OUT = tostring(ok1)..'|'..tostring(e1)..'|'..tostring(ok2)..'|'..tostring(e2)\n",
+        &co);
+    EXPECT_EQ(st, LUA_OK);
+    EXPECT_TRUE(lua_rt.base.async_live == NULL);
+    lua_getglobal(lua_rt.L, "OUT");
+    const char *out = lua_tostring(lua_rt.L, -1);
+    out = out ? out : "(none)";
+    EXPECT_NE_MSG(strstr(out, "false|"), NULL, out);
+    EXPECT_NE_MSG(strstr(out, "hull.async(): the runtime is shutting down"),
+                  NULL, out);
+    EXPECT_NE_MSG(strstr(out, "hull.sleep() cannot wait: the runtime is "
+                              "shutting down"), NULL, out);
+    lua_pop(lua_rt.L, 1);
+
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    EXPECT_EQ(be->tick(actx, 0), 0);
+    lua_rt.base.shutting_down = 0;
+    cleanup_lua();
     be->free(actx);
 }
 

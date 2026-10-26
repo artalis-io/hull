@@ -181,6 +181,20 @@ kept the rest. Check the list below before upgrading.
   backend claims the `duckdb://` scheme; a `--with=postgres` or `--with=mysql` app (any composed
   backend) got them too.
 
+**Runtime (Lua) - audit 29 fixes**
+- **Lua `print` in an app is a log record now (behaviour change).** It wrote its arguments
+  straight to stderr, unescaped - a CR / LF / ESC in app text forged log or terminal lines - and
+  charged nothing, so a loop of huge prints was free. It now writes one INFO record tagged
+  `[app]` (`HH:MM:SS INFO  [app] ...`, like `log.info` and JS `console.log`), control bytes but
+  tab escaped, each argument charged 1 unit per 8 bytes before the write. Scripts that parsed a
+  bare `print` line from stderr should match past the prefix, or write to `ctx.stdout`. The
+  tool VM (the CLI plugins) keeps the raw print.
+- No wait and no `hull.async` task starts once the runtime is shutting down. A `__gc` finalizer
+  run at teardown could start a task whose `hull.sleep` armed a timer on a loop that never runs
+  again and tracked its ctx after the teardown sweep; every Lua wait (sleep, `http.fetch`,
+  `db.async`, compute, gpu, ssh, smtp, `worker.dispatch`, `tui.poll`) now refuses then, and
+  `hl_lua_free` marks the runtime shutting down before `lua_close` on every path.
+
 ## [0.17.1] - 2026-10-18
 
 Full PR list:
