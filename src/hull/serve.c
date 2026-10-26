@@ -778,7 +778,6 @@ typedef struct {
     /* What the runtime is handed: a borrowed view of client_tls_config, so
      * every outbound consumer shares the one resolved trust anchor. */
     HlClientTls          client_tls;
-    const char           *ca_bundle_path;
     /* CORS config - allocated INSIDE the seal arena (RO after seal)
      * so the origin allowlist a heap-write primitive could otherwise
      * mutate is mprotect-locked.  NULL when the manifest doesn't
@@ -1771,7 +1770,6 @@ static int hl_serve_wire_caps(HlServerState *s)
     memset(&s->http_cfg_storage, 0, sizeof(s->http_cfg_storage));
     memset(&s->client_tls_config, 0, sizeof(s->client_tls_config));
     s->client_tls_ctx = NULL;
-    s->ca_bundle_path = NULL;
 
     /* The outbound TLS trust anchor, resolved ONCE for every consumer.
      *
@@ -1794,7 +1792,7 @@ static int hl_serve_wire_caps(HlServerState *s)
          * publishes the anchor for the per-connection clients. */
         s->client_tls_ctx = hl_ca_trust_resolve(s->cfg.skip_ca_bundle,
                                                 s->cfg.ca_bundle_override,
-                                                &s->kl_alloc, &s->ca_bundle_path);
+                                                &s->kl_alloc, NULL);
         if (!wants_ctx && s->client_tls_ctx) {
             hl_tls_ctx_destroy(s->client_tls_ctx);
             s->client_tls_ctx = NULL;
@@ -1948,7 +1946,6 @@ static int hl_serve_apply_sandbox(HlServerState *s)
 
         if (hl_sandbox_apply(&sandbox_policy, s->app_dir,
                               s->cfg.no_db ? NULL : hl_sandbox_db_path(s->cfg.db_path),
-                              s->ca_bundle_path,
                               s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");
             return -1;

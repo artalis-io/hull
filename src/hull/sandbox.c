@@ -21,7 +21,7 @@
 #include "hull/limits/gpu.h"     /* HL_GPU_MAX_DEVICES */
 #include "log.h"
 #ifdef HL_ENABLE_DB
-#include "hull/cap/db_backend.h"   /* hl_db_feature_backends: detect a composed DuckDB feature */
+#include "hull/cap/db_backend.h"   /* hl_db_backend_select: detect a composed DuckDB feature */
 #endif
 
 #include <ctype.h>     /* isalpha / isalnum (DSN scheme syntax) */
@@ -458,7 +458,6 @@ typedef struct {
 static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                                    const char *app_dir,
                                    const char *db_path,
-                                   const char *ca_bundle_path,
                                    const char *tls_cert_path,
                                    const char *tls_key_path,
                                    const char *const *ttys,
@@ -627,12 +626,13 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                   scratch->fs_write_keys[i]);
     }
 
-    /* ── CA bundle, TLS cert, TLS key ───────────────────────── */
+    /* ── TLS cert, TLS key ───────────────────────────────────── */
 
-    if (ca_bundle_path) {
-        PARAM_ADD("CA_BUNDLE", ca_bundle_path);
-        SBPL_LIT("(allow file-read* (literal (param \"CA_BUNDLE\")))\n");
-    }
+    /* No CA bundle grant (audit 29): every anchor is read into memory
+     * before this profile applies (ca_trust.c), and the path the ladder
+     * reported was sometimes a label ("(embedded)") that resolved against
+     * the working directory - a planted symlink of that name widened the
+     * read grant to whatever it pointed at. */
     if (tls_cert_path) {
         PARAM_ADD("TLS_CERT", tls_cert_path);
         SBPL_LIT("(allow file-read* (literal (param \"TLS_CERT\")))\n");
@@ -869,7 +869,7 @@ int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
 #if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
     SeatbeltScratch *scratch = calloc(1, sizeof *scratch);
     if (!scratch) return -1;
-    int rc = seatbelt_build_profile(policy, NULL, NULL, NULL, NULL, NULL,
+    int rc = seatbelt_build_profile(policy, NULL, NULL, NULL, NULL,
                                     ttys, tty_count, buf, buf_size,
                                     params, max_params, scratch);
     free(scratch);
@@ -987,7 +987,6 @@ int hl_sandbox_apply_pledge(void)
 
 int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                       const char *db_path,
-                      const char *ca_bundle_path,
                       const char *tls_cert_path,
                       const char *tls_key_path)
 {
@@ -1133,7 +1132,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         }
 
         if (seatbelt_build_profile(policy, resolved_app, resolved_db,
-                                    ca_bundle_path, tls_cert_path,
+                                    tls_cert_path,
                                     tls_key_path, ttys, tty_count,
                                     profile_buf, sizeof(profile_buf),
                                     params, SEATBELT_MAX_PARAMS,
@@ -1188,17 +1187,16 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      * two ways: compiled into the base (HL_ENABLE_DUCKDB), OR composed as a
      * build feature (`hull build --with=duckdb`) into an app whose base sandbox
      * was built WITHOUT that flag. The feature case has no compile-time signal,
-     * so detect the linked backend at runtime via hl_db_feature_backends(). */
+     * so ask the selector whether a linked backend claims the duckdb scheme.
+     * Any composed backend used to count (audit 29): --with=postgres or
+     * --with=mysql fill the same hook and got DuckDB's /proc, /sys grants. */
     int duckdb_present = 0;
 #ifdef HL_ENABLE_DUCKDB
     duckdb_present = 1;
 #endif
 #ifdef HL_ENABLE_DB
-    if (!duckdb_present) {
-        size_t feat_count = 0;
-        (void)hl_db_feature_backends(&feat_count);
-        duckdb_present = (feat_count > 0);
-    }
+    if (!duckdb_present)
+        duckdb_present = hl_db_backend_select("duckdb://", NULL) != NULL;
 #endif
     if (duckdb_present) {
         unveil("/etc/localtime",                    "r");
@@ -1241,12 +1239,10 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             log_warn("[sandbox] unveil failed for database: %s", db_path);
     }
 
-    /* CA certificate bundle for HTTPS client verification */
-    if (ca_bundle_path) {
-        if (unveil(ca_bundle_path, "r") != 0)
-            log_warn("[sandbox] unveil failed for CA bundle: %s",
-                     ca_bundle_path);
-    }
+    /* No CA bundle unveil (audit 29): the anchor is already in memory
+     * (ca_trust.c reads it before phase 2), and the ladder's "(embedded)"
+     * label, unveiled as a relative path, resolved against the working
+     * directory - a planted "(embedded) -> /" symlink unveiled everything. */
 
     /* Hull runtime cache root ($HOME/.hull/cache/) - see SBPL
      * counterpart above. Auto-allowed read/write/create so the

@@ -630,7 +630,7 @@ would add protection, not merely honesty.
 - Manifest `fs` paths: unveil-equivalent via `(allow file-read* (subpath ...))` / `(allow file-read* file-write* ...)`
 - Network: TCP allowed only when manifest declares `hosts`
 - GPU: `iokit-open` + MTLCompilerService mach-lookup allowed only when `manifest.gpu` is set
-- CA bundle + TLS paths: read-only when HTTPS client is used
+- TLS cert / key paths: read-only when the server terminates TLS. The CA bundle gets no grant: it is read into memory before the sandbox applies (audit 29)
 - System frameworks + dyld cache: read-only (required for process operation)
 - Parameter substitution for paths. Avoids escaping issues with special characters
 - Irreversible. `sandbox_init` cannot be modified or removed after application

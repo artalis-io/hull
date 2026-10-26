@@ -151,6 +151,29 @@ do
     ok(not okb, "asm .include refused")
 end
 
+-- ── any inline assembly (audit 29) ──────────────────────────────────
+--
+-- The assembler's macro language builds `.incbin` at assembly time
+-- (`.macro m a` / `.inc\()\a` / `m bin`), out of reach of any text scan.
+do
+    local DEPS = "x.i: /app/compute/m/m.c\n"
+    local okb, err = build(DEPS, MARKS
+        .. '__asm__(".macro m a\\n.inc\\\\()\\\\a \\"/home/u/.ssh/id_rsa\\"\\n.endm\\nm bin\\n");\n')
+    ok(not okb and err:find("inline assembly", 1, true),
+        "asm macro building .incbin refused (" .. tostring(err) .. ")")
+    ok(#spawned == 1, "no compile step after inline assembly")
+    okb = build(DEPS, MARKS .. 'void f(void) { asm volatile(""); }\n')
+    ok(not okb, "bare asm refused")
+    okb = build(DEPS, MARKS .. 'void f(void) { __asm (""); }\n')
+    ok(not okb, "__asm refused")
+    okb = build(DEPS, MARKS .. 'int x __asm__("y");\n')
+    ok(not okb, "asm label refused")
+    okb = build(DEPS, MARKS .. 'void f(void) { __a\\\nsm__(""); }\n')
+    ok(not okb, "asm keyword split by a line splice refused")
+    ok(cb._preprocessed_reads_files('const char *s = "asm __asm__";\nint wasm, asm_x, my_asm;\n') == nil,
+        "asm inside a literal or as part of an identifier is not refused")
+end
+
 -- ── a directive made by a macro survives -E (audit 16) ─────────────
 --
 -- `#define E # embed "/abs/secret"` and a line `E` leave ` # embed ...` in

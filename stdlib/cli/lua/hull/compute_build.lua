@@ -160,7 +160,10 @@ end
 --      refused even inside the module.
 --   2. The preprocessed text is searched for `incbin` / `.include` (an asm
 --      directive that reads a file at assembly time), with every string
---      literal's escapes decoded, and for any directive left in it (clang
+--      literal's escapes decoded, for any inline assembly at all (`asm` /
+--      `__asm` / `__asm__` outside literals: the assembler's macro language
+--      can build `.incbin` at assembly time; audit 29), and for any
+--      directive left in it (clang
 --      still runs directives in `-x cpp-output` input, and a macro can make
 --      one; audit 16), then compiled AS IS (`-x cpp-output`), so what was
 --      checked is exactly what is built.
@@ -256,7 +259,7 @@ end
 -- (adjacent literals concatenate, so ".inc" "bin" reads as ".incbin"), plus
 -- the `"file"` of each `# N "file"` line marker. Comments are gone after -E.
 local function scan_preprocessed(text)
-    local lits, markers = {}, {}
+    local lits, markers, code = {}, {}, {}
     local i, n = 1, #text
     local bol = true
     while i <= n do
@@ -269,6 +272,7 @@ local function scan_preprocessed(text)
         end
         if f then
             markers[#markers + 1] = decode_c_string(f)
+            code[#code + 1] = " "
             i = eol
         elseif c == '"' or c == "'" then
             local j = i + 1
@@ -279,14 +283,16 @@ local function scan_preprocessed(text)
                 else j = j + 1 end
             end
             lits[#lits + 1] = decode_c_string(text:sub(i + 1, j - 1))
+            code[#code + 1] = " "
             i = j + 1
             bol = false
         else
+            code[#code + 1] = c
             bol = (c == "\n") or (bol and (c == " " or c == "\t"))
             i = i + 1
         end
     end
-    return table.concat(lits), markers
+    return table.concat(lits), markers, table.concat(code)
 end
 
 -- The pragmas a compute module may keep in its preprocessed text: loop and
@@ -347,11 +353,28 @@ end
 
 -- Does the preprocessed text `pre` ask the assembler to read a file?
 -- Returns a reason or nil.
+-- The keywords that open inline assembly (GNU / clang; `_asm` is the
+-- -fms-extensions spelling).
+local ASM_KEYWORDS = { asm = true, __asm = true, __asm__ = true, _asm = true }
+
 local function preprocessed_reads_files(pre)
-    local lits = scan_preprocessed(pre)
-    local hay = (pre .. "\n" .. lits):lower()
+    -- Phase 2 first, as the compile step will: a `\`-newline (or its
+    -- `??/` trigraph) joins the pieces of a split identifier.
+    local text = pre:gsub("%?%?/\r?\n", ""):gsub("\\\r?\n", "")
+    local lits, _, code = scan_preprocessed(text)
+    local hay = (text .. "\n" .. lits):lower()
     if hay:find("incbin", 1, true) then return "an .incbin directive" end
     if lits:lower():find("%.include") then return "an asm .include directive" end
+    -- Any inline assembly at all (audit 29): the assembler's own macro
+    -- language builds a directive at assembly time (`.macro m a` ...
+    -- `.inc\()\a` with `m bin` makes `.incbin`), so no scan of the text can
+    -- rule a file read out. A freestanding hull_process module has no use
+    -- for asm; outside string literals (markers dropped), it is refused.
+    for word in code:gmatch("[%a_][%w_]*") do
+        if ASM_KEYWORDS[word] then
+            return "inline assembly (`" .. word .. "`)"
+        end
+    end
     return nil
 end
 
