@@ -62,7 +62,9 @@ HlDbBudgetBinding hl_db_budget_current(void);
 void hl_db_budget_unbind(const void *ud);
 
 /* Charge this thread's bound budget (the progress handler). 0 = go on; no
- * binding is never an interrupt. */
+ * binding is never an interrupt. While the worker pool is being freed
+ * (hl_db_op_shutdown) every bound charge interrupts, so a worker.dispatch
+ * job's SQL wait does not hold the join either (audit 28). */
 int hl_db_budget_charge(int64_t units);
 
 /* A plain budget for code with no VM of its own (a db.async op).
@@ -92,8 +94,9 @@ int hl_db_op_budget_charge(void *ud, int64_t units);
 uint64_t hl_db_monotonic_ms(void);
 
 /* Set while the process frees its worker pool (on before pool_free, off once
- * it has returned): every HlDbOpBudget trips at its next charge, so an op
- * waiting on the server does not hold the join. */
+ * it has returned): every HlDbOpBudget trips at its next charge, and every
+ * other bound charge (a worker.dispatch job's) interrupts, so an op waiting
+ * on the server does not hold the join. */
 void hl_db_op_shutdown(int on);
 
 /* The largest string or blob a SQLite connection Hull opens may build

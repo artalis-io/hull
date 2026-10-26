@@ -32,6 +32,7 @@
 #include "hull/utils/alloc.h"  /* HlAllocator + hl_alloc_kl (Keel-free KlAllocator) */
 #include "hull/shared/async_backend.h"
 #include "hull/shared/log_lock.h"
+#include "hull/shared/cli_log.h"   /* hl_log_install_line_callback */
 #include "hull/shared/thread_affinity.h"
 #include "hull/manifest.h"
 #include <sh_seal_arena.h>
@@ -455,6 +456,13 @@ int hull_serve(int argc, char **argv)
     /* Make log.c thread-safe + mark this as the event-loop thread before the
      * worker threads spawn: workers (db/compute/gpu async) log concurrently,
      * and the loop-only thread-affinity assertions must be live, not inert. */
+    /* One escaped line per record, as serve.c's: log.c's default callback
+     * printed app text (an uncaught error's message) raw, so a newline in it
+     * forged a record (audit 28). Sole owner, as in serve.c, if a subcommand
+     * reached this in-process with the CLI policy installed. LOG_TRACE keeps
+     * log.c's default level. */
+    hl_cli_log_suspend();
+    hl_log_install_line_callback(LOG_TRACE);
     hl_log_make_threadsafe();
     hl_event_loop_mark_current();
     HlAsyncBackendPool *pool = NULL;

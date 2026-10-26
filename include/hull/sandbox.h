@@ -148,6 +148,11 @@ int hl_sandbox_apply_pledge(void);
  * pledge carries no `tty`, and isatty's ioctl is then fatal on Linux. */
 int hl_sandbox_std_tty(int fd);
 
+/* 1 once a pledge is in force in this process (phase 1 applied on Linux /
+ * OpenBSD / a cosmo APE there), else 0. The pledge grants no chown: code
+ * that would make one asks this first. */
+int hl_sandbox_pledged(void);
+
 /*
  * Phase 2: full sandbox based on a resolved policy.
  *

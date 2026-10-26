@@ -61,6 +61,18 @@ kept the rest. Check the list below before upgrading.
 - Lua `auth-flows` and `email` refuse an address that is not valid UTF-8, as the JS twins
   (whose strings cannot hold invalid bytes) effectively do.
 
+**Runtime - audit 28 fixes**
+- A built app without HTTP (the `app.main` runner) logs one escaped line per record, as the
+  server does: it used log.c's default output, which printed a message's newline raw, and its
+  records no longer carry the C `file:line`.
+- Running as root, SQLite hands a new WAL / journal / shm file to the database file's owner again
+  when no kernel sandbox is in force (`hull migrate`, `--no-sandbox`, macOS); only a pledged
+  process keeps the creator as owner. A root `hull migrate` killed mid-run had left a root-owned
+  hot journal the app's own user could not recover.
+- SIGTERM no longer waits on a `worker.dispatch` job's SQL wait (`pg_sleep`, a lock wait, a silent
+  server with `read_timeout=0`): while the worker pool is freed every bound SQL charge stops, as a
+  `db.async` op's already did.
+
 ## [0.17.1] - 2026-10-18
 
 Full PR list:

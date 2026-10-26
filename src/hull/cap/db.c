@@ -23,7 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/types.h>   /* uid_t / gid_t (db_no_fchown) */
+#include <sys/types.h>   /* uid_t / gid_t (db_fchown) */
+#include <unistd.h>      /* fchown */
 
 /* ── Prepared statement cache ──────────────────────────────────────── */
 
@@ -283,11 +284,22 @@ static void db_mem_shutdown(void *ud) { (void)ud; g_sqlite_mem.xShutdown(g_sqlit
 
 static pthread_once_t g_sqlite_setup_once = PTHREAD_ONCE_INIT;
 
-/* SQLite's fchown, replaced (db_sqlite_setup_once): success, no syscall. */
-static int db_no_fchown(int fd, uid_t uid, gid_t gid)
+/* Weak default (no sandbox linked, e.g. a unit test); sandbox.c overrides. */
+__attribute__((weak)) int hl_sandbox_pledged(void)
 {
-    (void)fd; (void)uid; (void)gid;
     return 0;
+}
+
+/* SQLite's fchown, replaced (db_sqlite_setup_once): under a pledge, success
+ * with no syscall; unsandboxed (hull migrate, --no-sandbox, macOS), the real
+ * one - a root `hull migrate` killed mid-run otherwise left a root-owned hot
+ * journal / WAL the app's own user could not recover (audit 28). */
+static int db_fchown(int fd, uid_t uid, gid_t gid)
+{
+    // cppcheck-suppress knownConditionTrueFalse
+    if (hl_sandbox_pledged())
+        return 0;
+    return fchown(fd, uid, gid);
 }
 
 static void db_sqlite_setup_once(void)
@@ -326,12 +338,12 @@ static void db_sqlite_setup_once(void)
      * creates to the database file's owner. The kernel sandbox grants no
      * chown, so on Linux the seccomp filter killed the process at the first
      * write (a hull app in a container, which runs as root unless told
-     * otherwise). Hull's files are its own: keep the creator as owner.
+     * otherwise). Sandboxed, keep the creator as owner (db_fchown).
      * (After the sqlite3_config calls above: the lookup initializes SQLite.) */
     sqlite3_vfs *unix_vfs = sqlite3_vfs_find("unix");
     if (unix_vfs && unix_vfs->iVersion >= 3 && unix_vfs->xSetSystemCall)
         (void)unix_vfs->xSetSystemCall(unix_vfs, "fchown",
-                                       (sqlite3_syscall_ptr)db_no_fchown);
+                                       (sqlite3_syscall_ptr)db_fchown);
     hl_db_budget_restore(budget);
 }
 

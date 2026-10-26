@@ -127,34 +127,8 @@ static int serve_stdio_write(void *ctx, const char *data, size_t len)
 
 /* ── Logging ───────────────────────────────────────────────────────── */
 
-/* Custom log callback: suppresses file:line in release builds.
- *
- * The format string is provided by the log.c callback API, not a
- * literal; vsnprintf is doing exactly what it's meant to. Suppress
- * -Wformat-nonliteral locally rather than restructuring the API. */
-static void hl_log_callback(log_Event *ev) {
-    char ts[16];
-    ts[strftime(ts, sizeof(ts), "%H:%M:%S", ev->time)] = '\0';
-
-    char raw[1024], msg[1024];
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-nonliteral"
-    vsnprintf(raw, sizeof(raw), ev->fmt, ev->ap);
-#pragma GCC diagnostic pop
-    /* CR / LF as \r / \n (audit 27): an uncaught exception's message, a ws
-     * or SSE error, reaches a log call with app text in it, and a newline
-     * there wrote a second record of the app's choosing. */
-    hl_log_escape_line(raw, msg, sizeof msg);
-
-#ifdef DEBUG
-    fprintf((FILE *)ev->udata, "%s %-5s %s:%d: %s\n",
-            ts, log_level_string(ev->level), ev->file, ev->line, msg);
-#else
-    fprintf((FILE *)ev->udata, "%s %-5s %s\n",
-            ts, log_level_string(ev->level), msg);
-#endif
-}
-
+/* The record format itself is hl_log_install_line_callback's (cli_log.c),
+ * shared with the app.main runner. */
 static int hl_parse_log_level(const char *s) {
     if (strcmp(s, "trace") == 0) return LOG_TRACE;
     if (strcmp(s, "debug") == 0) return LOG_DEBUG;
@@ -166,8 +140,8 @@ static int hl_parse_log_level(const char *s) {
 }
 
 /* Bridge: routes Keel KlHttpServerLogFn through rxi/log.c with [keel] prefix.
- * `fmt` comes from Keel's logging callback API; see the comment on
- * hl_log_callback above. */
+ * `fmt` comes from Keel's logging callback API, not a literal, so
+ * -Wformat-nonliteral is suppressed locally. */
 static void hl_keel_log_bridge(int level, const char *fmt, va_list ap,
                                 void *user_data) {
     (void)user_data;
@@ -985,9 +959,7 @@ static int hl_serve_init_logging(HlServerState *s)
     hl_cli_log_suspend();
 
     hl_log_make_threadsafe();  /* workers (db/wasm/gpu) log concurrently */
-    log_set_level(s->cfg.log_level);
-    log_set_quiet(true);  /* suppress default stderr callback */
-    log_add_callback(hl_log_callback, stderr, s->cfg.log_level);
+    hl_log_install_line_callback(s->cfg.log_level);
 
     /* Initialize tracking allocator */
     hl_alloc_init(&s->alloc, (size_t)s->cfg.mem_limit);
