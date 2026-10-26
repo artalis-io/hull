@@ -133,6 +133,11 @@ typedef struct {
      * segment change is refused while any instance outside the pool still
      * holds the chain (guarded by mutex). */
     int chain_attached;
+    /* Linear memory of the load-time probe instance (8 KiB app heap), start
+     * function included; 0 when the probe did not instantiate. The pool
+     * bound: an instance holding more than this + its own heap_size (in
+     * pages) grew with memory.grow and is not pooled (audit 29). */
+    uint64_t probe_linear_bytes;
 } HlWasmModule;
 
 /* Forward decl - the full ShSealArena type lives in sh_seal_arena.h.

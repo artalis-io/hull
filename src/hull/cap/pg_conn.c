@@ -26,6 +26,7 @@
 #ifndef HL_PG_NO_TLS
 #include "hull/cap/db_transport.h"
 #include "hull/cap/db_budget.h"     /* hl_db_budget_charge: a tripped run */
+#include "hull/cap/db_sql_kw.h"     /* hl_sql_txn_kind_ex: a lone COMMIT */
 #include "hull/shared/tls_client.h"
 #endif
 
@@ -45,6 +46,11 @@
  * ~2400x the real-world value while still bounding the work a hostile or
  * MITM'd peer can ask the client to perform. */
 #define SCRAM_MAX_ITERS 10000000
+/* RFC 7677's floor. A server that asks for fewer is accepted only where a
+ * cleartext password would be (verified TLS, or sslmode=disable): over
+ * prefer / require a MITM could ask for i=1 and brute-force the password
+ * from the ClientProof offline at no cost (audit 29). */
+#define SCRAM_MIN_ITERS 4096
 /* What one SCRAM PBKDF2 iteration is charged to the run's budget: one 32-byte
  * block, two HMAC-SHA256 compressions of 64 bytes at 1 unit per 8 bytes - the
  * rate the Lua crypto binding charges its own PBKDF2 (audit 17). */
@@ -305,18 +311,55 @@ int hl_pg_conn_io_left(HlPgConn *conn, uint64_t *started)
     return (left == 0 || fleft < left) ? fleft : left;
 }
 
-/* Read one frame. The returned body is valid until the next call, which
- * compacts the previously-consumed bytes. Returns 0 / -1. */
-static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
+/* The read buffer starts at HL_PG_RBUF_INITIAL and doubles up to
+ * HL_PG_MAX_MSG + 8192 for one large frame; it used to keep that size until
+ * the connection closed, so every pooled connection that once read a big row
+ * held ~1 GiB for good. Once the large frame is consumed and what is left
+ * fits the initial size, it shrinks back (audit 29). */
+#define HL_PG_RBUF_INITIAL 8192
+#define HL_PG_RBUF_SHRINK  ((size_t)1 << 20)
+
+/* Drop the bytes already consumed, and give a grown buffer back. */
+static void pg_rbuf_compact(HlPgConn *conn)
 {
-    uint64_t started = 0;   /* this frame's reads share one ?read_timeout= */
-    int got = 0;            /* a chunk of it came in */
     if (conn->consumed > 0) {
         memmove(conn->rbuf, conn->rbuf + conn->consumed,
                 conn->rlen - conn->consumed);
         conn->rlen -= conn->consumed;
         conn->consumed = 0;
     }
+    if (conn->rcap > HL_PG_RBUF_SHRINK && conn->rlen <= HL_PG_RBUF_INITIAL) {
+        uint8_t *nb = realloc(conn->rbuf, HL_PG_RBUF_INITIAL);
+        if (nb) {
+            conn->rbuf = nb;
+            conn->rcap = HL_PG_RBUF_INITIAL;
+        }
+    }
+}
+
+/* The run asked to stop while a reply was awaited. After a lone COMMIT was
+ * sent the server commits regardless, so the reply is read on in the bounded
+ * finishing mode (0) instead of dropped, which kept tx_status 'T' and
+ * reported the commit lost (audit 29); otherwise the connection is
+ * abandoned (-1). */
+static int pg_stop_or_finish(HlPgConn *conn)
+{
+    if (conn->commit_sent && !conn->finishing) {
+        conn->finishing = 1;
+        conn->finish_started = 0;
+        return 0;
+    }
+    pg_abandon(conn);
+    return -1;
+}
+
+/* Read one frame. The returned body is valid until the next call, which
+ * compacts the previously-consumed bytes. Returns 0 / -1. */
+static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
+{
+    uint64_t started = 0;   /* this frame's reads share one ?read_timeout= */
+    int got = 0;            /* a chunk of it came in */
+    pg_rbuf_compact(conn);
     for (;;) {
         size_t consumed = 0;
         HlPgResult r = hl_pg_frame_next(conn->rbuf, conn->rlen, f, &consumed);
@@ -330,13 +373,12 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
         /* Still incomplete after a chunk: the run is asked after every one,
          * not only after a quiet slice - a server sending a large frame a
          * byte at a time, each within a slice, was never stopped (audit 21). */
-        if (got && !conn->finishing && pg_wait_stop(NULL)) {
-            pg_abandon(conn);
+        if (got && !conn->finishing && pg_wait_stop(NULL) &&
+            pg_stop_or_finish(conn) != 0)
             return -1;
-        }
         /* NEED_MORE: grow if the buffer is full (bounded), then read. */
         if (conn->rlen == conn->rcap) {
-            size_t ncap = conn->rcap ? conn->rcap * 2 : 8192;
+            size_t ncap = conn->rcap ? conn->rcap * 2 : HL_PG_RBUF_INITIAL;
             /* frame_next rejects any length > HL_PG_MAX_MSG, so a legitimate
              * frame never needs more than that plus its 5-byte header. */
             if (ncap > (size_t)HL_PG_MAX_MSG + 8192) {
@@ -377,7 +419,10 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
         int wr = hl_db_transport_wait_readable(conn->transport, left,
                                                conn->finishing ? NULL : pg_wait_stop,
                                                NULL);
-        if (wr == -2) { pg_abandon(conn); return -1; }
+        if (wr == -2) {
+            if (pg_stop_or_finish(conn) != 0) return -1;
+            continue;   /* finishing now: wait again, under its bound */
+        }
         /* What the wait left: passed its own `left`, the read could spend as
          * long again (audit 22). While finishing that is the finishing bound
          * too: recomputed from ?read_timeout= alone, the TLS read below ran
@@ -444,7 +489,7 @@ typedef struct {
 /* Handle one SASL AuthenticationRequest sub-message. Returns 0 to continue
  * the handshake, -1 on failure (conn->errmsg set). */
 static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
-                        int32_t sub, HlPgCursor *c)
+                        int32_t sub, HlPgCursor *c, int weak_iters_ok)
 {
     if (sub == HL_PG_AUTH_SASL) {
         sc->started = 1;
@@ -561,6 +606,13 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
                         : "invalid SCRAM server-first");
             return -1;
         }
+        if (iters < SCRAM_MIN_ITERS && !weak_iters_ok) {
+            set_err(conn->errmsg, sizeof conn->errmsg,
+                    "SCRAM iteration count below " HL_STR(SCRAM_MIN_ITERS)
+                    " refused over an unverified connection (use "
+                    "sslmode=verify-full)");
+            return -1;
+        }
         /* The iteration count is the server's: up to SCRAM_MAX_ITERS rounds
          * of HMAC run inside this one call, so they are charged to the run
          * as soon as the count is accepted, and a run that cannot pay does
@@ -571,7 +623,12 @@ static int scram_handle(HlPgConn *conn, PgScram *sc, const HlPgDsn *dsn,
                     "SCRAM key derivation");
             return -1;
         }
-        if (strncmp(rnonce, sc->client_nonce, strlen(sc->client_nonce)) != 0) {
+        /* The server's nonce must EXTEND ours (RFC 5802 5.1): one equal to
+         * the client's added no server randomness, and a prefix check alone
+         * took it (audit 29). */
+        size_t cn_len = strlen(sc->client_nonce);
+        if (strlen(rnonce) <= cn_len ||
+            strncmp(rnonce, sc->client_nonce, cn_len) != 0) {
             set_err(conn->errmsg, sizeof conn->errmsg, "SCRAM nonce mismatch");
             return -1;
         }
@@ -773,7 +830,10 @@ static int pg_start(HlPgConn *conn, HlDbTransport *transport, const HlPgDsn *dsn
                        sub == HL_PG_AUTH_SASL_CONTINUE ||
                        sub == HL_PG_AUTH_SASL_FINAL) {
 #ifndef HL_PG_NO_SCRAM
-                if (scram_handle(conn, &scram, dsn, sub, &c) != 0) {
+                if (scram_handle(conn, &scram, dsn, sub, &c,
+                                 hl_pg_cleartext_allowed(
+                                     tls_verified,
+                                     hl_pg_sslmode_parse(dsn->sslmode))) != 0) {
                     conn_teardown(conn); return -1;
                 }
 #else
@@ -1035,25 +1095,32 @@ static int scram_pbkdf2(const char *pw, size_t pw_len,
     msg[salt_len + 0] = 0; msg[salt_len + 1] = 0;
     msg[salt_len + 2] = 0; msg[salt_len + 3] = 1;   /* INT(1) */
 
-    uint8_t u[32], t[32];
+    /* u / t / next are the PBKDF2 state, from which the salted password
+     * follows: scrubbed on every return, the failures included (audit 29). */
+    uint8_t u[32], t[32], next[32];
+    int ret = -1;
     int rc = hl_cap_crypto_hmac_sha256((const uint8_t *)pw, pw_len,
                                        msg, salt_len + 4, u);
     free(msg);
-    if (rc != 0) return -1;
+    if (rc != 0) goto out;
     memcpy(t, u, 32);
 
     for (int i = 1; i < iters; i++) {
         /* HMAC into a separate buffer, not in-place over the input `u`: the
          * cap-layer HMAC backend is swappable (HL_HMAC_BACKEND), so don't
          * assume it buffers the message before writing `out`. */
-        uint8_t next[32];
         if (hl_cap_crypto_hmac_sha256((const uint8_t *)pw, pw_len, u, 32, next) != 0)
-            return -1;
+            goto out;
         memcpy(u, next, 32);
         for (int j = 0; j < 32; j++) t[j] = (uint8_t)(t[j] ^ u[j]);
     }
     memcpy(out, t, 32);
-    return 0;
+    ret = 0;
+out:
+    pg_secure_zero(u, sizeof u);
+    pg_secure_zero(t, sizeof t);
+    pg_secure_zero(next, sizeof next);
+    return ret;
 }
 
 int hl_pg_scram_proof(const char *password, size_t pw_len,
@@ -1063,27 +1130,32 @@ int hl_pg_scram_proof(const char *password, size_t pw_len,
 {
     uint8_t salted[32], client_key[32], stored_key[32];
     uint8_t client_sig[32], server_key[32];
+    int ret = -1;
 
     if (scram_pbkdf2(password, pw_len, salt, salt_len, iterations, salted) != 0)
-        return -1;
+        goto out;
     if (hl_cap_crypto_hmac_sha256(salted, 32,
-            (const uint8_t *)"Client Key", 10, client_key) != 0) return -1;
-    if (hl_cap_crypto_sha256(client_key, 32, stored_key) != 0) return -1;
+            (const uint8_t *)"Client Key", 10, client_key) != 0) goto out;
+    if (hl_cap_crypto_sha256(client_key, 32, stored_key) != 0) goto out;
     if (hl_cap_crypto_hmac_sha256(stored_key, 32,
-            (const uint8_t *)auth_msg, auth_msg_len, client_sig) != 0) return -1;
+            (const uint8_t *)auth_msg, auth_msg_len, client_sig) != 0) goto out;
     for (int i = 0; i < 32; i++)
         client_proof[i] = (uint8_t)(client_key[i] ^ client_sig[i]);
 
     if (hl_cap_crypto_hmac_sha256(salted, 32,
-            (const uint8_t *)"Server Key", 10, server_key) != 0) return -1;
+            (const uint8_t *)"Server Key", 10, server_key) != 0) goto out;
     if (hl_cap_crypto_hmac_sha256(server_key, 32,
-            (const uint8_t *)auth_msg, auth_msg_len, server_sig) != 0) return -1;
-
-    /* Scrub the derived secrets. */
+            (const uint8_t *)auth_msg, auth_msg_len, server_sig) != 0) goto out;
+    ret = 0;
+out:
+    /* Scrub the derived secrets on every path - stored_key and client_sig
+     * too, and the early failures (audit 29). */
     pg_secure_zero(salted, sizeof salted);
     pg_secure_zero(client_key, sizeof client_key);
+    pg_secure_zero(stored_key, sizeof stored_key);
+    pg_secure_zero(client_sig, sizeof client_sig);
     pg_secure_zero(server_key, sizeof server_key);
-    return 0;
+    return ret;
 }
 #endif /* HL_PG_NO_SCRAM */
 
@@ -1330,7 +1402,10 @@ static int pg_abandon_if_tripped(HlPgConn *conn, uint32_t body_len)
  * failed and then "rolled back" by the server (audit 18). The reply is read
  * on to its ReadyForQuery instead - without asking the budget again while
  * waiting for it, and for at most HL_PG_FINISH_MAX_FRAMES frames. The trip
- * is sticky, so the run raises it at its next poll once the call returns. */
+ * is sticky, so the run raises it at its next poll once the call returns.
+ * After a lone COMMIT was sent (conn->commit_sent) a trip on ANY frame of its
+ * reply finishes the same way: the extended protocol's ParseComplete /
+ * BindComplete / NoData come before the CommandComplete (audit 29). */
 static int pg_reply_charge(HlPgConn *conn, const HlPgFrame *f)
 {
     if (f->type == HL_PG_B_READY) return 0;
@@ -1341,8 +1416,9 @@ static int pg_reply_charge(HlPgConn *conn, const HlPgFrame *f)
         return 1;
     }
     if (hl_db_budget_charge(pg_frame_units(f->body_len)) == 0) return 0;
-    if (f->type == HL_PG_B_CMD_COMPLETE && f->body_len >= 6 &&
-        memcmp(f->body, "COMMIT", 6) == 0) {
+    if (conn->commit_sent ||
+        (f->type == HL_PG_B_CMD_COMPLETE && f->body_len >= 6 &&
+         memcmp(f->body, "COMMIT", 6) == 0)) {
         conn->finishing = 1;
         conn->finish_started = 0;   /* the bound starts at the next read */
         return 0;
@@ -1489,6 +1565,7 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
     hl_pg_msg_end(&w, m);
 
     free(rw);
+    conn->commit_sent = 0;
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_pg_writer_free(&w);
     if (se) {
@@ -1496,6 +1573,7 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
             set_err(conn->errmsg, sizeof conn->errmsg, "failed to send query");
         return -1;
     }
+    conn->commit_sent = hl_sql_txn_kind_ex(sql, 1) == HL_SQL_TXN_COMMIT;
 
     /* Read the response stream until ReadyForQuery. */
     int had_error = 0;
@@ -1556,6 +1634,7 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
             conn->finishing = 0;
+            conn->commit_sent = 0;
             return had_error ? -1 : 0;
         case HL_PG_B_NOTIFY:
             pg_note_notify(conn, &f);
@@ -1585,6 +1664,7 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
     size_t m = hl_pg_msg_begin(&w, HL_PG_F_QUERY);
     hl_pg_put_cstr(&w, sql);
     hl_pg_msg_end(&w, m);
+    conn->commit_sent = 0;
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_pg_writer_free(&w);
     if (se) {
@@ -1592,6 +1672,7 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
             set_err(conn->errmsg, sizeof conn->errmsg, "failed to send script");
         return -1;
     }
+    conn->commit_sent = hl_sql_txn_kind_ex(sql, 1) == HL_SQL_TXN_COMMIT;
 
     /* Simple Query returns a stream per statement; discard all results and
      * read to ReadyForQuery. A single ErrorResponse anywhere fails the whole
@@ -1637,6 +1718,7 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         case HL_PG_B_READY:
             conn->tx_status = hl_pg_get_u8(&c);
             conn->finishing = 0;
+            conn->commit_sent = 0;
             return had_error ? -1 : 0;
         case HL_PG_B_NOTIFY:
             pg_note_notify(conn, &f);
@@ -1685,12 +1767,7 @@ static int wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
         /* 1. Consume any COMPLETE frame already buffered. poll(2) watches the
          * socket, not our accumulation buffer, so a frame received alongside an
          * earlier one would be invisible to poll and must be drained here first. */
-        if (conn->consumed > 0) {
-            memmove(conn->rbuf, conn->rbuf + conn->consumed,
-                    conn->rlen - conn->consumed);
-            conn->rlen -= conn->consumed;
-            conn->consumed = 0;
-        }
+        pg_rbuf_compact(conn);
         HlPgFrame f;
         size_t consumed = 0;
         HlPgResult r = hl_pg_frame_next(conn->rbuf, conn->rlen, &f, &consumed);
@@ -1737,7 +1814,7 @@ static int wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
         /* 3. Readable: recv one chunk into the buffer (grow if full, bounded like
          * conn_next_frame), then loop back to parse. */
         if (conn->rlen == conn->rcap) {
-            size_t ncap = conn->rcap ? conn->rcap * 2 : 8192;
+            size_t ncap = conn->rcap ? conn->rcap * 2 : HL_PG_RBUF_INITIAL;
             if (ncap > (size_t)HL_PG_MAX_MSG + 8192) {
                 set_err(conn->errmsg, sizeof conn->errmsg, "server message exceeds limit");
                 return -1;

@@ -140,7 +140,9 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
  * pragma (foreign_keys, query_only, defer_foreign_keys, recursive_triggers,
  * busy_timeout, synchronous, ...) takes effect when it is PREPARED and still
  * passes sqlite3_stmt_readonly, so a "read-only" agent query changed the warm
- * app connection (audit 11).
+ * app connection (audit 11). Since audit 29 that holds for argument-less
+ * pragmas too (`PRAGMA optimize` runs ANALYZE), and ATTACH (even of '' /
+ * ":memory:"), DETACH and ANALYZE are refused under it.
  *
  * Two more setters are bounded (audit 12): busy_timeout - the event-loop thread
  * SLEEPS that long on a locked database, uncharged, so a large value stalls
@@ -176,10 +178,79 @@ static int db_synchronous_ok(const char *v)
     return 0;
 }
 
+/* SQLite's own bookkeeping tables (audit 29). sqlite_sequence holds every
+ * AUTOINCREMENT table's high-water mark: an app `UPDATE sqlite_sequence SET
+ * seq = 9223372036854775807` (or an INSERT of a row naming '_hull_jobs')
+ * made every later insert into a _hull_* table fail SQLITE_FULL without the
+ * SQL ever naming one. The sqlite_stat* tables steer the planner. SQLite
+ * writes both with direct VDBE ops that never reach the authorizer, except
+ * for three nested statements it parses itself: DROP TABLE and ANALYZE
+ * DELETE their rows (so DELETE stays legal: removing a row only lets
+ * AUTOINCREMENT fall back to the table's largest rowid), and ALTER TABLE ...
+ * RENAME updates sqlite_sequence.name. That rename is recognised by its
+ * shape - an SQLITE_ALTER_TABLE followed by the sqlite_rename_table function -
+ * and admits ONE update of sqlite_sequence.name; any callback outside the
+ * rename's own (sqlite_master / sqlite_temp_master reads and writes,
+ * functions, subselects) withdraws it. */
+static _Thread_local int db_rename_state; /* 0 none, 1 ALTER seen, 2 rename */
+
+static int db_sqlite_stat_table(const char *t)
+{
+    return t && strncasecmp(t, "sqlite_stat", 11) == 0;
+}
+
+static int db_schema_table(const char *t)
+{
+    return t && (strcasecmp(t, "sqlite_master") == 0 ||
+                 strcasecmp(t, "sqlite_temp_master") == 0 ||
+                 strcasecmp(t, "sqlite_schema") == 0 ||
+                 strcasecmp(t, "sqlite_temp_schema") == 0);
+}
+
+static int db_bookkeeping_write(int action, const char *a1, const char *a2,
+                                const char *a3)
+{
+    int seq = a1 && strcasecmp(a1, "sqlite_sequence") == 0;
+    int stat = db_sqlite_stat_table(a1);
+
+    /* Track the ALTER TABLE ... RENAME shape. */
+    if (action == SQLITE_ALTER_TABLE) {
+        db_rename_state = 1;
+        return 0;
+    }
+    if (action == SQLITE_FUNCTION && a2 &&
+        strcmp(a2, "sqlite_rename_table") == 0 && db_rename_state >= 1) {
+        db_rename_state = 2;
+        return 0;
+    }
+    if (db_rename_state && !(action == SQLITE_FUNCTION ||
+                             action == SQLITE_SELECT ||
+                             ((action == SQLITE_READ || action == SQLITE_UPDATE) &&
+                              (db_schema_table(a1) || seq))))
+        db_rename_state = 0;
+
+    if (!seq && !stat) return 0;
+    /* Only main's and temp's: VACUUM copies these tables into the database
+     * it attaches as "vacuum_<hex>" with INSERTs that reach this callback,
+     * and the only other attachable databases ('' / ":memory:") are
+     * scratch. */
+    if (a3 && strcasecmp(a3, "main") != 0 && strcasecmp(a3, "temp") != 0)
+        return 0;
+    if (action == SQLITE_INSERT) return 1;
+    if (action != SQLITE_UPDATE) return 0;
+    if (seq && db_rename_state == 2 && a2 && strcasecmp(a2, "name") == 0) {
+        db_rename_state = 0;   /* one update per rename */
+        return 0;
+    }
+    return 1;
+}
+
 static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
                          const char *a3, const char *a4)
 {
     (void)a3; (void)a4;
+    if (db_bookkeeping_write(action, a1, a2, a3))
+        return SQLITE_DENY;
     static const char *const set_refused[] = {
         "hard_heap_limit", "soft_heap_limit", "cache_size", "cache_spill",
         "default_cache_size", "temp_store", "threads",
@@ -189,17 +260,46 @@ static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
         "index_list", "foreign_key_list", "foreign_key_check",
         "integrity_check", "quick_check",
     };
+    /* Argument-less pragmas that only report a value (audit 29): the
+     * read-only gate takes these bare, never with an argument. */
+    static const char *const report_ok[] = {
+        "foreign_keys", "user_version", "schema_version", "application_id",
+        "page_count", "page_size", "freelist_count", "encoding",
+        "database_list", "collation_list", "function_list", "module_list",
+        "pragma_list", "compile_options", "journal_mode", "synchronous",
+        "busy_timeout", "auto_vacuum", "data_version", "max_page_count",
+    };
     switch (action) {
     case SQLITE_ATTACH:
+        if (ud) return SQLITE_DENY;   /* read-only gate: no ATTACH at all */
         if (a1 && (a1[0] == '\0' || strcmp(a1, ":memory:") == 0))
             return SQLITE_OK;
         return SQLITE_DENY;
+    case SQLITE_DETACH:
+    case SQLITE_ANALYZE:
+        /* ANALYZE writes the sqlite_stat* tables; DETACH changes the
+         * connection (audit 29). */
+        return ud ? SQLITE_DENY : SQLITE_OK;
     case SQLITE_PRAGMA:
-        if (!a1) return SQLITE_OK;
+        if (!a1) return ud ? SQLITE_DENY : SQLITE_OK;
         if (strcasecmp(a1, "writable_schema") == 0 ||
             strcasecmp(a1, "temp_store_directory") == 0 ||
             strcasecmp(a1, "data_store_directory") == 0)
             return SQLITE_DENY;
+        if (ud) {
+            /* The read-only gate checks EVERY pragma, with or without an
+             * argument: an argument-less `PRAGMA optimize` runs ANALYZE and
+             * writes, `PRAGMA shrink_memory` / `wal_checkpoint` act on the
+             * warm app connection (audit 29). */
+            for (size_t i = 0; i < sizeof describe_ok / sizeof describe_ok[0]; i++)
+                if (strcasecmp(a1, describe_ok[i]) == 0)
+                    return SQLITE_OK;
+            if (!a2)
+                for (size_t i = 0; i < sizeof report_ok / sizeof report_ok[0]; i++)
+                    if (strcasecmp(a1, report_ok[i]) == 0)
+                        return SQLITE_OK;
+            return SQLITE_DENY;
+        }
         if (!a2) return SQLITE_OK;
         for (size_t i = 0; i < sizeof set_refused / sizeof set_refused[0]; i++)
             if (strcasecmp(a1, set_refused[i]) == 0)
@@ -215,12 +315,6 @@ static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
             return SQLITE_DENY;
         if (strcasecmp(a1, "synchronous") == 0 && !db_synchronous_ok(a2))
             return SQLITE_DENY;
-        if (ud) {
-            for (size_t i = 0; i < sizeof describe_ok / sizeof describe_ok[0]; i++)
-                if (strcasecmp(a1, describe_ok[i]) == 0)
-                    return SQLITE_OK;
-            return SQLITE_DENY;
-        }
         return SQLITE_OK;
     case SQLITE_TRANSACTION:
     case SQLITE_SAVEPOINT:

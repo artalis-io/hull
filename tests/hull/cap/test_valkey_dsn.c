@@ -81,6 +81,21 @@ UTEST(valkey_dsn, sslmode_disable_on_tls_scheme_refused) {
     ASSERT_TRUE(strstr(e, "pw") == NULL);   /* no credentials in the error */
 }
 
+/* Audit 29: sslmode=require verifies nothing, and the handshake sends the
+ * password in HELLO 3 AUTH - refused when the DSN carries one. */
+UTEST(valkey_dsn, sslmode_require_with_a_password_refused) {
+    {
+        HlValkeyDsn d; char e[192];
+        ASSERT_EQ(-1, hl_valkey_dsn_parse("redis://u:s3cret@host?sslmode=require", &d, e, sizeof e));
+        ASSERT_TRUE(strstr(e, "verify-full") != NULL);
+        ASSERT_TRUE(strstr(e, "s3cret") == NULL);
+        ASSERT_EQ(-1, hl_valkey_dsn_parse("rediss://:s3cret@host?sslmode=REQUIRE", &d, e, sizeof e));
+    }
+    { OK("redis://host?sslmode=require");                ASSERT_EQ(d.verify, 0); }
+    { OK("redis://u:s3cret@host?sslmode=verify-full");   ASSERT_EQ(d.verify, 1); }
+    { OK("rediss://u:s3cret@host");                      ASSERT_EQ(d.verify, 1); }
+}
+
 UTEST(valkey_dsn, sslmode_and_timeout_opts) {
     { OK("rediss://host?sslmode=require");      ASSERT_EQ(d.verify, 0); }
     { OK("rediss://host?sslmode=verify-full");  ASSERT_EQ(d.verify, 1); }

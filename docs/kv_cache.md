@@ -256,7 +256,9 @@ semantic layer.
   `kv.dynamic` allowlist and the same network sandbox grant as a network DB. It
   packages exactly like the Postgres/MySQL wire backends (pure C, no vendored
   engine, RESP2/RESP3, ACL/password auth, `rediss://` TLS via the shared TLS
-  client). The portable KV subset only; there is NO generic Redis-command escape
+  client; `?sslmode=require` - TLS that verifies no certificate - is refused
+  when the DSN carries a password, since the HELLO AUTH would reach any man in
+  the middle: use `verify-full`, audit 29). The portable KV subset only; there is NO generic Redis-command escape
   hatch, and cluster / Sentinel / streams / pub-sub / sorted-sets / scripting are
   out of scope and belong in separate future capabilities.
 - **CacheLib**: evaluated and **declined** - see the design spike

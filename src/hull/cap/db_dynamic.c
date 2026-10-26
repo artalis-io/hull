@@ -12,12 +12,14 @@
 #include "hull/cap/fs_policy.h"
 #include "hull/manifest.h"
 #include "hull/host_match.h"
+#include "hull/shared/fs_util.h"   /* hl_default_db_path_check: the leaf */
 
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>   /* lstat: dynamic_path_has_symlink */
 
 /* Process-wide cap on concurrent dynamic connections (fd-exhaustion backstop).
  * db.open / close run on the event-loop thread, so the handle table needs no
@@ -108,6 +110,32 @@ static int scheme_is_file(const char *scheme)
 static int host_allowed(const HlManifestDbDynamic *policy, const char *host)
 {
     return hl_host_match_any_env(policy->hosts, policy->host_count, host);
+}
+
+/* 1 when any component of @p abs below its first @p base_len bytes (the app
+ * directory) is a symbolic link, or the leaf or one of its SQLite sidecars
+ * (-wal / -shm / -journal) is a link or not a regular file. hl_cap_fs_validate
+ * only checks that the realpath stays inside the app directory and the fs.write
+ * policy is matched lexically, but SQLite opens the absolute path FOLLOWING
+ * links, so a planted `data/x.db -> ../private/ref.db` opened a file fs.write
+ * would have re-rooted or refused (audit 29). A component that does not exist
+ * yet ends the walk: SQLite creates it. */
+static int dynamic_path_has_symlink(const char *abs, size_t base_len)
+{
+    char prefix[HL_DB_DYNAMIC_DSN_MAX];
+    size_t len = strlen(abs);
+    if (len >= sizeof prefix || base_len >= len) return 1;
+    memcpy(prefix, abs, len + 1);
+    for (size_t i = base_len + 1; i < len; i++) {
+        if (prefix[i] != '/') continue;
+        prefix[i] = '\0';
+        struct stat st;
+        int r = lstat(prefix, &st);
+        prefix[i] = '/';
+        if (r != 0) return 0;              /* the rest does not exist yet */
+        if (S_ISLNK(st.st_mode)) return 1;
+    }
+    return hl_default_db_path_check(abs, NULL, 0) != 0;
 }
 
 HlDbHandle *hl_db_dynamic_open(const char *dsn,
@@ -210,6 +238,14 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
                 : snprintf(abs_dsn, sizeof abs_dsn, "%s/%s", fs_cfg->base_dir, path);
             if (n < 0 || (size_t)n >= sizeof abs_dsn) {
                 if (err) *err = "db.open: file path too long";
+                return NULL;
+            }
+            /* No symbolic link on the way to the file, nor at it (audit 29). */
+            const char *abs_path = abs_dsn + (scheme[0] ? strlen(scheme) + 3 : 0);
+            if (dynamic_path_has_symlink(abs_path, strlen(fs_cfg->base_dir))) {
+                if (err) *err = "db.open: the file path runs through a symbolic "
+                                "link, or names something that is not a "
+                                "regular file";
                 return NULL;
             }
             open_dsn = abs_dsn;

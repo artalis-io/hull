@@ -1586,6 +1586,56 @@ UTEST(hl_cap_wasm, pooled_call_memory_grow_not_capped)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* Audit 29: pooling went by the heap_size asked for, never the memory the
+ * instance holds after the call, so a guest that grew its memory was pooled
+ * holding it. An instance that grew past its heap is destroyed instead; one
+ * that did not is pooled as before - on the copy path and on the zero-copy
+ * release alike. */
+UTEST(hl_cap_wasm, grown_instance_is_not_pooled)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts small = {0};
+    small.heap_size = 64 * 1024;
+    small.max_input = 256;
+    small.max_output = 64;
+    static const char ones[64] = {0};   /* grows 64 pages = 4 MB */
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+
+    /* No growth (0 input bytes): pooled. */
+    ASSERT_EQ(hl_cap_wasm_call(&cache, "grow", ones, 0, &out, &out_len,
+                               &small, NULL, NULL, &vfs, NULL, NULL, &err),
+              HL_WASM_OK);
+    free(out); out = NULL;
+    HlWasmModule *mod = hl_cap_wasm_module_lookup(&cache, "grow");
+    ASSERT_TRUE(mod != NULL);
+    ASSERT_TRUE(mod->probe_linear_bytes > 0);
+    ASSERT_EQ(mod->pool.count, 1);
+
+    /* That pooled instance grows 64 pages: destroyed, not pooled again. */
+    ASSERT_EQ(hl_cap_wasm_call(&cache, "grow", ones, sizeof ones, &out,
+                               &out_len, &small, NULL, NULL, &vfs, NULL, NULL,
+                               &err), HL_WASM_OK);
+    free(out); out = NULL;
+    ASSERT_EQ(out_len, (size_t)1);
+    ASSERT_EQ(mod->pool.count, 0);
+
+    /* The zero-copy release takes the same path. */
+    HlWasmBuffer *b = NULL;
+    ASSERT_EQ(hl_cap_wasm_call_buf(&cache, "grow", ones, sizeof ones, &b,
+                                   &small, NULL, NULL, &vfs, NULL, NULL, &err),
+              HL_WASM_OK);
+    ASSERT_TRUE(b != NULL);
+    hl_wasm_buffer_close(b);
+    ASSERT_EQ(mod->pool.count, 0);
+    hl_cap_wasm_destroy(&cache);
+}
+
 /* Audit 15 follow-up: a zero-copy buffer keeps a pooled instance checked out;
  * it reserves the linear memory the instance holds when it is checked out
  * (memory.grow during the call included), not just its heap + stack, and the

@@ -842,6 +842,42 @@ UTEST(hl_cap_crypto, ed25519_sign_verify)
     ASSERT_EQ(rc, 0);
 }
 
+/* Audit 29: S + L (the group order) is the same scalar mod L, and TweetNaCl
+ * alone accepts it - a second valid encoding of one signature. Refused. */
+UTEST(hl_cap_crypto, ed25519_verify_rejects_non_canonical_s)
+{
+    static const uint8_t L[32] = {
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+        0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    };
+    uint8_t pk[32], sk[64];
+    hl_cap_crypto_ed25519_keypair(pk, sk);
+    const char *msg = "malleable?";
+    uint8_t sig[64];
+    ASSERT_EQ(0, hl_cap_crypto_ed25519_sign((const uint8_t *)msg, strlen(msg),
+                                            sk, sig));
+    ASSERT_EQ(0, hl_cap_crypto_ed25519_verify((const uint8_t *)msg, strlen(msg),
+                                              sig, pk));
+    uint8_t mauled[64];
+    memcpy(mauled, sig, 64);
+    unsigned carry = 0;
+    for (int i = 0; i < 32; i++) {
+        unsigned v = (unsigned)mauled[32 + i] + L[i] + carry;
+        mauled[32 + i] = (uint8_t)v;
+        carry = v >> 8;
+    }
+    EXPECT_EQ(-1, hl_cap_crypto_ed25519_verify((const uint8_t *)msg, strlen(msg),
+                                               mauled, pk));
+    /* S = L exactly, and all-ones, are not canonical either. */
+    memcpy(mauled + 32, L, 32);
+    EXPECT_EQ(-1, hl_cap_crypto_ed25519_verify((const uint8_t *)msg, strlen(msg),
+                                               mauled, pk));
+    memset(mauled + 32, 0xff, 32);
+    EXPECT_EQ(-1, hl_cap_crypto_ed25519_verify((const uint8_t *)msg, strlen(msg),
+                                               mauled, pk));
+}
+
 UTEST(hl_cap_crypto, ed25519_verify_wrong_key)
 {
     uint8_t pk1[32], sk1[64];

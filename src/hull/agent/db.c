@@ -172,11 +172,15 @@ int hl_agent_prepare_readonly(sqlite3 *db, const char *sql, int len,
     *err = NULL;
     if (!db || !sql) { *err = "no SQL statement"; return -1; }
     sqlite3_stmt *stmt = NULL;
+    /* The strict authorizer stays on through step and finalize: SQLite
+     * re-prepares a statement whose schema changed inside sqlite3_step, and
+     * that re-prepare asks the authorizer again (audit 29).
+     * hl_agent_finalize_readonly removes it. */
     hl_cap_db_refuse_txn_control(db, 1);
     int rc = sqlite3_prepare_v2(db, sql, len, &stmt, NULL);
-    hl_cap_db_refuse_txn_control(db, 0);
     if (rc != SQLITE_OK) {
         sqlite3_finalize(stmt);
+        hl_cap_db_refuse_txn_control(db, 0);
         /* SQLITE_AUTH: the guard refused it (transaction control, ATTACH,
          * a memory pragma) - none of which a read-only query may run. */
         *err = rc == SQLITE_AUTH ? "only read-only statements are allowed"
@@ -188,10 +192,17 @@ int hl_agent_prepare_readonly(sqlite3 *db, const char *sql, int len,
         *err = stmt ? "only read-only statements are allowed"
                     : "no SQL statement";
         sqlite3_finalize(stmt);
+        hl_cap_db_refuse_txn_control(db, 0);
         return -1;
     }
     *out = stmt;
     return 0;
+}
+
+void hl_agent_finalize_readonly(sqlite3 *db, sqlite3_stmt *stmt)
+{
+    sqlite3_finalize(stmt);
+    hl_cap_db_refuse_txn_control(db, 0);
 }
 
 static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
@@ -259,7 +270,7 @@ static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
         sh_json_write_kv_string(&w, "error", sqlite3_errmsg(db));
 
     sh_json_write_object_end(&w);
-    sqlite3_finalize(stmt);
+    hl_agent_finalize_readonly(db, stmt);
     if (close_db) sqlite3_close(db);
     return 0;
 }

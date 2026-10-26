@@ -175,6 +175,16 @@ HlTlsClient *hl_tls_client_handshake_stop(int fd, const char *host,
 {
     KlAllocator *alloc = default_alloc();   /* persistent; outlives the KlTls/ctx */
 
+    /* Verifying with no server name to check is refused outright rather than
+     * left to skip set_hostname: mbedTLS then checks the chain only, and any
+     * certificate the anchor signed passes (CVE-2025-27809; audit 29 - every
+     * caller passes a host today, this keeps it so). */
+    if (verify && (!host || !host[0])) {
+        log_error("[hull:tls] a verified connection needs a server name; "
+                  "connection refused");
+        return NULL;
+    }
+
     /* verify: trust anchor = the one this invocation resolved (--ca-bundle,
      * the system store, or the embedded bundle; see hl_ca_bundle_active),
      * cert chain + hostname checked. Otherwise: no CA, server certificate
@@ -212,6 +222,13 @@ HlTlsClient *hl_tls_client_handshake_stop(int fd, const char *host,
     /* A hostname that did not take leaves the handshake checking the chain
      * but not the name - any certificate the anchor signed would do. Failed
      * closed when verifying, as Keel's own HTTP client does (audit 9). */
+    if (verify && !tls->set_hostname) {
+        log_error("[hull:tls] the TLS backend cannot check a server name; "
+                  "verified connection refused");
+        tls->destroy(tls);
+        kl_tls_mbedtls_ctx_destroy(ctx);
+        return NULL;
+    }
     if (host && host[0] && tls->set_hostname &&
         tls->set_hostname(tls, host) != 0 && verify) {
         log_error("[hull:tls] could not set the server name '%s' for "

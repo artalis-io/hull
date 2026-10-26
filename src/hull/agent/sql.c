@@ -213,7 +213,7 @@ static int sql_named_ctx(HlAppContext *ctx, const char *query_name,
         sh_json_write_kv_string(&w, "error", sqlite3_errmsg(db));
 
     sh_json_write_object_end(&w);
-    sqlite3_finalize(stmt);
+    hl_agent_finalize_readonly(db, stmt);
     sh_arena_free(arena);
     free(qf);
     return 0;

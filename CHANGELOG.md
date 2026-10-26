@@ -122,6 +122,51 @@ kept the rest. Check the list below before upgrading.
   cell changed, so a `tickMs: 0` redraw loop flooded the terminal and, on one that read slowly,
   sat blocked in `write` where neither the run deadline nor the budget could stop it.
 
+**Runtime - audit 29 fixes (caps / DB)**
+- **App SQL cannot write SQLite's bookkeeping tables.** `UPDATE sqlite_sequence SET seq =
+  9223372036854775807` (or an INSERT naming `_hull_jobs`) made every later AUTOINCREMENT insert
+  into a `_hull_*` table fail `SQLITE_FULL` without the SQL naming one. INSERT / UPDATE of
+  `sqlite_sequence` and `sqlite_stat*` in `main` / `temp` is refused; DELETE stays legal (DROP
+  TABLE and ANALYZE run one themselves), as does the rename of a sequence row an `ALTER TABLE ...
+  RENAME` makes, and VACUUM's copy.
+- **The agent's read-only SQL gate checks every pragma, ATTACH, DETACH and ANALYZE.** An
+  argument-less `PRAGMA optimize` (which runs ANALYZE and writes) passed; so did `ATTACH ':memory:'`
+  and DETACH. Bare pragmas pass only when they report a value (`user_version`, `page_count`, ...)
+  or describe a table; the strict authorizer now stays installed through step and finalize, where
+  SQLite re-prepares a statement whose schema changed.
+- **MySQL implicit-commit classifier:** MariaDB's `ANALYZE SELECT / UPDATE / DELETE` (an EXPLAIN
+  that runs the statement) commits nothing and is no longer resumed as DDL; only `ANALYZE
+  [NO_WRITE_TO_BINLOG | LOCAL] TABLE` commits. `CREATE OR REPLACE TEMPORARY TABLE` is temporary.
+- **Postgres: a trip on any frame of a lone COMMIT's reply reports the commit.** The audit-18
+  exemption covered only a trip on CommandComplete; a trip on ParseComplete / BindComplete /
+  NoData, or during the wait for the reply, dropped the connection with the transaction still
+  open although the server committed. Once a COMMIT is sent whole, a stop finishes the reply in
+  the bounded (2 s) finishing mode instead.
+- **Postgres SCRAM:** the server nonce must extend the client's (an equal one was taken), and an
+  iteration count below 4096 is refused unless the certificate was verified or
+  `sslmode=disable` - over `prefer` / `require` a MITM could ask for `i=1` and brute-force the
+  password from the proof. The PBKDF2 state and the derived keys are scrubbed on every path.
+- **Postgres read buffer shrinks back** to 8 KiB after a frame over 1 MiB is consumed; a pooled
+  connection that once read a big row kept up to ~1 GiB until it closed.
+- **A `worker.dispatch` job's end-of-job ROLLBACK can be stopped.** It ran unbound, and an
+  unbound charge never stops, so a Postgres / MySQL server silent under `read_timeout=0` pinned
+  the pool thread and the SIGTERM join. It now runs under a cleanup budget that stops after 2 s or
+  when the pool shuts down; a stopped rollback drops the connection.
+- **`db.open` of a file DSN refuses a path through a symbolic link** - a directory component, the
+  database file, or its `-wal` / `-shm` / `-journal` sidecar. Containment and the fs.write match
+  were checked on the path, then SQLite opened it following links: a planted
+  `data/x.db -> ../private/ref.db` opened a file fs.write would have refused.
+- **Ed25519 verification refuses a non-canonical `S`.** TweetNaCl alone accepted `R || (S + L)`,
+  a second valid encoding of one signature (malleability for anything keyed on signature bytes).
+- **Valkey: `sslmode=require` with a password is refused** (use `verify-full`): require verifies
+  no certificate, and the handshake sends `HELLO 3 AUTH <user> <password>` over it.
+- **The TLS client refuses a verified handshake with no server name**, rather than skipping
+  `set_hostname` and checking the chain only (defence in depth for CVE-2025-27809).
+- **A WASM instance that grew its memory is not pooled.** Pooling went by the `heap_size` asked
+  for, so a guest that grew to ~4 GiB was kept holding it (8 per module, outside the live-instance
+  bounds); past its initial memory plus its heap it is now destroyed, on the zero-copy release
+  too.
+
 **Runtime - audit 28 fuzzing fixes** (five new libFuzzer harnesses: `fuzz_log_escape`,
 `fuzz_http_guard`, `fuzz_sql_kw`, `fuzz_dsn_redact`, `fuzz_mysql_stmt`)
 - A SQL `--` comment ends at a carriage return as well as a newline, as SQLite, Postgres and

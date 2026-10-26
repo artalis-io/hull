@@ -199,4 +199,14 @@ UTEST(tls_handshake, set_hostname_failure_fails_closed)
     close(sv[0]); close(sv[1]);
 }
 
+/* Audit 29: verifying with no server name is refused before any session is
+ * made - a skipped set_hostname checks the chain but not the name. */
+UTEST(tls_handshake, verify_without_a_host_is_refused)
+{
+    int sv[2]; ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    ASSERT_TRUE(hl_tls_client_handshake(sv[0], NULL, 1, 100) == NULL);
+    ASSERT_TRUE(hl_tls_client_handshake(sv[0], "", 1, 100) == NULL);
+    close(sv[0]); close(sv[1]);
+}
+
 UTEST_MAIN()

@@ -1727,6 +1727,8 @@ UTEST(mysql_backend, implicit_commit_classifier)
         "CHANGE MASTER TO MASTER_HOST = 'h'",
         "CHANGE REPLICATION SOURCE TO SOURCE_HOST = 'h'",
         "/* c */ create table t (id int)",
+        "ANALYZE TABLES t", "analyze no_write_to_binlog table t",
+        "ANALYZE LOCAL TABLE t", "CREATE OR REPLACE TABLE t (id INT)",
     };
     static const char *const no_commit[] = {
         "CREATE TEMPORARY TABLE snap SELECT * FROM accounts",
@@ -1738,6 +1740,11 @@ UTEST(mysql_backend, implicit_commit_classifier)
         "SET autocommit = 0", "PURGE BINARY LOGS TO 'x'", "CHECKSUM TABLE t",
         "INSTALL COMPONENT 'file://c'", "LOCK INSTANCE FOR BACKUP",
         "UPDATE a SET x = 1", "INSERT INTO t VALUES (1)", "SELECT 1", "", NULL,
+        /* audit 29: MariaDB ANALYZE <stmt>, CREATE OR REPLACE TEMPORARY */
+        "ANALYZE SELECT * FROM t", "analyze update t set x = 1",
+        "ANALYZE DELETE FROM t", "ANALYZE FORMAT=JSON SELECT 1", "ANALYZE",
+        "CREATE OR REPLACE TEMPORARY TABLE snap SELECT * FROM a",
+        "create or /* c */ replace temporary table t (id int)",
     };
     for (size_t i = 0; i < sizeof commits / sizeof commits[0]; i++)
         EXPECT_EQ_MSG(1, my_sql_commits_implicitly(commits[i]), commits[i]);
