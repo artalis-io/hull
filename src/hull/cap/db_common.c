@@ -51,12 +51,19 @@ void hl_db_budget_unbind(const void *ud)
     }
 }
 
+static atomic_int g_op_shutdown;
+
 int hl_db_budget_charge(int64_t units)
 {
-    return tl_budget_fn ? tl_budget_fn(tl_budget_ud, units) : 0;
+    if (!tl_budget_fn) return 0;
+    int stop = tl_budget_fn(tl_budget_ud, units);
+    /* The pool is being freed: a worker.dispatch job's SQL charges its VM's
+     * budget, not an HlDbOpBudget, and a wait charges no units - so a
+     * pg_sleep in a dispatch held the join until the job's deadline, for
+     * ever with --max-run-ms 0 (audit 28). Any bound run's SQL stops (the
+     * binding was still asked, so an HlDbOpBudget records its reason). */
+    return stop || atomic_load_explicit(&g_op_shutdown, memory_order_acquire);
 }
-
-static atomic_int g_op_shutdown;
 
 void hl_db_op_shutdown(int on)
 {

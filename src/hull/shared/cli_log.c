@@ -12,6 +12,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 
 static int g_installed  = 0;
@@ -134,4 +135,34 @@ void hl_cli_log_init(int verbose)
     log_set_quiet(true);       /* silence log.c's built-in file:line stderr */
     log_set_level(LOG_TRACE);
     log_add_callback(cli_log_callback, stderr, LOG_TRACE);
+}
+
+/* The plain per-record line (serve.c's server log, and the app.main runner):
+ * time, level, message - every message CR / LF escaped (audit 27/28). */
+static void line_callback(log_Event *ev)
+{
+    char ts[16];
+    ts[strftime(ts, sizeof(ts), "%H:%M:%S", ev->time)] = '\0';
+
+    char raw[1024], msg[1024];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+    vsnprintf(raw, sizeof(raw), ev->fmt, ev->ap);
+#pragma GCC diagnostic pop
+    hl_log_escape_line(raw, msg, sizeof msg);
+
+#ifdef DEBUG
+    fprintf((FILE *)ev->udata, "%s %-5s %s:%d: %s\n",
+            ts, log_level_string(ev->level), ev->file, ev->line, msg);
+#else
+    fprintf((FILE *)ev->udata, "%s %-5s %s\n",
+            ts, log_level_string(ev->level), msg);
+#endif
+}
+
+void hl_log_install_line_callback(int level)
+{
+    log_set_level(level);
+    log_set_quiet(true);   /* log.c's own stderr callback prints raw text */
+    log_add_callback(line_callback, stderr, level);
 }

@@ -250,4 +250,27 @@ UTEST(cli_log, a_record_with_a_newline_is_one_line)
     remove(path);
 }
 
+/* Audit 28: the app.main runner (serve_cli.c) left log.c's default callback,
+ * which prints the message raw. It now installs the same escaped line as
+ * serve.c. Last in the file: log.c cannot unregister a callback. */
+UTEST(cli_log, line_callback_escapes_and_omits_file_line)
+{
+    FILE *saved = NULL;
+    char path[512];
+    capture_path(path, sizeof(path), "line");
+    capture_begin(&saved, path);
+    hl_log_install_line_callback(LOG_TRACE);
+    log_log(LOG_ERROR, "src/hull/runtime/lua/async.c", 9,
+            "task error: x\n12:00:00 ERROR [hull:sandbox] forged");
+    capture_end(path);
+    (void)saved;
+    ASSERT_TRUE(strstr(captured,
+        "ERROR task error: x\\n12:00:00 ERROR [hull:sandbox] forged\n") != NULL);
+    ASSERT_TRUE(strstr(captured, "\n12:00:00 ERROR [hull:sandbox]") == NULL);
+#ifndef DEBUG
+    ASSERT_TRUE(strstr(captured, "async.c:9") == NULL);
+#endif
+    remove(path);
+}
+
 UTEST_MAIN()

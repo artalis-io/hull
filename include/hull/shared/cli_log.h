@@ -124,4 +124,11 @@ int hl_cli_log_is_native_source(const char *file);
  * escaped holds no CR / LF, so nothing is escaped twice. */
 void hl_log_escape_line(const char *in, char *out, size_t outsz);
 
+/* Route log.c through the plain escaped line ("HH:MM:SS LEVEL message", plus
+ * file:line under DEBUG) at @p level, replacing log.c's own stderr callback,
+ * which prints app text raw. serve.c installs it for the server, serve_cli.c
+ * for the app.main runner (audit 28: a built CLI app logged with log.c's
+ * default callback, so an uncaught error's newline forged a record). */
+void hl_log_install_line_callback(int level);
+
 #endif /* HL_SHARED_CLI_LOG_H */

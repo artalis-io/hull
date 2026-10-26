@@ -902,6 +902,14 @@ int hl_sandbox_std_tty(int fd)
     return (fd >= 0 && fd <= 2) ? g_std_tty[fd] : -1;
 }
 
+/* Set once a pledge is in force (phase 1 succeeded on a pledge host). */
+static int g_pledged = 0;
+
+int hl_sandbox_pledged(void)
+{
+    return g_pledged;
+}
+
 int hl_sandbox_apply_pledge(void)
 {
     /* Probe the controlling terminal before ANY sandbox is installed. glibc
@@ -966,6 +974,7 @@ int hl_sandbox_apply_pledge(void)
         log_error("[sandbox] phase 1 pledge failed");
         return -1;
     }
+    g_pledged = 1;
 
     log_info("[sandbox] phase 1 pledge applied (exec/proc/fork blocked)");
     return 0;

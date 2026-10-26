@@ -573,6 +573,34 @@ UTEST(hl_cap_db, op_budget_stops_on_deadline_cancel_and_shutdown)
     EXPECT_EQ(HL_DB_OP_STOP_UNITS, e.reason);
 }
 
+/* Audit 28: a worker.dispatch job's SQL is charged to its VM's budget, not
+ * an HlDbOpBudget, so the pool-shutdown stop missed it. Any bound charge
+ * interrupts while the pool is freed; the binding is still asked. */
+static int g_bound_calls;
+static int bound_never_trips(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    g_bound_calls++;
+    return 0;
+}
+
+UTEST(hl_cap_db, pool_shutdown_stops_every_bound_charge)
+{
+    HlDbBudgetBinding prev = hl_db_budget_swap(bound_never_trips, &g_bound_calls);
+    g_bound_calls = 0;
+    EXPECT_EQ(0, hl_db_budget_charge(0));
+    hl_db_op_shutdown(1);
+    EXPECT_EQ(1, hl_db_budget_charge(0));
+    EXPECT_EQ(2, g_bound_calls);
+    hl_db_op_shutdown(0);
+    EXPECT_EQ(0, hl_db_budget_charge(5));
+    (void)hl_db_budget_swap(NULL, NULL);
+    hl_db_op_shutdown(1);
+    EXPECT_EQ(0, hl_db_budget_charge(0));   /* unbound: never an interrupt */
+    hl_db_op_shutdown(0);
+    hl_db_budget_restore(prev);
+}
+
 /* The pragmas that set how much memory or how many threads SQLite uses are
  * refused to SQL; reading them is not. */
 UTEST(hl_cap_db, memory_pragmas_cannot_be_set)
