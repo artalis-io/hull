@@ -122,6 +122,20 @@ kept the rest. Check the list below before upgrading.
   cell changed, so a `tickMs: 0` redraw loop flooded the terminal and, on one that read slowly,
   sat blocked in `write` where neither the run deadline nor the budget could stop it.
 
+**Runtime - audit 28 fuzzing fixes** (five new libFuzzer harnesses: `fuzz_log_escape`,
+`fuzz_http_guard`, `fuzz_sql_kw`, `fuzz_dsn_redact`, `fuzz_mysql_stmt`)
+- A SQL `--` comment ends at a carriage return as well as a newline, as SQLite, Postgres and
+  MySQL end it. The shared transaction-keyword reader ran it to the next `\n`, so
+  `-- x\rCOMMIT` read as a comment where the server ran a COMMIT.
+- DuckDB's dynamic-SQL refusal (`query(...)`, `query_table(...)`, `json_execute_serialized_sql`)
+  reads past a quoted identifier one byte at a time: a quote inside a string or comment made it
+  skip the call that followed.
+- Audit-log URL redaction finds the userinfo `@` only inside the authority (before the first
+  `/`, `?` or `#`): a password holding `?` or `#` was printed. A URL with an `@` past the
+  authority is logged as `scheme://[redacted]`.
+- Log escaping writes every control byte but tab (and DEL) as `\xNN`, not only CR / LF: an
+  ESC sequence in app text rewrote what a terminal showed.
+
 ## [0.17.1] - 2026-10-18
 
 Full PR list:
