@@ -8,7 +8,7 @@ release-artifact layout).
 
 ## [Unreleased]
 
-### Behaviour changes (security audits 24-27)
+### Behaviour changes (security audits 24-28)
 
 Audits 24-26 tightened stdlib inputs; some apps will see different output or a new error.
 Audit 27 walked back the changes that broke ordinary calls (CSV column order, search paging) and
@@ -38,6 +38,22 @@ kept the rest. Check the list below before upgrading.
 - `jobs.cleanup`: `before` that is not a finite unix timestamp; `older_than` (`olderThan`) that is
   not a finite number of seconds >= 0. `older_than = 0` deletes every terminal job in both
   runtimes (JS took 0 as unset and kept seven days until audit 27).
+- `jobs.enqueue` / `jobs.cron`: `priority` that is not an integer in the INTEGER range (Lua
+  `priority = false` used to mean 0; a JS string went into the column as text); `concurrency`
+  that is not a whole number >= 0. `nil` / `null` still mean 0 / no cap.
+- `inbox` and `idempotency` `ttl`: must be a whole number of seconds in 1..31622400 (366 days),
+  so the expiry fits a 32-bit INTEGER column. Checked at `init` and on every call that takes one
+  (`inbox.mark_processed`, `inbox.check_and_mark`, `idempotency.middleware`); a fraction or a
+  longer ttl used to be accepted.
+- `audit-log` `retain_days` (`retainDays`): must be a finite number in (0, 36500]. A non-number
+  disabled pruning, and JS `null` / `false` computed a cutoff of "now" and deleted every row.
+  Omit it (Lua `nil`, JS `undefined`) for the default 365.
+- `attachment.init` `max_size` (`maxSize`): must be a finite number > 0, or `false` (JS also
+  `null`) for unlimited. A non-number raised mid-upload, and a NaN disabled the cap.
+- `totp.init`: `max_lockout_duration` (`maxLockoutDuration`) must be a finite number >= 0 (a
+  string one disabled the lockout in JS and raised at the first failure in Lua), and
+  `pending_ttl` (`pendingTtl`) a finite number or `false` (a string or NaN never expired a
+  pending enrolment).
 
 **Stdlib - clamped, not refused**
 - **`search.query` paging clamps.** `limit` / `offset` accept a number or a numeric string
@@ -60,6 +76,23 @@ kept the rest. Check the list below before upgrading.
   record that changed during the network wait.
 - Lua `auth-flows` and `email` refuse an address that is not valid UTF-8, as the JS twins
   (whose strings cannot hold invalid bytes) effectively do.
+
+**Stdlib - audit 28 fixes**
+- **TOTP per-IP lockout counts each account's failures.** Audit 26 stopped a successful verify
+  from clearing the IP's failure count (one IP could spread wrong codes over many accounts and
+  reset its count with its own), so behind a proxy or NAT ordinary typos from every user added up
+  to `max_failed_attempts_per_ip` and locked 2FA for everyone there. A success now takes back only
+  that user's own failures from the IP's count; other accounts' failures still count toward the
+  lockout. The per-account shares live in a new `_hull_totp_attempts_by_ip_user` table, created by
+  `totp.init` like the others (nothing to migrate).
+- JS `auth-flows` and `email` refuse an address with an unpaired UTF-16 surrogate: it has no
+  UTF-8 form (QuickJS writes it as invalid bytes, which the Lua twins already refuse).
+- `safe_url` percent-encodes a backslash (`%5C`): browsers read it as `/` in an http(s) URL, so a
+  relative `/\evil.test` was the protocol-relative `//evil.test`.
+- JS `jobs` duration options (`visibilityTimeout`, `reapInterval`, `throttle`, `olderThan`) read a
+  string the way Lua's `tonumber` does: `"0b11"`, `"0o7"` and `"Infinity"` now throw, as in Lua.
+- `hull dev --agent`'s discovery publish refuses a `.hull` it cannot inspect, as every other
+  symlink check does.
 
 **Runtime - audit 28 fixes**
 - A built app without HTTP (the `app.main` runner) logs one escaped line per record, as the

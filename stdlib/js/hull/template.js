@@ -140,10 +140,11 @@ const filters = {
     // control characters percent-encoded: returned verbatim, raw output
     // ({{{ u | safe_url }}}) emitted `https://a"><script>x</script>` as markup
     // (audit 26). Encoded, the URL means the same and is inert in either
-    // context.
+    // context. A backslash too (audit 28): browsers read it as "/" in an
+    // http(s) URL, so a relative "/\evil.test" was "//evil.test".
     safe_url(val) {
         const s = String(val ?? "");
-        const enc = () => s.replace(/[\u0000-\u0020\u007f"'<>`]/g, (c) =>
+        const enc = () => s.replace(/[\u0000-\u0020\u007f"'<>`\\]/g, (c) =>
             "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
         const probe = decodeRefs(s).replace(/[\u0000-\u0020\u007f]/g, "").toLowerCase();
         const m = /^([a-z][a-z0-9+.-]*):/.exec(probe);
