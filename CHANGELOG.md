@@ -94,6 +94,30 @@ kept the rest. Check the list below before upgrading.
 - `hull dev --agent`'s discovery publish refuses a `.hull` it cannot inspect, as every other
   symlink check does.
 
+**Stdlib - audit 29 fixes**
+- **`auth-flows` login lockout locks at the threshold on MySQL.** The failed-login UPDATE
+  incremented `failed_count` and then compared `failed_count + 1` with the limit; MySQL evaluates a
+  single-table `SET` left to right, so it saw the new count and locked one attempt early (after
+  `max_failed_logins - 1`, both the per-(account, IP) and the account-wide row). The new count and
+  lock are now computed in the stdlib and written under `db.batch`, the same on every backend.
+  "Not locked" is now stored as `0` rather than `NULL` (read the same way).
+- **`jobs` keys are stored as strings and fit their column.** `dedup_key` / `concurrency_key`
+  (`dedupKey` / `concurrencyKey`) were bound as given: on MySQL an integer key compared numerically
+  with the `VARCHAR` column, so the dedup read-back could return another job's id. An integer is
+  now its decimal string, any other non-string raises, and a key over 255 bytes raises instead of
+  being truncated or failing in the backend. `ctx.step` names are held to 255 bytes and signal
+  names (`ctx.wait_signal` / `waitSignal`, `jobs.signal`) to 200, which leaves room for the wait's
+  memo prefix. JS counts UTF-8 bytes, as Lua does.
+- Lua `csrf` answers 413 for a body with more than 256 form pairs (counted on every `&`, as JS
+  splits), as JS and the documentation do; it stopped scanning quietly, reporting a later `_csrf`
+  field as missing. An empty token header is no token, so the body field is read, as in JS.
+- `auth.jwt_middleware` / `jwtMiddleware` read `Authorization` by one rule: the `Bearer` scheme in
+  any case (RFC 7235), spaces / tabs around the token dropped, an empty token a 401. Lua took only
+  `Bearer` / `bearer` and any whitespace, JS only `Bearer ` with one space.
+- JS `totp` guards the whole lazy re-key after a successful verify, as Lua's `pcall` does: a throw
+  from re-encrypting the secret turned a success whose code (or recovery code) was already spent
+  into a 500.
+
 **Runtime - audit 28 fixes**
 - A built app without HTTP (the `app.main` runner) logs one escaped line per record, as the
   server does: it used log.c's default output, which printed a message's newline raw, and its

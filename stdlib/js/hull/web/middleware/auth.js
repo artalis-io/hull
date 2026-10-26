@@ -154,16 +154,32 @@ function jwtMiddleware(opts) {
             }
         }
 
-        // Extract token from Authorization header
+        // Extract token from Authorization header. One rule in both runtimes
+        // (audit 29): the scheme is case-insensitive (RFC 7235), spaces / tabs
+        // separate it from the token and are dropped around it, and an empty
+        // token is no token. JS took only "Bearer ", Lua "[Bb]earer" and any
+        // whitespace.
         const authHeader = req.header("Authorization");
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        // Scanned by hand, not by a regexp with a lazy capture that
+        // backtracks over a long run of spaces.
+        let token = null;
+        if (typeof authHeader === "string" && authHeader.length > 7 &&
+            authHeader.substring(0, 6).toLowerCase() === "bearer") {
+            const sp = (c) => c === 32 || c === 9;
+            let i = 6, j = authHeader.length - 1;
+            if (sp(authHeader.charCodeAt(i))) {
+                while (i <= j && sp(authHeader.charCodeAt(i))) i++;
+                while (j >= i && sp(authHeader.charCodeAt(j))) j--;
+                if (i <= j) token = authHeader.substring(i, j + 1);
+            }
+        }
+        if (!token) {
             if (optional) return 0;
             res.status(401);
             res.json({ error: "missing bearer token" });
             return 1;
         }
 
-        const token = authHeader.substring(7);
         const result = jwt.verify(token, secret, verifyOpts);
 
         // jwt.verify returns [payload, null] on success, [null, "reason"] on failure

@@ -211,8 +211,11 @@ function csrf.middleware(opts)
             return 0
         end
 
-        -- Look for token in header first, then body field
+        -- Look for token in header first, then body field. An empty header
+        -- is no token (audit 29): it skipped the _csrf body field, where the
+        -- JS twin reads the body.
         local token = req.headers[header_name]
+        if token == "" then token = nil end
         if not token and req.body then
             -- M-5: cap body size + max pairs to prevent DoS via a giant
             -- form body. 1 MiB / 256 pairs is generous for any real form.
@@ -221,15 +224,27 @@ function csrf.middleware(opts)
                 res:status(413):json({ error = "csrf: body too large" })
                 return 1
             end
-            local pair_count = 0
+            -- At most 256 pairs, counted as the JS twin splits the body (on
+            -- every "&", empty pieces included) and answered 413 like the
+            -- body cap (audit 29): past 256 the scan used to stop quietly,
+            -- reporting a later _csrf field as missing.
+            local pieces, at = 1, 1
+            while true do
+                local amp = body:find("&", at, true)
+                if not amp then break end
+                pieces = pieces + 1
+                if pieces > 256 then
+                    res:status(413):json({ error = "csrf: too many form fields" })
+                    return 1
+                end
+                at = amp + 1
+            end
             -- Phase 6 audit M-4: per-pair-byte cap. Without this, a body
             -- with a single 1 MiB pair (under the 1 MiB total cap above)
             -- would force a 1 MiB url_decode on every unsafe-method
             -- request. 4 KiB is generous for any sane form field.
             local MAX_PAIR_BYTES = 4096
             for pair in body:gmatch("[^&]+") do
-                pair_count = pair_count + 1
-                if pair_count > 256 then break end
                 if #pair > MAX_PAIR_BYTES then
                     -- Skip oversized pairs entirely; the _csrf field
                     -- itself is short by spec, so a real CSRF token
@@ -249,7 +264,7 @@ function csrf.middleware(opts)
             end
         end
 
-        if not token then
+        if not token or token == "" then
             res:status(403):json({ error = "csrf: token missing" })
             return 1
         end

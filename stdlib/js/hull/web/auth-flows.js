@@ -531,50 +531,38 @@ function lockoutRemaining(userIdStr) {
 function bumpFailedLogin(userIdStr, max) {
     userIdStr = uidKey(userIdStr);
     const now = time.now();
-    // Portable conditional upsert. The original used INSERT ... ON CONFLICT
-    // DO UPDATE, which MySQL spells differently (ON DUPLICATE KEY UPDATE), so
-    // do it in two portable steps that hold on every backend: an atomic
-    // CASE-based UPDATE (standard SQL), then an INSERT only when no row matched
-    // (first failure). No explicit transaction, so it composes safely even if
-    // the login handler already runs inside one.
+    // Read-modify-write under db.batch (as totp's bumpFailedAttempt): the new
+    // count and lock are computed here and bound, so no backend's SET
+    // evaluation order matters. A single UPDATE whose locked_until CASE read
+    // failed_count + 1 locked one attempt early on MySQL, which evaluates a
+    // single-table SET left to right (audit 29). db.batch nests as a
+    // savepoint inside an app transaction; db.upsert writes each backend's
+    // own dialect.
     //
-    // The CASE mirrors the original (Round-9 HIGH-2): reset failed_count to 1
-    // when a prior lockout window has expired but gc_expired hasn't pruned the
-    // row yet, so a stale count doesn't trip a fresh lockout on the next bad
-    // attempt (pre-fix the user got 1 attempt per 15min for the next 24h, not
-    // 5); else increment and lock at the threshold.
-    const updateSql =
-        "UPDATE _hull_auth_login_attempts SET "
-        + "  failed_count = CASE "
-        + "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN 1 "
-        + "    ELSE failed_count + 1 "
-        + "  END, "
-        + "  last_failed_at = ?, "
-        + "  locked_until = CASE "
-        + "    WHEN locked_until IS NOT NULL AND locked_until < ? THEN NULL "
-        + "    WHEN failed_count + 1 >= ? THEN ? + ? "
-        + "    ELSE NULL "
-        + "  END "
-        + "WHERE user_id = ?";
-    const updateArgs = [
-        now,                // failed_count CASE: window-expired check
-        now,                // last_failed_at
-        now,                // locked_until CASE: window-expired check
-        max, now, _state.lockoutDuration,
-        userIdStr];
-    if (db.exec(updateSql, updateArgs) > 0) return;
-    // No existing row: first failure for this user. INSERT; if a concurrent
-    // request won the insert race (duplicate PK), fall back to the atomic
-    // UPDATE so the increment still lands.
-    try {
-        db.exec(
-            "INSERT INTO _hull_auth_login_attempts "
-            + "(user_id, failed_count, last_failed_at, locked_until) "
-            + "VALUES (?, 1, ?, NULL)",
-            [userIdStr, now]);
-    } catch (e) {
-        db.exec(updateSql, updateArgs);
-    }
+    // Round-9 HIGH-2: the count starts again at 1 once a prior lockout window
+    // has expired (gc_expired may not have pruned the row yet), so a stale
+    // count does not trip a fresh lockout on the next bad attempt; else it
+    // increments and locks at the threshold. 0 is stored for "not locked",
+    // as the Lua side does.
+    db.batch(() => {
+        const r = db.query(
+            "SELECT failed_count, locked_until FROM _hull_auth_login_attempts "
+            + "WHERE user_id = ?", [userIdStr]);
+        const row = r && r[0];
+        const fc = (row && Number(row.failed_count)) || 0;
+        const lu = (row && Number(row.locked_until)) || 0;
+        let newFc;
+        let newLu = 0;
+        if (lu !== 0 && lu < now) {
+            newFc = 1;
+        } else {
+            newFc = fc + 1;
+            if (newFc >= max) newLu = now + _state.lockoutDuration;
+        }
+        db.upsert("_hull_auth_login_attempts", ["user_id"],
+            ["user_id", "failed_count", "last_failed_at", "locked_until"],
+            [userIdStr, newFc, now, newLu]);
+    });
 }
 
 function clearFailedLogins(userIdStr) {

@@ -1030,7 +1030,10 @@ function verifyWithKind(userId, code, req) {
                 // stored under an older version.
                 if (_state.currentKeyVersion != null
                     && (row.version !== _state.currentKeyVersion || row.unbound)) {
-                    rekeyRow(userId, row.secret);
+                    // Whole call guarded, as the Lua sibling's pcall: the
+                    // code is already spent, so a throw from encryptSecret
+                    // must not turn this success into a 500 (audit 29).
+                    try { rekeyRow(userId, row.secret); } catch (_e) { /* best-effort */ }
                 }
                 return [true, "totp"];
             }
@@ -1058,7 +1061,8 @@ function verifyWithKind(userId, code, req) {
             // Same lazy rekey on the recovery-code path.
             if (_state.currentKeyVersion != null
                 && (row.version !== _state.currentKeyVersion || row.unbound)) {
-                rekeyRow(userId, row.secret);
+                // Guarded as above: the recovery code is already consumed.
+                try { rekeyRow(userId, row.secret); } catch (_e) { /* best-effort */ }
             }
             return [true, "recovery"];
         }

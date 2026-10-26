@@ -2878,7 +2878,13 @@ UTEST(lua_stdlib, totp_brute_force_lockout)
      * After max_failed_attempts consecutive wrong codes the user is
      * locked for lockout_duration seconds; verify returns false
      * silently during the window. Successful TOTP verify clears the
-     * counter. Apps that want UX can read totp.lockout_remaining. */
+     * counter. Apps that want UX can read totp.lockout_remaining.
+     *
+     * The wrong codes are chosen to differ from the real code at every
+     * step from step - 5 to step + 6 (the window is 3, plus drift): fixed
+     * 000000 / 000001 / 000002 matched a real code at an eligible step
+     * about once in 16000 runs (audit 29). The lockout bound allows a
+     * second of clock movement either way. */
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
@@ -2887,28 +2893,39 @@ UTEST(lua_stdlib, totp_brute_force_lockout)
          * walk all stored recovery codes with PBKDF2 (10×~1s under
          * MSan). Drop them; the lockout path doesn't care. */
         "  totp.init({ max_failed_attempts = 3, lockout_duration = 60, "
-        "               window = 10, recovery_codes = 0 }) "
+        "               window = 3, recovery_codes = 0 }) "
         "  local r = totp.enroll('u1') "
         "  local secret = __test_hooks('hull.web.middleware.totp').base32_decode(r.secret_base32) "
         "  local step = __test_hooks('hull.web.middleware.totp').current_step() "
+        "  local at = __test_hooks('hull.web.middleware.totp').totp_at_step "
+        "  local function wrong(seed) "
+        "    for c = seed, 999999 do "
+        "      local code, hit = string.format('%06d', c), false "
+        "      for s = step - 5, step + 6 do "
+        "        if at(secret, s, 6) == code then hit = true break end "
+        "      end "
+        "      if not hit then return code end "
+        "    end "
+        "  end "
+        "  local w0, w1, w2 = wrong(0), wrong(100), wrong(200) "
         "  if not totp.confirm('u1', __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step, 6)) "
         "    then return 0 end "
-        "  if totp.verify('u1', '000000') then return 0 end "
-        "  if totp.verify('u1', '000001') then return 0 end "
+        "  if totp.verify('u1', w0) then return 0 end "
+        "  if totp.verify('u1', w1) then return 0 end "
         "  if totp.lockout_remaining('u1') ~= 0 then return 0 end "
-        "  if totp.verify('u1', '000002') then return 0 end "
+        "  if totp.verify('u1', w2) then return 0 end "
         "  local remain = totp.lockout_remaining('u1') "
-        "  if remain <= 0 or remain > 60 then return 0 end "
+        "  if remain < 1 or remain > 61 then return 0 end "
         "  local good = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step + 2, 6) "
         "  if totp.verify('u1', good) then return 0 end "
         "  __test_hooks('hull.web.middleware.totp').clear_failed_attempts('u1') "
         "  if totp.lockout_remaining('u1') ~= 0 then return 0 end "
-        "  if totp.verify('u1', '000000') then return 0 end "
-        "  if totp.verify('u1', '000001') then return 0 end "
+        "  if totp.verify('u1', w0) then return 0 end "
+        "  if totp.verify('u1', w1) then return 0 end "
         "  local good2 = __test_hooks('hull.web.middleware.totp').totp_at_step(secret, step + 3, 6) "
         "  if not totp.verify('u1', good2) then return 0 end "
-        "  if totp.verify('u1', '000000') then return 0 end "
-        "  if totp.verify('u1', '000001') then return 0 end "
+        "  if totp.verify('u1', w0) then return 0 end "
+        "  if totp.verify('u1', w1) then return 0 end "
         "  if totp.lockout_remaining('u1') ~= 0 then return 0 end "
         "  return 1 "
         "end)()");
@@ -5180,6 +5197,21 @@ UTEST(lua_stdlib, stdlib_audit28_suite)
 
     long long pass = 0, fail = -1;
     int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit28.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
+
+/* Stdlib regressions from audit 29: jobs keys stored as strings and capped
+ * at the column, csrf 413 / empty header, one Bearer rule. */
+UTEST(lua_stdlib, stdlib_audit29_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit29.lua", &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
     EXPECT_GT(pass, 0LL);
