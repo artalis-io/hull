@@ -1307,6 +1307,19 @@ fuzz/fuzz_js_source: fuzz/fuzz_js_source.c $(SRCDIR)/hull/frontend/js_session.c 
 
 # Stage the FULL repo .js/.mjs/.cjs corpus (deterministic, path-mangled names) + the small
 # checked-in adversarial seed into a temp dir at run time -- no duplicated snapshot committed.
+# Guest log-message escaping (cap/wasm_log.c, audit 26): a guest's
+# HL_WASM_OP_LOG text cannot write a log line of its own. Oracles: exact-size
+# buffers, no raw controls, whole-token truncation ending "...". The escaper is
+# its own leaf TU, so no WAMR links.
+fuzz/fuzz_wasm_log_escape: fuzz/fuzz_wasm_log_escape.c $(SRCDIR)/hull/cap/wasm_log.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_WASM -o $@ $^
+
+# Embedded-migration filter (migrate.c, audits 25 / 27): only top-level
+# migrations/<name>.sql run in a built binary. Oracle: an independent
+# reference. The rest of migrate.c's references (DB layer, crypto, VFS) are
+# stubbed in fuzz_migrate_name_stubs.c, never reached.
+fuzz/fuzz_migrate_name: fuzz/fuzz_migrate_name.c fuzz/fuzz_migrate_name_stubs.c $(SRCDIR)/hull/migrate.c $(VENDDIR)/log.c/log.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -I$(SRCDIR)/hull -Ivendor/keel/include -I$(VENDDIR)/log.c -o $@ $^
 build/fuzz-corpus/js_source: fuzz/corpus_js_source
 	@mkdir -p $@
 	@cp fuzz/corpus_js_source/* $@/ 2>/dev/null || true
@@ -1317,7 +1330,8 @@ fuzz-js-source: fuzz/fuzz_js_source build/fuzz-corpus/js_source
 	./fuzz/fuzz_js_source build/fuzz-corpus/js_source/ -dict=fuzz/js_source.dict -max_len=16384 -max_total_time=$(FUZZ_TIME)
 
 fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source fuzz/fuzz_ssh \
-      fuzz/fuzz_log_escape fuzz/fuzz_http_guard fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact fuzz/fuzz_mysql_stmt
+      fuzz/fuzz_log_escape fuzz/fuzz_http_guard fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact fuzz/fuzz_mysql_stmt \
+      fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -1341,6 +1355,8 @@ fuzz-run: fuzz
 	./fuzz/fuzz_sql_kw fuzz/corpus_sql_kw/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_dsn_redact fuzz/corpus_dsn_redact/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mysql_stmt fuzz/corpus_mysql_stmt/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_wasm_log_escape fuzz/corpus_wasm_log_escape/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_migrate_name fuzz/corpus_migrate_name/ -max_total_time=$(FUZZ_TIME)
 	$(MAKE) fuzz-lua-source FUZZ_TIME=$(FUZZ_TIME)   # stages the full .lua corpus first
 	$(MAKE) fuzz-js-source FUZZ_TIME=$(FUZZ_TIME)    # stages the full .js corpus first
 

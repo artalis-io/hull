@@ -135,6 +135,9 @@ kept the rest. Check the list below before upgrading.
   authority is logged as `scheme://[redacted]`.
 - Log escaping writes every control byte but tab (and DEL) as `\xNN`, not only CR / LF: an
   ESC sequence in app text rewrote what a terminal showed.
+- A guest log message truncated to fit the log ends with `...` after a whole escape; it
+  could cut one short (`a\x0...`). Found by the new `fuzz_wasm_log_escape`; `fuzz_migrate_name`
+  covers the embedded-migration filter. The escaper moved to `cap/wasm_log.c`.
 
 ## [0.17.1] - 2026-10-18
 

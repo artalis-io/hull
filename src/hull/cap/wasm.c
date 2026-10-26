@@ -164,37 +164,6 @@ uint64_t hl_cap_wasm_host_call_count(void)
 }
 #endif
 
-size_t hl_cap_wasm_log_escape(const char *msg, size_t len,
-                              char *out, size_t outsz)
-{
-    static const char hex[] = "0123456789abcdef";
-    if (!out || outsz == 0) return 0;
-    size_t o = 0;
-    for (size_t i = 0; msg && i < len; i++) {
-        unsigned char c = (unsigned char)msg[i];
-        char tmp[4];
-        size_t n;
-        if (c == '\n')      { tmp[0] = '\\'; tmp[1] = 'n'; n = 2; }
-        else if (c == '\r') { tmp[0] = '\\'; tmp[1] = 'r'; n = 2; }
-        else if (c < 0x20 || c == 0x7f) {
-            tmp[0] = '\\'; tmp[1] = 'x';
-            tmp[2] = hex[c >> 4]; tmp[3] = hex[c & 0xf]; n = 4;
-        } else { tmp[0] = (char)c; n = 1; }
-        if (o + n + 1 > outsz) {
-            /* Truncated: end with "..." where it fits. */
-            size_t dots = outsz > 4 ? 3 : 0;
-            if (o > outsz - 1 - dots) o = outsz - 1 - dots;
-            memcpy(out + o, "...", dots);
-            o += dots;
-            break;
-        }
-        memcpy(out + o, tmp, n);
-        o += n;
-    }
-    out[o] = '\0';
-    return o;
-}
-
 static int32_t host_call_handler(wasm_exec_env_t exec_env,
                                  int32_t opcode, int32_t ptr, int32_t len)
 {

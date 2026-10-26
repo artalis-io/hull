@@ -19,6 +19,8 @@ Hull's source, so the two trees don't overlap).
 | `fuzz_sql_kw` | `hl_sql_txn_kind_ex` (both comment rules), `hl_cap_db_sql_calls_dynamic_sql`, `hl_cap_db_check_namespace` | A COMMIT / ROLLBACK the backends answer unsent must be the whole text (audit 12); DuckDB's dynamic-SQL refusal must see every call (audit 25). Metamorphic oracles over raw text, plus a construct mode whose meaning under the Postgres lexer is known by construction. |
 | `fuzz_dsn_redact` | `hl_db_dsn_redact` | The DSN form `hull migrate` prints must never hold the password (audits 9 / 10). Oracles: password marker never survives, bounds and truncation at every size. |
 | `fuzz_mysql_stmt` | `my_sql_single_statement`, `sql_is_rollback`, `my_sql_txn_kind` (static, the backend TU is included) | Under `CLIENT_MULTI_STATEMENTS` a text called one statement must be one (audits 10 / 12). Construct mode knows the statement count under MySQL's lexer. The wire client is stubbed in `fuzz_mysql_stmt_stubs.c`. |
+| `fuzz_wasm_log_escape` | `hl_cap_wasm_log_escape` (cap/wasm_log.c) | A guest's `HL_WASM_OP_LOG` text must not write a log line of its own (audit 26). Oracles: exact-size buffers at every size, no raw control byte, a message that fits copied whole, else the longest whole-token prefix + `...`. Found an escape split by the `...` (`a\x0...`). |
+| `fuzz_migrate_name` | `hl_migrate_embedded_name` | Only top-level `migrations/<name>.sql` may run in a built binary (audits 25 / 27). Oracle: an independent reference. The rest of `migrate.c` is stubbed in `fuzz_migrate_name_stubs.c`. |
 
 ## Build & run
 
