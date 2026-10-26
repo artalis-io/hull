@@ -1820,8 +1820,10 @@ jobs:
         # must NOT be reduced (that would weaken coverage of the real auth
         # path), so raising the honest wall-clock cap is the correct fix.
         # If total runtime keeps growing, split the MSan suite into parallel
-        # jobs rather than cutting work.
-        timeout-minutes: 30
+        # jobs rather than cutting work. Raised 30 -> 45 min: by audit 29
+        # the step ran ~29 min on main and a PR adding tests timed out.
+        # Splitting is the follow-up if it reaches ~40.
+        timeout-minutes: 45
         run: make msan
 
   tsan:
