@@ -964,6 +964,11 @@ UTEST(db_backend, sql_txn_kind)
     EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind("ABORT /* c */ ; SELECT 1"));
     EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind_ex("ROLLBACK; DELETE FROM t", 0));
     EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind("ROLLBACK; ; -- done\n"));
+    /* Postgres ends a -- comment at CR too (audit 28, fuzz_sql_kw): read to
+     * LF only, this was a lone ROLLBACK and the DELETE was reported done. */
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind("ROLLBACK--\r ;DELETE FROM t"));
+    EXPECT_EQ(HL_SQL_TXN_OTHER,    hl_sql_txn_kind_ex("ROLLBACK--\r ;DELETE FROM t", 0));
+    EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind("ROLLBACK -- done\r\n"));
 }
 
 UTEST_MAIN();

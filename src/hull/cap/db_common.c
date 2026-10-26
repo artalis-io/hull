@@ -169,7 +169,7 @@ static const char *dyn_skip_gap(const char *p, int nest)
                *p == '\f' || *p == '\v')
             p++;
         if (p[0] == '-' && p[1] == '-') {
-            while (*p && *p != '\n') p++;
+            while (*p && *p != '\n' && *p != '\r') p++;   /* CR ends it too */
             continue;
         }
         if (p[0] == '/' && p[1] == '*') {
@@ -212,7 +212,11 @@ int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
             const char *after = *q ? q + 1 : q;
             if (fits && dyn_name_is_dynamic(buf, n) && dyn_followed_by_call(after))
                 return 1;
-            p = after;
+            /* Go on at the next byte, not past the name: string literals and
+             * comments are not skipped, so a '"' inside one opened a "name"
+             * that swallowed a real query(...) after it (audit 28). Every
+             * byte is scanned for a bare name too. */
+            p++;
             continue;
         }
         if (dyn_ident_char(c) && !(c >= '0' && c <= '9')) {

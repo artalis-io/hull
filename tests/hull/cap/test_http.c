@@ -295,6 +295,11 @@ UTEST(audit_url, credentials_and_query_dropped)
     /* A '@' after the first '/' could be a password holding '/'. */
     ASSERT_STREQ("http://[redacted]", redact("http://u:p/w@host/x"));
     ASSERT_STREQ("host/x", redact("u:p@host/x"));
+    /* ... and one holding '?' or '#' (audit 28, fuzz_http_guard): the '@'
+     * was looked for before the query only, so "u:hunter2" was printed. */
+    ASSERT_STREQ("https://[redacted]", redact("https://u:hunter2#x@h/"));
+    ASSERT_STREQ("https://[redacted]", redact("https://u:pw?x@h/"));
+    ASSERT_STREQ("https://h/p", redact("https://u:p@h/p?q=1"));
     ASSERT_STREQ("", redact(NULL));
 }
 

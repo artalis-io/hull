@@ -1903,12 +1903,13 @@ jobs:
         run: |
           make CC=clang \
             fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff \
-            fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_ssh
+            fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_ssh \
+            fuzz/fuzz_log_escape fuzz/fuzz_http_guard
       - name: Run core fuzzers (60s each)
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match encoding ssh; do
+          for f in sh_json path_normalize mime_sniff host_match encoding ssh log_escape http_guard; do
             echo "== fuzz $f =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
           done
@@ -1929,12 +1930,13 @@ jobs:
           make CC=clang \
             fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite \
             fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire \
-            fuzz/fuzz_valkey_dsn
+            fuzz/fuzz_valkey_dsn fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact \
+            fuzz/fuzz_mysql_stmt
       - name: Run DB wire fuzzers (60s each)
-        timeout-minutes: 15
+        timeout-minutes: 18
         run: |
           set -e
-          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn; do
+          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn sql_kw dsn_redact mysql_stmt; do
             echo "== fuzz $f =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
           done

@@ -13,6 +13,14 @@ fuzz_valkey_dsn
 fuzz_span_sdk
 fuzz_span_window
 fuzz_lua_source
+fuzz_js_source
+fuzz_encoding
+fuzz_ssh
+fuzz_log_escape
+fuzz_http_guard
+fuzz_sql_kw
+fuzz_dsn_redact
+fuzz_mysql_stmt
 # Debug symbol bundles (macOS)
 *.dSYM/
 # libFuzzer artifacts
