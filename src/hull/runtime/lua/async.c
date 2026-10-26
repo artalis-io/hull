@@ -504,6 +504,8 @@ int hl_lua_can_wait(lua_State *L)
     lua_pop(L, 1);
     if (!lua || !lua_isyieldable(L) || L != lua->active_co)
         return 0;
+    if (lua->base.shutting_down)   /* audit 29, see hl_lua_check_can_wait */
+        return 0;
     const char *txn = hl_db_registry_open_txn(lua->base.db_registry);
     /* Always NULL only in a DB-less build (the inline stub). */
     // cppcheck-suppress knownConditionTrueFalse
@@ -520,6 +522,15 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
                           "app.main - not while a module loads, inside a C "
                           "callback such as string.gsub or table.sort, or in "
                           "a coroutine the app created", what);
+    /* At teardown nothing that waits can complete (audit 29): the loop never
+     * runs again, so a timer or op armed now - from a __gc finalizer
+     * lua_close runs, or code a cancelled op resumes - and the ctx it tracks
+     * after the teardown sweep would be stranded. One gate for every wait
+     * (sleep, http.fetch, db.async, compute, gpu, ssh, smtp,
+     * worker.dispatch, tui.poll). */
+    if (lua->base.shutting_down)
+        return luaL_error(L, "%s cannot wait: the runtime is shutting down",
+                          what);
     /* Another request, SSE event or timer runs while this one is parked, on
      * the SAME connection: a transaction held across the wait was rolled
      * back under it (or joined by the other entry), and the rest of this
@@ -833,6 +844,12 @@ int lua_hull_spawn(lua_State *L)
     lua_pop(L, 1);
     if (!lua)
         return luaL_error(L, "hull._spawn: no runtime context");
+    /* At teardown (a __gc finalizer lua_close runs) the loop is going away,
+     * as hull._task.spawn refuses (audit 29): the task runs inline and a
+     * wait in it armed a timer and tracked its ctx after the teardown sweep,
+     * stranded. */
+    if (lua->base.shutting_down)
+        return luaL_error(L, "hull.async(): the runtime is shutting down");
 
     lua_State *co = lua_newthread(L);
     if (has_hook) {

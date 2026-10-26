@@ -44,7 +44,8 @@ fail() { echo "  FAIL: $1${2:+ - got: $2}"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 
 assert_line() {
     a_out="$1"; a_key="$2"; a_want="$3"; a_lbl="$4"
-    a_got=$(printf '%s\n' "$a_out" | sed -n "s/^${a_key}=\\(.*\\)$/\\1/p" | head -1)
+    # A Lua print is a log record ("HH:MM:SS INFO  [app] k=v", audit 29).
+    a_got=$(printf '%s\n' "$a_out" | sed -n "s/^\\(.*\\[app\\] \\)\\{0,1\\}${a_key}=\\(.*\\)$/\\2/p" | head -1)
     if [ "$a_got" = "$a_want" ]; then pass "$a_lbl"
     else fail "$a_lbl" "${a_key}=${a_got:-<missing>} (wanted $a_want)"
     fi

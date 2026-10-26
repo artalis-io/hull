@@ -95,7 +95,8 @@ chmod 600 "$WORK/decoy_key"
 # has no locals, so a name reused here would clobber the caller's.
 assert_line() {
     a_out="$1"; a_key="$2"; a_want="$3"; a_lbl="$4"
-    a_got=$(printf '%s\n' "$a_out" | sed -n "s/^${a_key}=\\(.*\\)$/\\1/p" | head -1)
+    # A Lua print is a log record ("HH:MM:SS INFO  [app] k=v", audit 29).
+    a_got=$(printf '%s\n' "$a_out" | sed -n "s/^\\(.*\\[app\\] \\)\\{0,1\\}${a_key}=\\(.*\\)$/\\2/p" | head -1)
     if [ "$a_got" = "$a_want" ]; then pass "$a_lbl"
     else fail "$a_lbl" "${a_key}=${a_got:-<missing>} (wanted $a_want)"
     fi
@@ -704,7 +705,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "chacha_rekeyed" "true" "live: a rekey under chacha20-poly1305"
         assert_line "$OUT" "chacha_stdin" "1048576" "live: 1 MB of streamed stdin under chacha20-poly1305"
         assert_line "$OUT" "fanout_outputs" "fan-1,fan-2,fan-3,fan-4" "live: hull.map over four connections, results in order"
-        a_fan=$(printf '%s\n' "$OUT" | sed -n 's/^fanout_concurrent=//p' | head -1)
+        a_fan=$(printf '%s\n' "$OUT" | sed -n 's/^.*fanout_concurrent=//p' | head -1)
         case "$a_fan" in
             true:*) pass "live: hull.map ran the four connections concurrently (${a_fan#true:})" ;;
             *)      fail "live: hull.map ran the four connections concurrently" "fanout_concurrent=${a_fan:-<missing>}" ;;
@@ -762,7 +763,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
             assert_line "$HK_OUT" "connected" "yes" "live $3: connected after accepting the key"
             assert_line "$HK_OUT" "negotiated_hostkey" "$3" "live $3: negotiated $3"
             assert_line "$HK_OUT" "exec_stdout" "hull-tunnel-ok" "live $3: command output came back"
-            if ! printf '%s\n' "$HK_OUT" | grep -q '^connected=yes$'; then
+            if ! printf '%s\n' "$HK_OUT" | grep -qE '(^|\[app\] )connected=yes$'; then
                 printf '%s\n' "$HK_OUT" | sed 's/^/    /'
                 tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
             fi
@@ -781,7 +782,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         stop_shim
         assert_line "$RSA_OUT" "connected" "yes" "live: an RSA user key authenticates"
         assert_line "$RSA_OUT" "exec_stdout" "hull-tunnel-ok" "live: and runs a command"
-        if ! printf '%s\n' "$RSA_OUT" | grep -q '^connected=yes$'; then
+        if ! printf '%s\n' "$RSA_OUT" | grep -qE '(^|\[app\] )connected=yes$'; then
             printf '%s\n' "$RSA_OUT" | sed 's/^/    /'
             tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
         fi
@@ -798,7 +799,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         stop_shim
         assert_line "$EC_OUT" "connected" "yes" "live: an ECDSA user key authenticates"
         assert_line "$EC_OUT" "exec_stdout" "hull-tunnel-ok" "live: and runs a command"
-        if ! printf '%s\n' "$EC_OUT" | grep -q '^connected=yes$'; then
+        if ! printf '%s\n' "$EC_OUT" | grep -qE '(^|\[app\] )connected=yes$'; then
             printf '%s\n' "$EC_OUT" | sed 's/^/    /'
             tail -10 "$WORK/sshd/log" 2>/dev/null | sed 's/^/    sshd: /'
         fi

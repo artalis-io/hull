@@ -28,6 +28,7 @@
 #include "hull/cap/ws.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/cap/db_budget.h"
+#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 
 #include "lua.h"
 #include "lualib.h"
@@ -248,6 +249,66 @@ static int hl_lua_print(lua_State *L)
     return 0;
 }
 
+/* App VMs' print (audit 29): one log record, as log.info and JS
+ * console.log write. The raw stderr print above wrote app text unescaped -
+ * a CR / LF / ESC forged log or terminal lines - and charged nothing, so a
+ * loop of huge prints was free. Each argument is charged 1 unit per 8
+ * bytes before it is written; CR / LF and the other controls but tab go
+ * out escaped (the installed log callbacks escape every record the same
+ * way, hl_log_escape_line), tabs still separate the arguments. The tool VM
+ * keeps the raw print: the CLI plugins write their output through it. */
+static int hl_lua_app_print(lua_State *L)
+{
+    lua_Debug ar;
+    const char *src = "lua";
+    int line = 0;
+    if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+        src = ar.short_src;
+        line = ar.currentline;
+    }
+    const char *tag = "[app]";
+    if (strncmp(src, "hull.", 5) == 0 || strncmp(src, "vendor.", 7) == 0)
+        tag = "[hull:lua]";
+
+    /* Convert every argument in place first: the buffer below may not see
+     * an unbalanced stack between its operations. */
+    int n = lua_gettop(L);
+    for (int i = 1; i <= n; i++) {
+        size_t len = 0;
+        luaL_tolstring(L, i, &len);
+        lua_replace(L, i);
+        uint64_t u = hl_work_bytes_units((uint64_t)len);
+        lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
+    }
+
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    for (int i = 1; i <= n; i++) {
+        size_t len = 0;
+        const char *s = lua_tolstring(L, i, &len);
+        if (i > 1)
+            luaL_addchar(&b, '\t');
+        for (size_t k = 0; k < len; k++) {
+            unsigned char c = (unsigned char)s[k];
+            if (c == '\n') {
+                luaL_addlstring(&b, "\\n", 2);
+            } else if (c == '\r') {
+                luaL_addlstring(&b, "\\r", 2);
+            } else if ((c < 0x20 && c != '\t') || c == 0x7f) {
+                char hex[5];
+                snprintf(hex, sizeof hex, "\\x%02x", c);
+                luaL_addlstring(&b, hex, 4);
+            } else {
+                luaL_addchar(&b, (char)c);
+            }
+        }
+    }
+    luaL_pushresult(&b);
+    log_log(LOG_INFO, src, line, "%s %s", tag, lua_tostring(L, -1));
+    lua_pop(L, 1);
+    return 0;
+}
+
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 /* General lua_State -> HlLua accessor (registry "__hull_lua", set in
@@ -344,8 +405,10 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         hl_lua_tool_register_orchestration(lua->L);
     }
 
-    /* Replace print with stderr version */
-    lua_pushcfunction(lua->L, hl_lua_print);
+    /* Replace print: a log record in an app VM (audit 29), raw stderr in
+     * the tool VM (the CLI plugins write their output through it). */
+    lua_pushcfunction(lua->L, cfg->sandbox ? hl_lua_app_print
+                                           : hl_lua_print);
     lua_setglobal(lua->L, "print");
 
     /* The instruction budget: after the base library (it replaces pcall
@@ -671,6 +734,10 @@ void hl_lua_free(HlLua *lua)
      * watch is disarmed only after the close - the watchdog must be done
      * with it before its storage goes - as the worker VM does (audit 15). */
     if (lua->L) {
+        /* Finalizers run at teardown: no wait or task may start (audit 29;
+         * stop_async set it already on the serve paths, as hl_js_free sets
+         * it itself). */
+        lua->base.shutting_down = 1;
         HL_LUA_ARM(lua, lua->L);
         lua_close(lua->L);
         lua->L = NULL;
