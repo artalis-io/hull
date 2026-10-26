@@ -333,11 +333,14 @@ JSEOF
         fail "js: a tui.run session longer than the run deadline completes"
     fi
 
-    # A poll that returns no event re-arms only after a real wait (audit 26):
-    # a tickMs = 1 loop re-armed its own deadline for ever, while a 100 ms
-    # clock still gets a new run per tick.
-    echo "--- a tickMs=1 tui.run is not re-armed per tick ---"
-    for tick in 1 100; do
+    # A poll that returns no event re-arms only once the run has really
+    # waited 50 ms in all (audit 26 / 28): a tickMs = 0 busy loop never
+    # re-arms its own deadline, while a 100 ms clock gets a new run per tick
+    # and a 16 ms clock one per ~3 ticks - judged per call (audit 26), a
+    # clock under 50 ms piled every idle tick into one run that died on the
+    # budget (audit 28).
+    echo "--- a tickMs=0 tui.run is not re-armed per tick ---"
+    for tick in 0 100 16; do
         sed "s/TICK/${tick}/" > "${TMP}/tick_${tick}.js" <<'JSEOF'
 import { app } from "hull:app";
 import { tui } from "hull:tui";
@@ -345,7 +348,13 @@ app.manifest({ tui: true, modules: ["hull/tui@1"] });
 app.main((ctx) => {
     const r = tui.run({
         tickMs: TICK,
-        draw: (d) => { d.clear(); d.print(1, 1, "tick waiting"); },
+        draw: (d) => {
+            /* A costly frame: ~100k loop steps, so an un-re-armed clock
+             * spends a 2M-instruction budget within a few dozen ticks. */
+            let x = 0;
+            if (TICK === 16) for (let i = 0; i < 100000; i++) x += i & 7;
+            d.clear(); d.print(1, 1, "tick waiting " + (x & 1));
+        },
         onEvent: (ev) => { if (ev.kind === "key" && ev.key === "q") return "done"; },
     });
     ctx.stdout.write(`tick: ${r}\n`);
@@ -354,16 +363,23 @@ app.main((ctx) => {
 JSEOF
     done
     if HULL_MAX_RUN_MS=300 "${DRIVE}" "js error" "%s1500q" -- \
-           "${HULL_BIN}" "${TMP}/tick_1.js" >/dev/null 2>&1; then
-        pass "js: a tickMs=1 tui.run is stopped by the run deadline"
+           "${HULL_BIN}" "${TMP}/tick_0.js" >/dev/null 2>&1; then
+        pass "js: a tickMs=0 tui.run is stopped by the run deadline"
     else
-        fail "js: a tickMs=1 tui.run is stopped by the run deadline"
+        fail "js: a tickMs=0 tui.run is stopped by the run deadline"
     fi
     if HULL_MAX_RUN_MS=300 "${DRIVE}" "tick: done" "%s1200q" -- \
            "${HULL_BIN}" "${TMP}/tick_100.js" >/dev/null 2>&1; then
         pass "js: a tickMs=100 tui.run clock outlives the run deadline"
     else
         fail "js: a tickMs=100 tui.run clock outlives the run deadline"
+    fi
+    if HULL_MAX_RUN_MS=300 HULL_MAX_INSTRUCTIONS=2000000 \
+           "${DRIVE}" "tick: done" "%s1500q" -- \
+           "${HULL_BIN}" "${TMP}/tick_16.js" >/dev/null 2>&1; then
+        pass "js: a tickMs=16 tui.run with a costly draw outlives one budget"
+    else
+        fail "js: a tickMs=16 tui.run with a costly draw outlives one budget"
     fi
 
     # ── hull doctor --tui (Phase 2 dogfood) ────────────────────────

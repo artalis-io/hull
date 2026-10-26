@@ -73,6 +73,19 @@ kept the rest. Check the list below before upgrading.
   server with `read_timeout=0`): while the worker pool is freed every bound SQL charge stops, as a
   `db.async` op's already did.
 
+**Runtime (JS) - audit 28 fixes**
+- **A JS `tui.run({ tickMs })` clock under 50 ms no longer dies on the instruction budget.**
+  `tui.pollSync` re-armed only when one call waited 50 ms, so every idle tick of a 16 ms clock
+  piled into one run. The idle time is now added up since the last re-arm and a new run starts
+  once it reaches 50 ms (Lua re-arms every `tui.poll` resume). A `pollSync(0)` busy loop still
+  never re-arms, and a hangup never does.
+- **JS `gpu.bufferCopy` charges no more than the source holds.** An explicit `size` was charged
+  as given, so `size: -1` tripped the budget (uncatchable) instead of failing with the catchable
+  `out_of_bounds`; it now charges what Lua charges.
+- **JS `WasmInstance.call` without `maxOutput` is clamped to the VM heap limit.** The instance's
+  own default skipped the clamp, so an oversized output was copied off the heap before it was
+  refused; the guest now fails `output_too_small` first, as in Lua.
+
 ## [0.17.1] - 2026-10-18
 
 Full PR list:

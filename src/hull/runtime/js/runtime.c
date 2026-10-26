@@ -154,6 +154,7 @@ void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
     js->instruction_count = 0;
     js->budget_tripped = 0;
     js->budget_timed_out = 0;
+    js->tui_idle_ms = 0;
 }
 
 JSValue hl_js_budget_throw(JSContext *ctx)
