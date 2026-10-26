@@ -88,6 +88,10 @@ typedef struct HlJS {
      * budget. budget_timed_out: the trip was that deadline, not the count. */
     HlRunWatch      run_watch;
     int             budget_timed_out;
+    /* Measured idle time tui.pollSync has waited, with no event, since the
+     * run was last armed. Once it reaches HL_JS_TUI_REARM_MIN_MS the poll
+     * starts a new run; every arm resets it (audit 28). */
+    uint64_t        tui_idle_ms;
 
     /* 1 while a middleware runs (and its microtasks drain). Middleware is
      * synchronous: an async op started now would suspend the connection the

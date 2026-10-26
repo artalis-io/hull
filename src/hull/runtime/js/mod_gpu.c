@@ -659,29 +659,36 @@ static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
     return ab;
 }
 
-/* The bytes a size-0 gpu.bufferCopy moves: what the source holds past
- * @p src_offset, 0 when the device or buffer is not there (the copy then
- * fails). Read under the device lock, the way hl_cap_gpu_buffer_copy
- * resolves them. */
-static size_t js_gpu_copy_src_bytes(HlGpuCtx *gpu, int device,
-                                    const char *src, size_t src_offset)
+/* The bytes a gpu.bufferCopy moves: @p size, or the rest of the source past
+ * @p src_offset when it is 0, never more than the source holds - a bogus
+ * size (-1 read as SIZE_MAX) is refused by the cap as out_of_bounds, a
+ * catchable error, and must not trip the budget first (audit 28). 0 when the
+ * device or buffer is not there (the copy then fails). Read under the device
+ * lock, the way hl_cap_gpu_buffer_copy resolves them; mirrors Lua's
+ * lua_gpu_copy_bytes. */
+static size_t js_gpu_copy_bytes(HlGpuCtx *gpu, int device, const char *src,
+                                size_t src_offset, size_t size)
 {
+    if (!gpu || !src) return 0;
     int idx = device < 0 ? gpu->default_device : device;
-    if (idx < 0 || idx >= gpu->device_count ||
+    if (idx < 0 || idx >= gpu->device_count || idx >= HL_GPU_MAX_DEVICES ||
         (gpu->device_restriction && !gpu->allowed_devices[idx]))
         return 0;
     HlGpuDevice *dev = &gpu->devices[idx];
-    size_t n = 0;
+    size_t src_size = 0;
+    int found = 0;
     pthread_mutex_lock(&dev->mutex);
     for (int i = 0; i < dev->buffer_count; i++) {
         if (strcmp(dev->buffers[i].name, src) == 0) {
-            if (src_offset < dev->buffers[i].size)
-                n = dev->buffers[i].size - src_offset;
+            src_size = dev->buffers[i].size;
+            found = 1;
             break;
         }
     }
     pthread_mutex_unlock(&dev->mutex);
-    return n;
+    if (!found || src_offset >= src_size) return 0;
+    size_t rest = src_size - src_offset;
+    return (size == 0 || size > rest) ? rest : size;
 }
 
 static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
@@ -719,8 +726,8 @@ static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
 
     /* Charged before it runs, as gpu.buffer is (audit 27: a copy of up to
      * the device's whole live memory was free). */
-    uint64_t copy_bytes = size ? size
-                        : js_gpu_copy_src_bytes(gpu, device, src, src_offset);
+    uint64_t copy_bytes =
+        (uint64_t)js_gpu_copy_bytes(gpu, device, src, src_offset, size);
     if (hl_js_budget_charge(ctx, hl_work_bulk_units(copy_bytes)) < 0)
         goto opt_fail;
 

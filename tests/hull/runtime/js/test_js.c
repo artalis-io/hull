@@ -13751,6 +13751,40 @@ UTEST(js_audit27, sync_compute_calls_are_charged)
     cleanup_js();
     hl_cap_wasm_destroy(&cache);
 }
+
+/* WasmInstance.call without a maxOutput fell to the instance's own default,
+ * which the heap clamp never saw: the guest's output was copied off the
+ * heap in full before the ArrayBuffer step refused it (audit 28). The cap is
+ * now resolved (per call, else the instance's, else the global default) and
+ * brought to the VM heap limit before the call, as Lua does. */
+UTEST(js_audit28, instance_call_default_output_is_heap_clamped)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a9_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(eval_int("(globalThis.CB = new ArrayBuffer(512 << 10),"
+                       " globalThis.CI = compute.instance('echo',"
+                       " { maxOutput: 1 << 20 }), 1)"), 1);
+    EXPECT_EQ(eval_int("CI.call(CB).byteLength"), 512 << 10);
+    size_t heap = js.max_heap_bytes;
+    js.max_heap_bytes = 256 << 10;
+    char *msg = eval_str("(() => { try { CI.call(CB); return 'ok'; }"
+                         " catch (e) { return String(e.message); } })()");
+    ASSERT_TRUE(msg != NULL);
+    EXPECT_TRUE_MSG(strstr(msg, "output_too_small") != NULL, msg);
+    free(msg);
+    js.max_heap_bytes = heap;
+    EXPECT_EQ(eval_int("CI.call(CB).byteLength"), 512 << 10);
+    EXPECT_EQ(eval_int("(CI.close(), globalThis.CB = globalThis.CI ="
+                       " undefined, 1)"), 1);
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_cap_wasm_destroy(&cache);
+}
 #endif /* HL_ENABLE_WASM */
 
 #ifdef HL_ENABLE_IMAGE

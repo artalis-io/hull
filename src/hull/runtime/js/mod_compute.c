@@ -945,6 +945,18 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
         return js_push_wasm_buffer(ctx, out_buf);
     }
 
+    /* The output is copied onto the VM heap. Without an explicit maxOutput
+     * js_wasm_sync_prepare had nothing to clamp and the cap fell to the
+     * instance's own default, unclamped (audit 28): resolve the effective
+     * cap here - per call, else the instance's default, else the global
+     * default - after the still-open check (pi is read), then bring it to
+     * the heap limit, as Lua's lua_sync_call_clamp_output does. */
+    if (!opts.max_output)
+        opts.max_output = pi->default_max_output ? pi->default_max_output
+                                                 : HL_WASM_DEFAULT_MAX_OUTPUT;
+    if (js && js->max_heap_bytes && opts.max_output > js->max_heap_bytes)
+        opts.max_output = js->max_heap_bytes;
+
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
