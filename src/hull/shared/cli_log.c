@@ -52,16 +52,27 @@ int hl_cli_log_is_native_source(const char *file)
 
 void hl_log_escape_line(const char *in, char *out, size_t outsz)
 {
+    static const char hex[] = "0123456789abcdef";
     if (!out || outsz == 0) return;
     size_t o = 0;
     for (const char *p = in ? in : ""; *p; p++) {
-        if (*p == '\n' || *p == '\r') {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\n' || c == '\r') {
             if (o + 2 >= outsz) break;
             out[o++] = '\\';
-            out[o++] = *p == '\n' ? 'n' : 'r';
+            out[o++] = c == '\n' ? 'n' : 'r';
+        } else if ((c < 0x20 && c != '\t') || c == 0x7f) {
+            /* ESC and the other controls as \xNN, as the wasm log escaper
+             * writes them (audit 28): raw, an ESC sequence in app text
+             * rewrote what a terminal showed of the log. */
+            if (o + 4 >= outsz) break;
+            out[o++] = '\\';
+            out[o++] = 'x';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 15];
         } else {
             if (o + 1 >= outsz) break;
-            out[o++] = *p;
+            out[o++] = (char)c;
         }
     }
     out[o] = '\0';

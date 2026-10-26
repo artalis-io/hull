@@ -42,7 +42,10 @@ static inline const char *hl_sql_skip_space_ex(const char *p, int nest)
                *p == '\f' || *p == '\v')
             p++;
         if (p[0] == '-' && p[1] == '-') {
-            while (*p && *p != '\n') p++;
+            /* Postgres (and DuckDB) end a line comment at CR too; ending
+             * it early only shows more text, so every dialect does (audit 28:
+             * "ROLLBACK--\r ;DELETE ..." read as a lone ROLLBACK). */
+            while (*p && *p != '\n' && *p != '\r') p++;
         } else if (p[0] == '/' && p[1] == '*') {
             int depth = 1;
             p += 2;

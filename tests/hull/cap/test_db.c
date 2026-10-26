@@ -671,6 +671,11 @@ UTEST(hl_cap_db, dynamic_sql_calls_are_found)
         "CREATE MACRO m() AS TABLE FROM query('x')",
         "SELECT * FROM U&\"\\0071uery\"('x')",
         "SELECT 'query(' AS s",          /* literals are not skipped: refused */
+        /* Audit 28 (fuzz_sql_kw): a '"' in a literal or comment opened a
+         * "name" that swallowed the call, and CR did not end a -- comment. */
+        "SELECT '\"', * FROM query('SELECT * FROM _h'||'ull_sessions')",
+        "--\"\n SELECT * FROM query('x')",
+        "SELECT * FROM query --\r ('x')",
     };
     for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
         EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql(hit[i]));

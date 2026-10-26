@@ -1201,6 +1201,44 @@ fuzz/fuzz_mysqlwire: fuzz/fuzz_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c
 fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/utils/hex.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_MY_NO_AUTH -o $@ $^
 
+# SQL-text classifiers (audits 10 / 12 / 25): the transaction-statement reader
+# (cap/db_sql_kw.h, header-only, both comment rules), the DuckDB dynamic-SQL
+# refusal and the _hull_* namespace check (cap/db_common.c). Metamorphic
+# oracles over raw text plus a construct mode whose Postgres-lexer meaning is
+# known (a dynamic call must be reported; COMMIT/ROLLBACK + a second statement
+# must not read as COMMIT/ROLLBACK). HL_ENABLE_DB compiles db_common.c's body.
+fuzz/fuzz_sql_kw: fuzz/fuzz_sql_kw.c $(SRCDIR)/hull/cap/db_common.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -o $@ $^
+
+# Log-record escaping (shared/cli_log.c, audit 27): every record both log
+# callbacks write goes through hl_log_escape_line, so app text cannot forge a
+# line. Oracles: exact-size buffers, no raw CR / LF, whole-token truncation.
+fuzz/fuzz_log_escape: fuzz/fuzz_log_escape.c $(SRCDIR)/hull/shared/cli_log.c $(VENDDIR)/log.c/log.c
+	$(CC) $(FUZZ_CFLAGS) -I$(VENDDIR)/log.c -o $@ $^
+
+# Outbound-HTTP text guards in cap/http.c (audits 17 / 22 / 23 / 26): URL
+# redaction for the audit log, reserved request headers, method tokens and the
+# cross-origin redirect-safe header list, each against a reference. Keel's
+# url.c is linked for real (the oracle compares with its parse); the request
+# functions are stubbed in the harness, so no Keel client / mbedTLS link.
+fuzz/fuzz_http_guard: fuzz/fuzz_http_guard.c fuzz/fuzz_http_guard_stubs.c $(SRCDIR)/hull/cap/http.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/utils/host_match.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c $(VENDDIR)/log.c/log.c vendor/keel/src/url.c vendor/keel/src/kl_cstr.c
+	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -Ivendor/keel/src -I$(VENDDIR)/log.c -o $@ $^
+
+# DSN redaction for error messages (cap/db_select.c, audits 9 / 10): the
+# password marker must never survive; bounds and truncation are checked at
+# every output size. HL_ENABLE_DB with no backend compiles db_select.c with an
+# empty registry, so nothing beyond the TU links.
+fuzz/fuzz_dsn_redact: fuzz/fuzz_dsn_redact.c $(SRCDIR)/hull/cap/db_select.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -o $@ $^
+
+# MySQL statement classifiers (cap/db_mysql.c, audits 9 / 10 / 12): the
+# one-statement scanner and the ROLLBACK the backend answers unsent. They are
+# static, so the harness includes the backend TU; the wire client it calls is
+# stubbed (fuzz_mysql_stmt_stubs.c, never reached), keeping cap/crypto and Keel
+# out of the link.
+fuzz/fuzz_mysql_stmt: fuzz/fuzz_mysql_stmt.c fuzz/fuzz_mysql_stmt_stubs.c $(SRCDIR)/hull/cap/db_mysql.c $(VENDDIR)/log.c/log.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -DHL_ENABLE_MYSQL -I$(VENDDIR)/log.c -o $@ fuzz/fuzz_mysql_stmt.c fuzz/fuzz_mysql_stmt_stubs.c $(VENDDIR)/log.c/log.c
+
 # Mapped-span guest SDK math (templates/hull_span.h): the attacker-controlled
 # span-metadata decode + window-read offset arithmetic. Header-only (freestanding
 # SDK), so no Hull link deps -- just -Itemplates.
@@ -1278,7 +1316,8 @@ build/fuzz-corpus/js_source: fuzz/corpus_js_source
 fuzz-js-source: fuzz/fuzz_js_source build/fuzz-corpus/js_source
 	./fuzz/fuzz_js_source build/fuzz-corpus/js_source/ -dict=fuzz/js_source.dict -max_len=16384 -max_total_time=$(FUZZ_TIME)
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source fuzz/fuzz_ssh
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source fuzz/fuzz_ssh \
+      fuzz/fuzz_log_escape fuzz/fuzz_http_guard fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact fuzz/fuzz_mysql_stmt
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -1297,6 +1336,11 @@ fuzz-run: fuzz
 	./fuzz/fuzz_valkey_dsn fuzz/corpus_valkey_dsn/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_span_sdk fuzz/corpus_span_sdk/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_span_window fuzz/corpus_span_window/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_log_escape fuzz/corpus_log_escape/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_http_guard fuzz/corpus_http_guard/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_sql_kw fuzz/corpus_sql_kw/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_dsn_redact fuzz/corpus_dsn_redact/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_mysql_stmt fuzz/corpus_mysql_stmt/ -max_total_time=$(FUZZ_TIME)
 	$(MAKE) fuzz-lua-source FUZZ_TIME=$(FUZZ_TIME)   # stages the full .lua corpus first
 	$(MAKE) fuzz-js-source FUZZ_TIME=$(FUZZ_TIME)    # stages the full .js corpus first
 

@@ -306,7 +306,9 @@ for _j in ("wamrc-x86_64", "wamrc-artifact-verify"):
 import re  # noqa: E402
 CANONICAL_FUZZ = {
     "sh_json", "path_normalize", "mime_sniff", "host_match", "encoding", "ssh",  # core
+    "log_escape", "http_guard",                                       # core (audit 28)
     "pgwire", "pg_dsn", "pg_rewrite", "mysqlwire", "mysql_dsn", "respwire", "valkey_dsn",  # db wire
+    "sql_kw", "dsn_redact", "mysql_stmt",                             # db (audit 28)
     "span_sdk", "span_window",                                        # compute
 }
 _WF = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),

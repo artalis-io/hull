@@ -233,6 +233,11 @@ UTEST(cli_log, escape_line_writes_crlf_as_two_characters)
     ASSERT_STREQ("ab", out);
     hl_log_escape_line(NULL, out, sizeof out);
     ASSERT_STREQ("", out);
+    /* Audit 28: other controls (ESC, a terminal escape) as \xNN; tab stays. */
+    hl_log_escape_line("a\x1b[2Jb\tc\x7f", out, sizeof out);
+    ASSERT_STREQ("a\\x1b[2Jb\tc\\x7f", out);
+    hl_log_escape_line("ab\x1b", out, 6);        /* \x1b would not fit whole */
+    ASSERT_STREQ("ab", out);
 }
 
 UTEST(cli_log, a_record_with_a_newline_is_one_line)

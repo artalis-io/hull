@@ -62,21 +62,18 @@ size_t hl_http_url_redact(const char *url, char *out, size_t outsz)
     const char *rest = url + scheme_len;
     size_t end = strcspn(rest, "?#");           /* query and fragment go */
 
+    /* The authority ends at the first '/', '?' or '#'; the last '@' before
+     * it ends the userinfo. An '@' anywhere after it means either a password
+     * holding an unencoded '/', '?' or '#' (`u:hunter2#x@h` printed
+     * "u:hunter2" - audit 28) or an '@' in the path / query; the two cannot
+     * be told apart, so neither is printed (as hl_db_dsn_redact). */
+    size_t auth_end = strcspn(rest, "/?#");
     const char *at = NULL;
-    for (size_t i = 0; i < end; i++)
-        if (rest[i] == '@') at = rest + i;      /* the last one ends userinfo */
-    const char *keep = rest;
-    size_t keep_len = end;
-    int ambiguous = 0;
-    if (at) {
-        size_t slash = strcspn(rest, "/");
-        if ((size_t)(at - rest) < slash) {
-            keep = at + 1;
-            keep_len = end - (size_t)(keep - rest);
-        } else {
-            ambiguous = 1;   /* a password holding '/', or '@' in the path */
-        }
-    }
+    for (size_t i = 0; i < auth_end; i++)
+        if (rest[i] == '@') at = rest + i;
+    int ambiguous = strchr(rest + auth_end, '@') != NULL;
+    const char *keep = at ? at + 1 : rest;
+    size_t keep_len = end - (size_t)(keep - rest);
 
     size_t o = redact_put(out, outsz, 0, url, scheme_len);
     if (ambiguous)
