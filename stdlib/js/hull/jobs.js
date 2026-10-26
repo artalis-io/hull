@@ -143,8 +143,10 @@ let _pausedAt = 0;
 // jobs.runWorker go through it too (audit 12): only init's did, so a NaN
 // visibilityTimeout passed to work() re-pended every running job and a NaN
 // reapInterval switched the reaper off (now - last >= NaN is false).
+// A string is read as Lua's tonumber reads it (luaToNumber, audit 28):
+// Number() also took "0b11", "0o7" and "Infinity", which the Lua twin refuses.
 function durationOpt(name, v, who) {
-    const n = (typeof v === "string" && v.trim() !== "") ? Number(v) : v;
+    const n = (typeof v === "string" && v.trim() !== "") ? luaToNumber(v) : v;
     if (typeof n !== "number" || !Number.isFinite(n) || !(n >= 0))
         throw new Error((who || "jobs.init") + ": " + name
             + " must be a finite number of seconds >= 0, got " + String(v));

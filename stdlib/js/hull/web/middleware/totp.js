@@ -132,6 +132,15 @@ CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
     locked_until   INTEGER
 );
 
+-- The failures each account had from one IP (audit 28): see the Lua twin.
+CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip_user (
+    ip             VARCHAR(255) NOT NULL,
+    user_id        VARCHAR(255) NOT NULL,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    PRIMARY KEY (ip, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
     ON _hull_totp_recovery(user_id);
 
@@ -140,6 +149,9 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_lf
 
 CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
     ON _hull_totp_attempts_by_ip(last_failed_at);
+
+CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_user_lf
+    ON _hull_totp_attempts_by_ip_user(last_failed_at);
 `;
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -468,7 +480,10 @@ function lockoutRemainingIp(ip) {
     return remain > 0 ? remain : 0;
 }
 
-function bumpFailedAttemptIp(ip) {
+// The IP's count is the sum of the failures every account had from it since
+// it last started (aged out or locked); _hull_totp_attempts_by_ip_user holds
+// each account's share and goes whenever the count starts again (audit 28).
+function bumpFailedAttemptIp(ip, userId) {
     if (typeof ip !== "string" || ip === "") return;
     const now = time.now();
     db.batch(() => {
@@ -476,15 +491,28 @@ function bumpFailedAttemptIp(ip) {
             "SELECT failed_count, last_failed_at FROM _hull_totp_attempts_by_ip "
             + "WHERE ip = ?", [ip]);
         let fc = (r && r[0] && r[0].failed_count) || 0;
-        // A success no longer clears the count (audit 26), so it ages out:
+        // A success does not clear the count (audit 26), so it ages out:
         // failures more than lockoutDurationPerIp apart start it again.
         const last = r && r[0] && r[0].last_failed_at;
         if (typeof last === "number" && now - last > _state.lockoutDurationPerIp) fc = 0;
+        if (fc === 0) {
+            // The count starts again: the shares of the old one go with it.
+            db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?", [ip]);
+        }
         let newFc = fc + 1;
         let lockedUntil = 0;   // not locked (see bumpFailedAttempt)
         if (newFc >= _state.maxFailedAttemptsPerIp) {
             lockedUntil = now + _state.lockoutDurationPerIp;
             newFc = 0;
+            db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?", [ip]);
+        } else if (typeof userId === "string") {
+            const u = db.query(
+                "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
+                + "WHERE ip = ? AND user_id = ?", [ip, userId]);
+            const ufc = (u && u[0] && u[0].failed_count) || 0;
+            db.upsert("_hull_totp_attempts_by_ip_user", ["ip", "user_id"],
+                ["ip", "user_id", "failed_count", "last_failed_at"],
+                [ip, userId, ufc + 1, now]);
         }
         db.upsert("_hull_totp_attempts_by_ip", ["ip"],
             ["ip", "failed_count", "last_failed_at", "locked_until"],
@@ -492,9 +520,31 @@ function bumpFailedAttemptIp(ip) {
     });
 }
 
+// A user's successful verify from an IP takes that user's own failures from
+// the IP back out of its count (audit 28). See the Lua twin.
+function creditSuccessIp(ip, userId) {
+    if (typeof ip !== "string" || ip === "" || typeof userId !== "string") return;
+    db.batch(() => {
+        const u = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
+            + "WHERE ip = ? AND user_id = ?", [ip, userId]);
+        const ufc = (u && u[0] && u[0].failed_count) || 0;
+        if (!(ufc > 0)) return;
+        db.exec("DELETE FROM _hull_totp_attempts_by_ip_user "
+                + "WHERE ip = ? AND user_id = ?", [ip, userId]);
+        const r = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip WHERE ip = ?", [ip]);
+        const fc = (r && r[0] && r[0].failed_count) || 0;
+        const newFc = fc - ufc > 0 ? fc - ufc : 0;
+        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = ? WHERE ip = ?",
+                [newFc, ip]);
+    });
+}
+
 function clearFailedAttemptsIp(ip) {
     if (typeof ip !== "string" || ip === "") return;
     db.exec("DELETE FROM _hull_totp_attempts_by_ip WHERE ip = ?", [ip]);
+    db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?", [ip]);
 }
 
 let _xffWarnDone = false;
@@ -804,6 +854,10 @@ function cleanup() {
         + "WHERE (locked_until IS NULL OR locked_until < ?) "
         + "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
         [now, ipAttemptsCutoff]);
+    db.exec(
+        "DELETE FROM _hull_totp_attempts_by_ip_user "
+        + "WHERE last_failed_at IS NULL OR last_failed_at < ?",
+        [ipAttemptsCutoff]);
     return removed;
 }
 
@@ -968,8 +1022,10 @@ function verifyWithKind(userId, code, req) {
             && ctEq(totpAtStep(row.secret, step, row.digits), code)) {
             if (markStepUsed(userId, step) === 1) {
                 // The per-IP count is NOT cleared (audit 26): see the Lua
-                // sibling. It ages out (bumpFailedAttemptIp).
+                // sibling. Only this user's own failures from the IP come
+                // off it (audit 28); the rest age out (bumpFailedAttemptIp).
                 clearFailedAttempts(userId);
+                if (ip) creditSuccessIp(ip, userId);
                 // Lazy rekey: re-encrypt under current if the row was
                 // stored under an older version.
                 if (_state.currentKeyVersion != null
@@ -996,7 +1052,9 @@ function verifyWithKind(userId, code, req) {
                 + "WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
                 [time.now(), userId, rows[i].code_hash]);
             if (consumed !== 1) return [false, null];
-            clearFailedAttempts(userId);  // per-IP count kept (see above)
+            clearFailedAttempts(userId);
+            // Only this user's own failures leave the per-IP count (above).
+            if (ip) creditSuccessIp(ip, userId);
             // Same lazy rekey on the recovery-code path.
             if (_state.currentKeyVersion != null
                 && (row.version !== _state.currentKeyVersion || row.unbound)) {
@@ -1006,7 +1064,7 @@ function verifyWithKind(userId, code, req) {
         }
     }
     bumpFailedAttempt(userId);
-    if (ip) bumpFailedAttemptIp(ip);
+    if (ip) bumpFailedAttemptIp(ip, userId);
     return [false, null];
 }
 
@@ -1148,6 +1206,12 @@ const _test = {
     lockoutRemainingIp,
     bumpFailedAttemptIp,
     clearFailedAttemptsIp,
+    creditSuccessIp,
+    ipFailedCount: (ip) => {
+        const r = db.query("SELECT failed_count FROM _hull_totp_attempts_by_ip "
+                         + "WHERE ip = ?", [ip]);
+        return (r && r[0] && r[0].failed_count) || 0;
+    },
     extractIp,
     xffWarnReset: () => { _xffWarnDone = false; },
     // Test-only: backdate a pending row's created_at so cleanup()

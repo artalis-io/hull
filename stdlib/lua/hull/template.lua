@@ -187,8 +187,10 @@ end
 -- control characters percent-encoded: returned verbatim, raw output
 -- ({{{ u | safe_url }}}) emitted `https://a"><script>x</script>` as markup
 -- (audit 26). Encoded, the URL means the same and is inert in either context.
+-- A backslash too (audit 28): browsers read it as "/" in an http(s) URL, so
+-- a relative "/\evil.test" was the protocol-relative "//evil.test".
 local function url_encode_unsafe(s)
-    return (s:gsub("[%c%s\"'<>`]", function(c)
+    return (s:gsub("[%c%s\"'<>`\\]", function(c)
         return string.format("%%%02X", c:byte())
     end))
 end

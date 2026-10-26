@@ -68,7 +68,8 @@ local function main()
 
     -- CANONICAL output only -- derived from app_dir, never a caller-supplied path,
     -- and never through a committed `.hull -> <dir>` link (audit 23).
-    if tool.is_symlink(app_dir .. "/.hull") == true then
+    -- nil (unreadable) refuses too, as every other caller reads it (#853).
+    if tool.is_symlink(app_dir .. "/.hull") ~= false then
         usage_error("publish: " .. app_dir .. "/.hull is a symbolic link")
     end
     local path = app_dir .. "/.hull/discovery.json"

@@ -55,7 +55,10 @@ const providers = Object.create(null);
 
 // An address: at most 254 BYTES of UTF-8 (RFC 5321's path limit), checked
 // before the pattern - as the Lua twin counts it. In UTF-16 units a ~250-
-// character CJK address (~750 bytes) passed (audit 21).
+// character CJK address (~750 bytes) passed (audit 21). An unpaired
+// surrogate has no UTF-8 form (QuickJS writes it as invalid bytes, which the
+// Lua twin's UTF-8 check refuses), so it makes the length Infinity: refused
+// (audit 28).
 const MAX_ADDR = 254;
 function utf8Length(s) {
     let n = 0;
@@ -65,6 +68,7 @@ function utf8Length(s) {
         else if (c < 0x800) n += 2;
         else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
                  (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+        else if (c >= 0xd800 && c <= 0xdfff) return Infinity;
         else n += 3;
     }
     return n;

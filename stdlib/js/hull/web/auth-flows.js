@@ -699,6 +699,9 @@ function isEmailIsh(s) {
         // past the control-character check (audit 21).
         else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
                  (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { bytes += 4; i++; }
+        // An unpaired surrogate has no UTF-8 form: QuickJS writes it as
+        // invalid bytes, which the Lua twin's UTF-8 check refuses (audit 28).
+        else if (c >= 0xd800 && c <= 0xdfff) return false;
         else bytes += 3;
     }
     if (bytes < 3 || bytes > 254) return false;

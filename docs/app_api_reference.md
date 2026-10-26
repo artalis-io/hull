@@ -407,10 +407,14 @@ Authy, 1Password - supports).
   - `opts.lockout_duration_per_ip` (`lockoutDurationPerIp`) must be a
     positive number of seconds; anything else (a string, `0`, NaN) makes
     `init` raise (audit 15). With a `req`, `verify` also counts wrong codes
-    per client IP (`max_failed_attempts_per_ip`, default `20`); the count
-    is NOT reset by a successful verify (audit 26: one IP spread wrong
-    codes over many accounts and reset its count by verifying its own) -
-    failures more than `lockout_duration_per_ip` apart start it again.
+    per client IP (`max_failed_attempts_per_ip`, default `20`). A
+    successful verify takes only that user's own failures from the IP back
+    out of the count (audit 28; the shares live in
+    `_hull_totp_attempts_by_ip_user`) - other accounts' failures stay
+    (audit 26: one IP spread wrong codes over many accounts and reset its
+    count by verifying its own), so typos from many users behind one proxy
+    or NAT do not add up to a lockout. Failures more than
+    `lockout_duration_per_ip` apart start the count again.
   - `opts.pending_ttl` (`pendingTtl`, default `3600`s) - how long an
     unconfirmed enrolment stays valid. A number (`<= 0` disables it, with
     a warning) or `false`; anything else (a string, NaN, infinity) makes

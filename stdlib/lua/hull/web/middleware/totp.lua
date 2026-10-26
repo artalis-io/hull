@@ -222,6 +222,17 @@ CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
     locked_until   INTEGER
 );
 
+-- The failures each account had from one IP (audit 28): a user's success
+-- takes back only its own failures from the IP's count, so failures spread
+-- over other accounts cannot be cleared by verifying one's own.
+CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip_user (
+    ip             VARCHAR(255) NOT NULL,
+    user_id        VARCHAR(255) NOT NULL,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    PRIMARY KEY (ip, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
     ON _hull_totp_recovery(user_id);
 
@@ -230,6 +241,9 @@ CREATE INDEX IF NOT EXISTS _hull_totp_attempts_lf
 
 CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
     ON _hull_totp_attempts_by_ip(last_failed_at);
+
+CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_user_lf
+    ON _hull_totp_attempts_by_ip_user(last_failed_at);
 ]]
 
 -- ── Helpers (private) ──────────────────────────────────────────────
@@ -635,7 +649,10 @@ local function lockout_remaining_ip(ip)
     return remain > 0 and remain or 0
 end
 
-local function bump_failed_attempt_ip(ip)
+-- The IP's count is the sum of the failures every account had from it since
+-- it last started (aged out or locked); _hull_totp_attempts_by_ip_user holds
+-- each account's share, and goes whenever the count starts again.
+local function bump_failed_attempt_ip(ip, user_id)
     if type(ip) ~= "string" or ip == "" then return end
     local now = time.now()
     db.batch(function()
@@ -643,18 +660,33 @@ local function bump_failed_attempt_ip(ip)
             "SELECT failed_count, last_failed_at FROM _hull_totp_attempts_by_ip "
             .. "WHERE ip = ?", { ip })
         local fc = (r and r[1] and r[1].failed_count) or 0
-        -- A success no longer clears the count (audit 26), so it ages out
+        -- A success does not clear the count (audit 26), so it ages out
         -- instead: failures more than lockout_duration_per_ip apart start
         -- the count again.
         local last = r and r[1] and r[1].last_failed_at
         if type(last) == "number" and now - last > _state.lockout_duration_per_ip then
             fc = 0
         end
+        if fc == 0 then
+            -- The count starts again: the shares of the old one go with it.
+            db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?",
+                    { ip })
+        end
         local new_fc = fc + 1
         local locked_until = 0   -- not locked (see bump_failed_attempt)
         if new_fc >= _state.max_failed_attempts_per_ip then
             locked_until = now + _state.lockout_duration_per_ip
             new_fc = 0
+            db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?",
+                    { ip })
+        elseif type(user_id) == "string" then
+            local u = db.query(
+                "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
+                .. "WHERE ip = ? AND user_id = ?", { ip, user_id })
+            local ufc = (u and u[1] and u[1].failed_count) or 0
+            db.upsert("_hull_totp_attempts_by_ip_user", { "ip", "user_id" },
+                { "ip", "user_id", "failed_count", "last_failed_at" },
+                { ip, user_id, ufc + 1, now })
         end
         db.upsert("_hull_totp_attempts_by_ip", { "ip" },
             { "ip", "failed_count", "last_failed_at", "locked_until" },
@@ -662,9 +694,39 @@ local function bump_failed_attempt_ip(ip)
     end)
 end
 
+-- A user's successful verify from an IP takes that user's own failures from
+-- the IP back out of its count (audit 28). Clearing the whole count let one
+-- IP spread wrong codes over many accounts and reset it with its own
+-- (audit 26); keeping all of it locked 2FA for everyone behind one proxy or
+-- NAT once ordinary typos added up to max_failed_attempts_per_ip.
+local function credit_success_ip(ip, user_id)
+    if type(ip) ~= "string" or ip == "" or type(user_id) ~= "string" then
+        return
+    end
+    db.batch(function()
+        local u = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
+            .. "WHERE ip = ? AND user_id = ?", { ip, user_id })
+        local ufc = (u and u[1] and u[1].failed_count) or 0
+        if ufc <= 0 then return end
+        db.exec("DELETE FROM _hull_totp_attempts_by_ip_user "
+                .. "WHERE ip = ? AND user_id = ?", { ip, user_id })
+        local r = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip WHERE ip = ?",
+            { ip })
+        local fc = (r and r[1] and r[1].failed_count) or 0
+        local new_fc = fc - ufc
+        if new_fc < 0 then new_fc = 0 end
+        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = ? "
+                .. "WHERE ip = ?", { new_fc, ip })
+    end)
+end
+
 local function clear_failed_attempts_ip(ip)
     if type(ip) ~= "string" or ip == "" then return end
     db.exec("DELETE FROM _hull_totp_attempts_by_ip WHERE ip = ?",
+            { ip })
+    db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?",
             { ip })
 end
 
@@ -1042,6 +1104,10 @@ function totp.cleanup()
         .. "WHERE (locked_until IS NULL OR locked_until < ?) "
         .. "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
         { now, ip_attempts_cutoff })
+    db.exec(
+        "DELETE FROM _hull_totp_attempts_by_ip_user "
+        .. "WHERE last_failed_at IS NULL OR last_failed_at < ?",
+        { ip_attempts_cutoff })
     return removed
 end
 
@@ -1255,8 +1321,11 @@ function totp.verify_with_kind(user_id, code, req)
             if mark_step_used(user_id, step) == 1 then
                 -- The per-IP count is NOT cleared (audit 26): one IP could
                 -- spread wrong codes over many accounts and reset its count
-                -- by verifying its own. It ages out (bump_failed_attempt_ip).
+                -- by verifying its own. Only this user's own failures from
+                -- the IP come off it (audit 28); the rest age out
+                -- (bump_failed_attempt_ip).
                 clear_failed_attempts(user_id)
+                if ip then credit_success_ip(ip, user_id) end
                 -- Lazy rekey: if the row's secret was decrypted under
                 -- a key version other than the current one (legacy v1
                 -- or an older v2 version after rotation), re-encrypt
@@ -1291,7 +1360,9 @@ function totp.verify_with_kind(user_id, code, req)
                 .. "WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
                 { time.now(), user_id, r.code_hash })
             if consumed ~= 1 then return false, nil end
-            clear_failed_attempts(user_id)  -- per-IP count kept (see above)
+            clear_failed_attempts(user_id)
+            -- Only this user's own failures leave the per-IP count (above).
+            if ip then credit_success_ip(ip, user_id) end
             -- Same lazy rekey on the recovery-code path - the
             -- decrypted secret is in hand so we might as well
             -- migrate it forward.
@@ -1304,7 +1375,7 @@ function totp.verify_with_kind(user_id, code, req)
     end
 
     bump_failed_attempt(user_id)
-    if ip then bump_failed_attempt_ip(ip) end
+    if ip then bump_failed_attempt_ip(ip, user_id) end
     return false, nil
 end
 
@@ -1487,6 +1558,12 @@ require("hull._test_hooks").register("hull.web.middleware.totp", {
     lockout_remaining_ip    = lockout_remaining_ip,
     bump_failed_attempt_ip  = bump_failed_attempt_ip,
     clear_failed_attempts_ip = clear_failed_attempts_ip,
+    credit_success_ip       = credit_success_ip,
+    ip_failed_count         = function(ip)
+        local r = db.query("SELECT failed_count FROM _hull_totp_attempts_by_ip "
+                           .. "WHERE ip = ?", { ip })
+        return (r and r[1] and r[1].failed_count) or 0
+    end,
     extract_ip              = extract_ip,
     xff_warn_reset          = function() _xff_warn_done = false end,
     -- Test-only: backdate a pending row's created_at so cleanup()
