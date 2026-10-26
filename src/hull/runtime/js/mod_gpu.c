@@ -1423,8 +1423,8 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                                     "gpu.async.dispatch: out of memory");
                                 copy_failed = 1;
                             }
+                            JS_FreeCString(ctx, ns);
                         }
-                        if (ns) JS_FreeCString(ctx, ns);
                     }
                     JS_FreeValue(ctx, nv);
 
