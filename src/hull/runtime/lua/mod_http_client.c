@@ -269,6 +269,9 @@ static int lua_http_request(lua_State *L)
         lua_getfield(L, 3, "body");
         if (lua_isstring(L, -1))
             body = lua_tolstring(L, -1, &body_len);
+        /* Keel copies and frames the body: charged before the work, with
+         * nothing held yet, as http.fetch's is (audit 28). */
+        lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
 
         lua_getfield(L, 3, "headers");
         if (lua_istable(L, -1)) {
@@ -345,6 +348,8 @@ static int lua_http_body_method(lua_State *L, const char *method)
     if (lua_isstring(L, 2))
         body = lua_tolstring(L, 2, &body_len);
     int timeout_ms = lua_http_timeout_opt(L, 3, "http.post/put/patch");
+    /* Charged before the headers take scratch (audit 28; http.fetch's is). */
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
 
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
@@ -484,6 +489,9 @@ static int lua_http_fetch(lua_State *L)
         lua_getfield(L, 3, "body");
         if (lua_isstring(L, -1))
             body = lua_tolstring(L, -1, &body_len);
+        /* Keel copies and frames the body: charged before the work, with
+         * nothing held yet, as http.fetch's is (audit 28). */
+        lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
 
         lua_getfield(L, 3, "headers");
         if (lua_istable(L, -1)) {

@@ -12482,6 +12482,40 @@ UTEST(lua_audit22, http_refuses_headers_hulls_client_writes)
     cleanup_lua_caps();
 }
 
+/* Audit 28: the synchronous http.request / post / put / patch never charged
+ * a body (http.fetch's is), so a pcall loop handed Keel a big body to copy
+ * on every call, uncharged. */
+UTEST(lua_audit28, sync_http_bodies_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    static const char *const calls[] = {
+        "http.post('http://x.invalid/', B)",
+        "http.put('http://x.invalid/', B)",
+        "http.patch('http://x.invalid/', B)",
+        "http.request('POST', 'http://x.invalid/', { body = B })",
+    };
+    for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') "
+                 "local B = string.rep('x', 4 * 1024 * 1024) "
+                 "for _ = 1, N do pcall(function() %s end) end", calls[i]);
+        char once[640], loop[640];
+        snprintf(once, sizeof once, "local N = 1 %s", code);
+        snprintf(loop, sizeof loop, "local N = 100 %s", code);
+        EXPECT_EQ_MSG(audit10_run(once, 10000000, err, sizeof err), LUA_OK, err);
+        EXPECT_NE_MSG(audit10_run(loop, 10000000, err, sizeof err), LUA_OK,
+                      calls[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, err);
+    }
+    lua_rt.base.http_cfg = NULL;
+    cleanup_lua_caps();
+}
+
 /* Audit 22: the scratch arena is reset only when a run starts, and
  * crypto.random / db params took from it for good, so one run filled it and
  * every later scratch user in that run failed. */
