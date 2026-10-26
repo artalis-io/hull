@@ -308,6 +308,31 @@ int hl_cap_db_sql_calls_dynamic_sql(const char *sql);
 int hl_cap_db_guard(sqlite3 *db);
 
 /**
+ * @brief sqlite3_prepare_v2 for app SQL on a guarded connection: also refuses
+ *        (SQLITE_AUTH, "not authorized") a statement that deletes
+ *        sqlite_stat* rows when it is not a DROP / ANALYZE, a decision the
+ *        authorizer can only make once the whole statement has been seen
+ *        (`ANALYZE t` deletes t's rows before its own callback; audit 29).
+ *
+ * Every app statement is prepared through it (the statement cache and
+ * @ref hl_cap_db_exec_script); it also clears the authorizer's per-prepare
+ * state before and after, so it never carries from one statement to another.
+ *
+ * @return an SQLite result code, as sqlite3_prepare_v2.
+ */
+int hl_cap_db_prepare(sqlite3 *db, const char *sql, int len,
+                      sqlite3_stmt **out, const char **tail);
+
+/**
+ * @brief Run a `;`-separated script, no parameters, each statement prepared
+ *        through @ref hl_cap_db_prepare (sqlite3_exec prepares with no such
+ *        check).
+ *
+ * @return `0`, or `-1` with the error readable through sqlite3_errmsg.
+ */
+int hl_cap_db_exec_script(sqlite3 *db, const char *sql);
+
+/**
  * @brief Process-wide SQLite setup, before the first connection opens: the
  *        SQLITE_CONFIG_MALLOC wrapper that charges every allocation to the
  *        calling thread's bound budget (cap/db_budget.h) and fails it once

@@ -216,21 +216,16 @@ static int sqlite_exec(HlDbHandle *h, const char *sql,
     return rc;
 }
 
-/* Multi-statement script, no params. sqlite3_exec compiles + runs every
- * ;-separated statement in one call (unlike the single-statement stmt
- * cache path). The specific error stays reachable via sqlite3_errmsg. */
+/* Multi-statement script, no params: compiles + runs every ;-separated
+ * statement in one call (unlike the single-statement stmt cache path), each
+ * through hl_cap_db_prepare. The specific error stays reachable via
+ * sqlite3_errmsg. */
 static int sqlite_exec_script(HlDbHandle *h, const char *sql)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (sqlite_refuse_broken(s)) return -1;
     s->own_err = NULL;
-    char *err = NULL;
-    int rc = sqlite3_exec(s->db, sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        sqlite3_free(err);
-        return -1;
-    }
-    return 0;
+    return hl_cap_db_exec_script(s->db, sql);
 }
 
 static int sqlite_begin(HlDbHandle *h)

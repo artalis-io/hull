@@ -149,10 +149,18 @@ kept the rest. Check the list below before upgrading.
 **Runtime - audit 29 fixes (caps / DB)**
 - **App SQL cannot write SQLite's bookkeeping tables.** `UPDATE sqlite_sequence SET seq =
   9223372036854775807` (or an INSERT naming `_hull_jobs`) made every later AUTOINCREMENT insert
-  into a `_hull_*` table fail `SQLITE_FULL` without the SQL naming one. INSERT / UPDATE of
-  `sqlite_sequence` and `sqlite_stat*` in `main` / `temp` is refused; DELETE stays legal (DROP
-  TABLE and ANALYZE run one themselves), as does the rename of a sequence row an `ALTER TABLE ...
-  RENAME` makes, and VACUUM's copy.
+  into a `_hull_*` table fail `SQLITE_FULL` without the SQL naming one, and `DELETE FROM
+  sqlite_sequence` made the `_hull_jobs` / `_hull_job_events` ids restart after a purge, so a jobs
+  event subscriber whose cursor was past the reused ids missed events. INSERT / UPDATE of
+  `sqlite_sequence` and `sqlite_stat*` in `main` / `temp` is refused, and so is an app DELETE of
+  either (in any database, from a CTE, or from a trigger the app defines on its own table), as is
+  `DROP TABLE sqlite_stat1`. The DELETEs SQLite runs itself stay legal - those of DROP TABLE / DROP
+  INDEX, which follow the statement's own DROP callback, and of `ANALYZE <table>`, which precede
+  its ANALYZE callback, so every app statement is now prepared through `hl_cap_db_prepare`, which
+  refuses a statement that ends its prepare with a `sqlite_stat*` DELETE and no DROP / ANALYZE (a
+  multi-statement script runs statement by statement through it, no longer through
+  `sqlite3_exec`) - as does the rename of a sequence row an `ALTER TABLE ... RENAME` makes, and
+  VACUUM's copy.
 - **The agent's read-only SQL gate checks every pragma, ATTACH, DETACH and ANALYZE.** An
   argument-less `PRAGMA optimize` (which runs ANALYZE and writes) passed; so did `ATTACH ':memory:'`
   and DETACH. Bare pragmas pass only when they report a value (`user_version`, `page_count`, ...)
