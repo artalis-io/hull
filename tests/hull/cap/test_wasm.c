@@ -355,6 +355,9 @@ UTEST(hl_cap_wasm, log_escape_truncates)
     ASSERT_TRUE(strlen(out) < sizeof out);
     ASSERT_TRUE(strstr(out, "...") != NULL);
     ASSERT_TRUE(strchr(out, '\n') == NULL);
+    /* The "..." never splits an escape (fuzz_wasm_log_escape: "a\x0..."). */
+    ASSERT_EQ((size_t)4, hl_cap_wasm_log_escape("a\x01" "bcdef", 7, out, sizeof out));
+    ASSERT_STREQ("a...", out);
 }
 
 UTEST(hl_cap_wasm, init_destroy)

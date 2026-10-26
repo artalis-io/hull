@@ -1904,12 +1904,13 @@ jobs:
           make CC=clang \
             fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff \
             fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_ssh \
-            fuzz/fuzz_log_escape fuzz/fuzz_http_guard
+            fuzz/fuzz_log_escape fuzz/fuzz_http_guard \
+            fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name
       - name: Run core fuzzers (60s each)
-        timeout-minutes: 12
+        timeout-minutes: 15
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match encoding ssh log_escape http_guard; do
+          for f in sh_json path_normalize mime_sniff host_match encoding ssh log_escape http_guard wasm_log_escape migrate_name; do
             echo "== fuzz $f =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
           done
