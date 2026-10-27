@@ -2352,7 +2352,7 @@ UTEST(js_cap, crypto_hmac_sha256)
     cleanup_js_caps();
 }
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 UTEST(js_cap, crypto_sign_and_rsa_private_pem)
 {
     /* The EC key and the RSA components are the ones test_asym.c signs with

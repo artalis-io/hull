@@ -5618,7 +5618,7 @@ UTEST(lua_stdlib, ssh_hostkey_vectors_suite)
     EXPECT_EQ(pass, 13LL);
 }
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 /* The same script with the capability layer, so hull.crypto is real and the
  * OpenSSL signatures are verified by mbedTLS through crypto.verify: 3 more
  * tests. The exact count is the point - a require that quietly failed would
@@ -5652,7 +5652,7 @@ UTEST(lua_stdlib, ssh_rsa_key_suite)
     EXPECT_EQ(pass, 3LL);
 }
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 UTEST(lua_stdlib, ssh_rsa_key_real_crypto)
 {
     init_lua_with_caps();
@@ -5683,7 +5683,7 @@ UTEST(lua_stdlib, ssh_ecdsa_key_suite)
     EXPECT_EQ(pass, 5LL);
 }
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 UTEST(lua_stdlib, ssh_ecdsa_key_real_crypto)
 {
     init_lua_with_caps();
@@ -5739,7 +5739,7 @@ UTEST(lua_stdlib, ssh_chacha_suite)
     EXPECT_EQ(pass, 10LL);
 }
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 UTEST(lua_stdlib, ssh_chacha_real_crypto)
 {
     init_lua_with_caps();

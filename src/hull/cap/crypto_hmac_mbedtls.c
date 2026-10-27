@@ -6,11 +6,11 @@
  *
  * Build dependency:
  *   This file links mbedTLS MD + SHA1/SHA256/SHA512. Hull pulls in
- *   mbedTLS unconditionally when HL_ENABLE_HTTP_CLIENT=1 (the TLS
- *   client needs it), which is the default build. On builds without
- *   mbedTLS (HL_ENABLE_HTTP_CLIENT=0 AND HL_ENABLE_HTTP_SERVER=0),
- *   the file is still compiled but `compute` short-circuits with
- *   "internal failure" so the symbol is always present at link time.
+ *   mbedTLS whenever HL_LINK_TLS is defined (an HTTP half, or a
+ *   network DB / KV backend), which includes the default build. On
+ *   builds without mbedTLS (pure-compute), the file is still compiled
+ *   but `compute` short-circuits with "internal failure" so the symbol is always
+ *   present at link time.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -21,7 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_LINK_TLS
 #include <mbedtls/md.h>
 
 static mbedtls_md_type_t md_type_for(HlCryptoHmacAlg alg)
@@ -66,7 +66,7 @@ static int mbedtls_compute(const HlCryptoHmacBackend *self,
     return rc == 0 ? 0 : -1;
 }
 
-#else /* !HL_ENABLE_HTTP */
+#else /* !HL_LINK_TLS */
 
 static int mbedtls_supports(HlCryptoHmacAlg alg)
 {
@@ -92,7 +92,7 @@ const HlCryptoHmacBackend hl_crypto_hmac_backend_mbedtls = {
     .compute  = mbedtls_compute,
 };
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_LINK_TLS
 /* STRONG override of the base's weak hl_crypto_hmac_active_backend() (cap/crypto.c):
  * when this real mbedTLS HMAC TU is linked (or composed into libhull_feature-tls.a),
  * HMAC uses mbedTLS. Absent on a TLS-less base (this branch compiled out), where

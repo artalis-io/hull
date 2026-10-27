@@ -47,6 +47,11 @@ ifeq ($(HL_LINK_TLS),0)
       %/test_asym.c %/test_ca_trust.c %/test_net_resolve.c %/test_net_stream.c \
       %/test_ssh.c %/test_agent_probe.c,$(TEST_SRCS))
 endif
+# cap/net_stream.c and cap/ssh.c go whenever both HTTP halves are off, even
+# with TLS linked for a network DB (the Makefile's CAP_SRCS filter).
+ifeq ($(HL_ENABLE_HTTP_CLIENT)$(HL_ENABLE_HTTP_SERVER),00)
+  TEST_SRCS := $(filter-out %/test_net_stream.c %/test_ssh.c,$(TEST_SRCS))
+endif
 
 # Drop DB-dependent tests in pure-compute builds.
 # test_js.c and test_lua.c exercise the full orchestration surface
@@ -128,13 +133,6 @@ endif
 
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
 TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
-# HL_TEST_LINK_TLS tells a test whether this build links TLS at all (an HTTP
-# half or a network DB / KV backend): the mbedTLS-backed crypto (AES-CTR,
-# ChaCha20, RSA / ECDSA) and the CA bundle parse exist only then. There is no
-# production macro for it - HL_ENABLE_HTTP is off on a postgres-only build.
-ifeq ($(HL_LINK_TLS),1)
-$(TEST_BINS): CFLAGS += -DHL_TEST_LINK_TLS
-endif
 
 # Test objects need hull capability sources but NOT main.o or runtime objects
 TEST_CAP_OBJS := $(CAP_OBJS)
@@ -925,7 +923,7 @@ $(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODUL
 
 # CA bundle test - links against cacert.o and mbedTLS for parse verification.
 # A build that links no TLS (HL_LINK_TLS=0: pure-compute) has no mbedTLS to
-# parse with, so the parse leg needs HL_TEST_LINK_TLS (set for TEST_BINS above).
+# parse with, so the parse leg needs HL_LINK_TLS (the Makefile's -D of that gate).
 $(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS)
@@ -1066,6 +1064,10 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),1)
 endif
 ifneq ($(HL_ENABLE_HTTP_ANY),0)
   CFLAGS += -DHL_ENABLE_HTTP
+endif
+# The mbedTLS crypto backends and the SBOM entries key off it (Makefile).
+ifeq ($(HL_LINK_TLS),1)
+  CFLAGS += -DHL_LINK_TLS
 endif
 # Re-add version string (the := above clobbers earlier += additions)
 CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"

@@ -251,11 +251,11 @@ static const HlSbomEntry sbom_entries[] = {
         .embedded_blob_sha256 = NULL,
     },
 
-#if defined(HL_ENABLE_HTTP)
+#if defined(HL_LINK_TLS)
     /* ── Submodule: HTTP server library (own project) ──
-     * Linked whenever either HTTP half is on; the pure-compute flavor
-     * (HL_ENABLE_HTTP=0) fully unlinks Keel (poll backend replaces it), so
-     * gate the SBOM entry on the same macro. */
+     * Linked whenever TLS is (HL_LINK_TLS: an HTTP half, or a network DB /
+     * KV backend, which uses Keel's KlTls without HTTP); the pure-compute
+     * flavor fully unlinks Keel (poll backend replaces it). */
     {
         .name = "keel",
         .in_libhull = 1,
@@ -320,11 +320,12 @@ static const HlSbomEntry sbom_entries[] = {
     },
 #endif
 
-#if defined(HL_ENABLE_HTTP)
+#if defined(HL_LINK_TLS)
     /* ── Snapshot: mbedTLS ──
-     * Linked whenever either HTTP half is on (Keel ships both); the
-     * pure-compute flavor drops it entirely (crypto falls back to the
-     * in-tree SHA + TweetNaCl), so gate the SBOM entry to match. */
+     * Linked whenever TLS is (HL_LINK_TLS: an HTTP half, or a Postgres /
+     * MySQL / Valkey backend - listed under HL_ENABLE_HTTP alone, a
+     * postgres-only build's SBOM left it out); the pure-compute flavor
+     * drops it entirely (crypto falls back to the in-tree SHA + TweetNaCl). */
     {
         .name = "mbedtls",
         .in_libhull = 1,

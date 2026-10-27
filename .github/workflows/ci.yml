@@ -1499,6 +1499,15 @@ jobs:
           # silently regressed back onto an mbedTLS symbol.
           - name: pure-compute (no http at all)
             flags: HL_ENABLE_HTTP=0
+            unit_tests: true
+          # A network DB backend with no HTTP: links Keel + mbedTLS (HL_LINK_TLS)
+          # without HL_ENABLE_HTTP. Code that asked "is HTTP on" when it meant
+          # "is mbedTLS linked" ran the fail-closed crypto stubs here (no
+          # AES-CTR / ChaCha20 / RSA / ECDSA) and dropped mbedTLS + Keel from the
+          # SBOM; the unit tests below are what catch that class.
+          - name: postgres, no http
+            flags: HL_ENABLE_HTTP=0 HL_ENABLE_POSTGRES=1
+            unit_tests: true
           # PostgreSQL backend on top of SQLite: links the pure-C wire client
           # (cap/pgwire.c, cap/pg_conn.c, cap/db_postgres.c) + the shared TLS
           # client into the full binary. Guards the POSTGRES=1 link + the
@@ -1573,12 +1582,12 @@ jobs:
         timeout-minutes: 3
         run: make ${{ matrix.flags }} e2e-cli-poll
 
-      # The unit tests in this configuration. Nothing ran them before, and
-      # they did not even build: suites for subsystems pure-compute drops
-      # (HTTP, SMTP, ws, TLS, Keel transports) were still discovered, and
-      # tests needing HTTP or a TLS-backed cipher were not guarded.
-      - name: Unit tests (pure-compute)
-        if: matrix.name == 'pure-compute (no http at all)'
+      # The unit tests in the configurations without HTTP. Nothing ran them
+      # before: in pure-compute they did not even build (suites for subsystems
+      # it drops were still discovered), and a DB-only build passed its link
+      # check while its mbedTLS crypto backends were compiled out.
+      - name: Unit tests (${{ matrix.name }})
+        if: matrix.unit_tests
         timeout-minutes: 20
         run: make ${{ matrix.flags }} test
 

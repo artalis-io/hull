@@ -308,6 +308,13 @@ endif
 ifeq ($(HL_ENABLE_VALKEY),1)
 CFLAGS += -DHL_ENABLE_VALKEY
 endif
+# HL_LINK_TLS (mk/flags.mk): Keel + mbedTLS are linked - an HTTP half or a
+# network DB / KV backend is on. HL_ENABLE_HTTP is off on a postgres-only
+# build, so code that asks "is the TLS stack here" (the SBOM, the tests of the
+# mbedTLS-backed crypto) tests this, not HTTP.
+ifeq ($(HL_LINK_TLS),1)
+CFLAGS += -DHL_LINK_TLS
+endif
 
 # Derived umbrella. `override` forces the derived value even if a
 # contradictory HL_ENABLE_DB=1 was passed with all backends off (resolves

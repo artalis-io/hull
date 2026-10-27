@@ -21,10 +21,11 @@
 #include <stdint.h>
 #include <string.h>
 
-/* mbedTLS is linked whenever HL_ENABLE_HTTP_CLIENT or HL_ENABLE_HTTP_SERVER is
- * on; the Makefile defines HL_ENABLE_HTTP in that case. Same guard the asym and
- * hmac backends use, so a pure-compute build compiles this to nothing. */
-#ifdef HL_ENABLE_HTTP
+/* mbedTLS is linked whenever HL_LINK_TLS is defined: an HTTP half, or a network
+ * DB / KV backend (a postgres-only build links it without HL_ENABLE_HTTP, and
+ * under that guard got the fail-closed stubs: no AES-CTR / ChaCha20). Same guard the asym and hmac backends use, so a pure-compute build
+ * compiles this to nothing. */
+#ifdef HL_LINK_TLS
 
 #include <mbedtls/gcm.h>
 #include <mbedtls/aes.h>
@@ -169,4 +170,4 @@ const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void)
     return &hl_crypto_aead_backend_mbedtls;
 }
 
-#endif /* HL_ENABLE_HTTP */
+#endif /* HL_LINK_TLS */
