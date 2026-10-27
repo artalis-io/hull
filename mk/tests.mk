@@ -23,6 +23,31 @@ else ifeq ($(RUNTIME),lua)
   TEST_SRCS := $(filter-out %/test_js.c %/test_js_session.c %/test_js_lexer.c %/test_js_parser.c %/test_js_conformance.c %/test_js_annotations.c %/test_js_scope.c %/test_js_frontend.c %/test_js_generation.c %/test_js_fuzz_entry.c,$(TEST_SRCS))
 endif
 
+# The release / verify helpers' rules (below) exist only with the HTTP client:
+# release_io.c is not compiled without it. Discovery has to agree, or
+# `make HL_ENABLE_HTTP=0 test` stops at "No rule to make target".
+ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
+  TEST_SRCS := $(filter-out %/test_release_io.c %/test_verify_self.c %/test_platform_sig.c,$(TEST_SRCS))
+endif
+
+# The same for the subsystems a build without them does not compile: the
+# outbound HTTP client and SMTP, the inbound server (body reader, static
+# files, WebSocket registry), and - with no TLS / Keel linked at all
+# (HL_LINK_TLS=0, i.e. pure-compute) - the TLS client, the mbedTLS crypto
+# backend, the CA trust resolver and the Keel-backed network transports.
+ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
+  TEST_SRCS := $(filter-out %/test_http.c,$(TEST_SRCS))
+  TEST_SRCS := $(foreach f,$(TEST_SRCS),$(if $(findstring /test_smtp,$(f)),,$(f)))
+endif
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
+  TEST_SRCS := $(filter-out %/test_body.c %/test_static.c %/test_ws.c,$(TEST_SRCS))
+endif
+ifeq ($(HL_LINK_TLS),0)
+  TEST_SRCS := $(filter-out %/test_tls_client.c %/test_tls_mbedtls_multi_ctx.c \
+      %/test_asym.c %/test_ca_trust.c %/test_net_resolve.c %/test_net_stream.c \
+      %/test_ssh.c %/test_agent_probe.c,$(TEST_SRCS))
+endif
+
 # Drop DB-dependent tests in pure-compute builds.
 # test_js.c and test_lua.c exercise the full orchestration surface
 # (including db.*) - they reference hl_db_backend_sqlite directly.
@@ -103,6 +128,13 @@ endif
 
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
 TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
+# HL_TEST_LINK_TLS tells a test whether this build links TLS at all (an HTTP
+# half or a network DB / KV backend): the mbedTLS-backed crypto (AES-CTR,
+# ChaCha20, RSA / ECDSA) and the CA bundle parse exist only then. There is no
+# production macro for it - HL_ENABLE_HTTP is off on a postgres-only build.
+ifeq ($(HL_LINK_TLS),1)
+$(TEST_BINS): CFLAGS += -DHL_TEST_LINK_TLS
+endif
 
 # Test objects need hull capability sources but NOT main.o or runtime objects
 TEST_CAP_OBJS := $(CAP_OBJS)
@@ -891,7 +923,9 @@ $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODUL
 $(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(MODULE_OBJ) $(BUILDDIR)/cap_gpu_feature.o $(BUILDDIR)/cap_tui_feature.o
 
-# CA bundle test - links against cacert.o and mbedTLS for parse verification
+# CA bundle test - links against cacert.o and mbedTLS for parse verification.
+# A build that links no TLS (HL_LINK_TLS=0: pure-compute) has no mbedTLS to
+# parse with, so the parse leg needs HL_TEST_LINK_TLS (set for TEST_BINS above).
 $(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS)

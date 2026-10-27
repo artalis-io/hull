@@ -1573,6 +1573,15 @@ jobs:
         timeout-minutes: 3
         run: make ${{ matrix.flags }} e2e-cli-poll
 
+      # The unit tests in this configuration. Nothing ran them before, and
+      # they did not even build: suites for subsystems pure-compute drops
+      # (HTTP, SMTP, ws, TLS, Keel transports) were still discovered, and
+      # tests needing HTTP or a TLS-backed cipher were not guarded.
+      - name: Unit tests (pure-compute)
+        if: matrix.name == 'pure-compute (no http at all)'
+        timeout-minutes: 20
+        run: make ${{ matrix.flags }} test
+
   reproducibility:
     needs: [classify]
     if: needs.classify.outputs.run_core_common == 'true'

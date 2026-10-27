@@ -1309,8 +1309,15 @@ NET_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/net/%.c,$(BUILDDIR)/net_%.o,$(NET_
 # pull manifest.o (shared helpers) + the relevant extractor.
 MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_js.o
 MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o
+# The test runtimes' mod_test.c (its only caller) is dropped without the HTTP
+# server, as cap_test.o is, so the dispatch helper goes with it.
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
+CAP_TEST_JS_OBJ  :=
+CAP_TEST_LUA_OBJ :=
+else
 CAP_TEST_JS_OBJ  := $(BUILDDIR)/cap_test_dispatch.o
 CAP_TEST_LUA_OBJ := $(BUILDDIR)/cap_test_dispatch.o
+endif
 # Note: the JS/Lua test bindings now live in {JS,LUA}_RT_OBJS
 # (runtime/{lua,js}/mod_test.c); only the pure-C dispatch helper needs
 # to be linked separately. (Item E: cap layer is now runtime-free.)

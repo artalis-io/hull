@@ -186,8 +186,10 @@ UTEST(sbom, format_cyclonedx_structure)
      * (currently lua, quickjs, sqlite, mbedtls, tinycc). The mbedTLS
      * entry is unconditional in any build with HTTP enabled, so this
      * assertion holds on the default test build. */
+#ifdef HL_ENABLE_HTTP   /* sbom.c lists mbedTLS under the same test */
     ASSERT_NE_MSG(strstr(out, "\"cpe\":\"cpe:2.3:a:arm:mbed_tls"), NULL,
                   "CycloneDX must emit cpe for mbedTLS");
+#endif
     free(out);
 }
 
@@ -222,7 +224,9 @@ UTEST(sbom, json_emits_tier_and_composition)
     ASSERT_NE_MSG(strstr(out, "\"with_features\""), NULL, "with-feature catalog");
     ASSERT_NE_MSG(strstr(out, "\"duckdb\""), NULL, "catalog lists duckdb");
     ASSERT_NE_MSG(strstr(out, "\"tier\":\"feature\""), NULL, "a feature-tier component");
+#ifdef HL_ENABLE_HTTP
     ASSERT_NE_MSG(strstr(out, "\"composed_in\":\"keel\""), NULL, "keel composed_in stem");
+#endif
     free(out);
 }
 
@@ -421,7 +425,9 @@ UTEST(sbom, libhull_scope_filters_and_renames)
     /* Subject renamed, core kept, JS runtime dropped, strictly fewer
      * components than the whole-hull SBOM. */
     ASSERT_NE_MSG(strstr(lh, "libhull"), NULL, "libhull scope names the subject");
+#ifdef HL_ENABLE_HTTP
     ASSERT_NE_MSG(strstr(lh, "mbedtls"), NULL, "libhull keeps the linked core");
+#endif
     ASSERT_EQ_MSG(strstr(lh, "quickjs"), NULL, "libhull drops the JS runtime");
     ASSERT_LT(lh_components, def_components);
 
@@ -479,8 +485,13 @@ UTEST(sbom, pure_compute_flavor_drops_http_deps)
     hl_sbom_set_scope_flavor("full");
     char *fl = format_to_string(HL_SBOM_JSON);
     ASSERT_NE(fl, NULL);
+#ifdef HL_ENABLE_HTTP
     ASSERT_NE_MSG(strstr(fl, "mbedtls"), NULL, "full keeps mbedTLS");
     ASSERT_LT(sbom_count(pc, "\"name\""), sbom_count(fl, "\"name\""));
+#else
+    /* A build with no HTTP has no HTTP deps to drop: the two lists match. */
+    ASSERT_EQ(sbom_count(pc, "\"name\""), sbom_count(fl, "\"name\""));
+#endif
 
     free(pc);
     free(fl);

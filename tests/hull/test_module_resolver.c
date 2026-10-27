@@ -35,10 +35,12 @@ static void add_module(HlManifest *m, const char *name, uint8_t api_major)
     m->modules_declared     = 1;
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 static void add_host(HlManifest *m, const char *host)
 {
     m->hosts[m->hosts_count++] = host;
 }
+#endif
 
 static void add_fs_read(HlManifest *m, const char *path)
 {
@@ -144,6 +146,7 @@ UTEST(module_resolver, short_and_canonical_names_resolve_the_same)
     ASSERT_EQ(memcmp(&sa, &sb, sizeof(sa)), 0);
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(module_resolver, http_with_hosts_admitted)
 {
     HlManifest m;
@@ -156,6 +159,7 @@ UTEST(module_resolver, http_with_hosts_admitted)
     ASSERT_EQ(hl_module_resolver_resolve(&m, &s, err, sizeof(err)), 0);
     ASSERT_TRUE(hl_module_set_contains_name(&s, "hull/http-client"));
 }
+#endif
 
 UTEST(module_resolver, fs_with_read_path_admitted)
 {
@@ -324,6 +328,7 @@ UTEST(module_resolver, duplicate_declaration_rejected)
  * filled in at runtime via a tool, etc.) can be useful without paths.
  * The resolver only hard-blocks compile-time gates. */
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(module_resolver, http_client_without_hosts_admitted)
 {
     HlManifest m;
@@ -337,6 +342,7 @@ UTEST(module_resolver, http_client_without_hosts_admitted)
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(err[0], '\0');
 }
+#endif
 
 UTEST(module_resolver, fs_without_paths_admitted)
 {
@@ -391,6 +397,7 @@ UTEST(module_resolver, jwt_auto_admits_crypto)
     ASSERT_TRUE(hl_module_set_contains_spec(&s, crypto));
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(module_resolver, session_auto_admits_db_and_crypto)
 {
     HlManifest m;
@@ -413,6 +420,7 @@ UTEST(module_resolver, session_auto_admits_db_and_crypto)
     ASSERT_TRUE(hl_module_set_contains_spec(&s, db));
     ASSERT_TRUE(hl_module_set_contains_spec(&s, crypto));
 }
+#endif
 
 #ifndef HL_ENABLE_GPU
 UTEST(module_resolver, gpu_rejected_when_compiled_out)
@@ -655,6 +663,7 @@ UTEST(build_flavor, caps_clear_http)
     ASSERT_EQ((int)hl_build_flavor_caps(NULL, base), (int)base);
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(build_flavor, pure_compute_rejects_http_server)
 {
     HlManifest m;
@@ -673,7 +682,9 @@ UTEST(build_flavor, pure_compute_rejects_http_server)
     ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, pc, err, sizeof(err)), -1);
     ASSERT_TRUE(strstr(err, "HTTP_SERVER") != NULL);
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(build_flavor, pure_compute_rejects_http_client)
 {
     HlManifest m;
@@ -691,6 +702,7 @@ UTEST(build_flavor, pure_compute_rejects_http_client)
     ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, pc, err, sizeof(err)), -1);
     ASSERT_TRUE(strstr(err, "HTTP_CLIENT") != NULL);
 }
+#endif
 
 UTEST(build_flavor, auto_picks_minimal)
 {
@@ -717,6 +729,7 @@ UTEST(build_flavor, ssh_needs_the_socket_layer_not_http)
     ASSERT_TRUE((ssh->required_caps & HL_MOD_CAP_HTTP) == 0);
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(module_resolver, ssh_admits_what_it_is_built_from)
 {
     /* hull/ssh requires hull.crypto (the key exchange and signatures),
@@ -738,7 +751,9 @@ UTEST(module_resolver, ssh_admits_what_it_is_built_from)
         ASSERT_TRUE(hl_module_set_contains_spec(&s, spec));
     }
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(build_flavor, auto_from_resolved_manifest)
 {
     HlManifest m;
@@ -754,5 +769,6 @@ UTEST(build_flavor, auto_from_resolved_manifest)
     /* An app needing HTTP -> full (the only HTTP-capable flavor now). */
     ASSERT_STREQ(hl_build_flavor_auto(req)->name, "full");
 }
+#endif
 
 UTEST_MAIN();
