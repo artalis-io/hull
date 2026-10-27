@@ -10,6 +10,25 @@ release-artifact layout).
 
 ### Fixes
 
+- **JS: `conn.close()` inside a ws client's `onClose` / `onError` was a use after free**
+  (audit 30). The connection was not yet marked closed while the callback ran, so `close()`
+  armed the 5 s close-handshake deadline after the callback's caller had disarmed it; the
+  client object was then released and freed with the timer still armed, and the deadline fired
+  into freed memory (and could call `onClose` again through it). The connection is now marked
+  closed before `onClose` / `onError` run (in both runtimes: `close()` there is a no-op, `send()`
+  throws as on any closed client), and the JS finalizer cancels any deadline still armed, as the
+  Lua `__gc` already did.
+- **JS: an ended handler's op could hold another request's response** (audit 30). A handler that
+  awaited a promise Hull does not drive is ended at once; when a later request settled that
+  promise, the first handler resumed inside the later request's job drain, and an op it then
+  started (`hull.sleep`, `http.fetch`, `db.async`, ...) was taken for the later request's: it
+  suspended that connection and the client waited for the first handler's op (a 2 s
+  `hull.sleep` delayed an unrelated response by 2 s). QuickJS now runs each promise job with
+  the tag of the code that awaited it (HULL PATCH 0008, docs/quickjs_patches.md), every entry
+  is a run with its own tag, and an op made by another run's code runs detached, attached to no
+  request and part of no run (app.main's own continuations stay main's). The same holds for a
+  timer's or ws callback's run resumed inside another entry.
+
 - **`time.now()` could lag the other clocks by a second on Linux.** It read `time()`, which
   glibc serves from the coarse clock, a few milliseconds behind `CLOCK_REALTIME`. Just after a
   second boundary it still named the previous second while `time.now_ms()` / `nowMs()` and

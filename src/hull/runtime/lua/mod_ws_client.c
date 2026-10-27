@@ -357,6 +357,10 @@ static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
     (void)ws;
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
     lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
+    /* Over before on_close runs (audit 30): a conn:close() from it armed the
+     * close deadline after the disarm above (__gc cancelled it, but until
+     * then it held the userdata for a connection that had ended). */
+    ud->closed = 1;
 
     if (ud->on_close_ref != LUA_NOREF) {
         HlWscCall c = { ud->on_close_ref, ud->self_ref, 2, reason, reason_len,
@@ -373,6 +377,7 @@ static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
     (void)ws;
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
     lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
+    ud->closed = 1;   /* terminal: as in on_close (audit 30) */
     if (ud->on_error_ref == LUA_NOREF) {
         log_error("[hull:ws:client] error: %s", msg ? msg : "unknown");
         lua_ws_client_finish(ud);

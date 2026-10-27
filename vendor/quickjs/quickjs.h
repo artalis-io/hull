@@ -937,6 +937,13 @@ void JS_SetWorkHandler(JSRuntime *rt, JSWorkHandler *cb, void *opaque);
    valid until it is replaced or the runtime is freed. See Hull's
    docs/quickjs_patches.md. */
 void JS_SetStopFlag(JSRuntime *rt, int *flag);
+/* HULL PATCH 0008: a tag the embedder gives the code it runs. A job runs
+   with the tag current when it was queued - a promise reaction job with
+   the tag current when its handler was registered (the `await` or `then`),
+   not the one current when the promise was settled - and the caller's tag
+   is restored after it. 0 until set. See Hull's docs/quickjs_patches.md. */
+void JS_SetJobTag(JSRuntime *rt, uint64_t tag);
+uint64_t JS_GetJobTag(JSRuntime *rt);
 /* if can_block is TRUE, Atomics.wait() can be used */
 void JS_SetCanBlock(JSRuntime *rt, JS_BOOL can_block);
 /* select which debug info is stripped from the compiled code */

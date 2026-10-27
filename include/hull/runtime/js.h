@@ -183,6 +183,16 @@ typedef struct HlJS {
      * a continuation created now takes a reference, and kills it when the
      * handler completes or the continuation is cancelled. */
     struct HlReqLife *active_life;
+    /* The run whose code the active_* fields describe (audit 30). Every
+     * entry starts a run with a fresh tag (hl_js_run_tag_new), a resume
+     * re-enters its continuation's (hl_js_run_tag_enter), and QuickJS runs a
+     * promise job with the tag current where it was awaited (HULL PATCH
+     * 0008). A job of another run that this entry's drain runs - a handler
+     * that awaited a promise this entry settled - has another tag, and the
+     * op it makes is not this entry's (hl_js_async_cont_create). */
+    uint64_t        run_tag_next;   /* last tag handed out */
+    uint64_t        entry_tag;      /* the active run's */
+    uint64_t        cli_main_tag;   /* app.main's own run's (0 = none) */
 
     /* Every middleware req.ctx stored on a request (reqctx.h), so one whose
      * request ended without reaching a handler is freed (dispatch.c). */

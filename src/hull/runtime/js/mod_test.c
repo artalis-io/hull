@@ -247,6 +247,10 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     /* Likewise the case's wall-clock deadline: the request's arm set one of
      * its own, and the case runs on to its own (cap/run_watchdog.h). */
     uint64_t saved_deadline = hl_run_watch_save(&tjs->run_watch);
+    /* And its run tag, which the request's arm replaced (audit 30): the
+     * case's code after this call is the case's run. */
+    uint64_t saved_entry_tag = tjs->entry_tag;
+    uint64_t saved_job_tag   = JS_GetJobTag(tjs->rt);
     int hold = hl_db_registry_open_txn(tjs->base.db_registry) != NULL;
     if (hold) hl_db_registry_guard_hold(1);
     HlTestResult result;
@@ -264,6 +268,8 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
             tjs->budget_tripped = 1;
     }
     hl_run_watch_restore(&tjs->run_watch, saved_deadline);
+    tjs->entry_tag = saved_entry_tag;
+    JS_SetJobTag(tjs->rt, saved_job_tag);
     if (!tjs->budget_tripped && hl_run_watch_stopped(&tjs->run_watch)) {
         tjs->budget_tripped = 1;
         tjs->budget_timed_out = 1;
