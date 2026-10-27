@@ -749,11 +749,12 @@ app.main(function(ctx)
 end)
 LUA
 sed "s/^local WORK = false/local WORK = true/" "$A30DIR/a30.lua" > "$A30DIR/work.lua"
-./build/hull "$A30DIR/a30.lua" -d "$DSN" >/dev/null 2>&1
+a30_fail() { echo "::error jobs audit 30: $1"; echo "--- hull stderr ---"; cat "$A30DIR/log"; exit 1; }
+./build/hull "$A30DIR/a30.lua" -d "$DSN" >>"$A30DIR/log" 2>&1 || a30_fail "a30.lua rc=$?"
 docker exec "$CONTAINER" psql -U hull -d hulldb -q -c "UPDATE _hull_cron SET next_run_at=1 WHERE name='a30c'" >/dev/null 2>&1 || true
-./build/hull "$A30DIR/a30.lua" -d "$DSN" >/dev/null 2>&1
+./build/hull "$A30DIR/a30.lua" -d "$DSN" >>"$A30DIR/log" 2>&1 || a30_fail "a30.lua rc=$?"
 a30kept=$(docker exec "$CONTAINER" psql -U hull -d hulldb -t -A -c "SELECT next_run_at FROM _hull_cron WHERE name='a30c'" 2>/dev/null | tr -d '[:space:]')
-a30out=$(./build/hull "$A30DIR/work.lua" -d "$DSN" 2>/dev/null)
+a30out=$(./build/hull "$A30DIR/work.lua" -d "$DSN" 2>>"$A30DIR/log") || a30_fail "work.lua rc=$?"
 a30next=$(docker exec "$CONTAINER" psql -U hull -d hulldb -t -A -c "SELECT next_run_at FROM _hull_cron WHERE name='a30c'" 2>/dev/null | tr -d '[:space:]')
 docker exec "$CONTAINER" psql -U hull -d hulldb -q -c "DELETE FROM _hull_cron WHERE name='a30c'" >/dev/null 2>&1 || true
 case "$a30kept|$a30out|$a30next" in
@@ -764,7 +765,7 @@ case "$a30kept|$a30out|$a30next" in
         else
             echo "::error jobs audit 30 on Postgres: next=$a30next"; exit 1
         fi ;;
-    *)  echo "::error jobs audit 30 on Postgres: kept=$a30kept | $a30out | next=$a30next"; exit 1 ;;
+    *)  echo "::error jobs audit 30 on Postgres: kept=$a30kept | $a30out | next=$a30next"; cat "$A30DIR/log"; exit 1 ;;
 esac
 jobs_reset_pg
 

@@ -5827,6 +5827,8 @@ UTEST(js_stdlib, stdlib_audit29_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* auth-flows needs both HTTP halves. */
 /* Stdlib regressions from audit 30: the login lockout and TOTP attempt
  * counters incremented by the database (semantics unchanged), and
  * rbac.hasAnyRole / hasAnyPermission taking a string as one name. */
@@ -5842,6 +5844,7 @@ UTEST(js_stdlib, stdlib_audit30_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
 /* TOTP regressions from audit 28: a success takes only the user's own
  * failures off the per-IP count; other accounts' failures still lock. */
