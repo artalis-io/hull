@@ -157,6 +157,7 @@ static void cleanup_lua(void)
     }
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Free HlReqCtx stored on req->ctx by middleware dispatch */
 static void free_lua_req_ctx(KlHttpRequest *req)
 {
@@ -172,6 +173,7 @@ static void free_lua_req_ctx(KlHttpRequest *req)
     free(rctx);
     req->ctx = NULL;
 }
+#endif
 
 /* Init lua with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
@@ -2346,6 +2348,7 @@ UTEST(lua_middleware, handler_ids_do_not_collide_with_routes)
     cleanup_lua();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(lua_middleware, dispatch_return_zero_continues)
 {
     init_lua();
@@ -2371,7 +2374,9 @@ UTEST(lua_middleware, dispatch_return_zero_continues)
     free_lua_req_ctx(&req);
     cleanup_lua();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(lua_middleware, dispatch_return_nonzero_short_circuits)
 {
     init_lua();
@@ -2467,7 +2472,9 @@ UTEST(lua_middleware, res_kept_past_its_request_fails_closed)
     free_lua_req_ctx(&req);
     cleanup_lua();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Track allocations from wire_routes_server to free them later */
 static void *wiring_allocs_lua[16];
 static int   wiring_alloc_count_lua;
@@ -2515,6 +2522,7 @@ UTEST(lua_middleware, wiring_to_server)
     kl_http_server_free(&server);
     cleanup_lua();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 UTEST(lua_middleware, order_preserved)
 {
@@ -3870,6 +3878,7 @@ UTEST(lua_stdlib, crypto_envelope_tag_is_lowercase_only)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Link origins: the Host header is parsed strictly and the URL is built from
  * the allowlist entry, never from the header. "app.example.com:@evil.com"
  * used to pass the allowlist and become the emailed link (token to evil.com).
@@ -3909,7 +3918,9 @@ UTEST(lua_stdlib, auth_flows_origin_is_built_from_the_allowlist)
     EXPECT_EQ(step, 0);
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Login CSRF (audit 8): the guard on every session-setting POST. Sec-Fetch-
  * Site same-origin / none passes, cross-site and same-site do not; without it
  * Origin, then Referer, must name the app; with neither, only a body that is
@@ -3946,7 +3957,9 @@ UTEST(lua_stdlib, auth_flows_cross_site_guard)
     EXPECT_EQ(step, 0);
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_token_round_trip)
 {
     init_lua_with_caps();
@@ -3983,7 +3996,9 @@ UTEST(lua_stdlib, auth_flows_token_round_trip)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_register_verify_login)
 {
     init_lua_with_caps();
@@ -4011,7 +4026,9 @@ UTEST(lua_stdlib, auth_flows_register_verify_login)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_input_validation)
 {
     init_lua_with_caps();
@@ -4035,7 +4052,9 @@ UTEST(lua_stdlib, auth_flows_input_validation)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_password_reset_helper)
 {
     init_lua_with_caps();
@@ -4056,7 +4075,9 @@ UTEST(lua_stdlib, auth_flows_password_reset_helper)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_magic_link_auto_signup_opt_in)
 {
     init_lua_with_caps();
@@ -4109,7 +4130,9 @@ UTEST(lua_stdlib, auth_flows_magic_link_auto_signup_opt_in)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
 {
     init_lua_with_caps();
@@ -4157,7 +4180,9 @@ UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_email_rate_limit_per_recipient)
 {
     init_lua_with_caps();
@@ -4206,7 +4231,9 @@ UTEST(lua_stdlib, auth_flows_email_rate_limit_per_recipient)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, auth_flows_email_rate_limit_drops_send)
 {
     init_lua_with_caps();
@@ -4254,6 +4281,7 @@ UTEST(lua_stdlib, auth_flows_email_rate_limit_drops_send)
 
     cleanup_lua_caps();
 }
+#endif
 
 /* ── hull.web.cookie tests ─────────────────────────────────────────────── */
 
@@ -4951,6 +4979,7 @@ UTEST(lua_stdlib, search_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, email_suite)
 {
     init_lua_with_caps();
@@ -4964,6 +4993,7 @@ UTEST(lua_stdlib, email_suite)
 
     cleanup_lua_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 10 (logx / _logfmt escaping, cache.fetch
  * misses, i18n, qrcode, csv): logx needs hull.log, cache hull.time, so the
@@ -4998,6 +5028,7 @@ UTEST(lua_stdlib, kv_cache_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Web stdlib regressions from audit 9 (auth-flows email-change undo, lockout
  * id keys, ratelimit, cookie, session logout, idempotency, oauth): auth-flows
  * and session need the db, so the caps-bearing state. */
@@ -5014,7 +5045,9 @@ UTEST(lua_stdlib, web_audit9_suite)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Auth stdlib regressions from audit 10 (the vacated address of an undoable
  * email change is reserved, undo resets / totp_disable, deferred magic-link
  * signup, logout origins, idempotency
@@ -5032,7 +5065,9 @@ UTEST(lua_stdlib, auth_audit10_suite)
 
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Auth-flows regressions from audit 12 (token mails go to the stored address,
  * exact standard_users lookup, unsuppressible email-change notice, persistent
  * recovery lock, keyed revoke / confirm writes, init requirements). */
@@ -5049,6 +5084,7 @@ UTEST(lua_stdlib, auth_audit12_suite)
 
     cleanup_lua_caps();
 }
+#endif
 
 /* The _hull_jobs / _hull_cron tables as a database from before jobs.init's
  * additive columns has them (progress .. claim_started_at, tz_offset,
@@ -5105,6 +5141,7 @@ UTEST(lua_stdlib, stdlib_audit15_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 16: no module exports its test hooks to app
  * code (hull._test_hooks is stdlib-internal), totp's allow_unbound_secrets
  * and rekey_status().unbound, and an integral float user id. */
@@ -5120,6 +5157,7 @@ UTEST(lua_stdlib, stdlib_audit16_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 22: totp's allow_plaintext_secrets and
  * rekey_status().plaintext. */
@@ -5136,6 +5174,7 @@ UTEST(lua_stdlib, stdlib_audit22_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 23: template.compile's (data) -> string
  * wrapper, config's finite numbers, the idempotency principal, the jobs.dead
  * and attachment.sweep limits. */
@@ -5151,7 +5190,9 @@ UTEST(lua_stdlib, stdlib_audit23_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 24: csv nil cells, clamped LIMITs, strict
  * status lists, session device refs, the outbox delivery timeout, jwt / totp
  * / validate number checks, trusted-host ports, the email-change user id. */
@@ -5167,7 +5208,9 @@ UTEST(lua_stdlib, stdlib_audit24_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 25: jobs / outbox schedule values are
  * finite whole seconds, outbox max_attempts a whole number. */
 UTEST(lua_stdlib, stdlib_audit25_suite)
@@ -5182,6 +5225,7 @@ UTEST(lua_stdlib, stdlib_audit25_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 26: safe_url raw output, Lua template dot
  * paths (rawget, no functions), search snippet / highlight escaping. */
@@ -5198,6 +5242,7 @@ UTEST(lua_stdlib, stdlib_audit26_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib option validation from audit 26: audit_log retain_days,
  * attachment max_size, search limit / offset, jobs max_attempts / cleanup
  * before, idempotency / inbox ttl bounds, email C1 controls, htmx form. */
@@ -5213,6 +5258,7 @@ UTEST(lua_stdlib, stdlib_options_audit26_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
 /* TOTP regressions from audit 26: a stripped (v1-shaped) bound blob is not
  * another account's secret, unbound / legacy secrets are 20 bytes, a success
@@ -5230,6 +5276,7 @@ UTEST(lua_stdlib, totp_audit26_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 27: search paging clamps, jobs time options
  * as whole seconds, count options read with tonumber, attachment
  * max_size = false, addresses refuse invalid UTF-8. */
@@ -5245,6 +5292,7 @@ UTEST(lua_stdlib, stdlib_audit27_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 28: safe_url encodes a backslash. */
 UTEST(lua_stdlib, stdlib_audit28_suite)
@@ -5385,6 +5433,7 @@ UTEST(lua_stdlib, middleware_logger_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(lua_stdlib, middleware_outbox_suite)
 {
     init_lua_with_caps();
@@ -5397,6 +5446,7 @@ UTEST(lua_stdlib, middleware_outbox_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
 UTEST(lua_stdlib, middleware_ratelimit_suite)
 {
@@ -5450,6 +5500,7 @@ UTEST(lua_stdlib, middleware_transaction_suite)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 17: etag helpers with an empty body, and
  * jobs' live config moved to hull._test_hooks. */
 UTEST(lua_stdlib, stdlib_audit17_suite)
@@ -5464,6 +5515,7 @@ UTEST(lua_stdlib, stdlib_audit17_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+#endif
 
 /* hull.jobs through its clock-injectable test hooks (audit 17: jobs._tick /
  * _cron_next / _events_drain left the module for hull._test_hooks, so the
@@ -5566,6 +5618,7 @@ UTEST(lua_stdlib, ssh_hostkey_vectors_suite)
     EXPECT_EQ(pass, 13LL);
 }
 
+#ifdef HL_TEST_LINK_TLS
 /* The same script with the capability layer, so hull.crypto is real and the
  * OpenSSL signatures are verified by mbedTLS through crypto.verify: 3 more
  * tests. The exact count is the point - a require that quietly failed would
@@ -5584,6 +5637,7 @@ UTEST(lua_stdlib, ssh_hostkey_vectors_real_crypto)
 
     cleanup_lua_caps();
 }
+#endif
 
 /* RSA user keys written by ssh-keygen. Vanilla: parsing, the size floor, the
  * damaged-key error (3). With the capability layer: the loaded key signs
@@ -5598,6 +5652,7 @@ UTEST(lua_stdlib, ssh_rsa_key_suite)
     EXPECT_EQ(pass, 3LL);
 }
 
+#ifdef HL_TEST_LINK_TLS
 UTEST(lua_stdlib, ssh_rsa_key_real_crypto)
 {
     init_lua_with_caps();
@@ -5612,6 +5667,7 @@ UTEST(lua_stdlib, ssh_rsa_key_real_crypto)
 
     cleanup_lua_caps();
 }
+#endif
 
 /* ECDSA user keys written by ssh-keygen. Vanilla: P-256 / P-384 load with a
  * SEC1 PEM byte-equal to OpenSSL's, P-521 refused, a key failing its
@@ -5627,6 +5683,7 @@ UTEST(lua_stdlib, ssh_ecdsa_key_suite)
     EXPECT_EQ(pass, 5LL);
 }
 
+#ifdef HL_TEST_LINK_TLS
 UTEST(lua_stdlib, ssh_ecdsa_key_real_crypto)
 {
     init_lua_with_caps();
@@ -5641,6 +5698,7 @@ UTEST(lua_stdlib, ssh_ecdsa_key_real_crypto)
 
     cleanup_lua_caps();
 }
+#endif
 
 UTEST(lua_stdlib, ssh_userauth_suite)
 {
@@ -5681,6 +5739,7 @@ UTEST(lua_stdlib, ssh_chacha_suite)
     EXPECT_EQ(pass, 10LL);
 }
 
+#ifdef HL_TEST_LINK_TLS
 UTEST(lua_stdlib, ssh_chacha_real_crypto)
 {
     init_lua_with_caps();
@@ -5695,6 +5754,7 @@ UTEST(lua_stdlib, ssh_chacha_real_crypto)
 
     cleanup_lua_caps();
 }
+#endif
 
 UTEST(lua_stdlib, ssh_cipher_suite)
 {
@@ -6736,6 +6796,41 @@ UTEST(lua_template_cache, parse_error_returns_no_cache_write)
  *
  * Implementation gate lives in lua_app_reject_if_serving(). */
 
+/* ── coroutine helpers (the ssh bridge's, and the task tests') ──────── */
+
+/* Start `src` in a coroutine of its own, compiled under a stdlib chunk name,
+ * the way the runtime starts a handler: active_co is what a park captures to
+ * resume later. Returns lua_resume's status. A coroutine that finishes here is
+ * unpinned here; one that yields is unpinned by hl_lua_async_resume when it
+ * finishes. */
+static int ssh_co_start(HlLua *lua, const char *src, lua_State **co_out)
+{
+    lua_State *L  = lua->L;
+    lua_State *co = lua_newthread(L);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    *co_out = co;
+    if (luaL_loadbuffer(co, src, strlen(src), "@hull.ssh.probe") != LUA_OK)
+        return -1;
+    lua->active_co         = co;
+    lua->active_conn       = NULL;          /* detached, as under app.main */
+    lua->active_thread_ref = ref;
+    int nres = 0;
+    int st = lua_resume(co, L, 0, &nres);
+    if (st != LUA_YIELD) {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        lua->active_co = NULL;
+        lua->active_thread_ref = LUA_NOREF;
+    }
+    return st;
+}
+
+static void ssh_tick_until_done(const HlAsyncBackend *be, HlAsyncBackendCtx *ctx,
+                                lua_State *co)
+{
+    for (int i = 0; i < 250 && lua_status(co) == LUA_YIELD; i++)
+        be->tick(ctx, 20);
+}
+
 /* ── the ssh byte-stream bridge ─────────────────────────────────────── */
 
 #ifdef HL_ENABLE_HTTP
@@ -6891,39 +6986,6 @@ UTEST(lua_ssh_bridge, an_out_of_range_port_is_refused_not_wrapped)
     }
     ssh_undeclare();
     cleanup_lua();
-}
-
-/* Start `src` in a coroutine of its own, compiled under a stdlib chunk name,
- * the way the runtime starts a handler: active_co is what a park captures to
- * resume later. Returns lua_resume's status. A coroutine that finishes here is
- * unpinned here; one that yields is unpinned by hl_lua_async_resume when it
- * finishes. */
-static int ssh_co_start(HlLua *lua, const char *src, lua_State **co_out)
-{
-    lua_State *L  = lua->L;
-    lua_State *co = lua_newthread(L);
-    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    *co_out = co;
-    if (luaL_loadbuffer(co, src, strlen(src), "@hull.ssh.probe") != LUA_OK)
-        return -1;
-    lua->active_co         = co;
-    lua->active_conn       = NULL;          /* detached, as under app.main */
-    lua->active_thread_ref = ref;
-    int nres = 0;
-    int st = lua_resume(co, L, 0, &nres);
-    if (st != LUA_YIELD) {
-        luaL_unref(L, LUA_REGISTRYINDEX, ref);
-        lua->active_co = NULL;
-        lua->active_thread_ref = LUA_NOREF;
-    }
-    return st;
-}
-
-static void ssh_tick_until_done(const HlAsyncBackend *be, HlAsyncBackendCtx *ctx,
-                                lua_State *co)
-{
-    for (int i = 0; i < 250 && lua_status(co) == LUA_YIELD; i++)
-        be->tick(ctx, 20);
 }
 
 /* A stream the SSH stdlib has connected to a loopback listener, on a real
@@ -7687,6 +7749,7 @@ UTEST(lua_async, a_task_does_not_inherit_its_spawners_teardown_hook)
     be->free(actx);
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* A timer handler that waits more than once keeps its timer: the last wait's
  * continuation still clears in_flight and reschedules, so the handler runs
  * again. From the second wait on it used to be lost, and the timer never
@@ -7741,7 +7804,9 @@ UTEST(lua_async, a_timer_handler_keeps_its_timer_across_waits)
     be->tick(actx, 0);
     be->free(actx);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* A timer may fire while a task is suspended. The trampoline used to
  * assert(dispatch_depth == 0), and every suspended handler or task holds that
  * above zero - so the first tick with a task in flight aborted the process. */
@@ -7790,6 +7855,7 @@ UTEST(lua_async, a_timer_fires_while_a_task_waits)
     be->tick(actx, 0);
     be->free(actx);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* Audit 29: at teardown (a __gc finalizer lua_close runs) hull.async ran
  * its task inline and a wait in it armed a timer and tracked its ctx after
@@ -8058,6 +8124,7 @@ UTEST(lua_task, stdlib_only_needs_a_loop_and_is_freed_unrun)
     be->free(actx);
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* auth-flows' deferred work leaves the request's transaction (audit 10
  * follow-up): /register run inside db.batch answers, and its account and
  * welcome mail come after the response, once the batch has committed. It
@@ -8114,6 +8181,7 @@ UTEST(lua_task, auth_flows_register_under_a_batch_defers_its_mail)
         out, sizeof out), 0);
     ASSERT_STREQ(out, "ok");
 }
+#endif
 
 /* Bytecode is never loaded from app reach: the template bridge, which app
  * code can require, compiles text only. A binary chunk is unverified Lua
@@ -10081,6 +10149,7 @@ UTEST(lua_audit6, main_replacing_hull_global_keeps_exit_code)
     cleanup_lua();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Entries in the req.ctx table (bindings.c). */
 static int req_ctx_entries(lua_State *L)
 {
@@ -10183,6 +10252,7 @@ UTEST(lua_audit7, req_ctx_dropped_when_the_response_is_sent)
     for (int i = 0; i < N; i++) reqs[i].ctx = NULL;
     cleanup_lua();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_HTTP_SERVER
 /* Round-7 L10: `hull test` ran every case of a file on one budget, never
@@ -10541,6 +10611,7 @@ UTEST(lua_audit9, verify_password_charges_its_iterations)
     cleanup_lua_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* M1 / M2: res:header appended to Keel's header buffer, outside the script
  * heap and with no cap. Past HL_RES_HEADER_BYTES_MAX it raises. res:text
  * added a Content-Type on every call; it sets one only when the response
@@ -10591,6 +10662,7 @@ UTEST(lua_audit9, response_headers_are_capped)
     lua_settop(L, 0);
     cleanup_lua();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* M3: a hull.async task that tripped the budget after its first yield
  * never marked itself done (pcall re-raises the trip, so the code after it
@@ -10966,6 +11038,8 @@ UTEST(lua_audit10, nested_test_request_keeps_the_case_budget_and_txn)
 #include "hull/http_feature.h"   /* hl_lua_http_error_response */
 #include <strings.h>             /* strncasecmp */
 
+#ifdef HL_ENABLE_HTTP_SERVER
+
 /* How many @p name headers the response carries (case-insensitive). */
 static int a10_header_count(const KlHttpResponse *res, const char *name)
 {
@@ -11083,9 +11157,11 @@ UTEST(lua_audit10, error_response_and_bytes_drop_stale_headers)
     lua_settop(L, 0);
     cleanup_lua();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── Audit 11: Content-Type and error headers across middleware ────────── */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L: whether the Content-Type is Hull's default was a flag on the per-call
  * `res` object, so a middleware's res:html followed by the handler's res:json
  * (two objects, one response) kept text/html for the JSON. And the 500 a
@@ -11152,6 +11228,7 @@ UTEST(lua_audit11, content_type_and_error_headers_span_middleware)
     lua_settop(L, 0);
     cleanup_lua();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── The run watchdog (cap/run_watchdog.h, audit 12) ──────────────────
  *
@@ -12485,6 +12562,7 @@ UTEST(lua_audit21, compute_segment_copies_are_charged)
 
 /* ── Audit 23 G6: the sync http client gives its scratch back ───────── */
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* #812 missed it: a sync call's header copies (and the response's
  * lowercased names) stayed in the scratch arena for the rest of the run,
  * so a run making requests in a loop filled it - then every scratch user
@@ -12509,6 +12587,7 @@ UTEST(lua_audit23, sync_http_gives_its_scratch_back)
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
+#endif
 
 /* ── Audit 22 G1: async input copies are held to the heap limit ──────── */
 
@@ -12611,6 +12690,7 @@ UTEST(lua_audit23, async_result_copies_are_held_to_the_heap_limit)
     f.be->free(f.actx);
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Audit 22: http.* sent a caller Host / Transfer-Encoding / Connection
  * as given - a second Host line, or a smuggled request. */
 UTEST(lua_audit22, http_refuses_headers_hulls_client_writes)
@@ -12636,7 +12716,9 @@ UTEST(lua_audit22, http_refuses_headers_hulls_client_writes)
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Audit 28: the synchronous http.request / post / put / patch never charged
  * a body (http.fetch's is), so a pcall loop handed Keel a big body to copy
  * on every call, uncharged. */
@@ -12670,6 +12752,7 @@ UTEST(lua_audit28, sync_http_bodies_are_charged)
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
+#endif
 
 /* Audit 22: the scratch arena is reset only when a run starts, and
  * crypto.random / db params took from it for good, so one run filled it and
@@ -12857,6 +12940,7 @@ UTEST(lua_audit24, log_escapes_cr_lf)
     cleanup_lua_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Audit 24: ws.connect passed Keel no config, so every wss:// failed with a
  * generic error. It takes the client TLS config http.fetch uses now, and with
  * none says so up front (the allowlist still runs first). */
@@ -12885,6 +12969,7 @@ UTEST(lua_audit24, wss_connect_needs_the_client_tls_config)
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
+#endif
 
 #ifdef HL_ENABLE_IMAGE
 /* Audit 25 L10: image.new / from_wasm / from_buffer's copy branch copied

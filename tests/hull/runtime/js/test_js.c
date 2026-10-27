@@ -162,6 +162,7 @@ static void cleanup_js(void)
     }
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Free HlReqCtx stored on req->ctx by middleware dispatch */
 static void free_req_ctx(KlHttpRequest *req)
 {
@@ -179,6 +180,7 @@ static void free_req_ctx(KlHttpRequest *req)
     free(rctx);
     req->ctx = NULL;
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* Init JS with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
@@ -2030,6 +2032,7 @@ UTEST(js_middleware, handler_ids_do_not_collide_with_routes)
     cleanup_js();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_middleware, dispatch_return_zero_continues)
 {
     init_js();
@@ -2057,7 +2060,9 @@ UTEST(js_middleware, dispatch_return_zero_continues)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* A `res` kept past its request fails closed: middleware stashes it, the
  * request finishes, and using it later throws instead of writing into a
  * response that was sent (on a connection that may be gone). */
@@ -2090,7 +2095,9 @@ UTEST(js_middleware, res_kept_past_its_request_fails_closed)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* A handler left pending with no Hull continuation was never suspended: the
  * response goes out when dispatch returns. Its `res` used to stay live
  * afterwards, onto a finished request. */
@@ -2110,7 +2117,9 @@ static int js_dispatch_last_route(const char *handler_src, KlHttpResponse *res,
     int id = eval_int("globalThis.__hull_internals.__hull_routes.length - 1");
     return hl_js_dispatch(&js, id, req, res);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_dispatch, a_microtask_only_handler_completes_and_closes_res)
 {
     init_js();
@@ -2128,7 +2137,9 @@ UTEST(js_dispatch, a_microtask_only_handler_completes_and_closes_res)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* A body that is not valid UTF-8 also arrives as its bytes (audit 24):
  * req.body replaces every invalid sequence with U+FFFD, so the idempotency
  * fingerprint read two different binary bodies as the same text. */
@@ -2150,7 +2161,9 @@ static int js_dispatch_body(const char *body, size_t len)
     free_req_ctx(&req);
     return rc == 0 ? res.status : -1;
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_audit24, a_body_that_is_not_utf8_also_arrives_as_bytes)
 {
     init_js();
@@ -2161,7 +2174,9 @@ UTEST(js_audit24, a_body_that_is_not_utf8_also_arrives_as_bytes)
     EXPECT_EQ(js_dispatch_body("\xc0\xaf", 2), 302);         /* an overlong */
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_dispatch, a_handler_awaiting_an_undriven_promise_ends_its_request)
 {
     init_js();
@@ -2179,7 +2194,9 @@ UTEST(js_dispatch, a_handler_awaiting_an_undriven_promise_ends_its_request)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
 {
     init_js();
@@ -2207,7 +2224,9 @@ UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Track allocations from wire_routes_server to free them later */
 static void *wiring_allocs_js[16];
 static int   wiring_alloc_count_js;
@@ -2261,6 +2280,7 @@ UTEST(js_middleware, wiring_to_server)
     kl_http_server_free(&server);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 UTEST(js_middleware, order_preserved)
 {
@@ -2332,6 +2352,7 @@ UTEST(js_cap, crypto_hmac_sha256)
     cleanup_js_caps();
 }
 
+#ifdef HL_TEST_LINK_TLS
 UTEST(js_cap, crypto_sign_and_rsa_private_pem)
 {
     /* The EC key and the RSA components are the ones test_asym.c signs with
@@ -2375,6 +2396,7 @@ UTEST(js_cap, crypto_sign_and_rsa_private_pem)
 
     cleanup_js_caps();
 }
+#endif
 
 UTEST(js_cap, crypto_hmac_sha1)
 {
@@ -3931,6 +3953,7 @@ UTEST(js_stdlib, kv_encrypted_handle)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_token_round_trip)
 {
     init_js_with_caps();
@@ -3974,6 +3997,7 @@ UTEST(js_stdlib, auth_flows_token_round_trip)
 
     cleanup_js_caps();
 }
+#endif
 
 /* Login CSRF (audit 8): the guard on every session-setting POST - see the
  * Lua twin auth_flows_cross_site_guard. */
@@ -4019,6 +4043,7 @@ UTEST(js_stdlib, auth_flows_cross_site_guard)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* An emailSend that returns a Promise (email.send is async) has its failure
  * observed - logged - rather than dropped unhandled (audit 8). */
 UTEST(js_stdlib, auth_flows_async_email_send_failure_observed)
@@ -4043,7 +4068,9 @@ UTEST(js_stdlib, auth_flows_async_email_send_failure_observed)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_register_verify_login)
 {
     init_js_with_caps();
@@ -4071,7 +4098,9 @@ UTEST(js_stdlib, auth_flows_register_verify_login)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_input_validation)
 {
     init_js_with_caps();
@@ -4102,7 +4131,9 @@ UTEST(js_stdlib, auth_flows_input_validation)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_magic_link_auto_signup_opt_in)
 {
     init_js_with_caps();
@@ -4133,7 +4164,9 @@ UTEST(js_stdlib, auth_flows_magic_link_auto_signup_opt_in)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_state_secret_non_ascii_round_trip)
 {
     init_js_with_caps();
@@ -4165,7 +4198,9 @@ UTEST(js_stdlib, auth_flows_state_secret_non_ascii_round_trip)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_email_rate_limit_per_recipient)
 {
     init_js_with_caps();
@@ -4209,7 +4244,9 @@ UTEST(js_stdlib, auth_flows_email_rate_limit_per_recipient)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_email_rate_limit_drops_send)
 {
     init_js_with_caps();
@@ -4245,6 +4282,7 @@ UTEST(js_stdlib, auth_flows_email_rate_limit_drops_send)
 
     cleanup_js_caps();
 }
+#endif
 
 /* ── hull:web:cookie tests ─────────────────────────────────────────────── */
 
@@ -4882,6 +4920,7 @@ UTEST(js_stdlib, i18n_detect)
 
 /* ── hull:email tests ─────────────────────────────────────────────── */
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, email_validation)
 {
     init_js();
@@ -4910,7 +4949,9 @@ UTEST(js_stdlib, email_validation)
 
     cleanup_js();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, email_unknown_provider)
 {
     init_js();
@@ -4937,7 +4978,9 @@ UTEST(js_stdlib, email_unknown_provider)
 
     cleanup_js();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, email_api_key_required)
 {
     init_js();
@@ -4964,6 +5007,7 @@ UTEST(js_stdlib, email_api_key_required)
 
     cleanup_js();
 }
+#endif
 
 /* ── hull:csv tests ──────────────────────────────────────────────────── */
 
@@ -5094,6 +5138,7 @@ UTEST(js_stdlib, csv_encode_headers)
  * First one wired. csv is pure (no capability use), which keeps this leg about
  * the seam rather than about caps; the harness supplies them regardless, so
  * db-using scripts can follow without a second mechanism. */
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* test_email.js wraps its assertions in an async IIFE around await
  * email.send(...). Every case is a validation rejection -- the script does no
  * network I/O -- so the chain settles on the microtask queue that
@@ -5113,6 +5158,7 @@ UTEST(js_stdlib, email_suite)
 
     cleanup_js_caps();
 }
+#endif
 
 UTEST(js_stdlib, encoding_suite)
 {
@@ -5242,6 +5288,7 @@ UTEST(js_stdlib, middleware_logger_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, middleware_outbox_suite)
 {
     init_js_with_caps();
@@ -5255,6 +5302,7 @@ UTEST(js_stdlib, middleware_outbox_suite)
 
     cleanup_js_caps();
 }
+#endif
 
 UTEST(js_stdlib, middleware_ratelimit_suite)
 {
@@ -5466,6 +5514,7 @@ UTEST(js_stdlib, kv_cache_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* auth loginPath redirect, ratelimit keys, health ping, auditLog kinds,
  * csrf safeMethods (audit 6 JS M2 / L1 / L5 / L6, c_js audit-log kinds). */
 UTEST(js_stdlib, middleware_audit6_suite)
@@ -5481,7 +5530,9 @@ UTEST(js_stdlib, middleware_audit6_suite)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Web stdlib regressions from audit 9 (auth-flows email-change undo, lockout
  * id keys, sync setters, ratelimit, cookie, session logout, idempotency,
  * oauth). */
@@ -5498,7 +5549,9 @@ UTEST(js_stdlib, web_audit9_suite)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Auth stdlib regressions from audit 10 (the vacated address of an undoable
  * email change is reserved, undo resets / totpDisable, deferred magic-link
  * signup, logout origins, idempotency principal, inbox source). */
@@ -5515,7 +5568,9 @@ UTEST(js_stdlib, auth_audit10_suite)
 
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Auth-flows regressions from audit 12 (token mails go to the stored address,
  * exact standardUsers lookup, unsuppressible email-change notice, persistent
  * recovery lock, keyed revoke / confirm writes, init requirements). */
@@ -5532,6 +5587,7 @@ UTEST(js_stdlib, auth_audit12_suite)
 
     cleanup_js_caps();
 }
+#endif
 
 /* The _hull_jobs / _hull_cron tables as a database from before jobs.init's
  * additive columns has them (progress .. claim_started_at, tz_offset,
@@ -5587,6 +5643,7 @@ UTEST(js_stdlib, stdlib_audit15_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 16: no module exports its test hooks to app
  * code (hull:_test_hooks is stdlib-internal), totp's allowUnboundSecrets and
  * rekeyStatus().unbound, and 42.0 / 42 as one user id. */
@@ -5602,6 +5659,7 @@ UTEST(js_stdlib, stdlib_audit16_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 22: totp's allowPlaintextSecrets and
  * rekeyStatus().plaintext. */
@@ -5618,6 +5676,7 @@ UTEST(js_stdlib, stdlib_audit22_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 23: template.compile's (data) => string
  * wrapper, config's finite numbers, the idempotency principal, the jobs.dead
  * and attachment.sweep limits. */
@@ -5633,7 +5692,9 @@ UTEST(js_stdlib, stdlib_audit23_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 24: csv columns / nil cells, clamped LIMITs,
  * session device refs, the outbox delivery timeout, the idempotency lossy
  * body, jwt / totp / validate number checks, trusted-host ports, template
@@ -5650,7 +5711,9 @@ UTEST(js_stdlib, stdlib_audit24_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 25: jobs / outbox schedule values are
  * finite whole seconds, outbox maxAttempts a whole number. */
 UTEST(js_stdlib, stdlib_audit25_suite)
@@ -5665,6 +5728,7 @@ UTEST(js_stdlib, stdlib_audit25_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 26: safe_url raw output, template dot paths
  * render no function, search snippet / highlight escaping. */
@@ -5681,6 +5745,7 @@ UTEST(js_stdlib, stdlib_audit26_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib option validation from audit 26: auditLog retainDays, attachment
  * maxSize, search limit / offset, jobs maxAttempts / cleanup before,
  * idempotency / inbox ttl bounds, email C1 controls, htmx form own props. */
@@ -5696,6 +5761,7 @@ UTEST(js_stdlib, stdlib_options_audit26_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
 /* TOTP regressions from audit 26: a stripped (v1-shaped) bound blob is not
  * another account's secret, unbound / legacy secrets are 20 bytes, a success
@@ -5729,6 +5795,7 @@ UTEST(js_stdlib, stdlib_audit27_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 28: unpaired surrogates in addresses,
  * safe_url encodes a backslash, jobs durations read as Lua's tonumber. */
 UTEST(js_stdlib, stdlib_audit28_suite)
@@ -5743,6 +5810,7 @@ UTEST(js_stdlib, stdlib_audit28_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 29: jobs keys stored as strings and capped
  * at the column, csrf 413 / empty header, one Bearer rule. */
@@ -5774,6 +5842,7 @@ UTEST(js_stdlib, totp_audit28_suite)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Stdlib regressions from audit 17: etag helpers with an empty body, and
  * jobs' live config moved to hull:_test_hooks. */
 UTEST(js_stdlib, stdlib_audit17_suite)
@@ -5788,6 +5857,7 @@ UTEST(js_stdlib, stdlib_audit17_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+#endif
 
 /* Stdlib regressions from audit 18: jobs.events / purge / cleanup / subscribe
  * build SQL placeholders from a counted loop over checked strings, never by a
@@ -6660,6 +6730,7 @@ UTEST(js_runtime, import_image_is_a_real_hull_module)
 
 #include "hull/runtime/test.h"  /* HlTestCaseResult, hl_js_test_run */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_test_runner, sync_passing_test_marked_pass)
 {
     init_js();
@@ -6685,7 +6756,9 @@ UTEST(js_test_runner, sync_passing_test_marked_pass)
     kl_http_router_free(&router);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_test_runner, sync_throwing_test_marked_fail)
 {
     init_js();
@@ -6713,7 +6786,9 @@ UTEST(js_test_runner, sync_throwing_test_marked_fail)
     kl_http_router_free(&router);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_test_runner, async_resolving_test_marked_pass)
 {
     init_js();
@@ -6741,7 +6816,9 @@ UTEST(js_test_runner, async_resolving_test_marked_pass)
     kl_http_router_free(&router);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_test_runner, async_rejecting_test_fails)
 {
     /* THE regression test. Pre-fix this would have shown PASS
@@ -6772,7 +6849,9 @@ UTEST(js_test_runner, async_rejecting_test_fails)
     kl_http_router_free(&router);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_test_runner, mixed_results_in_one_file)
 {
     /* Multiple tests, mixed sync/async, mixed pass/fail. The runner
@@ -6810,6 +6889,7 @@ UTEST(js_test_runner, mixed_results_in_one_file)
     kl_http_router_free(&router);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── JS bytecode cache ──────────────────────────────────────────
  *
@@ -7653,6 +7733,7 @@ UTEST(js_stdlib, crypto_envelope_tag_is_lowercase_only)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 UTEST(js_stdlib, auth_flows_origin_is_built_from_the_allowlist)
 {
     init_js_with_caps();
@@ -7690,6 +7771,7 @@ UTEST(js_stdlib, auth_flows_origin_is_built_from_the_allowlist)
     EXPECT_EQ(v, 0);
     cleanup_js_caps();
 }
+#endif
 
 UTEST(js_stdlib, jwt_absolute_exp_is_kept)
 {
@@ -8369,6 +8451,7 @@ UTEST(js_audit5, udf_interrupt_is_not_a_catchable_sql_error)
     cleanup_js_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Register `handler_src` as middleware and dispatch it. */
 static int a5_middleware(const char *handler_src, KlHttpRequest *req,
                          KlHttpResponse *res)
@@ -8387,7 +8470,9 @@ static int a5_middleware(const char *handler_src, KlHttpRequest *req,
                       "globalThis.__hull_internals.__hull_middleware.length - 1].handler_id");
     return hl_js_dispatch_middleware(&js, id, req, res);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* H3: an async middleware's Promise coerced to 0, "continue" - an auth
  * middleware that awaited its check let every request through. */
 UTEST(js_audit5, async_middleware_fails_closed)
@@ -8407,7 +8492,9 @@ UTEST(js_audit5, async_middleware_fails_closed)
         cleanup_js();
     }
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Audit 17: a middleware's number is truncated toward zero, sign kept, as
  * the Lua runtime reads it. ToInt32 wrapped 2^32 to 0 ("continue"), and a
  * valueOf that threw continued too. */
@@ -8433,7 +8520,9 @@ UTEST(js_audit17, middleware_number_return_matches_lua)
         cleanup_js();
     }
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* H3: a Hull async op in middleware suspended the connection Keel then ran
  * the rest of the chain and the handler on. Refused, with a clear error. */
 UTEST(js_audit5, async_op_in_middleware_is_refused)
@@ -8460,6 +8549,7 @@ UTEST(js_audit5, async_op_in_middleware_is_refused)
     be->tick(actx, 0);
     be->free(actx);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* M1: an async op cannot start while req.multipart() is parked for more
  * body on the same request (each takes over the connection's state), and
@@ -8489,6 +8579,7 @@ UTEST(js_audit5, async_op_is_refused_while_a_multipart_read_is_parked)
     be->free(actx);
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* H2: a handler over its budget failed only if the trip reached it as an
  * exception; one that tripped inside an un-awaited async call returned
  * normally and its request was answered as a success. */
@@ -8520,6 +8611,7 @@ UTEST(js_audit5, a_handler_over_budget_is_answered_500)
     free_req_ctx(&req2);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* L2: methods returned JS_EXCEPTION with nothing thrown - the app saw
  * `null` as the error. L4: req.header / req.headers resolved names through
@@ -8569,6 +8661,7 @@ UTEST(js_audit5, manifest_ignores_prototype_tampering)
     cleanup_js();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_audit5, request_and_response_binding_edges)
 {
     init_js();
@@ -8595,6 +8688,7 @@ UTEST(js_audit5, request_and_response_binding_edges)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* M4 + H2 in the worker VM: an async dispatch function's result is its
  * settled value (it came back as {}), a runaway async body is stopped (its
@@ -8765,6 +8859,7 @@ UTEST(js_audit6, connection_objects_are_tamper_proof)
     cleanup_js_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* H4: req.ctx was freed only by a synchronous handler; a middleware that
  * short-circuited (an auth reject) left its ctx object pinned in the JS
  * heap for good once Keel reset the request. */
@@ -8792,6 +8887,7 @@ UTEST(js_audit6, short_circuit_frees_req_ctx)
     EXPECT_TRUE(req2.ctx == NULL);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* M2: the no-transaction-across-a-wait check ran only when an op was made;
  * `const p = http.fetch(..); conn.exec("BEGIN"); await p` held the
@@ -8821,6 +8917,7 @@ UTEST(js_audit6, a_run_that_waits_in_a_transaction_is_failed)
     cleanup_js_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L5: res.text / res.html cut the body at the first NUL. */
 UTEST(js_audit6, res_text_keeps_embedded_nul)
 {
@@ -8837,16 +8934,20 @@ UTEST(js_audit6, res_text_keeps_embedded_nul)
     kl_http_response_free(&res);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── Audit 7: the JS runtime ──────────────────────────────────────────── */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 static size_t a7_tracked_ctxs(void)
 {
     size_t n = 0;
     for (HlReqCtx *c = js.req_ctxs.head; c; c = c->next) n++;
     return n;
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* H2: a middleware's req.ctx was freed only once a handler (or SSE route)
  * ran, or the middleware short-circuited. A request that passed middleware
  * and then 404'd (or upgraded, or failed its body) never reached one; Keel
@@ -8886,6 +8987,7 @@ UTEST(js_audit7, a_ctx_whose_request_ended_early_is_freed)
     EXPECT_EQ(a7_tracked_ctxs(), (size_t)1);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* L1: app.manifest() was re-entrant through its argument's toJSON: the
  * nested call stored its own manifest and installed its decorations, then
@@ -9083,6 +9185,7 @@ UTEST(js_audit7, request_done_leaves_a_running_handler_its_ctx)
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L3 (JS side): hl_maybe_compress reports a body it could not store, and
  * res.json / res.html / res.text ignored that: the response went out with
  * its status and headers and no body. They raise now, as Lua's do. */
@@ -9104,7 +9207,9 @@ static void a7_small_free(void *ctx, void *ptr, size_t size)
     (void)ctx; (void)size;
     free(ptr);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_audit7, a_body_that_cannot_be_stored_raises)
 {
     static const char *const srcs[] = {
@@ -9148,7 +9253,9 @@ UTEST(js_audit7, a_body_that_cannot_be_stored_raises)
     kl_http_response_free(&res);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* res.json used to swallow a throwing JSON.stringify (a cycle): it returned
  * undefined with the exception left pending. */
 UTEST(js_audit7, res_json_propagates_a_stringify_error)
@@ -9169,6 +9276,7 @@ UTEST(js_audit7, res_json_propagates_a_stringify_error)
     kl_http_response_free(&res);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── Audit 8 ─────────────────────────────────────────────────────────── */
 
@@ -9210,6 +9318,7 @@ UTEST(js_audit8, an_op_made_with_no_request_life_runs_detached)
     be->free(actx);
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* H1: `req` was built with property SETS, which ran a setter an app put on
  * Object.prototype - app code, with the connection active, before the
  * handler (or, in middleware, before the async gate was armed). Every
@@ -9254,7 +9363,9 @@ UTEST(js_audit8, building_req_runs_no_inherited_setter)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L1: res.json's code argument and res.redirect's code / url conversions
  * were not checked - the body went out with the old status, or nothing was
  * sent and undefined returned - with the exception left pending. */
@@ -9290,7 +9401,9 @@ UTEST(js_audit8, res_conversions_that_throw_propagate)
         cleanup_js();
     }
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L1: a middleware that made req.ctx a throwing accessor left the exception
  * pending past the dispatch (it surfaced in the next unrelated error). The
  * request fails instead, and nothing is left pending. */
@@ -9308,6 +9421,7 @@ UTEST(js_audit8, a_throwing_req_ctx_getter_fails_the_middleware)
     free_req_ctx(&req);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── hull:_task - detached tasks ───────────────────────────────────── */
 
@@ -9484,6 +9598,7 @@ UTEST(js_task, an_open_transaction_is_rolled_back)
     be->free(actx);
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* A task runs after its spawner's request is over: a `res` its closure
  * captured is closed by then, and writes nothing into that response. */
 UTEST(js_task, cannot_write_its_spawners_response)
@@ -9519,6 +9634,7 @@ UTEST(js_task, cannot_write_its_spawners_response)
     cleanup_js();
     be->free(actx);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* Stdlib-only; refused without a loop; a task that never ran is released
  * with the runtime (the context would otherwise free with a live object). */
@@ -9944,6 +10060,7 @@ UTEST(js_audit9, crypto_work_is_charged_to_the_budget)
 #include "hull/limits/runtime.h"   /* HL_RES_HEADER_BYTES_MAX */
 #include <strings.h>               /* strncasecmp */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* How many @p name headers the response carries (case-insensitive). */
 static int a9_header_count(const KlHttpResponse *res, const char *name)
 {
@@ -9959,7 +10076,9 @@ static int a9_header_count(const KlHttpResponse *res, const char *name)
     }
     return n;
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Does the response's header block contain @p needle? */
 static int a9_headers_contain(const KlHttpResponse *res, const char *needle)
 {
@@ -9972,7 +10091,9 @@ static int a9_headers_contain(const KlHttpResponse *res, const char *needle)
     free(copy);
     return found;
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* M1: res.header appended to Keel's header buffer, outside the script heap
  * and with no cap. Past HL_RES_HEADER_BYTES_MAX it raises now. */
 UTEST(js_audit9, response_headers_are_capped)
@@ -9998,7 +10119,9 @@ UTEST(js_audit9, response_headers_are_capped)
     kl_http_response_free(&res);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* res.json / html / text appended a Content-Type on every call - after an
  * app's own, and once more per repeated call. They set one only when the
  * response has none now (the app's wins), so a loop of res.text neither
@@ -10040,7 +10163,9 @@ UTEST(js_audit9, one_content_type_and_the_apps_wins)
     kl_http_response_free(&res2);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* M2: res.text / json / html / bytes copy (and may gzip) the body inside one
  * call, which the interrupt handler never saw: a loop of them over a large
  * string ran unbounded. The body is charged before the copy now. */
@@ -10071,6 +10196,7 @@ UTEST(js_audit9, response_bodies_are_charged)
         cleanup_js();
     }
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── Audit 10 (the JS twins of the Lua runtime items) ─────────────────── */
 
@@ -10919,6 +11045,7 @@ UTEST(js_audit10, builtin_work_is_charged)
     hl_js_free(&lim);
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* M (#712 regression): res.json / html / text kept the FIRST Content-Type
  * whoever set it, so res.html then res.json sent the JSON as text/html. Hull's
  * own default is replaced by the next body call; only an app-set one stays,
@@ -10958,7 +11085,9 @@ UTEST(js_audit10, a_body_call_replaces_hulls_own_content_type)
         cleanup_js();
     }
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L: the 500 a failed handler gets kept every header it had set - a
  * Set-Cookie, a Location, its own Content-Type next to the error's - and
  * res.bytes after a gzipped body kept the gzip's Content-Encoding / Vary. */
@@ -11004,6 +11133,7 @@ UTEST(js_audit10, error_response_and_bytes_drop_stale_headers)
     kl_http_response_free(&res2);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* L: WeakRef / FinalizationRegistry are not in the app runtime (a cleanup
  * callback ran in whatever request a GC happened in), nor in a
@@ -11186,6 +11316,7 @@ UTEST(js_audit11, rsa_verify_is_charged_by_the_key)
 
 /* ── Audit 11: Content-Type and error headers across middleware ────────── */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L: whether the Content-Type is Hull's default was a flag on the per-call
  * `res` object, so a middleware's res.html followed by the handler's res.json
  * (two objects, one response) kept text/html for the JSON. And the 500 a
@@ -11255,6 +11386,7 @@ UTEST(js_audit11, content_type_and_error_headers_span_middleware)
     kl_http_response_free(&res);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_HTTP_SERVER
 /* ── Audit 11 H1: route / middleware patterns outlive their JS strings ──
@@ -12438,6 +12570,7 @@ UTEST(js_audit19_intrinsics, router_needs_no_temporary_global)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Audit 19: jobs' listener map and health's check map were plain objects,
  * so jobs.on("toString", fn) found Object.prototype.toString instead of
  * "unknown event", and health.register("__proto__", fn) replaced the map's
@@ -12461,6 +12594,7 @@ UTEST(js_audit19_stdlib, name_maps_have_no_prototype)
     EXPECT_EQ(eval_int("globalThis.__a19_maps"), 3);
     cleanup_js_caps();
 }
+#endif
 
 /* Audit 20: retry.run with maxAttempts -1 / 0.5 never called fn (the Lua
  * twin agrees now); cookie.serialize refused only ';' CR LF NUL in a path and
@@ -12615,6 +12749,7 @@ UTEST(js_audit21, cancel_of_an_unawaited_op_runs_no_completion_hook)
 
 /* ── Audit 21 G6: off-heap copies and store walks are charged / capped ── */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* res.bytes copied a view of any size onto Keel's (unlimited) allocator. */
 UTEST(js_audit21, res_bytes_refuses_a_body_past_the_heap_limit)
 {
@@ -12637,6 +12772,7 @@ UTEST(js_audit21, res_bytes_refuses_a_body_past_the_heap_limit)
     kl_http_response_free(&res);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* blob.count / totalSize / iter / cleanup walked every shard directory
  * (256, or 65536 with shardDepth 2) for a few instructions of charge. */
@@ -12880,6 +13016,7 @@ UTEST(js_audit22, a_failed_string_conversion_leaks_nothing)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Audit 22: http.* sent a caller Host / Transfer-Encoding / Connection
  * as given - a second Host line, or a smuggled request. */
 UTEST(js_audit22, http_refuses_headers_hulls_client_writes)
@@ -12910,7 +13047,9 @@ UTEST(js_audit22, http_refuses_headers_hulls_client_writes)
     js.base.http_cfg = NULL;
     cleanup_js_caps();
 }
+#endif
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* Audit 22: a test file whose top level threw rejected its module promise
  * rather than raising, and the runner freed it unexamined - the tests before
  * the throw ran, the rest never existed, and the file passed. */
@@ -12951,7 +13090,9 @@ UTEST(js_audit23, a_test_file_whose_top_level_never_finishes_is_a_load_error)
     kl_http_router_free(&router);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
 UTEST(js_audit22, a_test_file_whose_top_level_throws_is_a_load_error)
 {
     init_js();
@@ -12986,6 +13127,7 @@ UTEST(js_audit22, a_test_file_whose_top_level_throws_is_a_load_error)
     kl_http_router_free(&router);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── Audit 23 G1: async RESULT copies are held to the heap limit ─────── */
 
@@ -13286,6 +13428,7 @@ UTEST(js_audit24, an_own_then_on_mains_promise_does_not_settle_main)
     be->free(loop);
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* Audit 24: ws.connect passed Keel no config, so every wss:// failed with a
  * generic error. It takes the client TLS config http.fetch uses now, and with
  * none says so up front (the allowlist still runs first). */
@@ -13320,6 +13463,7 @@ UTEST(js_audit24, wss_connect_needs_the_client_tls_config)
     js.base.http_cfg = NULL;
     cleanup_js_caps();
 }
+#endif
 
 /* ── Audit 25 ────────────────────────────────────────────────────────── */
 
@@ -13359,6 +13503,7 @@ UTEST(js_audit25, batch_on_a_connection_closed_by_the_async_probe)
     cleanup_js_caps();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* L4 / L5: a request body that is an ArrayBuffer or a typed array is sent;
  * anything else that is not a string / undefined / null throws a TypeError
  * - it was dropped silently and the request went out with no body. */
@@ -13417,7 +13562,9 @@ UTEST(js_audit25, http_body_types)
     js.base.http_cfg = NULL;
     cleanup_js_caps();
 }
+#endif
 
+#ifdef HL_ENABLE_HTTP_SERVER
 /* L6: a binary WebSocket frame reaches onMessage as an ArrayBuffer with its
  * bytes intact; it was a UTF-8-decoded string. A text frame stays a string. */
 UTEST(js_audit25, ws_binary_frame_is_an_array_buffer)
@@ -13460,6 +13607,7 @@ UTEST(js_audit25, ws_binary_frame_is_an_array_buffer)
     hl_ws_registry_free(&reg);
     cleanup_js();
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* L7: a row value that cannot be made (out of memory here) fails the query
  * with that exception; it was stored as the column's value and the partial
@@ -13669,6 +13817,7 @@ UTEST(js_audit27, password_prehash_is_charged)
     cleanup_js();
 }
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* http.request / post / put / patch never charged a body, and an
  * ArrayBuffer body was copied with malloc before anything sized it. The body
  * is charged (1 unit per 8 bytes) and refused past the heap limit before it
@@ -13708,6 +13857,7 @@ UTEST(js_audit27, http_bodies_are_charged)
     js.base.http_cfg = NULL;
     cleanup_js_caps();
 }
+#endif
 
 /* tar.extract(buf, undefined) converted the directory to the text
  * "undefined" and extracted into ./undefined/. undefined / null is no

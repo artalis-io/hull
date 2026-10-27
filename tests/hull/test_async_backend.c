@@ -52,8 +52,13 @@ UTEST(async_backend, init_and_free)
 
 UTEST(async_backend, name_is_keel)
 {
+    /* Keel's backend overrides the poll one only where Keel is linked. */
     const HlAsyncBackend *be = hl_async_backend();
+#ifdef HL_ENABLE_HTTP_SERVER
     ASSERT_STREQ(be->name, "keel");
+#else
+    ASSERT_STREQ(be->name, "poll");
+#endif
 }
 
 /* ── Time ──────────────────────────────────────────────────────────── */
