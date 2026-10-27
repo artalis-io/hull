@@ -161,9 +161,13 @@ static int dyn_name_is_dynamic(const char *s, size_t n)
 
 /* Skip whitespace and comments from @p p; @p nest = whether a block comment
  * nests (DuckDB's parser descends from Postgres's, but both readings are
- * tried so neither hides a call). Returns the first other character. */
-static const char *dyn_skip_gap(const char *p, int nest)
+ * tried so neither hides a call). Returns the first other character, or NULL
+ * once @p budget runs out. A skip runs to the end of an unterminated comment,
+ * and every dynamic name re-runs it, so `query--query--...` was quadratic
+ * (audit 30 re-audit): the skips of one scan share one byte budget. */
+static const char *dyn_skip_gap(const char *p, int nest, size_t *budget)
 {
+    const char *start = p;
     for (;;) {
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
                *p == '\f' || *p == '\v')
@@ -182,18 +186,28 @@ static const char *dyn_skip_gap(const char *p, int nest)
             }
             continue;
         }
-        return p;
+        break;
     }
+    size_t used = (size_t)(p - start);
+    if (used > *budget) return NULL;
+    *budget -= used;
+    return p;
 }
 
-static int dyn_followed_by_call(const char *p)
+/* A skip past the budget reads as a call: the statement is refused. */
+static int dyn_followed_by_call(const char *p, size_t *budget)
 {
-    return *dyn_skip_gap(p, 1) == '(' || *dyn_skip_gap(p, 0) == '(';
+    const char *a = dyn_skip_gap(p, 1, budget);
+    if (!a || *a == '(') return 1;
+    const char *b = dyn_skip_gap(p, 0, budget);
+    return !b || *b == '(';
 }
 
 int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
 {
     if (!sql) return 0;
+    /* Gap skips after dynamic names, in total: real SQL uses a sliver. */
+    size_t budget = 2 * strlen(sql) + 65536;
     for (const char *p = sql; *p; ) {
         unsigned char c = (unsigned char)*p;
         if ((c == 'U' || c == 'u') && p[1] == '&' && p[2] == '"')
@@ -215,7 +229,7 @@ int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
                 if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
             }
             const char *after = *q ? q + 1 : q;
-            if (fits && dyn_name_is_dynamic(buf, n) && dyn_followed_by_call(after))
+            if (fits && dyn_name_is_dynamic(buf, n) && dyn_followed_by_call(after, &budget))
                 return 1;
             /* Go on at the next byte, not past the name: string literals and
              * comments are not skipped, so a '"' inside one opened a "name"
@@ -228,7 +242,7 @@ int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
             const char *start = p;
             while (*p && dyn_ident_char((unsigned char)*p)) p++;
             if (dyn_name_is_dynamic(start, (size_t)(p - start)) &&
-                dyn_followed_by_call(p))
+                dyn_followed_by_call(p, &budget))
                 return 1;
             continue;
         }
