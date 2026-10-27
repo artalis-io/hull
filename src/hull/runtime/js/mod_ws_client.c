@@ -78,6 +78,13 @@ static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
     if (!ud) return;
 
     hl_async_teardown_unlink(&ud->teardown);
+    /* A deadline still armed holds ud raw: cancelled here, or it fired into
+     * freed memory (audit 30 - a close timer conn.close() armed from onClose,
+     * after the connection was over). At teardown the loop goes first and
+     * teardown_stop already disarmed it; the Lua finalizer does the same. */
+    if (ud->js && !ud->js->base.shutting_down)
+        js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
+    ud->connect_timer = 0;
     if (ud->client)
         kl_ws_client_free(ud->client);
 
@@ -445,6 +452,11 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
     (void)ws;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
     js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
+    /* The connection is over before onClose runs (audit 30): a conn.close()
+     * or send() from it is a no-op / an error, as on any closed client. It
+     * used to arm the close deadline here, after the disarm above, with
+     * nothing left to cancel it. */
+    ud->closed = 1;
 
     if (!JS_IsUndefined(ud->on_close)) {
         JSValue conn_obj = JS_DupValue(ud->ctx, ud->self_ref);
@@ -473,6 +485,7 @@ static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
     (void)ws;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
     js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
+    ud->closed = 1;   /* terminal: as in on_close (audit 30) */
     if (JS_IsUndefined(ud->on_error)) {
         log_error("[hull:ws:client] error: %s", msg ? msg : "unknown");
         js_ws_client_finish(ud);

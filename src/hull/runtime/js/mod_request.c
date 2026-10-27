@@ -248,6 +248,10 @@ static const char *mp_unusable(const HlJsMpIter *it)
     if (!hl_req_life_live(it->life) ||
         (it->conn && it->js->active_conn != it->conn))
         return "req.multipart(): the request is over";
+    /* Code of another run (audit 30): a handler that awaited a promise this
+     * request's run settled. A read it parked would be this request's. */
+    if (hl_js_run_foreign(it->js))
+        return "req.multipart(): the body belongs to another request's run";
     return NULL;
 }
 
@@ -654,8 +658,10 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     /* The park fired: no longer parked (a re-park below parks again). */
     mp_cont_set_parked(jc, 0);
 
-    /* An entry point: this resume's run gets a budget of its own. */
+    /* An entry point: this resume's run gets a budget of its own - but it
+     * is the run that parked, and keeps that run's tag (audit 30). */
     hl_js_budget_arm(js);
+    hl_js_run_tag_enter(js, jc->link.run_tag);
     js->active_timer = NULL;
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 

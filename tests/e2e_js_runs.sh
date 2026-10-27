@@ -35,6 +35,15 @@
 #       collector (its self-reference was reported as a child) and was
 #       closed at the next collection; it stays a root while connected.
 #
+# Audit 30:
+#   H   conn.close() from a ws client's onClose armed the close deadline after
+#       the connection was over; the client was freed and the deadline fired
+#       5 s later into freed memory (ASan: heap-use-after-free).
+#   M   A handler that awaited a promise Hull does not drive (its request was
+#       ended) resumed inside the request that settled it, and an op it then
+#       made was that request's: it held the other client's response for its
+#       whole wait.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -134,6 +143,32 @@ app.get("/pushnow", (_req, res) => {
     res.text(String(n));
 });
 app.get("/dropgot", (_req, res) => res.text(dropGot));
+
+/* Audit 30 H: the server closes; the client's onClose calls close() on the
+ * finished connection and drops it (nothing keeps the object alive). */
+app.ws("/closer", { onOpen(c) { c.close(1000); }, onMessage(c, m) {} });
+let closeCalls = 0;
+app.get("/wsclose", (req, res) => {
+    wsClient.connect("ws://127.0.0.1:" + req.query.port + "/closer", {
+        onClose(c) { closeCalls++; c.close(); c.close(4000, "again"); },
+    });
+    res.text("started");
+});
+app.get("/closecalls", (_req, res) => res.text(String(closeCalls)));
+
+/* Audit 30 M: /ra waits on a promise only /rb settles, then on its own
+ * sleep. /rb must not wait for /ra's sleep. */
+let raWake = null;
+app.get("/ra", async (_req, res) => {
+    await new Promise((r) => { raWake = r; });
+    await hull.sleep(1500);
+    try { res.json({ ok: "a" }); } catch (_e) {}
+});
+app.get("/rb", async (_req, res) => {
+    if (raWake) { raWake(); raWake = null; }
+    await null;
+    res.json({ ok: "b" });
+});
 
 /* Every request passes this, 404s included: ~200 KB on req.ctx. */
 app.use("*", "/*", (req, res) => { req.ctx.blob = "x".repeat(200000); return 0; });
@@ -356,6 +391,33 @@ sleep 0.5
 out=$(curl -s -m 10 "$URL/dropgot")
 [ "$out" = after-gc ] && pass "the dropped client still receives after a GC"     || fail "the dropped client still receives after a GC" "$out"
 
+echo "=== audit 30 H: conn.close() inside a ws client's onClose ==="
+curl -s -m 10 -o /dev/null "$URL/wsclose?port=$PORT"
+sleep 0.5
+curl -s -m 30 -o /dev/null "$URL/gc"    # the dropped client is finalized
+# Past the 5 s close deadline: armed by the close() in onClose, it fired
+# into the freed client (a crash under ASan, maybe a second onClose).
+sleep 6
+out=$(curl -s -m 10 "$URL/closecalls")
+[ "$out" = 1 ] && pass "onClose ran once; close() in it armed no deadline" \
+    || fail "onClose ran once; close() in it armed no deadline" "$out"
+out=$(curl -s -m 10 "$URL/fast")
+[ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
+
+echo "=== audit 30 M: an ended run's op is not the request that resumed it ==="
+curl -s -m 10 -o "$TMPDIR/ra.out" "$URL/ra" || true
+out=$(curl -s -m 10 -w ' %{time_total}' "$URL/rb")
+body=${out%% *}
+t=${out##* }
+if [ "$body" = '{"ok":"b"}' ] && awk "BEGIN{exit !($t < 1.0)}"; then
+    pass "/rb answered at once (${t}s), not after /ra's sleep"
+else
+    fail "/rb answered at once, not after /ra's sleep" "$out"
+fi
+sleep 1.8   # /ra's sleep resumes, detached, after both requests are over
+out=$(curl -s -m 10 "$URL/fast")
+[ "$out" = fast ] && pass "the ended run's op resumed harmlessly" || fail "after /ra's op" "$out"
+
 echo "=== audit 8 H1 / audit 18: the inherited accessors cannot be defined ==="
 # Audit 18: the intrinsics are frozen, so the Object.prototype `then` getter
 # and `remote_addr` setter the H1 legs planted are refused at load.
@@ -498,6 +560,10 @@ case "$out" in
     *) pass "nothing committed" ;;
 esac
 
+# Under an ASan build (make debug), a use after free above is reported here.
+if grep -q "AddressSanitizer" "$TMPDIR/log"; then
+    fail "the server log has no ASan report" "$(grep -m1 -A15 AddressSanitizer "$TMPDIR/log")"
+fi
 kill "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""
 

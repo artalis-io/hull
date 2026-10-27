@@ -129,6 +129,25 @@ static int js_db_budget_charge(void *ud, int64_t units)
 void hl_js_budget_arm(HlJS *js)
 {
     hl_js_budget_arm_kind(js, HL_RUN_ENTRY);
+    hl_js_run_tag_new(js);   /* every entry arms: a run of its own (audit 30) */
+}
+
+void hl_js_run_tag_new(HlJS *js)
+{
+    if (!js) return;
+    hl_js_run_tag_enter(js, ++js->run_tag_next);
+}
+
+void hl_js_run_tag_enter(HlJS *js, uint64_t tag)
+{
+    if (!js) return;
+    js->entry_tag = tag;
+    if (js->rt) JS_SetJobTag(js->rt, tag);
+}
+
+int hl_js_run_foreign(const HlJS *js)
+{
+    return js && js->rt && JS_GetJobTag(js->rt) != js->entry_tag;
 }
 
 const char *hl_js_trip_reason(const HlJS *js)
@@ -2336,6 +2355,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     js->active_life = NULL;
     js->last_async_cont = NULL;
     hl_js_budget_arm_kind(js, HL_RUN_MAIN);   /* app.main's own deadline */
+    hl_js_run_tag_new(js);                    /* a run of its own (audit 30) */
+    js->cli_main_tag = js->entry_tag;
     JSValue call_argv[1] = { ctxobj };
     js->active_cli_main = 1;   /* the ops main makes are main's */
     JSValue ret = JS_Call(ctx, main_fn, JS_UNDEFINED, 1, call_argv);

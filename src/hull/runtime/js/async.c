@@ -172,6 +172,7 @@ void hl_js_run_push(HlJS *js, HlAsyncCont *cont)
     HlJsRunLink *link = hl_js_cont_link(cont);
     link->handler_promise = JS_UNDEFINED;
     link->once = NULL;
+    link->run_tag = js->entry_tag;   /* audit 30: its resume re-enters it */
     link->unwired_prev = hl_js_cont_link((HlAsyncCont *)js->last_async_cont);
     js->last_async_cont = cont;
 }
@@ -435,6 +436,9 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * every resume failed at its first poll until the next dispatch). A
      * resume of app.main's own code keeps main's deadline default. */
     hl_js_budget_arm_kind(js, jc->cli_main ? HL_RUN_MAIN : HL_RUN_ENTRY);
+    /* The run that made this op, not a new one: its code after the await
+     * runs with that tag (audit 30). */
+    hl_js_run_tag_enter(js, jc->link.run_tag);
     js->active_timer = NULL;
     /* A stale transaction is not this run's to join (audit 6 M1). */
     hl_db_registry_guard_stale_txns(js->base.db_registry);
@@ -948,6 +952,33 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->alloc       = alloc;
     jc->push_result = push_result;
 
+    /* Code of another run is running (audit 30): a job this entry's drain
+     * runs because this entry settled a promise that run awaited - a handler
+     * whose request already ended, waiting on a promise Hull does not drive,
+     * or a timer's / ws callback's run. None of the active entry is its: as
+     * the active request's op it suspended that request's connection, and
+     * the request's client waited for it; chained into this entry's run it
+     * could complete it. It runs detached and belongs to no run - except
+     * app.main's, whose own code it may be (main awaiting a promise a
+     * ws-client callback settles). Its resume re-enters its own run's tag. */
+    if (hl_js_run_foreign(js)) {
+        jc->conn            = NULL;
+        jc->req             = NULL;
+        jc->timer_ctx       = NULL;
+        jc->on_complete     = NULL;
+        jc->on_complete_ctx = NULL;
+        jc->life            = NULL;
+        jc->cli_main        = js->cli_main_active && js->cli_main_tag != 0 &&
+                              JS_GetJobTag(js->rt) == js->cli_main_tag;
+        jc->attached        = 0;
+        jc->holds           = 0;
+        jc->link.handler_promise = JS_UNDEFINED;
+        jc->link.once            = NULL;
+        jc->link.unwired_prev    = NULL;
+        jc->link.run_tag         = JS_GetJobTag(js->rt);
+        return &jc->base;
+    }
+
     /* Capture per-request connection so multiple connections can be
      * suspended concurrently without clobbering each other.
      * handler_promise is set later by dispatch (two-step wiring). */
@@ -1237,6 +1268,9 @@ static void js_task_fire(void *user)
     /* The interrupted run's wall-clock deadline: the arm below sets the
      * task's own (cap/run_watchdog.h). */
     uint64_t      save_deadline    = hl_run_watch_save(&js->run_watch);
+    /* And its run tag, which the arm below replaces (audit 30). */
+    uint64_t      save_entry_tag   = js->entry_tag;
+    uint64_t      save_job_tag     = JS_GetJobTag(js->rt);
 #ifdef HL_ENABLE_DB
     /* The arm below rebinds this thread's SQL budget to this run. */
     HlDbBudgetBinding save_budget  = hl_db_budget_current();
@@ -1295,6 +1329,8 @@ static void js_task_fire(void *user)
     js->budget_tripped         = save_tripped;
     js->budget_timed_out       = save_timed_out;
     hl_run_watch_restore(&js->run_watch, save_deadline);
+    js->entry_tag = save_entry_tag;
+    JS_SetJobTag(js->rt, save_job_tag);
 #ifdef HL_ENABLE_DB
     hl_db_budget_restore(save_budget);
 #endif

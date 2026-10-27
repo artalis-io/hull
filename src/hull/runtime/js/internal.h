@@ -213,6 +213,7 @@ typedef struct HlJsRunLink {
     JSValue             handler_promise;  /* outer handler promise */
     struct HlJsRunLink *unwired_prev;     /* earlier cont of this run, not yet wired */
     HlJsRunOnce        *once;             /* shared with the run's other conts */
+    uint64_t            run_tag;          /* the run that made it (audit 30) */
 } HlJsRunLink;
 
 typedef struct {
@@ -236,6 +237,19 @@ int  hl_js_run_claim(HlJsRunLink *link);
 void hl_js_run_unlink(HlJsRunLink *link, JSContext *ctx);
 /* Chain a new continuation behind js->last_async_cont and make it the last. */
 void hl_js_run_push(HlJS *js, HlAsyncCont *cont);
+
+/* Run tags (audit 30, HlJS.entry_tag). The QuickJS job queue is shared: an
+ * entry's drain also runs the jobs of other runs whose promises this entry
+ * settled - a request that awaited a promise Hull does not drive was ended,
+ * and its code then resumed inside whichever entry resolved it. Each run has
+ * a tag; QuickJS runs a promise job with the tag of the code that awaited
+ * (HULL PATCH 0008), so the code now running belongs to the active entry
+ * only when the two tags agree. hl_js_budget_arm starts a new run (every
+ * entry arms it); a resume re-enters its continuation's run. */
+void hl_js_run_tag_new(HlJS *js);
+void hl_js_run_tag_enter(HlJS *js, uint64_t tag);
+/* 1 when the code now running is not the active entry's run's. */
+int  hl_js_run_foreign(const HlJS *js);
 /* An entry point's handler returned pending with continuations made: give
  * them @p promise (js->last_async_cont and the run chain behind it), mark the
  * run tripped if the handler went over its budget, and clear

@@ -327,3 +327,46 @@ no-op).
 
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit22.a_failed_string_conversion_leaks_nothing`.
+
+## Patch 0008 - a job runs with the tag of the code that awaited
+
+**Files:** `vendor/quickjs/quickjs.c` (`JSRuntime.job_tag`, `JSJobEntry.tag`,
+`JSPromiseReactionData.tag`, `JS_EnqueueJob2`, `JS_ExecutePendingJob`,
+`fulfill_or_reject_promise`, `perform_promise_then`, `JS_SetJobTag` /
+`JS_GetJobTag`), `quickjs.h` (`JS_SetJobTag`, `JS_GetJobTag`)
+**Found by:** audit 30 (M: cross-request op attribution)
+**Upstream:** Hull-specific.
+
+QuickJS has one job queue per runtime, and Hull drains it inside whichever
+entry is running (a request, a timer, a ws callback, a resume) with that
+entry's request, life and teardown hook active - its own code after an
+`await` must run there (audit 7 H1). But the drain also runs the jobs of
+OTHER runs: a handler that awaited a promise Hull does not drive was ended
+(its request answered), and when a later request resolved that promise, the
+first handler's code ran inside the second's drain. An op it then started
+(`hull.sleep`, `http.fetch`, `db.async`) was taken for the active request's:
+it suspended that request's connection, and the second client waited for the
+first handler's sleep.
+
+The patch gives the runtime a 64-bit tag the embedder sets
+(`JS_SetJobTag`, read back by `JS_GetJobTag`; 0 until set). A job is queued
+with the tag current at that moment and run with it (the caller's tag is put
+back after), and a promise reaction records the tag current when its handler
+was registered - the `await` or `then` - and its job is queued with THAT tag,
+not the one current when the promise was settled. So a job always carries the
+tag of the code that waited for it: the AsyncContext model, for one value.
+
+Hull (`runtime/js/runtime.c`, `hl_js_run_tag_*`) gives every entry a fresh
+tag (`hl_js_budget_arm`, and app.main's arm), a resume re-enters the tag of
+the continuation it resumes (`HlJsRunLink.run_tag`), and
+`hl_js_async_cont_create` treats an op made under a tag other than the active
+entry's as another run's: detached, attached to no request and chained into
+no run (app.main's own run excepted, by its tag). `req.multipart()` reads are
+refused there too.
+
+Cost: one 64-bit field per job and per pending reaction, and two stores per
+job run. A runtime that never sets a tag (the worker.dispatch VM, the JS
+source frontend's tooling session) behaves as upstream.
+
+**Guard:** `tests/e2e_js_runs.sh`, "audit 30 M": without the patch (or the
+Hull side) `/rb` answers after `/ra`'s 1.5 s sleep instead of at once.

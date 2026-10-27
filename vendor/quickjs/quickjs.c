@@ -367,6 +367,8 @@ struct JSRuntime {
        non-zero every step polls the interrupt handler */
     int *stop_flag;
     uint64_t work_pending;
+    /* HULL PATCH 0008: the job tag of the code now running (JS_SetJobTag) */
+    uint64_t job_tag;
 
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
@@ -949,6 +951,7 @@ struct JSModuleDef {
 typedef struct JSJobEntry {
     struct list_head link;
     JSContext *realm;
+    uint64_t tag; /* HULL PATCH 0008: run with this job tag */
     JSJobFunc *job_func;
     int argc;
     JSValue argv[0];
@@ -1856,6 +1859,17 @@ void JS_SetWorkHandler(JSRuntime *rt, JSWorkHandler *cb, void *opaque)
     rt->work_pending = 0;
 }
 
+/* HULL PATCH 0008: see JS_SetJobTag in quickjs.h */
+void JS_SetJobTag(JSRuntime *rt, uint64_t tag)
+{
+    rt->job_tag = tag;
+}
+
+uint64_t JS_GetJobTag(JSRuntime *rt)
+{
+    return rt->job_tag;
+}
+
 /* HULL PATCH 0006: see JS_SetStopFlag in quickjs.h */
 void JS_SetStopFlag(JSRuntime *rt, int *flag)
 {
@@ -2366,6 +2380,7 @@ static int JS_EnqueueJob2(JSContext *ctx, JSJobFunc *job_func,
     if (!e)
         return -1;
     e->realm = JS_DupContext(ctx);
+    e->tag = rt->job_tag; /* HULL PATCH 0008 */
     e->job_func = job_func;
     e->argc = argc;
     for(i = 0; i < argc; i++) {
@@ -2409,7 +2424,14 @@ int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx)
     e = list_entry(rt->job_list.next, JSJobEntry, link);
     list_del(&e->link);
     ctx = e->realm;
-    res = e->job_func(ctx, e->argc, (JSValueConst *)e->argv);
+    /* HULL PATCH 0008: the job runs with the tag it was queued under, and
+       the tag of whatever called this is put back after it */
+    {
+        uint64_t saved_tag = rt->job_tag;
+        rt->job_tag = e->tag;
+        res = e->job_func(ctx, e->argc, (JSValueConst *)e->argv);
+        rt->job_tag = saved_tag;
+    }
     for(i = 0; i < e->argc; i++)
         JS_FreeValue(ctx, e->argv[i]);
     if (JS_IsException(res))
@@ -53453,6 +53475,7 @@ typedef struct JSPromiseReactionData {
     struct list_head link; /* not used in promise_reaction_job */
     JSValue resolving_funcs[2];
     JSValue handler;
+    uint64_t tag; /* HULL PATCH 0008: the job tag when it was registered */
 } JSPromiseReactionData;
 
 JSPromiseStateEnum JS_PromiseState(JSContext *ctx, JSValue promise)
@@ -53563,7 +53586,15 @@ static void fulfill_or_reject_promise(JSContext *ctx, JSValueConst promise,
         args[2] = rd->handler;
         args[3] = JS_NewBool(ctx, is_reject);
         args[4] = value;
-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
+        /* HULL PATCH 0008: the reaction job belongs to the code that
+           registered it (the `await` / `then`), not to whatever settled
+           the promise */
+        {
+            uint64_t saved_tag = ctx->rt->job_tag;
+            ctx->rt->job_tag = rd->tag;
+            JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
+            ctx->rt->job_tag = saved_tag;
+        }
         list_del(&rd->link);
         promise_reaction_data_free(ctx->rt, rd);
     }
@@ -54313,6 +54344,7 @@ static __exception int perform_promise_then(JSContext *ctx,
         if (!JS_IsFunction(ctx, handler))
             handler = JS_UNDEFINED;
         rd->handler = JS_DupValue(ctx, handler);
+        rd->tag = ctx->rt->job_tag; /* HULL PATCH 0008 */
         rd_array[i] = rd;
     }
 
