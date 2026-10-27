@@ -14,9 +14,17 @@
 /* Linux / POSIX */
 #endif
 
+/* Whole seconds from CLOCK_REALTIME, the clock now_ms (and SQLite's 'now')
+ * read. Not time(): glibc serves it from the coarse clock, a few ms behind,
+ * so just after a second boundary time.now() could still name the previous
+ * second while a timestamp SQLite or now_ms took a moment earlier named the
+ * new one - a jobs reaper test saw a claim stamped "2 s ago" as 1 s old. */
 int64_t hl_cap_time_now(void)
 {
-    return (int64_t)time(NULL);
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+        return (int64_t)time(NULL);
+    return (int64_t)ts.tv_sec;
 }
 
 int64_t hl_cap_time_now_ms(void)
@@ -40,7 +48,7 @@ int hl_cap_time_date(char *buf, size_t buf_size)
     if (!buf || buf_size < 11)
         return -1;
 
-    time_t now = time(NULL);
+    time_t now = (time_t)hl_cap_time_now();
     struct tm tm;
     if (gmtime_r(&now, &tm) == NULL)
         return -1;
@@ -58,7 +66,7 @@ int hl_cap_time_datetime(char *buf, size_t buf_size)
     if (!buf || buf_size < 21)
         return -1;
 
-    time_t now = time(NULL);
+    time_t now = (time_t)hl_cap_time_now();
     struct tm tm;
     if (gmtime_r(&now, &tm) == NULL)
         return -1;

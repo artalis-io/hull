@@ -10,6 +10,13 @@ release-artifact layout).
 
 ### Fixes
 
+- **`time.now()` could lag the other clocks by a second on Linux.** It read `time()`, which
+  glibc serves from the coarse clock, a few milliseconds behind `CLOCK_REALTIME`. Just after a
+  second boundary it still named the previous second while `time.now_ms()` / `nowMs()` and
+  SQLite's `'now'` named the new one, so a timestamp taken by one and compared with the other
+  was off by one (a `jobs.reap` claim stamped two seconds ago read as one). `time.now()`,
+  `time.date()` and `time.datetime()` now read `CLOCK_REALTIME`.
+
 - **A build that linked mbedTLS for a database without HTTP used none of it** (e.g.
   `make HL_ENABLE_HTTP=0 HL_ENABLE_POSTGRES=1`, or MySQL / Valkey). The mbedTLS crypto backends
   were compiled only under `HL_ENABLE_HTTP`, so that binary carried mbedTLS yet ran the
