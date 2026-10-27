@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <unistd.h>   /* getpid */
 #include <limits.h>
+#include <time.h>     /* clock */
 #include <sys/stat.h>
 #include "hull/shared/cache_dir.h"   /* hl_hull_sqlite_temp_dir_make */
 #include "hull/shared/host.h"        /* hl_host_is_windows */
@@ -692,6 +693,37 @@ UTEST(hl_cap_db, dynamic_sql_calls_are_found)
     for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
         EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(miss[i]));
     EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(NULL));
+}
+
+/* Audit 30: the quoted-name scan ran to the closing quote from every '"',
+ * so a run of quotes was quadratic (1 MB ~ minutes, before any budget
+ * charge). It stops once a name cannot fit; detection is unchanged. */
+UTEST(hl_cap_db, dynamic_sql_scan_is_linear)
+{
+    EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql("SELECT * FROM \"QUERY\" ('x')"));
+    EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql("SELECT * FROM \"query\"('x')"));
+
+    size_t n = 1u << 20;
+    char *big = malloc(n + 64);
+    ASSERT_TRUE(big != NULL);
+    memset(big, '"', n);
+    big[n] = '\0';
+    clock_t t0 = clock();
+    EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(big));
+    /* Every byte is still scanned: a call after the quotes is found. */
+    strcpy(big + n, " query('x')");
+    EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql(big));
+    /* And one unterminated name a megabyte long. */
+    memset(big, 'a', n);
+    big[0] = '"';
+    big[n] = '\0';
+    EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(big));
+    /* The quadratic scan took ~10 min on 1 MB; the linear one ~0.3 s, and
+     * up to ~3 s under MSan / coverage instrumentation. 30 s separates the
+     * two on any CI build. */
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 30.0);
+    free(big);
 }
 
 /* Postgres decodes U&"\005fhull_sessions" to _hull_sessions after this text

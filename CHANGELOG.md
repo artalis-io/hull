@@ -54,6 +54,28 @@ release-artifact layout).
 - **JS `rbac.hasAnyRole(uid, "admin")` checked each character as a role** (audit 30). A
   string is now one role in both runtimes (Lua's `has_any_role` returned false for one);
   `hasAnyPermission` / `has_any_permission` likewise.
+- **A MySQL statement of exactly 16 MiB - 1 byte hung the connection** (audit 30). A packet
+  length of `ff ff ff` means "continued in the next packet", so the server waited for an
+  empty terminator packet Hull never sent, holding the event loop until the read timeout (for
+  ever for a migration with `read_timeout=0`). The writer now refuses that length, as the
+  reader already did, with the "larger than one MySQL packet" error.
+
+- **DuckDB's dynamic-SQL check was quadratic in a run of double quotes** (audit 30, `duckdb`
+  feature only). It scanned to the closing quote from every `"`, so 1 MB of quotes held the
+  event loop for minutes before any SQL budget charge. The scan of a quoted name now stops as
+  soon as the name is too long to be `query` / `query_table` / ...; every byte is still
+  scanned for a bare name.
+
+- **A libhull embedder that skipped the optional phase-1 pledge was killed on its first WAL**
+  (audit 30). The phase-2 pledge did not record that a pledge was in force, so SQLite's
+  `fchown` ran a real `chown` under it and a root process died on "pledge chown". Phase 2 now
+  records it too.
+
+- **`kv.open` had no limit on live connections, and each kept its biggest reply's buffer**
+  (audit 30, Valkey / Redis). Forty handles after one 40 MB `GET` each held 2.4 GB. At most 16
+  KV connections are open at once now (as for `db.open`; a refused open collects garbage once
+  and retries, so dropped stores free their slot), and a receive buffer past 1 MiB is freed
+  once its reply has been copied.
 
 - **`time.now()` could lag the other clocks by a second on Linux.** It read `time()`, which
   glibc serves from the coarse clock, a few milliseconds behind `CLOCK_REALTIME`. Just after a

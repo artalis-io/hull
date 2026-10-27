@@ -244,6 +244,58 @@ UTEST(valkey_conn, command_deadline_bounds_a_dripping_reply) {
     close(sv[0]);
 }
 
+/* Audit 30: a receive buffer grown by one big reply is dropped once the reply
+ * is done with (the next command, or hl_valkey_conn_trim), and the replies
+ * that follow - including bytes already buffered behind it - still read. */
+UTEST(valkey_conn, a_big_reply_buffer_is_trimmed) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    write(sv[0], HELLO_MAP, strlen(HELLO_MAP));
+    HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost", &d));
+    HlValkeyConn *c = NULL; char e[128];
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, NULL, e, sizeof e));
+
+    const size_t big = 2u * 1024u * 1024u;
+    const char *head = "$2097152\r\n";
+    const char *tail = "\r\n$2\r\nok\r\n";
+    size_t len = strlen(head) + big + strlen(tail);
+    char *data = malloc(len);
+    ASSERT_TRUE(data != NULL);
+    memcpy(data, head, strlen(head));
+    memset(data + strlen(head), 'b', big);
+    memcpy(data + strlen(head) + big, tail, strlen(tail));
+    Dripper dr = { .fd = sv[0], .data = data, .len = len,
+                   .chunk = 65536, .delay_ms = 0 };
+    atomic_init(&dr.stop, 0);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, drip, &dr));
+
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 2);
+    hl_resp_cmd_arg_cstr(&w, "GET");
+    hl_resp_cmd_arg_cstr(&w, "k");
+    HlRespValue reply;
+    ASSERT_EQ(0, hl_valkey_command(c, &w, &reply));
+    ASSERT_EQ((int)reply.type, (int)HL_RESP_STR);
+    ASSERT_EQ(reply.str.len, big);
+    EXPECT_EQ(reply.str.p[0], 'b');
+    EXPECT_EQ(reply.str.p[big - 1], 'b');
+    pthread_join(th, NULL);
+    hl_valkey_conn_trim(c);   /* the "ok" reply may be buffered: kept */
+
+    ASSERT_EQ(0, hl_valkey_command(c, &w, &reply));
+    ASSERT_EQ((int)reply.type, (int)HL_RESP_STR);
+    ASSERT_EQ(reply.str.len, (size_t)2);
+    EXPECT_EQ(0, memcmp(reply.str.p, "ok", 2));
+    hl_valkey_conn_trim(c);
+    hl_valkey_conn_trim(NULL);
+    hl_resp_writer_free(&w);
+
+    hl_valkey_conn_close(c);
+    close(sv[0]);
+    free(data);
+}
+
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"
 

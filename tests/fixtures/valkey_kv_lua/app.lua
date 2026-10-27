@@ -104,8 +104,25 @@ app.main(function(ctx)
     -- by the clear above) is absent even though the cache wrote "shared".
     local kv2 = kv_mod.open({ backend = "valkey", dsn = dsn, namespace = "t" })
     check("kv/cache namespace isolation", kv2:get("shared") == nil)
+    -- Audit 30: a 2 MB value roundtrips (its receive buffer is freed after the
+    -- copy), and at most 16 KV connections are live at once.
+    kv2:set("huge", string.rep("H", 2 * 1024 * 1024))
+    check("big value roundtrip", kv2:get("huge") == string.rep("H", 2 * 1024 * 1024))
+    check("op after a big value", kv2:get("nope") == nil)
     kv2:clear()
     kv2:close()
+
+    local held = {}
+    for i = 1, 16 do
+        held[i] = kv_mod.open({ backend = "valkey", dsn = dsn, namespace = "cap" })
+    end
+    local ok, err = pcall(kv_mod.open, { backend = "valkey", dsn = dsn, namespace = "cap" })
+    check("17th live connection refused",
+          not ok and tostring(err):find("too many open connections", 1, true) ~= nil)
+    for i = 1, 16 do held[i]:close() end
+    -- Dropped without close(): the refused open collects them and retries.
+    for _ = 1, 40 do kv_mod.open({ backend = "valkey", dsn = dsn, namespace = "cap" }) end
+    check("dropped connections free their slot", true)
 
     print("ALL OK")
     return 0

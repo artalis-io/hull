@@ -81,6 +81,15 @@ HlAllocator *hl_valkey_conn_alloc(HlValkeyConn *c);
  */
 int hl_valkey_command(HlValkeyConn *c, const HlRespWriter *cmd, HlRespValue *out);
 
+/*
+ * The caller is done with every byte the last reply borrowed: free the receive
+ * buffer when it has grown past a modest size (1 MiB) and holds nothing more,
+ * so one large reply does not stay resident for the connection's life. Any
+ * pointer into the last reply is invalid afterwards. hl_valkey_command does it
+ * itself before reading a reply. NULL-safe (audit 30).
+ */
+void hl_valkey_conn_trim(HlValkeyConn *c);
+
 /* Borrowed last-error string (valid until the next call on c). Never NULL. */
 const char *hl_valkey_conn_error(HlValkeyConn *c);
 

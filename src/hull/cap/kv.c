@@ -13,6 +13,7 @@
 
 #include "hull/cap/kv.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -24,6 +25,22 @@ struct HlKvConn {
     HlAllocator       *alloc;   /* NULL -> process default; owns this struct */
     char               err[256];/* "unsupported"/dispatch-side messages */
 };
+
+/* Live connections (HL_KV_OPEN_MAX): kv.open had no cap, and each connection
+ * kept a receive buffer of up to the backend's 64 MB reply limit - 40 handles
+ * after one 40 MB GET each held 2.4 GB (audit 30). Atomic: a test harness or
+ * an embedder may open from more than one thread. */
+static atomic_int g_kv_live;
+
+static int kv_slot_take(void) {
+    int n = atomic_load(&g_kv_live);
+    do {
+        if (n >= HL_KV_OPEN_MAX) return -1;
+    } while (!atomic_compare_exchange_weak(&g_kv_live, &n, n + 1));
+    return 0;
+}
+
+static void kv_slot_give(void) { atomic_fetch_sub(&g_kv_live, 1); }
 
 int hl_cap_kv_open(HlKvConn **out, const char *dsn, int timeout_ms,
                    HlAllocator *alloc, char *errbuf, size_t errlen) {
@@ -40,13 +57,24 @@ int hl_cap_kv_open(HlKvConn **out, const char *dsn, int timeout_ms,
                      "'hull build --with=valkey' (hull feature install valkey)");
         return -1;
     }
+    /* Taken before dialing, so a refused open costs no connection. */
+    if (kv_slot_take() != 0) {
+        if (errbuf && errlen)
+            snprintf(errbuf, errlen,
+                     "kv.open: too many open connections (at most %d; close some first)",
+                     HL_KV_OPEN_MAX);
+        return HL_KV_ERR_TOO_MANY;
+    }
     HlKvHandle *h = NULL;
-    if (b->open(&h, dsn, timeout_ms, alloc, errbuf, errlen) != 0)
+    if (b->open(&h, dsn, timeout_ms, alloc, errbuf, errlen) != 0) {
+        kv_slot_give();
         return -1;   /* open filled errbuf */
+    }
 
     HlKvConn *c = hl_alloc_calloc(alloc, 1, sizeof *c);
     if (!c) {
         b->close(h);
+        kv_slot_give();
         if (errbuf && errlen) snprintf(errbuf, errlen, "kv: out of memory");
         return -1;
     }
@@ -61,6 +89,17 @@ void hl_cap_kv_close(HlKvConn *c) {
     if (!c) return;
     c->b->close(c->h);
     hl_alloc_free(c->alloc, c, sizeof *c);
+    kv_slot_give();
+}
+
+void hl_cap_kv_release(HlKvConn *c) {
+    if (c && c->b->trim) c->b->trim(c->h);
+}
+
+/* After an op that returns nothing borrowed: its reply is done with. */
+static int kv_done(HlKvConn *c, int rc) {
+    hl_cap_kv_release(c);
+    return rc;
 }
 
 const char *hl_cap_kv_error(HlKvConn *c) {
@@ -99,19 +138,19 @@ int hl_cap_kv_set(HlKvConn *c, const uint8_t *key, size_t klen,
     if (!c) return -1;
     if (ttl_ms > 0 && !(c->b->caps & HL_KV_CAP_TTL)) return kv_unsupported(c, "ttl");
     kv_clear_err(c);
-    return c->b->set(c->h, key, klen, val, vlen, ttl_ms);
+    return kv_done(c, c->b->set(c->h, key, klen, val, vlen, ttl_ms));
 }
 
 int hl_cap_kv_del(HlKvConn *c, const uint8_t *key, size_t klen, int *deleted) {
     if (!c) return -1;
     kv_clear_err(c);
-    return c->b->del(c->h, key, klen, deleted);
+    return kv_done(c, c->b->del(c->h, key, klen, deleted));
 }
 
 int hl_cap_kv_exists(HlKvConn *c, const uint8_t *key, size_t klen, int *present) {
     if (!c) return -1;
     kv_clear_err(c);
-    return c->b->exists(c->h, key, klen, present);
+    return kv_done(c, c->b->exists(c->h, key, klen, present));
 }
 
 int hl_cap_kv_incr(HlKvConn *c, const uint8_t *key, size_t klen,
@@ -119,7 +158,7 @@ int hl_cap_kv_incr(HlKvConn *c, const uint8_t *key, size_t klen,
     if (!c) return -1;
     if (!c->b->incr) return kv_unsupported(c, "increment");
     kv_clear_err(c);
-    return c->b->incr(c->h, key, klen, by, ttl_ms, newval);
+    return kv_done(c, c->b->incr(c->h, key, klen, by, ttl_ms, newval));
 }
 
 HlKvCasResult hl_cap_kv_cas(HlKvConn *c, const uint8_t *key, size_t klen,
@@ -128,13 +167,16 @@ HlKvCasResult hl_cap_kv_cas(HlKvConn *c, const uint8_t *key, size_t klen,
     if (!c) return HL_KV_CAS_ERROR;
     if (!c->b->cas) { kv_unsupported(c, "compare-and-swap"); return HL_KV_CAS_ERROR; }
     kv_clear_err(c);
-    return c->b->cas(c->h, key, klen, expected, elen, has_expected, newv, nlen, ttl_ms);
+    HlKvCasResult r = c->b->cas(c->h, key, klen, expected, elen, has_expected,
+                                newv, nlen, ttl_ms);
+    hl_cap_kv_release(c);
+    return r;
 }
 
 int hl_cap_kv_clear(HlKvConn *c, const uint8_t *prefix, size_t plen, int64_t *removed) {
     if (!c) return -1;
     kv_clear_err(c);
-    return c->b->clear(c->h, prefix, plen, removed);
+    return kv_done(c, c->b->clear(c->h, prefix, plen, removed));
 }
 
 int hl_cap_kv_scan(HlKvConn *c, const uint8_t *prefix, size_t plen, size_t limit,
@@ -142,5 +184,5 @@ int hl_cap_kv_scan(HlKvConn *c, const uint8_t *prefix, size_t plen, size_t limit
     if (!c) return -1;
     if (!c->b->scan) return kv_unsupported(c, "scan");
     kv_clear_err(c);
-    return c->b->scan(c->h, prefix, plen, limit, cb, cbctx);
+    return kv_done(c, c->b->scan(c->h, prefix, plen, limit, cb, cbctx));
 }

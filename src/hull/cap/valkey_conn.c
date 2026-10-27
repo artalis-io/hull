@@ -51,6 +51,12 @@
 
 /* Initial receive-buffer size; grows (via the allocator) up to MAX_REPLY. */
 #define HL_VALKEY_RBUF_INIT 8192u
+/* A receive buffer larger than this is dropped once its last reply has been
+ * used (hl_valkey_conn_trim): one big GET left up to MAX_REPLY held by an
+ * idle connection until it closed (audit 30). */
+#ifndef HL_VALKEY_RBUF_KEEP
+#define HL_VALKEY_RBUF_KEEP (1024u * 1024u)
+#endif
 /* Error-message buffer size (matches the pg/mysql wire-client convention). */
 #define HL_VALKEY_ERRMSG    256u
 /* Default and floor for connect_timeout (ms). The value also bounds each
@@ -407,9 +413,23 @@ static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
     return -1;
 }
 
+void hl_valkey_conn_trim(HlValkeyConn *c) {
+    /* Only with nothing buffered past the last reply: bytes already received
+     * for a later one stay where they are. */
+    if (!c || !c->rbuf || c->rcap <= HL_VALKEY_RBUF_KEEP || c->consumed != c->rlen)
+        return;
+    memset(c->rbuf, 0, c->rcap);                     /* scrub residual bytes */
+    hl_alloc_free(c->alloc, c->rbuf, c->rcap);
+    c->rbuf = NULL;                                  /* regrows from RBUF_INIT */
+    c->rlen = c->rcap = c->consumed = 0;
+}
+
 /* Read exactly one reply into *out (borrows into rbuf + the reply arena, valid
  * until the next read). Returns 0 / -1. */
 static int read_reply(HlValkeyConn *c, HlRespValue *out) {
+    /* The previous reply is no longer borrowed: drop an oversized buffer
+     * before reading the next one (audit 30). */
+    hl_valkey_conn_trim(c);
     if (c->consumed > 0) {
         memmove(c->rbuf, c->rbuf + c->consumed, c->rlen - c->consumed);
         c->rlen -= c->consumed;

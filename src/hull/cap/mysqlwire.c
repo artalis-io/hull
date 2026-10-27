@@ -152,7 +152,11 @@ void hl_my_packet_end(HlMyWriter *w, size_t marker)
     /* Header is length(3) + seq(1); payload length excludes the 4-byte header. */
     if (marker + 4 > w->len) { w->err = 1; return; }
     size_t plen = w->len - marker - 4;
-    if (plen > HL_MY_MAX_MSG) { w->err = 1; return; }   /* 24-bit range */
+    /* A length of exactly 0xFFFFFF means "continued in the next packet":
+     * the server would wait for a terminator packet Hull never sends, so
+     * one payload stops a byte short of it, as the receive side refuses
+     * body_len == HL_MY_MAX_MSG (audit 30). */
+    if (plen >= HL_MY_MAX_MSG) { w->err = 1; return; }
     uint32_t u = (uint32_t)plen;
     w->buf[marker]     = (uint8_t)(u);
     w->buf[marker + 1] = (uint8_t)(u >> 8);

@@ -39,11 +39,25 @@ int hl_cap_kv_check_dsn(const struct HlManifestKvDynamic *policy, const char *ds
                         char *errbuf, size_t errlen);
 
 /*
+ * Live KV connections in the process are capped, as db.open's are
+ * (HL_DB_DYNAMIC_MAX): each holds a socket and a receive buffer that can grow
+ * to the backend's reply limit, and a handle the app drops is freed only when
+ * it is collected (audit 30). Every app KV connection is a kv.open one - the
+ * stdlib's valkey store opens through it - so the cap covers them all.
+ */
+#define HL_KV_OPEN_MAX 16
+/* hl_cap_kv_open's result when HL_KV_OPEN_MAX connections are live: a binding
+ * may collect garbage once (dropped handles release their slot) and retry. */
+#define HL_KV_ERR_TOO_MANY (-2)
+
+/*
  * Open a KV connection from a DSN. Selects the composed backend by scheme; if
  * none is composed, fails with an actionable hint (compose --with=valkey /
  * `hull feature install valkey`). timeout_ms <= 0 uses the DSN default. All
  * memory comes from `alloc` (NULL -> process default). Returns 0 + *out, or -1
- * with a message in errbuf.
+ * with a message in errbuf; HL_KV_ERR_TOO_MANY (and a message) when
+ * HL_KV_OPEN_MAX connections are already open. hl_cap_kv_close releases the
+ * slot.
  */
 int hl_cap_kv_open(HlKvConn **out, const char *dsn, int timeout_ms,
                    HlAllocator *alloc, char *errbuf, size_t errlen);
@@ -57,6 +71,10 @@ const char *hl_cap_kv_backend_name(HlKvConn *c);
  * next op); on a miss, found=0. The caller MUST copy before any further op. */
 int hl_cap_kv_get(HlKvConn *c, const uint8_t *key, size_t klen,
                   const uint8_t **val, size_t *vlen, int *found);
+/* The binding has copied a get() value: let the backend drop an oversized
+ * receive buffer (the value's bytes are invalid afterwards). The other ops do
+ * this themselves before returning (audit 30). NULL-safe. */
+void hl_cap_kv_release(HlKvConn *c);
 int hl_cap_kv_set(HlKvConn *c, const uint8_t *key, size_t klen,
                   const uint8_t *val, size_t vlen, int64_t ttl_ms);
 int hl_cap_kv_del(HlKvConn *c, const uint8_t *key, size_t klen, int *deleted);
