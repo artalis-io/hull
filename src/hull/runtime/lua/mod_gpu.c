@@ -759,8 +759,14 @@ static int l_gpu_texture(lua_State *L)
     int address_u = HL_GPU_ADDRESS_CLAMP;
     int address_v = HL_GPU_ADDRESS_CLAMP;
 
-    /* nil = destroy */
+    /* nil = destroy, on the device the opts name: it was read only on the
+     * create path, so the destroy went to the default device. */
     if (lua_isnil(L, 2)) {
+        if (lua_istable(L, 3)) {
+            lua_getfield(L, 3, "device");
+            if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+        }
         hl_cap_gpu_texture_destroy(ctx, device, name);
         lua_pushboolean(L, 1);
         return 1;

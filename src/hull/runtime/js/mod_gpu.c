@@ -623,8 +623,15 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
 
     int device = -1;
 
-    /* null = destroy */
+    /* null = destroy, on the device the opts name (it went to the default
+     * device). A throwing getter fails the call. */
     if (JS_IsNull(argv[1])) {
+        if (argc > 2 && JS_IsObject(argv[2])) {
+            int32_t d;
+            int r = hl_js_opt_int32(ctx, argv[2], "device", &d);
+            if (r < 0) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+            if (r) device = d;
+        }
         hl_cap_gpu_buffer_destroy(gpu, device, name);
         JS_FreeCString(ctx, name);
         return JS_TRUE;
@@ -837,8 +844,15 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
 
     int device = -1;
 
-    /* null = destroy */
+    /* null = destroy, on the device the opts name (it went to the default
+     * device). A throwing getter fails the call. */
     if (JS_IsNull(argv[1])) {
+        if (argc > 2 && JS_IsObject(argv[2])) {
+            int32_t d;
+            int r = hl_js_opt_int32(ctx, argv[2], "device", &d);
+            if (r < 0) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+            if (r) device = d;
+        }
         hl_cap_gpu_texture_destroy(gpu, device, name);
         JS_FreeCString(ctx, name);
         return JS_TRUE;
