@@ -718,8 +718,11 @@ UTEST(hl_cap_db, dynamic_sql_scan_is_linear)
     big[0] = '"';
     big[n] = '\0';
     EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(big));
+    /* The quadratic scan took ~10 min on 1 MB; the linear one ~0.3 s, and
+     * up to ~3 s under MSan / coverage instrumentation. 30 s separates the
+     * two on any CI build. */
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
-    EXPECT_LT(secs, 1.0);
+    EXPECT_LT(secs, 30.0);
     free(big);
 }
 
