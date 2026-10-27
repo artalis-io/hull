@@ -77,6 +77,9 @@ HL_ENABLE_SQLITE   ?= 1
 HL_ENABLE_POSTGRES ?= 0
 HL_ENABLE_MYSQL    ?= 0
 HL_ENABLE_DUCKDB   ?= 0
+# Defaulted here so the HL_LINK_TLS test below sees 0, not empty: unset,
+# its "0000" never matched and HL_ENABLE_HTTP=0 still linked Keel + mbedTLS.
+HL_ENABLE_VALKEY   ?= 0
 
 # HL_SQLITE_FEATURE=1 builds a SQLite-as-a-composable-feature base
 # (docs/sqlite_feature.md): SQLite leaves the base object set (composed
