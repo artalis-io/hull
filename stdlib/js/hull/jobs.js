@@ -1721,12 +1721,29 @@ function cron(name, spec, data, opts) {
     const priority = priorityOpt(o.priority, "jobs.cron");
     const ma = o.maxAttempts !== undefined && o.maxAttempts !== null
         ? attemptsOpt(o.maxAttempts, "jobs.cron") : null;
-    // One statement: UPDATE-then-INSERT raced - two callers both updated
-    // nothing and the second INSERT failed on the key.
-    db.upsert("_hull_cron", ["name"],
+    // Insert the row if absent (no UPDATE-then-INSERT race: two callers that
+    // both updated nothing failed the second INSERT on the key), then update
+    // an existing one. The update keeps the stored next_run_at when the spec
+    // and tz are unchanged and the schedule is not parked (audit 30): apps
+    // call jobs.cron at every start, and recomputing it from now pushed a
+    // tick that came due while no worker ran into the future, so it never
+    // fired - the missed tick fires once, as documented. A new spec or tz,
+    // or re-enabling a parked schedule, recomputes it. next_run_at is
+    // assigned FIRST and its CASE reads only columns this statement has not
+    // assigned yet: MySQL evaluates a single-table SET left to right.
+    const added = db.insertIfAbsent("_hull_cron", ["name"],
         ["name", "spec", "type", "payload", "queue", "priority",
          "max_attempts", "next_run_at", "tz_offset", "last_error", "updated_at"],
         [name, spec, jobType, payload, queue, priority, ma, nxt, tzOffset, null, now]);
+    if ((added || 0) === 0) {
+        db.exec(
+            "UPDATE _hull_cron SET next_run_at = CASE WHEN spec = ? AND tz_offset = ? " +
+            "AND next_run_at <> ? THEN next_run_at ELSE ? END, " +
+            "spec=?, type=?, payload=?, queue=?, priority=?, max_attempts=?, " +
+            "tz_offset=?, last_error=NULL, updated_at=? WHERE name=?",
+            [spec, tzOffset, CRON_DISABLED_AT, nxt,
+             spec, jobType, payload, queue, priority, ma, tzOffset, now, name]);
+    }
     return jobs;
 }
 
@@ -3226,6 +3243,15 @@ function _cronNext(spec, from, offset) {
     return p ? cronNext(p, from !== undefined ? from : time.now(), offset) : null;
 }
 function _tick(now) { processCron(now !== undefined ? now : time.now()); }
+// Read / move a schedule's next_run_at (audit 30: a tick that came due while
+// no worker ran, which the real clock cannot make in a test).
+function _cronNextRunAt(name) {
+    const r = db.query("SELECT next_run_at FROM _hull_cron WHERE name=?", [name]);
+    return r.length > 0 ? r[0].next_run_at : null;
+}
+function _cronSetNextRunAt(name, at) {
+    db.exec("UPDATE _hull_cron SET next_run_at=? WHERE name=?", [at, name]);
+}
 
 export const jobs = {
     init, enqueue, enqueueMany, claim, handler, default: setDefault, on, work, reap,
@@ -3243,6 +3269,8 @@ export const jobs = {
 // held for ever - that its own SQL cannot repair; audit 17).
 _test_hooks.register("hull:jobs", {
     config: _cfg, cronNext: _cronNext, tick: _tick, eventsDrain,
+    cronNextRunAt: _cronNextRunAt, cronSetNextRunAt: _cronSetNextRunAt,
+    CRON_DISABLED_AT,
 });
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,

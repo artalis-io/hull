@@ -255,6 +255,12 @@ jobs.uncron("heartbeat");
 
 - **`name`** is the schedule id and, by default, the enqueued **job type**
   (override with `opts.type`). Re-registering the same `name` updates it.
+  Calling `jobs.cron` at every start is the intended use: with the same
+  `spec` and `tz` it keeps the schedule's stored next occurrence (audit 30),
+  so a tick that came due while the app was down still fires once; it updates
+  the payload, `type`, `queue`, `priority` and `max_attempts`. A changed
+  `spec` or `tz`, or re-enabling a disabled schedule (below), computes the
+  next occurrence afresh.
 - **`spec`** is standard 5-field cron - `minute hour day-of-month month
   day-of-week` - in **UTC**. Supports `*`, `n`, `a-b`, `*/step`, `a-b/step`, and
   comma lists; `day-of-week` is `0`/`7` = Sunday. When both day-of-month and

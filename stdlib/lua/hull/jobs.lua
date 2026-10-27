@@ -1866,13 +1866,32 @@ function jobs.cron(name, spec, data, opts)
     local priority = priority_opt(opts.priority, "jobs.cron")
     local max_attempts = opts.max_attempts ~= nil
         and attempts_opt(opts.max_attempts, "jobs.cron") or nil
-    -- One statement: UPDATE-then-INSERT raced - two callers both updated
-    -- nothing and the second INSERT failed on the key.
-    db.upsert("_hull_cron", { "name" },
+    -- Insert the row if absent (no UPDATE-then-INSERT race: two callers
+    -- that both updated nothing failed the second INSERT on the key), then
+    -- update an existing one. The update keeps the stored next_run_at when
+    -- the spec and tz are unchanged and the schedule is not parked (audit
+    -- 30): apps call jobs.cron at every start, and recomputing it from now
+    -- pushed a tick that came due while no worker ran into the future, so
+    -- it never fired - the missed tick fires once, as documented. A new
+    -- spec or tz, or re-enabling a parked schedule, recomputes it.
+    -- next_run_at is assigned FIRST and its CASE reads only columns this
+    -- statement has not assigned yet: MySQL evaluates a single-table SET
+    -- left to right.
+    local added = db.insert_if_absent("_hull_cron", { "name" },
         { "name", "spec", "type", "payload", "queue", "priority",
           "max_attempts", "next_run_at", "tz_offset", "last_error", "updated_at" },
         { name, spec, job_type, payload, queue, priority,
           max_attempts, nxt, tz_offset, nil, now })
+    if (added or 0) == 0 then
+        db.exec(
+            "UPDATE _hull_cron SET next_run_at = CASE WHEN spec = ? AND tz_offset = ? "
+            .. "AND next_run_at <> ? THEN next_run_at ELSE ? END, "
+            .. "spec=?, type=?, payload=?, queue=?, priority=?, max_attempts=?, "
+            .. "tz_offset=?, last_error=NULL, updated_at=? WHERE name=?",
+            { spec, tz_offset, CRON_DISABLED_AT, nxt,
+              spec, job_type, payload, queue, priority, max_attempts,
+              tz_offset, now, name })
+    end
     return jobs
 end
 
@@ -1889,6 +1908,16 @@ _hooks.cron_next = function(spec, from, offset)
     return p and cron_next(p, from or time.now(), offset) or nil
 end
 _hooks.tick = function(now) process_cron(now or time.now()) end
+-- Read / move a schedule's next_run_at (audit 30: a tick that came due while
+-- no worker ran, which the real clock cannot make in a test).
+_hooks.cron_next_run_at = function(name)
+    local r = db.query("SELECT next_run_at FROM _hull_cron WHERE name=?", { name })
+    return r[1] and r[1].next_run_at or nil
+end
+_hooks.cron_set_next_run_at = function(name, at)
+    db.exec("UPDATE _hull_cron SET next_run_at=? WHERE name=?", { at, name })
+end
+_hooks.CRON_DISABLED_AT = CRON_DISABLED_AT
 
 -- jobs.work's refresh before starting each batch job after the first: the
 -- job's claim and its still-unstarted mates' are extended to now, so a mate

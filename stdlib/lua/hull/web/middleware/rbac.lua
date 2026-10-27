@@ -261,6 +261,10 @@ end
 -- @treturn boolean
 function rbac.has_any_role(user_id, roles_list)
     user_id = uid(user_id)
+    -- A string is one role (audit 30: ipairs over it saw no element, so
+    -- has_any_role(uid, "admin") was false for an admin; the JS twin
+    -- checked each character as a role).
+    if type(roles_list) == "string" then return rbac.has_role(user_id, roles_list) end
     for _, role in ipairs(roles_list) do
         if rbac.has_role(user_id, role) then
             return true
@@ -276,6 +280,10 @@ end
 -- @treturn boolean
 function rbac.has_any_permission(user_id, perms_list)
     user_id = uid(user_id)
+    -- A string is one permission (audit 30, as has_any_role).
+    if type(perms_list) == "string" then
+        return rbac.has_permission(user_id, perms_list)
+    end
     for _, perm in ipairs(perms_list) do
         if rbac.has_permission(user_id, perm) then
             return true

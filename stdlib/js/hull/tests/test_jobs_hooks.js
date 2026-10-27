@@ -300,6 +300,50 @@ cases.audit23 = async () => {
     });
 };
 
+// audit 30: jobs.cron at every start must not drop a tick that came due
+// while no worker ran; a changed spec / tz or a parked schedule recomputes.
+cases.audit30 = () => {
+    jobs.init();
+    const SPEC = "0 0 * * *";
+    test("re-registering keeps a due tick, which fires exactly once", () => {
+        jobs.cron("nightly", SPEC);
+        const due = time.now() - 30;
+        hooks.cronSetNextRunAt("nightly", due);
+        jobs.cron("nightly", SPEC, { v: 2 }, { queue: "q30" });
+        assertEq(hooks.cronNextRunAt("nightly"), due, "kept");
+        hooks.tick(time.now());
+        const c = jobs.claim({ batch: 10, queue: "q30" });
+        assertEq(c.length, 1, "fired once");
+        assertEq(c[0].type, "nightly", "type");
+        assertEq(c[0].data.v, 2, "the new payload");
+        hooks.tick(time.now());
+        assertEq(jobs.claim({ batch: 10, queue: "q30" }).length, 0, "no second fire");
+        assertEq(hooks.cronNextRunAt("nightly") > time.now(), true, "advanced");
+    });
+    test("a changed spec recomputes next_run_at", () => {
+        hooks.cronSetNextRunAt("nightly", time.now() - 30);
+        jobs.cron("nightly", "30 1 * * *");
+        const nx = hooks.cronNextRunAt("nightly");
+        assertEq(nx > time.now(), true, "recomputed");
+        assertEq(nx, hooks.cronNext("30 1 * * *", time.now()), "the new spec");
+    });
+    test("a changed tz recomputes next_run_at", () => {
+        hooks.cronSetNextRunAt("nightly", time.now() - 30);
+        jobs.cron("nightly", "30 1 * * *", null, { tz: "+02:00" });
+        assertEq(hooks.cronNextRunAt("nightly") > time.now(), true, "recomputed");
+    });
+    test("re-registering a parked schedule re-enables it", () => {
+        hooks.cronSetNextRunAt("nightly", hooks.CRON_DISABLED_AT);
+        jobs.cron("nightly", "30 1 * * *", null, { tz: "+02:00" });
+        const nx = hooks.cronNextRunAt("nightly");
+        assertEq(nx < hooks.CRON_DISABLED_AT && nx > time.now(), true, "re-enabled");
+    });
+    test("a fresh schedule gets its next occurrence", () => {
+        jobs.cron("fresh", SPEC);
+        assertEq(hooks.cronNextRunAt("fresh"), hooks.cronNext(SPEC, time.now()), "computed");
+    });
+};
+
 test("the case is known", () => {
     assertEq(typeof cases[globalThis.__jobs_case], "function", String(globalThis.__jobs_case));
 });

@@ -300,6 +300,51 @@ function cases.audit23()
     end)
 end
 
+-- audit 30: jobs.cron at every start must not drop a tick that came due
+-- while no worker ran; a changed spec / tz or a parked schedule recomputes.
+function cases.audit30()
+    jobs.init()
+    local SPEC = "0 0 * * *"
+    test("re-registering keeps a due tick, which fires exactly once", function()
+        jobs.cron("nightly", SPEC)
+        local due = time.now() - 30
+        hooks.cron_set_next_run_at("nightly", due)
+        jobs.cron("nightly", SPEC, { v = 2 }, { queue = "q30" })
+        assert_eq(hooks.cron_next_run_at("nightly"), due, "kept")
+        hooks.tick(time.now())
+        local c = jobs.claim({ batch = 10, queue = "q30" })
+        assert_eq(#c, 1, "fired once")
+        assert_eq(c[1].type, "nightly", "type")
+        assert_eq(c[1].data.v, 2, "the new payload")
+        hooks.tick(time.now())
+        assert_eq(#jobs.claim({ batch = 10, queue = "q30" }), 0, "no second fire")
+        assert_eq(hooks.cron_next_run_at("nightly") > time.now(), true, "advanced")
+    end)
+    test("a changed spec recomputes next_run_at", function()
+        local due = time.now() - 30
+        hooks.cron_set_next_run_at("nightly", due)
+        jobs.cron("nightly", "30 1 * * *")
+        local nx = hooks.cron_next_run_at("nightly")
+        assert_eq(nx > time.now(), true, "recomputed")
+        assert_eq(nx, hooks.cron_next("30 1 * * *", time.now()), "the new spec")
+    end)
+    test("a changed tz recomputes next_run_at", function()
+        hooks.cron_set_next_run_at("nightly", time.now() - 30)
+        jobs.cron("nightly", "30 1 * * *", nil, { tz = "+02:00" })
+        assert_eq(hooks.cron_next_run_at("nightly") > time.now(), true, "recomputed")
+    end)
+    test("re-registering a parked schedule re-enables it", function()
+        hooks.cron_set_next_run_at("nightly", hooks.CRON_DISABLED_AT)
+        jobs.cron("nightly", "30 1 * * *", nil, { tz = "+02:00" })
+        local nx = hooks.cron_next_run_at("nightly")
+        assert_eq(nx < hooks.CRON_DISABLED_AT and nx > time.now(), true, "re-enabled")
+    end)
+    test("a fresh schedule gets its next occurrence", function()
+        jobs.cron("fresh", SPEC)
+        assert_eq(hooks.cron_next_run_at("fresh"), hooks.cron_next(SPEC, time.now()), "computed")
+    end)
+end
+
 -- The harness sets the case as a global before it runs the script.
 local case = rawget(_G, "__jobs_case")
 test("the case is known", function()

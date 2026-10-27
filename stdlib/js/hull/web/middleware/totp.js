@@ -424,31 +424,36 @@ function lockoutRemaining(userId) {
 function bumpFailedAttempt(userId) {
     const now = time.now();
     let newLockout = null;
+    // The database increments the count (audit 30): read here and written
+    // back, a SELECT inside db.batch's plain BEGIN takes no row lock on
+    // Postgres / MySQL, so concurrent failed verifies from several instances
+    // all wrote N+1 - lost counts, and two could both be the
+    // threshold-crossing one. The UPDATE takes the row lock (held to the
+    // commit), and the SELECT after it reads this transaction's own row.
+    // insertIfAbsent / db.exec are each backend's own dialect (a
+    // hand-written INSERT ... ON CONFLICT is not MySQL syntax).
     db.batch(() => {
+        // 0, not NULL, for "not locked", as the Lua twin stores it:
+        // lockoutRemaining reads anything not in the future as unlocked.
+        db.insertIfAbsent("_hull_totp_attempts", ["user_id"],
+            ["user_id", "failed_count", "locked_until"], [userId, 0, 0]);
+        db.exec("UPDATE _hull_totp_attempts SET failed_count = failed_count + 1, "
+            + "last_failed_at = ? WHERE user_id = ?", [now, userId]);
         const r = db.query(
-            "SELECT failed_count, locked_until FROM _hull_totp_attempts "
-            + "WHERE user_id = ?", [userId]);
-        let fc = (r && r[0] && r[0].failed_count) || 0;
-        let newFc = fc + 1;
-        // 0 for "not locked", as the Lua twin stores it: lockoutRemaining
-        // reads anything not in the future as unlocked.
-        let lockedUntil = (r && r[0] && r[0].locked_until) || 0;
+            "SELECT failed_count FROM _hull_totp_attempts WHERE user_id = ?", [userId]);
+        const newFc = (r && r[0] && Number(r[0].failed_count)) || 0;
         // The count is kept across lockouts (a success deletes the row), so
         // the n-th lockout lasts lockoutDuration * 2^(n-1), capped.
         const max = _state.maxFailedAttempts;
-        if (max > 0 && newFc % max === 0) {
+        if (max > 0 && newFc > 0 && newFc % max === 0) {
             const n = Math.floor(newFc / max);
             const dur = _state.lockoutDuration * Math.pow(2, Math.min(n - 1, 20));
             const cap = Math.max(_state.maxLockoutDuration || 0, _state.lockoutDuration);
-            lockedUntil = now + Math.floor(Math.min(dur, cap));
+            const lockedUntil = now + Math.floor(Math.min(dur, cap));
+            db.exec("UPDATE _hull_totp_attempts SET locked_until = ? WHERE user_id = ?",
+                    [lockedUntil, userId]);
             newLockout = [lockedUntil, n];
         }
-        // db.upsert writes each backend's own dialect. A hand-written
-        // INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
-        // failed here instead of being counted, and the lockout never came.
-        db.upsert("_hull_totp_attempts", ["user_id"],
-            ["user_id", "failed_count", "last_failed_at", "locked_until"],
-            [userId, newFc, now, lockedUntil]);
     });
     // Tell the app a lockout started (see the Lua sibling): a password
     // holder can otherwise keep the owner out silently.
@@ -486,37 +491,43 @@ function lockoutRemainingIp(ip) {
 function bumpFailedAttemptIp(ip, userId) {
     if (typeof ip !== "string" || ip === "") return;
     const now = time.now();
+    // The database increments the count (audit 30), as in bumpFailedAttempt:
+    // the UPDATE takes the IP row's lock, held to the commit, so concurrent
+    // failures (and creditSuccessIp) are serialised and none is lost; every
+    // read after it is of a row this transaction wrote. failed_count is
+    // assigned before last_failed_at, which its CASE reads: MySQL evaluates
+    // a single-table SET left to right.
     db.batch(() => {
-        const r = db.query(
-            "SELECT failed_count, last_failed_at FROM _hull_totp_attempts_by_ip "
-            + "WHERE ip = ?", [ip]);
-        let fc = (r && r[0] && r[0].failed_count) || 0;
+        db.insertIfAbsent("_hull_totp_attempts_by_ip", ["ip"],
+            ["ip", "failed_count", "locked_until"], [ip, 0, 0]);
         // A success does not clear the count (audit 26), so it ages out:
         // failures more than lockoutDurationPerIp apart start it again.
-        const last = r && r[0] && r[0].last_failed_at;
-        if (typeof last === "number" && now - last > _state.lockoutDurationPerIp) fc = 0;
-        if (fc === 0) {
+        // locked_until is 0, not locked (see bumpFailedAttempt), unless this
+        // failure locks it below.
+        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = CASE WHEN "
+            + "last_failed_at IS NOT NULL AND ? - last_failed_at > ? THEN 1 "
+            + "ELSE failed_count + 1 END, last_failed_at = ?, locked_until = 0 "
+            + "WHERE ip = ?",
+            [now, _state.lockoutDurationPerIp, now, ip]);
+        const r = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip WHERE ip = ?", [ip]);
+        const newFc = (r && r[0] && Number(r[0].failed_count)) || 1;
+        if (newFc === 1) {
             // The count starts again: the shares of the old one go with it.
             db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?", [ip]);
         }
-        let newFc = fc + 1;
-        let lockedUntil = 0;   // not locked (see bumpFailedAttempt)
         if (newFc >= _state.maxFailedAttemptsPerIp) {
-            lockedUntil = now + _state.lockoutDurationPerIp;
-            newFc = 0;
+            db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = 0, "
+                + "locked_until = ? WHERE ip = ?",
+                [now + _state.lockoutDurationPerIp, ip]);
             db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?", [ip]);
         } else if (typeof userId === "string") {
-            const u = db.query(
-                "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
-                + "WHERE ip = ? AND user_id = ?", [ip, userId]);
-            const ufc = (u && u[0] && u[0].failed_count) || 0;
-            db.upsert("_hull_totp_attempts_by_ip_user", ["ip", "user_id"],
-                ["ip", "user_id", "failed_count", "last_failed_at"],
-                [ip, userId, ufc + 1, now]);
+            db.insertIfAbsent("_hull_totp_attempts_by_ip_user", ["ip", "user_id"],
+                ["ip", "user_id", "failed_count"], [ip, userId, 0]);
+            db.exec("UPDATE _hull_totp_attempts_by_ip_user SET "
+                + "failed_count = failed_count + 1, last_failed_at = ? "
+                + "WHERE ip = ? AND user_id = ?", [now, ip, userId]);
         }
-        db.upsert("_hull_totp_attempts_by_ip", ["ip"],
-            ["ip", "failed_count", "last_failed_at", "locked_until"],
-            [ip, newFc, now, lockedUntil]);
     });
 }
 
@@ -528,16 +539,17 @@ function creditSuccessIp(ip, userId) {
         const u = db.query(
             "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
             + "WHERE ip = ? AND user_id = ?", [ip, userId]);
-        const ufc = (u && u[0] && u[0].failed_count) || 0;
+        const ufc = (u && u[0] && Number(u[0].failed_count)) || 0;
         if (!(ufc > 0)) return;
-        db.exec("DELETE FROM _hull_totp_attempts_by_ip_user "
+        // Only the transaction whose DELETE took the share credits it, and
+        // the subtraction is the database's (audit 30): a count read here and
+        // written back lost the failures other instances added between.
+        const took = db.exec("DELETE FROM _hull_totp_attempts_by_ip_user "
                 + "WHERE ip = ? AND user_id = ?", [ip, userId]);
-        const r = db.query(
-            "SELECT failed_count FROM _hull_totp_attempts_by_ip WHERE ip = ?", [ip]);
-        const fc = (r && r[0] && r[0].failed_count) || 0;
-        const newFc = fc - ufc > 0 ? fc - ufc : 0;
-        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = ? WHERE ip = ?",
-                [newFc, ip]);
+        if ((took || 0) === 0) return;
+        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = CASE "
+                + "WHEN failed_count > ? THEN failed_count - ? ELSE 0 END "
+                + "WHERE ip = ?", [ufc, ufc, ip]);
     });
 }
 

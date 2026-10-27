@@ -29,6 +29,32 @@ release-artifact layout).
   request and part of no run (app.main's own continuations stay main's). The same holds for a
   timer's or ws callback's run resumed inside another entry.
 
+- **`jobs.cron` at startup dropped a tick that had come due while the app was down** (audit
+  30, both runtimes). Re-registering a schedule recomputed `next_run_at` from now even when
+  the spec and tz were unchanged, so a restart after a tick came due - but before a worker
+  fired it - pushed it into the future and it never fired, breaking the documented "missed
+  ticks fire once". The stored `next_run_at` is now kept for an unchanged spec / tz (the
+  payload, type, queue, priority and max_attempts still update); a new schedule, a changed
+  spec or tz, or re-enabling a disabled one computes it afresh. One INSERT-if-absent plus
+  an UPDATE whose `next_run_at` CASE is assigned first, so it holds under MySQL's
+  left-to-right SET.
+
+- **The login lockout counter lost updates on Postgres / MySQL** (audit 30, both runtimes).
+  auth-flows read the failed-login count, computed the next one in the stdlib and wrote it
+  back inside `db.batch`, whose plain `BEGIN` takes no row lock: concurrent attempts from
+  several instances all wrote N+1, so a lockout allowed several times the configured
+  guesses. The count is now incremented by the database (`failed_count = CASE ... THEN 1
+  ELSE failed_count + 1 END`), and the lock set by a second statement from the new count -
+  no statement reads a column it assigns earlier in its own SET (the audit-29 MySQL issue).
+  Semantics are unchanged: an expired lockout restarts the count at 1, reaching the
+  threshold locks for `lockout_duration`. TOTP's per-user and per-IP attempt counters had
+  the same read-modify-write and are fixed the same way; a per-IP credit is applied once,
+  by the transaction whose DELETE took the user's share.
+
+- **JS `rbac.hasAnyRole(uid, "admin")` checked each character as a role** (audit 30). A
+  string is now one role in both runtimes (Lua's `has_any_role` returned false for one);
+  `hasAnyPermission` / `has_any_permission` likewise.
+
 - **`time.now()` could lag the other clocks by a second on Linux.** It read `time()`, which
   glibc serves from the coarse clock, a few milliseconds behind `CLOCK_REALTIME`. Just after a
   second boundary it still named the previous second while `time.now_ms()` / `nowMs()` and

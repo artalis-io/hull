@@ -728,6 +728,47 @@ esac
 # Phase-4 latency/reconnect waits).
 jobs_reset_pg
 
+echo "=== jobs: audit 30 (cron re-registration keeps a due tick) on Postgres ==="
+A30DIR=$(mktemp -d)
+cat > "$A30DIR/a30.lua" <<'LUA'
+local WORK = false
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  -- Registered at every start, as docs/jobs.md says.
+  jobs.cron("a30c", "0 0 * * *", nil, { queue = "a30q" })
+  local ran = 0
+  jobs.handler("a30c", function() ran = ran + 1 end)
+  if WORK then
+    jobs.work({ queue = "a30q", batch = 10 })
+    jobs.work({ queue = "a30q", batch = 10 })
+  end
+  ctx.stdout:write(("A30 ran=%d\n"):format(ran))
+  return 0
+end)
+LUA
+sed "s/^local WORK = false/local WORK = true/" "$A30DIR/a30.lua" > "$A30DIR/work.lua"
+a30_fail() { echo "::error jobs audit 30: $1"; echo "--- hull stderr ---"; cat "$A30DIR/log"; exit 1; }
+./build/hull "$A30DIR/a30.lua" -d "$DSN" >>"$A30DIR/log" 2>&1 || a30_fail "a30.lua rc=$?"
+docker exec "$CONTAINER" psql -U hull -d hulldb -q -c "UPDATE _hull_cron SET next_run_at=1 WHERE name='a30c'" >/dev/null 2>&1 || true
+./build/hull "$A30DIR/a30.lua" -d "$DSN" >>"$A30DIR/log" 2>&1 || a30_fail "a30.lua rc=$?"
+a30kept=$(docker exec "$CONTAINER" psql -U hull -d hulldb -t -A -c "SELECT next_run_at FROM _hull_cron WHERE name='a30c'" 2>/dev/null | tr -d '[:space:]')
+a30out=$(./build/hull "$A30DIR/work.lua" -d "$DSN" 2>>"$A30DIR/log") || a30_fail "work.lua rc=$?"
+a30next=$(docker exec "$CONTAINER" psql -U hull -d hulldb -t -A -c "SELECT next_run_at FROM _hull_cron WHERE name='a30c'" 2>/dev/null | tr -d '[:space:]')
+docker exec "$CONTAINER" psql -U hull -d hulldb -q -c "DELETE FROM _hull_cron WHERE name='a30c'" >/dev/null 2>&1 || true
+case "$a30kept|$a30out|$a30next" in
+    "1|A30 ran=1|"[1-9]*)
+        if [ "$a30next" -gt 1 ]; then
+            echo "PASS: jobs.cron re-registration keeps a due tick, which fires once (Postgres)"
+            rm -rf "$A30DIR"
+        else
+            echo "::error jobs audit 30 on Postgres: next=$a30next"; exit 1
+        fi ;;
+    *)  echo "::error jobs audit 30 on Postgres: kept=$a30kept | $a30out | next=$a30next"; cat "$A30DIR/log"; exit 1 ;;
+esac
+jobs_reset_pg
+
 # ── db.exec affected-row count (regression guard) ─────────────────────
 # The pg backend must surface the CommandComplete row count (like sqlite3_changes
 # / MySQL affected_rows); it previously discarded it and returned 0, which broke
