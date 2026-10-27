@@ -995,40 +995,39 @@ end
 local function bump_failed_login(user_id, max)
     user_id = uid_key(user_id)
     local now = time.now()
-    -- Read-modify-write under db.batch (as totp's bump_failed_attempt): the
-    -- new count and lock are computed here and bound, so no backend's SET
-    -- evaluation order matters. A single UPDATE whose locked_until CASE read
-    -- failed_count + 1 locked one attempt early on MySQL, which evaluates a
-    -- single-table SET left to right (failed_count already incremented;
-    -- audit 29). db.batch nests as a savepoint inside an app transaction, and
-    -- db.upsert writes each backend's own dialect.
-    --
     -- Round-9 HIGH-2: when the previous lockout window has expired but the
     -- row has not been gc'd yet (gc_expired needs last_failed_at < now-86400),
     -- the stale count from the prior cycle would push straight into a fresh
     -- lockout on the next bad attempt. So the count starts again at 1 once
     -- the prior window has elapsed; else it increments and locks when it
     -- reaches the threshold. 0 is stored for "not locked" (lockout_remaining
-    -- reads anything not in the future as unlocked; a nil would end the
-    -- values array).
+    -- reads anything not in the future as unlocked).
+    --
+    -- The count is incremented by the database, in statements that read the
+    -- row they write (audit 30). Read in the stdlib and written back (audit
+    -- 29's db.upsert), a SELECT inside db.batch's plain BEGIN takes no row
+    -- lock on Postgres / MySQL, so concurrent attempts from several
+    -- instances all wrote N+1 and a lockout allowed several times max
+    -- guesses. No statement reads a column it assigns earlier in its own
+    -- SET: MySQL evaluates a single-table SET left to right, so a
+    -- locked_until CASE that read failed_count + 1 locked one attempt early
+    -- (audit 29). Step 2 takes the row lock, which holds to the commit, and
+    -- leaves locked_until as it was for step 3 to read. db.batch nests as a
+    -- savepoint inside an app transaction.
+    local expired = "locked_until IS NOT NULL AND locked_until <> 0 AND locked_until < ?"
     db.batch(function()
-        local r = db.query(
-            "SELECT failed_count, locked_until FROM _hull_auth_login_attempts "
-            .. "WHERE user_id = ?", { user_id })
-        local row = r and r[1]
-        local fc = (row and tonumber(row.failed_count)) or 0
-        local lu = (row and tonumber(row.locked_until)) or 0
-        local new_fc
-        local new_lu = 0
-        if lu ~= 0 and lu < now then
-            new_fc = 1
-        else
-            new_fc = fc + 1
-            if new_fc >= max then new_lu = now + _state.lockout_duration end
-        end
-        db.upsert("_hull_auth_login_attempts", { "user_id" },
-            { "user_id", "failed_count", "last_failed_at", "locked_until" },
-            { user_id, new_fc, now, new_lu })
+        -- 1. The row exists (each backend's own INSERT-if-absent).
+        db.insert_if_absent("_hull_auth_login_attempts", { "user_id" },
+            { "user_id", "failed_count", "locked_until" }, { user_id, 0, 0 })
+        -- 2. Count the attempt: 1 after an expired lockout, else one more.
+        db.exec("UPDATE _hull_auth_login_attempts SET failed_count = CASE WHEN "
+            .. expired .. " THEN 1 ELSE failed_count + 1 END, last_failed_at = ? "
+            .. "WHERE user_id = ?", { now, now, user_id })
+        -- 3. The lock, from the new count; an expired one is cleared.
+        db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE WHEN "
+            .. expired .. " THEN 0 WHEN failed_count >= ? THEN ? ELSE 0 END "
+            .. "WHERE user_id = ?",
+            { now, max, now + _state.lockout_duration, user_id })
     end)
 end
 
@@ -3230,6 +3229,13 @@ require("hull._test_hooks").register("hull.web.auth-flows", {
     same_address       = same_address,
     recovery_locked    = recovery_locked,
     strip_user_secrets = strip_user_secrets,
+    bump_failed_login  = bump_failed_login,
+    lockout_remaining  = lockout_remaining,
+    login_failed_count = function(user_id)
+        local r = db.query("SELECT failed_count FROM _hull_auth_login_attempts "
+                           .. "WHERE user_id = ?", { uid_key(user_id) })
+        return (r and r[1] and r[1].failed_count) or 0
+    end,
     handlers           = {
         register             = handle_register,
         login                = handle_login,

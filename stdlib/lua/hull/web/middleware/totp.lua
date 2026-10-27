@@ -589,35 +589,38 @@ end
 local function bump_failed_attempt(user_id)
     local now = time.now()
     local new_lockout
-    -- Read-modify-write under db.batch so two concurrent failed
-    -- verifies don't both think they're the threshold-crossing one
-    -- and double-lock.
+    -- The database increments the count (audit 30): read in the stdlib and
+    -- written back, a SELECT inside db.batch's plain BEGIN takes no row lock
+    -- on Postgres / MySQL, so concurrent failed verifies from several
+    -- instances all wrote N+1 - lost counts, and two could both be the
+    -- threshold-crossing one. The UPDATE takes the row lock (held to the
+    -- commit), and the SELECT after it reads this transaction's own row.
+    -- insert_if_absent / db.exec are each backend's own dialect (a
+    -- hand-written INSERT ... ON CONFLICT is not MySQL syntax).
     db.batch(function()
+        -- 0, not NULL, for "not locked": lockout_remaining reads anything
+        -- not in the future as unlocked.
+        db.insert_if_absent("_hull_totp_attempts", { "user_id" },
+            { "user_id", "failed_count", "locked_until" }, { user_id, 0, 0 })
+        db.exec("UPDATE _hull_totp_attempts SET failed_count = failed_count + 1, "
+            .. "last_failed_at = ? WHERE user_id = ?", { now, user_id })
         local r = db.query(
-            "SELECT failed_count, locked_until FROM _hull_totp_attempts "
-            .. "WHERE user_id = ?", { user_id })
-        local fc = (r and r[1] and r[1].failed_count) or 0
-        local new_fc = fc + 1
-        -- 0, not nil, for "not locked": lockout_remaining reads anything not
-        -- in the future as unlocked, and a nil would end the values array.
-        local locked_until = (r and r[1] and r[1].locked_until) or 0
+            "SELECT failed_count FROM _hull_totp_attempts WHERE user_id = ?",
+            { user_id })
+        local new_fc = (r and r[1] and tonumber(r[1].failed_count)) or 0
         -- The count is kept across lockouts (a success deletes the row), so
         -- the n-th lockout lasts lockout_duration * 2^(n-1), capped.
         local max = _state.max_failed_attempts
-        if max > 0 and new_fc % max == 0 then
+        if max > 0 and new_fc > 0 and new_fc % max == 0 then
             local n = new_fc // max
             local dur = _state.lockout_duration * (2 ^ math.min(n - 1, 20))
             local cap = math.max(_state.max_lockout_duration or 0,
                                  _state.lockout_duration)
-            locked_until = now + math.floor(math.min(dur, cap))
+            local locked_until = now + math.floor(math.min(dur, cap))
+            db.exec("UPDATE _hull_totp_attempts SET locked_until = ? WHERE user_id = ?",
+                    { locked_until, user_id })
             new_lockout = { locked_until, n }
         end
-        -- db.upsert writes each backend's own dialect. A hand-written
-        -- INSERT ... ON CONFLICT is not MySQL syntax: there every wrong code
-        -- failed here instead of being counted, and the lockout never came.
-        db.upsert("_hull_totp_attempts", { "user_id" },
-            { "user_id", "failed_count", "last_failed_at", "locked_until" },
-            { user_id, new_fc, now, locked_until })
     end)
     if new_lockout and _state.on_lockout then
         local ok, err = pcall(_state.on_lockout, user_id, new_lockout[1],
@@ -655,42 +658,47 @@ end
 local function bump_failed_attempt_ip(ip, user_id)
     if type(ip) ~= "string" or ip == "" then return end
     local now = time.now()
+    -- The database increments the count (audit 30), as in
+    -- bump_failed_attempt: the UPDATE takes the IP row's lock, held to the
+    -- commit, so concurrent failures (and credit_success_ip, which takes the
+    -- same lock first) are serialised and none is lost; every read after it
+    -- is of a row this transaction wrote. failed_count is assigned before
+    -- last_failed_at, which its CASE reads: MySQL evaluates a single-table
+    -- SET left to right.
     db.batch(function()
-        local r = db.query(
-            "SELECT failed_count, last_failed_at FROM _hull_totp_attempts_by_ip "
-            .. "WHERE ip = ?", { ip })
-        local fc = (r and r[1] and r[1].failed_count) or 0
+        db.insert_if_absent("_hull_totp_attempts_by_ip", { "ip" },
+            { "ip", "failed_count", "locked_until" }, { ip, 0, 0 })
         -- A success does not clear the count (audit 26), so it ages out
         -- instead: failures more than lockout_duration_per_ip apart start
-        -- the count again.
-        local last = r and r[1] and r[1].last_failed_at
-        if type(last) == "number" and now - last > _state.lockout_duration_per_ip then
-            fc = 0
-        end
-        if fc == 0 then
+        -- the count again. locked_until is 0, not locked (see
+        -- bump_failed_attempt), unless this failure locks it below.
+        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = CASE WHEN "
+            .. "last_failed_at IS NOT NULL AND ? - last_failed_at > ? THEN 1 "
+            .. "ELSE failed_count + 1 END, last_failed_at = ?, locked_until = 0 "
+            .. "WHERE ip = ?",
+            { now, _state.lockout_duration_per_ip, now, ip })
+        local r = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip WHERE ip = ?",
+            { ip })
+        local new_fc = (r and r[1] and tonumber(r[1].failed_count)) or 1
+        if new_fc == 1 then
             -- The count starts again: the shares of the old one go with it.
             db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?",
                     { ip })
         end
-        local new_fc = fc + 1
-        local locked_until = 0   -- not locked (see bump_failed_attempt)
         if new_fc >= _state.max_failed_attempts_per_ip then
-            locked_until = now + _state.lockout_duration_per_ip
-            new_fc = 0
+            db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = 0, "
+                .. "locked_until = ? WHERE ip = ?",
+                { now + _state.lockout_duration_per_ip, ip })
             db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?",
                     { ip })
         elseif type(user_id) == "string" then
-            local u = db.query(
-                "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
-                .. "WHERE ip = ? AND user_id = ?", { ip, user_id })
-            local ufc = (u and u[1] and u[1].failed_count) or 0
-            db.upsert("_hull_totp_attempts_by_ip_user", { "ip", "user_id" },
-                { "ip", "user_id", "failed_count", "last_failed_at" },
-                { ip, user_id, ufc + 1, now })
+            db.insert_if_absent("_hull_totp_attempts_by_ip_user", { "ip", "user_id" },
+                { "ip", "user_id", "failed_count" }, { ip, user_id, 0 })
+            db.exec("UPDATE _hull_totp_attempts_by_ip_user SET "
+                .. "failed_count = failed_count + 1, last_failed_at = ? "
+                .. "WHERE ip = ? AND user_id = ?", { now, ip, user_id })
         end
-        db.upsert("_hull_totp_attempts_by_ip", { "ip" },
-            { "ip", "failed_count", "last_failed_at", "locked_until" },
-            { ip, new_fc, now, locked_until })
     end)
 end
 
@@ -707,18 +715,17 @@ local function credit_success_ip(ip, user_id)
         local u = db.query(
             "SELECT failed_count FROM _hull_totp_attempts_by_ip_user "
             .. "WHERE ip = ? AND user_id = ?", { ip, user_id })
-        local ufc = (u and u[1] and u[1].failed_count) or 0
+        local ufc = (u and u[1] and tonumber(u[1].failed_count)) or 0
         if ufc <= 0 then return end
-        db.exec("DELETE FROM _hull_totp_attempts_by_ip_user "
+        -- Only the transaction whose DELETE took the share credits it, and
+        -- the subtraction is the database's (audit 30): a count read here
+        -- and written back lost the failures other instances added between.
+        local took = db.exec("DELETE FROM _hull_totp_attempts_by_ip_user "
                 .. "WHERE ip = ? AND user_id = ?", { ip, user_id })
-        local r = db.query(
-            "SELECT failed_count FROM _hull_totp_attempts_by_ip WHERE ip = ?",
-            { ip })
-        local fc = (r and r[1] and r[1].failed_count) or 0
-        local new_fc = fc - ufc
-        if new_fc < 0 then new_fc = 0 end
-        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = ? "
-                .. "WHERE ip = ?", { new_fc, ip })
+        if (took or 0) == 0 then return end
+        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = CASE "
+                .. "WHEN failed_count > ? THEN failed_count - ? ELSE 0 END "
+                .. "WHERE ip = ?", { ufc, ufc, ip })
     end)
 end
 

@@ -813,6 +813,46 @@ case "$a12out|$a12cron|$a12next" in
 esac
 jobs_reset_my   # clean slate for the following phases
 
+echo "=== jobs: audit 30 (cron re-registration keeps a due tick) on MySQL ==="
+A30DIR=$(mktemp -d)
+cat > "$A30DIR/a30.lua" <<'LUA'
+local WORK = false
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init()
+  -- Registered at every start, as docs/jobs.md says.
+  jobs.cron("a30c", "0 0 * * *", nil, { queue = "a30q" })
+  local ran = 0
+  jobs.handler("a30c", function() ran = ran + 1 end)
+  if WORK then
+    jobs.work({ queue = "a30q", batch = 10 })
+    jobs.work({ queue = "a30q", batch = 10 })
+  end
+  ctx.stdout:write(("A30 ran=%d\n"):format(ran))
+  return 0
+end)
+LUA
+sed "s/^local WORK = false/local WORK = true/" "$A30DIR/a30.lua" > "$A30DIR/work.lua"
+./build/hull "$A30DIR/a30.lua" -d "$DSN" >/dev/null 2>&1
+docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e "UPDATE _hull_cron SET next_run_at=1 WHERE name='a30c'" >/dev/null 2>&1 || true
+./build/hull "$A30DIR/a30.lua" -d "$DSN" >/dev/null 2>&1
+a30kept=$(docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -N -B -e "SELECT next_run_at FROM _hull_cron WHERE name='a30c'" 2>/dev/null | tr -d '[:space:]')
+a30out=$(./build/hull "$A30DIR/work.lua" -d "$DSN" 2>/dev/null)
+a30next=$(docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -N -B -e "SELECT next_run_at FROM _hull_cron WHERE name='a30c'" 2>/dev/null | tr -d '[:space:]')
+docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e "DELETE FROM _hull_cron WHERE name='a30c'" >/dev/null 2>&1 || true
+case "$a30kept|$a30out|$a30next" in
+    "1|A30 ran=1|"[1-9]*)
+        if [ "$a30next" -gt 1 ]; then
+            echo "PASS: jobs.cron re-registration keeps a due tick, which fires once (MySQL)"
+            rm -rf "$A30DIR"
+        else
+            echo "::error jobs audit 30 on MySQL: next=$a30next"; exit 1
+        fi ;;
+    *)  echo "::error jobs audit 30 on MySQL: kept=$a30kept | $a30out | next=$a30next"; exit 1 ;;
+esac
+jobs_reset_my
+
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
 # plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix

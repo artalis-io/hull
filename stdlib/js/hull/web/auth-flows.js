@@ -531,37 +531,37 @@ function lockoutRemaining(userIdStr) {
 function bumpFailedLogin(userIdStr, max) {
     userIdStr = uidKey(userIdStr);
     const now = time.now();
-    // Read-modify-write under db.batch (as totp's bumpFailedAttempt): the new
-    // count and lock are computed here and bound, so no backend's SET
-    // evaluation order matters. A single UPDATE whose locked_until CASE read
-    // failed_count + 1 locked one attempt early on MySQL, which evaluates a
-    // single-table SET left to right (audit 29). db.batch nests as a
-    // savepoint inside an app transaction; db.upsert writes each backend's
-    // own dialect.
-    //
     // Round-9 HIGH-2: the count starts again at 1 once a prior lockout window
     // has expired (gc_expired may not have pruned the row yet), so a stale
     // count does not trip a fresh lockout on the next bad attempt; else it
     // increments and locks at the threshold. 0 is stored for "not locked",
     // as the Lua side does.
+    //
+    // The count is incremented by the database, in statements that read the
+    // row they write (audit 30). Read here and written back (audit 29's
+    // db.upsert), a SELECT inside db.batch's plain BEGIN takes no row lock on
+    // Postgres / MySQL, so concurrent attempts from several instances all
+    // wrote N+1 and a lockout allowed several times max guesses. No
+    // statement reads a column it assigns earlier in its own SET: MySQL
+    // evaluates a single-table SET left to right, so a locked_until CASE
+    // that read failed_count + 1 locked one attempt early (audit 29). Step 2
+    // takes the row lock, which holds to the commit, and leaves locked_until
+    // as it was for step 3 to read. db.batch nests as a savepoint inside an
+    // app transaction.
+    const expired = "locked_until IS NOT NULL AND locked_until <> 0 AND locked_until < ?";
     db.batch(() => {
-        const r = db.query(
-            "SELECT failed_count, locked_until FROM _hull_auth_login_attempts "
-            + "WHERE user_id = ?", [userIdStr]);
-        const row = r && r[0];
-        const fc = (row && Number(row.failed_count)) || 0;
-        const lu = (row && Number(row.locked_until)) || 0;
-        let newFc;
-        let newLu = 0;
-        if (lu !== 0 && lu < now) {
-            newFc = 1;
-        } else {
-            newFc = fc + 1;
-            if (newFc >= max) newLu = now + _state.lockoutDuration;
-        }
-        db.upsert("_hull_auth_login_attempts", ["user_id"],
-            ["user_id", "failed_count", "last_failed_at", "locked_until"],
-            [userIdStr, newFc, now, newLu]);
+        // 1. The row exists (each backend's own INSERT-if-absent).
+        db.insertIfAbsent("_hull_auth_login_attempts", ["user_id"],
+            ["user_id", "failed_count", "locked_until"], [userIdStr, 0, 0]);
+        // 2. Count the attempt: 1 after an expired lockout, else one more.
+        db.exec("UPDATE _hull_auth_login_attempts SET failed_count = CASE WHEN "
+            + expired + " THEN 1 ELSE failed_count + 1 END, last_failed_at = ? "
+            + "WHERE user_id = ?", [now, now, userIdStr]);
+        // 3. The lock, from the new count; an expired one is cleared.
+        db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE WHEN "
+            + expired + " THEN 0 WHEN failed_count >= ? THEN ? ELSE 0 END "
+            + "WHERE user_id = ?",
+            [now, max, now + _state.lockoutDuration, userIdStr]);
     });
 }
 
@@ -2651,6 +2651,13 @@ const _test = {
     sameAddress,
     recoveryLocked,
     stripUserSecrets,
+    bumpFailedLogin,
+    lockoutRemaining,
+    loginFailedCount(userIdStr) {
+        const r = db.query("SELECT failed_count FROM _hull_auth_login_attempts "
+                           + "WHERE user_id = ?", [uidKey(userIdStr)]);
+        return (r && r[0] && r[0].failed_count) || 0;
+    },
     handlers: {
         register: handleRegister,
         login: handleLogin,

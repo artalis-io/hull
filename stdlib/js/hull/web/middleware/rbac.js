@@ -252,6 +252,9 @@ function hasPermission(userId, permission) {
  */
 function hasAnyRole(userId, roleList) {
     const uid = normalizeUserId(userId);
+    // A string is one role (audit 30: indexed as a list, "admin" was checked
+    // as the roles "a", "d", "m", "i", "n").
+    if (typeof roleList === "string") return hasRole(uid, roleList);
     for (let i = 0; i < roleList.length; i++) {
         if (hasRole(uid, roleList[i]))
             return true;
@@ -267,6 +270,8 @@ function hasAnyRole(userId, roleList) {
  */
 function hasAnyPermission(userId, permList) {
     const uid = normalizeUserId(userId);
+    // A string is one permission (audit 30, as hasAnyRole).
+    if (typeof permList === "string") return hasPermission(uid, permList);
     for (let i = 0; i < permList.length; i++) {
         if (hasPermission(uid, permList[i]))
             return true;
