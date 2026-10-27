@@ -8,6 +8,14 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixes
+
+- **`gpu.texture(name, nil, { device = N })` / `gpu.texture(name, null, { device: N })`
+  destroyed the texture on the default device**, and so did JS `gpu.buffer(name, null,
+  { device: N })`: the destroy branch ran before `opts.device` was read. A multi-GPU app
+  freed the wrong device's texture of that name and leaked the one it meant. Both runtimes now
+  read `device` first (a throwing JS getter fails the call); Lua `gpu.buffer` was already right.
+
 ### Security - vendored dependencies
 
 - **Vendored mbedTLS 3.6.2 -> 3.6.7** (3.6 LTS; official release tarball, SHA-256 checked
