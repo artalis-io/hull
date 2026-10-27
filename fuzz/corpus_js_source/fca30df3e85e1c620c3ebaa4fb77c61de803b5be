@@ -1,0 +1,4 @@
+a / b / b / c;
+let re = /ab+c/gic;
+let re = /ab+c/gi;
+x ? /y/ :1z;
