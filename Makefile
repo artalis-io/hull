@@ -3323,7 +3323,13 @@ $(BUILDDIR):
 
 # ── Debug build ─────────────────────────────────────────────────────
 
+# On macOS, first prove CC's ASan runtime can start a process: Apple clang 17
+# on macOS 26 deadlocks in ASan's own init, so every test binary would hang
+# before main (scripts/check_asan_runtime.sh names the fix).
 debug:
+ifeq ($(UNAME_S),Darwin)
+	@sh scripts/check_asan_runtime.sh "$(CC)"
+endif
 	$(MAKE) clean
 	$(MAKE) DEBUG=1 all
 	@echo 'DEBUG := 1' > $(SANITIZER_STAMP)
