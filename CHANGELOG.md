@@ -39,6 +39,24 @@ release-artifact layout).
   freed the wrong device's texture of that name and leaked the one it meant. Both runtimes now
   read `device` first (a throwing JS getter fails the call); Lua `gpu.buffer` was already right.
 
+### Security - build and release (audit 30)
+
+- **The release workflow no longer hands the platform signing key to a downloaded binary.**
+  The `sign-platform-manifest` job fetched v0.1.2's `hull-linux-x86_64` with `curl`, with no
+  hash pin or signature check, and ran it with `HULL_PLATFORM_KEY`: anyone able to replace that
+  old release asset would have captured the platform private key on the next release. The job
+  now builds hull from the tagged source (plain `make`, which needs no platform signature) and
+  signs with that. Both signing keys are now scoped to the one step that uses them (not the job
+  environment) and written to a private `mktemp -d` under `$RUNNER_TEMP`, removed on exit. See
+  docs/release_signing.md "Signer binaries".
+- **`make fetch-wgpu` / `fetch-duckdb` / `fetch-cosmocc` / `fetch-pwned-blocklist` download into
+  a private directory.** They used fixed names in the shared `/tmp`, so on a multi-user host
+  another account could pre-create the name as a symlink (curl then overwrote a file of the
+  victim's) or swap the archive between the SHA-256 check and the unzip. Each now downloads,
+  verifies and unpacks inside `mktemp -d "${TMPDIR:-/tmp}/hull-fetch.XXXXXX"`, removed on every
+  exit path. `scripts/build_musl_platform.sh`'s default work dirs and
+  `scripts/build_pwned_blocklist.sh`'s default input no longer name fixed `/tmp` paths either.
+
 ### Security - vendored dependencies
 
 - **Vendored mbedTLS 3.6.2 -> 3.6.7** (3.6 LTS; official release tarball, SHA-256 checked

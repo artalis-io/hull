@@ -36,13 +36,14 @@ fetch-ca-bundle:
 # every weak password through. Source license: CC-BY-3.0.
 
 PWNED_SRC_URL := https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt
-PWNED_SRC_TMP := /tmp/seclists_top10k.txt
 
 .PHONY: fetch-pwned-blocklist
 fetch-pwned-blocklist:
 	@echo "Fetching SecLists top 10K from danielmiessler/SecLists …"
-	curl $(CURL_RETRY) -fsSL $(PWNED_SRC_URL) -o $(PWNED_SRC_TMP)
-	@bash scripts/build_pwned_blocklist.sh $(PWNED_SRC_TMP)
+	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/hull-fetch.XXXXXX") || exit 1; \
+	trap 'rm -rf "$$tmp"' EXIT; trap 'exit 1' HUP INT TERM; \
+	curl $(CURL_RETRY) -fsSL $(PWNED_SRC_URL) -o "$$tmp/seclists_top10k.txt" \
+	    && bash scripts/build_pwned_blocklist.sh "$$tmp/seclists_top10k.txt"
 
 # ── HTMX + Pico (vendored assets for `hull init --profile htmx`) ───
 #
@@ -197,22 +198,22 @@ fetch-wgpu:
 			echo "Supported: macos-aarch64, macos-x86_64, linux-x86_64, linux-aarch64"; \
 			exit 1; \
 		fi; \
-		curl $(CURL_RETRY_LARGE) -sL -o /tmp/$(WGPU_ZIP) "$(WGPU_URL)"; \
+		tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/hull-fetch.XXXXXX") || exit 1; \
+		trap 'rm -rf "$$tmp"' EXIT; trap 'exit 1' HUP INT TERM; \
+		curl $(CURL_RETRY_LARGE) -sL -o "$$tmp/$(WGPU_ZIP)" "$(WGPU_URL)"; \
 		echo "Verifying SHA-256..."; \
-		ACTUAL=$$($(SHA256CMD) /tmp/$(WGPU_ZIP) | cut -d' ' -f1); \
+		ACTUAL=$$($(SHA256CMD) "$$tmp/$(WGPU_ZIP)" | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(WGPU_EXPECTED_SHA)" ]; then \
 			echo "ERROR: SHA-256 mismatch!"; \
 			echo "  expected: $(WGPU_EXPECTED_SHA)"; \
 			echo "  actual:   $$ACTUAL"; \
-			rm -f /tmp/$(WGPU_ZIP); \
 			exit 1; \
 		fi; \
 		echo "SHA-256 OK"; \
 		mkdir -p $(VENDDIR)/wgpu; \
-		unzip -o -j /tmp/$(WGPU_ZIP) "lib/libwgpu_native.a" -d $(VENDDIR)/wgpu/; \
-		unzip -o -j /tmp/$(WGPU_ZIP) "include/webgpu/webgpu.h" -d $(VENDDIR)/wgpu/; \
-		unzip -o -j /tmp/$(WGPU_ZIP) "include/webgpu/wgpu.h" -d $(VENDDIR)/wgpu/; \
-		rm -f /tmp/$(WGPU_ZIP); \
+		unzip -o -j "$$tmp/$(WGPU_ZIP)" "lib/libwgpu_native.a" -d $(VENDDIR)/wgpu/; \
+		unzip -o -j "$$tmp/$(WGPU_ZIP)" "include/webgpu/webgpu.h" -d $(VENDDIR)/wgpu/; \
+		unzip -o -j "$$tmp/$(WGPU_ZIP)" "include/webgpu/wgpu.h" -d $(VENDDIR)/wgpu/; \
 		echo "=== wgpu-native $(WGPU_VERSION) installed to $(VENDDIR)/wgpu/ ==="; \
 		ls -lh $(VENDDIR)/wgpu/libwgpu_native.a; \
 	fi
@@ -227,20 +228,20 @@ fetch-duckdb:
 			echo "Supported: osx-arm64, osx-amd64, linux-amd64, linux-arm64 (glibc)"; \
 			exit 1; \
 		fi; \
-		curl $(CURL_RETRY_LARGE) -sL -o /tmp/$(DUCKDB_ZIP) "$(DUCKDB_URL)"; \
+		tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/hull-fetch.XXXXXX") || exit 1; \
+		trap 'rm -rf "$$tmp"' EXIT; trap 'exit 1' HUP INT TERM; \
+		curl $(CURL_RETRY_LARGE) -sL -o "$$tmp/$(DUCKDB_ZIP)" "$(DUCKDB_URL)"; \
 		echo "Verifying SHA-256..."; \
-		ACTUAL=$$($(SHA256CMD) /tmp/$(DUCKDB_ZIP) | cut -d' ' -f1); \
+		ACTUAL=$$($(SHA256CMD) "$$tmp/$(DUCKDB_ZIP)" | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(DUCKDB_EXPECTED_SHA)" ]; then \
 			echo "ERROR: SHA-256 mismatch!"; \
 			echo "  expected: $(DUCKDB_EXPECTED_SHA)"; \
 			echo "  actual:   $$ACTUAL"; \
-			rm -f /tmp/$(DUCKDB_ZIP); \
 			exit 1; \
 		fi; \
 		echo "SHA-256 OK"; \
 		mkdir -p $(VENDDIR)/duckdb; \
-		unzip -o -j /tmp/$(DUCKDB_ZIP) -d $(VENDDIR)/duckdb/; \
-		rm -f /tmp/$(DUCKDB_ZIP); \
+		unzip -o -j "$$tmp/$(DUCKDB_ZIP)" -d $(VENDDIR)/duckdb/; \
 		echo "Isolating DuckDB's bundled mbedTLS/psa symbols..."; \
 		OBJCOPY="$$(command -v objcopy || command -v llvm-objcopy || command -v gobjcopy || true)"; \
 		[ -z "$$OBJCOPY" ] && [ -x /opt/homebrew/opt/llvm/bin/llvm-objcopy ] && OBJCOPY=/opt/homebrew/opt/llvm/bin/llvm-objcopy; \
@@ -253,12 +254,11 @@ fetch-duckdb:
 		fi; \
 		LIB=$(VENDDIR)/duckdb/libduckdb_static.a; \
 		nm "$$LIB" 2>/dev/null | awk '{print $$NF}' | grep -E '^_?(mbedtls_|psa_)' | sort -u \
-			| awk '{print $$1" hlduck_"$$1}' > /tmp/hl_duckdb_syms.map; \
-		if [ -s /tmp/hl_duckdb_syms.map ]; then \
-			"$$OBJCOPY" --redefine-syms=/tmp/hl_duckdb_syms.map "$$LIB"; \
-			echo "isolated $$(wc -l < /tmp/hl_duckdb_syms.map | tr -d ' ') symbols (hlduck_ prefix)"; \
+			| awk '{print $$1" hlduck_"$$1}' > "$$tmp/syms.map"; \
+		if [ -s "$$tmp/syms.map" ]; then \
+			"$$OBJCOPY" --redefine-syms="$$tmp/syms.map" "$$LIB"; \
+			echo "isolated $$(wc -l < "$$tmp/syms.map" | tr -d ' ') symbols (hlduck_ prefix)"; \
 		fi; \
-		rm -f /tmp/hl_duckdb_syms.map; \
 		echo "=== DuckDB $(DUCKDB_VERSION) installed to $(VENDDIR)/duckdb/ ==="; \
 		ls -lh $(VENDDIR)/duckdb/libduckdb_static.a; \
 	fi
@@ -277,22 +277,22 @@ fetch-cosmocc:
 		echo "cosmocc already installed: $$(which cosmocc)"; \
 	else \
 		echo "=== Fetching cosmocc $(COSMOCC_VERSION) to $(COSMOCC_DIR) ==="; \
-		curl --connect-timeout 30 --retry 3 --retry-all-errors -fsL -o /tmp/cosmocc.zip "$(COSMOCC_URL)" \
+		tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/hull-fetch.XXXXXX") || exit 1; \
+		trap 'rm -rf "$$tmp"' EXIT; trap 'exit 1' HUP INT TERM; \
+		curl --connect-timeout 30 --retry 3 --retry-all-errors -fsL -o "$$tmp/cosmocc.zip" "$(COSMOCC_URL)" \
 			|| { echo "cosmo.zip failed; falling back to $(COSMOCC_MIRROR)"; \
-			     curl $(CURL_RETRY_LARGE) -fsL -o /tmp/cosmocc.zip "$(COSMOCC_MIRROR)"; }; \
+			     curl $(CURL_RETRY_LARGE) -fsL -o "$$tmp/cosmocc.zip" "$(COSMOCC_MIRROR)"; }; \
 		echo "Verifying SHA-256..."; \
-		ACTUAL=$$($(SHA256CMD) /tmp/cosmocc.zip | cut -d' ' -f1); \
+		ACTUAL=$$($(SHA256CMD) "$$tmp/cosmocc.zip" | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(COSMOCC_SHA256)" ]; then \
 			echo "ERROR: SHA-256 mismatch!"; \
 			echo "  expected: $(COSMOCC_SHA256)"; \
 			echo "  actual:   $$ACTUAL"; \
-			rm -f /tmp/cosmocc.zip; \
 			exit 1; \
 		fi; \
 		echo "SHA-256 OK"; \
 		mkdir -p $(COSMOCC_DIR); \
-		unzip -q -o /tmp/cosmocc.zip -d $(COSMOCC_DIR); \
-		rm -f /tmp/cosmocc.zip; \
+		unzip -q -o "$$tmp/cosmocc.zip" -d $(COSMOCC_DIR); \
 		echo "=== cosmocc $(COSMOCC_VERSION) installed to $(COSMOCC_DIR)/bin/cosmocc ==="; \
 		echo "Add to PATH: export PATH=$(COSMOCC_DIR)/bin:\$$PATH"; \
 	fi
