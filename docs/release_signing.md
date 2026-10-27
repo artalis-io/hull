@@ -168,14 +168,41 @@ The `--no-verify-release-sig` flag (debug only, mirrors `--no-ca-bundle`) skips 
   env:
     HULL_RELEASE_KEY: ${{ secrets.HULL_RELEASE_KEY }}
   run: |
-    echo "$HULL_RELEASE_KEY" > /tmp/release.key
-    chmod 0600 /tmp/release.key
-    ./build/hull sign-release hull.sha256 --key /tmp/release.key
-    rm -f /tmp/release.key
+    umask 077
+    keydir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/hull-key.XXXXXX")
+    trap 'rm -rf "$keydir"' EXIT
+    printf '%s\n' "$HULL_RELEASE_KEY" > "$keydir/release.key"
+    ./hull-linux-x86_64 sign-release hull.sha256 --key "$keydir/release.key"
     test -s hull.sha256.sig
 ```
 
 The upload step adds `hull.sha256.sig` to the asset list.
+
+#### Signer binaries (audit 30)
+
+Rule: **a signing key is only ever handed to a hull built from the tagged
+source in the same workflow run.** Nothing downloaded - an earlier release, a
+tool bundle, a script fetched at run time - runs with `HULL_RELEASE_KEY` or
+`HULL_PLATFORM_KEY` in its environment or on disk.
+
+| Key | Job | Signer |
+|-----|-----|--------|
+| `HULL_PLATFORM_KEY` | `sign-platform-manifest` | `./build/hull`, a plain `make` of the tagged source checked out in that job |
+| `HULL_RELEASE_KEY` | `release` | `hull-linux-x86_64`, the artifact `build-native` built from the tagged source in the same run |
+
+The platform-manifest job used to fetch v0.1.2's `hull-linux-x86_64` with
+`curl` (no hash pin, no signature check) and run it with the platform key.
+Anyone who could replace that old release asset would have captured the
+platform private key on the next release, which defeats keeping the release
+and platform keys apart. A source-built signer works because a plain `make`
+needs no platform signature (`HL_EMBED_PLATFORM_SIG` stays off when
+`build/embedded_platform_sig.h` is absent) and `sign-release` is a plain
+Ed25519 sign over a file. The cost is one native build, a few minutes, in that
+job.
+
+Each key is in scope only for the step that uses it (`env:` on the step, never
+the job), and is written to a fresh `mktemp -d` under `$RUNNER_TEMP` with
+`umask 077`, removed by an `EXIT` trap.
 
 ### 5. `install.sh` (UNCHANGED)
 

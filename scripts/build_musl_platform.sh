@@ -39,8 +39,15 @@ if [ ! -f "$SRC/Makefile" ]; then
     exit 1
 fi
 
-# Build in a writable copy so <src-dir> can be a read-only mount.
-BUILD_SRC="${HULL_MUSL_BUILD_DIR:-/tmp/hull-musl-build}"
+# Build in a writable copy so <src-dir> can be a read-only mount. The default
+# work dirs live in a fresh private mktemp -d, never a fixed name in a shared
+# /tmp another local user could pre-create (audit 30). HULL_MUSL_BUILD_DIR /
+# HULL_MUSL_OUT_DIR still name an explicit location the caller owns.
+WORK=""
+if [ -z "${HULL_MUSL_BUILD_DIR:-}" ] || [ -z "${HULL_MUSL_OUT_DIR:-}" ]; then
+    WORK=$(mktemp -d "${TMPDIR:-/tmp}/hull-musl.XXXXXX")
+fi
+BUILD_SRC="${HULL_MUSL_BUILD_DIR:-$WORK/build}"
 rm -rf "$BUILD_SRC"
 mkdir -p "$BUILD_SRC"
 # `cp -a .../.` copies the tree contents (incl. dotfiles + submodules) into the
@@ -57,7 +64,7 @@ make -j"$JOBS" platform
 make -j"$JOBS" platform-slim
 make -j"$JOBS" feature-embedded
 
-OUT="${HULL_MUSL_OUT_DIR:-/tmp/hull-musl-out}"
+OUT="${HULL_MUSL_OUT_DIR:-$WORK/out}"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp build/libhull_platform.a      "$OUT"/

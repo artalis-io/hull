@@ -14,10 +14,12 @@
 
 set -eu
 
-SRC="${1:-/tmp/seclists_top10k.txt}"
-[ -f "$SRC" ] || {
-    echo "fetch the source first:" >&2
-    echo "  curl -fsSL https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt -o $SRC" >&2
+# No default input path: a fixed name in a shared /tmp is one another local
+# user can plant (audit 30). `make fetch-pwned-blocklist` downloads into a
+# private mktemp -d and passes the file here.
+SRC="${1:-}"
+[ -n "$SRC" ] && [ -f "$SRC" ] || {
+    echo "usage: $0 INPUT_FILE (or run: make fetch-pwned-blocklist)" >&2
     exit 1
 }
 
