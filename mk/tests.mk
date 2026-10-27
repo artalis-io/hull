@@ -47,6 +47,11 @@ ifeq ($(HL_LINK_TLS),0)
       %/test_asym.c %/test_ca_trust.c %/test_net_resolve.c %/test_net_stream.c \
       %/test_ssh.c %/test_agent_probe.c,$(TEST_SRCS))
 endif
+# cap/net_stream.c and cap/ssh.c go whenever both HTTP halves are off, even
+# with TLS linked for a network DB (the Makefile's CAP_SRCS filter).
+ifeq ($(HL_ENABLE_HTTP_CLIENT)$(HL_ENABLE_HTTP_SERVER),00)
+  TEST_SRCS := $(filter-out %/test_net_stream.c %/test_ssh.c,$(TEST_SRCS))
+endif
 
 # Drop DB-dependent tests in pure-compute builds.
 # test_js.c and test_lua.c exercise the full orchestration surface
@@ -1059,6 +1064,10 @@ ifeq ($(HL_ENABLE_HTTP_CLIENT),1)
 endif
 ifneq ($(HL_ENABLE_HTTP_ANY),0)
   CFLAGS += -DHL_ENABLE_HTTP
+endif
+# The mbedTLS crypto backends and the SBOM entries key off it (Makefile).
+ifeq ($(HL_LINK_TLS),1)
+  CFLAGS += -DHL_LINK_TLS
 endif
 # Re-add version string (the := above clobbers earlier += additions)
 CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"

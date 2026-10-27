@@ -13,8 +13,8 @@ release-artifact layout).
 - **A build that linked mbedTLS for a database without HTTP used none of it** (e.g.
   `make HL_ENABLE_HTTP=0 HL_ENABLE_POSTGRES=1`, or MySQL / Valkey). The mbedTLS crypto backends
   were compiled only under `HL_ENABLE_HTTP`, so that binary carried mbedTLS yet ran the
-  fail-closed stubs: no AES-CTR or ChaCha20-Poly1305 (`hull.ssh` connections failed), no RSA /
-  ECDSA sign or verify. Its `hull sbom` also left out mbedTLS and Keel, both linked. The Makefile
+  fail-closed stubs: no AES-CTR or ChaCha20-Poly1305 (`crypto.aes256ctr` and the AEAD calls
+  failed), no RSA / ECDSA sign or verify. Its `hull sbom` also left out mbedTLS and Keel, both linked. The Makefile
   now defines `HL_LINK_TLS` for C code whenever it links the TLS stack, and the backends and the
   SBOM entries test that. Builds with HTTP, and pure-compute builds, are unchanged.
 - **`gpu.load(name)` compiled on the default device only**, in both runtimes: it took no

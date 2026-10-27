@@ -23,8 +23,7 @@
 
 /* mbedTLS is linked whenever HL_LINK_TLS is defined: an HTTP half, or a network
  * DB / KV backend (a postgres-only build links it without HL_ENABLE_HTTP, and
- * under that guard got the fail-closed stubs: no AES-CTR / ChaCha20 for
- * hull.ssh). Same guard the asym and hmac backends use, so a pure-compute build
+ * under that guard got the fail-closed stubs: no AES-CTR / ChaCha20). Same guard the asym and hmac backends use, so a pure-compute build
  * compiles this to nothing. */
 #ifdef HL_LINK_TLS
 
