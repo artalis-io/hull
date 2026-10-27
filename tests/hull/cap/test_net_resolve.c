@@ -9,6 +9,7 @@
 #include "utest.h"
 
 #include "hull/cap/net_resolve.h"
+#include "../test_dns.h"
 
 UTEST(net_resolve, an_ipv4_literal_needs_no_lookup)
 {
@@ -50,6 +51,13 @@ UTEST(net_resolve, refusals_resolve_nothing)
     ASSERT_EQ(hl_net_resolve("192.0.2.7", 65536, a, 2), 0);
     ASSERT_EQ(hl_net_resolve("192.0.2.7", 22, NULL, 2), 0);
     ASSERT_EQ(hl_net_resolve("192.0.2.7", 22, a, 0), 0);
+}
+
+UTEST(net_resolve, a_reserved_name_resolves_nothing)
+{
+    if (hl_test_resolver_answers_invalid())
+        UTEST_SKIP("the system resolver answers .invalid names");
+    KlSockAddr a[2];
     ASSERT_EQ(hl_net_resolve("no-such-host.invalid", 22, a, 2), 0);
 }
 

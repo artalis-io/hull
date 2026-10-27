@@ -876,11 +876,13 @@ UTEST(smtp_starttls, failing_set_hostname_rejected)
 
 /* Connect to a blackhole (TEST-NET-1 192.0.2.1, RFC 5737) must reach a bounded
  * failure and free cleanly with the connect op confirmed detached (fix 2 +
- * fix 3). A short timeout keeps the test fast. */
+ * fix 3). A short timeout keeps the test fast. The port is 9 (discard), not
+ * 25: some networks transparently proxy outbound port 25, so a connect to
+ * 192.0.2.1:25 completes there (measured on one), while port 9 is left alone. */
 UTEST(smtp_connect, blackhole_timeout_detaches)
 {
     /* 192.0.2.1 is reserved and unrouteable; the connect will not complete. */
-    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 25, 600, NULL, NULL, NULL, NULL);
+    HlSmtpTransport *t = hl_smtp_transport_connect("192.0.2.1", 9, 600, NULL, NULL, NULL, NULL);
     /* Bounded failure: NULL (connect / deadline). hl_smtp_transport_connect
      * cancels + waits for detachment internally before freeing, so a clean
      * return here already proves detachment did not hang. */

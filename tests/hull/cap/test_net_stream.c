@@ -19,6 +19,7 @@
 
 #include "hull/cap/net_stream.h"
 #include "hull/shared/async_backend.h"
+#include "../test_dns.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -206,6 +207,8 @@ UTEST(net_stream, refused_port_reports_connect_not_timeout)
 
 UTEST(net_stream, unresolvable_host_reports_resolve)
 {
+    if (hl_test_resolver_answers_invalid())
+        UTEST_SKIP("the system resolver answers .invalid names");
     NetFix f;
     ASSERT_EQ(fix_init(&f), 0);
 
