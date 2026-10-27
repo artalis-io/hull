@@ -14196,4 +14196,220 @@ UTEST(js_audit29, compute_inputs_take_typed_arrays)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* ── gpu.* over an in-memory backend ─────────────────────────────────────
+ *
+ * The bindings are in the base build; only the wgpu backend is a feature.
+ * tests/hull/gpu_mock.h stands in for it (the Lua twin is test_lua.c's
+ * lua_gpu suite), so these run on every runner. */
+
+#include "../../gpu_mock.h"
+
+static HlGpuCtx *jgpu;
+
+/* hull:gpu registers only when a GPU context exists at init. */
+static int jgpu_init(int devices)
+{
+    if (js_initialized)
+        hl_js_free(&js);
+    js_initialized = 0;
+    jgpu = gpu_mock_ctx(devices);
+    if (!jgpu) return -1;
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    memset(&js, 0, sizeof(js));
+    js.base.platform_vfs = &platform_vfs;
+    js.base.gpu_ctx = jgpu;
+    js_initialized = (hl_js_init(&js, &cfg) == 0);
+    if (!js_initialized) return -1;
+    install_test_js_globals(&js);
+    return 0;
+}
+
+static void jgpu_cleanup(void)
+{
+    js.base.gpu_ctx = NULL;
+    cleanup_js();
+    gpu_mock_free(jgpu);
+    jgpu = NULL;
+}
+
+/* `body` is a function body returning a string; a throw comes back as
+ * "throw: <message>". */
+#define JGPU_EXPECT(body, want) do {                                       \
+        char *got_ = eval_str("(() => { const s = (b) => String.fromCharCode"\
+            "(...new Uint8Array(b)); const u = (t) => Uint8Array.from(t, "   \
+            "(c) => c.charCodeAt(0)).buffer; try {" body "} catch (e) {"     \
+            " return 'throw: ' + e.message; } })()");                        \
+        EXPECT_STREQ(got_, want);                                          \
+        free(got_);                                                        \
+    } while (0)
+
+static int jgpu_has(int device, int texture, const char *name)
+{
+    HlGpuDevice *d = &jgpu->devices[device];
+    int n = texture ? d->texture_count : d->buffer_count;
+    for (int i = 0; i < n; i++)
+        if (strcmp(texture ? d->textures[i].name : d->buffers[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+UTEST(js_gpu, devices_are_listed)
+{
+    ASSERT_EQ(jgpu_init(2), 0);
+    JGPU_EXPECT("const d = gpu.devices();"
+                "return gpu.available() + ' ' + d.length + ' ' +"
+                "  d[0].id + d[0].name + ' ' + d[1].id + d[1].name;",
+                "true 2 0mock0 1mock1");
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu, buffers_are_per_device)
+{
+    ASSERT_EQ(jgpu_init(2), 0);
+    JGPU_EXPECT("gpu.buffer('b', u('AAAAAAAA'));"
+                "gpu.buffer('b', u('BBBBBBBB'), { device: 1 });"
+                "return s(gpu.bufferRead('b')) + s(gpu.bufferRead('b', { device: 1 }));",
+                "AAAAAAAABBBBBBBB");
+    /* Whole 4-byte words at a 4-aligned offset, as WebGPU writes. */
+    JGPU_EXPECT("gpu.buffer('b', u('wxyz'), { device: 1, offset: 4 });"
+                "let r = s(gpu.bufferRead('b', { device: 1 }));"
+                "try { gpu.buffer('b', u('q'), { device: 1, offset: 1 }); }"
+                "catch (e) { r += ' ' + e.message; }"
+                "return r;",
+                "BBBBwxyz gpu.buffer failed");
+    EXPECT_EQ(jgpu->devices[0].live_bytes, (size_t)8);
+    EXPECT_EQ(jgpu->devices[1].live_bytes, (size_t)8);
+    jgpu_cleanup();
+}
+
+/* gpu.texture(name, null, { device: N }) and gpu.buffer(name, null,
+ * { device: N }) destroyed the object of that name on the DEFAULT device:
+ * the destroy branch ran before opts.device was read (#870). */
+UTEST(js_gpu, a_destroy_targets_the_device_it_names)
+{
+    ASSERT_EQ(jgpu_init(2), 0);
+    JGPU_EXPECT("const px = new Uint8Array(16).fill(1).buffer;"
+                "for (const d of [0, 1]) {"
+                "  gpu.buffer('b', u('data'), { device: d });"
+                "  gpu.texture('t', px, { width: 2, height: 2, device: d });"
+                "}"
+                "gpu.buffer('b', null, { device: 1 });"
+                "gpu.texture('t', null, { device: 1 });"
+                "gpu.texture('t', null, { device: 7 });"   /* no such device */
+                "return 'ok';",
+                "ok");
+    EXPECT_TRUE(jgpu_has(0, 0, "b"));
+    EXPECT_FALSE(jgpu_has(1, 0, "b"));
+    EXPECT_TRUE(jgpu_has(0, 1, "t"));
+    EXPECT_FALSE(jgpu_has(1, 1, "t"));
+    EXPECT_EQ(jgpu->devices[1].live_bytes, (size_t)0);
+    EXPECT_EQ(jgpu->devices[0].live_bytes, (size_t)(4 + 16));
+    /* A throwing device getter fails the destroy instead of picking one. */
+    JGPU_EXPECT("gpu.texture('t', null, { get device() { throw new Error('dev'); } });"
+                "return 'no throw';",
+                "throw: dev");
+    EXPECT_TRUE(jgpu_has(0, 1, "t"));
+    JGPU_EXPECT("gpu.buffer('b', null); gpu.texture('t', null); return 'ok';", "ok");
+    EXPECT_EQ(jgpu->devices[0].live_bytes, (size_t)0);
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu, an_unknown_device_is_refused)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("gpu.buffer('b', u('x'), { device: 3 }); return 'made';",
+                "throw: gpu.buffer failed");
+    JGPU_EXPECT("gpu.bufferRead('b', { device: 3 }); return 'read';",
+                "throw: gpu.bufferRead failed");
+    EXPECT_EQ(gpu_mock_buffer_creates, 0);
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu, dispatch_reads_back_the_buffer_it_names)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("gpu.compile('id', 'fn main() {}');"
+                "const a = gpu.dispatch('id', { buffers: ["
+                "  { data: u('hello') }, { size: 3 }] });"          /* default: 0 */
+                "const b = gpu.dispatch('id', { buffers: ["
+                "  { data: u('hello') }, { size: 3 }], output: 1 });"
+                "const c = gpu.dispatch('id', { buffers: ["
+                "  { data: u('hello') }], output: false });"
+                "return s(a) + ' ' + b.byteLength + ' ' +"
+                "  (s(b) === '\\0\\0\\0' ? 'z' : '?') + ' ' + c;",
+                "hello 3 z true");
+    int before = gpu_mock_dispatches;
+    JGPU_EXPECT("gpu.dispatch('nope', { buffers: [{ data: u('x') }] }); return 'ran';",
+                "throw: gpu.dispatch: shader_not_found");
+    EXPECT_EQ(gpu_mock_dispatches, before);
+    jgpu_cleanup();
+}
+
+/* compile, bufferRead and textureRead took no device option, unlike their
+ * Lua twins: a shader compiled only on the default device (a dispatch on
+ * another was shader_not_found), and reads came from the default device. */
+UTEST(js_gpu, compile_and_reads_take_the_device)
+{
+    ASSERT_EQ(jgpu_init(2), 0);
+    JGPU_EXPECT("gpu.compile('id1', 'fn main() {}', { device: 1 });"
+                "let r = s(gpu.dispatch('id1', { device: 1, buffers: [{ data: u('one') }] }));"
+                "try { gpu.dispatch('id1', { buffers: [{ data: u('x') }] }); }"
+                "catch (e) { r += ' ' + e.message; }"
+                "gpu.buffer('b', u('zero'));"
+                "gpu.buffer('b', u('one!'), { device: 1 });"
+                "r += ' ' + s(gpu.bufferRead('b', { device: 1 }));"
+                "try { gpu.bufferRead('b', { get device() { throw new Error('dev'); } }); }"
+                "catch (e) { r += ' ' + e.message; }"
+                "return r;",
+                "one gpu.dispatch: shader_not_found one! dev");
+#ifdef HL_ENABLE_IMAGE
+    JGPU_EXPECT("gpu.texture('t', new ArrayBuffer(16), { width: 2, height: 2 });"
+                "gpu.texture('t', new ArrayBuffer(16), { width: 4, height: 1, device: 1 });"
+                "return gpu.textureRead('t').width + ' ' +"
+                "  gpu.textureRead('t', { device: 1 }).width;",
+                "2 4");
+#endif
+    jgpu_cleanup();
+}
+
+/* A pipeline with several outputs returns an array of them (audit 29; it
+ * returned only the first), one output a single ArrayBuffer. */
+UTEST(js_gpu, a_pipeline_with_several_outputs_returns_an_array)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("gpu.compile('id', 'fn main() {}');"
+                "const stages = ["
+                "  { shader: 'id', buffers: [{ name: 'a', data: u('xy') }] },"
+                "  { shader: 'id', buffers: [{ name: 'a' }, { data: u('zz') }] }];"
+                "const one = gpu.pipeline(stages);"
+                "const two = gpu.pipeline(stages, { outputs: ["
+                "  { stage: 0, buffer: 0 }, { stage: 1, buffer: 1 }] });"
+                "return (one instanceof ArrayBuffer) + ':' + s(one) + ' ' +"
+                "  Array.isArray(two) + ':' + two.length + ':' + s(two[0]) + s(two[1]);",
+                "true:xy true:2:xyzz");
+    jgpu_cleanup();
+}
+
+/* A read-back larger than the VM heap limit is refused before the backend
+ * copies it off the heap (audit 17), in bufferRead and in dispatch. */
+UTEST(js_gpu, read_backs_past_the_heap_limit_are_refused)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("gpu.buffer('big', new ArrayBuffer(2 << 20));"
+                "gpu.compile('id', 'fn main() {}'); return 'ok';", "ok");
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 1u << 20;
+    JGPU_EXPECT("let r = '';"
+                "try { gpu.bufferRead('big'); r += 'read'; } catch (e) { r += e.message; }"
+                "try { gpu.dispatch('id', { buffers: [{ name: 'big' }] }); r += ' ran'; }"
+                "catch (e) { r += ' | ' + e.message; }"
+                "return r;",
+                "gpu.bufferRead failed | gpu.dispatch: output_too_large");
+    js.max_heap_bytes = saved;
+    JGPU_EXPECT("return String(gpu.bufferRead('big').byteLength);", "2097152");
+    jgpu_cleanup();
+}
+
 UTEST_MAIN();
