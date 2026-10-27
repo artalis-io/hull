@@ -7,11 +7,11 @@
  *
  * Build dependency:
  *   This file links mbedTLS PK + RSA + ECDSA + SHA. Hull pulls in
- *   mbedTLS unconditionally when HL_ENABLE_HTTP_CLIENT=1 (the TLS
- *   client needs it), which is the default build. On builds without
- *   mbedTLS (HL_ENABLE_HTTP_CLIENT=0 AND HL_ENABLE_HTTP_SERVER=0),
- *   the file is still compiled but `verify` short-circuits with
- *   "input error" so the symbol is always present at link time.
+ *   mbedTLS whenever HL_LINK_TLS is defined (an HTTP half, or a
+ *   network DB / KV backend), which includes the default build. On
+ *   builds without mbedTLS (pure-compute), the file is still compiled
+ *   but `verify` short-circuits with "input error" so the symbol is always
+ *   present at link time.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -25,11 +25,10 @@
 #include <string.h>
 #include <strings.h>
 
-/* mbedTLS is linked whenever HL_ENABLE_HTTP_CLIENT or HL_ENABLE_HTTP_SERVER
- * is on. The macro HL_ENABLE_HTTP is defined in that case (Makefile
- * sets it). Outside of that, we stub the backend so the symbol still
- * exists but every verify call reports "input error". */
-#ifdef HL_ENABLE_HTTP
+/* mbedTLS is linked whenever HL_LINK_TLS is defined (the Makefile sets it for
+ * an HTTP half or a network DB / KV backend). Outside of that, the base's weak
+ * fail-closed defaults stand in (see the #else branch below). */
+#ifdef HL_LINK_TLS
 
 #include <mbedtls/pk.h>
 #include <mbedtls/md.h>
@@ -603,7 +602,7 @@ done:
     return rc;
 }
 
-#else /* !HL_ENABLE_HTTP - mbedTLS is not linked */
+#else /* !HL_LINK_TLS - mbedTLS is not linked */
 
 /* Nothing is defined in this branch anymore: on a build without mbedTLS the base
  * provides the weak fail-closed defaults for the whole asym surface -- the
@@ -611,7 +610,7 @@ done:
  * mbedTLS implementations (the #ifdef branch), which compose into
  * libhull_feature-tls.a as strong overrides. See docs/tls_feature.md, a2. */
 
-#endif /* HL_ENABLE_HTTP */
+#endif /* HL_LINK_TLS */
 
 /* hl_crypto_asym_alg_{from,to}_string moved to cap/crypto.c (base-resident, pure
  * string<->enum helpers with no mbedTLS dependency) so mod_crypto's references
@@ -621,4 +620,4 @@ done:
 /* hl_cap_crypto_asym_verify (generic dispatcher) + hl_cap_crypto_asym_verify_default
  * moved to cap/crypto.c (base-resident) so they no longer tie those symbols to this
  * mbedTLS TU. verify_default now dispatches through hl_crypto_asym_active_backend(),
- * whose STRONG override lives below (HL_ENABLE_HTTP only). See docs/tls_feature.md. */
+ * whose STRONG override lives below (HL_LINK_TLS only). See docs/tls_feature.md. */

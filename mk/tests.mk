@@ -128,13 +128,6 @@ endif
 
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
 TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
-# HL_TEST_LINK_TLS tells a test whether this build links TLS at all (an HTTP
-# half or a network DB / KV backend): the mbedTLS-backed crypto (AES-CTR,
-# ChaCha20, RSA / ECDSA) and the CA bundle parse exist only then. There is no
-# production macro for it - HL_ENABLE_HTTP is off on a postgres-only build.
-ifeq ($(HL_LINK_TLS),1)
-$(TEST_BINS): CFLAGS += -DHL_TEST_LINK_TLS
-endif
 
 # Test objects need hull capability sources but NOT main.o or runtime objects
 TEST_CAP_OBJS := $(CAP_OBJS)
@@ -925,7 +918,7 @@ $(BUILDDIR)/test_module_resolver: $(TESTDIR)/hull/test_module_resolver.c $(MODUL
 
 # CA bundle test - links against cacert.o and mbedTLS for parse verification.
 # A build that links no TLS (HL_LINK_TLS=0: pure-compute) has no mbedTLS to
-# parse with, so the parse leg needs HL_TEST_LINK_TLS (set for TEST_BINS above).
+# parse with, so the parse leg needs HL_LINK_TLS (the Makefile's -D of that gate).
 $(BUILDDIR)/test_cacert: $(TESTDIR)/hull/test_cacert.c $(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CACERT_OBJ) $(SH_SEAL_ARENA_OBJ) $(MBEDTLS_OBJS)

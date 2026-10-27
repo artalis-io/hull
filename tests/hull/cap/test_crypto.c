@@ -1170,7 +1170,7 @@ UTEST(aes256ctr, matches_the_nist_sp800_38a_vector)
     ASSERT_EQ(memcmp(out, want, sizeof want), 0);
 }
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 UTEST(aes256ctr, decrypt_is_the_same_operation)
 {
     /* CTR XORs a keystream, so running the ciphertext back through with the
@@ -1191,7 +1191,7 @@ UTEST(aes256ctr, decrypt_is_the_same_operation)
 }
 #endif
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 UTEST(aes256ctr, handles_a_partial_final_block)
 {
     /* An OpenSSH private section is padded to the CIPHER block size, but the

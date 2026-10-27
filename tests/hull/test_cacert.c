@@ -80,7 +80,7 @@ UTEST(cacert, label_not_none)
     ASSERT_STRNE(label, "none");
 }
 
-#ifdef HL_TEST_LINK_TLS
+#ifdef HL_LINK_TLS
 UTEST(cacert, parseable_by_mbedtls)
 {
     /* The whole point: feed it to mbedTLS and confirm it parses. */
@@ -103,7 +103,7 @@ UTEST(cacert, parseable_by_mbedtls)
     mbedtls_x509_crt_free(chain_buf);
     ASSERT_LE(rc, 5);
 }
-#endif /* HL_TEST_LINK_TLS */
+#endif /* HL_LINK_TLS */
 
 #else  /* !HL_EMBED_CA_BUNDLE */
 
