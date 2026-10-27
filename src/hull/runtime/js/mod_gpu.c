@@ -60,16 +60,48 @@ static int js_gpu_retake_views(JSContext *ctx, const HlJsGpuView *views,
                                int n, const char *what)
 {
     for (int i = 0; i < n; i++) {
-        size_t len = 0;
-        uint8_t *p = hl_js_array_buffer_probe(ctx, &len, views[i].ab);
-        if (!p || len != views[i].len) {
-            JS_ThrowTypeError(ctx, "%s: an ArrayBuffer was detached or resized "
-                                   "while the arguments were read", what);
+        HlBufferView bv = {0};
+        const char *s = NULL;
+        int nf = 0;
+        /* Every recorded value is an object, so js_get_buffer runs no
+         * toString here (audit 29: typed arrays, WasmBuffer, MappedBuffer). */
+        if (!js_get_buffer(ctx, views[i].ab, &bv, &s, &nf) || nf ||
+            bv.len != views[i].len) {
+            if (nf) JS_FreeCString(ctx, s);
+            JS_ThrowTypeError(ctx, "%s: a buffer was detached, resized or "
+                                   "closed while the arguments were read", what);
             return -1;
         }
-        *views[i].slot = p;
+        *views[i].slot = bv.data;
     }
     return 0;
+}
+
+/* The bytes of a buffer / uniforms / texture `data` value (audit 29). An
+ * object must be a byte object - ArrayBuffer, typed array, WasmBuffer,
+ * MappedBuffer or image - (1, *p / *len its bytes, borrowed: a sync caller
+ * records it as a view, an async one copies at once); any other object is a
+ * TypeError (-1): a Float32Array uploaded its toString "1,2,3" and a
+ * WasmBuffer "[object WasmBuffer]". A primitive is 0: the caller converts it
+ * as a string (no app code runs for a primitive). */
+static int js_gpu_bytes_of(JSContext *ctx, JSValueConst v, const char *what,
+                           const void **p, size_t *len)
+{
+    *p = NULL;
+    *len = 0;
+    if (!JS_IsObject(v)) return 0;
+    HlBufferView bv = {0};
+    const char *s = NULL;
+    int nf = 0;
+    if (js_get_buffer(ctx, v, &bv, &s, &nf) && !nf) {
+        *p = bv.data;
+        *len = bv.len;
+        return 1;
+    }
+    if (nf) JS_FreeCString(ctx, s);
+    JS_ThrowTypeError(ctx, "%s: data must be a string, ArrayBuffer, typed "
+                           "array, WasmBuffer or MappedBuffer", what);
+    return -1;
 }
 
 /* Forward declaration */
@@ -111,15 +143,37 @@ static JSValue js_gpu_devices(JSContext *ctx, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
     int count = hl_cap_gpu_device_count(gpu);
+    /* Checked builds (audit 29): a value that cannot be made fails the call. */
     JSValue arr = JS_NewArray(ctx);
+    if (JS_IsException(arr)) return arr;
     for (int i = 0; i < count; i++) {
         JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "id", JS_NewInt32(ctx, i));
-        JS_SetPropertyStr(ctx, obj, "name",
-                          JS_NewString(ctx, hl_cap_gpu_device_name(gpu, i)));
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
+        if (JS_IsException(obj)) goto fail;
+        const char *dn = hl_cap_gpu_device_name(gpu, i);
+        JSValue nm = JS_NewString(ctx, dn ? dn : "");
+        if (JS_IsException(nm)) {
+            JS_FreeValue(ctx, obj);
+            goto fail;
+        }
+        if (JS_DefinePropertyValueStr(ctx, obj, "id", JS_NewInt32(ctx, i),
+                                      JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, nm);
+            JS_FreeValue(ctx, obj);
+            goto fail;
+        }
+        if (JS_DefinePropertyValueStr(ctx, obj, "name", nm,
+                                      JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, obj);
+            goto fail;
+        }
+        if (JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)i, obj,
+                                         JS_PROP_C_W_E) < 0)
+            goto fail;
     }
     return arr;
+fail:
+    JS_FreeValue(ctx, arr);
+    return JS_EXCEPTION;
 }
 
 /* Load WGSL shader from shaders/<name>.wgsl (VFS or disk) */
@@ -371,8 +425,10 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     }
     if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
         size_t uni_len;
-        uint8_t *uni_ab = hl_js_array_buffer_probe(ctx, &uni_len, uni_val);
-        if (uni_ab) {
+        const void *uni_ab;
+        int bk = js_gpu_bytes_of(ctx, uni_val, "gpu.dispatch", &uni_ab, &uni_len);
+        if (bk < 0) { perr = 1; goto parsed; }
+        if (bk) {
             opts.uniforms = uni_ab;
             opts.uniforms_len = uni_len;
             js_gpu_note_view(views, &nviews, 1 + 16 + 8, uni_val,
@@ -417,8 +473,11 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
                 if (JS_IsException(dv)) perr = 1;
                 else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                     size_t dlen;
-                    uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
-                    if (dab) {
+                    const void *dab;
+                    int bk = js_gpu_bytes_of(ctx, dv, "gpu.dispatch", &dab, &dlen);
+                    if (bk < 0) {
+                        perr = 1;
+                    } else if (bk) {
                         buf_data_vals[bi] = JS_DupValue(ctx, dv);
                         bufs[bi].data = dab;
                         bufs[bi].data_len = dlen;
@@ -1053,8 +1112,10 @@ static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
             if (JS_IsException(dv)) goto fail;
             if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                 size_t dlen;
-                uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
-                if (dab) {
+                const void *dab;
+                int bk = js_gpu_bytes_of(ctx, dv, "gpu: texture", &dab, &dlen);
+                if (bk < 0) { JS_FreeValue(ctx, dv); goto fail; }
+                if (bk) {
                     keep[i] = JS_DupValue(ctx, dv);
                     descs[i].data = dab;
                     descs[i].data_len = dlen;
@@ -1086,6 +1147,24 @@ static JSValue js_push_worker_gpu_result(JSContext *ctx, void *driver)
     HlWorkerGpuOp *op = (HlWorkerGpuOp *)driver;
     if (op->error)
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: %s", op->error_msg);
+    /* A pipeline with more than one output resolves to an array of
+     * ArrayBuffers, as gpu.pipeline returns (audit 29: it resolved to an
+     * empty buffer - the worker moves only a single output to op->output). */
+    if (op->is_pipeline && op->pipe_result.count > 1) {
+        JSValue arr = JS_NewArray(ctx);
+        if (JS_IsException(arr)) return arr;
+        for (int i = 0; i < op->pipe_result.count; i++) {
+            JSValue ab = JS_NewArrayBufferCopy(ctx,
+                (const uint8_t *)op->pipe_result.data[i], op->pipe_result.len[i]);
+            if (JS_IsException(ab) ||
+                JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)i, ab,
+                                             JS_PROP_C_W_E) < 0) {
+                JS_FreeValue(ctx, arr);
+                return JS_EXCEPTION;
+            }
+        }
+        return arr;
+    }
     if (op->output && op->output_len > 0)
         return JS_NewArrayBufferCopy(ctx, (const uint8_t *)op->output, op->output_len);
     return JS_NewArrayBufferCopy(ctx, NULL, 0);
@@ -1209,11 +1288,42 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, wg_val);
 
-    if ((r = hl_js_opt_int32(ctx, opts_val, "output", &i32)) < 0) goto early_fail;
-    if (r) opts.output_buffer = i32;
+    /* output as the sync call reads it (audit 29): false = no read-back
+     * (it converted to 0 and read buffer 0 back). */
+    {
+        JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
+        if (JS_IsException(out_val)) goto early_fail;
+        if (JS_IsBool(out_val) && !JS_ToBool(ctx, out_val)) {
+            opts.output_buffer = HL_GPU_OUTPUT_NONE;
+        } else if (!JS_IsUndefined(out_val)) {
+            if (JS_ToInt32(ctx, &i32, out_val) < 0) {
+                JS_FreeValue(ctx, out_val);
+                goto early_fail;
+            }
+            opts.output_buffer = i32;
+        }
+        JS_FreeValue(ctx, out_val);
+    }
 
     if ((r = hl_js_opt_uint32(ctx, opts_val, "timeout", &u32)) < 0) goto early_fail;
     if (r) opts.timeout_ms = u32;
+
+    /* The async dispatch runs no textures: refuse the options rather than
+     * ignore them (audit 29). */
+    {
+        static const char *const tex_keys[] = { "textures", "outputTexture" };
+        for (size_t k = 0; k < sizeof(tex_keys) / sizeof(tex_keys[0]); k++) {
+            JSValue tv = JS_GetPropertyStr(ctx, opts_val, tex_keys[k]);
+            if (JS_IsException(tv)) goto early_fail;
+            int present = !JS_IsUndefined(tv) && !JS_IsNull(tv);
+            JS_FreeValue(ctx, tv);
+            if (present) {
+                JS_ThrowTypeError(ctx, "gpu.async.dispatch: %s is not "
+                                  "supported (use gpu.dispatch)", tex_keys[k]);
+                goto early_fail;
+            }
+        }
+    }
 
     /* Deep-copy uniforms */
     void *uni_copy = NULL;
@@ -1224,11 +1334,17 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(uni_val)) {
         copy_failed = 1;
     } else if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
-        uint8_t *uni_ab = hl_js_array_buffer_probe(ctx, &uni_len, uni_val);
-        if (uni_ab && uni_len > 0) {
-            uni_copy = js_gpu_offheap_copy(ctx, js, &hold, uni_ab, uni_len,
-                                           "gpu.async.dispatch");
-            if (!uni_copy) copy_failed = 1;
+        const void *uni_ab;
+        int bk = js_gpu_bytes_of(ctx, uni_val, "gpu.async.dispatch",
+                                 &uni_ab, &uni_len);
+        if (bk < 0) {
+            copy_failed = 1;
+        } else if (bk) {
+            if (uni_len > 0) {
+                uni_copy = js_gpu_offheap_copy(ctx, js, &hold, uni_ab, uni_len,
+                                               "gpu.async.dispatch");
+                if (!uni_copy) copy_failed = 1;
+            }
         } else {
             const char *uni_str = JS_ToCStringLen(ctx, &uni_len, uni_val);
             if (uni_str) {
@@ -1292,15 +1408,23 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                         size_t nlen;
                         const char *ns = JS_ToCStringLen(ctx, &nlen, nv);
                         if (!ns) copy_failed = 1;
-                        if (ns && nlen > 0 && nlen < HL_GPU_NAME_MAX) {
+                        /* Copied whatever its length, as the sync call
+                         * passes it; a failed copy fails the call (audit
+                         * 29: the name was dropped, so the entry ran as a
+                         * transient buffer instead of the named one). */
+                        if (ns) {
                             char *ncopy = malloc(nlen + 1);
                             if (ncopy) {
                                 memcpy(ncopy, ns, nlen);
                                 ncopy[nlen] = '\0';
                                 buf_descs[bi].name = ncopy;
+                            } else {
+                                JS_ThrowInternalError(ctx,
+                                    "gpu.async.dispatch: out of memory");
+                                copy_failed = 1;
                             }
+                            JS_FreeCString(ctx, ns);
                         }
-                        if (ns) JS_FreeCString(ctx, ns);
                     }
                     JS_FreeValue(ctx, nv);
 
@@ -1310,16 +1434,23 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
                         copy_failed = 1;
                     } else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
-                        uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
-                        if (dab && dlen > 0) {
-                            buf_data_ptrs[bi] = js_gpu_offheap_copy(
-                                ctx, js, &hold, dab, dlen, "gpu.async.dispatch");
-                            if (buf_data_ptrs[bi]) {
-                                buf_descs[bi].data = buf_data_ptrs[bi];
-                                buf_descs[bi].data_len = dlen;
-                                buf_descs[bi].size = dlen;
-                            } else {
-                                copy_failed = 1;
+                        const void *dab;
+                        int bk = js_gpu_bytes_of(ctx, dv, "gpu.async.dispatch",
+                                                 &dab, &dlen);
+                        if (bk < 0) {
+                            copy_failed = 1;
+                        } else if (bk) {
+                            if (dlen > 0) {
+                                buf_data_ptrs[bi] = js_gpu_offheap_copy(
+                                    ctx, js, &hold, dab, dlen,
+                                    "gpu.async.dispatch");
+                                if (buf_data_ptrs[bi]) {
+                                    buf_descs[bi].data = buf_data_ptrs[bi];
+                                    buf_descs[bi].data_len = dlen;
+                                    buf_descs[bi].size = dlen;
+                                } else {
+                                    copy_failed = 1;
+                                }
                             }
                         } else {
                             const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
@@ -1412,6 +1543,9 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
 
     op->server = js->server;
     op->gpu_ctx = js->base.gpu_ctx;
+    /* Read-backs on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
+                           js->max_heap_bytes);
     snprintf(op->shader_name, sizeof(op->shader_name), "%s", name);
     op->opts = opts;
     op->buffers = buf_descs;
@@ -1575,8 +1709,11 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         if (JS_IsException(uni)) { JS_FreeValue(ctx, stage_val); perr = 1; break; }
         if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
             size_t ulen;
-            uint8_t *uab = hl_js_array_buffer_probe(ctx, &ulen, uni);
-            if (uab) {
+            const void *uab;
+            int bk = js_gpu_bytes_of(ctx, uni, "gpu.pipeline", &uab, &ulen);
+            if (bk < 0) {
+                perr = 1;
+            } else if (bk) {
                 js_keep[js_keep_count] = JS_DupValue(ctx, uni);
                 js_gpu_note_view(views, &nviews, max_views,
                                  js_keep[js_keep_count],
@@ -1634,8 +1771,12 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
                         perr = 1;
                     } else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
-                        uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
-                        if (dab) {
+                        const void *dab;
+                        int bk = js_gpu_bytes_of(ctx, dv, "gpu.pipeline",
+                                                 &dab, &dlen);
+                        if (bk < 0) {
+                            perr = 1;
+                        } else if (bk) {
                             js_keep[js_keep_count] = JS_DupValue(ctx, dv);
                             js_gpu_note_view(views, &nviews, max_views,
                                              js_keep[js_keep_count],
@@ -1776,11 +1917,17 @@ parsed:;
         return ab;
     }
 
+    /* Checked builds (audit 29): a failed element fails the call. */
     JSValue arr = JS_NewArray(ctx);
-    for (int i = 0; i < result.count; i++) {
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)i,
-            JS_NewArrayBufferCopy(ctx, (const uint8_t *)result.data[i],
-                                   result.len[i]));
+    for (int i = 0; i < result.count && !JS_IsException(arr); i++) {
+        JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)result.data[i],
+                                           result.len[i]);
+        if (JS_IsException(ab) ||
+            JS_DefinePropertyValueUint32(ctx, arr, (uint32_t)i, ab,
+                                         JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, arr);
+            arr = JS_EXCEPTION;
+        }
     }
     hl_cap_gpu_pipeline_result_free(&result);
     return arr;
@@ -1818,6 +1965,9 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
 
     op->server = js->server;
     op->gpu_ctx = js->base.gpu_ctx;
+    /* Read-backs on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
+                           js->max_heap_bytes);
     op->is_pipeline = 1;
     op->stage_count = stage_count;
 
@@ -1927,12 +2077,18 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
             perr = 1;
         } else if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
             size_t ulen;
-            uint8_t *uab = hl_js_array_buffer_probe(ctx, &ulen, uni);
-            if (uab && ulen > 0) {
-                op->stage_uniforms[s] = js_gpu_offheap_take_copy(js,
-                    &op->copy_hold, uab, ulen, &over, &oom);
-                if (op->stage_uniforms[s])
-                    op->stages[s].uniforms_len = ulen;
+            const void *uab;
+            int bk = js_gpu_bytes_of(ctx, uni, "gpu.async.pipeline",
+                                     &uab, &ulen);
+            if (bk < 0) {
+                perr = 1;
+            } else if (bk) {
+                if (ulen > 0) {
+                    op->stage_uniforms[s] = js_gpu_offheap_take_copy(js,
+                        &op->copy_hold, uab, ulen, &over, &oom);
+                    if (op->stage_uniforms[s])
+                        op->stages[s].uniforms_len = ulen;
+                }
             } else {
                 const char *us = JS_ToCStringLen(ctx, &ulen, uni);
                 if (!us) perr = 1;
@@ -1985,14 +2141,20 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                         perr = 1;
                     } else if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
                         size_t dlen;
-                        uint8_t *dab = hl_js_array_buffer_probe(ctx, &dlen, dv);
-                        if (dab && dlen > 0) {
-                            op->buffer_data[buf_off] = js_gpu_offheap_take_copy(
-                                js, &op->copy_hold, dab, dlen, &over, &oom);
-                            if (op->buffer_data[buf_off]) {
-                                op->buffers[buf_off].data = op->buffer_data[buf_off];
-                                op->buffers[buf_off].data_len = dlen;
-                                op->buffers[buf_off].size = dlen;
+                        const void *dab;
+                        int bk = js_gpu_bytes_of(ctx, dv, "gpu.async.pipeline",
+                                                 &dab, &dlen);
+                        if (bk < 0) {
+                            perr = 1;
+                        } else if (bk) {
+                            if (dlen > 0) {
+                                op->buffer_data[buf_off] = js_gpu_offheap_take_copy(
+                                    js, &op->copy_hold, dab, dlen, &over, &oom);
+                                if (op->buffer_data[buf_off]) {
+                                    op->buffers[buf_off].data = op->buffer_data[buf_off];
+                                    op->buffers[buf_off].data_len = dlen;
+                                    op->buffers[buf_off].size = dlen;
+                                }
                             }
                         } else {
                             const char *ds = JS_ToCStringLen(ctx, &dlen, dv);

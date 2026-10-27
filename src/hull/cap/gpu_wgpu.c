@@ -906,6 +906,13 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             rc = HL_GPU_ERR_READBACK;
             goto cleanup;
         }
+        /* An async op's copy is taken on its VM's in-flight result total
+         * first (audit 29). */
+        if (hl_offheap_shared_take(opts->result_hold, out_size) != 0) {
+            if (err_msg) *err_msg = "result too large";
+            rc = HL_GPU_ERR_READBACK;
+            goto cleanup;
+        }
 
         rc = readback_buffer(dctx, out_buf, out_size, output, output_len);
         if (rc != HL_GPU_OK && err_msg)
@@ -922,6 +929,12 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
         if (opts->max_output &&
             hl_gpu_tex_bytes(tex->width, tex->height, tex->format) > opts->max_output) {
             if (err_msg) *err_msg = "output_too_large";
+            rc = HL_GPU_ERR_READBACK;
+            goto cleanup;
+        }
+        if (hl_offheap_shared_take(opts->result_hold,
+                hl_gpu_tex_bytes(tex->width, tex->height, tex->format)) != 0) {
+            if (err_msg) *err_msg = "result too large";   /* audit 29 */
             rc = HL_GPU_ERR_READBACK;
             goto cleanup;
         }
@@ -1516,6 +1529,11 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 goto cleanup;
             }
             read_total += out_size;
+            if (hl_offheap_shared_take(opts->result_hold, out_size) != 0) {
+                if (err_msg) *err_msg = "result too large";   /* audit 29 */
+                rc = HL_GPU_ERR_READBACK;
+                goto cleanup;
+            }
 
             rc = readback_buffer(dctx, out_buf, out_size,
                                   &result->data[i], &result->len[i]);

@@ -1240,6 +1240,9 @@ static int l_gpu_async_dispatch(lua_State *L)
 
     op->server = lua->server;
     op->gpu_ctx = lua->base.gpu_ctx;
+    /* Read-backs on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
+                           lua->mem_limit);
     snprintf(op->shader_name, sizeof(op->shader_name), "%s", name);
     op->opts = opts;
     op->buffers = buf_descs;
@@ -1569,6 +1572,17 @@ static void lua_push_worker_gpu_pipeline_result(lua_State *L, void *driver)
     if (op->error) {
         lua_pushstring(L, op->error_msg);
         lua_setfield(L, -2, "error");
+    } else if (op->pipe_result.count > 1) {
+        /* More than one output: a table of strings, as gpu.pipeline
+         * returns (audit 29: it resolved to "" - the worker moves only a
+         * single output to op->output). */
+        lua_createtable(L, op->pipe_result.count, 0);
+        for (int i = 0; i < op->pipe_result.count; i++) {
+            lua_pushlstring(L, (const char *)op->pipe_result.data[i],
+                            op->pipe_result.len[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        lua_setfield(L, -2, "result");
     } else if (op->output && op->output_len > 0) {
         lua_pushlstring(L, (const char *)op->output, op->output_len);
         lua_setfield(L, -2, "result");
@@ -1694,6 +1708,9 @@ static int l_gpu_async_pipeline(lua_State *L)
 
     op->server = lua->server;
     op->gpu_ctx = lua->base.gpu_ctx;
+    /* Read-backs on the VM's in-flight result total (audit 29). */
+    hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
+                           lua->mem_limit);
     op->is_pipeline = 1;
     op->stage_count = stage_count;
     op->pipe_opts.device = device;

@@ -367,6 +367,18 @@ static int js_parse_udf_opts(JSContext *ctx, JSValueConst opts,
     return 0;
 }
 
+/* The connection a udf call operates on, or NULL (audit 29): a db.open
+ * (caller-owned) `this` is refused - udf is intentionally absent on a dynamic
+ * handle, and app code the call runs (the name's toString, the opts' getters)
+ * could close it under the call. A registry handle (db.connect / default)
+ * lives until teardown; it is still resolved again after the last app-code
+ * conversion and only that resolution is used. */
+static HlDbHandle *udf_call_handle(JSContext *ctx, JSValueConst this_val)
+{
+    if (js_call_is_owned(this_val)) return NULL;
+    return js_call_handle(ctx, this_val);
+}
+
 /*
  * db.udf.register(name, impl, opts?)
  *
@@ -379,7 +391,10 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
     HlJS *js = get_hl_js(ctx);
-    HlDbHandle *conn = js_call_handle(ctx, this_val);
+    if (js_call_is_owned(this_val))
+        return JS_ThrowTypeError(ctx,
+            "db.udf.register: not available on a db.open() connection");
+    HlDbHandle *conn = udf_call_handle(ctx, this_val);
     sqlite3 *raw_db = hl_db_sqlite_raw(conn);
     if (!js || !raw_db)
         return JS_ThrowInternalError(ctx, "database not available");
@@ -445,6 +460,13 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
             .timeout_ms    = lim.timeout_ms,
         };
 
+        /* Resolved again after the last app code (audit 29). */
+        conn = udf_call_handle(ctx, this_val);
+        if (!conn) {
+            JS_FreeCString(ctx, module_name);
+            JS_FreeCString(ctx, sql_name);
+            return JS_ThrowInternalError(ctx, "database not available");
+        }
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
             conn, js->base.wasm_cache, &udf_opts,
@@ -486,7 +508,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
          * getters / metamethods), and the connection's sqlite3* is not
          * kept across app code - the stale-transaction guard may have
          * replaced it, or withheld it (broken) (audit 12). */
-        raw_db = hl_db_sqlite_raw(conn);
+        raw_db = hl_db_sqlite_raw(udf_call_handle(ctx, this_val));
         if (!raw_db) {
             js_scalar_udf_destroy(udf_ctx);
             JS_FreeCString(ctx, sql_name);
@@ -559,7 +581,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
          * getters / metamethods), and the connection's sqlite3* is not
          * kept across app code - the stale-transaction guard may have
          * replaced it, or withheld it (broken) (audit 12). */
-        raw_db = hl_db_sqlite_raw(conn);
+        raw_db = hl_db_sqlite_raw(udf_call_handle(ctx, this_val));
         if (!raw_db) {
             js_agg_udf_destroy(udf_ctx);
             JS_FreeCString(ctx, sql_name);
@@ -591,7 +613,10 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
     HlJS *js = get_hl_js(ctx);
-    HlDbHandle *conn = js_call_handle(ctx, this_val);
+    if (js_call_is_owned(this_val))
+        return JS_ThrowTypeError(ctx,
+            "db.udf.unregister: not available on a db.open() connection");
+    HlDbHandle *conn = udf_call_handle(ctx, this_val);
     if (!js || !conn)
         return JS_ThrowInternalError(ctx, "database not available");
 
@@ -601,6 +626,12 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
     const char *sql_name = JS_ToCString(ctx, argv[0]);
     if (!sql_name)
         return JS_EXCEPTION;
+    /* Resolved again after the name's toString (app code; audit 29). */
+    conn = udf_call_handle(ctx, this_val);
+    if (!conn) {
+        JS_FreeCString(ctx, sql_name);
+        return JS_ThrowInternalError(ctx, "database not available");
+    }
 
 #ifdef HL_ENABLE_WASM
     int rc_unreg = hl_cap_db_udf_unregister(conn, sql_name);

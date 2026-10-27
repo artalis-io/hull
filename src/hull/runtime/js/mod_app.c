@@ -77,6 +77,51 @@ static int js_app_throw_if_serving(JSContext *ctx, const char *call)
     return 0;
 }
 
+/* opts.multipart's caps, read ONCE at registration into a plain
+ * null-prototype object of numbers under their snake_case names (audit 29).
+ * The live object was stored and routes.c read it through the app's getters
+ * at wiring: one that threw left the exception pending and the cap 0 - Keel's
+ * "unlimited". Each cap may be given in snake_case or camelCase (snake_case
+ * wins); it must be a non-negative finite number, else the call fails, as it
+ * does on a getter that throws. A missing / undefined cap is left out (0). */
+static JSValue js_app_multipart_caps(JSContext *ctx, JSValueConst mp)
+{
+    static const char *const keys[][2] = {
+        { "max_part_size",    "maxPartSize"    },
+        { "max_total_size",   "maxTotalSize"   },
+        { "max_parts",        "maxParts"       },
+        { "max_headers_size", "maxHeadersSize" },
+        { "max_input_buffer", "maxInputBuffer" },
+    };
+    JSValue out = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(out)) return out;
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        JSValue v = JS_UNDEFINED;
+        for (int alt = 0; alt < 2 && JS_IsUndefined(v); alt++) {
+            v = JS_GetPropertyStr(ctx, mp, keys[k][alt]);
+            if (JS_IsException(v)) goto fail;
+        }
+        if (JS_IsUndefined(v)) continue;
+        double d = 0;
+        if (!JS_IsNumber(v) || JS_ToFloat64(ctx, &d, v) < 0 ||
+            !(d >= 0) || d > 9007199254740991.0) {
+            JS_FreeValue(ctx, v);
+            JS_ThrowTypeError(ctx, "opts.multipart.%s must be a non-negative "
+                              "number", keys[k][1]);
+            goto fail;
+        }
+        JS_FreeValue(ctx, v);
+        if (JS_DefinePropertyValueStr(ctx, out, keys[k][0],
+                                      JS_NewFloat64(ctx, d),
+                                      JS_PROP_C_W_E) < 0)
+            goto fail;
+    }
+    return out;
+fail:
+    JS_FreeValue(ctx, out);
+    return JS_EXCEPTION;
+}
+
 /* Helper: register a route with given method string.
  *
  * Signature: app.<verb>(pattern, handler [, opts])
@@ -134,6 +179,15 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
             JS_FreeCString(ctx, pattern);
             return JS_EXCEPTION;
         }
+        if (JS_IsObject(mp) && !JS_IsFunction(ctx, mp) && !JS_IsArray(ctx, mp)) {
+            JSValue plain = js_app_multipart_caps(ctx, mp);
+            JS_FreeValue(ctx, mp);
+            if (JS_IsException(plain)) {
+                JS_FreeCString(ctx, pattern);
+                return JS_EXCEPTION;
+            }
+            mp = plain;
+        }
     }
 
     JSValue store = hl_js_internals(ctx);
@@ -167,9 +221,10 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
     app_put(ctx, def, "pattern", JS_NewString(ctx, pattern));
     app_put(ctx, def, "handler_id", JS_NewInt32(ctx, idx));
 
-    /* Stash opts.multipart (if a plain object) verbatim on the def.
-     * routes.c reads the integer caps off this sub-object when
-     * materializing the KlHttpMultipartConfig. */
+    /* Stash opts.multipart's caps - the plain object of numbers
+     * js_app_multipart_caps built above, never the app's object (audit 29)
+     * - on the def. routes.c reads them when materializing the
+     * KlHttpMultipartConfig. */
     if (has_opts) {
         if (JS_IsObject(mp) && !JS_IsFunction(ctx, mp) && !JS_IsArray(ctx, mp)) {
             app_put(ctx, def, "multipart", mp); /* takes ownership */
@@ -197,11 +252,18 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     if (argc < 3)
         return JS_ThrowTypeError(ctx, "app.use requires (method, pattern, handler)");
 
+    /* A conversion that throws is the call's error (audit 29: the pattern
+     * was converted after it, and a TypeError thrown over both). */
     const char *method = JS_ToCString(ctx, argv[0]);
+    if (!method) return JS_EXCEPTION;
     const char *pattern = JS_ToCString(ctx, argv[1]);
-    if (!method || !pattern || !JS_IsFunction(ctx, argv[2])) {
-        if (method) JS_FreeCString(ctx, method);
-        if (pattern) JS_FreeCString(ctx, pattern);
+    if (!pattern) {
+        JS_FreeCString(ctx, method);
+        return JS_EXCEPTION;
+    }
+    if (!JS_IsFunction(ctx, argv[2])) {
+        JS_FreeCString(ctx, method);
+        JS_FreeCString(ctx, pattern);
         return JS_ThrowTypeError(ctx, "app.use requires (method, pattern, handler)");
     }
 
@@ -258,11 +320,17 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     if (argc < 3)
         return JS_ThrowTypeError(ctx, "app.usePost requires (method, pattern, handler)");
 
+    /* A conversion that throws is the call's error (audit 29). */
     const char *method = JS_ToCString(ctx, argv[0]);
+    if (!method) return JS_EXCEPTION;
     const char *pattern = JS_ToCString(ctx, argv[1]);
-    if (!method || !pattern || !JS_IsFunction(ctx, argv[2])) {
-        if (method) JS_FreeCString(ctx, method);
-        if (pattern) JS_FreeCString(ctx, pattern);
+    if (!pattern) {
+        JS_FreeCString(ctx, method);
+        return JS_EXCEPTION;
+    }
+    if (!JS_IsFunction(ctx, argv[2])) {
+        JS_FreeCString(ctx, method);
+        JS_FreeCString(ctx, pattern);
         return JS_ThrowTypeError(ctx, "app.usePost requires (method, pattern, handler)");
     }
 

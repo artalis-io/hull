@@ -1387,6 +1387,7 @@ static JSValue js_crypto_key_secretbox_open(JSContext *ctx, JSValueConst this_va
             if (hl_cap_crypto_key_secretbox_open(k, out, ct.view.data, ct.view.len,
                                                  nonce.view.data) == 0)
                 ret = JS_NewArrayBufferCopy(ctx, out, msg_len);
+            secure_zero(out, msg_len + 1);   /* the plaintext (audit 29) */
             js_free(ctx, out);
         }
     }
