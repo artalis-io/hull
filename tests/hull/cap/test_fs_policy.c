@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -539,6 +540,10 @@ UTEST(fs_policy, the_runtime_s_cap_configs_move_into_sealed_memory)
     ShSealArena arena;
     ASSERT_EQ(0, hl_policy_seal_cap_configs(&rt, &arena));
     ASSERT_TRUE(rt.env_cfg != &env);
+    /* Copied at their types' alignment: memdup (alignment 1) after the
+     * base_dir strdup left the HlEnvConfig on an odd address (UBSan). */
+    ASSERT_EQ(0u, (unsigned)((uintptr_t)rt.env_cfg % _Alignof(HlEnvConfig)));
+    ASSERT_EQ(0u, (unsigned)((uintptr_t)rt.fs_cfg % _Alignof(HlFsConfig)));
     ASSERT_EQ(2, rt.env_cfg->count);
     ASSERT_TRUE(rt.env_cfg->allowed == envs);
     ASSERT_TRUE(rt.fs_cfg != &fs);

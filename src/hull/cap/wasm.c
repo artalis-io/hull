@@ -21,6 +21,7 @@
 #include "hull/limits/wasm.h"
 #include "hull/utils/macros.h"
 #include <sh_seal_arena.h>
+#include "hull/utils/seal_dup.h"
 #include "hull/vfs.h"
 #include "log.h"
 #include "wasm_export.h"
@@ -574,8 +575,9 @@ int hl_cap_wasm_init(HlWasmCache *cache)
         free(arena);
         return -1;
     }
-    NativeSymbol *host_symbols = sh_seal_arena_memdup(
-        arena, host_symbols_template, sizeof(host_symbols_template));
+    NativeSymbol *host_symbols = hl_seal_dup(
+        arena, host_symbols_template, sizeof(host_symbols_template),
+        _Alignof(NativeSymbol));
     if (!host_symbols) {
         log_error("[wasm] seal arena memdup failed");
         sh_seal_arena_destroy(arena);
