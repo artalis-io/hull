@@ -10,6 +10,21 @@ release-artifact layout).
 
 ### Fixes
 
+- **The audit-30 fixes, re-audited** (audit 30 re-audit).
+  - The DuckDB dynamic-SQL scan was still quadratic for bare names: each `query` /
+    `query_table` token skipped the comment after it, and an unterminated `--` or `/*` ran to
+    the end of the text, so `query--query--...` (1 MB) held the event loop for about 100 s
+    before any budget charge. The skips of one scan now share a byte budget (twice the text
+    plus 64 KiB), past which the statement is refused.
+  - The atomic lockout counters (auth-flows login, TOTP per-user and per-IP) ran their
+    INSERT-if-absent before the UPDATE. On MySQL an `INSERT IGNORE` of an existing row takes a
+    shared lock, so two concurrent wrong guesses for one key deadlocked on the UPDATE, and
+    the victim's guess went uncounted (a 500). The UPDATE now runs first; only a key with no
+    row yet is inserted, then counted.
+  - TOTP `credit_success_ip` locked the per-user share before the IP row, the reverse of the
+    failure path, so a success and a failure from one IP could deadlock on Postgres / MySQL. It
+    now locks the IP row first, which also keeps the share it reads from changing under it.
+
 - **JS: `conn.close()` inside a ws client's `onClose` / `onError` was a use after free**
   (audit 30). The connection was not yet marked closed while the callback ran, so `close()`
   armed the 5 s close-handshake deadline after the callback's caller had disarmed it; the

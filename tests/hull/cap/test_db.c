@@ -718,6 +718,19 @@ UTEST(hl_cap_db, dynamic_sql_scan_is_linear)
     big[0] = '"';
     big[n] = '\0';
     EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(big));
+    /* Every bare dynamic name skips the comment after it, and an
+     * unterminated one runs to the end: `query--query--...` and its
+     * block-comment twin were quadratic (audit 30 re-audit). Past the
+     * shared skip budget the scan fails closed. */
+    for (size_t i = 0; i + 7 <= n; i += 7) memcpy(big + i, "query--", 7);
+    big[n - n % 7] = '\0';
+    EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql(big));
+    for (size_t i = 0; i + 7 <= n; i += 7) memcpy(big + i, "query/*", 7);
+    big[n - n % 7] = '\0';
+    EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql(big));
+    /* A short comment after a name that is not a call stays allowed. */
+    EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql("SELECT query -- note\nFROM t"));
+    EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql("SELECT * FROM query /* x */ ('y')"));
     /* The quadratic scan took ~10 min on 1 MB; the linear one ~0.3 s, and
      * up to ~3 s under MSan / coverage instrumentation. 30 s separates the
      * two on any CI build. */

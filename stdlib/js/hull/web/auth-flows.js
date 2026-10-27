@@ -544,20 +544,28 @@ function bumpFailedLogin(userIdStr, max) {
     // wrote N+1 and a lockout allowed several times max guesses. No
     // statement reads a column it assigns earlier in its own SET: MySQL
     // evaluates a single-table SET left to right, so a locked_until CASE
-    // that read failed_count + 1 locked one attempt early (audit 29). Step 2
+    // that read failed_count + 1 locked one attempt early (audit 29). Step 1
     // takes the row lock, which holds to the commit, and leaves locked_until
-    // as it was for step 3 to read. db.batch nests as a savepoint inside an
-    // app transaction.
+    // as it was for step 2 to read. db.batch nests as a savepoint inside an
+    // app transaction. The UPDATE runs before the INSERT-if-absent, which
+    // runs only for a new row: on MySQL an INSERT IGNORE of an existing row
+    // takes a SHARED lock on it, so two attempts both holding one then both
+    // asking for the UPDATE's exclusive lock deadlocked, and the victim's
+    // attempt went uncounted (audit 30 re-audit).
     const expired = "locked_until IS NOT NULL AND locked_until <> 0 AND locked_until < ?";
     db.batch(() => {
-        // 1. The row exists (each backend's own INSERT-if-absent).
-        db.insertIfAbsent("_hull_auth_login_attempts", ["user_id"],
-            ["user_id", "failed_count", "locked_until"], [userIdStr, 0, 0]);
-        // 2. Count the attempt: 1 after an expired lockout, else one more.
-        db.exec("UPDATE _hull_auth_login_attempts SET failed_count = CASE WHEN "
-            + expired + " THEN 1 ELSE failed_count + 1 END, last_failed_at = ? "
-            + "WHERE user_id = ?", [now, now, userIdStr]);
-        // 3. The lock, from the new count; an expired one is cleared.
+        // 1. Count the attempt: 1 after an expired lockout, else one more.
+        //    A first attempt makes the row (each backend's own
+        //    INSERT-if-absent) and counts it then.
+        const countSql = "UPDATE _hull_auth_login_attempts SET failed_count = "
+            + "CASE WHEN " + expired + " THEN 1 ELSE failed_count + 1 END, "
+            + "last_failed_at = ? WHERE user_id = ?";
+        if ((db.exec(countSql, [now, now, userIdStr]) || 0) === 0) {
+            db.insertIfAbsent("_hull_auth_login_attempts", ["user_id"],
+                ["user_id", "failed_count", "locked_until"], [userIdStr, 0, 0]);
+            db.exec(countSql, [now, now, userIdStr]);
+        }
+        // 2. The lock, from the new count; an expired one is cleared.
         db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE WHEN "
             + expired + " THEN 0 WHEN failed_count >= ? THEN ? ELSE 0 END "
             + "WHERE user_id = ?",
