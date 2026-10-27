@@ -184,6 +184,13 @@ typedef struct HlKvBackend {
      * non-zero stops early. Returns 0 / -1. NULL unless caps & HL_KV_CAP_SCAN. */
     int (*scan)(HlKvHandle *h, const uint8_t *prefix, size_t plen, size_t limit,
                 HlKvScanCb cb, void *cbctx);
+
+    /* OPTIONAL (may be NULL; the cap layer checks). The caller is done with
+     * every byte the last op borrowed (a get() value is copied, a scan()
+     * ended): the backend may release an oversized receive buffer so one big
+     * reply does not stay resident for the handle's life (audit 30). Any
+     * pointer the last op returned is invalid afterwards. */
+    void (*trim)(HlKvHandle *h);
 } HlKvBackend;
 
 /*

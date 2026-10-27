@@ -207,7 +207,12 @@ int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
                 if (*q == '"') {
                     if (q[1] == '"') { q++; } else break;
                 }
-                if (n < sizeof buf) buf[n++] = *q; else fits = 0;
+                /* Stop once the name cannot fit: it cannot be a dynamic
+                 * name then, and `after` is read only when it fits. Run to
+                 * the closing quote from every '"' (see p++ below), a text
+                 * of N quotes scanned O(N^2) - 1 MB held the loop for
+                 * minutes before any budget charge (audit 30). */
+                if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
             }
             const char *after = *q ? q + 1 : q;
             if (fits && dyn_name_is_dynamic(buf, n) && dyn_followed_by_call(after))

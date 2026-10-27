@@ -89,7 +89,11 @@ static JSValue js_kv_get(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     kv_arg_free(ctx, ks, kf);
     if (rc != 0) return JS_ThrowInternalError(ctx, "%s", hl_cap_kv_error(c));
     if (!found) return JS_NULL;
-    return JS_NewArrayBufferCopy(ctx, val, vlen);   /* COPY: borrow-copy guard */
+    JSValue out = JS_NewArrayBufferCopy(ctx, val, vlen);   /* COPY: borrow-copy guard */
+    /* The value is copied (or the copy failed): an oversized receive buffer
+     * can go (audit 30). */
+    hl_cap_kv_release(c);
+    return out;
 }
 
 /* conn.set(keyBuf, valBuf, ttlMs?) -> true. */
@@ -324,6 +328,13 @@ static JSValue js_kv_open(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     }
     HlKvConn *c = NULL;
     int rc = hl_cap_kv_open(&c, dsn, timeout_ms, js ? js->base.alloc : NULL, err, sizeof err);
+    if (rc == HL_KV_ERR_TOO_MANY) {
+        /* Live connections are capped (HL_KV_OPEN_MAX, audit 30), and a store
+         * the app dropped without close() holds its slot until collected:
+         * collect once and retry, as fs.mmap does for its guard slots. */
+        JS_RunGC(JS_GetRuntime(ctx));
+        rc = hl_cap_kv_open(&c, dsn, timeout_ms, js ? js->base.alloc : NULL, err, sizeof err);
+    }
     JS_FreeCString(ctx, dsn);
     if (rc != 0) return JS_ThrowInternalError(ctx, "%s", err);
 

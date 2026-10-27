@@ -63,6 +63,8 @@ static void vk_close(HlKvHandle *h) {
 
 static const char *vk_last_error(HlKvHandle *h) { return h ? h->errmsg : ""; }
 
+static void vk_trim(HlKvHandle *h) { if (h) hl_valkey_conn_trim(h->conn); }
+
 static void seterr(HlKvHandle *h, const char *m) { snprintf(h->errmsg, sizeof h->errmsg, "%s", m); }
 
 /* Send the built command, read its reply, free the writer. On transport error
@@ -483,6 +485,7 @@ const HlKvBackend hl_kv_backend_valkey = {
     .cas        = vk_cas,
     .clear      = vk_clear,
     .scan       = vk_scan,
+    .trim       = vk_trim,
 };
 
 /* The strong hl_kv_feature_backends hook lives in a SEPARATE TU

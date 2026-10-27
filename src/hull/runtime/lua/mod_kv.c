@@ -70,6 +70,11 @@ static int l_kv_get(lua_State *L)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     if (!found) { lua_pushnil(L); return 1; }
     lua_pushlstring(L, (const char *)val, vlen);   /* COPY: borrow-copy guard */
+    /* The value is copied: an oversized receive buffer can go (audit 30).
+     * Resolved again, not c: the push's GC step can run an app __gc that
+     * closes this connection. */
+    HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
+    if (o->c && !o->scanning) hl_cap_kv_release(o->c);
     return 1;
 }
 
@@ -260,8 +265,17 @@ static int l_kv_open(lua_State *L)
     HlLuaKvConn *o = lua_newuserdatauv(L, sizeof *o, 0);
     memset(o, 0, sizeof *o);
     luaL_setmetatable(L, HL_LUA_KV_MT);   /* installs __gc + method __index */
-    if (hl_cap_kv_open(&o->c, dsn, timeout_ms, lua ? lua->base.alloc : NULL,
-                       err, sizeof err) != 0)
+    int rc = hl_cap_kv_open(&o->c, dsn, timeout_ms, lua ? lua->base.alloc : NULL,
+                            err, sizeof err);
+    if (rc == HL_KV_ERR_TOO_MANY) {
+        /* Live connections are capped (HL_KV_OPEN_MAX, audit 30), and a store
+         * the app dropped without close() holds its slot until collected:
+         * collect once and retry, as fs.mmap does for its guard slots. */
+        lua_gc(L, LUA_GCCOLLECT);
+        rc = hl_cap_kv_open(&o->c, dsn, timeout_ms, lua ? lua->base.alloc : NULL,
+                            err, sizeof err);
+    }
+    if (rc != 0)
         return luaL_error(L, "%s", err);
     return 1;
 }

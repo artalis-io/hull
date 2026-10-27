@@ -902,7 +902,9 @@ int hl_sandbox_std_tty(int fd)
     return (fd >= 0 && fd <= 2) ? g_std_tty[fd] : -1;
 }
 
-/* Set once a pledge is in force (phase 1 succeeded on a pledge host). */
+/* Set once a pledge is in force: phase 1 or phase 2 succeeded on a pledge
+ * host. Phase 2 sets it too - an embedder may skip the optional phase 1
+ * (include/hull/embed.h), and SQLite's fchown no-op keys off it (audit 30). */
 static int g_pledged = 0;
 
 int hl_sandbox_pledged(void)
@@ -1425,6 +1427,10 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         log_error("[sandbox] pledge failed");
         return -1;
     }
+    /* Phase 1 is optional (hl_embed_seal callers may skip it): record the
+     * pledge here too, or a root embedder's first WAL hit "pledge chown"
+     * through SQLite's fchown (db_fchown in cap/db.c; audit 30). */
+    g_pledged = 1;
 
 #if defined(__linux__)
     if (landlock_abi < 1) {

@@ -83,6 +83,31 @@ UTEST(mysqlwire, int_roundtrip_little_endian)
 }
 
 /* lenenc integers across all four encodings + the boundary values. */
+/* Audit 30: a payload length of exactly 0xFFFFFF means "continued in the
+ * next packet", so the writer refuses it (the server would wait for a
+ * terminator packet) and accepts one byte less. */
+static int packet_of(size_t payload)
+{
+    static uint8_t zeros[0x00FFFFFF];
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, 0);
+    hl_my_put_bytes(&w, zeros, payload);
+    hl_my_packet_end(&w, m);
+    int err = w.err;
+    if (!err && (w.buf[0] != (uint8_t)payload ||
+                 w.buf[1] != (uint8_t)(payload >> 8) ||
+                 w.buf[2] != (uint8_t)(payload >> 16)))
+        err = 2;
+    hl_my_writer_free(&w);
+    return err;
+}
+
+UTEST(mysqlwire, packet_end_refuses_continuation_length)
+{
+    ASSERT_EQ(packet_of(0x00FFFFFE), 0);
+    ASSERT_NE(packet_of(0x00FFFFFF), 0);
+}
+
 UTEST(mysqlwire, lenenc_int_boundaries)
 {
     uint64_t vals[] = { 0, 250, 251, 0xFFFF, 0x10000, 0xFFFFFF, 0x1000000,
