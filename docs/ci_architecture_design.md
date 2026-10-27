@@ -1922,11 +1922,12 @@ placeholder "rare combinations" jobs - every row names concrete targets/configs
 
 | job | command (targets) | timeout / budget | pinned versions | failure artifacts | property beyond main | ~cost |
 |---|---|---|---|---|---|---|
-| `nightly-fuzz-core` | sh_json, path_normalize, mime_sniff, host_match @ `-max_total_time=300` | 40 min / 300 s×4 | clang (ubuntu-24.04) | `crash-*` inputs + corpus dir | deep coverage vs the 60 s smoke | ~20 min |
-| `nightly-fuzz-db-wire` | pgwire, pg_dsn, pg_rewrite, mysqlwire, mysql_dsn, respwire, valkey_dsn @ 180 s | 40 min / 180 s×7 | clang | `crash-*` inputs | deep DB-wire coverage | ~21 min |
+| `nightly-fuzz-core` | sh_json, path_normalize, mime_sniff, host_match, encoding, log_escape, http_guard, wasm_log_escape, migrate_name @ `-max_total_time=300` | 60 min / 300 s×9 | clang (ubuntu-24.04) | `crash-*` inputs + corpus dir | deep coverage vs the 60 s smoke | ~45 min |
+| `nightly-fuzz-db-wire` | pgwire, pg_dsn, pg_rewrite, mysqlwire, mysql_dsn, respwire, valkey_dsn, sql_kw, dsn_redact, mysql_stmt @ 180 s | 50 min / 180 s×10 | clang | `crash-*` inputs | deep DB-wire coverage | ~30 min |
 | `nightly-fuzz-compute` | span_sdk, span_window @ 300 s | 25 min | clang | `crash-*` inputs | deep span coverage | ~10 min |
-| `nightly-fuzz-js` | fuzz_js_source @ 600 s | 20 min | clang | `crash-*` inputs | deep JS-parser coverage | ~10 min |
-| `nightly-fuzz-lua` | fuzz_lua_source @ 600 s | 20 min | clang | `crash-*` inputs | deep Lua-parser coverage | ~10 min |
+| `nightly-fuzz-js` | `make fuzz-js-source` (staged repo corpus + dict) @ 3600 s | 75 min | clang | `crash-*` inputs | deep JS-parser coverage | ~60 min |
+| `nightly-fuzz-lua` | `make fuzz-lua-source` (staged repo corpus + dict) @ 3600 s | 75 min | clang | `crash-*` inputs | deep Lua-parser coverage | ~60 min |
+| `nightly-fuzz-ssh` | fuzz_ssh @ 3600 s | 75 min | clang | `crash-*` inputs | deep `hull.ssh` coverage (CI smokes it 60 s) | ~60 min |
 | `nightly-rare-configs` | link + `hull version` + `app.main` smoke for (a) `DB=0 HTTP=0 WASM=0 IMAGE=0` minimal; (b) `POSTGRES=1 MYSQL=1` (both wire backends); (c) `SQLITE=0 POSTGRES=1 MYSQL=1`; (d) `IMAGE=0 WASM=0` | 30 min | gcc (ubuntu-24.04) | build/link log | uncommon link combos NOT in the 7-leg matrix | ~10 min |
 | `nightly-compat-llvm` | build `wamrc` against llvm-17 AND llvm-18; AOT smoke each | 30 min | llvm-17, llvm-18 | wamrc build log | wamrc builds across LLVM versions | ~10 min |
 | `nightly-compat-db` | `e2e_postgres` vs pinned `postgres:15` & `16`; `e2e_mysql` vs pinned `mysql:8.0` | 40 min | pinned images | e2e logs | wire compat across engine versions | ~20 min |
