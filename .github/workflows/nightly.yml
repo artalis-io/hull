@@ -13,8 +13,9 @@ name: Nightly
 on:
   # 07:00 UTC daily (GitHub cron is ALWAYS UTC). GitHub runs `schedule:` only on
   # the default branch, and the per-job guard below re-asserts refs/heads/main.
-  # Estimated budget ~2 runner-hours/night (Appendix F). `workflow_dispatch` stays
-  # available for manual/production-equivalent runs.
+  # Estimated budget ~5 runner-hours/night (Appendix F), most of it the three
+  # hour-long parser fuzzers. `workflow_dispatch` stays available for
+  # manual/production-equivalent runs.
   schedule:
     - cron: "0 7 * * *"
   workflow_dispatch:
@@ -22,6 +23,9 @@ on:
       fuzz_seconds:
         description: "libFuzzer -max_total_time per target (production nightly = 300)."
         default: "300"
+      deep_fuzz_seconds:
+        description: "Budget for the slow parser fuzzers: lua_source, js_source, ssh (production nightly = 3600)."
+        default: "3600"
 
 # Minimal permissions: nightly reads the repo; it never pushes / comments / writes.
 permissions:
@@ -40,7 +44,7 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     name: Nightly fuzz (core security, deep)
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '300' }}
     steps:
@@ -53,11 +57,12 @@ jobs:
         run: |
           make CC=clang \
             fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match \
-            fuzz/fuzz_encoding
+            fuzz/fuzz_encoding fuzz/fuzz_log_escape fuzz/fuzz_http_guard \
+            fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name
       - name: Run core fuzzers (deep)
         run: |
           set -e
-          for f in sh_json path_normalize mime_sniff host_match encoding; do
+          for f in sh_json path_normalize mime_sniff host_match encoding log_escape http_guard wasm_log_escape migrate_name; do
             echo "== fuzz $f (${FUZZ_SECONDS}s) =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time="$FUZZ_SECONDS"
           done
@@ -73,6 +78,10 @@ jobs:
             fuzz/corpus_mime_sniff/
             fuzz/corpus_host_match/
             fuzz/corpus_encoding/
+            fuzz/corpus_log_escape/
+            fuzz/corpus_http_guard/
+            fuzz/corpus_wasm_log_escape/
+            fuzz/corpus_migrate_name/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -80,7 +89,7 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     name: Nightly fuzz (DB wire, deep)
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '180' }}
     steps:
@@ -93,11 +102,12 @@ jobs:
         run: |
           make CC=clang \
             fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite \
-            fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn
+            fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn \
+            fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact fuzz/fuzz_mysql_stmt
       - name: Run DB wire fuzzers (deep)
         run: |
           set -e
-          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn; do
+          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn sql_kw dsn_redact mysql_stmt; do
             echo "== fuzz $f (${FUZZ_SECONDS}s) =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time="$FUZZ_SECONDS"
           done
@@ -145,9 +155,9 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     name: Nightly fuzz (JS source parser, deep)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 75
     env:
-      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '600' }}
+      FUZZ_SECONDS: ${{ github.event.inputs.deep_fuzz_seconds || '3600' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -157,8 +167,9 @@ jobs:
       - name: Build + run the JS source fuzzer (deep)
         run: |
           set -e
-          make CC=clang fuzz/fuzz_js_source
-          ./fuzz/fuzz_js_source fuzz/corpus_js_source/ -max_total_time="$FUZZ_SECONDS"
+          # The make target CI runs: corpus staged with every repo .js file,
+          # the dictionary, -max_len=16384.
+          make fuzz-js-source CC=clang FUZZ_TIME="$FUZZ_SECONDS"
       - name: Upload crashers on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
@@ -172,9 +183,9 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     name: Nightly fuzz (Lua source parser, deep)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 75
     env:
-      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '600' }}
+      FUZZ_SECONDS: ${{ github.event.inputs.deep_fuzz_seconds || '3600' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -184,13 +195,45 @@ jobs:
       - name: Build + run the Lua source fuzzer (deep)
         run: |
           set -e
-          make CC=clang fuzz/fuzz_lua_source
-          ./fuzz/fuzz_lua_source fuzz/corpus_lua_source/ -max_total_time="$FUZZ_SECONDS"
+          # The make target CI runs: corpus staged with every repo .lua file,
+          # the dictionary, -max_len=16384.
+          make fuzz-lua-source CC=clang FUZZ_TIME="$FUZZ_SECONDS"
       - name: Upload crashers on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: nightly-fuzz-lua-crashers
+          path: crash-*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # hull.ssh: every parser an SSH server's bytes reach, most before auth, plus a
+  # scripted connection. ~40x slower per input than the C codecs (a Lua VM per
+  # input), so it gets an hour like the source parsers; CI only smokes it 60 s.
+  nightly-fuzz-ssh:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Nightly fuzz (SSH protocol stack, deep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      FUZZ_SECONDS: ${{ github.event.inputs.deep_fuzz_seconds || '3600' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build + run the SSH fuzzer (deep)
+        # Run from the repo root: the harness loads fuzz/ssh_driver.lua by path.
+        run: |
+          set -e
+          make CC=clang fuzz/fuzz_ssh
+          ./fuzz/fuzz_ssh fuzz/corpus_ssh/ -max_total_time="$FUZZ_SECONDS"
+      - name: Upload crashers on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nightly-fuzz-ssh-crashers
           path: crash-*
           if-no-files-found: ignore
           retention-days: 14
@@ -343,6 +386,7 @@ jobs:
       - nightly-fuzz-compute
       - nightly-fuzz-js
       - nightly-fuzz-lua
+      - nightly-fuzz-ssh
       - nightly-rare-configs
       - nightly-compat-llvm
       - nightly-compat-db
