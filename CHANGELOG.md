@@ -10,6 +10,11 @@ release-artifact layout).
 
 ### Fixes
 
+- **JS `gpu.compile`, `gpu.bufferRead` and `gpu.textureRead` ignored `{ device }`**: a shader
+  compiled on the default device only (a dispatch on another device failed `shader_not_found`),
+  and both reads returned the default device's object of that name. They now take the device
+  as their Lua twins do; a throwing getter fails the call. Found by the new runtime GPU tests
+  (`lua_gpu` / `js_gpu`), which run both bindings over an in-memory backend on every runner.
 - **`gpu.texture(name, nil, { device = N })` / `gpu.texture(name, null, { device: N })`
   destroyed the texture on the default device**, and so did JS `gpu.buffer(name, null,
   { device: N })`: the destroy branch ran before `opts.device` was read. A multi-GPU app

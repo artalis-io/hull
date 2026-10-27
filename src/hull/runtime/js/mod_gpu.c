@@ -287,6 +287,15 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "gpu.compile requires name and wgsl");
 
     HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    /* The device opts name, as Lua's gpu.compile reads it: compiled on the
+     * default device only, a shader could not be dispatched on another. */
+    int device = -1;
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        int32_t d;
+        int r = hl_js_opt_int32(ctx, argv[2], "device", &d);
+        if (r < 0) return JS_EXCEPTION;
+        if (r) device = d;
+    }
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return JS_EXCEPTION;
 
@@ -306,7 +315,7 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, wgsl);
         return JS_EXCEPTION;
     }
-    int rc = hl_cap_gpu_compile(gpu, -1, name, wgsl, wgsl_len);
+    int rc = hl_cap_gpu_compile(gpu, device, name, wgsl, wgsl_len);
     JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, wgsl);
 
@@ -700,10 +709,18 @@ static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
     if (!gpu)
         return JS_ThrowInternalError(ctx, "gpu not available");
 
+    /* The device opts name (it read the default device's). A throwing
+     * getter fails the call. */
+    int device = -1;
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        int32_t d;
+        int r = hl_js_opt_int32(ctx, argv[1], "device", &d);
+        if (r < 0) return JS_EXCEPTION;
+        if (r) device = d;
+    }
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return JS_EXCEPTION;
 
-    int device = -1;
     void *data = NULL;
     size_t len = 0;
 
@@ -1018,10 +1035,18 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
     HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
     if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
 
+    /* The device opts name (it read the default device's). A throwing
+     * getter fails the call. */
+    int device = -1;
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        int32_t d;
+        int r = hl_js_opt_int32(ctx, argv[1], "device", &d);
+        if (r < 0) return JS_EXCEPTION;
+        if (r) device = d;
+    }
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return JS_EXCEPTION;
 
-    int device = -1;
     void *data = NULL;
     size_t len = 0;
     uint32_t w = 0, h = 0;

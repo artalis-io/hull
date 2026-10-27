@@ -13261,4 +13261,227 @@ UTEST(lua_audit27, sync_compute_call_is_charged)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* ── gpu.* over an in-memory backend ─────────────────────────────────────
+ *
+ * The bindings are in the base build; only the wgpu backend is a feature.
+ * tests/hull/gpu_mock.h stands in for it, so these run on every runner: a
+ * two-device context, buffers and textures that keep their bytes, and an
+ * identity "shader" whose output is the buffer it names. */
+
+#include "../../gpu_mock.h"
+
+static HlGpuCtx *lgpu;
+
+static int lgpu_init(int devices)
+{
+    cleanup_lua();
+    hl_platform_vfs_dispose(platform_vfs_owned);
+    hl_platform_vfs_init(&platform_vfs, &platform_vfs_owned);
+    lgpu = gpu_mock_ctx(devices);
+    if (!lgpu) return -1;
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    memset(&lua_rt, 0, sizeof(lua_rt));
+    lua_rt.base.platform_vfs = &platform_vfs;
+    lua_rt.base.gpu_ctx = lgpu;
+    lua_initialized = (hl_lua_init(&lua_rt, &cfg) == 0);
+    if (!lua_initialized) return -1;
+    install_test_globals(lua_rt.L);
+    return 0;
+}
+
+static void lgpu_cleanup(void)
+{
+    cleanup_lua();
+    gpu_mock_free(lgpu);
+    lgpu = NULL;
+}
+
+/* Runs `src`, which sets the global R; returns a copy of R as a string
+ * ("ok" by convention), or the error. Caller frees. */
+static char *lgpu_run(const char *src)
+{
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    char *out;
+    if (luaL_dostring(lua_rt.L, src) != LUA_OK) {
+        const char *e = lua_tostring(lua_rt.L, -1);
+        out = strdup(e ? e : "(error)");
+    } else {
+        lua_getglobal(lua_rt.L, "R");
+        const char *r = lua_tostring(lua_rt.L, -1);
+        out = strdup(r ? r : "(R unset)");
+    }
+    lua_settop(lua_rt.L, 0);
+    return out;
+}
+
+#define LGPU_EXPECT(src, want) do {                                        \
+        char *got_ = lgpu_run(src);                                        \
+        EXPECT_STREQ(got_, want);                                          \
+        free(got_);                                                        \
+    } while (0)
+
+static int lgpu_has(int device, const char *kind, const char *name)
+{
+    HlGpuDevice *d = &lgpu->devices[device];
+    if (strcmp(kind, "buffer") == 0) {
+        for (int i = 0; i < d->buffer_count; i++)
+            if (strcmp(d->buffers[i].name, name) == 0) return 1;
+    } else {
+        for (int i = 0; i < d->texture_count; i++)
+            if (strcmp(d->textures[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
+
+UTEST(lua_gpu, devices_are_listed)
+{
+    ASSERT_EQ(lgpu_init(2), 0);
+    LGPU_EXPECT("local d = gpu.devices() "
+                "R = tostring(gpu.available()) .. ' ' .. #d .. ' ' .. "
+                "d[1].id .. d[1].name .. ' ' .. d[2].id .. d[2].name",
+                "true 2 0mock0 1mock1");
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu, buffers_are_per_device)
+{
+    ASSERT_EQ(lgpu_init(2), 0);
+    LGPU_EXPECT("gpu.buffer('b', 'AAAAAAAA') "
+                "gpu.buffer('b', 'BBBBBBBB', { device = 1 }) "
+                "R = gpu.buffer_read('b') .. gpu.buffer_read('b', { device = 1 })",
+                "AAAAAAAABBBBBBBB");
+    /* A write to an existing buffer lands at its offset - whole 4-byte words
+     * at a 4-aligned offset, as WebGPU writes; anything else is refused
+     * rather than logged and dropped. */
+    LGPU_EXPECT("gpu.buffer('b', 'wxyz', { device = 1, offset = 4 }) "
+                "local ok, e = gpu.buffer('b', 'q', { device = 1, offset = 1 }) "
+                "R = gpu.buffer_read('b', { device = 1 }) .. ' ' .. tostring(ok) "
+                "  .. ' ' .. tostring(e)",
+                "BBBBwxyz nil buffer_error");
+    EXPECT_EQ(lgpu->devices[0].live_bytes, (size_t)8);
+    EXPECT_EQ(lgpu->devices[1].live_bytes, (size_t)8);
+    lgpu_cleanup();
+}
+
+/* gpu.texture(name, nil, { device = N }) destroyed the texture of that name
+ * on the DEFAULT device: the destroy branch ran before opts.device was read
+ * (#870). gpu.buffer's destroy reads it first. */
+UTEST(lua_gpu, a_destroy_targets_the_device_it_names)
+{
+    ASSERT_EQ(lgpu_init(2), 0);
+    LGPU_EXPECT("local px = string.rep('\\1', 16) "
+                "for d = 0, 1 do "
+                "  gpu.buffer('b', 'data', { device = d }) "
+                "  gpu.texture('t', px, { width = 2, height = 2, device = d }) "
+                "end "
+                "gpu.buffer('b', nil, { device = 1 }) "
+                "gpu.texture('t', nil, { device = 1 }) "
+                "gpu.texture('t', nil, { device = 7 }) "   /* no such device */
+                "R = 'ok'",
+                "ok");
+    EXPECT_TRUE(lgpu_has(0, "buffer", "b"));
+    EXPECT_FALSE(lgpu_has(1, "buffer", "b"));
+    EXPECT_TRUE(lgpu_has(0, "texture", "t"));
+    EXPECT_FALSE(lgpu_has(1, "texture", "t"));
+    EXPECT_EQ(lgpu->devices[1].live_bytes, (size_t)0);
+    EXPECT_EQ(lgpu->devices[0].live_bytes, (size_t)(4 + 16));
+    LGPU_EXPECT("gpu.buffer('b', nil) gpu.texture('t', nil) R = 'ok'", "ok");
+    EXPECT_EQ(lgpu->devices[0].live_bytes, (size_t)0);
+    EXPECT_EQ(lgpu->devices[0].buffer_count + lgpu->devices[0].texture_count, 0);
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu, an_unknown_device_is_refused)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("local ok = gpu.buffer('b', 'x', { device = 3 }) "
+                "local r, e = gpu.buffer_read('b', { device = 3 }) "
+                "R = tostring(ok) .. ' ' .. tostring(r) .. ' ' .. tostring(e)",
+                "nil nil buffer_read_error");
+    EXPECT_EQ(gpu_mock_buffer_creates, 0);
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu, dispatch_reads_back_the_buffer_it_names)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("assert(gpu.compile('id', 'fn main() {}')) "
+                "local a = gpu.dispatch('id', { buffers = {"
+                "  { data = 'hello' }, { size = 3 } } }) "        /* default: 1 */
+                "local b = gpu.dispatch('id', { buffers = {"
+                "  { data = 'hello' }, { size = 3 } }, output = 2 }) "
+                "local c = gpu.dispatch('id', { buffers = {"
+                "  { data = 'hello' } }, output = false }) "
+                "R = a .. ' ' .. #b .. ' ' .. (b == '\\0\\0\\0' and 'z' or '?') "
+                "  .. ' ' .. tostring(c)",
+                "hello 3 z true");
+    /* An uncompiled shader never reaches the backend. */
+    int before = gpu_mock_dispatches;
+    LGPU_EXPECT("local r, e = gpu.dispatch('nope', { buffers = {"
+                "  { data = 'x' } } }) R = tostring(r) .. ' ' .. tostring(e)",
+                "nil shader_not_found");
+    EXPECT_EQ(gpu_mock_dispatches, before);
+    lgpu_cleanup();
+}
+
+/* The twin of js_gpu.compile_and_reads_take_the_device: compile, buffer_read
+ * and texture_read act on the device the opts name. */
+UTEST(lua_gpu, compile_and_reads_take_the_device)
+{
+    ASSERT_EQ(lgpu_init(2), 0);
+    LGPU_EXPECT("assert(gpu.compile('id1', 'fn main() {}', { device = 1 })) "
+                "local r = gpu.dispatch('id1', { device = 1, buffers = { { data = 'one' } } }) "
+                "local _, e = gpu.dispatch('id1', { buffers = { { data = 'x' } } }) "
+                "gpu.buffer('b', 'zero') gpu.buffer('b', 'one!', { device = 1 }) "
+                "R = r .. ' ' .. tostring(e) .. ' ' .. gpu.buffer_read('b', { device = 1 })",
+                "one shader_not_found one!");
+#ifdef HL_ENABLE_IMAGE
+    LGPU_EXPECT("gpu.texture('t', string.rep('\\0', 16), { width = 2, height = 2 }) "
+                "gpu.texture('t', string.rep('\\0', 16), { width = 4, height = 1, device = 1 }) "
+                "R = gpu.texture_read('t'):width() .. ' ' .. "
+                "  gpu.texture_read('t', { device = 1 }):width()",
+                "2 4");
+#endif
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu, a_pipeline_with_several_outputs_returns_a_list)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("assert(gpu.compile('id', 'fn main() {}')) "
+                "local stages = {"
+                "  { shader = 'id', buffers = { { name = 'a', data = 'xy' } } },"
+                "  { shader = 'id', buffers = { { name = 'a' }, { data = 'zz' } } } } "
+                "local one = gpu.pipeline(stages) "
+                "local two = gpu.pipeline(stages, { outputs = {"
+                "  { stage = 1, buffer = 1 }, { stage = 2, buffer = 2 } } }) "
+                "R = type(one) .. ':' .. one .. ' ' .. type(two) .. ':' .. "
+                "  #two .. ':' .. two[1] .. two[2]",
+                "string:xy table:2:xyzz");
+    lgpu_cleanup();
+}
+
+/* A read-back larger than the VM heap limit - one the heap could never
+ * hold - is refused before the backend copies it off the heap (audit 17),
+ * in buffer_read and in dispatch. The limit is narrowed below the 8 MB
+ * buffer once the string that filled it is collected. */
+UTEST(lua_gpu, read_backs_past_the_heap_limit_are_refused)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("gpu.buffer('big', string.rep('x', 8 << 20)) "
+                "assert(gpu.compile('id', 'fn main() {}')) "
+                "collectgarbage() R = 'ok'", "ok");
+    size_t saved = lua_rt.mem_limit;
+    lua_rt.mem_limit = lua_rt.mem_used + (1u << 20);
+    ASSERT_LT(lua_rt.mem_limit, (size_t)8 << 20);
+    LGPU_EXPECT("local r, e = gpu.buffer_read('big') "
+                "local d, de = gpu.dispatch('id', { buffers = { { name = 'big' } } }) "
+                "R = tostring(r) .. ' ' .. tostring(e) .. ' ' .. tostring(d) .. ' ' "
+                "  .. tostring(de)",
+                "nil buffer_read_error nil output_too_large");
+    lua_rt.mem_limit = saved;
+    LGPU_EXPECT("R = #gpu.buffer_read('big')", "8388608");
+    lgpu_cleanup();
+}
+
 UTEST_MAIN();
