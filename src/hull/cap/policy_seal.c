@@ -19,6 +19,7 @@
 #endif
 
 #include <sh_seal_arena.h>
+#include "hull/utils/seal_dup.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -105,7 +106,7 @@ int hl_policy_seal_cap_configs(HlRuntime *rt, ShSealArena *arena)
     HlFsConfig  *fs  = NULL;
     HlEnvConfig *env = NULL;
     if (rt->fs_cfg) {
-        fs = sh_seal_arena_memdup(arena, rt->fs_cfg, sizeof *fs);
+        fs = HL_SEAL_DUP(arena, rt->fs_cfg, HlFsConfig);
         if (!fs) goto fail;
         if (rt->fs_cfg->base_dir) {
             fs->base_dir = sh_seal_arena_strdup(arena, rt->fs_cfg->base_dir);
@@ -117,7 +118,7 @@ int hl_policy_seal_cap_configs(HlRuntime *rt, ShSealArena *arena)
         }
     }
     if (rt->env_cfg) {
-        env = sh_seal_arena_memdup(arena, rt->env_cfg, sizeof *env);
+        env = HL_SEAL_DUP(arena, rt->env_cfg, HlEnvConfig);
         if (!env) goto fail;
     }
 
@@ -129,12 +130,12 @@ int hl_policy_seal_cap_configs(HlRuntime *rt, ShSealArena *arena)
 #endif
     KlTlsConfig *tls = NULL;
     if (tls_src) {
-        tls = sh_seal_arena_memdup(arena, tls_src, sizeof *tls);
+        tls = HL_SEAL_DUP(arena, tls_src, KlTlsConfig);
         if (!tls) goto fail;
     }
     HlClientTls *ctls = NULL;
     if (rt->client_tls) {
-        ctls = sh_seal_arena_memdup(arena, rt->client_tls, sizeof *ctls);
+        ctls = HL_SEAL_DUP(arena, rt->client_tls, HlClientTls);
         if (!ctls) goto fail;
         if (ctls->cfg == tls_src) ctls->cfg = tls;
     }
@@ -142,12 +143,12 @@ int hl_policy_seal_cap_configs(HlRuntime *rt, ShSealArena *arena)
     HlHttpConfig *http = NULL;
     HlSmtpConfig *smtp = NULL;
     if (rt->http_cfg) {
-        http = sh_seal_arena_memdup(arena, rt->http_cfg, sizeof *http);
+        http = HL_SEAL_DUP(arena, rt->http_cfg, HlHttpConfig);
         if (!http) goto fail;
         if (http->tls && http->tls == tls_src) http->tls = tls;
     }
     if (rt->smtp_cfg) {
-        smtp = sh_seal_arena_memdup(arena, rt->smtp_cfg, sizeof *smtp);
+        smtp = HL_SEAL_DUP(arena, rt->smtp_cfg, HlSmtpConfig);
         if (!smtp) goto fail;
         if (smtp->tls && smtp->tls == (const void *)tls_src) smtp->tls = tls;
     }

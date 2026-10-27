@@ -36,6 +36,7 @@
 #include "hull/shared/thread_affinity.h"
 #include "hull/manifest.h"
 #include <sh_seal_arena.h>
+#include "hull/utils/seal_dup.h"
 #include "hull/module_resolver.h"
 #include "hull/runtime.h"
 #include "hull/sandbox.h"
@@ -612,8 +613,7 @@ int hull_serve(int argc, char **argv)
      * on the stack let a write re-count or repoint one. Everything wired
      * below that keeps a pointer into the manifest points into this copy;
      * the stack value is read once, while wiring, and never again. */
-    const HlManifest *policy = sh_seal_arena_memdup(&seal_arena, &manifest,
-                                                    sizeof manifest);
+    const HlManifest *policy = HL_SEAL_DUP(&seal_arena, &manifest, HlManifest);
     if (!policy) {
         log_error("[hull:cli] seal arena alloc(manifest) failed");
         return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,

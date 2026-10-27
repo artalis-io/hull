@@ -50,6 +50,7 @@
 #include "hull/ca_trust.h"
 #include "hull/utils/csp.h"
 #include <sh_seal_arena.h>
+#include "hull/utils/seal_dup.h"
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
@@ -1514,7 +1515,7 @@ static int hl_serve_wire_caps(HlServerState *s)
          * for strings (the arena owns them; destroyed at shutdown). */
         hl_manifest_free(&s->manifest);
         s->manifest = sealed;
-        s->policy = sh_seal_arena_memdup(&s->seal_arena, &sealed, sizeof sealed);
+        s->policy = HL_SEAL_DUP(&s->seal_arena, &sealed, HlManifest);
         if (!s->policy) {
             log_error("[hull:c] seal arena alloc(manifest) failed");
             sh_seal_arena_destroy(&s->seal_arena);
