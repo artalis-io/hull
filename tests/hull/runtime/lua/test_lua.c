@@ -13445,6 +13445,31 @@ UTEST(lua_gpu, compile_and_reads_take_the_device)
     lgpu_cleanup();
 }
 
+/* gpu.load compiled on the default device whatever the opts said: a shader
+ * from shaders/ could not be dispatched on another device. */
+static const char lgpu_wgsl[] = "fn main() {}";
+static const HlEntry lgpu_shader_entries[] = {
+    { "shaders/id.wgsl", (const unsigned char *)lgpu_wgsl, sizeof lgpu_wgsl - 1 },
+    { 0, 0, 0 }
+};
+
+UTEST(lua_gpu, load_takes_the_device)
+{
+    ASSERT_EQ(lgpu_init(2), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, lgpu_shader_entries, NULL);
+    lua_rt.base.app_vfs = &vfs;
+    LGPU_EXPECT("assert(gpu.load('id', { device = 1 })) "
+                "local r = gpu.dispatch('id', { device = 1, buffers = { { data = 'one' } } }) "
+                "local _, e = gpu.dispatch('id', { buffers = { { data = 'x' } } }) "
+                "assert(gpu.load('id')) "
+                "R = r .. ' ' .. tostring(e) .. ' ' .. "
+                "  gpu.dispatch('id', { buffers = { { data = 'zero' } } })",
+                "one shader_not_found zero");
+    lua_rt.base.app_vfs = NULL;
+    lgpu_cleanup();
+}
+
 UTEST(lua_gpu, a_pipeline_with_several_outputs_returns_a_list)
 {
     ASSERT_EQ(lgpu_init(1), 0);

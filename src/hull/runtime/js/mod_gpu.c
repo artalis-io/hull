@@ -176,7 +176,8 @@ fail:
     return JS_EXCEPTION;
 }
 
-/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk) */
+/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk), compiled on the
+ * device the opts name, as gpu.compile is (default device only before). */
 static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -186,6 +187,15 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
 
     HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
     if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
+
+    /* Read first: a getter is app code, run before anything is held. */
+    int device = -1;
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        int32_t d;
+        int r = hl_js_opt_int32(ctx, argv[1], "device", &d);
+        if (r < 0) return JS_EXCEPTION;
+        if (r) device = d;
+    }
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     const char *name = JS_ToCString(ctx, argv[0]);
@@ -269,7 +279,7 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, name);
         return JS_EXCEPTION;
     }
-    int rc = hl_cap_gpu_compile(gpu, -1, name, wgsl, wgsl_len);
+    int rc = hl_cap_gpu_compile(gpu, device, name, wgsl, wgsl_len);
     free(file_buf);
     JS_FreeCString(ctx, name);
 
@@ -2421,7 +2431,7 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, gpu, "compile",
                       JS_NewCFunction(ctx, js_gpu_compile, "compile", 2));
     JS_SetPropertyStr(ctx, gpu, "load",
-                      JS_NewCFunction(ctx, js_gpu_load, "load", 1));
+                      JS_NewCFunction(ctx, js_gpu_load, "load", 2));
     JS_SetPropertyStr(ctx, gpu, "dispatch",
                       JS_NewCFunction(ctx, js_gpu_dispatch, "dispatch", 2));
     JS_SetPropertyStr(ctx, gpu, "pipeline",
