@@ -178,7 +178,8 @@ static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
  *
  * gpu.available() -> boolean
  * gpu.devices() -> { {id=0, name="..."}, ... }
- * gpu.compile(name, wgsl) -> true, err
+ * gpu.compile(name, wgsl, opts?) -> true, err
+ * gpu.load(name, opts?) -> true, err   (shaders/<name>.wgsl; opts.device)
  * gpu.dispatch(name, opts) -> output, err
  * gpu.async.dispatch(name, opts) -> {result=..., error=...}
  * gpu.buffer(name, data, opts?) -> true, err
@@ -235,12 +236,23 @@ static int l_gpu_devices(lua_State *L)
     return 1;
 }
 
-/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk) */
+/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk), compiled on
+ * opts.device as gpu.compile is (it compiled on the default device only, so a
+ * loaded shader could not be dispatched on another). */
 static int l_gpu_load(lua_State *L)
 {
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
     const char *name = luaL_checkstring(L, 1);
     HlLua *lua = get_hl_lua(L);
+
+    /* Read before file_buf exists: an __index here may raise. */
+    int device = -1;
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "device");
+        if (!lua_isnil(L, -1))
+            device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
 
     /* Validate shader name: reject path traversal */
     if (!name[0] || name[0] == '/' || strstr(name, "..") || strchr(name, '\\'))
@@ -319,7 +331,7 @@ static int l_gpu_load(lua_State *L)
         free(file_buf);
         return hl_lua_budget_raise(L);
     }
-    int rc = hl_cap_gpu_compile(ctx, -1, name, wgsl, wgsl_len);
+    int rc = hl_cap_gpu_compile(ctx, device, name, wgsl, wgsl_len);
     free(file_buf);
 
     if (rc != HL_GPU_OK) {

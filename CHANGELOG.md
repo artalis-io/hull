@@ -10,6 +10,9 @@ release-artifact layout).
 
 ### Fixes
 
+- **`gpu.load(name)` compiled on the default device only**, in both runtimes: it took no
+  options, so a shader from `shaders/` could not be dispatched on another device
+  (`shader_not_found`). It now takes `{ device = N }` / `{ device: N }` as `gpu.compile` does.
 - **JS `gpu.compile`, `gpu.bufferRead` and `gpu.textureRead` ignored `{ device }`**: a shader
   compiled on the default device only (a dispatch on another device failed `shader_not_found`),
   and both reads returned the default device's object of that name. They now take the device

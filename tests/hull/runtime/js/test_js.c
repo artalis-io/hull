@@ -14374,6 +14374,31 @@ UTEST(js_gpu, compile_and_reads_take_the_device)
     jgpu_cleanup();
 }
 
+/* The twin of lua_gpu.load_takes_the_device. */
+static const char jgpu_wgsl[] = "fn main() {}";
+static const HlEntry jgpu_shader_entries[] = {
+    { "shaders/id.wgsl", (const unsigned char *)jgpu_wgsl, sizeof jgpu_wgsl - 1 },
+    { 0, 0, 0 }
+};
+
+UTEST(js_gpu, load_takes_the_device)
+{
+    ASSERT_EQ(jgpu_init(2), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, jgpu_shader_entries, NULL);
+    js.base.app_vfs = &vfs;
+    JGPU_EXPECT("gpu.load('id', { device: 1 });"
+                "let r = s(gpu.dispatch('id', { device: 1, buffers: [{ data: u('one') }] }));"
+                "try { gpu.dispatch('id', { buffers: [{ data: u('x') }] }); }"
+                "catch (e) { r += ' ' + e.message; }"
+                "try { gpu.load('id', { get device() { throw new Error('dev'); } }); }"
+                "catch (e) { r += ' ' + e.message; }"
+                "return r;",
+                "one gpu.dispatch: shader_not_found dev");
+    js.base.app_vfs = NULL;
+    jgpu_cleanup();
+}
+
 /* A pipeline with several outputs returns an array of them (audit 29; it
  * returned only the first), one output a single ArrayBuffer. */
 UTEST(js_gpu, a_pipeline_with_several_outputs_returns_an_array)

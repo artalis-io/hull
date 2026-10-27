@@ -2002,8 +2002,8 @@ app.manifest({ gpu = true })
 ```lua
 gpu.available()                        -- boolean
 gpu.devices()                          -- { {id=0, name="Apple M1"}, ... }
-gpu.compile(name, wgsl)                -- compile WGSL shader (cached, idempotent)
-gpu.load(name)                         -- load + compile shaders/<name>.wgsl from disk/VFS
+gpu.compile(name, wgsl, {device=N})    -- compile WGSL shader (cached, idempotent)
+gpu.load(name, {device=N})             -- load + compile shaders/<name>.wgsl from disk/VFS
 gpu.dispatch(name, opts)               -- run shader, return output (string)
 gpu.dispatch(name, { output = false }) -- fire-and-forget (no readback, returns true)
 gpu.pipeline(stages, opts)             -- multi-stage dispatch, single submission
@@ -2021,8 +2021,8 @@ gpu.buffer_copy(src, dst, opts?)       -- GPU-side buffer copy (no CPU roundtrip
 import { gpu } from "hull:gpu";
 gpu.available()                        // boolean
 gpu.devices()                          // [{id, name}, ...]
-gpu.compile(name, wgsl)                // compile WGSL shader
-gpu.load(name)                         // load + compile shaders/<name>.wgsl
+gpu.compile(name, wgsl, {device: N})   // compile WGSL shader
+gpu.load(name, {device: N})            // load + compile shaders/<name>.wgsl
 gpu.dispatch(name, opts)               // ArrayBuffer output
 gpu.dispatch(name, { output: false })  // fire-and-forget (returns true)
 gpu.pipeline(stages, opts)             // multi-stage, ArrayBuffer or Array<ArrayBuffer>
@@ -2126,7 +2126,7 @@ gpu.buffer_copy("source", "dest", {
 - Binding convention: uniforms → buffers → sampled textures → storage textures (all `@group(0)`).
 - A named texture's `storage` flag must match how it was created (`gpu.texture(..., { storage = ... })`): a mismatch fails the dispatch / pipeline with `texture_storage_mismatch` (audit 10 - the bind group was sized from the flag and filled from the texture, writing past it).
 
-**Shader loading from files:** `gpu.load(name)` reads `shaders/<name>.wgsl` from disk (dev mode) or VFS (built binaries) and compiles it. Enables shader iteration without modifying app code.
+**Shader loading from files:** `gpu.load(name)` reads `shaders/<name>.wgsl` from disk (dev mode) or VFS (built binaries) and compiles it - on `opts.device` when given, like `gpu.compile` (a shader is compiled per device; dispatch it on the device it was compiled on). Enables shader iteration without modifying app code.
 
 ```lua
 -- shaders/score.wgsl on disk (dev mode) or embedded (built binary)
