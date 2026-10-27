@@ -2427,6 +2427,12 @@ make msan               # clean + rebuild with -fsanitize=memory,undefined (Linu
 make test               # run tests under whichever sanitizer was built
 ```
 
+On macOS 26, Apple clang 17's ASan runtime deadlocks in its own init (every
+ASan binary hangs before `main`, a hello-world included), so `make debug` first
+runs `scripts/check_asan_runtime.sh` and stops with the fix: build with LLVM's
+clang, `make CC="$(brew --prefix llvm)/bin/clang" debug` and the same `CC=` on
+`make test`.
+
 ASan catches: heap/stack buffer overflow, use-after-free, double-free, memory leaks.
 UBSan catches: signed overflow, null dereference, misaligned access, shift overflow.
 MSan catches: use of uninitialized memory.
