@@ -53,6 +53,12 @@
 #       rest autocommitted - and the request whose drain ran that code had its
 #       own acknowledged write rolled back with the other run's transaction.
 #
+# Audit 32:
+#   M   A run failed by that check (its stretch of jobs ended holding a
+#       transaction) went on running in the same drain: its code after the
+#       await wrote in autocommit and its request was answered 200. Its jobs
+#       are now dropped and the run ends failed (500).
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -240,6 +246,32 @@ app.get("/r31c", async (_req, res) => {
     res.text("c");
 });
 app.get("/r31state", (_req, res) => res.text(r31d));
+
+/* Audit 32: /f32b holds a transaction and awaits a promise only another
+ * run's job settles (/f32a's, woken by /f32b): its stretch ends holding
+ * the transaction, which is rolled back and the run failed. Its own code
+ * after the await used to run on in the same drain - 'fb2' autocommitted
+ * and the request was answered 200 (a stray COMMIT succeeds on Postgres /
+ * MySQL). Now it is not continued: 500, and neither write committed. */
+let f32Wake = null, f32Wake2 = null, f32After = "none";
+const f32Gate = new Promise(r => { f32Wake = r; });
+const f32Gate2 = new Promise(r => { f32Wake2 = r; });
+app.get("/f32a", async (_req, res) => {
+    await f32Gate;
+    f32Wake2();
+    res.text("a");
+});
+app.get("/f32b", async (_req, res) => {
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('fb1')");
+    f32Wake();
+    await f32Gate2;
+    f32After = "continued";
+    conn.exec("INSERT INTO t VALUES ('fb2')");
+    try { conn.exec("COMMIT"); } catch (e) { /* SQLite: no transaction */ }
+    res.text("b");
+});
+app.get("/f32state", (_req, res) => res.text(f32After));
 app.get("/y31a", async (_req, res) => {
     res.text("a");
     await new Promise((r) => { y31Wake = r; });
@@ -559,6 +591,24 @@ case "$rows" in
     *'"rc1"'*|*'"rc2"'*) fail "the rolled-back transaction committed nothing" "$rows" ;;
     *) pass "the rolled-back transaction committed nothing" ;;
 esac
+
+echo "=== audit 32: a run failed for holding a transaction stops running ==="
+curl -s -m 10 -o /dev/null "$URL/f32a" || true
+code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$URL/f32b")
+[ "$code" = 500 ] && pass "the failed run is answered 500" \
+    || fail "the failed run is answered 500" "$code"
+out=$(curl -s -m 10 "$URL/f32state")
+[ "$out" = none ] && pass "its code after the await does not run" \
+    || fail "its code after the await does not run" "$out"
+rows=$(curl -s -m 10 "$URL/rows")
+case "$rows" in
+    *'"fb1"'*|*'"fb2"'*) fail "neither of its writes is committed" "$rows" ;;
+    *) pass "neither of its writes is committed" ;;
+esac
+grep -q "handler failed: the run waited holding a database transaction" "$TMPDIR/log" \
+    && pass "the failure is reported" || fail "the failure is reported" "$(tail -5 "$TMPDIR/log")"
+out=$(curl -s -m 10 "$URL/fast")
+[ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
 
 echo "=== audit 8 H1 / audit 18: the inherited accessors cannot be defined ==="
 # Audit 18: the intrinsics are frozen, so the Object.prototype `then` getter

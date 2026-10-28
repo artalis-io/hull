@@ -88,6 +88,10 @@ typedef struct HlJS {
      * budget. budget_timed_out: the trip was that deadline, not the count. */
     HlRunWatch      run_watch;
     int             budget_timed_out;
+    /* budget_txn_failed: the trip is the run having waited holding a
+     * database transaction (audit 32, hl_js_run_txn_fail_active): its
+     * completion is then decided as a failed run's. */
+    int             budget_txn_failed;
     /* Measured idle time tui.pollSync has waited, with no event, since the
      * run was last armed. Once it reaches HL_JS_TUI_REARM_MIN_MS the poll
      * starts a new run; every arm resets it (audit 28). */

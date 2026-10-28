@@ -951,6 +951,9 @@ int JS_GetPendingJobTag(JSRuntime *rt, uint64_t *ptag);
    leaving the jobs ahead of it queued in order. Returns as
    JS_ExecutePendingJob; 0 when no pending job has that tag. */
 int JS_ExecutePendingJobTagged(JSRuntime *rt, uint64_t tag, JSContext **pctx);
+/* HULL PATCH 0008 (audit 32): drop the first pending job unrun (its
+   arguments freed). 1 when one was dropped, 0 when none was pending. */
+int JS_DiscardPendingJob(JSRuntime *rt);
 /* if can_block is TRUE, Atomics.wait() can be used */
 void JS_SetCanBlock(JSRuntime *rt, JS_BOOL can_block);
 /* select which debug info is stripped from the compiled code */

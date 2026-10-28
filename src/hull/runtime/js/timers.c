@@ -186,7 +186,8 @@ void hl_js_timer_trampoline(void *user_data)
          * in_flight, and the timer used to stop firing for good, silently.
          * (Or over its budget: a tripped run's promise never settles.) */
         if (js->budget_tripped)
-            log_error("[hull:timer] handler exceeded the instruction limit");
+            log_error("[hull:timer] handler failed: %s",
+                      hl_js_trip_reason(js));
         else
             log_warn("[hull:timer] handler awaits a promise Hull does not "
                      "drive; the timer is rescheduled without waiting for it");

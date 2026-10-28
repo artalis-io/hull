@@ -353,6 +353,8 @@ static void hl_js_hold_release(HlJS *js, HlAsyncCtx *hold, int outcome)
     hl_net_op_complete(js->base.net_ctx, (HlSuspendOp *)&hold->op);
 }
 
+static void hl_js_run_tag_clear(HlJS *js, uint64_t tag);
+
 int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
 {
     int st = (int)JS_PromiseState(js->ctx, ret);
@@ -361,6 +363,32 @@ int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
         st = (int)JS_PromiseState(js->ctx, ret);
     }
     *state = st;
+    /* The drain failed this run: it held a transaction across a wait
+     * (hl_js_run_txn_hold_end), and its jobs were dropped from then on, so
+     * its promise is pending, or settled by code from before. Either way
+     * the run is failed, never answered as its own code left it (audit
+     * 32). With continuations made, they are wired into one record marked
+     * txn_held and the run waits: the first to resume fails it without
+     * continuing it, through the holder of the connection (as
+     * hl_js_run_yield_check's runs). Without, the run is failed now, as a
+     * tripped one: the caller answers 500, fails app.main, reschedules the
+     * timer, ends the ws callback. */
+    if (st >= 0 && hl_js_run_tag_failed(js, js->entry_tag)) {
+        uint64_t tag = js->entry_tag;
+        if (js->last_async_cont) {
+            HlJsRunOnce *run = hl_js_run_attach(js, ret);
+            if (run) {
+                run->txn_held = 1;
+                hl_js_run_tag_clear(js, tag);
+            }
+            hl_js_run_drop(js, run);
+            return 1;
+        }
+        js->budget_tripped = 1;
+        js->budget_txn_failed = 1;
+        hl_js_run_tag_clear(js, tag);
+        return 0;
+    }
     if (st != JS_PROMISE_PENDING)
         return 0;
     if (!js->last_async_cont) {
@@ -377,13 +405,34 @@ int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
     return 1;
 }
 
+/* The failed-run list is a fixed ring (HlJS.txn_failed_tags): a free slot
+ * (a run that ended, hl_js_run_tag_clear) is taken first, else the oldest
+ * entry is overwritten. It never grows. */
 static void hl_js_run_tag_fail(HlJS *js, uint64_t tag)
 {
     if (tag == 0 || hl_js_run_tag_failed(js, tag)) return;
     unsigned n = (unsigned)(sizeof js->txn_failed_tags /
                             sizeof js->txn_failed_tags[0]);
+    for (unsigned i = 0; i < n; i++) {
+        if (js->txn_failed_tags[i] == 0) {
+            js->txn_failed_tags[i] = tag;
+            return;
+        }
+    }
     js->txn_failed_tags[js->txn_failed_next % n] = tag;
     js->txn_failed_next = (js->txn_failed_next + 1) % n;
+}
+
+/* The failed run has ended: nothing of it is left to stop by its tag (its
+ * continuations share a run record marked txn_held, or there are none, and
+ * its queued jobs were dropped). Frees its slot (audit 32). */
+static void hl_js_run_tag_clear(HlJS *js, uint64_t tag)
+{
+    if (!js || tag == 0) return;
+    unsigned n = (unsigned)(sizeof js->txn_failed_tags /
+                            sizeof js->txn_failed_tags[0]);
+    for (unsigned i = 0; i < n; i++)
+        if (js->txn_failed_tags[i] == tag) js->txn_failed_tags[i] = 0;
 }
 
 int hl_js_run_tag_failed(const HlJS *js, uint64_t tag)
@@ -608,8 +657,34 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     jc->reject = JS_UNDEFINED;
 
     /* Drain microtasks - this continues the handler past the await */
-    if (!aborted)
+    if (!aborted) {
         hl_js_run_jobs(js);
+        /* The drain failed this run (hl_js_run_txn_hold_end): its later
+         * jobs were dropped. It ends here as one that waited holding a
+         * transaction - forced to failure below, not answered as its code
+         * left it (audit 32). The continuations it made before that, and
+         * its siblings, share a record marked txn_held, so none of them
+         * continues it either. */
+        if (hl_js_run_tag_failed(js, jc->link.run_tag)) {
+            HlJsRunOnce *once = jc->link.once;
+            if (js->last_async_cont) {
+                HlAsyncCont *nc = (HlAsyncCont *)js->last_async_cont;
+                hl_js_run_wire(hl_js_cont_link(nc), js->ctx,
+                               jc->link.handler_promise, jc->link.once);
+                if (!once) once = hl_js_cont_link(nc)->once;
+                js->last_async_cont = NULL;
+            }
+            if (jc->link.once) jc->link.once->txn_held = 1;
+            if (once) once->txn_held = 1;
+            /* A wired run's continuations all share its record, so the
+             * record now stops them and the slot can go. An unwired
+             * chain's siblings have records of their own: the tag stays. */
+            if (once && once == jc->link.once &&
+                !JS_IsUndefined(jc->link.handler_promise))
+                hl_js_run_tag_clear(js, jc->link.run_tag);
+            aborted = 1;
+        }
+    }
     /* No entry waits on this continuation (an un-awaited chain, or an op of
      * another run's job): nothing below checks its wait. A transaction still
      * open now is held across whatever its code awaits - `const p =

@@ -732,8 +732,24 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     jc->reject  = JS_UNDEFINED;
 
     /* Drain microtasks - the for-await loop body runs here. */
-    if (!aborted)
+    if (!aborted) {
         hl_js_run_jobs(js);
+        /* The drain failed this run (it held a transaction across a wait,
+         * hl_js_run_txn_hold_end): its later jobs were dropped, and it ends
+         * here failed, as in hl_js_async_resume (audit 32). */
+        if (hl_js_run_tag_failed(js, jc->link.run_tag)) {
+            if (js->last_async_cont) {
+                HlJsRunLink *nl =
+                    hl_js_cont_link((HlAsyncCont *)js->last_async_cont);
+                hl_js_run_wire(nl, ctx, jc->link.handler_promise,
+                               jc->link.once);
+                if (nl->once) nl->once->txn_held = 1;
+                js->last_async_cont = NULL;
+            }
+            if (jc->link.once) jc->link.once->txn_held = 1;
+            aborted = 1;
+        }
+    }
     js->active_life = NULL;
 
     /* Check outer handler-Promise state */

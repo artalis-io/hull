@@ -755,7 +755,15 @@ reverse holds too: while the active run is inside a transaction across a microta
 await null; ...`), the drain runs its own jobs first (`JS_ExecutePendingJobTagged`) and holds other
 runs' jobs back until the transaction closes; if the active run runs out of jobs with it still
 open, its stretch ended holding it (`hl_js_run_txn_hold_end`: rolled back, logged, tag failed) and
-the drain goes on. Audit 7 H1 / M3 / M6: run after
+the drain goes on. A failed tag's jobs are dropped unrun at the top of every drain
+(`JS_DiscardPendingJob`, HULL PATCH 0008; audit 32: the run's own jobs queued later in the same
+drain ran on, writing in autocommit and answering 200), and the run ends failed where its
+completion is decided: `hl_js_entry_park` (continuations wired into one `txn_held` record and the
+run waits, or, with none, a trip with `budget_txn_failed` so the caller answers 500 / fails
+app.main / ends the timer or ws callback as a tripped run), and the post-drain checks of
+`hl_js_async_resume` and `mp_js_pump` (forced to failure, toString skipped). The tag list is a
+fixed ring of 32; a slot is freed (`hl_js_run_tag_clear`) once a wired run's record stops its
+continuations. Audit 7 H1 / M3 / M6: run after
 the entry returned, those jobs ran with no request active (an op they started was detached and
 never waited for: an empty 200, then `res.json` into a recycled connection slot), or inside
 another entry's drain. The same holds for the toString of a failed run's error or rejection,

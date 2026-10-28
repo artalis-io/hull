@@ -189,7 +189,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         } else if (js->budget_tripped) {
             /* Returned (or rejected) after a trip - e.g. an un-awaited async
              * call that hit the limit: the run still failed. */
-            log_error("[hull:c] handler exceeded the instruction limit");
+            log_error("[hull:c] handler failed: %s", hl_js_trip_reason(js));
             result = -1;
         } else if (st == JS_PROMISE_PENDING) {
             /* No continuation: the connection was never suspended, so the
