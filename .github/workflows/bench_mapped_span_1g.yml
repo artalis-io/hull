@@ -18,6 +18,11 @@ on:
         required: false
         default: "1024"
 
+# Least privilege: the GITHUB_TOKEN can only read the repository. A job that
+# needs more (release's publish job) grants it on the job itself.
+permissions:
+  contents: read
+
 jobs:
   mapped-span-bench-1g:
     name: Mapped-span benchmark (${{ github.event.inputs.dataset_mb }} MiB)
@@ -25,6 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install LLVM + cmake + wabt + clang/lld

@@ -102,23 +102,21 @@ mkdir -p "$PW_DIR"
 # ~/.cache and make cache invalidation harder).
 export PLAYWRIGHT_BROWSERS_PATH="$PW_DIR/.browsers"
 
-if [ ! -d "$PW_DIR/node_modules/playwright" ]; then
-    echo "e2e_htmx_playwright: first-time install (playwright + chromium, ~150 MB)…"
-    cat > "$PW_DIR/package.json" <<'JSON'
-{
-  "name": "hull-htmx-pw",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "playwright":           "^1.48.0",
-    "@axe-core/playwright": "^4.11.3"
-  }
-}
-JSON
-    ( cd "$PW_DIR" && npm install --no-audit --no-fund --no-progress --silent )
+# The dependency set is the committed tests/playwright/package.json +
+# package-lock.json (exact versions + integrity hashes): `npm ci` installs
+# exactly the locked tree, and --ignore-scripts runs no package's install
+# hooks (the browser comes from `playwright install` below, not a hook).
+# Reinstall whenever the committed lockfile differs from the installed one.
+PW_LOCK_SRC="$SRCDIR/tests/playwright"
+if [ ! -d "$PW_DIR/node_modules/playwright" ] \
+   || ! cmp -s "$PW_LOCK_SRC/package-lock.json" "$PW_DIR/package-lock.json"; then
+    echo "e2e_htmx_playwright: installing playwright + axe from the lockfile…"
+    cp "$PW_LOCK_SRC/package.json" "$PW_LOCK_SRC/package-lock.json" "$PW_DIR/"
+    ( cd "$PW_DIR" && npm ci --ignore-scripts --no-audit --no-fund --no-progress --silent )
+    PW_FRESH=1     # a new playwright may want a different chromium revision
 fi
 
-if [ ! -d "$PW_DIR/.browsers" ] || [ -z "$(ls -A "$PW_DIR/.browsers" 2>/dev/null)" ]; then
+if [ -n "${PW_FRESH:-}" ] || [ ! -d "$PW_DIR/.browsers" ] || [ -z "$(ls -A "$PW_DIR/.browsers" 2>/dev/null)" ]; then
     echo "e2e_htmx_playwright: downloading chromium…"
     # --with-deps needs sudo on Linux for apt; only attempt it on CI.
     if [ -n "$CI" ] && [ "$(uname -s)" = "Linux" ]; then

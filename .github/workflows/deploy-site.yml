@@ -18,6 +18,11 @@ on:
       - 'minisign.pub'
       - '.github/workflows/deploy-site.yml'
 
+# Least privilege: the GITHUB_TOKEN can only read the repository. A job that
+# needs more (release's publish job) grants it on the job itself.
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-24.04
@@ -32,6 +37,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Build site
         run: |

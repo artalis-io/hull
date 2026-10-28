@@ -29,6 +29,11 @@ on:
 # every other plan (core, tooling, domain, examples, generic tests, unknown,
 # main/full/force-full) runs the broad suite. `ci-success` is still NOT a
 # required check; branch protection is unchanged.
+# Least privilege: the GITHUB_TOKEN can only read the repository. A job that
+# needs more (release's publish job) grants it on the job itself.
+permissions:
+  contents: read
+
 jobs:
   # -- orchestrator: classify the change, self-test the classifier/gate/map, then
   # emit the per-group run-flags every expensive job gates on. --
@@ -58,6 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Classifier + gate + applicability self-tests
         run: |
@@ -127,6 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -313,10 +320,13 @@ jobs:
         run: |
           set -eu
           if ! command -v zig >/dev/null 2>&1; then
+            # The pin lives in scripts/zig.sha256 (shared with the release's
+            # scripts/build_zig_bundle.sh); an empty value fails the check below.
+            ZIG_SHA=$(awk '$2 == "zig-linux-x86_64-0.13.0.tar.xz" { print $1 }' scripts/zig.sha256)
             # Cached between runs and checked against the SHA-256 ziglang.org
             # publishes (download/index.json): the host has been slow enough that a
             # fresh fetch overran its budget for hours at a time.
-            if [ -s /tmp/zig.tar.xz ] && ! echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c --status -; then
+            if [ -s /tmp/zig.tar.xz ] && ! echo "$ZIG_SHA  /tmp/zig.tar.xz" | sha256sum -c --status -; then
               rm -f /tmp/zig.tar.xz            # a bad cached copy: fetch again
             fi
             if [ ! -s /tmp/zig.tar.xz ]; then
@@ -324,7 +334,7 @@ jobs:
                 https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
                 -o /tmp/zig.tar.xz
             fi
-            echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c -
+            echo "$ZIG_SHA  /tmp/zig.tar.xz" | sha256sum -c -
             sudo mkdir -p /opt/zig
             sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             echo "/opt/zig" >> "$GITHUB_PATH"
@@ -626,6 +636,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install LLVM + cmake
         run: sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
@@ -667,6 +678,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install LLVM + cmake
         run: sudo apt-get update && sudo apt-get install -y llvm-18-dev cmake
@@ -753,6 +765,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install LLVM + cmake
@@ -930,6 +943,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install LLVM + cmake + wabt + clang/lld
@@ -985,6 +999,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install LLVM + cmake
@@ -1089,6 +1104,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install clang + lld + wabt + LLVM + cmake
@@ -1145,6 +1161,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install clang + lld + LLVM + cmake
@@ -1196,6 +1213,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install clang + lld + LLVM + cmake
@@ -1249,6 +1267,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install clang + lld + LLVM + cmake
@@ -1301,6 +1320,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install clang + lld + LLVM + cmake
@@ -1354,6 +1374,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install LLVM + cmake
@@ -1544,6 +1565,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Build
@@ -1607,6 +1629,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
       - name: Build hull
@@ -1650,6 +1673,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
       - name: Build twice in the reproducible container and cmp
@@ -1682,6 +1706,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
       - name: Build hull in-container as the runner user
@@ -1719,6 +1744,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
       # Build inside the snapshot-pinned reproducible container (roadmap 0.3.1).
@@ -1781,6 +1807,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Build pipeline E2E tests
@@ -1796,6 +1823,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Build and test with sanitizers
@@ -1813,6 +1841,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -1853,6 +1882,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install clang
@@ -1887,6 +1917,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install clang
@@ -1916,6 +1947,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -1943,6 +1975,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -1970,6 +2003,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -1993,6 +2027,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -2010,6 +2045,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -2033,6 +2069,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: recursive
       - name: JS frontend tests (fresh registry embed)
         run: make test-js-frontend
@@ -2048,6 +2085,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Lua source + frontend tests (fresh registry embed)
         run: make test-lua-frontend
@@ -2071,6 +2109,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -2094,6 +2133,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: build test_pg_transport + test_pg_conn under ASan+UBSan (+LSan), Postgres enabled
@@ -2121,6 +2161,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -2154,6 +2195,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: build test_mysql_transport + test_mysql_conn under ASan+UBSan (+LSan), MySQL enabled
@@ -2178,6 +2220,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -2206,6 +2249,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -2237,6 +2281,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install tools
@@ -2259,6 +2304,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install cosmocc
@@ -2370,6 +2416,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -2400,6 +2447,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       # fetch-duckdb isolates DuckDB's bundled mbedTLS (objcopy --redefine-syms)
@@ -2576,6 +2624,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Fetch DuckDB static libs
         run: make fetch-duckdb
@@ -2598,6 +2647,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install Vulkan loader + dev headers (compose links -lvulkan)
         run: sudo apt-get update && sudo apt-get install -y libvulkan-dev
@@ -2619,6 +2669,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Compose the TUI feature into an app binary (e2e)
         timeout-minutes: 15
@@ -2632,6 +2683,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Compose the Postgres feature into an app binary (e2e)
         timeout-minutes: 15
@@ -2645,6 +2697,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Compose the MySQL feature into an app binary (e2e)
         timeout-minutes: 15
@@ -2663,6 +2716,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Compose postgres + mysql together and assert one shared transport (e2e)
         timeout-minutes: 20
@@ -2680,6 +2734,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: JS-less lifecycle (RUNTIME=lua, expect JS not analyzable)
         timeout-minutes: 10
@@ -2694,6 +2749,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install lcov
@@ -2716,6 +2772,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install luacheck
@@ -2807,19 +2864,20 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Build
         run: make
 
       # Cache playwright + chromium across runs (large download, ~150 MB).
-      # Key on the playwright pin from the test script so a version bump
-      # auto-invalidates. PLAYWRIGHT_BROWSERS_PATH points into the cache.
+      # Keyed on the committed lockfile so a version bump auto-invalidates.
+      # PLAYWRIGHT_BROWSERS_PATH points into the cache.
       - name: Cache Playwright + Chromium
         uses: actions/cache@v4
         with:
           path: tests/.playwright
-          key: playwright-${{ runner.os }}-v1.48.0
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/playwright/package-lock.json') }}
 
       - name: HTMX browser E2E (dev)
         timeout-minutes: 6
@@ -2873,6 +2931,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install wrk
@@ -2903,6 +2962,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Rust toolchain
@@ -2923,6 +2983,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Cache the Zig 0.13.0 tarball
@@ -2937,10 +2998,13 @@ jobs:
           set -eu
           # --retry-all-errors also retries a partial transfer (curl exit 18),
           # the observed ziglang.org download flake.
+          # The pin lives in scripts/zig.sha256 (shared with the release's
+          # scripts/build_zig_bundle.sh); an empty value fails the check below.
+          ZIG_SHA=$(awk '$2 == "zig-linux-x86_64-0.13.0.tar.xz" { print $1 }' scripts/zig.sha256)
           # Cached between runs and checked against the SHA-256 ziglang.org
           # publishes (download/index.json): the host has been slow enough that a
           # fresh fetch overran its budget for hours at a time.
-          if [ -s /tmp/zig.tar.xz ] && ! echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c --status -; then
+          if [ -s /tmp/zig.tar.xz ] && ! echo "$ZIG_SHA  /tmp/zig.tar.xz" | sha256sum -c --status -; then
             rm -f /tmp/zig.tar.xz            # a bad cached copy: fetch again
           fi
           if [ ! -s /tmp/zig.tar.xz ]; then
@@ -2948,7 +3012,7 @@ jobs:
               https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
               -o /tmp/zig.tar.xz
           fi
-          echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c -
+          echo "$ZIG_SHA  /tmp/zig.tar.xz" | sha256sum -c -
           sudo mkdir -p /opt/zig
           sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo "/opt/zig" >> "$GITHUB_PATH"
@@ -2974,6 +3038,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: recursive
       - uses: ./.github/actions/docker-mirror
 
@@ -3049,6 +3114,8 @@ jobs:
       - musl
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - name: Evaluate required job results
         env:
           # A matrix job exposes ONE aggregate result here; ci_gate.py handles it.

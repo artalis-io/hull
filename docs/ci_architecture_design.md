@@ -946,9 +946,10 @@ alone.
 ## A.4 Cache audit (verified)
 
 - **The ONLY `actions/cache` in the entire repo** is `htmx-browser`'s
-  `playwright-${{ runner.os }}-v1.48.0` (Chromium bundle, ~150 MB). Key is a
-  hardcoded version literal (not lockfile-hashed) - can drift from the pin in
-  `e2e_htmx_playwright.sh`; low risk (Playwright re-fetches on mismatch).
+  `playwright-${{ runner.os }}-<hash of tests/playwright/package-lock.json>`
+  (Chromium bundle, ~150 MB). Since audit 31 the key is the committed
+  lockfile's hash and the test installs from it with `npm ci --ignore-scripts`
+  (it was a hardcoded `v1.48.0` literal over caret ranges with no lockfile).
 - **No native-object / built-artifact caching anywhere.** Every toolchain/dep
   (cosmocc, wgpu, DuckDB, zig, LLVM/wamrc, WAMR submodule) is fetched fresh per
   job (`make fetch-*`, SHA-verified) or apt/curl. Cross-job data uses

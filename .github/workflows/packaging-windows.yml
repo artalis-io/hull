@@ -39,6 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - name: Regenerate + diff against the committed manifests
         # Pass the workflow input through the environment (never interpolate
         # ${{ }} into the shell text, where a quote in the value would be parsed
@@ -56,6 +58,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - name: Run packaging tests
         shell: pwsh
         run: |

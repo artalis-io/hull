@@ -5,6 +5,19 @@ on:
     tags:
       - 'v*'
 
+# Least privilege: the GITHUB_TOKEN can only read the repository. A job that
+# needs more (release's publish job) grants it on the job itself.
+permissions:
+  contents: read
+
+env:
+  # The Alpine image the musl release assets (hull-libc-musl-*.tar,
+  # hull-platform-musl-*.tar) are built in, pinned by its multi-arch index
+  # digest: those tars are signed into hull.sha256, so a re-pushed 3.20 tag
+  # must not change what they are built from. Bump: `docker buildx
+  # imagetools inspect alpine:3.20` and take the index Digest.
+  ALPINE_IMAGE: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
 jobs:
   # ────────────────────────────────────────────────────────────────────
   # Stage 1: build the platform libraries (libhull_platform.a per arch).
@@ -36,6 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -136,6 +150,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -201,6 +216,7 @@ jobs:
       # run before the artifacts are downloaded into it.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Build signer from the tagged source
@@ -350,6 +366,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -501,6 +518,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
 
@@ -752,6 +770,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install LLVM + cmake (Linux)
@@ -813,11 +832,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/docker-mirror
 
       - name: Assemble + pack the floor in Alpine (musl)
         run: |
-          docker run --rm -v "$PWD":/work alpine:3.20 sh -c '
+          docker run --rm -v "$PWD":/work "$ALPINE_IMAGE" sh -c '
             set -eu
             apk add --no-cache build-base >/dev/null 2>&1
             sh /work/scripts/build_musl_floor.sh /tmp/floor \
@@ -860,6 +881,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true          # keel + wamr are needed to build the platform
       - uses: ./.github/actions/docker-mirror
 
@@ -871,7 +893,7 @@ jobs:
         # container-internal copy regardless, so nothing writes into the checkout
         # except the output tar. Same toolchain set tests/e2e_musl.sh installs.
         run: |
-          docker run --rm -v "$PWD":/work alpine:3.20 sh -c '
+          docker run --rm -v "$PWD":/work "$ALPINE_IMAGE" sh -c '
             set -eu
             apk add --no-cache build-base clang lld make xxd bash git perl linux-headers >/dev/null 2>&1
             sh /work/scripts/build_musl_platform.sh /work \
@@ -910,6 +932,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Build zig bundle
         run: |
@@ -937,6 +961,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - name: Install strace (the producer traces a build to trim the tree)
         run: sudo apt-get update -qq && sudo apt-get install -y strace
       - name: Build cosmocc bundle
@@ -980,6 +1006,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Write VERSION file
@@ -1043,6 +1070,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Write VERSION file
@@ -1087,6 +1115,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Write VERSION file
@@ -1125,6 +1154,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
@@ -1156,6 +1186,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
@@ -1191,6 +1222,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Write VERSION file
@@ -1230,6 +1262,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Write VERSION file
@@ -1270,6 +1303,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Write VERSION file

@@ -1,0 +1,12 @@
+# SHA-256 pins for the official Zig release tarballs Hull downloads, in
+# `sha256sum -c` format. The single source of truth for both consumers:
+#   - scripts/build_zig_bundle.sh (release.yml build-zig: the repacked tree is
+#     signed into hull.sha256, so the input must be pinned)
+#   - .github/workflows/ci.yml (the linker-zig / embed-zig jobs)
+# Values from https://ziglang.org/download/index.json, each tarball also checked
+# against its minisign signature (key RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U).
+# Bumping Zig: add the new version's lines here (and keep the old ones until no
+# workflow names that version).
+d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  zig-linux-x86_64-0.13.0.tar.xz
+041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556  zig-linux-aarch64-0.13.0.tar.xz
+46fae219656545dfaf4dce12fb4e8685cec5b51d721beee9389ab4194d43394c  zig-macos-aarch64-0.13.0.tar.xz

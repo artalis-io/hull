@@ -139,6 +139,32 @@ release-artifact layout).
   exit path. `scripts/build_musl_platform.sh`'s default work dirs and
   `scripts/build_pwned_blocklist.sh`'s default input no longer name fixed `/tmp` paths either.
 
+### Security - build and release (audit 31)
+
+- **The Zig bundle's input is pinned.** `scripts/build_zig_bundle.sh` (release `build-zig`)
+  downloaded `zig-<triple>-<ver>.tar.xz` from ziglang.org with no hash check, and the repacked
+  `hull-zig-*.tar` was then signed into `hull.sha256`. It now verifies the tarball against a
+  per-triple SHA-256 pin in `scripts/zig.sha256` before extracting and fails on a mismatch or a
+  missing pin. CI's Zig installs read the same file (one source of truth). The pins match
+  ziglang.org's `index.json`, and each tarball was checked against Zig's minisign key.
+- **Least-privilege workflow tokens.** Every workflow now declares `permissions: contents: read`
+  at the top (ci, dco, deploy-site, release and the manual 1 GiB bench had none, so they ran
+  with the repository's default token permissions); the release publish job keeps its own
+  `contents` / `id-token` / `attestations: write`. Every `actions/checkout` sets
+  `persist-credentials: false` (no job pushes or authenticates git after checkout), so the token
+  is not left in `.git/config` for later steps.
+- **The musl release assets build in a digest-pinned Alpine.** `build-floor-musl` and
+  `build-platform-musl` ran `alpine:3.20` by tag; they now run
+  `alpine:3.20@sha256:<index digest>` (workflow-level `ALPINE_IMAGE`), so a re-pushed tag cannot
+  change what the release-signed `hull-libc-musl-*.tar` / `hull-platform-musl-*.tar` are built
+  from. (apk package versions are not pinned: Alpine drops superseded versions from its
+  repositories, so a pin would break the release on the next security update.)
+- **The browser E2E installs from a lockfile.** `tests/e2e_htmx_playwright.sh` ran
+  `npm install` over caret ranges with no lockfile. The dependency set is now the committed
+  `tests/playwright/package.json` + `package-lock.json` (exact versions and integrity hashes,
+  playwright 1.61.1, @axe-core/playwright 4.13.0), installed with `npm ci --ignore-scripts`; the
+  CI cache is keyed on the lockfile's hash.
+
 ### Security - vendored dependencies
 
 - **Vendored mbedTLS 3.6.2 -> 3.6.7** (3.6 LTS; official release tarball, SHA-256 checked
