@@ -10,6 +10,15 @@ release-artifact layout).
 
 ### Fixes
 
+- **A locked login address told a registered account from an unknown one** (audit 32, both
+  runtimes). An unknown address is counted under a key made from its own spelling (ASCII case
+  folded), a known one under its account, whose lookup may fold more (accents under MySQL's
+  `utf8mb4_0900_ai_ci`). Failures spread over accent variants therefore locked a registered
+  account's row and none of an unknown address's, and `/login` skipped both counter writes
+  for an address it found locked - one commit less, visible in the response time. A locked
+  address now runs the same statements in a hold mode that leaves the count and the lock as
+  they were, so locked and unlocked addresses do the same database work.
+
 - **`--verify-sig` loaded bytecode from the shared code cache** (audit 31). The signature and
   the disk gate hash an app's SOURCE, but the Lua / QuickJS bytecode and compiled-template
   caches are sealed with `~/.hull/cache.key`, which every app process of the user holds: a

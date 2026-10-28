@@ -544,7 +544,7 @@ function counterBatch(fn) {
     }
 }
 
-function bumpFailedLogin(userIdStr, max) {
+function bumpFailedLogin(userIdStr, max, hold) {
     userIdStr = uidKey(userIdStr);
     const now = time.now();
     // Round-9 HIGH-2: the count starts again at 1 once a prior lockout window
@@ -573,7 +573,16 @@ function bumpFailedLogin(userIdStr, max) {
     // one gap (the per-(account, IP) keys are adjacent) deadlocked on their
     // INSERTs (audit 31). A non-locking read takes neither; only a new key
     // is inserted, and every UPDATE then matches its row.
+    //
+    // `hold` (audit 32) runs the same statements but leaves the count and the
+    // lock as they are: /login runs it for an address it found locked, so a
+    // locked address does the same database work as an unlocked one. An
+    // unknown address is keyed by its own spelling and a known one by its
+    // account, so accent variants the app's lookup folds lock a known
+    // account's row and not an unknown address's - skipping the writes when
+    // locked told the two apart by time.
     const expired = "locked_until IS NOT NULL AND locked_until <> 0 AND locked_until < ?";
+    const held = hold ? 1 : 0;
     counterBatch(() => {
         const have = db.query("SELECT 1 AS present FROM _hull_auth_login_attempts "
             + "WHERE user_id = ?", [userIdStr]);
@@ -583,13 +592,15 @@ function bumpFailedLogin(userIdStr, max) {
         }
         // 1. Count the attempt: 1 after an expired lockout, else one more.
         db.exec("UPDATE _hull_auth_login_attempts SET failed_count = "
-            + "CASE WHEN " + expired + " THEN 1 ELSE failed_count + 1 END, "
-            + "last_failed_at = ? WHERE user_id = ?", [now, now, userIdStr]);
+            + "CASE WHEN ? = 1 THEN failed_count WHEN " + expired
+            + " THEN 1 ELSE failed_count + 1 END, "
+            + "last_failed_at = ? WHERE user_id = ?", [held, now, now, userIdStr]);
         // 2. The lock, from the new count; an expired one is cleared.
-        db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE WHEN "
+        db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE "
+            + "WHEN ? = 1 THEN locked_until WHEN "
             + expired + " THEN 0 WHEN failed_count >= ? THEN ? ELSE 0 END "
             + "WHERE user_id = ?",
-            [now, max, now + _state.lockoutDuration, userIdStr]);
+            [held, now, max, now + _state.lockoutDuration, userIdStr]);
     });
 }
 
@@ -617,9 +628,9 @@ function clearAllFailedLogins(uid) {
 // The lockout rows a failed password check counts against: the account's
 // own row FIRST, then the (account, IP) one, so a failure writing the IP row
 // cannot leave the guess uncounted against the account (audit 31).
-function bumpFailedLogins(uid, ipKey) {
-    bumpFailedLogin(uid, _state.maxFailedLoginsPerAccount);
-    bumpFailedLogin(ipKey, _state.maxFailedLogins);
+function bumpFailedLogins(uid, ipKey, hold) {
+    bumpFailedLogin(uid, _state.maxFailedLoginsPerAccount, hold);
+    bumpFailedLogin(ipKey, _state.maxFailedLogins, hold);
 }
 
 function loginLocked(uid, ipKey) {
@@ -1475,9 +1486,9 @@ function handleLogin(req, res) {
     const pwOk   = (_state.enumerationSafe || Boolean(user))
                    && crypto.verifyPassword(body.password, pwHash);
     if (preLocked || !user || !user.password_hash || !pwOk) {
-        if (!preLocked) {
-            bumpFailedLogins(uid, ipKey);
-        }
+        // Locked: the same statements, holding the count and the lock
+        // (audit 32 - see bumpFailedLogin).
+        bumpFailedLogins(uid, ipKey, preLocked);
         return res.status(401).json({ error: "invalid credentials" });
     }
     if (_state.requireVerifiedEmail && !isVerified(user)) {
