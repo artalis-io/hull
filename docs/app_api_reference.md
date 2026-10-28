@@ -604,7 +604,12 @@ verify step between successful first-factor auth and `on_login` when
       that still stops a brute force spread over many addresses. The
       client IP honours `trust_proxy`. Counters clear on successful login
       (that address and the account-wide one) or `password-reset/confirm`
-      (all of them).
+      (all of them). A `/login` for an address no account has is counted
+      the same way, under an internal key derived from the address (a
+      SHA-256 of its ASCII-lowercased form): the same reads and writes as a
+      known address, so response time does not reveal which addresses are
+      registered, and an unknown address is throttled like a known one.
+      These rows are never returned to the app and age out with the rest.
     - Registration, verify-resend, magic-link and password-reset requests
       issue their token and send their email **after** the response, on the
       event loop: those steps happen only for some addresses, so doing them

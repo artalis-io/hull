@@ -5844,6 +5844,23 @@ UTEST(js_stdlib, stdlib_audit30_suite)
     EXPECT_GT(pass, 0);
     cleanup_js_caps();
 }
+
+/* Stdlib regressions from audit 31: lockout counters decide their INSERT
+ * with a non-locking read (MySQL gap-lock deadlock), bump the account row
+ * before the per-IP one, a TOTP per-IP failure keeps a running lock, and
+ * /login counts an unknown address under its own key. */
+UTEST(js_stdlib, stdlib_audit31_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit31.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+    cleanup_js_caps();
+}
 #endif
 
 /* TOTP regressions from audit 28: a success takes only the user's own

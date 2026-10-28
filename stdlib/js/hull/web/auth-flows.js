@@ -528,6 +528,22 @@ function lockoutRemaining(userIdStr) {
     return lu > now ? (lu - now) : 0;
 }
 
+// Run a lockout counter's db.batch, once more if the database picked it as a
+// deadlock victim (MySQL ER_LOCK_DEADLOCK, Postgres 40P01): the attempt must
+// be counted, not answered 500. Only at top level - inside an app
+// transaction the deadlock rolled the whole transaction back, and the error
+// is the app's to handle. Mirror of the Lua counter_batch.
+function counterBatch(fn) {
+    const outer = db.inTransaction();
+    try {
+        db.batch(fn);
+    } catch (e) {
+        const msg = String(e && e.message !== undefined ? e.message : e);
+        if (outer || !msg.toLowerCase().includes("deadlock")) throw e;
+        db.batch(fn);
+    }
+}
+
 function bumpFailedLogin(userIdStr, max) {
     userIdStr = uidKey(userIdStr);
     const now = time.now();
@@ -544,27 +560,31 @@ function bumpFailedLogin(userIdStr, max) {
     // wrote N+1 and a lockout allowed several times max guesses. No
     // statement reads a column it assigns earlier in its own SET: MySQL
     // evaluates a single-table SET left to right, so a locked_until CASE
-    // that read failed_count + 1 locked one attempt early (audit 29). Step 1
-    // takes the row lock, which holds to the commit, and leaves locked_until
-    // as it was for step 2 to read. db.batch nests as a savepoint inside an
-    // app transaction. The UPDATE runs before the INSERT-if-absent, which
-    // runs only for a new row: on MySQL a duplicate INSERT of an existing row
-    // takes a SHARED lock on it, so two attempts both holding one then both
-    // asking for the UPDATE's exclusive lock deadlocked, and the victim's
-    // attempt went uncounted (audit 30 re-audit).
+    // that read failed_count + 1 locked one attempt early (audit 29). The
+    // count UPDATE takes the row lock, which holds to the commit, and leaves
+    // locked_until as it was for the lock UPDATE to read. db.batch nests as
+    // a savepoint inside an app transaction.
+    //
+    // Whether the row must be made is decided by a plain (non-locking)
+    // SELECT (audit 31). On MySQL a duplicate INSERT of an existing row takes a
+    // SHARED lock, so two attempts both holding one deadlocked on the UPDATE
+    // (audit 30 re-audit); and an UPDATE that matches no row takes a GAP lock
+    // under REPEATABLE READ, so two attempts making different new keys in
+    // one gap (the per-(account, IP) keys are adjacent) deadlocked on their
+    // INSERTs (audit 31). A non-locking read takes neither; only a new key
+    // is inserted, and every UPDATE then matches its row.
     const expired = "locked_until IS NOT NULL AND locked_until <> 0 AND locked_until < ?";
-    db.batch(() => {
-        // 1. Count the attempt: 1 after an expired lockout, else one more.
-        //    A first attempt makes the row (each backend's own
-        //    INSERT-if-absent) and counts it then.
-        const countSql = "UPDATE _hull_auth_login_attempts SET failed_count = "
-            + "CASE WHEN " + expired + " THEN 1 ELSE failed_count + 1 END, "
-            + "last_failed_at = ? WHERE user_id = ?";
-        if ((db.exec(countSql, [now, now, userIdStr]) || 0) === 0) {
+    counterBatch(() => {
+        const have = db.query("SELECT 1 AS present FROM _hull_auth_login_attempts "
+            + "WHERE user_id = ?", [userIdStr]);
+        if (!have || have.length === 0) {
             db.insertIfAbsent("_hull_auth_login_attempts", ["user_id"],
                 ["user_id", "failed_count", "locked_until"], [userIdStr, 0, 0]);
-            db.exec(countSql, [now, now, userIdStr]);
         }
+        // 1. Count the attempt: 1 after an expired lockout, else one more.
+        db.exec("UPDATE _hull_auth_login_attempts SET failed_count = "
+            + "CASE WHEN " + expired + " THEN 1 ELSE failed_count + 1 END, "
+            + "last_failed_at = ? WHERE user_id = ?", [now, now, userIdStr]);
         // 2. The lock, from the new count; an expired one is cleared.
         db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE WHEN "
             + expired + " THEN 0 WHEN failed_count >= ? THEN ? ELSE 0 END "
@@ -592,6 +612,31 @@ function clearAllFailedLogins(uid) {
     db.exec("DELETE FROM _hull_auth_login_attempts "
             + "WHERE user_id = ? OR user_id LIKE ? ESCAPE '!'",
             [uid, pat]);
+}
+
+// The lockout rows a failed password check counts against: the account's
+// own row FIRST, then the (account, IP) one, so a failure writing the IP row
+// cannot leave the guess uncounted against the account (audit 31).
+function bumpFailedLogins(uid, ipKey) {
+    bumpFailedLogin(uid, _state.maxFailedLoginsPerAccount);
+    bumpFailedLogin(ipKey, _state.maxFailedLogins);
+}
+
+function loginLocked(uid, ipKey) {
+    return lockoutRemaining(ipKey) > 0 || lockoutRemaining(uid) > 0;
+}
+
+// The lockout key /login counts an UNKNOWN address under (audit 31), so an
+// unknown address does the same reads and writes as a known one - the time
+// they took told the two apart - and is throttled the same way. It starts
+// with IP_SEP, which no account key or (account, IP) key does (the per-IP
+// keys already assume no user id holds IP_SEP), so it cannot name a real
+// account's row; it lives only in _hull_auth_login_attempts and goes with
+// gc_expired. The address is folded as sameAddress folds it (ASCII case),
+// so both runtimes derive the same key. See the Lua unknown_login_key.
+const UNKNOWN_KEY_PREFIX = IP_SEP + "unknown" + IP_SEP;
+function unknownLoginKey(email) {
+    return UNKNOWN_KEY_PREFIX + encoding.hex.encode(crypto.sha256(asciiLower(email)));
 }
 
 // ── Pwned-password check (opt-in) ──────────────────────────────
@@ -1319,13 +1364,12 @@ async function handleVerify(req, res) {
     // The same lockout rows as /login (see the Lua sibling): no second,
     // unthrottled password oracle.
     const ipKey = attemptIpKey(uid, req);
-    const locked = lockoutRemaining(ipKey) > 0 || lockoutRemaining(uid) > 0;
+    const locked = loginLocked(uid, ipKey);
     const stored = !locked && passwordLenOk(pw, false) && storedPasswordHash(user);
     const ok = typeof stored === "string" && crypto.verifyPassword(pw, stored);
     if (!ok) {
         if (!locked) {
-            bumpFailedLogin(ipKey, _state.maxFailedLogins);
-            bumpFailedLogin(uid, _state.maxFailedLoginsPerAccount);
+            bumpFailedLogins(uid, ipKey);
         }
         if (wantsJson(req)) {
             return res.status(401).json({ error: VERIFY_WRONG_PASSWORD,
@@ -1410,11 +1454,15 @@ function handleLogin(req, res) {
     // internally - the counter ticks, the user still can't log in
     // until the window expires - but the wire response is now
     // indistinguishable from a wrong-password reply.
-    const uid   = user ? userId(user) : null;
-    const ipKey = user ? attemptIpKey(uid, req) : null;
-    const preLocked = user
-                      && (lockoutRemaining(ipKey) > 0
-                          || lockoutRemaining(uid) > 0);
+    //
+    // An unknown address is counted under a key of its own (unknownLoginKey,
+    // audit 31): the same lockout reads before the check and the same writes
+    // after a failure as a known one, so the time the request takes does not
+    // tell the two apart, and a locked unknown address answers as a locked
+    // account does.
+    const uid   = (user ? userId(user) : null) ?? unknownLoginKey(body.email);
+    const ipKey = attemptIpKey(uid, req);
+    const preLocked = loginLocked(uid, ipKey);
     // Timing-safe email enumeration defense. crypto.verifyPassword
     // (PBKDF2-SHA256, 600k iters by default) takes 50–200ms; a 401
     // that skipped the verify because the email was unknown would
@@ -1427,9 +1475,8 @@ function handleLogin(req, res) {
     const pwOk   = (_state.enumerationSafe || Boolean(user))
                    && crypto.verifyPassword(body.password, pwHash);
     if (preLocked || !user || !user.password_hash || !pwOk) {
-        if (user && !preLocked) {
-            bumpFailedLogin(ipKey, _state.maxFailedLogins);
-            bumpFailedLogin(uid, _state.maxFailedLoginsPerAccount);
+        if (!preLocked) {
+            bumpFailedLogins(uid, ipKey);
         }
         return res.status(401).json({ error: "invalid credentials" });
     }
@@ -1737,12 +1784,11 @@ async function handleEmailChange(req, res) {
         // The lockout rows /login uses: keyed by the account's own id.
         const acct = userId(current) ?? uid;
         const ipKey = attemptIpKey(acct, req);
-        const locked = lockoutRemaining(ipKey) > 0 || lockoutRemaining(acct) > 0;
+        const locked = loginLocked(acct, ipKey);
         const stored = !locked && passwordLenOk(pw, false) && storedPasswordHash(current);
         if (!(typeof stored === "string" && crypto.verifyPassword(pw, stored))) {
             if (!locked) {
-                bumpFailedLogin(ipKey, _state.maxFailedLogins);
-                bumpFailedLogin(acct, _state.maxFailedLoginsPerAccount);
+                bumpFailedLogins(acct, ipKey);
             }
             return res.status(401).json({ error: "invalid credentials" });
         }
@@ -2660,6 +2706,9 @@ const _test = {
     recoveryLocked,
     stripUserSecrets,
     bumpFailedLogin,
+    bumpFailedLogins,
+    unknownLoginKey,
+    attemptIpKey,
     lockoutRemaining,
     loginFailedCount(userIdStr) {
         const r = db.query("SELECT failed_count FROM _hull_auth_login_attempts "

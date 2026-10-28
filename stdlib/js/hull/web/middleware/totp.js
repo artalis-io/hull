@@ -421,6 +421,32 @@ function lockoutRemaining(userId) {
     return remain > 0 ? remain : 0;
 }
 
+// Run a counter's db.batch, once more if the database picked it as a
+// deadlock victim (as auth-flows' counterBatch): the failure must be
+// counted, not answered 500. Only at top level. See the Lua counter_batch.
+function counterBatch(fn) {
+    const outer = db.inTransaction();
+    try {
+        db.batch(fn);
+    } catch (e) {
+        const msg = String(e && e.message !== undefined ? e.message : e);
+        if (outer || !msg.toLowerCase().includes("deadlock")) throw e;
+        db.batch(fn);
+    }
+}
+
+// Is there a row for this key? A plain, non-locking read (audit 31), which
+// decides whether a counter must INSERT its row first. An UPDATE matching no
+// row took a GAP lock under MySQL's REPEATABLE READ, so two counters making
+// different new keys in one gap deadlocked on their INSERTs; an INSERT
+// IGNORE of an existing row takes a shared lock, which deadlocked two
+// counters of one key on their UPDATEs (audit 30 re-audit). The read takes
+// neither. Table and column are this module's literals.
+function rowPresent(sql, params) {
+    const r = db.query(sql, params);
+    return Boolean(r && r.length > 0);
+}
+
 function bumpFailedAttempt(userId) {
     const now = time.now();
     let newLockout = null;
@@ -431,21 +457,19 @@ function bumpFailedAttempt(userId) {
     // threshold-crossing one. The UPDATE takes the row lock (held to the
     // commit), and the SELECT after it reads this transaction's own row.
     // insertIfAbsent / db.exec are each backend's own dialect (a
-    // hand-written INSERT ... ON CONFLICT is not MySQL syntax). The UPDATE
-    // comes first and the INSERT-if-absent only for a new row: a MySQL
-    // duplicate INSERT of an existing row takes a shared lock, and two verifies
-    // both holding one deadlocked on the UPDATE (audit 30 re-audit; see
-    // auth-flows' bumpFailedLogin).
-    db.batch(() => {
-        const countSql = "UPDATE _hull_totp_attempts SET failed_count = "
-            + "failed_count + 1, last_failed_at = ? WHERE user_id = ?";
-        if ((db.exec(countSql, [now, userId]) || 0) === 0) {
+    // hand-written INSERT ... ON CONFLICT is not MySQL syntax). Only a new
+    // key is inserted, decided by a non-locking read (rowPresent: the MySQL
+    // gap- and shared-lock deadlocks, audits 30 / 31).
+    counterBatch(() => {
+        if (!rowPresent("SELECT 1 AS present FROM _hull_totp_attempts "
+                        + "WHERE user_id = ?", [userId])) {
             // 0, not NULL, for "not locked", as the Lua twin stores it:
             // lockoutRemaining reads anything not in the future as unlocked.
             db.insertIfAbsent("_hull_totp_attempts", ["user_id"],
                 ["user_id", "failed_count", "locked_until"], [userId, 0, 0]);
-            db.exec(countSql, [now, userId]);
         }
+        db.exec("UPDATE _hull_totp_attempts SET failed_count = "
+            + "failed_count + 1, last_failed_at = ? WHERE user_id = ?", [now, userId]);
         const r = db.query(
             "SELECT failed_count FROM _hull_totp_attempts WHERE user_id = ?", [userId]);
         const newFc = (r && r[0] && Number(r[0].failed_count)) || 0;
@@ -501,27 +525,31 @@ function bumpFailedAttemptIp(ip, userId) {
     // The database increments the count (audit 30), as in bumpFailedAttempt:
     // the UPDATE takes the IP row's lock, held to the commit, before any
     // share row, so concurrent failures (and creditSuccessIp, which takes
-    // the IP row first too) are serialised and none is lost; every read
-    // after it is of a row this transaction wrote. failed_count is assigned
-    // before last_failed_at, which its CASE reads: MySQL evaluates a
-    // single-table SET left to right. Each UPDATE runs before its
-    // INSERT-if-absent, which only a new row needs (the MySQL shared-lock
-    // deadlock, see bumpFailedAttempt).
-    db.batch(() => {
-        // A success does not clear the count (audit 26), so it ages out:
-        // failures more than lockoutDurationPerIp apart start it again.
-        // locked_until is 0, not locked (see bumpFailedAttempt), unless this
-        // failure locks it below.
-        const countSql = "UPDATE _hull_totp_attempts_by_ip SET failed_count = "
-            + "CASE WHEN last_failed_at IS NOT NULL AND ? - last_failed_at > ? "
-            + "THEN 1 ELSE failed_count + 1 END, last_failed_at = ?, "
-            + "locked_until = 0 WHERE ip = ?";
-        const countParams = [now, _state.lockoutDurationPerIp, now, ip];
-        if ((db.exec(countSql, countParams) || 0) === 0) {
+    // the IP row first too) queue on it and none is lost; every read after
+    // it is of a row this transaction wrote. failed_count is assigned before
+    // last_failed_at, which its CASE reads: MySQL evaluates a single-table
+    // SET left to right. Only a new key is inserted, decided by a
+    // non-locking read (rowPresent, audit 31).
+    counterBatch(() => {
+        if (!rowPresent("SELECT 1 AS present FROM _hull_totp_attempts_by_ip "
+                        + "WHERE ip = ?", [ip])) {
             db.insertIfAbsent("_hull_totp_attempts_by_ip", ["ip"],
                 ["ip", "failed_count", "locked_until"], [ip, 0, 0]);
-            db.exec(countSql, countParams);
         }
+        // A success does not clear the count (audit 26), so it ages out:
+        // failures more than lockoutDurationPerIp apart start it again. A
+        // lock still running is kept (audit 31): this failure passed
+        // lockoutRemainingIp before another instance locked the IP, and
+        // writing 0 here unlocked it. Its CASE reads only locked_until
+        // itself, no column assigned before it. Otherwise locked_until is 0,
+        // not locked (see bumpFailedAttempt), unless this failure locks it
+        // below.
+        db.exec("UPDATE _hull_totp_attempts_by_ip SET failed_count = "
+            + "CASE WHEN last_failed_at IS NOT NULL AND ? - last_failed_at > ? "
+            + "THEN 1 ELSE failed_count + 1 END, last_failed_at = ?, "
+            + "locked_until = CASE WHEN locked_until IS NOT NULL "
+            + "AND locked_until > ? THEN locked_until ELSE 0 END WHERE ip = ?",
+            [now, _state.lockoutDurationPerIp, now, now, ip]);
         const r = db.query(
             "SELECT failed_count FROM _hull_totp_attempts_by_ip WHERE ip = ?", [ip]);
         const newFc = (r && r[0] && Number(r[0].failed_count)) || 1;
@@ -535,14 +563,14 @@ function bumpFailedAttemptIp(ip, userId) {
                 [now + _state.lockoutDurationPerIp, ip]);
             db.exec("DELETE FROM _hull_totp_attempts_by_ip_user WHERE ip = ?", [ip]);
         } else if (typeof userId === "string") {
-            const shareSql = "UPDATE _hull_totp_attempts_by_ip_user SET "
-                + "failed_count = failed_count + 1, last_failed_at = ? "
-                + "WHERE ip = ? AND user_id = ?";
-            if ((db.exec(shareSql, [now, ip, userId]) || 0) === 0) {
+            if (!rowPresent("SELECT 1 AS present FROM _hull_totp_attempts_by_ip_user "
+                            + "WHERE ip = ? AND user_id = ?", [ip, userId])) {
                 db.insertIfAbsent("_hull_totp_attempts_by_ip_user", ["ip", "user_id"],
                     ["ip", "user_id", "failed_count"], [ip, userId, 0]);
-                db.exec(shareSql, [now, ip, userId]);
             }
+            db.exec("UPDATE _hull_totp_attempts_by_ip_user SET "
+                + "failed_count = failed_count + 1, last_failed_at = ? "
+                + "WHERE ip = ? AND user_id = ?", [now, ip, userId]);
         }
     });
 }
@@ -551,12 +579,16 @@ function bumpFailedAttemptIp(ip, userId) {
 // the IP back out of its count (audit 28). See the Lua twin.
 function creditSuccessIp(ip, userId) {
     if (typeof ip !== "string" || ip === "" || typeof userId !== "string") return;
-    db.batch(() => {
+    counterBatch(() => {
         // The IP row's lock first, as bumpFailedAttemptIp takes it: taking
         // the share first (the DELETE) and the IP row second, a concurrent
         // success and failure from one IP deadlocked (audit 30 re-audit).
         // Held to the commit, it also keeps the share read below from
-        // changing under it. No IP row: nothing to credit.
+        // changing under it. No IP row: nothing to credit - asked first with
+        // a non-locking read, since an UPDATE matching no row takes a gap
+        // lock (audit 31).
+        if (!rowPresent("SELECT 1 AS present FROM _hull_totp_attempts_by_ip "
+                        + "WHERE ip = ?", [ip])) return;
         const held = db.exec("UPDATE _hull_totp_attempts_by_ip SET "
                 + "failed_count = failed_count WHERE ip = ?", [ip]);
         if ((held || 0) === 0) return;

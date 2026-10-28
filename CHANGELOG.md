@@ -34,6 +34,28 @@ release-artifact layout).
   `make wamrc`); AOT from an older wamrc is refused. The runtime's lack of hardware bound
   checks is now pinned (`WASM_DISABLE_HW_BOUND_CHECK=1`). `hull build` also hashes the wamrc
   binary by streaming it: a ~90 MB wamrc failed the build with "out of memory".
+- **Concurrent first failures deadlocked the lockout counters on MySQL** (audit 31, both
+  runtimes). The audit-30 re-audit ran the counter's UPDATE first and the INSERT-if-absent
+  only when it matched no row; but an UPDATE matching no row takes a gap lock under
+  REPEATABLE READ, so two requests creating different new keys in one gap - the per-(account,
+  IP) login keys are adjacent - deadlocked on their INSERTs (ERROR 1213). The losing request
+  answered 500, and since the per-IP row was bumped before the account row, its guess counted
+  against neither. Every counter (auth-flows login, TOTP per-user, per-IP and per-IP share,
+  and the TOTP success credit) now asks with a plain, non-locking `SELECT` whether its row
+  exists, inserts only a new key, then updates; a counter picked as a deadlock victim at top
+  level is run once more. A failed password check bumps the account row before the per-IP
+  row, so a failure on the second cannot leave the guess uncounted against the account.
+- **A TOTP failure could undo another instance's per-IP lock** (audit 31, both runtimes).
+  The per-IP count's UPDATE always wrote `locked_until = 0`, so a failure that passed the
+  lock check just before another instance locked the IP unlocked it again. A lock still
+  running is now kept. (The audit-30 note that these counters were serialised so that none
+  was lost was true of the counts, not of the lock.)
+- **`/login` response time told known addresses from unknown ones** (audit 31, both
+  runtimes). An unknown address ran the dummy PBKDF2 verify but skipped the lockout reads
+  and, on failure, the counter writes a known address did. An unknown address is now counted
+  under an internal key derived from it (SHA-256 of its ASCII-lowercased form, under a
+  prefix no account key can have), with the same reads and writes, and throttled the same
+  way; a locked unknown address gets the same 401 as a locked account.
 
 - **MySQL: a COMMIT tripped in its wait is finished; insert_if_absent refuses a truncated
   value** (audit 31).
