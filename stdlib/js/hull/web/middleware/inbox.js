@@ -49,11 +49,31 @@ function normSource(source) {
     return source;
 }
 
+// 1 when s holds a lone surrogate, which has no UTF-8 encoding: it reached
+// a utf8mb4 column as replacement bytes, and a MySQL that stored a truncated
+// value made a genuine id a false duplicate (audit 31; see the Lua sibling).
+function hasLoneSurrogate(s) {
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xD800 && c <= 0xDBFF) {
+            const d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+            if (d >= 0xDC00 && d <= 0xDFFF) { i++; continue; }
+            return true;
+        }
+        if (c >= 0xDC00 && c <= 0xDFFF) return true;
+    }
+    return false;
+}
+
 function checkIdLen(messageId, source) {
     if (messageId && messageId.length > MAX_ID_LEN)
         throw new Error("inbox: messageId too long (max " + MAX_ID_LEN + ")");
+    if (messageId && hasLoneSurrogate(messageId))
+        throw new Error("inbox: messageId is not valid Unicode (a lone surrogate)");
     if (source && source.length > MAX_ID_LEN)
         throw new Error("inbox: source too long (max " + MAX_ID_LEN + ")");
+    if (source && hasLoneSurrogate(source))
+        throw new Error("inbox: source is not valid Unicode (a lone surrogate)");
 }
 
 // A ttl is a positive, finite NUMBER of seconds (audit 15): a string one

@@ -433,7 +433,7 @@ function bumpFailedAttempt(userId) {
     // insertIfAbsent / db.exec are each backend's own dialect (a
     // hand-written INSERT ... ON CONFLICT is not MySQL syntax). The UPDATE
     // comes first and the INSERT-if-absent only for a new row: a MySQL
-    // INSERT IGNORE of an existing row takes a shared lock, and two verifies
+    // duplicate INSERT of an existing row takes a shared lock, and two verifies
     // both holding one deadlocked on the UPDATE (audit 30 re-audit; see
     // auth-flows' bumpFailedLogin).
     db.batch(() => {

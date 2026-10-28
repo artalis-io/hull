@@ -2016,4 +2016,225 @@ UTEST(mysql_backend, temporary_table_rollback_is_not_resumed)
     close(sv[0]);
 }
 
+/* ── Audit 31: a COMMIT tripped in its wait is finished ───────────── */
+
+/* A thread that writes @p buf to @p fd after @p delay_ms. */
+typedef struct {
+    int            fd;
+    const uint8_t *buf;
+    size_t         len;
+    int            delay_ms;
+} MyLate;
+
+static void *my_late_main(void *p)
+{
+    MyLate *l = p;
+    struct timespec ts = { l->delay_ms / 1000, (long)(l->delay_ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+    if (write(l->fd, l->buf, l->len) != (ssize_t)l->len) return NULL;
+    return NULL;
+}
+
+/* The run's budget trips while the OK of a lone COMMIT is awaited (it comes
+ * 300 ms later). The COMMIT was wholly sent, so the server commits whatever
+ * the client does: the wait used to abandon the connection with IN_TRANS
+ * still set, the commit was reported failed, and the next ROLLBACK was
+ * answered done unsent - a retry applied the batch twice. The reply is read
+ * on (no budget asked) and its status taken; the trip stays sticky. */
+UTEST(mysql_backend, a_commit_tripped_in_its_wait_is_finished)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    ASSERT_TRUE(my_in_trans(&h));
+
+    HlMyWriter late; hl_my_writer_init(&late);
+    put_ok_more(&late, 1, 0x0002);                      /* COMMIT: autocommit */
+    put_ok_more(&late, 1, 0x0002);                      /* the next statement */
+    MyLate l = { .fd = sv[0], .buf = late.buf, .len = late.len, .delay_ms = 300 };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, my_late_main, &l));
+
+    my_charges = 0;
+    my_trip_at = 1;                      /* the first slice's ask trips */
+    HlDbBudgetBinding prev = hl_db_budget_swap(my_count_trip_fn, NULL);
+    int64_t t0 = my_test_ms();
+    int rc = mysql_commit(&h);
+    int64_t spent = my_test_ms() - t0;
+    int still = hl_db_budget_charge(0);
+    hl_db_budget_restore(prev);
+    pthread_join(th, NULL);
+    EXPECT_EQ(0, rc);                    /* the commit the server made */
+    EXPECT_NE(0, still);                 /* the run still raises the trip */
+    EXPECT_TRUE(spent >= 250 && spent < 2000);
+    EXPECT_EQ(0, ctx.conn.broken);
+    EXPECT_TRUE(ctx.conn.transport != NULL);
+    EXPECT_FALSE(mysql_in_txn(&h));      /* the guard rolls nothing "back" */
+
+    /* In step, and no longer finishing: the next statement reads its reply. */
+    EXPECT_TRUE(mysql_exec(&h, "SELECT 1", NULL, 0) >= 0);
+    EXPECT_EQ(0, ctx.conn.finishing);
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    hl_my_writer_free(&late);
+    close(sv[0]);
+}
+
+/* The same trip, but the server never answers: the finishing read asks no
+ * budget, so it is held to HL_MY_FINISH_MAX_MS (here ?read_timeout=0, no
+ * other bound) and the connection is then abandoned as before audit 31 -
+ * IN_TRANS still set, so calls refuse until a ROLLBACK. */
+UTEST(mysql_backend, an_unanswered_finishing_commit_is_abandoned_after_the_bound)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    memset(&h, 0, sizeof h);
+    memset(&ctx, 0, sizeof ctx);
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db?read_timeout=0",
+                                 &dsn, err, sizeof err));
+    ASSERT_EQ(0, hl_my_conn_start(&ctx.conn, sv[1], &dsn));
+    h.backend = &hl_db_backend_mysql;
+    h.ctx = &ctx;
+    h.batch_depth = 1;
+    ASSERT_EQ(0, mysql_begin(&h));
+
+    my_charges = 0;
+    my_trip_at = 1;
+    HlDbBudgetBinding prev = hl_db_budget_swap(my_count_trip_fn, NULL);
+    int64_t t0 = my_test_ms();
+    int rc = mysql_commit(&h);
+    int64_t spent = my_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent >= HL_MY_FINISH_MAX_MS - 100 && spent < HL_MY_FINISH_MAX_MS + 2000);
+    EXPECT_EQ(1, ctx.conn.broken);
+    EXPECT_TRUE(ctx.conn.transport == NULL);
+    EXPECT_TRUE(mysql_in_txn(&h));
+    /* refused until a ROLLBACK, which the server did with the session */
+    EXPECT_EQ(-1, mysql_exec(&h, "INSERT INTO a VALUES (1)", NULL, 0));
+    EXPECT_EQ(0, mysql_rollback(&h));
+    EXPECT_FALSE(mysql_in_txn(&h));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A statement that is not one COMMIT ("COMMIT; DELETE ...") never
+ * finishes: the trip abandons it at once, as before. */
+UTEST(mysql_backend, only_a_lone_commit_finishes)
+{
+    EXPECT_TRUE(sql_is_commit("COMMIT"));
+    EXPECT_TRUE(sql_is_commit(" commit work ; "));
+    EXPECT_FALSE(sql_is_commit("COMMIT; DELETE FROM t"));
+    EXPECT_FALSE(sql_is_commit("/*!COMMIT*/"));
+    EXPECT_FALSE(sql_is_commit("ROLLBACK"));
+
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+
+    my_charges = 0;
+    my_trip_at = 1;
+    HlDbBudgetBinding prev = hl_db_budget_swap(my_count_trip_fn, NULL);
+    int64_t t0 = my_test_ms();
+    int rc = mysql_exec(&h, "COMMIT; DELETE FROM t", NULL, 0);
+    int64_t spent = my_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent < 1000);           /* abandoned at the first ask */
+    EXPECT_TRUE(ctx.conn.transport == NULL);
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* ── Audit 31: insert_if_absent refuses a truncated value ─────────── */
+
+static void put_prepare_ok_1param(HlMyWriter *s)
+{
+    size_t m = hl_my_packet_begin(s, 1);
+    hl_my_put_u8(s, HL_MY_PKT_OK);
+    hl_my_put_u32(s, 1);
+    hl_my_put_u16(s, 0);                            /* num_columns */
+    hl_my_put_u16(s, 1);                            /* num_params */
+    hl_my_put_u8(s, 0);
+    hl_my_put_u16(s, 0);
+    hl_my_packet_end(s, m);
+    put_col_def(s, 2, "?", HL_MY_TYPE_VAR_STRING);
+    put_eof(s, 3);
+}
+
+/* insert_if_absent was INSERT IGNORE, which downgrades every error to a
+ * warning: an invalid utf8mb4 value or one too long for its column was
+ * stored TRUNCATED and the call succeeded ('evt_1\xff' stored as 'evt_1',
+ * then the genuine 'evt_1' read as a duplicate). It is a plain INSERT now:
+ * ER_DUP_ENTRY is "already there" (0, no COM_PING), any other error fails
+ * the call - strict mode rolled the statement back, so nothing was stored. */
+UTEST(mysql_backend, insert_if_absent_is_a_plain_insert)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    put_prepare_ok_1param(&s);
+    build_err(&s, 1, HL_MY_ER_DUP_ENTRY, "Duplicate entry 'k1' for key 'PRIMARY'");
+    put_prepare_ok_1param(&s);
+    build_err(&s, 1, 1366, "Incorrect string value: '\\xFF\\xFE' for column 'id'");
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* PING */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+
+    const char *cols[] = { "id" };
+    HlValue v1 = { .type = HL_TYPE_TEXT, .s = "k1", .len = 2 };
+    EXPECT_EQ(0, mysql_insert_if_absent(&h, "t", cols, 1, cols, &v1, 1));
+    EXPECT_EQ(0, ctx.conn.broken);
+    EXPECT_EQ(0, ctx.txn_aborted);
+    EXPECT_TRUE(my_in_trans(&h));        /* a duplicate keeps the transaction */
+
+    HlValue v2 = { .type = HL_TYPE_TEXT, .s = "evt_1\xff\xfe", .len = 7 };
+    EXPECT_EQ(-1, mysql_insert_if_absent(&h, "t", cols, 1, cols, &v2, 1));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "Incorrect string value") != NULL);
+    EXPECT_EQ(0, ctx.txn_aborted);       /* the ping found the transaction */
+    EXPECT_TRUE(my_in_trans(&h));
+
+    /* What the client sent: never INSERT IGNORE. */
+    shutdown(sv[1], SHUT_WR);
+    char got[8192];
+    size_t n = 0;
+    ssize_t r;
+    while (n < sizeof got - 1 && (r = read(sv[0], got + n, sizeof got - 1 - n)) > 0)
+        n += (size_t)r;
+    got[n] = '\0';
+    int saw_insert = 0, saw_ignore = 0;
+    for (size_t i = 0; i + 11 <= n; i++) {
+        if (memcmp(got + i, "INSERT INTO", 11) == 0) saw_insert++;
+        if (memcmp(got + i, "IGNORE", 6) == 0) saw_ignore++;
+    }
+    EXPECT_EQ(2, saw_insert);
+    EXPECT_EQ(0, saw_ignore);
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 UTEST_MAIN()

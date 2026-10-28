@@ -255,11 +255,18 @@ static int my_wait_stop(void *ud);
  * run deadline asked. A trip closes the connection, as a trip mid-reply
  * does; a timeout or a failed write leaves it broken (part of the packet may
  * have gone, so the stream is out of step). */
+static int my_io_left(HlMyConn *conn, uint64_t *started);
+
 static int conn_send(HlMyConn *conn, const uint8_t *buf, size_t len)
 {
-    int rc = hl_db_transport_send_sliced(conn->transport, buf, len,
-                                         conn->read_timeout_ms,
-                                         my_wait_stop, NULL);
+    /* While finishing (no budget asked) the write is held to what is left of
+     * the finishing bound too, not ?read_timeout= alone. */
+    uint64_t started = 0;
+    int timeout = my_io_left(conn, &started);
+    if (timeout < 0) { my_abandon(conn); return -1; }
+    int rc = hl_db_transport_send_sliced(conn->transport, buf, len, timeout,
+                                         conn->finishing ? NULL : my_wait_stop,
+                                         NULL);
     if (rc == 0) return 0;
     if (rc == -2) {
         conn->broken = 1;      /* first: the close sends no close_notify */
@@ -280,6 +287,45 @@ static int my_wait_stop(void *ud)
 {
     (void)ud;
     return hl_db_budget_charge(0) != 0;
+}
+
+/* What is left of the finishing bound, -1 once it has passed (never 0). */
+static int my_finish_left(HlMyConn *conn)
+{
+    int bound = HL_MY_FINISH_MAX_MS;
+    if (conn->read_timeout_ms > 0 && conn->read_timeout_ms < bound)
+        bound = conn->read_timeout_ms;
+    return hl_db_transport_time_left(&conn->finish_started, bound);
+}
+
+/* What is left of ?read_timeout= measured from *@p started, narrowed to the
+ * finishing bound while finishing: 0 = no bound, -1 = run out. */
+static int my_io_left(HlMyConn *conn, uint64_t *started)
+{
+    int left = hl_db_transport_time_left(started, conn->read_timeout_ms);
+    if (left < 0 || !conn->finishing)
+        return left;
+    int fleft = my_finish_left(conn);
+    if (fleft < 0)
+        return -1;
+    return (left == 0 || fleft < left) ? fleft : left;
+}
+
+/* The run asked to stop while a reply was awaited. After a lone COMMIT was
+ * wholly sent the server commits regardless, so the reply is read on in the
+ * bounded finishing mode (0) instead of dropped - which kept IN_TRANS, so
+ * the commit was reported lost and the next ROLLBACK answered done unsent
+ * while the server had committed (audit 31); otherwise the connection is
+ * abandoned (-1). The trip is sticky: the run raises it at its next poll. */
+static int my_stop_or_finish(HlMyConn *conn)
+{
+    if (conn->commit_sent && !conn->finishing) {
+        conn->finishing = 1;
+        conn->finish_started = 0;   /* the bound starts at the next read */
+        return 0;
+    }
+    my_abandon(conn);
+    return -1;
 }
 
 /* Read one packet. The returned body is valid until the next call, which
@@ -314,7 +360,9 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
         /* Still incomplete after a chunk: the run is asked after every one,
          * not only after a quiet slice - a server sending a large packet a
          * byte at a time, each within a slice, was never stopped (audit 21). */
-        if (got && my_wait_stop(NULL)) { my_abandon(conn); return -1; }
+        if (got && !conn->finishing && my_wait_stop(NULL) &&
+            my_stop_or_finish(conn) != 0)
+            return -1;
         /* NEED_MORE: grow if full (bounded by the 24-bit packet cap), then read. */
         if (conn->rlen == conn->rcap) {
             /* Up to one whole packet (header + 24-bit payload), clamped:
@@ -340,13 +388,26 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
             conn_set_err(conn, "read failed or timed out (see ?read_timeout=)");
             return -1;
         }
+        /* Finishing a tripped run's COMMIT reply asks no budget, so its whole
+         * read is held to a short absolute bound instead; on expiry the
+         * connection is abandoned with IN_TRANS still set (refuse until
+         * ROLLBACK), as a trip did before audit 31. */
+        if (conn->finishing) {
+            int fleft = my_finish_left(conn);
+            if (fleft < 0) { my_abandon(conn); return -1; }
+            if (left == 0 || fleft < left) left = fleft;
+        }
         int wr = hl_db_transport_wait_readable(conn->transport, left,
-                                               my_wait_stop, NULL);
-        if (wr == -2) { my_abandon(conn); return -1; }
+                                               conn->finishing ? NULL : my_wait_stop,
+                                               NULL);
+        if (wr == -2) {
+            if (my_stop_or_finish(conn) != 0) return -1;
+            continue;   /* finishing now: wait again, under its bound */
+        }
         /* What the wait left: passed its own `left`, the read could spend as
-         * long again (audit 22). */
-        if (wr == 1 &&
-            (left = hl_db_transport_time_left(&started, conn->read_timeout_ms)) < 0)
+         * long again (audit 22) - and, while finishing, no more than the
+         * finishing bound. */
+        if (wr == 1 && (left = my_io_left(conn, &started)) < 0)
             wr = 0;
         ssize_t n = -1;
         if (wr == 1) {
@@ -355,10 +416,14 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
             do { n = hl_db_transport_recv_sliced(conn->transport,
                                                  conn->rbuf + conn->rlen,
                                                  conn->rcap - conn->rlen,
-                                                 left, my_wait_stop, NULL); }
+                                                 left,
+                                                 conn->finishing ? NULL : my_wait_stop,
+                                                 NULL); }
             while (n == -1 && errno == EINTR);
+            /* A stop mid-record leaves the TLS stream out of step: close. */
             if (n == -2) { my_abandon(conn); return -1; }
         }
+        if (n < 0 && conn->finishing) { my_abandon(conn); return -1; }
         if (n <= 0) {
             conn_set_err(conn, n < 0 ? "read failed or timed out (see ?read_timeout=)"
                                      : "connection closed by server");
@@ -791,6 +856,17 @@ static int reply_frame(HlMyConn *conn, HlMyFrame *f, unsigned may_end)
     return -1;
 }
 
+/* A command starts: no finishing state carries over from the last one, and
+ * only hl_my_conn_query takes commit_next (the caller sets it for that call
+ * alone). */
+static void my_cmd_reset(HlMyConn *conn)
+{
+    conn->commit_next = 0;
+    conn->commit_sent = 0;
+    conn->finishing = 0;
+    conn->finish_started = 0;
+}
+
 static int refuse_if_broken(HlMyConn *conn)
 {
     if (!conn->broken) return 0;
@@ -859,6 +935,8 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
                      int64_t *affected)
 {
     if (affected) *affected = -1;
+    int is_commit = conn->commit_next;
+    my_cmd_reset(conn);
     if (refuse_if_broken(conn) != 0) return -1;
 
     /* COM_QUERY is a fresh command: the packet sequence restarts at 0. */
@@ -880,6 +958,7 @@ int hl_my_conn_query(HlMyConn *conn, const char *sql,
     int se = conn_send(conn, w.buf, w.len);
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send query"); return -1; }
+    conn->commit_sent = is_commit;   /* wholly sent: the server will commit */
 
     HlMyFrame f;
     if (reply_frame(conn, &f, MY_END_OK | MY_END_ERR) != 0) return -1;
@@ -1167,6 +1246,7 @@ int hl_my_conn_query_prepared(HlMyConn *conn, const char *sql,
                               void *cb_ctx, int64_t *affected)
 {
     if (affected) *affected = -1;
+    my_cmd_reset(conn);
     if (refuse_if_broken(conn) != 0) return -1;
 
     /* 1. COM_STMT_PREPARE (fresh command: sequence restarts at 0). */
@@ -1434,6 +1514,7 @@ static int drain_one_result(HlMyConn *conn, int *more)
 
 int hl_my_conn_ping(HlMyConn *conn)
 {
+    my_cmd_reset(conn);
     if (refuse_if_broken(conn) != 0) return -1;
     /* Keep the failed statement's message and code for the caller: the ping
      * is bookkeeping, not the call the app made. */
@@ -1466,6 +1547,7 @@ int hl_my_conn_ping(HlMyConn *conn)
 
 int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)
 {
+    my_cmd_reset(conn);
     if (refuse_if_broken(conn) != 0) return -1;
     HlMyWriter w; hl_my_writer_init(&w);
     size_t m = hl_my_packet_begin(&w, 0);

@@ -67,6 +67,20 @@ test("checkAndMark returns true for second call", () => {
     assertEq(dup, true, "second call should be duplicate");
 });
 
+test("checkAndMark refuses a lone surrogate (audit 31)", () => {
+    let threw = null;
+    try { inbox.checkAndMark("evt_1\uD800", "test"); } catch (e) { threw = String(e); }
+    assertEq(threw !== null && threw.includes("lone surrogate"), true, String(threw));
+    threw = null;
+    try { inbox.markProcessed("\uDC00evt", "test"); } catch (e) { threw = String(e); }
+    assertEq(threw !== null && threw.includes("lone surrogate"), true, String(threw));
+    threw = null;
+    try { inbox.checkAndMark("evt_2", "src\uDBFF"); } catch (e) { threw = String(e); }
+    assertEq(threw !== null && threw.includes("source is not valid"), true, String(threw));
+    // a surrogate PAIR is a valid code point
+    assertEq(inbox.checkAndMark("js-\u00e9vt-\uD83D\uDE00", "test"), false);
+});
+
 // ── default source ───────────────────────────────────────────────────
 
 test("default source works", () => {
