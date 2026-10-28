@@ -53,12 +53,11 @@ release-artifact layout).
     valid UTF-8 (in JS, one with a lone surrogate).
 - **In-flight `http.fetch` responses are bounded per VM** (audit 31). Keel buffers each async
   response (the decompressed body included, up to `max_response_size`, 4 MiB by default) off the
-  VM heap, and only the request body was counted, so `Promise.all` of 2000 large fetches could
-  hold about 8 GiB beside a 64 MB heap limit. Each async fetch now holds its body plus the
-  response limit on the VM's off-heap total under the heap limit, and a VM keeps at most 64
-  fetches in flight; past either, `http.fetch` raises ("too many requests in flight") before
-  starting anything. Both runtimes. With the default heap that allows 16 default fetches in
-  flight per VM.
+  VM heap, and nothing counted the fetches in flight, so `Promise.all` of 2000 large fetches
+  could hold about 8 GiB beside a 64 MB heap limit. A VM now keeps at most 64 fetches in flight;
+  past that, `http.fetch` raises ("too many requests in flight") before starting anything. The
+  response buffers a VM holds are bounded by in-flight count x `max_response_size` (256 MiB by
+  default). Both runtimes.
 - **TUI only after the manifest admits it** (audit 31). The `hull.tui` bindings acquired the
   terminal without checking the manifest, so an app's top level - which runs before the manifest
   is applied, and in the manifest-extraction VM behind `hull build` / `manifest` / `check` /

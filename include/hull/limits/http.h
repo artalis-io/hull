@@ -74,47 +74,32 @@ static inline int hl_http_max_redirects(int configured)
 /* ── In-flight http.fetch admission (audit 31) ───────────────────────
  *
  * Keel buffers every async response (decompressed body included, bounded by
- * max_response_size) on its own allocator, outside the VM heap, until the op
- * is done. Only the request body was held on the VM's off-heap total, and
- * nothing counted the fetches a VM kept in flight, so
- * `Promise.all(2000 x http.fetch(big))` could hold ~8 GiB beside a 64 MB
- * heap limit. Each async fetch now holds its body PLUS the response limit
- * on that total (under the heap limit), and a VM keeps at most
- * HL_HTTP_MAX_INFLIGHT fetches in flight. The hold and the count go back
- * when the op's ctx goes (shared/async.c). */
+ * max_response_size, 4 MiB by default) on its own allocator, outside the VM
+ * heap, until the op is done, and nothing counted the fetches a VM kept in
+ * flight: `Promise.all(2000 x http.fetch(big))` could hold ~8 GiB beside a
+ * 64 MB heap limit. A VM now keeps at most HL_HTTP_MAX_INFLIGHT fetches in
+ * flight, so the response buffers it can hold are bounded by
+ * HL_HTTP_MAX_INFLIGHT x max_response_size. The request body Keel copies is
+ * still held on the VM's off-heap total under the heap limit (audit 22).
+ * The count and the hold go back when the op's ctx goes (shared/async.c). */
 #define HL_HTTP_MAX_INFLIGHT          64
-/* Keel's KL_HTTP_CLIENT_DEFAULT_MAX_RESP (max_response_size 0); checked
- * against it in cap/http_async.c. */
-#define HL_HTTP_DEFAULT_MAX_RESPONSE  ((size_t)4 * 1024 * 1024)
-
-/* The bytes a fetch reserves for its response: the configured limit, or
- * Keel's default when none is set. */
-static inline size_t hl_http_response_reserve(size_t max_response_size)
-{
-    return max_response_size ? max_response_size : HL_HTTP_DEFAULT_MAX_RESPONSE;
-}
 
 enum {
     HL_HTTP_ADMIT_OK       = 0,
     HL_HTTP_ADMIT_INFLIGHT = -1,   /* HL_HTTP_MAX_INFLIGHT already in flight */
-    HL_HTTP_ADMIT_HEAP     = -2,   /* body + response past the heap limit */
+    HL_HTTP_ADMIT_HEAP     = -2,   /* the body copy past the heap limit */
 };
 
 /* Admit one more async fetch: @p inflight is the VM's count, @p total its
  * off-heap counter, @p limit its heap limit (0 = none). On success @p hold
- * holds @p body_len + the response reservation; on refusal nothing is
- * held. */
+ * holds @p body_len; on refusal nothing is held. */
 static inline int hl_http_fetch_admit(int inflight, HlOffheapHold *hold,
                                       size_t *total, size_t limit,
-                                      size_t body_len,
-                                      size_t max_response_size)
+                                      size_t body_len)
 {
     if (inflight >= HL_HTTP_MAX_INFLIGHT)
         return HL_HTTP_ADMIT_INFLIGHT;
-    size_t resp = hl_http_response_reserve(max_response_size);
-    if (body_len > (size_t)-1 - resp)
-        return HL_HTTP_ADMIT_HEAP;
-    if (hl_offheap_take(hold, total, limit, body_len + resp) != 0)
+    if (hl_offheap_take(hold, total, limit, body_len) != 0)
         return HL_HTTP_ADMIT_HEAP;
     return HL_HTTP_ADMIT_OK;
 }
