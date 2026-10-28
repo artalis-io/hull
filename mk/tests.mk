@@ -45,12 +45,12 @@ endif
 ifeq ($(HL_LINK_TLS),0)
   TEST_SRCS := $(filter-out %/test_tls_client.c %/test_tls_mbedtls_multi_ctx.c \
       %/test_asym.c %/test_ca_trust.c %/test_net_resolve.c %/test_net_stream.c \
-      %/test_ssh.c %/test_agent_probe.c,$(TEST_SRCS))
+      %/test_net_stream_race.c %/test_ssh.c %/test_agent_probe.c,$(TEST_SRCS))
 endif
 # cap/net_stream.c and cap/ssh.c go whenever both HTTP halves are off, even
 # with TLS linked for a network DB (the Makefile's CAP_SRCS filter).
 ifeq ($(HL_ENABLE_HTTP_CLIENT)$(HL_ENABLE_HTTP_SERVER),00)
-  TEST_SRCS := $(filter-out %/test_net_stream.c %/test_ssh.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_net_stream.c %/test_net_stream_race.c %/test_ssh.c,$(TEST_SRCS))
 endif
 
 # Drop DB-dependent tests in pure-compute builds.
@@ -348,6 +348,15 @@ SMTP_TP_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_smtp.o $(BUILDDIR)/cap_smtp_tr
 $(BUILDDIR)/test_smtp_transport: $(TESTDIR)/hull/cap/test_smtp_transport.c \
     $(SRCDIR)/hull/cap/smtp.c $(SRCDIR)/hull/cap/smtp_transport.c $(SMTP_TP_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) -DHL_SMTP_TEST_HOOKS $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SMTP_TP_TEST_LIBS) $(LDFLAGS)
+
+# Net stream connect-race test: defines its own hl_net_resolve (a blackhole
+# address first, loopback second) so a Happy-Eyeballs race is deterministic, so
+# cap_net_resolve.o is EXCLUDED from this test's link (audit 33).
+NET_RACE_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_net_resolve.o,$(TEST_COMMON_LIBS))
+NET_RACE_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_net_resolve.o,$(TEST_COMMON_DEPS))
+$(BUILDDIR)/test_net_stream_race: $(TESTDIR)/hull/cap/test_net_stream_race.c \
+    $(NET_RACE_TEST_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(NET_RACE_TEST_LIBS) $(LDFLAGS)
 
 # SMTP op test: direct-includes src/hull/cap/smtp_op.c under -DHL_SMTP_TEST_HOOKS
 # to drive its allocation seam (the deterministic fail-after-N sweep + scrub

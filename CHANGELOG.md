@@ -59,6 +59,18 @@ release-artifact layout).
   statements, and the `import_database` / `export_database` / `copy_database` pragma names,
   under every file policy (`hl_cap_db_sql_reads_whole_database`, read like the audit-25
   dynamic-SQL check: any case, comments between the words, any statement of the text).
+- **A losing connect attempt left its watcher on a closed descriptor** (audit 33, `hull/ssh`
+  and every other `cap/net_stream.c` stream). If a name resolved to several addresses and a
+  later one won while an earlier attempt was still in flight (for example, a dual-stack host
+  with IPv6 blackholed past the 250 ms stagger), the losing descriptor was closed without
+  removing its `attempt_ready` watcher. The registration stayed on a closed fd number. On
+  epoll, the next socket to get that number could not be watched (`EPOLL_CTL_MOD` failed), so
+  a connect through it failed or a connected stream's reads and writes never woke. Each race
+  poisoned one more number for the life of the process. On the poll backend, that socket's
+  readiness went to a callback for the old stream. The watcher is now removed before the
+  descriptor closes. `test_net_stream_race` drives the race with a fake resolver (blackhole
+  first, loopback second) on both backends.
+
 - **`ws.connect` clients were uncounted, each holding up to 20 MiB off the heap** (audit 32).
   Every Keel client connection keeps an outbound drain (up to 4 MiB) and a message reassembly
   buffer (up to 16 MiB) on Keel's allocator until it is freed, and nothing limited how many a
