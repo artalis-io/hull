@@ -54,6 +54,19 @@ release-artifact layout).
     failure path, so a success and a failure from one IP could deadlock on Postgres / MySQL. It
     now locks the IP row first, which also keeps the share it reads from changing under it.
 
+- **JS: a transaction held across a wait by code no entry waits on** (audit 31). The wait check
+  ran only for runs an entry waits on. A continuation nobody awaits
+  (`hull.sleep(5).then(async () => ...)` from a synchronous handler), or the code of an ended
+  handler resumed inside another request's job drain, could run `const p = hull.sleep(20);
+  BEGIN; INSERT; await p; INSERT; COMMIT`: the first write was rolled back unseen, the second
+  autocommitted - and in the cross-request case the request whose drain ran that code had its
+  own acknowledged write rolled back with the other handler's transaction. A transaction left
+  open where such code stops (the end of an unwired resume, or the end of another run's jobs in
+  a drain, read from the new QuickJS `JS_GetPendingJobTag`) is now rolled back before anything
+  else runs, logged, and that code is not continued past its await. The reverse is closed too:
+  while a run is inside a transaction across a microtask yield (`BEGIN; await null; ...`),
+  another run's queued jobs no longer run inside it; they wait until it closes (QuickJS
+  `JS_ExecutePendingJobTagged` runs the active run's own jobs first).
 - **JS: `conn.close()` inside a ws client's `onClose` / `onError` was a use after free**
   (audit 30). The connection was not yet marked closed while the callback ran, so `close()`
   armed the 5 s close-handshake deadline after the callback's caller had disarmed it; the

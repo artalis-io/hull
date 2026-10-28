@@ -743,7 +743,19 @@ null` is the entry's own: an op it starts belongs to the run, and a `BEGIN` it r
 then wires every continuation into one run and checks; an async or multipart resume that waits
 again checks too - whether or not it started a new op (`await pa; BEGIN; ...; await pb` with
 `pb` made before the BEGIN waits across it all the same, audit 8 M7) - and so does an entry
-left waiting on a promise Hull does not drive (audit 8 c_db L1). Audit 7 H1 / M3 / M6: run after
+left waiting on a promise Hull does not drive (audit 8 c_db L1). Code no entry waits on is
+checked too (audit 31): the end of a resume whose continuation is unwired (`hull.sleep(5).then(async
+() => ...)` from a synchronous handler) fails that chain's run record (its continuations are
+wired with no handler promise, so each comes back to the check), and in `hl_js_run_jobs` the end
+of another run's stretch of jobs (QuickJS `JS_GetPendingJobTag`, HULL PATCH 0008) with a
+transaction open rolls it back before the active entry's next job runs and marks that run's tag
+failed (`HlJS.txn_failed_tags`, `hl_js_run_tag_failed`): its later resumes are not continued.
+Before, the other run's transaction swallowed the active request's acknowledged write. The
+reverse holds too: while the active run is inside a transaction across a microtask yield (`BEGIN;
+await null; ...`), the drain runs its own jobs first (`JS_ExecutePendingJobTagged`) and holds other
+runs' jobs back until the transaction closes; if the active run runs out of jobs with it still
+open, its stretch ended holding it (`hl_js_run_txn_hold_end`: rolled back, logged, tag failed) and
+the drain goes on. Audit 7 H1 / M3 / M6: run after
 the entry returned, those jobs ran with no request active (an op they started was detached and
 never waited for: an empty 200, then `res.json` into a recycled connection slot), or inside
 another entry's drain. The same holds for the toString of a failed run's error or rejection,

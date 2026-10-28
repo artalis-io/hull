@@ -111,6 +111,14 @@ void hl_db_registry_guard_hold(int delta);
 static inline void hl_db_registry_guard_hold(int delta) { (void)delta; }
 #endif
 
+/* 1 while hl_db_registry_guard_hold holds the guard off (the guard then
+ * rolls nothing back, so a caller that would report a rollback skips it). */
+#ifdef HL_ENABLE_DB
+int hl_db_registry_guard_held(void);
+#else
+static inline int hl_db_registry_guard_held(void) { return 0; }
+#endif
+
 /*
  * Point the registry at the app's databases map. The manifest is only known
  * after the app runs app.manifest(), which is after the registry is created

@@ -355,6 +355,29 @@ int hl_js_conn_held_elsewhere(HlJS *js, KlHttpConn *conn);
  * resume fails it instead of continuing it. 1 = the run is failed. */
 int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run);
 
+/* Audit 31: a transaction found open where code of run @p tag stops - the
+ * end of a resume whose continuation no entry waits on (an un-awaited
+ * `hull.sleep(5).then(async () => ...)`, an op made by another run's job),
+ * or the end of another run's job inside an entry's drain. That code is
+ * suspended holding it (or abandoned it), and what runs next - the active
+ * entry's own code, another request - would run inside it. Roll it back,
+ * log, and mark @p tag failed (hl_js_run_tag_failed), so no later resume of
+ * that run continues it. Nothing while the guard is held
+ * (hl_db_registry_guard_held: a test case's live transaction). 1 = found. */
+int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag);
+/* 1 when run @p tag held a transaction across a wait (above, or
+ * hl_js_run_yield_check): its continuations resume without continuing it. */
+int hl_js_run_tag_failed(const HlJS *js, uint64_t tag);
+/* 1 when hl_js_run_jobs should hold other runs' jobs back: a registry /
+ * db.open connection is in a transaction, the guard is not held, and the
+ * run is not over its budget (its jobs are being discarded). */
+int hl_js_run_txn_open(HlJS *js);
+/* The active run has no job left and a transaction still open while other
+ * runs' jobs wait (audit 31): its stretch ended holding it. Roll it back,
+ * log, and mark the active run's tag failed, so a resume does not continue
+ * it (the park's hl_js_run_yield_check no longer sees the transaction). */
+void hl_js_run_txn_hold_end(HlJS *js);
+
 /* Suspend js->active_conn for an attached op - hl_net_op_suspend, after the
  * gate's checks once more: the binding's argument conversions, between the
  * gate and here, can run app code (a getter) that parked a multipart read.

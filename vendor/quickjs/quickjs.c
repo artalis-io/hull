@@ -1870,6 +1870,15 @@ uint64_t JS_GetJobTag(JSRuntime *rt)
     return rt->job_tag;
 }
 
+/* HULL PATCH 0008 (audit 31): the tag the next pending job will run with */
+int JS_GetPendingJobTag(JSRuntime *rt, uint64_t *ptag)
+{
+    if (list_empty(&rt->job_list))
+        return 0;
+    *ptag = list_entry(rt->job_list.next, JSJobEntry, link)->tag;
+    return 1;
+}
+
 /* HULL PATCH 0006: see JS_SetStopFlag in quickjs.h */
 void JS_SetStopFlag(JSRuntime *rt, int *flag)
 {
@@ -2407,12 +2416,11 @@ BOOL JS_IsJobPending(JSRuntime *rt)
    if pctx != NULL. It may be NULL if the context was already
    destroyed or if no job was pending. The 'pctx' parameter is now
    absolete. */
+static int js_execute_job_entry(JSRuntime *rt, JSJobEntry *e, JSContext **pctx);
+
 int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx)
 {
-    JSContext *ctx;
     JSJobEntry *e;
-    JSValue res;
-    int i, ret;
 
     if (list_empty(&rt->job_list)) {
         if (pctx)
@@ -2422,6 +2430,31 @@ int JS_ExecutePendingJob(JSRuntime *rt, JSContext **pctx)
 
     /* get the first pending job and execute it */
     e = list_entry(rt->job_list.next, JSJobEntry, link);
+    return js_execute_job_entry(rt, e, pctx);
+}
+
+/* HULL PATCH 0008 (audit 31): run the first pending job queued with @tag,
+   leaving the jobs before it queued in order. Same return as
+   JS_ExecutePendingJob; 0 when no job has that tag. */
+int JS_ExecutePendingJobTagged(JSRuntime *rt, uint64_t tag, JSContext **pctx)
+{
+    struct list_head *el;
+    list_for_each(el, &rt->job_list) {
+        JSJobEntry *e = list_entry(el, JSJobEntry, link);
+        if (e->tag == tag)
+            return js_execute_job_entry(rt, e, pctx);
+    }
+    if (pctx)
+        *pctx = NULL;
+    return 0;
+}
+
+static int js_execute_job_entry(JSRuntime *rt, JSJobEntry *e, JSContext **pctx)
+{
+    JSContext *ctx;
+    JSValue res;
+    int i, ret;
+
     list_del(&e->link);
     ctx = e->realm;
     /* HULL PATCH 0008: the job runs with the tag it was queued under, and

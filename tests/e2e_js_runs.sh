@@ -44,6 +44,15 @@
 #       made was that request's: it held the other client's response for its
 #       whole wait.
 #
+# Audit 31:
+#   H   The wait check ran only for runs an entry waits on. A continuation no
+#       entry waits on (`hull.sleep(5).then(async () => ...)` from a
+#       synchronous handler) or code of another run (a handler that awaited a
+#       promise another request settled) could `const p = hull.sleep(20);
+#       BEGIN; INSERT; await p`: the first write was rolled back unseen, the
+#       rest autocommitted - and the request whose drain ran that code had its
+#       own acknowledged write rolled back with the other run's transaction.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -168,6 +177,79 @@ app.get("/rb", async (_req, res) => {
     if (raWake) { raWake(); raWake = null; }
     await null;
     res.json({ ok: "b" });
+});
+
+/* Audit 31: an un-awaited chain waits holding a transaction (u1 / u2 must
+ * not commit); the control (u3) opens and commits in one stretch. */
+let u31 = "none";
+app.get("/u31", (_req, res) => {
+    hull.sleep(5).then(async () => {
+        const p = hull.sleep(20);
+        conn.exec("BEGIN");
+        conn.exec("INSERT INTO t VALUES ('u1')");
+        await p;
+        conn.exec("INSERT INTO t VALUES ('u2')");
+        try { conn.exec("COMMIT"); u31 = "committed"; } catch (_e) { u31 = "threw"; }
+    });
+    hull.sleep(5).then(async () => {
+        await hull.sleep(5);
+        conn.exec("BEGIN");
+        conn.exec("INSERT INTO t VALUES ('u3')");
+        conn.exec("COMMIT");
+    });
+    res.text("started");
+});
+app.get("/u31state", (_req, res) => res.text(u31));
+/* ...and another request's code, run in /x31b's drain, opens one and waits:
+ * /x31b's own acknowledged write (xb) must survive, xa1 / xa2 must not
+ * commit. /y31a's code, run the same way, commits in one stretch (yc). */
+let x31Wake = null, y31Wake = null;
+app.get("/x31a", async (_req, res) => {
+    res.text("a");
+    await new Promise((r) => { x31Wake = r; });
+    const p = hull.sleep(20);
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('xa1')");
+    await p;
+    conn.exec("INSERT INTO t VALUES ('xa2')");
+    try { conn.exec("COMMIT"); } catch (_e) {}
+});
+app.get("/x31b", async (_req, res) => {
+    if (x31Wake) { x31Wake(); x31Wake = null; }
+    await null;
+    conn.exec("INSERT INTO t VALUES ('xb')");
+    res.text("b");
+});
+/* ...and the reverse: /r31c is inside a transaction across `await null`
+ * when /r31d's code (woken by /r31c) is queued: run there, its write (rd)
+ * joined /r31c's transaction and went with its ROLLBACK. */
+let r31Wake = null, r31d = "none";
+app.get("/r31d", async (_req, res) => {
+    res.text("d");
+    await new Promise((r) => { r31Wake = r; });
+    conn.exec("INSERT INTO t VALUES ('rd')");
+    r31d = conn.inTransaction() ? "inside" : "alone";
+});
+app.get("/r31c", async (_req, res) => {
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('rc1')");
+    if (r31Wake) { r31Wake(); r31Wake = null; }
+    await null;
+    conn.exec("INSERT INTO t VALUES ('rc2')");
+    conn.exec("ROLLBACK");
+    res.text("c");
+});
+app.get("/r31state", (_req, res) => res.text(r31d));
+app.get("/y31a", async (_req, res) => {
+    res.text("a");
+    await new Promise((r) => { y31Wake = r; });
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('yc')");
+    conn.exec("COMMIT");
+});
+app.get("/y31b", (_req, res) => {
+    if (y31Wake) { y31Wake(); y31Wake = null; }
+    res.text("b");
 });
 
 /* Every request passes this, 404s included: ~200 KB on req.ctx. */
@@ -417,6 +499,66 @@ fi
 sleep 1.8   # /ra's sleep resumes, detached, after both requests are over
 out=$(curl -s -m 10 "$URL/fast")
 [ "$out" = fast ] && pass "the ended run's op resumed harmlessly" || fail "after /ra's op" "$out"
+
+echo "=== audit 31: a transaction held across a wait by code no entry waits on ==="
+before=$(grep -c "async code waited while a transaction was open" "$TMPDIR/log" || true)
+curl -s -m 10 -o /dev/null "$URL/u31"
+sleep 0.5
+out=$(curl -s -m 10 "$URL/rows")
+case "$out" in
+    *'"u1"'*|*'"u2"'*) fail "nothing of the un-awaited chain's transaction is committed" "$out" ;;
+    *) pass "nothing of the un-awaited chain's transaction is committed" ;;
+esac
+case "$out" in
+    *'"u3"'*) pass "a transaction opened and committed in one stretch still commits" ;;
+    *) fail "a transaction opened and committed in one stretch still commits" "$out" ;;
+esac
+out=$(curl -s -m 10 "$URL/u31state")
+[ "$out" = none ] && pass "the chain is not continued past its wait" \
+    || fail "the chain is not continued past its wait" "$out"
+curl -s -m 10 -o /dev/null "$URL/x31a"
+out=$(curl -s -m 10 "$URL/x31b")
+sleep 0.5
+rows=$(curl -s -m 10 "$URL/rows")
+case "$rows" in
+    *'"xb"'*) [ "$out" = b ] && pass "the other request's acknowledged write survives" \
+                  || fail "the other request is answered" "$out" ;;
+    *) fail "the other request's acknowledged write survives" "$rows" ;;
+esac
+case "$rows" in
+    *'"xa1"'*|*'"xa2"'*) fail "nothing of the ended run's transaction is committed" "$rows" ;;
+    *) pass "nothing of the ended run's transaction is committed" ;;
+esac
+after=$(grep -c "async code waited while a transaction was open" "$TMPDIR/log" || true)
+[ "$after" -ge $((before + 2)) ] && pass "both waits are reported" \
+    || fail "both waits are reported" "$before -> $after"
+curl -s -m 10 -o /dev/null "$URL/y31a"
+curl -s -m 10 -o /dev/null "$URL/y31b"
+sleep 0.2
+out=$(curl -s -m 10 "$URL/rows")
+case "$out" in
+    *'"yc"'*) pass "another run's transaction committed in one stretch still commits" ;;
+    *) fail "another run's transaction committed in one stretch still commits" "$out" ;;
+esac
+
+echo "=== audit 31: another run's job queued while a transaction spans await null ==="
+curl -s -m 10 -o /dev/null "$URL/r31d"
+out=$(curl -s -m 10 -w ' %{http_code}' "$URL/r31c")
+[ "$out" = "c 200" ] && pass "the run with the transaction finishes normally" \
+    || fail "the run with the transaction finishes normally" "$out"
+sleep 0.2
+out=$(curl -s -m 10 "$URL/r31state")
+[ "$out" = alone ] && pass "the other run's code ran outside the transaction" \
+    || fail "the other run's code ran outside the transaction" "$out"
+rows=$(curl -s -m 10 "$URL/rows")
+case "$rows" in
+    *'"rd"'*) pass "the other run's write survives the rollback" ;;
+    *) fail "the other run's write survives the rollback" "$rows" ;;
+esac
+case "$rows" in
+    *'"rc1"'*|*'"rc2"'*) fail "the rolled-back transaction committed nothing" "$rows" ;;
+    *) pass "the rolled-back transaction committed nothing" ;;
+esac
 
 echo "=== audit 8 H1 / audit 18: the inherited accessors cannot be defined ==="
 # Audit 18: the intrinsics are frozen, so the Object.prototype `then` getter

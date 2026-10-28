@@ -333,7 +333,9 @@ no-op).
 **Files:** `vendor/quickjs/quickjs.c` (`JSRuntime.job_tag`, `JSJobEntry.tag`,
 `JSPromiseReactionData.tag`, `JS_EnqueueJob2`, `JS_ExecutePendingJob`,
 `fulfill_or_reject_promise`, `perform_promise_then`, `JS_SetJobTag` /
-`JS_GetJobTag`), `quickjs.h` (`JS_SetJobTag`, `JS_GetJobTag`)
+`JS_GetJobTag` / `JS_GetPendingJobTag` / `JS_ExecutePendingJobTagged`),
+`quickjs.h` (`JS_SetJobTag`, `JS_GetJobTag`, `JS_GetPendingJobTag`,
+`JS_ExecutePendingJobTagged`)
 **Found by:** audit 30 (M: cross-request op attribution)
 **Upstream:** Hull-specific.
 
@@ -363,6 +365,16 @@ the continuation it resumes (`HlJsRunLink.run_tag`), and
 entry's as another run's: detached, attached to no request and chained into
 no run (app.main's own run excepted, by its tag). `req.multipart()` reads are
 refused there too.
+
+Audit 31 adds `JS_GetPendingJobTag` (the tag the next pending job will run
+with), so `hl_js_run_jobs` can tell where another run's stretch of jobs ends:
+a transaction still open there is rolled back before the active entry's next
+job runs, and that run is not continued past its await. It also adds
+`JS_ExecutePendingJobTagged` (run the first pending job queued with a given
+tag, leaving the ones ahead of it in order): while the active run is inside a
+transaction across a microtask yield, the drain runs that run's own jobs
+first and holds other runs' jobs back until the transaction closes, so they
+never run inside it.
 
 Cost: one 64-bit field per job and per pending reaction, and two stores per
 job run. A runtime that never sets a tag (the worker.dispatch VM, the JS

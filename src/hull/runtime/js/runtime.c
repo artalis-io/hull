@@ -1423,10 +1423,50 @@ int hl_js_run_jobs(HlJS *js)
     int count = 0;
     int failed = 0;
     JSContext *ctx1;
+    /* The run whose code ran last: the drain's caller ran the active
+     * entry's. An open transaction found at the top of the loop is that
+     * run's - another run's stretch that ended holding one was rolled back
+     * below. */
+    uint64_t last_tag = js->entry_tag;
     for (;;) {
-        int ret = JS_ExecutePendingJob(js->rt, &ctx1);
-        if (ret == 0)
-            break;
+        /* A job of another run (audit 30) that ends with a transaction open
+         * left it to whatever runs next - the active entry's own code, which
+         * ran inside it: a request's acknowledged write went with the other
+         * run's rollback (audit 31). Checked once that run's stretch of
+         * jobs ends: at a job of another tag, or the end of the queue. */
+        uint64_t tag = 0, next = 0;
+        int foreign = JS_GetPendingJobTag(js->rt, &tag) &&
+                      tag != js->entry_tag;
+        int ret;
+        if (foreign && last_tag == js->entry_tag && hl_js_run_txn_open(js)) {
+            /* The reverse (audit 31): the active run is inside a transaction
+             * across a microtask yield (`BEGIN; await null; ...`), and the
+             * job at the head is another run's - run there, its writes
+             * joined the active run's transaction (lost with its rollback,
+             * or committed with it). The active run's own jobs go first;
+             * the other run's wait until the transaction closes. With none
+             * of its own left, the active run's stretch is over holding the
+             * transaction: that is a wait, so it is rolled back and the run
+             * failed (hl_js_run_txn_hold_end), and the drain goes on. */
+            ret = JS_ExecutePendingJobTagged(js->rt, js->entry_tag, &ctx1);
+            if (ret != 0) {
+                foreign = 0;
+            } else {
+                /* The head job runs next either way: even if the rollback
+                 * did not take, the drain never spins on it. */
+                hl_js_run_txn_hold_end(js);
+                ret = JS_ExecutePendingJob(js->rt, &ctx1);
+                if (ret == 0)
+                    break;
+            }
+        } else {
+            ret = JS_ExecutePendingJob(js->rt, &ctx1);
+            if (ret == 0)
+                break;
+        }
+        last_tag = foreign ? tag : js->entry_tag;
+        if (foreign && (!JS_GetPendingJobTag(js->rt, &next) || next != tag))
+            hl_js_run_tag_txn_check(js, tag);
         if (ret > 0) {
             count++;
             continue;
