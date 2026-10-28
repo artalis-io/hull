@@ -562,6 +562,8 @@ static void lua_push_worker_wasm_result(lua_State *L, void *driver)
 static int lua_compute_async_k(lua_State *L, int status, lua_KContext kctx)
 {
     (void)status;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "compute.async");
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)kctx;
     if (op && op->error)
         return luaL_error(L, "compute.async: %s", op->error_msg);

@@ -84,6 +84,18 @@ release-artifact layout).
   for the tool VM. `tool.extract_manifest_lua` / `_js` now return that error escaped, and
   `build.lua` prints file names through the new `tool.escape` (the `hl_log_escape_line` rules:
   CR / LF as `\r` / `\n`, other controls but tab as `\xNN`).
+- **A Lua coroutine whose async wait was abandoned could still be resumed** (audit 33). When
+  the runtime could not build an op's result (out of memory) it failed the handler without
+  resuming it, and a cancelled op (its request gone, the pool torn down) did the same; either
+  way the op was freed while the coroutine stayed suspended inside the binding's
+  `lua_yieldk`, and it was only unparked. An app that had kept `coroutine.running()` could
+  `coroutine.resume` it from a later request: `db.async` / `compute.async` /
+  `instance:async_call` continuations then read the freed op (a use-after-free, seen under
+  ASan in `lua_db_async_k`), and the dead handler ran on inside another request's run. Such a
+  coroutine is now marked abandoned, and `coroutine.resume` / `coroutine.close` refuse it for
+  good; every binding continuation also checks that it is the runtime's own resume before it
+  reads its context.
+
 - **`--verify-sig` loaded bytecode from the shared code cache** (audit 31). The signature and
   the disk gate hash an app's SOURCE, but the Lua / QuickJS bytecode and compiled-template
   caches are sealed with `~/.hull/cache.key`, which every app process of the user holds: a

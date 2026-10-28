@@ -872,6 +872,8 @@ static int lua_db_quote_identifier(lua_State *L)
 static int lua_db_async_k(lua_State *L, int status, lua_KContext kctx)
 {
     (void)status;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "db.async");
     HlWorkerDbOp *op = (HlWorkerDbOp *)kctx;
     if (op && op->error)
         return luaL_error(L, "db.async: %s", op->error_msg);

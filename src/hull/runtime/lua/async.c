@@ -91,14 +91,53 @@ void hl_lua_timer_reschedule(HlLuaTimer *t);
  * parked coroutine (hl_lua_guard_coroutine_lib). */
 static char hl_lua_parked_marker;
 
+/* A coroutine whose wait the runtime gave up on - its result could not be
+ * built (out of memory) or the op was cancelled (the request went away, the
+ * pool was torn down) - stays suspended inside the binding's lua_yieldk with
+ * the op freed under it. Unmarked, coroutine.resume from a later request ran
+ * the binding's continuation on the freed op (lua_db_async_k,
+ * lua_compute_async_k) and the dead handler on inside another run (audit
+ * 33). The mark is sticky: nothing clears it, so the coroutine is refused
+ * for good. */
+static char hl_lua_abandoned_marker;
+
+/* Set by hl_lua_async_resume for the span of its own lua_resume: the one
+ * resume a binding's continuation may act on (hl_lua_async_k_ok). */
+static char hl_lua_resuming_marker;
+
+static void **hl_lua_co_mark(lua_State *co)
+{
+    return (void **)lua_getextraspace(co);
+}
+
+static int hl_lua_thread_is_abandoned(lua_State *co)
+{
+    return co && *hl_lua_co_mark(co) == &hl_lua_abandoned_marker;
+}
+
 static void hl_lua_set_parked(lua_State *co, int on)
 {
-    if (co) *(void **)lua_getextraspace(co) = on ? &hl_lua_parked_marker : NULL;
+    if (co && !hl_lua_thread_is_abandoned(co))
+        *hl_lua_co_mark(co) = on ? &hl_lua_parked_marker : NULL;
+}
+
+static void hl_lua_set_abandoned(lua_State *co)
+{
+    if (co) *hl_lua_co_mark(co) = &hl_lua_abandoned_marker;
 }
 
 static int hl_lua_thread_is_parked(lua_State *co)
 {
-    return co && *(void **)lua_getextraspace(co) == &hl_lua_parked_marker;
+    return co && (*hl_lua_co_mark(co) == &hl_lua_parked_marker ||
+                  hl_lua_thread_is_abandoned(co));
+}
+
+int hl_lua_async_k_ok(lua_State *L)
+{
+    if (*hl_lua_co_mark(L) != &hl_lua_resuming_marker)
+        return 0;
+    *hl_lua_co_mark(L) = NULL;
+    return 1;
 }
 
 /* coroutine.resume / coroutine.close, refusing a parked coroutine; the
@@ -108,6 +147,9 @@ static int hl_lua_thread_is_parked(lua_State *co)
 static int hl_lua_co_guarded(lua_State *L)
 {
     lua_State *co = lua_tothread(L, 1);
+    if (hl_lua_thread_is_abandoned(co))
+        return luaL_error(L, "cannot resume or close a coroutine whose Hull "
+                             "operation was abandoned");
     if (hl_lua_thread_is_parked(co))
         return luaL_error(L, "cannot resume or close a coroutine that is "
                              "waiting on a Hull operation");
@@ -180,7 +222,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     lua_State *co = lc->co;
     KlHttpConn *conn = lc->conn;
 
-    if (!co) return;
+    if (!co || hl_lua_thread_is_abandoned(co)) return;
     hl_lua_set_parked(co, 0);   /* the runtime resumes it now */
 
     /* Restore per-request context so C functions called during resume
@@ -233,13 +275,20 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
          * with the error object on top (or, with no stack room even for
          * that, whatever is on top - hl_lua_error_text reads any value). */
         status = LUA_ERRMEM;
+        /* The coroutine stays suspended in the binding's lua_yieldk, and the
+         * op its continuation would read is freed once this returns: no one
+         * may resume it again (audit 33). */
+        hl_lua_set_abandoned(co);
     } else {
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
         /* A new run: budget.c. A resume of app.main itself keeps main's
          * deadline default (cap/run_watchdog.h). */
         HL_LUA_ARM_KIND(lua, co, co == lua->cli_main_co ? HL_RUN_MAIN
                                                         : HL_RUN_ENTRY);
+        *hl_lua_co_mark(co) = &hl_lua_resuming_marker;   /* hl_lua_async_k_ok */
         status = lua_resume(co, lua->L, nargs, &nres);
+        if (*hl_lua_co_mark(co) == &hl_lua_resuming_marker)
+            *hl_lua_co_mark(co) = NULL;   /* no continuation took it */
         status = hl_lua_resume_status(co, status);
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
     }
@@ -395,11 +444,15 @@ static void hl_lua_async_cancel(HlAsyncCont *self)
          * into a coroutine that may already have been collected. Touched
          * only while main is still alive. */
         if (lua->cli_main_co == lc->co)
-            hl_lua_set_parked(lc->co, 0);
+            hl_lua_set_abandoned(lc->co);   /* audit 33, as below */
         lc->thread_ref = LUA_NOREF;
         lc->co = NULL;
     } else {
-        hl_lua_set_parked(lc->co, 0);
+        /* Never resumed, and never resumable: it stays suspended in the
+         * binding's lua_yieldk with the op about to be freed. The app may
+         * still hold it (coroutine.running()); merely unparked,
+         * coroutine.resume ran the continuation on the freed op (audit 33). */
+        hl_lua_set_abandoned(lc->co);
         if (lc->thread_ref != LUA_NOREF) {
             luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
             lc->thread_ref = LUA_NOREF;
