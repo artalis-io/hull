@@ -22,6 +22,18 @@ release-artifact layout).
   file name holding ESC / OSC sequences or a newline could forge PASS lines, rewrite the
   terminal or write the clipboard (OSC 52). They are printed escaped now (`\x1b`, `\n`), as
   log records are; so are `hull migrate status`'s migration names.
+- **Compute AOT built by `hull build` could read and write host memory** (audit 31). `hull build`
+  ran wamrc without `--bounds-checks`, and on a 64-bit target wamrc then drops the software
+  bounds checks and relies on a guard region past linear memory. Hull's WAMR runtime reserves
+  none (it has no hardware bound check), so a module's loads and stores at `mem_base + addr`
+  went unchecked. `hull build` now passes `--bounds-checks=1 --stack-bounds-checks=1` (the flag
+  set is in the AOT cache key, so no entry compiled without them is reused); WAMR patch 0007's
+  stamp (now version 2) records both checks from what wamrc generated, and the runtime and
+  `hull build` refuse AOT without them - the module's `.wasm` runs in the interpreter instead.
+  Rebuild apps with AOT compute after updating Hull and wamrc (`hull tools install wamrc`, or
+  `make wamrc`); AOT from an older wamrc is refused. The runtime's lack of hardware bound
+  checks is now pinned (`WASM_DISABLE_HW_BOUND_CHECK=1`). `hull build` also hashes the wamrc
+  binary by streaming it: a ~90 MB wamrc failed the build with "out of memory".
 
 - **MySQL: a COMMIT tripped in its wait is finished; insert_if_absent refuses a truncated
   value** (audit 31).

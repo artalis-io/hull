@@ -1072,6 +1072,21 @@ jobs:
             || { echo "::error::AOT shared-heap e2e did not run its 5 checks to pass"; exit 1; }
           echo "compute AOT read spans + segments correctly under a real wamrc .aot."
 
+      - name: Compute AOT bounds-check E2E (audit 31, must NOT skip)
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          # Same embedded-hull + wamrc preconditions; run the script directly.
+          sh tests/ci_ensure_wamrc.sh
+          sh tests/e2e_compute_aot_bounds.sh 2>&1 | tee aotbounds.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::compute AOT bounds e2e failed (rc=$rc)"; exit "$rc"; }
+          if grep -qE '\bSKIP\b' aotbounds.log; then
+            echo "::error::AOT bounds e2e skipped (no embedded hull / no wamrc)"; exit 1
+          fi
+          grep -qE "compute-aot-bounds: 6 passed, 0 failed" aotbounds.log \
+            || { echo "::error::AOT bounds e2e did not run its 6 checks to pass"; exit 1; }
+
       - name: hull build of a Memory64 compute plugin E2E (#336, must NOT skip)
         timeout-minutes: 12
         run: |

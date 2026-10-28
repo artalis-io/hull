@@ -211,7 +211,17 @@ ifneq ($(WAMR_PATCH_PREREQ),)
 $(WAMR_SRCS) $(WAMR_INVOKE_SRC) $(WAMR_INVOKE_SRC_ARM64): $(WAMR_PATCH_PREREQ)
 endif
 
+# WASM_DISABLE_HW_BOUND_CHECK=1 (audit 31): Hull's runtime ships SOFTWARE bounds
+# checks - linear memory is mapped at its exact size, with no guard region, and
+# every AOT artifact must be compiled --bounds-checks=1 --stack-bounds-checks=1
+# (the wamrc stamp records it; cap/wasm_aot_stamp.h). This was already the
+# effective config (platform_internal.h enables HW checks only under
+# BUILD_TARGET_X86_64 / _AARCH64, which nothing here defines); it is pinned
+# explicitly so a later BUILD_TARGET fix cannot silently switch on WAMR's
+# SIGSEGV handler and 8 GiB-per-instance reservations, which would fight Hull's
+# own SIGBUS guard and its live-instance memory accounting. docs/wamr_patches.md.
 WAMR_CFLAGS := -std=c11 $(HL_OPT) -w $(WAMR_ARCH_DEFS) \
+	-DWASM_DISABLE_HW_BOUND_CHECK=1 \
 	-DWASM_ENABLE_INTERP=1 \
 	-DWASM_ENABLE_FAST_INTERP=1 \
 	-DWASM_ENABLE_AOT=1 \

@@ -15,15 +15,13 @@
  * back-compat.
  *
  * Bound-mode note: the AOT fixture is built --bounds-checks=1 (SW-bound), like
- * the sibling read-only-heap AOT test. Hull's `hull build` ships HW-bound AOT by
- * default (wamrc --bounds-checks=0 on 64-bit), but HW-bound turns an out-of-heap
- * access into a guard-page fault that the FULL runtime converts to a trap; a bare
- * unit harness lacks that setup, so an out-of-window access that the guard
- * correctly rejects from the shared heap then falls to linear memory and faults
- * raw instead of trapping. The guard's shared-heap SOFTWARE check is emitted
- * identically in both modes (aot_emit_memory.c, under `enable_shared_heap`,
- * independent of the linear-memory bounds mode), so SW-bound here proves the
- * guard deterministically; HW-bound end-to-end is exercised by e2e-compute.
+ * the sibling read-only-heap AOT test - and like `hull build` itself, which
+ * passes --bounds-checks=1 --stack-bounds-checks=1 since audit 31: Hull's
+ * runtime has no hardware bound check (no guard region past linear memory), so
+ * the runtime refuses AOT whose stamp does not record software bounds checks.
+ * The guard's shared-heap SOFTWARE check is emitted identically in both modes
+ * (aot_emit_memory.c, under `enable_shared_heap`, independent of the
+ * linear-memory bounds mode).
  *
  * See docs/wamr_shared_heap_guarded_subrange_design.md.
  * SPDX-License-Identifier: AGPL-3.0-or-later

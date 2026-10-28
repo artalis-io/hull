@@ -337,8 +337,15 @@ end
 -- vouching for the loop-header terminate check the compute timeout relies on.
 -- Mirrors include/hull/cap/wasm_aot_stamp.h (the runtime refuses the same
 -- files): magic "\0aot" at 0, target-info section (type 0, size 48) at 8, the
--- stamp at 40 - version (u32 LE) then "HULL" (0x48554C4C).
-local AOT_STAMP_VERSION = 1
+-- stamp at 40 - version + flags (u32 LE) then "HULL" (0x48554C4C).
+--
+-- Audit 31: the stamp's low u32 is the version in its low 16 bits plus flag
+-- bits wamrc sets from what it actually generated - 0x10000 memory bounds
+-- checks, 0x20000 native-stack bounds checks. Hull's WAMR runtime has no
+-- hardware bound check (no guard region past linear memory), so AOT code
+-- without software bounds checks would load and store host memory.
+local AOT_STAMP_VERSION = 2
+local AOT_STAMP_REQUIRED_FLAGS = 0x30000
 local function aot_stamp_status(path)
     local data = tool.read_file(path)
     if not data or #data < 64 then return "not an AOT file" end
@@ -346,13 +353,26 @@ local function aot_stamp_status(path)
     if magic ~= 0x746F6100 or sec_type ~= 0 or sec_size ~= 48 then
         return "not an AOT file"
     end
-    local version, stamp = string.unpack("<I4I4", data, 41)
+    local low, stamp = string.unpack("<I4I4", data, 41)
     if stamp ~= 0x48554C4C then return "no Hull terminate-check stamp" end
+    local version = low & 0xFFFF
     if version ~= AOT_STAMP_VERSION then
         return "stamp version " .. version .. ", expected " .. AOT_STAMP_VERSION
     end
+    if low & AOT_STAMP_REQUIRED_FLAGS ~= AOT_STAMP_REQUIRED_FLAGS then
+        return "compiled without software bounds checks"
+    end
     return nil
 end
+
+-- The wamrc flags every compute AOT is compiled with (audit 31). Also folded
+-- into the AOT cache key, so an entry compiled under another set is never
+-- reused. --bounds-checks=1 / --stack-bounds-checks=1: on a 64-bit target
+-- wamrc otherwise drops the memory bounds checks and relies on guard pages
+-- Hull's runtime does not reserve (docs/wamr_patches.md, "Bounds checks").
+-- --enable-shared-heap: see the comment at the spawn below.
+local AOT_WAMRC_FLAGS = {"--enable-shared-heap", "--bounds-checks=1",
+                         "--stack-bounds-checks=1"}
 
 -- WAMR picks its loader by these four bytes ("\0aot"), not by the file name,
 -- so AOT code saved as compute/<name>.wasm runs as AOT (round 7).
@@ -2403,7 +2423,8 @@ local function main()
                         -- anything that can change the AOT bytes.
                         local key, hit
                         if cache_enabled then
-                            key = aot_cache.key(wasm_path, arch, mem64, wamrc_id)
+                            key = aot_cache.key(wasm_path, arch, mem64, wamrc_id,
+                                                  AOT_WAMRC_FLAGS)
                             if key then
                                 hit = aot_cache.lookup(key, aot_path)
                             end
@@ -2433,22 +2454,27 @@ local function main()
                             -- from the module's (memory i64) type. (There is no
                             -- --enable-memory64 flag in the vendored WAMR; passing
                             -- it prints usage and fails -- the #336 bug this fixes.)
-                            local wamrc_args = {wamrc, "--target=" .. arch,
-                                                "--enable-shared-heap",
-                                                "-o", aot_path, wasm_path}
+                            local wamrc_args = {wamrc, "--target=" .. arch}
+                            for _, f in ipairs(AOT_WAMRC_FLAGS) do
+                                wamrc_args[#wamrc_args + 1] = f
+                            end
+                            wamrc_args[#wamrc_args + 1] = "-o"
+                            wamrc_args[#wamrc_args + 1] = aot_path
+                            wamrc_args[#wamrc_args + 1] = wasm_path
                             print("hull build: AOT " .. rel ..
                                   " -> " .. arch ..
                                   (mem64 and " (memory64)" or ""))
                             ok = tool.spawn(wamrc_args)
-                            -- An unpatched wamrc (no terminate-check stamp):
-                            -- its code would not stop at the compute timeout,
-                            -- and the runtime refuses it. Stop compiling AOT;
+                            -- An unpatched wamrc (no terminate-check stamp),
+                            -- an older patched one (stamp version 1), or one
+                            -- that ignored the bounds-check flags (audit 31):
+                            -- the runtime refuses its code. Stop compiling AOT;
                             -- the modules ship as .wasm (interpreter).
                             local why = ok and aot_stamp_status(aot_path)
                             if why then
                                 tool.remove_file(aot_path)
                                 print("hull build: warning: " .. wamrc ..
-                                      " is not Hull's patched wamrc (" .. why ..
+                                      " is not Hull's current patched wamrc (" .. why ..
                                       "); skipping AOT - modules run in the " ..
                                       "interpreter. Install Hull's with " ..
                                       "`hull tools install wamrc` (or `make wamrc`).")
