@@ -17,6 +17,7 @@
 #include "internal.h"   /* HL_LUA_ARM */
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/cap/http.h"
+#include "hull/limits/http.h"   /* HL_WS_CLIENT_MAX_LIVE (audit 32) */
 #include "hull/utils/alloc.h"
 #include "hull/shared/async.h"   /* HlAsyncTeardown */
 #include "hull/shared/async_backend.h"
@@ -47,6 +48,29 @@ static void lua_ws_client_disarm_connect(HlLuaWsClientUD *ud,
     ud->connect_timer = 0;
 }
 
+/* Free the Keel connection (never from inside one of Keel's callbacks) and
+ * give its live-client slot back: the buffers the slot stood for go with it
+ * (audit 32). */
+static void lua_ws_client_free_conn(HlLuaWsClientUD *ud)
+{
+    if (ud->client) {
+        kl_ws_client_free(ud->client);
+        ud->client = NULL;
+    }
+    hl_ws_client_slot_release(&ud->slot);
+}
+
+/* Drop a pending release turn (lua_ws_client_finish's). */
+static void lua_ws_client_cancel_release(HlLuaWsClientUD *ud,
+                                         HlAsyncBackendCtx *loop)
+{
+    if (ud->release_timer && loop) {
+        const HlAsyncBackend *be = hl_async_backend();
+        if (be) be->timer_cancel(loop, ud->release_timer);
+    }
+    ud->release_timer = 0;
+}
+
 /* Runtime teardown, the loop still alive: free the Keel connection now. The
  * userdata (and its refs) go with the Lua state. */
 static void lua_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *loop)
@@ -55,10 +79,8 @@ static void lua_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *l
         ((char *)t - offsetof(HlLuaWsClientUD, teardown));
     ud->closed = 1;
     lua_ws_client_disarm_connect(ud, loop);
-    if (ud->client) {
-        kl_ws_client_free(ud->client);
-        ud->client = NULL;
-    }
+    lua_ws_client_cancel_release(ud, loop);
+    lua_ws_client_free_conn(ud);
 }
 
 /* Client conn methods */
@@ -191,13 +213,13 @@ static int lua_ws_client_gc(lua_State *L)
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
     hl_async_teardown_unlink(&ud->teardown);
-    if (ud->lua && !ud->lua->base.shutting_down)
+    if (ud->lua && !ud->lua->base.shutting_down) {
         lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
-    ud->connect_timer = 0;
-    if (ud->client) {
-        kl_ws_client_free(ud->client);
-        ud->client = NULL;
+        lua_ws_client_cancel_release(ud, ud->lua->base.async_ctx);
     }
+    ud->connect_timer = 0;
+    ud->release_timer = 0;
+    lua_ws_client_free_conn(ud);
     unref_slot(L, &ud->on_open_ref);
     unref_slot(L, &ud->on_message_ref);
     unref_slot(L, &ud->on_close_ref);
@@ -334,6 +356,17 @@ static void lua_ws_client_on_message(KlWsClientConn *ws, const char *data,
     ws_client_call(ud, &c, "on_message");
 }
 
+/* The loop turn after the connection ended (a timer, not one of Keel's
+ * callbacks: safe to free there). Without it the Keel client - and its up to
+ * 4 MiB drain and frame buffer - lived until the userdata was collected, and
+ * an app that kept a closed client kept its slot (audit 32). */
+static void lua_ws_client_release(void *user_data)
+{
+    HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
+    ud->release_timer = 0;   /* fired */
+    lua_ws_client_free_conn(ud);
+}
+
 /* The connection is over (closed, or failed - Keel closes it before calling
  * on_error, and fires no on_close after). */
 static void lua_ws_client_finish(HlLuaWsClientUD *ud)
@@ -346,8 +379,17 @@ static void lua_ws_client_finish(HlLuaWsClientUD *ud)
     /* Mark closed (methods fail closed) but keep `client` non-NULL so __gc
      * frees the KlWsClientConn - Keel does NOT free it on close, and we must
      * not free it here either (Keel touches `ws` immediately after this
-     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
+     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`).
+     * It is freed on the next loop turn instead (audit 32); with no timer,
+     * __gc still frees it. */
     ud->closed = 1;
+    if (ud->client && !ud->release_timer && ud->lua &&
+        !ud->lua->base.shutting_down && ud->lua->base.async_ctx) {
+        const HlAsyncBackend *be = hl_async_backend();
+        ud->release_timer = be ? be->timer_add(ud->lua->base.async_ctx, 0,
+                                               lua_ws_client_release, ud)
+                               : 0;
+    }
 }
 
 static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
@@ -400,8 +442,7 @@ static void lua_ws_client_connect_expired(void *user_data)
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
     ud->connect_timer = 0;   /* fired */
     if (ud->closed || !ud->client) return;
-    kl_ws_client_free(ud->client);
-    ud->client = NULL;
+    lua_ws_client_free_conn(ud);
     lua_ws_client_on_error(NULL, "connect timeout", ud);
 }
 
@@ -414,8 +455,7 @@ static void lua_ws_client_close_expired(void *user_data)
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
     ud->connect_timer = 0;   /* fired */
     if (ud->closed || !ud->client) return;
-    kl_ws_client_free(ud->client);
-    ud->client = NULL;
+    lua_ws_client_free_conn(ud);
     static const char why[] = "close timeout";
     lua_ws_client_on_close(NULL, 1006, why, sizeof why - 1, ud);
 }
@@ -501,6 +541,24 @@ static int lua_ws_connect(lua_State *L)
     else
         lua_pop(L, 1);
 
+    /* A live-client slot (audit 32), after the handlers' conversions (app
+     * code) and before the Keel client exists. A client the app dropped
+     * whose Keel connection was not freed yet goes with a collection, so at
+     * the cap collect once and look again (as fs.mmap does for its SIGBUS
+     * slots). The userdata owns the slot from here: __gc gives it back if
+     * anything below raises. */
+    if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE) {
+        lua_gc(L, LUA_GCCOLLECT);
+        /* The collection ran __gc finalizers: app code. */
+        if (lua->base.shutting_down || !lua->base.async_ctx)
+            return luaL_error(L, "ws.connect: runtime is shutting down");
+    }
+    if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
+        return luaL_error(L, "ws.connect: too many live WebSocket clients "
+                          "(at most %d per VM)", HL_WS_CLIENT_MAX_LIVE);
+    lua->base.ws_clients++;
+    ud->slot = &lua->base.ws_clients;
+
     /* Store self-ref to prevent GC while connected */
     lua_pushvalue(L, -1); /* dup userdata */
     ud->self_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -520,6 +578,9 @@ static int lua_ws_connect(lua_State *L)
 #ifdef HL_ENABLE_HTTP_CLIENT
     wcfg.tls = parsed.is_https ? lua->base.http_cfg->tls : NULL;
 #endif
+    /* Keel's default frame limit is 16 MiB per client, off the heap:
+     * capped, so the live-client cap bounds the total (audit 32). */
+    wcfg.max_frame_size = hl_ws_client_max_frame(lua->mem_limit);
     KlWsClientConn *client = kl_ws_client_connect(
         &lua->server->ev, &lua->server->alloc_storage, &wcfg, url, &cbs, ud);
 
@@ -527,6 +588,7 @@ static int lua_ws_connect(lua_State *L)
         /* Clean up self_ref */
         luaL_unref(L, LUA_REGISTRYINDEX, ud->self_ref);
         ud->self_ref = LUA_NOREF;
+        hl_ws_client_slot_release(&ud->slot);
         return luaL_error(L, "WebSocket connect failed");
     }
 
@@ -547,8 +609,7 @@ static int lua_ws_connect(lua_State *L)
                            : 0;
     if (ud->connect_timer == 0) {
         hl_async_teardown_unlink(&ud->teardown);
-        kl_ws_client_free(ud->client);   /* not inside a Keel event */
-        ud->client = NULL;
+        lua_ws_client_free_conn(ud);   /* not inside a Keel event */
         ud->closed = 1;
         luaL_unref(L, LUA_REGISTRYINDEX, ud->self_ref);
         ud->self_ref = LUA_NOREF;

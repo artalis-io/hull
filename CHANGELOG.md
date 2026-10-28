@@ -52,6 +52,15 @@ release-artifact layout).
   statements, and the `import_database` / `export_database` / `copy_database` pragma names,
   under every file policy (`hl_cap_db_sql_reads_whole_database`, read like the audit-25
   dynamic-SQL check: any case, comments between the words, any statement of the text).
+- **`ws.connect` clients were uncounted, each holding up to 20 MiB off the heap** (audit 32).
+  Every Keel client connection keeps an outbound drain (up to 4 MiB) and a message reassembly
+  buffer (up to 16 MiB) on Keel's allocator until it is freed, and nothing limited how many a
+  VM kept: a loop of `ws.connect` to a peer that stops reading held gigabytes beside a 64 MB
+  heap. A VM now holds at most `HL_WS_CLIENT_MAX_LIVE` (64) clients - past it `ws.connect`
+  raises (after one garbage collection) - and each client's frame limit is 4 MiB (or the heap
+  limit, if lower). An ended client's Keel connection is freed on the next loop turn, not when
+  its object is collected, so a closed client the app still references gives its slot back.
+  Both runtimes. A message over 4 MiB from a peer now fails the connection (1009).
 
 - **`hull build` linked the app through a symbolic link at its output** (audit 32). The tool
   layer's path check canonicalised a path it could not `realpath` through its nearest existing

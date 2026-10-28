@@ -16,6 +16,7 @@
 #include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/http.h"
+#include "hull/limits/http.h"   /* HL_WS_CLIENT_MAX_LIVE (audit 32) */
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/utils/alloc.h"
 
@@ -44,6 +45,18 @@ static void js_ws_client_disarm_connect(HlJSWsClientUD *ud,
     ud->connect_timer = 0;
 }
 
+/* Free the Keel connection (never from inside one of Keel's callbacks) and
+ * give its live-client slot back: the buffers the slot stood for go with it
+ * (audit 32). */
+static void js_ws_client_free_conn(HlJSWsClientUD *ud)
+{
+    if (ud->client) {
+        kl_ws_client_free(ud->client);
+        ud->client = NULL;
+    }
+    hl_ws_client_slot_release(&ud->slot);
+}
+
 /* Runtime teardown, the loop still alive: free the Keel connection now and
  * drop the self-reference (a pending release timer is cancelled first), so
  * the object goes with the runtime. Releasing it can run the finalizer,
@@ -54,10 +67,7 @@ static void js_ws_client_teardown_stop(HlAsyncTeardown *t, HlAsyncBackendCtx *lo
         ((char *)t - offsetof(HlJSWsClientUD, teardown));
     ud->closed = 1;
     js_ws_client_disarm_connect(ud, loop);
-    if (ud->client) {
-        kl_ws_client_free(ud->client);
-        ud->client = NULL;
-    }
+    js_ws_client_free_conn(ud);
     if (ud->release_timer && loop) {
         const HlAsyncBackend *be = hl_async_backend();
         if (be) be->timer_cancel(loop, ud->release_timer);
@@ -85,8 +95,7 @@ static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
     if (ud->js && !ud->js->base.shutting_down)
         js_ws_client_disarm_connect(ud, ud->js->base.async_ctx);
     ud->connect_timer = 0;
-    if (ud->client)
-        kl_ws_client_free(ud->client);
+    js_ws_client_free_conn(ud);
 
     /* Mirror the gc_mark guards: callbacks may have been cleared to
      * JS_UNDEFINED by on_close before the finalizer runs. Freeing
@@ -408,6 +417,10 @@ static void js_ws_client_release_self(void *user_data)
 {
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
     ud->release_timer = 0;   /* fired */
+    /* The Keel client (a timer, not one of Keel's callbacks: safe), and its
+     * slot, go now: an app that kept the closed client kept them until the
+     * object was collected (audit 32). */
+    js_ws_client_free_conn(ud);
     if (JS_IsUndefined(ud->self_ref)) return;
     JSValue self = ud->self_ref;
     ud->self_ref = JS_UNDEFINED;
@@ -519,8 +532,7 @@ static void js_ws_client_connect_expired(void *user_data)
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
     ud->connect_timer = 0;   /* fired */
     if (ud->closed || !ud->client) return;
-    kl_ws_client_free(ud->client);
-    ud->client = NULL;
+    js_ws_client_free_conn(ud);
     js_ws_client_on_error(NULL, "connect timeout", ud);
 }
 
@@ -533,8 +545,7 @@ static void js_ws_client_close_expired(void *user_data)
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
     ud->connect_timer = 0;   /* fired */
     if (ud->closed || !ud->client) return;
-    kl_ws_client_free(ud->client);
-    ud->client = NULL;
+    js_ws_client_free_conn(ud);
     static const char why[] = "close timeout";
     js_ws_client_on_close(NULL, 1006, why, sizeof why - 1, ud);
 }
@@ -656,6 +667,25 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 
     JS_SetOpaque(obj, ud);
 
+    /* A live-client slot (audit 32), after the handlers' getters (app code)
+     * and before the Keel client exists. A client the app dropped whose Keel
+     * connection was not freed yet goes with a collection, so at the cap
+     * collect once and look again. The object owns the slot from here: its
+     * finalizer gives it back. */
+    if (js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
+        JS_RunGC(JS_GetRuntime(ctx));
+    if (js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE) {
+        JS_FreeCString(ctx, url);
+        JS_FreeValue(ctx, ud->self_ref);
+        ud->self_ref = JS_UNDEFINED;
+        JS_FreeValue(ctx, obj);
+        return JS_ThrowRangeError(ctx, "ws.connect: too many live WebSocket "
+                                  "clients (at most %d per VM)",
+                                  HL_WS_CLIENT_MAX_LIVE);
+    }
+    js->base.ws_clients++;
+    ud->slot = &js->base.ws_clients;
+
     /* Connect */
     KlWsClientCallbacks cbs = {
         .on_open = js_ws_client_on_open,
@@ -671,6 +701,9 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 #ifdef HL_ENABLE_HTTP_CLIENT
     wcfg.tls = parsed.is_https ? js->base.http_cfg->tls : NULL;
 #endif
+    /* Keel's default frame limit is 16 MiB per client, off the heap:
+     * capped, so the live-client cap bounds the total (audit 32). */
+    wcfg.max_frame_size = hl_ws_client_max_frame(js->max_heap_bytes);
     KlWsClientConn *client = kl_ws_client_connect(
         &js->server->ev, &js->server->alloc_storage, &wcfg, url, &cbs, ud);
 
@@ -678,6 +711,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 
     if (!client) {
         /* Connection failed immediately - clean up self_ref */
+        hl_ws_client_slot_release(&ud->slot);
         JS_FreeValue(ctx, ud->self_ref);
         ud->self_ref = JS_UNDEFINED;
         JS_FreeValue(ctx, obj);
@@ -706,9 +740,8 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
             JSValue self = ud->self_ref;
             ud->self_ref = JS_UNDEFINED;
             ud->closed = 1;
-            kl_ws_client_free(ud->client);   /* not inside a Keel event */
-            ud->client = NULL;
-            JS_FreeValue(ctx, self);         /* obj still holds ud */
+            js_ws_client_free_conn(ud);      /* not inside a Keel event */
+            JS_FreeValue(ctx, self);        /* obj still holds ud */
             JS_FreeValue(ctx, obj);
             return JS_ThrowTypeError(ctx, "WebSocket connect failed");
         }

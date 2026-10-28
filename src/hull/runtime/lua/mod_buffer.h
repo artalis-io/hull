@@ -152,6 +152,12 @@ typedef struct HlLuaWsClientUD {
     uint16_t        close_code;
     size_t          close_reason_len;
     char            close_reason[123];   /* a Close frame's reason limit */
+    /* The VM's live-client count (HlRuntime.ws_clients) while this client
+     * holds a slot, NULL once given back (audit 32). */
+    int            *slot;
+    /* The loop turn after the connection ended: the Keel client (and its
+     * buffers) is freed there, not at __gc (audit 32). 0 = none pending. */
+    uint64_t        release_timer;
 } HlLuaWsClientUD;
 
 /* conn userdata helpers (defined in lua/mod_ws.c) */

@@ -320,6 +320,10 @@ struct HlRuntime {
      * HL_HTTP_MAX_INFLIGHT; each op's ctx decrements it when it goes
      * (HlAsyncCtx.inflight, audit 31). */
     int http_inflight;
+    /* ws.connect clients whose Keel connection still exists on this VM, at
+     * most HL_WS_CLIENT_MAX_LIVE (audit 32); each gives its slot back when
+     * the Keel client is freed (hl_ws_client_slot_release). */
+    int ws_clients;
     /* Set by vt->stop_async: the server is being torn down. A WebSocket
      * closed by that teardown runs no on_close handler - the event loop is
      * going away under it (audit 15). */
