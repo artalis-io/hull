@@ -186,6 +186,10 @@ void hl_tool_cache_seal_prepare(void);
  * app compromised at native level could have planted, run inside a build or
  * a signing (audit 22: the AOT cache moved to the tool key for this in
  * audit 5; the bytecode caches had not). They compile from source instead.
+ *
+ * Also called by both app entry points (serve.c, serve_cli.c) under
+ * --verify-sig: the signature and the disk gate hash SOURCE, so a cache hit
+ * would run bytecode any sibling app of the user could have sealed (audit 31).
  */
 void hl_runtime_cache_code_off(int off);
 

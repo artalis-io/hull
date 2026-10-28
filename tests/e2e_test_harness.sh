@@ -200,6 +200,50 @@ check_runtime "lua" "$TMP/lua"
 echo "== JS =="
 check_runtime "js" "$TMP/js"
 
+# ── (audit 31) app text in hull test's output is escaped ─────────────
+# A test name or an error message holding ESC / OSC / a newline was printed
+# raw: it could forge PASS lines, rewrite the terminal, or write the clipboard
+# (OSC 52). Both are printed escaped now (\x1b, \n), file names too.
+mkdir -p "$TMP/esc_lua/tests" "$TMP/esc_js/tests"
+cat > "$TMP/esc_lua/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/http-server@1" } })
+app.get("/", function(req, res) res:json({ ok = true }) end)
+LUA
+cat > "$TMP/esc_lua/tests/test_esc.lua" <<'LUA'
+test("name\27[2K\rforged\n  PASS  fake", function() end)
+test("fails", function() error("boom\27]52;c;aGk=\7\n  PASS  fake2", 0) end)
+LUA
+cat > "$TMP/esc_js/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1"] });
+app.get("/", (req, res) => res.json({ ok: true }));
+JS
+cat > "$TMP/esc_js/tests/test_esc.js" <<'JS'
+test("name\x1b[2K\rforged\n  PASS  fake", () => {});
+test("fails", () => { throw new Error("boom\x1b]52;c;aGk=\x07\n  PASS  fake2"); });
+JS
+esc=$(printf '\033')
+bel=$(printf '\007')
+for rt in lua js; do
+    out="$("$HULL" test "$TMP/esc_$rt" 2>&1)" || true
+    case "$out" in
+        *"$esc"*|*"$bel"*) fail "$rt: hull test escapes app text" "a raw ESC / BEL reached the output" ;;
+        *'name\x1b[2K\rforged\n  PASS  fake'*)
+            pass "$rt: hull test prints a test name escaped" ;;
+        *) fail "$rt: hull test prints a test name escaped" "$out" ;;
+    esac
+    case "$out" in
+        *'boom\x1b]52;c;aGk=\x07\n  PASS  fake2'*)
+            pass "$rt: hull test prints an error message escaped" ;;
+        *) fail "$rt: hull test prints an error message escaped" "$out" ;;
+    esac
+    if printf '%s\n' "$out" | grep -q '^  PASS  fake'; then
+        fail "$rt: no forged PASS line" "$out"
+    else
+        pass "$rt: no forged PASS line"
+    fi
+done
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"

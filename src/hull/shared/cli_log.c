@@ -78,6 +78,26 @@ void hl_log_escape_line(const char *in, char *out, size_t outsz)
     out[o] = '\0';
 }
 
+void hl_log_fputs_escaped(FILE *f, const char *s)
+{
+    static const char hex[] = "0123456789abcdef";
+    if (!f) return;
+    for (const char *p = s ? s : ""; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\n' || c == '\r') {
+            fputc('\\', f);
+            fputc(c == '\n' ? 'n' : 'r', f);
+        } else if ((c < 0x20 && c != '\t') || c == 0x7f) {
+            fputc('\\', f);
+            fputc('x', f);
+            fputc(hex[c >> 4], f);
+            fputc(hex[c & 15], f);
+        } else {
+            fputc(c, f);
+        }
+    }
+}
+
 /* Lower-case level word for the terse default line ("warn", "error"). */
 static const char *level_word(int level)
 {

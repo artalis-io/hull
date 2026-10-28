@@ -12,6 +12,7 @@
 #ifdef HL_ENABLE_JS
 
 #include "hull/cap/test.h"
+#include "hull/shared/cli_log.h"   /* hl_log_fputs_escaped */
 #include "hull/runtime/test.h"
 #include "hull/runtime/js.h"
 #include "hull/utils/alloc.h"
@@ -558,14 +559,26 @@ void hl_js_test_clear(JSContext *ctx)
     state->cases = tcase_new_list(ctx);
 }
 
+/* A PASS / FAIL line on the optional writer, app text escaped (audit 31). */
+static void test_print_line(FILE *out, int passed, const char *desc,
+                            const char *err)
+{
+    if (!out) return;
+    fputs(passed ? "  PASS  " : "  FAIL  ", out);
+    hl_log_fputs_escaped(out, desc ? desc : "(unnamed)");
+    fputc('\n', out);
+    if (!passed) {
+        fputs("    ", out);
+        hl_log_fputs_escaped(out, err ? err : "unknown error");
+        fputc('\n', out);
+    }
+}
+
 /* Record a FAIL into the writer + results array, with formatted error. */
 static void record_fail(FILE *out, HlTestCaseResult *results, int max_results,
                         int idx, const char *desc, const char *msg)
 {
-    if (out)
-        fprintf(out, "  FAIL  %s\n    %s\n",
-                desc ? desc : "(unnamed)",
-                msg  ? msg  : "unknown error");
+    test_print_line(out, 0, desc, msg);
     if (results && idx < max_results) {
         snprintf(results[idx].name, sizeof(results[idx].name),
                  "%s", desc ? desc : "(unnamed)");
@@ -578,8 +591,7 @@ static void record_fail(FILE *out, HlTestCaseResult *results, int max_results,
 static void record_pass(FILE *out, HlTestCaseResult *results, int max_results,
                         int idx, const char *desc)
 {
-    if (out)
-        fprintf(out, "  PASS  %s\n", desc ? desc : "(unnamed)");
+    test_print_line(out, 1, desc, NULL);
     if (results && idx < max_results) {
         snprintf(results[idx].name, sizeof(results[idx].name),
                  "%s", desc ? desc : "(unnamed)");

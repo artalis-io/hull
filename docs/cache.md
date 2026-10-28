@@ -36,6 +36,11 @@ shared pool, so an app compromised at native level could read that key from
 its own memory and seal a forged AOT blob under a known `.wasm`'s key - native
 code the next `hull build` of another app would have embedded as a cache hit.
 
+For the same reason a process that must not trust other apps of the user
+loads no code from the runtime-key caches at all: the build tool (audit 22)
+and an app run with `--verify-sig` (audit 31), whose signature covers the
+source it compiles, not bytecode another app could have sealed.
+
 ## Why a cache layer
 
 Hull recompiles a lot. On every cold start a single app can run:

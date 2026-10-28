@@ -248,7 +248,7 @@ static int seal_mac(const SealKey *k, const char *kind, const char *key,
     return hl_cap_crypto_hmac_sha256(k->key, sizeof k->key, msg, off, mac);
 }
 
-/* The runtime-key code caches are off in a tool process
+/* The runtime-key code caches are off in a tool process and under --verify-sig
  * (hl_runtime_cache_code_off). Set once, before any VM or thread. */
 static volatile int g_code_cache_off;
 

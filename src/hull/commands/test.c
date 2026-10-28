@@ -17,6 +17,7 @@
 #include "hull/cap/test.h"
 #include "hull/cap/tool.h"
 #include "hull/test_runner.h"
+#include "hull/shared/cli_log.h"   /* hl_log_fputs_escaped */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,13 +42,20 @@ typedef struct {
 static void stdout_on_file_start(void *user, const char *basename)
 {
     (void)user;
-    printf("\n--- %s ---\n", basename);
+    /* App-controlled text (file names, test names, error messages) is
+     * printed escaped: an ESC / OSC sequence or a newline in it forged PASS
+     * lines or wrote the clipboard (audit 31). */
+    fputs("\n--- ", stdout);
+    hl_log_fputs_escaped(stdout, basename);
+    fputs(" ---\n", stdout);
 }
 
 static void stdout_on_file_load_error(void *user, const char *err)
 {
     (void)user;
-    fprintf(stderr, "  ERROR: %s\n", err ? err : "unknown");
+    fputs("  ERROR: ", stderr);
+    hl_log_fputs_escaped(stderr, err ? err : "unknown");
+    fputc('\n', stderr);
 }
 
 static void stdout_on_file_end(void *user,
@@ -59,10 +67,14 @@ static void stdout_on_file_end(void *user,
      * runner stores them in results[]; we emit them here. */
     for (int i = 0; i < count; i++) {
         const HlTestCaseResult *r = &results[i];
-        if (r->passed)
-            printf("  PASS  %s\n", r->name);
-        else
-            printf("  FAIL  %s\n    %s\n", r->name, r->error);
+        fputs(r->passed ? "  PASS  " : "  FAIL  ", stdout);
+        hl_log_fputs_escaped(stdout, r->name);
+        fputc('\n', stdout);
+        if (!r->passed) {
+            fputs("    ", stdout);
+            hl_log_fputs_escaped(stdout, r->error);
+            fputc('\n', stdout);
+        }
     }
     (void)file_total;
     (void)file_passed;

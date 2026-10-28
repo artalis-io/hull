@@ -40,6 +40,7 @@
 #define HL_SHARED_CLI_LOG_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 /**
  * @brief Install the CLI logging policy. Idempotent.
@@ -123,6 +124,13 @@ int hl_cli_log_is_native_source(const char *file);
  * ws / SSE error - cannot forge a line (audit 27). A message log.* already
  * escaped holds no CR / LF, so nothing is escaped twice. */
 void hl_log_escape_line(const char *in, char *out, size_t outsz);
+
+/* Write @p s to @p f escaped as hl_log_escape_line escapes it, untruncated.
+ * For app-controlled text printed to a terminal outside the log (hull test's
+ * PASS / FAIL lines, file names and load errors): raw, an ESC / OSC sequence
+ * or a newline in a test name or an error() message forged PASS lines or
+ * wrote the clipboard (OSC 52) (audit 31). */
+void hl_log_fputs_escaped(FILE *f, const char *s);
 
 /* Route log.c through the plain escaped line ("HH:MM:SS LEVEL message", plus
  * file:line under DEBUG) at @p level, replacing log.c's own stderr callback,

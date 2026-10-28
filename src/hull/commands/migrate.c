@@ -19,6 +19,7 @@
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap + raw */
 #include "hull/tool.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
+#include "hull/shared/cli_log.h"   /* hl_log_fputs_escaped */
 #include <limits.h>
 
 #include <stdio.h>
@@ -129,11 +130,17 @@ static int cmd_status(const char *app_dir, const char *db_path)
 
     printf("Migrations:\n");
     for (int i = 0; i < count; i++) {
+        /* A migration's name comes from the app's tree (or its database's
+         * _hull_migrations), so it is printed escaped (audit 31). */
+        fputs(entries[i].applied ? "  [x] " : "  [ ] ", stdout);
+        hl_log_fputs_escaped(stdout, entries[i].name);
         if (entries[i].applied) {
-            printf("  [x] %s  (%s)\n", entries[i].name,
-                   entries[i].applied_at ? entries[i].applied_at : "?");
+            fputs("  (", stdout);
+            hl_log_fputs_escaped(stdout, entries[i].applied_at
+                                         ? entries[i].applied_at : "?");
+            fputs(")\n", stdout);
         } else {
-            printf("  [ ] %s  (pending)\n", entries[i].name);
+            fputs("  (pending)\n", stdout);
         }
     }
 
