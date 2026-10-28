@@ -736,7 +736,13 @@ operation before it arms anything - a new JS wait primitive must call it).
 In JS the check runs again where the run actually yields (`hl_js_run_yield_check`), since a
 transaction can open after the op was made (`const p = http.fetch(..); conn.exec("BEGIN");
 await p`): the transaction is rolled back there and the run is failed at its next resume (500;
-`app.main` exits 1) without being continued. Every entry - dispatch, SSE, timers, ws-server and
+`app.main` exits 1) without being continued. The run's TAG is failed too, and stays failed while
+any pending job or reaction on a pending promise carries it (`HlJS.txn_dead_tags`, swept with
+QuickJS `JS_ForEachLiveJobTag`): a reaction the run left on a promise Hull does not drive is
+queued when that promise settles, maybe from a later request, and is dropped unrun - kept in a
+32-slot ring and cleared once the request was answered, it ran the code after the await in
+autocommit (audit 33). A handler left waiting only on such a promise is failed at once (500,
+`budget_txn_failed`), not answered an empty 200. Every entry - dispatch, SSE, timers, ws-server and
 ws-client callbacks, `app.main` - parks through `hl_js_entry_park` (`runtime/js/async.c`): it
 first runs the jobs the handler queued, with the entry still active (its code after `await
 null` is the entry's own: an op it starts belongs to the run, and a `BEGIN` it runs is seen),

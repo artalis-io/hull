@@ -197,13 +197,21 @@ typedef struct HlJS {
     uint64_t        run_tag_next;   /* last tag handed out */
     uint64_t        entry_tag;      /* the active run's */
     uint64_t        cli_main_tag;   /* app.main's own run's (0 = none) */
-    /* Runs that held a transaction across a wait (audit 31): a resume of a
-     * continuation whose run_tag is here is not continued. Its unwired and
-     * foreign continuations share no HlJsRunOnce, so the run is named by its
-     * tag. A ring: the oldest is overwritten, which only lets that chain go
-     * on as it did before the check (its transaction was rolled back). */
-    uint64_t        txn_failed_tags[32];
-    unsigned        txn_failed_next;
+    /* Runs that held a transaction across a wait (audits 31-33): their
+     * tags, sorted. A resume of a continuation whose run_tag is here is not
+     * continued, and a pending job queued under one is dropped unrun
+     * (hl_js_run_jobs) - whenever it is queued: a reaction the run left on a
+     * promise Hull does not drive can be queued long after the run was
+     * answered. A tag is forgotten only once no code can run under it any
+     * more - no pending job and no reaction on a pending promise carries it
+     * (the sweep in hl_js_run_tag_fail, JS_ForEachLiveJobTag) - so no live
+     * failed run is ever evicted (audit 33: a 32-slot ring overwrote, and a
+     * run's slot was freed when its request was answered). */
+    uint64_t       *txn_dead_tags;
+    size_t          txn_dead_len;
+    size_t          txn_dead_cap;
+    size_t          txn_dead_sweep_at;   /* sweep when len reaches this */
+    int             txn_dead_oom;        /* a tag could not be recorded */
 
     /* Every middleware req.ctx stored on a request (reqctx.h), so one whose
      * request ended without reaching a handler is freed (dispatch.c). */

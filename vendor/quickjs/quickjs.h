@@ -954,6 +954,11 @@ int JS_ExecutePendingJobTagged(JSRuntime *rt, uint64_t tag, JSContext **pctx);
 /* HULL PATCH 0008 (audit 32): drop the first pending job unrun (its
    arguments freed). 1 when one was dropped, 0 when none was pending. */
 int JS_DiscardPendingJob(JSRuntime *rt);
+/* HULL PATCH 0008 (audit 33): call @cb with the tag of every job that can
+   still run: each pending job and each reaction on a pending promise. -1
+   (nothing reported) while the GC runs. */
+int JS_ForEachLiveJobTag(JSRuntime *rt, void (*cb)(void *opaque, uint64_t tag),
+                         void *opaque);
 /* if can_block is TRUE, Atomics.wait() can be used */
 void JS_SetCanBlock(JSRuntime *rt, JS_BOOL can_block);
 /* select which debug info is stripped from the compiled code */

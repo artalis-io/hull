@@ -382,6 +382,15 @@ arguments freed): `hl_js_run_jobs` drops every job of a run that was failed
 for holding a transaction across a wait, so its code after the await does not
 run on in the same drain.
 
+Audit 33 adds `JS_ForEachLiveJobTag` (report the tag of every pending job and
+of every reaction on a pending promise; -1 while the collector runs). A failed
+run's tag must outlive its request: a reaction it left on a promise Hull does
+not drive is queued only when that promise settles, possibly from a much later
+request. Hull keeps every failed tag in a sorted set and sweeps it, when it has
+doubled, down to the tags this walk still reports - so a tag is forgotten only
+once no code can run under it, and the set is bounded by the reactions and
+jobs alive on the VM heap.
+
 Cost: one 64-bit field per job and per pending reaction, and two stores per
 job run. A runtime that never sets a tag (the worker.dispatch VM, the JS
 source frontend's tooling session) behaves as upstream.

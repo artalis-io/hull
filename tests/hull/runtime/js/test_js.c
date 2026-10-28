@@ -8944,13 +8944,57 @@ UTEST(js_audit6, a_run_that_waits_in_a_transaction_is_failed)
     free(msg);
     EXPECT_TRUE(hl_db_registry_open_txn(js.base.db_registry) != NULL);
     HlJsRunOnce run = {0};
-    EXPECT_EQ(hl_js_run_yield_check(&js, &run), 1);
+    EXPECT_EQ(hl_js_run_yield_check(&js, &run, 4242), 1);
     EXPECT_EQ(run.txn_held, 1);
+    /* Audit 33: its tag is failed too, so a job of it queued later is
+     * dropped. */
+    EXPECT_EQ(hl_js_run_tag_failed(&js, 4242), 1);
     EXPECT_TRUE(hl_db_registry_open_txn(js.base.db_registry) == NULL);
     /* Without a transaction open: nothing to fail. */
     HlJsRunOnce run2 = {0};
-    EXPECT_EQ(hl_js_run_yield_check(&js, &run2), 0);
+    EXPECT_EQ(hl_js_run_yield_check(&js, &run2, 4343), 0);
     EXPECT_EQ(run2.txn_held, 0);
+    EXPECT_EQ(hl_js_run_tag_failed(&js, 4343), 0);
+    cleanup_js_caps();
+}
+
+/* Audit 33: a failed run's tag is kept while code can still run under it -
+ * here a reaction on a pending promise registered under that tag - and only
+ * tags with nothing left are forgotten (the sweep): no live failed run is
+ * evicted, however many runs fail after it. */
+UTEST(js_audit33, failed_tag_kept_while_a_reaction_can_run)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    /* A reaction registered under tag 777 on a promise that never settles
+     * by itself. */
+    JS_SetJobTag(js.rt, 777);
+    EXPECT_EQ(a5_module_named("<a33-hold>",
+        "globalThis.__a33 = new Promise(() => {});\n"
+        "globalThis.__a33.then(() => {});\n", &msg), 0);
+    free(msg);
+    JS_SetJobTag(js.rt, 0);
+    EXPECT_EQ(a5_module_named("<a33-init>",
+        "import { db } from 'hull:db';\n"
+        "globalThis.__a33c = db.default();\n"
+        "globalThis.__a33c.exec('CREATE TABLE IF NOT EXISTS a33_t (v INTEGER)');\n",
+        &msg), 0);
+    free(msg);
+    for (uint64_t tag = 777; tag < 777 + 400; tag++) {
+        char name[32];
+        snprintf(name, sizeof name, "<a33-%u>", (unsigned)tag);
+        EXPECT_EQ(a5_module_named(name, "globalThis.__a33c.exec('BEGIN');\n",
+                                  &msg), 0);
+        free(msg);
+        HlJsRunOnce run = {0};
+        EXPECT_EQ(hl_js_run_yield_check(&js, &run, tag), 1);
+    }
+    /* 777 still has a live reaction: kept through every sweep. */
+    EXPECT_EQ(hl_js_run_tag_failed(&js, 777), 1);
+    /* The newest are still recorded; the set did not keep all 400. */
+    EXPECT_EQ(hl_js_run_tag_failed(&js, 777 + 399), 1);
+    EXPECT_LT(js.txn_dead_len, (size_t)400);
     cleanup_js_caps();
 }
 
