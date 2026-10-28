@@ -566,8 +566,16 @@ static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
         js->tui_idle_ms += waited;
         rearm = js->tui_idle_ms >= HL_JS_TUI_REARM_MIN_MS;
     }
-    if (js && rearm)
-        hl_js_budget_arm_kind(js, js->active_cli_main ? HL_RUN_MAIN : HL_RUN_ENTRY);
+    /* Only app.main's own run starts a new one here (audit 32). Any other
+     * entry that is not an HTTP request - a timer, a ws-server / ws-client
+     * callback, a hull:_task task - could also sit in a synchronous tui.run
+     * loop, and re-arming there renewed its deadline and budget for as long
+     * as the terminal kept producing events or idle ticks, holding the event
+     * loop past the run limit. Such an entry keeps the one run it was given
+     * (Lua's tui.poll yields to the loop, so its resume is an ordinary new
+     * run). */
+    if (js && rearm && js->active_cli_main)
+        hl_js_budget_arm_kind(js, HL_RUN_MAIN);
     if (rc < 0) return JS_ThrowInternalError(ctx, "tui.pollSync failed");
     if (rc == 1) return JS_NULL;
     return event_to_js(ctx, &ev);

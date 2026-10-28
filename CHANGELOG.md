@@ -18,6 +18,12 @@ release-artifact layout).
   for an address it found locked - one commit less, visible in the response time. A locked
   address now runs the same statements in a hold mode that leaves the count and the lock as
   they were, so locked and unlocked addresses do the same database work.
+- **A JS `tui.run` loop outside app.main renewed its own run limit** (audit 32). `tui.pollSync`
+  re-arms the instruction budget and the run deadline on each event (and after 50 ms of
+  waiting), meant for app.main's interactive session; but a timer, a WebSocket callback or a
+  `hull:_task` task of a serving app that admits TUI could run the same synchronous loop and
+  re-arm too, holding the event loop for as long as the terminal produced events or idle
+  ticks. Only app.main's own run re-arms now; any other entry keeps the single run it got.
 
 - **`--verify-sig` loaded bytecode from the shared code cache** (audit 31). The signature and
   the disk gate hash an app's SOURCE, but the Lua / QuickJS bytecode and compiled-template
