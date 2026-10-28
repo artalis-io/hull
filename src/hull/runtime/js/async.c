@@ -377,6 +377,25 @@ int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
     return 1;
 }
 
+static void hl_js_run_tag_fail(HlJS *js, uint64_t tag)
+{
+    if (tag == 0 || hl_js_run_tag_failed(js, tag)) return;
+    unsigned n = (unsigned)(sizeof js->txn_failed_tags /
+                            sizeof js->txn_failed_tags[0]);
+    js->txn_failed_tags[js->txn_failed_next % n] = tag;
+    js->txn_failed_next = (js->txn_failed_next + 1) % n;
+}
+
+int hl_js_run_tag_failed(const HlJS *js, uint64_t tag)
+{
+    if (!js || tag == 0) return 0;
+    unsigned n = (unsigned)(sizeof js->txn_failed_tags /
+                            sizeof js->txn_failed_tags[0]);
+    for (unsigned i = 0; i < n; i++)
+        if (js->txn_failed_tags[i] == tag) return 1;
+    return 0;
+}
+
 int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run)
 {
     const char *txn = hl_db_registry_open_txn(js->base.db_registry);
@@ -390,6 +409,51 @@ int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run)
     hl_db_registry_guard_stale_txns(js->base.db_registry);
     if (run) run->txn_held = 1;
     return 1;
+}
+
+/* Code no entry waits on stopped with a transaction open (audit 31): roll it
+ * back and say so. 1 = there was one. */
+static int hl_js_txn_left_open(HlJS *js)
+{
+    if (!js || hl_db_registry_guard_held()) return 0;
+    const char *txn = hl_db_registry_open_txn(js->base.db_registry);
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!txn) return 0;
+    log_error("[hull:c] async code waited while a transaction was open on "
+              "database connection '%s': other requests use the same "
+              "connection while it waits. Commit or roll back first. The "
+              "transaction is rolled back and that code is not continued",
+              txn);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
+    return 1;
+}
+
+int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag)
+{
+    if (!hl_js_txn_left_open(js)) return 0;
+    hl_js_run_tag_fail(js, tag);
+    return 1;
+}
+
+/* The end of a resume no entry waits on (audit 31). Its chain - this
+ * continuation and the ones its code made in this resume - shares one run
+ * record (wired with no handler promise, so each of them comes back here),
+ * and a transaction left open fails that record: the code after the await is
+ * not continued. Only the chain: a sibling chain of the same request, with
+ * a record of its own, goes on. */
+static void hl_js_unwired_txn_check(HlJS *js, HlJsAsyncCont *jc)
+{
+    HlJsRunOnce *run = jc->link.once;
+    if (js->last_async_cont) {
+        HlAsyncCont *nc = (HlAsyncCont *)js->last_async_cont;
+        hl_js_run_wire(hl_js_cont_link(nc), js->ctx, JS_UNDEFINED,
+                       jc->link.once);
+        if (!run) run = hl_js_cont_link(nc)->once;
+        js->last_async_cont = NULL;
+    }
+    if (!hl_js_txn_left_open(js)) return;
+    if (run) run->txn_held = 1;
+    else hl_js_run_tag_fail(js, jc->link.run_tag);   /* nothing to name it by but the run */
 }
 
 int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
@@ -497,7 +561,8 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * REJECTED branch below writes a 500. Exactly one of resolve/reject fires. */
     /* The run waited holding a transaction (rolled back then): fail it
      * without continuing the handler (hl_js_run_yield_check). */
-    int aborted = jc->link.once && jc->link.once->txn_held;
+    int aborted = (jc->link.once && jc->link.once->txn_held) ||
+                  hl_js_run_tag_failed(js, jc->link.run_tag);   /* audit 31 */
 
     if (aborted) {
         /* resolve / reject are freed below, uncalled */
@@ -527,6 +592,14 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     /* Drain microtasks - this continues the handler past the await */
     if (!aborted)
         hl_js_run_jobs(js);
+    /* No entry waits on this continuation (an un-awaited chain, or an op of
+     * another run's job): nothing below checks its wait. A transaction still
+     * open now is held across whatever its code awaits - `const p =
+     * hull.sleep(20); BEGIN; ...; await p` - and the next entry would run
+     * inside it (audit 31). Before the active fields are cleared: the
+     * rollback runs while this resume is still the active one. */
+    if (!aborted && JS_IsUndefined(jc->link.handler_promise))
+        hl_js_unwired_txn_check(js, jc);
     js->active_cli_main = 0;
 
     js->active_on_complete     = NULL;
@@ -552,6 +625,14 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         state = JS_PROMISE_REJECTED;
     if (js->budget_tripped && !conn && !jc->timer_ctx && !wired && jc->cli_main)
         hl_js_cli_main_trip(js, hl_js_trip_reason(js));
+    if (aborted && !wired) {
+        /* Its run held a transaction across a wait: the code after this
+         * await is dropped, not continued (audit 31). */
+        log_error("[hull:js] async code whose run waited holding a database "
+                  "transaction is not continued");
+        if (jc->cli_main)
+            hl_js_cli_main_trip(js, "waited holding a database transaction");
+    }
     /* The handler waits again (not a settled one deferred to its holder,
      * below): checked whether or not this resume started a new op - one made
      * before a BEGIN it ran now (`await pa; BEGIN; ...; await pb`) waits

@@ -193,6 +193,13 @@ typedef struct HlJS {
     uint64_t        run_tag_next;   /* last tag handed out */
     uint64_t        entry_tag;      /* the active run's */
     uint64_t        cli_main_tag;   /* app.main's own run's (0 = none) */
+    /* Runs that held a transaction across a wait (audit 31): a resume of a
+     * continuation whose run_tag is here is not continued. Its unwired and
+     * foreign continuations share no HlJsRunOnce, so the run is named by its
+     * tag. A ring: the oldest is overwritten, which only lets that chain go
+     * on as it did before the check (its transaction was rolled back). */
+    uint64_t        txn_failed_tags[32];
+    unsigned        txn_failed_next;
 
     /* Every middleware req.ctx stored on a request (reqctx.h), so one whose
      * request ended without reaching a handler is freed (dispatch.c). */

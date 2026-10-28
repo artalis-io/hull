@@ -1424,9 +1424,19 @@ int hl_js_run_jobs(HlJS *js)
     int failed = 0;
     JSContext *ctx1;
     for (;;) {
+        /* A job of another run (audit 30) that ends with a transaction open
+         * left it to whatever runs next - the active entry's own code, which
+         * ran inside it: a request's acknowledged write went with the other
+         * run's rollback (audit 31). Checked once that run's stretch of
+         * jobs ends: at a job of another tag, or the end of the queue. */
+        uint64_t tag = 0, next = 0;
+        int foreign = JS_GetPendingJobTag(js->rt, &tag) &&
+                      tag != js->entry_tag;
         int ret = JS_ExecutePendingJob(js->rt, &ctx1);
         if (ret == 0)
             break;
+        if (foreign && (!JS_GetPendingJobTag(js->rt, &next) || next != tag))
+            hl_js_run_tag_txn_check(js, tag);
         if (ret > 0) {
             count++;
             continue;

@@ -677,7 +677,8 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
 
     /* The run waited holding a transaction (rolled back then): fail it
      * without continuing the handler (hl_js_run_yield_check). */
-    int aborted = jc->link.once && jc->link.once->txn_held;
+    int aborted = (jc->link.once && jc->link.once->txn_held) ||
+                  hl_js_run_tag_failed(js, jc->link.run_tag);   /* audit 31 */
 
     PumpStep s;
     if (aborted) {

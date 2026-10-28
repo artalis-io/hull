@@ -944,6 +944,9 @@ void JS_SetStopFlag(JSRuntime *rt, int *flag);
    is restored after it. 0 until set. See Hull's docs/quickjs_patches.md. */
 void JS_SetJobTag(JSRuntime *rt, uint64_t tag);
 uint64_t JS_GetJobTag(JSRuntime *rt);
+/* HULL PATCH 0008 (audit 31): the tag the next pending job will run with:
+   1 and *ptag set, or 0 when no job is pending. */
+int JS_GetPendingJobTag(JSRuntime *rt, uint64_t *ptag);
 /* if can_block is TRUE, Atomics.wait() can be used */
 void JS_SetCanBlock(JSRuntime *rt, JS_BOOL can_block);
 /* select which debug info is stripped from the compiled code */

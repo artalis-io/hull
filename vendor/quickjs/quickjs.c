@@ -1870,6 +1870,15 @@ uint64_t JS_GetJobTag(JSRuntime *rt)
     return rt->job_tag;
 }
 
+/* HULL PATCH 0008 (audit 31): the tag the next pending job will run with */
+int JS_GetPendingJobTag(JSRuntime *rt, uint64_t *ptag)
+{
+    if (list_empty(&rt->job_list))
+        return 0;
+    *ptag = list_entry(rt->job_list.next, JSJobEntry, link)->tag;
+    return 1;
+}
+
 /* HULL PATCH 0006: see JS_SetStopFlag in quickjs.h */
 void JS_SetStopFlag(JSRuntime *rt, int *flag)
 {

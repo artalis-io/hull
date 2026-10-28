@@ -102,6 +102,11 @@ void hl_db_registry_guard_hold(int delta)
     if (g_guard_hold < 0) g_guard_hold = 0;
 }
 
+int hl_db_registry_guard_held(void)
+{
+    return g_guard_hold > 0;
+}
+
 void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
 {
     if (g_guard_hold > 0) return;   /* a test case's live transaction */
