@@ -77,7 +77,9 @@ function M.valid_module_name(name)
 end
 
 function M.invalid_name_message(name)
-    return "invalid compute module name '" .. tostring(name) ..
+    -- The name comes from the app's tree: escaped (audit 32).
+    local shown = tool.escape and tool.escape(tostring(name)) or tostring(name)
+    return "invalid compute module name '" .. shown ..
            "' (names may contain only letters, digits, underscores and hyphens)"
 end
 

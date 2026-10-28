@@ -25,6 +25,21 @@ release-artifact layout).
   re-arm too, holding the event loop for as long as the terminal produced events or idle
   ticks. Only app.main's own run re-arms now; any other entry keeps the single run it got.
 
+- **`hull build` linked the app through a symbolic link at its output** (audit 32). The tool
+  layer's path check canonicalised a path it could not `realpath` through its nearest existing
+  ancestor, so a dangling link in the not-yet-existing tail - the leaf included - passed as its
+  nominal spelling, while the linker (`cc -o`, ld64 / GNU bfd) wrote through it to the target. A
+  cloned app committing `app -> ~/.local/bin/git` had a plain `hull build` drop an executable
+  there; nothing else stopped it where the tool mode has no kernel sandbox (macOS, Windows,
+  Linux without Landlock). The check now refuses any symlink in that tail, and `hull build`
+  refuses an output path that is a symbolic link with a message saying so.
+- **Tool commands printed app text raw** (audit 32). The error an app's top level raised while
+  its manifest was read, and file names from the app's tree, reached the terminal unescaped
+  under `hull build`, `manifest`, `check`, `modules`, `analyze` and `deploy`, so an ESC / OSC 52
+  sequence in them rewrote the terminal or set the clipboard - the `hull test` fix of audit 31,
+  for the tool VM. `tool.extract_manifest_lua` / `_js` now return that error escaped, and
+  `build.lua` prints file names through the new `tool.escape` (the `hl_log_escape_line` rules:
+  CR / LF as `\r` / `\n`, other controls but tab as `\xNN`).
 - **`--verify-sig` loaded bytecode from the shared code cache** (audit 31). The signature and
   the disk gate hash an app's SOURCE, but the Lua / QuickJS bytecode and compiled-template
   caches are sealed with `~/.hull/cache.key`, which every app process of the user holds: a

@@ -133,7 +133,8 @@ static int tool_tail_comp_unsafe(const char *comp, int win)
 
 /* Canonical form of @p path into @p out: realpath when it exists; else the
  * realpath of its nearest existing ancestor plus the remaining components,
- * none of which may be "." or ".." in any spelling (tool_tail_comp_unsafe).
+ * none of which may be "." or ".." in any spelling (tool_tail_comp_unsafe)
+ * or a symbolic link (audit 32).
  * -1 when that cannot be done. The check used to fall back to the RAW path
  * when realpath failed (a leaf not yet created): "/tmp/../home/u/x" then
  * passed the "/tmp" prefix. */
@@ -160,6 +161,17 @@ static int tool_canonical_path(const char *path, char out[PATH_MAX])
         const char *comp = slash ? slash + 1 : work;
         if (tool_tail_comp_unsafe(comp, win))
             return -1;
+        /* A tail component realpath could not resolve may still EXIST: a
+         * dangling symlink (or one whose target's parent is missing). The
+         * write through it lands at the target, wherever that is, while the
+         * nominal spelling passed the prefix check - a cloned app's
+         * `app -> ~/.local/bin/git` had `hull build` link the app there
+         * (audit 32). So no component of the tail may be a symlink. */
+        {
+            struct stat lst;
+            if (lstat(work, &lst) == 0 && S_ISLNK(lst.st_mode))
+                return -1;
+        }
         char nt[PATH_MAX];
         int m = tail[0] ? snprintf(nt, sizeof nt, "%s/%s", comp, tail)
                         : snprintf(nt, sizeof nt, "%s", comp);

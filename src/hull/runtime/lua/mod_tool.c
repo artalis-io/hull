@@ -711,6 +711,45 @@ static int l_tool_stderr(lua_State *L)
     return 0;
 }
 
+/* tool.escape(str) -> str: app-derived text (a manifest-extraction error, a
+ * file name from the app's tree) made safe to print, with the rules
+ * hl_log_escape_line applies to log records: CR / LF as the two characters
+ * \r / \n, every other control byte but tab (ESC above all) and DEL as
+ * \xNN. tool.stderr and the tool VM's print write raw - the plugins' own
+ * multi-line output needs that - so an ESC / OSC 52 sequence in an app's
+ * error message rewrote the terminal or set the clipboard under `hull build`
+ * / `manifest` / `check` / `modules` / `deploy` (audit 32). Embedded NULs are
+ * escaped too (\x00): the text is taken by length. */
+static void tool_push_escaped(lua_State *L, const char *s, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+    luaL_Buffer b;
+    luaL_buffinit(L, &b);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\n' || c == '\r') {
+            luaL_addchar(&b, '\\');
+            luaL_addchar(&b, c == '\n' ? 'n' : 'r');
+        } else if ((c < 0x20 && c != '\t') || c == 0x7f) {
+            luaL_addchar(&b, '\\');
+            luaL_addchar(&b, 'x');
+            luaL_addchar(&b, hex[c >> 4]);
+            luaL_addchar(&b, hex[c & 15]);
+        } else {
+            luaL_addchar(&b, (char)c);
+        }
+    }
+    luaL_pushresult(&b);
+}
+
+static int l_tool_escape(lua_State *L)
+{
+    size_t len = 0;
+    const char *s = luaL_tolstring(L, 1, &len);
+    tool_push_escaped(L, s, len);
+    return 1;
+}
+
 /* tool.stdout(str): write verbatim to STDOUT (and flush). `print` in every Hull Lua
  * VM is routed to stderr (hl_lua_print), so a command whose primary output is DATA
  * (e.g. hull analyze --json, which must keep stdout pure JSON) writes it here. */
@@ -756,11 +795,14 @@ static int l_tool_extract_manifest_js(lua_State *L)
                                               &json, &json_len, &err);
     lua_pop(L, 1);   /* __hull_exe - popped only after the call, which borrows it */
     if (rc != 0) {
+        /* The message carries the app's own error text: escaped, as the
+         * Lua extraction's is (audit 32). */
         char buf[256];
         snprintf(buf, sizeof(buf), "tool.extract_manifest_js: %s",
                  err ? err : "unknown error");
         free(err);
-        return luaL_error(L, "%s", buf);
+        tool_push_escaped(L, buf, strlen(buf));
+        return lua_error(L);
     }
     free(err); /* defensive - should be NULL on success */
 
@@ -796,7 +838,10 @@ static int l_tool_extract_manifest_lua(lua_State *L)
     (void)hl_lua_extract_manifest_json(path, lua ? lua->base.platform_vfs : NULL,
                                        &json, &json_len, &err);
     if (json) lua_pushlstring(L, json, json_len); else lua_pushnil(L);
-    if (err) lua_pushstring(L, err); else lua_pushnil(L);
+    /* err is the app's top-level error message: every caller prints it, so
+     * it comes back escaped (audit 32: an ESC / OSC 52 sequence in it reached
+     * the terminal under hull build / manifest / check / modules / deploy). */
+    if (err) tool_push_escaped(L, err, strlen(err)); else lua_pushnil(L);
     free(json);
     free(err);
     return 2;
@@ -2175,6 +2220,7 @@ static const luaL_Reg tool_funcs[] = {
     { "realpath",               l_tool_realpath },
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
+    { "escape",                 l_tool_escape },
     { "stdout",                 l_tool_stdout },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_manifest_lua",   l_tool_extract_manifest_lua },

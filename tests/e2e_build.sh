@@ -1040,6 +1040,38 @@ else
     fail "signed CLI app binary missing"
 fi
 
+# ── Audit 32: no output through a symlink; app text escaped ──────────
+
+echo ""
+echo "=== audit 32: output symlink + escaped app text ==="
+mkdir -p "$WORKDIR/a32link" "$WORKDIR/a32victim"
+printf 'app.main(function(ctx) return 0 end)\n' > "$WORKDIR/a32link/app.lua"
+ln -s "$WORKDIR/a32victim/planted" "$WORKDIR/a32link/app"
+hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" "$WORKDIR/a32link"
+if [ -e "$WORKDIR/a32victim/planted" ]; then
+    fail "build wrote through a dangling output symlink"
+else
+    pass "build did not write through a dangling output symlink"
+fi
+check_contains "output symlink refusal is reported" "$OUT" "symbolic link"
+
+mkdir -p "$WORKDIR/a32esc"
+# A top-level error carrying an OSC 52 clipboard write and a line rewrite.
+printf -- '-- app.manifest(\nerror("\\27]52;c;cHduZWQ=\\7\\27[2K\\rok", 0)\n' > "$WORKDIR/a32esc/app.lua"
+ESC=$(printf '\033')
+for cmd in build manifest; do
+    if [ "$cmd" = build ]; then
+        hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" "$WORKDIR/a32esc"
+    else
+        hull_do "$HULL" manifest "$WORKDIR/a32esc"
+    fi
+    case "$OUT" in
+        *"$ESC"*) fail "hull $cmd printed a raw ESC from the app's error" ;;
+        *)        pass "hull $cmd printed no raw ESC" ;;
+    esac
+    check_contains "hull $cmd shows the escaped error" "$OUT" '\x1b]52'
+done
+
 # ── Summary ───────────────────────────────────────────────────────────
 
 echo ""

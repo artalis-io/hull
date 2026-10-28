@@ -922,6 +922,51 @@ UTEST(tool, rmdir_path_validation)
     hl_tool_unveil_free(&ctx);
 }
 
+/* A dangling symlink in the not-yet-existing tail of a path: realpath fails,
+ * so the check used to append the tail to the nearest existing ancestor and
+ * pass the NOMINAL spelling, while the writer (a linker's -o) followed the
+ * link to its target - a cloned app's `app -> ~/.local/bin/git` had
+ * `hull build` drop an executable there (audit 32). */
+UTEST(tool, unveil_refuses_dangling_symlink_tail)
+{
+    HlToolUnveilCtx ctx;
+    hl_tool_unveil_init(&ctx);
+    ASSERT_TRUE(hl_test_tmpdir() != NULL);
+    char *tmpdir = make_tmpdir();
+    ASSERT_TRUE(tmpdir != NULL);
+    hl_tool_unveil_add(&ctx, tmpdir, "rwc");
+    hl_tool_unveil_seal(&ctx);
+
+    char leaf[512], link_leaf[512], link_dir[512], via_dir[512], inside[512];
+    snprintf(leaf, sizeof leaf, "%s/app", tmpdir);
+    snprintf(link_leaf, sizeof link_leaf, "%s/app-link", tmpdir);
+    snprintf(link_dir, sizeof link_dir, "%s/out", tmpdir);
+    snprintf(via_dir, sizeof via_dir, "%s/out/app", tmpdir);
+    snprintf(inside, sizeof inside, "%s/missing-target", tmpdir);
+
+    /* A missing plain leaf is still a writable output. */
+    ASSERT_EQ(hl_tool_unveil_check(&ctx, leaf, 'w'), 0);
+
+    /* A dangling leaf link outside every grant is refused ... */
+    ASSERT_EQ(symlink("/nonexistent-hull-audit32/planted", link_leaf), 0);
+    ASSERT_EQ(hl_tool_unveil_check(&ctx, link_leaf, 'w'), -1);
+    unlink(link_leaf);
+    /* ... and so is one whose (missing) target is inside: a link is never a
+     * new output. */
+    ASSERT_EQ(symlink(inside, link_leaf), 0);
+    ASSERT_EQ(hl_tool_unveil_check(&ctx, link_leaf, 'w'), -1);
+    unlink(link_leaf);
+
+    /* A dangling link as a directory component of the tail. */
+    ASSERT_EQ(symlink("/nonexistent-hull-audit32/dir", link_dir), 0);
+    ASSERT_EQ(hl_tool_unveil_check(&ctx, via_dir, 'w'), -1);
+    unlink(link_dir);
+
+    hl_tool_rmdir(tmpdir, NULL);
+    free(tmpdir);
+    hl_tool_unveil_free(&ctx);
+}
+
 /* ── Unveil context tests ─────────────────────────────────────────── */
 
 UTEST(tool, unveil_init_and_add)
