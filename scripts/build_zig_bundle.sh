@@ -18,14 +18,38 @@ triple="${1:?usage: build_zig_bundle.sh <zig-triple> <zig-version> <out.tar>}"
 version="${2:?missing zig version}"
 out="${3:?missing output tar path}"
 
+tarball="zig-${triple}-${version}.tar.xz"
+
+# The tarball must match its pin in scripts/zig.sha256 (the repacked tree is
+# signed into hull.sha256, so an unpinned download would be release-signed as
+# whatever the server sent). No pin for this triple/version: refuse.
+pins="$(cd "$(dirname "$0")" && pwd)/zig.sha256"
+expected=$(awk -v f="$tarball" '$1 !~ /^#/ && $2 == f { print $1 }' "$pins")
+case "$expected" in *[!0-9a-f]*) expected="" ;; esac
+[ ${#expected} -eq 64 ] || expected=""
+[ -n "$expected" ] || { echo "build_zig_bundle: no SHA-256 pin for $tarball in $pins" >&2; exit 1; }
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-url="https://ziglang.org/download/${version}/zig-${triple}-${version}.tar.xz"
+url="https://ziglang.org/download/${version}/${tarball}"
 echo "build_zig_bundle: fetching $url"
 # --retry-all-errors also retries a partial transfer (curl exit 18), the
 # observed ziglang.org download flake.
 curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "$url" -o "$work/zig.tar.xz"
+
+if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$work/zig.tar.xz" | awk '{print $1}')
+else
+    actual=$(shasum -a 256 "$work/zig.tar.xz" | awk '{print $1}')
+fi
+if [ "$actual" != "$expected" ]; then
+    echo "build_zig_bundle: SHA-256 mismatch for $tarball" >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    exit 1
+fi
+echo "build_zig_bundle: SHA-256 verified ($expected)"
 
 mkdir -p "$work/tree"
 # --strip-components=1 drops the top-level zig-<triple>-<ver>/ dir so the tree

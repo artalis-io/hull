@@ -50,6 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -95,6 +96,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -130,6 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -161,6 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -189,6 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -220,6 +225,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -256,6 +262,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Build + smoke ${{ matrix.label }}
         env:
@@ -293,6 +300,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install LLVM ${{ matrix.llvm }} + cmake
         run: sudo apt-get update && sudo apt-get install -y llvm-${{ matrix.llvm }}-dev cmake
@@ -346,6 +354,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - uses: ./.github/actions/docker-mirror
       - name: ${{ matrix.label }} e2e (pinned engine image)
@@ -392,6 +401,8 @@ jobs:
       - nightly-compat-db
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       # Completeness (amendment 3): assert this gate `needs` EVERY nightly job, so
       # no nightly job can be added without wiring it into the gate. Runs here
       # (inside nightly.yml) rather than in ci.yml, keeping the PR path unchanged.

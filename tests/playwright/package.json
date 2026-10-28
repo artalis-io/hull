@@ -1,0 +1,10 @@
+{
+  "name": "hull-htmx-pw",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.61.1",
+    "playwright-core": "1.61.1",
+    "@axe-core/playwright": "4.13.0"
+  }
+}

@@ -297,6 +297,7 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: recursive   # vendor/keel is required to link
 
       # An MSYS-native make - the reason this job uses MSYS2 at all (see the
@@ -1254,6 +1255,7 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: recursive
 
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0

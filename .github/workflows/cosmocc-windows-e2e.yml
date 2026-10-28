@@ -55,6 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          persist-credentials: false
           submodules: true
       - name: Install cosmocc
         run: |
@@ -85,6 +86,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - name: Install strace (the producer traces a build to trim the tree)
         run: sudo apt-get update -qq && sudo apt-get install -y strace
       - name: Produce hull-cosmocc.tar
@@ -111,6 +114,8 @@ jobs:
     needs: [build-cosmo-hull, build-bundle]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: hull-cosmo-branch
@@ -407,6 +412,8 @@ jobs:
     needs: [windows-e2e]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: cosmo-http-apes
