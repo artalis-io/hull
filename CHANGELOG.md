@@ -10,6 +10,19 @@ release-artifact layout).
 
 ### Fixes
 
+- **`--verify-sig` loaded bytecode from the shared code cache** (audit 31). The signature and
+  the disk gate hash an app's SOURCE, but the Lua / QuickJS bytecode and compiled-template
+  caches are sealed with `~/.hull/cache.key`, which every app process of the user holds: a
+  compromised sibling app could seal forged bytecode that a `--verify-sig` app then ran after
+  passing every check. Both app entry points (the server and the `app.main` runner) now turn
+  the code caches off under `--verify-sig`, before any VM exists; such a run compiles from
+  source and neither reads nor writes the cache.
+
+- **`hull test` printed app text raw** (audit 31). A test name, an error message or a test
+  file name holding ESC / OSC sequences or a newline could forge PASS lines, rewrite the
+  terminal or write the clipboard (OSC 52). They are printed escaped now (`\x1b`, `\n`), as
+  log records are; so are `hull migrate status`'s migration names.
+
 - **The audit-30 fixes, re-audited** (audit 30 re-audit).
   - The DuckDB dynamic-SQL scan was still quadratic for bare names: each `query` /
     `query_table` token skipped the comment after it, and an unterminated `--` or `/*` ran to

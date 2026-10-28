@@ -91,6 +91,7 @@
 #include "hull/cap/wasm.h"
 #endif
 #include "hull/cap/gpu.h"
+#include "hull/runtime/cache_common.h"   /* hl_runtime_cache_code_off */
 
 #include <keel/http_cors.h>
 #include <keel/keel.h>
@@ -2492,6 +2493,13 @@ int hull_serve(int argc, char **argv)
     /* Phase 1: parse CLI args */
     int rc = hl_serve_parse_args(&s, argc, argv);
     if (rc != 0) return rc < 0 ? 1 : 0; /* -1 = error, 1 = help shown */
+
+    /* --verify-sig: no bytecode or compiled template from the shared code
+     * cache. Its entries are sealed under ~/.hull/cache.key, which every app
+     * process of the user holds, and the signature + disk gate hash SOURCE:
+     * a cache hit would run bytecode a sibling app could have forged after
+     * every check passed (audit 31). Set before any VM or worker exists. */
+    if (s.cfg.verify_sig_path) hl_runtime_cache_code_off(1);
 
     /* Phase 2: resolve entry point + app_dir */
     if (hl_serve_resolve_entry(&s, argv[0]) != 0) return 1;

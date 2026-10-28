@@ -710,6 +710,99 @@ LUA
 
 run_built_cli
 
+# (audit 31) A --verify-sig run loads no bytecode / compiled template from the
+# shared code cache: its entries are sealed under ~/.hull/cache.key, which
+# every app process of the user holds, while the signature and the disk gate
+# hash SOURCE - a cache hit ran bytecode a sibling app could have forged. Each
+# signed binary (an app.main tool on the serve_cli runner, and one declaring
+# hull/http-server on serve.c) runs once without --verify-sig (it fills a
+# fresh HULL_CACHE_DIR) and once with it (it leaves another empty).
+run_verify_sig_no_code_cache() {
+    echo "--- --verify-sig reads and writes no code cache (audit 31) ---"
+    if ! can_build_cli; then
+        echo "  SKIP: no build compiler or platform library for hull build"
+        return 0
+    fi
+    hull_abs=$(cd "$(dirname "${HULL_BIN}")" && pwd)/$(basename "${HULL_BIN}")
+    for kind in cli server; do
+        d=$(mktemp -d)
+        mods='"hull/json@1"'
+        [ "$kind" = server ] && mods='"hull/json@1", "hull/http-server@1"'
+        cat > "${d}/app.lua" <<LUA
+app.manifest({ modules = { ${mods} } })
+local json = require("hull.json")
+app.main(function() return json.encode({ a = 1 }) == '{"a":1}' and 3 or 4 end)
+LUA
+        (cd "$d" && "$hull_abs" keygen dev >/dev/null 2>&1)
+        if [ ! -f "${d}/dev.key" ]; then
+            fail "verify-sig cache ($kind): hull keygen failed"
+            rm -rf "$d"; continue
+        fi
+        sigarg=""
+        plat="$(dirname "${HULL_BIN}")/libhull_platform.a"
+        if [ -f "$plat" ]; then
+            cp "$plat" "${d}/"
+            cp "$(dirname "${HULL_BIN}")/platform_canary_hash" "${d}/" 2>/dev/null || true
+            "$hull_abs" sign-platform --dir "${d}/" "${d}/dev" >/dev/null 2>&1 \
+                && sigarg="--platform-sig ${d}/platform.sig"
+        fi
+        # shellcheck disable=SC2086
+        bin=$(build_cli "$d" --sign "${d}/dev.key" $sigarg)
+        if [ -z "$bin" ] && grep -q "cannot read platform.sig" "${d}/build.log"; then
+            echo "  SKIP: verify-sig cache ($kind) (no platform.sig for this hull)"
+            rm -rf "$d"; continue
+        elif [ -z "$bin" ]; then
+            fail "verify-sig cache ($kind): hull build failed ($(tail -3 "${d}/build.log"))"
+            rm -rf "$d"; continue
+        fi
+        # HOME outside the app directory: an app directory above $HOME is
+        # refused by the sandbox.
+        h=$(mktemp -d)
+        mkdir -p "${d}/cache_plain" "${d}/cache_signed"
+        _saved_home=$HOME
+        HOME="$h"; export HOME
+        HULL_CACHE_DIR="${d}/cache_plain"; export HULL_CACHE_DIR
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin")
+        expect_eq "verify-sig cache ($kind): unsigned-check run exits 3" "3" "$rc"
+        HULL_CACHE_DIR="${d}/cache_signed"; export HULL_CACHE_DIR
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --verify-sig "${d}/dev.pub" --hull-no-verify-platform)
+        expect_eq "verify-sig cache ($kind): --verify-sig run exits 3" "3" "$rc"
+        unset HULL_CACHE_DIR
+        HOME=$_saved_home; export HOME
+        n_plain=$(find "${d}/cache_plain" -type f | wc -l | tr -d ' ')
+        n_signed=$(find "${d}/cache_signed" -type f | wc -l | tr -d ' ')
+        if [ "$n_plain" -gt 0 ]; then
+            pass "verify-sig cache ($kind): a plain run fills the code cache ($n_plain entries)"
+        else
+            fail "verify-sig cache ($kind): a plain run wrote no cache entry (test cannot tell)"
+        fi
+        expect_eq "verify-sig cache ($kind): a --verify-sig run writes no cache entry" "0" "$n_signed"
+        # Seed the signed run's cache with the plain run's entries, each one
+        # spoiled: a run that READS an entry finds its seal broken, deletes it
+        # ("not ours: drop it") and writes a fresh one, so a tree whose bytes
+        # are unchanged afterwards was never read.
+        rm -rf "${d}/cache_signed"
+        cp -R "${d}/cache_plain" "${d}/cache_signed"
+        find "${d}/cache_signed" -type f -exec sh -c 'printf x >> "$1"' _ {} \;
+        sum_before=$(cd "${d}/cache_signed" && find . -type f -exec cksum {} + | sort)
+        HOME="$h"; export HOME
+        HULL_CACHE_DIR="${d}/cache_signed"; export HULL_CACHE_DIR
+        rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" --verify-sig "${d}/dev.pub" --hull-no-verify-platform)
+        unset HULL_CACHE_DIR
+        HOME=$_saved_home; export HOME
+        expect_eq "verify-sig cache ($kind): --verify-sig run over a filled cache exits 3" "3" "$rc"
+        sum_after=$(cd "${d}/cache_signed" && find . -type f -exec cksum {} + | sort)
+        if [ -n "$sum_before" ] && [ "$sum_before" = "$sum_after" ]; then
+            pass "verify-sig cache ($kind): a --verify-sig run reads no cache entry"
+        else
+            fail "verify-sig cache ($kind): a --verify-sig run read (and replaced) cache entries"
+        fi
+        rm -rf "$d" "$h"
+    done
+}
+
+run_verify_sig_no_code_cache
+
 echo
 echo "${PASS}/$((PASS + FAIL)) CLI e2e tests passed"
 [ "${FAIL}" -eq 0 ]

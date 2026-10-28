@@ -12,6 +12,7 @@
 #ifdef HL_ENABLE_LUA
 
 #include "hull/cap/test.h"
+#include "hull/shared/cli_log.h"   /* hl_log_fputs_escaped */
 #include "hull/runtime/test.h"
 #include "hull/runtime/lua.h"
 #include "hull/utils/alloc.h"
@@ -443,6 +444,21 @@ void hl_lua_test_clear(lua_State *L)
     lua_setfield(L, LUA_REGISTRYINDEX, TEST_CASES_KEY);
 }
 
+/* A PASS / FAIL line on the optional writer, app text escaped (audit 31). */
+static void test_print_line(FILE *out, int passed, const char *desc,
+                            const char *err)
+{
+    if (!out) return;
+    fputs(passed ? "  PASS  " : "  FAIL  ", out);
+    hl_log_fputs_escaped(out, desc ? desc : "(unnamed)");
+    fputc('\n', out);
+    if (!passed) {
+        fputs("    ", out);
+        hl_log_fputs_escaped(out, err ? err : "unknown error");
+        fputc('\n', out);
+    }
+}
+
 void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
                          FILE *out, HlTestCaseResult *results, int max_results)
 {
@@ -483,8 +499,7 @@ void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
         (*total)++;
         int rc = lua_pcall(L, 0, 0, 0);
         if (rc == LUA_OK) {
-            if (out)
-                fprintf(out, "  PASS  %s\n", desc ? desc : "(unnamed)");
+            test_print_line(out, 1, desc, NULL);
             if (results && idx < max_results) {
                 snprintf(results[idx].name, sizeof(results[idx].name),
                          "%s", desc ? desc : "(unnamed)");
@@ -494,9 +509,7 @@ void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
             (*passed)++;
         } else {
             const char *err = lua_tostring(L, -1);
-            if (out)
-                fprintf(out, "  FAIL  %s\n    %s\n", desc ? desc : "(unnamed)",
-                       err ? err : "unknown error");
+            test_print_line(out, 0, desc, err);
             if (results && idx < max_results) {
                 snprintf(results[idx].name, sizeof(results[idx].name),
                          "%s", desc ? desc : "(unnamed)");

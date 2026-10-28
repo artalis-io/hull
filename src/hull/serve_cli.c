@@ -64,6 +64,7 @@
 #include <keel/http_client.h>
 #include "hull/tls_transport.h"
 #endif
+#include "hull/runtime/cache_common.h"   /* hl_runtime_cache_code_off */
 
 #include "log.h"
 
@@ -368,6 +369,8 @@ int hull_serve(int argc, char **argv)
                                     &allow_degraded_sandbox, &db_path,
                                     &skip_ca_bundle, &ca_bundle_override, &xo);
     if (entry_idx == -2) return 1;
+    /* --verify-sig loads no code from the shared cache (serve.c; audit 31). */
+    if (xo.verify_sig) hl_runtime_cache_code_off(1);
     if (!db_path) db_path = getenv("HULL_DB");
     /* Same environment fallbacks as serve.c. */
     {
