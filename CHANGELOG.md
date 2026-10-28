@@ -16,6 +16,19 @@ release-artifact layout).
   addresses. It now runs after that limit (and before the per-recipient one, so a probe does
   not spend the address owner's mail allowance). `docs/app_api_reference.md` said email change
   answered alike for taken and free addresses; it now says what it does.
+- **An app could kill the process by truncating a database file SQLite holds open** (audit 33,
+  both runtimes). SQLite maps a WAL database's index (`<db>-shm`) `MAP_SHARED` in every
+  connection, and that mapping is not one of the fs.mmap SIGBUS guard's: `compute.stream("m",
+  input, {file = "data/app.db-shm"})` with an `fs.write` grant on `data`, or an `fs.write`
+  through an in-root symlink to it, truncated the file in place and the next query died of
+  SIGBUS - every connection with it. Every connection the SQLite backend opens now registers
+  its database file (`cap/db_live_files.c`), and the fs capability refuses, with
+  `database_file_in_use`, to truncate or rewrite in place (`hl_cap_fs_open_write_fd`, which
+  compute.stream and the in-place `fs.write` use), replace by rename (`fs.write`, `tar.extract`)
+  or delete a file whose device and inode are a live database's or its `-wal` / `-shm` /
+  `-journal`'s - a replaced or removed sidecar splits the WAL index or loses committed
+  transactions. An in-place write to a leaf NAMED like a sidecar is refused whatever it is.
+  Covered by `make e2e-db-live-files` and `test_fs`.
 
 - **A locked login address told a registered account from an unknown one** (audit 32, both
   runtimes). An unknown address is counted under a key made from its own spelling (ASCII case

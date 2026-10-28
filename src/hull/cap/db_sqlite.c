@@ -14,6 +14,7 @@
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_budget.h"   /* hl_db_budget_swap / _restore */
+#include "hull/cap/db_live_files.h" /* audit 33 */
 #include "hull/utils/alloc.h"
 
 #include <sqlite3.h>
@@ -34,6 +35,7 @@ typedef struct {
     const char  *own_err;   /* an error of ours, not SQLite's (errmsg) */
     int          owned;     /* 1 = opened here (may be replaced); 0 = wrapped */
     int          broken;    /* stuck in a transaction it could not leave */
+    char        *live_path; /* registered with db_live_files (audit 33) */
 } HlDbSqliteCtx;
 
 static const char REENTERED_MSG[] =
@@ -125,6 +127,23 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     hl_stmt_cache_init(&s->cache, s->db, alloc);
     s->owned = 1;
 
+    /* Its file (and so its -wal / -shm / -journal) is now one the fs
+     * capability will not rewrite, replace or delete (audit 33). Kept by
+     * path: a reopen (sqlite_replace_conn) names the same file. */
+    const char *file = sqlite3_db_filename(s->db, "main");
+    if (file && file[0]) {
+        s->live_path = strdup(file);
+        if (!s->live_path || hl_db_live_file_add(s->live_path) != 0) {
+            fprintf(stderr, "hull: sqlite opened '%s' but could not record "
+                            "it (out of memory)\n", dsn ? dsn : "(null)");
+            free(s->live_path);
+            hl_stmt_cache_destroy(&s->cache);
+            sqlite3_close(s->db);
+            free(s);
+            return -1;
+        }
+    }
+
     *ctx = s;
     return 0;
 }
@@ -190,6 +209,10 @@ static void sqlite_close(HlDbHandle *h)
     hl_stmt_cache_destroy(&s->cache);
     hl_cap_db_shutdown(s->db);
     sqlite3_close(s->db);
+    if (s->live_path) {
+        hl_db_live_file_remove(s->live_path);
+        free(s->live_path);
+    }
     free(s);
 }
 

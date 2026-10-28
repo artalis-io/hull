@@ -1467,6 +1467,13 @@ e2e-timers: $(BUILDDIR)/hull
 e2e-teardown: $(BUILDDIR)/hull
 	sh tests/e2e_teardown.sh
 
+# A database file SQLite holds open is not truncated, replaced or removed
+# through the fs capability (audit 33): compute.stream's file output and an
+# fs.write through a symlink into the -shm killed the process with SIGBUS.
+.PHONY: e2e-db-live-files
+e2e-db-live-files: $(BUILDDIR)/hull
+	sh tests/e2e_db_live_files.sh
+
 e2e-js-runs: $(BUILDDIR)/hull
 	sh tests/e2e_js_runs.sh
 
