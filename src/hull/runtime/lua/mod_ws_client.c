@@ -549,8 +549,9 @@ static int lua_ws_connect(lua_State *L)
      * anything below raises. */
     if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE) {
         lua_gc(L, LUA_GCCOLLECT);
-        /* The collection ran __gc finalizers: app code. */
-        if (lua->base.shutting_down || !lua->base.async_ctx)
+        /* The collection ran __gc finalizers: app code. (async_ctx was
+         * checked above and is not cleared by app code; shutting_down is.) */
+        if (lua->base.shutting_down)
             return luaL_error(L, "ws.connect: runtime is shutting down");
     }
     if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
