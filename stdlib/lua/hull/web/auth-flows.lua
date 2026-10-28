@@ -64,7 +64,10 @@
 --     path runs a dummy PBKDF2 verify on unknown emails so response
 --     timing is identical to a known-but-wrong attempt (the previous
 --     ~50-200ms delta would otherwise leak account existence over
---     the network). Controlled by `enumeration_safe` (default true).
+--     the network), and does the same lockout reads and writes for
+--     an unknown email as for a known one, under a lockout key of its
+--     own (audit 31: only known emails did them, which timing showed).
+--     The dummy verify is controlled by `enumeration_safe` (default true).
 --     Set false ONLY in test fixtures that don't care about timing
 --     observables - never in production.
 --   * Re-verify-on-email-change: changing email puts the new
@@ -992,6 +995,22 @@ local function lockout_remaining(user_id)
     return 0
 end
 
+-- Run a lockout counter's db.batch, once more if the database picked it as
+-- a deadlock victim (MySQL ER_LOCK_DEADLOCK, Postgres 40P01): the attempt
+-- must be counted, not answered 500. Only at top level - inside an app
+-- transaction the deadlock rolled the whole transaction back, and the error
+-- is the app's to handle.
+local function counter_batch(fn)
+    local outer = db.in_transaction()
+    local ok, err = pcall(function() db.batch(fn) end)
+    if ok then return end
+    if not outer and tostring(err):lower():find("deadlock", 1, true) then
+        db.batch(fn)
+        return
+    end
+    error(err, 0)
+end
+
 local function bump_failed_login(user_id, max)
     user_id = uid_key(user_id)
     local now = time.now()
@@ -1011,28 +1030,30 @@ local function bump_failed_login(user_id, max)
     -- guesses. No statement reads a column it assigns earlier in its own
     -- SET: MySQL evaluates a single-table SET left to right, so a
     -- locked_until CASE that read failed_count + 1 locked one attempt early
-    -- (audit 29). Step 1 takes the row lock, which holds to the commit, and
-    -- leaves locked_until as it was for step 2 to read. db.batch nests as a
-    -- savepoint inside an app transaction. The UPDATE runs before the
-    -- INSERT-if-absent, which runs only for a new row: on MySQL an INSERT
-    -- IGNORE of an existing row takes a SHARED lock on it, so two attempts
-    -- both holding one then both asking for the UPDATE's exclusive lock
-    -- deadlocked, and the victim's attempt went uncounted (audit 30
-    -- re-audit).
+    -- (audit 29). The count UPDATE takes the row lock, which holds to the
+    -- commit, and leaves locked_until as it was for the lock UPDATE to read.
+    -- db.batch nests as a savepoint inside an app transaction.
+    --
+    -- Whether the row must be made is decided by a plain (non-locking)
+    -- SELECT (audit 31). On MySQL a duplicate INSERT of an existing row takes
+    -- a SHARED lock, so two attempts both holding one deadlocked on the
+    -- UPDATE (audit 30 re-audit); and an UPDATE that matches no row takes a
+    -- GAP lock under REPEATABLE READ, so two attempts making different new
+    -- keys in one gap (the per-(account, IP) keys are adjacent) deadlocked
+    -- on their INSERTs (audit 31). A non-locking read takes neither; only a
+    -- new key is inserted, and every UPDATE then matches its row.
     local expired = "locked_until IS NOT NULL AND locked_until <> 0 AND locked_until < ?"
-    db.batch(function()
-        -- 1. Count the attempt: 1 after an expired lockout, else one more.
-        --    A first attempt makes the row (each backend's own
-        --    INSERT-if-absent) and counts it then.
-        local count_sql = "UPDATE _hull_auth_login_attempts SET failed_count = "
-            .. "CASE WHEN " .. expired .. " THEN 1 ELSE failed_count + 1 END, "
-            .. "last_failed_at = ? WHERE user_id = ?"
-        local count_params = { now, now, user_id }
-        if (db.exec(count_sql, count_params) or 0) == 0 then
+    counter_batch(function()
+        local have = db.query("SELECT 1 AS present FROM _hull_auth_login_attempts "
+                              .. "WHERE user_id = ?", { user_id })
+        if not have or #have == 0 then
             db.insert_if_absent("_hull_auth_login_attempts", { "user_id" },
                 { "user_id", "failed_count", "locked_until" }, { user_id, 0, 0 })
-            db.exec(count_sql, count_params)
         end
+        -- 1. Count the attempt: 1 after an expired lockout, else one more.
+        db.exec("UPDATE _hull_auth_login_attempts SET failed_count = "
+            .. "CASE WHEN " .. expired .. " THEN 1 ELSE failed_count + 1 END, "
+            .. "last_failed_at = ? WHERE user_id = ?", { now, now, user_id })
         -- 2. The lock, from the new count; an expired one is cleared.
         db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE WHEN "
             .. expired .. " THEN 0 WHEN failed_count >= ? THEN ? ELSE 0 END "
@@ -1062,6 +1083,30 @@ local function clear_all_failed_logins(uid)
     db.exec("DELETE FROM _hull_auth_login_attempts "
             .. "WHERE user_id = ? OR user_id LIKE ? ESCAPE '!'",
             { uid, pat })
+end
+
+-- The lockout rows a failed password check counts against: the account's
+-- own row FIRST, then the (account, IP) one, so a failure writing the IP
+-- row cannot leave the guess uncounted against the account (audit 31).
+local function bump_failed_logins(uid, ip_key)
+    bump_failed_login(uid, _state.max_failed_logins_per_account)
+    bump_failed_login(ip_key, _state.max_failed_logins)
+end
+
+local function login_locked(uid, ip_key)
+    return lockout_remaining(ip_key) > 0 or lockout_remaining(uid) > 0
+end
+
+-- The lockout key /login counts an UNKNOWN address under (audit 31), so an
+-- unknown address does the same reads and writes as a known one - the time
+-- they took told the two apart - and is throttled the same way. It starts
+-- with IP_SEP, which no account key or (account, IP) key does (the per-IP
+-- keys already assume no user id holds IP_SEP), so it cannot name a real
+-- account's row; it lives only in _hull_auth_login_attempts and goes with
+-- gc_expired. The address is folded as same_address folds it (ASCII case).
+local UNKNOWN_KEY_PREFIX = IP_SEP .. "unknown" .. IP_SEP
+local function unknown_login_key(email)
+    return UNKNOWN_KEY_PREFIX .. encoding.hex.encode(crypto.sha256(email:lower()))
 end
 
 -- ── Pwned-password check (opt-in) ──────────────────────────────────
@@ -1642,13 +1687,12 @@ local function handle_verify(req, res)
     -- and a locked account answers as a wrong password would, without the
     -- check - this route must not be a second, unthrottled oracle.
     local ip_key = attempt_ip_key(uid, req)
-    local locked = lockout_remaining(ip_key) > 0 or lockout_remaining(uid) > 0
+    local locked = login_locked(uid, ip_key)
     local stored = not locked and password_len_ok(pw, false) and stored_password_hash(user)
     local ok = type(stored) == "string" and crypto.verify_password(pw, stored)
     if not ok then
         if not locked then
-            bump_failed_login(ip_key, _state.max_failed_logins)
-            bump_failed_login(uid, _state.max_failed_logins_per_account)
+            bump_failed_logins(uid, ip_key)
         end
         if wants_json(req) then
             return res:status(401):json({ error = VERIFY_WRONG_PASSWORD,
@@ -1748,10 +1792,15 @@ local function handle_login(req, res)
     -- user who's already authenticated through a different channel
     -- (e.g. mobile app) can read the counter via the (private)
     -- lockout_remaining helper on their own.
-    local uid    = user and user_uid(user)
-    local ip_key = uid and attempt_ip_key(uid, req)
-    local pre_locked = user and (lockout_remaining(ip_key) > 0
-                                 or lockout_remaining(uid) > 0)
+    --
+    -- An unknown address is counted under a key of its own
+    -- (unknown_login_key, audit 31): the same lockout reads before the
+    -- check and the same writes after a failure as a known one, so the
+    -- time the request takes does not tell the two apart, and a locked
+    -- unknown address answers as a locked account does.
+    local uid    = (user and user_uid(user)) or unknown_login_key(body.email)
+    local ip_key = attempt_ip_key(uid, req)
+    local pre_locked = login_locked(uid, ip_key)
     -- Run verify_password unconditionally when enumeration_safe is on,
     -- using a pre-computed dummy hash on the unknown-email branch so
     -- network timing is identical between known and unknown emails.
@@ -1761,9 +1810,8 @@ local function handle_login(req, res)
     local pw_ok  = (_state.enumeration_safe or user ~= nil)
                    and crypto.verify_password(body.password, pwhash)
     if pre_locked or not user or not user.password_hash or not pw_ok then
-        if user and not pre_locked then
-            bump_failed_login(ip_key, _state.max_failed_logins)
-            bump_failed_login(uid, _state.max_failed_logins_per_account)
+        if not pre_locked then
+            bump_failed_logins(uid, ip_key)
         end
         return res:status(401):json({ error = "invalid credentials" })
     end
@@ -2125,13 +2173,12 @@ local function handle_email_change(req, res)
         -- The lockout rows /login uses: keyed by the account's own id.
         local uid = user_uid(current) or user_id
         local ip_key = attempt_ip_key(uid, req)
-        local locked = lockout_remaining(ip_key) > 0 or lockout_remaining(uid) > 0
+        local locked = login_locked(uid, ip_key)
         local stored = not locked and password_len_ok(pw, false)
                        and stored_password_hash(current)
         if not (type(stored) == "string" and crypto.verify_password(pw, stored)) then
             if not locked then
-                bump_failed_login(ip_key, _state.max_failed_logins)
-                bump_failed_login(uid, _state.max_failed_logins_per_account)
+                bump_failed_logins(uid, ip_key)
             end
             return res:status(401):json({ error = "invalid credentials" })
         end
@@ -3240,6 +3287,9 @@ require("hull._test_hooks").register("hull.web.auth-flows", {
     recovery_locked    = recovery_locked,
     strip_user_secrets = strip_user_secrets,
     bump_failed_login  = bump_failed_login,
+    bump_failed_logins = bump_failed_logins,
+    unknown_login_key  = unknown_login_key,
+    attempt_ip_key     = attempt_ip_key,
     lockout_remaining  = lockout_remaining,
     login_failed_count = function(user_id)
         local r = db.query("SELECT failed_count FROM _hull_auth_login_attempts "
