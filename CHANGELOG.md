@@ -24,6 +24,17 @@ release-artifact layout).
   `hull:_task` task of a serving app that admits TUI could run the same synchronous loop and
   re-arm too, holding the event loop for as long as the terminal produced events or idle
   ticks. Only app.main's own run re-arms now; any other entry keeps the single run it got.
+- **JS: a run failed for holding a transaction across a wait kept running** (audit 32). The
+  audit-31 check rolls back the transaction of a run whose stretch of jobs ends while it is
+  open and marks the run failed, but only a later async resume read that mark: the run's own
+  jobs queued after it, in the same drain, still ran. A handler that ran `BEGIN; INSERT a;
+  await p` with `p` settled by another request's code had `a` rolled back, then went on to
+  `INSERT b` in autocommit and was answered 200 (its stray COMMIT succeeds on Postgres /
+  MySQL). The job drain now drops a failed run's jobs unrun (QuickJS
+  `JS_DiscardPendingJob`, HULL PATCH 0008), and the run ends failed wherever its completion
+  is decided: a request is answered 500, app.main exits 1, a timer or WebSocket callback ends
+  as a failed run does, its continuations share a record that stops them, and the failed-run
+  list (a fixed ring of 32) frees the run's slot once nothing of it is left to stop.
 
 - **`hull build` linked the app through a symbolic link at its output** (audit 32). The tool
   layer's path check canonicalised a path it could not `realpath` through its nearest existing

@@ -2449,6 +2449,27 @@ int JS_ExecutePendingJobTagged(JSRuntime *rt, uint64_t tag, JSContext **pctx)
     return 0;
 }
 
+/* HULL PATCH 0008 (audit 32): drop the first pending job without running
+   it (its arguments are freed). 1 when a job was dropped, 0 when none was
+   pending. */
+int JS_DiscardPendingJob(JSRuntime *rt)
+{
+    JSJobEntry *e;
+    JSContext *ctx;
+    int i;
+
+    if (list_empty(&rt->job_list))
+        return 0;
+    e = list_entry(rt->job_list.next, JSJobEntry, link);
+    list_del(&e->link);
+    ctx = e->realm;
+    for(i = 0; i < e->argc; i++)
+        JS_FreeValue(ctx, e->argv[i]);
+    js_free(ctx, e);
+    JS_FreeContext(ctx);
+    return 1;
+}
+
 static int js_execute_job_entry(JSRuntime *rt, JSJobEntry *e, JSContext **pctx)
 {
     JSContext *ctx;

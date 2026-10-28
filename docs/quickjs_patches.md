@@ -333,9 +333,10 @@ no-op).
 **Files:** `vendor/quickjs/quickjs.c` (`JSRuntime.job_tag`, `JSJobEntry.tag`,
 `JSPromiseReactionData.tag`, `JS_EnqueueJob2`, `JS_ExecutePendingJob`,
 `fulfill_or_reject_promise`, `perform_promise_then`, `JS_SetJobTag` /
-`JS_GetJobTag` / `JS_GetPendingJobTag` / `JS_ExecutePendingJobTagged`),
+`JS_GetJobTag` / `JS_GetPendingJobTag` / `JS_ExecutePendingJobTagged` /
+`JS_DiscardPendingJob`),
 `quickjs.h` (`JS_SetJobTag`, `JS_GetJobTag`, `JS_GetPendingJobTag`,
-`JS_ExecutePendingJobTagged`)
+`JS_ExecutePendingJobTagged`, `JS_DiscardPendingJob`)
 **Found by:** audit 30 (M: cross-request op attribution)
 **Upstream:** Hull-specific.
 
@@ -375,6 +376,11 @@ tag, leaving the ones ahead of it in order): while the active run is inside a
 transaction across a microtask yield, the drain runs that run's own jobs
 first and holds other runs' jobs back until the transaction closes, so they
 never run inside it.
+
+Audit 32 adds `JS_DiscardPendingJob` (drop the first pending job unrun, its
+arguments freed): `hl_js_run_jobs` drops every job of a run that was failed
+for holding a transaction across a wait, so its code after the await does not
+run on in the same drain.
 
 Cost: one 64-bit field per job and per pending reaction, and two stores per
 job run. A runtime that never sets a tag (the worker.dispatch VM, the JS

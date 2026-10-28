@@ -152,6 +152,8 @@ int hl_js_run_foreign(const HlJS *js)
 
 const char *hl_js_trip_reason(const HlJS *js)
 {
+    if (js && js->budget_txn_failed)
+        return "the run waited holding a database transaction";
     return js && js->budget_timed_out ? HL_RUN_TIME_LIMIT_MSG
                                       : "instruction limit exceeded";
 }
@@ -173,6 +175,7 @@ void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
     js->instruction_count = 0;
     js->budget_tripped = 0;
     js->budget_timed_out = 0;
+    js->budget_txn_failed = 0;
     js->tui_idle_ms = 0;
 }
 
@@ -1428,7 +1431,21 @@ int hl_js_run_jobs(HlJS *js)
      * run's - another run's stretch that ended holding one was rolled back
      * below. */
     uint64_t last_tag = js->entry_tag;
+    int hold_ended = 0;
     for (;;) {
+        /* A job of a run failed for holding a transaction across a wait
+         * (hl_js_run_txn_hold_end, hl_js_run_tag_txn_check) is dropped
+         * unrun: that run is not continued, in this drain or a later one -
+         * run, its code went on with the rest of its writes autocommitted
+         * and its request answered as a success (audit 32). */
+        {
+            uint64_t ftag = 0;
+            if (JS_GetPendingJobTag(js->rt, &ftag) &&
+                hl_js_run_tag_failed(js, ftag)) {
+                (void)JS_DiscardPendingJob(js->rt);
+                continue;
+            }
+        }
         /* A job of another run (audit 30) that ends with a transaction open
          * left it to whatever runs next - the active entry's own code, which
          * ran inside it: a request's acknowledged write went with the other
@@ -1438,7 +1455,8 @@ int hl_js_run_jobs(HlJS *js)
         int foreign = JS_GetPendingJobTag(js->rt, &tag) &&
                       tag != js->entry_tag;
         int ret;
-        if (foreign && last_tag == js->entry_tag && hl_js_run_txn_open(js)) {
+        if (foreign && last_tag == js->entry_tag && !hold_ended &&
+            hl_js_run_txn_open(js)) {
             /* The reverse (audit 31): the active run is inside a transaction
              * across a microtask yield (`BEGIN; await null; ...`), and the
              * job at the head is another run's - run there, its writes
@@ -1452,12 +1470,13 @@ int hl_js_run_jobs(HlJS *js)
             if (ret != 0) {
                 foreign = 0;
             } else {
-                /* The head job runs next either way: even if the rollback
-                 * did not take, the drain never spins on it. */
+                /* The active run is failed: its jobs are dropped from here
+                 * on (top of the loop), and the head job runs next. Held
+                 * only once per drain: even if the rollback did not take,
+                 * the drain never spins on it (audit 32). */
                 hl_js_run_txn_hold_end(js);
-                ret = JS_ExecutePendingJob(js->rt, &ctx1);
-                if (ret == 0)
-                    break;
+                hold_ended = 1;
+                continue;
             }
         } else {
             ret = JS_ExecutePendingJob(js->rt, &ctx1);
