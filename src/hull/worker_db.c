@@ -375,6 +375,16 @@ void hl_db_result_free(HlDbResult *r)
     memset(r, 0, sizeof(*r));
 }
 
+/* Cells a stored row takes: a zero-column row (Postgres `SELECT FROM t`)
+ * still takes one, so the store never shrinks to 0 bytes and every row has a
+ * size to charge. realloc(p, 0) frees p and returns NULL on glibc: read as
+ * "too many rows", it left r->values pointing at the freed block, which
+ * hl_db_result_free freed again (audit 32). */
+static size_t db_row_stride(int ncols)
+{
+    return ncols > 0 ? (size_t)ncols : 1;
+}
+
 /* Grow result to hold at least one more row */
 static int db_result_grow(HlDbResult *r)
 {
@@ -382,11 +392,11 @@ static int db_result_grow(HlDbResult *r)
         return 0;
     int new_cap = r->capacity ? r->capacity * 2 : 16;
     if (new_cap > 100000) return -1; /* sanity cap */
-    if (r->ncols > 0 &&
-        (size_t)new_cap > SIZE_MAX / ((size_t)r->ncols * sizeof(HlDbValue)))
+    size_t stride = db_row_stride(r->ncols);
+    if ((size_t)new_cap > SIZE_MAX / (stride * sizeof(HlDbValue)))
         return -1; /* overflow guard */
     HlDbValue *nv = realloc(r->values,
-                             (size_t)new_cap * (size_t)r->ncols * sizeof(HlDbValue));
+                             (size_t)new_cap * stride * sizeof(HlDbValue));
     if (!nv) return -1;
     r->values = nv;
     r->capacity = new_cap;
@@ -518,7 +528,10 @@ static int db_materialize_row_cb(void *ctx, HlColumn *cols, int ncols)
     if (ncols != r->ncols)
         return materialize_fail(mc, "result rows differ in column count");
 
-    size_t row_bytes = (size_t)r->ncols * sizeof(HlDbValue);
+    /* At least one cell's worth per row, as db_result_grow stores it: empty
+     * rows were free, so up to the 100k-row cap cost no bytes and no budget
+     * (audit 32). */
+    size_t row_bytes = db_row_stride(r->ncols) * sizeof(HlDbValue);
     for (int i = 0; i < r->ncols; i++) {
         const HlValue *v = &cols[i].value;
         if ((v->type == HL_TYPE_TEXT || v->type == HL_TYPE_BLOB) && v->s)

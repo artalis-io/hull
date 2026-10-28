@@ -45,6 +45,20 @@ app.main(function()
     local d = require("hull.db").connect("analytics")
     local r = d.query("SELECT 42 AS answer")
     assert(r and r[1] and r[1].answer == 42, "duckdb query failed")
+    -- Audit 32: statements that run SQL from a file or copy every table
+    -- without naming one are refused by Hull itself (not only by DuckDB's
+    -- external-access setting), in any statement of the text.
+    for _, sql in ipairs({
+        "IMPORT DATABASE 'imp'",
+        "EXPORT DATABASE 'exp'",
+        "ATTACH ':memory:' AS c; COPY FROM DATABASE memory TO c",
+        "PRAGMA import_database('imp')",
+        "SELECT 1; /* x */ export -- y\n database 'exp'",
+    }) do
+        local ok, err = pcall(d.exec, sql)
+        assert(not ok and tostring(err):find("COPY FROM DATABASE are not available", 1, true),
+               "not refused by Hull: " .. sql .. " -> " .. tostring(err))
+    end
     print("DUCKDB FEATURE APP OK")
     return 0
 end)

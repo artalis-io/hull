@@ -645,6 +645,28 @@ static const char DUCK_DYNAMIC_SQL_MSG[] =
     "duckdb: query(), query_table() and json_execute_serialized_sql() are "
     "not available (they build SQL at run time, past Hull's _hull_* check)";
 
+/* IMPORT / EXPORT DATABASE and COPY FROM DATABASE run SQL from a file or
+ * copy every table without naming one (audit 32). Refused under every file
+ * policy: Hull's caps use none of them. */
+static const char DUCK_WHOLE_DB_MSG[] =
+    "duckdb: IMPORT DATABASE, EXPORT DATABASE and COPY FROM DATABASE are "
+    "not available (they run SQL from a file or copy every table, past "
+    "Hull's _hull_* check)";
+
+/* 0 when @p sql may run, -1 (error set) when it is refused. */
+static int duck_refuse_sql(HlDbDuckCtx *s, const char *sql)
+{
+    if (hl_cap_db_sql_calls_dynamic_sql(sql)) {
+        duck_set_err(s, DUCK_DYNAMIC_SQL_MSG);
+        return -1;
+    }
+    if (hl_cap_db_sql_reads_whole_database(sql)) {
+        duck_set_err(s, DUCK_WHOLE_DB_MSG);
+        return -1;
+    }
+    return 0;
+}
+
 static int duck_query(HlDbHandle *h, const char *sql,
                       const HlValue *params, int nparams,
                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
@@ -652,10 +674,7 @@ static int duck_query(HlDbHandle *h, const char *sql,
     (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbDuckCtx *s = h->ctx;
-    if (hl_cap_db_sql_calls_dynamic_sql(sql)) {
-        duck_set_err(s, DUCK_DYNAMIC_SQL_MSG);
-        return -1;
-    }
+    if (duck_refuse_sql(s, sql) != 0) return -1;
 
     duckdb_prepared_statement stmt;
     if (duckdb_prepare(s->con, sql, &stmt) != DuckDBSuccess) {
@@ -735,10 +754,7 @@ static int duck_exec_script(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
     HlDbDuckCtx *s = h->ctx;
-    if (hl_cap_db_sql_calls_dynamic_sql(sql)) {
-        duck_set_err(s, DUCK_DYNAMIC_SQL_MSG);
-        return -1;
-    }
+    if (duck_refuse_sql(s, sql) != 0) return -1;
     duckdb_result r;
     if (duckdb_query(s->con, sql, &r) != DuckDBSuccess) {
         duck_set_err(s, duckdb_result_error(&r));
