@@ -24,7 +24,7 @@ diff --git a/core/iwasm/aot/aot_runtime.c b/core/iwasm/aot/aot_runtime.c
 diff --git a/core/iwasm/aot/aot_runtime.h b/core/iwasm/aot/aot_runtime.h
 --- a/core/iwasm/aot/aot_runtime.h
 +++ b/core/iwasm/aot/aot_runtime.h
-@@ -36,6 +36,17 @@
+@@ -36,6 +36,23 @@
  #define WASM_FEATURE_FRAME_PER_FUNCTION (1 << 12)
  #define WASM_FEATURE_FRAME_NO_FUNC_IDX (1 << 13)
  
@@ -32,12 +32,18 @@ diff --git a/core/iwasm/aot/aot_runtime.h b/core/iwasm/aot/aot_runtime.h
 + * AOT file, vouching that its code carries the loop-header terminate check
 + * (aot_compile_check_terminate). The loader ignores the field; the embedder
 + * (Hull: include/hull/cap/wasm_aot_stamp.h) refuses AOT code without it. High
-+ * 32 bits "HULL", low 32 bits the stamp version - bump it in both places when
-+ * the contract changes. */
++ * 32 bits "HULL", low 32 bits the stamp version (low 16) plus flag bits set
++ * from what was generated: memory and native-stack bounds checks (audit 31:
++ * Hull's runtime has no hardware bound check, so it requires both). Bump the
++ * version in both places when the contract changes. */
 +#define HULL_AOT_STAMP_MAGIC 0x48554C4CU
-+#define HULL_AOT_STAMP_VERSION 1U
-+#define HULL_AOT_STAMP \
-+    (((uint64)HULL_AOT_STAMP_MAGIC << 32) | (uint64)HULL_AOT_STAMP_VERSION)
++#define HULL_AOT_STAMP_VERSION 2U
++#define HULL_AOT_STAMP_F_BOUNDS 0x10000U
++#define HULL_AOT_STAMP_F_STACK_BOUNDS 0x20000U
++#define HULL_AOT_STAMP(bounds, stack_bounds)                               \
++    (((uint64)HULL_AOT_STAMP_MAGIC << 32) | (uint64)HULL_AOT_STAMP_VERSION \
++     | ((bounds) ? (uint64)HULL_AOT_STAMP_F_BOUNDS : 0)                    \
++     | ((stack_bounds) ? (uint64)HULL_AOT_STAMP_F_STACK_BOUNDS : 0))
 +
  typedef enum AOTSectionType {
      AOT_SECTION_TYPE_TARGET_INFO = 0,
@@ -147,13 +153,15 @@ diff --git a/core/iwasm/common/wasm_runtime_common.h b/core/iwasm/common/wasm_ru
 diff --git a/core/iwasm/compilation/aot_emit_aot_file.c b/core/iwasm/compilation/aot_emit_aot_file.c
 --- a/core/iwasm/compilation/aot_emit_aot_file.c
 +++ b/core/iwasm/compilation/aot_emit_aot_file.c
-@@ -4513,6 +4513,9 @@
+@@ -4513,6 +4513,11 @@
      if (!comp_ctx->call_stack_features.func_idx) {
          obj_data->target_info.feature_flags |= WASM_FEATURE_FRAME_NO_FUNC_IDX;
      }
 +    /* Hull ext (patch 0007): stamp the file as carrying the loop-header
-+     * terminate check (see HULL_AOT_STAMP in aot_runtime.h). */
-+    obj_data->target_info.reserved = HULL_AOT_STAMP;
++     * terminate check, recording the bounds checks it was generated with
++     * (see HULL_AOT_STAMP in aot_runtime.h). */
++    obj_data->target_info.reserved = HULL_AOT_STAMP(
++        comp_ctx->enable_bound_check, comp_ctx->enable_stack_bound_check);
  
      bh_print_time("Begin to resolve object file info");
  

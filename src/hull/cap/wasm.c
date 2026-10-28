@@ -686,7 +686,10 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
  * the stamp - from a distro / Homebrew wamrc, an older ~/.hull/tools/wamrc, or
  * built elsewhere - would run an endless loop forever, so it is refused; the
  * caller falls back to the module's .wasm when there is one (the interpreter
- * is bounded by gas and by the watchdog alike). Returns 1 when usable. */
+ * is bounded by gas and by the watchdog alike). Audit 31: the stamp must also
+ * record software bounds checks - Hull's runtime has no hardware bound check
+ * (no guard region past linear memory), so AOT code without them loads and
+ * stores host memory. Returns 1 when usable. */
 static int aot_stamp_usable(const char *name, const uint8_t *buf, size_t len)
 {
     int st = hl_aot_stamp_check(buf, len);
@@ -695,7 +698,11 @@ static int aot_stamp_usable(const char *name, const uint8_t *buf, size_t len)
     const char *why =
         st == HL_AOT_STAMP_NOT_AOT ? "it is not a WAMR AOT file" :
         st == HL_AOT_STAMP_OLD_VERSION
-            ? "it was compiled by an older Hull wamrc (stale terminate-check stamp)"
+            ? "it was compiled by an older Hull wamrc (stale stamp)" :
+        st == HL_AOT_STAMP_NO_BOUNDS
+            ? "it was compiled without software bounds checks "
+              "(--bounds-checks=1 --stack-bounds-checks=1), and Hull's runtime "
+              "has no guard region to catch an out-of-bounds access"
             : "it was not compiled by Hull's patched wamrc (no terminate-check "
               "stamp), so the compute timeout could not stop its loops";
     log_error("[wasm] refusing the AOT artifact of module '%s': %s. Rebuild it "
@@ -862,8 +869,8 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     if (!is_aot && buf_len >= 4 && hl_aot_le32(buf) == HL_AOT_FILE_MAGIC) {
         if (hl_aot_stamp_check(buf, buf_len) != HL_AOT_STAMP_OK) {
             log_error("[wasm] refusing module '%s': compute/%s.wasm holds AOT "
-                      "code without the current Hull wamrc stamp, so the "
-                      "compute timeout could not stop its loops. Ship "
+                      "code without the current Hull wamrc stamp (terminate "
+                      "check and software bounds checks). Ship "
                       "WebAssembly bytecode as .wasm, and AOT compiled by "
                       "Hull's wamrc as .aot.<arch>", name, name);
             free(buf);

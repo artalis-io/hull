@@ -3988,7 +3988,7 @@ static void mk_aot_head(uint8_t *b, size_t n, uint32_t stamp_version,
 UTEST(hl_cap_wasm, aot_stamp_check)
 {
     uint8_t b[96];
-    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_LOW_OK, HL_AOT_STAMP_MAGIC);
     EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_OK);
     EXPECT_EQ(hl_aot_stamp_check(b, 63), HL_AOT_STAMP_NOT_AOT);     /* short */
     EXPECT_EQ(hl_aot_stamp_check(NULL, 0), HL_AOT_STAMP_NOT_AOT);
@@ -3998,15 +3998,84 @@ UTEST(hl_cap_wasm, aot_stamp_check)
     mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION + 1, HL_AOT_STAMP_MAGIC);
     EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_OLD_VERSION);
 
+    /* Audit 31: the stamp must record software bounds checks. A version-1
+     * stamp (a wamrc from before the flag bits) is stale; a current one
+     * without both bits - wamrc's 64-bit default, guard-page code Hull's
+     * runtime has no guard region for - is refused. */
+    mk_aot_head(b, sizeof b, 1u, HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_OLD_VERSION);
+    mk_aot_head(b, sizeof b, 1u | HL_AOT_STAMP_REQUIRED, HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_OLD_VERSION);
     mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_NO_BOUNDS);
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION | HL_AOT_STAMP_F_BOUNDS,
+                HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_NO_BOUNDS);
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION | HL_AOT_STAMP_F_STACK_BOUNDS,
+                HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_NO_BOUNDS);
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_LOW_OK | 0x40000u, HL_AOT_STAMP_MAGIC);
+    EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_OK);
+
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_LOW_OK, HL_AOT_STAMP_MAGIC);
     b[0] = 0x01;                                      /* not "\0aot" */
     EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_NOT_AOT);
-    mk_aot_head(b, sizeof b, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    mk_aot_head(b, sizeof b, HL_AOT_STAMP_LOW_OK, HL_AOT_STAMP_MAGIC);
     b[8] = 3;                                         /* first section not target info */
     EXPECT_EQ(hl_aot_stamp_check(b, sizeof b), HL_AOT_STAMP_NOT_AOT);
 
     /* A plain .wasm is not an AOT file. */
     EXPECT_EQ(hl_aot_stamp_check(echo_wasm, echo_wasm_len), HL_AOT_STAMP_NOT_AOT);
+}
+
+/* Audit 31: an AOT artifact stamped by Hull's wamrc but compiled without
+ * software bounds checks is refused like an unstamped one - the .wasm runs in
+ * the interpreter, and with no .wasm the load fails. */
+UTEST(hl_cap_wasm, aot_without_bounds_checks_refused)
+{
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+    static const char *aot_key = "compute/echo.aot.x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    static const char *aot_key = "compute/echo.aot.aarch64";
+#else
+    UTEST_SKIP("no AOT arch");
+#endif
+    static uint8_t nobounds[128];
+    mk_aot_head(nobounds, sizeof nobounds,
+                HL_AOT_STAMP_VERSION | HL_AOT_STAMP_F_STACK_BOUNDS,
+                HL_AOT_STAMP_MAGIC);
+    ASSERT_EQ(hl_aot_stamp_check(nobounds, sizeof nobounds),
+              HL_AOT_STAMP_NO_BOUNDS);
+
+    HlEntry with_wasm[] = {
+        { aot_key, nobounds, sizeof nobounds },
+        { "compute/echo.wasm", echo_wasm, echo_wasm_len },
+        { 0, 0, 0 }
+    };
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, with_wasm, NULL);
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+    pthread_mutex_lock(&cache.pool_mutex);
+    int is_aot = cache.count == 1 ? cache.modules[0].is_aot : -1;
+    pthread_mutex_unlock(&cache.pool_mutex);
+    EXPECT_EQ(is_aot, 0);
+    hl_cap_wasm_destroy(&cache);
+
+    HlEntry aot_only[] = { { aot_key, nobounds, sizeof nobounds }, { 0, 0, 0 } };
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, aot_only, NULL);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), HL_WASM_ERR_LOAD);
+    hl_cap_wasm_destroy(&cache);
+
+    /* The same bytes under the .wasm name (AOT magic): refused too. */
+    HlEntry as_wasm[] = { { "compute/echo.wasm", nobounds, sizeof nobounds },
+                          { 0, 0, 0 } };
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    hl_vfs_init(&vfs, as_wasm, NULL);
+    EXPECT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), HL_WASM_ERR_LOAD);
+    hl_cap_wasm_destroy(&cache);
 }
 
 /* An AOT artifact without the stamp (an unpatched wamrc's) is refused: the
@@ -4153,7 +4222,7 @@ UTEST(hl_cap_wasm, stamped_aot_never_loaded_from_disk)
      * the fix the load below returned HL_WASM_ERR_LOAD instead of falling
      * back to the .wasm. */
     static uint8_t stamped[128];
-    mk_aot_head(stamped, sizeof stamped, HL_AOT_STAMP_VERSION, HL_AOT_STAMP_MAGIC);
+    mk_aot_head(stamped, sizeof stamped, HL_AOT_STAMP_LOW_OK, HL_AOT_STAMP_MAGIC);
     ASSERT_EQ(hl_aot_stamp_check(stamped, sizeof stamped), HL_AOT_STAMP_OK);
 
     char dir[512];

@@ -1774,6 +1774,12 @@ e2e-compute-async-trap: $(BUILDDIR)/hull
 e2e-compute-aot-shared-heap:
 	sh tests/e2e_compute_aot_shared_heap.sh
 
+# Audit 31: `hull build`'s AOT bounds-checks every linear-memory access (same
+# embedded-hull + wamrc preconditions as above; run the script directly in CI).
+.PHONY: e2e-compute-aot-bounds
+e2e-compute-aot-bounds:
+	sh tests/e2e_compute_aot_bounds.sh
+
 # #336: `hull build` of a Memory64 compute plugin (needs an embedded hull + wamrc,
 # same as the shared-heap E2E above). Run directly (as CI does):
 # `sh tests/e2e_compute_memory64.sh`, or `make EMBED_PLATFORM=1 e2e-compute-memory64`.

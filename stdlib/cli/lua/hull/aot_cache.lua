@@ -17,7 +17,7 @@
 --
 -- Public surface (CLI-only; not exposed to app code):
 --
---   M.key(wasm_path, arch, mem64, wamrc_version)
+--   M.key(wasm_path, arch, mem64, wamrc_version, wamrc_flags)
 --     → string|nil       64-char hex digest the store uses for this
 --                        artifact, or nil on read failure.
 --
@@ -57,6 +57,12 @@ local CACHE_KIND = "compute-aot"
 -- shared-heap component at all.
 local SHARED_HEAP_AOT_COMPAT = "v1"
 
+-- AOT contract version, bumped when what Hull requires of an AOT artifact
+-- changes. v2 (audit 31): software bounds checks (--bounds-checks=1
+-- --stack-bounds-checks=1) and the stamp version 2 that records them; every
+-- entry from before is dropped (it was compiled without bounds checks).
+local AOT_CONTRACT = "v2"
+
 local function disabled()
     -- hull_cache_disabled("AOT") already checks HULL_NO_CACHE first
     -- (cache_dir.c:198 short-circuits before the per-kind check),
@@ -89,14 +95,17 @@ function M.wamrc_version(wamrc_bin)
     if wamrc_version_memo[wamrc_bin] then
         return wamrc_version_memo[wamrc_bin]
     end
-    local bytes = tool.read_file(wamrc_bin)
-    if not bytes then
+    -- Streamed in C: a wamrc statically linked against LLVM is ~90 MB,
+    -- more than the tool VM's 64 MB heap, so reading it into a Lua
+    -- string failed the whole build ("out of memory").
+    local sha = tool.sha256_file(wamrc_bin)
+    if not sha then
         -- Fail closed: no fingerprint → no cache key → no cache.
         -- Better than fingerprinting `nil` and colliding every
         -- failing-probe run together.
         return nil
     end
-    local id = "wamrc-sha256=" .. hex.encode(crypto.sha256(bytes))
+    local id = "wamrc-sha256=" .. sha
     wamrc_version_memo[wamrc_bin] = id
     return id
 end
@@ -111,12 +120,17 @@ end
 --                 is no --enable-memory64 wamrc flag). Redundant with wasm_sha
 --                 but kept explicit for clarity.
 --   sh_aot      - shared-heap AOT compatibility token (SHARED_HEAP_AOT_COMPAT)
---   wamrc_id    - version banner + binary mtime
+--   wamrc_id    - sha256 of the wamrc binary
+--   flags       - the wamrc flag list (audit 31), so an entry compiled with
+--                 another flag set - e.g. without --bounds-checks=1 - is never
+--                 reused; plus the AOT_CONTRACT token
 --
 -- Folded into a single SHA-256, hex-encoded - the blob_store keyed
 -- mode expects a 64-char lowercase hex id.
-function M.key(wasm_path, arch, mem64, wamrc_version)
+function M.key(wasm_path, arch, mem64, wamrc_version, wamrc_flags)
     if not wasm_path or not arch then return nil end
+    -- Fail closed: no flag list -> no key -> no cache.
+    if type(wamrc_flags) ~= "table" then return nil end
     local wasm_bytes = tool.read_file(wasm_path)
     if not wasm_bytes then return nil end
     local wasm_sha = hex.encode(crypto.sha256(wasm_bytes))
@@ -127,6 +141,8 @@ function M.key(wasm_path, arch, mem64, wamrc_version)
         "|sh_aot=", SHARED_HEAP_AOT_COMPAT,   -- shared-heap AOT compat token (bump on
                                               -- any shared-heap AOT contract change)
         "|wamrc=", wamrc_version or "unknown",
+        "|aot=", AOT_CONTRACT,
+        "|flags=", table.concat(wamrc_flags, " "),
     })
     return hex.encode(crypto.sha256(payload))
 end
