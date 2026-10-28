@@ -308,6 +308,22 @@ int hl_cap_db_sql_calls_dynamic_sql(const char *sql);
 int hl_cap_db_sql_reads_whole_database(const char *sql);
 
 /**
+ * @brief Whether @p sql holds a DuckDB statement that changes which catalog or
+ * schema an unqualified name resolves to - ATTACH / DETACH another database
+ * file, USE a database/schema, or SET / RESET / PRAGMA of `schema` or
+ * `search_path` - past #hl_cap_db_check_namespace (audit 33). Once a second
+ * catalog is attached or made current, a stored view or macro in it reads the
+ * app's `_hull_*` tables cross-catalog without the name ever appearing in the
+ * app's SQL text, so the lexical check cannot see it. The DuckDB backend
+ * refuses such a text under every file policy. Read conservatively, as
+ * #hl_cap_db_sql_reads_whole_database: every word of the text (string literals
+ * are not skipped), the keywords in any case with whitespace and comments
+ * (nesting or not) between them; any statement of a multi-statement text
+ * counts. 1 = refused.
+ */
+int hl_cap_db_sql_switches_catalog(const char *sql);
+
+/**
  * @brief Install Hull's SQL guard on a connection: the authorizer that refuses
  *        ATTACH of a file / VACUUM INTO and the file-moving pragmas,
  *        SQLITE_DBCONFIG_DEFENSIVE, the progress handler that charges the

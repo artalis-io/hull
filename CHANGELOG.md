@@ -212,6 +212,21 @@ release-artifact layout).
   and a stdlib frame exempts a require only when it calls `require` by name (a stdlib helper
   calling a function the app handed it no longer lends it that exemption).
 
+- **DuckDB app SQL could ATTACH a second catalog and read `_hull_*` cross-catalog** (audit 33).
+  Hull's `_hull_*` guard on a DuckDB connection is the lexical text check, which audit 25 / 32
+  reinforced by refusing dynamic-SQL table functions and whole-database file statements. But
+  `ATTACH 'file.duckdb' AS c` (permitted in the fs-grant mode-B policy, within an allowed
+  directory) opens a second catalog, and a stored view or macro inside an attacker-authored
+  `.duckdb` file - one an app with `fs.write` of that directory may hold, e.g. an upload -
+  reads `app._hull_sessions` cross-catalog with no `_hull_` ever appearing in the app's SQL,
+  so the lexical check never sees it; `USE` and `SET search_path` / `SET schema` reach the
+  same result by changing which catalog an unqualified name resolves to. The DuckDB backend
+  now refuses ATTACH, DETACH, USE, and SET / RESET / PRAGMA of `search_path` or `schema` in
+  app SQL and migrations (`hl_cap_db_sql_switches_catalog`, read with the same budgeted,
+  linear, comment-aware scan as the audit-32 classifier; any statement of a multi-statement
+  text counts). No stdlib SQL uses them, and cross-catalog queries are not a documented Hull
+  DuckDB feature (file I/O stays available through `read_csv` / `read_parquet` / `COPY`).
+
 - **MySQL: a COMMIT tripped in its wait is finished; insert_if_absent refuses a truncated
   value** (audit 31).
   - A run whose budget or deadline tripped while the OK of a lone, wholly sent COMMIT was

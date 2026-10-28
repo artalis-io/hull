@@ -59,6 +59,22 @@ app.main(function()
         assert(not ok and tostring(err):find("COPY FROM DATABASE are not available", 1, true),
                "not refused by Hull: " .. sql .. " -> " .. tostring(err))
     end
+    -- Audit 33: ATTACH / DETACH / USE / SET search_path|schema switch the
+    -- catalog an unqualified name resolves to, which would read _hull_* tables
+    -- through a cross-catalog view with no _hull_ in the app SQL. Refused by
+    -- Hull itself, in any statement of the text.
+    for _, sql in ipairs({
+        "ATTACH ':memory:' AS c2",
+        "USE c2",
+        "SET schema = 'c2.main'",
+        "SET search_path = 'a,b'",
+        "RESET schema",
+        "SELECT 1; /* x */ attach -- y\n ':memory:' AS c3",
+    }) do
+        local ok, err = pcall(d.exec, sql)
+        assert(not ok and tostring(err):find("switch catalogs", 1, true),
+               "not refused by Hull: " .. sql .. " -> " .. tostring(err))
+    end
     print("DUCKDB FEATURE APP OK")
     return 0
 end)
