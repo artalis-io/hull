@@ -305,7 +305,9 @@ local function main()
     local undeclared, unused = diff_sets(declared, used)
 
     if want_json then
-        print(json.encode({
+        -- Encoded JSON: written raw (json.encode escapes every C0 control
+        -- itself; the escaping print would turn a raw DEL into \x7f).
+        tool.stderr_raw(json.encode({
             app_dir    = app_dir,
             declared   = (function()
                 local t = {}; for k, _ in pairs(declared) do t[#t+1] = k end
@@ -313,7 +315,7 @@ local function main()
             end)(),
             undeclared = undeclared,
             unused     = unused,
-        }))
+        }) .. "\n")
         if #undeclared > 0 then tool.exit(1) end
         return
     end

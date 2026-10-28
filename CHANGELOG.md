@@ -108,6 +108,22 @@ release-artifact layout).
   `make wamrc`); AOT from an older wamrc is refused. The runtime's lack of hardware bound
   checks is now pinned (`WASM_DISABLE_HW_BOUND_CHECK=1`). `hull build` also hashes the wamrc
   binary by streaming it: a ~90 MB wamrc failed the build with "out of memory".
+- **Tool commands printed a cloned tree's text raw** (audit 33). Audit 32 escaped app text at
+  the call sites it found in `hull build` and the manifest-extraction error, but most tool
+  commands still wrote file names, manifest strings and signature fields verbatim: `hull verify`
+  (unsigned / missing / modified file names, the signed build info), `hull inspect` (every
+  `package.sig` / `hull.sig` field, signed or not), `hull deploy` (the env names and hosts it
+  rejected as unsafe), `hull modules list` / `hull check` / `hull modules analyze` (declared
+  specs, source file names), `hull analyze` (diagnostic paths), `hull compute build` (an invalid
+  module name, a dependency path), `hull eject` (copied file names), the AOT step of
+  `hull build`, and the dispatcher's report of a plugin's error (a `json.decode` error quotes the
+  byte it stopped at). An ESC / OSC sequence there rewrote the terminal, set its title or (OSC 52)
+  the clipboard. The tool VM's `print`, `tool.stderr` and `tool.stdout` now escape every control
+  byte but LF and tab (CR as `\r`; ESC, NUL, the other C0 controls and DEL as `\xNN`; UTF-8
+  unchanged), as does the dispatcher's error line; `tool.stderr_raw` / `tool.stdout_raw` write
+  verbatim and are used only for JSON the plugin encoded itself. Covered by
+  `tests/e2e_tool_escape.sh` (`make e2e-tool-escape`).
+
 - **Concurrent first failures deadlocked the lockout counters on MySQL** (audit 31, both
   runtimes). The audit-30 re-audit ran the counter's UPDATE first and the INSERT-if-absent
   only when it matched no row; but an UPDATE matching no row takes a gap lock under

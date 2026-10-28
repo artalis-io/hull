@@ -29,6 +29,7 @@
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
 #include "hull/cap/db_budget.h"
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
+#include "hull/shared/term_escape.h"   /* hl_term_fwrite_escaped (audit 33) */
 
 #include "lua.h"
 #include "lualib.h"
@@ -234,15 +235,21 @@ static void hl_lua_sandbox(lua_State *L)
 
 /* ── Print helper (mirrors console polyfill in JS) ──────────────────── */
 
+/* The tool VM's print (cfg->sandbox == 0): stderr, with control bytes
+ * escaped (hl_term_fwrite_escaped - LF / tab kept). The CLI plugins print
+ * file names, manifest strings and package.sig fields from the tree they
+ * work on through it, and raw an ESC / OSC sequence there rewrote the
+ * terminal or set the clipboard (audit 33). */
 static int hl_lua_print(lua_State *L)
 {
     int n = lua_gettop(L);
     for (int i = 1; i <= n; i++) {
         if (i > 1)
             fputc('\t', stderr);
-        const char *s = luaL_tolstring(L, i, NULL);
+        size_t len = 0;
+        const char *s = luaL_tolstring(L, i, &len);
         if (s)
-            fputs(s, stderr);
+            hl_term_fwrite_escaped(stderr, s, len);
         lua_pop(L, 1); /* pop the string from luaL_tolstring */
     }
     fputc('\n', stderr);
@@ -405,8 +412,9 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         hl_lua_tool_register_orchestration(lua->L);
     }
 
-    /* Replace print: a log record in an app VM (audit 29), raw stderr in
-     * the tool VM (the CLI plugins write their output through it). */
+    /* Replace print: a log record in an app VM (audit 29), escaped stderr
+     * in the tool VM (the CLI plugins write their output through it;
+     * audit 33). */
     lua_pushcfunction(lua->L, cfg->sandbox ? hl_lua_app_print
                                            : hl_lua_print);
     lua_setglobal(lua->L, "print");

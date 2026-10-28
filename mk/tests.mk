@@ -1404,6 +1404,12 @@ e2e: $(BUILDDIR)/hull
 e2e-build:
 	sh tests/e2e_build.sh
 
+# Tool commands escape control bytes from the tree they read (audit 33):
+# verify / inspect / deploy / modules / check / analyze / compute / eject.
+.PHONY: e2e-tool-escape
+e2e-tool-escape: $(BUILDDIR)/hull
+	sh tests/e2e_tool_escape.sh
+
 e2e-http: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_http.sh
 

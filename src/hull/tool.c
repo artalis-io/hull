@@ -21,6 +21,7 @@
 #include "hull/sandbox.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
+#include "hull/shared/term_escape.h"   /* plugin errors (audit 33) */
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -631,8 +632,18 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         }
     }
     if (rc != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        fprintf(stderr, "hull %s: %s\n", module, err ? err : "unknown error");
+        /* The error a plugin raised can quote the tree it was reading - a
+         * json.decode error names the byte it stopped at, a file name, a
+         * manifest string - so it is escaped as the tool VM's writers escape
+         * (audit 33). */
+        size_t elen = 0;
+        const char *err = lua_tolstring(L, -1, &elen);
+        fprintf(stderr, "hull %s: ", module);
+        if (err)
+            hl_term_fwrite_escaped(stderr, err, elen);
+        else
+            fputs("unknown error", stderr);
+        fputc('\n', stderr);
         lua_pop(L, 1);
     }
 
