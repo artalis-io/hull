@@ -18,6 +18,11 @@
 local json = require("hull.json")
 local hex = require("hull.encoding").hex
 local fcompose = require("hull.feature_compose")
+
+-- App-derived text (a file name from the app's tree) is printed through
+-- tool.escape: tool.stderr / print write raw, and a name holding an ESC /
+-- OSC sequence rewrote the terminal or set the clipboard (audit 32).
+local esc = tool.escape or function(x) return tostring(x) end
 -- The per-feature compose registry (single source of truth): { backend, type,
 -- hook, cxx, base_group, whole_archive, libs } per --with feature. Hoisted out
 -- of main() during the build modularization (docs/build_modularization.md).
@@ -506,7 +511,7 @@ local function find_sql_files(dir)
         print("hull build: warning: skipping " .. #skipped .. " .sql file(s) " ..
               "in subdirectories of " .. dir .. " (only top-level " ..
               "migrations run, as in development): " ..
-              table.concat(skipped, ", "))
+              esc(table.concat(skipped, ", ")))
     end
     return files
 end
@@ -545,7 +550,7 @@ local function collect_app_entries(app_dir, files)
     local function add(path, name)
         local data = read_file(path)
         if not data then
-            tool.stderr("hull build: cannot read " .. path .. "\n"); tool.exit(1)
+            tool.stderr("hull build: cannot read " .. esc(path) .. "\n"); tool.exit(1)
         end
         entries[#entries + 1] = { name = name, data = data }
     end
@@ -574,7 +579,7 @@ local function collect_app_entries(app_dir, files)
     for _, e in ipairs(entries) do
         if seen_names[e.name] then
             tool.stderr("hull build: two files embed under the same name '"
-                        .. e.name .. "' (rename one, e.g. x.json.lua vs x.json)\n")
+                        .. esc(e.name) .. "' (rename one, e.g. x.json.lua vs x.json)\n")
             tool.exit(1)
         end
         seen_names[e.name] = true
@@ -647,7 +652,7 @@ local function generate_app_registry(app_dir, files)
     local function add_file(path, entry_name, var_prefix)
         local data = read_file(path)
         if not data then
-            tool.stderr("hull build: cannot read " .. path .. "\n")
+            tool.stderr("hull build: cannot read " .. esc(path) .. "\n")
             tool.exit(1)
         end
 
@@ -741,7 +746,7 @@ local function generate_app_registry(app_dir, files)
     for _, e in ipairs(entries) do
         if seen_names[e.name] then
             tool.stderr("hull build: two files embed under the same name '"
-                        .. e.name .. "' (rename one, e.g. x.json.lua vs x.json)\n")
+                        .. esc(e.name) .. "' (rename one, e.g. x.json.lua vs x.json)\n")
             tool.exit(1)
         end
         seen_names[e.name] = true
@@ -2012,14 +2017,14 @@ typedef struct {
                 tool.stderr("  Missing/stale: ")
                 local names = {}
                 for _, e in ipairs(r.errors) do names[#names + 1] = e.name end
-                tool.stderr(table.concat(names, ", ") .. "\n")
+                tool.stderr(esc(table.concat(names, ", ")) .. "\n")
                 tool.stderr("  Either install clang with wasm32 target support, run\n")
                 tool.stderr("    hull compute build  (on a machine with clang)\n")
                 tool.stderr("  and commit the resulting .wasm files, or pass --no-build-compute\n")
                 tool.stderr("  to embed the existing .wasm files as-is.\n")
             else
                 for _, e in ipairs(r.errors) do
-                    tool.stderr("hull build: compute/" .. e.name .. ": " .. e.err .. "\n")
+                    tool.stderr("hull build: compute/" .. esc(e.name) .. ": " .. esc(e.err) .. "\n")
                 end
             end
             tool.rmdir(tmpdir)
@@ -2051,7 +2056,7 @@ typedef struct {
         for _, f in ipairs(wasm) do
             if has_aot_magic(f) then
                 if not opts.trust_prebuilt_aot then
-                    tool.stderr("hull build: " .. f .. " holds AOT code, not " ..
+                    tool.stderr("hull build: " .. esc(f) .. " holds AOT code, not " ..
                                 "WebAssembly bytecode. A build embeds only the " ..
                                 "AOT it compiles itself: ship the module's " ..
                                 "bytecode as .wasm, or pass --trust-prebuilt-aot " ..
@@ -2061,7 +2066,7 @@ typedef struct {
                 end
                 local why = aot_stamp_status(f)
                 if why then
-                    tool.stderr("hull build: " .. f .. " holds AOT code, not " ..
+                    tool.stderr("hull build: " .. esc(f) .. " holds AOT code, not " ..
                                 "WebAssembly bytecode (" .. why .. "); the " ..
                                 "runtime refuses it. Ship the module's bytecode " ..
                                 "as .wasm - hull build compiles the AOT with " ..
@@ -2080,7 +2085,7 @@ typedef struct {
             else
                 local why = aot_stamp_status(f)
                 if why then
-                    print("hull build: warning: " .. f .. " is unusable (" ..
+                    print("hull build: warning: " .. esc(f) .. " is unusable (" ..
                           why .. "): the runtime refuses it and runs the " ..
                           "module's .wasm in the interpreter. Delete it, or " ..
                           "rebuild it with Hull's wamrc (`hull tools install wamrc`).")
@@ -2091,7 +2096,7 @@ typedef struct {
         end
         if #skipped > 0 then
             print("hull build: not embedding " .. #skipped .. " committed AOT " ..
-                  "file(s) (" .. table.concat(skipped, ", ") .. "): a build " ..
+                  "file(s) (" .. esc(table.concat(skipped, ", ")) .. "): a build " ..
                   "embeds only the AOT it compiles itself. Pass " ..
                   "--trust-prebuilt-aot to embed them.")
         end
@@ -2240,6 +2245,17 @@ end
 
 local function main()
     local opts = parse_args()
+
+    -- The output must not be a symbolic link: the linker writes THROUGH one
+    -- (ld64 / GNU bfd open the path), so a cloned app committing
+    -- `app -> ~/.local/bin/git` had `hull build` drop an executable there
+    -- (audit 32). The tool layer refuses a dangling link too; this says why.
+    if tool.is_symlink(opts.output) == true then
+        tool.stderr("hull build: the output " .. esc(opts.output) .. " is a "
+            .. "symbolic link; refusing to link through it (remove it, or "
+            .. "pass -o PATH)\n")
+        tool.exit(1)
+    end
 
     -- Cross-target guard (docs/build_arc_audit.md #2). The emit path can produce
     -- a cross-ARCH app_registry.o, but the platform library + the bundled

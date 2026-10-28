@@ -2058,7 +2058,12 @@ since audit 10 that includes `tool.extract_platform*` / `extract_feature_*` (the
 `extract_manifest_lua` / `_js`'s entry - and the tool VM has no `load` / `loadfile` / `dofile`
 (app code is only run through `extract_manifest_*`, in a fresh sandboxed runtime). The unveil
 check canonicalises a not-yet-existing path through its nearest existing ancestor (a raw
-`/tmp/../x` no longer passes the `/tmp` prefix). Nothing a build or eject executes or links is
+`/tmp/../x` no longer passes the `/tmp` prefix), and refuses a path whose not-yet-existing
+tail holds a symbolic link, leaf included: a dangling `app -> ~/.local/bin/git` passed as its
+nominal spelling and the linker wrote through it (audit 32; `hull build` also refuses an output
+that is a link). App-derived text the tool VM prints - an extraction error, a file name from the
+app's tree - goes through `tool.escape` (the `hl_log_escape_line` rules; `tool.stderr` and the
+tool VM's `print` stay raw for the plugins' own output; audit 32). Nothing a build or eject executes or links is
 taken from the working directory (`./build/wamrc`, `./build/libhull_platform*.a`,
 `./build/platform.sig`); `hull build --platform-sig PATH` names a platform.sig explicitly.
 
