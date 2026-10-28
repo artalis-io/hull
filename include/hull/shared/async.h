@@ -149,6 +149,10 @@ typedef struct HlAsyncCtx {
      * total (offheap.h): an http.fetch body Keel copied. Given back when
      * the ctx goes, on every path (audit 22). */
     HlOffheapHold hold;
+    /* The VM's in-flight http.fetch count (HlRuntime.http_inflight), which
+     * this op incremented when it started; decremented when the ctx goes,
+     * on every path (audit 31). NULL = not counted. */
+    int          *inflight;
 
     /* http.fetch's redirect policy, read by its per-hop hook (http_async.c):
      * the sealed HlHttpConfig, whether the chain began on https - such a

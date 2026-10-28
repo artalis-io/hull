@@ -517,13 +517,21 @@ static int lua_http_fetch(lua_State *L)
 
     /* Keel copies the body and keeps it until the request is done: charged
      * and held on the VM's off-heap total under its heap limit - N fetches
-     * in flight held N copies of one big body (audit 22). Both raise with
-     * nothing allocated, and run no app code. */
+     * in flight held N copies of one big body (audit 22). Keel also buffers
+     * each response (up to max_response_size) off the heap, so at most
+     * HL_HTTP_MAX_INFLIGHT fetches are in flight: those buffers are bounded
+     * by that count x max_response_size (audit 31). Both raise with nothing
+     * allocated, and run no app code. */
     lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
     HlOffheapHold body_hold = {0};
-    if (hl_offheap_take(&body_hold, &lua->wasm_buf_bytes, lua->mem_limit,
-                        body_len) != 0) {
+    int admit = hl_http_fetch_admit(lua->base.http_inflight, &body_hold,
+                                    &lua->wasm_buf_bytes, lua->mem_limit,
+                                    body_len);
+    if (admit != HL_HTTP_ADMIT_OK) {
         lua_http_scratch_release(lua, headers);
+        if (admit == HL_HTTP_ADMIT_INFLIGHT)
+            return luaL_error(L, "http.fetch: too many requests in flight "
+                              "(at most %d per VM)", HL_HTTP_MAX_INFLIGHT);
         return luaL_error(L, "http.fetch: a %I-byte body would take the VM's "
                           "off-heap copies past its heap limit",
                           (lua_Integer)body_len);
@@ -556,6 +564,8 @@ static int lua_http_fetch(lua_State *L)
     }
     ctx->cont = cont;
     ctx->hold = body_hold;   /* given back when the ctx goes */
+    ctx->inflight = &lua->base.http_inflight;   /* audit 31 */
+    lua->base.http_inflight++;
     /* No request holds a detached fetch: teardown cancels it (audit 14). */
     if (ctx->detached)
         hl_async_ctx_track(ctx, &lua->base.async_live);

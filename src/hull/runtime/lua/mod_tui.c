@@ -56,6 +56,12 @@ static int ensure_acquired(lua_State *L)
         if (errno == EBUSY) {
             return luaL_error(L, "tui: another TUI session is already active in this process");
         }
+        if (errno == EPERM) {   /* the manifest has not admitted TUI (audit 31) */
+            return luaL_error(L,
+                "tui: not admitted - the app must declare `tui = true` and "
+                "\"hull/tui@1\" in app.manifest, and use the terminal from "
+                "app.main, not at top level");
+        }
         if (errno == ENOTTY) {
             return luaL_error(L, "tui: not attached to a terminal (stdin/stdout redirected?)");
         }

@@ -316,6 +316,10 @@ struct HlRuntime {
      * WebSocket client still pending on the loop. Drained by
      * vt->stop_async. */
     struct HlAsyncTeardown *async_live;
+    /* http.fetch ops in flight on this VM (attached and detached), at most
+     * HL_HTTP_MAX_INFLIGHT; each op's ctx decrements it when it goes
+     * (HlAsyncCtx.inflight, audit 31). */
+    int http_inflight;
     /* Set by vt->stop_async: the server is being torn down. A WebSocket
      * closed by that teardown runs no on_close handler - the event loop is
      * going away under it (audit 15). */

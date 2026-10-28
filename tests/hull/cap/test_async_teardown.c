@@ -145,4 +145,26 @@ UTEST(async_teardown, drop_unrun_after_its_own_cancel_frees_only_the_ctx)
     EXPECT_EQ(destroyed, 1);
 }
 
+/* audit 31: an http.fetch ctx gives its in-flight count back when it goes,
+ * on every path (resume, cancel, never armed). */
+UTEST(async_teardown, a_ctx_gives_its_inflight_count_back)
+{
+    reset();
+    int inflight = 0;
+    HlAsyncTeardown *list = NULL;
+    HlAsyncCtx *a = make_ctx(1), *b = make_ctx(1), *c = make_ctx(1);
+    ASSERT_TRUE(a && b && c);
+    a->inflight = b->inflight = c->inflight = &inflight;
+    inflight = 3;
+    hl_async_ctx_track(a, &list);
+    hl_async_ctx_resume_detached(b);           /* completes */
+    EXPECT_EQ(2, inflight);
+    c->cont->destroy(c->cont);                 /* never armed: the ctx */
+    c->cont = NULL;                            /* does not own its cont */
+    hl_async_ctx_free(c);
+    EXPECT_EQ(1, inflight);
+    hl_async_teardown_run(&list, NULL);        /* cancelled at teardown */
+    EXPECT_EQ(0, inflight);
+}
+
 UTEST_MAIN();

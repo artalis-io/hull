@@ -89,6 +89,13 @@ bool hl_module_set_optional_absent_spec(const HlResolvedModuleSet *set,
 bool hl_module_set_optional_absent_name(const HlResolvedModuleSet *set,
                                          const char *canonical_name);
 
+/* Open (or close) the TUI admission gate (hl_tui_admit_set, cap/tui.h) from
+ * an applied manifest: open iff @p manifest says `tui = true` AND @p set
+ * admitted hull/tui. Called by every entry point once the manifest is
+ * applied and the import tracker validated (audit 31). */
+void hl_tui_admit_resolved(const HlManifest *manifest,
+                           const HlResolvedModuleSet *set);
+
 /* Number of bits set. */
 int hl_module_set_count(const HlResolvedModuleSet *set);
 

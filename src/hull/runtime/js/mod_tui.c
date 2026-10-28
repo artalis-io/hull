@@ -50,6 +50,13 @@ static int ensure_acquired(JSContext *ctx)
                 "tui: another TUI session is already active in this process");
             return -1;
         }
+        if (errno == EPERM) {   /* the manifest has not admitted TUI (audit 31) */
+            JS_ThrowInternalError(ctx,
+                "tui: not admitted - the app must declare `tui: true` and "
+                "\"hull/tui@1\" in app.manifest, and use the terminal from "
+                "app.main, not at top level");
+            return -1;
+        }
         if (errno == ENOTTY) {
             JS_ThrowInternalError(ctx,
                 "tui: not attached to a terminal (stdin/stdout redirected?)");

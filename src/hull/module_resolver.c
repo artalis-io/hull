@@ -664,3 +664,13 @@ int hl_import_tracker_validate(const HlRuntime *rt,
     }
     return -1;
 }
+
+/* ── TUI admission (audit 31) ────────────────────────────────────── */
+
+void hl_tui_admit_resolved(const HlManifest *manifest,
+                           const HlResolvedModuleSet *set)
+{
+    int on = manifest && manifest->tui && set &&
+             hl_module_set_contains_name(set, "hull/tui");
+    (void)hl_tui_admit_set(on);
+}

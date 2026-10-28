@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/cap/tui.h"   /* hl_tui_admit_set (audit 31) */
 #include "hull/tool.h"
 #include "hull/stdlib_feature.h"
 #include "hull/compilers.h"
@@ -376,6 +377,14 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     /* No bytecode from the runtime-key caches in a build or a signing: an
      * app process holds that key (cache_common.h, audit 22). */
     hl_runtime_cache_code_off(1);
+
+    /* The toolchain's own --tui commands (hull.doctor_tui, hull.dev_tui,
+     * ...) may take the terminal; no other tool module may (audit 31: a
+     * manifest extraction a build runs executes an app's top level). */
+    {
+        size_t ml = strlen(module);
+        (void)hl_tui_admit_set(ml > 4 && strcmp(module + ml - 4, "_tui") == 0);
+    }
 
     /* Parse --cc/--compiler option for configurable compiler */
     const char *cc_explicit = parse_cc_option(argc, argv);

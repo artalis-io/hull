@@ -643,6 +643,73 @@ SQL
             fail "tui_dashboard did not disable SGR mouse on exit"
             ;;
     esac
+    # ── TUI admission gate (audit 31) ─────────────────────────────
+    #
+    # The terminal is taken only once the runtime has applied a manifest
+    # that declares `tui = true` AND hull/tui. App top level runs before
+    # that, and the manifest-extraction VM (`hull manifest` / build / check
+    # / ...) never opens the gate, so an app that touches hull.tui there -
+    # declared or not - must write no escape sequence (no OSC 52 clipboard
+    # write, no alt screen). Each app carries a fresh token so no cached
+    # extraction result can make the check vacuous; the declared app.main
+    # control proves the PTY capture would see an OSC 52 if one were sent.
+    echo "--- TUI admission gate ---"
+    GATE_TOKEN="gate-$$-$(date +%s)"
+    mkdir -p "${TMP}/gate_lua" "${TMP}/gate_js" "${TMP}/gate_ok"
+    cat > "${TMP}/gate_lua/app.lua" <<EOF
+-- ${GATE_TOKEN}
+pcall(function() require("hull.tui").clipboard_set("echo pwned") end)
+app.manifest({ modules = { "hull/crypto@1" } })
+app.main(function() return 0 end)
+EOF
+    cat > "${TMP}/gate_js/app.js" <<EOF
+// ${GATE_TOKEN}
+import { app } from "hull:app";
+import { tui } from "hull:tui";
+try { tui.clipboardSet("echo pwned"); } catch (e) {}
+app.manifest({ modules: ["hull/crypto@1"] });
+app.main(() => 0);
+EOF
+    cat > "${TMP}/gate_ok/app.lua" <<EOF
+-- ${GATE_TOKEN}
+app.manifest({ tui = true, modules = { "hull/tui@1" } })
+local tui = require("hull.tui")
+pcall(tui.clipboard_set, "top-level")
+app.main(function() tui.clipboard_set("ok-control") return 0 end)
+EOF
+    check_no_tty_write() {
+        label="$1"; shift
+        OUT=$("${DRIVE}" "never-matches-${GATE_TOKEN}" "%s300" -- "$@" 2>&1)
+        case "${OUT}" in
+            *"]52;"*|*"[?1049h"*)
+                fail "${label} wrote to the terminal before the manifest admitted TUI"
+                ;;
+            *)
+                pass "${label} writes no escape sequence"
+                ;;
+        esac
+    }
+    check_no_tty_write "lua: undeclared tui at top level (hull app.lua)" \
+        "${HULL_BIN}" "${TMP}/gate_lua/app.lua"
+    check_no_tty_write "lua: undeclared tui under hull manifest" \
+        "${HULL_BIN}" manifest "${TMP}/gate_lua"
+    check_no_tty_write "js: undeclared tui at top level (hull app.js)" \
+        "${HULL_BIN}" "${TMP}/gate_js/app.js"
+    check_no_tty_write "js: undeclared tui under hull manifest" \
+        "${HULL_BIN}" manifest "${TMP}/gate_js"
+    check_no_tty_write "lua: declared tui's top level under hull manifest" \
+        "${HULL_BIN}" manifest "${TMP}/gate_ok"
+    OUT=$("${DRIVE}" "never-matches-${GATE_TOKEN}" "%s300" -- \
+          "${HULL_BIN}" "${TMP}/gate_ok/app.lua" 2>&1)
+    # base64("top-level") = dG9wLWxldmVs: its top level must not get it.
+    case "${OUT}" in
+        *"dG9wLWxldmVs"*)
+            fail "lua: a declared app's TOP LEVEL set the clipboard" ;;
+        *"]52;"*)
+            pass "lua: a declared app's app.main (not its top level) sets the clipboard" ;;
+        *)
+            fail "lua: a declared app's app.main did not set the clipboard (control)" ;;
+    esac
 fi
 
 echo

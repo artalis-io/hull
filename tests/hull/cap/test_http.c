@@ -359,4 +359,43 @@ UTEST(request_method, only_rfc9110_tokens_are_accepted)
                                       &resp));
 }
 
+/* ── In-flight http.fetch admission (audit 31) ──────────────────────── */
+
+/* The N+1th fetch past HL_HTTP_MAX_INFLIGHT is refused, with nothing held. */
+UTEST(fetch_admit, refuses_past_the_inflight_cap)
+{
+    size_t total = 0;
+    int inflight = 0;
+    HlOffheapHold holds[HL_HTTP_MAX_INFLIGHT + 1];
+    memset(holds, 0, sizeof holds);
+    for (int i = 0; i < HL_HTTP_MAX_INFLIGHT; i++) {
+        ASSERT_EQ(HL_HTTP_ADMIT_OK,
+                  hl_http_fetch_admit(inflight, &holds[i], &total, 0, 1024));
+        inflight++;
+    }
+    EXPECT_EQ((size_t)HL_HTTP_MAX_INFLIGHT * 1024, total);
+    EXPECT_EQ(HL_HTTP_ADMIT_INFLIGHT,
+              hl_http_fetch_admit(inflight, &holds[HL_HTTP_MAX_INFLIGHT],
+                                  &total, 0, 1024));
+    EXPECT_EQ((size_t)0, holds[HL_HTTP_MAX_INFLIGHT].bytes);
+    EXPECT_EQ((size_t)HL_HTTP_MAX_INFLIGHT * 1024, total);
+    for (int i = 0; i < HL_HTTP_MAX_INFLIGHT; i++)
+        hl_offheap_drop(&holds[i]);
+    EXPECT_EQ((size_t)0, total);
+}
+
+/* The body copy is still held under the heap limit (audit 22); a refused
+ * body holds nothing. */
+UTEST(fetch_admit, the_body_counts_against_the_heap_limit)
+{
+    size_t total = 0;
+    HlOffheapHold a = {0}, b = {0};
+    ASSERT_EQ(HL_HTTP_ADMIT_OK, hl_http_fetch_admit(0, &a, &total, 100, 60));
+    EXPECT_EQ(HL_HTTP_ADMIT_HEAP, hl_http_fetch_admit(1, &b, &total, 100, 41));
+    EXPECT_EQ((size_t)0, b.bytes);
+    EXPECT_EQ((size_t)60, total);
+    hl_offheap_drop(&a);
+    EXPECT_EQ((size_t)0, total);
+}
+
 UTEST_MAIN()

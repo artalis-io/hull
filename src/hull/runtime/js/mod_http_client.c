@@ -624,13 +624,17 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Keel copies the body and keeps it until the request is done: held on
-     * the VM's off-heap total under its heap limit, and charged - N
-     * fetches in flight held N copies of one big body (audit 22). The
-     * body was charged when it was read (js_http_body_get, audit 27). */
+     * the VM's off-heap total under its heap limit - N fetches in flight
+     * held N copies of one big body (audit 22). Keel also buffers each
+     * response (up to max_response_size) off the heap, so at most
+     * HL_HTTP_MAX_INFLIGHT fetches are in flight: those buffers are bounded
+     * by that count x max_response_size (audit 31). The body was charged
+     * when it was read (js_http_body_get, audit 27). */
     HlOffheapHold body_hold = {0};
-    int over = hl_offheap_take(&body_hold, &js->wasm_buf_bytes,
-                               js->max_heap_bytes, body_len) != 0;
-    if (over) {
+    int admit = hl_http_fetch_admit(js->base.http_inflight, &body_hold,
+                                    &js->wasm_buf_bytes, js->max_heap_bytes,
+                                    body_len);
+    if (admit != HL_HTTP_ADMIT_OK) {
         hl_offheap_drop(&body_hold);
         JS_FreeValue(ctx, resolving_funcs[0]);
         JS_FreeValue(ctx, resolving_funcs[1]);
@@ -639,6 +643,9 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, url);
         js_http_body_free(ctx, &jbody);
         js_free_http_headers(ctx, headers, num_headers);
+        if (admit == HL_HTTP_ADMIT_INFLIGHT)
+            return JS_ThrowRangeError(ctx, "http.fetch: too many requests "
+                "in flight (at most %d per VM)", HL_HTTP_MAX_INFLIGHT);
         return JS_ThrowRangeError(ctx, "http.fetch: a %zu-byte body would "
             "take the VM's off-heap copies past its heap limit", body_len);
     }
@@ -684,6 +691,8 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     }
     async_ctx->cont = cont;
     async_ctx->hold = body_hold;   /* given back when the ctx goes */
+    async_ctx->inflight = &js->base.http_inflight;   /* audit 31 */
+    js->base.http_inflight++;
     /* No request holds a detached fetch: teardown cancels it (audit 14). */
     if (async_ctx->detached)
         hl_async_ctx_track(async_ctx, &js->base.async_live);
