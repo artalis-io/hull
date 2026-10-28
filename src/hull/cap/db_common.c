@@ -251,4 +251,85 @@ int hl_cap_db_sql_calls_dynamic_sql(const char *sql)
     return 0;
 }
 
+/* ── DuckDB whole-database file statements (audit 32) ──────────────── */
+
+/* DuckDB runs SQL it reads from a file, or copies every table, without the
+ * statement naming one: IMPORT DATABASE 'dir' runs dir/schema.sql and
+ * dir/load.sql (files an app with fs.write can author), EXPORT DATABASE
+ * 'dir' writes every table - _hull_* ones included - to files read_csv can
+ * read back, and COPY FROM DATABASE a TO b copies every table into an
+ * attached file. IMPORT is a PRAGMA underneath (import_database), so the
+ * pragma names count too, bare or "quoted". */
+static int whole_db_name(const char *s, size_t n)
+{
+    static const char *const names[] = {
+        "import_database", "export_database", "copy_database", NULL
+    };
+    for (int i = 0; names[i]; i++)
+        if (strlen(names[i]) == n && strncasecmp(s, names[i], n) == 0)
+            return 1;
+    return 0;
+}
+
+/* Whether the next word after @p p (past whitespace and comments, read with
+ * a nesting and a non-nesting block-comment rule) is @p kw. A skip past the
+ * budget reads as a match: the statement is refused. Sets *@p after to the
+ * text after the word on the reading that matched. */
+static int whole_db_next_is(const char *p, const char *kw, size_t *budget,
+                            const char **after)
+{
+    for (int nest = 1; nest >= 0; nest--) {
+        const char *q = dyn_skip_gap(p, nest, budget);
+        if (!q) { *after = NULL; return 1; }
+        size_t n = 0;
+        while (dyn_ident_char((unsigned char)q[n])) n++;
+        if (n == strlen(kw) && strncasecmp(q, kw, n) == 0) {
+            *after = q + n;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int hl_cap_db_sql_reads_whole_database(const char *sql)
+{
+    if (!sql) return 0;
+    size_t budget = 2 * strlen(sql) + 65536;   /* shared by every gap skip */
+    for (const char *p = sql; *p; ) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') {               /* "quoted" pragma / function name */
+            char buf[32];
+            size_t n = 0;
+            int fits = 1;
+            for (const char *q = p + 1; *q; q++) {
+                if (*q == '"') {
+                    if (q[1] == '"') { q++; } else break;
+                }
+                if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
+            }
+            if (fits && whole_db_name(buf, n)) return 1;
+            p++;                      /* literals are not skipped: see above */
+            continue;
+        }
+        if (dyn_ident_char(c) && !(c >= '0' && c <= '9')) {
+            const char *start = p;
+            while (*p && dyn_ident_char((unsigned char)*p)) p++;
+            size_t n = (size_t)(p - start);
+            const char *after = NULL;
+            if (whole_db_name(start, n)) return 1;
+            if ((n == 6 && (strncasecmp(start, "import", 6) == 0 ||
+                            strncasecmp(start, "export", 6) == 0)) &&
+                whole_db_next_is(p, "database", &budget, &after))
+                return 1;
+            if (n == 4 && strncasecmp(start, "copy", 4) == 0 &&
+                whole_db_next_is(p, "from", &budget, &after) &&
+                (!after || whole_db_next_is(after, "database", &budget, &after)))
+                return 1;
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
 #endif /* HL_ENABLE_DB */

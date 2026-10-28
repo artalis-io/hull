@@ -695,6 +695,70 @@ UTEST(hl_cap_db, dynamic_sql_calls_are_found)
     EXPECT_EQ(0, hl_cap_db_sql_calls_dynamic_sql(NULL));
 }
 
+/* Audit 32: DuckDB statements that run SQL from a file or copy every table
+ * without naming one are refused, in any spelling and any statement. */
+UTEST(hl_cap_db, whole_database_statements_are_refused)
+{
+    static const char *const hit[] = {
+        "IMPORT DATABASE 'data/imp'",
+        "import database 'data/imp'",
+        "  \n\tImPoRt   DaTaBaSe 'x'",
+        "EXPORT DATABASE 'data/x'",
+        "EXPORT DATABASE 'data/x' (FORMAT parquet)",
+        "COPY FROM DATABASE db TO c",
+        "copy from database db to c (SCHEMA)",
+        "/* lead */ IMPORT /* gap */ DATABASE 'x'",
+        "-- lead\nEXPORT -- gap\n DATABASE 'x'",
+        "IMPORT /* /* nested */ */ DATABASE 'x'",
+        "IMPORT /* /* not nested */ DATABASE 'x'",
+        "COPY /* a */ FROM -- b\n DATABASE db TO c",
+        "COPY --\r FROM DATABASE db TO c",
+        "SELECT 1; IMPORT DATABASE 'x'",
+        "ATTACH 'data/c.duckdb' AS c; COPY FROM DATABASE db TO c",
+        "CREATE TABLE t (x INT); EXPORT DATABASE 'x'; SELECT 1",
+        "PRAGMA import_database('data/imp')",
+        "PRAGMA IMPORT_DATABASE('data/imp')",
+        "PRAGMA \"import_database\"('data/imp')",
+        "CALL export_database('x')",
+        "SELECT 'export database' AS s",   /* literals are not skipped */
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_reads_whole_database(hit[i]));
+
+    static const char *const miss[] = {
+        "SELECT * FROM t",
+        "COPY t TO 'data/t.csv'",
+        "COPY t FROM 'data/t.csv'",
+        "SELECT import, export, copy FROM t",
+        "SELECT database FROM t",
+        "CREATE TABLE imports (export_id INT, database_name TEXT)",
+        "SELECT * FROM t WHERE importance = 1",
+        "ATTACH 'data/c.duckdb' AS c",
+        "",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_reads_whole_database(miss[i]));
+    EXPECT_EQ(0, hl_cap_db_sql_reads_whole_database(NULL));
+}
+
+/* The keyword gap skips share one budget: `import/*` repeated, each opening
+ * an unterminated comment, stays linear and fails closed. */
+UTEST(hl_cap_db, whole_database_scan_is_linear)
+{
+    size_t n = 1u << 20;
+    char *big = malloc(n + 1);
+    ASSERT_TRUE(big != NULL);
+    for (size_t i = 0; i + 8 <= n; i += 8) memcpy(big + i, "import/*", 8);
+    big[n - n % 8] = '\0';
+    clock_t t0 = clock();
+    EXPECT_EQ(1, hl_cap_db_sql_reads_whole_database(big));
+    for (size_t i = 0; i + 8 <= n; i += 8) memcpy(big + i, "copy  --", 8);
+    EXPECT_EQ(1, hl_cap_db_sql_reads_whole_database(big));
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 5.0);
+    free(big);
+}
+
 /* Audit 30: the quoted-name scan ran to the closing quote from every '"',
  * so a run of quotes was quadratic (1 MB ~ minutes, before any budget
  * charge). It stops once a name cannot fit; detection is unchanged. */

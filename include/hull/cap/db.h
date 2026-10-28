@@ -294,6 +294,20 @@ int hl_cap_db_check_namespace(const char *sql);
 int hl_cap_db_sql_calls_dynamic_sql(const char *sql);
 
 /**
+ * @brief Whether @p sql holds a DuckDB statement that runs SQL from a file or
+ * copies every table without naming one - IMPORT DATABASE (it runs the
+ * directory's schema.sql / load.sql), EXPORT DATABASE, COPY FROM DATABASE -
+ * or names the pragmas behind them (import_database, export_database,
+ * copy_database), past #hl_cap_db_check_namespace (audit 32). The DuckDB
+ * backend refuses such a text under every file policy. Read conservatively,
+ * as #hl_cap_db_sql_calls_dynamic_sql: every word of the text (string
+ * literals are not skipped), the keywords in any case with whitespace and
+ * comments (nesting or not) between them; any statement of a multi-statement
+ * text counts. 1 = refused.
+ */
+int hl_cap_db_sql_reads_whole_database(const char *sql);
+
+/**
  * @brief Install Hull's SQL guard on a connection: the authorizer that refuses
  *        ATTACH of a file / VACUUM INTO and the file-moving pragmas,
  *        SQLITE_DBCONFIG_DEFENSIVE, the progress handler that charges the

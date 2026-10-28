@@ -208,6 +208,73 @@ UTEST(db_backend, an_async_result_under_the_cap_is_copied)
     EXPECT_EQ(10, drain.rows_read);
 }
 
+/* ── Audit 32: zero-column rows (Postgres `SELECT FROM t`) ─────────── */
+
+static int empty_rows_total;
+
+static int empty_query(HlDbHandle *h, const char *sql,
+                       const HlValue *params, int nparams,
+                       HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
+{
+    (void)h; (void)sql; (void)params; (void)nparams; (void)alloc;
+    for (int i = 0; i < empty_rows_total; i++) {
+        if (hl_db_budget_charge(0) != 0) return -1;
+        HlColumn none[1];
+        memset(none, 0, sizeof none);
+        if (cb(cb_ctx, none, 0) != 0) return 0;
+    }
+    return 0;
+}
+
+static const HlDbBackend empty_backend = {
+    .name   = "empty",
+    .query  = empty_query,
+    .errmsg = drain_errmsg,
+};
+
+/* Past the first growth (16 rows) the store was realloc'd to 0 bytes: on
+ * glibc that freed it and returned NULL, read as "too many rows", and the
+ * result free freed the block again. Rows of no columns cost nothing either.
+ * Now the rows are kept (one cell of room each) and charged. */
+UTEST(db_backend, zero_column_async_rows_are_kept_and_charged)
+{
+    empty_rows_total = 40;
+    HlDbHandle h = {0};
+    h.backend = &empty_backend;
+    HlDbResult r;
+    HlDbOpBudget b = { .limit = 1000000, .used = 0, .tripped = 0 };
+    char err[256] = {0};
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    int rc = hl_worker_db_materialize(&h, "SELECT", NULL, 0, 0, &b, NULL,
+                                      &r, err, sizeof err);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(40, r.nrows);
+    EXPECT_EQ(0, r.ncols);
+    EXPECT_GE(b.used, (int64_t)40);   /* at least one unit a row */
+    EXPECT_FALSE(b.tripped);
+    hl_db_result_free(&r);
+}
+
+/* Empty rows count against the result's byte cap too. */
+UTEST(db_backend, zero_column_async_rows_count_against_the_cap)
+{
+    empty_rows_total = 1000;
+    HlDbHandle h = {0};
+    h.backend = &empty_backend;
+    HlDbResult r;
+    HlDbOpBudget b = { .limit = 0, .used = 0, .tripped = 0 };
+    char err[256] = {0};
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    int rc = hl_worker_db_materialize(&h, "SELECT", NULL, 0,
+                                      100 * sizeof(HlDbValue), &b, NULL,
+                                      &r, err, sizeof err);
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(-2, rc);
+    EXPECT_TRUE(strstr(err, "result too large") != NULL);
+    hl_db_result_free(&r);
+}
+
 /* ── Audit 23: in-flight db.async results share one ceiling ─────────── */
 
 static int drain_materialize_held(HlOffheapShared *hold, char *err,

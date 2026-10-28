@@ -35,6 +35,23 @@ release-artifact layout).
   is decided: a request is answered 500, app.main exits 1, a timer or WebSocket callback ends
   as a failed run does, its continuations share a record that stops them, and the failed-run
   list (a fixed ring of 32) frees the run's slot once nothing of it is left to stop.
+- **A `db.async` result of zero-column rows was freed twice** (audit 32). Postgres accepts an
+  empty select list (`SELECT FROM generate_series(1, 20)`), and the worker's result copy grew
+  its row store to `rows x 0` bytes. On glibc `realloc(p, 0)` frees `p` and returns NULL; the
+  copy read that as "too many rows" and the result free freed the block again, so one
+  `conn.async.query` past 16 empty rows aborted the process. A hostile server (or a MITM
+  under the default `sslmode=prefer`) could send the same reply to any `db.async` query.
+  A row now takes at least one cell of room, and that size is charged to the result's byte
+  cap and the op's budget, so empty rows are no longer free up to the 100k-row cap.
+- **DuckDB `IMPORT DATABASE` / `EXPORT DATABASE` / `COPY FROM DATABASE` got past the `_hull_*`
+  check** (audit 32). With a DuckDB file policy (a directory granted in both `fs.read` and
+  `fs.write`), `EXPORT DATABASE` wrote every table - `_hull_*` ones included - to CSV files
+  `read_csv` read back, `IMPORT DATABASE` ran the `schema.sql` / `load.sql` an app had written
+  with `fs.write` (forging sessions or roles), and `COPY FROM DATABASE` copied every table
+  into an attached file, none of them naming a table. The DuckDB backend now refuses these
+  statements, and the `import_database` / `export_database` / `copy_database` pragma names,
+  under every file policy (`hl_cap_db_sql_reads_whole_database`, read like the audit-25
+  dynamic-SQL check: any case, comments between the words, any statement of the text).
 
 - **`hull build` linked the app through a symbolic link at its output** (audit 32). The tool
   layer's path check canonicalised a path it could not `realpath` through its nearest existing
