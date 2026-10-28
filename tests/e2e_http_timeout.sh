@@ -35,6 +35,11 @@
 # with no timer. A mute listener completes the upgrade and then never
 # answers; on_close fires with 1006 after HL_WS_CLIENT_CLOSE_TIMEOUT_MS (5 s).
 #
+# Audit 32: a VM holds at most 64 live ws.connect clients. 64 connects to the
+# black hole succeed and the 65th is refused; once their connect deadline
+# ends them, 64 connects to a refused port succeed (the app still holds every
+# client object); once those have failed, a new connect succeeds again.
+#
 # Audit 26: a request carrying a non-safe header (X-Api-Key) is refused a
 # redirect to another allowed origin (127.0.0.1 -> localhost); without the
 # header the same redirect is followed.
@@ -48,6 +53,7 @@ PORT="${PORT:-19894}"
 SLOW_PORT="${SLOW_PORT:-19895}"
 HOLE_PORT="${HOLE_PORT:-19896}"
 MUTE_PORT="${MUTE_PORT:-19897}"
+DEAD_PORT="${DEAD_PORT:-19898}"   # nothing listens: connect is refused
 PASS=0
 FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
@@ -174,6 +180,7 @@ EOF
 python3 -I "$TMPDIR/mute.py" "$MUTE_PORT" >"$TMPDIR/mute.log" 2>&1 &
 MUTE_PID=$!
 WS_MUTE="ws://127.0.0.1:$MUTE_PORT/ws"
+WS_DEAD="ws://127.0.0.1:$DEAD_PORT/ws"
 
 SLOW="http://127.0.0.1:$SLOW_PORT/slow"
 BASE="http://127.0.0.1:$SLOW_PORT"
@@ -215,6 +222,26 @@ app.get("/muteclose", function(_req, res)
     res:text("closing")
 end)
 app.get("/mutestate", function(_req, res) res:text(mute_state) end)
+-- Audit 32: at most 64 live clients per VM. Every client is kept referenced
+-- (cap_keep), so only the runtime freeing its Keel connection gives a slot
+-- back - not the collector.
+local cap_keep = {}
+local CAP_URL = { hole = "$WS_HOLE", dead = "$WS_DEAD" }
+app.get("/cap", function(req, res)
+    local n, why = 0, "none-refused"
+    for _ = 1, tonumber(req.query.n) do
+        local ok, c = pcall(wsc.connect, CAP_URL[req.query.u],
+                            { on_error = function() end })
+        if not ok then
+            why = tostring(c):find("too many live WebSocket clients", 1, true)
+                  and "refused" or tostring(c)
+            break
+        end
+        n = n + 1
+        cap_keep[#cap_keep + 1] = c
+    end
+    res:text(n .. "|" .. why)
+end)
 local URL = "$SLOW"
 local BASE = "$BASE"
 
@@ -313,6 +340,23 @@ app.get("/earlygo", (_req, res) => {
     res.text("closing");
 });
 app.get("/earlystate", (_req, res) => res.text(earlyState));
+// Audit 32: see the Lua app.
+const capKeep = [];
+const CAP_URL = { hole: "$WS_HOLE", dead: "$WS_DEAD" };
+app.get("/cap", (req, res) => {
+    let n = 0, why = "none-refused";
+    for (let i = 0; i < Number(req.query.n); i++) {
+        try {
+            capKeep.push(wsClient.connect(CAP_URL[req.query.u], { onError() {} }));
+            n++;
+        } catch (e) {
+            why = String(e).includes("too many live WebSocket clients")
+                ? "refused" : String(e);
+            break;
+        }
+    }
+    res.text(n + "|" + why);
+});
 const URL = "$SLOW";
 const BASE = "$BASE";
 
@@ -488,6 +532,22 @@ run_app() {
             && pass "$rt ws early close: onClose once at the deadline (1006)" \
             || fail "$rt ws early close: onClose once at the deadline (1006)" "$out"
     fi
+
+    # Audit 32: at most HL_WS_CLIENT_MAX_LIVE (64) live clients per VM.
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/cap?u=hole&n=65")
+    [ "$out" = "64|refused" ] \
+        && pass "$rt ws cap: the 65th live client is refused" \
+        || fail "$rt ws cap: the 65th live client is refused" "$out"
+    sleep 1.6   # the 1000 ms connect deadline ends all 64
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/cap?u=dead&n=65")
+    [ "$out" = "64|refused" ] \
+        && pass "$rt ws cap: timed-out clients give their slots back" \
+        || fail "$rt ws cap: timed-out clients give their slots back" "$out"
+    sleep 0.5   # every refused connect has ended (on_error, then freed)
+    out=$(curl -s -m 10 "http://127.0.0.1:$PORT/cap?u=hole&n=1")
+    [ "$out" = "1|none-refused" ] \
+        && pass "$rt ws cap: ended clients the app still holds free their slots" \
+        || fail "$rt ws cap: ended clients the app still holds free their slots" "$out"
 
     out=$(curl -s -m 10 "http://127.0.0.1:$PORT/detached?k=long")
     [ "$out" = "error" ] \

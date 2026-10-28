@@ -243,6 +243,9 @@ typedef struct HlJSWsClientUD {
      * connection lives on the server's event loop, which is freed before the
      * runtime, so teardown frees it first (audit 14 G1). */
     HlAsyncTeardown teardown;
+    /* The VM's live-client count (HlRuntime.ws_clients) while this client
+     * holds a slot, NULL once given back (audit 32). */
+    int            *slot;
 } HlJSWsClientUD;
 
 /* WS conn helpers (defined in js/mod_ws.c) */

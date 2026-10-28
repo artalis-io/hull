@@ -50,6 +50,39 @@
  * (audit 26: Keel sets CLOSING with no timer of its own). */
 #define HL_WS_CLIENT_CLOSE_TIMEOUT_MS 5000
 
+/* ── Live ws.connect clients (audit 32) ──────────────────────────────
+ *
+ * Each Keel client connection keeps an outbound drain of up to 4 MiB and a
+ * message reassembly buffer of up to max_frame_size on Keel's allocator,
+ * outside the VM heap, for as long as the KlWsClientConn exists (Keel frees
+ * them only in kl_ws_client_free, not on close). Nothing counted the
+ * clients a VM kept, so a loop of ws.connect to a peer that stopped reading
+ * held gigabytes beside a 64 MB heap. A VM now holds at most
+ * HL_WS_CLIENT_MAX_LIVE Keel clients (counted from ws.connect until the
+ * client is freed), and each client's frame limit is
+ * hl_ws_client_max_frame(): HL_WS_CLIENT_MAX_FRAME, lowered to the VM heap
+ * limit (a message bigger than the heap could never reach the app anyway).
+ * So a VM's client buffers are bounded by 64 x (4 MiB + 4 MiB) = 512 MiB,
+ * the same order as the http.fetch cap (64 x max_response_size). */
+#define HL_WS_CLIENT_MAX_LIVE   64
+#define HL_WS_CLIENT_MAX_FRAME  ((size_t)4 * 1024 * 1024)   /* Keel's default: 16 MiB */
+
+static inline size_t hl_ws_client_max_frame(size_t heap_limit)
+{
+    return heap_limit > 0 && heap_limit < HL_WS_CLIENT_MAX_FRAME
+           ? heap_limit : HL_WS_CLIENT_MAX_FRAME;
+}
+
+/* Give a client's slot back: @p *slot is the VM's count while the client
+ * holds one, NULL once given back, so every end path may call it. */
+static inline void hl_ws_client_slot_release(int **slot)
+{
+    if (*slot) {
+        if (**slot > 0) (**slot)--;
+        *slot = NULL;
+    }
+}
+
 /* The effective whole-request timeout. @p per_call and @p app_default are
  * 0 when not given (anything <= 0 counts as not given); @p ceiling is
  * HL_HTTP_FETCH_MAX_TIMEOUT_MS or HL_HTTP_SYNC_MAX_TIMEOUT_MS. */
