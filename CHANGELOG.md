@@ -47,7 +47,10 @@ release-artifact layout).
   own acknowledged write rolled back with the other handler's transaction. A transaction left
   open where such code stops (the end of an unwired resume, or the end of another run's jobs in
   a drain, read from the new QuickJS `JS_GetPendingJobTag`) is now rolled back before anything
-  else runs, logged, and that code is not continued past its await.
+  else runs, logged, and that code is not continued past its await. The reverse is closed too:
+  while a run is inside a transaction across a microtask yield (`BEGIN; await null; ...`),
+  another run's queued jobs no longer run inside it; they wait until it closes (QuickJS
+  `JS_ExecutePendingJobTagged` runs the active run's own jobs first).
 - **JS: `conn.close()` inside a ws client's `onClose` / `onError` was a use after free**
   (audit 30). The connection was not yet marked closed while the callback ran, so `close()`
   armed the 5 s close-handshake deadline after the callback's caller had disarmed it; the

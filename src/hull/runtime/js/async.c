@@ -435,6 +435,24 @@ int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag)
     return 1;
 }
 
+int hl_js_run_txn_open(HlJS *js)
+{
+    return js && !js->budget_tripped && !hl_db_registry_guard_held() &&
+           hl_db_registry_open_txn(js->base.db_registry) != NULL;
+}
+
+void hl_js_run_txn_hold_end(HlJS *js)
+{
+    const char *txn = hl_db_registry_open_txn(js->base.db_registry);
+    log_error("[hull:c] a run's code stopped while a transaction was open on "
+              "database connection '%s' and other code was waiting to run: "
+              "it would have run inside the transaction. Commit or roll back "
+              "before yielding. The transaction is rolled back and the run "
+              "fails", txn ? txn : "?");
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
+    hl_js_run_tag_fail(js, js->entry_tag);
+}
+
 /* The end of a resume no entry waits on (audit 31). Its chain - this
  * continuation and the ones its code made in this resume - shares one run
  * record (wired with no handler promise, so each of them comes back here),

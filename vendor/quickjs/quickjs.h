@@ -947,6 +947,10 @@ uint64_t JS_GetJobTag(JSRuntime *rt);
 /* HULL PATCH 0008 (audit 31): the tag the next pending job will run with:
    1 and *ptag set, or 0 when no job is pending. */
 int JS_GetPendingJobTag(JSRuntime *rt, uint64_t *ptag);
+/* HULL PATCH 0008 (audit 31): run the first pending job queued with @tag,
+   leaving the jobs ahead of it queued in order. Returns as
+   JS_ExecutePendingJob; 0 when no pending job has that tag. */
+int JS_ExecutePendingJobTagged(JSRuntime *rt, uint64_t tag, JSContext **pctx);
 /* if can_block is TRUE, Atomics.wait() can be used */
 void JS_SetCanBlock(JSRuntime *rt, JS_BOOL can_block);
 /* select which debug info is stripped from the compiled code */

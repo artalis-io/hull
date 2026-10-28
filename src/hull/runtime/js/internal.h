@@ -368,6 +368,15 @@ int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag);
 /* 1 when run @p tag held a transaction across a wait (above, or
  * hl_js_run_yield_check): its continuations resume without continuing it. */
 int hl_js_run_tag_failed(const HlJS *js, uint64_t tag);
+/* 1 when hl_js_run_jobs should hold other runs' jobs back: a registry /
+ * db.open connection is in a transaction, the guard is not held, and the
+ * run is not over its budget (its jobs are being discarded). */
+int hl_js_run_txn_open(HlJS *js);
+/* The active run has no job left and a transaction still open while other
+ * runs' jobs wait (audit 31): its stretch ended holding it. Roll it back,
+ * log, and mark the active run's tag failed, so a resume does not continue
+ * it (the park's hl_js_run_yield_check no longer sees the transaction). */
+void hl_js_run_txn_hold_end(HlJS *js);
 
 /* Suspend js->active_conn for an attached op - hl_net_op_suspend, after the
  * gate's checks once more: the binding's argument conversions, between the

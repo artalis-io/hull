@@ -220,6 +220,26 @@ app.get("/x31b", async (_req, res) => {
     conn.exec("INSERT INTO t VALUES ('xb')");
     res.text("b");
 });
+/* ...and the reverse: /r31c is inside a transaction across `await null`
+ * when /r31d's code (woken by /r31c) is queued: run there, its write (rd)
+ * joined /r31c's transaction and went with its ROLLBACK. */
+let r31Wake = null, r31d = "none";
+app.get("/r31d", async (_req, res) => {
+    res.text("d");
+    await new Promise((r) => { r31Wake = r; });
+    conn.exec("INSERT INTO t VALUES ('rd')");
+    r31d = conn.inTransaction() ? "inside" : "alone";
+});
+app.get("/r31c", async (_req, res) => {
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('rc1')");
+    if (r31Wake) { r31Wake(); r31Wake = null; }
+    await null;
+    conn.exec("INSERT INTO t VALUES ('rc2')");
+    conn.exec("ROLLBACK");
+    res.text("c");
+});
+app.get("/r31state", (_req, res) => res.text(r31d));
 app.get("/y31a", async (_req, res) => {
     res.text("a");
     await new Promise((r) => { y31Wake = r; });
@@ -519,6 +539,25 @@ out=$(curl -s -m 10 "$URL/rows")
 case "$out" in
     *'"yc"'*) pass "another run's transaction committed in one stretch still commits" ;;
     *) fail "another run's transaction committed in one stretch still commits" "$out" ;;
+esac
+
+echo "=== audit 31: another run's job queued while a transaction spans await null ==="
+curl -s -m 10 -o /dev/null "$URL/r31d"
+out=$(curl -s -m 10 -w ' %{http_code}' "$URL/r31c")
+[ "$out" = "c 200" ] && pass "the run with the transaction finishes normally" \
+    || fail "the run with the transaction finishes normally" "$out"
+sleep 0.2
+out=$(curl -s -m 10 "$URL/r31state")
+[ "$out" = alone ] && pass "the other run's code ran outside the transaction" \
+    || fail "the other run's code ran outside the transaction" "$out"
+rows=$(curl -s -m 10 "$URL/rows")
+case "$rows" in
+    *'"rd"'*) pass "the other run's write survives the rollback" ;;
+    *) fail "the other run's write survives the rollback" "$rows" ;;
+esac
+case "$rows" in
+    *'"rc1"'*|*'"rc2"'*) fail "the rolled-back transaction committed nothing" "$rows" ;;
+    *) pass "the rolled-back transaction committed nothing" ;;
 esac
 
 echo "=== audit 8 H1 / audit 18: the inherited accessors cannot be defined ==="
