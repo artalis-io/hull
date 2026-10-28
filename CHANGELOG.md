@@ -10,6 +10,13 @@ release-artifact layout).
 
 ### Fixes
 
+- **Email change could probe whether addresses exist, without limit** (audit 33, both
+  runtimes). A taken target address is answered 409 `email already in use`, and that check ran
+  before the account's email-change request limit, so a signed-in user could test any number of
+  addresses. It now runs after that limit (and before the per-recipient one, so a probe does
+  not spend the address owner's mail allowance). `docs/app_api_reference.md` said email change
+  answered alike for taken and free addresses; it now says what it does.
+
 - **A locked login address told a registered account from an unknown one** (audit 32, both
   runtimes). An unknown address is counted under a key made from its own spelling (ASCII case
   folded), a known one under its account, whose lookup may fold more (accents under MySQL's

@@ -551,8 +551,12 @@ verify step between successful first-factor auth and `on_login` when
     repeated there, and a `user_get` that cannot resolve the new id is
     logged).
   - `opts.enumeration_safe` (default `true`). Register / reset /
-    magic-link / email-change return identical success shapes
-    regardless of whether the email exists.
+    magic-link return identical success shapes regardless of whether
+    the email exists. Email-change answers a target address that is
+    already taken with 409 `email already in use` (a UX choice): only to
+    a signed-in user who re-entered their password, and only after the
+    account's email-change request limit, so it cannot be used to probe
+    addresses in bulk (audit 33).
   - `opts.verify_ttl` (86400s), `opts.reset_ttl` (3600s),
     `opts.magic_link_ttl` (600s), `opts.email_change_ttl` (86400s).
     These, `totp_pending_ttl`, `max_failed_logins`,
