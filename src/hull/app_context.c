@@ -326,7 +326,9 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
          * Resolver failure is fatal - caller sees init failure. */
         if (load_rc == 0 && opts->gate_modules) {
             HlManifest m = {0};
+            int manifest_tui = 0;   /* m is freed before the TUI gate opens */
             if (ctx->rt->vt->extract_manifest(ctx->rt, &m) == 0) {
+                manifest_tui = m.tui;
                 /* Every "$VAR" reference must name a declared variable, as the
                  * serve path and the app.main runner check (audit 17: `hull
                  * test` / `hull agent` resolved databases.internal and the
@@ -407,6 +409,13 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                 fprintf(stderr, "[app-context] %s\n", itrack_err);
                 hl_app_context_free(ctx);
                 return -1;
+            }
+            /* Manifest applied: the TUI gate opens only for an app that
+             * declared `tui = true` and hull/tui (audit 31). */
+            {
+                HlManifest tm = {0};
+                tm.tui = manifest_tui;
+                hl_tui_admit_resolved(&tm, ctx->rt->module_set);
             }
         }
     }

@@ -309,6 +309,15 @@ int hl_tui_feature_present(void);
 void hl_tui_feature_register_lua(void *lua_state);
 int  hl_tui_feature_register_js(void *js_ctx, void *hl_js);
 
+/* Admission gate (audit 31; cap/tui_feature.c). hl_cap_tui_acquire fails
+ * with EPERM unless it is set. Set only after the manifest is applied and
+ * admits TUI (hl_tui_admit_resolved, module_resolver.h), or by the hull
+ * toolchain for its own `--tui` tool modules; never during app top level or
+ * in a manifest-extraction VM. hl_tui_admit_set returns the previous value
+ * (so a caller can clear it for a scope and put it back). */
+int hl_tui_admit_set(int on);
+int hl_tui_admitted(void);
+
 #ifdef __cplusplus
 }
 #endif

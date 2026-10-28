@@ -40,3 +40,31 @@ int hl_tui_feature_register_js(void *js_ctx, void *hl_js)
     (void)hl_js;
     return 0;
 }
+
+/* ── Admission gate (audit 31) ─────────────────────────────────────── *
+ *
+ * hl_cap_tui_acquire refuses (EPERM) unless this flag is set. The runtime
+ * sets it only once the app's manifest has been applied - module resolution
+ * admitted hull/tui AND the manifest says `tui = true`
+ * (hl_tui_admit_resolved: serve.c, app_context.c) - and the hull toolchain
+ * sets it for its own `--tui` tool modules (tool.c). App top-level code runs
+ * before either, and the manifest-extraction VMs (`hull build` / `manifest`
+ * / `check` / ...) never set it: an untrusted repo's top level could
+ * otherwise take the terminal or paste-jack the clipboard (OSC 52).
+ *
+ * Strong, base-resident (not in the tui feature archive), so the base sets
+ * it whether or not the cap layer is linked. Read and written on the
+ * thread that runs the app / tool VM only. */
+static int g_tui_admitted;
+
+int hl_tui_admit_set(int on)
+{
+    int prev = g_tui_admitted;
+    g_tui_admitted = on ? 1 : 0;
+    return prev;
+}
+
+int hl_tui_admitted(void)
+{
+    return g_tui_admitted;
+}

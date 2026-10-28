@@ -68,10 +68,38 @@ UTEST(tui_lifecycle, acquire_without_tty_errors)
         return;
     }
     HlTuiCtx *ctx = NULL;
+    int prev = hl_tui_admit_set(1);
     int rc = hl_cap_tui_acquire(&ctx);
+    int err = errno;
+    (void)hl_tui_admit_set(prev);
     ASSERT_EQ(rc, -1);
-    ASSERT_EQ(errno, ENOTTY);
+    ASSERT_EQ(err, ENOTTY);
     ASSERT_TRUE(ctx == NULL);
+}
+
+/* audit 31: nothing may take the terminal until the runtime has applied a
+ * manifest that admits TUI (or the toolchain opened the gate for its own
+ * --tui command). The gate is checked before anything touches the tty. */
+UTEST(tui_lifecycle, acquire_refused_until_admitted)
+{
+    int prev = hl_tui_admit_set(0);
+    EXPECT_EQ(0, hl_tui_admitted());
+    HlTuiCtx *ctx = NULL;
+    int rc = hl_cap_tui_acquire(&ctx);
+    int err = errno;
+    (void)hl_tui_admit_set(prev);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(err, EPERM);
+    ASSERT_TRUE(ctx == NULL);
+}
+
+UTEST(tui_lifecycle, admit_set_returns_the_previous_value)
+{
+    int prev = hl_tui_admit_set(1);
+    EXPECT_EQ(1, hl_tui_admit_set(0));
+    EXPECT_EQ(0, hl_tui_admit_set(7));
+    EXPECT_EQ(1, hl_tui_admitted());
+    (void)hl_tui_admit_set(prev);
 }
 
 UTEST(tui_lifecycle, release_null_is_safe)
@@ -100,7 +128,8 @@ static pid_t spawn_pty(int *master_out, void (*child_fn)(void))
     pid_t pid = forkpty(&master, NULL, NULL, NULL);
     if (pid < 0) return -1;
     if (pid == 0) {
-        /* Child. */
+        /* Child. The gate a runtime opens once the manifest admits TUI. */
+        (void)hl_tui_admit_set(1);
         child_fn();
         _exit(0);
     }
@@ -217,6 +246,33 @@ static void child_resize_then_combining(void)
 
 /* ── Tests ──────────────────────────────────────────────────────── */
 
+/* audit 31: on a real terminal, an acquire the manifest has not admitted
+ * fails EPERM and writes not one byte (no OSC 11 probe, no alt screen, so
+ * no OSC 52 either). */
+static void child_unadmitted_acquire(void)
+{
+    (void)hl_tui_admit_set(0);
+    HlTuiCtx *ctx = NULL;
+    if (hl_cap_tui_acquire(&ctx) == 0) _exit(70);
+    if (errno != EPERM) _exit(71);
+    _exit(0);
+}
+
+UTEST(tui_lifecycle_pty, unadmitted_acquire_writes_nothing)
+{
+    int master = -1;
+    pid_t pid = spawn_pty(&master, child_unadmitted_acquire);
+    ASSERT_GE(pid, 0);
+    char buf[256];
+    size_t n = drain(master, buf, sizeof buf, 300);
+    int status = 0;
+    ASSERT_TRUE(waitpid_timeout(pid, &status, 2000));
+    close(master);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+    EXPECT_EQ((size_t)0, n);
+}
+
 UTEST(tui_lifecycle_pty, acquire_release_roundtrip)
 {
     int master = -1;
@@ -329,6 +385,7 @@ UTEST(tui_lifecycle_pty, termios_restored_after_release)
         struct termios before, after;
         tcgetattr(STDIN_FILENO, &before);
         HlTuiCtx *ctx = NULL;
+        (void)hl_tui_admit_set(1);
         if (hl_cap_tui_acquire(&ctx) != 0) _exit(60);
         hl_cap_tui_release(ctx);
         tcgetattr(STDIN_FILENO, &after);

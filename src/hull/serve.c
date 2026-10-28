@@ -1664,6 +1664,11 @@ static int hl_serve_wire_caps(HlServerState *s)
         }
     }
 
+    /* The manifest is applied: only now may the app take the terminal, and
+     * only when it declared both `tui = true` and hull/tui (audit 31). */
+    hl_tui_admit_resolved(s->manifest_sealed ? &s->manifest : NULL,
+                          rt->module_set);
+
     /* Wire CSP policy to runtime.
      * Default CSP is always active - even without app.manifest().
      * Explicit csp="custom" overrides; csp=false disables.

@@ -51,6 +51,22 @@ release-artifact layout).
     any other error fails the call and stores nothing. A foreign-key or NOT NULL violation that
     IGNORE skipped now fails too. The inbox also refuses a message id or source that is not
     valid UTF-8 (in JS, one with a lone surrogate).
+- **In-flight `http.fetch` responses are bounded per VM** (audit 31). Keel buffers each async
+  response (the decompressed body included, up to `max_response_size`, 4 MiB by default) off the
+  VM heap, and only the request body was counted, so `Promise.all` of 2000 large fetches could
+  hold about 8 GiB beside a 64 MB heap limit. Each async fetch now holds its body plus the
+  response limit on the VM's off-heap total under the heap limit, and a VM keeps at most 64
+  fetches in flight; past either, `http.fetch` raises ("too many requests in flight") before
+  starting anything. Both runtimes. With the default heap that allows 16 default fetches in
+  flight per VM.
+- **TUI only after the manifest admits it** (audit 31). The `hull.tui` bindings acquired the
+  terminal without checking the manifest, so an app's top level - which runs before the manifest
+  is applied, and in the manifest-extraction VM behind `hull build` / `manifest` / `check` /
+  `modules` / `deploy` - could switch the screen or write an OSC 52 clipboard sequence, even
+  without declaring `hull/tui` (a cloned repo could paste-jack the developer's clipboard).
+  `hl_cap_tui_acquire` now refuses unless the runtime has applied a manifest declaring
+  `tui = true` and `hull/tui`, or the command is one of hull's own `--tui` tools; manifest
+  extraction never allows it. Both runtimes.
 - **The audit-30 fixes, re-audited** (audit 30 re-audit).
   - The DuckDB dynamic-SQL scan was still quadratic for bare names: each `query` /
     `query_table` token skipped the comment after it, and an unterminated `--` or `/*` ran to

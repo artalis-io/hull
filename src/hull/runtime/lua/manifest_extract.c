@@ -19,6 +19,7 @@
 #include "hull/runtime/lua.h"
 #include "internal.h"   /* hl_lua_manifest_json */
 #include "hull/module_registry.h"
+#include "hull/cap/tui.h"   /* hl_tui_admit_set (audit 31) */
 #include "hull/utils/alloc.h"
 
 #include "lua.h"
@@ -105,8 +106,10 @@ static char *dup_str(const char *s, size_t n)
 }
 
 
-int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
-                                 char **out_json, size_t *out_len, char **out_err)
+static int extract_manifest_json_impl(const char *path,
+                                      const HlVfs *platform_vfs,
+                                      char **out_json, size_t *out_len,
+                                      char **out_err)
 {
     if (out_json) *out_json = NULL;
     if (out_len) *out_len = 0;
@@ -192,5 +195,19 @@ int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
 
     hl_lua_free(lua);
     free(lua);
+    return rc;
+}
+
+/* The app's top level runs here: the TUI gate is closed for the whole
+ * extraction, so it cannot take the terminal or write OSC 52 - the tool
+ * process (`hull build` / `manifest` / `check` / ...) never opens it, and a
+ * --tui tool command that did is not lent to the app (audit 31). */
+int hl_lua_extract_manifest_json(const char *path, const HlVfs *platform_vfs,
+                                 char **out_json, size_t *out_len, char **out_err)
+{
+    int prev = hl_tui_admit_set(0);
+    int rc = extract_manifest_json_impl(path, platform_vfs, out_json, out_len,
+                                        out_err);
+    (void)hl_tui_admit_set(prev);
     return rc;
 }

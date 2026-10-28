@@ -12,6 +12,7 @@
  */
 
 #include "hull/manifest_extract_file.h"
+#include "hull/cap/tui.h"   /* hl_tui_admit_set (audit 31) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,7 +79,7 @@ int hl_manifest_extract_write_result(const char *out_path, const char *status,
 #define PATH_MAX 4096
 #endif
 
-int hl_manifest_extract_js_in_process(const char *path,
+static int extract_js_in_process_impl(const char *path,
                                        const char *early_result_path,
                                        char **out_json,
                                        size_t *out_json_len,
@@ -413,6 +414,22 @@ int hl_manifest_extract_js_from_file(const char *path,
             *out_err = strdup_safe(plen ? payload : "manifest extraction failed");
     }
     free(raw);
+    return rc;
+}
+
+/* The app's top level runs here: the TUI gate is closed for the whole
+ * extraction, so it cannot take the terminal or write OSC 52 even inside a
+ * tool process that opened the gate for its own --tui command (audit 31). */
+int hl_manifest_extract_js_in_process(const char *path,
+                                       const char *early_result_path,
+                                       char **out_json,
+                                       size_t *out_json_len,
+                                       char **out_err)
+{
+    int prev = hl_tui_admit_set(0);
+    int rc = extract_js_in_process_impl(path, early_result_path, out_json,
+                                        out_json_len, out_err);
+    (void)hl_tui_admit_set(prev);
     return rc;
 }
 

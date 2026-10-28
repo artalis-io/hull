@@ -589,6 +589,10 @@ __attribute__((weak)) int hl_sandbox_std_tty(int fd)
 int hl_cap_tui_acquire(HlTuiCtx **out)
 {
     if (!out) { errno = EINVAL; return -1; }
+    /* Only once the app's manifest admitted TUI (or for the toolchain's own
+     * --tui commands): app top level and the manifest-extraction VMs run
+     * before / without that and must not touch the terminal (audit 31). */
+    if (!hl_tui_admitted()) { errno = EPERM; return -1; }
     if (g_singleton) { errno = EBUSY; return -1; }
     /* Without a terminal at startup the sandbox granted no `tty`, so isatty's
      * ioctl would be killed by the Linux seccomp filter before it could say
