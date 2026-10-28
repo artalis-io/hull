@@ -1011,7 +1011,7 @@ local function counter_batch(fn)
     error(err, 0)
 end
 
-local function bump_failed_login(user_id, max)
+local function bump_failed_login(user_id, max, hold)
     user_id = uid_key(user_id)
     local now = time.now()
     -- Round-9 HIGH-2: when the previous lockout window has expired but the
@@ -1042,7 +1042,16 @@ local function bump_failed_login(user_id, max)
     -- keys in one gap (the per-(account, IP) keys are adjacent) deadlocked
     -- on their INSERTs (audit 31). A non-locking read takes neither; only a
     -- new key is inserted, and every UPDATE then matches its row.
+    --
+    -- `hold` (audit 32) runs the same statements but leaves the count and the
+    -- lock as they are: /login runs it for an address it found locked, so a
+    -- locked address does the same database work as an unlocked one. An
+    -- unknown address is keyed by its own spelling and a known one by its
+    -- account, so accent variants the app's lookup folds lock a known
+    -- account's row and not an unknown address's - skipping the writes when
+    -- locked told the two apart by time.
     local expired = "locked_until IS NOT NULL AND locked_until <> 0 AND locked_until < ?"
+    local held = hold and 1 or 0
     counter_batch(function()
         local have = db.query("SELECT 1 AS present FROM _hull_auth_login_attempts "
                               .. "WHERE user_id = ?", { user_id })
@@ -1052,13 +1061,15 @@ local function bump_failed_login(user_id, max)
         end
         -- 1. Count the attempt: 1 after an expired lockout, else one more.
         db.exec("UPDATE _hull_auth_login_attempts SET failed_count = "
-            .. "CASE WHEN " .. expired .. " THEN 1 ELSE failed_count + 1 END, "
-            .. "last_failed_at = ? WHERE user_id = ?", { now, now, user_id })
+            .. "CASE WHEN ? = 1 THEN failed_count WHEN " .. expired
+            .. " THEN 1 ELSE failed_count + 1 END, "
+            .. "last_failed_at = ? WHERE user_id = ?", { held, now, now, user_id })
         -- 2. The lock, from the new count; an expired one is cleared.
-        db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE WHEN "
+        db.exec("UPDATE _hull_auth_login_attempts SET locked_until = CASE "
+            .. "WHEN ? = 1 THEN locked_until WHEN "
             .. expired .. " THEN 0 WHEN failed_count >= ? THEN ? ELSE 0 END "
             .. "WHERE user_id = ?",
-            { now, max, now + _state.lockout_duration, user_id })
+            { held, now, max, now + _state.lockout_duration, user_id })
     end)
 end
 
@@ -1088,9 +1099,9 @@ end
 -- The lockout rows a failed password check counts against: the account's
 -- own row FIRST, then the (account, IP) one, so a failure writing the IP
 -- row cannot leave the guess uncounted against the account (audit 31).
-local function bump_failed_logins(uid, ip_key)
-    bump_failed_login(uid, _state.max_failed_logins_per_account)
-    bump_failed_login(ip_key, _state.max_failed_logins)
+local function bump_failed_logins(uid, ip_key, hold)
+    bump_failed_login(uid, _state.max_failed_logins_per_account, hold)
+    bump_failed_login(ip_key, _state.max_failed_logins, hold)
 end
 
 local function login_locked(uid, ip_key)
@@ -1810,9 +1821,9 @@ local function handle_login(req, res)
     local pw_ok  = (_state.enumeration_safe or user ~= nil)
                    and crypto.verify_password(body.password, pwhash)
     if pre_locked or not user or not user.password_hash or not pw_ok then
-        if not pre_locked then
-            bump_failed_logins(uid, ip_key)
-        end
+        -- Locked: the same statements, holding the count and the lock
+        -- (audit 32 - see bump_failed_login).
+        bump_failed_logins(uid, ip_key, pre_locked)
         return res:status(401):json({ error = "invalid credentials" })
     end
     if _state.require_verified_email and not is_verified(user) then
