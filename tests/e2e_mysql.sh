@@ -242,7 +242,7 @@ app.get("/stdlib", function(req, res)
 end)
 -- Backend-agnostic DB-backed stdlib on real MySQL: inbox dedup, rbac
 -- roles/permissions, audit-log record/list, transaction commit, and
--- insert_if_absent (INSERT IGNORE dialect). Proves each module's CREATE TABLE
+-- insert_if_absent (INSERT + duplicate-key dialect). Proves each module's CREATE TABLE
 -- + CRUD run on the MySQL dialect, not just SQLite.
 app.get("/stdlib2", function(req, res)
     local inbox_new = inbox.check_and_mark("evt-1", "webhook")   -- false = new
@@ -265,7 +265,7 @@ app.get("/stdlib2", function(req, res)
     end)
     local txn_count = db.query("SELECT count(*) AS c FROM stdlib2_txn")[1].c
 
-    -- db.insert_if_absent -> INSERT IGNORE: first insert wins, second ignored.
+    -- db.insert_if_absent -> INSERT, duplicate taken as absent: first insert wins, second ignored.
     -- VARCHAR PK (MySQL forbids a bare TEXT primary key without a prefix length).
     db.exec("CREATE TABLE IF NOT EXISTS stdlib2_ins (message_key VARCHAR(255) PRIMARY KEY, val BIGINT)")
     db.insert_if_absent("stdlib2_ins", { "message_key" },
@@ -275,8 +275,29 @@ app.get("/stdlib2", function(req, res)
     local ins_val = db.query(
         "SELECT val FROM stdlib2_ins WHERE message_key = ?", { "k1" })[1].val
 
+    -- Audit 31: insert_if_absent was INSERT IGNORE, which stored an invalid
+    -- utf8mb4 value or one too long for its column TRUNCATED ('evt_1\xff\xfe'
+    -- as 'evt_1') and succeeded, so the genuine 'evt_1' was then a false
+    -- duplicate. Both are refused now, nothing is stored, and 'evt_1' is new.
+    db.exec("CREATE TABLE IF NOT EXISTS stdlib2_trunc (k VARCHAR(8) PRIMARY KEY, v TEXT) DEFAULT CHARSET=utf8mb4")
+    local bad_utf8_ok = pcall(db.insert_if_absent, "stdlib2_trunc", { "k" },
+                              { "k", "v" }, { "evt_1\xff\xfe", "x" })
+    local too_long_ok = pcall(db.insert_if_absent, "stdlib2_trunc", { "k" },
+                              { "k", "v" }, { "evt_1_and_more", "x" })
+    local upsert_bad_ok = pcall(db.upsert, "stdlib2_trunc", { "k" },
+                                { "k", "v" }, { "evt_1\xff", "x" })
+    local trunc_rows = db.query("SELECT count(*) AS c FROM stdlib2_trunc")[1].c
+    local genuine = db.insert_if_absent("stdlib2_trunc", { "k" }, { "k", "v" }, { "evt_1", "y" })
+    local genuine_dup = db.insert_if_absent("stdlib2_trunc", { "k" }, { "k", "v" }, { "evt_1", "z" })
+    local inbox_bad_ok = pcall(inbox.check_and_mark, "evt_2\xff", "webhook")
+
     res:json({
         insert_if_absent = ins_val,
+        trunc_refused = (not bad_utf8_ok) and (not too_long_ok) and (not upsert_bad_ok)
+                        and (not inbox_bad_ok),
+        trunc_rows   = trunc_rows,
+        trunc_genuine = genuine,
+        trunc_genuine_dup = genuine_dup,
         inbox_new    = inbox_new,
         inbox_dup    = inbox_dup,
         inbox_pad    = inbox_pad,
@@ -469,6 +490,10 @@ echo "$RESP_STDLIB2" | grep -q '"rbac_delete":false' || { echo "::error rbac has
 echo "$RESP_STDLIB2" | grep -q '"audit_count":1'     || { echo "::error audit-log record/list"; fail=1; }
 echo "$RESP_STDLIB2" | grep -q '"txn_count":1'       || { echo "::error transaction commit"; fail=1; }
 echo "$RESP_STDLIB2" | grep -q '"insert_if_absent":10' || { echo "::error insert_if_absent (first-wins) on mysql"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"trunc_refused":true' || { echo "::error insert_if_absent / upsert / inbox accepted a value MySQL would truncate (audit 31)"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"trunc_rows":0' || { echo "::error a refused insert_if_absent stored a truncated row (audit 31)"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"trunc_genuine":1' || { echo "::error the genuine id read as a duplicate after a truncation attempt (audit 31)"; fail=1; }
+echo "$RESP_STDLIB2" | grep -q '"trunc_genuine_dup":0' || { echo "::error insert_if_absent duplicate did not report 0 rows (audit 31)"; fail=1; }
 
 if [ "$fail" = 0 ]; then
     echo "PASS: mysql backend end-to-end (sync + db.async + stdlib -> typed decode)"

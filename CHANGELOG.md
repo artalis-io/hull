@@ -23,6 +23,22 @@ release-artifact layout).
   terminal or write the clipboard (OSC 52). They are printed escaped now (`\x1b`, `\n`), as
   log records are; so are `hull migrate status`'s migration names.
 
+- **MySQL: a COMMIT tripped in its wait is finished; insert_if_absent refuses a truncated
+  value** (audit 31).
+  - A run whose budget or deadline tripped while the OK of a lone, wholly sent COMMIT was
+    awaited closed the connection with the transaction still marked open: the commit the
+    server made was reported failed, the stale-transaction guard's ROLLBACK was answered done
+    without being sent, and a retry applied the batch twice. As on Postgres since audit 29, the
+    reply is now read on with no budget asked, bounded by 2 s (or a shorter `read_timeout`),
+    and its status taken; past the bound the connection is abandoned as before. The trip stays
+    sticky.
+  - `insert_if_absent` was `INSERT IGNORE`, which turns every strict-mode error into a warning
+    and stores the value truncated: `'evt_1\xff\xfe'` was stored as `'evt_1'`, so the genuine
+    `evt_1` then read as an inbox duplicate, and a jobs payload over a TEXT column's 64 KB lost
+    its tail. It is a plain `INSERT` whose duplicate-key error (1062) means "already there";
+    any other error fails the call and stores nothing. A foreign-key or NOT NULL violation that
+    IGNORE skipped now fails too. The inbox also refuses a message id or source that is not
+    valid UTF-8 (in JS, one with a lone surrogate).
 - **The audit-30 fixes, re-audited** (audit 30 re-audit).
   - The DuckDB dynamic-SQL scan was still quadratic for bare names: each `query` /
     `query_table` token skipped the comment after it, and an unterminated `--` or `/*` ran to

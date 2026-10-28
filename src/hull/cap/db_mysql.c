@@ -9,7 +9,7 @@
  * Provides connect, the COM_QUERY text protocol (param-less), and parameterized
  * query / exec via the binary prepared-statement protocol (COM_STMT_PREPARE /
  * EXECUTE / CLOSE). The insert_if_absent / upsert dialect helpers use MySQL's
- * INSERT IGNORE / ON DUPLICATE KEY syntax and the information_schema-backed
+ * INSERT + ER_DUP_ENTRY / ON DUPLICATE KEY syntax and the information_schema-backed
  * table_columns, plus multi-statement exec_script (migrations).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -140,6 +140,17 @@ static int sql_is_rollback(const char *sql)
 {
     return my_sql_single_statement(sql) &&
            my_sql_txn_kind(sql) == HL_SQL_TXN_ROLLBACK;
+}
+
+/* 1 when @p sql is ONE COMMIT statement, read the way MySQL reads it: once
+ * it is wholly sent the server commits whatever the client does, so a run
+ * stopped while its OK is awaited finishes the read (HlMyConn.commit_next,
+ * audit 31) rather than dropping the connection and reporting the commit
+ * lost. */
+static int sql_is_commit(const char *sql)
+{
+    return my_sql_single_statement(sql) &&
+           my_sql_txn_kind(sql) == HL_SQL_TXN_COMMIT;
 }
 
 static void scrub_free(char *s)
@@ -633,6 +644,7 @@ static int mysql_query_raw(HlDbHandle *h, const char *sql,
     memset(&a, 0, sizeof a);
     a.user_cb = cb;
     a.user_ctx = cb_ctx;
+    s->conn.commit_next = sql_is_commit(sql);
     int rc = hl_my_conn_query(&s->conn, sql,
                               cb ? adapter_desc : NULL,
                               cb ? adapter_row : NULL, &a, NULL);
@@ -677,6 +689,7 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
         return (int)(affected < 0 ? 0 : affected);
     }
 
+    s->conn.commit_next = sql_is_commit(sql);
     int qrc = hl_my_conn_query(&s->conn, collated ? collated : sql,
                                NULL, NULL, NULL, &affected);
     free(collated);
@@ -866,6 +879,7 @@ static int mysql_txn_raw(HlDbHandle *h, const char *sql)
     HlDbMyCtx *s = h->ctx;
     int ready = my_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
+    s->conn.commit_next = sql_is_commit(sql);
     int rc = hl_my_conn_query(&s->conn, sql, NULL, NULL, NULL, NULL);
     /* A ROLLBACK that failed because the connection went: the server rolled
      * the transaction back with it. */
@@ -930,10 +944,25 @@ static void ap(char *buf, size_t cap, size_t *off, const char *str)
 }
 
 /*
- * Build and run `INSERT [IGNORE] INTO t (cols) VALUES (?,...) [ON DUPLICATE KEY
+ * Build and run `INSERT INTO t (cols) VALUES (?,...) [ON DUPLICATE KEY
  * UPDATE c = VALUES(c), ...]`, binding @p values through the prepared-statement
  * path. MySQL keys the conflict off any UNIQUE / PRIMARY index, so
  * @p conflict_cols is unused (kept for the vtable signature parity).
+ *
+ * insert_if_absent is a plain INSERT whose ER_DUP_ENTRY is taken as "already
+ * there" (0 rows), not INSERT IGNORE (audit 31): IGNORE downgrades EVERY
+ * error to a warning, so under strict mode an invalid utf8mb4 value (1366)
+ * or one too long for its column (1406) was stored TRUNCATED and the call
+ * succeeded - `'evt_1\xff\xfe'` stored as 'evt_1', and the genuine 'evt_1'
+ * then read as a duplicate (inbox dedup poisoning); a jobs payload over a
+ * TEXT column's 64 KB kept its first 64 KB. A plain INSERT fails atomically
+ * on those (strict mode rolls the statement back), so no truncated row is
+ * ever written, and a failed duplicate rolls back only the statement - the
+ * transaction a batch holds goes on, as it did under IGNORE. A foreign-key
+ * or NOT NULL violation, which IGNORE also skipped, now fails the call. An
+ * upsert (ON DUPLICATE KEY UPDATE, no IGNORE) already surfaced strict-mode
+ * errors. Both rely on the server's strict sql_mode (the MySQL 5.7+ /
+ * MariaDB 10.2.4+ default): without it MySQL truncates any INSERT.
  */
 static int build_and_run_insert(HlDbHandle *h, const char *table,
                                 const char *const *cols,
@@ -947,7 +976,7 @@ static int build_and_run_insert(HlDbHandle *h, const char *table,
     if (!sql) return -1;
     size_t off = 0;
 
-    ap(sql, cap, &off, do_update ? "INSERT INTO " : "INSERT IGNORE INTO ");
+    ap(sql, cap, &off, "INSERT INTO ");
     ap(sql, cap, &off, table);
     ap(sql, cap, &off, " (");
     for (int i = 0; i < n_cols; i++) {
@@ -979,7 +1008,25 @@ static int build_and_run_insert(HlDbHandle *h, const char *table,
     }
     sql[off] = '\0';
 
-    int rc = mysql_exec(h, sql, values, n_cols);
+    if (do_update) {
+        int rc = mysql_exec(h, sql, values, n_cols);
+        free(sql);
+        return rc;
+    }
+    /* insert_if_absent: a duplicate is a clean outcome, not a failure, so it
+     * never reaches my_note_failure (whose COM_PING after a failed statement
+     * inside a transaction would be a round trip for nothing). */
+    int was = my_in_trans(h);
+    int rc = mysql_exec_raw(h, sql, values, n_cols);
+    HlDbMyCtx *s = h ? h->ctx : NULL;
+    if (rc < 0 && s && !s->conn.broken && !s->txn_aborted &&
+        s->conn.last_err_code == HL_MY_ER_DUP_ENTRY) {
+        s->conn.errmsg[0] = '\0';
+        s->conn.last_err_code = 0;
+        rc = 0;                                  /* already there: 0 rows */
+    } else if (s) {
+        my_note_failure(s, sql, was, rc);
+    }
     free(sql);
     return rc;
 }

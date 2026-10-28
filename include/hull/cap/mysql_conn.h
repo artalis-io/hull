@@ -106,8 +106,26 @@ typedef struct HlMyConn {
     /* The DSN's ?read_timeout= (0 = none): bounds each wait for the server,
      * polled in slices that ask the run's budget (audit 18). */
     int      read_timeout_ms;
+    /* Set by the caller (db_mysql.c, whose classifiers decide it) just before
+     * hl_my_conn_query when the text is ONE COMMIT statement; the call takes
+     * and clears it. Once that COMMIT is wholly sent, commit_sent is set: a
+     * stop asked while its reply is awaited no longer abandons the connection
+     * (the server commits regardless) but switches to `finishing` - the
+     * reply is read on with no stop asked, the whole read bounded by
+     * HL_MY_FINISH_MAX_MS (or a shorter ?read_timeout=), so the OK's status
+     * is what the client reports. Abandoned with IN_TRANS still set, the
+     * commit read as lost and the next ROLLBACK was answered done unsent
+     * (audit 31, the twin of Postgres's audit 29). */
+    int      commit_next;
+    int      commit_sent;
+    int      finishing;
+    uint64_t finish_started;   /* monotonic ms the finishing bound began, 0 = not yet */
     char     errmsg[HL_MY_ERRMSG_SIZE];
 } HlMyConn;
+
+/* Bound on the read that finishes a tripped run's COMMIT reply: the DSN's
+ * ?read_timeout=, but never more than this (and this when it is 0). */
+#define HL_MY_FINISH_MAX_MS 2000
 
 /* SERVER_STATUS_IN_TRANS: a transaction is open on the connection. */
 #define HL_MY_SERVER_STATUS_IN_TRANS 0x0001
@@ -115,6 +133,9 @@ typedef struct HlMyConn {
 /* ER_LOCK_DEADLOCK: InnoDB chose this transaction as the deadlock victim and
  * rolled ALL of it back (not only the failing statement). */
 #define HL_MY_ER_LOCK_DEADLOCK 1213
+
+/* ER_DUP_ENTRY: a row whose UNIQUE / PRIMARY key is already there. */
+#define HL_MY_ER_DUP_ENTRY 1062
 
 /* ER_DUP_KEYNAME: CREATE INDEX of a name the table already has. */
 #define HL_MY_ER_DUP_KEYNAME 1061

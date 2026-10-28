@@ -62,12 +62,22 @@ local function norm_source(source)
     return source
 end
 
+-- An id that is not valid UTF-8 is refused too (audit 31): the columns are
+-- utf8mb4, and a MySQL that stored a truncated value ('evt_1\xff' as
+-- 'evt_1') made the genuine 'evt_1' a false duplicate. The backend refuses
+-- the insert now; this says why, on every backend.
 local function check_id_len(message_id, source)
     if message_id and #message_id > MAX_ID_LEN then
         error("inbox: message_id too long (max " .. MAX_ID_LEN .. ")", 3)
     end
+    if message_id and not utf8.len(message_id) then
+        error("inbox: message_id is not valid UTF-8", 3)
+    end
     if source and #source > MAX_ID_LEN then
         error("inbox: source too long (max " .. MAX_ID_LEN .. ")", 3)
+    end
+    if source and not utf8.len(source) then
+        error("inbox: source is not valid UTF-8", 3)
     end
 end
 

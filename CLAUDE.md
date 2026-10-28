@@ -944,7 +944,13 @@ roadmap §2.9.)
   abandoned: the reply is read on to its ReadyForQuery, so the commit the
   server made is reported, not a "lost" transaction; likewise a MySQL trip on
   the packet that ends a reply (its OK / ERR, or the EOF of the last result
-  set) finishes the call, nothing being left to read. The trip is sticky, so
+  set) finishes the call, nothing being left to read - and since audit 31 a
+  trip in the WAIT for a lone COMMIT's OK (`HlMyConn.commit_sent`, set once the
+  COMMIT is wholly sent; `commit_next` is set by db_mysql.c's `sql_is_commit`)
+  switches to finishing too, held to `HL_MY_FINISH_MAX_MS` (2 s, or a shorter
+  `read_timeout`, writes included) and abandoned past it as before (it
+  abandoned at once, IN_TRANS kept: the commit read as lost, the next ROLLBACK
+  was answered done unsent, and a retry applied it twice). The trip is sticky, so
   the run raises it at its next poll (audit 18). That finishing read asks no
   budget, so it is held to `HL_PG_FINISH_MAX_MS` (2 s, or a shorter
   `read_timeout`) in all; past it the connection is abandoned with tx_status
@@ -1048,8 +1054,17 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   SQLite/Postgres. MORE values than placeholders is refused (`parameter count
   mismatch`, the statement closed), as SQLite and Postgres refuse it; the
   surplus used to be dropped silently (audit 17).
-- **Dialect:** `insert_if_absent` builds `INSERT IGNORE`; `upsert` builds
-  `INSERT ... ON DUPLICATE KEY UPDATE c = VALUES(c)` (MariaDB / MySQL 5.7+);
+- **Dialect:** `insert_if_absent` builds a plain `INSERT` and takes its
+  `ER_DUP_ENTRY` (1062) as "already there" (0 rows, no COM_PING), not
+  `INSERT IGNORE` (audit 31): IGNORE downgraded every strict-mode error to a
+  warning and stored the value TRUNCATED (invalid utf8mb4 1366, too long
+  1406: `'evt_1\xff'` stored as `'evt_1'`, a false inbox duplicate). Strict
+  mode rolls the failed statement back, so no truncated row persists; a FK /
+  NOT NULL violation IGNORE skipped now fails too. Relies on the server's
+  strict `sql_mode` (the default). The inbox also refuses an id / source that
+  is not valid UTF-8 (Lua `utf8.len`; JS a lone surrogate). `upsert` builds
+  `INSERT ... ON DUPLICATE KEY UPDATE c = VALUES(c)` (MariaDB / MySQL 5.7+;
+  no IGNORE, so strict-mode errors surface);
   `last_id` returns the OK packet's `last_insert_id`; `table_columns` queries
   `information_schema.columns` scoped to `DATABASE()`; identifier quoting is
   backtick (`` ` ``). MySQL 8 has no `CREATE INDEX ... IF NOT EXISTS`, so the

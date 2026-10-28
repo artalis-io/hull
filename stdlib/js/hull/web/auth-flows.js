@@ -548,7 +548,7 @@ function bumpFailedLogin(userIdStr, max) {
     // takes the row lock, which holds to the commit, and leaves locked_until
     // as it was for step 2 to read. db.batch nests as a savepoint inside an
     // app transaction. The UPDATE runs before the INSERT-if-absent, which
-    // runs only for a new row: on MySQL an INSERT IGNORE of an existing row
+    // runs only for a new row: on MySQL a duplicate INSERT of an existing row
     // takes a SHARED lock on it, so two attempts both holding one then both
     // asking for the UPDATE's exclusive lock deadlocked, and the victim's
     // attempt went uncounted (audit 30 re-audit).

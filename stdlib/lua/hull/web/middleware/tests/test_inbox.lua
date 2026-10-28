@@ -68,6 +68,17 @@ test("check_and_mark returns true for second call", function()
     assert_eq(dup, true, "second call should be duplicate")
 end)
 
+test("check_and_mark refuses an id that is not valid UTF-8 (audit 31)", function()
+    local ok, err = pcall(inbox.check_and_mark, "evt_1\xff\xfe", "test")
+    assert(not ok and tostring(err):find("not valid UTF%-8"), tostring(err))
+    ok, err = pcall(inbox.mark_processed, "evt_\xed\xa0\x80", "test")   -- a surrogate
+    assert(not ok and tostring(err):find("not valid UTF%-8"), tostring(err))
+    ok, err = pcall(inbox.check_and_mark, "evt_2", "src\xc3")
+    assert(not ok and tostring(err):find("source is not valid"), tostring(err))
+    -- a valid multi-byte id is fine
+    assert_eq(inbox.check_and_mark("évt_\u{1F600}", "test"), false)
+end)
+
 -- ── default source ───────────────────────────────────────────────────
 
 test("default source works", function()
