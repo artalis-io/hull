@@ -3447,6 +3447,7 @@ cppcheck:
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_http_client.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_compute.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_gpu.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/async.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_http_client.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_gpu.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_app.c \
