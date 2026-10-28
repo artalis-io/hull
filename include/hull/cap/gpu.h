@@ -66,8 +66,18 @@ typedef enum {
 #define HL_GPU_OUTPUT_NONE      -1
 
 /* Ceiling on an app-supplied dispatch / pipeline `timeout` (ms). A sync
- * dispatch waits on the event loop, outside the instruction budget. */
+ * dispatch waits on the event loop, outside the instruction budget.
+ * Enforced in hl_cap_gpu_dispatch / hl_cap_gpu_pipeline (hl_gpu_timeout_clamp)
+ * for every caller, sync and async: the JS bindings passed `timeout: -1`
+ * through as 2^32-1 ms, ~49.7 days (audit 33). */
 #define HL_GPU_TIMEOUT_MAX_MS   60000
+
+/* The timeout a dispatch / pipeline runs with: @p ms, at most
+ * HL_GPU_TIMEOUT_MAX_MS (0 stays 0, the backend's default). */
+static inline uint32_t hl_gpu_timeout_clamp(uint32_t ms)
+{
+    return ms > HL_GPU_TIMEOUT_MAX_MS ? HL_GPU_TIMEOUT_MAX_MS : ms;
+}
 
 #define HL_GPU_USAGE_READ       0x01
 #define HL_GPU_USAGE_WRITE      0x02
@@ -200,6 +210,16 @@ typedef struct HlGpuDevice {
      * at HL_GPU_MAX_LIVE_BYTES: the slot counts alone let an app hold
      * 64 x 16384^2 x 8 bytes of textures (audit 17). */
     size_t         live_bytes;
+    /* A dispatch / pipeline that timed out is still running on the device,
+     * and the transient buffers / textures it made are only freed once it
+     * finishes (WebGPU destroy semantics). Their bytes stay counted in
+     * live_bytes as `stalled_bytes`, and the device refuses new dispatches
+     * and pipelines ("gpu_busy") until the backend's queue_idle reports the
+     * queue drained, which gives them back (audit 33: they were released
+     * on the timeout, so repeated timed-out calls held device memory past
+     * HL_GPU_MAX_LIVE_BYTES). */
+    size_t         stalled_bytes;
+    int            stalled;
     pthread_mutex_t mutex;
 } HlGpuDevice;
 
@@ -326,6 +346,12 @@ typedef struct HlGpuBackend {
     int   (*texture_read)(HlGpuDevice *dev, HlGpuTexture *tex,
                           void **data, size_t *len);
     void  (*texture_destroy)(HlGpuDevice *dev, HlGpuTexture *tex);
+
+    /* 1 when the device has no submitted work still running, 0 otherwise;
+     * never blocks. Asked before a dispatch / pipeline on a device a timed-
+     * out call stalled (audit 33). NULL = the backend runs nothing
+     * asynchronously, so a stalled device is taken as drained. */
+    int   (*queue_idle)(HlGpuDevice *dev);
 } HlGpuBackend;
 
 /* Top-level GPU context */

@@ -162,6 +162,24 @@ release-artifact layout).
   `hl_cap_tui_acquire` now refuses unless the runtime has applied a manifest declaring
   `tui = true` and `hull/tui`, or the command is one of hull's own `--tui` tools; manifest
   extraction never allows it. Both runtimes.
+- **A JS GPU call could hold the event loop for ~49.7 days, and a timed-out one let device memory
+  pass its ceiling** (audit 33, `--with=gpu`).
+  - **Timeout clamp.** `gpu.dispatch` / `gpu.pipeline` and their `async` forms read `timeout`
+    with `JS_ToUint32` and passed it straight through, so `timeout: -1` waited 2^32-1 ms (Lua
+    already clamped it). The ceiling, `HL_GPU_TIMEOUT_MAX_MS` (60 s), is now enforced in
+    `hl_cap_gpu_dispatch` / `hl_cap_gpu_pipeline` for every caller, and the JS bindings read the
+    option as Lua does: non-positive means the default, at most 60 s.
+  - **Run deadline.** A GPU wait also asks the calling run every 10 ms, so a sync dispatch stops
+    at the run's deadline (`--max-run-ms`) or a tripped budget instead of waiting out its
+    timeout.
+  - **Memory held by a timed-out call.** A timed-out dispatch or pipeline is still running on
+    the device, and the transient buffers / textures it made are freed only when it finishes.
+    Their bytes were given back at once, so repeated timed-out calls held device (on unified
+    memory, host) memory past `HL_GPU_MAX_LIVE_BYTES`. They now stay reserved, and the device
+    refuses new dispatches / pipelines with `gpu_busy` until a non-blocking poll
+    (`queue_idle`) shows the queue drained.
+  - Covered by `test_gpu` (mock backend: the clamp, and the stall and drain).
+
 - **The audit-30 fixes, re-audited** (audit 30 re-audit).
   - The DuckDB dynamic-SQL scan was still quadratic for bare names: each `query` /
     `query_table` token skipped the comment after it, and an unterminated `--` or `/*` ran to
