@@ -159,7 +159,9 @@ UTEST(async_teardown, a_ctx_gives_its_inflight_count_back)
     hl_async_ctx_track(a, &list);
     hl_async_ctx_resume_detached(b);           /* completes */
     EXPECT_EQ(2, inflight);
-    hl_async_ctx_free(c);                      /* never armed */
+    c->cont->destroy(c->cont);                 /* never armed: the ctx */
+    c->cont = NULL;                            /* does not own its cont */
+    hl_async_ctx_free(c);
     EXPECT_EQ(1, inflight);
     hl_async_teardown_run(&list, NULL);        /* cancelled at teardown */
     EXPECT_EQ(0, inflight);
