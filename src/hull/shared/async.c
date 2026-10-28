@@ -55,6 +55,9 @@ void hl_async_teardown_run(HlAsyncTeardown **list, HlAsyncBackendCtx *loop)
 static void hl_async_ctx_release(HlAsyncCtx *ctx)
 {
     hl_offheap_drop(&ctx->hold);
+    if (ctx->inflight && *ctx->inflight > 0)
+        (*ctx->inflight)--;
+    ctx->inflight = NULL;
     hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
 }
 

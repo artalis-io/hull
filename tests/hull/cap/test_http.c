@@ -359,4 +359,65 @@ UTEST(request_method, only_rfc9110_tokens_are_accepted)
                                       &resp));
 }
 
+/* ── In-flight http.fetch admission (audit 31) ──────────────────────── */
+
+/* The N+1th fetch past HL_HTTP_MAX_INFLIGHT is refused, with nothing held. */
+UTEST(fetch_admit, refuses_past_the_inflight_cap)
+{
+    size_t total = 0;
+    int inflight = 0;
+    HlOffheapHold holds[HL_HTTP_MAX_INFLIGHT + 1];
+    memset(holds, 0, sizeof holds);
+    for (int i = 0; i < HL_HTTP_MAX_INFLIGHT; i++) {
+        ASSERT_EQ(HL_HTTP_ADMIT_OK,
+                  hl_http_fetch_admit(inflight, &holds[i], &total, 0, 0, 1024));
+        inflight++;
+    }
+    EXPECT_EQ((size_t)HL_HTTP_MAX_INFLIGHT * 1024, total);
+    EXPECT_EQ(HL_HTTP_ADMIT_INFLIGHT,
+              hl_http_fetch_admit(inflight, &holds[HL_HTTP_MAX_INFLIGHT],
+                                  &total, 0, 0, 1024));
+    EXPECT_EQ((size_t)0, holds[HL_HTTP_MAX_INFLIGHT].bytes);
+    EXPECT_EQ((size_t)HL_HTTP_MAX_INFLIGHT * 1024, total);
+    for (int i = 0; i < HL_HTTP_MAX_INFLIGHT; i++)
+        hl_offheap_drop(&holds[i]);
+    EXPECT_EQ((size_t)0, total);
+}
+
+/* Each fetch holds its body plus the response limit (Keel's 4 MiB default
+ * when none is configured): a 64 MB heap admits 16 default fetches, not the
+ * 17th, which holds nothing. */
+UTEST(fetch_admit, response_reservation_counts_against_the_heap_limit)
+{
+    const size_t heap = (size_t)64 * 1024 * 1024;
+    size_t total = 0;
+    HlOffheapHold holds[17];
+    memset(holds, 0, sizeof holds);
+    for (int i = 0; i < 16; i++)
+        ASSERT_EQ(HL_HTTP_ADMIT_OK,
+                  hl_http_fetch_admit(i, &holds[i], &total, heap, 0, 0));
+    EXPECT_EQ(heap, total);
+    EXPECT_EQ(HL_HTTP_ADMIT_HEAP,
+              hl_http_fetch_admit(16, &holds[16], &total, heap, 0, 0));
+    EXPECT_EQ((size_t)0, holds[16].bytes);
+    hl_offheap_drop(&holds[0]);
+    /* One back: the next one fits again, its body counted too. */
+    EXPECT_EQ(HL_HTTP_ADMIT_HEAP,
+              hl_http_fetch_admit(15, &holds[16], &total, heap, 1, 0));
+    EXPECT_EQ(HL_HTTP_ADMIT_OK,
+              hl_http_fetch_admit(15, &holds[16], &total, heap, 0, 0));
+    for (int i = 1; i < 17; i++)
+        hl_offheap_drop(&holds[i]);
+    EXPECT_EQ((size_t)0, total);
+}
+
+UTEST(fetch_admit, an_overflowing_body_is_refused)
+{
+    size_t total = 0;
+    HlOffheapHold h = {0};
+    EXPECT_EQ(HL_HTTP_ADMIT_HEAP,
+              hl_http_fetch_admit(0, &h, &total, 0, (size_t)-1, 0));
+    EXPECT_EQ((size_t)0, total);
+}
+
 UTEST_MAIN()

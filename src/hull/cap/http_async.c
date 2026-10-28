@@ -27,6 +27,10 @@
 
 #include "log.h"
 
+/* hl_http_response_reserve's default is Keel's (audit 31). */
+_Static_assert(HL_HTTP_DEFAULT_MAX_RESPONSE == KL_HTTP_CLIENT_DEFAULT_MAX_RESP,
+               "HL_HTTP_DEFAULT_MAX_RESPONSE must match Keel's default");
+
 /* ── Tagged pointer convention ───────────────────────────────────── *
  * LSB=1 marks a KlHttpRedirectClient*; LSB=0 marks a KlHttpClient*.
  * Same technique Keel uses for watcher vs connection dispatch.      */
