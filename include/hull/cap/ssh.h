@@ -28,6 +28,18 @@
 extern "C" {
 #endif
 
+/* Live SSH streams per process (audit 35). Each holds a socket - up to 8
+ * while its connect races addresses - until closed or collected, so 32 is at
+ * most 256 descriptors during a connect storm and 32 once connected: room for
+ * a fleet tool's fan-out, and well inside a 1024-descriptor limit beside the
+ * listener, its connections, SQLite temp files and TLS. Past it,
+ * hl_cap_ssh_open refuses with HL_NET_E_LIMIT. */
+#define HL_SSH_MAX_LIVE_STREAMS 32
+
+/* The longest whole-connect deadline a binding passes (10 min, as http.fetch's
+ * async ceiling); a longer timeout_ms is clamped to it for the dial. */
+#define HL_SSH_CONNECT_MS_MAX (10 * 60 * 1000)
+
 /* What the caller asked for. Strings are borrowed for the duration of the
  * call only (the transport copies what it keeps). */
 typedef struct HlSshOpen {
@@ -71,10 +83,15 @@ typedef struct HlSshEnv {
  *   - HL_NET_E_TLS with *why set: a TLS relay was asked for and this
  *     invocation has no trust anchor. Refused rather than downgraded -
  *     the tunnel's headers carry credentials
+ *   - HL_NET_E_LIMIT with *why set: HL_SSH_MAX_LIVE_STREAMS streams are
+ *     live; checked after the grants, before anything is dialled
  *   - any other HL_NET_E_* from the transport, *why NULL
  */
 int hl_cap_ssh_open(const HlSshEnv *env, const HlSshOpen *req,
                     HlNetStream **out, const char **why);
+
+/** Streams hl_cap_ssh_open has handed out and not yet released (for tests). */
+int hl_cap_ssh_live_streams(void);
 
 #ifdef __cplusplus
 }

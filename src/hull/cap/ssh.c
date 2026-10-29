@@ -4,12 +4,43 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <stdatomic.h>
 #include <string.h>
 
 #include "hull/cap/ssh.h"
 #include "hull/cap/ssh_policy.h"
 
 #include "log.h"
+
+/* Live streams (HL_SSH_MAX_LIVE_STREAMS, audit 35). Each stream holds a
+ * socket - up to NET_MAX_ADDRS (8) while the connect races addresses - until
+ * it is closed or collected, and a coroutine parked on one anchors its handle
+ * so the collector frees nothing: with no count, app code pacing connects to
+ * a host that accepts and stalls filled the process's descriptor table, and
+ * Keel stopped accepting. Process-wide and atomic like kv.open's count; a
+ * slot is taken before anything is dialled and given back by the stream's
+ * release hook, once its sockets are closed. */
+static atomic_int g_ssh_live;
+
+#define SSH_STR_(x) #x
+#define SSH_XSTR(x) SSH_STR_(x)
+
+static int ssh_slot_take(void)
+{
+    int n = atomic_load(&g_ssh_live);
+    do {
+        if (n >= HL_SSH_MAX_LIVE_STREAMS) return -1;
+    } while (!atomic_compare_exchange_weak(&g_ssh_live, &n, n + 1));
+    return 0;
+}
+
+static void ssh_slot_give(void *unused)
+{
+    (void)unused;
+    atomic_fetch_sub(&g_ssh_live, 1);
+}
+
+int hl_cap_ssh_live_streams(void) { return atomic_load(&g_ssh_live); }
 
 int hl_cap_ssh_open(const HlSshEnv *env, const HlSshOpen *req,
                     HlNetStream **out, const char **why)
@@ -86,5 +117,20 @@ int hl_cap_ssh_open(const HlSshEnv *env, const HlSshOpen *req,
         cfg.tls_hostname = req->via_tls_hostname;
     }
 
-    return hl_net_stream_connect(out, &cfg);
+    /* After every refusal above, so a denied or TLS-less open costs no slot,
+     * and before the dial, so a refused one opens no socket. */
+    if (ssh_slot_take() != 0) {
+        if (why)
+            *why = "ssh: too many open SSH connections (at most "
+                   SSH_XSTR(HL_SSH_MAX_LIVE_STREAMS) "; close some first)";
+        return HL_NET_E_LIMIT;
+    }
+    cfg.on_release  = ssh_slot_give;
+    cfg.release_arg = NULL;
+
+    int rc = hl_net_stream_connect(out, &cfg);
+    /* A stream handed out gives the slot back through on_release; one that
+     * was never made does not, so it is given back here. */
+    if (!*out) ssh_slot_give(NULL);
+    return rc;
 }

@@ -313,6 +313,23 @@ release-artifact layout).
   text counts). No stdlib SQL uses them, and cross-catalog queries are not a documented Hull
   DuckDB feature (file I/O stays available through `read_csv` / `read_parquet` / `COPY`).
 
+- **Live SSH streams are capped per process** (audit 35). `hull.ssh` byte streams had no
+  count: each holds a socket (up to 8 while its connect races addresses) until closed or
+  collected, and a coroutine parked on one anchors its handle, so app code with an `ssh`
+  grant pacing `hull.async` connects to a host that accepts and stalls filled the
+  descriptor table under `ulimit -n 1024`, after which Keel logged "accept: out of
+  descriptors" and stopped serving (SQLite temp files and TLS lost descriptors too).
+  `hl_cap_ssh_open` now takes one of `HL_SSH_MAX_LIVE_STREAMS` (32) process-wide slots,
+  after the grants and before anything is dialled, and the stream gives it back from its
+  release hook (`HlNetStreamConfig.on_release`) once its sockets are closed; past the cap
+  the connect returns `(nil, message, "too_many_streams")` (`HL_NET_E_LIMIT`), which
+  `ssh.connect` reports as `{ code = "too_many_streams" }`. The Lua binding collects once
+  and retries on that refusal, as `kv.open` and `blob` do, so streams dropped without
+  `close()` free their slots. The dial's own deadline is clamped to 10 min
+  (`HL_SSH_CONNECT_MS_MAX`, as `http.fetch`'s async ceiling); `ssh.connect`'s handshake
+  deadline keeps the caller's `timeout_ms`. The other socket users already had caps
+  (`db.open` / `kv.open` 16, SMTP in-flight, `http.fetch` in-flight, `ws.connect` per VM).
+
 - **MySQL: a COMMIT tripped in its wait is finished; insert_if_absent refuses a truncated
   value** (audit 31).
   - A run whose budget or deadline tripped while the OK of a lone, wholly sent COMMIT was

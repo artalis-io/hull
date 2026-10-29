@@ -137,6 +137,7 @@ static const char *net_err_code(int rc)
     case HL_NET_E_TIMEOUT:  return "timeout";
     case HL_NET_E_DEADLINE: return "deadline";
     case HL_NET_E_CLOSED:   return "closed";
+    case HL_NET_E_LIMIT:    return "too_many_streams";
     case HL_NET_E_RESOLVE:
     case HL_NET_E_CONNECT:
     case HL_NET_E_TLS:      return "connect_failed";
@@ -592,6 +593,10 @@ static int lua_ssh_connect(lua_State *L)
         return push_err(L, port < 0 ? "ssh: port must be an integer 1..65535"
                                     : "ssh: timeout_ms must be an integer 1..86400000");
     }
+    /* The dial's own deadline is clamped (audit 35): a connect held for up
+     * to 24 h kept its sockets and its live-stream slot all that time. The
+     * stdlib's handshake deadline keeps the caller's full value. */
+    if (timeout > HL_SSH_CONNECT_MS_MAX) timeout = HL_SSH_CONNECT_MS_MAX;
 
     /* The relay, if any. Its strings stay on the stack until after connect:
      * cfg.host and cfg.tls_hostname are BORROWED for the duration of the
@@ -647,9 +652,27 @@ static int lua_ssh_connect(lua_State *L)
     HlNetStream *s = NULL;
     const char *why = NULL;
     int rc = hl_cap_ssh_open(&env, &req, &s, &why);
+    if (rc == HL_NET_E_LIMIT) {
+        /* Live streams are capped (HL_SSH_MAX_LIVE_STREAMS, audit 35), and a
+         * stream the app dropped without close() holds its slot until it is
+         * collected: collect once and retry, as kv.open and blob do. The
+         * option strings the request borrows are still on the stack (each is
+         * reachable from it), so the collection frees none of them, and the
+         * handle at `base` holds no stream yet. A slot a collected stream
+         * gives back only after its in-flight connect op lets go is not
+         * waited for. */
+        lua_gc(L, LUA_GCCOLLECT);
+        why = NULL;
+        rc = hl_cap_ssh_open(&env, &req, &s, &why);
+    }
     lua_settop(L, base);                 /* every option lookup, at once */
 
     if (!s) {
+        if (rc == HL_NET_E_LIMIT) {
+            push_err(L, why);
+            lua_pushstring(L, "too_many_streams");
+            return 3;
+        }
         if (rc == HL_NET_E_DENIED) {
             push_err(L, why);
             lua_pushstring(L, "denied");   /* the manifest said no */

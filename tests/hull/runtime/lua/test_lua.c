@@ -29,6 +29,9 @@
 #include "hull/runtime/cache_common.h"
 #include "hull/shared/blob_store.h"
 #include "hull/cap/blob.h"   /* hl_cap_blob_live_handles (a34) */
+#ifdef HL_ENABLE_HTTP
+#include "hull/cap/ssh.h"    /* hl_cap_ssh_live_streams (a35) */
+#endif
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
 #include "hull/stdlib_feature.h"
@@ -7035,6 +7038,10 @@ typedef struct {
     int with_db;            /* the runtime has a default database (caps) */
 } SshBridgeFix;
 
+/* The listener's backlog: a test that opens many streams raises it, since a
+ * connect past a full backlog is not answered. */
+static int ssh_bridge_backlog = 4;
+
 /* Returns 0, or the step that failed. */
 static int ssh_bridge_open_ex(SshBridgeFix *bf, int with_db)
 {
@@ -7052,7 +7059,7 @@ static int ssh_bridge_open_ex(SshBridgeFix *bf, int with_db)
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     socklen_t alen = sizeof a;
     if (bind(bf->lfd, (struct sockaddr *)&a, sizeof a) != 0 ||
-        listen(bf->lfd, 4) != 0 ||
+        listen(bf->lfd, ssh_bridge_backlog) != 0 ||
         getsockname(bf->lfd, (struct sockaddr *)&a, &alen) != 0) return 3;
     bf->port = ntohs(a.sin_port);
 
@@ -7203,6 +7210,61 @@ UTEST(lua_ssh_bridge, a_close_wakes_its_waiter_from_the_loop)
     EXPECT_EQ_MSG(lua_status(co_b), LUA_OK, "the reader is woken");
     if (lua_status(co_b) == LUA_OK) EXPECT_STREQ(lua_tostring(co_b, -1), "closed");
     ssh_bridge_close(&bf);
+}
+
+/* Audit 35: live streams are capped per process (HL_SSH_MAX_LIVE_STREAMS),
+ * and a stream dropped without close() holds its slot until collected, so a
+ * refused connect collects once and retries. */
+UTEST(lua_ssh_bridge, live_streams_are_capped_and_dropped_ones_are_collected)
+{
+    SshBridgeFix bf;
+    ssh_bridge_backlog = 128;
+    int orc = ssh_bridge_open(&bf);
+    ssh_bridge_backlog = 4;
+    ASSERT_EQ(orc, 0);
+    ASSERT_EQ(hl_cap_ssh_live_streams(), 1);      /* H */
+
+    char src[512];
+    snprintf(src, sizeof src,
+        "local s = require('hull.ssh._stream')\n"
+        "T = {}\n"
+        "for i = 1, %d do\n"
+        "  local h, e, code = s.connect{ host = '127.0.0.1', port = %d,\n"
+        "                                user = 'operator' }\n"
+        "  if not h then return i, e, code end\n"
+        "  T[i] = h\n"
+        "end\n"
+        "return 0\n", HL_SSH_MAX_LIVE_STREAMS + 4, bf.port);
+    lua_State *co = ssh_bridge_run(&bf, src);
+    for (int i = 0; i < 4 && lua_status(co) == LUA_YIELD; i++)
+        ssh_tick_until_done(bf.be, lua_rt.base.async_ctx, co);
+    ASSERT_EQ(lua_status(co), LUA_OK);
+    /* H holds one slot, so the HL_SSH_MAX_LIVE_STREAMS-th connect here is
+     * the first one past the cap - refused even after a collection, since
+     * every live handle is still referenced from T. */
+    EXPECT_EQ(lua_tointeger(co, -3), HL_SSH_MAX_LIVE_STREAMS);
+    EXPECT_TRUE(lua_tostring(co, -2) &&
+                strstr(lua_tostring(co, -2), "too many open SSH connections"));
+    EXPECT_STREQ(lua_tostring(co, -1), "too_many_streams");
+    EXPECT_EQ(hl_cap_ssh_live_streams(), HL_SSH_MAX_LIVE_STREAMS);
+
+    /* Drop them all without closing: the next connect's refusal collects
+     * them, and the retry succeeds. */
+    snprintf(src, sizeof src,
+        "T = nil\n"
+        "local h, e, code = require('hull.ssh._stream').connect{\n"
+        "  host = '127.0.0.1', port = %d, user = 'operator' }\n"
+        "assert(h, tostring(e) .. ' ' .. tostring(code))\n"
+        "h:close()\n"
+        "return true\n", bf.port);
+    co = ssh_bridge_run(&bf, src);
+    for (int i = 0; i < 4 && lua_status(co) == LUA_YIELD; i++)
+        ssh_tick_until_done(bf.be, lua_rt.base.async_ctx, co);
+    if (lua_status(co) != LUA_OK)
+        fprintf(stderr, "retry: %s\n", lua_tostring(co, -1));
+    EXPECT_EQ(lua_status(co), LUA_OK);
+    ssh_bridge_close(&bf);
+    EXPECT_EQ(hl_cap_ssh_live_streams(), 0);    /* every slot given back */
 }
 
 UTEST(lua_ssh_bridge, app_code_holding_a_stream_is_refused)
