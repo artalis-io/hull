@@ -212,6 +212,20 @@ UTEST(hull_cap_gpu, a_failed_dispatch_flushes_its_uploads)
         "    data[id.x] = data[id.x] * 2u;\n"
         "}\n";
     ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "double", wgsl, strlen(wgsl)));
+    /* The failing calls bind a texture the shader declares, so the
+     * dispatch layer's binding check passes them (audit 35) and the
+     * backend fails after the upload, on the texture lookup. */
+    const char *wgsl_tex =
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "@group(0) @binding(1) var tex: texture_2d<f32>;\n"
+        "@group(0) @binding(2) var smp: sampler;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    let c = textureSampleLevel(tex, smp, vec2<f32>(0.0, 0.0), 0.0);\n"
+        "    data[id.x] = data[id.x] * 2u + u32(c.x * 0.0);\n"
+        "}\n";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "double_tex", wgsl_tex,
+                                            strlen(wgsl_tex)));
 
     const size_t big_len = (size_t)4 << 20;
     void *big = calloc(1, big_len);
@@ -230,7 +244,7 @@ UTEST(hull_cap_gpu, a_failed_dispatch_flushes_its_uploads)
     for (int i = 0; i < 64; i++) {
         const char *err = NULL;
         EXPECT_EQ(HL_GPU_ERR_DISPATCH,
-                  hl_cap_gpu_dispatch(&ctx, "double", &bad, NULL, NULL, &err));
+                  hl_cap_gpu_dispatch(&ctx, "double_tex", &bad, NULL, NULL, &err));
         EXPECT_STREQ("texture_not_found", err);
     }
     free(big);

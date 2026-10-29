@@ -1556,7 +1556,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
              * must not write past, so bound the upload by the real one. */
             size_t upload_cap = alloc_size <= SIZE_MAX - 3
                 ? (alloc_size + 3) & ~(size_t)3 : alloc_size;
-            for (int p = 0; p < persistent_count; p++) {
+            for (int p = 0; persistent_buffers && p < persistent_count; p++) {
                 if (persistent_buffers[p].handle == (void *)gpu_buf) {
                     if (persistent_buffers[p].size < upload_cap)
                         upload_cap = persistent_buffers[p].size;
@@ -1570,7 +1570,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
             /* A persistent buffer bound larger than it is fails the bind
              * group's validation (audit 35; see wgpu_dispatch). Refused
              * before the upload, so a refused call writes nothing. */
-            for (int p = 0; p < persistent_count; p++) {
+            for (int p = 0; persistent_buffers && p < persistent_count; p++) {
                 if (persistent_buffers[p].handle == (void *)gpu_buf) {
                     size_t have = persistent_buffers[p].size;
                     size_t have_aligned = have <= SIZE_MAX - 3
