@@ -486,17 +486,45 @@ static int fv_arg_end(char c)
     return c == ',' || c == ')' || c == ';' || c == '\0';
 }
 
-/* Table functions and pragmas that take a TABLE NAME as a value. */
-static int fv_table_by_value_name(const char *s, size_t n)
+static int fv_name_in(const char *s, size_t n, const char *const *names)
 {
-    static const char *const names[] = {
-        "pragma_table_info", "table_info", "pragma_show", "show",
-        "histogram", "histogram_values", "duckdb_table_sample", NULL
-    };
     for (int i = 0; names[i]; i++)
         if (strlen(names[i]) == n && strncasecmp(s, names[i], n) == 0)
             return 1;
     return 0;
+}
+
+/* Table functions that take a TABLE NAME as a value and are nothing else:
+ * checked wherever they are called. */
+static int fv_table_by_value_name(const char *s, size_t n)
+{
+    static const char *const names[] = {
+        "pragma_table_info", "pragma_show", "histogram_values",
+        "duckdb_table_sample", NULL
+    };
+    return fv_name_in(s, n, names);
+}
+
+/* `show` / `table_info`: pragmas, but ordinary column names too. Their
+ * `name = value` spelling exists only after PRAGMA, so a bare `show = 1`
+ * (SET, WHERE) is a column (audit 35: #912 refused `UPDATE items SET show =
+ * 1`). A call, `show(...)`, can only be the pragma: checked anywhere. */
+static int fv_pragma_by_value_name(const char *s, size_t n)
+{
+    return (n == 4 && strncasecmp(s, "show", 4) == 0) ||
+           (n == 10 && strncasecmp(s, "table_info", 10) == 0);
+}
+
+/* The words after which a table function can stand: a FROM item, a CALL,
+ * a PRAGMA, a table operand of a statement. `,` and `(` count too (a
+ * comma join, a parenthesised FROM item). */
+static int fv_table_position_kw(const char *s, size_t n)
+{
+    static const char *const names[] = {
+        "from", "join", "lateral", "call", "pragma", "using", "describe",
+        "summarize", "show", "pivot", "unpivot", "table", "in", NULL
+    };
+    return fv_name_in(s, n, names);
 }
 
 /* Names refused in every spelling: storage_info returns column statistics
@@ -509,7 +537,11 @@ static int fv_always_refused_name(const char *s, size_t n)
         "storage_info", "pragma_storage_info",
         "enable_profiling", "disable_profiling",
         "enable_profile", "disable_profile",
-        "enable_logging", "disable_logging", "truncate_duckdb_logs", NULL
+        "enable_logging", "disable_logging", "truncate_duckdb_logs",
+        /* POINTER arguments (audit 35): no SQL value converts to POINTER
+         * in DuckDB 1.5.4, so they cannot be reached with an address; not
+         * left to that. */
+        "arrow_scan", "arrow_scan_dumb", NULL
     };
     for (int i = 0; names[i]; i++)
         if (strlen(names[i]) == n && strncasecmp(s, names[i], n) == 0)
@@ -518,12 +550,14 @@ static int fv_always_refused_name(const char *s, size_t n)
 }
 
 /* After a table-by-value name at @p p, read with one comment rule: 1 when
- * it is called (`(` or `=`) with anything but one plain argument. */
-static int fv_table_arg_refused(const char *p, int nest, size_t *budget)
+ * it is called (`(`, or `=` under @p eq) with anything but one plain
+ * argument. */
+static int fv_table_arg_refused_ex(const char *p, int nest, int eq,
+                                   size_t *budget)
 {
     const char *q = dyn_skip_gap(p, nest, budget);
     if (!q) return 1;
-    if (*q != '(' && *q != '=') return 0;     /* a column, SHOW TABLES, ... */
+    if (*q != '(' && !(eq && *q == '=')) return 0;  /* a column, SHOW TABLES */
     int paren = (*q == '(');
     q = dyn_skip_gap(q + 1, nest, budget);
     if (!q) return 1;
@@ -535,6 +569,106 @@ static int fv_table_arg_refused(const char *p, int nest, size_t *budget)
     if (!q) return 1;
     q = dyn_skip_gap(q, nest, budget);
     return !q || !fv_arg_end(*q);
+}
+
+static int fv_table_arg_refused(const char *p, int nest, size_t *budget)
+{
+    return fv_table_arg_refused_ex(p, nest, 1, budget);
+}
+
+/* Whether the call whose `(` is at @p p, read with one comment rule, has
+ * exactly ONE argument: 1 only when that is certain. Anything this reader
+ * cannot follow (a dollar-quoted string, an E'' escape, an unterminated
+ * quote, the end of the text, the budget) is 0. The `histogram` table macro
+ * takes (source, column, ...); the aggregate `histogram(expr)` one. */
+static int fv_call_has_one_arg(const char *p, int nest, size_t *budget)
+{
+    int depth = 0;
+    const char *q = p + 1;
+    for (;;) {
+        q = dyn_skip_gap(q, nest, budget);
+        if (!q) return 0;
+        char c = *q;
+        if (c == '\0' || c == '$' || c == ';') return 0;
+        if ((c == 'e' || c == 'E') && q[1] == '\'') {
+            const char *e = q + 2;
+            while (*e && *e != '\'' && *e != '\\') e++;
+            if (*e != '\'') return 0;           /* a backslash escape */
+            q++;
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            q = fv_quoted(q, budget, NULL, 0, NULL);
+            if (!q) return 0;
+            continue;
+        }
+        if (!fv_take(budget, 1)) return 0;
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth == 0) return c == ')';
+            depth--;
+        } else if (c == ',' && depth == 0) {
+            return 0;
+        }
+        q++;
+    }
+}
+
+/* `histogram` after a table-position word: refused when called with more
+ * than one argument (or one this reader cannot count) whose first is not
+ * plain - the table macro's source, which it hands to query_table. The
+ * aggregate `histogram(lower(name))` passes, and so does any histogram in a
+ * select list (audit 35: #912 refused both). */
+static int fv_histogram_refused(const char *p, size_t *budget)
+{
+    for (int nest = 1; nest >= 0; nest--) {
+        const char *q = dyn_skip_gap(p, nest, budget);
+        if (!q) return 1;
+        if (*q != '(') continue;
+        if (fv_call_has_one_arg(q, 1, budget) &&
+            fv_call_has_one_arg(q, 0, budget))
+            continue;
+        if (fv_table_arg_refused_ex(q, 1, 0, budget) ||
+            fv_table_arg_refused_ex(q, 0, 0, budget))
+            return 1;
+    }
+    return 0;
+}
+
+/* After a table-position word (or `,` / `(`) at @p p: the name that
+ * follows, bare or "quoted", read with both comment rules. 1 when it is
+ * `histogram` called as refused above, or - after PRAGMA - `show` /
+ * `table_info` given anything but one plain argument. */
+static int fv_table_position_refused(const char *p, int pragma, size_t *budget)
+{
+    for (int nest = 1; nest >= 0; nest--) {
+        const char *q = dyn_skip_gap(p, nest, budget);
+        if (!q) return 1;
+        char buf[16];
+        size_t n = 0;
+        const char *after;
+        if (*q == '"') {
+            after = fv_quoted(q, budget, buf, sizeof buf, &n);
+            if (!after) continue;            /* unterminated: no name */
+            if (n == SIZE_MAX) continue;     /* longer than any name here */
+        } else if (fv_name_start((unsigned char)*q)) {
+            after = q;
+            while (dyn_ident_char((unsigned char)*after)) after++;
+            n = (size_t)(after - q);
+            if (n >= sizeof buf) continue;
+            memcpy(buf, q, n);
+        } else {
+            continue;
+        }
+        if (n == 9 && strncasecmp(buf, "histogram", 9) == 0 &&
+            fv_histogram_refused(after, budget))
+            return 1;
+        if (pragma && fv_pragma_by_value_name(buf, n) &&
+            (fv_table_arg_refused(after, 1, budget) ||
+             fv_table_arg_refused(after, 0, budget)))
+            return 1;
+    }
+    return 0;
 }
 
 int hl_cap_db_sql_names_table_by_value(const char *sql)
@@ -559,7 +693,16 @@ int hl_cap_db_sql_names_table_by_value(const char *sql)
                 (fv_table_arg_refused(q + 1, 1, &budget) ||
                  fv_table_arg_refused(q + 1, 0, &budget)))
                 return 1;
+            if (fits && *q == '"' && fv_pragma_by_value_name(buf, n) &&
+                (fv_table_arg_refused_ex(q + 1, 1, 0, &budget) ||
+                 fv_table_arg_refused_ex(q + 1, 0, 0, &budget)))
+                return 1;
             p++;                      /* literals are not skipped: see above */
+            continue;
+        }
+        if (c == ',' || c == '(') {
+            if (fv_table_position_refused(p + 1, 0, &budget)) return 1;
+            p++;
             continue;
         }
         if (dyn_ident_char(c) && !(c >= '0' && c <= '9')) {
@@ -571,9 +714,72 @@ int hl_cap_db_sql_names_table_by_value(const char *sql)
                 (fv_table_arg_refused(p, 1, &budget) ||
                  fv_table_arg_refused(p, 0, &budget)))
                 return 1;
+            /* show(...) / table_info(...) anywhere; `= value` after PRAGMA. */
+            if (fv_pragma_by_value_name(start, n) &&
+                (fv_table_arg_refused_ex(p, 1, 0, &budget) ||
+                 fv_table_arg_refused_ex(p, 0, 0, &budget)))
+                return 1;
+            if (fv_table_position_kw(start, n) &&
+                fv_table_position_refused(p, n == 6 &&
+                    strncasecmp(start, "pragma", 6) == 0, &budget))
+                return 1;
             continue;
         }
         p++;
+    }
+    return 0;
+}
+
+/* The protected database file: its directory (NULL: none) and name. */
+typedef struct {
+    const char *dir;
+    const char *base;
+    size_t      blen;
+} FvProtect;
+
+/* Whether @p s (@p n bytes, a path or a literal's text) names the protected
+ * file on path-component boundaries: the name preceded by the start or a
+ * separator, and followed by the end, a separator, or a `.wal` / `.tmp`
+ * sidecar suffix (`.wal.checkpoint`, `.wal.recovery`, `.tmp/` ...).
+ * Case-insensitive, as the file system may be. A bare substring refused
+ * `approvals` for `app` and every `_hull_migrations` statement for `hull`
+ * (audit 35). */
+static int fv_names_protected(const char *s, size_t n, const FvProtect *pr)
+{
+    size_t bl = pr->blen;
+    if (n < bl) return 0;
+    for (size_t i = 0; i + bl <= n; i++) {
+        if (i > 0 && s[i - 1] != '/' && s[i - 1] != '\\') continue;
+        if (strncasecmp(s + i, pr->base, bl) != 0) continue;
+        size_t j = i + bl;
+        if (j == n || s[j] == '/' || s[j] == '\\') return 1;
+        if (s[j] == '.' && n - j >= 4 &&
+            (strncasecmp(s + j, ".wal", 4) == 0 ||
+             strncasecmp(s + j, ".tmp", 4) == 0))
+            return 1;
+    }
+    return 0;
+}
+
+/* Whether any literal in @p sql names the protected file: the text between
+ * every two consecutive `'`, every two `"` and every two `$` is read as a
+ * literal's body, whatever the parity (a quote inside a comment shifts it),
+ * so every real literal - '...', E'...', "...", $$...$$, $tag$...$tag$ - is
+ * one of the spans read. A path reaches DuckDB only as a literal: a file
+ * function's argument and a COPY target must be one (checked below), and a
+ * replacement scan (FROM 'x.csv') is one. Each byte is in one span per
+ * quote character. */
+static int fv_literal_names_protected(const char *sql, const FvProtect *pr)
+{
+    static const char quotes[] = { '\'', '"', '$' };
+    for (size_t k = 0; k < sizeof quotes; k++) {
+        const char *prev = NULL;
+        for (const char *p = strchr(sql, quotes[k]); p;
+             p = strchr(p + 1, quotes[k])) {
+            if (prev && fv_names_protected(prev + 1, (size_t)(p - prev - 1), pr))
+                return 1;
+            prev = p;
+        }
     }
     return 0;
 }
@@ -611,8 +817,9 @@ static int fv_glob_reaches(const char *body, const char *protect_dir)
 }
 
 /* A path literal at @p p ('...' or "..."): NULL to refuse (not one, too
- * long, a glob reaching @p protect_dir, budget gone), else the text after. */
-static const char *fv_path_literal(const char *p, const char *protect_dir,
+ * long, naming the protected file, a glob reaching its directory, budget
+ * gone), else the text after. */
+static const char *fv_path_literal(const char *p, const FvProtect *pr,
                                    size_t *budget)
 {
     if (*p != '\'' && *p != '"') return NULL;
@@ -620,7 +827,8 @@ static const char *fv_path_literal(const char *p, const char *protect_dir,
     size_t n = 0;
     const char *after = fv_quoted(p, budget, body, sizeof body, &n);
     if (!after || n == SIZE_MAX) return NULL;
-    if (protect_dir && fv_glob_reaches(body, protect_dir)) return NULL;
+    if (pr && pr->base && fv_names_protected(body, n, pr)) return NULL;
+    if (pr && pr->dir && fv_glob_reaches(body, pr->dir)) return NULL;
     return after;
 }
 
@@ -638,7 +846,7 @@ static int fv_file_function_name(const char *s, size_t n)
  * is called (`(`) with a first argument that is not a path literal or a
  * [list] of them, or with any argument under @p deny. */
 static int fv_file_call_refused(const char *p, int nest, int deny,
-                                const char *protect_dir, size_t *budget)
+                                const FvProtect *pr, size_t *budget)
 {
     const char *q = dyn_skip_gap(p, nest, budget);
     if (!q) return 1;
@@ -650,7 +858,7 @@ static int fv_file_call_refused(const char *p, int nest, int deny,
         for (;;) {
             q = dyn_skip_gap(q + 1, nest, budget);
             if (!q) return 1;
-            q = fv_path_literal(q, protect_dir, budget);
+            q = fv_path_literal(q, pr, budget);
             if (!q) return 1;
             q = dyn_skip_gap(q, nest, budget);
             if (!q) return 1;
@@ -658,7 +866,7 @@ static int fv_file_call_refused(const char *p, int nest, int deny,
             if (*q != ',') return 1;
         }
     } else {
-        q = fv_path_literal(q, protect_dir, budget);
+        q = fv_path_literal(q, pr, budget);
         if (!q) return 1;
     }
     q = dyn_skip_gap(q, nest, budget);
@@ -668,9 +876,10 @@ static int fv_file_call_refused(const char *p, int nest, int deny,
 /* After the word COPY at @p p, read with one comment rule: 1 when its TO /
  * FROM target (the first TO or FROM outside parentheses) is not a path
  * literal or a bare name - a (constant expression) is one DuckDB folds -
- * or is a glob reaching @p protect_dir. A dollar-quoted string anywhere in
+ * or is a literal naming the protected file or a glob reaching its
+ * directory. A dollar-quoted string anywhere in
  * the statement is refused, as the parenthesis count cannot read it. */
-static int fv_copy_refused(const char *p, int nest, const char *protect_dir,
+static int fv_copy_refused(const char *p, int nest, const FvProtect *pr,
                            size_t *budget)
 {
     int depth = 0;
@@ -704,7 +913,7 @@ static int fv_copy_refused(const char *p, int nest, const char *protect_dir,
             q = dyn_skip_gap(q, nest, budget);
             if (!q) return 1;
             if (*q == '\'' || *q == '"') {
-                q = fv_path_literal(q, protect_dir, budget);
+                q = fv_path_literal(q, pr, budget);
             } else if (fv_name_start((unsigned char)*q)) {
                 while (dyn_ident_char((unsigned char)*q)) q++;
             } else {
@@ -734,8 +943,8 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
 
     /* The protected file's name, in any spelling of its path: every path
      * DuckDB is handed that names the database, a WAL sidecar or the temp
-     * directory (<db>.wal, <db>.tmp/) holds it. Case-insensitive, as the
-     * file system may be. */
+     * directory (<db>.wal, <db>.tmp/) holds it as a path component. Read in
+     * literals only (fv_literal_names_protected), where a path can be. */
     char protect_dir[PATH_MAX];
     const char *base = NULL;
     size_t blen = 0;
@@ -749,10 +958,10 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
         memcpy(protect_dir, protect_path, dn);
         protect_dir[dn] = '\0';
         if (blen == 0) return 1;
-        for (size_t i = 0; i + blen <= len; i++)
-            if (strncasecmp(sql + i, base, blen) == 0) return 1;
     }
-    const char *pdir = (base && protect_dir[0]) ? protect_dir : NULL;
+    FvProtect prot = { (base && protect_dir[0]) ? protect_dir : NULL, base, blen };
+    const FvProtect *pr = base ? &prot : NULL;
+    if (pr && fv_literal_names_protected(sql, pr)) return 1;
 
     for (const char *p = sql; *p; ) {
         unsigned char c = (unsigned char)*p;
@@ -768,8 +977,8 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
                 if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
             }
             if (fits && *q == '"' && fv_file_function_name(buf, n) &&
-                (fv_file_call_refused(q + 1, 1, deny_file_functions, pdir, &budget) ||
-                 fv_file_call_refused(q + 1, 0, deny_file_functions, pdir, &budget)))
+                (fv_file_call_refused(q + 1, 1, deny_file_functions, pr, &budget) ||
+                 fv_file_call_refused(q + 1, 0, deny_file_functions, pr, &budget)))
                 return 1;
             p++;                      /* literals are not skipped: see above */
             continue;
@@ -782,6 +991,13 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
              * text (E'\x61pp.duckdb'): one holding a backslash is refused.
              * The look stops at the next quote or backslash, so the looks
              * of one text never overlap. */
+            if (n == 1 && (*start == 'u' || *start == 'U') && p[0] == '&' &&
+                p[1] == '\'') {
+                const char *q = p + 2;
+                while (*q && *q != '\'' && *q != '\\') q++;
+                if (*q == '\\') return 1;
+                continue;
+            }
             if (n == 1 && (*start == 'e' || *start == 'E') && *p == '\'') {
                 const char *q = p + 1;
                 while (*q && *q != '\'' && *q != '\\') q++;
@@ -789,12 +1005,12 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
                 continue;
             }
             if (fv_file_function_name(start, n) &&
-                (fv_file_call_refused(p, 1, deny_file_functions, pdir, &budget) ||
-                 fv_file_call_refused(p, 0, deny_file_functions, pdir, &budget)))
+                (fv_file_call_refused(p, 1, deny_file_functions, pr, &budget) ||
+                 fv_file_call_refused(p, 0, deny_file_functions, pr, &budget)))
                 return 1;
             if (n == 4 && strncasecmp(start, "copy", 4) == 0 &&
-                (fv_copy_refused(p, 1, pdir, &budget) ||
-                 fv_copy_refused(p, 0, pdir, &budget)))
+                (fv_copy_refused(p, 1, pr, &budget) ||
+                 fv_copy_refused(p, 0, pr, &budget)))
                 return 1;
             continue;
         }

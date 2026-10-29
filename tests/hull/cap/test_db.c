@@ -905,6 +905,29 @@ UTEST(hl_cap_db, table_name_values_are_refused)
         "PRAGMA enable_profiling",
         "CALL enable_logging(level = 'debug')",
         "CALL truncate_duckdb_logs()",
+        /* Audit 35: still refused with show / table_info / histogram read
+         * by position. */
+        "PRAGMA show = concat('_', 'hull_x')",
+        "PRAGMA \"table_info\" = concat('a', 'b')",
+        "PRAGMA /* c */ table_info = lower('X')",
+        "CALL show(concat('a', 'b'))",
+        "SELECT * FROM show(concat('a', 'b'))",
+        "SELECT * FROM table_info(lower('X'))",
+        "SELECT * FROM t, histogram(concat('_', 'hull_s'), x)",
+        "SELECT * FROM t JOIN histogram(lower('X'), x) h ON true",
+        "SELECT * FROM (histogram(lower('X'), x))",
+        "SELECT * FROM /* c */ histogram(lower('X'), x)",
+        "SELECT * FROM \"histogram\"(lower('X'), x)",
+        "SELECT * FROM LATERAL histogram(lower('X'), x)",
+        "SUMMARIZE histogram(lower('X'), x)",
+        "SELECT * FROM histogram(lower('X') /* ) */, x)",
+        "SELECT * FROM histogram(lower('X') -- )\n, x)",
+        "SELECT * FROM histogram(lower($$)$$), x)",
+        "SELECT * FROM histogram(lower(E'\\'), x)",
+        "SELECT * FROM histogram(lower('X')",
+        /* POINTER arguments: refused by name (defence in depth). */
+        "SELECT * FROM arrow_scan(?, ?, ?)",
+        "SELECT * FROM \"Arrow_Scan_Dumb\"(?, ?, ?)",
     };
     for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
         EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(hit[i]));
@@ -925,6 +948,22 @@ UTEST(hl_cap_db, table_name_values_are_refused)
         "SHOW t",
         "SELECT table_info, histogram FROM t",
         "CREATE TABLE stats (storage TEXT, info TEXT)",
+        /* Audit 35: #912 refused these columns and aggregates. */
+        "UPDATE items SET show = 1",
+        "UPDATE items SET \"show\" = 1",          /* DuckDB reserves show */
+        "SELECT * FROM items WHERE \"Show\" = lower(name)",
+        "UPDATE items SET show = ? WHERE id = ?",
+        "SELECT * FROM items WHERE show = ?",
+        "SELECT * FROM items WHERE show = lower(name)",
+        "SELECT * FROM items WHERE table_info = concat('a', 'b')",
+        "SELECT histogram(lower(name)) FROM t",
+        "SELECT id, histogram(lower(name)) FROM t",
+        "SELECT histogram(lower(name), [1, 2, 3]) FROM t",
+        "SELECT (histogram(lower(name))) FROM t",
+        "SELECT * FROM t WHERE x IN (SELECT histogram(lower(y)) FROM u)",
+        "SELECT * FROM histogram('t', x)",
+        "PRAGMA show('users')",
+        "PRAGMA table_info = users",
         "SELECT * FROM t",
         "",
     };
@@ -1019,9 +1058,35 @@ UTEST(hl_cap_db, database_file_reads_are_refused)
         "SELECT E'plain'",
         "SELECT * FROM t",
         "",
+        /* Audit 35: the name outside a literal, or not a path component. */
+        "SELECT app.duckdb FROM app",
+        "SELECT * FROM app_duckdb_stats",
+        "SELECT 'my_app.duckdb'",
+        "SELECT 'app.duckdbx'",
+        "SELECT * FROM read_csv('data/app.duckdb.csv.old')",
     };
     for (size_t i = 0; i < sizeof miss_b / sizeof miss_b[0]; i++)
         EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(miss_b[i], 0, protect));
+    /* Audit 35: still refused - every spelling of the file in a literal. */
+    static const char *const hit_35[] = {
+        "SELECT * FROM read_blob('./APP.duckdb')",
+        "SELECT * FROM read_text('db/app.duckdb.WAL.recovery')",
+        "SELECT * FROM read_text('db/app.duckdb.tmp/x')",
+        "SELECT * FROM read_blob('db\\app.duckdb')",
+        "SELECT * FROM read_blob(\"app.duckdb\")",
+        "SELECT * FROM 'db/app.duckdb'",
+        "SELECT * FROM $$app.duckdb$$",
+        "SELECT * FROM $t$app.duckdb$t$",
+        "COPY t TO './app.duckdb.wal'",
+        "COPY t FROM \"app.duckdb\"",
+        "SELECT * FROM read_blob('app.duckdb/')",
+        /* A quote inside a comment shifts the parity: still found. */
+        "/* ' */ SELECT * FROM read_blob('app.duckdb') /* ' */",
+        "SELECT * FROM read_blob(U&'\\0061pp.duckdb')",
+        "SELECT U&'\\0061'",
+    };
+    for (size_t i = 0; i < sizeof hit_35 / sizeof hit_35[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(hit_35[i], 0, protect));
 
     /* Mode A: no fs policy, so no file function may be called at all. */
     static const char *const hit_a[] = {
@@ -1045,6 +1110,41 @@ UTEST(hl_cap_db, database_file_reads_are_refused)
     rmdir(real);
 }
 
+/* Audit 35: #912 refused any statement holding the database file's name as
+ * a substring, so an extensionless name broke ordinary SQL - `duckdb://hull`
+ * refused every _hull_migrations statement (the app could not boot),
+ * `duckdb://sessions` the session store, `duckdb://app` `approvals`. The
+ * name is read only in literals, on path-component boundaries. */
+UTEST(hl_cap_db, extensionless_database_names_do_not_refuse_sql)
+{
+    static const struct { const char *protect, *sql; } miss[] = {
+        { "/nonexistent/d/hull",
+          "CREATE TABLE IF NOT EXISTS _hull_migrations (name VARCHAR(255) "
+          "PRIMARY KEY, applied_at TEXT)" },
+        { "/nonexistent/d/hull", "SELECT name FROM _hull_migrations ORDER BY name" },
+        { "/nonexistent/d/hull", "INSERT INTO _hull_migrations (name) VALUES ('001_init.sql')" },
+        { "/nonexistent/d/hull", "SELECT 'hull_x', 'my/hullabaloo'" },
+        { "/nonexistent/d/sessions", "SELECT * FROM _hull_sessions WHERE id = ?" },
+        { "/nonexistent/d/sessions", "DELETE FROM _hull_sessions WHERE expires_at < ?" },
+        { "/nonexistent/d/app", "SELECT * FROM approvals WHERE app = ?" },
+        { "/nonexistent/d/data", "SELECT data FROM user_data" },
+        { "/nonexistent/d/data", "SELECT * FROM read_csv('data_2024.csv')" },
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(miss[i].sql, 0, miss[i].protect));
+    static const struct { const char *protect, *sql; } hit[] = {
+        { "/nonexistent/d/hull", "SELECT * FROM read_text('hull')" },
+        { "/nonexistent/d/hull", "SELECT * FROM read_blob('./HULL.wal')" },
+        { "/nonexistent/d/hull", "SELECT * FROM read_blob('/nonexistent/d/hull')" },
+        { "/nonexistent/d/hull", "COPY t TO 'hull.tmp/x.csv'" },
+        { "/nonexistent/d/data", "SELECT * FROM read_blob('d/../Data')" },
+        { "/nonexistent/d/data", "SELECT * FROM 'data.wal'" },
+        { "/nonexistent/d/sessions", "SELECT content FROM read_blob('sessions')" },
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(hit[i].sql, 0, hit[i].protect));
+}
+
 /* The look-aheads of both scans share one byte budget: runs of call
  * openers, COPYs and unterminated literals stay linear and fail closed. */
 UTEST(hl_cap_db, table_value_and_file_scans_are_linear)
@@ -1056,6 +1156,7 @@ UTEST(hl_cap_db, table_value_and_file_scans_are_linear)
     static const char *const pats[] = {
         "table_info(/*", "histogram('x", "read_csv('a',", "copy --",
         "copy (", "e'e'", "histogram(", "show = ",
+        "(histogram((", ",histogram(lower(x)", "from histogram(", "pragma show = ",
     };
     for (size_t k = 0; k < sizeof pats / sizeof pats[0]; k++) {
         size_t pl = strlen(pats[k]);

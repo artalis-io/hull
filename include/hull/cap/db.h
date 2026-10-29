@@ -335,7 +335,12 @@ int hl_cap_db_sql_switches_catalog(const char *sql);
  * `table_info`, `pragma_show`, `show`, `histogram`, `histogram_values` and
  * `duckdb_table_sample` are refused when called (`(` or `=`) with anything
  * but one plain argument - a '...' literal or a (dotted, maybe "quoted")
- * name - so `histogram(col)` (the aggregate) passes. Read as
+ * name - so `histogram(col)` (the aggregate) passes. `show` / `table_info`
+ * count in their `= value` spelling only after PRAGMA (a `"show" = 1` column
+ * is not one), and `histogram` only after a table-position word (FROM, JOIN,
+ * CALL, PRAGMA, `,`, `(`, ...) with more than one argument, so the aggregate
+ * passes anywhere (audit 35). `arrow_scan` / `arrow_scan_dumb` (POINTER
+ * arguments) are refused by name. Read as
  * #hl_cap_db_sql_calls_dynamic_sql (literals not skipped, both comment
  * rules); every look-ahead shares one byte budget, past which the text is
  * refused. 1 = refused.
@@ -349,10 +354,13 @@ int hl_cap_db_sql_names_table_by_value(const char *sql);
  * `allowed_directories`) whenever external access is off, and app SQL cannot
  * clear them (DuckDB refuses to change `allowed_paths` then), so
  * `read_blob('app.duckdb')` returned the raw file, `_hull_*` rows included.
- * Refused: any text holding @p protect_path's file name (case-insensitive;
- * every spelling of a path to the file, a sidecar or the temp directory holds
- * it); an E'...' literal with a backslash (escapes spell a name without its
- * text); with @p deny_file_functions (no fs policy: DuckDB external access
+ * Refused: any literal naming @p protect_path's file as a path component
+ * (case-insensitive; preceded by the start or a separator, followed by the
+ * end, a separator or a `.wal` / `.tmp` suffix - every spelling of a path to
+ * the file, a sidecar or the temp directory; the text between every two
+ * consecutive `'`, `"` or `$` is read, whatever the parity; audit 35); an
+ * E'...' or U&'...' literal with a backslash (escapes spell a name without
+ * its text); with @p deny_file_functions (no fs policy: DuckDB external access
  * off) any call of a file-reading table function (`read_*`, `parquet_*`,
  * `glob`, `sniff_csv`), and otherwise one whose first argument is not a
  * '...' / "..." path literal or a [list] of them, or is a glob whose

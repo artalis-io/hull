@@ -157,6 +157,51 @@ if ! echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK"; then
 fi
 echo "ok  --with=duckdb composed + ran"
 
+echo "=== an extensionless database name: migrations run, ordinary SQL passes ==="
+# Audit 35: #912 refused every statement holding the database file's name as
+# a substring. With `duckdb://data/hull` every _hull_migrations statement was
+# refused (the app could not boot); `"show" = 1` and histogram(lower(x)) were
+# refused as table-name values. The name is read only in literals, on path
+# component boundaries, and show / histogram by position.
+EXT=$(mktemp -d)
+mkdir -p "$EXT/migrations" "$EXT/data"
+cat > "$EXT/migrations/001_init.sql" <<'SQL'
+CREATE TABLE hull_items (id INTEGER, name VARCHAR, "show" INTEGER);
+INSERT INTO hull_items VALUES (1, 'Alpha', 0), (2, 'beta', 0);
+SQL
+cat > "$EXT/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1" },
+    fs = { read = { "data/" }, write = { "data/" } },
+})
+app.main(function()
+    local d = require("hull.db").default()
+    d.exec([[UPDATE hull_items SET "show" = 1 WHERE id = ?]], { 1 })
+    local r = d.query([[SELECT count(*) AS c FROM hull_items WHERE "show" = ?]], { 1 })
+    assert(r[1].c == 1, "show column update")
+    assert(#d.query("SELECT id, histogram(lower(name)) AS h FROM hull_items GROUP BY id") == 2,
+           "aggregate histogram")
+    for _, sql in ipairs({
+        "SELECT content FROM read_blob('data/hull')",
+        "SELECT content FROM read_text('./data/HULL.wal')",
+        "COPY hull_items TO 'data/hull.wal'",
+    }) do
+        local ok, err = pcall(d.query, sql)
+        assert(not ok and tostring(err):find("may not name the database file", 1, true),
+               "not refused by Hull: " .. sql .. " -> " .. tostring(err))
+    end
+    print("EXTENSIONLESS DUCKDB OK")
+    return 0
+end)
+LUA
+EXT_BUILD=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$EXT/bin" "$EXT" 2>&1) || true
+echo "$EXT_BUILD" | grep -q "composed feature 'duckdb'" || { echo "$EXT_BUILD"; echo "FAIL: extensionless app not composed"; exit 1; }
+EXT_OUT=$(cd "$EXT" && ./bin --hull-d duckdb://data/hull 2>&1) || true
+echo "$EXT_OUT" | tail -5
+rm -rf "$EXT"
+echo "$EXT_OUT" | grep -q "EXTENSIONLESS DUCKDB OK" || { echo "FAIL: duckdb://data/hull app did not run its migrations and SQL"; exit 1; }
+echo "ok  duckdb://data/hull: migrations ran, ordinary SQL passed, the file stayed refused"
+
 echo "=== a long DuckDB query is stopped by the run's instruction budget ==="
 # Audit 15: the statement ran inside one duckdb_execute_prepared call, which no
 # budget or watchdog saw - this query held the thread for minutes. It now runs
