@@ -41,4 +41,9 @@
  * to n bytes per call, so a larger n only means more calls. */
 #define HL_BLOB_READ_CHUNK_MAX (16 * 1024 * 1024)
 
+/* Instruction-budget units charged for opening a blob writer / reader: the
+ * open is a handful of syscalls and descriptors no interpreter step sees
+ * (audit 34). The live handles are also capped (HL_BLOB_MAX_LIVE_HANDLES). */
+#define HL_BLOB_OPEN_UNITS 1024
+
 #endif /* HL_LIMITS_RUNTIME_H */

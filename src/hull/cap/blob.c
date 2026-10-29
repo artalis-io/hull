@@ -18,6 +18,7 @@
 #include "hull/utils/alloc.h"
 
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>   /* lstat: root_has_symlink */
@@ -153,16 +154,45 @@ int hl_cap_blob_put_durable(HlBlob *b, const uint8_t *buf, size_t len,
     return hl_blob_store_put_durable(b, buf, len, expected, out_id);
 }
 
+/* Live streaming handles (HL_BLOB_MAX_LIVE_HANDLES). A writer holds two
+ * descriptors and a reader one until it is finalized / aborted / closed or
+ * collected, and opening one costs the app almost nothing: 61433 writers
+ * exhausted macOS's per-process descriptor limit, and with it accept(), the
+ * SQLite temp files and every TLS connection (audit 34). Counted here, where
+ * each handle is made and consumed, so a slot is given back exactly once
+ * whichever path consumes it. Atomic: a test harness or an embedder may open
+ * from more than one thread. */
+static atomic_int g_blob_live;
+
+static int blob_slot_take(void)
+{
+    int n = atomic_load(&g_blob_live);
+    do {
+        if (n >= HL_BLOB_MAX_LIVE_HANDLES) return -1;
+    } while (!atomic_compare_exchange_weak(&g_blob_live, &n, n + 1));
+    return 0;
+}
+
+static void blob_slot_give(void) { atomic_fetch_sub(&g_blob_live, 1); }
+
+int hl_cap_blob_live_handles(void) { return atomic_load(&g_blob_live); }
+
 int hl_cap_blob_writer_open(HlBlob *b, const char *expected,
                             HlBlobWriter **out)
 {
-    return hl_blob_store_writer_open(b, expected, out);
+    if (blob_slot_take() != 0) return HL_BLOB_ERR_TOO_MANY;
+    int rc = hl_blob_store_writer_open(b, expected, out);
+    if (rc != 0) blob_slot_give();
+    return rc;
 }
 
 int hl_cap_blob_writer_open_durable(HlBlob *b, const char *expected,
                                     HlBlobWriter **out)
 {
-    return hl_blob_store_writer_open_durable(b, expected, out);
+    if (blob_slot_take() != 0) return HL_BLOB_ERR_TOO_MANY;
+    int rc = hl_blob_store_writer_open_durable(b, expected, out);
+    if (rc != 0) blob_slot_give();
+    return rc;
 }
 
 int hl_cap_blob_writer_write(HlBlobWriter *w,
@@ -174,12 +204,17 @@ int hl_cap_blob_writer_write(HlBlobWriter *w,
 int hl_cap_blob_writer_finalize(HlBlobWriter *w,
                                 char *out_id, size_t *out_size)
 {
-    return hl_blob_store_writer_finalize(w, out_id, out_size);
+    if (!w) return -1;
+    int rc = hl_blob_store_writer_finalize(w, out_id, out_size);
+    blob_slot_give();          /* finalize consumes the writer either way */
+    return rc;
 }
 
 void hl_cap_blob_writer_abort(HlBlobWriter *w)
 {
+    if (!w) return;
     hl_blob_store_writer_abort(w);
+    blob_slot_give();
 }
 
 int hl_cap_blob_get(HlBlob *b, const char *id, int track_access,
@@ -191,7 +226,10 @@ int hl_cap_blob_get(HlBlob *b, const char *id, int track_access,
 int hl_cap_blob_reader_open(HlBlob *b, const char *id, int track_access,
                             HlBlobReader **out)
 {
-    return hl_blob_store_reader_open(b, id, track_access, out);
+    if (blob_slot_take() != 0) return HL_BLOB_ERR_TOO_MANY;
+    int rc = hl_blob_store_reader_open(b, id, track_access, out);
+    if (rc != 0) blob_slot_give();
+    return rc;
 }
 
 int hl_cap_blob_reader_read(HlBlobReader *r,
@@ -202,7 +240,9 @@ int hl_cap_blob_reader_read(HlBlobReader *r,
 
 void hl_cap_blob_reader_close(HlBlobReader *r)
 {
+    if (!r) return;
     hl_blob_store_reader_close(r);
+    blob_slot_give();
 }
 
 int hl_cap_blob_exists(HlBlob *b, const char *id)

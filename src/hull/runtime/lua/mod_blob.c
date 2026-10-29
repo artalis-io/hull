@@ -255,9 +255,26 @@ static int lua_blob_writer_new(lua_State *L)
     lua_pushvalue(L, store_idx);
     lua_setiuservalue(L, -2, 1);
 
+    /* Opening a handle is charged (audit 34): it costs descriptors and
+     * syscalls a plain call never sees. */
+    lua_hlwork(L, HL_BLOB_OPEN_UNITS, 0);
     int open_rc = durable
         ? hl_cap_blob_writer_open_durable(b, expected, &ud->w)
         : hl_cap_blob_writer_open(b, expected, &ud->w);
+    if (open_rc == HL_BLOB_ERR_TOO_MANY) {
+        /* Live handles are capped (HL_BLOB_MAX_LIVE_HANDLES, audit 34), and
+         * one the app dropped without finalize / abort holds its slot until
+         * collected: collect once and retry, as fs.mmap does. The store is
+         * anchored at store_idx, so a __gc that re-runs blob.init cannot free
+         * it under us; this writer's userdata is on the stack too. */
+        lua_gc(L, LUA_GCCOLLECT);
+        open_rc = durable
+            ? hl_cap_blob_writer_open_durable(b, expected, &ud->w)
+            : hl_cap_blob_writer_open(b, expected, &ud->w);
+    }
+    if (open_rc == HL_BLOB_ERR_TOO_MANY)
+        return luaL_error(L, "blob.writer: too many open blob writers / "
+                          "readers (at most %d)", HL_BLOB_MAX_LIVE_HANDLES);
     if (open_rc != 0)
         return luaL_error(L, "blob.writer: open failed");
     return 1;
@@ -347,7 +364,16 @@ static int lua_blob_reader_new(lua_State *L)
     luaL_setmetatable(L, HL_BLOB_READER_MT);
     lua_pushvalue(L, store_idx);
     lua_setiuservalue(L, -2, 1);
-    if (hl_cap_blob_reader_open(b, id, track, &ud->r) != 0)
+    lua_hlwork(L, HL_BLOB_OPEN_UNITS, 0);   /* audit 34: see the writer */
+    int rc = hl_cap_blob_reader_open(b, id, track, &ud->r);
+    if (rc == HL_BLOB_ERR_TOO_MANY) {
+        lua_gc(L, LUA_GCCOLLECT);
+        rc = hl_cap_blob_reader_open(b, id, track, &ud->r);
+    }
+    if (rc == HL_BLOB_ERR_TOO_MANY)
+        return luaL_error(L, "blob.reader: too many open blob writers / "
+                          "readers (at most %d)", HL_BLOB_MAX_LIVE_HANDLES);
+    if (rc != 0)
         return luaL_error(L, "blob.reader: blob not found");
     return 1;
 }
