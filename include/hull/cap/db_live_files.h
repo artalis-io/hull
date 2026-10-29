@@ -12,7 +12,8 @@
  * takes committed transactions with it.
  *
  * Every connection the SQLite backend opens registers its database file here
- * (refcounted by path, process-wide, any thread), and the fs capability
+ * (refcounted by path, process-wide, any thread) right after sqlite3_open,
+ * before anything maps the -shm (audit 34), and the fs capability
  * refuses to rewrite, replace or delete a file whose device and inode are the
  * database's or one of its sidecars'.
  *
@@ -34,6 +35,18 @@ void hl_db_live_file_remove(const char *path);
 /* 1 when @p st (a regular file's stat) is a registered database file or one
  * of its -wal / -shm / -journal sidecars, as they are on disk now. */
 int  hl_db_live_file_match(const struct stat *st);
+
+/* The registry's lock, for a check that must be atomic with what it guards
+ * (audit 34): the fs capability holds it from the stat it matches through
+ * the one destructive syscall (ftruncate / renameat / unlinkat), so a
+ * connection registering meanwhile (hl_db_live_file_add takes the same lock,
+ * before SQLite maps anything) either sees the file already changed or makes
+ * the check refuse. Held only around single syscalls; never across a SQLite
+ * call. hl_db_live_file_match_locked is hl_db_live_file_match with the lock
+ * already held. */
+void hl_db_live_files_lock(void);
+void hl_db_live_files_unlock(void);
+int  hl_db_live_file_match_locked(const struct stat *st);
 
 /* 1 when @p path's last component ends in "-wal", "-shm" or "-journal":
  * SQLite's sidecar names, refused for an in-place write whatever they are. */

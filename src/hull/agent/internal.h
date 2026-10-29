@@ -34,6 +34,9 @@ int hl_agent_tcp_probe(int port, int timeout_ms);
  * Returns a sqlite3 handle the caller must close, or NULL on failure.
  */
 struct sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path);
+/* Close a handle hl_agent_open_app_db returned (it unregisters the file from
+ * the live-database registry, cap/db_live_files.h). */
+void hl_agent_close_app_db(struct sqlite3 *db);
 
 struct sqlite3_stmt;
 /* Prepare @p sql (@p len bytes, -1 = to its NUL) as a READ-ONLY agent query:

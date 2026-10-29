@@ -128,6 +128,19 @@ int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
                      HlFsSymlink symlink, mode_t create_mode, const char **err);
 
 /*
+ * As hl_fs_open_at_ex, and on success writes to @p leaf the name of the
+ * component that was actually opened - the leaf AFTER every symlink was
+ * followed, which is the file's own name in its directory (audit 34: the fs
+ * capability refuses an in-place write whose real leaf is named like a SQLite
+ * sidecar, whatever alias reached it). "" when the implementation that opened
+ * it does not know (the Linux openat2 fast path, READ / DIR only) or on
+ * failure. @p leaf may be NULL.
+ */
+int hl_fs_open_at_leaf(int root_fd, const char *relpath, HlFsOpenMode mode,
+                       HlFsSymlink symlink, mode_t create_mode,
+                       char *leaf, size_t leaf_sz, const char **err);
+
+/*
  * Result of resolving a path to its PARENT directory fd + leaf NAME - for a
  * METADATA op (stat) that must lstat the terminal WITHOUT opening or following it.
  *

@@ -221,7 +221,8 @@ static int splice_link(const char *link, const char *rest,
 }
 
 static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
-                          HlFsSymlink sympol, mode_t cmode, const char **err)
+                          HlFsSymlink sympol, mode_t cmode,
+                          char *leaf, size_t leaf_sz, const char **err)
 {
     int stack[HL_FS_MAX_DEPTH];
     int depth = 0;
@@ -380,6 +381,7 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             if (fd >= 0) {
                 result_fd = finalize_regular_leaf(fd, err);  /* closes fd + sets *err on reject */
                 if (result_fd < 0) goto fail;                /* *err already set */
+                if (leaf && leaf_sz > clen) memcpy(leaf, comp, clen + 1);
                 goto done;
             }
             if (errno == ELOOP || errno == EMLINK) goto symlink;
@@ -438,7 +440,16 @@ int hl_fs_open_at(int root_fd, const char *relpath, HlFsOpenMode mode,
 int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
                      HlFsSymlink sympol, mode_t create_mode, const char **err)
 {
+    return hl_fs_open_at_leaf(root_fd, relpath, mode, sympol, create_mode,
+                              NULL, 0, err);
+}
+
+int hl_fs_open_at_leaf(int root_fd, const char *relpath, HlFsOpenMode mode,
+                       HlFsSymlink sympol, mode_t create_mode,
+                       char *leaf, size_t leaf_sz, const char **err)
+{
     const char *e = "io_error";
+    if (leaf && leaf_sz) leaf[0] = '\0';
     if (root_fd < 0 || !relpath) { if (err) *err = "invalid_args"; return -1; }
     if (!caller_path_ok(relpath)) { if (err) *err = "invalid_path"; return -1; }
     /* Public depth bound, enforced BEFORE either implementation so both accept /
@@ -472,7 +483,8 @@ int hl_fs_open_at_ex(int root_fd, const char *relpath, HlFsOpenMode mode,
     }
 #endif
 
-    int fd = resolve_manual(root_fd, relpath, mode, sympol, create_mode, &e);
+    int fd = resolve_manual(root_fd, relpath, mode, sympol, create_mode,
+                            leaf, leaf_sz, &e);
     if (fd < 0 && err) *err = e;
     return fd;
 }

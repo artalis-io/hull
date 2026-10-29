@@ -187,6 +187,24 @@ static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
     return fd;
 }
 
+/* As fs_resolve_fd, and @p leaf receives the name of the file actually opened
+ * (after every symlink; see hl_fs_open_at_leaf). */
+static int fs_resolve_fd_leaf(const HlFsConfig *cfg, const char *path,
+                              HlFsOpenMode mode, mode_t cmode,
+                              char *leaf, size_t leaf_sz, const char **err_msg)
+{
+    char scratch[HL_FS_PATH_MAX];
+    FsTarget t;
+    HlFsOpenMode sel_mode = mode == HL_FS_OPEN_WRITE_KEEP ? HL_FS_OPEN_WRITE : mode;
+    if (fs_select(cfg, path, sel_mode, scratch, sizeof(scratch), &t, err_msg) != 0)
+        return -1;
+    const char *e = NULL;
+    int fd = hl_fs_open_at_leaf(t.anchor_fd, t.residual, mode, t.sym, cmode,
+                                leaf, leaf_sz, &e);
+    if (fd < 0 && err_msg) *err_msg = e ? e : "open_failed";
+    return fd;
+}
+
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 int hl_cap_fs_open_read_fd(const HlFsConfig *cfg, const char *path,
@@ -230,7 +248,15 @@ int hl_fs_strip_setid(int fd)
  * opened file is compared by device and inode with every registered database
  * and its sidecars (db_live_files), checked BEFORE the truncate; a leaf named
  * like a sidecar is refused whatever it is (the name check needs no live
- * connection - another process's database, one opened later). */
+ * connection - another process's database, one opened later), and so is a
+ * leaf an in-root symlink reaches whose own name is a sidecar's (audit 34:
+ * `fs.write("data/alias", ...)` with `alias -> app.db-shm`).
+ *
+ * The match and the truncate run under the live-file registry's lock
+ * (audit 34): a connection registers (under that lock) before SQLite maps
+ * its -shm, so either it registered first and the match refuses, or the
+ * truncate finished before it mapped anything. Checked then truncated
+ * without the lock, a connection opened in between was truncated under. */
 int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
                             const char **err_msg)
 {
@@ -238,18 +264,27 @@ int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
         if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
         return -1;
     }
-    int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE_KEEP, 0644, err_msg);
+    char leaf[NAME_MAX + 1];
+    int fd = fs_resolve_fd_leaf(cfg, path, HL_FS_OPEN_WRITE_KEEP, 0644,
+                                leaf, sizeof leaf, err_msg);
     if (fd < 0)
         return -1;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || hl_db_live_file_match(&st)) {
+    if (hl_db_sidecar_name(leaf)) {
         close(fd);
         if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
         return -1;
     }
-    if (hl_fs_strip_setid(fd) != 0 || ftruncate(fd, 0) != 0) {
+    const char *fail = NULL;
+    struct stat st;
+    hl_db_live_files_lock();
+    if (fstat(fd, &st) != 0 || hl_db_live_file_match_locked(&st))
+        fail = HL_DB_LIVE_FILE_ERR;
+    else if (hl_fs_strip_setid(fd) != 0 || ftruncate(fd, 0) != 0)
+        fail = "write_failed";
+    hl_db_live_files_unlock();
+    if (fail) {
         close(fd);
-        if (err_msg) *err_msg = "write_failed";
+        if (err_msg) *err_msg = fail;
         return -1;
     }
     return fd;
@@ -497,10 +532,29 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
         goto out;
     }
     tfd = -1;
-    if (renameat(par.parent_fd, tmpname, par.parent_fd, par.leaf) != 0) {
+    /* The live check again, atomic with the rename (audit 34): the one above
+     * is the early refusal, before the data is written; this one holds the
+     * registry's lock from the target's stat through renameat, so a
+     * connection that registered meanwhile is seen. The data write and fsync
+     * stay outside the lock. */
+    int ren_rc, ren_err = 0;
+    {
+        struct stat tgt;
+        hl_db_live_files_lock();
+        if (fstatat(par.parent_fd, par.leaf, &tgt, AT_SYMLINK_NOFOLLOW) == 0
+            && S_ISREG(tgt.st_mode) && hl_db_live_file_match_locked(&tgt)) {
+            hl_db_live_files_unlock();
+            fail = HL_DB_LIVE_FILE_ERR;
+            goto out;
+        }
+        ren_rc = renameat(par.parent_fd, tmpname, par.parent_fd, par.leaf);
+        if (ren_rc != 0) ren_err = errno;
+        hl_db_live_files_unlock();
+    }
+    if (ren_rc != 0) {
         /* The target cannot be replaced, only rewritten: a bind-mounted
          * single file (EBUSY), or another filesystem (EXDEV). In place. */
-        if (errno == EBUSY || errno == EXDEV) {
+        if (ren_err == EBUSY || ren_err == EXDEV) {
             status = FS_ATOMIC_IN_PLACE;
             goto out;
         }
@@ -585,24 +639,32 @@ int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
             goto audit;
         }
         /* The leaf itself, never followed: a symlink is removed, not its
-         * target; a directory is not a file to delete. */
+         * target; a directory is not a file to delete.
+         * Nor is a live database file removed (audit 33): a deleted -wal
+         * takes committed transactions with it, a deleted -shm splits the WAL
+         * index. A symlink to one is only a name and may go. The stat, the
+         * match and the unlink hold the registry's lock (audit 34), so a
+         * connection registering meanwhile is seen. */
         struct stat st;
+        int saved = 0, refuse = 0;
+        hl_db_live_files_lock();
         int rc = fstatat(par.parent_fd, par.leaf, &st, AT_SYMLINK_NOFOLLOW);
-        if (rc == 0 && S_ISDIR(st.st_mode)) {
+        if (rc != 0)
+            saved = errno;
+        else if (S_ISDIR(st.st_mode))
+            refuse = 1;
+        else if (S_ISREG(st.st_mode) && hl_db_live_file_match_locked(&st))
+            refuse = 2;
+        else if (unlinkat(par.parent_fd, par.leaf, 0) != 0)
+            rc = -1, saved = errno;
+        hl_db_live_files_unlock();
+        if (refuse) {
             close(par.parent_fd);
-            if (err_msg) *err_msg = "not_a_regular_file";
+            if (err_msg)
+                *err_msg = refuse == 1 ? "not_a_regular_file" : HL_DB_LIVE_FILE_ERR;
             goto audit;
         }
-        /* Nor removed (audit 33): a deleted -wal takes committed
-         * transactions with it, a deleted -shm splits the WAL index. A
-         * symlink to one is only a name and may go. */
-        if (rc == 0 && S_ISREG(st.st_mode) && hl_db_live_file_match(&st)) {
-            close(par.parent_fd);
-            if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
-            goto audit;
-        }
-        if (rc != 0 || unlinkat(par.parent_fd, par.leaf, 0) != 0) {
-            int saved = errno;
+        if (rc != 0) {
             close(par.parent_fd);
             if (err_msg)
                 *err_msg = saved == ENOENT ? "not_found"

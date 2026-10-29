@@ -229,6 +229,23 @@ release-artifact layout).
   verbatim and are used only for JSON the plugin encoded itself. Covered by
   `tests/e2e_tool_escape.sh` (`make e2e-tool-escape`).
 
+- **The live-database check could still lose a race to a connection being opened** (audit 34,
+  both runtimes). Audit 33 registered a SQLite connection's file only after
+  `hl_cap_db_init` returned, but its `PRAGMA journal_mode=WAL` had already opened the WAL and
+  mapped the `-shm`; and the fs capability matched the file and then truncated it in two steps.
+  A connection opened in between - `db.async` on a `db.open` DSN reopens per op, an evicted
+  worker connection reopens - while the event loop wrote in place through an in-root symlink to
+  `<db>-shm` was truncated under, and the process died of SIGBUS (reproduced within a second).
+  The backend now registers the file right after `sqlite3_open`, which maps nothing (and
+  unregisters only once the connection is closed); the agent's read-only connections register
+  too; and the stat, the match and the one destructive syscall - `ftruncate` in
+  `hl_cap_fs_open_write_fd`, `renameat` in the atomic `fs.write`, `unlinkat` in `fs.delete` -
+  run under the registry's lock, which registration takes, so a connection either registered
+  first (refused) or maps nothing until the change is done. An in-place write is also refused
+  when the leaf an alias actually reaches is named like a sidecar (`hl_fs_open_at_leaf`).
+  Covered by `test_fs` (a VFS shim asserting the file is registered before its WAL opens, and a
+  forked race of opens against in-place writes).
+
 - **Concurrent first failures deadlocked the lockout counters on MySQL** (audit 31, both
   runtimes). The audit-30 re-audit ran the counter's UPDATE first and the INSERT-if-absent
   only when it matched no row; but an UPDATE matching no row takes a gap lock under
