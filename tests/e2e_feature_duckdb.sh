@@ -39,7 +39,11 @@ trap 'rm -rf "$APP" "$PLAIN" /tmp/hull_base_duckdb_e2e' EXIT
 cat > "$APP/app.lua" <<'LUA'
 app.manifest({
     modules = { "hull/db@1" },
-    databases = { named = { analytics = "duckdb://:memory:" } },
+    databases = { named = { analytics = "duckdb://:memory:",
+                            filedb = "duckdb://data/fdb.duckdb" } },
+    -- The file database lives in a granted directory. app.main hands DuckDB
+    -- no fs policy, so it still runs with external access off (mode A).
+    fs = { read = { "data/" }, write = { "data/" } },
 })
 app.main(function()
     local d = require("hull.db").connect("analytics")
@@ -75,6 +79,52 @@ app.main(function()
         assert(not ok and tostring(err):find("switch catalogs", 1, true),
                "not refused by Hull: " .. sql .. " -> " .. tostring(err))
     end
+    -- Audit 34: DuckDB keeps the database file and its WAL / temp files
+    -- readable from SQL whatever external access says, so read_blob of the
+    -- file returned its raw bytes, _hull_* rows included. And a table name
+    -- built at run time reached storage_info (column min / max values),
+    -- pragma_table_info and histogram. Both refused by Hull itself.
+    local f = require("hull.db").connect("filedb")
+    f.exec("CREATE TABLE IF NOT EXISTS users (name VARCHAR, n INTEGER)")
+    f.exec("INSERT INTO users VALUES ('alice', 7)")
+    f.exec("CHECKPOINT")
+    f.exec("INSERT INTO users VALUES ('bob', 9)")   -- in the WAL
+    local rows = f.query("SELECT count(*) AS c FROM users")
+    assert(rows[1].c >= 2, "file database did not take writes")
+    for _, sql in ipairs({
+        "SELECT octet_length(content) AS n FROM read_blob('data/fdb.duckdb')",
+        "SELECT content FROM read_text('data/fdb.duckdb.wal')",
+        "SELECT content FROM read_blob('./data/FDB.DUCKDB')",
+        "SELECT content FROM read_blob(concat('fdb.', 'duckdb'))",
+        "SELECT content FROM read_blob(E'\\x66db.duckdb')",
+        "SELECT * FROM read_csv('x.csv')",            -- no fs policy: none
+        "SELECT * FROM glob('*')",
+        "COPY users TO 'data/fdb.duckdb.wal'",
+        "COPY users FROM (concat('fdb.', 'duckdb'))",
+    }) do
+        local ok, err = pcall(f.query, sql)
+        assert(not ok and tostring(err):find("may not name the database file", 1, true),
+               "not refused by Hull: " .. sql .. " -> " .. tostring(err))
+    end
+    for _, sql in ipairs({
+        "SELECT * FROM pragma_storage_info(concat('us', 'ers'))",
+        "SELECT * FROM pragma_storage_info('users')",
+        "PRAGMA storage_info('users')",
+        "CALL pragma_storage_info(chr(117) || 'sers')",
+        "SELECT * FROM pragma_table_info(concat('_', 'hull_sessions'))",
+        "PRAGMA table_info(chr(117) || 'sers')",
+        "SELECT * FROM pragma_show(concat('us', 'ers'))",
+        "SELECT * FROM histogram(concat('us', 'ers'), name)",
+        "CALL enable_logging(level = 'debug')",
+    }) do
+        local ok, err = pcall(f.query, sql)
+        assert(not ok and tostring(err):find("plain literal or name", 1, true),
+               "not refused by Hull: " .. sql .. " -> " .. tostring(err))
+    end
+    -- A literal or plain name stays usable, as does the aggregate histogram.
+    assert(#f.query("SELECT * FROM pragma_table_info('users')") == 2)
+    assert(#f.query("PRAGMA table_info(users)") == 2)
+    assert(#f.query("SELECT histogram(n) AS h FROM users") == 1)
     print("DUCKDB FEATURE APP OK")
     return 0
 end)
@@ -84,14 +134,16 @@ echo "=== hull build --with=duckdb (system compiler: features are C++) ==="
 BUILD_OUT=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$APP/bin" "$APP" 2>&1) || true
 echo "$BUILD_OUT"
 echo "$BUILD_OUT" | grep -q "composed feature 'duckdb'" || { echo "FAIL: feature not composed"; exit 1; }
-RUN_OUT=$("$APP/bin" 2>&1) || true
+# From the app directory: the file database (data/fdb.duckdb) is relative to it.
+mkdir -p "$APP/data"
+RUN_OUT=$(cd "$APP" && ./bin 2>&1) || true
 echo "$RUN_OUT"
 if ! echo "$RUN_OUT" | grep -q "DUCKDB FEATURE APP OK"; then
     echo "--- app run failed; diagnostics ---"
     file "$APP/bin" 2>/dev/null || true
     command -v ldd >/dev/null 2>&1 && ldd "$APP/bin" 2>&1 | head || true
     echo "--- retry with --no-sandbox (isolates sandbox vs link/static-init) ---"
-    if "$APP/bin" --hull-no-sandbox 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
+    if (cd "$APP" && ./bin --hull-no-sandbox) 2>&1 | grep -q "DUCKDB FEATURE APP OK"; then
         echo "DIAG: works with --no-sandbox -> a sandboxed syscall blocks DuckDB init"
         if command -v strace >/dev/null 2>&1; then
             echo "--- strace (sandboxed run): syscalls that returned an error ---"

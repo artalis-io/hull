@@ -60,6 +60,26 @@ release-artifact layout).
   undriven-promise case is answered as a failed run (500; app.main exits 1, a timer is
   rescheduled, a ws callback ended). Regression legs in `tests/e2e_js_runs.sh`.
 
+- **DuckDB app SQL could read the database file, and the storage statistics of `_hull_*`
+  tables** (audit 34). DuckDB keeps the open database file, its `.wal`, `.wal.checkpoint`
+  and `.wal.recovery` sidecars and its `<db>.tmp/` temp directory in `allowed_paths` /
+  `allowed_directories` whenever external access is off (it re-adds them when external
+  access is turned off, and refuses to change `allowed_paths` after), so
+  `SELECT content FROM read_blob('app.duckdb')` returned the raw file - `_hull_*` rows
+  (session ids, TOTP secrets) included - and `COPY ... TO 'app.duckdb.wal'` could write
+  over the WAL. And DuckDB constant-folds table-function arguments, so
+  `pragma_storage_info(concat('_', 'hull_sessions'))` (any spelling: PRAGMA, CALL, FROM)
+  returned column min / max values of a `_hull_*` table, and `pragma_table_info` /
+  `pragma_show` / the `histogram` table macro its schema or rows, past the `_hull_*` text
+  check. The DuckDB backend now refuses: SQL naming the database file (any spelling of its
+  path holds its name, case-insensitive), an `E'...'` literal with a backslash, any call of
+  a file-reading table function (`read_*`, `parquet_*`, `glob`, `sniff_csv`) under no fs
+  policy, and otherwise one whose path is not a plain literal (or list of them) or is a glob
+  reaching the database directory, a COPY whose target is a `(constant expression)` or such
+  a glob, `storage_info` in every spelling, the profiling / logging calls DuckDB runs past
+  `lock_configuration`, and a table-name function called with anything but a plain literal
+  or name. Classifier tests in `test_db.c`, real-engine legs in `tests/e2e_feature_duckdb.sh`.
+
 - **JS: a run failed for holding a transaction across a wait kept running** (audit 32). The
   audit-31 check rolls back the transaction of a run whose stretch of jobs ends while it is
   open and marks the run failed, but only a later async resume read that mark: the run's own

@@ -324,6 +324,48 @@ int hl_cap_db_sql_reads_whole_database(const char *sql);
 int hl_cap_db_sql_switches_catalog(const char *sql);
 
 /**
+ * @brief Whether @p sql hands a DuckDB table function or pragma a TABLE NAME
+ * it can build at run time, or names one refused outright (audit 34).
+ * DuckDB constant-folds table-function arguments, so
+ * `pragma_storage_info(concat('_', 'hull_sessions'))` reaches a `_hull_*`
+ * table past #hl_cap_db_check_namespace. Refused in every spelling (bare or
+ * "quoted", any case, PRAGMA / CALL / FROM): `storage_info` /
+ * `pragma_storage_info` (column min / max statistics), and the profiling and
+ * logging calls DuckDB runs past lock_configuration. `pragma_table_info`,
+ * `table_info`, `pragma_show`, `show`, `histogram`, `histogram_values` and
+ * `duckdb_table_sample` are refused when called (`(` or `=`) with anything
+ * but one plain argument - a '...' literal or a (dotted, maybe "quoted")
+ * name - so `histogram(col)` (the aggregate) passes. Read as
+ * #hl_cap_db_sql_calls_dynamic_sql (literals not skipped, both comment
+ * rules); every look-ahead shares one byte budget, past which the text is
+ * refused. 1 = refused.
+ */
+int hl_cap_db_sql_names_table_by_value(const char *sql);
+
+/**
+ * @brief Whether @p sql can reach the DuckDB database file itself (audit 34).
+ * DuckDB adds the database file and its `.wal`, `.wal.checkpoint` and
+ * `.wal.recovery` sidecars to `allowed_paths` (and `<db>.tmp/` to
+ * `allowed_directories`) whenever external access is off, and app SQL cannot
+ * clear them (DuckDB refuses to change `allowed_paths` then), so
+ * `read_blob('app.duckdb')` returned the raw file, `_hull_*` rows included.
+ * Refused: any text holding @p protect_path's file name (case-insensitive;
+ * every spelling of a path to the file, a sidecar or the temp directory holds
+ * it); an E'...' literal with a backslash (escapes spell a name without its
+ * text); with @p deny_file_functions (no fs policy: DuckDB external access
+ * off) any call of a file-reading table function (`read_*`, `parquet_*`,
+ * `glob`, `sniff_csv`), and otherwise one whose first argument is not a
+ * '...' / "..." path literal or a [list] of them, or is a glob whose
+ * directory part resolves to @p protect_path's directory or an ancestor;
+ * and a COPY whose TO / FROM target is not a literal or bare name (a
+ * (constant expression)) or is such a glob. @p protect_path is the canonical
+ * database path (`<cwd>/.tmp` for an in-memory database); NULL skips the
+ * name and glob checks. 1 = refused.
+ */
+int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
+                                   const char *protect_path);
+
+/**
  * @brief Install Hull's SQL guard on a connection: the authorizer that refuses
  *        ATTACH of a file / VACUUM INTO and the file-moving pragmas,
  *        SQLITE_DBCONFIG_DEFENSIVE, the progress handler that charges the

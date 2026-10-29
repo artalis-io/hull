@@ -869,6 +869,210 @@ UTEST(hl_cap_db, dynamic_sql_scan_is_linear)
     free(big);
 }
 
+/* Audit 34: DuckDB constant-folds table-function arguments, so a table name
+ * built at run time reached _hull_* tables through storage_info (column
+ * min / max values), pragma_table_info, pragma_show and histogram. */
+UTEST(hl_cap_db, table_name_values_are_refused)
+{
+    static const char *const hit[] = {
+        "SELECT * FROM pragma_storage_info(concat('_', 'hull_sessions'))",
+        "SELECT * FROM pragma_storage_info('users')",   /* any spelling */
+        "PRAGMA storage_info('users')",
+        "PRAGMA storage_info = 'users'",
+        "CALL pragma_storage_info(chr(95) || 'hull_sessions')",
+        "SELECT * FROM \"pragma_storage_info\"('t')",
+        "SELECT * FROM \"Storage_Info\"('t')",
+        "SELECT 'storage_info'",                         /* literals not skipped */
+        "SELECT * FROM pragma_table_info(concat('_', 'hull_sessions'))",
+        "SELECT * FROM pragma_table_info(chr(95) || 'hull_x')",
+        "SELECT * FROM pragma_table_info('_' || 'hull_x')",
+        "SELECT * FROM pragma_table_info(?)",
+        "SELECT * FROM pragma_table_info($1)",
+        "SELECT * FROM pragma_table_info(E'\\x5fhull_x')",
+        "SELECT * FROM pragma_table_info($$_hull_x$$)",
+        "PRAGMA table_info(getvariable('t'))",
+        "PRAGMA table_info = concat('a', 'b')",
+        "SELECT * FROM pragma_show(concat('_', 'hull_x'))",
+        "SELECT * FROM histogram(concat('_', 'hull_sessions'), x)",
+        "SELECT * FROM histogram_values(chr(95) || 'hull_s', x)",
+        "SELECT * FROM duckdb_table_sample(concat('a', 'b'))",
+        "SELECT * FROM \"pragma_table_info\"(concat('a', 'b'))",
+        "SELECT * FROM pragma_table_info /* gap */ (concat('a', 'b'))",
+        "SELECT * FROM pragma_table_info -- gap\n (concat('a', 'b'))",
+        "SELECT * FROM pragma_table_info /* /* nested */ */ (lower('A'))",
+        "SELECT * FROM pragma_table_info('a'\n'b')",
+        "CALL enable_profiling(save_location = 'x.txt')",
+        "PRAGMA enable_profiling",
+        "CALL enable_logging(level = 'debug')",
+        "CALL truncate_duckdb_logs()",
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(hit[i]));
+
+    static const char *const miss[] = {
+        "SELECT * FROM pragma_table_info('users')",
+        "SELECT * FROM pragma_table_info(users)",
+        "SELECT * FROM pragma_table_info(main.users)",
+        "SELECT * FROM pragma_table_info(\"My Table\")",
+        "PRAGMA table_info('users')",
+        "PRAGMA table_info = 'users'",
+        "SELECT * FROM pragma_show('users')",
+        "SELECT * FROM histogram('t', x)",
+        "SELECT * FROM histogram(t, x, bin_count := 4)",
+        "SELECT histogram(x) FROM t",
+        "SELECT histogram(t.x, [1, 2, 3]) FROM t",
+        "SHOW TABLES",
+        "SHOW t",
+        "SELECT table_info, histogram FROM t",
+        "CREATE TABLE stats (storage TEXT, info TEXT)",
+        "SELECT * FROM t",
+        "",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value(miss[i]));
+    EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value(NULL));
+}
+
+/* Audit 34: DuckDB keeps the database file, its WAL sidecars and its temp
+ * directory readable from SQL whatever external access says, so
+ * read_blob('app.duckdb') returned the raw file, _hull_* rows included. */
+UTEST(hl_cap_db, database_file_reads_are_refused)
+{
+    char root[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(root, sizeof root, "hull_duckfile") != NULL);
+    char real[PATH_MAX];
+    ASSERT_TRUE(realpath(root, real) != NULL);
+    char dbdir[PATH_MAX + 8], datadir[PATH_MAX + 8], protect[PATH_MAX + 32];
+    snprintf(dbdir, sizeof dbdir, "%s/db", real);
+    snprintf(datadir, sizeof datadir, "%s/data", real);
+    snprintf(protect, sizeof protect, "%s/app.duckdb", dbdir);
+    ASSERT_EQ(0, mkdir(dbdir, 0700));
+    ASSERT_EQ(0, mkdir(datadir, 0700));
+
+    static const char *const hit_b[] = {   /* mode B: an fs policy */
+        "SELECT content FROM read_blob('app.duckdb')",
+        "SELECT content FROM read_text('APP.DUCKDB.wal')",
+        "SELECT * FROM read_text('db/x/../app.duckdb.wal.checkpoint')",
+        "SELECT * FROM read_blob('file:///abs/app.duckdb')",
+        "SELECT * FROM 'app.duckdb.wal'",
+        "SELECT * FROM glob('app.duckdb.tmp/*')",
+        "COPY t TO 'app.duckdb'",
+        "COPY t FROM 'db/app.duckdb.wal' (FORMAT csv)",
+        "SELECT 'app.duckdb'",                         /* the name, anywhere */
+        "SELECT * FROM read_blob(concat('app.', 'duckdb'))",
+        "SELECT * FROM read_blob('app.' || 'duck' || 'db')",
+        "SELECT * FROM read_blob(?)",
+        "SELECT * FROM read_blob($$x$$)",
+        "SELECT * FROM read_blob(E'\\x61pp.duckdb')",
+        "SELECT E'\\x61'",
+        "SELECT * FROM read_text('a'\n'pp.duckdb')",
+        "SELECT * FROM read_text(['data/a.csv', concat('a', 'b')])",
+        "SELECT * FROM read_text(lower('X'))",
+        "SELECT * FROM \"read_blob\"(lower('X'))",
+        "SELECT * FROM read_blob /* gap */ (lower('X'))",
+        "SELECT * FROM parquet_metadata(lower('X'))",
+        "SELECT * FROM sniff_csv(lower('X'))",
+        "SELECT * FROM read_blob('~/x*')",
+        "SELECT * FROM read_blob('/*')",
+        "SELECT * FROM read_blob('no_such_dir_hull_zz/*')",
+        "COPY t TO (concat('a', '.csv'))",
+        "COPY (SELECT 1) TO $$x.csv$$",
+        "COPY t FROM 'a.csv'\n'b'",
+    };
+    for (size_t i = 0; i < sizeof hit_b / sizeof hit_b[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(hit_b[i], 0, protect));
+
+    /* Globs whose directory reaches the database directory. */
+    char sql[3 * PATH_MAX];
+    const char *const reach[] = { "/*", "/db/*", "/db/*.wal", "/**/x",
+                                  "/data/../db/a*", "/d?/x" };
+    for (size_t i = 0; i < sizeof reach / sizeof reach[0]; i++) {
+        char path[2 * PATH_MAX];
+        snprintf(path, sizeof path, "%s%s", real, reach[i]);
+        snprintf(sql, sizeof sql, "SELECT * FROM read_blob('%s')", path);
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(sql, 0, protect));
+        snprintf(sql, sizeof sql, "COPY t FROM '%s'", path);
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(sql, 0, protect));
+        snprintf(sql, sizeof sql, "SELECT * FROM read_csv(['%s/data/a.csv', '%s'])",
+                 real, path);
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(sql, 0, protect));
+    }
+    /* Mode B's documented use: files in the declared directories. */
+    snprintf(sql, sizeof sql,
+             "SELECT * FROM read_csv('%s/data/*.csv', header = true)", real);
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(sql, 0, protect));
+    snprintf(sql, sizeof sql, "COPY t FROM '%s/data/*.csv' (FORMAT csv)", real);
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(sql, 0, protect));
+    snprintf(sql, sizeof sql, "SELECT * FROM read_parquet(['%s/data/a.parquet', "
+             "\"%s/data/b.parquet\"])", real, real);
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(sql, 0, protect));
+    static const char *const miss_b[] = {
+        "SELECT * FROM read_csv('data/a.csv')",
+        "SELECT * FROM read_csv('data/a.csv', header = true, columns = {'a': 'INT'})",
+        "SELECT * FROM read_json_auto(\"data/a.json\")",
+        "COPY t TO 'data/out.csv' (FORMAT csv, HEADER)",
+        "COPY (SELECT * FROM (SELECT 1) s WHERE 1 = 1) TO 'data/out.parquet'",
+        "COPY t FROM STDIN",
+        "SELECT copy FROM t",
+        "SELECT read_count, glob_x FROM t WHERE name GLOB 'x*'",
+        "SELECT * FROM t WHERE e = 'e'",
+        "SELECT E'plain'",
+        "SELECT * FROM t",
+        "",
+    };
+    for (size_t i = 0; i < sizeof miss_b / sizeof miss_b[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(miss_b[i], 0, protect));
+
+    /* Mode A: no fs policy, so no file function may be called at all. */
+    static const char *const hit_a[] = {
+        "SELECT * FROM read_csv('data/a.csv')",
+        "SELECT * FROM read_text('x')",
+        "SELECT * FROM glob('*')",
+        "SELECT * FROM parquet_schema('x.parquet')",
+        "SELECT * FROM \"read_blob\"('x')",
+        "SELECT * FROM read_ndjson_objects('x')",
+    };
+    for (size_t i = 0; i < sizeof hit_a / sizeof hit_a[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(hit_a[i], 1, protect));
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files("SELECT read_x FROM t", 1, protect));
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files("SELECT 42 AS answer", 1, protect));
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(NULL, 1, protect));
+    /* A path that could not be resolved ("/": no name) refuses everything. */
+    EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files("SELECT 1", 0, "/"));
+
+    rmdir(dbdir);
+    rmdir(datadir);
+    rmdir(real);
+}
+
+/* The look-aheads of both scans share one byte budget: runs of call
+ * openers, COPYs and unterminated literals stay linear and fail closed. */
+UTEST(hl_cap_db, table_value_and_file_scans_are_linear)
+{
+    size_t n = 1u << 20;
+    char *big = malloc(n + 1);
+    ASSERT_TRUE(big != NULL);
+    clock_t t0 = clock();
+    static const char *const pats[] = {
+        "table_info(/*", "histogram('x", "read_csv('a',", "copy --",
+        "copy (", "e'e'", "histogram(", "show = ",
+    };
+    for (size_t k = 0; k < sizeof pats / sizeof pats[0]; k++) {
+        size_t pl = strlen(pats[k]);
+        for (size_t i = 0; i + pl <= n; i += pl) memcpy(big + i, pats[k], pl);
+        big[n - n % pl] = '\0';
+        (void)hl_cap_db_sql_names_table_by_value(big);
+        (void)hl_cap_db_sql_reaches_db_files(big, 0, "/nonexistent/app.duckdb");
+    }
+    /* A long text with no match still scans for the name at every byte. */
+    memset(big, 'a', n);
+    big[n] = '\0';
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(big, 0, "/nonexistent/app.duckdb"));
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 30.0);
+    free(big);
+}
+
 /* Postgres decodes U&"\005fhull_sessions" to _hull_sessions after this text
  * check has looked, so the Unicode-escape identifier form is refused. The
  * U&'...' string literal is not an identifier and stays allowed. */
