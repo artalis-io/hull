@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "internal.h"
 #include "db_wait.h"   /* hl_js_db_refuse_wait */
@@ -294,9 +295,9 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
                         copy_bytes) != 0) {
         JS_FreeCString(ctx, src_cstr);
         hl_kv_free(ctx_kvs, ctx_count);
-        return JS_ThrowRangeError(ctx, "worker.dispatch: %zu bytes of fn and "
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "worker.dispatch: %zu bytes of fn and "
             "ctx would take the VM's off-heap copies past its heap limit",
-            copy_bytes);
+            copy_bytes));
     }
     /* The ctx copies were charged as they were made; this is the
      * source's. */

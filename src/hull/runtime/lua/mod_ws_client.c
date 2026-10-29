@@ -12,6 +12,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "internal.h"   /* HL_LUA_ARM */
@@ -555,7 +556,7 @@ static int lua_ws_connect(lua_State *L)
             return luaL_error(L, "ws.connect: runtime is shutting down");
     }
     if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
-        return luaL_error(L, "ws.connect: too many live WebSocket clients "
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "ws.connect: too many live WebSocket clients "
                           "(at most %d per VM)", HL_WS_CLIENT_MAX_LIVE);
     lua->base.ws_clients++;
     ud->slot = &lua->base.ws_clients;

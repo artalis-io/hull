@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "hull/cap/smtp.h"
 #include "hull/cap/smtp_op.h"
@@ -268,7 +269,7 @@ static int lua_smtp_send(lua_State *L)
     if (hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes, lua->mem_limit,
                         copy_bytes) != 0) {
         smtp_scratch_release(lua, scratch_mark);
-        return luaL_error(L, "smtp.send: a %I-byte message would take the "
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "smtp.send: a %I-byte message would take the "
                           "VM's off-heap copies past its heap limit",
                           (lua_Integer)copy_bytes);
     }

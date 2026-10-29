@@ -24,6 +24,7 @@ import { httpClient } from "hull:http-client";
 import { time } from "hull:time";
 import { json } from "hull:json";
 import { _test_hooks } from "hull:_test_hooks";
+import { _refusal } from "hull:_refusal";
 
 let maxAttempts = 5;
 
@@ -161,18 +162,6 @@ function enqueue(opts) {
     return db.lastId();
 }
 
-// The runtime's refusals to wait (runtime/js/db_wait.h, async.c async gate;
-// the same test as hull:web:pwned's). They say where flush was called, not
-// how the destination answered, so they are rethrown, never recorded as a
-// failed attempt (audit 18: every flush from such a place burned an attempt
-// until the row was 'failed', unsent).
-function isWaitRefusal(e) {
-    const s = String(e && e.message !== undefined ? e.message : e);
-    return s.indexOf("cannot wait while a transaction is open") >= 0
-        || s.indexOf("cannot run in middleware") >= 0
-        || s.indexOf("cannot start while req.multipart()") >= 0;
-}
-
 // How long a flush's claim on a row lasts before another flush may take it
 // (seconds): longer than any delivery can run - http.fetch's ceiling
 // (HL_HTTP_FETCH_MAX_TIMEOUT_MS, 10 min) plus a minute. It was 300 s, under
@@ -184,7 +173,12 @@ const CLAIM_LEASE = 660;
 /**
  * Attempt to deliver a single outbox item.
  * @returns {[boolean, string|null, *]} [success, errorMessage, refusal]:
- *   refusal is the runtime's refusal to wait (see isWaitRefusal), if any.
+ *   refusal is the runtime's refusal of the delivery (an Error whose `code`
+ *   is "busy" or "wait_refused", hull:_refusal), if any. A refusal says where
+ *   or when flush ran, not how the destination answered, so it is never
+ *   recorded as a failed attempt (audit 18; audit 35: the fetch cap's
+ *   refusal was, since the stdlib matched only the older messages - it tests
+ *   the code now).
  */
 async function deliverItem(item) {
     if (item.kind === "webhook" || item.kind === "http") {
@@ -210,7 +204,7 @@ async function deliverItem(item) {
                 return [true, null];
             return [false, "HTTP " + result.status];
         } catch (e) {
-            if (isWaitRefusal(e)) return [false, String(e), e];
+            if (_refusal.code(e)) return [false, String(e), e];
             return [false, String(e)];
         }
     }
@@ -244,7 +238,9 @@ function backoffDelay(attempt) {
  *
  * @param {Object} [opts]
  * @param {number} [opts.limit=50]  Max items to process per call.
- * @returns {Promise<{ delivered: number, failed: number, retried: number }>}
+ * @returns {Promise<{ delivered: number, failed: number, retried: number, busy?: true }>}
+ *   `busy: true` when the runtime refused a delivery as busy (the VM's fetch
+ *   cap): the flush stopped there, the rest stay pending, unattempted.
  */
 
 // Lua's tonumber(v) for a number or a string: a decimal numeral (optional
@@ -305,12 +301,18 @@ async function flush(opts) {
         if (claimed !== 1) continue;
         const [ok, err, refusal] = await deliverItem(item);
         if (refusal !== undefined) {
-            // Give the claim back (the row is due again at once) and rethrow:
-            // nothing was sent, so no attempt is counted.
+            // Give the claim back (the row is due again at once): nothing was
+            // sent, so no attempt is counted. A busy refusal (the VM's fetch
+            // cap, its off-heap copy total) is transient and would refuse
+            // every row after this one too, so the flush stops and reports it
+            // (`busy: true`); the rows stay pending for the next flush. A
+            // refusal to wait is the caller's bug: rethrown.
             db.exec(
                 "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " +
                 "AND state = 'pending' AND next_attempt_at = ?",
                 [claimNow, item.id, lease]);
+            if (_refusal.isBusy(refusal))
+                return { delivered, failed, retried, busy: true };
             throw refusal;
         }
 

@@ -13,7 +13,10 @@
  *   2. HIBP range API. Fail-open on outage, with a once-per-process
  *      warn so the operator sees the gap. A manifest.hosts that
  *      certainly does not admit the endpoint is a misconfiguration,
- *      not an outage: check() throws.
+ *      not an outage: check() throws. So is the runtime refusing the
+ *      fetch (`e.code` "busy" - 64 fetches already in flight on this
+ *      VM - or "wait_refused"): check() rethrows it, and the request
+ *      fails rather than accepting an unchecked password (audit 35).
  *
  * @license AGPL-3.0-or-later
  */
@@ -25,6 +28,12 @@ import { log }        from "hull:log";
 import { time }       from "hull:time";
 import { blocklist }  from "hull:web:_pwned_blocklist";
 import { _test_hooks } from "hull:_test_hooks";
+import { _refusal }   from "hull:_refusal";
+
+// The HIBP fetch; the suite stands in for it through the test hooks (setGet),
+// as outbox's setPost.
+const realGet = (url, opts) => httpClient.async.get(url, opts);
+let get = realGet;
 
 const DEFAULT_ENDPOINT = "https://api.pwnedpasswords.com/range/";
 
@@ -88,14 +97,6 @@ function hostsMayAdmit(endpoint) {
     return false;
 }
 
-// The runtime's refusals to wait (runtime/js/db_wait.h, async.c async gate).
-function isWaitRefusal(e) {
-    const s = String(e && e.message !== undefined ? e.message : e);
-    return s.indexOf("cannot wait while a transaction is open") >= 0
-        || s.indexOf("cannot run in middleware") >= 0
-        || s.indexOf("cannot start while req.multipart()") >= 0;
-}
-
 async function check(password, opts) {
     if (typeof password !== "string" || password === "") return false;
     opts = opts || {};
@@ -112,15 +113,19 @@ async function check(password, opts) {
 
     let resp;
     try {
-        resp = await httpClient.async.get(endpoint + prefix, {
+        resp = await get(endpoint + prefix, {
             headers: { "User-Agent": "hull-pwned-check/1" },
         });
     } catch (e) {
-        // The runtime refusing the wait (a transaction open, middleware, a
-        // parked multipart read) is a bug in the caller, not an HIBP outage:
-        // failing open on it turned the check off, quietly, for every such
-        // call. Re-throw.
-        if (isWaitRefusal(e)) throw e;
+        // The runtime refusing the fetch is not an HIBP outage: a refusal to
+        // wait (a transaction open, middleware, a parked multipart read) is a
+        // bug in the caller, and a busy refusal (the VM's 64 fetches in
+        // flight, its off-heap copy total) is local and says nothing about
+        // HIBP. Failing open on either turned the check off - on the busy one
+        // for anyone who could hold 64 slow fetches open (audit 35).
+        // Re-thrown, by code (hull:_refusal), so the request fails instead of
+        // accepting the password.
+        if (_refusal.code(e)) throw e;
         // Neither is a host the manifest does not admit: failing open on it
         // turned the check off for the life of the process, behind one warning.
         if (!hostsMayAdmit(endpoint)) {
@@ -177,4 +182,7 @@ export { pwned };
 
 // Test seams, registered with the stdlib-internal hull:_test_hooks rather
 // than exported on the module (audit 23).
-_test_hooks.register("hull:web:pwned", { sha1Hex, inLocalBlocklist });
+_test_hooks.register("hull:web:pwned", {
+    sha1Hex, inLocalBlocklist,
+    setGet(fn) { get = fn || realGet; },
+});

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/smtp.h"
@@ -323,9 +324,9 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     HlOffheapHold copy_hold = {0};
     if (hl_offheap_take(&copy_hold, &js->wasm_buf_bytes, js->max_heap_bytes,
                         copy_bytes) != 0) {
-        result = JS_ThrowRangeError(ctx, "smtp.send: a %zu-byte message would "
+        result = hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "smtp.send: a %zu-byte message would "
                                     "take the VM's off-heap copies past its "
-                                    "heap limit", copy_bytes);
+                                    "heap limit", copy_bytes));
         goto cleanup;
     }
     HlSmtpOp *op = hl_smtp_op_create(&msg, to_ms);

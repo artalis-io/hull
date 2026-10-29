@@ -19,6 +19,7 @@
 #include <quickjs.h>
 #include "hull/runtime/js.h"
 #include "hull/cap/db_registry.h"
+#include "refusal.h"
 
 /* 0 to go ahead; -1 with a TypeError pending on @p ctx (return JS_EXCEPTION). */
 static inline int hl_js_db_refuse_wait(JSContext *ctx, const char *what)
@@ -30,6 +31,7 @@ static inline int hl_js_db_refuse_wait(JSContext *ctx, const char *what)
                       "database connection '%s': other requests use the same "
                       "connection while this one waits. Commit or roll back "
                       "first (db.batch fn must be synchronous)", what, txn);
+    hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
     return -1;
 }
 

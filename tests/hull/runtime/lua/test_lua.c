@@ -7604,6 +7604,8 @@ UTEST(lua_async, a_wait_inside_a_transaction_is_refused)
         "local ok, e = pcall(hull.sleep, 5)\n"
         "check(not ok and tostring(e):find('transaction is open', 1, true)\n"
         "      and tostring(e):find(\"'default'\", 1, true), 'sleep in txn: '..tostring(e))\n"
+        /* The refusal carries its code (audit 35). */
+        "check(tostring(e):find('^%[hull:wait_refused%] '), 'code: '..tostring(e))\n"
         "ok, e = pcall(function() return t:wait() end)\n"
         "check(not ok and tostring(e):find('transaction is open', 1, true), 'wait in txn: '..tostring(e))\n"
         "db.exec('COMMIT')\n"
@@ -11850,6 +11852,8 @@ UTEST(lua_audit34, blob_handles_are_capped_collected_and_charged)
         "H = {} local ok, e = pcall(function() for i = 1, 100000 do "
         "  H[#H + 1] = (i % 2 == 0) and blob.writer() or blob.reader(ID) end end) "
         "assert(not ok and tostring(e):find('too many open blob'), tostring(e)) "
+        /* The refusal carries the busy code (audit 35). */
+        "assert(tostring(e):find('^%[hull:busy%] '), tostring(e)) "
         "assert(#H == 256, #H) return 1",
         HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
     EXPECT_EQ(hl_cap_blob_live_handles(), HL_BLOB_MAX_LIVE_HANDLES);

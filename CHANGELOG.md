@@ -170,6 +170,24 @@ release-artifact layout).
   coroutine is now marked abandoned, and `coroutine.resume` / `coroutine.close` refuse it for
   good; every binding continuation also checks that it is the runtime's own resume before it
   reads its context.
+- **The fetch cap turned the pwned-password check off and made outbox drop work** (audit 35).
+  Audit 31 capped each VM at 64 in-flight fetches, but the stdlib recognised the runtime's
+  refusals by their message text and did not know the new one: `hull/web/pwned` took "too
+  many requests in flight" for an HIBP outage and failed open ("not pwned"), so a client
+  holding ~64 slow fetches made register / reset / password change accept breached
+  passwords; `outbox.flush` counted it as a failed delivery for every claimed row, and after
+  `max_attempts` the rows were marked failed without ever being sent. Every runtime refusal
+  to start or wait on an async op now carries a stable code - `busy` for an admission cap
+  (the fetch cap, the VM's off-heap copy total for `http.fetch` / `db.async` /
+  `worker.dispatch` / `smtp.send` / `compute.*` / `gpu.*`, the `ws.connect` and blob handle
+  caps), `wait_refused` for a wait the runtime refuses (a transaction open, middleware, a
+  parked multipart read, outside a handler, shutdown): JS errors get an own `e.code`, Lua
+  error strings start with `"[hull:<code>] "` (raised without the `chunk:line:` prefix). The
+  messages are otherwise unchanged. The stdlib tests the code (`hull._refusal` /
+  `hull:_refusal`), never the text: pwned re-raises a refusal, and `outbox.flush` gives the
+  claim back without counting an attempt - on `busy` it stops and returns `busy = true`,
+  leaving the rest pending. Codes documented under "Runtime refusal codes" in
+  docs/app_api_reference.md; covered by `tests/e2e_refusal_codes.sh` (both runtimes).
 
 - **GPU uploads with no dispatch grew device memory without bound; a stalled device still
   took reads, copies and writes** (audit 34). wgpu copies each `gpu.buffer` / `gpu.texture`

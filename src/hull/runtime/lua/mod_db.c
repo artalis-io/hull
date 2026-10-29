@@ -5,6 +5,7 @@
 
 #ifdef HL_ENABLE_DB
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "internal.h"   /* hl_lua_source_is_stdlib */
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
@@ -1010,7 +1011,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     if (!hl_lua_can_wait(L)) {
         lua_free_hl_values(L, params, nparams);
         hl_lua_check_can_wait(L, "db.async");   /* raises */
-        return luaL_error(L, "db.async cannot wait here");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "db.async cannot wait here");
     }
 
     /* The copies below live outside the heap until the op is freed: charged
@@ -1034,7 +1035,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         if (hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes, lua->mem_limit,
                             copy_bytes) != 0) {
             lua_free_hl_values(L, params, nparams);
-            return luaL_error(L, "db.async: %I bytes of SQL and params would "
+            return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "db.async: %I bytes of SQL and params would "
                               "take the VM's off-heap copies past its heap "
                               "limit", (lua_Integer)(copy_bytes > (size_t)LUA_MAXINTEGER
                                   ? LUA_MAXINTEGER : copy_bytes));

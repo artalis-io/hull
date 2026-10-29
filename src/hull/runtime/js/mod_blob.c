@@ -40,6 +40,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
@@ -445,9 +446,9 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
     if (open_rc != 0) {
         JS_FreeValue(ctx, obj);
         if (open_rc == HL_BLOB_ERR_TOO_MANY)
-            return JS_ThrowRangeError(ctx, "blob.writer: too many open blob "
+            return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "blob.writer: too many open blob "
                                       "writers / readers (at most %d)",
-                                      HL_BLOB_MAX_LIVE_HANDLES);
+                                      HL_BLOB_MAX_LIVE_HANDLES));
         return JS_ThrowInternalError(ctx, "blob.writer: open failed");
     }
     bh->h = w;
@@ -573,9 +574,9 @@ static JSValue js_blob_reader_new(JSContext *ctx, JSValueConst this_val,
     if (rc != 0) {
         JS_FreeValue(ctx, obj);
         if (rc == HL_BLOB_ERR_TOO_MANY)
-            return JS_ThrowRangeError(ctx, "blob.reader: too many open blob "
+            return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "blob.reader: too many open blob "
                                       "writers / readers (at most %d)",
-                                      HL_BLOB_MAX_LIVE_HANDLES);
+                                      HL_BLOB_MAX_LIVE_HANDLES));
         return JS_ThrowInternalError(ctx, "blob.reader: blob not found");
     }
     bh->h = r;

@@ -611,12 +611,14 @@ int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
             "%s cannot run in middleware: middleware is synchronous (it "
             "returns 0 to continue, non-zero to stop); do async work in the "
             "route handler", what);
+        hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
         return -1;
     }
     if (js->active_conn && js->active_life && js->active_life->parked > 0) {
         JS_ThrowTypeError(ctx,
             "%s cannot start while req.multipart() is waiting for more of "
             "the request body; await the multipart read first", what);
+        hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
         return -1;
     }
     return 0;

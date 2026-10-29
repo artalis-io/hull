@@ -3076,8 +3076,11 @@ UTEST(js_stdlib, a_wait_inside_a_transaction_is_refused)
         "  db.exec('BEGIN');\n"
         "  db.exec('INSERT INTO wtj VALUES (1)');\n"
         "  let msg = '';\n"
-        "  try { hull.sleep(5); } catch (e) { msg = String(e && e.message); }\n"
+        "  let code = null;\n"
+        "  try { hull.sleep(5); } catch (e) { msg = String(e && e.message); code = e.code; }\n"
         "  if (!msg.includes('transaction is open') || !msg.includes(\"'default'\")) return 2;\n"
+        /* The refusal carries its code (audit 35). */
+        "  if (code !== 'wait_refused') return 4;\n"
         "  db.exec('COMMIT');\n"
         "  globalThis.__slept = hull.sleep(5).then(() => 1);\n"
         "  if (db.query('SELECT COUNT(*) AS n FROM wtj')[0].n !== 1) return 3;\n"
@@ -10465,8 +10468,11 @@ UTEST(js_audit34, blob_handles_are_capped_collected_and_charged)
     EXPECT_EQ(eval_int("(() => { globalThis.H = []; try {"
                        " for (let i = 0; i < 100000; i++)"
                        "   H.push(i % 2 ? blob.writer() : blob.reader(ID));"
-                       " } catch (e) { globalThis.E = String(e.message); }"
+                       " } catch (e) { globalThis.E = String(e.message);"
+                       "   globalThis.EC = e.code; }"
                        " return H.length; })()"), HL_BLOB_MAX_LIVE_HANDLES);
+    /* The refusal carries the busy code (audit 35). */
+    EXPECT_EQ(eval_int("EC === 'busy' ? 1 : 0"), 1);
     char *e = eval_str("E");
     EXPECT_TRUE(e && strstr(e, "too many open blob") != NULL);
     free(e);

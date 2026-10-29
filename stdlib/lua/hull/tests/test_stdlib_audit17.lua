@@ -137,7 +137,7 @@ test("audit 18: a wait refusal is raised, not counted as an attempt", function()
                      payload = "{}", max_attempts = 1 })
     local real = http_client.async.post
     http_client.async.post = function()
-        error("http.fetch: can only wait in a handler", 0)
+        error("[hull:wait_refused] http.fetch: can only wait in a handler", 0)
     end
     local ok1, err1 = pcall(outbox.flush)
     -- The claim was given back: the next flush takes the row again at once.
@@ -150,6 +150,92 @@ test("audit 18: a wait refusal is raised, not counted as an attempt", function()
     local p, f = counts()
     assert_eq(p, p0 + 1, "still pending")
     assert_eq(f, f0, "not failed")
+end)
+
+-- ── refusal codes (audit 35) ────────────────────────────────────────
+-- The stdlib recognised refusals by message text, so audit 31's fetch cap
+-- ("too many requests in flight") read as a remote failure: outbox counted
+-- an attempt for every claimed row, pwned failed open. Refusals now start
+-- with "[hull:<code>] " and the stdlib tests the code.
+
+-- max_attempts = 1: a counted attempt would mark the row failed.
+local function outbox_rows(dest)
+    outbox.enqueue({ kind = "webhook", destination = dest .. "/1",
+                     payload = "{}", max_attempts = 1 })
+    outbox.enqueue({ kind = "webhook", destination = dest .. "/2",
+                     payload = "{}", max_attempts = 1 })
+end
+
+test("audit 35: a busy refusal stops the flush, nothing counted", function()
+    outbox.init()
+    local p0, f0 = counts()
+    outbox_rows("http://a35.test/busy")
+    local calls = 0
+    local real = http_client.async.post
+    http_client.async.post = function()
+        calls = calls + 1
+        error("[hull:busy] http.fetch: too many requests in flight (at most 64 per VM)", 0)
+    end
+    local ok1, r1 = pcall(outbox.flush)
+    local ok2, r2 = pcall(outbox.flush)
+    http_client.async.post = real
+    assert_eq(ok1, true, "not raised: " .. tostring(r1))
+    assert_eq(ok2, true, "not raised: " .. tostring(r2))
+    assert_eq(r1.busy, true, "reported busy")
+    assert_eq(r1.failed + r1.retried + r1.delivered, 0, "no outcome")
+    -- The flush stopped at the first refusal, and the claim was given back:
+    -- the second flush took the same row again.
+    assert_eq(calls, 2, "one delivery tried per flush")
+    local p, f = counts()
+    assert_eq(p, p0 + 2, "both still pending")
+    assert_eq(f, f0, "none failed: no attempt counted")
+end)
+
+test("audit 35: refusal text without the code is a delivery failure", function()
+    outbox.init()
+    outbox_rows("http://a35.test/text")
+    local p0, f0 = counts()
+    local real = http_client.async.post
+    -- A remote failure whose message merely contains refusal text (or the
+    -- code anywhere but the start) is not a refusal.
+    http_client.async.post = function()
+        error("upstream said: [hull:busy] too many requests in flight", 0)
+    end
+    local ok, r = pcall(outbox.flush)
+    http_client.async.post = real
+    assert_eq(ok, true, "not raised: " .. tostring(r))
+    assert_eq(r.busy, nil, "not busy")
+    -- Every due row (these two and the ones earlier tests left pending)
+    -- was tried and counted.
+    assert_eq(r.failed, p0, "all counted")
+    local p, f = counts()
+    assert_eq(p, 0, "none pending")
+    assert_eq(f, f0 + p0, "all failed")
+end)
+
+local pwned = require("hull.web.pwned")
+local PW = "a35-zq8Xk3v-not-in-any-list-7"
+
+test("audit 35: pwned raises on a busy refusal instead of failing open", function()
+    local real = http_client.async.get
+    http_client.async.get = function()
+        error("[hull:busy] http.fetch: too many requests in flight (at most 64 per VM)", 0)
+    end
+    local ok, e = pcall(pwned.check, PW)
+    http_client.async.get = real
+    assert_eq(ok, false, "raised")
+    assert_eq(tostring(e):find("^%[hull:busy%] ") ~= nil, true, "code kept: " .. tostring(e))
+end)
+
+test("audit 35: pwned raises on a wait refusal", function()
+    local real = http_client.async.get
+    http_client.async.get = function()
+        error("[hull:wait_refused] http.fetch cannot wait while a transaction is open", 0)
+    end
+    local ok, e = pcall(pwned.check, PW)
+    http_client.async.get = real
+    assert_eq(ok, false, "raised")
+    assert_eq(tostring(e):find("^%[hull:wait_refused%] ") ~= nil, true, "code kept: " .. tostring(e))
 end)
 
 return { pass = pass, fail = fail }

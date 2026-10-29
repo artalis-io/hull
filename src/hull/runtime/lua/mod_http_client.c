@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "hull/cap/http.h"
 #include "hull/cap/http_async.h"
@@ -530,9 +531,9 @@ static int lua_http_fetch(lua_State *L)
     if (admit != HL_HTTP_ADMIT_OK) {
         lua_http_scratch_release(lua, headers);
         if (admit == HL_HTTP_ADMIT_INFLIGHT)
-            return luaL_error(L, "http.fetch: too many requests in flight "
+            return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "http.fetch: too many requests in flight "
                               "(at most %d per VM)", HL_HTTP_MAX_INFLIGHT);
-        return luaL_error(L, "http.fetch: a %I-byte body would take the VM's "
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "http.fetch: a %I-byte body would take the VM's "
                           "off-heap copies past its heap limit",
                           (lua_Integer)body_len);
     }

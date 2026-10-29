@@ -1475,6 +1475,9 @@ e2e-http-redirect: $(BUILDDIR)/hull
 e2e-http-timeout: $(BUILDDIR)/hull
 	sh tests/e2e_http_timeout.sh
 
+e2e-refusal-codes: $(BUILDDIR)/hull
+	sh tests/e2e_refusal_codes.sh
+
 e2e-timers: $(BUILDDIR)/hull
 	sh tests/e2e_timers.sh
 

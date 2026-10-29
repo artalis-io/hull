@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "hull/runtime/lua.h"
 #include "internal.h"
 #include "protected.h"
@@ -571,7 +572,7 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     if (!lua || !lua_isyieldable(L) || L != lua->active_co)
-        return luaL_error(L, "%s can only wait in a handler, a task or "
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s can only wait in a handler, a task or "
                           "app.main - not while a module loads, inside a C "
                           "callback such as string.gsub or table.sort, or in "
                           "a coroutine the app created", what);
@@ -582,7 +583,7 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
      * (sleep, http.fetch, db.async, compute, gpu, ssh, smtp,
      * worker.dispatch, tui.poll). */
     if (lua->base.shutting_down)
-        return luaL_error(L, "%s cannot wait: the runtime is shutting down",
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait: the runtime is shutting down",
                           what);
     /* Another request, SSE event or timer runs while this one is parked, on
      * the SAME connection: a transaction held across the wait was rolled
@@ -592,7 +593,7 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
     /* Always NULL only in a DB-less build (the inline stub). */
     // cppcheck-suppress knownConditionTrueFalse
     if (txn)
-        return luaL_error(L, "%s cannot wait while a transaction is open on "
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait while a transaction is open on "
                           "database connection '%s': other requests use the "
                           "same connection while this one waits. Commit or "
                           "roll back first (and do the waiting outside "

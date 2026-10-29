@@ -15,6 +15,7 @@
 import { etag } from "hull:web:middleware:etag";
 import { jobs } from "hull:jobs";
 import { outbox } from "hull:web:middleware:outbox";
+import { pwned } from "hull:web:pwned";
 import { db as dbModule } from "hull:db";
 
 const db = dbModule.default();
@@ -162,7 +163,8 @@ await testAsync("audit 18: a wait refusal is rethrown, not counted as an attempt
     // in for it.
     const hooks = __testHooks("hull:web:middleware:outbox");
     hooks.setPost(() => {
-        throw new Error("http.fetch cannot run in middleware");
+        throw Object.assign(new Error("http.fetch cannot run in middleware"),
+                            { code: "wait_refused" });
     });
     let msg1 = "", msg2 = "";
     try {
@@ -177,6 +179,88 @@ await testAsync("audit 18: a wait refusal is rethrown, not counted as an attempt
     const [p, f] = outboxCounts();
     assertEq(p, p0 + 1, "still pending");
     assertEq(f, f0, "not failed");
+});
+
+// ── refusal codes (audit 35) ────────────────────────────────────────
+// The stdlib recognised refusals by message text, so audit 31's fetch cap
+// ("too many requests in flight") read as a remote failure: outbox counted an
+// attempt for every claimed row, pwned failed open. Refusals now carry
+// e.code and the stdlib tests it.
+
+function busyError() {
+    return Object.assign(
+        new RangeError("http.fetch: too many requests in flight (at most 64 per VM)"),
+        { code: "busy" });
+}
+
+// maxAttempts = 1: a counted attempt would mark the row failed.
+function outboxTwoRows(dest) {
+    outbox.enqueue({ kind: "webhook", destination: dest + "/1", payload: "{}", maxAttempts: 1 });
+    outbox.enqueue({ kind: "webhook", destination: dest + "/2", payload: "{}", maxAttempts: 1 });
+}
+
+await testAsync("audit 35: a busy refusal stops the flush, nothing counted", async () => {
+    outbox.init();
+    const [p0, f0] = outboxCounts();
+    outboxTwoRows("http://a35.test/busy");
+    const hooks = __testHooks("hull:web:middleware:outbox");
+    let calls = 0;
+    hooks.setPost(() => { calls++; throw busyError(); });
+    let r1, r2;
+    try {
+        r1 = await outbox.flush();
+        r2 = await outbox.flush();
+    } finally {
+        hooks.setPost(null);
+    }
+    assertEq(r1.busy, true, "reported busy");
+    assertEq(r2.busy, true, "reported busy again");
+    assertEq(r1.failed + r1.retried + r1.delivered, 0, "no outcome");
+    assertEq(calls, 2, "one delivery tried per flush");
+    const [p, f] = outboxCounts();
+    assertEq(p, p0 + 2, "both still pending");
+    assertEq(f, f0, "none failed: no attempt counted");
+});
+
+await testAsync("audit 35: refusal text without the code is a delivery failure", async () => {
+    outbox.init();
+    outboxTwoRows("http://a35.test/text");
+    const [p0, f0] = outboxCounts();
+    const hooks = __testHooks("hull:web:middleware:outbox");
+    hooks.setPost(() => { throw new Error("http.fetch: too many requests in flight"); });
+    let r;
+    try { r = await outbox.flush(); } finally { hooks.setPost(null); }
+    assertEq(r.busy, undefined, "not busy");
+    // Every due row (these two and the ones earlier tests left pending) was
+    // tried and counted.
+    assertEq(r.failed, p0, "all counted");
+    const [p, f] = outboxCounts();
+    assertEq(p, 0, "none pending");
+    assertEq(f, f0 + p0, "all failed");
+});
+
+const PW = "a35-zq8Xk3v-not-in-any-list-7";
+
+await testAsync("audit 35: pwned rethrows a busy refusal instead of failing open", async () => {
+    const hooks = __testHooks("hull:web:pwned");
+    hooks.setGet(() => { throw busyError(); });
+    let code = null, r;
+    try { r = await pwned.check(PW); } catch (e) { code = e.code; }
+    finally { hooks.setGet(null); }
+    assertEq(r, undefined, "no answer");
+    assertEq(code, "busy", "rethrown with its code");
+});
+
+await testAsync("audit 35: pwned rethrows a wait refusal", async () => {
+    const hooks = __testHooks("hull:web:pwned");
+    hooks.setGet(() => {
+        throw Object.assign(new TypeError("http.fetch cannot run in middleware"),
+                            { code: "wait_refused" });
+    });
+    let code = null;
+    try { await pwned.check(PW); } catch (e) { code = e.code; }
+    finally { hooks.setGet(null); }
+    assertEq(code, "wait_refused", "rethrown with its code");
 });
 
 // Counts go back to the C harness (run_js_test in
