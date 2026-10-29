@@ -147,6 +147,62 @@ UTEST(db_duckdb, null_bind_and_long_string)
     h.backend->close(&h);
 }
 
+/* Every column of a row, as text ("" for NIL), copied in the row callback. */
+typedef struct {
+    int  nrows;
+    int  ncols;
+    char vals[8][64];
+} TextRow;
+
+static int text_row_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    TextRow *t = ctx;
+    t->ncols = ncols;
+    for (int i = 0; i < ncols && i < 8; i++) {
+        if (cols[i].value.type == HL_TYPE_TEXT) {
+            size_t n = cols[i].value.len < sizeof t->vals[i] - 1
+                ? cols[i].value.len : sizeof t->vals[i] - 1;
+            memcpy(t->vals[i], cols[i].value.s, n);
+            t->vals[i][n] = '\0';
+        } else if (cols[i].value.type == HL_TYPE_INT) {
+            snprintf(t->vals[i], sizeof t->vals[i], "%lld",
+                     (long long)cols[i].value.i);
+        } else {
+            t->vals[i][0] = '\0';
+        }
+    }
+    t->nrows++;
+    return 0;
+}
+
+/* Strings of up to 12 bytes are stored inline in the vector's duckdb_string_t.
+ * duck_decode copied that struct to its stack and pointed the value into the
+ * copy, so once it returned every short column of a row read whatever the
+ * stack slot held next - another column's value (audit 35). */
+UTEST(db_duckdb, short_inline_strings_keep_their_own_value)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+
+    TextRow t;
+    memset(&t, 0, sizeof t);
+    ASSERT_EQ(hl_db_query(&h,
+        "SELECT 'x1' AS a, 42 AS n, 'y2' AS b, 'alice' AS c, "
+        "'twelve-bytes' AS d, 'a-long-string-over-twelve' AS e, 'bob' AS f",
+        NULL, 0, text_row_cb, &t, NULL), 0);
+    ASSERT_EQ(t.nrows, 1);
+    ASSERT_EQ(t.ncols, 7);
+    ASSERT_STREQ(t.vals[0], "x1");
+    ASSERT_STREQ(t.vals[1], "42");
+    ASSERT_STREQ(t.vals[2], "y2");
+    ASSERT_STREQ(t.vals[3], "alice");
+    ASSERT_STREQ(t.vals[4], "twelve-bytes");
+    ASSERT_STREQ(t.vals[5], "a-long-string-over-twelve");
+    ASSERT_STREQ(t.vals[6], "bob");
+
+    h.backend->close(&h);
+}
+
 /* BEGIN + INSERT + ROLLBACK leaves no row; a COMMITted one persists. */
 UTEST(db_duckdb, transaction_commit_and_rollback)
 {
