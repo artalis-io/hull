@@ -14,6 +14,7 @@
 
 #include <stddef.h>
 #include <keel/http_body_reader.h>
+#include <keel/http_body_reader_multipart.h>
 
 /**
  * @brief Body-reader factory function.
@@ -79,8 +80,9 @@ typedef void (*HlMultipartResumeFn)(void *ctx, HlMultipartResumeReason reason);
  *
  * @param alloc      Per-request allocator.
  * @param req        Inbound request (Content-Type must be multipart/form-data).
- * @param user_data  KlHttpMultipartConfig*; caller-owned. NULL → defaults
- *                   (all caps unlimited - set caps for adversarial input).
+ * @param user_data  KlHttpMultipartConfig*; caller-owned. NULL, or a cap
+ *                   left at 0, takes Hull's default
+ *                   (hl_cap_multipart_effective_config) - never unlimited.
  *
  * @return Body reader, or NULL on rejection (non-multipart Content-Type,
  *         missing/oversized boundary, allocation failure → 415).
@@ -88,6 +90,37 @@ typedef void (*HlMultipartResumeFn)(void *ctx, HlMultipartResumeReason reason);
 KlHttpBodyReader *hl_cap_multipart_factory(KlAllocator *alloc,
                                        const KlHttpRequest *req,
                                        void *user_data);
+
+/**
+ * @brief Fill every cap a route left at 0 with Hull's default (audit 34).
+ *
+ * max_headers_size → HL_MP_DEFAULT_MAX_HEADERS, max_input_buffer →
+ * HL_MP_DEFAULT_MAX_INPUT, max_parts → HL_MP_DEFAULT_MAX_PARTS, and
+ * max_total_size → the server body limit (hl_cap_multipart_set_body_limit),
+ * raised to fit one max_part_size part with its headers and framing.
+ * max_part_size stays 0 (bounded by max_total_size). Unlimited is not
+ * offered: a route that needs more sets an explicit (large) value.
+ *
+ * @param in   Route config, or NULL (all defaults).
+ * @param out  Receives the effective config.
+ */
+void hl_cap_multipart_effective_config(const KlHttpMultipartConfig *in,
+                                       KlHttpMultipartConfig *out);
+
+/**
+ * @brief Set the server body limit that max_total_size defaults to.
+ * Called once by the server at startup (-b / --body-max-size); 0 restores
+ * HL_BODY_MAX_SIZE.
+ */
+void hl_cap_multipart_set_body_limit(size_t limit);
+
+/**
+ * @brief Mark the factory calls that follow as fed the WHOLE body in one
+ * on_data (the in-process test harness): an unset max_input_buffer then
+ * defaults to the effective max_total_size, since nothing drains the
+ * input before the handler runs. Reset to 0 after the call.
+ */
+void hl_cap_multipart_set_whole_body_feed(int on);
 
 /**
  * @brief Get the inner Keel multipart reader for kl_http_multipart_next.

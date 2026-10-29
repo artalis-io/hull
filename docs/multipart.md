@@ -63,8 +63,14 @@ app.post("/upload", async (req, res) => {
 ```
 
 JS accepts both snake_case and camelCase cap names; snake_case wins if
-both are present. Every cap defaults to `0` (unlimited) when omitted -
-**always set sensible caps for adversarial input.** Exceeding any cap
+both are present. A streaming route skips the server's `-b` body limit,
+so every cap left unset (or `0`) takes Hull's default - never unlimited
+(audit 34): `max_headers_size` 16 KiB, `max_input_buffer` 1 MiB,
+`max_parts` 1000, and `max_total_size` the server body limit (`-b`,
+1 MB by default) raised to fit one `max_part_size` part with its headers;
+`max_part_size` itself is then bounded by the total. Set an explicit
+(larger) value to raise a cap - a route accepting several large files
+sets `max_total_size`. Exceeding any cap
 mid-stream raises a parser error which the iterator surfaces to the
 handler (see "Errors" below).
 

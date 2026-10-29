@@ -158,6 +158,42 @@ text = resp.decode("latin-1")
 print("drip-ok" if ('"value":"%s"' % value) in text else "drip-bad: " + text[:300])
 EOF
 
+# Header-flood client for scenario 21 (audit 34): opens a part and sends
+# its header line as an endless run of 'a' bytes, never "\r\n\r\n".
+# Prints "cut <seconds> <status-line>" once the server answers or drops
+# the connection, or "uncut <seconds> <bytes>" if it is still reading
+# after the time limit (a route whose header buffer was unlimited).
+cat > "$TMPDIR_WORK/hdrflood.py" <<'EOF'
+import socket, sys, time, select
+port, path, limit = int(sys.argv[1]), sys.argv[2], float(sys.argv[3])
+s = socket.create_connection(("127.0.0.1", port), timeout=5)
+s.sendall(("POST %s HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+           "Content-Type: multipart/form-data; boundary=B\r\n"
+           "Content-Length: 100000000000\r\n\r\n--B\r\nX-a: " % path).encode())
+chunk = b"a" * 65536
+sent, t0, resp = 0, time.time(), None
+while time.time() - t0 < limit:
+    r, w, _ = select.select([s], [s], [], 0.5)
+    if r:
+        try:
+            resp = s.recv(4096)
+        except OSError:
+            resp = b""
+        break
+    if w:
+        try:
+            sent += s.send(chunk)
+        except OSError:
+            resp = b""
+            break
+dt = time.time() - t0
+if resp is None:
+    print("uncut %.2f %d" % (dt, sent))
+else:
+    line = resp.split(b"\r\n", 1)[0].decode("latin-1") or "closed"
+    print("cut %.2f %s" % (dt, line))
+EOF
+
 # ── Lua fixture ──────────────────────────────────────────────────────
 
 cat > "$TMPDIR_WORK/app.lua" <<'EOF'
@@ -293,6 +329,15 @@ app.post("/upload-headers-cap", run_cap_route,
 -- resumes it with HL_MP_RESUME_ERROR - pcall catches, 413 lands.
 app.post("/upload-total-cap", run_cap_route,
     { multipart = { max_total_size = 512 } })
+
+-- Audit 34: caps a route leaves unset are Hull's defaults, never
+-- unlimited. /upload-defaults sets only max_part_size (the documented
+-- pattern), /upload-nocaps sets nothing: a never-ending part header is
+-- cut off at the 16 KiB header default, and with no caps at all the
+-- body total defaults to the server body limit (-b, 1 MB here).
+app.post("/upload-defaults", run_cap_route,
+    { multipart = { max_part_size = 8 * 1024 * 1024 } })
+app.post("/upload-nocaps", run_cap_route, { multipart = {} })
 
 -- Streaming-async sync-completion: handler returns 401 BEFORE
 -- iterating req:multipart(). Exercises Keel v2.2.0's H1 keep-alive
@@ -457,6 +502,9 @@ async function runCapRoute(req, res) {
 app.post("/upload-parts-cap",   runCapRoute, { multipart: { maxParts: 2 } });
 app.post("/upload-headers-cap", runCapRoute, { multipart: { maxHeadersSize: 128 } });
 app.post("/upload-total-cap",   runCapRoute, { multipart: { maxTotalSize: 512 } });
+// Audit 34: unset caps take Hull's defaults (see Lua sibling).
+app.post("/upload-defaults", runCapRoute, { multipart: { maxPartSize: 8 * 1024 * 1024 } });
+app.post("/upload-nocaps",   runCapRoute, { multipart: {} });
 
 // Streaming-async sync-completion (see Lua sibling for the contract).
 app.post("/upload-sync-reject", async (_req, res) => {
@@ -751,6 +799,49 @@ run_multipart_tests() {
         pass "$LABEL parked handler error: handler header dropped"
     fi
 
+    # ── Scenario 21: unset caps are bounded (audit 34) ──
+    # A route that set only max_part_size had no header, input-buffer or
+    # total cap: a never-ending part header was buffered and rescanned
+    # per chunk for the whole 30 s body deadline. It is now cut off at
+    # the 16 KiB header default, quickly and with the RSS bounded.
+    if [ -n "$PY" ]; then
+        RSS0=$(ps -o rss= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')
+        FLOOD=$("$PY" "$TMPDIR_WORK/hdrflood.py" "$PORT" /upload-defaults 8 2>&1)
+        case "$FLOOD" in
+            "cut "*" HTTP/1.1 413"*|"cut "*" closed")
+                SECS=$(echo "$FLOOD" | awk '{print int($2)}')
+                if [ "$SECS" -lt 3 ]; then
+                    pass "$LABEL endless part header cut off ($FLOOD)"
+                else
+                    fail "$LABEL endless part header cut off too slowly: $FLOOD"
+                fi ;;
+            *) fail "$LABEL endless part header cut off - $FLOOD" ;;
+        esac
+        FLOOD=$("$PY" "$TMPDIR_WORK/hdrflood.py" "$PORT" /upload-nocaps 8 2>&1)
+        case "$FLOOD" in
+            "cut "*) pass "$LABEL endless part header cut off, no caps set" ;;
+            *)       fail "$LABEL endless part header cut off, no caps set - $FLOOD" ;;
+        esac
+        RSS1=$(ps -o rss= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')
+        if [ -n "$RSS0" ] && [ -n "$RSS1" ] && [ $((RSS1 - RSS0)) -lt 32768 ]; then
+            pass "$LABEL header flood: RSS bounded (${RSS0}K -> ${RSS1}K)"
+        else
+            fail "$LABEL header flood: RSS bounded (${RSS0}K -> ${RSS1}K)"
+        fi
+    else
+        echo "  SKIP: $LABEL header flood (needs python)"
+    fi
+    # With no caps at all the body total is the server body limit (1 MB):
+    # a 2 MB file is refused, a small field still goes through.
+    STATUS=$(curl --max-time 10 -sS -o /tmp/.mp_resp -w '%{http_code}' \
+        -X POST "http://127.0.0.1:$PORT/upload-nocaps" \
+        -F "f=@$TMPDIR_WORK/medium.bin" 2>/dev/null) || STATUS=000
+    check_contains "$LABEL no caps: 2 MB body over the default total refused" "$STATUS" "413"
+    RESP=$(curl --max-time 5 -sS -X POST "http://127.0.0.1:$PORT/upload-nocaps" \
+        -F "a=1" -F "b=2" 2>/dev/null)
+    check_contains "$LABEL no caps: small body accepted" "$RESP" '"count":2'
+    rm -f /tmp/.mp_resp
+
     # ── Sanity: post-multipart requests still work (no per-request
     # leak that wedges the connection state) ──
     RESP=$(curl -sS "http://127.0.0.1:$PORT/health")
@@ -770,7 +861,7 @@ fi
 
 # ── Scenario 20 (JS): part.read() is bounded by the JS heap (audit 18) ──
 # part.read() buffered a whole part on the server allocator, uncharged and
-# with no cap (the route's multipart caps default to unlimited), and past
+# with no cap (the route's multipart caps defaulted to unlimited), and past
 # the heap the ArrayBuffer copy's JS_EXCEPTION was RESOLVED as the value.
 # Under an 8 MB heap a 12 MB field is refused with a rejection the handler
 # catches; a 1 MB one still reads whole.

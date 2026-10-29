@@ -500,7 +500,12 @@ app.post("/entries/:id/photos", async (req, res) => {
     } else {
         res.redirect("/");
     }
-}, { multipart: { maxPartSize: 8 * 1024 * 1024 } });
+}, { multipart: {
+    // One photo plus the CSRF field (see app.lua for the cap defaults).
+    maxPartSize:  8 * 1024 * 1024,
+    maxTotalSize: 9 * 1024 * 1024,
+    maxParts:     4,
+} });
 
 app.get("/entries/:id/photos/:att_id", (req, res) => {
     const entryId = Number.parseInt(req.params.id, 10);
