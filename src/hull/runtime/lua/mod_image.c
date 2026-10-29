@@ -310,7 +310,8 @@ static int l_image_encode(lua_State *L)
         return 2;
     }
 
-    image_charge(L, hl_image_codec_units((*imgp)->width, (*imgp)->height, 0));
+    /* Per format: a PNG encode does ~32x the work per byte (audit 35). */
+    image_charge(L, hl_image_encode_units(*imgp, fmt_name));
 
     void *out = NULL;
     size_t out_len = 0;

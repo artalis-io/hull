@@ -668,6 +668,30 @@ UTEST(hull_cap_image, codec_units)
     ASSERT_TRUE(hl_image_codec_units(UINT32_MAX, UINT32_MAX, SIZE_MAX) > 0);
 }
 
+/* Audit 35: an encode is charged per format - PNG 32x and JPEG 4x the base
+ * rate of 1 unit per 8 bytes the encoder works over; an unknown format
+ * pays the base rate. Every factor is above the old flat charge. */
+UTEST(hull_cap_image, encode_units_per_format)
+{
+    enum { W = 64, H = 32 };
+    static uint8_t px[W * H * 4];
+    HlImage *img = hl_image_new(W, H, HL_IMAGE_RGBA8, px, sizeof px, NULL);
+    ASSERT_TRUE(img != NULL);
+    uint64_t base = hl_image_encode_bytes(img) / 8;
+    ASSERT_EQ(base, (uint64_t)(W * 4 + 1) * H / 8);
+    EXPECT_EQ(hl_image_encode_units(img, "png"),
+              base * HL_IMAGE_ENCODE_PNG_FACTOR);
+    EXPECT_EQ(hl_image_encode_units(img, "jpeg"),
+              base * HL_IMAGE_ENCODE_JPEG_FACTOR);
+    EXPECT_EQ(hl_image_encode_units(img, "bmp"), base);
+    EXPECT_EQ(hl_image_encode_units(img, NULL), base);
+    /* above what the flat rate charged */
+    EXPECT_GT(hl_image_encode_units(img, "png"), 30 * hl_image_codec_units(W, H, 0));
+    EXPECT_GT(hl_image_encode_units(img, "jpeg"), 3 * hl_image_codec_units(W, H, 0));
+    EXPECT_EQ(hl_image_encode_units(NULL, "png"), (uint64_t)0);
+    hl_image_free(img);
+}
+
 /* Audit 18: stb_image_write runs through the capped allocator now (it used
  * plain malloc, with nothing bounding its peak). The cap must still let a
  * worst-case (incompressible) PNG and a JPEG encode through, and every stb

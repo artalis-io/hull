@@ -365,9 +365,9 @@ static JSValue js_image_encode_fn(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "image.encode: image_too_large");
     }
 
-    /* The encode is one call over every pixel (audit 10). */
-    if (hl_js_budget_charge(ctx, hl_image_codec_units(img->width,
-                                                      img->height, 0)) < 0) {
+    /* The encode is one call over every pixel (audit 10), charged per
+     * format: a PNG encode does ~32x the work per byte (audit 35). */
+    if (hl_js_budget_charge(ctx, hl_image_encode_units(img, fmt_name)) < 0) {
         JS_FreeCString(ctx, fmt_name);
         return JS_EXCEPTION;
     }

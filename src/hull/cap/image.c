@@ -333,6 +333,24 @@ uint64_t hl_image_encode_bytes(const HlImage *img)
     return ((uint64_t)img->width * (uint64_t)bpp + 1u) * (uint64_t)img->height;
 }
 
+uint64_t hl_image_encode_units(const HlImage *img, const char *fmt_name)
+{
+    if (!img) return 0;
+    /* Measured on Apple M1 (audit 35), against a plain script loop of the
+     * default 100M budget (~1.2 s JS, ~0.4 s Lua): incompressible pixels -
+     * the worst case - cost ~36x the base rate for PNG (five filters a row,
+     * then zlib's 16-deep hash chains at level 8, which a lower level barely
+     * shortens on noise) and ~4x for JPEG at the default quality. At the
+     * factors in image.h a budget's worth of such encodes runs ~1.3 s. */
+    uint64_t factor = 1;
+    if (fmt_name && strcmp(fmt_name, "png") == 0)
+        factor = HL_IMAGE_ENCODE_PNG_FACTOR;
+    else if (fmt_name && strcmp(fmt_name, "jpeg") == 0)
+        factor = HL_IMAGE_ENCODE_JPEG_FACTOR;
+    uint64_t base = hl_image_encode_bytes(img) / 8;
+    return base > UINT64_MAX / factor ? UINT64_MAX : base * factor;
+}
+
 int hl_image_encode(const HlImage *img, const char *fmt_name,
                      int quality,
                      void **out, size_t *out_len,

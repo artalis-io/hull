@@ -8040,6 +8040,42 @@ UTEST(js_audit18, image_encode_refused_past_the_heap_limit)
     ASSERT_EQ(eval_int("img.close(); 1"), 1);
     cleanup_js();
 }
+
+/* Audit 35: an encode was charged 1 unit per 8 RGBA bytes whatever the
+ * format, ~30-40x under a PNG encode's real cost (~4x under JPEG's): a
+ * budget's worth of 4000 x 4000 PNG encodes held the loop ~40 s. A 512 x
+ * 512 RGBA image is 131072 units at the base rate; as PNG it is 32x that,
+ * past a 2M budget the old charge fit under, and as JPEG 4x, which fits. */
+UTEST(js_audit35, image_encode_is_charged_per_format)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    if (eval_int("typeof image === 'object' && image !== null ? 1 : 0") != 1) {
+        cleanup_js();   /* image compiled out */
+        return;
+    }
+    ASSERT_EQ(eval_int("globalThis.img = image.new(512, 512, 'rgba8',"
+                       " new ArrayBuffer(512 * 512 * 4)); 1"), 1);
+
+    js.max_instructions = 2000000;
+    hl_js_budget_arm(&js);
+    char *r = eval_str("(() => { try { image.encode(img, 'jpeg'); return 'ok'; }"
+                       " catch (e) { return 'threw'; } })()");
+    EXPECT_STREQ(r ? r : "(null)", "ok");
+    free(r);
+    EXPECT_EQ(0, js.budget_tripped);
+
+    hl_js_budget_arm(&js);
+    r = eval_str("(() => { try { image.encode(img, 'png'); return 'ok'; }"
+                 " catch (e) { return 'threw'; } })()");
+    free(r);
+    EXPECT_EQ(1, js.budget_tripped);
+
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+    ASSERT_EQ(eval_int("img.close(); 1"), 1);
+    cleanup_js();
+}
 #endif /* HL_ENABLE_IMAGE */
 
 JS_WORKER_CASE(the_function_s_own_toString_is_not_what_runs, (void)0,
