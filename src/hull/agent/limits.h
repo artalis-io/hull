@@ -35,6 +35,8 @@
 #define HL_AGENT_QUERIES_MAX_FILE     (1 * 1024 * 1024)   /* 1 MiB queries.json */
 #define HL_AGENT_CAPS_MAX_PER_FILE    (1 * 1024 * 1024)   /* 1 MiB per source file in caps walk */
 #define HL_AGENT_CAPS_MAX_TOTAL       (64 * 1024 * 1024)  /* 64 MiB for the whole caps walk */
+#define HL_AGENT_EVAL_MAX_RESULT      (4 * 1024 * 1024)   /* 4 MiB encoded eval result */
+#define HL_AGENT_EVAL_MAX_DEPTH       32                  /* nesting of an eval result */
 
 /* ── Iteration / line caps ─────────────────────────────────────────── */
 
