@@ -578,9 +578,16 @@ void hl_js_run_txn_hold_end(HlJS *js)
 /* The end of a resume no entry waits on (audit 31). Its chain - this
  * continuation and the ones its code made in this resume - shares one run
  * record (wired with no handler promise, so each of them comes back here),
- * and a transaction left open fails that record: the code after the await is
- * not continued. Only the chain: a sibling chain of the same request, with
- * a record of its own, goes on. */
+ * and a transaction left open fails that record AND the run's tag: the code
+ * after the await is not continued. The record alone stopped only Hull ops'
+ * resumes; a reaction the chain left on a promise Hull does not drive
+ * (`BEGIN; ...; await gate`, the gate settled by a later request) kept the
+ * tag, was queued when the gate settled and ran in that request's drain, its
+ * writes autocommitted (audit 34). The tag is the entry's, so sibling chains
+ * of the same entry stop too: they are that run's code (a synchronous
+ * handler has answered already; an entry still waiting - an async handler,
+ * app.main, a timer, a ws callback - is failed as one that waited holding a
+ * transaction, its completion run once through hl_js_run_claim). */
 static void hl_js_unwired_txn_check(HlJS *js, HlJsAsyncCont *jc)
 {
     HlJsRunOnce *run = jc->link.once;
@@ -593,7 +600,7 @@ static void hl_js_unwired_txn_check(HlJS *js, HlJsAsyncCont *jc)
     }
     if (!hl_js_txn_left_open(js)) return;
     if (run) run->txn_held = 1;
-    else hl_js_run_tag_fail(js, jc->link.run_tag);   /* nothing to name it by but the run */
+    hl_js_run_tag_fail(js, jc->link.run_tag);
 }
 
 int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)

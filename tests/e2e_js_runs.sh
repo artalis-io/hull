@@ -68,6 +68,13 @@
 #       code ran on as soon as the gate settled. Each is now a 500 whose code
 #       after the await never runs and commits nothing.
 #
+# Audit 34:
+#   M   An un-awaited chain with a run record (wired by an earlier resume, or
+#       making a Hull op beside its BEGIN) that awaited an undriven promise
+#       holding a transaction had only that record failed, not its tag: the
+#       reaction on the promise ran in the drain of the later request that
+#       settled it, its writes autocommitted. The tag is failed now.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -195,7 +202,9 @@ app.get("/rb", async (_req, res) => {
 });
 
 /* Audit 31: an un-awaited chain waits holding a transaction (u1 / u2 must
- * not commit); the control (u3) opens and commits in one stretch. */
+ * not commit); the control (u3, on a request of its own since audit 34 -
+ * a sibling chain of the failed run stops with it) opens and commits in one
+ * stretch. */
 let u31 = "none";
 app.get("/u31", (_req, res) => {
     hull.sleep(5).then(async () => {
@@ -206,6 +215,9 @@ app.get("/u31", (_req, res) => {
         conn.exec("INSERT INTO t VALUES ('u2')");
         try { conn.exec("COMMIT"); u31 = "committed"; } catch (_e) { u31 = "threw"; }
     });
+    res.text("started");
+});
+app.get("/u31c", (_req, res) => {
     hull.sleep(5).then(async () => {
         await hull.sleep(5);
         conn.exec("BEGIN");
@@ -215,6 +227,46 @@ app.get("/u31", (_req, res) => {
     res.text("started");
 });
 app.get("/u31state", (_req, res) => res.text(u31));
+/* Audit 34: an un-awaited chain with a run record (wired by an earlier
+ * resume - C; or making a Hull op in the resume that opens the transaction -
+ * A) awaits a promise Hull does not drive holding a transaction. The gate is
+ * settled by a later request (/w34*): the code after the await must not run
+ * and nothing of it may commit. The record alone stopped only Hull ops'
+ * resumes; the reaction on the gate kept the tag and ran in /w34*'s drain. */
+const u34 = { a: "none", c: "none" };
+let w34a = null, w34c = null;
+const u34aGate = new Promise(r => { w34a = r; });
+const u34cGate = new Promise(r => { w34c = r; });
+app.get("/u34c", (_req, res) => {
+    (async () => {
+        await hull.sleep(5);
+        await hull.sleep(5);
+        conn.exec("BEGIN");
+        conn.exec("INSERT INTO t VALUES ('u34c1')");
+        await u34cGate;
+        u34.c = "continued";
+        conn.exec("INSERT INTO t VALUES ('u34c2')");
+        try { conn.exec("COMMIT"); } catch (_e) { /* SQLite: no transaction */ }
+    })();
+    res.text("ok");
+});
+app.get("/u34a", (_req, res) => {
+    (async () => {
+        await hull.sleep(5);
+        const s = hull.sleep(5);
+        conn.exec("BEGIN");
+        conn.exec("INSERT INTO t VALUES ('u34a1')");
+        await u34aGate;
+        u34.a = "continued";
+        conn.exec("INSERT INTO t VALUES ('u34a2')");
+        try { conn.exec("COMMIT"); } catch (_e) { /* SQLite: no transaction */ }
+        await s;
+    })();
+    res.text("ok");
+});
+app.get("/w34a", (_req, res) => { w34a(); res.text("w"); });
+app.get("/w34c", (_req, res) => { w34c(); res.text("w"); });
+app.get("/u34state", (_req, res) => res.json(u34));
 /* ...and another request's code, run in /x31b's drain, opens one and waits:
  * /x31b's own acknowledged write (xb) must survive, xa1 / xa2 must not
  * commit. /y31a's code, run the same way, commits in one stretch (yc). */
@@ -592,6 +644,7 @@ out=$(curl -s -m 10 "$URL/fast")
 echo "=== audit 31: a transaction held across a wait by code no entry waits on ==="
 before=$(grep -c "async code waited while a transaction was open" "$TMPDIR/log" || true)
 curl -s -m 10 -o /dev/null "$URL/u31"
+curl -s -m 10 -o /dev/null "$URL/u31c"
 sleep 0.5
 out=$(curl -s -m 10 "$URL/rows")
 case "$out" in
@@ -700,6 +753,30 @@ case "$rows" in
     *g33*) fail "none of their writes is committed" "$rows" ;;
     *) pass "none of their writes is committed" ;;
 esac
+out=$(curl -s -m 10 "$URL/fast")
+[ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
+
+echo "=== audit 34: an un-awaited chain that waited holding a transaction never resumes ==="
+before=$(grep -c "async code waited while a transaction was open" "$TMPDIR/log" || true)
+out=$(curl -s -m 10 "$URL/u34c")
+[ "$out" = ok ] && pass "the chain's request is answered" || fail "the chain's request is answered" "$out"
+curl -s -m 10 -o /dev/null "$URL/u34a"
+sleep 0.3
+curl -s -m 10 -o /dev/null "$URL/w34c"
+curl -s -m 10 -o /dev/null "$URL/w34a"
+sleep 0.3
+out=$(curl -s -m 10 "$URL/u34state")
+[ "$out" = '{"a":"none","c":"none"}' ] \
+    && pass "neither chain's code after the gate ran (A: op made, C: wired earlier)" \
+    || fail "neither chain's code after the gate ran (A: op made, C: wired earlier)" "$out"
+rows=$(curl -s -m 10 "$URL/rows")
+case "$rows" in
+    *u34*) fail "none of the chains' writes is committed" "$rows" ;;
+    *) pass "none of the chains' writes is committed" ;;
+esac
+after=$(grep -c "async code waited while a transaction was open" "$TMPDIR/log" || true)
+[ "$after" -ge $((before + 2)) ] && pass "both waits are reported" \
+    || fail "both waits are reported" "$before -> $after"
 out=$(curl -s -m 10 "$URL/fast")
 [ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
 

@@ -752,7 +752,12 @@ again checks too - whether or not it started a new op (`await pa; BEGIN; ...; aw
 left waiting on a promise Hull does not drive (audit 8 c_db L1). Code no entry waits on is
 checked too (audit 31): the end of a resume whose continuation is unwired (`hull.sleep(5).then(async
 () => ...)` from a synchronous handler) fails that chain's run record (its continuations are
-wired with no handler promise, so each comes back to the check), and in `hl_js_run_jobs` the end
+wired with no handler promise, so each comes back to the check) AND its run tag - the record
+alone stops only Hull ops' resumes, and a reaction the chain left on a promise Hull does not
+drive (`await hull.sleep(5); await hull.sleep(5); BEGIN; ...; await gate`, the gate settled by a
+later request) ran in that request's drain, its writes autocommitted (audit 34). The tag is the
+entry's, so the entry's other un-awaited chains stop with it (they are that run's code; an
+entry still waiting is failed as one that waited holding a transaction), and in `hl_js_run_jobs` the end
 of another run's stretch of jobs (QuickJS `JS_GetPendingJobTag`, HULL PATCH 0008) with a
 transaction open rolls it back before the active entry's next job runs and marks that run's tag
 failed (`HlJS.txn_failed_tags`, `hl_js_run_tag_failed`): its later resumes are not continued.
