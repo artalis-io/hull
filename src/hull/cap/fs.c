@@ -8,6 +8,7 @@
  */
 
 #include "hull/cap/fs.h"
+#include "hull/cap/db_live_files.h"
 #include "hull/shared/host.h"
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
@@ -223,12 +224,29 @@ int hl_fs_strip_setid(int fd)
  * opened without O_TRUNC and truncated only once the bits are gone: opened
  * O_TRUNC, a write refused for bits it could not clear had already emptied
  * the file (audit 27). */
+/* A file SQLite holds open is not truncated or rewritten (audit 33): its
+ * WAL index (`-shm`) is mapped MAP_SHARED by every connection, outside the
+ * SIGBUS guard, so truncating it killed the process at the next query. The
+ * opened file is compared by device and inode with every registered database
+ * and its sidecars (db_live_files), checked BEFORE the truncate; a leaf named
+ * like a sidecar is refused whatever it is (the name check needs no live
+ * connection - another process's database, one opened later). */
 int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
                             const char **err_msg)
 {
+    if (hl_db_sidecar_name(path)) {
+        if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
+        return -1;
+    }
     int fd = fs_resolve_fd(cfg, path, HL_FS_OPEN_WRITE_KEEP, 0644, err_msg);
     if (fd < 0)
         return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || hl_db_live_file_match(&st)) {
+        close(fd);
+        if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
+        return -1;
+    }
     if (hl_fs_strip_setid(fd) != 0 || ftruncate(fd, 0) != 0) {
         close(fd);
         if (err_msg) *err_msg = "write_failed";
@@ -445,6 +463,13 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
         fail = "not_a_regular_file";
         goto out;
     }
+    /* Nor replaced (audit 33): a live database or sidecar renamed over
+     * leaves the connections on the old inode while a later one builds a
+     * second WAL index beside theirs. */
+    if (have_target && hl_db_live_file_match(&target)) {
+        fail = HL_DB_LIVE_FILE_ERR;
+        goto out;
+    }
     /* The temp must be the file of that name in the target's directory, or the
      * rename below would move something else. */
     if (fstat(tfd, &tmp_fd_st) != 0
@@ -566,6 +591,14 @@ int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
         if (rc == 0 && S_ISDIR(st.st_mode)) {
             close(par.parent_fd);
             if (err_msg) *err_msg = "not_a_regular_file";
+            goto audit;
+        }
+        /* Nor removed (audit 33): a deleted -wal takes committed
+         * transactions with it, a deleted -shm splits the WAL index. A
+         * symlink to one is only a name and may go. */
+        if (rc == 0 && S_ISREG(st.st_mode) && hl_db_live_file_match(&st)) {
+            close(par.parent_fd);
+            if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
             goto audit;
         }
         if (rc != 0 || unlinkat(par.parent_fd, par.leaf, 0) != 0) {

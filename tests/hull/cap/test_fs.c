@@ -21,6 +21,7 @@
 #include "hull/shared/host.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_policy.h"
+#include "hull/cap/db_live_files.h"
 #include "hull/utils/alloc.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -1112,6 +1113,133 @@ UTEST(hl_cap_fs, mmap_whole_file_window_fields)
     ASSERT_EQ(buf->map_len, buf->len);
     ASSERT_EQ(buf->foffset, (uint64_t)0);
     hl_cap_fs_munmap(buf);
+    teardown_fs();
+}
+
+/* ── Audit 33: database files SQLite holds open ─────────────────────── */
+
+/* Make sub/live.db + its -wal / -shm with known content, register the
+ * database as a live SQLite file, and alias the -shm through an in-root
+ * symlink (the route the in-place write takes). */
+static void live_db_setup(char *db_abs, size_t sz)
+{
+    setup_fs();
+    static const char *const names[] = { "live.db", "live.db-wal", "live.db-shm" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        char p[512];
+        snprintf(p, sizeof(p), "%s/sub/%s", test_dir, names[i]);
+        FILE *f = fopen(p, "wb");
+        if (f) { fputs("keep", f); fclose(f); }
+    }
+    char p[512];
+    snprintf(p, sizeof(p), "%s/sub/shmalias", test_dir);
+    (void)symlink("live.db-shm", p);
+    snprintf(db_abs, sz, "%s/sub/live.db", test_dir);
+    hl_db_live_file_add(db_abs);
+}
+
+static long long sub_size(const char *leaf)
+{
+    char p[512];
+    snprintf(p, sizeof(p), "%s/sub/%s", test_dir, leaf);
+    struct stat st;
+    return stat(p, &st) == 0 ? (long long)st.st_size : -1;
+}
+
+/* compute.stream's file output opens through hl_cap_fs_open_write_fd and
+ * truncated the -shm SQLite maps MAP_SHARED: the next query died of SIGBUS. */
+UTEST(hl_cap_fs, the_write_open_refuses_a_live_sqlite_sidecar)
+{
+    if (hl_host_is_windows()) return;
+    char db[512];
+    live_db_setup(db, sizeof db);
+    const char *err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_open_write_fd(&test_cfg, "sub/live.db-shm", &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_open_write_fd(&test_cfg, "sub/live.db", &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    EXPECT_EQ(4LL, sub_size("live.db-shm"));   /* not truncated */
+    EXPECT_EQ(4LL, sub_size("live.db"));
+    hl_db_live_file_remove(db);
+    teardown_fs();
+}
+
+/* fs.write through an in-root symlink writes in place: refused by inode. */
+UTEST(hl_cap_fs, an_in_place_write_refuses_a_live_sqlite_sidecar)
+{
+    if (hl_host_is_windows()) return;
+    char db[512];
+    live_db_setup(db, sizeof db);
+    const char *err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_write(&test_cfg, "sub/shmalias", "y", 1, &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    EXPECT_EQ(4LL, sub_size("live.db-shm"));
+    hl_db_live_file_remove(db);
+    teardown_fs();
+}
+
+/* Replacing (rename) or deleting a live database or sidecar is refused too. */
+UTEST(hl_cap_fs, replace_and_delete_refuse_a_live_sqlite_file)
+{
+    if (hl_host_is_windows()) return;
+    char db[512];
+    live_db_setup(db, sizeof db);
+    struct stat before, after;
+    ASSERT_EQ(host_path_stat("sub/live.db-wal", &before), 0);
+    const char *err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_write(&test_cfg, "sub/live.db-wal", "x", 1, &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_write(&test_cfg, "sub/live.db", "x", 1, &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    ASSERT_EQ(host_path_stat("sub/live.db-wal", &after), 0);
+    EXPECT_EQ((long long)before.st_ino, (long long)after.st_ino);
+    EXPECT_FALSE(temp_left("sub"));
+    err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_delete(&test_cfg, "sub/live.db-shm", &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    EXPECT_EQ(4LL, sub_size("live.db-shm"));
+    /* The link is only a name: removing it is fine. */
+    EXPECT_EQ(0, hl_cap_fs_delete(&test_cfg, "sub/shmalias", NULL));
+
+    /* Once the connection is gone the files are ordinary again. */
+    hl_db_live_file_remove(db);
+    EXPECT_EQ(0, hl_cap_fs_write(&test_cfg, "sub/live.db", "x", 1, NULL));
+    EXPECT_EQ(0, hl_cap_fs_delete(&test_cfg, "sub/live.db-wal", NULL));
+    teardown_fs();
+}
+
+/* A sidecar NAME is refused for an in-place write even with no live
+ * connection; an atomic write of such a name is an ordinary new file. */
+UTEST(hl_cap_fs, sidecar_names_are_refused_in_place_only)
+{
+    setup_fs();
+    const char *err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_open_write_fd(&test_cfg, "sub/other.db-WAL", &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    EXPECT_EQ(0, hl_cap_fs_write(&test_cfg, "sub/travel-journal", "j", 1, NULL));
+    EXPECT_EQ(1, hl_db_sidecar_name("a/b.db-journal"));
+    EXPECT_EQ(1, hl_db_sidecar_name("x-shm"));
+    EXPECT_EQ(0, hl_db_sidecar_name("shm"));
+    EXPECT_EQ(0, hl_db_sidecar_name("a-wal/b.txt"));
+    teardown_fs();
+}
+
+/* The registry is refcounted by path: one connection closing leaves the
+ * file live for the others. */
+UTEST(hl_cap_fs, live_db_registry_is_refcounted)
+{
+    if (hl_host_is_windows()) return;
+    char db[512];
+    live_db_setup(db, sizeof db);
+    hl_db_live_file_add(db);                    /* a second connection */
+    hl_db_live_file_remove(db);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("sub/live.db", &st), 0);
+    EXPECT_EQ(1, hl_db_live_file_match(&st));
+    hl_db_live_file_remove(db);
+    EXPECT_EQ(0, hl_db_live_file_match(&st));
     teardown_fs();
 }
 

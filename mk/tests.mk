@@ -1301,7 +1301,10 @@ fuzz/fuzz_span_sdk: fuzz/fuzz_span_sdk.c
 # hl_host_is_windows() for the mapping granularity (Windows maps views at the
 # 64 KiB allocation granularity, not the page size). It is a libc-only leaf, so
 # it costs the fuzzer nothing and keeps the "no Keel" property intact.
-fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/fs_resolve.c $(SRCDIR)/hull/cap/fs_policy.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/shared/host.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c $(VENDDIR)/sh_seal_arena/sh_seal_arena.c
+#
+# cap/db_live_files.c (audit 33) is the registry fs.c asks before it truncates,
+# replaces or deletes a file: a libc + pthread leaf, so the same holds.
+fuzz/fuzz_span_window: fuzz/fuzz_span_window.c $(SRCDIR)/hull/cap/fs.c $(SRCDIR)/hull/cap/db_live_files.c $(SRCDIR)/hull/cap/fs_resolve.c $(SRCDIR)/hull/cap/fs_policy.c $(SRCDIR)/hull/cap/audit.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/shared/host.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c $(VENDDIR)/sh_seal_arena/sh_seal_arena.c
 	$(CC) $(FUZZ_CFLAGS) -Ivendor/keel/include -I$(VENDDIR)/sh_seal_arena -o $@ $^
 
 # hull.source.lua parser: adversarial bytes -> lua.parse() over a bounded lua_State.
@@ -1481,6 +1484,13 @@ e2e-timers: $(BUILDDIR)/hull
 .PHONY: e2e-teardown
 e2e-teardown: $(BUILDDIR)/hull
 	sh tests/e2e_teardown.sh
+
+# A database file SQLite holds open is not truncated, replaced or removed
+# through the fs capability (audit 33): compute.stream's file output and an
+# fs.write through a symlink into the -shm killed the process with SIGBUS.
+.PHONY: e2e-db-live-files
+e2e-db-live-files: $(BUILDDIR)/hull
+	sh tests/e2e_db_live_files.sh
 
 e2e-js-runs: $(BUILDDIR)/hull
 	sh tests/e2e_js_runs.sh
