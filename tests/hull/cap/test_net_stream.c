@@ -29,6 +29,8 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
 
 /* ── Fixture ────────────────────────────────────────────────────────── */
 
@@ -699,6 +701,88 @@ UTEST(net_stream, bounded_waits_expire_without_killing_the_stream_poll)
 UTEST(net_stream, bounded_waits_expire_without_killing_the_stream_linked)
 {
     EXPECT_EQ(bounded_waits_case(hl_async_backend()), 0);
+}
+
+/* ── a failed send ──────────────────────────────────────────────────── */
+
+static uint64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* A stream with bytes queued whose peer resets the connection. The flush in
+ * io_ready fails; the queue used to be kept and io_rearm, which never looked
+ * at s->result, left the write watcher on the dead socket - so poll / kqueue
+ * reported it ready on every tick and the loop spun at 100% CPU until the
+ * stream was freed (audit 34). Now the queue is dropped and the watcher goes,
+ * so an idle tick waits its full timeout again.
+ *
+ * Returns 0, or the step that failed. */
+static int failed_send_case(const HlAsyncBackend *be)
+{
+    NetFix f; HlNetStream *s = NULL;
+    int step = 0;
+    if (fix_init_on(&f, be) != 0 || fix_listen(&f) != 0) return 1;
+
+    HlNetStreamConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.async      = f.ctx;
+    cfg.backend    = f.be;
+    cfg.pool       = f.pool;
+    cfg.host       = "127.0.0.1";
+    cfg.port       = f.port;
+    cfg.connect_ms = 5000;
+    cfg.write_cap  = 64 * 1024;
+    hl_net_stream_connect(&s, &cfg);
+    if (!s || pump_connect(&f, s, 400) != HL_NET_OK || fix_accept(&f) != 0) { step = 2; goto out; }
+
+    /* Fill the kernel buffers and then the stream's own queue: the peer reads
+     * nothing, so a write eventually finds no room and parks. */
+    static char chunk[16 * 1024];
+    memset(chunk, 'x', sizeof chunk);
+    int parked = 0;
+    for (int i = 0; i < 4096 && !parked; i++) {
+        int rc = hl_net_stream_write(s, chunk, sizeof chunk);
+        if (rc == HL_NET_E_AGAIN) parked = 1;
+        else if (rc != HL_NET_OK) { step = 3; goto out; }
+    }
+    if (!parked) { step = 4; goto out; }
+
+    /* Reset from the peer: SO_LINGER 0 makes close() send RST. */
+    struct linger lg = { 1, 0 };
+    setsockopt(f.peer_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);
+    close(f.peer_fd);
+    f.peer_fd = -1;
+    usleep(100 * 1000);            /* the RST reaches the stream's socket */
+
+    /* Let the failure land. */
+    for (int i = 0; i < 20; i++) f.be->tick(f.ctx, 10);
+
+    /* Ten ticks of 30 ms each must actually wait: a spinning loop returns
+     * from every one at once. */
+    uint64_t t0 = mono_ms();
+    for (int i = 0; i < 10; i++) f.be->tick(f.ctx, 30);
+    if (mono_ms() - t0 < 150) { step = 5; goto out; }
+
+    /* And the stream reports the failure instead of queueing more. */
+    if (hl_net_stream_write(s, "x", 1) != HL_NET_E_IO) { step = 6; goto out; }
+
+out:
+    if (s) hl_net_stream_free(s);
+    fix_free(&f);
+    return step;
+}
+
+UTEST(net_stream, a_failed_send_does_not_spin_the_loop_poll)
+{
+    EXPECT_EQ(failed_send_case(&hl_async_backend_poll), 0);
+}
+
+UTEST(net_stream, a_failed_send_does_not_spin_the_loop_linked)
+{
+    EXPECT_EQ(failed_send_case(hl_async_backend()), 0);
 }
 
 UTEST(net_stream, io_rejects_bad_arguments)
