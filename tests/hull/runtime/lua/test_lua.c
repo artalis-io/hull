@@ -11774,6 +11774,50 @@ UTEST(lua_audit18, image_encode_refused_past_the_heap_limit)
     hl_lua_free(&v);
     hl_cap_wasm_destroy(&cache);
 }
+
+/* Audit 35: an encode was charged 1 unit per 8 RGBA bytes whatever the
+ * format, ~30-40x under a PNG encode's real cost (~4x under JPEG's). A
+ * 512 x 512 RGBA image is 131072 units at the base rate; as PNG it is 32x
+ * that, past a 2M budget the old charge fit under, and as JPEG 4x. */
+UTEST(lua_audit35, image_encode_is_charged_per_format)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    if (luaL_dostring(v.L, "image = require('hull.image')") != LUA_OK) {
+        lua_settop(v.L, 0);   /* image compiled out */
+        hl_lua_free(&v);
+        return;
+    }
+    ASSERT_EQ(luaL_dostring(v.L,
+        "img = image.new(512, 512, 'rgba8', string.rep('\\0', 512 * 512 * 4))"),
+        LUA_OK);
+    lua_gc(v.L, LUA_GCCOLLECT, 0);
+
+    int64_t saved = v.max_instructions;
+    v.max_instructions = 2000000;
+    HL_LUA_ARM(&v, v.L);
+    int rc = luaL_dostring(v.L,
+        "local out, err = image.encode(img, 'jpeg') assert(out, err)");
+    EXPECT_EQ(rc, LUA_OK);
+    if (rc != LUA_OK) printf("  got: %s\n", lua_tostring(v.L, -1));
+    lua_settop(v.L, 0);
+
+    HL_LUA_ARM(&v, v.L);
+    rc = luaL_dostring(v.L, "pcall(image.encode, img, 'png') return 1");
+    EXPECT_NE(rc, LUA_OK);
+    const char *e = lua_tostring(v.L, -1);
+    EXPECT_NE_MSG(strstr(e ? e : "", "instruction limit"), NULL, e ? e : "");
+    lua_settop(v.L, 0);
+
+    v.max_instructions = saved;
+    HL_LUA_ARM(&v, v.L);
+    EXPECT_EQ(luaL_dostring(v.L, "img:close()"), LUA_OK);
+    lua_settop(v.L, 0);
+    hl_lua_free(&v);
+}
 #endif /* HL_ENABLE_IMAGE */
 #endif /* HL_ENABLE_WASM */
 

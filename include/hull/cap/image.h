@@ -139,6 +139,18 @@ uint64_t hl_image_decode_units(const void *data, size_t len,
  * at a fixed multiple of it (audit 18). Saturates. */
 uint64_t hl_image_encode_bytes(const HlImage *img);
 
+/* Instruction-budget units for ENCODING @p img as @p fmt_name, charged
+ * before the encode runs: one unit per 8 bytes the encoder works over
+ * (hl_image_encode_bytes), times a per-format factor for what the codec does
+ * per byte - PNG runs five filters over every row and deflates the result,
+ * JPEG a DCT per block. At the plain decode rate a 4000 x 4000 PNG encode
+ * took 1.4-3.5 s for 8M units, so ~12 fit the default budget and held the
+ * event loop ~40 s (audit 35). An unknown format pays the base rate (the
+ * encode refuses it before working). Saturates. */
+#define HL_IMAGE_ENCODE_PNG_FACTOR  32u
+#define HL_IMAGE_ENCODE_JPEG_FACTOR 4u
+uint64_t hl_image_encode_units(const HlImage *img, const char *fmt_name);
+
 /* Encode to bytes */
 int hl_image_encode(const HlImage *img, const char *fmt_name,
                      int quality,

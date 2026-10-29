@@ -294,6 +294,17 @@ release-artifact layout).
   lock check just before another instance locked the IP unlocked it again. A lock still
   running is now kept. (The audit-30 note that these counters were serialised so that none
   was lost was true of the counts, not of the lock.)
+- **PNG encodes were charged ~30-40x below their cost** (audit 35, both runtimes).
+  `image.encode` charged 1 unit per 8 RGBA bytes whatever the format, but stb_image_write's
+  PNG writer runs five filters over every row and then deflates with 16-deep hash chains:
+  a 4000 x 4000 PNG encode took 1.4-3.5 s for 8M units, so ~12 fit the default budget
+  and held the event loop ~40 s, under the 60 s run deadline. JPEG was ~4x under. Encodes
+  are now charged per format (`hl_image_encode_units`): 1 unit per 8 bytes the encoder
+  works over, times 32 for PNG and 4 for JPEG (`HL_IMAGE_ENCODE_{PNG,JPEG}_FACTOR`),
+  measured on incompressible pixels, the worst case. A budget's worth of encodes now
+  runs ~1.2-1.4 s, as a plain script loop does. A lower zlib level was tried and barely
+  helps on noise, so the PNG level is unchanged. A single PNG encode of more than ~3M
+  pixels is now over the default 100M budget; raise `--max-instructions` for that.
 - **`/login` response time told known addresses from unknown ones** (audit 31, both
   runtimes). An unknown address ran the dummy PBKDF2 verify but skipped the lockout reads
   and, on failure, the counter writes a known address did. An unknown address is now counted
