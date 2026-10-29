@@ -186,12 +186,49 @@ typedef struct HlGpuDispatchOpts {
                                       * copy (audit 29); NULL = sync call */
 } HlGpuDispatchOpts;
 
+/* ── Shader binding layout (audit 35) ─────────────────────────────── */
+
+/* The kind of resource a WGSL `@group(0) @binding(N)` declaration takes. */
+typedef enum {
+    HL_GPU_BIND_UNKNOWN = 0,      /* a handle type named by an alias: any
+                                   * texture / sampler slot is let through */
+    HL_GPU_BIND_UNIFORM,          /* var<uniform> */
+    HL_GPU_BIND_STORAGE,          /* var<storage, ...> */
+    HL_GPU_BIND_TEXTURE,          /* texture_2d<...> */
+    HL_GPU_BIND_STORAGE_TEXTURE,  /* texture_storage_2d<fmt, access> */
+    HL_GPU_BIND_SAMPLER,          /* sampler */
+    HL_GPU_BIND_OTHER,            /* any other texture / sampler type:
+                                   * nothing Hull binds can fill it */
+} HlGpuBindKind;
+
+#ifndef HL_GPU_SHADER_BINDINGS_MAX
+#define HL_GPU_SHADER_BINDINGS_MAX 64
+#endif
+
+typedef struct HlGpuBindingDecl {
+    uint16_t binding;
+    uint8_t  kind;      /* HlGpuBindKind */
+    int8_t   format;    /* a storage texture's HlGpuTexFormat, -1 = any */
+} HlGpuBindingDecl;
+
 /* Cached compiled pipeline */
 typedef struct HlGpuPipeline {
     char  name[HL_GPU_NAME_MAX];
     void *handle;           /* backend-specific pipeline handle */
     void *bind_group_layout;
+    /* Group 0's declared bindings, read from the WGSL source at compile
+     * (hl_gpu_wgsl_layout). layout_known = 0 when the source used a form
+     * the reader does not follow (a const-expression index, ...): the
+     * backend's own validation is then the only check. */
+    int              layout_known;
+    int              decl_count;
+    HlGpuBindingDecl decls[HL_GPU_SHADER_BINDINGS_MAX];
 } HlGpuPipeline;
+
+/* Read the `@group(0) @binding(N) var ...` declarations of @p wgsl into
+ * @p out (layout_known, decl_count, decls). Returns 0 when the layout is
+ * known, -1 when it is not (out->layout_known = 0). Never fails a compile. */
+int hl_gpu_wgsl_layout(const char *wgsl, size_t len, HlGpuPipeline *out);
 
 /* Persistent named buffer */
 typedef struct HlGpuBuffer {
@@ -419,6 +456,25 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
 /* Pipeline (multi-stage dispatch) */
 int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
                          HlGpuPipelineResult *result, const char **err_msg);
+
+/* Check one dispatch's (or one pipeline stage's) bindings against the
+ * shader's declared layout before anything reaches the backend (audit 35):
+ * wgpu-native aborts the process on a submit whose bind group failed
+ * validation. Hull binds the uniforms (when given) at binding 0, the
+ * buffers after them in order, then each texture (storage: 1 slot;
+ * sampled: view + sampler). Every one of those bindings must be declared
+ * in group 0 with that kind (a storage texture also with the texture's
+ * format). Returns 0, or -1 with *err = "binding_mismatch". A pipeline
+ * whose layout is not known passes (the backend validates). @p dev
+ * resolves named persistent textures' kind and format; NULL = use the
+ * descriptor's. A declared binding Hull does not fill is left to the
+ * backend: WGSL drops a declaration the entry point never uses from the
+ * layout, which the source alone cannot tell. */
+int hl_gpu_bindings_check(const HlGpuPipeline *pipeline,
+                          const HlGpuDevice *dev, int has_uniforms,
+                          const HlGpuBufferDesc *buffers, int buffer_count,
+                          const HlGpuTextureDesc *textures, int texture_count,
+                          const char **err);
 
 /* Free all data pointers in a pipeline result */
 void hl_cap_gpu_pipeline_result_free(HlGpuPipelineResult *result);

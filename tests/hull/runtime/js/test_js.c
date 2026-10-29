@@ -14454,6 +14454,15 @@ static int jgpu_has(int device, int texture, const char *name)
     return 0;
 }
 
+/* The test shader declares the storage bindings the dispatches below make:
+ * every binding is checked against the shader's declarations (audit 35). */
+#define HL_TEST_GPU_WGSL \
+    "@group(0) @binding(0) var<storage, read_write> a: array<u32>; " \
+    "@group(0) @binding(1) var<storage, read_write> b: array<u32>; " \
+    "@group(0) @binding(2) var<storage, read_write> c: array<u32>; " \
+    "@group(0) @binding(3) var<storage, read_write> d: array<u32>; " \
+    "fn main() {}"
+
 UTEST(js_gpu, devices_are_listed)
 {
     ASSERT_EQ(jgpu_init(2), 0);
@@ -14529,7 +14538,7 @@ UTEST(js_gpu, an_unknown_device_is_refused)
 UTEST(js_gpu, dispatch_reads_back_the_buffer_it_names)
 {
     ASSERT_EQ(jgpu_init(1), 0);
-    JGPU_EXPECT("gpu.compile('id', 'fn main() {}');"
+    JGPU_EXPECT("gpu.compile('id', '" HL_TEST_GPU_WGSL "');"
                 "const a = gpu.dispatch('id', { buffers: ["
                 "  { data: u('hello') }, { size: 3 }] });"          /* default: 0 */
                 "const b = gpu.dispatch('id', { buffers: ["
@@ -14552,7 +14561,7 @@ UTEST(js_gpu, dispatch_reads_back_the_buffer_it_names)
 UTEST(js_gpu, compile_and_reads_take_the_device)
 {
     ASSERT_EQ(jgpu_init(2), 0);
-    JGPU_EXPECT("gpu.compile('id1', 'fn main() {}', { device: 1 });"
+    JGPU_EXPECT("gpu.compile('id1', '" HL_TEST_GPU_WGSL "', { device: 1 });"
                 "let r = s(gpu.dispatch('id1', { device: 1, buffers: [{ data: u('one') }] }));"
                 "try { gpu.dispatch('id1', { buffers: [{ data: u('x') }] }); }"
                 "catch (e) { r += ' ' + e.message; }"
@@ -14574,7 +14583,7 @@ UTEST(js_gpu, compile_and_reads_take_the_device)
 }
 
 /* The twin of lua_gpu.load_takes_the_device. */
-static const char jgpu_wgsl[] = "fn main() {}";
+static const char jgpu_wgsl[] = HL_TEST_GPU_WGSL;
 static const HlEntry jgpu_shader_entries[] = {
     { "shaders/id.wgsl", (const unsigned char *)jgpu_wgsl, sizeof jgpu_wgsl - 1 },
     { 0, 0, 0 }
@@ -14603,7 +14612,7 @@ UTEST(js_gpu, load_takes_the_device)
 UTEST(js_gpu, a_pipeline_with_several_outputs_returns_an_array)
 {
     ASSERT_EQ(jgpu_init(1), 0);
-    JGPU_EXPECT("gpu.compile('id', 'fn main() {}');"
+    JGPU_EXPECT("gpu.compile('id', '" HL_TEST_GPU_WGSL "');"
                 "const stages = ["
                 "  { shader: 'id', buffers: [{ name: 'a', data: u('xy') }] },"
                 "  { shader: 'id', buffers: [{ name: 'a' }, { data: u('zz') }] }];"
@@ -14622,7 +14631,7 @@ UTEST(js_gpu, read_backs_past_the_heap_limit_are_refused)
 {
     ASSERT_EQ(jgpu_init(1), 0);
     JGPU_EXPECT("gpu.buffer('big', new ArrayBuffer(2 << 20));"
-                "gpu.compile('id', 'fn main() {}'); return 'ok';", "ok");
+                "gpu.compile('id', '" HL_TEST_GPU_WGSL "'); return 'ok';", "ok");
     size_t saved = js.max_heap_bytes;
     js.max_heap_bytes = 1u << 20;
     JGPU_EXPECT("let r = '';"

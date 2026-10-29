@@ -425,6 +425,356 @@ int hl_gpu_tex_binding_check(int desc_storage, int tex_storage,
     return slots;
 }
 
+/* ── Shader binding layout (audit 35) ──────────────────────────────── */
+
+/* wgpu-native validates a bind group against the pipeline's layout, logs
+ * the error and returns an invalid group; the submit that uses it is then
+ * a Rust panic, which cannot unwind out of the C API and aborts the whole
+ * process. So the bindings a call makes are checked against the shader's
+ * declarations first. WGSL has no reflection in webgpu.h, so the
+ * declarations are read from the source at compile: only the module-scope
+ * `@group(G) @binding(B) var<...> name : type` form, with comments
+ * skipped. Anything the reader does not follow leaves the layout unknown
+ * (never a failed compile); the backend then refuses such a call itself
+ * before it submits. */
+
+static size_t wl_skip_ws(const char *s, size_t n, size_t i)
+{
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+            c == '\v' || c == '\f') {
+            i++;
+        } else if (c == '/' && i + 1 < n && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n' && s[i] != '\r') i++;
+        } else if (c == '/' && i + 1 < n && s[i + 1] == '*') {
+            /* WGSL block comments nest. */
+            int depth = 1;
+            i += 2;
+            while (i < n && depth > 0) {
+                if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+                    depth++; i += 2;
+                } else if (s[i] == '*' && i + 1 < n && s[i + 1] == '/') {
+                    depth--; i += 2;
+                } else {
+                    i++;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+
+static int wl_ident_start(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static int wl_ident_char(char c)
+{
+    return wl_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+/* The identifier at s[i], as [*start, *start + *len); returns the index
+ * past it (== i when there is none). */
+static size_t wl_ident(const char *s, size_t n, size_t i,
+                       const char **start, size_t *len)
+{
+    size_t j = i;
+    if (j < n && wl_ident_start(s[j])) {
+        while (j < n && wl_ident_char(s[j])) j++;
+    }
+    *start = s + i;
+    *len = j - i;
+    return j;
+}
+
+static int wl_is(const char *id, size_t len, const char *word)
+{
+    size_t wl = strlen(word);
+    return len == wl && memcmp(id, word, wl) == 0;
+}
+
+/* `( <int> [,] )` at s[i]: a decimal or 0x literal with an optional i / u
+ * suffix. Returns the index past ')', or 0 when it is not that form. */
+static size_t wl_int_arg(const char *s, size_t n, size_t i, unsigned long *out)
+{
+    i = wl_skip_ws(s, n, i);
+    if (i >= n || s[i] != '(') return 0;
+    i = wl_skip_ws(s, n, i + 1);
+    unsigned long v = 0;
+    size_t digits = 0;
+    if (i + 1 < n && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+        i += 2;
+        while (i < n) {
+            char c = s[i];
+            int d = (c >= '0' && c <= '9') ? c - '0'
+                  : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                  : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (d < 0) break;
+            if (v > 0xFFFFFul) return 0;
+            v = v * 16 + (unsigned long)d;
+            digits++; i++;
+        }
+    } else {
+        while (i < n && s[i] >= '0' && s[i] <= '9') {
+            if (v > 0xFFFFFul) return 0;
+            v = v * 10 + (unsigned long)(s[i] - '0');
+            digits++; i++;
+        }
+    }
+    if (digits == 0) return 0;
+    if (i < n && (s[i] == 'i' || s[i] == 'u')) i++;
+    if (i < n && wl_ident_char(s[i])) return 0;
+    i = wl_skip_ws(s, n, i);
+    if (i < n && s[i] == ',') i = wl_skip_ws(s, n, i + 1);
+    if (i >= n || s[i] != ')') return 0;
+    *out = v;
+    return i + 1;
+}
+
+/* Skip a balanced (...) or <...> group starting at s[i] (== open). Returns
+ * the index past the close, or 0 when unbalanced. */
+static size_t wl_skip_group(const char *s, size_t n, size_t i,
+                            char open, char close)
+{
+    int depth = 0;
+    while (i < n) {
+        size_t j = wl_skip_ws(s, n, i);
+        if (j != i) { i = j; continue; }
+        if (s[i] == open) depth++;
+        else if (s[i] == close) {
+            if (--depth == 0) return i + 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static int wl_storage_format(const char *id, size_t len)
+{
+    if (wl_is(id, len, "rgba8unorm"))  return HL_GPU_TEX_RGBA8;
+    if (wl_is(id, len, "r8unorm"))     return HL_GPU_TEX_R8;
+    if (wl_is(id, len, "rgba16float")) return HL_GPU_TEX_RGBA16F;
+    if (wl_is(id, len, "r32float"))    return HL_GPU_TEX_R32F;
+    return 100;   /* a format no Hull texture has */
+}
+
+/* After `var` with group/binding attributes: fill *kind / *format. Returns
+ * the index past the type's first identifier, or 0 when not followed. */
+static size_t wl_var_decl(const char *s, size_t n, size_t i,
+                          int *kind, int *format)
+{
+    const char *id;
+    size_t len;
+    *format = -1;
+    int space = -1;
+    i = wl_skip_ws(s, n, i);
+    if (i < n && s[i] == '<') {
+        size_t j = wl_skip_ws(s, n, i + 1);
+        j = wl_ident(s, n, j, &id, &len);
+        if (wl_is(id, len, "uniform"))      space = HL_GPU_BIND_UNIFORM;
+        else if (wl_is(id, len, "storage")) space = HL_GPU_BIND_STORAGE;
+        else return 0;   /* private / workgroup / function take no binding */
+        i = wl_skip_group(s, n, i, '<', '>');
+        if (i == 0) return 0;
+    }
+    i = wl_skip_ws(s, n, i);
+    i = wl_ident(s, n, i, &id, &len);           /* the variable's name */
+    if (len == 0) return 0;
+    i = wl_skip_ws(s, n, i);
+    if (i >= n || s[i] != ':') return 0;
+    i = wl_skip_ws(s, n, i + 1);
+    i = wl_ident(s, n, i, &id, &len);           /* the type */
+    if (len == 0) return 0;
+    if (space >= 0) {
+        *kind = space;
+        return i;
+    }
+    if (wl_is(id, len, "sampler")) {
+        *kind = HL_GPU_BIND_SAMPLER;
+    } else if (wl_is(id, len, "texture_2d")) {
+        *kind = HL_GPU_BIND_TEXTURE;
+    } else if (wl_is(id, len, "texture_storage_2d")) {
+        *kind = HL_GPU_BIND_STORAGE_TEXTURE;
+        size_t j = wl_skip_ws(s, n, i);
+        if (j < n && s[j] == '<') {
+            j = wl_skip_ws(s, n, j + 1);
+            j = wl_ident(s, n, j, &id, &len);
+            if (len == 0) return 0;
+            *format = wl_storage_format(id, len);
+        }
+    } else if (len > 8 && memcmp(id, "texture_", 8) == 0) {
+        *kind = HL_GPU_BIND_OTHER;      /* 1d / 3d / cube / array / depth / ... */
+    } else if (wl_is(id, len, "sampler_comparison")) {
+        *kind = HL_GPU_BIND_OTHER;
+    } else {
+        *kind = HL_GPU_BIND_UNKNOWN;    /* an alias */
+    }
+    return i;
+}
+
+int hl_gpu_wgsl_layout(const char *wgsl, size_t len, HlGpuPipeline *out)
+{
+    if (!out) return -1;
+    out->layout_known = 0;
+    out->decl_count = 0;
+    if (!wgsl) return -1;
+
+    const char *s = wgsl;
+    size_t n = len;
+    size_t i = 0;
+    int have_group = 0, have_binding = 0;
+    unsigned long group = 0, binding = 0;
+    int count = 0;
+
+    for (;;) {
+        i = wl_skip_ws(s, n, i);
+        if (i >= n) break;
+        char c = s[i];
+        const char *id;
+        size_t idlen;
+
+        if (c == '@') {
+            i = wl_skip_ws(s, n, i + 1);
+            i = wl_ident(s, n, i, &id, &idlen);
+            if (idlen == 0) return -1;
+            if (wl_is(id, idlen, "group") || wl_is(id, idlen, "binding")) {
+                unsigned long v = 0;
+                size_t j = wl_int_arg(s, n, i, &v);
+                if (j == 0) return -1;   /* a const-expression index */
+                if (id[0] == 'g') {
+                    if (have_group) return -1;
+                    have_group = 1; group = v;
+                } else {
+                    if (have_binding) return -1;
+                    have_binding = 1; binding = v;
+                }
+                i = j;
+            } else {
+                size_t j = wl_skip_ws(s, n, i);
+                if (j < n && s[j] == '(') {
+                    j = wl_skip_group(s, n, j, '(', ')');
+                    if (j == 0) return -1;
+                    i = j;
+                }
+            }
+            continue;
+        }
+
+        if (wl_ident_start(c)) {
+            i = wl_ident(s, n, i, &id, &idlen);
+            if (have_group || have_binding) {
+                if (!wl_is(id, idlen, "var") || !have_group || !have_binding)
+                    return -1;
+                int kind = HL_GPU_BIND_UNKNOWN, format = -1;
+                size_t j = wl_var_decl(s, n, i, &kind, &format);
+                if (j == 0) return -1;
+                i = j;
+                if (group == 0) {
+                    if (binding > 0xFFFF) return -1;
+                    for (int k = 0; k < count; k++)
+                        if (out->decls[k].binding == (uint16_t)binding)
+                            return -1;          /* WGSL refuses it anyway */
+                    if (count >= HL_GPU_SHADER_BINDINGS_MAX) return -1;
+                    out->decls[count].binding = (uint16_t)binding;
+                    out->decls[count].kind = (uint8_t)kind;
+                    out->decls[count].format = (int8_t)format;
+                    count++;
+                }
+                have_group = have_binding = 0;
+            }
+            continue;
+        }
+
+        if (have_group || have_binding) return -1;
+        i++;
+    }
+    if (have_group || have_binding) return -1;
+
+    out->decl_count = count;
+    out->layout_known = 1;
+    return 0;
+}
+
+static const HlGpuBindingDecl *wl_find_decl(const HlGpuPipeline *p,
+                                            int binding)
+{
+    if (binding < 0) return NULL;
+    for (int k = 0; k < p->decl_count; k++)
+        if (p->decls[k].binding == (uint16_t)binding)
+            return &p->decls[k];
+    return NULL;
+}
+
+/* Binding @p b must be declared, as @p want (UNKNOWN declarations accept a
+ * texture / sampler slot), and a storage texture with @p format. */
+static int wl_slot_ok(const HlGpuPipeline *p, int b, int want, int format)
+{
+    const HlGpuBindingDecl *d = wl_find_decl(p, b);
+    if (!d) return 0;
+    if (d->kind == HL_GPU_BIND_UNKNOWN)
+        return want == HL_GPU_BIND_TEXTURE ||
+               want == HL_GPU_BIND_STORAGE_TEXTURE ||
+               want == HL_GPU_BIND_SAMPLER;
+    if (d->kind != want) return 0;
+    if (want == HL_GPU_BIND_STORAGE_TEXTURE && d->format >= 0 &&
+        d->format != format)
+        return 0;
+    return 1;
+}
+
+int hl_gpu_bindings_check(const HlGpuPipeline *pipeline,
+                          const HlGpuDevice *dev, int has_uniforms,
+                          const HlGpuBufferDesc *buffers, int buffer_count,
+                          const HlGpuTextureDesc *textures, int texture_count,
+                          const char **err)
+{
+    static const char *mismatch = "binding_mismatch";
+    if (!pipeline || !pipeline->layout_known)
+        return 0;
+    if (buffer_count < 0 || texture_count < 0 ||
+        (buffer_count > 0 && !buffers) || (texture_count > 0 && !textures)) {
+        if (err) *err = mismatch;
+        return -1;
+    }
+    int b = 0;
+    if (has_uniforms) {
+        if (!wl_slot_ok(pipeline, b, HL_GPU_BIND_UNIFORM, -1)) goto bad;
+        b++;
+    }
+    for (int i = 0; i < buffer_count; i++, b++)
+        if (!wl_slot_ok(pipeline, b, HL_GPU_BIND_STORAGE, -1)) goto bad;
+    for (int i = 0; i < texture_count; i++) {
+        const HlGpuTextureDesc *td = &textures[i];
+        int format = (int)td->format;
+        if (td->name && dev) {
+            for (int t = 0; t < dev->texture_count; t++) {
+                if (strcmp(dev->textures[t].name, td->name) == 0) {
+                    format = (int)dev->textures[t].format;
+                    break;
+                }
+            }
+        }
+        if (td->storage) {
+            if (!wl_slot_ok(pipeline, b, HL_GPU_BIND_STORAGE_TEXTURE, format))
+                goto bad;
+            b++;
+        } else {
+            if (!wl_slot_ok(pipeline, b, HL_GPU_BIND_TEXTURE, -1) ||
+                !wl_slot_ok(pipeline, b + 1, HL_GPU_BIND_SAMPLER, -1))
+                goto bad;
+            b += 2;
+        }
+    }
+    return 0;
+bad:
+    if (err) *err = mismatch;
+    return -1;
+}
+
 int hl_cap_gpu_available(HlGpuCtx *ctx)
 {
     return ctx && ctx->device_count > 0;
@@ -488,6 +838,9 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
                                    wgsl, wgsl_len, slot);
     if (rc == HL_GPU_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", name);
+        /* Group 0's declared bindings, checked before every dispatch and
+         * pipeline stage that uses it (audit 35). */
+        (void)hl_gpu_wgsl_layout(wgsl, wgsl_len, slot);
         dev->pipeline_count++;
     }
 
@@ -550,6 +903,18 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
         pthread_mutex_unlock(&dev->mutex);
         if (err_msg) *err_msg = err_no_shader;
         return HL_GPU_ERR_NOT_FOUND;
+    }
+
+    /* Every binding the call makes must be one the shader declares, before
+     * wgpu sees it: a submit with a bind group wgpu found invalid aborts
+     * the process (audit 35). */
+    if (hl_gpu_bindings_check(pipeline, dev,
+                              opts->uniforms && opts->uniforms_len > 0,
+                              opts->buffers, opts->buffer_count,
+                              opts->textures, opts->texture_count,
+                              err_msg) != 0) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_DISPATCH;
     }
 
     if (stalled_refuse(ctx, dev)) {
@@ -645,6 +1010,17 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts_in,
             pthread_mutex_unlock(&dev->mutex);
             if (err_msg) *err_msg = "shader_not_found";
             return HL_GPU_ERR_NOT_FOUND;
+        }
+        /* As hl_cap_gpu_dispatch: each stage's bindings against its
+         * shader's declarations (audit 35). */
+        const HlGpuPipelineStage *st = &opts->stages[i];
+        if (hl_gpu_bindings_check(pipelines[i], dev,
+                                  st->uniforms && st->uniforms_len > 0,
+                                  st->buffers, st->buffer_count,
+                                  st->textures, st->texture_count,
+                                  err_msg) != 0) {
+            pthread_mutex_unlock(&dev->mutex);
+            return HL_GPU_ERR_DISPATCH;
         }
     }
 
