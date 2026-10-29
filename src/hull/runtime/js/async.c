@@ -353,8 +353,6 @@ static void hl_js_hold_release(HlJS *js, HlAsyncCtx *hold, int outcome)
     hl_net_op_complete(js->base.net_ctx, (HlSuspendOp *)&hold->op);
 }
 
-static void hl_js_run_tag_clear(HlJS *js, uint64_t tag);
-
 int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
 {
     int st = (int)JS_PromiseState(js->ctx, ret);
@@ -372,21 +370,18 @@ int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
      * continuing it, through the holder of the connection (as
      * hl_js_run_yield_check's runs). Without, the run is failed now, as a
      * tripped one: the caller answers 500, fails app.main, reschedules the
-     * timer, ends the ws callback. */
+     * timer, ends the ws callback. Its tag stays failed (audit 33): a
+     * reaction it left on a promise Hull does not drive is dropped whenever
+     * that promise settles. */
     if (st >= 0 && hl_js_run_tag_failed(js, js->entry_tag)) {
-        uint64_t tag = js->entry_tag;
         if (js->last_async_cont) {
             HlJsRunOnce *run = hl_js_run_attach(js, ret);
-            if (run) {
-                run->txn_held = 1;
-                hl_js_run_tag_clear(js, tag);
-            }
+            if (run) run->txn_held = 1;
             hl_js_run_drop(js, run);
             return 1;
         }
         js->budget_tripped = 1;
         js->budget_txn_failed = 1;
-        hl_js_run_tag_clear(js, tag);
         return 0;
     }
     if (st != JS_PROMISE_PENDING)
@@ -395,57 +390,129 @@ int hl_js_entry_park(HlJS *js, JSValue ret, int *state)
         /* Waiting on a promise Hull does not drive: the entry ends now, but
          * the handler may yet resume - from whichever later entry settles
          * the promise, inside that entry's transaction. Not holding one of
-         * its own: the check says so and rolls it back (audit 8 c_db L1). */
-        hl_js_run_yield_check(js, NULL);
+         * its own: the check rolls it back (audit 8 c_db L1), and the run is
+         * failed - its tag, so the code after the await never runs (its
+         * writes went on in autocommit), and the entry, answered as a
+         * tripped one (500, app.main exit 1, ...) rather than as a handler
+         * that awaits an undriven promise (an empty 200) (audit 33). */
+        if (hl_js_run_yield_check(js, NULL, js->entry_tag)) {
+            js->budget_tripped = 1;
+            js->budget_txn_failed = 1;
+        }
         return 0;
     }
     HlJsRunOnce *run = hl_js_run_attach(js, ret);
-    hl_js_run_yield_check(js, run);
+    hl_js_run_yield_check(js, run, js->entry_tag);
     hl_js_run_drop(js, run);
     return 1;
 }
 
-/* The failed-run list is a fixed ring (HlJS.txn_failed_tags): a free slot
- * (a run that ended, hl_js_run_tag_clear) is taken first, else the oldest
- * entry is overwritten. It never grows. */
-static void hl_js_run_tag_fail(HlJS *js, uint64_t tag)
+/* The failed-run set (HlJS.txn_dead_tags) is a sorted array. A tag leaves
+ * it only in a sweep, and only once no pending job and no reaction on a
+ * pending promise carries it (JS_ForEachLiveJobTag): nothing of that run can
+ * run any more, so nothing is left to drop. A tag that stays is backed by at
+ * least one live reaction or job, each a JS-heap allocation, so the set is
+ * bounded by the VM heap limit, not by a count that could evict a live run;
+ * the sweep runs when the set has doubled since the last one (at least
+ * HL_JS_DEAD_TAG_SWEEP_MIN), which keeps its O(heap) walk amortised over the
+ * failures that grew it. */
+#define HL_JS_DEAD_TAG_SWEEP_MIN 64
+
+static size_t hl_js_dead_tag_pos(const HlJS *js, uint64_t tag)
 {
-    if (tag == 0 || hl_js_run_tag_failed(js, tag)) return;
-    unsigned n = (unsigned)(sizeof js->txn_failed_tags /
-                            sizeof js->txn_failed_tags[0]);
-    for (unsigned i = 0; i < n; i++) {
-        if (js->txn_failed_tags[i] == 0) {
-            js->txn_failed_tags[i] = tag;
-            return;
-        }
+    size_t lo = 0, hi = js->txn_dead_len;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (js->txn_dead_tags[mid] < tag) lo = mid + 1; else hi = mid;
     }
-    js->txn_failed_tags[js->txn_failed_next % n] = tag;
-    js->txn_failed_next = (js->txn_failed_next + 1) % n;
+    return lo;
 }
 
-/* The failed run has ended: nothing of it is left to stop by its tag (its
- * continuations share a run record marked txn_held, or there are none, and
- * its queued jobs were dropped). Frees its slot (audit 32). */
-static void hl_js_run_tag_clear(HlJS *js, uint64_t tag)
+typedef struct {
+    HlJS          *js;
+    unsigned char *live;   /* one flag per txn_dead_tags entry */
+} HlJsDeadSweep;
+
+static void hl_js_dead_tag_seen(void *opaque, uint64_t tag)
+{
+    HlJsDeadSweep *sw = opaque;
+    size_t i = hl_js_dead_tag_pos(sw->js, tag);
+    if (i < sw->js->txn_dead_len && sw->js->txn_dead_tags[i] == tag)
+        sw->live[i] = 1;
+}
+
+/* Forget the failed tags no code can run under any more. */
+static void hl_js_dead_tag_sweep(HlJS *js)
+{
+    size_t n = js->txn_dead_len;
+    if (n == 0 || !js->rt) return;
+    unsigned char *live = hl_alloc_calloc(js->base.alloc, n, 1);
+    if (!live) return;   /* keep them all: never forget a live one */
+    HlJsDeadSweep sw = { js, live };
+    if (JS_ForEachLiveJobTag(js->rt, hl_js_dead_tag_seen, &sw) == 0) {
+        size_t w = 0;
+        for (size_t i = 0; i < n; i++)
+            if (live[i]) js->txn_dead_tags[w++] = js->txn_dead_tags[i];
+        js->txn_dead_len = w;
+    }
+    hl_alloc_free(js->base.alloc, live, n);
+    size_t next = js->txn_dead_len * 2;
+    js->txn_dead_sweep_at = next > HL_JS_DEAD_TAG_SWEEP_MIN
+                            ? next : HL_JS_DEAD_TAG_SWEEP_MIN;
+}
+
+static void hl_js_run_tag_fail(HlJS *js, uint64_t tag)
 {
     if (!js || tag == 0) return;
-    unsigned n = (unsigned)(sizeof js->txn_failed_tags /
-                            sizeof js->txn_failed_tags[0]);
-    for (unsigned i = 0; i < n; i++)
-        if (js->txn_failed_tags[i] == tag) js->txn_failed_tags[i] = 0;
+    size_t i = hl_js_dead_tag_pos(js, tag);
+    if (i < js->txn_dead_len && js->txn_dead_tags[i] == tag) return;
+    if (js->txn_dead_len >= js->txn_dead_sweep_at) {
+        hl_js_dead_tag_sweep(js);
+        i = hl_js_dead_tag_pos(js, tag);
+    }
+    if (js->txn_dead_len == js->txn_dead_cap) {
+        size_t ncap = js->txn_dead_cap ? js->txn_dead_cap * 2 : 16;
+        uint64_t *nt = (ncap > SIZE_MAX / sizeof *nt) ? NULL
+            : hl_alloc_realloc(js->base.alloc, js->txn_dead_tags,
+                               js->txn_dead_cap * sizeof *nt,
+                               ncap * sizeof *nt);
+        if (!nt) {
+            /* The run cannot be named: it must still never run again, so
+             * every job is dropped from now on - a VM that cannot hold a few
+             * more bytes is failing anyway (hl_js_run_jobs). */
+            log_error("[hull:c] out of memory recording a failed run: no "
+                      "further promise jobs run on this VM");
+            js->txn_dead_oom = 1;
+            return;
+        }
+        js->txn_dead_tags = nt;
+        js->txn_dead_cap = ncap;
+    }
+    memmove(js->txn_dead_tags + i + 1, js->txn_dead_tags + i,
+            (js->txn_dead_len - i) * sizeof *js->txn_dead_tags);
+    js->txn_dead_tags[i] = tag;
+    js->txn_dead_len++;
 }
 
 int hl_js_run_tag_failed(const HlJS *js, uint64_t tag)
 {
     if (!js || tag == 0) return 0;
-    unsigned n = (unsigned)(sizeof js->txn_failed_tags /
-                            sizeof js->txn_failed_tags[0]);
-    for (unsigned i = 0; i < n; i++)
-        if (js->txn_failed_tags[i] == tag) return 1;
-    return 0;
+    if (js->txn_dead_oom) return 1;
+    size_t i = hl_js_dead_tag_pos(js, tag);
+    return i < js->txn_dead_len && js->txn_dead_tags[i] == tag;
 }
 
-int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run)
+void hl_js_run_tags_free(HlJS *js)
+{
+    if (!js) return;
+    if (js->txn_dead_tags)
+        hl_alloc_free(js->base.alloc, js->txn_dead_tags,
+                      js->txn_dead_cap * sizeof *js->txn_dead_tags);
+    js->txn_dead_tags = NULL;
+    js->txn_dead_len = js->txn_dead_cap = js->txn_dead_sweep_at = 0;
+}
+
+int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run, uint64_t tag)
 {
     const char *txn = hl_db_registry_open_txn(js->base.db_registry);
     /* Always NULL only in a DB-less build (the inline stub). */
@@ -457,6 +524,12 @@ int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run)
               "transaction is rolled back and the run fails", txn);
     hl_db_registry_guard_stale_txns(js->base.db_registry);
     if (run) run->txn_held = 1;
+    /* And its tag (audit 33): the record stops its continuations, but a
+     * reaction it left on a promise Hull does not drive (`const s =
+     * hull.sleep(..); BEGIN; ...; await gate; ...; await s`) was queued as
+     * soon as another entry settled the gate, and its code ran on, in
+     * autocommit, before the sleep's resume failed the run. */
+    hl_js_run_tag_fail(js, tag);
     return 1;
 }
 
@@ -676,12 +749,8 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
             }
             if (jc->link.once) jc->link.once->txn_held = 1;
             if (once) once->txn_held = 1;
-            /* A wired run's continuations all share its record, so the
-             * record now stops them and the slot can go. An unwired
-             * chain's siblings have records of their own: the tag stays. */
-            if (once && once == jc->link.once &&
-                !JS_IsUndefined(jc->link.handler_promise))
-                hl_js_run_tag_clear(js, jc->link.run_tag);
+            /* The tag stays failed (audit 33): a reaction the run left on
+             * a promise Hull does not drive may be queued later. */
             aborted = 1;
         }
     }
@@ -906,7 +975,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
          * callback, app.main) waits again: not holding a transaction - on a
          * new op, an earlier one, or a promise Hull does not drive. */
         if (waits_again)
-            hl_js_run_yield_check(js, run);
+            hl_js_run_yield_check(js, run, jc->link.run_tag);
         /* A request still waiting must keep its connection suspended until
          * the run completes: Keel otherwise sends the response as it stands
          * when this resume returns (an empty 200), while the handler goes on
@@ -1439,6 +1508,7 @@ static void js_task_fire(void *user)
     int64_t       save_count       = js->instruction_count;
     int           save_tripped     = js->budget_tripped;
     int           save_timed_out   = js->budget_timed_out;
+    int           save_txn_failed  = js->budget_txn_failed;
     /* The interrupted run's wall-clock deadline: the arm below sets the
      * task's own (cap/run_watchdog.h). */
     uint64_t      save_deadline    = hl_run_watch_save(&js->run_watch);
@@ -1502,6 +1572,7 @@ static void js_task_fire(void *user)
     js->instruction_count      = save_count;
     js->budget_tripped         = save_tripped;
     js->budget_timed_out       = save_timed_out;
+    js->budget_txn_failed      = save_txn_failed;
     hl_run_watch_restore(&js->run_watch, save_deadline);
     js->entry_tag = save_entry_tag;
     JS_SetJobTag(js->rt, save_job_tag);

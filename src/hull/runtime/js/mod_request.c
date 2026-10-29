@@ -707,7 +707,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         js->active_req  = NULL;
         js->active_life = NULL;
         /* Waiting again: not while holding a transaction (audit 6 M2). */
-        hl_js_run_yield_check(js, jc->link.once);
+        hl_js_run_yield_check(js, jc->link.once, jc->link.run_tag);
         mp_cont_set_parked(jc, 1);
         if (hl_cap_multipart_park(jc->iter->wrapper, mp_js_park_thunk, jc) != 0)
             mp_cont_set_parked(jc, 0);
@@ -858,7 +858,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         /* Waiting again - on a new op or one made earlier (audit 8 M7): not
          * holding a transaction. A run deferred to its holder has settled. */
         if (handler_pending)
-            hl_js_run_yield_check(js, run);
+            hl_js_run_yield_check(js, run, jc->link.run_tag);
         /* Waiting on a promise Hull does not drive (`await gate` after the
          * multipart loop): no op holds the connection, no read is parked on
          * it, and no continuation was wired - nothing is left that will

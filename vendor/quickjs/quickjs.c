@@ -53560,6 +53560,44 @@ static void promise_reaction_data_free(JSRuntime *rt,
     js_free_rt(rt, rd);
 }
 
+/* HULL PATCH 0008 (audit 33): call @cb with the tag of every job that can
+   still run - each pending job, and each reaction registered on a pending
+   promise (an `await` / `then` waiting for it). A tag reported by neither has
+   no code left that can run under it. A tag may be reported more than once.
+   -1 (nothing reported) while the collector runs: the object list is not
+   walkable then. */
+int JS_ForEachLiveJobTag(JSRuntime *rt, void (*cb)(void *opaque, uint64_t tag),
+                         void *opaque)
+{
+    struct list_head *el, *el2;
+    int i;
+
+    if (rt->gc_phase != JS_GC_PHASE_NONE)
+        return -1;
+    list_for_each(el, &rt->job_list) {
+        cb(opaque, list_entry(el, JSJobEntry, link)->tag);
+    }
+    list_for_each(el, &rt->gc_obj_list) {
+        JSGCObjectHeader *gp = list_entry(el, JSGCObjectHeader, link);
+        JSObject *p;
+        JSPromiseData *s;
+        if (js_rc(gp)->gc_obj_type != JS_GC_OBJ_TYPE_JS_OBJECT)
+            continue;
+        p = (JSObject *)gp;
+        if (p->class_id != JS_CLASS_PROMISE)
+            continue;
+        s = p->u.opaque;
+        if (!s || s->promise_state != JS_PROMISE_PENDING)
+            continue;
+        for(i = 0; i < 2; i++) {
+            list_for_each(el2, &s->promise_reactions[i]) {
+                cb(opaque, list_entry(el2, JSPromiseReactionData, link)->tag);
+            }
+        }
+    }
+    return 0;
+}
+
 static JSValue promise_reaction_job(JSContext *ctx, int argc,
                                     JSValueConst *argv)
 {

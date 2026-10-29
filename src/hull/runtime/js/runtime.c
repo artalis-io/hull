@@ -1709,6 +1709,7 @@ void hl_js_free(HlJS *js)
         JS_FreeRuntime(js->rt);
         js->rt = NULL;
     }
+    hl_js_run_tags_free(js);   /* after the runtime: its jobs are gone */
     /* After the runtime: its writers / readers hold their own references,
      * so the store goes with the last of them in any order. */
     hl_js_blob_release(js);

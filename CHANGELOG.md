@@ -31,6 +31,22 @@ release-artifact layout).
   `hull:_task` task of a serving app that admits TUI could run the same synchronous loop and
   re-arm too, holding the event loop for as long as the terminal produced events or idle
   ticks. Only app.main's own run re-arms now; any other entry keeps the single run it got.
+- **JS: a run failed for holding a transaction across a wait still resumed later** (audit 33).
+  Audit 32 dropped a failed run's queued jobs, but forgot the run's tag as soon as its
+  request was answered, and the 32-slot list it lived in overwrote its oldest entry. A
+  reaction the run had left on a promise Hull does not drive was queued only when that
+  promise settled - from a later request - and then ran: the handler's code after the
+  `await` went on in autocommit and its writes were committed, after a 500 had reported the
+  transaction rolled back. A handler that awaited such a promise holding a transaction, with
+  no other run's job involved, was answered an empty 200 and continued the same way; and
+  with a Hull op also in flight (`const s = hull.sleep(..); BEGIN; ...; await gate; ...;
+  await s`) its code ran on as soon as the gate settled, before the sleep's resume failed
+  the run. Every place a run is found waiting in a transaction now fails its tag, a failed
+  tag is kept until no pending job and no reaction on a pending promise carries it (a sweep
+  over QuickJS's live jobs and promises, HULL PATCH 0008's `JS_ForEachLiveJobTag`), and the
+  undriven-promise case is answered as a failed run (500; app.main exits 1, a timer is
+  rescheduled, a ws callback ended). Regression legs in `tests/e2e_js_runs.sh`.
+
 - **JS: a run failed for holding a transaction across a wait kept running** (audit 32). The
   audit-31 check rolls back the transaction of a run whose stretch of jobs ends while it is
   open and marks the run failed, but only a later async resume read that mark: the run's own

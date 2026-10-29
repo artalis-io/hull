@@ -59,6 +59,15 @@
 #       await wrote in autocommit and its request was answered 200. Its jobs
 #       are now dropped and the run ends failed (500).
 #
+# Audit 33:
+#   M   A run failed that way still ran its code after the await once the
+#       promise it awaited settled in a LATER entry's drain (its failed tag
+#       was forgotten when its request was answered), and a handler that
+#       awaited an undriven promise holding a transaction was answered an
+#       empty 200 and continued later; with a Hull op also in flight, its
+#       code ran on as soon as the gate settled. Each is now a 500 whose code
+#       after the await never runs and commits nothing.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -272,6 +281,54 @@ app.get("/f32b", async (_req, res) => {
     res.text("b");
 });
 app.get("/f32state", (_req, res) => res.text(f32After));
+
+/* Audit 33: the same runs with the gate settled by a LATER request (/x33*)
+ * instead of inside the run's own drain. g33a: the f32b shape (another
+ * run's job ends the stretch); g33b: no foreign job - the handler just
+ * awaits an undriven promise holding a transaction; g33c: a Hull op (a
+ * sleep) is in flight beside it. Each answers 500, its code after the
+ * await never runs, and nothing of it is committed. */
+const g33 = { a: "none", b: "none", c: "none" };
+let w33a0 = null, w33a = null, w33b = null, w33c = null;
+const g33a0 = new Promise(r => { w33a0 = r; });
+const g33aGate = new Promise(r => { w33a = r; });
+const g33bGate = new Promise(r => { w33b = r; });
+const g33cGate = new Promise(r => { w33c = r; });
+app.get("/g33a0", async (_req, res) => { await g33a0; res.text("a0"); });
+app.get("/g33a", async (_req, res) => {
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('g33a1')");
+    w33a0();
+    await g33aGate;
+    g33.a = "continued";
+    conn.exec("INSERT INTO t VALUES ('g33a2')");
+    try { conn.exec("COMMIT"); } catch (e) { /* SQLite: no transaction */ }
+    res.text("a");
+});
+app.get("/g33b", async (_req, res) => {
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('g33b1')");
+    await g33bGate;
+    g33.b = "continued";
+    conn.exec("INSERT INTO t VALUES ('g33b2')");
+    try { conn.exec("COMMIT"); } catch (e) { /* SQLite: no transaction */ }
+    res.text("b");
+});
+app.get("/g33c", async (_req, res) => {
+    const s = hull.sleep(1500);
+    conn.exec("BEGIN");
+    conn.exec("INSERT INTO t VALUES ('g33c1')");
+    await g33cGate;
+    g33.c = "continued";
+    conn.exec("INSERT INTO t VALUES ('g33c2')");
+    try { conn.exec("COMMIT"); } catch (e) { /* SQLite: no transaction */ }
+    await s;
+    res.text("c");
+});
+app.get("/x33a", (_req, res) => { w33a(); res.text("x"); });
+app.get("/x33b", (_req, res) => { w33b(); res.text("x"); });
+app.get("/x33c", (_req, res) => { w33c(); res.text("x"); });
+app.get("/g33state", (_req, res) => res.json(g33));
 app.get("/y31a", async (_req, res) => {
     res.text("a");
     await new Promise((r) => { y31Wake = r; });
@@ -607,6 +664,42 @@ case "$rows" in
 esac
 grep -q "handler failed: the run waited holding a database transaction" "$TMPDIR/log" \
     && pass "the failure is reported" || fail "the failure is reported" "$(tail -5 "$TMPDIR/log")"
+out=$(curl -s -m 10 "$URL/fast")
+[ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
+
+echo "=== audit 33: a failed run never resumes, whenever its promise settles ==="
+curl -s -m 10 -o /dev/null "$URL/g33a0" &
+sleep 0.3
+code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$URL/g33a")
+[ "$code" = 500 ] && pass "a run failed by another run's job is answered 500" \
+    || fail "a run failed by another run's job is answered 500" "$code"
+code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$URL/g33b")
+[ "$code" = 500 ] && pass "a handler awaiting an undriven promise in a transaction is answered 500" \
+    || fail "a handler awaiting an undriven promise in a transaction is answered 500" "$code"
+curl -s -m 10 -o "$TMPDIR/g33c.out" -w '%{http_code}' "$URL/g33c" > "$TMPDIR/g33c.code" &
+G33C=$!
+sleep 0.3
+curl -s -m 10 -o /dev/null "$URL/x33a"
+curl -s -m 10 -o /dev/null "$URL/x33b"
+curl -s -m 10 -o /dev/null "$URL/x33c"
+sleep 0.2
+out=$(curl -s -m 10 "$URL/g33state")
+[ "$out" = '{"a":"none","b":"none","c":"none"}' ] \
+    && pass "no failed run's code ran after a later request settled its promise" \
+    || fail "no failed run's code ran after a later request settled its promise" "$out"
+wait "$G33C" || true
+code=$(cat "$TMPDIR/g33c.code")
+[ "$code" = 500 ] && pass "a failed run with an op in flight is answered 500" \
+    || fail "a failed run with an op in flight is answered 500" "$code"
+out=$(curl -s -m 10 "$URL/g33state")
+[ "$out" = '{"a":"none","b":"none","c":"none"}' ] \
+    && pass "its code after the await still did not run" \
+    || fail "its code after the await still did not run" "$out"
+rows=$(curl -s -m 10 "$URL/rows")
+case "$rows" in
+    *g33*) fail "none of their writes is committed" "$rows" ;;
+    *) pass "none of their writes is committed" ;;
+esac
 out=$(curl -s -m 10 "$URL/fast")
 [ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
 

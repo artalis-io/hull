@@ -352,8 +352,12 @@ int hl_js_conn_held_elsewhere(HlJS *js, KlHttpConn *conn);
  * started and before the await: `const p = http.fetch(..);
  * conn.exec("BEGIN"); await p`. If a registry connection is in a
  * transaction now, roll it back, log, and mark @p run (txn_held) so its next
- * resume fails it instead of continuing it. 1 = the run is failed. */
-int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run);
+ * resume fails it instead of continuing it, and its @p tag failed so a
+ * pending job of it is dropped whenever it is queued (audit 33). 1 = the run
+ * is failed. */
+int hl_js_run_yield_check(HlJS *js, HlJsRunOnce *run, uint64_t tag);
+/* Free the failed-run set (hl_js_free, after the QuickJS runtime). */
+void hl_js_run_tags_free(HlJS *js);
 
 /* Audit 31: a transaction found open where code of run @p tag stops - the
  * end of a resume whose continuation no entry waits on (an un-awaited
