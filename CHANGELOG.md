@@ -200,6 +200,18 @@ release-artifact layout).
   prefix no account key can have), with the same reads and writes, and throttled the same
   way; a locked unknown address gets the same 401 as a locked account.
 
+- **A Lua `require` with no caller frame skipped the module declaration gate** (audit 33).
+  Before `app.manifest()` is applied, a top-level require is recorded by the import tracker
+  and checked against the declared modules once the manifest is in; a require with no Lua
+  frame above it was taken for the runtime's own `hull.json` preload and neither recorded nor
+  refused. Calling `require` as a coroutine body - `coroutine.wrap(require)("hull.db")` or
+  `coroutine.resume(coroutine.create(require), "hull.crypto")` - therefore loaded any
+  first-party module with an empty `modules` list, and the app used it (queried the default
+  database) with the startup check passing. Such a require is now the app's import: tracked
+  before the manifest, refused after it. The runtime's preload goes through the trusted entry,
+  and a stdlib frame exempts a require only when it calls `require` by name (a stdlib helper
+  calling a function the app handed it no longer lends it that exemption).
+
 - **MySQL: a COMMIT tripped in its wait is finished; insert_if_absent refuses a truncated
   value** (audit 31).
   - A run whose budget or deadline tripped while the OK of a lone, wholly sent COMMIT was

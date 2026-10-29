@@ -803,6 +803,62 @@ LUA
 
 run_verify_sig_no_code_cache
 
+# Audit 33: a require with no Lua caller frame - require as a coroutine's
+# body - was taken for the runtime's own preload: neither tracked by the
+# pre-manifest import tracker nor refused, so an app with an empty modules list
+# loaded hull.db (and queried the database). It must fail app load like any
+# other undeclared top-level import.
+run_require_no_frame() {
+    echo "--- require with no caller frame (lua) ---"
+    d=$(mktemp -d "${TMPDIR:-/tmp}/hull_a33req.XXXXXX")
+    case "$HULL_BIN" in
+        /*) bin="$HULL_BIN" ;;
+        *)  bin="$(pwd)/$HULL_BIN" ;;
+    esac
+    for shape in wrap create pcall; do
+        case "$shape" in
+            wrap)   line='local m = coroutine.wrap(require)("hull.db")' ;;
+            create) line='local _, m = coroutine.resume(coroutine.create(require), "hull.db")' ;;
+            pcall)  line='local _, m = pcall(coroutine.wrap(require), "hull.db")' ;;
+        esac
+        for decl in none db; do
+            if [ "$decl" = db ]; then mods='"hull/db@1"'; else mods=''; fi
+            cat > "${d}/app.lua" <<EOF
+local app = require("hull.app")
+${line}
+app.manifest({ modules = { ${mods} } })
+app.main(function(ctx)
+    ctx.stdout:write("A33_RAN " .. type(m) .. "\n")
+    return 0
+end)
+EOF
+            rc=$(cd "$d" && hull_run "$HULL_RC_TMP" "$bin" run app.lua)
+            out=$(cat "$HULL_RC_TMP")
+            if [ "$decl" = db ]; then
+                expect_eq "require no-frame ($shape): declared hull/db runs" "0" "$rc"
+                case "$out" in
+                    *"A33_RAN table"*) pass "require no-frame ($shape): declared module loads" ;;
+                    *) fail "require no-frame ($shape): declared module did not load (got '$out')" ;;
+                esac
+            else
+                if [ "$rc" = "1" ]; then
+                    pass "require no-frame ($shape): undeclared hull/db fails app load (exit $rc)"
+                else
+                    fail "require no-frame ($shape): undeclared hull/db (expected exit 1, got $rc)"
+                fi
+                case "$out" in
+                    *A33_RAN*) fail "require no-frame ($shape): app.main ran" ;;
+                    *"hull/db"*"not declared"*) pass "require no-frame ($shape): names hull/db" ;;
+                    *) fail "require no-frame ($shape): message (got '$out')" ;;
+                esac
+            fi
+        done
+    done
+    rm -rf "$d"
+}
+
+run_require_no_frame
+
 echo
 echo "${PASS}/$((PASS + FAIL)) CLI e2e tests passed"
 [ "${FAIL}" -eq 0 ]

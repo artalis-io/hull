@@ -675,6 +675,21 @@ static int require_named_by_stdlib(lua_State *L)
     return require_caller_is_stdlib(L);
 }
 
+/* 1 when an untrusted require is the app's own import: anything but stdlib
+ * code calling `require` by name. That includes a require with NO Lua frame
+ * above it - `coroutine.wrap(require)("hull.db")`, require as a coroutine's
+ * body - which was taken for the runtime's own preload and neither tracked
+ * nor refused, so an app loaded any first-party module with an empty
+ * modules list (audit 33). pcall / xpcall / table.sort / string.gsub put a C
+ * frame there and a metamethod the frame that triggered it, neither of them
+ * stdlib; and a stdlib helper calling a function the app handed it (hull.map's
+ * fn, retry's retry_on) does not name `require`. The runtime's own requires
+ * go through hl_lua_require_trusted, which skips this. */
+static int require_is_app_import(lua_State *L)
+{
+    return !require_named_by_stdlib(L);
+}
+
 /* 1 when @p name is a first-party module the app has not declared and the
  * caller is app code, i.e. a cache hit the declaration gate would refuse. */
 static int cached_but_undeclared(lua_State *L, HlLua *lua, const char *name)
@@ -684,7 +699,7 @@ static int cached_but_undeclared(lua_State *L, HlLua *lua, const char *name)
     const HlModuleSpec *spec = hl_module_registry_find_runtime(name, '.');
     if (!spec || hl_module_set_contains_spec(lua->base.module_set, spec))
         return 0;
-    return !require_caller_is_stdlib(L);
+    return require_is_app_import(L);
 }
 
 /* trusted: the runtime's own C code asking for a module it uses (hull.map
@@ -770,9 +785,7 @@ static int require_impl(lua_State *L, int trusted)
          * require("hull.json") was never checked against the manifest. */
         if (!trusted && lua && !lua->base.module_set) {
             const HlModuleSpec *spec = hl_module_registry_find_runtime(name, '.');
-            lua_Debug ar;
-            if (spec && lua_getstack(L, 1, &ar) && lua_getinfo(L, "S", &ar) &&
-                ar.source && !hl_lua_source_is_stdlib(ar.source))
+            if (spec && require_is_app_import(L))
                 hl_import_tracker_record(&lua->base, spec->name);
         }
         lua_remove(L, -2); /* remove __hull_loaded table */
@@ -818,29 +831,15 @@ static int require_impl(lua_State *L, int trusted)
                         "See `hull modules available` for the full list.",
                         name, spec->name, (int)spec->api_major, deps_part);
                 }
-            } else {
-                /* Only track requires originating from user-level Lua
-                 * code. Two non-user paths bypass tracking:
-                 *
-                 *   1) The C runtime pre-loads hull.json into the
-                 *      registry stash before the app file runs (see
-                 *      hl_lua_register_modules); there's no Lua frame
-                 *      above this require, lua_getstack returns 0.
-                 *   2) Stdlib modules that transitively require other
-                 *      stdlib (middleware/session → hull.crypto): the
-                 *      Lua caller's chunk source starts with "hull.".
-                 *      The user's entry-point declaration is what
-                 *      matters; auto-admit covers transitive deps.
-                 *
-                 * Tracking fires only when there IS a Lua caller AND
-                 * that caller is NOT in the hull namespace. */
-                lua_Debug ar;
-                int caller_is_user = lua_getstack(L, 1, &ar) &&
-                                     lua_getinfo(L, "S", &ar) &&
-                                     ar.source &&
-                                     !hl_lua_source_is_stdlib(ar.source);
-                if (caller_is_user)
-                    hl_import_tracker_record(&lua->base, spec->name);
+            } else if (!trusted && require_is_app_import(L)) {
+                /* Track every import but two: the runtime's own (trusted:
+                 * the hull.json preload, hull.map loading hull._async), and
+                 * stdlib modules requiring their dependencies by name
+                 * (middleware/session -> hull.crypto), which auto-admit
+                 * covers. A require with no Lua caller frame at all is the
+                 * app's (coroutine.wrap(require)): it used to be taken for
+                 * the preload and skipped (audit 33). */
+                hl_import_tracker_record(&lua->base, spec->name);
             }
         }
     }
@@ -1327,7 +1326,9 @@ int hl_lua_register_stdlib(HlLua *lua)
      * intrinsic as of v0.1.0 release. The internal stash bypasses
      * the manifest gate because it's not user-callable. */
     if (lua->base.platform_vfs) {
-        lua_getglobal(L, "require");
+        /* The trusted entry: the untrusted global would track (or, once
+         * the module set is wired, refuse) this frameless require. */
+        lua_pushcfunction(L, hl_lua_require_trusted);
         lua_pushstring(L, "hull.json");
         if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
             log_error("[hull:c] failed to pre-load json: %s",
