@@ -14,6 +14,7 @@
 #include "hull/runtime/factory.h"
 #include "hull/stdlib_feature.h"
 #include "hull/vfs.h"
+#include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
 
 #include "hull/cap/fs.h"          /* HlFsConfig - test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
@@ -230,7 +231,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             const char *derr = NULL;
             HlDbHandle *def = hl_db_registry_get(ctx->db_registry, "default", &derr);
             if (!def) {
-                fprintf(stderr, "hull: %s\n", derr ? derr : "cannot open database");
+                hl_eprintf_line("hull: %s", derr ? derr : "cannot open database");
                 hl_db_registry_destroy(ctx->db_registry);
                 ctx->db_registry = NULL;
                 hl_app_context_free(ctx);
@@ -335,7 +336,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                  * other references against any variable). */
                 char ref_err[256] = {0};
                 if (hl_manifest_check_env_refs(&m, ref_err, sizeof ref_err) != 0) {
-                    fprintf(stderr, "[app-context] manifest: %s\n", ref_err);
+                    hl_eprintf_line("[app-context] manifest: %s", ref_err);
                     hl_manifest_free(&m);
                     hl_app_context_free(ctx);
                     return -1;
@@ -365,7 +366,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                             m.fs_read,  (size_t)m.fs_read_count,
                             m.fs_write, (size_t)m.fs_write_count,
                             &ctx->fs_policy_storage, &perr) != 0) {
-                        fprintf(stderr, "[app-context] fs policy: %s\n",
+                        hl_eprintf_line("[app-context] fs policy: %s",
                                 perr ? perr : "compile failed");
                         hl_manifest_free(&m);
                         hl_app_context_free(ctx);
@@ -385,7 +386,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 #endif
                 hl_manifest_free(&m);
                 if (rc != 0) {
-                    fprintf(stderr, "[app-context] module resolver: %s\n", err);
+                    hl_eprintf_line("[app-context] module resolver: %s", err);
                     hl_app_context_free(ctx);
                     return -1;
                 }
@@ -406,7 +407,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             char itrack_err[256] = {0};
             if (hl_import_tracker_validate(ctx->rt, ctx->rt->module_set,
                                            itrack_err, sizeof(itrack_err)) != 0) {
-                fprintf(stderr, "[app-context] %s\n", itrack_err);
+                hl_eprintf_line("[app-context] %s", itrack_err);
                 hl_app_context_free(ctx);
                 return -1;
             }

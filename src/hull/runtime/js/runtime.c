@@ -48,6 +48,7 @@
 
 /* VFS: O(log n) lookups into sorted entry arrays */
 #include "hull/vfs.h"
+#include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
 
 /* ── Forward declarations ───────────────────────────────────────────── */
 
@@ -2322,7 +2323,7 @@ static int coerce_js_exit_code(JSContext *ctx, JSValue v)
         return i;
     }
     const char *s = JS_ToCString(ctx, v);
-    fprintf(stderr, "[hull:main] non-numeric return: %s\n",
+    hl_eprintf_line("[hull:main] non-numeric return: %s",
             s ? s : "(unprintable)");
     if (s) JS_FreeCString(ctx, s);
     return 1;
@@ -2492,7 +2493,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         if (wrc != 0) {
             JSValue exc = JS_GetException(ctx);
             const char *msg = JS_ToCString(ctx, exc);
-            fprintf(stderr, "[hull:main] %s\n",
+            hl_eprintf_line("[hull:main] %s",
                     msg ? msg : "cannot wait for main's promise");
             if (msg) JS_FreeCString(ctx, msg);
             else JS_FreeValue(ctx, JS_GetException(ctx));
@@ -2545,7 +2546,7 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     int rc;
     if (rejected) {
         const char *msg = JS_ToCString(ctx, value);
-        fprintf(stderr, "[hull:main] promise rejected: %s\n",
+        hl_eprintf_line("[hull:main] promise rejected: %s",
                 msg ? msg : "(unknown)");
         if (msg) JS_FreeCString(ctx, msg);
         rc = 1;

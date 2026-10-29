@@ -87,6 +87,7 @@
 #include "hull/static.h"
 #include "hull/tool.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
+#include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
@@ -907,7 +908,7 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
          * migrated and served (audit 25). */
         char why[sizeof(s->default_db) + 160];
         if (hl_default_db_path_check(s->cfg.db_path, why, sizeof why) != 0) {
-            fprintf(stderr, "hull: %s\n", why);
+            hl_eprintf_line("hull: %s", why);
             return -1;
         }
     }

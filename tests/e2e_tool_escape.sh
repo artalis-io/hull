@@ -187,6 +187,78 @@ else
     cat "$WORKDIR/out.json"
 fi
 
+# ── App and request text printed to stderr (audit 34) ───────────────────
+# app.main's error / rejection / non-numeric return, a handler error that
+# quotes a remote multipart field, and an app-context load error were
+# written with plain fprintf, so their control bytes reached the operator's
+# terminal raw.
+echo "=== app and request text on stderr is escaped (audit 34) ==="
+RAPP="$WORKDIR/rapp"
+mkdir -p "$RAPP/lerr" "$RAPP/lret" "$RAPP/jrej" "$RAPP/jret" "$RAPP/jthrow"
+printf 'app.main(function() error("boom\\27]52;c;cHduZWQ=\\7\\nFORGED") end)\n' \
+    > "$RAPP/lerr/app.lua"
+printf 'app.main(function() return "ret\\27]0;PWNED\\7" end)\n' > "$RAPP/lret/app.lua"
+printf 'import { app } from "hull:app";\napp.main(async () => { await null; throw new Error("rej\\x1b]52;c;cHduZWQ=\\x07"); });\n' \
+    > "$RAPP/jrej/app.js"
+printf 'import { app } from "hull:app";\napp.main(() => "ret\\x1b]0;PWNED\\x07");\n' \
+    > "$RAPP/jret/app.js"
+printf 'import { app } from "hull:app";\napp.main(() => { throw new Error("thr\\x1b]0;PWNED\\x07"); });\n' \
+    > "$RAPP/jthrow/app.js"
+run "lua app.main error"            "$RAPP/lerr"   "$HULL" app.lua
+run "lua app.main non-numeric"      "$RAPP/lret"   "$HULL" app.lua
+run "js app.main promise rejected"  "$RAPP/jrej"   "$HULL" app.js
+run "js app.main non-numeric"       "$RAPP/jret"   "$HULL" app.js
+run "js app.main throw"             "$RAPP/jthrow" "$HULL" app.js
+
+# hull test: a module-resolver error naming the app's own module string.
+TAPP="$WORKDIR/tapp"
+mkdir -p "$TAPP/tests"
+printf 'app.manifest({ modules = { "hull/http-server@1", "hull/nope\\27]0;PWNED\\7@1" } })\napp.get("/", function(_, res) res:text("x") end)\n' \
+    > "$TAPP/app.lua"
+printf 'test("t", function() end)\n' > "$TAPP/tests/test_app.lua"
+run "hull test (module resolver error)" "$TAPP" "$HULL" test .
+
+# A multipart handler error quoting a field of the remote request body.
+if command -v curl >/dev/null 2>&1; then
+    MAPP="$WORKDIR/mapp"
+    mkdir -p "$MAPP"
+    cat > "$MAPP/app.js" <<'JSEOF'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1"] });
+app.get("/health", (_req, res) => { res.text("ok"); });
+app.post("/up", async (req, res) => {
+    for await (const part of req.multipart()) {
+        const u8 = new Uint8Array(await part.read());
+        let s = "";
+        for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+        throw new Error("bad field: " + s);
+    }
+    res.text("none");
+}, { multipart: { maxPartSize: 65536 } });
+JSEOF
+    MPORT=$((20000 + $$ % 20000))
+    "$HULL" --no-sandbox -p "$MPORT" "$MAPP/app.js" > "$WORKDIR/out.mp" 2>&1 &
+    MPID=$!
+    up=0
+    for _ in $(seq 1 50); do
+        if curl -s "http://127.0.0.1:$MPORT/health" >/dev/null 2>&1; then up=1; break; fi
+        sleep 0.1
+    done
+    if [ "$up" -eq 1 ]; then
+        curl -s -o /dev/null -X POST "http://127.0.0.1:$MPORT/up" \
+            -F "v=x${OSC52}y" >/dev/null 2>&1
+        sleep 0.3
+        kill "$MPID" 2>/dev/null; wait "$MPID" 2>/dev/null
+        check_out "multipart handler error (request body)" "$WORKDIR/out.mp"
+    else
+        kill "$MPID" 2>/dev/null; wait "$MPID" 2>/dev/null
+        fail "multipart server did not start"
+        head -5 "$WORKDIR/out.mp"
+    fi
+else
+    echo "  SKIP: curl not found (multipart leg)"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

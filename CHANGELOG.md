@@ -348,6 +348,16 @@ release-artifact layout).
 - **JS `rbac.hasAnyRole(uid, "admin")` checked each character as a role** (audit 30). A
   string is now one role in both runtimes (Lua's `has_any_role` returned false for one);
   `hasAnyPermission` / `has_any_permission` likewise.
+- **App and request text reached stderr raw on paths outside the log** (audit 34, both
+  runtimes). app.main's error, a JS app.main whose promise rejected, a non-numeric app.main
+  return, a JS handler failing after its multipart body parked (whose error can quote a field
+  of the remote request body), the app-context load errors `hull test` / `hull check` /
+  `hull agent` print (module names, `$VAR` names, fs paths, import names from the cloned tree)
+  and SQLite open / reopen messages naming a DSN were written with plain `fprintf`, so an ESC /
+  OSC sequence or a newline in them rewrote the operator's terminal or forged a log line. The
+  multipart error now goes through `log_error` (escaped by the installed callback) and the rest
+  through `hl_eprintf_line` (`shared/term_escape.h`), which escapes the whole line as log
+  records are escaped. Covered by the audit-34 legs of `tests/e2e_tool_escape.sh`.
 - **A MySQL statement of exactly 16 MiB - 1 byte hung the connection** (audit 30). A packet
   length of `ff ff ff` means "continued in the next packet", so the server waited for an
   empty terminator packet Hull never sent, holding the event loop until the read timeout (for

@@ -26,6 +26,8 @@
 #include <string.h>
 #include <strings.h>   /* strncasecmp */
 
+#include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
+
 /* ── SQLite context ───────────────────────────────────────────────── */
 
 typedef struct {
@@ -108,7 +110,7 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     hl_cap_db_sqlite_setup();   /* the charged allocator, before any open */
     int rc = sqlite3_open(dsn, &s->db);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "hull: sqlite open failed for '%s': %s (code %d)\n",
+        hl_eprintf_line("hull: sqlite open failed for '%s': %s (code %d)",
                 dsn ? dsn : "(null)",
                 s->db ? sqlite3_errmsg(s->db) : sqlite3_errstr(rc), rc);
         if (s->db) sqlite3_close(s->db);
@@ -117,7 +119,7 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     }
 
     if (hl_cap_db_init(s->db) != 0) {
-        fprintf(stderr, "hull: sqlite opened '%s' but init failed: %s\n",
+        hl_eprintf_line("hull: sqlite opened '%s' but init failed: %s",
                 dsn ? dsn : "(null)", sqlite3_errmsg(s->db));
         sqlite3_close(s->db);
         free(s);
@@ -134,8 +136,8 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     if (file && file[0]) {
         s->live_path = strdup(file);
         if (!s->live_path || hl_db_live_file_add(s->live_path) != 0) {
-            fprintf(stderr, "hull: sqlite opened '%s' but could not record "
-                            "it (out of memory)\n", dsn ? dsn : "(null)");
+            hl_eprintf_line("hull: sqlite opened '%s' but could not record "
+                            "it (out of memory)", dsn ? dsn : "(null)");
             free(s->live_path);
             hl_stmt_cache_destroy(&s->cache);
             sqlite3_close(s->db);
@@ -183,8 +185,8 @@ static void sqlite_replace_conn(HlDbSqliteCtx *s)
     HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
     int ok = sqlite3_open(path, &ndb) == SQLITE_OK && hl_cap_db_init(ndb) == 0;
     if (!ok) {
-        fprintf(stderr, "hull: sqlite could not reopen '%s' to leave a stuck "
-                        "transaction: %s\n", path,
+        hl_eprintf_line("hull: sqlite could not reopen '%s' to leave a stuck "
+                        "transaction: %s", path,
                 ndb ? sqlite3_errmsg(ndb) : "out of memory");
         if (ndb) sqlite3_close(ndb);
         s->broken = 1;
@@ -194,8 +196,8 @@ static void sqlite_replace_conn(HlDbSqliteCtx *s)
         s->db = ndb;
         s->broken = 0;
         hl_stmt_cache_init(&s->cache, ndb, s->alloc);
-        fprintf(stderr, "hull: sqlite connection to '%s' replaced: its "
-                        "transaction could not be rolled back\n", path);
+        hl_eprintf_line("hull: sqlite connection to '%s' replaced: its "
+                        "transaction could not be rolled back", path);
     }
     hl_db_budget_restore(budget);
     free(path);

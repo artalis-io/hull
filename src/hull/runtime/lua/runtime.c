@@ -1130,7 +1130,7 @@ static int lua_coerce_exit_code(lua_State *co)
         return ((int)d) & 0xff;
     }
     const char *s = lua_tostring(co, -1);
-    fprintf(stderr, "[hull:main] non-numeric return: %s\n",
+    hl_eprintf_line("[hull:main] non-numeric return: %s",
             s ? s : "(unprintable)");
     return 1;
 }
@@ -1237,7 +1237,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua_pushlightuserdata(L, &prep);
     if (lua_pcall(L, 1, 2, 0) != LUA_OK) {
         char ebuf[256];
-        fprintf(stderr, "[hull:main] cannot start main: %s\n",
+        hl_eprintf_line("[hull:main] cannot start main: %s",
                 hl_lua_error_text(lua, L, -1, ebuf, sizeof ebuf));
         lua_settop(L, base);
         if (prep.ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, prep.ref);
@@ -1306,7 +1306,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
         rc = lua_coerce_exit_code(co);
     } else {
         char ebuf[512];
-        fprintf(stderr, "[hull:main] error: %s\n",
+        hl_eprintf_line("[hull:main] error: %s",
                 hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
         rc = 1;
     }
