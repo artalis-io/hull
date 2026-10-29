@@ -55,7 +55,8 @@ local function main()
     -- returns a discovery (an invalid one on a bad root / internal defect). Exit 0; the
     -- consumer reads `valid` / `complete` from the JSON.
     local disc = analyze.analyze(app_dir, { source_kind = "standalone" })
-    tool.stdout(json.encode(projection.project(disc)) .. "\n")
+    -- Encoded JSON: raw (json.encode escapes every C0 control itself).
+    tool.stdout_raw(json.encode(projection.project(disc)) .. "\n")
     tool.exit(0)
 end
 

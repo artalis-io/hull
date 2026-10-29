@@ -2088,9 +2088,16 @@ check canonicalises a not-yet-existing path through its nearest existing ancesto
 `/tmp/../x` no longer passes the `/tmp` prefix), and refuses a path whose not-yet-existing
 tail holds a symbolic link, leaf included: a dangling `app -> ~/.local/bin/git` passed as its
 nominal spelling and the linker wrote through it (audit 32; `hull build` also refuses an output
-that is a link). App-derived text the tool VM prints - an extraction error, a file name from the
-app's tree - goes through `tool.escape` (the `hl_log_escape_line` rules; `tool.stderr` and the
-tool VM's `print` stay raw for the plugins' own output; audit 32). Nothing a build or eject executes or links is
+that is a link). The tool VM's writers - `print`, `tool.stderr`, `tool.stdout`, and the
+dispatcher's report of a plugin's error (`hull_tool`) - escape every control byte but LF and tab
+(`hl_term_fwrite_escaped`, `include/hull/shared/term_escape.h`: CR as `\r`, ESC / NUL / the other
+C0 and DEL as `\xNN`, UTF-8 unchanged), so a file name, manifest string or `package.sig` field of
+a cloned tree cannot rewrite the terminal or set the clipboard through any command (audit 33:
+`hull verify` / `inspect` / `deploy` / `modules` / `check` / `analyze` / `compute build` / `eject`
+printed them raw; audit 32 had escaped call sites one by one). `tool.stderr_raw` /
+`tool.stdout_raw` write verbatim, only for text the plugin encoded itself (json.encode output,
+which escapes C0 but keeps DEL raw, legal in JSON). `tool.escape` still puts app text on one line
+(LF as `\n`); its output holds no control byte, so the writers leave it unchanged. Nothing a build or eject executes or links is
 taken from the working directory (`./build/wamrc`, `./build/libhull_platform*.a`,
 `./build/platform.sig`); `hull build --platform-sig PATH` names a platform.sig explicitly.
 

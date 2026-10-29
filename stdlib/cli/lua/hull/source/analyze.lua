@@ -185,7 +185,7 @@ local function list_rules(o)
         for _, r in ipairs(lint.RULES) do
             rules[#rules + 1] = { id = r.id, severity = r.severity, default = r.default, description = r.describe }
         end
-        tool.stdout(json.encode({ schema_version = 2, rules = rules }) .. "\n")
+        tool.stdout_raw(json.encode({ schema_version = 2, rules = rules }) .. "\n")
     else
         local out = {}
         for _, r in ipairs(lint.RULES) do
@@ -324,7 +324,8 @@ end
 
 -- ── output (real output on STDOUT via tool.stdout; print is routed to stderr) ──
 local function emit_json(root_norm, files, diagnostics, summary)
-    tool.stdout(json.encode({
+    -- Encoded JSON: raw (json.encode escapes every C0 control itself).
+    tool.stdout_raw(json.encode({
         schema_version = 2,                                  -- v2: lint findings + severities
         root = (root_norm == "") and "." or root_norm,
         files_scanned = #files,

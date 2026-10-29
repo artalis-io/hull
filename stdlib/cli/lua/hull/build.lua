@@ -20,8 +20,9 @@ local hex = require("hull.encoding").hex
 local fcompose = require("hull.feature_compose")
 
 -- App-derived text (a file name from the app's tree) is printed through
--- tool.escape: tool.stderr / print write raw, and a name holding an ESC /
--- OSC sequence rewrote the terminal or set the clipboard (audit 32).
+-- tool.escape, which keeps it on one line (audit 32). tool.stderr / print
+-- escape every control byte but LF / tab themselves since audit 33, and
+-- leave tool.escape's output (no control bytes) as it is.
 local esc = tool.escape or function(x) return tostring(x) end
 -- The per-feature compose registry (single source of truth): { backend, type,
 -- hook, cxx, base_group, whole_archive, libs } per --with feature. Hoisted out

@@ -70,8 +70,9 @@ local function main()
         tool.exit(1)
     end
 
-    -- Print as JSON
-    print(json.encode(m))
+    -- Print as JSON. Encoded, so written raw: json.encode escapes every C0
+    -- control itself, and the escaping print would turn a DEL into \x7f.
+    tool.stderr_raw(json.encode(m) .. "\n")
 end
 
 -- The tool dispatcher (src/hull/tool.c) invokes the returned main() only when

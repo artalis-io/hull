@@ -38,6 +38,7 @@
 #include "hull/release_io.h"
 #include "hull/shared/host.h"
 #include "hull/shared/cli_log.h"
+#include "hull/shared/term_escape.h"   /* tool.stderr / stdout (audit 33) */
 #include "hull/cap/crypto.h"
 #include "hull/cap/tar.h"        /* tool.bundle_verify */
 #include "hull/release.h"        /* hl_release_verify_manifest_sig */
@@ -704,10 +705,27 @@ static int l_tool_file_mtime(lua_State *L)
 
 /* ── tool.stderr(msg) ──────────────────────────────────────────────── */
 
+/* tool.stderr(str): write to stderr with control bytes escaped
+ * (hl_term_fwrite_escaped: LF / tab kept, CR as \r, every other control -
+ * ESC and NUL included - and DEL as \xNN; UTF-8 unchanged). A plugin's
+ * message names files, manifest strings and package.sig fields of the tree
+ * it works on, and written raw an ESC / OSC sequence there rewrote the
+ * terminal or set the clipboard under hull verify / inspect / deploy /
+ * modules / check / analyze / compute / eject (audit 33). tool.stderr_raw
+ * writes verbatim, for text the plugin built entirely itself. */
 static int l_tool_stderr(lua_State *L)
 {
-    const char *msg = luaL_checkstring(L, 1);
-    fprintf(stderr, "%s", msg);
+    size_t len = 0;
+    const char *msg = luaL_checklstring(L, 1, &len);
+    hl_term_fwrite_escaped(stderr, msg, len);
+    return 0;
+}
+
+static int l_tool_stderr_raw(lua_State *L)
+{
+    size_t len = 0;
+    const char *msg = luaL_checklstring(L, 1, &len);
+    fwrite(msg, 1, len, stderr);
     return 0;
 }
 
@@ -715,10 +733,12 @@ static int l_tool_stderr(lua_State *L)
  * file name from the app's tree) made safe to print, with the rules
  * hl_log_escape_line applies to log records: CR / LF as the two characters
  * \r / \n, every other control byte but tab (ESC above all) and DEL as
- * \xNN. tool.stderr and the tool VM's print write raw - the plugins' own
- * multi-line output needs that - so an ESC / OSC 52 sequence in an app's
- * error message rewrote the terminal or set the clipboard under `hull build`
- * / `manifest` / `check` / `modules` / `deploy` (audit 32). Embedded NULs are
+ * \xNN: one line of text. An ESC / OSC 52 sequence in an app's error
+ * message rewrote the terminal or set the clipboard under `hull build` /
+ * `manifest` / `check` / `modules` / `deploy` (audit 32). Since audit 33
+ * tool.stderr / tool.stdout / print escape every control byte but LF and
+ * tab themselves, so this is for keeping app text on one line; its output
+ * holds no control byte, so the writers leave it as it is. Embedded NULs are
  * escaped too (\x00): the text is taken by length. */
 static void tool_push_escaped(lua_State *L, const char *s, size_t len)
 {
@@ -750,10 +770,23 @@ static int l_tool_escape(lua_State *L)
     return 1;
 }
 
-/* tool.stdout(str): write verbatim to STDOUT (and flush). `print` in every Hull Lua
- * VM is routed to stderr (hl_lua_print), so a command whose primary output is DATA
- * (e.g. hull analyze --json, which must keep stdout pure JSON) writes it here. */
+/* tool.stdout(str): write to STDOUT (and flush), control bytes escaped as
+ * tool.stderr escapes them (audit 33). `print` in every Hull Lua VM is routed
+ * to stderr (hl_lua_print), so a command whose primary output is DATA (e.g.
+ * hull analyze --json, which must keep stdout pure JSON) writes it here.
+ * tool.stdout_raw writes verbatim: for an already-encoded payload (JSON from
+ * json.encode, which escapes every C0 control itself) whose bytes must not
+ * change - DEL is legal raw in JSON, and \x7f would not be. */
 static int l_tool_stdout(lua_State *L)
+{
+    size_t len = 0;
+    const char *msg = luaL_checklstring(L, 1, &len);
+    hl_term_fwrite_escaped(stdout, msg, len);
+    fflush(stdout);
+    return 0;
+}
+
+static int l_tool_stdout_raw(lua_State *L)
 {
     size_t len = 0;
     const char *msg = luaL_checklstring(L, 1, &len);
@@ -2220,8 +2253,10 @@ static const luaL_Reg tool_funcs[] = {
     { "realpath",               l_tool_realpath },
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
+    { "stderr_raw",             l_tool_stderr_raw },
     { "escape",                 l_tool_escape },
     { "stdout",                 l_tool_stdout },
+    { "stdout_raw",             l_tool_stdout_raw },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_manifest_lua",   l_tool_extract_manifest_lua },
     { "extract_platform",       l_tool_extract_platform },
