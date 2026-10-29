@@ -415,6 +415,22 @@ release-artifact layout).
   and retries, so dropped stores free their slot), and a receive buffer past 1 MiB is freed
   once its reply has been copied.
 
+- **Named and internal SQLite file DSNs could leave the app tree** (audit 34, both runtimes).
+  A `databases.named` / `databases.internal` file DSN was opened as written: a relative one
+  resolved against the working directory, and nothing checked containment or links. So a cloned
+  app that committed `cache.db -> ../secret.db` with `databases.named.cache = "cache.db"` read and
+  wrote a database outside its tree wherever there was no kernel sandbox (`--no-sandbox`,
+  degraded Linux, a cosmo APE on Windows / macOS / BSD). Such a DSN (scheme-less, `sqlite://`,
+  `file://` or `duckdb://`, and a `$VAR` one once it is resolved) is now resolved against the app
+  directory and must stay inside it. It may have no `..` component and no symbolic link below
+  the app directory, and its leaf and `-wal` / `-shm` / `-journal` sidecars must be absent or
+  regular files, the same rule as `db.open` (audit 29) and the implicit `data.db` (audit 25). An
+  absolute path outside the app directory is refused. The kernel sandbox never granted one, so
+  sandboxed deployments see no change. `:memory:`, network DSNs and the operator's `-d` are
+  unaffected. The worker pool is handed the same checked absolute path, and a connection whose
+  DSN no longer passes gets a DSN no backend takes, so `async` fails instead of falling back to
+  the default database. Covered by `test_db_registry` and `tests/e2e_named_connections.sh`.
+
 - **`time.now()` could lag the other clocks by a second on Linux.** It read `time()`, which
   glibc serves from the coarse clock, a few milliseconds behind `CLOCK_REALTIME`. Just after a
   second boundary it still named the previous second while `time.now_ms()` / `nowMs()` and

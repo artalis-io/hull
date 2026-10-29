@@ -15,6 +15,9 @@
 #include "hull/manifest.h"
 #include "hull/utils/env_ref.h"   /* hl_env_ref */
 #include "hull/cap/policy_seal.h"  /* hl_policy_page_* */
+#include "hull/shared/host.h"     /* hl_host_normalize_path, HL_HOST_PATH_MAX */
+
+#include <limits.h>
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -55,6 +58,12 @@ struct HlDbRegistry {
              * value takes over once set. */
             int               has_internal_dsn;
             char              internal_dsn[HL_DB_REGISTRY_DSN_MAX];
+            /* The app directory a manifest file DSN must stay in (audit
+             * 34): its realpath, and the spelling it was given in (an
+             * absolute DSN may name the app directory either way). */
+            int               has_app_dir;
+            char              app_dir_real[HL_HOST_PATH_MAX];
+            char              app_dir_raw[HL_HOST_PATH_MAX];
         };
         unsigned char policy_span[HL_POLICY_SPAN];
     };
@@ -160,6 +169,158 @@ int hl_db_registry_seed(HlDbRegistry *reg, const char *name,
     return 0;
 }
 
+/* Copy @p dir into @p out without its trailing slashes ("/" stays "/"). */
+static int copy_dir(const char *dir, char *out, size_t outsz)
+{
+    size_t n = strlen(dir);
+    while (n > 1 && dir[n - 1] == '/') n--;
+    if (n == 0 || n >= outsz) return -1;
+    memcpy(out, dir, n);
+    out[n] = '\0';
+    return 0;
+}
+
+int hl_db_registry_set_app_dir(HlDbRegistry *reg, const char *app_dir)
+{
+    if (!reg || reg->sealed || !app_dir || !app_dir[0]) return -1;
+    char real[PATH_MAX];
+    if (!realpath(app_dir, real)) return -1;
+    if (copy_dir(real, reg->app_dir_real, sizeof reg->app_dir_real) != 0 ||
+        copy_dir(app_dir, reg->app_dir_raw, sizeof reg->app_dir_raw) != 0)
+        return -1;
+    reg->has_app_dir = 1;
+    return 0;
+}
+
+/* 1 when @p path starts with directory @p dir followed by '/'. */
+static int under_dir(const char *path, const char *dir)
+{
+    size_t n = strlen(dir);
+    if (n == 1 && dir[0] == '/') return path[0] == '/';
+    return strncmp(path, dir, n) == 0 && path[n] == '/' && path[n + 1];
+}
+
+/* 1 when @p path has a ".." component. */
+static int has_dotdot(const char *path)
+{
+    for (const char *p = path; *p; ) {
+        const char *e = strchr(p, '/');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == 2 && p[0] == '.' && p[1] == '.') return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* A manifest (databases.named / databases.internal) DSN, after any "$VAR"
+ * reference was resolved, made safe to open (audit 34). A network DSN, an
+ * unknown scheme (the selector refuses it) and an in-memory / temporary
+ * database pass unchanged. A file DSN (scheme-less, sqlite://, file://,
+ * duckdb://) must name a file inside the app directory - a relative path is
+ * taken against the app directory, not the working directory - with no ".."
+ * component, no symbolic link below the app directory, and a leaf and SQLite
+ * sidecars (-wal / -shm / -journal) that are absent or regular files, as
+ * db.open requires (audit 29) and the implicit data.db (audit 25). The
+ * declaration is the grant, as -d is the operator's: no fs.write entry is
+ * needed, but nothing outside the tree is reachable - a cloned app committing
+ * cache.db -> ../secret.db opened that database wherever the kernel sandbox
+ * is absent. Returns the DSN to open (@p buf for a file DSN, holding its
+ * absolute path with the original scheme), or NULL + *err. */
+static const char *confine_manifest_dsn(const HlDbRegistry *reg,
+                                        const char *dsn, char *buf,
+                                        size_t bufsz, const char **err)
+{
+    size_t plen = 0;   /* length of a file scheme's "<scheme>://" prefix */
+    const char *sep = strstr(dsn, "://");
+    if (sep) {
+        size_t n = (size_t)(sep - dsn);
+        int scheme = n > 0 && ((dsn[0] >= 'a' && dsn[0] <= 'z') ||
+                               (dsn[0] >= 'A' && dsn[0] <= 'Z'));
+        for (size_t i = 1; scheme && i < n; i++) {
+            char c = dsn[i];
+            scheme = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
+        }
+        if (scheme) {
+            if ((n == 6 && strncasecmp(dsn, "sqlite", 6) == 0) ||
+                (n == 4 && strncasecmp(dsn, "file", 4) == 0) ||
+                (n == 6 && strncasecmp(dsn, "duckdb", 6) == 0))
+                plen = n + 3;
+            else
+                return dsn;   /* a network backend, or one the selector refuses */
+        }
+    }
+    const char *path = dsn + plen;
+    if (!path[0] || strcmp(path, ":memory:") == 0) return dsn;
+
+    if (!reg->has_app_dir) {
+        *err = "a file database DSN needs the app directory (none is known)";
+        return NULL;
+    }
+    char norm[HL_HOST_PATH_MAX];
+    if (hl_host_normalize_path(path, norm, sizeof norm) >= 0) path = norm;
+    if (has_dotdot(path)) {
+        *err = "a file database DSN may not have a \"..\" component";
+        return NULL;
+    }
+
+    char abs[HL_HOST_PATH_MAX];
+    size_t base_len;
+    if (path[0] == '/') {
+        size_t n = strlen(path);
+        if (n >= sizeof abs) { *err = "database path too long"; return NULL; }
+        memcpy(abs, path, n + 1);
+        if (under_dir(abs, reg->app_dir_real)) {
+            base_len = strlen(reg->app_dir_real);
+        } else if (reg->app_dir_raw[0] == '/' && under_dir(abs, reg->app_dir_raw)) {
+            base_len = strlen(reg->app_dir_raw);
+        } else {
+            /* The app directory spelled through a link above it (/var vs
+             * /private/var on macOS): canonicalise the deepest existing
+             * ancestor and compare again. A link INSIDE the tree that leads
+             * out resolves outside and is refused here; one that stays in
+             * is no escape, and the leaf is still checked below. */
+            char tmp[HL_HOST_PATH_MAX], real[PATH_MAX];
+            memcpy(tmp, abs, n + 1);
+            size_t cut = n;
+            int found = 0;
+            while (cut > 0) {
+                while (cut > 0 && tmp[cut] != '/') cut--;
+                if (cut == 0) break;
+                tmp[cut] = '\0';
+                if (realpath(tmp, real)) { found = 1; break; }
+            }
+            int m = found ? snprintf(tmp, sizeof tmp, "%s%s", real, abs + cut) : -1;
+            if (m < 0 || (size_t)m >= sizeof tmp ||
+                !under_dir(tmp, reg->app_dir_real)) {
+                *err = "a file database DSN must name a file inside the app directory";
+                return NULL;
+            }
+            memcpy(abs, tmp, (size_t)m + 1);
+            base_len = strlen(reg->app_dir_real);
+        }
+    } else {
+        int n = snprintf(abs, sizeof abs, "%s/%s", reg->app_dir_real, path);
+        if (n < 0 || (size_t)n >= sizeof abs) {
+            *err = "database path too long";
+            return NULL;
+        }
+        base_len = strlen(reg->app_dir_real);
+    }
+    if (hl_db_path_has_symlink(abs, base_len)) {
+        *err = "a file database DSN runs through a symbolic link, or names "
+               "something that is not a regular file";
+        return NULL;
+    }
+    int n = snprintf(buf, bufsz, "%.*s%s", (int)plen, dsn, abs);
+    if (n < 0 || (size_t)n >= bufsz) {
+        *err = "database path too long";
+        return NULL;
+    }
+    return buf;
+}
+
 /* Look up the DSN for @p name: manifest databases first (resolving a "$VAR"
  * env reference from the environment), then any seeded fallback is handled by
  * the cache scan in _get. Returns NULL + *err on failure. */
@@ -187,15 +348,18 @@ static const char *resolve_manifest_dsn(HlDbRegistry *reg, const char *name,
 /* The DSN for @p name, from the sealed sources only: the manifest, then for
  * "default" the -d DSN when the manifest declares no entry for it (derr stays
  * NULL for a plain miss; a set derr, e.g. an unset env ref, is a real error).
- * Worked out afresh on every call rather than kept per connection: a stored
- * copy would be writable heap the worker pool connects to. */
+ * A manifest DSN goes through confine_manifest_dsn (@p buf, @p bufsz hold a
+ * rewritten one); the operator's -d DSN is taken as given. Worked out afresh
+ * on every call rather than kept per connection: a stored copy would be
+ * writable heap the worker pool connects to. */
 static const char *lookup_dsn(HlDbRegistry *reg, const char *name,
-                              const char **err)
+                              const char **err, char *buf, size_t bufsz)
 {
+    const char *d = NULL;
     if (strcmp(name, INTERNAL_NAME) == 0) {
-        const char *d = (reg->manifest && reg->manifest->databases.internal)
-                        ? reg->manifest->databases.internal
-                        : (reg->has_internal_dsn ? reg->internal_dsn : NULL);
+        d = (reg->manifest && reg->manifest->databases.internal)
+            ? reg->manifest->databases.internal
+            : (reg->has_internal_dsn ? reg->internal_dsn : NULL);
         char var[128];
         if (d && hl_env_ref(d, var, sizeof var)) {
             const char *v = getenv(var);
@@ -203,14 +367,18 @@ static const char *lookup_dsn(HlDbRegistry *reg, const char *name,
                 *err = "databases.internal env var is unset";
                 return NULL;
             }
-            return v;
+            d = v;
         }
-        return d;
+    } else {
+        d = resolve_manifest_dsn(reg, name, err);
+        if (!d) {
+            if (!*err && reg->has_default_dsn && strcmp(name, "default") == 0)
+                return reg->default_dsn;
+            return NULL;
+        }
     }
-    const char *dsn = resolve_manifest_dsn(reg, name, err);
-    if (!dsn && !*err && reg->has_default_dsn && strcmp(name, "default") == 0)
-        dsn = reg->default_dsn;
-    return dsn;
+    if (!d) return NULL;
+    return confine_manifest_dsn(reg, d, buf, bufsz, err);
 }
 
 static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
@@ -260,7 +428,9 @@ int hl_db_registry_default_is_network(const HlDbRegistry *reg)
 {
     if (!reg) return 0;
     const char *err = NULL;
-    const char *dsn = lookup_dsn((HlDbRegistry *)(uintptr_t)reg, "default", &err);
+    char buf[HL_HOST_PATH_MAX + 16];
+    const char *dsn = lookup_dsn((HlDbRegistry *)(uintptr_t)reg, "default", &err,
+                                 buf, sizeof buf);
     if (!dsn) return 0;
     if (dsn[0] == '$') return 1;
     /* Without case (audit 14): the backend selector reads the scheme that
@@ -294,7 +464,8 @@ static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
     }
 
     const char *derr = NULL;
-    const char *dsn = lookup_dsn(reg, name, &derr);
+    char dsn_buf[HL_HOST_PATH_MAX + 16];
+    const char *dsn = lookup_dsn(reg, name, &derr, dsn_buf, sizeof dsn_buf);
     if (!dsn) {
         if (err) *err = derr ? derr
                              : "unknown database name (not in manifest.databases)";
@@ -333,8 +504,15 @@ const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h)
         const RegSlot *s = &reg->slots[i];
         if (s->open && &s->handle == h) {
             if (!s->dsn_known) return NULL;
+            /* The worker copies the DSN before this thread calls again. */
+            static _Thread_local char buf[HL_HOST_PATH_MAX + 16];
             const char *err = NULL;
-            return lookup_dsn(reg, s->name, &err);
+            const char *dsn = lookup_dsn(reg, s->name, &err, buf, sizeof buf);
+            /* NULL would send the op to the DEFAULT database: a connection
+             * whose DSN no longer resolves or passes the confinement check
+             * (a symlink planted since it opened, an env var unset) gets a
+             * DSN no backend takes, so the op fails instead (audit 34). */
+            return dsn ? dsn : "hull-refused://";
         }
     }
     return NULL;

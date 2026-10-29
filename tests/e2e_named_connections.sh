@@ -225,6 +225,52 @@ else
     echo "  SKIP: curl not found (stale transaction vs resume)"
 fi
 
+# ── A named file DSN stays inside the app tree (audit 34) ──────────────
+# A cloned app committing cache.db -> ../secret.db with
+# databases.named.cache = "cache.db" opened the database outside its tree
+# wherever the kernel sandbox is absent (--no-sandbox here). A symlinked
+# file, a path escaping the tree and an absolute path elsewhere are refused,
+# and the outside database is never touched; a relative in-tree DSN opens
+# under the app directory even when hull runs from elsewhere.
+echo "=== E2E: named file DSNs are confined to the app tree ==="
+CONF="$TMPDIR/confine"
+mkdir -p "$CONF/app" "$CONF/elsewhere"
+SECRET="$CONF/secret.db"
+ln -s ../secret.db "$CONF/app/linked.db"
+HULL_ABS=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
+confine_case() {
+    label="$1"; dsn="$2"; want="$3"
+    cat > "$CONF/app/app.lua" << EOF
+local db = require("hull.db")
+app.manifest({ modules = { "hull/db@1" }, databases = { named = { cache = "$dsn" } } })
+app.main(function()
+  local ok, err = pcall(function()
+    local c = db.connect("cache")
+    c.exec("CREATE TABLE IF NOT EXISTS t(x INTEGER)")
+    c.exec("INSERT INTO t VALUES (5)")
+    return c.query("SELECT count(*) AS n FROM t")[1].n
+  end)
+  print("confine=" .. (ok and "opened" or ("refused: " .. tostring(err))))
+  return 0
+end)
+EOF
+    out=$(cd "$CONF/elsewhere" && "$HULL_ABS" --no-sandbox -d "$CONF/app/default.db" "$CONF/app/app.lua" 2>&1 || true)
+    case "$out" in
+        *"confine=$want"*) pass "$label" ;;
+        *) fail "$label" "$out" ;;
+    esac
+}
+confine_case "a symlinked named DSN is refused" "linked.db" "refused"
+confine_case "an escaping named DSN is refused" "../secret.db" "refused"
+confine_case "an absolute named DSN outside the tree is refused" "$SECRET" "refused"
+[ ! -e "$SECRET" ] && pass "the outside database was never created" \
+                   || fail "the outside database was never created" "$(ls -l "$SECRET")"
+confine_case "a relative in-tree named DSN opens" "data_cache.db" "opened"
+[ -f "$CONF/app/data_cache.db" ] && [ ! -e "$CONF/elsewhere/data_cache.db" ] \
+    && pass "the relative DSN opened under the app directory, not the working directory" \
+    || fail "the relative DSN opened under the app directory, not the working directory" \
+            "$(ls "$CONF/app" "$CONF/elsewhere")"
+
 echo ""
 echo "=== Results: $PASS/$TOTAL passed ==="
 [ "$FAIL" -eq 0 ] || exit 1

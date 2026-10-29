@@ -223,6 +223,18 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             hl_app_context_free(ctx);   /* app_dir_copy too (audit 15) */
             return -1;
         }
+        /* A databases.named / .internal file DSN must stay in the app tree
+         * (audit 34): every entry point (serve, the app.main runner, hull
+         * test / agent) builds its registry here, and the worker pool opens
+         * the DSN the registry hands it. */
+        if (hl_db_registry_set_app_dir(ctx->db_registry, ctx->app_dir_copy) != 0) {
+            fprintf(stderr, "hull: cannot resolve the app directory for the "
+                            "database registry\n");
+            hl_db_registry_destroy(ctx->db_registry);
+            ctx->db_registry = NULL;
+            hl_app_context_free(ctx);
+            return -1;
+        }
         /* Open the default connection only when a default DSN exists. With none
          * (postgres-only build, no -d), the app runs DB-less: db.default() is
          * lazy and errors only on use, matching a compute-only build. */

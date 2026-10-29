@@ -642,6 +642,17 @@ behind `hull test` / `hull agent` runs the same check, and so does the stdlib's
 internal-connection lookup before a top-level `init()` uses a `"$VAR"`
 `databases.internal` (audit 17: both read an undeclared variable).
 
+A file DSN in `databases.named` / `databases.internal` (scheme-less, `sqlite://`, `file://`,
+`duckdb://`; a `"$VAR"` one after resolution) is confined to the app tree
+(`confine_manifest_dsn`, `cap/db_registry.c`, audit 34): a relative path is opened under the
+app directory (`hl_db_registry_set_app_dir`, set by `app_context.c` for every entry point),
+not the working directory, and `..`, a path outside the app directory, a symbolic link below
+it, or a leaf / `-wal` / `-shm` / `-journal` that is a link or not a regular file are refused
+(`hl_db_path_has_symlink`, shared with `db.open`). `:memory:`, network DSNs and `-d` pass. The
+worker pool gets the checked absolute path from `hl_db_registry_dsn_for`, which answers a DSN
+no backend takes (never NULL, which would mean the default database) once a connection's DSN
+no longer passes.
+
 (The DB connection dials its host directly; `manifest.hosts` gates
 `http.fetch`, not database connections.)
 

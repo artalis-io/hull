@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>   /* lstat: dynamic_path_has_symlink */
+#include <sys/stat.h>   /* lstat: hl_db_path_has_symlink */
 
 /* Process-wide cap on concurrent dynamic connections (fd-exhaustion backstop).
  * db.open / close run on the event-loop thread, so the handle table needs no
@@ -120,7 +120,7 @@ static int host_allowed(const HlManifestDbDynamic *policy, const char *host)
  * links, so a planted `data/x.db -> ../private/ref.db` opened a file fs.write
  * would have re-rooted or refused (audit 29). A component that does not exist
  * yet ends the walk: SQLite creates it. */
-static int dynamic_path_has_symlink(const char *abs, size_t base_len)
+int hl_db_path_has_symlink(const char *abs, size_t base_len)
 {
     char prefix[HL_DB_DYNAMIC_DSN_MAX];
     size_t len = strlen(abs);
@@ -242,7 +242,7 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
             }
             /* No symbolic link on the way to the file, nor at it (audit 29). */
             const char *abs_path = abs_dsn + (scheme[0] ? strlen(scheme) + 3 : 0);
-            if (dynamic_path_has_symlink(abs_path, strlen(fs_cfg->base_dir))) {
+            if (hl_db_path_has_symlink(abs_path, strlen(fs_cfg->base_dir))) {
                 if (err) *err = "db.open: the file path runs through a symbolic "
                                 "link, or names something that is not a "
                                 "regular file";
