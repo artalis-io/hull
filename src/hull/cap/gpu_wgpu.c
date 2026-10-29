@@ -41,6 +41,7 @@ static int texture_read_wait(HlGpuDevice *dev, HlGpuTexture *tex,
 static void wgpu_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex);
 static void upload_initial(WGPUQueue queue, WGPUBuffer buf, size_t buf_size,
                            const HlGpuBufferDesc *desc);
+static int wgpu_flush_writes(HlGpuDevice *dev, uint32_t timeout_ms);
 
 static uint64_t gpu_now_ms(void)
 {
@@ -98,6 +99,26 @@ static int gpu_poll_with_timeout(WGPUDevice device, uint32_t timeout_ms)
 static WGPUStringView sv(const char *s)
 {
     return (WGPUStringView){ .data = s, .length = s ? strlen(s) : 0 };
+}
+
+/* A dispatch / pipeline that queued uploads (inline buffers, uniforms,
+ * inline textures) and then failed before its wgpuQueueSubmit left their
+ * staging copies in wgpu's pending writes, which only a later submission
+ * frees - and the cap layer counts no write for a failed call, so the
+ * audit-34 flush never came: a loop of failing dispatches with an 8 MiB
+ * inline buffer grew past 1.5 GB (audit 35). Submit them now, before the
+ * call's buffers are destroyed, and wait (bounded). A wait that timed out
+ * or was stopped turns the call into a timeout, so the cap layer marks the
+ * device stalled - the staging is still held by running work. */
+static void flush_unsubmitted(HlGpuDevice *dev, int staged, int submitted,
+                              uint32_t timeout_ms, int *rc,
+                              const char **err_msg)
+{
+    if (!staged || submitted) return;
+    if (wgpu_flush_writes(dev, timeout_ms) == HL_GPU_ERR_TIMEOUT) {
+        *rc = HL_GPU_ERR_TIMEOUT;
+        if (err_msg) *err_msg = "gpu_timeout";
+    }
 }
 
 /* ── Internal types ────────────────────────────────────────────────── */
@@ -599,6 +620,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
     wgpu_last_error = 0;   /* checked after the submit */
 
     int rc = HL_GPU_ERR_DISPATCH;
+    int staged = 0, submitted = 0;   /* audit 35: see flush_unsubmitted */
     WGPUBuffer uniform_buf = NULL;
     WGPUBuffer *temp_bufs = NULL;
     int temp_count = 0;
@@ -666,6 +688,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             if (err_msg) *err_msg = "uniform_buffer_create_failed";
             goto cleanup;
         }
+        staged = 1;
         if (gpu_write_padded(dctx->queue, uniform_buf, opts->uniforms,
                              opts->uniforms_len, usize) != 0) {
             if (err_msg) *err_msg = "out_of_memory";
@@ -726,6 +749,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             temp_bufs[temp_count++] = gpu_buf;
 
             /* Upload initial data if present */
+            if (desc->data) staged = 1;
             upload_initial(dctx->queue, gpu_buf, buf_size, desc);
         }
 
@@ -788,6 +812,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                 }
                 itex->storage = td->storage;
                 if (td->data && td->data_len > 0) {
+                    staged = 1;   /* a failed write may have staged too */
                     trc = wgpu_texture_write(dev, itex,
                                               td->data, td->data_len);
                     if (trc != HL_GPU_OK) {
@@ -912,6 +937,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
         uint32_t timeout = (opts->timeout_ms > 0) ? opts->timeout_ms : HL_GPU_TIMEOUT_MS;
         if (timeout < 10) timeout = 10;  /* floor: 10ms */
         wgpuQueueSubmit(dctx->queue, 1, &cmd);
+        submitted = 1;
         if (gpu_poll_with_timeout(dctx->device, timeout) != 0) {
             if (err_msg) *err_msg = "gpu_timeout";
             rc = HL_GPU_ERR_TIMEOUT;
@@ -990,6 +1016,7 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
     }
 
 cleanup:
+    flush_unsubmitted(dev, staged, submitted, opts->timeout_ms, &rc, err_msg);
     if (cmd) wgpuCommandBufferRelease(cmd);
     if (pass) wgpuComputePassEncoderRelease(pass);
     if (encoder) wgpuCommandEncoderRelease(encoder);
@@ -1200,6 +1227,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
     wgpu_last_error = 0;
 
     int rc = HL_GPU_ERR_DISPATCH;
+    int staged = 0, submitted = 0;   /* audit 35: see flush_unsubmitted */
     WGPUCommandEncoder encoder = NULL;
     WGPUCommandBuffer cmd = NULL;
 
@@ -1293,6 +1321,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 if (err_msg) *err_msg = "uniform_buffer_create_failed";
                 goto cleanup;
             }
+            staged = 1;
             if (gpu_write_padded(dctx->queue, uniform_bufs[s], stage->uniforms,
                                  stage->uniforms_len, usize) != 0) {
                 if (err_msg) *err_msg = "out_of_memory";
@@ -1359,6 +1388,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                     break;
                 }
             }
+            if (desc->data) staged = 1;
             upload_initial(dctx->queue, gpu_buf, upload_cap, desc);
 
             size_t buf_aligned = alloc_size <= SIZE_MAX - 3
@@ -1511,6 +1541,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
         uint32_t timeout = (opts->timeout_ms > 0) ? opts->timeout_ms : HL_GPU_TIMEOUT_MS;
         if (timeout < 10) timeout = 10;  /* floor: 10ms */
         wgpuQueueSubmit(dctx->queue, 1, &cmd);
+        submitted = 1;
         if (gpu_poll_with_timeout(dctx->device, timeout) != 0) {
             if (err_msg) *err_msg = "gpu_timeout";
             rc = HL_GPU_ERR_TIMEOUT;
@@ -1587,6 +1618,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
     } /* end of readback block */
 
 cleanup:
+    flush_unsubmitted(dev, staged, submitted, opts->timeout_ms, &rc, err_msg);
     if (cmd) wgpuCommandBufferRelease(cmd);
     if (encoder) wgpuCommandEncoderRelease(encoder);
     for (int s = 0; s < stage_count; s++) {
