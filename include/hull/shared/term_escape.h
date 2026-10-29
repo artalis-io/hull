@@ -23,8 +23,10 @@
 #ifndef HL_SHARED_TERM_ESCAPE_H
 #define HL_SHARED_TERM_ESCAPE_H
 
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static inline void hl_term_fwrite_escaped(FILE *f, const char *s, size_t len)
 {
@@ -45,6 +47,64 @@ static inline void hl_term_fwrite_escaped(FILE *f, const char *s, size_t len)
         run = i + 1;
     }
     if (len > run) fwrite(s + run, 1, len - run, f);
+}
+
+/* Write @p s to @p f with every control byte escaped, LF and CR included
+ * (as hl_log_escape_line escapes a log record: CR / LF as \r / \n, tab kept,
+ * every other C0 control and DEL as \xNN). For one diagnostic LINE that
+ * quotes app, request or cloned-tree text: written raw, a newline in it forged
+ * a second line and an ESC / OSC sequence rewrote the terminal (audit 34). */
+static inline void hl_term_fputs_line_escaped(FILE *f, const char *s)
+{
+    static const char hex[] = "0123456789abcdef";
+    if (!f) return;
+    for (const char *p = s ? s : ""; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\n' || c == '\r') {
+            fputc('\\', f);
+            fputc(c == '\n' ? 'n' : 'r', f);
+        } else if ((c < 0x20 && c != '\t') || c == 0x7f) {
+            fputc('\\', f);
+            fputc('x', f);
+            fputc(hex[c >> 4], f);
+            fputc(hex[c & 15], f);
+        } else {
+            fputc(c, f);
+        }
+    }
+}
+
+/* printf to stderr as ONE escaped line: the formatted text is written through
+ * hl_term_fputs_line_escaped and a newline appended (the format carries no
+ * trailing \n). For the diagnostics Hull prints outside the log - app.main's
+ * error / rejection / return value, a handler error, an app-context load
+ * error - whose arguments are app, request or cloned-tree text (audit 34). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
+static inline void hl_eprintf_line(const char *fmt, ...)
+{
+    char small[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(small, sizeof small, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n < sizeof small) {
+        hl_term_fputs_line_escaped(stderr, small);
+    } else {
+        char *big = (char *)malloc((size_t)n + 1);
+        if (!big) {
+            hl_term_fputs_line_escaped(stderr, small);   /* truncated */
+        } else {
+            va_start(ap, fmt);
+            vsnprintf(big, (size_t)n + 1, fmt, ap);
+            va_end(ap);
+            hl_term_fputs_line_escaped(stderr, big);
+            free(big);
+        }
+    }
+    fputc('\n', stderr);
 }
 
 #endif /* HL_SHARED_TERM_ESCAPE_H */

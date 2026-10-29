@@ -823,8 +823,11 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
             hl_js_run_jobs(js);
             js->last_async_cont = NULL;
         }
-        /* log via stderr to match the standard async-resume path */
-        fprintf(stderr, "[hull:c] async js handler error: %s\n",
+        /* Logged as the standard async-resume path logs it (async.c), so the
+         * installed callback escapes it: the error can quote a field of the
+         * remote request body, and fprintf wrote its ESC / CR / LF raw to the
+         * operator's terminal and log (audit 34). */
+        log_error("[hull:c] async js handler error: %s",
                 msg ? msg : tripped ? hl_js_trip_reason(js)
                           : aborted ? "waited holding a database transaction"
                                     : "(unknown)");
