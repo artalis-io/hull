@@ -46,7 +46,7 @@ run_case() {
     ext="$1"; label="$2"
     dir="$TMPDIR/$ext"
     default_db="$WTMP/$ext-app.db"
-    internal_db="$WTMP/$ext-internal.db"
+    internal_db="$WTMP/$ext/internal.db"   # inside the app tree (audit 34)
     out=$(cd "$dir" && "$OLDPWD/$HULL" --no-sandbox -d "$default_db" "app.$ext" 2>&1 || true)
 
     [ -f "$internal_db" ] && [ "$(has_table "$internal_db")" = 1 ] \
@@ -65,7 +65,7 @@ mkdir -p "$TMPDIR/lua" "$TMPDIR/js"
 cat > "$TMPDIR/lua/app.lua" <<EOF
 app.manifest({
     modules = { "hull/web/middleware/session@1" },
-    databases = { internal = "$WTMP/lua-internal.db" },
+    databases = { internal = "$WTMP/lua/internal.db" },
 })
 local session = require("hull.web.middleware.session")
 app.main(function(ctx)
@@ -81,7 +81,7 @@ import { app } from "hull:app";
 import { session } from "hull:web:middleware:session";
 app.manifest({
     modules: ["hull/web/middleware/session@1"],
-    databases: { internal: "$WTMP/js-internal.db" },
+    databases: { internal: "$WTMP/js/internal.db" },
 });
 app.main((ctx) => {
     session.init({});

@@ -128,6 +128,14 @@ static inline int hl_db_registry_guard_held(void) { return 0; }
  */
 void hl_db_registry_set_manifest(HlDbRegistry *reg, const HlManifest *manifest);
 
+/* The app directory a manifest file DSN (databases.named / .internal) must
+ * stay inside (audit 34): a relative one is opened under it, and one outside
+ * it, through a symbolic link, or naming a non-regular file is refused. Set
+ * right after create, before any manifest connection opens; until set every
+ * manifest file DSN is refused. -1 once sealed or when @p app_dir cannot be
+ * resolved. The -d DSN (the operator's) is not checked. */
+int hl_db_registry_set_app_dir(HlDbRegistry *reg, const char *app_dir);
+
 /* Make the registry's DSN sources (the manifest pointer and the -d DSN)
  * read-only for the rest of the process - the last step of wiring, after
  * set_manifest. 0 on success; -1 is fatal for the caller. Destroy undoes it. */

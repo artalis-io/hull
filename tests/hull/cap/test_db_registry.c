@@ -15,8 +15,12 @@
 #include "hull/manifest.h"
 #include "hull/utils/env_ref.h"
 
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* Seed a pre-opened SQLite connection as "default", then resolve it. */
 UTEST(db_registry, seed_and_get_default)
@@ -335,6 +339,166 @@ UTEST(db_registry, open_txn_names_the_connection_and_guard_clears_it)
     EXPECT_EQ(0, h->batch_depth);
 
     hl_db_registry_destroy(reg);
+}
+
+
+/* ── audit 34: manifest file DSNs stay inside the app tree ───────────── */
+
+/* A fresh canonical directory "<tmp>/app" plus a sibling "<tmp>/outside.db"
+ * path; returns 0 on success. */
+static int confine_fixture(char *root, size_t rsz, char *app, size_t asz)
+{
+    const char *t = getenv("TMPDIR");
+    char tmpl[PATH_MAX];
+    snprintf(tmpl, sizeof tmpl, "%s/hull_reg_XXXXXX", (t && t[0]) ? t : "/tmp");
+    if (!mkdtemp(tmpl)) return -1;
+    if (!realpath(tmpl, root)) return -1;
+    (void)rsz;
+    snprintf(app, asz, "%s/app", root);
+    return mkdir(app, 0700);
+}
+
+static void rm_tree(const char *root)
+{
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", root);
+    (void)system(cmd);
+}
+
+static HlDbHandle *get_named(const char *app, const char *dsn,
+                             HlDbRegistry **out_reg, HlManifest *m,
+                             const char **err)
+{
+    memset(m, 0, sizeof *m);
+    m->databases.named[0].name = "cache";
+    m->databases.named[0].dsn = dsn;
+    m->databases.named_count = 1;
+    HlDbRegistry *reg = hl_db_registry_create(m, NULL, NULL);
+    *out_reg = reg;
+    if (!reg) return NULL;
+    if (app && hl_db_registry_set_app_dir(reg, app) != 0) return NULL;
+    return hl_db_registry_get(reg, "cache", err);
+}
+
+/* A relative file DSN opens under the app directory, not the working
+ * directory, and the worker pool is handed the same absolute file. */
+UTEST(db_registry, relative_file_dsn_opens_under_the_app_dir)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    HlManifest m;
+    HlDbRegistry *reg = NULL;
+    const char *err = NULL;
+    HlDbHandle *h = get_named(app, "data/../cache.db", &reg, &m, &err);
+    EXPECT_TRUE(h == NULL);                       /* ".." refused */
+    hl_db_registry_destroy(reg);
+
+    err = NULL;
+    h = get_named(app, "cache.db", &reg, &m, &err);
+    ASSERT_TRUE(h != NULL);
+    ASSERT_TRUE(hl_db_exec(h, "CREATE TABLE t (x INTEGER)", NULL, 0) >= 0);
+    char want[PATH_MAX + 16];
+    snprintf(want, sizeof want, "%s/cache.db", app);
+    struct stat st;
+    EXPECT_EQ(0, stat(want, &st));
+    EXPECT_STREQ(want, hl_db_registry_dsn_for(reg, h));
+    hl_db_registry_destroy(reg);
+
+    /* sqlite:// keeps its scheme; an absolute path inside the tree is fine. */
+    char dsn[PATH_MAX + 32];
+    snprintf(dsn, sizeof dsn, "sqlite://%s/other.db", app);
+    err = NULL;
+    h = get_named(app, dsn, &reg, &m, &err);
+    ASSERT_TRUE(h != NULL);
+    EXPECT_STREQ(dsn, hl_db_registry_dsn_for(reg, h));
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
+/* A symlinked file, a symlinked directory, a symlinked sidecar and a path
+ * outside the tree are all refused, and the outside file is never made. */
+UTEST(db_registry, symlinked_or_escaping_file_dsn_is_refused)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char outside[PATH_MAX + 16], p[PATH_MAX + 32];
+    snprintf(outside, sizeof outside, "%s/outside.db", root);
+
+    snprintf(p, sizeof p, "%s/cache.db", app);
+    ASSERT_EQ(0, symlink("../outside.db", p));
+    snprintf(p, sizeof p, "%s/sub", app);
+    ASSERT_EQ(0, symlink("..", p));
+    snprintf(p, sizeof p, "%s/side.db-wal", app);
+    ASSERT_EQ(0, symlink("../outside.db", p));
+
+    const char *cases[4];
+    char abs_out[PATH_MAX + 32];
+    snprintf(abs_out, sizeof abs_out, "%s", outside);
+    cases[0] = "cache.db";
+    cases[1] = "sub/outside.db";
+    cases[2] = "side.db";
+    cases[3] = abs_out;
+    for (int i = 0; i < 4; i++) {
+        HlManifest m;
+        HlDbRegistry *reg = NULL;
+        const char *err = NULL;
+        HlDbHandle *h = get_named(app, cases[i], &reg, &m, &err);
+        EXPECT_TRUE(h == NULL);
+        EXPECT_TRUE(err != NULL);
+        hl_db_registry_destroy(reg);
+    }
+    struct stat st;
+    EXPECT_NE(0, lstat(outside, &st));
+    rm_tree(root);
+}
+
+/* "$VAR" DSNs are checked after resolution; :memory: needs no app dir; a
+ * file DSN with no app dir known is refused; the internal DSN is confined. */
+UTEST(db_registry, env_memory_internal_and_no_app_dir)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    HlManifest m;
+    HlDbRegistry *reg = NULL;
+    const char *err = NULL;
+
+    setenv("HULL_TEST_CONFINE_DSN", "../evil.db", 1);
+    HlDbHandle *h = get_named(app, "$HULL_TEST_CONFINE_DSN", &reg, &m, &err);
+    EXPECT_TRUE(h == NULL);
+    hl_db_registry_destroy(reg);
+    unsetenv("HULL_TEST_CONFINE_DSN");
+
+    err = NULL;
+    h = get_named(NULL, ":memory:", &reg, &m, &err);
+    EXPECT_TRUE(h != NULL);
+    hl_db_registry_destroy(reg);
+
+    err = NULL;
+    h = get_named(NULL, "cache.db", &reg, &m, &err);
+    EXPECT_TRUE(h == NULL);
+    hl_db_registry_destroy(reg);
+
+    char outside[PATH_MAX + 16];
+    snprintf(outside, sizeof outside, "%s/internal.db", root);
+    HlManifest mi = {0};
+    mi.databases.internal = outside;
+    reg = hl_db_registry_create(&mi, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    err = NULL;
+    EXPECT_TRUE(hl_db_registry_internal(reg, &err) == NULL);
+    hl_db_registry_destroy(reg);
+    struct stat st;
+    EXPECT_NE(0, lstat(outside, &st));
+
+    /* The operator's -d DSN is not checked (it is the operator's choice). */
+    reg = hl_db_registry_create(NULL, outside, NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    err = NULL;
+    EXPECT_TRUE(hl_db_registry_get(reg, "default", &err) != NULL);
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
 }
 
 UTEST_MAIN()

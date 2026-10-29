@@ -52,6 +52,13 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
                                   char *opened, size_t opened_size,
                                   const char **err);
 
+/* 1 when any component of @p abs below its first @p base_len bytes (the app
+ * directory) is a symbolic link, or the leaf or one of its SQLite sidecars
+ * (-wal / -shm / -journal) is a link or not a regular file. A component that
+ * does not exist yet ends the walk (SQLite creates it). Shared by db.open
+ * (audit 29) and the registry's named / internal file DSNs (audit 34). */
+int hl_db_path_has_symlink(const char *abs, size_t base_len);
+
 /* Close + free a handle from hl_db_dynamic_open. NULL-safe; call exactly once
  * per successful open (the caller guards against double-close). */
 void hl_db_dynamic_close(HlDbHandle *h);

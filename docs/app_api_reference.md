@@ -110,7 +110,7 @@ app.manifest({
     secrets = { "DATABASE_URL" },          -- readable by "$DATABASE_URL" only
     databases = {
         named = {
-            cache   = "./cache.db",       -- SQLite file (literal)
+            cache   = "./cache.db",       -- SQLite file (literal; under the app dir)
             primary = "$DATABASE_URL",    -- postgres:// from $DATABASE_URL (env ref)
         },
         dynamic = { hosts = { "*.rds.amazonaws.com" }, schemes = { "postgres" } },
@@ -118,6 +118,11 @@ app.manifest({
     },
 })
 ```
+
+A file DSN (SQLite / DuckDB, literal or `"$VAR"`) must name a file inside the
+app directory: a relative one is opened under it, and `..`, a path elsewhere,
+or a symbolic link on the way to the file (or at it, or at its `-wal` / `-shm`
+/ `-journal`) is refused when the connection opens (audit 34).
 
 **MySQL / MariaDB: `_hull_*` collation.** Hull creates its own tables with
 a NO PAD binary collation (`utf8mb4_0900_bin` on MySQL 8.0.17+,
