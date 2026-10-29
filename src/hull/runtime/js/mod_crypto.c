@@ -116,6 +116,24 @@ static void js_msg_free(JSContext *ctx, JsMsg *m)
     m->needs_free = 0;
 }
 
+/* Ed25519 sign / verify copy the whole message off the VM heap (TweetNaCl's
+ * crypto_sign / crypto_sign_open take sig || msg in one buffer, verify twice
+ * over), and a MappedBuffer / WasmBuffer message is not on the heap at all: a
+ * 600 MB mapping under a 64 MB heap held 1.27 GB (audit 34). Refused past the
+ * heap limit before the copy, as fs.read / res.bytes refuse. Returns 1 with a
+ * pending RangeError, 0 when the message fits. */
+static int js_msg_over_heap(JSContext *ctx, const JsMsg *m, const char *fn)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->max_heap_bytes &&
+        (uint64_t)m->view.len > (uint64_t)js->max_heap_bytes) {
+        JS_ThrowRangeError(ctx, "crypto.%s: a message of %zu bytes is larger "
+                           "than the VM heap limit", fn, m->view.len);
+        return 1;
+    }
+    return 0;
+}
+
 /* An argument that must be exactly `want` bytes (a key, nonce, signature or
  * tag). Returns 1, or 0 with a pending exception and nothing to free. */
 static int js_fixed_arg(JSContext *ctx, JSValueConst v, JsMsg *m, size_t want,
@@ -497,7 +515,8 @@ static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
         js_msg_free(ctx, &data);
         return JS_EXCEPTION;
     }
-    if (js_crypto_charge(ctx, data.view.len) ||
+    if (js_msg_over_heap(ctx, &data, "ed25519Sign") ||   /* audit 34 */
+        js_crypto_charge(ctx, data.view.len) ||
         hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS)) {   /* audit 10 */
         js_msg_free(ctx, &data);
         js_msg_free(ctx, &sk);
@@ -532,7 +551,8 @@ static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
         js_msg_free(ctx, &sig);
         return JS_EXCEPTION;
     }
-    if (js_crypto_charge(ctx, data.view.len) ||
+    if (js_msg_over_heap(ctx, &data, "ed25519Verify") ||   /* audit 34 */
+        js_crypto_charge(ctx, data.view.len) ||
         hl_js_budget_charge(ctx, HL_ASYM_OP_UNITS)) {   /* audit 10 */
         js_msg_free(ctx, &data);
         js_msg_free(ctx, &sig);

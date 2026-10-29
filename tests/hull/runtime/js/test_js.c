@@ -11319,6 +11319,37 @@ UTEST(js_audit10, public_key_operations_are_charged)
     }
 }
 
+/* Audit 34: ed25519Sign / ed25519Verify copy the message off the heap (verify
+ * twice over), and a MappedBuffer / WasmBuffer message is not on the heap at
+ * all. A message larger than the heap limit is refused before the copy; auth
+ * hashes the message in place and still takes it. */
+UTEST(js_audit34, ed25519_refuses_a_message_past_the_heap_limit)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int("(() => { globalThis.K = crypto.ed25519Keypair();"
+                       " globalThis.BIG = new Uint8Array(2 * 1024 * 1024);"
+                       " globalThis.S = crypto.ed25519Sign(BIG, K.secretKey);"
+                       " globalThis.AK = new Uint8Array(32);"
+                       " return crypto.ed25519Verify(BIG, S, K.publicKey) ? 1 : 0; })()"), 1);
+    size_t saved = js.max_heap_bytes;
+    js.max_heap_bytes = 1024 * 1024;   /* the field only: BIG already exists */
+    char *r = eval_str("(() => { try { crypto.ed25519Verify(BIG, S, K.publicKey); }"
+                       " catch (e) { return String(e.message); } return 'no throw'; })()");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    if (r && !strstr(r, "heap limit")) printf("  got: %s\n", r);
+    free(r);
+    r = eval_str("(() => { try { crypto.ed25519Sign(BIG, K.secretKey); }"
+                 " catch (e) { return String(e.message); } return 'no throw'; })()");
+    EXPECT_TRUE(r && strstr(r, "heap limit") != NULL);
+    free(r);
+    /* auth streams the message: no copy, so no refusal. */
+    EXPECT_EQ(eval_int("(() => { const t = crypto.auth(BIG, AK);"
+                       " return crypto.authVerify(t, BIG, AK) ? 1 : 0; })()"), 1);
+    js.max_heap_bytes = saved;
+    cleanup_js();
+}
+
 /* ── Audit 11 ────────────────────────────────────────────────────────── */
 
 /* Work QuickJS HULL PATCH 0005 still missed: string-to-number (the
