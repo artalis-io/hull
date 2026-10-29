@@ -504,6 +504,16 @@ release-artifact layout).
   was off by one (a `jobs.reap` claim stamped two seconds ago read as one). `time.now()`,
   `time.date()` and `time.datetime()` now read `CLOCK_REALTIME`.
 
+- **A Lua coroutine that yielded inside a transaction could be resumed by a later request**
+  (audit 35). Waits refuse while a transaction is open, but a coroutine the app made and
+  stored could `BEGIN`, write, `coroutine.yield()`, and be resumed from the next request:
+  the stale-transaction guard had rolled the first writes back when the first request
+  ended, so the rest of its statements autocommitted one by one and its `COMMIT`
+  "succeeded". Such a coroutine can now be resumed, closed or called through
+  `coroutine.wrap` only by the run that yielded it (a generator inside `db.batch` keeps
+  working); from a later run the call raises. A coroutine that yields with no transaction
+  open is unaffected. Covered by `test_lua` (`lua_audit35`).
+
 - **A build that linked mbedTLS for a database without HTTP used none of it** (e.g.
   `make HL_ENABLE_HTTP=0 HL_ENABLE_POSTGRES=1`, or MySQL / Valkey). The mbedTLS crypto backends
   were compiled only under `HL_ENABLE_HTTP`, so that binary carried mbedTLS yet ran the

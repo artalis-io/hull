@@ -8126,6 +8126,99 @@ UTEST(lua_task, runs_outside_its_spawners_transaction)
     ASSERT_STREQ(out, "ok");
 }
 
+/* Audit 35: a coroutine the app made that yielded inside a transaction was
+ * resumed by a later entry - after the stale-transaction guard had rolled
+ * that transaction back - so its remaining INSERT autocommitted and its
+ * COMMIT "succeeded". Only the run that yielded it may resume, wrap-call or
+ * close it now. */
+UTEST(lua_audit35, a_coroutine_yielded_in_a_txn_is_refused_in_a_later_run)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE ct (x INTEGER)')\n"
+        "local co, w, cl\n"
+        "require('hull._task').spawn(function()\n"
+        "  co = coroutine.create(function()\n"
+        "    db.exec('BEGIN') db.exec('INSERT INTO ct VALUES (1)')\n"
+        "    coroutine.yield()\n"
+        "    db.exec('INSERT INTO ct VALUES (2)') db.exec('COMMIT') end)\n"
+        "  assert(coroutine.resume(co))\n"
+        "  db.exec('ROLLBACK')\n"
+        "  w = coroutine.wrap(function()\n"
+        "    db.exec('BEGIN') coroutine.yield()\n"
+        "    db.exec('INSERT INTO ct VALUES (3)') db.exec('COMMIT') end)\n"
+        "  w()\n"
+        "  db.exec('ROLLBACK')\n"
+        "  cl = coroutine.create(function()\n"
+        "    local _ <close> = setmetatable({}, { __close = function()\n"
+        "      db.exec('INSERT INTO ct VALUES (4)') end })\n"
+        "    db.exec('BEGIN') coroutine.yield() end)\n"
+        "  assert(coroutine.resume(cl))\n"
+        "end)\n"      /* the task ends inside cl's transaction: rolled back */
+        "hull.sleep(20)\n"
+        "check(co ~= nil and w ~= nil and cl ~= nil, 'the task did not run')\n"
+        "local ok, e = pcall(coroutine.resume, co)\n"
+        "check(not ok and tostring(e):find('inside a database transaction', 1, true),\n"
+        "      'resume: '..tostring(e))\n"
+        "ok, e = pcall(w)\n"
+        "check(not ok and tostring(e):find('inside a database transaction', 1, true),\n"
+        "      'wrap: '..tostring(e))\n"
+        "ok, e = pcall(coroutine.close, cl)\n"
+        "check(not ok and tostring(e):find('inside a database transaction', 1, true),\n"
+        "      'close: '..tostring(e))\n"
+        "check(coroutine.status(co) == 'suspended', 'co ran')\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM ct')[1].n == 0, 'a row was committed')\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n"
+        "db.exec('BEGIN') db.exec('COMMIT')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* Within the run that yielded it, a coroutine inside a transaction resumes as
+ * before (a generator under db.batch); a coroutine that yields with no
+ * transaction open resumes from any later run, including one whose earlier
+ * yield was inside a transaction. */
+UTEST(lua_audit35, same_run_and_txn_free_coroutines_still_resume)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE cs (x INTEGER)')\n"
+        "local co = coroutine.create(function()\n"
+        "  db.exec('BEGIN') db.exec('INSERT INTO cs VALUES (1)')\n"
+        "  coroutine.yield('mid')\n"
+        "  db.exec('INSERT INTO cs VALUES (2)') db.exec('COMMIT')\n"
+        "  coroutine.yield('after')\n"
+        "  return 'done' end)\n"
+        "local ok, v = coroutine.resume(co)\n"
+        "check(ok and v == 'mid', 'first: '..tostring(v))\n"
+        "ok, v = coroutine.resume(co)\n"
+        "check(ok and v == 'after', 'same run: '..tostring(v))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM cs')[1].n == 2, 'rows')\n"
+        "local g = coroutine.wrap(function() for i = 1, 3 do coroutine.yield(i) end end)\n"
+        "check(g() == 1, 'gen 1')\n"
+        "local n = 0\n"
+        "db.batch(function()\n"
+        "  for x in coroutine.wrap(function() for i = 1, 3 do\n"
+        "      db.exec('INSERT INTO cs VALUES (?)', {10 + i}) coroutine.yield(i) end end) do\n"
+        "    n = n + x end end)\n"
+        "check(n == 6, 'batch generator '..n)\n"
+        "hull.sleep(5)\n"   /* a new run */
+        "check(g() == 2, 'a txn-free generator resumes in a later run')\n"
+        "ok, v = coroutine.resume(co)\n"
+        "check(ok and v == 'done', 'later run after a txn-free yield: '..tostring(v))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM cs')[1].n == 5, 'rows after')\n"
+        "local dead = coroutine.create(function() db.exec('BEGIN') coroutine.yield()\n"
+        "  db.exec('ROLLBACK') end)\n"
+        "coroutine.resume(dead) coroutine.resume(dead)\n"
+        "hull.sleep(5)\n"
+        "ok, v = coroutine.resume(dead)\n"
+        "check(not ok and tostring(v):find('dead', 1, true), 'dead: '..tostring(v))\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
 /* Stdlib-only, and it needs a loop; a task that never got its turn is freed
  * with the VM. */
 UTEST(lua_task, stdlib_only_needs_a_loop_and_is_freed_unrun)

@@ -38,6 +38,10 @@
  */
 
 #include "hull/runtime/lua.h"
+
+#include <stdatomic.h>
+
+static atomic_uint_fast64_t budget_run_seq;
 #include "internal.h"
 
 #include "lua.h"
@@ -162,6 +166,12 @@ void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
     b->used = 0;
     b->tripped = 0;
     b->timed_out = 0;
+    /* A fresh id per run, from one process-wide counter (worker VMs arm on
+     * pool threads): a per-budget counter would hand a nested run's id out
+     * again after the restore. A coroutine that yielded inside a
+     * transaction may be resumed only by the run with its id (async.c,
+     * audit 35). */
+    b->run_id = atomic_fetch_add(&budget_run_seq, 1) + 1;
     /* The run's wall-clock deadline: armed (and its flag cleared) before any
      * of the run's code. */
     if (b->watch) hl_run_watch_arm(b->watch, run_ms);
