@@ -332,4 +332,69 @@ int hl_cap_db_sql_reads_whole_database(const char *sql)
     return 0;
 }
 
+/* ── DuckDB catalog / schema switching (audit 33) ──────────────────── */
+
+/* ATTACH / DETACH another database file, USE a database or schema, or SET /
+ * RESET / PRAGMA of `schema` / `search_path` all change which catalog an
+ * unqualified name resolves to. A stored view or macro in a second catalog
+ * then reads the app's `_hull_*` tables cross-catalog, and the name never
+ * appears in the app's own SQL text, so hl_cap_db_check_namespace (lexical)
+ * cannot see it. App SQL may use none of them (audit 33). */
+static int catalog_kw(const char *s, size_t n)
+{
+    static const char *const names[] = { "attach", "detach", "use", NULL };
+    for (int i = 0; names[i]; i++)
+        if (strlen(names[i]) == n && strncasecmp(s, names[i], n) == 0)
+            return 1;
+    return 0;
+}
+
+int hl_cap_db_sql_switches_catalog(const char *sql)
+{
+    if (!sql) return 0;
+    size_t budget = 2 * strlen(sql) + 65536;   /* shared by every gap skip */
+    for (const char *p = sql; *p; ) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') {               /* "quoted" keyword, "" = a quote */
+            char buf[16];
+            size_t n = 0;
+            int fits = 1;
+            for (const char *q = p + 1; *q; q++) {
+                if (*q == '"') {
+                    if (q[1] == '"') { q++; } else break;
+                }
+                if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
+            }
+            if (fits && catalog_kw(buf, n)) return 1;
+            p++;                      /* literals are not skipped: see above */
+            continue;
+        }
+        if (dyn_ident_char(c) && !(c >= '0' && c <= '9')) {
+            const char *start = p;
+            while (*p && dyn_ident_char((unsigned char)*p)) p++;
+            size_t n = (size_t)(p - start);
+            if (catalog_kw(start, n)) return 1;
+            /* SET / RESET / PRAGMA [GLOBAL|SESSION|LOCAL] (schema|search_path) */
+            if ((n == 3 && strncasecmp(start, "set", 3) == 0) ||
+                (n == 5 && strncasecmp(start, "reset", 5) == 0) ||
+                (n == 6 && strncasecmp(start, "pragma", 6) == 0)) {
+                const char *after = NULL;
+                const char *q = p;
+                if (whole_db_next_is(q, "global", &budget, &after) ||
+                    whole_db_next_is(q, "session", &budget, &after) ||
+                    whole_db_next_is(q, "local", &budget, &after)) {
+                    if (!after) return 1;   /* budget exhausted: refuse */
+                    q = after;
+                }
+                if (whole_db_next_is(q, "schema", &budget, &after) ||
+                    whole_db_next_is(q, "search_path", &budget, &after))
+                    return 1;
+            }
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
 #endif /* HL_ENABLE_DB */

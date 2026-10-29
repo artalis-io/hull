@@ -759,6 +759,72 @@ UTEST(hl_cap_db, whole_database_scan_is_linear)
     free(big);
 }
 
+/* Audit 33: ATTACH / DETACH / USE / SET search_path|schema switch catalogs,
+ * which would read _hull_* tables through a cross-catalog view with no _hull_
+ * in the app SQL. The DuckDB backend refuses them. */
+UTEST(hl_cap_db, catalog_switch_statements_are_refused)
+{
+    static const char *const hit[] = {
+        "ATTACH 'data/c.duckdb' AS c",
+        "attach 'x' as c (READ_ONLY)",
+        "DETACH c",
+        "detach database c",
+        "USE c",
+        "USE c.main",
+        "use \"c\"",
+        "SET schema = 'c.main'",
+        "SET schema TO 'c.main'",
+        "set search_path = 'a,b'",
+        "SET SESSION schema = 'c'",
+        "SET GLOBAL search_path='a'",
+        "RESET schema",
+        "RESET search_path",
+        "PRAGMA schema='c'",
+        "\"ATTACH\" 'x' AS c",
+        "/* lead */ ATTACH 'x' AS c",
+        "-- lead\nUSE c",
+        "SET /* gap */ schema = 'c'",
+        "SELECT 1; ATTACH 'x' AS c",
+        "CREATE TABLE t (x INT); USE c",
+        "SET -- c\n SESSION /* d */ search_path = 'a'",
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_switches_catalog(hit[i]));
+
+    static const char *const miss[] = {
+        "SELECT * FROM t",
+        "SET memory_limit = '1GB'",
+        "SET threads = 4",
+        "RESET memory_limit",
+        "PRAGMA database_list",
+        "SELECT schema, search_path FROM t",       /* not after SET/RESET */
+        "CREATE TABLE schemas (search_path TEXT)",
+        "BEGIN TRANSACTION",
+        "COMMIT",
+        "ROLLBACK",
+        "",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_switches_catalog(miss[i]));
+    EXPECT_EQ(0, hl_cap_db_sql_switches_catalog(NULL));
+}
+
+/* The SET/RESET/PRAGMA next-word peeks share one gap budget, so a run of
+ * `set/*` openers stays linear and fails closed. */
+UTEST(hl_cap_db, catalog_switch_scan_is_linear)
+{
+    size_t n = 1u << 20;
+    char *big = malloc(n + 1);
+    ASSERT_TRUE(big != NULL);
+    for (size_t i = 0; i + 8 <= n; i += 8) memcpy(big + i, "set   /*", 8);
+    big[n - n % 8] = '\0';
+    clock_t t0 = clock();
+    (void)hl_cap_db_sql_switches_catalog(big);
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 5.0);
+    free(big);
+}
+
 /* Audit 30: the quoted-name scan ran to the closing quote from every '"',
  * so a run of quotes was quadratic (1 MB ~ minutes, before any budget
  * charge). It stops once a name cannot fit; detection is unchanged. */

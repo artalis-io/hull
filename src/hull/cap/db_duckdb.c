@@ -653,6 +653,15 @@ static const char DUCK_WHOLE_DB_MSG[] =
     "not available (they run SQL from a file or copy every table, past "
     "Hull's _hull_* check)";
 
+/* ATTACH / DETACH / USE / SET search_path|schema switch the catalog an
+ * unqualified name resolves to; a view or macro stored in a second catalog
+ * then reads _hull_* tables cross-catalog with no _hull_ in the app's SQL
+ * (audit 33). Refused under every file policy; no stdlib SQL uses them. */
+static const char DUCK_CATALOG_MSG[] =
+    "duckdb: ATTACH, DETACH, USE and SET/RESET of search_path or schema are "
+    "not available (they switch catalogs, which would read _hull_* tables "
+    "through a cross-catalog view past Hull's _hull_* check)";
+
 /* 0 when @p sql may run, -1 (error set) when it is refused. */
 static int duck_refuse_sql(HlDbDuckCtx *s, const char *sql)
 {
@@ -662,6 +671,10 @@ static int duck_refuse_sql(HlDbDuckCtx *s, const char *sql)
     }
     if (hl_cap_db_sql_reads_whole_database(sql)) {
         duck_set_err(s, DUCK_WHOLE_DB_MSG);
+        return -1;
+    }
+    if (hl_cap_db_sql_switches_catalog(sql)) {
+        duck_set_err(s, DUCK_CATALOG_MSG);
         return -1;
     }
     return 0;
