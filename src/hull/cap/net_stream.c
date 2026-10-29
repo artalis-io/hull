@@ -195,11 +195,24 @@ static void io_unwatch(HlNetStream *s)
     s->io_mask = 0;
 }
 
-/* Drop every racing descriptor we still hold. Idempotent. */
+/* Drop every racing descriptor we still hold. Idempotent.
+ *
+ * Every descriptor in attempt_fd[] is watched (co_start_attempt keeps it there only
+ * while its attempt_ready watcher is armed, and attempt_ready / co_cancel_attempt
+ * clear the slot when they take the watcher off), so the watcher goes first, as
+ * in co_cancel_attempt and io_unwatch. co_on_done runs this for the attempts
+ * still racing when one wins, BEFORE the op cancel-requests them - so
+ * co_cancel_attempt then finds the slot empty and removes nothing. Closing
+ * without the watcher_del left attempt_ready registered on a closed fd number
+ * (audit 33): on epoll the next socket to get that number could not be watched
+ * (EPOLL_CTL_MOD on a dropped fd fails), and on poll its readiness reached a
+ * callback for this stream. */
 static void retire_attempts(HlNetStream *s)
 {
     for (int i = 0; i < NET_MAX_ADDRS; i++) {
         if (kl_handle_valid(s->attempt_fd[i])) {
+            if (s->be->watcher_del)
+                s->be->watcher_del(s->async, (int)s->attempt_fd[i]);
             sp_close(s->attempt_fd[i]);
             s->attempt_fd[i] = KL_INVALID_SOCKET;
         }
