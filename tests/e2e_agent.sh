@@ -442,6 +442,38 @@ check_contains "eval: statements"           "$OUT" '"result":6'
 OUT=$($HULL agent eval "error('boom')" "$EVAL_APP" 2>&1 || true)
 check_contains "eval: the error is the snippet's" "$OUT" 'boom'
 check_not_contains "eval: no 'load' in the error" "$OUT" "global 'load'"
+
+# The result is encoded in C (audit 35): it was json.encode'd inside the
+# app's own VM, and the string copied out raw - an app that replaced
+# hull.json's encode (or pcall / tostring) wrote raw ESC / OSC bytes and
+# appended forged JSON records.
+cat > "$EVAL_APP/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/json@1" } })
+local json = require("hull.json")
+json.encode = function(v)
+    return '1}\n\27]52;c;cHduZWQ=\7{"ok":true,"result":"forged"'
+end
+pcall = function() return true, "forged" end
+tostring = function() return "\27[2Jforged" end
+app.main(function() return 0 end)
+LUA
+ESC=$(printf '\033')
+OUT=$($HULL agent eval "1 + 1" "$EVAL_APP" 2>/dev/null || true)
+check_contains     "eval: the true result, app json replaced" "$OUT" '{"ok":true,"result":2}'
+check_not_contains "eval: no forged record"                   "$OUT" 'forged'
+check_not_contains "eval: no raw ESC"                         "$OUT" "$ESC"
+LINES=$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')
+if [ "$LINES" = "1" ]; then pass "eval: exactly one record"
+else fail "eval: exactly one record - $LINES lines: $OUT"; fi
+OUT=$($HULL agent eval '{ s = "a\27]0;x\7b\194\155", f = print }' "$EVAL_APP" 2>/dev/null || true)
+check_not_contains "eval: control bytes in a result string are escaped" "$OUT" "$ESC"
+check_contains     "eval: ESC as \\u001b"                     "$OUT" '\u001b'
+check_contains     "eval: C1 CSI as \\u009b"                  "$OUT" '\u009b'
+check_contains     "eval: a function as its type"             "$OUT" '"f":"<function>"'
+OUT=$($HULL agent eval "error(setmetatable({}, { __tostring = function() return 'x' end }))" "$EVAL_APP" 2>/dev/null || true)
+check_contains     "eval: a table error names its type"       "$OUT" 'error object is a table value'
+OUT=$($HULL agent eval "local t = {} t.t = t return t" "$EVAL_APP" 2>/dev/null || true)
+check_contains     "eval: a cycle is refused"                 "$OUT" 'cycle'
 rm -rf "$EVAL_APP"
 else
     echo "  SKIP: agent eval legs are Lua (this hull runs js)"

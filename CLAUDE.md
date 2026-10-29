@@ -1888,6 +1888,8 @@ hull agent inspect [app_dir]             # analyzed project model: annotated dec
 
 `hull dev --agent` enables sidecar files: `.hull/dev.json` (port, PID) on start, `.hull/last_error.json` on load failure. See [AGENTS.md](AGENTS.md) for the full agent development guide.
 
+**Agent output is never app-produced JSON copied raw (audit 35).** `hull agent eval` / MCP `hull_eval` encodes a Lua result in C (`src/hull/agent/eval.c`: raw accessors, no metamethods, depth / size bounded, cycles refused; the snippet is its own chunk under a C `lua_pcall`), never with the app's `hull.json` or its `pcall` / `tostring` globals - a cloned app replacing `json.encode` wrote raw ESC / OSC and forged records. JS uses QuickJS's C `JS_JSONStringify`. Either result goes out through `eval_write_json_safe`, which also escapes DEL and C1 controls. A new agent / MCP command that embeds text from an app VM writes it with the escaping string writers, or validates it first (`hl_agent_text_is_terminal_safe` + `sh_json_parse`, as `hl_agent_errors` does).
+
 ### Migration System
 
 SQL migrations provide versioned schema management for SQLite databases.

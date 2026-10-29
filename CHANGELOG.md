@@ -153,6 +153,20 @@ release-artifact layout).
   timer, a ws callback) is failed as one that waited holding a transaction. Regression legs
   in `tests/e2e_js_runs.sh`.
 
+- **`hull agent eval` / MCP `hull_eval` printed whatever a Lua app's `hull.json` returned**
+  (audit 35). The Lua result was encoded by `json.encode` inside the app's own VM - with
+  `require`, `pcall` and `tostring` taken from app globals - and the string copied into the
+  output unchecked. A cloned app that replaced `require("hull.json").encode` at top level
+  made `hull agent eval "1+1" <app>` write raw ESC / OSC sequences to the terminal (screen
+  and clipboard injection) and append forged JSON records an agent read as the real result;
+  through MCP the client decoded the forged result. The snippet now runs as its own chunk
+  under a C `lua_pcall`, and its value is encoded in C with raw accessors only (no Lua code,
+  no metamethods; depth 32, 4 MiB, a cycle refused; a function / userdata as `"<function>"`;
+  an error that is not a string named by its type). The eval output - JS included - also
+  escapes DEL and the C1 controls (`\u009b` CSI) a JSON encoder leaves raw in a string. An
+  app no longer has to declare `hull/json` for eval to work. Regression legs in
+  `tests/e2e_agent.sh` and `tests/e2e_mcp.sh`.
+
 - **`ws.connect` clients were uncounted, each holding up to 20 MiB off the heap** (audit 32).
   Every Keel client connection keeps an outbound drain (up to 4 MiB) and a message reassembly
   buffer (up to 16 MiB) on Keel's allocator until it is freed, and nothing limited how many a
