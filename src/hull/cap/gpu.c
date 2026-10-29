@@ -85,6 +85,38 @@ static void live_release(HlGpuDevice *dev, size_t n)
     dev->live_bytes = n > dev->live_bytes ? 0 : dev->live_bytes - n;
 }
 
+/* A device a timed-out dispatch / pipeline left running work on (audit 33).
+ * Called under the device mutex before a new submission: gives the stalled
+ * transient bytes back once the backend reports the queue drained, and
+ * otherwise refuses (1). Refusing, rather than queueing behind the hung
+ * submission, keeps each later call from waiting out its own timeout on the
+ * same device - holding the device mutex, and on the sync path the event
+ * loop, for every one of them. */
+static int stalled_refuse(const HlGpuCtx *ctx, HlGpuDevice *dev)
+{
+    if (!dev->stalled) return 0;
+    if (ctx->backend->queue_idle && !ctx->backend->queue_idle(dev))
+        return 1;
+    live_release(dev, dev->stalled_bytes);
+    dev->stalled_bytes = 0;
+    dev->stalled = 0;
+    return 0;
+}
+
+/* After a submission: a timeout keeps the call's transient bytes reserved
+ * and marks the device stalled; anything else gives them back. */
+static void transient_settle(HlGpuDevice *dev, size_t transient, int rc)
+{
+    if (rc == HL_GPU_ERR_TIMEOUT) {
+        dev->stalled = 1;
+        dev->stalled_bytes += transient;
+    } else {
+        live_release(dev, transient);
+    }
+}
+
+static const char GPU_BUSY_MSG[] = "gpu_busy";
+
 size_t hl_gpu_tex_bytes(uint32_t width, uint32_t height, HlGpuTexFormat fmt)
 {
     size_t bpp = 4;
@@ -398,10 +430,19 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
 /* ── Dispatch ──────────────────────────────────────────────────────── */
 
 int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
-                        const HlGpuDispatchOpts *opts,
+                        const HlGpuDispatchOpts *opts_in,
                         void **output, size_t *output_len,
                         const char **err_msg)
 {
+    /* The timeout is clamped here, for every binding and the async worker
+     * (audit 33), on a copy: the caller's opts are const. */
+    HlGpuDispatchOpts opts_c;
+    const HlGpuDispatchOpts *opts = NULL;
+    if (opts_in) {
+        opts_c = *opts_in;
+        opts_c.timeout_ms = hl_gpu_timeout_clamp(opts_c.timeout_ms);
+        opts = &opts_c;
+    }
     static const char *err_no_gpu = "gpu_not_available";
     static const char *err_no_dev = "invalid_device";
     static const char *err_no_shader = "shader_not_found";
@@ -434,9 +475,16 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
         return HL_GPU_ERR_NOT_FOUND;
     }
 
+    if (stalled_refuse(ctx, dev)) {
+        pthread_mutex_unlock(&dev->mutex);
+        if (err_msg) *err_msg = GPU_BUSY_MSG;
+        return HL_GPU_ERR_TIMEOUT;
+    }
+
     /* The call's own buffers, uniforms and inline textures are held on the
      * device while it runs: reserved against the live ceiling before the
-     * backend makes them, given back after (audit 17). */
+     * backend makes them, given back after (audit 17) - or, when it timed
+     * out, once the device is idle again (audit 33). */
     size_t transient = hl_gpu_dispatch_transient_bytes(dev, opts);
     if (live_reserve(dev, transient) != 0) {
         pthread_mutex_unlock(&dev->mutex);
@@ -449,7 +497,7 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
                                     dev->buffers, dev->buffer_count,
                                     dev->textures, dev->texture_count,
                                     output, output_len, err_msg);
-    live_release(dev, transient);
+    transient_settle(dev, transient, rc);
 
     pthread_mutex_unlock(&dev->mutex);
 
@@ -469,10 +517,19 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
 
 /* ── Pipeline (multi-stage dispatch) ────────────────────────────────── */
 
-int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
+int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts_in,
                          HlGpuPipelineResult *result, const char **err_msg)
 {
     static const char *err_internal = "internal_error";
+
+    /* As hl_cap_gpu_dispatch: the timeout clamped for every caller. */
+    HlGpuPipelineOpts opts_c;
+    const HlGpuPipelineOpts *opts = NULL;
+    if (opts_in) {
+        opts_c = *opts_in;
+        opts_c.timeout_ms = hl_gpu_timeout_clamp(opts_c.timeout_ms);
+        opts = &opts_c;
+    }
 
     if (!ctx || !opts || !result || !opts->stages) {
         if (err_msg) *err_msg = err_internal;
@@ -520,8 +577,14 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
 
     memset(result, 0, sizeof(*result));
 
+    if (stalled_refuse(ctx, dev)) {
+        pthread_mutex_unlock(&dev->mutex);
+        if (err_msg) *err_msg = GPU_BUSY_MSG;
+        return HL_GPU_ERR_TIMEOUT;
+    }
+
     /* As hl_cap_gpu_dispatch: the stages' own buffers are reserved for the
-     * call (audit 17). */
+     * call (audit 17), and kept while a timed-out call runs (audit 33). */
     size_t transient = hl_gpu_pipeline_transient_bytes(dev, opts);
     if (live_reserve(dev, transient) != 0) {
         pthread_mutex_unlock(&dev->mutex);
@@ -533,7 +596,7 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
         dev, pipelines, opts->stage_count, opts,
         dev->buffers, dev->buffer_count,
         dev->textures, dev->texture_count, result, err_msg);
-    live_release(dev, transient);
+    transient_settle(dev, transient, rc);
 
     pthread_mutex_unlock(&dev->mutex);
 

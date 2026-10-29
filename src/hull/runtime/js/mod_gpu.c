@@ -22,6 +22,21 @@
 #include <stdio.h>
 #include <stdatomic.h>
 
+/* opts.timeout (ms) as a dispatch's timeout_ms, as Lua's gpu_timeout_arg reads
+ * it: 0 (the backend default) for a non-positive value, at most
+ * HL_GPU_TIMEOUT_MAX_MS. Read as uint32, -1 was 2^32-1 ms, ~49.7 days of
+ * waiting on the event loop (audit 33; the cap layer clamps too). Returns as
+ * hl_js_opt_int64. */
+static int js_gpu_timeout_opt(JSContext *ctx, JSValueConst obj, uint32_t *out)
+{
+    int64_t t = 0;
+    int r = hl_js_opt_int64(ctx, obj, "timeout", &t);
+    if (r == 1)
+        *out = t <= 0 ? 0 : t > HL_GPU_TIMEOUT_MAX_MS ? HL_GPU_TIMEOUT_MAX_MS
+                                                      : (uint32_t)t;
+    return r;
+}
+
 /* The largest WGSL source gpu.load reads or gpu.compile takes. */
 #define JS_GPU_WGSL_MAX ((size_t)10 * 1024 * 1024)
 
@@ -428,7 +443,7 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
 
     /* Parse timeout */
     uint32_t t32;
-    r = hl_js_opt_uint32(ctx, opts_val, "timeout", &t32);
+    r = js_gpu_timeout_opt(ctx, opts_val, &t32);
     if (r < 0) { perr = 1; goto parsed; }
     if (r) opts.timeout_ms = t32;
 
@@ -1354,7 +1369,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, out_val);
     }
 
-    if ((r = hl_js_opt_uint32(ctx, opts_val, "timeout", &u32)) < 0) goto early_fail;
+    if ((r = js_gpu_timeout_opt(ctx, opts_val, &u32)) < 0) goto early_fail;
     if (r) opts.timeout_ms = u32;
 
     /* The async dispatch runs no textures: refuse the options rather than
@@ -1912,7 +1927,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         if (perr) goto parsed;
 
         uint32_t t;
-        r = hl_js_opt_uint32(ctx, argv[1], "timeout", &t);
+        r = js_gpu_timeout_opt(ctx, argv[1], &t);
         if (r < 0) { perr = 1; goto parsed; }
         if (r) pipe_timeout_ms = t;
     }
@@ -2296,7 +2311,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         if (perr) goto opts_done;
 
         uint32_t t;
-        r = hl_js_opt_uint32(ctx, argv[1], "timeout", &t);
+        r = js_gpu_timeout_opt(ctx, argv[1], &t);
         if (r < 0) goto opts_done;
         if (r) op->pipe_opts.timeout_ms = t;
     }

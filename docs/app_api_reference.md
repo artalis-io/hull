@@ -2199,7 +2199,7 @@ local out = gpu.dispatch("search", {
 
 GPU latency is constant ~2.6ms (dominated by submit+poll overhead). Crossover vs AOT at ~16K vectors. Use GPU for large parallel workloads; use WASM AOT for small sequential ones.
 
-**GPU timeout:** Dispatches time out after 5 seconds (configurable via `HL_GPU_TIMEOUT_MS` at compile time). Returns `HL_GPU_ERR_TIMEOUT`. Prevents infinite hangs from shader bugs. Applies to `dispatch`, `pipeline`, and `buffer_copy`.
+**GPU timeout:** Dispatches time out after 5 seconds by default (configurable via `HL_GPU_TIMEOUT_MS` at compile time); a per-call `timeout` (ms) may change it, at most 60 seconds (`HL_GPU_TIMEOUT_MAX_MS`, enforced in the cap layer for both runtimes; a non-positive value means the default). A sync wait also stops at the run's deadline (`--max-run-ms`). Returns `HL_GPU_ERR_TIMEOUT`. Prevents infinite hangs from shader bugs. Applies to `dispatch`, `pipeline`, and `buffer_copy`. A timed-out dispatch or pipeline is still running on the device: its buffers stay counted against the device's memory ceiling, and the device answers further dispatches and pipelines with `gpu_busy` until that work has finished (audit 33).
 
 **Build:** `make fetch-wgpu` downloads and SHA-256 verifies wgpu-native. Then `make HL_ENABLE_GPU=1` auto-detects `vendor/wgpu/`. macOS links Metal + QuartzCore + CoreGraphics + Foundation; Linux links `-lvulkan`. Not compatible with Cosmopolitan builds.
 

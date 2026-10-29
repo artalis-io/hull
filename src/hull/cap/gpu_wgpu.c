@@ -11,6 +11,7 @@
 #ifdef HL_ENABLE_GPU
 
 #include "hull/cap/gpu.h"
+#include "hull/cap/db_budget.h"   /* hl_db_budget_charge: a GPU wait asks the run */
 #include "webgpu.h"
 #include "wgpu.h"
 #include "log.h"
@@ -46,19 +47,44 @@ static uint64_t gpu_now_ms(void)
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+/* The calling run is stopped: its instruction budget tripped, its run
+ * deadline passed (the run watchdog), or the worker pool is being freed. A
+ * 0-unit charge only asks; the trip is sticky, so the run raises it once the
+ * GPU call returns (as the sync SMTP send asks, audit 27). An async dispatch
+ * on a pool thread has no run bound and is bounded by its timeout alone. */
+static int gpu_run_stopped(void)
+{
+#ifdef HL_ENABLE_DB
+    return hl_db_budget_charge(0) != 0;
+#else
+    return 0;
+#endif
+}
+
+/* How often a GPU wait asks the run whether it was stopped. */
+#define GPU_STOP_POLL_MS 10u
+
 /* Poll device until work completes or timeout expires.
- * Returns 0 on success, -1 on timeout. */
+ * Returns 0 on success, -1 on timeout - or when the calling run was stopped
+ * (audit 33: the wait held the event loop for its whole timeout, past the
+ * run deadline). The work is then still running, as on a timeout: the
+ * caller reports HL_GPU_ERR_TIMEOUT and the cap layer marks the device
+ * stalled. A 0 timeout is the backend default, never "wait for ever". */
 static int gpu_poll_with_timeout(WGPUDevice device, uint32_t timeout_ms)
 {
-    if (timeout_ms == 0) {
-        wgpuDevicePoll(device, 1, NULL);
-        return 0;
-    }
-    uint64_t deadline = gpu_now_ms() + timeout_ms;
+    if (timeout_ms == 0) timeout_ms = HL_GPU_TIMEOUT_MS;
+    uint64_t start = gpu_now_ms();
+    uint64_t deadline = start + timeout_ms;
+    uint64_t next_ask = start + GPU_STOP_POLL_MS;
     for (;;) {
         WGPUBool done = wgpuDevicePoll(device, 0, NULL);
         if (done) return 0;
-        if (gpu_now_ms() >= deadline) return -1;
+        uint64_t now = gpu_now_ms();
+        if (now >= deadline) return -1;
+        if (now >= next_ask) {
+            if (gpu_run_stopped()) return -1;
+            next_ask = now + GPU_STOP_POLL_MS;
+        }
         /* Brief yield to avoid busy-spin */
         struct timespec ts = { 0, 100000 }; /* 100 µs */
         nanosleep(&ts, NULL);
@@ -157,9 +183,15 @@ static void on_buffer_map(WGPUMapAsyncStatus status,
 static void gpu_wait_map(WGPUDevice device, MapReq *req, uint32_t timeout_ms)
 {
     uint64_t deadline = gpu_now_ms() + timeout_ms;
+    uint64_t next_ask = gpu_now_ms() + GPU_STOP_POLL_MS;
     while (!req->done) {
         (void)wgpuDevicePoll(device, 0, NULL);
-        if (req->done || gpu_now_ms() >= deadline) break;
+        uint64_t now = gpu_now_ms();
+        if (req->done || now >= deadline) break;
+        if (now >= next_ask) {                  /* see gpu_poll_with_timeout */
+            if (gpu_run_stopped()) break;
+            next_ask = now + GPU_STOP_POLL_MS;
+        }
         struct timespec ts = { 0, 100000 };   /* 100 us */
         nanosleep(&ts, NULL);
     }
@@ -1921,6 +1953,16 @@ static int wgpu_buffer_copy(HlGpuDevice *dev,
     return wgpu_last_error ? HL_GPU_ERR_BUFFER : HL_GPU_OK;
 }
 
+/* The device has no submitted work still running (audit 33): a non-blocking
+ * poll, which also lets wgpu free the buffers a timed-out dispatch's
+ * cleanup destroyed once the work they back has finished. */
+static int wgpu_queue_idle(HlGpuDevice *dev)
+{
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
+    if (!dctx || !dctx->device) return 1;
+    return wgpuDevicePoll(dctx->device, 0, NULL) ? 1 : 0;
+}
+
 /* ── Backend vtable ────────────────────────────────────────────────── */
 
 const HlGpuBackend hl_gpu_backend_wgpu = {
@@ -1941,6 +1983,7 @@ const HlGpuBackend hl_gpu_backend_wgpu = {
     .texture_write     = wgpu_texture_write,
     .texture_read      = wgpu_texture_read,
     .texture_destroy   = wgpu_texture_destroy,
+    .queue_idle        = wgpu_queue_idle,
 };
 
 #else /* !HL_ENABLE_GPU */

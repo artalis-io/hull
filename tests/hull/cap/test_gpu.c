@@ -597,9 +597,21 @@ static void mock_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex)
     tex->handle = NULL;
 }
 
-/* The live total the backend saw while a dispatch / pipeline ran. */
+/* The live total the backend saw while a dispatch / pipeline ran, the
+ * timeout it was handed, what it returns, and whether the queue is idle. */
 static int mock_dispatches;
 static size_t mock_live_during;
+static uint32_t mock_timeout_seen;
+static int mock_dispatch_rc;
+static int mock_idle = 1;
+static int mock_idle_asks;
+
+static int mock_queue_idle(HlGpuDevice *dev)
+{
+    (void)dev;
+    mock_idle_asks++;
+    return mock_idle;
+}
 
 static int mock_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                          const HlGpuDispatchOpts *opts,
@@ -608,11 +620,12 @@ static int mock_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                          void **output, size_t *output_len,
                          const char **err_msg)
 {
-    (void)pipeline; (void)opts; (void)pb; (void)pc; (void)pt; (void)ptc;
+    (void)pipeline; (void)pb; (void)pc; (void)pt; (void)ptc;
     (void)output; (void)output_len; (void)err_msg;
     mock_dispatches++;
     mock_live_during = dev->live_bytes;
-    return HL_GPU_OK;
+    mock_timeout_seen = opts->timeout_ms;
+    return mock_dispatch_rc;
 }
 
 static int mock_dispatch_pipeline(HlGpuDevice *dev, HlGpuPipeline **pipelines,
@@ -622,11 +635,12 @@ static int mock_dispatch_pipeline(HlGpuDevice *dev, HlGpuPipeline **pipelines,
                                   HlGpuPipelineResult *result,
                                   const char **err_msg)
 {
-    (void)pipelines; (void)stage_count; (void)opts; (void)pb; (void)pc;
+    (void)pipelines; (void)stage_count; (void)pb; (void)pc;
     (void)pt; (void)ptc; (void)result; (void)err_msg;
     mock_dispatches++;
     mock_live_during = dev->live_bytes;
-    return HL_GPU_OK;
+    mock_timeout_seen = opts->timeout_ms;
+    return mock_dispatch_rc;
 }
 
 static const HlGpuBackend MOCK_BACKEND = {
@@ -639,6 +653,7 @@ static const HlGpuBackend MOCK_BACKEND = {
     .texture_destroy   = mock_texture_destroy,
     .dispatch          = mock_dispatch,
     .dispatch_pipeline = mock_dispatch_pipeline,
+    .queue_idle        = mock_queue_idle,
 };
 
 static HlGpuCtx *mock_ctx(void)
@@ -649,6 +664,9 @@ static HlGpuCtx *mock_ctx(void)
     ctx->device_count = 1;
     pthread_mutex_init(&ctx->devices[0].mutex, NULL);
     mock_buf_creates = mock_tex_creates = mock_reads = mock_fail_create = 0;
+    mock_dispatch_rc = HL_GPU_OK;
+    mock_idle = 1;
+    mock_idle_asks = 0;
     return ctx;
 }
 
@@ -867,6 +885,105 @@ UTEST(hull_cap_gpu_live, pipeline_reserves_stage_buffers)
     EXPECT_EQ((size_t)64, ctx->devices[0].live_bytes);
 
     hl_cap_gpu_buffer_destroy(ctx, -1, "p");
+    mock_free(ctx);
+}
+
+
+/* ── Audit 33: timeouts clamped in the cap layer; a timed-out call keeps
+ * its memory reserved ──────────────────────────────────────────────── */
+
+/* The JS bindings passed `timeout: -1` through as 2^32-1 ms (~49.7 days on
+ * the event loop). The cap layer now clamps every caller's timeout. */
+UTEST(hull_cap_gpu_audit33, dispatch_and_pipeline_timeouts_are_clamped)
+{
+    EXPECT_EQ((uint32_t)0, hl_gpu_timeout_clamp(0));
+    EXPECT_EQ((uint32_t)10, hl_gpu_timeout_clamp(10));
+    EXPECT_EQ((uint32_t)HL_GPU_TIMEOUT_MAX_MS, hl_gpu_timeout_clamp(UINT32_MAX));
+
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    mock_add_shader(ctx, "sh");
+    HlGpuDispatchOpts opts = {
+        .output_buffer = -1, .output_texture = -1, .device = -1,
+        .timeout_ms = UINT32_MAX,
+    };
+    const char *err = NULL;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ((uint32_t)HL_GPU_TIMEOUT_MAX_MS, mock_timeout_seen);
+    EXPECT_EQ((uint32_t)UINT32_MAX, opts.timeout_ms);   /* the caller's copy */
+    opts.timeout_ms = 250;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ((uint32_t)250, mock_timeout_seen);
+
+    HlGpuPipelineStage stages[1] = { { .shader = "sh" } };
+    HlGpuPipelineOpts popts = {
+        .stages = stages, .stage_count = 1,
+        .output_count = HL_GPU_OUTPUT_NONE, .device = -1,
+        .timeout_ms = HL_GPU_TIMEOUT_MAX_MS + 1,
+    };
+    HlGpuPipelineResult result;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_pipeline(ctx, &popts, &result, &err));
+    EXPECT_EQ((uint32_t)HL_GPU_TIMEOUT_MAX_MS, mock_timeout_seen);
+    mock_free(ctx);
+}
+
+/* A timed-out dispatch is still running, and so is the memory its transient
+ * buffers hold: it was given back at once, so repeated timed-out calls held
+ * device memory past HL_GPU_MAX_LIVE_BYTES. It now stays reserved and the
+ * device refuses new work until the queue has drained. */
+UTEST(hull_cap_gpu_audit33, a_timed_out_dispatch_keeps_its_bytes_until_idle)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    mock_add_shader(ctx, "sh");
+    mock_dispatches = 0;
+    HlGpuBufferDesc bufs[1] = { { .name = NULL, .size = 64, .binding = -1 } };
+    HlGpuDispatchOpts opts = {
+        .buffers = bufs, .buffer_count = 1,
+        .output_buffer = -1, .output_texture = -1, .device = -1,
+    };
+    const char *err = NULL;
+
+    mock_dispatch_rc = HL_GPU_ERR_TIMEOUT;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ((size_t)64, ctx->devices[0].live_bytes);     /* still held */
+    EXPECT_EQ(1, ctx->devices[0].stalled);
+
+    /* Busy: refused before the backend runs, nothing more reserved. */
+    mock_dispatch_rc = HL_GPU_OK;
+    mock_idle = 0;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_STREQ("gpu_busy", err ? err : "");
+    EXPECT_EQ(1, mock_dispatches);
+    EXPECT_EQ((size_t)64, ctx->devices[0].live_bytes);
+    HlGpuPipelineStage stages[1] = { { .shader = "sh", .buffers = bufs, .buffer_count = 1 } };
+    HlGpuPipelineOpts popts = {
+        .stages = stages, .stage_count = 1,
+        .output_count = HL_GPU_OUTPUT_NONE, .device = -1,
+    };
+    HlGpuPipelineResult result;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_pipeline(ctx, &popts, &result, &err));
+    EXPECT_STREQ("gpu_busy", err ? err : "");
+    EXPECT_EQ(1, mock_dispatches);
+
+    /* Drained: the stalled bytes go back and the call runs. */
+    mock_idle = 1;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ(2, mock_dispatches);
+    EXPECT_EQ((size_t)64, mock_live_during);               /* only this call's */
+    EXPECT_EQ((size_t)0, ctx->devices[0].live_bytes);
+    EXPECT_EQ(0, ctx->devices[0].stalled);
+
+    /* A timed-out pipeline stalls the device the same way. */
+    mock_dispatch_rc = HL_GPU_ERR_TIMEOUT;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_pipeline(ctx, &popts, &result, &err));
+    EXPECT_EQ((size_t)64, ctx->devices[0].live_bytes);
+    EXPECT_EQ(1, ctx->devices[0].stalled);
+    mock_dispatch_rc = HL_GPU_OK;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_pipeline(ctx, &popts, &result, &err));
+    EXPECT_EQ((size_t)0, ctx->devices[0].live_bytes);
     mock_free(ctx);
 }
 
