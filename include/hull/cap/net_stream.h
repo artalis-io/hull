@@ -96,6 +96,7 @@ typedef struct HlNetStream HlNetStream;
 #define HL_NET_E_AGAIN     (-10)  /* would park; suspend on the pending op   */
 #define HL_NET_E_TLS       (-11)  /* TLS setup or handshake failed           */
 #define HL_NET_E_DEADLINE  (-12)  /* the stream's deadline was reached       */
+#define HL_NET_E_LIMIT     (-13)  /* a live-stream cap refused it (cap/ssh.c) */
 
 /* Bounds. A hostile or merely slow peer must not be able to grow Hull's
  * memory, so both buffers are fixed at construction and writes are admitted
@@ -145,6 +146,16 @@ typedef struct HlNetStreamConfig {
      * which is what a caller wants unless it is connecting to an address and
      * expecting a different name. */
     const char *tls_hostname;
+
+    /* Called exactly once, with release_arg, when the stream's storage is
+     * finally released (its sockets closed) - which may be AFTER
+     * hl_net_stream_free returns, once an in-flight resolution or connect op
+     * lets go. Only for a stream hl_net_stream_connect handed out: a connect
+     * that fails with *out NULL never calls it, so the caller undoes what it
+     * reserved itself. cap/ssh.c gives back its live-stream slot here (audit
+     * 35). Runs on the loop thread; NULL = nothing to do. */
+    void (*on_release)(void *release_arg);
+    void  *release_arg;
 } HlNetStreamConfig;
 
 /* ## Parking protocol

@@ -549,6 +549,8 @@ end
 ---   { code = "host_revoked", fingerprint = ... }   the store revokes the key
 ---   { code = "auth_failed",  methods = {...} }
 ---   { code = "denied",       detail = ... }      manifest refused it
+---   { code = "too_many_streams", detail = ... }  the per-process cap on live
+---                                                SSH streams (32) is reached
 ---
 --- A `code` rather than a message, because the caller has to branch on the
 --- host-key cases and matching on prose is how that goes wrong later.

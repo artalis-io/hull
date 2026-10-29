@@ -120,6 +120,11 @@ struct HlNetStream {
     int          expiry_kind;         /* what the armed bound reports     */
     int          expired;             /* 0, or an expiry not yet reported */
 
+    /* The caller's release hook (HlNetStreamConfig.on_release): run once,
+     * after the storage is freed, in maybe_release. */
+    void       (*on_release)(void *);
+    void        *release_arg;
+
     /* Parking. The binding fills op.on_resume and suspends; we complete it. */
     HlAsyncOp    op;
     int          op_pending;
@@ -260,9 +265,12 @@ static void maybe_release(HlNetStream *s)
     if (s->be->op_cancel) s->be->op_cancel(s->async, &s->op);
     s->op_pending = 0;
 
+    void (*on_release)(void *) = s->on_release;
+    void *release_arg = s->release_arg;
     free(s->rx);
     free(s->tx);
     free(s);
+    if (on_release) on_release(release_arg);
 }
 
 /* ── Resolution ─────────────────────────────────────────────────────── */
@@ -1002,6 +1010,8 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg)
         s->tls_alloc = *cfg->tls_alloc;   /* by value: the caller's may go */
     }
 
+    s->on_release  = cfg->on_release;
+    s->release_arg = cfg->release_arg;
     s->connect_ms = cfg->connect_ms > 0 ? cfg->connect_ms : NET_CONNECT_MS_DEF;
     s->connect_started_ms = be->monotonic_ms ? be->monotonic_ms() : 0;
     s->read_cap   = cfg->read_cap  ? cfg->read_cap  : HL_NET_READ_CAP_DEFAULT;
@@ -1312,6 +1322,7 @@ const char *hl_net_stream_strerror(int err)
     case HL_NET_E_AGAIN:      return "would block";
     case HL_NET_E_TLS:        return "TLS handshake failed";
     case HL_NET_E_DEADLINE:   return "deadline reached";
+    case HL_NET_E_LIMIT:      return "too many live streams";
     default:                  return "unknown error";
     }
 }
