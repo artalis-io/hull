@@ -557,6 +557,58 @@ int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag)
     return 1;
 }
 
+/* The end of every JS entry (audit 35). Each entry kind ends here instead of
+ * with a bare hl_db_registry_guard_stale_txns:
+ *
+ *   - a request handler            (dispatch.c, hl_js_dispatch)
+ *   - a middleware                 (dispatch.c, hl_js_dispatch_middleware)
+ *   - a timer                      (timers.c, every way out)
+ *   - an SSE handler               (sse.c)
+ *   - ws-server on_open / on_message / on_close  (ws.c)
+ *   - ws-client callbacks          (mod_ws_client.c, js_ws_client_call)
+ *   - app.main's own run           (runtime.c)
+ *   - a hull:_task task            (async.c, js_task_run)
+ *   - an async op's resume         (async.c, hl_js_async_resume)
+ *   - a multipart resume           (mod_request.c, mp_js_pump)
+ *   - a hull test case             (mod_test.c)
+ *
+ * A transaction still open when the entry's code has stopped (its drain
+ * done) was opened by that run - the drain already checked any other run's
+ * stretch (hl_js_run_jobs) - and the run stopped holding it: forgotten, or
+ * left waiting on a promise Hull does not drive (`(async () => { BEGIN; ...;
+ * await gate; ...; COMMIT })()` from a synchronous handler, a settled async
+ * handler, a middleware, a timer). The bare guard rolled it back and nothing
+ * more, so the reaction left on `gate` kept a live tag and, once a later
+ * request settled it, the code after the await ran on in autocommit. Here
+ * the run's tag is failed too (hl_js_run_tag_fail), so that code never runs.
+ * For an entry that only forgot to COMMIT nothing of the run is left to
+ * drop, so failing the tag is harmless; the entry's own outcome (a response
+ * already decided, a timer's reschedule) is unchanged. Entries that wait
+ * (hl_js_entry_park returned 1) already checked their wait; then nothing is
+ * open here. Nothing while the guard is held (a test case's live
+ * transaction around test.get). A new JS entry must end through this. */
+int hl_js_entry_end_txn_check(HlJS *js)
+{
+    if (!js) return 0;
+    int found = 0;
+    if (!hl_db_registry_guard_held()) {
+        const char *txn = hl_db_registry_open_txn(js->base.db_registry);
+        // cppcheck-suppress knownConditionTrueFalse
+        if (txn) {
+            log_error("[hull:c] a run ended while a transaction was open on "
+                      "database connection '%s': it was never committed, or "
+                      "its code is waiting on a promise Hull does not drive "
+                      "and would go on in autocommit. Commit or roll back "
+                      "before the run ends. The transaction is rolled back "
+                      "and the run's remaining code is not continued", txn);
+            found = 1;
+        }
+    }
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
+    if (found) hl_js_run_tag_fail(js, js->entry_tag);
+    return found;
+}
+
 int hl_js_run_txn_open(HlJS *js)
 {
     return js && !js->budget_tripped && !hl_db_registry_guard_held() &&
@@ -833,7 +885,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->active_req  = NULL;
         js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
-        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+        (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
         return;
     }
 
@@ -1059,7 +1111,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
      * M1). Only now, after the re-wait's hl_js_run_yield_check: run before
      * it, the guard rolled the transaction back unseen and the handler
      * resumed later without it (audit 6 M2). */
-    hl_db_registry_guard_stale_txns(js->base.db_registry);
+    (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
     /* Last: Keel sends the response, and may serve the connection's next
      * request from inside this call. */
     hl_js_hold_release(js, release, release_outcome);
@@ -1561,7 +1613,7 @@ static void js_task_fire(void *user)
     JS_FreeValue(ctx, ret);
     hl_js_run_jobs(js);
     js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
-    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+    (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
 
     /* Back to whatever run the task interrupted (see above). Its own trip
      * left nothing pending: the logs above drained the exception. */

@@ -898,7 +898,7 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
     js->last_async_cont = NULL;
     /* Roll back a transaction left open (audit 6 M1) - after the re-wait's
      * hl_js_run_yield_check above, which must see it first (audit 6 M2). */
-    hl_db_registry_guard_stale_txns(js->base.db_registry);
+    (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
 
     /* Done. Free the cont. */
     self->destroy(self);

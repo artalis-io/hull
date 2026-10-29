@@ -805,6 +805,14 @@ is refused there - it was the active request's op and held that client's respons
 nested run (`hull:_task`, `test.get`) puts the outer tag back. As defence
 in depth a resume never sends while Keel still has the connection suspended by an op
 (`hl_js_conn_held_elsewhere`, over `hl_net_op_holder`).
+**A new JS entry must end through `hl_js_entry_end_txn_check`** (`runtime/js/async.c`, which
+lists every entry kind), never a bare `hl_db_registry_guard_stale_txns` (that one stays at entry
+START only). An entry that ends - a synchronous handler, a settled async handler, a middleware, a
+timer, an SSE / ws-server / ws-client callback, app.main's stretch, a `hull:_task` task, an async
+or multipart resume, a `hull test` case - with a transaction still open rolls it back AND fails
+its run tag: a chain it left un-awaited on a promise Hull does not drive (`(async () => { BEGIN;
+...; await gate; ...; COMMIT })()`) was otherwise continued in autocommit once a later request
+settled the gate (audit 35). A forgotten COMMIT keeps the entry's outcome; only the tag fails.
 Under that invariant every transaction the guard finds is orphaned. JS
 `db.batch(fn)` refuses an async fn before BEGIN (prototype check against the
 intrinsic AsyncFunction / AsyncGeneratorFunction) and a returned thenable

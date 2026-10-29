@@ -369,6 +369,13 @@ void hl_js_run_tags_free(HlJS *js);
  * that run continues it. Nothing while the guard is held
  * (hl_db_registry_guard_held: a test case's live transaction). 1 = found. */
 int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag);
+/* Audit 35: the end of every JS entry (the list is at the definition in
+ * async.c). Rolls back a transaction still open - as the bare stale guard
+ * did - and, when there was one, fails the entry's run tag (js->entry_tag),
+ * so a reaction the run left on a promise Hull does not drive never runs.
+ * Call it in place of hl_db_registry_guard_stale_txns at every way out of
+ * an entry, after the entry's drain. 1 = there was one. */
+int hl_js_entry_end_txn_check(HlJS *js);
 /* 1 when run @p tag held a transaction across a wait (above, or
  * hl_js_run_yield_check): its continuations resume without continuing it. */
 int hl_js_run_tag_failed(const HlJS *js, uint64_t tag);
