@@ -778,6 +778,13 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
         }
 
         JS_FreeValue(ctx, ret);
+        /* The case is an entry: a transaction it left open is rolled back
+         * and its run tag failed, so a chain it left waiting on a promise
+         * Hull does not drive cannot run on in autocommit in a later case
+         * (audit 35). Its jobs are not drained first: the case's outcome is
+         * recorded already. */
+        if (js)
+            (void)hl_js_entry_end_txn_check(js);
         if (desc) JS_FreeCString(ctx, desc);
         JS_FreeValue(ctx, timeout_val);
         JS_FreeValue(ctx, fn);

@@ -2445,6 +2445,14 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         hl_js_run_jobs(js);   /* a sync main's queued jobs */
     js->active_cli_main = 0;
     js->last_async_cont = NULL;
+    /* Main's own stretch is over: a transaction still open was opened by
+     * it and is held across whatever its code now waits on (a waiting main
+     * was checked by the park, so nothing is open then). Rolled back, and
+     * main's tag failed, so a chain it left on a promise Hull does not
+     * drive - settled later by a request, when main also registered
+     * routes - never runs on in autocommit (audit 35). It used to stay open
+     * until the next entry's guard rolled it back unseen. */
+    (void)hl_js_entry_end_txn_check(js);
 
     /* Branch on whether main returned a Promise. */
     JSValue value = ret;

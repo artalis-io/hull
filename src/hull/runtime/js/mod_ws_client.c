@@ -348,7 +348,7 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
     if (js) {
         hl_js_run_jobs(js);
         js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
-        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+        (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
     }
 }
 

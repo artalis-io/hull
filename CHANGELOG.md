@@ -98,6 +98,18 @@ release-artifact layout).
   is decided: a request is answered 500, app.main exits 1, a timer or WebSocket callback ends
   as a failed run does, its continuations share a record that stops them, and the failed-run
   list (a fixed ring of 32) frees the run's slot once nothing of it is left to stop.
+- **JS: an entry that ended holding a transaction let its waiting code run on later**
+  (audit 35). The run-failure checks of audits 31-34 ran only where a run was found waiting:
+  an entry that simply ended - a synchronous handler, an async handler already settled, a
+  middleware, a timer, an SSE or WebSocket callback, app.main's own stretch - finished with a
+  bare stale-transaction rollback. A chain it left un-awaited (`(async () => { BEGIN; INSERT
+  a; await gate; INSERT b; COMMIT })()`) had `a` rolled back unseen, and when a later request
+  settled `gate` the chain's code ran on in autocommit and `b` was committed. Every JS entry
+  now ends through one helper, `hl_js_entry_end_txn_check`, which rolls the transaction back
+  AND fails the entry's run tag, so that code never runs (handler, middleware, timer, SSE,
+  ws-server and ws-client callbacks, app.main, `hull:_task` tasks, async and multipart
+  resumes, `hull test` cases). An entry that merely forgot to COMMIT keeps its outcome; the
+  rollback is now logged. Regression legs in `tests/e2e_js_runs.sh`.
 - **A `db.async` result of zero-column rows was freed twice** (audit 32). Postgres accepts an
   empty select list (`SELECT FROM generate_series(1, 20)`), and the worker's result copy grew
   its row store to `rows x 0` bytes. On glibc `realloc(p, 0)` frees `p` and returns NULL; the

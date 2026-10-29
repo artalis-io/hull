@@ -75,6 +75,14 @@
 #       reaction on the promise ran in the drain of the later request that
 #       settled it, its writes autocommitted. The tag is failed now.
 #
+# Audit 35:
+#   M   An entry that ENDED (a synchronous handler, a settled async handler,
+#       a middleware, a timer, a ws callback) while a chain it left un-awaited
+#       held a transaction across a promise Hull does not drive only had the
+#       transaction rolled back; when a later request settled the promise the
+#       chain ran on in autocommit. Every entry kind now ends through
+#       hl_js_entry_end_txn_check, which fails the run's tag too.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -267,6 +275,51 @@ app.get("/u34a", (_req, res) => {
 app.get("/w34a", (_req, res) => { w34a(); res.text("w"); });
 app.get("/w34c", (_req, res) => { w34c(); res.text("w"); });
 app.get("/u34state", (_req, res) => res.json(u34));
+
+/* Audit 35: an entry that ENDS (it does not wait) while an un-awaited chain
+ * it started holds a transaction across a promise Hull does not drive - a
+ * synchronous handler, an async handler already settled, a middleware, a
+ * timer, a ws-server callback. The entry's end rolled the transaction back
+ * and nothing more: when a later request (/w35) settled the gate, the
+ * chain's code after the await ran on in autocommit. Each must stay "none"
+ * and commit nothing. */
+const s35 = { s: "none", a: "none", m: "none", t: "none", w: "none" };
+const g35 = {};
+const gate35 = (k) => new Promise((r) => { g35[k] = r; });
+function chain35(k) {
+    const gate = gate35(k);
+    (async () => {
+        conn.exec("BEGIN");
+        conn.exec("INSERT INTO t VALUES ('v35" + k + "1')");
+        await gate;
+        s35[k] = "continued";
+        conn.exec("INSERT INTO t VALUES ('v35" + k + "2')");
+        try { conn.exec("COMMIT"); } catch (_e) { /* SQLite: no transaction */ }
+    })();
+}
+app.get("/v35s", (_req, res) => { chain35("s"); res.text("ok"); });
+app.get("/v35a", async (_req, res) => { chain35("a"); res.text("ok"); });
+app.use("GET", "/m35/*", (_req, _res) => { chain35("m"); return 0; });
+app.get("/m35/x", (_req, res) => res.text("ok"));
+let t35armed = false;
+app.every(100, () => { if (t35armed) { t35armed = false; chain35("t"); } });
+app.get("/t35arm", (_req, res) => { t35armed = true; res.text("armed"); });
+app.ws("/ws35", { onMessage(c, _m) { chain35("w"); c.send("ok"); } });
+let ws35got = "none";
+app.get("/ws35go", (req, res) => {
+    wsClient.connect("ws://127.0.0.1:" + req.query.port + "/ws35", {
+        onOpen(c) { c.send("go"); },
+        onMessage(_c, m) { ws35got = m; },
+    });
+    res.text("started");
+});
+app.get("/ws35got", (_req, res) => res.text(ws35got));
+app.get("/w35", (req, res) => {
+    const f = g35[req.query.k];
+    if (f) { delete g35[req.query.k]; f(); res.text("settled"); }
+    else res.text("no gate");
+});
+app.get("/s35state", (_req, res) => res.json(s35));
 /* ...and another request's code, run in /x31b's drain, opens one and waits:
  * /x31b's own acknowledged write (xb) must survive, xa1 / xa2 must not
  * commit. /y31a's code, run the same way, commits in one stretch (yc). */
@@ -777,6 +830,42 @@ esac
 after=$(grep -c "async code waited while a transaction was open" "$TMPDIR/log" || true)
 [ "$after" -ge $((before + 2)) ] && pass "both waits are reported" \
     || fail "both waits are reported" "$before -> $after"
+out=$(curl -s -m 10 "$URL/fast")
+[ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
+
+echo "=== audit 35: an entry that ends holding a transaction fails its run ==="
+before=$(grep -c "a run ended while a transaction was open" "$TMPDIR/log" || true)
+out=$(curl -s -m 10 "$URL/v35s")
+[ "$out" = ok ] && pass "a synchronous handler's request is answered" \
+    || fail "a synchronous handler's request is answered" "$out"
+out=$(curl -s -m 10 "$URL/v35a")
+[ "$out" = ok ] && pass "a settled async handler's request is answered" \
+    || fail "a settled async handler's request is answered" "$out"
+out=$(curl -s -m 10 "$URL/m35/x")
+[ "$out" = ok ] && pass "the middleware's request is answered" \
+    || fail "the middleware's request is answered" "$out"
+curl -s -m 10 -o /dev/null "$URL/t35arm"
+curl -s -m 10 -o /dev/null "$URL/ws35go?port=$PORT"
+sleep 0.5
+out=$(curl -s -m 10 "$URL/ws35got")
+[ "$out" = ok ] && pass "the ws callback answered" || fail "the ws callback answered" "$out"
+for k in s a m t w; do
+    out=$(curl -s -m 10 "$URL/w35?k=$k")
+    [ "$out" = settled ] || fail "gate $k was set by its entry" "$out"
+done
+sleep 0.3
+out=$(curl -s -m 10 "$URL/s35state")
+[ "$out" = '{"s":"none","a":"none","m":"none","t":"none","w":"none"}' ] \
+    && pass "no chain's code after the gate ran (handler, async handler, middleware, timer, ws)" \
+    || fail "no chain's code after the gate ran (handler, async handler, middleware, timer, ws)" "$out"
+rows=$(curl -s -m 10 "$URL/rows")
+case "$rows" in
+    *v35*) fail "none of the chains' writes is committed" "$rows" ;;
+    *) pass "none of the chains' writes is committed" ;;
+esac
+after=$(grep -c "a run ended while a transaction was open" "$TMPDIR/log" || true)
+[ "$after" -ge $((before + 5)) ] && pass "all five are reported" \
+    || fail "all five are reported" "$before -> $after"
 out=$(curl -s -m 10 "$URL/fast")
 [ "$out" = fast ] && pass "the server is still up" || fail "the server is still up" "$out"
 

@@ -105,7 +105,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
         int st;
         if (hl_js_entry_park(js, ret, &st)) {
             JS_FreeValue(ctx, ret);
-            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+            (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
             return;
         }
     }
@@ -113,7 +113,7 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     hl_js_run_jobs(js);
     js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
     JS_FreeValue(ctx, ret);
-    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+    (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
 }
 
 void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
@@ -189,7 +189,7 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
         int st;
         if (hl_js_entry_park(js, ret, &st)) {
             JS_FreeValue(ctx, ret);
-            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+            (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
             return;
         }
     }
@@ -197,7 +197,7 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     hl_js_run_jobs(js);
     js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
     JS_FreeValue(ctx, ret);
-    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+    (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
 }
 
 /* Deferred-teardown hook (HlJS::active_on_complete): invalidate the conn
@@ -305,7 +305,7 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                 js->last_async_cont = NULL;   /* an un-awaited op belongs to no run */
             }
             JS_FreeValue(ctx, ret);
-            hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+            (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
 
             if (deferred) {
                 JS_FreeValue(ctx, handler);

@@ -162,7 +162,7 @@ void hl_js_timer_trampoline(void *user_data)
         js->active_timer = NULL;
         hl_js_run_jobs(js);
         js->last_async_cont = NULL;
-        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+        (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
         hl_js_timer_reschedule(t);
         return;
     }
@@ -177,7 +177,7 @@ void hl_js_timer_trampoline(void *user_data)
         /* It clears in_flight and reschedules when the handler completes. */
         JS_FreeValue(ctx, ret);
         js->active_timer = NULL;
-        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+        (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
         return;
     }
 
@@ -195,7 +195,7 @@ void hl_js_timer_trampoline(void *user_data)
         t->in_flight = 0;
         js->active_timer = NULL;
         js->last_async_cont = NULL;
-        hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+        (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
         hl_js_timer_reschedule(t);
         return;
     }
@@ -232,7 +232,7 @@ void hl_js_timer_trampoline(void *user_data)
 
     JS_FreeValue(ctx, ret);
     t->in_flight = 0;
-    hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
+    (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
 
     if (!cancelled)
         hl_js_timer_reschedule(t);
