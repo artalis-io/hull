@@ -168,6 +168,21 @@ static int writes_settle(const HlGpuCtx *ctx, HlGpuDevice *dev, size_t n)
     return rc == HL_GPU_ERR_TIMEOUT ? HL_GPU_ERR_TIMEOUT : HL_GPU_OK;
 }
 
+/* After a dispatch / pipeline that failed (neither OK nor a timeout): it
+ * may have queued its inline uploads and failed before submitting them,
+ * leaving their staging copies in the backend's pending writes. The wgpu
+ * backend submits them itself on that path; here they are counted too -
+ * the call's transient bytes, an upper bound - so the threshold flush comes
+ * for a backend that does not (audit 35: the failure path counted nothing,
+ * and a loop of failing dispatches grew device memory without bound). */
+static void failed_call_settle(const HlGpuCtx *ctx, HlGpuDevice *dev,
+                               size_t transient, int rc)
+{
+    if (rc == HL_GPU_OK || rc == HL_GPU_ERR_TIMEOUT || transient == 0)
+        return;
+    (void)writes_settle(ctx, dev, transient);
+}
+
 /* Bytes of a 4-aligned copy of @p n bytes, at least a word: a storage
  * buffer's allocation, and what wgpu stages for a buffer write or
  * read-back. */
@@ -561,6 +576,7 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
                                     output, output_len, err_msg);
     transient_settle(dev, transient, rc);
     submit_settle(dev, 0, rc);
+    failed_call_settle(ctx, dev, transient, rc);
 
     pthread_mutex_unlock(&dev->mutex);
 
@@ -661,6 +677,7 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts_in,
         dev->textures, dev->texture_count, result, err_msg);
     transient_settle(dev, transient, rc);
     submit_settle(dev, 0, rc);
+    failed_call_settle(ctx, dev, transient, rc);
 
     pthread_mutex_unlock(&dev->mutex);
 
@@ -780,8 +797,12 @@ int hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
 
     int rc = ctx->backend->buffer_write(dev, buf,
                                         data, len, offset);
+    /* Counted even when the backend refused it: a write split in two
+     * (whole words, then a padded tail) can stage its first part and fail
+     * its second (audit 35). */
+    int wrc = writes_settle(ctx, dev, word_bytes(len));
     if (rc == HL_GPU_OK)
-        rc = writes_settle(ctx, dev, word_bytes(len));
+        rc = wrc;
     pthread_mutex_unlock(&dev->mutex);
     return rc;
 }
@@ -939,8 +960,9 @@ int hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
     }
 
     int rc = ctx->backend->texture_write(dev, tex, data, len);
+    int wrc = writes_settle(ctx, dev, tex_staging_bytes(tex));   /* audit 35 */
     if (rc == HL_GPU_OK)
-        rc = writes_settle(ctx, dev, tex_staging_bytes(tex));
+        rc = wrc;
     pthread_mutex_unlock(&dev->mutex);
     return rc;
 }

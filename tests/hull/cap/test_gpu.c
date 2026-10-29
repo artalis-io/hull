@@ -196,6 +196,68 @@ UTEST(hull_cap_gpu, dispatch_double)
     hl_cap_gpu_destroy(&ctx);
 }
 
+/* Audit 35: a dispatch that uploaded an inline buffer and then failed
+ * before its submit (an unknown texture) left the upload's staging copy in
+ * wgpu's pending writes; a loop of them held gigabytes. The backend now
+ * submits them on that path. The loop runs, the device is not stalled, and
+ * a dispatch after it still computes from its own data. */
+UTEST(hull_cap_gpu, a_failed_dispatch_flushes_its_uploads)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+    const char *wgsl =
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    data[id.x] = data[id.x] * 2u;\n"
+        "}\n";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "double", wgsl, strlen(wgsl)));
+
+    const size_t big_len = (size_t)4 << 20;
+    void *big = calloc(1, big_len);
+    ASSERT_TRUE(big != NULL);
+    HlGpuBufferDesc bbuf = {
+        .data = big, .data_len = big_len, .size = big_len,
+        .usage = HL_GPU_USAGE_READWRITE, .binding = -1,
+    };
+    HlGpuTextureDesc tex = { .name = "no_such_texture" };
+    HlGpuDispatchOpts bad = {
+        .buffers = &bbuf, .buffer_count = 1,
+        .textures = &tex, .texture_count = 1,
+        .workgroups = {1, 1, 1},
+        .output_buffer = -1, .output_texture = -1, .device = -1,
+    };
+    for (int i = 0; i < 64; i++) {
+        const char *err = NULL;
+        EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+                  hl_cap_gpu_dispatch(&ctx, "double", &bad, NULL, NULL, &err));
+        EXPECT_STREQ("texture_not_found", err);
+    }
+    free(big);
+    int di = ctx.default_device >= 0 ? ctx.default_device : 0;
+    EXPECT_EQ(0, ctx.devices[di].stalled);
+    EXPECT_TRUE(ctx.devices[di].queued_write_bytes < HL_GPU_MAX_QUEUED_WRITE_BYTES);
+
+    uint32_t input[4] = {1, 2, 3, 4};
+    HlGpuBufferDesc buf = {
+        .data = input, .data_len = sizeof(input), .size = sizeof(input),
+        .usage = HL_GPU_USAGE_READWRITE, .binding = -1,
+    };
+    HlGpuDispatchOpts opts = {
+        .buffers = &buf, .buffer_count = 1, .workgroups = {4, 1, 1},
+        .output_buffer = 0, .output_texture = -1, .device = -1,
+    };
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_dispatch(&ctx, "double", &opts,
+                                             &output, &output_len, &err));
+    ASSERT_EQ(sizeof(input), output_len);
+    EXPECT_EQ((uint32_t)8, ((uint32_t *)output)[3]);
+    free(output);
+    hl_cap_gpu_destroy(&ctx);
+}
+
 /* A buffer larger than its data gets the data and zeros - not whatever lies
  * past the data. Upload used to copy `size` bytes from `data`, so a script
  * asking for {data = "abcd", size = 1 << 20} read host memory into the GPU
@@ -1185,6 +1247,101 @@ UTEST(hull_cap_gpu_audit34, a_read_that_times_out_stalls_the_device)
     free(out);
     EXPECT_EQ((size_t)1000, dev->live_bytes);
     EXPECT_EQ((size_t)0, dev->stalled_bytes);
+    mock_free(ctx);
+}
+
+/* ── Audit 35: a dispatch / pipeline that queued its inline uploads and
+ * failed before submitting them left their staging copies queued, and
+ * the cap layer counted nothing for a failed call, so the audit-34 flush
+ * never came (1.5 GB on Metal from a loop of failing dispatches). A failed
+ * call now counts its transient bytes as queued writes. */
+
+UTEST(hull_cap_gpu_audit35, a_failed_dispatch_counts_its_staged_uploads)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    mock_add_shader(ctx, "sh");
+    mock_add_shader(ctx, "s1");
+    mock_dispatches = 0;
+    HlGpuDevice *dev = &ctx->devices[0];
+
+    const size_t chunk = (size_t)8 << 20;
+    HlGpuBufferDesc bufs[1] = {
+        { .name = NULL, .size = chunk, .binding = -1 },
+    };
+    HlGpuDispatchOpts opts = {
+        .buffers = bufs, .buffer_count = 1,
+        .output_buffer = -1, .output_texture = -1, .device = -1,
+    };
+    const char *err = NULL;
+
+    /* A failure the backend reports before its submit: counted. */
+    mock_dispatch_rc = HL_GPU_ERR_DISPATCH;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ(chunk, dev->queued_write_bytes);
+    EXPECT_EQ((size_t)0, dev->live_bytes);   /* the reservation went back */
+    EXPECT_EQ(0, mock_flushes);
+
+    /* A loop of them is bounded: one flush per cap's worth. */
+    int n = (int)(HL_GPU_MAX_QUEUED_WRITE_BYTES / chunk);
+    for (int i = 0; i < 10 * n; i++)
+        (void)hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err);
+    EXPECT_EQ(10, mock_flushes);
+    EXPECT_TRUE(dev->queued_write_bytes < HL_GPU_MAX_QUEUED_WRITE_BYTES);
+
+    /* Success carried every queued write with its submission. */
+    mock_dispatch_rc = HL_GPU_OK;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ((size_t)0, dev->queued_write_bytes);
+
+    /* The pipeline path too. */
+    HlGpuBufferDesc b0[1] = { { .name = NULL, .size = chunk, .binding = -1 } };
+    HlGpuPipelineStage stages[2] = {
+        { .shader = "sh", .buffers = b0, .buffer_count = 1 },
+        { .shader = "s1", .buffers = b0, .buffer_count = 1 },
+    };
+    HlGpuPipelineOpts popts = {
+        .stages = stages, .stage_count = 2,
+        .output_count = HL_GPU_OUTPUT_NONE, .device = -1,
+    };
+    HlGpuPipelineResult result;
+    mock_dispatch_rc = HL_GPU_ERR_DISPATCH;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &popts, &result, &err));
+    EXPECT_EQ(hl_gpu_pipeline_transient_bytes(dev, &popts), dev->queued_write_bytes);
+    EXPECT_TRUE(dev->queued_write_bytes >= chunk);
+
+    /* A timeout is not double-counted: the queued writes stall the device. */
+    mock_dispatch_rc = HL_GPU_ERR_TIMEOUT;
+    size_t queued = dev->queued_write_bytes;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_EQ((size_t)0, dev->queued_write_bytes);
+    EXPECT_EQ(chunk + queued, dev->stalled_bytes);
+    mock_free(ctx);
+}
+
+/* A write the backend refused may still have staged part of itself (whole
+ * words, then a padded tail): counted all the same. */
+static int mock_write_rc;
+static int mock_buffer_write_rc(HlGpuDevice *dev, HlGpuBuffer *buf,
+                                const void *data, size_t len, size_t offset)
+{
+    (void)mock_buffer_write(dev, buf, data, len, offset);
+    return mock_write_rc;
+}
+
+UTEST(hull_cap_gpu_audit35, a_refused_write_is_still_counted)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    HlGpuBackend be = MOCK_BACKEND;
+    be.buffer_write = mock_buffer_write_rc;
+    ctx->backend = &be;
+    mock_write_rc = HL_GPU_ERR_BUFFER;
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "a", 64, HL_GPU_USAGE_READWRITE));
+    static const char px[64];
+    EXPECT_EQ(HL_GPU_ERR_BUFFER, hl_cap_gpu_buffer_write(ctx, -1, "a", px, 64, 0));
+    EXPECT_EQ((size_t)64, ctx->devices[0].queued_write_bytes);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "a");
     mock_free(ctx);
 }
 

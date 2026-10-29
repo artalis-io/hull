@@ -232,6 +232,19 @@ release-artifact layout).
   `make wamrc`); AOT from an older wamrc is refused. The runtime's lack of hardware bound
   checks is now pinned (`WASM_DISABLE_HW_BOUND_CHECK=1`). `hull build` also hashes the wamrc
   binary by streaming it: a ~90 MB wamrc failed the build with "out of memory".
+- **A failed GPU dispatch leaked its uploads** (audit 35, both runtimes, sync and async).
+  `gpu.dispatch` / `gpu.pipeline` queue their inline buffers, uniforms and inline textures,
+  then could fail before submitting (an unknown texture, a binding-kind mismatch, too many
+  bindings in a later stage, a bind group or encoder that could not be made). Audit 34's
+  flush counted no write for a failed call, so the staging copies stayed in wgpu's pending
+  writes: a loop of failing dispatches with an 8 MiB inline buffer held 1.7 GB of device
+  memory at 200 calls and 5.9 GB at 700 (Apple Metal), with a Lua heap under 64 MB. The
+  wgpu backend now submits the pending writes itself, with a bounded wait, when a call that
+  queued uploads fails before its submit (a wait that times out reports the call as a
+  timeout and stalls the device); the cap layer also counts a failed call's transient bytes,
+  and a refused `gpu.buffer` / `gpu.texture` write's, as queued writes, so the 64 MiB flush
+  comes for any backend. The same loop now peaks at ~220 MB, as a loop of successful
+  dispatches does.
 - **Tool commands printed a cloned tree's text raw** (audit 33). Audit 32 escaped app text at
   the call sites it found in `hull build` and the manifest-extraction error, but most tool
   commands still wrote file names, manifest strings and signature fields verbatim: `hull verify`
