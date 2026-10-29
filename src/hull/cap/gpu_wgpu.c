@@ -36,6 +36,8 @@ static int wgpu_texture_write(HlGpuDevice *dev, HlGpuTexture *tex,
                                const void *data, size_t len);
 static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
                               void **data, size_t *len);
+static int texture_read_wait(HlGpuDevice *dev, HlGpuTexture *tex,
+                             uint32_t timeout_ms, void **data, size_t *len);
 static void wgpu_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex);
 static void upload_initial(WGPUQueue queue, WGPUBuffer buf, size_t buf_size,
                            const HlGpuBufferDesc *desc);
@@ -221,9 +223,13 @@ static int gpu_write_padded(WGPUQueue queue, WGPUBuffer buf, const void *data,
     return 0;
 }
 
+/* @p timeout_ms bounds the copy's submission and the map, each (0 = the
+ * backend default): a dispatch passes its own, clamped timeout (audit 34). */
 static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
-                            size_t want, void **out_data, size_t *out_len)
+                            size_t want, uint32_t timeout_ms,
+                            void **out_data, size_t *out_len)
 {
+    if (timeout_ms == 0) timeout_ms = HL_GPU_TIMEOUT_MS;
     /* Copies are whole 4-byte words; every Hull buffer is allocated
      * 4-aligned, so the rounded copy stays inside it. Only `want` bytes go
      * back to the caller. (An unaligned size was a validation error: the
@@ -266,7 +272,7 @@ static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
     /* Submit and wait - bounded: a blocking poll here waited forever on a
      * hung device, holding the device mutex. */
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    int waited = gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS);
+    int waited = gpu_poll_with_timeout(dctx->device, timeout_ms);
 
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(encoder);
@@ -284,12 +290,14 @@ static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
         .userdata1 = &map_req,
     };
     wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, size, map_cb);
-    gpu_wait_map(dctx->device, &map_req, HL_GPU_TIMEOUT_MS);
+    gpu_wait_map(dctx->device, &map_req, timeout_ms);
 
     if (!map_req.done || map_req.status != WGPUMapAsyncStatus_Success) {
         wgpuBufferDestroy(staging);
         wgpuBufferRelease(staging);
-        return HL_GPU_ERR_READBACK;
+        /* A map still pending is work still running: a timeout, which the
+         * cap layer turns into a stalled device (audit 34). */
+        return !map_req.done ? HL_GPU_ERR_TIMEOUT : HL_GPU_ERR_READBACK;
     }
 
     /* Copy mapped data to output */
@@ -946,7 +954,8 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             goto cleanup;
         }
 
-        rc = readback_buffer(dctx, out_buf, out_size, output, output_len);
+        rc = readback_buffer(dctx, out_buf, out_size, opts->timeout_ms,
+                             output, output_len);
         if (rc != HL_GPU_OK && err_msg)
             *err_msg = "readback_failed";
     } else if (output && output_len && opts->output_texture >= 0) {
@@ -972,8 +981,8 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
         }
         /* readback reads the texture, never mutates it; the backend vtable
          * slot is non-const so launder through uintptr_t to keep it. */
-        rc = wgpu_texture_read(dev, (HlGpuTexture *)(uintptr_t)tex,
-                                output, output_len);
+        rc = texture_read_wait(dev, (HlGpuTexture *)(uintptr_t)tex,
+                               opts->timeout_ms, output, output_len);
         if (rc != HL_GPU_OK && err_msg)
             *err_msg = "texture_readback_failed";
     } else {
@@ -1068,7 +1077,7 @@ static int wgpu_buffer_read(HlGpuDevice *dev, HlGpuBuffer *buf,
         return HL_GPU_ERR_BUFFER;
 
     return readback_buffer(dctx, (WGPUBuffer)buf->handle,
-                            buf->size, data, len);
+                            buf->size, 0, data, len);
 }
 
 /* ── wgpu_buffer_destroy ───────────────────────────────────────────── */
@@ -1567,7 +1576,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 goto cleanup;
             }
 
-            rc = readback_buffer(dctx, out_buf, out_size,
+            rc = readback_buffer(dctx, out_buf, out_size, opts->timeout_ms,
                                   &result->data[i], &result->len[i]);
             if (rc != HL_GPU_OK) {
                 if (err_msg) *err_msg = "readback_failed";
@@ -1770,6 +1779,15 @@ static int wgpu_texture_write(HlGpuDevice *dev, HlGpuTexture *tex,
 static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
                               void **data, size_t *len)
 {
+    return texture_read_wait(dev, tex, 0, data, len);
+}
+
+/* As readback_buffer: @p timeout_ms bounds the submission and the map
+ * (0 = the backend default). */
+static int texture_read_wait(HlGpuDevice *dev, HlGpuTexture *tex,
+                             uint32_t timeout_ms, void **data, size_t *len)
+{
+    if (timeout_ms == 0) timeout_ms = HL_GPU_TIMEOUT_MS;
     WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !tex || !tex->handle)
         return HL_GPU_ERR_BUFFER;
@@ -1831,7 +1849,7 @@ static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
 
     wgpu_last_error = 0;
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    int waited = gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS);
+    int waited = gpu_poll_with_timeout(dctx->device, timeout_ms);
 
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(encoder);
@@ -1849,12 +1867,12 @@ static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
         .userdata1 = &map_req,
     };
     wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, staging_size, map_cb);
-    gpu_wait_map(dctx->device, &map_req, HL_GPU_TIMEOUT_MS);
+    gpu_wait_map(dctx->device, &map_req, timeout_ms);
 
     if (!map_req.done || map_req.status != WGPUMapAsyncStatus_Success) {
         wgpuBufferDestroy(staging);
         wgpuBufferRelease(staging);
-        return HL_GPU_ERR_READBACK;
+        return !map_req.done ? HL_GPU_ERR_TIMEOUT : HL_GPU_ERR_READBACK;
     }
 
     const void *mapped = wgpuBufferGetConstMappedRange(staging, 0, staging_size);
@@ -1963,6 +1981,35 @@ static int wgpu_queue_idle(HlGpuDevice *dev)
     return wgpuDevicePoll(dctx->device, 0, NULL) ? 1 : 0;
 }
 
+/* Submit the writes wgpuQueueWriteBuffer / WriteTexture queued and wait for
+ * them (audit 34). wgpu copies each write into a staging buffer it holds
+ * until the next submission completes, and a write submits nothing, so a
+ * loop of gpu.buffer uploads with no dispatch grew device memory without
+ * bound (4.8 GB in one run). An empty command buffer carries the pending
+ * writes; the bounded poll lets wgpu free their staging. HL_GPU_OK, or
+ * HL_GPU_ERR_TIMEOUT when the wait timed out or the run was stopped (the
+ * cap layer marks the device stalled). */
+static int wgpu_flush_writes(HlGpuDevice *dev, uint32_t timeout_ms)
+{
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
+    if (!dctx || !dctx->device) return HL_GPU_OK;
+    WGPUCommandEncoderDescriptor enc_desc = { .label = sv("hull_flush_enc") };
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
+        dctx->device, &enc_desc);
+    if (!encoder) return HL_GPU_ERR_INTERNAL;
+    WGPUCommandBufferDescriptor cmd_desc = { .label = sv("hull_flush_cmd") };
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, &cmd_desc);
+    if (!cmd) {
+        wgpuCommandEncoderRelease(encoder);
+        return HL_GPU_ERR_INTERNAL;
+    }
+    wgpuQueueSubmit(dctx->queue, 1, &cmd);
+    int waited = gpu_poll_with_timeout(dctx->device, timeout_ms);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(encoder);
+    return waited != 0 ? HL_GPU_ERR_TIMEOUT : HL_GPU_OK;
+}
+
 /* ── Backend vtable ────────────────────────────────────────────────── */
 
 const HlGpuBackend hl_gpu_backend_wgpu = {
@@ -1984,6 +2031,7 @@ const HlGpuBackend hl_gpu_backend_wgpu = {
     .texture_read      = wgpu_texture_read,
     .texture_destroy   = wgpu_texture_destroy,
     .queue_idle        = wgpu_queue_idle,
+    .flush_writes      = wgpu_flush_writes,
 };
 
 #else /* !HL_ENABLE_GPU */

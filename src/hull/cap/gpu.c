@@ -117,6 +117,77 @@ static void transient_settle(HlGpuDevice *dev, size_t transient, int rc)
 
 static const char GPU_BUSY_MSG[] = "gpu_busy";
 
+static size_t sat_add(size_t a, size_t b)
+{
+    return a > SIZE_MAX - b ? SIZE_MAX : a + b;
+}
+
+/* Work a timed-out submission left running holds @p n more device bytes
+ * the backend made for it (a read's staging buffer, queued writes' staging
+ * copies): counted on live_bytes as stalled bytes, even past the ceiling -
+ * they ARE held - until queue_idle gives them back (audit 34). */
+static void stall_add(HlGpuDevice *dev, size_t n)
+{
+    dev->stalled = 1;
+    dev->live_bytes = sat_add(dev->live_bytes, n);
+    dev->stalled_bytes = sat_add(dev->stalled_bytes, n);
+}
+
+/* After a backend call that submits and waits (dispatch, pipeline, read,
+ * copy, flush): every queued write went with that submission. Success
+ * means wgpu freed their staging copies; a timeout leaves them, and the
+ * call's own @p staging bytes, held by the running work (audit 34). */
+static void submit_settle(HlGpuDevice *dev, size_t staging, int rc)
+{
+    if (rc == HL_GPU_ERR_TIMEOUT) {
+        stall_add(dev, sat_add(staging, dev->queued_write_bytes));
+        dev->queued_write_bytes = 0;
+    } else if (rc == HL_GPU_OK) {
+        dev->queued_write_bytes = 0;
+    }
+}
+
+/* After a buffer / texture write the backend accepted: count its staging
+ * copy, and once the device holds HL_GPU_MAX_QUEUED_WRITE_BYTES of them,
+ * have the backend submit and wait for them (audit 34: wgpu frees a
+ * write's staging only when a later submission completes, so uploads with
+ * no dispatch grew device memory without bound). Called under the device
+ * mutex. HL_GPU_OK, or HL_GPU_ERR_TIMEOUT when the flush timed out (the
+ * device is then stalled). */
+static int writes_settle(const HlGpuCtx *ctx, HlGpuDevice *dev, size_t n)
+{
+    dev->queued_write_bytes = sat_add(dev->queued_write_bytes, n);
+    if (dev->queued_write_bytes < HL_GPU_MAX_QUEUED_WRITE_BYTES)
+        return HL_GPU_OK;
+    if (!ctx->backend->flush_writes) {
+        dev->queued_write_bytes = 0;
+        return HL_GPU_OK;
+    }
+    int rc = ctx->backend->flush_writes(dev, 0);
+    submit_settle(dev, 0, rc);
+    return rc == HL_GPU_ERR_TIMEOUT ? HL_GPU_ERR_TIMEOUT : HL_GPU_OK;
+}
+
+/* Bytes of a 4-aligned copy of @p n bytes, at least a word: a storage
+ * buffer's allocation, and what wgpu stages for a buffer write or
+ * read-back. */
+static size_t word_bytes(size_t n)
+{
+    if (n == 0) return 4;
+    return n > SIZE_MAX - 3 ? SIZE_MAX : (n + 3) & ~(size_t)3;
+}
+
+/* Bytes of a texture's staging copy: rows padded to 256 bytes, as WebGPU
+ * lays out a texture <-> buffer copy. */
+static size_t tex_staging_bytes(const HlGpuTexture *tex)
+{
+    size_t row = hl_gpu_tex_bytes(tex->width, 1, tex->format);
+    if (row > SIZE_MAX - 255) return SIZE_MAX;
+    row = (row + 255) & ~(size_t)255;
+    if (tex->height && row > SIZE_MAX / tex->height) return SIZE_MAX;
+    return row * tex->height;
+}
+
 size_t hl_gpu_tex_bytes(uint32_t width, uint32_t height, HlGpuTexFormat fmt)
 {
     size_t bpp = 4;
@@ -140,16 +211,7 @@ size_t hl_gpu_tex_bytes(uint32_t width, uint32_t height, HlGpuTexFormat fmt)
  * is made once, at the largest size any stage declares. Saturates at
  * SIZE_MAX. */
 
-static size_t sat_add(size_t a, size_t b)
-{
-    return a > SIZE_MAX - b ? SIZE_MAX : a + b;
-}
-
-static size_t storage_bytes(size_t n)
-{
-    if (n == 0) return 4;
-    return n > SIZE_MAX - 3 ? SIZE_MAX : (n + 3) & ~(size_t)3;
-}
+/* (sat_add and word_bytes, the storage-buffer rounding, are above.) */
 
 static size_t uniform_bytes(const void *data, size_t n)
 {
@@ -183,7 +245,7 @@ size_t hl_gpu_dispatch_transient_bytes(const HlGpuDevice *dev,
     for (int i = 0; opts->buffers && i < opts->buffer_count; i++) {
         const HlGpuBufferDesc *d = &opts->buffers[i];
         if (!persistent_buffer(dev, d->name))
-            n = sat_add(n, storage_bytes(d->size));
+            n = sat_add(n, word_bytes(d->size));
     }
     for (int i = 0; opts->textures && i < opts->texture_count; i++) {
         const HlGpuTextureDesc *td = &opts->textures[i];
@@ -204,7 +266,7 @@ size_t hl_gpu_pipeline_transient_bytes(const HlGpuDevice *dev,
         for (int b = 0; st->buffers && b < st->buffer_count; b++) {
             const HlGpuBufferDesc *d = &st->buffers[b];
             if (!d->name) {
-                n = sat_add(n, storage_bytes(d->size));
+                n = sat_add(n, word_bytes(d->size));
                 continue;
             }
             if (persistent_buffer(dev, d->name))
@@ -224,7 +286,7 @@ size_t hl_gpu_pipeline_transient_bytes(const HlGpuDevice *dev,
                 }
             }
             if (first)
-                n = sat_add(n, storage_bytes(max));
+                n = sat_add(n, word_bytes(max));
         }
     }
     return n;
@@ -498,6 +560,7 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
                                     dev->textures, dev->texture_count,
                                     output, output_len, err_msg);
     transient_settle(dev, transient, rc);
+    submit_settle(dev, 0, rc);
 
     pthread_mutex_unlock(&dev->mutex);
 
@@ -597,6 +660,7 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts_in,
         dev->buffers, dev->buffer_count,
         dev->textures, dev->texture_count, result, err_msg);
     transient_settle(dev, transient, rc);
+    submit_settle(dev, 0, rc);
 
     pthread_mutex_unlock(&dev->mutex);
 
@@ -708,9 +772,16 @@ int hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_BUFFER;
     }
+    /* A stalled device queues nothing more (audit 34). */
+    if (stalled_refuse(ctx, dev)) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUSY;
+    }
 
     int rc = ctx->backend->buffer_write(dev, buf,
                                         data, len, offset);
+    if (rc == HL_GPU_OK)
+        rc = writes_settle(ctx, dev, word_bytes(len));
     pthread_mutex_unlock(&dev->mutex);
     return rc;
 }
@@ -740,8 +811,16 @@ int hl_cap_gpu_buffer_read(HlGpuCtx *ctx, int device, const char *name,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_BUFFER;
     }
+    /* On a stalled device the read would wait out its whole timeout behind
+     * the hung work, holding the mutex (and on the sync path the event
+     * loop), and leave its staging buffer behind (audit 34). */
+    if (stalled_refuse(ctx, dev)) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUSY;
+    }
 
     int rc = ctx->backend->buffer_read(dev, buf, data, len);
+    submit_settle(dev, word_bytes(buf->size), rc);
     pthread_mutex_unlock(&dev->mutex);
     return rc;
 }
@@ -854,8 +933,14 @@ int hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_NOT_FOUND;
     }
+    if (stalled_refuse(ctx, dev)) {          /* as buffer_write (audit 34) */
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUSY;
+    }
 
     int rc = ctx->backend->texture_write(dev, tex, data, len);
+    if (rc == HL_GPU_OK)
+        rc = writes_settle(ctx, dev, tex_staging_bytes(tex));
     pthread_mutex_unlock(&dev->mutex);
     return rc;
 }
@@ -886,8 +971,13 @@ int hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_BUFFER;   /* as buffer_read (audit 17) */
     }
+    if (stalled_refuse(ctx, dev)) {          /* as buffer_read (audit 34) */
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUSY;
+    }
 
     int rc = ctx->backend->texture_read(dev, tex, data, len);
+    submit_settle(dev, tex_staging_bytes(tex), rc);
     if (rc == HL_GPU_OK) {
         if (out_width)  *out_width  = tex->width;
         if (out_height) *out_height = tex->height;
@@ -990,10 +1080,15 @@ int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
         pthread_mutex_unlock(&dev->mutex);
         return HL_GPU_ERR_INTERNAL;
     }
+    if (stalled_refuse(ctx, dev)) {          /* as buffer_read (audit 34) */
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUSY;
+    }
 
     int rc = ctx->backend->buffer_copy(dev,
                                         src, dst,
                                         src_offset, dst_offset, copy_size);
+    submit_settle(dev, 0, rc);
     pthread_mutex_unlock(&dev->mutex);
 
     if (hl_audit_enabled) {

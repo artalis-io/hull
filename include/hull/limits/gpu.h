@@ -51,4 +51,12 @@
 #define HL_GPU_MAX_LIVE_BYTES    ((size_t)1 << 30)   /* 1 GiB */
 #endif
 
+/* Bytes of buffer / texture writes one device may hold queued (their
+ * staging copies, which the backend keeps until a submission completes)
+ * before the cap layer has the backend submit and wait for them
+ * (audit 34). At most this plus one write is ever outstanding. */
+#ifndef HL_GPU_MAX_QUEUED_WRITE_BYTES
+#define HL_GPU_MAX_QUEUED_WRITE_BYTES ((size_t)64 << 20)   /* 64 MiB */
+#endif
+
 #endif /* HL_LIMITS_GPU_H */

@@ -58,6 +58,11 @@ typedef enum {
     HL_GPU_ERR_NOT_FOUND     = -7,
     HL_GPU_ERR_DEVICE        = -8,
     HL_GPU_ERR_TIMEOUT       = -9,
+    /* The device is still running work a timed-out call left (audit 33):
+     * refused before anything is queued ("gpu_busy"). Returned by the
+     * buffer / texture write, read and copy entry points (audit 34);
+     * dispatch / pipeline keep HL_GPU_ERR_TIMEOUT with "gpu_busy". */
+    HL_GPU_ERR_BUSY          = -10,
 } HlGpuError;
 
 /* ── Buffer usage flags ────────────────────────────────────────────── */
@@ -220,6 +225,15 @@ typedef struct HlGpuDevice {
      * HL_GPU_MAX_LIVE_BYTES). */
     size_t         stalled_bytes;
     int            stalled;
+    /* Bytes buffer / texture writes queued since the last submission the
+     * device waited out: wgpu holds each write's staging copy until a
+     * submission completes, and a write submits nothing (audit 34: a loop
+     * of uploads with no dispatch held 4.8 GB). Past
+     * HL_GPU_MAX_QUEUED_WRITE_BYTES the cap layer has the backend flush
+     * them (flush_writes); a flush, read, copy or dispatch that timed out
+     * moves them into stalled_bytes. A timed-out read also counts its
+     * staging buffer there. */
+    size_t         queued_write_bytes;
     pthread_mutex_t mutex;
 } HlGpuDevice;
 
@@ -352,6 +366,13 @@ typedef struct HlGpuBackend {
      * out call stalled (audit 33). NULL = the backend runs nothing
      * asynchronously, so a stalled device is taken as drained. */
     int   (*queue_idle)(HlGpuDevice *dev);
+
+    /* Submit the writes buffer_write / texture_write queued and wait for
+     * them, at most @p timeout_ms (0 = the backend default), asking the
+     * run like every GPU wait. HL_GPU_OK, or HL_GPU_ERR_TIMEOUT (the work
+     * is still running). NULL = a write holds nothing past its call
+     * (audit 34). */
+    int   (*flush_writes)(HlGpuDevice *dev, uint32_t timeout_ms);
 } HlGpuBackend;
 
 /* Top-level GPU context */
