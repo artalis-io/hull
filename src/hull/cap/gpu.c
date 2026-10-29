@@ -574,7 +574,7 @@ static size_t wl_var_decl(const char *s, size_t n, size_t i,
     i = wl_skip_ws(s, n, i);
     if (i < n && s[i] == '<') {
         size_t j = wl_skip_ws(s, n, i + 1);
-        j = wl_ident(s, n, j, &id, &len);
+        (void)wl_ident(s, n, j, &id, &len);
         if (wl_is(id, len, "uniform"))      space = HL_GPU_BIND_UNIFORM;
         else if (wl_is(id, len, "storage")) space = HL_GPU_BIND_STORAGE;
         else return 0;   /* private / workgroup / function take no binding */
@@ -602,7 +602,7 @@ static size_t wl_var_decl(const char *s, size_t n, size_t i,
         size_t j = wl_skip_ws(s, n, i);
         if (j < n && s[j] == '<') {
             j = wl_skip_ws(s, n, j + 1);
-            j = wl_ident(s, n, j, &id, &len);
+            (void)wl_ident(s, n, j, &id, &len);
             if (len == 0) return 0;
             *format = wl_storage_format(id, len);
         }
