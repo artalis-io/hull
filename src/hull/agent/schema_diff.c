@@ -275,7 +275,7 @@ static int schema_diff_ctx(HlAppContext *ctx, const char *db_path,
         sqlite3 *db = hl_agent_open_app_db(hl_app_context_app_dir(ctx), db_path);
         if (!db) return hl_agent_write_error(out, "cannot open database");
         int rc = schema_diff_impl(db, vfs, out);
-        sqlite3_close(db);
+        hl_agent_close_app_db(db);
         return rc;
     }
     return schema_diff_impl(hl_app_context_db(ctx), vfs, out);
@@ -304,7 +304,7 @@ static int schema_diff(const char *app_dir, const char *db_path,
     hl_vfs_init(&vfs, hl_app_entries, app_dir);
 
     int rc = schema_diff_impl(db, &vfs, out);
-    sqlite3_close(db);
+    hl_agent_close_app_db(db);
     return rc;
 }
 

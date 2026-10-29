@@ -109,7 +109,7 @@ static int db_schema_impl(sqlite3 *db, int close_db, ShJsonBuf *out)
 
     sh_json_write_array_end(&w);
     sh_json_write_object_end(&w);
-    if (close_db) sqlite3_close(db);
+    if (close_db) hl_agent_close_app_db(db);
     return 0;
 }
 
@@ -213,7 +213,7 @@ static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
     int rc;
     if (hl_agent_prepare_readonly(db, sql, -1, &stmt, &perr) != 0) {
         int ret = hl_agent_write_error(out, perr ? perr : "prepare failed");
-        if (close_db) sqlite3_close(db);
+        if (close_db) hl_agent_close_app_db(db);
         return ret;
     }
 
@@ -271,7 +271,7 @@ static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
 
     sh_json_write_object_end(&w);
     hl_agent_finalize_readonly(db, stmt);
-    if (close_db) sqlite3_close(db);
+    if (close_db) hl_agent_close_app_db(db);
     return 0;
 }
 
@@ -326,7 +326,7 @@ static int migrate_status_impl(sqlite3 *db, int close_db, const HlVfs *vfs,
     int rc = wrap_ok ? hl_migrate_status(&tmp_handle, vfs, &entries, &count) : -1;
     if (wrap_ok) hl_db_sqlite_unwrap(&tmp_handle);
     if (rc != 0) {
-        if (close_db) sqlite3_close(db);
+        if (close_db) hl_agent_close_app_db(db);
         return hl_agent_write_error(out, "failed to query migration status");
     }
 
@@ -354,7 +354,7 @@ static int migrate_status_impl(sqlite3 *db, int close_db, const HlVfs *vfs,
     sh_json_write_object_end(&w);
 
     hl_migrate_status_free(entries, count);
-    if (close_db) sqlite3_close(db);
+    if (close_db) hl_agent_close_app_db(db);
     return 0;
 }
 

@@ -35,6 +35,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "../test_tmpdir.h"
+#ifdef HL_ENABLE_SQLITE
+#include <pthread.h>
+#include <sqlite3.h>
+#include <sys/wait.h>
+#include <time.h>
+#include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
+#include "hull/cap/db_sqlite.h"
+#endif
 
 static char test_dir[256];
 static HlFsConfig  test_cfg;
@@ -1242,5 +1251,199 @@ UTEST(hl_cap_fs, live_db_registry_is_refcounted)
     EXPECT_EQ(0, hl_db_live_file_match(&st));
     teardown_fs();
 }
+
+/* ── Audit 34: registered before mapped; the check atomic with the write ── */
+#ifdef HL_ENABLE_SQLITE
+
+/* A VFS shim over the default one that, when SQLite opens a database's WAL
+ * or rollback journal (the step that leads to the -shm mapping), records
+ * whether the database was already registered. Registered after
+ * hl_cap_db_init, it was not: `PRAGMA journal_mode=WAL` inside the init
+ * opened the WAL and mapped the -shm while the fs capability still saw an
+ * ordinary file (audit 34). */
+static sqlite3_vfs  shim_vfs;
+static sqlite3_vfs *shim_orig;
+static int          shim_side_opens;
+static int          shim_unregistered;
+
+static int shim_open(sqlite3_vfs *vfs, sqlite3_filename name,
+                     sqlite3_file *file, int flags, int *out_flags)
+{
+    (void)vfs;
+    if (name && (flags & (SQLITE_OPEN_WAL | SQLITE_OPEN_MAIN_JOURNAL))) {
+        const char *sfx = (flags & SQLITE_OPEN_WAL) ? "-wal" : "-journal";
+        size_t n = strlen(name), k = strlen(sfx);
+        char db[1024];
+        if (n > k && n - k < sizeof db && strcmp(name + n - k, sfx) == 0) {
+            memcpy(db, name, n - k);
+            db[n - k] = '\0';
+            struct stat st;
+            shim_side_opens++;
+            if (stat(db, &st) != 0 || !hl_db_live_file_match(&st))
+                shim_unregistered++;
+        }
+    }
+    return shim_orig->xOpen(shim_orig, name, file, flags, out_flags);
+}
+
+static int live_open(HlDbHandle *h, const char *path)
+{
+    void *ctx = NULL;
+    memset(h, 0, sizeof *h);
+    if (hl_db_backend_sqlite.open(&ctx, path, NULL) != 0) return -1;
+    h->backend = &hl_db_backend_sqlite;
+    h->ctx = ctx;
+    return 0;
+}
+
+UTEST(hl_cap_fs, a_sqlite_file_is_registered_before_its_wal_opens)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    hl_cap_db_sqlite_setup();          /* before sqlite3_vfs_register initializes */
+    shim_orig = sqlite3_vfs_find(NULL);
+    ASSERT_TRUE(shim_orig != NULL);
+    shim_vfs = *shim_orig;
+    shim_vfs.zName = "hull-test-live-shim";
+    shim_vfs.pNext = NULL;
+    shim_vfs.xOpen = shim_open;
+    ASSERT_EQ(SQLITE_OK, sqlite3_vfs_register(&shim_vfs, 1));
+    shim_side_opens = shim_unregistered = 0;
+
+    char db[512];
+    snprintf(db, sizeof db, "%s/sub/order.db", test_dir);
+    HlDbHandle h;
+    int opened = live_open(&h, db);
+    if (opened == 0) {
+        EXPECT_TRUE(hl_db_backend_sqlite.exec(&h, "CREATE TABLE t(x)", NULL, 0) >= 0);
+        EXPECT_TRUE(hl_db_backend_sqlite.exec(&h, "INSERT INTO t VALUES (1)", NULL, 0) >= 0);
+        hl_db_backend_sqlite.close(&h);
+    }
+    sqlite3_vfs_unregister(&shim_vfs);
+    sqlite3_vfs_register(shim_orig, 1);
+
+    ASSERT_EQ(0, opened);
+    EXPECT_TRUE(shim_side_opens > 0);
+    EXPECT_EQ(0, shim_unregistered);
+    /* And unregistered once closed. */
+    struct stat st;
+    ASSERT_EQ(0, stat(db, &st));
+    EXPECT_EQ(0, hl_db_live_file_match(&st));
+    teardown_fs();
+}
+
+/* The race itself: a thread opens, uses and closes a WAL database over and
+ * over (db.async on a db.open DSN, an evicted worker connection) while this
+ * thread writes in place through an in-root symlink to its -shm. Before
+ * audit 34 the write truncated the index a just-opened connection had mapped
+ * and the process died of SIGBUS within a second. Run in a child so a crash
+ * is a failed assertion, not a dead test binary. */
+typedef struct {
+    char path[512];
+    volatile int stop;
+    int cycles;
+} LiveRace;
+
+static void *live_race_thread(void *arg)
+{
+    LiveRace *r = arg;
+    while (!r->stop) {
+        HlDbHandle h;
+        if (live_open(&h, r->path) != 0) continue;
+        (void)hl_db_backend_sqlite.exec(&h, "INSERT INTO t VALUES (1)", NULL, 0);
+        hl_db_backend_sqlite.close(&h);
+        r->cycles++;
+    }
+    return NULL;
+}
+
+UTEST(hl_cap_fs, a_write_racing_sqlite_opens_never_truncates_a_mapped_index)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    char db[512];
+    snprintf(db, sizeof db, "%s/sub/race.db", test_dir);
+    {
+        HlDbHandle h;
+        ASSERT_EQ(0, live_open(&h, db));
+        ASSERT_TRUE(hl_db_backend_sqlite.exec(&h, "CREATE TABLE t(x)", NULL, 0) >= 0);
+        hl_db_backend_sqlite.close(&h);
+    }
+    char link[512];
+    snprintf(link, sizeof link, "%s/sub/racealias", test_dir);
+    ASSERT_EQ(0, symlink("race.db-shm", link));
+
+    fflush(NULL);
+    pid_t pid = fork();
+    ASSERT_TRUE(pid >= 0);
+    if (pid == 0) {
+        static LiveRace r;
+        snprintf(r.path, sizeof r.path, "%s", db);
+        pthread_t th;
+        if (pthread_create(&th, NULL, live_race_thread, &r) != 0) _exit(10);
+        struct timespec t0, now;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        long refused = 0, written = 0;
+        do {
+            const char *err = NULL;
+            if (hl_cap_fs_write(&test_cfg, "sub/racealias", "y", 1, &err) == 0)
+                written++;
+            else if (err && strcmp(err, HL_DB_LIVE_FILE_ERR) == 0)
+                refused++;
+            int fd = hl_cap_fs_open_write_fd(&test_cfg, "sub/racealias", &err);
+            if (fd >= 0) { written++; close(fd); }
+            else if (err && strcmp(err, HL_DB_LIVE_FILE_ERR) == 0) refused++;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+        } while ((now.tv_sec - t0.tv_sec) * 1000L
+                 + (now.tv_nsec - t0.tv_nsec) / 1000000L < 1500);
+        r.stop = 1;
+        pthread_join(th, NULL);
+        /* Surviving is the point. Every write here is refused (the alias's
+         * real leaf is named like a sidecar); the registry alone would let
+         * one through while no connection is open, which is harmless. */
+        (void)written;
+        if (refused == 0 || r.cycles == 0) _exit(3);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(pid, waitpid(pid, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    if (WIFSIGNALED(status))
+        fprintf(stderr, "race child died of signal %d\n", WTERMSIG(status));
+    EXPECT_EQ(0, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    teardown_fs();
+}
+
+/* The real leaf an alias reaches is checked by name too: a symlink to some
+ * other process's (or a not-yet-open) `x.db-shm` is refused in place. */
+UTEST(hl_cap_fs, an_in_place_write_refuses_an_alias_to_a_sidecar_name)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    char p[512];
+    snprintf(p, sizeof p, "%s/sub/other.db-shm", test_dir);
+    FILE *f = fopen(p, "wb");
+    if (f) { fputs("keep", f); fclose(f); }
+    snprintf(p, sizeof p, "%s/sub/otheralias", test_dir);
+    ASSERT_EQ(0, symlink("other.db-shm", p));
+    const char *err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_open_write_fd(&test_cfg, "sub/otheralias", &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    err = NULL;
+    EXPECT_EQ(-1, hl_cap_fs_write(&test_cfg, "sub/otheralias", "y", 1, &err));
+    EXPECT_STREQ(HL_DB_LIVE_FILE_ERR, err ? err : "");
+    EXPECT_EQ(4LL, sub_size("other.db-shm"));
+    /* An alias to an ordinary file still writes through. */
+    snprintf(p, sizeof p, "%s/sub/plain.txt", test_dir);
+    f = fopen(p, "wb");
+    if (f) { fputs("keep", f); fclose(f); }
+    snprintf(p, sizeof p, "%s/sub/plainalias", test_dir);
+    ASSERT_EQ(0, symlink("plain.txt", p));
+    EXPECT_EQ(0, hl_cap_fs_write(&test_cfg, "sub/plainalias", "y", 1, NULL));
+    EXPECT_EQ(1LL, sub_size("plain.txt"));
+    teardown_fs();
+}
+
+#endif /* HL_ENABLE_SQLITE */
 
 UTEST_MAIN();

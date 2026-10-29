@@ -118,20 +118,13 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
         return -1;
     }
 
-    if (hl_cap_db_init(s->db) != 0) {
-        hl_eprintf_line("hull: sqlite opened '%s' but init failed: %s",
-                dsn ? dsn : "(null)", sqlite3_errmsg(s->db));
-        sqlite3_close(s->db);
-        free(s);
-        return -1;
-    }
-
-    hl_stmt_cache_init(&s->cache, s->db, alloc);
-    s->owned = 1;
-
-    /* Its file (and so its -wal / -shm / -journal) is now one the fs
-     * capability will not rewrite, replace or delete (audit 33). Kept by
-     * path: a reopen (sqlite_replace_conn) names the same file. */
+    /* Its file (and so its -wal / -shm / -journal) is one the fs capability
+     * will not rewrite, replace or delete (audit 33) - registered HERE,
+     * before hl_cap_db_init, whose `PRAGMA journal_mode=WAL` opens the WAL
+     * and maps the -shm MAP_SHARED: registered after it, an in-place write
+     * in that window found the file unknown and truncated the mapped index
+     * (SIGBUS; audit 34). sqlite3_open maps nothing. Kept by path: a reopen
+     * (sqlite_replace_conn) names the same file. */
     const char *file = sqlite3_db_filename(s->db, "main");
     if (file && file[0]) {
         s->live_path = strdup(file);
@@ -139,12 +132,25 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
             hl_eprintf_line("hull: sqlite opened '%s' but could not record "
                             "it (out of memory)", dsn ? dsn : "(null)");
             free(s->live_path);
-            hl_stmt_cache_destroy(&s->cache);
             sqlite3_close(s->db);
             free(s);
             return -1;
         }
     }
+
+    if (hl_cap_db_init(s->db) != 0) {
+        hl_eprintf_line("hull: sqlite opened '%s' but init failed: %s",
+                dsn ? dsn : "(null)", sqlite3_errmsg(s->db));
+        /* Unregistered only once the connection (and its mapping) is gone. */
+        if (sqlite3_close(s->db) == SQLITE_OK && s->live_path)
+            hl_db_live_file_remove(s->live_path);
+        free(s->live_path);
+        free(s);
+        return -1;
+    }
+
+    hl_stmt_cache_init(&s->cache, s->db, alloc);
+    s->owned = 1;
 
     *ctx = s;
     return 0;
@@ -179,6 +185,9 @@ static void sqlite_replace_conn(HlDbSqliteCtx *s)
         s->broken = 1;
         return;
     }
+    /* The new connection opens the file s->live_path already registers (the
+     * old one stays open, and registered, until the new one is ready), so
+     * its -shm is never mapped by an unregistered connection (audit 34). */
     char *path = strdup(file);
     if (!path) { s->broken = 1; return; }
     sqlite3 *ndb = NULL;
@@ -210,9 +219,11 @@ static void sqlite_close(HlDbHandle *h)
 
     hl_stmt_cache_destroy(&s->cache);
     hl_cap_db_shutdown(s->db);
-    sqlite3_close(s->db);
+    /* Unregistered after the close, and only when it closed: a connection
+     * sqlite3_close left open (SQLITE_BUSY) still maps its -shm. */
+    int closed = sqlite3_close(s->db) == SQLITE_OK;
     if (s->live_path) {
-        hl_db_live_file_remove(s->live_path);
+        if (closed) hl_db_live_file_remove(s->live_path);
         free(s->live_path);
     }
     free(s);

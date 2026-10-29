@@ -77,20 +77,28 @@ static int same_file(const char *path, const struct stat *st)
            s.st_ino == st->st_ino;
 }
 
-int hl_db_live_file_match(const struct stat *st)
+void hl_db_live_files_lock(void)   { pthread_mutex_lock(&g_mu); }
+void hl_db_live_files_unlock(void) { pthread_mutex_unlock(&g_mu); }
+
+int hl_db_live_file_match_locked(const struct stat *st)
 {
     static const char *const sfx[] = { "", "-wal", "-shm", "-journal" };
     if (!st) return 0;
-    int hit = 0;
-    pthread_mutex_lock(&g_mu);
-    for (int i = 0; i < g_count && !hit; i++) {
-        for (size_t k = 0; k < sizeof sfx / sizeof sfx[0] && !hit; k++) {
+    for (int i = 0; i < g_count; i++) {
+        for (size_t k = 0; k < sizeof sfx / sizeof sfx[0]; k++) {
             char p[4096];
             int n = snprintf(p, sizeof p, "%s%s", g_files[i].path, sfx[k]);
             if (n > 0 && (size_t)n < sizeof p && same_file(p, st))
-                hit = 1;
+                return 1;
         }
     }
+    return 0;
+}
+
+int hl_db_live_file_match(const struct stat *st)
+{
+    pthread_mutex_lock(&g_mu);
+    int hit = hl_db_live_file_match_locked(st);
     pthread_mutex_unlock(&g_mu);
     return hit;
 }

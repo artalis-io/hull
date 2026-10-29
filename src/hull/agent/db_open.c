@@ -21,6 +21,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
+#include "hull/cap/db_live_files.h"
 #include "hull/migrate.h"
 #include "hull/shared/host.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
@@ -28,7 +29,29 @@
 
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+
+/* A read-only connection to a WAL database maps its -shm too, so it is a
+ * live database file like the backend's (audit 34): registered right after
+ * the open, before anything reads (and so maps) the index, and unregistered
+ * once closed. */
+static int agent_live_add(sqlite3 *db)
+{
+    const char *file = sqlite3_db_filename(db, "main");
+    return (file && file[0]) ? hl_db_live_file_add(file) : 0;
+}
+
+void hl_agent_close_app_db(sqlite3 *db)
+{
+    if (!db) return;
+    const char *file = sqlite3_db_filename(db, "main");
+    char *copy = (file && file[0]) ? strdup(file) : NULL;
+    int closed = sqlite3_close(db) == SQLITE_OK;
+    if (copy && closed) hl_db_live_file_remove(copy);
+    free(copy);
+}
 
 sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
 {
@@ -70,12 +93,16 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
             if (db) sqlite3_close(db);
             return NULL;
         }
+        if (agent_live_add(db) != 0) {
+            sqlite3_close(db);
+            return NULL;
+        }
         /* READONLY covers this file only: ATTACH read any other the user
          * can, and VACUUM INTO wrote a copy anywhere (audit 9 M2). The app
          * connections' guard, without hl_cap_db_init's pragmas (WAL and the
          * rest would write). */
         if (hl_cap_db_guard(db) != 0) {
-            sqlite3_close(db);
+            hl_agent_close_app_db(db);
             return NULL;
         }
     } else {
