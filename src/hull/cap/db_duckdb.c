@@ -558,10 +558,16 @@ static void duck_decode(duckdb_type type, void *data, idx_t row, HlValue *out)
         out->type = HL_TYPE_DOUBLE; out->d = ((double *)data)[row]; return;
     case DUCKDB_TYPE_VARCHAR:
     case DUCKDB_TYPE_BLOB: {
-        duckdb_string_t s = ((duckdb_string_t *)data)[row];
-        uint32_t len = s.value.inlined.length;
+        /* A pointer into the vector, never a copy: a string of up to 12
+         * bytes is stored inline in the duckdb_string_t itself, so a value
+         * pointing into a local copy pointed into this function's dead stack
+         * frame, and short columns read each other's bytes (audit 35). The
+         * vector belongs to the chunk, which the caller keeps until the row
+         * callback has returned. */
+        const duckdb_string_t *sp = &((const duckdb_string_t *)data)[row];
+        uint32_t len = sp->value.inlined.length;
         const char *p = (len <= HL_DUCKDB_STRING_INLINE_MAX)
-            ? s.value.inlined.inlined : s.value.pointer.ptr;
+            ? sp->value.inlined.inlined : sp->value.pointer.ptr;
         out->type = (type == DUCKDB_TYPE_BLOB) ? HL_TYPE_BLOB : HL_TYPE_TEXT;
         out->s = p;
         out->len = len;

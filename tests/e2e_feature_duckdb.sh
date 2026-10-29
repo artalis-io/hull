@@ -49,6 +49,15 @@ app.main(function()
     local d = require("hull.db").connect("analytics")
     local r = d.query("SELECT 42 AS answer")
     assert(r and r[1] and r[1].answer == 42, "duckdb query failed")
+    -- Audit 35: a string of up to 12 bytes is inline in DuckDB's vector;
+    -- the decoder pointed the value into a dead stack copy, so short columns
+    -- of one row read each other's bytes.
+    local s = d.query("SELECT 'x1' AS a, 42 AS n, 'y2' AS b, 'alice' AS c, " ..
+                      "'a-long-string-over-twelve' AS e, 'bob' AS f")[1]
+    assert(s.a == "x1" and s.n == 42 and s.b == "y2" and s.c == "alice"
+           and s.e == "a-long-string-over-twelve" and s.f == "bob",
+           "short strings: " .. tostring(s.a) .. "," .. tostring(s.b) .. "," ..
+           tostring(s.c) .. "," .. tostring(s.f))
     -- Audit 32: statements that run SQL from a file or copy every table
     -- without naming one are refused by Hull itself (not only by DuckDB's
     -- external-access setting), in any statement of the text.

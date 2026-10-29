@@ -38,6 +38,13 @@ release-artifact layout).
   for an address it found locked - one commit less, visible in the response time. A locked
   address now runs the same statements in a hold mode that leaves the count and the lock as
   they were, so locked and unlocked addresses do the same database work.
+- **DuckDB returned another column's value for short strings** (audit 35, both runtimes).
+  DuckDB stores a VARCHAR / BLOB of up to 12 bytes inline in the vector's string struct; the
+  decoder copied that struct to its own stack and pointed the value into the copy, which was
+  dead once it returned. Short columns of one row then read whatever the slot held next -
+  `SELECT 'x1' a, 42 n, 'y2' b` gave `a = 'y2'` - in `conn.query`, `db.async`,
+  `worker.dispatch` and `table_columns`: short ids and role names could be confused. The value
+  now points into the chunk's vector, which outlives the row callback.
 - **A JS `tui.run` loop outside app.main renewed its own run limit** (audit 32). `tui.pollSync`
   re-arms the instruction budget and the run deadline on each event (and after 50 ms of
   waiting), meant for app.main's interactive session; but a timer, a WebSocket callback or a
