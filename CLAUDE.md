@@ -748,6 +748,17 @@ that could `BEGIN` after an earlier check (audit 15); a binding that must free
 copies before raising tests `hl_lua_can_wait` first; JS:
 `hl_js_db_refuse_wait` in `runtime/js/db_wait.h`, called by each parking
 operation before it arms anything - a new JS wait primitive must call it).
+A Lua coroutine the APP made never waits (Hull ops park only `active_co`), but a
+bare `coroutine.yield` inside a transaction let the app hold it past its run and
+resume it from a later entry, after the guard had rolled the transaction back:
+its remaining statements autocommitted and its COMMIT "succeeded" (audit 35).
+So Hull's `coroutine.yield` records, in the yielding thread's extra space, the
+yielding run's id (`HlLuaBudget.run_id`, a process-wide counter set at every
+arm; a nested run's budget restore puts the outer id back) when
+`hl_db_registry_open_txn` is non-NULL, and `coroutine.resume` / `close` / a
+`coroutine.wrap` function (`hl_lua_co_check`, `runtime/lua/async.c`) refuse that
+coroutine from any other run. Within the run - a generator under `db.batch` -
+it resumes as before, and a yield with no transaction open clears the mark.
 In JS the check runs again where the run actually yields (`hl_js_run_yield_check`), since a
 transaction can open after the op was made (`const p = http.fetch(..); conn.exec("BEGIN");
 await p`): the transaction is rolled back there and the run is failed at its next resume (500;

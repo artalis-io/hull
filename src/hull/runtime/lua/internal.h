@@ -208,8 +208,10 @@ int hl_lua_check_can_wait(lua_State *L, const char *what);
  * For a binding that must free what it copied before it raises. */
 int hl_lua_can_wait(lua_State *L);
 
-/* Wrap coroutine.resume / coroutine.close so they refuse a coroutine the
- * runtime has parked on a Hull operation (async.c). */
+/* Wrap coroutine.resume / coroutine.close / coroutine.wrap so they refuse a
+ * coroutine the runtime has parked on a Hull operation, or one that yielded
+ * inside a transaction in another run; coroutine.yield records the latter
+ * (async.c, audit 35). */
 void hl_lua_guard_coroutine_lib(lua_State *L);
 
 /* Called first by every binding continuation (the lua_KFunction of a

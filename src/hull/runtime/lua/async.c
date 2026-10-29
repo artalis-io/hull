@@ -89,7 +89,7 @@ void hl_lua_timer_reschedule(HlLuaTimer *t);
  * worker could still be writing the op's result, after which the real
  * continuation resumed a dead coroutine. coroutine.resume / close refuse a
  * parked coroutine (hl_lua_guard_coroutine_lib). */
-static char hl_lua_parked_marker;
+static int hl_lua_parked_marker;
 
 /* A coroutine whose wait the runtime gave up on - its result could not be
  * built (out of memory) or the op was cancelled (the request went away, the
@@ -99,11 +99,33 @@ static char hl_lua_parked_marker;
  * lua_compute_async_k) and the dead handler on inside another run (audit
  * 33). The mark is sticky: nothing clears it, so the coroutine is refused
  * for good. */
-static char hl_lua_abandoned_marker;
+static int hl_lua_abandoned_marker;
 
 /* Set by hl_lua_async_resume for the span of its own lua_resume: the one
  * resume a binding's continuation may act on (hl_lua_async_k_ok). */
-static char hl_lua_resuming_marker;
+static int hl_lua_resuming_marker;
+
+/* A coroutine the app made that yielded while a transaction was open on a
+ * registry connection or a db.open handle (audit 35). Its extra space holds
+ * the yielding run's id, tagged odd - the markers above are ints, so their
+ * addresses are even and cannot collide. Only the run that yielded it may
+ * resume or close it: once that run ends, the stale-transaction guard rolls
+ * the transaction back (and no wait may span one), so the coroutine's next
+ * statements, run from a later request, autocommitted one by one and its
+ * COMMIT "succeeded" with the earlier writes gone. Within the run - a
+ * generator yielding rows inside db.batch - it resumes as before. The mark
+ * is rewritten (or cleared) by the coroutine's next yield. */
+_Static_assert(_Alignof(int) >= 2, "marker addresses must be even");
+
+static void *hl_lua_txn_tag(uint64_t run_id)
+{
+    return (void *)(((uintptr_t)run_id << 1) | (uintptr_t)1);
+}
+
+static int hl_lua_mark_is_txn_tag(void *mark)
+{
+    return ((uintptr_t)mark & (uintptr_t)1) != 0;
+}
 
 static void **hl_lua_co_mark(lua_State *co)
 {
@@ -144,15 +166,42 @@ int hl_lua_async_k_ok(lua_State *L)
  * original function is upvalue 1. A failure that was the instruction budget
  * running out is re-raised, not returned as (false, err): returned, a loop
  * resuming coroutine after coroutine never ended (budget.c). */
+static HlLua *hl_lua_from_registry(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    return lua;
+}
+
+/* Raises when @p co may not be resumed or closed from here: parked on a Hull
+ * operation, abandoned, or yielded inside a transaction by another run. */
+static void hl_lua_co_check(lua_State *L, lua_State *co)
+{
+    if (!co) return;
+    if (hl_lua_thread_is_abandoned(co))
+        (void)luaL_error(L, "cannot resume or close a coroutine whose Hull "
+                            "operation was abandoned");
+    if (hl_lua_thread_is_parked(co))
+        (void)luaL_error(L, "cannot resume or close a coroutine that is "
+                            "waiting on a Hull operation");
+    void *mark = *hl_lua_co_mark(co);
+    if (hl_lua_mark_is_txn_tag(mark)) {
+        HlLua *lua = hl_lua_from_registry(L);
+        if (lua_status(co) == LUA_YIELD &&
+            (!lua || mark != hl_lua_txn_tag(lua->budget.run_id)))
+            (void)luaL_error(L, "cannot resume or close a coroutine that "
+                                "yielded inside a database transaction in an "
+                                "earlier run: the transaction was rolled back "
+                                "when that run ended, so what follows would "
+                                "commit statement by statement");
+        *hl_lua_co_mark(co) = NULL;   /* its next yield marks it again */
+    }
+}
+
 static int hl_lua_co_guarded(lua_State *L)
 {
-    lua_State *co = lua_tothread(L, 1);
-    if (hl_lua_thread_is_abandoned(co))
-        return luaL_error(L, "cannot resume or close a coroutine whose Hull "
-                             "operation was abandoned");
-    if (hl_lua_thread_is_parked(co))
-        return luaL_error(L, "cannot resume or close a coroutine that is "
-                             "waiting on a Hull operation");
+    hl_lua_co_check(L, lua_tothread(L, 1));
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
     lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
@@ -182,6 +231,73 @@ int hl_lua_resume_status(lua_State *co, int status)
     return LUA_ERRRUN;
 }
 
+/* coroutine.yield: records, in the yielding coroutine's extra space,
+ * whether a transaction is open (audit 35, hl_lua_txn_tag). Written only on
+ * a coroutine that can yield - never the main thread, whose extra space
+ * every new thread copies - and never over a runtime marker. */
+static int hl_lua_co_yield(lua_State *L)
+{
+    if (lua_isyieldable(L)) {   /* never the main thread */
+        void **mark = hl_lua_co_mark(L);
+        if (*mark == NULL || hl_lua_mark_is_txn_tag(*mark)) {
+            HlLua *lua = hl_lua_from_registry(L);
+            const char *txn = lua ? hl_db_registry_open_txn(
+                                        lua->base.db_registry) : NULL;
+            // cppcheck-suppress knownConditionTrueFalse
+            *mark = txn ? hl_lua_txn_tag(lua->budget.run_id) : NULL;
+        }
+    }
+    return lua_yield(L, lua_gettop(L));
+}
+
+/* coroutine.wrap's function: lcorolib's auxwrap, behind the same check as
+ * coroutine.resume. Upvalue 1 is the thread. */
+static int hl_lua_co_auxwrap(lua_State *L)
+{
+    lua_State *co = lua_tothread(L, lua_upvalueindex(1));
+    hl_lua_co_check(L, co);
+    int narg = lua_gettop(L);
+    int nres = 0;
+    if (!lua_checkstack(co, narg)) {
+        lua_pushliteral(L, "too many arguments to resume");
+        return lua_error(L);
+    }
+    lua_xmove(L, co, narg);
+    int status = lua_resume(co, L, narg, &nres);
+    if (status == LUA_OK || status == LUA_YIELD) {
+        if (!lua_checkstack(L, nres + 1)) {
+            lua_pop(co, nres);
+            lua_pushliteral(L, "too many results to resume");
+            return lua_error(L);
+        }
+        lua_xmove(co, L, nres);
+        return nres;
+    }
+    lua_xmove(co, L, 1);                     /* the error */
+    int stat = lua_status(co);
+    if (stat != LUA_OK && stat != LUA_YIELD) {   /* an error in the coroutine */
+        stat = lua_closethread(co, L);       /* close its tbc variables */
+        lua_xmove(co, L, 1);
+    }
+    if (stat != LUA_ERRMEM && lua_type(L, -1) == LUA_TSTRING) {
+        luaL_where(L, 1);
+        lua_insert(L, -2);
+        lua_concat(L, 2);
+    }
+    return lua_error(L);
+}
+
+/* coroutine.wrap(f) */
+static int hl_lua_co_wrap(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_State *NL = lua_newthread(L);
+    lua_pushvalue(L, 1);
+    lua_xmove(L, NL, 1);
+    lua_pushcclosure(L, hl_lua_co_auxwrap, 1);
+    return 1;
+}
+
 void hl_lua_guard_coroutine_lib(lua_State *L)
 {
     /* Every thread starts with a copy of the main thread's extra space, so
@@ -200,6 +316,10 @@ void hl_lua_guard_coroutine_lib(lua_State *L)
             lua_pop(L, 1);
         }
     }
+    lua_pushcfunction(L, hl_lua_co_wrap);
+    lua_setfield(L, -2, "wrap");
+    lua_pushcfunction(L, hl_lua_co_yield);
+    lua_setfield(L, -2, "yield");
     lua_pop(L, 1);
 }
 
