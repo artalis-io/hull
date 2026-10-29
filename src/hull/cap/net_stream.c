@@ -744,7 +744,13 @@ static void io_rearm(HlNetStream *s)
     if (!kl_handle_valid(s->fd) || s->closing) return;
 
     unsigned want = 0;
-    if (s->tls && !s->tls_done) {
+    if (s->result != HL_NET_OK) {
+        /* A failed stream wants nothing from its socket. A dead socket is
+         * reported ready (POLLHUP / EV_EOF) on every tick, so a watcher left
+         * on it spun the loop at 100% CPU until the binding freed the stream
+         * (audit 34). Every caller sees the stored error without a wakeup. */
+        want = 0;
+    } else if (s->tls && !s->tls_done) {
         /* Mid-handshake the socket readiness that matters is whatever the
          * handshake asked for, not what the application wants: no application
          * byte can move until it finishes. */
@@ -818,6 +824,16 @@ static int tx_flush(HlNetStream *s)
     }
     if (s->tx_off == s->tx_len) { s->tx_len = s->tx_off = 0; }
     return HL_NET_OK;
+}
+
+/* A send failed: the stream is dead. The queue goes with it - nothing can
+ * deliver it, and kept, it was a reason for io_rearm to watch the dead socket
+ * for writability on every tick (audit 34). */
+static void tx_fail(HlNetStream *s)
+{
+    s->tx_len = s->tx_off = 0;
+    s->result = HL_NET_E_IO;
+    s->eof    = 1;
 }
 
 /* Fill the receive buffer from the socket, decrypting on the way when a
@@ -894,7 +910,16 @@ static void io_ready(int fd, unsigned ready, void *user)
         return;
     }
 
-    if ((ready & HL_ASYNC_READ) && s->rx) {
+    /* The backends report a hangup or socket error (POLLHUP / POLLERR,
+     * EV_EOF) as READ readiness, whatever was asked for. READ on a watcher
+     * that did not ask for it is therefore the socket dying under a queued
+     * send - and a reset socket is reported ready on every tick. Ignored (no
+     * reader, or rx never allocated) it spun the loop at 100% CPU until the
+     * stream was freed (audit 34). Treat it as a write attempt, which finds
+     * the error; one that makes no progress either is a dead socket too. */
+    int hup = (ready & HL_ASYNC_READ) && !(s->io_mask & HL_ASYNC_READ);
+
+    if ((ready & HL_ASYNC_READ) && s->rx && !hup) {
         rx_fill(s);
         if (s->want_read && (s->rx_off < s->rx_len || s->eof)) {
             s->want_read = 0;
@@ -902,13 +927,19 @@ static void io_ready(int fd, unsigned ready, void *user)
         }
     }
 
-    if (ready & HL_ASYNC_WRITE) {
-        if (tx_flush(s) != HL_NET_OK) { s->result = HL_NET_E_IO; s->eof = 1; woke = 1; }
-        else if (s->want_write && s->tx_off == s->tx_len) {
+    if (s->result == HL_NET_OK && ((ready & HL_ASYNC_WRITE) || hup)) {
+        size_t queued = s->tx_len - s->tx_off;
+        int rc = tx_flush(s);
+        if (rc != HL_NET_OK ||
+            (hup && queued && s->tx_len - s->tx_off == queued)) {
+            tx_fail(s);
+            woke = 1;
+        } else if (s->want_write && s->tx_off == s->tx_len) {
             s->want_write = 0;
             woke = 1;
         }
     }
+    if (s->result != HL_NET_OK) woke = 1;   /* nothing else will wake a parked op */
 
     io_rearm(s);
     if (woke) wake(s);
@@ -1243,7 +1274,15 @@ int hl_net_stream_write(HlNetStream *s, const void *buf, size_t len)
     memcpy(s->tx + s->tx_len, buf, len);
     s->tx_len += len;
 
-    if (tx_flush(s) != HL_NET_OK) { s->result = HL_NET_E_IO; return HL_NET_E_IO; }
+    if (tx_flush(s) != HL_NET_OK) {
+        /* Drop the queue and the watcher (io_rearm sees the error), and wake
+         * an op parked on this stream: it would otherwise wait for readiness
+         * that is no longer watched. */
+        tx_fail(s);
+        io_rearm(s);
+        wake(s);
+        return HL_NET_E_IO;
+    }
     io_rearm(s);
     return HL_NET_OK;
 }

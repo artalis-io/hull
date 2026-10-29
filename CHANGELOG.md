@@ -226,6 +226,16 @@ release-artifact layout).
   and a stdlib frame exempts a require only when it calls `require` by name (a stdlib helper
   calling a function the app handed it no longer lends it that exemption).
 
+- **A network stream whose send failed spun the event loop at 100% CPU** (audit 34). When a
+  stream's peer reset the connection with bytes still queued (a `hull.ssh` session, say), the
+  failed flush kept the queue and `io_rearm` - which never looked at the stored error - kept
+  the write watcher on the dead socket; and since the poll and Keel backends report a hangup
+  as READ readiness, a stream that had never read ignored it. Either way the socket was
+  reported ready on every tick (~200k ticks in 0.3 s) until the binding freed the stream. A
+  failed send now drops the queue, a stream with a stored error watches nothing, and READ
+  readiness on a watcher that did not ask for it is taken as a write attempt that finds the
+  error (no progress counts as one). An op parked on the stream is woken with the error.
+
 - **DuckDB app SQL could ATTACH a second catalog and read `_hull_*` cross-catalog** (audit 33).
   Hull's `_hull_*` guard on a DuckDB connection is the lexical text check, which audit 25 / 32
   reinforced by refusing dynamic-SQL table functions and whole-database file statements. But
