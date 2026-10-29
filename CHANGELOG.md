@@ -505,6 +505,17 @@ release-artifact layout).
   the same read-modify-write and are fixed the same way; a per-IP credit is applied once,
   by the transaction whose DELETE took the user's share.
 
+- **DuckDB's POINTER-taking table functions are refused by name** (audit 35, `duckdb`
+  feature, defence in depth). Of DuckDB 1.5.4's table, table-macro and pragma functions only
+  `arrow_scan` and `arrow_scan_dumb` take POINTER arguments, and both passed Hull's SQL
+  checks. Checked against the engine under Hull's configuration: no SQL value reaches a
+  non-NULL POINTER - the type cannot be named (`1::POINTER` is a catalog error), no bindable
+  value (integer, text, double, blob, boolean) converts to it, no function returns one and no
+  table has such a column, and NULL fails at bind ("pointers cannot be null") - so they were
+  not reachable with an address. They are refused anyway, so the guarantee does not rest on
+  that. No other listed function reads files, takes a table name as a string, or takes a raw
+  pointer outside the existing refusal lists (`read_duckdb` and `parquet_scan` are covered by
+  the `read_*` / `parquet_*` file-function rule).
 - **JS `rbac.hasAnyRole(uid, "admin")` checked each character as a role** (audit 30). A
   string is now one role in both runtimes (Lua's `has_any_role` returned false for one);
   `hasAnyPermission` / `has_any_permission` likewise.
@@ -530,6 +541,22 @@ release-artifact layout).
   soon as the name is too long to be `query` / `query_table` / ...; every byte is still
   scanned for a bare name.
 
+- **DuckDB refused ordinary SQL that contained the database's file name, or used `show` /
+  `histogram`** (audit 35, `duckdb` feature; regression from audit 34). The database-file
+  check refused any statement holding the file's name as a substring, anywhere: with
+  `duckdb://data/hull` every `_hull_migrations` statement was refused and the app could not
+  boot, `duckdb://sessions` broke the session store, `duckdb://app` refused `approvals`,
+  `duckdb://data` refused `SELECT data FROM user_data`. The name is now read only in
+  literals - the text between every two consecutive `'`, `"` or `$`, whatever the parity, so
+  a quote inside a comment cannot hide one - and in file-function arguments and COPY targets,
+  as a path component (preceded by the start or a separator, followed by the end, a separator
+  or a `.wal` / `.tmp` sidecar suffix). `read_blob` / `read_text` / `COPY` of the file and its
+  sidecars stay refused in every spelling (relative, `./`, `..`, any case, backslash,
+  `"..."`, dollar-quoted), and a `U&'...'` literal with a backslash is refused like an `E'...'`
+  one. The table-name check refused `"show" = 1`, `WHERE "show" = ?` and
+  `histogram(lower(name))`: `show` / `table_info` take their `= value` spelling only after
+  `PRAGMA` now, and `histogram` is the table macro only after a table-position word (FROM,
+  JOIN, CALL, PRAGMA, `,`, `(`, ...) and with more than one argument.
 - **A libhull embedder that skipped the optional phase-1 pledge was killed on its first WAL**
   (audit 30). The phase-2 pledge did not record that a pledge was in force, so SQLite's
   `fchown` ran a real `chown` under it and a root process died on "pledge chown". Phase 2 now
