@@ -137,6 +137,24 @@ release-artifact layout).
   good; every binding continuation also checks that it is the runtime's own resume before it
   reads its context.
 
+- **GPU uploads with no dispatch grew device memory without bound; a stalled device still
+  took reads, copies and writes** (audit 34). wgpu copies each `gpu.buffer` / `gpu.texture`
+  upload into a staging buffer it frees only when a later queue submission completes, and no
+  write path submitted: a loop of 16 MB `gpu.buffer` writes held 4.8 GB of device memory in
+  one run under the default budget, with a 64 MB VM heap. The cap layer now counts every
+  write's staging copy per device and, once 64 MiB are queued
+  (`HL_GPU_MAX_QUEUED_WRITE_BYTES`), has the backend submit an empty command buffer and wait
+  for it (bounded, asking the run); any dispatch, pipeline, read or copy that completes
+  releases them too. The same loop now peaks at ~255 MB. And audit 33's stall gate covered
+  only dispatch / pipeline: on a device a timed-out call left running, every
+  `gpu.buffer_read` / `texture_read` waited out its 5 s timeout behind the hung work, holding
+  the device mutex (and the event loop on the sync path), and left a staging buffer nothing
+  counted. Reads, copies and writes are now refused at once with `gpu_busy`
+  (`HL_GPU_ERR_BUSY`); a read, copy or write flush that times out marks the device stalled and
+  keeps its staging bytes, and the queued writes it carried, on the device's live total until
+  the queue drains; a timed-out map counts as a timeout; and a dispatch's read-back waits
+  with the dispatch's own clamped timeout.
+
 - **`--verify-sig` loaded bytecode from the shared code cache** (audit 31). The signature and
   the disk gate hash an app's SOURCE, but the Lua / QuickJS bytecode and compiled-template
   caches are sealed with `~/.hull/cache.key`, which every app process of the user holds: a

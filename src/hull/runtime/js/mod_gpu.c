@@ -718,7 +718,7 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     if (rc != HL_GPU_OK)
-        return JS_ThrowInternalError(ctx, "gpu.buffer failed");
+        return JS_ThrowInternalError(ctx, "gpu.buffer %s", rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "failed");
 
     return JS_TRUE;
 }
@@ -754,7 +754,7 @@ static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     if (rc != HL_GPU_OK)
-        return JS_ThrowInternalError(ctx, "gpu.bufferRead failed");
+        return JS_ThrowInternalError(ctx, "gpu.bufferRead %s", rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "failed");
 
     /* As textureRead: 1 unit per 8 bytes before the copy (audit 26). */
     if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)len)) < 0) {
@@ -848,6 +848,8 @@ static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.bufferCopy: %s",
                    rc == HL_GPU_ERR_NOT_FOUND ? "buffer_not_found"
                  : rc == HL_GPU_ERR_BUFFER ? "out_of_bounds"
+                 : rc == HL_GPU_ERR_BUSY ? "gpu_busy"
+                 : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout"
                  : "copy_failed");
 
     return JS_TRUE;
@@ -1038,7 +1040,7 @@ static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     if (rc != HL_GPU_OK)
-        return JS_ThrowInternalError(ctx, "gpu.texture failed");
+        return JS_ThrowInternalError(ctx, "gpu.texture %s", rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "failed");
     return JS_TRUE;
 
 opt_fail:
@@ -1082,7 +1084,7 @@ static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     if (rc != HL_GPU_OK)
-        return JS_ThrowInternalError(ctx, "gpu.textureRead failed");
+        return JS_ThrowInternalError(ctx, "gpu.textureRead %s", rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "failed");
 
     /* The read-back and its copy into the image: 1 unit per 8 bytes, before
      * the copy (audit 26). */

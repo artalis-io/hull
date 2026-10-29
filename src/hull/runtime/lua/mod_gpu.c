@@ -619,7 +619,7 @@ static int l_gpu_buffer(lua_State *L)
 
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
-        lua_pushstring(L, "buffer_error");
+        lua_pushstring(L, rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "buffer_error");
         return 2;
     }
     lua_pushboolean(L, 1);
@@ -646,7 +646,7 @@ static int l_gpu_buffer_read(lua_State *L)
                                     &data, &len);
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
-        lua_pushstring(L, "buffer_read_error");
+        lua_pushstring(L, rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "buffer_read_error");
         return 2;
     }
 
@@ -733,6 +733,8 @@ static int l_gpu_buffer_copy(lua_State *L)
         lua_pushnil(L);
         lua_pushstring(L, rc == HL_GPU_ERR_NOT_FOUND ? "buffer_not_found"
                        : rc == HL_GPU_ERR_BUFFER ? "out_of_bounds"
+                       : rc == HL_GPU_ERR_BUSY ? "gpu_busy"
+                       : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout"
                        : "copy_failed");
         return 2;
     }
@@ -886,7 +888,7 @@ static int l_gpu_texture(lua_State *L)
         rc = hl_cap_gpu_texture_write(ctx, device, name, pixels, pixel_len);
         if (rc != HL_GPU_OK) {
             lua_pushnil(L);
-            lua_pushstring(L, "texture_write_failed");
+            lua_pushstring(L, rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "texture_write_failed");
             return 2;
         }
     }
@@ -918,7 +920,7 @@ static int l_gpu_texture_read(lua_State *L)
                                      &data, &len, &w, &h, &fmt);
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
-        lua_pushstring(L, "texture_read_failed");
+        lua_pushstring(L, rc == HL_GPU_ERR_BUSY ? "gpu_busy" : rc == HL_GPU_ERR_TIMEOUT ? "gpu_timeout" : "texture_read_failed");
         return 2;
     }
 

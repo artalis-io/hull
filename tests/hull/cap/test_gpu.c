@@ -643,10 +643,60 @@ static int mock_dispatch_pipeline(HlGpuDevice *dev, HlGpuPipeline **pipelines,
     return mock_dispatch_rc;
 }
 
+/* Writes, copies and the queued-write flush (audit 34). */
+static int mock_writes, mock_copies, mock_flushes;
+static int mock_flush_rc, mock_read_rc;
+
+static int mock_buffer_write(HlGpuDevice *dev, HlGpuBuffer *buf,
+                             const void *data, size_t len, size_t offset)
+{
+    (void)dev; (void)buf; (void)data; (void)len; (void)offset;
+    mock_writes++;
+    return HL_GPU_OK;
+}
+
+static int mock_texture_write(HlGpuDevice *dev, HlGpuTexture *tex,
+                              const void *data, size_t len)
+{
+    (void)dev; (void)tex; (void)data; (void)len;
+    mock_writes++;
+    return HL_GPU_OK;
+}
+
+static int mock_buffer_copy(HlGpuDevice *dev, HlGpuBuffer *src,
+                            HlGpuBuffer *dst, size_t so, size_t dso, size_t n)
+{
+    (void)dev; (void)src; (void)dst; (void)so; (void)dso; (void)n;
+    mock_copies++;
+    return HL_GPU_OK;
+}
+
+static int mock_flush_writes(HlGpuDevice *dev, uint32_t timeout_ms)
+{
+    (void)dev; (void)timeout_ms;
+    mock_flushes++;
+    return mock_flush_rc;
+}
+
+/* A read that times out, as the backend reports a hung device. */
+static int mock_buffer_read_rc(HlGpuDevice *dev, HlGpuBuffer *buf,
+                               void **data, size_t *len)
+{
+    if (mock_read_rc != HL_GPU_OK) {
+        mock_reads++;
+        return mock_read_rc;
+    }
+    return mock_buffer_read(dev, buf, data, len);
+}
+
 static const HlGpuBackend MOCK_BACKEND = {
     .name              = "mock",
     .buffer_create     = mock_buffer_create,
-    .buffer_read       = mock_buffer_read,
+    .buffer_write      = mock_buffer_write,
+    .buffer_copy       = mock_buffer_copy,
+    .texture_write     = mock_texture_write,
+    .flush_writes      = mock_flush_writes,
+    .buffer_read       = mock_buffer_read_rc,
     .buffer_destroy    = mock_buffer_destroy,
     .texture_create    = mock_texture_create,
     .texture_read      = mock_texture_read,
@@ -667,6 +717,9 @@ static HlGpuCtx *mock_ctx(void)
     mock_dispatch_rc = HL_GPU_OK;
     mock_idle = 1;
     mock_idle_asks = 0;
+    mock_writes = mock_copies = mock_flushes = 0;
+    mock_flush_rc = HL_GPU_OK;
+    mock_read_rc = HL_GPU_OK;
     return ctx;
 }
 
@@ -984,6 +1037,154 @@ UTEST(hull_cap_gpu_audit33, a_timed_out_dispatch_keeps_its_bytes_until_idle)
     mock_dispatch_rc = HL_GPU_OK;
     EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_pipeline(ctx, &popts, &result, &err));
     EXPECT_EQ((size_t)0, ctx->devices[0].live_bytes);
+    mock_free(ctx);
+}
+
+/* ── Queued writes and the stall gate on every submitting entry (audit 34)
+ *
+ * wgpu holds every queued write's staging copy until a submission
+ * completes, and nothing in a write path submitted: a loop of uploads held
+ * 4.8 GB of device memory. And a stalled device refused only dispatch /
+ * pipeline: a read waited out its timeout behind the hung work. */
+
+UTEST(hull_cap_gpu_audit34, queued_writes_are_flushed_past_the_cap)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    const size_t chunk = (size_t)16 << 20;
+    void *data = calloc(1, chunk);
+    ASSERT_TRUE(data != NULL);
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", chunk,
+                                                   HL_GPU_USAGE_READWRITE));
+    HlGpuDevice *dev = &ctx->devices[0];
+
+    /* Under the cap: queued, nothing submitted. */
+    int n = (int)(HL_GPU_MAX_QUEUED_WRITE_BYTES / chunk);
+    for (int i = 0; i < n - 1; i++)
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "b", data, chunk, 0));
+    EXPECT_EQ(0, mock_flushes);
+    EXPECT_EQ((size_t)(n - 1) * chunk, dev->queued_write_bytes);
+
+    /* Reaching it: the backend submits and waits; the count starts over. */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "b", data, chunk, 0));
+    EXPECT_EQ(1, mock_flushes);
+    EXPECT_EQ((size_t)0, dev->queued_write_bytes);
+
+    /* A loop of writes is bounded: one flush per cap's worth. */
+    for (int i = 0; i < 10 * n; i++)
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "b", data, chunk, 0));
+    EXPECT_EQ(11, mock_flushes);
+    EXPECT_TRUE(dev->queued_write_bytes < HL_GPU_MAX_QUEUED_WRITE_BYTES);
+
+    /* A completed read carried the queued writes with it. */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "b", data, chunk, 0));
+    void *out = NULL;
+    size_t out_len = 0;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_read(ctx, -1, "b", 0, &out, &out_len));
+    free(out);
+    EXPECT_EQ((size_t)0, dev->queued_write_bytes);
+
+    /* Texture writes count their (row-padded) staging copy. */
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_texture_create(ctx, -1, "t", 3, 2,
+                                                    HL_GPU_TEX_RGBA8, 0, 0, 0, 0));
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_texture_write(ctx, -1, "t", data, 24));
+    EXPECT_EQ((size_t)(256 * 2), dev->queued_write_bytes);
+
+    /* A flush that times out stalls the device with the queued bytes held. */
+    size_t live_before = dev->live_bytes;
+    mock_flush_rc = HL_GPU_ERR_TIMEOUT;
+    int rc = HL_GPU_OK;
+    for (int i = 0; i < n && rc == HL_GPU_OK; i++)
+        rc = hl_cap_gpu_buffer_write(ctx, -1, "b", data, chunk, 0);
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, rc);
+    EXPECT_EQ(1, dev->stalled);
+    EXPECT_EQ((size_t)0, dev->queued_write_bytes);
+    EXPECT_TRUE(dev->stalled_bytes >= HL_GPU_MAX_QUEUED_WRITE_BYTES);
+    EXPECT_EQ(live_before + dev->stalled_bytes, dev->live_bytes);
+
+    /* Busy until the queue drains; then the held bytes go back. */
+    mock_idle = 0;
+    int writes = mock_writes;
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_write(ctx, -1, "b", data, chunk, 0));
+    EXPECT_EQ(writes, mock_writes);
+    mock_idle = 1;
+    mock_flush_rc = HL_GPU_OK;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "b", data, chunk, 0));
+    EXPECT_EQ(0, dev->stalled);
+    EXPECT_EQ(live_before, dev->live_bytes);
+
+    free(data);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_audit34, a_stalled_device_refuses_reads_copies_writes)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "a", 64, HL_GPU_USAGE_READWRITE));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 64, HL_GPU_USAGE_READWRITE));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_texture_create(ctx, -1, "t", 4, 4,
+                                                    HL_GPU_TEX_RGBA8, 0, 0, 0, 0));
+    HlGpuDevice *dev = &ctx->devices[0];
+    dev->stalled = 1;
+    mock_idle = 0;
+
+    static const char px[64];
+    void *out = NULL;
+    size_t out_len = 0;
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_read(ctx, -1, "a", 0, &out, &out_len));
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_texture_read(ctx, -1, "t", 0, &out, &out_len,
+                                                        NULL, NULL, NULL));
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_copy(ctx, -1, "a", "b", 0, 0, 0));
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_write(ctx, -1, "a", px, 64, 0));
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_texture_write(ctx, -1, "t", px, 64));
+    EXPECT_EQ(0, mock_reads);
+    EXPECT_EQ(0, mock_copies);
+    EXPECT_EQ(0, mock_writes);
+    EXPECT_TRUE(out == NULL);
+
+    /* Drained: each runs again. */
+    mock_idle = 1;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_copy(ctx, -1, "a", "b", 0, 0, 0));
+    EXPECT_EQ(1, mock_copies);
+    EXPECT_EQ(0, dev->stalled);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_read(ctx, -1, "a", 0, &out, &out_len));
+    free(out);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_audit34, a_read_that_times_out_stalls_the_device)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "a", 1000, HL_GPU_USAGE_READWRITE));
+    static const char px[64];
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "a", px, 64, 0));
+    HlGpuDevice *dev = &ctx->devices[0];
+    EXPECT_EQ((size_t)64, dev->queued_write_bytes);
+
+    mock_read_rc = HL_GPU_ERR_TIMEOUT;
+    void *out = NULL;
+    size_t out_len = 0;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_buffer_read(ctx, -1, "a", 0, &out, &out_len));
+    EXPECT_EQ(1, dev->stalled);
+    /* The staging copy of the read and the write it carried stay held. */
+    EXPECT_EQ((size_t)(1000 + 64), dev->stalled_bytes);
+    EXPECT_EQ((size_t)(1000 + 1000 + 64), dev->live_bytes);
+    EXPECT_EQ((size_t)0, dev->queued_write_bytes);
+
+    /* The next read is refused at once, without reaching the backend. */
+    mock_idle = 0;
+    int reads = mock_reads;
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_read(ctx, -1, "a", 0, &out, &out_len));
+    EXPECT_EQ(reads, mock_reads);
+
+    mock_idle = 1;
+    mock_read_rc = HL_GPU_OK;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_read(ctx, -1, "a", 0, &out, &out_len));
+    free(out);
+    EXPECT_EQ((size_t)1000, dev->live_bytes);
+    EXPECT_EQ((size_t)0, dev->stalled_bytes);
     mock_free(ctx);
 }
 
