@@ -10335,6 +10335,7 @@ UTEST(js_audit10, fs_write_is_charged)
  * into the heap, 1 unit per 64 bytes) and the new one (1 per 8 bytes read). */
 
 #include "hull/cap/fs_policy.h"   /* HlFsPolicy (a15 fixture) */
+#include "hull/cap/blob.h"        /* hl_cap_blob_live_handles (a34) */
 #include "hull/utils/alloc.h"     /* hl_alloc_init */
 
 typedef struct {
@@ -10441,6 +10442,50 @@ UTEST(js_audit15, blob_reads_are_charged_and_clamped)
     free(r);
     js.max_heap_bytes = saved;
     cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+/* Audit 34: a blob writer holds two descriptors and a reader one, and
+ * opening one cost almost nothing - 61433 writers exhausted the process's
+ * descriptor limit (accept(), SQLite temp files and TLS with it). Live
+ * handles are capped now, a dropped one is collected to make room, and the
+ * open is charged. */
+UTEST(js_audit34, blob_handles_are_capped_collected_and_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(hl_cap_blob_live_handles(), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob; blob.init({ dir: 'blobs' });\n"
+        "globalThis.ID = blob.put('abc').id;\n", 0), 0);
+    /* Held handles: the cap, then a clear refusal. */
+    EXPECT_EQ(eval_int("(() => { globalThis.H = []; try {"
+                       " for (let i = 0; i < 100000; i++)"
+                       "   H.push(i % 2 ? blob.writer() : blob.reader(ID));"
+                       " } catch (e) { globalThis.E = String(e.message); }"
+                       " return H.length; })()"), HL_BLOB_MAX_LIVE_HANDLES);
+    char *e = eval_str("E");
+    EXPECT_TRUE(e && strstr(e, "too many open blob") != NULL);
+    free(e);
+    EXPECT_EQ(hl_cap_blob_live_handles(), HL_BLOB_MAX_LIVE_HANDLES);
+    /* Closing gives the slot back exactly once (a second abort / close is a
+     * no-op). */
+    EXPECT_EQ(eval_int("(() => { H[1].abort(); H[1].abort(); H[0].close();"
+                       " H[0].close(); return 1; })()"), 1);
+    EXPECT_EQ(hl_cap_blob_live_handles(), HL_BLOB_MAX_LIVE_HANDLES - 2);
+    /* Dropped without close: the open collects them and goes ahead. */
+    EXPECT_EQ(eval_int("(() => { H = null; const w = blob.writer();"
+                       " w.write('x'); const r = w.finalize();"
+                       " return typeof r.id === 'string' ? 1 : 0; })()"), 1);
+    EXPECT_TRUE(hl_cap_blob_live_handles() < 8);
+    /* The open is charged: 200 opens are over a 100k budget. */
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 200; i++) blob.writer().abort();", 100000), 1);
+    cleanup_js_caps();
+    EXPECT_EQ(hl_cap_blob_live_handles(), 0);
     a15_fs_close(&f);
 }
 

@@ -414,6 +414,10 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, ev);
     }
 
+    /* Opening a handle is charged (audit 34): it costs descriptors and
+     * syscalls a plain call never sees. */
+    if (hl_js_budget_charge(ctx, HL_BLOB_OPEN_UNITS)) return JS_EXCEPTION;
+
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) return JS_EXCEPTION;
 
@@ -428,8 +432,22 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
     int open_rc = durable
         ? hl_cap_blob_writer_open_durable(b, expected, &w)
         : hl_cap_blob_writer_open        (b, expected, &w);
+    if (open_rc == HL_BLOB_ERR_TOO_MANY) {
+        /* Live handles are capped (HL_BLOB_MAX_LIVE_HANDLES, audit 34), and
+         * one the app dropped without finalize / abort holds its slot until
+         * collected: collect once and retry, as fs.mmap does. A finalizer
+         * runs no JS, so the store in hand is still current. */
+        JS_RunGC(JS_GetRuntime(ctx));
+        open_rc = durable
+            ? hl_cap_blob_writer_open_durable(b, expected, &w)
+            : hl_cap_blob_writer_open        (b, expected, &w);
+    }
     if (open_rc != 0) {
         JS_FreeValue(ctx, obj);
+        if (open_rc == HL_BLOB_ERR_TOO_MANY)
+            return JS_ThrowRangeError(ctx, "blob.writer: too many open blob "
+                                      "writers / readers (at most %d)",
+                                      HL_BLOB_MAX_LIVE_HANDLES);
         return JS_ThrowInternalError(ctx, "blob.writer: open failed");
     }
     bh->h = w;
@@ -528,6 +546,10 @@ static JSValue js_blob_reader_new(JSContext *ctx, JSValueConst this_val,
     if (!id) return JS_EXCEPTION;
     int track = read_track_access(ctx, argc, argv, 1);
     if (track < 0) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
+    if (hl_js_budget_charge(ctx, HL_BLOB_OPEN_UNITS)) {   /* audit 34 */
+        JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
     b = get_store(ctx);   /* again, after the arguments: see get_store */
     if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
 
@@ -543,9 +565,17 @@ static JSValue js_blob_reader_new(JSContext *ctx, JSValueConst this_val,
 
     HlBlobReader *r = NULL;
     int rc = hl_cap_blob_reader_open(b, id, track, &r);
+    if (rc == HL_BLOB_ERR_TOO_MANY) {    /* audit 34: see the writer */
+        JS_RunGC(JS_GetRuntime(ctx));
+        rc = hl_cap_blob_reader_open(b, id, track, &r);
+    }
     JS_FreeCString(ctx, id);
     if (rc != 0) {
         JS_FreeValue(ctx, obj);
+        if (rc == HL_BLOB_ERR_TOO_MANY)
+            return JS_ThrowRangeError(ctx, "blob.reader: too many open blob "
+                                      "writers / readers (at most %d)",
+                                      HL_BLOB_MAX_LIVE_HANDLES);
         return JS_ThrowInternalError(ctx, "blob.reader: blob not found");
     }
     bh->h = r;

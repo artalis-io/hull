@@ -86,6 +86,18 @@ int hl_cap_blob_put_durable(HlBlob *b,
                             const char *expected,
                             char *out_id);
 
+/* At most HL_BLOB_MAX_LIVE_HANDLES streaming writers + readers are open in
+ * the process at once (a writer holds two descriptors, a reader one; audit
+ * 34). An open past the cap returns HL_BLOB_ERR_TOO_MANY and opens nothing:
+ * a binding collects garbage once (a dropped handle holds its slot until it
+ * is finalized) and retries, as fs.mmap does. The slot is given back by
+ * writer_finalize (success or not), writer_abort and reader_close. */
+#define HL_BLOB_MAX_LIVE_HANDLES 256
+#define HL_BLOB_ERR_TOO_MANY     (-2)
+
+/* Handles currently open (for tests). */
+int hl_cap_blob_live_handles(void);
+
 int hl_cap_blob_writer_open(HlBlob *b, const char *expected,
                             HlBlobWriter **out);
 

@@ -320,6 +320,18 @@ release-artifact layout).
   `hl_cap_tui_acquire` now refuses unless the runtime has applied a manifest declaring
   `tui = true` and `hull/tui`, or the command is one of hull's own `--tui` tools; manifest
   extraction never allows it. Both runtimes.
+
+- **Blob writers and readers could exhaust the process's file descriptors** (audit 34). A
+  `blob.writer()` holds two descriptors and a `blob.reader()` one until it is finalized,
+  aborted, closed or collected, and opening one cost the app almost nothing: 61433 writers
+  exhausted macOS's per-process limit, and with it `accept()`, SQLite's temp files and every
+  TLS connection. At most `HL_BLOB_MAX_LIVE_HANDLES` (256) are open in the process now,
+  counted in the capability layer where each handle is made and consumed, so a slot is given
+  back exactly once (finalize, abort, close, a finalizer, teardown). An open past the cap
+  collects garbage once - a handle the app dropped holds its slot until collected - and
+  retries, as `fs.mmap` does, then fails with "too many open blob writers / readers". Opening
+  a handle is charged `HL_BLOB_OPEN_UNITS` (1024) to the run's budget. Both runtimes.
+
 - **A JS GPU call could hold the event loop for ~49.7 days, and a timed-out one let device memory
   pass its ceiling** (audit 33, `--with=gpu`).
   - **Timeout clamp.** `gpu.dispatch` / `gpu.pipeline` and their `async` forms read `timeout`

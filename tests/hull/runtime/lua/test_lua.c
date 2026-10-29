@@ -28,6 +28,7 @@
 #include "hull/runtime/lua_template_cache.h"
 #include "hull/runtime/cache_common.h"
 #include "hull/shared/blob_store.h"
+#include "hull/cap/blob.h"   /* hl_cap_blob_live_handles (a34) */
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
 #include "hull/stdlib_feature.h"
@@ -11827,6 +11828,48 @@ UTEST(lua_audit15, blob_reads_are_charged_and_clamped)
     EXPECT_NE(strstr(err, "heap limit"), NULL);
     lua_rt.mem_limit = saved;
     cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+/* Audit 34: blob writers / readers hold descriptors; live handles are
+ * capped, a dropped one is collected to make room, and the open is charged. */
+UTEST(lua_audit34, blob_handles_are_capped_collected_and_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    ASSERT_EQ(hl_cap_blob_live_handles(), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "blob = require('hull.blob') blob.init({ dir = 'blobs' }) "
+        "ID = blob.put('abc') return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* Held handles: the cap, then a clear refusal. */
+    EXPECT_EQ(audit10_run(
+        "H = {} local ok, e = pcall(function() for i = 1, 100000 do "
+        "  H[#H + 1] = (i % 2 == 0) and blob.writer() or blob.reader(ID) end end) "
+        "assert(not ok and tostring(e):find('too many open blob'), tostring(e)) "
+        "assert(#H == 256, #H) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_EQ(hl_cap_blob_live_handles(), HL_BLOB_MAX_LIVE_HANDLES);
+    /* Closing gives the slot back exactly once. */
+    EXPECT_EQ(audit10_run("H[2]:abort() H[2]:abort() H[1]:close() H[1]:close() return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_EQ(hl_cap_blob_live_handles(), HL_BLOB_MAX_LIVE_HANDLES - 2);
+    /* Dropped without close: the open collects them and goes ahead. */
+    EXPECT_EQ(audit10_run(
+        "H = nil for i = 1, 600 do local w = blob.writer() end "
+        "local w = blob.writer() w:write('x') "
+        "assert(type(w:finalize()) == 'string') return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_TRUE(hl_cap_blob_live_handles() <= HL_BLOB_MAX_LIVE_HANDLES);
+    /* The open is charged: 200 opens are over a 100k budget. */
+    EXPECT_NE(audit10_run("for i = 1, 200 do blob.writer():abort() end return 1",
+                          100000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    cleanup_lua_caps();
+    EXPECT_EQ(hl_cap_blob_live_handles(), 0);
     a15_fs_close(&f);
 }
 
