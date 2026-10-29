@@ -52,6 +52,17 @@ __attribute__((weak)) int hl_smtp_server_sweep(HlSmtpServerCtx *s)
 { (void)s; return 0; }
 #endif
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Weak default for serve.o's publishing of the server body limit to the
+ * multipart cap defaults (audit 34). cap/body.c lives in libhull_feature-http.a,
+ * so an HTTP-free app that does not compose it still links the base's serve.o;
+ * serve.o never runs there (app.main goes through serve_cli.o), so this is a
+ * pure link satisfier. A composed http feature's strong definition wins. */
+#include "hull/cap/body.h"
+__attribute__((weak)) void hl_cap_multipart_set_body_limit(size_t limit)
+{ (void)limit; }
+#endif
+
 /* Present in EVERY native base (not gated on HL_ENABLE_HTTP_SERVER): a reduced
  * flavor (client-only / pure-compute) drops the web bindings but a composed
  * runtime still references these symbols, so the base must carry the weak
