@@ -100,6 +100,20 @@ release-artifact layout).
   descriptor closes. `test_net_stream_race` drives the race with a fake resolver (blackhole
   first, loopback second) on both backends.
 
+- **JS: an un-awaited chain that waited holding a transaction resumed later** (audit 34).
+  When a fire-and-forget async chain (`(async () => { ... })()` from a handler) stopped
+  with a transaction open, Hull rolled it back and failed only the chain's run record, not
+  its run tag, whenever the chain had a record - it had been wired by an earlier resume
+  (`await hull.sleep(5); await hull.sleep(5); BEGIN; ...; await gate`), or it started a
+  Hull op beside the BEGIN. The record stops only Hull ops' resumes: the reaction left on
+  `gate`, a promise Hull does not drive, kept the tag and ran in the drain of the later
+  request that settled it, so the code after the `await` went on in autocommit and its
+  writes were committed (a stray COMMIT succeeds on Postgres / MySQL). The run's tag is now
+  failed as well. The tag is the entry's, so other un-awaited chains of the same entry stop
+  with it - they are that run's code; an entry still waiting (an async handler, app.main, a
+  timer, a ws callback) is failed as one that waited holding a transaction. Regression legs
+  in `tests/e2e_js_runs.sh`.
+
 - **`ws.connect` clients were uncounted, each holding up to 20 MiB off the heap** (audit 32).
   Every Keel client connection keeps an outbound drain (up to 4 MiB) and a message reassembly
   buffer (up to 16 MiB) on Keel's allocator until it is freed, and nothing limited how many a
