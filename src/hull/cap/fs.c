@@ -539,10 +539,10 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
      * stay outside the lock. */
     int ren_rc, ren_err = 0;
     {
-        struct stat now;
+        struct stat tgt;
         hl_db_live_files_lock();
-        if (fstatat(par.parent_fd, par.leaf, &now, AT_SYMLINK_NOFOLLOW) == 0
-            && S_ISREG(now.st_mode) && hl_db_live_file_match_locked(&now)) {
+        if (fstatat(par.parent_fd, par.leaf, &tgt, AT_SYMLINK_NOFOLLOW) == 0
+            && S_ISREG(tgt.st_mode) && hl_db_live_file_match_locked(&tgt)) {
             hl_db_live_files_unlock();
             fail = HL_DB_LIVE_FILE_ERR;
             goto out;
