@@ -212,11 +212,13 @@ run_runtime() {
         fail "$rt: outbox rows after a busy flush" "$out"
     fi
 
-    # Let the held fetches finish; the next flush delivers every row.
+    # Let the held fetches finish; the next flush delivers every row. Poll
+    # the server itself until the fetch cap has freed (a slow runner can
+    # take well past the 4 s hold to drain 64 requests), up to 30 s.
     i=0
-    while [ $i -lt 100 ]; do
-        n=$(jobs -p | wc -l | tr -d ' ')
-        [ "$n" -le 1 ] && break
+    while [ $i -lt 300 ]; do
+        out=$(curl -sS -m 5 "http://127.0.0.1:$PORT/chk" 2>/dev/null || true)
+        [ "$(jget "$out" code)" != "busy" ] && [ -n "$out" ] && break
         sleep 0.1; i=$((i + 1))
     done
     out=$(curl -sS "http://127.0.0.1:$PORT/flush")
