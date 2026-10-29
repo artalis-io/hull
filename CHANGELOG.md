@@ -398,6 +398,17 @@ release-artifact layout).
   retries, as `fs.mmap` does, then fails with "too many open blob writers / readers". Opening
   a handle is charged `HL_BLOB_OPEN_UNITS` (1024) to the run's budget. Both runtimes.
 
+- **Postgres `COPY ... FROM STDIN` through `conn.exec` / `conn.query` hung until the run
+  deadline** (audit 35). Those calls use the extended protocol (Parse / Bind / Describe /
+  Execute / Sync in one write). In copy-in mode the server ignores that Sync, so after Hull's
+  CopyFail it sent its ErrorResponse and then waited for another Sync, while Hull waited for
+  ReadyForQuery: 60 s for a request, 10 min for `app.main` or a `db.async` op (holding a pool
+  thread), for ever with `--max-run-ms 0` and `?read_timeout=0` - and then the connection was
+  dropped (inside a transaction, refused until ROLLBACK). The extended path now sends a Sync
+  right after the CopyFail, so the statement fails at once and the connection stays in step;
+  the simple-query path (scripts, migrations), which already got its ReadyForQuery, sends
+  none. Verified against postgres:16.
+
 - **A JS GPU call could hold the event loop for ~49.7 days, and a timed-out one let device memory
   pass its ceiling** (audit 33, `--with=gpu`).
   - **Timeout clamp.** `gpu.dispatch` / `gpu.pipeline` and their `async` forms read `timeout`

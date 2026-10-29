@@ -1016,7 +1016,11 @@ roadmap §2.9.)
   TLS read after each wait and any write too (`hl_pg_conn_io_left`; the read
   took `read_timeout` alone, audit 27). Postgres refuses `COPY ... TO STDOUT` by dropping the
   connection at the CopyOutResponse (there is no CopyFail for that direction;
-  COPY FROM STDIN still gets a CopyFail). The Postgres startup exchange is
+  COPY FROM STDIN still gets a CopyFail - and, on the extended protocol
+  `conn.exec` / `conn.query` use, a Sync after it: the server ignores the Sync
+  sent with Execute while in copy-in mode and waits for the next one, so both
+  sides sat until the run deadline (audit 35; never on the simple-query path,
+  where an extra Sync earns an extra ReadyForQuery). The Postgres startup exchange is
   charged the same way, frame by frame, and a SCRAM iteration count (the
   server's) is charged 16 units a round before the key derivation runs
   (audit 17); the MySQL auth exchange is charged per packet and takes at most

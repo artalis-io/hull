@@ -1097,6 +1097,177 @@ UTEST(pg_exec_simple, copy_out_is_refused)
     close(sv[0]);
 }
 
+/* `COPY ... FROM STDIN`: a fake server that follows PostgreSQL's copy-in
+ * rules. In copy-in mode it ignores Sync; after the CopyFail it sends an
+ * ErrorResponse and, when the statement came in on the extended protocol,
+ * discards messages until the NEXT Sync, then sends ReadyForQuery. On the
+ * simple protocol it sends ReadyForQuery straight after the error. Then it
+ * answers one more statement with CommandComplete + ReadyForQuery, so the
+ * test can show the connection is still in step. hl_pg_query sent no Sync
+ * after its CopyFail, so both sides waited until the run deadline
+ * (audit 35). */
+typedef struct {
+    int fd;
+    int extended;
+    int syncs_after_copyfail;   /* extended: the Sync that ended the discard;
+                                   simple: a stray Sync (must stay 0) */
+    int ok;
+} PgCopyIn;
+
+static int pgci_read_full(int fd, uint8_t *b, size_t n)
+{
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, b + got, n - got);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+/* One frontend message; its type, -1 on EOF. */
+static int pgci_next(int fd)
+{
+    uint8_t h[5];
+    if (pgci_read_full(fd, h, 5) != 0) return -1;
+    uint32_t len = ((uint32_t)h[1] << 24) | ((uint32_t)h[2] << 16) |
+                   ((uint32_t)h[3] << 8) | h[4];
+    if (len < 4 || len > 1u << 20) return -1;
+    uint8_t body[4096];
+    size_t left = len - 4;
+    while (left) {
+        size_t n = left < sizeof body ? left : sizeof body;
+        if (pgci_read_full(fd, body, n) != 0) return -1;
+        left -= n;
+    }
+    return h[0];
+}
+
+static int pgci_send(int fd, HlPgWriter *s)
+{
+    int rc = (!s->err && write(fd, s->buf, s->len) == (ssize_t)s->len) ? 0 : -1;
+    hl_pg_writer_free(s);
+    hl_pg_writer_init(s);
+    return rc;
+}
+
+static void *pgci_main(void *p)
+{
+    PgCopyIn *ci = p;
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    int t;
+    /* The statement, up to the point the server enters copy-in mode. */
+    if (ci->extended) {
+        while ((t = pgci_next(ci->fd)) != HL_PG_F_EXECUTE)
+            if (t < 0) goto out;
+        m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+        m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+        m = hl_pg_msg_begin(&s, 'n'); hl_pg_msg_end(&s, m);   /* NoData */
+    } else {
+        if (pgci_next(ci->fd) != HL_PG_F_QUERY) goto out;
+    }
+    m = hl_pg_msg_begin(&s, 'G');                 /* CopyInResponse */
+    hl_pg_put_u8(&s, 0);
+    hl_pg_put_i16(&s, 1);
+    hl_pg_put_i16(&s, 0);
+    hl_pg_msg_end(&s, m);
+    if (pgci_send(ci->fd, &s) != 0) goto out;
+    while ((t = pgci_next(ci->fd)) != 'f')        /* a Sync is ignored here */
+        if (t < 0 || t == 'X') goto out;
+
+    m = hl_pg_msg_begin(&s, 'E');
+    hl_pg_put_u8(&s, 'M');
+    hl_pg_put_cstr(&s, "COPY from stdin failed");
+    hl_pg_put_u8(&s, 0);
+    hl_pg_msg_end(&s, m);
+    if (pgci_send(ci->fd, &s) != 0) goto out;
+    if (ci->extended) {
+        /* Discard until the next Sync: the client must send one. */
+        while ((t = pgci_next(ci->fd)) != HL_PG_F_SYNC)
+            if (t < 0 || t == 'X') goto out;
+        ci->syncs_after_copyfail = 1;
+    }
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    if (pgci_send(ci->fd, &s) != 0) goto out;
+
+    /* The next statement. A stray Sync from the simple path shows up here,
+     * before the Query. */
+    if (ci->extended) {
+        while ((t = pgci_next(ci->fd)) != HL_PG_F_SYNC)
+            if (t < 0) goto out;
+    } else {
+        t = pgci_next(ci->fd);
+        if (t == HL_PG_F_SYNC) { ci->syncs_after_copyfail++; goto out; }
+        if (t != HL_PG_F_QUERY) goto out;
+    }
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "SELECT 1"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    if (pgci_send(ci->fd, &s) != 0) goto out;
+    ci->ok = 1;
+out:
+    hl_pg_writer_free(&s);
+    return NULL;
+}
+
+UTEST(pg_query, copy_in_is_refused_and_the_connection_stays_in_step)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 3000;   /* a hang shows as this, not as forever */
+    PgCopyIn ci = { .fd = sv[0], .extended = 1 };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, pgci_main, &ci));
+
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_query(&conn, "COPY t FROM STDIN", NULL, 0,
+                         NULL, NULL, NULL, NULL);
+    int64_t spent = pg_test_ms() - t0;
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(spent < 1000);
+    EXPECT_TRUE(strstr(conn.errmsg, "COPY from stdin failed") != NULL);
+    EXPECT_EQ(0, conn.broken);
+    EXPECT_EQ('I', conn.tx_status);
+
+    EXPECT_EQ(0, hl_pg_query(&conn, "SELECT 1", NULL, 0, NULL, NULL,
+                             NULL, NULL));
+    hl_pg_conn_close(&conn);       /* first: a server still waiting sees EOF */
+    pthread_join(th, NULL);
+    EXPECT_EQ(1, ci.ok);
+    EXPECT_EQ(1, ci.syncs_after_copyfail);
+    close(sv[0]);
+}
+
+UTEST(pg_exec_simple, copy_in_is_refused_without_a_stray_sync)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 3000;
+    PgCopyIn ci = { .fd = sv[0], .extended = 0 };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, pgci_main, &ci));
+
+    int64_t t0 = pg_test_ms();
+    EXPECT_EQ(-1, hl_pg_exec_simple(&conn, "COPY t FROM STDIN"));
+    EXPECT_TRUE(pg_test_ms() - t0 < 1000);
+    EXPECT_TRUE(strstr(conn.errmsg, "COPY from stdin failed") != NULL);
+    EXPECT_EQ(0, conn.broken);
+
+    EXPECT_EQ(0, hl_pg_exec_simple(&conn, "SELECT 1"));
+    hl_pg_conn_close(&conn);
+    pthread_join(th, NULL);
+    EXPECT_EQ(1, ci.ok);
+    EXPECT_EQ(0, ci.syncs_after_copyfail);
+    close(sv[0]);
+}
+
 /* An exec-style statement (no rows, no callback) surfaces its CommandComplete
  * row count via the `affected` out-param - the "UPDATE N" tag form, distinct from
  * "SELECT N". This is what db.exec returns on Postgres (fixed: db_postgres.c's
