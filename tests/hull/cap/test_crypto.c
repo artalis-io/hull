@@ -975,6 +975,44 @@ UTEST(hl_cap_crypto, auth_roundtrip)
     ASSERT_EQ(0, hl_cap_crypto_auth_verify(tag, msg, strlen(msg), key));
 }
 
+/* Audit 34: the inner hash is streamed (no copy of the message). Checked
+ * against HMAC-SHA512 built by concatenation over the one-shot SHA-512, at
+ * every length around the 128-byte block and the 112-byte padding edge. */
+UTEST(hl_cap_crypto, auth_streamed_matches_concatenated_hmac)
+{
+    static const size_t lens[] = { 0, 1, 63, 64, 111, 112, 113, 127, 128, 129,
+                                   239, 240, 241, 255, 256, 257, 1000, 4096,
+                                   4097, 70000 };
+    uint8_t key[32];
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i * 7 + 1);
+    uint8_t *msg = malloc(70000);
+    uint8_t *buf = malloc(128 + 70000);
+    ASSERT_TRUE(msg && buf);
+    for (size_t i = 0; i < 70000; i++) msg[i] = (uint8_t)(i * 31 + 5);
+
+    for (size_t t = 0; t < sizeof lens / sizeof lens[0]; t++) {
+        size_t n = lens[t];
+        uint8_t ipad[128], opad[128], inner[64], outer_in[192], full[64];
+        memset(ipad, 0x36, 128);
+        memset(opad, 0x5c, 128);
+        for (int i = 0; i < 32; i++) { ipad[i] ^= key[i]; opad[i] ^= key[i]; }
+        memcpy(buf, ipad, 128);
+        memcpy(buf + 128, msg, n);
+        ASSERT_EQ(0, hl_cap_crypto_sha512(buf, 128 + n, inner));
+        memcpy(outer_in, opad, 128);
+        memcpy(outer_in + 128, inner, 64);
+        ASSERT_EQ(0, hl_cap_crypto_sha512(outer_in, 192, full));
+
+        uint8_t tag[32];
+        ASSERT_EQ(0, hl_cap_crypto_auth(n ? (const void *)msg : "", n, key, tag));
+        EXPECT_EQ(0, memcmp(tag, full, 32));
+        if (memcmp(tag, full, 32) != 0) printf("  mismatch at length %zu\n", n);
+        EXPECT_EQ(0, hl_cap_crypto_auth_verify(tag, n ? (const void *)msg : "", n, key));
+    }
+    free(msg);
+    free(buf);
+}
+
 UTEST(hl_cap_crypto, auth_wrong_key)
 {
     uint8_t key[32], wrong_key[32];

@@ -1611,6 +1611,44 @@ const HlCryptoHmacBackend hl_crypto_hmac_backend_portable = {
  * HMAC-SHA512, then truncate to 32 bytes.
  */
 
+/* SHA-512 of a 128-byte block followed by `msg`, without copying `msg`:
+ * TweetNaCl's crypto_hashblocks takes the whole blocks in place and only the
+ * tail (< 128 bytes) plus the padding goes through a stack block. Same
+ * padding as TweetNaCl's crypto_hash. */
+static const uint8_t SHA512_IV[64] = {
+    0x6a,0x09,0xe6,0x67,0xf3,0xbc,0xc9,0x08, 0xbb,0x67,0xae,0x85,0x84,0xca,0xa7,0x3b,
+    0x3c,0x6e,0xf3,0x72,0xfe,0x94,0xf8,0x2b, 0xa5,0x4f,0xf5,0x3a,0x5f,0x1d,0x36,0xf1,
+    0x51,0x0e,0x52,0x7f,0xad,0xe6,0x82,0xd1, 0x9b,0x05,0x68,0x8c,0x2b,0x3e,0x6c,0x1f,
+    0x1f,0x83,0xd9,0xab,0xfb,0x41,0xbd,0x6b, 0x5b,0xe0,0xcd,0x19,0x13,0x7e,0x21,0x79,
+};
+
+static void sha512_prefixed(uint8_t out[64], const uint8_t prefix[128],
+                            const uint8_t *msg, size_t msg_len)
+{
+    uint8_t h[64], x[256];
+    memcpy(h, SHA512_IV, sizeof h);
+    crypto_hashblocks_sha512(h, prefix, 128);
+
+    size_t full = msg_len & ~(size_t)127;
+    if (full) crypto_hashblocks_sha512(h, msg, (unsigned long long)full);
+
+    size_t n = msg_len - full;               /* < 128 */
+    memset(x, 0, sizeof x);
+    if (n) memcpy(x, msg + full, n);
+    x[n] = 128;
+    size_t blen = n < 112 ? 128 : 256;
+    uint64_t total = (uint64_t)msg_len + 128;   /* bytes hashed */
+    x[blen - 9] = (uint8_t)(total >> 61);
+    uint64_t bits = total << 3;
+    for (int i = 0; i < 8; i++)
+        x[blen - 1 - i] = (uint8_t)(bits >> (8 * i));
+    crypto_hashblocks_sha512(h, x, (unsigned long long)blen);
+
+    memcpy(out, h, 64);
+    hull_secure_zero(x, sizeof x);           /* may hold the key block's tail */
+    hull_secure_zero(h, sizeof h);
+}
+
 static int hmac_sha512(const uint8_t *key, size_t key_len,
                        const uint8_t *msg, size_t msg_len,
                        uint8_t out[64])
@@ -1632,33 +1670,12 @@ static int hmac_sha512(const uint8_t *key, size_t key_len,
         k_opad[i] ^= key[i];
     }
 
-    /* inner = SHA512(k_ipad || msg) */
-    /* Allocate contiguous buffer for inner hash input */
-    if (msg_len > SIZE_MAX - 128) {
-        hull_secure_zero(k_ipad, sizeof(k_ipad));   /* the key, xor a constant */
-        hull_secure_zero(k_opad, sizeof(k_opad));
-        hull_secure_zero(tk, sizeof(tk));
-        return -1;
-    }
-    size_t inner_len = 128 + msg_len;
-    uint8_t stack_inner[4224]; /* 128 + 4096 */
-    uint8_t *inner_buf = (inner_len <= sizeof(stack_inner)) ? stack_inner
-                                                             : malloc(inner_len);
-    if (!inner_buf) {
-        hull_secure_zero(k_ipad, sizeof(k_ipad));
-        hull_secure_zero(k_opad, sizeof(k_opad));
-        hull_secure_zero(tk, sizeof(tk));
-        return -1;
-    }
-    memcpy(inner_buf, k_ipad, 128);
-    memcpy(inner_buf + 128, msg, msg_len);
-
+    /* inner = SHA512(k_ipad || msg), streamed: the message used to be
+     * copied behind k_ipad into one buffer the size of the message, off the
+     * VM heap - a 600 MB MappedBuffer under a 64 MB heap made a 600 MB
+     * malloc (audit 34). */
     uint8_t inner_hash[64];
-    crypto_hash_sha512(inner_hash, inner_buf, (unsigned long long)inner_len);
-
-    /* The first 128 bytes are key ^ ipad: the key, trivially. */
-    hull_secure_zero(inner_buf, 128);
-    if (inner_buf != stack_inner) free(inner_buf);
+    sha512_prefixed(inner_hash, k_ipad, msg, msg_len);
 
     /* outer = SHA512(k_opad || inner_hash) */
     uint8_t outer_buf[128 + 64];

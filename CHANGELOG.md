@@ -356,6 +356,15 @@ release-artifact layout).
   closed before `onClose` / `onError` run (in both runtimes: `close()` there is a no-op, `send()`
   throws as on any closed client), and the JS finalizer cancels any deadline still armed, as the
   Lua `__gc` already did.
+- **JS: an ed25519 / HMAC message larger than the heap was copied off it** (audit 34).
+  `crypto.ed25519Sign` / `ed25519Verify` / `auth` / `authVerify` take a MappedBuffer or
+  WasmBuffer, which is not on the VM heap, and the capability layer copied the whole message
+  into a malloc'd buffer - twice over for a verify (TweetNaCl's `crypto_sign_open` wants
+  `sig || msg` and a same-size output): a 600 MB mapping under a 64 MB heap held 1.27 GB.
+  `ed25519Sign` / `ed25519Verify` now refuse a message larger than the heap limit before the
+  copy (RangeError), and HMAC-SHA512/256 (`auth`, `authVerify`) hashes the message in place
+  with TweetNaCl's `crypto_hashblocks` instead of copying it behind the key block, so it takes
+  any size and is charged as before. The Lua twins take Lua strings, already on the heap.
 - **JS: an ended handler's op could hold another request's response** (audit 30). A handler that
   awaited a promise Hull does not drive is ended at once; when a later request settled that
   promise, the first handler resumed inside the later request's job drain, and an op it then
