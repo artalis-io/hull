@@ -296,6 +296,64 @@ UTEST(valkey_conn, a_big_reply_buffer_is_trimmed) {
     free(data);
 }
 
+/* Audit 35: a read that fails part-way leaves the buffer it grew holding
+ * unparsed bytes, and the audit-30 trim runs only after a reply was used -
+ * from the next command, which a dead connection never reads. The buffer
+ * (up to HL_VALKEY_MAX_REPLY, outside every VM heap) stayed until close /
+ * GC. It is scrubbed and freed as soon as the connection is marked dead.
+ * Here 3 MiB of a 4 MiB bulk reply arrive and the server hangs up. */
+static void *drip_then_hang_up(void *arg) {
+    drip(arg);
+    close(((Dripper *)arg)->fd);        /* the server hangs up mid-reply */
+    return NULL;
+}
+
+UTEST(valkey_conn, a_failed_read_releases_its_buffer) {
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    write(sv[0], HELLO_MAP, strlen(HELLO_MAP));
+    HlValkeyDsn d; ASSERT_EQ(0, dsn_of("redis://localhost", &d));
+    HlAllocator a;
+    hl_alloc_init(&a, 0);
+    HlValkeyConn *c = NULL; char e[128];
+    ASSERT_EQ(0, hl_valkey_conn_start(&c, sv[1], &d, &a, e, sizeof e));
+    size_t base = hl_alloc_used(&a);
+
+    const char *head = "$4194304\r\n";
+    const size_t part = 3u * 1024u * 1024u;
+    size_t len = strlen(head) + part;
+    char *data = malloc(len);
+    ASSERT_TRUE(data != NULL);
+    memcpy(data, head, strlen(head));
+    memset(data + strlen(head), 'b', part);
+    Dripper dr = { .fd = sv[0], .data = data, .len = len,
+                   .chunk = 65536, .delay_ms = 0 };
+    atomic_init(&dr.stop, 0);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, drip_then_hang_up, &dr));
+
+    HlRespWriter w; hl_resp_writer_init(&w);
+    hl_resp_cmd_begin(&w, 2);
+    hl_resp_cmd_arg_cstr(&w, "GET");
+    hl_resp_cmd_arg_cstr(&w, "k");
+    HlRespValue reply;
+    EXPECT_EQ(-1, hl_valkey_command(c, &w, &reply));
+    pthread_join(th, NULL);
+    EXPECT_TRUE(strstr(hl_valkey_conn_error(c), "closed") != NULL);
+    /* The 4 MiB buffer is gone, not held by the dead connection. */
+    EXPECT_TRUE(hl_alloc_used(&a) <= base);
+
+    /* Dead from here on, and still holding nothing. */
+    EXPECT_EQ(-1, hl_valkey_command(c, &w, &reply));
+    EXPECT_TRUE(strstr(hl_valkey_conn_error(c), "reopen") != NULL);
+    EXPECT_TRUE(hl_alloc_used(&a) <= base);
+    hl_resp_writer_free(&w);
+
+    hl_valkey_conn_close(c);
+    EXPECT_EQ((size_t)0, hl_alloc_used(&a));
+    free(data);
+}
+
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"
 
