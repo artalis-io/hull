@@ -413,15 +413,25 @@ static int conn_send(HlValkeyConn *c, const uint8_t *buf, size_t len) {
     return -1;
 }
 
+/* Scrub and free the receive buffer; it regrows from RBUF_INIT. */
+static void rbuf_drop(HlValkeyConn *c) {
+    if (c->rbuf) {
+        memset(c->rbuf, 0, c->rcap);                 /* scrub residual bytes */
+        hl_alloc_free(c->alloc, c->rbuf, c->rcap);
+    }
+    c->rbuf = NULL;
+    c->rlen = c->rcap = c->consumed = 0;
+}
+
 void hl_valkey_conn_trim(HlValkeyConn *c) {
+    if (!c) return;
+    /* A dead connection never reads again: whatever it holds goes. */
+    if (c->dead) { rbuf_drop(c); return; }
     /* Only with nothing buffered past the last reply: bytes already received
      * for a later one stay where they are. */
-    if (!c || !c->rbuf || c->rcap <= HL_VALKEY_RBUF_KEEP || c->consumed != c->rlen)
+    if (!c->rbuf || c->rcap <= HL_VALKEY_RBUF_KEEP || c->consumed != c->rlen)
         return;
-    memset(c->rbuf, 0, c->rcap);                     /* scrub residual bytes */
-    hl_alloc_free(c->alloc, c->rbuf, c->rcap);
-    c->rbuf = NULL;                                  /* regrows from RBUF_INIT */
-    c->rlen = c->rcap = c->consumed = 0;
+    rbuf_drop(c);
 }
 
 /* Read exactly one reply into *out (borrows into rbuf + the reply arena, valid
@@ -514,6 +524,12 @@ int hl_valkey_command(HlValkeyConn *c, const HlRespWriter *cmd, HlRespValue *out
                          ? kl_monotonic_ms() + (uint64_t)c->cmd_timeout_ms : 0;
     int rc = conn_send(c, cmd->buf, cmd->len) != 0 ? -1 : read_reply(c, out);
     c->deadline_ms = 0;
+    /* A read that failed part-way (a tripped budget, the deadline, a
+     * malformed or oversized reply) leaves up to HL_VALKEY_MAX_REPLY of
+     * unparsed bytes, and the trim above runs only after a reply was used:
+     * the dead connection kept them, outside every VM heap, until it was
+     * closed or collected - 16 stores could hold ~1 GiB (audit 35). */
+    if (c->dead) rbuf_drop(c);
     return rc;
 }
 

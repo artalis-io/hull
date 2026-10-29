@@ -495,6 +495,16 @@ release-artifact layout).
   closed before `onClose` / `onError` run (in both runtimes: `close()` there is a no-op, `send()`
   throws as on any closed client), and the JS finalizer cancels any deadline still armed, as the
   Lua `__gc` already did.
+- **A failed Valkey read kept its receive buffer, up to 64 MiB outside the VM heap** (audit 35).
+  The audit-30 trim drops an oversized receive buffer only once a reply has been used, from the
+  next command. A read that failed part-way - a tripped budget, the command deadline, a
+  malformed or oversized reply, a server hanging up - left the unparsed bytes behind and marked
+  the connection dead, and a dead connection never reads again, so the buffer stayed until the
+  store was closed or collected: 16 stores (`HL_KV_OPEN_MAX`) could hold ~1 GiB. The buffer is
+  now scrubbed and freed as soon as a command fails on a dead connection. Lua `kv.get` copies
+  the value with a protected push and gives the buffer back before it raises an out-of-memory
+  error (a plain `lua_pushlstring` raised past the release); the JS binding already released it
+  whether or not its copy succeeded.
 - **JS: an ed25519 / HMAC message larger than the heap was copied off it** (audit 34).
   `crypto.ed25519Sign` / `ed25519Verify` / `auth` / `authVerify` take a MappedBuffer or
   WasmBuffer, which is not on the VM heap, and the capability layer copied the whole message

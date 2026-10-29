@@ -668,7 +668,9 @@ link, leaf and SQLite sidecars included (audit 29). `hosts` entries may be
 an empty one) rejects every `db.open`. A process-wide cap (16) bounds concurrent
 dynamic connections. `kv.open` has the same cap (`HL_KV_OPEN_MAX`, in `cap/kv.c`; every Valkey store
 opens through it), and a Valkey receive buffer past 1 MiB is freed once its reply is used
-(audit 30). `hull.ssh` byte streams are capped too: `hl_cap_ssh_open` takes one of
+(audit 30), and scrubbed and freed as soon as a read fails part-way and the connection is
+marked dead, which never reads again (audit 35; Lua `kv.get` gives it back before an
+out-of-memory raise). `hull.ssh` byte streams are capped too: `hl_cap_ssh_open` takes one of
 `HL_SSH_MAX_LIVE_STREAMS` (32, process-wide) slots after the grants and before the dial, the
 stream gives it back from `HlNetStreamConfig.on_release` once its sockets are closed, a
 refusal is `HL_NET_E_LIMIT` / code `too_many_streams` (the Lua binding collects once and

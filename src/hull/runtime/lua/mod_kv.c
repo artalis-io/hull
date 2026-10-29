@@ -69,12 +69,17 @@ static int l_kv_get(lua_State *L)
     if (hl_cap_kv_get(c, (const uint8_t *)key, klen, &val, &vlen, &found) != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
     if (!found) { lua_pushnil(L); return 1; }
-    lua_pushlstring(L, (const char *)val, vlen);   /* COPY: borrow-copy guard */
-    /* The value is copied: an oversized receive buffer can go (audit 30).
-     * Resolved again, not c: the push's GC step can run an app __gc that
-     * closes this connection. */
+    /* COPY: borrow-copy guard. A protected push: a plain lua_pushlstring
+     * that ran out of memory raised past the release below, and the
+     * value's receive buffer (up to 64 MiB, outside the VM heap) stayed
+     * with the connection (audit 35). */
+    int pushed = hl_lua_pushlstring_safe(L, (const char *)val, vlen);
+    /* The value is copied (or could not be): an oversized receive buffer
+     * can go (audit 30). Resolved again, not c: the push's GC step can run
+     * an app __gc that closes this connection. */
     HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
     if (o->c && !o->scanning) hl_cap_kv_release(o->c);
+    if (pushed != 0) return luaL_error(L, "kv: not enough memory for the value");
     return 1;
 }
 
