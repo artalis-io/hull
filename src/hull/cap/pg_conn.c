@@ -1430,15 +1430,28 @@ static int pg_reply_charge(HlPgConn *conn, const HlPgFrame *f)
 /* The server answered a statement with CopyIn / CopyBoth: it now waits for
  * COPY data, and the client - reading for ReadyForQuery - waited for the
  * server: both sat until the read timeout. Hull does not stream COPY data,
- * so it answers CopyFail ('f'); the server then reports an error and goes
- * on to ReadyForQuery. -1 when even that could not be sent. */
-static int pg_refuse_copy(HlPgConn *conn)
+ * so it answers CopyFail ('f'); the server then reports an error. What
+ * follows depends on the protocol the statement came in on:
+ *   - simple query (`extended` 0): the server goes on to ReadyForQuery.
+ *   - extended query (`extended` 1, hl_pg_query): the server IGNORES a Sync
+ *     received in copy-in mode - the one hl_pg_query sent with its Execute
+ *     is gone - and after the ErrorResponse discards messages until the
+ *     NEXT Sync. So a Sync is sent right after the CopyFail; without it both
+ *     sides waited for the other until the run deadline (audit 35). Never
+ *     on the simple path: an extra Sync there earns an extra ReadyForQuery,
+ *     which the next call would read as its own reply.
+ * -1 when the reply could not be sent. */
+static int pg_refuse_copy(HlPgConn *conn, int extended)
 {
     HlPgWriter w;
     hl_pg_writer_init(&w);
     size_t m = hl_pg_msg_begin(&w, 'f');
     hl_pg_put_cstr(&w, "COPY FROM STDIN is not supported by hull/db");
     hl_pg_msg_end(&w, m);
+    if (extended) {
+        m = hl_pg_msg_begin(&w, HL_PG_F_SYNC);
+        hl_pg_msg_end(&w, m);
+    }
     int se = w.err || conn_send(conn, w.buf, w.len);
     hl_pg_writer_free(&w);
     return se ? -1 : 0;
@@ -1627,7 +1640,7 @@ int hl_pg_query(HlPgConn *conn, const char *sql,
         }
         case HL_PG_B_COPY_IN:
         case HL_PG_B_COPY_BOTH:
-            if (pg_refuse_copy(conn) != 0) return -1;
+            if (pg_refuse_copy(conn, 1) != 0) return -1;
             break;            /* the ErrorResponse that follows fails it */
         case HL_PG_B_COPY_OUT:
             return pg_refuse_copy_out(conn);
@@ -1711,7 +1724,7 @@ int hl_pg_exec_simple(HlPgConn *conn, const char *sql)
         }
         case HL_PG_B_COPY_IN:
         case HL_PG_B_COPY_BOTH:
-            if (pg_refuse_copy(conn) != 0) return -1;
+            if (pg_refuse_copy(conn, 0) != 0) return -1;
             break;            /* the ErrorResponse that follows fails it */
         case HL_PG_B_COPY_OUT:
             return pg_refuse_copy_out(conn);

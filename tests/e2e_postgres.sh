@@ -187,6 +187,28 @@ app.get("/copy17", function(req, res)
         replaced = settles(),
     })
 end)
+-- Audit 35: COPY ... FROM STDIN through db.exec / db.query (the extended
+-- protocol). The server ignores the Sync sent with Execute while in copy-in
+-- mode, so after Hull's CopyFail it waited for another Sync and Hull for
+-- ReadyForQuery until the run deadline. It must now fail at once, on the
+-- same connection (same backend pid), and inside a transaction leave a
+-- transaction that a ROLLBACK clears.
+app.get("/copy35", function(req, res)
+    local pid0 = db.query("SELECT pg_backend_pid() AS p")[1].p
+    local ok_e, err_e = pcall(db.exec, "COPY e2e (name) FROM STDIN")
+    local ok_q = pcall(db.query, "COPY e2e (name) FROM STDIN")
+    local pid1 = db.query("SELECT pg_backend_pid() AS p")[1].p
+    db.exec("BEGIN")
+    local ok_t = pcall(db.exec, "COPY e2e (name) FROM STDIN")
+    db.exec("ROLLBACK")
+    local pid2 = db.query("SELECT pg_backend_pid() AS p")[1].p
+    res:json({
+        refused = (not ok_e) and (not ok_q) and (not ok_t)
+                  and tostring(err_e):find("COPY", 1, true) ~= nil,
+        same_conn = (pid0 == pid1) and (pid1 == pid2),
+        settled = settles(),
+    })
+end)
 -- Audit 6. L6: COMMIT WORK / END TRANSACTION / a comment-prefixed COMMIT of
 -- an aborted transaction is a rollback the server answers without an error;
 -- each must fail, as a bare COMMIT does. M3: BEGIN through db.async is
@@ -321,6 +343,14 @@ RESP_C17=$(curl -fsS "http://127.0.0.1:${PORT}/copy17" || echo FAIL)
 echo "copy17 response: $RESP_C17"
 echo "$RESP_C17" | grep -q '"refused":true'  || { echo "::error COPY TO STDOUT was not refused"; fail=1; }
 echo "$RESP_C17" | grep -q '"replaced":true' || { echo "::error no recovery after a refused COPY TO STDOUT"; fail=1; }
+
+# -m 15: before the audit-35 fix each COPY FROM STDIN held the request until
+# the 60 s run deadline.
+RESP_C35=$(curl -fsS -m 15 "http://127.0.0.1:${PORT}/copy35" || echo FAIL)
+echo "copy35 response: $RESP_C35"
+echo "$RESP_C35" | grep -q '"refused":true'   || { echo "::error COPY FROM STDIN via db.exec / db.query was not refused promptly"; fail=1; }
+echo "$RESP_C35" | grep -q '"same_conn":true' || { echo "::error a refused COPY FROM STDIN cost the connection"; fail=1; }
+echo "$RESP_C35" | grep -q '"settled":true'   || { echo "::error no recovery after a refused COPY FROM STDIN"; fail=1; }
 
 RESP_T6=$(curl -fsS "http://127.0.0.1:${PORT}/txn6" || echo FAIL)
 echo "txn6 response: $RESP_T6"
