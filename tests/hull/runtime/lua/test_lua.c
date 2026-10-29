@@ -9145,6 +9145,64 @@ UTEST(lua_audit3, a_parked_coroutine_cannot_be_resumed_by_the_app)
     lua_worker_close(&f);
 }
 
+/* Audit 33: when the runtime cannot build an op's result (out of memory) it
+ * fails the handler without resuming it, and frees the op - but the coroutine
+ * stays suspended in the binding's lua_yieldk. Only unparked, a later
+ * coroutine.resume from app code ran the binding's continuation on the freed
+ * op (lua_db_async_k / lua_compute_async_k: a use-after-free) and the dead
+ * handler on outside its request. It is now refused for good. */
+UTEST(lua_audit33, an_abandoned_wait_can_never_be_resumed)
+{
+    LuaWorkerFix f;
+    ASSERT_EQ(lua_worker_open(&f), 0);
+    lua_State *L = lua_rt.L;
+    lua_State *co = NULL;
+    int st = ssh_co_start(&lua_rt,
+        "SAVED = coroutine.running()\n"
+        "local r = require('hull.worker').dispatch(function()\n"
+        "  return string.rep('x', 3 * 1024 * 1024) end)\n"
+        "RAN_ON = true\n"
+        "return 'resumed ' .. #r\n", &co);
+    ASSERT_EQ(st, LUA_YIELD);
+    /* Leave about 1 MB of heap: the 3 MB result cannot be pushed. */
+    lua_gc(L, LUA_GCCOLLECT);
+    size_t room = lua_rt.mem_limit - lua_rt.mem_used;
+    ASSERT_GT(room, (size_t)(4u << 20));
+    (void)lua_newuserdatauv(L, room - (size_t)(1u << 20), 0);
+    lua_setglobal(L, "BALLAST");
+    /* Until the dispatch completes the coroutine is merely parked; once its
+     * result push has failed it is abandoned. */
+    int abandoned = 0;
+    for (int i = 0; i < 250 && !abandoned; i++) {
+        f.be->tick(f.actx, 20);
+        ASSERT_EQ(luaL_dostring(L,
+            "return select(2, pcall(coroutine.resume, SAVED))"), LUA_OK);
+        const char *m = lua_tostring(L, -1);
+        abandoned = m && strstr(m, "abandoned") != NULL;
+        lua_pop(L, 1);
+    }
+    EXPECT_TRUE(abandoned);
+    ASSERT_EQ(luaL_dostring(L, "BALLAST = nil collectgarbage()"), LUA_OK);
+    /* Still suspended in lua_yieldk, and still refused, now and later. */
+    EXPECT_EQ(lua_status(co), LUA_YIELD);
+    for (int i = 0; i < 2; i++) {
+        ASSERT_EQ(luaL_dostring(L,
+            "local ok, e = pcall(coroutine.resume, SAVED, 'forged') "
+            "local ok2, e2 = pcall(coroutine.close, SAVED) "
+            "return tostring(ok) .. ':' .. tostring(e) .. '|' .. tostring(ok2)"),
+            LUA_OK);
+        const char *msg = lua_tostring(L, -1);
+        EXPECT_TRUE_MSG(msg && strncmp(msg, "false:", 6) == 0 &&
+                        strstr(msg, "abandoned") != NULL &&
+                        strstr(msg, "|false") != NULL, msg ? msg : "(nil)");
+        lua_pop(L, 1);
+    }
+    lua_getglobal(L, "RAN_ON");
+    EXPECT_TRUE(lua_isnil(L, -1));   /* the dead handler never ran on */
+    lua_pop(L, 1);
+    lua_worker_close(&f);
+}
+
 /* A stored hash names its own iteration count: one past the cap is refused
  * at once instead of running for minutes. */
 UTEST(lua_audit3, verify_password_refuses_an_absurd_iteration_count)

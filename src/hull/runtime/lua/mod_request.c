@@ -443,6 +443,8 @@ static int mp_part_read(lua_State *L)
 static int mp_part_read_continue(lua_State *L, int status, lua_KContext ctx)
 {
     (void)status; (void)ctx;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "req:multipart()");
     return mp_part_read_pump(L);
 }
 
@@ -543,6 +545,8 @@ static int mp_chunks_drive(lua_State *L)
 static int mp_chunks_continue(lua_State *L, int status, lua_KContext ctx)
 {
     (void)status; (void)ctx;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "req:multipart()");
     return mp_chunks_drive(L);
 }
 
@@ -660,6 +664,8 @@ static int mp_iter_drive(lua_State *L)
 static int mp_iter_continue(lua_State *L, int status, lua_KContext ctx)
 {
     (void)status; (void)ctx;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "req:multipart()");
     return mp_iter_drive(L);
 }
 

@@ -212,6 +212,12 @@ int hl_lua_can_wait(lua_State *L);
  * runtime has parked on a Hull operation (async.c). */
 void hl_lua_guard_coroutine_lib(lua_State *L);
 
+/* Called first by every binding continuation (the lua_KFunction of a
+ * lua_yieldk): 1 when this is the runtime's own resume of the wait, which
+ * may read the kctx; 0 otherwise - the continuation must then raise without
+ * touching kctx, which may be freed (audit 33). Consumes the mark. */
+int hl_lua_async_k_ok(lua_State *L);
+
 /* The status to act on after a runtime lua_resume of @p co: a LUA_YIELD
  * that no Hull operation caused (a bare coroutine.yield()) becomes
  * LUA_ERRRUN, with the coroutine closed and a message on its top. */

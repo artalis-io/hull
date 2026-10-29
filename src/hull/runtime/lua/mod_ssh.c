@@ -396,6 +396,8 @@ static int ssh_read_step(lua_State *L, HlLuaSshStream *o);
 static int lua_ssh_read_k(lua_State *L, int status, lua_KContext kctx)
 {
     (void)status;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "ssh read");
     return ssh_read_step(L, (HlLuaSshStream *)kctx);
 }
 
@@ -449,6 +451,8 @@ static int ssh_write_step(lua_State *L, HlLuaSshStream *o, int ud_idx);
 static int lua_ssh_write_k(lua_State *L, int status, lua_KContext kctx)
 {
     (void)status;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "ssh write");
     /* The userdata is back at the bottom of the stack on resume. */
     return ssh_write_step(L, (HlLuaSshStream *)kctx, 1);
 }
@@ -504,6 +508,8 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o);
 static int lua_ssh_connect_k(lua_State *L, int status, lua_KContext kctx)
 {
     (void)status;
+    if (!hl_lua_async_k_ok(L))   /* audit 33: kctx may be freed */
+        return luaL_error(L, "%s: this wait was abandoned", "ssh connect");
     return ssh_connect_step(L, (HlLuaSshStream *)kctx);
 }
 

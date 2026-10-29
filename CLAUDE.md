@@ -1379,6 +1379,16 @@ completion hook (a ws on_close's deferred conn teardown) and clears a timer's
 `in_flight` - in JS once per run (`hl_js_run_claim`). JS's cancel skipped both,
 so a ws on_close parked across a teardown kept its conn object alive and
 QuickJS aborted in `JS_FreeRuntime` (audit 19). Only a continuation wired into a run does this: an op a synchronous entry left un-awaited (`http.fetch(x)` in a sync ws on_close) carried the entry's hook, and its cancel tore down the conn the entry had already freed (audit 21). A detached run (a timer, a ws on_close) whose last Hull op resumes while it still awaits a promise Hull does not drive is ended at that resume - completion hook run, the timer's `in_flight` cleared and rescheduled - as a request's is: nothing else would finish it, so the timer never fired again and the conn leaked into `JS_FreeRuntime` (audit 22).
+In Lua, a wait the runtime gives up on - a cancel (`hl_lua_async_cancel`) or a
+result it could not build (the `push_failed` path of `hl_lua_async_resume`) -
+leaves the coroutine suspended inside the binding's `lua_yieldk` with the op
+freed, so the coroutine is marked ABANDONED (a sticky value in its extra space)
+and `coroutine.resume` / `close` refuse it for good; merely unparked, a later
+request resumed it and `lua_db_async_k` read the freed op (audit 33). Every
+binding continuation (a `lua_yieldk` kfunction) calls `hl_lua_async_k_ok` first
+and raises without touching its kctx unless this is the runtime's own resume:
+a new one must too. (JS needs no twin: an op settles a promise whose resolve
+functions the app never holds.)
 A binding never resumes another coroutine's wait inline from app code: a
 resume is loop-level (it runs the stale-transaction guard, re-arms the budget
 and clears `active_co`), so a wake made inside a run goes through a 0 ms
