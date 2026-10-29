@@ -1804,11 +1804,6 @@ async function handleEmailChange(req, res) {
             return res.status(401).json({ error: "invalid credentials" });
         }
     }
-    // An address an undoable confirmed change of ANOTHER account vacated is
-    // taken too (audit 10; see oldEmailReserved).
-    if (findByEmail(body.new_email) || oldEmailReserved(body.new_email, uidKey(uid))) {
-        return res.status(409).json({ error: "email already in use" });
-    }
 
     // Round-10 HIGH-1: compute origin FIRST. Pre-fix the upsert
     // ran before the origin check, so a hostile Host header could
@@ -1852,6 +1847,16 @@ async function handleEmailChange(req, res) {
     // which a revoke does not reset - checked before anything is stored or
     // sent, refused with a 429.
     let allowed = emailRateAllow("\0email-change:" + key, true);
+    // A taken target address is answered 409 (it reveals that the address
+    // exists - a UX call), but only after the account's request limit
+    // (audit 33): checked before it, an authenticated user could probe any
+    // number of addresses. It comes before the per-recipient limit, so
+    // probing an address does not spend its owner's mail allowance. An
+    // address an undoable confirmed change of ANOTHER account vacated is
+    // taken too (audit 10; see oldEmailReserved).
+    if (allowed && (findByEmail(body.new_email) || oldEmailReserved(body.new_email, key))) {
+        return res.status(409).json({ error: "email already in use" });
+    }
     if (allowed) allowed = emailRateAllow(body.new_email);
     if (!allowed) {
         res.header("Retry-After", String(emailRateRetry()));

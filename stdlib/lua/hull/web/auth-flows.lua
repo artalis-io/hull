@@ -2194,16 +2194,6 @@ local function handle_email_change(req, res)
             return res:status(401):json({ error = "invalid credentials" })
         end
     end
-    -- Reject if the target email is already taken - reveals
-    -- existence, but that's a UX call (the alternative is a silent
-    -- accept that confuses the user).
-    -- An address an undoable confirmed change of ANOTHER account vacated is
-    -- taken too (audit 10; see old_email_reserved).
-    if _state.user_find_by_email(body.new_email)
-       or old_email_reserved(body.new_email, uid_key(user_id)) then
-        return res:status(409):json({ error = "email already in use" })
-    end
-
     -- Round-10 HIGH-1: compute the origin FIRST. Pre-fix the
     -- db.upsert ran before the origin check, so a request with a
     -- hostile Host header (off-allowlist) clobbered the victim's
@@ -2261,6 +2251,18 @@ local function handle_email_change(req, res)
     -- are checked before anything is stored or sent: refused, nothing is
     -- pending, no notice goes out, and the answer is 429.
     local allowed, retry = email_rate_allow("\0email-change:" .. key, true)
+    -- Reject a target address that is already taken - it reveals that the
+    -- address exists, a UX call (a silent accept would confuse the user).
+    -- So it is answered only after the account's request limit (audit 33):
+    -- checked before it, an authenticated user could probe any number of
+    -- addresses. It comes before the per-recipient limit, so probing an
+    -- address does not spend its owner's mail allowance. An address an
+    -- undoable confirmed change of ANOTHER account vacated is taken too
+    -- (audit 10; see old_email_reserved).
+    if allowed and (_state.user_find_by_email(body.new_email)
+                    or old_email_reserved(body.new_email, key)) then
+        return res:status(409):json({ error = "email already in use" })
+    end
     if allowed then
         allowed, retry = email_rate_allow(body.new_email)
     end
