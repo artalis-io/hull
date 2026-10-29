@@ -141,6 +141,12 @@ typedef struct HlDbDuckCtx {
      * failed COMMIT still ends DuckDB's transaction - and ROLLBACK / ABORT
      * when they succeed; a statement the budget interrupted never ran). */
     int                in_txn;
+    /* Audit 34: the file app SQL may not reach through DuckDB's own file
+     * functions - the canonical database path, or <cwd>/.tmp (the temp
+     * directory) for an in-memory database - and whether file functions
+     * are refused outright (no fs policy: external access off). */
+    int                deny_file_functions;
+    char               protect[PATH_MAX];
     char               errmsg[512];
 } HlDbDuckCtx;
 
@@ -356,7 +362,18 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     if (path[0] == '\0')
         path = ":memory:";
 
+    s->deny_file_functions = (g_duck_allowed_ndirs <= 0);
+
     if (strncmp(path, ":memory:", 8) == 0) {
+        /* DuckDB's temp directory for an in-memory database is <cwd>/.tmp,
+         * kept reachable from SQL as a database file is (audit 34). A path
+         * that cannot be made leaves "/", whose empty name refuses every
+         * statement. */
+        char cwd[PATH_MAX];
+        if (!realpath(".", cwd) ||
+            (size_t)snprintf(s->protect, sizeof s->protect, "%s/.tmp",
+                             strcmp(cwd, "/") == 0 ? "" : cwd) >= sizeof s->protect)
+            snprintf(s->protect, sizeof s->protect, "/");
         if (duck_open_instance(s, path, &s->db, &s->con) != 0) {
             free(s);
             return -1;
@@ -418,6 +435,11 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     }
     s->shared = sh;
     s->db = sh->db;
+    /* The file's canonical path (its WAL / temp names extend it). One too
+     * long to hold leaves "/", which refuses every statement (audit 34). */
+    if ((size_t)snprintf(s->protect, sizeof s->protect, "%s", sh->path) >=
+        sizeof s->protect)
+        snprintf(s->protect, sizeof s->protect, "/");
 
     *out_ctx = s;
     return 0;
@@ -662,6 +684,28 @@ static const char DUCK_CATALOG_MSG[] =
     "not available (they switch catalogs, which would read _hull_* tables "
     "through a cross-catalog view past Hull's _hull_* check)";
 
+/* DuckDB constant-folds table-function arguments, so a table name passed
+ * as a value can be built at run time (concat('_', 'hull_sessions')):
+ * storage_info returned column min / max statistics of _hull_* tables,
+ * pragma_table_info / pragma_show / histogram their schema or rows. The
+ * profiling / logging calls run past lock_configuration (audit 34). */
+static const char DUCK_TABLE_VALUE_MSG[] =
+    "duckdb: storage_info, the profiling / logging calls, and table-name "
+    "functions (pragma_table_info, pragma_show, histogram, ...) called with "
+    "anything but a plain literal or name are not available (a table name "
+    "built at run time gets past Hull's _hull_* check)";
+
+/* DuckDB keeps the database file, its WAL sidecars and its temp directory
+ * readable (and writable) from SQL whatever external access says, and the
+ * list cannot be cleared - DuckDB re-adds them whenever external access is
+ * turned off and refuses to change allowed_paths after: read_blob('app.duckdb')
+ * returned the raw file, _hull_* rows included (audit 34). */
+static const char DUCK_DB_FILE_MSG[] =
+    "duckdb: SQL may not name the database file, its WAL or temp files, call "
+    "a file function without a declared fs policy, or give a file function / "
+    "COPY a path that is not a plain literal (it could read the database "
+    "file past Hull's _hull_* check)";
+
 /* 0 when @p sql may run, -1 (error set) when it is refused. */
 static int duck_refuse_sql(HlDbDuckCtx *s, const char *sql)
 {
@@ -675,6 +719,15 @@ static int duck_refuse_sql(HlDbDuckCtx *s, const char *sql)
     }
     if (hl_cap_db_sql_switches_catalog(sql)) {
         duck_set_err(s, DUCK_CATALOG_MSG);
+        return -1;
+    }
+    if (hl_cap_db_sql_names_table_by_value(sql)) {
+        duck_set_err(s, DUCK_TABLE_VALUE_MSG);
+        return -1;
+    }
+    if (hl_cap_db_sql_reaches_db_files(sql, s->deny_file_functions,
+                                       s->protect)) {
+        duck_set_err(s, DUCK_DB_FILE_MSG);
         return -1;
     }
     return 0;

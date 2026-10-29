@@ -13,7 +13,10 @@
 
 #include "hull/cap/db.h"
 #include "hull/cap/db_budget.h"
+#include <limits.h>   /* PATH_MAX */
 #include <stdatomic.h>
+#include <stdint.h>   /* SIZE_MAX */
+#include <stdlib.h>   /* realpath */
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -390,6 +393,409 @@ int hl_cap_db_sql_switches_catalog(const char *sql)
                     whole_db_next_is(q, "search_path", &budget, &after))
                     return 1;
             }
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
+/* ── DuckDB values that name a table or a file (audit 34) ──────────── */
+
+/* DuckDB constant-folds a table function's arguments, so a table name or a
+ * file path handed to one as a VALUE can be built at run time
+ * (concat('_', 'hull_sessions'), chr(95) || ..., a bound parameter), and no
+ * lexical check sees it. The readers below accept such an argument only when
+ * it is a plain literal or name - one whose text the namespace check (and the
+ * protected-file check) has already read - and refuse everything else. Every
+ * byte one of them reads past the main scan is charged to one budget per
+ * scan, and a scan past it fails closed, so each stays linear. */
+
+/* Charge @p n bytes; 0 once the budget is gone. */
+static int fv_take(size_t *budget, size_t n)
+{
+    if (n > *budget) return 0;
+    *budget -= n;
+    return 1;
+}
+
+/* The body of the '...' or "..." at @p p (doubled quote = one quote), copied
+ * unescaped into @p out (cap bytes; NULL = do not copy; *out_n = SIZE_MAX
+ * when it does not fit). Returns the text after the closing quote, or NULL
+ * for an unterminated one or once the budget is gone. */
+static const char *fv_quoted(const char *p, size_t *budget, char *out,
+                             size_t cap, size_t *out_n)
+{
+    char q = *p;
+    const char *s = p + 1;
+    size_t n = 0;
+    for (;;) {
+        if (!*s) return NULL;
+        if (*s == q) {
+            if (s[1] != q) break;
+            s++;
+        }
+        if (out) {
+            if (n + 1 < cap) out[n] = *s;
+            n++;
+        }
+        s++;
+    }
+    if (!fv_take(budget, (size_t)(s + 1 - p))) return NULL;
+    if (out) {
+        if (n + 1 >= cap) { *out_n = SIZE_MAX; out[0] = '\0'; }
+        else { out[n] = '\0'; *out_n = n; }
+    }
+    return s + 1;
+}
+
+/* The first byte of a bare name: a parameter ($1, $name) or a dollar-quoted
+ * string ($$...$$) starts with '$', which the scans' word reader allows. */
+static int fv_name_start(unsigned char c)
+{
+    return dyn_ident_char(c) && c != '$' && !(c >= '0' && c <= '9');
+}
+
+/* A bare or "quoted" name chain (a.b."c") at @p p. Returns the text after
+ * it, or NULL when @p p holds none or the budget is gone. */
+static const char *fv_name_chain(const char *p, int nest, size_t *budget)
+{
+    for (;;) {
+        if (*p == '"') {
+            p = fv_quoted(p, budget, NULL, 0, NULL);
+            if (!p) return NULL;
+        } else if (fv_name_start((unsigned char)*p)) {
+            const char *s = p;
+            while (dyn_ident_char((unsigned char)*p)) p++;
+            if (!fv_take(budget, (size_t)(p - s))) return NULL;
+        } else {
+            return NULL;
+        }
+        const char *g = dyn_skip_gap(p, nest, budget);
+        if (!g) return NULL;
+        if (*g != '.') return p;
+        p = dyn_skip_gap(g + 1, nest, budget);
+        if (!p) return NULL;
+    }
+}
+
+/* What may end a plain argument: another argument, the call's end, or (for
+ * the `PRAGMA name = value` spelling) the statement's end. */
+static int fv_arg_end(char c)
+{
+    return c == ',' || c == ')' || c == ';' || c == '\0';
+}
+
+/* Table functions and pragmas that take a TABLE NAME as a value. */
+static int fv_table_by_value_name(const char *s, size_t n)
+{
+    static const char *const names[] = {
+        "pragma_table_info", "table_info", "pragma_show", "show",
+        "histogram", "histogram_values", "duckdb_table_sample", NULL
+    };
+    for (int i = 0; names[i]; i++)
+        if (strlen(names[i]) == n && strncasecmp(s, names[i], n) == 0)
+            return 1;
+    return 0;
+}
+
+/* Names refused in every spelling: storage_info returns column statistics
+ * (min / max values) of any table, and the profiling / logging calls are
+ * CALL-able past lock_configuration (they write query text to stdout, a log
+ * table or a file). */
+static int fv_always_refused_name(const char *s, size_t n)
+{
+    static const char *const names[] = {
+        "storage_info", "pragma_storage_info",
+        "enable_profiling", "disable_profiling",
+        "enable_profile", "disable_profile",
+        "enable_logging", "disable_logging", "truncate_duckdb_logs", NULL
+    };
+    for (int i = 0; names[i]; i++)
+        if (strlen(names[i]) == n && strncasecmp(s, names[i], n) == 0)
+            return 1;
+    return 0;
+}
+
+/* After a table-by-value name at @p p, read with one comment rule: 1 when
+ * it is called (`(` or `=`) with anything but one plain argument. */
+static int fv_table_arg_refused(const char *p, int nest, size_t *budget)
+{
+    const char *q = dyn_skip_gap(p, nest, budget);
+    if (!q) return 1;
+    if (*q != '(' && *q != '=') return 0;     /* a column, SHOW TABLES, ... */
+    int paren = (*q == '(');
+    q = dyn_skip_gap(q + 1, nest, budget);
+    if (!q) return 1;
+    if (paren && *q == ')') return 0;          /* no argument */
+    if (*q == '\'')
+        q = fv_quoted(q, budget, NULL, 0, NULL);
+    else
+        q = fv_name_chain(q, nest, budget);
+    if (!q) return 1;
+    q = dyn_skip_gap(q, nest, budget);
+    return !q || !fv_arg_end(*q);
+}
+
+int hl_cap_db_sql_names_table_by_value(const char *sql)
+{
+    if (!sql) return 0;
+    size_t budget = 2 * strlen(sql) + 65536;
+    for (const char *p = sql; *p; ) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') {               /* "quoted" function / pragma name */
+            char buf[32];
+            size_t n = 0;
+            int fits = 1;
+            const char *q = p + 1;
+            for (; *q; q++) {
+                if (*q == '"') {
+                    if (q[1] == '"') { q++; } else break;
+                }
+                if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
+            }
+            if (fits && fv_always_refused_name(buf, n)) return 1;
+            if (fits && *q == '"' && fv_table_by_value_name(buf, n) &&
+                (fv_table_arg_refused(q + 1, 1, &budget) ||
+                 fv_table_arg_refused(q + 1, 0, &budget)))
+                return 1;
+            p++;                      /* literals are not skipped: see above */
+            continue;
+        }
+        if (dyn_ident_char(c) && !(c >= '0' && c <= '9')) {
+            const char *start = p;
+            while (*p && dyn_ident_char((unsigned char)*p)) p++;
+            size_t n = (size_t)(p - start);
+            if (fv_always_refused_name(start, n)) return 1;
+            if (fv_table_by_value_name(start, n) &&
+                (fv_table_arg_refused(p, 1, &budget) ||
+                 fv_table_arg_refused(p, 0, &budget)))
+                return 1;
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
+/* Whether a glob path literal can reach a file in @p protect_dir: its
+ * directory part (everything before the first wildcard, up to the last '/')
+ * resolves to that directory or one of its ancestors. A path whose directory
+ * cannot be resolved, or that starts with `~` (DuckDB expands it), counts. */
+static int fv_glob_reaches(const char *body, const char *protect_dir)
+{
+    const char *s = body;
+    if (strncasecmp(s, "file://", 7) == 0) s += 7;
+    size_t meta = strcspn(s, "*?[{");
+    if (!s[meta]) return 0;           /* not a glob: the name check reads it */
+    if (s[0] == '~') return 1;
+    char prefix[PATH_MAX];
+    size_t cut = 0;
+    int slash = 0;
+    for (size_t i = 0; i < meta; i++)
+        if (s[i] == '/') { cut = i; slash = 1; }
+    if (!slash) {
+        prefix[0] = '.'; prefix[1] = '\0';
+    } else {
+        if (cut == 0) cut = 1;        /* "/x*" */
+        if (cut >= sizeof prefix) return 1;
+        memcpy(prefix, s, cut);
+        prefix[cut] = '\0';
+    }
+    char rp[PATH_MAX];
+    if (!realpath(prefix, rp)) return 1;
+    size_t rn = strlen(rp);
+    if (rn == 1 && rp[0] == '/') return 1;
+    return strncasecmp(protect_dir, rp, rn) == 0 &&
+           (protect_dir[rn] == '\0' || protect_dir[rn] == '/');
+}
+
+/* A path literal at @p p ('...' or "..."): NULL to refuse (not one, too
+ * long, a glob reaching @p protect_dir, budget gone), else the text after. */
+static const char *fv_path_literal(const char *p, const char *protect_dir,
+                                   size_t *budget)
+{
+    if (*p != '\'' && *p != '"') return NULL;
+    char body[PATH_MAX];
+    size_t n = 0;
+    const char *after = fv_quoted(p, budget, body, sizeof body, &n);
+    if (!after || n == SIZE_MAX) return NULL;
+    if (protect_dir && fv_glob_reaches(body, protect_dir)) return NULL;
+    return after;
+}
+
+/* DuckDB's file-reading table functions: every read_* and parquet_* one,
+ * plus glob and sniff_csv. */
+static int fv_file_function_name(const char *s, size_t n)
+{
+    if (n > 5 && strncasecmp(s, "read_", 5) == 0) return 1;
+    if (n > 8 && strncasecmp(s, "parquet_", 8) == 0) return 1;
+    return (n == 4 && strncasecmp(s, "glob", 4) == 0) ||
+           (n == 9 && strncasecmp(s, "sniff_csv", 9) == 0);
+}
+
+/* After a file-function name at @p p, read with one comment rule: 1 when it
+ * is called (`(`) with a first argument that is not a path literal or a
+ * [list] of them, or with any argument under @p deny. */
+static int fv_file_call_refused(const char *p, int nest, int deny,
+                                const char *protect_dir, size_t *budget)
+{
+    const char *q = dyn_skip_gap(p, nest, budget);
+    if (!q) return 1;
+    if (*q != '(') return 0;          /* a column named read_x, a GLOB b */
+    if (deny) return 1;
+    q = dyn_skip_gap(q + 1, nest, budget);
+    if (!q) return 1;
+    if (*q == '[') {
+        for (;;) {
+            q = dyn_skip_gap(q + 1, nest, budget);
+            if (!q) return 1;
+            q = fv_path_literal(q, protect_dir, budget);
+            if (!q) return 1;
+            q = dyn_skip_gap(q, nest, budget);
+            if (!q) return 1;
+            if (*q == ']') { q++; break; }
+            if (*q != ',') return 1;
+        }
+    } else {
+        q = fv_path_literal(q, protect_dir, budget);
+        if (!q) return 1;
+    }
+    q = dyn_skip_gap(q, nest, budget);
+    return !q || (*q != ',' && *q != ')');
+}
+
+/* After the word COPY at @p p, read with one comment rule: 1 when its TO /
+ * FROM target (the first TO or FROM outside parentheses) is not a path
+ * literal or a bare name - a (constant expression) is one DuckDB folds -
+ * or is a glob reaching @p protect_dir. A dollar-quoted string anywhere in
+ * the statement is refused, as the parenthesis count cannot read it. */
+static int fv_copy_refused(const char *p, int nest, const char *protect_dir,
+                           size_t *budget)
+{
+    int depth = 0;
+    const char *q = p;
+    for (;;) {
+        q = dyn_skip_gap(q, nest, budget);
+        if (!q) return 1;
+        char c = *q;
+        if (c == '\0' || (c == ';' && depth == 0)) return 0;
+        if (c == '\'' || c == '"') {
+            q = fv_quoted(q, budget, NULL, 0, NULL);
+            if (!q) return 1;
+            continue;
+        }
+        if (c == '$') return 1;
+        if (c == '(') { depth++; q++; continue; }
+        if (c == ')') {
+            if (--depth < 0) return 0;   /* COPY was a name in a subquery */
+            q++;
+            continue;
+        }
+        if (dyn_ident_char((unsigned char)c) && !(c >= '0' && c <= '9')) {
+            const char *s = q;
+            while (dyn_ident_char((unsigned char)*q)) q++;
+            size_t n = (size_t)(q - s);
+            if (!fv_take(budget, n)) return 1;
+            if (depth != 0 ||
+                !((n == 2 && strncasecmp(s, "to", 2) == 0) ||
+                  (n == 4 && strncasecmp(s, "from", 4) == 0)))
+                continue;
+            q = dyn_skip_gap(q, nest, budget);
+            if (!q) return 1;
+            if (*q == '\'' || *q == '"') {
+                q = fv_path_literal(q, protect_dir, budget);
+            } else if (fv_name_start((unsigned char)*q)) {
+                while (dyn_ident_char((unsigned char)*q)) q++;
+            } else {
+                return 1;             /* TO (expr), TO $$...$$, ... */
+            }
+            if (!q) return 1;
+            q = dyn_skip_gap(q, nest, budget);
+            if (!q) return 1;
+            /* What may follow a target: the end, an option list, WITH /
+             * FORMAT ... - not a quote (E'...' read as the name E). */
+            return !(*q == '\0' || *q == ';' || *q == '(' || *q == ')' ||
+                     *q == ',' ||
+                     (dyn_ident_char((unsigned char)*q) &&
+                      !(*q >= '0' && *q <= '9')));
+        }
+        if (!fv_take(budget, 1)) return 1;
+        q++;
+    }
+}
+
+int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
+                                   const char *protect_path)
+{
+    if (!sql) return 0;
+    size_t len = strlen(sql);
+    size_t budget = 2 * len + 65536;
+
+    /* The protected file's name, in any spelling of its path: every path
+     * DuckDB is handed that names the database, a WAL sidecar or the temp
+     * directory (<db>.wal, <db>.tmp/) holds it. Case-insensitive, as the
+     * file system may be. */
+    char protect_dir[PATH_MAX];
+    const char *base = NULL;
+    size_t blen = 0;
+    if (protect_path && protect_path[0]) {
+        const char *slash = strrchr(protect_path, '/');
+        base = slash ? slash + 1 : protect_path;
+        blen = strlen(base);
+        size_t dn = slash ? (size_t)(slash - protect_path) : 0;
+        if (slash && dn == 0) dn = 1;
+        if (dn >= sizeof protect_dir) return 1;
+        memcpy(protect_dir, protect_path, dn);
+        protect_dir[dn] = '\0';
+        if (blen == 0) return 1;
+        for (size_t i = 0; i + blen <= len; i++)
+            if (strncasecmp(sql + i, base, blen) == 0) return 1;
+    }
+    const char *pdir = (base && protect_dir[0]) ? protect_dir : NULL;
+
+    for (const char *p = sql; *p; ) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') {               /* "quoted" function name */
+            char buf[32];
+            size_t n = 0;
+            int fits = 1;
+            const char *q = p + 1;
+            for (; *q; q++) {
+                if (*q == '"') {
+                    if (q[1] == '"') { q++; } else break;
+                }
+                if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
+            }
+            if (fits && *q == '"' && fv_file_function_name(buf, n) &&
+                (fv_file_call_refused(q + 1, 1, deny_file_functions, pdir, &budget) ||
+                 fv_file_call_refused(q + 1, 0, deny_file_functions, pdir, &budget)))
+                return 1;
+            p++;                      /* literals are not skipped: see above */
+            continue;
+        }
+        if (dyn_ident_char(c) && !(c >= '0' && c <= '9')) {
+            const char *start = p;
+            while (*p && dyn_ident_char((unsigned char)*p)) p++;
+            size_t n = (size_t)(p - start);
+            /* E'...' takes backslash escapes, which spell a path without its
+             * text (E'\x61pp.duckdb'): one holding a backslash is refused.
+             * The look stops at the next quote or backslash, so the looks
+             * of one text never overlap. */
+            if (n == 1 && (*start == 'e' || *start == 'E') && *p == '\'') {
+                const char *q = p + 1;
+                while (*q && *q != '\'' && *q != '\\') q++;
+                if (*q == '\\') return 1;
+                continue;
+            }
+            if (fv_file_function_name(start, n) &&
+                (fv_file_call_refused(p, 1, deny_file_functions, pdir, &budget) ||
+                 fv_file_call_refused(p, 0, deny_file_functions, pdir, &budget)))
+                return 1;
+            if (n == 4 && strncasecmp(start, "copy", 4) == 0 &&
+                (fv_copy_refused(p, 1, pdir, &budget) ||
+                 fv_copy_refused(p, 0, pdir, &budget)))
+                return 1;
             continue;
         }
         p++;

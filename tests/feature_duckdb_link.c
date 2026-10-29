@@ -24,7 +24,8 @@
 /* The archive's references into the base: duck_execute charges each DuckDB
  * task to the run's budget (cap/db_common.c, audit 15), and duck_rollback
  * runs unbound (audit 16); duck_query / duck_exec_script refuse SQL that
- * calls a dynamic-SQL function (audit 25). A composed app gets the real budget functions
+ * calls a dynamic-SQL function (audit 25), and the audit 32 / 33 / 34 refusals.
+ * A composed app gets the real budget functions
  * from the platform lib (tests/e2e_feature_duckdb.sh exercises them); this
  * smoke links the archive alone, so they stand in with "no budget bound" -
  * never an interrupt - and "no dynamic SQL". */
@@ -65,6 +66,24 @@ int hl_cap_db_sql_switches_catalog(const char *sql);
 int hl_cap_db_sql_switches_catalog(const char *sql)
 {
     (void)sql;
+    return 0;
+}
+
+int hl_cap_db_sql_names_table_by_value(const char *sql);
+int hl_cap_db_sql_names_table_by_value(const char *sql)
+{
+    (void)sql;
+    return 0;
+}
+
+int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
+                                   const char *protect_path);
+int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
+                                   const char *protect_path)
+{
+    (void)sql;
+    (void)deny_file_functions;
+    (void)protect_path;
     return 0;
 }
 
