@@ -561,7 +561,14 @@ app.post("/entries/:id/photos", function(req, res)
     else
         res:redirect("/")
     end
-end, { multipart = { max_part_size = 8 * 1024 * 1024 } })
+end, { multipart = {
+    -- One photo plus the CSRF field. Unset caps get Hull's defaults
+    -- (16 KiB headers, 1000 parts, total = the body limit raised to fit
+    -- one part), but naming them keeps the route's budget explicit.
+    max_part_size  = 8 * 1024 * 1024,
+    max_total_size = 9 * 1024 * 1024,
+    max_parts      = 4,
+} })
 
 -- GET /entries/:id/photos/:att_id - auth-gated serve. The default-deny
 -- of attachment-serve is overridden here with our own _owns_attachment

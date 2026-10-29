@@ -41,17 +41,23 @@ a module. `hull/http-server@1` covers it.
 <!-- compact -->
 ## Caps + error handling
 
-All five caps default to `0` (unlimited). Exceeding any of them mid-
-stream raises a parser error inside the iterator; wrap with `pcall` /
-`try-catch` to write a structured 4xx response. Uncaught errors → 500.
+A streaming route skips the server's `-b` body limit, so Hull fills in
+every cap the route leaves unset (or `0`) with a default - none is ever
+unlimited. Set an explicit (larger) value to raise one. Exceeding any of
+them mid-stream raises a parser error inside the iterator; wrap with
+`pcall` / `try-catch` to write a structured 4xx response. Uncaught
+errors → 500.
 
-| Cap | Lua | JS | Effect |
-|---|---|---|---|
-| Per-part body | `max_part_size` | `maxPartSize` | `PART_TOO_LARGE` when a single part exceeds |
-| Whole body | `max_total_size` | `maxTotalSize` | `BODY_TOO_LARGE` over all parts |
-| Part count | `max_parts` | `maxParts` | `TOO_MANY_PARTS` on the (N+1)th `PART_BEGIN` |
-| Per-part headers | `max_headers_size` | `maxHeadersSize` | `HEADERS_TOO_LARGE` while parsing a part header |
-| Input buffer | `max_input_buffer` | `maxInputBuffer` | Hard cap on parser scratch buffer |
+| Cap | Lua | JS | Default | Effect |
+|---|---|---|---|---|
+| Per-part body | `max_part_size` | `maxPartSize` | bounded by the whole-body cap | `PART_TOO_LARGE` when a single part exceeds |
+| Whole body | `max_total_size` | `maxTotalSize` | the server body limit (`-b`, 1 MB), raised to fit one `max_part_size` part | `BODY_TOO_LARGE` over all parts |
+| Part count | `max_parts` | `maxParts` | 1000 | `TOO_MANY_PARTS` on the (N+1)th `PART_BEGIN` |
+| Per-part headers | `max_headers_size` | `maxHeadersSize` | 16 KiB | `HEADERS_TOO_LARGE` while parsing a part header |
+| Input buffer | `max_input_buffer` | `maxInputBuffer` | 1 MiB | Hard cap on parser scratch buffer |
+
+A route taking several large files sets `max_total_size` itself: the
+default only fits ONE `max_part_size` part.
 
 ```lua
 app.post("/upload", function(req, res)

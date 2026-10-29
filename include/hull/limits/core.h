@@ -30,6 +30,16 @@
 /* ── HTTP / body ────────────────────────────────────────────────────── */
 
 #define HL_BODY_MAX_SIZE      (1024 * 1024)     /* 1 MB request body */
+
+/* Streaming-multipart caps a route leaves unset (audit 34). Keel's own
+ * default for each is 0 = unlimited, and an unbounded part-header buffer
+ * was rescanned for "\r\n\r\n" on every chunk (quadratic CPU, memory
+ * growing for the whole body deadline). max_total_size defaults to the
+ * server body limit (-b), raised to fit one max_part_size part. */
+#define HL_MP_DEFAULT_MAX_HEADERS   (16 * 1024)     /* per-part header bytes */
+#define HL_MP_DEFAULT_MAX_INPUT     (1024 * 1024)   /* unconsumed input bytes */
+#define HL_MP_DEFAULT_MAX_PARTS     1000            /* parts per request */
+#define HL_MP_FRAMING_SLACK         4096            /* boundary + CRLF framing */
 #define HL_QUERY_BUF_SIZE     4096              /* Query string parse buffer */
 #define HL_PARAM_NAME_MAX     256               /* Route param name buffer */
 

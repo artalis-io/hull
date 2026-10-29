@@ -35,6 +35,7 @@
 
 #include "hull/utils/alloc.h"
 #include "hull/app_context.h"
+#include "hull/cap/body.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_backend.h"    /* hl_db_backend_select (runtime default-DSN probe) */
@@ -1014,6 +1015,9 @@ static int hl_serve_init_server(HlServerState *s)
         .access_log = hl_serve_request_done,
         .access_log_data = s,
     };
+    /* Streaming-multipart routes bypass max_body_size; their unset
+     * max_total_size defaults to the same limit (audit 34). */
+    hl_cap_multipart_set_body_limit(config.max_body_size);
 
     /* Set up server TLS if cert/key provided */
     memset(&s->server_tls_config, 0, sizeof(s->server_tls_config));

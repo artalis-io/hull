@@ -6,6 +6,8 @@
 
 #include "utest.h"
 #include "hull/cap/body.h"
+#include "hull/limits/core.h"
+#include <stdint.h>
 #include <keel/http_body_reader.h>
 #include <keel/http_body_reader_multipart.h>
 #include <keel/http_request.h>
@@ -326,6 +328,114 @@ UTEST(hl_cap_multipart, inner_drives_kl_multipart_next_normally) {
 
     br->destroy(br);
 }
+
+/* Audit 34: a route with no max_headers_size gets Hull's default, so a
+ * part header that never ends is refused once it passes 16 KiB instead
+ * of growing (and being rescanned) for the whole body deadline. */
+UTEST(hl_cap_multipart, default_header_cap_stops_endless_header) {
+    KlAllocator a = kl_allocator_default();
+    KlHttpRequest req = mp_make_req("multipart/form-data; boundary=AB");
+    KlHttpMultipartConfig route = {0};
+    route.max_part_size = 8u * 1024 * 1024;   /* the only cap the route set */
+    KlHttpBodyReader *br = hl_cap_multipart_factory(&a, &req, &route);
+    ASSERT_TRUE(br != NULL);
+    KlHttpBodyReader *inner = hl_cap_multipart_inner(br);
+
+    ASSERT_EQ(br->on_data(br, "--AB\r\nX-a: ", 11), 0);
+    char chunk[4096];
+    memset(chunk, 'a', sizeof(chunk));
+    KlHttpMultipartPartMeta meta;
+    const char *d = NULL;
+    size_t dn = 0;
+    KlHttpMultipartEvent ev = KL_HTTP_MP_EVT_NEED_DATA;
+    int fed = 0;
+    while (ev == KL_HTTP_MP_EVT_NEED_DATA && fed < 64) {
+        ASSERT_EQ(br->on_data(br, chunk, sizeof(chunk)), 0);
+        fed++;
+        ev = kl_http_multipart_next(inner, &meta, &d, &dn);
+    }
+    ASSERT_EQ((int)ev, (int)KL_HTTP_MP_EVT_ERROR);
+    ASSERT_EQ((int)kl_http_multipart_last_error(inner),
+              (int)KL_HTTP_MP_ERR_HEADERS_TOO_LARGE);
+    ASSERT_LE((size_t)fed * sizeof(chunk),
+              (size_t)HL_MP_DEFAULT_MAX_HEADERS + 2 * sizeof(chunk));
+    br->destroy(br);
+}
 #endif
+
+/* ── Default-filling of unset caps (audit 34) ─────────────────────── */
+
+UTEST(hl_cap_multipart, effective_config_fills_every_unset_cap) {
+    hl_cap_multipart_set_body_limit(0);
+    KlHttpMultipartConfig out;
+    hl_cap_multipart_effective_config(NULL, &out);
+    ASSERT_EQ(out.max_headers_size, (size_t)HL_MP_DEFAULT_MAX_HEADERS);
+    ASSERT_EQ(out.max_input_buffer, (size_t)HL_MP_DEFAULT_MAX_INPUT);
+    ASSERT_EQ(out.max_parts, HL_MP_DEFAULT_MAX_PARTS);
+    ASSERT_EQ(out.max_total_size, (size_t)HL_BODY_MAX_SIZE);
+    ASSERT_EQ(out.max_part_size, (size_t)0);   /* bounded by the total */
+}
+
+UTEST(hl_cap_multipart, effective_config_keeps_explicit_caps) {
+    KlHttpMultipartConfig in = {0};
+    in.max_part_size = 10;
+    in.max_total_size = 20;
+    in.max_parts = 3;
+    in.max_headers_size = 40;
+    in.max_input_buffer = 50;
+    KlHttpMultipartConfig out;
+    hl_cap_multipart_effective_config(&in, &out);
+    ASSERT_EQ(out.max_part_size, (size_t)10);
+    ASSERT_EQ(out.max_total_size, (size_t)20);
+    ASSERT_EQ(out.max_parts, 3);
+    ASSERT_EQ(out.max_headers_size, (size_t)40);
+    ASSERT_EQ(out.max_input_buffer, (size_t)50);
+}
+
+UTEST(hl_cap_multipart, effective_config_total_follows_body_limit) {
+    hl_cap_multipart_set_body_limit(5u * 1024 * 1024);
+    KlHttpMultipartConfig out;
+    hl_cap_multipart_effective_config(NULL, &out);
+    ASSERT_EQ(out.max_total_size, (size_t)5u * 1024 * 1024);
+    hl_cap_multipart_set_body_limit(0);
+    hl_cap_multipart_effective_config(NULL, &out);
+    ASSERT_EQ(out.max_total_size, (size_t)HL_BODY_MAX_SIZE);
+}
+
+UTEST(hl_cap_multipart, effective_config_total_fits_one_max_part) {
+    hl_cap_multipart_set_body_limit(0);
+    KlHttpMultipartConfig in = {0};
+    in.max_part_size = 64u * 1024 * 1024;
+    KlHttpMultipartConfig out;
+    hl_cap_multipart_effective_config(&in, &out);
+    ASSERT_EQ(out.max_total_size,
+              (size_t)64u * 1024 * 1024 + HL_MP_DEFAULT_MAX_HEADERS
+                  + HL_MP_FRAMING_SLACK);
+    /* A part cap below the body limit leaves the body limit. */
+    in.max_part_size = 1024;
+    hl_cap_multipart_effective_config(&in, &out);
+    ASSERT_EQ(out.max_total_size, (size_t)HL_BODY_MAX_SIZE);
+    /* Saturates rather than wrapping. */
+    in.max_part_size = SIZE_MAX - 10;
+    hl_cap_multipart_effective_config(&in, &out);
+    ASSERT_EQ(out.max_total_size, (size_t)SIZE_MAX);
+}
+
+UTEST(hl_cap_multipart, effective_config_whole_body_feed_input_is_total) {
+    hl_cap_multipart_set_body_limit(0);
+    KlHttpMultipartConfig in = {0};
+    in.max_total_size = 8u * 1024 * 1024;
+    KlHttpMultipartConfig out;
+    hl_cap_multipart_set_whole_body_feed(1);
+    hl_cap_multipart_effective_config(&in, &out);
+    ASSERT_EQ(out.max_input_buffer, (size_t)8u * 1024 * 1024);
+    in.max_input_buffer = 100;   /* an explicit cap is kept */
+    hl_cap_multipart_effective_config(&in, &out);
+    ASSERT_EQ(out.max_input_buffer, (size_t)100);
+    hl_cap_multipart_set_whole_body_feed(0);
+    in.max_input_buffer = 0;
+    hl_cap_multipart_effective_config(&in, &out);
+    ASSERT_EQ(out.max_input_buffer, (size_t)HL_MP_DEFAULT_MAX_INPUT);
+}
 
 UTEST_MAIN();

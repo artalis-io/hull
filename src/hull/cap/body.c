@@ -17,6 +17,7 @@
 #include "hull/limits/core.h"
 #include <keel/http_body_reader_multipart.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 KlHttpBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlHttpRequest *req,
@@ -113,13 +114,74 @@ static void mp_wrap_destroy(KlHttpBodyReader *self)
     kl_free(w->alloc, w, sizeof(*w));
 }
 
+/* Set once at server start, before the loop accepts a connection. */
+static size_t g_mp_body_limit = HL_BODY_MAX_SIZE;
+/* Set by the in-process test harness around its factory call (one
+ * thread, the harness's own dispatch). */
+static int g_mp_whole_body_feed = 0;
+
+void hl_cap_multipart_set_body_limit(size_t limit)
+{
+    g_mp_body_limit = limit > 0 ? limit : HL_BODY_MAX_SIZE;
+}
+
+static size_t mp_add_sat(size_t a, size_t b)
+{
+    return a > SIZE_MAX - b ? SIZE_MAX : a + b;
+}
+
+void hl_cap_multipart_effective_config(const KlHttpMultipartConfig *in,
+                                       KlHttpMultipartConfig *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (in) *out = *in;
+    if (out->max_headers_size == 0)
+        out->max_headers_size = HL_MP_DEFAULT_MAX_HEADERS;
+    int input_unset = out->max_input_buffer == 0;
+    if (input_unset)
+        out->max_input_buffer = HL_MP_DEFAULT_MAX_INPUT;
+    if (out->max_parts <= 0)
+        out->max_parts = HL_MP_DEFAULT_MAX_PARTS;
+    if (out->max_total_size == 0) {
+        /* The server body limit, but never below what one part of the
+         * route's own max_part_size needs: a route that says it takes a
+         * 64 MB file must not be cut off at the 1 MB default. */
+        size_t total = g_mp_body_limit;
+        if (out->max_part_size > 0) {
+            size_t one = mp_add_sat(mp_add_sat(out->max_part_size,
+                                               out->max_headers_size),
+                                    HL_MP_FRAMING_SLACK);
+            if (one > total) total = one;
+        }
+        out->max_total_size = total;
+    }
+    /* The in-process test harness hands the whole body over in one
+     * on_data before the handler runs, so nothing drains the input in
+     * between: an unset input cap there is the body cap, as a live
+     * server's (fed per read, drained by the handler) effectively is. */
+    if (input_unset && g_mp_whole_body_feed &&
+        out->max_total_size > out->max_input_buffer)
+        out->max_input_buffer = out->max_total_size;
+}
+
+void hl_cap_multipart_set_whole_body_feed(int on)
+{
+    g_mp_whole_body_feed = on ? 1 : 0;
+}
+
 KlHttpBodyReader *hl_cap_multipart_factory(KlAllocator *alloc,
                                        const KlHttpRequest *req,
                                        void *user_data)
 {
     if (!alloc || !req) return NULL;
 
-    KlHttpBodyReader *inner = kl_http_body_reader_multipart(alloc, req, user_data);
+    /* Keel copies the config into the reader, so a stack copy with the
+     * defaults filled in is enough (audit 34). */
+    KlHttpMultipartConfig cfg;
+    hl_cap_multipart_effective_config((const KlHttpMultipartConfig *)user_data,
+                                      &cfg);
+    KlHttpBodyReader *inner = kl_http_body_reader_multipart(alloc, req, &cfg);
     if (!inner) return NULL;
 
     HlMultipartWrapper *w = kl_malloc(alloc, sizeof(*w));

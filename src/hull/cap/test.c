@@ -18,6 +18,7 @@
  */
 
 #include "hull/cap/test.h"
+#include "hull/cap/body.h"
 
 #include <keel/http_router.h>
 #include <keel/http_request.h>
@@ -121,8 +122,10 @@ int hl_cap_test_dispatch(KlHttpRouter *router, const char *method,
                               req.path, req.path_len,
                               &matched, req.params, &nparams);
         if (matched && matched->streaming_handler && matched->body_reader) {
+            hl_cap_multipart_set_whole_body_feed(1);
             KlHttpBodyReader *w = matched->body_reader(&alloc, &req,
                                                    matched->user_data);
+            hl_cap_multipart_set_whole_body_feed(0);
             if (w) {
                 /* Feed the whole body in one on_data, then complete the stream.
                  * A cap-exceeding body makes on_data return < 0, which the

@@ -482,6 +482,17 @@ release-artifact layout).
   and both reads returned the default device's object of that name. They now take the device
   as their Lua twins do; a throwing getter fails the call. Found by the new runtime GPU tests
   (`lua_gpu` / `js_gpu`), which run both bindings over an in-memory backend on every runner.
+- **Streaming-multipart routes had no header, buffer, part or total cap unless they set one
+  (audit 34)**: such a route skips the server's `-b` body limit, and every multipart cap left
+  unset was Keel's `0` = unlimited. A route that set only `max_part_size` (the documented
+  pattern, and the photos example) let an unauthenticated client send a part header that
+  never ends: it was buffered without bound and rescanned for its terminator on every chunk,
+  holding a core at 100% and growing memory for the 30 s body deadline, per connection. Hull
+  now fills every unset cap (`hl_cap_multipart_effective_config`, both runtimes and the
+  in-process test harness): `max_headers_size` 16 KiB, `max_input_buffer` 1 MiB, `max_parts`
+  1000, and `max_total_size` the server body limit (`-b`, 1 MB by default) raised to fit one
+  `max_part_size` part. Unlimited is no longer offered; a route that needs more sets an
+  explicit value (one taking several big files sets `max_total_size`).
 - **`gpu.texture(name, nil, { device = N })` / `gpu.texture(name, null, { device: N })`
   destroyed the texture on the default device**, and so did JS `gpu.buffer(name, null,
   { device: N })`: the destroy branch ran before `opts.device` was read. A multi-GPU app
