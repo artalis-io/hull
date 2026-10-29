@@ -61,6 +61,13 @@ int hl_cap_db_sql_reads_whole_database(const char *sql)
     return 0;
 }
 
+int hl_cap_db_sql_switches_catalog(const char *sql);
+int hl_cap_db_sql_switches_catalog(const char *sql)
+{
+    (void)sql;
+    return 0;
+}
+
 int main(void)
 {
     void *ctx = NULL;
