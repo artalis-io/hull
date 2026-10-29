@@ -6,6 +6,7 @@
 
 #ifdef HL_ENABLE_WASM
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/cap/wasm.h"
@@ -100,9 +101,9 @@ static JSValue js_push_wasm_buffer(JSContext *ctx, HlWasmBuffer *buf)
             HlAllocator *a = buf->alloc;
             hl_wasm_buffer_destroy(buf);
             hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
-            return JS_ThrowRangeError(ctx,
+            return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx,
                 "buffer of %zu bytes would take the VM's buffers past its "
-                "heap limit (close unused buffers)", n);
+                "heap limit (close unused buffers)", n));
         }
     }
     if (js) {
@@ -602,9 +603,9 @@ static int js_async_input_copy(JSContext *ctx, HlJS *js, const char *who,
     }
     if (hl_offheap_take(hold, &js->wasm_buf_bytes, js->max_heap_bytes,
                         len) != 0) {
-        JS_ThrowRangeError(ctx, "%s: input of %zu bytes would take the VM's "
+        hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "%s: input of %zu bytes would take the VM's "
                            "buffers past its heap limit (close unused "
-                           "buffers)", who, len);
+                           "buffers)", who, len));
         return -1;
     }
     if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)len)) < 0) {
@@ -1673,9 +1674,9 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
                                 js->max_heap_bytes, ilen) != 0) {
                 js_stream_free_args(ctx, &cb_ctx, has_output, out_storage.kind,
                                     in_file_str, out_file_str, name);
-                return JS_ThrowRangeError(ctx, "compute.stream: input of %zu "
+                return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "compute.stream: input of %zu "
                                           "bytes would take the VM's buffers "
-                                          "past its heap limit", ilen);
+                                          "past its heap limit", ilen));
             }
             if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)ilen))) {
                 hl_offheap_drop(&in_hold);

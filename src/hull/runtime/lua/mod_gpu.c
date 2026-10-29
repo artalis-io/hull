@@ -4,6 +4,7 @@
  */
 
 
+#include "refusal.h"
 #include "hull/cap/fs.h"          /* HlMappedBuffer / HL_MMAP_MT (pinned views); without
                                    * WASM nothing else brought it in */
 #include "hull/cap/fs_resolve.h"  /* hl_fs_fopen_read */
@@ -115,14 +116,19 @@ static void gpu_pin_add(lua_State *L, GpuPins *ps, int kind, void *p, size_t len
  * raise (lua_hlwork, at once when it puts the run over), and it runs before
  * anything is held: call it only where every copy made so far has an owner a
  * raise closes (a to-be-closed slot). */
+/* gpu_offheap_copy's admission refusal: raised with the busy refusal code
+ * in front (GPU_ERR_PREFIX, audit 35). */
+static const char GPU_ERR_BUSY[] = "its buffers would take the VM past its "
+                                   "heap limit (close unused buffers)";
+#define GPU_ERR_PREFIX(e) ((e) == GPU_ERR_BUSY ? HL_LUA_REFUSAL_BUSY : "")
+
 static void *gpu_offheap_copy(lua_State *L, HlLua *lua, HlOffheapHold *hold,
                               const void *src, size_t len, const char **err)
 {
     lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)len), 0);
     if (hl_offheap_take(hold, lua ? &lua->wasm_buf_bytes : NULL,
                         lua ? lua->mem_limit : 0, len) != 0) {
-        *err = "its buffers would take the VM past its heap limit "
-               "(close unused buffers)";
+        *err = GPU_ERR_BUSY;
         return NULL;
     }
     void *p = malloc(len);
@@ -161,7 +167,7 @@ static void gpu_pin_view(lua_State *L, int anchor, int idx, HlBufferView *bv)
         const char *err = NULL;
         void *copy = gpu_offheap_copy(L, get_hl_lua(L), &ps->hold, bv->data,
                                       bv->len, &err);
-        if (!copy) { luaL_error(L, "gpu: %s", err); return; }
+        if (!copy) { hl_lua_refuse(L, "%sgpu: %s", GPU_ERR_PREFIX(err), err); return; }
         gpu_pin_add(L, ps, GPU_PIN_COPY, copy, bv->len);
         bv->data = copy;
     }
@@ -1152,7 +1158,8 @@ static int l_gpu_async_dispatch(lua_State *L)
             const char *err = NULL;
             uni_copy = gpu_offheap_copy(L, lua, &tmp->hold, uni, uni_len, &err);
             if (!uni_copy)
-                return luaL_error(L, "gpu.async.dispatch: %s", err);
+                return hl_lua_refuse(L, "%sgpu.async.dispatch: %s",
+                                  GPU_ERR_PREFIX(err), err);
             tmp->uni = uni_copy;
         }
     }
@@ -1207,8 +1214,9 @@ static int l_gpu_async_dispatch(lua_State *L)
                             buf_data_ptrs[i] = gpu_offheap_copy(L, lua,
                                 &tmp->hold, d, dlen, &err);
                             if (!buf_data_ptrs[i])
-                                return luaL_error(L, "gpu.async.dispatch: %s",
-                                                  err);
+                                return hl_lua_refuse(L,
+                                    "%sgpu.async.dispatch: %s",
+                                    GPU_ERR_PREFIX(err), err);
                             buf_descs[i].data = buf_data_ptrs[i];
                             buf_descs[i].data_len = dlen;
                             buf_descs[i].size = dlen;
@@ -1713,7 +1721,8 @@ static int l_gpu_async_pipeline(lua_State *L)
         lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)copy_bytes), 0);
         if (hl_offheap_take(&copy_hold, &lua->wasm_buf_bytes, lua->mem_limit,
                             copy_bytes) != 0)
-            return luaL_error(L, "gpu.async.pipeline: its buffers would take "
+            return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY
+                                 "gpu.async.pipeline: its buffers would take "
                                  "the VM past its heap limit (close unused "
                                  "buffers)");
     }

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "internal.h"
 #include "hull/shared/async.h"
@@ -265,7 +266,8 @@ static int lua_worker_dispatch(lua_State *L)
         free(bw.buf);
         hl_kv_free(ctx_kvs, ctx_count);
         hl_lua_check_can_wait(L, "worker.dispatch()");   /* raises */
-        return luaL_error(L, "worker.dispatch() cannot wait here");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT
+                          "worker.dispatch() cannot wait here");
     }
 
     /* Both copies are held on the VM's off-heap total under its heap limit
@@ -280,10 +282,12 @@ static int lua_worker_dispatch(lua_State *L)
                                    lua->mem_limit, copy_bytes) != 0) {
         free(bw.buf);
         hl_kv_free(ctx_kvs, ctx_count);
-        return luaL_error(L, charged
-            ? "worker.dispatch: run exceeded its instruction limit"
-            : "worker.dispatch: fn and ctx would take the VM's off-heap "
-              "copies past its heap limit");
+        if (charged)
+            return luaL_error(L, "worker.dispatch: run exceeded its "
+                              "instruction limit");
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "worker.dispatch: fn and "
+                             "ctx would take the VM's off-heap copies past "
+                             "its heap limit");
     }
 
     /* Allocate dispatch op */

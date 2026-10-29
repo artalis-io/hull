@@ -12,6 +12,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "internal.h"            /* async gate, instruction budget */
@@ -679,9 +680,9 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, ud->self_ref);
         ud->self_ref = JS_UNDEFINED;
         JS_FreeValue(ctx, obj);
-        return JS_ThrowRangeError(ctx, "ws.connect: too many live WebSocket "
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "ws.connect: too many live WebSocket "
                                   "clients (at most %d per VM)",
-                                  HL_WS_CLIENT_MAX_LIVE);
+                                  HL_WS_CLIENT_MAX_LIVE));
     }
     js->base.ws_clients++;
     ud->slot = &js->base.ws_clients;

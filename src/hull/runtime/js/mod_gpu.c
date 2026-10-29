@@ -5,6 +5,7 @@
  */
 
 
+#include "refusal.h"
 #include "hull/cap/fs_resolve.h"  /* hl_fs_fopen_read */
 #include "db_wait.h"   /* hl_js_db_refuse_wait */
 #include "mod_buffer.h"
@@ -1252,8 +1253,8 @@ static void *js_gpu_offheap_copy(JSContext *ctx, HlJS *js, HlOffheapHold *hold,
 {
     if (hl_offheap_take(hold, &js->wasm_buf_bytes, js->max_heap_bytes,
                         len) != 0) {
-        JS_ThrowRangeError(ctx, "%s: its buffers would take the VM past its "
-                           "heap limit (close unused buffers)", who);
+        hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "%s: its buffers would take the VM past its "
+                           "heap limit (close unused buffers)", who));
         return NULL;
     }
     if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)len)) < 0) {
@@ -2341,9 +2342,9 @@ opts_done:
      * (audit 20). */
     if (over) {
         hl_worker_gpu_op_free(op); free(op);
-        return JS_ThrowRangeError(ctx, "gpu.async.pipeline: its buffers would "
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "gpu.async.pipeline: its buffers would "
                                   "take the VM past its heap limit (close "
-                                  "unused buffers)");
+                                  "unused buffers)"));
     }
     if (hl_js_budget_charge(ctx,
             hl_work_bytes_units((uint64_t)op->copy_hold.bytes)) < 0) {

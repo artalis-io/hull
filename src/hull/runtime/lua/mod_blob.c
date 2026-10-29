@@ -35,6 +35,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
@@ -273,7 +274,7 @@ static int lua_blob_writer_new(lua_State *L)
             : hl_cap_blob_writer_open(b, expected, &ud->w);
     }
     if (open_rc == HL_BLOB_ERR_TOO_MANY)
-        return luaL_error(L, "blob.writer: too many open blob writers / "
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "blob.writer: too many open blob writers / "
                           "readers (at most %d)", HL_BLOB_MAX_LIVE_HANDLES);
     if (open_rc != 0)
         return luaL_error(L, "blob.writer: open failed");
@@ -371,7 +372,7 @@ static int lua_blob_reader_new(lua_State *L)
         rc = hl_cap_blob_reader_open(b, id, track, &ud->r);
     }
     if (rc == HL_BLOB_ERR_TOO_MANY)
-        return luaL_error(L, "blob.reader: too many open blob writers / "
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "blob.reader: too many open blob writers / "
                           "readers (at most %d)", HL_BLOB_MAX_LIVE_HANDLES);
     if (rc != 0)
         return luaL_error(L, "blob.reader: blob not found");

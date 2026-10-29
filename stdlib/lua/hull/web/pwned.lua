@@ -24,6 +24,11 @@
 --   false  - the password does not appear, OR HIBP was unreachable
 --            AND the embedded blocklist did not hit (fail-open).
 --
+-- check() raises (never fails open) when the runtime itself refuses the
+-- fetch - a "[hull:busy]" refusal (64 fetches already in flight on this VM,
+-- the off-heap copy total) or a "[hull:wait_refused]" one: the request then
+-- fails rather than accepting an unchecked password (audit 35).
+--
 -- Apps consuming this module MUST add the HIBP host (or their
 -- override) to manifest.hosts - check() raises when the hosts list
 -- certainly does not admit it (a misconfiguration, not an outage):
@@ -39,17 +44,11 @@ local http_client = require("hull.http-client")
 local log         = require("hull.log")
 local time        = require("hull.time")
 local blocklist   = require("hull.web._pwned_blocklist")
+local refusal     = require("hull._refusal")
 
 local DEFAULT_ENDPOINT = "https://api.pwnedpasswords.com/range/"
 
 local M = {}
-
--- The runtime's refusals to wait (runtime/lua/async.c hl_lua_check_can_wait).
-local function is_wait_refusal(err)
-    local s = tostring(err)
-    return s:find("cannot wait while a transaction is open", 1, true) ~= nil
-        or s:find("can only wait in a handler", 1, true) ~= nil
-end
 
 -- Could manifest.hosts admit the endpoint's host? Read only after a fetch
 -- failed to start, to tell a misconfiguration from an outage. Conservative:
@@ -138,10 +137,14 @@ function M.check(password, opts)
     local ok, resp = pcall(http_client.async.get, endpoint .. prefix, {
         headers = { ["User-Agent"] = "hull-pwned-check/1" },
     })
-    -- The runtime refusing the wait (a transaction open, called where it
-    -- cannot wait) is a bug in the caller, not an HIBP outage: failing open
-    -- on it turned the check off, quietly, for every such call. Re-raise.
-    if not ok and is_wait_refusal(resp) then error(resp, 0) end
+    -- The runtime refusing the fetch is not an HIBP outage: a refusal to
+    -- wait (a transaction open, called where it cannot wait) is a bug in the
+    -- caller, and a busy refusal (the VM's 64 fetches in flight, its
+    -- off-heap copy total) is local and says nothing about HIBP. Failing open
+    -- on either turned the check off - on the busy one for anyone who could
+    -- hold 64 slow fetches open (audit 35). Re-raised, by code (hull._refusal),
+    -- so the request fails instead of accepting the password.
+    if not ok and refusal.code(resp) then error(resp, 0) end
     -- Neither is a host the manifest does not admit: failing open on it
     -- turned the check off for the life of the process, behind one warning.
     if not ok and not hosts_may_admit(endpoint) then

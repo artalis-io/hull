@@ -9,6 +9,7 @@
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/cap/http.h"
 #include "db_wait.h"   /* hl_js_db_refuse_wait */
+#include "refusal.h"   /* hl_js_refusal_tag (audit 35) */
 #include "hull/cap/http_async.h"
 #include "hull/shared/async.h"
 #include "hull/utils/alloc.h"
@@ -644,10 +645,12 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         js_http_body_free(ctx, &jbody);
         js_free_http_headers(ctx, headers, num_headers);
         if (admit == HL_HTTP_ADMIT_INFLIGHT)
-            return JS_ThrowRangeError(ctx, "http.fetch: too many requests "
+            JS_ThrowRangeError(ctx, "http.fetch: too many requests "
                 "in flight (at most %d per VM)", HL_HTTP_MAX_INFLIGHT);
-        return JS_ThrowRangeError(ctx, "http.fetch: a %zu-byte body would "
-            "take the VM's off-heap copies past its heap limit", body_len);
+        else
+            JS_ThrowRangeError(ctx, "http.fetch: a %zu-byte body would "
+                "take the VM's off-heap copies past its heap limit", body_len);
+        return hl_js_refusal_tag(ctx, HL_REFUSAL_BUSY);
     }
 
     extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,

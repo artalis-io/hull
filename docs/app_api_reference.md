@@ -211,7 +211,7 @@ Register with `app.use(method, pattern, mw)`:
 | `hkdf` | `hull.crypto.hkdf` | `hull:crypto:hkdf` | HKDF-SHA256 (RFC 5869): `derive(ikm, length, { salt?, info? })`, plus `extract(salt, ikm)` / `expand(prk, info, length)`. Several independent keys from one high-entropy secret, each bound to its `info` label (at most 8160 bytes). Not a password hash (`crypto.hash_password` is). Lua returns a byte string, JS an ArrayBuffer |
 | `otp` | `hull.crypto.otp` | `hull:crypto:otp` | HOTP (RFC 4226): `hotp(key, counter, digits?)` and `step(now, period?)` for TOTP (RFC 6238). The algorithm under `hull/web/middleware/totp` |
 | `sealbox` | `hull.crypto.sealbox` | `hull:crypto:sealbox` | Versioned secretbox sealing under a keyring (`keyring` / `seal` / `open`), with an optional context bound into the sealed frame. Keys may be 32-byte strings or `crypto.key_from_env` handles; `keyring_from_env{ keys = { [1] = "VAR" }, current = 1 }` (JS `keyringFromEnv`) builds a keyring of held keys. `open` returns `value, version` or `nil, reason` in Lua and `[value, null, version]` or `[null, reason]` in JS (reason `unknown_version` or `open_failed`). Backs `hull/kv`'s `encrypt` option (see [kv_cache.md](kv_cache.md#encryption-at-rest)) and TOTP's encrypted secrets |
-| `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage (a network failure or non-200); the runtime refusing the wait (called with a transaction open, or from middleware), and a `manifest.hosts` that certainly does not admit the endpoint, are raised, not taken for an outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
+| `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage (a network failure or non-200); a [runtime refusal](#runtime-refusal-codes) (`busy` - e.g. 64 fetches already in flight on the VM - or `wait_refused`) and a `manifest.hosts` that certainly does not admit the endpoint are raised, not taken for an outage, so the request fails instead of accepting an unchecked password (audit 35). Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
 | `audit-log` | `hull.web.middleware.audit-log` | `hull:web:middleware:audit-log` | Append-only sign-in / auth event log + per-device grouping. `record(user_id, kind, req, opts)`, `list(user_id, opts)`, `list_devices(user_id, opts)`, `is_new_device(user_id, req, opts)`. Fingerprint = `sha256(family_os|ip_prefix)[:16]`. Owns `_hull_audit_log`. Composes with auth-flows (emits events when `sign_in_log = true`), with session (per-device summary via `list_devices`), or standalone for app-recorded kinds (`api_token_issued`, `admin_impersonate`, etc.). `init`'s `retain_days` (`retainDays`, default 365) must be a finite number in (0, 36500]; anything else raises - `null` / `false` used to delete every row and a string disabled pruning (audit 26) |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
@@ -1076,7 +1076,7 @@ verify step between successful first-factor auth and `on_login` when
   - `opts.headers`. JSON-encoded headers (optional).
   - `opts.idempotency_key`. Dedup key for delivery (optional).
   - `opts.max_attempts` (whole number >= 0) and `opts.delay` (seconds: a finite number or a numeric string, rounded up to whole seconds; anything else is an error / TypeError - audit 25).
-- `outbox.flush(opts)`. Deliver pending items. Exponential backoff (`2^attempt * 10s`, capped at 1hr). Delivery waits on the network, so flush raises inside `db.batch` / an open transaction, and the runtime's refusal to wait (middleware, outside a handler) is raised with the row left pending, never counted as a failed attempt (audit 18).
+- `outbox.flush(opts)`. Deliver pending items. Exponential backoff (`2^attempt * 10s`, capped at 1hr). Delivery waits on the network, so flush raises inside `db.batch` / an open transaction, and a [runtime refusal](#runtime-refusal-codes) is never counted as a failed attempt: the claim is given back and the row stays pending. A `wait_refused` refusal (middleware, outside a handler) is raised (audit 18); a `busy` one (the VM's fetch cap, its off-heap copy total) stops the flush, which returns with `busy = true` (Lua) / `busy: true` (JS) and leaves the rest of the rows pending, unattempted (audit 35).
 - `outbox.middleware()`. Sets `req.ctx._outbox_flush = true` for auto-flush.
 - `outbox.stats()` → `{ pending, delivered, failed }` counts.
 - `outbox.cleanup(max_age)`. Delete old delivered items.
@@ -1637,6 +1637,36 @@ const r = await httpClient.async.get("https://api.example.com/report", { timeout
 - **On timeout** the call fails like any other transport error: the sync calls raise
   / throw `http.get failed: ...`; `http.async.*` resolves to `nil` (Lua) / `undefined`
   (JS) - the same as a refused connection.
+
+### Runtime refusal codes
+
+An async op the runtime refuses to START is not a remote failure, and its error
+says so with a stable code (audit 35) - test the code, never the message text:
+
+| Code | Raised when | Meaning |
+|---|---|---|
+| `wait_refused` | a wait is attempted with a transaction open on a connection, in middleware (JS), while `req.multipart()` is parked (JS), outside a handler / task / `app.main` (Lua), or while the runtime shuts down (Lua) | the call is in the wrong place: a bug in the caller |
+| `busy` | an admission cap of this VM is full: 64 `http.fetch` / `http.async.*` requests in flight (`HL_HTTP_MAX_INFLIGHT`), the VM's off-heap copy total (a `db.async` / `worker.dispatch` / `smtp.send` / `http.fetch` / `compute.async` / `compute.stream` / `gpu.*` copy that would pass its heap limit), 64 live `ws.connect` clients, 256 open blob readers / writers | local and transient: nothing was sent, a later call may be admitted |
+
+- **JS:** the thrown `Error` has an own `code` property: `e.code === "busy"`.
+- **Lua:** the error string starts with `"[hull:<code>] "` (no `chunk:line:`
+  prefix in front): `tostring(e):match("^%[hull:([%w_]+)%] ")`. Match it at
+  the start only - a remote message can contain the text.
+
+The messages are unchanged apart from Lua's prefix. The stdlib follows the same
+rule: `hull/web/pwned` re-raises a refusal instead of failing open, and
+`outbox.flush` gives the claim back without counting an attempt.
+
+```javascript
+try { await httpClient.async.get(url); }
+catch (e) { if (e.code === "busy") return res.status(503).header("Retry-After", "1").json({ error: "busy" }); throw e; }
+```
+```lua
+local ok, r = pcall(http.async.get, url)
+if not ok and tostring(r):find("^%[hull:busy%] ") then
+    return res:status(503):header("Retry-After", "1"):json({ error = "busy" })
+end
+```
 
 ### Outbound SMTP (`smtp.send`, model-2 async)
 

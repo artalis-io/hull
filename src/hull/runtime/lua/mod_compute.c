@@ -5,6 +5,7 @@
 
 #ifdef HL_ENABLE_WASM
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_spans.h" /* HL_WASM_MAX_SPANS */
@@ -142,7 +143,7 @@ void lua_push_wasm_buffer(lua_State *L, HlWasmBuffer *buf)
                                    lua->mem_limit) != 0) {
             size_t n = hl_wasm_buffer_len(buf);
             hl_wasm_buffer_close(buf);
-            luaL_error(L, "buffer of %I bytes would take the VM's buffers "
+            hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "buffer of %I bytes would take the VM's buffers "
                           "past its heap limit (close unused buffers)",
                        (lua_Integer)n);
         }
@@ -203,7 +204,7 @@ static void *lua_async_input_copy(lua_State *L, HlLua *lua, const void *input,
      * and nothing is held yet. */
     lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)len), 0);
     if (hl_offheap_take(hold, &lua->wasm_buf_bytes, lua->mem_limit, len) != 0)
-        luaL_error(L, "compute.async: input of %I bytes would take the VM's "
+        hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "compute.async: input of %I bytes would take the VM's "
                       "buffers past its heap limit (close unused buffers)",
                    (lua_Integer)len);
     void *copy = malloc(len);
@@ -1584,7 +1585,7 @@ static int lua_compute_stream(lua_State *L)
             lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)in_copy_len), 0);
             if (hl_offheap_take(&in_hold, &lua->wasm_buf_bytes, lua->mem_limit,
                                 in_copy_len) != 0)
-                return luaL_error(L, "compute.stream: input of %I bytes would "
+                return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "compute.stream: input of %I bytes would "
                                      "take the VM's buffers past its heap limit",
                                   (lua_Integer)in_copy_len);
             in_copy = hl_alloc_malloc(lua->base.alloc, in_copy_len);

@@ -6,6 +6,7 @@
 
 #ifdef HL_ENABLE_DB
 
+#include "refusal.h"
 #include "mod_buffer.h"
 #include "internal.h"            /* async gate, instruction budget */
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
@@ -1125,9 +1126,9 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
                             js->max_heap_bytes, copy_bytes) != 0) {
             js_free_hl_values(ctx, params, nparams);
             JS_FreeCString(ctx, sql);
-            return JS_ThrowRangeError(ctx, "db.async: %zu bytes of SQL and "
+            return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "db.async: %zu bytes of SQL and "
                 "params would take the VM's off-heap copies past its heap "
-                "limit", copy_bytes);
+                "limit", copy_bytes));
         }
         if (hl_js_budget_charge(ctx, hl_work_bytes_units(copy_bytes)) < 0) {
             hl_offheap_drop(&copy_hold);

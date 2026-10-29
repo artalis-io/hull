@@ -50,6 +50,7 @@ local function has_header(headers, want)
     return false
 end
 local time = require("hull.time")
+local refusal = require("hull._refusal")
 
 local outbox = {}
 
@@ -170,20 +171,15 @@ function outbox.enqueue(opts)
     return db.last_id()
 end
 
--- The runtime's refusals to wait (runtime/lua/async.c hl_lua_check_can_wait;
--- the same test as hull.web.pwned's). They say where flush was called, not
--- how the destination answered, so they are raised, never recorded as a
--- failed attempt (audit 18: every flush from such a place burned an attempt
--- until the row was 'failed', unsent).
-local function is_wait_refusal(err)
-    local s = tostring(err)
-    return s:find("cannot wait while a transaction is open", 1, true) ~= nil
-        or s:find("can only wait in a handler", 1, true) ~= nil
-end
-
 --- Attempt to deliver a single outbox item.
--- Returns true on success, false on failure, and `false, err, true` when the
--- runtime refused to wait (see is_wait_refusal).
+-- Returns true on success, false on failure, and `false, err, code` when the
+-- runtime refused the delivery (code is its hull._refusal code: "busy" or
+-- "wait_refused"). A refusal says where or when flush ran, not how the
+-- destination answered, so it is never recorded as a failed attempt
+-- (audit 18: every flush from such a place burned an attempt until the row
+-- was 'failed', unsent; audit 35: so did every flush while the VM's 64
+-- fetches were in flight, and the stdlib matched only the older refusal
+-- messages - it tests the code now).
 -- How long a flush's claim on a row lasts before another flush may take it
 -- (seconds): longer than any delivery can run - http.fetch's ceiling
 -- (HL_HTTP_FETCH_MAX_TIMEOUT_MS, 10 min) plus a minute. It was 300 s, under
@@ -227,8 +223,9 @@ local function deliver_item(item)
         if send_ok and result and result.status and result.status >= 200 and result.status < 300 then
             return true, nil
         end
-        if not send_ok and is_wait_refusal(result) then
-            return false, result, true
+        local refused = not send_ok and refusal.code(result) or nil
+        if refused then
+            return false, result, refused
         end
 
         local err_msg
@@ -264,7 +261,9 @@ end
 -- @function outbox.flush
 -- @tparam[opt] table opts
 -- @tparam[opt=50] number opts.limit  Max items to process per call.
--- @treturn table  `{ delivered = N, failed = N, retried = N }`.
+-- @treturn table  `{ delivered = N, failed = N, retried = N }`, plus
+--   `busy = true` when the runtime refused a delivery as busy (the VM's
+--   fetch cap): the flush stopped there, the rest stay pending, unattempted.
 -- @note Delivery is at-least-once - design receivers to be idempotent.
 function outbox.flush(opts)
     -- Delivery waits on http.fetch, which the runtime refuses inside a
@@ -310,12 +309,21 @@ function outbox.flush(opts)
         if claimed == 1 then
             local ok, err, refused = deliver_item(item)
             if refused then
-                -- Give the claim back (the row is due again at once) and
-                -- raise: nothing was sent, so no attempt is counted.
+                -- Give the claim back (the row is due again at once):
+                -- nothing was sent, so no attempt is counted. A busy refusal
+                -- (the VM's fetch cap, its off-heap copy total) is transient
+                -- and would refuse every row after this one too, so the flush
+                -- stops and reports it (`busy = true`); the rows stay pending
+                -- for the next flush. A refusal to wait is the caller's bug:
+                -- raised.
                 db.exec(
                     "UPDATE _hull_outbox SET next_attempt_at = ? WHERE id = ? " ..
                     "AND state = 'pending' AND next_attempt_at = ?",
                     { claim_now, item.id, lease })
+                if refused == refusal.BUSY then
+                    return { delivered = delivered, failed = failed,
+                             retried = retried, busy = true }
+                end
                 error(err, 0)
             end
 
