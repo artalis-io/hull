@@ -784,7 +784,16 @@ app.main) that raised, before its caller's closing guard, and marks it died
 (`hl_lua_died_marker`: resume / close refuse it, `coroutine.status` reads dead; a
 closed thread reads LUA_OK with its error on the stack, so app.main's final status
 is kept in `HlLua.cli_main_status`). A new runtime resume path must go through
-`hl_lua_resume_status`. Accepted limits: a coroutine resumed inside
+`hl_lua_resume_status`, passing the same `from` it gave `lua_resume`: closing a
+coroutine passes its resumer as `lua_closethread`'s `from`, which gives the
+closed thread the resumer's C-call depth and hands it the `__close` handlers'
+unreported work (Lua patch 0004). With NULL (audit 39) a `hull._spawn` /
+`tui.async` task - run inline inside the spawner - whose `__close` spawned
+another dying task nested C frames with no limit until the native stack
+overflowed, and each closed task's handlers ran up to a hook stride uncharged;
+every `lua_closethread` in Hull passes its resumer. `hl_lua_async_resume` resumes
+only a coroutine that is `LUA_YIELD` with the parked mark; anything else ends
+through the error path unresumed. Accepted limits: a coroutine resumed inside
 the RESUMER's transaction yields untagged, so if the guard later rolls that
 transaction back, the coroutine's writes after its next resume autocommit (kept
 so a generator consumed inside each request's `db.batch` works); the generation

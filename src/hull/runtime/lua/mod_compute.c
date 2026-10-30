@@ -1083,12 +1083,15 @@ static int lua_wasm_inst_tostring(lua_State *L)
     return 1;
 }
 
-/* inst.async:call(input, opts?) - proxy that prepends the instance as arg 1.
- * Stack on entry: async_proxy, input, [opts]
- * We need to retrieve the instance from the proxy's upvalue. */
+/* inst.async:call(input, opts?) / inst.async.call(input, opts?) - proxy that
+ * puts the instance in front of the arguments. Upvalue 1 is the instance,
+ * upvalue 2 the proxy table: the method form passes that table as arg 1,
+ * which is dropped (audit 39: it was taken for the input, so the method form
+ * the reference documents never worked). */
 static int lua_wasm_inst_async_proxy_call(lua_State *L)
 {
-    /* The instance userdata is stored as upvalue 1 of this closure */
+    if (lua_gettop(L) >= 1 && lua_rawequal(L, 1, lua_upvalueindex(2)))
+        lua_remove(L, 1);                  /* the method form's self */
     lua_pushvalue(L, lua_upvalueindex(1)); /* push instance */
     lua_insert(L, 1);                      /* move to position 1 */
     return lua_wasm_inst_async_call(L);    /* call with instance as self */
@@ -1106,7 +1109,8 @@ static int lua_wasm_inst_index(lua_State *L)
         /* Create { call = <closure with inst upvalue> } */
         lua_newtable(L);
         lua_pushvalue(L, 1);  /* push the instance userdata */
-        lua_pushcclosure(L, lua_wasm_inst_async_proxy_call, 1);
+        lua_pushvalue(L, -2); /* and the proxy table itself */
+        lua_pushcclosure(L, lua_wasm_inst_async_proxy_call, 2);
         lua_setfield(L, -2, "call");
         return 1;
     }

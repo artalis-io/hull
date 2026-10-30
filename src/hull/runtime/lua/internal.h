@@ -225,8 +225,15 @@ int hl_lua_async_k_ok(lua_State *L);
 
 /* The status to act on after a runtime lua_resume of @p co: a LUA_YIELD
  * that no Hull operation caused (a bare coroutine.yield()) becomes
- * LUA_ERRRUN, with the coroutine closed and a message on its top. */
-int hl_lua_resume_status(lua_State *co, int status);
+ * LUA_ERRRUN, with the coroutine closed and a message on its top.
+ * @p from is the resumer - the same state the lua_resume was given: closing
+ * the coroutine runs its __close handlers, and lua_closethread takes the C
+ * call depth from @p from and hands it their unreported work (Lua patch
+ * 0004). NULL reset the depth to 0 and dropped the work, so a task spawned
+ * inline (hull._spawn, tui.async) whose __close spawned another dying task
+ * nested C frames with no limit until the native stack overflowed, and each
+ * closed task's handlers ran up to a hook stride uncharged (audit 39). */
+int hl_lua_resume_status(lua_State *co, lua_State *from, int status);
 
 /* Start an event-loop entry protected (runtime.c): a new coroutine holding
  * the handler from registry table @p table at @p handler_id, then the

@@ -1265,7 +1265,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     HL_LUA_ARM_KIND(lua, co, HL_RUN_MAIN);   /* app.main's own deadline */
     int nres = 0;
     int status = lua_resume(co, L, 1, &nres);
-    status = hl_lua_resume_status(co, status);
+    status = hl_lua_resume_status(co, L, status);
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 9 L1: any open txn is stale now */
 
     if (status == LUA_YIELD) {

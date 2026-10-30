@@ -1209,13 +1209,21 @@ static int l_gpu_async_dispatch(lua_State *L)
                     if (lua_isstring(L, -1)) {
                         size_t nlen;
                         const char *nstr = lua_tolstring(L, -1, &nlen);
-                        if (nstr && nlen > 0 && nlen < HL_GPU_NAME_MAX) {
+                        /* Too long a name, or a failed copy, fails the
+                         * call: dropped, the buffer ran unnamed (audit 39).
+                         * `tmp` frees what was copied. */
+                        if (nstr && nlen >= HL_GPU_NAME_MAX)
+                            return luaL_error(L, "gpu.async.dispatch: buffer "
+                                              "name too long (max %d bytes)",
+                                              HL_GPU_NAME_MAX - 1);
+                        if (nstr && nlen > 0) {
                             char *ncopy = malloc(nlen + 1);
-                            if (ncopy) {
-                                memcpy(ncopy, nstr, nlen);
-                                ncopy[nlen] = '\0';
-                                buf_descs[i].name = ncopy;
-                            }
+                            if (!ncopy)
+                                return luaL_error(L, "gpu.async.dispatch: "
+                                                  "out of memory");
+                            memcpy(ncopy, nstr, nlen);
+                            ncopy[nlen] = '\0';
+                            buf_descs[i].name = ncopy;
                         }
                     }
                     lua_pop(L, 1);
