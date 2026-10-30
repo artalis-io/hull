@@ -281,6 +281,16 @@ app.main(function()
     local ok = pcall(require("hull.db").default().query,
                      "SELECT nextval('_hull_outbox_id_seq') AS v")
     assert(not ok, "app SQL reached the stdlib's sequence")
+    -- Audit 39: DuckDB rewrites x.nextval() as nextval(x), so the sequence
+    -- name could stand before the dot.
+    for _, sql in ipairs({
+        "SELECT concat('_hu', 'll_outbox_id_seq').nextval() AS v",
+        "SELECT concat('_hu', 'll_outbox_id_seq').\"nextval\"() AS v",
+        "SELECT concat('_hu', 'll_outbox_id_seq') . currval ( ) AS v",
+    }) do
+        local ok2 = pcall(require("hull.db").default().query, sql)
+        assert(not ok2, "app SQL reached the stdlib's sequence: " .. sql)
+    end
     print("DUCKDB STDLIB TABLES OK")
     return 0
 end)
@@ -316,6 +326,15 @@ app.main(() => {
     try { db.default().query("SELECT nextval('_hull_outbox_id_seq') AS v"); }
     catch (e) { reached = false; }
     if (reached) throw new Error("app SQL reached the stdlib's sequence");
+    for (const sql of [
+        "SELECT concat('_hu', 'll_outbox_id_seq').nextval() AS v",
+        "SELECT concat('_hu', 'll_outbox_id_seq').\"nextval\"() AS v",
+        "SELECT concat('_hu', 'll_outbox_id_seq') . currval ( ) AS v",
+    ]) {
+        let r2 = true;
+        try { db.default().query(sql); } catch (e) { r2 = false; }
+        if (r2) throw new Error("app SQL reached the stdlib's sequence: " + sql);
+    }
     console.log("DUCKDB STDLIB TABLES OK");
     return 0;
 });
@@ -325,9 +344,32 @@ STD_BUILD=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -
 echo "$STD_BUILD" | grep -q "composed feature 'duckdb'" || { echo "$STD_BUILD"; echo "FAIL: $RT stdlib app not composed"; exit 1; }
 STD_OUT=$(cd "$STD" && ./bin --hull-d duckdb://data/s.duckdb 2>&1) || true
 echo "$STD_OUT" | tail -5
-rm -rf "$STD"
-echo "$STD_OUT" | grep -q "DUCKDB STDLIB TABLES OK" || { echo "$STD_BUILD" | tail -20; echo "$STD_OUT"; echo "FAIL: $RT stdlib audit-log / outbox tables on DuckDB"; exit 1; }
+echo "$STD_OUT" | grep -q "DUCKDB STDLIB TABLES OK" || { echo "$STD_BUILD" | tail -20; echo "$STD_OUT"; echo "FAIL: $RT stdlib audit-log / outbox tables on DuckDB"; rm -rf "$STD"; exit 1; }
 echo "ok  $RT: audit-log + outbox tables created on DuckDB with a Hull-owned sequence"
+# Audit 39: a view planted in the file over a _hull_* table handed its rows to
+# app SQL naming no _hull_. The open now refuses the database. Planted with
+# the DuckDB CLI (or Python's duckdb) when one is installed.
+PLANT=""
+if command -v duckdb >/dev/null 2>&1; then
+    PLANT="cli"
+elif command -v python3 >/dev/null 2>&1 && python3 -c "import duckdb" >/dev/null 2>&1; then
+    PLANT="py"
+fi
+if [ -n "$PLANT" ]; then
+    VSQL="CREATE VIEW leakview AS SELECT * FROM _hull_audit_log"
+    if [ "$PLANT" = cli ]; then
+        duckdb "$STD/data/s.duckdb" "$VSQL" >/dev/null
+    else
+        python3 -c "import duckdb,sys; c=duckdb.connect(sys.argv[1]); c.execute(sys.argv[2]); c.close()" \
+            "$STD/data/s.duckdb" "$VSQL"
+    fi
+    PL_OUT=$(cd "$STD" && ./bin --hull-d duckdb://data/s.duckdb 2>&1) || true
+    echo "$PL_OUT" | grep -q "names a reserved _hull_\* table" || { echo "$PL_OUT"; echo "FAIL: $RT planted view over _hull_audit_log was not refused"; rm -rf "$STD"; exit 1; }
+    echo "ok  $RT: a planted view over a _hull_* table refuses the open"
+else
+    echo "skip $RT: planted-view leg (no duckdb CLI / python duckdb; test_db_duckdb covers it)"
+fi
+rm -rf "$STD"
 done
 
 echo "=== a long DuckDB query is stopped by the run's instruction budget ==="

@@ -164,6 +164,64 @@ case "$out" in
     *) fail "js: the manifest is read past a top-level init()" "$out" ;;
 esac
 
+# Audit 39: a view or trigger stored in the app's database that names a
+# _hull_* table expands into reads of Hull's tables that app SQL never names
+# (`SELECT tok FROM leakv`). The stdlib still reaches its own tables on the
+# default connection (the SQLite authorizer trusts it); a database holding
+# such a view or trigger is refused at open, naming it.
+echo "=== planted view / trigger over _hull_* (SQLite) ==="
+for ext in lua js; do
+    d="$TMPDIR/p$ext"
+    mkdir -p "$d"
+    if [ "$ext" = lua ]; then
+        cat > "$d/app.lua" <<'EOF4'
+app.manifest({ modules = { "hull/web/middleware/session@1", "hull/db@1" } })
+local session = require("hull.web.middleware.session")
+app.main(function(ctx)
+    session.init({})
+    local db = require("hull.db").default()
+    local ok = pcall(function() return db.query("SELECT count(*) AS n FROM app_t") end)
+    ctx.stdout:write("app_query=" .. tostring(ok) .. "\n")
+    return 0
+end)
+EOF4
+    else
+        cat > "$d/app.js" <<'EOF4'
+import { app } from "hull:app";
+import { session } from "hull:web:middleware:session";
+import { db } from "hull:db";
+app.manifest({ modules: ["hull/web/middleware/session@1", "hull/db@1"] });
+app.main((ctx) => {
+    session.init({});
+    let ok = true;
+    try { db.default().query("SELECT count(*) AS n FROM app_t"); } catch (e) { ok = false; }
+    ctx.stdout.write("app_query=" + ok + "\n");
+    return 0;
+});
+EOF4
+    fi
+    pdb="$WTMP/p$ext/app.db"
+    "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
+c.execute('CREATE TABLE app_t (x INTEGER)'); c.commit()" "$pdb"
+    out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox -d "$pdb" "app.$ext" 2>&1 || true)
+    [ "$(has_table "$pdb")" = 1 ] && case "$out" in *"app_query=true"*) true ;; *) false ;; esac \
+        && pass "$ext: the stdlib creates and uses _hull_sessions on the default connection" \
+        || fail "$ext: the stdlib creates and uses _hull_sessions on the default connection" "$out"
+    for obj in "CREATE VIEW leakv AS SELECT * FROM _hull_sessions" \
+               "CREATE TRIGGER leakt AFTER INSERT ON _hull_sessions BEGIN INSERT INTO app_t VALUES (1); END"; do
+        "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
+c.execute(sys.argv[2]); c.commit()" "$pdb" "$obj"
+        out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox -d "$pdb" "app.$ext" 2>&1 || true)
+        case "$out" in
+            *"names a reserved _hull_* table"*)
+                pass "$ext: a database holding '$(echo "$obj" | cut -d" " -f1-3)' is refused at open" ;;
+            *) fail "$ext: a database holding '$(echo "$obj" | cut -d" " -f1-3)' is refused at open" "$out" ;;
+        esac
+        "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
+c.execute('DROP VIEW IF EXISTS leakv'); c.execute('DROP TRIGGER IF EXISTS leakt'); c.commit()" "$pdb"
+    done
+done
+
 echo ""
 echo "e2e_db_internal: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

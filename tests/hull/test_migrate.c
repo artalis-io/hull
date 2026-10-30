@@ -60,7 +60,11 @@ static int count_cb(void *ctx, int ncols, char **vals, char **names)
 static int scalar(sqlite3 *db, const char *sql)
 {
     int v = -1;
-    if (sqlite3_exec(db, sql, count_cb, &v, NULL) != SQLITE_OK)
+    /* Reads Hull's own _hull_migrations: trusted (audit 39). */
+    int ns_prev = hl_cap_db_ns_trust(1);
+    int rc = sqlite3_exec(db, sql, count_cb, &v, NULL);
+    hl_cap_db_ns_restore(ns_prev);
+    if (rc != SQLITE_OK)
         return -2;
     return v;
 }

@@ -492,8 +492,13 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
+    /* The SQLite authorizer's `_hull_*` check takes the same verdict as the
+     * text check above (audit 39): a stored view / trigger reaching one is
+     * refused for app SQL. Around the call only (prepare and step). */
+    int ns_prev = hl_cap_db_ns_trust(is_stdlib);
     int rc = hl_db_query(h, sql, params, nparams,
                          js_query_row_cb, &qc, js->base.alloc);
+    hl_cap_db_ns_restore(ns_prev);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
@@ -559,7 +564,9 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "database connection is closed");
     }
 
+    int ns_prev = hl_cap_db_ns_trust(is_stdlib);   /* see query */
     int rc = hl_db_exec(h, sql, params, nparams);
+    hl_cap_db_ns_restore(ns_prev);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
@@ -799,11 +806,13 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
             : "database connection is closed");
     }
 
+    int ns_prev = hl_cap_db_ns_trust(is_stdlib);   /* see query */
     int rc = is_upsert
         ? hl_db_upsert(h, table, conflict_cols, n_conflict,
                        cols, values, n_cols)
         : hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
                                   cols, values, n_cols);
+    hl_cap_db_ns_restore(ns_prev);
 
     js_free_hl_values(ctx, values, n_values);
     js_free_string_array(ctx, cols, n_cols);
@@ -1044,6 +1053,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     /* Input differs by kind: WAIT_NOTIFY takes (channel, timeoutMs); the
      * query/exec kinds take (sql, params). */
     HlWorkerDbOp *op = NULL;
+    int ns_trusted = 0;   /* the stdlib-frame verdict, for the worker */
 
     if (kind == HL_WORK_DB_WAIT_NOTIFY) {
         /* A backend with no LISTEN/NOTIFY fails here (audit 14): the worker
@@ -1098,7 +1108,8 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         if (!sql)
             return JS_EXCEPTION;
 
-        if (!js_is_stdlib_caller(ctx, this_val) && hl_cap_db_check_namespace(sql) != 0) {
+        ns_trusted = js_is_stdlib_caller(ctx, this_val);
+        if (!ns_trusted && hl_cap_db_check_namespace(sql) != 0) {
             JS_FreeCString(ctx, sql);
             return JS_ThrowInternalError(ctx,
                 "access denied: _hull_* tables are reserved");
@@ -1190,6 +1201,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         const char *dsn = js_call_dsn(ctx, this_val);
         op->max_instructions = js->max_instructions;   /* the op's own */
         op->max_result_bytes = js->max_heap_bytes;
+        op->ns_trusted = ns_trusted;
         hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
                                js->max_heap_bytes);
         op->no_cache = JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;

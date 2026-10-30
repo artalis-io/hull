@@ -267,7 +267,10 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     WorkerJsQueryCtx qc = { .ctx = ctx, .rows = rows, .row_num = 0 };
+    /* Worker-VM SQL is app SQL: the authorizer's `_hull_*` check applies (audit 39). */
+    int ns_prev = hl_cap_db_ns_trust(0);
     int rc = hl_db_query(h, sql, params, nparams, worker_js_row_cb, &qc, NULL);
+    hl_cap_db_ns_restore(ns_prev);
 
     worker_js_free_values(ctx, params, strs, nparams);
     JS_FreeCString(ctx, sql);
@@ -315,7 +318,9 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
         }
     }
 
+    int ns_prev = hl_cap_db_ns_trust(0);   /* app SQL (audit 39) */
     int rc = hl_db_exec(h, sql, params, nparams);
+    hl_cap_db_ns_restore(ns_prev);
 
     worker_js_free_values(ctx, params, strs, nparams);
     JS_FreeCString(ctx, sql);

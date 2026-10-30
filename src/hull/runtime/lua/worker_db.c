@@ -195,7 +195,10 @@ static int worker_lua_db_query(lua_State *L)
             return luaL_error(L, "params must be a table");
     }
 
+    /* Worker-VM SQL is app SQL: the authorizer's `_hull_*` check applies (audit 39). */
+    int ns_prev = hl_cap_db_ns_trust(0);
     int rc = hl_db_query(h, sql, params, nparams, worker_lua_row_cb, &qc, NULL);
+    hl_cap_db_ns_restore(ns_prev);
     free(params);
     /* Closes the guard and drops the param values above it; the result
      * table is on top. */
@@ -233,7 +236,9 @@ static int worker_lua_db_exec(lua_State *L)
             return luaL_error(L, "params must be a table");
     }
 
+    int ns_prev = hl_cap_db_ns_trust(0);   /* app SQL (audit 39) */
     int rc = hl_db_exec(h, sql, params, nparams);
+    hl_cap_db_ns_restore(ns_prev);
     free(params);
     lua_settop(L, guard - 1);   /* closes the guard, drops the param values */
 

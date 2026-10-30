@@ -182,6 +182,27 @@ static void free_lua_req_ctx(KlHttpRequest *req)
 
 /* Init lua with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
+
+/* The harness's own SQL on _hull_* tables (setting up an old schema, aging a
+ * claim) runs as Hull's: the SQLite authorizer refuses `_hull_*` objects to
+ * untrusted SQL (audit 39). */
+static int trusted_exec(sqlite3 *db, const char *sql, int (*cb)(void *, int, char **, char **),
+                        void *ud, char **err)
+{
+    int prev = hl_cap_db_ns_trust(1);
+    int rc = sqlite3_exec(db, sql, cb, ud, err);
+    hl_cap_db_ns_restore(prev);
+    return rc;
+}
+
+static int trusted_prepare(sqlite3 *db, const char *sql, int n, sqlite3_stmt **st,
+                           const char **tail)
+{
+    int prev = hl_cap_db_ns_trust(1);
+    int rc = sqlite3_prepare_v2(db, sql, n, st, tail);
+    hl_cap_db_ns_restore(prev);
+    return rc;
+}
 static HlDbHandle test_db_handle;
 static HlDbRegistry *test_db_registry;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
@@ -5151,7 +5172,7 @@ UTEST(lua_stdlib, stdlib_audit15_suite)
 {
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
-    ASSERT_EQ(sqlite3_exec(test_db, AUDIT15_OLD_JOBS_SCHEMA, NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_EQ(trusted_exec(test_db, AUDIT15_OLD_JOBS_SCHEMA, NULL, NULL, NULL), SQLITE_OK);
 
     long long pass = 0, fail = -1;
     int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit15.lua", &pass, &fail);
@@ -5161,7 +5182,7 @@ UTEST(lua_stdlib, stdlib_audit15_suite)
 
     for (size_t i = 0; i < sizeof AUDIT15_NEW_COLUMNS / sizeof AUDIT15_NEW_COLUMNS[0]; i++) {
         sqlite3_stmt *st = NULL;
-        EXPECT_EQ(sqlite3_prepare_v2(test_db, AUDIT15_NEW_COLUMNS[i], -1, &st, NULL), SQLITE_OK);
+        EXPECT_EQ(trusted_prepare(test_db, AUDIT15_NEW_COLUMNS[i], -1, &st, NULL), SQLITE_OK);
         sqlite3_finalize(st);
     }
 
@@ -6360,7 +6381,7 @@ UTEST(lua_stdlib, audit10_followup_jobs)
     EXPECT_EQ(step, 0);
 
     /* One second behind: may be a heartbeat made a moment ago - kept. */
-    ASSERT_EQ(sqlite3_exec(test_db,
+    ASSERT_EQ(trusted_exec(test_db,
         "UPDATE _hull_jobs SET claimed_at = CAST(strftime('%s','now') AS INTEGER) - 1 "
         "WHERE queue = 'a10vt'", NULL, NULL, NULL), SQLITE_OK);
     EXPECT_EQ(eval_int(
@@ -6369,7 +6390,7 @@ UTEST(lua_stdlib, audit10_followup_jobs)
         "  return jobs.get(A10_RID).status == 'running' and 0 or 1 end)()"), 0);
 
     /* Two seconds behind: held at least one full second - reaped. */
-    ASSERT_EQ(sqlite3_exec(test_db,
+    ASSERT_EQ(trusted_exec(test_db,
         "UPDATE _hull_jobs SET claimed_at = CAST(strftime('%s','now') AS INTEGER) - 2 "
         "WHERE queue = 'a10vt'", NULL, NULL, NULL), SQLITE_OK);
     EXPECT_EQ(eval_int(

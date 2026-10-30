@@ -611,7 +611,12 @@ static void db_work_fn(void *ud)
     if (limit_ms) budget.deadline_ms = hl_db_monotonic_ms() + limit_ms;
     HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
     int refused = 0;   /* the result was refused: keep that message */
+    /* The submitting binding's stdlib-frame verdict (audit 39): the SQLite
+     * authorizer refuses `_hull_*` objects an app op reaches through a
+     * stored view or trigger. */
+    int ns_prev = hl_cap_db_ns_trust(op->ns_trusted);
     HlWorkerDb *wdb = db_work_run(op, &fresh, &budget, &refused);
+    hl_cap_db_ns_restore(ns_prev);
     hl_db_budget_restore(prev);
     if (budget.tripped && op->error && !refused)
         snprintf(op->error_msg, sizeof(op->error_msg), "%s",

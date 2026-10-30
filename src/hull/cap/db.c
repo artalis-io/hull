@@ -15,6 +15,7 @@
 #include "hull/cap/db_budget.h"
 #include "hull/utils/alloc.h"
 #include "hull/shared/cache_dir.h"   /* hl_hull_sqlite_temp_dir */
+#include "hull/shared/term_escape.h" /* hl_eprintf_line */
 #include <sqlite3.h>
 #include <errno.h>
 #include <limits.h>
@@ -376,11 +377,87 @@ int hl_cap_db_exec_script(sqlite3 *db, const char *sql)
     return 0;
 }
 
+/* Whether @p action touches a reserved `_hull_*` object (audit 39). The text
+ * check (hl_cap_db_check_namespace) reads only the SQL the app hands Hull; a
+ * view or trigger stored in the database expands here, at prepare time, into
+ * reads and writes of the tables it names - so the authorizer sees what the
+ * statement really reaches, whatever spelled it. Table name in a1 for the row
+ * actions (a2 is the column), a1 and / or a2 for DDL (index / trigger: a1 the
+ * object, a2 its table; ALTER: a2 the table). */
+static int db_name_guarded(const char *name)
+{
+    /* hull/search's FTS5 indexes (`_hull_fts_<name>` and FTS5's own shadow
+     * tables `_hull_fts_<name>_data` / `_idx` / `_content` / ...) are left
+     * out: FTS5 prepares its shadow-table statements itself, lazily - at the
+     * COMMIT that ends a db.batch or an app's own transaction holding a
+     * search.index call, not inside the stdlib call - so they would run
+     * untrusted. What they hold is the app's own content, which it reads
+     * through search.query anyway. */
+    return hl_cap_db_name_reserved(name) &&
+           strncasecmp(name, "_hull_fts_", 10) != 0;
+}
+
+static int db_action_reserved(int action, const char *a1, const char *a2)
+{
+    switch (action) {
+    case SQLITE_READ:
+    case SQLITE_INSERT:
+    case SQLITE_UPDATE:
+    case SQLITE_DELETE:
+    case SQLITE_CREATE_TABLE:
+    case SQLITE_CREATE_TEMP_TABLE:
+    case SQLITE_DROP_TABLE:
+    case SQLITE_DROP_TEMP_TABLE:
+    case SQLITE_CREATE_VIEW:
+    case SQLITE_CREATE_TEMP_VIEW:
+    case SQLITE_DROP_VIEW:
+    case SQLITE_DROP_TEMP_VIEW:
+    case SQLITE_ANALYZE:
+    case SQLITE_REINDEX:
+    case SQLITE_CREATE_VTABLE:
+    case SQLITE_DROP_VTABLE:
+        return db_name_guarded(a1);
+    case SQLITE_CREATE_INDEX:
+    case SQLITE_CREATE_TEMP_INDEX:
+    case SQLITE_DROP_INDEX:
+    case SQLITE_DROP_TEMP_INDEX:
+    case SQLITE_CREATE_TRIGGER:
+    case SQLITE_CREATE_TEMP_TRIGGER:
+    case SQLITE_DROP_TRIGGER:
+    case SQLITE_DROP_TEMP_TRIGGER:
+        return db_name_guarded(a1) || db_name_guarded(a2);
+    case SQLITE_ALTER_TABLE:
+        return db_name_guarded(a2);
+    default:
+        return 0;
+    }
+}
+
+/* VACUUM rebuilds the database by attaching a scratch one named
+ * "vacuum_<hex>" and running CREATE TABLE / CREATE INDEX / INSERT INTO it
+ * for every table, `_hull_*` ones included (copied by SQLite's transfer
+ * optimisation, which reports no read of the source). Writes into such a
+ * database are let through: the only attachable databases are scratch
+ * ('' / ":memory:"), so an app that names one so reaches nothing, and a read
+ * of main's `_hull_*` tables is still refused. */
+static int db_vacuum_target(const char *dbname)
+{
+    return dbname && strncasecmp(dbname, "vacuum_", 7) == 0;
+}
+
 static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
                          const char *a3, const char *a4)
 {
     (void)a3; (void)a4;
     if (db_bookkeeping_write(action, a1, a2, a3, a4))
+        return SQLITE_DENY;
+    /* `_hull_*` objects: only for SQL the stdlib / Hull runs (the thread's
+     * flag, set by the bindings from the same stdlib-frame rule that waives
+     * the text check) or under the agent's read-only gate (developer
+     * tooling, which has always read them). App SQL reaching one through a
+     * stored view or trigger is refused (audit 39). */
+    if (!ud && !hl_cap_db_ns_trusted() && db_action_reserved(action, a1, a2) &&
+        !db_vacuum_target(a3))
         return SQLITE_DENY;
     static const char *const set_refused[] = {
         "hard_heap_limit", "soft_heap_limit", "cache_size", "cache_spill",
@@ -631,6 +708,48 @@ void hl_cap_db_sqlite_setup(void)
     (void)pthread_once(&g_sqlite_setup_once, db_sqlite_setup_once);
 }
 
+/* 0 when no view or trigger in @p db's schema names a `_hull_*` table (in
+ * its SQL text, its name, or - a trigger - the table it is ON); -1 (logged,
+ * the object named) otherwise or when the schema cannot be read. Read the way
+ * the text check reads app SQL, so a string literal holding `_hull_` counts
+ * too: an app view could not have been created with one either. */
+static int db_check_stored_objects(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT type, name, tbl_name, sql FROM main.sqlite_schema "
+            "WHERE type IN ('view', 'trigger')", -1, &st, NULL) != SQLITE_OK) {
+        hl_eprintf_line("hull: sqlite could not read the schema: %s",
+                        sqlite3_errmsg(db));
+        sqlite3_finalize(st);
+        return -1;
+    }
+    int rc = 0, step;
+    while ((step = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *type = (const char *)sqlite3_column_text(st, 0);
+        const char *name = (const char *)sqlite3_column_text(st, 1);
+        const char *tbl  = (const char *)sqlite3_column_text(st, 2);
+        const char *sql  = (const char *)sqlite3_column_text(st, 3);
+        if (hl_cap_db_name_reserved(name) || hl_cap_db_name_reserved(tbl) ||
+            (sql && hl_cap_db_check_namespace(sql) != 0)) {
+            hl_eprintf_line("hull: the database holds a %s '%.64s' that names "
+                            "a reserved _hull_* table (it would read or copy "
+                            "Hull's internal tables past its check); drop it "
+                            "with the sqlite3 CLI before opening the database "
+                            "with Hull", type ? type : "?", name ? name : "?");
+            rc = -1;
+            break;
+        }
+    }
+    if (rc == 0 && step != SQLITE_DONE) {
+        hl_eprintf_line("hull: sqlite could not read the schema: %s",
+                        sqlite3_errmsg(db));
+        rc = -1;
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
 int hl_cap_db_init(sqlite3 *db)
 {
     if (!db)
@@ -734,6 +853,16 @@ int hl_cap_db_init(sqlite3 *db)
     (void)sqlite3_exec(db, hl_cap_db_temp_on_disk() ? "PRAGMA temp_store=FILE"
                                                      : "PRAGMA temp_store=MEMORY",
                        NULL, NULL, NULL);
+
+    /* A view or trigger stored in the file that names a `_hull_*` table
+     * runs under whichever statement reaches it: a view read by app SQL (the
+     * authorizer refuses that too), or a trigger ON a `_hull_*` table firing
+     * inside a stdlib statement - which the authorizer allows - and copying
+     * the row (a session token) into a table the app reads. The stdlib
+     * creates neither and app SQL cannot (its text would name `_hull_`), so
+     * one was planted: refuse the open (audit 39). */
+    if (db_check_stored_objects(db) != 0)
+        return -1;
 
     /* REQUIRED, and last, so the pragmas above are not subject to it: a
      * connection that cannot refuse ATTACH / VACUUM INTO would let SQL write

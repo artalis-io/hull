@@ -309,6 +309,25 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
     idx_t rows = duckdb_row_count(&r);
     for (idx_t i = 0; i < rows && rc == 0; i++) {
         char *def = duckdb_value_varchar(&r, 2, i);
+        /* A macro whose body names a `_hull_*` table hands its rows to any
+         * app SQL that calls it - `SELECT * FROM m()` names no `_hull_`
+         * (audit 39). The stdlib creates no macro, so one is planted. */
+        if (def && hl_cap_db_check_namespace(def) != 0) {
+            char *schema = duckdb_value_varchar(&r, 0, i);
+            char *name = duckdb_value_varchar(&r, 1, i);
+            snprintf(s->errmsg, sizeof s->errmsg,
+                     "duckdb: the database holds macro %.64s.%.64s, whose "
+                     "body names a reserved _hull_* table (app SQL calling "
+                     "it would read Hull's internal tables past its check); "
+                     "drop it with the DuckDB CLI before opening the "
+                     "database with Hull",
+                     schema ? schema : "?", name ? name : "?");
+            duckdb_free(schema);
+            duckdb_free(name);
+            duckdb_free(def);
+            rc = -1;
+            break;
+        }
         if (!def || hl_cap_db_sql_calls_dynamic_sql(def) ||
             hl_cap_db_sql_reads_whole_database(def) ||
             hl_cap_db_sql_switches_catalog(def) ||
@@ -351,6 +370,39 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
     rows = duckdb_row_count(&r);
     for (idx_t i = 0; i < rows && rc == 0; i++) {
         char *def = duckdb_value_varchar(&r, 3, i);
+        /* A view naming a `_hull_*` table hands its rows to app SQL that
+         * reads the view (`SELECT tok FROM v` names no `_hull_`; audit 39);
+         * a DEFAULT of an app table naming one (a `_hull_*` sequence) is not
+         * Hull's either. The stdlib's own tables carry `nextval('_hull_..')`
+         * defaults, so those are left alone. The stdlib creates no view. */
+        int reserved = def && hl_cap_db_check_namespace(def) != 0;
+        if (reserved) {
+            char *kind = duckdb_value_varchar(&r, 0, i);
+            char *tbl = duckdb_value_varchar(&r, 2, i);
+            if (kind && strcmp(kind, "view") != 0 && hl_cap_db_name_reserved(tbl))
+                reserved = 0;   /* a stdlib table's own DEFAULT */
+            duckdb_free(kind);
+            duckdb_free(tbl);
+        }
+        if (reserved) {
+            char *kind = duckdb_value_varchar(&r, 0, i);
+            char *schema = duckdb_value_varchar(&r, 1, i);
+            char *name = duckdb_value_varchar(&r, 2, i);
+            snprintf(s->errmsg, sizeof s->errmsg,
+                     "duckdb: the database holds a %.20s %.64s.%.64s that "
+                     "names a reserved _hull_* table (app SQL reaching it "
+                     "would read Hull's internal tables past its check); "
+                     "drop it with the DuckDB CLI before opening the "
+                     "database with Hull",
+                     kind ? kind : "?", schema ? schema : "?",
+                     name ? name : "?");
+            duckdb_free(kind);
+            duckdb_free(schema);
+            duckdb_free(name);
+            duckdb_free(def);
+            rc = -1;
+            break;
+        }
         if (!def || hl_cap_db_sql_names_table_by_value(def)) {
             char *kind = duckdb_value_varchar(&r, 0, i);
             char *schema = duckdb_value_varchar(&r, 1, i);

@@ -96,6 +96,22 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
     return 0;
 }
 
+/* The open-time stored-object check namespace-checks macro / view bodies
+ * (audit 39). */
+int hl_cap_db_check_namespace(const char *sql);
+int hl_cap_db_check_namespace(const char *sql)
+{
+    (void)sql;
+    return 0;
+}
+
+int hl_cap_db_name_reserved(const char *name);
+int hl_cap_db_name_reserved(const char *name)
+{
+    (void)name;
+    return 0;
+}
+
 int main(void)
 {
     void *ctx = NULL;
