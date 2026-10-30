@@ -1646,7 +1646,7 @@ says so with a stable code (audit 35) - test the code, never the message text:
 | Code | Raised when | Meaning |
 |---|---|---|
 | `wait_refused` | a wait is attempted with a transaction open on a connection, in middleware (JS), while `req.multipart()` is parked (JS), outside a handler / task / `app.main` (Lua), or while the runtime shuts down (Lua) | the call is in the wrong place: a bug in the caller |
-| `busy` | an admission cap of this VM is full: 64 `http.fetch` / `http.async.*` requests in flight (`HL_HTTP_MAX_INFLIGHT`), the VM's off-heap copy total (a `db.async` / `worker.dispatch` / `smtp.send` / `http.fetch` / `compute.async` / `compute.stream` / `gpu.*` copy that would pass its heap limit), 64 live `ws.connect` clients, 256 open blob readers / writers | local and transient: nothing was sent, a later call may be admitted |
+| `busy` | an admission cap of this VM is full: 64 `http.fetch` / `http.async.*` requests in flight (`HL_HTTP_MAX_INFLIGHT`), the SMTP admission cap (`max(1, floor(W/2))` sends in flight), the VM's off-heap copy total (a `db.async` / `worker.dispatch` / `smtp.send` / `http.fetch` / `compute.async` / `compute.stream` / `gpu.*` copy that would pass its heap limit), 64 live `ws.connect` clients, 256 open blob readers / writers | local and transient: nothing was sent, a later call may be admitted |
 
 - **JS:** the thrown `Error` has an own `code` property: `e.code === "busy"`.
 - **Lua:** the error string starts with `"[hull:<code>] "` (no `chunk:line:`
@@ -1676,10 +1676,11 @@ worker thread while the request coroutine/Promise suspends, so a slow peer never
 blocks the loop. Full design: [docs/smtp_keel_slice2c_plan.md](smtp_keel_slice2c_plan.md).
 
 - **Lua:** `local r = smtp.send(msg)` yields transparently and resumes with the
-  `{ ok, error }` table. **JS:** `const r = await smtp.send(msg)` - it ALWAYS returns
+  `{ ok, error }` table. **JS:** `const r = await smtp.send(msg)` - it returns
   a `Promise` resolving to `{ ok, error }` (including immediately-resolved
-  validation/admission failures); it rejects only on a programming error (bad
-  argument type), never on an SMTP failure. There is no `smtp.async.send`; `send`
+  validation failures); it throws only on a programming error (bad argument
+  type) or a runtime refusal (`busy` / `wait_refused`, below), never on an SMTP
+  failure. There is no `smtp.async.send`; `send`
   IS the async entry. The stdlib `hull/email` provider `await`s it (see
   `stdlib/js/hull/email.js`).
 - **No active loop** (`app.main` CLI, in-process test harness): the same call runs
@@ -1688,9 +1689,13 @@ blocks the loop. Full design: [docs/smtp_keel_slice2c_plan.md](smtp_keel_slice2c
   falls back to synchronous execution from an active loop.
 - **Admission cap.** Concurrent SMTP worker jobs are capped at `max(1, floor(W/2))`
   for a pool of `W` workers (`--workers`), always leaving >= 1 worker for db /
-  compute. When the cap is reached, `send` resolves promptly (never runs on the loop
-  thread) with `{ ok = false, error = "connect_failed" }` and audits
-  `schedule:cap_reached`.
+  compute. When the cap is reached, `send` is refused promptly (never runs on the
+  loop thread): it RAISES (Lua) / THROWS (JS) the `busy` runtime refusal (see
+  "Runtime refusal codes") and audits `schedule:cap_reached`. Nothing was sent; a
+  later call may be admitted. (Before audit 36 it returned
+  `{ ok = false, error = "connect_failed" }`, indistinguishable from a peer that
+  could not be reached - an app that checked only the result now gets an error
+  and should catch it: Lua `pcall`, JS `try` / `catch`, then test the code.)
 - **Terminal audit tags** (with `--audit`): a post-resolution operation-deadline
   expiry keeps the public `connect_failed` token but audits
   `terminal:post_resolution_deadline`; a shutdown-swept in-flight op audits

@@ -181,10 +181,20 @@ release-artifact layout).
   `randombytes` at all (HULL PATCH), and Hull no longer defines it. The random source
   itself takes no descriptor where the host has one: `arc4random_buf` on macOS and the
   BSDs, `getrandom` on Linux and on a cosmo APE (every host); `/dev/urandom` is the last
-  resort, opened once and kept. Also: `smtp.send` refused by the admission cap now raises
-  / throws the `busy` refusal (it read as a `connect_failed` delivery; JS `hull/email`
-  re-throws refusals with their code), and a Lua SSH stream read / write refused because
+  resort, opened once and kept. Also: a Lua SSH stream read / write refused because
   another coroutine waits on it returns `"busy"` as its third value.
+
+- **Behaviour change: `smtp.send` refused by the SMTP admission cap now RAISES / THROWS
+  the `busy` runtime refusal** (audit 36) instead of returning
+  `{ ok = false, error = "connect_failed" }`. The old result was indistinguishable from a
+  peer that could not be reached, although nothing was sent and a later call may be
+  admitted - every other admission cap already refuses this way. **Apps that checked only
+  the returned result now get an exception at the cap**: catch it (Lua `pcall`, the message
+  starts with `"[hull:busy] "`; JS `try` / `catch`, `e.code === "busy"`) and retry or
+  answer 503. `hull/email`'s `smtp` provider passes the refusal through with its code in
+  both runtimes (JS re-throws it rather than wrapping it as `delivery_failed`). The
+  `schedule:cap_reached` audit record is unchanged. `tests/e2e_smtp.sh` asserts the
+  refusal code (cap-zero, true saturation, and under `db.async` load), still immediate.
 
 - **`ws.connect` clients were uncounted, each holding up to 20 MiB off the heap** (audit 32).
   Every Keel client connection keeps an outbound drain (up to 4 MiB) and a message reassembly
