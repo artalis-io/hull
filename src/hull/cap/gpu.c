@@ -699,6 +699,207 @@ int hl_gpu_wgsl_layout(const char *wgsl, size_t len, HlGpuPipeline *out)
     return 0;
 }
 
+/* ── Shader expression depth (audit 36) ────────────────────────────
+ *
+ * naga parses a chain of left-associative operators or accessors into a
+ * tree as deep as the chain and walks it recursively (validation, constant
+ * evaluation, the backend writers); its parser has a recursion limit,
+ * those passes do not. A few thousand `+ y` in one expression overflowed
+ * the event loop's stack and killed the process. So the depth a shader can
+ * reach is bounded before the backend sees it.
+ *
+ * The estimate is an upper bound on the tree's depth, read token by token
+ * (comments skipped, identifiers and numeric literals as single operands),
+ * per statement (`;`, `{`, `}` end one). Each bracket level is a frame:
+ * its binary operators (each may be one level of the tree), plus the
+ * longest run of unary / postfix operators applied to one operand (`-`,
+ * `!`, `.x`, `[i]`), plus the deepest bracketed sub-expression closed in
+ * it (+1). A comma separates sibling arguments, so it starts a new count
+ * and the frame keeps the largest. A long flat list - a constant array of
+ * thousands of `-1.0` elements - stays shallow, while nesting
+ * (`((a + a ...) + a ...) + a ...`) adds up. */
+
+typedef struct {
+    size_t bin;        /* binary operators in the current argument */
+    size_t run;        /* unary / postfix operators on the current operand */
+    size_t run_max;
+    size_t child;      /* deepest closed sub-expression, +1 */
+    size_t arg_max;    /* deepest earlier argument */
+} WlFrame;
+
+static size_t wl_frame_depth(const WlFrame *f)
+{
+    size_t cur = f->bin + f->run_max + f->child;
+    return cur > f->arg_max ? cur : f->arg_max;
+}
+
+static void wl_frame_run(WlFrame *f)
+{
+    f->run++;
+    if (f->run > f->run_max) f->run_max = f->run;
+}
+
+/* The operator at s[i]: its length (0 when s[i] starts none), and whether
+ * it can be binary (*bin). */
+static size_t wl_operator(const char *s, size_t n, size_t i, int *bin)
+{
+    static const char *const two[] = {
+        "&&", "||", "==", "!=", "<=", ">=", "<<", ">>", "->",
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+    };
+    if (i + 3 <= n && (memcmp(s + i, "<<=", 3) == 0 ||
+                       memcmp(s + i, ">>=", 3) == 0)) {
+        *bin = 1;
+        return 3;
+    }
+    if (i + 2 <= n && (memcmp(s + i, "++", 2) == 0 ||
+                       memcmp(s + i, "--", 2) == 0)) {
+        *bin = 0;
+        return 2;
+    }
+    for (size_t k = 0; k < sizeof(two) / sizeof(two[0]); k++) {
+        if (i + 2 <= n && memcmp(s + i, two[k], 2) == 0) {
+            *bin = 1;
+            return 2;
+        }
+    }
+    switch (s[i]) {
+    case '!': case '~':
+        *bin = 0;
+        return 1;
+    case '-': case '&': case '*':           /* binary, or a prefix */
+    case '+': case '/': case '%': case '|': case '^':
+    case '<': case '>': case '=':
+        *bin = 1;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+size_t hl_gpu_wgsl_complexity(const char *wgsl, size_t len)
+{
+    if (!wgsl) return 0;
+    enum { WL_FRAMES = HL_GPU_WGSL_EXPR_DEPTH_MAX + 2 };
+    WlFrame fr[WL_FRAMES];
+    const char *s = wgsl;
+    size_t n = len, i = 0, top = 0, peak = 0;
+    int operand = 0;    /* the last token ended an operand */
+    memset(&fr[0], 0, sizeof(fr[0]));
+
+    /* Note depth d; past the limit the answer is known, stop reading. */
+#define WL_NOTE(d) do {                                                   \
+        size_t d_ = (d);                                                  \
+        if (d_ > peak) peak = d_;                                         \
+        if (peak > HL_GPU_WGSL_EXPR_DEPTH_MAX) return peak;               \
+    } while (0)
+    /* Close the innermost frame into its parent. */
+#define WL_POP() do {                                                     \
+        size_t c_ = wl_frame_depth(&fr[top]) + 1;                         \
+        top--;                                                            \
+        if (c_ > fr[top].child) fr[top].child = c_;                       \
+        WL_NOTE(wl_frame_depth(&fr[top]));                                \
+    } while (0)
+
+    for (;;) {
+        i = wl_skip_ws(s, n, i);
+        if (i >= n) break;
+        char c = s[i];
+        WlFrame *f = &fr[top];
+
+        if (wl_ident_start(c)) {
+            while (i < n && wl_ident_char(s[i])) i++;
+            operand = 1;
+            continue;
+        }
+        if ((c >= '0' && c <= '9') ||
+            (c == '.' && i + 1 < n && s[i + 1] >= '0' && s[i + 1] <= '9')) {
+            int hex = c == '0' && i + 1 < n &&
+                      (s[i + 1] == 'x' || s[i + 1] == 'X');
+            if (hex) i += 2;
+            while (i < n) {
+                char d = s[i];
+                if ((!hex && (d == 'e' || d == 'E')) ||
+                    (hex && (d == 'p' || d == 'P'))) {
+                    i++;
+                    if (i < n && (s[i] == '+' || s[i] == '-')) i++;
+                } else if (wl_ident_char(d) || d == '.') {
+                    i++;
+                } else {
+                    break;
+                }
+            }
+            operand = 1;
+            continue;
+        }
+
+        switch (c) {
+        case ';': case '{': case '}':
+            /* A statement ends: close what it left open, start over. */
+            while (top > 0) WL_POP();
+            WL_NOTE(wl_frame_depth(&fr[0]));
+            memset(&fr[0], 0, sizeof(fr[0]));
+            operand = 0;
+            i++;
+            continue;
+        case '(': case '[':
+            if (c == '[' && operand) {          /* an index accessor */
+                wl_frame_run(f);
+                WL_NOTE(wl_frame_depth(f));
+            }
+            if (top + 1 >= WL_FRAMES) return top + 1;
+            top++;
+            memset(&fr[top], 0, sizeof(fr[top]));
+            operand = 0;
+            i++;
+            continue;
+        case ')': case ']':
+            if (top > 0) WL_POP();
+            operand = 1;
+            i++;
+            continue;
+        case ',':
+            f->arg_max = wl_frame_depth(f);
+            f->bin = f->run = f->run_max = f->child = 0;
+            operand = 0;
+            i++;
+            continue;
+        case '.':                               /* member / swizzle */
+            wl_frame_run(f);
+            WL_NOTE(wl_frame_depth(f));
+            operand = 0;
+            i++;
+            continue;
+        default:
+            break;
+        }
+
+        int bin = 0;
+        size_t olen = wl_operator(s, n, i, &bin);
+        if (olen == 0) {                        /* '@', ':', ... */
+            operand = 0;
+            i++;
+            continue;
+        }
+        if (bin && operand) {
+            f->bin++;
+            f->run = 0;
+        } else {
+            /* A prefix operator, a postfix ++ / --, or a binary one with
+             * no left operand: one more level on this operand. */
+            wl_frame_run(f);
+        }
+        operand = 0;
+        WL_NOTE(wl_frame_depth(f));
+        i += olen;
+    }
+    while (top > 0) WL_POP();
+    WL_NOTE(wl_frame_depth(&fr[0]));
+#undef WL_POP
+#undef WL_NOTE
+    return peak;
+}
+
 static const HlGpuBindingDecl *wl_find_decl(const HlGpuPipeline *p,
                                             int binding)
 {
@@ -804,6 +1005,20 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
     hl_assert_on_event_loop("hl_cap_gpu_compile (gpu.compile/load)");
     if (!ctx || !name || !wgsl)
         return HL_GPU_ERR_INTERNAL;
+    /* A source naga would recurse over until the stack overflows is refused
+     * before any wgpu call (audit 36). Both checks are linear scans, bounded
+     * by the size cap. */
+    if (wgsl_len > HL_GPU_WGSL_MAX_BYTES) {
+        log_warn("[hull:gpu] shader '%s' refused: %zu bytes of WGSL "
+                 "(at most %zu)", name, wgsl_len,
+                 (size_t)HL_GPU_WGSL_MAX_BYTES);
+        return HL_GPU_ERR_SHADER;
+    }
+    if (hl_gpu_wgsl_complexity(wgsl, wgsl_len) > HL_GPU_WGSL_EXPR_DEPTH_MAX) {
+        log_warn("[hull:gpu] shader '%s' refused: an expression nests deeper "
+                 "than %d operators", name, HL_GPU_WGSL_EXPR_DEPTH_MAX);
+        return HL_GPU_ERR_SHADER;
+    }
     /* A name must fit its slot: stored truncated but looked up in full,
      * it never matched, and each call took a new slot until the device's
      * table was full. */

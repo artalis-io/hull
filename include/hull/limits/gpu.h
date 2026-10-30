@@ -59,4 +59,25 @@
 #define HL_GPU_MAX_QUEUED_WRITE_BYTES ((size_t)64 << 20)   /* 64 MiB */
 #endif
 
+/* The largest WGSL source gpu.compile takes or gpu.load reads (audit 36).
+ * Real compute shaders are a few KiB; the largest shipped is under 4 KiB. */
+#ifndef HL_GPU_WGSL_MAX_BYTES
+#define HL_GPU_WGSL_MAX_BYTES    ((size_t)1 << 20)   /* 1 MiB */
+#endif
+
+/* The deepest expression a shader may build, as hl_gpu_wgsl_complexity
+ * estimates it: the operators and accessors chained in one operand (a
+ * comma-separated argument restarts the count) plus the brackets open
+ * around it, within one statement (audit 36). naga (wgpu-native's WGSL
+ * compiler) parses a left-associative chain - `a + a + ...`, `v.wzyx.wzyx...`,
+ * `x == 1u && x == 1u && ...` - into a tree as deep as the chain and walks
+ * it recursively in validation and the backend writers; on the event
+ * loop's 8 MiB stack the process died (SIGSEGV) at ~9000 chained `+`,
+ * ~10000 swizzles, ~5000 `&&` terms. Hand-written and generated shaders put
+ * tens, rarely low hundreds, of operators in one operand: 1000 is far above
+ * them and ~8x below the crash. */
+#ifndef HL_GPU_WGSL_EXPR_DEPTH_MAX
+#define HL_GPU_WGSL_EXPR_DEPTH_MAX 1000
+#endif
+
 #endif /* HL_LIMITS_GPU_H */

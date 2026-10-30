@@ -230,6 +230,15 @@ typedef struct HlGpuPipeline {
  * known, -1 when it is not (out->layout_known = 0). Never fails a compile. */
 int hl_gpu_wgsl_layout(const char *wgsl, size_t len, HlGpuPipeline *out);
 
+/* The deepest expression @p wgsl builds, estimated without parsing
+ * (comments and numeric literals skipped): per statement, the operators
+ * and accessors chained in one operand plus the brackets open around it.
+ * hl_cap_gpu_compile refuses a source past HL_GPU_WGSL_EXPR_DEPTH_MAX, or
+ * larger than HL_GPU_WGSL_MAX_BYTES, before the backend sees it: naga
+ * recurses over such a tree until the stack overflows (audit 36). Returns
+ * 0 for NULL. */
+size_t hl_gpu_wgsl_complexity(const char *wgsl, size_t len);
+
 /* Persistent named buffer */
 typedef struct HlGpuBuffer {
     char    name[HL_GPU_NAME_MAX];

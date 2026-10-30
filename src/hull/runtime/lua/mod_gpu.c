@@ -277,6 +277,7 @@ static int l_gpu_load(lua_State *L)
     const char *wgsl = NULL;
     size_t wgsl_len = 0;
     char *file_buf = NULL;
+    int too_large = 0;
 
     if (entry && entry->data) {
         wgsl = (const char *)entry->data;
@@ -303,7 +304,10 @@ static int l_gpu_load(lua_State *L)
                 flen = ftell(f);
                 if (fseek(f, 0, SEEK_SET) != 0) flen = -1;
             }
-            if (flen > 0 && flen < 10 * 1024 * 1024) {
+            /* At most HL_GPU_WGSL_MAX_BYTES, as gpu.compile (audit 36). */
+            if (flen > 0 && (unsigned long)flen > HL_GPU_WGSL_MAX_BYTES)
+                too_large = 1;
+            if (flen > 0 && (unsigned long)flen <= HL_GPU_WGSL_MAX_BYTES) {
                 file_buf = malloc((size_t)flen + 1);
                 if (file_buf && fread(file_buf, 1, (size_t)flen, f) == (size_t)flen) {
                     file_buf[flen] = '\0';
@@ -323,6 +327,15 @@ static int l_gpu_load(lua_State *L)
         }
     }
 
+    if (wgsl && wgsl_len > HL_GPU_WGSL_MAX_BYTES)
+        too_large = 1;     /* an embedded one */
+    if (too_large) {
+        free(file_buf);
+        lua_pushnil(L);
+        lua_pushfstring(L, "shader '%s' is too large (at most %d bytes)",
+                        name, (int)HL_GPU_WGSL_MAX_BYTES);
+        return 2;
+    }
     if (!wgsl) {
         free(file_buf);
         lua_pushnil(L);
@@ -363,6 +376,12 @@ static int l_gpu_compile(lua_State *L)
             device = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+
+    /* Capped as gpu.load's read is (audit 36): naga's passes recurse over
+     * the source's expressions, and nothing real comes near 1 MiB. */
+    if (wgsl_len > HL_GPU_WGSL_MAX_BYTES)
+        return luaL_error(L, "gpu.compile: WGSL source too large "
+                          "(at most %d bytes)", (int)HL_GPU_WGSL_MAX_BYTES);
 
     /* The compile runs on the event loop in this one call: charged before
      * it, 1 unit per 8 WGSL bytes (audit 24). */
