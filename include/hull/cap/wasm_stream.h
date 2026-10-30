@@ -16,6 +16,7 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/utils/buffer.h"
+#include "hull/cap/fs_resolve.h"   /* HlFsChargeFn */
 #include <stddef.h>
 
 /* Forward declarations */
@@ -73,6 +74,11 @@ typedef struct {
     HlWasmCallOpts  call_opts;   /* per-chunk gas, heap, stack */
     HlStreamBeforeChunkFn before_chunk;   /* NULL = none */
     void           *before_chunk_ud;
+    /* Charge scope for opening a file input / output (cap/fs_resolve.h): the
+     * resolution of a deep or mkdir-p output path is charged as fs.write's is
+     * (audit 38). NULL = none; a trip fails the stream "budget_exhausted". */
+    HlFsChargeFn    fs_charge;
+    void           *fs_charge_ud;
     size_t          max_output;  /* buffer-mode output cap (bytes); 0 = none.
                                   * Past it the stream fails "output_too_large". */
 } HlStreamOpts;

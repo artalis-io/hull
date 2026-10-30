@@ -301,12 +301,22 @@ static int extract_write(const HlTarEntry *e, void *vctx)
 {
     struct extract_ctx *c = (struct extract_ctx *)vctx;
     /* Each entry is charged before it is written, as fs.write is: one unit
-     * per 8 bytes plus one for the entry. The archive may be a MappedBuffer
-     * of up to 1 GiB, so the heap does not bound it either (audit 16).
-     * lua_hlwork raises at once when the run is over, with nothing more
-     * written; hl_tar_parse holds no allocation to leak. */
-    lua_hlwork(c->L, (size_t)hl_work_bytes_units((uint64_t)e->size) + 1, 0);
-    if (e->is_dir) return 0;   /* fs.write creates parents; empty dirs dropped */
+     * per 8 bytes, plus fs.write's floor for the rename and stat work every
+     * file costs whatever its size, while the resolver charges the temp
+     * file's create and every directory walked or made (audit 38: 65,536
+     * empty entries ran 18 s in one call charged ~1.1M units). The archive
+     * may be a MappedBuffer of up to 1 GiB, so the heap does not bound it
+     * either (audit 16). A directory entry writes nothing (fs.write makes
+     * parents; empty directories are dropped) but is charged a stat's floor,
+     * so an archive of them is not free. lua_hlwork raises at once when the
+     * run is over, with nothing more written; hl_tar_parse holds no
+     * allocation to leak. */
+    if (e->is_dir) {
+        lua_hlwork(c->L, HL_WORK_FS_STAT_UNITS, 0);
+        return 0;
+    }
+    lua_hlwork(c->L, (size_t)(HL_WORK_FS_WRITE_UNITS +
+                              hl_work_bytes_units((uint64_t)e->size)), 0);
 
     /* Build "<dir>/<name>". Both halves are already traversal-checked (dir by
      * the fs cap on write, name by hl_tar_parse), but keep it bounded. */
@@ -318,8 +328,13 @@ static int extract_write(const HlTarEntry *e, void *vctx)
         pn = snprintf(path, sizeof(path), "%s", e->name);
     if (pn < 0 || (size_t)pn >= sizeof(path)) { c->err = "path too long"; return -1; }
 
+    /* No Lua API between the scope's begin and end: nothing can longjmp
+     * past it. The trip is raised once the scope is closed. */
+    HlFsChargeScope cs = hl_fs_charge_begin(hl_lua_fs_charge, c->L);
     int rc = hl_cap_fs_write_ex(c->fs, path, (const char *)(e->data ? e->data : (const unsigned char *)""),
                              e->size, HL_FS_WRITE_NO_SYNC, &c->err);
+    if (hl_fs_charge_end(cs) || hl_lua_budget_tripped(c->L))
+        hl_lua_budget_raise(c->L);   /* does not return */
     return rc == 0 ? 0 : -1;
 }
 
@@ -418,7 +433,13 @@ static int l_tar_pack(lua_State *L)
         if (!path) { lua_pop(L, pushed); err = "tar.pack: entry needs a path"; break; }
         hl_lua_anchor(L, 2, pushed == 3 ? -2 : -1);   /* the path string */
 
+        /* Both reads of each entry resolve its path and are charged for it
+         * by the resolver, as fs.read's are (audit 38): a pack of the same
+         * deep path 65,536 times was charged its bytes only. */
+        HlFsChargeScope cs = hl_fs_charge_begin(hl_lua_fs_charge, L);
         int64_t size = hl_cap_fs_read(lua->base.fs_cfg, path, NULL, 0, &err);
+        if (hl_fs_charge_end(cs) || hl_lua_budget_tripped(L))
+            return hl_lua_budget_raise(L);   /* everything read is anchored */
         if (size < 0) { lua_pop(L, pushed); break; }
         /* A running total of the archive, against the heap limit, before
          * this file is read; the read is charged before it runs (audit 15):
@@ -437,7 +458,10 @@ static int l_tar_pack(lua_State *L)
         lua_pop(L, 1);
         int64_t got = 0;
         if (size > 0) {
+            cs = hl_fs_charge_begin(hl_lua_fs_charge, L);
             got = hl_cap_fs_read(lua->base.fs_cfg, path, buf, (size_t)size, &err);
+            if (hl_fs_charge_end(cs) || hl_lua_budget_tripped(L))
+                return hl_lua_budget_raise(L);
             if (got < 0) { lua_pop(L, pushed); break; }
         }
         HlTarEntry *e = &ents[i - 1];

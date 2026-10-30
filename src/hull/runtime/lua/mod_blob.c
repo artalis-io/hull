@@ -178,7 +178,7 @@ static void blob_charge(lua_State *L, size_t len)
  * every put does whatever its size (audit 37: an empty put was free). */
 static void blob_put_charge(lua_State *L, size_t len)
 {
-    lua_hlwork(L, (size_t)(HL_WORK_FS_WRITE_UNITS + hl_work_bytes_units(len)), 0);
+    lua_hlwork(L, (size_t)(HL_WORK_BLOB_WRITE_UNITS + hl_work_bytes_units(len)), 0);
 }
 
 /* Read `durable` from an optional opts table at `idx` (1 = true, 0 = false). */
@@ -318,7 +318,7 @@ static int lua_writer_finalize(lua_State *L)
     if (!ud->w) return luaL_error(L, "blob.writer: already finalized/aborted");
     /* The fsync and rename (audit 37); a refused finalize leaves the
      * writer to its __gc, which aborts it. */
-    lua_hlwork(L, HL_WORK_FS_WRITE_UNITS, 0);
+    lua_hlwork(L, HL_WORK_BLOB_WRITE_UNITS, 0);
     char id[HL_BLOB_ID_BUF_SIZE]; size_t size = 0;
     int rc = hl_cap_blob_writer_finalize(ud->w, id, &size);
     ud->w = NULL;          /* finalize always consumes the writer */

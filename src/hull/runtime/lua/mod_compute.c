@@ -1541,6 +1541,8 @@ static int lua_compute_stream(lua_State *L)
     wasm_clamp_opts(&stream_opts.call_opts, &lua->base);
     stream_opts.before_chunk = lua_stream_before_chunk;
     stream_opts.before_chunk_ud = L;
+    stream_opts.fs_charge = hl_lua_fs_charge;   /* opening a file input / output */
+    stream_opts.fs_charge_ud = L;
     /* The buffer-mode result becomes one Lua string on the VM heap: it may
      * not be larger than what is left of it. */
     if (lua->mem_limit)

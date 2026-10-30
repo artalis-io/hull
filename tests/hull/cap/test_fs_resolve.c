@@ -875,4 +875,145 @@ UTEST(fs_resolve, regular_leaf_fd_is_blocking)
     teardown();
 }
 
+/* ── Charge scope (audit 38) ───────────────────────────────────────────── *
+ * Every resolution reports its work to the thread's charge scope before each
+ * step's syscalls; a scope that says stop ends the walk with
+ * "budget_exhausted", sticky for the scope, creating nothing further. With no
+ * scope nothing is charged. */
+typedef struct { uint64_t used, limit; int calls; } A38Budget;
+
+static int a38_charge(void *ud, uint64_t units)
+{
+    A38Budget *b = (A38Budget *)ud;
+    b->calls++;
+    b->used += units;
+    return b->limit && b->used > b->limit;
+}
+
+UTEST(fs_resolve, charge_scope_counts_each_step)
+{
+    setup();
+    mkdirp_host("a"); mkdirp_host("a/b"); mkdirp_host("a/b/c");
+    wfile("a/b/c/f.txt", "x");
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+
+    /* No scope: nothing charged, the open works. */
+    int fd = hl_fs_open_at(root, "a/b/c/f.txt", HL_FS_OPEN_READ, 0, &err);
+    ASSERT_GE(fd, 0);
+    close(fd);
+
+    A38Budget shallow = { 0, 0, 0 }, deep = { 0, 0, 0 };
+    HlFsChargeScope prev = hl_fs_charge_begin(a38_charge, &shallow);
+    wfile("g.txt", "y");
+    fd = hl_fs_open_at(root, "g.txt", HL_FS_OPEN_READ, 0, &err);
+    EXPECT_EQ(hl_fs_charge_end(prev), 0);
+    ASSERT_GE(fd, 0);
+    close(fd);
+    prev = hl_fs_charge_begin(a38_charge, &deep);
+    fd = hl_fs_open_at(root, "a/b/c/f.txt", HL_FS_OPEN_READ, 0, &err);
+    EXPECT_EQ(hl_fs_charge_end(prev), 0);
+    ASSERT_GE(fd, 0);
+    close(fd);
+    /* Three directory steps more than the shallow open. */
+    EXPECT_GE(deep.used, shallow.used + 3 * 1024);
+    EXPECT_GT(shallow.used, 0u);
+
+    /* A missing leaf costs the lookup, not the leaf open. */
+    A38Budget miss = { 0, 0, 0 };
+    prev = hl_fs_charge_begin(a38_charge, &miss);
+    EXPECT_LT(hl_fs_open_at(root, "nope.txt", HL_FS_OPEN_READ, 0, &err), 0);
+    EXPECT_EQ(hl_fs_charge_end(prev), 0);
+    EXPECT_STREQ(err, "not_found");
+#if !defined(__linux__) || defined(__COSMOPOLITAN__)
+    EXPECT_LT(miss.used, shallow.used);   /* openat2 charges the leaf up front */
+#endif
+    close(root);
+    teardown();
+}
+
+UTEST(fs_resolve, charge_scope_stops_the_walk)
+{
+    setup();
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+
+    /* A 60-deep mkdir-p stopped by a budget of a few directories: it fails
+     * "budget_exhausted" and leaves only the directories it was charged for. */
+    char deep[256] = "";
+    for (int i = 0; i < 60; i++) strcat(deep, "d/");
+    strcat(deep, "f");
+    A38Budget b = { 0, 30000, 0 };
+    HlFsChargeScope prev = hl_fs_charge_begin(a38_charge, &b);
+    EXPECT_LT(hl_fs_open_at(root, deep, HL_FS_OPEN_WRITE, 0644, &err), 0);
+    EXPECT_STREQ(err, "budget_exhausted");
+    /* Sticky: a later resolution in the same scope fails without charging. */
+    int calls = b.calls;
+    wfile("g.txt", "y");
+    EXPECT_LT(hl_fs_open_at(root, "g.txt", HL_FS_OPEN_READ, 0, &err), 0);
+    EXPECT_STREQ(err, "budget_exhausted");
+    EXPECT_EQ(b.calls, calls);
+    /* Suspended (cleanup after a trip): works, then the trip is back. */
+    HlFsChargeScope off = hl_fs_charge_begin(NULL, NULL);
+    int fd = hl_fs_open_at(root, "g.txt", HL_FS_OPEN_READ, 0, &err);
+    EXPECT_GE(fd, 0);
+    if (fd >= 0) close(fd);
+    EXPECT_EQ(hl_fs_charge_end(off), 0);
+    EXPECT_EQ(hl_fs_charge(1), 1);
+    EXPECT_EQ(hl_fs_charge_end(prev), 1);
+    EXPECT_EQ(hl_fs_charge(1), 0);   /* no scope again */
+
+    int made = 0;
+    char p[512];
+    snprintf(p, sizeof p, "%s", base);
+    for (;;) {
+        strcat(p, "/d");
+        struct stat st;
+        if (stat(p, &st) != 0) break;
+        made++;
+    }
+    EXPECT_GE(made, 1);
+    EXPECT_LT(made, 10);
+    close(root);
+    teardown();
+}
+
+/* A chain of symlinks: each expansion is charged. */
+UTEST(fs_resolve, charge_scope_counts_symlinks)
+{
+    setup();
+    mkdirp_host("dir"); wfile("dir/f", "z");
+    symln("dir", "s1");
+    for (int i = 2; i <= 20; i++) {
+        char t[16], l[16];
+        snprintf(t, sizeof t, "s%d", i - 1);
+        snprintf(l, sizeof l, "s%d", i);
+        symln(t, l);
+    }
+    const char *err = NULL;
+    int root = hl_fs_open_base(base, &err);
+    ASSERT_GE(root, 0);
+    A38Budget one = { 0, 0, 0 }, chain = { 0, 0, 0 };
+    HlFsChargeScope prev = hl_fs_charge_begin(a38_charge, &one);
+    int fd = hl_fs_open_at(root, "s1/f", HL_FS_OPEN_READ, 0, &err);
+    (void)hl_fs_charge_end(prev);
+    ASSERT_GE(fd, 0);
+    close(fd);
+    prev = hl_fs_charge_begin(a38_charge, &chain);
+    fd = hl_fs_open_at(root, "s20/f", HL_FS_OPEN_READ, 0, &err);
+    (void)hl_fs_charge_end(prev);
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+    /* openat2 follows the chain inside the kernel: charged as the walk. */
+    (void)chain;
+#else
+    EXPECT_GE(chain.used, one.used + 19 * (64 + 64));
+#endif
+    ASSERT_GE(fd, 0);
+    close(fd);
+    close(root);
+    teardown();
+}
+
 UTEST_MAIN();

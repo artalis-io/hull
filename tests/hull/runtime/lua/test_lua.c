@@ -14369,4 +14369,181 @@ UTEST(lua_audit37, small_blob_calls_have_a_floor)
     a15_fs_close(&f);
 }
 
+/* ── Audit 38: path resolution, directory creation and tar entries ────
+ *
+ * The resolver did its work - a lookup and a directory open per component,
+ * a readlink per symlink, a mkdirat per missing directory - inside one
+ * binding call, uncharged: fs.read of an empty or missing file cost 0 units,
+ * a 26-deep path 26 directory opens a call, a 100-deep fs.write mkdir-p'd
+ * 100 directories under a flat floor, and tar.extract wrote every entry for
+ * 1 + size/8. The resolver charges each step to the binding's charge scope
+ * now (cap/fs_resolve.h, hull/shared/work_charge.h): a loop of any of them
+ * trips a small budget, uncatchable, and ordinary amounts of work still fit. */
+
+#define A38_DEEP "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z"
+
+/* A temp app root, fs.read + fs.write over all of it, with an empty file,
+ * a 26-deep directory holding `empty` and `one`, and a chain of 40
+ * symlinks s40 -> s39 -> ... -> s1 -> dir. */
+static int a38_fs_open(A15Fs *f)
+{
+    static const char *const all[] = { "." };
+    memset(f, 0, sizeof *f);
+    if (!hl_test_mkdtemp(f->dir, sizeof f->dir, "hull_a38")) return -1;
+    hl_alloc_init(&f->alloc, 0);
+    f->policy = HL_FS_POLICY_INIT;
+    char p[HL_TEST_PATH_MAX + 128], q[64];
+    snprintf(p, sizeof p, "%s/d", f->dir);
+    if (mkdir(p, 0755) != 0) return -1;
+    for (const char *c = A38_DEEP; *c; c += c[1] ? 2 : 1) {
+        size_t n = strlen(p);
+        snprintf(p + n, sizeof p - n, "/%c", *c);
+        if (mkdir(p, 0755) != 0) return -1;
+    }
+    static const char *const leaves[] = { "d/" A38_DEEP "/empty", "empty",
+                                          "dir/empty" };
+    snprintf(p, sizeof p, "%s/dir", f->dir);
+    if (mkdir(p, 0755) != 0) return -1;
+    for (size_t i = 0; i < sizeof leaves / sizeof leaves[0]; i++) {
+        snprintf(p, sizeof p, "%s/%s", f->dir, leaves[i]);
+        FILE *fp = fopen(p, "wb");
+        if (!fp) return -1;
+        fclose(fp);
+    }
+    snprintf(p, sizeof p, "%s/d/" A38_DEEP "/one", f->dir);
+    FILE *fp = fopen(p, "wb");
+    if (!fp || fputs("1", fp) < 0) { if (fp) fclose(fp); return -1; }
+    fclose(fp);
+    for (int i = 1; i <= 40; i++) {
+        snprintf(p, sizeof p, "%s/s%d", f->dir, i);
+        if (i == 1) snprintf(q, sizeof q, "dir");
+        else snprintf(q, sizeof q, "s%d", i - 1);
+        if (symlink(q, p) != 0) return -1;
+    }
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(f->dir, &f->alloc, all, 1, all, 1,
+                                      &f->policy, &perr) != 0)
+        return -1;
+    f->fs.base_dir = f->dir;
+    f->fs.base_len = strlen(f->dir);
+    f->fs.policy = &f->policy;
+    lua_rt.base.fs_cfg = &f->fs;
+    return 0;
+}
+
+UTEST(lua_audit38, path_resolution_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    char err[512];
+    /* Each loop did 0 units of fs work before (only the loop's own few
+     * instructions per iteration, far under the budget); each trips now,
+     * and pcall does not catch it. */
+    static const char *const loops[] = {
+        "for i = 1, 100000 do fs.read('empty') end return 1",
+        "for i = 1, 100000 do pcall(fs.read, 'missing') end return 1",
+        "for i = 1, 2000 do fs.read('d/" A38_DEEP "/empty') end return 1",
+        "for i = 1, 2000 do fs.stat('d/" A38_DEEP "/empty') end return 1",
+        "for i = 1, 2000 do fs.mmap('d/" A38_DEEP "/one'):close() end return 1",
+        "for i = 1, 2000 do fs.list('d/" A38_DEEP "') end return 1",
+        "for i = 1, 20000 do pcall(fs.read, 's40/empty') end return 1",
+        "for i = 1, 20000 do pcall(fs.stat, 's40/empty') end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 5000000, err, sizeof err), LUA_OK,
+                      loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    /* One of each still fits a small budget, and works. */
+    EXPECT_EQ(audit10_run(
+        "assert(fs.read('empty') == '') "
+        "assert(fs.read('d/" A38_DEEP "/one') == '1') "
+        "assert(fs.stat('d/" A38_DEEP "/empty').size == 0) "
+        "fs.mmap('d/" A38_DEEP "/one'):close() "
+        "assert(#fs.list('d/" A38_DEEP "') == 2) "
+        "assert(fs.read('s40/empty') == '') "
+        "assert(fs.read('missing') == nil) return 1",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit38, directory_creation_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    char err[512];
+    /* 100 directories made per call: before, a flat 32768 per call - 100
+     * calls (10,000 directories) fitted in 5M. */
+    EXPECT_NE(audit10_run(
+        "local deep = string.rep('a/', 100) "
+        "for i = 1, 100 do pcall(fs.write, 'w/' .. i .. '/' .. deep .. 'f', '') end "
+        "return 1", 5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* The trip stopped the walk part-way: far fewer than the 100 trees. */
+    EXPECT_EQ(audit10_run(
+        "local n = #fs.list('w') assert(n >= 1 and n < 20, n) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit38, tar_entries_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "tar = require('hull.archive.tar') "
+        "local es = {} for i = 1, 2000 do es[i] = { name = 'e' .. i, data = '' } end "
+        "TAR = tar.create(es) "
+        "PACK = {} for i = 1, 20000 do PACK[i] = { name = 'e' .. i, path = 'empty' } end "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 2000 empty files in ONE call: charged 1 unit each before (~2000). */
+    EXPECT_NE(audit10_run("pcall(tar.extract, TAR, 'x') return 1",
+                          5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* 20000 reads of one empty path in ONE call: charged its bytes (0). */
+    EXPECT_NE(audit10_run("pcall(tar.pack, PACK) return 1",
+                          5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* A small archive still extracts and packs in a small budget. */
+    EXPECT_EQ(audit10_run(
+        "local t = tar.create({ { name = 'a.txt', data = 'A' }, "
+        "  { name = 'sub/b.txt', data = 'B' } }) "
+        "assert(tar.extract(t, 'y')) "
+        "assert(fs.read('y/sub/b.txt') == 'B') "
+        "assert(#tar.pack({ 'y/a.txt', 'y/sub/b.txt' }) > 0) return 1",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+/* The re-tuned floors leave ordinary workloads their headroom: 500 small
+ * files written into a subdirectory and read back fit in 15M units (~16.7k
+ * a write there and ~4.5k a read; a 100M budget holds ~6000 such writes,
+ * ~6900 flat ones - it held ~3000 under audit 37's flat 32768). */
+UTEST(lua_audit38, ordinary_fs_work_keeps_its_headroom)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "for i = 1, 500 do assert(fs.write('site/p' .. i .. '.html', 'page ' .. i)) end "
+        "for i = 1, 500 do assert(fs.read('site/p' .. i .. '.html') == 'page ' .. i) end "
+        "assert(#fs.list('site') == 500) return 1",
+        15000000, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
 UTEST_MAIN();

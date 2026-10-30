@@ -37,6 +37,25 @@
  * absolute paths and `..` traversal are rejected at the cap layer.
  * ════════════════════════════════════════════════════════════════════ */
 
+/* The run's budget as the fs capability's charge function (@p ud is the
+ * lua_State): each directory entry fs.list reads (audit 37) and every step a
+ * path resolution takes (audit 38), charged as the cap does the work, never
+ * raising inside it (a longjmp there would leak held descriptors); the
+ * binding raises the trip after, once the cap has returned. */
+int hl_lua_fs_charge(void *ud, uint64_t units)
+{
+    return hl_lua_budget_charge((lua_State *)ud,
+                                units > INT64_MAX ? INT64_MAX : (int64_t)units);
+}
+
+/* One capability call under the run's charge scope; no Lua API in between,
+ * so nothing can longjmp past hl_fs_charge_end. */
+#define LUA_FS_CHARGED(L, tripped, call) do {                              \
+        HlFsChargeScope cs_ = hl_fs_charge_begin(hl_lua_fs_charge, (L));    \
+        call;                                                               \
+        (tripped) = hl_fs_charge_end(cs_) || hl_lua_budget_tripped(L);      \
+    } while (0)
+
 /* fs.read(path) - returns the whole file contents as a binary-safe
  * Lua string, or (nil, err). Two-pass: first call hl_cap_fs_read
  * with buf=NULL to learn the size, then allocate + read. */
@@ -50,8 +69,15 @@ static int lua_fs_read(lua_State *L)
     }
     const char *path = luaL_checkstring(L, 1);
 
+    /* Both reads resolve the path (policy select, the walk, the open) and
+     * are charged for it as they go (audit 38): an empty or missing file
+     * cost nothing, a deep one 26 directory opens a call, for 0 units. */
     const char *err_msg = NULL;
-    int64_t size = hl_cap_fs_read(lua->base.fs_cfg, path, NULL, 0, &err_msg);
+    int64_t size;
+    int tripped;
+    LUA_FS_CHARGED(L, tripped,
+        size = hl_cap_fs_read(lua->base.fs_cfg, path, NULL, 0, &err_msg));
+    if (tripped) return hl_lua_budget_raise(L);
     if (size < 0) {
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "read_failed");
@@ -77,8 +103,10 @@ static int lua_fs_read(lua_State *L)
      * heap limit covers it (a memory error raises; nothing leaks). */
     luaL_Buffer b;
     char *buf = luaL_buffinitsize(L, &b, (size_t)size);
-    int64_t got = hl_cap_fs_read(lua->base.fs_cfg, path,
-                                  buf, (size_t)size, &err_msg);
+    int64_t got;
+    LUA_FS_CHARGED(L, tripped,
+        got = hl_cap_fs_read(lua->base.fs_cfg, path, buf, (size_t)size, &err_msg));
+    if (tripped) return hl_lua_budget_raise(L);
     if (got < 0) {
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "read_failed");
@@ -104,12 +132,17 @@ static int lua_fs_write(lua_State *L)
     /* Charged BEFORE the write (audit 10): one call writes up to the whole
      * heap and counted as one instruction. One unit per 8 bytes, as blob.put;
      * lua_hlwork raises at once when the run is over, with nothing written.
-     * Plus a floor for the temp file, fsync and rename every write does
-     * whatever its size (audit 37: an empty write was free). */
+     * Plus a floor for the fsyncs and rename every write does whatever its
+     * size (audit 37: an empty write was free); the resolutions - the temp
+     * file's create, every directory walked or made - are charged by the
+     * resolver as it goes (audit 38). */
     lua_hlwork(L, (size_t)(HL_WORK_FS_WRITE_UNITS + hl_work_bytes_units(len)), 0);
 
     const char *err_msg = NULL;
-    int rc = hl_cap_fs_write(lua->base.fs_cfg, path, bytes, len, &err_msg);
+    int rc, tripped;
+    LUA_FS_CHARGED(L, tripped,
+        rc = hl_cap_fs_write(lua->base.fs_cfg, path, bytes, len, &err_msg));
+    if (tripped) return hl_lua_budget_raise(L);
     if (rc != 0) {
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "write_failed");
@@ -147,7 +180,8 @@ static int lua_fs_mmap(lua_State *L)
         if (off < 0 || length <= 0)
             return luaL_error(L, "fs.mmap: offset must be >= 0 and length > 0");
     }
-    /* The open, map and guard registration, whatever the size (audit 37). */
+    /* The map and guard registration, whatever the size (audit 37); the
+     * open's resolution is charged by the resolver (audit 38). */
     lua_hlwork(L, HL_WORK_FS_MMAP_UNITS, 0);
     /* Every mapping takes one of the SIGBUS guard's slots until its buffer is
      * freed, and a full table refuses the mapping (audit 20). A buffer the
@@ -156,12 +190,18 @@ static int lua_fs_mmap(lua_State *L)
      * process: collect once and retry (audit 21). */
     for (int attempt = 0; ; attempt++) {
         err_msg = NULL;
-        buf = window
-            ? hl_cap_fs_mmap_window(lua->base.fs_cfg, path,
-                                    (uint64_t)off, (uint64_t)length,
-                                    lua->base.alloc, &err_msg)
-            : hl_cap_fs_mmap(lua->base.fs_cfg, path,
-                             lua->base.alloc, &err_msg);
+        int tripped;
+        LUA_FS_CHARGED(L, tripped,
+            buf = window
+                ? hl_cap_fs_mmap_window(lua->base.fs_cfg, path,
+                                        (uint64_t)off, (uint64_t)length,
+                                        lua->base.alloc, &err_msg)
+                : hl_cap_fs_mmap(lua->base.fs_cfg, path,
+                                 lua->base.alloc, &err_msg));
+        if (tripped) {
+            if (buf) hl_cap_fs_munmap(buf);
+            return hl_lua_budget_raise(L);
+        }
         if (buf || attempt > 0 || !err_msg ||
             strcmp(err_msg, "too_many_mappings") != 0)
             break;
@@ -206,12 +246,16 @@ static int lua_fs_stat(lua_State *L)
         return 2;
     }
     const char *path = luaL_checkstring(L, 1);
-    /* A resolve per path component and an fstatat (audit 37). */
-    lua_hlwork(L, (size_t)hl_work_fs_stat_units(path), 0);
+    /* The policy select and the fstatat (audit 37); the walk to the parent
+     * directory is charged by the resolver, step by step (audit 38). */
+    lua_hlwork(L, HL_WORK_FS_STAT_UNITS, 0);
 
     const char *err = NULL;
     HlFsStatInfo info;
-    int rc = hl_cap_fs_stat(lua->base.fs_cfg, path, &info, &err);
+    int rc, tripped;
+    LUA_FS_CHARGED(L, tripped,
+        rc = hl_cap_fs_stat(lua->base.fs_cfg, path, &info, &err));
+    if (tripped) return hl_lua_budget_raise(L);
     if (rc == 1) { lua_pushnil(L); return 1; }        /* absent (not an error) */
     if (rc != 0) {
         lua_pushnil(L);
@@ -259,15 +303,6 @@ static void lua_register_fs_list_guard(lua_State *L)
     lua_pop(L, 1);
 }
 
-/* Each directory entry fs.list reads, charged as it is read (audit 37),
- * never raising inside the cap's loop (a longjmp there would leak the open
- * directory and the names); the binding raises the trip after. */
-static int lua_fs_list_charge(void *ud, uint64_t units)
-{
-    return hl_lua_budget_charge((lua_State *)ud,
-                                units > INT64_MAX ? INT64_MAX : (int64_t)units);
-}
-
 static int lua_fs_list(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -291,7 +326,7 @@ static int lua_fs_list(lua_State *L)
     HlFsDirEntry *entries = NULL;
     size_t count = 0;
     int rc = hl_cap_fs_list_ex(lua->base.fs_cfg, path, &entries, &count,
-                               lua->base.alloc, lua_fs_list_charge, L, &err);
+                               lua->base.alloc, hl_lua_fs_charge, L, &err);
     if (rc != 0 && hl_lua_budget_tripped(L))
         return hl_lua_budget_raise(L);   /* the guard owns nothing yet */
     if (rc != 0) {

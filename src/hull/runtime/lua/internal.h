@@ -154,6 +154,9 @@ int  hl_lua_budget_raise(lua_State *L);
  * (compute.stream's chunks). Returns 1 once the run is tripped; the binding
  * cleans up and then calls hl_lua_budget_raise. 0 on a VM with no budget. */
 int  hl_lua_budget_charge(lua_State *L, int64_t units);
+/* hl_lua_budget_charge as an HlFsChargeFn (cap/fs_resolve.h), @p ud the
+ * lua_State: for the fs capability's charge scope (mod_fs.c, audit 38). */
+int  hl_lua_fs_charge(void *ud, uint64_t units);
 
 /* The stored manifest (registry "__hull_manifest") as JSON, encoded in C with
  * raw accessors - what the build signs and --verify-sig compares

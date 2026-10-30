@@ -473,11 +473,16 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
     HlFsParent par;
     if (hl_fs_resolve_parent(t.anchor_fd, t.residual, t.sym, &par, &e) != 0) {
         close(tfd);
+        /* The temp is removed even when the run's budget stopped the walk
+         * above (audit 38): the cleanup's resolution is not charged. */
+        HlFsChargeScope off = hl_fs_charge_begin(NULL, NULL);
         HlFsParent tp;
-        if (hl_fs_resolve_parent(t.anchor_fd, tmprel, t.sym, &tp, &e) == 0) {
+        const char *ce = NULL;
+        if (hl_fs_resolve_parent(t.anchor_fd, tmprel, t.sym, &tp, &ce) == 0) {
             fs_unlink_temp(tp.parent_fd, tmpname);
             close(tp.parent_fd);
         }
+        (void)hl_fs_charge_end(off);
         if (err_msg) *err_msg = e ? e : "open_failed";
         return FS_ATOMIC_FAILED;
     }
@@ -815,8 +820,13 @@ int hl_cap_fs_list_ex(const HlFsConfig *cfg, const char *path,
 
     {
         const char *e = NULL;
+        /* The directory's resolution is charged to @p charge too, step by
+         * step (audit 38): a deep path was 26 directory opens, uncharged. */
+        HlFsChargeScope cs = { NULL, NULL, 0 };
+        if (charge) cs = hl_fs_charge_begin(charge, charge_ud);
         int dfd = hl_fs_open_at_ex(sel.entry->anchor_fd, sel.residual, HL_FS_OPEN_DIR,
                                    sel.sympol, 0, &e);
+        if (charge) (void)hl_fs_charge_end(cs);
         if (dfd < 0) { if (err_msg) *err_msg = e ? e : "io_error"; goto audit; }
 
         list_root = hl_fs_is_reserved_root(dfd);
