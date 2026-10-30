@@ -210,6 +210,35 @@ release-artifact layout).
   app no longer has to declare `hull/json` for eval to work. Regression legs in
   `tests/e2e_agent.sh` and `tests/e2e_mcp.sh`.
 
+- **An app could kill the process through `crypto.ed25519_keypair()` when entropy failed**
+  (audit 36). TweetNaCl's `crypto_sign_keypair` drew its seed from `randombytes()`, whose
+  void contract cannot report a failure, so Hull's implementation aborted the process when
+  `hl_cap_crypto_random` failed. On a cosmo APE and on native builds other than Linux /
+  macOS that source opened `/dev/urandom` on every call, so an app that held every
+  descriptor through its own caps (blob writers, SSH streams, ws clients, `db.open`,
+  inbound connections) turned `crypto.ed25519_keypair()` / JS `crypto.ed25519Keypair()`
+  into a process kill. The keypair now draws a 32-byte seed through `hl_cap_crypto_random`
+  and derives the key from it (`hl_cap_crypto_ed25519_seed_keypair`, byte-identical to
+  `crypto_sign_keypair`, checked against the RFC 8032 vectors); a failure raises / throws
+  a catchable error with no key. The vendored TweetNaCl no longer references
+  `randombytes` at all (HULL PATCH), and Hull no longer defines it. The random source
+  itself takes no descriptor where the host has one: `arc4random_buf` on macOS and the
+  BSDs, `getrandom` on Linux and on a cosmo APE (every host); `/dev/urandom` is the last
+  resort, opened once and kept. Also: a Lua SSH stream read / write refused because
+  another coroutine waits on it returns `"busy"` as its third value.
+
+- **Behaviour change: `smtp.send` refused by the SMTP admission cap now RAISES / THROWS
+  the `busy` runtime refusal** (audit 36) instead of returning
+  `{ ok = false, error = "connect_failed" }`. The old result was indistinguishable from a
+  peer that could not be reached, although nothing was sent and a later call may be
+  admitted - every other admission cap already refuses this way. **Apps that checked only
+  the returned result now get an exception at the cap**: catch it (Lua `pcall`, the message
+  starts with `"[hull:busy] "`; JS `try` / `catch`, `e.code === "busy"`) and retry or
+  answer 503. `hull/email`'s `smtp` provider passes the refusal through with its code in
+  both runtimes (JS re-throws it rather than wrapping it as `delivery_failed`). The
+  `schedule:cap_reached` audit record is unchanged. `tests/e2e_smtp.sh` asserts the
+  refusal code (cap-zero, true saturation, and under `db.async` load), still immediate.
+
 - **`ws.connect` clients were uncounted, each holding up to 20 MiB off the heap** (audit 32).
   Every Keel client connection keeps an outbound drain (up to 4 MiB) and a message reassembly
   buffer (up to 16 MiB) on Keel's allocator until it is freed, and nothing limited how many a

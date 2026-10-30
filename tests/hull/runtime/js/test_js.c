@@ -36,6 +36,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include "hull/cap/env.h"
+#include "hull/cap/crypto.h"  /* hl_cap_crypto_random_fail_next_for_test (a36) */
 #include "quickjs.h"
 
 #include <keel/keel.h>
@@ -4646,6 +4647,30 @@ UTEST(js_cap, crypto_bytes_contract)
         "}\n"
         "globalThis.__bytes = run();\n";
     ASSERT_EQ(js_run_steps(code, "globalThis.__bytes"), 0);
+    cleanup_js_caps();
+}
+
+/* A failed random source makes crypto.ed25519Keypair() throw a catchable
+ * error; it used to abort() the process inside TweetNaCl's randombytes()
+ * (audit 36). The next call works. */
+UTEST(js_cap, crypto_ed25519_keypair_entropy_failure_throws)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "function run() {\n"
+        "  try { crypto.ed25519Keypair(); return 1; }\n"
+        "  catch (e) { if (!String(e).includes('keypair generation failed')) return 2; }\n"
+        "  const kp = crypto.ed25519Keypair();\n"
+        "  if (kp.publicKey.byteLength !== 32 || kp.secretKey.byteLength !== 64) return 3;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__kp = run();\n";
+    hl_cap_crypto_random_fail_next_for_test(1);
+    int r = js_run_steps(code, "globalThis.__kp");
+    hl_cap_crypto_random_fail_next_for_test(0);
+    ASSERT_EQ(r, 0);
     cleanup_js_caps();
 }
 

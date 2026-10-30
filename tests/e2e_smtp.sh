@@ -92,19 +92,32 @@ LONGSUBJ=$(python3 -c "print('S'*400)")
 cat > "$APPDIR/app.lua" <<LUA
 local smtp = require("hull.smtp")
 app.manifest({ modules = { "hull/smtp@1", "hull/http-server@1" }, hosts = { "127.0.0.1" } })
+-- The admission cap RAISES the busy refusal (audit 36); report its code.
+local function send(msg)
+    local ok, r = pcall(smtp.send, msg)
+    if ok then return r end
+    local code = tostring(r):match("^%[hull:([%w_]+)%] ")
+    if code then return { ok=false, refused=code } end
+    error(r, 0)
+end
 app.get("/",       function(req, res) res:json({ ready=true }) end)
-app.get("/send",   function(req, res) res:json(smtp.send({ host="127.0.0.1", port=$PORT_SMTP, from="a@x", to="b@y", subject="hi", body="hello" })) end)
-app.get("/long",   function(req, res) res:json(smtp.send({ host="127.0.0.1", port=$PORT_SMTP, from="a@x", to="b@y", subject="$LONGSUBJ", body="b" })) end)
-app.get("/denied", function(req, res) res:json(smtp.send({ host="evil.example.com", port=25, from="a@x", to="b@y", subject="s", body="b" })) end)
+app.get("/send",   function(req, res) res:json(send({ host="127.0.0.1", port=$PORT_SMTP, from="a@x", to="b@y", subject="hi", body="hello" })) end)
+app.get("/long",   function(req, res) res:json(send({ host="127.0.0.1", port=$PORT_SMTP, from="a@x", to="b@y", subject="$LONGSUBJ", body="b" })) end)
+app.get("/denied", function(req, res) res:json(send({ host="evil.example.com", port=25, from="a@x", to="b@y", subject="s", body="b" })) end)
 LUA
 cat > "$APPDIR/app.js" <<JS
 import { app } from "hull:app";
 import { smtp } from "hull:smtp";
 app.manifest({ modules: ["hull/smtp@1", "hull/http-server@1"], hosts: ["127.0.0.1"] });
+// The admission cap THROWS the busy refusal (audit 36); report its code.
+async function send(msg) {
+    try { return await smtp.send(msg); }
+    catch (e) { if (typeof e.code === "string") return { ok: false, refused: e.code }; throw e; }
+}
 app.get("/",       (req, res) => res.json({ ready: true }));
-app.get("/send",   async (req, res) => res.json(await smtp.send({ host:"127.0.0.1", port:$PORT_SMTP, from:"a@x", to:"b@y", subject:"hi", body:"hello" })));
-app.get("/long",   async (req, res) => res.json(await smtp.send({ host:"127.0.0.1", port:$PORT_SMTP, from:"a@x", to:"b@y", subject:"$LONGSUBJ", body:"b" })));
-app.get("/denied", async (req, res) => res.json(await smtp.send({ host:"evil.example.com", port:25, from:"a@x", to:"b@y", subject:"s", body:"b" })));
+app.get("/send",   async (req, res) => res.json(await send({ host:"127.0.0.1", port:$PORT_SMTP, from:"a@x", to:"b@y", subject:"hi", body:"hello" })));
+app.get("/long",   async (req, res) => res.json(await send({ host:"127.0.0.1", port:$PORT_SMTP, from:"a@x", to:"b@y", subject:"$LONGSUBJ", body:"b" })));
+app.get("/denied", async (req, res) => res.json(await send({ host:"evil.example.com", port:25, from:"a@x", to:"b@y", subject:"s", body:"b" })));
 JS
 
 # ── db.async-under-saturation apps: SMTP + a REAL db.async route ─────────
@@ -116,8 +129,16 @@ cat > "$APPDIR/app_db.lua" <<LUA
 local smtp = require("hull.smtp")
 local db = require("hull.db").default()
 app.manifest({ modules = { "hull/smtp@1", "hull/db@1", "hull/http-server@1" }, hosts = { "127.0.0.1" } })
+-- The admission cap RAISES the busy refusal (audit 36); report its code.
+local function send(msg)
+    local ok, r = pcall(smtp.send, msg)
+    if ok then return r end
+    local code = tostring(r):match("^%[hull:([%w_]+)%] ")
+    if code then return { ok=false, refused=code } end
+    error(r, 0)
+end
 app.get("/",     function(req, res) res:json({ ready=true }) end)
-app.get("/send", function(req, res) res:json(smtp.send({ host="127.0.0.1", port=$PORT_SMTP, from="a@x", to="b@y", subject="hi", body="hello" })) end)
+app.get("/send", function(req, res) res:json(send({ host="127.0.0.1", port=$PORT_SMTP, from="a@x", to="b@y", subject="hi", body="hello" })) end)
 app.get("/db",   function(req, res)
     local rows = db.async.query("SELECT 1 + 1 as result")
     res:json({ ok=true, result = rows[1].result })
@@ -129,8 +150,13 @@ import { smtp } from "hull:smtp";
 import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 app.manifest({ modules: ["hull/smtp@1", "hull/db@1", "hull/http-server@1"], hosts: ["127.0.0.1"] });
+// The admission cap THROWS the busy refusal (audit 36); report its code.
+async function send(msg) {
+    try { return await smtp.send(msg); }
+    catch (e) { if (typeof e.code === "string") return { ok: false, refused: e.code }; throw e; }
+}
 app.get("/",     (req, res) => res.json({ ready: true }));
-app.get("/send", async (req, res) => res.json(await smtp.send({ host:"127.0.0.1", port:$PORT_SMTP, from:"a@x", to:"b@y", subject:"hi", body:"hello" })));
+app.get("/send", async (req, res) => res.json(await send({ host:"127.0.0.1", port:$PORT_SMTP, from:"a@x", to:"b@y", subject:"hi", body:"hello" })));
 app.get("/db",   async (req, res) => {
     const rows = await db.async.query("SELECT 1 + 1 as result");
     res.json({ ok: true, result: rows[0].result });
@@ -189,13 +215,13 @@ run_suite() { # <label> <appfile>
     fi
     stop_mock
 
-    # 2. cap-zero: immediate, never synchronous, schedule:cap_reached
+    # 2. cap-zero: immediate busy refusal, never synchronous, schedule:cap_reached
     start_mock fast; start_hull "$APP" --workers 1
     T0=$(python3 -c "import time;print(time.time())")
     R_CAP=$(curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/send")
     T1=$(python3 -c "import time;print(time.time())")
     DT=$(python3 -c "print(int(($T1-$T0)*1000))")
-    case "$R_CAP" in *'"error":"connect_failed"'*) pass "$RT cap-zero connect_failed: $R_CAP" ;;
+    case "$R_CAP" in *'"refused":"busy"'*) pass "$RT cap-zero refused busy: $R_CAP" ;;
                      *) fail "$RT cap-zero result (got: $R_CAP)" ;; esac
     [ "$DT" -lt 2000 ] && pass "$RT cap-zero immediate (${DT}ms)" || fail "$RT cap-zero slow (${DT}ms)"
     grep -q '"schedule":"cap_reached"' "$APPDIR/hull.log" \
@@ -212,7 +238,8 @@ run_suite() { # <label> <appfile>
 
     # 4. TRUE saturation (W=2 -> cap 1): one admitted send is held on the slow
     #    peer (occupying the single slot); a concurrent send overflows and must
-    #    resolve promptly as connect_failed / schedule:cap_reached. This is the
+    #    be refused promptly with the busy refusal (audit 36; it resolved as
+#    connect_failed before) / schedule:cap_reached. This is the
     #    observable binding parity for real saturation (cap 1, not the cap-0
     #    degenerate case above), asserted identically for Lua and JS.
     start_mock slow; start_hull "$APP" --workers 2
@@ -225,7 +252,7 @@ run_suite() { # <label> <appfile>
     R_SAT=$(curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/send")
     T1=$(python3 -c "import time;print(time.time())")
     DT_SAT=$(python3 -c "print(int(($T1-$T0)*1000))")
-    case "$R_SAT" in *'"error":"connect_failed"'*) pass "$RT saturation overflow connect_failed: $R_SAT" ;;
+    case "$R_SAT" in *'"refused":"busy"'*) pass "$RT saturation overflow refused busy: $R_SAT" ;;
                      *) fail "$RT saturation overflow (got: $R_SAT)" ;; esac
     [ "$DT_SAT" -lt 2000 ] && pass "$RT saturation overflow prompt (${DT_SAT}ms)" \
                            || fail "$RT saturation overflow slow (${DT_SAT}ms)"
@@ -268,7 +295,7 @@ db_saturation_leg() { # <rt> <appfile>
                     *) fail "$RT db.async under saturation (got: $R_DB)" ;; esac
     [ "$DT_DB" -lt 4000 ] && pass "$RT db.async bounded (${DT_DB}ms)" || fail "$RT db.async slow (${DT_DB}ms)"
     R_OV=$(curl -s --max-time 8 "http://127.0.0.1:$PORT_HTTP/send")
-    case "$R_OV" in *'"error":"connect_failed"'*) pass "$RT overflow still cap_reached: $R_OV" ;;
+    case "$R_OV" in *'"refused":"busy"'*) pass "$RT overflow still refused busy: $R_OV" ;;
                     *) fail "$RT overflow during db leg (got: $R_OV)" ;; esac
     wait "$HELD" 2>/dev/null                  # release: the held send completes normally
     # Slot reusable after release: a follow-up send is ADMITTED and completes ok

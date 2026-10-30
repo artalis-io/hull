@@ -42,6 +42,7 @@
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/env.h"
+#include "hull/cap/crypto.h"  /* hl_cap_crypto_random_fail_next_for_test (a36) */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"   /* HlWasmCache (lua_audit15 compute.stream) */
 #endif
@@ -2646,6 +2647,28 @@ UTEST(lua_cap, crypto_bytes_contract)
         "  if crypto.hmac_sha256_verify('m', 'k', 'short') then return 15 end "
         "  return 0 "
         "end)()");
+    EXPECT_EQ(step, 0);
+    cleanup_lua_caps();
+}
+
+/* A failed random source makes crypto.ed25519_keypair() raise a catchable
+ * error; it used to abort() the process inside TweetNaCl's randombytes()
+ * (audit 36). The next call works. */
+UTEST(lua_cap, crypto_ed25519_keypair_entropy_failure_raises)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    hl_cap_crypto_random_fail_next_for_test(1);
+    int step = eval_int(
+        "(function() "
+        "  local ok, err = pcall(crypto.ed25519_keypair) "
+        "  if ok then return 1 end "
+        "  if not tostring(err):find('keypair generation failed', 1, true) then return 2 end "
+        "  local pk, sk = crypto.ed25519_keypair() "
+        "  if #pk ~= 32 or #sk ~= 64 then return 3 end "
+        "  return 0 "
+        "end)()");
+    hl_cap_crypto_random_fail_next_for_test(0);
     EXPECT_EQ(step, 0);
     cleanup_lua_caps();
 }

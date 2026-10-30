@@ -153,6 +153,12 @@ int hl_cap_crypto_sha1(const void *data, size_t len, uint8_t out[20]);
  */
 int hl_cap_crypto_random(void *buf, size_t len);
 
+/**
+ * @brief Test seam: make the next @p count calls to `hl_cap_crypto_random`
+ * fail (0 clears it). For unit tests only; not reachable from app code.
+ */
+void hl_cap_crypto_random_fail_next_for_test(int count);
+
 /* ── HMAC-SHA256 ───────────────────────────────────────────────────── */
 
 /**
@@ -370,6 +376,18 @@ int hl_cap_crypto_ed25519_sign(const uint8_t *msg, size_t msg_len,
  * @return `0` on success, `-1` on CSPRNG failure.
  */
 int hl_cap_crypto_ed25519_keypair(uint8_t out_pk[32], uint8_t out_sk[64]);
+
+/**
+ * @brief Derive an Ed25519 keypair from a 32-byte seed (RFC 8032 5.1.5).
+ *
+ * Byte-identical to TweetNaCl's crypto_sign_keypair given the same seed;
+ * @p out_sk is seed || public key. `hl_cap_crypto_ed25519_keypair` draws the
+ * seed from `hl_cap_crypto_random` and calls this.
+ *
+ * @return `0` on success, `-1` on a NULL argument.
+ */
+int hl_cap_crypto_ed25519_seed_keypair(const uint8_t seed[32],
+                                       uint8_t out_pk[32], uint8_t out_sk[64]);
 
 /* ── Asymmetric verify (RSA / ECDSA, PEM-keyed) ────────────────────── */
 

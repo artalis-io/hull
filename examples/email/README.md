@@ -100,12 +100,17 @@ event loop.
 - **SMTP failures resolve, they do not reject.** Both runtimes return
   `{ ok: false, error: "<token>" }` for any delivery failure (bad greeting, auth
   failure, TLS failure, timeout). The JS Promise rejects only on a programming
-  error (a wrong argument type), never on an SMTP failure - so `if (!r.ok)` is the
-  correct failure check, not `try/catch`.
-- **Admission back-pressure surfaces as `connect_failed`.** Concurrent SMTP jobs
-  are capped so a burst of slow sends cannot starve the worker pool; a send that is
-  turned away resolves immediately (without touching the loop) with
-  `{ ok: false, error: "connect_failed" }`.
+  error (a wrong argument type) or a runtime refusal (below), never on an SMTP
+  failure - so `if (!r.ok)` is the delivery-failure check, and `try/catch` is
+  needed only for the refusal.
+- **Admission back-pressure is a `busy` refusal, not a result.** Concurrent SMTP
+  jobs are capped so a burst of slow sends cannot starve the worker pool; a send
+  that is turned away is refused immediately (without touching the loop): Lua
+  raises an error whose message starts with `"[hull:busy] "`, JS throws an `Error`
+  with `e.code === "busy"`. Nothing was sent and a later call may be admitted -
+  this example's `pcall` / `try` logs it as a failed attempt; a real app might
+  answer 503 with `Retry-After`. (It resolved as `{ ok: false, error:
+  "connect_failed" }` before audit 36.)
 - **TLS is fail-closed.** STARTTLS and implicit TLS verify the certificate chain and
   hostname against the embedded Mozilla CA bundle; a verification or handshake
   failure aborts the send (`{ ok: false, error: "tls_handshake_failed" }`) and never

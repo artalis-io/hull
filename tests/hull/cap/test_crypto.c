@@ -534,6 +534,101 @@ UTEST(hl_cap_crypto, random_null)
     ASSERT_EQ(rc, -1);
 }
 
+/* ── Ed25519 keypair from a seed (audit 36) ─────────────────────────── */
+
+/* Not sscanf("%2x"): cosmocc's does not count a leading 0 toward the field
+ * width, so a byte whose first digit is 0 is misread ("04" came back as
+ * 0x44 in the RFC 8439 vectors below, "031c" as 0x31 in RFC 8032 TEST 1's
+ * seed) - the Ed25519 / ChaCha20 known-answer tests then fail on cosmo with
+ * the crypto itself correct. */
+static int nibble(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0'
+         : c >= 'a' && c <= 'f' ? c - 'a' + 10
+         : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0;
+}
+
+static void unhex(const char *h, uint8_t *out, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        out[i] = (uint8_t)(nibble(h[2 * i]) << 4 | nibble(h[2 * i + 1]));
+}
+
+/* RFC 8032 section 7.1, TEST 1 / 2 / 3: SECRET KEY -> PUBLIC KEY. */
+UTEST(hl_cap_crypto, ed25519_seed_keypair_matches_rfc8032)
+{
+    static const char *const v[][2] = {
+        { "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+          "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" },
+        { "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+          "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c" },
+        { "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+          "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025" },
+    };
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+        uint8_t seed[32], want_pk[32], pk[32], sk[64];
+        unhex(v[i][0], seed, 32);
+        unhex(v[i][1], want_pk, 32);
+        ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(seed, pk, sk), 0);
+        ASSERT_EQ(memcmp(pk, want_pk, 32), 0);
+        /* TweetNaCl's secret key layout: seed || public key */
+        ASSERT_EQ(memcmp(sk, seed, 32), 0);
+        ASSERT_EQ(memcmp(sk + 32, want_pk, 32), 0);
+    }
+}
+
+/* RFC 8032 TEST 1's signature of the empty message, from the derived key. */
+UTEST(hl_cap_crypto, ed25519_seed_keypair_signs_the_rfc8032_vector)
+{
+    uint8_t seed[32], pk[32], sk[64], sig[64], want[64];
+    unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+          seed, 32);
+    unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+          "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+          want, 64);
+    ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(seed, pk, sk), 0);
+    ASSERT_EQ(hl_cap_crypto_ed25519_sign((const uint8_t *)"", 0, sk, sig), 0);
+    ASSERT_EQ(memcmp(sig, want, 64), 0);
+}
+
+UTEST(hl_cap_crypto, ed25519_seed_keypair_rejects_null)
+{
+    uint8_t seed[32] = {0}, pk[32], sk[64];
+    ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(NULL, pk, sk), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(seed, NULL, sk), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(seed, pk, NULL), -1);
+}
+
+/* A failed random source fails the keypair with -1 and a zeroed secret key;
+ * it used to abort() the process inside TweetNaCl's randombytes(). */
+UTEST(hl_cap_crypto, ed25519_keypair_fails_gracefully_when_random_fails)
+{
+    uint8_t pk[32], sk[64], zero[64] = {0};
+    memset(sk, 0xAA, sizeof sk);
+    hl_cap_crypto_random_fail_next_for_test(1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_keypair(pk, sk), -1);
+    ASSERT_EQ(memcmp(sk, zero, 64), 0);
+
+    /* The seam is spent: the next call succeeds and is self-consistent. */
+    ASSERT_EQ(hl_cap_crypto_ed25519_keypair(pk, sk), 0);
+    uint8_t pk2[32], sk2[64];
+    ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(sk, pk2, sk2), 0);
+    ASSERT_EQ(memcmp(pk, pk2, 32), 0);
+    uint8_t sig[64];
+    ASSERT_EQ(hl_cap_crypto_ed25519_sign((const uint8_t *)"m", 1, sk, sig), 0);
+    ASSERT_EQ(hl_cap_crypto_ed25519_verify((const uint8_t *)"m", 1, sig, pk), 0);
+}
+
+UTEST(hl_cap_crypto, box_keypair_fails_gracefully_when_random_fails)
+{
+    uint8_t pk[32], sk[32];
+    hl_cap_crypto_random_fail_next_for_test(1);
+    ASSERT_EQ(hl_cap_crypto_box_keypair(pk, sk), -1);
+    hl_cap_crypto_random_fail_next_for_test(1);
+    ASSERT_EQ(hl_cap_crypto_random(pk, sizeof pk), -1);
+    ASSERT_EQ(hl_cap_crypto_random(pk, sizeof pk), 0);
+}
+
 /* ── HMAC-SHA256 vtable migration check ─────────────────────────────
  *
  * Direct cap-level coverage that the new vtable-dispatched
@@ -1257,20 +1352,6 @@ UTEST(aes256ctr, rejects_bad_arguments)
 
 /* ── ChaCha20 / Poly1305 (RFC 8439 vectors) ────────────────────────── */
 
-/* Not sscanf("%2x"): cosmocc's misreads a byte whose first digit is 0
- * ("04" came back as 0x44), which turned these vectors into garbage. */
-static int nibble(char c)
-{
-    return c >= '0' && c <= '9' ? c - '0'
-         : c >= 'a' && c <= 'f' ? c - 'a' + 10
-         : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0;
-}
-
-static void unhex(const char *h, uint8_t *out, size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-        out[i] = (uint8_t)(nibble(h[2 * i]) << 4 | nibble(h[2 * i + 1]));
-}
 
 UTEST(crypto, chacha20_rfc8439_2_4_2)
 {

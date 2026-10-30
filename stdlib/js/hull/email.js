@@ -35,6 +35,7 @@
 import { smtp } from "hull:smtp";
 import { httpClient } from "hull:http-client";
 import { json } from "hull:json";
+import { _refusal } from "hull:_refusal";
 
 const email = {};
 
@@ -110,6 +111,10 @@ providers.smtp = async function(opts) {
             content_type: opts.content_type || "text/plain",
         });
     } catch (e) {
+        // The runtime refusing the send (busy: the admission cap or the
+        // off-heap copy total; wait_refused) attempted no delivery: re-thrown
+        // with its code, as Lua's smtp.send raise reaches the caller (audit 36).
+        if (_refusal.code(e)) throw e;
         emailError("delivery_failed", "smtp: " + String(e));
     }
     if (!result || !result.ok) {

@@ -390,6 +390,18 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
      * attaches the handler promise to freed memory (the handler's `await` on
      * our resolved promise completes via the microtask pump, no cont needed). */
 
+    /* The admission cap is not a connect failure: nothing was sent and a later
+     * call may be admitted, so it throws the "busy" refusal (audit 36), as the
+     * off-heap copy cap above does. */
+    if (aout.schedule && strcmp(aout.schedule, "cap_reached") == 0) {
+        JS_FreeValue(ctx, rf[0]); JS_FreeValue(ctx, rf[1]);
+        JS_FreeValue(ctx, promise);
+        result = hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx,
+                     "smtp.send: too many sends in flight (admission cap "
+                     "reached)"));
+        goto cleanup;
+    }
+
     /* Resolve the promise ourselves via our own rf copies, then free them. */
     {
         JSValue rv = js_smtp_result_obj(ctx, 0,

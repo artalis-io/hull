@@ -7,7 +7,12 @@ typedef unsigned long u32;
 typedef unsigned long long u64;
 typedef long long i64;
 typedef i64 gf[16];
-extern void randombytes(u8 *,u64);
+/* HULL PATCH: no randombytes(). Its contract is void (it cannot report a
+ * failure), so the only safe reaction to an entropy failure inside it was
+ * abort(). Every key Hull makes draws its randomness through
+ * hl_cap_crypto_random (which reports failure) and derives the key from it:
+ * crypto_box_keypair stays commented out below, and crypto_sign_keypair is
+ * replaced by crypto_sign_ed25519_tweet_seed_keypair. */
 
 static const u8
   _0[16],
@@ -654,13 +659,19 @@ sv scalarbase(gf p[4],const u8 *s)
   M(q[3],X,Y);
   scalarmult(p,q,s);
 }
-int crypto_sign_keypair(u8 *pk, u8 *sk)
+/* HULL PATCH: crypto_sign_keypair with the 32-byte seed supplied by the
+ * caller instead of drawn from randombytes() (see the top of the file). The
+ * rest is the upstream body unchanged, so the output is byte-identical to
+ * crypto_sign_keypair given the same seed (RFC 8032 section 5.1.5). The
+ * expanded hash d holds the secret scalar and is scrubbed before return. */
+int crypto_sign_ed25519_tweet_seed_keypair(u8 *pk, u8 *sk, const u8 *seed)
 {
   u8 d[64];
   gf p[4];
   int i;
+  volatile u8 *vd;
 
-  randombytes(sk, 32);
+  FOR(i,32) sk[i] = seed[i];
   crypto_hash(d, sk, 32);
   d[0] &= 248;
   d[31] &= 127;
@@ -670,6 +681,8 @@ int crypto_sign_keypair(u8 *pk, u8 *sk)
   pack(pk,p);
 
   FOR(i,32) sk[32 + i] = pk[i];
+  vd = d;
+  FOR(i,64) vd[i] = 0;
   return 0;
 }
 
