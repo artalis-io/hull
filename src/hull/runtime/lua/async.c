@@ -254,6 +254,7 @@ static void hl_lua_co_check(lua_State *L, lua_State *co)
         hl_lua_mark_kind(*mark) == (int)HL_LUA_MARK_TXN_YIELD) {
         uint64_t egen;
         int eopen = hl_lua_txn_open(L, &egen);
+        // cppcheck-suppress knownConditionTrueFalse
         if (!eopen || *mark != hl_lua_txn_mark(egen, HL_LUA_MARK_TXN_YIELD))
             (void)luaL_error(L, "cannot close a coroutine that raised inside "
                                 "a database transaction that has since "
