@@ -8510,6 +8510,146 @@ UTEST(lua_audit37, a_generator_running_multi_statement_sql_in_a_batch_keeps_work
     ASSERT_STREQ(out, "ok");
 }
 
+/* Audit 38: coroutine.resume, like lcorolib, left a coroutine that raised
+ * with its to-be-closed variables pending until coroutine.close. A later
+ * run's close() then ran the coroutine's own __close handlers - written to
+ * run inside its transaction - after the stale-transaction guard had rolled
+ * that transaction back: the credit committed alone in autocommit. Now the
+ * coroutine is closed in the run that raised: its handler runs inside the
+ * transaction, the guard rolls both writes back, and close() runs nothing. */
+UTEST(lua_audit38, a_coroutine_that_raised_runs_its_close_handlers_in_its_run)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE lg (x TEXT)')\n"
+        "local held, ok1, e1, ran\n"
+        "require('hull._task').spawn(function()\n"
+        "  held = coroutine.create(function()\n"
+        "    db.exec('BEGIN') db.exec(\"INSERT INTO lg VALUES ('debit')\")\n"
+        "    local g <close> = setmetatable({}, {__close = function()\n"
+        "      ran = db.in_transaction()\n"
+        "      db.exec(\"INSERT INTO lg VALUES ('credit')\") end})\n"
+        "    error('boom') end)\n"
+        "  ok1, e1 = coroutine.resume(held) end)\n"
+        "hull.sleep(20)\n"
+        "check(ok1 == false and tostring(e1):find('boom', 1, true), 'resume: '..tostring(e1))\n"
+        "check(ran == true, 'the handler ran inside the transaction: '..tostring(ran))\n"
+        "check(coroutine.status(held) == 'dead', 'status '..coroutine.status(held))\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM lg')[1].n == 0, 'rows after the run')\n"
+        "local ok, r = pcall(coroutine.close, held)\n"
+        "check(ok and r == true, 'close: '..tostring(ok)..' '..tostring(r))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM lg')[1].n == 0, 'close committed a row')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* The same when the coroutine first yielded tagged inside its own
+ * transaction and a second resume in the same run made it raise. */
+UTEST(lua_audit38, a_tagged_coroutine_that_raised_is_closed_in_its_run)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE lt (x TEXT)')\n"
+        "local held, ok1, e1\n"
+        "require('hull._task').spawn(function()\n"
+        "  held = coroutine.create(function()\n"
+        "    db.exec('BEGIN') db.exec(\"INSERT INTO lt VALUES ('debit')\")\n"
+        "    local g <close> = setmetatable({}, {__close = function()\n"
+        "      db.exec(\"INSERT INTO lt VALUES ('credit')\") end})\n"
+        "    if coroutine.yield() then error('boom') end end)\n"
+        "  assert(coroutine.resume(held))\n"
+        "  ok1, e1 = coroutine.resume(held, true) end)\n"
+        "hull.sleep(20)\n"
+        "check(ok1 == false and tostring(e1):find('boom', 1, true), 'resume: '..tostring(e1))\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM lt')[1].n == 0, 'rows after the run')\n"
+        "local ok, r = pcall(coroutine.close, held)\n"
+        "check(ok and r == true, 'close: '..tostring(ok)..' '..tostring(r))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM lt')[1].n == 0, 'close committed a row')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* A runtime-run coroutine (here a hull._task task) that raised is closed
+ * too, before the guard: its handler runs inside its transaction, and a
+ * reference the app kept (coroutine.running()) can neither close nor resume
+ * it afterwards; it reads dead. */
+UTEST(lua_audit38, a_task_that_raised_is_closed_before_the_guard)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE lk (x TEXT)')\n"
+        "local held, ran\n"
+        "require('hull._task').spawn(function()\n"
+        "  held = coroutine.running()\n"
+        "  db.exec('BEGIN') db.exec(\"INSERT INTO lk VALUES ('debit')\")\n"
+        "  local g <close> = setmetatable({}, {__close = function()\n"
+        "    ran = db.in_transaction()\n"
+        "    db.exec(\"INSERT INTO lk VALUES ('credit')\") end})\n"
+        "  error('boom') end)\n"
+        "hull.sleep(20)\n"
+        "check(ran == true, 'the handler ran inside the transaction: '..tostring(ran))\n"
+        "check(coroutine.status(held) == 'dead', 'status '..coroutine.status(held))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM lk')[1].n == 0, 'rows after the run')\n"
+        "local ok, e = pcall(coroutine.close, held)\n"
+        "check(not ok and tostring(e):find('ended by an error', 1, true), 'close: '..tostring(e))\n"
+        "ok, e = pcall(coroutine.resume, held)\n"
+        "check(not ok and tostring(e):find('ended by an error', 1, true), 'resume: '..tostring(e))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM lk')[1].n == 0, 'a row committed')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* Ordinary errors keep coroutine.resume / close / wrap's results: (false,
+ * err) with the original error object, the __close handler already run, a
+ * handler's own error replacing the original (as coroutine.close reports
+ * it), close() of the dead coroutine true, and a dead coroutine refusing a
+ * resume as before. */
+UTEST(lua_audit38, resume_and_close_results_are_unchanged)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local closed = 0\n"
+        "local co = coroutine.create(function()\n"
+        "  local g <close> = setmetatable({}, {__close = function(_, err)\n"
+        "    closed = closed + 1; assert(tostring(err):find('boom', 1, true)) end})\n"
+        "  error('boom') end)\n"
+        "local ok, e = coroutine.resume(co)\n"
+        "check(ok == false and tostring(e):find(':%d+: boom$'), 'resume: '..tostring(e))\n"
+        "check(closed == 1, 'the handler ran: '..closed)\n"
+        "check(coroutine.status(co) == 'dead', 'status '..coroutine.status(co))\n"
+        "check(coroutine.close(co) == true, 'close of the dead coroutine')\n"
+        "check(closed == 1, 'ran twice: '..closed)\n"
+        "ok, e = coroutine.resume(co)\n"
+        "check(ok == false and e == 'cannot resume dead coroutine', 'dead: '..tostring(e))\n"
+        "local obj = {}\n"
+        "co = coroutine.create(function() error(obj) end)\n"
+        "ok, e = coroutine.resume(co)\n"
+        "check(ok == false and e == obj, 'the error object is kept')\n"
+        "co = coroutine.create(function()\n"
+        "  local g <close> = setmetatable({}, {__close = function() error('inclose', 0) end})\n"
+        "  error('boom') end)\n"
+        "ok, e = coroutine.resume(co)\n"
+        "check(ok == false and e == 'inclose', 'handler error: '..tostring(e))\n"
+        "check(coroutine.status(co) == 'dead', 'status after a handler error')\n"
+        "local w = coroutine.wrap(function()\n"
+        "  local g <close> = setmetatable({}, {__close = function() closed = closed + 1 end})\n"
+        "  error('wboom') end)\n"
+        "ok, e = pcall(w)\n"
+        "check(not ok and tostring(e):find('wboom', 1, true) and closed == 2, 'wrap: '..tostring(e))\n"
+        "co = coroutine.create(function() coroutine.yield(1) return 2 end)\n"
+        "local a, b = coroutine.resume(co)\n"
+        "check(a == true and b == 1, 'yield results')\n"
+        "a, b = coroutine.resume(co)\n"
+        "check(a == true and b == 2, 'return results')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
 /* Stdlib-only, and it needs a loop; a task that never got its turn is freed
  * with the VM. */
 UTEST(lua_task, stdlib_only_needs_a_loop_and_is_freed_unrun)
@@ -10195,7 +10335,10 @@ UTEST(lua_audit6, xpcall_handler_not_run_on_a_trip)
 }
 
 /* H1 (HULL PATCH 0003): a coroutine that died by the trip kept hooks off,
- * so the __close handlers a later coroutine.close ran were unmetered. */
+ * so the __close handlers a later coroutine.close ran were unmetered. Since
+ * audit 38 the coroutine is closed in the run that tripped: its handler runs
+ * there, metered, and is stopped by the trip; a later close() finds it dead
+ * and runs nothing. */
 UTEST(lua_audit6, close_of_a_tripped_coroutine_is_metered)
 {
     lua_Integer done = -1;
@@ -10207,8 +10350,9 @@ UTEST(lua_audit6, close_of_a_tripped_coroutine_is_metered)
         "  while true do end "
         "end) "
         "coroutine.resume(CO)",
-        "coroutine.close(CO)", "CLOSED", &done);
-    EXPECT_NE(rc, LUA_OK);
+        "assert(coroutine.status(CO) == 'dead') "
+        "assert(coroutine.close(CO) == true)", "CLOSED", &done);
+    EXPECT_EQ(rc, LUA_OK);
     EXPECT_EQ(done, 0);
 }
 

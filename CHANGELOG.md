@@ -224,6 +224,24 @@ release-artifact layout).
   coroutine marked as waiting until its async result is built, so a finalizer that build runs
   cannot resume it. Covered by `test_lua` (`lua_audit36`).
 
+- **A Lua coroutine that raised ran its `__close` handlers in a later run, in autocommit**
+  (audit 38). `coroutine.resume`, like Lua's own, did not close a coroutine that raised, so
+  its to-be-closed variables stayed pending until `coroutine.close`; and the transaction-tag
+  check skipped a coroutine that had died by an error. A handler that kept such a coroutine
+  (it did `BEGIN`, wrote the debit, declared a `<close>` guard writing the credit and
+  committing, then raised) had its debit rolled back by the stale-transaction guard at the end
+  of the run, and a later request's `coroutine.close(held)` committed the credit alone - a
+  half-applied ledger. The same held when the coroutine had first yielded tagged inside its
+  own transaction. A coroutine that raises is now closed at once, in the run that raised:
+  `coroutine.resume` runs its `__close` handlers before returning `false, err` (the original
+  error, or a handler's own, as `coroutine.close` reports it), and the runtime closes a
+  handler / timer / task / app.main coroutine that raised before its closing guard - a
+  reference kept with `coroutine.running()` then reads dead and can no longer be resumed or
+  closed. As defence in depth `coroutine.close` refuses a coroutine that raised inside a
+  transaction of its own that has since ended. Also: a `ws.connect` client collected while
+  the runtime shuts down now cancels its pending connect / release timer (it fired into the
+  freed userdata). Covered by `test_lua` (`lua_audit38`).
+
 - **`fs.list`, `fs.stat` and small fs / blob writes cost nothing against the run budget**
   (audit 37, both runtimes). `fs.list` read the whole directory - every entry, matching the
   grant's pattern or not - and `fstatat`ed each one it kept, inside one uncharged call: a Lua

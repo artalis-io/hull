@@ -1287,6 +1287,7 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
          * the HTTP server uses); on HTTP=0 it's the poll backend's
          * standalone loop. hl_lua_async_resume calls backend->stop when
          * main terminates, which returns us here. */
+        lua->cli_main_status = LUA_YIELD;
         int srv_rc = hl_async_backend()->run(lua->base.async_ctx);
         if (srv_rc < 0) {
             fprintf(stderr, "[hull:main] event loop error\n");
@@ -1294,7 +1295,8 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
 
         /* After run() returns, the coroutine status reflects main's
          * terminal state. */
-        status = lua_status(co);
+        status = lua->cli_main_status != LUA_YIELD ? lua->cli_main_status
+                                                   : lua_status(co);
         nres   = lua_gettop(co);
     }
 
