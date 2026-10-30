@@ -443,6 +443,11 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
      * run while the eval is the active run, as an entry's are, not left
      * for whatever runs next on a warm context (audit 22). */
     hl_js_run_jobs(js);
+    /* The eval is an entry: a transaction the snippet left open (held
+     * across an await of a promise Hull does not drive) is rolled back and
+     * its run's tag failed, so the rest never continues in autocommit
+     * (audit 36; the bare guards in hl_agent_eval_ctx only rolled back). */
+    (void)hl_js_entry_end_txn_check(js);
 
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);

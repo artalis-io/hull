@@ -571,6 +571,10 @@ int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag)
  *   - an async op's resume         (async.c, hl_js_async_resume)
  *   - a multipart resume           (mod_request.c, mp_js_pump)
  *   - a hull test case             (mod_test.c)
+ *   - the app's module top level   (runtime.c, hl_js_settle_module: a run
+ *                                   tag of its own, audit 36)
+ *   - a hull test file's top level (runtime.c, vt_js_run_test_file)
+ *   - an agent eval / template render (agent/eval.c, agent/template.c)
  *
  * A transaction still open when the entry's code has stopped (its drain
  * done) was opened by that run - the drain already checked any other run's

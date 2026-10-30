@@ -140,6 +140,8 @@ static int render_js(HlJS *js, const char *template_name,
      * rather than raising here. */
     if (!err_path) {
         hl_js_run_jobs(js);
+        /* An entry: ends through the transaction check (audit 36). */
+        (void)hl_js_entry_end_txn_check(js);
         if (JS_IsObject(v) &&
             JS_PromiseState(ctx, v) == JS_PROMISE_REJECTED) {
             JS_Throw(ctx, JS_PromiseResult(ctx, v));

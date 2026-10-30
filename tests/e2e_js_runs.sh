@@ -83,6 +83,15 @@
 #       chain ran on in autocommit. Every entry kind now ends through
 #       hl_js_entry_end_txn_check, which fails the run's tag too.
 #
+# Audit 36:
+#   M   The app's module top level was an entry that never ended through that
+#       check, and ran under tag 0, which is never failed. A top level that
+#       opened a transaction and awaited a promise Hull does not drive left
+#       the module pending; the code after the await ran in the drain of the
+#       request that settled the promise, its transaction rolled back by that
+#       request's start guard, and the rest autocommitted. The top level now
+#       has a tag of its own and ends through the check.
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -1051,6 +1060,59 @@ if [ "$up" = 1 ]; then
     esac
 else
     fail "the tui app starts" "$(tail -5 "$TMPDIR/tui.log")"
+fi
+kill "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=""
+
+echo "=== audit 36: the module top level ends through the transaction check ==="
+mkdir -p "$TMPDIR/top"
+cat > "$TMPDIR/top/app.js" <<'EOF'
+import { app } from "hull:app";
+import { db } from "hull:db";
+app.manifest({ modules: ["hull/db@1", "hull/http-server@1"] });
+const conn = db.default();
+conn.exec("CREATE TABLE IF NOT EXISTS t36 (x INTEGER)");
+let release;
+const gate = new Promise(r => { release = r; });
+let after = "no";
+app.get("/fast", (_req, res) => res.text("fast"));
+app.get("/settle", (_req, res) => { release(); res.text("ok"); });
+app.get("/count", (_req, res) =>
+    res.json({ n: conn.query("SELECT count(*) AS n FROM t36")[0].n, after }));
+conn.exec("BEGIN");
+conn.exec("INSERT INTO t36 VALUES (1)");
+await gate;
+after = "yes";
+conn.exec("INSERT INTO t36 VALUES (2)");
+conn.exec("INSERT INTO t36 VALUES (3)");
+conn.exec("COMMIT");
+EOF
+TOPPORT=$((PORT + 2))
+"$HULL" --no-sandbox -p "$TOPPORT" -d "$TMPDIR/top/app.db" "$TMPDIR/top/app.js" \
+    </dev/null >"$TMPDIR/top.log" 2>&1 &
+SERVER_PID=$!
+up=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if curl -s -m 10 -o /dev/null "http://127.0.0.1:$TOPPORT/fast"; then up=1; break; fi
+    sleep 0.5
+done
+if [ "$up" = 1 ]; then
+    out=$(curl -s -m 10 "http://127.0.0.1:$TOPPORT/settle")
+    [ "$out" = ok ] && pass "the request that settles the gate is answered" \
+        || fail "the request that settles the gate is answered" "$out"
+    sleep 0.3
+    out=$(curl -s -m 10 "http://127.0.0.1:$TOPPORT/count")
+    [ "$out" = '{"n":0,"after":"no"}' ] \
+        && pass "the top level's code after the gate never runs and commits nothing" \
+        || fail "the top level's code after the gate never runs and commits nothing" "$out"
+    grep -q "a run ended while a transaction was open" "$TMPDIR/top.log" \
+        && pass "the open transaction is reported at load" \
+        || fail "the open transaction is reported at load" "$(tail -5 "$TMPDIR/top.log")"
+    grep -q "module top level has not finished" "$TMPDIR/top.log" \
+        && pass "the pending top level is warned about" \
+        || fail "the pending top level is warned about" "$(tail -5 "$TMPDIR/top.log")"
+else
+    fail "the top-level app starts" "$(tail -5 "$TMPDIR/top.log")"
 fi
 kill "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""

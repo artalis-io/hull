@@ -826,10 +826,18 @@ in depth a resume never sends while Keel still has the connection suspended by a
 lists every entry kind), never a bare `hl_db_registry_guard_stale_txns` (that one stays at entry
 START only). An entry that ends - a synchronous handler, a settled async handler, a middleware, a
 timer, an SSE / ws-server / ws-client callback, app.main's stretch, a `hull:_task` task, an async
-or multipart resume, a `hull test` case - with a transaction still open rolls it back AND fails
+or multipart resume (including the "another continuation already completed the handler" exit),
+a `hull test` case, the app's module top level, a `hull test` file's top level, an agent eval or
+template render - with a transaction still open rolls it back AND fails
 its run tag: a chain it left un-awaited on a promise Hull does not drive (`(async () => { BEGIN;
 ...; await gate; ...; COMMIT })()`) was otherwise continued in autocommit once a later request
 settled the gate (audit 35). A forgotten COMMIT keeps the entry's outcome; only the tag fails.
+The module top level runs under a run tag of its own (`hl_js_load_app`; manifest extraction
+excepted), never tag 0 - tag 0 is never failed, so a top-level `BEGIN; ...; await gate` was
+continued in the drain of the request that settled `gate`, its first writes rolled back by that
+request's start guard and the rest autocommitted - and goes back to tag 0 after its check; a top
+level still pending after load (awaiting a promise Hull does not drive) is logged as a WARN, and
+in a `hull test` file one that left a transaction open is a load error (audit 36).
 Under that invariant every transaction the guard finds is orphaned. JS
 `db.batch(fn)` refuses an async fn before BEGIN (prototype check against the
 intrinsic AsyncFunction / AsyncGeneratorFunction) and a returned thenable
