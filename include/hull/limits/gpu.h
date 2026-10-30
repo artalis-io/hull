@@ -13,6 +13,9 @@
 #ifndef HL_LIMITS_GPU_H
 #define HL_LIMITS_GPU_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #ifndef HL_GPU_MAX_DEVICES
 #define HL_GPU_MAX_DEVICES       8
 #endif
@@ -122,6 +125,49 @@
  * to survive, leaving room for whatever lies below naga on the stack. */
 #ifndef HL_GPU_WGSL_DECL_CHAIN_MAX
 #define HL_GPU_WGSL_DECL_CHAIN_MAX 2048
+#endif
+
+/* The deepest nesting a shader's initializers may build by inference, as
+ * hl_gpu_wgsl_inferred counts it (audit 39): ~10000 function-local
+ * `const aK = array(aK-1);` crashed naga's MSL writer on the event loop's
+ * stack, 6000 did not. The written-type bound HL_GPU_WGSL_TYPE_DEPTH_MAX
+ * applies: no real shader nests values that deep. */
+#ifndef HL_GPU_WGSL_INFERRED_DEPTH_MAX
+#define HL_GPU_WGSL_INFERRED_DEPTH_MAX HL_GPU_WGSL_TYPE_DEPTH_MAX
+#endif
+
+/* The most nodes naga's constant evaluator may copy beyond what a shader
+ * writes, summed over its declarations, as hl_gpu_wgsl_inferred counts it
+ * (audit 39): `const aK = array(aK-1, aK-1);` doubles each link, and the
+ * writers expand the copies into a tree (Apple M1 Max / Metal: 16 links,
+ * ~2^17 nodes, 6 s; 20 links 109 s and 815 MB). 12 links (~16300 copied
+ * nodes, just under this bound) compile in ~0.55 s against ~0.35 s for a
+ * trivial shader; 13 links are refused. A large lookup table is written,
+ * not copied, and a module constant named from a function counts once. */
+#ifndef HL_GPU_WGSL_EXPAND_MAX
+#define HL_GPU_WGSL_EXPAND_MAX ((uint64_t)16384)
+#endif
+
+/* Run-budget units charged per expanded node before a compile (audit 39),
+ * on top of 1 unit per 8 source bytes. Measured at ~12 us of compile per
+ * copied node on Metal; 1024 units is a few times what the same time of
+ * script costs, so a compile at the bound takes ~1/6 of the default
+ * budget. */
+#ifndef HL_GPU_WGSL_EXPAND_UNITS
+#define HL_GPU_WGSL_EXPAND_UNITS ((uint64_t)1024)
+#endif
+
+/* The stack of the thread every backend shader compile runs on (audit 39;
+ * see gpu_compile_on_big_stack). A virtual reservation: only the pages a
+ * compile touches are committed, and the thread exits after each compile.
+ * Measured on Apple M1 Max / Metal with every pre-check bypassed, the
+ * deepest stack any source under HL_GPU_WGSL_MAX_BYTES reached was a flat
+ * `a+a+...` chain: ~576 bytes of stack per source byte, ~576 MiB at the
+ * cap (an `&&` chain 124 MiB, `[0]` index chains 180 MiB, `else if` chains
+ * ~105 MiB, declaration chains under 40 MiB). 2 GiB leaves >3x for other
+ * backends and compilers; with the pre-checks on, nothing reaches 8 MiB. */
+#ifndef HL_GPU_COMPILE_STACK_BYTES
+#define HL_GPU_COMPILE_STACK_BYTES ((size_t)2 << 30)   /* 2 GiB */
 #endif
 
 #endif /* HL_LIMITS_GPU_H */

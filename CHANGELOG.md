@@ -289,6 +289,34 @@ release-artifact layout).
   `lock_configuration`, and a table-name function called with anything but a plain literal
   or name. Classifier tests in `test_db.c`, real-engine legs in `tests/e2e_feature_duckdb.sh`.
 
+- **A shader built by inference could still crash the process, or hold the event loop for
+  minutes, past the GPU pre-checks** (audit 39). Rounds 36-38 each bounded one WGSL shape that
+  made naga recurse past the event loop's 8 MiB stack; round 39 found two more. Declarations
+  that each wrap the one before in a constructor - `const a1 = array(a0); const a2 =
+  array(a1); ...`, function-local, `const` or `let` - nest their inferred type with no template
+  bracket written, so neither the written-type check nor the module-scope chain check saw them:
+  ~10000 such declarations (~260 KB) crashed naga's MSL writer (SIGSEGV). And ~16-20 constants
+  each built from two copies of the one before (`const a2 = array(a1, a1)`, ~600 bytes) are kept
+  by naga's evaluator as a DAG the writers expand into a tree: 6 s at 16, 27 s / 281 MB at 18,
+  109 s / 815 MB at 20, on the event loop. Two fixes. **Structurally**, the backend compile
+  (shader module and pipeline creation, where naga validates and translates the source) now
+  runs on a thread of its own with a 2 GiB stack (`HL_GPU_COMPILE_STACK_BYTES`, a virtual
+  reservation; the event loop waits for it, as it did for the synchronous compile), sized from
+  the deepest any source under the 1 MiB cap reached on that thread with every estimator
+  disabled - ~576 MiB, for a flat `a+a+...` chain (Apple M1 Max / Metal); a host that cannot
+  reserve it gets 1 GiB, 256 MiB or 64 MiB, and with no thread the compile is refused rather
+  than run on the loop. The round-36 to 39 crash shapes now fail cleanly or compile there even
+  with the estimators bypassed. **And the work is bounded**: every declaration - module-scope
+  and function-local `const` / `let` / `var` / `override`, parameters, `alias`, `struct`, a
+  function's return type - gets an inferred nesting depth and an expanded size
+  (`hl_gpu_wgsl_inferred`), and `gpu.compile` / `gpu.load` refuse (`shader_error`, before wgpu)
+  a source nesting deeper than 64 (`HL_GPU_WGSL_INFERRED_DEPTH_MAX`), whose constants expand
+  past 16384 copied nodes (`HL_GPU_WGSL_EXPAND_MAX`, ~0.2 s of extra compile on Metal), or with a
+  chain of more than 2048 function-local declarations naming one another. A compile is now
+  charged its expansion too (1024 units per copied node on top of 1 unit per 8 bytes,
+  `hl_gpu_wgsl_compile_units`). The estimators stay as the fast first line; the scan is linear
+  and iterative, and the examples' and docs' shaders are unaffected.
+
 - **A Lua coroutine tagged inside a transaction could still be resumed after that transaction
   was rolled back, and one consumed inside the resumer's transaction was refused for good**
   (audit 36; the second a regression from audit 35). Audit 35 bound the coroutine to the run

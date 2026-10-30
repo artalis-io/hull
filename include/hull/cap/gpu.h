@@ -265,10 +265,42 @@ size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len);
  * above or when its tables cannot be allocated. */
 size_t hl_gpu_wgsl_decl_chain(const char *wgsl, size_t len);
 
+/* What the initializers of @p wgsl build (audit 39), over every
+ * declaration - module-scope and function-local const / let / var /
+ * override, parameters, alias, struct, a function's return type:
+ *   depth    - the deepest inferred nesting (a declaration naming another
+ *              inside a constructor is one level deeper than it);
+ *   expanded - the nodes naga's evaluator would copy beyond what the
+ *              source writes (a const / let named as a whole argument
+ *              counts its own expanded size again), summed, saturating;
+ *   chain    - the longest run of function-local declarations naming one
+ *              another.
+ * Returns 0, or -1 (every field past its limit) for a source the lexer
+ * cannot read or whose tables cannot be allocated; a cycle sets depth to
+ * HL_GPU_WGSL_UNREADABLE. */
+typedef struct {
+    size_t   depth;
+    uint64_t expanded;
+    size_t   chain;
+} HlGpuWgslInferred;
+int hl_gpu_wgsl_inferred(const char *wgsl, size_t len, HlGpuWgslInferred *out);
+
+/* The run-budget units a compile of @p wgsl is charged before it runs:
+ * 1 per 8 source bytes plus HL_GPU_WGSL_EXPAND_UNITS per expanded node
+ * (audit 39). The gpu.compile / gpu.load bindings charge it. */
+uint64_t hl_gpu_wgsl_compile_units(const char *wgsl, size_t len);
+
 /* Every pre-compile check hl_cap_gpu_compile runs: size, lexing, the
- * expression / block / type depths and the declaration chains. 0 when the source passes; -1 with a
- * short reason in *why otherwise. */
+ * expression / block / type depths, the declaration chains, and the
+ * inferred depth / expansion / local chains. 0 when the source passes; -1
+ * with a short reason in *why otherwise. */
 int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why);
+
+/* TEST-ONLY (audit 39): skip hl_gpu_wgsl_precheck in hl_cap_gpu_compile, so
+ * a test can show that a shape the estimators would refuse fails cleanly on
+ * the compile thread instead of overflowing a stack. Never set outside the
+ * unit tests. */
+void hl_gpu_test_set_precheck_bypass(int on);
 
 /* Persistent named buffer */
 typedef struct HlGpuBuffer {

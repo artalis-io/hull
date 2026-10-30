@@ -344,9 +344,10 @@ static int l_gpu_load(lua_State *L)
     }
 
     /* Charged before the compile, which runs on the event loop in this one
-     * call (audit 24). Non-raising: file_buf is freed before the trip. */
-    if (hl_lua_budget_charge(L, (int64_t)hl_work_bytes_units(
-            (uint64_t)wgsl_len))) {
+     * call (audit 24), its expansion too (audit 39). Non-raising: file_buf
+     * is freed before the trip. */
+    if (hl_lua_budget_charge(L, (int64_t)hl_gpu_wgsl_compile_units(wgsl,
+            wgsl_len))) {
         free(file_buf);
         return hl_lua_budget_raise(L);
     }
@@ -384,8 +385,8 @@ static int l_gpu_compile(lua_State *L)
                           "(at most %d bytes)", (int)HL_GPU_WGSL_MAX_BYTES);
 
     /* The compile runs on the event loop in this one call: charged before
-     * it, 1 unit per 8 WGSL bytes (audit 24). */
-    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)wgsl_len), 0);
+     * it, 1 unit per 8 WGSL bytes (audit 24) plus its expansion (audit 39). */
+    lua_hlwork(L, (size_t)hl_gpu_wgsl_compile_units(wgsl, wgsl_len), 0);
 
     int rc = hl_cap_gpu_compile(ctx, device, name, wgsl, wgsl_len);
     if (rc != HL_GPU_OK) {
