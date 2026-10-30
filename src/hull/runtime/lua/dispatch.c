@@ -131,7 +131,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     /* Resume coroutine: handler(req, res) */
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
-    status = hl_lua_resume_status(co, status);
+    status = hl_lua_resume_status(co, lua->L, status);
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     lua->active_on_complete     = NULL;

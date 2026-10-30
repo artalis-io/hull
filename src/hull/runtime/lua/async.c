@@ -381,13 +381,13 @@ static int hl_lua_co_guarded(lua_State *L)
     return lua_gettop(L);
 }
 
-int hl_lua_resume_status(lua_State *co, int status)
+int hl_lua_resume_status(lua_State *co, lua_State *from, int status)
 {
     if (status != LUA_OK && status != LUA_YIELD) {
         /* Its __close handlers run now, inside this run, before the
          * caller's stale-transaction guard (audit 38). */
         int st = lua_status(co);
-        status = hl_lua_close_errored(co, NULL, status);
+        status = hl_lua_close_errored(co, from, status);
         if (st != LUA_OK && st != LUA_YIELD)
             *hl_lua_co_mark(co) = &hl_lua_died_marker;
         return status;
@@ -400,7 +400,7 @@ int hl_lua_resume_status(lua_State *co, int status)
      * response Keel had already sent and reused), a timer stayed in
      * flight for good. It ends here, as an error. Closed first, so a
      * reference the app kept to it cannot run it again. */
-    (void)lua_closethread(co, NULL);
+    (void)lua_closethread(co, from);   /* @p from: audit 39 */
     *hl_lua_co_mark(co) = &hl_lua_died_marker;   /* audit 38 */
     /* Pushed protected: out of memory here aborted the process (no panic
      * handler). Without room for the message, nil stands in - the callers
@@ -539,6 +539,14 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     KlHttpConn *conn = lc->conn;
 
     if (!co || hl_lua_thread_is_abandoned(co)) return;
+    /* Defence in depth (audit 39): only a coroutine suspended on this wait
+     * is resumed. One that is not suspended (running, dead, closed) or no
+     * longer carries the parked mark is not this continuation's to run:
+     * lua_resume would fail on it and the error path would close it -
+     * possibly a thread that is running further up the C stack. It ends
+     * through the error path below without being resumed. */
+    int refused = (lua_status(co) != LUA_YIELD ||
+                   *hl_lua_co_mark(co) != &hl_lua_parked_marker);
     /* The coroutine stays marked parked while its result is built below:
      * push_result allocates under lua_pcall, and a __gc finalizer that
      * allocation runs is app code that must not resume it (audit 36). The
@@ -566,7 +574,9 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
      * coroutine, which takes the error path below - one request fails. */
     int nargs = 0;
     int push_failed = 0;
-    if (driver && lc->push_result) {
+    if (refused) {
+        push_failed = 1;
+    } else if (driver && lc->push_result) {
         lua_State *M = lua->L;
         if (!lua_checkstack(M, 3) || !lua_checkstack(co, 2)) {
             push_failed = -1;
@@ -594,11 +604,13 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         /* Not resumed: the coroutine ends here, through the error path,
          * with the error object on top (or, with no stack room even for
          * that, whatever is on top - hl_lua_error_text reads any value). */
-        status = LUA_ERRMEM;
+        status = refused ? LUA_ERRRUN : LUA_ERRMEM;
         /* The coroutine stays suspended in the binding's lua_yieldk, and the
          * op its continuation would read is freed once this returns: no one
-         * may resume it again (audit 33). */
-        hl_lua_set_abandoned(co);
+         * may resume it again (audit 33). A refused one that already died
+         * keeps its died mark (refused too, and reported dead). */
+        if (!refused || *hl_lua_co_mark(co) != &hl_lua_died_marker)
+            hl_lua_set_abandoned(co);
     } else {
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
         /* A new run: budget.c. A resume of app.main itself keeps main's
@@ -609,7 +621,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         status = lua_resume(co, lua->L, nargs, &nres);
         if (*hl_lua_co_mark(co) == &hl_lua_resuming_marker)
             *hl_lua_co_mark(co) = NULL;   /* no continuation took it */
-        status = hl_lua_resume_status(co, status);
+        status = hl_lua_resume_status(co, lua->L, status);
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
     }
 
@@ -696,7 +708,10 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     } else {
         /* Error */
         char ebuf[512];
-        const char *msg = hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf));
+        const char *msg = refused
+            ? "a Hull operation completed for a coroutine that was not "
+              "waiting on it"
+            : hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf));
         int was_main = (lua->cli_main_co == co);
         if (conn)
             log_error("[hull:c] async lua handler error: %s",
@@ -1272,7 +1287,7 @@ int lua_hull_spawn(lua_State *L)
 
     int nres = 0;
     int sr   = lua_resume(co, L, 0, &nres);
-    sr = hl_lua_resume_status(co, sr);   /* a bare yield: an error */
+    sr = hl_lua_resume_status(co, L, sr);   /* a bare yield: an error */
 
     /* The spawner's state back before anything below that can raise (a
      * luaL_ref out of memory; the trip): a raise skipped it (audit 17). */
@@ -1426,7 +1441,7 @@ static void lua_task_fire(void *user)
     HL_LUA_ARM(lua, co);                                       /* its own run */
     int nres = 0;
     int st = lua_resume(co, L, 0, &nres);
-    st = hl_lua_resume_status(co, st);   /* a bare yield: an error */
+    st = hl_lua_resume_status(co, L, st);   /* a bare yield: an error */
     hl_db_registry_guard_stale_txns(lua->base.db_registry);   /* audit 6 M1 */
 
     if (st == LUA_OK) {

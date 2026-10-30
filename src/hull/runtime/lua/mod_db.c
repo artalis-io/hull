@@ -413,6 +413,10 @@ static int lua_db_query_impl(lua_State *L)
     lua_settop(L, table_idx);
     lua_scratch_release(L, params);
 
+    /* A row build that failed because the run's budget or deadline tripped
+     * inside it raises the trip, not a catchable memory error (audit 39). */
+    if (qc.failed && hl_lua_budget_tripped(L))
+        return hl_lua_budget_raise(L);
     if (qc.failed)
         return luaL_error(L, "db.query: not enough memory for the result");
     if (rc != 0) {
@@ -828,6 +832,8 @@ static int lua_db_table_columns(lua_State *L)
     LuaColForwardCtx fwd = { L, 0, 0 };
     int rc = hl_db_table_columns(h, table, lua_db_table_columns_cb, &fwd);
     lua_closeslot(L, guard);    /* the result table stays on top */
+    if (fwd.failed && hl_lua_budget_tripped(L))
+        return hl_lua_budget_raise(L);   /* audit 39, as db.query */
     if (fwd.failed)
         return luaL_error(L, "db.table_columns: not enough memory for the result");
     if (rc < 0) {

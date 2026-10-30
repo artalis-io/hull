@@ -9939,7 +9939,7 @@ UTEST(lua_audit4, bare_yield_is_an_error)
     int nres = 0;
     int st = lua_resume(co, L, 0, &nres);
     ASSERT_EQ(st, LUA_YIELD);
-    st = hl_lua_resume_status(co, st);
+    st = hl_lua_resume_status(co, L, st);
     EXPECT_EQ(st, LUA_ERRRUN);
     lua_pop(L, 1);
     cleanup_lua();
@@ -14560,6 +14560,127 @@ UTEST(lua_audit38, ordinary_fs_work_keeps_its_headroom)
     EXPECT_STREQ(err, "");
     cleanup_lua_caps();
     a15_fs_close(&f);
+}
+
+/* ── Audit 39: closing a dying task passes its resumer ───────────────────
+ *
+ * hl_lua_resume_status closed a coroutine that raised or made a bare yield
+ * with lua_closethread(co, NULL): the closed thread's C-call depth restarted
+ * at 0 and its __close handlers' unreported work (Lua patch 0004) went
+ * nowhere. hull._spawn (and tui.async) run the task inline inside the
+ * spawner's run, so a dying task whose __close spawned another dying task
+ * nested C frames with no limit until the native stack overflowed (one
+ * request killed the server), and each closed task's handlers ran up to a
+ * hook stride the budget never saw. The resumer is passed as `from` now. */
+
+/* A bare-yield (and a raising) task whose __close spawns another: the chain
+ * stops at Lua's C-stack limit, inside the spawner's run, instead of
+ * overflowing the native stack. */
+static const char A39_BOMB_YIELD[] =
+    "local n = 0\n"
+    "local function bomb() return function() n = n + 1\n"
+    "  local x <close> = setmetatable({}, {__close = function()\n"
+    "    hull._spawn(bomb()) end})\n"
+    "  coroutine.yield() end end\n";
+static const char A39_BOMB_RAISE[] =
+    "local n = 0\n"
+    "local function bomb() return function() n = n + 1\n"
+    "  local x <close> = setmetatable({}, {__close = function()\n"
+    "    hull._spawn(bomb()) end})\n"
+    "  error('dying') end end\n";
+
+UTEST(lua_audit39, nested_dying_spawn_stops_at_the_c_stack_limit_in_main)
+{
+    lua_task_log_reset();
+    static const char *const bombs[] = { A39_BOMB_YIELD, A39_BOMB_RAISE };
+    for (size_t i = 0; i < 2; i++) {
+        char body[1024];
+        snprintf(body, sizeof body, "%s"
+                 "hull._spawn(bomb())\n"
+                 "check(n > 1 and n < 1000, 'tasks: '..n)\n", bombs[i]);
+        char out[512];
+        ASSERT_EQ(run_task_script(body, out, sizeof out), 0);
+        EXPECT_STREQ(out, "ok");
+    }
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+UTEST(lua_audit39, nested_dying_spawn_stops_at_the_c_stack_limit_in_a_handler)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_State *L = lua_rt.L;
+    char src[2048];
+    snprintf(src, sizeof src,
+             "app.manifest({modules = {'hull/http-server@1'}})\n"
+             "%s"
+             "app.get('/boom', function(req, res) hull._spawn(bomb()) "
+             "  res:json({ n = n }) end)\n", A39_BOMB_YIELD);
+    ASSERT_EQ(luaL_dostring(L, src), LUA_OK);
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    ASSERT_EQ(hl_lua_wire_routes(&lua_rt, &router), 0);
+    hl_lua_test_register(L, &router, &lua_rt);
+    ASSERT_EQ(luaL_dostring(L,
+        "test('boom', function() "
+        "  local r = test.get('/boom') assert(r.status == 200, r.status) "
+        "  local n = r.json.n "
+        "  assert(n > 1 and n < 1000, 'tasks: ' .. tostring(n)) "
+        "  r = test.get('/boom') assert(r.status == 200, r.status) end)\n"),
+        LUA_OK);
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[1];
+    memset(results, 0, sizeof results);
+    hl_lua_test_run(L, &total, &passed, &failed, NULL, results, 1);
+    EXPECT_EQ(total, 1);
+    EXPECT_TRUE_MSG(results[0].passed, results[0].error);
+
+    kl_http_router_free(&router);
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua_caps();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+#endif
+
+/* Each closed task's __close work is charged to the spawner: a loop of
+ * spawns whose handler runs just under a hook stride and then raises trips
+ * the limit (unfixed, none of it was ever charged and the loop ran on). */
+UTEST(lua_audit39, closed_task_close_work_is_charged_to_the_spawner)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    lua_task_log_reset();
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_rt.max_instructions = 20000000;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+
+    lua_State *co;
+    (void)ssh_co_start(&lua_rt,
+        "local mt = {__close = function()\n"
+        "  local s = 0 for i = 1, 4000 do s = s + i end error('c') end}\n"
+        "local function body() local x <close> = setmetatable({}, mt) error('b') end\n"
+        "for i = 1, 20000 do hull._spawn(body) end\n"
+        "OUT = 'ran on'\n", &co);
+    if (lua_status(co) == LUA_YIELD)
+        ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+    lua_getglobal(lua_rt.L, "OUT");
+    EXPECT_TRUE(lua_isnil(lua_rt.L, -1));
+    lua_pop(lua_rt.L, 1);
+    const char *e = lua_tostring(co, -1);
+    EXPECT_TRUE_MSG(e && strstr(e, "instruction limit") != NULL, e ? e : "(none)");
+
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
 }
 
 UTEST_MAIN();

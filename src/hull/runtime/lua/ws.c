@@ -95,7 +95,7 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
 
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
-    status = hl_lua_resume_status(co, status);
+    status = hl_lua_resume_status(co, lua->L, status);
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     if (status == LUA_OK) {
@@ -153,7 +153,7 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
 
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
-    status = hl_lua_resume_status(co, status);
+    status = hl_lua_resume_status(co, lua->L, status);
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
     if (status == LUA_OK) {
@@ -230,7 +230,7 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
 
         int nres = 0;
         int status = lua_resume(co, lua->L, nargs, &nres);
-        status = hl_lua_resume_status(co, status);
+        status = hl_lua_resume_status(co, lua->L, status);
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: any open txn is stale now */
 
         lua->active_on_complete     = NULL;

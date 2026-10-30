@@ -45,6 +45,12 @@ app.get("/mixed", function(req, res)
     local s = inst:call("B")
     res:json({ a = a or "NIL", s = s or "NIL" })
 end)
+-- the method form the reference documents (audit 39: the proxy table was
+-- taken for the input)
+app.get("/method", function(req, res)
+    local r, e = inst.async:call("M")
+    res:json({ out = r or "NIL", err = e or "none" })
+end)
 EOF
 
 cat > "$TMP/app.js" << 'EOF'
@@ -82,9 +88,13 @@ run_rt() {
     pa=$(curl -sf "http://127.0.0.1:$PORT/pa?t=hello_pa" 2>/dev/null || echo FAIL)
     reuse=$(curl -sf "http://127.0.0.1:$PORT/reuse" 2>/dev/null || echo FAIL)
     mixed=$(curl -sf "http://127.0.0.1:$PORT/mixed" 2>/dev/null || echo FAIL)
+    method=$(curl -sf "http://127.0.0.1:$PORT/method" 2>/dev/null || echo FAIL)
     kill $PID 2>/dev/null; wait $PID 2>/dev/null || true
     case "$pa"    in *'"out":"hello_pa"'*) pass "${runtime} persistent async runs" ;; *) fail "${runtime} persistent async (got: $pa)" ;; esac
     case "$reuse" in *'"ok":true'*)        pass "${runtime} repeated reuse (busy clears)" ;; *) fail "${runtime} repeated reuse (got: $reuse)" ;; esac
+    if [ "$runtime" = "lua" ]; then
+        case "$method" in *'"out":"M"'*) pass "lua inst.async:call method form" ;; *) fail "lua inst.async:call method form (got: $method)" ;; esac
+    fi
     case "$mixed" in *'"a":"A"'*'"s":"B"'*|*'"s":"B"'*'"a":"A"'*) pass "${runtime} sync after async (busy cleared)" ;; *) fail "${runtime} sync after async (got: $mixed)" ;; esac
 }
 

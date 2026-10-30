@@ -170,6 +170,26 @@ release-artifact layout).
   `SELECT 'x1' a, 42 n, 'y2' b` gave `a = 'y2'` - in `conn.query`, `db.async`,
   `worker.dispatch` and `table_columns`: short ids and role names could be confused. The value
   now points into the chunk's vector, which outlives the row callback.
+- **One request could crash the server through a chain of dying Lua tasks** (audit 39,
+  Lua). Audit 38 closes a task that raised or made a bare `coroutine.yield()` in the run
+  that ended it, but closed it with no resumer (`lua_closethread(co, NULL)`): the closed
+  thread's C-call depth restarted at 0 and its `__close` handlers' unreported work went
+  nowhere. `hull._spawn` (and `tui.async`) run the task inline inside the spawner's run, so a
+  dying task whose `__close` spawned another dying task nested C frames with no limit until
+  the native stack overflowed (`app.get("/boom", ...)` killed the server; the `app.main`
+  twin SIGSEGV'd ~3500 tasks deep), and each closed task's handlers ran up to a hook stride
+  (10000 instructions) the budget never saw - 200000 such spawns ran ~1.8 billion
+  instructions with no trip. Every runtime resume now passes its resumer to
+  `hl_lua_resume_status`, which closes the coroutine from it: the chain stops at Lua's
+  C-stack limit ("C stack overflow", logged) and the handlers' work is charged to the
+  spawner. As defence in depth, a Hull operation's completion no longer resumes a coroutine
+  that is not suspended on it with the parked mark (it ends through the error path).
+  Smaller fixes in the same pass: `inst.async:call(x)` (the documented method form) took the
+  proxy table as the input and now works; `gpu.async.dispatch` refuses a buffer name of
+  `HL_GPU_NAME_MAX` bytes or more (it was dropped, the buffer run unnamed) and fails on a
+  name copy it cannot allocate; `db.query` / `table_columns` raise the budget / deadline trip
+  that stopped their row build instead of "not enough memory"; and the Valkey `kv` `set` /
+  `cas` bindings charge their key and value bytes (1 unit per 8) before sending.
 - **A JS iterator helper could hold the event loop past every limit** (audit 38).
   `Array.prototype.values.call({ length: 2 ** 53 - 1 }).drop(2 ** 53 - 1).next()` ran up to
   2^53 steps inside one builtin call: QuickJS calls a built-in iterator's `next` directly, so
