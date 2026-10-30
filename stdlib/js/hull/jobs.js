@@ -26,6 +26,8 @@ import { json } from "hull:json";
 import { crypto } from "hull:crypto";
 import { _test_hooks } from "hull:_test_hooks";
 import { _refusal } from "hull:_refusal";
+import { _text } from "hull:_text";
+import { encoding } from "hull:encoding";
 const db = dbModule.default();
 
 // Outcome sentinels a handler returns. Frozen objects so
@@ -101,40 +103,28 @@ function backoffDelay(attempts) {
 // write fail on Postgres (MySQL also refuses invalid UTF-8, and more than
 // 64 KiB in a TEXT column), and the failed bookkeeping write threw out of
 // work() / the subscription drain: the batch stayed 'running' and the worker
-// died, on every lease expiry. So: a non-string is converted under try
-// (toString is app code), NULs are dropped, a lone surrogate becomes U+FFFD,
-// and the text is capped at TEXT_MAX UTF-8 bytes, cut on a code point. The
-// Lua twin (safe_text) applies the same rules to bytes.
+// died, on every lease expiry. The rules (conversion under try, NULs
+// dropped, a lone surrogate as U+FFFD, a cap cut on a code point) live in the
+// shared hull:_text storable (audit 39), which every stdlib write of app or
+// request text uses.
 const TEXT_MAX = 4096;
 const UNCONVERTIBLE = "(an error value that could not be converted to text)";
 function safeText(v) {
-    let s;
-    if (typeof v === "string") s = v;
-    else {
-        try { s = String(v); } catch (_e) { s = UNCONVERTIBLE; }
-        if (typeof s !== "string") s = UNCONVERTIBLE;
+    return _text.storable(v, TEXT_MAX, true, UNCONVERTIBLE);
+}
+
+// A stored job / step result (audit 39; see the Lua sibling): the Lua twin
+// stores a result whose JSON is not UTF-8 as "b64:" + base64(JSON), byte-
+// exact. JSON.stringify output is always valid Unicode (a lone surrogate is
+// escaped), so this side writes plain JSON, and reads both forms - the bytes
+// as UTF-8, a byte that is not as U+FFFD.
+const STORED_B64 = "b64:";
+function unstoredJson(v) {
+    if (typeof v === "string" && v.startsWith(STORED_B64)) {
+        const raw = encoding.base64.decode(v.slice(STORED_B64.length));
+        if (raw !== null) return _text.fromUtf8Lenient(raw);
     }
-    // Every kept unit is at least one byte, so 2 x TEXT_MAX units bound the
-    // scan for a huge string of NULs.
-    let cut = false;
-    if (s.length > 2 * TEXT_MAX) { s = s.slice(0, 2 * TEXT_MAX); cut = true; }
-    let out = "", bytes = 0;
-    const n = s.length;
-    for (let i = 0; i < n; i++) {
-        let c = s.charCodeAt(i), w;
-        if (c === 0) continue;
-        if (c < 0x80) w = 1;
-        else if (c < 0x800) w = 2;
-        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < n &&
-                 (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) w = 4;
-        else if (c >= 0xd800 && c <= 0xdfff) { w = 3; c = 0xfffd; }
-        else w = 3;
-        if (bytes + w > TEXT_MAX) { cut = true; break; }
-        bytes += w;
-        if (w === 4) { out += s.slice(i, i + 2); i++; }
-        else out += String.fromCharCode(c);
-    }
-    return cut ? out + "..." : out;
+    return v;
 }
 
 // An error value as text, for last_error. Its message getter and toString
@@ -664,7 +654,7 @@ function loadDeps(dependentId) {
     edges.forEach((e, i) => {
         const r = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", [e.dep_id]);
         if (r[0] && r[0].result !== undefined && r[0].result !== null) {
-            try { out[i] = json.decode(r[0].result); } catch (_e) { out[i] = undefined; }
+            try { out[i] = json.decode(unstoredJson(r[0].result)); } catch (_e) { out[i] = undefined; }
         } else {
             out[i] = undefined;
         }
@@ -2400,7 +2390,7 @@ function result(id) {
         // Fail soft on a corrupted result row (we wrote valid JSON, but don't
         // throw on external corruption): fall back to the raw string.
         if (rr.length && rr[0].result != null) {
-            try { out.result = JSON.parse(rr[0].result); }
+            try { out.result = JSON.parse(unstoredJson(rr[0].result)); }
             catch (e) { out.result = rr[0].result; }
         }
     } else if (status === "dead") {
@@ -2459,7 +2449,7 @@ async function runStep(workflowId, stepKey, fn) {
         [workflowId, stepKey]);
     if (rows.length) {
         if (rows[0].result == null) return undefined;
-        try { return JSON.parse(rows[0].result); } catch (e) { return rows[0].result; }
+        try { return JSON.parse(unstoredJson(rows[0].result)); } catch (e) { return rows[0].result; }
     }
     // First execution: run, then persist. At-least-once - a crash between the
     // side effect and this INSERT re-runs the step on resume (steps must be

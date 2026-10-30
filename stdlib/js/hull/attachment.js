@@ -28,6 +28,7 @@ const db = dbInternal.connection();
 import { fs } from "hull:fs";
 import { mime as mimeMod } from "hull:mime";
 import { time } from "hull:time";
+import { _text } from "hull:_text";
 
 let maxSize = null;          // null = unlimited per upload
 let mimeAllowlist = null;    // null = any MIME allowed
@@ -216,8 +217,11 @@ async function store(part, opts) {
             "(id, blob_id, original_name, mime, declared_mime, " +
             " size, uploaded_by, uploaded_at, refcount) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
-            [id, blobId, part.filename, sniffed, declared,
-             size, uploadedBy, time.now()]
+            // The filename and declared type are request text: made
+            // storable (hull:_text, audit 39; see the Lua sibling).
+            [id, blobId, _text.storable(part.filename, 1024), sniffed,
+             _text.storable(declared, 255),
+             size, uploadedBy === null ? null : _text.storable(uploadedBy, 255), time.now()]
         );
     } catch (e) {
         // The blob was finalised before the row: with no row it was never

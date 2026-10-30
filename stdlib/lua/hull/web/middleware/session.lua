@@ -13,6 +13,7 @@ local crypto = require("hull.crypto")
 local db = require("hull.db._internal").connection()
 local time = require("hull.time")
 local _request = require("hull.web._request")
+local _text = require("hull._text")
 
 local session = {}
 
@@ -230,18 +231,20 @@ function session.create(data, opts)
         -- Real UAs top out around 500 chars; bots and scanners can
         -- send 100KB UAs. Cap to bound the row size - the value is
         -- only used for the /devices listing display.
-        if type(ua) == "string" and #ua > 512 then
-            ua = ua:sub(1, 512)
-        end
         -- Round-9 MEDIUM-7: cap IP too. IPv6 max is ~45 chars
         -- (including embedded IPv4); 64 leaves headroom for the
         -- bracketed `[::1]:port` form. Pre-fix an attacker could
         -- submit a 64 KiB X-Forwarded-For header and the entire
-        -- string landed in the indexed column. UA was capped years
-        -- ago; IP path was missed.
-        if type(ip) == "string" and #ip > 64 then
-            ip = ip:sub(1, 64)
-        end
+        -- string landed in the indexed column.
+        -- Both are request text, stored as text every backend accepts
+        -- (hull._text.storable, audit 39): a User-Agent with obs-text
+        -- bytes, or a byte cut through a multibyte character, failed this
+        -- INSERT on Postgres / MySQL - after session.rotate had destroyed
+        -- the old session, the auth flow had consumed its single-use token
+        -- or OAuth had redeemed its code - so every login from that client
+        -- answered 500.
+        if ua ~= nil then ua = _text.storable(ua, 512) end
+        if ip ~= nil then ip = _text.storable(ip, 64) end
     end
 
     -- The ttl column is written only when the caller chose one (the values
@@ -384,8 +387,19 @@ end
 --
 -- @tparam string session_id  Empty / nil is a no-op.
 -- @treturn boolean  true if a row was deleted, false otherwise.
+-- A session id as generate_id makes it: 64 lowercase hex characters.
+local function is_sid(s)
+    return type(s) == "string" and #s == 64 and s:find("^[0-9a-f]+$") ~= nil
+end
+
 function session.destroy(session_id)
-    if not session_id or session_id == "" then
+    -- Anything else names no session (audit 39). The id comes from a cookie,
+    -- whose %00 decodes to a NUL: the DELETE then failed on Postgres - from
+    -- session.rotate, after the auth flow had consumed its single-use token,
+    -- and from logout before the clearing Set-Cookie - so every login and
+    -- logout of a client holding such a cookie (a sibling subdomain can set
+    -- one) answered 500.
+    if not is_sid(session_id) then
         return false
     end
 
@@ -505,7 +519,7 @@ function session.destroy_others(current_sid, user_id)
     if not user_id then return 0 end
     return db.exec(
         "DELETE FROM _hull_sessions WHERE user_id = ? AND id != ?",
-        { user_id, current_sid or "" }) or 0
+        { user_id, is_sid(current_sid) and current_sid or "" }) or 0
 end
 
 --- Destroy every session for a user.

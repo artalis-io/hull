@@ -135,6 +135,41 @@ test("flush adds no second Idempotency-Key in another case", function()
     assert_eq(seen["idempotency-key"], "app-key", "the app's own")
 end)
 
+-- Audit 39: the delivery error is remote / runtime text; stored raw, a NUL or
+-- bytes that are not UTF-8 failed the outcome UPDATE on Postgres (and over
+-- 64 KiB on MySQL), and the row was re-leased for ever, uncounted.
+test("audit 39: a hostile delivery error is stored as safe text", function()
+    H.clear()
+    local id = outbox.enqueue({
+        kind = "webhook",
+        destination = "http://127.0.0.1:9999/a39",
+        payload = '{"event":"a39"}',
+    })
+    H.set_post(function()
+        error("upstream: a\0b caf\xc3 " .. string.rep("y", 70000), 0)
+    end)
+    local ok, err = pcall(outbox.flush)
+    H.set_post(nil)
+    assert(ok, tostring(err))
+    local row = H.rows(id)[1]
+    assert_eq(row.attempts, 1, "attempt counted")
+    local le = row.last_error
+    assert(type(le) == "string" and not le:find("\0", 1, true) and utf8.len(le)
+           and #le <= 4099, "storable last_error")
+    assert(le:find("caf\239\191\189", 1, true), "U+FFFD")
+end)
+
+test("audit 39: an idempotency_key the column cannot store is refused", function()
+    for _, k in ipairs({ "a\0b", "caf\xc3", string.rep("k", 256) }) do
+        local ok, err = pcall(outbox.enqueue, {
+            kind = "webhook", destination = "http://127.0.0.1:9999/k",
+            payload = "{}", idempotency_key = k,
+        })
+        assert_eq(ok, false, "refused")
+        assert(tostring(err):find("idempotency_key", 1, true), tostring(err))
+    end
+end)
+
 -- ── stats ───────────────────────────────────────────────────────────
 
 test("stats returns counts by state", function()

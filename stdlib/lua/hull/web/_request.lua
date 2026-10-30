@@ -46,9 +46,12 @@ function M.client_ip(req, trust_proxy)
     if not ip and type(req.remote_addr) == "string" and req.remote_addr ~= "" then
         ip = req.remote_addr
     end
-    if type(ip) == "string" and #ip > 64 then
-        ip = ip:sub(1, 64)
-    end
+    -- Capped at 64 bytes on a code point and made storable (audit 39): the
+    -- address keys rows (sessions, the audit log, the auth-flows / TOTP
+    -- lockout counters), and a header's obs-text bytes, or a byte cut
+    -- through a multibyte character, failed those writes on Postgres /
+    -- MySQL.
+    if ip ~= nil then ip = _text.storable(ip, 64) end
     return ip
 end
 

@@ -96,6 +96,53 @@ release-artifact layout).
   for an address it found locked - one commit less, visible in the response time. A locked
   address now runs the same statements in a hold mode that leaves the count and the lock as
   they were, so locked and unlocked addresses do the same database work.
+- **Request and app text the stdlib stored could fail the write after the side effect**
+  (audit 39, both runtimes). Postgres refuses a NUL and text that is not UTF-8 (a lone
+  surrogate in JS), MySQL's utf8mb4 columns refuse invalid UTF-8 and more than a TEXT column
+  holds, and several stdlib writes came after a step they cannot undo:
+  - **idempotency** stored the response AFTER sending it, as raw text. A body echoing request
+    bytes made the UPDATE raise after the handler's side effect had committed: the client got
+    a 500, the key stayed `inflight` for its 300 s lease (a retry got 409), and a retry after
+    the lease ran the handler again (a second payment). The response is now stored BEFORE it
+    is sent, body and headers base64 encoded (byte-exact, text every backend accepts), and a
+    store that still fails marks the key `unstored`, whose retries get a fixed 409 - never a
+    second run. **Stored format change:** a new row has `response_headers = "v2:" ||
+    base64(JSON)` and a base64 `response_body`; rows an earlier Hull wrote (a bare JSON object)
+    replay as before, but an earlier Hull reading a new row would replay the base64 text, so
+    do not roll back across this change while keys from it are live (24 h by default). The
+    middleware also never worked on MySQL, where `key` is a reserved word (its CREATE TABLE and
+    SELECT were syntax errors, and MySQL gives no TEXT column a DEFAULT): the column is now
+    quoted for the dialect, `state` is `VARCHAR(16)`, and on MySQL the body columns are
+    `MEDIUMTEXT` (tables made from now on; existing SQLite / Postgres tables are unchanged). A client `Idempotency-Key` that is not printable ASCII is a 400, not a 500, and
+    a principal or path the columns cannot store is hashed / made storable.
+  - **session / audit-log**: `ua:sub(1, 512)` / `substring(0, 512)` cut through a multibyte
+    character, and obs-text bytes in a User-Agent went in raw, so the `_hull_sessions` INSERT
+    failed - after `session.rotate` had destroyed the old session, auth-flows had consumed its
+    single-use token or burned the TOTP step, OAuth had redeemed its code - and every login
+    from that client answered 500; the audit-log write (pcall'd) never recorded the device, so
+    `on_new_device` fired on every login. The User-Agent, the client IP (`_request.client_ip`,
+    which also keys the auth-flows / TOTP lockout rows), the device fingerprint inputs, and
+    audit-log's `kind` / `session_id` / metadata are made storable. `session.destroy` (and
+    `destroy_others`' current id) take only a real 64-hex session id: a cookie's `%00`
+    decoded to a NUL whose DELETE failed on Postgres, from `rotate` after the token was spent
+    and from logout before the clearing Set-Cookie.
+  - **jobs** (a round 38 regression): a Lua handler returning bytes that are not UTF-8 (a
+    digest) was dead-lettered on every backend, SQLite included, where it had completed
+    before, and `ctx.step` raised on such a result. Its JSON is now stored as `"b64:" ||
+    base64(JSON)` when it is not UTF-8 (plain JSON otherwise, as before), reads back
+    byte-exact in Lua (and as UTF-8 with U+FFFD in JS), and old rows read unchanged.
+  - **outbox** `last_error` (an error near 64 KiB failed the outcome UPDATE on MySQL and the
+    row was re-leased for ever, uncounted), **attachment** filename / declared type /
+    `uploaded_by`, Lua **flash** text / kind, and **email** provider error bodies (copied
+    unbounded into the error message; capped at 1 KiB) are made storable. `outbox.enqueue`
+    refuses an `idempotency_key` the column cannot store, and **inbox** refuses a NUL in an id.
+  The rules (an `__tostring` / getter that throws cannot escape, NULs dropped, invalid UTF-8 /
+  lone surrogates as U+FFFD, a byte cap cut on a code point) moved from jobs into the shared
+  internal `hull._text.storable` / `hull:_text` `storable`. Covered by the idempotency /
+  session / outbox / jobs stdlib suites, `tests/e2e_text_storage.sh` (SQLite) and the audit 39
+  legs of `tests/e2e_postgres.sh` / `tests/e2e_mysql.sh` (a trigger refusing the stored
+  response proves the key is left processed).
+
 - **A DuckDB macro could read any `_hull_*` table by a name built at run time** (audit 37,
   both runtimes). The table-name functions (`histogram`, `histogram_values`,
   `pragma_table_info`, `pragma_show`, `table_info`, `show`, `duckdb_table_sample`) took a

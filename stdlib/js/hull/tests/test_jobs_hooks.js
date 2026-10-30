@@ -389,6 +389,17 @@ cases.audit38 = async () => {
         assertEq(jobs.get(id).lastError,
             "(an error value that could not be converted to text)", "fixed text");
     });
+    // Audit 39: a result holding a lone surrogate / a NUL completes and reads
+    // back equal (the Lua twin stores bytes that are not UTF-8 base64).
+    await atest("a result holding a lone surrogate completes and reads back", async () => {
+        const S = "\ud800x\u0000y";
+        jobs.handler("binres", () => ({ s: S }));
+        const id = jobs.enqueue("binres", {}, { queue: "bin39" });
+        await jobs.work({ batch: 1, queue: "bin39" });
+        const r = jobs.result(id);
+        assertEq(r.status, "done", "done: " + String(jobs.get(id).lastError));
+        assertEq(r.result && r.result.s, S, "result");
+    });
     await atest("a result that cannot be stored dead-letters the job once", async () => {
         jobs.handler("badres", () => { const o = {}; o.self = o; return o; });
         const id = jobs.enqueue("badres", {}, { queue: "r38" });

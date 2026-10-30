@@ -2423,6 +2423,18 @@ must preserve:
   own / raw-table fields and renders no function (Lua `{{ s.rep }}` printed a
   native address); `search` snippet / highlight hand FTS5 U+E000-E002
   sentinels, HTML-escape the text, then splice in the caller's markers.
+- **Stored request / app text goes through the shared safe-text helper
+  (audit 39)**: any stdlib write of text that comes from an app, a request
+  (headers, body, path, a filename) or a remote reply (an error body, an
+  exception message) passes it through `hull._text.storable` (Lua) /
+  `hull:_text`'s `storable` (JS) first: conversion that cannot throw out,
+  NULs dropped, invalid UTF-8 / lone surrogates as U+FFFD, a byte cap cut on a
+  code point. Postgres and MySQL refuse the raw text, and such writes often
+  follow a step that cannot be undone (a rotated session, a consumed token, a
+  committed side effect). Bytes that must round-trip exactly (an idempotent
+  response, a binary job result) are stored base64 instead, with old rows
+  still readable. Identifiers that are reserved words (`key`) are quoted with
+  `conn.quote_identifier`.
 - **Audit-metadata scrub**: `session.login_handler` strips `tokens`, `claims`,
   `password*`, `secret`, etc. from `audit_metadata` before `audit_log.record`.
 - **CSRF body caps**: 1 MiB body, 256 pairs, 4 KiB per pair (Lua); 413 over cap.

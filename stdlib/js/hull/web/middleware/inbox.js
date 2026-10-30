@@ -70,10 +70,15 @@ function checkIdLen(messageId, source) {
         throw new Error("inbox: messageId too long (max " + MAX_ID_LEN + ")");
     if (messageId && hasLoneSurrogate(messageId))
         throw new Error("inbox: messageId is not valid Unicode (a lone surrogate)");
+    // Nor a NUL (audit 39): Postgres refuses it.
+    if (typeof messageId === "string" && messageId.indexOf("\0") >= 0)
+        throw new Error("inbox: messageId contains a NUL");
     if (source && source.length > MAX_ID_LEN)
         throw new Error("inbox: source too long (max " + MAX_ID_LEN + ")");
     if (source && hasLoneSurrogate(source))
         throw new Error("inbox: source is not valid Unicode (a lone surrogate)");
+    if (typeof source === "string" && source.indexOf("\0") >= 0)
+        throw new Error("inbox: source contains a NUL");
 }
 
 // A ttl is a positive, finite NUMBER of seconds (audit 15): a string one

@@ -37,6 +37,7 @@ local function mock_res()
     function r:status(code) self._status = code; return self end
     function r:json(data) self._body = json.encode(data); return self end
     function r:text(data) self._body = data; return self end
+    function r:html(data) self._body = data; return self end
     function r:header(name, value) self._headers[name] = value; return self end
     return r
 end
@@ -199,6 +200,78 @@ test("different principals can use same key", function()
     local res2 = mock_res()
     local result = mw(req2, res2)
     assert_eq(result, 0, "different principal, should continue")
+end)
+
+-- ── audit 39: stored byte-exact, before sending; a failed store ─────
+
+test("audit 39: a body that is not UTF-8 / holds a NUL replays byte-exact", function()
+    local mw = idempotency.middleware()
+    local body = "<p>caf\xe9 \0 \xff\xfe</p>"
+    local req1 = mock_req("POST", "/a39", "x", { ["idempotency-key"] = "a39-bytes" })
+    local res1 = mock_res()
+    assert_eq(mw(req1, res1), 0)
+    idempotency.respond_html(req1, res1, 201, body)
+    assert_eq(res1._body, body, "first response")
+    local row = H.rows("a39-bytes")[1]
+    assert_eq(row.state, "complete")
+    assert(row.response_headers:sub(1, 3) == "v2:", "stored in the v2 format")
+    assert(utf8.len(row.response_body) and not row.response_body:find("\0", 1, true),
+           "stored body is plain text")
+    local req2 = mock_req("POST", "/a39", "x", { ["idempotency-key"] = "a39-bytes" })
+    local res2 = mock_res()
+    assert_eq(mw(req2, res2), 1)
+    assert_eq(res2._status, 201)
+    assert_eq(res2._body, body, "replayed bytes")
+    assert_eq(res2._headers["content-type"], "text/html; charset=utf-8")
+    assert_eq(res2._headers["X-Idempotency-Replay"], "true")
+end)
+
+test("audit 39: a failed store marks the key processed, never re-runnable", function()
+    local mw = idempotency.middleware()
+    local runs = 0
+    local function handle(req, res)
+        runs = runs + 1
+        idempotency.respond(req, res, 201, { n = runs })
+    end
+    local req1 = mock_req("POST", "/a39f", "x", { ["idempotency-key"] = "a39-fail" })
+    local res1 = mock_res()
+    assert_eq(mw(req1, res1), 0)
+    H.fail_store(true)
+    local ok, err = pcall(handle, req1, res1)
+    H.fail_store(false)
+    assert(ok, "the handler must not raise: " .. tostring(err))
+    assert_eq(res1._status, 201, "the response is still sent")
+    assert_eq(H.rows("a39-fail")[1].state, "unstored")
+    local req2 = mock_req("POST", "/a39f", "x", { ["idempotency-key"] = "a39-fail" })
+    local res2 = mock_res()
+    assert_eq(mw(req2, res2), 1, "a retry never reaches the handler")
+    assert_eq(res2._status, 409)
+    assert_eq(runs, 1)
+end)
+
+test("audit 39: a row in the old format still replays", function()
+    local mw = idempotency.middleware()
+    local req = mock_req("POST", "/legacy", "x", { ["idempotency-key"] = "a39-legacy" })
+    H.put_legacy("a39-legacy", "__anon", H.fingerprint(req), 200, '{"old":true}',
+                 '{"content-type":"application/json"}')
+    local res = mock_res()
+    assert_eq(mw(req, res), 1)
+    assert_eq(res._status, 200)
+    assert_eq(res._body, '{"old":true}')
+end)
+
+test("audit 39: a key that is not printable ASCII is a 400", function()
+    local mw = idempotency.middleware()
+    for _, k in ipairs({ "caf\xc3\xa9", "a\0b", "tab\tkey", "\xff" }) do
+        local res = mock_res()
+        assert_eq(mw(mock_req("POST", "/k", "x", { ["idempotency-key"] = k }), res), 1)
+        assert_eq(res._status, 400, "key " .. (k:gsub("%c", "?")))
+    end
+end)
+
+test("audit 39: a principal the column cannot store is hashed", function()
+    local p = H.norm_principal("u\xff\0")
+    assert(p:sub(1, 7) == "sha256:", p)
 end)
 
 -- ── cleanup ─────────────────────────────────────────────────────────

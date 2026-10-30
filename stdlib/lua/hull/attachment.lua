@@ -37,6 +37,7 @@ local db = require("hull.db._internal").connection()
 local fs = require("hull.fs")
 local mime_mod = require("hull.mime")
 local time = require("hull.time")
+local _text = require("hull._text")
 
 local attachment = {}
 
@@ -238,8 +239,15 @@ function attachment.store(part, opts)
             (id, blob_id, original_name, mime, declared_mime,
              size, uploaded_by, uploaded_at, refcount)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-        ]], { id, blob_id, part.filename, sniffed, declared,
-              size, opts.uploaded_by, time.now() })
+        ]], {
+            -- The filename and declared type are request text (a
+            -- multipart header): made storable (hull._text, audit 39),
+            -- or a Latin-1 filename failed the INSERT on Postgres /
+            -- MySQL after the upload was streamed and finalised.
+            id, blob_id, _text.storable(part.filename, 1024),
+            sniffed, _text.storable(declared, 255),
+            size, opts.uploaded_by ~= nil and _text.storable(opts.uploaded_by, 255) or nil,
+            time.now() })
     end)
     if not ins_ok then
         -- The blob was finalised before the row: with no row it was never

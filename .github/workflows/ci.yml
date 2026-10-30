@@ -364,6 +364,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-attachment
 
+      - name: Stored request / app text E2E tests (audit 39)
+        timeout-minutes: 2
+        run: make e2e-text-storage
+
       - name: Hypermedia entry upload E2E tests
         timeout-minutes: 2
         run: make e2e-hypermedia-photos-upload

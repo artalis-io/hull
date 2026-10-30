@@ -32,6 +32,7 @@ import { _test_hooks } from "hull:_test_hooks";
 import { json } from "hull:json";
 import { log } from "hull:log";
 import { _request } from "hull:web:_request";
+import { _text } from "hull:_text";
 
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
@@ -54,6 +55,66 @@ function completedExpiry(req) {
 const CLAIM_GUARD = " AND state = 'inflight' AND fingerprint = ? AND created_at = ?";
 // Matches the `key` column width (VARCHAR(255)); keys over this are rejected.
 const MAX_KEY_LEN = 255;
+
+// The `key` column, quoted for the connection's dialect (audit 39): KEY is a
+// reserved word in MySQL, where every statement naming it bare - the CREATE
+// TABLE included - was a syntax error. Quoting keeps the column name existing
+// SQLite / Postgres tables have. Resolved per call: the internal connection
+// is wired after module load.
+function keyCol() {
+    return db.quoteIdentifier("key");
+}
+
+// The stored response (audit 39; see the Lua sibling). It used to be written
+// AFTER it was sent, as raw text: a body Postgres refuses (a NUL, a lone
+// surrogate) made that UPDATE throw after the handler's side effect had
+// committed - a 500, the row 'inflight' for its lease, and a retry after the
+// lease ran the handler AGAIN. Now the body and the headers blob are stored
+// base64 encoded BEFORE the response is sent, and a write that still fails
+// marks the row STATE_UNSTORED, whose retries get a fixed 409.
+//
+// A v2 row has response_headers = STORED_V2 + base64(JSON of the headers)
+// and response_body = base64(body bytes); a JS string is stored as its
+// WTF-8 bytes (UTF-8, with a lone surrogate as its own 3-byte sequence, as
+// the runtime sends it), so the replay is byte-exact. A row an earlier Hull
+// wrote (a bare JSON object, or NULL) replays as before.
+const STORED_V2 = "v2:";
+const STATE_UNSTORED = "unstored";
+// Test seam (hull:_test_hooks failStore): makes the store throw.
+let failStoreForTest = false;
+
+// A JS string as WTF-8 bytes (a byte string). Built in 8 K-code pieces: in
+// this QuickJS `s += x` copies `s` each time.
+function wtf8Bytes(str) {
+    const parts = [];
+    let buf = [];
+    const push = (c) => {
+        buf.push(c);
+        if (buf.length >= 8192) { parts.push(String.fromCharCode.apply(null, buf)); buf = []; }
+    };
+    const n = str.length;
+    for (let i = 0; i < n; i++) {
+        let c = str.charCodeAt(i);
+        if (c < 0x80) { push(c); continue; }
+        if (c >= 0xd800 && c <= 0xdbff && i + 1 < n) {
+            const d = str.charCodeAt(i + 1);
+            if (d >= 0xdc00 && d <= 0xdfff) {
+                c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
+                i++;
+            }
+        }
+        if (c < 0x800) {
+            push(0xc0 | (c >> 6)); push(0x80 | (c & 63));
+        } else if (c < 0x10000) {
+            push(0xe0 | (c >> 12)); push(0x80 | ((c >> 6) & 63)); push(0x80 | (c & 63));
+        } else {
+            push(0xf0 | (c >> 18)); push(0x80 | ((c >> 12) & 63));
+            push(0x80 | ((c >> 6) & 63)); push(0x80 | (c & 63));
+        }
+    }
+    if (buf.length) parts.push(String.fromCharCode.apply(null, buf));
+    return parts.join("");
+}
 
 /* M-7 (Phase 5) + Phase 6 audit M-1: allowlist of headers safe to replay
  * or cache from a previous response. Excludes credential-bearing /
@@ -138,19 +199,25 @@ function init(opts) {
     const o = opts || {};
     if (o.ttl !== undefined) idemTtl = checkTtl("idempotency.init: ttl", o.ttl);
 
+    // MySQL's TEXT holds 64 KiB; a stored body (base64, 4/3 of the bytes)
+    // needs more there. MEDIUMTEXT holds 16 MiB; a body past even that is
+    // marked unstored rather than truncated (strict mode refuses it).
+    // `state` is a VARCHAR: MySQL gives no TEXT column a DEFAULT.
+    const bodyType = db.backendName === "mysql" ? "MEDIUMTEXT" : "TEXT";
+    const k = keyCol();
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_idempotency_keys (" +
-        "  key            VARCHAR(255) NOT NULL," +
+        "  " + k + " VARCHAR(255) NOT NULL," +
         "  principal_id   VARCHAR(255) NOT NULL DEFAULT '__anon'," +
         "  fingerprint    TEXT NOT NULL," +
         "  endpoint       TEXT NOT NULL," +
         "  status         INTEGER," +
-        "  response_body  TEXT," +
-        "  response_headers TEXT," +
-        "  state          TEXT NOT NULL DEFAULT 'inflight'," +
+        "  response_body  " + bodyType + "," +
+        "  response_headers " + bodyType + "," +
+        "  state          VARCHAR(16) NOT NULL DEFAULT 'inflight'," +
         "  created_at     INTEGER NOT NULL," +
         "  expires_at     INTEGER NOT NULL," +
-        "  PRIMARY KEY (principal_id, key)" +
+        "  PRIMARY KEY (principal_id, " + k + ")" +
         ")"
     );
     db.exec(
@@ -261,7 +328,10 @@ function normPrincipal(p) {
         throw new TypeError("idempotency: getPrincipal must return a string or a number, got "
             + typeof p);
     }
-    if (p.length > MAX_KEY_LEN || p.startsWith("sha256:"))
+    // Text the column cannot store as is (a NUL, a lone surrogate; audit 39)
+    // is hashed too: Postgres / MySQL refused the claim's INSERT.
+    if (p.length > MAX_KEY_LEN || p.startsWith("sha256:") || p.indexOf("\0") >= 0
+        || _text.storable(p, 4 * MAX_KEY_LEN) !== p)
         return "sha256:" + encoding.hex.encode(crypto.sha256(p));
     return p;
 }
@@ -319,6 +389,13 @@ function middleware(opts) {
             res.json({ error: "idempotency-key too long (max " + MAX_KEY_LEN + ")" });
             return 1;
         }
+        // Printable ASCII only (audit 39; see the Lua sibling): a key the
+        // column refuses failed the claim's INSERT - a 500 for a client error.
+        if (typeof key !== "string" || /[^\x20-\x7e]/.test(key)) {
+            res.status(400);
+            res.json({ error: "idempotency-key must be printable ASCII" });
+            return 1;
+        }
 
         if (!req.ctx) req.ctx = {};
 
@@ -337,8 +414,11 @@ function middleware(opts) {
         }
         const principalId = normPrincipal(rawPrincipal);
         const fingerprint = computeFingerprint(req);
-        const endpoint = req.method + " " + req.path;
+        // The path is request text: stored only for inspection, as text
+        // every backend accepts (audit 39).
+        const endpoint = _text.storable(String(req.method) + " " + String(req.path), 1024, true);
         const now = time.now();
+        const K = keyCol();
 
         // Periodic cleanup
         requestCount++;
@@ -350,7 +430,7 @@ function middleware(opts) {
         // Check for existing key
         const rows = db.query(
             "SELECT fingerprint, state, status, response_body, response_headers, expires_at " +
-            "FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
+            "FROM _hull_idempotency_keys WHERE principal_id = ? AND " + K + " = ?",
             [principalId, key]
         );
 
@@ -363,7 +443,7 @@ function middleware(opts) {
                 // fresh claim since the SELECT, and an unguarded DELETE
                 // removed that.
                 db.exec(
-                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? " +
+                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND " + K + " = ? " +
                     "AND expires_at <= ?",
                     [principalId, key, now]
                 );
@@ -391,8 +471,32 @@ function middleware(opts) {
                     return 1;
                 }
 
+                // Ran, but its response could not be stored (audit 39): the
+                // side effect happened, so the handler must not run again,
+                // and there is nothing to replay.
+                if (row.state === STATE_UNSTORED) {
+                    res.status(409);
+                    res.json({ error: "request with this idempotency key was already "
+                        + "processed; its response could not be stored for replay" });
+                    return 1;
+                }
+
                 // Completed with cached response
                 if (row.state === "complete" && row.status) {
+                    // A v2 row holds both blobs base64 encoded (bytes, sent
+                    // as is); an older row the raw text. An undecodable v2
+                    // row (tampered) replays an empty body.
+                    let headersJson = row.response_headers;
+                    let bodyText = row.response_body;
+                    let bodyBytes = null;
+                    if (typeof headersJson === "string" && headersJson.startsWith(STORED_V2)) {
+                        const hb = encoding.base64.decode(headersJson.slice(STORED_V2.length));
+                        headersJson = hb === null ? null : encoding.utf8.decode(hb);
+                        const bb = typeof bodyText === "string"
+                            ? encoding.base64.decode(bodyText) : null;
+                        bodyText = null;
+                        bodyBytes = bb === null ? "" : bb;
+                    }
                     res.status(row.status);
                     // Decode once. Walk once. M-7 filtering AND
                     // Content-Type detection both happen in the
@@ -400,9 +504,9 @@ function middleware(opts) {
                     // an uncaught SyntaxError from a second decode
                     // path (audit J#1).
                     let replayedCt = null;
-                    if (row.response_headers) {
+                    if (typeof headersJson === "string" && headersJson) {
                         let headers;
-                        try { headers = json.decode(row.response_headers); }
+                        try { headers = json.decode(headersJson); }
                         catch (_e) { headers = null; }
                         if (headers && typeof headers === "object") {
                             const keys = Object.keys(headers);
@@ -425,7 +529,10 @@ function middleware(opts) {
                         }
                     }
                     res.header("X-Idempotency-Replay", "true");
-                    if (row.response_body) {
+                    if (bodyBytes !== null) {
+                        if (!replayedCt) res.header("Content-Type", "application/json");
+                        res.bytes(encoding.bytes.toU8(bodyBytes));
+                    } else if (bodyText) {
                         // Default to application/json for back-compat
                         // with old cached rows from before respondHtml()
                         // existed; respond()/respondHtml() always stash
@@ -433,7 +540,7 @@ function middleware(opts) {
                         if (!replayedCt) {
                             res.header("Content-Type", "application/json");
                         }
-                        res.text(row.response_body);
+                        res.text(bodyText);
                     } else {
                         res.text("");
                     }
@@ -442,7 +549,7 @@ function middleware(opts) {
 
                 // Complete but no cached response: delete and re-run
                 db.exec(
-                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? " +
+                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND " + K + " = ? " +
                     "AND state = 'complete' AND status IS NULL",
                     [principalId, key]
                 );
@@ -453,8 +560,8 @@ function middleware(opts) {
         // a concurrent request claiming the same key).
         const inserted = db.insertIfAbsent(
             "_hull_idempotency_keys",
-            ["principal_id", "key"],
-            ["key", "principal_id", "fingerprint", "endpoint",
+            ["principal_id", K],
+            [K, "principal_id", "fingerprint", "endpoint",
              "state", "created_at", "expires_at"],
             [key, principalId, fingerprint, endpoint,
              "inflight", now, now + Math.min(ttl, INFLIGHT_LEASE)]
@@ -497,20 +604,6 @@ function middleware(opts) {
 // `contentType` is folded into the cached headers blob so the replay
 // path serves the response with the correct mime.
 function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, sendFn) {
-    res.status(statusCode);
-    if (extraHeaders) {
-        const keys = Object.keys(extraHeaders);
-        for (let i = 0; i < keys.length; i++) {
-            const k = keys[i];
-            const v = extraHeaders[k];
-            if (!isReplayableHeader(k)) continue;
-            if (typeof v !== "string") continue;
-            if (/[\r\n\x00]/.test(v)) continue;
-            res.header(k, v);
-        }
-    }
-    sendFn(res, bodyStr);
-
     if (req.ctx && req.ctx._idem_key) {
         // Phase 6 audit M-3: filter headers through the allowlist
         // before writing to SQLite so credential headers never
@@ -533,16 +626,55 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
                 filtered[k.toLowerCase()] = v;
             }
         }
-        const headersStr = json.encode(filtered);
-        db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, " +
-            "response_body = ?, response_headers = ?, expires_at = ? " +
-            "WHERE principal_id = ? AND key = ?" + CLAIM_GUARD,
-            [statusCode, bodyStr, headersStr, completedExpiry(req),
-             req.ctx._idem_principal, req.ctx._idem_key,
-             req.ctx._idem_fingerprint, req.ctx._idem_created]
-        );
+        // Stored BEFORE the response is sent, base64 encoded (audit 39; see
+        // STORED_V2). A write that still fails (a body past the column, a
+        // lost connection) marks the row unstored - a retry gets 409, never
+        // a second run of the handler - and the response is sent anyway.
+        const where = " WHERE principal_id = ? AND " + keyCol() + " = ?" + CLAIM_GUARD;
+        const claim = [req.ctx._idem_principal, req.ctx._idem_key,
+                       req.ctx._idem_fingerprint, req.ctx._idem_created];
+        try {
+            if (failStoreForTest) throw new Error("injected store failure");
+            const headersStr = STORED_V2 + encoding.base64.encode(wtf8Bytes(json.encode(filtered)));
+            const bodyEnc = encoding.base64.encode(
+                wtf8Bytes(typeof bodyStr === "string" ? bodyStr : String(bodyStr ?? "")));
+            db.exec(
+                "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, " +
+                "response_body = ?, response_headers = ?, expires_at = ?" + where,
+                [statusCode, bodyEnc, headersStr, completedExpiry(req)].concat(claim)
+            );
+        } catch (e) {
+            log.warn("idempotency: the response could not be stored for replay ("
+                + _text.storable(e && e.message !== undefined ? e.message : e, 512, true)
+                + "); retries of this key get 409");
+            try {
+                db.exec(
+                    "UPDATE _hull_idempotency_keys SET state = '" + STATE_UNSTORED + "', " +
+                    "status = NULL, response_body = NULL, response_headers = NULL, " +
+                    "expires_at = ?" + where,
+                    [completedExpiry(req)].concat(claim)
+                );
+            } catch (e2) {
+                log.error("idempotency: the key could not be marked processed ("
+                    + _text.storable(e2 && e2.message !== undefined ? e2.message : e2, 512, true)
+                    + "); a retry after the " + INFLIGHT_LEASE + " s lease runs the handler again");
+            }
+        }
     }
+
+    res.status(statusCode);
+    if (extraHeaders) {
+        const keys = Object.keys(extraHeaders);
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            const v = extraHeaders[k];
+            if (!isReplayableHeader(k)) continue;
+            if (typeof v !== "string") continue;
+            if (/[\r\n\x00]/.test(v)) continue;
+            res.header(k, v);
+        }
+    }
+    sendFn(res, bodyStr);
 }
 
 function respond(req, res, statusCode, data, extraHeaders) {
@@ -586,7 +718,7 @@ function complete(req) {
     if (req.ctx && req.ctx._idem_key) {
         db.exec(
             "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? " +
-            "WHERE principal_id = ? AND key = ?" + CLAIM_GUARD,
+            "WHERE principal_id = ? AND " + keyCol() + " = ?" + CLAIM_GUARD,
             [completedExpiry(req), req.ctx._idem_principal, req.ctx._idem_key,
              req.ctx._idem_fingerprint, req.ctx._idem_created]
         );
@@ -613,10 +745,24 @@ export { idempotency };
 // inside the module, where the _hull_* namespace check admits the query.
 _test_hooks.register("hull:web:middleware:idempotency", {
     rows(key) {
-        return db.query("SELECT state, status FROM _hull_idempotency_keys WHERE key = ?", [key]);
+        return db.query("SELECT state, status, response_body, response_headers " +
+                        "FROM _hull_idempotency_keys WHERE " + keyCol() + " = ?", [key]);
     },
     // The principal helpers (audit 23: they were exported on the module).
     defaultPrincipal,
     normPrincipal,
     computeFingerprint,
+    // Make the response store fail (audit 39: a failed store must leave the
+    // key processed, never re-runnable).
+    failStore(on) { failStoreForTest = !!on; },
+    // A completed row in the format an earlier Hull wrote (raw body, bare
+    // JSON headers), for the backward-compatibility check.
+    putLegacy(key, principal, fingerprint, status, body, headersJson) {
+        const now = time.now();
+        db.exec("INSERT INTO _hull_idempotency_keys (" + keyCol() + ", principal_id, " +
+            "fingerprint, endpoint, status, response_body, response_headers, state, " +
+            "created_at, expires_at) VALUES (?, ?, ?, 'POST /legacy', ?, ?, ?, " +
+            "'complete', ?, ?)",
+            [key, principal, fingerprint, status, body, headersJson, now, now + 3600]);
+    },
 });

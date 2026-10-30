@@ -1050,7 +1050,7 @@ verify step between successful first-factor auth and `on_login` when
   - Cache hit + same fingerprint → returns cached response (handler skipped).
   - Cache hit + different fingerprint → returns 409 Conflict.
   - Fingerprint: `SHA-256(method + path + body)`.
-- `idempotency.respond(req, res, status, data)`. Sends response and caches it for replay.
+- `idempotency.respond(req, res, status, data)`. Sends response and caches it for replay. The response is stored BEFORE it is sent, body and headers base64 encoded, so a body holding bytes that are not UTF-8 or a NUL (or, in JS, a lone surrogate) replays byte-exact on every backend; a store that still fails (a body past the column, a lost connection) marks the key processed, and its retries get a 409 rather than running the handler again (audit 39). A client key that is not printable ASCII is a 400. Works on MySQL (the `key` column is quoted; `key` is a reserved word there).
 - `idempotency.complete(req)`. Marks key as processed without caching response body.
 - **Replay-header allowlist (security):** when `idempotency.respond` is
   called with `extra_headers`, only headers on a strict allowlist are

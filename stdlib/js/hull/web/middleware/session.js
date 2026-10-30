@@ -18,6 +18,7 @@ import { json } from "hull:json";
 import { app } from "hull:app";
 import { log } from "hull:log";
 import { _request } from "hull:web:_request";
+import { _text } from "hull:_text";
 
 let sessionTtl = 86400;
 // Round-8 MEDIUM-8: absolute (hard) TTL cap from created_at.
@@ -199,14 +200,15 @@ function create(data, opts) {
         ua = h["user-agent"] || null;
         // Real UAs top out around 500 chars; bots and scanners can
         // send 100KB UAs. Cap to bound the row size - the value is
-        // only used for the /devices listing display.
-        if (typeof ua === "string" && ua.length > 512) {
-            ua = ua.substring(0, 512);
-        }
-        // Round-9 MEDIUM-7: cap IP. See Lua sibling for rationale.
-        if (typeof ip === "string" && ip.length > 64) {
-            ip = ip.substring(0, 64);
-        }
+        // only used for the /devices listing display. Round-9
+        // MEDIUM-7: cap IP too. Both are request text, stored as text
+        // every backend accepts, capped in UTF-8 bytes on a code point
+        // (hull:_text storable, audit 39): substring(0, 512) could split
+        // a surrogate pair, and the lone half failed this INSERT on
+        // Postgres / MySQL after the old session was rotated away and
+        // the auth flow's single-use token consumed.
+        if (ua !== null && ua !== undefined) ua = _text.storable(ua, 512);
+        if (ip !== null && ip !== undefined) ip = _text.storable(ip, 64);
     }
 
     db.exec(
@@ -331,8 +333,16 @@ function update(sessionId, data, opts) {
  *
  * @param {string} sessionId
  */
+// A session id as generateId makes it: 64 lowercase hex characters.
+function isSid(s) {
+    return typeof s === "string" && /^[0-9a-f]{64}$/.test(s);
+}
+
 function destroy(sessionId) {
-    if (!sessionId || typeof sessionId !== "string")
+    // Anything else names no session (audit 39; see the Lua sibling): a
+    // cookie's %00 decodes to a NUL, and the DELETE then failed on Postgres
+    // after the auth flow had consumed its single-use token.
+    if (!isSid(sessionId))
         return false;
 
     const affected = db.exec(
@@ -450,7 +460,7 @@ function destroyOthers(currentSid, userId) {
     if (userId === null) return 0;
     return db.exec(
         "DELETE FROM _hull_sessions WHERE user_id = ? AND id != ?",
-        [userId, currentSid || ""]) || 0;
+        [userId, isSid(currentSid) ? currentSid : ""]) || 0;
 }
 
 /**
