@@ -58,6 +58,7 @@
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"   /* hl_net_op_suspend / _complete, HlSuspendOp */
+#include "hull/shared/refusal.h" /* HL_REFUSAL_BUSY */
 
 /* Declared at its call sites rather than in a header, matching
  * mod_http_client.c and mod_compute.c. */
@@ -381,7 +382,12 @@ static int ssh_busy(lua_State *L, const HlLuaSshStream *o)
     /* A closed stream's waiter may still be due its wake; a new caller just
      * gets "closed" from the step below. */
     if (!o->ctx || !o->s) return 0;
-    push_err(L, "busy: another coroutine is waiting on this connection");
+    /* (nil, message, "busy"): the code as the third value, as a transport
+     * failure carries its own, so the protocol layer never matches the prose
+     * (audit 36). */
+    lua_pushnil(L);
+    lua_pushstring(L, "busy: another coroutine is waiting on this connection");
+    lua_pushstring(L, HL_REFUSAL_BUSY);
     return 1;
 }
 
@@ -431,7 +437,7 @@ static int lua_ssh_read(lua_State *L)
 {
     require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
-    if (ssh_busy(L, o)) return 2;
+    if (ssh_busy(L, o)) return 3;
     lua_Integer want = luaL_optinteger(L, 2, 4096);
     if (want <= 0) return push_err(L, "read size must be positive");
 
@@ -491,7 +497,7 @@ static int lua_ssh_write(lua_State *L)
 {
     require_stdlib_caller(L);
     HlLuaSshStream *o = check_stream(L);
-    if (ssh_busy(L, o)) return 2;
+    if (ssh_busy(L, o)) return 3;
     size_t len;
     luaL_checklstring(L, 2, &len);
     if (!len) { lua_pushboolean(L, 1); return 1; }

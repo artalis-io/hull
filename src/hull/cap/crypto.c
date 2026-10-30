@@ -20,7 +20,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
-#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+#include <stdatomic.h>
+#if defined(__linux__) || defined(__COSMOPOLITAN__)
 #include <sys/random.h>
 #endif
 
@@ -668,23 +669,103 @@ int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
 
 /* ── Random bytes ───────────────────────────────────────────────────── */
 
+/* Test seam: the next @p count calls to hl_cap_crypto_random fail. */
+static atomic_int g_random_fail_next;
+
+void hl_cap_crypto_random_fail_next_for_test(int count)
+{
+    atomic_store(&g_random_fail_next, count > 0 ? count : 0);
+}
+
+static int random_forced_failure(void)
+{
+    int n = atomic_load(&g_random_fail_next);
+    while (n > 0) {
+        if (atomic_compare_exchange_weak(&g_random_fail_next, &n, n - 1))
+            return 1;
+    }
+    return 0;
+}
+
+#if defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
+    defined(__NetBSD__) || defined(__DragonFly__)
+#  define HL_RANDOM_ARC4 1
+#elif defined(__linux__) || defined(__COSMOPOLITAN__)
+#  define HL_RANDOM_GETRANDOM 1
+#endif
+
+#if !defined(HL_RANDOM_ARC4) && \
+    (!defined(HL_RANDOM_GETRANDOM) || defined(__COSMOPOLITAN__))
+/* Last-resort source: /dev/urandom, opened ONCE and kept (audit 36). It used
+ * to be opened on every call, so a process at its descriptor limit - which an
+ * app can reach through its own caps (blob writers, SSH streams, ws clients,
+ * db.open, inbound connections) - could not get a key, a token or a session
+ * id; worse, crypto_sign_keypair's randombytes() aborted on it. Only a host
+ * with neither getrandom nor arc4random reaches it, or a cosmo APE on a Linux
+ * kernel older than 3.17, where getrandom is ENOSYS. A signal during the open
+ * or a read is retried. */
+static atomic_int g_urandom_fd = -1;
+
+static int urandom_read(uint8_t *p, size_t remaining)
+{
+    int fd = atomic_load(&g_urandom_fd);
+    if (fd < 0) {
+        int nfd;
+        do {
+            nfd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        } while (nfd < 0 && errno == EINTR);
+        if (nfd < 0)
+            return -1;
+        int expected = -1;
+        if (atomic_compare_exchange_strong(&g_urandom_fd, &expected, nfd)) {
+            fd = nfd;
+        } else {
+            close(nfd);                 /* another thread won the race */
+            fd = expected;
+        }
+    }
+    while (remaining > 0) {
+        ssize_t n = read(fd, p, remaining);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return -1;
+        p += n;
+        remaining -= (size_t)n;
+    }
+    return 0;
+}
+#endif
+
 int hl_cap_crypto_random(void *buf, size_t len)
 {
     if (!buf || len == 0)
         return -1;
+    if (random_forced_failure())
+        return -1;
 
-#ifdef __APPLE__
-    /* macOS: arc4random_buf is always available and non-failing */
+#if defined(HL_RANDOM_ARC4)
+    /* macOS / the BSDs: arc4random_buf is kernel-seeded, takes no descriptor
+     * and cannot fail. (A cosmo APE never takes this branch: cosmocc defines
+     * none of these macros.) */
     arc4random_buf(buf, len);
     return 0;
-#elif defined(__linux__) && !defined(__COSMOPOLITAN__)
-    /* Linux: getrandom(2) - no fd, blocks until pool is seeded */
+#elif defined(HL_RANDOM_GETRANDOM)
+    /* Linux: getrandom(2) - no fd, blocks until the pool is seeded. A cosmo
+     * APE gets the same through Cosmopolitan's getrandom on every host it
+     * runs on (the syscall on Linux, the host's entropy call on the BSDs and
+     * macOS, ProcessPrng on Windows); it falls back to /dev/urandom only
+     * where the kernel has no getrandom (ENOSYS). */
     uint8_t *p = (uint8_t *)buf;
     size_t remaining = len;
     while (remaining > 0) {
         ssize_t n = getrandom(p, remaining, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
+#if defined(__COSMOPOLITAN__)
+            if (errno == ENOSYS)
+                return urandom_read(p, remaining);
+#endif
             return -1;
         }
         p += n;
@@ -692,31 +773,7 @@ int hl_cap_crypto_random(void *buf, size_t len)
     }
     return 0;
 #else
-    /* POSIX fallback: /dev/urandom. A signal arriving during the open or a
-     * read is retried: it used to fail the call - and with it a key, a
-     * token or a session id - for no reason but timing. */
-    int fd;
-    do {
-        fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    } while (fd < 0 && errno == EINTR);
-    if (fd < 0)
-        return -1;
-
-    uint8_t *p = (uint8_t *)buf;
-    size_t remaining = len;
-    while (remaining > 0) {
-        ssize_t n = read(fd, p, remaining);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0) {
-            close(fd);
-            return -1;
-        }
-        p += n;
-        remaining -= (size_t)n;
-    }
-    close(fd);
-    return 0;
+    return urandom_read((uint8_t *)buf, len);
 #endif
 }
 
@@ -1260,23 +1317,15 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
  * the hl_cap_crypto_* API.
  */
 
-/* TweetNaCl requires an external randombytes() implementation.
- * We provide it via our existing hl_cap_crypto_random(). It cannot report a
- * failure and TweetNaCl assumes none (libsodium's contract is the same), so a
- * failed read aborts: crypto_sign_keypair used to return success with a
- * secret key made of whatever the caller's buffer held - fd exhaustion
- * (EMFILE on /dev/urandom), or a getrandom blocked by seccomp, was enough. */
-void randombytes(unsigned char *buf, unsigned long long len)
-{
-    if (len == 0) return;
-    if (len > SIZE_MAX || hl_cap_crypto_random(buf, (size_t)len) != 0) {
-        /* stderr, not the logger: cap_crypto.o is linked into small
-         * binaries (tests, tools) that do not carry log.c. */
-        fputs("hull: [crypto] the system random source failed; refusing to "
-              "continue rather than generate predictable keys\n", stderr);
-        abort();
-    }
-}
+/* No randombytes(): TweetNaCl's randombytes() is void and cannot report a
+ * failure, so Hull's used to abort() the whole process when the random source
+ * failed - an app holding every descriptor turned crypto.ed25519_keypair()
+ * into a process kill (audit 36). The vendored TweetNaCl no longer calls it
+ * (HULL PATCH in vendor/tweetnacl/tweetnacl.c): every key draws its seed
+ * through hl_cap_crypto_random, which fails gracefully, and is derived from
+ * it (hl_cap_crypto_ed25519_keypair, hl_cap_crypto_box_keypair). A new
+ * TweetNaCl entry that needs randomness must take it the same way; defining
+ * randombytes again would bring the abort back. */
 
 /* 1 when the 32-byte little-endian scalar @p s is below the Ed25519 group
  * order L = 2^252 + 27742317777372353535851937790883648493 (libsodium's
@@ -1386,7 +1435,23 @@ int hl_cap_crypto_ed25519_keypair(uint8_t out_pk[32], uint8_t out_sk[64])
     if (!out_pk || !out_sk)
         return -1;
 
-    return crypto_sign_ed25519_keypair(out_pk, out_sk);
+    uint8_t seed[32];
+    if (hl_cap_crypto_random(seed, sizeof seed) != 0) {
+        hull_secure_zero(seed, sizeof seed);
+        hull_secure_zero(out_sk, 64);   /* never a key from stale memory */
+        return -1;
+    }
+    int rc = hl_cap_crypto_ed25519_seed_keypair(seed, out_pk, out_sk);
+    hull_secure_zero(seed, sizeof seed);
+    return rc;
+}
+
+int hl_cap_crypto_ed25519_seed_keypair(const uint8_t seed[32],
+                                       uint8_t out_pk[32], uint8_t out_sk[64])
+{
+    if (!seed || !out_pk || !out_sk)
+        return -1;
+    return crypto_sign_ed25519_seed_keypair(out_pk, out_sk, seed) == 0 ? 0 : -1;
 }
 
 /* ── SHA-512 (via TweetNaCl) ────────────────────────────────────────── */

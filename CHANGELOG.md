@@ -167,6 +167,25 @@ release-artifact layout).
   app no longer has to declare `hull/json` for eval to work. Regression legs in
   `tests/e2e_agent.sh` and `tests/e2e_mcp.sh`.
 
+- **An app could kill the process through `crypto.ed25519_keypair()` when entropy failed**
+  (audit 36). TweetNaCl's `crypto_sign_keypair` drew its seed from `randombytes()`, whose
+  void contract cannot report a failure, so Hull's implementation aborted the process when
+  `hl_cap_crypto_random` failed. On a cosmo APE and on native builds other than Linux /
+  macOS that source opened `/dev/urandom` on every call, so an app that held every
+  descriptor through its own caps (blob writers, SSH streams, ws clients, `db.open`,
+  inbound connections) turned `crypto.ed25519_keypair()` / JS `crypto.ed25519Keypair()`
+  into a process kill. The keypair now draws a 32-byte seed through `hl_cap_crypto_random`
+  and derives the key from it (`hl_cap_crypto_ed25519_seed_keypair`, byte-identical to
+  `crypto_sign_keypair`, checked against the RFC 8032 vectors); a failure raises / throws
+  a catchable error with no key. The vendored TweetNaCl no longer references
+  `randombytes` at all (HULL PATCH), and Hull no longer defines it. The random source
+  itself takes no descriptor where the host has one: `arc4random_buf` on macOS and the
+  BSDs, `getrandom` on Linux and on a cosmo APE (every host); `/dev/urandom` is the last
+  resort, opened once and kept. Also: `smtp.send` refused by the admission cap now raises
+  / throws the `busy` refusal (it read as a `connect_failed` delivery; JS `hull/email`
+  re-throws refusals with their code), and a Lua SSH stream read / write refused because
+  another coroutine waits on it returns `"busy"` as its third value.
+
 - **`ws.connect` clients were uncounted, each holding up to 20 MiB off the heap** (audit 32).
   Every Keel client connection keeps an outbound drain (up to 4 MiB) and a message reassembly
   buffer (up to 16 MiB) on Keel's allocator until it is freed, and nothing limited how many a

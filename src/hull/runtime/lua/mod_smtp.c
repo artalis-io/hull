@@ -313,7 +313,13 @@ static int lua_smtp_send(lua_State *L)
         return lua_yieldk(L, 0, 0, NULL);   /* resumed by lua_push_smtp_result */
 
     /* RESOLVED: an immediate scheduling failure (already audited once in the
-     * orchestration). The public token stays connect_failed; never blocks. */
+     * orchestration). The public token stays connect_failed; never blocks.
+     * The admission cap is not a connect failure: nothing was sent and a later
+     * call may be admitted, so it raises the "busy" refusal (audit 36), as the
+     * off-heap copy cap above does. */
+    if (out.schedule && strcmp(out.schedule, "cap_reached") == 0)
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "smtp.send: too many sends "
+                             "in flight (admission cap reached)");
     return lua_smtp_fail(L, out.result.token ? out.result.token : "connect_failed");
 }
 

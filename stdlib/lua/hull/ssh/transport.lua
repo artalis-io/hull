@@ -218,6 +218,8 @@ function Transport:read_some(max)
             self:quiet(true)
         elseif code == "deadline" then
             fail("deadline", "deadline reached")
+        elseif code == "busy" then
+            fail("busy", tostring(err))
         else
             error("ssh: read failed: " .. tostring(err))
         end
@@ -258,6 +260,8 @@ function Transport:send_raw(bytes)
             self:quiet(false)
         elseif code == "deadline" then
             fail("deadline", "deadline reached")
+        elseif code == "busy" then
+            fail("busy", tostring(err))
         else
             error("ssh: write failed: " .. tostring(err))
         end
