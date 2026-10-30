@@ -796,6 +796,7 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
     HlFsDirEntry *arr = NULL;
     size_t count = 0, cap = 0, total_bytes = 0;
     DIR *dirp = NULL;
+    int list_root = 0;
 
     char scratch[HL_FS_PATH_MAX];
     HlFsListSelection sel = hl_fs_policy_select_list(cfg->policy, path,
@@ -808,6 +809,7 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
                                    sel.sympol, 0, &e);
         if (dfd < 0) { if (err_msg) *err_msg = e ? e : "io_error"; goto audit; }
 
+        list_root = hl_fs_is_reserved_root(dfd);
         dirp = fdopendir(dfd);   /* takes ownership of dfd; closedir closes it */
         if (!dirp) { close(dfd); if (err_msg) *err_msg = "io_error"; goto audit; }
     }
@@ -830,6 +832,9 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
             if (!nul) { if (err_msg) *err_msg = "name_too_long"; goto fail_mid; }
             size_t nlen = (size_t)((const char *)nul - name);
             if (nlen == 0) { if (err_msg) *err_msg = "io_error"; goto fail_mid; }
+
+            /* An app root's .hull is not the app's: not listed either (audit 37). */
+            if (list_root && hl_fs_reserved_name(name, nlen)) continue;
 
             /* PATTERN filter: only the terminal-pattern matches are exposed. A
              * non-match is filtered out (NOT a failure). */

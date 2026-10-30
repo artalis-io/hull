@@ -444,6 +444,7 @@ typedef struct {
     char fs_write_keys[HL_MANIFEST_MAX_PATHS][16];   /* "FS_W_0" .. "FS_W_31" */
     char fs_read_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
     char fs_write_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
+    char app_hull[SEATBELT_PATH_SIZE];     /* <app_dir>/.hull (audit 37) */
 } SeatbeltScratch;
 
 /*
@@ -773,6 +774,23 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     SBPL_LIT("; Block exec and fork\n"
              "(deny process-exec*)\n"
              "(deny process-fork)\n");
+
+    /* ── <app_dir>/.hull: never the app's (audit 37) ─────────── */
+
+    /* The `hull dev --agent` sidecars an agent reads as Hull's own output
+     * live there. Last, so it wins over every allow above (SBPL: the last
+     * matching rule decides) - the app-dir read, a manifest grant, a -d
+     * database. Seatbelt matches the real path without case on a
+     * case-insensitive volume, and an in-root symlink resolves to it. */
+    if (app_dir) {
+        int hn = snprintf(scratch->app_hull, sizeof(scratch->app_hull),
+                          "%s/.hull", app_dir);
+        if (hn > 0 && (size_t)hn < sizeof(scratch->app_hull)) {
+            PARAM_ADD("APP_HULL", scratch->app_hull);
+            SBPL_LIT("\n; The app tree's .hull (Hull's own sidecars)\n"
+                     "(deny file-read* file-write* (subpath (param \"APP_HULL\")))\n");
+        }
+    }
 
     /* W^X on macOS is enforced by three other layers, not by an SBPL
      * `(deny dynamic-code-generation)` clause:
@@ -1177,6 +1195,14 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     if (app_dir) {
         if (unveil(app_dir, "r") != 0)
             log_warn("[sandbox] unveil failed for app dir: %s", app_dir);
+        /* ...except its .hull (the `hull dev --agent` sidecars; audit 37).
+         * OpenBSD's unveil hides a path unveiled with no permissions under a
+         * broader grant; Landlock only adds access, so on Linux this is a
+         * no-op and the capability layer's refusal is the boundary there. */
+        char hull_dir[SANDBOX_PATH_MAX];
+        int hn = snprintf(hull_dir, sizeof hull_dir, "%s/.hull", app_dir);
+        if (hn > 0 && (size_t)hn < sizeof hull_dir)
+            (void)unveil(hull_dir, "");
     }
 
     /* /dev/urandom: needed by crypto.random and password hashing */

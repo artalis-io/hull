@@ -59,4 +59,19 @@ function M.project(disc)
     }
 end
 
+-- encode(projected) -> JSON text with every byte a terminal acts on escaped. hull.json
+-- escapes C0 controls but leaves DEL and the UTF-8 C1 controls (U+0080..U+009F, CSI
+-- among them) raw inside strings; repo source text (an annotation's `raw`) reaches
+-- these strings, and an agent reads this output in a terminal (audit 37 Low). Outside
+-- a string valid JSON holds only ASCII, so the rewrite is the same JSON value.
+function M.encode(projected)
+    local json = require("hull.json")
+    local out = json.encode(projected)
+    out = out:gsub("\127", "\\u007f")
+    out = out:gsub("\194([\128-\159])", function(c)
+        return string.format("\\u%04x", c:byte())
+    end)
+    return out
+end
+
 return M

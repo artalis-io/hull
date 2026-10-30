@@ -10,6 +10,35 @@ release-artifact layout).
 
 ### Fixes
 
+- **The app running under `hull dev --agent` could forge what `hull agent` serves as Hull's
+  output** (audit 37, both runtimes). Round 36 bound the `.hull/` sidecars to the live session
+  by a nonce kept under `$HOME/.hull/dev-sessions/<pid>` - and also written into
+  `.hull/dev.json`. An app whose manifest granted `fs = { read = {".hull/"}, write =
+  {".hull/"} }` read the nonce and `session_pid` from dev.json and rewrote
+  `.hull/last_error.json` (with the nonce) and `.hull/discovery.json` (checked only by
+  `session_pid`, streamed raw); `hull agent errors`, MCP `hull_errors`, the agent API `/errors`
+  and `hull agent inspect` then served its text - prompt injection to an AI agent through a
+  trusted channel. Three changes. **No secret in the app tree:** dev.json now carries only
+  public fields (port, pid, start time, supervisor pid). **Every sidecar carries a MAC**
+  (HMAC-SHA256 through the cap HMAC entry points, `include/hull/shared/dev_session.h`) keyed by
+  the `$HOME`-only nonce, over a fixed label, the sidecar kind, the canonical app directory, the
+  supervisor pid and the exact content: dev.json (the supervisor), last_error.json (the served
+  child, which takes the key from `HULL_DEV_SESSION`, overwrites the value in the process's
+  environment block, unsets it before app code runs, keeps it only in C memory and zeroes it
+  once the app has loaded) and discovery.json (the publisher, whose tool VM gets only the MAC,
+  as the document's last member `session_mac`). `hull agent` verifies it in constant time
+  against the `$HOME` key before serving anything, and otherwise reports "ignored: not written
+  by a live `hull dev --agent` session"; a sidecar copied into another tree does not verify
+  there. **App code cannot touch `<app>/.hull`:** the fs policy refuses a grant of it (the
+  manifest fails to load) and every caller path naming it, in any letter case
+  (`reserved_path`; fs.read / write / stat / list / mmap / delete, `compute.stream` file output,
+  blob roots and `db.open` file DSNs all select through it); the resolver refuses stepping into
+  it from the app root through a symlink or another spelling (by inode); `fs.list` of the root
+  leaves it out; Seatbelt denies it after every allow; OpenBSD unveils it with no permissions
+  (Landlock cannot take away a parent's grant, so on Linux the capability layer is the
+  boundary). Also: a new session prunes the `dev-sessions` records of supervisors that are gone
+  (a reused pid would otherwise still verify a dead session's stale sidecars), and
+  `hull agent inspect` escapes DEL and C1 controls in both its live and standalone output.
 - **Email change could probe whether addresses exist, without limit** (audit 33, both
   runtimes). A taken target address is answered 409 `email already in use`, and that check ran
   before the account's email-change request limit, so a signed-in user could test any number of

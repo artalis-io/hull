@@ -360,7 +360,11 @@ int hull_serve(int argc, char **argv)
 {
     /* No agent sidecars here: the dev session nonce is not the app's to read
      * (audit 36). */
-    unsetenv(HL_DEV_SESSION_ENV);
+    {
+        char ds[HL_DEV_SESSION_NONCE_LEN + 1];
+        hl_dev_session_take_env(ds);   /* value scrubbed in place too */
+        hl_secure_zero(ds, sizeof ds);
+    }
     int app_argc = 0;
     char **app_argv = NULL;
     int no_migrate = 0, no_sandbox = 0, allow_degraded_sandbox = 0;

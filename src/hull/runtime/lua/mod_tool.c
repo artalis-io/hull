@@ -39,6 +39,8 @@
 #include "hull/shared/host.h"
 #include "hull/shared/cli_log.h"
 #include "hull/shared/term_escape.h"   /* tool.stderr / stdout (audit 33) */
+#include "hull/shared/dev_session.h"   /* tool.dev_sidecar_mac (audit 37) */
+#include "hull/tool.h"                 /* hl_tool_set_dev_session */
 #include "hull/cap/crypto.h"
 #include "hull/cap/tar.h"        /* tool.bundle_verify */
 #include "hull/release.h"        /* hl_release_verify_manifest_sig */
@@ -784,6 +786,44 @@ static int l_tool_stdout(lua_State *L)
     hl_term_fwrite_escaped(stdout, msg, len);
     fflush(stdout);
     return 0;
+}
+
+/* ── tool.dev_sidecar_mac(kind, app_dir, session_pid, content) ──────── *
+ *
+ * The MAC a `hull dev --agent` sidecar carries (include/hull/shared/
+ * dev_session.h), keyed by the session key the publisher took from
+ * HL_DEV_SESSION_ENV before this VM started (hl_tool_set_dev_session). Only
+ * the discovery kind, for hull.project.publish. nil when this process has
+ * no session key (a publish run by hand) - the generation is then written
+ * without a MAC and never served as the live one (audit 37). The key itself
+ * never reaches Lua. */
+static char g_tool_dev_session[HL_DEV_SESSION_NONCE_LEN + 1];
+
+void hl_tool_set_dev_session(const char *nonce)
+{
+    if (nonce && hl_dev_session_nonce_valid(nonce))
+        memcpy(g_tool_dev_session, nonce, sizeof g_tool_dev_session);
+    else
+        hl_secure_zero(g_tool_dev_session, sizeof g_tool_dev_session);
+}
+
+static int l_tool_dev_sidecar_mac(lua_State *L)
+{
+    const char *kind = luaL_checkstring(L, 1);
+    const char *app_dir = luaL_checkstring(L, 2);
+    lua_Integer sp = luaL_checkinteger(L, 3);
+    size_t len = 0;
+    const char *content = luaL_checklstring(L, 4, &len);
+    char mac[HL_DEV_SIDECAR_MAC_LEN + 1];
+    if (!g_tool_dev_session[0] || strcmp(kind, HL_DEV_SIDECAR_DISCOVERY) != 0 ||
+        sp <= 0 || sp > INT_MAX ||
+        hl_dev_sidecar_mac(g_tool_dev_session, kind, app_dir, (long)sp,
+                           content, len, mac) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, mac);
+    return 1;
 }
 
 static int l_tool_stdout_raw(lua_State *L)
@@ -2257,6 +2297,7 @@ static const luaL_Reg tool_funcs[] = {
     { "escape",                 l_tool_escape },
     { "stdout",                 l_tool_stdout },
     { "stdout_raw",             l_tool_stdout_raw },
+    { "dev_sidecar_mac",        l_tool_dev_sidecar_mac },
     { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_manifest_lua",   l_tool_extract_manifest_lua },
     { "extract_platform",       l_tool_extract_platform },

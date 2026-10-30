@@ -20,7 +20,6 @@
 
 local analyze    = require("hull.project.analyze")
 local projection = require("hull.project.projection")
-local json       = require("hull.json")
 
 local function usage_error(msg)
     tool.stderr("hull agent inspect: " .. msg .. "\n")
@@ -55,8 +54,8 @@ local function main()
     -- returns a discovery (an invalid one on a bad root / internal defect). Exit 0; the
     -- consumer reads `valid` / `complete` from the JSON.
     local disc = analyze.analyze(app_dir, { source_kind = "standalone" })
-    -- Encoded JSON: raw (json.encode escapes every C0 control itself).
-    tool.stdout_raw(json.encode(projection.project(disc)) .. "\n")
+    -- Encoded JSON: raw (projection.encode escapes C0, DEL and C1 controls).
+    tool.stdout_raw(projection.encode(projection.project(disc)) .. "\n")
     tool.exit(0)
 end
 

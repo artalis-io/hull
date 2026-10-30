@@ -345,9 +345,11 @@ typedef struct {
     int skip_ca_bundle;
     const char *ca_bundle_override; /* --ca-bundle=PATH */
     int agent_mode;
-    /* The `hull dev --agent` session nonce (HL_DEV_SESSION_ENV, 64 hex), or
-     * "": stamped into .hull/last_error.json so `hull agent errors` can tell
-     * a record this session wrote from one a repo shipped (audit 36). */
+    /* The `hull dev --agent` session key (HL_DEV_SESSION_ENV, 64 hex), or
+     * "": the MAC on .hull/last_error.json, so `hull agent errors` can tell a
+     * record this session wrote from one a repo shipped or the app wrote
+     * (audit 36 / 37). Held only here - never in the environment, a file or
+     * a VM - and zeroed once the app has loaded. */
     char dev_session[65];
     int agent_api_mode;
     int drain_timeout;
@@ -1307,23 +1309,35 @@ static int hl_serve_load_app(HlServerState *s)
                     sh_json_writer_init(&w, serve_stdio_write, ef);
                     sh_json_write_object_start(&w);
                     sh_json_write_kv_string(&w, "error", msg);
-                    sh_json_write_kv_int   (&w, "timestamp",
-                                            (int64_t)time(NULL));
+                    int64_t ts = (int64_t)time(NULL);
+                    sh_json_write_kv_int   (&w, "timestamp", ts);
                     /* The session that wrote it: `hull agent errors`
-                     * serves the record only when this matches the live
-                     * session's nonce (audit 36). */
-                    if (s->cfg.dev_session[0])
-                        sh_json_write_kv_string(&w, "session",
-                                                s->cfg.dev_session);
+                     * serves the record only when this MAC verifies under
+                     * the live session's key (audit 36 / 37). The
+                     * supervisor is our parent (dev.c spawns us). */
+                    if (s->cfg.dev_session[0]) {
+                        char content[600], mac[HL_DEV_SIDECAR_MAC_LEN + 1];
+                        int cn = snprintf(content, sizeof content, "%lld\n%s",
+                                          (long long)ts, msg);
+                        if (cn > 0 && (size_t)cn < sizeof content &&
+                            hl_dev_sidecar_mac(s->cfg.dev_session,
+                                               HL_DEV_SIDECAR_LAST_ERROR,
+                                               s->app_dir, (long)getppid(),
+                                               content, (size_t)cn, mac) == 0)
+                            sh_json_write_kv_string(&w, "mac", mac);
+                    }
                     sh_json_write_object_end(&w);
                     fputc('\n', ef);
                     fclose(ef);
                 }
             }
         }
+        hl_secure_zero(s->cfg.dev_session, sizeof s->cfg.dev_session);
         return -1;
     }
     s->app_loaded = 1;
+    /* The session key's only use is the load-failure record above. */
+    hl_secure_zero(s->cfg.dev_session, sizeof s->cfg.dev_session);
 
     /* Clear previous error file on successful load */
     if (s->cfg.agent_mode) {
@@ -2515,14 +2529,13 @@ int hull_serve(int argc, char **argv)
     int rc = hl_serve_parse_args(&s, argc, argv);
     if (rc != 0) return rc < 0 ? 1 : 0; /* -1 = error, 1 = help shown */
 
-    /* The dev supervisor's session nonce: kept for the last_error.json
-     * stamp, and taken out of the environment before any app code runs. */
-    {
-        const char *ds = getenv(HL_DEV_SESSION_ENV);
-        if (s.cfg.agent_mode && hl_dev_session_nonce_valid(ds))
-            memcpy(s.cfg.dev_session, ds, 65);
-        unsetenv(HL_DEV_SESSION_ENV);
-    }
+    /* The dev supervisor's session key: kept (in C memory only) for the
+     * last_error.json MAC, and taken out of the environment - its bytes in
+     * the process's environment block overwritten - before any app code
+     * runs (audit 37). */
+    hl_dev_session_take_env(s.cfg.dev_session);
+    if (!s.cfg.agent_mode)
+        hl_secure_zero(s.cfg.dev_session, sizeof s.cfg.dev_session);
 
     /* --verify-sig: no bytecode or compiled template from the shared code
      * cache. Its entries are sealed under ~/.hull/cache.key, which every app

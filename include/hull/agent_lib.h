@@ -52,13 +52,15 @@ char *hl_agent_read_sidecar(const char *path, size_t cap, size_t *out_len);
 long hl_agent_json_int_field(const char *buf, const char *key);
 
 /*
- * Is a LIVE `hull dev --agent` session serving @p app_dir? 0 iff
- * <app>/.hull/dev.json carries a 64-hex nonce equal to the copy the
- * supervisor keeps at $HOME/.hull/dev-sessions/<session_pid> and (off
- * Windows, where kill(pid, 0) is not inert) that pid is alive; -1 otherwise.
- * On 0, @p nonce (65 bytes), @p session_pid and @p port (each optional) are
- * set from dev.json. Everything else under <app>/.hull is repo content until
- * it is tied to this nonce (audit 36).
+ * Is a LIVE `hull dev --agent` session serving @p app_dir? 0 iff the
+ * supervisor named by <app>/.hull/dev.json's session_pid keeps a key at
+ * $HOME/.hull/dev-sessions/<session_pid>, dev.json's MAC verifies under it
+ * for this (canonical) app directory, and (off Windows, where kill(pid, 0)
+ * is not inert) that pid is alive; -1 otherwise. On 0, @p nonce (65 bytes:
+ * the KEY, read from $HOME - never from the app tree), @p session_pid and
+ * @p port (each optional) are set. Every other sidecar under <app>/.hull is
+ * repo / app content until its own MAC verifies under that key
+ * (hl_dev_sidecar_mac_ok; audit 36 / 37). The caller zeroes @p nonce.
  */
 int hl_agent_dev_session(const char *app_dir, char *nonce, long *session_pid,
                          int *port);

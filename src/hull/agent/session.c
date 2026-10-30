@@ -2,10 +2,11 @@
  * agent/session.c - bind <app>/.hull sidecars to a live `hull dev --agent`
  * session.
  *
- * The app tree may be a cloned repo, and a repo can ship any file under
- * .hull/. The dev supervisor keeps its session nonce outside the tree
- * ($HOME/.hull/dev-sessions/<pid>, see commands/dev.c); a sidecar is Hull's
- * own output only when it is tied to that nonce (audit 36).
+ * The app tree may be a cloned repo, and a repo (or the app running under
+ * the session) can write any file under .hull/. The dev supervisor keeps its
+ * session nonce outside the tree ($HOME/.hull/dev-sessions/<pid>, see
+ * commands/dev.c); a sidecar is Hull's own output only when it carries a MAC
+ * keyed by that nonce (include/hull/shared/dev_session.h; audit 36 / 37).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -14,6 +15,7 @@
 
 #include "hull/shared/dev_session.h"
 #include "hull/shared/host.h"   /* hl_host_home, hl_host_is_windows */
+#include "hull/utils/secure_zero.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -68,31 +70,36 @@ long hl_agent_json_int_field(const char *buf, const char *key)
 int hl_agent_dev_session(const char *app_dir, char *nonce_out,
                          long *session_pid, int *port)
 {
+    const char *dir = app_dir ? app_dir : ".";
     char dev_path[PATH_MAX];
-    int b = snprintf(dev_path, sizeof(dev_path), "%s/.hull/dev.json",
-                     app_dir ? app_dir : ".");
+    int b = snprintf(dev_path, sizeof(dev_path), "%s/.hull/dev.json", dir);
     if (b < 0 || (size_t)b >= sizeof(dev_path)) return -1;
 
     char *dev = hl_agent_read_sidecar(dev_path, 64 * 1024, NULL);
     if (!dev) return -1;
     long sp = hl_agent_json_int_field(dev, "session_pid");
     long pt = hl_agent_json_int_field(dev, "port");
-    char nonce[HL_DEV_SESSION_NONCE_LEN + 1] = "";
-    const char *p = strstr(dev, "\"nonce\":\"");
+    long cp = hl_agent_json_int_field(dev, "pid");
+    long st = hl_agent_json_int_field(dev, "started_at");
+    char mac[HL_DEV_SIDECAR_MAC_LEN + 1] = "";
+    const char *p = strstr(dev, "\"mac\":\"");
     if (p) {
-        p += 9;
+        p += 7;
         size_t i = 0;
-        while (i < HL_DEV_SESSION_NONCE_LEN &&
+        while (i < HL_DEV_SIDECAR_MAC_LEN &&
                ((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) {
-            nonce[i] = p[i];
+            mac[i] = p[i];
             i++;
         }
-        nonce[i] = '\0';
-        if (i != HL_DEV_SESSION_NONCE_LEN || p[i] != '"') nonce[0] = '\0';
+        mac[i] = '\0';
+        if (i != HL_DEV_SIDECAR_MAC_LEN || p[i] != '"') mac[0] = '\0';
     }
     free(dev);
-    if (sp <= 0 || !nonce[0]) return -1;
+    if (sp <= 0 || pt <= 0 || cp <= 0 || st <= 0 || !mac[0]) return -1;
 
+    /* The key: the nonce the supervisor keeps under $HOME. It is in no file
+     * under the app tree (audit 37: dev.json carried it, so an app granted
+     * .hull/ could stamp it into forged sidecars). */
     const char *home = hl_host_home();
     if (!home || !*home) return -1;
     char kp[PATH_MAX];
@@ -100,18 +107,40 @@ int hl_agent_dev_session(const char *app_dir, char *nonce_out,
     if (n < 0 || (size_t)n >= sizeof kp) return -1;
     size_t kl = 0;
     char *kept = hl_agent_read_sidecar(kp, 128, &kl);
-    int match = kept && kl == HL_DEV_SESSION_NONCE_LEN &&
-                memcmp(kept, nonce, HL_DEV_SESSION_NONCE_LEN) == 0;
-    free(kept);
-    if (!match) return -1;
+    char nonce[HL_DEV_SESSION_NONCE_LEN + 1] = "";
+    if (kept && kl == HL_DEV_SESSION_NONCE_LEN) {
+        memcpy(nonce, kept, HL_DEV_SESSION_NONCE_LEN);
+        nonce[HL_DEV_SESSION_NONCE_LEN] = '\0';
+    }
+    if (kept) { hl_secure_zero(kept, kl); free(kept); }
+    if (!hl_dev_session_nonce_valid(nonce)) return -1;
+
+    /* dev.json is this session's, for this app directory: its MAC binds the
+     * port / pid / start time to the supervisor pid and the canonical app dir
+     * (a dev.json copied from another tree, or naming another live session's
+     * pid, does not verify). */
+    char content[128];
+    n = snprintf(content, sizeof content, "port=%ld pid=%ld started_at=%ld",
+                 pt, cp, st);
+    if (n < 0 || (size_t)n >= sizeof content ||
+        !hl_dev_sidecar_mac_ok(nonce, HL_DEV_SIDECAR_DEV_JSON, dir, sp,
+                               content, (size_t)n, mac)) {
+        hl_secure_zero(nonce, sizeof nonce);
+        return -1;
+    }
 
     /* kill(pid, 0) terminates the process on Windows (cosmo; see
-     * agent_inspect_stream_live): there the nonce match alone binds. The
-     * supervisor removes its $HOME copy when it exits. */
-    if (!hl_host_is_windows() && kill((pid_t)sp, 0) != 0) return -1;
+     * agent_inspect_stream_live): there the record alone binds. The
+     * supervisor removes its $HOME copy when it exits, and a new session
+     * prunes records whose pid is gone. */
+    if (!hl_host_is_windows() && kill((pid_t)sp, 0) != 0) {
+        hl_secure_zero(nonce, sizeof nonce);
+        return -1;
+    }
 
     if (nonce_out) memcpy(nonce_out, nonce, sizeof nonce);
+    hl_secure_zero(nonce, sizeof nonce);
     if (session_pid) *session_pid = sp;
-    if (port) *port = pt > 0 && pt <= 65535 ? (int)pt : 0;
+    if (port) *port = pt <= 65535 ? (int)pt : 0;
     return 0;
 }

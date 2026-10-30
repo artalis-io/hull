@@ -14,7 +14,7 @@
 #include "hull/dev_state.h"
 #include "hull/release_io.h"  /* hl_release_io_self_path */
 #include "hull/shared/host.h" /* hl_host_find_in_path */
-#include "hull/shared/dev_session.h" /* HL_DEV_SESSION_ENV (audit 36) */
+#include "hull/shared/dev_session.h" /* HL_DEV_SESSION_ENV, sidecar MAC (audit 36/37) */
 #include "hull/tool.h"
 
 #include <dirent.h>
@@ -63,10 +63,12 @@ static int agent_dir_safe(const char *app_dir)
 }
 
 /* The session's nonce, and where it is kept outside the app tree:
- * $HOME/.hull/dev-sessions/<supervisor pid>. `hull agent inspect` serves a
- * published generation only when dev.json carries that nonce - a repo that
- * ships its own .hull/dev.json + discovery.json (naming a live pid of the
- * user's) cannot also plant a file under $HOME. */
+ * $HOME/.hull/dev-sessions/<supervisor pid>. It is the key of the MAC every
+ * sidecar of the session carries (include/hull/shared/dev_session.h) and is
+ * written to no file in the app tree: `hull agent inspect` / `errors` /
+ * `status` serve a sidecar only when its MAC verifies under the $HOME copy -
+ * a repo that ships its own .hull/ files, or an app that writes them, cannot
+ * compute one (audit 36 / 37). */
 static char g_dev_nonce[65];
 
 static int dev_session_path(char *out, size_t out_sz, int mkdirs)
@@ -108,10 +110,42 @@ static void agent_remove_last_error(const char *app_dir)
  * before the first spawn, so the first load failure is already stamped. A
  * last_error.json already in the tree is not this session's: removed (audit
  * 36). */
+/* Remove the session records of supervisors that are gone (a crash or a
+ * SIGKILL leaves its record behind). A record keys the MACs of its session's
+ * sidecars; once its pid is reused by another process, the record would
+ * still verify that dead session's (genuine, but stale) sidecars, so it is
+ * pruned whenever a new session starts. Not on Windows: kill(pid, 0) there
+ * terminates the process (see agent_inspect_stream_live in agent.c). */
+static void dev_session_prune(void)
+{
+    if (hl_host_is_windows()) return;
+    const char *home = hl_host_home();
+    if (!home) return;
+    char dir[PATH_MAX];
+    int n = snprintf(dir, sizeof dir, "%s/.hull/dev-sessions", home);
+    if (n < 0 || (size_t)n >= sizeof dir) return;
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *nm = de->d_name;
+        if (nm[0] < '1' || nm[0] > '9') continue;
+        char *end = NULL;
+        errno = 0;
+        long pid = strtol(nm, &end, 10);
+        if (errno || !end || *end || pid <= 0 || pid > INT_MAX) continue;
+        if (pid == (long)getpid()) continue;
+        if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
+        (void)unlinkat(dirfd(d), nm, 0);
+    }
+    closedir(d);
+}
+
 static void agent_session_begin(const char *app_dir)
 {
     agent_remove_last_error(app_dir);
     if (g_dev_nonce[0]) return;
+    dev_session_prune();
     unsigned char r[32];
     if (hl_cap_crypto_random(r, sizeof r) != 0) return;
     static const char hx[] = "0123456789abcdef";
@@ -153,10 +187,22 @@ static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
     if (!f) { close(tfd); unlink(tmp); return; }
     /* session_pid = the dev SUPERVISOR pid (stable across reloads); pid = the served
      * child (changes each reload). The supervisor identity lets `hull agent inspect` bind
-     * a published discovery generation to THIS live dev session. */
+     * a published discovery generation to THIS live dev session.
+     *
+     * No secret here: the app reads this tree, and an app granted .hull/ read
+     * the nonce dev.json used to carry and forged sidecars with it (audit
+     * 37). The fields are public; the MAC, keyed by the nonce kept under
+     * $HOME, says this supervisor wrote them for this app directory. */
+    long started = (long)time(NULL);
+    char content[128], mac[HL_DEV_SIDECAR_MAC_LEN + 1] = "";
+    snprintf(content, sizeof content, "port=%d pid=%d started_at=%ld",
+             port, (int)pid, started);
+    if (g_dev_nonce[0])
+        (void)hl_dev_sidecar_mac(g_dev_nonce, HL_DEV_SIDECAR_DEV_JSON, app_dir,
+                                 (long)getpid(), content, strlen(content), mac);
     fprintf(f, "{\"port\":%d,\"pid\":%d,\"session_pid\":%d,\"started_at\":%ld,"
-               "\"nonce\":\"%s\"}\n",
-            port, (int)pid, (int)getpid(), (long)time(NULL), g_dev_nonce);
+               "\"mac\":\"%s\"}\n",
+            port, (int)pid, (int)getpid(), started, mac);
     fclose(f);
     if (rename(tmp, path) != 0) unlink(tmp);   /* atomic publish (tmp + rename) */
 }

@@ -19,7 +19,6 @@
 
 local analyze    = require("hull.project.analyze")
 local projection = require("hull.project.projection")
-local json       = require("hull.json")
 
 local function usage_error(msg)
     tool.stderr("hull project publish: " .. msg .. "\n")
@@ -73,7 +72,17 @@ local function main()
         usage_error("publish: " .. app_dir .. "/.hull is a symbolic link")
     end
     local path = app_dir .. "/.hull/discovery.json"
-    local okw, reason = atomic_write(path, json.encode(p) .. "\n")
+    -- The generation carries the session's MAC as its LAST member (session_mac),
+    -- computed in C over the document without it, keyed by the session key the dev
+    -- supervisor handed this process (never visible here). `hull agent inspect`
+    -- streams a generation only when it verifies (audit 37). No key (a publish run
+    -- by hand): written without one, and never served as the live generation.
+    local doc = projection.encode(p)
+    local mac = tool.dev_sidecar_mac("discovery.json", app_dir, session_pid, doc)
+    if mac and doc:sub(-1) == "}" and doc ~= "{}" then
+        doc = doc:sub(1, -2) .. ',"session_mac":"' .. mac .. '"}'
+    end
+    local okw, reason = atomic_write(path, doc .. "\n")
     if not okw then usage_error("publish: " .. tostring(reason)) end
     tool.exit(0)
 end
