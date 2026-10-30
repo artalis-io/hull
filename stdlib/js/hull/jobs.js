@@ -740,13 +740,41 @@ function finish(job, info, transition) {
 // runtime "busy" refusal, which says nothing about the job (audit 38: it was
 // counted, so a burst that filled the fetch cap dead-lettered jobs that never
 // reached their remote). It is claimable again a second later.
+//
+// A refusal is recognised by its code, which an app can also produce (a
+// handler rethrowing a parsed remote `{ code: "busy" }`), so the hand-backs
+// are bounded (audit 39): each worker process counts a job's consecutive
+// ones, waits a second longer before each (1 s, 2 s, ... capped at
+// BUSY_DELAY_MAX), and after BUSY_STREAK_MAX of them in a row the next busy
+// failure is counted as an attempt like any other error. Any other outcome
+// resets the count. A real cap stays full only while the VM's own work holds
+// it, so a genuine burst passes long before that.
+const BUSY_STREAK_MAX = 20;
+const BUSY_DELAY_MAX = 30;
+const _busyStreak = new Map();   // job id -> consecutive busy hand-backs (this process)
+
+function busyStreakClear(job) { _busyStreak.delete(job.id); }
+
+// True when a busy failure of this job would be handed back (not counted).
+function busyStreakOpen(job) { return (_busyStreak.get(job.id) || 0) < BUSY_STREAK_MAX; }
+
+// True when the job may be handed back once more (and counts that one).
+function busyStreakTake(job) {
+    const n = _busyStreak.get(job.id) || 0;
+    if (n >= BUSY_STREAK_MAX) { _busyStreak.delete(job.id); return false; }
+    if (!n && _busyStreak.size >= 10000) _busyStreak.clear();   // bound it: start over
+    _busyStreak.set(job.id, n + 1);
+    return true;
+}
+
 function handBack(job) {
     const now = time.now();
+    const delay = Math.min(_busyStreak.get(job.id) || 1, BUSY_DELAY_MAX);
     let n;
     db.batch(() => {
         n = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
             "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
-            [now + 1, now, job.id, job.claimToken]);
+            [now + delay, now, job.id, job.claimToken]);
         if (n) releaseSlot(job);
     });
     if (!n) job._lost = true;
@@ -1952,6 +1980,7 @@ async function work(opts) {
         try {
             const result = await h(job);
             handlerFailed = false;
+            busyStreakClear(job);
             if (result && typeof result === "object" && result[WF_YIELD] === true) {
                 // Durable workflow yielded - no terminal outcome, no event. A
                 // yield is not a failed attempt, so undo the claim's attempt
@@ -2031,7 +2060,8 @@ async function work(opts) {
                 }
             }
         } catch (e) {
-            if (handlerFailed && _refusal.isBusy(e)) {
+            if (handlerFailed && !_refusal.isBusy(e)) busyStreakClear(job);
+            if (handlerFailed && _refusal.isBusy(e) && busyStreakTake(job)) {
                 // Not an attempt: nothing reached the job. A failed hand-back
                 // (the database) is recorded as a retry below.
                 try { handBack(job); } catch (e2) { e = e2; handlerFailed = false; }
@@ -2446,18 +2476,30 @@ const WF_PREFIX = WF_TYPE_PREFIX;
 // completed: the body stops there and the handler compensates.
 const WF_ABORT = Symbol("hull.jobs.wfAbort");
 function wfAbort() { const e = new Error("__hull_wf_abort"); e[WF_ABORT] = true; return e; }
+// Thrown by runStep outside a compensation run when a step's saga
+// compensation already ran (audit 39): its effect was undone, so replaying its
+// memoized result would carry the workflow on to 'done' over an undone step.
+// The handler ends the workflow dead instead.
+const WF_UNDONE = Symbol("hull.jobs.wfUndone");
 
 // Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
-// workflow the value comes from the store and fn is NOT called again.
-async function runStep(workflowId, stepKey, fn) {
+// workflow the value comes from the store and fn is NOT called again. A
+// compensation run (`compensating`) replays a compensated step too: it only
+// re-registers compensations, and runCompensations skips that one.
+async function runStep(workflowId, stepKey, fn, compensating) {
     if (typeof stepKey !== "string" || stepKey === "")
         throw new Error("ctx.step: name must be a non-empty string");
     keyOpt(stepKey, "name", "ctx.step", false);
     if (typeof fn !== "function") throw new Error("ctx.step: fn must be a function");
     const rows = db.query(
-        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        "SELECT result, status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
         [workflowId, stepKey]);
     if (rows.length) {
+        if (rows[0].status === "compensated" && !compensating) {
+            const e = new Error("__hull_wf_undone");
+            e[WF_UNDONE] = stepKey;
+            throw e;
+        }
         if (rows[0].result == null) return undefined;
         try { return JSON.parse(rows[0].result); } catch (e) { return rows[0].result; }
     }
@@ -2715,7 +2757,7 @@ function makeCtx(job, name) {
                     [job.id, stepKey]);
                 if (!(r && r.length)) throw wfAbort();
             }
-            const result = await runStep(job.id, stepKey, fn);
+            const result = await runStep(job.id, stepKey, fn, compensating);
             if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });
             return result;
         },
@@ -2793,10 +2835,30 @@ function workflow(name, fn) {
                 return { [WF_YIELD]: true, wakeAt: e.wakeAt,
                          waiting: e.waiting, signalName: e.signalName,
                          signalKey: e.signalKey, deadline: e.deadline };
+            } else if (e && typeof e === "object" && typeof e[WF_UNDONE] === "string") {
+                // The saga already rolled back: finish it and dead-letter.
+                const why = new Error("step '" + safeText(e[WF_UNDONE]) +
+                    "' was compensated; the workflow cannot continue past it");
+                const failed = await runCompensations(ctx._comps, job.id);
+                return { [WF_DEAD]: true, error: withCompFailures(why, failed).message };
+            } else if (_refusal.isBusy(e) && busyStreakOpen(job)) {
+                // A "busy" refusal is local and transient: work() hands the
+                // job back without spending the attempt. Never compensate for
+                // it (audit 39): the compensations ran on the last attempt,
+                // the hand-back re-ran the workflow, and it replayed the
+                // undone steps' memos to 'done'.
+                throw e;
             }
             const max = (job.maxAttempts != null) ? job.maxAttempts : _cfg.maxAttempts;
-            if ((job.attempts || 0) >= max)
-                e = withCompFailures(e, await runCompensations(ctx._comps, job.id));
+            if ((job.attempts || 0) >= max) {
+                const failed = await runCompensations(ctx._comps, job.id);
+                if (ctx._comps.length && _refusal.code(e)) {
+                    // Compensations ran, so this outcome is final: it must not
+                    // carry a refusal code work() would act on.
+                    e = new Error("workflow failed: " + errText(e));
+                }
+                e = withCompFailures(e, failed);
+            }
             throw e;
         }
         if (res !== DEAD) return res;
@@ -3432,6 +3494,16 @@ _test_hooks.register("hull:jobs", {
     config: _cfg, cronNext: _cronNext, tick: _tick, eventsDrain,
     cronNextRunAt: _cronNextRunAt, cronSetNextRunAt: _cronSetNextRunAt,
     CRON_DISABLED_AT,
+    // Audit 39: make a handed-back job due now, read / set its busy
+    // hand-back streak, mark a workflow step compensated.
+    makeDue: (id) => db.exec("UPDATE _hull_jobs SET run_at=? WHERE id=?", [time.now(), id]),
+    busyStreak: (id, n) => {
+        if (n !== undefined) _busyStreak.set(id, n);
+        return _busyStreak.get(id);
+    },
+    markStepCompensated: (id, key) => db.exec(
+        "UPDATE _hull_workflow_steps SET status='compensated' WHERE workflow_id=? AND step_key=?",
+        [id, key]),
 });
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,

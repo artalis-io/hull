@@ -453,6 +453,85 @@ cases.audit38 = async () => {
     });
 };
 
+// Audit 39: a busy refusal is never compensated, a compensated step is never
+// replayed as done, and busy hand-backs are bounded (an app can forge the code).
+cases.audit39 = async () => {
+    jobs.init({ backoff: () => 0 });
+    const busy = (m) => { const e = new Error(m); e.code = "busy"; return e; };
+    let charged = 0, refunded = 0, ship = 0;
+    jobs.workflow("order39", async (c) => {
+        await c.step("charge", () => { charged++; return "ch_1"; },
+            { compensate: () => { refunded++; } });
+        await c.step("ship", () => {
+            ship++;
+            if (ship === 1) throw busy("http.fetch: 64 requests in flight");
+            return "shipped";
+        });
+        return "ok";
+    });
+    await atest("a busy step on the last attempt is handed back, not compensated", async () => {
+        const id = jobs.start("order39", {}, { queue: "o39", maxAttempts: 1 });
+        await jobs.work({ batch: 1, queue: "o39" });
+        const j = jobs.get(id);
+        assertEq(j.status, "pending", "handed back");
+        assertEq(j.attempts, 0, "uncounted");
+        assertEq(refunded, 0, "not compensated");
+        hooks.makeDue(id);
+        await jobs.work({ batch: 1, queue: "o39" });
+        assertEq(jobs.get(id).status, "done", "done");
+        assertEq(charged, 1, "charged once");
+        assertEq(refunded, 0, "still not compensated");
+        assertEq(ship, 2, "ship re-ran");
+    });
+    await atest("busy hand-backs are bounded: past the streak cap the attempt counts", async () => {
+        jobs.handler("busy39", () => { throw busy("forged"); });
+        const id = jobs.enqueue("busy39", {}, { queue: "b39", maxAttempts: 1 });
+        hooks.busyStreak(id, 20);
+        await jobs.work({ batch: 1, queue: "b39" });
+        const j = jobs.get(id);
+        assertEq(j.status, "dead", "counted");
+        assertEq(j.attempts, 1, "one attempt");
+        assertEq(hooks.busyStreak(id), undefined, "streak cleared");
+    });
+    await atest("a workflow past the cap compensates and carries no refusal code", async () => {
+        let r = 0;
+        jobs.workflow("cap39", async (c) => {
+            await c.step("a", () => 1, { compensate: () => { r++; } });
+            await c.step("b", () => { throw busy("forged"); });
+        });
+        const id = jobs.start("cap39", {}, { queue: "c39", maxAttempts: 1 });
+        hooks.busyStreak(id, 20);
+        await jobs.work({ batch: 1, queue: "c39" });
+        const j = jobs.get(id);
+        assertEq(j.status, "dead", "dead");
+        assertEq(r, 1, "compensated");
+        assertEq(String(j.lastError).slice(0, 17), "workflow failed: ", String(j.lastError));
+    });
+    await atest("a compensated step is not replayed as done", async () => {
+        let r = 0, calls = 0;
+        jobs.workflow("undone39", async (c) => {
+            await c.step("a", () => 1, { compensate: () => { r++; } });
+            await c.step("b", () => {
+                calls++;
+                if (calls === 1) throw new Error("transient");
+                return 2;
+            });
+            return "ok";
+        });
+        const id = jobs.start("undone39", {}, { queue: "u39", maxAttempts: 3 });
+        await jobs.work({ batch: 1, queue: "u39" });
+        assertEq(jobs.get(id).status, "pending", "retrying");
+        hooks.markStepCompensated(id, "a");
+        hooks.makeDue(id);
+        await jobs.work({ batch: 1, queue: "u39" });
+        const j = jobs.get(id);
+        assertEq(j.status, "dead", "dead, not done");
+        assertEq(String(j.lastError).includes("was compensated"), true, String(j.lastError));
+        assertEq(calls, 1, "b not run past the undone step");
+        assertEq(r, 0, "the compensated step is not compensated again");
+    });
+};
+
 test("the case is known", () => {
     assertEq(typeof cases[globalThis.__jobs_case], "function", String(globalThis.__jobs_case));
 });

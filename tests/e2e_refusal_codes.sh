@@ -20,6 +20,16 @@
 #     = 1, so a counted attempt would have marked it failed);
 # and once the held fetches finish, the same flush delivers every row.
 #
+# Audit 39 legs, same setup:
+#   - email.send through an HTTP provider (postmark) re-raises the busy
+#     refusal with its code (it was wrapped as delivery_failed);
+#   - retry.run re-raises it unchanged, after one call (Lua: it gained a
+#     "hull.retry:N: " prefix that hid the code);
+#   - a workflow whose step hits the busy refusal on its LAST attempt is
+#     handed back without running its compensation, and once the cap frees
+#     it completes with nothing compensated (round 38 compensated it, then
+#     the hand-back replayed the undone step's memo to 'done').
+#
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
@@ -82,13 +92,56 @@ cat > "$TMPDIR/lua/app.lua" <<EOF
 local app = require("hull.app")
 app.manifest({
     modules = { "hull/http-server@1", "hull/http-client@1", "hull/web/pwned@1",
-                "hull/web/middleware/outbox@1", "hull/json@1" },
-    hosts = { "127.0.0.1" },
+                "hull/web/middleware/outbox@1", "hull/json@1", "hull/email@1",
+                "hull/retry@1", "hull/jobs@1" },
+    hosts = { "127.0.0.1", "api.postmarkapp.com" },
 })
 local http = require("hull.http-client")
 local pwned = require("hull.web.pwned")
 local outbox = require("hull.web.middleware.outbox")
 outbox.init({ max_attempts = 1 })
+local email = require("hull.email")
+local retry = require("hull.retry")
+local jobs = require("hull.jobs")
+local function rcode(e)
+    if type(e) == "table" then return e.code or "none" end
+    return tostring(e):match("^%[hull:([%w_]+)%] ") or "none"
+end
+local inited, wf_id, refunded = false, nil, 0
+local function jinit()
+    if not inited then jobs.init({ backoff = function() return 0 end }); inited = true end
+end
+jobs.workflow("order", function(c)
+    c.step("charge", function() return "ch_1" end,
+           { compensate = function() refunded = refunded + 1 end })
+    c.step("ship", function() http.async.get("$M/ship"); return "shipped" end)
+    return "ok"
+end)
+app.get("/email", function(req, res)
+    local ok, e = pcall(email.send, { provider = "postmark", api_key = "k",
+        from = "a@b.co", to = "c@d.co", subject = "s", body = "b" })
+    res:json({ code = ok and "sent" or rcode(e) })
+end)
+app.get("/retry", function(req, res)
+    local calls = 0
+    local ok, e = pcall(retry.run, function()
+        calls = calls + 1
+        return http.async.get("$M/r")
+    end, { max_attempts = 3 })
+    res:json({ code = ok and "ok" or rcode(e), calls = calls })
+end)
+app.get("/wfstart", function(req, res)
+    jinit()
+    wf_id = jobs.start("order", {}, { max_attempts = 1 })
+    jobs.work({})
+    local j = jobs.get(wf_id)
+    res:json({ status = j.status, attempts = j.attempts, refunded = refunded })
+end)
+app.get("/wfwork", function(req, res)
+    jinit()
+    jobs.work({})
+    res:json({ status = jobs.get(wf_id).status, refunded = refunded })
+end)
 app.get("/hold", function(req, res)
     pcall(http.async.get, "$M/hold")
     res:text("ok")
@@ -119,12 +172,51 @@ import { app } from "hull:app";
 import { httpClient } from "hull:http-client";
 import { pwned } from "hull:web:pwned";
 import { outbox } from "hull:web:middleware:outbox";
+import { email } from "hull:email";
+import { retry } from "hull:retry";
+import { jobs } from "hull:jobs";
 app.manifest({
     modules: ["hull/http-server@1", "hull/http-client@1", "hull/web/pwned@1",
-              "hull/web/middleware/outbox@1"],
-    hosts: ["127.0.0.1"],
+              "hull/web/middleware/outbox@1", "hull/email@1", "hull/retry@1",
+              "hull/jobs@1"],
+    hosts: ["127.0.0.1", "api.postmarkapp.com"],
 });
 outbox.init({ maxAttempts: 1 });
+const rcode = (e) => (e && e.code) || "none";
+let inited = false, wfId = null, refunded = 0;
+const jinit = () => { if (!inited) { jobs.init({ backoff: () => 0 }); inited = true; } };
+jobs.workflow("order", async (c) => {
+    await c.step("charge", () => "ch_1", { compensate: () => { refunded++; } });
+    await c.step("ship", async () => { await httpClient.async.get("$M/ship"); return "shipped"; });
+    return "ok";
+});
+app.get("/email", async (req, res) => {
+    try {
+        await email.send({ provider: "postmark", api_key: "k", from: "a@b.co",
+                           to: "c@d.co", subject: "s", body: "b" });
+        res.json({ code: "sent" });
+    } catch (e) { res.json({ code: rcode(e) }); }
+});
+app.get("/retry", async (req, res) => {
+    let calls = 0;
+    try {
+        await retry.run(() => { calls++; return httpClient.async.get("$M/r"); },
+                        { maxAttempts: 3 });
+        res.json({ code: "ok", calls });
+    } catch (e) { res.json({ code: rcode(e), calls }); }
+});
+app.get("/wfstart", async (req, res) => {
+    jinit();
+    wfId = jobs.start("order", {}, { maxAttempts: 1 });
+    await jobs.work({});
+    const j = jobs.get(wfId);
+    res.json({ status: j.status, attempts: j.attempts, refunded });
+});
+app.get("/wfwork", async (req, res) => {
+    jinit();
+    await jobs.work({});
+    res.json({ status: jobs.get(wfId).status, refunded });
+});
 app.get("/hold", async (req, res) => {
     try { await httpClient.async.get("$M/hold"); } catch (e) {}
     res.text("ok");
@@ -198,6 +290,24 @@ run_runtime() {
         fail "$rt: pwned.check under the fetch cap must not fail open" "$code $out"
     fi
 
+    out=$(curl -sS "http://127.0.0.1:$PORT/email")
+    [ "$(jget "$out" code)" = "busy" ] \
+        && pass "$rt: email.send (postmark) re-raises the busy refusal with its code" \
+        || fail "$rt: email provider under the fetch cap" "$out"
+    out=$(curl -sS "http://127.0.0.1:$PORT/retry")
+    if [ "$(jget "$out" code)" = "busy" ] && [ "$(jget "$out" calls)" = "1" ]; then
+        pass "$rt: retry.run re-raises the refusal unchanged, without retrying"
+    else
+        fail "$rt: retry.run under the fetch cap" "$out"
+    fi
+    out=$(curl -sS "http://127.0.0.1:$PORT/wfstart")
+    if [ "$(jget "$out" status)" = "pending" ] && [ "$(jget "$out" attempts)" = "0" ] \
+       && [ "$(jget "$out" refunded)" = "0" ]; then
+        pass "$rt: a busy step on the last attempt is handed back, not compensated"
+    else
+        fail "$rt: workflow under the fetch cap" "$out"
+    fi
+
     out=$(curl -sS "http://127.0.0.1:$PORT/flush")
     if [ "$(jget "$out" busy)" = "True" ] && [ "$(jget "$out" failed)" = "0" ] \
        && [ "$(jget "$out" retried)" = "0" ] && [ "$(jget "$out" delivered)" = "0" ]; then
@@ -227,13 +337,25 @@ run_runtime() {
     out=$(curl -sS "http://127.0.0.1:$PORT/chk")
     [ "$(jget "$out" pwned)" = "False" ] && pass "$rt: the check answers again" \
         || fail "$rt: check after the cap" "$out"
+    # The hand-back deferred the workflow a second; poll it to its end.
+    i=0
+    while [ $i -lt 50 ]; do
+        out=$(curl -sS "http://127.0.0.1:$PORT/wfwork")
+        [ "$(jget "$out" status)" = "pending" ] || break
+        sleep 0.2; i=$((i + 1))
+    done
+    if [ "$(jget "$out" status)" = "done" ] && [ "$(jget "$out" refunded)" = "0" ]; then
+        pass "$rt: the handed-back workflow completes with nothing compensated"
+    else
+        fail "$rt: workflow after the cap" "$out"
+    fi
 
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
     SERVER_PID=""
 }
 
-echo "=== refusal codes (audit 35) ==="
+echo "=== refusal codes (audit 35, audit 39) ==="
 run_runtime lua app.lua
 run_runtime js app.js
 

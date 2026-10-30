@@ -158,6 +158,30 @@ expect_code("an address ending in NBSP throws",
     { from = "x@y.com", to = "y@z.com\xC2\xA0", subject = "s", body = "b" },
     "invalid_argument", "invalid to address")
 
+-- A runtime refusal reaches the caller with its code (audit 39): the HTTP
+-- providers wrapped it as delivery_failed, so jobs spent attempts on mail
+-- that was never sent. The fetch is stubbed to refuse (busy, as the 64-fetch
+-- cap does); tests/e2e_refusal_codes.sh drives the real cap.
+do
+    local hc = require("hull.http-client")
+    local orig = hc.async.post
+    hc.async.post = function() error("[hull:busy] http.fetch: test cap", 0) end
+    for _, prov in ipairs({ "postmark", "sendgrid", "resend" }) do
+        test(prov .. " re-raises a runtime refusal with its code", function()
+            local ok, err = pcall(email.send, { provider = prov, api_key = "k",
+                from = "a@b.com", to = "c@d.com", subject = "s", body = "b" })
+            assert_eq(ok, false, "expected a throw")
+            assert_eq(err, "[hull:busy] http.fetch: test cap", "the refusal itself")
+        end)
+    end
+    hc.async.post = function() error("remote said no", 0) end
+    expect_code("an ordinary fetch error is still delivery_failed",
+        { provider = "postmark", api_key = "k", from = "a@b.com", to = "c@d.com",
+          subject = "s", body = "b" },
+        "delivery_failed", "remote said no")
+    hc.async.post = orig
+end
+
 print(pass .. " passed, " .. fail .. " failed")
 -- Results go back to the C harness. This suite runs INSIDE the Hull Lua
 -- runtime (hull.email pulls in hull.http-client and hull.smtp, both

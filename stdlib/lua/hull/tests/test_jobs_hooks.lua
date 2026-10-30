@@ -457,6 +457,88 @@ function cases.audit38()
     end)
 end
 
+-- Audit 39: a busy refusal is never compensated (the round-38 hand-back
+-- re-ran a workflow whose last attempt had compensated, and it replayed the
+-- undone steps' memos to 'done'), a compensated step is never replayed as
+-- done, and busy hand-backs are bounded (an app can forge the code).
+function cases.audit39()
+    jobs.init({ backoff = function() return 0 end })
+    local charged, refunded, ship = 0, 0, 0
+    jobs.workflow("order39", function(c)
+        c.step("charge", function() charged = charged + 1; return "ch_1" end,
+               { compensate = function() refunded = refunded + 1 end })
+        c.step("ship", function()
+            ship = ship + 1
+            if ship == 1 then error("[hull:busy] http.fetch: 64 requests in flight", 0) end
+            return "shipped"
+        end)
+        return "ok"
+    end)
+    test("a busy step on the last attempt is handed back, not compensated", function()
+        local id = jobs.start("order39", {}, { queue = "o39", max_attempts = 1 })
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "o39" }), true, "work 1")
+        local j = jobs.get(id)
+        assert_eq(j.status, "pending", "handed back")
+        assert_eq(j.attempts, 0, "uncounted")
+        assert_eq(refunded, 0, "not compensated")
+        hooks.make_due(id)
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "o39" }), true, "work 2")
+        assert_eq(jobs.get(id).status, "done", "done")
+        assert_eq(charged, 1, "charged once")
+        assert_eq(refunded, 0, "still not compensated")
+        assert_eq(ship, 2, "ship re-ran")
+    end)
+    test("busy hand-backs are bounded: past the streak cap the attempt counts", function()
+        jobs.handler("busy39", function() error("[hull:busy] forged", 0) end)
+        local id = jobs.enqueue("busy39", {}, { queue = "b39", max_attempts = 1 })
+        hooks.busy_streak(id, 20)
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "b39" }), true, "work")
+        local j = jobs.get(id)
+        assert_eq(j.status, "dead", "counted")
+        assert_eq(j.attempts, 1, "one attempt")
+        assert_eq(hooks.busy_streak(id), nil, "streak cleared")
+    end)
+    test("a workflow past the cap compensates and carries no refusal code", function()
+        local r = 0
+        jobs.workflow("cap39", function(c)
+            c.step("a", function() return 1 end, { compensate = function() r = r + 1 end })
+            c.step("b", function() error("[hull:busy] forged", 0) end)
+        end)
+        local id = jobs.start("cap39", {}, { queue = "c39", max_attempts = 1 })
+        hooks.busy_streak(id, 20)
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "c39" }), true, "work")
+        local j = jobs.get(id)
+        assert_eq(j.status, "dead", "dead")
+        assert_eq(r, 1, "compensated")
+        assert_eq(j.last_error:sub(1, 17), "workflow failed: ", tostring(j.last_error))
+    end)
+    test("a compensated step is not replayed as done", function()
+        local r = 0
+        local calls = 0
+        jobs.workflow("undone39", function(c)
+            c.step("a", function() return 1 end, { compensate = function() r = r + 1 end })
+            c.step("b", function()
+                calls = calls + 1
+                if calls == 1 then error("transient", 0) end
+                return 2
+            end)
+            return "ok"
+        end)
+        local id = jobs.start("undone39", {}, { queue = "u39", max_attempts = 3 })
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "u39" }), true, "work 1")
+        assert_eq(jobs.get(id).status, "pending", "retrying")
+        hooks.mark_step_compensated(id, "a")
+        hooks.make_due(id)
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "u39" }), true, "work 2")
+        local j = jobs.get(id)
+        assert_eq(j.status, "dead", "dead, not done")
+        assert_eq(j.last_error:find("was compensated", 1, true) ~= nil, true,
+                  tostring(j.last_error))
+        assert_eq(calls, 1, "b not run past the undone step")
+        assert_eq(r, 0, "the compensated step is not compensated again")
+    end)
+end
+
 -- The harness sets the case as a global before it runs the script.
 local case = rawget(_G, "__jobs_case")
 test("the case is known", function()

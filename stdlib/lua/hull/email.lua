@@ -44,6 +44,10 @@
 local json = require("hull.json")
 local http_client = require("hull.http-client")
 local smtp = require("hull.smtp")
+-- A runtime refusal (busy / wait_refused) attempted no delivery: the HTTP
+-- providers re-raise it with its code rather than wrap it as
+-- delivery_failed (audit 39), as smtp.send's raise reaches the caller.
+local refusal = require("hull._refusal")
 
 local email = {}
 
@@ -155,6 +159,7 @@ function providers.postmark(opts)
         }
     )
     if not ok then
+        if refusal.code(resp) then error(resp, 0) end
         email_error("delivery_failed", "postmark: " .. tostring(resp))
     end
     if not resp then
@@ -202,6 +207,7 @@ function providers.sendgrid(opts)
         }
     )
     if not ok then
+        if refusal.code(resp) then error(resp, 0) end
         email_error("delivery_failed", "sendgrid: " .. tostring(resp))
     end
     if not resp then
@@ -242,6 +248,7 @@ function providers.resend(opts)
         }
     )
     if not ok then
+        if refusal.code(resp) then error(resp, 0) end
         email_error("delivery_failed", "resend: " .. tostring(resp))
     end
     if not resp then

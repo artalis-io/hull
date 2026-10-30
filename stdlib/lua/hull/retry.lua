@@ -26,6 +26,7 @@
 --   local out = retry.run(function() return gpu.async.dispatch("scan", opts) end)
 
 local crypto = require("hull.crypto")
+local refusal = require("hull._refusal")
 
 local retry = {}
 
@@ -76,6 +77,16 @@ end
 --                      backoff sleep (for logging / metrics).
 -- @return Every value the successful (or last) call of `fn` returned.
 --   Re-raises the last error if all attempts errored.
+--
+-- A runtime refusal (an error starting `"[hull:wait_refused] "` or
+-- `"[hull:busy] "`, see hull._refusal) is never retried: it is re-raised at
+-- once, unchanged (audit 39). `wait_refused` recurs on every attempt (the call
+-- is misplaced: inside a transaction, middleware...), and `busy` is this VM's
+-- own admission cap - the caller decides (jobs hands the job back uncounted,
+-- the outbox gives its claim back), rather than retry.run spending attempts
+-- and sleeping while holding the run. Errors are re-raised with level 0, so
+-- they keep their text (they used to gain a "hull.retry:N: " prefix, which
+-- hid the refusal code).
 function retry.run(fn, opts)
     opts = opts or {}
     -- 0 and NaN take the default too, as in the JS twin (`maxAttempts ||
@@ -98,8 +109,9 @@ function retry.run(fn, opts)
                 return table.unpack(r, 2, r.n)
             end
         else
+            if refusal.code(r[2]) then error(r[2], 0) end
             if opts.retry_on_error and not opts.retry_on_error(r[2]) then
-                error(r[2])
+                error(r[2], 0)
             end
         end
         if attempt < max then
@@ -110,7 +122,7 @@ function retry.run(fn, opts)
     -- Exhausted. A trailing error re-raises; a retry_on-flagged success returns
     -- the last values (the caller's predicate can inspect them).
     if last[1] then return table.unpack(last, 2, last.n) end
-    error(last[2])
+    error(last[2], 0)
 end
 
 return retry

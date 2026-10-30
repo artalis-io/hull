@@ -26,6 +26,7 @@
  */
 
 import { crypto } from "hull:crypto";
+import { _refusal } from "hull:_refusal";
 
 const retry = {};
 
@@ -68,6 +69,12 @@ retry.backoff = function(attempt, opts) {
  *   - `onRetry(attempt, ok, value)` - called before each backoff sleep.
  * @returns {Promise<*>} The successful (or last) result; re-throws the last
  *   error if all attempts threw.
+ *
+ * A runtime refusal (an Error whose `code` is "wait_refused" or "busy", see
+ * hull:_refusal) is never retried: it is re-thrown at once (audit 39).
+ * "wait_refused" recurs on every attempt, and "busy" is this VM's own
+ * admission cap - the caller decides (jobs hands the job back uncounted, the
+ * outbox gives its claim back), as in the Lua twin.
  */
 retry.run = async function(fn, opts) {
     opts = opts || {};
@@ -89,6 +96,7 @@ retry.run = async function(fn, opts) {
         if (ok) {
             if (!(opts.retryOn && (await opts.retryOn(val)))) return val;
         } else {
+            if (_refusal.code(val)) throw val;
             if (opts.retryOnError && !(await opts.retryOnError(val))) throw val;
         }
         if (attempt < max) {
