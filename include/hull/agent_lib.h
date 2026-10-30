@@ -39,6 +39,30 @@
  */
 FILE *hl_agent_open_sidecar(const char *path);
 
+/*
+ * Read a whole sidecar (hl_agent_open_sidecar rules) of at most @p cap bytes
+ * into a NUL-terminated malloc'd buffer; *out_len (if non-NULL) gets the exact
+ * length. A short read or read error is NULL, so a truncated file is refused.
+ */
+char *hl_agent_read_sidecar(const char *path, size_t cap, size_t *out_len);
+
+/*
+ * A positive integer field "<key>": <digits> of a small JSON blob, or -1.
+ */
+long hl_agent_json_int_field(const char *buf, const char *key);
+
+/*
+ * Is a LIVE `hull dev --agent` session serving @p app_dir? 0 iff
+ * <app>/.hull/dev.json carries a 64-hex nonce equal to the copy the
+ * supervisor keeps at $HOME/.hull/dev-sessions/<session_pid> and (off
+ * Windows, where kill(pid, 0) is not inert) that pid is alive; -1 otherwise.
+ * On 0, @p nonce (65 bytes), @p session_pid and @p port (each optional) are
+ * set from dev.json. Everything else under <app>/.hull is repo content until
+ * it is tied to this nonce (audit 36).
+ */
+int hl_agent_dev_session(const char *app_dir, char *nonce, long *session_pid,
+                         int *port);
+
 /* Forward declaration */
 typedef struct HlAppContext HlAppContext;
 

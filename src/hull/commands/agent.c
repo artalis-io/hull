@@ -727,7 +727,7 @@ static void agent_usage(void)
         "  compute [app_dir]              List WASM compute modules\n"
         "  gpu [app_dir]                  List WGSL shaders + GPU availability\n"
         "  perf [app_dir]                 Runtime stats snapshot\n"
-        "  logs [app_dir] [--tail N]      Last N log lines from .hull/dev.log\n"
+        "  logs [app_dir] [--tail N]      No Hull-written log (a .hull/dev.log is not read)\n"
         "  validate <file>                Parse+sandbox-check a Lua/JS file\n"
         "  eval <code> [app_dir]          Run a one-shot snippet, return JSON\n"
         "  template <name> [data.json] [dir]  Render a template with data\n"
@@ -741,57 +741,7 @@ static void agent_usage(void)
         "All output is JSON to stdout.\n");
 }
 
-/* ── hull agent inspect ────────────────────────────────────────────────
- *
- * Read a text field's integer value from a small JSON blob (crude, matching
- * hl_agent_status's dev.json port parse): "<key>"<ws>:<ws><digits>. Returns -1 if absent.
- */
-static long json_int_field(const char *buf, const char *key)
-{
-    char needle[64];
-    int n = snprintf(needle, sizeof(needle), "\"%s\"", key);
-    if (n < 0 || (size_t)n >= sizeof(needle)) return -1;
-    const char *p = strstr(buf, needle);
-    if (!p) return -1;
-    p += n;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != ':') return -1;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p < '0' || *p > '9') return -1;              /* must start with a digit (no sign / garbage) */
-    errno = 0;
-    char *end = NULL;
-    long v = strtol(p, &end, 10);
-    if (errno != 0 || end == p) return -1;            /* overflow / no digits consumed */
-    /* the numeric token must terminate on a valid JSON boundary (not e.g. "12x") */
-    if (*end != ',' && *end != '}' && *end != ' ' && *end != '\t' &&
-        *end != '\n' && *end != '\r' && *end != '\0') return -1;
-    if (v <= 0 || v > INT_MAX) return -1;             /* a pid fits in a positive int */
-    return v;
-}
-
-/* Read a whole file into a NUL-terminated malloc'd buffer (cap-bounded), or NULL. Requires
- * a COMPLETE read (short read / read error -> NULL) so a truncated sidecar is rejected
- * rather than parsed. On success `*out_len` (if non-NULL) is the exact byte length -- pass
- * it (not strlen) to the parser + emitter so an embedded NUL cannot hide trailing bytes. */
-static char *read_whole_file(const char *path, size_t cap, size_t *out_len)
-{
-    FILE *f = hl_agent_open_sidecar(path);   /* no link, no FIFO (audit 22) */
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long sz = ftell(f);
-    if (sz < 0 || (size_t)sz > cap) { fclose(f); return NULL; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
-    char *buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t got = fread(buf, 1, (size_t)sz, f);
-    int bad = (got != (size_t)sz) || ferror(f);       /* demand the full file, no read error */
-    fclose(f);
-    if (bad) { free(buf); return NULL; }
-    buf[got] = '\0';
-    if (out_len) *out_len = got;
-    return buf;
-}
+/* ── hull agent inspect ──────────────────────────────────────────────── */
 
 /* Validate that `buf` (of `len` bytes) is a COMPLETE, well-formed JSON document via the
  * repo's parser. A truncated / corrupt discovery.json -- even one whose session_pid token
@@ -815,50 +765,20 @@ static int json_document_valid(const char *buf, size_t len)
  * This rejects a stale/cross-reload sidecar and a corrupt/partial one. */
 static int agent_inspect_stream_live(const char *app_dir)
 {
-    char disc_path[PATH_MAX], dev_path[PATH_MAX];
+    char disc_path[PATH_MAX];
     int a = snprintf(disc_path, sizeof(disc_path), "%s/.hull/discovery.json", app_dir);
-    int b = snprintf(dev_path, sizeof(dev_path), "%s/.hull/dev.json", app_dir);
-    if (a < 0 || (size_t)a >= sizeof(disc_path) || b < 0 || (size_t)b >= sizeof(dev_path))
+    if (a < 0 || (size_t)a >= sizeof(disc_path))
         return -1;
 
-    char *dev = read_whole_file(dev_path, 64 * 1024, NULL);
-    if (!dev) return -1;
-    long sp_dev = json_int_field(dev, "session_pid");
-    /* The session's nonce, against the copy the live supervisor keeps under
+    /* dev.json's nonce against the copy the live supervisor keeps under
      * $HOME (see dev.c): files a repo shipped in .hull/ cannot match it. */
-    char nonce[65] = "";
-    {
-        const char *p = strstr(dev, "\"nonce\":\"");
-        if (p) {
-            p += 9;
-            size_t i = 0;
-            while (i < 64 && ((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) {
-                nonce[i] = p[i];
-                i++;
-            }
-            nonce[i] = '\0';
-            if (i != 64 || p[64] != '"') nonce[0] = '\0';
-        }
-    }
-    free(dev);
-    if (sp_dev <= 0 || !nonce[0]) return -1;
-    {
-        const char *home = hl_host_home();
-        if (!home || !*home) return -1;
-        char sp[PATH_MAX];
-        int n = snprintf(sp, sizeof sp, "%s/.hull/dev-sessions/%ld", home, sp_dev);
-        if (n < 0 || (size_t)n >= sizeof sp) return -1;
-        size_t kl = 0;
-        char *kept = read_whole_file(sp, 128, &kl);
-        int match = kept && kl == 64 && memcmp(kept, nonce, 64) == 0;
-        free(kept);
-        if (!match) return -1;
-    }
+    long sp_dev = 0;
+    if (hl_agent_dev_session(app_dir, NULL, &sp_dev, NULL) != 0) return -1;
 
     size_t disc_len = 0;
-    char *disc = read_whole_file(disc_path, 64 * 1024 * 1024, &disc_len);   /* 64 MB cap */
+    char *disc = hl_agent_read_sidecar(disc_path, 64 * 1024 * 1024, &disc_len);   /* 64 MB cap */
     if (!disc) return -1;
-    long sp_disc = json_int_field(disc, "session_pid");
+    long sp_disc = hl_agent_json_int_field(disc, "session_pid");
 
     /* Bind the published generation to a specific live dev session.
      *

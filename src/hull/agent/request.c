@@ -135,23 +135,12 @@ int hl_agent_request(const char *method, const char *path, int port,
 
 int hl_agent_status(const char *app_dir, int port, ShJsonBuf *out)
 {
-    /* Try to read .hull/dev.json for port info */
-    char dev_json_path[PATH_MAX];
-    snprintf(dev_json_path, sizeof(dev_json_path), "%s/.hull/dev.json", app_dir);
-
-    FILE *f = hl_agent_open_sidecar(dev_json_path);
-    if (f) {
-        char buf[4096];
-        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-        buf[n] = '\0';
-        fclose(f);
-
-        const char *port_key = strstr(buf, "\"port\":");
-        if (port_key) {
-            int p = (int)strtol(port_key + 7, NULL, 10);
-            if (p > 0) port = p;
-        }
-    }
+    /* The port of the live `hull dev --agent` session, when dev.json is
+     * bound to one: a dev.json a repo shipped is not (audit 36). */
+    int dev_port = 0;
+    if (hl_agent_dev_session(app_dir, NULL, NULL, &dev_port) == 0 &&
+        dev_port > 0)
+        port = dev_port;
 
     /* Pure TCP-connect liveness probe (no app route or middleware invoked),
      * driven through Keel's socket provider + a private KlEventCtx watcher.
@@ -169,62 +158,80 @@ int hl_agent_status(const char *app_dir, int port, ShJsonBuf *out)
 
 /* ── hl_agent_errors ───────────────────────────────────────────────── */
 
+/* The record `hull dev --agent`'s served child writes on a load failure
+ * (serve.c hl_serve_load_app): {"error":"failed to load <entry>",
+ * "timestamp":N,"session":"<nonce>"}. Keep the two in step. */
+#define HL_AGENT_ERR_PREFIX "failed to load "
+
+static void errors_write_empty(ShJsonBuf *out, const char *ignored)
+{
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, out);
+    sh_json_write_object_start(&w);
+    sh_json_write_key(&w, "errors");
+    sh_json_write_array_start(&w);
+    sh_json_write_array_end(&w);
+    if (ignored)
+        sh_json_write_kv_string(&w, "ignored", ignored);
+    sh_json_write_object_end(&w);
+}
+
 int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
 {
     char err_path[PATH_MAX];
-    snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", app_dir);
+    int pn = snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json",
+                      app_dir);
+    if (pn < 0 || (size_t)pn >= sizeof(err_path))
+        return hl_agent_write_error(out, "app_dir too long");
 
-    FILE *f = hl_agent_open_sidecar(err_path);
-    if (!f) {
-        ShJsonWriter w;
-        sh_json_writer_init(&w, sh_json_buf_write, out);
-        sh_json_write_object_start(&w);
-        sh_json_write_key(&w, "errors");
-        sh_json_write_array_start(&w);
-        sh_json_write_array_end(&w);
-        sh_json_write_object_end(&w);
+    size_t n = 0;
+    char *buf = hl_agent_read_sidecar(err_path, 64 * 1024, &n);
+    if (!buf) {
+        errors_write_empty(out, NULL);
         return 0;
     }
 
-    /* Read and pass through the JSON file */
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
-    long flen = ftell(f);
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
-    if (flen <= 0 || flen > 1024 * 1024) {
-        fclose(f);
-        return -1;
-    }
-    char *buf = malloc((size_t)flen + 1);
-    if (!buf) { fclose(f); return -1; }
-    size_t n = fread(buf, 1, (size_t)flen, f);
-    /* L3: capture read error before fclose. */
-    int read_err = ferror(f);
-    fclose(f);
-    if (read_err || n != (size_t)flen) {
+    /* The app tree may be a cloned repo, and an agent reads this output as
+     * Hull's own diagnostics: a committed last_error.json was served as is,
+     * whatever it told the agent to do (audit 36). The record is served only
+     * when it carries the nonce of the live `hull dev --agent` session, and
+     * then only its known fields, re-encoded. */
+    static const char unverified[] =
+        ".hull/last_error.json was ignored: it was not written by a live "
+        "`hull dev --agent` session (repo content, not Hull output)";
+    char nonce[65];
+    if (hl_agent_dev_session(app_dir, nonce, NULL, NULL) != 0) {
         free(buf);
-        return -1;
+        errors_write_empty(out, unverified);
+        return 0;
     }
-    buf[n] = '\0';
 
-    /* The file may have been shipped with the repo rather than written by
-     * hull dev: pass it through only when it is JSON, and holds no
-     * terminal control bytes (it is copied to the user's terminal as is). */
-    int ok = hl_agent_text_is_terminal_safe(buf, n);
+    SHArena *arena = hl_agent_text_is_terminal_safe(buf, n)
+                         ? sh_arena_create(4096 + 8 * n) : NULL;
+    ShJsonValue *v = NULL;
+    const char *msg = NULL, *sess = NULL;
+    double ts = -1;
+    if (arena && sh_json_parse(buf, n, arena, &v) == SH_JSON_OK && v &&
+        sh_json_type(v) == SH_JSON_OBJECT) {
+        msg  = sh_json_as_string(sh_json_get(v, "error"), NULL);
+        sess = sh_json_as_string(sh_json_get(v, "session"), NULL);
+        ts   = sh_json_as_double(sh_json_get(v, "timestamp"), -1);
+    }
+    int ok = msg && sess && strcmp(sess, nonce) == 0 &&
+             strncmp(msg, HL_AGENT_ERR_PREFIX,
+                     sizeof(HL_AGENT_ERR_PREFIX) - 1) == 0 &&
+             strlen(msg) < 1024 && ts >= 0 && ts < 1e13;
     if (ok) {
-        SHArena *arena = sh_arena_create(4096 + 8 * n);
-        ShJsonValue *v = NULL;
-        ok = arena && sh_json_parse(buf, n, arena, &v) == SH_JSON_OK && v &&
-             sh_json_type(v) == SH_JSON_OBJECT;
-        if (arena) sh_arena_free(arena);
+        ShJsonWriter w;
+        sh_json_writer_init(&w, sh_json_buf_write, out);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "error", msg);
+        sh_json_write_kv_int(&w, "timestamp", (int64_t)ts);
+        sh_json_write_object_end(&w);
     }
-    if (!ok) {
-        free(buf);
-        return hl_agent_write_error(out, ".hull/last_error.json is not a "
-                                         "valid error record");
-    }
-
-    /* Pass through raw JSON - write directly to buffer */
-    sh_json_buf_write(out, buf, n);
+    if (arena) sh_arena_free(arena);
     free(buf);
+    if (!ok)
+        errors_write_empty(out, unverified);
     return 0;
 }

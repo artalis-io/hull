@@ -123,13 +123,15 @@ synchronization needed - the event loop is single-threaded.
 
 `hull dev` runs the TUI in your current terminal. On file save, Hull
 restarts the process (which restarts the TUI from scratch). For
-debug logging that doesn't fight the screen, write to a sidecar file:
+debug logging that doesn't fight the screen, send the log (stderr) to a
+file outside the app tree:
 
 ```lua
-log.info("event: " .. ev.type)  -- → .hull/dev.log
+log.info("event: " .. ev.type)  -- → stderr
 ```
 
-Then `tail -f .hull/dev.log` in a second terminal.
+Run `hull dev app.lua 2> /tmp/mydash.log`, then `tail -f /tmp/mydash.log`
+in a second terminal.
 
 <!-- full -->
 ## Capability bits at runtime

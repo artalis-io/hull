@@ -1254,7 +1254,7 @@ hull agent vfs [app_dir]                 # list embedded files
 hull agent compute [app_dir]             # WASM modules + AOT
 hull agent gpu [app_dir]                 # WGSL shaders + GPU availability
 hull agent perf [app_dir]                # runtime stats snapshot
-hull agent logs [app_dir] [--tail N]     # tail .hull/dev.log
+hull agent logs [app_dir] [--tail N]     # no Hull-written log; a .hull/dev.log is not read
 hull agent eval <code> [app_dir]         # one-shot Lua/JS snippet → JSON result
 hull agent template <name> [data] [dir]  # render template via runtime
 hull agent compute-call <mod> <in> [dir] # invoke WASM module on file input
