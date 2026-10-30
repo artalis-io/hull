@@ -39,6 +39,14 @@ typedef struct HlDbMyCtx {
      * later statements would each autocommit and the eventual
      * COMMIT would succeed, so calls refuse until a ROLLBACK (my_ready). */
     int      txn_aborted;
+    /* Session state a later entry on this shared connection must not inherit,
+     * read from the statements run on it (my_track_session; audit 39): a LOCK
+     * TABLES not yet released, an XA transaction begun and not ended, and
+     * GET_LOCK calls not yet matched by RELEASE_LOCK. Cleared when the
+     * session is reset or replaced. */
+    int      lock_tables;
+    int      xa_open;
+    int      named_locks;
 } HlDbMyCtx;
 
 static int my_connect(HlMyConn *conn, const char *dsn)
@@ -211,7 +219,105 @@ static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
     }
     hl_my_conn_close(&s->conn);
     s->conn = fresh;
+    s->lock_tables = s->xa_open = s->named_locks = 0;   /* a new session */
     return 0;
+}
+
+/* -- Session state an entry may leave behind (audit 39) ------------- */
+
+typedef struct {
+    HlDbMyCtx *s;
+    int        ok;        /* the statement succeeded: releasing words count */
+} MyTrack;
+
+static void my_track_word(void *ud, const char *w, const char *prev,
+                          const char *prev2)
+{
+    MyTrack *t = ud;
+    HlDbMyCtx *s = t->s;
+    (void)prev2;
+    if (strcmp(w, "get_lock") == 0) {
+        if (s->named_locks < 1000000) s->named_locks++;
+    } else if (strcmp(w, "release_lock") == 0) {
+        if (t->ok && s->named_locks > 0) s->named_locks--;
+    } else if (strcmp(w, "release_all_locks") == 0) {
+        if (t->ok) s->named_locks = 0;
+    } else if (strcmp(w, "table") == 0 || strcmp(w, "tables") == 0) {
+        if (strcmp(prev, "lock") == 0) s->lock_tables = 1;
+        else if (strcmp(prev, "unlock") == 0 && t->ok) s->lock_tables = 0;
+    } else if (strcmp(prev, "xa") == 0) {
+        if (strcmp(w, "start") == 0 || strcmp(w, "begin") == 0) s->xa_open = 1;
+        else if ((strcmp(w, "commit") == 0 || strcmp(w, "rollback") == 0) &&
+                 t->ok)
+            s->xa_open = 0;
+    }
+}
+
+/* Note what @p sql (run with result @p rc) did to the session. Words that
+ * take state (LOCK TABLES, XA START, GET_LOCK) count whether or not the
+ * statement succeeded; words that release it only when it did. START
+ * TRANSACTION / BEGIN releases LOCK TABLES. A heuristic that errs one way:
+ * a misread costs a session reset at the next entry boundary, no more. */
+static void my_track_session(HlDbHandle *h, const char *sql, int rc)
+{
+    HlDbMyCtx *s = h ? h->ctx : NULL;
+    if (!s || !sql) return;
+    MyTrack t = { s, rc >= 0 };
+    hl_sql_scan_words(sql, 0, 1, my_track_word, &t);
+    if (t.ok && my_sql_txn_kind(sql) == HL_SQL_TXN_BEGIN)
+        s->lock_tables = 0;
+}
+
+/* State no entry can be holding legitimately at an entry boundary: every
+ * later entry on the shared connection would run in it. Autocommit off
+ * (every statement opens a transaction the next guard rolls back), a LOCK
+ * TABLES (every other table refused), an XA transaction (ROLLBACK refused
+ * with XAER_RMFAIL; IN_TRANS stays set). */
+static int my_session_leftover(const HlDbMyCtx *s)
+{
+    return !(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT) ||
+           s->lock_tables || s->xa_open;
+}
+
+/* hl_db_session_dirty: a pooled worker connection holding any of it - or a
+ * GET_LOCK, which a later op on another thread could never release - is
+ * dropped after the op rather than reused. */
+static int mysql_session_dirty(HlDbHandle *h)
+{
+    HlDbMyCtx *s = h ? h->ctx : NULL;
+    if (!s || s->conn.broken) return 0;
+    return my_session_leftover(s) || s->named_locks > 0;
+}
+
+/* Reset the session (COM_RESET_CONNECTION): rolls back, ends XA, drops LOCK
+ * TABLES / GET_LOCK / temporary tables / user variables and restores every
+ * session variable, autocommit included. When the server refuses it (MySQL
+ * before 5.7.3, MariaDB before 10.2.4) or it fails, the connection is
+ * abandoned instead - the server ends the session's state with it - and
+ * the next call reconnects (my_ready). Not on a pinned handle, whose session
+ * lock (the migration run) would go with it. */
+static void my_reset_session(HlDbHandle *h, const char *why)
+{
+    HlDbMyCtx *s = h->ctx;
+    if (h->session_pinned) return;
+    if (!s->conn.broken) {
+        log_warn("[hull:c] mysql: resetting the session, which an earlier "
+                 "entry left with %s; session settings, user variables, "
+                 "temporary tables and named locks on it are dropped", why);
+        if (hl_my_conn_reset(&s->conn) == 0) {
+            s->lock_tables = s->xa_open = s->named_locks = 0;
+            s->txn_aborted = 0;
+            return;
+        }
+        log_warn("[hull:c] mysql: session reset failed (%s); closing the "
+                 "connection instead", s->conn.errmsg);
+        s->conn.broken = 1;        /* first: the close sends no close_notify */
+        hl_my_conn_close(&s->conn);
+    }
+    /* Broken: nothing of the session survives; the next call reconnects. */
+    s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+    s->txn_aborted = 0;
+    s->lock_tables = s->xa_open = s->named_locks = 0;
 }
 
 /* Case-insensitive substring search (strcasestr is not standard C). */
@@ -835,7 +941,12 @@ static void my_resume_after_implicit_commit(HlDbHandle *h, const char *sql,
     HlDbMyCtx *s = h->ctx;
     if (!s || s->txn_aborted || s->conn.broken) return;
     if (!my_sql_commits_implicitly(sql)) return;
+    /* A new transaction under the batch: the transaction generation must
+     * move, which the caller's note cannot see (in a transaction before and
+     * after the statement, with DDL text; audit 39). */
+    HlDbTxnSnap before = hl_db_txn_snap(h);
     (void)mysql_txn_raw(h, "START TRANSACTION");
+    hl_db_txn_note(h, before, NULL);
 }
 
 static int mysql_query(HlDbHandle *h, const char *sql,
@@ -844,6 +955,7 @@ static int mysql_query(HlDbHandle *h, const char *sql,
 {
     int was = my_in_trans(h);
     int rc = mysql_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
+    my_track_session(h, sql, rc);
     if (h && h->ctx) my_note_failure(h->ctx, sql, was, rc);
     my_resume_after_implicit_commit(h, sql, was);
     return rc;
@@ -854,6 +966,7 @@ static int mysql_exec(HlDbHandle *h, const char *sql,
 {
     int was = my_in_trans(h);
     int rc = mysql_exec_raw(h, sql, params, nparams);
+    my_track_session(h, sql, rc);
     if (h && h->ctx) my_note_failure(h->ctx, sql, was, rc);
     my_resume_after_implicit_commit(h, sql, was);
     return rc;
@@ -870,6 +983,7 @@ static int mysql_exec_script(HlDbHandle *h, const char *sql)
     char *collated = mysql_bin_collate_hull_tables(sql, s->conn.bin_collation);
     int rc = hl_my_conn_exec_multi(&s->conn, collated ? collated : sql);
     free(collated);
+    my_track_session(h, sql, rc);
     return rc;
 }
 
@@ -894,6 +1008,7 @@ static int mysql_txn(HlDbHandle *h, const char *sql)
 {
     int was = my_in_trans(h);
     int rc = mysql_txn_raw(h, sql);
+    my_track_session(h, sql, rc);
     if (h && h->ctx) my_note_failure(h->ctx, sql, was, rc);
     return rc;
 }
@@ -912,11 +1027,40 @@ static int mysql_in_txn(HlDbHandle *h)
            s->txn_aborted;
 }
 
+/* A ROLLBACK alone did not clear what a failed entry can leave on the
+ * session (audit 39): after XA START it fails (XAER_RMFAIL) with IN_TRANS
+ * still set, and after SET autocommit = 0 every later statement opens a
+ * transaction the next guard rolls back - one failed request and every
+ * later write was acknowledged and never committed, every wait refused,
+ * until a restart. So the guard also resets the session when the rollback
+ * failed or left the transaction open, when autocommit is off, when a LOCK
+ * TABLES or an XA transaction is outstanding, and - after a stale
+ * transaction, the sign of a failed entry - when a GET_LOCK may be held. A
+ * GET_LOCK an entry left with no transaction open is not seen. */
 static void mysql_guard_stale_txn(HlDbHandle *h)
 {
-    if (!mysql_in_txn(h)) return;
-    fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
-    (void)mysql_rollback(h);
+    if (!h || !h->ctx) return;
+    HlDbMyCtx *s = h->ctx;
+    const char *why = NULL;
+    if (mysql_in_txn(h)) {
+        fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
+        int rc = mysql_rollback(h);
+        if (s->conn.broken) {
+            /* Lost: the server ended the session; my_ready reconnects. */
+            if (!(s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS))
+                s->lock_tables = s->xa_open = s->named_locks = 0;
+            return;
+        }
+        if (rc != 0 || (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS))
+            why = "a transaction its ROLLBACK cannot end (XA)";
+        else if (s->named_locks > 0)
+            why = "a GET_LOCK";
+    }
+    if (!why && !s->conn.broken && my_session_leftover(s))
+        why = !(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT)
+              ? "autocommit off" : s->xa_open ? "an XA transaction"
+              : "LOCK TABLES";
+    if (why) my_reset_session(h, why);
 }
 
 static int64_t mysql_last_id(HlDbHandle *h)
@@ -1120,6 +1264,7 @@ const HlDbBackend hl_db_backend_mysql = {
     .rollback              = mysql_rollback,
     .guard_stale_txn       = mysql_guard_stale_txn,
     .in_txn                = mysql_in_txn,
+    .session_dirty         = mysql_session_dirty,
     .last_id               = mysql_last_id,
     .errmsg                = mysql_errmsg,
     .insert_if_absent      = mysql_insert_if_absent,

@@ -77,6 +77,7 @@ int hl_my_caching_sha2_scramble(const char *password,
 
 #define HL_MY_ERRMSG_SIZE    256    /* connection error-message buffer */
 #define HL_MY_RECV_BUF_INIT  8192   /* initial receive-buffer capacity */
+#define HL_MY_RECV_BUF_SHRINK ((size_t)1 << 20) /* give back a buffer grown past this */
 
 struct HlDbTransport;   /* cap/db_transport.h: the owned byte transport */
 
@@ -120,6 +121,15 @@ typedef struct HlMyConn {
     int      commit_sent;
     int      finishing;
     uint64_t finish_started;   /* monotonic ms the finishing bound began, 0 = not yet */
+    /* The collation id the handshake announced (hl_my_client_charset), which
+     * hl_my_conn_reset applies again: a session reset restores the global
+     * defaults, not the handshake's (audit 39). */
+    uint8_t  charset;
+    /* The server is MariaDB (its version string says so): it maps a
+     * character set's default collation through character_set_collations
+     * (MariaDB 11: utf8mb4 -> utf8mb4_uca1400_ai_ci), the handshake's
+     * included, so the reset names no collation for the default id. */
+    uint8_t  mariadb;
     char     errmsg[HL_MY_ERRMSG_SIZE];
 } HlMyConn;
 
@@ -129,6 +139,11 @@ typedef struct HlMyConn {
 
 /* SERVER_STATUS_IN_TRANS: a transaction is open on the connection. */
 #define HL_MY_SERVER_STATUS_IN_TRANS 0x0001
+
+/* SERVER_STATUS_AUTOCOMMIT: the session runs in autocommit. Clear after a
+ * `SET autocommit = 0`, when every statement opens a transaction that only an
+ * explicit COMMIT ends. Taken from the handshake, then from every OK / EOF. */
+#define HL_MY_SERVER_STATUS_AUTOCOMMIT 0x0002
 
 /* ER_LOCK_DEADLOCK: InnoDB chose this transaction as the deadlock victim and
  * rolled ALL of it back (not only the failing statement). */
@@ -255,6 +270,20 @@ int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql);
  * connection is then marked broken).
  */
 int hl_my_conn_ping(HlMyConn *conn);
+
+/*
+ * COM_RESET_CONNECTION, then the handshake's character set again (SET NAMES
+ * utf8mb4 + collation_connection = conn->charset): the server rolls back the
+ * open transaction, ends an XA transaction that is not prepared, releases
+ * LOCK TABLES and GET_LOCK locks, drops temporary tables, user variables
+ * and prepared statements, and restores every session variable (autocommit
+ * included) to its global value (audit 39). A prepared XA transaction is
+ * detached and stays prepared on the server. Updates conn->server_status.
+ * Returns 0, or -1 (the server refused the command - MySQL before 5.7.3,
+ * MariaDB before 10.2.4 - or the connection failed; conn->errmsg says which).
+ * Asks no budget, as hl_my_conn_ping.
+ */
+int hl_my_conn_reset(HlMyConn *conn);
 #endif
 
 #endif /* HL_CAP_MYSQL_CONN_H */

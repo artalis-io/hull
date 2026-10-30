@@ -218,6 +218,15 @@ typedef struct HlDbBackend {
      * transaction" from what actually happened instead of from the SQL
      * text (audit 37). NULL = not tracked (the text heuristic applies). */
     uint64_t (*txn_seq)(HlDbHandle *h);
+
+    /* Whether the session holds state a later user of the connection must
+     * not inherit and a ROLLBACK does not clear (audit 39): MySQL's
+     * autocommit off, an outstanding LOCK TABLES / XA transaction / GET_LOCK;
+     * a Postgres session-level advisory lock. No I/O. The worker pool drops
+     * such a connection after the op or job instead of reusing it (the
+     * event-loop connections are reset by guard_stale_txn instead). NULL =
+     * never. */
+    int    (*session_dirty)(HlDbHandle *h);
 } HlDbBackend;
 
 struct HlDbHandle {
@@ -241,6 +250,14 @@ static inline int hl_db_in_txn(HlDbHandle *h)
 {
     if (!h || !h->backend || !h->backend->in_txn) return 0;
     return h->backend->in_txn(h) ? 1 : 0;
+}
+
+/* 1 when the session holds state a pooled reuse must not inherit
+ * (HlDbBackend.session_dirty), 0 otherwise or unknown. */
+static inline int hl_db_session_dirty(HlDbHandle *h)
+{
+    if (!h || !h->backend || !h->backend->session_dirty) return 0;
+    return h->backend->session_dirty(h) ? 1 : 0;
 }
 
 /*

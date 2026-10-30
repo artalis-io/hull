@@ -42,6 +42,10 @@ typedef struct HlDbPgCtx {
     HlPgListen   listen[HL_PG_MAX_LISTEN];   /* LISTENed on this connection */
     int          nlisten;
     char        *dsn;         /* to reconnect (secret: scrubbed on close) */
+    /* Session-level advisory locks the statements run on this connection may
+     * still hold (pg_advisory_lock calls not matched by pg_advisory_unlock;
+     * pg_track_session, audit 39). A ROLLBACK does not release them. */
+    int          adv_locks;
 } HlDbPgCtx;
 
 static int pg_connect(HlPgConn *conn, const char *dsn)
@@ -123,7 +127,52 @@ static int pg_ready(HlDbPgCtx *s, const char *sql, int pinned)
     hl_pg_conn_close(&s->conn);
     s->conn = fresh;
     s->nlisten = 0;   /* a new session listens to nothing */
+    s->adv_locks = 0; /* and holds no advisory lock */
     return 0;
+}
+
+/* -- Session-level advisory locks (audit 39) ------------------------- */
+
+typedef struct {
+    HlDbPgCtx *s;
+    int        ok;
+} PgTrack;
+
+static void pg_track_word(void *ud, const char *w, const char *prev,
+                          const char *prev2)
+{
+    PgTrack *t = ud;
+    (void)prev; (void)prev2;
+    if (strcmp(w, "pg_advisory_lock") == 0 ||
+        strcmp(w, "pg_advisory_lock_shared") == 0 ||
+        strcmp(w, "pg_try_advisory_lock") == 0 ||
+        strcmp(w, "pg_try_advisory_lock_shared") == 0) {
+        if (t->s->adv_locks < 1000000) t->s->adv_locks++;
+    } else if (strcmp(w, "pg_advisory_unlock") == 0 ||
+               strcmp(w, "pg_advisory_unlock_shared") == 0) {
+        if (t->ok && t->s->adv_locks > 0) t->s->adv_locks--;
+    } else if (strcmp(w, "pg_advisory_unlock_all") == 0) {
+        if (t->ok) t->s->adv_locks = 0;
+    }
+}
+
+/* Count the session-level advisory locks @p sql may take or release (the
+ * transaction-level pg_advisory_xact_* go with the transaction). Taking
+ * counts whether or not the statement succeeded (pg_try_* may not have
+ * taken it), releasing only when it did: a misread costs an unlock_all at
+ * the next stale-transaction guard, no more. Dollar-quoted bodies are read
+ * as code (a DO block runs them). */
+static void pg_track_session(HlDbPgCtx *s, const char *sql, int rc)
+{
+    if (!s || !sql) return;
+    PgTrack t = { s, rc >= 0 };
+    hl_sql_scan_words(sql, 1, 0, pg_track_word, &t);
+}
+
+static int pg_session_dirty(HlDbHandle *h)
+{
+    HlDbPgCtx *s = h ? h->ctx : NULL;
+    return s && !s->conn.broken && s->adv_locks > 0;
 }
 
 /* ── Open / close ─────────────────────────────────────────────────── */
@@ -382,9 +431,9 @@ static int adapter_row(void *ctx, const char *const *vals,
     return rc ? 1 : 0;
 }
 
-static int pg_query(HlDbHandle *h, const char *sql,
-                    const HlValue *params, int nparams,
-                    HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
+static int pg_query_raw(HlDbHandle *h, const char *sql,
+                        const HlValue *params, int nparams,
+                        HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
 {
     (void)alloc;
     if (!h || !h->ctx) return -1;
@@ -458,6 +507,15 @@ static int pg_query(HlDbHandle *h, const char *sql,
     return 0;
 }
 
+static int pg_query(HlDbHandle *h, const char *sql,
+                    const HlValue *params, int nparams,
+                    HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
+{
+    int rc = pg_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
+    if (h) pg_track_session(h->ctx, sql, rc);
+    return rc;
+}
+
 static int pg_exec(HlDbHandle *h, const char *sql,
                    const HlValue *params, int nparams)
 {
@@ -472,7 +530,9 @@ static int pg_exec_script(HlDbHandle *h, const char *sql)
     HlDbPgCtx *s = h->ctx;
     int ready = pg_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
-    return hl_pg_exec_simple(&s->conn, sql);
+    int rc = hl_pg_exec_simple(&s->conn, sql);
+    pg_track_session(s, sql, rc);
+    return rc;
 }
 
 static int pg_begin(HlDbHandle *h)    { return pg_exec(h, "BEGIN", NULL, 0); }
@@ -490,6 +550,18 @@ static void pg_guard_stale_txn(HlDbHandle *h)
     if (s->conn.tx_status == 'I' || s->conn.tx_status == 0) return;
     fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
     (void)pg_rollback(h);   /* a lost connection: pg_ready takes the ROLLBACK */
+    /* A failed entry's session-level advisory lock outlives the ROLLBACK and
+     * held every other session waiting on it until a restart (audit 39).
+     * Released here, after a stale transaction - the sign of a failed entry;
+     * one an entry left with no transaction open is not seen. Not on a pinned
+     * handle (the migration lock). */
+    if (s->adv_locks > 0 && !s->conn.broken && !h->session_pinned &&
+        s->conn.tx_status == 'I') {
+        fprintf(stderr, "[hull:c] releasing session-level advisory locks "
+                        "left by a previous request\n");
+        if (pg_exec(h, "SELECT pg_advisory_unlock_all()", NULL, 0) >= 0)
+            s->adv_locks = 0;
+    }
 }
 
 /* 'T' (in a transaction) or 'E' (in a failed one); a connection lost inside
@@ -773,6 +845,7 @@ const HlDbBackend hl_db_backend_postgres = {
     .errmsg               = pg_errmsg,
     .guard_stale_txn      = pg_guard_stale_txn,
     .in_txn               = pg_in_txn,
+    .session_dirty        = pg_session_dirty,
     .insert_if_absent     = pg_insert_if_absent,
     .upsert               = pg_upsert,
     .table_columns        = pg_table_columns,

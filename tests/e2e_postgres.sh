@@ -18,6 +18,7 @@
 . "$(dirname "$0")/lib/hull_docker.sh"
 set -eu
 
+# Overridable so a run can sit beside other services on the host.
 CONTAINER=${HULL_E2E_PG_CONTAINER:-hull-pg-e2e}
 PGPORT=${HULL_E2E_PG_PORT:-55432}
 PORT=${HULL_E2E_APP_PORT:-18091}
@@ -851,6 +852,37 @@ else
 fi
 docker exec "$CONTAINER" psql -U hull -d hulldb -q -c \
   "DROP TRIGGER IF EXISTS a39_fail ON _hull_idempotency_keys" >/dev/null 2>&1 || true
+
+# ── audit 39: a failed request's session-level advisory lock is released ─
+# pg_advisory_lock is session-scoped: the stale-transaction guard's ROLLBACK
+# left it held, and every other session waiting on it hung until a restart.
+# After a stale transaction the guard now runs pg_advisory_unlock_all.
+echo "=== audit 39: a failed request's advisory lock is released ==="
+A39DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_session_audit39.sh"
+db_session_audit39_app "$A39DIR" postgres
+./build/hull -d "$DSN" -p "$PORT" "$A39DIR/app.lua" >"$A39DIR/serve.log" 2>&1 &
+SVR=$!
+wait_for_server "$A39DIR/serve.log" || exit 1
+curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 39 setup"; cat "$A39DIR/serve.log"; exit 1; }
+a39out=$(db_session_audit39_run "$PORT" advisory)
+echo "$a39out"
+pg_q() { docker exec "$CONTAINER" psql -U hull -d hulldb -tAc "$1" 2>/dev/null; }
+a39rows=$(pg_q "SELECT COUNT(*) FROM s39b WHERE v = 1")
+a39left=$(pg_q "SELECT COUNT(*) FROM s39")
+a39free=$(pg_q "SELECT pg_try_advisory_lock(3939)")
+kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+a39fail=0
+db_session_audit39_ok "$a39out" advisory || a39fail=1
+[ "$a39rows" = 1 ] || { echo "::error audit 39: the later write did not commit ($a39rows)"; a39fail=1; }
+[ "$a39left" = 0 ] || { echo "::error audit 39: the failed request's write committed ($a39left)"; a39fail=1; }
+[ "$a39free" = t ] || { echo "::error audit 39: the failed request's advisory lock is still held"; a39fail=1; }
+if [ "$a39fail" = 0 ]; then
+    echo "PASS: a failed request's session-level advisory lock is released (Postgres)"
+    rm -rf "$A39DIR"
+else
+    cat "$A39DIR/serve.log"; exit 1
+fi
 
 # ── db.exec affected-row count (regression guard) ─────────────────────
 # The pg backend must surface the CommandComplete row count (like sqlite3_changes

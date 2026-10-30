@@ -296,6 +296,7 @@ void hl_my_build_ssl_request(HlMyWriter *w, uint8_t seq,
 #define HL_MY_COM_STMT_PREPARE  0x16
 #define HL_MY_COM_STMT_EXECUTE  0x17
 #define HL_MY_COM_STMT_CLOSE    0x19
+#define HL_MY_COM_RESET_CONNECTION 0x1F   /* MySQL 5.7.3+ / MariaDB 10.2.4+ */
 
 /* Capability flags (subset; little-endian on the wire). */
 #define HL_MY_CLIENT_LONG_PASSWORD      0x00000001u

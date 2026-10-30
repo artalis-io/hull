@@ -340,6 +340,17 @@ static int conn_next_frame(HlMyConn *conn, HlMyFrame *f)
         conn->rlen -= conn->consumed;
         conn->consumed = 0;
     }
+    /* A buffer grown for one large packet (up to 16 MB) is given back once
+     * what is left fits the initial size: every pooled connection that once
+     * read a big row kept it until it closed (audit 39, the twin of the
+     * Postgres buffer's audit 29). */
+    if (conn->rcap > HL_MY_RECV_BUF_SHRINK && conn->rlen <= HL_MY_RECV_BUF_INIT) {
+        uint8_t *nb = realloc(conn->rbuf, HL_MY_RECV_BUF_INIT);
+        if (nb) {
+            conn->rbuf = nb;
+            conn->rcap = HL_MY_RECV_BUF_INIT;
+        }
+    }
     for (;;) {
         size_t consumed = 0;
         HlMyResult r = hl_my_frame_next(conn->rbuf, conn->rlen, f, &consumed);
@@ -578,7 +589,12 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
      * encoded UTF-8 text, and a gbk-like default broke quote_identifier
      * (hl_my_client_charset, audit 20). */
     uint8_t charset = hl_my_client_charset(hs.charset);
+    conn->charset = charset;
+    conn->mariadb = strstr(hs.server_version, "MariaDB") != NULL;
     conn->bin_collation = hl_my_bin_collation(hs.server_version);
+    /* The session's starting status (autocommit), until the first OK: it was
+     * left 0, which read as autocommit off (audit 39). */
+    conn->server_status = hs.status;
 
     /* TLS negotiation (SSLRequest): consult sslmode, then upgrade before the
      * credentialed HandshakeResponse41 goes on the wire. The response's
@@ -668,7 +684,12 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         if (f.body_len == 0) continue;
         uint8_t hdr = f.body[0];
 
-        if (hdr == HL_MY_PKT_OK) return 0;   /* authenticated */
+        if (hdr == HL_MY_PKT_OK) {           /* authenticated */
+            HlMyOk ok;
+            if (hl_my_parse_ok(&f, &ok) == 0)
+                conn->server_status = ok.status_flags;
+            return 0;
+        }
 
         if (hdr == HL_MY_PKT_ERR) {
             HlMyErr e;
@@ -1543,6 +1564,59 @@ int hl_my_conn_ping(HlMyConn *conn)
     memcpy(conn->errmsg, saved, sizeof saved);
     conn->last_err_code = saved_code;
     return rc;
+}
+
+int hl_my_conn_reset(HlMyConn *conn)
+{
+    my_cmd_reset(conn);
+    if (refuse_if_broken(conn) != 0) return -1;
+    HlMyWriter w; hl_my_writer_init(&w);
+    size_t m = hl_my_packet_begin(&w, 0);
+    hl_my_put_u8(&w, HL_MY_COM_RESET_CONNECTION);
+    hl_my_packet_end(&w, m);
+    int rc = -1;
+    if (!w.err) {
+        conn->broken = 1;                       /* until the reply is read */
+        conn->last_err_code = 0;
+        int se = conn_send(conn, w.buf, w.len);
+        HlMyFrame f;
+        if (se) {
+            conn_set_err(conn, "failed to send COM_RESET_CONNECTION");
+        } else if (conn_next_frame(conn, &f) == 0 && f.body_len > 0) {
+            HlMyOk ok;
+            HlMyErr e;
+            if (f.body[0] == HL_MY_PKT_OK && hl_my_parse_ok(&f, &ok) == 0) {
+                conn->server_status = ok.status_flags;
+                conn->last_insert_id = 0;
+                conn->broken = 0;
+                rc = 0;
+            } else if (f.body[0] == HL_MY_PKT_ERR &&
+                       hl_my_parse_err(&f, 1, &e) == 0) {
+                conn->broken = 0;               /* in step: the reply ended */
+                conn->last_err_code = e.code;
+                snprintf(conn->errmsg, sizeof conn->errmsg,
+                         "session reset refused: %.*s",
+                         (int)e.message_len, e.message);
+            } else {
+                conn_set_err(conn, "unexpected reply to COM_RESET_CONNECTION");
+            }
+        }
+    }
+    hl_my_writer_free(&w);
+    if (rc != 0) return -1;
+    /* The reset restored the global character set; put the handshake's back
+     * (the server may default to latin1, which double-encodes UTF-8 text).
+     * MySQL took the handshake's collation id as given; MariaDB mapped the
+     * default one (45) to its character_set_collations choice, which a plain
+     * SET NAMES makes again. */
+    unsigned id = conn->charset ? conn->charset : HL_MY_DEFAULT_CHARSET;
+    char names[64];
+    if (conn->mariadb && id == HL_MY_DEFAULT_CHARSET)
+        snprintf(names, sizeof names, "SET NAMES utf8mb4");
+    else
+        snprintf(names, sizeof names,
+                 "SET NAMES utf8mb4, collation_connection = %u", id);
+    return hl_my_conn_query(conn, names, NULL, NULL, NULL, NULL) == 0 ? 0 : -1;
 }
 
 int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)

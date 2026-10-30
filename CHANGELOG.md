@@ -451,6 +451,34 @@ release-artifact layout).
   member's destination (`O_NOFOLLOW`). Covered by `test_lua` / `test_js` (`*_audit37`) and
   `test_tar`.
 
+- **MySQL: one failed request left the shared connection in XA, autocommit-off or LOCK
+  TABLES state until a restart** (audit 39). The stale-transaction guard sent a plain
+  ROLLBACK and ignored the outcome. After `XA START` the ROLLBACK fails (1399
+  XAER_RMFAIL) with `SERVER_STATUS_IN_TRANS` still set, so every later request on the
+  default connection ran inside the zombie transaction - its writes acknowledged and never
+  committed - and every wait was refused (`wait_refused`). After `SET autocommit = 0` every
+  later statement opened a transaction the end-of-request guard rolled back. A LOCK TABLES
+  refused every other table, and a GET_LOCK left by a failed request blocked every other
+  session. The stdlib tables on the app connection (outbox, inbox, jobs, search, kv) went
+  with them. The guard now resets the session with `COM_RESET_CONNECTION` (then sets the
+  handshake's character set again) when its ROLLBACK failed or left the transaction open,
+  when autocommit is off (`SERVER_STATUS_AUTOCOMMIT`, now parsed, the handshake's included),
+  when a LOCK TABLES or XA transaction is outstanding, and - after a stale transaction - when
+  a GET_LOCK may be held (both tracked from the statement text); a server that refuses the
+  command (MySQL before 5.7.3, MariaDB before 10.2.4) has the connection closed instead and
+  replaced on the next call. A reset drops every session setting, user variable, temporary
+  table and named lock on that connection, deliberate ones included - only when the guard
+  found such state. `db.open` handles get the same guard; a worker-pool connection holding
+  any of it (or a GET_LOCK / Postgres advisory lock) is dropped after its `db.async` op or
+  `worker.dispatch` job (`hl_db_session_dirty`). Postgres: a session-level advisory lock a
+  failed request took outlived the guard's ROLLBACK; after a stale transaction the guard now
+  runs `pg_advisory_unlock_all()`. Also: the MySQL receive buffer is given back after a large
+  packet (it kept up to 16 MB per pooled connection; the twin of Postgres's audit 29), the
+  implicit-commit resume moves the transaction generation, and a TLS database write that
+  wants to read first waits for POLLIN instead of spinning on a writable socket. Covered by
+  `test_mysql_conn` (`*guard*`, `session_tracker`, `reset_connection_*`) and the audit 39
+  phases of `e2e_mysql` / `e2e_postgres`.
+
 - **JS: a run failed for holding a transaction across a wait kept running** (audit 32). The
   audit-31 check rolls back the transaction of a run whose stretch of jobs ends while it is
   open and marks the run failed, but only a later async resume read that mark: the run's own
