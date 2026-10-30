@@ -18,9 +18,13 @@
 #include "hull/cap/audit.h"
 #include "hull/limits/gpu.h"
 #include "hull/shared/thread_affinity.h"
+#include "hull/shared/work_charge.h"
 #include "log.h"
 
 #include <assert.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1766,6 +1770,670 @@ out:
     return result;
 }
 
+/* ── Inferred nesting and expansion (audit 39) ──────────────────────
+ *
+ * The type and chain checks above read what a shader WRITES; naga also
+ * works on what its initializers BUILD. A declaration that wraps the one
+ * before it in a constructor - `const a1 = array(a0); const a2 =
+ * array(a1); ...`, module scope or function-local, const or let - nests
+ * its inferred type one level deeper each time with no template bracket
+ * written, and 10000 function-local links crashed naga's MSL writer on
+ * the event loop's stack. And a constant built from two copies of the one
+ * before it (`const a2 = array(a1, a1)`) is kept by naga's evaluator as a
+ * DAG that the writers expand into a tree: 16-20 such declarations, ~600
+ * bytes of source, held the event loop 6-109 s.
+ *
+ * So every declaration - module scope and function-local const, let, var,
+ * override, the parameters, alias, struct and a function's return type -
+ * is read with the identifiers its initializer or type names, each with
+ * the constructor levels (array / vecN / matCxR / atomic / ptr calls and
+ * template lists, and calls of the module's struct / alias names) open
+ * around it and the accessors (`.member`, `[index]`) applied after it, and:
+ *
+ *  - its inferred depth is the deepest constructor level it writes, or the
+ *    depth of a declaration it names plus the levels around that name less
+ *    the accessors after it (a struct is one more than its deepest member);
+ *  - its expanded size is its own value tokens plus, for each const / let
+ *    it names as a whole argument (between `(` / `,` / `=` and `)` / `,` /
+ *    `;`, accessors allowed), that declaration's expanded size - the copy
+ *    naga's evaluator makes. An operand of an operator (arithmetic folds to
+ *    a scalar / vector / matrix) is one token; a module constant named from
+ *    a function counts once (the writers name it), a function-local one is
+ *    expanded at every use;
+ *  - its chain is the longest run of function-local declarations naming
+ *    one another (module-scope chains are hl_gpu_wgsl_decl_chain's).
+ *
+ * Names resolve as WGSL scopes them (a local hides a module name from the
+ * end of its declaration to the end of its block). Linear, iterative, and
+ * fail closed: a source it cannot read, or a cycle, counts as too deep. */
+
+enum { WI_REF, WI_BIND, WI_OPEN, WI_FOROPEN, WI_CLOSE };
+#define WI_SIZE_SAT ((uint64_t)1 << 40)   /* sizes saturate here */
+enum { WN_CONST, WN_LET, WN_VAR, WN_OVERRIDE, WN_ALIAS, WN_STRUCT,
+       WN_FN, WN_PARAM };
+
+typedef struct {
+    size_t start, len;        /* WI_REF: the name */
+    long target;              /* WI_REF: the node it names, or -1 */
+    long node;                /* WI_BIND: the node bound */
+    int kind;
+    int level;                /* WI_REF: constructor levels around it */
+    int sub;                  /* WI_REF: accessors applied after it */
+    unsigned char lead;       /* WI_REF: after ( , = or at the start */
+    unsigned char whole;      /* WI_REF: a whole argument / initializer */
+} WiEvt;
+
+typedef struct {
+    size_t name_start, name_len;   /* name_len 0: unnamed */
+    size_t ev_first, ev_count;     /* its references, contiguous */
+    size_t tokens;                 /* value tokens it writes */
+    size_t own_depth;              /* deepest constructor level it writes */
+    uint64_t size;
+    size_t depth, chain, next;
+    long nameid, prev;
+    int state, kind, local;
+} WiNode;
+
+typedef struct { char kind; unsigned char inc, ctor; long base; } WiOpen;
+
+typedef struct {
+    const char *s;
+    size_t n;
+    WiEvt *ev;
+    size_t nev, capev;
+    WiNode *nd;
+    size_t nnd, capnd;
+    WiOpen *st;
+    size_t capst;
+    WlName *types;            /* module struct / alias names, sorted */
+    size_t ntypes;
+    int bad;
+} WiScan;
+
+static long wi_evt(WiScan *c, int kind)
+{
+    if (c->bad) return -1;
+    if (wl_grow((void **)&c->ev, &c->capev, c->nev + 1, sizeof(*c->ev)) != 0) {
+        c->bad = 1;
+        return -1;
+    }
+    WiEvt *e = &c->ev[c->nev];
+    memset(e, 0, sizeof(*e));
+    e->kind = kind;
+    e->target = -1;
+    e->node = -1;
+    return (long)c->nev++;
+}
+
+static long wi_node(WiScan *c, int kind, int local, const WlTok *name)
+{
+    if (c->bad) return -1;
+    if (wl_grow((void **)&c->nd, &c->capnd, c->nnd + 1, sizeof(*c->nd)) != 0) {
+        c->bad = 1;
+        return -1;
+    }
+    WiNode *d = &c->nd[c->nnd];
+    memset(d, 0, sizeof(*d));
+    d->kind = kind;
+    d->local = local;
+    d->nameid = -1;
+    d->prev = -1;
+    if (name) {
+        d->name_start = name->start;
+        d->name_len = name->end - name->start;
+    }
+    d->ev_first = c->nev;
+    return (long)c->nnd++;
+}
+
+/* array / atomic / ptr / binding_array / vecN / matCxR, with the f / i / u
+ * / h shorthand suffixes when @p suffix: a type that nests what it holds. */
+static int wi_builtin_ctor(const char *id, size_t len, int suffix)
+{
+    if (wl_is(id, len, "array") || wl_is(id, len, "atomic") ||
+        wl_is(id, len, "ptr") || wl_is(id, len, "binding_array"))
+        return 1;
+    if (len >= 4 && memcmp(id, "vec", 3) == 0 && id[3] >= '2' && id[3] <= '4')
+        return len == 4 || (suffix && len == 5 && strchr("fiuh", id[4]));
+    if (len >= 6 && memcmp(id, "mat", 3) == 0 && id[3] >= '2' && id[3] <= '4' &&
+        id[4] == 'x' && id[5] >= '2' && id[5] <= '4')
+        return len == 6 || (suffix && len == 7 && strchr("fh", id[6]));
+    return 0;
+}
+
+static int wi_is_type_name(const WiScan *c, const WlTok *t)
+{
+    return c->ntypes > 0 &&
+           wl_names_find(c->s, c->types, c->ntypes, t->start,
+                         t->end - t->start) >= 0;
+}
+
+/* Push a bracket; its constructor level counts when @p inc. */
+static int wi_push(WiScan *c, size_t *sp, char kind, int inc, int ctor,
+                   long base)
+{
+    if (wl_grow((void **)&c->st, &c->capst, *sp + 1, sizeof(*c->st)) != 0) {
+        c->bad = 1;
+        return -1;
+    }
+    c->st[*sp].kind = kind;
+    c->st[*sp].inc = (unsigned char)(inc ? 1 : 0);
+    c->st[*sp].ctor = (unsigned char)(ctor ? 1 : 0);
+    c->st[*sp].base = base;
+    (*sp)++;
+    return 0;
+}
+
+/* Past an attribute's name and argument list at s[i] (just past '@'). */
+static size_t wi_skip_attr(const char *s, size_t n, size_t i)
+{
+    WlTok nm, op;
+    if (wl_next(s, n, i, &nm) != WL_IDENT) return i;
+    i = nm.end;
+    if (wl_next(s, n, i, &op) != WL_PUNCT || s[op.start] != '(') return i;
+    size_t j = wl_skip_group(s, n, op.start, '(', ')');
+    return j ? j : n;
+}
+
+enum { WI_TO_SEMI, WI_TO_PARAM, WI_TO_BRACE, WI_STRUCT };
+
+/* Read an initializer / type from s[i] for @p owner (a node), recording
+ * its references; stops as @p mode says. Returns the index to go on at. */
+static size_t wi_scan(WiScan *c, size_t i, int mode, long owner)
+{
+    const char *s = c->s;
+    size_t n = c->n, sp = 0;
+    int level = 0, lead = 1;
+    long last = -1;               /* the reference accessors apply to */
+    WiNode *d = &c->nd[owner];
+
+#define WI_WHOLE() do {                                                    \
+        if (last >= 0 && c->ev[last].lead) c->ev[last].whole = 1;          \
+    } while (0)
+
+    for (;;) {
+        if (c->bad) return n;
+        WlTok t;
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END) { WI_WHOLE(); i = t.start; break; }
+        if (k == WL_BAD) { c->bad = 1; return n; }
+        if (k == WL_NUM) {
+            d->tokens++;
+            last = -1;
+            lead = 0;
+            i = t.end;
+            continue;
+        }
+        if (k == WL_IDENT) {
+            i = t.end;
+            WlTok nx;
+            int nk = wl_next(s, n, i, &nx);
+            char nc = nk == WL_PUNCT ? s[nx.start] : '\0';
+            if (mode == WI_STRUCT && sp == 0 && nc == ':') {
+                lead = 0;                       /* a member name */
+                last = -1;
+                continue;
+            }
+            const char *id = s + t.start;
+            size_t idl = t.end - t.start;
+            d->tokens++;
+            long e = wi_evt(c, WI_REF);
+            if (e < 0) return n;
+            c->ev[e].start = t.start;
+            c->ev[e].len = idl;
+            c->ev[e].level = level;
+            if (nc == '(') {                    /* a call */
+                int ctor = wi_builtin_ctor(id, idl, 1) || wi_is_type_name(c, &t);
+                if (wi_push(c, &sp, '(', ctor, 0, -1) != 0) return n;
+                level += ctor;
+                if ((size_t)level > d->own_depth) d->own_depth = (size_t)level;
+                i = nx.end;
+                lead = 1;
+                last = -1;
+                continue;
+            }
+            if (nc == '<' && wi_builtin_ctor(id, idl, 0) &&
+                !(nx.end < n && (s[nx.end] == '=' || s[nx.end] == '<'))) {
+                if (wi_push(c, &sp, '<', 1, 1, -1) != 0) return n;
+                level++;
+                if ((size_t)level > d->own_depth) d->own_depth = (size_t)level;
+                i = nx.end;
+                lead = 0;
+                last = -1;
+                continue;
+            }
+            c->ev[e].lead = (unsigned char)lead;
+            last = e;
+            lead = 0;
+            continue;
+        }
+        /* Punctuation. */
+        char ch = s[t.start];
+        char pc = t.start > 0 ? s[t.start - 1] : '\0';
+        char nc = t.end < n ? s[t.end] : '\0';
+        i = t.end;
+        if (ch == '.') {
+            WlTok m;
+            if (wl_next(s, n, i, &m) == WL_IDENT) {
+                i = m.end;
+                if (last >= 0) c->ev[last].sub++;
+            } else {
+                last = -1;
+            }
+            lead = 0;
+        } else if (ch == '[') {
+            if (last >= 0) c->ev[last].sub++;
+            if (wi_push(c, &sp, '[', 0, 0, last) != 0) return n;
+            last = -1;
+            lead = 0;
+        } else if (ch == ']') {
+            while (sp > 0 && c->st[sp - 1].kind == '<') level -= c->st[--sp].inc;
+            last = -1;
+            if (sp > 0 && c->st[sp - 1].kind == '[') last = c->st[--sp].base;
+            lead = 0;
+        } else if (ch == '(') {
+            if (wi_push(c, &sp, '(', 0, 0, -1) != 0) return n;
+            last = -1;
+            lead = 1;
+        } else if (ch == ')') {
+            WI_WHOLE();
+            last = -1;
+            lead = 0;
+            while (sp > 0 && c->st[sp - 1].kind != '(') level -= c->st[--sp].inc;
+            if (sp == 0) {
+                if (mode == WI_TO_PARAM) { i = t.start; break; }
+                continue;                       /* malformed */
+            }
+            level -= c->st[--sp].inc;
+        } else if (ch == '>' && nc != '=' && sp > 0 && c->st[sp - 1].kind == '<') {
+            level -= c->st[--sp].inc;
+            last = -1;
+            lead = 0;
+            WlTok op;
+            if (wl_next(s, n, i, &op) == WL_PUNCT && s[op.start] == '(') {
+                /* array<T, N>(...): the constructor's arguments, one level
+                 * inside it as its template was. */
+                if (wi_push(c, &sp, '(', 1, 0, -1) != 0) return n;
+                level++;
+                if ((size_t)level > d->own_depth) d->own_depth = (size_t)level;
+                i = op.end;
+                lead = 1;
+            }
+        } else if (ch == ',') {
+            WI_WHOLE();
+            last = -1;
+            lead = 1;
+            if (sp == 0 && mode == WI_TO_PARAM) { i = t.start; break; }
+        } else if (ch == ';') {
+            WI_WHOLE();
+            if (mode != WI_TO_SEMI) i = t.start;
+            break;
+        } else if (ch == '=') {
+            last = -1;
+            /* An initializer starts here; '==', '<=', '>=', '!=' do not. */
+            lead = !(pc == '=' || pc == '<' || pc == '>' || pc == '!' ||
+                     nc == '=');
+        } else if (ch == '{') {
+            if (mode == WI_STRUCT) continue;    /* stray */
+            i = t.start;
+            break;
+        } else if (ch == '}') {
+            WI_WHOLE();
+            if (mode != WI_STRUCT) i = t.start;
+            break;
+        } else if (ch == '@') {
+            i = wi_skip_attr(s, n, i);
+            last = -1;
+            lead = 0;
+        } else {
+            last = -1;
+            lead = 0;
+        }
+    }
+#undef WI_WHOLE
+    d = &c->nd[owner];
+    d->ev_count = c->nev - d->ev_first;
+    return i;
+}
+
+/* A `let` / `var` / `const` name at s[i] (past the keyword): the node,
+ * scanned to the end of the declaration. Returns -1 when unnamed. */
+static long wi_decl(WiScan *c, size_t *i, int kind, int local)
+{
+    const char *s = c->s;
+    size_t n = c->n;
+    if (kind == WN_VAR) *i = wl_skip_template(s, n, *i);
+    WlTok nm;
+    if (wl_next(s, n, *i, &nm) != WL_IDENT) return -1;
+    *i = nm.end;
+    long nd = wi_node(c, kind, local, &nm);
+    if (nd < 0) return -1;
+    *i = wi_scan(c, *i, kind == WN_STRUCT ? WI_STRUCT : WI_TO_SEMI, nd);
+    return nd;
+}
+
+/* A function from s[i] (past `fn`): parameters, return type, body. */
+static size_t wi_fn(WiScan *c, size_t i)
+{
+    const char *s = c->s;
+    size_t n = c->n;
+    WlTok nm, t;
+    if (wl_next(s, n, i, &nm) != WL_IDENT) return i;
+    i = nm.end;
+    long fn = wi_node(c, WN_FN, 0, &nm);
+    if (fn < 0) return n;
+    size_t pfirst = c->nnd;
+    if (wl_next(s, n, i, &t) != WL_PUNCT || s[t.start] != '(') return i;
+    i = t.end;
+    for (;;) {                                  /* the parameters */
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END || k == WL_BAD) return t.start;
+        if (k == WL_PUNCT && s[t.start] == '@') { i = wi_skip_attr(s, n, t.end); continue; }
+        if (k == WL_PUNCT && s[t.start] == ',') { i = t.end; continue; }
+        if (k == WL_PUNCT && s[t.start] == ')') { i = t.end; break; }
+        if (k != WL_IDENT) return t.start;      /* malformed */
+        WlTok colon;
+        if (wl_next(s, n, t.end, &colon) != WL_PUNCT || s[colon.start] != ':')
+            return t.start;
+        long p = wi_node(c, WN_PARAM, 1, &t);
+        if (p < 0) return n;
+        i = wi_scan(c, colon.end, WI_TO_PARAM, p);
+        if (c->bad) return n;
+    }
+    size_t pend = c->nnd;
+    /* The return type, owned by the function. */
+    c->nd[fn].ev_first = c->nev;
+    WlTok a, b;
+    if (wl_next(s, n, i, &a) == WL_PUNCT && s[a.start] == '-' &&
+        wl_next(s, n, a.end, &b) == WL_PUNCT && s[b.start] == '>')
+        i = wi_scan(c, b.end, WI_TO_BRACE, fn);
+    else
+        c->nd[fn].ev_count = 0;
+    if (c->bad) return n;
+    if (wl_next(s, n, i, &t) != WL_PUNCT || s[t.start] != '{') return i;
+
+    size_t depth = 0;
+    int for_pending = 0;
+    for (;;) {                                  /* the body */
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END) { i = t.start; break; }
+        if (k == WL_BAD) { c->bad = 1; return n; }
+        i = t.end;
+        if (k == WL_IDENT) {
+            int kind = wl_tok_is(s, &t, "let") ? WN_LET :
+                       wl_tok_is(s, &t, "var") ? WN_VAR :
+                       wl_tok_is(s, &t, "const") ? WN_CONST : -1;
+            if (kind >= 0 && depth > 0) {
+                long nd = wi_decl(c, &i, kind, 1);
+                if (c->bad) return n;
+                if (nd >= 0) {
+                    long e = wi_evt(c, WI_BIND);
+                    if (e < 0) return n;
+                    c->ev[e].node = nd;
+                }
+            } else if (wl_tok_is(s, &t, "for")) {
+                if (wi_evt(c, WI_OPEN) < 0) return n;   /* the header's scope */
+                for_pending = 1;
+            }
+            continue;
+        }
+        if (k != WL_PUNCT) continue;
+        char ch = s[t.start];
+        if (ch == '{') {
+            if (wi_evt(c, (depth > 0 && for_pending) ? WI_FOROPEN : WI_OPEN) < 0)
+                return n;
+            if (depth == 0) {
+                for (size_t p = pfirst; p < pend; p++) {
+                    long e = wi_evt(c, WI_BIND);
+                    if (e < 0) return n;
+                    c->ev[e].node = (long)p;
+                }
+            }
+            for_pending = 0;
+            depth++;
+        } else if (ch == '}') {
+            if (wi_evt(c, WI_CLOSE) < 0) return n;
+            if (--depth == 0) break;
+        } else if (ch == '@') {
+            i = wi_skip_attr(s, n, i);
+        }
+    }
+    while (depth-- > 0)                         /* left open: malformed */
+        if (wi_evt(c, WI_CLOSE) < 0) return n;
+    return i;
+}
+
+int hl_gpu_wgsl_inferred(const char *wgsl, size_t len, HlGpuWgslInferred *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!wgsl) return 0;
+    if (!wl_utf8_valid(wgsl, len)) return -1;
+    const char *s = wgsl;
+    size_t n = len, i = 0;
+    int rc = -1;
+    WiScan c;
+    memset(&c, 0, sizeof(c));
+    c.s = s;
+    c.n = n;
+    WlName *names = NULL;
+    long *cur = NULL, *modof = NULL, *scope = NULL;
+    size_t *stack = NULL;
+
+    /* Pass 0: the module's struct / alias names (constructor callees). */
+    {
+        size_t braces = 0, cap = 0;
+        for (;;) {
+            WlTok t;
+            int k = wl_next(s, n, i, &t);
+            if (k == WL_END) break;
+            if (k == WL_BAD) goto out;
+            i = t.end;
+            if (k == WL_PUNCT) {
+                if (s[t.start] == '{') braces++;
+                else if (s[t.start] == '}' && braces > 0) braces--;
+                continue;
+            }
+            if (k != WL_IDENT || braces != 0) continue;
+            if (!wl_tok_is(s, &t, "struct") && !wl_tok_is(s, &t, "alias"))
+                continue;
+            WlTok nm;
+            if (wl_next(s, n, i, &nm) != WL_IDENT) continue;
+            if (wl_grow((void **)&c.types, &cap, c.ntypes * 2 + 2,
+                        sizeof(*c.types)) != 0)
+                goto out;
+            c.types[c.ntypes].start = nm.start;
+            c.types[c.ntypes].len = nm.end - nm.start;
+            c.types[c.ntypes].idx = (long)c.ntypes;
+            c.ntypes++;
+        }
+        if (c.ntypes > 0)
+            wl_names_sort(s, c.types, c.types + c.ntypes, c.ntypes);
+    }
+
+    /* Pass 1: every declaration and the references it makes. */
+    i = 0;
+    for (;;) {
+        WlTok t;
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END) break;
+        if (k == WL_BAD) goto out;
+        i = t.end;
+        if (k == WL_PUNCT && s[t.start] == '@') { i = wi_skip_attr(s, n, i); continue; }
+        if (k != WL_IDENT) continue;
+        if (wl_tok_is(s, &t, "fn")) {
+            i = wi_fn(&c, i);
+        } else if (wl_tok_is(s, &t, "const")) {
+            wi_decl(&c, &i, WN_CONST, 0);
+        } else if (wl_tok_is(s, &t, "let")) {
+            wi_decl(&c, &i, WN_LET, 0);
+        } else if (wl_tok_is(s, &t, "var")) {
+            wi_decl(&c, &i, WN_VAR, 0);
+        } else if (wl_tok_is(s, &t, "override")) {
+            wi_decl(&c, &i, WN_OVERRIDE, 0);
+        } else if (wl_tok_is(s, &t, "alias")) {
+            wi_decl(&c, &i, WN_ALIAS, 0);
+        } else if (wl_tok_is(s, &t, "struct")) {
+            wi_decl(&c, &i, WN_STRUCT, 0);
+        }
+        if (c.bad) goto out;
+    }
+    if (c.bad) goto out;
+    if (c.nnd == 0) { rc = 0; goto out; }
+
+    /* Name ids: one per distinct name, by sorting. */
+    size_t nn = 0;
+    names = malloc(c.nnd * 2 * sizeof(*names));
+    if (!names) goto out;
+    for (size_t k = 0; k < c.nnd; k++) {
+        if (c.nd[k].name_len == 0) continue;
+        names[nn].start = c.nd[k].name_start;
+        names[nn].len = c.nd[k].name_len;
+        names[nn].idx = (long)k;
+        nn++;
+    }
+    wl_names_sort(s, names, names + nn, nn);
+    long nids = 0;
+    for (size_t k = 0; k < nn; k++) {
+        if (k > 0 && wl_name_cmp(s, names[k - 1].start, names[k - 1].len,
+                                 names[k].start, names[k].len) != 0)
+            nids++;
+        c.nd[names[k].idx].nameid = nids;
+    }
+    nids = nn > 0 ? nids + 1 : 0;
+    cur = malloc(((size_t)nids + 1) * sizeof(*cur));
+    modof = malloc(((size_t)nids + 1) * sizeof(*modof));
+    scope = malloc((c.nev + 1) * sizeof(*scope));
+    stack = malloc(c.nnd * sizeof(*stack));
+    if (!cur || !modof || !scope || !stack) goto out;
+    for (long k = 0; k < nids; k++) { cur[k] = -1; modof[k] = -1; }
+    for (size_t k = 0; k < c.nnd; k++) {
+        const WiNode *d = &c.nd[k];
+        if (!d->local && d->nameid >= 0 && modof[d->nameid] < 0)
+            modof[d->nameid] = (long)k;
+    }
+
+    /* Resolve every reference in order, locals scoped as WGSL scopes them. */
+    {
+        size_t sp = 0;
+        for (size_t e = 0; e < c.nev; e++) {
+            WiEvt *ev = &c.ev[e];
+            if (ev->kind == WI_REF) {
+                long hit = wl_names_find(s, names, nn, ev->start, ev->len);
+                if (hit < 0) continue;
+                long id = c.nd[hit].nameid;
+                ev->target = cur[id] >= 0 ? cur[id] : modof[id];
+            } else if (ev->kind == WI_BIND) {
+                WiNode *d = &c.nd[ev->node];
+                if (d->nameid < 0) continue;
+                d->prev = cur[d->nameid];
+                cur[d->nameid] = ev->node;
+                scope[sp++] = ev->node;
+            } else if (ev->kind == WI_OPEN) {
+                scope[sp++] = -1;
+            } else if (ev->kind == WI_FOROPEN) {
+                scope[sp++] = -2;
+            } else {                            /* WI_CLOSE */
+                for (int pass = 0; pass < 2 && sp > 0; pass++) {
+                    long m = -1;
+                    while (sp > 0 && (m = scope[--sp]) >= 0)
+                        cur[c.nd[m].nameid] = c.nd[m].prev;
+                    if (m != -2) break;         /* a loop body: its header too */
+                }
+            }
+        }
+    }
+
+    /* Depth, size and chain of every declaration, by an explicit walk. */
+    for (size_t root = 0; root < c.nnd; root++) {
+        if (c.nd[root].state == 2) continue;
+        size_t sp = 0;
+        stack[sp++] = root;
+        c.nd[root].state = 1;
+        while (sp > 0) {
+            WiNode *d = &c.nd[stack[sp - 1]];
+            int descended = 0;
+            while (d->next < d->ev_count) {
+                const WiEvt *ev = &c.ev[d->ev_first + d->next];
+                if (ev->kind == WI_REF && ev->target >= 0) {
+                    WiNode *t = &c.nd[ev->target];
+                    if (t->state == 1) {        /* a cycle */
+                        out->depth = HL_GPU_WGSL_UNREADABLE;
+                        rc = 0;
+                        goto out;
+                    }
+                    if (t->state == 0) {
+                        t->state = 1;
+                        stack[sp++] = (size_t)ev->target;
+                        descended = 1;
+                        break;
+                    }
+                }
+                d->next++;
+            }
+            if (descended) continue;
+            /* Every reference is resolved: combine. */
+            size_t depth = d->own_depth, chain = 0;
+            uint64_t size = d->tokens;
+            for (size_t q = 0; q < d->ev_count; q++) {
+                const WiEvt *ev = &c.ev[d->ev_first + q];
+                if (ev->kind != WI_REF || ev->target < 0) continue;
+                const WiNode *t = &c.nd[ev->target];
+                size_t sum = t->depth + (size_t)ev->level;
+                size_t dd = sum > (size_t)ev->sub ? sum - (size_t)ev->sub : 0;
+                if (dd > depth) depth = dd;
+                if (d->local && t->local && t->chain > chain) chain = t->chain;
+                if (ev->whole && (t->kind == WN_CONST || t->kind == WN_LET) &&
+                    (t->local || !d->local) && t->size > 1)
+                    size += t->size - 1;        /* the copy it names */
+                if (size > WI_SIZE_SAT)
+                    size = WI_SIZE_SAT;
+            }
+            if (d->kind == WN_STRUCT) depth++;
+            d->depth = depth;
+            d->size = size;
+            d->chain = d->local ? chain + 1 : 0;
+            d->state = 2;
+            if (depth > out->depth) out->depth = depth;
+            if (d->chain > out->chain) out->chain = d->chain;
+            if (d->kind == WN_CONST || d->kind == WN_LET) {
+                out->expanded += size - (size > d->tokens ? d->tokens : size);
+                if (out->expanded > WI_SIZE_SAT)
+                    out->expanded = WI_SIZE_SAT;
+            }
+            sp--;
+        }
+    }
+    rc = 0;
+out:
+    if (rc != 0) {
+        out->depth = HL_GPU_WGSL_UNREADABLE;
+        out->chain = HL_GPU_WGSL_UNREADABLE;
+        out->expanded = WI_SIZE_SAT;
+    }
+    free(c.ev);
+    free(c.nd);
+    free(c.st);
+    free(c.types);
+    free(names);
+    free(cur);
+    free(modof);
+    free(scope);
+    free(stack);
+    return rc;
+}
+
+uint64_t hl_gpu_wgsl_compile_units(const char *wgsl, size_t len)
+{
+    uint64_t units = hl_work_bytes_units((uint64_t)len);
+    HlGpuWgslInferred inf;
+    if (wgsl && len <= HL_GPU_WGSL_MAX_BYTES &&
+        hl_gpu_wgsl_inferred(wgsl, len, &inf) == 0 &&
+        inf.expanded <= HL_GPU_WGSL_EXPAND_MAX)
+        units += inf.expanded * HL_GPU_WGSL_EXPAND_UNITS;
+    return units;
+}
+
 int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why)
 {
     const char *w = NULL;
@@ -1788,6 +2456,16 @@ int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why)
         } else if (hl_gpu_wgsl_decl_chain(wgsl, len) >
                    HL_GPU_WGSL_DECL_CHAIN_MAX) {
             w = "module-scope declarations refer to one another too deeply";
+        } else {
+            HlGpuWgslInferred inf;
+            if (hl_gpu_wgsl_inferred(wgsl, len, &inf) != 0)
+                w = "a byte sequence outside WGSL's tokens";
+            else if (inf.depth > HL_GPU_WGSL_INFERRED_DEPTH_MAX)
+                w = "values nest too deeply (through their declarations)";
+            else if (inf.expanded > HL_GPU_WGSL_EXPAND_MAX)
+                w = "constant expressions expand too far";
+            else if (inf.chain > HL_GPU_WGSL_DECL_CHAIN_MAX)
+                w = "function-local declarations refer to one another too deeply";
         }
     }
     if (why) *why = w;
@@ -1889,6 +2567,90 @@ const char *hl_cap_gpu_device_name(HlGpuCtx *ctx, int device)
     return ctx->devices[device].name;
 }
 
+/* ── The compile thread (audit 39) ──────────────────────────────────
+ *
+ * naga (inside wgpuDeviceCreateShaderModule and the pipeline creation that
+ * translates the module for the platform) recurses over the shader's
+ * expressions, statements, types and declarations. Rounds 36-39 each found
+ * one more shape that recursed past the event loop's 8 MiB stack - an
+ * uncatchable SIGSEGV - and each added an estimator to
+ * hl_gpu_wgsl_precheck. The estimators stay as the fast first line; the
+ * backend compile itself now runs on a thread of its own whose stack is
+ * sized so that no source under HL_GPU_WGSL_MAX_BYTES can overflow it
+ * (HL_GPU_COMPILE_STACK_BYTES, a virtual reservation: only the pages a
+ * compile touches are committed, and the thread exits after each compile,
+ * so they are returned). The event loop waits for it - the compile was
+ * already synchronous. wgpu-native's device is thread-safe (gpu.async
+ * dispatches use it from pool threads), and the backend's error flag is
+ * thread-local, set and read on the compile thread. Signals are blocked on
+ * the thread, so they keep going to the threads that handle them. */
+
+static int g_precheck_bypass;      /* test-only: see gpu.h */
+
+void hl_gpu_test_set_precheck_bypass(int on)
+{
+    g_precheck_bypass = on ? 1 : 0;
+}
+
+typedef struct {
+    HlGpuCtx      *ctx;
+    HlGpuDevice   *dev;
+    const char    *name;
+    const char    *wgsl;
+    size_t         wgsl_len;
+    HlGpuPipeline *slot;
+    int            rc;
+} HlGpuCompileJob;
+
+static void *gpu_compile_main(void *arg)
+{
+    HlGpuCompileJob *job = arg;
+    job->rc = job->ctx->backend->compile(job->dev, job->name, job->wgsl,
+                                         job->wgsl_len, job->slot);
+    return NULL;
+}
+
+/* Run the backend compile on a thread with a large stack and wait for it.
+ * A host that cannot reserve the full stack gets a smaller one (still far
+ * above the event loop's, with the estimators bounding what reaches it);
+ * with no thread at all the compile is refused, never run on the loop. */
+static int gpu_compile_on_big_stack(HlGpuCompileJob *job)
+{
+    static const size_t sizes[] = {
+        HL_GPU_COMPILE_STACK_BYTES,
+        (size_t)1 << 30,
+        (size_t)256 << 20,
+        (size_t)64 << 20,
+    };
+    sigset_t all, old;
+    sigfillset(&all);
+    int masked = pthread_sigmask(SIG_SETMASK, &all, &old) == 0;
+    int started = 0;
+    pthread_t th;
+    for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]) && !started; k++) {
+        if (k > 0 && sizes[k] >= HL_GPU_COMPILE_STACK_BYTES) continue;
+        pthread_attr_t attr;
+        if (pthread_attr_init(&attr) != 0) continue;
+        if (pthread_attr_setstacksize(&attr, sizes[k]) == 0 &&
+            pthread_create(&th, &attr, gpu_compile_main, job) == 0) {
+            started = 1;
+            if (k > 0)
+                log_warn("[hull:gpu] shader compile thread got a %zu MiB "
+                         "stack (%zu MiB could not be reserved)",
+                         sizes[k] >> 20,
+                         (size_t)HL_GPU_COMPILE_STACK_BYTES >> 20);
+        }
+        pthread_attr_destroy(&attr);
+    }
+    if (masked) pthread_sigmask(SIG_SETMASK, &old, NULL);
+    if (!started) {
+        log_error("[hull:gpu] no thread for the shader compile: refused");
+        return HL_GPU_ERR_INTERNAL;
+    }
+    pthread_join(th, NULL);
+    return job->rc;
+}
+
 /* ── Pipeline ──────────────────────────────────────────────────────── */
 
 int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
@@ -1903,7 +2665,8 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
      * unbounded time expanding, is refused before any wgpu call (audits
      * 36 / 37). Every check is a linear scan, bounded by the size cap. */
     const char *why = NULL;
-    if (hl_gpu_wgsl_precheck(wgsl, wgsl_len, &why) != 0) {
+    if (!g_precheck_bypass &&
+        hl_gpu_wgsl_precheck(wgsl, wgsl_len, &why) != 0) {
         log_warn("[hull:gpu] shader '%s' refused before compile: %s "
                  "(%zu bytes of WGSL)", name, why, wgsl_len);
         return HL_GPU_ERR_SHADER;
@@ -1938,8 +2701,9 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
 
     /* Compile via backend */
     HlGpuPipeline *slot = &dev->pipelines[dev->pipeline_count];
-    int rc = ctx->backend->compile(dev, name,
-                                   wgsl, wgsl_len, slot);
+    HlGpuCompileJob job = { ctx, dev, name, wgsl, wgsl_len, slot,
+                            HL_GPU_ERR_INTERNAL };
+    int rc = gpu_compile_on_big_stack(&job);
     if (rc == HL_GPU_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", name);
         /* Group 0's declared bindings, checked before every dispatch and

@@ -864,6 +864,7 @@ UTEST(hull_cap_gpu, disabled_placeholder)
 /* ── Bind-group slot accounting (base-resident, no device needed) ──── */
 
 #include "hull/cap/gpu.h"
+#include "hull/shared/work_charge.h"
 
 UTEST(hull_cap_gpu, tex_binding_slots)
 {
@@ -2556,6 +2557,301 @@ UTEST(hull_cap_gpu_audit38, real_device_survives)
         EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, name, ok, strlen(ok)));
         free(crash); free(over); free(ok);
     }
+    hl_cap_gpu_destroy(&ctx);
+}
+#endif /* HL_ENABLE_GPU */
+
+/* ── Audit 39: inferred nesting, expansion, the compile thread ────── */
+
+static HlGpuWgslInferred a39_inf;
+
+static int a39_infer(const char *wgsl)
+{
+    return hl_gpu_wgsl_inferred(wgsl, strlen(wgsl), &a39_inf);
+}
+
+/* `links` declarations of @p kind, each wrapping the one before:
+ *   A39_LOCAL_CONST / A39_LOCAL_LET: `const aK = array(aK-1);` in main
+ *   A39_MOD_CONST:                   the same at module scope
+ *   A39_EXP_CONST / A39_EXP_LOCAL:   `const aK = array(aK-1, aK-1);`
+ *   A39_LET_CHAIN:                   `let aK = aK-1;` in main */
+enum { A39_LOCAL_CONST, A39_LOCAL_LET, A39_MOD_CONST, A39_EXP_CONST,
+       A39_EXP_LOCAL, A39_LET_CHAIN };
+
+static char *a39_shape(int kind, size_t links)
+{
+    size_t cap = 48 * (links + 4) + 256;
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    int local = kind != A39_MOD_CONST && kind != A39_EXP_CONST;
+    const char *kw = (kind == A39_LOCAL_LET || kind == A39_LET_CHAIN) ? "let" : "const";
+    size_t off = 0;
+    off += (size_t)snprintf(s + off, cap - off, "%s%s a0 = 1u;\n",
+                            local ? "@compute @workgroup_size(1) fn main() {\n" : "",
+                            kw);
+    for (size_t k = 1; k <= links; k++) {
+        if (kind == A39_LET_CHAIN)
+            off += (size_t)snprintf(s + off, cap - off, "%s a%zu = a%zu;\n",
+                                    kw, k, k - 1);
+        else if (kind == A39_EXP_CONST || kind == A39_EXP_LOCAL)
+            off += (size_t)snprintf(s + off, cap - off,
+                                    "%s a%zu = array(a%zu, a%zu);\n",
+                                    kw, k, k - 1, k - 1);
+        else
+            off += (size_t)snprintf(s + off, cap - off, "%s a%zu = array(a%zu);\n",
+                                    kw, k, k - 1);
+    }
+    snprintf(s + off, cap - off, "%s_ = a%zu;\n}\n",
+             local ? "" : "@compute @workgroup_size(1) fn main() {\n", links);
+    return s;
+}
+
+UTEST(hull_cap_gpu_audit39, inferred_depth)
+{
+    memset(&a39_inf, 0xff, sizeof(a39_inf));
+    EXPECT_EQ(0, hl_gpu_wgsl_inferred(NULL, 0, &a39_inf));
+    EXPECT_EQ((size_t)0, a39_inf.depth);
+    EXPECT_EQ(-1, hl_gpu_wgsl_inferred("x", 1, NULL));
+    ASSERT_EQ(0, a39_infer("const a = 1;"));
+    EXPECT_EQ((size_t)0, a39_inf.depth);
+    /* Constructor calls and template lists nest; a call does not. */
+    ASSERT_EQ(0, a39_infer("const a = array(array(1));"));
+    EXPECT_EQ((size_t)2, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("const a = array<array<f32, 2>, 1>(array<f32, 2>(1., 2.));"));
+    EXPECT_EQ((size_t)2, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("const v = vec4f(1.); const m = mat2x2f(1., 2., 3., 4.);"));
+    EXPECT_EQ((size_t)1, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("fn f(x: f32) -> f32 { return x; } "
+                           "fn main() { let a = f(f(f(1.))); let b = sqrt(max(a, 1.)); }"));
+    EXPECT_EQ((size_t)0, a39_inf.depth);
+    /* Through declarations, by inference: module scope, const and let. */
+    for (int kind = A39_LOCAL_CONST; kind <= A39_MOD_CONST; kind++) {
+        char *s = a39_shape(kind, 10);
+        ASSERT_TRUE(s != NULL);
+        ASSERT_EQ(0, a39_infer(s));
+        EXPECT_EQ((size_t)10, a39_inf.depth);
+        free(s);
+    }
+    /* An accessor takes a level off; a struct is one over its members. */
+    ASSERT_EQ(0, a39_infer("const a = array(array(1)); const b = array(a[0]); "
+                           "const c = array(a[0][0]);"));
+    EXPECT_EQ((size_t)2, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("struct S { x: f32 } struct T { s: S } "
+                           "const t = T(S(1.)); const u = array(t);"));
+    EXPECT_EQ((size_t)3, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("alias A = array<f32, 2>; fn main() { var x: A; "
+                           "let y = array(x); }"));
+    EXPECT_EQ((size_t)2, a39_inf.depth);
+    /* Parameters and return types carry their types' depth. */
+    ASSERT_EQ(0, a39_infer("alias A = array<array<f32, 2>, 2>; "
+                           "fn f(p: A) -> A { let q = array(p); return p; } "
+                           "fn main() { let r = array(f(A())); }"));
+    EXPECT_EQ((size_t)3, a39_inf.depth);
+    /* Shadowing: a local hides a module name to the end of its block. */
+    ASSERT_EQ(0, a39_infer("const a = array(array(array(1))); "
+                           "fn main() { let a = 1; let b = array(a); }"));
+    EXPECT_EQ((size_t)3, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("const a = array(array(array(1))); "
+                           "fn main() { { let a = 1; } let b = array(a); }"));
+    EXPECT_EQ((size_t)4, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("const a = array(array(array(1))); "
+                           "fn main() { let a = array(a); }"));   /* the outer one */
+    EXPECT_EQ((size_t)4, a39_inf.depth);
+    ASSERT_EQ(0, a39_infer("const i = array(array(array(1))); fn main() { "
+                           "for (var i = 0; i < 4; i++) { let b = array(i); } }"));
+    EXPECT_EQ((size_t)3, a39_inf.depth);
+    /* A cycle counts as too deep; unreadable bytes fail. */
+    ASSERT_EQ(0, a39_infer("const a = array(b); const b = array(a);"));
+    EXPECT_TRUE(a39_inf.depth > HL_GPU_WGSL_INFERRED_DEPTH_MAX);
+    EXPECT_EQ(-1, a39_infer("const a = \"s\";"));
+    EXPECT_TRUE(a39_inf.depth > HL_GPU_WGSL_INFERRED_DEPTH_MAX);
+}
+
+UTEST(hull_cap_gpu_audit39, inferred_expansion)
+{
+    /* No copies: literals, arithmetic operands, a LUT read by index. */
+    ASSERT_EQ(0, a39_infer("const a = array(1, 2, 3, 4); const b = a[1] + a[2]; "
+                           "const c = b * b;"));
+    EXPECT_EQ((uint64_t)0, a39_inf.expanded);
+    ASSERT_EQ(0, a39_infer("const T = array<u32, 4>(1u, 2u, 3u, 4u); "
+                           "fn main() { let x = array(T, T); let y = T[0]; }"));
+    EXPECT_EQ((uint64_t)0, a39_inf.expanded);   /* written by name */
+    /* A local const copied as a whole argument. */
+    ASSERT_EQ(0, a39_infer("fn main() { const a = array(1, 2, 3); "
+                           "const b = array(a, a); }"));
+    EXPECT_EQ((uint64_t)6, a39_inf.expanded);
+    /* Doubling: aK = 2^(K+1) - 1 nodes, 3 written. */
+    char *s = a39_shape(A39_EXP_CONST, 3);
+    ASSERT_TRUE(s != NULL);
+    ASSERT_EQ(0, a39_infer(s));
+    EXPECT_EQ((uint64_t)(4 + 12), a39_inf.expanded);
+    free(s);
+    for (int kind = A39_EXP_CONST; kind <= A39_EXP_LOCAL; kind++) {
+        s = a39_shape(kind, 10);
+        ASSERT_TRUE(s != NULL);
+        ASSERT_EQ(0, a39_infer(s));
+        EXPECT_TRUE(a39_inf.expanded > 2000 && a39_inf.expanded < 5000);
+        free(s);
+        s = a39_shape(kind, 64);       /* saturates, no overflow */
+        ASSERT_TRUE(s != NULL);
+        ASSERT_EQ(0, a39_infer(s));
+        EXPECT_TRUE(a39_inf.expanded > HL_GPU_WGSL_EXPAND_MAX);
+        free(s);
+    }
+    /* The charge follows the expansion. */
+    s = a39_shape(A39_EXP_CONST, 10);
+    ASSERT_TRUE(s != NULL);
+    ASSERT_EQ(0, a39_infer(s));
+    EXPECT_EQ(hl_work_bytes_units(strlen(s)) +
+              a39_inf.expanded * HL_GPU_WGSL_EXPAND_UNITS,
+              hl_gpu_wgsl_compile_units(s, strlen(s)));
+    free(s);
+}
+
+UTEST(hull_cap_gpu_audit39, local_chains)
+{
+    char *ok = a39_shape(A39_LET_CHAIN, HL_GPU_WGSL_DECL_CHAIN_MAX - 1);
+    char *over = a39_shape(A39_LET_CHAIN, HL_GPU_WGSL_DECL_CHAIN_MAX);
+    ASSERT_TRUE(ok && over);
+    ASSERT_EQ(0, a39_infer(ok));
+    EXPECT_EQ((size_t)HL_GPU_WGSL_DECL_CHAIN_MAX, a39_inf.chain);
+    EXPECT_EQ((size_t)0, a39_inf.depth);
+    EXPECT_EQ(0, a37_check(ok));
+    ASSERT_EQ(0, a39_infer(over));
+    EXPECT_EQ((size_t)HL_GPU_WGSL_DECL_CHAIN_MAX + 1, a39_inf.chain);
+    const char *why = NULL;
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(over, strlen(over), &why));
+    EXPECT_TRUE(why && strstr(why, "function-local"));
+    free(ok); free(over);
+    /* Module-scope chains are hl_gpu_wgsl_decl_chain's: a chain at its
+     * bound, read from main, still passes. */
+    char *mod = a38_chain(A38_CONST, HL_GPU_WGSL_DECL_CHAIN_MAX - 1, 0);
+    ASSERT_TRUE(mod != NULL);
+    EXPECT_EQ(0, a37_check(mod));
+    free(mod);
+}
+
+/* The round-39 shapes: refused before the backend sees them. */
+static char *a39_round39(int which)
+{
+    switch (which) {
+    case 0: return a39_shape(A39_LOCAL_CONST, 10000);   /* crashed naga */
+    case 1: return a39_shape(A39_EXP_CONST, 16);        /* 6 s */
+    case 2: return a39_shape(A39_EXP_CONST, 20);        /* 109 s */
+    case 3: return a39_shape(A39_EXP_LOCAL, 18);
+    default: return a39_shape(A39_LOCAL_LET, 10000);
+    }
+}
+
+UTEST(hull_cap_gpu_audit39, round39_shapes_refused)
+{
+    for (int w = 0; w < 5; w++) {
+        char *s = a39_round39(w);
+        ASSERT_TRUE(s != NULL);
+        EXPECT_TRUE(strlen(s) <= HL_GPU_WGSL_MAX_BYTES);
+        const char *why = NULL;
+        EXPECT_EQ(-1, hl_gpu_wgsl_precheck(s, strlen(s), &why));
+        EXPECT_TRUE(why != NULL);
+        /* ...and nothing older caught them. */
+        EXPECT_TRUE(hl_gpu_wgsl_complexity(s, strlen(s)) < 16);
+        EXPECT_TRUE(hl_gpu_wgsl_type_depth(s, strlen(s)) < 4);
+        free(s);
+    }
+    /* Below the bounds they pass. */
+    char *d = a39_shape(A39_LOCAL_CONST, HL_GPU_WGSL_INFERRED_DEPTH_MAX);
+    char *d1 = a39_shape(A39_LOCAL_CONST, HL_GPU_WGSL_INFERRED_DEPTH_MAX + 1);
+    char *e = a39_shape(A39_EXP_CONST, 8);
+    ASSERT_TRUE(d && d1 && e);
+    EXPECT_EQ(0, a37_check(d));
+    EXPECT_EQ(-1, a37_check(d1));
+    EXPECT_EQ(0, a37_check(e));
+    free(d); free(d1); free(e);
+}
+
+static pthread_t a39_caller, a39_seen;
+static int a39_compile_thread(HlGpuDevice *dev, const char *name,
+                              const char *wgsl, size_t wgsl_len,
+                              HlGpuPipeline *out)
+{
+    (void)dev; (void)name; (void)wgsl; (void)wgsl_len; (void)out;
+    a39_seen = pthread_self();
+    mock_compiles++;
+    return HL_GPU_OK;
+}
+
+UTEST(hull_cap_gpu_audit39, compile_runs_off_the_calling_thread)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = a39_compile_thread;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    mock_compiles = 0;
+    a39_caller = pthread_self();
+    a39_seen = a39_caller;
+    const char *ok = "@compute @workgroup_size(1) fn main() {}";
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "ok", ok, strlen(ok)));
+    EXPECT_EQ(1, mock_compiles);
+    EXPECT_FALSE(pthread_equal(a39_caller, a39_seen));
+    /* The round-39 shapes never reach it. */
+    for (int w = 0; w < 5; w++) {
+        char *s = a39_round39(w);
+        ASSERT_TRUE(s != NULL);
+        EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "bad", s, strlen(s)));
+        free(s);
+    }
+    EXPECT_EQ(1, mock_compiles);
+    mock_free(ctx);
+}
+
+#ifdef HL_ENABLE_GPU
+UTEST(hull_cap_gpu_audit39, real_device_refuses_round39)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+    for (int w = 0; w < 5; w++) {
+        char *s = a39_round39(w);
+        ASSERT_TRUE(s != NULL);
+        EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(&ctx, -1, "r39", s, strlen(s)));
+        free(s);
+    }
+    /* At the bounds they compile. */
+    char *d = a39_shape(A39_LOCAL_CONST, HL_GPU_WGSL_INFERRED_DEPTH_MAX);
+    char *e = a39_shape(A39_EXP_CONST, 8);
+    ASSERT_TRUE(d && e);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "depth", d, strlen(d)));
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "exp", e, strlen(e)));
+    free(d); free(e);
+    hl_cap_gpu_destroy(&ctx);
+}
+
+/* The structural fix: with every estimator bypassed, the shapes that
+ * overflowed the event loop's stack in rounds 36-39 fail cleanly (or
+ * compile) on the compile thread; the process survives. */
+UTEST(hull_cap_gpu_audit39, compile_thread_survives_without_estimators)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+    char *shapes[6];
+    shapes[0] = a36_chain(A36_ADD_HEAD, "+y", 9000, "; }");     /* round 36 */
+    shapes[1] = a38_chain(A38_OVERRIDE, 40000, 1);               /* round 38 */
+    shapes[2] = a38_chain(A38_CONST, 30000, 1);
+    shapes[3] = a39_shape(A39_LOCAL_CONST, 10000);               /* round 39 */
+    shapes[4] = a39_shape(A39_LOCAL_LET, 10000);
+    shapes[5] = a37_elseif(5500);                                /* round 37 */
+    hl_gpu_test_set_precheck_bypass(1);
+    for (int k = 0; k < 6; k++) {
+        ASSERT_TRUE(shapes[k] != NULL);
+        char name[16];
+        snprintf(name, sizeof(name), "bypass%d", k);
+        int rc = hl_cap_gpu_compile(&ctx, -1, name, shapes[k], strlen(shapes[k]));
+        EXPECT_TRUE(rc == HL_GPU_OK || rc == HL_GPU_ERR_SHADER);
+        free(shapes[k]);
+    }
+    hl_gpu_test_set_precheck_bypass(0);
+    /* A shader still compiles after them. */
+    const char *ok = "@compute @workgroup_size(1) fn main() {}";
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "after", ok, strlen(ok)));
     hl_cap_gpu_destroy(&ctx);
 }
 #endif /* HL_ENABLE_GPU */

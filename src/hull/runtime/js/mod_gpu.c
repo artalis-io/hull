@@ -300,8 +300,9 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
     }
 
     /* The read and the compile are charged before the compile: WGSL
-     * compilation was free (audit 24). */
-    if (hl_js_budget_charge(ctx, hl_work_bytes_units(wgsl_len)) < 0) {
+     * compilation was free (audit 24); its expansion is charged too
+     * (audit 39). */
+    if (hl_js_budget_charge(ctx, hl_gpu_wgsl_compile_units(wgsl, wgsl_len)) < 0) {
         free(file_buf);
         JS_FreeCString(ctx, name);
         return JS_EXCEPTION;
@@ -341,13 +342,14 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
     if (!wgsl) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
 
     /* Capped as gpu.load's file read is, and charged before the compile:
-     * WGSL of any length compiled free of the budget (audit 24). */
+     * WGSL of any length compiled free of the budget (audit 24); its
+     * expansion is charged too (audit 39). */
     if (wgsl_len > JS_GPU_WGSL_MAX) {
         JS_FreeCString(ctx, name);
         JS_FreeCString(ctx, wgsl);
         return JS_ThrowRangeError(ctx, "gpu.compile: WGSL source too large");
     }
-    if (hl_js_budget_charge(ctx, hl_work_bytes_units(wgsl_len)) < 0) {
+    if (hl_js_budget_charge(ctx, hl_gpu_wgsl_compile_units(wgsl, wgsl_len)) < 0) {
         JS_FreeCString(ctx, name);
         JS_FreeCString(ctx, wgsl);
         return JS_EXCEPTION;
