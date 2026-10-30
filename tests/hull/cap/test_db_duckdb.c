@@ -294,6 +294,39 @@ UTEST(db_duckdb, security_lockdown)
     h.backend->close(&h);
 }
 
+/* Audit 36: a catalog / schema qualifier hid `histogram` from the
+ * table-position check, and DuckDB resolved main.histogram /
+ * system.main.histogram to the table macro, reading a table whose name was
+ * built at run time. Refused by the backend; a plain source still runs. */
+UTEST(db_duckdb, qualified_table_macro_is_refused)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE users (name VARCHAR, n INTEGER)",
+                         NULL, 0), 0);
+    ASSERT_EQ(hl_db_exec(&h, "INSERT INTO users VALUES ('alice', 7)", NULL, 0), 0);
+
+    static const char *const refused[] = {
+        "SELECT * FROM main.histogram(lower('USERS'), n)",
+        "SELECT * FROM system.main.histogram('us' || 'ers', n)",
+        "SELECT * FROM main.\"histogram\"(concat('us', 'ers'), n)",
+        "SELECT * FROM main . /* c */ histogram(lower('USERS'), n)",
+        "SELECT * FROM main.pragma_table_info(lower('USERS'))",
+        "SELECT * FROM system.main.query_table(lower('USERS'))",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_EQ(-1, hl_db_query(&h, refused[i], NULL, 0, NULL, NULL, NULL));
+
+    int64_t c = 0;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM main.histogram(users, n)",
+                             NULL, 0, count_cb, &c, NULL));
+    EXPECT_EQ(1, (int)c);
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM main.users",
+                             NULL, 0, count_cb, &c, NULL));
+    EXPECT_EQ(1, (int)c);
+    h.backend->close(&h);
+}
+
 /* Audit 19: the selector matches a DSN's scheme in any case (db_select.c
  * lowercases it), but the backend stripped only a lowercase "duckdb://", so
  * "DuckDB://:memory:" was opened as a file of that name. */

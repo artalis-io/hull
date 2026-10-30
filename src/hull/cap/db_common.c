@@ -422,9 +422,10 @@ static int fv_take(size_t *budget, size_t n)
 /* The body of the '...' or "..." at @p p (doubled quote = one quote), copied
  * unescaped into @p out (cap bytes; NULL = do not copy; *out_n = SIZE_MAX
  * when it does not fit). Returns the text after the closing quote, or NULL
- * for an unterminated one or once the budget is gone. */
-static const char *fv_quoted(const char *p, size_t *budget, char *out,
-                             size_t cap, size_t *out_n)
+ * for an unterminated one or once the budget is gone (setting *@p exhausted,
+ * when given, in that case only). */
+static const char *fv_quoted_st(const char *p, size_t *budget, char *out,
+                                size_t cap, size_t *out_n, int *exhausted)
 {
     char q = *p;
     const char *s = p + 1;
@@ -441,12 +442,21 @@ static const char *fv_quoted(const char *p, size_t *budget, char *out,
         }
         s++;
     }
-    if (!fv_take(budget, (size_t)(s + 1 - p))) return NULL;
+    if (!fv_take(budget, (size_t)(s + 1 - p))) {
+        if (exhausted) *exhausted = 1;
+        return NULL;
+    }
     if (out) {
         if (n + 1 >= cap) { *out_n = SIZE_MAX; out[0] = '\0'; }
         else { out[n] = '\0'; *out_n = n; }
     }
     return s + 1;
+}
+
+static const char *fv_quoted(const char *p, size_t *budget, char *out,
+                             size_t cap, size_t *out_n)
+{
+    return fv_quoted_st(p, budget, out, cap, out_n, NULL);
 }
 
 /* The first byte of a bare name: a parameter ($1, $name) or a dollar-quoted
@@ -476,6 +486,48 @@ static const char *fv_name_chain(const char *p, int nest, size_t *budget)
         if (*g != '.') return p;
         p = dyn_skip_gap(g + 1, nest, budget);
         if (!p) return NULL;
+    }
+}
+
+/* The LAST name of a bare or "quoted" name chain at @p p, read with one
+ * comment rule: `histogram`, `main.histogram`, `system.main."histogram"`,
+ * any depth, gaps allowed around each '.'. A catalog / schema qualifier must
+ * not hide the function name it qualifies: the table-position check read
+ * only the first name, so `FROM main.histogram('_hu' || 'll_sessions', c)`
+ * ran the macro DuckDB resolves through system.main (audit 36). The name is
+ * copied into @p buf (*@p n = SIZE_MAX when it does not fit @p cap). Returns
+ * 1 with *@p after = the text after that name, 0 when @p p holds no name
+ * (or an unterminated quote), -1 once the budget is gone. Every byte read
+ * is charged, so a scan that re-reads chains stays linear or fails closed. */
+static int fv_chain_last(const char *p, int nest, size_t *budget, char *buf,
+                         size_t cap, size_t *n, const char **after)
+{
+    for (;;) {
+        const char *e;
+        if (*p == '"') {
+            int exhausted = 0;
+            e = fv_quoted_st(p, budget, buf, cap, n, &exhausted);
+            if (!e) return exhausted ? -1 : 0;
+        } else if (fv_name_start((unsigned char)*p)) {
+            e = p;
+            while (dyn_ident_char((unsigned char)*e)) e++;
+            size_t len = (size_t)(e - p);
+            if (!fv_take(budget, len)) return -1;
+            if (len >= cap) {
+                *n = SIZE_MAX;
+            } else {
+                memcpy(buf, p, len);
+                buf[len] = '\0';
+                *n = len;
+            }
+        } else {
+            return 0;
+        }
+        const char *g = dyn_skip_gap(e, nest, budget);
+        if (!g) return -1;
+        if (*g != '.') { *after = e; return 1; }
+        p = dyn_skip_gap(g + 1, nest, budget);
+        if (!p) return -1;
     }
 }
 
@@ -636,9 +688,10 @@ static int fv_histogram_refused(const char *p, size_t *budget)
 }
 
 /* After a table-position word (or `,` / `(`) at @p p: the name that
- * follows, bare or "quoted", read with both comment rules. 1 when it is
- * `histogram` called as refused above, or - after PRAGMA - `show` /
- * `table_info` given anything but one plain argument. */
+ * follows, bare or "quoted", past any catalog / schema qualifiers
+ * (fv_chain_last), read with both comment rules. 1 when it is `histogram`
+ * called as refused above, or - after PRAGMA - `show` / `table_info` given
+ * anything but one plain argument. */
 static int fv_table_position_refused(const char *p, int pragma, size_t *budget)
 {
     for (int nest = 1; nest >= 0; nest--) {
@@ -646,20 +699,11 @@ static int fv_table_position_refused(const char *p, int pragma, size_t *budget)
         if (!q) return 1;
         char buf[16];
         size_t n = 0;
-        const char *after;
-        if (*q == '"') {
-            after = fv_quoted(q, budget, buf, sizeof buf, &n);
-            if (!after) continue;            /* unterminated: no name */
-            if (n == SIZE_MAX) continue;     /* longer than any name here */
-        } else if (fv_name_start((unsigned char)*q)) {
-            after = q;
-            while (dyn_ident_char((unsigned char)*after)) after++;
-            n = (size_t)(after - q);
-            if (n >= sizeof buf) continue;
-            memcpy(buf, q, n);
-        } else {
-            continue;
-        }
+        const char *after = NULL;
+        int got = fv_chain_last(q, nest, budget, buf, sizeof buf, &n, &after);
+        if (got < 0) return 1;               /* budget gone: refuse */
+        if (got == 0) continue;              /* no name */
+        if (n == SIZE_MAX) continue;         /* longer than any name here */
         if (n == 9 && strncasecmp(buf, "histogram", 9) == 0 &&
             fv_histogram_refused(after, budget))
             return 1;

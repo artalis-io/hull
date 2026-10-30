@@ -972,6 +972,127 @@ UTEST(hl_cap_db, table_name_values_are_refused)
     EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value(NULL));
 }
 
+/* Audit 36: a catalog / schema qualifier hid the function name from the
+ * table-position check - `FROM main.histogram('_hu' || 'll_sessions', sid)`
+ * returned the _hull_ table's rows. Every checked name is refused however
+ * it is qualified; the audit 35 columns and aggregates stay allowed. */
+UTEST(hl_cap_db, qualified_function_names_are_refused)
+{
+    static const char *const by_value[] = {
+        "SELECT * FROM main.histogram('_hu' || 'll_sessions', sid)",
+        "SELECT * FROM system.main.histogram('_hu' || 'll_sessions', sid)",
+        "SELECT * FROM main.\"histogram\"('_hu' || 'll_sessions', sid)",
+        "SELECT * FROM \"system\".\"main\".\"histogram\"(lower('X'), x)",
+        "SELECT * FROM main . histogram (lower('X'), x)",
+        "SELECT * FROM main /* c */ . /* d */ histogram(lower('X'), x)",
+        "SELECT * FROM main -- c\n.histogram(lower('X'), x)",
+        "SELECT * FROM t, main.histogram(lower('X'), x)",
+        "SELECT * FROM t JOIN system.main.histogram(lower('X'), x) h ON true",
+        "SELECT * FROM (main.histogram(lower('X'), x))",
+        "SELECT * FROM LATERAL main.histogram(lower('X'), x)",
+        "SELECT * FROM \"a.b\".main.histogram(lower('X'), x)",
+        "SELECT * FROM \"very long catalog name, longer than buf\".main.histogram(lower('X'), x)",
+        "SELECT * FROM main.pragma_table_info('_hu' || 'll_sessions')",
+        "SELECT * FROM system.main.pragma_show(lower('X'))",
+        "SELECT * FROM main.\"histogram_values\"(lower('X'), x)",
+        "SELECT * FROM system.main.duckdb_table_sample(lower('X'))",
+        "SELECT * FROM main.\"pragma_table_info\"(lower('X'))",
+        "CALL main.pragma_table_info('_hu' || 'll_sessions')",
+        "SELECT * FROM main.table_info(lower('X'))",
+        "SELECT * FROM main.show(lower('X'))",
+        "PRAGMA main.show = lower('X')",
+        "PRAGMA main.\"table_info\" = lower('X')",
+        "SELECT * FROM main.pragma_storage_info('t')",
+        "SELECT * FROM system.main.\"storage_info\"('t')",
+        "CALL system.main.enable_profiling()",
+        "SELECT * FROM main.arrow_scan(?, ?, ?)",
+    };
+    for (size_t i = 0; i < sizeof by_value / sizeof by_value[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(by_value[i]));
+
+    static const char *const dynamic[] = {
+        "SELECT * FROM main.query('SELECT 1')",
+        "SELECT * FROM system.main.query_table('_hu' || 'll_sessions')",
+        "SELECT * FROM main.\"query_table\"('t')",
+        "SELECT * FROM system . main . json_execute_serialized_sql('x')",
+    };
+    for (size_t i = 0; i < sizeof dynamic / sizeof dynamic[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_calls_dynamic_sql(dynamic[i]));
+
+    static const char *const files[] = {
+        "SELECT * FROM main.read_csv(lower('X'))",
+        "SELECT * FROM system.main.\"read_text\"(lower('X'))",
+        "SELECT * FROM main.parquet_metadata(lower('X'))",
+        "SELECT * FROM system.main.glob(lower('X'))",
+        "SELECT * FROM main.sniff_csv(lower('X'))",
+        "SELECT * FROM main.read_blob('app.duckdb')",
+    };
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(files[i], 0,
+                                                    "/nonexistent/app.duckdb"));
+    EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(
+                     "SELECT * FROM main.read_csv('x.csv')", 1, NULL));
+
+    EXPECT_EQ(1, hl_cap_db_sql_reads_whole_database(
+                     "PRAGMA main.import_database('d')"));
+    EXPECT_EQ(1, hl_cap_db_sql_reads_whole_database(
+                     "CALL system.main.\"export_database\"('d')"));
+
+    static const char *const miss[] = {
+        "SELECT * FROM main.histogram('t', x)",
+        "SELECT * FROM system.main.histogram(t, x, bin_count := 4)",
+        "SELECT * FROM main.t",
+        "SELECT * FROM system.main.items WHERE show = 1",
+        "SELECT t.histogram FROM t",
+        "SELECT count(t.histogram) FROM t",
+        "SELECT histogram(t.x) FROM t",
+        "SELECT main.histogram(lower(name)) FROM t",
+        "SELECT (t.x).histogram() FROM t",
+        "SELECT * FROM main.pragma_table_info('users')",
+        "SELECT * FROM main.pragma_table_info(main.users)",
+        "UPDATE main.items SET show = 1",
+        "SELECT a.show, b.table_info FROM a, b",
+        "SELECT * FROM a, b.c, \"d\".\"e\"",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value(miss[i]));
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(
+                     "SELECT * FROM main.read_csv('data.csv')", 0,
+                     "/nonexistent/app.duckdb"));
+}
+
+/* Audit 36: a qualifier chain is re-read from every table-position opener,
+ * charged to the scan's budget: long chains and openers inside quoted
+ * qualifiers stay linear (and fail closed past the budget). */
+UTEST(hl_cap_db, qualified_name_scan_is_linear)
+{
+    size_t n = 1u << 20;
+    char *big = malloc(n + 64);
+    ASSERT_TRUE(big != NULL);
+    clock_t t0 = clock();
+    static const char *const pats[] = {
+        "a.", "\"a\".", ",\",\".", "(\"(\".", ", a . ", "from a.", "(a /* x */ .",
+        ",\"a,b,c,d,e,f,g\" . ",
+    };
+    for (size_t k = 0; k < sizeof pats / sizeof pats[0]; k++) {
+        size_t pl = strlen(pats[k]);
+        memcpy(big, "SELECT * FROM ", 14);
+        size_t i = 14;
+        for (; i + pl <= n; i += pl) memcpy(big + i, pats[k], pl);
+        memcpy(big + i, "histogram(lower('X'), x)", 25);
+        (void)hl_cap_db_sql_names_table_by_value(big);
+    }
+    /* One long chain ending in the macro is still read to its end. */
+    memcpy(big, "SELECT * FROM ", 14);
+    size_t i = 14;
+    for (; i + 2 <= n; i += 2) memcpy(big + i, "a.", 2);
+    memcpy(big + i, "histogram(lower('X'), x)", 25);
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(big));
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 30.0);
+    free(big);
+}
+
 /* Audit 34: DuckDB keeps the database file, its WAL sidecars and its temp
  * directory readable from SQL whatever external access says, so
  * read_blob('app.duckdb') returned the raw file, _hull_* rows included. */
