@@ -184,6 +184,27 @@ release-artifact layout).
   coroutine marked as waiting until its async result is built, so a finalizer that build runs
   cannot resume it. Covered by `test_lua` (`lua_audit36`).
 
+- **`fs.list`, `fs.stat` and small fs / blob writes cost nothing against the run budget**
+  (audit 37, both runtimes). `fs.list` read the whole directory - every entry, matching the
+  grant's pattern or not - and `fstatat`ed each one it kept, inside one uncharged call: a Lua
+  loop listing a 60,000-file directory with a pattern that matched nothing made 1,166 calls
+  in 50 s without tripping the 100M budget, held off only by the run watchdog. An empty
+  `fs.write` (temp file, fsync, rename, directory fsync) cost 0 units (95,010 calls in 20 s),
+  and so did an empty `blob.put`, `blob.exists` / `size` / `atime` / `delete`, `blob.init`
+  (three `mkdir -p` and a `tmp/` sweep every call), `fs.stat` and `fs.mmap`. `fs.list` now
+  charges each entry as it reads it (`hl_cap_fs_list_ex`: 64 units + 1 per 64 name bytes,
+  256 more per entry kept) and stops mid-directory on a trip, raised as the uncatchable
+  limit; the other calls charge a fixed floor before the work, on top of the per-byte rate
+  (`hull/shared/work_charge.h`: 32768 for a write / put / finalize, 16384 for `blob.init`
+  plus its sweep's entries, 8192 for a blob stat / delete / get, 4096 for `fs.mmap`, 256 + 64
+  per path component for `fs.stat`), sized from measured cost so a budget of any one of them
+  runs no longer than a budget of plain script. Also: Lua ws-client `ping` re-checks the
+  connection after converting its argument, and `ping` is charged like a send in both
+  runtimes; `smtp.send`'s `port` is range-checked instead of wrapped (`2^32 + 25` was port
+  25); and trusted tar extraction no longer writes through a symbolic link already at a
+  member's destination (`O_NOFOLLOW`). Covered by `test_lua` / `test_js` (`*_audit37`) and
+  `test_tar`.
+
 - **JS: a run failed for holding a transaction across a wait kept running** (audit 32). The
   audit-31 check rolls back the transaction of a run whose stretch of jobs ends while it is
   open and marks the run failed, but only a later async resume read that mark: the run's own

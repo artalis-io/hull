@@ -14086,4 +14086,142 @@ UTEST(lua_gpu, read_backs_past_the_heap_limit_are_refused)
     lgpu_cleanup();
 }
 
+/* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
+ *
+ * fs.list read a whole directory (every entry, matching the grant's pattern
+ * or not) and fstatat()ed each one it kept, uncharged; an empty fs.write /
+ * blob.put (a temp file, an fsync, a rename) cost 0 units; fs.stat,
+ * blob.exists / size / delete and blob.init (three mkdir_p and a tmp/ sweep)
+ * nothing. Each is charged now (hull/shared/work_charge.h): a loop of them
+ * trips the budget, a single call of each still fits easily. */
+
+#define A37_FILES 3000
+
+/* A temp app root whose policy reads @p read and writes "." , with
+ * A37_FILES empty files in many/, wired into the caps runtime. */
+static int a37_fs_open(A15Fs *f, const char *read)
+{
+    static const char *const all[] = { "." };
+    const char *reads[1] = { read };
+    memset(f, 0, sizeof *f);
+    if (!hl_test_mkdtemp(f->dir, sizeof f->dir, "hull_a37")) return -1;
+    hl_alloc_init(&f->alloc, 0);
+    f->policy = HL_FS_POLICY_INIT;
+    char p[HL_TEST_PATH_MAX + 32];
+    snprintf(p, sizeof p, "%s/many", f->dir);
+    if (mkdir(p, 0755) != 0) return -1;
+    for (int i = 0; i < A37_FILES; i++) {
+        snprintf(p, sizeof p, "%s/many/f%05d.txt", f->dir, i);
+        FILE *fp = fopen(p, "wb");
+        if (!fp) return -1;
+        fclose(fp);
+    }
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(f->dir, &f->alloc, reads, 1, all, 1,
+                                      &f->policy, &perr) != 0)
+        return -1;
+    f->fs.base_dir = f->dir;
+    f->fs.base_len = strlen(f->dir);
+    f->fs.policy = &f->policy;
+    lua_rt.base.fs_cfg = &f->fs;
+    return 0;
+}
+
+UTEST(lua_audit37, fs_list_is_charged_per_entry)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "."), 0);
+    char err[512];
+    /* 3000 entries kept: ~1M units a listing. */
+    EXPECT_NE(audit10_run("for i = 1, 100 do fs.list('many') end return 1",
+                          5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* The trip is not an error pcall can catch and loop past. */
+    EXPECT_NE(audit10_run("for i = 1, 100 do pcall(fs.list, 'many') end return 1",
+                          5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("assert(#fs.list('many') == 3000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit37, fs_list_charges_entries_the_pattern_drops)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "many/*.log"), 0);
+    char err[512];
+    /* Nothing matches, yet every listing reads 3000 entries (~190k units). */
+    EXPECT_EQ(audit10_run("assert(#fs.list('many') == 0) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run("for i = 1, 100 do fs.list('many') end return 1",
+                          5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit37, small_fs_calls_have_a_floor)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "."), 0);
+    char err[512];
+    static const char *const loops[] = {
+        "for i = 1, 1000 do fs.write('e.txt', '') end return 1",
+        "for i = 1, 100000 do fs.stat('many/f00001.txt') end return 1",
+        "fs.write('m.bin', 'abcd') for i = 1, 10000 do fs.mmap('m.bin'):close() end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 5000000, err, sizeof err), LUA_OK,
+                      loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    /* A few of each fit in a small budget. */
+    EXPECT_EQ(audit10_run(
+        "for i = 1, 10 do assert(fs.write('e.txt', '')) end "
+        "assert(fs.stat('e.txt').size == 0) return 1",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit37, small_blob_calls_have_a_floor)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "."), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "blob = require('hull.blob') blob.init({ dir = 'blobs' }) "
+        "ID = blob.put('x') return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    static const char *const loops[] = {
+        "for i = 1, 1000 do blob.put('') end return 1",
+        "for i = 1, 10000 do blob.exists(ID) end return 1",
+        "for i = 1, 10000 do blob.size(ID) end return 1",
+        "for i = 1, 10000 do blob.delete(string.rep('0', 64)) end return 1",
+        "for i = 1, 1000 do blob.init({ dir = 'blobs' }) end return 1",
+        "for i = 1, 1000 do local w = blob.writer() w:finalize() end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 5000000, err, sizeof err), LUA_OK,
+                      loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    EXPECT_EQ(audit10_run(
+        "blob.init({ dir = 'blobs' }) local id = blob.put('') "
+        "assert(blob.exists(id)) assert(blob.size(id) == 0) "
+        "assert(blob.delete(id)) return 1",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
 UTEST_MAIN();

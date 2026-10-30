@@ -14670,4 +14670,121 @@ UTEST(js_gpu, read_backs_past_the_heap_limit_are_refused)
     jgpu_cleanup();
 }
 
+/* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
+ *
+ * The twins of lua_audit37: fs.list read a whole directory, matching or
+ * not, uncharged; an empty fs.write / blob.put, fs.stat, blob.exists / size
+ * / delete and blob.init cost nothing. Each is charged now
+ * (hull/shared/work_charge.h): a loop of them trips, one call still fits. */
+
+#define A37_FILES 3000
+
+static int a37_fs_open(A15Fs *f, const char *read)
+{
+    static const char *const all[] = { "." };
+    const char *reads[1] = { read };
+    memset(f, 0, sizeof *f);
+    if (!hl_test_mkdtemp(f->dir, sizeof f->dir, "hull_a37")) return -1;
+    hl_alloc_init(&f->alloc, 0);
+    f->policy = HL_FS_POLICY_INIT;
+    char p[HL_TEST_PATH_MAX + 32];
+    snprintf(p, sizeof p, "%s/many", f->dir);
+    if (mkdir(p, 0755) != 0) return -1;
+    for (int i = 0; i < A37_FILES; i++) {
+        snprintf(p, sizeof p, "%s/many/f%05d.txt", f->dir, i);
+        FILE *fp = fopen(p, "wb");
+        if (!fp) return -1;
+        fclose(fp);
+    }
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(f->dir, &f->alloc, reads, 1, all, 1,
+                                      &f->policy, &perr) != 0)
+        return -1;
+    f->fs.base_dir = f->dir;
+    f->fs.base_len = strlen(f->dir);
+    f->fs.policy = &f->policy;
+    js.base.fs_cfg = &f->fs;
+    return 0;
+}
+
+UTEST(js_audit37, fs_list_is_charged_per_entry)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "."), 0);
+    /* 3000 entries kept: ~1M units a listing; try/catch cannot swallow it. */
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 100; i++) { try { fs.list('many'); } catch (e) {} }",
+        5000000), 1);
+    EXPECT_EQ(eval_int("fs.list('many').length === 3000 ? 1 : 0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit37, fs_list_charges_entries_the_pattern_drops)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "many/*.log"), 0);
+    EXPECT_EQ(eval_int("fs.list('many').length === 0 ? 1 : 0"), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 100; i++) fs.list('many');", 5000000), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit37, small_fs_calls_have_a_floor)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "."), 0);
+    static const char *const loops[] = {
+        "for (let i = 0; i < 1000; i++) fs.write('e.txt', '');",
+        "for (let i = 0; i < 100000; i++) fs.stat('many/f00001.txt');",
+        "fs.write('m.bin', 'abcd'); for (let i = 0; i < 10000; i++) fs.mmap('m.bin').close();",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++)
+        EXPECT_EQ_MSG(a10_run_tripped(loops[i], 5000000), 1, loops[i]);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 10; i++) fs.write('e.txt', '');"
+        "if (fs.stat('e.txt').size !== 0) throw new Error('size');"
+        "globalThis.__a37_ok = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a37_ok|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit37, small_blob_calls_have_a_floor)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a37_fs_open(&f, "."), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob; blob.init({ dir: 'blobs' });\n"
+        "globalThis.ID = blob.put('x').id;\n", 0), 0);
+    static const char *const loops[] = {
+        "for (let i = 0; i < 1000; i++) blob.put('');",
+        "for (let i = 0; i < 10000; i++) blob.exists(ID);",
+        "for (let i = 0; i < 10000; i++) blob.size(ID);",
+        "for (let i = 0; i < 10000; i++) blob.delete('0'.repeat(64));",
+        "for (let i = 0; i < 1000; i++) blob.init({ dir: 'blobs' });",
+        "for (let i = 0; i < 1000; i++) blob.writer().finalize();",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++)
+        EXPECT_EQ_MSG(a10_run_tripped(loops[i], 5000000), 1, loops[i]);
+    EXPECT_EQ(a10_run_tripped(
+        "blob.init({ dir: 'blobs' }); const id = blob.put('').id;"
+        "if (!blob.exists(id) || blob.size(id) !== 0 || !blob.delete(id))"
+        "  throw new Error('blob');"
+        "globalThis.__a37_blob = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a37_blob|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
 UTEST_MAIN();

@@ -287,6 +287,11 @@ static JSValue js_ws_client_ping(JSContext *ctx, JSValueConst this_val,
         if (data) JS_FreeCString(ctx, data);
         return JS_UNDEFINED;
     }
+    /* Charged like a send (audit 37). */
+    if (hl_js_budget_charge(ctx, hl_work_send_units(len, 1))) {
+        if (data) JS_FreeCString(ctx, data);
+        return JS_EXCEPTION;
+    }
 
     kl_ws_client_send_ping(ud->client, data, len);
     if (data) JS_FreeCString(ctx, data);

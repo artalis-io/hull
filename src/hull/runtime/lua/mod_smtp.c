@@ -144,7 +144,13 @@ static int lua_smtp_send(lua_State *L)
     const char *host = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
 
     lua_getfield(L, 1, "port");
-    int port = lua_isinteger(L, -1) ? (int)lua_tointeger(L, -1) : 587;
+    /* Range-checked before the narrowing (audit 37): (int) of 2^32 + 25
+     * wrapped to port 25. Out of range is 0, which validation refuses. */
+    int port = 587;
+    if (lua_isinteger(L, -1)) {
+        lua_Integer p = lua_tointeger(L, -1);
+        port = p >= 1 && p <= 65535 ? (int)p : 0;
+    }
 
     lua_getfield(L, 1, "username");
     const char *username = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;

@@ -117,13 +117,20 @@ static int lua_blob_init(lua_State *L)
 
     /* The userdata first, the store after: made the other way round, a
      * memory error creating the userdata leaked the HlBlob. */
+    /* Three mkdir_p and the tmp/ sweep every call (audit 37). */
+    lua_hlwork(L, HL_WORK_BLOB_INIT_UNITS, 0);
     LuaBlobUd *s = (LuaBlobUd *)lua_newuserdatauv(L, sizeof(*s), 0);
     s->b = NULL;
     luaL_setmetatable(L, HL_BLOB_MT);
-    int rc = hl_cap_blob_init(&s->b, lua->base.fs_cfg, lua->base.alloc,
-                                dir, shard_depth, tmp_max_age);
+    uint64_t swept = 0;
+    int rc = hl_cap_blob_init_ex(&s->b, lua->base.fs_cfg, lua->base.alloc,
+                                 dir, shard_depth, tmp_max_age, &swept);
     if (rc != 0)
         return luaL_error(L, "blob.init: failed (check fs.write declares '%s')", dir);
+    /* Each tmp/ entry the sweep read, charged after it as the blob walk is
+     * (audit 21); the userdata owns the store, so a raise here frees it and
+     * the store is not installed. */
+    lua_hlwork(L, (size_t)swept, 0);
 
     /* Drop any previous singleton (re-init is allowed). The old
      * userdata's __gc will fire on GC, freeing the old HlBlob. */
@@ -167,6 +174,13 @@ static void blob_charge(lua_State *L, size_t len)
     lua_hlwork(L, len / 8, 0);
 }
 
+/* A whole put: the bytes, plus a floor for the temp file, fsync and rename
+ * every put does whatever its size (audit 37: an empty put was free). */
+static void blob_put_charge(lua_State *L, size_t len)
+{
+    lua_hlwork(L, (size_t)(HL_WORK_FS_WRITE_UNITS + hl_work_bytes_units(len)), 0);
+}
+
 /* Read `durable` from an optional opts table at `idx` (1 = true, 0 = false). */
 static int read_durable_opt(lua_State *L, int idx)
 {
@@ -183,7 +197,7 @@ static int lua_blob_put(lua_State *L)
     size_t len = 0;
     const char *bytes = luaL_checklstring(L, 1, &len);
     int durable = read_durable_opt(L, 2);
-    blob_charge(L, len);
+    blob_put_charge(L, len);
 
     char id[HL_BLOB_ID_BUF_SIZE];
     int rc = durable
@@ -204,7 +218,7 @@ static int lua_blob_put_verified(lua_State *L)
     const char *bytes = luaL_checklstring(L, 1, &len);
     const char *expected = check_id(L, 2);
     int durable = read_durable_opt(L, 3);
-    blob_charge(L, len);
+    blob_put_charge(L, len);
 
     char id[HL_BLOB_ID_BUF_SIZE];
     int rc = durable
@@ -302,6 +316,9 @@ static int lua_writer_finalize(lua_State *L)
 {
     HlBlobWriterLua *ud = check_writer_ud(L, 1);
     if (!ud->w) return luaL_error(L, "blob.writer: already finalized/aborted");
+    /* The fsync and rename (audit 37); a refused finalize leaves the
+     * writer to its __gc, which aborts it. */
+    lua_hlwork(L, HL_WORK_FS_WRITE_UNITS, 0);
     char id[HL_BLOB_ID_BUF_SIZE]; size_t size = 0;
     int rc = hl_cap_blob_writer_finalize(ud->w, id, &size);
     ud->w = NULL;          /* finalize always consumes the writer */
@@ -440,7 +457,9 @@ static int lua_blob_get(lua_State *L)
     /* The cap reads the whole blob (up to 256 MB) into an off-heap buffer
      * and SHA-256s it before the copy into the heap: a blob the heap could
      * never hold is refused before that, and the read + hash is charged
-     * before it runs (audit 15). An unknown id is still nil. */
+     * before it runs (audit 15). An unknown id is still nil. The stat is
+     * charged, found or not (audit 37: a get of a missing id was free). */
+    lua_hlwork(L, HL_WORK_BLOB_STAT_UNITS, 0);
     size_t want = 0;
     if (hl_cap_blob_stat(b, id, &want, NULL) != 0) {
         lua_pushnil(L);
@@ -477,6 +496,7 @@ static int lua_blob_exists(lua_State *L)
 {
     HlBlob *b = get_store(L);
     const char *id = check_id(L, 1);
+    lua_hlwork(L, HL_WORK_BLOB_STAT_UNITS, 0);   /* a stat / unlink (audit 37) */
     int rc = hl_cap_blob_exists(b, id);
     if (rc < 0) return luaL_error(L, "blob.exists: stat failed");
     lua_pushboolean(L, rc);
@@ -487,6 +507,7 @@ static int lua_blob_size(lua_State *L)
 {
     HlBlob *b = get_store(L);
     const char *id = check_id(L, 1);
+    lua_hlwork(L, HL_WORK_BLOB_STAT_UNITS, 0);   /* a stat / unlink (audit 37) */
     size_t size = 0;
     if (hl_cap_blob_stat(b, id, &size, NULL) != 0) {
         lua_pushnil(L);
@@ -500,6 +521,7 @@ static int lua_blob_atime(lua_State *L)
 {
     HlBlob *b = get_store(L);
     const char *id = check_id(L, 1);
+    lua_hlwork(L, HL_WORK_BLOB_STAT_UNITS, 0);   /* a stat / unlink (audit 37) */
     int64_t atime = 0;
     if (hl_cap_blob_stat(b, id, NULL, &atime) != 0) {
         lua_pushnil(L);
@@ -513,6 +535,7 @@ static int lua_blob_delete(lua_State *L)
 {
     HlBlob *b = get_store(L);
     const char *id = check_id(L, 1);
+    lua_hlwork(L, HL_WORK_BLOB_STAT_UNITS, 0);   /* a stat / unlink (audit 37) */
     int rc = hl_cap_blob_delete(b, id);
     if (rc < 0) return luaL_error(L, "blob.delete: unlink failed");
     lua_pushboolean(L, rc);

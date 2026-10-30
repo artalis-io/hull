@@ -15,6 +15,7 @@
 #include "hull/shared/fs_util.h"
 #include "hull/cap/crypto.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/work_charge.h"   /* the sweep's units (audit 37) */
 #include "../utils/hex.h"
 
 #include <ctype.h>
@@ -285,23 +286,28 @@ static int make_tmp_name(char *out, size_t out_cap)
 
 /* ── Lifecycle ───────────────────────────────────────────────────── */
 
-static void sweep_stale_tmps(const char *root, uint64_t max_age_sec)
+static uint64_t sweep_stale_tmps(const char *root, uint64_t max_age_sec)
 {
-    if (max_age_sec == UINT64_MAX) return;
+    uint64_t units = 0;
+    if (max_age_sec == UINT64_MAX) return 0;
     /* tmp/ through a descriptor opened without following, and every stat /
      * unlink relative to it: a symlink at tmp/ pointed this unlink sweep at
      * whatever directory it named. */
     int tfd = open_root_subdir(root, "tmp");
-    if (tfd < 0) return;
+    if (tfd < 0) return 0;
     DIR *d = fdopendir(tfd);
-    if (!d) { close(tfd); return; }
+    if (!d) { close(tfd); return 0; }
 
     time_t now = time(NULL);
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
+        /* The work, for the caller to charge (audit 37): the app can fill
+         * tmp/ with names of its own, each read on every open. */
+        units += hl_work_dirent_units(strnlen(ent->d_name, 256));
         if (strncmp(ent->d_name, HL_BLOB_STORE_TMP_PREFIX,
                     sizeof(HL_BLOB_STORE_TMP_PREFIX) - 1) != 0) continue;
 
+        units += HL_WORK_FS_LIST_STAT_UNITS;
         struct stat st;
         if (fstatat(dirfd(d), ent->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0)
             continue;
@@ -323,6 +329,7 @@ static void sweep_stale_tmps(const char *root, uint64_t max_age_sec)
             unlinkat(dirfd(d), ent->d_name, 0);
     }
     closedir(d);
+    return units;
 }
 
 int hl_blob_store_open(HlBlobStore **out,
@@ -331,6 +338,18 @@ int hl_blob_store_open(HlBlobStore **out,
                        int shard_depth,
                        uint64_t tmp_max_age_sec)
 {
+    return hl_blob_store_open_ex(out, alloc, abs_root, shard_depth,
+                                 tmp_max_age_sec, NULL);
+}
+
+int hl_blob_store_open_ex(HlBlobStore **out,
+                          HlAllocator *alloc,
+                          const char *abs_root,
+                          int shard_depth,
+                          uint64_t tmp_max_age_sec,
+                          uint64_t *work_units)
+{
+    if (work_units) *work_units = 0;
     if (!out || !abs_root || abs_root[0] != '/') return -1;
 
     /* Trim trailing slashes. */
@@ -357,7 +376,10 @@ int hl_blob_store_open(HlBlobStore **out,
         (int)sizeof(path)) goto fail_root;
     if (hl_mkdir_p(path, 0755) < 0) goto fail_root;
 
-    sweep_stale_tmps(root, tmp_max_age_sec);
+    {
+        uint64_t units = sweep_stale_tmps(root, tmp_max_age_sec);
+        if (work_units) *work_units = units;
+    }
 
     HlBlobStore *s = hl_alloc_malloc(alloc, sizeof(*s));
     if (!s) goto fail_root;

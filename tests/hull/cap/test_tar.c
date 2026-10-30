@@ -427,6 +427,37 @@ UTEST_F(tar_fixture, extract_creates_missing_parent_dirs) {
     free(buf);
 }
 
+/* A symbolic link already at a member's destination is not followed (audit
+ * 37): fopen("wb") wrote the member through it, to wherever it pointed. */
+UTEST_F(tar_fixture, extract_does_not_follow_existing_symlink) {
+    unsigned char *buf = calloc(1, 4096);
+    ASSERT_NE(buf, NULL);
+    size_t off = 0;
+    tar_add_file(buf, &off, "driver", "EVIL", 4);
+    off += 512;
+
+    char dest[PATH_MAX], victim[PATH_MAX], link[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/floor3", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(dest, 0755), 0);
+    snprintf(victim, sizeof(victim), "%s/victim", utest_fixture->tmpdir);
+    FILE *w = fopen(victim, "wb");
+    ASSERT_NE(w, NULL);
+    fwrite("SAFE", 1, 4, w);
+    fclose(w);
+    snprintf(link, sizeof(link), "%s/driver", dest);
+    ASSERT_EQ(symlink(victim, link), 0);
+
+    EXPECT_EQ(hl_tar_extract(buf, off, dest), -1);
+    char rd[8] = {0};
+    FILE *r = fopen(victim, "rb");
+    ASSERT_NE(r, NULL);
+    size_t n = fread(rd, 1, sizeof(rd), r);
+    fclose(r);
+    EXPECT_EQ(n, (size_t)4);
+    EXPECT_EQ(memcmp(rd, "SAFE", 4), 0);
+    free(buf);
+}
+
 UTEST_F(tar_fixture, extract_rejects_traversal) {
     unsigned char *buf = calloc(1, 4096);
     ASSERT_NE(buf, NULL);

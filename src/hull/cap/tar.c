@@ -13,6 +13,7 @@
 #include "hull/shared/fs_util.h"
 
 #include <errno.h>
+#include <fcntl.h>   /* O_NOFOLLOW (audit 37) */
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -311,6 +312,19 @@ int hl_tar_parse(const unsigned char *tar, size_t tar_len,
 
 struct extract_ctx { const char *dest; };
 
+/* Open @p path to write, never through a symbolic link already at it
+ * (audit 37): fopen(path, "wb") followed one, so a link left in the
+ * destination had the member written wherever it pointed. */
+static FILE *extract_open_write(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                  0644);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "wb");
+    if (!f) close(fd);
+    return f;
+}
+
 /* Create parent directories of @p path (which ends in the member name). */
 static int extract_make_parents(char *path)
 {
@@ -334,7 +348,7 @@ static int extract_file_cb(const HlTarEntry *e, void *vctx)
     if (e->is_dir) return hl_mkdir_p(path, 0755);
 
     if (extract_make_parents(path) != 0) return -1;
-    FILE *f = fopen(path, "wb");
+    FILE *f = extract_open_write(path);
     if (!f) return -1;
     if (e->size && fwrite(e->data, 1, e->size, f) != e->size) {
         fclose(f);
@@ -350,7 +364,7 @@ static int extract_copy(const char *src, const char *dst, unsigned mode)
 {
     FILE *in = fopen(src, "rb");
     if (!in) return -1;
-    FILE *out = fopen(dst, "wb");
+    FILE *out = extract_open_write(dst);
     if (!out) { fclose(in); return -1; }
     char buf[8192];
     size_t n;

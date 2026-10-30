@@ -77,6 +77,20 @@ int hl_blob_store_open(HlBlobStore **out,
                        int shard_depth,
                        uint64_t tmp_max_age_sec);
 
+/**
+ * @brief @ref hl_blob_store_open, reporting in @p work_units (when non-NULL)
+ *        the instruction-budget units the tmp/ sweep's work is worth: one
+ *        hl_work_dirent_units per entry it read and #HL_WORK_FS_LIST_STAT_UNITS
+ *        per fstatat (hull/shared/work_charge.h). An app binding charges them
+ *        after the open (audit 37).
+ */
+int hl_blob_store_open_ex(HlBlobStore **out,
+                          HlAllocator *alloc,
+                          const char *abs_root,
+                          int shard_depth,
+                          uint64_t tmp_max_age_sec,
+                          uint64_t *work_units);
+
 /** Close + free a store handle. Safe to pass NULL. */
 void hl_blob_store_close(HlBlobStore *s);
 

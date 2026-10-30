@@ -181,9 +181,14 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
             v_ct = vals[9], v_rto = vals[10], v_cc = vals[11];
 
     const char *host = JS_IsString(v_host) ? JS_ToCString(ctx, v_host) : NULL;
+    /* Range-checked, not wrapped (audit 37): ToInt32 of 2^32 + 25 is 25.
+     * Out of range (or not an integer) is 0, which validation refuses. */
     int32_t port = 587;
-    if (JS_IsNumber(v_port))
-        JS_ToInt32(ctx, &port, v_port);
+    if (JS_IsNumber(v_port)) {
+        double p = 0;
+        JS_ToFloat64(ctx, &p, v_port);   /* a number: no conversion code */
+        port = p >= 1 && p <= 65535 && p == (double)(int32_t)p ? (int32_t)p : 0;
+    }
     const char *username = JS_IsString(v_user) ? JS_ToCString(ctx, v_user) : NULL;
     const char *password = JS_IsString(v_pass) ? JS_ToCString(ctx, v_pass) : NULL;
 

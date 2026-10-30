@@ -229,9 +229,22 @@ static JSValue js_blob_init(JSContext *ctx, JSValueConst this_val,
         if (r) tmp_max_age = (uint64_t)tma;
     }
 
+    /* Three mkdir_p and the tmp/ sweep every call (audit 37). */
+    if (hl_js_budget_charge(ctx, HL_WORK_BLOB_INIT_UNITS)) {
+        JS_FreeCString(ctx, dir);
+        return JS_EXCEPTION;
+    }
     HlBlob *b = NULL;
-    int rc = hl_cap_blob_init(&b, js->base.fs_cfg, js->base.alloc,
-                                dir, shard_depth, tmp_max_age);
+    uint64_t swept = 0;
+    int rc = hl_cap_blob_init_ex(&b, js->base.fs_cfg, js->base.alloc,
+                                 dir, shard_depth, tmp_max_age, &swept);
+    /* Each tmp/ entry the sweep read, charged after it as the blob walk is
+     * (audit 21): the store is not installed when that takes the run over. */
+    if (rc == 0 && hl_js_budget_charge(ctx, swept)) {
+        hl_cap_blob_free(b);
+        JS_FreeCString(ctx, dir);
+        return JS_EXCEPTION;
+    }
     if (rc != 0) {
         /* Stash dir into a stack buffer for the error message before
          * releasing the cstring - paths fit comfortably in PATH_MAX. */
@@ -287,6 +300,14 @@ static int blob_charge(JSContext *ctx, size_t len)
     return hl_js_budget_charge(ctx, (uint64_t)len / 8);
 }
 
+/* A whole put: the bytes, plus a floor for the temp file, fsync and rename
+ * every put does whatever its size (audit 37: an empty put was free). */
+static int blob_put_charge(JSContext *ctx, size_t len)
+{
+    return hl_js_budget_charge(ctx, HL_WORK_FS_WRITE_UNITS +
+                                    hl_work_bytes_units((uint64_t)len));
+}
+
 static JSValue js_blob_put(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -308,7 +329,7 @@ static JSValue js_blob_put(JSContext *ctx, JSValueConst this_val,
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) return JS_EXCEPTION;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b || blob_charge(ctx, len)) {
+    if (!b || blob_put_charge(ctx, len)) {
         if (cstr) JS_FreeCString(ctx, cstr);
         return JS_EXCEPTION;
     }
@@ -343,7 +364,7 @@ static JSValue js_blob_put_verified(JSContext *ctx, JSValueConst this_val,
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) { JS_FreeCString(ctx, expected); return JS_EXCEPTION; }
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b || blob_charge(ctx, len)) {
+    if (!b || blob_put_charge(ctx, len)) {
         JS_FreeCString(ctx, expected);
         if (cstr) JS_FreeCString(ctx, cstr);
         return JS_EXCEPTION;
@@ -498,6 +519,9 @@ static JSValue js_writer_finalize(JSContext *ctx, JSValueConst this_val,
     if (!bh) return JS_EXCEPTION;
     if (!bh->h) return JS_ThrowInternalError(ctx,
         "blob.writer: already finalized/aborted");
+    /* The fsync and rename (audit 37); a refused finalize leaves the
+     * writer to its finalizer, which aborts it. */
+    if (hl_js_budget_charge(ctx, HL_WORK_FS_WRITE_UNITS)) return JS_EXCEPTION;
     char id[HL_BLOB_ID_BUF_SIZE]; size_t size = 0;
     int rc = hl_cap_blob_writer_finalize((HlBlobWriter *)bh->h, id, &size);
     bh->h = NULL;                    /* writer always consumed */
@@ -655,7 +679,12 @@ static JSValue js_blob_get(JSContext *ctx, JSValueConst this_val,
     uint8_t *buf = NULL;
     size_t len = 0;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
+    /* The stat below, found or not (audit 37: a get of a missing id was
+     * free). */
+    if (!b || hl_js_budget_charge(ctx, HL_WORK_BLOB_STAT_UNITS)) {
+        JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
     /* The cap reads the whole blob (up to 256 MB) into an off-heap buffer
      * and SHA-256s it before the copy into the heap: a blob the heap could
      * never hold is refused before that, and the read + hash is charged
@@ -705,7 +734,11 @@ static JSValue js_blob_exists(JSContext *ctx, JSValueConst this_val,
     const char *id = check_id(ctx, argv[0]);
     if (!id) return JS_EXCEPTION;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
+    /* A stat or unlink of the shard path (audit 37). */
+    if (!b || hl_js_budget_charge(ctx, HL_WORK_BLOB_STAT_UNITS)) {
+        JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_blob_exists(b, id);
     JS_FreeCString(ctx, id);
     if (rc < 0) return JS_ThrowInternalError(ctx, "blob.exists: stat failed");
@@ -723,7 +756,11 @@ static JSValue js_blob_size(JSContext *ctx, JSValueConst this_val,
     if (!id) return JS_EXCEPTION;
     size_t size = 0;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
+    /* A stat or unlink of the shard path (audit 37). */
+    if (!b || hl_js_budget_charge(ctx, HL_WORK_BLOB_STAT_UNITS)) {
+        JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_blob_stat(b, id, &size, NULL);
     JS_FreeCString(ctx, id);
     if (rc != 0) return JS_NULL;
@@ -741,7 +778,11 @@ static JSValue js_blob_atime(JSContext *ctx, JSValueConst this_val,
     if (!id) return JS_EXCEPTION;
     int64_t at = 0;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
+    /* A stat or unlink of the shard path (audit 37). */
+    if (!b || hl_js_budget_charge(ctx, HL_WORK_BLOB_STAT_UNITS)) {
+        JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_blob_stat(b, id, NULL, &at);
     JS_FreeCString(ctx, id);
     if (rc != 0) return JS_NULL;
@@ -758,7 +799,11 @@ static JSValue js_blob_delete(JSContext *ctx, JSValueConst this_val,
     const char *id = check_id(ctx, argv[0]);
     if (!id) return JS_EXCEPTION;
     b = get_store(ctx);   /* again, after the arguments: see get_store */
-    if (!b) { JS_FreeCString(ctx, id); return JS_EXCEPTION; }
+    /* A stat or unlink of the shard path (audit 37). */
+    if (!b || hl_js_budget_charge(ctx, HL_WORK_BLOB_STAT_UNITS)) {
+        JS_FreeCString(ctx, id);
+        return JS_EXCEPTION;
+    }
     int rc = hl_cap_blob_delete(b, id);
     JS_FreeCString(ctx, id);
     if (rc < 0) return JS_ThrowInternalError(ctx, "blob.delete: unlink failed");

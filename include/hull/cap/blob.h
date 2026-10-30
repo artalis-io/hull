@@ -71,6 +71,16 @@ int hl_cap_blob_init(HlBlob **out,
                      int shard_depth,
                      uint64_t tmp_max_age_sec);
 
+/** @ref hl_cap_blob_init, reporting the tmp/ sweep's work in @p work_units
+ *  (see hl_blob_store_open_ex) for the binding to charge (audit 37). */
+int hl_cap_blob_init_ex(HlBlob **out,
+                        const HlFsConfig *fs_cfg,
+                        HlAllocator *alloc,
+                        const char *dir,
+                        int shard_depth,
+                        uint64_t tmp_max_age_sec,
+                        uint64_t *work_units);
+
 /** Free a blob store handle. Safe to pass NULL. */
 void hl_cap_blob_free(HlBlob *b);
 
