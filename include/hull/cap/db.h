@@ -343,9 +343,32 @@ int hl_cap_db_sql_switches_catalog(const char *sql);
  * arguments) are refused by name. Read as
  * #hl_cap_db_sql_calls_dynamic_sql (literals not skipped, both comment
  * rules); every look-ahead shares one byte budget, past which the text is
- * refused. 1 = refused.
+ * refused. In a text that creates a macro or function (see
+ * #hl_cap_db_sql_creates_macro) the reading is strict (audit 37): a bare
+ * name in a macro body may be a PARAMETER, which the call fills with a value
+ * built at run time (`CREATE MACRO hm(t, c) AS TABLE FROM histogram(t, c)`,
+ * then `FROM hm('_hu' || 'll_sessions', id)`), so only a '...' literal is a
+ * plain argument there, and `histogram` with more than one argument is
+ * refused in every position. 1 = refused.
  */
 int hl_cap_db_sql_names_table_by_value(const char *sql);
+
+/**
+ * @brief #hl_cap_db_sql_names_table_by_value, read strictly when @p in_macro
+ * is set (for a stored macro's definition text: every bare name may be a
+ * parameter).
+ */
+int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro);
+
+/**
+ * @brief Whether @p sql creates a DuckDB macro or function: `CREATE`, any run
+ * of `OR` / `REPLACE` / `TEMP` / `TEMPORARY` / `LOCAL` / `GLOBAL` /
+ * `UNLOGGED` / `PERSISTENT`, then `MACRO` or `FUNCTION`, keywords in any
+ * case with whitespace and comments (nesting or not) between them, in any
+ * statement of the text (literals not skipped). A look-ahead past the byte
+ * budget counts as a macro (audit 37). 1 = it does.
+ */
+int hl_cap_db_sql_creates_macro(const char *sql);
 
 /**
  * @brief Whether @p sql can reach the DuckDB database file itself (audit 34).

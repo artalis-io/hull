@@ -83,6 +83,20 @@ local function delay_secs(v)
     return math.ceil(n)
 end
 
+-- The id column's DDL. DuckDB has no inline identity column: its
+-- identity_column template names a sequence (`nextval('%s')`) that
+-- identity_sequence creates, and the raw template referenced a sequence
+-- literally named %s. The sequence is Hull's (`_hull_...`), so app SQL
+-- cannot reach it (audit 37). Every other backend's DDL is inline.
+local function id_column_ddl(seq)
+    local d = db.dialect
+    if type(d) == "table" and type(d.identity_sequence) == "string" then
+        db.exec(string.format(d.identity_sequence, seq))
+        return (string.format(d.identity_column, seq))
+    end
+    return db.autoincrement_id_ddl
+end
+
 --- Initialize the `_hull_outbox` table.
 --
 -- Idempotent - safe to call on every boot.
@@ -100,7 +114,7 @@ function outbox.init(opts)
     end
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_outbox ("
-        .. "id              " .. db.autoincrement_id_ddl .. ", "
+        .. "id              " .. id_column_ddl("_hull_outbox_id_seq") .. ", "
         .. "kind            TEXT NOT NULL,"
         .. "destination     TEXT NOT NULL,"
         .. "payload         TEXT NOT NULL,"

@@ -41,6 +41,20 @@ const _state = {
     trustProxy: false,
 };
 
+// The id column's DDL. DuckDB has no inline identity column: its
+// identityColumn template names a sequence (`nextval('%s')`) that
+// identitySequence creates, and the raw template referenced a sequence
+// literally named %s. The sequence is Hull's (`_hull_...`), so app SQL
+// cannot reach it (audit 37). Every other backend's DDL is inline.
+function idColumnDdl(seq) {
+    const d = db.dialect;
+    if (d && typeof d.identitySequence === "string") {
+        db.exec(d.identitySequence.replace("%s", seq));
+        return d.identityColumn.replace("%s", seq);
+    }
+    return db.autoincrementIdDdl;
+}
+
 function init(opts) {
     opts = opts || {};
     // fingerprintSalt is REQUIRED - see the matching Lua docstring
@@ -70,7 +84,7 @@ function init(opts) {
     if (opts.trustProxy !== undefined) _state.trustProxy = opts.trustProxy === true;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
-        + "id          " + db.autoincrementIdDdl + ", "
+        + "id          " + idColumnDdl("_hull_audit_log_id_seq") + ", "
         + "user_id     VARCHAR(255) NOT NULL,"
         + "event_at    INTEGER NOT NULL,"
         + "kind        TEXT    NOT NULL,"

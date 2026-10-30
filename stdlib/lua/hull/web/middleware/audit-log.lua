@@ -45,6 +45,20 @@ local _state = {
     trust_proxy       = false,
 }
 
+-- The id column's DDL. DuckDB has no inline identity column: its
+-- identity_column template names a sequence (`nextval('%s')`) that
+-- identity_sequence creates, and the raw template referenced a sequence
+-- literally named %s. The sequence is Hull's (`_hull_...`), so app SQL
+-- cannot reach it (audit 37). Every other backend's DDL is inline.
+local function id_column_ddl(seq)
+    local d = db.dialect
+    if type(d) == "table" and type(d.identity_sequence) == "string" then
+        db.exec(string.format(d.identity_sequence, seq))
+        return (string.format(d.identity_column, seq))
+    end
+    return db.autoincrement_id_ddl
+end
+
 --- Initialize the audit-log table. Call once at app startup
 -- (typically right after session.init()).
 -- @tparam table opts
@@ -94,7 +108,7 @@ function audit_log.init(opts)
     _state.trust_proxy = opts.trust_proxy == true
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
-        .. "id          " .. db.autoincrement_id_ddl .. ", "
+        .. "id          " .. id_column_ddl("_hull_audit_log_id_seq") .. ", "
         .. "user_id     VARCHAR(255) NOT NULL,"
         .. "event_at    INTEGER NOT NULL,"
         .. "kind        TEXT    NOT NULL,"

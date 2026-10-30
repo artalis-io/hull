@@ -133,6 +133,15 @@ app.main(function()
         "SELECT * FROM main /* c */ . histogram(concat('us', 'ers'), name)",
         "SELECT * FROM main.pragma_table_info(concat('us', 'ers'))",
         "CALL system.main.pragma_storage_info('users')",
+        -- Audit 37: a bare name in a macro body is a parameter, filled at
+        -- call time with a value built at run time; and getvariable().
+        "CREATE OR REPLACE TEMP MACRO hm(t, c) AS TABLE SELECT * FROM histogram(t, c)",
+        "CREATE MACRO hp(t, c) AS TABLE SELECT * FROM histogram(t, c)",
+        "CREATE OR REPLACE TEMP MACRO q3(t) AS (SELECT string_agg(bin, ',') FROM histogram(t, n))",
+        "CREATE OR REPLACE TEMP MACRO tm(t) AS TABLE SELECT * FROM pragma_table_info(t)",
+        "CREATE TEMP FUNCTION sh(t) AS TABLE SELECT * FROM pragma_show(t)",
+        "CREATE /* x */ OR REPLACE TEMP MACRO hv(t) AS TABLE FROM histogram_values(t, n)",
+        "SELECT * FROM histogram(getvariable('t'), name)",
     }) do
         local ok, err = pcall(f.query, sql)
         assert(not ok and tostring(err):find("plain literal or name", 1, true),
@@ -145,6 +154,13 @@ app.main(function()
     -- A qualified macro with a plain source, and a qualified table, run.
     assert(#f.query("SELECT * FROM main.histogram(users, n)") >= 1)
     assert(#f.query("SELECT * FROM main.users") >= 2)
+    -- Macros that use none of them, or a literal source, still work.
+    f.exec("CREATE OR REPLACE TEMP MACRO plus1(a) AS a + 1")
+    assert(f.query("SELECT plus1(41) AS v")[1].v == 42)
+    f.exec("CREATE OR REPLACE TEMP MACRO uh() AS TABLE SELECT * FROM histogram('users', n)")
+    assert(#f.query("SELECT * FROM uh()") >= 1)
+    f.exec("CREATE OR REPLACE TEMP MACRO byn(k) AS TABLE SELECT * FROM main.users WHERE n = k")
+    assert(#f.query("SELECT * FROM main.byn(7)") >= 1)
     for _, sql in ipairs({
         "SELECT * FROM system.main.query_table(concat('us', 'ers'))",
         "SELECT * FROM main.\"query\"('SELECT 1')",
@@ -228,6 +244,91 @@ echo "$EXT_OUT" | tail -5
 rm -rf "$EXT"
 echo "$EXT_OUT" | grep -q "EXTENSIONLESS DUCKDB OK" || { echo "FAIL: duckdb://data/hull app did not run its migrations and SQL"; exit 1; }
 echo "ok  duckdb://data/hull: migrations ran, ordinary SQL passed, the file stayed refused"
+
+echo "=== stdlib _hull_* tables with an id column on DuckDB (audit-log, outbox) ==="
+# Audit 37: DuckDB's autoincrement_id_ddl is a template naming a sequence
+# (nextval('%s')); the stdlib put it in its DDL raw, so _hull_audit_log /
+# _hull_outbox referenced a sequence called %s and init failed. The stdlib
+# now creates a Hull-owned _hull_<table>_id_seq first. Both runtimes.
+for RT in lua js; do
+STD=$(mktemp -d)
+mkdir -p "$STD/data"
+if [ "$RT" = lua ]; then
+cat > "$STD/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1", "hull/web/middleware/audit-log@1",
+                "hull/web/middleware/outbox@1" },
+    fs = { read = { "data/" }, write = { "data/" } },
+})
+app.main(function()
+    local audit_log = require("hull.web.middleware.audit-log")
+    local outbox = require("hull.web.middleware.outbox")
+    for _ = 1, 2 do   -- init is idempotent
+        audit_log.init({ fingerprint_salt = "e2e-duckdb-salt", cleanup = false })
+        outbox.init()
+    end
+    audit_log.record("u1", "login", nil,
+        { ip = "192.0.2.1", user_agent = "e2e", fingerprint = "fp1" })
+    audit_log.record("u1", "logout", nil,
+        { ip = "192.0.2.1", user_agent = "e2e", fingerprint = "fp1" })
+    local rows = audit_log.list("u1")
+    assert(#rows == 2, "audit_log.list: " .. #rows)
+    local id = outbox.enqueue({ kind = "webhook", destination = "https://example.invalid/h",
+                                payload = "{}" })
+    assert(type(id) == "number", "outbox.enqueue id: " .. tostring(id))
+    assert(outbox.stats().pending == 1, "outbox pending")
+    -- The sequence is Hull's: app SQL cannot reach it.
+    local ok = pcall(require("hull.db").default().query,
+                     "SELECT nextval('_hull_outbox_id_seq') AS v")
+    assert(not ok, "app SQL reached the stdlib's sequence")
+    print("DUCKDB STDLIB TABLES OK")
+    return 0
+end)
+LUA
+else
+cat > "$STD/app.js" <<'JS'
+import { app } from "hull:app";
+import { auditLog } from "hull:web:middleware:audit-log";
+import { outbox } from "hull:web:middleware:outbox";
+import { db } from "hull:db";
+app.manifest({
+    modules: ["hull/db@1", "hull/web/middleware/audit-log@1",
+              "hull/web/middleware/outbox@1"],
+    fs: { read: ["data/"], write: ["data/"] },
+});
+app.main(() => {
+    for (let i = 0; i < 2; i++) {
+        auditLog.init({ fingerprintSalt: "e2e-duckdb-salt", cleanup: false });
+        outbox.init();
+    }
+    auditLog.record("u1", "login", null,
+        { ip: "192.0.2.1", user_agent: "e2e", fingerprint: "fp1" });
+    auditLog.record("u1", "logout", null,
+        { ip: "192.0.2.1", user_agent: "e2e", fingerprint: "fp1" });
+    const rows = auditLog.list("u1");
+    if (rows.length !== 2) throw new Error("auditLog.list: " + rows.length);
+    const id = outbox.enqueue({ kind: "webhook", destination: "https://example.invalid/h",
+                                payload: "{}" });
+    if (typeof id !== "number" && typeof id !== "bigint")
+        throw new Error("outbox.enqueue id: " + id);
+    if (outbox.stats().pending !== 1) throw new Error("outbox pending");
+    let reached = true;
+    try { db.default().query("SELECT nextval('_hull_outbox_id_seq') AS v"); }
+    catch (e) { reached = false; }
+    if (reached) throw new Error("app SQL reached the stdlib's sequence");
+    console.log("DUCKDB STDLIB TABLES OK");
+    return 0;
+});
+JS
+fi
+STD_BUILD=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$STD/bin" "$STD" 2>&1) || true
+echo "$STD_BUILD" | grep -q "composed feature 'duckdb'" || { echo "$STD_BUILD"; echo "FAIL: $RT stdlib app not composed"; exit 1; }
+STD_OUT=$(cd "$STD" && ./bin --hull-d duckdb://data/s.duckdb 2>&1) || true
+echo "$STD_OUT" | tail -5
+rm -rf "$STD"
+echo "$STD_OUT" | grep -q "DUCKDB STDLIB TABLES OK" || { echo "$STD_BUILD" | tail -20; echo "$STD_OUT"; echo "FAIL: $RT stdlib audit-log / outbox tables on DuckDB"; exit 1; }
+echo "ok  $RT: audit-log + outbox tables created on DuckDB with a Hull-owned sequence"
+done
 
 echo "=== a long DuckDB query is stopped by the run's instruction budget ==="
 # Audit 15: the statement ran inside one duckdb_execute_prepared call, which no

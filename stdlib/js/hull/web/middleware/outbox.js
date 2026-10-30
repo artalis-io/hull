@@ -70,6 +70,20 @@ function delaySecs(v) {
     return Math.ceil(n);
 }
 
+// The id column's DDL. DuckDB has no inline identity column: its
+// identityColumn template names a sequence (`nextval('%s')`) that
+// identitySequence creates, and the raw template referenced a sequence
+// literally named %s. The sequence is Hull's (`_hull_...`), so app SQL
+// cannot reach it (audit 37). Every other backend's DDL is inline.
+function idColumnDdl(seq) {
+    const d = db.dialect;
+    if (d && typeof d.identitySequence === "string") {
+        db.exec(d.identitySequence.replace("%s", seq));
+        return d.identityColumn.replace("%s", seq);
+    }
+    return db.autoincrementIdDdl;
+}
+
 /**
  * Initialize the `_hull_outbox` SQLite table. Idempotent.
  *
@@ -83,7 +97,7 @@ function init(opts) {
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_outbox (" +
-        "  id              " + db.autoincrementIdDdl + "," +
+        "  id              " + idColumnDdl("_hull_outbox_id_seq") + "," +
         "  kind            TEXT NOT NULL," +
         "  destination     TEXT NOT NULL," +
         "  payload         TEXT NOT NULL," +
