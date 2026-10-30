@@ -13674,6 +13674,15 @@ static int lgpu_has(int device, const char *kind, const char *name)
     return 0;
 }
 
+/* The test shader declares the storage bindings the dispatches below make:
+ * every binding is checked against the shader's declarations (audit 35). */
+#define HL_TEST_GPU_WGSL \
+    "@group(0) @binding(0) var<storage, read_write> a: array<u32>; " \
+    "@group(0) @binding(1) var<storage, read_write> b: array<u32>; " \
+    "@group(0) @binding(2) var<storage, read_write> c: array<u32>; " \
+    "@group(0) @binding(3) var<storage, read_write> d: array<u32>; " \
+    "fn main() {}"
+
 UTEST(lua_gpu, devices_are_listed)
 {
     ASSERT_EQ(lgpu_init(2), 0);
@@ -13746,7 +13755,7 @@ UTEST(lua_gpu, an_unknown_device_is_refused)
 UTEST(lua_gpu, dispatch_reads_back_the_buffer_it_names)
 {
     ASSERT_EQ(lgpu_init(1), 0);
-    LGPU_EXPECT("assert(gpu.compile('id', 'fn main() {}')) "
+    LGPU_EXPECT("assert(gpu.compile('id', '" HL_TEST_GPU_WGSL "')) "
                 "local a = gpu.dispatch('id', { buffers = {"
                 "  { data = 'hello' }, { size = 3 } } }) "        /* default: 1 */
                 "local b = gpu.dispatch('id', { buffers = {"
@@ -13770,7 +13779,7 @@ UTEST(lua_gpu, dispatch_reads_back_the_buffer_it_names)
 UTEST(lua_gpu, compile_and_reads_take_the_device)
 {
     ASSERT_EQ(lgpu_init(2), 0);
-    LGPU_EXPECT("assert(gpu.compile('id1', 'fn main() {}', { device = 1 })) "
+    LGPU_EXPECT("assert(gpu.compile('id1', '" HL_TEST_GPU_WGSL "', { device = 1 })) "
                 "local r = gpu.dispatch('id1', { device = 1, buffers = { { data = 'one' } } }) "
                 "local _, e = gpu.dispatch('id1', { buffers = { { data = 'x' } } }) "
                 "gpu.buffer('b', 'zero') gpu.buffer('b', 'one!', { device = 1 }) "
@@ -13788,7 +13797,7 @@ UTEST(lua_gpu, compile_and_reads_take_the_device)
 
 /* gpu.load compiled on the default device whatever the opts said: a shader
  * from shaders/ could not be dispatched on another device. */
-static const char lgpu_wgsl[] = "fn main() {}";
+static const char lgpu_wgsl[] = HL_TEST_GPU_WGSL;
 static const HlEntry lgpu_shader_entries[] = {
     { "shaders/id.wgsl", (const unsigned char *)lgpu_wgsl, sizeof lgpu_wgsl - 1 },
     { 0, 0, 0 }
@@ -13814,7 +13823,7 @@ UTEST(lua_gpu, load_takes_the_device)
 UTEST(lua_gpu, a_pipeline_with_several_outputs_returns_a_list)
 {
     ASSERT_EQ(lgpu_init(1), 0);
-    LGPU_EXPECT("assert(gpu.compile('id', 'fn main() {}')) "
+    LGPU_EXPECT("assert(gpu.compile('id', '" HL_TEST_GPU_WGSL "')) "
                 "local stages = {"
                 "  { shader = 'id', buffers = { { name = 'a', data = 'xy' } } },"
                 "  { shader = 'id', buffers = { { name = 'a' }, { data = 'zz' } } } } "
@@ -13835,7 +13844,7 @@ UTEST(lua_gpu, read_backs_past_the_heap_limit_are_refused)
 {
     ASSERT_EQ(lgpu_init(1), 0);
     LGPU_EXPECT("gpu.buffer('big', string.rep('x', 8 << 20)) "
-                "assert(gpu.compile('id', 'fn main() {}')) "
+                "assert(gpu.compile('id', '" HL_TEST_GPU_WGSL "')) "
                 "collectgarbage() R = 'ok'", "ok");
     size_t saved = lua_rt.mem_limit;
     lua_rt.mem_limit = lua_rt.mem_used + (1u << 20);

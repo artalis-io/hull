@@ -212,6 +212,20 @@ UTEST(hull_cap_gpu, a_failed_dispatch_flushes_its_uploads)
         "    data[id.x] = data[id.x] * 2u;\n"
         "}\n";
     ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "double", wgsl, strlen(wgsl)));
+    /* The failing calls bind a texture the shader declares, so the
+     * dispatch layer's binding check passes them (audit 35) and the
+     * backend fails after the upload, on the texture lookup. */
+    const char *wgsl_tex =
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "@group(0) @binding(1) var tex: texture_2d<f32>;\n"
+        "@group(0) @binding(2) var smp: sampler;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    let c = textureSampleLevel(tex, smp, vec2<f32>(0.0, 0.0), 0.0);\n"
+        "    data[id.x] = data[id.x] * 2u + u32(c.x * 0.0);\n"
+        "}\n";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "double_tex", wgsl_tex,
+                                            strlen(wgsl_tex)));
 
     const size_t big_len = (size_t)4 << 20;
     void *big = calloc(1, big_len);
@@ -230,7 +244,7 @@ UTEST(hull_cap_gpu, a_failed_dispatch_flushes_its_uploads)
     for (int i = 0; i < 64; i++) {
         const char *err = NULL;
         EXPECT_EQ(HL_GPU_ERR_DISPATCH,
-                  hl_cap_gpu_dispatch(&ctx, "double", &bad, NULL, NULL, &err));
+                  hl_cap_gpu_dispatch(&ctx, "double_tex", &bad, NULL, NULL, &err));
         EXPECT_STREQ("texture_not_found", err);
     }
     free(big);
@@ -533,6 +547,306 @@ UTEST(hull_cap_gpu, texture_null_safety)
     rc = hl_cap_gpu_texture_create(&ctx, 0, "t", 0, 0,
                                     HL_GPU_TEX_RGBA8, 0, 0, 0, 0);
     ASSERT_EQ(HL_GPU_ERR_INTERNAL, rc);
+}
+
+/* ── Audit 35: bindings the shader does not declare (real device) ─────
+ *
+ * A stage with one buffer more than its WGSL declares made wgpu-native
+ * panic inside wgpuQueueSubmit ("failed to initiate panic, error 3,
+ * aborting"), killing the process. Each case below must return an error,
+ * and the next valid dispatch on the same device must still work. */
+
+static const char *A35_ONE_BUF =
+    "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+    "@compute @workgroup_size(1)\n"
+    "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+    "    data[id.x] = data[id.x] * 2u;\n"
+    "}\n";
+
+/* A valid dispatch of A35_ONE_BUF ("a35_one") after a refused call. */
+static int a35_valid_dispatch(HlGpuCtx *ctx)
+{
+    uint32_t in[4] = {1, 2, 3, 4};
+    HlGpuBufferDesc b = { .data = in, .data_len = sizeof(in),
+                          .size = sizeof(in), .binding = -1 };
+    HlGpuDispatchOpts o = { .buffers = &b, .buffer_count = 1,
+                            .workgroups = {4, 1, 1}, .output_buffer = 0,
+                            .output_texture = -1, .device = -1 };
+    void *out = NULL;
+    size_t len = 0;
+    const char *err = NULL;
+    int rc = hl_cap_gpu_dispatch(ctx, "a35_one", &o, &out, &len, &err);
+    int ok = rc == HL_GPU_OK && len == sizeof(in) && out &&
+             ((uint32_t *)out)[3] == 8;
+    free(out);
+    return ok;
+}
+
+static void a35_force_unknown_layout(HlGpuCtx *ctx, const char *name)
+{
+    HlGpuDevice *dev = &ctx->devices[ctx->default_device];
+    for (int i = 0; i < dev->pipeline_count; i++)
+        if (strcmp(dev->pipelines[i].name, name) == 0)
+            dev->pipelines[i].layout_known = 0;
+}
+
+UTEST(hull_cap_gpu_audit35, extra_binding_refused_device_survives)
+{
+    HlGpuCtx *ctx = calloc(1, sizeof(*ctx));
+    ASSERT_TRUE(ctx != NULL);
+    if (!gpu_test_init(ctx)) { free(ctx); ASSERT_TRUE(1); return; }
+    const char *zero = "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "a35_one", A35_ONE_BUF,
+                                            strlen(A35_ONE_BUF)));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "a35_zero", zero,
+                                            strlen(zero)));
+    ASSERT_TRUE(a35_valid_dispatch(ctx));
+
+    uint32_t in[4] = {1, 2, 3, 4};
+    HlGpuBufferDesc two[2] = {
+        { .data = in, .data_len = sizeof(in), .size = sizeof(in), .binding = -1 },
+        { .data = in, .data_len = sizeof(in), .size = sizeof(in), .binding = -1 },
+    };
+    const char *err = NULL;
+    void *out = NULL;
+    size_t len = 0;
+
+    /* gpu.pipeline: one buffer too many (the reported crash). */
+    HlGpuPipelineStage st = { .shader = "a35_one", .buffers = two,
+                              .buffer_count = 2, .workgroups = {4, 1, 1} };
+    HlGpuPipelineOpts po = { .stages = &st, .stage_count = 1, .device = -1 };
+    HlGpuPipelineResult res;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &po, &res, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    /* gpu.dispatch: the same. */
+    HlGpuDispatchOpts o = { .buffers = two, .buffer_count = 2,
+                            .workgroups = {4, 1, 1}, .output_buffer = 0,
+                            .output_texture = -1, .device = -1 };
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+              hl_cap_gpu_dispatch(ctx, "a35_one", &o, &out, &len, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    EXPECT_TRUE(out == NULL);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    /* A shader with no bindings at all, given one. */
+    o.buffer_count = 1;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+              hl_cap_gpu_dispatch(ctx, "a35_zero", &o, &out, &len, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    st.shader = "a35_zero";
+    st.buffer_count = 1;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &po, &res, &err));
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    /* Uniforms where the shader declares a storage buffer at 0. */
+    static const uint32_t uni[4] = {1, 2, 3, 4};
+    o.uniforms = uni;
+    o.uniforms_len = sizeof(uni);
+    o.buffer_count = 0;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+              hl_cap_gpu_dispatch(ctx, "a35_one", &o, &out, &len, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    hl_cap_gpu_destroy(ctx);
+    free(ctx);
+}
+
+/* The backend's own guard, with the source-level check out of the way: a
+ * layout the reader could not follow, and a declared binding the entry
+ * point never uses (WGSL drops it from the auto layout, so the source says
+ * 2 bindings and the pipeline has 1). wgpu reports the invalid bind group
+ * through the error callback; the backend must not submit it. */
+UTEST(hull_cap_gpu_audit35, backend_refuses_invalid_bind_group)
+{
+    HlGpuCtx *ctx = calloc(1, sizeof(*ctx));
+    ASSERT_TRUE(ctx != NULL);
+    if (!gpu_test_init(ctx)) { free(ctx); ASSERT_TRUE(1); return; }
+    const char *unused =
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "@group(0) @binding(1) var<storage, read_write> spare: array<u32>;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    data[id.x] = data[id.x] + 1u;\n"
+        "}\n";
+    const char *zero = "@compute @workgroup_size(1) fn main() {}";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "a35_one", A35_ONE_BUF,
+                                            strlen(A35_ONE_BUF)));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "a35_unused", unused,
+                                            strlen(unused)));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "a35_zero", zero,
+                                            strlen(zero)));
+    a35_force_unknown_layout(ctx, "a35_one");
+    a35_force_unknown_layout(ctx, "a35_zero");
+
+    uint32_t in[4] = {1, 2, 3, 4};
+    HlGpuBufferDesc two[2] = {
+        { .data = in, .data_len = sizeof(in), .size = sizeof(in), .binding = -1 },
+        { .data = in, .data_len = sizeof(in), .size = sizeof(in), .binding = -1 },
+    };
+    const char *err = NULL;
+    void *out = NULL;
+    size_t len = 0;
+    HlGpuDispatchOpts o = { .buffers = two, .buffer_count = 2,
+                            .workgroups = {4, 1, 1}, .output_buffer = 0,
+                            .output_texture = -1, .device = -1 };
+    const char *shaders[3] = { "a35_one", "a35_unused", "a35_zero" };
+    for (int k = 0; k < 3; k++) {
+        o.buffer_count = k == 2 ? 1 : 2;
+        err = NULL;
+        EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+                  hl_cap_gpu_dispatch(ctx, shaders[k], &o, &out, &len, &err));
+        EXPECT_STREQ("binding_mismatch", err);
+        EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+        HlGpuPipelineStage st = { .shader = shaders[k], .buffers = two,
+                                  .buffer_count = o.buffer_count,
+                                  .workgroups = {4, 1, 1} };
+        HlGpuPipelineOpts po = { .stages = &st, .stage_count = 1, .device = -1 };
+        HlGpuPipelineResult res;
+        err = NULL;
+        EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &po, &res, &err));
+        EXPECT_STREQ("binding_mismatch", err);
+        EXPECT_TRUE(a35_valid_dispatch(ctx));
+    }
+
+    /* Too few: the shader uses binding 0, the call binds nothing at it. A
+     * pipeline stage with no buffers sets no bind group; the pass fails
+     * validation at the encoder's finish, never at the submit. */
+    HlGpuPipelineStage st0 = { .shader = "a35_one", .buffer_count = 0,
+                               .workgroups = {4, 1, 1} };
+    HlGpuPipelineOutput none_out = { .stage = 0, .buffer = 0 };
+    HlGpuPipelineOpts po0 = { .stages = &st0, .stage_count = 1,
+                              .outputs = &none_out,
+                              .output_count = HL_GPU_OUTPUT_NONE, .device = -1 };
+    HlGpuPipelineResult res0;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &po0, &res0, &err));
+    EXPECT_STREQ("gpu_validation_error", err);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    hl_cap_gpu_destroy(ctx);
+    free(ctx);
+}
+
+/* Device limits Hull's own caps allow past: refused with a named error
+ * before wgpu sees them (each was an invalid object, then an abort in the
+ * queue call that used it). */
+UTEST(hull_cap_gpu_audit35, device_limits_refused_before_wgpu)
+{
+    HlGpuCtx *ctx = calloc(1, sizeof(*ctx));
+    ASSERT_TRUE(ctx != NULL);
+    if (!gpu_test_init(ctx)) { free(ctx); ASSERT_TRUE(1); return; }
+    const char *uni_wgsl =
+        "struct U { k: u32 };\n"
+        "@group(0) @binding(0) var<uniform> u: U;\n"
+        "@group(0) @binding(1) var<storage, read_write> data: array<u32>;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    data[id.x] = data[id.x] * u.k;\n"
+        "}\n";
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "a35_one", A35_ONE_BUF,
+                                            strlen(A35_ONE_BUF)));
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "a35_uni", uni_wgsl,
+                                            strlen(uni_wgsl)));
+
+    uint32_t in[4] = {1, 2, 3, 4};
+    HlGpuBufferDesc b = { .data = in, .data_len = sizeof(in),
+                          .size = sizeof(in), .binding = -1 };
+    HlGpuDispatchOpts o = { .buffers = &b, .buffer_count = 1,
+                            .workgroups = {1u << 20, 1, 1},
+                            .output_buffer = -1, .output_texture = -1,
+                            .device = -1 };
+    const char *err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+              hl_cap_gpu_dispatch(ctx, "a35_one", &o, NULL, NULL, &err));
+    EXPECT_STREQ("workgroups_exceed_limit", err);
+    HlGpuPipelineStage st = { .shader = "a35_one", .buffers = &b,
+                              .buffer_count = 1, .workgroups = {1, 1u << 20, 1} };
+    HlGpuPipelineOpts po = { .stages = &st, .stage_count = 1,
+                             .output_count = HL_GPU_OUTPUT_NONE, .device = -1 };
+    HlGpuPipelineResult res;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &po, &res, &err));
+    EXPECT_STREQ("workgroups_exceed_limit", err);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    /* Uniforms past maxUniformBufferBindingSize (64 KiB by default). */
+    size_t big = (size_t)1 << 20;
+    void *ubig = calloc(1, big);
+    ASSERT_TRUE(ubig != NULL);
+    o.workgroups = (HlGpuWorkgroups){4, 1, 1};
+    o.uniforms = ubig;
+    o.uniforms_len = big;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+              hl_cap_gpu_dispatch(ctx, "a35_uni", &o, NULL, NULL, &err));
+    EXPECT_STREQ("uniforms_too_large", err);
+    free(ubig);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    /* A persistent buffer bound with a larger size than it has. */
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "a35_p", 16,
+                                                  HL_GPU_USAGE_READWRITE));
+    HlGpuBufferDesc pb = { .name = "a35_p", .size = 64, .binding = -1 };
+    HlGpuDispatchOpts po2 = { .buffers = &pb, .buffer_count = 1,
+                              .workgroups = {4, 1, 1}, .output_buffer = -1,
+                              .output_texture = -1, .device = -1 };
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+              hl_cap_gpu_dispatch(ctx, "a35_one", &po2, NULL, NULL, &err));
+    EXPECT_STREQ("buffer_size_mismatch", err);
+    st = (HlGpuPipelineStage){ .shader = "a35_one", .buffers = &pb,
+                               .buffer_count = 1, .workgroups = {4, 1, 1} };
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &po, &res, &err));
+    EXPECT_STREQ("buffer_size_mismatch", err);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    /* An inline storage buffer past maxStorageBufferBindingSize. */
+    HlGpuBufferDesc huge = { .size = (size_t)512 << 20, .binding = -1 };
+    o.uniforms = NULL;
+    o.uniforms_len = 0;
+    o.buffers = &huge;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH,
+              hl_cap_gpu_dispatch(ctx, "a35_one", &o, NULL, NULL, &err));
+    EXPECT_STREQ("buffer_too_large", err);
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    /* A persistent buffer past maxBufferSize (the live cap is 1 GiB) was an
+     * invalid buffer that "succeeded"; its first write aborted. Either it is
+     * refused, or the device really takes it and the write works. */
+    int rc = hl_cap_gpu_buffer_create(ctx, -1, "a35_big", (size_t)768 << 20,
+                                      HL_GPU_USAGE_READWRITE);
+    if (rc == HL_GPU_OK) {
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_write(ctx, -1, "a35_big", in,
+                                                     sizeof(in), 0));
+        hl_cap_gpu_buffer_destroy(ctx, -1, "a35_big");
+    }
+    /* Likewise a texture past maxTextureDimension2D (8192 by default; Hull
+     * admits 16384). */
+    rc = hl_cap_gpu_texture_create(ctx, -1, "a35_wide", 16384, 4,
+                                   HL_GPU_TEX_R8, 0, 0, 0, 0);
+    if (rc == HL_GPU_OK) {
+        uint8_t *px = calloc(16384, 4);
+        ASSERT_TRUE(px != NULL);
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_texture_write(ctx, -1, "a35_wide",
+                                                      px, 16384 * 4));
+        free(px);
+        hl_cap_gpu_texture_destroy(ctx, -1, "a35_wide");
+    }
+    EXPECT_TRUE(a35_valid_dispatch(ctx));
+
+    hl_cap_gpu_buffer_destroy(ctx, -1, "a35_p");
+    hl_cap_gpu_destroy(ctx);
+    free(ctx);
 }
 
 #else /* !HL_ENABLE_GPU */
@@ -1342,6 +1656,200 @@ UTEST(hull_cap_gpu_audit35, a_refused_write_is_still_counted)
     EXPECT_EQ(HL_GPU_ERR_BUFFER, hl_cap_gpu_buffer_write(ctx, -1, "a", px, 64, 0));
     EXPECT_EQ((size_t)64, ctx->devices[0].queued_write_bytes);
     hl_cap_gpu_buffer_destroy(ctx, -1, "a");
+    mock_free(ctx);
+}
+
+/* ── Audit 35: the shader's declared layout (no device needed) ────────
+ *
+ * wgpu-native aborts the process on a submit whose bind group failed
+ * validation, so the dispatch layer checks every binding a call makes
+ * against the `@group(0) @binding(N)` declarations read at compile. */
+
+static HlGpuPipeline a35_pipe;
+
+static int a35_layout(const char *wgsl)
+{
+    memset(&a35_pipe, 0, sizeof(a35_pipe));
+    return hl_gpu_wgsl_layout(wgsl, strlen(wgsl), &a35_pipe);
+}
+
+static const HlGpuBindingDecl *a35_decl(int binding)
+{
+    for (int i = 0; i < a35_pipe.decl_count; i++)
+        if (a35_pipe.decls[i].binding == binding)
+            return &a35_pipe.decls[i];
+    return NULL;
+}
+
+UTEST(hull_cap_gpu_audit35, wgsl_layout_reads_declarations)
+{
+    ASSERT_EQ(0, a35_layout(
+        "// @group(0) @binding(9) var<storage> commented: array<u32>;\n"
+        "/* nested /* @group(0) @binding(8) var<uniform> c: u32; */ */\n"
+        "struct U { k: u32, @size(16) pad: u32 };\n"
+        "@group(0) @binding(0) var<uniform> u: U;\n"
+        "@binding(1) @group(0) var<storage, read_write> a: array<u32>;\n"
+        "@group(0)\n  @binding(0x2) var<storage,read> b: array<f32>;\n"
+        "@group(0) @binding(3u) var t: texture_2d<f32>;\n"
+        "@group(0) @binding(4i) var s: sampler;\n"
+        "@group(0) @binding(5) var o: texture_storage_2d<r32float, write>;\n"
+        "@group(1) @binding(0) var<storage> other_group: array<u32>;\n"
+        "alias Img = texture_2d<f32>;\n"
+        "@group(0) @binding(6) var img: Img;\n"
+        "@group(0) @binding(7) var cube: texture_cube<f32>;\n"
+        "var<private> p: u32;\n"
+        "var<workgroup> w: array<u32, 64>;\n"
+        "@compute @workgroup_size(8, 8)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    var local = 1u;\n"
+        "}\n"));
+    EXPECT_EQ(1, a35_pipe.layout_known);
+    EXPECT_EQ(8, a35_pipe.decl_count);
+    ASSERT_TRUE(a35_decl(0) && a35_decl(1) && a35_decl(2) && a35_decl(3));
+    ASSERT_TRUE(a35_decl(4) && a35_decl(5) && a35_decl(6) && a35_decl(7));
+    EXPECT_EQ(HL_GPU_BIND_UNIFORM, a35_decl(0)->kind);
+    EXPECT_EQ(HL_GPU_BIND_STORAGE, a35_decl(1)->kind);
+    EXPECT_EQ(HL_GPU_BIND_STORAGE, a35_decl(2)->kind);
+    EXPECT_EQ(HL_GPU_BIND_TEXTURE, a35_decl(3)->kind);
+    EXPECT_EQ(HL_GPU_BIND_SAMPLER, a35_decl(4)->kind);
+    EXPECT_EQ(HL_GPU_BIND_STORAGE_TEXTURE, a35_decl(5)->kind);
+    EXPECT_EQ(HL_GPU_TEX_R32F, a35_decl(5)->format);
+    EXPECT_EQ(HL_GPU_BIND_UNKNOWN, a35_decl(6)->kind);
+    EXPECT_EQ(HL_GPU_BIND_OTHER, a35_decl(7)->kind);
+    EXPECT_TRUE(a35_decl(8) == NULL);   /* in a comment */
+    EXPECT_TRUE(a35_decl(9) == NULL);
+
+    /* No bindings at all is a known, empty layout. */
+    ASSERT_EQ(0, a35_layout("@compute @workgroup_size(1) fn main() {}"));
+    EXPECT_EQ(1, a35_pipe.layout_known);
+    EXPECT_EQ(0, a35_pipe.decl_count);
+}
+
+UTEST(hull_cap_gpu_audit35, wgsl_layout_unknown_when_not_followed)
+{
+    /* A const-expression index: the reader cannot evaluate it. */
+    EXPECT_EQ(-1, a35_layout(
+        "const B = 1;\n@group(0) @binding(B) var<storage> a: array<u32>;\n"));
+    EXPECT_EQ(0, a35_pipe.layout_known);
+    /* group / binding not followed by a var. */
+    EXPECT_EQ(-1, a35_layout("@group(0) @binding(0) fn f() {}"));
+    EXPECT_EQ(-1, a35_layout("@group(0) var<storage> a: array<u32>;"));
+    EXPECT_EQ(-1, a35_layout("@group(0) @binding(0)"));
+    /* A duplicate binding (WGSL itself refuses it). */
+    EXPECT_EQ(-1, a35_layout(
+        "@group(0) @binding(0) var<storage> a: array<u32>;\n"
+        "@group(0) @binding(0) var<storage> b: array<u32>;\n"));
+    EXPECT_EQ(-1, a35_layout("@group(0) @binding(99999999999) var<storage> a: u32;"));
+    EXPECT_EQ(-1, hl_gpu_wgsl_layout(NULL, 0, &a35_pipe));
+    EXPECT_EQ(0, a35_pipe.layout_known);
+}
+
+UTEST(hull_cap_gpu_audit35, bindings_check_matches_hull_assignment)
+{
+    const char *err = NULL;
+    HlGpuBufferDesc bufs[3];
+    memset(bufs, 0, sizeof(bufs));
+    HlGpuTextureDesc texs[2];
+    memset(texs, 0, sizeof(texs));
+
+    /* One storage buffer declared. */
+    ASSERT_EQ(0, a35_layout("@group(0) @binding(0) var<storage, read_write> d: array<u32>;"));
+    EXPECT_EQ(0, hl_gpu_bindings_check(&a35_pipe, NULL, 0, bufs, 1, NULL, 0, &err));
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 0, bufs, 2, NULL, 0, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    /* Uniforms take binding 0, which is a storage buffer here. */
+    err = NULL;
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 1, bufs, 0, NULL, 0, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    /* A texture where nothing is declared. */
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 0, bufs, 1, texs, 1, &err));
+    /* Fewer than declared is left to the backend (WGSL drops unused ones). */
+    ASSERT_EQ(0, a35_layout(
+        "@group(0) @binding(0) var<storage> a: array<u32>;\n"
+        "@group(0) @binding(1) var<storage> b: array<u32>;\n"));
+    EXPECT_EQ(0, hl_gpu_bindings_check(&a35_pipe, NULL, 0, bufs, 1, NULL, 0, &err));
+
+    /* uniform + 2 buffers + a sampled texture + a storage texture. */
+    ASSERT_EQ(0, a35_layout(
+        "@group(0) @binding(0) var<uniform> u: vec4<f32>;\n"
+        "@group(0) @binding(1) var<storage> a: array<u32>;\n"
+        "@group(0) @binding(2) var<storage, read_write> b: array<u32>;\n"
+        "@group(0) @binding(3) var t: texture_2d<f32>;\n"
+        "@group(0) @binding(4) var s: sampler;\n"
+        "@group(0) @binding(5) var o: texture_storage_2d<rgba8unorm, write>;\n"));
+    texs[0].storage = 0;
+    texs[1].storage = 1;
+    texs[1].format = HL_GPU_TEX_RGBA8;
+    EXPECT_EQ(0, hl_gpu_bindings_check(&a35_pipe, NULL, 1, bufs, 2, texs, 2, &err));
+    /* Without the uniforms everything shifts down one: mismatched kinds. */
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 0, bufs, 2, texs, 2, &err));
+    /* A third buffer lands on the texture's binding. */
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 1, bufs, 3, texs, 2, &err));
+    /* The storage texture's format must be the declared one. */
+    texs[1].format = HL_GPU_TEX_R32F;
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 1, bufs, 2, texs, 2, &err));
+    texs[1].format = HL_GPU_TEX_RGBA8;
+    /* Storage / sampled swapped. */
+    texs[0].storage = 1;
+    texs[1].storage = 0;
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 1, bufs, 2, texs, 2, &err));
+
+    /* An alias-typed handle accepts a texture or a sampler, never a buffer. */
+    ASSERT_EQ(0, a35_layout(
+        "alias T = texture_2d<f32>; alias S = sampler;\n"
+        "@group(0) @binding(0) var t: T;\n@group(0) @binding(1) var s: S;\n"));
+    texs[0].storage = 0;
+    EXPECT_EQ(0, hl_gpu_bindings_check(&a35_pipe, NULL, 0, NULL, 0, texs, 1, &err));
+    EXPECT_EQ(-1, hl_gpu_bindings_check(&a35_pipe, NULL, 0, bufs, 1, NULL, 0, &err));
+
+    /* An unknown layout passes: the backend validates. */
+    a35_pipe.layout_known = 0;
+    EXPECT_EQ(0, hl_gpu_bindings_check(&a35_pipe, NULL, 0, bufs, 3, NULL, 0, &err));
+}
+
+/* Through hl_cap_gpu_dispatch / _pipeline: a mismatched call never reaches
+ * the backend. */
+UTEST(hull_cap_gpu_audit35, mismatch_refused_before_backend)
+{
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    mock_add_shader(ctx, "one");
+    HlGpuPipeline *p = &ctx->devices[0].pipelines[0];
+    const char *wgsl = "@group(0) @binding(0) var<storage, read_write> d: array<u32>;\n"
+                       "@compute @workgroup_size(1) fn main() { d[0] = 1u; }\n";
+    ASSERT_EQ(0, hl_gpu_wgsl_layout(wgsl, strlen(wgsl), p));
+    mock_dispatches = 0;
+
+    HlGpuBufferDesc bufs[2] = {
+        { .size = 16, .binding = -1 }, { .size = 16, .binding = -1 },
+    };
+    HlGpuDispatchOpts o = { .buffers = bufs, .buffer_count = 2,
+                            .output_buffer = -1, .output_texture = -1,
+                            .device = -1 };
+    const char *err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_dispatch(ctx, "one", &o, NULL, NULL, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    EXPECT_EQ(0, mock_dispatches);
+    EXPECT_EQ((size_t)0, ctx->devices[0].live_bytes);
+
+    HlGpuPipelineStage st[2] = {
+        { .shader = "one", .buffers = bufs, .buffer_count = 1 },
+        { .shader = "one", .buffers = bufs, .buffer_count = 2 },
+    };
+    HlGpuPipelineOpts po = { .stages = st, .stage_count = 2,
+                             .output_count = HL_GPU_OUTPUT_NONE, .device = -1 };
+    HlGpuPipelineResult res;
+    err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_DISPATCH, hl_cap_gpu_pipeline(ctx, &po, &res, &err));
+    EXPECT_STREQ("binding_mismatch", err);
+    EXPECT_EQ(0, mock_dispatches);
+
+    /* The matching calls go through. */
+    o.buffer_count = 1;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_dispatch(ctx, "one", &o, NULL, NULL, &err));
+    st[1].buffer_count = 1;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_pipeline(ctx, &po, &res, &err));
+    EXPECT_EQ(2, mock_dispatches);
     mock_free(ctx);
 }
 

@@ -109,7 +109,16 @@ static WGPUStringView sv(const char *s)
  * inline buffer grew past 1.5 GB (audit 35). Submit them now, before the
  * call's buffers are destroyed, and wait (bounded). A wait that timed out
  * or was stopped turns the call into a timeout, so the cap layer marks the
- * device stalled - the staging is still held by running work. */
+ * device stalled - the staging is still held by running work.
+ *
+ * This runs on the paths the queue guard refused too (wgpu_invalid: an
+ * invalid layout, bind group or command buffer after the uploads were
+ * queued). The flush is still safe there: wgpu_flush_writes clears the
+ * error flag and submits only a fresh EMPTY command buffer, checked on its
+ * own, which references none of the call's objects; the pending writes it
+ * carries target only buffers / textures that were checked valid before
+ * each write was queued (a write is never made once the flag is set), and
+ * none of them is destroyed until after this flush. */
 static void flush_unsubmitted(HlGpuDevice *dev, int staged, int submitted,
                               uint32_t timeout_ms, int *rc,
                               const char **err_msg)
@@ -127,6 +136,14 @@ typedef struct WgpuDeviceCtx {
     WGPUAdapter adapter;
     WGPUDevice  device;
     WGPUQueue   queue;
+    /* The device's limits (wgpuDeviceGetLimits at enumeration, else the
+     * WebGPU defaults): a size, dimension or workgroup count past one is
+     * refused before wgpu sees it (audit 35). */
+    uint64_t max_buffer_size;
+    uint64_t max_storage_binding;
+    uint64_t max_uniform_binding;
+    uint32_t max_texture_2d;
+    uint32_t max_workgroups;
 } WgpuDeviceCtx;
 
 typedef struct WgpuBackendCtx {
@@ -138,8 +155,49 @@ typedef struct WgpuBackendCtx {
 /* ── Error handlers (suppress wgpu-native's default panic handler) ── */
 
 /* Track last uncaptured error per-device for shader compilation.
- * wgpu-native surfaces errors via callback, not NULL returns. */
+ * wgpu-native surfaces errors via callback, not NULL returns.
+ *
+ * The callback fires on the calling thread, inside the wgpu call that
+ * found the error, so this flag is what a validation error turns into -
+ * for the device-level calls (create buffer / texture / bind group /
+ * layout, encoder finish). It is NOT for the queue calls: wgpu-native
+ * sends a wgpuQueueSubmit / wgpuQueueWriteBuffer / wgpuQueueWriteTexture
+ * error through handle_error_fatal, a Rust panic that cannot unwind out
+ * of the C API, so the process aborts ("failed to initiate panic") and no
+ * callback or error scope ever sees it (audit 35: a gpu.pipeline stage
+ * with one buffer more than its shader declares killed the process). So
+ * every queue call here is made only once the flag shows nothing invalid
+ * reached it (wgpu_invalid), and every object it touches was checked when
+ * it was made. */
 static _Thread_local int wgpu_last_error;
+
+/* An error was reported since the flag was cleared: nothing it touched
+ * may reach the queue. */
+static int wgpu_invalid(void)
+{
+    return wgpu_last_error != 0;
+}
+
+/* The WebGPU default limits, used when the device's cannot be read. */
+#define HL_WGPU_DEF_MAX_BUFFER        ((uint64_t)256 << 20)
+#define HL_WGPU_DEF_MAX_STORAGE_BIND  ((uint64_t)128 << 20)
+#define HL_WGPU_DEF_MAX_UNIFORM_BIND  ((uint64_t)64 << 10)
+#define HL_WGPU_DEF_MAX_TEXTURE_2D    8192u
+#define HL_WGPU_DEF_MAX_WORKGROUPS    65535u
+
+/* A dispatch's workgroup counts (0 runs as 1) within the device's
+ * per-dimension limit: past it the pass fails validation (audit 35). */
+static int wgpu_workgroups_ok(const WgpuDeviceCtx *d, HlGpuWorkgroups w)
+{
+    return w.x <= d->max_workgroups && w.y <= d->max_workgroups &&
+           w.z <= d->max_workgroups;
+}
+
+/* A storage buffer of @p n bytes can be made and bound whole. */
+static int wgpu_storage_size_ok(const WgpuDeviceCtx *d, uint64_t n)
+{
+    return n <= d->max_buffer_size && n <= d->max_storage_binding;
+}
 
 static void on_uncaptured_error(WGPUDevice const *device,
                                  WGPUErrorType type,
@@ -258,6 +316,7 @@ static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
     if (want > SIZE_MAX - 3) return HL_GPU_ERR_READBACK;
     size_t size = (want + 3) & ~(size_t)3;
     if (size == 0) size = 4;
+    if (size > dctx->max_buffer_size) return HL_GPU_ERR_READBACK;
     wgpu_last_error = 0;
 
     /* Create staging buffer for MapRead */
@@ -284,6 +343,16 @@ static int readback_buffer(WgpuDeviceCtx *dctx, WGPUBuffer src,
     WGPUCommandBufferDescriptor cmd_desc = { .label = sv("hull_readback_cmd") };
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, &cmd_desc);
     if (!cmd) {
+        wgpuCommandEncoderRelease(encoder);
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return HL_GPU_ERR_READBACK;
+    }
+
+    /* An invalid copy (or staging buffer) aborts the process at the submit
+     * (audit 35). */
+    if (wgpu_invalid()) {
+        wgpuCommandBufferRelease(cmd);
         wgpuCommandEncoderRelease(encoder);
         wgpuBufferDestroy(staging);
         wgpuBufferRelease(staging);
@@ -497,6 +566,26 @@ static int wgpu_enumerate_devices(HlGpuCtx *ctx,
         dctx->adapter = adapters[i];
         dctx->device = req.device;
         dctx->queue = queue;
+        dctx->max_buffer_size     = HL_WGPU_DEF_MAX_BUFFER;
+        dctx->max_storage_binding = HL_WGPU_DEF_MAX_STORAGE_BIND;
+        dctx->max_uniform_binding = HL_WGPU_DEF_MAX_UNIFORM_BIND;
+        dctx->max_texture_2d      = HL_WGPU_DEF_MAX_TEXTURE_2D;
+        dctx->max_workgroups      = HL_WGPU_DEF_MAX_WORKGROUPS;
+        {
+            WGPULimits lim = {0};
+            if (wgpuDeviceGetLimits(req.device, &lim) == WGPUStatus_Success) {
+                if (lim.maxBufferSize)
+                    dctx->max_buffer_size = lim.maxBufferSize;
+                if (lim.maxStorageBufferBindingSize)
+                    dctx->max_storage_binding = lim.maxStorageBufferBindingSize;
+                if (lim.maxUniformBufferBindingSize)
+                    dctx->max_uniform_binding = lim.maxUniformBufferBindingSize;
+                if (lim.maxTextureDimension2D)
+                    dctx->max_texture_2d = lim.maxTextureDimension2D;
+                if (lim.maxComputeWorkgroupsPerDimension)
+                    dctx->max_workgroups = lim.maxComputeWorkgroupsPerDimension;
+            }
+        }
 
         bctx->device_ctxs[count] = dctx;
 
@@ -656,6 +745,18 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
         if (err_msg) *err_msg = "too_many_bindings";
         return HL_GPU_ERR_DISPATCH;
     }
+    /* Past a device limit wgpu fails validation, and the submit aborts the
+     * process (audit 35): refused here, with the limit named. */
+    if (!wgpu_workgroups_ok(dctx, opts->workgroups)) {
+        if (err_msg) *err_msg = "workgroups_exceed_limit";
+        return HL_GPU_ERR_DISPATCH;
+    }
+    if (has_uniforms &&
+        (opts->uniforms_len > dctx->max_uniform_binding ||
+         ((opts->uniforms_len + 15) & ~(size_t)15) > dctx->max_uniform_binding)) {
+        if (err_msg) *err_msg = "uniforms_too_large";
+        return HL_GPU_ERR_DISPATCH;
+    }
 
     /* Allocate entry arrays */
     WGPUBindGroupEntry *entries = calloc((size_t)total_bindings,
@@ -684,7 +785,8 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             .size  = usize,
         };
         uniform_buf = wgpuDeviceCreateBuffer(dctx->device, &ub_desc);
-        if (!uniform_buf) {
+        /* A write to a buffer wgpu refused to make aborts (audit 35). */
+        if (!uniform_buf || wgpu_invalid()) {
             if (err_msg) *err_msg = "uniform_buffer_create_failed";
             goto cleanup;
         }
@@ -726,13 +828,23 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
         }
 
         if (!gpu_buf) {
-            /* Create temporary buffer */
+            /* Create temporary buffer: at least one word, since the entry
+             * below binds at least 4 bytes - a zero-size buffer under a
+             * 4-byte binding failed validation (audit 35). */
             size_t buf_size = desc->size;
-            if (buf_size == 0 && desc->data)
-                buf_size = 1;
+            if (buf_size > SIZE_MAX - 3) {
+                if (err_msg) *err_msg = "buffer_too_large";
+                goto cleanup;
+            }
 
             /* Align to 4 bytes */
             buf_size = (buf_size + 3) & ~(size_t)3;
+            if (buf_size == 0)
+                buf_size = 4;
+            if (!wgpu_storage_size_ok(dctx, (uint64_t)buf_size)) {
+                if (err_msg) *err_msg = "buffer_too_large";
+                goto cleanup;
+            }
 
             WGPUBufferDescriptor buf_desc = {
                 .label = sv("hull_storage"),
@@ -742,11 +854,11 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                 .size  = buf_size,
             };
             gpu_buf = wgpuDeviceCreateBuffer(dctx->device, &buf_desc);
-            if (!gpu_buf) {
+            if (gpu_buf) temp_bufs[temp_count++] = gpu_buf;
+            if (!gpu_buf || wgpu_invalid()) {   /* see the uniform buffer */
                 if (err_msg) *err_msg = "buffer_create_failed";
                 goto cleanup;
             }
-            temp_bufs[temp_count++] = gpu_buf;
 
             /* Upload initial data if present */
             if (desc->data) staged = 1;
@@ -769,6 +881,26 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             ? (uint64_t)((effective_size + 3) & ~(size_t)3) : (uint64_t)effective_size;
         if (buf_size_aligned == 0)
             buf_size_aligned = 4;
+        /* A persistent buffer bound with a larger size than it has, or any
+         * binding past the device's storage-binding limit, fails wgpu's
+         * bind-group validation (audit 35). */
+        for (int p = 0; desc->name && persistent_buffers &&
+                        p < persistent_count; p++) {
+            if ((WGPUBuffer)persistent_buffers[p].handle == gpu_buf) {
+                size_t have = persistent_buffers[p].size;
+                uint64_t have_aligned = have <= SIZE_MAX - 3
+                    ? (uint64_t)((have + 3) & ~(size_t)3) : (uint64_t)have;
+                if (buf_size_aligned > have_aligned) {
+                    if (err_msg) *err_msg = "buffer_size_mismatch";
+                    goto cleanup;
+                }
+                break;
+            }
+        }
+        if (!wgpu_storage_size_ok(dctx, buf_size_aligned)) {
+            if (err_msg) *err_msg = "buffer_too_large";
+            goto cleanup;
+        }
 
         entries[i + binding_offset] = (WGPUBindGroupEntry){
             .binding = binding,
@@ -869,10 +1001,14 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
          * when there are no bind groups). */
         WGPUBindGroupLayout layout = (WGPUBindGroupLayout)pipeline->bind_group_layout;
         if (!layout) {
+            wgpu_last_error = 0;
             layout = wgpuComputePipelineGetBindGroupLayout(
                 (WGPUComputePipeline)pipeline->handle, 0);
-            if (!layout) {
-                if (err_msg) *err_msg = "bind_group_layout_failed";
+            /* A shader with no group 0 has no layout to give: wgpu reports
+             * it and returns an invalid one, which is not cached. */
+            if (!layout || wgpu_invalid()) {
+                if (layout) wgpuBindGroupLayoutRelease(layout);
+                if (err_msg) *err_msg = "binding_mismatch";
                 goto cleanup;
             }
             pipeline->bind_group_layout = layout;
@@ -884,9 +1020,12 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             .entryCount = (size_t)total_bindings,
             .entries = entries,
         };
+        wgpu_last_error = 0;
         bind_group = wgpuDeviceCreateBindGroup(dctx->device, &bg_desc);
-        if (!bind_group) {
-            if (err_msg) *err_msg = "bind_group_create_failed";
+        /* The bindings did not match the layout: the submit would abort the
+         * process (audit 35). */
+        if (!bind_group || wgpu_invalid()) {
+            if (err_msg) *err_msg = "binding_mismatch";
             goto cleanup;
         }
     }
@@ -936,6 +1075,13 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
     {
         uint32_t timeout = (opts->timeout_ms > 0) ? opts->timeout_ms : HL_GPU_TIMEOUT_MS;
         if (timeout < 10) timeout = 10;  /* floor: 10ms */
+        /* An invalid pass or command buffer is a panic inside
+         * wgpuQueueSubmit, which aborts the process: never submitted
+         * (audit 35). */
+        if (wgpu_invalid()) {
+            if (err_msg) *err_msg = "gpu_validation_error";
+            goto cleanup;
+        }
         wgpuQueueSubmit(dctx->queue, 1, &cmd);
         submitted = 1;
         if (gpu_poll_with_timeout(dctx->device, timeout) != 0) {
@@ -1051,7 +1197,14 @@ static int wgpu_buffer_create(HlGpuDevice *dev, const char *name,
     (void)usage;
 
     /* Align to 4 bytes */
+    if (size > SIZE_MAX - 3)
+        return HL_GPU_ERR_BUFFER;
     size = (size + 3) & ~(size_t)3;
+    /* Past maxBufferSize wgpu makes an invalid buffer that "succeeded";
+     * the first gpu.buffer write to it then aborted the process inside
+     * wgpuQueueWriteBuffer (audit 35). */
+    if ((uint64_t)size > dctx->max_buffer_size)
+        return HL_GPU_ERR_BUFFER;
 
     WGPUBufferDescriptor desc = {
         .label = sv("hull_persistent"),
@@ -1061,9 +1214,15 @@ static int wgpu_buffer_create(HlGpuDevice *dev, const char *name,
         .size  = size,
     };
 
+    wgpu_last_error = 0;
     WGPUBuffer buf = wgpuDeviceCreateBuffer(dctx->device, &desc);
-    if (!buf)
+    if (!buf || wgpu_invalid()) {
+        if (buf) {
+            wgpuBufferDestroy(buf);
+            wgpuBufferRelease(buf);
+        }
         return HL_GPU_ERR_BUFFER;
+    }
 
     out->handle = buf;
     return HL_GPU_OK;
@@ -1191,6 +1350,9 @@ static WGPUBuffer find_or_create_temp(WgpuDeviceCtx *dctx,
     /* Create new temp buffer */
     size_t aligned = size <= SIZE_MAX - 3 ? (size + 3) & ~(size_t)3 : size;
     if (aligned == 0) aligned = 4;
+    /* Past the device's limits wgpu makes an invalid buffer, and the
+     * upload to it aborts the process (audit 35). */
+    if (!wgpu_storage_size_ok(dctx, (uint64_t)aligned)) return NULL;
 
     WGPUBufferDescriptor desc = {
         .label = sv("hull_pipe_buf"),
@@ -1206,6 +1368,8 @@ static WGPUBuffer find_or_create_temp(WgpuDeviceCtx *dctx,
         map[*map_count] = (TempBufEntry){ name, buf, aligned };
         (*map_count)++;
     }
+    /* Recorded first, so the caller's cleanup destroys it. */
+    if (wgpu_invalid()) return NULL;
     return buf;
 }
 
@@ -1305,6 +1469,17 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
             if (err_msg) *err_msg = "too_many_bindings";
             goto cleanup;
         }
+        /* As wgpu_dispatch: device limits refused before wgpu (audit 35). */
+        if (!wgpu_workgroups_ok(dctx, stage->workgroups)) {
+            if (err_msg) *err_msg = "workgroups_exceed_limit";
+            goto cleanup;
+        }
+        if (has_uniforms &&
+            (stage->uniforms_len > dctx->max_uniform_binding ||
+             ((stage->uniforms_len + 15) & ~(size_t)15) > dctx->max_uniform_binding)) {
+            if (err_msg) *err_msg = "uniforms_too_large";
+            goto cleanup;
+        }
 
         WGPUBindGroupEntry *entries = &all_entries[entry_count];
 
@@ -1317,7 +1492,7 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 .size  = usize,
             };
             uniform_bufs[s] = wgpuDeviceCreateBuffer(dctx->device, &ub_desc);
-            if (!uniform_bufs[s]) {
+            if (!uniform_bufs[s] || wgpu_invalid()) {   /* see wgpu_dispatch */
                 if (err_msg) *err_msg = "uniform_buffer_create_failed";
                 goto cleanup;
             }
@@ -1381,19 +1556,39 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
              * must not write past, so bound the upload by the real one. */
             size_t upload_cap = alloc_size <= SIZE_MAX - 3
                 ? (alloc_size + 3) & ~(size_t)3 : alloc_size;
-            for (int p = 0; p < persistent_count; p++) {
+            for (int p = 0; persistent_buffers && p < persistent_count; p++) {
                 if (persistent_buffers[p].handle == (void *)gpu_buf) {
                     if (persistent_buffers[p].size < upload_cap)
                         upload_cap = persistent_buffers[p].size;
                     break;
                 }
             }
-            if (desc->data) staged = 1;
-            upload_initial(dctx->queue, gpu_buf, upload_cap, desc);
 
             size_t buf_aligned = alloc_size <= SIZE_MAX - 3
                 ? (alloc_size + 3) & ~(size_t)3 : alloc_size;
             if (buf_aligned == 0) buf_aligned = 4;
+            /* A persistent buffer bound larger than it is fails the bind
+             * group's validation (audit 35; see wgpu_dispatch). Refused
+             * before the upload, so a refused call writes nothing. */
+            for (int p = 0; persistent_buffers && p < persistent_count; p++) {
+                if (persistent_buffers[p].handle == (void *)gpu_buf) {
+                    size_t have = persistent_buffers[p].size;
+                    size_t have_aligned = have <= SIZE_MAX - 3
+                        ? (have + 3) & ~(size_t)3 : have;
+                    if (buf_aligned > have_aligned) {
+                        if (err_msg) *err_msg = "buffer_size_mismatch";
+                        goto cleanup;
+                    }
+                    break;
+                }
+            }
+            if (!wgpu_storage_size_ok(dctx, (uint64_t)buf_aligned)) {
+                if (err_msg) *err_msg = "buffer_too_large";
+                goto cleanup;
+            }
+
+            if (desc->data) staged = 1;
+            upload_initial(dctx->queue, gpu_buf, upload_cap, desc);
 
             /* Track for readback */
             if (s < HL_GPU_MAX_PIPELINE_STAGES && b < 16) {
@@ -1462,10 +1657,14 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
         /* Get bind group layout (lazy) */
         WGPUBindGroupLayout layout = (WGPUBindGroupLayout)pipelines[s]->bind_group_layout;
         if (!layout && total_bindings > 0) {
+            wgpu_last_error = 0;
             layout = wgpuComputePipelineGetBindGroupLayout(
                 (WGPUComputePipeline)pipelines[s]->handle, 0);
-            if (!layout) {
-                if (err_msg) *err_msg = "bind_group_layout_failed";
+            /* As wgpu_dispatch: an invalid layout is neither used nor
+             * cached (audit 35). */
+            if (!layout || wgpu_invalid()) {
+                if (layout) wgpuBindGroupLayoutRelease(layout);
+                if (err_msg) *err_msg = "binding_mismatch";
                 goto cleanup;
             }
             pipelines[s]->bind_group_layout = layout;
@@ -1478,9 +1677,12 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                 .entryCount = (size_t)total_bindings,
                 .entries = entries,
             };
+            wgpu_last_error = 0;
             bind_groups[s] = wgpuDeviceCreateBindGroup(dctx->device, &bg_desc);
-            if (!bind_groups[s]) {
-                if (err_msg) *err_msg = "bind_group_create_failed";
+            /* An invalid bind group aborts the process at the submit
+             * (audit 35). */
+            if (!bind_groups[s] || wgpu_invalid()) {
+                if (err_msg) *err_msg = "binding_mismatch";
                 goto cleanup;
             }
         }
@@ -1540,6 +1742,10 @@ static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
     {
         uint32_t timeout = (opts->timeout_ms > 0) ? opts->timeout_ms : HL_GPU_TIMEOUT_MS;
         if (timeout < 10) timeout = 10;  /* floor: 10ms */
+        if (wgpu_invalid()) {           /* never submitted (audit 35) */
+            if (err_msg) *err_msg = "gpu_validation_error";
+            goto cleanup;
+        }
         wgpuQueueSubmit(dctx->queue, 1, &cmd);
         submitted = 1;
         if (gpu_poll_with_timeout(dctx->device, timeout) != 0) {
@@ -1707,6 +1913,12 @@ static int wgpu_texture_create(HlGpuDevice *dev, uint32_t width,
     WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !dctx->device)
         return HL_GPU_ERR_DEVICE;
+    /* Hull admits 16384, the device may take less (WebGPU's default is
+     * 8192): an invalid texture's upload aborted the process inside
+     * wgpuQueueWriteTexture (audit 35). */
+    if (width == 0 || height == 0 ||
+        width > dctx->max_texture_2d || height > dctx->max_texture_2d)
+        return HL_GPU_ERR_BUFFER;
 
     WGPUTextureUsage usage = WGPUTextureUsage_CopyDst | WGPUTextureUsage_CopySrc;
     if (storage)
@@ -1832,6 +2044,11 @@ static int texture_read_wait(HlGpuDevice *dev, HlGpuTexture *tex,
     /* 256-byte alignment required by WebGPU for buffer-to-texture copies */
     uint32_t aligned_row = (row_bytes + 255) & ~(uint32_t)255;
     size_t staging_size = (size_t)aligned_row * tex->height;
+    /* A staging buffer past maxBufferSize is invalid, and the copy into it
+     * aborted the process at the submit (audit 35). */
+    if ((uint64_t)staging_size > dctx->max_buffer_size)
+        return HL_GPU_ERR_READBACK;
+    wgpu_last_error = 0;
 
     /* Create staging buffer */
     WGPUBufferDescriptor staging_desc = {
@@ -1879,7 +2096,13 @@ static int texture_read_wait(HlGpuDevice *dev, HlGpuTexture *tex,
         return HL_GPU_ERR_READBACK;
     }
 
-    wgpu_last_error = 0;
+    if (wgpu_invalid()) {           /* never submitted (audit 35) */
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(encoder);
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return HL_GPU_ERR_READBACK;
+    }
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
     int waited = gpu_poll_with_timeout(dctx->device, timeout_ms);
 
@@ -1994,6 +2217,11 @@ static int wgpu_buffer_copy(HlGpuDevice *dev,
         return HL_GPU_ERR_INTERNAL;
     }
 
+    if (wgpu_invalid()) {           /* never submitted (audit 35) */
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(encoder);
+        return HL_GPU_ERR_BUFFER;
+    }
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
     int poll_rc = gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS);
 
@@ -2025,6 +2253,7 @@ static int wgpu_flush_writes(HlGpuDevice *dev, uint32_t timeout_ms)
 {
     WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !dctx->device) return HL_GPU_OK;
+    wgpu_last_error = 0;
     WGPUCommandEncoderDescriptor enc_desc = { .label = sv("hull_flush_enc") };
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
         dctx->device, &enc_desc);
@@ -2032,6 +2261,11 @@ static int wgpu_flush_writes(HlGpuDevice *dev, uint32_t timeout_ms)
     WGPUCommandBufferDescriptor cmd_desc = { .label = sv("hull_flush_cmd") };
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, &cmd_desc);
     if (!cmd) {
+        wgpuCommandEncoderRelease(encoder);
+        return HL_GPU_ERR_INTERNAL;
+    }
+    if (wgpu_invalid()) {           /* never submitted (audit 35) */
+        wgpuCommandBufferRelease(cmd);
         wgpuCommandEncoderRelease(encoder);
         return HL_GPU_ERR_INTERNAL;
     }

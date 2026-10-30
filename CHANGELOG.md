@@ -681,6 +681,29 @@ release-artifact layout).
   1000, and `max_total_size` the server body limit (`-b`, 1 MB by default) raised to fit one
   `max_part_size` part. Unlimited is no longer offered; a route that needs more sets an
   explicit value (one taking several big files sets `max_total_size`).
+- **A GPU dispatch or pipeline stage whose bindings did not match its shader aborted the
+  process (audit 35)**: wgpu-native reports a bad bind group through its error callback but
+  sends a `wgpuQueueSubmit` / `wgpuQueueWriteBuffer` / `wgpuQueueWriteTexture` error through
+  a Rust panic that cannot unwind out of its C API ("fatal runtime error: failed to initiate
+  panic, error 3, aborting"), so a `gpu.pipeline` stage passing one buffer more than its WGSL
+  declares killed the whole Hull process. `hull build --with=gpu` / `HL_ENABLE_GPU` builds
+  only. Every binding a `gpu.dispatch` / `gpu.pipeline` call makes (sync and async; uniforms
+  at 0, then buffers, then textures) is now checked against the shader's
+  `@group(0) @binding(N)` declarations, read from the WGSL at compile
+  (`hl_gpu_wgsl_layout` / `hl_gpu_bindings_check`): count, index, kind (uniform / storage /
+  sampled texture / sampler / storage texture) and a storage texture's format, refused as
+  `binding_mismatch` before wgpu sees it. As defence in depth the wgpu backend never makes a
+  queue call after an error was reported - an invalid bind group, layout, buffer, texture or
+  command buffer is refused (`binding_mismatch` / `gpu_validation_error`) instead of
+  submitted - and refuses the device limits Hull's own caps allow past before wgpu does:
+  workgroup counts over `maxComputeWorkgroupsPerDimension` (`workgroups_exceed_limit`),
+  uniforms over `maxUniformBufferBindingSize` (`uniforms_too_large`), a storage binding over
+  `maxStorageBufferBindingSize` (`buffer_too_large`), a persistent buffer over
+  `maxBufferSize` or a texture over `maxTextureDimension2D` (an invalid object that
+  "succeeded", whose first write aborted), and a persistent buffer bound larger than it is
+  (`buffer_size_mismatch`). A zero-size inline buffer is now made one word long. The
+  `gpu_texture` example's shader now uses the sampler it declares (WGSL drops an unused one
+  from the layout, so the example's dispatch was one of these aborts).
 - **`gpu.texture(name, nil, { device = N })` / `gpu.texture(name, null, { device: N })`
   destroyed the texture on the default device**, and so did JS `gpu.buffer(name, null,
   { device: N })`: the destroy branch ran before `opts.device` was read. A multi-GPU app
