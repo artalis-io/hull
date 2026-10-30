@@ -125,6 +125,14 @@ app.main(function()
         "SELECT * FROM pragma_show(concat('us', 'ers'))",
         "SELECT * FROM histogram(concat('us', 'ers'), name)",
         "CALL enable_logging(level = 'debug')",
+        -- Audit 36: a catalog / schema qualifier hid the macro's name from
+        -- the table-position check, and DuckDB ran it.
+        "SELECT * FROM main.histogram(concat('us', 'ers'), name)",
+        "SELECT * FROM system.main.histogram(concat('us', 'ers'), name)",
+        "SELECT * FROM main.\"histogram\"(concat('us', 'ers'), name)",
+        "SELECT * FROM main /* c */ . histogram(concat('us', 'ers'), name)",
+        "SELECT * FROM main.pragma_table_info(concat('us', 'ers'))",
+        "CALL system.main.pragma_storage_info('users')",
     }) do
         local ok, err = pcall(f.query, sql)
         assert(not ok and tostring(err):find("plain literal or name", 1, true),
@@ -134,6 +142,16 @@ app.main(function()
     assert(#f.query("SELECT * FROM pragma_table_info('users')") == 2)
     assert(#f.query("PRAGMA table_info(users)") == 2)
     assert(#f.query("SELECT histogram(n) AS h FROM users") == 1)
+    -- A qualified macro with a plain source, and a qualified table, run.
+    assert(#f.query("SELECT * FROM main.histogram(users, n)") >= 1)
+    assert(#f.query("SELECT * FROM main.users") >= 2)
+    for _, sql in ipairs({
+        "SELECT * FROM system.main.query_table(concat('us', 'ers'))",
+        "SELECT * FROM main.\"query\"('SELECT 1')",
+    }) do
+        local ok = pcall(f.query, sql)
+        assert(not ok, "qualified dynamic SQL not refused: " .. sql)
+    end
     print("DUCKDB FEATURE APP OK")
     return 0
 end)

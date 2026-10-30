@@ -222,6 +222,21 @@ release-artifact layout).
   leaving the rest pending. Codes documented under "Runtime refusal codes" in
   docs/app_api_reference.md; covered by `tests/e2e_refusal_codes.sh` (both runtimes).
 
+- **A schema-qualified `histogram` read a DuckDB table named at run time** (audit 36, both
+  runtimes). Audit 35 counted `histogram` as the table macro only in table position, but the
+  table-position check read just the word after `FROM` / `JOIN` / `,` / `(`, so a catalog or
+  schema qualifier hid it: `SELECT * FROM main.histogram('_hu' || 'll_sessions', sid)` (also
+  `system.main.histogram(...)`, `main."histogram"(...)`) passed every Hull DuckDB check and
+  returned the `_hull_` table's rows - the name is built at run time, so the lexical
+  `_hull_*` check never saw it. The check now reads past any qualifier chain (bare or
+  quoted names, any depth, comments around the dots) to the function name it qualifies, so
+  the qualified forms are refused like `FROM histogram(...)`; `PRAGMA x.show = ...` is read
+  the same way. The other checked names (`pragma_table_info`, `query_table`, `read_*`, ...)
+  are matched wherever they appear and were already refused qualified; tests now pin that.
+  The audit 35 columns and aggregates stay allowed, and the chain read is charged to the
+  scan's budget, so the scan stays linear. Covered by `test_db`, `test_db_duckdb` and
+  `tests/e2e_feature_duckdb.sh`.
+
 - **GPU uploads with no dispatch grew device memory without bound; a stalled device still
   took reads, copies and writes** (audit 34). wgpu copies each `gpu.buffer` / `gpu.texture`
   upload into a staging buffer it frees only when a later queue submission completes, and no
