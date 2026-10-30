@@ -297,8 +297,15 @@ void hl_db_dynamic_close(HlDbHandle *h)
         g_dynamic[i] = NULL;
         atomic_store(&g_dynamic_id[i], 0);
     }
+    /* Closing a handle inside a transaction ends that transaction: the
+     * generation changes, as for every other end (audit 37). Noted after
+     * the close with the backend cleared, so hl_db_in_txn reads 0 instead
+     * of asking a closed connection. */
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     if (h->backend)
         h->backend->close(h);
+    h->backend = NULL;
+    hl_db_txn_note(h, was, NULL);
     free(h);
 }
 

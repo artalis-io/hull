@@ -757,15 +757,30 @@ its remaining statements autocommitted and its COMMIT "succeeded" (audit 35).
 So the tag names the TRANSACTION, not the run (audit 36): each thread keeps a
 transaction generation (`hl_db_txn_gen`, `cap/db_backend.h`) that the db
 wrappers change whenever a transaction starts or ends on any connection
-(`hl_db_txn_note`: `hl_db_in_txn` before vs after, plus a statement that may end
-one and open the next - COMMIT AND CHAIN, a multi-statement text; savepoints do
-not count). `coroutine.resume` / a `coroutine.wrap` call (`hl_lua_co_check`,
+(`hl_db_txn_note`: `hl_db_in_txn` before vs after, plus - still inside one - whether
+a transaction ended in between: from the backend's `txn_seq` counter where it has
+one (SQLite, by commit / rollback hooks), else from the text, any statement that
+may end one and open the next - COMMIT AND CHAIN, a multi-statement text;
+savepoints do not count; closing a `db.open` handle or the registry inside one
+counts as its end; audit 37). `coroutine.resume` / a `coroutine.wrap` call (`hl_lua_co_check`,
 `runtime/lua/async.c`) records in the coroutine's extra space which transaction,
 if any, is open as it starts; Hull's `coroutine.yield` tags it with the current
 generation only when it yields inside a transaction it opened itself (a yield
 inside the resumer's still-open transaction - a generator consumed in each
 request's `db.batch` - leaves no tag); and resume / close / wrap refuse a tagged
-coroutine once that transaction is no longer the open one. A run id was not
+coroutine once that transaction is no longer the open one. A coroutine resumed
+inside its OWN still-open transaction keeps its tag (audit 37: rewritten to
+"resumed", its next yield cleared it, so a second yield left it untagged), and
+`coroutine.resume` / a wrap call check again after the stack growth that can run
+a `__gc`, right before `lua_resume`. Accepted limits: a coroutine resumed inside
+the RESUMER's transaction yields untagged, so if the guard later rolls that
+transaction back, the coroutine's writes after its next resume autocommit (kept
+so a generator consumed inside each request's `db.batch` works); the generation
+is per thread, not per connection, so a transaction started or ended on ANOTHER
+connection between resumes refuses a coroutine holding its own (conservative);
+and on Postgres / MySQL / DuckDB (no `txn_seq`) a multi-statement text or a
+COMMIT / BEGIN-kind statement inside a consumer's batch changes the generation
+too, refusing a generator kept across requests from then on. A run id was not
 enough: it changed only at the next arm, so app code between an entry's closing
 guard and the next entry (an error object's `__tostring`, a `__gc` finalizer)
 resumed into the rolled-back transaction; and tagging every yield inside any

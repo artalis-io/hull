@@ -209,6 +209,15 @@ typedef struct HlDbBackend {
      * (treated as 0). Used to refuse a wait while a transaction is open on a
      * shared connection (hl_db_registry_open_txn) and by hl_db_batch_*. */
     int    (*in_txn)(HlDbHandle *h);
+
+    /* A per-connection counter that changes whenever a transaction ENDS on
+     * the connection (commit or rollback, however it was asked for: a
+     * COMMIT inside a multi-statement text, COMMIT AND CHAIN, a failure
+     * that rolled the transaction back). 0 = not tracked on this
+     * connection. No I/O. With it, hl_db_txn_note tells "still the same
+     * transaction" from what actually happened instead of from the SQL
+     * text (audit 37). NULL = not tracked (the text heuristic applies). */
+    uint64_t (*txn_seq)(HlDbHandle *h);
 } HlDbBackend;
 
 struct HlDbHandle {
@@ -247,14 +256,34 @@ static inline int hl_db_in_txn(HlDbHandle *h)
  * yielded inside is still open (runtime/lua/async.c), whenever app code
  * resumes it. Conservative by design: an extra change only refuses more.
  */
+/* A connection's transaction state before a call: whether it was inside
+ * one, and its txn_seq (0 = not tracked). */
+typedef struct {
+    int      in_txn;
+    uint64_t seq;
+} HlDbTxnSnap;
+
+static inline uint64_t hl_db_txn_seq(HlDbHandle *h)
+{
+    if (!h || !h->backend || !h->backend->txn_seq) return 0;
+    return h->backend->txn_seq(h);
+}
+
+static inline HlDbTxnSnap hl_db_txn_snap(HlDbHandle *h)
+{
+    HlDbTxnSnap s = { hl_db_in_txn(h), 0 };
+    if (s.in_txn) s.seq = hl_db_txn_seq(h);
+    return s;
+}
+
 #ifdef HL_ENABLE_DB
 uint64_t hl_db_txn_gen(void);
-void     hl_db_txn_note(HlDbHandle *h, int was_in_txn, const char *sql);
+void     hl_db_txn_note(HlDbHandle *h, HlDbTxnSnap before, const char *sql);
 #else
 static inline uint64_t hl_db_txn_gen(void) { return 0; }
-static inline void hl_db_txn_note(HlDbHandle *h, int was_in_txn,
+static inline void hl_db_txn_note(HlDbHandle *h, HlDbTxnSnap before,
                                   const char *sql)
-{ (void)h; (void)was_in_txn; (void)sql; }
+{ (void)h; (void)before; (void)sql; }
 #endif
 
 static inline int hl_db_query(HlDbHandle *h, const char *sql,
@@ -264,7 +293,7 @@ static inline int hl_db_query(HlDbHandle *h, const char *sql,
 {
     if (!h || !h->backend) return -1;
     h->batch_err = NULL;
-    int was = hl_db_in_txn(h);
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     int rc = h->backend->query(h, sql, params, nparams,
                                cb, cb_ctx, alloc);
     hl_db_txn_note(h, was, sql);
@@ -276,7 +305,7 @@ static inline int hl_db_exec(HlDbHandle *h, const char *sql,
 {
     if (!h || !h->backend) return -1;
     h->batch_err = NULL;
-    int was = hl_db_in_txn(h);
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     int rc = h->backend->exec(h, sql, params, nparams);
     hl_db_txn_note(h, was, sql);
     return rc;
@@ -287,7 +316,7 @@ static inline int hl_db_exec(HlDbHandle *h, const char *sql,
 static inline int hl_db_exec_script(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->backend || !h->backend->exec_script) return -1;
-    int was = hl_db_in_txn(h);
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     int rc = h->backend->exec_script(h, sql);
     hl_db_txn_note(h, was, sql);
     return rc;
@@ -296,7 +325,7 @@ static inline int hl_db_exec_script(HlDbHandle *h, const char *sql)
 static inline int hl_db_begin(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    int was = hl_db_in_txn(h);
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     int rc = h->backend->begin(h);
     hl_db_txn_note(h, was, NULL);
     return rc;
@@ -305,7 +334,7 @@ static inline int hl_db_begin(HlDbHandle *h)
 static inline int hl_db_commit(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    int was = hl_db_in_txn(h);
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     int rc = h->backend->commit(h);
     hl_db_txn_note(h, was, NULL);
     return rc;
@@ -314,7 +343,7 @@ static inline int hl_db_commit(HlDbHandle *h)
 static inline int hl_db_rollback(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    int was = hl_db_in_txn(h);
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     int rc = h->backend->rollback(h);
     hl_db_txn_note(h, was, NULL);
     return rc;
@@ -341,7 +370,7 @@ static inline const char *hl_db_errmsg(HlDbHandle *h)
 static inline void hl_db_guard_stale_txn(HlDbHandle *h)
 {
     if (!h || !h->backend) return;
-    int was = hl_db_in_txn(h);
+    HlDbTxnSnap was = hl_db_txn_snap(h);
     if (h->backend->guard_stale_txn) h->backend->guard_stale_txn(h);
     hl_db_txn_note(h, was, NULL);
     h->batch_depth = 0;

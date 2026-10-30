@@ -8397,6 +8397,119 @@ UTEST(lua_audit36, a_generator_consumed_inside_each_runs_batch_keeps_working)
     ASSERT_STREQ(out, "ok");
 }
 
+/* Audit 37: round 36 rewrote a still-matching "yielded in its own
+ * transaction" tag to "resumed inside a transaction" on every resume, and the
+ * next yield then took the transaction for the resumer's and cleared the tag.
+ * A coroutine that did BEGIN, yielded, was resumed and yielded again lost its
+ * tag; once the guard rolled the transaction back, a later run resumed it and
+ * its later statements autocommitted. */
+UTEST(lua_audit37, a_coroutine_yielding_twice_in_its_txn_is_refused_later)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE dy (x INTEGER)')\n"
+        "local own = coroutine.create(function()\n"
+        "  db.exec('BEGIN') db.exec('INSERT INTO dy VALUES (1)')\n"
+        "  coroutine.yield() coroutine.yield()\n"
+        "  db.exec('INSERT INTO dy VALUES (2)') end)\n"
+        "require('hull._task').spawn(function()\n"
+        "  assert(coroutine.resume(own)) assert(coroutine.resume(own)) end)\n"
+        "hull.sleep(20)\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n"
+        "local ok, e = pcall(coroutine.resume, own)\n"
+        "check(not ok and tostring(e):find('since ended', 1, true), 'resume: '..tostring(e))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM dy')[1].n == 0, 'rows')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* Any number of yields inside the coroutine's own transaction keeps the tag,
+ * a coroutine nested inside it does not disturb it, and inside the run the
+ * coroutine still resumes and commits normally. */
+UTEST(lua_audit37, a_coroutine_keeps_its_tag_across_many_yields)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE my (x INTEGER)')\n"
+        "local function worker(n, commit)\n"
+        "  return coroutine.create(function()\n"
+        "    db.exec('BEGIN')\n"
+        "    for i = 1, n do\n"
+        "      db.exec('INSERT INTO my VALUES (?)', {i})\n"
+        "      local inner = coroutine.create(function() coroutine.yield() end)\n"
+        "      assert(coroutine.resume(inner))\n"
+        "      coroutine.yield(i)\n"
+        "    end\n"
+        "    if commit then db.exec('COMMIT') end end)\n"
+        "end\n"
+        "local done = worker(4, true)\n"
+        "local left = worker(4, false)\n"
+        "require('hull._task').spawn(function()\n"
+        "  for _ = 1, 5 do assert(coroutine.resume(done)) end\n"
+        "  for _ = 1, 4 do assert(coroutine.resume(left)) end end)\n"
+        "hull.sleep(20)\n"
+        "check(coroutine.status(done) == 'dead', 'the committing worker finished')\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM my')[1].n == 4, 'its 4 rows')\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n"
+        "local ok, e = pcall(coroutine.resume, left)\n"
+        "check(not ok and tostring(e):find('since ended', 1, true), 'resume: '..tostring(e))\n"
+        "ok, e = pcall(coroutine.close, left)\n"
+        "check(not ok and tostring(e):find('since ended', 1, true), 'close: '..tostring(e))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM my')[1].n == 4, 'no autocommitted row')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* coroutine.wrap goes through the same check. */
+UTEST(lua_audit37, a_wrapped_coroutine_yielding_twice_is_refused_later)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE wy (x INTEGER)')\n"
+        "local f = coroutine.wrap(function()\n"
+        "  db.exec('BEGIN') db.exec('INSERT INTO wy VALUES (1)')\n"
+        "  coroutine.yield() coroutine.yield() coroutine.yield()\n"
+        "  db.exec('INSERT INTO wy VALUES (2)') end)\n"
+        "require('hull._task').spawn(function() f() f() f() end)\n"
+        "hull.sleep(20)\n"
+        "local ok, e = pcall(f)\n"
+        "check(not ok and tostring(e):find('since ended', 1, true), 'wrap: '..tostring(e))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM wy')[1].n == 0, 'rows')\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
+/* A generator consumed inside each run's db.batch that runs a multi-statement
+ * text or a refused transaction statement keeps working: SQLite reports
+ * transaction ends (txn_seq), so the generation is not changed by the text
+ * alone (audit 37; it was bumped for any text that could end one). */
+UTEST(lua_audit37, a_generator_running_multi_statement_sql_in_a_batch_keeps_working)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE ms (x INTEGER)')\n"
+        "local gen = coroutine.wrap(function() local i = 0\n"
+        "  while true do i = i + 1\n"
+        "    db.exec('INSERT INTO ms VALUES (1); INSERT INTO ms VALUES (0)')\n"
+        "    pcall(db.exec, 'BEGIN')\n"   /* refused inside the batch */
+        "    coroutine.yield(i) end end)\n"
+        "for r = 1, 3 do\n"
+        "  local v\n"
+        "  db.batch(function() v = gen() end)\n"
+        "  check(v == r, 'run '..r..': '..tostring(v))\n"
+        "  hull.sleep(5)\n"
+        "end\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM ms')[1].n == 3, 'rows '..db.query('SELECT COUNT(*) AS n FROM ms')[1].n)\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
 /* Stdlib-only, and it needs a loop; a task that never got its turn is freed
  * with the VM. */
 UTEST(lua_task, stdlib_only_needs_a_loop_and_is_freed_unrun)
