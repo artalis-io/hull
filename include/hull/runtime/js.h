@@ -348,6 +348,15 @@ void hl_js_reset_request(HlJS *js);
 void hl_js_budget_arm(HlJS *js);
 void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind);
 
+/* Audit 35: the end of every JS entry (the list is at the definition in
+ * runtime/js/async.c - the app's module top level included, audit 36).
+ * Rolls back a transaction still open - as the bare stale guard did - and,
+ * when there was one, fails the entry's run tag (js->entry_tag), so a
+ * reaction the run left on a promise Hull does not drive never runs. Call
+ * it in place of hl_db_registry_guard_stale_txns at every way out of an
+ * entry, after the entry's drain. 1 = there was one. */
+int hl_js_entry_end_txn_check(HlJS *js);
+
 /* Why the run tripped: "instruction limit exceeded", or
  * HL_RUN_TIME_LIMIT_MSG when its wall-clock deadline passed. */
 const char *hl_js_trip_reason(const HlJS *js);

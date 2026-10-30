@@ -127,6 +127,17 @@ release-artifact layout).
   statements, and the `import_database` / `export_database` / `copy_database` pragma names,
   under every file policy (`hl_cap_db_sql_reads_whole_database`, read like the audit-25
   dynamic-SQL check: any case, comments between the words, any statement of the text).
+- **A JS app's module top level could hold a transaction across an await and commit the rest
+  in autocommit** (audit 36). The top level is an entry, but it ran under run tag 0 (never
+  failed) and never ended through `hl_js_entry_end_txn_check`. `conn.exec("BEGIN"); ...;
+  await gate; ...; conn.exec("COMMIT")` at top level, with `gate` settled by a route, left the
+  module pending at load; the code after the await ran in the drain of the request that settled
+  it, the first writes were rolled back by that request's start guard and the rest committed
+  one statement at a time. The top level now has a run tag of its own and ends through the
+  check: the transaction is rolled back at load, reported, and the code after the await never
+  runs. A top level still pending after load is logged as a WARN. The same check now ends a
+  `hull test` file's top level (an open transaction there is a load error), an agent eval and
+  template render, and the multipart resume that finds its handler already completed.
 - **A losing connect attempt left its watcher on a closed descriptor** (audit 33, `hull/ssh`
   and every other `cap/net_stream.c` stream). If a name resolved to several addresses and a
   later one won while an earlier attempt was still in flight (for example, a dual-stack host

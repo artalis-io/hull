@@ -783,6 +783,9 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
         jc->conn = NULL;
         js->active_conn = NULL;
         js->active_req  = NULL;
+        /* This resume's code ran too: it ends like every other way out of
+         * the entry (audit 35 hardening, audit 36). */
+        (void)hl_js_entry_end_txn_check(js);
         self->destroy(self);
         return;
     }

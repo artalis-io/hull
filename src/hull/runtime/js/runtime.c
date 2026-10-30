@@ -1206,6 +1206,10 @@ static int hl_js_settle_module(HlJS *js, JSValue val)
 {
     if (JS_IsException(val)) {          /* synchronous compile / link error */
         hl_js_dump_error(js);
+        if (!js->manifest_extract_lenient) {
+            (void)hl_js_entry_end_txn_check(js);   /* audit 36 */
+            hl_js_run_tag_enter(js, 0);
+        }
         return -1;
     }
 
@@ -1262,9 +1266,36 @@ static int hl_js_settle_module(HlJS *js, JSValue val)
         JS_Throw(js->ctx, reason);      /* re-arm so dump_error prints it */
         hl_js_dump_error(js);
         rc = -1;
+    } else if (JS_IsObject(val) &&
+               JS_PromiseState(js->ctx, val) == JS_PROMISE_PENDING) {
+        log_warn("[hull:c] the app's module top level has not finished: it "
+                 "awaits a promise Hull does not drive. The code after that "
+                 "await runs later, inside whatever run settles the promise; "
+                 "put startup work in app.main instead");
     }
+    /* The top level is an entry (audit 36): it ran under a run tag of its
+     * own (js_toplevel_begin), and ends like every other entry. A
+     * transaction it left open - forgotten, or held across a top-level
+     * `await gate` - is rolled back here and the tag failed, so the code
+     * after the await is never continued: run later in the drain of the
+     * request that settled `gate`, it found its transaction rolled back by
+     * that request's start guard and committed the rest one statement at a
+     * time. Then back to tag 0, as before the load, for the code Hull runs
+     * before the first entry arms its own. */
+    (void)hl_js_entry_end_txn_check(js);
+    hl_js_run_tag_enter(js, 0);
     JS_FreeValue(js->ctx, val);
     return rc;
+}
+
+/* The start of the app's module top level (audit 36): a run tag of its own,
+ * not tag 0 - tag 0 is never failed, so a reaction the top level left on a
+ * promise Hull does not drive could not be stopped. Manifest extraction (the
+ * lenient, bounded drain) evaluates no real app run. */
+static void js_toplevel_begin(HlJS *js)
+{
+    if (!js->manifest_extract_lenient)
+        hl_js_run_tag_new(js);
 }
 
 int hl_js_load_app(HlJS *js, const char *filename)
@@ -1327,6 +1358,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
                  * module's do: under the absolute entry path they missed
                  * every embedded module and were read from disk instead
                  * (audit 17, now refused). */
+                js_toplevel_begin(js);
                 JSValue val = JS_Eval(js->ctx, buf, e->len, vfs_name,
                                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
                 js->scratch->used = arena_saved;
@@ -1394,6 +1426,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     /* Evaluate as ES module. ASYNC so a deferred top-level throw / rejected
      * import is observable as a rejected eval promise (see hl_js_settle_module),
      * not silently swallowed. */
+    js_toplevel_begin(js);
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,
                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
 
@@ -1968,6 +2001,7 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
     static char load_err_buf[1024];
 
     if (JS_IsException(result)) {
+        (void)hl_js_entry_end_txn_check(js);   /* audit 36 */
         JSValue exc = JS_GetException(js->ctx);
         JSValue msg_val = JS_GetPropertyStr(js->ctx, exc, "message");
         const char *msg = JS_ToCString(js->ctx, msg_val);
@@ -1985,6 +2019,19 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
      * reported a pass, the rest silently missing (audit 22) - as for app
      * load (hl_js_settle_module), it is a load error. */
     hl_js_run_jobs(js);
+    /* The file's top level is an entry: it ends through the transaction
+     * check like every other (audit 36), so a transaction it left open -
+     * held across a top-level await a later case settles - is rolled back
+     * and the code after the await never continued. A load error: the
+     * tests it would register after the await are missing anyway. */
+    if (hl_js_entry_end_txn_check(js)) {
+        snprintf(load_err_buf, sizeof(load_err_buf), "%s",
+                 "the test file's top level left a database transaction "
+                 "open (it was rolled back)");
+        JS_FreeValue(js->ctx, result);
+        if (load_err) *load_err = load_err_buf;
+        return -1;
+    }
     if (JS_IsObject(result) &&
         JS_PromiseState(js->ctx, result) == JS_PROMISE_REJECTED) {
         JSValue reason = JS_PromiseResult(js->ctx, result);
