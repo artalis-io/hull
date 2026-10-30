@@ -255,8 +255,18 @@ size_t hl_gpu_wgsl_block_depth(const char *wgsl, size_t len);
  * as above or when its tables cannot be allocated (audit 37). */
 size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len);
 
-/* Every pre-compile check hl_cap_gpu_compile runs: size, lexing, and the
- * expression / block / type depths. 0 when the source passes; -1 with a
+/* The longest chain of module-scope declarations of @p wgsl naming one
+ * another (const, override, var, let, alias, struct, fn - a function names
+ * what its body calls and reads - and const_assert), counted in
+ * declarations, across declarations in any order; names a function
+ * declares itself shadow module-scope ones. naga orders declarations with
+ * a recursive walk, one frame per link (audit 38). A cycle counts as past
+ * HL_GPU_WGSL_DECL_CHAIN_MAX. 0 for NULL or none, HL_GPU_WGSL_UNREADABLE as
+ * above or when its tables cannot be allocated. */
+size_t hl_gpu_wgsl_decl_chain(const char *wgsl, size_t len);
+
+/* Every pre-compile check hl_cap_gpu_compile runs: size, lexing, the
+ * expression / block / type depths and the declaration chains. 0 when the source passes; -1 with a
  * short reason in *why otherwise. */
 int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why);
 

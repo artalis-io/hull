@@ -2389,4 +2389,175 @@ UTEST(hull_cap_gpu_audit37, real_device_survives)
 }
 #endif /* HL_ENABLE_GPU */
 
+/* ── audit 38: declaration reference chains ───────────────────────── */
+
+enum { A38_CONST, A38_OVERRIDE, A38_FN, A38_N };
+
+/* @p links declarations of one kind, each naming the one before (in
+ * declaration order or reversed), and an entry point naming the last:
+ * a chain of links + 1 declarations. Compact, so 50000 links fit the
+ * 1 MiB source cap. */
+static const char *a38_name(size_t i, char buf[16])
+{
+    static const char digits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    char tmp[16];
+    size_t n = 0;
+    do { tmp[n++] = digits[i % 36]; i /= 36; } while (i > 0);
+    buf[0] = 'C';
+    for (size_t k = 0; k < n; k++) buf[1 + k] = tmp[n - 1 - k];
+    buf[1 + n] = '\0';
+    return buf;
+}
+
+static char *a38_chain(int kind, size_t links, int reversed)
+{
+    size_t cap = 40 * (links + 4) + 256;
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    size_t off = 0;
+    char a[16], b[16];
+    for (size_t k = 0; k < links; k++) {
+        size_t i = reversed ? links - 1 - k : k;
+        const char *fmt0, *fmt;
+        switch (kind) {
+        case A38_CONST:    fmt0 = "const C0=1u;";      fmt = "const %s=%s;"; break;
+        case A38_OVERRIDE: fmt0 = "override C0=1u;";   fmt = "override %s=%s;"; break;
+        default:           fmt0 = "fn C0(){}";         fmt = "fn %s(){%s();}"; break;
+        }
+        if (i == 0) off += (size_t)snprintf(s + off, cap - off, "%s", fmt0);
+        else off += (size_t)snprintf(s + off, cap - off, fmt,
+                                     a38_name(i, a), a38_name(i - 1, b));
+    }
+    if (kind == A38_FN)
+        snprintf(s + off, cap - off,
+                 "\n@compute @workgroup_size(1) fn main(){%s();}\n",
+                 a38_name(links - 1, a));
+    else
+        snprintf(s + off, cap - off,
+                 "\n@group(0) @binding(0) var<storage, read_write> o: array<u32>;\n"
+                 "@compute @workgroup_size(1) fn main(){o[0]=%s;}\n",
+                 a38_name(links - 1, a));
+    return s;
+}
+
+static const size_t a38_crash_links[A38_N] = { 30000, 40000, 50000 };
+
+UTEST(hull_cap_gpu_audit38, chains_counted)
+{
+#define A38_DC(s) hl_gpu_wgsl_decl_chain(s, strlen(s))
+    EXPECT_EQ((size_t)0, hl_gpu_wgsl_decl_chain(NULL, 0));
+    EXPECT_EQ((size_t)0, A38_DC("// nothing\n"));
+    EXPECT_EQ((size_t)1, A38_DC("fn main() {}"));
+    EXPECT_EQ((size_t)2, A38_DC("const a = 1; fn main() { let x = a; }"));
+    EXPECT_EQ((size_t)3, A38_DC("fn main() { b(); } fn b() { c(); } fn c() {}"));
+    /* Attribute arguments name what they use; attribute names do not. */
+    EXPECT_EQ((size_t)2, A38_DC("override WG = 64u; "
+                                "@compute @workgroup_size(WG) fn main() {}"));
+    EXPECT_EQ((size_t)1, A38_DC("const compute = 1; @compute @workgroup_size(1) fn main() {}"));
+    /* Types, and var / let / alias / struct / const_assert. */
+    EXPECT_EQ((size_t)4, A38_DC("const N = 4u; alias V = array<f32, N>; "
+                                "struct S { v: V } var<private> g: S;"));
+    EXPECT_EQ((size_t)2, A38_DC("const N = 4; const_assert N > 1;"));
+    EXPECT_EQ((size_t)1, A38_DC("var<storage> storage: f32;"));   /* template */
+    /* Member names are not references. */
+    EXPECT_EQ((size_t)2, A38_DC("struct S { a: f32 } fn a() -> f32 { var s: S; return s.a; }"));
+    /* Shadowing: a parameter, a let in a block (to its block's end), a for
+     * header's var (to the loop's end), and an initializer seeing the
+     * outer name. None of these is a cycle. */
+    EXPECT_EQ((size_t)2, A38_DC("fn a() { let b = 1; } fn b() { a(); }"));
+    EXPECT_EQ((size_t)2, A38_DC("fn a(b: u32) -> u32 { return b; } fn b() -> u32 { return a(1u); }"));
+    EXPECT_EQ((size_t)2, A38_DC("fn b() {} fn a() { { let b = 1; } b(); }"));
+    EXPECT_EQ((size_t)2, A38_DC("fn b() {} fn a() { for (var b = 0; b < 1; b++) { } b(); }"));
+    EXPECT_EQ((size_t)2, A38_DC("const x = 1; fn a() { let x = x + 1; }"));
+    EXPECT_EQ((size_t)1, A38_DC("const b = 1; fn a() { var<function> b = 0; { let y = b; } }"));
+    /* Cycles (WGSL refuses them) count as too long. */
+    EXPECT_TRUE(A38_DC("const a = b; const b = a;") > HL_GPU_WGSL_DECL_CHAIN_MAX);
+    EXPECT_TRUE(A38_DC("fn a() { a(); }") > HL_GPU_WGSL_DECL_CHAIN_MAX);
+    EXPECT_TRUE(A38_DC("struct A { b: B } struct B { a: A }") > HL_GPU_WGSL_DECL_CHAIN_MAX);
+    /* The lexer's refusals carry over. */
+    EXPECT_EQ(HL_GPU_WGSL_UNREADABLE, A38_DC("const a = \"s\";"));
+#undef A38_DC
+}
+
+UTEST(hull_cap_gpu_audit38, chains_at_the_bound)
+{
+    for (int kind = 0; kind < A38_N; kind++) {
+        for (int rev = 0; rev <= 1; rev++) {
+            /* links + 1 declarations with the entry point. */
+            char *ok = a38_chain(kind, HL_GPU_WGSL_DECL_CHAIN_MAX - 1, rev);
+            char *over = a38_chain(kind, HL_GPU_WGSL_DECL_CHAIN_MAX, rev);
+            ASSERT_TRUE(ok && over);
+            EXPECT_EQ((size_t)HL_GPU_WGSL_DECL_CHAIN_MAX,
+                      hl_gpu_wgsl_decl_chain(ok, strlen(ok)));
+            EXPECT_EQ((size_t)HL_GPU_WGSL_DECL_CHAIN_MAX + 1,
+                      hl_gpu_wgsl_decl_chain(over, strlen(over)));
+            EXPECT_EQ(0, a37_check(ok));
+            const char *why = NULL;
+            EXPECT_EQ(-1, hl_gpu_wgsl_precheck(over, strlen(over), &why));
+            EXPECT_TRUE(why && strstr(why, "declarations"));
+            /* Every other estimate stays shallow. */
+            EXPECT_TRUE(hl_gpu_wgsl_complexity(over, strlen(over)) < 16);
+            EXPECT_TRUE(hl_gpu_wgsl_block_depth(over, strlen(over)) < 4);
+            EXPECT_TRUE(hl_gpu_wgsl_type_depth(over, strlen(over)) < 4);
+            free(ok); free(over);
+        }
+        char *crash = a38_chain(kind, a38_crash_links[kind], 1);
+        ASSERT_TRUE(crash != NULL);
+        EXPECT_TRUE(strlen(crash) <= HL_GPU_WGSL_MAX_BYTES);
+        EXPECT_EQ(-1, a37_check(crash));
+        free(crash);
+    }
+}
+
+UTEST(hull_cap_gpu_audit38, compile_refuses_before_backend)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = mock_compile;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    mock_compiles = 0;
+    for (int kind = 0; kind < A38_N; kind++) {
+        char *src = a38_chain(kind, HL_GPU_WGSL_DECL_CHAIN_MAX, 0);
+        ASSERT_TRUE(src != NULL);
+        EXPECT_EQ(HL_GPU_ERR_SHADER,
+                  hl_cap_gpu_compile(ctx, -1, "bad", src, strlen(src)));
+        free(src);
+    }
+    EXPECT_EQ(0, mock_compiles);
+    char *ok = a38_chain(A38_FN, HL_GPU_WGSL_DECL_CHAIN_MAX - 1, 1);
+    ASSERT_TRUE(ok != NULL);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "ok", ok, strlen(ok)));
+    EXPECT_EQ(1, mock_compiles);
+    free(ok);
+    mock_free(ctx);
+}
+
+#ifdef HL_ENABLE_GPU
+/* On a real device (skipped without an adapter): the chains that crashed
+ * naga are refused and the process survives; chains at the bound compile. */
+UTEST(hull_cap_gpu_audit38, real_device_survives)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+    for (int kind = 0; kind < A38_N; kind++) {
+        char name[16];
+        char *crash = a38_chain(kind, a38_crash_links[kind], 1);
+        char *over = a38_chain(kind, HL_GPU_WGSL_DECL_CHAIN_MAX, 1);
+        char *ok = a38_chain(kind, HL_GPU_WGSL_DECL_CHAIN_MAX - 1, kind == A38_FN);
+        ASSERT_TRUE(crash && over && ok);
+        snprintf(name, sizeof(name), "crash%d", kind);
+        EXPECT_EQ(HL_GPU_ERR_SHADER,
+                  hl_cap_gpu_compile(&ctx, -1, name, crash, strlen(crash)));
+        snprintf(name, sizeof(name), "over%d", kind);
+        EXPECT_EQ(HL_GPU_ERR_SHADER,
+                  hl_cap_gpu_compile(&ctx, -1, name, over, strlen(over)));
+        snprintf(name, sizeof(name), "ok%d", kind);
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, name, ok, strlen(ok)));
+        free(crash); free(over); free(ok);
+    }
+    hl_cap_gpu_destroy(&ctx);
+}
+#endif /* HL_ENABLE_GPU */
+
 UTEST_MAIN();

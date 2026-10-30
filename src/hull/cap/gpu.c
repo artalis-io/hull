@@ -1140,14 +1140,59 @@ static int wl_grow(void **p, size_t *cap, size_t need, size_t elem)
     return 0;
 }
 
-static uint64_t wl_hash(const char *s, size_t len)
+/* Names resolved by sorting (audit 38): the declarations' names are merge
+ * sorted (bottom-up, no recursion) and each reference binary-searched, so
+ * resolution is O(n log n) whatever the names are - an unseeded hash table
+ * could be filled with names that all collide. */
+typedef struct {
+    size_t start, len;
+    long idx;                 /* the declaration's index */
+} WlName;
+
+static int wl_name_cmp(const char *s, size_t as, size_t al,
+                       size_t bs, size_t bl)
 {
-    uint64_t h = 1469598103934665603ull;          /* FNV-1a */
-    for (size_t k = 0; k < len; k++) {
-        h ^= (unsigned char)s[k];
-        h *= 1099511628211ull;
+    size_t m = al < bl ? al : bl;
+    int c = memcmp(s + as, s + bs, m);
+    if (c != 0) return c;
+    return al < bl ? -1 : (al > bl ? 1 : 0);
+}
+
+/* Sort @p v (@p n entries) by name; @p tmp has room for @p n. */
+static void wl_names_sort(const char *s, WlName *v, WlName *tmp, size_t n)
+{
+    WlName *src = v, *dst = tmp;
+    for (size_t w = 1; w < n; w *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * w) {
+            size_t mid = lo + w < n ? lo + w : n;
+            size_t hi = lo + 2 * w < n ? lo + 2 * w : n;
+            size_t a = lo, b = mid, o = lo;
+            while (a < mid && b < hi)
+                dst[o++] = wl_name_cmp(s, src[b].start, src[b].len,
+                                       src[a].start, src[a].len) < 0
+                           ? src[b++] : src[a++];
+            while (a < mid) dst[o++] = src[a++];
+            while (b < hi) dst[o++] = src[b++];
+        }
+        WlName *sw = src; src = dst; dst = sw;
+        if (w > SIZE_MAX / 4) break;
     }
-    return h;
+    if (src != v) memcpy(v, src, n * sizeof(*v));
+}
+
+/* The declaration named s[start, start + len) in sorted @p v, or -1. */
+static long wl_names_find(const char *s, const WlName *v, size_t n,
+                          size_t start, size_t len)
+{
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = wl_name_cmp(s, v[mid].start, v[mid].len, start, len);
+        if (c == 0) return v[mid].idx;
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return -1;
 }
 
 size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len)
@@ -1158,7 +1203,7 @@ size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len)
     size_t n = len, i = 0, braces = 0, result = 0;
     WlTypeDecl *decls = NULL;
     WlTypeRef *refs = NULL;
-    long *table = NULL;
+    WlName *names = NULL;
     size_t *stack = NULL;
     size_t ndecl = 0, capdecl = 0, nref = 0, capref = 0;
 
@@ -1257,29 +1302,18 @@ size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len)
     if (ndecl == 0) goto out;
 
     /* Resolve each reference to the declaration of that name. */
-    size_t tsize = 16;
-    while (tsize < ndecl * 2) tsize *= 2;
-    table = malloc(tsize * sizeof(*table));
+    names = malloc(ndecl * 2 * sizeof(*names));
     stack = malloc(ndecl * sizeof(*stack));
-    if (!table || !stack) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
-    for (size_t k = 0; k < tsize; k++) table[k] = -1;
+    if (!names || !stack) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
     for (size_t k = 0; k < ndecl; k++) {
-        size_t h = (size_t)wl_hash(s + decls[k].start, decls[k].len) & (tsize - 1);
-        while (table[h] >= 0) h = (h + 1) & (tsize - 1);
-        table[h] = (long)k;
+        names[k].start = decls[k].start;
+        names[k].len = decls[k].len;
+        names[k].idx = (long)k;
     }
-    for (size_t r = 0; r < nref; r++) {
-        size_t h = (size_t)wl_hash(s + refs[r].start, refs[r].len) & (tsize - 1);
-        while (table[h] >= 0) {
-            const WlTypeDecl *d = &decls[table[h]];
-            if (d->len == refs[r].len &&
-                memcmp(s + d->start, s + refs[r].start, d->len) == 0) {
-                refs[r].target = table[h];
-                break;
-            }
-            h = (h + 1) & (tsize - 1);
-        }
-    }
+    wl_names_sort(s, names, names + ndecl, ndecl);
+    for (size_t r = 0; r < nref; r++)
+        refs[r].target = wl_names_find(s, names, ndecl, refs[r].start,
+                                       refs[r].len);
 
     /* Depths, by an explicit depth-first walk (no recursion here either). */
     for (size_t root = 0; root < ndecl; root++) {
@@ -1292,7 +1326,9 @@ size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len)
         while (sp > 0) {
             WlTypeDecl *d = &decls[stack[sp - 1]];
             int descended = 0;
-            while (d->next_ref < d->ref_count) {
+            /* refs is non-NULL whenever a declaration has references
+             * (ref_count > 0 implies nref > 0); said explicitly for scan-build. */
+            while (refs && d->next_ref < d->ref_count) {
                 const WlTypeRef *r = &refs[d->ref_first + d->next_ref];
                 size_t v = r->level + 1;    /* a predeclared type: 1 */
                 if (r->target >= 0) {
@@ -1327,8 +1363,406 @@ size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len)
 out:
     free(decls);
     free(refs);
-    free(table);
+    free(names);
     free(stack);
+    return result;
+}
+
+/* ── Declaration reference chains (audit 38) ───────────────────────
+ *
+ * naga orders a module's declarations before it lowers them with a
+ * recursive depth-first walk (front::wgsl::index::DependencySolver::dfs),
+ * one stack frame per edge from a declaration to one it names. So a chain
+ * `const c2 = c1; const c1 = c0; ...` - or overrides, or functions each
+ * calling the next - each naming one declared after it (counted here in
+ * any order) overflowed the event loop's stack (SIGSEGV) long
+ * before any other check saw anything: every expression, block and type in
+ * it is shallow. Here every module-scope declaration (const, override,
+ * var, let, alias, struct, fn and the anonymous const_assert) is read with
+ * every identifier it names - an initializer's, a type's, a function's
+ * parameter and return types, the identifiers its body names (callees and
+ * the globals it reads), and the arguments of the attributes before it -
+ * and the longest chain of declarations naming one another is counted with
+ * an explicit walk. Names a function declares itself (parameters, and
+ * let / var / const in a block, from the end of their declaration to the
+ * end of their block; a `for` header's to the end of the loop) shadow a
+ * module-scope name, as in WGSL; member names (after '.', or before ':' in
+ * a struct) and attribute names are not references. Anything else that
+ * reads as a reference counts as one, so a misread can only lengthen a
+ * chain. A cycle (WGSL refuses recursive declarations) counts as too
+ * long. */
+
+enum { WE_REF, WE_LOCAL, WE_OPEN, WE_FOROPEN, WE_CLOSE };
+
+typedef struct {
+    size_t start, len;
+    long target;              /* declaration index, or -1 */
+    int kind;
+} WlEvt;
+
+typedef struct {
+    size_t ev_first, ev_count;
+    size_t depth, next;       /* chain length; walk cursor */
+    int state;                /* 0 unvisited, 1 on the walk, 2 done */
+} WlChainDecl;
+
+typedef struct {
+    const char *s;
+    size_t n;
+    WlEvt *ev;
+    size_t nev, capev;
+    int oom;
+} WlChainScan;
+
+static void wl_evt(WlChainScan *c, int kind, size_t start, size_t len)
+{
+    if (c->oom) return;
+    if (wl_grow((void **)&c->ev, &c->capev, c->nev + 1, sizeof(*c->ev)) != 0) {
+        c->oom = 1;
+        return;
+    }
+    WlEvt *e = &c->ev[c->nev++];
+    e->start = start;
+    e->len = len;
+    e->target = -1;
+    e->kind = kind;
+}
+
+/* Past a template list `<...>` at s[i] (when one starts there), its
+ * identifiers not recorded: `var<storage, read_write>`. */
+static size_t wl_skip_template(const char *s, size_t n, size_t i)
+{
+    WlTok t;
+    if (wl_next(s, n, i, &t) != WL_PUNCT || s[t.start] != '<') return i;
+    size_t depth = 0;
+    for (;;) {
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END || k == WL_BAD) return i;
+        if (k == WL_PUNCT) {
+            char c = s[t.start];
+            if (c == ';' || c == '{' || c == '}') return t.start;
+            if (c == '<') depth++;
+            else if (c == '>' && depth > 0 && --depth == 0) return t.end;
+        }
+        i = t.end;
+    }
+}
+
+/* Scan from s[i] to the end of a declaration: ';' (consumed) for a
+ * simple one, the closing '}' for a struct; a brace or ';' it does not
+ * expect ends it unconsumed. Records each identifier as a reference but
+ * member and attribute names. Returns the index to continue at. */
+static size_t wl_chain_body(WlChainScan *c, size_t i, int is_struct)
+{
+    const char *s = c->s;
+    size_t n = c->n;
+    int skip_next = 0;          /* after '.' or '@' */
+    int opened = 0;             /* the struct's '{' was read */
+    for (;;) {
+        WlTok t;
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END || k == WL_BAD) return t.start;
+        if (k == WL_IDENT) {
+            i = t.end;
+            if (skip_next) { skip_next = 0; continue; }
+            WlTok nx;
+            if (is_struct && wl_next(s, n, i, &nx) == WL_PUNCT &&
+                s[nx.start] == ':')
+                continue;                       /* a member name */
+            wl_evt(c, WE_REF, t.start, t.end - t.start);
+            continue;
+        }
+        skip_next = 0;
+        i = t.end;
+        if (k != WL_PUNCT) continue;
+        char ch = s[t.start];
+        if (ch == '.' || ch == '@') {
+            skip_next = 1;
+        } else if (is_struct && ch == '{' && !opened) {
+            opened = 1;
+        } else if (is_struct && ch == '}' && opened) {
+            return t.end;
+        } else if (!is_struct && ch == ';') {
+            return t.end;
+        } else if (ch == '{' || ch == '}' || ch == ';') {
+            return t.start;                     /* malformed: stop here */
+        }
+    }
+}
+
+/* A function from s[i] (past its name): parameters, return type, body. */
+static size_t wl_chain_fn(WlChainScan *c, size_t i)
+{
+    const char *s = c->s;
+    size_t n = c->n;
+    WlEvt *params = NULL;       /* parameter names, declared at the body */
+    size_t np = 0, capp = 0, depth = 0, pd = 0;
+    int skip_next = 0, done_params = 0, for_pending = 0;
+    size_t local_start = 0, local_len = 0;   /* a let / var / const name */
+    int local_pending = 0;
+
+    for (;;) {
+        WlTok t;
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END || k == WL_BAD) { i = t.start; break; }
+        i = t.end;
+        if (k == WL_IDENT) {
+            if (skip_next) { skip_next = 0; continue; }
+            if (depth == 0) {
+                WlTok nx;
+                if (pd == 1 && wl_next(s, n, i, &nx) == WL_PUNCT &&
+                    s[nx.start] == ':') {
+                    if (wl_grow((void **)&params, &capp, np + 1,
+                                sizeof(*params)) != 0) {
+                        c->oom = 1;
+                        break;
+                    }
+                    params[np].start = t.start;
+                    params[np].len = t.end - t.start;
+                    np++;
+                    continue;
+                }
+                wl_evt(c, WE_REF, t.start, t.end - t.start);
+                continue;
+            }
+            int is_var = wl_tok_is(s, &t, "var");
+            if (is_var || wl_tok_is(s, &t, "let") || wl_tok_is(s, &t, "const")) {
+                if (is_var) i = wl_skip_template(s, n, i);
+                WlTok nm;
+                if (wl_next(s, n, i, &nm) == WL_IDENT) {
+                    i = nm.end;
+                    if (local_pending)
+                        wl_evt(c, WE_LOCAL, local_start, local_len);
+                    local_start = nm.start;
+                    local_len = nm.end - nm.start;
+                    local_pending = 1;
+                }
+                continue;
+            }
+            if (wl_tok_is(s, &t, "for")) {
+                wl_evt(c, WE_OPEN, 0, 0);       /* the header's scope */
+                for_pending = 1;
+                continue;
+            }
+            wl_evt(c, WE_REF, t.start, t.end - t.start);
+            continue;
+        }
+        skip_next = 0;
+        if (k != WL_PUNCT) continue;
+        char ch = s[t.start];
+        if (ch == '.' || ch == '@') {
+            skip_next = 1;
+        } else if (depth == 0 && !done_params && (ch == '(' || ch == ')')) {
+            /* The parameter list, and the parentheses of attributes in it:
+             * a parameter name is an identifier before ':' at its level. */
+            if (ch == '(') pd++;
+            else if (pd > 0 && --pd == 0) done_params = 1;
+        } else if (ch == '{') {
+            if (depth == 0) {
+                wl_evt(c, WE_OPEN, 0, 0);
+                for (size_t p = 0; p < np; p++)
+                    wl_evt(c, WE_LOCAL, params[p].start, params[p].len);
+            } else {
+                local_pending = 0;              /* malformed */
+                wl_evt(c, for_pending ? WE_FOROPEN : WE_OPEN, 0, 0);
+                for_pending = 0;
+            }
+            depth++;
+        } else if (ch == '}') {
+            if (depth == 0) { i = t.start; break; }
+            local_pending = 0;
+            wl_evt(c, WE_CLOSE, 0, 0);
+            if (--depth == 0) break;
+        } else if (ch == ';') {
+            if (depth == 0) { i = t.start; break; }   /* malformed */
+            if (local_pending) {
+                wl_evt(c, WE_LOCAL, local_start, local_len);
+                local_pending = 0;
+            }
+        }
+    }
+    free(params);
+    return i;
+}
+
+size_t hl_gpu_wgsl_decl_chain(const char *wgsl, size_t len)
+{
+    if (!wgsl) return 0;
+    if (!wl_utf8_valid(wgsl, len)) return HL_GPU_WGSL_UNREADABLE;
+    const char *s = wgsl;
+    size_t n = len, i = 0, result = 0;
+    WlChainScan c = { s, n, NULL, 0, 0, 0 };
+    WlChainDecl *decls = NULL;
+    WlName *names = NULL;
+    size_t *shadow = NULL, *stack = NULL;
+    long *scope = NULL;
+    size_t ndecl = 0, capdecl = 0, nnames = 0, capnames = 0;
+    size_t top_first = 0;   /* events since the last declaration ended */
+
+    /* Pass 1: the declarations and the events of each. */
+    for (;;) {
+        WlTok t;
+        int kind = wl_next(s, n, i, &t);
+        if (kind == WL_END) break;
+        if (kind == WL_BAD) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
+        i = t.end;
+        if (kind == WL_PUNCT && s[t.start] == '@') {
+            /* An attribute: its name is not a reference, its arguments
+             * are references of the declaration it precedes. */
+            WlTok nm, op;
+            if (wl_next(s, n, i, &nm) != WL_IDENT) continue;
+            i = nm.end;
+            if (wl_next(s, n, i, &op) != WL_PUNCT || s[op.start] != '(')
+                continue;
+            i = op.end;
+            size_t pd = 1;
+            int after_dot = 0;
+            while (pd > 0) {
+                WlTok a;
+                int ak = wl_next(s, n, i, &a);
+                if (ak == WL_END || ak == WL_BAD) break;
+                if (ak == WL_PUNCT) {
+                    char ch = s[a.start];
+                    if (ch == ';' || ch == '{' || ch == '}') break;
+                    if (ch == '(') pd++;
+                    else if (ch == ')') pd--;
+                    after_dot = ch == '.';
+                } else {
+                    if (ak == WL_IDENT && !after_dot)
+                        wl_evt(&c, WE_REF, a.start, a.end - a.start);
+                    after_dot = 0;
+                }
+                i = a.end;
+            }
+            continue;
+        }
+        if (kind != WL_IDENT) continue;
+        int is_fn = wl_tok_is(s, &t, "fn");
+        int is_struct = wl_tok_is(s, &t, "struct");
+        int is_var = wl_tok_is(s, &t, "var");
+        int is_assert = wl_tok_is(s, &t, "const_assert");
+        if (!is_fn && !is_struct && !is_var && !is_assert &&
+            !wl_tok_is(s, &t, "const") && !wl_tok_is(s, &t, "override") &&
+            !wl_tok_is(s, &t, "let") && !wl_tok_is(s, &t, "alias"))
+            continue;
+
+        if (wl_grow((void **)&decls, &capdecl, ndecl + 1, sizeof(*decls)) != 0) {
+            result = HL_GPU_WGSL_UNREADABLE;
+            goto out;
+        }
+        WlChainDecl *d = &decls[ndecl];
+        memset(d, 0, sizeof(*d));
+        d->ev_first = top_first;
+        if (!is_assert) {
+            if (is_var) i = wl_skip_template(s, n, i);
+            WlTok nm;
+            if (wl_next(s, n, i, &nm) == WL_IDENT) {
+                i = nm.end;
+                if (wl_grow((void **)&names, &capnames, nnames + 1,
+                            sizeof(*names)) != 0) {
+                    result = HL_GPU_WGSL_UNREADABLE;
+                    goto out;
+                }
+                names[nnames].start = nm.start;
+                names[nnames].len = nm.end - nm.start;
+                names[nnames].idx = (long)ndecl;
+                nnames++;
+            }
+        }
+        i = is_fn ? wl_chain_fn(&c, i) : wl_chain_body(&c, i, is_struct);
+        if (c.oom) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
+        d->ev_count = c.nev - d->ev_first;
+        top_first = c.nev;
+        ndecl++;
+    }
+    if (c.oom) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
+    if (ndecl == 0) goto out;
+
+    /* Resolve names, a declaration at a time: a local declaration whose
+     * name is a module-scope one hides it until its scope closes. */
+    if (wl_grow((void **)&names, &capnames, nnames * 2 + 1,
+                sizeof(*names)) != 0) {
+        result = HL_GPU_WGSL_UNREADABLE;
+        goto out;
+    }
+    wl_names_sort(s, names, names + nnames, nnames);
+    shadow = calloc(ndecl, sizeof(*shadow));
+    stack = malloc(ndecl * sizeof(*stack));
+    scope = malloc((c.nev + 1) * sizeof(*scope));
+    if (!shadow || !stack || !scope) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
+    for (size_t k = 0; k < ndecl; k++) {
+        size_t sp = 0;
+        for (size_t e = decls[k].ev_first;
+             e < decls[k].ev_first + decls[k].ev_count; e++) {
+            WlEvt *ev = &c.ev[e];
+            if (ev->kind == WE_REF || ev->kind == WE_LOCAL) {
+                long tg = wl_names_find(s, names, nnames, ev->start, ev->len);
+                if (ev->kind == WE_REF) {
+                    ev->target = (tg >= 0 && shadow[tg] == 0) ? tg : -1;
+                } else if (tg >= 0) {
+                    shadow[tg]++;
+                    scope[sp++] = tg;
+                }
+            } else if (ev->kind == WE_OPEN) {
+                scope[sp++] = -1;
+            } else if (ev->kind == WE_FOROPEN) {
+                scope[sp++] = -2;
+            } else {                            /* WE_CLOSE */
+                for (int pass = 0; pass < 2 && sp > 0; pass++) {
+                    long m = -1;
+                    while (sp > 0 && (m = scope[--sp]) >= 0) shadow[m]--;
+                    if (m != -2) break;         /* a loop body: its header too */
+                }
+            }
+        }
+        while (sp > 0) {                        /* scopes left open */
+            long m = scope[--sp];
+            if (m >= 0) shadow[m]--;
+        }
+    }
+
+    /* The longest chain, by an explicit depth-first walk. */
+    for (size_t root = 0; root < ndecl; root++) {
+        if (decls[root].state == 2) continue;
+        size_t sp = 0;
+        stack[sp++] = root;
+        decls[root].state = 1;
+        while (sp > 0) {
+            WlChainDecl *d = &decls[stack[sp - 1]];
+            int descended = 0;
+            while (d->next < d->ev_count) {
+                const WlEvt *ev = &c.ev[d->ev_first + d->next];
+                if (ev->kind == WE_REF && ev->target >= 0) {
+                    WlChainDecl *t = &decls[ev->target];
+                    if (t->state == 1) {            /* a cycle */
+                        result = HL_GPU_WGSL_DECL_CHAIN_MAX + 1;
+                        goto out;
+                    }
+                    if (t->state == 0) {
+                        t->state = 1;
+                        stack[sp++] = (size_t)ev->target;
+                        descended = 1;
+                        break;
+                    }
+                    if (t->depth > d->depth) d->depth = t->depth;
+                }
+                d->next++;
+            }
+            if (descended) continue;
+            d->depth += 1;                      /* itself */
+            d->state = 2;
+            if (d->depth > result) result = d->depth;
+            if (result > HL_GPU_WGSL_DECL_CHAIN_MAX) goto out;
+            sp--;
+        }
+    }
+out:
+    free(c.ev);
+    free(decls);
+    free(names);
+    free(shadow);
+    free(stack);
+    free(scope);
     return result;
 }
 
@@ -1351,6 +1785,9 @@ int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why)
         } else if (hl_gpu_wgsl_type_depth(wgsl, len) >
                    HL_GPU_WGSL_TYPE_DEPTH_MAX) {
             w = "types nest too deeply";
+        } else if (hl_gpu_wgsl_decl_chain(wgsl, len) >
+                   HL_GPU_WGSL_DECL_CHAIN_MAX) {
+            w = "module-scope declarations refer to one another too deeply";
         }
     }
     if (why) *why = w;
