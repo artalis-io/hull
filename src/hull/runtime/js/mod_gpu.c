@@ -38,8 +38,9 @@ static int js_gpu_timeout_opt(JSContext *ctx, JSValueConst obj, uint32_t *out)
     return r;
 }
 
-/* The largest WGSL source gpu.load reads or gpu.compile takes. */
-#define JS_GPU_WGSL_MAX ((size_t)10 * 1024 * 1024)
+/* The largest WGSL source gpu.load reads or gpu.compile takes (audit 36:
+ * 1 MiB, from 10). */
+#define JS_GPU_WGSL_MAX HL_GPU_WGSL_MAX_BYTES
 
 /* ── Two-pass ArrayBuffer views (audit 9 H1) ──────────────────────
  *
@@ -237,6 +238,7 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
     const char *wgsl = NULL;
     size_t wgsl_len = 0;
     char *file_buf = NULL;
+    int too_large = 0;
 
     if (entry && entry->data) {
         wgsl = (const char *)entry->data;
@@ -261,7 +263,9 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
                 flen = ftell(f);
                 if (fseek(f, 0, SEEK_SET) != 0) flen = -1;
             }
-            if (flen > 0 && flen < (long)JS_GPU_WGSL_MAX) {
+            if (flen > 0 && (unsigned long)flen > JS_GPU_WGSL_MAX)
+                too_large = 1;
+            if (flen > 0 && (unsigned long)flen <= JS_GPU_WGSL_MAX) {
                 file_buf = malloc((size_t)flen + 1);
                 if (file_buf && fread(file_buf, 1, (size_t)flen, f) == (size_t)flen) {
                     file_buf[flen] = '\0';
@@ -281,6 +285,13 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
         }
     }
 
+    if (too_large || (wgsl && wgsl_len > JS_GPU_WGSL_MAX)) {
+        free(file_buf);
+        JSValue err = JS_ThrowRangeError(ctx, "gpu.load: shader '%s' is too large (at most %d bytes)",
+                                         name, (int)JS_GPU_WGSL_MAX);
+        JS_FreeCString(ctx, name);
+        return err;
+    }
     if (!wgsl) {
         free(file_buf);
         JSValue err = JS_ThrowInternalError(ctx, "gpu.load: shader '%s' not found in shaders/", name);
@@ -331,7 +342,7 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
 
     /* Capped as gpu.load's file read is, and charged before the compile:
      * WGSL of any length compiled free of the budget (audit 24). */
-    if (wgsl_len >= JS_GPU_WGSL_MAX) {
+    if (wgsl_len > JS_GPU_WGSL_MAX) {
         JS_FreeCString(ctx, name);
         JS_FreeCString(ctx, wgsl);
         return JS_ThrowRangeError(ctx, "gpu.compile: WGSL source too large");

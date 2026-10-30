@@ -9,6 +9,7 @@
 #ifdef HL_ENABLE_GPU
 
 #include "hull/cap/gpu.h"  /* error codes; HL_GPU_* limits come transitively from limits/gpu.h */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1852,5 +1853,205 @@ UTEST(hull_cap_gpu_audit35, mismatch_refused_before_backend)
     EXPECT_EQ(2, mock_dispatches);
     mock_free(ctx);
 }
+
+/* ── Audit 36: shaders naga would recurse over until the stack overflows ──
+ *
+ * A long chain of operators or accessors in one expression is parsed into a
+ * tree as deep as the chain; naga's later passes walk it recursively, and a
+ * few thousand terms overflowed the event loop's stack (SIGSEGV). The cap
+ * layer refuses such a source before any wgpu call. */
+
+/* A shader whose one expression is `head` followed by `n` copies of `rep`
+ * and then `tail`. Freed by the caller. */
+static char *a36_chain(const char *head, const char *rep, size_t n,
+                       const char *tail)
+{
+    size_t hl = strlen(head), rl = strlen(rep), tl = strlen(tail);
+    char *s = malloc(hl + rl * n + tl + 1);
+    if (!s) return NULL;
+    char *p = s;
+    memcpy(p, head, hl); p += hl;
+    for (size_t i = 0; i < n; i++) { memcpy(p, rep, rl); p += rl; }
+    memcpy(p, tail, tl); p += tl;
+    *p = '\0';
+    return s;
+}
+
+static size_t a36_depth(const char *wgsl)
+{
+    return hl_gpu_wgsl_complexity(wgsl, strlen(wgsl));
+}
+
+#define A36_ADD_HEAD "@group(0) @binding(0) var<storage, read_write> o: array<f32>;\n" \
+                     "@compute @workgroup_size(1) fn main() { var y = o[0]; o[0] = y"
+#define A36_SWZ_HEAD "@group(0) @binding(0) var<storage, read_write> o: array<vec4f>;\n" \
+                     "@compute @workgroup_size(1) fn main() { o[0] = o[1]"
+
+static char *a36_read_file(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = malloc(1 << 16);
+    size_t n = buf ? fread(buf, 1, (1 << 16) - 1, f) : 0;
+    fclose(f);
+    if (!buf) return NULL;
+    buf[n] = '\0';
+    *len = n;
+    return buf;
+}
+
+static const char *const a36_examples[] = {
+    "examples/gpu_search/shaders/cosine_similarity.wgsl",
+    "examples/gpu_texture/shaders/invert.wgsl",
+};
+
+UTEST(hull_cap_gpu_audit36, ordinary_shaders_are_shallow)
+{
+    for (size_t k = 0; k < sizeof(a36_examples) / sizeof(a36_examples[0]); k++) {
+        size_t len = 0;
+        char *src = a36_read_file(a36_examples[k], &len);
+        ASSERT_TRUE(src != NULL);
+        size_t d = hl_gpu_wgsl_complexity(src, len);
+        EXPECT_TRUE(d > 0);
+        EXPECT_TRUE(d < 32);
+        free(src);
+    }
+    EXPECT_EQ((size_t)0, hl_gpu_wgsl_complexity(NULL, 0));
+    EXPECT_EQ((size_t)0, a36_depth(""));
+    /* Every binary operator may be a level, the assignment included. */
+    EXPECT_EQ((size_t)3, a36_depth("let x = a + b * c;"));   /* = + * */
+    EXPECT_EQ((size_t)3, a36_depth("let x = -v.x;"));      /* bin '=' + '-' + '.' */
+    /* Comments, literals with exponents and hex are single operands. */
+    EXPECT_EQ((size_t)1, a36_depth("// a+b+c+d\n/* x /* - - */ */ let x = 1.5e-3;"));
+    EXPECT_EQ((size_t)1, a36_depth("let x = 0x1p-4f;"));
+}
+
+UTEST(hull_cap_gpu_audit36, long_chains_are_deep)
+{
+    /* The crash forms: chained binary operators, swizzles, && terms. */
+    char *add = a36_chain(A36_ADD_HEAD, "+y", 20000, "; }");
+    char *swz = a36_chain(A36_SWZ_HEAD, ".wzyx", 20000, "; }");
+    char *band = a36_chain(A36_ADD_HEAD, " && y == 1.0", 6000, "; }");
+    char *cst = a36_chain("const c = 1", "+1", 20000,
+                          ";\n@compute @workgroup_size(1) fn main() {}");
+    ASSERT_TRUE(add && swz && band && cst);
+    EXPECT_TRUE(a36_depth(add) > HL_GPU_WGSL_EXPR_DEPTH_MAX);
+    EXPECT_TRUE(a36_depth(swz) > HL_GPU_WGSL_EXPR_DEPTH_MAX);
+    EXPECT_TRUE(a36_depth(band) > HL_GPU_WGSL_EXPR_DEPTH_MAX);
+    EXPECT_TRUE(a36_depth(cst) > HL_GPU_WGSL_EXPR_DEPTH_MAX);
+    free(add); free(swz); free(band); free(cst);
+
+    /* Nesting adds up: ten groups of 500 each stay deep, though no single
+     * bracket level holds more than 500 operators. */
+    char *nest = a36_chain("let x = ", "(", 10, "y");
+    ASSERT_TRUE(nest != NULL);
+    size_t nl = strlen(nest);
+    char *full = malloc(nl + 10 * (500 * 2 + 1) + 2);
+    ASSERT_TRUE(full != NULL);
+    memcpy(full, nest, nl);
+    char *p = full + nl;
+    for (int g = 0; g < 10; g++) {
+        for (int k = 0; k < 500; k++) { *p++ = '+'; *p++ = 'y'; }
+        *p++ = ')';
+    }
+    *p++ = ';';
+    *p = '\0';
+    EXPECT_TRUE(a36_depth(full) > HL_GPU_WGSL_EXPR_DEPTH_MAX);
+    free(nest); free(full);
+
+    /* So does nesting alone. */
+    char *paren = a36_chain("let x = ", "(", 5000, "1;");
+    ASSERT_TRUE(paren != NULL);
+    EXPECT_TRUE(a36_depth(paren) > HL_GPU_WGSL_EXPR_DEPTH_MAX);
+    free(paren);
+}
+
+UTEST(hull_cap_gpu_audit36, wide_but_shallow_is_fine)
+{
+    /* A 5000-element constant table: commas restart the count. */
+    char *lut = a36_chain("const lut = array<f32, 5000>(-1.0", ", -1.0", 4999,
+                          ");\n@compute @workgroup_size(1) fn main() {}");
+    /* An unrolled 256-term dot product: every '+' and '*' counts (~513),
+     * still well under the limit. */
+    char *dot = a36_chain(A36_ADD_HEAD, " + o[1] * o[2]", 256, "; }");
+    /* Statements reset the count: 5000 short statements. */
+    char *many = a36_chain("@compute @workgroup_size(1) fn main() { var y = 1.0; ",
+                           "y = y + y * y; ", 5000, "}");
+    ASSERT_TRUE(lut && dot && many);
+    EXPECT_TRUE(a36_depth(lut) < 16);
+    EXPECT_TRUE(a36_depth(dot) < 600);
+    EXPECT_TRUE(a36_depth(many) < 16);
+    free(lut); free(dot); free(many);
+}
+
+/* Through hl_cap_gpu_compile: refused before the backend is called. */
+static int mock_compiles;
+static int mock_compile(HlGpuDevice *dev, const char *name, const char *wgsl,
+                        size_t wgsl_len, HlGpuPipeline *out)
+{
+    (void)dev; (void)name; (void)wgsl; (void)wgsl_len; (void)out;
+    mock_compiles++;
+    return HL_GPU_OK;
+}
+
+UTEST(hull_cap_gpu_audit36, compile_refuses_before_backend)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = mock_compile;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    mock_compiles = 0;
+
+    char *add = a36_chain(A36_ADD_HEAD, "+y", 20000, "; }");
+    ASSERT_TRUE(add != NULL);
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "deep", add, strlen(add)));
+    free(add);
+
+    /* Larger than HL_GPU_WGSL_MAX_BYTES: refused, however shallow. */
+    size_t big = HL_GPU_WGSL_MAX_BYTES + 1;
+    char *src = malloc(big + 1);
+    ASSERT_TRUE(src != NULL);
+    memset(src, ' ', big);
+    src[big] = '\0';
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "big", src, big));
+    free(src);
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+
+    const char *ok = "@compute @workgroup_size(1) fn main() { let x = 1 + 2; }";
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "ok", ok, strlen(ok)));
+    EXPECT_EQ(1, mock_compiles);
+    mock_free(ctx);
+}
+
+#ifdef HL_ENABLE_GPU
+/* On a real device (skipped without an adapter): the source that crashed
+ * the process is refused, and the process goes on to compile the examples'
+ * shaders. */
+UTEST(hull_cap_gpu_audit36, real_device_survives)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+
+    char *add = a36_chain(A36_ADD_HEAD, "+y", 20000, "; }");
+    char *swz = a36_chain(A36_SWZ_HEAD, ".wzyx", 20000, "; }");
+    ASSERT_TRUE(add && swz);
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(&ctx, -1, "add", add, strlen(add)));
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(&ctx, -1, "swz", swz, strlen(swz)));
+    free(add); free(swz);
+
+    for (size_t k = 0; k < sizeof(a36_examples) / sizeof(a36_examples[0]); k++) {
+        size_t len = 0;
+        char *src = a36_read_file(a36_examples[k], &len);
+        ASSERT_TRUE(src != NULL);
+        char name[16];
+        snprintf(name, sizeof(name), "ex%zu", k);
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, name, src, len));
+        free(src);
+    }
+    hl_cap_gpu_destroy(&ctx);
+}
+#endif /* HL_ENABLE_GPU */
 
 UTEST_MAIN();

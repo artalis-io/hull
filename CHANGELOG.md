@@ -264,6 +264,19 @@ release-artifact layout).
   `make wamrc`); AOT from an older wamrc is refused. The runtime's lack of hardware bound
   checks is now pinned (`WASM_DISABLE_HW_BOUND_CHECK=1`). `hull build` also hashes the wamrc
   binary by streaming it: a ~90 MB wamrc failed the build with "out of memory".
+- **A shader with a very long expression crashed the process** (audit 36, both runtimes,
+  `gpu.compile` and `gpu.load`). naga, wgpu-native's WGSL compiler, parses a chain of
+  left-associative operators or accessors into a tree as deep as the chain and walks it
+  recursively; its parser has a recursion limit, its later passes do not. One expression of
+  ~9000 chained `+ y`, ~10000 swizzles or ~5000 `&&` terms overflowed the event loop's stack
+  (SIGSEGV). The cap layer now estimates the deepest expression a source builds before any
+  wgpu call (`hl_gpu_wgsl_complexity`: per statement, the binary operators in one operand,
+  plus its longest unary / postfix run, plus its deepest bracketed sub-expression; a comma
+  restarts the count, so a long constant table stays shallow) and refuses one past
+  `HL_GPU_WGSL_EXPR_DEPTH_MAX` (1000, ~8x below the crash and far above real shaders) with
+  `shader_error`. The WGSL source is also capped at 1 MiB (`HL_GPU_WGSL_MAX_BYTES`, from 10
+  MiB in JS and none for Lua's `gpu.compile`); a larger `gpu.compile` source raises and a
+  larger shader file makes `gpu.load` report it as too large.
 - **A failed GPU dispatch leaked its uploads** (audit 35, both runtimes, sync and async).
   `gpu.dispatch` / `gpu.pipeline` queue their inline buffers, uniforms and inline textures,
   then could fail before submitting (an unknown texture, a binding-kind mismatch, too many
