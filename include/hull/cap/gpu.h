@@ -236,8 +236,29 @@ int hl_gpu_wgsl_layout(const char *wgsl, size_t len, HlGpuPipeline *out);
  * hl_cap_gpu_compile refuses a source past HL_GPU_WGSL_EXPR_DEPTH_MAX, or
  * larger than HL_GPU_WGSL_MAX_BYTES, before the backend sees it: naga
  * recurses over such a tree until the stack overflows (audit 36). Returns
- * 0 for NULL. */
+ * 0 for NULL, HL_GPU_WGSL_UNREADABLE for a source the shared lexer cannot
+ * split as naga does (malformed UTF-8, a byte outside every WGSL token). */
 size_t hl_gpu_wgsl_complexity(const char *wgsl, size_t len);
+
+/* What the depth checks return for a source they refuse to read (audit
+ * 37): larger than every limit, so a comparison refuses it. */
+#define HL_GPU_WGSL_UNREADABLE ((size_t)-1)
+
+/* The deepest block nesting @p wgsl builds, braces and `else if` chains
+ * together (an `else if` nests without a brace; naga validates the If tree
+ * recursively). 0 for NULL, HL_GPU_WGSL_UNREADABLE as above (audit 37). */
+size_t hl_gpu_wgsl_block_depth(const char *wgsl, size_t len);
+
+/* The deepest type the module-scope `struct` / `alias` declarations of
+ * @p wgsl build, across declarations in any order (a cycle counts as past
+ * HL_GPU_WGSL_TYPE_DEPTH_MAX). 0 for NULL or none, HL_GPU_WGSL_UNREADABLE
+ * as above or when its tables cannot be allocated (audit 37). */
+size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len);
+
+/* Every pre-compile check hl_cap_gpu_compile runs: size, lexing, and the
+ * expression / block / type depths. 0 when the source passes; -1 with a
+ * short reason in *why otherwise. */
+int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why);
 
 /* Persistent named buffer */
 typedef struct HlGpuBuffer {
