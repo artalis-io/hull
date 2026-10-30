@@ -10,6 +10,21 @@ release-artifact layout).
 
 ### Fixes
 
+- **A chain of shader declarations could still crash the process past the GPU pre-checks**
+  (audit 38). naga orders a module's declarations with a recursive depth-first walk, one stack
+  frame per declaration a declaration names, before anything else runs; a chain in which each
+  `const`, `override` or function names the next one declared after it - every expression,
+  block and type in it shallow - overflowed the event loop's stack (SIGSEGV): `const` chains
+  survived 25000 links and crashed at 30000, `override` 10000 / 40000, functions each calling
+  the next 20000 / 50000, all under the 1 MiB source cap (Apple M1 Max / Metal). `gpu.compile` /
+  `gpu.load` now refuse (`shader_error`, before wgpu) a source whose longest chain of
+  module-scope declarations naming one another - const, override, var / let, alias, struct,
+  const_assert, and functions through the callees and globals their bodies name, with
+  parameters and block-scoped locals shadowing as WGSL scopes them - exceeds 2048
+  (`HL_GPU_WGSL_DECL_CHAIN_MAX`), counted in any declaration order; a cycle counts as too long.
+  The check is one linear scan plus a sort; names are resolved by sorting and binary search, and
+  the audit-37 type check now does the same instead of an unseeded hash table that colliding
+  names could make quadratic. The examples' and docs' shaders are unaffected.
 - **The app running under `hull dev --agent` could forge what `hull agent` serves as Hull's
   output** (audit 37, both runtimes). Round 36 bound the `.hull/` sidecars to the live session
   by a nonce kept under `$HOME/.hull/dev-sessions/<pid>` - and also written into

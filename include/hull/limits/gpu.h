@@ -106,4 +106,22 @@
 #define HL_GPU_WGSL_TYPE_DEPTH_MAX 64
 #endif
 
+/* The longest chain of module-scope declarations naming one another, as
+ * hl_gpu_wgsl_decl_chain counts it (audit 38): naga orders every
+ * declaration with a recursive depth-first walk (one frame per link,
+ * front::wgsl::index::DependencySolver::dfs) before anything else runs, so
+ * a long chain overflowed the event loop's 8 MiB stack (SIGSEGV) while every
+ * expression, block and type in it stayed shallow. The walk goes deep when
+ * each declaration names one declared after it; the count here ignores
+ * order (a shorter, conservative rule). Measured on Apple M1 Max / Metal:
+ * `override` chains survived 10000 links and crashed at 40000, `const`
+ * chains survived 25000 / crashed at 30000, functions each calling the next
+ * survived 20000 / crashed at 50000 - all under the 1 MiB size cap. Real
+ * shaders chain a handful of declarations (a constant derived from another,
+ * a helper calling a helper); 2048 is ~5x below the shortest chain measured
+ * to survive, leaving room for whatever lies below naga on the stack. */
+#ifndef HL_GPU_WGSL_DECL_CHAIN_MAX
+#define HL_GPU_WGSL_DECL_CHAIN_MAX 2048
+#endif
+
 #endif /* HL_LIMITS_GPU_H */
