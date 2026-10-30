@@ -15263,6 +15263,7 @@ UTEST(js_audit39, x509_parse_is_charged)
     cleanup_js_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_CLIENT
 UTEST(js_audit39, sync_http_requests_are_charged)
 {
     init_js_with_caps();
@@ -15294,6 +15295,7 @@ UTEST(js_audit39, sync_http_requests_are_charged)
     js.base.http_cfg = NULL;
     cleanup_js_caps();
 }
+#endif /* HL_ENABLE_HTTP_CLIENT */
 
 UTEST(js_audit39, a_collect_and_retry_is_charged)
 {

@@ -14964,6 +14964,7 @@ UTEST(lua_audit39, x509_parse_is_charged)
     cleanup_lua_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_CLIENT
 UTEST(lua_audit39, sync_http_requests_are_charged)
 {
     init_lua_with_caps();
@@ -14996,5 +14997,6 @@ UTEST(lua_audit39, sync_http_requests_are_charged)
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();
 }
+#endif /* HL_ENABLE_HTTP_CLIENT */
 
 UTEST_MAIN();
