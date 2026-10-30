@@ -26,3 +26,7 @@ void hl_my_dsn_parse(void);
 void hl_my_dsn_parse(void) { abort(); }
 void hl_my_dsn_scrub(void);
 void hl_my_dsn_scrub(void) { abort(); }
+void hl_my_conn_reset(void);
+void hl_my_conn_reset(void) { abort(); }
+void hl_db_txn_note(void);
+void hl_db_txn_note(void) { abort(); }
