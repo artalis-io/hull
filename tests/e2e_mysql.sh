@@ -819,7 +819,9 @@ local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init()
-  -- The cron tick, through jobs.work (its enqueue raises out of it).
+  -- The cron tick, through jobs.work: the schedule whose enqueue fails is
+  -- skipped with its CAS rolled back, and jobs.work goes on (audit 38: it
+  -- raised out of it).
   local raised = pcall(jobs.work, { queue = "a12t" }) and 0 or 1
   ctx.stdout:write(("A12CRON raised=%d\n"):format(raised))
   return 0
@@ -831,7 +833,7 @@ a12cron=$(./build/hull "$A12DIR/tick.lua" -d "$DSN" 2>/dev/null)
 a12next=$(docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -N -B -e "SELECT next_run_at FROM _hull_cron WHERE name='a12c'" 2>/dev/null | tr -d '[:space:]')
 docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw hulldb -e "DELETE FROM _hull_cron WHERE name='a12c'" >/dev/null 2>&1 || true
 case "$a12out|$a12cron|$a12next" in
-    *"A12 b=dead r=pending n=1 q=dead ran=2"*"A12CRON raised=1"*"|1")
+    *"A12 b=dead r=pending n=1 q=dead ran=2"*"A12CRON raised=0"*"|1")
         echo "PASS: jobs cancelled / purged deps fail dependents, released mates refund the rate window, cron CAS rolls back with a failed enqueue (MySQL)"
         rm -rf "$A12DIR" ;;
     *)  echo "::error jobs audit 12 on MySQL: $a12out | $a12cron | next=$a12next"; exit 1 ;;
@@ -876,6 +878,26 @@ case "$a30kept|$a30out|$a30next" in
             echo "::error jobs audit 30 on MySQL: next=$a30next"; exit 1
         fi ;;
     *)  echo "::error jobs audit 30 on MySQL: kept=$a30kept | $a30out | next=$a30next"; cat "$A30DIR/log"; exit 1 ;;
+esac
+jobs_reset_my
+
+# ── audit 38: error text MySQL refuses cannot wedge a worker ──────────
+# Strict mode refuses invalid UTF-8 and more than 64 KiB in a TEXT column
+# (last_error, events.data): the failed write escaped jobs.work, leaving the
+# job and its batch-mates 'running', or raised before a poison subscription
+# event's cursor / lease UPDATE.
+echo "=== jobs: audit 38 (unstorable error text / results) on MySQL ==="
+A38DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_jobs_audit38.sh"
+jobs_audit38_apps "$A38DIR"
+a38lua=$(./build/hull "$A38DIR/a38.lua" -d "$DSN" 2>"$A38DIR/log")
+jobs_reset_my
+a38js=$(./build/hull "$A38DIR/a38.js" -d "$DSN" 2>>"$A38DIR/log")
+case "$a38lua|$a38js" in
+    *"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*"|"*"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*)
+        echo "PASS: unstorable handler / subscriber text and results cannot wedge a worker (MySQL)"
+        rm -rf "$A38DIR" ;;
+    *)  echo "::error jobs audit 38 on MySQL: lua=[$a38lua] js=[$a38js]"; cat "$A38DIR/log"; exit 1 ;;
 esac
 jobs_reset_my
 

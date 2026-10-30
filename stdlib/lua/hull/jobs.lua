@@ -100,13 +100,68 @@ local function backoff_delay(attempts)
     return whole_secs(d)
 end
 
+-- App-originated text (a handler's or subscriber's error, a dead-letter
+-- reason) as text every backend stores (audit 38). A handler that raised with
+-- a NUL or bytes that are not UTF-8 - a slice of a remote reply - made the
+-- last_error write fail on Postgres (MySQL also refuses invalid UTF-8, and
+-- more than 64 KiB in a TEXT column), and the failed bookkeeping write raised
+-- out of jobs.work / the subscription drain: the batch stayed 'running' and
+-- the worker died, on every lease expiry. So: a non-string is converted under
+-- pcall (an __tostring is app code that may raise; audit 23), NULs are
+-- dropped, each byte that does not start a valid UTF-8 sequence (surrogates
+-- and overlongs included, as Lua 5.4's strict utf8 reads them) becomes
+-- U+FFFD, and the text is capped at TEXT_MAX bytes, cut on a code point.
+local TEXT_MAX = 4096
+local UNCONVERTIBLE = "(an error value that could not be converted to text)"
+
+-- s cut to at most max bytes, never inside a UTF-8 sequence.
+local function cut_utf8(s, max)
+    if #s <= max then return s end
+    local e = max
+    while e > 0 and e > max - 4 and ((s:byte(e + 1) or 0) & 0xC0) == 0x80 do e = e - 1 end
+    return s:sub(1, e)
+end
+
+local function safe_text(v)
+    local s
+    if type(v) == "string" then
+        s = v
+    elseif v == nil or type(v) == "number" or type(v) == "boolean" then
+        s = tostring(v)
+    else
+        local ok, r = pcall(tostring, v)
+        s = (ok and type(r) == "string") and r or UNCONVERTIBLE
+    end
+    local cut = false
+    if #s > TEXT_MAX then s = cut_utf8(s, TEXT_MAX); cut = true end
+    if s:find("\0", 1, true) then s = s:gsub("\0", "") end
+    if not utf8.len(s) then
+        local out, i, n = {}, 1, #s
+        while i <= n do
+            local len, bad = utf8.len(s, i)
+            if len then out[#out + 1] = s:sub(i); break end
+            out[#out + 1] = s:sub(i, bad - 1)
+            out[#out + 1] = "\239\191\189"   -- U+FFFD
+            i = bad + 1
+        end
+        s = table.concat(out)
+        if #s > TEXT_MAX then s = cut_utf8(s, TEXT_MAX); cut = true end
+    end
+    if cut then s = s .. "..." end
+    return s
+end
+
 -- An error value as text, for last_error. tostring runs an app __tostring,
 -- which may raise (audit 23: the raise escaped jobs.work).
 local function err_text(e)
-    local ok, s = pcall(tostring, e)
-    if ok and type(s) == "string" then return s end
-    return "(an error value that could not be converted to text)"
+    return safe_text(e)
 end
+
+-- The runtime refusing an async op because one of this VM's admission caps
+-- is full (hull._refusal "busy"): local and transient, so a handler that
+-- failed on it is handed back without spending an attempt, as the outbox
+-- gives back its claim.
+local refusal = require("hull._refusal")
 
 -- The test hooks, registered with the stdlib-internal hull._test_hooks (the
 -- seams are filled in below, where they are defined): the live config (as
@@ -692,7 +747,8 @@ local function emit_durable(event, job, info)
     info = info or {}
     local data
     if info.error ~= nil or info.attempt ~= nil or job.trace ~= nil then
-        data = json.encode({ error = info.error, attempt = info.attempt, trace = job.trace })
+        data = json.encode({ error = info.error ~= nil and safe_text(info.error) or nil,
+                             attempt = info.attempt, trace = job.trace })
     end
     db.exec(
         "INSERT INTO _hull_job_events (ts, type, job_id, job_type, queue, data) "
@@ -954,10 +1010,19 @@ end
 -- @treturn table the jobs module (for chaining)
 function jobs.limit(queue, opts)
     if opts == nil or opts == false then _limits[queue] = nil; return jobs end
-    if type(opts.rate) ~= "number" or opts.rate < 1 then
-        error("jobs.limit: opts.rate must be a positive number")
+    -- rate: a whole number of jobs (audit 38: a fraction left a fractional
+    -- grant, which Postgres refuses for the INTEGER counter, and NaN passed
+    -- the `< 1` check); per: a finite number of seconds > 0.
+    local rate = type(opts.rate) == "number" and math.tointeger(opts.rate)
+    if not rate or rate < 1 or rate > 2147483647 then
+        error("jobs.limit: opts.rate must be a whole number >= 1", 2)
     end
-    _limits[queue] = { rate = opts.rate, per = opts.per or 1 }
+    local per = opts.per
+    if per == nil then per = 1 end
+    if type(per) ~= "number" or per ~= per or per <= 0 or per == math.huge then
+        error("jobs.limit: opts.per must be a number of seconds > 0", 2)
+    end
+    _limits[queue] = { rate = rate, per = per }
     return jobs
 end
 
@@ -1374,13 +1439,13 @@ local YIELD = {}      -- thrown by ctx.sleep / ctx.wait_signal
 local WF_YIELD = {}   -- returned by the workflow handler to the work loop
 local WF_DEAD = {}    -- jobs.DEAD from a workflow, carrying its compensation failures
 
-local function mark_done(job, result)
+-- `enc` is the handler's return value already encoded (result_json), or nil.
+local function mark_done(job, enc)
     local id = job.id
     local n = db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? "
         .. "WHERE id=?" .. CLAIMED, { time.now(), id, job.claim_token })
     if (n or 0) == 0 then return "lost" end
-    if result ~= nil then   -- persist the handler's return value for dependents
-        local enc = json.encode(result)
+    if enc ~= nil then   -- persist the handler's return value for dependents
         db.upsert("_hull_job_results", { "job_id" }, { "job_id", "result" }, { id, enc })
     end
     resolve_deps(id, true)                                   -- unblock dependents
@@ -1390,6 +1455,7 @@ end
 
 local function mark_dead(job, err)
     local id = job.id
+    err = safe_text(err)
     local n = db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, "
         .. "updated_at=? WHERE id=?" .. CLAIMED, { err, time.now(), id, job.claim_token })
     if (n or 0) == 0 then return "lost" end
@@ -1404,6 +1470,7 @@ end
 -- Returns the disposition it applied: "dead" (retries exhausted -> dead-letter)
 -- or "retried" (rescheduled with backoff), so jobs.work can emit the right event.
 local function mark_retry(job, err)
+    err = safe_text(err)
     local attempts = job.attempts or 0
     local max = job.max_attempts or _cfg.max_attempts
     if attempts >= max then
@@ -1416,6 +1483,25 @@ local function mark_retry(job, err)
         { now + backoff_delay(attempts), err, now, job.id, job.claim_token })
     if (n or 0) == 0 then return "lost" end
     return "retried"
+end
+
+-- A job result's JSON, or nil and why it cannot be stored (audit 38). The
+-- encoder passes a string's bytes through, so a result holding text that is
+-- not UTF-8 failed the _hull_job_results write on Postgres / MySQL, and a
+-- result over 64 KiB failed it on MySQL (TEXT): the job was retried - its
+-- handler run again - until its attempts ran out, failing the same way each
+-- time. A result that cannot be stored now dead-letters the job once, saying
+-- why (JSON.stringify escapes a lone surrogate, so the JS twin only meets
+-- the encode error and the size).
+local RESULT_MAX_MYSQL = 65535
+local function result_json(result)
+    local ok, enc = pcall(json.encode, result)
+    if not ok then return nil, "it cannot be encoded as JSON (" .. err_text(enc) .. ")" end
+    if not utf8.len(enc) then return nil, "it holds text that is not valid UTF-8" end
+    if #enc > RESULT_MAX_MYSQL and db.backend_name == "mysql" then
+        return nil, "its JSON is larger than " .. RESULT_MAX_MYSQL .. " bytes"
+    end
+    return enc
 end
 
 -- Fire in-process listeners for a lifecycle event. Each listener is isolated:
@@ -1458,6 +1544,23 @@ local function finish(job, info, transition)
     end
     emit(EVENT_OF[outcome] or outcome, job, info)
     return outcome
+end
+
+-- Give a job back to `pending` without spending its attempt (the claim's
+-- increment undone, as a workflow yield does): its handler failed on a
+-- runtime "busy" refusal, which says nothing about the job (audit 38: it was
+-- counted, so a burst that filled the fetch cap dead-lettered jobs that never
+-- reached their remote). It is claimable again a second later.
+local function hand_back(job)
+    local now = time.now()
+    local n
+    db.batch(function()
+        n = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
+            .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" .. CLAIMED,
+            { now + 1, now, job.id, job.claim_token })
+        if (n or 0) > 0 then release_slot(job) end
+    end)
+    if (n or 0) == 0 then job._lost = true end
 end
 
 -- Workflow job types and the step-store marker of a compensation run (see
@@ -1807,6 +1910,7 @@ local function process_cron(now)
                 .. (parsed and ("spec '" .. tostring(c.spec) .. "' has no upcoming occurrence")
                     or ("spec '" .. tostring(c.spec) .. "' is invalid ("
                         .. tostring(perr or "invalid cron field") .. ")"))
+            why = safe_text(why)
             local off = db.exec(
                 "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? "
                 .. "WHERE name=? AND next_run_at=?",
@@ -1821,7 +1925,11 @@ local function process_cron(now)
         -- connection, a raise) lost that tick for good - the schedule had
         -- already moved on. Now the CAS rolls back with it and the next tick
         -- fires it.
-        db.batch(function()
+        -- One schedule whose enqueue fails (a row stored before jobs.cron
+        -- checked its type: an empty type raised here; audit 38) rolls back
+        -- its own tick and leaves the other schedules - and the jobs.work
+        -- call that fires them - alone.
+        pcall(function() db.batch(function()
             local won = db.exec(
                 "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? "
                 .. "WHERE name=? AND next_run_at=?",
@@ -1835,7 +1943,7 @@ local function process_cron(now)
                 jobs.enqueue(c.type, data,
                     { queue = c.queue, priority = c.priority, max_attempts = c.max_attempts })
             end
-        end)
+        end) end)
         ::next_schedule::
     end
 end
@@ -1860,7 +1968,15 @@ function jobs.cron(name, spec, data, opts)
     local tz_offset = parse_tz_offset(opts.tz)
     local nxt = cron_next(parsed, now, tz_offset)
     if not nxt then error("jobs.cron: spec has no upcoming occurrence") end
-    local job_type = opts.type or name
+    -- An empty type falls back to the name (as the JS twin's `o.type ||
+    -- name`); any other non-string is refused here. Stored as given, an empty
+    -- type made every due tick's enqueue raise out of jobs.work, on every
+    -- worker (audit 38).
+    local job_type = opts.type
+    if job_type == nil or job_type == "" then job_type = name end
+    if type(job_type) ~= "string" then
+        error("jobs.cron: opts.type must be a non-empty string", 2)
+    end
     local payload  = data ~= nil and json.encode(data) or nil
     local queue    = opts.queue or "default"
     local priority = priority_opt(opts.priority, "jobs.cron")
@@ -1959,7 +2075,8 @@ local function record_attempt(job, started_ms, finished_ms, outcome, err)
         .. "started_ms, finished_ms, duration_ms, outcome, error, trace_id) "
         .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         { job.id, job.queue or "default", job.type, job.attempts, wait_ms,
-          started_ms, finished_ms, finished_ms - started_ms, outcome, err, job.trace })
+          started_ms, finished_ms, finished_ms - started_ms, outcome,
+          err ~= nil and safe_text(err) or nil, job.trace })
 end
 
 --- Claim a batch and run each job's handler, applying the outcome (done /
@@ -1993,7 +2110,11 @@ function jobs.work(opts)
     -- Drain durable event subscriptions (throttled; the per-subscription lease
     -- makes this fleet-safe). Only workers that registered subscribers do work.
     if next(_subscribers) and now - _last_edrain >= 1 then
-        for name in pairs(_subscribers) do events_drain(name, { now = now }) end
+        -- One subscription's failed drain (its lease then expires and a
+        -- later drain retries it) does not stop the others, or the jobs
+        -- this call claims (audit 38: a raise here killed run_worker on
+        -- every worker carrying the subscription).
+        for name in pairs(_subscribers) do pcall(events_drain, name, { now = now }) end
         _last_edrain = now
     end
     local batch = jobs.claim(opts)
@@ -2087,6 +2208,8 @@ function jobs.work(opts)
                         end)
                         if (parked or 0) == 0 then job._lost = true end
                     end
+                elseif not ok and refusal.is_busy(result) then
+                    hand_back(job)   -- not an attempt: nothing reached the job
                 elseif not ok then
                     err_str = err_text(result)
                     outcome = finish(job, { error = err_str, attempt = job.attempts },
@@ -2105,24 +2228,39 @@ function jobs.work(opts)
                 else
                     -- nil / true / jobs.DISCARD -> done, no result; any other return
                     -- value is stored as the job's result (for dependents).
-                    local res
+                    local res, enc, why
                     if result ~= nil and result ~= true and result ~= jobs.DISCARD then
                         res = result
+                        enc, why = result_json(res)
                     end
-                    outcome = finish(job, { result = res }, function()
-                        return mark_done(job, res)
-                    end)
+                    if why then
+                        -- Running it again cannot help: dead-letter it once.
+                        err_str = "job result cannot be stored: " .. why
+                        outcome = finish(job, { error = err_str }, function()
+                            return mark_dead(job, err_str)
+                        end)
+                    else
+                        outcome = finish(job, { result = res }, function()
+                            return mark_done(job, enc)
+                        end)
+                    end
                 end
             end)
             if not tok then
+                -- Text is made storable before it is written (safe_text), so
+                -- what failed here is the database itself; its error (a
+                -- driver message, no app text) is what last_error records.
                 err_str = err_text(terr)
                 outcome = finish(job, { error = err_str, attempt = job.attempts },
                     function() return mark_retry(job, err_str) end)
             end
         end
         -- Opt-in attempt history (a yield leaves outcome nil -> not recorded).
+        -- Best effort: the job's transition is already committed, and a
+        -- failed history row must not take the worker (and the unstarted
+        -- batch-mates) down with it.
         if outcome and history_enabled(job.queue) then
-            record_attempt(job, started_ms, time.now_ms(), outcome, err_str)
+            pcall(record_attempt, job, started_ms, time.now_ms(), outcome, err_str)
         end
         -- The strict-concurrency slot reserved at claim was released with the
         -- transition out of 'running' (finish / the park above): any exit -
@@ -2343,7 +2481,13 @@ function jobs.metrics(opts)
     local out = { queues = queues, totals = totals }
     -- Latency + throughput from the attempt history over the last `window`
     -- seconds (present only when attempt recording is on, i.e. there is data).
-    local window = opts.window or 300
+    -- A finite number of seconds > 0 (audit 38: a string raised on the
+    -- arithmetic, 0 divided the throughput by zero, NaN reached the query).
+    local window = opts.window
+    if window == nil then window = 300 end
+    if type(window) ~= "number" or window ~= window or window <= 0 or window == math.huge then
+        error("jobs.metrics: opts.window must be a number of seconds > 0", 2)
+    end
     local sample = db.query(
         "SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ?"
         .. (opts.queue and " AND queue=?" or "") .. " ORDER BY finished_ms DESC LIMIT 5000",
@@ -2535,6 +2679,11 @@ local function run_step(workflow_id, step_key, fn)
     -- idempotent, same contract as a job handler).
     local result = fn()
     local enc = result ~= nil and json.encode(result) or nil
+    -- Said plainly rather than as the database's encoding error (audit 38).
+    if enc ~= nil and not utf8.len(enc) then
+        error("ctx.step: the result of step '" .. safe_text(step_key)
+            .. "' holds text that is not valid UTF-8 and cannot be stored", 2)
+    end
     db.exec(
         "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
         .. "VALUES (?, ?, ?, 'done', ?)",
@@ -2674,7 +2823,7 @@ local function run_compensations(comps, workflow_id)
                 db.exec("UPDATE _hull_workflow_steps SET status='compensated' "
                     .. "WHERE workflow_id=? AND step_key=?", { workflow_id, c.key })
             else
-                failed[#failed + 1] = c.key .. ": " .. tostring(err)
+                failed[#failed + 1] = c.key .. ": " .. err_text(err)
             end
         end
     end
@@ -2684,7 +2833,7 @@ end
 -- Append a failed-compensation list to a dead-letter error.
 local function with_comp_failures(err, failed)
     if #failed == 0 then return err end
-    return tostring(err) .. " (compensation failed: " .. table.concat(failed, "; ") .. ")"
+    return err_text(err) .. " (compensation failed: " .. table.concat(failed, "; ") .. ")"
 end
 
 -- A durable wait suspends the workflow by raising its yield sentinel up to
@@ -2824,6 +2973,9 @@ local function make_ctx(job, name)
         if type(patch_id) ~= "string" or patch_id == "" then
             error("ctx.patched: patch_id must be a non-empty string")
         end
+        -- Stored in the step key "__patch:<id>" (VARCHAR(255)); a longer id
+        -- failed the INSERT on Postgres / MySQL (audit 38).
+        key_opt(patch_id, "patch_id", "ctx.patched", false, MAX_SIGNAL_NAME)
         local key = "__patch:" .. patch_id
         local rows = db.query(
             "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
@@ -3372,14 +3524,32 @@ events_drain = function(name, opts)
         new_failures = (delivered > 0) and 1 or (failures + 1)
         if max_failures and new_failures >= max_failures then
             -- Don't chain: skipping a subscription_skipped must not emit another.
+            -- The subscriber's error is app text: converted under pcall (an
+            -- __tostring may raise) and made storable (safe_text, in
+            -- emit_durable). A raise here came before the cursor / lease
+            -- UPDATE below, so the lease was never released and every lease
+            -- expiry raised again out of jobs.work (audit 38). If the record
+            -- still cannot be written, it is written without the subscriber's
+            -- text; if not even that, the poison is not skipped this drain
+            -- (the lease is still released, and the next drain tries again).
+            local skipped = true
             if poison.type ~= "subscription_skipped" then
-                emit_durable("subscription_skipped",
-                    { id = poison.job_id, type = poison.job_type, queue = poison.queue },
-                    { error = "subscription '" .. name .. "' skipped event " .. poison.id
-                        .. " after " .. new_failures .. " failures: " .. tostring(poison_err) })
+                local target = { id = poison.job_id, type = poison.job_type, queue = poison.queue }
+                local head = "subscription '" .. name .. "' skipped event " .. tostring(poison.id)
+                    .. " after " .. new_failures .. " failures"
+                local eok, eerr = pcall(emit_durable, "subscription_skipped", target,
+                    { error = head .. ": " .. err_text(poison_err) })
+                if not eok then
+                    eok = pcall(emit_durable, "subscription_skipped", target,
+                        { error = head .. " (its error could not be recorded: "
+                            .. err_text(eerr) .. ")" })
+                end
+                skipped = eok
             end
-            new_cursor = poison.id   -- advance PAST the poison
-            new_failures = 0
+            if skipped then
+                new_cursor = poison.id   -- advance PAST the poison
+                new_failures = 0
+            end
         end
     end
     if opts.commit_cursor == false then new_cursor = cursor end

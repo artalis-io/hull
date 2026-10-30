@@ -344,6 +344,115 @@ cases.audit30 = () => {
     });
 };
 
+// Audit 38: a handler's or subscriber's error text went to the database as it
+// was, and Postgres refuses a NUL or a lone surrogate (MySQL also more than
+// 64 KiB in TEXT): the write threw out of work() / the drain, leaving the
+// batch 'running' and the worker dead. SQLite stores such text, so here the
+// checks are on what is stored: storable text, the worker alive, the
+// batch-mates done, the poison skipped (tests/e2e_postgres.sh and
+// e2e_mysql.sh run the same against the servers that refused it).
+cases.audit38 = async () => {
+    jobs.init({ events: true, history: true, backoff: () => 0 });
+    const storable = (s) => typeof s === "string" && !s.includes("\u0000") &&
+        !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s) &&
+        s.length <= 4096 + 3;
+    await atest("a handler error the database would refuse is stored as safe text", async () => {
+        jobs.handler("poison", () => {
+            throw new Error("upstream: a\u0000b " + "ok \u{1F600}".slice(0, 4) + " " + "y".repeat(100000));
+        });
+        jobs.handler("fine", () => true);
+        const p = jobs.enqueue("poison", {});
+        const a = jobs.enqueue("fine", {}), b = jobs.enqueue("fine", {});
+        let threw = null;
+        try { await jobs.work({ batch: 10 }); } catch (e) { threw = e; }
+        assertEq(threw, null, "work did not throw");
+        const j = jobs.get(p);
+        assertEq(j.status, "pending", "re-pended");
+        assertEq(storable(j.lastError), true, "storable lastError");
+        assertEq(j.lastError.slice(0, 13), "upstream: ab ", "NUL dropped");
+        assertEq(j.lastError.includes("ok �"), true, "U+FFFD");
+        assertEq(j.lastError.slice(-3), "...", "capped");
+        assertEq(jobs.get(a).status, "done", "batch-mate a");
+        assertEq(jobs.get(b).status, "done", "batch-mate b");
+        const h = jobs.history(p);
+        assertEq(h.length, 1, "attempt recorded");
+        assertEq(storable(h[0].error), true, "storable attempt error");
+    });
+    await atest("an error whose message getter throws is recorded as a fixed text", async () => {
+        jobs.handler("weird", () => {
+            const e = new Error("x");
+            Object.defineProperty(e, "message", { get() { throw new Error("no"); } });
+            throw e;
+        });
+        const id = jobs.enqueue("weird", {}, { queue: "w38" });
+        await jobs.work({ batch: 1, queue: "w38" });
+        assertEq(jobs.get(id).lastError,
+            "(an error value that could not be converted to text)", "fixed text");
+    });
+    await atest("a result that cannot be stored dead-letters the job once", async () => {
+        jobs.handler("badres", () => { const o = {}; o.self = o; return o; });
+        const id = jobs.enqueue("badres", {}, { queue: "r38" });
+        await jobs.work({ batch: 1, queue: "r38" });
+        const j = jobs.get(id);
+        assertEq(j.status, "dead", "dead");
+        assertEq(j.attempts, 1, "ran once");
+        assertEq(j.lastError.includes("job result cannot be stored"), true, String(j.lastError));
+    });
+    await atest("a runtime busy refusal is handed back without spending an attempt", async () => {
+        jobs.handler("busy", () => {
+            const e = new Error("fetch cap full"); e.code = "busy"; throw e;
+        });
+        const id = jobs.enqueue("busy", {}, { queue: "b38", maxAttempts: 1 });
+        await jobs.work({ batch: 1, queue: "b38" });
+        const j = jobs.get(id);
+        assertEq(j.status, "pending", "pending");
+        assertEq(j.attempts, 0, "uncounted");
+        assertEq(j.runAt > time.now() - 1, true, "deferred");
+    });
+    test("a poison subscription event with such text is skipped", () => {
+        jobs.subscribe("p38", (ev) => {
+            if (ev.type === "dead") throw new Error("forward failed: " + "\u{1F600}".slice(0, 1) + "\u0000");
+        }, { from: "beginning", maxFailures: 1 });
+        jobs.subscribe("q38", (ev) => {
+            if (ev.type === "dead") {
+                const e = new Error("x");
+                Object.defineProperty(e, "message", { get() { throw new Error("no"); } });
+                throw e;
+            }
+        }, { from: "beginning", maxFailures: 1 });
+        const d = hooks.eventsDrain("p38", { now: time.now() + 100 });
+        assertEq(d.skipped, true, "p38 skipped");
+        const d2 = hooks.eventsDrain("q38", { now: time.now() + 100 });
+        assertEq(d2.skipped, true, "q38 skipped");
+        const sk = jobs.events({ types: ["subscription_skipped"] });
+        assertEq(sk.length, 2, "two skip events");
+        for (const e of sk) assertEq(storable(e.data && e.data.error), true, "storable skip text");
+        const d3 = hooks.eventsDrain("p38", { now: time.now() + 100 });
+        assertEq(d3.leased, true, "lease released");
+    });
+    test("options that wedged a worker are refused up front", () => {
+        const refused = (fn) => { try { fn(); return false; } catch (_e) { return true; } };
+        assertEq(refused(() => jobs.cron("c38", "* * * * *", null, { type: 5 })), true, "cron type");
+        jobs.cron("c38", "* * * * *", null, { type: "" });   // falls back to the name
+        assertEq(refused(() => jobs.limit("q", { rate: 1.5 })), true, "fractional rate");
+        assertEq(refused(() => jobs.limit("q", { rate: NaN })), true, "NaN rate");
+        assertEq(refused(() => jobs.limit("q", { rate: 2, per: 0 })), true, "per 0");
+        assertEq(refused(() => jobs.limit("q", { rate: 2, per: "x" })), true, "per string");
+        assertEq(refused(() => jobs.limit("q", { rate: 2, per: 0.5 })), false, "per 0.5");
+        jobs.limit("q", null);
+        assertEq(refused(() => jobs.metrics({ window: 0 })), true, "window 0");
+        assertEq(refused(() => jobs.metrics({ window: "300" })), true, "window string");
+        assertEq(refused(() => jobs.metrics({ window: 60 })), false, "window 60");
+    });
+    await atest("ctx.patched refuses an id too long for its step key", async () => {
+        jobs.workflow("longpatch", (w) => { w.patched("p".repeat(300)); return true; });
+        const id = jobs.start("longpatch", {}, { queue: "l38" });
+        await jobs.work({ batch: 1, queue: "l38" });
+        const j = jobs.get(id);
+        assertEq(String(j.lastError).includes("too long"), true, String(j.lastError));
+    });
+};
+
 test("the case is known", () => {
     assertEq(typeof cases[globalThis.__jobs_case], "function", String(globalThis.__jobs_case));
 });

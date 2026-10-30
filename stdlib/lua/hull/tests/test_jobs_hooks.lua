@@ -210,7 +210,7 @@ end
 -- (the worker loop died, the job stayed 'running'); JS retries it.
 function cases.audit22()
     jobs.init()
-    test("a result json.encode refuses is retried, not raised", function()
+    test("a result json.encode refuses is recorded, not raised", function()
         jobs.handler("nanres", function() return { ratio = 0/0 } end)
         local id = jobs.enqueue("nanres", {})
         local ok, err = pcall(jobs.work, { batch = 1 })
@@ -342,6 +342,118 @@ function cases.audit30()
     test("a fresh schedule gets its next occurrence", function()
         jobs.cron("fresh", SPEC)
         assert_eq(hooks.cron_next_run_at("fresh"), hooks.cron_next(SPEC, time.now()), "computed")
+    end)
+end
+
+-- Audit 38: a handler's or subscriber's error text went to the database as
+-- it was, and Postgres refuses a NUL or bytes that are not UTF-8 (MySQL also
+-- more than 64 KiB in TEXT): the write raised out of jobs.work / the drain,
+-- leaving the batch 'running' and the worker dead. SQLite stores such text,
+-- so here the checks are on what is stored: storable text, the worker alive,
+-- the batch-mates done, the poison skipped (tests/e2e_postgres.sh and
+-- e2e_mysql.sh run the same against the servers that refused it).
+function cases.audit38()
+    jobs.init({ events = true, history = true, backoff = function() return 0 end })
+    local function storable(s)
+        return type(s) == "string" and not s:find("\0", 1, true)
+            and utf8.len(s) ~= nil and #s <= 4096 + 3
+    end
+    test("a handler error the database would refuse is stored as safe text", function()
+        jobs.handler("poison", function()
+            error("upstream: a\0b caf\xc3 " .. string.rep("y", 100000), 0)
+        end)
+        jobs.handler("fine", function() return true end)
+        local p = jobs.enqueue("poison", {})
+        local a, b = jobs.enqueue("fine", {}), jobs.enqueue("fine", {})
+        local ok, err = pcall(jobs.work, { batch = 10 })
+        assert_eq(ok, true, tostring(err))
+        local j = jobs.get(p)
+        assert_eq(j.status, "pending", "re-pended")
+        assert_eq(storable(j.last_error), true, "storable last_error")
+        assert_eq(j.last_error:sub(1, 13), "upstream: ab ", "NUL dropped")
+        assert_eq(j.last_error:find("caf\239\191\189", 1, true) ~= nil, true, "U+FFFD")
+        assert_eq(j.last_error:sub(-3), "...", "capped")
+        assert_eq(jobs.get(a).status, "done", "batch-mate a")
+        assert_eq(jobs.get(b).status, "done", "batch-mate b")
+        local h = jobs.history(p)
+        assert_eq(#h, 1, "attempt recorded")
+        assert_eq(storable(h[1].error), true, "storable attempt error")
+    end)
+    test("an error whose __tostring raises is recorded as a fixed text", function()
+        jobs.handler("weird", function()
+            error(setmetatable({}, { __tostring = function() error("no") end }))
+        end)
+        local id = jobs.enqueue("weird", {}, { queue = "w38" })
+        local ok, err = pcall(jobs.work, { batch = 1, queue = "w38" })
+        assert_eq(ok, true, tostring(err))
+        assert_eq(jobs.get(id).last_error,
+            "(an error value that could not be converted to text)", "fixed text")
+    end)
+    test("a result that cannot be stored dead-letters the job once", function()
+        jobs.handler("badres", function() return { body = "caf\xc3" } end)
+        local id = jobs.enqueue("badres", {}, { queue = "r38" })
+        local ok, err = pcall(jobs.work, { batch = 1, queue = "r38" })
+        assert_eq(ok, true, tostring(err))
+        local j = jobs.get(id)
+        assert_eq(j.status, "dead", "dead")
+        assert_eq(j.attempts, 1, "ran once")
+        assert_eq(j.last_error:find("job result cannot be stored", 1, true) ~= nil, true,
+                  tostring(j.last_error))
+    end)
+    test("a runtime busy refusal is handed back without spending an attempt", function()
+        jobs.handler("busy", function() error("[hull:busy] fetch cap full", 0) end)
+        local id = jobs.enqueue("busy", {}, { queue = "b38", max_attempts = 1 })
+        local ok, err = pcall(jobs.work, { batch = 1, queue = "b38" })
+        assert_eq(ok, true, tostring(err))
+        local j = jobs.get(id)
+        assert_eq(j.status, "pending", "pending")
+        assert_eq(j.attempts, 0, "uncounted")
+        assert_eq(j.run_at > time.now() - 1, true, "deferred")
+    end)
+    test("a poison subscription event with such text is skipped", function()
+        local seen = {}
+        jobs.subscribe("p38", function(ev)
+            if ev.type == "dead" then error("forward failed: caf\xc3\0", 0) end
+            seen[#seen + 1] = ev.id
+        end, { from = "beginning", max_failures = 1 })
+        jobs.subscribe("q38", function(ev)
+            if ev.type == "dead" then
+                error(setmetatable({}, { __tostring = function() error("no") end }))
+            end
+        end, { from = "beginning", max_failures = 1 })
+        local d = hooks.events_drain("p38", { now = time.now() + 100 })
+        assert_eq(d.skipped, true, "p38 skipped")
+        local d2 = hooks.events_drain("q38", { now = time.now() + 100 })
+        assert_eq(d2.skipped, true, "q38 skipped")
+        local sk = jobs.events({ types = { "subscription_skipped" } })
+        assert_eq(#sk, 2, "two skip events")
+        for _, e in ipairs(sk) do
+            assert_eq(storable(e.data and e.data.error), true, "storable skip text")
+        end
+        -- The cursor moved past the poison: the next drain goes on from it.
+        local d3 = hooks.events_drain("p38", { now = time.now() + 100 })
+        assert_eq(d3.leased, true, "lease released")
+    end)
+    test("options that wedged a worker are refused up front", function()
+        assert_eq(pcall(jobs.cron, "c38", "* * * * *", nil, { type = 5 }), false, "cron type")
+        jobs.cron("c38", "* * * * *", nil, { type = "" })   -- falls back to the name
+        assert_eq(pcall(jobs.limit, "q", { rate = 1.5 }), false, "fractional rate")
+        assert_eq(pcall(jobs.limit, "q", { rate = 0/0 }), false, "NaN rate")
+        assert_eq(pcall(jobs.limit, "q", { rate = 2, per = 0 }), false, "per 0")
+        assert_eq(pcall(jobs.limit, "q", { rate = 2, per = "x" }), false, "per string")
+        assert_eq(pcall(jobs.limit, "q", { rate = 2, per = 0.5 }), true, "per 0.5")
+        jobs.limit("q", nil)
+        assert_eq(pcall(jobs.metrics, { window = 0 }), false, "window 0")
+        assert_eq(pcall(jobs.metrics, { window = "300" }), false, "window string")
+        assert_eq(pcall(jobs.metrics, { window = 60 }), true, "window 60")
+    end)
+    test("ctx.patched refuses an id too long for its step key", function()
+        jobs.workflow("longpatch", function(w) w.patched(string.rep("p", 300)); return true end)
+        local id = jobs.start("longpatch", {}, { queue = "l38" })
+        local ok, err = pcall(jobs.work, { batch = 1, queue = "l38" })
+        assert_eq(ok, true, tostring(err))
+        local j = jobs.get(id)
+        assert_eq(j.last_error:find("too long", 1, true) ~= nil, true, tostring(j.last_error))
     end)
 end
 

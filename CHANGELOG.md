@@ -169,6 +169,36 @@ release-artifact layout).
   a multi-statement text or a refused `BEGIN` inside each request's `db.batch` is no longer
   refused from the second request on - the generation changed whenever the text could have
   ended a transaction. Covered by the `lua_audit37` tests in `test_lua`.
+- **A job handler's or subscriber's error text could stop every worker** (audit 38, both
+  runtimes). `hull/jobs` wrote the text a handler threw (`last_error`, the attempt history,
+  the event log) as it was, and Postgres refuses a NUL or text that is not UTF-8 - a lone
+  surrogate from an emoji sliced in half, a slice of a remote reply - while MySQL also
+  refuses more than 64 KiB in a TEXT column. In JS the failed retry write threw out of
+  `jobs.work()`: the job and every unstarted batch-mate stayed `running`, `runWorker` died,
+  and the reaper re-pended them after the visibility timeout, round after round, the
+  batch-mates losing attempts and dead-lettering as "worker lost" without running. Skipping a
+  poison subscription event wrote the subscriber's error into the event log before releasing
+  the subscription's lease, so the failed INSERT kept the lease and raised again out of
+  `jobs.work` at every lease expiry, on every worker with that subscription (Lua on
+  Postgres; both runtimes on MySQL past 64 KiB), and converting that error ran its
+  `__tostring` / `message` getter unguarded. Every app-originated text jobs stores now goes
+  through one helper per runtime (`safe_text` / `safeText`): a non-string is converted under
+  `pcall` / `try`, NULs are dropped, invalid UTF-8 and lone surrogates become U+FFFD, and the
+  text is capped at 4 KiB on a code point. The JS retry write is guarded as the Lua one is (a
+  failed write is retried with the database's own error), a failed attempt-history row no
+  longer escapes, a skip record that cannot be written is written without the subscriber's
+  text (and the lease is released either way), and one failing subscription drain or cron
+  schedule no longer stops `jobs.work`. A job result that cannot be stored (Lua text that is
+  not UTF-8, a value the encoder refuses, more than 64 KiB on MySQL) dead-letters the job once
+  with "job result cannot be stored" instead of re-running the handler until its attempts
+  run out. Also: Lua `jobs.cron(..., { type = "" })` stored an empty type that made every due
+  tick raise out of `jobs.work` (it falls back to the name now, as in JS; a non-string is
+  refused); `jobs.limit` refuses a fractional or NaN `rate` and a `per` that is not a number
+  of seconds > 0; `jobs.metrics` refuses a `window` that is not a number > 0; `ctx.patched`
+  refuses an id too long for its step key; and a handler that fails on a runtime `busy`
+  refusal (`hull._refusal` / `hull:_refusal`) is handed back without spending an attempt, as
+  the outbox does. Covered by the `jobs_hooks_audit38` cases in `test_lua` / `test_js` and the
+  audit 38 legs of `tests/e2e_postgres.sh` / `tests/e2e_mysql.sh`.
 - **JS: a run failed for holding a transaction across a wait still resumed later** (audit 33).
   Audit 32 dropped a failed run's queued jobs, but forgot the run's tag as soon as its
   request was answered, and the 32-slot list it lived in overwrote its oldest entry. A

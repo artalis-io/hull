@@ -25,6 +25,7 @@ import { time } from "hull:time";
 import { json } from "hull:json";
 import { crypto } from "hull:crypto";
 import { _test_hooks } from "hull:_test_hooks";
+import { _refusal } from "hull:_refusal";
 const db = dbModule.default();
 
 // Outcome sentinels a handler returns. Frozen objects so
@@ -94,14 +95,58 @@ function backoffDelay(attempts) {
     return wholeSecs(d);
 }
 
+// App-originated text (a handler's or subscriber's error, a dead-letter
+// reason) as text every backend stores (audit 38). A handler that threw with
+// a NUL, or a lone surrogate (an emoji sliced in half), made the last_error
+// write fail on Postgres (MySQL also refuses invalid UTF-8, and more than
+// 64 KiB in a TEXT column), and the failed bookkeeping write threw out of
+// work() / the subscription drain: the batch stayed 'running' and the worker
+// died, on every lease expiry. So: a non-string is converted under try
+// (toString is app code), NULs are dropped, a lone surrogate becomes U+FFFD,
+// and the text is capped at TEXT_MAX UTF-8 bytes, cut on a code point. The
+// Lua twin (safe_text) applies the same rules to bytes.
+const TEXT_MAX = 4096;
+const UNCONVERTIBLE = "(an error value that could not be converted to text)";
+function safeText(v) {
+    let s;
+    if (typeof v === "string") s = v;
+    else {
+        try { s = String(v); } catch (_e) { s = UNCONVERTIBLE; }
+        if (typeof s !== "string") s = UNCONVERTIBLE;
+    }
+    // Every kept unit is at least one byte, so 2 x TEXT_MAX units bound the
+    // scan for a huge string of NULs.
+    let cut = false;
+    if (s.length > 2 * TEXT_MAX) { s = s.slice(0, 2 * TEXT_MAX); cut = true; }
+    let out = "", bytes = 0;
+    const n = s.length;
+    for (let i = 0; i < n; i++) {
+        let c = s.charCodeAt(i), w;
+        if (c === 0) continue;
+        if (c < 0x80) w = 1;
+        else if (c < 0x800) w = 2;
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < n &&
+                 (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) w = 4;
+        else if (c >= 0xd800 && c <= 0xdfff) { w = 3; c = 0xfffd; }
+        else w = 3;
+        if (bytes + w > TEXT_MAX) { cut = true; break; }
+        bytes += w;
+        if (w === 4) { out += s.slice(i, i + 2); i++; }
+        else out += String.fromCharCode(c);
+    }
+    return cut ? out + "..." : out;
+}
+
 // An error value as text, for last_error. Its message getter and toString
 // are app code that may throw (audit 23: the throw escaped work()).
 function errText(e) {
+    let s;
     try {
-        return String((e && e.message) || e);
+        s = String((e && e.message) || e);
     } catch (_e) {
-        return "(an error value that could not be converted to text)";
+        s = UNCONVERTIBLE;
     }
+    return safeText(s);
 }
 
 // Registered handlers: type -> fn. `_default` is the optional catch-all.
@@ -651,7 +696,9 @@ function emitDurable(event, job, info) {
     let data = null;
     if (info.error !== undefined || info.attempt !== undefined ||
         (job.trace !== undefined && job.trace !== null)) {
-        data = json.encode({ error: info.error, attempt: info.attempt, trace: job.trace });
+        data = json.encode({
+            error: info.error !== undefined && info.error !== null ? safeText(info.error) : info.error,
+            attempt: info.attempt, trace: job.trace });
     }
     db.exec(
         "INSERT INTO _hull_job_events (ts, type, job_id, job_type, queue, data) " +
@@ -686,6 +733,41 @@ function finish(job, info, transition) {
     if (outcome === "lost") { job._lost = true; return undefined; }   // another run owns it now
     emit(EVENT_OF[outcome] || outcome, job, info);
     return outcome;
+}
+
+// Give a job back to `pending` without spending its attempt (the claim's
+// increment undone, as a workflow yield does): its handler failed on a
+// runtime "busy" refusal, which says nothing about the job (audit 38: it was
+// counted, so a burst that filled the fetch cap dead-lettered jobs that never
+// reached their remote). It is claimable again a second later.
+function handBack(job) {
+    const now = time.now();
+    let n;
+    db.batch(() => {
+        n = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, " +
+            "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" + CLAIMED,
+            [now + 1, now, job.id, job.claimToken]);
+        if (n) releaseSlot(job);
+    });
+    if (!n) job._lost = true;
+}
+
+// A job result's JSON, or why it cannot be stored (audit 38): [enc, why].
+// A result the encoder refuses (a cycle, a BigInt) failed the transition and
+// the job was retried - its handler run again - until its attempts ran out,
+// failing the same way each time; so did a result over 64 KiB on MySQL
+// (TEXT). It now dead-letters the job once, saying why. (JSON.stringify
+// escapes a lone surrogate, so unlike the Lua twin no text check is needed.)
+const RESULT_MAX_MYSQL = 65535;
+function resultJson(result) {
+    let enc;
+    try { enc = json.encode(result); }
+    catch (e) { return [undefined, "it cannot be encoded as JSON (" + errText(e) + ")"]; }
+    if (typeof enc !== "string") return [undefined, "it cannot be encoded as JSON"];
+    if (db.backendName === "mysql" && enc.length > RESULT_MAX_MYSQL / 3 &&
+        utf8Length(enc) > RESULT_MAX_MYSQL)
+        return [undefined, "its JSON is larger than " + RESULT_MAX_MYSQL + " bytes"];
+    return [enc, undefined];
 }
 
 /**
@@ -895,9 +977,16 @@ function shape(row) {
  */
 function limit(queue, opts) {
     if (opts === null || opts === undefined || opts === false) { delete _limits[queue]; return jobs; }
-    if (typeof opts.rate !== "number" || opts.rate < 1)
-        throw new Error("jobs.limit: opts.rate must be a positive number");
-    _limits[queue] = { rate: opts.rate, per: opts.per || 1 };
+    // rate: a whole number of jobs (audit 38: a fraction left a fractional
+    // grant, which Postgres refuses for the INTEGER counter, and NaN passed
+    // the `< 1` check); per: a finite number of seconds > 0.
+    const rate = opts.rate;
+    if (!Number.isInteger(rate) || rate < 1 || rate > 2147483647)
+        throw new Error("jobs.limit: opts.rate must be a whole number >= 1");
+    const per = opts.per === undefined || opts.per === null ? 1 : opts.per;
+    if (typeof per !== "number" || !Number.isFinite(per) || per <= 0)
+        throw new Error("jobs.limit: opts.per must be a number of seconds > 0");
+    _limits[queue] = { rate, per };
     return jobs;
 }
 
@@ -1297,13 +1386,13 @@ const YIELD = Symbol("hull.jobs.yield");        // thrown by ctx.sleep / waitSig
 const WF_YIELD = Symbol("hull.jobs.wfYield");   // returned to the work loop
 const WF_DEAD = Symbol("hull.jobs.wfDead");     // jobs.DEAD + compensation failures
 
-function markDone(job, result) {
+// `enc` is the handler's return value already encoded (resultJson), or undefined.
+function markDone(job, enc) {
     const id = job.id;
     const n = db.exec("UPDATE _hull_jobs SET status='done', claim_token=NULL, updated_at=? " +
         "WHERE id=?" + CLAIMED, [time.now(), id, job.claimToken]);
     if ((n || 0) === 0) return "lost";
-    if (result !== undefined) {   // persist the handler's return value for dependents
-        const enc = json.encode(result);
+    if (enc !== undefined) {   // persist the handler's return value for dependents
         db.upsert("_hull_job_results", ["job_id"], ["job_id", "result"], [id, enc]);
     }
     resolveDeps(id, true);                                   // unblock dependents
@@ -1313,6 +1402,7 @@ function markDone(job, result) {
 
 function markDead(job, err) {
     const id = job.id;
+    err = safeText(err);
     const n = db.exec("UPDATE _hull_jobs SET status='dead', last_error=?, claim_token=NULL, " +
         "updated_at=? WHERE id=?" + CLAIMED, [err, time.now(), id, job.claimToken]);
     if ((n || 0) === 0) return "lost";
@@ -1326,6 +1416,7 @@ function markDead(job, err) {
 // Returns the disposition it applied: "dead" (retries exhausted -> dead-letter)
 // or "retried" (rescheduled with backoff), so work() can emit the right event.
 function markRetry(job, err) {
+    err = safeText(err);
     const attempts = job.attempts || 0;
     const max = job.maxAttempts !== undefined && job.maxAttempts !== null
         ? job.maxAttempts : _cfg.maxAttempts;
@@ -1662,8 +1753,8 @@ function processCron(now) {
             // or writing a NULL next_run_at (an unparseable one did here) are
             // both wrong: disable it - parked, not enqueued - and say why.
             // jobs.cron re-enables.
-            const why = `schedule '${c.name}' disabled: spec '${c.spec}' ` +
-                (parsed ? "has no upcoming occurrence" : "is invalid (invalid cron field)");
+            const why = safeText(`schedule '${c.name}' disabled: spec '${c.spec}' ` +
+                (parsed ? "has no upcoming occurrence" : "is invalid (invalid cron field)"));
             const off = db.exec(
                 "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? " +
                 "WHERE name=? AND next_run_at=?",
@@ -1675,7 +1766,10 @@ function processCron(now) {
         // The compare-and-set and the enqueue commit together (audit 12): a
         // worker that won the CAS and then failed to enqueue lost that tick for
         // good. Now the CAS rolls back with it and the next tick fires it.
-        db.batch(() => {
+        // One schedule whose enqueue fails (a row stored before jobs.cron
+        // checked its type; audit 38) rolls back its own tick and leaves the
+        // other schedules - and the work() call that fires them - alone.
+        try { db.batch(() => {
             const won = db.exec(
                 "UPDATE _hull_cron SET next_run_at=?, last_run_at=?, updated_at=? " +
                 "WHERE name=? AND next_run_at=?",
@@ -1690,7 +1784,7 @@ function processCron(now) {
                     maxAttempts: c.max_attempts === null ? undefined : c.max_attempts,
                 });
             }
-        });
+        }); } catch (_e) { /* this tick is retried by the next due-check */ }
     }
 }
 
@@ -1715,7 +1809,11 @@ function cron(name, spec, data, opts) {
     const tzOffset = parseTzOffset(o.tz);
     const nxt = cronNext(parsed, now, tzOffset);
     if (nxt === null) throw new Error("jobs.cron: spec has no upcoming occurrence");
-    const jobType = o.type || name;
+    // An empty type falls back to the name; any other non-string is refused
+    // here, not at every due tick's enqueue (audit 38).
+    const jobType = (o.type === undefined || o.type === null || o.type === "") ? name : o.type;
+    if (typeof jobType !== "string")
+        throw new Error("jobs.cron: opts.type must be a non-empty string");
     const payload = data !== undefined && data !== null ? json.encode(data) : null;
     const queue = o.queue || "default";
     const priority = priorityOpt(o.priority, "jobs.cron");
@@ -1775,7 +1873,8 @@ function recordAttempt(job, startedMs, finishedMs, outcome, err) {
         "started_ms, finished_ms, duration_ms, outcome, error, trace_id) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [job.id, job.queue || "default", job.type, job.attempts, waitMs,
-         startedMs, finishedMs, finishedMs - startedMs, outcome, err || null, job.trace || null]);
+         startedMs, finishedMs, finishedMs - startedMs, outcome,
+         err ? safeText(err) : null, job.trace || null]);
 }
 
 // work()'s refresh before starting each batch job after the first: the job's
@@ -1821,7 +1920,13 @@ async function work(opts) {
     // makes this fleet-safe). Only workers that registered subscribers do work.
     const subNames = Object.keys(_subscribers);
     if (subNames.length && now - _lastEdrain >= 1) {
-        for (const name of subNames) eventsDrain(name, { now });
+        // One subscription's failed drain (its lease then expires and a later
+        // drain retries it) does not stop the others, or the jobs this call
+        // claims (audit 38: a throw here killed runWorker on every worker
+        // carrying the subscription).
+        for (const name of subNames) {
+            try { eventsDrain(name, { now }); } catch (_e) { /* retried next drain */ }
+        }
         _lastEdrain = now;
     }
     const batch = claim(o);
@@ -1843,8 +1948,10 @@ async function work(opts) {
             errStr = `no handler for job type '${job.type}'`;
             outcome = finish(job, { error: errStr }, () => markDead(job, errStr));
         } else {
+        let handlerFailed = true;   // the catch below also sees transition errors
         try {
             const result = await h(job);
+            handlerFailed = false;
             if (result && typeof result === "object" && result[WF_YIELD] === true) {
                 // Durable workflow yielded - no terminal outcome, no event. A
                 // yield is not a failed attempt, so undo the claim's attempt
@@ -1914,17 +2021,45 @@ async function work(opts) {
                 // value is stored as the job's result (for dependents).
                 const res = (result !== undefined && result !== true && result !== DISCARD)
                     ? result : undefined;
-                outcome = finish(job, { result: res }, () => markDone(job, res));
+                const [enc, why] = res !== undefined ? resultJson(res) : [undefined, undefined];
+                if (why !== undefined) {
+                    // Running it again cannot help: dead-letter it once.
+                    errStr = "job result cannot be stored: " + why;
+                    outcome = finish(job, { error: errStr }, () => markDead(job, errStr));
+                } else {
+                    outcome = finish(job, { result: res }, () => markDone(job, enc));
+                }
             }
         } catch (e) {
+            if (handlerFailed && _refusal.isBusy(e)) {
+                // Not an attempt: nothing reached the job. A failed hand-back
+                // (the database) is recorded as a retry below.
+                try { handBack(job); } catch (e2) { e = e2; handlerFailed = false; }
+                if (handlerFailed) continue;
+            }
             errStr = errText(e);
-            outcome = finish(job, { error: errStr, attempt: job.attempts },
-                () => markRetry(job, errStr));
+            try {
+                outcome = finish(job, { error: errStr, attempt: job.attempts },
+                    () => markRetry(job, errStr));
+            } catch (e2) {
+                // The retry could not be written (finish's transaction rolled
+                // back). The text is storable (safeText), so the database
+                // itself failed: record ITS error, as the Lua twin does. Left
+                // to escape, this kept the job and every unstarted batch-mate
+                // 'running' and killed runWorker until the reaper (audit 38).
+                errStr = errText(e2);
+                outcome = finish(job, { error: errStr, attempt: job.attempts },
+                    () => markRetry(job, errStr));
+            }
         }
         }
         // Opt-in attempt history (a yield leaves outcome undefined -> not recorded).
+        // Best effort: the job's transition is already committed, and a failed
+        // history row must not take the worker (and the unstarted batch-mates)
+        // down with it.
         if (outcome && historyEnabled(job.queue)) {
-            recordAttempt(job, startedMs, time.nowMs(), outcome, errStr);
+            try { recordAttempt(job, startedMs, time.nowMs(), outcome, errStr); }
+            catch (_e) { /* history is best effort */ }
         }
         // The strict-concurrency slot reserved at claim was released with the
         // transition out of 'running' (finish / the park above), in the same
@@ -2138,7 +2273,11 @@ function metrics(opts) {
     const out = { queues, totals };
     // Latency + throughput from the attempt history over the last `window`
     // seconds (present only when attempt recording is on, i.e. there is data).
-    const window = o.window || 300;
+    // A finite number of seconds > 0 (audit 38: a string or NaN reached the
+    // query, 0 fell back silently).
+    const window = o.window === undefined || o.window === null ? 300 : o.window;
+    if (typeof window !== "number" || !Number.isFinite(window) || window <= 0)
+        throw new Error("jobs.metrics: opts.window must be a number of seconds > 0");
     const sinceMs = (now - window) * 1000;
     const sample = o.queue
         ? db.query("SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ? AND queue=? ORDER BY finished_ms DESC LIMIT 5000", [sinceMs, o.queue])
@@ -2482,7 +2621,7 @@ async function runCompensations(comps, workflowId) {
             try {
                 await c.fn();   // compensations must be idempotent
             } catch (e) {
-                failed.push(c.key + ": " + String(e && e.message !== undefined ? e.message : e));
+                failed.push(c.key + ": " + errText(e));
                 continue;
             }
             db.exec("UPDATE _hull_workflow_steps SET status='compensated' WHERE workflow_id=? AND step_key=?",
@@ -2495,7 +2634,7 @@ async function runCompensations(comps, workflowId) {
 // Append a failed-compensation list to a dead-letter error.
 function withCompFailures(err, failed) {
     if (!failed.length) return err;
-    const msg = (err && err.message !== undefined ? err.message : String(err)) +
+    const msg = errText(err) +
         " (compensation failed: " + failed.join("; ") + ")";
     return new Error(msg);
 }
@@ -2603,6 +2742,9 @@ function makeCtx(job, name) {
         patched: (patchId) => {
             if (typeof patchId !== "string" || patchId === "")
                 throw new Error("ctx.patched: patchId must be a non-empty string");
+            // Stored in the step key "__patch:<id>" (VARCHAR(255)); a longer
+            // id failed the INSERT on Postgres / MySQL (audit 38).
+            keyOpt(patchId, "patchId", "ctx.patched", false, MAX_SIGNAL_NAME);
             const key = "__patch:" + patchId;
             const rows = db.query(
                 "SELECT status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
@@ -3158,14 +3300,33 @@ function eventsDrain(name, opts) {
     if (poison) {
         newFailures = (delivered > 0) ? 1 : failures + 1;
         if (maxFailures && newFailures >= maxFailures) {
+            // The subscriber's error is app text: read under try (its message
+            // getter / toString may throw) and made storable (safeText, in
+            // emitDurable). A throw here came before the cursor / lease UPDATE
+            // below, so the lease was never released and every lease expiry
+            // threw again out of work() (audit 38). If the record still cannot
+            // be written it is written without the subscriber's text; if not
+            // even that, the poison is not skipped this drain (the lease is
+            // still released, and the next drain tries again).
+            let skipped = true;
             if (poison.type !== "subscription_skipped") {   // don't chain skip-of-skip
-                emitDurable("subscription_skipped",
-                    { id: poison.job_id, type: poison.job_type, queue: poison.queue },
-                    { error: `subscription '${name}' skipped event ${poison.id} after ` +
-                        `${newFailures} failures: ${(poisonErr && poisonErr.message) || poisonErr}` });
+                const target = { id: poison.job_id, type: poison.job_type, queue: poison.queue };
+                const head = `subscription '${name}' skipped event ${poison.id} after ` +
+                    `${newFailures} failures`;
+                try {
+                    emitDurable("subscription_skipped", target,
+                        { error: head + ": " + errText(poisonErr) });
+                } catch (e) {
+                    try {
+                        emitDurable("subscription_skipped", target,
+                            { error: head + " (its error could not be recorded: " + errText(e) + ")" });
+                    } catch (_e2) { skipped = false; }
+                }
             }
-            newCursor = poison.id;   // advance PAST the poison
-            newFailures = 0;
+            if (skipped) {
+                newCursor = poison.id;   // advance PAST the poison
+                newFailures = 0;
+            }
         }
     }
     if (o.commitCursor === false) newCursor = cursor;

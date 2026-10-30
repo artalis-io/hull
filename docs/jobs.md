@@ -295,7 +295,7 @@ jobs.uncron("heartbeat");
 
 `jobs.limit(queue, { rate, per })` caps how fast a queue is dispatched:
 **at most `rate` jobs per `per`-second window across the whole fleet** (default
-`per = 1`). The window counter lives in the DB (`_hull_ratelimit`), so K worker
+`per = 1`; `rate` is a whole number >= 1, `per` a number of seconds > 0). The window counter lives in the DB (`_hull_ratelimit`), so K worker
 processes share one budget - unlike a per-process limiter that would let K
 workers each run `rate`. Use it to respect a downstream's limit (an email
 provider, a third-party API quota).
@@ -595,6 +595,12 @@ by **return value** (or by raising):
 | raises an error / returns `jobs.RETRY` | **retry** with backoff (until `max_attempts`, then dead-letter) |
 | returns `jobs.DEAD` | **dead-letter** immediately (non-retryable) |
 | returns `jobs.DISCARD` | **done** without effect (drop) |
+| returns a value that cannot be stored (not JSON-encodable, Lua text that is not UTF-8, JSON over 64 KiB on MySQL) | **dead-letter** once, `last_error` "job result cannot be stored: ..." |
+| fails on a runtime `busy` refusal (an admission cap of the VM is full) | handed back to `pending` a second later, **no attempt spent** |
+
+The error text a handler raises is stored as `last_error` (and in the attempt
+history / event log) after it is made storable on every backend: NULs dropped,
+invalid UTF-8 and lone surrogates replaced with U+FFFD, capped at 4 KiB.
 
 `job.attempts` is the count of the attempt currently running (incremented by the
 claim). Handlers that do blocking or heavy work offload via `db.async` /
