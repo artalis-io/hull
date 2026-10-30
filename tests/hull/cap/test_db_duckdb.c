@@ -254,12 +254,13 @@ UTEST(db_duckdb, rollback_runs_after_the_budget_tripped)
     EXPECT_TRUE(hl_db_in_txn(&h));
 
     HlDbBudgetBinding prev = hl_db_budget_swap(always_tripped, NULL);
-    /* The app's own ROLLBACK is charged: if the trip stopped it, it ended
-     * nothing. */
-    if (hl_db_exec(&h, "ROLLBACK", NULL, 0) != 0) {
-        EXPECT_TRUE(hl_db_in_txn(&h));
-        EXPECT_EQ(0, hl_db_rollback(&h));
-    }
+    /* The app's own ROLLBACK is never interrupted (a transaction statement
+     * takes effect in a task DuckDB's threads may already hold, audit 36):
+     * it runs and reports that it ended the transaction, and the cleanup
+     * rollback after it finds none and still succeeds. */
+    EXPECT_EQ(0, hl_db_exec(&h, "ROLLBACK", NULL, 0));
+    EXPECT_FALSE(hl_db_in_txn(&h));
+    EXPECT_EQ(0, hl_db_rollback(&h));
     EXPECT_FALSE(hl_db_in_txn(&h));
     hl_db_budget_restore(prev);
     ASSERT_EQ(hl_db_begin(&h), 0);
@@ -272,6 +273,48 @@ UTEST(db_duckdb, rollback_runs_after_the_budget_tripped)
     int64_t n = -1;
     ASSERT_EQ(hl_db_query(&h, "SELECT COUNT(*) FROM tr", NULL, 0, count_cb, &n, NULL), 0);
     EXPECT_EQ(n, 0);
+    h.backend->close(&h);
+}
+
+/* Audit 36: duckdb_interrupt does not stop a task one of DuckDB's own
+ * threads already took, and BEGIN / COMMIT / ROLLBACK take effect there, so a
+ * COMMIT reported "interrupted" under a tripped budget had often committed.
+ * A transaction statement now runs to its end and reports what it did: under
+ * an always-tripped budget, every COMMIT succeeds and its row persists, every
+ * app ROLLBACK succeeds and its row is gone, in_txn matches the connection's
+ * real state, and the cleanup rollback that follows still succeeds. */
+UTEST(db_duckdb, txn_statement_outcome_is_reported_under_a_tripped_budget)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE ta (v INTEGER)", NULL, 0), 0);
+    HlValue v = { .type = HL_TYPE_INT, .i = 1 };
+    int64_t expect = 0;
+    int bad_commit = 0, bad_rollback = 0, bad_track = 0, bad_cleanup = 0;
+    for (int k = 0; k < 2000; k++) {
+        ASSERT_EQ(hl_db_begin(&h), 0);
+        ASSERT_EQ(hl_db_exec(&h, "INSERT INTO ta VALUES (?)", &v, 1), 0);
+        int commit = (k % 2) == 0;
+        HlDbBudgetBinding prev = hl_db_budget_swap(always_tripped, NULL);
+        int rc = hl_db_exec(&h, commit ? "COMMIT" : "ROLLBACK", NULL, 0);
+        if (rc != 0) { if (commit) bad_commit++; else bad_rollback++; }
+        if (hl_db_in_txn(&h)) bad_track++;
+        /* The cleanup a batch or a job end runs after it. */
+        if (hl_db_rollback(&h) != 0) bad_cleanup++;
+        hl_db_budget_restore(prev);
+        if (commit) expect++;
+        /* Reality: no transaction is open (BEGIN would fail inside one). */
+        if (hl_db_exec(&h, "BEGIN TRANSACTION", NULL, 0) != 0) bad_track++;
+        else ASSERT_EQ(hl_db_rollback(&h), 0);
+    }
+    EXPECT_EQ(bad_commit, 0);
+    EXPECT_EQ(bad_rollback, 0);
+    EXPECT_EQ(bad_track, 0);
+    EXPECT_EQ(bad_cleanup, 0);
+    EXPECT_FALSE(hl_db_in_txn(&h));
+    int64_t n = -1;
+    ASSERT_EQ(hl_db_query(&h, "SELECT COUNT(*) FROM ta", NULL, 0, count_cb, &n, NULL), 0);
+    EXPECT_EQ(n, expect);
     h.backend->close(&h);
 }
 
