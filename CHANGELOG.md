@@ -169,6 +169,35 @@ release-artifact layout).
   a multi-statement text or a refused `BEGIN` inside each request's `db.batch` is no longer
   refused from the second request on - the generation changed whenever the text could have
   ended a transaction. Covered by the `lua_audit37` tests in `test_lua`.
+- **A stored view or macro could read `_hull_*` tables for app SQL** (audit 39, both
+  runtimes). The `_hull_*` text check reads only the SQL an app hands Hull, so a planted
+  database file (a cloned app, an app with `fs.write` of the database directory, another
+  program) holding `CREATE VIEW leakview AS SELECT tok FROM _hull_sessions` - or, on DuckDB,
+  `CREATE MACRO leakm() AS TABLE (SELECT tok FROM _hull_sessions)` - handed live session
+  tokens to `SELECT tok FROM leakview` / `SELECT * FROM leakm()`, whose text names no
+  `_hull_`. DuckDB's open-time stored-object check now runs the namespace check on every
+  macro, table macro and view body (and app tables' column DEFAULTs) and refuses the open
+  naming the object. SQLite enforces it at run time: the authorizer refuses every read,
+  write and DDL of a `_hull_*` table (views and triggers expand there, at prepare) unless the
+  thread's trusted flag is set (`hl_cap_db_ns_trust`), which the Lua / JS bindings and the
+  `db.async` worker set from the same stdlib-frame rule that waives the text check, and
+  Hull's migration tracking sets for itself (migration files and `worker.dispatch` SQL run
+  untrusted; the agent's read-only gate keeps reading them; hull/search's `_hull_fts_*` indexes,
+  which FTS5 writes lazily at a later COMMIT and which hold the app's own content, are left
+  out; VACUUM's copy into its scratch
+  database passes). `hl_cap_db_init` also refuses a SQLite file holding a view or trigger
+  that names a `_hull_*` table, since a trigger ON one fires inside trusted stdlib
+  statements. Postgres / MySQL need no counterpart: a view there can name `_hull_*` only if
+  SQL created it, which the text check refuses, and `databases.internal` stays the real
+  boundary against another program's objects. Also in this round: DuckDB rewrites `x.f()` as
+  `f(x)`, so `concat('_hu', 'll_outbox_id_seq').nextval()` (or `."nextval"()`, `.currval()`,
+  a macro's `x.nextval()`) advanced a stdlib sequence past the literal-only rule; every
+  guarded function called after a `.` now takes its receiver as the first argument (a
+  `'...'` literal for the value-strict ones, a path literal for file functions; a plain name
+  only in the schema-qualified `main.f('x')` spelling), and `nextval()` / `currval()` with
+  no argument are refused. Covered by `test_db` (`authorizer_refuses_hull_tables_through_*`,
+  `init_refuses_stored_objects_naming_hull_tables`, `method_call_spelling_is_read`),
+  `test_db_duckdb` and `e2e_db_internal` / `e2e_feature_duckdb`.
 - **A job handler's or subscriber's error text could stop every worker** (audit 38, both
   runtimes). `hull/jobs` wrote the text a handler threw (`last_error`, the attempt history,
   the event log) as it was, and Postgres refuses a NUL or text that is not UTF-8 - a lone

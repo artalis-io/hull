@@ -254,7 +254,11 @@ static int execute_migration(HlDbHandle *h, const char *name,
     /* Migration files can bundle several ;-separated statements, so use the
      * script path (sqlite3_exec / PG simple Query), not the single-statement
      * exec. */
+    /* App SQL: a view or trigger it reaches may not touch a `_hull_*`
+     * table either (the SQLite authorizer, audit 39). */
+    int ns_prev = hl_cap_db_ns_trust(0);
     int rc = hl_db_exec_script(h, sql_copy);
+    hl_cap_db_ns_restore(ns_prev);
     free(sql_copy);
     if (rc < 0) {
         log_error("[hull:migrate] %s: SQL error: %s", name, hl_db_errmsg(h));
@@ -635,7 +639,12 @@ int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
     /* Startup work, not an app run: a large data migration is not charged
      * to (nor stopped by) the budget the app's load left bound (H4). */
     HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    /* Hull's own statements on _hull_migrations are trusted by the SQLite
+     * authorizer's `_hull_*` check; the migration files themselves run
+     * untrusted (migration_apply, audit 39). */
+    int ns_prev = hl_cap_db_ns_trust(1);
     int rc = migrate_run_locked(handle, vfs);
+    hl_cap_db_ns_restore(ns_prev);
     hl_db_budget_restore(budget);
     mig_unlock(handle, kind);
     handle->session_pinned = pinned;
@@ -731,8 +740,22 @@ static int status_probe_cb(void *ctx, HlColumn *cols, int ncols)
     return 1;   /* one row is enough */
 }
 
+static int migrate_status_impl(HlDbHandle *handle, const HlVfs *vfs,
+                               HlMigrationStatus **out, int *out_count);
+
 int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
                       HlMigrationStatus **out, int *out_count)
+{
+    /* Reads Hull's own _hull_migrations (audit 39: trusted by the SQLite
+     * authorizer's `_hull_*` check). */
+    int ns_prev = hl_cap_db_ns_trust(1);
+    int rc = migrate_status_impl(handle, vfs, out, out_count);
+    hl_cap_db_ns_restore(ns_prev);
+    return rc;
+}
+
+static int migrate_status_impl(HlDbHandle *handle, const HlVfs *vfs,
+                               HlMigrationStatus **out, int *out_count)
 {
     if (!handle || !handle->backend) {
         /* Absent backend (compute-only / --no-db): report zero migrations. */

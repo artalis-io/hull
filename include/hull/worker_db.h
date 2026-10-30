@@ -180,6 +180,10 @@ typedef struct HlWorkerDbOp {
      * charged to the op budget at 1 unit per HL_DB_ALLOC_UNIT_BYTES - an
      * unbounded result exhausted the process's memory (audit 15). */
     size_t         max_result_bytes;
+    /* The submitting binding granted the stdlib-frame bypass of the
+     * `_hull_*` text check: the worker sets the SQLite authorizer's flag
+     * (hl_cap_db_ns_trust) from it for the op (audit 39). */
+    int            ns_trusted;
 
     /* WAIT_NOTIFY input: LISTEN channel (owned) + wait bound in ms. */
     char          *channel;

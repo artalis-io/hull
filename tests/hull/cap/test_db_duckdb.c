@@ -606,6 +606,95 @@ UTEST(db_duckdb, stored_sleep_view_or_default_refuses_the_open)
     }
 }
 
+/* Audit 39: a view or macro stored in the file that names a `_hull_*` table
+ * handed its rows to app SQL whose text names none (`SELECT tok FROM
+ * leakview`). The open refuses such a database; the stdlib's own tables
+ * (with their nextval('_hull_..._seq') DEFAULTs) open fine. */
+UTEST(db_duckdb, stored_object_naming_hull_tables_refuses_the_open)
+{
+    static const char *const ddl[] = {
+        "CREATE VIEW leakview AS SELECT tok FROM _hull_sessions",
+        "CREATE MACRO leakm() AS TABLE (SELECT tok FROM _hull_sessions)",
+        "CREATE MACRO leaks() AS (SELECT max(tok) FROM main._hull_sessions)",
+        "CREATE TABLE app_t (id BIGINT DEFAULT nextval('_hull_s_seq'))",
+    };
+    for (size_t k = 0; k < sizeof ddl / sizeof ddl[0]; k++) {
+        char path[] = "/tmp/hull_duck_ns_XXXXXX";
+        int fd = mkstemp(path);
+        ASSERT_TRUE(fd >= 0);
+        close(fd);
+        unlink(path);
+        char dsn[128];
+        snprintf(dsn, sizeof dsn, "duckdb://%s", path);
+        char wal[160];
+        snprintf(wal, sizeof wal, "%s.wal", path);
+
+        duckdb_database db;
+        duckdb_connection con;
+        duckdb_result r;
+        ASSERT_TRUE(duckdb_open(path, &db) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_connect(db, &con) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_query(con,
+            "CREATE SEQUENCE _hull_s_seq; "
+            "CREATE TABLE _hull_sessions (id BIGINT DEFAULT "
+            "nextval('_hull_s_seq') PRIMARY KEY, tok VARCHAR); "
+            "INSERT INTO _hull_sessions (tok) VALUES ('secret'); "
+            "CREATE TABLE items (v INT); CREATE VIEW itemv AS SELECT v FROM items",
+            &r) == DuckDBSuccess);
+        duckdb_destroy_result(&r);
+        duckdb_disconnect(&con);
+        duckdb_close(&db);
+
+        /* Stdlib-shaped tables and app views open. */
+        HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+        ASSERT_EQ(hl_db_backend_duckdb.open(&h.ctx, dsn, NULL), 0);
+        h.backend->close(&h);
+
+        ASSERT_TRUE(duckdb_open(path, &db) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_connect(db, &con) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_query(con, ddl[k], &r) == DuckDBSuccess);
+        duckdb_destroy_result(&r);
+        duckdb_disconnect(&con);
+        duckdb_close(&db);
+
+        void *ctx = NULL;
+        EXPECT_EQ(-1, hl_db_backend_duckdb.open(&ctx, dsn, NULL));
+        EXPECT_TRUE(ctx == NULL);
+
+        unlink(path);
+        unlink(wal);
+    }
+}
+
+/* Audit 39: DuckDB rewrites x.nextval() as nextval(x), so the sequence name
+ * stood before the dot: concat('_hu', 'll_..._seq').nextval() advanced a
+ * stdlib sequence. Refused on the real engine. */
+UTEST(db_duckdb, method_call_sequence_names_are_refused)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(0, hl_db_exec(&h, "CREATE SEQUENCE s39", NULL, 0));
+    static const char *const refused[] = {
+        "SELECT concat('s', '39').nextval()",
+        "SELECT concat('s', '39').\"nextval\"()",
+        "SELECT concat('s', '39') . nextval ( )",
+        "SELECT concat('s', '39').currval()",
+        "SELECT nextval()",
+    };
+    int64_t c = 0;
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        EXPECT_EQ(-1, hl_db_query(&h, refused[i], NULL, 0, count_cb, &c, NULL));
+        /* Refused by Hull, not by DuckDB's parser. */
+        EXPECT_TRUE(strstr(hl_db_errmsg(&h), "table-name") != NULL);
+    }
+    /* None of them advanced the sequence. ('s39'.nextval() is not valid
+     * DuckDB syntax, so the literal form is nextval('s39').) */
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT nextval('s39')", NULL, 0,
+                             count_cb, &c, NULL));
+    EXPECT_EQ(1, (int)c);
+    h.backend->close(&h);
+}
+
 /* Audit 37: a params array short of the placeholders (Lua drops trailing
  * nils) binds the tail NULL, as the other backends do. */
 UTEST(db_duckdb, short_params_bind_the_tail_null)

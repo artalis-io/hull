@@ -652,6 +652,164 @@ UTEST(hl_cap_db, namespace_check_blocks_hull_tables)
     ASSERT_EQ(hl_cap_db_check_namespace(NULL), HL_DB_ERR_DENIED);
 }
 
+/* Audit 39: a view or trigger stored in the database expands into reads /
+ * writes of `_hull_*` tables the app's SQL text never names. The authorizer
+ * refuses them unless the thread's trusted flag is set (the bindings set it
+ * from the stdlib-frame rule). The objects are made here with the flag set,
+ * standing in for a planted file. */
+static int count_rows_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    (void)cols; (void)ncols;
+    (*(int *)ctx)++;
+    return 0;
+}
+
+UTEST(hl_cap_db, authorizer_refuses_hull_tables_through_a_view)
+{
+    setup_db();
+    int prev = hl_cap_db_ns_trust(1);
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(test_db,
+        "CREATE TABLE _hull_sessions (tok TEXT);"
+        "INSERT INTO _hull_sessions VALUES ('secret');"
+        "CREATE VIEW leakv AS SELECT tok FROM _hull_sessions;"
+        "CREATE VIEW countv AS SELECT count(*) AS n FROM _hull_sessions;",
+        NULL, NULL, NULL));
+    hl_cap_db_ns_restore(prev);
+
+    /* App SQL (untrusted, the default): refused at prepare. */
+    EXPECT_EQ(0, hl_cap_db_ns_trusted());
+    int n = 0;
+    EXPECT_NE(0, hl_cap_db_query(&test_cache, "SELECT tok FROM leakv",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(0, n);
+    EXPECT_NE(0, hl_cap_db_query(&test_cache, "SELECT n FROM countv",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_NE(0, hl_cap_db_query(&test_cache,
+                                 "SELECT * FROM users WHERE name IN (SELECT tok FROM leakv)",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(0, n);
+
+    /* Trusted (a stdlib call): allowed. */
+    prev = hl_cap_db_ns_trust(1);
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT tok FROM leakv",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    hl_cap_db_ns_restore(prev);
+    EXPECT_EQ(1, n);
+
+    /* A cached statement prepared trusted does not lend its verdict: the
+     * untrusted re-run of the same text is still refused (it was never
+     * cached for an untrusted caller to reuse - the text names no `_hull_`,
+     * so only the authorizer stands between it and the rows). */
+    hl_stmt_cache_destroy(&test_cache);
+    hl_stmt_cache_init(&test_cache, test_db, NULL);
+    n = 0;
+    EXPECT_NE(0, hl_cap_db_query(&test_cache, "SELECT tok FROM leakv",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(0, n);
+
+    /* App tables are untouched. */
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT * FROM users",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    teardown_db();
+}
+
+UTEST(hl_cap_db, authorizer_refuses_hull_tables_through_a_trigger)
+{
+    setup_db();
+    int prev = hl_cap_db_ns_trust(1);
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(test_db,
+        "CREATE TABLE _hull_sessions (tok TEXT);"
+        "INSERT INTO _hull_sessions VALUES ('secret');"
+        "CREATE TABLE app_t (x INTEGER);"
+        "CREATE TABLE app_leak (tok TEXT);"
+        "CREATE TRIGGER leak AFTER INSERT ON app_t BEGIN "
+        "  INSERT INTO app_leak SELECT tok FROM _hull_sessions; END;"
+        "CREATE TRIGGER wipe AFTER DELETE ON app_t BEGIN "
+        "  DELETE FROM _hull_sessions; END;",
+        NULL, NULL, NULL));
+    hl_cap_db_ns_restore(prev);
+
+    EXPECT_GT(0, hl_cap_db_exec(&test_cache, "INSERT INTO app_t VALUES (1)",
+                                NULL, 0));
+    int n = 0;
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT tok FROM app_leak",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(0, n);
+
+    /* Trusted: the trigger runs. */
+    prev = hl_cap_db_ns_trust(1);
+    EXPECT_LE(0, hl_cap_db_exec(&test_cache, "INSERT INTO app_t VALUES (1)",
+                                NULL, 0));
+    hl_cap_db_ns_restore(prev);
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT tok FROM app_leak",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(1, n);
+
+    /* DELETE through a trigger is refused too. */
+    EXPECT_GT(0, hl_cap_db_exec(&test_cache, "DELETE FROM app_t", NULL, 0));
+
+    /* VACUUM still works untrusted: its copy of `_hull_*` tables goes into
+     * the scratch "vacuum_<hex>" database (db_vacuum_target). */
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "DROP TRIGGER leak; DROP TRIGGER wipe",
+                                      NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, "VACUUM", NULL, NULL, NULL));
+    teardown_db();
+}
+
+/* hl_cap_db_init refuses a database that already holds a view or trigger
+ * naming a `_hull_*` table: a trigger ON one fires inside trusted stdlib
+ * statements, which the authorizer lets through. */
+UTEST(hl_cap_db, init_refuses_stored_objects_naming_hull_tables)
+{
+    char dir[512];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hull-db-stored") != NULL);
+    char path[600];
+    snprintf(path, sizeof path, "%s/planted.db", dir);
+    static const char *const planted[] = {
+        "CREATE VIEW leakv AS SELECT tok FROM _hull_sessions",
+        "CREATE TRIGGER t AFTER INSERT ON _hull_sessions BEGIN "
+        "  INSERT INTO app_leak VALUES (new.tok); END",
+        "CREATE TRIGGER t2 AFTER INSERT ON app_leak BEGIN "
+        "  DELETE FROM _hull_sessions; END",
+    };
+    hl_cap_db_sqlite_setup();
+    for (size_t i = 0; i < sizeof planted / sizeof planted[0]; i++) {
+        unlink(path);
+        sqlite3 *raw = NULL;
+        ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &raw));   /* no guard */
+        ASSERT_EQ(SQLITE_OK, sqlite3_exec(raw,
+            "CREATE TABLE _hull_sessions (tok TEXT);"
+            "CREATE TABLE app_leak (tok TEXT);", NULL, NULL, NULL));
+        ASSERT_EQ(SQLITE_OK, sqlite3_exec(raw, planted[i], NULL, NULL, NULL));
+        sqlite3_close(raw);
+
+        sqlite3 *db = NULL;
+        ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &db));
+        EXPECT_NE(0, hl_cap_db_init(db));
+        sqlite3_close(db);
+    }
+    /* An app view over app tables opens fine. */
+    unlink(path);
+    sqlite3 *raw = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &raw));
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(raw,
+        "CREATE TABLE _hull_sessions (tok TEXT);"
+        "CREATE TABLE app_leak (tok TEXT);"
+        "CREATE VIEW v AS SELECT tok FROM app_leak;"
+        "CREATE TRIGGER t AFTER INSERT ON app_leak BEGIN SELECT 1; END;",
+        NULL, NULL, NULL));
+    sqlite3_close(raw);
+    sqlite3 *db = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &db));
+    EXPECT_EQ(0, hl_cap_db_init(db));
+    sqlite3_close(db);
+    unlink(path);
+    char side[620];
+    snprintf(side, sizeof side, "%s-wal", path); unlink(side);
+    snprintf(side, sizeof side, "%s-shm", path); unlink(side);
+    rmdir(dir);
+}
+
 /* Audit 25: DuckDB's query() / query_table() build a statement or a table
  * name at run time ('_hu' || 'll_sessions'), past the text check above. */
 UTEST(hl_cap_db, dynamic_sql_calls_are_found)
@@ -1307,6 +1465,96 @@ UTEST(hl_cap_db, duckdb_sleep_and_sequence_by_value)
         for (; i + pl <= n; i += pl) memcpy(big + i, pats[k], pl);
         big[i] = '\0';
         (void)hl_cap_db_sql_names_table_by_value(big);
+    }
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 30.0);
+    free(big);
+}
+
+/* Audit 39: DuckDB rewrites x.f(...) as f(x, ...), so the value a guarded
+ * function takes first can stand before the dot. */
+UTEST(hl_cap_db, method_call_spelling_is_read)
+{
+    static const char *const hit[] = {
+        "SELECT concat('_hu','ll_outbox_id_seq').nextval()",
+        "SELECT concat('_hu','ll_outbox_id_seq').\"nextval\"()",
+        "SELECT concat('_hu','ll_outbox_id_seq') . nextval ( )",
+        "SELECT concat('_hu','ll_outbox_id_seq')./* c */nextval/* d */()",
+        "SELECT concat('_hu','ll_outbox_id_seq').-- c\nnextval()",
+        "SELECT concat('_hu','ll_outbox_id_seq').currval()",
+        "SELECT (chr(95) || 'hull_x').CURRVAL()",
+        "SELECT n.nextval() FROM names",
+        "SELECT ?.nextval()",
+        "SELECT '_hu'\n'll_x'.nextval()",            /* joined literals */
+        "SELECT E'\\x5fhull_x'.nextval()",           /* escape string */
+        "SELECT 'x'::VARCHAR.nextval()",
+        "SELECT nextval()",                           /* no argument */
+        "SELECT \"nextval\" ( )",
+        "SELECT concat('_hu','ll_sessions').pragma_table_info()",
+        "SELECT * FROM concat('_hu','ll_sessions').histogram_values(tok)",
+        "SELECT * FROM lower('X').duckdb_table_sample()",
+        "SELECT * FROM lower('X').\"pragma_show\"()",
+        "SELECT * FROM lower('X').histogram(tok)",
+        "SELECT * FROM 'x.duckdb'.read_duckdb(table_name := concat('a', 'b'))",
+        "SELECT 't'.storage_info()",
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(hit[i]));
+    /* A macro body: a bare receiver is a parameter. */
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value_ex("x.nextval()", 1));
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value_ex("t.pragma_table_info()", 1));
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(
+                     "CREATE MACRO m(x) AS x.nextval()"));
+
+    static const char *const miss[] = {
+        "SELECT 'orders_seq'.nextval()",
+        "SELECT 'orders_seq' . \"currval\" ( )",
+        "SELECT main.nextval('orders_seq')",
+        "SELECT t.x, t.nextval FROM t",
+        "SELECT 1.5, a.b.c FROM a",
+        "SELECT * FROM main.pragma_table_info('users')",
+        "SELECT * FROM \"main\".pragma_table_info('users')",
+        "SELECT name.histogram() FROM t",             /* the aggregate */
+        "SELECT * FROM 'x.duckdb'.read_duckdb(table_name := 'a')",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value(miss[i]));
+
+    /* File functions: the receiver is the path. */
+    EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(
+                     "SELECT * FROM concat('a', '.csv').read_csv(header := true)",
+                     0, "/nonexistent/app.duckdb"));
+    EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(
+                     "SELECT * FROM 'app.duckdb'.read_blob(x := 1)", 0,
+                     "/nonexistent/app.duckdb"));
+    EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(
+                     "SELECT * FROM 'a.csv'.read_csv(header := true)", 1, NULL));
+    /* Even a plain path receiver is refused: the main scan wants the path
+     * as the first parenthesised argument (the method spelling of a file
+     * function is not supported; read_csv('data.csv', ...) is). */
+    EXPECT_EQ(1, hl_cap_db_sql_reaches_db_files(
+                     "SELECT * FROM 'data.csv'.read_csv(header := true)", 0,
+                     "/nonexistent/app.duckdb"));
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(
+                     "SELECT * FROM main.read_csv('data.csv')", 0,
+                     "/nonexistent/app.duckdb"));
+
+    /* Linear: many dots before guarded names, and receivers of many quotes,
+     * stay bounded (or fail closed). */
+    size_t n = 1u << 20;
+    char *big = malloc(n + 64);
+    ASSERT_TRUE(big != NULL);
+    clock_t t0 = clock();
+    static const char *const pats[] = {
+        "''''.nextval(", ".nextval(", "a.b.", "\"\"\"\".nextval(", ". ",
+    };
+    for (size_t k = 0; k < sizeof pats / sizeof pats[0]; k++) {
+        size_t pl = strlen(pats[k]);
+        size_t i = 0;
+        for (; i + pl <= n; i += pl) memcpy(big + i, pats[k], pl);
+        big[i] = '\0';
+        (void)hl_cap_db_sql_names_table_by_value(big);
+        (void)hl_cap_db_sql_reaches_db_files(big, 0, "/nonexistent/app.duckdb");
     }
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     EXPECT_LT(secs, 30.0);

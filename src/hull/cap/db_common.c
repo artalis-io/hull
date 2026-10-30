@@ -212,6 +212,32 @@ int hl_cap_db_check_namespace(const char *sql)
     return HL_DB_OK;
 }
 
+/* Per-thread "this SQL is the stdlib's / Hull's own" flag the SQLite
+ * authorizer reads (audit 39; see the header). Untrusted by default. */
+static _Thread_local int g_db_ns_trusted;
+
+int hl_cap_db_ns_trust(int trusted)
+{
+    int prev = g_db_ns_trusted;
+    g_db_ns_trusted = trusted ? 1 : 0;
+    return prev;
+}
+
+void hl_cap_db_ns_restore(int prev)
+{
+    g_db_ns_trusted = prev ? 1 : 0;
+}
+
+int hl_cap_db_ns_trusted(void)
+{
+    return g_db_ns_trusted;
+}
+
+int hl_cap_db_name_reserved(const char *name)
+{
+    return name && strncasecmp(name, "_hull_", 6) == 0;
+}
+
 /* ── DuckDB dynamic-SQL table functions (audit 25) ─────────────────── */
 
 static int dyn_ident_char(unsigned char c)
@@ -815,8 +841,28 @@ static int fv_sequence_fn_name(const char *s, size_t n)
                       strncasecmp(s, "currval", 7) == 0);
 }
 
-static int fv_sequence_arg_refused(const char *p, size_t *budget)
+/* 1 when the call at @p p (after the name, one comment rule) is `( )`: no
+ * argument at all; 0 when it is not; -1 once the budget is gone. */
+static int fv_call_is_empty(const char *p, int nest, size_t *budget)
 {
+    const char *q = dyn_skip_gap(p, nest, budget);
+    if (!q) return -1;
+    if (*q != '(') return 0;
+    q = dyn_skip_gap(q + 1, nest, budget);
+    if (!q) return -1;
+    return *q == ')';
+}
+
+/* @p dotted: the name follows a '.' (x.nextval(), DuckDB's method-call
+ * spelling of nextval(x)): its argument is the receiver, which the '.'
+ * reader (fv_dotted_refused) checks, so `()` is fine there. Undotted, an
+ * empty call is refused outright (audit 39): it has no reading but the
+ * dotted one. */
+static int fv_sequence_arg_refused(const char *p, int dotted, size_t *budget)
+{
+    if (!dotted && (fv_call_is_empty(p, 1, budget) != 0 ||
+                    fv_call_is_empty(p, 0, budget) != 0))
+        return 1;
     return fv_table_arg_refused_ex(p, 1, 0, 1, budget) ||
            fv_table_arg_refused_ex(p, 0, 0, 1, budget);
 }
@@ -871,7 +917,7 @@ static int fv_read_duckdb_arg_refused(const char *q, int nest, size_t *budget)
  * has a table_name / schema_name option refused above, or cannot be read to
  * its end (a dollar-quoted string, an E'' escape, the budget). Its path is
  * the protected-file check's. */
-static int fv_read_duckdb_refused(const char *p, size_t *budget)
+static int fv_read_duckdb_refused(const char *p, int dotted, size_t *budget)
 {
     for (int nest = 1; nest >= 0; nest--) {
         const char *q = dyn_skip_gap(p, nest, budget);
@@ -879,6 +925,11 @@ static int fv_read_duckdb_refused(const char *p, size_t *budget)
         if (*q != '(') continue;
         int depth = 0;
         q++;
+        /* 'f.duckdb'.read_duckdb(table_name := ...): dotted, the path is the
+         * receiver and the FIRST parenthesised argument may be an option
+         * (audit 39). */
+        if (dotted && fv_read_duckdb_arg_refused(q, nest, budget))
+            return 1;
         for (;;) {
             q = dyn_skip_gap(q, nest, budget);
             if (!q) return 1;
@@ -916,6 +967,199 @@ static int fv_read_duckdb_refused(const char *p, size_t *budget)
 static int fv_read_duckdb_name(const char *s, size_t n)
 {
     return n == 11 && strncasecmp(s, "read_duckdb", 11) == 0;
+}
+
+/* ── Method-call spelling: x.f(...) is f(x, ...) (audit 39) ──────────
+ *
+ * DuckDB rewrites `x.f(args)` as `f(x, args)`, so the value a guarded
+ * function takes first can stand BEFORE the dot:
+ * concat('_hu', 'll_outbox_id_seq').nextval() advanced a stdlib sequence
+ * while nextval(concat(...)) was refused. The readers below run at every
+ * '.' of the text (literals are not skipped, as elsewhere): when a guarded
+ * name follows it (bare or "quoted", whitespace / comments around) and is
+ * called, the receiver must be one plain '...' literal. */
+
+enum { FV_RECV_OTHER = 0, FV_RECV_LITERAL, FV_RECV_NAME };
+
+static int fv_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+           c == '\v';
+}
+
+/* Whether the text just before @p at (whitespace only) is a '.'. */
+static int fv_prev_is_dot(const char *sql, const char *at)
+{
+    const char *b = at;
+    while (b > sql && fv_space(b[-1])) b--;
+    return b > sql && b[-1] == '.';
+}
+
+/* What stands before the '.' at @p dot, read backwards over whitespace
+ * only (a comment there makes it OTHER: the stricter reading). LITERAL: one
+ * '...' literal with nothing joined to it - no prefix letter (E'', X'',
+ * U&''), no literal before it (DuckDB joins '_hu' 'll_x' across a newline);
+ * *@p lit is its opening quote. NAME: a bare name chain (a, a.b) not
+ * following an expression. Every byte read is charged; past the budget,
+ * OTHER. */
+static int fv_receiver_kind(const char *sql, const char *dot,
+                            const char **lit, size_t *budget)
+{
+    const char *e = dot;
+    while (e > sql && fv_space(e[-1])) e--;
+    if (e == sql) return FV_RECV_OTHER;
+    if (e[-1] == '\'') {
+        /* Back to the opening quote: a doubled quote is one quote. */
+        const char *k = e - 1;
+        for (;;) {
+            const char *j = k;
+            while (j > sql && j[-1] != '\'') j--;
+            if (!fv_take(budget, (size_t)(k - j) + 1)) return FV_RECV_OTHER;
+            if (j == sql) return FV_RECV_OTHER;      /* no opening quote */
+            j--;                                     /* j: a quote */
+            if (j > sql && j[-1] == '\'') { k = j - 1; continue; }
+            const char *b = j;
+            if (b > sql && (dyn_ident_char((unsigned char)b[-1]) ||
+                            b[-1] == '&'))
+                return FV_RECV_OTHER;                /* E'..', U&'..' */
+            while (b > sql && fv_space(b[-1])) b--;
+            if (b > sql && b[-1] == '\'')
+                return FV_RECV_OTHER;                /* '..' '..' joined */
+            *lit = j;
+            return FV_RECV_LITERAL;
+        }
+    }
+    if (dyn_ident_char((unsigned char)e[-1]) || e[-1] == '"') {
+        /* A chain of bare and "quoted" names, a."b".c - no gaps. */
+        const char *b = e;
+        for (;;) {
+            if (b > sql && b[-1] == '"') {
+                const char *k = b - 1;           /* the closing quote */
+                for (;;) {
+                    const char *j = k;
+                    while (j > sql && j[-1] != '"') j--;
+                    if (!fv_take(budget, (size_t)(k - j) + 1))
+                        return FV_RECV_OTHER;
+                    if (j == sql) return FV_RECV_OTHER;
+                    j--;
+                    if (j > sql && j[-1] == '"') { k = j - 1; continue; }
+                    b = j;
+                    break;
+                }
+            } else {
+                const char *s0 = b;
+                while (b > sql && dyn_ident_char((unsigned char)b[-1])) b--;
+                if (!fv_take(budget, (size_t)(s0 - b))) return FV_RECV_OTHER;
+                if (b == s0 || !fv_name_start((unsigned char)*b))
+                    return FV_RECV_OTHER;
+            }
+            if (b > sql + 1 && b[-1] == '.' &&
+                (dyn_ident_char((unsigned char)b[-2]) || b[-2] == '"')) {
+                b--;
+                continue;
+            }
+            break;
+        }
+        if (b > sql && dyn_ident_char((unsigned char)b[-1]))
+            return FV_RECV_OTHER;                    /* U&"..": a prefix */
+        const char *c = b;
+        while (c > sql && fv_space(c[-1])) c--;
+        if (c > sql && (c[-1] == ')' || c[-1] == ']' || c[-1] == '}' ||
+                        c[-1] == '\'' || c[-1] == '"' || c[-1] == ':' ||
+                        c[-1] == '.'))
+            return FV_RECV_OTHER;                    /* (expr)::t.f() */
+        return FV_RECV_NAME;
+    }
+    return FV_RECV_OTHER;
+}
+
+/* After the '.' at @p dot, read with one comment rule: the name there (bare
+ * or "quoted") copied into @p buf, and whether it is called. 1 = called,
+ * with *@p paren at its '('; 0 = no name / not called; -1 = budget gone. */
+static int fv_dotted_name(const char *dot, int nest, size_t *budget,
+                          char *buf, size_t cap, size_t *n,
+                          const char **paren)
+{
+    const char *q = dyn_skip_gap(dot + 1, nest, budget);
+    if (!q) return -1;
+    const char *e;
+    if (*q == '"') {
+        int exhausted = 0;
+        e = fv_quoted_st(q, budget, buf, cap, n, &exhausted);
+        if (!e) return exhausted ? -1 : 0;
+    } else if (fv_name_start((unsigned char)*q)) {
+        e = q;
+        while (dyn_ident_char((unsigned char)*e)) e++;
+        size_t len = (size_t)(e - q);
+        if (!fv_take(budget, len)) return -1;
+        if (len >= cap) {
+            *n = SIZE_MAX;
+        } else {
+            memcpy(buf, q, len);
+            buf[len] = '\0';
+            *n = len;
+        }
+    } else {
+        return 0;
+    }
+    if (*n == SIZE_MAX) return 0;            /* longer than any guarded name */
+    const char *g = dyn_skip_gap(e, nest, budget);
+    if (!g) return -1;
+    if (*g != '(') return 0;
+    *paren = g;
+    return 1;
+}
+
+/* At the '.' at @p dot of @p sql: 1 when a guarded function is called in
+ * method form with a receiver it may not take. A '...' literal receiver is
+ * always fine. A name chain before the dot is also how a schema-qualified
+ * call is spelled (main.pragma_table_info('users'), which DuckDB binds as
+ * such when `main` is a schema): with parenthesised arguments - checked as
+ * arguments by the main scan - it passes; with none, `n.nextval()` is
+ * nextval(n), a column's run-time value, refused for the sequence functions
+ * and in a macro body (a parameter). Any other receiver - an expression,
+ * concat(...), a cast - is refused. The histogram table macro (two or more
+ * arguments in all) takes a literal or, outside a macro body, a name; with
+ * none in its parentheses it is the aggregate. read_duckdb's options are
+ * read from its first parenthesised argument on (its path is the file
+ * reader's). */
+static int fv_dotted_refused(const char *sql, const char *dot, int strict,
+                             size_t *budget)
+{
+    for (int nest = 1; nest >= 0; nest--) {
+        char buf[32];
+        size_t n = 0;
+        const char *paren = NULL;
+        int got = fv_dotted_name(dot, nest, budget, buf, sizeof buf, &n, &paren);
+        if (got < 0) return 1;
+        if (got == 0) continue;
+        if (fv_always_refused_name(buf, n)) return 1;
+        int value_strict = fv_sequence_fn_name(buf, n) ||
+                           fv_table_by_value_name(buf, n) ||
+                           fv_pragma_by_value_name(buf, n);
+        int histogram = n == 9 && strncasecmp(buf, "histogram", 9) == 0;
+        if (fv_read_duckdb_name(buf, n) &&
+            fv_read_duckdb_refused(paren, 1, budget))
+            return 1;
+        if (!value_strict && !histogram) continue;
+        if (histogram && fv_call_is_empty(paren, 1, budget) == 1 &&
+            fv_call_is_empty(paren, 0, budget) == 1)
+            continue;                        /* histogram(x): the aggregate */
+        const char *lit = NULL;
+        int kind = fv_receiver_kind(sql, dot, &lit, budget);
+        if (kind == FV_RECV_LITERAL) continue;
+        if (kind != FV_RECV_NAME) return 1;
+        if (histogram) {
+            if (strict) return 1;
+            continue;
+        }
+        int empty1 = fv_call_is_empty(paren, 1, budget);
+        int empty0 = fv_call_is_empty(paren, 0, budget);
+        if (empty1 < 0 || empty0 < 0) return 1;
+        if (!empty1 && !empty0) continue;    /* qualified: args checked */
+        if (strict || fv_sequence_fn_name(buf, n)) return 1;
+    }
+    return 0;
 }
 
 /* The modifiers DuckDB's grammar allows between CREATE and MACRO / FUNCTION
@@ -996,10 +1240,10 @@ int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro)
             }
             if (fits && fv_always_refused_name(buf, n)) return 1;
             if (fits && *q == '"' && fv_sequence_fn_name(buf, n) &&
-                fv_sequence_arg_refused(q + 1, &budget))
+                fv_sequence_arg_refused(q + 1, fv_prev_is_dot(sql, p), &budget))
                 return 1;
             if (fits && *q == '"' && fv_read_duckdb_name(buf, n) &&
-                fv_read_duckdb_refused(q + 1, &budget))
+                fv_read_duckdb_refused(q + 1, 0, &budget))
                 return 1;
             if (fits && *q == '"' && fv_table_by_value_name(buf, n) &&
                 (fv_table_arg_refused(q + 1, 1, strict, &budget) ||
@@ -1021,16 +1265,21 @@ int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro)
             p++;
             continue;
         }
+        if (c == '.') {               /* x.f(...) is f(x, ...) (audit 39) */
+            if (fv_dotted_refused(sql, p, strict, &budget)) return 1;
+            p++;
+            continue;
+        }
         if (dyn_ident_char(c) && !(c >= '0' && c <= '9')) {
             const char *start = p;
             while (*p && dyn_ident_char((unsigned char)*p)) p++;
             size_t n = (size_t)(p - start);
             if (fv_always_refused_name(start, n)) return 1;
             if (fv_sequence_fn_name(start, n) &&
-                fv_sequence_arg_refused(p, &budget))
+                fv_sequence_arg_refused(p, fv_prev_is_dot(sql, start), &budget))
                 return 1;
             if (fv_read_duckdb_name(start, n) &&
-                fv_read_duckdb_refused(p, &budget))
+                fv_read_duckdb_refused(p, 0, &budget))
                 return 1;
             if (fv_table_by_value_name(start, n) &&
                 (fv_table_arg_refused(p, 1, strict, &budget) ||
@@ -1206,6 +1455,31 @@ static int fv_file_call_refused(const char *p, int nest, int deny,
     return !q || (*q != ',' && *q != ')');
 }
 
+/* At the '.' at @p dot: 1 when a file function is called in method form
+ * (`'a.csv'.read_csv(...)` is read_csv('a.csv', ...), audit 39) and its
+ * receiver - the path - is not one path literal that passes, or under
+ * @p deny at all. */
+static int fv_dotted_file_refused(const char *sql, const char *dot, int deny,
+                                  const FvProtect *pr, size_t *budget)
+{
+    for (int nest = 1; nest >= 0; nest--) {
+        char buf[32];
+        size_t n = 0;
+        const char *paren = NULL;
+        int got = fv_dotted_name(dot, nest, budget, buf, sizeof buf, &n, &paren);
+        if (got < 0) return 1;
+        if (got == 0 || !fv_file_function_name(buf, n)) continue;
+        if (deny) return 1;
+        const char *lit = NULL;
+        int kind = fv_receiver_kind(sql, dot, &lit, budget);
+        if (kind == FV_RECV_NAME) continue;  /* main.read_csv('x'): the
+                                              * main scan reads its path */
+        if (kind != FV_RECV_LITERAL) return 1;
+        if (!fv_path_literal(lit, pr, budget)) return 1;
+    }
+    return 0;
+}
+
 /* After the word COPY at @p p, read with one comment rule: 1 when its TO /
  * FROM target (the first TO or FROM outside parentheses) is not a path
  * literal or a bare name - a (constant expression) is one DuckDB folds -
@@ -1347,6 +1621,9 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
                 return 1;
             continue;
         }
+        if (c == '.' &&
+            fv_dotted_file_refused(sql, p, deny_file_functions, pr, &budget))
+            return 1;
         p++;
     }
     return 0;

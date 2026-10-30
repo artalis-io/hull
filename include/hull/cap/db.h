@@ -282,6 +282,36 @@ int hl_cap_db_guard_stale_txn(sqlite3 *db);
 int hl_cap_db_check_namespace(const char *sql);
 
 /**
+ * @brief Mark the SQL this thread runs next as trusted (stdlib / Hull's own)
+ * or not, for the SQLite authorizer's `_hull_*` check (audit 39).
+ *
+ * The text check above sees only the SQL an app hands Hull; a view or
+ * trigger stored in the database expands at prepare time into reads and
+ * writes of tables the text never names (`CREATE VIEW v AS SELECT tok FROM
+ * _hull_sessions` in a planted file, then app `SELECT tok FROM v`). The
+ * SQLite authorizer refuses every read / write / DDL of a `_hull_*` table
+ * unless this thread's flag is set. Untrusted is the default; the bindings
+ * set it from the same stdlib-frame rule that waives the text check, around
+ * the backend call only (prepare AND step - a statement re-prepared after a
+ * schema change re-runs the authorizer), and Hull's internal statements
+ * (the migration tracking table) set it themselves. Nesting: a binding
+ * called from inside another statement (a UDF, a finalizer) sets its own
+ * value and puts the outer one back.
+ *
+ * @return The previous value, for #hl_cap_db_ns_restore.
+ */
+int  hl_cap_db_ns_trust(int trusted);
+void hl_cap_db_ns_restore(int prev);
+/** @brief This thread's current flag (read by the SQLite authorizer). */
+int  hl_cap_db_ns_trusted(void);
+
+/**
+ * @brief Whether @p name (a table / index / trigger / view name the SQLite
+ * authorizer reports) is a reserved `_hull_*` object, compared without case.
+ */
+int  hl_cap_db_name_reserved(const char *name);
+
+/**
  * @brief Whether @p sql calls one of DuckDB's dynamic-SQL table functions -
  * `query(sql)`, `query_table(name)`, `json_execute_serialized_sql(plan)` -
  * which assemble a statement or a table name at run time and so get past

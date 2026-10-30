@@ -405,8 +405,13 @@ static int lua_db_query_impl(lua_State *L)
         lua_scratch_release(L, params);   /* audit 24: raised with it held */
         return luaL_error(L, "query: the connection was closed");
     }
+    /* The authorizer's `_hull_*` check follows the same rule as the text
+     * check above (audit 39): a stored view / trigger reaching one is
+     * refused for app SQL. Set around the call only (prepare and step). */
+    int ns_prev = hl_cap_db_ns_trust(is_stdlib);
     int rc = hl_db_query(h, sql, params, nparams,
                          lua_query_row_cb, &qc, lua->base.alloc);
+    hl_cap_db_ns_restore(ns_prev);
     /* Closes the guard and pops the params lua_to_hl_values left on the
      * stack (they kept the string pointers alive during the query): the
      * result table is on top. */
@@ -456,7 +461,9 @@ static int lua_db_exec_impl(lua_State *L)
         lua_scratch_release(L, params);   /* audit 24, as lua_db_query_impl */
         return luaL_error(L, "exec: the connection was closed");
     }
+    int ns_prev = hl_cap_db_ns_trust(is_stdlib);   /* see query */
     int rc = hl_db_exec(h, sql, params, nparams);
+    hl_cap_db_ns_restore(ns_prev);
     lua_settop(L, guard - 1);   /* closes the guard, pops the params */
     lua_scratch_release(L, params);
 
@@ -692,8 +699,10 @@ static int lua_db_insert_if_absent(lua_State *L)
 
     HlDbHandle *h = db_call_handle(L);
 
+    int ns_prev = hl_cap_db_ns_trust(lua_is_stdlib_caller(L, "insert_if_absent"));
     int rc = hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
                                      cols, vals, n_cols);
+    hl_cap_db_ns_restore(ns_prev);
     if (lua->scratch) lua->scratch->used = scratch_mark_at;
     if (rc < 0) {
         return hl_lua_raise_copy(L, "db.insert_if_absent: ", hl_db_errmsg(h));
@@ -754,8 +763,10 @@ static int lua_db_upsert(lua_State *L)
 
     HlDbHandle *h = db_call_handle(L);
 
+    int ns_prev = hl_cap_db_ns_trust(lua_is_stdlib_caller(L, "upsert"));
     int rc = hl_db_upsert(h, table, conflict_cols, n_conflict,
                            cols, vals, n_cols);
+    hl_cap_db_ns_restore(ns_prev);
     if (lua->scratch) lua->scratch->used = scratch_mark_at;
     if (rc < 0) {
         return hl_lua_raise_copy(L, "db.upsert: ", hl_db_errmsg(h));
@@ -968,6 +979,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
      * query/exec kinds take (sql, params). */
     const char *sql = NULL, *channel = NULL;
     int timeout_ms = 0;
+    int ns_trusted = 0;   /* the stdlib-frame verdict, for the worker */
     HlValue *params = NULL;
     int nparams = 0;
 
@@ -989,8 +1001,8 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
             (double)luaL_optinteger(L, 2, 1000));
     } else {
         sql = luaL_checkstring(L, 1);
-        if (!lua_is_stdlib_caller(L, kind == HL_WORK_DB_QUERY ? "query" : "exec") &&
-            hl_cap_db_check_namespace(sql) != 0)
+        ns_trusted = lua_is_stdlib_caller(L, kind == HL_WORK_DB_QUERY ? "query" : "exec");
+        if (!ns_trusted && hl_cap_db_check_namespace(sql) != 0)
             return luaL_error(L, "access denied: _hull_* tables are reserved");
         if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
             if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
@@ -1093,6 +1105,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         const char *dsn = db_call_dsn(L);
         op->max_instructions = lua->max_instructions;   /* the op's own */
         op->max_result_bytes = lua->mem_limit;
+        op->ns_trusted = ns_trusted;
         hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
                                lua->mem_limit);
         op->no_cache = luaL_testudata(L, lua_upvalueindex(1),

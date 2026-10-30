@@ -10,6 +10,7 @@
 
 #include "utest.h"
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db.h"   /* hl_cap_db_ns_trust */
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/manifest.h"
@@ -241,9 +242,12 @@ UTEST(db_registry, a_declared_internal_dsn_is_its_own_connection)
     /* A worker resolves the same database for it. */
     EXPECT_STREQ(":memory:", hl_db_registry_dsn_for(reg, in));
 
-    /* The internal tables live there, not in the app's database. */
+    /* The internal tables live there, not in the app's database. (As the
+     * stdlib: the SQLite authorizer refuses `_hull_*` otherwise, audit 39.) */
+    int ns_prev = hl_cap_db_ns_trust(1);
     ASSERT_TRUE(hl_db_exec(in, "CREATE TABLE _hull_probe (x INTEGER)", NULL, 0) >= 0);
     EXPECT_TRUE(hl_db_exec(def, "INSERT INTO _hull_probe VALUES (1)", NULL, 0) < 0);
+    hl_cap_db_ns_restore(ns_prev);
     hl_db_registry_destroy(reg);
 }
 
