@@ -536,13 +536,22 @@ UTEST(hl_cap_crypto, random_null)
 
 /* ── Ed25519 keypair from a seed (audit 36) ─────────────────────────── */
 
-static void kat_unhex(const char *hex, uint8_t *out, size_t n)
+/* Not sscanf("%2x"): cosmocc's does not count a leading 0 toward the field
+ * width, so a byte whose first digit is 0 is misread ("04" came back as
+ * 0x44 in the RFC 8439 vectors below, "031c" as 0x31 in RFC 8032 TEST 1's
+ * seed) - the Ed25519 / ChaCha20 known-answer tests then fail on cosmo with
+ * the crypto itself correct. */
+static int nibble(char c)
 {
-    for (size_t i = 0; i < n; i++) {
-        unsigned v = 0;
-        sscanf(hex + 2 * i, "%2x", &v);
-        out[i] = (uint8_t)v;
-    }
+    return c >= '0' && c <= '9' ? c - '0'
+         : c >= 'a' && c <= 'f' ? c - 'a' + 10
+         : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0;
+}
+
+static void unhex(const char *h, uint8_t *out, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        out[i] = (uint8_t)(nibble(h[2 * i]) << 4 | nibble(h[2 * i + 1]));
 }
 
 /* RFC 8032 section 7.1, TEST 1 / 2 / 3: SECRET KEY -> PUBLIC KEY. */
@@ -558,8 +567,8 @@ UTEST(hl_cap_crypto, ed25519_seed_keypair_matches_rfc8032)
     };
     for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
         uint8_t seed[32], want_pk[32], pk[32], sk[64];
-        kat_unhex(v[i][0], seed, 32);
-        kat_unhex(v[i][1], want_pk, 32);
+        unhex(v[i][0], seed, 32);
+        unhex(v[i][1], want_pk, 32);
         ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(seed, pk, sk), 0);
         ASSERT_EQ(memcmp(pk, want_pk, 32), 0);
         /* TweetNaCl's secret key layout: seed || public key */
@@ -572,9 +581,9 @@ UTEST(hl_cap_crypto, ed25519_seed_keypair_matches_rfc8032)
 UTEST(hl_cap_crypto, ed25519_seed_keypair_signs_the_rfc8032_vector)
 {
     uint8_t seed[32], pk[32], sk[64], sig[64], want[64];
-    kat_unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
           seed, 32);
-    kat_unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+    unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
           "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
           want, 64);
     ASSERT_EQ(hl_cap_crypto_ed25519_seed_keypair(seed, pk, sk), 0);
@@ -1343,20 +1352,6 @@ UTEST(aes256ctr, rejects_bad_arguments)
 
 /* ── ChaCha20 / Poly1305 (RFC 8439 vectors) ────────────────────────── */
 
-/* Not sscanf("%2x"): cosmocc's misreads a byte whose first digit is 0
- * ("04" came back as 0x44), which turned these vectors into garbage. */
-static int nibble(char c)
-{
-    return c >= '0' && c <= '9' ? c - '0'
-         : c >= 'a' && c <= 'f' ? c - 'a' + 10
-         : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0;
-}
-
-static void unhex(const char *h, uint8_t *out, size_t n)
-{
-    for (size_t i = 0; i < n; i++)
-        out[i] = (uint8_t)(nibble(h[2 * i]) << 4 | nibble(h[2 * i + 1]));
-}
 
 UTEST(crypto, chacha20_rfc8439_2_4_2)
 {
