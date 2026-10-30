@@ -22,6 +22,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <strings.h>     /* strncasecmp */
+#include <pthread.h>
+#include <stdatomic.h>
 
 #ifndef HL_FS_PATH_MAX
 #define HL_FS_PATH_MAX 4096
@@ -131,6 +134,118 @@ static size_t caller_component_count(const char *p)
     }
     return n;
 }
+
+/* ── reserved app-tree directory (audit 37) ───────────────────────────────── *
+ *
+ * <app>/.hull holds the `hull dev --agent` sidecars (dev.json, last_error.json,
+ * discovery.json) and `hull build`'s cosmo debug sidecars; an agent reads them as
+ * Hull's own output, so app code never touches it. The policy refuses a caller path
+ * naming it lexically (fs_policy.c); this walk refuses STEPPING into it from an app
+ * root by any route a lexical check cannot see - an in-root symlink (`x -> .hull`),
+ * another letter case on a case-insensitive filesystem, or an HFS+ spelling with
+ * ignorable code points (compared by inode when it is a directory). The roots are
+ * registered by hl_fs_reserve_root (every policy compile). */
+#define HL_FS_RESERVED_ROOTS_MAX 16
+
+static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { dev_t dev; ino_t ino; int fd; } g_res[HL_FS_RESERVED_ROOTS_MAX];
+static atomic_int g_res_n;
+static int g_res_evict;   /* next slot to reuse once full (under g_res_mu) */
+
+int hl_fs_reserved_name(const char *name, size_t len)
+{
+    return name && len == 5 && strncasecmp(name, ".hull", 5) == 0;
+}
+
+void hl_fs_reserve_root(int base_fd)
+{
+    struct stat st;
+    if (base_fd < 0 || fstat(base_fd, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    pthread_mutex_lock(&g_res_mu);
+    int n = atomic_load(&g_res_n);
+    int seen = 0;
+    for (int i = 0; i < n; i++)
+        if (g_res[i].dev == st.st_dev && g_res[i].ino == st.st_ino) { seen = 1; break; }
+    if (!seen) {
+        int slot = n < HL_FS_RESERVED_ROOTS_MAX ? n : -1;
+        if (slot < 0) {
+            /* Full: reuse the slot of a root that has been removed. Only a
+             * process that compiles policies for many directories - a test
+             * binary - gets here; a server compiles one. */
+            for (int i = 0; i < n; i++) {
+                struct stat rs;
+                if (fstat(g_res[i].fd, &rs) == 0 && rs.st_nlink == 0) { slot = i; break; }
+            }
+            /* None known removed (some filesystems keep st_nlink): the oldest
+             * goes, so the root compiled last is always registered. */
+            if (slot < 0) {
+                slot = g_res_evict;
+                g_res_evict = (g_res_evict + 1) % HL_FS_RESERVED_ROOTS_MAX;
+            }
+        }
+        int fd = slot >= 0 ? fcntl(base_fd, F_DUPFD_CLOEXEC, 0) : -1;
+        if (fd >= 0) {
+            int old = slot < n ? g_res[slot].fd : -1;
+            g_res[slot].dev = st.st_dev;
+            g_res[slot].ino = st.st_ino;
+            g_res[slot].fd = fd;
+            if (old >= 0) close(old);
+            if (slot == n) atomic_store(&g_res_n, n + 1);   /* publish after the write */
+        }
+    }
+    pthread_mutex_unlock(&g_res_mu);
+}
+
+/* Is @p dirfd one of the registered app roots? */
+static int is_reserved_root(int dirfd)
+{
+    int n = atomic_load(&g_res_n);
+    if (n == 0) return 0;
+    struct stat st;
+    if (fstat(dirfd, &st) != 0) return 0;
+    for (int i = 0; i < n; i++)
+        if (g_res[i].dev == st.st_dev && g_res[i].ino == st.st_ino) return 1;
+    return 0;
+}
+
+int hl_fs_is_reserved_root(int dirfd) { return is_reserved_root(dirfd); }
+
+/* Would stepping from @p parent to its entry @p comp (whose stat is @p st, when
+ * known) reach the reserved directory? 1 = refuse. */
+static int reserved_step(int parent, const char *comp, const struct stat *st)
+{
+    if (atomic_load(&g_res_n) == 0) return 0;
+    int root = -1;   /* computed lazily: one fstat */
+    if (hl_fs_reserved_name(comp, strlen(comp))) {
+        root = is_reserved_root(parent);
+        if (root) return 1;
+    }
+    if (st && S_ISDIR(st->st_mode)) {
+        if (root < 0) root = is_reserved_root(parent);
+        if (!root) return 0;
+        struct stat hs;
+        if (fstatat(parent, ".hull", &hs, AT_SYMLINK_NOFOLLOW) == 0 &&
+            hs.st_dev == st->st_dev && hs.st_ino == st->st_ino)
+            return 1;
+    }
+    return 0;
+}
+
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+/* Does any registered root currently hold a .hull entry? Then openat2's one-call
+ * resolution, which reports nothing about the directories it passed, is not used. */
+static int reserved_dir_present(void)
+{
+    int n = atomic_load(&g_res_n);
+    for (int i = 0; i < n; i++) {
+        struct stat hs;
+        if (fstatat(g_res[i].fd, ".hull", &hs, AT_SYMLINK_NOFOLLOW) == 0) return 1;
+        /* another spelling of the name on a case-insensitive filesystem is found by
+         * the same lookup there; on a case-sensitive one it is another directory. */
+    }
+    return 0;
+}
+#endif
 
 /* Test/diagnostic hook: HL_FS_FORCE_MANUAL forces the portable manual walk even on
  * Linux, so the parity tests can exercise both implementations on one platform.
@@ -303,6 +418,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
              * the old macOS ELOOP-vs-ENOTDIR ambiguity: an interior symlink is now
              * recognised by the lstat, not by interpreting an open error. */
             int reclass = 0;
+            if (reserved_step(stack[depth - 1], comp, NULL)) {
+                *err = "reserved_path"; goto fail;
+            }
             for (;;) {
                 struct stat lst;
                 if (fstatat(stack[depth - 1], comp, &lst, AT_SYMLINK_NOFOLLOW) != 0) {
@@ -338,6 +456,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 struct stat st;
                 if (fstat(fd, &st) != 0) { close(fd); map_errno(errno, err); goto fail; }
                 if (!S_ISDIR(st.st_mode)) { close(fd); *err = "not_a_directory"; goto fail; }
+                if (reserved_step(stack[depth - 1], comp, &st)) {
+                    close(fd); *err = "reserved_path"; goto fail;
+                }
                 if (depth >= HL_FS_MAX_DEPTH) { close(fd); *err = "path_too_deep"; goto fail; }
                 stack[depth++] = fd;
                 break;
@@ -351,6 +472,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
              * O_DIRECTORY|O_NOFOLLOW on a symlink returns ENOTDIR on macOS (not
              * ELOOP), which would misread a symlinked dir as not_a_directory. */
             struct stat lst;
+            if (reserved_step(stack[depth - 1], comp, NULL)) {
+                *err = "reserved_path"; goto fail;
+            }
             if (fstatat(stack[depth - 1], comp, &lst, AT_SYMLINK_NOFOLLOW) != 0) {
                 map_errno(errno, err); goto fail;
             }
@@ -363,6 +487,13 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 if (errno == ENOTDIR) { *err = "not_a_directory"; goto fail; }
                 map_errno(errno, err); goto fail;
             }
+            {
+                struct stat dst;
+                if (fstat(fd, &dst) != 0) { close(fd); map_errno(errno, err); goto fail; }
+                if (reserved_step(stack[depth - 1], comp, &dst)) {
+                    close(fd); *err = "reserved_path"; goto fail;
+                }
+            }
             result_fd = fd;
             goto done;
         } else {
@@ -373,6 +504,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
              * truncate) plus the contained mkdir-p already done for interior
              * components. A symlink leaf still returns ELOOP (O_NOFOLLOW) and is
              * handled by the symlink policy below, unchanged. */
+            if (reserved_step(stack[depth - 1], comp, NULL)) {
+                *err = "reserved_path"; goto fail;
+            }
             int flags = (mode == HL_FS_OPEN_READ)
                           ? (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
                           : (O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
@@ -464,7 +598,8 @@ int hl_fs_open_at_leaf(int root_fd, const char *relpath, HlFsOpenMode mode,
     /* openat2 does not create intermediate dirs, so WRITE always uses the manual
      * walk (which does the contained mkdir-p). READ and DIR take the one-call fast
      * path, unless HL_FS_FORCE_MANUAL is set (parity testing). */
-    if ((mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) && !force_manual()) {
+    if ((mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) && !force_manual() &&
+        !reserved_dir_present()) {
         /* A READ leaf opens O_NONBLOCK so a special-file target can never block the
          * open; it is then type-gated to a regular file. DIR keeps O_DIRECTORY (its
          * own S_ISDIR contract; a directory open never blocks). */
@@ -546,6 +681,11 @@ int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink sympol,
         if (parent_fd < 0) { if (err) *err = e; return -1; }
     }
 
+    if (reserved_step(parent_fd, leaf, NULL)) {
+        close(parent_fd);
+        if (err) *err = "reserved_path";
+        return -1;
+    }
     memcpy(out->leaf, leaf, leaf_len + 1);
     out->parent_fd = parent_fd;
     return 0;

@@ -165,6 +165,9 @@ int hl_fs_grant_parse(const char *raw, size_t raw_len, HlAllocator *alloc,
         if (seglen == 1 && seg[0] == '.') continue;    /* "." adds no depth */
         if (seglen == 2 && seg[0] == '.' && seg[1] == '.') { e = "invalid_path"; goto fail; }
         if (seglen > NAME_MAX) { e = "invalid_path"; goto fail; }
+        /* A grant of <app>/.hull (or anything in it) - Hull's own directory, which
+         * no app capability reaches - fails the manifest (audit 37). */
+        if (n == 0 && hl_fs_reserved_name(seg, seglen)) { e = "reserved_path"; goto fail; }
 
         int has_star = 0;
         if (scan_component(seg, seglen, &has_star, &e) != 0) goto fail;
@@ -477,6 +480,9 @@ int hl_fs_policy_compile(const char *base_dir, HlAllocator *alloc,
     p.alloc = alloc;
     p.base_fd = hl_fs_open_base(base_dir, &e);
     if (p.base_fd < 0) { if (err) *err = e; return -1; }
+    /* Every resolution in this process refuses stepping into base_dir/.hull
+     * (audit 37), whatever route reaches it. */
+    hl_fs_reserve_root(p.base_fd);
 
     if (compile_set(p.base_fd, alloc, read, read_n, &p.read, &p.read_n, &e) != 0) goto fail;
     if (compile_set(p.base_fd, alloc, write, write_n, &p.write, &p.write_n, &e) != 0) goto fail;
@@ -593,6 +599,10 @@ static long split_caller(const char *path, const char **comp, size_t *len,
         if (l == 2 && s[0] == '.' && s[1] == '.') { *err = "invalid_path"; return -1; }
         if (l > NAME_MAX) { *err = "invalid_path"; return -1; }
         if (n >= HL_FS_MAX_DEPTH) { *err = "invalid_path"; return -1; }
+        /* <app>/.hull is Hull's own (the `hull dev --agent` sidecars an agent
+         * trusts); app code may not name it, in any letter case (audit 37). The
+         * resolver also refuses reaching it through a symlink. */
+        if (n == 0 && hl_fs_reserved_name(s, l)) { *err = "reserved_path"; return -1; }
         comp[n] = s; len[n] = l; n++;
     }
     if (n == 0 && !allow_empty) { *err = "invalid_path"; return -1; }

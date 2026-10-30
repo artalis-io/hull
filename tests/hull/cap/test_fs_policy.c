@@ -14,6 +14,7 @@
 
 #include "utest.h"
 #include "hull/cap/fs_policy.h"
+#include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -640,5 +641,102 @@ UTEST(policy_span, an_overlong_default_dsn_is_refused)
     EXPECT_TRUE(hl_db_registry_create(NULL, dsn, NULL) == NULL);
 }
 #endif
+
+/* ── audit 37: <app>/.hull is never reachable by app capabilities ──────────────
+ * It holds the `hull dev --agent` sidecars an agent trusts as Hull's output. */
+UTEST(fs_policy, hull_dir_grant_is_refused)
+{
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsGrant g = HL_FS_GRANT_INIT; const char *err = NULL;
+    const char *bad[] = { ".hull", ".hull/", ".hull/dev.json", "./.hull/x", ".HULL/",
+                          ".Hull/last_error.json" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        err = NULL;
+        EXPECT_EQ(-1, hl_fs_grant_parse(bad[i], strlen(bad[i]), &a, &g, &err));
+        EXPECT_STREQ("reserved_path", err);
+    }
+    /* only the app root's .hull: a nested one, or a longer name, is the app's */
+    ASSERT_EQ(0, hl_fs_grant_parse("data/.hull/x", 12, &a, &g, &err)); hl_fs_grant_free(&g);
+    ASSERT_EQ(0, hl_fs_grant_parse(".hullx", 6, &a, &g, &err));        hl_fs_grant_free(&g);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+}
+
+UTEST(fs_policy, hull_dir_caller_paths_are_refused)
+{
+    setup(); build_tree();
+    mk_dir(".hull"); mk_file(".hull/dev.json");
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "." };
+    const char *wr[] = { "." };
+    ASSERT_EQ(0, build_policy(&a, rd, 1, wr, 1, &p, &err));
+
+    char sc[256];
+    const char *bad[] = { ".hull/dev.json", "./.hull/dev.json", ".HULL/dev.json",
+                          ".hUlL/x", ".hull" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        HlFsSelection s = hl_fs_policy_select(&p, bad[i], HL_FS_OPEN_READ, sc, sizeof sc);
+        EXPECT_TRUE(s.entry == NULL); EXPECT_STREQ("reserved_path", s.err);
+        s = hl_fs_policy_select(&p, bad[i], HL_FS_OPEN_WRITE, sc, sizeof sc);
+        EXPECT_TRUE(s.entry == NULL); EXPECT_STREQ("reserved_path", s.err);
+        s = hl_fs_policy_select_stat(&p, bad[i], sc, sizeof sc);
+        EXPECT_TRUE(s.entry == NULL); EXPECT_STREQ("reserved_path", s.err);
+        HlFsListSelection l = hl_fs_policy_select_list(&p, bad[i], sc, sizeof sc);
+        EXPECT_TRUE(l.entry == NULL); EXPECT_STREQ("reserved_path", l.err);
+    }
+    /* the rest of the tree is untouched */
+    HlFsSelection ok = hl_fs_policy_select(&p, "data/a.csv", HL_FS_OPEN_READ, sc, sizeof sc);
+    EXPECT_TRUE(ok.entry != NULL);
+
+    hl_fs_policy_free(&p);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+UTEST(fs_policy, hull_dir_unreachable_through_a_symlink)
+{
+    setup(); build_tree();
+    mk_dir(".hull"); mk_file(".hull/dev.json");
+    mk_link(".hull", "alias");               /* in-root symlink to the reserved dir */
+    mk_link("../.hull/dev.json", "data/leak");
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "." };
+    ASSERT_EQ(0, build_policy(&a, rd, 1, NULL, 0, &p, &err));
+    int root = p.read[0].anchor_fd;
+
+    const char *e = NULL;
+    EXPECT_EQ(-1, hl_fs_open_at(root, "alias/dev.json", HL_FS_OPEN_READ, 0, &e));
+    EXPECT_STREQ("reserved_path", e);
+    e = NULL;
+    EXPECT_EQ(-1, hl_fs_open_at(root, "data/leak", HL_FS_OPEN_READ, 0, &e));
+    EXPECT_STREQ("reserved_path", e);
+    e = NULL;
+    EXPECT_EQ(-1, hl_fs_open_at(root, "alias", HL_FS_OPEN_DIR, 0, &e));
+    EXPECT_STREQ("reserved_path", e);
+    e = NULL;
+    EXPECT_EQ(-1, hl_fs_open_at(root, "alias/new.json", HL_FS_OPEN_WRITE, 0644, &e));
+    EXPECT_STREQ("reserved_path", e);
+    HlFsParent par;
+    e = NULL;
+    EXPECT_EQ(-1, hl_fs_resolve_parent(root, "alias/dev.json", HL_FS_SYMLINK_FOLLOW, &par, &e));
+    EXPECT_STREQ("reserved_path", e);
+    {   /* nothing was created through the alias */
+        char np[512]; struct stat st;
+        snprintf(np, sizeof np, "%s/.hull/new.json", base);
+        EXPECT_NE(0, lstat(np, &st));
+    }
+    /* a grant that IS such a symlink fails the compile */
+    hl_fs_policy_free(&p);
+    const char *rd2[] = { "alias" };
+    p = HL_FS_POLICY_INIT;
+    int rc2 = build_policy(&a, rd2, 1, NULL, 0, &p, &err);
+    EXPECT_EQ(-1, rc2);
+    EXPECT_STREQ("reserved_path", err);
+
+    hl_fs_policy_free(&p);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
 
 UTEST_MAIN();

@@ -110,6 +110,7 @@ FILE *hl_fs_fopen_read(const char *base_dir, const char *relpath);
  * Returns an open fd (caller closes) or -1 with *err set to a stable token:
  * "invalid_path", "path_too_deep", "not_found", "permission", "not_a_directory",
  * "is_a_directory", "not_a_regular_file", "symlink_loop", "symlink_denied",
+ * "reserved_path" (a step into an app root's .hull; hl_fs_reserve_root),
  * "io_error". "not_a_regular_file" is the single token for a READ/WRITE leaf that
  * resolves to a FIFO, socket, character/block device, or directory (§5a intentional
  * tightening). "symlink_denied" only under HL_FS_SYMLINK_REFUSE; see
@@ -173,5 +174,26 @@ typedef struct {
  */
 int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink symlink,
                          HlFsParent *out, const char **err);
+
+/*
+ * The app tree's reserved `.hull` directory (audit 37). It holds the
+ * `hull dev --agent` sidecars an agent reads as Hull's own output, so app code
+ * reaches it by no route.
+ *
+ * hl_fs_reserved_name: 1 iff the component (@p len bytes) is ".hull", ASCII
+ * case-insensitively (what a case-insensitive filesystem opens).
+ *
+ * hl_fs_reserve_root: register the directory @p base_fd names as an app root
+ * (a CLOEXEC dup is kept; up to 16 roots per process). Every resolution then
+ * refuses, with "reserved_path", any step from that root into its `.hull` - by
+ * name in any letter case, or by inode when it is a directory, so an in-root
+ * symlink or another spelling does not reach it either. hl_fs_policy_compile
+ * calls it.
+ *
+ * hl_fs_is_reserved_root: 1 iff @p dirfd is a registered root.
+ */
+int  hl_fs_reserved_name(const char *name, size_t len);
+void hl_fs_reserve_root(int base_fd);
+int  hl_fs_is_reserved_root(int dirfd);
 
 #endif /* HULL_CAP_FS_RESOLVE_H */

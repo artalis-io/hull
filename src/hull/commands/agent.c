@@ -29,6 +29,8 @@
 #include "hull/sbom.h"
 #include "hull/tool.h"
 #include "hull/shared/host.h"   /* hl_host_is_windows: kill(pid,0) is not inert there */
+#include "hull/shared/dev_session.h"   /* discovery MAC (audit 37) */
+#include "hull/utils/secure_zero.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -757,6 +759,37 @@ static int json_document_valid(const char *buf, size_t len)
     return ok;
 }
 
+/* Write valid JSON text with the bytes a terminal acts on escaped: DEL and the UTF-8
+ * C1 controls (U+0080..U+009F), which a JSON encoder leaves raw inside a string, and
+ * any C0 control but the tab / CR / LF whitespace between tokens. Outside a string
+ * valid JSON holds only ASCII structural bytes and whitespace, so the output is the
+ * same JSON value (as agent/eval.c's eval_write_json_safe; audit 37 Low). */
+static void inspect_write_json_safe(FILE *out, const char *json, size_t len)
+{
+    size_t run = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)json[i];
+        unsigned code;
+        size_t skip = 1;
+        if (c < 0x20 || c == 0x7f) {
+            if (c == '\t' || c == '\n' || c == '\r') continue;
+            code = c;
+        } else if (c == 0xc2 && i + 1 < len &&
+                   (unsigned char)json[i + 1] >= 0x80 &&
+                   (unsigned char)json[i + 1] <= 0x9f) {
+            code = (unsigned char)json[i + 1];
+            skip = 2;
+        } else {
+            continue;
+        }
+        if (i > run) fwrite(json + run, 1, i - run, out);
+        fprintf(out, "\\u%04x", code);
+        run = i + skip;
+        i += skip - 1;
+    }
+    if (len > run) fwrite(json + run, 1, len - run, out);
+}
+
 /* If a LIVE dev session has published a discovery generation for `app_dir`, stream it to
  * stdout and return 0. "Live" (D9): both .hull/discovery.json and .hull/dev.json exist,
  * their session_pid values match, that supervisor PID is still alive (kill(pid,0)), AND
@@ -770,14 +803,40 @@ static int agent_inspect_stream_live(const char *app_dir)
     if (a < 0 || (size_t)a >= sizeof(disc_path))
         return -1;
 
-    /* dev.json's nonce against the copy the live supervisor keeps under
-     * $HOME (see dev.c): files a repo shipped in .hull/ cannot match it. */
+    /* dev.json verified under the key the live supervisor keeps under $HOME (see
+     * dev.c): files a repo shipped in .hull/ cannot match it. */
     long sp_dev = 0;
-    if (hl_agent_dev_session(app_dir, NULL, &sp_dev, NULL) != 0) return -1;
+    char key[HL_DEV_SESSION_NONCE_LEN + 1];
+    if (hl_agent_dev_session(app_dir, key, &sp_dev, NULL) != 0) return -1;
 
     size_t disc_len = 0;
     char *disc = hl_agent_read_sidecar(disc_path, 64 * 1024 * 1024, &disc_len);   /* 64 MB cap */
-    if (!disc) return -1;
+    if (!disc) { hl_secure_zero(key, sizeof key); return -1; }
+
+    /* The generation must carry the publisher's MAC under that key, as its LAST member:
+     * `<doc minus its closing brace>,"session_mac":"<64 hex>"}` (+ a newline). The
+     * MAC'd document is the file with that member removed. A session_pid match alone
+     * bound nothing: the app running under the session read dev.json and rewrote
+     * discovery.json to match (audit 37). */
+    size_t end = disc_len;
+    if (end > 0 && disc[end - 1] == '\n') end--;
+    const size_t klen = sizeof(HL_DEV_DISCOVERY_MAC_KEY) - 1;
+    const size_t tail = klen + HL_DEV_SIDECAR_MAC_LEN + 2;   /* key + mac + "\"}" */
+    int mac_ok = 0;
+    size_t doc_len = 0;
+    if (end > tail + 1 && disc[end - 1] == '}' && disc[end - 2] == '"' &&
+        memcmp(disc + end - tail, HL_DEV_DISCOVERY_MAC_KEY, klen) == 0) {
+        const char *mac = disc + end - tail + klen;
+        doc_len = end - tail;            /* bytes before the member */
+        disc[doc_len] = '}';             /* the MAC'd document: "...}" */
+        doc_len++;
+        mac_ok = hl_dev_sidecar_mac_ok(key, HL_DEV_SIDECAR_DISCOVERY, app_dir, sp_dev,
+                                       disc, doc_len, mac);
+    }
+    hl_secure_zero(key, sizeof key);
+    if (!mac_ok) { free(disc); return -1; }
+    disc[doc_len] = '\0';
+    disc_len = doc_len;
     long sp_disc = hl_agent_json_int_field(disc, "session_pid");
 
     /* Bind the published generation to a specific live dev session.
@@ -814,7 +873,8 @@ static int agent_inspect_stream_live(const char *app_dir)
      * -- whose complete on-disk document is invalid -- falls back to standalone. */
     if (!json_document_valid(disc, disc_len)) { free(disc); return -1; }
 
-    fwrite(disc, 1, disc_len, stdout);
+    inspect_write_json_safe(stdout, disc, disc_len);
+    fputc('\n', stdout);
     free(disc);
     return 0;
 }
@@ -845,9 +905,19 @@ static int cmd_inspect(int argc, char **argv, const HlCommandEnv *env)
     }
     if (positionals > 1) clean_read = 0;       /* extra roots -> Lua rejects (exit 2) */
 
-    if (has_publish)
-        return hull_tool("hull.project.publish", argc - 1, argv + 1,
-                         env ? env->hull_exe : NULL);
+    if (has_publish) {
+        /* The dev supervisor hands its session key to the publisher through
+         * the environment: taken (and scrubbed) here, before the tool VM
+         * starts, and used only to MAC the generation (audit 37). */
+        char ds[HL_DEV_SESSION_NONCE_LEN + 1];
+        hl_dev_session_take_env(ds);
+        hl_tool_set_dev_session(ds);
+        hl_secure_zero(ds, sizeof ds);
+        int rc = hull_tool("hull.project.publish", argc - 1, argv + 1,
+                           env ? env->hull_exe : NULL);
+        hl_tool_set_dev_session(NULL);
+        return rc;
+    }
 
     if (clean_read && agent_inspect_stream_live(app_dir) == 0)
         return 0;                              /* served the live published generation */

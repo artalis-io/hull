@@ -21,6 +21,14 @@
 int hull_tool(const char *module, int argc, char **argv, const char *hull_exe);
 
 /*
+ * Hand the `hull dev --agent` session key (64 hex, from HL_DEV_SESSION_ENV;
+ * NULL / "" clears it) to the tool VM's tool.dev_sidecar_mac, which MACs a
+ * published discovery generation with it. The key stays in C memory; the VM
+ * only ever sees the MAC (audit 37).
+ */
+void hl_tool_set_dev_session(const char *nonce);
+
+/*
  * What a tool command's argv names, for the tool sandbox's grants. `argv[0]`
  * is the subcommand; `module` the tool module ("hull.build").
  *

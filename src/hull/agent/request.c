@@ -10,6 +10,9 @@
 #include <sh_json.h>
 #include <sh_arena.h>
 
+#include "hull/shared/dev_session.h"   /* sidecar MAC (audit 37) */
+#include "hull/utils/secure_zero.h"
+
 #include <limits.h>      /* PATH_MAX */
 #include <stdint.h>      /* uint64_t (kl_monotonic_ms timing) */
 #include <stdio.h>
@@ -160,7 +163,8 @@ int hl_agent_status(const char *app_dir, int port, ShJsonBuf *out)
 
 /* The record `hull dev --agent`'s served child writes on a load failure
  * (serve.c hl_serve_load_app): {"error":"failed to load <entry>",
- * "timestamp":N,"session":"<nonce>"}. Keep the two in step. */
+ * "timestamp":N,"mac":"<hex>"}, the MAC over "<N>\n<error>"
+ * (HL_DEV_SIDECAR_LAST_ERROR). Keep the two in step. */
 #define HL_AGENT_ERR_PREFIX "failed to load "
 
 static void errors_write_empty(ShJsonBuf *out, const char *ignored)
@@ -194,13 +198,16 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     /* The app tree may be a cloned repo, and an agent reads this output as
      * Hull's own diagnostics: a committed last_error.json was served as is,
      * whatever it told the agent to do (audit 36). The record is served only
-     * when it carries the nonce of the live `hull dev --agent` session, and
+     * when its MAC verifies under the live `hull dev --agent` session's key
+     * (kept under $HOME, in no file the app can read - audit 37: the key sat
+     * in dev.json, and an app granted .hull/ forged records with it), and
      * then only its known fields, re-encoded. */
     static const char unverified[] =
-        ".hull/last_error.json was ignored: it was not written by a live "
-        "`hull dev --agent` session (repo content, not Hull output)";
-    char nonce[65];
-    if (hl_agent_dev_session(app_dir, nonce, NULL, NULL) != 0) {
+        ".hull/last_error.json was ignored: not written by a live "
+        "`hull dev --agent` session (repo or app content, not Hull output)";
+    char nonce[HL_DEV_SESSION_NONCE_LEN + 1];
+    long sp = 0;
+    if (hl_agent_dev_session(app_dir, nonce, &sp, NULL) != 0) {
         free(buf);
         errors_write_empty(out, unverified);
         return 0;
@@ -209,18 +216,28 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     SHArena *arena = hl_agent_text_is_terminal_safe(buf, n)
                          ? sh_arena_create(4096 + 8 * n) : NULL;
     ShJsonValue *v = NULL;
-    const char *msg = NULL, *sess = NULL;
+    const char *msg = NULL, *mac = NULL;
     double ts = -1;
     if (arena && sh_json_parse(buf, n, arena, &v) == SH_JSON_OK && v &&
         sh_json_type(v) == SH_JSON_OBJECT) {
-        msg  = sh_json_as_string(sh_json_get(v, "error"), NULL);
-        sess = sh_json_as_string(sh_json_get(v, "session"), NULL);
-        ts   = sh_json_as_double(sh_json_get(v, "timestamp"), -1);
+        msg = sh_json_as_string(sh_json_get(v, "error"), NULL);
+        mac = sh_json_as_string(sh_json_get(v, "mac"), NULL);
+        ts  = sh_json_as_double(sh_json_get(v, "timestamp"), -1);
     }
-    int ok = msg && sess && strcmp(sess, nonce) == 0 &&
+    int ok = msg && mac && strlen(mac) == HL_DEV_SIDECAR_MAC_LEN &&
              strncmp(msg, HL_AGENT_ERR_PREFIX,
                      sizeof(HL_AGENT_ERR_PREFIX) - 1) == 0 &&
-             strlen(msg) < 1024 && ts >= 0 && ts < 1e13;
+             strlen(msg) < 1024 && ts >= 0 && ts < 1e13 &&
+             ts == (double)(int64_t)ts;
+    if (ok) {
+        char content[1100];
+        int cn = snprintf(content, sizeof content, "%lld\n%s",
+                          (long long)ts, msg);
+        ok = cn > 0 && (size_t)cn < sizeof content &&
+             hl_dev_sidecar_mac_ok(nonce, HL_DEV_SIDECAR_LAST_ERROR, app_dir,
+                                   sp, content, (size_t)cn, mac);
+    }
+    hl_secure_zero(nonce, sizeof nonce);
     if (ok) {
         ShJsonWriter w;
         sh_json_writer_init(&w, sh_json_buf_write, out);
