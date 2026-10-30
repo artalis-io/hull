@@ -202,6 +202,7 @@ static int hl_lua_txn_open(lua_State *L, uint64_t *gen)
 {
     HlLua *lua = hl_lua_from_registry(L);
     *gen = hl_db_txn_gen();
+    // cppcheck-suppress knownConditionTrueFalse
     return lua && hl_db_registry_open_txn(lua->base.db_registry) != NULL;
 }
 
@@ -293,6 +294,7 @@ static int hl_lua_co_yield(lua_State *L)
         if (*mark == NULL || hl_lua_mark_is_txn(*mark)) {
             uint64_t gen;
             int open = hl_lua_txn_open(L, &gen);
+            // cppcheck-suppress knownConditionTrueFalse
             if (!open)
                 *mark = NULL;
             else if (*mark == hl_lua_txn_mark(gen, HL_LUA_MARK_TXN_RESUMED))
