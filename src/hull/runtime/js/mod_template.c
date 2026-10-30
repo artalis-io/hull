@@ -75,6 +75,7 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, code);
         return JS_EXCEPTION;
     }
+    // cppcheck-suppress knownConditionTrueFalse
     JSValue result = named
         ? hl_js_template_compile_cached(ctx, code, len, script)
         : hl_js_template_compile_uncached(ctx, code, len, script);
