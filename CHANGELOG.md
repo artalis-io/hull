@@ -506,6 +506,31 @@ release-artifact layout).
   ws-server and ws-client callbacks, app.main, `hull:_task` tasks, async and multipart
   resumes, `hull test` cases). An entry that merely forgot to COMMIT keeps its outcome; the
   rollback is now logged. Regression legs in `tests/e2e_js_runs.sh`.
+- **Blob walks and `blob.init`, `db.open` and template compiles cost (almost) nothing against
+  the run budget; `template.render_string` filled the shared cache** (audit 39, both
+  runtimes). `blob.count` / `total_size` / `iter` / `cleanup` charged 1 unit per shard
+  directory and per entry, but each walk probed all 256 shard directories (65,536 at
+  `shard_depth = 2`) and stat'ed every entry: a `blob.count()` loop on an EMPTY store ran
+  ~120 s per 100M budget. The store now charges the calling thread's charge scope
+  (`cap/fs_resolve.h`) as it walks, before each step: 128 units per shard probe, 1024 per
+  directory opened, a directory entry plus a stat per blob, a `blob.delete`'s 8192 per cleanup
+  unlink; at depth 2 it opens each level-1 directory once and skips the 256 children of a
+  missing one. `blob.init` ran `realpath`, an `lstat` per component (O(depth^2)) and three
+  full `mkdir -p` walks under a flat 16384 floor - a 150-component path ran 24 s per budget,
+  139 s and ~917,000 directories with a new path each call; every lookup is now charged a
+  lookup plus a name per component, every directory made 8192, the root is made once and
+  `blobs/` / `tmp/` one level each. `db.open` + `close` of a file database (~1 ms:
+  `sqlite3_open`, the PRAGMAs, WAL setup, the closing checkpoint) cost only the ~2400 units
+  SQLite's allocations charge - 106 s per budget; it now charges 65536 units before a file
+  open (4096 for any other), its path checks per lookup, and a trip during the open - the
+  floor or SQLite's allocator - raises the limit instead of "connection failed".
+  `template.render_string` / `renderString` of a source of 256+ bytes wrote a sealed cache file
+  into the shared `~/.hull` pool for every distinct string, uncharged (Lua 37 s and 61k files
+  per budget, JS 84 s and 147k files): **an anonymous source is no longer cached** (named
+  templates still are), and every compile is charged 8 units per byte of generated code
+  before it runs. `reader:read(n)` charges a 128-unit floor per call (`read(1)` was free).
+  Budget-sized loops of each now trip in 0.3-2.5 s (a plain script loop: ~0.7 s). Covered by
+  `test_lua` / `test_js` (`*_audit39`).
 - **A shader could still crash the process past the GPU pre-checks, or hold the event loop for
   seconds** (audit 37). Three gaps in the audit-36 source checks `gpu.compile` / `gpu.load` run
   before wgpu. (1) The checks' lexer ended a `//` comment only at LF / CR, but WGSL - and naga -

@@ -15,6 +15,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_dynamic.h"
+#include "hull/cap/fs_resolve.h"   /* the db.open charge scope (audit 39) */
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/worker_db.h"
@@ -1433,9 +1434,19 @@ static int lua_db_open(lua_State *L)
      * database. */
     char opened[HL_DB_DYNAMIC_DSN_MAX];
     HlLuaOwnedConn *o = push_owned_box(L);
-    /* Nothing allocates on the Lua heap between the open and o->h. */
+    /* Nothing allocates on the Lua heap between the open and o->h. The
+     * path checks and the open's fixed work are charged to the run as they
+     * go (audit 39); a trip there, or in SQLite's allocator during the open
+     * (the budget bound on this thread), raises the run's limit rather
+     * than "connection failed". */
+    HlFsChargeScope cs = hl_fs_charge_begin(hl_lua_fs_charge, L);
     HlDbHandle *h = hl_db_dynamic_open_ex(dsn, policy, lua->base.fs_cfg,
                                           opened, sizeof opened, &err);
+    int tripped = hl_fs_charge_end(cs) || hl_lua_budget_tripped(L);
+    if (tripped) {
+        if (h) hl_db_dynamic_close(h);
+        return hl_lua_budget_raise(L);
+    }
     if (!h)
         return luaL_error(L, "%s", err ? err : "db.open: denied");
     o->h = h;

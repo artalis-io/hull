@@ -48,6 +48,16 @@
 #include "internal.h"   /* hl_js_budget_charge */
 #include "hull/limits/runtime.h"       /* HL_BLOB_READ_CHUNK_MAX */
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
+#include "hull/cap/fs_resolve.h"       /* hl_fs_charge_begin (audit 39) */
+
+/* One blob capability call under the run's charge scope (audit 39): the
+ * store walks and blob.init charge their steps as they run and stop once
+ * the run is over; the interrupt is then pending (hl_js_fs_charge). */
+#define JS_BLOB_WALK(ctx, tripped, call) do {                              \
+        HlFsChargeScope cs_ = hl_fs_charge_begin(hl_js_fs_charge, (ctx));   \
+        call;                                                               \
+        (tripped) = hl_fs_charge_end(cs_);                                  \
+    } while (0)
 
 #include <limits.h>
 #include <stdio.h>
@@ -236,12 +246,17 @@ static JSValue js_blob_init(JSContext *ctx, JSValueConst this_val,
     }
     HlBlob *b = NULL;
     uint64_t swept = 0;
-    int rc = hl_cap_blob_init_ex(&b, js->base.fs_cfg, js->base.alloc,
-                                 dir, shard_depth, tmp_max_age, &swept);
+    int rc, tripped;
+    /* The path checks and the directories made are charged step by step
+     * as they run (audit 39): a deep dir was O(depth^2) lstats and
+     * mkdirs under the flat floor. */
+    JS_BLOB_WALK(ctx, tripped,
+                 rc = hl_cap_blob_init_ex(&b, js->base.fs_cfg, js->base.alloc,
+                                          dir, shard_depth, tmp_max_age, &swept));
     /* Each tmp/ entry the sweep read, charged after it as the blob walk is
      * (audit 21): the store is not installed when that takes the run over. */
-    if (rc == 0 && hl_js_budget_charge(ctx, swept)) {
-        hl_cap_blob_free(b);
+    if (tripped || (rc == 0 && hl_js_budget_charge(ctx, swept))) {
+        if (rc == 0) hl_cap_blob_free(b);
         JS_FreeCString(ctx, dir);
         return JS_EXCEPTION;
     }
@@ -626,7 +641,8 @@ static JSValue js_reader_read(JSContext *ctx, JSValueConst this_val,
      * reader returns up to n bytes a call, so a larger n only means more
      * calls. The charge cannot run app code, so the reader is still open. */
     if (cap > HL_BLOB_READ_CHUNK_MAX) cap = HL_BLOB_READ_CHUNK_MAX;
-    if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)cap)))
+    if (hl_js_budget_charge(ctx, HL_WORK_BLOB_READ_UNITS +
+                                 hl_work_bytes_units((uint64_t)cap)))
         return JS_EXCEPTION;
 
     uint8_t *buf = js_malloc(ctx, (size_t)cap);
@@ -853,16 +869,18 @@ static JSValue js_blob_iter(JSContext *ctx, JSValueConst this_val,
     HlBlob *b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
 
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
-        return JS_EXCEPTION;
+    /* The walk charges each shard probe, directory and entry as it goes
+     * (audit 39); over the budget it stops and the interrupt is pending. */
     IterAcc acc = { ctx, NULL, 0, 0, 0 };
-    if (hl_cap_blob_iter(b, iter_collect_cb, &acc) != 0 || acc.oom) {
+    int rc, tripped;
+    JS_BLOB_WALK(ctx, tripped, rc = hl_cap_blob_iter(b, iter_collect_cb, &acc));
+    if (tripped) {
+        js_free(ctx, acc.items);
+        return JS_EXCEPTION;
+    }
+    if (rc != 0 || acc.oom) {
         js_free(ctx, acc.items);
         return JS_ThrowInternalError(ctx, "blob.iter: walk failed");
-    }
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b))) {
-        js_free(ctx, acc.items);
-        return JS_EXCEPTION;
     }
 
     /* Build a JS array of {id, size} objects. Snapshot semantics: the
@@ -894,11 +912,10 @@ static JSValue js_blob_total_size(JSContext *ctx, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     HlBlob *b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
-        return JS_EXCEPTION;
-    uint64_t total = hl_cap_blob_total_size(b);
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b)))
-        return JS_EXCEPTION;
+    uint64_t total;
+    int tripped;
+    JS_BLOB_WALK(ctx, tripped, total = hl_cap_blob_total_size(b));
+    if (tripped) return JS_EXCEPTION;
     return JS_NewInt64(ctx, (int64_t)total);
 }
 
@@ -908,11 +925,10 @@ static JSValue js_blob_count(JSContext *ctx, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     HlBlob *b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
-        return JS_EXCEPTION;
-    uint64_t n = hl_cap_blob_count(b);
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b)))
-        return JS_EXCEPTION;
+    uint64_t n;
+    int tripped;
+    JS_BLOB_WALK(ctx, tripped, n = hl_cap_blob_count(b));
+    if (tripped) return JS_EXCEPTION;
     return JS_NewInt64(ctx, (int64_t)n);
 }
 
@@ -964,13 +980,13 @@ static JSValue js_blob_cleanup(JSContext *ctx, JSValueConst this_val,
      * function does after its conversions. */
     b = get_store(ctx);
     if (!b) return JS_EXCEPTION;
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_before(b)))
-        return JS_EXCEPTION;
     uint64_t removed = 0, freed = 0;
-    if (hl_cap_blob_cleanup(b, &opts, &removed, &freed) != 0)
+    int rc, tripped;
+    JS_BLOB_WALK(ctx, tripped,
+                 rc = hl_cap_blob_cleanup(b, &opts, &removed, &freed));
+    if (tripped) return JS_EXCEPTION;   /* each unlink was charged before it */
+    if (rc != 0)
         return JS_ThrowInternalError(ctx, "blob.cleanup: failed");
-    if (hl_js_budget_charge(ctx, hl_cap_blob_walk_units_after(b) + removed))
-        return JS_EXCEPTION;
 
     JSValue out = JS_NewObject(ctx);   /* checked (audit 27) */
     if (JS_IsException(out) ||

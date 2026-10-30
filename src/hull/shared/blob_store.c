@@ -16,6 +16,7 @@
 #include "hull/cap/crypto.h"
 #include "hull/utils/alloc.h"
 #include "hull/shared/work_charge.h"   /* the sweep's units (audit 37) */
+#include "hull/cap/fs_resolve.h"       /* hl_fs_charge: the walk (audit 39) */
 #include "../utils/hex.h"
 
 #include <ctype.h>
@@ -68,7 +69,6 @@ struct HlBlobStore {
     char        *root;        /* absolute path, no trailing slash */
     size_t       root_len;
     int          shard_depth; /* 1 or 2 */
-    uint64_t     last_walk;   /* entries the last collect_entries found */
 };
 
 struct HlBlobStoreWriter {
@@ -332,6 +332,55 @@ static uint64_t sweep_stale_tmps(const char *root, uint64_t max_age_sec)
     return units;
 }
 
+/* Directory creation for open, charged to the calling thread's charge scope
+ * (cap/fs_resolve.h) step by step, BEFORE each syscall (audit 39): a lookup
+ * by absolute path walks every component in the kernel, so a stat / mkdir
+ * costs a lookup plus a name per component, and each directory made costs a
+ * mkdir. blob.init did three hl_mkdir_p of a deep root (O(depth^2)) and
+ * created up to ~150 directories a call under a flat floor. No scope (Hull's
+ * own caches) charges nothing. -1 with errno ECANCELED once the scope says
+ * stop. */
+static uint64_t path_lookup_units(const char *path)
+{
+    uint64_t comps = 0;
+    for (const char *p = path; *p; p++)
+        if (*p == '/') comps++;
+    return HL_WORK_FS_LOOKUP_UNITS + comps * HL_WORK_FS_NAME_UNITS;
+}
+
+/* @p path made if missing (its parent exists). */
+static int charged_ensure_dir(const char *path)
+{
+    if (hl_fs_charge(path_lookup_units(path))) { errno = ECANCELED; return -1; }
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+    if (hl_fs_charge(HL_WORK_FS_MKDIR_UNITS)) { errno = ECANCELED; return -1; }
+    return hl_ensure_dir(path, 0755);
+}
+
+/* hl_mkdir_p, charged: the whole path first (an existing store is one
+ * lookup), then each prefix from the top. */
+static int charged_mkdir_p(const char *path)
+{
+    if (hl_fs_charge(path_lookup_units(path))) { errno = ECANCELED; return -1; }
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+
+    char buf[PATH_MAX];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(buf)) { errno = ENAMETOOLONG; return -1; }
+    memcpy(buf, path, len + 1);
+    for (size_t i = 1; i <= len; i++) {
+        if (buf[i] != '/' && buf[i] != '\0') continue;
+        char saved = buf[i];
+        buf[i] = '\0';
+        int rc = charged_ensure_dir(buf);
+        buf[i] = saved;
+        if (rc != 0) return -1;
+    }
+    return 0;
+}
+
 int hl_blob_store_open(HlBlobStore **out,
                        HlAllocator *alloc,
                        const char *abs_root,
@@ -366,15 +415,17 @@ int hl_blob_store_open_ex(HlBlobStore **out,
     root[root_len] = '\0';
 
     char path[PATH_MAX];
-    if (hl_mkdir_p(root, 0755) < 0) goto fail_root;
+    if (charged_mkdir_p(root) < 0) goto fail_root;
 
+    /* blobs/ and tmp/ sit directly below the root, now made: one level
+     * each (three full mkdir_p walks re-walked the root's prefixes). */
     if (snprintf(path, sizeof(path), "%s/blobs", root) >=
         (int)sizeof(path)) goto fail_root;
-    if (hl_mkdir_p(path, 0755) < 0) goto fail_root;
+    if (charged_ensure_dir(path) < 0) goto fail_root;
 
     if (snprintf(path, sizeof(path), "%s/tmp", root) >=
         (int)sizeof(path)) goto fail_root;
-    if (hl_mkdir_p(path, 0755) < 0) goto fail_root;
+    if (charged_ensure_dir(path) < 0) goto fail_root;
 
     {
         uint64_t units = sweep_stale_tmps(root, tmp_max_age_sec);
@@ -1003,15 +1054,34 @@ static void entries_free(StoreEntries *e)
     e->capacity = 0;
 }
 
-/* Collect the blobs of the shard @p hex below the held blobs/ fd. The shard
- * and its entries are reached without following a symlink: a planted shard
- * link made the walk report - and prune / clear unlink - another tree's files. */
-static int walk_shard(int blobs_fd, const char *hex, int depth,
-                      StoreEntries *e)
+/* The walk's work is charged to the calling thread's charge scope
+ * (cap/fs_resolve.h) as it goes, step by step and BEFORE each step's
+ * syscalls (audit 39): every shard directory probed (an openat, found or
+ * not), every one opened (open + fdopendir + readdir + close), and every
+ * entry read and stat'ed. The flat 1 unit per shard directory audit 21
+ * charged left a `blob.count()` loop on an EMPTY store at 256 failed
+ * openats (65,536 at shard_depth 2) a call for 256 units - ~120 s per
+ * budget. Once the scope says stop, the walk fails (-1, errno ECANCELED)
+ * and the binding raises the run's limit. No scope (Hull's own caches)
+ * charges nothing. */
+static int walk_charge(uint64_t units)
 {
-    int sfd = lookup_shard_at(blobs_fd, hex, depth);
+    if (hl_fs_charge(units)) { errno = ECANCELED; return -1; }
+    return 0;
+}
+
+/* Collect the blobs of the shard directory @p name below @p parent_fd (a
+ * held blobs/ or level-1 shard fd). The shard and its entries are reached
+ * without following a symlink: a planted shard link made the walk report -
+ * and prune / clear unlink - another tree's files. */
+static int walk_shard(int parent_fd, const char *name, StoreEntries *e)
+{
+    if (walk_charge(HL_WORK_BLOB_PROBE_UNITS) != 0) return -1;
+    int sfd = openat(parent_fd, name,
+                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (sfd < 0)
         return (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) ? 0 : -1;
+    if (walk_charge(HL_WORK_FS_STEP_UNITS) != 0) { close(sfd); return -1; }
     DIR *d = fdopendir(sfd);
     if (!d) {
         close(sfd);
@@ -1021,9 +1091,13 @@ static int walk_shard(int blobs_fd, const char *hex, int depth,
     int rc = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
+        if (walk_charge(hl_work_dirent_units(strnlen(ent->d_name, 256))) != 0) {
+            rc = -1; break;
+        }
         if (ent->d_name[0] == '.') continue;
         if (validate_id(ent->d_name) != 0) continue;
 
+        if (walk_charge(HL_WORK_FS_LIST_STAT_UNITS) != 0) { rc = -1; break; }
         struct stat st;
         if (fstatat(dirfd(d), ent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
         if (!S_ISREG(st.st_mode)) continue;
@@ -1035,7 +1109,9 @@ static int walk_shard(int blobs_fd, const char *hex, int depth,
         item.mtime = (int64_t)st.st_mtime;
         if (entries_push(e, &item) != 0) { rc = -1; break; }
     }
+    int saved = errno;
     closedir(d);
+    errno = saved;
     return rc;
 }
 
@@ -1047,44 +1123,42 @@ static int collect_entries(HlBlobStore *s, StoreEntries *e)
     e->alloc    = s->alloc;
 
     static const char HEX[] = "0123456789abcdef";
-    s->last_walk = 0;
+    if (walk_charge(HL_WORK_FS_STEP_UNITS) != 0) return -1;   /* root + blobs/ */
     int blobs = lookup_blobs_dir(s);
     if (blobs < 0)   /* no blobs/ yet (or not a real directory): empty */
         return (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) ? 0 : -1;
 
     int depth = s->shard_depth >= 2 ? 2 : 1;
-    int n = depth == 2 ? 65536 : 256;
-    for (int idx = 0; idx < n; idx++) {
-        char hex[5];
-        if (depth == 2) {
-            hex[0] = HEX[(idx >> 12) & 15]; hex[1] = HEX[(idx >> 8) & 15];
-            hex[2] = HEX[(idx >> 4) & 15];  hex[3] = HEX[idx & 15];
-            hex[4] = '\0';
-        } else {
-            hex[0] = HEX[(idx >> 4) & 15];  hex[1] = HEX[idx & 15];
-            hex[2] = '\0';
+    int rc = 0;
+    for (int i1 = 0; rc == 0 && i1 < 256; i1++) {
+        char l1[3] = { HEX[(i1 >> 4) & 15], HEX[i1 & 15], '\0' };
+        if (depth == 1) {
+            rc = walk_shard(blobs, l1, e);
+            continue;
         }
-        if (walk_shard(blobs, hex, depth, e) != 0) {
-            close(blobs);
-            s->last_walk = e->count;
-            entries_free(e);
-            return -1;
+        /* Depth 2: open the level-1 directory once and probe its 256
+         * children relative to it; a missing level-1 directory skips them
+         * all (each child was a failed two-level walk, 65,536 a call). */
+        if (walk_charge(HL_WORK_BLOB_PROBE_UNITS) != 0) { rc = -1; break; }
+        int fd1 = openat(blobs, l1,
+                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd1 < 0) {
+            if (errno != ENOENT && errno != ELOOP && errno != ENOTDIR) rc = -1;
+            continue;
         }
+        if (walk_charge(HL_WORK_FS_STEP_UNITS) != 0) { close(fd1); rc = -1; break; }
+        for (int i2 = 0; rc == 0 && i2 < 256; i2++) {
+            char l2[3] = { HEX[(i2 >> 4) & 15], HEX[i2 & 15], '\0' };
+            rc = walk_shard(fd1, l2, e);
+        }
+        close(fd1);
     }
     close(blobs);
-    s->last_walk = e->count;
+    if (rc != 0) {
+        entries_free(e);
+        return -1;
+    }
     return 0;
-}
-
-uint64_t hl_blob_store_walk_shards(const HlBlobStore *s)
-{
-    if (!s) return 0;
-    return s->shard_depth >= 2 ? 65536u : 256u;
-}
-
-uint64_t hl_blob_store_last_walk_entries(const HlBlobStore *s)
-{
-    return s ? s->last_walk : 0;
 }
 
 int hl_blob_store_iter(HlBlobStore *s, HlBlobStoreIterCb cb, void *user)
@@ -1179,6 +1253,11 @@ int hl_blob_store_cleanup(HlBlobStore *s,
 
         if (!evict) continue;
 
+        /* Each unlink walks root / blobs / shard again: charged as a
+         * blob.delete is, before it (audit 39). */
+        if (!opts->dry_run && walk_charge(HL_WORK_BLOB_STAT_UNITS) != 0) {
+            rc = -1; break;
+        }
         if (!opts->dry_run &&
             blob_unlink(s, it->id) != 0 && errno != ENOENT) {
             rc = -1; continue;

@@ -13,6 +13,8 @@
 #include "hull/manifest.h"
 #include "hull/host_match.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check: the leaf */
+#include "hull/cap/fs_resolve.h"   /* hl_fs_charge (audit 39) */
+#include "hull/shared/work_charge.h"
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -126,8 +128,16 @@ int hl_db_path_has_symlink(const char *abs, size_t base_len)
     size_t len = strlen(abs);
     if (len >= sizeof prefix || base_len >= len) return 1;
     memcpy(prefix, abs, len + 1);
+    uint64_t comps = 0;
+    for (size_t i = 0; i <= base_len; i++)
+        if (prefix[i] == '/') comps++;
     for (size_t i = base_len + 1; i < len; i++) {
         if (prefix[i] != '/') continue;
+        /* Each lstat walks the whole prefix: charged before it to the
+         * thread's charge scope (audit 39); a trip refuses the path. */
+        if (hl_fs_charge(HL_WORK_FS_LOOKUP_UNITS +
+                         ++comps * HL_WORK_FS_NAME_UNITS))
+            return 1;
         prefix[i] = '\0';
         struct stat st;
         int r = lstat(prefix, &st);
@@ -263,6 +273,16 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
         }
     }
 
+    /* The open's fixed work, charged before it to the thread's charge scope
+     * (audit 39): a file database is sqlite3_open, the PRAGMAs and the WAL
+     * setup, and its close a checkpoint and the sidecar unlinks - ~1.3 ms
+     * an open + close, which a db.open / close loop got for the ~2400
+     * units SQLite's allocations charge (106 s per budget). */
+    if (hl_fs_charge(open_dsn == abs_dsn ? HL_WORK_DB_OPEN_FILE_UNITS
+                                         : HL_WORK_DB_OPEN_UNITS)) {
+        if (err) *err = "budget_exhausted";
+        return NULL;
+    }
     HlDbHandle *h = calloc(1, sizeof *h);
     if (!h) {
         if (err) *err = "db.open: out of memory";

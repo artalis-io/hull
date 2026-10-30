@@ -15,6 +15,8 @@
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_policy.h"
+#include "hull/cap/fs_resolve.h"        /* hl_fs_charge (audit 39) */
+#include "hull/shared/work_charge.h"
 #include "hull/utils/alloc.h"
 
 #include <limits.h>
@@ -89,8 +91,18 @@ static int root_has_symlink(const char *abs_root, size_t base_len)
     size_t len = strlen(abs_root);
     if (len >= sizeof prefix) return 1;
     memcpy(prefix, abs_root, len + 1);
+    uint64_t comps = 0;
+    for (size_t i = 0; i <= base_len && i < len; i++)
+        if (prefix[i] == '/') comps++;
     for (size_t i = base_len + 1; i <= len; i++) {
         if (prefix[i] != '/' && prefix[i] != '\0') continue;
+        /* Each lstat walks the whole prefix in the kernel: charged before
+         * it, a lookup plus a name per component (audit 39; a 150-deep
+         * dir was ~11,000 component walks a call). A trip counts as a
+         * link: the init fails and the binding raises the limit. */
+        if (hl_fs_charge(HL_WORK_FS_LOOKUP_UNITS +
+                         ++comps * HL_WORK_FS_NAME_UNITS))
+            return 1;
         char c = prefix[i];
         prefix[i] = '\0';
         struct stat st;
@@ -287,16 +299,6 @@ uint64_t hl_cap_blob_total_size(HlBlob *b)
 uint64_t hl_cap_blob_count(HlBlob *b)
 {
     return hl_blob_store_count(b);
-}
-
-uint64_t hl_cap_blob_walk_units_before(HlBlob *b)
-{
-    return hl_blob_store_walk_shards(b);
-}
-
-uint64_t hl_cap_blob_walk_units_after(HlBlob *b)
-{
-    return hl_blob_store_last_walk_entries(b);
 }
 
 int hl_cap_blob_cleanup(HlBlob *b, const HlBlobCleanupOpts *opts,

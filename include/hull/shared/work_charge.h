@@ -111,7 +111,8 @@ static inline uint64_t hl_work_sse_units(const char *text, size_t len, size_t ex
  * by Hull), so their floors stay whole (audit 37's rate, ~190 units/us):
  *
  *   empty blob.put / finalize   ~170 us  ->  HL_WORK_BLOB_WRITE_UNITS 32768
- *   blob.init (3 mkdir_p, sweep)~125 us  ->  HL_WORK_BLOB_INIT_UNITS  16384
+ *   blob.init (open, sweep)     ~125 us  ->  HL_WORK_BLOB_INIT_UNITS  16384
+ *     (+ its path walks and mkdirs per step since audit 39, below)
  *   blob.exists / size / atime   ~44 us  ->  HL_WORK_BLOB_STAT_UNITS   8192
  *   blob.delete                  ~42 us  ->  HL_WORK_BLOB_STAT_UNITS   8192
  *
@@ -137,6 +138,35 @@ static inline uint64_t hl_work_sse_units(const char *text, size_t len, size_t ex
 #define HL_WORK_BLOB_WRITE_UNITS     32768u
 #define HL_WORK_BLOB_INIT_UNITS      16384u
 #define HL_WORK_BLOB_STAT_UNITS       8192u
+
+/* ── Audit 39: blob walks / init / reads, db.open, template compiles ──
+ *
+ * Same rate (64 units per microsecond of measured time):
+ *
+ *   blob walks (iter / count / total_size / cleanup), charged by the
+ *     store as it walks (blob_store.c): per shard directory probed (an
+ *     openat, ~2 us) HL_WORK_BLOB_PROBE_UNITS, per one opened
+ *     HL_WORK_FS_STEP_UNITS, per entry hl_work_dirent_units +
+ *     HL_WORK_FS_LIST_STAT_UNITS, per cleanup unlink
+ *     HL_WORK_BLOB_STAT_UNITS; at shard_depth 2 a missing level-1
+ *     directory skips its 256 children. Measured budget-sized loops
+ *     (100M) of blob.count: empty or filled store, depth 1 or 2,
+ *     1.3-2.5 s (~120 s before).
+ *   blob.init: each realpath / lstat / stat a lookup plus a name per
+ *     component, each directory made HL_WORK_FS_MKDIR_UNITS.
+ *   blob reader:read(n), the read syscall      -> HL_WORK_BLOB_READ_UNITS
+ *   db.open of a file DSN: sqlite3_open, the PRAGMAs and WAL setup, and
+ *     close's checkpoint + sidecar unlinks (charged at open; a close
+ *     always follows one)             ~0.6-1.3 ms -> HL_WORK_DB_OPEN_FILE_UNITS
+ *   any other db.open (":memory:", a network DSN's setup before the
+ *     dial, whose waits ask the budget)       -> HL_WORK_DB_OPEN_UNITS
+ *   a template compile (Lua load / QuickJS parse + emit of the generated
+ *     code), per byte of generated code       -> HL_WORK_TEMPLATE_COMPILE_BYTE */
+#define HL_WORK_BLOB_PROBE_UNITS       128u
+#define HL_WORK_BLOB_READ_UNITS        128u
+#define HL_WORK_DB_OPEN_FILE_UNITS   65536u
+#define HL_WORK_DB_OPEN_UNITS         4096u
+#define HL_WORK_TEMPLATE_COMPILE_BYTE    8u
 
 /* One directory entry read (fs.list, the blob tmp/ sweep). */
 static inline uint64_t hl_work_dirent_units(size_t name_len)

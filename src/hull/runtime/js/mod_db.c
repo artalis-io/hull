@@ -19,6 +19,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_dynamic.h"
+#include "hull/cap/fs_resolve.h"   /* the db.open charge scope (audit 39) */
 #include "hull/worker_db.h"
 #include "hull/shared/async.h"
 #include "hull/net_backend.h"
@@ -1624,8 +1625,19 @@ static JSValue js_db_open(JSContext *ctx, JSValueConst this_val,
      * conn.async opens its worker connection from this, so both name the same
      * database. */
     char opened[HL_DB_DYNAMIC_DSN_MAX];
+    /* The path checks and the open's fixed work are charged to the run as
+     * they go (audit 39); a trip there, or in SQLite's allocator during the
+     * open (the budget bound on this thread), throws the run's limit
+     * rather than "connection failed". */
+    HlFsChargeScope cs = hl_fs_charge_begin(hl_js_fs_charge, ctx);
     HlDbHandle *h = hl_db_dynamic_open_ex(dsn, policy, js->base.fs_cfg,
                                           opened, sizeof opened, &err);
+    int tripped = hl_fs_charge_end(cs);
+    if (tripped || js->budget_tripped) {
+        if (h) hl_db_dynamic_close(h);
+        JS_FreeCString(ctx, dsn);
+        return tripped ? JS_EXCEPTION : hl_js_budget_throw(ctx);
+    }
     if (!h) {
         JS_FreeCString(ctx, dsn);
         return JS_ThrowInternalError(ctx, "%s", err ? err : "db.open: denied");

@@ -56,6 +56,17 @@ int hl_lua_template_compile_cached(struct lua_State *L,
                                    const char *chunkname);
 
 /**
+ * @brief The same compile, never reading or writing the cache.
+ *
+ * For an anonymous source (template.render_string, audit 39): every
+ * distinct request-influenced string wrote a sealed file into the shared
+ * pool, uncharged, without bound. Same contract as the cached call.
+ */
+int hl_lua_template_compile_uncached(struct lua_State *L,
+                                     const char *code, size_t code_len,
+                                     const char *chunkname);
+
+/**
  * @brief Tear down the process-wide template store handle.
  *
  * Tests that redirect `$HOME` need to drop the cached store. Not

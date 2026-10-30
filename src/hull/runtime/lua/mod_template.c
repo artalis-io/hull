@@ -9,6 +9,7 @@
 #include "hull/runtime/lua_template_cache.h"
 #include "hull/vfs.h"
 #include "protected.h"   /* hl_lua_pushlstring_safe */
+#include "hull/shared/work_charge.h"   /* HL_WORK_TEMPLATE_COMPILE_BYTE */
 
 #include <sh_arena.h>
 #include <limits.h>
@@ -61,7 +62,19 @@ static int lua_template_compile(lua_State *L)
         snprintf(chunk, sizeof chunk, "=template");
     }
 
-    if (hl_lua_template_compile_cached(L, code, len, chunk) != LUA_OK)
+    /* The compile (parse + code emission of the generated source) is C
+     * work no instruction hook sees: charged by size before it runs
+     * (audit 39). Only a NAMED template - one of the app's template files
+     * - goes through the on-disk cache; an anonymous source
+     * (template.render_string) is request-influenced, and every distinct
+     * one wrote a sealed file into the shared pool, uncharged and without
+     * bound (audit 39). */
+    lua_hlwork(L, len > SIZE_MAX / HL_WORK_TEMPLATE_COMPILE_BYTE
+                      ? SIZE_MAX : len * HL_WORK_TEMPLATE_COMPILE_BYTE, 0);
+    int rc = (name && *name)
+        ? hl_lua_template_compile_cached(L, code, len, chunk)
+        : hl_lua_template_compile_uncached(L, code, len, chunk);
+    if (rc != LUA_OK)
         return lua_error(L); /* propagate compile / pcall error */
 
     return 1; /* render function on stack */

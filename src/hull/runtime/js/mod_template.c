@@ -9,6 +9,7 @@
 #include "hull/vfs.h"
 #include "hull/limits/core.h"
 #include "hull/runtime/js_template_cache.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_TEMPLATE_COMPILE_BYTE */
 
 #include <limits.h>
 #include <stdio.h>
@@ -44,7 +45,9 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
      * caller passes ends up AFTER a prefix that is not "hull:", so the
      * resulting script can never be mistaken for stdlib. */
     char script[HL_MODULE_PATH_MAX];
+    int named = 0;
     if (argc >= 2 && JS_IsString(argv[1])) {
+        named = 1;
         const char *req = JS_ToCString(ctx, argv[1]);
         if (!req) {
             JS_FreeCString(ctx, code);
@@ -61,7 +64,20 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
      * JS_ReadObject and we skip both the parse pass AND the IIFE
      * execute that creates the closure. See
      * include/hull/runtime/js_template_cache.h. */
-    JSValue result = hl_js_template_compile_cached(ctx, code, len, script);
+    /* The compile (QuickJS parse + bytecode emission of the generated
+     * source) is C work no interrupt poll sees: charged by size before it
+     * runs (audit 39). Only a NAMED template - one of the app's template
+     * files - goes through the on-disk cache; an anonymous source
+     * (template.renderString) is request-influenced, and every distinct
+     * one wrote a sealed file into the shared pool, uncharged and without
+     * bound (audit 39). */
+    if (hl_js_budget_charge(ctx, (uint64_t)len * HL_WORK_TEMPLATE_COMPILE_BYTE)) {
+        JS_FreeCString(ctx, code);
+        return JS_EXCEPTION;
+    }
+    JSValue result = named
+        ? hl_js_template_compile_cached(ctx, code, len, script)
+        : hl_js_template_compile_uncached(ctx, code, len, script);
 
     JS_FreeCString(ctx, code);
 

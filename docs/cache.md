@@ -100,6 +100,12 @@ directory becomes pathological at ~50K entries - sharding keeps
 | `js-templates` | Generated JS render function (bytecode) for every `templates/*.html` | template source sha256 + engine version + name | template parse + JS codegen + `JS_Eval` |
 | `tools` | Signed binaries downloaded by `hull tools install` (e.g. `wamrc`) | sha256 of the binary | full `~6 MB` HTTPS download + Ed25519 verify |
 
+Only NAMED templates (`template.render` / `compile` of a `templates/*`
+file) are cached. `template.render_string` / `renderString` compiles its
+anonymous source every call and never reads or writes the cache: the
+source is often request-influenced, and every distinct string was a new
+sealed file in the shared pool, without bound (audit 39).
+
 The five runtime caches share the same C primitive (`hl_blob_store_*`)
 and the same management commands. `tools` is a separate "system store":
 it's content-addressed in the strict sense (filename IS `sha256(contents)`)

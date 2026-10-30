@@ -58,6 +58,17 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
                                       const char *name);
 
 /**
+ * @brief The same compile, never reading or writing the cache.
+ *
+ * For an anonymous source (template.renderString, audit 39): every
+ * distinct request-influenced string wrote a sealed file into the shared
+ * pool, uncharged, without bound.
+ */
+JSValue hl_js_template_compile_uncached(JSContext *ctx,
+                                        const char *code, size_t code_len,
+                                        const char *name);
+
+/**
  * @brief Tear down the process-wide JS template store handle.
  *
  * Tests that redirect `$HOME` need to drop the cached store. Not

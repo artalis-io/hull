@@ -97,6 +97,13 @@ static JSValue fresh_eval(JSContext *ctx,
                    JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT);
 }
 
+JSValue hl_js_template_compile_uncached(JSContext *ctx,
+                                        const char *code, size_t code_len,
+                                        const char *name)
+{
+    return fresh_eval(ctx, code, code_len, name);
+}
+
 /* Cache-miss path: compile-only, persist the chunk, then run.
  *
  * Compile twice? No - JS_Eval with COMPILE_ONLY produces the

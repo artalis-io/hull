@@ -31,6 +31,15 @@
 
 /* ── Path validation ────────────────────────────────────────────────── */
 
+/* A realpath of @p path: a lookup per component (audit 39). */
+static uint64_t validate_realpath_units(const char *path)
+{
+    uint64_t comps = 1;
+    for (const char *p = path; *p; p++)
+        if (*p == '/') comps++;
+    return comps * HL_WORK_FS_LOOKUP_UNITS;
+}
+
 int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
                        const char **err_msg)
 {
@@ -69,6 +78,15 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
         p = slash + 1;
     }
 
+    /* Each realpath below walks its whole path, a lookup per component:
+     * charged to the thread's charge scope before it runs (audit 39 - a
+     * deep blob.init / db.open path was O(depth^2) lookups a call, and a
+     * fresh one strips a missing component per realpath). No scope (Hull's
+     * own callers) charges nothing; a trip fails the validation. */
+    if (hl_fs_charge(validate_realpath_units(cfg->base_dir))) {
+        if (err_msg) *err_msg = "budget_exhausted";
+        return -1;
+    }
     /* Resolve the base directory (must exist) */
     char resolved_base[PATH_MAX];
     if (realpath(cfg->base_dir, resolved_base) == NULL) {
@@ -91,7 +109,12 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
     probe[sizeof(probe) - 1] = '\0';
 
     char resolved[PATH_MAX];
-    while (realpath(probe, resolved) == NULL) {
+    for (;;) {
+        if (hl_fs_charge(validate_realpath_units(probe))) {
+            if (err_msg) *err_msg = "budget_exhausted";
+            return -1;
+        }
+        if (realpath(probe, resolved) != NULL) break;
         char *slash = strrchr(probe, '/');
         if (!slash || slash == probe) {
             if (err_msg) *err_msg = "validate_failed";
