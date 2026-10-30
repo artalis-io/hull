@@ -5605,6 +5605,7 @@ JOBS_HOOKS_CASE(audit20)
 JOBS_HOOKS_CASE(audit22)
 JOBS_HOOKS_CASE(audit23)
 JOBS_HOOKS_CASE(audit30)
+JOBS_HOOKS_CASE(audit38)
 #undef JOBS_HOOKS_CASE
 
 UTEST(lua_stdlib, ws_stream_suite)

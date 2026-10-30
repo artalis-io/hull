@@ -2474,7 +2474,8 @@ check_audit10 "js" "js" "$JS_AUDIT10" "$JS_AUDIT10_REG" "$JS_AUDIT10_TICK"
 #   so its next claim fits in the same window (it was charged twice).
 # REMOVED (second stage): a dependency deleted behind jobs' back is resolved
 #   as failed by the reaper (it read the missing row as satisfied); a cron
-#   whose enqueue raises keeps its next_run_at (the CAS rolls back with it).
+#   whose enqueue raises keeps its next_run_at (the CAS rolls back with it),
+#   and since audit 38 the failure no longer escapes jobs.work.
 check_audit12() {
     label="$1"; ext="$2"; app="$3"
     T="$(mktemp -d)"; printf '%s\n' "$app" > "$T/app.$ext"
@@ -2524,8 +2525,8 @@ PY
         *) fail "$label: removed dependency" "$out" ;;
     esac
     case "$out|$row" in
-        *"CRONTX raised=1"*"|1")
-            pass "$label: a cron whose enqueue fails keeps its schedule (CAS rolled back)" ;;
+        *"CRONTX raised=0"*"|1")
+            pass "$label: a cron whose enqueue fails keeps its schedule (CAS rolled back) and work goes on" ;;
         *) fail "$label: cron CAS + enqueue atomicity" "$out | $row" ;;
     esac
     rm -rf "$T"
@@ -2587,7 +2588,8 @@ LUA_AUDIT12_TICK='local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init()
-  -- The cron tick, through jobs.work (its enqueue raises out of it).
+  -- The cron tick, through jobs.work: its enqueue fails and rolls back with
+  -- the CAS, and jobs.work goes on (audit 38: it raised out of it).
   local raised = pcall(jobs.work, { queue = "tickq" }) and 0 or 1
   jobs.reap()
   local d = jobs.dead({ limit = 10 })
@@ -2657,7 +2659,8 @@ JS_AUDIT12_TICK='import { app } from "hull:app"; import { jobs } from "hull:jobs
 app.manifest({ modules: ["hull/jobs@1"] });
 app.main(async (ctx) => {
   jobs.init();
-  // The cron tick, through jobs.work (its enqueue raises out of it).
+  // The cron tick, through jobs.work: its enqueue fails and rolls back with
+  // the CAS, and work() goes on (audit 38: it threw out of it).
   let raised = 0;
   try { await jobs.work({ queue: "tickq" }); } catch (_e) { raised = 1; }
   jobs.reap();

@@ -879,6 +879,26 @@ case "$a30kept|$a30out|$a30next" in
 esac
 jobs_reset_my
 
+# ── audit 38: error text MySQL refuses cannot wedge a worker ──────────
+# Strict mode refuses invalid UTF-8 and more than 64 KiB in a TEXT column
+# (last_error, events.data): the failed write escaped jobs.work, leaving the
+# job and its batch-mates 'running', or raised before a poison subscription
+# event's cursor / lease UPDATE.
+echo "=== jobs: audit 38 (unstorable error text / results) on MySQL ==="
+A38DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_jobs_audit38.sh"
+jobs_audit38_apps "$A38DIR"
+a38lua=$(./build/hull "$A38DIR/a38.lua" -d "$DSN" 2>"$A38DIR/log")
+jobs_reset_my
+a38js=$(./build/hull "$A38DIR/a38.js" -d "$DSN" 2>>"$A38DIR/log")
+case "$a38lua|$a38js" in
+    *"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*"|"*"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*)
+        echo "PASS: unstorable handler / subscriber text and results cannot wedge a worker (MySQL)"
+        rm -rf "$A38DIR" ;;
+    *)  echo "::error jobs audit 38 on MySQL: lua=[$a38lua] js=[$a38js]"; cat "$A38DIR/log"; exit 1 ;;
+esac
+jobs_reset_my
+
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
 # plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix
