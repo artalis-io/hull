@@ -161,6 +161,11 @@ typedef struct HlLua {
      * event loop returns. */
     lua_State  *cli_main_co;
 
+    /* app.main's final status, set by hl_lua_async_resume when main ends
+     * inside the loop: a coroutine closed after it raised reads LUA_OK
+     * from lua_status (audit 38). LUA_YIELD while main has not ended. */
+    int         cli_main_status;
+
     /* hull._task tasks spawned but not yet run (HlLuaTask list, async.c);
      * released by hl_lua_free. */
     void       *tasks;

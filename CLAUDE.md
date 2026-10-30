@@ -772,7 +772,19 @@ coroutine once that transaction is no longer the open one. A coroutine resumed
 inside its OWN still-open transaction keeps its tag (audit 37: rewritten to
 "resumed", its next yield cleared it, so a second yield left it untagged), and
 `coroutine.resume` / a wrap call check again after the stack growth that can run
-a `__gc`, right before `lua_resume`. Accepted limits: a coroutine resumed inside
+a `__gc`, right before `lua_resume`. A coroutine that RAISES is closed in the run
+that raised (audit 38, `hl_lua_close_errored`): `coroutine.resume` (like
+lcorolib) left its to-be-closed variables pending, and the error-status coroutine
+skipped the tag check, so a later run's `coroutine.close` ran its `__close`
+handlers - written for its transaction - in autocommit after the guard had rolled
+the transaction back. `coroutine.resume` now closes it before returning `false,
+err` (the original error, or a handler's, as `coroutine.close` reports), and
+`hl_lua_resume_status` closes every runtime-run coroutine (handler, timer, task,
+app.main) that raised, before its caller's closing guard, and marks it died
+(`hl_lua_died_marker`: resume / close refuse it, `coroutine.status` reads dead; a
+closed thread reads LUA_OK with its error on the stack, so app.main's final status
+is kept in `HlLua.cli_main_status`). A new runtime resume path must go through
+`hl_lua_resume_status`. Accepted limits: a coroutine resumed inside
 the RESUMER's transaction yields untagged, so if the guard later rolls that
 transaction back, the coroutine's writes after its next resume autocommit (kept
 so a generator consumed inside each request's `db.batch` works); the generation

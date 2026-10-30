@@ -221,7 +221,11 @@ static int lua_ws_client_gc(lua_State *L)
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
     hl_async_teardown_unlink(&ud->teardown);
-    if (ud->lua && !ud->lua->base.shutting_down) {
+    /* Whenever the loop is still reachable, shutting down or not: a timer
+     * left armed fired into the freed userdata (audit 38). The entry points
+     * clear async_ctx before the runtime goes, and the backend wraps are
+     * orphaned (no-ops) once the loop is freed. */
+    if (ud->lua && ud->lua->base.async_ctx) {
         lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
         lua_ws_client_cancel_release(ud, ud->lua->base.async_ctx);
     }

@@ -103,6 +103,15 @@ static int hl_lua_parked_marker;
  * for good. */
 static int hl_lua_abandoned_marker;
 
+/* A runtime-run coroutine (a handler, timer, task, app.main) the runtime
+ * closed after it raised or made a bare yield (hl_lua_resume_status). Closed,
+ * its status reads LUA_OK with the error object left on its stack for the
+ * runtime to report, so lcorolib would take it for a suspended coroutine
+ * whose body is that object; the app may still hold it
+ * (coroutine.running()). Sticky: coroutine.resume / close refuse it and
+ * coroutine.status reports it dead (audit 38). */
+static int hl_lua_died_marker;
+
 /* Set by hl_lua_async_resume for the span of its own lua_resume: the one
  * resume a binding's continuation may act on (hl_lua_async_k_ok). */
 static int hl_lua_resuming_marker;
@@ -229,9 +238,28 @@ static void hl_lua_co_check(lua_State *L, lua_State *co)
     if (hl_lua_thread_is_parked(co))
         (void)luaL_error(L, "cannot resume or close a coroutine that is "
                             "waiting on a Hull operation");
+    if (*hl_lua_co_mark(co) == &hl_lua_died_marker)
+        (void)luaL_error(L, "cannot resume or close a coroutine that ended "
+                            "by an error (it was closed when it raised)");
     void **mark = hl_lua_co_mark(co);
     if (*mark != NULL && !hl_lua_mark_is_txn(*mark))
         return;   /* a runtime marker: not ours to touch */
+    /* Defence in depth (audit 38): a coroutine that died by an error is
+     * closed in the run that raised (hl_lua_close_errored), so none should
+     * be left with pending __close handlers. One that still were, tagged
+     * inside a transaction of its own that has since ended, may not be
+     * closed: its handlers would run in autocommit. */
+    int cst = lua_status(co);
+    if (cst != LUA_OK && cst != LUA_YIELD &&
+        hl_lua_mark_kind(*mark) == (int)HL_LUA_MARK_TXN_YIELD) {
+        uint64_t egen;
+        int eopen = hl_lua_txn_open(L, &egen);
+        if (!eopen || *mark != hl_lua_txn_mark(egen, HL_LUA_MARK_TXN_YIELD))
+            (void)luaL_error(L, "cannot close a coroutine that raised inside "
+                                "a database transaction that has since "
+                                "ended: its __close handlers would commit "
+                                "statement by statement");
+    }
     /* Not about to run (running, normal or dead): coroutine.resume fails
      * on its own, and the coroutine's own record must stay as it is - a
      * coroutine resuming itself would otherwise rewrite it. */
@@ -259,6 +287,24 @@ static void hl_lua_co_check(lua_State *L, lua_State *co)
     *mark = open ? hl_lua_txn_mark(gen, HL_LUA_MARK_TXN_RESUMED) : NULL;
 }
 
+/* A coroutine that raised is closed at once, its to-be-closed variables run
+ * inside the run that raised (lcorolib leaves them pending until
+ * coroutine.close). Pending, a later run's coroutine.close(co) ran the
+ * coroutine's own __close handlers - written to run inside its transaction -
+ * after the stale-transaction guard had rolled that transaction back: their
+ * statements committed in autocommit, a half-applied write (audit 38). The
+ * error object left on top is the original error, or the error a __close
+ * handler raised, as coroutine.close reports it. Returns the status to
+ * report; @p status when @p co did not die by an error. */
+static int hl_lua_close_errored(lua_State *co, lua_State *from, int status)
+{
+    int st = lua_status(co);
+    if (st == LUA_OK || st == LUA_YIELD)
+        return status;   /* not an error in the coroutine (dead, running) */
+    st = lua_closethread(co, from);
+    return st != LUA_OK ? st : status;
+}
+
 /* coroutine.resume: lcorolib's luaB_coresume behind hl_lua_co_check. The
  * check runs again right before lua_resume, after the stack growth that can
  * run a __gc finalizer (which could end the transaction the coroutine
@@ -282,6 +328,10 @@ static int hl_lua_co_resume(lua_State *L)
     if (hl_lua_budget_tripped(L)) {
         if (status == LUA_OK || status == LUA_YIELD)
             lua_pop(co, nres);
+        else {   /* closed in this run too (audit 38): never left pending */
+            (void)hl_lua_close_errored(co, L, status);
+            lua_settop(co, 0);   /* the error object: else it reads suspended */
+        }
         return hl_lua_budget_raise(L);
     }
     if (status == LUA_OK || status == LUA_YIELD) {
@@ -295,9 +345,28 @@ static int hl_lua_co_resume(lua_State *L)
         lua_xmove(co, L, nres);
         return nres + 1;
     }
+    /* An error in the coroutine: its to-be-closed variables run now, in
+     * this run (hl_lua_close_errored, audit 38). The error returned is the
+     * original one, or a __close handler's, as coroutine.close reports. */
+    (void)hl_lua_close_errored(co, L, status);
     lua_pushboolean(L, 0);
     lua_xmove(co, L, 1);   /* the error */
     return 2;
+}
+
+/* coroutine.status: a coroutine the runtime closed after it died is dead
+ * (hl_lua_died_marker). Upvalue 1 is lcorolib's. */
+static int hl_lua_co_status(lua_State *L)
+{
+    lua_State *co = lua_tothread(L, 1);
+    if (co && *hl_lua_co_mark(co) == &hl_lua_died_marker) {
+        lua_pushliteral(L, "dead");
+        return 1;
+    }
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
+    return lua_gettop(L);
 }
 
 static int hl_lua_co_guarded(lua_State *L)
@@ -313,6 +382,15 @@ static int hl_lua_co_guarded(lua_State *L)
 
 int hl_lua_resume_status(lua_State *co, int status)
 {
+    if (status != LUA_OK && status != LUA_YIELD) {
+        /* Its __close handlers run now, inside this run, before the
+         * caller's stale-transaction guard (audit 38). */
+        int st = lua_status(co);
+        status = hl_lua_close_errored(co, NULL, status);
+        if (st != LUA_OK && st != LUA_YIELD)
+            *hl_lua_co_mark(co) = &hl_lua_died_marker;
+        return status;
+    }
     if (status != LUA_YIELD || hl_lua_thread_is_parked(co))
         return status;
     /* Yielded with no Hull operation behind it: a bare coroutine.yield()
@@ -322,6 +400,7 @@ int hl_lua_resume_status(lua_State *co, int status)
      * flight for good. It ends here, as an error. Closed first, so a
      * reference the app kept to it cannot run it again. */
     (void)lua_closethread(co, NULL);
+    *hl_lua_co_mark(co) = &hl_lua_died_marker;   /* audit 38 */
     /* Pushed protected: out of memory here aborted the process (no panic
      * handler). Without room for the message, nil stands in - the callers
      * read the error object with hl_lua_error_text, which takes any value. */
@@ -424,6 +503,13 @@ void hl_lua_guard_coroutine_lib(lua_State *L)
         } else {
             lua_pop(L, 1);
         }
+    }
+    lua_getfield(L, -1, "status");
+    if (lua_isfunction(L, -1)) {
+        lua_pushcclosure(L, hl_lua_co_status, 1);
+        lua_setfield(L, -2, "status");
+    } else {
+        lua_pop(L, 1);
     }
     lua_pushcfunction(L, hl_lua_co_wrap);
     lua_setfield(L, -2, "wrap");
@@ -593,6 +679,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 #endif
 
         if (was_main && lua->base.async_ctx) {
+            lua->cli_main_status = LUA_OK;
             lua->cli_main_co = NULL;
             hl_async_backend()->stop(lua->base.async_ctx);
         }
@@ -653,6 +740,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 #endif
 
         if (was_main && lua->base.async_ctx) {
+            lua->cli_main_status = status;   /* closed: lua_status reads OK */
             lua->cli_main_co = NULL;
             hl_async_backend()->stop(lua->base.async_ctx);
         }
