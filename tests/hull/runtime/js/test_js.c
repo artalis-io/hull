@@ -14787,4 +14787,90 @@ UTEST(js_audit37, small_blob_calls_have_a_floor)
     a15_fs_close(&f);
 }
 
+/* ── Audit 38: iterator helpers ─────────────────────────────────────────
+ *
+ * JS_IteratorNext2's fast path for a native iterator (an array iterator,
+ * a helper, a wrap-for-valid-iterator) is no call, so a C loop pulling from
+ * one counted nothing: Iterator.prototype.drop over an array iterator on a
+ * huge array-like ran up to 2^53 steps inside one builtin call, uncharged and
+ * blind to the run watchdog. Each native step now polls like a call (QuickJS
+ * HULL PATCH 0005, audit 38). Each source below is ONE builtin call that
+ * would otherwise not end; each trips a 1M budget fast, uncatchably. */
+#define A38_HUGE "Array.prototype.values.call({ length: 2 ** 53 - 1 })"
+UTEST(js_audit38, iterator_helper_steps_are_charged)
+{
+    static const char *const srcs[] = {
+        A38_HUGE ".drop(2 ** 53 - 1).next();",
+        A38_HUGE ".filter(Array.isArray).next();",
+        A38_HUGE ".map(Array.isArray).drop(2 ** 53 - 1).next();",
+        A38_HUGE ".some(Array.isArray);",
+        A38_HUGE ".every(Boolean.bind(null, 1));",
+        A38_HUGE ".find(Array.isArray);",
+        A38_HUGE ".forEach(Array.isArray);",
+        A38_HUGE ".reduce(Math.max, 0);",
+        A38_HUGE ".flatMap(Array.prototype.slice.bind([], 0, 0)).next();",
+        "Iterator.concat({ [Symbol.iterator]: () => " A38_HUGE " })"
+        ".drop(2 ** 53 - 1).next();",
+        "Iterator.from({ next: Object.bind(null, { done: false }) })"
+        ".drop(2 ** 53 - 1).next();",
+        /* other C loops over an iterable: one Set entry, no growth */
+        "new Set(" A38_HUGE ");",
+        "Promise.race(" A38_HUGE ");",
+    };
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        char code[1024];
+        snprintf(code, sizeof code,
+                 "globalThis.__a38 = 0;\n"
+                 "try { %s } catch (e) { globalThis.__a38 = 1; }\n", srcs[i]);
+        hl_js_reset_request(&lim);
+        struct timespec t0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        EXPECT_TRUE_MSG(a5_eval_throws(&lim, code), srcs[i]);
+        long ms = a10_ms_since(&t0);
+        EXPECT_EQ_MSG(lim.budget_tripped, 1, srcs[i]);
+        EXPECT_LT_MSG(ms, 5000L, srcs[i]);
+        hl_js_reset_request(&lim);
+        JSValue v = JS_Eval(lim.ctx, "globalThis.__a38", 16, "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        int32_t caught = -1;
+        JS_ToInt32(lim.ctx, &caught, v);
+        JS_FreeValue(lim.ctx, v);
+        EXPECT_EQ_MSG(caught, 0, srcs[i]);   /* the catch never ran */
+    }
+    hl_js_free(&lim);
+}
+
+/* The same single call with NO instruction limit: the run watchdog's stop
+ * flag is seen at each native step, not only after the builtin returns. */
+UTEST(js_audit38, iterator_helper_steps_see_the_watchdog)
+{
+    EXPECT_EQ(wd_js_run(A38_HUGE ".drop(2 ** 53 - 1).next();", NULL), 1);
+    EXPECT_EQ(wd_js_run("try { " A38_HUGE ".some(Array.isArray); } "
+                        "catch (e) {}\nglobalThis.after = 1;", NULL), 1);
+}
+
+/* Ordinary iterator-helper use still works and fits a normal budget. */
+UTEST(js_audit38, ordinary_iterator_helpers_still_work)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "const r = [1, 2, 3, 4].values().map(x => x * 2).filter(x => x > 2)"
+        ".drop(1).toArray();\n"
+        "if (r.join() !== '6,8') throw 1;\n"
+        "if (![1, 2, 3].values().some(x => x === 3)) throw 2;\n"
+        "if ([1, 2, 3].values().reduce((a, b) => a + b) !== 6) throw 3;\n"
+        "if (Iterator.concat([1], [2, 3]).toArray().join() !== '1,2,3') throw 4;\n"
+        "if ([[1], [2]].values().flatMap(x => x).take(5).toArray().length"
+        " !== 2) throw 5;\n"
+        "let n = 0; for (const x of new Array(100000).fill(1)) n += x;\n"
+        "if (n !== 100000) throw 6;\n"
+        "if (Array.from(new Set([1, 2, 2])).length !== 2) throw 7;\n"));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+#undef A38_HUGE
+
 UTEST_MAIN();

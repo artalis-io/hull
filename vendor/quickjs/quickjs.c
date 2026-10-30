@@ -16835,6 +16835,17 @@ static JSValue JS_IteratorNext2(JSContext *ctx, JSValueConst enum_obj,
             JSCFunctionType func;
             JSValueConst args[1];
 
+            /* HULL PATCH 0005 (audit 38): this fast path is no call, so
+               nothing counted it: a C loop pulling from a native iterator
+               (Iterator.prototype.drop over
+               Array.prototype.values.call({ length: 2 ** 53 - 1 }), and
+               every other helper, toArray, Iterator.concat, Array.from,
+               Promise.all, ...) ran up to 2^53 steps inside one builtin,
+               charged nothing and blind to the run watchdog. Each step is
+               now one step, as a call is: charged, and it sees the stop
+               flag (HULL PATCH 0006) at once. See docs/quickjs_patches.md. */
+            if (js_poll_interrupts(ctx))
+                goto fail;
             /* in case the function expects one argument */
             if (argc == 0) {
                 args[0] = JS_UNDEFINED;
@@ -16902,11 +16913,20 @@ static int JS_IteratorClose(JSContext *ctx, JSValueConst enum_obj,
 {
     JSValue method, ret, ex_obj;
     int res;
+    BOOL uncatchable = FALSE;
 
     if (is_exception_pending) {
         ex_obj = ctx->rt->current_exception;
         ctx->rt->current_exception = JS_UNINITIALIZED;
         res = -1;
+        /* HULL PATCH 0003 (audit 38): keep an interrupt uncatchable. The
+           JS_Throw below cleared the flag, so an interrupt raised inside an
+           iterator loop (Iterator.prototype.some / every / find / forEach /
+           reduce, the helpers, Array.from, ...) reached the caller's catch.
+           And run no `return` method for it: the run is over. */
+        uncatchable = ctx->rt->current_exception_is_uncatchable;
+        if (uncatchable)
+            goto done;
     } else {
         ex_obj = JS_UNDEFINED;
         res = 0;
@@ -16932,6 +16952,8 @@ static int JS_IteratorClose(JSContext *ctx, JSValueConst enum_obj,
  done:
     if (is_exception_pending) {
         JS_Throw(ctx, ex_obj);
+        if (uncatchable) /* HULL PATCH 0003 (audit 38) */
+            JS_SetUncatchableException(ctx, TRUE);
     }
     return res;
 }
