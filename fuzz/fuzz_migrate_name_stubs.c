@@ -26,3 +26,7 @@ void hl_vfs_prefix(void);
 void hl_vfs_prefix(void) { abort(); }
 void hl_db_txn_note(void);
 void hl_db_txn_note(void) { abort(); }
+void hl_cap_db_ns_trust(void);
+void hl_cap_db_ns_trust(void) { abort(); }
+void hl_cap_db_ns_restore(void);
+void hl_cap_db_ns_restore(void) { abort(); }
