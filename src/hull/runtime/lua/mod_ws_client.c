@@ -192,6 +192,13 @@ static int lua_ws_client_ping(lua_State *L)
 
     size_t len = 0;
     const char *data = luaL_optlstring(L, 2, NULL, &len);
+    lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);   /* as send */
+    /* Again, after the conversion (audit 37, as send since audit 27): a
+     * number converted to a string allocates, and the allocation can run a
+     * __gc that closes this connection. */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->client || ud->closed)
+        return 0;
     kl_ws_client_send_ping(ud->client, data, len);
     return 0;
 }

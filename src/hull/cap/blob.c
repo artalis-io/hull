@@ -109,6 +109,19 @@ int hl_cap_blob_init(HlBlob **out,
                      int shard_depth,
                      uint64_t tmp_max_age_sec)
 {
+    return hl_cap_blob_init_ex(out, fs_cfg, alloc, dir, shard_depth,
+                               tmp_max_age_sec, NULL);
+}
+
+int hl_cap_blob_init_ex(HlBlob **out,
+                        const HlFsConfig *fs_cfg,
+                        HlAllocator *alloc,
+                        const char *dir,
+                        int shard_depth,
+                        uint64_t tmp_max_age_sec,
+                        uint64_t *work_units)
+{
+    if (work_units) *work_units = 0;
     if (!out || !fs_cfg || !dir) return -1;
 
     /* Trim trailing slashes so "data/blobs/" works the same as
@@ -131,8 +144,8 @@ int hl_cap_blob_init(HlBlob **out,
     if (root_has_symlink(abs_root, fs_cfg->base_len))
         return -1;
 
-    return hl_blob_store_open(out, alloc, abs_root,
-                              shard_depth, tmp_max_age_sec);
+    return hl_blob_store_open_ex(out, alloc, abs_root,
+                                 shard_depth, tmp_max_age_sec, work_units);
 }
 
 void hl_cap_blob_free(HlBlob *b)

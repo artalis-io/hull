@@ -153,8 +153,11 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
             "fs.write: bytes must be an ArrayBuffer, TypedArray, or string");
     }
     /* Charged BEFORE the write (audit 10, parity with Lua): one call writes
-     * up to the whole heap and counted as one step. One unit per 8 bytes. */
-    if (hl_js_budget_charge(ctx, (uint64_t)view.len / 8)) {
+     * up to the whole heap and counted as one step. One unit per 8 bytes,
+     * plus a floor for the temp file, fsync and rename every write does
+     * whatever its size (audit 37: an empty write was free). */
+    if (hl_js_budget_charge(ctx, HL_WORK_FS_WRITE_UNITS +
+                                 hl_work_bytes_units((uint64_t)view.len))) {
         if (needs_free && str) JS_FreeCString(ctx, str);
         JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
@@ -199,6 +202,12 @@ static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
+    /* A resolve per path component and an fstatat (audit 37). */
+    if (hl_js_budget_charge(ctx, hl_work_fs_stat_units(path))) {
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
+    }
+
     const char *err = NULL;
     HlFsStatInfo info;
     int rc = hl_cap_fs_stat(js->base.fs_cfg, path, &info, &err);
@@ -229,6 +238,23 @@ static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
 /* fs.list(dir) -> Array<{ name, type, size }>. Deterministic byte-order
  * (unsigned-byte lexicographic, shorter first). Empty dir -> []; missing or
  * denied dir -> throw. */
+/* Each directory entry fs.list reads, charged as it is read (audit 37): a
+ * pattern that matches nothing still reads the whole directory, inside one
+ * call no interrupt poll sees. Over the budget the uncatchable trip is left
+ * pending and the listing stops. */
+typedef struct {
+    JSContext *ctx;
+    int        tripped;
+} JsFsListCharge;
+
+static int js_fs_list_charge(void *ud, uint64_t units)
+{
+    JsFsListCharge *c = (JsFsListCharge *)ud;
+    if (c->tripped) return 1;
+    if (hl_js_budget_charge(c->ctx, units)) c->tripped = 1;
+    return c->tripped;
+}
+
 static JSValue js_fs_list(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv)
 {
@@ -243,12 +269,20 @@ static JSValue js_fs_list(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
+    if (hl_js_budget_charge(ctx, HL_WORK_FS_LIST_UNITS)) {   /* the open */
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
+    }
+
     const char *err = NULL;
     HlFsDirEntry *entries = NULL;
     size_t count = 0;
-    int rc = hl_cap_fs_list(js->base.fs_cfg, path, &entries, &count,
-                            js->base.alloc, &err);
+    JsFsListCharge lc = { ctx, 0 };
+    int rc = hl_cap_fs_list_ex(js->base.fs_cfg, path, &entries, &count,
+                               js->base.alloc, js_fs_list_charge, &lc, &err);
     JS_FreeCString(ctx, path);
+    if (lc.tripped)
+        return JS_EXCEPTION;   /* the uncatchable trip, left pending */
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "fs.list: %s", err ? err : "list_failed");
 
@@ -313,6 +347,12 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
 
     /* Optional second arg { offset, length } selects a windowed, page-aligned
      * mapping (mapped-spans). A bare path stays whole-file. */
+    /* The open, map and guard registration, whatever the size (audit 37). */
+    if (hl_js_budget_charge(ctx, HL_WORK_FS_MMAP_UNITS)) {
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
+    }
+
     const char *err_msg = NULL;
     HlMappedBuffer *buf;
     int64_t off = 0, length = 0;

@@ -103,8 +103,10 @@ static int lua_fs_write(lua_State *L)
     const char *bytes = luaL_checklstring(L, 2, &len);
     /* Charged BEFORE the write (audit 10): one call writes up to the whole
      * heap and counted as one instruction. One unit per 8 bytes, as blob.put;
-     * lua_hlwork raises at once when the run is over, with nothing written. */
-    lua_hlwork(L, len / 8, 0);
+     * lua_hlwork raises at once when the run is over, with nothing written.
+     * Plus a floor for the temp file, fsync and rename every write does
+     * whatever its size (audit 37: an empty write was free). */
+    lua_hlwork(L, (size_t)(HL_WORK_FS_WRITE_UNITS + hl_work_bytes_units(len)), 0);
 
     const char *err_msg = NULL;
     int rc = hl_cap_fs_write(lua->base.fs_cfg, path, bytes, len, &err_msg);
@@ -145,6 +147,8 @@ static int lua_fs_mmap(lua_State *L)
         if (off < 0 || length <= 0)
             return luaL_error(L, "fs.mmap: offset must be >= 0 and length > 0");
     }
+    /* The open, map and guard registration, whatever the size (audit 37). */
+    lua_hlwork(L, HL_WORK_FS_MMAP_UNITS, 0);
     /* Every mapping takes one of the SIGBUS guard's slots until its buffer is
      * freed, and a full table refuses the mapping (audit 20). A buffer the
      * app dropped without close() is a small userdata the collector is in no
@@ -202,6 +206,8 @@ static int lua_fs_stat(lua_State *L)
         return 2;
     }
     const char *path = luaL_checkstring(L, 1);
+    /* A resolve per path component and an fstatat (audit 37). */
+    lua_hlwork(L, (size_t)hl_work_fs_stat_units(path), 0);
 
     const char *err = NULL;
     HlFsStatInfo info;
@@ -253,6 +259,15 @@ static void lua_register_fs_list_guard(lua_State *L)
     lua_pop(L, 1);
 }
 
+/* Each directory entry fs.list reads, charged as it is read (audit 37),
+ * never raising inside the cap's loop (a longjmp there would leak the open
+ * directory and the names); the binding raises the trip after. */
+static int lua_fs_list_charge(void *ud, uint64_t units)
+{
+    return hl_lua_budget_charge((lua_State *)ud,
+                                units > INT64_MAX ? INT64_MAX : (int64_t)units);
+}
+
 static int lua_fs_list(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -262,6 +277,7 @@ static int lua_fs_list(lua_State *L)
         return 2;
     }
     const char *path = luaL_checkstring(L, 1);
+    lua_hlwork(L, HL_WORK_FS_LIST_UNITS, 0);   /* the open (audit 37) */
 
     /* Create the __gc guard FIRST, while it owns nothing: if this allocation OOMs,
      * there is no C result yet to leak. Only after the cap call fills `entries`
@@ -274,8 +290,10 @@ static int lua_fs_list(lua_State *L)
     const char *err = NULL;
     HlFsDirEntry *entries = NULL;
     size_t count = 0;
-    int rc = hl_cap_fs_list(lua->base.fs_cfg, path, &entries, &count,
-                            lua->base.alloc, &err);
+    int rc = hl_cap_fs_list_ex(lua->base.fs_cfg, path, &entries, &count,
+                               lua->base.alloc, lua_fs_list_charge, L, &err);
+    if (rc != 0 && hl_lua_budget_tripped(L))
+        return hl_lua_budget_raise(L);   /* the guard owns nothing yet */
     if (rc != 0) {
         lua_pushnil(L);
         lua_pushstring(L, err ? err : "list_failed");

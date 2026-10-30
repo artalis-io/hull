@@ -13,6 +13,7 @@
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
+#include "hull/shared/work_charge.h"   /* fs.list charges (audit 37) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -784,6 +785,15 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
                    HlFsDirEntry **out_entries, size_t *out_count,
                    HlAllocator *alloc, const char **err_msg)
 {
+    return hl_cap_fs_list_ex(cfg, path, out_entries, out_count, alloc,
+                             NULL, NULL, err_msg);
+}
+
+int hl_cap_fs_list_ex(const HlFsConfig *cfg, const char *path,
+                      HlFsDirEntry **out_entries, size_t *out_count,
+                      HlAllocator *alloc, HlFsChargeFn charge, void *charge_ud,
+                      const char **err_msg)
+{
     if (out_entries) *out_entries = NULL;
     if (out_count)   *out_count = 0;
     if (!cfg || !path || !cfg->base_dir || !out_entries || !out_count) {
@@ -833,6 +843,13 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
             size_t nlen = (size_t)((const char *)nul - name);
             if (nlen == 0) { if (err_msg) *err_msg = "io_error"; goto fail_mid; }
 
+            /* Every entry read is charged, kept or not (audit 37): a pattern
+             * that matches nothing still reads the whole directory. */
+            if (charge && charge(charge_ud, hl_work_dirent_units(nlen))) {
+                if (err_msg) *err_msg = "budget_exhausted";
+                goto fail_mid;
+            }
+
             /* An app root's .hull is not the app's: not listed either (audit 37). */
             if (list_root && hl_fs_reserved_name(name, nlen)) continue;
 
@@ -851,6 +868,10 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
                 goto fail_mid;
             }
 
+            if (charge && charge(charge_ud, HL_WORK_FS_LIST_STAT_UNITS)) {
+                if (err_msg) *err_msg = "budget_exhausted";
+                goto fail_mid;
+            }
             struct stat st;
             if (fstatat(dirfd(dirp), name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
                 /* An entry that vanished mid-enumeration is a hard failure, not a
