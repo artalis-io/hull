@@ -366,6 +366,47 @@ echo "$LONG_OUT" | grep -Eq "instruction limit exceeded|run exceeded its time li
 [ $((T1 - T0)) -lt 60 ] || { echo "FAIL: stopping the query took $((T1 - T0)) s"; exit 1; }
 echo "ok  long DuckDB query interrupted in $((T1 - T0)) s"
 
+echo "=== DuckDB sleep functions refused; sequence names literal-only ==="
+# Audit 38: sleep_ms / pg_sleep block inside one execution task, which
+# duckdb_interrupt does not stop: SELECT sleep_ms(5000) ran its 5 s past a
+# budget that tripped at 500 ms. They are refused before they run, and
+# nextval / currval take only a literal sequence name.
+SLP=$(mktemp -d)
+cat > "$SLP/app.lua" <<'LUA'
+app.manifest({
+    modules = { "hull/db@1" },
+    databases = { named = { analytics = "duckdb://:memory:" } },
+})
+app.main(function()
+    local d = require("hull.db").connect("analytics")
+    for _, sql in ipairs({
+        "SELECT sleep_ms(30000)",
+        "SELECT main.sleep_ms(30000)",
+        "SELECT \"sleep_ms\"(30000)",
+        "SELECT pg_sleep(30)",
+        "SELECT pg_catalog.pg_sleep(30)",
+        "SELECT nextval(concat('s', '38'))",
+    }) do
+        local ok, err = pcall(d.query, sql)
+        assert(not ok, "not refused: " .. sql)
+    end
+    d.exec("CREATE SEQUENCE s38")
+    assert(d.query("SELECT nextval('s38') AS v")[1].v == 1, "literal nextval")
+    print("DUCKDB SLEEP REFUSED OK")
+    return 0
+end)
+LUA
+SLP_BUILD=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$SLP/bin" "$SLP" 2>&1) || true
+echo "$SLP_BUILD" | grep -q "composed feature 'duckdb'" || { echo "$SLP_BUILD"; echo "FAIL: sleep app not composed"; exit 1; }
+T0=$(date +%s)
+SLP_OUT=$("$SLP/bin" 2>&1) || true
+T1=$(date +%s)
+rm -rf "$SLP"
+echo "$SLP_OUT" | tail -3
+echo "$SLP_OUT" | grep -q "DUCKDB SLEEP REFUSED OK" || { echo "FAIL: DuckDB sleep / sequence refusals"; exit 1; }
+[ $((T1 - T0)) -lt 20 ] || { echo "FAIL: the sleep app took $((T1 - T0)) s"; exit 1; }
+echo "ok  sleep_ms / pg_sleep refused, nextval literal-only"
+
 echo "=== negative: a plain sqlite app must NOT compose duckdb ==="
 printf 'app.manifest({modules={"hull/db@1"}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
     > "$PLAIN/app.lua"

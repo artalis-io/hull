@@ -1224,6 +1224,95 @@ UTEST(hl_cap_db, macro_scan_is_linear)
     free(big);
 }
 
+/* Audit 38: DuckDB's sleep_ms / pg_sleep block inside one execution task,
+ * which duckdb_interrupt does not stop, so they are refused in every
+ * spelling; nextval / currval take only a literal sequence name; and
+ * read_duckdb's table_name / schema_name only a literal. */
+UTEST(hl_cap_db, duckdb_sleep_and_sequence_by_value)
+{
+    static const char *const hit[] = {
+        "SELECT sleep_ms(5000)",
+        "SELECT SLEEP_MS(1)",
+        "SELECT main.sleep_ms(1)",
+        "SELECT system.main.sleep_ms(1)",
+        "SELECT \"sleep_ms\"(1)",
+        "SELECT \"main\".\"sleep_ms\"(1)",
+        "SELECT sleep_ms /* c */ (1)",
+        "SELECT sleep_ms(x) FROM t",
+        "SELECT pg_sleep(4)",
+        "SELECT pg_catalog.pg_sleep(4)",
+        "SELECT \"PG_SLEEP\"(4)",
+        "CREATE MACRO z(n) AS sleep_ms(n)",
+        "CREATE VIEW v AS SELECT pg_sleep(1)",
+        "CREATE TABLE t (a INT DEFAULT sleep_ms(1))",
+        "SELECT 'sleep_ms'",                   /* literals not skipped */
+        /* sequence names by value */
+        "SELECT nextval(concat('_hu', 'll_jobs_id_seq'))",
+        "SELECT currval(chr(95) || 'hull_x')",
+        "SELECT nextval(?)",
+        "SELECT nextval($1)",
+        "SELECT nextval(s) FROM t",
+        "SELECT NEXTVAL(main.s)",
+        "SELECT \"nextval\"(getvariable('s'))",
+        "SELECT main.nextval('a' || 'b')",
+        "SELECT nextval /* c */ (lower('S'))",
+        "CREATE MACRO nv(s) AS nextval(s)",
+        /* read_duckdb table / schema names by value */
+        "SELECT * FROM read_duckdb('x.duckdb', table_name := concat('', 'a'))",
+        "SELECT * FROM read_duckdb('x.duckdb', table_name => lower('A'))",
+        "SELECT * FROM read_duckdb('x.duckdb', table_name = ?)",
+        "SELECT * FROM read_duckdb('x.duckdb', \"table_name\" := 'a' || 'b')",
+        "SELECT * FROM read_duckdb('x.duckdb', schema_name := getvariable('s'))",
+        "SELECT * FROM \"read_duckdb\"('x.duckdb', table_name := t)",
+        "SELECT * FROM read_duckdb('x.duckdb', union_by_name := true, table_name := $t)",
+        "SELECT * FROM read_duckdb('x.duckdb', table_name := $$a$$)",
+        "SELECT * FROM read_duckdb('x.duckdb', table_name := 'a'",
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(hit[i]));
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value_ex("sleep_ms(n)", 1));
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value_ex("nextval(s)", 1));
+
+    static const char *const miss[] = {
+        "SELECT nextval('orders_seq')",
+        "SELECT currval('orders_seq')",
+        "SELECT nextval ( 'orders_seq' )",
+        "CREATE TABLE o (id BIGINT DEFAULT nextval('orders_seq') PRIMARY KEY)",
+        "CREATE MACRO nv() AS nextval('orders_seq')",
+        "SELECT nextval",                       /* a column */
+        "SELECT * FROM read_duckdb('x.duckdb')",
+        "SELECT * FROM read_duckdb('x.duckdb', table_name := 'a')",
+        "SELECT * FROM read_duckdb('x.duckdb', table_name => 'a', schema_name = 'main')",
+        "SELECT * FROM read_duckdb(['a.duckdb', 'b.duckdb'], union_by_name := true)",
+        "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+        "SELECT sleep, sleep_count, my_sleep_ms FROM t",
+        "SELECT histogram(lower(name)) FROM t",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value(miss[i]));
+
+    /* Linear: repeated sequence / read_duckdb calls and unterminated quotes
+     * re-read from every position stay bounded (or fail closed). */
+    size_t n = 1u << 20;
+    char *big = malloc(n + 64);
+    ASSERT_TRUE(big != NULL);
+    clock_t t0 = clock();
+    static const char *const pats[] = {
+        "nextval('", "read_duckdb(", "read_duckdb('a',table_name:='",
+        "nextval(", ",\"", "read_duckdb(e'",
+    };
+    for (size_t k = 0; k < sizeof pats / sizeof pats[0]; k++) {
+        size_t pl = strlen(pats[k]);
+        size_t i = 0;
+        for (; i + pl <= n; i += pl) memcpy(big + i, pats[k], pl);
+        big[i] = '\0';
+        (void)hl_cap_db_sql_names_table_by_value(big);
+    }
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 30.0);
+    free(big);
+}
+
 /* Audit 34: DuckDB keeps the database file, its WAL sidecars and its temp
  * directory readable from SQL whatever external access says, so
  * read_blob('app.duckdb') returned the raw file, _hull_* rows included. */

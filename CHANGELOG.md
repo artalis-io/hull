@@ -58,6 +58,20 @@ release-artifact layout).
   `-journal`'s - a replaced or removed sidecar splits the WAL index or loses committed
   transactions. An in-place write to a leaf NAMED like a sidecar is refused whatever it is.
   Covered by `make e2e-db-live-files` and `test_fs`.
+- **DuckDB SQL could hold the event loop for as long as it asked** (audit 38). The DuckDB
+  backend runs a statement task by task and stops it at a tripped budget or run deadline, but
+  `duckdb_interrupt` only stops the NEXT task, and `sleep_ms(ms)` (and `pg_catalog.pg_sleep`,
+  a macro over it) blocks inside one: with a budget tripping at 500 ms, `SELECT sleep_ms(5000)`
+  returned after 5 s and `SELECT pg_sleep(4)` after 4 s, and one sleep per row or a huge
+  argument held the loop (and a SIGTERM drain) past every limit. Both are refused in every
+  spelling (qualified, quoted, any case, inside a macro / view / DEFAULT); DuckDB 1.5.4 has no
+  other built-in that waits. A database whose stored view or column DEFAULT calls one (or
+  `storage_info`, or a table-name function by value) refuses to open, as a stored table-name
+  macro has since audit 37. Two Lows: `nextval` / `currval` take only one `'...'` literal
+  sequence name (`nextval(concat('_hu', 'll_jobs_id_seq'))` advanced a stdlib-owned
+  sequence; a literal naming `_hull_*` is already the namespace check's), and `read_duckdb`'s
+  `table_name` / `schema_name` options likewise. Covered by `test_db`, `test_db_duckdb` and
+  `tests/e2e_feature_duckdb.sh`.
 
 - **A locked login address told a registered account from an unknown one** (audit 32, both
   runtimes). An unknown address is counted under a key made from its own spelling (ASCII case

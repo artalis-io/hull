@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Open a fresh in-memory DuckDB handle. */
@@ -481,6 +482,128 @@ UTEST(db_duckdb, stored_table_name_macro_refuses_the_open)
 
     unlink(path);
     unlink(wal);
+}
+
+static double mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+/* A budget that trips once the monotonic clock passes *(double *)ud. */
+static int trips_at(void *ud, int64_t units)
+{
+    (void)units;
+    return mono_ms() >= *(double *)ud;
+}
+
+/* Audit 38: sleep_ms / pg_sleep block inside one execution task, which
+ * duckdb_interrupt does not stop - SELECT sleep_ms(5000) returned after 5 s
+ * under a budget that tripped at 500 ms. They are refused before they run;
+ * a budget trip still lands near its time for ordinary work; sequence names
+ * and read_duckdb table names are literal-only. */
+UTEST(db_duckdb, sleep_refused_and_trip_lands_on_time)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+
+    static const char *const refused[] = {
+        "SELECT sleep_ms(5000)",
+        "SELECT main.sleep_ms(5000)",
+        "SELECT \"sleep_ms\"(5000)",
+        "SELECT pg_sleep(4)",
+        "SELECT pg_catalog.pg_sleep(4)",
+        "SELECT \"pg_catalog\".\"pg_sleep\"(4)",
+        "CREATE MACRO zz(n) AS sleep_ms(n)",
+        "CREATE VIEW vz AS SELECT pg_sleep(1)",
+        "CREATE TABLE tz (a INT DEFAULT sleep_ms(1000))",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        double t0 = mono_ms();
+        EXPECT_EQ(-1, hl_db_query(&h, refused[i], NULL, 0, NULL, NULL, NULL));
+        EXPECT_LT(mono_ms() - t0, 500.0);
+    }
+
+    /* Ordinary long work is still stopped near the budget's time. */
+    double deadline = mono_ms() + 300.0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(trips_at, &deadline);
+    double t0 = mono_ms();
+    int64_t c = 0;
+    EXPECT_EQ(-1, hl_db_query(&h, "SELECT count(*) FROM range(10000000000)",
+                              NULL, 0, count_cb, &c, NULL));
+    double took = mono_ms() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_LT(took, 2000.0);
+
+    /* Sequences: a literal name works, a run-time one is refused. */
+    EXPECT_EQ(0, hl_db_exec(&h, "CREATE SEQUENCE s38", NULL, 0));
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT nextval('s38')", NULL, 0,
+                             count_cb, &c, NULL));
+    EXPECT_EQ(1, (int)c);
+    EXPECT_EQ(0, hl_db_exec(&h,
+        "CREATE TABLE o38 (id BIGINT DEFAULT nextval('s38') PRIMARY KEY, v INT)",
+        NULL, 0));
+    EXPECT_EQ(0, hl_db_exec(&h, "INSERT INTO o38 (v) VALUES (1)", NULL, 0));
+    EXPECT_EQ(-1, hl_db_query(&h, "SELECT nextval(concat('s', '38'))", NULL, 0,
+                              NULL, NULL, NULL));
+    EXPECT_EQ(-1, hl_db_query(&h, "SELECT currval(lower('S38'))", NULL, 0,
+                              NULL, NULL, NULL));
+    h.backend->close(&h);
+}
+
+/* Audit 38: a view or a column DEFAULT stored in the file that calls
+ * sleep_ms refuses the open, as a stored table-name macro does (audit 37). */
+UTEST(db_duckdb, stored_sleep_view_or_default_refuses_the_open)
+{
+    static const char *const ddl[] = {
+        "CREATE VIEW v AS SELECT sleep_ms(1000) AS x",
+        "CREATE TABLE t (a INT DEFAULT sleep_ms(1000))",
+        "CREATE MACRO m(n) AS pg_sleep(n)",
+    };
+    for (size_t k = 0; k < sizeof ddl / sizeof ddl[0]; k++) {
+        char path[] = "/tmp/hull_duck_sleep_XXXXXX";
+        int fd = mkstemp(path);
+        ASSERT_TRUE(fd >= 0);
+        close(fd);
+        unlink(path);
+        char dsn[128];
+        snprintf(dsn, sizeof dsn, "duckdb://%s", path);
+        char wal[160];
+        snprintf(wal, sizeof wal, "%s.wal", path);
+
+        duckdb_database db;
+        duckdb_connection con;
+        duckdb_result r;
+        ASSERT_TRUE(duckdb_open(path, &db) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_connect(db, &con) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_query(con,
+            "CREATE SEQUENCE sq; CREATE TABLE ok (id BIGINT DEFAULT "
+            "nextval('sq'), v INT); CREATE VIEW okv AS SELECT v FROM ok",
+            &r) == DuckDBSuccess);
+        duckdb_destroy_result(&r);
+        duckdb_disconnect(&con);
+        duckdb_close(&db);
+
+        /* Harmless views and defaults open. */
+        HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+        ASSERT_EQ(hl_db_backend_duckdb.open(&h.ctx, dsn, NULL), 0);
+        h.backend->close(&h);
+
+        ASSERT_TRUE(duckdb_open(path, &db) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_connect(db, &con) == DuckDBSuccess);
+        ASSERT_TRUE(duckdb_query(con, ddl[k], &r) == DuckDBSuccess);
+        duckdb_destroy_result(&r);
+        duckdb_disconnect(&con);
+        duckdb_close(&db);
+
+        void *ctx = NULL;
+        EXPECT_EQ(-1, hl_db_backend_duckdb.open(&ctx, dsn, NULL));
+        EXPECT_TRUE(ctx == NULL);
+
+        unlink(path);
+        unlink(wal);
+    }
 }
 
 /* Audit 37: a params array short of the placeholders (Lua drops trailing
