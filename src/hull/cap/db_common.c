@@ -666,9 +666,11 @@ static int fv_always_refused_name(const char *s, size_t n)
 
 /* After a table-by-value name at @p p, read with one comment rule: 1 when
  * it is called (`(`, or `=` under @p eq) with anything but one plain
- * argument. */
+ * argument. Under @p strict (a text that creates a macro or function) only
+ * a '...' literal is plain: a bare name there can be a macro PARAMETER,
+ * substituted at call time with a value built at run time (audit 37). */
 static int fv_table_arg_refused_ex(const char *p, int nest, int eq,
-                                   size_t *budget)
+                                   int strict, size_t *budget)
 {
     const char *q = dyn_skip_gap(p, nest, budget);
     if (!q) return 1;
@@ -679,6 +681,8 @@ static int fv_table_arg_refused_ex(const char *p, int nest, int eq,
     if (paren && *q == ')') return 0;          /* no argument */
     if (*q == '\'')
         q = fv_quoted(q, budget, NULL, 0, NULL);
+    else if (strict)
+        return 1;
     else
         q = fv_name_chain(q, nest, budget);
     if (!q) return 1;
@@ -686,9 +690,10 @@ static int fv_table_arg_refused_ex(const char *p, int nest, int eq,
     return !q || !fv_arg_end(*q);
 }
 
-static int fv_table_arg_refused(const char *p, int nest, size_t *budget)
+static int fv_table_arg_refused(const char *p, int nest, int strict,
+                                size_t *budget)
 {
-    return fv_table_arg_refused_ex(p, nest, 1, budget);
+    return fv_table_arg_refused_ex(p, nest, 1, strict, budget);
 }
 
 /* Whether the call whose `(` is at @p p, read with one comment rule, has
@@ -734,7 +739,7 @@ static int fv_call_has_one_arg(const char *p, int nest, size_t *budget)
  * plain - the table macro's source, which it hands to query_table. The
  * aggregate `histogram(lower(name))` passes, and so does any histogram in a
  * select list (audit 35: #912 refused both). */
-static int fv_histogram_refused(const char *p, size_t *budget)
+static int fv_histogram_refused(const char *p, int strict, size_t *budget)
 {
     for (int nest = 1; nest >= 0; nest--) {
         const char *q = dyn_skip_gap(p, nest, budget);
@@ -743,8 +748,8 @@ static int fv_histogram_refused(const char *p, size_t *budget)
         if (fv_call_has_one_arg(q, 1, budget) &&
             fv_call_has_one_arg(q, 0, budget))
             continue;
-        if (fv_table_arg_refused_ex(q, 1, 0, budget) ||
-            fv_table_arg_refused_ex(q, 0, 0, budget))
+        if (fv_table_arg_refused_ex(q, 1, 0, strict, budget) ||
+            fv_table_arg_refused_ex(q, 0, 0, strict, budget))
             return 1;
     }
     return 0;
@@ -755,7 +760,8 @@ static int fv_histogram_refused(const char *p, size_t *budget)
  * (fv_chain_last), read with both comment rules. 1 when it is `histogram`
  * called as refused above, or - after PRAGMA - `show` / `table_info` given
  * anything but one plain argument. */
-static int fv_table_position_refused(const char *p, int pragma, size_t *budget)
+static int fv_table_position_refused(const char *p, int pragma, int strict,
+                                     size_t *budget)
 {
     for (int nest = 1; nest >= 0; nest--) {
         const char *q = dyn_skip_gap(p, nest, budget);
@@ -768,19 +774,78 @@ static int fv_table_position_refused(const char *p, int pragma, size_t *budget)
         if (got == 0) continue;              /* no name */
         if (n == SIZE_MAX) continue;         /* longer than any name here */
         if (n == 9 && strncasecmp(buf, "histogram", 9) == 0 &&
-            fv_histogram_refused(after, budget))
+            fv_histogram_refused(after, strict, budget))
             return 1;
         if (pragma && fv_pragma_by_value_name(buf, n) &&
-            (fv_table_arg_refused(after, 1, budget) ||
-             fv_table_arg_refused(after, 0, budget)))
+            (fv_table_arg_refused(after, 1, strict, budget) ||
+             fv_table_arg_refused(after, 0, strict, budget)))
             return 1;
     }
     return 0;
 }
 
-int hl_cap_db_sql_names_table_by_value(const char *sql)
+/* The modifiers DuckDB's grammar allows between CREATE and MACRO / FUNCTION
+ * (OR REPLACE, then OptTemp), read loosely: any run of them is skipped. */
+static int fv_macro_modifier(const char *s, size_t n)
+{
+    static const char *const names[] = {
+        "or", "replace", "temp", "temporary", "local", "global", "unlogged",
+        "persistent", NULL
+    };
+    return fv_name_in(s, n, names);
+}
+
+int hl_cap_db_sql_creates_macro(const char *sql)
 {
     if (!sql) return 0;
+    size_t budget = 2 * strlen(sql) + 65536;   /* shared by every look-ahead */
+    for (const char *p = sql; *p; ) {
+        unsigned char c = (unsigned char)*p;
+        if (!fv_name_start(c)) {
+            if (dyn_ident_char(c))      /* a digit or '$' run: one word */
+                while (*p && dyn_ident_char((unsigned char)*p)) p++;
+            else
+                p++;
+            continue;
+        }
+        const char *start = p;
+        while (*p && dyn_ident_char((unsigned char)*p)) p++;
+        if (!(p - start == 6 && strncasecmp(start, "create", 6) == 0))
+            continue;
+        /* CREATE, any modifiers, then MACRO / FUNCTION - each word read past
+         * whitespace and comments under both comment rules. A look-ahead past
+         * the budget counts as a macro: the stricter reading. */
+        const char *q = p;
+        for (;;) {
+            const char *after = NULL;
+            if (whole_db_next_is(q, "macro", &budget, &after) ||
+                whole_db_next_is(q, "function", &budget, &after))
+                return 1;
+            int moved = 0;
+            for (int nest = 1; nest >= 0 && !moved; nest--) {
+                const char *w = dyn_skip_gap(q, nest, &budget);
+                if (!w) return 1;
+                size_t n = 0;
+                while (dyn_ident_char((unsigned char)w[n])) n++;
+                if (n && fv_macro_modifier(w, n)) {
+                    if (!fv_take(&budget, n)) return 1;
+                    q = w + n;
+                    moved = 1;
+                }
+            }
+            if (!moved) break;
+        }
+    }
+    return 0;
+}
+
+int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro)
+{
+    if (!sql) return 0;
+    /* A text that creates a macro or function is read strictly: a bare name
+     * in its body may be a parameter, which the call fills with a value built
+     * at run time (audit 37). */
+    const int strict = in_macro || hl_cap_db_sql_creates_macro(sql);
     size_t budget = 2 * strlen(sql) + 65536;
     for (const char *p = sql; *p; ) {
         unsigned char c = (unsigned char)*p;
@@ -797,18 +862,22 @@ int hl_cap_db_sql_names_table_by_value(const char *sql)
             }
             if (fits && fv_always_refused_name(buf, n)) return 1;
             if (fits && *q == '"' && fv_table_by_value_name(buf, n) &&
-                (fv_table_arg_refused(q + 1, 1, &budget) ||
-                 fv_table_arg_refused(q + 1, 0, &budget)))
+                (fv_table_arg_refused(q + 1, 1, strict, &budget) ||
+                 fv_table_arg_refused(q + 1, 0, strict, &budget)))
                 return 1;
             if (fits && *q == '"' && fv_pragma_by_value_name(buf, n) &&
-                (fv_table_arg_refused_ex(q + 1, 1, 0, &budget) ||
-                 fv_table_arg_refused_ex(q + 1, 0, 0, &budget)))
+                (fv_table_arg_refused_ex(q + 1, 1, 0, strict, &budget) ||
+                 fv_table_arg_refused_ex(q + 1, 0, 0, strict, &budget)))
+                return 1;
+            if (strict && fits && *q == '"' && n == 9 &&
+                strncasecmp(buf, "histogram", 9) == 0 &&
+                fv_histogram_refused(q + 1, strict, &budget))
                 return 1;
             p++;                      /* literals are not skipped: see above */
             continue;
         }
         if (c == ',' || c == '(') {
-            if (fv_table_position_refused(p + 1, 0, &budget)) return 1;
+            if (fv_table_position_refused(p + 1, 0, strict, &budget)) return 1;
             p++;
             continue;
         }
@@ -818,23 +887,34 @@ int hl_cap_db_sql_names_table_by_value(const char *sql)
             size_t n = (size_t)(p - start);
             if (fv_always_refused_name(start, n)) return 1;
             if (fv_table_by_value_name(start, n) &&
-                (fv_table_arg_refused(p, 1, &budget) ||
-                 fv_table_arg_refused(p, 0, &budget)))
+                (fv_table_arg_refused(p, 1, strict, &budget) ||
+                 fv_table_arg_refused(p, 0, strict, &budget)))
                 return 1;
             /* show(...) / table_info(...) anywhere; `= value` after PRAGMA. */
             if (fv_pragma_by_value_name(start, n) &&
-                (fv_table_arg_refused_ex(p, 1, 0, &budget) ||
-                 fv_table_arg_refused_ex(p, 0, 0, &budget)))
+                (fv_table_arg_refused_ex(p, 1, 0, strict, &budget) ||
+                 fv_table_arg_refused_ex(p, 0, 0, strict, &budget)))
+                return 1;
+            /* In a macro body, the histogram table macro's call anywhere, not
+             * only after a table-position word: every word is read, so the
+             * last name of main.histogram is too (audit 37). */
+            if (strict && n == 9 && strncasecmp(start, "histogram", 9) == 0 &&
+                fv_histogram_refused(p, strict, &budget))
                 return 1;
             if (fv_table_position_kw(start, n) &&
                 fv_table_position_refused(p, n == 6 &&
-                    strncasecmp(start, "pragma", 6) == 0, &budget))
+                    strncasecmp(start, "pragma", 6) == 0, strict, &budget))
                 return 1;
             continue;
         }
         p++;
     }
     return 0;
+}
+
+int hl_cap_db_sql_names_table_by_value(const char *sql)
+{
+    return hl_cap_db_sql_names_table_by_value_ex(sql, 0);
 }
 
 /* The protected database file: its directory (NULL: none) and name. */

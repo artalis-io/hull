@@ -38,6 +38,26 @@ release-artifact layout).
   for an address it found locked - one commit less, visible in the response time. A locked
   address now runs the same statements in a hold mode that leaves the count and the lock as
   they were, so locked and unlocked addresses do the same database work.
+- **A DuckDB macro could read any `_hull_*` table by a name built at run time** (audit 37,
+  both runtimes). The table-name functions (`histogram`, `histogram_values`,
+  `pragma_table_info`, `pragma_show`, `table_info`, `show`, `duckdb_table_sample`) took a
+  bare name as a plain argument, assuming the `_hull_*` text check had read it - but in a
+  `CREATE [OR REPLACE] [TEMP] MACRO` / `FUNCTION` body a bare name is a parameter, filled
+  at call time: `CREATE TEMP MACRO hm(t, c) AS TABLE FROM histogram(t, c)` then
+  `FROM hm('_hu' || 'll_sessions', sid)` (or a bound `?`) returned session ids, TOTP rows
+  and idempotency keys. In a text that creates a macro or function (any case, comments
+  between the keywords, any statement) those functions now take only a `'...'` literal,
+  and `histogram` with a table macro's argument list is refused in every position;
+  `getvariable()`, `?` and `$n` sources were already refused, and column / lambda / lateral
+  references are rejected by DuckDB itself. A database file that already holds a macro
+  whose body would be refused (made before this fix, or by another program) is refused at
+  open, naming the macro. Macros that use none of these functions, or a literal source,
+  still work. Also: DuckDB's `autoincrement_id_ddl` is a template naming a sequence
+  (`nextval('%s')`), which the stdlib put into its DDL raw, so `audit-log` and `outbox`
+  could not create their tables on DuckDB; they now create a Hull-owned
+  `_hull_<table>_id_seq` first (`identity_sequence` is `CREATE SEQUENCE IF NOT EXISTS %s`),
+  and a params array short of the placeholders binds the tail NULL on DuckDB, as on the
+  other backends. Covered by `test_db`, `test_db_duckdb` and `tests/e2e_feature_duckdb.sh`.
 - **A DuckDB COMMIT / ROLLBACK could be reported interrupted after it took effect** (audit 36,
   both runtimes). When a run's budget tripped during a statement, the DuckDB backend called
   `duckdb_interrupt` and reported the statement stopped, but the interrupt does not stop a

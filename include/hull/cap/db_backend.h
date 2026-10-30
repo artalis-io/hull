@@ -93,10 +93,12 @@ typedef struct HlDbDialect {
      * column. SQLite: "INTEGER PRIMARY KEY AUTOINCREMENT". Postgres:
      * "BIGSERIAL PRIMARY KEY". MySQL: "BIGINT AUTO_INCREMENT PRIMARY KEY".
      * DuckDB references a sequence: "BIGINT DEFAULT nextval('%s') PRIMARY KEY".
+     * The stdlib (audit-log, outbox) fills %s with a Hull-owned _hull_<table>_id_seq
+     * it creates through identity_sequence first (audit 37).
      * Used by stdlib CREATE TABLE (audit-log, outbox) and the schema builder. */
     const char *identity_column;
 
-    /* printf-style companion template ("CREATE SEQUENCE %s") for engines whose
+    /* printf-style companion template ("CREATE SEQUENCE IF NOT EXISTS %s") for engines whose
      * identity needs a separate sequence (DuckDB); NULL where identity is
      * inline. The schema builder generates one sequence name and threads it
      * through both identity_sequence and identity_column. */

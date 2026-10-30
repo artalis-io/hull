@@ -19,6 +19,11 @@
 #include "hull/cap/db_budget.h"
 #include "hull/cap/types.h"
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-prototypes"
+#include <duckdb.h>
+#pragma GCC diagnostic pop
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -370,6 +375,168 @@ UTEST(db_duckdb, qualified_table_macro_is_refused)
     h.backend->close(&h);
 }
 
+/* Audit 37: a bare name in a macro body is a parameter, filled at call time
+ * with a value built at run time, so a macro wrapping histogram /
+ * pragma_table_info / ... read any table by a constructed name. Creating one
+ * is refused; a macro over a literal, or one that uses none of them, runs. */
+UTEST(db_duckdb, macro_parameter_table_names_are_refused)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE _hull_x (name VARCHAR, checksum VARCHAR)",
+                         NULL, 0), 0);
+    ASSERT_EQ(hl_db_exec(&h, "INSERT INTO _hull_x VALUES ('s1', 'c1')", NULL, 0), 0);
+    ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE users (name VARCHAR, id INTEGER)",
+                         NULL, 0), 0);
+    ASSERT_EQ(hl_db_exec(&h, "INSERT INTO users VALUES ('bob', 1)", NULL, 0), 0);
+
+    static const char *const refused[] = {
+        "CREATE OR REPLACE TEMP MACRO hm(t, c) AS TABLE SELECT * FROM histogram(t, c)",
+        "CREATE MACRO hp(t, c) AS TABLE SELECT * FROM histogram(t, c)",
+        "CREATE OR REPLACE TEMP MACRO q3(t) AS (SELECT string_agg(bin, ',') FROM histogram(t, checksum))",
+        "CREATE OR REPLACE TEMP MACRO tm(t) AS TABLE SELECT * FROM pragma_table_info(t)",
+        "CREATE OR REPLACE TEMP MACRO sh(t) AS TABLE SELECT * FROM pragma_show(t)",
+        "CREATE OR REPLACE TEMP MACRO sm(t) AS TABLE SELECT * FROM duckdb_table_sample(t)",
+        "CREATE OR REPLACE TEMP MACRO hv(t) AS TABLE SELECT * FROM histogram_values(t, name)",
+        "CREATE OR REPLACE TEMP FUNCTION fm(t) AS TABLE SELECT * FROM histogram(t, name)",
+        "CREATE /* x */ TEMPORARY -- y\n MACRO h2(t, c) AS TABLE FROM main.histogram(t, c)",
+        /* run-time values outside a macro */
+        "SELECT * FROM histogram(getvariable('t'), name)",
+        "SELECT * FROM pragma_table_info(getvariable('t'))",
+        "PREPARE p3 AS SELECT * FROM histogram(?, name)",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_EQ(-1, hl_db_exec(&h, refused[i], NULL, 0));
+    /* Nothing was created: the macros the reported attack called are absent. */
+    EXPECT_NE(0, hl_db_query(&h, "SELECT * FROM hm('_hu' || 'll_x', name)",
+                             NULL, 0, NULL, NULL, NULL));
+    EXPECT_NE(0, hl_db_query(&h, "SELECT * FROM tm('_hu' || 'll_x')",
+                             NULL, 0, NULL, NULL, NULL));
+
+    /* Legitimate macros still work. */
+    int64_t c = 0;
+    EXPECT_EQ(0, hl_db_exec(&h, "CREATE OR REPLACE TEMP MACRO ok1(a) AS a + 1",
+                            NULL, 0));
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT ok1(41)", NULL, 0, count_cb, &c, NULL));
+    EXPECT_EQ(42, (int)c);
+    EXPECT_EQ(0, hl_db_exec(&h,
+        "CREATE OR REPLACE TEMP MACRO ok2() AS TABLE SELECT * FROM histogram('users', name)",
+        NULL, 0));
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM ok2()", NULL, 0,
+                             count_cb, &c, NULL));
+    EXPECT_EQ(1, (int)c);
+    EXPECT_EQ(0, hl_db_exec(&h,
+        "CREATE OR REPLACE TEMP MACRO ok3(n) AS TABLE SELECT * FROM main.users WHERE id = n",
+        NULL, 0));
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM main.ok3(1)", NULL, 0,
+                             count_cb, &c, NULL));
+    EXPECT_EQ(1, (int)c);
+    EXPECT_EQ(0, hl_db_exec(&h,
+        "CREATE OR REPLACE TEMP MACRO ok4(x) AS (SELECT histogram(lower(name)) FROM users)",
+        NULL, 0));
+    h.backend->close(&h);
+}
+
+/* Audit 37: a macro already stored in the file (made before the fix, or by
+ * another program) is the same reach, so the open refuses a database that
+ * holds one; a database whose macros are harmless opens. */
+UTEST(db_duckdb, stored_table_name_macro_refuses_the_open)
+{
+    char path[] = "/tmp/hull_duck_macro_XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT_TRUE(fd >= 0);
+    close(fd);
+    unlink(path);
+    char dsn[128];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", path);
+    char wal[160];
+    snprintf(wal, sizeof wal, "%s.wal", path);
+
+    duckdb_database db;
+    duckdb_connection con;
+    duckdb_result r;
+    ASSERT_TRUE(duckdb_open(path, &db) == DuckDBSuccess);
+    ASSERT_TRUE(duckdb_connect(db, &con) == DuckDBSuccess);
+    ASSERT_TRUE(duckdb_query(con, "CREATE MACRO ok1(a) AS a + 1", &r) == DuckDBSuccess);
+    duckdb_destroy_result(&r);
+    duckdb_disconnect(&con);
+    duckdb_close(&db);
+
+    HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(hl_db_backend_duckdb.open(&h.ctx, dsn, NULL), 0);
+    h.backend->close(&h);
+
+    ASSERT_TRUE(duckdb_open(path, &db) == DuckDBSuccess);
+    ASSERT_TRUE(duckdb_connect(db, &con) == DuckDBSuccess);
+    ASSERT_TRUE(duckdb_query(con,
+        "CREATE MACRO hp(t, c) AS TABLE SELECT * FROM histogram(t, c)", &r) ==
+        DuckDBSuccess);
+    duckdb_destroy_result(&r);
+    duckdb_disconnect(&con);
+    duckdb_close(&db);
+
+    void *ctx = NULL;
+    EXPECT_EQ(-1, hl_db_backend_duckdb.open(&ctx, dsn, NULL));
+    EXPECT_TRUE(ctx == NULL);
+
+    unlink(path);
+    unlink(wal);
+}
+
+/* Audit 37: a params array short of the placeholders (Lua drops trailing
+ * nils) binds the tail NULL, as the other backends do. */
+UTEST(db_duckdb, short_params_bind_the_tail_null)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    ASSERT_EQ(hl_db_exec(&h, "CREATE TABLE t (a INTEGER, b VARCHAR, c VARCHAR)",
+                         NULL, 0), 0);
+    HlValue v = { .type = HL_TYPE_INT, .i = 5 };
+    ASSERT_EQ(hl_db_exec(&h, "INSERT INTO t VALUES (?, ?, ?)", &v, 1), 0);
+    int64_t c = 0;
+    ASSERT_EQ(hl_db_query(&h, "SELECT count(*) FROM t WHERE a = 5 AND b IS NULL "
+                          "AND c IS NULL", NULL, 0, count_cb, &c, NULL), 0);
+    EXPECT_EQ(1, (int)c);
+    HlValue two[2] = { { .type = HL_TYPE_INT, .i = 1 }, { .type = HL_TYPE_INT, .i = 2 } };
+    EXPECT_NE(0, hl_db_exec(&h, "INSERT INTO t (a) VALUES (?)", two, 2));
+    h.backend->close(&h);
+}
+
+/* @p tpl with its one %s replaced by @p name (the stdlib's substitution). */
+static void fill_seq(char *out, size_t cap, const char *tpl, const char *name)
+{
+    const char *m = strstr(tpl, "%s");
+    if (!m) { snprintf(out, cap, "%s", tpl); return; }
+    snprintf(out, cap, "%.*s%s%s", (int)(m - tpl), tpl, name, m + 2);
+}
+
+/* Audit 37: the stdlib's id column on DuckDB names a Hull-owned sequence it
+ * creates first (the raw template named one called %s). */
+UTEST(db_duckdb, identity_template_makes_a_working_table)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(duck_open_mem(&h), 0);
+    char sql[256];
+    for (int round = 0; round < 2; round++) {   /* idempotent, as init is */
+        fill_seq(sql, sizeof sql, hl_db_backend_duckdb.dialect.identity_sequence,
+                 "_hull_t_id_seq");
+        ASSERT_EQ(hl_db_exec(&h, sql, NULL, 0), 0);
+        char col[128];
+        fill_seq(col, sizeof col, hl_db_backend_duckdb.dialect.identity_column,
+                 "_hull_t_id_seq");
+        snprintf(sql, sizeof sql,
+                 "CREATE TABLE IF NOT EXISTS _hull_t (id %s, v TEXT)", col);
+        ASSERT_EQ(hl_db_exec(&h, sql, NULL, 0), 0);
+    }
+    ASSERT_EQ(hl_db_exec(&h, "INSERT INTO _hull_t (v) VALUES ('a'), ('b')",
+                         NULL, 0), 0);
+    int64_t c = 0;
+    ASSERT_EQ(hl_db_query(&h, "SELECT CAST(max(id) AS BIGINT) FROM _hull_t",
+                          NULL, 0, count_cb, &c, NULL), 0);
+    EXPECT_EQ(2, (int)c);
+    h.backend->close(&h);
+}
+
 /* Audit 19: the selector matches a DSN's scheme in any case (db_select.c
  * lowercases it), but the backend stripped only a lowercase "duckdb://", so
  * "DuckDB://:memory:" was opened as a file of that name. */
@@ -395,7 +562,7 @@ UTEST(db_duckdb, dialect_descriptor)
     ASSERT_EQ(b->dialect.supports_index_if_not_exists, 1);
     ASSERT_EQ(b->dialect.supports_skip_locked, 0);   /* not a hull/jobs target */
     ASSERT_TRUE(strstr(b->dialect.identity_column, "nextval") != NULL);
-    ASSERT_STREQ(b->dialect.identity_sequence, "CREATE SEQUENCE %s");
+    ASSERT_STREQ(b->dialect.identity_sequence, "CREATE SEQUENCE IF NOT EXISTS %s");
     ASSERT_EQ((int)b->native_tag, (int)HL_DB_NATIVE_DUCKDB);
     ASSERT_EQ(b->supports_udf, 0);
     ASSERT_STREQ(b->schemes[0], "duckdb");

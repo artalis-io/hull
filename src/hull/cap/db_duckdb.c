@@ -287,6 +287,53 @@ static int duck_apply_allowed_dirs(duckdb_connection con)
 
 /* ── Open / close ─────────────────────────────────────────────────── */
 
+/* A macro already stored in the file is the same reach as one app SQL can
+ * no longer create (audit 37): `CREATE MACRO hp(t, c) AS TABLE FROM
+ * histogram(t, c)` made before the fix, or put there by another program,
+ * hands a run-time table name to a table-name function on every call. Each
+ * non-internal macro's definition is read as a macro body (every bare name a
+ * parameter) by the same refusals app SQL goes through; one that would be
+ * refused makes the open fail, naming it. 0 / -1 with @p s->errmsg set. */
+static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
+{
+    duckdb_result r;
+    if (duckdb_query(con,
+            "SELECT schema_name, function_name, macro_definition "
+            "FROM duckdb_functions() WHERE NOT internal AND "
+            "function_type IN ('macro', 'table_macro')", &r) != DuckDBSuccess) {
+        duckdb_destroy_result(&r);
+        duck_set_err(s, "duckdb: could not list the database's macros");
+        return -1;
+    }
+    int rc = 0;
+    idx_t rows = duckdb_row_count(&r);
+    for (idx_t i = 0; i < rows && rc == 0; i++) {
+        char *def = duckdb_value_varchar(&r, 2, i);
+        if (!def || hl_cap_db_sql_calls_dynamic_sql(def) ||
+            hl_cap_db_sql_reads_whole_database(def) ||
+            hl_cap_db_sql_switches_catalog(def) ||
+            hl_cap_db_sql_names_table_by_value_ex(def, 1) ||
+            hl_cap_db_sql_reaches_db_files(def, s->deny_file_functions,
+                                           s->protect)) {
+            char *schema = duckdb_value_varchar(&r, 0, i);
+            char *name = duckdb_value_varchar(&r, 1, i);
+            snprintf(s->errmsg, sizeof s->errmsg,
+                     "duckdb: the database holds macro %.64s.%.64s, whose "
+                     "body hands a run-time value to a table-name or file "
+                     "function (it would read _hull_* tables past Hull's "
+                     "check); drop it with the DuckDB CLI before opening the "
+                     "database with Hull",
+                     schema ? schema : "?", name ? name : "?");
+            duckdb_free(schema);
+            duckdb_free(name);
+            rc = -1;
+        }
+        duckdb_free(def);
+    }
+    duckdb_destroy_result(&r);
+    return rc;
+}
+
 /* A new instance of @p path with the security configuration applied and
  * frozen (lock_configuration is database-wide in DuckDB, as the settings it
  * freezes are): connected through @p con, which the caller keeps. 0 / -1
@@ -341,6 +388,12 @@ static int duck_open_instance(HlDbDuckCtx *s, const char *path,
         return -1;
     }
     duckdb_destroy_result(&r);
+
+    if (duck_check_stored_macros(s, *con) != 0) {
+        duckdb_disconnect(con);
+        duckdb_close(db);
+        return -1;
+    }
     return 0;
 }
 
@@ -386,6 +439,12 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
      * another thread is opening waits for it, so two cannot make two. */
     char *key = duck_canon(path);
     if (!key) { free(s); return -1; }
+    /* The file's canonical path, set before the instance opens: its stored
+     * macros are checked against it (audit 37). Set again below from the
+     * shared entry, which holds the same key. */
+    if ((size_t)snprintf(s->protect, sizeof s->protect, "%s", key) >=
+        sizeof s->protect)
+        snprintf(s->protect, sizeof s->protect, "/");
     pthread_mutex_lock(&g_duck_shared_mu);
     HlDuckShared *sh;
     while ((sh = duck_find(key)) && sh->state != HL_DUCK_READY)
@@ -514,6 +573,13 @@ static int duck_bind_params(duckdb_prepared_statement stmt,
         }
         if (rc != DuckDBSuccess) return -1;
     }
+    /* A Lua / JS params array with trailing nils arrives short (Lua's `#`
+     * drops the tail): bind the rest NULL, as SQLite, Postgres and MySQL do.
+     * DuckDB failed the statement ("Values were not provided"), so the
+     * stdlib's audit_log.record never ran on DuckDB (audit 37). */
+    idx_t want = duckdb_nparams(stmt);
+    for (idx_t k = (idx_t)nparams + 1; k <= want; k++)
+        if (duckdb_bind_null(stmt, k) != DuckDBSuccess) return -1;
     return 0;
 }
 
@@ -707,12 +773,16 @@ static const char DUCK_CATALOG_MSG[] =
  * as a value can be built at run time (concat('_', 'hull_sessions')):
  * storage_info returned column min / max statistics of _hull_* tables,
  * pragma_table_info / pragma_show / histogram their schema or rows. The
- * profiling / logging calls run past lock_configuration (audit 34). */
+ * profiling / logging calls run past lock_configuration (audit 34). In a
+ * macro body a bare name is a parameter the call fills at run time
+ * (audit 37). */
 static const char DUCK_TABLE_VALUE_MSG[] =
     "duckdb: storage_info, the profiling / logging calls, and table-name "
     "functions (pragma_table_info, pragma_show, histogram, ...) called with "
-    "anything but a plain literal or name are not available (a table name "
-    "built at run time gets past Hull's _hull_* check)";
+    "anything but a plain literal or name (only a '...' literal inside a "
+    "macro or function body, whose bare names are parameters) are not "
+    "available (a table name built at run time gets past Hull's _hull_* "
+    "check)";
 
 /* DuckDB keeps the database file, its WAL sidecars and its temp directory
  * readable (and writable) from SQL whatever external access says, and the
@@ -1063,7 +1133,7 @@ const HlDbBackend hl_db_backend_duckdb = {
         .supports_index_if_not_exists = 1,
         .supports_skip_locked         = 0,   /* not a hull/jobs target */
         .identity_column              = "BIGINT DEFAULT nextval('%s') PRIMARY KEY",
-        .identity_sequence            = "CREATE SEQUENCE %s",
+        .identity_sequence            = "CREATE SEQUENCE IF NOT EXISTS %s",
     },
     .native_tag           = HL_DB_NATIVE_DUCKDB,
     .supports_udf         = 0,   /* db.udf stays SQLite-only */

@@ -46,7 +46,7 @@ typedef struct HlDbDialect {
                                                /*   back to last_id (single-row)     */
     unsigned char supports_index_if_not_exists;/* 0 = MySQL (backend shim covers it) */
     const char *identity_column;               /* inline PK column DDL               */
-    const char *identity_sequence;             /* "CREATE SEQUENCE %s" companion for */
+    const char *identity_sequence;             /* "CREATE SEQUENCE IF NOT EXISTS %s" companion */
                                                /*   engines needing it (DuckDB); else*/
                                                /*   NULL                             */
 } HlDbDialect;
@@ -72,7 +72,7 @@ builder feature actually differs, not speculatively.
 | `supports_returning` | 1 (>= 3.35) | 1 | 0 (MariaDB is 1) | 1 |
 | `supports_index_if_not_exists` | 1 | 1 | 0 (shim) | 1 |
 | `identity_column` | `INTEGER PRIMARY KEY` | `BIGSERIAL PRIMARY KEY` | `BIGINT AUTO_INCREMENT PRIMARY KEY` | `BIGINT DEFAULT nextval('%s') PRIMARY KEY` |
-| `identity_sequence` | NULL | NULL | NULL | `CREATE SEQUENCE %s` |
+| `identity_sequence` | NULL | NULL | NULL | `CREATE SEQUENCE IF NOT EXISTS %s` |
 
 The builder emits `?` placeholders uniformly; the PG backend already rewrites
 `?` -> `$n` in C, so the builder never needs `$n`. `placeholder` is exposed only

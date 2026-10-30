@@ -1093,6 +1093,137 @@ UTEST(hl_cap_db, qualified_name_scan_is_linear)
     free(big);
 }
 
+/* Audit 37: a bare name inside a macro / function body is a PARAMETER, which
+ * the call fills with a value built at run time, so the table-by-value
+ * functions take only a '...' literal in a text that creates a macro, and
+ * the histogram table macro is refused in every position there. */
+UTEST(hl_cap_db, macro_parameters_cannot_name_a_table)
+{
+    static const char *const macro[] = {
+        "CREATE MACRO m(t) AS t + 1",
+        "create macro m(t) as t",
+        "CREATE OR REPLACE TEMP MACRO m(t) AS t",
+        "CREATE OR REPLACE TEMPORARY MACRO m(t) AS t",
+        "CREATE TEMP FUNCTION f(t) AS t",
+        "CREATE FUNCTION f(t) AS t",
+        "CREATE /* c */ OR -- d\n REPLACE /* /* nested */ */ TEMP MACRO m(t) AS t",
+        "CREATE\tOR\nREPLACE\rMACRO m(t) AS t",
+        "CREATE LOCAL TEMP MACRO m(t) AS t",
+        "CREATE GLOBAL TEMPORARY FUNCTION m(t) AS t",
+        "SELECT 1; CREATE MACRO m(t) AS t",
+        "CrEaTe Or RePlAcE mAcRo m(t) AS t",
+    };
+    for (size_t i = 0; i < sizeof macro / sizeof macro[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_creates_macro(macro[i]));
+    static const char *const not_macro[] = {
+        "CREATE TABLE macro (x INT)",
+        "CREATE VIEW v AS SELECT 1",
+        "SELECT macro, function FROM t",
+        "CREATE TABLE t (function_name TEXT)",
+        "CREATE SEQUENCE s",
+        "SELECT create_macro FROM t",
+    };
+    for (size_t i = 0; i < sizeof not_macro / sizeof not_macro[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_creates_macro(not_macro[i]));
+    EXPECT_EQ(0, hl_cap_db_sql_creates_macro(NULL));
+
+    static const char *const hit[] = {
+        /* the reported spellings */
+        "CREATE OR REPLACE TEMP MACRO hm(t, c) AS TABLE SELECT * FROM histogram(t, c)",
+        "CREATE MACRO hp(t, c) AS TABLE SELECT * FROM histogram(t, c)",
+        "CREATE OR REPLACE TEMP MACRO q3(t) AS (SELECT string_agg(bin, ',') FROM histogram(t, checksum))",
+        "CREATE OR REPLACE TEMP MACRO tm(t) AS TABLE SELECT * FROM pragma_table_info(t)",
+        "CREATE MACRO s(t) AS TABLE SELECT * FROM pragma_show(t)",
+        "CREATE MACRO s(t) AS TABLE SELECT * FROM table_info(t)",
+        "CREATE MACRO s(t) AS TABLE SELECT * FROM show(t)",
+        "CREATE MACRO s(t) AS TABLE SELECT * FROM duckdb_table_sample(t)",
+        "CREATE MACRO s(t) AS TABLE SELECT * FROM histogram_values(t, c)",
+        /* other spellings */
+        "CREATE TEMP FUNCTION f(t) AS TABLE FROM histogram(t, name)",
+        "CREATE MACRO h2(t, c) AS TABLE FROM histogram(t, c)",
+        "CREATE MACRO h3(t) AS TABLE SELECT * FROM users, histogram(t, name)",
+        "CREATE MACRO h(t) AS TABLE SELECT * FROM main.histogram(t, name)",
+        "CREATE MACRO h(t) AS TABLE SELECT * FROM \"histogram\"(t, name)",
+        "CREATE MACRO h(t) AS TABLE SELECT * FROM main.pragma_table_info(t)",
+        "CREATE MACRO h(t) AS TABLE SELECT * FROM pragma_table_info(main.t)",
+        "CREATE MACRO h(t) AS TABLE SELECT * FROM pragma_table_info(\"t\")",
+        "CREATE MACRO h(t := 'users') AS TABLE FROM histogram(t, name)",
+        "CREATE MACRO h(t) AS (SELECT histogram(t, name))",
+        "CREATE MACRO h(t) AS (SELECT 1 WHERE EXISTS (SELECT * FROM histogram(t, x)))",
+        "CREATE /**/ MACRO h(t) AS TABLE FROM histogram(t, c)",
+        "SELECT 1; CREATE MACRO h(t) AS TABLE FROM histogram(t, c)",
+        "CREATE MACRO h(t) AS TABLE FROM histogram(t, c); SELECT 1",
+        /* run-time sources outside a macro */
+        "SELECT * FROM histogram(getvariable('t'), name)",
+        "SELECT * FROM pragma_table_info(getvariable('t'))",
+        "SELECT * FROM histogram($t, name)",
+        "SELECT * FROM histogram(?, name)",
+        "PREPARE p AS SELECT * FROM pragma_table_info(?)",
+        "PREPARE p AS SELECT * FROM histogram($1, name)",
+        "SELECT * FROM histogram(source := '_hu' || 'll_x', col_name := name)",
+    };
+    for (size_t i = 0; i < sizeof hit / sizeof hit[0]; i++)
+        EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value(hit[i]));
+
+    /* A stored macro's definition text, read as a body. */
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value_ex(
+                     "SELECT * FROM histogram(t, c)", 1));
+    EXPECT_EQ(1, hl_cap_db_sql_names_table_by_value_ex(
+                     "(SELECT string_agg(bin, ',') FROM histogram(t, checksum))", 1));
+    EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value_ex(
+                     "SELECT * FROM histogram(t, c)", 0));
+    EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value_ex("(a + 1)", 1));
+
+    static const char *const miss[] = {
+        "CREATE MACRO ok1(a) AS a + 1",
+        "CREATE OR REPLACE TEMP MACRO ok2(x) AS (SELECT histogram(lower(name)) FROM users)",
+        "CREATE MACRO ok3(x) AS (SELECT histogram(x) FROM users)",
+        "CREATE MACRO ok4() AS TABLE SELECT * FROM histogram('users', name)",
+        "CREATE MACRO ok5() AS TABLE SELECT * FROM pragma_table_info('users')",
+        "CREATE MACRO ok6(n) AS TABLE SELECT * FROM main.users WHERE id = n",
+        "CREATE MACRO ok7(n) AS TABLE SELECT show, table_info FROM items",
+        "CREATE TABLE t (macro INT); SELECT * FROM pragma_table_info(main.users)",
+        "SELECT * FROM main.histogram('t', x)",
+        "SELECT * FROM histogram(users, name)",
+        "SELECT * FROM pragma_table_info(main.users)",
+        "SELECT * FROM main.my_macro(1)",
+        "UPDATE items SET show = 1",
+        "SELECT histogram(lower(name)) FROM t",
+    };
+    for (size_t i = 0; i < sizeof miss / sizeof miss[0]; i++)
+        EXPECT_EQ(0, hl_cap_db_sql_names_table_by_value(miss[i]));
+}
+
+/* Audit 37: the CREATE ... MACRO reader is linear and fails closed. */
+UTEST(hl_cap_db, macro_scan_is_linear)
+{
+    size_t n = 1u << 20;
+    char *big = malloc(n + 64);
+    ASSERT_TRUE(big != NULL);
+    clock_t t0 = clock();
+    static const char *const pats[] = {
+        "create ", "create or ", "or replace temp ", "create /* x */ ",
+        "create --\n", "create /*", "create a ",
+    };
+    for (size_t k = 0; k < sizeof pats / sizeof pats[0]; k++) {
+        size_t pl = strlen(pats[k]);
+        size_t i = 0;
+        for (; i + pl <= n; i += pl) memcpy(big + i, pats[k], pl);
+        memcpy(big + i, "x", 2);
+        (void)hl_cap_db_sql_creates_macro(big);
+        (void)hl_cap_db_sql_names_table_by_value(big);
+    }
+    /* A long modifier run still reaches MACRO. */
+    memcpy(big, "create ", 7);
+    size_t i = 7;
+    for (; i + 3 <= n; i += 3) memcpy(big + i, "or ", 3);
+    memcpy(big + i, "macro", 6);
+    EXPECT_EQ(1, hl_cap_db_sql_creates_macro(big));
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    EXPECT_LT(secs, 30.0);
+    free(big);
+}
+
 /* Audit 34: DuckDB keeps the database file, its WAL sidecars and its temp
  * directory readable from SQL whatever external access says, so
  * read_blob('app.duckdb') returned the raw file, _hull_* rows included. */

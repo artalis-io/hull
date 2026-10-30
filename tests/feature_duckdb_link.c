@@ -76,6 +76,15 @@ int hl_cap_db_sql_names_table_by_value(const char *sql)
     return 0;
 }
 
+/* duck_check_stored_macros reads stored macro bodies strictly (audit 37). */
+int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro);
+int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro)
+{
+    (void)sql;
+    (void)in_macro;
+    return 0;
+}
+
 int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
                                    const char *protect_path);
 int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
