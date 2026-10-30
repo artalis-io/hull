@@ -500,7 +500,13 @@ static const char *fv_quoted_st(const char *p, size_t *budget, char *out,
     const char *s = p + 1;
     size_t n = 0;
     for (;;) {
-        if (!*s) return NULL;
+        if (!*s) {
+            /* Charged too: callers re-read from many positions, and an
+             * unterminated quote read uncharged each time was quadratic. */
+            if (!fv_take(budget, (size_t)(s - p)) && exhausted)
+                *exhausted = 1;
+            return NULL;
+        }
         if (*s == q) {
             if (s[1] != q) break;
             s++;
@@ -662,7 +668,14 @@ static int fv_always_refused_name(const char *s, size_t n)
         /* POINTER arguments (audit 35): no SQL value converts to POINTER
          * in DuckDB 1.5.4, so they cannot be reached with an address; not
          * left to that. */
-        "arrow_scan", "arrow_scan_dumb", NULL
+        "arrow_scan", "arrow_scan_dumb",
+        /* They block inside one execution task for an app-chosen time
+         * (audit 38): duckdb_interrupt stops only the NEXT task, so
+         * sleep_ms(5000) ran its 5 s past a tripped budget and the run
+         * deadline. pg_sleep is pg_catalog's macro over sleep_ms. DuckDB
+         * 1.5.4 has no other built-in that waits (no http / s3 extension is
+         * loadable with external access off). */
+        "sleep_ms", "pg_sleep", NULL
     };
     for (int i = 0; names[i]; i++)
         if (strlen(names[i]) == n && strncasecmp(s, names[i], n) == 0)
@@ -790,6 +803,121 @@ static int fv_table_position_refused(const char *p, int pragma, int strict,
     return 0;
 }
 
+/* nextval / currval take a SEQUENCE NAME as a value, constant-folded like a
+ * table function's argument: nextval(concat('_hu', 'll_jobs_id_seq'))
+ * advanced a sequence the stdlib owns (audit 38). Only one '...' literal -
+ * text the namespace check has read - is accepted, in every reading (a bare
+ * name is a column or a macro parameter: a value at run time). DuckDB 1.5.4
+ * has no setval. */
+static int fv_sequence_fn_name(const char *s, size_t n)
+{
+    return n == 7 && (strncasecmp(s, "nextval", 7) == 0 ||
+                      strncasecmp(s, "currval", 7) == 0);
+}
+
+static int fv_sequence_arg_refused(const char *p, size_t *budget)
+{
+    return fv_table_arg_refused_ex(p, 1, 0, 1, budget) ||
+           fv_table_arg_refused_ex(p, 0, 0, 1, budget);
+}
+
+/* One argument of a read_duckdb call, at @p q: 1 when it is a table_name /
+ * schema_name option (`:=`, `=>` or `=`) whose value is not one plain '...'
+ * literal. read_duckdb('f.duckdb', table_name := concat(...)) names the
+ * table it reads by a value built at run time (audit 38). */
+static int fv_read_duckdb_arg_refused(const char *q, int nest, size_t *budget)
+{
+    q = dyn_skip_gap(q, nest, budget);
+    if (!q) return 1;
+    char buf[16];
+    size_t n = 0;
+    const char *e;
+    if (*q == '"') {
+        int exhausted = 0;
+        e = fv_quoted_st(q, budget, buf, sizeof buf, &n, &exhausted);
+        if (!e) return 1;
+        if (n == SIZE_MAX) return 0;         /* longer than either option */
+    } else if (fv_name_start((unsigned char)*q)) {
+        e = q;
+        while (dyn_ident_char((unsigned char)*e)) e++;
+        n = (size_t)(e - q);
+        if (!fv_take(budget, n)) return 1;
+        if (n >= sizeof buf) return 0;
+        memcpy(buf, q, n);
+        buf[n] = '\0';
+    } else {
+        return 0;                            /* a positional value */
+    }
+    if (!((n == 10 && strncasecmp(buf, "table_name", 10) == 0) ||
+          (n == 11 && strncasecmp(buf, "schema_name", 11) == 0)))
+        return 0;
+    q = dyn_skip_gap(e, nest, budget);
+    if (!q) return 1;
+    if ((q[0] == ':' && q[1] == '=') || (q[0] == '=' && q[1] == '>'))
+        q += 2;
+    else if (q[0] == '=')
+        q += 1;
+    else
+        return 1;                            /* not a plain option: refuse */
+    q = dyn_skip_gap(q, nest, budget);
+    if (!q || *q != '\'') return 1;
+    q = fv_quoted(q, budget, NULL, 0, NULL);
+    if (!q) return 1;
+    q = dyn_skip_gap(q, nest, budget);
+    return !q || !fv_arg_end(*q);
+}
+
+/* After `read_duckdb` at @p p, read with each comment rule: 1 when its call
+ * has a table_name / schema_name option refused above, or cannot be read to
+ * its end (a dollar-quoted string, an E'' escape, the budget). Its path is
+ * the protected-file check's. */
+static int fv_read_duckdb_refused(const char *p, size_t *budget)
+{
+    for (int nest = 1; nest >= 0; nest--) {
+        const char *q = dyn_skip_gap(p, nest, budget);
+        if (!q) return 1;
+        if (*q != '(') continue;
+        int depth = 0;
+        q++;
+        for (;;) {
+            q = dyn_skip_gap(q, nest, budget);
+            if (!q) return 1;
+            char c = *q;
+            if (c == '\0' || c == '$') return 1;
+            if ((c == 'e' || c == 'E') && q[1] == '\'') {
+                const char *e = q + 2;
+                while (*e && *e != '\'' && *e != '\\') e++;
+                if (*e != '\'' || !fv_take(budget, (size_t)(e - q)))
+                    return 1;
+                q++;
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                q = fv_quoted(q, budget, NULL, 0, NULL);
+                if (!q) return 1;
+                continue;
+            }
+            if (!fv_take(budget, 1)) return 1;
+            if (c == '(' || c == '[' || c == '{') {
+                depth++;
+            } else if (c == ')' || c == ']' || c == '}') {
+                if (depth == 0) break;
+                depth--;
+            } else if (c == ',' && depth == 0 &&
+                       fv_read_duckdb_arg_refused(q + 1, nest, budget)) {
+                return 1;
+            }
+            q++;
+        }
+    }
+    return 0;
+}
+
+static int fv_read_duckdb_name(const char *s, size_t n)
+{
+    return n == 11 && strncasecmp(s, "read_duckdb", 11) == 0;
+}
+
 /* The modifiers DuckDB's grammar allows between CREATE and MACRO / FUNCTION
  * (OR REPLACE, then OptTemp), read loosely: any run of them is skipped. */
 static int fv_macro_modifier(const char *s, size_t n)
@@ -867,6 +995,12 @@ int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro)
                 if (n < sizeof buf) buf[n++] = *q; else { fits = 0; break; }
             }
             if (fits && fv_always_refused_name(buf, n)) return 1;
+            if (fits && *q == '"' && fv_sequence_fn_name(buf, n) &&
+                fv_sequence_arg_refused(q + 1, &budget))
+                return 1;
+            if (fits && *q == '"' && fv_read_duckdb_name(buf, n) &&
+                fv_read_duckdb_refused(q + 1, &budget))
+                return 1;
             if (fits && *q == '"' && fv_table_by_value_name(buf, n) &&
                 (fv_table_arg_refused(q + 1, 1, strict, &budget) ||
                  fv_table_arg_refused(q + 1, 0, strict, &budget)))
@@ -892,6 +1026,12 @@ int hl_cap_db_sql_names_table_by_value_ex(const char *sql, int in_macro)
             while (*p && dyn_ident_char((unsigned char)*p)) p++;
             size_t n = (size_t)(p - start);
             if (fv_always_refused_name(start, n)) return 1;
+            if (fv_sequence_fn_name(start, n) &&
+                fv_sequence_arg_refused(p, &budget))
+                return 1;
+            if (fv_read_duckdb_name(start, n) &&
+                fv_read_duckdb_refused(p, &budget))
+                return 1;
             if (fv_table_by_value_name(start, n) &&
                 (fv_table_arg_refused(p, 1, strict, &budget) ||
                  fv_table_arg_refused(p, 0, strict, &budget)))

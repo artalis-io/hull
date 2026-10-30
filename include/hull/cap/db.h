@@ -340,7 +340,11 @@ int hl_cap_db_sql_switches_catalog(const char *sql);
  * is not one), and `histogram` only after a table-position word (FROM, JOIN,
  * CALL, PRAGMA, `,`, `(`, ...) with more than one argument, so the aggregate
  * passes anywhere (audit 35). `arrow_scan` / `arrow_scan_dumb` (POINTER
- * arguments) are refused by name. Read as
+ * arguments) are refused by name, and so are `sleep_ms` / `pg_sleep`, which
+ * block inside one execution task no budget trip stops (audit 38).
+ * `nextval` / `currval` (a sequence name by value) and `read_duckdb`'s
+ * `table_name` / `schema_name` options take only one '...' literal
+ * (audit 38). Read as
  * #hl_cap_db_sql_calls_dynamic_sql (literals not skipped, both comment
  * rules); every look-ahead shares one byte budget, past which the text is
  * refused. In a text that creates a macro or function (see

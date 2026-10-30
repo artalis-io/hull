@@ -321,9 +321,49 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
                      "duckdb: the database holds macro %.64s.%.64s, whose "
                      "body hands a run-time value to a table-name or file "
                      "function (it would read _hull_* tables past Hull's "
-                     "check); drop it with the DuckDB CLI before opening the "
+                     "check) or calls sleep_ms / pg_sleep; drop it with the DuckDB CLI before opening the "
                      "database with Hull",
                      schema ? schema : "?", name ? name : "?");
+            duckdb_free(schema);
+            duckdb_free(name);
+            rc = -1;
+        }
+        duckdb_free(def);
+    }
+    duckdb_destroy_result(&r);
+    if (rc != 0) return rc;
+
+    /* A view or a column DEFAULT stored in the file runs on every query /
+     * insert that reaches it: one calling sleep_ms (audit 38), storage_info
+     * or a table-name function by value would run past the text check. Read
+     * as app SQL (bare names are columns there, not parameters). */
+    if (duckdb_query(con,
+            "SELECT 'view', schema_name, view_name, sql FROM duckdb_views() "
+            "WHERE NOT internal UNION ALL "
+            "SELECT 'column default of', schema_name, table_name, "
+            "column_default FROM duckdb_columns() "
+            "WHERE NOT internal AND column_default IS NOT NULL",
+            &r) != DuckDBSuccess) {
+        duckdb_destroy_result(&r);
+        duck_set_err(s, "duckdb: could not list the database's views");
+        return -1;
+    }
+    rows = duckdb_row_count(&r);
+    for (idx_t i = 0; i < rows && rc == 0; i++) {
+        char *def = duckdb_value_varchar(&r, 3, i);
+        if (!def || hl_cap_db_sql_names_table_by_value(def)) {
+            char *kind = duckdb_value_varchar(&r, 0, i);
+            char *schema = duckdb_value_varchar(&r, 1, i);
+            char *name = duckdb_value_varchar(&r, 2, i);
+            snprintf(s->errmsg, sizeof s->errmsg,
+                     "duckdb: the database holds a %.20s %.64s.%.64s that "
+                     "calls a function Hull refuses (sleep_ms / pg_sleep, "
+                     "storage_info, or a table-name function given a "
+                     "run-time value); drop it with the DuckDB CLI before "
+                     "opening the database with Hull",
+                     kind ? kind : "?", schema ? schema : "?",
+                     name ? name : "?");
+            duckdb_free(kind);
             duckdb_free(schema);
             duckdb_free(name);
             rc = -1;
