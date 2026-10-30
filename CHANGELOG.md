@@ -87,6 +87,25 @@ release-artifact layout).
   `lock_configuration`, and a table-name function called with anything but a plain literal
   or name. Classifier tests in `test_db.c`, real-engine legs in `tests/e2e_feature_duckdb.sh`.
 
+- **A Lua coroutine tagged inside a transaction could still be resumed after that transaction
+  was rolled back, and one consumed inside the resumer's transaction was refused for good**
+  (audit 36; the second a regression from audit 35). Audit 35 bound the coroutine to the run
+  that yielded it, by an id that changed only when the next run was armed - so app code that
+  runs after an entry's closing stale-transaction guard and before the next entry (an error
+  object's `__tostring`, read for the error message; a `__gc` finalizer) still matched it,
+  resumed the coroutine into the rolled-back transaction, and its next statements
+  autocommitted. And it tagged a coroutine on every yield inside ANY transaction, including
+  the resumer's (`db.batch(function() v = gen() end)`), so a generator or work queue kept
+  across requests answered the first request and failed every later one with "yielded inside
+  a database transaction in an earlier run", though each batch had committed. The tag now
+  names the transaction, not the run: each thread keeps a transaction generation
+  (`hl_db_txn_gen`) that changes whenever a transaction starts or ends on any connection, a
+  coroutine is tagged only when it yields inside a transaction it opened itself (its resume
+  records which transaction, if any, was already open), and it is refused only once that
+  transaction has ended - whatever app code tries, whenever. The runtime also keeps a handler
+  coroutine marked as waiting until its async result is built, so a finalizer that build runs
+  cannot resume it. Covered by `test_lua` (`lua_audit36`).
+
 - **JS: a run failed for holding a transaction across a wait kept running** (audit 32). The
   audit-31 check rolls back the transaction of a run whose stretch of jobs ends while it is
   open and marks the run failed, but only a later async resume read that mark: the run's own

@@ -754,13 +754,25 @@ A Lua coroutine the APP made never waits (Hull ops park only `active_co`), but a
 bare `coroutine.yield` inside a transaction let the app hold it past its run and
 resume it from a later entry, after the guard had rolled the transaction back:
 its remaining statements autocommitted and its COMMIT "succeeded" (audit 35).
-So Hull's `coroutine.yield` records, in the yielding thread's extra space, the
-yielding run's id (`HlLuaBudget.run_id`, a process-wide counter set at every
-arm; a nested run's budget restore puts the outer id back) when
-`hl_db_registry_open_txn` is non-NULL, and `coroutine.resume` / `close` / a
-`coroutine.wrap` function (`hl_lua_co_check`, `runtime/lua/async.c`) refuse that
-coroutine from any other run. Within the run - a generator under `db.batch` -
-it resumes as before, and a yield with no transaction open clears the mark.
+So the tag names the TRANSACTION, not the run (audit 36): each thread keeps a
+transaction generation (`hl_db_txn_gen`, `cap/db_backend.h`) that the db
+wrappers change whenever a transaction starts or ends on any connection
+(`hl_db_txn_note`: `hl_db_in_txn` before vs after, plus a statement that may end
+one and open the next - COMMIT AND CHAIN, a multi-statement text; savepoints do
+not count). `coroutine.resume` / a `coroutine.wrap` call (`hl_lua_co_check`,
+`runtime/lua/async.c`) records in the coroutine's extra space which transaction,
+if any, is open as it starts; Hull's `coroutine.yield` tags it with the current
+generation only when it yields inside a transaction it opened itself (a yield
+inside the resumer's still-open transaction - a generator consumed in each
+request's `db.batch` - leaves no tag); and resume / close / wrap refuse a tagged
+coroutine once that transaction is no longer the open one. A run id was not
+enough: it changed only at the next arm, so app code between an entry's closing
+guard and the next entry (an error object's `__tostring`, a `__gc` finalizer)
+resumed into the rolled-back transaction; and tagging every yield inside any
+transaction refused a generator kept across requests for good. Within the
+transaction - a generator under its own `db.batch` - it resumes as before.
+`hl_lua_async_resume` keeps the handler coroutine marked parked while its result
+is built (a `__gc` there is app code), replacing the mark only at the resume.
 In JS the check runs again where the run actually yields (`hl_js_run_yield_check`), since a
 transaction can open after the op was made (`const p = http.fetch(..); conn.exec("BEGIN");
 await p`): the transaction is rolled back there and the run is failed at its next resume (500;

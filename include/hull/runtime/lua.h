@@ -44,9 +44,6 @@ typedef struct HlLuaBudget {
     int     tripped;    /* sticky until re-armed */
     int     timed_out;  /* the trip was the run's wall-clock deadline */
     HlRunWatch *watch;  /* the VM's run watchdog (cap/run_watchdog.h) */
-    uint64_t run_id;    /* process-unique id of the run armed last (never 0);
-                         * a nested run's save / restore of the struct puts
-                         * the outer run's id back (audit 35) */
 } HlLuaBudget;
 
 /* ── Configuration ──────────────────────────────────────────────────── */

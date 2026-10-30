@@ -225,6 +225,36 @@ struct HlDbHandle {
 
 /* ── Inline wrappers ──────────────────────────────────────────────── */
 
+/* 1 inside a transaction, 0 in autocommit or unknown (no in_txn method). */
+static inline int hl_db_in_txn(HlDbHandle *h)
+{
+    if (!h || !h->backend || !h->backend->in_txn) return 0;
+    return h->backend->in_txn(h) ? 1 : 0;
+}
+
+/*
+ * Transaction generation (audit 36). A per-thread counter that changes
+ * whenever a transaction starts or ends on any connection this thread uses:
+ * every wrapper below that can change a connection's transaction state
+ * compares hl_db_in_txn before and after the call (hl_db_txn_note), and a
+ * statement that may end one transaction and open the next with no visible
+ * change (COMMIT AND CHAIN, "COMMIT; BEGIN") counts too. Savepoints do not:
+ * they stay inside the transaction. So while a transaction is open, an
+ * unchanged generation means it is still the same transaction - which is
+ * how the Lua runtime tells whether the transaction a suspended coroutine
+ * yielded inside is still open (runtime/lua/async.c), whenever app code
+ * resumes it. Conservative by design: an extra change only refuses more.
+ */
+#ifdef HL_ENABLE_DB
+uint64_t hl_db_txn_gen(void);
+void     hl_db_txn_note(HlDbHandle *h, int was_in_txn, const char *sql);
+#else
+static inline uint64_t hl_db_txn_gen(void) { return 0; }
+static inline void hl_db_txn_note(HlDbHandle *h, int was_in_txn,
+                                  const char *sql)
+{ (void)h; (void)was_in_txn; (void)sql; }
+#endif
+
 static inline int hl_db_query(HlDbHandle *h, const char *sql,
                               const HlValue *params, int nparams,
                               HlRowCallback cb, void *cb_ctx,
@@ -232,8 +262,11 @@ static inline int hl_db_query(HlDbHandle *h, const char *sql,
 {
     if (!h || !h->backend) return -1;
     h->batch_err = NULL;
-    return h->backend->query(h, sql, params, nparams,
-                             cb, cb_ctx, alloc);
+    int was = hl_db_in_txn(h);
+    int rc = h->backend->query(h, sql, params, nparams,
+                               cb, cb_ctx, alloc);
+    hl_db_txn_note(h, was, sql);
+    return rc;
 }
 
 static inline int hl_db_exec(HlDbHandle *h, const char *sql,
@@ -241,7 +274,10 @@ static inline int hl_db_exec(HlDbHandle *h, const char *sql,
 {
     if (!h || !h->backend) return -1;
     h->batch_err = NULL;
-    return h->backend->exec(h, sql, params, nparams);
+    int was = hl_db_in_txn(h);
+    int rc = h->backend->exec(h, sql, params, nparams);
+    hl_db_txn_note(h, was, sql);
+    return rc;
 }
 
 /* Returns -1 if the backend lacks exec_script (caller decides how to
@@ -249,25 +285,37 @@ static inline int hl_db_exec(HlDbHandle *h, const char *sql,
 static inline int hl_db_exec_script(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->backend || !h->backend->exec_script) return -1;
-    return h->backend->exec_script(h, sql);
+    int was = hl_db_in_txn(h);
+    int rc = h->backend->exec_script(h, sql);
+    hl_db_txn_note(h, was, sql);
+    return rc;
 }
 
 static inline int hl_db_begin(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->begin(h);
+    int was = hl_db_in_txn(h);
+    int rc = h->backend->begin(h);
+    hl_db_txn_note(h, was, NULL);
+    return rc;
 }
 
 static inline int hl_db_commit(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->commit(h);
+    int was = hl_db_in_txn(h);
+    int rc = h->backend->commit(h);
+    hl_db_txn_note(h, was, NULL);
+    return rc;
 }
 
 static inline int hl_db_rollback(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->rollback(h);
+    int was = hl_db_in_txn(h);
+    int rc = h->backend->rollback(h);
+    hl_db_txn_note(h, was, NULL);
+    return rc;
 }
 
 static inline int64_t hl_db_last_id(HlDbHandle *h)
@@ -283,13 +331,6 @@ static inline const char *hl_db_errmsg(HlDbHandle *h)
     return h->backend->errmsg(h);
 }
 
-/* 1 inside a transaction, 0 in autocommit or unknown (no in_txn method). */
-static inline int hl_db_in_txn(HlDbHandle *h)
-{
-    if (!h || !h->backend || !h->backend->in_txn) return 0;
-    return h->backend->in_txn(h) ? 1 : 0;
-}
-
 /* Roll back a transaction left open by an entry that has finished. Any
  * db.batch bookkeeping goes with it: a batch cannot legitimately span an
  * entry (its fn cannot wait), so a depth still set here belongs to the
@@ -298,7 +339,9 @@ static inline int hl_db_in_txn(HlDbHandle *h)
 static inline void hl_db_guard_stale_txn(HlDbHandle *h)
 {
     if (!h || !h->backend) return;
+    int was = hl_db_in_txn(h);
     if (h->backend->guard_stale_txn) h->backend->guard_stale_txn(h);
+    hl_db_txn_note(h, was, NULL);
     h->batch_depth = 0;
 }
 

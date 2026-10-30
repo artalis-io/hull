@@ -17,6 +17,7 @@
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_open_txn */
+#include "hull/cap/db_backend.h"    /* hl_db_txn_gen */
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"     /* hl_db_budget_current (hull._task) */
 #endif
@@ -106,26 +107,46 @@ static int hl_lua_abandoned_marker;
  * resume a binding's continuation may act on (hl_lua_async_k_ok). */
 static int hl_lua_resuming_marker;
 
-/* A coroutine the app made that yielded while a transaction was open on a
- * registry connection or a db.open handle (audit 35). Its extra space holds
- * the yielding run's id, tagged odd - the markers above are ints, so their
- * addresses are even and cannot collide. Only the run that yielded it may
- * resume or close it: once that run ends, the stale-transaction guard rolls
- * the transaction back (and no wait may span one), so the coroutine's next
- * statements, run from a later request, autocommitted one by one and its
- * COMMIT "succeeded" with the earlier writes gone. Within the run - a
- * generator yielding rows inside db.batch - it resumes as before. The mark
- * is rewritten (or cleared) by the coroutine's next yield. */
-_Static_assert(_Alignof(int) >= 2, "marker addresses must be even");
+/* A coroutine the app made that yielded inside a transaction IT opened, on a
+ * registry connection or a db.open handle (audits 35 / 36). Its extra space
+ * then holds that transaction's generation (hl_db_txn_gen,
+ * cap/db_backend.h) tagged 01 in the low bits - the markers above are ints,
+ * so their addresses are multiples of 4 and cannot collide. It may be
+ * resumed or closed only while that same transaction is still open: once
+ * it ended - the stale-transaction guard rolled it back when its run ended,
+ * or anything else committed or rolled it back - the coroutine's next
+ * statements would autocommit one by one and its COMMIT "succeed" with the
+ * earlier writes gone. The check is against the transaction, not the run,
+ * so app code that runs after a run's closing guard and before the next
+ * entry (an error object's __tostring, a __gc finalizer) cannot resume it
+ * either (audit 36). Within the transaction - a generator yielding rows
+ * inside its own db.batch - it resumes as before.
+ *
+ * Only a transaction the coroutine opened counts. While it runs, its extra
+ * space records whether a transaction was already open when it was resumed,
+ * and which one (the generation, tagged 11); a yield inside that same
+ * transaction - the resumer's db.batch around `v = gen()` - leaves no tag,
+ * since the transaction is the resumer's to finish. Tagged on every yield
+ * inside a transaction, a generator consumed inside each request's batch
+ * was refused for good from the second request on (audit 36). */
+_Static_assert(_Alignof(int) >= 4, "marker addresses must be multiples of 4");
 
-static void *hl_lua_txn_tag(uint64_t run_id)
+#define HL_LUA_MARK_TXN_YIELD   ((uintptr_t)1)   /* yielded in its own txn */
+#define HL_LUA_MARK_TXN_RESUMED ((uintptr_t)3)   /* resumed inside a txn */
+
+static void *hl_lua_txn_mark(uint64_t gen, uintptr_t kind)
 {
-    return (void *)(((uintptr_t)run_id << 1) | (uintptr_t)1);
+    return (void *)(((uintptr_t)gen << 2) | kind);
 }
 
-static int hl_lua_mark_is_txn_tag(void *mark)
+static int hl_lua_mark_is_txn(void *mark)
 {
     return ((uintptr_t)mark & (uintptr_t)1) != 0;
+}
+
+static int hl_lua_mark_kind(void *mark)
+{
+    return (int)((uintptr_t)mark & (uintptr_t)3);
 }
 
 static void **hl_lua_co_mark(lua_State *co)
@@ -175,8 +196,29 @@ static HlLua *hl_lua_from_registry(lua_State *L)
     return lua;
 }
 
+/* The transaction open on this VM's connections right now, if any: its
+ * generation in *gen. */
+static int hl_lua_txn_open(lua_State *L, uint64_t *gen)
+{
+    HlLua *lua = hl_lua_from_registry(L);
+    *gen = hl_db_txn_gen();
+    return lua && hl_db_registry_open_txn(lua->base.db_registry) != NULL;
+}
+
+/* lcorolib's "suspended": a coroutine coroutine.resume would run. */
+static int hl_lua_co_resumable(lua_State *L, lua_State *co)
+{
+    if (co == L) return 0;
+    if (lua_status(co) == LUA_YIELD) return 1;
+    lua_Debug ar;
+    return lua_status(co) == LUA_OK && lua_getstack(co, 0, &ar) == 0 &&
+           lua_gettop(co) > 0;
+}
+
 /* Raises when @p co may not be resumed or closed from here: parked on a Hull
- * operation, abandoned, or yielded inside a transaction by another run. */
+ * operation, abandoned, or yielded inside a transaction of its own that has
+ * since ended. Otherwise, for a coroutine about to run, records whether a
+ * transaction is open as it starts (hl_lua_co_yield reads it). */
 static void hl_lua_co_check(lua_State *L, lua_State *co)
 {
     if (!co) return;
@@ -186,18 +228,25 @@ static void hl_lua_co_check(lua_State *L, lua_State *co)
     if (hl_lua_thread_is_parked(co))
         (void)luaL_error(L, "cannot resume or close a coroutine that is "
                             "waiting on a Hull operation");
-    void *mark = *hl_lua_co_mark(co);
-    if (hl_lua_mark_is_txn_tag(mark)) {
-        HlLua *lua = hl_lua_from_registry(L);
-        if (lua_status(co) == LUA_YIELD &&
-            (!lua || mark != hl_lua_txn_tag(lua->budget.run_id)))
-            (void)luaL_error(L, "cannot resume or close a coroutine that "
-                                "yielded inside a database transaction in an "
-                                "earlier run: the transaction was rolled back "
-                                "when that run ended, so what follows would "
-                                "commit statement by statement");
-        *hl_lua_co_mark(co) = NULL;   /* its next yield marks it again */
-    }
+    void **mark = hl_lua_co_mark(co);
+    if (*mark != NULL && !hl_lua_mark_is_txn(*mark))
+        return;   /* a runtime marker: not ours to touch */
+    /* Not about to run (running, normal or dead): coroutine.resume fails
+     * on its own, and the coroutine's own record must stay as it is - a
+     * coroutine resuming itself would otherwise rewrite it. */
+    if (!hl_lua_co_resumable(L, co))
+        return;
+    uint64_t gen;
+    int open = hl_lua_txn_open(L, &gen);
+    if (hl_lua_mark_kind(*mark) == (int)HL_LUA_MARK_TXN_YIELD &&
+        lua_status(co) == LUA_YIELD &&
+        (!open || *mark != hl_lua_txn_mark(gen, HL_LUA_MARK_TXN_YIELD)))
+        (void)luaL_error(L, "cannot resume or close a coroutine that "
+                            "yielded inside a database transaction that has "
+                            "since ended (rolled back when its run ended, or "
+                            "committed): what follows would commit "
+                            "statement by statement");
+    *mark = open ? hl_lua_txn_mark(gen, HL_LUA_MARK_TXN_RESUMED) : NULL;
 }
 
 static int hl_lua_co_guarded(lua_State *L)
@@ -233,19 +282,23 @@ int hl_lua_resume_status(lua_State *co, int status)
 }
 
 /* coroutine.yield: records, in the yielding coroutine's extra space,
- * whether a transaction is open (audit 35, hl_lua_txn_tag). Written only on
- * a coroutine that can yield - never the main thread, whose extra space
- * every new thread copies - and never over a runtime marker. */
+ * whether it yields inside a transaction it opened itself (audits 35 / 36,
+ * hl_lua_txn_mark). Written only on a coroutine that can yield - never the
+ * main thread, whose extra space every new thread copies - and never over a
+ * runtime marker. */
 static int hl_lua_co_yield(lua_State *L)
 {
     if (lua_isyieldable(L)) {   /* never the main thread */
         void **mark = hl_lua_co_mark(L);
-        if (*mark == NULL || hl_lua_mark_is_txn_tag(*mark)) {
-            HlLua *lua = hl_lua_from_registry(L);
-            const char *txn = lua ? hl_db_registry_open_txn(
-                                        lua->base.db_registry) : NULL;
-            // cppcheck-suppress knownConditionTrueFalse
-            *mark = txn ? hl_lua_txn_tag(lua->budget.run_id) : NULL;
+        if (*mark == NULL || hl_lua_mark_is_txn(*mark)) {
+            uint64_t gen;
+            int open = hl_lua_txn_open(L, &gen);
+            if (!open)
+                *mark = NULL;
+            else if (*mark == hl_lua_txn_mark(gen, HL_LUA_MARK_TXN_RESUMED))
+                *mark = NULL;   /* the resumer's transaction, still open */
+            else
+                *mark = hl_lua_txn_mark(gen, HL_LUA_MARK_TXN_YIELD);
         }
     }
     return lua_yield(L, lua_gettop(L));
@@ -344,7 +397,11 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     KlHttpConn *conn = lc->conn;
 
     if (!co || hl_lua_thread_is_abandoned(co)) return;
-    hl_lua_set_parked(co, 0);   /* the runtime resumes it now */
+    /* The coroutine stays marked parked while its result is built below:
+     * push_result allocates under lua_pcall, and a __gc finalizer that
+     * allocation runs is app code that must not resume it (audit 36). The
+     * mark is replaced by the resuming marker (or abandoned) right before
+     * lua_resume. */
 
     /* Restore per-request context so C functions called during resume
      * (e.g., another http.async.get) can find the active connection */

@@ -13,6 +13,8 @@
 
 #include "hull/cap/db.h"
 #include "hull/cap/db_budget.h"
+#include "hull/cap/db_backend.h"
+#include "hull/cap/db_sql_kw.h"
 #include <limits.h>   /* PATH_MAX */
 #include <stdatomic.h>
 #include <stdint.h>   /* SIZE_MAX */
@@ -20,6 +22,67 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+
+/* ── Transaction generation (cap/db_backend.h, audit 36) ───────────── */
+
+static _Thread_local uint64_t tl_txn_gen;
+
+uint64_t hl_db_txn_gen(void)
+{
+    return tl_txn_gen;
+}
+
+/* 1 when @p sql holds a statement after its first one (text past a ';'
+ * outside quotes and comments). Read conservatively: a backslash escape is
+ * not understood, so a ';' inside such a literal can count - which only
+ * changes the generation once more than needed. */
+static int txn_sql_multi(const char *sql)
+{
+    char q = 0;
+    for (const char *p = sql; *p; p++) {
+        if (q) {
+            if (*p == q) q = 0;
+            continue;
+        }
+        if (*p == '\'' || *p == '"' || *p == '`') {
+            q = *p;
+        } else if (p[0] == '-' && p[1] == '-') {
+            while (*p && *p != '\n' && *p != '\r') p++;
+            if (!*p) return 0;
+        } else if (p[0] == '/' && p[1] == '*') {
+            const char *e = strstr(p + 2, "*/");
+            if (!e) return 0;
+            p = e + 1;
+        } else if (*p == ';') {
+            const char *r = hl_sql_skip_space_ex(p + 1, 0);
+            if (*r == ';') { p = r - 1; continue; }
+            return *r != '\0';
+        }
+    }
+    return 0;
+}
+
+void hl_db_txn_note(HlDbHandle *h, int was_in_txn, const char *sql)
+{
+    int now = hl_db_in_txn(h);
+    int changed = was_in_txn != now;
+    if (!changed && was_in_txn) {
+        /* Still inside one: was it still the same transaction? A statement
+         * that ends one and opens the next shows no change. */
+        if (!sql) {
+            changed = 1;   /* begin / commit / rollback / the guard */
+        } else {
+            /* Either comment rule (Postgres nests block comments, SQLite
+             * and MySQL do not): a transaction word under either counts. */
+            HlSqlTxnKind k0 = hl_sql_txn_kind_ex(sql, 0);
+            HlSqlTxnKind k1 = hl_sql_txn_kind_ex(sql, 1);
+            changed = (k0 != HL_SQL_TXN_NONE && k0 != HL_SQL_TXN_SAVEPOINT) ||
+                      (k1 != HL_SQL_TXN_NONE && k1 != HL_SQL_TXN_SAVEPOINT) ||
+                      txn_sql_multi(sql);
+        }
+    }
+    if (changed) tl_txn_gen++;
+}
 
 /* ── The calling run's budget (cap/db_budget.h) ────────────────────── */
 

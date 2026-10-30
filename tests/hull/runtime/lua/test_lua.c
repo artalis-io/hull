@@ -8283,6 +8283,97 @@ UTEST(lua_audit35, same_run_and_txn_free_coroutines_still_resume)
     ASSERT_STREQ(out, "ok");
 }
 
+/* Audit 36: the audit-35 check compared the yielding run's id, which only
+ * changes at the next arm - so app code that runs after an entry's closing
+ * stale-transaction guard and before the next entry (an error object's
+ * __tostring read by hl_lua_error_text, a __gc finalizer) still matched it,
+ * resumed the coroutine into the rolled-back transaction, and its next INSERT
+ * autocommitted. The check is now against the transaction itself. */
+UTEST(lua_audit36, a_coroutine_is_refused_once_its_txn_was_rolled_back)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE tg (x INTEGER)')\n"
+        "CO = coroutine.create(function()\n"
+        "  db.exec('BEGIN') db.exec('INSERT INTO tg VALUES (1)')\n"
+        "  coroutine.yield()\n"
+        "  db.exec('INSERT INTO tg VALUES (2)') end)\n"
+        "assert(coroutine.resume(CO))\n"
+        "ERR = setmetatable({}, { __tostring = function()\n"
+        "  local ok, e = pcall(coroutine.resume, CO)\n"
+        "  RESUMED, RESUME_ERR = ok, tostring(e)\n"
+        "  return 'boom' end })\n"), LUA_OK);
+    /* The entry's closing guard, then the error path's message - with no
+     * new run armed in between. */
+    hl_db_registry_guard_stale_txns(lua_rt.base.db_registry);
+    char buf[256];
+    lua_getglobal(L, "ERR");
+    EXPECT_STREQ(hl_lua_error_text(&lua_rt, L, -1, buf, sizeof buf), "boom");
+    lua_settop(L, 0);
+    EXPECT_EQ(eval_int("RESUMED == false and 1 or 0"), 1);
+    EXPECT_EQ(eval_int("RESUME_ERR:find('since ended', 1, true) and 1 or 0"), 1);
+    /* A finalizer is refused the same way. */
+    ASSERT_EQ(luaL_dostring(L,
+        "setmetatable({}, { __gc = function()\n"
+        "  local ok, e = pcall(coroutine.resume, CO)\n"
+        "  GC_RESUMED, GC_ERR = ok, tostring(e) end })\n"), LUA_OK);
+    lua_gc(L, LUA_GCCOLLECT);
+    EXPECT_EQ(eval_int("GC_RESUMED == false and 1 or 0"), 1);
+    EXPECT_EQ(eval_int("GC_ERR:find('since ended', 1, true) and 1 or 0"), 1);
+    EXPECT_EQ(eval_int("coroutine.status(CO) == 'suspended' and 1 or 0"), 1);
+    EXPECT_EQ(eval_int("require('hull.db').default()"
+                       ".query('SELECT COUNT(*) AS n FROM tg')[1].n"), 0);
+    EXPECT_EQ(eval_int("require('hull.db').default().in_transaction()"
+                       " and 1 or 0"), 0);
+    cleanup_lua_caps();
+}
+
+/* Audit 36: #927 tagged a coroutine on every yield inside a transaction,
+ * including the RESUMER's (a db.batch around `v = gen()`), so a generator or
+ * work queue kept across requests was refused for good from the second
+ * request on, though every batch had committed. Only a transaction the
+ * coroutine opened itself tags it now. */
+UTEST(lua_audit36, a_generator_consumed_inside_each_runs_batch_keeps_working)
+{
+    char out[512];
+    ASSERT_EQ(run_task_script_db(
+        "local db = require('hull.db').default()\n"
+        "db.exec('CREATE TABLE gb (x INTEGER)')\n"
+        "local gen = coroutine.wrap(function() local i = 0\n"
+        "  while true do i = i + 1\n"
+        "    db.exec('INSERT INTO gb VALUES (?)', {i}) coroutine.yield(i) end end)\n"
+        "local co = coroutine.create(function() local i = 0\n"
+        "  while true do i = i + 1 coroutine.yield(i) end end)\n"
+        "for r = 1, 3 do\n"
+        "  local v, ok, w\n"
+        "  db.batch(function() v = gen() ok, w = coroutine.resume(co) end)\n"
+        "  check(v == r and ok and w == r, 'run '..r..': '..tostring(v)..' '..tostring(w))\n"
+        "  hull.sleep(5)\n"   /* a new run */
+        "end\n"
+        "db.exec('BEGIN') local v = gen() db.exec('COMMIT')\n"
+        "check(v == 4, 'raw txn: '..tostring(v))\n"
+        "hull.sleep(5)\n"
+        "check(gen() == 5, 'after the raw txn, in a later run')\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM gb')[1].n == 5, 'rows')\n"
+        /* A coroutine resumed inside the resumer's transaction that ends it
+         * and opens one of its own is tagged by that one. */
+        "local own = coroutine.create(function()\n"
+        "  db.exec('COMMIT') db.exec('BEGIN') db.exec('INSERT INTO gb VALUES (99)')\n"
+        "  coroutine.yield() db.exec('COMMIT') end)\n"
+        "require('hull._task').spawn(function()\n"
+        "  db.exec('BEGIN') assert(coroutine.resume(own)) end)\n"
+        "hull.sleep(20)\n"   /* the task ended: its guard rolled 99 back */
+        "local ok, e = pcall(coroutine.resume, own)\n"
+        "check(not ok and tostring(e):find('since ended', 1, true), 'own: '..tostring(e))\n"
+        "check(db.query('SELECT COUNT(*) AS n FROM gb WHERE x = 99')[1].n == 0, '99 committed')\n"
+        "check(not db.in_transaction(), 'left inside a transaction')\n",
+        out, sizeof out), 0);
+    ASSERT_STREQ(out, "ok");
+}
+
 /* Stdlib-only, and it needs a loop; a task that never got its turn is freed
  * with the VM. */
 UTEST(lua_task, stdlib_only_needs_a_loop_and_is_freed_unrun)
