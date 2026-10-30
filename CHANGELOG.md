@@ -121,6 +121,17 @@ release-artifact layout).
   `SELECT 'x1' a, 42 n, 'y2' b` gave `a = 'y2'` - in `conn.query`, `db.async`,
   `worker.dispatch` and `table_columns`: short ids and role names could be confused. The value
   now points into the chunk's vector, which outlives the row callback.
+- **A JS iterator helper could hold the event loop past every limit** (audit 38).
+  `Array.prototype.values.call({ length: 2 ** 53 - 1 }).drop(2 ** 53 - 1).next()` ran up to
+  2^53 steps inside one builtin call: QuickJS calls a built-in iterator's `next` directly, so
+  no step was counted, nothing was charged to the instruction budget and the run watchdog's
+  stop flag was never seen (3e8 steps took ~9 s under `--max-run-ms 1000`). Each native
+  iterator step is now one step, charged and polled like a call (QuickJS HULL PATCH 0005), which
+  covers every C loop over an iterator at once: the helpers, `some` / `every` / `find` /
+  `forEach` / `reduce` / `toArray`, `Iterator.concat` / `from`, `Array.from`, the Map / Set
+  constructors, `Promise.all` and kin. The interrupt raised inside such a loop also left it
+  CATCHABLE (`JS_IteratorClose` re-threw it with the flag cleared); it stays uncatchable and runs
+  no `return` method (HULL PATCH 0003). Covered by the `js_audit38` cases in `test_js`.
 - **A JS `tui.run` loop outside app.main renewed its own run limit** (audit 32). `tui.pollSync`
   re-arms the instruction budget and the run deadline on each event (and after 50 ms of
   waiting), meant for app.main's interactive session; but a timer, a WebSocket callback or a

@@ -127,8 +127,18 @@ earlier version also exported `JS_SetUncatchableError` for bindings that
 re-raise a caught interrupt (a SQL UDF, a `compute.stream` callback); upstream
 now provides `JS_SetUncatchableException`, which `hl_js_budget_throw` uses.
 
+Audit 38: `JS_IteratorClose` with an exception pending - the error path of
+every C loop over an iterator (`Iterator.prototype.some` / `every` / `find`
+/ `forEach` / `reduce`, the helpers, `Array.from`, ...) - re-raised the
+saved error with `JS_Throw`, which clears the uncatchable flag, so an
+interrupt raised inside such a loop reached the caller's `catch`. It now
+keeps the flag and, for an uncatchable error, calls no `return` method (as
+the bytecode unwinder already skips iterator closing for one).
+
 **Guard:** `tests/hull/runtime/js/test_js.c`,
-`js_audit5.async_bodies_do_not_escape_the_instruction_limit`. Without the patch
+`js_audit5.async_bodies_do_not_escape_the_instruction_limit`; for the
+audit 38 part, `js_audit38.iterator_helper_steps_are_charged` (the catch
+never runs). Without the patch
 the async-burn loop is never interrupted and the test hangs.
 
 ## Patch 0004 - build_backtrace holds its own reference to the error
@@ -256,6 +266,30 @@ The eleventh audit added the work the first pass missed:
   charge `JS_WORK_ELEM` per element, like `Array.from` -
   `new Uint8Array({ length: 5e7 })` ran 5e7 property reads in one step.
 
+The thirty-eighth audit added the iterator protocol:
+
+- **A native iterator step** (polled, as a call is): `JS_IteratorNext2`'s
+  fast path calls a built-in iterator's `next` (an array iterator, an
+  iterator helper, a wrap-for-valid-iterator, a Map / Set / string /
+  regexp-string iterator) directly, with no `JS_Call`, so no step was
+  counted. A C loop pulling from one allocated nothing and ran no bytecode:
+  `Array.prototype.values.call({ length: 2 ** 53 - 1 }).drop(2 ** 53 - 1)
+  .next()` ran 2^53 steps inside one builtin call, uncharged and blind to
+  the run watchdog (patch 0006 polls only at steps; measured ~9 s per 3e8
+  under `--max-run-ms 1000`, trip only after the return). The fast path now
+  calls `js_poll_interrupts` before each step - one step, charged like a
+  call and seeing the stop flag at once - so every consumer is covered in
+  one place: the iterator helpers (`drop`, `filter`, `map`, `take`,
+  `flatMap`, both levels), `some` / `every` / `find` / `forEach` /
+  `reduce` / `toArray`, `Iterator.concat`, `Iterator.from`'s wrapper,
+  `for...of`, spread and destructuring, `Array.from` / `TA.from`, the
+  `Map` / `Set` / `WeakMap` / `WeakSet` constructors, `Object.fromEntries`,
+  `Map.groupBy` / `Object.groupBy`, and `Promise.all` / `allSettled` /
+  `any` / `race`. An iterator whose `next` is not native goes through
+  `JS_Call`, which was already a counted step (a native callback such as
+  `Array.isArray` is one too). The same audit found the interrupt made
+  catchable on its way out of those loops: see patch 0003.
+
 The allocator charge is in the core (`js_malloc_rt` / `js_realloc_rt`), not a
 custom `JSMallocFunctions` table, so it can make the next step poll (an
 allocator has no context) and keeps QuickJS's own slab allocator and memory
@@ -264,9 +298,13 @@ behaves as upstream (the JS source frontend's tooling session sets none).
 
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit10.builtin_work_is_charged` (each case trips a 1M budget within
-seconds; several never return without the patch) and
+seconds; several never return without the patch),
 `js_audit11.builtin_work_is_charged` (each loop trips a 1M budget within
-49 iterations, counted rather than timed).
+49 iterations, counted rather than timed), and the `js_audit38` cases
+(`iterator_helper_steps_are_charged`: one helper call over a 2^53-element
+array-like trips a 1M budget, uncatchably; `iterator_helper_steps_see_the_watchdog`:
+with no limit, the run deadline stops that one call; the `drop` case never
+returns without the patch).
 
 ## Patch 0006 - an embedder stop flag polled at every step
 
