@@ -135,6 +135,18 @@ interrupt raised inside such a loop reached the caller's `catch`. It now
 keeps the flag and, for an uncatchable error, calls no `return` method (as
 the bytecode unwinder already skips iterator closing for one).
 
+Audit 39: a regexp compile stopped by the budget (patch 0005's
+`lre_check_work`) is raised through `JS_ThrowInterrupted` too, not as the
+SyntaxError every other compile failure becomes. The same audit swept the
+other places C code takes a pending exception and throws it again
+(`JS_GetException` / `JS_Throw`): the async function and async generator
+resumes, `promise_reaction_job`, the thenable and `finally` jobs, the
+`Promise` combinators and module loading all turn it into a REJECTION, which
+is the case this patch covers (the next call polls and finds the run still
+tripped); the generator `throw` path throws the app's own value, and module
+evaluation rethrows only to Hull's own loader. No C loop was found that
+swallows an interrupt and keeps iterating.
+
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit5.async_bodies_do_not_escape_the_instruction_limit`; for the
 audit 38 part, `js_audit38.iterator_helper_steps_are_charged` (the catch
@@ -169,7 +181,9 @@ crashing input, replayed by the per-PR JS-source fuzz job.
 
 **Files:** `vendor/quickjs/quickjs.h` (`JSWorkHandler`, `JS_SetWorkHandler`),
 `vendor/quickjs/quickjs.c` (the `work_*` runtime fields, `js_work_flush` /
-`js_work_add` / `js_work_check`, and their call sites below)
+`js_work_add` / `js_work_check`, and their call sites below),
+`vendor/quickjs/libregexp.{c,h}` (since audit 39: `lre_check_work`, the cached
+forward group-name scan)
 **Found by:** the tenth runtime audit (H2)
 **Upstream:** Hull-specific; the model is Lua patch 0004
 ([lua_patches.md](lua_patches.md)).
@@ -290,6 +304,50 @@ The thirty-eighth audit added the iterator protocol:
   `Array.isArray` is one too). The same audit found the interrupt made
   catchable on its way out of those loops: see patch 0003.
 
+The thirty-ninth audit removed the last long single calls the run watchdog
+could not stop:
+
+- **Proxy `ownKeys` validation** (made linear, checked):
+  `js_proxy_get_own_property_names` looked for duplicates with one
+  `find_prop_key` scan per key, and matched every target key against the
+  result the same way (non-configurable keys, a non-extensible target), so a
+  trap returning n keys cost O(n^2) compares: 200k keys ran 8 s in one
+  `Reflect.ownKeys`, 1M about 200 s within the 64 MB heap, the trip landing
+  only after it returned. Both checks now go through an open-addressed index
+  of the atoms (`JSAtomIndex`), and the key-collection, index-build and
+  target loops each charge `JS_WORK_ELEM` per key (checked).
+- **The `JSON.stringify` replacer array** (checked): its loop runs to the
+  array's length - up to 2^53 - 1, not bounded by the heap - and charged
+  nothing for a hole (`a.length = 1e8; JSON.stringify({}, a)` ran 4 s under a
+  1 s deadline). Each index charges `JS_WORK_ELEM`.
+- **A forward named backreference** (linear, checked): `\k<name>` before its
+  group made `re_parse_captures` rescan the whole pattern, once per reference
+  (`new RegExp('\\k<a>'.repeat(20000) + '(?<a>x)')` compiled for 5 s). The
+  first forward reference now scans the pattern once into a list of every
+  named group (`fwd_names`), which later ones search. Each lookup (backward
+  or forward, up to 255 names of up to 127 bytes) and the scan are charged
+  through a new libregexp hook, `lre_check_work(opaque, bytes)` (Hull's side:
+  `js_work_add`); when it reports the run over, the compile fails with
+  `LRE_INTERRUPTED_MSG`, which `js_compile_regexp` raises as the
+  uncatchable interrupt rather than a SyntaxError.
+- **`RegExp.prototype[Symbol.split]`** (checked): one exec per position of
+  the input; the exec call counted one step for ~100 ns of work, so a 60M-
+  character split ran 5 s inside a 100M budget. Each position now also
+  charges `JS_WORK_ELEM`.
+- **The `JSON.parse` reviver walk** (checked): `internalize_json_property`
+  reads each array's length when it reaches it, and an earlier reviver call
+  can set a later array's length to 2^32 - 1. Each element charges
+  `JS_WORK_ELEM`.
+
+Probed and left as they are (each one call stays bounded by the heap and
+already charged, or is a counted step per iteration): typed-array `set` (its
+generic loop was checked since audit 10), `Symbol.replace` / `Symbol.match`
+(the fast path's `lre_exec` polls at every goto / backtrack; the generic loops
+call `exec` through `JS_Call`, a step, and store every result), spread
+(`js_append_enumerate`: the iterator protocol above, or a fast array whose
+copy is allocated), `for...in` (its inner skip loop walks property lists the
+heap holds; a prototype step polls), and `Date.parse` (one linear scan).
+
 The allocator charge is in the core (`js_malloc_rt` / `js_realloc_rt`), not a
 custom `JSMallocFunctions` table, so it can make the next step poll (an
 allocator has no context) and keeps QuickJS's own slab allocator and memory
@@ -304,7 +362,12 @@ seconds; several never return without the patch),
 (`iterator_helper_steps_are_charged`: one helper call over a 2^53-element
 array-like trips a 1M budget, uncatchably; `iterator_helper_steps_see_the_watchdog`:
 with no limit, the run deadline stops that one call; the `drop` case never
-returns without the patch).
+returns without the patch), and the `js_audit39` cases
+(`long_builtins_are_charged`: a holey replacer array, regexp compiles with
+250 long group names and 300k backreferences either way, a 16M-position split
+and a reviver-grown array each trip a 1M budget, uncatchably;
+`long_builtins_see_the_watchdog`; `proxy_own_keys_is_linear`: 300k keys,
+4.5e10 compares before, finish in milliseconds; `ordinary_use_still_works`).
 
 ## Patch 0006 - an embedder stop flag polled at every step
 
@@ -315,9 +378,10 @@ returns without the patch).
 **Upstream:** Hull-specific.
 
 Audits 9-12 kept finding work one step does that patch 0005 does not charge (a
-property miss walking a deep prototype chain, Proxy `ownKeys` validation, a
-regexp compile rescanning for `\k<name>`, a literal compared char by char, a
-slow-array length shrink, ...). Charging each one never converges, so Hull
+property miss walking a deep prototype chain, a literal compared char by char,
+a slow-array length shrink, ...; Proxy `ownKeys` validation and a regexp
+compile rescanning for `\k<name>` were on this list until audit 39 made them
+linear and charged). Charging each one never converges, so Hull
 bounds every run by wall-clock time as well (`src/hull/cap/run_watchdog.c`): a
 watchdog thread raises a per-VM stop flag at the run's deadline. The interrupt
 handler only runs when a context's step counter runs out - every

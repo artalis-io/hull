@@ -47818,6 +47818,12 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
                                   sizeof(error_msg), str, len, re_flags, ctx);
     JS_FreeCString(ctx, str);
     if (!re_bytecode_buf) {
+        /* HULL PATCH 0005 (audit 39): a compile stopped by the budget is
+           the (uncatchable) interrupt, not a SyntaxError */
+        if (!strcmp(error_msg, LRE_INTERRUPTED_MSG)) {
+            JS_ThrowInterrupted(ctx);
+            return JS_EXCEPTION;
+        }
         JS_ThrowSyntaxError(ctx, "%s", error_msg);
         return JS_EXCEPTION;
     }
@@ -48196,6 +48202,13 @@ int lre_check_timeout(void *opaque)
     JSRuntime *rt = ctx->rt;
     return (rt->interrupt_handler && 
             rt->interrupt_handler(rt, rt->interrupt_opaque));
+}
+
+/* HULL PATCH 0005 (audit 39): regexp compile work */
+int lre_check_work(void *opaque, size_t bytes)
+{
+    JSContext *ctx = opaque;
+    return js_work_add(ctx->rt, bytes);
 }
 
 void *lre_realloc(void *opaque, void *ptr, size_t size)
@@ -49356,6 +49369,10 @@ static JSValue js_regexp_Symbol_split(JSContext *ctx, JSValueConst this_val,
         goto done;
     }
     while (q < size) {
+        /* HULL PATCH 0005 (audit 39): one exec per position; the exec
+           call alone counted one step for ~100 ns of work */
+        if (js_work_check(ctx, JS_WORK_ELEM))
+            goto exception;
         if (JS_SetProperty(ctx, splitter, JS_ATOM_lastIndex, JS_NewInt32(ctx, q)) < 0)
             goto exception;
         JS_FreeValue(ctx, z);
@@ -49952,6 +49969,10 @@ static JSValue internalize_json_property(JSContext *ctx, JSValueConst holder,
                 goto fail;
         }
         for(i = 0; i < len; i++) {
+            /* HULL PATCH 0005 (audit 39): an earlier reviver call can
+               grow a later array's length (up to 2^32 - 1), read here */
+            if (js_work_check(ctx, JS_WORK_ELEM))
+                goto fail;
             if (is_array) {
                 prop = JS_NewAtomUInt32(ctx, i);
                 if (prop == JS_ATOM_NULL)
@@ -50481,6 +50502,11 @@ JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
                 goto exception;
             for (i = j = 0; i < n; i++) {
                 JSValue present;
+                /* HULL PATCH 0005 (audit 39): n is the replacer's length,
+                   up to 2^53 - 1 and not bounded by the heap: a holey
+                   array of length 1e8 looped 4 s with nothing charged */
+                if (js_work_check(ctx, JS_WORK_ELEM))
+                    goto exception;
                 v = JS_GetPropertyInt64(ctx, replacer, i);
                 if (JS_IsException(v))
                     goto exception;
@@ -51401,13 +51427,66 @@ static int js_proxy_delete_property(JSContext *ctx, JSValueConst obj,
     return res;
 }
 
-/* return the index of the property or -1 if not found */
-static int find_prop_key(const JSPropertyEnum *tab, int n, JSAtom atom)
+/* HULL PATCH 0005 (audit 39): an open-addressed index of tab's atoms, so
+   the proxy ownKeys checks are linear. They called find_prop_key once per
+   key (duplicates) and once per target key (non-extensible / non-
+   configurable), O(len^2) compares no poll saw: 200k keys ran 8 s in one
+   Reflect.ownKeys, 1M about 200 s. Slots hold index + 1 (0 = empty). */
+typedef struct {
+    uint32_t *slots;
+    uint32_t mask;
+} JSAtomIndex;
+
+static inline uint32_t js_atom_index_hash(JSAtom atom, uint32_t mask)
 {
-    int i;
-    for(i = 0; i < n; i++) {
-        if (tab[i].atom == atom)
-            return i;
+    return ((uint32_t)atom * 0x9E3779B1u) & mask;
+}
+
+/* build the index; -1 on exception, 1 if tab holds a duplicate atom */
+static int js_atom_index_init(JSContext *ctx, JSAtomIndex *ix,
+                              const JSPropertyEnum *tab, uint32_t len)
+{
+    uint32_t size = 16, i, h;
+    ix->slots = NULL;
+    ix->mask = 0;
+    if (len == 0)
+        return 0;
+    while (size < len * 2ULL) {
+        if (size >= (1u << 31)) {
+            JS_ThrowOutOfMemory(ctx);
+            return -1;
+        }
+        size <<= 1;
+    }
+    ix->slots = js_mallocz(ctx, sizeof(ix->slots[0]) * (size_t)size);
+    if (!ix->slots)
+        return -1;
+    ix->mask = size - 1;
+    for (i = 0; i < len; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM))
+            return -1;
+        h = js_atom_index_hash(tab[i].atom, ix->mask);
+        while (ix->slots[h] != 0) {
+            if (tab[ix->slots[h] - 1].atom == tab[i].atom)
+                return 1;
+            h = (h + 1) & ix->mask;
+        }
+        ix->slots[h] = i + 1;
+    }
+    return 0;
+}
+
+static int js_atom_index_find(const JSAtomIndex *ix,
+                              const JSPropertyEnum *tab, JSAtom atom)
+{
+    uint32_t h;
+    if (!ix->slots)
+        return -1;
+    h = js_atom_index_hash(atom, ix->mask);
+    while (ix->slots[h] != 0) {
+        if (tab[ix->slots[h] - 1].atom == atom)
+            return ix->slots[h] - 1;
+        h = (h + 1) & ix->mask;
     }
     return -1;
 }
@@ -51424,6 +51503,7 @@ static int js_proxy_get_own_property_names(JSContext *ctx,
     JSAtom atom;
     JSPropertyDescriptor desc;
     int res, is_extensible, idx;
+    JSAtomIndex ix = { NULL, 0 }; /* HULL PATCH 0005 (audit 39) */
 
     s = get_proxy_method(ctx, &method, obj, JS_ATOM_ownKeys);
     if (!s)
@@ -51448,6 +51528,8 @@ static int js_proxy_get_own_property_names(JSContext *ctx,
             goto fail;
     }
     for(i = 0; i < len; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 (audit 39) */
+            goto fail;
         val = JS_GetPropertyUint32(ctx, prop_array, i);
         if (JS_IsException(val))
             goto fail;
@@ -51464,13 +51546,14 @@ static int js_proxy_get_own_property_names(JSContext *ctx,
         tab[i].is_enumerable = FALSE; /* XXX: redundant? */
     }
 
-    /* check duplicate properties (XXX: inefficient, could store the
-     * properties an a temporary object to use the hash) */
-    for(i = 1; i < len; i++) {
-        if (find_prop_key(tab, i, tab[i].atom) >= 0) {
-            JS_ThrowTypeError(ctx, "proxy: duplicate property");
-            goto fail;
-        }
+    /* check duplicate properties. HULL PATCH 0005 (audit 39): through a
+       hash index, not a find_prop_key scan per key (O(len^2)) */
+    res = js_atom_index_init(ctx, &ix, tab, len);
+    if (res < 0)
+        goto fail;
+    if (res) {
+        JS_ThrowTypeError(ctx, "proxy: duplicate property");
+        goto fail;
     }
 
     is_extensible = JS_IsExtensible(ctx, s->target);
@@ -51486,6 +51569,8 @@ static int js_proxy_get_own_property_names(JSContext *ctx,
                                JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK))
         goto fail;
     for(i = 0; i < len2; i++) {
+        if (js_work_check(ctx, JS_WORK_ELEM)) /* HULL PATCH 0005 (audit 39) */
+            goto fail;
         if (s->is_revoked) {
             JS_ThrowTypeErrorRevokedProxy(ctx);
             goto fail;
@@ -51497,7 +51582,7 @@ static int js_proxy_get_own_property_names(JSContext *ctx,
         if (res) {  /* safety, property should be found */
             js_free_desc(ctx, &desc);
             if (!(desc.flags & JS_PROP_CONFIGURABLE) || !is_extensible) {
-                idx = find_prop_key(tab, len, tab2[i].atom);
+                idx = js_atom_index_find(&ix, tab, tab2[i].atom); /* HULL PATCH 0005 */
                 if (idx < 0) {
                     JS_ThrowTypeError(ctx, "proxy: target property must be present in proxy ownKeys");
                     goto fail;
@@ -51518,12 +51603,14 @@ static int js_proxy_get_own_property_names(JSContext *ctx,
         }
     }
 
+    js_free(ctx, ix.slots); /* HULL PATCH 0005 (audit 39) */
     JS_FreePropertyEnum(ctx, tab2, len2);
     JS_FreeValue(ctx, prop_array);
     *ptab = tab;
     *plen = len;
     return 0;
  fail:
+    js_free(ctx, ix.slots); /* HULL PATCH 0005 (audit 39) */
     JS_FreePropertyEnum(ctx, tab2, len2);
     JS_FreePropertyEnum(ctx, tab, len);
     JS_FreeValue(ctx, prop_array);

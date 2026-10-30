@@ -85,6 +85,11 @@ typedef struct {
     int has_named_captures; /* -1 = don't know, 0 = no, 1 = yes */
     void *opaque;
     DynBuf group_names;
+    /* HULL PATCH 0005 (audit 39): every named group of the whole pattern
+       (name, '\0', capture index), scanned once for the first forward
+       \k<name>; was a rescan of the pattern per forward reference */
+    DynBuf fwd_names;
+    BOOL fwd_names_done;
     union {
         char error_msg[TMP_BUF_SIZE];
         char tmp_buf[TMP_BUF_SIZE];
@@ -1685,7 +1690,8 @@ static int re_parse_group_name(char *buf, int buf_size, const uint8_t **pp)
 /* if capture_name = NULL: return the number of captures + 1.
    Otherwise, return the number of matching capture groups  */
 static int re_parse_captures(REParseState *s, int *phas_named_captures,
-                             const char *capture_name, BOOL emit_group_index)
+                             const char *capture_name, BOOL emit_group_index,
+                             DynBuf *rec)
 {
     const uint8_t *p;
     int capture_index, n;
@@ -1701,10 +1707,15 @@ static int re_parse_captures(REParseState *s, int *phas_named_captures,
                 if (p[2] == '<' && p[3] != '=' && p[3] != '!') {
                     *phas_named_captures = 1;
                     /* potential named capture */
-                    if (capture_name) {
+                    if (capture_name || rec) { /* HULL PATCH 0005 */
                         p += 3;
                         if (re_parse_group_name(name, sizeof(name), &p) == 0) {
-                            if (!strcmp(name, capture_name)) {
+                            if (rec) {
+                                dbuf_putstr(rec, name);
+                                dbuf_putc(rec, '\0');
+                                dbuf_putc(rec, capture_index);
+                            }
+                            if (capture_name && !strcmp(name, capture_name)) {
                                 if (emit_group_index)
                                     dbuf_putc(&s->byte_code, capture_index);
                                 n++;
@@ -1744,7 +1755,7 @@ static int re_count_captures(REParseState *s)
 {
     if (s->total_capture_count < 0) {
         s->total_capture_count = re_parse_captures(s, &s->has_named_captures,
-                                                   NULL, FALSE);
+                                                   NULL, FALSE, NULL);
     }
     return s->total_capture_count;
 }
@@ -1778,6 +1789,56 @@ static int find_group_name(REParseState *s, const char *name, BOOL emit_group_in
         }
         p += len + LRE_GROUP_NAME_TRAILER_LEN;
         capture_index++;
+    }
+    return n;
+}
+
+/* HULL PATCH 0005 (audit 39): charge 'bytes' of compile work; a parse
+   error "interrupted" (LRE_INTERRUPTED_MSG) once the run is over budget */
+static int re_charge(REParseState *s, size_t bytes)
+{
+    if (lre_check_work(s->opaque, bytes))
+        return re_parse_error(s, "%s", LRE_INTERRUPTED_MSG);
+    return 0;
+}
+
+/* HULL PATCH 0005 (audit 39): the forward \k<name> lookup, over the named
+   groups of the whole pattern collected by one scan. Same result as
+   re_parse_captures(s, .., name, emit) - the count of groups named 'name',
+   their indexes emitted - which rescanned the pattern on every forward
+   reference: '\k<a>'.repeat(20000) + '(?<a>x)' took 5 s to compile.
+   -1 on error (s->u.error_msg set). */
+static int find_fwd_group_name(REParseState *s, const char *name,
+                               BOOL emit_group_index)
+{
+    const char *p, *buf_end;
+    size_t len, name_len;
+    int n, dummy;
+
+    if (!s->fwd_names_done) {
+        s->fwd_names_done = TRUE;
+        if (re_charge(s, s->buf_end - s->buf_start))
+            return -1;
+        re_parse_captures(s, &dummy, NULL, FALSE, &s->fwd_names);
+        if (dbuf_error(&s->fwd_names))
+            return re_parse_out_of_memory(s);
+    }
+    if (re_charge(s, s->fwd_names.size))
+        return -1;
+    p = (char *)s->fwd_names.buf;
+    if (!p)
+        return 0;
+    buf_end = (char *)s->fwd_names.buf + s->fwd_names.size;
+    name_len = strlen(name);
+    n = 0;
+    while (p < buf_end) {
+        len = strlen(p);
+        if (len == name_len && memcmp(name, p, name_len) == 0) {
+            if (emit_group_index)
+                dbuf_putc(&s->byte_code, (uint8_t)p[len + 1]);
+            n++;
+        }
+        p += len + 2;
     }
     return n;
 }
@@ -2041,7 +2102,7 @@ static int re_parse_term(REParseState *s, BOOL is_backward_dir)
         case 'k':
             {
                 const uint8_t *p1;
-                int dummy_res, n;
+                int n;
                 BOOL is_forward;
                 
                 p1 = p;
@@ -2063,11 +2124,17 @@ static int re_parse_term(REParseState *s, BOOL is_backward_dir)
                         goto parse_class_atom;
                 }
                 is_forward = FALSE;
+                /* HULL PATCH 0005 (audit 39): charged, and the forward
+                   lookup goes through one cached scan */
+                if (re_charge(s, s->group_names.size))
+                    return -1;
                 n = find_group_name(s, s->u.tmp_buf, FALSE);
                 if (n == 0) {
                     /* no capture name parsed before, try to look
-                       after (inefficient, but hopefully not common */
-                    n = re_parse_captures(s, &dummy_res, s->u.tmp_buf, FALSE);
+                       after */
+                    n = find_fwd_group_name(s, s->u.tmp_buf, FALSE);
+                    if (n < 0)
+                        return -1;
                     if (n == 0) {
                         if (s->is_unicode || re_has_named_captures(s))
                             return re_parse_error(s, "group name not defined");
@@ -2082,7 +2149,8 @@ static int re_parse_term(REParseState *s, BOOL is_backward_dir)
                 /* emit back references to all the captures indexes matching the group name */
                 re_emit_op_u8(s, REOP_back_reference + 2 * is_backward_dir + s->ignore_case, n);
                 if (is_forward) {
-                    re_parse_captures(s, &dummy_res, s->u.tmp_buf, TRUE);
+                    if (find_fwd_group_name(s, s->u.tmp_buf, TRUE) < 0)
+                        return -1;
                 } else {
                     find_group_name(s, s->u.tmp_buf, TRUE);
                 }
@@ -2545,6 +2613,7 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
 
     dbuf_init2(&s->byte_code, opaque, lre_bytecode_realloc);
     dbuf_init2(&s->group_names, opaque, lre_realloc);
+    dbuf_init2(&s->fwd_names, opaque, lre_realloc); /* HULL PATCH 0005 */
 
     dbuf_put_u16(&s->byte_code, re_flags); /* first element is the flags */
     dbuf_putc(&s->byte_code, 0); /* second element is the number of captures */
@@ -2566,6 +2635,7 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
     error:
         dbuf_free(&s->byte_code);
         dbuf_free(&s->group_names);
+        dbuf_free(&s->fwd_names); /* HULL PATCH 0005 */
         pstrcpy(error_msg, error_msg_size, s->u.error_msg);
         *plen = 0;
         return NULL;
@@ -2603,6 +2673,7 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
                 lre_get_flags(s->byte_code.buf) | LRE_FLAG_NAMED_GROUPS);
     }
     dbuf_free(&s->group_names);
+    dbuf_free(&s->fwd_names); /* HULL PATCH 0005 */
 
 #ifdef DUMP_REOP
     lre_dump_bytecode(s->byte_code.buf, s->byte_code.size);

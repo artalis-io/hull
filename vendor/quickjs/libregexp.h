@@ -60,6 +60,11 @@ int lre_parse_escape(const uint8_t **pp, int allow_utf16);
 int lre_check_stack_overflow(void *opaque, size_t alloca_size);
 /* must be provided by the user, return non zero if time out */
 int lre_check_timeout(void *opaque);
+/* HULL PATCH 0005 (audit 39): must be provided by the user. Charge 'bytes'
+   of compile work (1/64 instruction units); non zero = stop: lre_compile
+   fails with the message LRE_INTERRUPTED_MSG */
+int lre_check_work(void *opaque, size_t bytes);
+#define LRE_INTERRUPTED_MSG "interrupted"
 void *lre_realloc(void *opaque, void *ptr, size_t size);
 
 #endif /* LIBREGEXP_H */
