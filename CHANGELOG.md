@@ -10,6 +10,20 @@ release-artifact layout).
 
 ### Fixes
 
+- **A JS Proxy `ownKeys`, a `JSON.stringify` replacer array or a regexp compile could hold the
+  event loop past every limit** (audit 39). Each was one builtin call with nothing charged and
+  nothing polled. QuickJS checked a Proxy `ownKeys` result for duplicates (and against a
+  non-extensible target) with a linear search per key, O(n^2): 200k keys took 8 s in one
+  `Reflect.ownKeys`, 1M about 200 s inside the 64 MB heap. The checks now go through a hash
+  index, linear, and each key is charged. The replacer-array loop of `JSON.stringify` charged
+  nothing for holes (`a.length = 1e8; JSON.stringify({}, a)` ran 4 s under a 1 s deadline; up to
+  2^32 - 1 iterations); each index is now charged and the loop stops at a trip. A forward
+  `\k<name>` made the regexp compiler rescan the whole pattern once per reference
+  (`new RegExp('\\k<a>'.repeat(20000) + '(?<a>x)')` took 5 s); one scan is now cached, every
+  group-name lookup is charged, and a compile stopped by the budget raises the uncatchable
+  interrupt instead of a SyntaxError. The sweep also charges `RegExp.prototype[Symbol.split]`
+  per position and the `JSON.parse` reviver walk per element (an earlier reviver call could grow a
+  later array to 2^32 - 1). Covered by the `js_audit39` cases in `test_js` (QuickJS HULL PATCH 0005).
 - **A chain of shader declarations could still crash the process past the GPU pre-checks**
   (audit 38). naga orders a module's declarations with a recursive depth-first walk, one stack
   frame per declaration a declaration names, before anything else runs; a chain in which each

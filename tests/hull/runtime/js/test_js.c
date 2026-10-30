@@ -15023,4 +15023,133 @@ UTEST(js_audit38, ordinary_fs_work_keeps_its_headroom)
     a15_fs_close(&f);
 }
 
+/* ── Audit 39: long builtins in QuickJS ─────────────────────────────────
+ *
+ * One builtin call that ran for seconds with nothing charged and nothing
+ * polled (QuickJS HULL PATCH 0005, audit 39): Proxy ownKeys validation was
+ * O(len^2) (200k keys 8 s, 1M about 200 s in one Reflect.ownKeys), the
+ * JSON.stringify replacer-array loop charged nothing for holes (length 1e8
+ * ran 4 s), a forward \k<name> rescanned the whole pattern per reference
+ * (compile quadratic), and a split / a reviver walk were undercharged. Each
+ * source below is ONE call that trips a 1M budget fast, uncatchably. */
+#define A39_GROUPS \
+    "const P = 'n'.repeat(100); let g = '';\n" \
+    "for (let i = 0; i < 250; i++) g += '(?<' + P + i + '>x)';\n" \
+    "const K = ('\\\\k<' + P + '249>').repeat(300000);\n"
+UTEST(js_audit39, long_builtins_are_charged)
+{
+    static const char *const srcs[] = {
+        /* replacer array with holes: 2^32 - 1 iterations in one call */
+        "const a = []; a.length = 2 ** 32 - 1; JSON.stringify({}, a);",
+        /* regexp compile: each \k<name> scans the group names (charged),
+         * forward references through one cached scan */
+        A39_GROUPS "new RegExp(g + K);",
+        A39_GROUPS "new RegExp(K + g);",
+        /* split: one exec per position */
+        "'a'.repeat(1 << 24).split(/b/);",
+        /* an earlier reviver call grows a later array to 2^32 - 1 */
+        "JSON.parse('[[0],[0]]', function (k, v) {"
+        " if (k === '0' && Array.isArray(v) && Array.isArray(this) &&"
+        " this.length === 2) this[1].length = 2 ** 32 - 1; return v; });",
+    };
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        char code[2048];
+        snprintf(code, sizeof code,
+                 "globalThis.__a39 = 0;\n"
+                 "try { %s } catch (e) { globalThis.__a39 = 1; }\n", srcs[i]);
+        hl_js_reset_request(&lim);
+        struct timespec t0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        EXPECT_TRUE_MSG(a5_eval_throws(&lim, code), srcs[i]);
+        long ms = a10_ms_since(&t0);
+        EXPECT_EQ_MSG(lim.budget_tripped, 1, srcs[i]);
+        EXPECT_LT_MSG(ms, 5000L, srcs[i]);
+        hl_js_reset_request(&lim);
+        JSValue v = JS_Eval(lim.ctx, "globalThis.__a39", 16, "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        int32_t caught = -1;
+        JS_ToInt32(lim.ctx, &caught, v);
+        JS_FreeValue(lim.ctx, v);
+        EXPECT_EQ_MSG(caught, 0, srcs[i]);   /* the catch never ran */
+    }
+    hl_js_free(&lim);
+}
+
+/* With NO instruction limit the run deadline stops the same single calls:
+ * the charges made inside them see the watchdog's flag. */
+UTEST(js_audit39, long_builtins_see_the_watchdog)
+{
+    EXPECT_EQ(wd_js_run("const a = []; a.length = 2 ** 32 - 1;"
+                        "JSON.stringify({}, a);", NULL), 1);
+    int after = -1;
+    EXPECT_EQ(wd_js_run(A39_GROUPS
+                        "try { new RegExp(K + g); } catch (e) {}\n"
+                        "globalThis.after = 1;", &after), 1);
+    EXPECT_EQ(after, 0);
+}
+#undef A39_GROUPS
+
+/* Proxy ownKeys validation is linear now: 300k keys - 4.5e10 compares
+ * before - finish in well under a second, with the checks intact. */
+UTEST(js_audit39, proxy_own_keys_is_linear)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "const keys = Array.from({ length: 300000 }, (_, i) => 'k' + i);\n"
+        "const r = Reflect.ownKeys(new Proxy({}, { ownKeys: () => keys }));\n"
+        "if (r.length !== 300000 || r[299999] !== 'k299999') throw 1;\n"
+        "const t = Object.preventExtensions(Object.fromEntries("
+        "keys.slice(0, 100000).map(k => [k, 1])));\n"
+        "const r2 = Reflect.ownKeys(new Proxy(t, {"
+        " ownKeys: () => keys.slice(0, 100000).reverse() }));\n"
+        "if (r2.length !== 100000) throw 2;\n"));
+    EXPECT_LT(a10_ms_since(&t0), 5000L);
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+
+/* Ordinary use still works: the proxy invariants, a replacer array,
+ * named backreferences both ways, a reviver, split. */
+UTEST(js_audit39, ordinary_use_still_works)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "const own = (t, k) => Reflect.ownKeys(new Proxy(t, { ownKeys: () => k }));\n"
+        "const err = (f) => { try { f(); } catch (e) { return e instanceof TypeError; } return false; };\n"
+        "if (own({}, ['a', 'b', Symbol.iterator]).length !== 3) throw 1;\n"
+        "if (!err(() => own({}, ['a', 'b', 'a']))) throw 2;\n"
+        "const ne = Object.preventExtensions({ x: 1, y: 2 });\n"
+        "if (own(ne, ['y', 'x']).join() !== 'y,x') throw 3;\n"
+        "if (!err(() => own(ne, ['x']))) throw 4;\n"
+        "if (!err(() => own(ne, ['x', 'y', 'z']))) throw 5;\n"
+        "const nc = {}; Object.defineProperty(nc, 'q', { value: 1 });\n"
+        "if (!err(() => own(nc, []))) throw 6;\n"
+        "if (own(nc, ['q', 'r']).length !== 2) throw 7;\n"
+        "if (JSON.stringify({ a: 1, b: 2, c: 3 }, ['c', 'a', 'c', 1])"
+        " !== '{\"c\":3,\"a\":1}') throw 8;\n"
+        "const sparse = ['b']; sparse[5] = 'a';\n"
+        "if (JSON.stringify({ a: 1, b: 2 }, sparse) !== '{\"b\":2,\"a\":1}') throw 9;\n"
+        "if (!/\\k<w>(?<w>a)/.test('a')) throw 10;\n"
+        "const m = 'abab'.match(/(?<w>ab)\\k<w>/);\n"
+        "if (!m || m.groups.w !== 'ab') throw 11;\n"
+        "const f = new RegExp('\\\\k<a>'.repeat(20000) + '(?<a>x)\\\\k<a>');\n"
+        "if (!f.test('xx')) throw 12;\n"
+        "const d = /(?:(?<a>x)|(?<a>y))\\k<a>/;\n"
+        "if (!d.test('yy') || d.test('xy')) throw 13;\n"
+        "let err14 = false; try { new RegExp('(?<a>x)\\\\k<b>', 'u'); } catch (e) { err14 = e instanceof SyntaxError; }\n"
+        "if (!err14) throw 14;\n"
+        "const j = JSON.parse('{\"a\":[1,2,{\"b\":3}]}', (k, v) => typeof v === 'number' ? v * 10 : v);\n"
+        "if (j.a[1] !== 20 || j.a[2].b !== 30) throw 15;\n"
+        "if ('a,b,,c'.split(/,/).join('|') !== 'a|b||c') throw 16;\n"));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+
+
 UTEST_MAIN();
