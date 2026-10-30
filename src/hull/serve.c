@@ -32,6 +32,7 @@
  * runtime #ifdef - under RUNTIME=lua / HL_ENABLE_JS=0 the declaration would
  * disappear and the call become an implicit declaration (an error on GCC 14). */
 #include "hull/shared/cli_log.h"
+#include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV (audit 36) */
 
 #include "hull/utils/alloc.h"
 #include "hull/app_context.h"
@@ -344,6 +345,10 @@ typedef struct {
     int skip_ca_bundle;
     const char *ca_bundle_override; /* --ca-bundle=PATH */
     int agent_mode;
+    /* The `hull dev --agent` session nonce (HL_DEV_SESSION_ENV, 64 hex), or
+     * "": stamped into .hull/last_error.json so `hull agent errors` can tell
+     * a record this session wrote from one a repo shipped (audit 36). */
+    char dev_session[65];
     int agent_api_mode;
     int drain_timeout;
     int max_connections;
@@ -1304,6 +1309,12 @@ static int hl_serve_load_app(HlServerState *s)
                     sh_json_write_kv_string(&w, "error", msg);
                     sh_json_write_kv_int   (&w, "timestamp",
                                             (int64_t)time(NULL));
+                    /* The session that wrote it: `hull agent errors`
+                     * serves the record only when this matches the live
+                     * session's nonce (audit 36). */
+                    if (s->cfg.dev_session[0])
+                        sh_json_write_kv_string(&w, "session",
+                                                s->cfg.dev_session);
                     sh_json_write_object_end(&w);
                     fputc('\n', ef);
                     fclose(ef);
@@ -2503,6 +2514,15 @@ int hull_serve(int argc, char **argv)
     /* Phase 1: parse CLI args */
     int rc = hl_serve_parse_args(&s, argc, argv);
     if (rc != 0) return rc < 0 ? 1 : 0; /* -1 = error, 1 = help shown */
+
+    /* The dev supervisor's session nonce: kept for the last_error.json
+     * stamp, and taken out of the environment before any app code runs. */
+    {
+        const char *ds = getenv(HL_DEV_SESSION_ENV);
+        if (s.cfg.agent_mode && hl_dev_session_nonce_valid(ds))
+            memcpy(s.cfg.dev_session, ds, 65);
+        unsetenv(HL_DEV_SESSION_ENV);
+    }
 
     /* --verify-sig: no bytecode or compiled template from the shared code
      * cache. Its entries are sealed under ~/.hull/cache.key, which every app

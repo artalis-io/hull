@@ -14,6 +14,7 @@
 #include "hull/dev_state.h"
 #include "hull/release_io.h"  /* hl_release_io_self_path */
 #include "hull/shared/host.h" /* hl_host_find_in_path */
+#include "hull/shared/dev_session.h" /* HL_DEV_SESSION_ENV (audit 36) */
 #include "hull/tool.h"
 
 #include <dirent.h>
@@ -93,30 +94,47 @@ static void dev_session_remove(void)
     if (g_dev_nonce[0] && dev_session_path(p, sizeof p, 0) == 0) unlink(p);
 }
 
+static void agent_remove_last_error(const char *app_dir)
+{
+    if (!agent_dir_safe(app_dir)) return;
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/.hull/last_error.json", app_dir);
+    if (n > 0 && (size_t)n < sizeof(path)) unlink(path);
+}
+
+/* Start the agent session: make its nonce, keep the copy under $HOME, and
+ * hand it to every served child through HL_DEV_SESSION_ENV (the child stamps
+ * it into .hull/last_error.json and unsets it before app code runs). Done
+ * before the first spawn, so the first load failure is already stamped. A
+ * last_error.json already in the tree is not this session's: removed (audit
+ * 36). */
+static void agent_session_begin(const char *app_dir)
+{
+    agent_remove_last_error(app_dir);
+    if (g_dev_nonce[0]) return;
+    unsigned char r[32];
+    if (hl_cap_crypto_random(r, sizeof r) != 0) return;
+    static const char hx[] = "0123456789abcdef";
+    char nonce[65];
+    for (int i = 0; i < 32; i++) {
+        nonce[2 * i]     = hx[r[i] >> 4];
+        nonce[2 * i + 1] = hx[r[i] & 15];
+    }
+    nonce[64] = '\0';
+    char sp[PATH_MAX];
+    if (dev_session_path(sp, sizeof sp, 1) != 0) return;
+    (void)unlink(sp);
+    int fd = open(sp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    ssize_t w = write(fd, nonce, 64);
+    close(fd);
+    if (w != 64) { unlink(sp); return; }
+    memcpy(g_dev_nonce, nonce, sizeof nonce);
+    (void)setenv(HL_DEV_SESSION_ENV, g_dev_nonce, 1);
+}
+
 static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
 {
-    if (!g_dev_nonce[0]) {
-        unsigned char r[32];
-        if (hl_cap_crypto_random(r, sizeof r) == 0) {
-            static const char hx[] = "0123456789abcdef";
-            for (int i = 0; i < 32; i++) {
-                g_dev_nonce[2 * i]     = hx[r[i] >> 4];
-                g_dev_nonce[2 * i + 1] = hx[r[i] & 15];
-            }
-            g_dev_nonce[64] = '\0';
-            char sp[PATH_MAX];
-            if (dev_session_path(sp, sizeof sp, 1) == 0) {
-                (void)unlink(sp);
-                int fd = open(sp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-                if (fd >= 0) {
-                    ssize_t w = write(fd, g_dev_nonce, 64);
-                    (void)w;
-                    close(fd);
-                }
-            }
-        }
-    }
-
     char path[PATH_MAX], tmp[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
     if (n < 0 || (size_t)n >= sizeof(path)) return;
@@ -263,6 +281,7 @@ static void agent_publish_discovery(const char *hull_exe, const char *app_dir, l
 static void agent_remove_sidecars(const char *app_dir)
 {
     dev_session_remove();
+    agent_remove_last_error(app_dir);
     if (!agent_dir_safe(app_dir)) return;
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
@@ -738,8 +757,10 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 
     fprintf(stderr, "[hull:dev] watching %s for changes...\n", app_dir);
 
-    if (agent_mode)
+    if (agent_mode) {
         agent_ensure_dir(app_dir);
+        agent_session_begin(app_dir);
+    }
 
     int ret = 0;
     long generation = 0;   /* incremented per (re)spawn; published to .hull/discovery.json */

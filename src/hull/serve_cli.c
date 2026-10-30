@@ -73,6 +73,8 @@
 #include <string.h>
 #include <limits.h>
 
+#include "hull/shared/dev_session.h"   /* HL_DEV_SESSION_ENV */
+
 static const char **build_env_allowlist(const HlManifest *m)
 {
     if (!m || m->env_count <= 0) return NULL;
@@ -356,6 +358,9 @@ static int cli_fail(HlAppContext *ctx, HlRuntime *rt,
 __attribute__((weak))
 int hull_serve(int argc, char **argv)
 {
+    /* No agent sidecars here: the dev session nonce is not the app's to read
+     * (audit 36). */
+    unsetenv(HL_DEV_SESSION_ENV);
     int app_argc = 0;
     char **app_argv = NULL;
     int no_migrate = 0, no_sandbox = 0, allow_degraded_sandbox = 0;

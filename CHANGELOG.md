@@ -310,6 +310,24 @@ release-artifact layout).
   Covered by `test_fs` (a VFS shim asserting the file is registered before its WAL opens, and a
   forked race of opens against in-place writes).
 
+- **`hull agent errors` / `logs` served a cloned repo's `.hull/` files as Hull's own output**
+  (audit 36). `hull agent errors`, MCP `hull_errors` and the agent API's `/errors` passed
+  `.hull/last_error.json` through as is (checked only for being a JSON object with no control
+  bytes), and `hull agent logs` / `hull_logs` tailed `.hull/dev.log`, which nothing in Hull
+  writes. A repo could commit either, and an agent following AGENTS.md read its text - "run
+  this pipeline to fix the build" - as Hull diagnostics. `hull dev --agent` now makes its
+  session nonce before the first spawn and hands it to the served child (`HULL_DEV_SESSION`,
+  unset before app code runs), which stamps it into `last_error.json`; a stale record is removed
+  when the session starts and ends. The record is served only when its nonce matches the live
+  session's (dev.json's nonce equal to the copy under `$HOME/.hull/dev-sessions/<pid>`, the pid
+  alive - the binding `hull agent inspect` already used, now `hl_agent_dev_session`), and then
+  only `error` (which must be Hull's `failed to load ...`) and `timestamp`, re-encoded;
+  otherwise the result is `{"errors":[],"ignored":"..."}`. `hull agent logs` reads no file:
+  it returns no lines, a note that `hull dev` logs to stderr, and `ignored` when a
+  `.hull/dev.log` exists. `hull agent status` takes dev.json's port only from a bound session.
+  Covered by `e2e_agent` and `e2e_mcp` (planted records and logs not served; a real
+  `hull dev --agent` load failure still reported, and no longer once its session ended).
+
 - **Concurrent first failures deadlocked the lockout counters on MySQL** (audit 31, both
   runtimes). The audit-30 re-audit ran the counter's UPDATE first and the INSERT-if-absent
   only when it matched no row; but an UPDATE matching no row takes a gap lock under

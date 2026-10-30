@@ -1414,14 +1414,11 @@ When `--agent` is passed:
   ```
 - **`.hull/last_error.json`**. Written on load failure. Schema:
   ```json
-  {
-    "file": "app.lua",
-    "line": 42,
-    "col": 13,
-    "message": "attempt to call a nil value (global 'foo')",
-    "trace": [...]
-  }
+  { "error": "failed to load app.lua", "timestamp": 1747325420, "session": "<64-hex nonce>" }
   ```
+  `session` is the dev session's nonce; `hull agent errors` serves the record
+  (as `{error, timestamp}`) only while that session is live, so a copy that
+  came with a cloned repo is ignored (audit 36).
 
 Both atomically written. Safe to poll.
 
@@ -1437,7 +1434,7 @@ All `hull agent` subcommands emit JSON to stdout. Exit code 0 on success,
 | `db query "SQL" [app]` | `{ "columns": [...], "rows": [[...]], "count": N }` |
 | `request METHOD PATH` | `{ "status": 200, "headers": {...}, "body": "...", "duration_ms": 12 }` |
 | `status [app]` | `{ "running": true, "port": 3000, "pid": 12345 }` |
-| `errors [app]` | Contents of `.hull/last_error.json` or `{ "errors": [] }` |
+| `errors [app]` | `{error, timestamp}` from `.hull/last_error.json` when the live `hull dev --agent` session wrote it (nonce-bound, audit 36), else `{ "errors": [] }` (plus `ignored` for an unverified file) |
 | `test [app]` | `{ "tests": [...], "passed": N, "failed": M }` |
 | `context --task=T --level=L` | Markdown excerpt from `docs/` relevant to task |
 | `migrate [app]` | `{ "applied": [...], "pending": [...], "total": N }` |
@@ -1767,7 +1764,7 @@ notes per command:
 | `vfs` | `src/hull/agent/vfs.c` | Iterates `hl_app_entries[]` + `hl_stdlib_entries[]`; buckets by name prefix. |
 | `compute` / `gpu` | `src/hull/agent/compute.c`, `gpu.c` | VFS first, disk fallback. Two-pass dirent collection (avoids `rewinddir` pitfalls). |
 | `perf` | `src/hull/agent/perf.c` | Compile-time feature flags + default limits snapshot. Points at `/ready` for live stats. |
-| `logs` | `src/hull/agent/logs.c` | Tail-reads `.hull/dev.log` up to a capped window; emits last N lines. |
+| `logs` | `src/hull/agent/logs.c` | Reads no file: Hull writes no `dev.log`, so a `.hull/dev.log` (repo content) is reported as `ignored`, never served (audit 36). |
 | `eval` | `src/hull/agent/eval.c` | Wraps the snippet so its return value is JSON-encoded by the runtime's own `json` module (Lua) or `JSON.stringify` (JS), then emitted raw. |
 | `template` | `src/hull/agent/template.c` | Delegates to `hull.template.render` / `hull:template`'s `template.render` via the loaded runtime. |
 | `compute-call` | `src/hull/agent/compute.c` | Reads input file (capped), reports module + size + scheduled-execution status. |
