@@ -73,11 +73,19 @@ local function check_id_len(message_id, source)
     if message_id and not utf8.len(message_id) then
         error("inbox: message_id is not valid UTF-8", 3)
     end
+    -- Nor a NUL (audit 39): Postgres refuses it, so the lookup raised a
+    -- backend error rather than this one.
+    if message_id and message_id:find("\0", 1, true) then
+        error("inbox: message_id contains a NUL", 3)
+    end
     if source and #source > MAX_ID_LEN then
         error("inbox: source too long (max " .. MAX_ID_LEN .. ")", 3)
     end
     if source and not utf8.len(source) then
         error("inbox: source is not valid UTF-8", 3)
+    end
+    if source and source:find("\0", 1, true) then
+        error("inbox: source contains a NUL", 3)
     end
 end
 

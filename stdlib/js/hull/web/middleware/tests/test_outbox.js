@@ -124,6 +124,44 @@ try {
     console.log("FAIL: flush processes pending items: " + e.message);
 }
 
+// Audit 39: the delivery error is remote / runtime text, stored as safe text
+// (a lone surrogate or a NUL failed the outcome UPDATE on Postgres).
+try {
+    H.clear();
+    const id = outbox.enqueue({
+        kind: "webhook",
+        destination: "http://127.0.0.1:9999/a39",
+        payload: '{"event":"a39"}',
+    });
+    H.setPost(async () => {
+        throw new Error("upstream: a\u0000b \ud83d " + "y".repeat(70000));
+    });
+    try { await outbox.flush(); } finally { H.setPost(null); }
+    const row = H.rows(id)[0];
+    assertEq(row.attempts, 1, "attempt counted");
+    const le = row.last_error;
+    assertEq(typeof le, "string", "last_error");
+    assertEq(le.includes("\u0000"), false, "no NUL");
+    assertEq(le.includes("\ufffd"), true, "U+FFFD");
+    assertEq(le.length <= 4099, true, "capped");
+    pass++;
+} catch (e) {
+    fail++;
+    console.log("FAIL: audit 39 hostile delivery error: " + e.message);
+}
+
+test("audit 39: an idempotencyKey the column cannot store is refused", () => {
+    for (const k of ["a\u0000b", "\ud800", "k".repeat(256)]) {
+        let caught = null;
+        try {
+            outbox.enqueue({ kind: "webhook", destination: "http://127.0.0.1:9999/k",
+                             payload: "{}", idempotencyKey: k });
+        } catch (e) { caught = e; }
+        assertEq(caught !== null && String(caught.message).includes("idempotencyKey"), true,
+                 String(caught));
+    }
+});
+
 // Audit 23: an app header "idempotency-key" was sent beside the row's
 // "Idempotency-Key" - two headers.
 try {

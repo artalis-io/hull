@@ -26,6 +26,7 @@ import { json }   from "hull:json";
 import { app }    from "hull:app";
 import { log }    from "hull:log";
 import { _request } from "hull:web:_request";
+import { _text } from "hull:_text";
 
 const _state = {
     retainDays: 365,
@@ -198,16 +199,30 @@ function ipPrefix(ip) {
     return first;
 }
 
+// The User-Agent and IP as the columns store them (see the Lua sibling):
+// request text, made storable and capped in UTF-8 bytes on a code point
+// (hull:_text storable, audit 39 - substring(0, 512) could split a surrogate
+// pair, the INSERT then failed on Postgres / MySQL, the device was never
+// recorded and onNewDevice fired on every login). The fingerprint is
+// computed from these same values.
+const UA_MAX = 512, IP_MAX = 64;
+function storableUa(ua) {
+    return ua === null || ua === undefined ? null : _text.storable(ua, UA_MAX);
+}
+function storableIp(ip) {
+    return ip === null || ip === undefined ? null : _text.storable(ip, IP_MAX);
+}
+
 function extractIp(req) {
     // Delegates to the shared hull:web:_request helper (trustProxy ->
     // XFF-first -> remote_addr, capped at 64 chars). This module's
     // extractIp was the canonical implementation the helper was lifted
     // from; see docs/stdlib_style.md section 4.
-    return _request.clientIp(req, _state.trustProxy);
+    return storableIp(_request.clientIp(req, _state.trustProxy));
 }
 
 function extractUa(req) {
-    return req && req.headers && req.headers["user-agent"] || null;
+    return storableUa(req && req.headers && req.headers["user-agent"] || null);
 }
 
 import { encoding } from "hull:encoding";
@@ -237,21 +252,16 @@ function record(userId, kind, req, opts) {
     userId = _request.userId(userId);
     if (userId === null || typeof kind !== "string" || kind === "") return;
     opts = opts || {};
-    let ip = opts.ip !== undefined ? opts.ip : extractIp(req);
-    // A caller-supplied ip is capped at 64 chars, as clientIp caps the
-    // derived one (audit 23).
-    if (typeof ip === "string" && ip.length > 64) ip = ip.substring(0, 64);
-    let ua = opts.user_agent !== undefined ? opts.user_agent : extractUa(req);
-    // Bound the user_agent column the same way session.create does.
-    // Real UAs top out around 500 chars; bots and scanners can send
-    // 100 KB UAs.
-    if (typeof ua === "string" && ua.length > 512) ua = ua.substring(0, 512);
+    // A caller-supplied ip / user_agent is capped and made storable as the
+    // derived ones are (audits 23 / 39).
+    const ip = opts.ip !== undefined ? storableIp(opts.ip) : extractIp(req);
+    const ua = opts.user_agent !== undefined ? storableUa(opts.user_agent) : extractUa(req);
     // App-supplied fingerprint overrides are accepted but capped
-    // at 64 chars so apps that wire a header-derived fingerprint
-    // can't land arbitrary-length values in the column. The auto-
+    // at 64 bytes (and made storable) so apps that wire a header-derived
+    // fingerprint can't land arbitrary values in the column. The auto-
     // derived fingerprint is always 16 chars (sha256 prefix).
     let fp = opts.fingerprint || fingerprint(req);
-    if (typeof fp === "string" && fp.length > 64) fp = fp.substring(0, 64);
+    if (fp !== null && fp !== undefined) fp = _text.storable(fp, 64);
     // Metadata column cap. Apps that accidentally put request bodies
     // or debug dumps into metadata otherwise grow the column without
     // bound (default 365-day retention compounds the damage). 4 KB
@@ -272,8 +282,10 @@ function record(userId, kind, req, opts) {
         + " session_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         // Round-11 LOW-11: `||` would convert 0 / "" to null. Lua
         // passes raw. Use explicit undefined check for parity.
-        [userId, time.now(), kind, ip, ua, fp,
-         opts.session_id !== undefined ? opts.session_id : null,
+        // kind and session_id are app text: made storable too (audit 39).
+        [userId, time.now(), _text.storable(kind, 255), ip, ua, fp,
+         opts.session_id !== undefined && opts.session_id !== null
+            ? _text.storable(opts.session_id, 255) : null,
          meta]);
 }
 

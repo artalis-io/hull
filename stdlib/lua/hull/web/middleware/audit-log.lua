@@ -259,16 +259,33 @@ local function ip_prefix(ip)
     return ip
 end
 
+-- The User-Agent and IP as the columns store them: request text, made
+-- storable (hull._text.storable, audit 39: obs-text bytes or a cut through a
+-- multibyte character failed the INSERT on Postgres / MySQL, so the device
+-- was never recorded and on_new_device fired on every login) and capped -
+-- real UAs top out around 500 chars, bots send 100 KB ones; an IP fits 64.
+-- The fingerprint is computed from these same values, so
+-- recompute_fingerprints (which reads them back) agrees with it.
+local UA_MAX, IP_MAX = 512, 64
+local function storable_ua(ua)
+    if ua == nil then return nil end
+    return _text.storable(ua, UA_MAX)
+end
+local function storable_ip(ip)
+    if ip == nil then return nil end
+    return _text.storable(ip, IP_MAX)
+end
+
 local function extract_ip(req)
     -- Delegates to the shared hull.web._request helper (trust_proxy ->
     -- XFF-first -> remote_addr, capped at 64 chars). This module's
     -- extract_ip was the canonical implementation the helper was lifted
     -- from; see docs/stdlib_style.md section 4.
-    return _request.client_ip(req, _state.trust_proxy)
+    return storable_ip(_request.client_ip(req, _state.trust_proxy))
 end
 
 local function extract_ua(req)
-    return req and req.headers and req.headers["user-agent"] or nil
+    return storable_ua(req and req.headers and req.headers["user-agent"] or nil)
 end
 
 --- Compute the (coarse) device fingerprint for a request, from
@@ -301,21 +318,16 @@ function audit_log.record(user_id, kind, req, opts)
     user_id = _request.user_id(user_id)
     if not user_id or type(kind) ~= "string" or kind == "" then return end
     opts = opts or {}
-    local ip = opts.ip ~= nil and opts.ip or extract_ip(req)
-    -- A caller-supplied ip is capped at 64 chars, as client_ip caps the
-    -- derived one (audit 23).
-    if type(ip) == "string" and #ip > 64 then ip = ip:sub(1, 64) end
-    local ua = opts.user_agent ~= nil and opts.user_agent or extract_ua(req)
-    -- Bound the user_agent column the same way session.create does.
-    -- Real UAs top out around 500 chars; bots and scanners can send
-    -- 100 KB UAs. 512 covers all real traffic.
-    if type(ua) == "string" and #ua > 512 then ua = ua:sub(1, 512) end
+    -- A caller-supplied ip / user_agent is capped and made storable as the
+    -- derived ones are (audits 23 / 39).
+    local ip = opts.ip ~= nil and storable_ip(opts.ip) or extract_ip(req)
+    local ua = opts.user_agent ~= nil and storable_ua(opts.user_agent) or extract_ua(req)
     -- App-supplied fingerprint overrides are accepted but capped at
-    -- 64 chars so apps that wire a header-derived fingerprint can't
-    -- land arbitrary-length values in the column. The auto-derived
-    -- fingerprint is always 16 chars (sha256 prefix).
+    -- 64 bytes (and made storable) so apps that wire a header-derived
+    -- fingerprint can't land arbitrary values in the column. The
+    -- auto-derived fingerprint is always 16 chars (sha256 prefix).
     local fp = opts.fingerprint or audit_log.fingerprint(req)
-    if type(fp) == "string" and #fp > 64 then fp = fp:sub(1, 64) end
+    if fp ~= nil then fp = _text.storable(fp, 64) end
     -- Metadata column cap. Apps that accidentally put request bodies
     -- or debug dumps into metadata otherwise grow the column without
     -- bound (default 365-day retention compounds the damage). 4 KB
@@ -338,8 +350,12 @@ function audit_log.record(user_id, kind, req, opts)
         "INSERT INTO _hull_audit_log "
         .. "(user_id, event_at, kind, ip, user_agent, fingerprint, "
         .. " session_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        { user_id, time.now(), kind, ip, ua, fp,
-          opts.session_id, meta })
+        -- kind, session_id and metadata are app text: made storable too
+        -- (audit 39). The metadata JSON escapes control characters, so
+        -- replacing a byte that is not UTF-8 keeps it valid JSON.
+        { user_id, time.now(), _text.storable(kind, 255), ip, ua, fp,
+          opts.session_id ~= nil and _text.storable(opts.session_id, 255) or nil,
+          meta ~= nil and _text.storable(meta, META_MAX + 1024) or nil })
 end
 
 -- opts.limit as an integer 1..1000 (default 50): a number or a numeric

@@ -47,6 +47,7 @@ local db = require("hull.db._internal").connection()
 local time = require("hull.time")
 local log = require("hull.log")
 local _request = require("hull.web._request")
+local _text = require("hull._text")
 
 local idempotency = {}
 
@@ -138,6 +139,33 @@ local _header_name = "idempotency-key"
 -- Matches the `key` column width (VARCHAR(255)); keys over this are rejected.
 local MAX_KEY_LEN = 255
 
+-- The `key` column, quoted for the connection's dialect (audit 39): KEY is a
+-- reserved word in MySQL, where every statement naming it bare - the CREATE
+-- TABLE included - was a syntax error, so the middleware never worked there.
+-- Quoting keeps the column name existing SQLite / Postgres tables have.
+-- Resolved per call: the internal connection is wired after module load.
+local function key_col()
+    return db.quote_identifier("key")
+end
+
+-- The stored response (audit 39). It used to be written AFTER it was sent,
+-- as raw text: a body Postgres refuses (a NUL, bytes that are not UTF-8 - a
+-- respond_html echoing request bytes) made that UPDATE raise after the
+-- handler's side effect had committed. The client got a 500, the row stayed
+-- 'inflight' for its lease (a retry got 409), and a retry after the lease ran
+-- the handler AGAIN. Now the body and the headers blob are stored base64
+-- encoded - byte-exact, and text every backend accepts - BEFORE the response
+-- is sent, and a write that still fails marks the row STATE_UNSTORED, whose
+-- retries get a fixed 409 instead of running the handler again.
+--
+-- A row in this format has response_headers = STORED_V2 .. base64(JSON of
+-- the headers) and response_body = base64(body bytes). A row an earlier Hull
+-- wrote (response_headers a bare JSON object, or NULL) replays as before.
+local STORED_V2 = "v2:"
+local STATE_UNSTORED = "unstored"
+-- Test seam (hull._test_hooks fail_store): makes the store raise.
+local _fail_store = false
+
 -- A ttl is a positive, finite NUMBER of seconds (audit 15): a string one
 -- ("86400") was coerced here while the JS twin concatenated it onto the
 -- expiry. Same rule as the JS twin and auth.login; anything else raises.
@@ -168,19 +196,25 @@ function idempotency.init(opts)
         _ttl = check_ttl("idempotency.init: ttl", opts.ttl)
     end
 
+    -- MySQL's TEXT holds 64 KiB; a stored body (base64, 4/3 of the bytes)
+    -- needs more there. MEDIUMTEXT holds 16 MiB; a body past even that is
+    -- marked unstored rather than truncated (strict mode refuses it).
+    -- `state` is a VARCHAR: MySQL gives no TEXT column a DEFAULT.
+    local body_type = db.backend_name == "mysql" and "MEDIUMTEXT" or "TEXT"
+    local k = key_col()
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_idempotency_keys (
-            key            VARCHAR(255) NOT NULL,
+            ]] .. k .. [[ VARCHAR(255) NOT NULL,
             principal_id   VARCHAR(255) NOT NULL DEFAULT '__anon',
             fingerprint    TEXT NOT NULL,
             endpoint       TEXT NOT NULL,
             status         INTEGER,
-            response_body  TEXT,
-            response_headers TEXT,
-            state          TEXT NOT NULL DEFAULT 'inflight',
+            response_body  ]] .. body_type .. [[,
+            response_headers ]] .. body_type .. [[,
+            state          VARCHAR(16) NOT NULL DEFAULT 'inflight',
             created_at     INTEGER NOT NULL,
             expires_at     INTEGER NOT NULL,
-            PRIMARY KEY (principal_id, key)
+            PRIMARY KEY (principal_id, ]] .. k .. [[)
         )
     ]])
     db.exec([[
@@ -286,7 +320,10 @@ local function norm_principal(p)
         error("idempotency: get_principal must return a string or a number, got "
               .. type(p))
     end
-    if #p > MAX_KEY_LEN or p:sub(1, 7) == "sha256:" then
+    -- Text the column cannot store as is (a NUL, bytes that are not UTF-8;
+    -- audit 39) is hashed too: Postgres / MySQL refused the claim's INSERT.
+    if #p > MAX_KEY_LEN or p:sub(1, 7) == "sha256:" or p:find("\0", 1, true)
+       or not utf8.len(p) then
         return "sha256:" .. encoding.hex.encode(crypto.sha256(p))
     end
     return p
@@ -361,6 +398,14 @@ function idempotency.middleware(opts)
             res:status(400):json({ error = "idempotency-key too long (max " .. MAX_KEY_LEN .. ")" })
             return 1
         end
+        -- Printable ASCII only (audit 39): a key with a NUL or bytes that
+        -- are not UTF-8 failed the claim's INSERT on Postgres / MySQL - a
+        -- 500 for a client error. Keys are opaque client tokens (UUIDs in
+        -- practice); obs-text has no business in one.
+        if key:find("[^\32-\126]") then
+            res:status(400):json({ error = "idempotency-key must be printable ASCII" })
+            return 1
+        end
 
         local raw_principal = get_principal(req)
         -- A custom get_principal with no answer (audit 11): sharing "__anon"
@@ -379,8 +424,11 @@ function idempotency.middleware(opts)
         end
         local principal_id = norm_principal(raw_principal)
         local fingerprint = compute_fingerprint(req)
-        local endpoint = req.method .. " " .. req.path
+        -- The path is request text: stored only for inspection, as text
+        -- every backend accepts (audit 39).
+        local endpoint = _text.storable(tostring(req.method) .. " " .. tostring(req.path), 1024, true)
         local now = time.now()
+        local K = key_col()
 
         -- Clean up expired keys periodically (every 100 requests)
         cleanup_counter = cleanup_counter + 1
@@ -391,7 +439,7 @@ function idempotency.middleware(opts)
 
         -- Check for existing key
         local rows = db.query(
-            "SELECT fingerprint, state, status, response_body, response_headers, expires_at FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
+            "SELECT fingerprint, state, status, response_body, response_headers, expires_at FROM _hull_idempotency_keys WHERE principal_id = ? AND " .. K .. " = ?",
             { principal_id, key }
         )
 
@@ -402,7 +450,7 @@ function idempotency.middleware(opts)
             -- expired: a concurrent request may have replaced it with a fresh
             -- claim since the SELECT, and an unguarded DELETE removed that.
             if row.expires_at <= now then
-                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? "
+                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND " .. K .. " = ? "
                         .. "AND expires_at <= ?",
                         { principal_id, key, now })
             else
@@ -426,17 +474,37 @@ function idempotency.middleware(opts)
                     return 1
                 end
 
+                -- Ran, but its response could not be stored (audit 39): the
+                -- side effect happened, so the handler must not run again,
+                -- and there is nothing to replay.
+                if row.state == STATE_UNSTORED then
+                    res:status(409):json({
+                        error = "request with this idempotency key was already "
+                            .. "processed; its response could not be stored for replay"
+                    })
+                    return 1
+                end
+
                 -- Completed: return cached response
                 if row.state == "complete" and row.status then
+                    -- A v2 row holds both blobs base64 encoded; an older row
+                    -- the raw text. An undecodable v2 row (tampered) replays
+                    -- an empty body rather than raising.
+                    local headers_json, body = row.response_headers, row.response_body
+                    if type(headers_json) == "string"
+                       and headers_json:sub(1, #STORED_V2) == STORED_V2 then
+                        headers_json = encoding.base64.decode(headers_json:sub(#STORED_V2 + 1))
+                        body = type(body) == "string" and encoding.base64.decode(body) or nil
+                    end
                     res:status(row.status)
                     -- Restore cached headers (M-3: allowlist + CRLF reject).
                     -- Content-Type is one of these - respond() and
                     -- respond_html() both stash it in the headers blob -
                     -- so the cached value drives the replayed mime type.
                     local replayed_ct = nil
-                    if row.response_headers then
-                        local headers = json.decode(row.response_headers)
-                        if headers then
+                    if type(headers_json) == "string" then
+                        local okd, headers = pcall(json.decode, headers_json)
+                        if okd and type(headers) == "table" then
                             for k, v in pairs(headers) do
                                 if is_replayable_header(k) and header_value_safe(v) then
                                     res:header(k, v)
@@ -448,13 +516,13 @@ function idempotency.middleware(opts)
                         end
                     end
                     res:header("X-Idempotency-Replay", "true")
-                    if row.response_body then
+                    if body then
                         -- Default to application/json for back-compat with
                         -- old cached rows from before respond_html() existed.
                         if not replayed_ct then
                             res:header("Content-Type", "application/json")
                         end
-                        res:text(row.response_body)
+                        res:text(body)
                     else
                         res:text("")
                     end
@@ -463,7 +531,7 @@ function idempotency.middleware(opts)
 
                 -- State is "complete" but no status cached: let handler re-run
                 -- (handler didn't use idempotency.respond() last time)
-                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ? "
+                db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND " .. K .. " = ? "
                         .. "AND state = 'complete' AND status IS NULL",
                         { principal_id, key })
             end
@@ -473,8 +541,8 @@ function idempotency.middleware(opts)
         -- a concurrent request claiming the same key).
         local inserted = db.insert_if_absent(
             "_hull_idempotency_keys",
-            { "principal_id", "key" },
-            { "key", "principal_id", "fingerprint", "endpoint",
+            { "principal_id", K },
+            { K, "principal_id", "fingerprint", "endpoint",
               "state", "created_at", "expires_at" },
             { key, principal_id, fingerprint, endpoint,
               "inflight", now, now + math.min(ttl, INFLIGHT_LEASE) }
@@ -520,16 +588,6 @@ end
 -- `content_type` is folded into the cached headers blob so the replay
 -- path serves the response with the correct mime.
 local function cache_and_send(req, res, status_code, body_str, content_type, extra_headers, send_fn)
-    res:status(status_code)
-    if extra_headers then
-        for k, v in pairs(extra_headers) do
-            if is_replayable_header(k) and header_value_safe(v) then
-                res:header(k, v)
-            end
-        end
-    end
-    send_fn(res, body_str)
-
     if req.ctx._idem_key then
         -- Phase 6 audit M-3: filter headers through the allowlist
         -- before writing to SQLite so credential headers never
@@ -550,15 +608,53 @@ local function cache_and_send(req, res, status_code, body_str, content_type, ext
                 end
             end
         end
-        local headers_str = json.encode(filtered)
-        db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, response_body = ?, response_headers = ?, expires_at = ? WHERE principal_id = ? AND key = ?"
-            .. CLAIM_GUARD,
-            { status_code, body_str, headers_str, completed_expiry(req),
-              req.ctx._idem_principal, req.ctx._idem_key,
-              req.ctx._idem_fingerprint, req.ctx._idem_created }
-        )
+        -- Stored BEFORE the response is sent, base64 encoded (audit 39; see
+        -- STORED_V2). A write that still fails (a body past the column, a
+        -- lost connection) marks the row unstored - a retry gets 409, never
+        -- a second run of the handler - and the response is sent anyway.
+        local where = " WHERE principal_id = ? AND " .. key_col() .. " = ?" .. CLAIM_GUARD
+        local p, k = req.ctx._idem_principal, req.ctx._idem_key
+        local fp, created = req.ctx._idem_fingerprint, req.ctx._idem_created
+        local ok, err = pcall(function()
+            if _fail_store then error("injected store failure", 0) end
+            local headers_str = STORED_V2 .. encoding.base64.encode(json.encode(filtered))
+            local body_enc = encoding.base64.encode(
+                type(body_str) == "string" and body_str or tostring(body_str or ""))
+            db.exec(
+                "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, "
+                .. "response_body = ?, response_headers = ?, expires_at = ?" .. where,
+                { status_code, body_enc, headers_str, completed_expiry(req),
+                  p, k, fp, created })
+        end)
+        if not ok then
+            log.warn("idempotency: the response could not be stored for replay ("
+                .. _text.storable(err, 512, true) .. "); retries of this key get 409")
+            -- Called by name inside a closure: the _hull_* namespace check
+            -- admits a stdlib call only when it names the method.
+            local ok2, err2 = pcall(function()
+                db.exec(
+                    "UPDATE _hull_idempotency_keys SET state = '" .. STATE_UNSTORED .. "', "
+                    .. "status = NULL, response_body = NULL, response_headers = NULL, "
+                    .. "expires_at = ?" .. where,
+                    { completed_expiry(req), p, k, fp, created })
+            end)
+            if not ok2 then
+                log.error("idempotency: the key could not be marked processed ("
+                    .. _text.storable(err2, 512, true) .. "); a retry after the "
+                    .. INFLIGHT_LEASE .. " s lease runs the handler again")
+            end
+        end
     end
+
+    res:status(status_code)
+    if extra_headers then
+        for k, v in pairs(extra_headers) do
+            if is_replayable_header(k) and header_value_safe(v) then
+                res:header(k, v)
+            end
+        end
+    end
+    send_fn(res, body_str)
 end
 
 function idempotency.respond(req, res, status_code, data, extra_headers)
@@ -602,8 +698,8 @@ end
 function idempotency.complete(req)
     if req.ctx._idem_key then
         db.exec(
-            "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? WHERE principal_id = ? AND key = ?"
-            .. CLAIM_GUARD,
+            "UPDATE _hull_idempotency_keys SET state = 'complete', expires_at = ? WHERE principal_id = ? AND "
+            .. key_col() .. " = ?" .. CLAIM_GUARD,
             { completed_expiry(req), req.ctx._idem_principal, req.ctx._idem_key,
               req.ctx._idem_fingerprint, req.ctx._idem_created }
         )
@@ -626,12 +722,27 @@ end
 -- inside the module, where the _hull_* namespace check admits the query.
 require("hull._test_hooks").register("hull.web.middleware.idempotency", {
     rows = function(key)
-        return db.query("SELECT state, status FROM _hull_idempotency_keys WHERE key = ?",
+        return db.query("SELECT state, status, response_body, response_headers "
+                        .. "FROM _hull_idempotency_keys WHERE " .. key_col() .. " = ?",
                         { key })
     end,
     -- The principal helpers (audit 23: they were exported on the module).
     default_principal = default_principal,
     norm_principal = norm_principal,
+    fingerprint = compute_fingerprint,
+    -- Make the response store fail (audit 39: a failed store must leave the
+    -- key processed, never re-runnable).
+    fail_store = function(on) _fail_store = on and true or false end,
+    -- A completed row in the format an earlier Hull wrote (raw body, bare
+    -- JSON headers), for the backward-compatibility check.
+    put_legacy = function(key, principal, fingerprint, status, body, headers_json)
+        local now = time.now()
+        db.exec("INSERT INTO _hull_idempotency_keys (" .. key_col() .. ", principal_id, "
+            .. "fingerprint, endpoint, status, response_body, response_headers, state, "
+            .. "created_at, expires_at) VALUES (?, ?, ?, 'POST /legacy', ?, ?, ?, "
+            .. "'complete', ?, ?)",
+            { key, principal, fingerprint, status, body, headers_json, now, now + 3600 })
+    end,
 })
 
 return idempotency

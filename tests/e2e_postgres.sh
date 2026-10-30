@@ -18,9 +18,9 @@
 . "$(dirname "$0")/lib/hull_docker.sh"
 set -eu
 
-CONTAINER=hull-pg-e2e
-PGPORT=55432
-PORT=18091
+CONTAINER=${HULL_E2E_PG_CONTAINER:-hull-pg-e2e}
+PGPORT=${HULL_E2E_PG_PORT:-55432}
+PORT=${HULL_E2E_APP_PORT:-18091}
 DSN="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=disable"
 DSN_TLS="postgres://hull:s3cretpw@127.0.0.1:${PGPORT}/hulldb?sslmode=require"
 
@@ -815,12 +815,42 @@ a38lua=$(./build/hull "$A38DIR/a38.lua" -d "$DSN" 2>"$A38DIR/log")
 jobs_reset_pg
 a38js=$(./build/hull "$A38DIR/a38.js" -d "$DSN" 2>>"$A38DIR/log")
 case "$a38lua|$a38js" in
-    *"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*"|"*"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*)
+    *"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1 bin=1"*"|"*"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1 bin=1"*)
         echo "PASS: unstorable handler / subscriber text and results cannot wedge a worker (Postgres)"
         rm -rf "$A38DIR" ;;
     *)  echo "::error jobs audit 38 on Postgres: lua=[$a38lua] js=[$a38js]"; cat "$A38DIR/log"; exit 1 ;;
 esac
 jobs_reset_pg
+
+# ── audit 39: request / app text the stdlib stores (shared with MySQL) ─
+# An idempotent response echoing request bytes, a User-Agent with obs-text
+# bytes or a cut through a multibyte character, a filename that is not UTF-8:
+# Postgres refused each write after the side effect (a 500, the key left
+# 'inflight' and the handler re-run after its lease; a login failing after
+# the old session was rotated away). A trigger then refuses a stored response
+# outright: the key must still be left processed (409), never re-run.
+echo "=== audit 39: stored request / app text on Postgres ==="
+A39DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_text_audit39.sh"
+text_audit39_apps "$A39DIR"
+a39_inject_pg() {
+    docker exec "$CONTAINER" psql -U hull -d hulldb -q -c "
+      CREATE OR REPLACE FUNCTION a39_fail() RETURNS trigger AS \$\$ BEGIN
+        IF NEW.response_body IS NOT NULL AND NEW.endpoint LIKE '%payfail%' THEN
+          RAISE EXCEPTION 'a39 injected'; END IF; RETURN NEW; END \$\$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS a39_fail ON _hull_idempotency_keys;
+      CREATE TRIGGER a39_fail BEFORE UPDATE ON _hull_idempotency_keys
+        FOR EACH ROW EXECUTE FUNCTION a39_fail();"
+}
+if A39_INJECT=a39_inject_pg text_audit39_run "$PWD/build/hull" "$A39DIR/l/app.lua" "$PORT" pglua -d "$DSN" \
+   && A39_INJECT=a39_inject_pg text_audit39_run "$PWD/build/hull" "$A39DIR/j/app.js" "$PORT" pgjs -d "$DSN"; then
+    echo "PASS: stored request / app text cannot fail a write after its side effect (Postgres)"
+    rm -rf "$A39DIR"
+else
+    echo "::error audit 39 on Postgres"; exit 1
+fi
+docker exec "$CONTAINER" psql -U hull -d hulldb -q -c \
+  "DROP TRIGGER IF EXISTS a39_fail ON _hull_idempotency_keys" >/dev/null 2>&1 || true
 
 # ── db.exec affected-row count (regression guard) ─────────────────────
 # The pg backend must surface the CommandComplete row count (like sqlite3_changes

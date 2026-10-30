@@ -58,21 +58,65 @@ function M.has_unicode_space(s)
     return false
 end
 
--- @p s cut to at most @p n bytes without splitting a UTF-8 sequence: a
--- byte cut mid-character stored invalid UTF-8, which Postgres and a strict
--- MySQL utf8mb4 column refuse (audit 21).
-function M.utf8_cut(s, n)
-    if #s <= n then return s end
-    s = s:sub(1, n)
-    for i = #s, math.max(1, #s - 3), -1 do
-        local b = s:byte(i)
-        if b < 0x80 then return s end
-        if b >= 0xC0 then
-            local need = b >= 0xF0 and 4 or (b >= 0xE0 and 3 or 2)
-            if #s - i + 1 >= need then return s end
-            return s:sub(1, i - 1)
-        end
+-- App, request or remote text as text every database backend stores
+-- (audits 38 / 39). Postgres refuses a NUL and bytes that are not UTF-8,
+-- MySQL's utf8mb4 columns refuse invalid UTF-8 and values over the column
+-- (64 KiB for TEXT), and the stdlib writes such text - a User-Agent with
+-- obs-text bytes, a handler's error, a filename, a remote error body - after
+-- a step it cannot undo (a session rotated, a single-use token consumed, a
+-- message delivered). A refused write there wedged the row or failed the
+-- request after the side effect. So, for any value:
+--   * a non-string is converted under pcall (an __tostring is app code that
+--     may raise; audit 23), and one that cannot be converted becomes
+--     @p unconvertible (default M.UNCONVERTIBLE);
+--   * NULs are dropped;
+--   * each byte that does not start a valid UTF-8 sequence (surrogates and
+--     overlongs included, as Lua 5.4's strict utf8 reads them) becomes
+--     U+FFFD;
+--   * the text is capped at @p max bytes (default M.TEXT_MAX), cut on a code
+--     point, with "..." appended when @p ellipsis is true and it was cut.
+-- The JS twin is hull:_text's storable, applying the same rules to code
+-- units (a lone surrogate becomes U+FFFD). A new stdlib write of app,
+-- request or remote text goes through this (CLAUDE.md).
+M.TEXT_MAX = 4096
+M.UNCONVERTIBLE = "(a value that could not be converted to text)"
+
+local function cut_utf8(s, max)
+    if #s <= max then return s end
+    local e = max
+    while e > 0 and e > max - 4 and ((s:byte(e + 1) or 0) & 0xC0) == 0x80 do e = e - 1 end
+    return s:sub(1, e)
+end
+
+function M.storable(v, max, ellipsis, unconvertible)
+    max = max or M.TEXT_MAX
+    local s
+    if type(v) == "string" then
+        s = v
+    elseif v == nil or type(v) == "number" or type(v) == "boolean" then
+        s = tostring(v)
+    else
+        local ok, r = pcall(tostring, v)
+        s = (ok and type(r) == "string") and r or (unconvertible or M.UNCONVERTIBLE)
     end
+    local cut = false
+    -- Each kept byte stays at most 3 bytes (U+FFFD for one bad byte), and a
+    -- huge run of NULs keeps nothing, so 4 x max input bytes bound the scan.
+    if #s > 4 * max then s = s:sub(1, 4 * max); cut = true end
+    if s:find("\0", 1, true) then s = s:gsub("\0", "") end
+    if not utf8.len(s) then
+        local out, i, n = {}, 1, #s
+        while i <= n do
+            local len, bad = utf8.len(s, i)
+            if len then out[#out + 1] = s:sub(i); break end
+            out[#out + 1] = s:sub(i, bad - 1)
+            out[#out + 1] = "\239\191\189"   -- U+FFFD
+            i = bad + 1
+        end
+        s = table.concat(out)
+    end
+    if #s > max then s = cut_utf8(s, max); cut = true end
+    if cut and ellipsis then s = s .. "..." end
     return s
 end
 

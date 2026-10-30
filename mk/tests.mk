@@ -1454,6 +1454,9 @@ e2e-multipart: $(BUILDDIR)/hull
 e2e-attachment: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_attachment.sh
 
+e2e-text-storage: $(BUILDDIR)/hull
+	sh tests/e2e_text_storage.sh
+
 e2e-blob: $(BUILDDIR)/hull
 	sh tests/e2e_blob.sh
 

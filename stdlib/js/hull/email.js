@@ -36,6 +36,7 @@ import { smtp } from "hull:smtp";
 import { httpClient } from "hull:http-client";
 import { json } from "hull:json";
 import { _refusal } from "hull:_refusal";
+import { _text } from "hull:_text";
 
 const email = {};
 
@@ -45,6 +46,15 @@ function emailError(code, message) {
     const e = new Error(message);
     e.code = code;
     throw e;
+}
+
+// A provider's error reply as error text: capped and made storable (audit
+// 39; see the Lua sibling).
+const PROVIDER_ERROR_MAX = 1024;
+function providerError(resp) {
+    const b = resp ? resp.body : undefined;
+    if (b === undefined || b === null || b === "") return "unknown error";
+    return _text.storable(b, PROVIDER_ERROR_MAX, true);
 }
 
 // Provider adapters: each takes (opts), returns true on success, throws on
@@ -165,7 +175,7 @@ providers.postmark = async function(opts) {
         emailError("delivery_failed", "postmark: no response");
     if (resp.status >= 200 && resp.status < 300)
         return true;
-    emailError("delivery_failed", "postmark: " + (resp.body || "unknown error"));
+    emailError("delivery_failed", "postmark: " + providerError(resp));
 };
 
 providers.sendgrid = async function(opts) {
@@ -209,7 +219,7 @@ providers.sendgrid = async function(opts) {
         emailError("delivery_failed", "sendgrid: no response");
     if (resp.status >= 200 && resp.status < 300)
         return true;
-    emailError("delivery_failed", "sendgrid: " + (resp.body || "unknown error"));
+    emailError("delivery_failed", "sendgrid: " + providerError(resp));
 };
 
 providers.resend = async function(opts) {
@@ -252,7 +262,7 @@ providers.resend = async function(opts) {
         emailError("delivery_failed", "resend: no response");
     if (resp.status >= 200 && resp.status < 300)
         return true;
-    emailError("delivery_failed", "resend: " + (resp.body || "unknown error"));
+    emailError("delivery_failed", "resend: " + providerError(resp));
 };
 
 // One address: no control character, and none of the characters that

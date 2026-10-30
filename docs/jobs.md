@@ -595,7 +595,7 @@ by **return value** (or by raising):
 | raises an error / returns `jobs.RETRY` | **retry** with backoff (until `max_attempts`, then dead-letter) |
 | returns `jobs.DEAD` | **dead-letter** immediately (non-retryable) |
 | returns `jobs.DISCARD` | **done** without effect (drop) |
-| returns a value that cannot be stored (not JSON-encodable, Lua text that is not UTF-8, JSON over 64 KiB on MySQL) | **dead-letter** once, `last_error` "job result cannot be stored: ..." |
+| returns a value that cannot be stored (not JSON-encodable, JSON over 64 KiB on MySQL; Lua bytes that are not UTF-8 are stored base64 and read back byte-exact, audit 39) | **dead-letter** once, `last_error` "job result cannot be stored: ..." |
 | fails on a runtime `busy` refusal (an admission cap of the VM is full) | handed back to `pending` a second later, **no attempt spent** |
 
 The error text a handler raises is stored as `last_error` (and in the attempt

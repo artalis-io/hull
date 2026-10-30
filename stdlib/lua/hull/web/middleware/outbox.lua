@@ -51,6 +51,7 @@ local function has_header(headers, want)
 end
 local time = require("hull.time")
 local refusal = require("hull._refusal")
+local _text = require("hull._text")
 
 local outbox = {}
 
@@ -165,6 +166,16 @@ function outbox.enqueue(opts)
         error("outbox.enqueue requires opts.payload")
     end
 
+    -- The idempotency key is often a client's Idempotency-Key header; the
+    -- column is VARCHAR(255). One it cannot store (longer, a NUL, bytes that
+    -- are not UTF-8) is refused here with a clear error rather than failing
+    -- the INSERT on Postgres / MySQL (audit 39).
+    if opts.idempotency_key ~= nil and (type(opts.idempotency_key) ~= "string"
+       or _text.storable(opts.idempotency_key, 255) ~= opts.idempotency_key) then
+        error("outbox.enqueue: idempotency_key must be a string of at most 255 "
+              .. "bytes of UTF-8 text without NUL", 2)
+    end
+
     local now = time.now()
     local max = _max_attempts
     if opts.max_attempts ~= nil then
@@ -244,7 +255,7 @@ local function deliver_item(item)
 
         local err_msg
         if not send_ok then
-            err_msg = tostring(result)
+            err_msg = result   -- made storable before it is written
         elseif result then
             err_msg = "HTTP " .. tostring(result.status)
         else
@@ -353,6 +364,13 @@ function outbox.flush(opts)
                 )
                 if n == 1 then delivered = delivered + 1 end
             else
+                -- The error is remote / runtime text (a fetch error, a
+                -- __tostring that raises): stored through hull._text so the
+                -- outcome write cannot fail on it (audit 39). On MySQL an
+                -- error near 64 KiB (TEXT) failed this UPDATE, and the row
+                -- was re-leased after every lease, its attempts never
+                -- counted.
+                err = _text.storable(err, 4096, true)
                 local new_attempts = item.attempts + 1
                 if new_attempts >= item.max_attempts then
                     local n = db.exec(
@@ -437,7 +455,8 @@ end
 require("hull._test_hooks").register("hull.web.middleware.outbox", {
     rows = function(id)
         return db.query("SELECT state, kind, destination, idempotency_key, "
-                        .. "next_attempt_at, created_at FROM _hull_outbox WHERE id = ?",
+                        .. "next_attempt_at, created_at, attempts, last_error "
+                        .. "FROM _hull_outbox WHERE id = ?",
                         { id })
     end,
     clear = function() db.exec("DELETE FROM _hull_outbox") end,

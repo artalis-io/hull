@@ -25,6 +25,7 @@ import { time } from "hull:time";
 import { json } from "hull:json";
 import { _test_hooks } from "hull:_test_hooks";
 import { _refusal } from "hull:_refusal";
+import { _text } from "hull:_text";
 
 let maxAttempts = 5;
 
@@ -154,6 +155,15 @@ function enqueue(opts) {
         throw new Error("outbox.enqueue requires opts.destination");
     if (!opts.payload)
         throw new Error("outbox.enqueue requires opts.payload");
+
+    // The idempotency key is often a client's Idempotency-Key header; the
+    // column is VARCHAR(255). One it cannot store is refused here with a
+    // clear error (audit 39; see the Lua sibling).
+    const ik = opts.idempotencyKey;
+    if (ik !== undefined && ik !== null && ik !== ""
+        && (typeof ik !== "string" || _text.storable(ik, 255) !== ik))
+        throw new TypeError("outbox.enqueue: idempotencyKey must be a string of at most "
+            + "255 bytes of UTF-8 text without NUL");
 
     const now = time.now();
     const max = opts.maxAttempts !== undefined
@@ -341,18 +351,21 @@ async function flush(opts) {
             );
             if (n === 1) delivered++;
         } else {
+            // Remote / runtime text, stored through hull:_text so the outcome
+            // write cannot fail on it (audit 39; see the Lua sibling).
+            const errText = _text.storable(err, 4096, true);
             const newAttempts = item.attempts + 1;
             if (newAttempts >= item.max_attempts) {
                 const n = db.exec(
                     "UPDATE _hull_outbox SET state = 'failed', attempts = ?, last_error = ? WHERE id = ?" + mine,
-                    [newAttempts, err, item.id, lease]
+                    [newAttempts, errText, item.id, lease]
                 );
                 if (n === 1) failed++;
             } else {
                 const nextAt = time.now() + backoffDelay(newAttempts);
                 const n = db.exec(
                     "UPDATE _hull_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?" + mine,
-                    [newAttempts, nextAt, err, item.id, lease]
+                    [newAttempts, nextAt, errText, item.id, lease]
                 );
                 if (n === 1) retried++;
             }
@@ -453,7 +466,8 @@ _test_hooks.register("hull:web:middleware:outbox", {
     // _hull_* namespace check admits the query.
     rows(id) {
         return db.query("SELECT state, kind, destination, idempotency_key, " +
-                        "next_attempt_at, created_at FROM _hull_outbox WHERE id = ?", [id]);
+                        "next_attempt_at, created_at, attempts, last_error " +
+                        "FROM _hull_outbox WHERE id = ?", [id]);
     },
     clear() { db.exec("DELETE FROM _hull_outbox"); },
 });

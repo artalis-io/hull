@@ -389,8 +389,46 @@ function cases.audit38()
         assert_eq(jobs.get(id).last_error,
             "(an error value that could not be converted to text)", "fixed text")
     end)
+    -- Audit 39: round 38 dead-lettered a result whose JSON is not UTF-8 on
+    -- every backend; it is stored byte-exact now and reads back equal.
+    local BIN = "\255\254\0abc caf\xc3"
+    test("a result holding bytes that are not UTF-8 completes and reads back", function()
+        jobs.handler("binres", function() return { digest = BIN } end)
+        local id = jobs.enqueue("binres", {}, { queue = "bin39" })
+        local ok, err = pcall(jobs.work, { batch = 1, queue = "bin39" })
+        assert_eq(ok, true, tostring(err))
+        local r = jobs.result(id)
+        assert_eq(r.status, "done", "done: " .. tostring(jobs.get(id).last_error))
+        assert_eq(r.result and r.result.digest, BIN, "byte-exact result")
+    end)
+    test("a dependent receives a binary result byte-exact", function()
+        jobs.handler("binsrc", function() return BIN end)
+        local seen
+        jobs.handler("bindst", function(job) seen = job.deps and job.deps[1] end)
+        local a = jobs.enqueue("binsrc", {}, { queue = "bind39" })
+        jobs.enqueue("bindst", {}, { queue = "bind39", depends_on = { a } })
+        assert_eq(pcall(jobs.work, { batch = 5, queue = "bind39" }), true, "work")
+        assert_eq(pcall(jobs.work, { batch = 5, queue = "bind39" }), true, "work")
+        assert_eq(seen, BIN, "dependency result")
+    end)
+    test("a ctx.step result holding bytes that are not UTF-8 replays", function()
+        local runs = 0
+        jobs.workflow("binstep", function(w)
+            local v = w.step("b", function() return { d = BIN } end)
+            runs = runs + 1
+            if runs == 1 then error("again", 0) end
+            return { same = (v.d == BIN) }
+        end)
+        local id = jobs.start("binstep", {}, { queue = "bs39" })
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "bs39" }), true, "first run")
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "bs39" }), true, "replay")
+        local r = jobs.result(id)
+        assert_eq(r.status, "done", "done: " .. tostring(jobs.get(id).last_error))
+        assert_eq(runs, 2, "re-ran")
+        assert_eq(r.result.same, true, "the stored step value replayed byte-exact")
+    end)
     test("a result that cannot be stored dead-letters the job once", function()
-        jobs.handler("badres", function() return { body = "caf\xc3" } end)
+        jobs.handler("badres", function() return { f = function() end } end)
         local id = jobs.enqueue("badres", {}, { queue = "r38" })
         local ok, err = pcall(jobs.work, { batch = 1, queue = "r38" })
         assert_eq(ok, true, tostring(err))

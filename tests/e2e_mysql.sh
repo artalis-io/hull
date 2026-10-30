@@ -17,9 +17,9 @@
 . "$(dirname "$0")/lib/hull_docker.sh"
 set -eu
 
-CONTAINER=hull-mysql-e2e
-MYPORT=55336
-PORT=18092
+CONTAINER=${HULL_E2E_MY_CONTAINER:-hull-mysql-e2e}
+MYPORT=${HULL_E2E_MY_PORT:-55336}
+PORT=${HULL_E2E_APP_PORT:-18092}
 DSN="mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=disable"
 DSN_TLS="mysql://hull:s3cretpw@127.0.0.1:${MYPORT}/hulldb?sslmode=require"
 
@@ -894,12 +894,42 @@ a38lua=$(./build/hull "$A38DIR/a38.lua" -d "$DSN" 2>"$A38DIR/log")
 jobs_reset_my
 a38js=$(./build/hull "$A38DIR/a38.js" -d "$DSN" 2>>"$A38DIR/log")
 case "$a38lua|$a38js" in
-    *"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*"|"*"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1"*)
+    *"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1 bin=1"*"|"*"A38 work=true/true p=pending a=done b=done r=dead safe=1 skip=1 bin=1"*)
         echo "PASS: unstorable handler / subscriber text and results cannot wedge a worker (MySQL)"
         rm -rf "$A38DIR" ;;
     *)  echo "::error jobs audit 38 on MySQL: lua=[$a38lua] js=[$a38js]"; cat "$A38DIR/log"; exit 1 ;;
 esac
 jobs_reset_my
+
+# ── audit 39: request / app text the stdlib stores (shared with Postgres) ─
+# Strict mode refused an idempotent response echoing request bytes and a
+# User-Agent with obs-text bytes after the side effect; idempotency did not
+# work at all (`key` is a reserved word: its CREATE TABLE and SELECT were
+# syntax errors). A trigger then refuses a stored response outright: the key
+# must still be left processed (409), never re-run.
+echo "=== audit 39: stored request / app text on MySQL ==="
+A39DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_text_audit39.sh"
+text_audit39_apps "$A39DIR"
+# One statement per call, no BEGIN ... END (the client splits -e on ';'):
+# setting a NOT NULL column to NULL makes strict mode refuse the UPDATE.
+a39_inject_my() {
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw hulldb -e \
+      "DROP TRIGGER IF EXISTS a39_fail"
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw hulldb -e \
+      "CREATE TRIGGER a39_fail BEFORE UPDATE ON _hull_idempotency_keys FOR EACH ROW
+       SET NEW.fingerprint = IF(NEW.response_body IS NOT NULL
+                                AND NEW.endpoint LIKE '%payfail%', NULL, NEW.fingerprint)"
+}
+if A39_INJECT=a39_inject_my text_audit39_run "$PWD/build/hull" "$A39DIR/l/app.lua" "$PORT" mylua -d "$DSN" \
+   && A39_INJECT=a39_inject_my text_audit39_run "$PWD/build/hull" "$A39DIR/j/app.js" "$PORT" myjs -d "$DSN"; then
+    echo "PASS: stored request / app text cannot fail a write after its side effect (MySQL)"
+    rm -rf "$A39DIR"
+else
+    echo "::error audit 39 on MySQL"; exit 1
+fi
+docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw hulldb -e \
+  "DROP TRIGGER IF EXISTS a39_fail" >/dev/null 2>&1 || true
 
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the

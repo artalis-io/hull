@@ -36,6 +36,13 @@ function mockRes() {
         status(code) { this._status = code; return this; },
         json(data) { this._body = json.encode(data); return this; },
         text(data) { this._body = data; return this; },
+        html(data) { this._body = data; return this; },
+        bytes(u8) {
+            let b = "";
+            for (let i = 0; i < u8.length; i++) b += String.fromCharCode(u8[i]);
+            this._bytes = b;
+            return this;
+        },
         header(name, value) {
             if (value === undefined) return this._headers[name] || null;
             this._headers[name] = value;
@@ -200,6 +207,73 @@ test("different principals can use same key", () => {
     const res2 = mockRes();
     const result = mw(req2, res2);
     assertEq(result, 0, "different principal, should continue");
+});
+
+// ── audit 39: stored byte-exact, before sending; a failed store ─────
+
+test("audit 39: a body with a lone surrogate / NUL replays byte-exact", () => {
+    const mw = idempotency.middleware();
+    const body = "<p>caf\u00e9 \u0000 \ud83d</p>";
+    const req1 = mockReq("POST", "/a39", "x", { "idempotency-key": "a39-bytes" });
+    const res1 = mockRes();
+    assertEq(mw(req1, res1), 0);
+    idempotency.respondHtml(req1, res1, 201, body);
+    assertEq(res1._body, body, "first response");
+    const row = H.rows("a39-bytes")[0];
+    assertEq(row.state, "complete");
+    assertEq(row.response_headers.slice(0, 3), "v2:", "v2 format");
+    const req2 = mockReq("POST", "/a39", "x", { "idempotency-key": "a39-bytes" });
+    const res2 = mockRes();
+    assertEq(mw(req2, res2), 1);
+    assertEq(res2._status, 201);
+    // The WTF-8 bytes of the string: e9 as c3 a9, the lone surrogate as
+    // ed a0 bd, the NUL kept.
+    assertEq(res2._bytes, "<p>caf\xc3\xa9 \x00 \xed\xa0\xbd</p>", "replayed bytes");
+    assertEq(res2._headers["content-type"], "text/html; charset=utf-8");
+    assertEq(res2._headers["X-Idempotency-Replay"], "true");
+});
+
+test("audit 39: a failed store marks the key processed, never re-runnable", () => {
+    const mw = idempotency.middleware();
+    let runs = 0;
+    const handle = (req, res) => { runs++; idempotency.respond(req, res, 201, { n: runs }); };
+    const req1 = mockReq("POST", "/a39f", "x", { "idempotency-key": "a39-fail" });
+    const res1 = mockRes();
+    assertEq(mw(req1, res1), 0);
+    H.failStore(true);
+    try { handle(req1, res1); } finally { H.failStore(false); }
+    assertEq(res1._status, 201, "the response is still sent");
+    assertEq(H.rows("a39-fail")[0].state, "unstored");
+    const req2 = mockReq("POST", "/a39f", "x", { "idempotency-key": "a39-fail" });
+    const res2 = mockRes();
+    assertEq(mw(req2, res2), 1, "a retry never reaches the handler");
+    assertEq(res2._status, 409);
+    assertEq(runs, 1);
+});
+
+test("audit 39: a row in the old format still replays", () => {
+    const mw = idempotency.middleware();
+    const req = mockReq("POST", "/legacy", "x", { "idempotency-key": "a39-legacy" });
+    H.putLegacy("a39-legacy", "__anon", H.computeFingerprint(req), 200, '{"old":true}',
+                '{"content-type":"application/json"}');
+    const res = mockRes();
+    assertEq(mw(req, res), 1);
+    assertEq(res._status, 200);
+    assertEq(res._body, '{"old":true}');
+});
+
+test("audit 39: a key that is not printable ASCII is a 400", () => {
+    const mw = idempotency.middleware();
+    for (const k of ["caf\u00e9", "a\u0000b", "tab\tkey", "\ud800"]) {
+        const res = mockRes();
+        assertEq(mw(mockReq("POST", "/k", "x", { "idempotency-key": k }), res), 1);
+        assertEq(res._status, 400, "key " + JSON.stringify(k));
+    }
+});
+
+test("audit 39: a principal the column cannot store is hashed", () => {
+    assertEq(H.normPrincipal("u\ud800").slice(0, 7), "sha256:");
+    assertEq(H.normPrincipal("u\u0000").slice(0, 7), "sha256:");
 });
 
 // ── cleanup ─────────────────────────────────────────────────────────

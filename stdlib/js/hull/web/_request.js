@@ -10,6 +10,8 @@
  * differently. See docs/stdlib_style.md §4.
  */
 
+import { _text } from "hull:_text";
+
 /**
  * The client's source IP, honoring a `trustProxy` policy.
  *
@@ -39,7 +41,10 @@ function clientIp(req, trustProxy) {
     if (!ip && typeof req.remote_addr === "string" && req.remote_addr !== "") {
         ip = req.remote_addr;
     }
-    if (typeof ip === "string" && ip.length > 64) ip = ip.slice(0, 64);
+    // Capped at 64 UTF-8 bytes on a code point and made storable (audit 39;
+    // see the Lua sibling): slice(0, 64) could split a surrogate pair, and
+    // the address keys session / audit-log / lockout rows.
+    if (typeof ip === "string") ip = _text.storable(ip, 64);
     return ip || null;
 }
 

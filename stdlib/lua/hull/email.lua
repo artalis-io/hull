@@ -60,6 +60,16 @@ local function email_error(code, message)
     error(setmetatable({ code = code, message = message }, _err_mt), 0)
 end
 
+-- A provider's error reply as error text: capped and made storable (audit
+-- 39). The whole reply body was copied into the message, which callers log
+-- and store (a jobs / outbox last_error), unbounded and as raw bytes.
+local PROVIDER_ERROR_MAX = 1024
+local function provider_error(resp)
+    local b = resp and resp.body
+    if b == nil or b == "" then return "unknown error" end
+    return _text.storable(b, PROVIDER_ERROR_MAX, true)
+end
+
 -- An address: a string of at most 254 bytes (RFC 5321's path limit), checked
 -- BEFORE the pattern - "[^%s@]+%.[^%s@]+" backtracks quadratically, so a long
 -- dotless domain took seconds on the event loop.
@@ -168,7 +178,7 @@ function providers.postmark(opts)
     if resp.status >= 200 and resp.status < 300 then
         return true
     end
-    email_error("delivery_failed", "postmark: " .. (resp.body or "unknown error"))
+    email_error("delivery_failed", "postmark: " .. provider_error(resp))
 end
 
 function providers.sendgrid(opts)
@@ -216,7 +226,7 @@ function providers.sendgrid(opts)
     if resp.status >= 200 and resp.status < 300 then
         return true
     end
-    email_error("delivery_failed", "sendgrid: " .. (resp.body or "unknown error"))
+    email_error("delivery_failed", "sendgrid: " .. provider_error(resp))
 end
 
 function providers.resend(opts)
@@ -257,7 +267,7 @@ function providers.resend(opts)
     if resp.status >= 200 and resp.status < 300 then
         return true
     end
-    email_error("delivery_failed", "resend: " .. (resp.body or "unknown error"))
+    email_error("delivery_failed", "resend: " .. provider_error(resp))
 end
 
 --- Send an email via the selected provider.

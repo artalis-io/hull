@@ -106,49 +106,41 @@ end
 -- last_error write fail on Postgres (MySQL also refuses invalid UTF-8, and
 -- more than 64 KiB in a TEXT column), and the failed bookkeeping write raised
 -- out of jobs.work / the subscription drain: the batch stayed 'running' and
--- the worker died, on every lease expiry. So: a non-string is converted under
--- pcall (an __tostring is app code that may raise; audit 23), NULs are
--- dropped, each byte that does not start a valid UTF-8 sequence (surrogates
--- and overlongs included, as Lua 5.4's strict utf8 reads them) becomes
--- U+FFFD, and the text is capped at TEXT_MAX bytes, cut on a code point.
+-- the worker died, on every lease expiry. The rules (conversion under pcall,
+-- NULs dropped, bad bytes as U+FFFD, a cap cut on a code point) live in the
+-- shared hull._text.storable (audit 39), which every stdlib write of app or
+-- request text uses.
+local _text = require("hull._text")
 local TEXT_MAX = 4096
 local UNCONVERTIBLE = "(an error value that could not be converted to text)"
 
--- s cut to at most max bytes, never inside a UTF-8 sequence.
-local function cut_utf8(s, max)
-    if #s <= max then return s end
-    local e = max
-    while e > 0 and e > max - 4 and ((s:byte(e + 1) or 0) & 0xC0) == 0x80 do e = e - 1 end
-    return s:sub(1, e)
+local function safe_text(v)
+    return _text.storable(v, TEXT_MAX, true, UNCONVERTIBLE)
 end
 
-local function safe_text(v)
-    local s
-    if type(v) == "string" then
-        s = v
-    elseif v == nil or type(v) == "number" or type(v) == "boolean" then
-        s = tostring(v)
-    else
-        local ok, r = pcall(tostring, v)
-        s = (ok and type(r) == "string") and r or UNCONVERTIBLE
+-- A job or step result as stored (audit 39). The JSON encoder passes a
+-- string's bytes through, so a result holding bytes that are not UTF-8 (a
+-- digest, a slice of a binary reply) is JSON text Postgres / MySQL refuse.
+-- Round 38 dead-lettered such a job on EVERY backend, SQLite included, where
+-- it had completed before. Now its JSON is stored as STORED_B64 ..
+-- base64(JSON) - byte-exact, and text every backend accepts - while a result
+-- whose JSON is valid UTF-8 is stored as the JSON itself, as before. JSON
+-- text never starts with "b64:", so rows written either way (and by an
+-- earlier Hull) read back unchanged. The JS twin writes plain JSON
+-- (JSON.stringify escapes a lone surrogate) and reads both forms.
+local encoding = require("hull.encoding")
+local STORED_B64 = "b64:"
+local function stored_json(enc)
+    if utf8.len(enc) and not enc:find("\0", 1, true) then return enc end
+    return STORED_B64 .. encoding.base64.encode(enc)
+end
+-- The JSON text of a stored result (either form).
+local function unstored_json(v)
+    if type(v) == "string" and v:sub(1, #STORED_B64) == STORED_B64 then
+        local raw = encoding.base64.decode(v:sub(#STORED_B64 + 1))
+        if raw then return raw end
     end
-    local cut = false
-    if #s > TEXT_MAX then s = cut_utf8(s, TEXT_MAX); cut = true end
-    if s:find("\0", 1, true) then s = s:gsub("\0", "") end
-    if not utf8.len(s) then
-        local out, i, n = {}, 1, #s
-        while i <= n do
-            local len, bad = utf8.len(s, i)
-            if len then out[#out + 1] = s:sub(i); break end
-            out[#out + 1] = s:sub(i, bad - 1)
-            out[#out + 1] = "\239\191\189"   -- U+FFFD
-            i = bad + 1
-        end
-        s = table.concat(out)
-        if #s > TEXT_MAX then s = cut_utf8(s, TEXT_MAX); cut = true end
-    end
-    if cut then s = s .. "..." end
-    return s
+    return v
 end
 
 -- An error value as text, for last_error. tostring runs an app __tostring,
@@ -717,7 +709,7 @@ local function load_deps(dependent_id)
     for i, e in ipairs(edges) do
         local r = db.query("SELECT result FROM _hull_job_results WHERE job_id=?", { e.dep_id })
         if r[1] and r[1].result ~= nil then
-            local ok, decoded = pcall(json.decode, r[1].result)
+            local ok, decoded = pcall(json.decode, unstored_json(r[1].result))
             if ok then out[i] = decoded end
         end
     end
@@ -1485,19 +1477,17 @@ local function mark_retry(job, err)
     return "retried"
 end
 
--- A job result's JSON, or nil and why it cannot be stored (audit 38). The
--- encoder passes a string's bytes through, so a result holding text that is
--- not UTF-8 failed the _hull_job_results write on Postgres / MySQL, and a
--- result over 64 KiB failed it on MySQL (TEXT): the job was retried - its
--- handler run again - until its attempts ran out, failing the same way each
--- time. A result that cannot be stored now dead-letters the job once, saying
--- why (JSON.stringify escapes a lone surrogate, so the JS twin only meets
--- the encode error and the size).
+-- A job result as stored, or nil and why it cannot be stored (audit 38). A
+-- result over 64 KiB failed the _hull_job_results write on MySQL (TEXT): the
+-- job was retried - its handler run again - until its attempts ran out,
+-- failing the same way each time. A result that cannot be stored now
+-- dead-letters the job once, saying why. Bytes that are not UTF-8 are stored
+-- (stored_json, audit 39), not refused.
 local RESULT_MAX_MYSQL = 65535
 local function result_json(result)
     local ok, enc = pcall(json.encode, result)
     if not ok then return nil, "it cannot be encoded as JSON (" .. err_text(enc) .. ")" end
-    if not utf8.len(enc) then return nil, "it holds text that is not valid UTF-8" end
+    enc = stored_json(enc)
     if #enc > RESULT_MAX_MYSQL and db.backend_name == "mysql" then
         return nil, "its JSON is larger than " .. RESULT_MAX_MYSQL .. " bytes"
     end
@@ -2674,7 +2664,7 @@ function jobs.result(id)
             -- Fail soft on a corrupted result row (we wrote valid JSON, but don't
             -- raise on external corruption). Explicit if: a decoded false/nil is
             -- a valid result, so `ok and decoded or raw` would mis-map it.
-            local ok, decoded = pcall(json.decode, rr[1].result)
+            local ok, decoded = pcall(json.decode, unstored_json(rr[1].result))
             if ok then out.result = decoded else out.result = rr[1].result end
         end
     elseif status == "dead" then
@@ -2743,19 +2733,15 @@ local function run_step(workflow_id, step_key, fn, compensating)
             error({ [WF_UNDONE] = step_key }, 0)
         end
         if rows[1].result == nil then return nil end
-        local ok, decoded = pcall(json.decode, rows[1].result)
+        local ok, decoded = pcall(json.decode, unstored_json(rows[1].result))
         if ok then return decoded else return rows[1].result end
     end
     -- First execution: run, then persist. At-least-once - a crash between the
     -- side effect and this INSERT re-runs the step on resume (steps must be
     -- idempotent, same contract as a job handler).
     local result = fn()
-    local enc = result ~= nil and json.encode(result) or nil
-    -- Said plainly rather than as the database's encoding error (audit 38).
-    if enc ~= nil and not utf8.len(enc) then
-        error("ctx.step: the result of step '" .. safe_text(step_key)
-            .. "' holds text that is not valid UTF-8 and cannot be stored", 2)
-    end
+    -- Bytes that are not UTF-8 are stored byte-exact (stored_json, audit 39).
+    local enc = result ~= nil and stored_json(json.encode(result)) or nil
     db.exec(
         "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
         .. "VALUES (?, ?, ?, 'done', ?)",
