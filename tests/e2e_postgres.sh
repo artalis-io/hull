@@ -736,7 +736,9 @@ local jobs = require("hull.jobs")
 app.manifest({ modules = { "hull/jobs@1" } })
 app.main(function(ctx)
   jobs.init()
-  -- The cron tick, through jobs.work (its enqueue raises out of it).
+  -- The cron tick, through jobs.work: the schedule whose enqueue fails is
+  -- skipped with its CAS rolled back, and jobs.work goes on (audit 38: it
+  -- raised out of it).
   local raised = pcall(jobs.work, { queue = "a12t" }) and 0 or 1
   ctx.stdout:write(("A12CRON raised=%d\n"):format(raised))
   return 0
@@ -748,7 +750,7 @@ a12cron=$(./build/hull "$A12DIR/tick.lua" -d "$DSN" 2>/dev/null)
 a12next=$(docker exec "$CONTAINER" psql -U hull -d hulldb -t -A -c "SELECT next_run_at FROM _hull_cron WHERE name='a12c'" 2>/dev/null | tr -d '[:space:]')
 docker exec "$CONTAINER" psql -U hull -d hulldb -q -c "DELETE FROM _hull_cron WHERE name='a12c'" >/dev/null 2>&1 || true
 case "$a12out|$a12cron|$a12next" in
-    *"A12 b=dead r=pending n=1 q=dead ran=2"*"A12CRON raised=1"*"|1")
+    *"A12 b=dead r=pending n=1 q=dead ran=2"*"A12CRON raised=0"*"|1")
         echo "PASS: jobs cancelled / purged deps fail dependents, released mates refund the rate window, cron CAS rolls back with a failed enqueue (Postgres)"
         rm -rf "$A12DIR" ;;
     *)  echo "::error jobs audit 12 on Postgres: $a12out | $a12cron | next=$a12next"; exit 1 ;;
