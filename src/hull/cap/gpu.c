@@ -438,17 +438,82 @@ int hl_gpu_tex_binding_check(int desc_storage, int tex_storage,
  * (never a failed compile); the backend then refuses such a call itself
  * before it submits. */
 
+/* The WGSL lexer these readers share (audit 37). It must split the source
+ * exactly where naga does: a reader that skipped text naga parses can be
+ * steered past the checks. So blankspace and comments follow the WGSL
+ * spec to the code point, identifiers take every non-ASCII code point
+ * (WGSL takes XID characters; anything else is a token naga refuses, so
+ * reading it as identifier text hides nothing naga accepts), and a byte
+ * outside every WGSL token - an ASCII control, `"`, `'`, `#`, `$`, `?`,
+ * `\`, a backtick, malformed UTF-8 - is reported (WL_BAD) so the checks
+ * refuse the source instead of stepping over it. */
+
+/* The length of the well-formed UTF-8 sequence at s[i] (1-4), or 0. */
+static size_t wl_utf8(const char *s, size_t n, size_t i)
+{
+    const unsigned char *u = (const unsigned char *)s;
+    unsigned char c = u[i];
+    if (c < 0x80) return 1;
+    size_t len;
+    unsigned char lo = 0x80, hi = 0xBF;
+    if (c >= 0xC2 && c <= 0xDF) {
+        len = 2;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        len = 3;
+        if (c == 0xE0) lo = 0xA0;           /* no overlong form */
+        if (c == 0xED) hi = 0x9F;           /* no surrogate */
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        len = 4;
+        if (c == 0xF0) lo = 0x90;
+        if (c == 0xF4) hi = 0x8F;           /* nothing past U+10FFFF */
+    } else {
+        return 0;
+    }
+    if (len > n - i) return 0;
+    if (u[i + 1] < lo || u[i + 1] > hi) return 0;
+    for (size_t k = 2; k < len; k++)
+        if (u[i + k] < 0x80 || u[i + k] > 0xBF) return 0;
+    return len;
+}
+
+/* WGSL blankspace: U+0009-000D, U+0020, U+0085, U+200E, U+200F, U+2028,
+ * U+2029. Returns its length at s[i], or 0. (These lead bytes are never
+ * continuation bytes, so a match cannot start inside another character.) */
+static size_t wl_blank(const char *s, size_t n, size_t i)
+{
+    const unsigned char *u = (const unsigned char *)s;
+    unsigned char c = u[i];
+    if ((c >= 0x09 && c <= 0x0D) || c == 0x20) return 1;
+    if (c == 0xC2 && i + 1 < n && u[i + 1] == 0x85) return 2;
+    if (c == 0xE2 && i + 2 < n && u[i + 1] == 0x80 &&
+        (u[i + 2] == 0x8E || u[i + 2] == 0x8F ||
+         u[i + 2] == 0xA8 || u[i + 2] == 0xA9))
+        return 3;
+    return 0;
+}
+
+/* What ends a WGSL line comment: U+000A-000D, U+0085, U+2028, U+2029. */
+static int wl_line_break(const char *s, size_t n, size_t i)
+{
+    const unsigned char *u = (const unsigned char *)s;
+    unsigned char c = u[i];
+    if (c >= 0x0A && c <= 0x0D) return 1;
+    if (c == 0xC2 && i + 1 < n && u[i + 1] == 0x85) return 1;
+    return c == 0xE2 && i + 2 < n && u[i + 1] == 0x80 &&
+           (u[i + 2] == 0xA8 || u[i + 2] == 0xA9);
+}
+
 static size_t wl_skip_ws(const char *s, size_t n, size_t i)
 {
     while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-            c == '\v' || c == '\f') {
-            i++;
-        } else if (c == '/' && i + 1 < n && s[i + 1] == '/') {
-            while (i < n && s[i] != '\n' && s[i] != '\r') i++;
-        } else if (c == '/' && i + 1 < n && s[i + 1] == '*') {
-            /* WGSL block comments nest. */
+        size_t b = wl_blank(s, n, i);
+        if (b) {
+            i += b;
+        } else if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
+            while (i < n && !wl_line_break(s, n, i)) i++;
+        } else if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+            /* WGSL block comments nest; pairs are taken left to right,
+             * as naga takes them. */
             int depth = 1;
             i += 2;
             while (i < n && depth > 0) {
@@ -467,14 +532,30 @@ static size_t wl_skip_ws(const char *s, size_t n, size_t i)
     return i;
 }
 
-static int wl_ident_start(char c)
+static int wl_digit(char c) { return c >= '0' && c <= '9'; }
+
+/* The length of the identifier character at s[i]: an ASCII letter, digit
+ * or '_', or a well-formed non-ASCII code point that is not blankspace.
+ * 0 for anything else. */
+static size_t wl_ident_unit(const char *s, size_t n, size_t i)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    unsigned char c = (unsigned char)s[i];
+    if (c < 0x80) {
+        return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                c == '_' || wl_digit((char)c)) ? 1 : 0;
+    }
+    if (wl_blank(s, n, i)) return 0;
+    return wl_utf8(s, n, i);
 }
 
-static int wl_ident_char(char c)
+static int wl_ident_start_at(const char *s, size_t n, size_t i)
 {
-    return wl_ident_start(c) || (c >= '0' && c <= '9');
+    return i < n && !wl_digit(s[i]) && wl_ident_unit(s, n, i) > 0;
+}
+
+static int wl_ident_char_at(const char *s, size_t n, size_t i)
+{
+    return i < n && wl_ident_unit(s, n, i) > 0;
 }
 
 /* The identifier at s[i], as [*start, *start + *len); returns the index
@@ -483,12 +564,88 @@ static size_t wl_ident(const char *s, size_t n, size_t i,
                        const char **start, size_t *len)
 {
     size_t j = i;
-    if (j < n && wl_ident_start(s[j])) {
-        while (j < n && wl_ident_char(s[j])) j++;
+    if (wl_ident_start_at(s, n, j)) {
+        size_t u;
+        while (j < n && (u = wl_ident_unit(s, n, j)) > 0) j += u;
     }
     *start = s + i;
     *len = j - i;
     return j;
+}
+
+/* A numeric literal at s[i]: digits, a '.', a hex prefix, an exponent
+ * whose sign is taken only before a digit, a suffix. Returns the index
+ * past it. */
+static size_t wl_number(const char *s, size_t n, size_t i)
+{
+    int hex = s[i] == '0' && i + 1 < n && (s[i + 1] == 'x' || s[i + 1] == 'X');
+    if (hex) i += 2;
+    while (i < n) {
+        char d = s[i];
+        if ((!hex && (d == 'e' || d == 'E')) ||
+            (hex && (d == 'p' || d == 'P'))) {
+            i++;
+            if (i + 1 < n && (s[i] == '+' || s[i] == '-') && wl_digit(s[i + 1]))
+                i++;
+        } else if ((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') ||
+                   wl_digit(d) || d == '_' || d == '.') {
+            i++;
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+
+/* The ASCII punctuation WGSL tokens are made of. */
+static int wl_punct(char c)
+{
+    return c != '\0' && strchr("!%&()*+,-./:;<=>@[]^{|}~", c) != NULL;
+}
+
+enum { WL_END, WL_IDENT, WL_NUM, WL_PUNCT, WL_BAD };
+
+typedef struct {
+    int kind;
+    size_t start;      /* first byte */
+    size_t end;        /* past the token (a punctuation token is one byte) */
+} WlTok;
+
+/* The token at or after s[i] (blankspace and comments skipped). */
+static int wl_next(const char *s, size_t n, size_t i, WlTok *t)
+{
+    i = wl_skip_ws(s, n, i);
+    t->start = t->end = i;
+    if (i >= n) return t->kind = WL_END;
+    char c = s[i];
+    if (wl_digit(c) || (c == '.' && i + 1 < n && wl_digit(s[i + 1]))) {
+        t->end = wl_number(s, n, i);
+        return t->kind = WL_NUM;
+    }
+    if (wl_ident_start_at(s, n, i)) {
+        const char *id;
+        size_t len;
+        t->end = wl_ident(s, n, i, &id, &len);
+        return t->kind = WL_IDENT;
+    }
+    if (wl_punct(c)) {
+        t->end = i + 1;
+        return t->kind = WL_PUNCT;
+    }
+    return t->kind = WL_BAD;
+}
+
+/* Whether the whole source is well-formed UTF-8 (naga takes a Rust str). */
+static int wl_utf8_valid(const char *s, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        if ((unsigned char)s[i] < 0x80) { i++; continue; }
+        size_t u = wl_utf8(s, n, i);
+        if (u == 0) return 0;
+        i += u;
+    }
+    return 1;
 }
 
 static int wl_is(const char *id, size_t len, const char *word)
@@ -527,7 +684,7 @@ static size_t wl_int_arg(const char *s, size_t n, size_t i, unsigned long *out)
     }
     if (digits == 0) return 0;
     if (i < n && (s[i] == 'i' || s[i] == 'u')) i++;
-    if (i < n && wl_ident_char(s[i])) return 0;
+    if (i < n && wl_ident_char_at(s, n, i)) return 0;
     i = wl_skip_ws(s, n, i);
     if (i < n && s[i] == ',') i = wl_skip_ws(s, n, i + 1);
     if (i >= n || s[i] != ')') return 0;
@@ -664,7 +821,7 @@ int hl_gpu_wgsl_layout(const char *wgsl, size_t len, HlGpuPipeline *out)
             continue;
         }
 
-        if (wl_ident_start(c)) {
+        if (wl_ident_start_at(s, n, i)) {
             i = wl_ident(s, n, i, &id, &idlen);
             if (have_group || have_binding) {
                 if (!wl_is(id, idlen, "var") || !have_group || !have_binding)
@@ -780,6 +937,7 @@ static size_t wl_operator(const char *s, size_t n, size_t i, int *bin)
 size_t hl_gpu_wgsl_complexity(const char *wgsl, size_t len)
 {
     if (!wgsl) return 0;
+    if (!wl_utf8_valid(wgsl, len)) return HL_GPU_WGSL_UNREADABLE;
     enum { WL_FRAMES = HL_GPU_WGSL_EXPR_DEPTH_MAX + 2 };
     WlFrame fr[WL_FRAMES];
     const char *s = wgsl;
@@ -802,33 +960,16 @@ size_t hl_gpu_wgsl_complexity(const char *wgsl, size_t len)
     } while (0)
 
     for (;;) {
-        i = wl_skip_ws(s, n, i);
-        if (i >= n) break;
+        WlTok t;
+        int kind = wl_next(s, n, i, &t);
+        if (kind == WL_END) break;
+        if (kind == WL_BAD) return HL_GPU_WGSL_UNREADABLE;
+        i = t.start;
         char c = s[i];
         WlFrame *f = &fr[top];
 
-        if (wl_ident_start(c)) {
-            while (i < n && wl_ident_char(s[i])) i++;
-            operand = 1;
-            continue;
-        }
-        if ((c >= '0' && c <= '9') ||
-            (c == '.' && i + 1 < n && s[i + 1] >= '0' && s[i + 1] <= '9')) {
-            int hex = c == '0' && i + 1 < n &&
-                      (s[i + 1] == 'x' || s[i + 1] == 'X');
-            if (hex) i += 2;
-            while (i < n) {
-                char d = s[i];
-                if ((!hex && (d == 'e' || d == 'E')) ||
-                    (hex && (d == 'p' || d == 'P'))) {
-                    i++;
-                    if (i < n && (s[i] == '+' || s[i] == '-')) i++;
-                } else if (wl_ident_char(d) || d == '.') {
-                    i++;
-                } else {
-                    break;
-                }
-            }
+        if (kind == WL_IDENT || kind == WL_NUM) {
+            i = t.end;
             operand = 1;
             continue;
         }
@@ -870,17 +1011,17 @@ size_t hl_gpu_wgsl_complexity(const char *wgsl, size_t len)
             operand = 0;
             i++;
             continue;
+        case '@': case ':':
+            operand = 0;
+            i++;
+            continue;
         default:
             break;
         }
 
         int bin = 0;
         size_t olen = wl_operator(s, n, i, &bin);
-        if (olen == 0) {                        /* '@', ':', ... */
-            operand = 0;
-            i++;
-            continue;
-        }
+        if (olen == 0) return HL_GPU_WGSL_UNREADABLE;   /* not reached */
         if (bin && operand) {
             f->bin++;
             f->run = 0;
@@ -898,6 +1039,322 @@ size_t hl_gpu_wgsl_complexity(const char *wgsl, size_t len)
 #undef WL_POP
 #undef WL_NOTE
     return peak;
+}
+
+/* ── Statement nesting (audit 37) ──────────────────────────────────
+ *
+ * naga's parser stops at 127 nested braces, but `else if` nests without
+ * one: `if (c) {} else if (c) {} else if ...` is parsed into an If whose
+ * reject block holds the next If, and validation walks that tree
+ * recursively (validate_block_impl). ~5400 links overflowed the event
+ * loop's stack while the expression estimate, which starts over at every
+ * brace, stayed at 4. So the nesting of blocks is counted on its own: a
+ * brace opens one level below the enclosing block, an `else if` body one
+ * below the block of the `if` it continues, an `else` body at that
+ * block's level. */
+
+static int wl_tok_is(const char *s, const WlTok *t, const char *word)
+{
+    return t->kind == WL_IDENT && wl_is(s + t->start, t->end - t->start, word);
+}
+
+size_t hl_gpu_wgsl_block_depth(const char *wgsl, size_t len)
+{
+    if (!wgsl) return 0;
+    if (!wl_utf8_valid(wgsl, len)) return HL_GPU_WGSL_UNREADABLE;
+    enum { WL_BLOCKS = HL_GPU_WGSL_BLOCK_DEPTH_MAX + 2 };
+    size_t level[WL_BLOCKS];   /* the depth of each open block */
+    size_t top = 0, peak = 0, pending = 0, i = 0;
+    const char *s = wgsl;
+    size_t n = len;
+
+    for (;;) {
+        WlTok t;
+        int kind = wl_next(s, n, i, &t);
+        if (kind == WL_END) break;
+        if (kind == WL_BAD) return HL_GPU_WGSL_UNREADABLE;
+        i = t.end;
+        if (kind != WL_PUNCT) continue;
+        char c = s[t.start];
+        if (c == '{') {
+            size_t d = (top ? level[top - 1] : 0) + 1 + pending;
+            pending = 0;
+            if (d > peak) peak = d;
+            if (peak > HL_GPU_WGSL_BLOCK_DEPTH_MAX) return peak;
+            /* d >= top + 1, so the stack never fills before the limit. */
+            if (top >= WL_BLOCKS) return HL_GPU_WGSL_UNREADABLE;
+            level[top++] = d;
+        } else if (c == '}' && top > 0) {
+            size_t closed = level[--top];
+            size_t parent = top ? level[top - 1] : 0;
+            size_t extra = closed - parent - 1;   /* the else-if chain so far */
+            WlTok e, f;
+            if (wl_next(s, n, i, &e) == WL_IDENT && wl_tok_is(s, &e, "else")) {
+                (void)wl_next(s, n, e.end, &f);
+                pending = wl_tok_is(s, &f, "if") ? extra + 1 : extra;
+            }
+        }
+    }
+    return peak;
+}
+
+/* ── Type nesting (audit 37) ───────────────────────────────────────
+ *
+ * Each `alias A<k> = array<A<k-1>, 1>;` nests a type one level deeper than
+ * the last; naga and the Metal / SPIR-V writers expand the whole chain,
+ * work that grows with its square (10000 aliases: 24 s on the event loop,
+ * and the Metal compiler service crashed on a few hundred). Module-scope
+ * declarations may come in any order, so every `struct` and `alias` is
+ * read first - its name, and each identifier its body names with the
+ * template brackets open around it - and the depths are resolved after:
+ * a type is as deep as the deepest type it names plus the template
+ * brackets around that name (a predeclared type is 1), and a struct one
+ * level more than its deepest member. Member and attribute names are not type
+ * references. A cycle (WGSL refuses recursive types) counts as too deep. */
+
+typedef struct {
+    size_t start, len;        /* the name */
+    size_t ref_first, ref_count;
+    size_t depth;
+    size_t next_ref;          /* resolution cursor */
+    int state;                /* 0 unvisited, 1 on the stack, 2 done */
+    int is_struct;
+} WlTypeDecl;
+
+typedef struct {
+    size_t start, len;
+    size_t level;             /* template brackets open around it */
+    long target;              /* declaration index, or -1 */
+} WlTypeRef;
+
+static int wl_grow(void **p, size_t *cap, size_t need, size_t elem)
+{
+    if (need <= *cap) return 0;
+    size_t nc = *cap ? *cap * 2 : 64;
+    while (nc < need) nc *= 2;
+    if (nc > SIZE_MAX / elem) return -1;
+    void *q = realloc(*p, nc * elem);
+    if (!q) return -1;
+    *p = q;
+    *cap = nc;
+    return 0;
+}
+
+static uint64_t wl_hash(const char *s, size_t len)
+{
+    uint64_t h = 1469598103934665603ull;          /* FNV-1a */
+    for (size_t k = 0; k < len; k++) {
+        h ^= (unsigned char)s[k];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len)
+{
+    if (!wgsl) return 0;
+    if (!wl_utf8_valid(wgsl, len)) return HL_GPU_WGSL_UNREADABLE;
+    const char *s = wgsl;
+    size_t n = len, i = 0, braces = 0, result = 0;
+    WlTypeDecl *decls = NULL;
+    WlTypeRef *refs = NULL;
+    long *table = NULL;
+    size_t *stack = NULL;
+    size_t ndecl = 0, capdecl = 0, nref = 0, capref = 0;
+
+    /* Pass 1: the declarations and what their bodies name. */
+    for (;;) {
+        WlTok t;
+        int kind = wl_next(s, n, i, &t);
+        if (kind == WL_END) break;
+        if (kind == WL_BAD) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
+        i = t.end;
+        if (kind == WL_PUNCT) {
+            if (s[t.start] == '{') braces++;
+            else if (s[t.start] == '}' && braces > 0) braces--;
+            continue;
+        }
+        if (kind != WL_IDENT || braces != 0) continue;
+        int is_struct = wl_tok_is(s, &t, "struct");
+        if (!is_struct && !wl_tok_is(s, &t, "alias")) continue;
+
+        WlTok name, open;
+        if (wl_next(s, n, i, &name) != WL_IDENT) continue;
+        if (wl_next(s, n, name.end, &open) != WL_PUNCT ||
+            s[open.start] != (is_struct ? '{' : '='))
+            continue;
+        i = open.end;
+
+        if (wl_grow((void **)&decls, &capdecl, ndecl + 1, sizeof(*decls)) != 0) {
+            result = HL_GPU_WGSL_UNREADABLE;
+            goto out;
+        }
+        WlTypeDecl *d = &decls[ndecl++];
+        memset(d, 0, sizeof(*d));
+        d->start = name.start;
+        d->len = name.end - name.start;
+        d->ref_first = nref;
+        d->is_struct = is_struct;
+
+        /* The body: to the struct's '}' or the alias's ';'. A template
+         * '<' is closed only by a '>' (not '>=') at its own bracket depth,
+         * as WGSL's template-list discovery pairs them. */
+        enum { WL_TMPL_MAX = 256 };
+        size_t tmpl[WL_TMPL_MAX];   /* bracket depth of each open '<' */
+        size_t ntmpl = 0, pd = 0, extra_level = 0;
+        int after_at = 0;
+        for (;;) {
+            WlTok b;
+            int bk = wl_next(s, n, i, &b);
+            if (bk == WL_END) break;
+            if (bk == WL_BAD) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
+            i = b.end;
+            if (bk == WL_IDENT) {
+                WlTok nx;
+                int member = wl_next(s, n, i, &nx) == WL_PUNCT &&
+                             s[nx.start] == ':';
+                if (!after_at && !member) {
+                    if (wl_grow((void **)&refs, &capref, nref + 1,
+                                sizeof(*refs)) != 0) {
+                        result = HL_GPU_WGSL_UNREADABLE;
+                        goto out;
+                    }
+                    refs[nref].start = b.start;
+                    refs[nref].len = b.end - b.start;
+                    refs[nref].level = ntmpl + extra_level;
+                    refs[nref].target = -1;
+                    nref++;
+                }
+                after_at = 0;
+                continue;
+            }
+            after_at = 0;
+            if (bk != WL_PUNCT) continue;
+            char c = s[b.start];
+            char nc = b.end < n ? s[b.end] : '\0';
+            if (c == '@') {
+                after_at = 1;
+            } else if ((is_struct && c == '}') || (!is_struct && c == ';')) {
+                break;
+            } else if (c == '{' || c == '}' || c == ';') {
+                break;                          /* malformed: stop here */
+            } else if (c == '(' || c == '[') {
+                pd++;
+            } else if (c == ')' || c == ']') {
+                if (pd > 0) pd--;
+                while (ntmpl > 0 && tmpl[ntmpl - 1] > pd) ntmpl--;
+            } else if (c == '<' && nc != '=' && nc != '<') {
+                if (ntmpl < WL_TMPL_MAX) tmpl[ntmpl++] = pd;
+                else extra_level++;             /* counted, never closed */
+            } else if (c == '<') {
+                i = b.end + 1;                  /* '<=' / '<<' */
+            } else if (c == '>' && nc != '=') {
+                if (ntmpl > 0 && tmpl[ntmpl - 1] == pd) ntmpl--;
+            }
+        }
+        d->ref_count = nref - d->ref_first;
+    }
+    if (ndecl == 0) goto out;
+
+    /* Resolve each reference to the declaration of that name. */
+    size_t tsize = 16;
+    while (tsize < ndecl * 2) tsize *= 2;
+    table = malloc(tsize * sizeof(*table));
+    stack = malloc(ndecl * sizeof(*stack));
+    if (!table || !stack) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
+    for (size_t k = 0; k < tsize; k++) table[k] = -1;
+    for (size_t k = 0; k < ndecl; k++) {
+        size_t h = (size_t)wl_hash(s + decls[k].start, decls[k].len) & (tsize - 1);
+        while (table[h] >= 0) h = (h + 1) & (tsize - 1);
+        table[h] = (long)k;
+    }
+    for (size_t r = 0; r < nref; r++) {
+        size_t h = (size_t)wl_hash(s + refs[r].start, refs[r].len) & (tsize - 1);
+        while (table[h] >= 0) {
+            const WlTypeDecl *d = &decls[table[h]];
+            if (d->len == refs[r].len &&
+                memcmp(s + d->start, s + refs[r].start, d->len) == 0) {
+                refs[r].target = table[h];
+                break;
+            }
+            h = (h + 1) & (tsize - 1);
+        }
+    }
+
+    /* Depths, by an explicit depth-first walk (no recursion here either). */
+    for (size_t root = 0; root < ndecl; root++) {
+        if (decls[root].state == 2) continue;
+        size_t sp = 0;
+        stack[sp++] = root;
+        decls[root].state = 1;
+        decls[root].next_ref = 0;
+        decls[root].depth = 0;
+        while (sp > 0) {
+            WlTypeDecl *d = &decls[stack[sp - 1]];
+            int descended = 0;
+            while (d->next_ref < d->ref_count) {
+                const WlTypeRef *r = &refs[d->ref_first + d->next_ref];
+                size_t v = r->level + 1;    /* a predeclared type: 1 */
+                if (r->target >= 0) {
+                    WlTypeDecl *t = &decls[r->target];
+                    if (t->state == 1) {            /* a cycle */
+                        result = HL_GPU_WGSL_TYPE_DEPTH_MAX + 1;
+                        goto out;
+                    }
+                    if (t->state == 0) {
+                        t->state = 1;
+                        t->next_ref = 0;
+                        t->depth = 0;
+                        stack[sp++] = (size_t)r->target;
+                        descended = 1;
+                        break;
+                    }
+                    v = r->level + t->depth;
+                }
+                if (v > d->depth) d->depth = v;
+                d->next_ref++;
+            }
+            if (descended) continue;
+            /* An alias is the type it names; a struct is one level more. */
+            if (d->is_struct) d->depth += 1;
+            if (d->depth == 0) d->depth = 1;
+            d->state = 2;
+            if (d->depth > result) result = d->depth;
+            if (result > HL_GPU_WGSL_TYPE_DEPTH_MAX) goto out;
+            sp--;
+        }
+    }
+out:
+    free(decls);
+    free(refs);
+    free(table);
+    free(stack);
+    return result;
+}
+
+int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why)
+{
+    const char *w = NULL;
+    if (!wgsl) {
+        w = "no source";
+    } else if (len > HL_GPU_WGSL_MAX_BYTES) {
+        w = "source too large";
+    } else {
+        size_t e = hl_gpu_wgsl_complexity(wgsl, len);
+        if (e == HL_GPU_WGSL_UNREADABLE) {
+            w = "a byte sequence outside WGSL's tokens";
+        } else if (e > HL_GPU_WGSL_EXPR_DEPTH_MAX) {
+            w = "an expression nests too deeply";
+        } else if (hl_gpu_wgsl_block_depth(wgsl, len) >
+                   HL_GPU_WGSL_BLOCK_DEPTH_MAX) {
+            w = "statements (blocks / else-if chains) nest too deeply";
+        } else if (hl_gpu_wgsl_type_depth(wgsl, len) >
+                   HL_GPU_WGSL_TYPE_DEPTH_MAX) {
+            w = "types nest too deeply";
+        }
+    }
+    if (why) *why = w;
+    return w ? -1 : 0;
 }
 
 static const HlGpuBindingDecl *wl_find_decl(const HlGpuPipeline *p,
@@ -1005,18 +1462,13 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
     hl_assert_on_event_loop("hl_cap_gpu_compile (gpu.compile/load)");
     if (!ctx || !name || !wgsl)
         return HL_GPU_ERR_INTERNAL;
-    /* A source naga would recurse over until the stack overflows is refused
-     * before any wgpu call (audit 36). Both checks are linear scans, bounded
-     * by the size cap. */
-    if (wgsl_len > HL_GPU_WGSL_MAX_BYTES) {
-        log_warn("[hull:gpu] shader '%s' refused: %zu bytes of WGSL "
-                 "(at most %zu)", name, wgsl_len,
-                 (size_t)HL_GPU_WGSL_MAX_BYTES);
-        return HL_GPU_ERR_SHADER;
-    }
-    if (hl_gpu_wgsl_complexity(wgsl, wgsl_len) > HL_GPU_WGSL_EXPR_DEPTH_MAX) {
-        log_warn("[hull:gpu] shader '%s' refused: an expression nests deeper "
-                 "than %d operators", name, HL_GPU_WGSL_EXPR_DEPTH_MAX);
+    /* A source naga would recurse over until the stack overflows, or spend
+     * unbounded time expanding, is refused before any wgpu call (audits
+     * 36 / 37). Every check is a linear scan, bounded by the size cap. */
+    const char *why = NULL;
+    if (hl_gpu_wgsl_precheck(wgsl, wgsl_len, &why) != 0) {
+        log_warn("[hull:gpu] shader '%s' refused before compile: %s "
+                 "(%zu bytes of WGSL)", name, why, wgsl_len);
         return HL_GPU_ERR_SHADER;
     }
     /* A name must fit its slot: stored truncated but looked up in full,

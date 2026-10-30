@@ -142,6 +142,26 @@ release-artifact layout).
   ws-server and ws-client callbacks, app.main, `hull:_task` tasks, async and multipart
   resumes, `hull test` cases). An entry that merely forgot to COMMIT keeps its outcome; the
   rollback is now logged. Regression legs in `tests/e2e_js_runs.sh`.
+- **A shader could still crash the process past the GPU pre-checks, or hold the event loop for
+  seconds** (audit 37). Three gaps in the audit-36 source checks `gpu.compile` / `gpu.load` run
+  before wgpu. (1) The checks' lexer ended a `//` comment only at LF / CR, but WGSL - and naga -
+  also end it at VT, FF, U+0085, U+2028 and U+2029: `// x\v o[0] = y + y + ...` hid a
+  20000-term chain from the depth estimate while naga parsed it and overflowed the stack
+  (SIGSEGV); the binding-layout reader could be hidden from the same way. The lexer now follows
+  the WGSL spec for blankspace (U+0009-000D, U+0020, U+0085, U+200E, U+200F, U+2028, U+2029),
+  line breaks and nested block comments, reads every non-ASCII code point as identifier text,
+  and refuses (`shader_error`) a source that is not well-formed UTF-8 or holds a byte outside
+  every WGSL token (`"`, `'`, `#`, `$`, `?`, `\`, a backtick, an ASCII control) instead of
+  stepping over it. (2) The estimate started over at every brace, so a flat `if {} else if {}
+  else if ...` chain - which nests without braces and so passes naga's 127-brace parser limit -
+  was measured as depth 4 while naga validated its If tree recursively: 5400 links killed the
+  process (5300 survived, Apple M1 Max). Block nesting, braces and else-if chains together, is
+  now bounded at 512 (`HL_GPU_WGSL_BLOCK_DEPTH_MAX`). (3) An `alias A<k> = array<A<k-1>, 1>`
+  chain (or a struct chain) is expanded in full by naga and the backend writers, in time that
+  grows with its square - 10000 links took 24 s on the event loop, uncharged, and a few hundred
+  crashed Metal's compiler service. Type nesting across module-scope declarations, in any order,
+  is now bounded at 64 (`HL_GPU_WGSL_TYPE_DEPTH_MAX`); a recursive type counts as too deep.
+  Every check is a linear scan; the examples' and docs' shaders are unaffected.
 - **A `db.async` result of zero-column rows was freed twice** (audit 32). Postgres accepts an
   empty select list (`SELECT FROM generate_series(1, 20)`), and the worker's result copy grew
   its row store to `rows x 0` bytes. On glibc `realloc(p, 0)` frees `p` and returns NULL; the

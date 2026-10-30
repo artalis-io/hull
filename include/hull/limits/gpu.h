@@ -80,4 +80,30 @@
 #define HL_GPU_WGSL_EXPR_DEPTH_MAX 1000
 #endif
 
+/* The deepest block nesting a shader may build, braces and `else if`
+ * chains together, as hl_gpu_wgsl_block_depth counts it (audit 37). naga's
+ * parser stops at 127 nested braces, but an `else if` nests without one
+ * and naga validates the resulting If tree recursively: on the event
+ * loop's 8 MiB stack a flat chain of 5400 `else if` links killed the
+ * process (SIGSEGV in validate_block_impl; 5300 survived, Apple M1 Max /
+ * Metal). Real shaders nest a handful of blocks and chain tens of
+ * `else if`; 512 is ~10x below the crash, and Metal itself refuses more
+ * than 256 nested brackets at pipeline creation. */
+#ifndef HL_GPU_WGSL_BLOCK_DEPTH_MAX
+#define HL_GPU_WGSL_BLOCK_DEPTH_MAX 512
+#endif
+
+/* The deepest type a shader's module-scope `struct` / `alias`
+ * declarations may build, as hl_gpu_wgsl_type_depth counts it (audit 37):
+ * a chain `alias A1 = array<A0, 1>; alias A2 = array<A1, 1>; ...` is
+ * expanded in full by naga and the backend writers, work that grows with
+ * the square of its length - 5000 links took 6 s and 10000 took 24 s on
+ * the event loop, uncharged, and a few hundred crashed Metal's compiler
+ * service (pipeline creation then fails). Real shaders nest types a few
+ * levels deep; 64 keeps the work negligible and is ~4x below where the
+ * Metal compiler first failed (between 200 and 300 aliases). */
+#ifndef HL_GPU_WGSL_TYPE_DEPTH_MAX
+#define HL_GPU_WGSL_TYPE_DEPTH_MAX 64
+#endif
+
 #endif /* HL_LIMITS_GPU_H */

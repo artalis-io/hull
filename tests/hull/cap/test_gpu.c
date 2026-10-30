@@ -47,7 +47,7 @@ UTEST(hull_cap_gpu, compile_no_gpu)
 {
     HlGpuCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
-    int rc = hl_cap_gpu_compile(&ctx, 0, "test", "@compute fn main() {}", 22);
+    int rc = hl_cap_gpu_compile(&ctx, 0, "test", "@compute fn main() {}", 21);
     ASSERT_EQ(HL_GPU_ERR_NOT_AVAILABLE, rc);
 }
 
@@ -2050,6 +2050,341 @@ UTEST(hull_cap_gpu_audit36, real_device_survives)
         EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, name, src, len));
         free(src);
     }
+    hl_cap_gpu_destroy(&ctx);
+}
+#endif /* HL_ENABLE_GPU */
+
+/* ── Audit 37: the pre-checks read the source exactly as naga does ────
+ *
+ * WGSL ends a line comment at VT, FF, NEL, LS and PS as well as LF / CR.
+ * A reader that ended it only at LF / CR skipped the rest of such a line
+ * while naga parsed it, so a deep chain hidden there crashed the process.
+ * Also: `else if` chains nest without braces (block depth), and alias /
+ * struct chains nest types across declarations (type depth). */
+
+static const char *const a37_terms[] = {
+    "\v", "\f", "\xC2\x85", "\xE2\x80\xA8", "\xE2\x80\xA9",
+};
+
+#define A37_N (sizeof(a37_terms) / sizeof(a37_terms[0]))
+
+/* The audit-36 crash chain, hidden from a reader that does not end a line
+ * comment at @p term. */
+static char *a37_hidden(const char *term, size_t terms)
+{
+    char head[512];
+    snprintf(head, sizeof(head),
+             "@group(0) @binding(0) var<storage, read_write> o: array<f32>;\n"
+             "@compute @workgroup_size(1) fn main() { var y = o[0]; "
+             "// hidden%s o[0] = y", term);
+    return a36_chain(head, " + y", terms, "; }");
+}
+
+/* An `if` followed by @p links `else if` links, in main(). */
+static char *a37_elseif(size_t links)
+{
+    return a36_chain("@group(0) @binding(0) var<storage, read_write> o: array<f32>;\n"
+                     "@compute @workgroup_size(1) fn main() { "
+                     "if (o[0] > 0.0) { o[0] = 1.0; }",
+                     " else if (o[0] > 0.0) { o[0] = 1.0; }", links, " }");
+}
+
+/* `alias A0 = f32; alias A1 = array<A0, 1>; ...` up to A<links>, in
+ * declaration order or reversed. */
+static char *a37_aliases(size_t links, int reversed)
+{
+    size_t cap = 64 * (links + 4);
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    size_t off = 0;
+    if (!reversed) off += (size_t)snprintf(s + off, cap - off, "alias A0 = f32;\n");
+    for (size_t k = 1; k <= links; k++) {
+        size_t i = reversed ? links + 1 - k : k;
+        off += (size_t)snprintf(s + off, cap - off,
+                                "alias A%zu = array<A%zu, 1>;\n", i, i - 1);
+    }
+    if (reversed) off += (size_t)snprintf(s + off, cap - off, "alias A0 = f32;\n");
+    snprintf(s + off, cap - off,
+             "@compute @workgroup_size(1) fn main() { var x: A%zu; }\n", links);
+    return s;
+}
+
+/* Valid WGSL using every blankspace character, comments ended by each line
+ * break, and a non-ASCII identifier. */
+static const char a37_blank_src[] =
+    "@group(0) @binding(0) var<storage, read_write> o: array<f32>;\n"
+    "@compute @workgroup_size(1) fn main() { "
+    "var\xC2\x85y\xE2\x80\x8E=\xE2\x80\x8Fo[0];\v\f"
+    "// c1\v o[0] = y;// c2\f o[0] = y;// c3\xC2\x85 o[0] = y;"
+    "// c4\xE2\x80\xA8 o[0] = y;// c5\xE2\x80\xA9 o[0] = y;\r"
+    "/* \"quoted\" #x $y ? \\ ` ' */ let \xC3\xA9t\xC3\xA9 = y; "
+    "o[0] = \xC3\xA9t\xC3\xA9;\xE2\x80\xA8\xE2\x80\xA9 }";
+
+static int a37_check(const char *wgsl)
+{
+    const char *why = NULL;
+    return hl_gpu_wgsl_precheck(wgsl, strlen(wgsl), &why);
+}
+
+UTEST(hull_cap_gpu_audit37, line_comment_terminators_hide_nothing)
+{
+    for (size_t k = 0; k < A37_N; k++) {
+        char *src = a37_hidden(a37_terms[k], 20000);
+        ASSERT_TRUE(src != NULL);
+        EXPECT_TRUE(a36_depth(src) > HL_GPU_WGSL_EXPR_DEPTH_MAX);
+        const char *why = NULL;
+        EXPECT_EQ(-1, hl_gpu_wgsl_precheck(src, strlen(src), &why));
+        EXPECT_TRUE(why != NULL);
+        free(src);
+    }
+    /* A comment ends at the terminator: what follows is code, counted. */
+    for (size_t k = 0; k < A37_N; k++) {
+        char src[128];
+        snprintf(src, sizeof(src), "// c%slet x = a + b * c;", a37_terms[k]);
+        EXPECT_EQ((size_t)3, a36_depth(src));
+    }
+    /* ...but U+200E / U+200F are blankspace, not line breaks. */
+    EXPECT_EQ((size_t)0, a36_depth("// c\xE2\x80\x8E let x = a + b * c;"));
+    EXPECT_EQ((size_t)0, a36_depth("// c\xE2\x80\x8F let x = a + b * c;"));
+}
+
+UTEST(hull_cap_gpu_audit37, layout_sees_past_every_terminator)
+{
+    for (size_t k = 0; k < A37_N; k++) {
+        char src[256];
+        snprintf(src, sizeof(src),
+                 "@group(0) @binding(0) var<storage> a: array<u32>; // c%s"
+                 "@group(0) @binding(1) var<storage> b: array<u32>;\n",
+                 a37_terms[k]);
+        ASSERT_EQ(0, a35_layout(src));
+        EXPECT_EQ(2, a35_pipe.decl_count);
+        EXPECT_TRUE(a35_decl(1) != NULL);
+    }
+    /* Blankspace of every kind between the tokens, non-ASCII names. */
+    ASSERT_EQ(0, a35_layout(
+        "@group(0)\xC2\x85@binding(0)\xE2\x80\x8Evar<storage>\xE2\x80\x8F"
+        "donn\xC3\xA9" "es\xE2\x80\xA8:\xE2\x80\xA9" "array<u32>;\v\f"
+        "@group(0) @binding(1) var t\xC3\xA9x: texture_2d<f32>;\n"));
+    EXPECT_EQ(2, a35_pipe.decl_count);
+    ASSERT_TRUE(a35_decl(0) && a35_decl(1));
+    EXPECT_EQ(HL_GPU_BIND_STORAGE, a35_decl(0)->kind);
+    EXPECT_EQ(HL_GPU_BIND_TEXTURE, a35_decl(1)->kind);
+}
+
+UTEST(hull_cap_gpu_audit37, legitimate_blankspace_accepted)
+{
+    EXPECT_EQ(0, a37_check(a37_blank_src));
+    EXPECT_TRUE(a36_depth(a37_blank_src) < 8);
+    /* The examples' shader files too. */
+    for (size_t k = 0; k < sizeof(a36_examples) / sizeof(a36_examples[0]); k++) {
+        size_t len = 0;
+        char *src = a36_read_file(a36_examples[k], &len);
+        ASSERT_TRUE(src != NULL);
+        const char *why = "unset";
+        EXPECT_EQ(0, hl_gpu_wgsl_precheck(src, len, &why));
+        EXPECT_TRUE(why == NULL);
+        free(src);
+    }
+}
+
+/* Every WGSL shader embedded in an example app or the gpu context doc
+ * (Lua long strings, JS template literals, ```wgsl fences) passes. */
+static const char *const a37_hosts[] = {
+    "examples/gpu_pipeline/app.lua",
+    "examples/compute_gpu_chain/app.lua",
+    "examples/gpu_search/app.lua",
+    "examples/gpu_search/app.js",
+    "stdlib/context/gpu.md",
+};
+
+UTEST(hull_cap_gpu_audit37, embedded_example_shaders_accepted)
+{
+    static const char *const opens[]  = { "[[\n", "`\n", "```wgsl\n" };
+    static const char *const closes[] = { "\n]]", "\n`", "\n```" };
+    size_t found = 0;
+    for (size_t h = 0; h < sizeof(a37_hosts) / sizeof(a37_hosts[0]); h++) {
+        size_t len = 0;
+        char *src = a36_read_file(a37_hosts[h], &len);
+        ASSERT_TRUE(src != NULL);
+        for (size_t m = 0; m < 3; m++) {
+            const char *p = src;
+            while ((p = strstr(p, opens[m])) != NULL) {
+                p += strlen(opens[m]);
+                const char *e = strstr(p, closes[m]);
+                if (!e) break;
+                size_t n = (size_t)(e - p);
+                char *body = malloc(n + 1);
+                ASSERT_TRUE(body != NULL);
+                memcpy(body, p, n);
+                body[n] = '\0';
+                if (strstr(body, "fn ") && (strstr(body, "@compute") ||
+                                            strstr(body, "@group"))) {
+                    const char *why = NULL;
+                    EXPECT_EQ(0, hl_gpu_wgsl_precheck(body, n, &why));
+                    if (why) printf("%s: %s\n", a37_hosts[h], why);
+                    found++;
+                }
+                free(body);
+                p = e + strlen(closes[m]);
+            }
+        }
+        free(src);
+    }
+    EXPECT_TRUE(found >= 5);
+}
+
+UTEST(hull_cap_gpu_audit37, unclassifiable_bytes_refused)
+{
+    static const struct { const char *s; size_t len; } bad[] = {
+#define A37_S(x) { x, sizeof(x) - 1 }
+        A37_S("let x = \"s\";"), A37_S("let x = 'c';"), A37_S("#define X 1"),
+        A37_S("let $x = 1;"), A37_S("let x = a ? b : c;"),
+        A37_S("let x = a \\ b;"), A37_S("let x = `t`;"),
+        A37_S("let x = 1;\x01"), A37_S("let x = 1;\x7f"),
+        A37_S("let x\0 = 1;"),                      /* NUL outside a comment */
+        A37_S("let x = 1; \xFF"), A37_S("let \xC0\x80 = 1;"),
+        A37_S("let \xED\xA0\x80 = 1;"), A37_S("let x = 1; \xE2\x80"),
+        A37_S("// \xFF in a comment\n"),            /* not UTF-8 at all */
+#undef A37_S
+    };
+    for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
+        EXPECT_EQ(HL_GPU_WGSL_UNREADABLE, hl_gpu_wgsl_complexity(bad[k].s, bad[k].len));
+        EXPECT_EQ(HL_GPU_WGSL_UNREADABLE, hl_gpu_wgsl_block_depth(bad[k].s, bad[k].len));
+        EXPECT_EQ(HL_GPU_WGSL_UNREADABLE, hl_gpu_wgsl_type_depth(bad[k].s, bad[k].len));
+        const char *why = NULL;
+        EXPECT_EQ(-1, hl_gpu_wgsl_precheck(bad[k].s, bad[k].len, &why));
+    }
+    /* Those characters inside a comment are only comment text. */
+    EXPECT_EQ((size_t)0, a36_depth("// \"q\" 'c' #x $y ? \\ ` \x01\n/* \x7f */"));
+}
+
+UTEST(hull_cap_gpu_audit37, else_if_chains_nest)
+{
+    /* fn body 1, if body 2, each link one deeper. */
+    char *c500 = a37_elseif(500);
+    char *c5500 = a37_elseif(5500);
+    ASSERT_TRUE(c500 && c5500);
+    EXPECT_EQ((size_t)502, hl_gpu_wgsl_block_depth(c500, strlen(c500)));
+    EXPECT_TRUE(hl_gpu_wgsl_block_depth(c5500, strlen(c5500)) >
+                HL_GPU_WGSL_BLOCK_DEPTH_MAX);
+    /* The expression estimate never saw it. */
+    EXPECT_TRUE(a36_depth(c5500) < 16);
+    EXPECT_EQ(0, a37_check(c500));
+    EXPECT_EQ(-1, a37_check(c5500));
+    free(c500); free(c5500);
+
+    EXPECT_EQ((size_t)0, hl_gpu_wgsl_block_depth(NULL, 0));
+#define A37_BD(s) hl_gpu_wgsl_block_depth(s, strlen(s))
+    EXPECT_EQ((size_t)1, A37_BD("fn f() {}"));
+    EXPECT_EQ((size_t)3, A37_BD("fn f() { { {} } }"));
+    /* else: the if's level; else if: one deeper; comments in between. */
+    EXPECT_EQ((size_t)2, A37_BD("fn f() { if a {} else {} }"));
+    EXPECT_EQ((size_t)3, A37_BD("fn f() { if a {} /* c */ else if b {} }"));
+    EXPECT_EQ((size_t)4, A37_BD("fn f() { if a {} else if b {} else if c {} else {} }"));
+    /* A chain inside nested blocks adds to them. */
+    EXPECT_EQ((size_t)5, A37_BD("fn f() { loop { if a {} else if b {} else if c {} } }"));
+    /* Separate statements do not. */
+    EXPECT_EQ((size_t)2, A37_BD("fn f() { if a {} if b {} if c {} }"));
+#undef A37_BD
+}
+
+UTEST(hull_cap_gpu_audit37, type_chains_nest)
+{
+#define A37_TD(s) hl_gpu_wgsl_type_depth(s, strlen(s))
+    EXPECT_EQ((size_t)0, hl_gpu_wgsl_type_depth(NULL, 0));
+    EXPECT_EQ((size_t)0, A37_TD("fn main() {}"));
+    EXPECT_EQ((size_t)1, A37_TD("alias F = f32;"));
+    EXPECT_EQ((size_t)3, A37_TD("alias M = array<array<f32, 4>, 4>;"));
+    EXPECT_EQ((size_t)2, A37_TD("struct S { a: f32, @align(16) b: u32 }"));
+    /* A member named like a type is not a reference to it. */
+    EXPECT_EQ((size_t)2, A37_TD("struct S { S: f32 }"));
+    /* A comparison inside a size expression does not close a template. */
+    EXPECT_EQ((size_t)2, A37_TD("alias V = array<f32, (2 > 1)>;"));
+    EXPECT_TRUE(A37_TD("struct L { c: vec3<f32> } "
+                       "struct Scene { l: array<L, 4>, n: u32 }") < 8);
+    /* Mutual recursion (WGSL refuses it) counts as too deep. */
+    EXPECT_TRUE(A37_TD("struct A { b: B } struct B { a: A }") >
+                HL_GPU_WGSL_TYPE_DEPTH_MAX);
+
+    /* A<k> nests k + 1 levels, in either declaration order. */
+    for (int rev = 0; rev <= 1; rev++) {
+        char *ok = a37_aliases(HL_GPU_WGSL_TYPE_DEPTH_MAX - 1, rev);
+        char *deep = a37_aliases(HL_GPU_WGSL_TYPE_DEPTH_MAX, rev);
+        char *huge = a37_aliases(5000, rev);
+        ASSERT_TRUE(ok && deep && huge);
+        EXPECT_EQ((size_t)HL_GPU_WGSL_TYPE_DEPTH_MAX, A37_TD(ok));
+        EXPECT_EQ(0, a37_check(ok));
+        EXPECT_TRUE(A37_TD(deep) > HL_GPU_WGSL_TYPE_DEPTH_MAX);
+        EXPECT_EQ(-1, a37_check(deep));
+        EXPECT_EQ(-1, a37_check(huge));
+        free(ok); free(deep); free(huge);
+    }
+    /* A struct chain likewise. */
+    char st[8192];
+    size_t off = (size_t)snprintf(st, sizeof(st), "struct S0 { v: f32 }\n");
+    for (int k = 1; k <= 100; k++)
+        off += (size_t)snprintf(st + off, sizeof(st) - off,
+                                "struct S%d { v: S%d }\n", k, k - 1);
+    EXPECT_TRUE(A37_TD(st) > HL_GPU_WGSL_TYPE_DEPTH_MAX);
+#undef A37_TD
+}
+
+UTEST(hull_cap_gpu_audit37, compile_refuses_before_backend)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = mock_compile;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    mock_compiles = 0;
+
+    char *srcs[A37_N + 2];
+    for (size_t k = 0; k < A37_N; k++) srcs[k] = a37_hidden(a37_terms[k], 20000);
+    srcs[A37_N] = a37_elseif(5500);
+    srcs[A37_N + 1] = a37_aliases(2000, 1);
+    for (size_t k = 0; k < A37_N + 2; k++) {
+        ASSERT_TRUE(srcs[k] != NULL);
+        EXPECT_EQ(HL_GPU_ERR_SHADER,
+                  hl_cap_gpu_compile(ctx, -1, "bad", srcs[k], strlen(srcs[k])));
+        free(srcs[k]);
+    }
+    const char *quote = "fn main() { let x = \"s\"; }";
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "q", quote, strlen(quote)));
+    EXPECT_EQ(0, mock_compiles);
+
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "blank", a37_blank_src,
+                                            strlen(a37_blank_src)));
+    EXPECT_EQ(1, mock_compiles);
+    mock_free(ctx);
+}
+
+#ifdef HL_ENABLE_GPU
+/* On a real device (skipped without an adapter): each source that crashed
+ * naga or held the loop is refused and the process survives; the valid
+ * blankspace shader and a type chain at the limit still compile. */
+UTEST(hull_cap_gpu_audit37, real_device_survives)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+
+    char *srcs[A37_N + 2];
+    for (size_t k = 0; k < A37_N; k++) srcs[k] = a37_hidden(a37_terms[k], 20000);
+    srcs[A37_N] = a37_elseif(5500);
+    srcs[A37_N + 1] = a37_aliases(2000, 0);
+    for (size_t k = 0; k < A37_N + 2; k++) {
+        ASSERT_TRUE(srcs[k] != NULL);
+        char name[16];
+        snprintf(name, sizeof(name), "bad%zu", k);
+        EXPECT_EQ(HL_GPU_ERR_SHADER,
+                  hl_cap_gpu_compile(&ctx, -1, name, srcs[k], strlen(srcs[k])));
+        free(srcs[k]);
+    }
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "blank", a37_blank_src,
+                                            strlen(a37_blank_src)));
+    char *ok = a37_aliases(HL_GPU_WGSL_TYPE_DEPTH_MAX - 1, 1);
+    ASSERT_TRUE(ok != NULL);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "types", ok, strlen(ok)));
+    free(ok);
     hl_cap_gpu_destroy(&ctx);
 }
 #endif /* HL_ENABLE_GPU */
