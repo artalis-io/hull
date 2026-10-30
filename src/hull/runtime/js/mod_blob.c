@@ -473,8 +473,12 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
         /* Live handles are capped (HL_BLOB_MAX_LIVE_HANDLES, audit 34), and
          * one the app dropped without finalize / abort holds its slot until
          * collected: collect once and retry, as fs.mmap does. A finalizer
-         * runs no JS, so the store in hand is still current. */
-        JS_RunGC(JS_GetRuntime(ctx));
+         * runs no JS, so the store in hand is still current. The
+         * collection is charged first (audit 39). */
+        if (hl_js_gc_for_retry(ctx)) {
+            JS_FreeValue(ctx, obj);
+            return JS_EXCEPTION;
+        }
         open_rc = durable
             ? hl_cap_blob_writer_open_durable(b, expected, &w)
             : hl_cap_blob_writer_open        (b, expected, &w);
@@ -606,7 +610,11 @@ static JSValue js_blob_reader_new(JSContext *ctx, JSValueConst this_val,
     HlBlobReader *r = NULL;
     int rc = hl_cap_blob_reader_open(b, id, track, &r);
     if (rc == HL_BLOB_ERR_TOO_MANY) {    /* audit 34: see the writer */
-        JS_RunGC(JS_GetRuntime(ctx));
+        if (hl_js_gc_for_retry(ctx)) {   /* charged (audit 39) */
+            JS_FreeCString(ctx, id);
+            JS_FreeValue(ctx, obj);
+            return JS_EXCEPTION;
+        }
         rc = hl_cap_blob_reader_open(b, id, track, &r);
     }
     JS_FreeCString(ctx, id);

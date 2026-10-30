@@ -8,6 +8,7 @@
 #include "hull/cap/crypto_key.h"
 #include "hull/cap/env.h"
 #include "hull/limits/core.h"
+#include "hull/shared/work_charge.h"   /* hl_work_x509_units (audit 39) */
 #include "../../utils/base64.h"
 #include "../../utils/hex.h"
 #include "protected.h"   /* pushes that cannot leak or skip a scrub */
@@ -556,6 +557,10 @@ static int lua_crypto_x509_pubkey_pem(lua_State *L)
 {
     size_t der_len;
     const char *der = luaL_checklstring(L, 1, &der_len);
+    /* The DER parse walks every byte and allocates per name entry: charged
+     * before it runs (audit 39 - a crafted 64 KiB certificate parsed in
+     * ~0.55 ms for ~10 units). */
+    lua_hlwork(L, (size_t)hl_work_x509_units(der_len), 0);
 
     /* mbedtls_pk_write_pubkey_pem needs ~800 bytes for RSA-2048 SPKI
      * and ~2 KiB for RSA-4096; 4 KiB is generous and stack-safe. */

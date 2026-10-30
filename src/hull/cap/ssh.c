@@ -42,12 +42,42 @@ static void ssh_slot_give(void *unused)
 
 int hl_cap_ssh_live_streams(void) { return atomic_load(&g_ssh_live); }
 
+/* A name a relay header or a resolver can take as one host: letters,
+ * digits, '-', '.', '_' (a DNS name), or an IP literal (hex digits, ':' and
+ * '.'). A grant matched by glob ("*.example.com") admitted
+ * "evil,a.example.com", which the stdlib then wrote into the relay's
+ * destination header, where a relay splitting on ',' read "evil" (audit 39).
+ * NULL (absent) is left to the grant check. */
+static int ssh_host_ok(const char *h)
+{
+    if (!h) return 1;
+    size_t n = strlen(h);
+    if (n == 0 || n > 253) return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)h[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+            c == ':')
+            continue;
+        return 0;
+    }
+    return 1;
+}
+
 int hl_cap_ssh_open(const HlSshEnv *env, const HlSshOpen *req,
                     HlNetStream **out, const char **why)
 {
     if (out) *out = NULL;
     if (why) *why = NULL;
     if (!env || !req || !out) return HL_NET_E_INVAL;
+
+    if (!ssh_host_ok(req->host) ||
+        (req->via && (!ssh_host_ok(req->via_host) ||
+                      (req->via_tls_hostname && req->via_tls_hostname[0] &&
+                       !ssh_host_ok(req->via_tls_hostname))))) {
+        if (why) *why = "host must be a host name or an IP address";
+        return HL_NET_E_DENIED;
+    }
 
     /* The grants, before any name resolution and before a socket exists.
      *

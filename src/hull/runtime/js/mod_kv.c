@@ -331,8 +331,12 @@ static JSValue js_kv_open(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     if (rc == HL_KV_ERR_TOO_MANY) {
         /* Live connections are capped (HL_KV_OPEN_MAX, audit 30), and a store
          * the app dropped without close() holds its slot until collected:
-         * collect once and retry, as fs.mmap does for its guard slots. */
-        JS_RunGC(JS_GetRuntime(ctx));
+         * collect once and retry, as fs.mmap does for its guard slots.
+         * The collection is charged first (audit 39). */
+        if (hl_js_gc_for_retry(ctx)) {
+            JS_FreeCString(ctx, dsn);
+            return JS_EXCEPTION;
+        }
         rc = hl_cap_kv_open(&c, dsn, timeout_ms, js ? js->base.alloc : NULL, err, sizeof err);
     }
     JS_FreeCString(ctx, dsn);

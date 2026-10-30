@@ -215,6 +215,10 @@ int hl_cap_tui_write(HlTuiCtx *ctx, const char *s, size_t len);
  * shadow == pending. */
 int hl_cap_tui_flush(HlTuiCtx *ctx);
 
+/* The bytes the last hl_cap_tui_flush wrote to the terminal (0 for an
+ * unchanged frame), for the bindings to charge (audit 39). */
+size_t hl_cap_tui_last_flush_bytes(const HlTuiCtx *ctx);
+
 /* ── Input ──────────────────────────────────────────────────────── */
 
 /* Block until an event is available or `timeout_ms` elapses. Uses

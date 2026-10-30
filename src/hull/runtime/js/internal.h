@@ -310,6 +310,16 @@ JSValue hl_js_budget_throw(JSContext *ctx);
  * and the binding returns JS_EXCEPTION without doing the work. The Lua twin
  * is lua_hlcharge (runtime/lua/mod_crypto.c crypto_charge). */
 int hl_js_budget_charge(JSContext *ctx, uint64_t units);
+/* Collect once before a binding retries a call refused at a handle cap
+ * (fs.mmap's guard slots, blob handles, kv connections, ws clients, compute
+ * buffers): objects the app dropped hold their slots until collected. A full
+ * JS_RunGC costs time in proportion to the heap, so it is charged first -
+ * one unit per 64 bytes the runtime holds (audit 39: uncharged, a refused
+ * call in a loop over a 150k-object heap cost 8.6 ms for ~3,000 units).
+ * 0 after the collection, or -1 with the uncatchable interrupt pending and
+ * nothing collected. Every retry site goes through this, never a bare
+ * JS_RunGC. */
+int hl_js_gc_for_retry(JSContext *ctx);
 /* hl_js_budget_charge as an HlFsChargeFn (cap/fs_resolve.h), @p ud the
  * JSContext: for the fs capability's charge scope (mod_fs.c, audit 38). */
 int hl_js_fs_charge(void *ud, uint64_t units);

@@ -49,6 +49,7 @@
 /* VFS: O(log n) lookups into sorted entry arrays */
 #include "hull/vfs.h"
 #include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
+#include "hull/shared/work_charge.h"   /* hl_work_bulk_units (audit 39) */
 
 /* ── Forward declarations ───────────────────────────────────────────── */
 
@@ -196,6 +197,19 @@ int hl_js_budget_charge(JSContext *ctx, uint64_t units)
         hl_js_budget_throw(ctx);
         return -1;
     }
+    return 0;
+}
+
+int hl_js_gc_for_retry(JSContext *ctx)
+{
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    /* A full collection walks every live object: charge it from the heap's
+     * size, at the allocator's rate, before it runs (audit 39). */
+    if (hl_js_budget_charge(ctx, hl_work_bulk_units(JS_GetMallocSize(rt))))
+        return -1;
+    JS_RunGC(rt);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js) js->offheap_gc_debt = 0;
     return 0;
 }
 

@@ -410,10 +410,21 @@ function Conn:stats() return inner[self]:stats() end
 -- it reaches - that is the caller's statement, not a default.
 local DEFAULT_DESTINATION_HEADER = "Cf-Access-Jump-Destination"
 
--- host:port as a relay reads it; an IPv6 literal is bracketed.
+-- host:port as a relay reads it; an IPv6 literal is bracketed. The port is
+-- the integer M.connect checked, written with %d (audit 39: tostring of a
+-- string port "22e2" put "host:22e2" in the header while the grant was
+-- checked against 2200, and a relay reading the port with atoi dialled 22).
+-- The host must be one name - a DNS name or an IP literal - since a grant
+-- matched by glob admitted "evil,a.example.com", and a relay splitting the
+-- header on ',' read "evil".
 local function destination_value(host, port)
-    if host:find(":", 1, true) then return "[" .. host .. "]:" .. tostring(port) end
-    return host .. ":" .. tostring(port)
+    if math.type(port) ~= "integer" then return nil end
+    if type(host) ~= "string" or host == "" or #host > 253
+       or host:find("[^%w%.%-_:]") then
+        return nil
+    end
+    if host:find(":", 1, true) then return string.format("[%s]:%d", host, port) end
+    return string.format("%s:%d", host, port)
 end
 
 -- The headers to send: the caller's, with the destination header checked
@@ -434,6 +445,10 @@ local function tunnel_headers(tunnel, host, port)
     if name ~= false then checked[name:lower()] = true end
 
     local want = destination_value(host, port)
+    if not want then
+        return nil, { code = "denied", detail = "the destination must be a host "
+            .. "name or IP address and an integer port" }
+    end
     local seen = false
     for _, line in ipairs(out) do
         -- A header line is `token ":" value` (RFC 9110): one with no name,
@@ -607,6 +622,18 @@ function M.connect(opts)
     -- server that accepts the socket and then stalls in any of them runs it
     -- out, rather than holding the caller forever.
     local timeout = opts.timeout_ms or M.CONNECT_TIMEOUT_MS
+    -- Integers, not numeric strings or floats (audit 39): the binding checks
+    -- the grant against the integer, and a relay header is written from it.
+    if opts.port ~= nil and math.type(opts.port) ~= "integer" then
+        error("ssh.connect: port must be an integer", 2)
+    end
+    if math.type(timeout) ~= "integer" then
+        error("ssh.connect: timeout_ms must be an integer", 2)
+    end
+    if type(opts.tunnel) == "table" and opts.tunnel.port ~= nil
+       and math.type(opts.tunnel.port) ~= "integer" then
+        error("ssh.connect: tunnel.port must be an integer", 2)
+    end
     if opts.software ~= nil then
         local sok, why = pcall(packet.build_ident, opts.software)
         if not sok then

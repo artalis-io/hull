@@ -7090,6 +7090,44 @@ UTEST(lua_ssh_bridge, an_out_of_range_port_is_refused_not_wrapped)
     cleanup_lua();
 }
 
+UTEST(lua_ssh_bridge, ports_must_be_lua_integers_audit39)
+{
+    /* lua_tointegerx converted "22e2" to 2200 - the port the grant was
+     * checked against - while the stdlib wrote "host:22e2" into a relay's
+     * destination header, which a relay reading it with atoi dialled as 22.
+     * Strings and floats are refused now, for port, via.port and
+     * timeout_ms; and a host that is not one name (a glob grant admitted
+     * "evil,a.example.com") is refused before any grant or dial. */
+    init_lua();
+    ASSERT_EQ(ssh_declare(
+        "app.manifest({ modules = { 'hull/ssh@1' },\n"
+        "  ssh = { connect = { hosts = { 'spark.local', '*.example.com' },\n"
+        "                      ports = { 22, 2200 }, users = { 'operator' } },\n"
+        "          tunnel = { hosts = { 'r.example.com' }, ports = { 443 } } } })\n"), 0);
+    const char *cases[] = {
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = '22e2', user = 'operator' }))",
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 22.0, user = 'operator' }))",
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 22, user = 'operator', timeout_ms = '1000' }))",
+        "return select(2, require('hull.ssh._stream').connect({ host = 'spark.local',"
+        " port = 22, user = 'operator', via = { host = 'r.example.com', port = '443' } }))",
+        "return (select(2, require('hull.ssh._stream').connect({ host = 'evil,a.example.com',"
+        " port = 22, user = 'operator', via = { host = 'r.example.com', port = 443 } })))",
+    };
+    const char *want[] = { "port must be", "port must be", "timeout_ms must be",
+                           "via.port must be", "host must be a host name" };
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ(run_as_stdlib(lua_rt.L, cases[i]), LUA_OK);
+        const char *err = lua_tostring(lua_rt.L, -1);
+        EXPECT_TRUE_MSG(err && strstr(err, want[i]), cases[i]);
+        lua_settop(lua_rt.L, 0);
+    }
+    ssh_undeclare();
+    cleanup_lua();
+}
+
 /* A stream the SSH stdlib has connected to a loopback listener, on a real
  * loop, with the manifest applied: what every bridge test below starts from.
  * The handle is the global H, shared by the coroutines a test starts. */
@@ -14890,6 +14928,73 @@ UTEST(lua_audit39, render_string_is_charged_and_not_persisted)
     cleanup_lua_caps();
     if (saved_home[0]) setenv("HOME", saved_home, 1);
     hl_lua_template_cache_reset();
+}
+
+/* ── Audit 39: certificate parses and sync HTTP requests ─────────────
+ *
+ * crypto.x509_pubkey_pem parsed up to 64 KiB of DER for ~10 units (a crafted
+ * certificate of ~5,400 names took ~0.55 ms), and a sync http.get to a
+ * refused port did DNS + socket + connect for ~7 units: both loops ran for
+ * minutes per budget. Each is charged before the work now
+ * (hull/shared/work_charge.h): a loop trips a small budget, pcall does not
+ * catch it, and ordinary use still fits. */
+
+UTEST(lua_audit39, x509_parse_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    /* The charge is by length, before the parse: 60 KB of junk costs the
+     * same as a crafted certificate of that size (~31k units a call). */
+    EXPECT_NE(audit10_run(
+        "local der = string.rep('\48', 60000) "
+        "for i = 1, 1000 do crypto.x509_pubkey_pem(der) end return 1",
+        5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run(
+        "local der = string.rep('\48', 60000) "
+        "for i = 1, 1000 do pcall(crypto.x509_pubkey_pem, der) end return 1",
+        5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* A certificate-sized input (~2 KB) is ~2k units: 100 fit in 1M. */
+    EXPECT_EQ(audit10_run(
+        "local der = string.rep('\48', 2048) "
+        "for i = 1, 100 do assert(crypto.x509_pubkey_pem(der) == nil) end return 1",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_audit39, sync_http_requests_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static const char *hosts[] = { "127.0.0.1" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    /* Port 1 refuses the connect: each call did real work for ~7 units. */
+    static const char *const loops[] = {
+        "for i = 1, 2000 do pcall(http.get, 'http://127.0.0.1:1/x') end return 1",
+        "for i = 1, 2000 do pcall(http.post, 'http://127.0.0.1:1/x', '') end return 1",
+        "for i = 1, 2000 do pcall(http.delete, 'http://127.0.0.1:1/x') end return 1",
+        "for i = 1, 2000 do pcall(http.request, 'GET', 'http://127.0.0.1:1/x') end return 1",
+        /* refused by the allowlist: the floor is charged before the check */
+        "for i = 1, 2000 do pcall(http.get, 'http://x.invalid/') end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code, "local http = require('hull.http-client') %s",
+                 loops[i]);
+        EXPECT_NE_MSG(audit10_run(code, 5000000, err, sizeof err), LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    /* A handful of requests still fits a small budget. */
+    EXPECT_EQ(audit10_run(
+        "local http = require('hull.http-client') "
+        "for i = 1, 20 do assert(not pcall(http.get, 'http://127.0.0.1:1/x')) end "
+        "return 1", 1000000, err, sizeof err), LUA_OK);
+    lua_rt.base.http_cfg = NULL;
+    cleanup_lua_caps();
 }
 
 UTEST_MAIN();

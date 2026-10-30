@@ -354,6 +354,14 @@ allocator has no context) and keeps QuickJS's own slab allocator and memory
 accounting. A runtime with no work handler pays one test per charge and
 behaves as upstream (the JS source frontend's tooling session sets none).
 
+Audit 39 added `JS_GetMallocSize(rt)`, an O(1) read of the bytes the runtime
+has allocated. A binding that collects before retrying a refused call (a
+handle cap held by objects the app dropped: `fs.mmap`, `blob`, `kv.open`,
+`ws.connect`, compute buffers) runs a full `JS_RunGC`, whose cost grows with
+the heap; Hull charges it from this size (`hl_js_gc_for_retry`, one unit per
+64 bytes) BEFORE it collects - uncharged, a refused call in a loop over a
+big heap cost ~8.6 ms for ~3,000 units.
+
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit10.builtin_work_is_charged` (each case trips a 1M budget within
 seconds; several never return without the patch),

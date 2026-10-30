@@ -678,13 +678,14 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
      * connection was not freed yet goes with a collection, so at the cap
      * collect once and look again. The object owns the slot from here: its
      * finalizer gives it back. */
-    if (js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
-        JS_RunGC(JS_GetRuntime(ctx));
-    if (js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE) {
+    int gc_tripped = js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE &&
+                     hl_js_gc_for_retry(ctx) != 0;   /* charged (audit 39) */
+    if (gc_tripped || js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE) {
         JS_FreeCString(ctx, url);
         JS_FreeValue(ctx, ud->self_ref);
         ud->self_ref = JS_UNDEFINED;
         JS_FreeValue(ctx, obj);
+        if (gc_tripped) return JS_EXCEPTION;
         return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "ws.connect: too many live WebSocket "
                                   "clients (at most %d per VM)",
                                   HL_WS_CLIENT_MAX_LIVE));

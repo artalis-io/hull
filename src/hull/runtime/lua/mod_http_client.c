@@ -245,6 +245,24 @@ static void lua_push_http_response_owned(lua_State *L, KlHttpClientResponse *res
     if (st != LUA_OK) lua_error(L);
 }
 
+/* The response, pushed and charged: its body was received, decompressed
+ * and copied into the VM, 1 unit per 8 bytes (audit 39). Known only once it
+ * arrived, so charged after; the request's floor was charged before. */
+static void lua_push_http_response_charged(lua_State *L, KlHttpClientResponse *resp)
+{
+    size_t n = resp->body_len;
+    lua_push_http_response_owned(L, resp);
+    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)n), 0);
+}
+
+/* Every sync request costs DNS, a socket, a connect and maybe a TLS
+ * handshake whatever its size: a floor charged before anything is held
+ * (audit 39 - a refused connect in a pcall loop ran ~10 min per budget). */
+static void lua_http_charge_request(lua_State *L)
+{
+    lua_hlwork(L, (size_t)HL_WORK_HTTP_REQUEST_UNITS, 0);
+}
+
 /* http.request(method, url, opts?) */
 static int lua_http_request(lua_State *L)
 {
@@ -255,6 +273,7 @@ static int lua_http_request(lua_State *L)
     const char *method = luaL_checkstring(L, 1);
     const char *url = luaL_checkstring(L, 2);
     int timeout_ms = lua_http_timeout_opt(L, 3, "http.request");
+    lua_http_charge_request(L);   /* audit 39 */
 
     const char *body = NULL;
     size_t body_len = 0;
@@ -296,7 +315,7 @@ static int lua_http_request(lua_State *L)
         return luaL_error(L, "http request failed: %s",
                           kl_strerror(resp.error));
 
-    lua_push_http_response_owned(L, &resp);
+    lua_push_http_response_charged(L, &resp);
     return 1;
 }
 
@@ -309,6 +328,7 @@ static int lua_http_get(lua_State *L)
 
     const char *url = luaL_checkstring(L, 1);
     int timeout_ms = lua_http_timeout_opt(L, 2, "http.get");
+    lua_http_charge_request(L);   /* audit 39 */
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
 
@@ -332,7 +352,7 @@ static int lua_http_get(lua_State *L)
     if (rc != 0)
         return luaL_error(L, "http.get failed: %s", kl_strerror(resp.error));
 
-    lua_push_http_response_owned(L, &resp);
+    lua_push_http_response_charged(L, &resp);
     return 1;
 }
 
@@ -350,7 +370,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
         body = lua_tolstring(L, 2, &body_len);
     int timeout_ms = lua_http_timeout_opt(L, 3, "http.post/put/patch");
     /* Charged before the headers take scratch (audit 28; http.fetch's is). */
-    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)body_len), 0);
+    lua_hlwork(L, (size_t)hl_work_http_request_units(body_len), 0);
 
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
@@ -376,7 +396,7 @@ static int lua_http_body_method(lua_State *L, const char *method)
         return luaL_error(L, "http.%s failed: %s", method,
                           kl_strerror(resp.error));
 
-    lua_push_http_response_owned(L, &resp);
+    lua_push_http_response_charged(L, &resp);
     return 1;
 }
 
@@ -393,6 +413,7 @@ static int lua_http_delete(lua_State *L)
 
     const char *url = luaL_checkstring(L, 1);
     int timeout_ms = lua_http_timeout_opt(L, 2, "http.delete");
+    lua_http_charge_request(L);   /* audit 39 */
     HlHttpHeader *headers = NULL;
     int num_headers = 0;
 
@@ -417,7 +438,7 @@ static int lua_http_delete(lua_State *L)
         return luaL_error(L, "http.delete failed: %s",
                           kl_strerror(resp.error));
 
-    lua_push_http_response_owned(L, &resp);
+    lua_push_http_response_charged(L, &resp);
     return 1;
 }
 
@@ -475,6 +496,7 @@ static int lua_http_fetch(lua_State *L)
     const char *method = luaL_checkstring(L, 1);
     const char *url = luaL_checkstring(L, 2);
     int timeout_ms = lua_http_timeout_opt(L, 3, "http.fetch");
+    lua_http_charge_request(L);   /* the same floor per start (audit 39) */
 
     const char *body = NULL;
     size_t body_len = 0;

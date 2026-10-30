@@ -931,6 +931,10 @@ void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque)
    length throws at once). See Hull's docs/quickjs_patches.md. */
 typedef int JSWorkHandler(JSRuntime *rt, void *opaque, uint64_t units);
 void JS_SetWorkHandler(JSRuntime *rt, JSWorkHandler *cb, void *opaque);
+/* HULL PATCH 0005 (audit 39): the bytes the runtime has allocated now, an
+   O(1) read, so an embedder can charge an explicit JS_RunGC (whose cost
+   grows with the heap) before it runs it. */
+size_t JS_GetMallocSize(JSRuntime *rt);
 /* HULL PATCH 0006: 'flag' (or NULL) is an int another thread may set
    (atomically); while it is non-zero every call and backward jump polls
    the interrupt handler, as when the step counter runs out. It must stay

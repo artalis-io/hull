@@ -565,9 +565,14 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
 static long opt_int_in(lua_State *L, lua_Integer def, lua_Integer lo, lua_Integer hi)
 {
     if (lua_isnoneornil(L, -1)) return (long)def;
-    int ok = 0;
-    lua_Integer v = lua_tointegerx(L, -1, &ok);
-    if (!ok || v < lo || v > hi) return -1;
+    /* A Lua integer only (audit 39): lua_tointegerx also converts strings
+     * ("22e2" -> 2200, the port the grant was checked against) and floats,
+     * while the stdlib wrote the same value into a relay's destination
+     * header with tostring - "10.0.0.1:22e2", which a relay that reads the
+     * port with atoi / strtol dialled as port 22. */
+    if (!lua_isinteger(L, -1)) return -1;
+    lua_Integer v = lua_tointeger(L, -1);
+    if (v < lo || v > hi) return -1;
     return (long)v;
 }
 

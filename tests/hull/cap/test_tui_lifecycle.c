@@ -244,7 +244,45 @@ static void child_resize_then_combining(void)
     hl_cap_tui_release(ctx);
 }
 
+/* audit 39: the bindings charge a flush its frame; the cap reports what the
+ * last flush wrote - the frame the first time, nothing for an unchanged
+ * frame, the whole grid again after invalidate (a redraw). */
+static void child_flush_bytes(void)
+{
+    HlTuiCtx *ctx = NULL;
+    if (hl_cap_tui_acquire(&ctx) != 0) _exit(80);
+    if (hl_cap_tui_last_flush_bytes(ctx) != 0) _exit(81);
+    hl_cap_tui_move(ctx, 1, 1);
+    hl_cap_tui_write(ctx, "hello", 5);
+    if (hl_cap_tui_flush(ctx) != 0) _exit(82);
+    size_t first = hl_cap_tui_last_flush_bytes(ctx);
+    if (first < 5) _exit(83);
+    if (hl_cap_tui_flush(ctx) != 0) _exit(84);
+    if (hl_cap_tui_last_flush_bytes(ctx) != 0) _exit(85);
+    hl_cap_tui_invalidate(ctx);
+    if (hl_cap_tui_flush(ctx) != 0) _exit(86);
+    if (hl_cap_tui_last_flush_bytes(ctx) < 5) _exit(87);
+    if (hl_cap_tui_last_flush_bytes(NULL) != 0) _exit(88);
+    hl_cap_tui_release(ctx);
+}
+
 /* ── Tests ──────────────────────────────────────────────────────── */
+
+UTEST(tui_lifecycle_pty, flush_reports_the_bytes_it_wrote)
+{
+    int master = -1;
+    pid_t pid = spawn_pty(&master, child_flush_bytes);
+    ASSERT_GE(pid, 0);
+
+    char drainbuf[TEST_DRAIN_BUF_BYTES];
+    drain(master, drainbuf, sizeof drainbuf, TEST_DRAIN_DEADLINE_MS);
+
+    int status = 0;
+    ASSERT_TRUE(waitpid_timeout(pid, &status, TEST_CHILD_WAIT_MS));
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+    close(master);
+}
 
 /* audit 31: on a real terminal, an acquire the manifest has not admitted
  * fails EPERM and writes not one byte (no OSC 11 probe, no alt screen, so

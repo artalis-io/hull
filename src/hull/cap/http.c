@@ -10,6 +10,8 @@
 #include "hull/cap/http.h"
 #include "hull/cap/audit.h"
 #include "hull/host_match.h"
+#include "hull/cap/db_budget.h"       /* hl_db_budget_charge: a redirect hop */
+#include "hull/shared/work_charge.h"   /* HL_WORK_HTTP_REQUEST_UNITS */
 
 #include <keel/allocator.h>
 #include <keel/clock.h>
@@ -232,6 +234,17 @@ static int hl_http_sync_redirect_hop(const char *next_url, void *data)
     HlHttpSyncChain *chain = (HlHttpSyncChain *)data;
     if (hl_http_redirect_allowed(next_url, &chain->guard) != 0)
         return -1;
+    /* Each hop is another DNS lookup, connect and maybe TLS handshake: the
+     * request's floor again, charged to the calling run's budget before the
+     * hop, which a tripped run does not take (audit 39). The run's budget is
+     * bound to the thread only in DB builds (cap/db_budget.h); without one
+     * the hop is bounded by the deadline and the redirect cap alone. */
+#ifdef HL_ENABLE_DB
+    if (hl_db_budget_charge((int64_t)HL_WORK_HTTP_REQUEST_UNITS) != 0) {
+        log_warn("[hull:http] redirect not followed: the run is over its budget");
+        return -1;
+    }
+#endif
     int left = hl_http_chain_remaining_ms(chain->deadline_ms,
                                           kl_monotonic_ms());
     if (left <= 0) {
