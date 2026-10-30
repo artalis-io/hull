@@ -156,6 +156,9 @@ providers.postmark = async function(opts) {
             }
         );
     } catch (e) {
+        // A runtime refusal attempted no delivery: re-thrown with its code
+        // (audit 39), as the smtp provider does.
+        if (_refusal.code(e)) throw e;
         emailError("delivery_failed", "postmark: " + String(e));
     }
     if (!resp)
@@ -197,6 +200,9 @@ providers.sendgrid = async function(opts) {
             }
         );
     } catch (e) {
+        // A runtime refusal attempted no delivery: re-thrown with its code
+        // (audit 39), as the smtp provider does.
+        if (_refusal.code(e)) throw e;
         emailError("delivery_failed", "sendgrid: " + String(e));
     }
     if (!resp)
@@ -237,6 +243,9 @@ providers.resend = async function(opts) {
             }
         );
     } catch (e) {
+        // A runtime refusal attempted no delivery: re-thrown with its code
+        // (audit 39), as the smtp provider does.
+        if (_refusal.code(e)) throw e;
         emailError("delivery_failed", "resend: " + String(e));
     }
     if (!resp)

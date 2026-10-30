@@ -60,6 +60,26 @@ release-artifact layout).
   addresses. It now runs after that limit (and before the per-recipient one, so a probe does
   not spend the address owner's mail allowance). `docs/app_api_reference.md` said email change
   answered alike for taken and free addresses; it now says what it does.
+- **A runtime refusal could undo a workflow, dead-letter unsent mail or lose its code in
+  `retry.run`** (audit 39, both runtimes). Round 38 hands a job whose handler failed on a `busy`
+  refusal back uncounted; three stdlib paths broke that. **Workflows:** on the last attempt the
+  workflow wrapper ran the saga compensations before rethrowing, and the error kept its `busy`
+  code, so the job was handed back and re-run - and the replay returned the memoized results of
+  the steps the compensations had just undone, ending the workflow `done` with its side effects
+  reverted (a charge refunded, the shipment made). A `busy` refusal is now rethrown before any
+  compensation runs; a workflow whose compensations ran never carries a refusal code (its
+  outcome is final); and `ctx.step` no longer replays a compensated step as done outside a
+  compensation run - the workflow is dead-lettered instead. **Email:** the postmark /
+  sendgrid / resend providers wrapped a refusal as `delivery_failed`, so jobs spent attempts and
+  dead-lettered mail that was never attempted; they now rethrow it with its code, as the smtp
+  provider does. **retry.run:** the Lua twin re-raised at level 1, prepending `hull.retry:N: `
+  (the refusal prefix then no longer matched, and ordinary errors were double-prefixed); it
+  re-raises at level 0 now, and neither runtime retries a refusal any more (`wait_refused`
+  recurs every time; `busy` is left to the caller, so jobs hands back and the outbox gives its
+  claim back). **Bounded hand-backs:** the code is one an app can also produce (a Lua error string
+  starting `[hull:busy] `, a rethrown parsed remote `{ code: "busy" }`), so a job is handed back
+  at most 20 times in a row per worker process, each a second longer than the last (capped at
+  30 s); the next busy failure is counted like any other error.
 - **An app could kill the process by truncating a database file SQLite holds open** (audit 33,
   both runtimes). SQLite maps a WAL database's index (`<db>-shm`) `MAP_SHARED` in every
   connection, and that mapping is not one of the fs.mmap SIGBUS guard's: `compute.stream("m",

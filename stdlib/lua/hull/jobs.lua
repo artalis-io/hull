@@ -1551,13 +1551,57 @@ end
 -- runtime "busy" refusal, which says nothing about the job (audit 38: it was
 -- counted, so a burst that filled the fetch cap dead-lettered jobs that never
 -- reached their remote). It is claimable again a second later.
+--
+-- A refusal is recognised by its code, which an app can also produce (a Lua
+-- error string starting "[hull:busy] ", a rethrown parsed remote error), so
+-- the hand-backs are bounded (audit 39): each worker process counts a job's
+-- consecutive ones, waits a second longer before each (1 s, 2 s, ... capped at
+-- BUSY_DELAY_MAX), and after BUSY_STREAK_MAX of them in a row the next busy
+-- failure is counted as an attempt like any other error. Any other outcome
+-- resets the count. A real cap stays full only while the VM's own work holds
+-- it, so a genuine burst passes long before that.
+local BUSY_STREAK_MAX = 20
+local BUSY_DELAY_MAX = 30
+local _busy_streak = {}      -- job id -> consecutive busy hand-backs (this process)
+local _busy_streak_n = 0
+
+local function busy_streak_clear(job)
+    if _busy_streak[job.id] then
+        _busy_streak[job.id] = nil
+        _busy_streak_n = _busy_streak_n - 1
+    end
+end
+
+-- True when the job may be handed back once more (and counts that one).
+local function busy_streak_take(job)
+    local n = _busy_streak[job.id]
+    if n and n >= BUSY_STREAK_MAX then
+        busy_streak_clear(job)
+        return false
+    end
+    if not n then
+        if _busy_streak_n >= 10000 then   -- bound the table: start over
+            _busy_streak, _busy_streak_n = {}, 0
+        end
+        _busy_streak_n = _busy_streak_n + 1
+    end
+    _busy_streak[job.id] = (n or 0) + 1
+    return true
+end
+
+-- True when a busy failure of this job would be handed back (not counted).
+local function busy_streak_open(job)
+    return (_busy_streak[job.id] or 0) < BUSY_STREAK_MAX
+end
+
 local function hand_back(job)
     local now = time.now()
+    local delay = math.min(_busy_streak[job.id] or 1, BUSY_DELAY_MAX)
     local n
     db.batch(function()
         n = db.exec("UPDATE _hull_jobs SET status='pending', run_at=?, "
             .. "attempts=attempts-1, claim_token=NULL, updated_at=? WHERE id=?" .. CLAIMED,
-            { now + 1, now, job.id, job.claim_token })
+            { now + delay, now, job.id, job.claim_token })
         if (n or 0) > 0 then release_slot(job) end
     end)
     if (n or 0) == 0 then job._lost = true end
@@ -2034,6 +2078,23 @@ _hooks.cron_set_next_run_at = function(name, at)
     db.exec("UPDATE _hull_cron SET next_run_at=? WHERE name=?", { at, name })
 end
 _hooks.CRON_DISABLED_AT = CRON_DISABLED_AT
+-- Audit 39: make a handed-back job due now (the real clock would wait out
+-- its hand-back delay), read / set its busy hand-back streak, and mark a
+-- workflow step compensated (the state the round-38 regression left).
+_hooks.make_due = function(id)
+    db.exec("UPDATE _hull_jobs SET run_at=? WHERE id=?", { time.now(), id })
+end
+_hooks.busy_streak = function(id, n)
+    if n ~= nil then
+        if not _busy_streak[id] then _busy_streak_n = _busy_streak_n + 1 end
+        _busy_streak[id] = n
+    end
+    return _busy_streak[id]
+end
+_hooks.mark_step_compensated = function(id, key)
+    db.exec("UPDATE _hull_workflow_steps SET status='compensated' "
+        .. "WHERE workflow_id=? AND step_key=?", { id, key })
+end
 
 -- jobs.work's refresh before starting each batch job after the first: the
 -- job's claim and its still-unstarted mates' are extended to now, so a mate
@@ -2141,6 +2202,7 @@ function jobs.work(opts)
             end)
         else
             local ok, result = pcall(h, job)
+            if not (not ok and refusal.is_busy(result)) then busy_streak_clear(job) end
             -- The transition after the handler is protected too, as the JS
             -- worker's one try is: a result json.encode refuses (a sparse
             -- array, a NaN) or a park that cannot be written raised out of
@@ -2208,7 +2270,7 @@ function jobs.work(opts)
                         end)
                         if (parked or 0) == 0 then job._lost = true end
                     end
-                elseif not ok and refusal.is_busy(result) then
+                elseif not ok and refusal.is_busy(result) and busy_streak_take(job) then
                     hand_back(job)   -- not an attempt: nothing reached the job
                 elseif not ok then
                     err_str = err_text(result)
@@ -2657,19 +2719,29 @@ local WF_PREFIX = WF_TYPE_PREFIX
 -- Raised by a compensation run (see jobs.reap) at the first step that never
 -- completed: the body stops there and the handler compensates.
 local WF_ABORT = {}
+-- Raised by run_step outside a compensation run when a step's saga
+-- compensation already ran (audit 39): its effect was undone, so replaying its
+-- memoized result would carry the workflow on to 'done' over an undone step.
+-- The handler ends the workflow dead instead.
+local WF_UNDONE = {}
 
 -- Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
--- workflow the value comes from the store and fn is NOT called again.
-local function run_step(workflow_id, step_key, fn)
+-- workflow the value comes from the store and fn is NOT called again. A
+-- compensation run (`compensating`) replays a compensated step too: it only
+-- re-registers compensations, and run_compensations skips that one.
+local function run_step(workflow_id, step_key, fn, compensating)
     if type(step_key) ~= "string" or step_key == "" then
         error("ctx.step: name must be a non-empty string")
     end
     key_opt(step_key, "name", "ctx.step", false)
     if type(fn) ~= "function" then error("ctx.step: fn must be a function") end
     local rows = db.query(
-        "SELECT result FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
+        "SELECT result, status FROM _hull_workflow_steps WHERE workflow_id=? AND step_key=?",
         { workflow_id, step_key })
     if rows and #rows > 0 then
+        if rows[1].status == "compensated" and not compensating then
+            error({ [WF_UNDONE] = step_key }, 0)
+        end
         if rows[1].result == nil then return nil end
         local ok, decoded = pcall(json.decode, rows[1].result)
         if ok then return decoded else return rows[1].result end
@@ -2909,7 +2981,7 @@ local function make_ctx(job, name)
                 { job.id, step_key })
             if not (r and #r > 0) then error(WF_ABORT, 0) end
         end
-        local result = run_step(job.id, step_key, fn)
+        local result = run_step(job.id, step_key, fn, compensating)
         if opts and type(opts.compensate) == "function" then
             comps[#comps + 1] = { key = step_key, fn = opts.compensate }
         end
@@ -3035,10 +3107,29 @@ function jobs.workflow(name, fn)
                      waiting = res.waiting, signal_name = res.signal_name,
                      signal_key = res.signal_key,
                      deadline = res.deadline }
+        elseif type(res) == "table" and rawget(res, WF_UNDONE) then
+            -- The saga already rolled back: finish it and dead-letter.
+            local why = "step '" .. safe_text(tostring(rawget(res, WF_UNDONE)))
+                .. "' was compensated; the workflow cannot continue past it"
+            return { [WF_DEAD] = true,
+                     error = with_comp_failures(why, run_compensations(ctx._comps, job.id)) }
+        elseif refusal.is_busy(res) and busy_streak_open(job) then
+            -- A "busy" refusal is local and transient: work() hands the job
+            -- back without spending the attempt. Never compensate for it
+            -- (audit 39): the compensations ran on the last attempt, the
+            -- hand-back re-ran the workflow, and it replayed the undone
+            -- steps' memos to 'done'.
+            error(res, 0)
         end
         local max = job.max_attempts or _cfg.max_attempts
         if (job.attempts or 0) >= max then
-            res = with_comp_failures(res, run_compensations(ctx._comps, job.id))
+            local failed = run_compensations(ctx._comps, job.id)
+            if #ctx._comps > 0 and refusal.code(res) then
+                -- Compensations ran, so this outcome is final: it must not
+                -- carry a refusal code work() would act on.
+                res = "workflow failed: " .. err_text(res)
+            end
+            res = with_comp_failures(res, failed)
         end
         error(res, 0)
     end)
