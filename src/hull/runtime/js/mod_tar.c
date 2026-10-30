@@ -274,14 +274,25 @@ static int js_extract_write(const HlTarEntry *e, void *vctx)
 {
     struct js_extract_ctx *c = (struct js_extract_ctx *)vctx;
     /* Each entry is charged before it is written, as fs.write is: one unit
-     * per 8 bytes plus one for the entry. The archive may be a MappedBuffer
-     * of up to 1 GiB, so the heap does not bound it either (audit 16). */
-    if (hl_js_budget_charge(c->ctx,
-                            hl_work_bytes_units((uint64_t)e->size) + 1)) {
+     * per 8 bytes, plus fs.write's floor for the rename and stat work every
+     * file costs whatever its size, while the resolver charges the temp
+     * file's create and every directory walked or made (audit 38: 65,536
+     * empty entries ran 18 s in one call charged ~1.1M units). The archive
+     * may be a MappedBuffer of up to 1 GiB, so the heap does not bound it
+     * either (audit 16). A directory entry writes nothing but is charged a
+     * stat's floor, so an archive of them is not free. */
+    if (e->is_dir) {
+        if (hl_js_budget_charge(c->ctx, HL_WORK_FS_STAT_UNITS)) {
+            c->tripped = 1;
+            return -1;
+        }
+        return 0;
+    }
+    if (hl_js_budget_charge(c->ctx, HL_WORK_FS_WRITE_UNITS +
+                                    hl_work_bytes_units((uint64_t)e->size))) {
         c->tripped = 1;
         return -1;
     }
-    if (e->is_dir) return 0;
 
     char path[4096];
     int pn;
@@ -291,9 +302,14 @@ static int js_extract_write(const HlTarEntry *e, void *vctx)
         pn = snprintf(path, sizeof(path), "%s", e->name);
     if (pn < 0 || (size_t)pn >= sizeof(path)) { c->err = "path too long"; return -1; }
 
+    HlFsChargeScope cs = hl_fs_charge_begin(hl_js_fs_charge, c->ctx);
     int rc = hl_cap_fs_write_ex(c->fs, path,
                              (const char *)(e->data ? e->data : (const unsigned char *)""),
                              e->size, HL_FS_WRITE_NO_SYNC, &c->err);
+    if (hl_fs_charge_end(cs)) {
+        c->tripped = 1;   /* the uncatchable interrupt, pending */
+        return -1;
+    }
     return rc == 0 ? 0 : -1;
 }
 
@@ -409,7 +425,11 @@ static JSValue js_tar_pack(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, el);
         if (!paths[i]) { err = "tar.pack: entry needs a path"; break; }
 
+        /* Both reads of each entry resolve its path and are charged for it
+         * by the resolver, as fs.read's are (audit 38). */
+        HlFsChargeScope cs = hl_fs_charge_begin(hl_js_fs_charge, ctx);
         int64_t size = hl_cap_fs_read(js->base.fs_cfg, paths[i], NULL, 0, &err);
+        if (hl_fs_charge_end(cs)) { threw = 1; break; }
         if (size < 0) break;
         /* A running total of the archive, against the heap limit, before
          * this file is read; the read is charged before it runs, and lands
@@ -428,7 +448,9 @@ static JSValue js_tar_pack(JSContext *ctx, JSValueConst this_val,
         if (!buf) { threw = 1; break; }
         int64_t got = 0;
         if (size > 0) {
+            cs = hl_fs_charge_begin(hl_js_fs_charge, ctx);
             got = hl_cap_fs_read(js->base.fs_cfg, paths[i], buf, (size_t)size, &err);
+            if (hl_fs_charge_end(cs)) { js_free(ctx, buf); threw = 1; break; }
             if (got < 0) { js_free(ctx, buf); break; }
         }
         bufs[i] = buf;

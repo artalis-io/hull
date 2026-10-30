@@ -304,7 +304,7 @@ static int blob_charge(JSContext *ctx, size_t len)
  * every put does whatever its size (audit 37: an empty put was free). */
 static int blob_put_charge(JSContext *ctx, size_t len)
 {
-    return hl_js_budget_charge(ctx, HL_WORK_FS_WRITE_UNITS +
+    return hl_js_budget_charge(ctx, HL_WORK_BLOB_WRITE_UNITS +
                                     hl_work_bytes_units((uint64_t)len));
 }
 
@@ -521,7 +521,7 @@ static JSValue js_writer_finalize(JSContext *ctx, JSValueConst this_val,
         "blob.writer: already finalized/aborted");
     /* The fsync and rename (audit 37); a refused finalize leaves the
      * writer to its finalizer, which aborts it. */
-    if (hl_js_budget_charge(ctx, HL_WORK_FS_WRITE_UNITS)) return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, HL_WORK_BLOB_WRITE_UNITS)) return JS_EXCEPTION;
     char id[HL_BLOB_ID_BUF_SIZE]; size_t size = 0;
     int rc = hl_cap_blob_writer_finalize((HlBlobWriter *)bh->h, id, &size);
     bh->h = NULL;                    /* writer always consumed */

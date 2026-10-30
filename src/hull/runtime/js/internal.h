@@ -310,6 +310,9 @@ JSValue hl_js_budget_throw(JSContext *ctx);
  * and the binding returns JS_EXCEPTION without doing the work. The Lua twin
  * is lua_hlcharge (runtime/lua/mod_crypto.c crypto_charge). */
 int hl_js_budget_charge(JSContext *ctx, uint64_t units);
+/* hl_js_budget_charge as an HlFsChargeFn (cap/fs_resolve.h), @p ud the
+ * JSContext: for the fs capability's charge scope (mod_fs.c, audit 38). */
+int hl_js_fs_charge(void *ud, uint64_t units);
 
 /* Log each argument as one record at @p level, "<tag> <text>": converted,
  * charged, CR / LF escaped (mod_log.c; hull:log and console.*). 0, or -1

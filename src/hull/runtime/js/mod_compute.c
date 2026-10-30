@@ -1522,6 +1522,16 @@ static int js_stream_before_chunk(size_t chunk_len, void *user_data)
     return 0;
 }
 
+/* The resolution of a file input / output, charged as fs.read / fs.write
+ * charge theirs (audit 38), to the same trip flag. */
+static int js_stream_fs_charge(void *user_data, uint64_t units)
+{
+    JsStreamBudget *b = (JsStreamBudget *)user_data;
+    if (b->tripped) return 1;
+    if (hl_js_budget_charge(b->ctx, units) < 0) b->tripped = 1;
+    return b->tripped;
+}
+
 /* Release compute.stream's parsed arguments (every path out after parsing). */
 static void js_stream_free_args(JSContext *ctx, JsStreamCbCtx *cb,
                                 int has_output, HlStreamOutKind out_kind,
@@ -1644,6 +1654,8 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     JsStreamBudget stream_budget = { ctx, 0 };
     stream_opts.before_chunk = js_stream_before_chunk;
     stream_opts.before_chunk_ud = &stream_budget;
+    stream_opts.fs_charge = js_stream_fs_charge;
+    stream_opts.fs_charge_ud = &stream_budget;
     /* The buffer-mode result becomes one ArrayBuffer on the VM heap. */
     stream_opts.max_output = js->max_heap_bytes;
 

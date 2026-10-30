@@ -304,6 +304,38 @@ release-artifact layout).
   is decided: a request is answered 500, app.main exits 1, a timer or WebSocket callback ends
   as a failed run does, its continuations share a record that stops them, and the failed-run
   list (a fixed ring of 32) frees the run's slot once nothing of it is left to stop.
+- **Path resolution, directory creation and tar entries cost (almost) nothing against the run
+  budget** (audit 38, both runtimes). The fs resolver walks a path inside one binding call - a
+  lookup and a directory open per component (~18 us each on macOS / APFS), a readlink per
+  symlink, a `mkdirat` per missing directory under `fs.write`'s mkdir-p - and none of it was
+  charged: `fs.read` (which resolves twice, size probe then read) charged only its bytes, so a
+  budget of empty-file reads ran 223 s, of a missing path 16 s, of a 27-component path over
+  300 s; a 250-deep `fs.write` made 250 directories (47 ms) under the flat 32768-unit floor,
+  ~750,000 directories per budget in 142 s; `fs.stat` / `fs.mmap` / `fs.list` ignored depth
+  and symlinks; `tar.extract` wrote every file (resolve, mkdir-p, temp, write, rename) for
+  1 + size/8 units - 65,536 empty entries took 18 s in ONE call charged ~1.1M units, beyond
+  the run watchdog's reach - and `tar.pack` read every entry twice for its bytes alone. The
+  resolver now reports each step to the calling thread's charge scope before its syscalls
+  (`hl_fs_charge_begin` / `hl_fs_charge`, `cap/fs_resolve.h`; units measured in
+  `hull/shared/work_charge.h`: 64 per resolution, 8 per component token, 64 per lookup, 1024
+  per directory opened, 64 per symlink expanded, 8192 per directory created, 1024 per
+  existing leaf opened, 4096 per leaf created), and stops the walk with `budget_exhausted` -
+  nothing further created - which the bindings raise as the uncatchable limit. `fs.read` /
+  `write` / `stat` / `mmap` / `list`, `tar.extract` / `pack` and `compute.stream`'s file
+  input / output (`HlStreamOpts.fs_charge`) open a scope; `tar.extract` also charges each
+  file `fs.write`'s floor + size/8 before writing it and each directory entry a stat's floor.
+  **The audit-37 flat floors are re-tuned** now that resolution is charged on its own: the
+  `fs.write` floor drops from 32768 to 10240 (a flat write totals ~14.5k units: ~6900 per
+  100M budget, up from ~3000, so a site generator writing a few thousand files in `app.main`
+  no longer needs `--max-instructions`), `fs.mmap` from 4096 to 512, `fs.list`'s from 1024 to
+  256, and `fs.stat` loses its per-component charge (the walk is charged instead). Blob calls,
+  which do not resolve through the fs policy, keep audit 37's floors. Measured on macOS /
+  APFS (arm64): a 100M budget of a plain Lua loop runs ~0.7 s; a 100M budget of any of the
+  loops above now trips in 0.7-2.0 s, Lua and JS alike (flat / new-file / 27-deep writes
+  1.5 / 1.5 / 1.8 s, 250-deep writes 1.7 s, empty / missing / 27-deep reads 1.8 / 1.3 /
+  1.8 s, 27-deep stat / mmap / list ~1.8 s, 40-symlink chains 1.8 s, 65,536-entry
+  `tar.extract` 1.3 s, `tar.pack` 1.8 s). Covered by `test_fs_resolve` (`charge_scope_*`)
+  and `test_lua` / `test_js` (`*_audit38`).
 - **JS: an entry that ended holding a transaction let its waiting code run on later**
   (audit 35). The run-failure checks of audits 31-34 ran only where a run was found waiting:
   an entry that simply ended - a synchronous handler, an async handler already settled, a

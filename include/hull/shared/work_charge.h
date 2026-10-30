@@ -57,50 +57,86 @@ static inline uint64_t hl_work_sse_units(const char *text, size_t len, size_t ex
     return ((uint64_t)len + extra) / 8 + lines + 2;
 }
 
-/* ── Filesystem / blob calls: a floor per call (audit 37) ─────────────
+/* ── Filesystem / blob calls (audits 37, 38) ──────────────────────────
  *
- * Some calls cost syscalls - an fsync, a rename, a readdir - whatever their
- * size, and a loop of them was free: an empty fs.write is a temp file, an
- * fsync, a rename and a directory fsync for 0 units (95,010 calls in 20 s
- * with no trip), and one fs.list on a directory of 60,000 files took ~43 ms
- * uncharged. Measured on macOS / APFS (arm64): the default 100M budget of a
- * plain Lua loop runs ~1.4 s; with the units below a 100M budget of a loop
- * of any one of these calls trips in 0.6-1.0 s - no longer than plain script
- * - while one call still costs a small fraction of the budget (100M buys
- * ~3000 empty writes or ~12000 blob.exists):
+ * Some calls cost syscalls whatever their size, and a loop of them was free:
+ * an empty fs.write was a temp file, an fsync, a rename and a directory fsync
+ * for 0 units, and one fs.list on a directory of 60,000 files took ~43 ms
+ * uncharged (audit 37). Path RESOLUTION was the rest (audit 38): fs.read of
+ * an empty file charged 0 units for two resolutions, a 27-component path is
+ * 26 directory opens, and a 250-deep fs.write mkdir-p'd 250 directories
+ * (47 ms per call) under a flat floor. So the resolver charges its own work,
+ * step by step, to the thread's charge scope (cap/fs_resolve.h), and the
+ * per-call floors below cover only the fixed work that is not resolution.
  *
- *   empty fs.write              ~200 us  ->  HL_WORK_FS_WRITE_UNITS  32768
- *   empty blob.put / finalize   ~170 us  ->  HL_WORK_FS_WRITE_UNITS  32768
- *   blob.init (3 mkdir_p, sweep)~125 us  ->  HL_WORK_BLOB_INIT_UNITS 16384
- *   blob.exists / size / atime   ~44 us  ->  HL_WORK_BLOB_STAT_UNITS  8192
- *   blob.delete                  ~42 us  ->  HL_WORK_BLOB_STAT_UNITS  8192
- *   fs.mmap + close              ~21 us  ->  HL_WORK_FS_MMAP_UNITS    4096
- *   fs.stat (2 components)      ~2.2 us  ->  256 + 64 per component
- *   fs.list, per entry read     ~0.6 us  ->  64 + name bytes / 64
- *   fs.list, per entry kept     ~1.5 us  ->  + HL_WORK_FS_LIST_STAT_UNITS 256
+ * Rate: 64 units per microsecond of measured syscall time (~15.6 ns per
+ * unit), so a default 100M budget spent on any one of these calls lasts
+ * ~1.6 s - about twice a plain script loop of the same budget (0.7 s on the
+ * reference machine), and never unbounded. Measured on macOS 26 / APFS,
+ * arm64 (M-series), sandbox on; directory opens are what make macOS slow
+ * (openat O_DIRECTORY + close ~12.6 us; fstatat ~1.0 us, readlinkat
+ * ~0.9 us, mkdirat ~58 us, a file create ~60 us, rename ~75 us):
+ *
+ *   resolver, per resolution (checks, root dup, the
+ *     call's policy select and audit)  ~1 us  -> HL_WORK_FS_RESOLVE_UNITS    64
+ *   resolver, per component token ("." / ".." too)  -> HL_WORK_FS_NAME_UNITS   8
+ *   resolver, per lookup (fstatat, or a failed
+ *     leaf open)                       ~1 us  -> HL_WORK_FS_LOOKUP_UNITS     64
+ *   resolver, directory opened (openat dir +
+ *     fstat + close)                ~16-17 us -> HL_WORK_FS_STEP_UNITS     1024
+ *   resolver, symlink expansion (readlinkat) ~1 us -> HL_WORK_FS_SYMLINK_UNITS 64
+ *   resolver, directory created (mkdirat ~58 us beside
+ *     siblings, ~150 us down a fresh chain)  -> HL_WORK_FS_MKDIR_UNITS     8192
+ *   resolver, existing leaf opened (open +
+ *     fstat + fcntl + close)           ~16 us -> HL_WORK_FS_LEAF_UNITS     1024
+ *   resolver, leaf created / truncated ~60 us -> HL_WORK_FS_CREATE_UNITS   4096
+ *
+ *   fs.write beyond its resolutions
+ *     (rename, fsyncs, fstatats)  ~125-200 us -> HL_WORK_FS_WRITE_UNITS  10240
+ *   fs.mmap + munmap beyond the open  ~8 us  -> HL_WORK_FS_MMAP_UNITS      512
+ *   fs.stat (fstatat, select)       ~2.3 us  -> HL_WORK_FS_STAT_UNITS      256
+ *   fs.list beyond its resolution    ~4 us   -> HL_WORK_FS_LIST_UNITS      256
+ *   fs.list, per entry read        ~0.6 us   -> 64 + name bytes / 64
+ *   fs.list, per entry kept        ~1.5 us   -> + HL_WORK_FS_LIST_STAT_UNITS 256
+ *
+ * A flat fs.write is then 2 x 64 + 8 + 64 + 4096 + 10240 = 14536 units
+ * (~6900 per 100M budget; ~3000 before audit 38's re-tune), an fs.read of
+ * a small file 2 x 1160, a fs.stat of a shallow name 320. Deep, symlinked
+ * and mkdir-p paths pay per step: a 27-component path ~29k units a
+ * resolution, a 250-deep fs.write's mkdir-p ~2.6M units. Measured budget-sized loops of
+ * each call (100M) on the reference machine all trip in 0.3-2.0 s; see the
+ * audit 38 PR for the table.
+ *
+ * Blob calls do not go through the resolver (their store paths are built
+ * by Hull), so their floors stay whole (audit 37's rate, ~190 units/us):
+ *
+ *   empty blob.put / finalize   ~170 us  ->  HL_WORK_BLOB_WRITE_UNITS 32768
+ *   blob.init (3 mkdir_p, sweep)~125 us  ->  HL_WORK_BLOB_INIT_UNITS  16384
+ *   blob.exists / size / atime   ~44 us  ->  HL_WORK_BLOB_STAT_UNITS   8192
+ *   blob.delete                  ~42 us  ->  HL_WORK_BLOB_STAT_UNITS   8192
  *
  * Every floor is charged BEFORE the call, on top of the per-byte charge;
- * fs.list charges each directory entry as it reads it (hl_cap_fs_list_ex),
- * so a directory too large for the budget stops part-way. */
-#define HL_WORK_FS_WRITE_UNITS       32768u
-#define HL_WORK_BLOB_INIT_UNITS      16384u
-#define HL_WORK_BLOB_STAT_UNITS       8192u
-#define HL_WORK_FS_MMAP_UNITS         4096u
+ * the resolver charges each step before its syscalls and stops the walk
+ * ("budget_exhausted") once the run is over; fs.list charges each directory
+ * entry as it reads it (hl_cap_fs_list_ex), so a directory too large for
+ * the budget stops part-way. */
+#define HL_WORK_FS_RESOLVE_UNITS        64u
+#define HL_WORK_FS_NAME_UNITS            8u
+#define HL_WORK_FS_LOOKUP_UNITS         64u
+#define HL_WORK_FS_STEP_UNITS         1024u
+#define HL_WORK_FS_SYMLINK_UNITS        64u
+#define HL_WORK_FS_MKDIR_UNITS        8192u
+#define HL_WORK_FS_LEAF_UNITS         1024u
+#define HL_WORK_FS_CREATE_UNITS       4096u
+#define HL_WORK_FS_WRITE_UNITS       10240u
+#define HL_WORK_FS_MMAP_UNITS          512u
 #define HL_WORK_FS_STAT_UNITS          256u
-#define HL_WORK_FS_COMPONENT_UNITS      64u
-#define HL_WORK_FS_LIST_UNITS         1024u   /* the open + policy select */
+#define HL_WORK_FS_LIST_UNITS          256u   /* the policy select + fdopendir */
 #define HL_WORK_FS_DIRENT_UNITS         64u
 #define HL_WORK_FS_LIST_STAT_UNITS     256u
-
-/* fs.stat: the floor plus one charge per path component resolved. */
-static inline uint64_t hl_work_fs_stat_units(const char *path)
-{
-    uint64_t comps = 1;
-    if (path)
-        for (const char *p = path; *p; p++)
-            if (*p == '/') comps++;
-    return HL_WORK_FS_STAT_UNITS + comps * HL_WORK_FS_COMPONENT_UNITS;
-}
+#define HL_WORK_BLOB_WRITE_UNITS     32768u
+#define HL_WORK_BLOB_INIT_UNITS      16384u
+#define HL_WORK_BLOB_STAT_UNITS       8192u
 
 /* One directory entry read (fs.list, the blob tmp/ sweep). */
 static inline uint64_t hl_work_dirent_units(size_t name_len)

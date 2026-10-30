@@ -94,7 +94,11 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
          * no fs.read could stream any file in its directory), left the path
          * open to a swap between the check and the open, and followed a FIFO. */
         const char *ferr = NULL;
+        HlFsChargeScope cs = { NULL, NULL, 0 };
+        if (opts && opts->fs_charge)
+            cs = hl_fs_charge_begin(opts->fs_charge, opts->fs_charge_ud);
         int in_fd = hl_cap_fs_open_read_fd(fs_cfg, input->path, &ferr);
+        if (opts && opts->fs_charge) (void)hl_fs_charge_end(cs);
         if (in_fd < 0) {
             if (err_msg) *err_msg = ferr ? ferr : "permission";
             return HL_WASM_ERR_INTERNAL;
@@ -142,7 +146,11 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
         /* Opened as fs.write opens (see the input above): the fs.write
          * grants decide, not "somewhere under the app directory". */
         const char *ferr = NULL;
+        HlFsChargeScope cs = { NULL, NULL, 0 };
+        if (opts && opts->fs_charge)
+            cs = hl_fs_charge_begin(opts->fs_charge, opts->fs_charge_ud);
         int out_fd = hl_cap_fs_open_write_fd(fs_cfg, output->path, &ferr);
+        if (opts && opts->fs_charge) (void)hl_fs_charge_end(cs);
         if (out_fd < 0) {
             if (in_file) fclose(in_file);
             if (in_buf) hl_alloc_free(alloc, in_buf, chunk_size);

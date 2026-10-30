@@ -14,6 +14,7 @@
 
 #include "hull/cap/fs_resolve.h"
 #include "hull/shared/host.h"   /* hl_host_is_windows */
+#include "hull/shared/work_charge.h"   /* HL_WORK_FS_* resolver units */
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -33,6 +34,39 @@
 #define HL_FS_RECLASSIFY_MAX 64 /* bound interior classify<->open TOCTOU retries */
 /* HL_FS_MAX_DEPTH is the public component-depth limit (fs_resolve.h); it also
  * bounds the manual walk's directory-fd stack. */
+
+/* ── charge scope (audit 38; fs_resolve.h) ───────────────────────────────── */
+
+static _Thread_local HlFsChargeScope tl_charge;
+
+HlFsChargeScope hl_fs_charge_begin(HlFsChargeFn fn, void *ud)
+{
+    HlFsChargeScope prev = tl_charge;
+    tl_charge.fn = fn;
+    tl_charge.ud = fn ? ud : NULL;
+    tl_charge.tripped = 0;
+    return prev;
+}
+
+int hl_fs_charge_end(HlFsChargeScope prev)
+{
+    int tripped = tl_charge.tripped;
+    tl_charge = prev;
+    return tripped;
+}
+
+int hl_fs_charge(uint64_t units)
+{
+    if (tl_charge.tripped) return 1;
+    if (!tl_charge.fn || units == 0) return 0;
+    if (tl_charge.fn(tl_charge.ud, units) != 0) {
+        tl_charge.tripped = 1;
+        return 1;
+    }
+    return 0;
+}
+
+#define HL_FS_BUDGET_ERR "budget_exhausted"
 
 static void map_errno(int e, const char **err)
 {
@@ -280,6 +314,16 @@ struct open_how { uint64_t flags; uint64_t mode; uint64_t resolve; };
 
 #define OPENAT2_EAGAIN_TRIES 8
 
+/* What the manual walk would charge for @p relpath (no symlinks). */
+static uint64_t openat2_units(const char *relpath, HlFsOpenMode mode)
+{
+    uint64_t comps = caller_component_count(relpath);
+    uint64_t u = comps * (HL_WORK_FS_NAME_UNITS + HL_WORK_FS_LOOKUP_UNITS);
+    if (comps > 1) u += (comps - 1) * HL_WORK_FS_STEP_UNITS;
+    u += mode == HL_FS_OPEN_DIR ? HL_WORK_FS_STEP_UNITS : HL_WORK_FS_LEAF_UNITS;
+    return u;
+}
+
 /* Returns fd, or -1 with *err set, or -2 meaning "openat2 unavailable (or kept
  * losing to concurrent renames), fall back to the manual walk". Under HL_FS_SYMLINK_REFUSE the kernel refuses every
  * symlink (RESOLVE_NO_SYMLINKS) and an ELOOP is mapped to "symlink_denied". */
@@ -366,6 +410,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             if (mode == HL_FS_OPEN_READ || mode == HL_FS_OPEN_DIR) {
                 int of = O_RDONLY | O_CLOEXEC
                          | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : O_NONBLOCK);
+                if (hl_fs_charge(HL_WORK_FS_STEP_UNITS)) {
+                    *err = HL_FS_BUDGET_ERR; goto fail;
+                }
                 result_fd = openat(stack[depth - 1], ".", of);
                 if (result_fd < 0) { map_errno(errno, err); goto fail; }
                 if (mode == HL_FS_OPEN_READ) {
@@ -386,6 +433,10 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
         memcpy(comp, cur, clen);
         comp[clen] = '\0';
         char *rest = slash ? slash + 1 : cur + clen;   /* what remains after comp */
+        /* Every component token parsed - "." and ".." included: a symlink
+         * target of 2000 "./" pieces is re-read on every expansion. Each
+         * step's syscalls are charged below, before they run (audit 38). */
+        if (hl_fs_charge(HL_WORK_FS_NAME_UNITS)) { *err = HL_FS_BUDGET_ERR; goto fail; }
 
         if (strcmp(comp, ".") == 0) { cur = rest; continue; }
         if (strcmp(comp, "..") == 0) {                 /* clamp at root */
@@ -423,9 +474,18 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             }
             for (;;) {
                 struct stat lst;
+                /* The classify (and each re-classify) is a lookup. */
+                if (hl_fs_charge(HL_WORK_FS_LOOKUP_UNITS)) {
+                    *err = HL_FS_BUDGET_ERR; goto fail;
+                }
                 if (fstatat(stack[depth - 1], comp, &lst, AT_SYMLINK_NOFOLLOW) != 0) {
                     if (errno == ENOENT && (mode == HL_FS_OPEN_WRITE ||
                                             mode == HL_FS_OPEN_WRITE_KEEP)) {
+                        /* A directory created (mkdir-p): charged before it
+                         * is made, so a tripped walk creates nothing more. */
+                        if (hl_fs_charge(HL_WORK_FS_MKDIR_UNITS)) {
+                            *err = HL_FS_BUDGET_ERR; goto fail;
+                        }
                         if (mkdirat(stack[depth - 1], comp, 0755) != 0 && errno != EEXIST) {
                             map_errno(errno, err); goto fail;
                         }
@@ -437,6 +497,10 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 if (S_ISLNK(lst.st_mode)) goto symlink;             /* expand; no open */
                 if (!S_ISDIR(lst.st_mode)) { *err = "not_a_directory"; goto fail; }
 
+                /* The directory open, fstat and (later) close. */
+                if (hl_fs_charge(HL_WORK_FS_STEP_UNITS)) {
+                    *err = HL_FS_BUDGET_ERR; goto fail;
+                }
                 int fd = openat(stack[depth - 1], comp,
                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
                 if (fd < 0) {
@@ -472,6 +536,7 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
              * O_DIRECTORY|O_NOFOLLOW on a symlink returns ENOTDIR on macOS (not
              * ELOOP), which would misread a symlinked dir as not_a_directory. */
             struct stat lst;
+            if (hl_fs_charge(HL_WORK_FS_LOOKUP_UNITS)) { *err = HL_FS_BUDGET_ERR; goto fail; }
             if (reserved_step(stack[depth - 1], comp, NULL)) {
                 *err = "reserved_path"; goto fail;
             }
@@ -480,6 +545,7 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             }
             if (S_ISLNK(lst.st_mode)) goto symlink;                 /* follow the symlink */
             if (!S_ISDIR(lst.st_mode)) { *err = "not_a_directory"; goto fail; }
+            if (hl_fs_charge(HL_WORK_FS_STEP_UNITS)) { *err = HL_FS_BUDGET_ERR; goto fail; }
             int fd = openat(stack[depth - 1], comp,
                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (fd < 0) {
@@ -504,6 +570,14 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
              * truncate) plus the contained mkdir-p already done for interior
              * components. A symlink leaf still returns ELOOP (O_NOFOLLOW) and is
              * handled by the symlink policy below, unchanged. */
+            /* The leaf open: the lookup before it; a file created or truncated
+             * (WRITE) costs a directory update, charged before it too; an
+             * existing file opened for READ is charged once it opened (a
+             * missing one costs the lookup only). */
+            if (hl_fs_charge(HL_WORK_FS_LOOKUP_UNITS) ||
+                (mode != HL_FS_OPEN_READ && hl_fs_charge(HL_WORK_FS_CREATE_UNITS))) {
+                *err = HL_FS_BUDGET_ERR; goto fail;
+            }
             if (reserved_step(stack[depth - 1], comp, NULL)) {
                 *err = "reserved_path"; goto fail;
             }
@@ -513,6 +587,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                              | (mode == HL_FS_OPEN_WRITE ? O_TRUNC : 0));
             int fd = openat(stack[depth - 1], comp, flags, cmode);
             if (fd >= 0) {
+                if (mode == HL_FS_OPEN_READ && hl_fs_charge(HL_WORK_FS_LEAF_UNITS)) {
+                    close(fd); *err = HL_FS_BUDGET_ERR; goto fail;
+                }
                 result_fd = finalize_regular_leaf(fd, err);  /* closes fd + sets *err on reject */
                 if (result_fd < 0) goto fail;                /* *err already set */
                 if (leaf && leaf_sz > clen) memcpy(leaf, comp, clen + 1);
@@ -529,6 +606,9 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
          * under REFUSE, any symlink (intermediate or terminal) is denied outright. */
         if (sympol == HL_FS_SYMLINK_REFUSE) { *err = "symlink_denied"; goto fail; }
         if (++symlinks > HL_FS_SYMLINK_MAX) { *err = "symlink_loop"; goto fail; }
+        /* An expansion: readlinkat and the splice; the components it puts
+         * back are charged as they are walked again. */
+        if (hl_fs_charge(HL_WORK_FS_SYMLINK_UNITS)) { *err = HL_FS_BUDGET_ERR; goto fail; }
         {
             char link[HL_FS_PATH_MAX];
             ssize_t ln = readlinkat(stack[depth - 1], comp, link, sizeof(link) - 1);
@@ -593,6 +673,11 @@ int hl_fs_open_at_leaf(int root_fd, const char *relpath, HlFsOpenMode mode,
         if (err) *err = "path_too_deep";
         return -1;
     }
+    /* The resolution itself: the checks above, the root's dup (audit 38). */
+    if (hl_fs_charge(HL_WORK_FS_RESOLVE_UNITS)) {
+        if (err) *err = HL_FS_BUDGET_ERR;
+        return -1;
+    }
 
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
     /* openat2 does not create intermediate dirs, so WRITE always uses the manual
@@ -606,6 +691,16 @@ int hl_fs_open_at_leaf(int root_fd, const char *relpath, HlFsOpenMode mode,
         int of = O_RDONLY | O_CLOEXEC
                  | (mode == HL_FS_OPEN_DIR ? O_DIRECTORY : O_NONBLOCK);
         int fd = try_openat2(root_fd, relpath, of, sympol, 0, &e);
+        /* One syscall, charged as the walk it replaces (audit 38): a step per
+         * interior component and the leaf (symlinks it follows inside the
+         * kernel are bounded by its own ELOOP limit). Charged once it ran -
+         * one bounded call - so a fallback to the manual walk (fd == -2:
+         * no openat2 on this kernel) is charged by that walk alone. */
+        if (fd != -2 && hl_fs_charge(openat2_units(relpath, mode))) {
+            if (fd >= 0) close(fd);
+            if (err) *err = HL_FS_BUDGET_ERR;
+            return -1;
+        }
         if (fd >= 0) {
             if (mode == HL_FS_OPEN_READ) {
                 fd = finalize_regular_leaf(fd, &e);
@@ -634,6 +729,10 @@ int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink sympol,
     if (!caller_path_ok(relpath)) { if (err) *err = "invalid_path"; return -1; }
     if (caller_component_count(relpath) > HL_FS_MAX_DEPTH) {
         if (err) *err = "path_too_deep";
+        return -1;
+    }
+    if (hl_fs_charge(HL_WORK_FS_RESOLVE_UNITS)) {   /* audit 38 */
+        if (err) *err = HL_FS_BUDGET_ERR;
         return -1;
     }
 

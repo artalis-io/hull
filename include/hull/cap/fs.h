@@ -296,11 +296,7 @@ int hl_cap_fs_list(const HlFsConfig *cfg, const char *path,
                    HlFsDirEntry **out_entries, size_t *out_count,
                    HlAllocator *alloc, const char **err_msg);
 
-/**
- * @brief Charge @p units of work to the calling run; non-zero = the run is
- *        over its budget (or past its deadline): stop.
- */
-typedef int (*HlFsChargeFn)(void *ud, uint64_t units);
+/* HlFsChargeFn (charge work to the calling run) is in cap/fs_resolve.h. */
 
 /**
  * @brief @ref hl_cap_fs_list, with every directory entry it reads charged to
@@ -313,7 +309,9 @@ typedef int (*HlFsChargeFn)(void *ud, uint64_t units);
  * #HL_WORK_FS_LIST_STAT_UNITS more (hull/shared/work_charge.h). When
  * @p charge returns non-zero the listing stops, rolled back like any other
  * failure, with `"budget_exhausted"`; the caller raises the run's trip.
- * @p charge NULL charges nothing (hl_cap_fs_list).
+ * @p charge is also installed as the resolver's charge scope for the call
+ * (hl_fs_charge_begin), so the directory's path resolution is charged too
+ * (audit 38). @p charge NULL charges nothing (hl_cap_fs_list).
  */
 int hl_cap_fs_list_ex(const HlFsConfig *cfg, const char *path,
                       HlFsDirEntry **out_entries, size_t *out_count,

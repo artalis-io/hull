@@ -14874,4 +14874,153 @@ UTEST(js_audit38, ordinary_iterator_helpers_still_work)
 }
 #undef A38_HUGE
 
+/* ── Audit 38: path resolution, directory creation and tar entries ────
+ *
+ * The twins of lua_audit38: the resolver's lookups, directory opens,
+ * readlinks and mkdirats ran uncharged inside one call (fs.read of an empty
+ * or missing file, a 26-deep path, a 100-deep fs.write, a chain of 40
+ * symlinks), and tar.extract wrote every entry for 1 + size/8. Each step is
+ * charged to the binding's charge scope now: a loop trips, try/catch cannot
+ * swallow it, and ordinary amounts of work still fit. */
+
+#define A38_DEEP "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z"
+
+static int a38_fs_open(A15Fs *f)
+{
+    static const char *const all[] = { "." };
+    memset(f, 0, sizeof *f);
+    if (!hl_test_mkdtemp(f->dir, sizeof f->dir, "hull_a38")) return -1;
+    hl_alloc_init(&f->alloc, 0);
+    f->policy = HL_FS_POLICY_INIT;
+    char p[HL_TEST_PATH_MAX + 128], q[64];
+    snprintf(p, sizeof p, "%s/d", f->dir);
+    if (mkdir(p, 0755) != 0) return -1;
+    for (const char *c = A38_DEEP; *c; c += c[1] ? 2 : 1) {
+        size_t n = strlen(p);
+        snprintf(p + n, sizeof p - n, "/%c", *c);
+        if (mkdir(p, 0755) != 0) return -1;
+    }
+    static const char *const leaves[] = { "d/" A38_DEEP "/empty", "empty",
+                                          "dir/empty" };
+    snprintf(p, sizeof p, "%s/dir", f->dir);
+    if (mkdir(p, 0755) != 0) return -1;
+    for (size_t i = 0; i < sizeof leaves / sizeof leaves[0]; i++) {
+        snprintf(p, sizeof p, "%s/%s", f->dir, leaves[i]);
+        FILE *fp = fopen(p, "wb");
+        if (!fp) return -1;
+        fclose(fp);
+    }
+    snprintf(p, sizeof p, "%s/d/" A38_DEEP "/one", f->dir);
+    FILE *fp = fopen(p, "wb");
+    if (!fp || fputs("1", fp) < 0) { if (fp) fclose(fp); return -1; }
+    fclose(fp);
+    for (int i = 1; i <= 40; i++) {
+        snprintf(p, sizeof p, "%s/s%d", f->dir, i);
+        if (i == 1) snprintf(q, sizeof q, "dir");
+        else snprintf(q, sizeof q, "s%d", i - 1);
+        if (symlink(q, p) != 0) return -1;
+    }
+    const char *perr = NULL;
+    if (hl_fs_policy_compile_manifest(f->dir, &f->alloc, all, 1, all, 1,
+                                      &f->policy, &perr) != 0)
+        return -1;
+    f->fs.base_dir = f->dir;
+    f->fs.base_len = strlen(f->dir);
+    f->fs.policy = &f->policy;
+    js.base.fs_cfg = &f->fs;
+    return 0;
+}
+
+UTEST(js_audit38, path_resolution_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    static const char *const loops[] = {
+        "for (let i = 0; i < 100000; i++) fs.read('empty');",
+        "for (let i = 0; i < 100000; i++) { try { fs.read('missing'); } catch (e) {} }",
+        "for (let i = 0; i < 2000; i++) fs.read('d/" A38_DEEP "/empty');",
+        "for (let i = 0; i < 2000; i++) fs.stat('d/" A38_DEEP "/empty');",
+        "for (let i = 0; i < 2000; i++) fs.mmap('d/" A38_DEEP "/one').close();",
+        "for (let i = 0; i < 2000; i++) fs.list('d/" A38_DEEP "');",
+        "for (let i = 0; i < 20000; i++) { try { fs.read('s40/empty'); } catch (e) {} }",
+        "for (let i = 0; i < 20000; i++) { try { fs.stat('s40/empty'); } catch (e) {} }",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++)
+        EXPECT_EQ_MSG(a10_run_tripped(loops[i], 5000000), 1, loops[i]);
+    EXPECT_EQ(a10_run_tripped(
+        "const dec = (b) => String.fromCharCode(...new Uint8Array(b));"
+        "if (fs.read('empty').byteLength !== 0) throw new Error('empty');"
+        "if (dec(fs.read('d/" A38_DEEP "/one')) !== '1') throw new Error('one');"
+        "if (fs.stat('d/" A38_DEEP "/empty').size !== 0) throw new Error('stat');"
+        "fs.mmap('d/" A38_DEEP "/one').close();"
+        "if (fs.list('d/" A38_DEEP "').length !== 2) throw new Error('list');"
+        "if (fs.read('s40/empty').byteLength !== 0) throw new Error('sym');"
+        "globalThis.__a38_ok = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a38_ok|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit38, directory_creation_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "const deep = 'a/'.repeat(100);"
+        "for (let i = 0; i < 100; i++) {"
+        "  try { fs.write('w/' + i + '/' + deep + 'f', ''); } catch (e) {} }",
+        5000000), 1);
+    int n = eval_int("fs.list('w').length");
+    EXPECT_GE(n, 1);
+    EXPECT_LT(n, 20);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit38, tar_entries_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { tar } from 'hull:archive:tar';\n"
+        "globalThis.tar = tar;\n"
+        "const es = []; for (let i = 1; i <= 2000; i++) es.push({ name: 'e' + i, data: '' });\n"
+        "globalThis.TAR = tar.create(es);\n"
+        "globalThis.PACK = [];\n"
+        "for (let i = 1; i <= 20000; i++) PACK.push({ name: 'e' + i, path: 'empty' });\n", 0), 0);
+    EXPECT_EQ(a10_run_tripped("try { tar.extract(TAR, 'x'); } catch (e) {}", 5000000), 1);
+    EXPECT_EQ(a10_run_tripped("try { tar.pack(PACK); } catch (e) {}", 5000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "const t = tar.create([{ name: 'a.txt', data: 'A' }, { name: 'sub/b.txt', data: 'B' }]);"
+        "tar.extract(t, 'y');"
+        "if (fs.read('y/sub/b.txt').byteLength !== 1) throw new Error('extract');"
+        "if (tar.pack(['y/a.txt', 'y/sub/b.txt']).byteLength === 0) throw new Error('pack');"
+        "globalThis.__a38_tar = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a38_tar|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit38, ordinary_fs_work_keeps_its_headroom)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 1; i <= 500; i++) fs.write('site/p' + i + '.html', 'page ' + i);"
+        "for (let i = 1; i <= 500; i++) fs.read('site/p' + i + '.html');"
+        "if (fs.list('site').length !== 500) throw new Error('list');"
+        "globalThis.__a38_site = 1;", 15000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a38_site|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
 UTEST_MAIN();

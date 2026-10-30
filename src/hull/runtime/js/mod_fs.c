@@ -49,6 +49,22 @@ static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, (int64_t)buf->len);
 }
 
+/* The run's budget as the fs capability's charge function (@p ud is the
+ * JSContext): every step a path resolution takes, charged as the resolver
+ * does it (audit 38). Over the budget the uncatchable interrupt is left
+ * pending and the walk stops; the binding returns JS_EXCEPTION after. */
+int hl_js_fs_charge(void *ud, uint64_t units)
+{
+    return hl_js_budget_charge((JSContext *)ud, units) != 0;
+}
+
+/* One capability call under the run's charge scope. */
+#define JS_FS_CHARGED(ctx, tripped, call) do {                             \
+        HlFsChargeScope cs_ = hl_fs_charge_begin(hl_js_fs_charge, (ctx));   \
+        call;                                                               \
+        (tripped) = hl_fs_charge_end(cs_);                                  \
+    } while (0)
+
 /* Read @p size bytes of @p path into a new ArrayBuffer and return it (a
  * shorter one when the file shrank since it was sized), or throw. */
 static JSValue js_fs_read_into_new_ab(JSContext *ctx, const HlFsConfig *fs,
@@ -63,7 +79,14 @@ static JSValue js_fs_read_into_new_ab(JSContext *ctx, const HlFsConfig *fs,
         JS_FreeValue(ctx, ab);
         return JS_ThrowInternalError(ctx, "fs.read: read_failed");
     }
-    int64_t got = hl_cap_fs_read(fs, path, (char *)store, size, err_msg);
+    int64_t got;
+    int tripped;
+    JS_FS_CHARGED(ctx, tripped,
+        got = hl_cap_fs_read(fs, path, (char *)store, size, err_msg));
+    if (tripped) {
+        JS_FreeValue(ctx, ab);
+        return JS_EXCEPTION;   /* the uncatchable interrupt, pending */
+    }
     if (got < 0) {
         JS_FreeValue(ctx, ab);
         return JS_ThrowInternalError(ctx, "fs.read: %s",
@@ -94,8 +117,18 @@ static JSValue js_fs_read(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
+    /* Both reads resolve the path (policy select, the walk, the open) and
+     * are charged for it as they go (audit 38): an empty or missing file
+     * cost nothing, a deep one 26 directory opens a call, for 0 units. */
     const char *err_msg = NULL;
-    int64_t size = hl_cap_fs_read(js->base.fs_cfg, path, NULL, 0, &err_msg);
+    int64_t size;
+    int tripped;
+    JS_FS_CHARGED(ctx, tripped,
+        size = hl_cap_fs_read(js->base.fs_cfg, path, NULL, 0, &err_msg));
+    if (tripped) {
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
+    }
     if (size < 0) {
         JSValue exc = JS_ThrowInternalError(ctx, "fs.read: %s",
                                              err_msg ? err_msg : "read_failed");
@@ -154,8 +187,10 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
     }
     /* Charged BEFORE the write (audit 10, parity with Lua): one call writes
      * up to the whole heap and counted as one step. One unit per 8 bytes,
-     * plus a floor for the temp file, fsync and rename every write does
-     * whatever its size (audit 37: an empty write was free). */
+     * plus a floor for the fsyncs and rename every write does whatever its
+     * size (audit 37: an empty write was free); the resolutions - the temp
+     * file's create, every directory walked or made - are charged by the
+     * resolver as it goes (audit 38). */
     if (hl_js_budget_charge(ctx, HL_WORK_FS_WRITE_UNITS +
                                  hl_work_bytes_units((uint64_t)view.len))) {
         if (needs_free && str) JS_FreeCString(ctx, str);
@@ -164,10 +199,13 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
     }
 
     const char *err_msg = NULL;
-    int rc = hl_cap_fs_write(js->base.fs_cfg, path,
-                              (const char *)view.data, view.len, &err_msg);
+    int rc, tripped;
+    JS_FS_CHARGED(ctx, tripped,
+        rc = hl_cap_fs_write(js->base.fs_cfg, path,
+                             (const char *)view.data, view.len, &err_msg));
     if (needs_free && str) JS_FreeCString(ctx, str);
     JS_FreeCString(ctx, path);
+    if (tripped) return JS_EXCEPTION;
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "fs.write: %s",
                                      err_msg ? err_msg : "write_failed");
@@ -202,16 +240,20 @@ static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
-    /* A resolve per path component and an fstatat (audit 37). */
-    if (hl_js_budget_charge(ctx, hl_work_fs_stat_units(path))) {
+    /* The policy select and the fstatat (audit 37); the walk to the parent
+     * directory is charged by the resolver, step by step (audit 38). */
+    if (hl_js_budget_charge(ctx, HL_WORK_FS_STAT_UNITS)) {
         JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
 
     const char *err = NULL;
     HlFsStatInfo info;
-    int rc = hl_cap_fs_stat(js->base.fs_cfg, path, &info, &err);
+    int rc, tripped;
+    JS_FS_CHARGED(ctx, tripped,
+        rc = hl_cap_fs_stat(js->base.fs_cfg, path, &info, &err));
     JS_FreeCString(ctx, path);
+    if (tripped) return JS_EXCEPTION;
     if (rc == 1) return JS_NULL;                          /* absent */
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "fs.stat: %s", err ? err : "stat_failed");
@@ -269,7 +311,9 @@ static JSValue js_fs_list(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
-    if (hl_js_budget_charge(ctx, HL_WORK_FS_LIST_UNITS)) {   /* the open */
+    /* The policy select and fdopendir; the directory's resolution is
+     * charged by the resolver (audit 38). */
+    if (hl_js_budget_charge(ctx, HL_WORK_FS_LIST_UNITS)) {
         JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
@@ -347,7 +391,8 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
 
     /* Optional second arg { offset, length } selects a windowed, page-aligned
      * mapping (mapped-spans). A bare path stays whole-file. */
-    /* The open, map and guard registration, whatever the size (audit 37). */
+    /* The map and guard registration, whatever the size (audit 37); the
+     * open's resolution is charged by the resolver (audit 38). */
     if (hl_js_budget_charge(ctx, HL_WORK_FS_MMAP_UNITS)) {
         JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
@@ -378,12 +423,15 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
             return JS_ThrowRangeError(ctx,
                 "fs.mmap: offset must be >= 0 and length > 0");
         }
-        buf = hl_cap_fs_mmap_window(js->base.fs_cfg, path,
-                                    (uint64_t)off, (uint64_t)length,
-                                    js->base.alloc, &err_msg);
-    } else {
-        buf = hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc, &err_msg);
     }
+    int windowed = argc >= 2 && JS_IsObject(argv[1]);
+    int tripped;
+    JS_FS_CHARGED(ctx, tripped,
+        buf = windowed
+            ? hl_cap_fs_mmap_window(js->base.fs_cfg, path,
+                                    (uint64_t)off, (uint64_t)length,
+                                    js->base.alloc, &err_msg)
+            : hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc, &err_msg));
     /* Every mapping takes one of the SIGBUS guard's slots until its buffer is
      * freed, and a full table refuses the mapping (audit 20). Buffers held
      * only by a dropped cycle wait for the collector: collect once and retry
@@ -391,13 +439,18 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
     if (!buf && err_msg && strcmp(err_msg, "too_many_mappings") == 0) {
         JS_RunGC(JS_GetRuntime(ctx));
         err_msg = NULL;
-        buf = argc >= 2 && JS_IsObject(argv[1])
-            ? hl_cap_fs_mmap_window(js->base.fs_cfg, path,
-                                    (uint64_t)off, (uint64_t)length,
-                                    js->base.alloc, &err_msg)
-            : hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc, &err_msg);
+        JS_FS_CHARGED(ctx, tripped,
+            buf = windowed
+                ? hl_cap_fs_mmap_window(js->base.fs_cfg, path,
+                                        (uint64_t)off, (uint64_t)length,
+                                        js->base.alloc, &err_msg)
+                : hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc, &err_msg));
     }
     JS_FreeCString(ctx, path);
+    if (tripped) {
+        if (buf) hl_cap_fs_munmap(buf);
+        return JS_EXCEPTION;
+    }
 
     if (!buf)
         return JS_ThrowInternalError(ctx, "fs.mmap: %s",

@@ -36,6 +36,49 @@
  */
 #define HL_FS_MAX_DEPTH 256
 
+#include <stdint.h>    /* uint64_t */
+
+/*
+ * Charge @p units of work to the calling run; non-zero = the run is over its
+ * budget (or past its deadline): stop. Must never raise / longjmp - it runs
+ * inside the capability layer, between syscalls that hold descriptors.
+ */
+typedef int (*HlFsChargeFn)(void *ud, uint64_t units);
+
+/*
+ * The resolver's charge scope (audit 38). Path resolution is real work one
+ * binding call does that no instruction hook sees - a 27-component path is
+ * 26 directory opens (~18 us each on macOS / APFS), a 250-deep fs.write
+ * mkdir-p's 250 directories, a chain of symlinks re-walks - so every
+ * resolution reports its work to this THREAD's scope as it goes, BEFORE each
+ * step's syscalls: per component walked, per symlink expanded, per directory
+ * created, per leaf opened (units in hull/shared/work_charge.h). When the
+ * scope's function says stop, the walk stops at once with "budget_exhausted"
+ * (descriptors closed, nothing further created) and the scope stays tripped,
+ * so every later resolution in it fails the same way.
+ *
+ * A binding opens a scope around its capability calls and, when
+ * hl_fs_charge_end reports a trip, raises the run's uncatchable limit. With
+ * no scope (fn NULL) nothing is charged: Hull's own reads (module loaders,
+ * static files, policy compile) and embedders are not app runs.
+ * hl_fs_charge_begin(NULL, NULL) suspends charging for cleanup that must
+ * run even after a trip (removing a temp file).
+ */
+typedef struct {
+    HlFsChargeFn fn;
+    void        *ud;
+    int          tripped;
+} HlFsChargeScope;
+
+/* Install @p fn / @p ud as this thread's scope (untripped); returns the one
+ * it replaces, for hl_fs_charge_end. */
+HlFsChargeScope hl_fs_charge_begin(HlFsChargeFn fn, void *ud);
+/* Put @p prev back; returns 1 if the scope being closed tripped. */
+int hl_fs_charge_end(HlFsChargeScope prev);
+/* Charge this thread's scope: 0 = go on, 1 = stop (sticky for the scope).
+ * No scope never stops. For the capability layer's own fixed work too. */
+int hl_fs_charge(uint64_t units);
+
 typedef enum {
     HL_FS_OPEN_READ,  /* open an existing REGULAR-FILE leaf O_RDONLY (symlinks
                        * followed, contained). The leaf is opened O_NONBLOCK so a
@@ -111,6 +154,7 @@ FILE *hl_fs_fopen_read(const char *base_dir, const char *relpath);
  * "invalid_path", "path_too_deep", "not_found", "permission", "not_a_directory",
  * "is_a_directory", "not_a_regular_file", "symlink_loop", "symlink_denied",
  * "reserved_path" (a step into an app root's .hull; hl_fs_reserve_root),
+ * "budget_exhausted" (the thread's charge scope said stop; hl_fs_charge),
  * "io_error". "not_a_regular_file" is the single token for a READ/WRITE leaf that
  * resolves to a FIFO, socket, character/block device, or directory (§5a intentional
  * tightening). "symlink_denied" only under HL_FS_SYMLINK_REFUSE; see
