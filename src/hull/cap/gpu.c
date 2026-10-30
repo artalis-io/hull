@@ -1326,7 +1326,9 @@ size_t hl_gpu_wgsl_type_depth(const char *wgsl, size_t len)
         while (sp > 0) {
             WlTypeDecl *d = &decls[stack[sp - 1]];
             int descended = 0;
-            while (d->next_ref < d->ref_count) {
+            /* refs is non-NULL whenever a declaration has references
+             * (ref_count > 0 implies nref > 0); said explicitly for scan-build. */
+            while (refs && d->next_ref < d->ref_count) {
                 const WlTypeRef *r = &refs[d->ref_first + d->next_ref];
                 size_t v = r->level + 1;    /* a predeclared type: 1 */
                 if (r->target >= 0) {
