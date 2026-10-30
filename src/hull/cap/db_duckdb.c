@@ -620,9 +620,20 @@ static void duck_track_txn(HlDbDuckCtx *s, const char *sql, int ok)
  * wall-clock deadline) and naps briefly. Once the budget or the deadline
  * trips, duckdb_interrupt stops the statement and the call fails. Returns
  * DuckDBSuccess, or DuckDBError with s->errmsg set and @p out empty
- * (*@p interrupted = 1 when the budget stopped it). */
+ * (*@p interrupted = 1 when the budget stopped it).
+ *
+ * A TRANSACTION statement (@p stoppable 0) is never interrupted (audit 36):
+ * duckdb_interrupt does not stop a task one of DuckDB's own threads already
+ * took, and BEGIN / COMMIT / ROLLBACK take effect in that task, so a COMMIT
+ * reported "interrupted" had often committed (and a ROLLBACK rolled back) -
+ * a worker.dispatch job then failed on a commit that held, its cleanup
+ * ROLLBACK found no transaction, and in_txn was wrong. Such a statement is
+ * cheap; it runs to its end and its real outcome is reported, as a Postgres
+ * COMMIT's reply is read to the end on a trip (commit_sent). The trip stays
+ * sticky in the run's budget, which raises it at its next poll. */
 static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
-                                 duckdb_result *out, int *interrupted)
+                                 int stoppable, duckdb_result *out,
+                                 int *interrupted)
 {
     memset(out, 0, sizeof *out);
     *interrupted = 0;
@@ -642,13 +653,15 @@ static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
         if (!tripped &&
             hl_db_budget_charge(idle ? 0 : HL_DB_DUCK_TASK_OPS) != 0) {
             tripped = 1;
-            duckdb_interrupt(s->con);   /* the next task fails */
+            if (stoppable)
+                duckdb_interrupt(s->con);   /* the next task fails */
         }
         if (idle) {
             struct timespec nap = { 0, 100000 };   /* 0.1 ms */
             (void)nanosleep(&nap, NULL);
         }
     }
+    if (!stoppable) tripped = 0;   /* ran to its end: report what it did */
     if (tripped || st == DUCKDB_PENDING_ERROR) {
         *interrupted = tripped;
         duck_set_err(s, tripped ? "interrupted (instruction limit exceeded)"
@@ -764,7 +777,8 @@ static int duck_query(HlDbHandle *h, const char *sql,
         duckdb_prepared_statement_type(stmt) == DUCKDB_STATEMENT_TYPE_TRANSACTION;
     duckdb_result result;
     int interrupted = 0;
-    if (duck_execute(s, stmt, &result, &interrupted) != DuckDBSuccess) {
+    if (duck_execute(s, stmt, !is_txn_stmt, &result, &interrupted)
+        != DuckDBSuccess) {
         duckdb_destroy_prepare(&stmt);
         /* An interrupted statement never ran: the state is unchanged. */
         if (is_txn_stmt && !interrupted) duck_track_txn(s, sql, 0);
@@ -849,6 +863,17 @@ static int duck_rollback(HlDbHandle *h)
     HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
     int rc = duck_exec(h, "ROLLBACK", NULL, 0);
     hl_db_budget_restore(budget);
+    /* Nothing left to roll back (the app's own COMMIT / ROLLBACK ended the
+     * transaction) is what the rollback asked for: success, and in_txn cleared,
+     * as duck_guard_stale_txn treats it (audit 36). */
+    if (rc != 0 && h && h->ctx) {
+        HlDbDuckCtx *s = h->ctx;
+        if (strstr(s->errmsg, "no transaction is active")) {
+            s->in_txn = 0;
+            s->errmsg[0] = '\0';
+            rc = 0;
+        }
+    }
     return rc;
 }
 

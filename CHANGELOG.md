@@ -38,6 +38,19 @@ release-artifact layout).
   for an address it found locked - one commit less, visible in the response time. A locked
   address now runs the same statements in a hold mode that leaves the count and the lock as
   they were, so locked and unlocked addresses do the same database work.
+- **A DuckDB COMMIT / ROLLBACK could be reported interrupted after it took effect** (audit 36,
+  both runtimes). When a run's budget tripped during a statement, the DuckDB backend called
+  `duckdb_interrupt` and reported the statement stopped, but the interrupt does not stop a
+  task one of DuckDB's own threads already took, and BEGIN / COMMIT / ROLLBACK take effect in
+  that task: a `db.batch` or app COMMIT that tripped could fail though DuckDB committed (a
+  retried `worker.dispatch` job wrote twice), its cleanup ROLLBACK then failed with "no
+  transaction is active", and `in_txn` was wrong until the next guard. A transaction
+  statement is now never interrupted: it runs to its end (it is cheap) and its real outcome
+  is reported, as a Postgres COMMIT's reply is read to the end on a trip; the trip stays
+  sticky and the run still raises it at its next poll. Hull's own rollback treats "no
+  transaction is active" as done. Covered by `test_db_duckdb` (2000 COMMIT / ROLLBACK under
+  an always-tripped budget), which also makes `rollback_runs_after_the_budget_tripped`
+  deterministic.
 - **DuckDB returned another column's value for short strings** (audit 35, both runtimes).
   DuckDB stores a VARCHAR / BLOB of up to 12 bytes inline in the vector's string struct; the
   decoder copied that struct to its own stack and pointed the value into the copy, which was
