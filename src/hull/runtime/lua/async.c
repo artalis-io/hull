@@ -247,7 +247,57 @@ static void hl_lua_co_check(lua_State *L, lua_State *co)
                             "since ended (rolled back when its run ended, or "
                             "committed): what follows would commit "
                             "statement by statement");
+    /* Yielded inside its own transaction, which is still open: it keeps
+     * the tag, so a later yield inside that same transaction tags it again.
+     * Rewritten to "resumed inside a transaction", the next yield read the
+     * transaction as the resumer's and left it untagged - a coroutine that
+     * yielded twice inside its own transaction could be resumed from a
+     * later run after the guard had rolled it back (audit 37). */
+    if (hl_lua_mark_kind(*mark) == (int)HL_LUA_MARK_TXN_YIELD &&
+        lua_status(co) == LUA_YIELD)
+        return;
     *mark = open ? hl_lua_txn_mark(gen, HL_LUA_MARK_TXN_RESUMED) : NULL;
+}
+
+/* coroutine.resume: lcorolib's luaB_coresume behind hl_lua_co_check. The
+ * check runs again right before lua_resume, after the stack growth that can
+ * run a __gc finalizer (which could end the transaction the coroutine
+ * yielded inside); nothing between that second check and the resume
+ * allocates (audit 37). */
+static int hl_lua_co_resume(lua_State *L)
+{
+    lua_State *co = lua_tothread(L, 1);
+    luaL_argexpected(L, co, 1, "coroutine");
+    hl_lua_co_check(L, co);
+    int narg = lua_gettop(L) - 1;
+    int nres = 0;
+    if (!lua_checkstack(co, narg)) {
+        lua_pushboolean(L, 0);
+        lua_pushliteral(L, "too many arguments to resume");
+        return 2;
+    }
+    hl_lua_co_check(L, co);
+    lua_xmove(L, co, narg);
+    int status = lua_resume(co, L, narg, &nres);
+    if (hl_lua_budget_tripped(L)) {
+        if (status == LUA_OK || status == LUA_YIELD)
+            lua_pop(co, nres);
+        return hl_lua_budget_raise(L);
+    }
+    if (status == LUA_OK || status == LUA_YIELD) {
+        if (!lua_checkstack(L, nres + 1)) {
+            lua_pop(co, nres);
+            lua_pushboolean(L, 0);
+            lua_pushliteral(L, "too many results to resume");
+            return 2;
+        }
+        lua_pushboolean(L, 1);
+        lua_xmove(co, L, nres);
+        return nres + 1;
+    }
+    lua_pushboolean(L, 0);
+    lua_xmove(co, L, 1);   /* the error */
+    return 2;
 }
 
 static int hl_lua_co_guarded(lua_State *L)
@@ -318,6 +368,7 @@ static int hl_lua_co_auxwrap(lua_State *L)
         lua_pushliteral(L, "too many arguments to resume");
         return lua_error(L);
     }
+    hl_lua_co_check(L, co);   /* again, after the growth (hl_lua_co_resume) */
     lua_xmove(L, co, narg);
     int status = lua_resume(co, L, narg, &nres);
     if (status == LUA_OK || status == LUA_YIELD) {
@@ -362,7 +413,9 @@ void hl_lua_guard_coroutine_lib(lua_State *L)
     *(void **)lua_getextraspace(L) = NULL;
     lua_getglobal(L, "coroutine");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
-    static const char *const fns[] = { "resume", "close" };
+    lua_pushcfunction(L, hl_lua_co_resume);
+    lua_setfield(L, -2, "resume");
+    static const char *const fns[] = { "close" };
     for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++) {
         lua_getfield(L, -1, fns[i]);
         if (lua_isfunction(L, -1)) {

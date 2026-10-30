@@ -38,7 +38,37 @@ typedef struct {
     int          owned;     /* 1 = opened here (may be replaced); 0 = wrapped */
     int          broken;    /* stuck in a transaction it could not leave */
     char        *live_path; /* registered with db_live_files (audit 33) */
+    uint64_t     txn_seq;   /* transaction ends (sqlite_hook_txn_end); 0 =
+                             * not tracked (a wrapped connection) */
 } HlDbSqliteCtx;
+
+/* Commit and rollback hooks: count every transaction end on the connection,
+ * explicit or not (audit 37, the backend's txn_seq). Never 0 once
+ * tracked. The commit hook fires before the commit, so a COMMIT that then
+ * fails counts too - an extra change only makes the generation more
+ * conservative. */
+static void sqlite_hook_txn_end(HlDbSqliteCtx *s)
+{
+    if (++s->txn_seq == 0) s->txn_seq = 1;
+}
+
+static int sqlite_commit_hook(void *ud)
+{
+    sqlite_hook_txn_end((HlDbSqliteCtx *)ud);
+    return 0;   /* let the commit go ahead */
+}
+
+static void sqlite_rollback_hook(void *ud)
+{
+    sqlite_hook_txn_end((HlDbSqliteCtx *)ud);
+}
+
+static void sqlite_track_txn(HlDbSqliteCtx *s, sqlite3 *db)
+{
+    if (!s->txn_seq) s->txn_seq = 1;
+    (void)sqlite3_commit_hook(db, sqlite_commit_hook, s);
+    (void)sqlite3_rollback_hook(db, sqlite_rollback_hook, s);
+}
 
 static const char REENTERED_MSG[] =
     "the connection is running a statement (a user-defined function cannot "
@@ -151,6 +181,7 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
 
     hl_stmt_cache_init(&s->cache, s->db, alloc);
     s->owned = 1;
+    sqlite_track_txn(s, s->db);
 
     *ctx = s;
     return 0;
@@ -205,6 +236,8 @@ static void sqlite_replace_conn(HlDbSqliteCtx *s)
         s->db = ndb;
         s->broken = 0;
         hl_stmt_cache_init(&s->cache, ndb, s->alloc);
+        sqlite_hook_txn_end(s);   /* the old connection's transaction */
+        sqlite_track_txn(s, ndb);
         hl_eprintf_line("hull: sqlite connection to '%s' replaced: its "
                         "transaction could not be rolled back", path);
     }
@@ -329,6 +362,12 @@ static int sqlite_in_txn(HlDbHandle *h)
     /* A broken connection's stuck transaction is not the app's: it refuses
      * every statement, so it holds nothing a wait could leave open. */
     return s && s->db && !s->broken && !sqlite3_get_autocommit(s->db);
+}
+
+static uint64_t sqlite_txn_seq(HlDbHandle *h)
+{
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    return s ? s->txn_seq : 0;
 }
 
 /* ── Dialect-aware SQL helpers ───────────────────────────────────────
@@ -586,6 +625,7 @@ const HlDbBackend hl_db_backend_sqlite = {
     .errmsg                = sqlite_errmsg,
     .guard_stale_txn       = sqlite_guard_stale_txn,
     .in_txn                = sqlite_in_txn,
+    .txn_seq               = sqlite_txn_seq,
     .insert_if_absent      = sqlite_insert_if_absent,
     .upsert                = sqlite_upsert,
     .table_columns         = sqlite_table_columns,

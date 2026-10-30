@@ -535,6 +535,8 @@ void hl_db_registry_close_all(HlDbRegistry *reg)
     reg->closed = 1;   /* first: a backend close cannot reopen through _get */
     for (int i = 0; i < reg->nslots; i++) {
         RegSlot *s = &reg->slots[i];
+        HlDbTxnSnap was = { 0, 0 };
+        if (s->open) was = hl_db_txn_snap(&s->handle);
         if (s->open && s->owned && s->handle.backend)
             s->handle.backend->close(&s->handle);
         /* A seeded slot is a value copy of a handle its owner closes; drop
@@ -542,6 +544,8 @@ void hl_db_registry_close_all(HlDbRegistry *reg)
          * no backend and fails "not available" (audit 17). */
         s->open = 0;
         memset(&s->handle, 0, sizeof s->handle);
+        /* A transaction open here ended with the close (audit 37). */
+        hl_db_txn_note(&s->handle, was, NULL);
     }
 }
 

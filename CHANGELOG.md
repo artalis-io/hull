@@ -64,6 +64,22 @@ release-artifact layout).
   `hull:_task` task of a serving app that admits TUI could run the same synchronous loop and
   re-arm too, holding the event loop for as long as the terminal produced events or idle
   ticks. Only app.main's own run re-arms now; any other entry keeps the single run it got.
+- **A Lua coroutine lost its transaction tag when it yielded twice** (audit 37). Round 36
+  tags a coroutine that yields inside a transaction it opened, so it cannot be resumed once
+  that transaction ended. But every resume rewrote a still-valid tag to "resumed inside a
+  transaction", and the next yield read the transaction as the resumer's and cleared it: a
+  coroutine that ran BEGIN, yielded, was resumed and yielded again could be resumed from a
+  later run after the guard had rolled its transaction back, its later statements
+  autocommitting (the first write gone, the second committed). A coroutine resumed inside
+  its own still-open transaction now keeps its tag, however often it yields (plain
+  `coroutine.resume`, `coroutine.wrap` and `coroutine.close` alike). Also: `coroutine.resume`
+  checks again right before it resumes, after the stack growth that can run a `__gc`
+  finalizer; closing a `db.open` handle (or the registry at teardown) with a transaction open
+  counts as that transaction's end; and SQLite now reports transaction ends itself (commit /
+  rollback hooks, the backend's new `txn_seq`), so a generator kept across requests that runs
+  a multi-statement text or a refused `BEGIN` inside each request's `db.batch` is no longer
+  refused from the second request on - the generation changed whenever the text could have
+  ended a transaction. Covered by the `lua_audit37` tests in `test_lua`.
 - **JS: a run failed for holding a transaction across a wait still resumed later** (audit 33).
   Audit 32 dropped a failed run's queued jobs, but forgot the run's tag as soon as its
   request was answered, and the 32-slot list it lived in overwrote its oldest entry. A

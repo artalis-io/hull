@@ -62,14 +62,20 @@ static int txn_sql_multi(const char *sql)
     return 0;
 }
 
-void hl_db_txn_note(HlDbHandle *h, int was_in_txn, const char *sql)
+void hl_db_txn_note(HlDbHandle *h, HlDbTxnSnap before, const char *sql)
 {
     int now = hl_db_in_txn(h);
-    int changed = was_in_txn != now;
-    if (!changed && was_in_txn) {
+    int changed = before.in_txn != now;
+    if (!changed && before.in_txn) {
         /* Still inside one: was it still the same transaction? A statement
          * that ends one and opens the next shows no change. */
-        if (!sql) {
+        uint64_t seq = hl_db_txn_seq(h);
+        if (before.seq && seq) {
+            /* The backend counts transaction ends: no guessing from the
+             * text, so a multi-statement INSERT inside a db.batch keeps the
+             * generation (audit 37). */
+            changed = seq != before.seq;
+        } else if (!sql) {
             changed = 1;   /* begin / commit / rollback / the guard */
         } else {
             /* Either comment rule (Postgres nests block comments, SQLite
