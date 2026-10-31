@@ -11,6 +11,7 @@
  */
 
 #include "internal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 
 #include "hull/cap/ws.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_guard_stale_txns */
@@ -62,7 +63,29 @@ static int push_ws_args(lua_State *L, void *ud)
     return 1;
 }
 
+/* --vm-thread (cap/vm_thread.h): ws on_open runs on the VM thread. */
+static void hl_lua_ws_on_open_impl(KlWsServerConn *ws_conn, void *user_data);
+typedef struct {
+    KlWsServerConn *ws_conn;
+    void *user_data;
+} hl_lua_ws_on_open_vmt_args;
+static void hl_lua_ws_on_open_vmt_job(void *ud)
+{
+    hl_lua_ws_on_open_vmt_args *a = (hl_lua_ws_on_open_vmt_args *)ud;
+    hl_lua_ws_on_open_impl(a->ws_conn, a->user_data);
+}
 void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaWsRoute *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_lua_ws_on_open_vmt_args a = { ws_conn, user_data };
+        (void)hl_vmt_run(vmt, hl_lua_ws_on_open_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_lua_ws_on_open_impl(ws_conn, user_data);
+}
+
+static void hl_lua_ws_on_open_impl(KlWsServerConn *ws_conn, void *user_data)
 {
     HlLuaWsRoute *route = (HlLuaWsRoute *)user_data;
     HlLua *lua = route->lua;
@@ -118,7 +141,32 @@ void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     }
 }
 
-void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
+/* --vm-thread (cap/vm_thread.h): ws on_message runs on the VM thread. */
+static void hl_lua_ws_on_message_impl(KlWsServerConn *ws_conn, const char *data, size_t len, int is_binary, void *user_data);
+typedef struct {
+    KlWsServerConn *ws_conn;
+    const char *data;
+    size_t len;
+    int is_binary;
+    void *user_data;
+} hl_lua_ws_on_message_vmt_args;
+static void hl_lua_ws_on_message_vmt_job(void *ud)
+{
+    hl_lua_ws_on_message_vmt_args *a = (hl_lua_ws_on_message_vmt_args *)ud;
+    hl_lua_ws_on_message_impl(a->ws_conn, a->data, a->len, a->is_binary, a->user_data);
+}
+void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data, size_t len, int is_binary, void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaWsRoute *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_lua_ws_on_message_vmt_args a = { ws_conn, data, len, is_binary, user_data };
+        (void)hl_vmt_run(vmt, hl_lua_ws_on_message_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_lua_ws_on_message_impl(ws_conn, data, len, is_binary, user_data);
+}
+
+static void hl_lua_ws_on_message_impl(KlWsServerConn *ws_conn, const char *data,
                                    size_t len, int is_binary, void *user_data)
 {
     HlLuaWsRoute *route = (HlLuaWsRoute *)user_data;
@@ -186,7 +234,32 @@ static void hl_lua_ws_close_teardown(HlLua *lua, void *ctx)
     hl_ws_registry_remove(lua->base.ws_registry, conn);
 }
 
-void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
+/* --vm-thread (cap/vm_thread.h): ws on_close runs on the VM thread. */
+static void hl_lua_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code, const char *reason, size_t reason_len, void *user_data);
+typedef struct {
+    KlWsServerConn *ws_conn;
+    uint16_t code;
+    const char *reason;
+    size_t reason_len;
+    void *user_data;
+} hl_lua_ws_on_close_vmt_args;
+static void hl_lua_ws_on_close_vmt_job(void *ud)
+{
+    hl_lua_ws_on_close_vmt_args *a = (hl_lua_ws_on_close_vmt_args *)ud;
+    hl_lua_ws_on_close_impl(a->ws_conn, a->code, a->reason, a->reason_len, a->user_data);
+}
+void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code, const char *reason, size_t reason_len, void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaWsRoute *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_lua_ws_on_close_vmt_args a = { ws_conn, code, reason, reason_len, user_data };
+        (void)hl_vmt_run(vmt, hl_lua_ws_on_close_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_lua_ws_on_close_impl(ws_conn, code, reason, reason_len, user_data);
+}
+
+static void hl_lua_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code,
                                  const char *reason, size_t reason_len,
                                  void *user_data)
 {

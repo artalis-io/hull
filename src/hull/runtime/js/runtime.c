@@ -2728,6 +2728,19 @@ static void vt_js_stop_async(HlRuntime *rt)
     js->server = NULL;
 }
 
+/* --vm-thread: the VM moved to another thread; QuickJS measures its stack
+ * limit from the C stack it was last told about. */
+static void vt_js_thread_switch(HlRuntime *rt)
+{
+    HlJS *js = (HlJS *)rt;
+    if (js->rt) JS_UpdateStackTop(js->rt);
+}
+
+static struct HlRunWatch *vt_js_run_watch(HlRuntime *rt)
+{
+    return &((HlJS *)rt)->run_watch;
+}
+
 const HlRuntimeVtable hl_js_vtable = {
     .init                 = vt_js_init,
     .load_app             = vt_js_load_app,
@@ -2749,4 +2762,6 @@ const HlRuntimeVtable hl_js_vtable = {
     .request_done         = vt_js_request_done,
 #endif
     .stop_async           = vt_js_stop_async,
+    .thread_switch        = vt_js_thread_switch,
+    .run_watch            = vt_js_run_watch,
 };

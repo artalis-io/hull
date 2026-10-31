@@ -240,6 +240,13 @@ typedef struct HlManifest {
      * 0 = not set (HL_HTTP_DEFAULT_TIMEOUT_MS). See hull/limits/http.h. */
     uint32_t    http_timeout_ms;
 
+    /* Run limits (from manifest "limits" key). limits.vm_thread turns on
+     * --vm-thread (cap/vm_thread.h); the grace and ceiling are in ms, 0 =
+     * not set (the CLI's, else the defaults). */
+    int         vm_thread;
+    uint32_t    vm_thread_grace_ms;
+    uint32_t    vm_thread_ceiling_ms;
+
     /* Capability flags */
     int         gpu;              /* 1 if app declares gpu: true or gpu: {...} */
     int         gpu_devices[HL_GPU_MAX_DEVICES]; /* allowed device indices */

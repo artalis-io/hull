@@ -87,6 +87,7 @@
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
+#include "hull/cap/vm_thread.h"     /* --vm-thread */
 #include "hull/static.h"
 #include "hull/tool.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
@@ -269,6 +270,14 @@ static void usage(const char *prog)
             "  --max-instructions N Set runtime instruction limit per request (default: 100m)\n"
             "  --max-run-ms MS      Wall-clock limit per uninterrupted script run (default:\n"
             "                       60000; app.main 600000; 0 = none; env HULL_MAX_RUN_MS)\n"
+            "  --vm-thread          Run handlers on a VM thread of their own: a run stuck\n"
+            "                       in a native call past its deadline is answered 503\n"
+            "                       and the server keeps answering (manifest\n"
+            "                       limits.vm_thread; default off)\n"
+            "  --vm-thread-grace-ms MS    Wait past a run's deadline before abandoning it\n"
+            "                       (default: 1000)\n"
+            "  --vm-thread-ceiling-ms MS  Exit (status 75) when an abandoned run is still\n"
+            "                       stuck after this long (default: 60000; 0 = never)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
             "  --max-connections N  Max concurrent connections (default: 256)\n"
             "  --body-max-size SIZE Max request body size (default: 1m)\n"
@@ -359,6 +368,12 @@ typedef struct {
     int read_timeout;
     int num_workers;
     int queue_capacity;
+    /* --vm-thread (cap/vm_thread.h): 1 on the command line; the manifest's
+     * limits.vm_thread turns it on too. Grace / ceiling: -1 = not given
+     * (the manifest's, else the defaults). */
+    int vm_thread;
+    int64_t vm_thread_grace_ms;
+    int64_t vm_thread_ceiling_ms;
 
     /* CLI mode (app.main): everything after `--` on the command line is
      * passed to main as ctx.args. Borrows pointers from argv; lifetime
@@ -385,6 +400,8 @@ typedef struct {
     .gpu_device = -1, \
     .log_level = LOG_INFO, \
     .drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS, \
+    .vm_thread_grace_ms = -1, \
+    .vm_thread_ceiling_ms = -1, \
 }
 
 /* ── Argument parsing ──────────────────────────────────────────────── */
@@ -487,6 +504,22 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             hl_run_watchdog_configure(ms);
+        } else if (strcmp(argv[i], "--vm-thread") == 0) {
+            cfg->vm_thread = 1;
+        } else if ((strcmp(argv[i], "--vm-thread-grace-ms") == 0 ||
+                    strcmp(argv[i], "--vm-thread-ceiling-ms") == 0) &&
+                   i + 1 < argc) {
+            /* Milliseconds, parsed as --max-run-ms is (clamped to 24 h). */
+            int grace = argv[i][12] == 'g';
+            int64_t ms;
+            if (hl_run_watchdog_parse_ms(argv[++i], &ms) != 0) {
+                fprintf(stderr, "hull: invalid %s: %s\n",
+                        grace ? "vm-thread-grace-ms" : "vm-thread-ceiling-ms",
+                        argv[i]);
+                return -1;
+            }
+            if (grace) cfg->vm_thread_grace_ms = ms;
+            else       cfg->vm_thread_ceiling_ms = ms;
         } else if (strcmp(argv[i], "--max-connections") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
@@ -810,6 +843,9 @@ typedef struct {
                                           *     is skipped and the process
                                           *     exits with cli_exit_code. */
     int                  cli_exit_code; /* main's return value (0..255) */
+
+    /* --vm-thread (cap/vm_thread.h): NULL when off. */
+    HlVmThread          *vm_thread;
 } HlServerState;
 
 /* ── Phase functions ─────────────────────────────────────────────────
@@ -2108,6 +2144,77 @@ static int hl_serve_wire_routes(HlServerState *s)
     return 0;
 }
 
+/* --vm-thread (cap/vm_thread.h): the runtime's thread_switch hook, in the
+ * shape the VM thread calls it. */
+static void serve_vmt_thread_switch(void *ud)
+{
+    HlRuntime *rt = (HlRuntime *)ud;
+    if (rt->vt->thread_switch) rt->vt->thread_switch(rt);
+}
+
+/* Start the VM thread when --vm-thread or the manifest's limits.vm_thread
+ * asks for it. Runs after the kernel sandbox is applied (a thread inherits
+ * the seccomp filter and the Landlock domain only from the thread that
+ * creates it) and after the routes are wired, right before the loop. -1
+ * only when it was asked for and could not be started. */
+static int hl_serve_start_vm_thread(HlServerState *s)
+{
+    /* HULL_VM_THREAD=1 is --vm-thread for a whole environment (an operator's
+     * knob, and how `make e2e-vm-thread-all` runs every suite with it). */
+    const char *env = getenv("HULL_VM_THREAD");
+    int env_on = env && *env && strcmp(env, "0") != 0;
+    if (!s->cfg.vm_thread && !s->manifest.vm_thread && !env_on) return 0;
+    HlRuntime *rt = hl_app_context_runtime(s->app);
+    HlRunWatch *watch = rt->vt->run_watch ? rt->vt->run_watch(rt) : NULL;
+    if (!watch) {
+        log_error("[hull:vm-thread] the %s runtime has no run watch; "
+                  "--vm-thread is not available", rt->vt->name);
+        return -1;
+    }
+    HlVmThreadConfig vc;
+    memset(&vc, 0, sizeof vc);
+    vc.watch = watch;
+    vc.grace_ms = s->cfg.vm_thread_grace_ms >= 0
+        ? (uint32_t)s->cfg.vm_thread_grace_ms
+        : s->manifest.vm_thread_grace_ms;          /* 0 = the default */
+    if (vc.grace_ms == 0) vc.grace_ms = HL_VMT_DEFAULT_GRACE_MS;
+    if (s->cfg.vm_thread_ceiling_ms >= 0)
+        vc.ceiling_ms = (uint32_t)s->cfg.vm_thread_ceiling_ms;   /* 0 = never */
+    else if (s->manifest.vm_thread_ceiling_ms > 0)
+        vc.ceiling_ms = s->manifest.vm_thread_ceiling_ms;
+    else
+        vc.ceiling_ms = HL_VMT_DEFAULT_CEILING_MS;
+    /* Standby answers new connections only on a plaintext listener. */
+    vc.listen_fd = s->server_tls_ctx ? NULL : &s->server.listen_fd;
+    vc.server_running = &s->server.running;
+    vc.server_draining = &s->server.draining;
+    vc.drain_ms = s->cfg.drain_timeout > 0 ? (uint32_t)s->cfg.drain_timeout : 0;
+    vc.thread_switch = serve_vmt_thread_switch;
+    vc.switch_ud = rt;
+    if (hl_vmt_create(&s->vm_thread, &vc) != 0) {
+        log_error("[hull:vm-thread] could not start the VM thread");
+        return -1;
+    }
+    rt->vm_thread = s->vm_thread;
+    log_info("[hull:c] VM thread on: a run stuck %u ms past its deadline is "
+             "abandoned (503); exit after %u ms stuck%s",
+             vc.grace_ms, vc.ceiling_ms,
+             vc.ceiling_ms ? "" : " (never)");
+    return 0;
+}
+
+/* Join the VM thread (idempotent). The loop has returned, so no run is in
+ * progress; teardown then runs every VM callback on this thread, exactly as
+ * without --vm-thread. */
+static void hl_serve_stop_vm_thread(HlServerState *s)
+{
+    if (!s->vm_thread) return;
+    HlRuntime *rt = s->app ? hl_app_context_runtime(s->app) : NULL;
+    if (rt) rt->vm_thread = NULL;
+    hl_vmt_destroy(s->vm_thread);
+    s->vm_thread = NULL;
+}
+
 /* Phase 4: log + enter the event loop until the server stops. */
 static void hl_serve_run(HlServerState *s)
 {
@@ -2171,6 +2278,10 @@ static void serve_pool_free(HlAsyncBackendPool *pool)
 /* Phase 5: tear down all resources after the event loop returns. */
 static void hl_serve_teardown_after_serve(HlServerState *s)
 {
+    /* Step 0 (--vm-thread): the VM comes back to this thread before
+     * anything below calls into it. */
+    hl_serve_stop_vm_thread(s);
+
     /* Model-2 async SMTP shutdown, PASS 1 (before pool_free): stop new SMTP
      * submissions and request cancellation of every in-flight op, so a running
      * transport observes the shutdown and terminates promptly instead of blocking
@@ -2426,6 +2537,11 @@ static int hl_serve_wire_and_start(HlServerState *s)
         if (rt_close) rt_close->registration_closed = 1;
     }
 
+    if (hl_serve_start_vm_thread(s) != 0) {
+        hl_serve_teardown_after_serve(s);
+        return -1;
+    }
+
     hl_serve_run(s);
     hl_serve_teardown_after_serve(s);
     return 0;
@@ -2438,6 +2554,8 @@ static int hl_serve_wire_and_start(HlServerState *s)
  * success path (in hl_serve_wire_and_start, after kl_http_server_run). */
 static void hl_serve_cleanup(HlServerState *s)
 {
+    hl_serve_stop_vm_thread(s);   /* idempotent; normally joined already */
+
     /* Free manifest if extracted but wire_and_start didn't finish.
      * For a sealed manifest this is a no-op (sealed flag short-circuits);
      * the actual mapping is destroyed at the END of this function, AFTER

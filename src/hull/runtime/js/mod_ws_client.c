@@ -13,6 +13,7 @@
  */
 
 #include "refusal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 #include "mod_buffer.h"
 #include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "internal.h"            /* async gate, instruction budget */
@@ -358,7 +359,29 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
     }
 }
 
+/* --vm-thread (cap/vm_thread.h): ws-client onOpen runs on the VM thread. */
+static void js_ws_client_on_open_impl(KlWsClientConn *ws, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    void *user_data;
+} js_ws_client_on_open_vmt_args;
+static void js_ws_client_on_open_vmt_job(void *ud)
+{
+    js_ws_client_on_open_vmt_args *a = (js_ws_client_on_open_vmt_args *)ud;
+    js_ws_client_on_open_impl(a->ws, a->user_data);
+}
 static void js_ws_client_on_open(KlWsClientConn *ws, void *user_data)
+{
+    HlVmThread *vmt = ((HlJSWsClientUD *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        js_ws_client_on_open_vmt_args a = { ws, user_data };
+        (void)hl_vmt_run(vmt, js_ws_client_on_open_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    js_ws_client_on_open_impl(ws, user_data);
+}
+
+static void js_ws_client_on_open_impl(KlWsClientConn *ws, void *user_data)
 {
     (void)ws;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)user_data;
@@ -384,7 +407,32 @@ static void js_ws_client_on_open(KlWsClientConn *ws, void *user_data)
     JS_FreeValue(ud->ctx, conn_obj);
 }
 
-static void js_ws_client_on_message(KlWsClientConn *ws, const char *data,
+/* --vm-thread (cap/vm_thread.h): ws-client onMessage runs on the VM thread. */
+static void js_ws_client_on_message_impl(KlWsClientConn *ws, const char *data, size_t len, int is_binary, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    const char *data;
+    size_t len;
+    int is_binary;
+    void *user_data;
+} js_ws_client_on_message_vmt_args;
+static void js_ws_client_on_message_vmt_job(void *ud)
+{
+    js_ws_client_on_message_vmt_args *a = (js_ws_client_on_message_vmt_args *)ud;
+    js_ws_client_on_message_impl(a->ws, a->data, a->len, a->is_binary, a->user_data);
+}
+static void js_ws_client_on_message(KlWsClientConn *ws, const char *data, size_t len, int is_binary, void *user_data)
+{
+    HlVmThread *vmt = ((HlJSWsClientUD *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        js_ws_client_on_message_vmt_args a = { ws, data, len, is_binary, user_data };
+        (void)hl_vmt_run(vmt, js_ws_client_on_message_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    js_ws_client_on_message_impl(ws, data, len, is_binary, user_data);
+}
+
+static void js_ws_client_on_message_impl(KlWsClientConn *ws, const char *data,
                                       size_t len, int is_binary, void *user_data)
 {
     (void)ws;
@@ -464,7 +512,32 @@ static void js_ws_client_finish(HlJSWsClientUD *ud)
     }
 }
 
-static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
+/* --vm-thread (cap/vm_thread.h): ws-client onClose runs on the VM thread. */
+static void js_ws_client_on_close_impl(KlWsClientConn *ws, uint16_t code, const char *reason, size_t reason_len, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    uint16_t code;
+    const char *reason;
+    size_t reason_len;
+    void *user_data;
+} js_ws_client_on_close_vmt_args;
+static void js_ws_client_on_close_vmt_job(void *ud)
+{
+    js_ws_client_on_close_vmt_args *a = (js_ws_client_on_close_vmt_args *)ud;
+    js_ws_client_on_close_impl(a->ws, a->code, a->reason, a->reason_len, a->user_data);
+}
+static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code, const char *reason, size_t reason_len, void *user_data)
+{
+    HlVmThread *vmt = ((HlJSWsClientUD *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        js_ws_client_on_close_vmt_args a = { ws, code, reason, reason_len, user_data };
+        (void)hl_vmt_run(vmt, js_ws_client_on_close_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    js_ws_client_on_close_impl(ws, code, reason, reason_len, user_data);
+}
+
+static void js_ws_client_on_close_impl(KlWsClientConn *ws, uint16_t code,
                                     const char *reason, size_t reason_len,
                                     void *user_data)
 {
@@ -498,7 +571,30 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
     js_ws_client_finish(ud);
 }
 
-static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
+/* --vm-thread (cap/vm_thread.h): ws-client onError runs on the VM thread. */
+static void js_ws_client_on_error_impl(KlWsClientConn *ws, const char *msg, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    const char *msg;
+    void *user_data;
+} js_ws_client_on_error_vmt_args;
+static void js_ws_client_on_error_vmt_job(void *ud)
+{
+    js_ws_client_on_error_vmt_args *a = (js_ws_client_on_error_vmt_args *)ud;
+    js_ws_client_on_error_impl(a->ws, a->msg, a->user_data);
+}
+static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg, void *user_data)
+{
+    HlVmThread *vmt = ((HlJSWsClientUD *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        js_ws_client_on_error_vmt_args a = { ws, msg, user_data };
+        (void)hl_vmt_run(vmt, js_ws_client_on_error_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    js_ws_client_on_error_impl(ws, msg, user_data);
+}
+
+static void js_ws_client_on_error_impl(KlWsClientConn *ws, const char *msg,
                                     void *user_data)
 {
     (void)ws;

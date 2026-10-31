@@ -10,6 +10,7 @@
  */
 
 #include "internal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 #include "hull/shared/req_life.h"
 
 #include "hull/shared/async.h"
@@ -30,7 +31,30 @@
 /* Forward declarations from bindings.c */
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life);
 
-void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
+/* --vm-thread (cap/vm_thread.h): an SSE handler runs on the VM thread. */
+static void hl_js_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
+typedef struct {
+    KlHttpRequest *req;
+    KlHttpResponse *res;
+    void *user_data;
+} hl_js_sse_handler_vmt_args;
+static void hl_js_sse_handler_vmt_job(void *ud)
+{
+    hl_js_sse_handler_vmt_args *a = (hl_js_sse_handler_vmt_args *)ud;
+    hl_js_sse_handler_impl(a->req, a->res, a->user_data);
+}
+void hl_js_sse_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
+{
+    HlVmThread *vmt = (user_data && ((HlJSSseRoute *)user_data)->js ? ((HlJSSseRoute *)user_data)->js->base.vm_thread : NULL);
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_js_sse_handler_vmt_args a = { req, res, user_data };
+        (void)hl_vmt_run(vmt, hl_js_sse_handler_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_js_sse_handler_impl(req, res, user_data);
+}
+
+static void hl_js_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
                                 void *user_data)
 {
     HlJSSseRoute *route = (HlJSSseRoute *)user_data;

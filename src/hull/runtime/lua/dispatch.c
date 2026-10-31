@@ -17,6 +17,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
+#include "hull/shared/vmt_http.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -186,9 +187,56 @@ void hl_lua_req_life_end_cb(HlLua *lua, void *life)
     hl_req_life_end((HlReqLife *)life);
 }
 
+/* ── --vm-thread (cap/vm_thread.h) ─────────────────────────────────── */
+
+typedef struct {
+    HlLua          *lua;
+    int             handler_id;
+    KlHttpRequest  *req;
+    KlHttpResponse *res;
+    int             rc;
+} HlLuaVmtJob;
+
+static void vmt_handler_job(void *ud)
+{
+    HlLuaVmtJob *j = (HlLuaVmtJob *)ud;
+    j->rc = hl_lua_dispatch(j->lua, j->handler_id, j->req, j->res);
+}
+
+static void vmt_middleware_job(void *ud)
+{
+    HlLuaVmtJob *j = (HlLuaVmtJob *)ud;
+    j->rc = hl_lua_dispatch_middleware(j->lua, j->handler_id, j->req, j->res);
+}
+
+/* Run a handler / middleware entry on the VM thread; 1 when the run was
+ * abandoned (*early: a raw 503 already went out on its socket). */
+static int vmt_run_http(HlLuaVmtJob *j, void (*fn)(void *), int *early)
+{
+    HlVmtHttp http;
+    hl_vmt_http_capture(&http, j->req, j->res);
+    return hl_vmt_run(j->lua->base.vm_thread, fn, j, &http, early)
+           == HL_VMT_ABANDONED;
+}
+
 void hl_lua_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlLuaRoute *route = (HlLuaRoute *)user_data;
+    if (route->lua->base.vm_thread &&
+        !hl_vmt_on_vm_thread(route->lua->base.vm_thread)) {
+        HlLuaVmtJob j = { route->lua, route->handler_id, req, res, -1 };
+        int early = 0;
+        int abandoned = vmt_run_http(&j, vmt_handler_job, &early);
+        if (j.rc == 1) return;   /* suspended: the run parked on an op */
+        if (!abandoned) {
+            if (j.rc < 0) hl_lua_http_error_response(route->lua, res);
+            else          hl_lua_res_answered(route->lua, res);
+            return;
+        }
+        hl_lua_res_answered(route->lua, res);   /* its kept headers go */
+        hl_vmt_http_finish_abandoned(req, res, early);
+        return;
+    }
     int rc = hl_lua_dispatch(route->lua, route->handler_id, req, res);
     if (rc < 0) {
         /* Error - write 500 response */
@@ -338,6 +386,26 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
 int hl_lua_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlLuaRoute *ctx = (HlLuaRoute *)user_data;
+    if (ctx->lua->base.vm_thread &&
+        !hl_vmt_on_vm_thread(ctx->lua->base.vm_thread)) {
+        HlLuaVmtJob j = { ctx->lua, ctx->handler_id, req, res, -1 };
+        int early = 0;
+        int abandoned = vmt_run_http(&j, vmt_middleware_job, &early);
+        if (!abandoned) {
+            if (j.rc < 0) {
+                hl_lua_http_error_response(ctx->lua, res);
+                return 1;
+            }
+            if (j.rc != 0) hl_lua_res_answered(ctx->lua, res);
+            return j.rc;
+        }
+        /* Abandoned: short-circuit with the 503. A middleware that completed
+         * (0) left its ctx for a later stage that will not run. */
+        if (j.rc == 0) hl_lua_free_req_ctx(ctx->lua, req);
+        hl_lua_res_answered(ctx->lua, res);
+        hl_vmt_http_finish_abandoned(req, res, early);
+        return 1;
+    }
     int rc = hl_lua_dispatch_middleware(ctx->lua, ctx->handler_id, req, res);
     if (rc < 0) {
         /* Middleware error - short-circuit with 500 */

@@ -36,6 +36,11 @@ uint64_t hl_db_txn_gen(void)
     return tl_txn_gen;
 }
 
+void hl_db_txn_gen_set(uint64_t gen)
+{
+    tl_txn_gen = gen;
+}
+
 /* 1 when @p sql holds a statement after its first one (text past a ';'
  * outside quotes and comments). Read conservatively: a backslash escape is
  * not understood, so a ';' inside such a literal can count - which only

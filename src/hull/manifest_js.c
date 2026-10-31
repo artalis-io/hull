@@ -289,6 +289,21 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                                         (int64_t)INT32_MAX);
     JS_FreeValue(ctx, http_val);
 
+    /* limits: { vmThread, vmThreadGraceMs, vmThreadCeilingMs }: --vm-thread
+     * from the manifest. The numbers as for wasm (at least 1, capped). */
+    JSValue lim_val = mjs_own(ctx, manifest, "limits");
+    if (mjs_is_obj(ctx, lim_val)) {
+        JSValue vt = mjs_own(ctx, lim_val, "vmThread");
+        if (JS_IsBool(vt))
+            out->vm_thread = JS_ToBool(ctx, vt);
+        JS_FreeValue(ctx, vt);
+        out->vm_thread_grace_ms = (uint32_t)mjs_wasm_limit(
+            ctx, lim_val, "vmThreadGraceMs", (int64_t)86400000);
+        out->vm_thread_ceiling_ms = (uint32_t)mjs_wasm_limit(
+            ctx, lim_val, "vmThreadCeilingMs", (int64_t)86400000);
+    }
+    JS_FreeValue(ctx, lim_val);
+
     /* gpu: true  OR  gpu: { devices: [0, 1] } */
     JSValue gpu_val = mjs_own(ctx, manifest, "gpu");
     if (mjs_is_obj(ctx, gpu_val)) {

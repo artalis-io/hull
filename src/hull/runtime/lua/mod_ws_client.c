@@ -13,6 +13,7 @@
  */
 
 #include "refusal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 #include "mod_buffer.h"
 #include "hull/shared/work_charge.h"   /* hl_work_send_units */
 #include "internal.h"   /* HL_LUA_ARM */
@@ -331,7 +332,29 @@ static void ws_client_call(HlLuaWsClientUD *ud, HlWscCall *c, const char *what)
 
 /* Client callbacks */
 
+/* --vm-thread (cap/vm_thread.h): ws-client on_open runs on the VM thread. */
+static void lua_ws_client_on_open_impl(KlWsClientConn *ws, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    void *user_data;
+} lua_ws_client_on_open_vmt_args;
+static void lua_ws_client_on_open_vmt_job(void *ud)
+{
+    lua_ws_client_on_open_vmt_args *a = (lua_ws_client_on_open_vmt_args *)ud;
+    lua_ws_client_on_open_impl(a->ws, a->user_data);
+}
 static void lua_ws_client_on_open(KlWsClientConn *ws, void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaWsClientUD *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        lua_ws_client_on_open_vmt_args a = { ws, user_data };
+        (void)hl_vmt_run(vmt, lua_ws_client_on_open_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    lua_ws_client_on_open_impl(ws, user_data);
+}
+
+static void lua_ws_client_on_open_impl(KlWsClientConn *ws, void *user_data)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)user_data;
     lua_ws_client_disarm_connect(ud, ud->lua->base.async_ctx);
@@ -354,7 +377,32 @@ static void lua_ws_client_on_open(KlWsClientConn *ws, void *user_data)
     ws_client_call(ud, &c, "on_open");
 }
 
-static void lua_ws_client_on_message(KlWsClientConn *ws, const char *data,
+/* --vm-thread (cap/vm_thread.h): ws-client on_message runs on the VM thread. */
+static void lua_ws_client_on_message_impl(KlWsClientConn *ws, const char *data, size_t len, int is_binary, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    const char *data;
+    size_t len;
+    int is_binary;
+    void *user_data;
+} lua_ws_client_on_message_vmt_args;
+static void lua_ws_client_on_message_vmt_job(void *ud)
+{
+    lua_ws_client_on_message_vmt_args *a = (lua_ws_client_on_message_vmt_args *)ud;
+    lua_ws_client_on_message_impl(a->ws, a->data, a->len, a->is_binary, a->user_data);
+}
+static void lua_ws_client_on_message(KlWsClientConn *ws, const char *data, size_t len, int is_binary, void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaWsClientUD *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        lua_ws_client_on_message_vmt_args a = { ws, data, len, is_binary, user_data };
+        (void)hl_vmt_run(vmt, lua_ws_client_on_message_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    lua_ws_client_on_message_impl(ws, data, len, is_binary, user_data);
+}
+
+static void lua_ws_client_on_message_impl(KlWsClientConn *ws, const char *data,
                                        size_t len, int is_binary,
                                        void *user_data)
 {
@@ -404,7 +452,32 @@ static void lua_ws_client_finish(HlLuaWsClientUD *ud)
     }
 }
 
-static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
+/* --vm-thread (cap/vm_thread.h): ws-client on_close runs on the VM thread. */
+static void lua_ws_client_on_close_impl(KlWsClientConn *ws, uint16_t code, const char *reason, size_t reason_len, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    uint16_t code;
+    const char *reason;
+    size_t reason_len;
+    void *user_data;
+} lua_ws_client_on_close_vmt_args;
+static void lua_ws_client_on_close_vmt_job(void *ud)
+{
+    lua_ws_client_on_close_vmt_args *a = (lua_ws_client_on_close_vmt_args *)ud;
+    lua_ws_client_on_close_impl(a->ws, a->code, a->reason, a->reason_len, a->user_data);
+}
+static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code, const char *reason, size_t reason_len, void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaWsClientUD *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        lua_ws_client_on_close_vmt_args a = { ws, code, reason, reason_len, user_data };
+        (void)hl_vmt_run(vmt, lua_ws_client_on_close_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    lua_ws_client_on_close_impl(ws, code, reason, reason_len, user_data);
+}
+
+static void lua_ws_client_on_close_impl(KlWsClientConn *ws, uint16_t code,
                                      const char *reason, size_t reason_len,
                                      void *user_data)
 {
@@ -425,7 +498,30 @@ static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
     lua_ws_client_finish(ud);
 }
 
-static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
+/* --vm-thread (cap/vm_thread.h): ws-client on_error runs on the VM thread. */
+static void lua_ws_client_on_error_impl(KlWsClientConn *ws, const char *msg, void *user_data);
+typedef struct {
+    KlWsClientConn *ws;
+    const char *msg;
+    void *user_data;
+} lua_ws_client_on_error_vmt_args;
+static void lua_ws_client_on_error_vmt_job(void *ud)
+{
+    lua_ws_client_on_error_vmt_args *a = (lua_ws_client_on_error_vmt_args *)ud;
+    lua_ws_client_on_error_impl(a->ws, a->msg, a->user_data);
+}
+static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg, void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaWsClientUD *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        lua_ws_client_on_error_vmt_args a = { ws, msg, user_data };
+        (void)hl_vmt_run(vmt, lua_ws_client_on_error_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    lua_ws_client_on_error_impl(ws, msg, user_data);
+}
+
+static void lua_ws_client_on_error_impl(KlWsClientConn *ws, const char *msg,
                                      void *user_data)
 {
     (void)ws;

@@ -230,6 +230,7 @@ void hl_run_watch_arm(HlRunWatch *w, uint32_t ms)
     __atomic_store_n(&w->stop, 0, __ATOMIC_RELAXED);
     unlink_locked(w);
     w->armed = 0;
+    w->seq++;
     if (ms > 0 && ensure_started_locked() == 0) {
         if (ms > HL_RUN_MAX_MS) ms = HL_RUN_MAX_MS;
         w->deadline_ms = now_ms() + ms;
@@ -245,8 +246,22 @@ void hl_run_watch_disarm(HlRunWatch *w)
     pthread_mutex_lock(&g_mu);
     unlink_locked(w);
     w->armed = 0;
+    w->seq++;
     __atomic_store_n(&w->stop, 0, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&g_mu);
+}
+
+void hl_run_watch_peek(HlRunWatch *w, uint64_t *deadline_ms, uint64_t *seq)
+{
+    uint64_t d = 0, q = 0;
+    if (w) {
+        pthread_mutex_lock(&g_mu);
+        d = w->armed ? w->deadline_ms : 0;
+        q = w->seq;
+        pthread_mutex_unlock(&g_mu);
+    }
+    if (deadline_ms) *deadline_ms = d;
+    if (seq) *seq = q;
 }
 
 uint64_t hl_run_watch_save(HlRunWatch *w)
@@ -264,6 +279,7 @@ void hl_run_watch_restore(HlRunWatch *w, uint64_t deadline_ms)
     pthread_mutex_lock(&g_mu);
     unlink_locked(w);
     w->armed = 0;
+    w->seq++;
     __atomic_store_n(&w->stop, 0, __ATOMIC_RELAXED);
     if (deadline_ms != 0) {
         w->deadline_ms = deadline_ms;

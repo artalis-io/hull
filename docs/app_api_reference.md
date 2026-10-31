@@ -1668,6 +1668,61 @@ if not ok and tostring(r):find("^%[hull:busy%] ") then
 end
 ```
 
+### Stuck runs: the VM thread (`--vm-thread`, `limits.vm_thread`)
+
+Every run has a wall-clock deadline (`--max-run-ms`, default 60 s; app.main
+10 min) that stops it at its next instruction / call. A single native call
+that does not look at the deadline - an engine builtin doing uncharged work, a
+long synchronous capability call - runs to its end, and without the VM thread
+it holds the whole server meanwhile. Turn the VM thread on to bound that to the
+one request:
+
+```lua
+app.manifest({
+    modules = { "hull/http-server@1" },
+    limits = { vm_thread = true,             -- default false (off)
+               vm_thread_grace_ms = 1000,    -- past the deadline before abandoning
+               vm_thread_ceiling_ms = 60000 },-- stuck this long: exit (status 75)
+})
+```
+```javascript
+app.manifest({
+    modules: ["hull/http-server@1"],
+    limits: { vmThread: true, vmThreadGraceMs: 1000, vmThreadCeilingMs: 60000 },
+});
+```
+
+Or from the command line: `--vm-thread`, `--vm-thread-grace-ms MS`,
+`--vm-thread-ceiling-ms MS` (`0` = never exit), or `HULL_VM_THREAD=1` in the
+environment. In a built binary the two limits are taken only as
+`--hull-vm-thread-grace-ms` / `--hull-vm-thread-ceiling-ms`. The command line
+wins over the manifest. Serve mode only (`app.main`, `hull test` and
+`hull agent` run as before).
+
+With it, handlers, middleware, SSE / WebSocket callbacks, timers and every
+resumed wait run on a dedicated VM thread, one at a time as before (nothing in
+app code changes: no concurrency, same ordering). When a run is still going
+`grace` past its deadline:
+
+- the request that started it is answered `503 Service Unavailable`
+  (`Retry-After: 1`) and its connection closed - at once on a plaintext
+  HTTP/1.x connection, when the run returns on a TLS / HTTP/2 one;
+- every new connection is answered 503 until the run returns (plaintext
+  listener; on a TLS listener new clients wait), and requests on connections
+  already open wait;
+- when the native call returns, the run is failed (it never continues past
+  the call: whatever it would have written is dropped) and the server serves
+  normally again;
+- if it has not returned after the ceiling (counted from the abandonment), the
+  process exits with status 75 so a supervisor restarts it. A SIGTERM during
+  that time exits after `--drain-timeout`.
+
+Each abandonment and recovery is logged (`[hull:vm-thread] run abandoned ...`,
+`... returned after N ms in standby; serving again`). `--max-run-ms 0` (no
+deadline) disables abandonment. Cost: every entry is handed between two
+threads (about 15 us), which roughly halves the throughput of a trivial
+handler and is noise for one doing real work.
+
 ### Outbound SMTP (`smtp.send`, model-2 async)
 
 `smtp.send(msg)` delivers mail over the Keel-v3 transport. Under an active server

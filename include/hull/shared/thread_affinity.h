@@ -37,10 +37,18 @@ void hl_event_loop_mark_current(void);
  * No-op if no thread has been marked. @what names the site for the message. */
 void hl_assert_on_event_loop(const char *what);
 
+/* --vm-thread (cap/vm_thread.h): the calling thread holds the event loop's
+ * baton - the loop thread is blocked waiting for it - until the matching
+ * leave, so it counts as the event-loop thread for the assertion above. */
+void hl_event_loop_baton_enter(void);
+void hl_event_loop_baton_leave(void);
+
 #else
 
 static inline void hl_event_loop_mark_current(void) {}
 static inline void hl_assert_on_event_loop(const char *what) { (void)what; }
+static inline void hl_event_loop_baton_enter(void) {}
+static inline void hl_event_loop_baton_leave(void) {}
 
 #endif /* HL_THREAD_AFFINITY_CHECKS */
 

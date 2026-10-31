@@ -41,6 +41,7 @@
  */
 
 #include "hull/runtime/js.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 #include "hull/utils/alloc.h"
 #include "hull/shared/async.h"
 #include "hull/shared/req_life.h"
@@ -647,7 +648,29 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
  * a result, resolves / rejects the iter Promise, drains microtasks,
  * checks the outer handler Promise, then frees the cont.
  */
+/* --vm-thread (cap/vm_thread.h): a multipart resume runs on the VM thread. */
+static void mp_js_pump_impl(HlAsyncCont *self, void *driver);
+typedef struct {
+    HlAsyncCont *self;
+    void *driver;
+} mp_js_pump_vmt_args;
+static void mp_js_pump_vmt_job(void *ud)
+{
+    mp_js_pump_vmt_args *a = (mp_js_pump_vmt_args *)ud;
+    mp_js_pump_impl(a->self, a->driver);
+}
 static void mp_js_pump(HlAsyncCont *self, void *driver)
+{
+    HlVmThread *vmt = ((HlJsMpCont *)self)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        mp_js_pump_vmt_args a = { self, driver };
+        (void)hl_vmt_run(vmt, mp_js_pump_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    mp_js_pump_impl(self, driver);
+}
+
+static void mp_js_pump_impl(HlAsyncCont *self, void *driver)
 {
     (void)driver;
     HlJsMpCont *jc = (HlJsMpCont *)self;

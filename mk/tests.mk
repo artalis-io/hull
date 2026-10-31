@@ -1146,7 +1146,7 @@ msan:
 #     shared memory is the atomic stop flag; the concurrency is filesystem-level
 #     (mkdir/symlink/unlink vs openat resolution), which TSan tolerates. Proves
 #     the resolver's containment holds under a real thread race.
-TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll test_async_poll_oom test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async test_smtp_backend_poll test_smtp_saturation
+TSAN_TESTS := test_vm_thread test_wasm test_async_backend test_async_backend_poll test_async_poll_oom test_fs_resolve_parity test_smtp_worker test_smtp_admit test_smtp_submit test_smtp_inflight test_smtp_async test_smtp_backend_poll test_smtp_saturation
 tsan:
 	$(MAKE) clean
 	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))
@@ -1499,6 +1499,21 @@ e2e-timers: $(BUILDDIR)/hull
 .PHONY: e2e-teardown
 e2e-teardown: $(BUILDDIR)/hull
 	sh tests/e2e_teardown.sh
+
+# --vm-thread (cap/vm_thread.h, audit convergence §6.3 phase 1): a run stuck
+# in a native call past its deadline is answered 503, new connections are
+# refused 503 meanwhile, the server serves again once the call returns, and
+# the hard ceiling exits the process (status 75). Both runtimes.
+.PHONY: e2e-vm-thread e2e-vm-thread-all
+e2e-vm-thread: $(BUILDDIR)/hull
+	sh tests/e2e_vm_thread.sh
+
+# The existing server suites again with every server's entries on the VM
+# thread (HULL_VM_THREAD=1 is --vm-thread for the whole environment).
+VM_THREAD_ALL_SUITES := e2e-examples e2e-http e2e-js-runs e2e-timers \
+	e2e-teardown e2e-cli e2e-multipart e2e-refusal-codes e2e-http-timeout
+e2e-vm-thread-all: $(BUILDDIR)/hull
+	HULL_VM_THREAD=1 $(MAKE) --no-print-directory $(VM_THREAD_ALL_SUITES)
 
 # A database file SQLite holds open is not truncated, replaced or removed
 # through the fs capability (audit 33): compute.stream's file output and an

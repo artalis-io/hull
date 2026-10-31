@@ -9,6 +9,7 @@
  */
 
 #include "internal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 
 #include "hull/utils/alloc.h"
 #include "hull/shared/async_backend.h"
@@ -96,7 +97,28 @@ void hl_lua_timer_reschedule(HlLuaTimer *t)
                   t->handler_id);
 }
 
+/* --vm-thread (cap/vm_thread.h): a timer runs on the VM thread. */
+static void hl_lua_timer_trampoline_impl(void *user_data);
+typedef struct {
+    void *user_data;
+} hl_lua_timer_trampoline_vmt_args;
+static void hl_lua_timer_trampoline_vmt_job(void *ud)
+{
+    hl_lua_timer_trampoline_vmt_args *a = (hl_lua_timer_trampoline_vmt_args *)ud;
+    hl_lua_timer_trampoline_impl(a->user_data);
+}
 void hl_lua_timer_trampoline(void *user_data)
+{
+    HlVmThread *vmt = ((HlLuaTimer *)user_data)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_lua_timer_trampoline_vmt_args a = { user_data };
+        (void)hl_vmt_run(vmt, hl_lua_timer_trampoline_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_lua_timer_trampoline_impl(user_data);
+}
+
+static void hl_lua_timer_trampoline_impl(void *user_data)
 {
     HlLuaTimer *t = (HlLuaTimer *)user_data;
     HlLua *lua = t->lua;

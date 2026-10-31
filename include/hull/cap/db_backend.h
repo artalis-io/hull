@@ -325,6 +325,10 @@ static inline HlDbTxnSnap hl_db_txn_snap(HlDbHandle *h)
 
 #ifdef HL_ENABLE_DB
 uint64_t hl_db_txn_gen(void);
+/* Set the calling thread's generation: --vm-thread hands the event loop's
+ * generation between the loop thread and the VM thread with each run
+ * (shared/vm_thread.c), so the VM sees one counter whichever runs it. */
+void     hl_db_txn_gen_set(uint64_t gen);
 void     hl_db_txn_note(HlDbHandle *h, HlDbTxnSnap before, const char *sql);
 #else
 static inline uint64_t hl_db_txn_gen(void) { return 0; }

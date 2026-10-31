@@ -266,6 +266,23 @@ release-artifact layout).
   `hl_js_load_app`) refuse the disk fallback whenever the app VFS is embedded
   (`hl_vfs_embedded`). `hull app.lua` / `hull dev` are unchanged. Covered by
   `make e2e-embedded-entry`.
+- **`--vm-thread`: one native call stuck past its deadline no longer holds the server**
+  (audit convergence phase 5, design §6.3 phase 1; off by default). With `--vm-thread`, the
+  manifest's `limits.vm_thread` (JS `limits.vmThread`) or `HULL_VM_THREAD=1`, the app VM's
+  entries - handlers, middleware, SSE / WebSocket callbacks, timers, every resumed wait - run
+  on a dedicated thread, which the event-loop thread hands each one to and waits for (a baton:
+  still one run at a time, no change for app code). When a run is still going a grace period
+  (`--vm-thread-grace-ms`, default 1 s) past its deadline - a native call that ignores the run
+  watchdog's stop flag - the loop thread abandons it: the request is answered 503 (at once on
+  plaintext HTTP/1.x), new connections are answered 503 until the call returns, and the run is
+  then failed and the server serves again. Still stuck after `--vm-thread-ceiling-ms` (default
+  60 s), the process exits with status 75 so a supervisor restarts it. Design, coverage and
+  limits (TLS listeners get no standby answers; Keel's own work waits during standby) in
+  `docs/design/audit_convergence_vm_thread.md`; `make e2e-vm-thread`, and
+  `make e2e-vm-thread-all` runs the server suites again with every entry on the VM thread.
+  Test hook `hull._test_native_sleep` / `hull._testNativeSleep` exists only under
+  `HULL_TEST_NATIVE_SLEEP=1`.
+
 - **A workflow step whose result could not be stored ran its side effect on every retry**
   (audit 41, both runtimes). `ctx.step` ran `fn`, then encoded the result and inserted the
   step memo; a result the encoder refuses (a cyclic Lua table, a JS BigInt or cycle) or one

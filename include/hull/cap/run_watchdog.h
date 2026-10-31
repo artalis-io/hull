@@ -66,6 +66,8 @@ typedef struct HlRunWatch {
     int                armed;         /* deadline_ms is this run's */
     int                linked;        /* pending in the watchdog's list */
     int                stop;          /* raised at the deadline: atomic */
+    uint64_t           seq;           /* bumped by every arm / restore /
+                                       * disarm (hl_run_watch_peek) */
 } HlRunWatch;
 
 /* Process-wide configuration, from --max-run-ms / HULL_MAX_RUN_MS: < 0 the
@@ -93,6 +95,12 @@ void hl_run_watch_disarm(HlRunWatch *w);
  * a deadline that has passed raises the flag at once. */
 uint64_t hl_run_watch_save(HlRunWatch *w);
 void     hl_run_watch_restore(HlRunWatch *w, uint64_t deadline_ms);
+
+/* The current deadline (0 = none armed) and the arm sequence number, read
+ * under the watchdog's lock from any thread: --vm-thread's loop thread
+ * (shared/vm_thread.c) tells from the sequence whether the run it waits for
+ * has armed the watch yet. */
+void hl_run_watch_peek(HlRunWatch *w, uint64_t *deadline_ms, uint64_t *seq);
 
 /* Whether @p w's deadline has passed. Any thread; lock-free. */
 static inline int hl_run_watch_stopped(const HlRunWatch *w)

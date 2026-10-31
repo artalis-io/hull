@@ -11,6 +11,7 @@
  */
 
 #include "internal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 
 #include "hull/shared/async.h"
 #include "hull/cap/ws.h"
@@ -42,7 +43,29 @@ static int ws_args_failed(JSContext *ctx, const char *what,
     return 1;
 }
 
+/* --vm-thread (cap/vm_thread.h): ws onOpen runs on the VM thread. */
+static void hl_js_ws_on_open_impl(KlWsServerConn *ws_conn, void *user_data);
+typedef struct {
+    KlWsServerConn *ws_conn;
+    void *user_data;
+} hl_js_ws_on_open_vmt_args;
+static void hl_js_ws_on_open_vmt_job(void *ud)
+{
+    hl_js_ws_on_open_vmt_args *a = (hl_js_ws_on_open_vmt_args *)ud;
+    hl_js_ws_on_open_impl(a->ws_conn, a->user_data);
+}
 void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
+{
+    HlVmThread *vmt = ((HlJSWsRoute *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_js_ws_on_open_vmt_args a = { ws_conn, user_data };
+        (void)hl_vmt_run(vmt, hl_js_ws_on_open_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_js_ws_on_open_impl(ws_conn, user_data);
+}
+
+static void hl_js_ws_on_open_impl(KlWsServerConn *ws_conn, void *user_data)
 {
     HlJSWsRoute *route = (HlJSWsRoute *)user_data;
     HlJS *js = route->js;
@@ -116,7 +139,32 @@ void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
     (void)hl_js_entry_end_txn_check(js);   /* audit 6 M1, audit 35 */
 }
 
-void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
+/* --vm-thread (cap/vm_thread.h): ws onMessage runs on the VM thread. */
+static void hl_js_ws_on_message_impl(KlWsServerConn *ws_conn, const char *data, size_t len, int is_binary, void *user_data);
+typedef struct {
+    KlWsServerConn *ws_conn;
+    const char *data;
+    size_t len;
+    int is_binary;
+    void *user_data;
+} hl_js_ws_on_message_vmt_args;
+static void hl_js_ws_on_message_vmt_job(void *ud)
+{
+    hl_js_ws_on_message_vmt_args *a = (hl_js_ws_on_message_vmt_args *)ud;
+    hl_js_ws_on_message_impl(a->ws_conn, a->data, a->len, a->is_binary, a->user_data);
+}
+void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data, size_t len, int is_binary, void *user_data)
+{
+    HlVmThread *vmt = ((HlJSWsRoute *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_js_ws_on_message_vmt_args a = { ws_conn, data, len, is_binary, user_data };
+        (void)hl_vmt_run(vmt, hl_js_ws_on_message_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_js_ws_on_message_impl(ws_conn, data, len, is_binary, user_data);
+}
+
+static void hl_js_ws_on_message_impl(KlWsServerConn *ws_conn, const char *data,
                                   size_t len, int is_binary, void *user_data)
 {
     HlJSWsRoute *route = (HlJSWsRoute *)user_data;
@@ -210,7 +258,32 @@ static void hl_js_ws_close_teardown(HlJS *js, void *ctx)
     hl_ws_registry_remove(js->base.ws_registry, conn);
 }
 
-void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
+/* --vm-thread (cap/vm_thread.h): ws onClose runs on the VM thread. */
+static void hl_js_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code, const char *reason, size_t reason_len, void *user_data);
+typedef struct {
+    KlWsServerConn *ws_conn;
+    uint16_t code;
+    const char *reason;
+    size_t reason_len;
+    void *user_data;
+} hl_js_ws_on_close_vmt_args;
+static void hl_js_ws_on_close_vmt_job(void *ud)
+{
+    hl_js_ws_on_close_vmt_args *a = (hl_js_ws_on_close_vmt_args *)ud;
+    hl_js_ws_on_close_impl(a->ws_conn, a->code, a->reason, a->reason_len, a->user_data);
+}
+void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code, const char *reason, size_t reason_len, void *user_data)
+{
+    HlVmThread *vmt = ((HlJSWsRoute *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_js_ws_on_close_vmt_args a = { ws_conn, code, reason, reason_len, user_data };
+        (void)hl_vmt_run(vmt, hl_js_ws_on_close_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_js_ws_on_close_impl(ws_conn, code, reason, reason_len, user_data);
+}
+
+static void hl_js_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code,
                                 const char *reason, size_t reason_len,
                                 void *user_data)
 {
