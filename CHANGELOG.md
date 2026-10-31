@@ -150,6 +150,19 @@ release-artifact layout).
   `-journal`'s - a replaced or removed sidecar splits the WAL index or loses committed
   transactions. An in-place write to a leaf NAMED like a sidecar is refused whatever it is.
   Covered by `make e2e-db-live-files` and `test_fs`.
+- **A symlink beside a built binary could replace its app or move its app directory** (audit
+  40, both runtimes, both runners). With no entry argument a built binary passed its embedded
+  entry name (`app.lua` / `app.js`) through `realpath()` and took its app directory from the
+  result, and the entry loaders looked the entry up by the resolved file's basename, reading
+  it from disk on a miss. So `app.lua -> planted/evil.lua` in the working directory ran
+  `evil.lua` as the app (under its own manifest), and `app.lua -> /other/app.lua` ran the
+  embedded code with the sandbox grant, the default `data.db`, migrations and the fs root all
+  moved to `/other` - without `--verify-sig` nothing checked either. A built binary now names
+  its entry by its embedded key under `realpath(".")` and never resolves it on disk, its app
+  directory is its working directory, and both entry loaders (`hl_lua_load_app`,
+  `hl_js_load_app`) refuse the disk fallback whenever the app VFS is embedded
+  (`hl_vfs_embedded`). `hull app.lua` / `hull dev` are unchanged. Covered by
+  `make e2e-embedded-entry`.
 - **DuckDB SQL could hold the event loop for as long as it asked** (audit 38). The DuckDB
   backend runs a statement task by task and stops it at a tripped budget or run deadline, but
   `duckdb_interrupt` only stops the NEXT task, and `sleep_ms(ms)` (and `pg_catalog.pg_sleep`,

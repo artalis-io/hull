@@ -397,12 +397,37 @@ int hull_serve(int argc, char **argv)
      * with no argv entry, so when none is given fall back to the embedded
      * entry the same way serve.c does (serve.c is not compiled in this
      * HTTP-server-less flavor, so the scan is replicated here). The embedded
-     * Lua entry is registered as "./app", the JS entry as "./app.js"; the
-     * "app.lua"/"app.js" name then resolves from the app VFS, and realpath()
-     * below harmlessly fails for it (leaving app_dir = "."). */
+     * Lua entry is registered as "./app", the JS entry as "./app.js".
+     *
+     * A built binary's app directory is its WORKING directory, and its entry
+     * name is never resolved on disk: realpath("app.lua") followed a symlink
+     * planted beside the binary, so the loader ran another file as the app
+     * or moved app_dir - the sandbox grant, data.db, migrations and the fs
+     * root - to wherever a same-named link pointed (audit 40). */
     const char *entry;
+    char entry_abs[4096];
+    char app_dir[4096];
     if (entry_idx >= 0) {
         entry = argv[entry_idx];
+
+        /* Derive app_dir from the entry point path (parent directory of
+         * the .lua/.js file, or "." if no slash). app_context needs both. */
+        if (realpath(entry, entry_abs) != NULL)
+            entry = entry_abs;
+
+        const char *slash = strrchr(entry, '/');
+        if (slash) {
+            size_t len = (size_t)(slash - entry);
+            if (len >= sizeof(app_dir)) {
+                fprintf(stderr, "hull: entry path too long\n");
+                return 1;
+            }
+            memcpy(app_dir, entry, len);
+            app_dir[len] = '\0';
+        } else {
+            app_dir[0] = '.';
+            app_dir[1] = '\0';
+        }
     } else {
         extern const HlEntry hl_app_entries[];
         const char *embedded = NULL;
@@ -416,28 +441,16 @@ int hull_serve(int argc, char **argv)
                 "[-- args...]\n");
             return 1;
         }
-        entry = embedded;
-    }
-
-    /* Derive app_dir from the entry point path (parent directory of
-     * the .lua/.js file, or "." if no slash). app_context needs both. */
-    char entry_abs[4096];
-    if (realpath(entry, entry_abs) != NULL)
-        entry = entry_abs;
-
-    char app_dir[4096];
-    const char *slash = strrchr(entry, '/');
-    if (slash) {
-        size_t len = (size_t)(slash - entry);
-        if (len >= sizeof(app_dir)) {
-            fprintf(stderr, "hull: entry path too long\n");
+        if (realpath(".", app_dir) == NULL) {
+            fprintf(stderr, "hull: cannot resolve the working directory\n");
             return 1;
         }
-        memcpy(app_dir, entry, len);
-        app_dir[len] = '\0';
-    } else {
-        app_dir[0] = '.';
-        app_dir[1] = '\0';
+        int n = snprintf(entry_abs, sizeof entry_abs, "%s/%s", app_dir, embedded);
+        if (n < 0 || (size_t)n >= sizeof entry_abs) {
+            fprintf(stderr, "hull: working directory path too long\n");
+            return 1;
+        }
+        entry = entry_abs;
     }
 
     /* Verify the app signature BEFORE any app code is loaded (serve.c's

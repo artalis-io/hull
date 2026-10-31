@@ -1806,6 +1806,36 @@ UTEST(lua_audit17, template_reads_disk_only_in_development)
     rm_rf(tmpdir);
 }
 
+/* Audit 40: a built binary runs only its embedded entry. An entry it did not
+ * embed (a symlinked app.lua planted beside it) is never read from disk. */
+UTEST(lua_audit40, entry_reads_disk_only_in_development)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a40"), NULL);
+    char path[HL_TEST_PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/planted.lua", tmpdir);
+    write_file(path, "__a40 = 40\n");
+
+    /* Development (no app VFS): the entry on disk loads. */
+    init_lua_with_appdir(NULL); /* hl_lua_load_app sets app_dir */
+    ASSERT_TRUE(lua_initialized);
+    EXPECT_EQ(hl_lua_load_app(&lua_rt, path), 0);
+    EXPECT_EQ(eval_int("__a40 or 0"), 40);
+
+    /* Built (non-empty app VFS): it does not. */
+    init_lua_with_appdir(NULL); /* hl_lua_load_app sets app_dir */
+    ASSERT_TRUE(lua_initialized);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a17_built_entries, tmpdir);
+    lua_rt.base.app_vfs = &vfs;
+    EXPECT_NE(hl_lua_load_app(&lua_rt, path), 0);
+    EXPECT_EQ(eval_int("__a40 or 0"), 0);
+    lua_rt.base.app_vfs = NULL;
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
 /* ── Crypto tests ──────────────────────────────────────────────────── */
 
 UTEST(lua_cap, crypto_sha256)

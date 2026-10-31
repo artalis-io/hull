@@ -12404,7 +12404,20 @@ UTEST(js_audit16, registration_ignores_prototype_setters)
  * --verify-sig. With no app VFS (development) the disk fallback stays. */
 
 static const unsigned char a17_tpl[] = "embedded template";
+/* The entries a built binary runs are embedded too: since audit 40 a built
+ * binary loads no entry from disk. Sorted in strcmp order. */
+static const unsigned char a17_mod_src[] =
+    "import { val } from './planted.js';\n"
+    "globalThis.__a17_mod = val;\n";
+static const unsigned char a17_tpl_src[] =
+    "import { template } from 'hull:template';\n"
+    "const t = (n) => { try { return template.render(n, {}); }\n"
+    "                   catch (e) { return 'missing'; } };\n"
+    "globalThis.__a17_planted = t('planted.html');\n"
+    "globalThis.__a17_embedded = t('embedded.html');\n";
 static const HlEntry a17_built_entries[] = {
+    { "./mod_app.js", a17_mod_src, sizeof a17_mod_src - 1 },
+    { "./tpl_app.js", a17_tpl_src, sizeof a17_tpl_src - 1 },
     { "templates/embedded.html", a17_tpl, sizeof a17_tpl - 1 },
     { NULL, NULL, 0 }
 };
@@ -12453,15 +12466,8 @@ UTEST(js_audit17, imports_and_templates_read_disk_only_in_development)
     ASSERT_EQ(mkdir(tdir, 0755), 0);
     a17_write(dir, "planted.js", "export const val = 17;\n");
     a17_write(dir, "templates/planted.html", "planted template");
-    a17_write(dir, "mod_app.js",
-        "import { val } from './planted.js';\n"
-        "globalThis.__a17_mod = val;\n");
-    a17_write(dir, "tpl_app.js",
-        "import { template } from 'hull:template';\n"
-        "const t = (n) => { try { return template.render(n, {}); }\n"
-        "                   catch (e) { return 'missing'; } };\n"
-        "globalThis.__a17_planted = t('planted.html');\n"
-        "globalThis.__a17_embedded = t('embedded.html');\n");
+    a17_write(dir, "mod_app.js", (const char *)a17_mod_src);
+    a17_write(dir, "tpl_app.js", (const char *)a17_tpl_src);
     HlVfs vfs;
 
     /* Development: the module and the template on disk load. */
@@ -12483,6 +12489,11 @@ UTEST(js_audit17, imports_and_templates_read_disk_only_in_development)
     got = eval_str("globalThis.__a17_embedded");
     EXPECT_TRUE(got && strcmp(got, "embedded template") == 0);
     free(got);
+    js.base.app_vfs = NULL;
+
+    /* Audit 40: an entry the binary did not embed is not read from disk
+     * (a symlinked app.js beside a built binary ran as the app). */
+    EXPECT_NE(a17_load(dir, "planted.js", 1, &vfs), 0);
     js.base.app_vfs = NULL;
 
     cleanup_js();
