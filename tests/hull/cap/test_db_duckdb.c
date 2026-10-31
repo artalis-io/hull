@@ -29,6 +29,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <limits.h>   /* PATH_MAX */
+#include <sys/stat.h> /* mkdir */
 
 /* Open a fresh in-memory DuckDB handle. */
 static int duck_open_mem(HlDbHandle *h)
@@ -967,6 +969,276 @@ UTEST(db_duckdb, one_instance_whatever_the_spelling)
     snprintf(wal, sizeof wal, "%s.wal", path);
     unlink(wal);
 }
+
+/* ── Audit 41 ─────────────────────────────────────────────────────── */
+
+/* @p tmpl with every "%s" replaced by @p path, into @p out. */
+static void a41_subst(char *out, size_t cap, const char *tmpl, const char *path)
+{
+    size_t o = 0, pl = strlen(path);
+    for (const char *t = tmpl; *t && o + 1 < cap; t++) {
+        if (t[0] == '%' && t[1] == 's' && o + pl + 1 < cap) {
+            memcpy(out + o, path, pl);
+            o += pl;
+            t++;
+        } else {
+            out[o++] = *t;
+        }
+    }
+    out[o] = '\0';
+}
+
+/* A fresh file at @p path (made by the caller's mkstemp name) holding the
+ * placeholder table `_hull_probe` plus @p ddl, with every %s in @p ddl
+ * replaced by the database path. 0, or -1 when DuckDB refused the DDL. */
+static int a41_plant(const char *path, const char *ddl)
+{
+    char sql[2048];
+    a41_subst(sql, sizeof sql, ddl, path);
+    duckdb_database db;
+    duckdb_connection con;
+    duckdb_result r;
+    if (duckdb_open(path, &db) != DuckDBSuccess) return -1;
+    if (duckdb_connect(db, &con) != DuckDBSuccess) {
+        duckdb_close(&db);
+        return -1;
+    }
+    int ok = duckdb_query(con,
+        "CREATE TABLE _hull_probe (tok VARCHAR); "
+        "INSERT INTO _hull_probe VALUES ('SECRET-TOKEN')", &r) == DuckDBSuccess;
+    duckdb_destroy_result(&r);
+    if (ok && ddl[0]) {
+        ok = duckdb_query(con, sql, &r) == DuckDBSuccess;
+        if (!ok) fprintf(stderr, "ddl refused by DuckDB: %s: %s\n", sql,
+                         duckdb_result_error(&r));
+        duckdb_destroy_result(&r);
+    }
+    duckdb_disconnect(&con);
+    duckdb_close(&db);
+    return ok ? 0 : -1;
+}
+
+static void a41_tmpname(char *path)
+{
+    int fd = mkstemp(path);
+    if (fd >= 0) close(fd);
+    unlink(path);
+}
+
+static void a41_unlink_db(const char *path)
+{
+    char wal[600];
+    unlink(path);
+    snprintf(wal, sizeof wal, "%s.wal", path);
+    unlink(wal);
+}
+
+/* Audit 41: stored views, DEFAULTs, CHECKs, generated columns and index
+ * expressions went through two of the five refusal scanners stored macros
+ * get, so a planted file holding a view that calls the dynamic-SQL table
+ * functions on a name built at run time, or that reads the database's own
+ * file (which DuckDB always allows), opened cleanly - and app SQL reading
+ * the view then got `_hull_*` rows or the raw file. Each is refused at open
+ * now. */
+UTEST(db_duckdb, stored_view_full_refusal_set_refuses_the_open)
+{
+    static const char *const ddl[] = {
+        "CREATE VIEW leak AS SELECT * FROM "
+            "query('SELECT tok FROM _hu' || 'll_probe')",
+        "CREATE VIEW leak AS SELECT * FROM query_table('_hu' || 'll_probe')",
+        "CREATE VIEW leak AS SELECT * FROM json_execute_serialized_sql("
+            "json_serialize_sql('SELECT tok FROM _hu' || 'll_probe'))",
+        "CREATE VIEW leak AS SELECT size FROM read_blob('%s')",
+        "CREATE VIEW leak AS SELECT size FROM read_blob('%s' || '')",
+        "CREATE VIEW leak AS SELECT content FROM read_text('%s.wal')",
+        "CREATE VIEW leak AS SELECT content FROM read_text("
+            "concat('%s', '.w', 'al'))",
+        "CREATE TABLE g (x INT, y BIGINT AS (sleep_ms(400 + x * 0)::BIGINT))",
+    };
+    for (size_t k = 0; k < sizeof ddl / sizeof ddl[0]; k++) {
+        char path[] = "/tmp/hull_duck_a41v_XXXXXX";
+        a41_tmpname(path);
+        char dsn[128];
+        snprintf(dsn, sizeof dsn, "duckdb://%s", path);
+        ASSERT_EQ(0, a41_plant(path, ddl[k]));
+        void *ctx = NULL;
+        int rc = hl_db_backend_duckdb.open(&ctx, dsn, NULL);
+        if (rc == 0) {
+            fprintf(stderr, "opened a file holding: %s\n", ddl[k]);
+            HlDbHandle h = { .backend = &hl_db_backend_duckdb, .ctx = ctx };
+            h.backend->close(&h);
+        }
+        EXPECT_EQ(-1, rc);
+        EXPECT_TRUE(ctx == NULL);
+        a41_unlink_db(path);
+    }
+}
+
+/* The controls: harmless views, DEFAULTs, CHECKs, generated columns, index
+ * expressions and table macros (with a parameter default) open and run. */
+UTEST(db_duckdb, harmless_stored_objects_open_and_run)
+{
+    char path[] = "/tmp/hull_duck_a41h_XXXXXX";
+    a41_tmpname(path);
+    char dsn[128];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", path);
+    ASSERT_EQ(0, a41_plant(path,
+        "CREATE TABLE items (v INT CHECK (v > 0), w INT AS (v * 2), "
+        "note VARCHAR DEFAULT 'none'); "
+        "CREATE INDEX items_vi ON items ((v + 1)); "
+        "INSERT INTO items (v) VALUES (3); "
+        "CREATE VIEW iv AS SELECT w, note FROM items; "
+        "CREATE MACRO tm(n := 2) AS TABLE SELECT n AS x; "
+        "CREATE MACRO twice(a) AS a * 2"));
+    HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(0, hl_db_backend_duckdb.open(&h.ctx, dsn, NULL));
+    int64_t n = 0;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT w FROM iv", NULL, 0, count_cb, &n,
+                             NULL));
+    EXPECT_EQ(6, n);
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT x FROM tm()", NULL, 0, count_cb, &n,
+                             NULL));
+    EXPECT_EQ(2, n);
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT twice(21)", NULL, 0, count_cb, &n,
+                             NULL));
+    EXPECT_EQ(42, n);
+    EXPECT_EQ(0, hl_db_exec(&h, "INSERT INTO items (v) VALUES (4)", NULL, 0));
+    EXPECT_EQ(-1, hl_db_exec(&h, "INSERT INTO items (v) VALUES (-1)", NULL, 0));
+    h.backend->close(&h);
+    a41_unlink_db(path);
+}
+
+/* Audit 41 (Low): only a statement's first word is a session SET. A column
+ * assignment named schema / search_path runs; the session forms are still
+ * refused. */
+UTEST(db_duckdb, set_column_assignment_is_not_a_catalog_switch)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(0, duck_open_mem(&h));
+    static const char *const ok[] = {
+        "CREATE TABLE prefs (id INT PRIMARY KEY, schema VARCHAR, "
+            "search_path VARCHAR)",
+        "INSERT INTO prefs VALUES (1, 'v1', 'p1')",
+        "UPDATE prefs SET schema = 'v2' WHERE id = 1",
+        "UPDATE prefs SET search_path = 'p2', schema = 'v3' WHERE id = 1",
+        "INSERT INTO prefs VALUES (1, 'v4', 'p4') ON CONFLICT DO UPDATE "
+            "SET schema = excluded.schema",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++)
+        EXPECT_EQ(0, hl_db_exec(&h, ok[i], NULL, 0));
+    static const char *const refused[] = {
+        "SET schema = 'main'",
+        "SET search_path = 'main'",
+        "  /* lead */ SET SESSION search_path = 'main'",
+        "SELECT 1; SET schema = 'main'",
+        "EXPLAIN ANALYZE SET schema = 'main'",
+        "RESET search_path",
+        "PRAGMA search_path",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_EQ(-1, hl_db_exec(&h, refused[i], NULL, 0));
+    h.backend->close(&h);
+}
+
+/* Audit 41: in mode B the protected-file and glob checks read only a path's
+ * text, and DuckDB follows symbolic links: a link inside an allowed
+ * directory naming the database file (or its WAL) read it under another
+ * name, a glob over a directory holding such a link did too, and a link to
+ * a file outside the allowed directories passed DuckDB's lexical
+ * allowed_directories check. Paths running through a link are refused. */
+UTEST(db_duckdb, mode_b_paths_through_symlinks_are_refused)
+{
+    char dir[] = "/tmp/hull_duck_a41d_XXXXXX";
+    ASSERT_TRUE(mkdtemp(dir) != NULL);
+    char rdir[PATH_MAX];
+    ASSERT_TRUE(realpath(dir, rdir) != NULL);
+    char db[PATH_MAX + 32], data[PATH_MAX + 32], clean[PATH_MAX + 32];
+    char link_db[PATH_MAX + 64], link_wal[PATH_MAX + 64];
+    char link_out[PATH_MAX + 64], outside[PATH_MAX + 64], okcsv[PATH_MAX + 64];
+    char dsn[PATH_MAX + 64], sql[3 * PATH_MAX];
+    snprintf(db, sizeof db, "%s/app.duckdb", rdir);
+    snprintf(data, sizeof data, "%s/data", rdir);
+    snprintf(clean, sizeof clean, "%s/clean", rdir);
+    snprintf(link_db, sizeof link_db, "%s/notes.csv", data);
+    snprintf(link_wal, sizeof link_wal, "%s/journal.bin", data);
+    snprintf(link_out, sizeof link_out, "%s/in.txt", data);
+    snprintf(outside, sizeof outside, "%s/outside.txt", rdir);
+    snprintf(okcsv, sizeof okcsv, "%s/ok.csv", clean);
+    ASSERT_EQ(0, mkdir(data, 0700));
+    ASSERT_EQ(0, mkdir(clean, 0700));
+    ASSERT_EQ(0, a41_plant(db, "CHECKPOINT"));
+    FILE *fp = fopen(outside, "w");
+    ASSERT_TRUE(fp != NULL);
+    fputs("OUTSIDE\n", fp);
+    fclose(fp);
+    fp = fopen(okcsv, "w");
+    ASSERT_TRUE(fp != NULL);
+    fputs("a\n1\n2\n", fp);
+    fclose(fp);
+    char wal[PATH_MAX + 32];
+    snprintf(wal, sizeof wal, "%s.wal", db);
+    ASSERT_EQ(0, symlink(db, link_db));
+    ASSERT_EQ(0, symlink(wal, link_wal));
+    ASSERT_EQ(0, symlink(outside, link_out));
+
+    static const char *dirs[2];
+    dirs[0] = data;
+    dirs[1] = clean;
+    hl_db_duckdb_set_fs_policy(dirs, 2);
+    snprintf(dsn, sizeof dsn, "duckdb://%s", db);
+    HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(0, hl_db_backend_duckdb.open(&h.ctx, dsn, NULL));
+
+    const char *const refused[] = {
+        "SELECT size FROM read_blob('%s')",           /* -> the db file */
+        "SELECT content FROM read_text('%s')",
+        "SELECT * FROM '%s'",                         /* replacement scan */
+    };
+    const char *const targets[] = { link_db, link_wal, link_out };
+    for (size_t t = 0; t < sizeof targets / sizeof targets[0]; t++) {
+        for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+            a41_subst(sql, sizeof sql, refused[i], targets[t]);
+            int rc = hl_db_query(&h, sql, NULL, 0, NULL, NULL, NULL);
+            if (rc == 0) fprintf(stderr, "ran: %s\n", sql);
+            EXPECT_EQ(-1, rc);
+        }
+    }
+    /* A glob over a directory holding such a link. */
+    snprintf(sql, sizeof sql, "SELECT size FROM read_blob('%s/*')", data);
+    EXPECT_EQ(-1, hl_db_query(&h, sql, NULL, 0, NULL, NULL, NULL));
+    snprintf(sql, sizeof sql, "SELECT size FROM read_blob('%s/**')", rdir);
+    EXPECT_EQ(-1, hl_db_query(&h, sql, NULL, 0, NULL, NULL, NULL));
+    snprintf(sql, sizeof sql, "SELECT * FROM '%s/*.csv'", data);
+    EXPECT_EQ(-1, hl_db_query(&h, sql, NULL, 0, NULL, NULL, NULL));
+    /* COPY to a link. */
+    snprintf(sql, sizeof sql, "COPY (SELECT 1) TO '%s'", link_out);
+    EXPECT_EQ(-1, hl_db_exec(&h, sql, NULL, 0));
+
+    /* Controls: an ordinary file, and a glob over a directory with no link. */
+    int64_t n = 0;
+    snprintf(sql, sizeof sql, "SELECT count(*) FROM read_csv('%s')", okcsv);
+    EXPECT_EQ(0, hl_db_query(&h, sql, NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(2, n);
+    snprintf(sql, sizeof sql, "SELECT count(*) FROM read_csv('%s/*.csv')", clean);
+    EXPECT_EQ(0, hl_db_query(&h, sql, NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(2, n);
+    snprintf(sql, sizeof sql, "SELECT count(*) FROM '%s'", okcsv);
+    EXPECT_EQ(0, hl_db_query(&h, sql, NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(2, n);
+
+    h.backend->close(&h);
+    hl_db_duckdb_set_fs_policy(NULL, 0);
+    unlink(link_db);
+    unlink(link_wal);
+    unlink(link_out);
+    unlink(outside);
+    unlink(okcsv);
+    a41_unlink_db(db);
+    rmdir(data);
+    rmdir(clean);
+    rmdir(rdir);
+}
+
 
 UTEST_MAIN()
 

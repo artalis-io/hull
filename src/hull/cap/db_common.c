@@ -15,6 +15,10 @@
 #include "hull/cap/db_budget.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sql_kw.h"
+#include "hull/shared/host.h"          /* hl_host_home */
+#include "hull/shared/work_charge.h"   /* HL_WORK_FS_LOOKUP_UNITS */
+#include <dirent.h>   /* opendir: the mode-B glob walk */
+#include <sys/stat.h> /* lstat */
 #include <limits.h>   /* PATH_MAX */
 #include <stdatomic.h>
 #include <stdint.h>   /* SIZE_MAX */
@@ -696,10 +700,65 @@ static int catalog_kw(const char *s, size_t n)
     return 0;
 }
 
+/* The word at @p q (after a gap read with @p nest): its length in *n and the
+ * text past it; NULL when the budget is gone. */
+static const char *catalog_word(const char *q, int nest, size_t *budget,
+                                const char **word, size_t *n)
+{
+    q = dyn_skip_gap(q, nest, budget);
+    if (!q) return NULL;
+    size_t k = 0;
+    while (dyn_ident_char((unsigned char)q[k])) k++;
+    *word = q;
+    *n = k;
+    return q + k;
+}
+
+static int catalog_word_is(const char *w, size_t n, const char *kw)
+{
+    return n == strlen(kw) && strncasecmp(w, kw, n) == 0;
+}
+
+/* At the start of a statement (@p p: the text's start, or just past a ';'):
+ * 1 when it is SET / RESET / PRAGMA [GLOBAL|SESSION|LOCAL] of `schema` or
+ * `search_path`, also behind EXPLAIN [ANALYZE] (which runs it). Only a
+ * statement's first word is a session SET: `UPDATE t SET schema = ...` and
+ * `ON CONFLICT DO UPDATE SET search_path = ...` assign columns, and were
+ * refused while every SET counted (audit 41). A ';' inside a literal or a
+ * comment starts a check too, which only ever refuses more. */
+static int catalog_stmt_switches(const char *p, size_t *budget)
+{
+    for (int nest = 1; nest >= 0; nest--) {
+        const char *w = NULL;
+        size_t n = 0;
+        const char *q = catalog_word(p, nest, budget, &w, &n);
+        if (!q) return 1;             /* budget exhausted: refuse */
+        if (catalog_word_is(w, n, "explain")) {
+            if (!(q = catalog_word(q, nest, budget, &w, &n))) return 1;
+            if (catalog_word_is(w, n, "analyze") &&
+                !(q = catalog_word(q, nest, budget, &w, &n)))
+                return 1;
+        }
+        if (!catalog_word_is(w, n, "set") && !catalog_word_is(w, n, "reset") &&
+            !catalog_word_is(w, n, "pragma"))
+            continue;
+        if (!(q = catalog_word(q, nest, budget, &w, &n))) return 1;
+        if (catalog_word_is(w, n, "global") || catalog_word_is(w, n, "session") ||
+            catalog_word_is(w, n, "local")) {
+            if (!(q = catalog_word(q, nest, budget, &w, &n))) return 1;
+        }
+        if (catalog_word_is(w, n, "schema") ||
+            catalog_word_is(w, n, "search_path"))
+            return 1;
+    }
+    return 0;
+}
+
 int hl_cap_db_sql_switches_catalog(const char *sql)
 {
     if (!sql) return 0;
     size_t budget = 2 * strlen(sql) + 65536;   /* shared by every gap skip */
+    if (catalog_stmt_switches(sql, &budget)) return 1;
     for (const char *p = sql; *p; ) {
         unsigned char c = (unsigned char)*p;
         if (c == '"') {               /* "quoted" keyword, "" = a quote */
@@ -721,24 +780,9 @@ int hl_cap_db_sql_switches_catalog(const char *sql)
             while (*p && dyn_ident_char((unsigned char)*p)) p++;
             size_t n = (size_t)(p - start);
             if (catalog_kw(start, n)) return 1;
-            /* SET / RESET / PRAGMA [GLOBAL|SESSION|LOCAL] (schema|search_path) */
-            if ((n == 3 && strncasecmp(start, "set", 3) == 0) ||
-                (n == 5 && strncasecmp(start, "reset", 5) == 0) ||
-                (n == 6 && strncasecmp(start, "pragma", 6) == 0)) {
-                const char *after = NULL;
-                const char *q = p;
-                if (whole_db_next_is(q, "global", &budget, &after) ||
-                    whole_db_next_is(q, "session", &budget, &after) ||
-                    whole_db_next_is(q, "local", &budget, &after)) {
-                    if (!after) return 1;   /* budget exhausted: refuse */
-                    q = after;
-                }
-                if (whole_db_next_is(q, "schema", &budget, &after) ||
-                    whole_db_next_is(q, "search_path", &budget, &after))
-                    return 1;
-            }
             continue;
         }
+        if (c == ';' && catalog_stmt_switches(p + 1, &budget)) return 1;
         p++;
     }
     return 0;
@@ -1561,11 +1605,15 @@ int hl_cap_db_sql_names_table_by_value(const char *sql)
     return hl_cap_db_sql_names_table_by_value_ex(sql, 0);
 }
 
-/* The protected database file: its directory (NULL: none) and name. */
+/* The protected database file: its directory (NULL: none), name, and
+ * canonical path (NULL: none); @p fs: the file functions may run (mode B),
+ * so a path they take is resolved against the file system too (audit 41). */
 typedef struct {
     const char *dir;
     const char *base;
     size_t      blen;
+    const char *path;
+    int         fs;
 } FvProtect;
 
 /* Whether @p s (@p n bytes, a path or a literal's text) names the protected
@@ -1647,6 +1695,223 @@ static int fv_glob_reaches(const char *body, const char *protect_dir)
            (protect_dir[rn] == '\0' || protect_dir[rn] == '/');
 }
 
+/* ── Mode B: paths resolved through the file system (audit 41) ───────
+ *
+ * The checks above read a path's TEXT, and DuckDB follows symbolic links:
+ * with fs.read / fs.write declared (mode B), a link inside an allowed
+ * directory whose target is the database file, its WAL or its temp
+ * directory - files DuckDB always lets SQL reach - read it under a name no
+ * text check knows, and a link to a file outside the allowed directories
+ * passed DuckDB's own (lexical) allowed_directories check. So in mode B a
+ * file function's path and a COPY target may not run through a symbolic
+ * link at all (the rule db.open applies to a file DSN,
+ * hl_db_path_has_symlink), nor may a literal carrying a replacement-scan
+ * extension; a glob may not cover a directory holding a link; and no
+ * literal may resolve to a protected file. Each lstat / realpath /
+ * directory entry is charged to the run's budget first. A link made between
+ * this check and the statement's run is not seen: the app has no API that
+ * makes one, so only another process could. */
+
+/* @p body with a `file://` prefix dropped and a leading `~` expanded (DuckDB
+ * expands it), into @p out. 0, or -1 (too long, no HOME, `~user`). */
+static int fv_fs_spelling(const char *body, char *out, size_t cap)
+{
+    const char *s = body;
+    if (strncasecmp(s, "file://", 7) == 0) s += 7;
+    if (s[0] == '~' && (s[1] == '/' || s[1] == '\0')) {
+        const char *home = hl_host_home();
+        if (!home || home[0] != '/') return -1;
+        int w = snprintf(out, cap, "%s%s", home, s + 1);
+        return (w < 0 || (size_t)w >= cap) ? -1 : 0;
+    }
+    if (s[0] == '~') return -1;
+    size_t n = strlen(s);
+    if (n >= cap) return -1;
+    memcpy(out, s, n + 1);
+    return 0;
+}
+
+/* 1 when some existing component of @p path (relative to the working
+ * directory, as DuckDB reads it) is a symbolic link, the leaf included, or
+ * the budget trips; 0 once a component does not exist. */
+static int fv_path_has_symlink(const char *path)
+{
+    char buf[PATH_MAX];
+    size_t n = strlen(path);
+    if (n == 0) return 0;
+    if (n >= sizeof buf) return 1;
+    memcpy(buf, path, n + 1);
+    for (size_t i = 1; i <= n; i++) {
+        if (i < n && buf[i] != '/') continue;
+        if (buf[i - 1] == '/') continue;      /* "//", or a trailing '/' */
+        if (hl_db_budget_charge(HL_WORK_FS_LOOKUP_UNITS)) return 1;
+        char saved = buf[i];
+        buf[i] = '\0';
+        struct stat st;
+        int r = lstat(buf, &st);
+        buf[i] = saved;
+        if (r != 0) return 0;          /* the rest does not exist (yet) */
+        if (S_ISLNK(st.st_mode)) return 1;
+    }
+    return 0;
+}
+
+#define FV_GLOB_MAX_ENTRIES 65536u
+#define FV_GLOB_MAX_DEPTH   32
+
+/* 1 when the tree under @p dir, @p depth levels deep, holds a symbolic link,
+ * or more than FV_GLOB_MAX_ENTRIES entries in all (*seen), or the budget
+ * trips. A directory that cannot be opened is one DuckDB cannot glob. */
+static int fv_dir_has_symlink(const char *dir, int depth, size_t *seen)
+{
+    if (depth <= 0) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent *de;
+    while (!found && (de = readdir(d)) != NULL) {
+        const char *nm = de->d_name;
+        if (nm[0] == '.' && (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0')))
+            continue;
+        if (++*seen > FV_GLOB_MAX_ENTRIES ||
+            hl_db_budget_charge(HL_WORK_FS_DIRENT_UNITS + HL_WORK_FS_LOOKUP_UNITS)) {
+            found = 1;
+            break;
+        }
+        char child[PATH_MAX];
+        int w = snprintf(child, sizeof child, "%s/%s", dir, nm);
+        if (w < 0 || (size_t)w >= sizeof child) { found = 1; break; }
+        struct stat st;
+        if (lstat(child, &st) != 0) continue;
+        if (S_ISLNK(st.st_mode)) { found = 1; break; }
+        if (S_ISDIR(st.st_mode) && depth > 1)
+            found = fv_dir_has_symlink(child, depth - 1, seen);
+    }
+    closedir(d);
+    return found;
+}
+
+/* For a glob path @p s (a wildcard in it): 1 when its fixed directory part
+ * runs through a symbolic link, or the directories it can match hold one.
+ * The walk goes as many levels deep as the pattern has components past that
+ * part (every level, up to FV_GLOB_MAX_DEPTH, for `**`). */
+static int fv_glob_has_symlink(const char *s)
+{
+    size_t meta = strcspn(s, "*?[{");
+    char prefix[PATH_MAX];
+    size_t cut = 0;
+    int slash = 0;
+    for (size_t i = 0; i < meta; i++)
+        if (s[i] == '/') { cut = i; slash = 1; }
+    if (!slash) {
+        prefix[0] = '.'; prefix[1] = '\0';
+    } else {
+        size_t c = cut == 0 ? 1 : cut;
+        if (c >= sizeof prefix) return 1;
+        memcpy(prefix, s, c);
+        prefix[c] = '\0';
+    }
+    if (fv_path_has_symlink(prefix)) return 1;
+    int depth = 1;
+    for (const char *q = s + (slash ? cut + 1 : 0); *q; q++)
+        if (*q == '/') depth++;
+    if (strstr(s, "**") || depth > FV_GLOB_MAX_DEPTH) depth = FV_GLOB_MAX_DEPTH;
+    size_t seen = 0;
+    return fv_dir_has_symlink(prefix, depth, &seen);
+}
+
+/* Whether the path @p body that a file function or COPY takes runs
+ * through a symbolic link (mode B). */
+static int fv_fs_path_refused(const char *body)
+{
+    char path[PATH_MAX];
+    if (fv_fs_spelling(body, path, sizeof path) != 0) return 1;
+    if (path[strcspn(path, "*?[{")]) return fv_glob_has_symlink(path);
+    return fv_path_has_symlink(path);
+}
+
+/* Whether @p real (a resolved path) is the protected file, one of its WAL
+ * sidecars, or its temp directory or a file in it. Case-insensitive, as
+ * the file system may be. */
+static int fv_real_is_protected(const char *real, const char *protect)
+{
+    size_t pl = strlen(protect);
+    if (strncasecmp(real, protect, pl) != 0) return 0;
+    const char *r = real + pl;
+    return r[0] == '\0' ||
+           strncasecmp(r, ".wal", 4) == 0 ||
+           (strncasecmp(r, ".tmp", 4) == 0 && (r[4] == '\0' || r[4] == '/'));
+}
+
+/* DuckDB reads a literal in table position by its extension (a replacement
+ * scan, FROM 'x.csv'): a literal carrying such an extension is a path. */
+static int fv_scan_extension(const char *s, size_t n)
+{
+    static const char *const exts[] = {
+        ".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl", ".ndjson",
+        ".duckdb", ".db", NULL
+    };
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] != '.') continue;
+        for (int k = 0; exts[k]; k++) {
+            size_t el = strlen(exts[k]);
+            if (n - i >= el && strncasecmp(s + i, exts[k], el) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* One literal body read in mode B (@p s, @p n bytes): 1 when it resolves to
+ * a protected file, or - carrying a replacement-scan extension - runs
+ * through a symbolic link or is a glob reaching the protected directory or
+ * a link. */
+static int fv_fs_literal_refused(const char *s, size_t n, const FvProtect *pr)
+{
+    if (n == 0 || n >= PATH_MAX) return 0;
+    if (memchr(s, '\n', n) || memchr(s, '\r', n) || memchr(s, '\0', n))
+        return 0;
+    char body[PATH_MAX];
+    memcpy(body, s, n);
+    body[n] = '\0';
+    int scan = fv_scan_extension(body, n);
+    char path[PATH_MAX];
+    if (fv_fs_spelling(body, path, sizeof path) != 0) return scan;
+    int glob = path[strcspn(path, "*?[{")] != '\0';
+    if (scan) {
+        if (glob) {
+            if ((pr->dir && fv_glob_reaches(path, pr->dir)) ||
+                fv_glob_has_symlink(path))
+                return 1;
+        } else if (fv_path_has_symlink(path)) {
+            return 1;
+        }
+    }
+    if (glob || !pr->path) return 0;
+    if (hl_db_budget_charge(HL_WORK_FS_LOOKUP_UNITS)) return 1;
+    char real[PATH_MAX];
+    if (!realpath(path, real)) return 0;
+    return fv_real_is_protected(real, pr->path);
+}
+
+/* Every literal of @p sql, read as fv_literal_names_protected reads them
+ * (each span between two consecutive quotes of one kind), through
+ * fv_fs_literal_refused. */
+static int fv_fs_literals_refused(const char *sql, const FvProtect *pr)
+{
+    static const char quotes[] = { '\'', '"', '$' };
+    for (size_t k = 0; k < sizeof quotes; k++) {
+        const char *prev = NULL;
+        for (const char *p = strchr(sql, quotes[k]); p;
+             p = strchr(p + 1, quotes[k])) {
+            if (prev && fv_fs_literal_refused(prev + 1, (size_t)(p - prev - 1), pr))
+                return 1;
+            prev = p;
+        }
+    }
+    return 0;
+}
+
 /* A path literal at @p p ('...' or "..."): NULL to refuse (not one, too
  * long, naming the protected file, a glob reaching its directory, budget
  * gone), else the text after. */
@@ -1660,6 +1925,7 @@ static const char *fv_path_literal(const char *p, const FvProtect *pr,
     if (!after || n == SIZE_MAX) return NULL;
     if (pr && pr->base && fv_names_protected(body, n, pr)) return NULL;
     if (pr && pr->dir && fv_glob_reaches(body, pr->dir)) return NULL;
+    if (pr && pr->fs && fv_fs_path_refused(body)) return NULL;
     return after;
 }
 
@@ -1815,9 +2081,11 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
         protect_dir[dn] = '\0';
         if (blen == 0) return 1;
     }
-    FvProtect prot = { (base && protect_dir[0]) ? protect_dir : NULL, base, blen };
-    const FvProtect *pr = base ? &prot : NULL;
-    if (pr && fv_literal_names_protected(sql, pr)) return 1;
+    FvProtect prot = { (base && protect_dir[0]) ? protect_dir : NULL, base, blen,
+                       base ? protect_path : NULL, !deny_file_functions };
+    const FvProtect *pr = (base || prot.fs) ? &prot : NULL;
+    if (base && fv_literal_names_protected(sql, &prot)) return 1;
+    if (prot.fs && fv_fs_literals_refused(sql, &prot)) return 1;
 
     for (const char *p = sql; *p; ) {
         unsigned char c = (unsigned char)*p;
