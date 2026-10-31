@@ -15188,5 +15188,182 @@ UTEST(js_audit39, ordinary_use_still_works)
     hl_js_free(&lim);
 }
 
+/* ── Audit 39: blob walks and init, db.open, template compiles ────────
+ *
+ * The twins of lua_audit39: a blob walk opened every shard directory for 1
+ * unit each, blob.init walked and mkdir-p'd a deep path under a flat floor,
+ * db.open + close of a file database cost ~1 ms for SQLite's allocations,
+ * template.renderString compiled (and persisted to the shared cache) every
+ * distinct source uncharged, and reader.read(1) charged 0 units. Each is
+ * charged before the work now: a loop trips, try/catch cannot swallow it,
+ * ordinary use fits, and renderString writes no cache file. */
+
+UTEST(js_audit39, blob_walks_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob; blob.init({ dir: 'blobs' });\n"
+        "for (let i = 1; i <= 300; i++) blob.put('b' + i);\n", 0), 0);
+    static const char *const loops[] = {
+        "for (let i = 0; i < 2000; i++) { try { blob.count(); } catch (e) {} }",
+        "for (let i = 0; i < 2000; i++) { try { blob.totalSize(); } catch (e) {} }",
+        "for (let i = 0; i < 2000; i++) { try { blob.iter(); } catch (e) {} }",
+        "for (let i = 0; i < 2000; i++) {"
+        "  try { blob.cleanup({ maxAge: 1, dryRun: true }); } catch (e) {} }",
+        "blob.init({ dir: 'blobs2', shardDepth: 2 });"
+        "for (let i = 0; i < 2000; i++) { try { blob.count(); } catch (e) {} }",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        if (i < 4)
+            ASSERT_EQ(a10_run_tripped("blob.init({ dir: 'blobs' });", 0), 0);
+        EXPECT_EQ_MSG(a10_run_tripped(loops[i], 5000000), 1, loops[i]);
+    }
+    EXPECT_EQ(a10_run_tripped(
+        "blob.init({ dir: 'blobs' });"
+        "for (let i = 0; i < 3; i++) if (blob.count() !== 300) throw new Error('count');"
+        "if (blob.iter().length !== 300) throw new Error('iter');"
+        "if (!(blob.totalSize() > 0)) throw new Error('size');"
+        "if (blob.cleanup({ maxAge: 1e9 }).removed !== 0) throw new Error('cleanup');"
+        "globalThis.__a39_walk = 1;", 5000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_walk|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit39, blob_init_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob;\n", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "const deep = 'a/'.repeat(150);"
+        "for (let i = 0; i < 100; i++) {"
+        "  try { blob.init({ dir: 'bi/' + i + '/' + deep + 's' }); } catch (e) {} }",
+        5000000), 1);
+    int n = eval_int("fs.list('bi').length");
+    EXPECT_GE(n, 1);
+    EXPECT_LT(n, 20);
+    EXPECT_EQ(a10_run_tripped(
+        "const deep = 'a/'.repeat(150);"
+        "for (let i = 0; i < 200; i++) {"
+        "  try { blob.init({ dir: 'bs/' + deep + 's' }); } catch (e) {} }",
+        5000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 10; i++) blob.init({ dir: 'data/blobs' });"
+        "if (blob.count() !== 0) throw new Error('count');"
+        "globalThis.__a39_init = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_init|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit39, blob_reader_reads_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    ASSERT_EQ(a10_run_tripped(
+        "import { blob } from 'hull:blob';\n"
+        "globalThis.blob = blob; blob.init({ dir: 'blobs' });\n"
+        "globalThis.R = blob.reader(blob.put('xyz').id);\n", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 200000; i++) { try { R.read(1); } catch (e) {} }",
+        5000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "const r = blob.reader(blob.put('hello').id); let n = 0;"
+        "for (;;) { const c = r.read(2); if (c === null) break; n += c.byteLength; }"
+        "r.close(); if (n !== 5) throw new Error('read');"
+        "globalThis.__a39_read = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_read|0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit39, db_open_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    static HlManifest m;
+    memset(&m, 0, sizeof m);
+    m.databases.dynamic.declared = 1;
+    m.databases.dynamic.schemes[0] = "sqlite";
+    m.databases.dynamic.scheme_count = 1;
+    hl_db_registry_set_manifest(test_db_registry, &m);
+    ASSERT_EQ(a10_run_tripped(
+        "import { db } from 'hull:db';\n"
+        "globalThis.dbm = db;\n", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 1000; i++) { try { dbm.open('x.db').close(); } catch (e) {} }",
+        5000000), 1);
+    /* A trip inside the open - the floor, or SQLite's allocator - is the
+     * limit, never a catchable "connection failed". */
+    for (int64_t lim = 2000; lim <= 20000; lim += 1500) {
+        int tripped = a10_run_tripped(
+            "globalThis.__a39_m = 'unset';"
+            "try { dbm.open(':memory:').close(); globalThis.__a39_m = 'ok'; }"
+            "catch (e) { globalThis.__a39_m = String(e && e.message); }", lim);
+        if (!tripped) {
+            char *msg = eval_str("globalThis.__a39_m");
+            ASSERT_NE(msg, NULL);
+            EXPECT_STREQ(msg, "ok");
+            free(msg);
+        }
+    }
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 1; i <= 5; i++) { const c = dbm.open('x.db');"
+        "  c.exec('CREATE TABLE IF NOT EXISTS t (x INTEGER)');"
+        "  c.exec('INSERT INTO t VALUES (?)', [i]); c.close(); }"
+        "const c = dbm.open('x.db'); const r = c.query('SELECT count(*) AS n FROM t');"
+        "c.close(); if (r[0].n !== 5) throw new Error('count');"
+        "globalThis.__a39_db = 1;", 2000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_db|0"), 1);
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_audit39, render_string_is_charged_and_not_persisted)
+{
+    const char *old_home = getenv("HOME");
+    char saved_home[512];
+    snprintf(saved_home, sizeof saved_home, "%s", old_home ? old_home : "");
+    char tmp[256];
+    jtc_with_tmp_home(tmp, sizeof tmp);
+    ASSERT_NE(tmp[0], 0);
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a10_run_tripped(
+        "import { template } from 'hull:template';\n"
+        "globalThis.tpl = template; globalThis.PAD = 'x'.repeat(300);\n", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 1; i <= 20; i++)"
+        "  if (tpl.renderString(PAD + '{{ n }}' + i, { n: i }) !== PAD + i + i)"
+        "    throw new Error('render');"
+        "globalThis.__a39_tpl = 1;", 0), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_tpl|0"), 1);
+    EXPECT_EQ(jtc_count(tmp), 0);
+    /* The compile is charged by size: ~700 units a render before. */
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 1000; i++) { try { tpl.renderString(PAD + i, {}); } catch (e) {} }",
+        4000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 50; i++) tpl.renderString('<p>{{ x }}</p>', { x: i });"
+        "globalThis.__a39_small = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_small|0"), 1);
+    cleanup_js_caps();
+    if (saved_home[0]) setenv("HOME", saved_home, 1);
+    hl_js_template_cache_reset();
+}
 
 UTEST_MAIN();

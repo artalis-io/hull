@@ -14704,4 +14704,192 @@ UTEST(lua_audit39, closed_task_close_work_is_charged_to_the_spawner)
     be->free(actx);
 }
 
+/* ── Audit 39: blob walks and init, db.open, template compiles ────────
+ *
+ * Calls that did syscalls or per-entry work for a flat or no charge: a
+ * blob walk opened 256 shard directories (65,536 at shard_depth 2) for 256
+ * units, blob.init walked and mkdir-p'd a deep path under a 16384 floor,
+ * db.open + close of a file database cost ~1 ms for SQLite's allocations
+ * (~2400 units), template.render_string compiled (and persisted to the
+ * shared cache) every distinct source for its Lua instructions only, and
+ * reader:read(1) charged 0 units. Each is charged before the work now: a
+ * loop trips a small budget, pcall does not catch it, ordinary use fits,
+ * and render_string writes no cache file. */
+
+UTEST(lua_audit39, blob_walks_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "blob = require('hull.blob') blob.init({ dir = 'blobs' }) "
+        "for i = 1, 300 do blob.put('b' .. i) end return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* 2000 walks of 256 shard directories: ~0.5M units before. */
+    static const char *const loops[] = {
+        "for i = 1, 2000 do pcall(blob.count) end return 1",
+        "for i = 1, 2000 do pcall(blob.total_size) end return 1",
+        "for i = 1, 2000 do pcall(blob.iter) end return 1",
+        "for i = 1, 2000 do pcall(blob.cleanup, { max_age = 1, dry_run = true }) end return 1",
+        "blob.init({ dir = 'blobs2', shard_depth = 2 }) "
+        "for i = 1, 2000 do pcall(blob.count) end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        if (i < 4)
+            ASSERT_EQ(audit10_run("blob.init({ dir = 'blobs' }) return 1",
+                                  HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+        EXPECT_NE_MSG(audit10_run(loops[i], 5000000, err, sizeof err), LUA_OK,
+                      loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    /* Ordinary use of a filled store still fits a small budget. */
+    EXPECT_EQ(audit10_run(
+        "blob.init({ dir = 'blobs' }) "
+        "for i = 1, 3 do assert(blob.count() == 300) end "
+        "local n = 0 for id in blob.iter() do n = n + 1 end assert(n == 300) "
+        "assert(blob.total_size() > 0) "
+        "assert(blob.cleanup({ max_age = 1e9 }).removed == 0) return 1",
+        5000000, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit39, blob_init_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run("blob = require('hull.blob') return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* A fresh 150-deep store a call: 150 directories made under a flat
+     * 16384 before (100 calls = 1.6M units, 15,000 directories). */
+    EXPECT_NE(audit10_run(
+        "local deep = string.rep('a/', 150) "
+        "for i = 1, 100 do pcall(blob.init, { dir = 'bi/' .. i .. '/' .. deep .. 's' }) end "
+        "return 1", 5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run(
+        "local n = #fs.list('bi') assert(n >= 1 and n < 20, n) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* The same deep store again and again: O(depth^2) lookups a call. */
+    EXPECT_NE(audit10_run(
+        "local deep = string.rep('a/', 150) "
+        "for i = 1, 200 do pcall(blob.init, { dir = 'bs/' .. deep .. 's' }) end "
+        "return 1", 5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* An ordinary store inits a few times in a small budget. */
+    EXPECT_EQ(audit10_run(
+        "for i = 1, 10 do blob.init({ dir = 'data/blobs' }) end "
+        "assert(blob.count() == 0) return 1",
+        1000000, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit39, blob_reader_reads_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "blob = require('hull.blob') blob.init({ dir = 'blobs' }) "
+        "R = blob.reader(blob.put('xyz')) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* A read syscall a call - past EOF after the third - for 0 units. */
+    EXPECT_NE(audit10_run("for i = 1, 200000 do pcall(R.read, R, 1) end return 1",
+                          5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run(
+        "local r = blob.reader(blob.put('hello')) local t = {} "
+        "while true do local c = r:read(2) if not c then break end t[#t + 1] = c end "
+        "r:close() assert(table.concat(t) == 'hello') return 1",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit39, db_open_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
+    static HlManifest m;
+    memset(&m, 0, sizeof m);
+    m.databases.dynamic.declared = 1;
+    m.databases.dynamic.schemes[0] = "sqlite";
+    m.databases.dynamic.scheme_count = 1;
+    hl_db_registry_set_manifest(test_db_registry, &m);
+    char err[512];
+    ASSERT_EQ(audit10_run("dbm = require('hull.db') return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* ~2400 units an open + close before: 1000 of them fitted in 5M. */
+    EXPECT_NE(audit10_run(
+        "for i = 1, 1000 do pcall(function() dbm.open('x.db').close() end) end "
+        "return 1", 5000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* A trip inside the open - the floor, or SQLite's allocator - is the
+     * limit, never "connection failed". */
+    for (int64_t lim = 2000; lim <= 20000; lim += 1500) {
+        int rc = audit10_run("dbm.open(':memory:').close() return 1",
+                             lim, err, sizeof err);
+        if (rc != LUA_OK)
+            EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, err);
+    }
+    /* Opening a database a few times fits a small budget. */
+    EXPECT_EQ(audit10_run(
+        "for i = 1, 5 do local c = dbm.open('x.db') "
+        "c.exec('CREATE TABLE IF NOT EXISTS t (x INTEGER)') "
+        "c.exec('INSERT INTO t VALUES (?)', { i }) c.close() end "
+        "local c = dbm.open('x.db') local r = c.query('SELECT count(*) AS n FROM t') "
+        "c.close() assert(r[1].n == 5) return 1",
+        2000000, err, sizeof err), LUA_OK);
+    EXPECT_STREQ(err, "");
+    hl_db_registry_set_manifest(test_db_registry, NULL);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_audit39, render_string_is_charged_and_not_persisted)
+{
+    const char *old_home = getenv("HOME");
+    char saved_home[512];
+    snprintf(saved_home, sizeof saved_home, "%s", old_home ? old_home : "");
+    char tmp[256];
+    tc_with_tmp_home(tmp, sizeof tmp);
+    ASSERT_NE(tmp[0], 0);
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    ASSERT_EQ(audit10_run(
+        "tpl = require('hull.template') PAD = string.rep('x', 300) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* Distinct sources render, and none is written to the shared cache
+     * (each was a sealed file in ~/.hull before). */
+    EXPECT_EQ(audit10_run(
+        "for i = 1, 20 do assert(tpl.render_string(PAD .. '{{ n }}' .. i, { n = i }) "
+        "  == PAD .. i .. i) end return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_EQ(tc_count(tmp), 0);
+    /* The compile is charged by size: ~1.6k units a render before. */
+    EXPECT_NE(audit10_run(
+        "for i = 1, 1000 do pcall(tpl.render_string, PAD .. i, {}) end return 1",
+        4000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run(
+        "for i = 1, 50 do tpl.render_string('<p>{{ x }}</p>', { x = i }) end return 1",
+        1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    if (saved_home[0]) setenv("HOME", saved_home, 1);
+    hl_lua_template_cache_reset();
+}
+
 UTEST_MAIN();

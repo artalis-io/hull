@@ -134,6 +134,13 @@ static int fresh_compile(lua_State *L,
     return rc;
 }
 
+int hl_lua_template_compile_uncached(lua_State *L,
+                                     const char *code, size_t code_len,
+                                     const char *chunkname)
+{
+    return fresh_compile(L, code, code_len, chunkname);
+}
+
 int hl_lua_template_compile_cached(lua_State *L,
                                    const char *code, size_t code_len,
                                    const char *chunkname)

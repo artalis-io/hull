@@ -37,11 +37,23 @@
 
 #include "refusal.h"
 #include "mod_buffer.h"
+#include "internal.h"   /* hl_lua_fs_charge, hl_lua_budget_raise */
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
 #include "hull/limits/runtime.h"       /* HL_BLOB_READ_CHUNK_MAX */
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
+#include "hull/cap/fs_resolve.h"       /* hl_fs_charge_begin (audit 39) */
+
+/* One blob capability call under the run's charge scope (audit 39): the
+ * store walks and blob.init charge their steps as they run and stop once
+ * the run is over; no Lua API in between, so nothing longjmps past the
+ * scope's end. The binding raises the trip after. */
+#define LUA_BLOB_WALK(L, tripped, call) do {                               \
+        HlFsChargeScope cs_ = hl_fs_charge_begin(hl_lua_fs_charge, (L));    \
+        call;                                                               \
+        (tripped) = hl_fs_charge_end(cs_) || hl_lua_budget_tripped(L);      \
+    } while (0)
 #include "log.h"
 #include "protected.h"   /* pushes that cannot leak the C buffer */
 
@@ -123,8 +135,15 @@ static int lua_blob_init(lua_State *L)
     s->b = NULL;
     luaL_setmetatable(L, HL_BLOB_MT);
     uint64_t swept = 0;
-    int rc = hl_cap_blob_init_ex(&s->b, lua->base.fs_cfg, lua->base.alloc,
-                                 dir, shard_depth, tmp_max_age, &swept);
+    int rc, tripped;
+    /* The path checks and the directories made are charged step by step
+     * as they run (audit 39): a deep dir was O(depth^2) lstats and
+     * mkdirs under the flat floor. */
+    LUA_BLOB_WALK(L, tripped,
+                  rc = hl_cap_blob_init_ex(&s->b, lua->base.fs_cfg,
+                                           lua->base.alloc, dir, shard_depth,
+                                           tmp_max_age, &swept));
+    if (tripped) return hl_lua_budget_raise(L);   /* __gc frees s->b */
     if (rc != 0)
         return luaL_error(L, "blob.init: failed (check fs.write declares '%s')", dir);
     /* Each tmp/ entry the sweep read, charged after it as the blob walk is
@@ -412,7 +431,10 @@ static int lua_reader_read(lua_State *L)
      * box, which is VM memory. */
     if ((lua_Unsigned)cap > HL_BLOB_READ_CHUNK_MAX)
         cap = HL_BLOB_READ_CHUNK_MAX;
-    lua_hlwork(L, (size_t)hl_work_bytes_units((uint64_t)cap), 0);
+    /* A floor for the read syscall itself (audit 39): read(1), or any read
+     * past the end, charged 0 units. */
+    lua_hlwork(L, (size_t)(HL_WORK_BLOB_READ_UNITS +
+                           hl_work_bytes_units((uint64_t)cap)), 0);
     luaL_Buffer lb;
     char *buf = luaL_buffinitsize(L, &lb, (size_t)cap);
     /* The box allocation can run a GC step, and an app __gc can close
@@ -637,12 +659,14 @@ static int lua_blob_iter(lua_State *L)
 
     /* The walk is charged: 1 unit per shard directory before it, 1 per
      * entry after (audit 21). lua_hlwork raises once the run is over. */
-    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
     IterAcc acc = { lua->base.alloc, NULL, 0, 0 };
-    if (hl_cap_blob_iter(b, iter_collect_cb, &acc) != 0) {
+    int rc, tripped;
+    LUA_BLOB_WALK(L, tripped, rc = hl_cap_blob_iter(b, iter_collect_cb, &acc));
+    if (tripped || rc != 0) {
         if (acc.items)
             hl_alloc_free(acc.alloc, acc.items,
                           acc.capacity * sizeof(IterItem));
+        if (tripped) return hl_lua_budget_raise(L);
         return luaL_error(L, "blob.iter: walk failed");
     }
 
@@ -651,7 +675,6 @@ static int lua_blob_iter(lua_State *L)
     st->count    = acc.count;
     st->capacity = acc.capacity;
     st->pos      = 0;
-    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_after(b), 0);
 
     /* Push the iterator function with the state as upvalue. */
     lua_pushcclosure(L, lua_iter_step, 1);
@@ -661,9 +684,10 @@ static int lua_blob_iter(lua_State *L)
 static int lua_blob_total_size(lua_State *L)
 {
     HlBlob *b = get_store(L);
-    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
-    uint64_t total = hl_cap_blob_total_size(b);
-    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_after(b), 0);
+    uint64_t total;
+    int tripped;
+    LUA_BLOB_WALK(L, tripped, total = hl_cap_blob_total_size(b));
+    if (tripped) return hl_lua_budget_raise(L);
     lua_pushinteger(L, (lua_Integer)total);
     return 1;
 }
@@ -671,9 +695,10 @@ static int lua_blob_total_size(lua_State *L)
 static int lua_blob_count(lua_State *L)
 {
     HlBlob *b = get_store(L);
-    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
-    uint64_t n = hl_cap_blob_count(b);
-    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_after(b), 0);
+    uint64_t n;
+    int tripped;
+    LUA_BLOB_WALK(L, tripped, n = hl_cap_blob_count(b));
+    if (tripped) return hl_lua_budget_raise(L);
     lua_pushinteger(L, (lua_Integer)n);
     return 1;
 }
@@ -710,11 +735,13 @@ static int lua_blob_cleanup(lua_State *L)
     opts.dry_run = lua_toboolean(L, -1);
     lua_pop(L, 1);
 
-    lua_hlwork(L, (size_t)hl_cap_blob_walk_units_before(b), 0);
     uint64_t removed = 0, freed = 0;
-    if (hl_cap_blob_cleanup(b, &opts, &removed, &freed) != 0)
+    int rc, tripped;
+    LUA_BLOB_WALK(L, tripped,
+                  rc = hl_cap_blob_cleanup(b, &opts, &removed, &freed));
+    if (tripped) return hl_lua_budget_raise(L);  /* unlinks charged before */
+    if (rc != 0)
         return luaL_error(L, "blob.cleanup: failed");
-    lua_hlwork(L, (size_t)(hl_cap_blob_walk_units_after(b) + removed), 0);
 
     lua_newtable(L);
     lua_pushinteger(L, (lua_Integer)removed);
