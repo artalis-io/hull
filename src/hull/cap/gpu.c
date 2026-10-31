@@ -1424,10 +1424,19 @@ typedef struct {
     int kind;
 } WlEvt;
 
+/* A function's own size, counted as hl_gpu_wgsl_size counts it (words,
+ * let / var / const declarations, statements), and the same with every
+ * call inlined (audit 41). */
+typedef struct {
+    uint64_t words, decls, stmts;
+} WlCallSize;
+
 typedef struct {
     size_t ev_first, ev_count;
     size_t depth, next;       /* chain length; walk cursor */
     int state;                /* 0 unvisited, 1 on the walk, 2 done */
+    int is_fn, called;        /* a function; called by one */
+    WlCallSize own, expanded;
 } WlChainDecl;
 
 typedef struct {
@@ -1514,22 +1523,29 @@ static size_t wl_chain_body(WlChainScan *c, size_t i, int is_struct)
     }
 }
 
-/* A function from s[i] (past its name): parameters, return type, body. */
-static size_t wl_chain_fn(WlChainScan *c, size_t i)
+/* A function from s[i] (past its name): parameters, return type, body.
+ * Its own size (audit 41) goes to @p sz: every word (identifier, keyword,
+ * numeric literal; `fn` and the name count too), each let / var / const
+ * in the body, and each statement (a block's `{`, or a `;` in the body
+ * outside parentheses). */
+static size_t wl_chain_fn(WlChainScan *c, size_t i, WlCallSize *sz)
 {
     const char *s = c->s;
     size_t n = c->n;
     WlEvt *params = NULL;       /* parameter names, declared at the body */
-    size_t np = 0, capp = 0, depth = 0, pd = 0;
+    size_t np = 0, capp = 0, depth = 0, pd = 0, bp = 0;
     int skip_next = 0, done_params = 0, for_pending = 0;
     size_t local_start = 0, local_len = 0;   /* a let / var / const name */
     int local_pending = 0;
 
+    sz->words = 2;              /* fn, its name */
+    sz->decls = sz->stmts = 0;
     for (;;) {
         WlTok t;
         int k = wl_next(s, n, i, &t);
         if (k == WL_END || k == WL_BAD) { i = t.start; break; }
         i = t.end;
+        if (k == WL_IDENT || k == WL_NUM) sz->words++;
         if (k == WL_IDENT) {
             if (skip_next) { skip_next = 0; continue; }
             if (depth == 0) {
@@ -1551,9 +1567,11 @@ static size_t wl_chain_fn(WlChainScan *c, size_t i)
             }
             int is_var = wl_tok_is(s, &t, "var");
             if (is_var || wl_tok_is(s, &t, "let") || wl_tok_is(s, &t, "const")) {
+                sz->decls++;
                 if (is_var) i = wl_skip_template(s, n, i);
                 WlTok nm;
                 if (wl_next(s, n, i, &nm) == WL_IDENT) {
+                    sz->words++;
                     i = nm.end;
                     if (local_pending)
                         wl_evt(c, WE_LOCAL, local_start, local_len);
@@ -1581,7 +1599,12 @@ static size_t wl_chain_fn(WlChainScan *c, size_t i)
              * a parameter name is an identifier before ':' at its level. */
             if (ch == '(') pd++;
             else if (pd > 0 && --pd == 0) done_params = 1;
+        } else if (depth > 0 && ch == '(') {
+            bp++;
+        } else if (depth > 0 && ch == ')') {
+            if (bp > 0) bp--;
         } else if (ch == '{') {
+            sz->stmts++;
             if (depth == 0) {
                 wl_evt(c, WE_OPEN, 0, 0);
                 for (size_t p = 0; p < np; p++)
@@ -1599,6 +1622,7 @@ static size_t wl_chain_fn(WlChainScan *c, size_t i)
             if (--depth == 0) break;
         } else if (ch == ';') {
             if (depth == 0) { i = t.start; break; }   /* malformed */
+            if (bp == 0) sz->stmts++;
             if (local_pending) {
                 wl_evt(c, WE_LOCAL, local_start, local_len);
                 local_pending = 0;
@@ -1609,10 +1633,44 @@ static size_t wl_chain_fn(WlChainScan *c, size_t i)
     return i;
 }
 
-size_t hl_gpu_wgsl_decl_chain(const char *wgsl, size_t len)
+static uint64_t wl_sat(uint64_t a, uint64_t b)
 {
+    return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+
+static void wl_call_add(WlCallSize *acc, const WlCallSize *v)
+{
+    acc->words = wl_sat(acc->words, v->words);
+    acc->decls = wl_sat(acc->decls, v->decls);
+    acc->stmts = wl_sat(acc->stmts, v->stmts);
+}
+
+static void wl_call_max(WlCallSize *acc, const WlCallSize *v)
+{
+    if (v->words > acc->words) acc->words = v->words;
+    if (v->decls > acc->decls) acc->decls = v->decls;
+    if (v->stmts > acc->stmts) acc->stmts = v->stmts;
+}
+
+static void wl_calls_saturate(HlGpuWgslCalls *calls)
+{
+    calls->fn_words = calls->fn_decls = calls->fn_stmts = UINT64_MAX;
+    calls->module_words = calls->module_decls = calls->module_stmts = UINT64_MAX;
+    calls->decls_sq = UINT64_MAX;
+}
+
+/* The declaration graph: the longest chain (the result), and - when
+ * @p calls is not NULL - each function's size with its calls inlined
+ * (audit 41). A source the walk cannot finish (unreadable, a cycle, a
+ * chain past HL_GPU_WGSL_DECL_CHAIN_MAX, no memory) saturates @p calls. */
+static size_t wl_decl_graph(const char *wgsl, size_t len, HlGpuWgslCalls *calls)
+{
+    if (calls) memset(calls, 0, sizeof(*calls));
     if (!wgsl) return 0;
-    if (!wl_utf8_valid(wgsl, len)) return HL_GPU_WGSL_UNREADABLE;
+    if (!wl_utf8_valid(wgsl, len)) {
+        if (calls) wl_calls_saturate(calls);
+        return HL_GPU_WGSL_UNREADABLE;
+    }
     const char *s = wgsl;
     size_t n = len, i = 0, result = 0;
     WlChainScan c = { s, n, NULL, 0, 0, 0 };
@@ -1693,14 +1751,16 @@ size_t hl_gpu_wgsl_decl_chain(const char *wgsl, size_t len)
                 nnames++;
             }
         }
-        i = is_fn ? wl_chain_fn(&c, i) : wl_chain_body(&c, i, is_struct);
+        d->is_fn = is_fn;
+        i = is_fn ? wl_chain_fn(&c, i, &d->own)
+                  : wl_chain_body(&c, i, is_struct);
         if (c.oom) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
         d->ev_count = c.nev - d->ev_first;
         top_first = c.nev;
         ndecl++;
     }
     if (c.oom) { result = HL_GPU_WGSL_UNREADABLE; goto out; }
-    if (ndecl == 0) goto out;
+    if (ndecl == 0) { calls = NULL; goto out; }
 
     /* Resolve names, a declaration at a time: a local declaration whose
      * name is a module-scope one hides it until its scope closes. */
@@ -1775,12 +1835,50 @@ size_t hl_gpu_wgsl_decl_chain(const char *wgsl, size_t len)
             if (descended) continue;
             d->depth += 1;                      /* itself */
             d->state = 2;
+            if (d->is_fn) {
+                /* Its size with every call inlined: its own, plus each
+                 * call site's callee as inlined (every callee is done:
+                 * a cycle was refused above). */
+                d->expanded = d->own;
+                for (size_t e = d->ev_first; e < d->ev_first + d->ev_count; e++) {
+                    const WlEvt *ev = &c.ev[e];
+                    if (ev->kind != WE_REF || ev->target < 0) continue;
+                    WlChainDecl *t = &decls[ev->target];
+                    if (!t->is_fn) continue;
+                    t->called = 1;
+                    wl_call_add(&d->expanded, &t->expanded);
+                }
+            }
             if (d->depth > result) result = d->depth;
             if (result > HL_GPU_WGSL_DECL_CHAIN_MAX) goto out;
             sp--;
         }
     }
+    if (calls) {
+        /* The largest function, and the module: every function no other
+         * calls (the entry points, and helpers left unused) as inlined. */
+        for (size_t k = 0; k < ndecl; k++) {
+            if (!decls[k].is_fn) continue;
+            WlCallSize fx = {
+                decls[k].expanded.words, decls[k].expanded.decls,
+                decls[k].expanded.stmts,
+            };
+            WlCallSize cur = { calls->fn_words, calls->fn_decls, calls->fn_stmts };
+            wl_call_max(&cur, &fx);
+            calls->fn_words = cur.words;
+            calls->fn_decls = cur.decls;
+            calls->fn_stmts = cur.stmts;
+            if (decls[k].called) continue;
+            calls->module_words = wl_sat(calls->module_words, fx.words);
+            calls->module_decls = wl_sat(calls->module_decls, fx.decls);
+            calls->module_stmts = wl_sat(calls->module_stmts, fx.stmts);
+            uint64_t sq = fx.decls > UINT32_MAX ? UINT64_MAX : fx.decls * fx.decls;
+            calls->decls_sq = wl_sat(calls->decls_sq, sq);
+        }
+        calls = NULL;                           /* complete */
+    }
 out:
+    if (calls) wl_calls_saturate(calls);        /* the walk stopped early */
     free(c.ev);
     free(decls);
     free(names);
@@ -1788,6 +1886,20 @@ out:
     free(stack);
     free(scope);
     return result;
+}
+
+size_t hl_gpu_wgsl_decl_chain(const char *wgsl, size_t len)
+{
+    return wl_decl_graph(wgsl, len, NULL);
+}
+
+int hl_gpu_wgsl_calls(const char *wgsl, size_t len, HlGpuWgslCalls *out)
+{
+    if (!out) return -1;
+    size_t r = wl_decl_graph(wgsl, len, out);
+    if (r == HL_GPU_WGSL_UNREADABLE || r > HL_GPU_WGSL_DECL_CHAIN_MAX)
+        return -1;
+    return 0;
 }
 
 /* ── Inferred nesting and expansion (audit 39) ──────────────────────
@@ -2577,8 +2689,20 @@ uint64_t hl_gpu_wgsl_compile_units(const char *wgsl, size_t len)
     if (wgsl && len <= HL_GPU_WGSL_MAX_BYTES) {
         HlGpuWgslSize sz;
         (void)hl_gpu_wgsl_size(wgsl, len, &sz);
-        units = sat_mul_add(units, sz.module_words, HL_GPU_WGSL_WORD_UNITS);
-        units = sat_mul_add(units, sz.module_stmts, HL_GPU_WGSL_STMT_UNITS);
+        /* Words and statements as compiled, every call inlined (audit 41),
+         * when that is more; a source whose calls cannot be counted (a
+         * cycle, a chain past its bound) is refused and charged as
+         * written. Declarations squared stay per function as written:
+         * inlined copies are independent code, and their cost is in the
+         * words. */
+        uint64_t words = sz.module_words, stmts = sz.module_stmts;
+        HlGpuWgslCalls calls;
+        if (hl_gpu_wgsl_calls(wgsl, len, &calls) == 0) {
+            if (calls.module_words > words) words = calls.module_words;
+            if (calls.module_stmts > stmts) stmts = calls.module_stmts;
+        }
+        units = sat_mul_add(units, words, HL_GPU_WGSL_WORD_UNITS);
+        units = sat_mul_add(units, stmts, HL_GPU_WGSL_STMT_UNITS);
         units = sat_mul_add(units, sz.decls_sq, HL_GPU_WGSL_DECL_SQ_UNITS);
     }
     return units;
@@ -2600,6 +2724,20 @@ static const char *wl_size_refusal(const char *wgsl, size_t len)
         return "the shader is too large (words)";
     if (sz.module_stmts > HL_GPU_WGSL_MODULE_STMTS_MAX)
         return "the shader has too many statements";
+    /* The same with every call inlined (audit 41): a chain of small
+     * functions each calling the one before a few times is within every
+     * bound above and doubles, or more, at each link as compiled. The
+     * module's totals bound every function too: each one is inlined into
+     * a function no other calls. */
+    HlGpuWgslCalls calls;
+    if (hl_gpu_wgsl_calls(wgsl, len, &calls) != 0)
+        return "functions call one another in a cycle or too deeply";
+    if (calls.module_words > HL_GPU_WGSL_INLINED_WORDS_MAX)
+        return "calls expand the shader too far (words, inlined)";
+    if (calls.module_decls > HL_GPU_WGSL_INLINED_DECLS_MAX)
+        return "calls expand the shader too far (declarations, inlined)";
+    if (calls.module_stmts > HL_GPU_WGSL_INLINED_STMTS_MAX)
+        return "calls expand the shader too far (statements, inlined)";
     return NULL;
 }
 
