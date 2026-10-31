@@ -2237,4 +2237,400 @@ UTEST(mysql_backend, insert_if_absent_is_a_plain_insert)
     close(sv[0]);
 }
 
+/* ── Audit 39: session state the stale-transaction guard resets ────── */
+
+/* Read every byte the client sent once it is done (it shuts its write side
+ * down), NUL-terminated. */
+static size_t my_drain_client(int sv[2], char *got, size_t cap)
+{
+    shutdown(sv[1], SHUT_WR);
+    size_t n = 0;
+    ssize_t r;
+    while (n < cap - 1 && (r = read(sv[0], got + n, cap - 1 - n)) > 0)
+        n += (size_t)r;
+    got[n] = '\0';
+    return n;
+}
+
+static int my_sent_command(const char *got, size_t n, uint8_t cmd)
+{
+    /* A one-byte command packet: length 1, sequence 0, the command. */
+    for (size_t i = 0; i + 5 <= n; i++)
+        if ((uint8_t)got[i] == 1 && got[i + 1] == 0 && got[i + 2] == 0 &&
+            got[i + 3] == 0 && (uint8_t)got[i + 4] == cmd)
+            return 1;
+    return 0;
+}
+
+static int my_sent_text(const char *got, size_t n, const char *text)
+{
+    size_t tl = strlen(text);
+    for (size_t i = 0; i + tl <= n; i++)
+        if (memcmp(got + i, text, tl) == 0) return 1;
+    return 0;
+}
+
+/* The handshake's status (autocommit) is the session's until the first OK:
+ * it was left 0, which read as autocommit off. */
+UTEST(mysql_conn, handshake_status_is_kept)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_TRUE(conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT);
+    EXPECT_FALSE(conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS);
+    EXPECT_EQ(HL_MY_DEFAULT_CHARSET, (int)conn.charset);
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* COM_RESET_CONNECTION takes the OK's status, then the handshake's character
+ * set is applied again (the reset restored the global one). */
+UTEST(mysql_conn, reset_connection_restores_charset)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0000);                        /* SET autocommit = 0 */
+    put_ok_more(&s, 1, 0x0002);                        /* RESET */
+    put_ok_more(&s, 1, 0x0002);                        /* SET NAMES */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    ASSERT_EQ(0, hl_my_conn_query(&conn, "SET autocommit = 0", NULL, NULL, NULL, NULL));
+    EXPECT_FALSE(conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT);
+    EXPECT_EQ(0, hl_my_conn_reset(&conn));
+    EXPECT_TRUE(conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT);
+    EXPECT_EQ(0, conn.broken);
+
+    char got[8192];
+    size_t n = my_drain_client(sv, got, sizeof got);
+    EXPECT_TRUE(my_sent_command(got, n, HL_MY_COM_RESET_CONNECTION));
+    EXPECT_TRUE(my_sent_text(got, n, "SET NAMES utf8mb4, collation_connection = 45"));
+
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* MariaDB maps utf8mb4's default collation through character_set_collations
+ * (11.x: utf8mb4_uca1400_ai_ci), the handshake's included: naming id 45 after
+ * the reset would change the session's collation, so a plain SET NAMES. */
+UTEST(mysql_conn, reset_connection_on_mariadb_names_no_collation)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002);                        /* RESET */
+    put_ok_more(&s, 1, 0x0002);                        /* SET NAMES */
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_EQ(0, conn.mariadb);                        /* "8.0.35" */
+    conn.mariadb = 1;
+    EXPECT_EQ(0, hl_my_conn_reset(&conn));
+    char got[8192];
+    size_t n = my_drain_client(sv, got, sizeof got);
+    EXPECT_TRUE(my_sent_text(got, n, "SET NAMES utf8mb4"));
+    EXPECT_FALSE(my_sent_text(got, n, "collation_connection"));
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A server that does not know the command answers an ERR: the call fails,
+ * the connection stays in step. */
+UTEST(mysql_conn, reset_connection_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    build_err(&s, 1, 1047, "Unknown command");
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_EQ(-1, hl_my_conn_reset(&conn));
+    EXPECT_EQ(0, conn.broken);
+    EXPECT_EQ(1047, (int)conn.last_err_code);
+    EXPECT_TRUE(strstr(conn.errmsg, "Unknown command") != NULL);
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* XA START, then the entry fails: ROLLBACK is refused (XAER_RMFAIL) with
+ * IN_TRANS still set, so every later request ran inside the zombie
+ * transaction and every wait was refused. The guard resets the session. */
+UTEST(mysql_backend, guard_resets_an_xa_transaction)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* XA START */
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* INSERT */
+    build_err(&s, 1, 1399, "XAER_RMFAIL: The command cannot be executed "
+                           "when global transaction is in the  ACTIVE state");
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* PING */
+    put_ok_more(&s, 1, 0x0002);                                  /* RESET */
+    put_ok_more(&s, 1, 0x0002);                                  /* SET NAMES */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    ASSERT_TRUE(mysql_exec(&h, "XA START 'h1'", NULL, 0) >= 0);
+    EXPECT_EQ(1, ctx.xa_open);
+    ASSERT_TRUE(mysql_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0) >= 0);
+    EXPECT_TRUE(mysql_in_txn(&h));
+
+    hl_db_guard_stale_txn(&h);
+    EXPECT_FALSE(mysql_in_txn(&h));
+    EXPECT_EQ(0, ctx.xa_open);
+    EXPECT_EQ(0, ctx.conn.broken);
+    EXPECT_EQ(0, mysql_session_dirty(&h));
+
+    char got[8192];
+    size_t n = my_drain_client(sv, got, sizeof got);
+    EXPECT_TRUE(my_sent_command(got, n, HL_MY_COM_RESET_CONNECTION));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* SET autocommit = 0: the guard's ROLLBACK succeeds, but every later
+ * statement would open a transaction the next guard rolls back - writes
+ * acknowledged and never committed. Autocommit off is reset. */
+UTEST(mysql_backend, guard_resets_autocommit_off)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0000);                          /* SET autocommit=0 */
+    put_ok_more(&s, 1, HL_MY_SERVER_STATUS_IN_TRANS);    /* INSERT */
+    put_ok_more(&s, 1, 0x0000);                          /* ROLLBACK */
+    put_ok_more(&s, 1, 0x0002);                          /* RESET */
+    put_ok_more(&s, 1, 0x0002);                          /* SET NAMES */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    ASSERT_TRUE(mysql_exec(&h, "SET autocommit = 0", NULL, 0) >= 0);
+    EXPECT_FALSE(mysql_in_txn(&h));
+    EXPECT_EQ(1, mysql_session_dirty(&h));
+    ASSERT_TRUE(mysql_exec(&h, "INSERT INTO t VALUES (2)", NULL, 0) >= 0);
+    EXPECT_TRUE(mysql_in_txn(&h));
+
+    hl_db_guard_stale_txn(&h);
+    EXPECT_FALSE(mysql_in_txn(&h));
+    EXPECT_TRUE(ctx.conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT);
+    EXPECT_EQ(0, mysql_session_dirty(&h));
+
+    char got[8192];
+    size_t n = my_drain_client(sv, got, sizeof got);
+    EXPECT_TRUE(my_sent_command(got, n, HL_MY_COM_RESET_CONNECTION));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A LOCK TABLES left at an entry boundary, with no transaction open, is
+ * reset too; a server that refuses COM_RESET_CONNECTION has the connection
+ * abandoned instead (the server ends the session's locks with it), and the
+ * next call reconnects. */
+UTEST(mysql_backend, guard_abandons_when_reset_is_refused)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002);                          /* LOCK TABLES */
+    build_err(&s, 1, 1047, "Unknown command");           /* RESET */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    ASSERT_TRUE(mysql_exec(&h, "LOCK TABLES t WRITE", NULL, 0) >= 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    EXPECT_FALSE(mysql_in_txn(&h));
+
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(1, ctx.conn.broken);
+    EXPECT_EQ(0, ctx.lock_tables);
+    EXPECT_FALSE(mysql_in_txn(&h));
+    EXPECT_TRUE(ctx.conn.transport == NULL);   /* closed */
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A pinned handle (the migration run holds GET_LOCK) is never reset. */
+UTEST(mysql_backend, guard_leaves_a_pinned_session)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0000);                          /* SET autocommit=0 */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    ASSERT_TRUE(mysql_exec(&h, "SET autocommit = 0", NULL, 0) >= 0);
+    h.session_pinned = 1;
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(0, ctx.conn.broken);
+
+    char got[8192];
+    size_t n = my_drain_client(sv, got, sizeof got);
+    EXPECT_FALSE(my_sent_command(got, n, HL_MY_COM_RESET_CONNECTION));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* The statement-text tracker: taking words count on any outcome, releasing
+ * words only on success; quoted text and comments are not read, executable
+ * comments are. */
+UTEST(mysql_backend, session_tracker)
+{
+    HlDbHandle h; HlDbMyCtx ctx;
+    memset(&h, 0, sizeof h);
+    memset(&ctx, 0, sizeof ctx);
+    h.backend = &hl_db_backend_mysql;
+    h.ctx = &ctx;
+    ctx.conn.server_status = HL_MY_SERVER_STATUS_AUTOCOMMIT;
+
+    my_track_session(&h, "SELECT GET_LOCK('a', 0), GET_LOCK('b', 0)", 0);
+    EXPECT_EQ(2, ctx.named_locks);
+    EXPECT_EQ(1, mysql_session_dirty(&h));
+    my_track_session(&h, "SELECT RELEASE_LOCK('a')", -1);   /* failed */
+    EXPECT_EQ(2, ctx.named_locks);
+    my_track_session(&h, "SELECT release_lock('a')", 0);
+    EXPECT_EQ(1, ctx.named_locks);
+    my_track_session(&h, "SELECT RELEASE_ALL_LOCKS()", 0);
+    EXPECT_EQ(0, ctx.named_locks);
+    my_track_session(&h, "SELECT 'GET_LOCK(x)' AS s -- GET_LOCK", 0);
+    EXPECT_EQ(0, ctx.named_locks);
+    EXPECT_EQ(0, mysql_session_dirty(&h));
+    /* "5--1" is arithmetic to MySQL, not a comment */
+    my_track_session(&h, "SELECT 5--1, GET_LOCK('z', 0)", 0);
+    EXPECT_EQ(1, ctx.named_locks);
+    my_track_session(&h, "DO RELEASE_ALL_LOCKS()", 0);
+    EXPECT_EQ(0, ctx.named_locks);
+
+    my_track_session(&h, "/*! LOCK TABLES t WRITE */", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "UNLOCK TABLES", -1);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "START TRANSACTION", 0);   /* releases LOCK TABLES */
+    EXPECT_EQ(0, ctx.lock_tables);
+    my_track_session(&h, "lock table t read", 0);
+    my_track_session(&h, "unlock tables", 0);
+    EXPECT_EQ(0, ctx.lock_tables);
+    my_track_session(&h, "SELECT * FROM t LOCK IN SHARE MODE", 0);
+    EXPECT_EQ(0, ctx.lock_tables);
+
+    my_track_session(&h, "XA BEGIN 'x'", 0);
+    EXPECT_EQ(1, ctx.xa_open);
+    my_track_session(&h, "XA END 'x'", 0);
+    EXPECT_EQ(1, ctx.xa_open);
+    my_track_session(&h, "XA COMMIT 'x' ONE PHASE", 0);
+    EXPECT_EQ(0, ctx.xa_open);
+    EXPECT_EQ(0, mysql_session_dirty(&h));
+}
+
+/* A receive buffer grown for one big packet is given back once a small
+ * reply follows (it kept up to 16 MB per pooled connection). */
+UTEST(mysql_conn, receive_buffer_shrinks_after_a_big_packet)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    /* SELECT big: one column, one 2 MB row */
+    size_t m = hl_my_packet_begin(&s, 1);
+    hl_my_put_lenenc_int(&s, 1);
+    hl_my_packet_end(&s, m);
+    put_col_def(&s, 2, "v", HL_MY_TYPE_VAR_STRING);
+    put_eof(&s, 3);
+    size_t big = (size_t)2 << 20;
+    char *val = malloc(big);
+    ASSERT_TRUE(val != NULL);
+    memset(val, 'x', big);
+    m = hl_my_packet_begin(&s, 4);
+    hl_my_put_lenenc_str(&s, val, big);
+    hl_my_packet_end(&s, m);
+    free(val);
+    put_eof_status(&s, 5, 0x0002);
+    put_ok_more(&s, 1, 0x0002);                        /* SELECT 1 */
+    ASSERT_EQ(0, s.err);
+
+    MyLate l = { .fd = sv[0], .buf = s.buf, .len = s.len, .delay_ms = 0 };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, my_late_main, &l));
+
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn;
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    QCollect g; memset(&g, 0, sizeof g);
+    ASSERT_EQ(0, hl_my_conn_query(&conn, "SELECT big", qdesc, qrow, &g, NULL));
+    EXPECT_EQ(1, g.rows);
+    /* the frame read after the big row gave the buffer back */
+    EXPECT_EQ((size_t)HL_MY_RECV_BUF_INIT, conn.rcap);
+    ASSERT_EQ(0, hl_my_conn_query(&conn, "SELECT 1", NULL, NULL, NULL, NULL));
+    EXPECT_EQ((size_t)HL_MY_RECV_BUF_INIT, conn.rcap);
+
+    pthread_join(th, NULL);
+    hl_my_conn_close(&conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* The implicit-commit resume opens a new transaction under the batch: the
+ * transaction generation moves (it went through mysql_txn_raw alone). */
+UTEST(mysql_backend, implicit_commit_resume_moves_the_generation)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* START */
+    put_ok_more(&s, 1, 0x0002);                        /* CREATE: committed */
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS);   /* resume */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, mysql_begin(&h));
+    uint64_t gen = hl_db_txn_gen();
+    ASSERT_TRUE(hl_db_exec(&h, "CREATE TABLE t2 (id INT)", NULL, 0) >= 0);
+    EXPECT_TRUE(my_in_trans(&h));
+    EXPECT_NE(gen, hl_db_txn_gen());
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 UTEST_MAIN()

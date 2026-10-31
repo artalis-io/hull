@@ -303,15 +303,20 @@ int hl_worker_db_end_job(char *err, size_t errsz)
         /* No batch spans jobs: a depth still set belongs to a transaction
          * that ended with the job (the hl_db_guard_stale_txn rule). */
         h->batch_depth = 0;
+        int drop = 0;
         if (h->backend && hl_db_in_txn(h)) {
             found = 1;
-            if (hl_db_rollback(h) != 0 || hl_db_in_txn(h)) {
-                *link = n->next;
-                h->backend->close(h);
-                hl_secure_free_str(n->dsn);
-                free(n);
-                continue;
-            }
+            drop = hl_db_rollback(h) != 0 || hl_db_in_txn(h);
+        }
+        /* Session state the next job on this thread must not inherit
+         * (audit 39): the close ends it. */
+        if (!drop && h->backend && hl_db_session_dirty(h)) drop = 1;
+        if (drop) {
+            *link = n->next;
+            h->backend->close(h);
+            hl_secure_free_str(n->dsn);
+            free(n);
+            continue;
         }
         link = &n->next;
     }
@@ -642,12 +647,16 @@ static void db_work_fn(void *ud)
  * BEGIN through db.async left each of them inside it - never committed, and
  * on SQLite holding the write lock against every other writer until restart.
  * Roll it back and fail the op. Returns 1 when the connection must be dropped
- * (the rollback did not end the transaction). */
+ * (the rollback did not end the transaction, or the session holds state no
+ * later op may inherit - MySQL autocommit off, a LOCK TABLES / XA / GET_LOCK,
+ * a Postgres advisory lock: hl_db_session_dirty, audit 39 - which the
+ * connection's close ends). */
 static int worker_end_txn(HlWorkerDbOp *op, HlDbHandle *h)
 {
     h->batch_depth = 0;   /* no batch spans ops (hl_db_guard_stale_txn) */
-    if (!hl_db_in_txn(h)) return 0;
-    int lost = hl_db_rollback(h) != 0 || hl_db_in_txn(h);
+    if (!hl_db_in_txn(h)) return hl_db_session_dirty(h);
+    int lost = hl_db_rollback(h) != 0 || hl_db_in_txn(h) ||
+               hl_db_session_dirty(h);
     if (op->kind == HL_WORK_DB_QUERY) {
         hl_db_result_free(&op->result);
         hl_offheap_shared_drop(&op->result_hold);

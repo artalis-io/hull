@@ -22,6 +22,7 @@
 #define HL_CAP_DB_SQL_KW_H
 
 #include <stddef.h>
+#include <string.h>   /* memcpy */
 
 typedef enum {
     HL_SQL_TXN_NONE = 0,  /* not a transaction-control statement */
@@ -136,6 +137,73 @@ static inline HlSqlTxnKind hl_sql_txn_kind_ex(const char *sql, int nest)
 static inline HlSqlTxnKind hl_sql_txn_kind(const char *sql)
 {
     return hl_sql_txn_kind_ex(sql, 1);
+}
+
+/*
+ * Walk every word of @p sql (letters, digits, '_'; lowercased; a word longer
+ * than HL_SQL_SCAN_WORD_MAX - 1 is passed as ""), calling @p fn with it and
+ * the two words before it in the same statement ("" when none; a ';' starts a
+ * new statement). Skipped: '...' strings (doubled quotes, and backslash
+ * escapes when @p backslash), "..." and `...` quoted names, "--" line
+ * comments and block comments (nesting when @p nest) - but not an executable
+ * comment (slash-star-bang), whose text MySQL runs. For bookkeeping that only
+ * errs on the safe side (audit 39, session-state tracking): a misread word
+ * costs a session reset at most.
+ */
+#define HL_SQL_SCAN_WORD_MAX 32
+typedef void (*HlSqlWordFn)(void *ud, const char *w, const char *prev,
+                            const char *prev2);
+
+static inline void hl_sql_scan_words(const char *sql, int nest, int backslash,
+                                     HlSqlWordFn fn, void *ud)
+{
+    char w[HL_SQL_SCAN_WORD_MAX];
+    char prev[HL_SQL_SCAN_WORD_MAX] = "", prev2[HL_SQL_SCAN_WORD_MAX] = "";
+    const char *p = sql;
+    if (!p) return;
+    while (*p) {
+        char c = *p;
+        if (c == '\'' || c == '"' || c == '`') {
+            p++;
+            while (*p) {
+                if (*p == '\\' && backslash && c != '`' && p[1]) { p += 2; continue; }
+                if (*p == c) {
+                    if (p[1] == c) { p += 2; continue; }
+                    break;
+                }
+                p++;
+            }
+            if (*p) p++;
+            continue;
+        }
+        /* "--" opens a comment only before whitespace or the end (MySQL's
+         * rule; reading on where Postgres would not only sees more). */
+        if ((c == '-' && p[1] == '-' &&
+             (p[2] == '\0' || p[2] == ' ' || p[2] == '\t' || p[2] == '\n' ||
+              p[2] == '\r')) ||
+            (c == '/' && p[1] == '*' && p[2] != '!')) {
+            p = hl_sql_skip_space_ex(p, nest);
+            continue;
+        }
+        if (c == ';') { prev[0] = prev2[0] = '\0'; p++; continue; }
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_') {
+            size_t n = 0;
+            while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                   (*p >= '0' && *p <= '9') || *p == '_') {
+                char ch = *p++;
+                if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+                if (n + 1 < sizeof w) w[n++] = ch;
+                else n = sizeof w;
+            }
+            w[n < sizeof w ? n : 0] = '\0';
+            fn(ud, w, prev, prev2);
+            memcpy(prev2, prev, sizeof prev2);
+            memcpy(prev, w, sizeof prev);
+            continue;
+        }
+        p++;
+    }
 }
 
 #endif /* HL_CAP_DB_SQL_KW_H */

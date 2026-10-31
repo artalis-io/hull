@@ -17,6 +17,7 @@
 . "$(dirname "$0")/lib/hull_docker.sh"
 set -eu
 
+# Overridable so a run can sit beside other services on the host.
 CONTAINER=${HULL_E2E_MY_CONTAINER:-hull-mysql-e2e}
 MYPORT=${HULL_E2E_MY_PORT:-55336}
 PORT=${HULL_E2E_APP_PORT:-18092}
@@ -930,6 +931,54 @@ else
 fi
 docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw hulldb -e \
   "DROP TRIGGER IF EXISTS a39_fail" >/dev/null 2>&1 || true
+
+# ── audit 39: session state a failed request leaves is reset ─────────
+# The stale-transaction guard sent a plain ROLLBACK and ignored the outcome.
+# After XA START it fails (XAER_RMFAIL) with IN_TRANS still set; after SET
+# autocommit = 0 every later statement opened a transaction the next guard
+# rolled back; a LOCK TABLES refused every other table; a GET_LOCK held by a
+# failed request blocked every other session. One failed request, and every
+# later write on the shared connection was acknowledged but never committed
+# (or refused), every wait refused, until a restart. The guard now resets
+# the session (COM_RESET_CONNECTION).
+echo "=== audit 39: XA / autocommit / LOCK TABLES / GET_LOCK leftovers are reset ==="
+A39DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_session_audit39.sh"
+db_session_audit39_app "$A39DIR" mysql
+./build/hull -d "$DSN" -p "$PORT" "$A39DIR/app.lua" >"$A39DIR/serve.log" 2>&1 &
+SVR=$!
+wait_for_server "$A39DIR/serve.log" || exit 1
+curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 39 setup"; cat "$A39DIR/serve.log"; exit 1; }
+a39cs0=$(curl -fsS "http://127.0.0.1:${PORT}/charset" || echo FAIL)
+a39out=$(db_session_audit39_run "$PORT" xa autocommit locktables getlock)
+a39cs1=$(curl -fsS "http://127.0.0.1:${PORT}/charset" || echo FAIL)
+echo "$a39out"
+my_q() {
+    docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw -h127.0.0.1 \
+        --protocol=tcp hulldb -N -e "$1" 2>/dev/null
+}
+a39rows=$(my_q "SELECT COUNT(*) FROM s39b WHERE v BETWEEN 1 AND 4")
+a39left=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM s39")
+a39free=$(my_q "SELECT IS_FREE_LOCK('a39lk')")
+kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+a39fail=0
+for k in xa autocommit locktables getlock; do
+    db_session_audit39_ok "$a39out" "$k" || a39fail=1
+done
+# Rows 1-4 committed (seen from another session); of the failed requests'
+# writes only the LOCK TABLES one (autocommit) committed; the named lock is
+# free; the connection character set survived the resets.
+[ "$a39rows" = 4 ] || { echo "::error audit 39: later writes committed: $a39rows of 4"; a39fail=1; }
+[ "$a39left" = 103 ] || { echo "::error audit 39: failed requests' writes: '$a39left' (want 103)"; a39fail=1; }
+[ "$a39free" = 1 ] || { echo "::error audit 39: GET_LOCK of a failed request still held"; a39fail=1; }
+[ "$a39cs0" = "$a39cs1" ] && [ "$a39cs0" != FAIL ] || { echo "::error audit 39: charset $a39cs0 -> $a39cs1"; a39fail=1; }
+grep -q "resetting the session" "$A39DIR/serve.log" || { echo "::error audit 39: no session reset logged"; a39fail=1; }
+if [ "$a39fail" = 0 ]; then
+    echo "PASS: a failed request's XA / autocommit / LOCK TABLES / GET_LOCK state is reset (MySQL)"
+    rm -rf "$A39DIR"
+else
+    cat "$A39DIR/serve.log"; exit 1
+fi
 
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the

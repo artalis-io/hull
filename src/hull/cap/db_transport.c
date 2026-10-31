@@ -923,6 +923,14 @@ int hl_db_transport_send_sliced(HlDbTransport *t, const uint8_t *buf,
     uint64_t start = 0;
     size_t sent = 0;
     int rc = 0;
+    /* A TLS write reports WANT_WRITE and WANT_READ alike (0), and a session
+     * that must read first (a post-handshake message) is not helped by a
+     * writable socket: polling POLLOUT returned at once and the loop spun
+     * (audit 39). So a TLS write that stays blocked after the socket was
+     * found writable waits for POLLIN next, and back for POLLOUT after a
+     * readable socket did not unblock it either. */
+    short want = POLLOUT;
+    int ready_last = 0;   /* the last poll found the socket ready */
     while (sent < len) {
         int blocked = 0;
         if (t->tls) {
@@ -931,8 +939,14 @@ int hl_db_transport_send_sliced(HlDbTransport *t, const uint8_t *buf,
             errno = 0;
             ssize_t n = hl_tls_client_write(fd, t->tls, buf + sent, len - sent);
             if (n < 0) { rc = -1; break; }
-            if (n == 0) blocked = 1;
-            else        sent += (size_t)n;
+            if (n == 0) {
+                blocked = 1;
+                if (ready_last) want = (want == POLLOUT) ? POLLIN : POLLOUT;
+            } else {
+                sent += (size_t)n;
+                want = POLLOUT;
+            }
+            ready_last = 0;
         } else {
             kl_ssize_t n = sp_send(t, t->fd, buf + sent, len - sent);
             if (n < 0) {
@@ -960,8 +974,11 @@ int hl_db_transport_send_sliced(HlDbTransport *t, const uint8_t *buf,
         int slice = HL_DB_WAIT_SLICE_MS;
         if (left > 0 && left < slice) slice = left;
         /* Intentional native-FD escape, as set_io_timeout (KL_SOCK_CAP_NATIVE_FD). */
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT, .revents = 0 };
-        if (poll(&pfd, 1, slice) < 0 && errno != EINTR) { rc = -1; break; }
+        struct pollfd pfd = { .fd = fd, .events = t->tls ? want : POLLOUT,
+                              .revents = 0 };
+        int pr = poll(&pfd, 1, slice);
+        if (pr < 0 && errno != EINTR) { rc = -1; break; }
+        ready_last = pr > 0;
     }
     if ((saved & O_NONBLOCK) == 0 && fcntl(fd, F_SETFL, saved) < 0)
         rc = -1;   /* a descriptor left non-blocking would fail later I/O */

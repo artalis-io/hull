@@ -732,7 +732,28 @@ transaction is aborted"). The SQLite guard checks its ROLLBACK took
 (`sqlite3_get_autocommit`), retries once after resetting the connection's
 statements, and when the connection is still inside the transaction replaces
 it in place (same ctx, so every handle stays valid) with a new connection to
-the same file - closing the old one rolls it back. An in-memory database is
+the same file - closing the old one rolls it back. The MySQL guard also
+RESETS the session (`COM_RESET_CONNECTION`, `hl_my_conn_reset`, then the
+handshake's charset again) when its ROLLBACK failed or left IN_TRANS set (XA:
+ROLLBACK is refused with XAER_RMFAIL), when `SERVER_STATUS_AUTOCOMMIT` is clear
+(`SET autocommit = 0`), when a LOCK TABLES / XA transaction is outstanding, or -
+after a stale transaction - when a GET_LOCK may be held (`my_track_session`
+reads them from the statement text); a refused reset closes the connection
+(replaced on the next call). One failed request had left every later write on
+the shared connection acknowledged and never committed, and every wait refused,
+until a restart (audit 39). A reset drops every session setting, user variable,
+temporary table and named lock on the connection, an app's deliberate ones
+included (another entry's GET_LOCK too), so session state must not be relied on
+across entries on a shared connection. The Postgres guard runs
+`pg_advisory_unlock_all()` after a stale transaction when a session-level
+advisory lock may be held (`pg_track_session`). Not reset on Postgres: `SET`
+outside a transaction (search_path, `SET ROLE`, `SET SESSION CHARACTERISTICS`:
+indistinguishable from an app's startup `SET TIME ZONE`), LISTEN, temporary
+tables; a `PREPARE TRANSACTION` (and a MySQL `XA PREPARE`) outlives the session
+and must be resolved with `COMMIT / ROLLBACK PREPARED` (`XA COMMIT / ROLLBACK`).
+A worker-pool connection whose session holds such state (`hl_db_session_dirty`,
+the vtable's `session_dirty`) is dropped after its op / job instead of reused.
+An in-memory database is
 not replaced (that would drop it), and `db.udf` registrations do not carry
 over (audit 11).
 
@@ -1113,6 +1134,15 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   fails with a hint. The RSA public-key exchange is not implemented. Once the
   server has cached the account's hash, the fast path works under any
   sslmode).
+- **Session reset (audit 39):** the stale-transaction guard resets the
+  session (`COM_RESET_CONNECTION`, MySQL 5.7.3+ / MariaDB 10.2.4+; else the
+  connection is closed and replaced) on XA / autocommit-off / LOCK TABLES
+  leftovers and a failed ROLLBACK - see "Stale transactions". The handshake's
+  status flags are kept (`server_status` was 0, read as autocommit off), and
+  the reset re-applies `SET NAMES utf8mb4, collation_connection = <id>` (a
+  plain `SET NAMES utf8mb4` on MariaDB for the default id 45, which it maps
+  through `character_set_collations`, the handshake's included). A
+  pinned handle (the migration run) is never reset.
 - **Deadlocks:** an `ER_LOCK_DEADLOCK` (1213) inside a transaction means
   InnoDB rolled the WHOLE transaction back; the backend then refuses every call
   but `ROLLBACK` (as for a connection lost mid-transaction), so later
