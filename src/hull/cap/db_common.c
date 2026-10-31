@@ -198,24 +198,44 @@ size_t hl_db_max_value_bytes(void)
 /* Backend-agnostic string check (no SQL execution): reject any SQL touching a
  * reserved `_hull_*` table. User code is gated by a call-stack check at each
  * binding site; stdlib bypasses via its `hull.` / `hull:` source prefix. */
+/* ASCII case fold for a letter test: b | 0x20 equals a lower-case letter
+ * only for that letter's two cases. */
+#define NS_FOLD(c) ((unsigned char)(c) | 0x20)
+
 int hl_cap_db_check_namespace(const char *sql)
 {
     if (!sql)
         return HL_DB_ERR_DENIED;
-    for (const char *p = sql; *p; p++) {
-        if ((*p == '_' || *p == 'H' || *p == 'h') &&
-            strncasecmp(p, "_hull_", 6) == 0)
-            return HL_DB_ERR_DENIED;
-        /* A Postgres Unicode-escape identifier, U&"\005fhull_sessions",
-         * spells the name with escapes this text check cannot see: the
-         * server decodes it to _hull_sessions. App SQL may not use one. The
-         * U&'...' string literal stays legal - it cannot name a table (only
-         * dynamic SQL could make one, the documented limit). */
-        if ((*p == 'U' || *p == 'u') && p[1] == '&' && p[2] == '"')
-            return HL_DB_ERR_DENIED;
+    /* One linear pass with no call per byte (audit 41): the old loop ran
+     * strncasecmp at every '_' / 'h' / 'H', and a reused multi-megabyte
+     * SQL string was rescanned on every call. Only a '_' can start
+     * "_hull_" (an 'h' never matched its leading '_'), and only a '&' can
+     * be the middle of U&". The scan stops at the terminating NUL, as the
+     * byte loop did; the tests read at most 5 bytes past a candidate and
+     * stop at a NUL first. The bindings charge the text before calling
+     * this (one unit per 8 bytes, hl_work_sql_units). */
+    const unsigned char *s = (const unsigned char *)sql;
+    for (const unsigned char *p = s; *p; p++) {
+        if (*p == '_') {
+            if (NS_FOLD(p[1]) == 'h' && NS_FOLD(p[2]) == 'u' &&
+                NS_FOLD(p[3]) == 'l' && NS_FOLD(p[4]) == 'l' &&
+                p[5] == '_')
+                return HL_DB_ERR_DENIED;
+        } else if (*p == '&') {
+            /* A Postgres Unicode-escape identifier, U&"\005fhull_sessions",
+             * spells the name with escapes this text check cannot see: the
+             * server decodes it to _hull_sessions. App SQL may not use one.
+             * The U&'...' string literal stays legal - it cannot name a
+             * table (only dynamic SQL could make one, the documented
+             * limit). */
+            if (p > s && NS_FOLD(p[-1]) == 'u' && p[1] == '"')
+                return HL_DB_ERR_DENIED;
+        }
     }
     return HL_DB_OK;
 }
+
+#undef NS_FOLD
 
 /* Per-thread "this SQL is the stdlib's / Hull's own" flag the SQLite
  * authorizer reads (audit 39; see the header). Untrusted by default. */

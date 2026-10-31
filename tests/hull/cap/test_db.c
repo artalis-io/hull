@@ -22,6 +22,7 @@
 #endif
 #include <sqlite3.h>
 #include <string.h>
+#include <strings.h>  /* strncasecmp: the audit-41 reference check */
 #include <stdlib.h>
 #include <unistd.h>   /* getpid */
 #include <limits.h>
@@ -2127,6 +2128,87 @@ UTEST(hl_cap_db, namespace_check_allows_normal_tables)
     ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM orders"), HL_DB_OK);
     ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO items VALUES (1)"), HL_DB_OK);
     ASSERT_EQ(hl_cap_db_check_namespace(""), HL_DB_OK);
+}
+
+/* Audit 41: the check is one linear pass now (it ran strncasecmp at every
+ * '_' / 'h' / 'H'). Same verdicts: matches at the start and the end, every
+ * letter case, U& at the start, the end and across case, quoted names. */
+UTEST(hl_cap_db, namespace_check_skip_ahead_edges)
+{
+    EXPECT_EQ(hl_cap_db_check_namespace("_hull_"), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("_hull_x"), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT 1 FROM x_hull_"), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT 1 FROM _hull"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("_hul"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("_"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("__hull_"), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("hull_"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("_hUlL_"), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("_HuLl_"), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("_hull-"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("_hu ll_"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT * FROM \"_hull_sessions\""),
+              HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT * FROM `_HULL_jobs`"),
+              HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT '_hull_' AS s"), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("U&\"x\""), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("u&\""), HL_DB_ERR_DENIED);
+    EXPECT_EQ(hl_cap_db_check_namespace("&\"x\""), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT 1 U&"), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT 1 U& \"x\""), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("V&\"x\""), HL_DB_OK);
+    EXPECT_EQ(hl_cap_db_check_namespace("SELECT a&\"b\""), HL_DB_OK);
+    /* A NUL ends the text: nothing past it is read. */
+    static const char cut[] = "SELECT 1\0_hull_";
+    EXPECT_EQ(hl_cap_db_check_namespace(cut), HL_DB_OK);
+    static const char cut2[] = "_hu\0ll_";
+    EXPECT_EQ(hl_cap_db_check_namespace(cut2), HL_DB_OK);
+}
+
+/* The old algorithm, verbatim, for a differential check. */
+static int a41_ns_reference(const char *sql)
+{
+    for (const char *p = sql; *p; p++) {
+        if ((*p == '_' || *p == 'H' || *p == 'h') &&
+            strncasecmp(p, "_hull_", 6) == 0)
+            return HL_DB_ERR_DENIED;
+        if ((*p == 'U' || *p == 'u') && p[1] == '&' && p[2] == '"')
+            return HL_DB_ERR_DENIED;
+    }
+    return HL_DB_OK;
+}
+
+UTEST(hl_cap_db, namespace_check_matches_the_old_algorithm)
+{
+    static const char alpha[] = "_hHuUlL&\"'a\x80\xff";
+    unsigned int seed = 41;
+    char buf[24];
+    for (int iter = 0; iter < 200000; iter++) {
+        seed = seed * 1103515245u + 12345u;
+        size_t len = (seed >> 16) % (sizeof buf - 1);
+        for (size_t i = 0; i < len; i++) {
+            seed = seed * 1103515245u + 12345u;
+            buf[i] = alpha[(seed >> 16) % (sizeof alpha - 1)];
+        }
+        buf[len] = '\0';
+        int want = a41_ns_reference(buf);
+        int got = hl_cap_db_check_namespace(buf);
+        if (want != got) {
+            EXPECT_EQ_MSG(got, want, buf);
+            break;
+        }
+    }
+    /* A large text decides in one pass, either way. */
+    size_t big = 8u << 20;
+    char *s = malloc(big + 8);
+    ASSERT_NE(s, NULL);
+    memset(s, '_', big);
+    s[big] = '\0';
+    EXPECT_EQ(hl_cap_db_check_namespace(s), HL_DB_OK);
+    memcpy(s + big - 6, "_HULL_", 6);
+    EXPECT_EQ(hl_cap_db_check_namespace(s), HL_DB_ERR_DENIED);
+    free(s);
 }
 
 /* ── UDF integration tests ──────────────────────────────────────────── */

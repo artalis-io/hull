@@ -3383,6 +3383,44 @@ UTEST(db_audit10, lua_sql_allocations_are_charged)
     cleanup_lua_caps();
 }
 
+/* Audit 41: the namespace check and the statement cache's compare walk the
+ * whole SQL text, and on a cache hit SQLite allocates almost nothing - so a
+ * reused large SQL string cost no budget (300 queries of 16 MB ran 26 s).
+ * The text is charged before the scan; ordinary queries still fit. */
+UTEST(db_audit41, lua_sql_text_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static const char *const loops[] = {
+        "for i = 1, 500 do db.query(s) end",
+        "for i = 1, 500 do db.exec(s) end",
+        "for i = 1, 500 do pcall(db.table_columns, t) end",
+        "db.exec('CREATE TABLE IF NOT EXISTS a41 (k TEXT PRIMARY KEY)') "
+        "for i = 1, 500 do pcall(db.insert_if_absent, t, nil, {'k'}, {'x'}) end",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local s = 'SELECT 1 --' .. string.rep('a', 1 << 20) "
+                 "local t = string.rep('t', 1 << 20) "
+                 "local ok, e = pcall(function() %s end) "
+                 "return 'done: ' .. tostring(e)", loops[i]);
+        hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000, 0);
+        int rc = luaL_dostring(lua_rt.L, code);
+        EXPECT_NE_MSG(rc, LUA_OK, loops[i]);
+        const char *err = lua_tostring(lua_rt.L, -1);
+        EXPECT_NE_MSG(strstr(err ? err : "", "instruction limit"), NULL,
+                      err ? err : loops[i]);
+        lua_settop(lua_rt.L, 0);
+    }
+    /* A thousand ordinary queries fit the same budget. */
+    hl_lua_budget_arm(lua_rt.L, &lua_rt.budget, 2000000, 0);
+    EXPECT_EQ(eval_int("(function() local n = 0 for i = 1, 1000 do "
+                       "n = n + db.query('SELECT 1 AS n')[1].n end "
+                       "return n end)()"), 1000);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_rekey_batch_helper)
 {
     init_lua_with_caps();
@@ -9666,6 +9704,65 @@ UTEST(lua_worker, a_transaction_does_not_outlive_its_job)
     EXPECT_NE_MSG(strstr(out, "boom"), NULL, out);
     EXPECT_NE_MSG(strstr(out, "|0"), NULL, out);
 
+    lua_rt.base.module_set = NULL;
+    cleanup_lua_caps();
+    f.be->tick(f.actx, 0);
+    f.be->pool_free(f.pool);
+    f.be->free(f.actx);
+}
+
+/* Audit 41: a worker.dispatch job's query / exec charge their SQL text to the
+ * job's budget before the namespace scan: a loop reusing a large SQL string
+ * was free. */
+static char lua_a41_worker_dsn[HL_TEST_PATH_MAX + 16];
+
+UTEST(lua_worker, sql_text_is_charged_to_the_job)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a41wdb"), NULL);
+    snprintf(lua_a41_worker_dsn, sizeof lua_a41_worker_dsn, "%s/w.db", dir);
+    hl_worker_db_init(lua_a41_worker_dsn);
+
+    LuaWorkerFix f;
+    memset(&f, 0, sizeof f);
+    f.be = hl_async_backend();
+    ASSERT_EQ(f.be->init(&f.actx, NULL), 0);
+    ASSERT_EQ(f.be->pool_create(&f.pool, f.actx, 1, 16), 0);
+    pending_async_ctx   = f.actx;
+    pending_thread_pool = f.pool;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlResolvedModuleSet set;
+    hl_module_set_clear(&set);
+    static const char *const mods[] = { "db", "worker" };
+    for (size_t i = 0; i < 2; i++) {
+        int idx = hl_module_registry_index(hl_module_registry_find_short(mods[i]));
+        ASSERT_GE(idx, 0);
+        set.bits[idx / 64] |= (uint64_t)1 << (idx % 64);
+    }
+    lua_rt.base.module_set = &set;
+    lua_rt.max_instructions = 2000000;   /* the dispatch's limit */
+
+    char out[512];
+    lua_worker_run(&f,
+        "local w = require('hull.worker')\n"
+        "local function msg(r) return type(r) == 'table' and tostring(r.error) or tostring(r) end\n"
+        "local r1 = w.dispatch(function()\n"
+        "  local s = 'SELECT 1 --' .. string.rep('a', 1 << 20)\n"
+        "  for i = 1, 500 do db.query(s) end return 'ran' end)\n"
+        "local r2 = w.dispatch(function()\n"
+        "  local s = 'SELECT 1 --' .. string.rep('a', 1 << 20)\n"
+        "  for i = 1, 500 do db.exec(s) end return 'ran' end)\n"
+        "local r3 = w.dispatch(function() local n = 0\n"
+        "  for i = 1, 1000 do n = n + db.query('SELECT 1 AS n')[1].n end\n"
+        "  return n end)\n"
+        "return msg(r1) .. '|' .. msg(r2) .. '|' .. msg(r3)\n", out, sizeof out);
+    const char *bar = strchr(out, '|');
+    EXPECT_NE_MSG(strstr(out, "instruction limit"), NULL, out);
+    EXPECT_TRUE_MSG(bar && strstr(bar + 1, "instruction limit") != NULL, out);
+    EXPECT_NE_MSG(strstr(out, "|1000"), NULL, out);
+
+    lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
     lua_rt.base.module_set = NULL;
     cleanup_lua_caps();
     f.be->tick(f.actx, 0);

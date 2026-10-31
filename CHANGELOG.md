@@ -350,6 +350,20 @@ release-artifact layout).
   meet; bytecode and the sealed bytecode cache carry no hash and are unaffected. Lua already seeds
   its string hash per state. Covered by `js_audit40` in `test_js` (with a test-only hook that
   forces every atom into one chain) and `lua_audit40` in `test_lua` (QuickJS HULL PATCH 0009).
+- **A reused large SQL string cost no instruction budget** (audit 41, both runtimes). Every
+  `conn.query` / `conn.exec` ran the `_hull_*` namespace check over the whole text - a
+  `strncasecmp` at every `_`, `h` and `H` - and SQLite's statement cache compared the full text on
+  a hit, where SQLite allocates almost nothing, so its allocator charge saw none of it: 300
+  queries of one 16 MB string ran 26 s untripped in Lua, and over HTTP the request held the event
+  loop until its 60 s deadline. The SQL text (and the identifiers `insert_if_absent` / `upsert` /
+  `table_columns` check) is now charged before the scan, one unit per 8 bytes plus 16 per call
+  (`hl_work_sql_units`), stdlib callers included, in `conn.query` / `exec`, `conn.async`, the
+  `worker.dispatch` VMs' `db.query` / `exec` (against the job's budget) and the dialect helpers,
+  in both runtimes. The check itself is one linear pass with no call per byte (only a `_` can
+  start `_hull_`, only a `&` can be the middle of `U&"`), verdicts unchanged - checked against the
+  old algorithm. A budget-sized loop of 16 MB queries now trips in ~0.6-0.9 s, of `SELECT 1` in
+  ~1.5 s. Covered by `db_audit41` in `test_lua` / `test_js`, the `sql_text_is_charged_to_the_job`
+  worker cases, and the namespace-check cases in `test_db`.
 - **One request could crash the server through a chain of dying Lua tasks** (audit 39,
   Lua). Audit 38 closes a task that raised or made a bare `coroutine.yield()` in the run
   that ended it, but closed it with no resumer (`lua_closethread(co, NULL)`): the closed
