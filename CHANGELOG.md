@@ -278,6 +278,18 @@ release-artifact layout).
   `SELECT 'x1' a, 42 n, 'y2' b` gave `a = 'y2'` - in `conn.query`, `db.async`,
   `worker.dispatch` and `table_columns`: short ids and role names could be confused. The value
   now points into the chunk's vector, which outlives the row callback.
+- **QuickJS hashed property names and Map keys with no secret** (audit 40, JS runtime). Atom
+  strings (property names, identifiers, JSON keys) and Map / Set string keys went through a fixed
+  multiply-add (`h * 263 + c`), so every string's bucket was known in advance, and walking an
+  atom-table bucket chain was charged nothing. Both hashes are now SipHash-1-3 keyed by a 128-bit
+  secret per runtime, drawn from `hl_cap_crypto_random` for the main runtime and every
+  worker.dispatch VM (runtime init fails without randomness); Map / Set number and BigInt keys are
+  keyed too. Each atom chain step and compare is charged to the run's budget, and `JSON.parse` polls
+  once per property / element, so the budget or the run deadline ends one long parse partway,
+  uncatchably. Hashes cover 16-bit code units, so 8-bit and 16-bit strings with the same text still
+  meet; bytecode and the sealed bytecode cache carry no hash and are unaffected. Lua already seeds
+  its string hash per state. Covered by `js_audit40` in `test_js` (with a test-only hook that
+  forces every atom into one chain) and `lua_audit40` in `test_lua` (QuickJS HULL PATCH 0009).
 - **One request could crash the server through a chain of dying Lua tasks** (audit 39,
   Lua). Audit 38 closes a task that raised or made a bare `coroutine.yield()` in the run
   that ended it, but closed it with no resumer (`lua_closethread(co, NULL)`): the closed

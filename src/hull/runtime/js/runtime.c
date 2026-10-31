@@ -50,6 +50,8 @@
 #include "hull/vfs.h"
 #include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
 #include "hull/shared/work_charge.h"   /* hl_work_bulk_units (audit 39) */
+#include "hull/cap/crypto.h"           /* hl_cap_crypto_random (audit 40) */
+#include "hull/utils/secure_zero.h"    /* hl_secure_zero */
 
 /* ── Forward declarations ───────────────────────────────────────────── */
 
@@ -198,6 +200,20 @@ int hl_js_budget_charge(JSContext *ctx, uint64_t units)
         return -1;
     }
     return 0;
+}
+
+JSRuntime *hl_js_new_runtime_keyed(void)
+{
+    uint8_t key[JS_HASH_KEY_SIZE];
+    JSRuntime *rt;
+
+    if (hl_cap_crypto_random(key, sizeof(key)) != 0) {
+        log_error("[js] no randomness for the runtime's hash key");
+        return NULL;
+    }
+    rt = JS_NewRuntimeKeyed(NULL, NULL, key);
+    hl_secure_zero(key, sizeof(key));
+    return rt;
 }
 
 int hl_js_gc_for_retry(JSContext *ctx)
@@ -1007,7 +1023,9 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
 
     /* Create runtime (using default allocator for now;
      * custom KlAllocator routing added when Keel is linked) */
-    js->rt = JS_NewRuntime();
+    /* QuickJS HULL PATCH 0009: the atom / Map hashes are keyed per
+     * runtime (audit 40); no randomness fails init. */
+    js->rt = hl_js_new_runtime_keyed();
     if (!js->rt)
         return -1;
 

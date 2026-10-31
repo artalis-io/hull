@@ -15511,4 +15511,229 @@ UTEST(js_audit39, a_collect_and_retry_is_charged)
     a15_fs_close(&f);
 }
 
+/* ── Audit 40: keyed atom / Map hashes, charged atom lookups ────────────
+ *
+ * QuickJS hashed property names (atoms) and Map / Set string keys with a
+ * fixed multiply-add and no secret, so the bucket of every string was known
+ * in advance, and an atom-table chain walk charged nothing. HULL PATCH 0009
+ * keys both hashes per runtime (SipHash-1-3, a 128-bit secret from
+ * hl_cap_crypto_random), charges each chain step and compare, and polls in
+ * JSON.parse's per-property loop. The collision cases use only the
+ * test-only JS_TestForceAtomHash (every atom hashes to one constant), with
+ * ordinary distinct keys. */
+UTEST(js_audit40, runtimes_hash_differently)
+{
+    JSRuntime *a = hl_js_new_runtime_keyed();
+    JSRuntime *b = hl_js_new_runtime_keyed();
+    ASSERT_TRUE(a != NULL && b != NULL);
+    static const char *const words[] = { "constructor", "length", "a", "key17" };
+    int differ = 0;
+    for (size_t i = 0; i < sizeof words / sizeof words[0]; i++) {
+        if (JS_TestAtomHash(a, words[i]) != JS_TestAtomHash(b, words[i]))
+            differ++;
+        /* stable within one runtime */
+        EXPECT_EQ(JS_TestAtomHash(a, words[i]), JS_TestAtomHash(a, words[i]));
+    }
+    /* a collision has probability 2^-30 per word */
+    EXPECT_EQ(differ, (int)(sizeof words / sizeof words[0]));
+    JS_FreeRuntime(a);
+    JS_FreeRuntime(b);
+
+    /* no randomness: no runtime, and hl_js_init fails */
+    hl_cap_crypto_random_fail_next_for_test(1);
+    EXPECT_TRUE(hl_js_new_runtime_keyed() == NULL);
+    hl_cap_crypto_random_fail_next_for_test(1);
+    HlJS v;
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    memset(&v, 0, sizeof v);
+    EXPECT_NE(hl_js_init(&v, &cfg), 0);
+    hl_js_free(&v);
+    hl_cap_crypto_random_fail_next_for_test(0);
+}
+
+UTEST(js_audit40, atoms_match_across_string_widths)
+{
+    JSRuntime *rt = hl_js_new_runtime_keyed();
+    ASSERT_TRUE(rt != NULL);
+    static const char *const words[] = {
+        "", "a", "ab", "abc", "abcd", "abcde", "length", "constructor",
+        "a_rather_longer_property_name_0123456789",
+    };
+    for (size_t i = 0; i < sizeof words / sizeof words[0]; i++)
+        EXPECT_EQ_MSG(JS_TestAtomWidths(rt, words[i]), 1, words[i]);
+    JS_FreeRuntime(rt);
+
+    /* the same through the language: a key cut from a 16-bit string, a
+     * rope, and a flat string all find one property / one Map entry */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(eval_int(
+        "const w = '\\u0100alpha'.slice(1);\n"
+        "const r = 'al' + 'p'.repeat(1) + 'ha';\n"
+        "const o = { alpha: 1 }; const m = new Map([['alpha', 2]]);\n"
+        "const big = 'x'.repeat(300) + 'y';\n"
+        "const m2 = new Map([[big, 3]]);\n"
+        "const big2 = 'x'.repeat(150) + 'x'.repeat(150) + 'y';\n"
+        "(o[w] === 1 && o[r] === 1 && m.get(w) === 2 && m.get(r) === 2 &&\n"
+        " m2.get(big2) === 3 && new Set([w, r, 'alpha']).size === 1 &&\n"
+        " new Map([[10n ** 30n, 4]]).get(10n ** 30n) === 4 &&\n"
+        " new Map([[1, 5]]).get(1.0) === 5) ? 1 : 0"), 1);
+    cleanup_js();
+}
+
+/* Bytecode carries atoms as strings, so code written by one runtime (one
+ * process, one key) runs in another - the sealed bytecode cache depends on
+ * no hash value. */
+UTEST(js_audit40, bytecode_crosses_keyed_runtimes)
+{
+    JSRuntime *ra = hl_js_new_runtime_keyed();
+    JSRuntime *rb = hl_js_new_runtime_keyed();
+    ASSERT_TRUE(ra != NULL && rb != NULL);
+    JSContext *ca = JS_NewContext(ra);
+    JSContext *cb = JS_NewContext(rb);
+    ASSERT_TRUE(ca != NULL && cb != NULL);
+    static const char src[] =
+        "function f(o) { return o.alpha + o['beta'] + Object.keys(o).length; }\n"
+        "const m = new Map([['gamma', 4]]);\n"
+        "f({ alpha: 1, beta: 2, delta: 0 }) + m.get('gam' + 'ma');\n";
+    JSValue fn = JS_Eval(ca, src, sizeof src - 1, "<a40>",
+                         JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+    ASSERT_FALSE(JS_IsException(fn));
+    size_t len = 0;
+    uint8_t *buf = JS_WriteObject(ca, &len, fn, JS_WRITE_OBJ_BYTECODE);
+    JS_FreeValue(ca, fn);
+    ASSERT_TRUE(buf != NULL);
+    JSValue fb = JS_ReadObject(cb, buf, len, JS_READ_OBJ_BYTECODE);
+    js_free(ca, buf);
+    ASSERT_FALSE(JS_IsException(fb));
+    JSValue r = JS_EvalFunction(cb, fb);
+    ASSERT_FALSE(JS_IsException(r));
+    int32_t got = 0;
+    JS_ToInt32(cb, &got, r);
+    JS_FreeValue(cb, r);
+    EXPECT_EQ(got, 10);
+    JS_FreeContext(ca);
+    JS_FreeContext(cb);
+    JS_FreeRuntime(ra);
+    JS_FreeRuntime(rb);
+
+    /* the sealed module cache: written by one keyed runtime, read back by
+     * another, and the module runs */
+    char tmp[256];
+    jbc_with_tmp_home(tmp, sizeof tmp);
+    ASSERT_NE(tmp[0], 0);
+    for (int pass = 0; pass < 2; pass++) {
+        JSRuntime *rt = hl_js_new_runtime_keyed();
+        ASSERT_TRUE(rt != NULL);
+        JSContext *ctx = JS_NewContext(rt);
+        ASSERT_TRUE(ctx != NULL);
+        JSValue mod = hl_js_compile_module_cached(ctx, JBC_PROBE,
+                                                  strlen(JBC_PROBE),
+                                                  "test:a40probe");
+        ASSERT_FALSE(JS_IsException(mod));
+        EXPECT_EQ(1, jbc_count(tmp));
+        JSModuleDef *md = JS_VALUE_GET_PTR(mod);
+        JSValue p = JS_EvalFunction(ctx, mod);
+        EXPECT_FALSE(JS_IsException(p));
+        JS_FreeValue(ctx, p);
+        JSValue ns = JS_GetModuleNamespace(ctx, md);
+        JSValue def = JS_GetPropertyStr(ctx, ns, "default");
+        JSValue five = JS_NewInt32(ctx, 5);
+        JSValue out = JS_Call(ctx, def, JS_UNDEFINED, 1, &five);
+        int32_t n = 0;
+        JS_ToInt32(ctx, &n, out);
+        EXPECT_EQ(n, 13);
+        JS_FreeValue(ctx, out);
+        JS_FreeValue(ctx, def);
+        JS_FreeValue(ctx, ns);
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+    }
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+/* A JSON object of N ordinary distinct keys, built in the run. */
+#define A40_OBJ(n) \
+    "let s = '{';\n" \
+    "for (let i = 0; i < " #n "; i++) s += (i ? ',' : '') + '\"key' + i + '\":' + i;\n" \
+    "s += '}';\n"
+
+/* Under the test hook every atom lands in one chain: each new key walks
+ * all of them. The walk is charged, and JSON.parse polls per property, so
+ * a few thousand keys trip a small budget uncatchably, partway. */
+UTEST(js_audit40, colliding_atoms_are_charged)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+    ASSERT_EQ(JS_TestForceAtomHash(lim.rt, 1), 0);
+    /* lookups still find the atoms made before the switch */
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "if (JSON.stringify({ length: [1].length }) !== '{\"length\":1}')"
+        " throw new Error('x');"));
+    hl_js_reset_request(&lim);
+    static const char code[] =
+        "globalThis.__a40 = 0;\n"
+        A40_OBJ(3000)
+        "try { JSON.parse(s); } catch (e) { globalThis.__a40 = 1; }\n";
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    EXPECT_TRUE(a5_eval_throws(&lim, code));
+    EXPECT_EQ(lim.budget_tripped, 1);
+    EXPECT_LT(a10_ms_since(&t0), 5000L);
+    hl_js_reset_request(&lim);
+    JSValue v = JS_Eval(lim.ctx, "globalThis.__a40", 16, "<t>",
+                        JS_EVAL_TYPE_GLOBAL);
+    int32_t caught = -1;
+    JS_ToInt32(lim.ctx, &caught, v);
+    JS_FreeValue(lim.ctx, v);
+    EXPECT_EQ(caught, 0);   /* the catch never ran */
+    hl_js_free(&lim);
+}
+
+/* The same with NO instruction limit: the run deadline ends the parse
+ * partway (the per-property poll sees the watchdog's flag). */
+UTEST(js_audit40, colliding_atoms_see_the_watchdog)
+{
+    hl_run_watchdog_configure(WD_TEST_MS);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    cfg.max_instructions = 0;
+    HlJS v;
+    memset(&v, 0, sizeof v);
+    ASSERT_EQ(hl_js_init(&v, &cfg), 0);
+    ASSERT_EQ(JS_TestForceAtomHash(v.rt, 1), 0);
+    hl_js_budget_arm(&v);
+    static const char code[] = A40_OBJ(60000) "JSON.parse(s);\n";
+    JSValue r = JS_Eval(v.ctx, code, sizeof code - 1, "<wd>",
+                        JS_EVAL_TYPE_GLOBAL);
+    EXPECT_TRUE(JS_IsException(r));
+    if (JS_IsException(r))
+        JS_FreeValue(v.ctx, JS_GetException(v.ctx));
+    JS_FreeValue(v.ctx, r);
+    EXPECT_EQ(v.budget_tripped, 1);
+    EXPECT_EQ(v.budget_timed_out, 1);
+    hl_js_free(&v);
+    hl_run_watchdog_configure(-1);
+}
+
+/* Ordinary large JSON.parse calls fit the default budget. */
+UTEST(js_audit40, ordinary_json_parse_still_fits)
+{
+    HlJS lim;
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    memset(&lim, 0, sizeof lim);
+    ASSERT_EQ(hl_js_init(&lim, &cfg), 0);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        A40_OBJ(100000)
+        "const o = JSON.parse(s);\n"
+        "if (Object.keys(o).length !== 100000 || o.key99999 !== 99999)"
+        " throw new Error('obj');\n"
+        "const a = JSON.parse('[' + Array.from({ length: 200000 }, (_, i) =>"
+        " '{\"id\":' + i + ',\"name\":\"n' + i + '\"}').join(',') + ']');\n"
+        "if (a.length !== 200000 || a[199999].name !== 'n199999')"
+        " throw new Error('arr');\n"));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+#undef A40_OBJ
+
 UTEST_MAIN();

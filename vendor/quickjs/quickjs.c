@@ -369,6 +369,13 @@ struct JSRuntime {
     uint64_t work_pending;
     /* HULL PATCH 0008: the job tag of the code now running (JS_SetJobTag) */
     uint64_t job_tag;
+    /* HULL PATCH 0009: the per-runtime SipHash key of the atom and Map
+       hashes (JS_NewRuntimeKeyed); all zero for JS_NewRuntime2 */
+    uint64_t hash_key[2];
+#ifdef QJS_HULL_TEST_HOOKS
+    /* HULL PATCH 0009: test only - every atom hashes to one constant */
+    BOOL test_force_atom_hash;
+#endif
 
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
@@ -2185,10 +2192,18 @@ static inline BOOL js_check_stack_overflow(JSRuntime *rt, size_t alloca_size)
 }
 #endif
 
-JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
+static const JSMallocFunctions def_malloc_funcs;
+
+/* HULL PATCH 0009: 'hash_key' (JS_HASH_KEY_SIZE bytes, or NULL for all
+   zero) keys the atom and Map hashes; it is in place before JS_InitAtoms */
+JSRuntime *JS_NewRuntimeKeyed(const JSMallocFunctions *mf, void *opaque,
+                              const uint8_t *hash_key)
 {
     JSRuntime *rt;
     JSMallocState ms;
+
+    if (!mf)
+        mf = &def_malloc_funcs;
 
     memset(&ms, 0, sizeof(ms));
     ms.opaque = opaque;
@@ -2213,6 +2228,15 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
     init_list_head(&rt->string_list);
 #endif
     init_list_head(&rt->job_list);
+
+    /* HULL PATCH 0009: the hash key, before any atom is hashed */
+    if (hash_key) {
+        int k;
+        for(k = 0; k < 8; k++) {
+            rt->hash_key[0] |= (uint64_t)hash_key[k] << (8 * k);
+            rt->hash_key[1] |= (uint64_t)hash_key[8 + k] << (8 * k);
+        }
+    }
 
     if (JS_InitAtoms(rt))
         goto fail;
@@ -2338,6 +2362,13 @@ JSRuntime *JS_NewRuntime(void)
 {
     return JS_NewRuntime2(&def_malloc_funcs, NULL);
 }
+
+/* HULL PATCH 0009: unkeyed (all-zero key), as upstream callers expect */
+JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
+{
+    return JS_NewRuntimeKeyed(mf, opaque, NULL);
+}
+
 
 void JS_SetMemoryLimit(JSRuntime *rt, size_t limit)
 {
@@ -3113,44 +3144,176 @@ static inline BOOL is_num_string(uint32_t *pval, const JSString *p)
     }
 }
 
-/* XXX: could use faster version ? */
-static inline uint32_t hash_string8(const uint8_t *str, size_t len, uint32_t h)
-{
-    size_t i;
+/* HULL PATCH 0009: the atom and Map string hashes are SipHash-1-3 keyed
+   by a per-runtime 128-bit secret (JSRuntime.hash_key, set by
+   JS_NewRuntimeKeyed before JS_InitAtoms makes the predefined atoms). The
+   upstream hash was a fixed multiply-add (h = h * 263 + c) with no secret,
+   so the bucket of every string was known in advance. The input is the
+   string's 16-bit code units, little-endian, so an 8-bit and a 16-bit
+   string with the same text hash identically (atoms compare across
+   widths), and the state streams, so a rope hashes as its flat text does.
+   'seed' (the atom type, or 0 for a Map key) is folded into the key. See
+   Hull's docs/quickjs_patches.md. */
+typedef struct {
+    uint64_t v0, v1, v2, v3;
+    uint64_t m;     /* pending bytes, little-endian */
+    uint32_t nb;    /* bytes in m: 0, 2, 4 or 6 */
+    uint64_t total; /* bytes hashed */
+} JSSipState;
 
-    for(i = 0; i < len; i++)
-        h = h * 263 + str[i];
-    return h;
+#define JS_SIP_ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
+#define JS_SIP_ROUND(st) do {                                           \
+        (st)->v0 += (st)->v1; (st)->v1 = JS_SIP_ROTL((st)->v1, 13);     \
+        (st)->v1 ^= (st)->v0; (st)->v0 = JS_SIP_ROTL((st)->v0, 32);     \
+        (st)->v2 += (st)->v3; (st)->v3 = JS_SIP_ROTL((st)->v3, 16);     \
+        (st)->v3 ^= (st)->v2;                                           \
+        (st)->v0 += (st)->v3; (st)->v3 = JS_SIP_ROTL((st)->v3, 21);     \
+        (st)->v3 ^= (st)->v0;                                           \
+        (st)->v2 += (st)->v1; (st)->v1 = JS_SIP_ROTL((st)->v1, 17);     \
+        (st)->v1 ^= (st)->v2; (st)->v2 = JS_SIP_ROTL((st)->v2, 32);     \
+    } while (0)
+
+static inline void js_sip_init(JSSipState *st, const JSRuntime *rt,
+                               uint32_t seed)
+{
+    uint64_t k0 = rt->hash_key[0] ^ seed, k1 = rt->hash_key[1];
+    st->v0 = k0 ^ 0x736f6d6570736575ULL;
+    st->v1 = k1 ^ 0x646f72616e646f6dULL;
+    st->v2 = k0 ^ 0x6c7967656e657261ULL;
+    st->v3 = k1 ^ 0x7465646279746573ULL;
+    st->m = 0;
+    st->nb = 0;
+    st->total = 0;
 }
 
-static inline uint32_t hash_string16(const uint16_t *str,
-                                     size_t len, uint32_t h)
+/* one 8-byte block: SipHash-1-3 runs one compression round */
+static inline void js_sip_block(JSSipState *st, uint64_t m)
 {
-    size_t i;
-
-    for(i = 0; i < len; i++)
-        h = h * 263 + str[i];
-    return h;
+    st->v3 ^= m;
+    JS_SIP_ROUND(st);
+    st->v0 ^= m;
 }
 
-static uint32_t hash_string(const JSString *str, uint32_t h)
+static inline void js_sip_unit(JSSipState *st, uint32_t c)
+{
+    st->m |= (uint64_t)(c & 0xffff) << (st->nb * 8);
+    st->nb += 2;
+    st->total += 2;
+    if (st->nb == 8) {
+        js_sip_block(st, st->m);
+        st->m = 0;
+        st->nb = 0;
+    }
+}
+
+static void js_sip_str8(JSSipState *st, const uint8_t *str, size_t len)
+{
+    size_t i = 0;
+    while (st->nb != 0 && i < len)
+        js_sip_unit(st, str[i++]);
+    for(; i + 4 <= len; i += 4) {
+        js_sip_block(st, (uint64_t)str[i] | ((uint64_t)str[i + 1] << 16) |
+                     ((uint64_t)str[i + 2] << 32) |
+                     ((uint64_t)str[i + 3] << 48));
+        st->total += 8;
+    }
+    while (i < len)
+        js_sip_unit(st, str[i++]);
+}
+
+static void js_sip_str16(JSSipState *st, const uint16_t *str, size_t len)
+{
+    size_t i = 0;
+    while (st->nb != 0 && i < len)
+        js_sip_unit(st, str[i++]);
+    for(; i + 4 <= len; i += 4) {
+        js_sip_block(st, (uint64_t)str[i] | ((uint64_t)str[i + 1] << 16) |
+                     ((uint64_t)str[i + 2] << 32) |
+                     ((uint64_t)str[i + 3] << 48));
+        st->total += 8;
+    }
+    while (i < len)
+        js_sip_unit(st, str[i++]);
+}
+
+/* a 64-bit word; only called with no code unit pending */
+static inline void js_sip_u64(JSSipState *st, uint64_t v)
+{
+    js_sip_block(st, v);
+    st->total += 8;
+}
+
+static uint32_t js_sip_final(JSSipState *st)
+{
+    uint64_t b = (st->total << 56) | st->m, h;
+    js_sip_block(st, b);
+    st->v2 ^= 0xff;
+    JS_SIP_ROUND(st);
+    JS_SIP_ROUND(st);
+    JS_SIP_ROUND(st);
+    h = st->v0 ^ st->v1 ^ st->v2 ^ st->v3;
+    return (uint32_t)(h ^ (h >> 32));
+}
+
+static void js_sip_string(JSSipState *st, const JSString *str)
 {
     if (str->is_wide_char)
-        h = hash_string16(str->u.str16, str->len, h);
+        js_sip_str16(st, str->u.str16, str->len);
     else
-        h = hash_string8(str->u.str8, str->len, h);
-    return h;
+        js_sip_str8(st, str->u.str8, str->len);
 }
 
-static uint32_t hash_string_rope(JSValueConst val, uint32_t h)
+static void js_sip_string_rope(JSSipState *st, JSValueConst val)
 {
     if (JS_VALUE_GET_TAG(val) == JS_TAG_STRING) {
-        return hash_string(JS_VALUE_GET_STRING(val), h);
+        js_sip_string(st, JS_VALUE_GET_STRING(val));
     } else {
         JSStringRope *r = JS_VALUE_GET_STRING_ROPE(val);
-        h = hash_string_rope(r->left, h);
-        return hash_string_rope(r->right, h);
+        js_sip_string_rope(st, r->left);
+        js_sip_string_rope(st, r->right);
     }
+}
+
+static uint32_t hash_string(JSRuntime *rt, const JSString *str, uint32_t seed)
+{
+    JSSipState st;
+    js_sip_init(&st, rt, seed);
+    js_sip_string(&st, str);
+    return js_sip_final(&st);
+}
+
+static uint32_t hash_string_rope(JSRuntime *rt, JSValueConst val, uint32_t seed)
+{
+    JSSipState st;
+    js_sip_init(&st, rt, seed);
+    js_sip_string_rope(&st, val);
+    return js_sip_final(&st);
+}
+
+/* the hash an atom of type 'atom_type' with this text is stored under */
+static uint32_t js_atom_hash_str(JSRuntime *rt, const JSString *str,
+                                 int atom_type)
+{
+#ifdef QJS_HULL_TEST_HOOKS
+    if (rt->test_force_atom_hash)
+        return 0x1234567 & JS_ATOM_HASH_MASK;
+#endif
+    return hash_string(rt, str, atom_type) & JS_ATOM_HASH_MASK;
+}
+
+/* same, for an 8-bit (ASCII) C string: equal to js_atom_hash_str of the
+   JSString holding that text */
+static uint32_t js_atom_hash_ascii(JSRuntime *rt, const char *str, size_t len,
+                                   int atom_type)
+{
+    JSSipState st;
+#ifdef QJS_HULL_TEST_HOOKS
+    if (rt->test_force_atom_hash)
+        return 0x1234567 & JS_ATOM_HASH_MASK;
+#endif
+    js_sip_init(&st, rt, atom_type);
+    js_sip_str8(&st, (const uint8_t *)str, len);
+    return js_sip_final(&st) & JS_ATOM_HASH_MASK;
 }
 
 static __maybe_unused void JS_DumpChar(FILE *fo, int c, int sep)
@@ -3372,22 +3535,31 @@ static JSAtom __JS_NewAtom(JSRuntime *rt, JSString *str, int atom_type)
         }
         /* try and locate an already registered atom */
         len = str->len;
-        js_work_add(rt, len); /* HULL PATCH 0005: hashed, maybe compared */
-        h = hash_string(str, atom_type);
-        h &= JS_ATOM_HASH_MASK;
+        js_work_add(rt, len); /* HULL PATCH 0005: hashed */
+        h = js_atom_hash_str(rt, str, atom_type); /* HULL PATCH 0009 */
         h1 = h & (rt->atom_hash_size - 1);
         i = rt->atom_hash[h1];
-        while (i != 0) {
-            p = rt->atom_array[i];
-            if (p->hash == h &&
-                p->atom_type == atom_type &&
-                p->len == len &&
-                js_string_memcmp(p, 0, str, 0, len) == 0) {
-                if (!__JS_AtomIsConst(i))
-                    js_rc(p)->ref_count++;
-                goto done;
+        {
+            /* HULL PATCH 0009: one element per chain step plus the bytes
+               compared, charged once the walk ends */
+            uint64_t work = 0;
+            while (i != 0) {
+                p = rt->atom_array[i];
+                work += JS_WORK_ELEM;
+                if (p->hash == h &&
+                    p->atom_type == atom_type &&
+                    p->len == len) {
+                    work += (uint64_t)len << str->is_wide_char;
+                    if (js_string_memcmp(p, 0, str, 0, len) == 0) {
+                        js_work_add(rt, work);
+                        if (!__JS_AtomIsConst(i))
+                            js_rc(p)->ref_count++;
+                        goto done;
+                    }
+                }
+                i = p->hash_next;
             }
-            i = p->hash_next;
+            js_work_add(rt, work);
         }
     } else {
         h1 = 0; /* avoid warning */
@@ -3527,25 +3699,93 @@ static JSAtom __JS_FindAtom(JSRuntime *rt, const char *str, size_t len,
     uint32_t h, h1, i;
     JSAtomStruct *p;
 
-    h = hash_string8((const uint8_t *)str, len, JS_ATOM_TYPE_STRING);
-    h &= JS_ATOM_HASH_MASK;
+    uint64_t work = len; /* HULL PATCH 0009: hashed */
+    h = js_atom_hash_ascii(rt, str, len, JS_ATOM_TYPE_STRING);
     h1 = h & (rt->atom_hash_size - 1);
     i = rt->atom_hash[h1];
     while (i != 0) {
         p = rt->atom_array[i];
+        work += JS_WORK_ELEM; /* HULL PATCH 0009: a chain step */
         if (p->hash == h &&
             p->atom_type == JS_ATOM_TYPE_STRING &&
             p->len == len &&
-            p->is_wide_char == 0 &&
-            memcmp(p->u.str8, str, len) == 0) {
-            if (!__JS_AtomIsConst(i))
-                js_rc(p)->ref_count++;
-            return i;
+            p->is_wide_char == 0) {
+            work += len; /* HULL PATCH 0009: compared */
+            if (memcmp(p->u.str8, str, len) == 0) {
+                js_work_add(rt, work);
+                if (!__JS_AtomIsConst(i))
+                    js_rc(p)->ref_count++;
+                return i;
+            }
         }
         i = p->hash_next;
     }
+    js_work_add(rt, work);
     return JS_ATOM_NULL;
 }
+
+#ifdef QJS_HULL_TEST_HOOKS
+/* HULL PATCH 0009: test only. Every atom hashes to one constant while 'on'
+   (all atoms share one bucket chain); the atoms already made are rehashed
+   and re-bucketed so lookups keep finding them. */
+int JS_TestForceAtomHash(JSRuntime *rt, int on)
+{
+    uint32_t i;
+    JSAtomStruct *p;
+
+    rt->test_force_atom_hash = (on != 0);
+    for(i = 1; i < (uint32_t)rt->atom_size; i++) {
+        p = rt->atom_array[i];
+        if (atom_is_free(p) || p->atom_type == JS_ATOM_TYPE_SYMBOL)
+            continue;
+        p->hash = js_atom_hash_str(rt, p, p->atom_type);
+    }
+    return JS_ResizeAtomHash(rt, rt->atom_hash_size);
+}
+
+/* HULL PATCH 0009: test only. The hash an 8-bit string atom with this
+   text is stored under in 'rt'. */
+uint32_t JS_TestAtomHash(JSRuntime *rt, const char *ascii)
+{
+    return js_atom_hash_ascii(rt, ascii, strlen(ascii), JS_ATOM_TYPE_STRING);
+}
+
+/* HULL PATCH 0009: test only. 1 when an 8-bit and a 16-bit JSString with
+   the text 'ascii' hash identically and make the same atom. */
+int JS_TestAtomWidths(JSRuntime *rt, const char *ascii)
+{
+    size_t i, len = strlen(ascii);
+    JSString *s8, *s16;
+    JSAtom a8, a16;
+    int ok;
+
+    s8 = js_alloc_string_rt(rt, len, 0);
+    s16 = js_alloc_string_rt(rt, len, 1);
+    if (!s8 || !s16) {
+        if (s8)
+            js_free_string(rt, s8);
+        if (s16)
+            js_free_string(rt, s16);
+        return 0;
+    }
+    for(i = 0; i < len; i++) {
+        s8->u.str8[i] = (uint8_t)ascii[i];
+        s16->u.str16[i] = (uint8_t)ascii[i];
+    }
+    s8->u.str8[len] = '\0';
+    ok = js_atom_hash_str(rt, s8, JS_ATOM_TYPE_STRING) ==
+         js_atom_hash_str(rt, s16, JS_ATOM_TYPE_STRING) &&
+         hash_string(rt, s8, 0) == hash_string(rt, s16, 0);
+    a8 = __JS_NewAtom(rt, s8, JS_ATOM_TYPE_STRING);
+    a16 = __JS_NewAtom(rt, s16, JS_ATOM_TYPE_STRING);
+    ok = ok && a8 != JS_ATOM_NULL && a8 == a16;
+    if (a8 != JS_ATOM_NULL)
+        JS_FreeAtomRT(rt, a8);
+    if (a16 != JS_ATOM_NULL)
+        JS_FreeAtomRT(rt, a16);
+    return ok;
+}
+#endif
 
 static void JS_FreeAtomStruct(JSRuntime *rt, JSAtomStruct *p)
 {
@@ -49724,6 +49964,11 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
             }
             if (s->token.val != '}') {
                 for(;;) {
+                    /* HULL PATCH 0009: one parse can make many atoms; poll
+                       per property so the budget (a tripped work charge)
+                       and the run watchdog's stop flag end it partway */
+                    if (js_poll_interrupts(ctx))
+                        goto fail;
                     if (s->token.val == TOK_STRING) {
                         prop_name = JS_ValueToAtom(ctx, s->token.u.str.str);
                         if (prop_name == JS_ATOM_NULL)
@@ -49788,6 +50033,8 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
             if (s->token.val != ']') {
                 idx = 0;
                 for(;;) {
+                    if (js_poll_interrupts(ctx)) /* HULL PATCH 0009 */
+                        goto fail;
                     if (pr) {
                         if (js_resize_array(ctx, (void **)&pr->u.array.elements, sizeof(pr->u.array.elements[0]),
                                             &pr_size, pr->u.array.count + 1))
@@ -52221,11 +52468,11 @@ static uint32_t map_hash_key(JSRuntime *rt, JSValueConst key, int hash_bits)
         break;
     case JS_TAG_STRING:
         js_work_add(rt, JS_VALUE_GET_STRING(key)->len); /* HULL PATCH 0005 */
-        h = map_hash32(hash_string(JS_VALUE_GET_STRING(key), 0) ^ JS_TAG_STRING, hash_bits);
+        h = map_hash32(hash_string(rt, JS_VALUE_GET_STRING(key), 0) ^ JS_TAG_STRING, hash_bits); /* HULL PATCH 0009 */
         break;
     case JS_TAG_STRING_ROPE:
         js_work_add(rt, string_rope_get_len(key)); /* HULL PATCH 0005 */
-        h = map_hash32(hash_string_rope(key, 0) ^ JS_TAG_STRING, hash_bits);
+        h = map_hash32(hash_string_rope(rt, key, 0) ^ JS_TAG_STRING, hash_bits); /* HULL PATCH 0009 */
         break;
     case JS_TAG_OBJECT:
     case JS_TAG_SYMBOL:
@@ -52240,7 +52487,13 @@ static uint32_t map_hash_key(JSRuntime *rt, JSValueConst key, int hash_bits)
         if (isnan(d))
             d = JS_FLOAT64_NAN;
     hash_float64:
-        h = map_hash64(float64_as_uint64(d) ^ JS_TAG_FLOAT64, hash_bits);
+        {
+            /* HULL PATCH 0009: keyed, as the string keys are */
+            JSSipState st;
+            js_sip_init(&st, rt, JS_TAG_FLOAT64);
+            js_sip_u64(&st, float64_as_uint64(d));
+            h = map_hash32(js_sip_final(&st), hash_bits);
+        }
         break;
     case JS_TAG_SHORT_BIG_INT:
         p = js_bigint_set_short(&buf, key);
@@ -52249,14 +52502,15 @@ static uint32_t map_hash_key(JSRuntime *rt, JSValueConst key, int hash_bits)
         p = JS_VALUE_GET_PTR(key);
     hash_bigint:
         {
+            /* HULL PATCH 0009: keyed over the limbs (h * 263 + limb before) */
             int i;
-            h = 1;
+            JSSipState st;
+            js_work_add(rt, (uint64_t)p->len * sizeof(p->tab[0]));
+            js_sip_init(&st, rt, JS_TAG_BIG_INT);
             for(i = p->len - 1; i >= 0; i--) {
-                h = h * 263 + p->tab[i];
+                js_sip_u64(&st, (uint64_t)p->tab[i]);
             }
-            /* the final step is necessary otherwise h mod n only
-               depends of p->tab[i] mod n */
-            h = map_hash32(h ^ JS_TAG_BIG_INT, hash_bits);
+            h = map_hash32(js_sip_final(&st), hash_bits);
         }
         break;
     default:

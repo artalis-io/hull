@@ -157,7 +157,7 @@ static HlJsWorkerCtx *get_js_worker_rt(void)
 
     wctx = calloc(1, sizeof(HlJsWorkerCtx));
     if (!wctx) return NULL;
-    wctx->rt = JS_NewRuntime();
+    wctx->rt = hl_js_new_runtime_keyed();   /* QuickJS HULL PATCH 0009 */
     if (!wctx->rt) {
         free(wctx);
         return NULL;
