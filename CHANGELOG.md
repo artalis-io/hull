@@ -163,6 +163,30 @@ release-artifact layout).
   `hl_js_load_app`) refuse the disk fallback whenever the app VFS is embedded
   (`hl_vfs_embedded`). `hull app.lua` / `hull dev` are unchanged. Covered by
   `make e2e-embedded-entry`.
+- **A workflow step whose result could not be stored ran its side effect on every retry**
+  (audit 41, both runtimes). `ctx.step` ran `fn`, then encoded the result and inserted the
+  step memo; a result the encoder refuses (a cyclic Lua table, a JS BigInt or cycle) or one
+  over MySQL's 64 KiB TEXT limit (a large remote reply) failed after `fn` had run, the attempt
+  failed, and every retry ran `fn` again until `max_attempts` - a charge made five times. The
+  result now goes through the same guarded, size-checked encoder as a job result
+  (`result_json` / `resultJson`); one that cannot be stored records the step as `unstored`
+  (its reason, made storable, in the memo row), and the workflow compensates - the step's own
+  compensation included - and dead-letters once with `step '<name>' ran but its result cannot
+  be stored: <why>`. A replay never calls `fn` again, even when the body catches the error;
+  `jobs.retry` deletes the marker, so an operator's retry runs the step again. A crash between
+  `fn` and the insert is still at-least-once. Also: `jobs.signal` refuses a payload whose
+  JSON is over 65534 bytes on MySQL (a 65535-byte one was stored, then failed the wait's
+  `"S" .. payload` memo on every run); search's `tokenize` must be a primitive string (an
+  object passed the check through one `toString` and was spliced into the SQL through a
+  second); Lua oauth treats a JWKS body that is not JSON as a failed fetch, as JS did;
+  `totp.init` refuses more than 32 `recovery_codes`; `session.login_handler`'s audit-metadata
+  scrub matches keys without case, and Lua runs the app's `audit_metadata` inside its pcall
+  (it raised after the session row and Set-Cookie were made); and the idempotency fingerprint
+  is versioned (`2:` + hex) and length-prefixes method / path / query / body, so a NUL can no
+  longer make two requests hash alike. A key stored by an earlier version (bare hex) is still
+  compared with the old form until it expires, so an upgrade does not answer a retry 409.
+  Covered by `lua_stdlib` / `js_stdlib` `jobs_hooks_audit41` and `stdlib_audit41_suite`, the
+  idempotency middleware suites, and the audit 41 phase of `tests/e2e_mysql.sh`.
 - **DuckDB SQL could hold the event loop for as long as it asked** (audit 38). The DuckDB
   backend runs a statement task by task and stops it at a tripped budget or run deadline, but
   `duckdb_interrupt` only stops the NEXT task, and `sleep_ms(ms)` (and `pg_catalog.pg_sleep`,

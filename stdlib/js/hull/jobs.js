@@ -2471,12 +2471,29 @@ function wfAbort() { const e = new Error("__hull_wf_abort"); e[WF_ABORT] = true;
 // memoized result would carry the workflow on to 'done' over an undone step.
 // The handler ends the workflow dead instead.
 const WF_UNDONE = Symbol("hull.jobs.wfUndone");
+// Thrown by runStep when a step ran but its result cannot be stored (audit
+// 41): `fn` succeeded, so its side effect stands, and running it again cannot
+// help - a result the encoder refuses (a BigInt, a cycle) or one over MySQL's
+// TEXT limit fails the same way every time. The step is recorded as status
+// 'unstored' (its result column holding why), every later replay throws this
+// again without calling fn, and the handler compensates and dead-letters the
+// workflow once. jobs.retry deletes the marker, so an operator's retry runs
+// the step again.
+const WF_UNSTORED = Symbol("hull.jobs.wfUnstored");
+function unstoredError(stepKey, why) {
+    const e = new Error("__hull_wf_unstored");
+    e[WF_UNSTORED] = stepKey;
+    e.why = why;
+    return e;
+}
 
 // Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
 // workflow the value comes from the store and fn is NOT called again. A
 // compensation run (`compensating`) replays a compensated step too: it only
 // re-registers compensations, and runCompensations skips that one.
-async function runStep(workflowId, stepKey, fn, compensating) {
+// `onRan` (optional) is called before a WF_UNSTORED throw: the step ran, so
+// ctx.step registers its compensation.
+async function runStep(workflowId, stepKey, fn, compensating, onRan) {
     if (typeof stepKey !== "string" || stepKey === "")
         throw new Error("ctx.step: name must be a non-empty string");
     keyOpt(stepKey, "name", "ctx.step", false);
@@ -2490,6 +2507,11 @@ async function runStep(workflowId, stepKey, fn, compensating) {
             e[WF_UNDONE] = stepKey;
             throw e;
         }
+        if (rows[0].status === "unstored") {
+            if (onRan) onRan();
+            throw unstoredError(stepKey, rows[0].result != null ? String(rows[0].result)
+                : "it could not be stored on an earlier run");
+        }
         if (rows[0].result == null) return undefined;
         try { return JSON.parse(unstoredJson(rows[0].result)); } catch (e) { return rows[0].result; }
     }
@@ -2497,12 +2519,30 @@ async function runStep(workflowId, stepKey, fn, compensating) {
     // side effect and this INSERT re-runs the step on resume (steps must be
     // idempotent, same contract as a job handler).
     const res = await fn();
-    const enc = res !== undefined ? json.encode(res) : null;
+    // Encoded as a job result is (resultJson: guarded, held to MySQL's TEXT
+    // limit). A result that cannot be stored never runs fn again (audit 41):
+    // a BigInt, a cycle, or the 64 KiB+ remote reply on MySQL failed the
+    // INSERT, the attempt failed, and every retry repeated the side effect
+    // until maxAttempts.
+    // An INSERT that fails for another reason (the database itself) takes
+    // the normal retry path: at-least-once, as for a crash between fn and
+    // the INSERT.
+    let enc = null, why;
+    if (res !== undefined) [enc, why] = resultJson(res);
+    if (why === undefined) {
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
+            "VALUES (?, ?, ?, 'done', ?)",
+            [workflowId, stepKey, enc, time.now()]);
+        return res;
+    }
+    why = safeText(why);
     db.exec(
         "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) " +
-        "VALUES (?, ?, ?, 'done', ?)",
-        [workflowId, stepKey, enc, time.now()]);
-    return res;
+        "VALUES (?, ?, ?, 'unstored', ?)",
+        [workflowId, stepKey, why, time.now()]);
+    if (onRan) onRan();
+    throw unstoredError(stepKey, why);
 }
 
 // A durable wait suspends the workflow by throwing its yield sentinel up to the
@@ -2747,8 +2787,11 @@ function makeCtx(job, name) {
                     [job.id, stepKey]);
                 if (!(r && r.length)) throw wfAbort();
             }
-            const result = await runStep(job.id, stepKey, fn, compensating);
-            if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });
+            const register = () => {
+                if (opts && typeof opts.compensate === "function") comps.push({ key: stepKey, fn: opts.compensate });
+            };
+            const result = await runStep(job.id, stepKey, fn, compensating, register);
+            register();
             return result;
         },
         sleep: (seconds) => {
@@ -2829,6 +2872,14 @@ function workflow(name, fn) {
                 // The saga already rolled back: finish it and dead-letter.
                 const why = new Error("step '" + safeText(e[WF_UNDONE]) +
                     "' was compensated; the workflow cannot continue past it");
+                const failed = await runCompensations(ctx._comps, job.id);
+                return { [WF_DEAD]: true, error: withCompFailures(why, failed).message };
+            } else if (e && typeof e === "object" && typeof e[WF_UNSTORED] === "string") {
+                // The step ran but its result cannot be stored (audit 41):
+                // never run it again. Compensate (its own compensation
+                // included) and dead-letter once.
+                const why = new Error("step '" + safeText(e[WF_UNSTORED]) +
+                    "' ran but its result cannot be stored: " + safeText(e.why));
                 const failed = await runCompensations(ctx._comps, job.id);
                 return { [WF_DEAD]: true, error: withCompFailures(why, failed).message };
             } else if (_refusal.isBusy(e) && busyStreakOpen(job)) {
@@ -2913,6 +2964,12 @@ function signal(id, name, payload, opts) {
         && (typeof delivery !== "string" || delivery === ""))
         throw new Error("jobs.signal: opts.deliveryId must be a non-empty string");
     const enc = payload !== undefined && payload !== null ? json.encode(payload) : null;
+    // The wait memoizes a consumed signal as "S" + payload in a TEXT column:
+    // on MySQL a payload of exactly 65535 bytes was stored here and then
+    // failed the memo's INSERT on every run of the wait (audit 41).
+    if (typeof enc === "string" && db.backendName === "mysql" &&
+        enc.length > (RESULT_MAX_MYSQL - 1) / 3 && utf8Length(enc) > RESULT_MAX_MYSQL - 1)
+        throw new Error("jobs.signal: payload JSON is larger than " + (RESULT_MAX_MYSQL - 1) + " bytes");
     const now = time.now();
     let accepted = true;
     db.batch(() => {
@@ -3111,6 +3168,10 @@ function retry(id) {
         // replayed, the steps after it run on an unpaid order). A step whose
         // compensation failed keeps its row - its effect still stands.
         db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='compensated'",
+            [id]);
+        // A step whose result could not be stored (audit 41) runs again on
+        // an operator's retry: the marker only stopped automatic re-runs.
+        db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='unstored'",
             [id]);
         // Running the step again is not enough when it is idempotent on a key
         // (as steps must be): the same key would fetch back the original,

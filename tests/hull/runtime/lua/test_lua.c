@@ -5450,6 +5450,23 @@ UTEST(lua_stdlib, stdlib_audit39_suite)
     EXPECT_GT(pass, 0LL);
     cleanup_lua_caps();
 }
+
+/* Stdlib regressions from audit 41: search's tokenize must be a string,
+ * oauth's JWKS decode is guarded, totp caps recovery_codes, and
+ * session.login_handler's audit metadata is scrubbed without case and run
+ * inside its pcall. */
+UTEST(lua_stdlib, stdlib_audit41_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit41.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+    cleanup_lua_caps();
+}
 #endif
 
 /* TOTP regressions from audit 28: a success takes only the user's own
@@ -5673,6 +5690,7 @@ JOBS_HOOKS_CASE(audit23)
 JOBS_HOOKS_CASE(audit30)
 JOBS_HOOKS_CASE(audit38)
 JOBS_HOOKS_CASE(audit39)
+JOBS_HOOKS_CASE(audit41)
 #undef JOBS_HOOKS_CASE
 
 UTEST(lua_stdlib, ws_stream_suite)

@@ -7,6 +7,8 @@ import { db as dbModule } from "hull:db";
 const db = dbModule.default();
 const H = __testHooks('hull:web:middleware:idempotency');
 import { json } from "hull:json";
+import { crypto } from "hull:crypto";
+import { encoding } from "hull:encoding";
 
 let pass = 0;
 let fail = 0;
@@ -263,6 +265,38 @@ test("audit 39: a row in the old format still replays", () => {
     assertEq(mw(req, res), 1);
     assertEq(res._status, 200);
     assertEq(res._body, '{"old":true}');
+});
+
+test("audit 41: a NUL cannot make two requests' fingerprints collide", () => {
+    // Joined with "\0", these two hashed the same bytes.
+    const a = mockReq("POST", "/a", "\u0000b", { "idempotency-key": "a41-nul" });
+    const b = mockReq("POST", "/a\u0000", "b", { "idempotency-key": "a41-nul" });
+    const fa = H.computeFingerprint(a), fb = H.computeFingerprint(b);
+    assertEq(fa.slice(0, 2), "2:", "versioned");
+    assertEq(fa !== fb, true, "fingerprints differ");
+    const mw = idempotency.middleware();
+    const res1 = mockRes();
+    assertEq(mw(a, res1), 0);
+    idempotency.respond(a, res1, 200, { who: "a" });
+    const res2 = mockRes();
+    assertEq(mw(b, res2), 1);
+    assertEq(res2._status, 409, "a different request is refused, not replayed");
+});
+
+test("audit 41: a row an earlier version fingerprinted still replays", () => {
+    const mw = idempotency.middleware();
+    const req = mockReq("POST", "/old-fp", "x", { "idempotency-key": "a41-legacy" });
+    const old = encoding.hex.encode(crypto.sha256("POST\u0000/old-fp\u0000\u0000x"));
+    H.putLegacy("a41-legacy", "__anon", old, 200, '{"old":true}',
+                '{"content-type":"application/json"}');
+    const res = mockRes();
+    assertEq(mw(req, res), 1);
+    assertEq(res._status, 200, "replayed, not 409");
+    assertEq(res._body, '{"old":true}');
+    const other = mockReq("POST", "/old-fp", "y", { "idempotency-key": "a41-legacy" });
+    const res2 = mockRes();
+    assertEq(mw(other, res2), 1);
+    assertEq(res2._status, 409, "a different body is still refused");
 });
 
 test("audit 39: a key that is not printable ASCII is a 400", () => {

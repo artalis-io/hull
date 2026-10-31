@@ -902,6 +902,80 @@ case "$a38lua|$a38js" in
 esac
 jobs_reset_my
 
+# ── audit 41: a step whose result MySQL cannot store runs once ─────────
+# A ctx.step result over 64 KiB (TEXT) failed the step-memo INSERT after fn
+# ran: the attempt failed and every retry ran the side effect again, until
+# max_attempts. It now records the step as unstored and dead-letters the
+# workflow once. And a signal payload of exactly 65535 bytes was stored, then
+# failed the wait's "S" .. payload memo on every run: jobs.signal caps it at
+# 65534.
+echo "=== jobs: audit 41 (unstorable step result, signal cap) on MySQL ==="
+A41DIR=$(mktemp -d)
+cat > "$A41DIR/a41.lua" <<'LUA'
+local jobs = require("hull.jobs")
+app.manifest({ modules = { "hull/jobs@1" } })
+app.main(function(ctx)
+  jobs.init({ backoff = function() return 0 end })
+  local runs = 0
+  jobs.workflow("a41big", function(w)
+    w.step("fetch", function() runs = runs + 1; return string.rep("r", 70000) end)
+    return "done"
+  end)
+  local id = jobs.start("a41big", {}, { queue = "a41", max_attempts = 5 })
+  for _ = 1, 6 do pcall(jobs.work, { queue = "a41", batch = 1 }) end
+  local j = jobs.get(id)
+  local big = (j.last_error or ""):find("larger than 65535", 1, true) and 1 or 0
+  jobs.workflow("a41sig", function(w) return #w.wait_signal("go") end)
+  local s = jobs.start("a41sig", {}, { queue = "a41s" })
+  pcall(jobs.work, { queue = "a41s", batch = 1 })
+  local over = pcall(jobs.signal, s, "go", string.rep("x", 65533)) and 0 or 1
+  local fits = jobs.signal(s, "go", string.rep("x", 65532)) and 1 or 0
+  pcall(jobs.work, { queue = "a41s", batch = 1 })
+  local r = jobs.result(s)
+  ctx.stdout:write(("A41 runs=%d st=%s big=%d over=%d fits=%d sig=%s/%s\n"):format(
+    runs, j.status, big, over, fits, tostring(r and r.status), tostring(r and r.result)))
+  return 0
+end)
+LUA
+cat > "$A41DIR/a41.js" <<'JS'
+import { app } from "hull:app";
+import { jobs } from "hull:jobs";
+app.manifest({ modules: ["hull/jobs@1"] });
+app.main(async (ctx) => {
+    jobs.init({ backoff: () => 0 });
+    let runs = 0;
+    jobs.workflow("a41big", async (w) => {
+        await w.step("fetch", () => { runs++; return "r".repeat(70000); });
+        return "done";
+    });
+    const id = jobs.start("a41big", {}, { queue: "a41", maxAttempts: 5 });
+    for (let i = 0; i < 6; i++) { try { await jobs.work({ queue: "a41", batch: 1 }); } catch (_e) { /* counted below */ } }
+    const j = jobs.get(id);
+    const big = String(j.lastError || "").includes("larger than 65535") ? 1 : 0;
+    jobs.workflow("a41sig", async (w) => (await w.waitSignal("go")).length);
+    const s = jobs.start("a41sig", {}, { queue: "a41s" });
+    try { await jobs.work({ queue: "a41s", batch: 1 }); } catch (_e) { /* parked */ }
+    let over = 0;
+    try { jobs.signal(s, "go", "x".repeat(65533)); } catch (_e) { over = 1; }
+    const fits = jobs.signal(s, "go", "x".repeat(65532)) ? 1 : 0;
+    try { await jobs.work({ queue: "a41s", batch: 1 }); } catch (_e) { /* reported below */ }
+    const r = jobs.result(s);
+    ctx.stdout.write(`A41 runs=${runs} st=${j.status} big=${big} over=${over} fits=${fits} ` +
+        `sig=${r && r.status}/${r && r.result}\n`);
+    return 0;
+});
+JS
+a41lua=$(./build/hull "$A41DIR/a41.lua" -d "$DSN" 2>"$A41DIR/log")
+jobs_reset_my
+a41js=$(./build/hull "$A41DIR/a41.js" -d "$DSN" 2>>"$A41DIR/log")
+case "$a41lua|$a41js" in
+    *"A41 runs=1 st=dead big=1 over=1 fits=1 sig=done/65532"*"|"*"A41 runs=1 st=dead big=1 over=1 fits=1 sig=done/65532"*)
+        echo "PASS: a step result MySQL cannot store runs once; a signal payload is capped (MySQL)"
+        rm -rf "$A41DIR" ;;
+    *)  echo "::error jobs audit 41 on MySQL: lua=[$a41lua] js=[$a41js]"; cat "$A41DIR/log"; exit 1 ;;
+esac
+jobs_reset_my
+
 # ── audit 39: request / app text the stdlib stores (shared with Postgres) ─
 # Strict mode refused an idempotent response echoing request bytes and a
 # User-Agent with obs-text bytes after the side effect; idempotency did not
