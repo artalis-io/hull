@@ -1892,6 +1892,17 @@ int JS_GetPendingJobTag(JSRuntime *rt, uint64_t *ptag)
     return 1;
 }
 
+/* HULL PATCH 0010 (audit 41): see JS_ResetRunPhase in quickjs.h */
+void JS_ResetRunPhase(JSRuntime *rt)
+{
+    struct list_head *el;
+    rt->work_pending = 0;
+    list_for_each(el, &rt->context_list) {
+        JSContext *c = list_entry(el, JSContext, link);
+        c->interrupt_counter = JS_INTERRUPT_COUNTER_INIT;
+    }
+}
+
 /* HULL PATCH 0006: see JS_SetStopFlag in quickjs.h */
 void JS_SetStopFlag(JSRuntime *rt, int *flag)
 {
@@ -48455,6 +48466,19 @@ int lre_check_work(void *opaque, size_t bytes)
 {
     JSContext *ctx = opaque;
     return js_work_add(ctx->rt, bytes);
+}
+
+/* HULL PATCH 0010 (audit 41): the regexp class-string hash, keyed with
+   the runtime's hash key (patch 0009) */
+uint32_t lre_string_hash(void *opaque, const uint32_t *buf, int len)
+{
+    JSContext *ctx = opaque;
+    JSSipState st;
+    int i;
+    js_sip_init(&st, ctx->rt, 0x72657321);
+    for(i = 0; i < len; i++)
+        js_sip_u64(&st, buf[i]);
+    return js_sip_final(&st);
 }
 
 void *lre_realloc(void *opaque, void *ptr, size_t size)

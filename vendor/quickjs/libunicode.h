@@ -92,6 +92,8 @@ static inline int cr_union_interval(CharRange *cr, uint32_t c1, uint32_t c2)
 }
 
 int cr_invert(CharRange *cr);
+/* HULL PATCH 0010 (audit 41): cr |= pend, 'pend' unsorted; empties it */
+int cr_union_pending(CharRange *cr, CharRange *pend);
 
 int cr_regexp_canonicalize(CharRange *cr, int is_unicode);
 

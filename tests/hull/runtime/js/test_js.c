@@ -15878,4 +15878,261 @@ UTEST(js_audit40, small_calls_have_a_floor)
     cleanup_js_caps();
 }
 
+
+/* ── Audit 41: String normalize and RegExp compilation in linear time ───
+ *
+ * One builtin call that did quadratic work no budget or deadline could stop
+ * (QuickJS HULL PATCH 0010): canonical reordering of a long run of
+ * combining marks was an insertion sort (normalize / localeCompare), every
+ * class member rebuilt the class's whole range list, every '|' moved all
+ * the bytecode before it, and every lookbehind term moved the terms before
+ * it. The corpus below pins the results to what the old algorithms gave:
+ * the digest was captured before the change. */
+#define A41_CORPUS \
+    "let seed = 12345;\n" \
+    "const rnd = (n) => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 8) % n; };\n" \
+    "let h = 0x811c9dc5;\n" \
+    "const mix = (s) => { s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } h ^= 0x2c; h = Math.imul(h, 16777619) >>> 0; };\n" \
+    "const marks = [0x300, 0x316, 0x334, 0x345, 0x5b0, 0x670, 0x93c, 0xe38, 0x302a, 0x1d165, 0xf71, 0x327, 0x328, 0x308, 0x301, 0x34f, 0x1dc0, 0x20d2, 0x5c4, 0x8f0];\n" \
+    "const bases = [0x61, 0x65, 0x6f, 0x75, 0x41, 0x55, 0x3b1, 0x435, 0xe9, 0x1d6, 0xfb01, 0x2460, 0xac00, 0xd7a3, 0x1100, 0x1161, 0x11a8, 0x3060, 0x309a, 0x212b, 0x1e9b, 0x20, 0x31];\n" \
+    "const fc = String.fromCodePoint;\n" \
+    "const strs = [];\n" \
+    "for (let n = 0; n < 400; n++) {\n" \
+    "    let s = '';\n" \
+    "    const len = 1 + rnd(14);\n" \
+    "    for (let k = 0; k < len; k++) s += rnd(3) ? fc(marks[rnd(marks.length)]) : fc(bases[rnd(bases.length)]);\n" \
+    "    strs.push(s);\n" \
+    "}\n" \
+    "let longRun = 'a';\n" \
+    "for (let k = 0; k < 3000; k++) longRun += fc(marks[(k * 7) % 11]);\n" \
+    "strs.push(longRun, longRun + 'b' + longRun.slice(1), '', 'plain ascii', '\\u1e9b\\u0323', 'E\\u0301\\u0328\\u0300');\n" \
+    "for (const s of strs) for (const f of ['NFC', 'NFD', 'NFKC', 'NFKD']) mix(Array.from(s.normalize(f), (c) => c.codePointAt(0).toString(16)).join(' '));\n" \
+    "for (let i = 0; i + 1 < strs.length; i++) mix(Math.sign(strs[i].localeCompare(strs[i + 1])));\n" \
+    "mix(longRun.localeCompare(longRun.normalize('NFD')));\n" \
+    "const res = [];\n" \
+    "const tryRe = (src, fl) => { try { return new RegExp(src, fl); } catch (e) { return e.constructor.name; } };\n" \
+    "const subjects = ['', 'a', 'A', 'z', 'Z', '0', '9', '_', '-', ']', '\\\\', 'k', 'K', '\\u212a', '\\u017f', 's', 'S', '\\u00e9', '\\u00c9', 'ss', '\\u00df', '\\u0130', 'i', 'I', '\\u0131', 'ab', 'abc', 'xyz', '\\u{1f600}', '\\u{1f1fa}\\u{1f1f8}', '\\ud83d', 'foo', 'bar', 'foobar', 'barfoo', 'q', '\\u0391', '\\u03b1', '\\u2028', ' ', '\\t'];\n" \
+    "const pats = [\n" \
+    "    ['[abc]', ''], ['[a-z]', 'i'], ['[^a-z0-9_]', ''], ['[\\\\w-]', ''], ['[\\\\d\\\\s]', 'u'], ['[\\\\W]', 'iu'],\n" \
+    "    ['[k-k]', 'iu'], ['[\\\\u017f]', 'iu'], ['[a-f\\\\x41-\\\\x46]', 'i'], ['[\\\\p{L}]', 'u'], ['[\\\\p{Lu}]', 'iu'],\n" \
+    "    ['[\\\\P{Ll}]', 'iu'], ['[^\\\\p{L}\\\\d]', 'u'], ['[\\\\p{Script=Greek}]', 'iu'], ['[a-c]|[x-z]', ''],\n" \
+    "    ['[\\\\q{ss|abc|a}]', 'v'], ['[\\\\q{ss|\\\\u00df}]', 'vi'], ['[\\\\p{RGI_Emoji}]', 'v'], ['[[a-z]--[aeiou]]', 'v'],\n" \
+    "    ['[[a-z]&&[a-f]]', 'vi'], ['[\\\\w--\\\\d]', 'v'], ['[^[a-z]--k]', 'vi'], ['[\\\\p{L}&&\\\\p{Lu}]', 'v'],\n" \
+    "    ['[[abc][xyz]q]', 'v'], ['foo|bar|baz', ''], ['(?:a|ab|abc)c', ''], ['^(?:x|foo|foob)ar$', 'i'],\n" \
+    "    ['(a|b|c|d)+', ''], ['(?<=foo|ba)r', ''], ['(?<=abc)', ''], ['(?<!a|b|z)b', ''], ['(?<=(?:\\\\w)+)$', ''],\n" \
+    "    ['(?<n>a)|(?<n>b)', ''], ['a|', ''], ['|a', ''], ['(?:|x)y', ''], ['(?<=a|bc|)c', 'i'],\n" \
+    "    ['[\\\\]-]', ''], ['[a-]', ''], ['[-z]', ''], ['[\\\\d-z]', ''], ['[\\\\b]', ''], ['[\\\\cJ]', ''], ['[z-a]', ''],\n" \
+    "    ['[\\\\u{10000}-\\\\u{10ffff}]', 'u'], ['[\\\\uD83D\\\\uDE00]', ''], ['[\\\\uD83D\\\\uDE00]', 'u'], ['[\\\\q{}]', 'v'],\n" \
+    "];\n" \
+    "for (let n = 0; n < 60; n++) {\n" \
+    "    let c = '[' + (rnd(4) ? '' : '^');\n" \
+    "    const m = 1 + rnd(12);\n" \
+    "    for (let k = 0; k < m; k++) {\n" \
+    "        const a = 0x20 + rnd(0x250);\n" \
+    "        const t = rnd(5);\n" \
+    "        const esc = (x) => '\\\\u{' + x.toString(16) + '}';\n" \
+    "        if (t === 0) c += esc(a) + '-' + esc(a + rnd(40));\n" \
+    "        else if (t === 1) c += ['\\\\d', '\\\\w', '\\\\s', '\\\\D'][rnd(4)];\n" \
+    "        else c += esc(a);\n" \
+    "    }\n" \
+    "    c += ']';\n" \
+    "    pats.push([c, ['u', 'iu', 'v', 'vi'][rnd(4)]]);\n" \
+    "}\n" \
+    "for (let n = 0; n < 30; n++) {\n" \
+    "    const alts = [];\n" \
+    "    const m = 1 + rnd(9);\n" \
+    "    for (let k = 0; k < m; k++) { let w = ''; const l = rnd(4); for (let j = 0; j < l; j++) w += 'abfoqrxz'[rnd(8)]; alts.push(w); }\n" \
+    "    const src = alts.join('|');\n" \
+    "    pats.push([src, rnd(2) ? 'i' : ''], ['^(?:' + src + ')+$', ''], ['(?<=' + src + ')r', ''], ['(?<!' + alts.join('') + ')' , '']);\n" \
+    "}\n" \
+    "const big = [];\n" \
+    "for (let k = 0; k < 300; k++) big.push('\\\\u{' + (0x100 + k * 3).toString(16) + '}');\n" \
+    "pats.push(['[' + big.join('') + ']', 'u'], ['[' + big.join('') + ']', 'iu'], [big.join('|'), 'u'], ['(?<=' + big.join('') + ')x', 'u']);\n" \
+    "const subj2 = subjects.concat(['\\u0100', '\\u0103', '\\u0101', '\\u012c', 'foor', 'bar', 'bcr', 'cr', 'qr', 'xr', 'zbr', 'abfr']);\n" \
+    "let nAll = 0;\n" \
+    "for (const [src, fl] of pats) {\n" \
+    "    const re = tryRe(src, fl);\n" \
+    "    if (typeof re === 'string') { mix(src + '/' + fl + '=' + re); continue; }\n" \
+    "    for (const s of subj2) {\n" \
+    "        const m = re.exec(s);\n" \
+    "        mix(m ? m.index + ':' + m.map(String).join(',') : '-');\n" \
+    "        nAll++;\n" \
+    "    }\n" \
+    "}\n" \
+    "const back = big.join('');\n" \
+    "const lb = new RegExp('(?<=' + back + ')x', 'u');\n" \
+    "mix(lb.test(Array.from({ length: 300 }, (_, k) => String.fromCodePoint(0x100 + k * 3)).join('') + 'x'));\n" \
+    "globalThis.__a41_digest = h.toString(16) + ':' + nAll;\n"
+
+static int a41_eval(HlJS *lim, const char *code, long *ms)
+{
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int threw = a5_eval_throws(lim, code);
+    if (ms) *ms = a10_ms_since(&t0);
+    return threw;
+}
+
+static int a41_global_is(HlJS *lim, const char *name, const char *want)
+{
+    JSValue v = JS_Eval(lim->ctx, name, strlen(name), "<t>",
+                        JS_EVAL_TYPE_GLOBAL);
+    const char *s = JS_ToCString(lim->ctx, v);
+    int ok = s && strcmp(s, want) == 0;
+    if (!ok) fprintf(stderr, "%s = %s, want %s\n", name, s ? s : "?", want);
+    JS_FreeCString(lim->ctx, s);
+    JS_FreeValue(lim->ctx, v);
+    return ok;
+}
+
+UTEST(js_audit41, normalize_and_regexp_results_unchanged)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 2000000000), 0);
+    hl_js_reset_request(&lim);
+    EXPECT_FALSE(a41_eval(&lim, A41_CORPUS, NULL));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    EXPECT_TRUE(a41_global_is(&lim, "globalThis.__a41_digest",
+                              "4da70b16:12243"));
+    hl_js_free(&lim);
+}
+#undef A41_CORPUS
+
+/* A run of 160k combining marks in four classes, out of order: it took
+ * minutes, and is milliseconds now - each form well under the default
+ * budget - with the marks in stable class order and NFC composing the
+ * starter across the run (the starter is found without a walk back). */
+UTEST(js_audit41, normalize_is_linear)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    hl_js_reset_request(&lim);
+    long ms = 0;
+    EXPECT_FALSE(a41_eval(&lim,
+        "const n = 40000, M = ['\\u0345', '\\u0316', '\\u0300', '\\u0334'];\n"
+        "let s = 'a'; for (let k = 0; k < 4 * n; k++) s += M[k & 3];\n"
+        "const r = (c, k) => c.repeat(k);\n"
+        "const nfd = 'a' + r('\\u0334', n) + r('\\u0316', n) + r('\\u0300', n) + r('\\u0345', n);\n"
+        "if (s.normalize('NFD') !== nfd) throw 1;\n"
+        "if (s.normalize('NFKD') !== nfd) throw 2;\n"
+        "const nfc = '\\u00e0' + r('\\u0334', n) + r('\\u0316', n) + r('\\u0300', n - 1) + r('\\u0345', n);\n"
+        "if (s.normalize('NFC') !== nfc) throw 3;\n"
+        "if (s.normalize('NFKC') !== nfc) throw 4;\n"
+        "if (s.localeCompare(nfd) !== 0) throw 5;\n"
+        "if (s.localeCompare(nfd + 'b') >= 0) throw 6;\n", &ms));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    EXPECT_LT(ms, 5000L);
+    hl_js_free(&lim);
+}
+
+/* Large classes (u, ui, v, a '--' chain, a \q set), alternations and
+ * lookbehinds compile in milliseconds - each took seconds to minutes - and
+ * still match exactly what they should. */
+UTEST(js_audit41, large_compiles_are_linear)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    hl_js_reset_request(&lim);
+    long ms = 0;
+    EXPECT_FALSE(a41_eval(&lim,
+        "const N = 60000, cp = (k) => 0x10000 + 2 * k;\n"
+        "let m = ''; for (let k = 0; k < N; k++) m += String.fromCodePoint(cp(k));\n"
+        "const has = (re, k) => re.test(String.fromCodePoint(k));\n"
+        "for (const f of ['u', 'ui', 'v', 'vi']) {\n"
+        "  const re = new RegExp('^[' + m + ']$', f);\n"
+        "  if (!has(re, cp(0)) || !has(re, cp(N - 1)) || !has(re, cp(777))) throw 'in ' + f;\n"
+        "  if (has(re, cp(0) + 1) || has(re, cp(N)) || has(re, 0x41)) throw 'out ' + f;\n"
+        "}\n"
+        "let sub = ''; for (let k = 0; k < N; k += 2) sub += '--' + String.fromCodePoint(cp(k));\n"
+        "const d = new RegExp('^[[' + m + ']' + sub + ']$', 'v');\n"
+        "if (has(d, cp(0)) || !has(d, cp(1)) || has(d, cp(N - 2)) || !has(d, cp(N - 1))) throw 'sub';\n"
+        "const q = new RegExp('^[\\\\q{' + Array.from({ length: N }, (_, k) => 'w' + k).join('|') + '}]$', 'v');\n"
+        "if (!q.test('w0') || !q.test('w59999') || q.test('w60000') || q.test('w')) throw 'q';\n"
+        "const alts = Array.from({ length: 160000 }, (_, k) => 'x' + k);\n"
+        "const a = new RegExp('^(?:' + alts.join('|') + ')$');\n"
+        "if (!a.test('x0') || !a.test('x159999') || !a.test('x80000') || a.test('x160000')) throw 'alt';\n"
+        "const lb = new RegExp('(?<=' + 'ab'.repeat(80000) + ')c', 'y');\n"
+        "lb.lastIndex = 160000; if (!lb.test('ab'.repeat(80000) + 'c')) throw 'lb1';\n"
+        "lb.lastIndex = 160000; if (lb.test('b' + 'ab'.repeat(79999) + 'c')) throw 'lb2';\n",
+        &ms));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    EXPECT_LT(ms, 5000L);
+    hl_js_free(&lim);
+}
+
+/* Ordinary use, against the semantics the new code paths take over: class
+ * unions and Annex B ranges, case folding, \p classes, '&&' / '--' chains,
+ * \q strings longest-first, the alternation split chain (first match wins,
+ * backtracking into later alternatives) and lookbehind term order. */
+UTEST(js_audit41, ordinary_use_still_works)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    hl_js_reset_request(&lim);
+    EXPECT_FALSE(a41_eval(&lim,
+        "const eq = (a, b, n) => { if (a !== b) throw new Error(n + ': ' + a + ' !== ' + b); };\n"
+        "eq(/^[a-cx-z\\d_]+$/.test('abz9_'), true, 1);\n"
+        "eq(/[\\d-z]/.test('-'), true, 2);\n"
+        "eq(/[^a-z]/i.test('Q'), false, 3);\n"
+        "eq(/[\\u212a]/iu.test('k'), true, 4);\n"
+        "eq(/[\\u017f]/i.test('s'), false, 5);\n"
+        "eq(/^[\\p{Lu}\\d]+$/u.test('AB1'), true, 6);\n"
+        "eq(/[[a-z]&&[c-e]]/v.test('d') && !/[[a-z]&&[c-e]]/v.test('b'), true, 7);\n"
+        "eq(/^[[a-z]--[aeiou]--[xyz]]+$/v.test('bcd') && !/[[a-z]--[aeiou]--x]/v.test('x'), true, 8);\n"
+        "eq('abc'.match(/[\\q{a|abc|ab}]/v)[0], 'abc', 9);\n"
+        "eq('SS'.match(/[\\q{ss|s}]/vi)[0], 'SS', 10);\n"
+        "eq('foobar'.match(/foo|foob|foobar/)[0], 'foo', 11);\n"
+        "eq('foobar'.match(/(?:foo|foob)ar/)[0], 'foobar', 12);\n"
+        "eq('xab'.replace(/(?<=x)ab|b/, '_'), 'x_', 13);\n"
+        "eq('abc'.match(/(?<=(a)(b))c/).slice(1).join(), 'a,b', 14);\n"
+        "eq('a1b2c3'.replace(/(?<=[a-c])\\d/g, '#'), 'a#b#c#', 15);\n"
+        "eq(/^(?:|a|b)$/.test(''), true, 16);\n"
+        "eq(/(?<n>x)|(?<n>y)/.exec('y').groups.n, 'y', 17);\n"
+        "let e = 0; try { new RegExp('[z-a]'); } catch (x) { e = x instanceof SyntaxError; } eq(e, true, 18);\n"
+        "e = 0; try { new RegExp('[^\\\\q{ab}]', 'v'); } catch (x) { e = x instanceof SyntaxError; } eq(e, true, 19);\n"
+        "eq('\\u1e9b\\u0323'.normalize('NFC'), '\\u1e9b\\u0323', 20);\n"
+        "eq('\\u1e9b\\u0323'.normalize('NFKC'), '\\u1e69', 21);\n"
+        "eq('\\u0045\\u0301\\u0328\\u0300'.normalize('NFD'), 'E\\u0328\\u0301\\u0300', 22);\n"
+        "eq('\\u1100\\u1161\\u11a8'.normalize('NFC'), '\\uac01', 23);\n"
+        "eq('a\\u0300\\u0300'.normalize('NFC'), '\\u00e0\\u0300', 24);\n", NULL));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+
+/* A compile still large after the fix is charged: under a small budget it
+ * trips, uncatchably (the catch never runs), quickly. */
+UTEST(js_audit41, large_compiles_are_charged)
+{
+    static const char *const srcs[] = {
+        "new RegExp('[' + P + ']', 'u');",
+        "new RegExp('[' + P + ']', 'v');",
+        "new RegExp(A);",
+        "new RegExp('(?<=' + A.replaceAll('|', '') + ')');",
+    };
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 0), 0);
+    hl_js_reset_request(&lim);
+    ASSERT_FALSE(a5_eval_throws(&lim,
+        "globalThis.P = Array.from({ length: 400000 },"
+        " (_, k) => String.fromCodePoint(0x10000 + 2 * k)).join('');\n"
+        "globalThis.A = 'ab|'.repeat(400000) + 'ab';\n"));
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "globalThis.__a41 = 0;\n"
+                 "try { %s } catch (e) { globalThis.__a41 = 1; }\n", srcs[i]);
+        lim.max_instructions = 60000;
+        hl_js_reset_request(&lim);
+        long ms = 0;
+        EXPECT_TRUE_MSG(a41_eval(&lim, code, &ms), srcs[i]);
+        EXPECT_EQ_MSG(lim.budget_tripped, 1, srcs[i]);
+        EXPECT_LT_MSG(ms, 5000L, srcs[i]);
+        lim.max_instructions = 0;
+        hl_js_reset_request(&lim);
+        EXPECT_TRUE_MSG(a41_global_is(&lim, "String(globalThis.__a41)", "0"),
+                        srcs[i]);
+    }
+    hl_js_free(&lim);
+}
+
 UTEST_MAIN();

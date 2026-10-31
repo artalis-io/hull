@@ -958,6 +958,13 @@ size_t JS_GetMallocSize(JSRuntime *rt);
    valid until it is replaced or the runtime is freed. See Hull's
    docs/quickjs_patches.md. */
 void JS_SetStopFlag(JSRuntime *rt, int *flag);
+/* HULL PATCH 0010 (audit 41): start a new run's charging from the same
+   phase every time: every context's step countdown back to its full
+   interval and the deferred work charge (patch 0005) dropped. Without it
+   a run's first poll (weighing a whole interval) and its first work flush
+   (up to one batch) landed wherever the previous run had left them. Call
+   when the embedder re-arms its budget. See Hull's docs/quickjs_patches.md. */
+void JS_ResetRunPhase(JSRuntime *rt);
 /* HULL PATCH 0008: a tag the embedder gives the code it runs. A job runs
    with the tag current when it was queued - a promise reaction job with
    the tag current when its handler was registered (the `await` or `then`),
