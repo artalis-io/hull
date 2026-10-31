@@ -334,6 +334,24 @@ release-artifact layout).
   constructors, `Promise.all` and kin. The interrupt raised inside such a loop also left it
   CATCHABLE (`JS_IteratorClose` re-threw it with the flag cleared); it stays uncatchable and runs
   no `return` method (HULL PATCH 0003). Covered by the `js_audit38` cases in `test_js`.
+- **`mime.sniff`, a WebSocket server ping and per-frame ws / SSE sends were charged little or
+  nothing** (audit 40, both runtimes). `mime.sniff` charged nothing, and after an XML
+  declaration, doctype or comment its `<svg` / `<html` scan compared at every byte of the 4 KiB
+  window (~16 us a call; a window of `<` ~120 us): a loop of `mime.sniff("<?xml" .. rep)` ran
+  ~300 s per 100M budget. The scan now tests the first byte and compares inline (worst path
+  ~9 us), and the call is charged 64 units plus 1 per 4 window bytes before it. The server
+  `conn:ping()` / `conn.ping()` was not charged at all (~8M pings a minute, held only by the run
+  deadline); it is charged as a send now, and re-checks the connection after converting its
+  payload (Lua; JS already did). Every ws frame (send / send_binary / ping, server and client,
+  per destination for `ws.broadcast`) and SSE event cost 1-3 units for ~5 us of framing and
+  syscalls - `conn:send("")` in a loop tripped at ~61 s, `stream:comment("")` at ~45 s, a
+  1000-line comment at ~42 s; the floors are the measured cost now (320 units a frame, 320 an
+  SSE event plus 32 a line), so each loop trips in ~1.3-1.6 s. Also given floors: `env.get`,
+  `time.date` / `time.datetime`, `crypto.key_from_env` / `keyFromEnv` (loops tripped in ~5 s),
+  `ws.connect` (the outbound-request floor, before the DNS / socket / connect), and a terminal
+  (re)acquire by `tui.enter` after `tui.leave` (a floor plus its measured time, capped at 2 ms -
+  past that the OSC 11 query is waiting on a terminal that does not answer, which the run
+  deadline bounds). Covered by the `lua_audit40` / `js_audit40` cases in `test_lua` / `test_js`.
 - **A JS `tui.run` loop outside app.main renewed its own run limit** (audit 32). `tui.pollSync`
   re-arms the instruction budget and the run deadline on each event (and after 50 ms of
   waiting), meant for app.main's interactive session; but a timer, a WebSocket callback or a

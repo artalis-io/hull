@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_CALL_UNITS (audit 40) */
 #include "hull/cap/time.h"
 #include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
@@ -34,6 +35,8 @@ static JSValue js_time_date(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     char buf[16];
+    if (hl_js_budget_charge(ctx, HL_WORK_CALL_UNITS))   /* audit 40 */
+        return JS_EXCEPTION;
     if (hl_cap_time_date(buf, sizeof(buf)) != 0)
         return JS_ThrowInternalError(ctx, "time.date() failed");
     return JS_NewString(ctx, buf);
@@ -44,6 +47,8 @@ static JSValue js_time_datetime(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     char buf[32];
+    if (hl_js_budget_charge(ctx, HL_WORK_CALL_UNITS))   /* audit 40 */
+        return JS_EXCEPTION;
     if (hl_cap_time_datetime(buf, sizeof(buf)) != 0)
         return JS_ThrowInternalError(ctx, "time.datetime() failed");
     return JS_NewString(ctx, buf);

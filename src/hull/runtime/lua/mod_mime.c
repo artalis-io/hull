@@ -5,6 +5,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/mime.h"
+#include "hull/shared/work_charge.h"   /* hl_work_mime_units (audit 40) */
 
 /* ════════════════════════════════════════════════════════════════════
  * hull.mime module
@@ -26,6 +27,9 @@ static int lua_mime_sniff(lua_State *L)
 {
     size_t len = 0;
     const char *bytes = luaL_checklstring(L, 1, &len);
+    /* Charged before the scan (audit 40): it reads up to the sniff window
+     * several times and was free, so a loop of it ran ~300 s a budget. */
+    lua_hlwork(L, (size_t)hl_work_mime_units(len), 0);
     const char *mime = hl_cap_mime_sniff((const uint8_t *)bytes, len);
     if (mime) lua_pushstring(L, mime);
     else      lua_pushnil(L);

@@ -678,8 +678,12 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
      * connection was not freed yet goes with a collection, so at the cap
      * collect once and look again. The object owns the slot from here: its
      * finalizer gives it back. */
-    int gc_tripped = js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE &&
-                     hl_js_gc_for_retry(ctx) != 0;   /* charged (audit 39) */
+    /* The connect - DNS, socket, connect, the TLS handshake for wss:// -
+     * charged before it as an outbound HTTP request is (audit 40: free, so
+     * a loop of refused connects ran on). */
+    int gc_tripped = hl_js_budget_charge(ctx, HL_WORK_WS_CONNECT_UNITS) != 0 ||
+                     (js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE &&
+                      hl_js_gc_for_retry(ctx) != 0);   /* charged (audit 39) */
     if (gc_tripped || js->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE) {
         JS_FreeCString(ctx, url);
         JS_FreeValue(ctx, ud->self_ref);

@@ -51,7 +51,16 @@ static HlTuiCtx *g_ctx = NULL;
 static int ensure_acquired(lua_State *L)
 {
     if (g_ctx) return 0;
+    /* Charged (audit 40): the floor before, the time the acquire took
+     * after, capped (the OSC 11 query waits up to 50 ms on a terminal that
+     * does not answer: a wait, bounded by the run deadline). */
+    lua_hlwork(L, HL_WORK_TUI_ACQUIRE_UNITS, 0);
+    int64_t t0 = hl_work_clock_us();
     int rc = hl_cap_tui_acquire(&g_ctx);
+    int saved = errno;
+    lua_hlwork(L, (size_t)hl_work_wall_us_units(hl_work_clock_us() - t0,
+                                                 HL_WORK_TUI_ACQUIRE_CAP_US), 0);
+    errno = saved;
     if (rc != 0) {
         if (errno == EBUSY) {
             return luaL_error(L, "tui: another TUI session is already active in this process");

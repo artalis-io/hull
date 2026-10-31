@@ -6,12 +6,15 @@
  */
 
 #include "hull/cap/mime.h"
+#include "hull/shared/work_charge.h"
 #include <string.h>
 
-/* Sniff window: inspect up to this many bytes for shape heuristics
- * (SVG / HTML scans and UTF-8 validation). The binary magic-byte
- * signatures only need their own length. */
-#define HL_MIME_SNIFF_WINDOW 4096
+/* Sniff window (cap/mime.h): inspect up to this many bytes for shape
+ * heuristics (SVG / HTML scans and UTF-8 validation). The binary
+ * magic-byte signatures only need their own length. The bindings charge
+ * by the same window (audit 40). */
+_Static_assert(HL_MIME_SNIFF_WINDOW == HL_WORK_MIME_WINDOW,
+               "mime.sniff's charge must cover its window");
 
 /* ── Binary magic-byte signatures (offset 0, exact match) ────────── */
 
@@ -90,9 +93,20 @@ static int contains_ci(const uint8_t *buf, size_t len, const char *needle,
     if (nlen == 0 || len < nlen) return 0;
     size_t cap = len < window ? len : window;
     if (cap < nlen) return 0;
+    /* Every needle is lowercase and starts with '<' (no case to fold), so
+     * test the first byte and compare inline: the scan was a strlen and a
+     * call at every byte of the window, uncharged (audit 40). */
+    const uint8_t first = (uint8_t)needle[0];
     for (size_t i = 0; i + nlen <= cap; i++) {
-        if (ci_starts_with(buf + i, cap - i, needle))
-            return 1;
+        if (buf[i] != first) continue;
+        size_t k = 1;
+        while (k < nlen) {
+            uint8_t b = buf[i + k];
+            if (b >= 'A' && b <= 'Z') b = (uint8_t)(b + 32);
+            if (b != (uint8_t)needle[k]) break;
+            k++;
+        }
+        if (k == nlen) return 1;
     }
     return 0;
 }

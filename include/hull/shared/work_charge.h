@@ -15,6 +15,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 /* Bytes copied, read or hashed in one call: one unit per 8. */
 static inline uint64_t hl_work_bytes_units(uint64_t bytes)
@@ -31,12 +32,42 @@ static inline uint64_t hl_work_bulk_units(uint64_t bytes)
     return bytes / 64;
 }
 
+/* ── WebSocket frames, SSE events, mime.sniff (audits 14, 40) ─────────
+ *
+ * Every frame or event is a frame build and a transport write whatever its
+ * size, and the old per-frame floor of 1 unit was ~100x too low: a loop of
+ * conn:send("") ran ~61 s per 100M budget, stream:comment("") ~45 s, a
+ * 1000-line comment ~42 s, and the server conn:ping() was not charged at
+ * all (audit 40). Same rate as the fs floors (64 units per microsecond),
+ * measured on macOS 26, arm64, with a client draining the socket:
+ *
+ *   ws send / send_binary / ping, server or client, per frame and per
+ *     destination (ws.broadcast)     ~4.3-4.6 us -> HL_WORK_WS_FRAME_UNITS  320
+ *   SSE event / comment, per call          ~4.9 us -> HL_WORK_SSE_EVENT_UNITS 320
+ *   SSE, per line (each its own field)    ~0.47 us -> HL_WORK_SSE_LINE_UNITS   32
+ *
+ * plus one unit per 8 bytes. A budget-sized loop of any of them trips in
+ * ~1.3-1.6 s.
+ *
+ * mime.sniff reads at most its window (HL_MIME_SNIFF_WINDOW, cap/mime.h):
+ * UTF-8 validation, the "<svg" / "<html" scans after an XML declaration,
+ * doctype or comment, ~35 tag prefixes. Its worst path is ~9-10 us over a
+ * full window (a window of '<' after "<?xml": both scans) - one unit per 4
+ * window bytes, ~2x margin - plus HL_WORK_MIME_UNITS for the call. It
+ * charged nothing, and its scan compared at every byte: a loop of
+ * `mime.sniff("<?xml" .. rep)` ran ~300 s per budget. */
+#define HL_WORK_WS_FRAME_UNITS        320u
+#define HL_WORK_SSE_EVENT_UNITS       320u
+#define HL_WORK_SSE_LINE_UNITS         32u
+#define HL_WORK_MIME_UNITS             64u
+#define HL_WORK_MIME_WINDOW          4096u   /* == HL_MIME_SNIFF_WINDOW */
+
 /* One message of @p len bytes framed and queued to each of @p dests
- * connections (ws send = 1, ws.broadcast = the endpoint's connection count):
- * one unit per 8 bytes plus one per frame, per destination (audit 14). */
+ * connections (ws send / ping = 1, ws.broadcast = the endpoint's connection
+ * count): one unit per 8 bytes plus the frame floor, per destination. */
 static inline uint64_t hl_work_send_units(size_t len, size_t dests)
 {
-    uint64_t per = (uint64_t)len / 8 + 1;
+    uint64_t per = (uint64_t)len / 8 + HL_WORK_WS_FRAME_UNITS;
     if (dests && per > UINT64_MAX / dests) return UINT64_MAX;
     return per * (uint64_t)dests;
 }
@@ -44,17 +75,24 @@ static inline uint64_t hl_work_send_units(size_t len, size_t dests)
 /* An SSE event / comment: Keel writes every line of @p text as its own field
  * (prefix, value and newline), so a text of newlines is several framing
  * bytes per byte. Since Keel 3.3.1 those pieces are batched (32 per HTTP
- * chunk, coalesced through a 4 KiB buffer into one transport write), so the
- * cost is the splitting and the framing, no longer a write per piece. One
- * unit per 8 bytes plus one per line - each CR or LF starts one (audit 14).
- * @p extra is the length of the event name and id, written as one field
- * each. */
+ * chunk, coalesced through a 4 KiB buffer into one transport write). One
+ * unit per 8 bytes, the line rate per line - each CR or LF starts one - and
+ * the event floor. @p extra is the length of the event name and id, written
+ * as one field each. */
 static inline uint64_t hl_work_sse_units(const char *text, size_t len, size_t extra)
 {
     uint64_t lines = 1;
     for (size_t i = 0; i < len; i++)
         if (text[i] == '\n' || text[i] == '\r') lines++;
-    return ((uint64_t)len + extra) / 8 + lines + 2;
+    return ((uint64_t)len + extra) / 8 + lines * HL_WORK_SSE_LINE_UNITS +
+           HL_WORK_SSE_EVENT_UNITS;
+}
+
+/* mime.sniff over @p len bytes. */
+static inline uint64_t hl_work_mime_units(size_t len)
+{
+    size_t w = len < HL_WORK_MIME_WINDOW ? len : HL_WORK_MIME_WINDOW;
+    return HL_WORK_MIME_UNITS + (uint64_t)w / 4;
 }
 
 /* ── Filesystem / blob calls (audits 37, 38) ──────────────────────────
@@ -189,8 +227,46 @@ static inline uint64_t hl_work_sse_units(const char *text, size_t len, size_t ex
  *     plus the frame a flush writes (1 per 8 bytes), once it is built
  */
 #define HL_WORK_HTTP_REQUEST_UNITS   16384u
+/* ws.connect: the same DNS / socket / connect / TLS work (audit 40). */
+#define HL_WORK_WS_CONNECT_UNITS     HL_WORK_HTTP_REQUEST_UNITS
 #define HL_WORK_X509_UNITS            1024u
 #define HL_WORK_TUI_UNITS               64u
+
+/* Calls with no size to charge by (audit 40): env.get (getenv and the
+ * allowlist scan), time.date / time.datetime (clock_gettime, gmtime_r,
+ * snprintf), ~0.2-0.3 us each, and crypto.key_from_env (~0.8 us: the env read, a
+ * hex / base64 decode and a locked key page). A loop of them ran ~5 s per
+ * 100M budget. */
+#define HL_WORK_CALL_UNITS              16u
+#define HL_WORK_KEY_FROM_ENV_UNITS      64u
+
+/* A terminal (re)acquire - tui.enter after tui.leave, or the first call:
+ * the tty open, tcgetattr / tcsetattr, the screen setup and the OSC 11
+ * theme query, which waits for the terminal's answer up to 50 ms. The
+ * floor is charged before, the measured time (64 units per us) after, up
+ * to HL_WORK_TUI_ACQUIRE_CAP_US: past that it is the terminal not
+ * answering, a wait the run deadline bounds as it bounds the other waits,
+ * and charging all 50 ms (3.2M units) would spend a small budget on the
+ * first frame (audit 40: a leave / enter loop was free). */
+#define HL_WORK_TUI_ACQUIRE_UNITS     4096u
+#define HL_WORK_TUI_ACQUIRE_CAP_US    2000
+
+/* A monotonic clock in microseconds, for the calls charged by the time
+ * they took (0 if the clock fails: the floor still applies). */
+static inline int64_t hl_work_clock_us(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000000 + (int64_t)ts.tv_nsec / 1000;
+}
+
+/* Measured time of @p us microseconds, at the 64-units-per-us rate, at
+ * most @p cap_us of it. */
+static inline uint64_t hl_work_wall_us_units(int64_t us, int64_t cap_us)
+{
+    if (us > cap_us) us = cap_us;
+    return us > 0 ? (uint64_t)us * 64u : 0;
+}
 
 /* An outbound HTTP request carrying @p body_len bytes. */
 static inline uint64_t hl_work_http_request_units(size_t body_len)

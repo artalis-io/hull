@@ -35,6 +35,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** Bytes the shape heuristics inspect at most (SVG / HTML scans, UTF-8
+ *  validation). The bindings charge by it (hl_work_mime_units). */
+#define HL_MIME_SNIFF_WINDOW 4096
+
 /**
  * @brief Sniff the MIME type of a buffer by inspecting its leading
  *        bytes.

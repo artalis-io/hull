@@ -15747,4 +15747,135 @@ UTEST(js_audit40, ordinary_json_parse_still_fits)
 }
 #undef A40_OBJ
 
+/* ── Audit 40: mime.sniff, ws server ping, per-frame ws / SSE floors ──
+ *
+ * The twins of lua_audit40: mime.sniff charged nothing (~16 us a call after
+ * an XML declaration), the server conn.ping() was not charged, and a ws
+ * frame / SSE event cost 1-3 units for ~5 us of framing and syscalls. */
+
+#include "hull/shared/work_charge.h"   /* hl_work_send_units */
+
+UTEST(js_audit40, mime_sniff_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a10_run_tripped(
+        "import { mime } from 'hull:mime';\n"
+        "const x = '<?xml' + '<'.repeat(8000);\n"
+        "for (let i = 0; i < 1000; i++) { try { mime.sniff(x); } catch (e) {} }",
+        500000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "import { mime } from 'hull:mime';\n"
+        "const x = new Uint8Array(8000).fill(60); x.set([60, 63, 120, 109, 108]);\n"
+        "for (let i = 0; i < 1000; i++) mime.sniff(x.buffer);",
+        500000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "import { mime } from 'hull:mime';\n"
+        "const eq = (a, b) => { if (a !== b) throw new Error(a + ' != ' + b); };\n"
+        "for (let i = 0; i < 100; i++) eq(mime.sniff('hello'), 'text/plain');\n"
+        "eq(mime.sniff('<?xml version=\"1.0\"?><SVG/>'), 'image/svg+xml');\n"
+        "eq(mime.sniff('<?xml?><!DOCTYPE html><HTML>'), 'text/html');\n"
+        "eq(mime.sniff('<?xml' + '<'.repeat(8000)), 'application/xml');\n"
+        "eq(mime.sniff('<?xml<<svg'), 'image/svg+xml');\n"
+        "globalThis.__a40_m = 1;", 100000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a40_m|0"), 1);
+    cleanup_js_caps();
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+UTEST(js_audit40, ws_and_sse_frames_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    EXPECT_GE(hl_work_send_units(0, 1), 300u);
+    EXPECT_GE(hl_work_sse_units("", 0, 0), 300u);
+
+    JSValue s = JS_NewObjectClass(js.ctx, (int)js_sse_stream_class_id);
+    ASSERT_FALSE(JS_IsException(s));
+    HlJSSseStreamUD *ud = js_mallocz(js.ctx, sizeof *ud);
+    ASSERT_TRUE(ud != NULL);
+    ud->sse.write_fn = a14_sse_write;
+    JS_SetOpaque(s, ud);
+    a14_set_global("S", s);
+    EXPECT_EQ(a10_run_tripped("for (let i = 0; i < 10000; i++) S.comment('');",
+                              1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 10000; i++) { try { S.event('e', ''); } catch (e) {} }",
+        1000000), 1);
+    EXPECT_EQ(a10_run_tripped("for (let i = 0; i < 100; i++) S.comment('hi');",
+                              1000000), 0);
+
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    for (int i = 0; i < 100; i++)
+        ASSERT_TRUE(hl_ws_registry_add(&reg, "/ws", NULL) != NULL);
+    js.base.ws_registry = &reg;
+    ASSERT_EQ(a10_run_tripped(
+        "import { wsServer } from 'hull:web:ws-server';\n"
+        "globalThis.ws = wsServer;\n", 0), 0);
+    EXPECT_EQ(a10_run_tripped("for (let i = 0; i < 100; i++) ws.broadcast('/ws', '');",
+                              1000000), 1);
+
+    /* One call over a budget smaller than a frame stops in the call, before
+     * the placeholder Keel handle is used (ping reached it uncharged). */
+    static char placeholder;
+    HlWsConn *c = hl_ws_registry_add(&reg, "/one", (KlWsServerConn *)(void *)&placeholder);
+    ASSERT_TRUE(c != NULL);
+    JSValue cv = hl_js_ws_push_conn(js.ctx, c);
+    ASSERT_FALSE(JS_IsException(cv));
+    a14_set_global("C", cv);
+    ASSERT_EQ(a10_run_tripped(
+        "globalThis.P = [() => C.ping(), () => C.ping('payload'),\n"
+        "                () => C.send(''), () => C.sendBinary(''), () => {}];\n"
+        "globalThis.R = (i) => { globalThis.B = 1; P[i](); globalThis.A = 1; };", 0), 0);
+    for (int i = 0; i < 4; i++) {
+        char code[96];
+        /* Calibrate: the smallest budget that runs the same snippet through a
+         * no-op (P[4]) - compiling and entering the snippet costs a varying
+         * amount by platform - then give the real call only 64 more units,
+         * far below one frame's charge. */
+        int64_t base = 0;
+        for (int64_t b = 16; b <= 8192; b += 16) {
+            JS_RunGC(js.rt);
+            ASSERT_EQ(a10_run_tripped("globalThis.B = 0; globalThis.A = 0;", 0), 0);
+            if (a10_run_tripped("R(4);", b) == 0 && eval_int("globalThis.A|0") == 1) {
+                base = b;
+                break;
+            }
+        }
+        ASSERT_GT(base, 0);
+        JS_RunGC(js.rt);
+        ASSERT_EQ(a10_run_tripped("globalThis.B = 0; globalThis.A = 0;", 0), 0);
+        snprintf(code, sizeof code, "R(%d);", i);
+        EXPECT_EQ_MSG(a10_run_tripped(code, base + 64), 1, code);
+        EXPECT_EQ_MSG(eval_int("globalThis.B|0"), 1, code);   /* reached the call */
+        EXPECT_EQ_MSG(eval_int("globalThis.A|0"), 0, code);   /* stopped in it */
+    }
+    hl_js_ws_invalidate_conn(js.ctx, c);
+
+    js.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+UTEST(js_audit40, small_calls_have_a_floor)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a10_run_tripped(
+        "import { time } from 'hull:time';\n"
+        "for (let i = 0; i < 100000; i++) time.date();", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "import { time } from 'hull:time';\n"
+        "for (let i = 0; i < 100000; i++) time.datetime();", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "import { time } from 'hull:time';\n"
+        "for (let i = 0; i < 1000; i++) { time.date(); time.datetime(); }", 1000000), 0);
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

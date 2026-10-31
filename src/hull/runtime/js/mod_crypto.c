@@ -1455,6 +1455,10 @@ static JSValue js_crypto_key_from_env(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "crypto.keyFromEnv: no env capability");
     const char *var = JS_ToCString(ctx, argv[0]);
     if (!var) return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, HL_WORK_KEY_FROM_ENV_UNITS)) {   /* audit 40 */
+        JS_FreeCString(ctx, var);
+        return JS_EXCEPTION;
+    }
 
     HlJsCryptoKey *h = js_malloc(ctx, sizeof *h);
     if (!h) { JS_FreeCString(ctx, var); return JS_ThrowOutOfMemory(ctx); }

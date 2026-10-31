@@ -32,6 +32,8 @@ int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
 const char *hl_db_registry_open_txn(HlDbRegistry *reg)
 { (void)reg; return NULL; }
 #endif
+int hl_js_budget_charge(JSContext *ctx, uint64_t units)   /* audit 40 */
+{ (void)ctx; (void)units; return 0; }
 int hl_cap_tui_acquire(HlTuiCtx **out) { (void)out; return -1; }
 int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout, HlTuiEvent *out)
 { (void)ctx; (void)timeout; (void)out; return 1; }
