@@ -1,0 +1,215 @@
+name: Fuzz (nightly, continuous)
+
+# docs/design/audit_convergence.md section 5.3: continuous fuzzing. Every
+# libFuzzer target in fuzz/ runs for 30 minutes a night, each in its own job,
+# starting from the committed seeds PLUS the corpus it grew on earlier nights
+# (kept with actions/cache, minimized with -merge=1 before it is saved). A
+# crash fails the job, uploads the crashing input and the log, and opens (or
+# comments on) a GitHub issue titled "fuzz-nightly: fuzz_<target> crashed".
+#
+# This is the long-budget tier. ci.yml runs the same targets for 60 s per PR
+# from the committed seeds only, and nightly.yml's deep fuzz jobs run them for
+# a few minutes; neither keeps what it found. Promote an interesting grown
+# input into fuzz/corpus_<target>/ by hand (fuzz/README.md "Corpus").
+#
+# Budget: 24 targets x ~35 min, at most 8 at once (~2 h wall, ~14 runner-hours).
+
+on:
+  # 03:30 UTC daily. GitHub runs `schedule:` only on the default branch.
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: "libFuzzer -max_total_time per target (nightly = 1800)."
+        default: "1800"
+      targets:
+        description: "Space-separated subset of targets to run (empty = all)."
+        default: ""
+
+# Read-only by default; only the crash-report step's job may open issues.
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nightly
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    if: github.ref == 'refs/heads/main'
+    name: fuzz_${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      issues: write          # gh issue create / comment on a crash
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        # Every fuzz/fuzz_<target>.c. lua_source / js_source stage their seeds
+        # (every repo .lua / .js file) through make, and take a dictionary.
+        target:
+          - sh_json
+          - path_normalize
+          - mime_sniff
+          - host_match
+          - encoding
+          - ssh
+          - log_escape
+          - http_guard
+          - wasm_log_escape
+          - migrate_name
+          - pgwire
+          - pg_dsn
+          - pg_rewrite
+          - mysqlwire
+          - mysql_dsn
+          - mysql_stmt
+          - respwire
+          - valkey_dsn
+          - sql_kw
+          - dsn_redact
+          - span_sdk
+          - span_window
+          - lua_source
+          - js_source
+    env:
+      TARGET: ${{ matrix.target }}
+      FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '1800' }}
+      ONLY: ${{ github.event.inputs.targets || '' }}
+      GROWN: build/fuzz-nightly/corpus
+      ARTIFACTS: build/fuzz-nightly/artifacts
+    steps:
+      - name: Selected?
+        id: sel
+        run: |
+          if [ -z "$ONLY" ] || printf ' %s ' "$ONLY" | grep -q " $TARGET "; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        if: steps.sel.outputs.run == 'true'
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Install clang
+        if: steps.sel.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Build fuzz_${{ matrix.target }}
+        if: steps.sel.outputs.run == 'true'
+        run: |
+          make CC=clang "fuzz/fuzz_$TARGET"
+          case "$TARGET" in
+            lua_source|js_source) make CC=clang "build/fuzz-corpus/$TARGET" ;;
+          esac
+
+      - name: Restore the grown corpus
+        if: steps.sel.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: build/fuzz-nightly/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz for ${{ env.FUZZ_SECONDS }}s
+        id: run
+        if: steps.sel.outputs.run == 'true'
+        run: |
+          set -u
+          mkdir -p "$GROWN" "$ARTIFACTS"
+          seeds="fuzz/corpus_$TARGET"
+          extra=""
+          case "$TARGET" in
+            lua_source|js_source)
+              seeds="build/fuzz-corpus/$TARGET"
+              extra="-dict=fuzz/$TARGET.dict -max_len=16384" ;;
+          esac
+          echo "grown corpus: $(find "$GROWN" -type f | wc -l) inputs; seeds: $(find "$seeds" -type f | wc -l)"
+          # New finds go into the FIRST directory (the grown corpus).
+          # shellcheck disable=SC2086
+          "./fuzz/fuzz_$TARGET" "$GROWN" "$seeds" $extra \
+            -max_total_time="$FUZZ_SECONDS" -timeout=30 -rss_limit_mb=2560 \
+            -print_final_stats=1 -artifact_prefix="$ARTIFACTS/" \
+            2>&1 | tee build/fuzz-nightly/run.log
+          exit "${PIPESTATUS[0]}"
+        shell: bash
+
+      - name: Minimize the grown corpus
+        if: always() && steps.sel.outputs.run == 'true'
+        run: |
+          set -u
+          [ -d "$GROWN" ] || exit 0
+          seeds="fuzz/corpus_$TARGET"
+          case "$TARGET" in lua_source|js_source) seeds="build/fuzz-corpus/$TARGET" ;; esac
+          mkdir -p build/fuzz-nightly/min
+          # Keep only inputs that add coverage beyond the committed seeds.
+          timeout 600 "./fuzz/fuzz_$TARGET" -merge=1 -timeout=30 \
+            build/fuzz-nightly/min "$GROWN" "$seeds" > /dev/null 2>&1 || true
+          if [ -n "$(ls -A build/fuzz-nightly/min 2>/dev/null)" ]; then
+            rm -rf "$GROWN" && mv build/fuzz-nightly/min "$GROWN"
+          fi
+          echo "saved corpus: $(find "$GROWN" -type f | wc -l) inputs"
+
+      - name: Save the grown corpus
+        if: always() && steps.sel.outputs.run == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/fuzz-nightly/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload the crash
+        if: failure() && steps.run.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fuzz-nightly-${{ matrix.target }}-crash
+          path: |
+            build/fuzz-nightly/artifacts/
+            build/fuzz-nightly/run.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Open an issue for the crash
+        if: failure() && steps.run.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -u
+          title="fuzz-nightly: fuzz_$TARGET crashed"
+          {
+            echo "The nightly fuzzer \`fuzz_$TARGET\` found a crashing input."
+            echo
+            echo "- Run: $RUN_URL"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Artifact: \`fuzz-nightly-$TARGET-crash\` (the input and the full log)"
+            echo
+            echo "Inputs:"
+            for f in "$ARTIFACTS"/*; do
+              [ -f "$f" ] && echo "- \`$(basename "$f")\` ($(wc -c < "$f") bytes, sha256 \`$(sha256sum "$f" | cut -c1-16)...\`)"
+            done
+            echo
+            echo "Sanitizer report (tail):"
+            echo
+            echo '```'
+            grep -A40 -m1 -E 'ERROR: (AddressSanitizer|UndefinedBehaviorSanitizer|libFuzzer)|runtime error:|deadly signal' \
+              build/fuzz-nightly/run.log | head -60 | tr -d '\033'
+            echo '```'
+            echo
+            echo "Reproduce: \`make fuzz/fuzz_$TARGET CC=clang && ./fuzz/fuzz_$TARGET <input>\` (fuzz/README.md)."
+            echo "Rate it with the A1 / A2 / A3 rubric (docs/audit_process.md) and fix it with a regression test."
+          } > build/fuzz-nightly/issue.md
+          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+                       --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file build/fuzz-nightly/issue.md
+          else
+            gh issue create --title "$title" --body-file build/fuzz-nightly/issue.md
+          fi

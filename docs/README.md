@@ -165,6 +165,9 @@ Rules and contracts that must hold. Change these deliberately.
 | [`fork_playbook.md`](fork_playbook.md) | The authoritative procedure for cutting forks / follow-up branches (fork from `main`, not a sibling PR branch). |
 | [`benchmark.md`](benchmark.md) | The performance-measurement methodology the reference numbers must be reproduced with. |
 | [`security.md`](security.md) | The capability-enforcement invariants (§ "Capability Enforcement Invariants") + the sealed-table rules are contracts, not just description. |
+| [`invariants/README.md`](invariants/README.md) | The invariant lint (`make check-invariants`, INV-1..INV-10): CLAUDE.md's "a new X must Y" rules as checks, how each decides, and the allowlist of justified exceptions. |
+| [`audit_process.md`](audit_process.md) | How audit rounds are run: the A1 / A2 / A3 severity rubric, a failing-before-the-fix regression test per finding, the independent review pass, the batch cap, solo engine / protocol patches, the feature freeze, and the converged-area cadence. |
+| [`design/audit_convergence.md`](design/audit_convergence.md) | The audit-convergence design (accepted; phase 1 in progress): invariant ratchets, nightly fuzzing, and the later structural bounds for remote cost, session state, internal data and shaders. |
 
 ---
 

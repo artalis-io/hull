@@ -57,6 +57,7 @@ GROUP_FLAG = {
 GROUP = {
     # always-on (never skip): the orchestrator, lint, and the gate itself.
     "classify": "always", "lint": "always", "ci-success": "always",
+    "invariants": "always",
     # focused source-frontend + parser fuzz (the proven narrow classes).
     "focused-js-frontend": "focused-js",
     "focused-lua-frontend": "focused-lua",
