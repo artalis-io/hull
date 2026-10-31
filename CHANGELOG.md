@@ -465,6 +465,33 @@ release-artifact layout).
   refusal (`hull._refusal` / `hull:_refusal`) is handed back without spending an attempt, as
   the outbox does. Covered by the `jobs_hooks_audit38` cases in `test_lua` / `test_js` and the
   audit 38 legs of `tests/e2e_postgres.sh` / `tests/e2e_mysql.sh`.
+- **DuckDB: a stored view could run dynamic SQL or read the database file, and a symbolic
+  link reached the database file in mode B** (audit 41). The open-time stored-object check
+  read stored views, column DEFAULTs and CHECK constraints with only two of the five
+  scanners stored macros get (the namespace check and the table-name-by-value check), so a
+  planted database file opened cleanly when it held a view that called the dynamic-SQL table
+  functions (`query`, `query_table`, `json_execute_serialized_sql`) on a table name built at
+  run time, or a view reading the database's own file or its WAL with a file-reading
+  function (DuckDB always allows those files) - and app SQL reading the view got `_hull_*`
+  rows or the raw file. The full refusal set app SQL goes through is now one predicate
+  (`duck_sql_refusal`), applied with the connection's own file policy, and read as strictly
+  as a macro body, to every stored macro, view body, column DEFAULT and generated-column
+  expression, CHECK constraint and index definition (sequences and types hold no SQL, a
+  macro parameter's default must be a constant expression, and secrets are not stored in
+  the database file). In mode B (a declared fs directory) the protected-file and glob checks
+  read only a path's text while DuckDB follows symbolic links, so a link inside an allowed
+  directory naming the database file, its WAL or its temp directory read it, and a link to a
+  file outside the allowed directories passed DuckDB's own lexical `allowed_directories`
+  check. A file function's path, a COPY target and a literal carrying a replacement-scan
+  extension may no longer run through a symbolic link (the rule `db.open` applies to a file
+  DSN), a glob may not cover a directory holding one (or more than 65536 entries), and no
+  literal may resolve (`realpath`) to the database file, a WAL sidecar or the temp directory;
+  each lookup is charged to the run's budget. Also: `UPDATE t SET schema = ...`, `SET
+  search_path = ...` as a column assignment and `ON CONFLICT DO UPDATE SET schema = ...` were
+  refused as catalog switches; only a statement's first word (behind `EXPLAIN [ANALYZE]`) is
+  a session SET now. Covered by `stored_view_full_refusal_set_refuses_the_open`,
+  `harmless_stored_objects_open_and_run`, `set_column_assignment_is_not_a_catalog_switch` and
+  `mode_b_paths_through_symlinks_are_refused` in `test_db_duckdb`.
 - **A bare `ANALYZE` or `PRAGMA optimize` failed beside any `_hull_*` table** (audit 40,
   SQLite). The audit 39 authorizer guarded `SQLITE_ANALYZE` and `SQLITE_REINDEX` by name, and a
   bare `ANALYZE` / `PRAGMA optimize` asks once per table, `_hull_*` ones included - so both
