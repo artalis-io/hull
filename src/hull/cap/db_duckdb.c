@@ -285,6 +285,79 @@ static int duck_apply_allowed_dirs(duckdb_connection con)
     return 0;
 }
 
+/* query(sql) / query_table(name) / json_execute_serialized_sql(plan) build
+ * a statement or a table name at run time, out of reach of the _hull_* text
+ * check (audit 25). No stdlib SQL uses them; app SQL that does is refused. */
+static const char DUCK_DYNAMIC_SQL_MSG[] =
+    "duckdb: query(), query_table() and json_execute_serialized_sql() are "
+    "not available (they build SQL at run time, past Hull's _hull_* check)";
+
+/* IMPORT / EXPORT DATABASE and COPY FROM DATABASE run SQL from a file or
+ * copy every table without naming one (audit 32). Refused under every file
+ * policy: Hull's caps use none of them. */
+static const char DUCK_WHOLE_DB_MSG[] =
+    "duckdb: IMPORT DATABASE, EXPORT DATABASE and COPY FROM DATABASE are "
+    "not available (they run SQL from a file or copy every table, past "
+    "Hull's _hull_* check)";
+
+/* ATTACH / DETACH / USE / SET search_path|schema switch the catalog an
+ * unqualified name resolves to; a view or macro stored in a second catalog
+ * then reads _hull_* tables cross-catalog with no _hull_ in the app's SQL
+ * (audit 33). Refused under every file policy; no stdlib SQL uses them. */
+static const char DUCK_CATALOG_MSG[] =
+    "duckdb: ATTACH, DETACH, USE and SET/RESET of search_path or schema are "
+    "not available (they switch catalogs, which would read _hull_* tables "
+    "through a cross-catalog view past Hull's _hull_* check)";
+
+/* DuckDB constant-folds table-function arguments, so a table name passed
+ * as a value can be built at run time (concat('_', 'hull_sessions')):
+ * storage_info returned column min / max statistics of _hull_* tables,
+ * pragma_table_info / pragma_show / histogram their schema or rows. The
+ * profiling / logging calls run past lock_configuration (audit 34). In a
+ * macro body a bare name is a parameter the call fills at run time
+ * (audit 37). */
+static const char DUCK_TABLE_VALUE_MSG[] =
+    "duckdb: storage_info, the profiling / logging calls, and table-name "
+    "functions (pragma_table_info, pragma_show, histogram, ...) called with "
+    "anything but a plain literal or name (only a '...' literal inside a "
+    "macro or function body, whose bare names are parameters) are not "
+    "available (a table name built at run time gets past Hull's _hull_* "
+    "check)";
+
+/* DuckDB keeps the database file, its WAL sidecars and its temp directory
+ * readable (and writable) from SQL whatever external access says, and the
+ * list cannot be cleared - DuckDB re-adds them whenever external access is
+ * turned off and refuses to change allowed_paths after: read_blob('app.duckdb')
+ * returned the raw file, _hull_* rows included (audit 34). */
+static const char DUCK_DB_FILE_MSG[] =
+    "duckdb: SQL may not name the database file, its WAL or temp files, call "
+    "a file function without a declared fs policy, or give a file function / "
+    "COPY a path that is not a plain literal or that runs through a symbolic "
+    "link (it could read the database file past Hull's _hull_* check)";
+
+/* The one refusal set every SQL text Hull hands DuckDB goes through - app
+ * SQL (duck_refuse_sql) and every stored view body, column DEFAULT /
+ * generated expression, CHECK, index and macro read at open
+ * (duck_check_stored_macros), which run on later queries without their text
+ * ever reaching duck_refuse_sql (audit 41: views went through two of the
+ * five scanners, so a planted view calling query() or reading the database
+ * file opened cleanly). @p deny / @p protect: the connection's file policy;
+ * @p strict: bare names are macro parameters (every stored body is read so).
+ * NULL when @p sql may run, else the message. */
+static const char *duck_sql_refusal(const char *sql, int deny,
+                                    const char *protect, int strict)
+{
+    if (!sql) return DUCK_DB_FILE_MSG;
+    if (hl_cap_db_sql_calls_dynamic_sql(sql)) return DUCK_DYNAMIC_SQL_MSG;
+    if (hl_cap_db_sql_reads_whole_database(sql)) return DUCK_WHOLE_DB_MSG;
+    if (hl_cap_db_sql_switches_catalog(sql)) return DUCK_CATALOG_MSG;
+    if (hl_cap_db_sql_names_table_by_value_ex(sql, strict))
+        return DUCK_TABLE_VALUE_MSG;
+    if (hl_cap_db_sql_reaches_db_files(sql, deny, protect))
+        return DUCK_DB_FILE_MSG;
+    return NULL;
+}
+
 /* ── Open / close ─────────────────────────────────────────────────── */
 
 /* A macro already stored in the file is the same reach as one app SQL can
@@ -328,21 +401,16 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
             rc = -1;
             break;
         }
-        if (!def || hl_cap_db_sql_calls_dynamic_sql(def) ||
-            hl_cap_db_sql_reads_whole_database(def) ||
-            hl_cap_db_sql_switches_catalog(def) ||
-            hl_cap_db_sql_names_table_by_value_ex(def, 1) ||
-            hl_cap_db_sql_reaches_db_files(def, s->deny_file_functions,
-                                           s->protect)) {
+        const char *why = duck_sql_refusal(def, s->deny_file_functions,
+                                           s->protect, 1);
+        if (why) {
             char *schema = duckdb_value_varchar(&r, 0, i);
             char *name = duckdb_value_varchar(&r, 1, i);
             snprintf(s->errmsg, sizeof s->errmsg,
-                     "duckdb: the database holds macro %.64s.%.64s, whose "
-                     "body hands a run-time value to a table-name or file "
-                     "function (it would read _hull_* tables past Hull's "
-                     "check) or calls sleep_ms / pg_sleep; drop it with the DuckDB CLI before opening the "
-                     "database with Hull",
-                     schema ? schema : "?", name ? name : "?");
+                     "duckdb: the database holds macro %.64s.%.64s, which "
+                     "Hull refuses to open (%s); drop it with the DuckDB "
+                     "CLI before opening the database with Hull",
+                     schema ? schema : "?", name ? name : "?", why);
             duckdb_free(schema);
             duckdb_free(name);
             rc = -1;
@@ -354,11 +422,22 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
 
     /* A view or a column DEFAULT stored in the file runs on every query /
      * insert that reaches it: one calling sleep_ms (audit 38), storage_info
-     * or a table-name function by value would run past the text check. Read
-     * as app SQL (bare names are columns there, not parameters). A CHECK
-     * constraint runs on every insert / update the same way: DuckDB accepts
-     * `CHECK (sleep_ms(1000) IS NULL OR x > 0)` (no subquery, so it reads no
-     * table), and its expression goes through the same scanners (audit 40). */
+     * or a table-name function by value would run past the text check. A
+     * CHECK constraint runs on every insert / update the same way: DuckDB
+     * accepts `CHECK (sleep_ms(1000) IS NULL OR x > 0)` (no subquery, so it
+     * reads no table) (audit 40). Audit 41: each of them - and a generated
+     * column's expression (DuckDB reports it as the column's default) and
+     * an index's definition (its keys are evaluated on every insert;
+     * DuckDB refuses keys with side effects today, read anyway) - goes
+     * through the
+     * whole refusal set app SQL does (duck_sql_refusal), read as strictly as
+     * a macro body: a view calling query() / query_table() on a name built
+     * at run time, or reading the database file with a file function, had
+     * opened cleanly. The other objects a DuckDB file holds carry no SQL
+     * that runs later: sequences and types are plain values, a macro
+     * parameter's default must be a constant expression (no subquery, no
+     * table function - DuckDB refuses one), and secrets are not stored in
+     * the database file. */
     if (duckdb_query(con,
             "SELECT 'view', schema_name, view_name, sql FROM duckdb_views() "
             "WHERE NOT internal UNION ALL "
@@ -367,7 +446,10 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
             "WHERE NOT internal AND column_default IS NOT NULL UNION ALL "
             "SELECT 'check constraint of', schema_name, table_name, "
             "expression FROM duckdb_constraints() "
-            "WHERE constraint_type = 'CHECK' AND expression IS NOT NULL",
+            "WHERE constraint_type = 'CHECK' AND expression IS NOT NULL "
+            "UNION ALL "
+            "SELECT 'index on', schema_name, table_name, sql "
+            "FROM duckdb_indexes() WHERE sql IS NOT NULL",
             &r) != DuckDBSuccess) {
         duckdb_destroy_result(&r);
         duck_set_err(s, "duckdb: could not list the database's views");
@@ -409,18 +491,20 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
             rc = -1;
             break;
         }
-        if (!def || hl_cap_db_sql_names_table_by_value(def)) {
+        /* Every scanner app SQL goes through, with the connection's file
+         * policy, read as strictly as a macro body (audit 41). */
+        const char *why = duck_sql_refusal(def, s->deny_file_functions,
+                                           s->protect, 1);
+        if (why) {
             char *kind = duckdb_value_varchar(&r, 0, i);
             char *schema = duckdb_value_varchar(&r, 1, i);
             char *name = duckdb_value_varchar(&r, 2, i);
             snprintf(s->errmsg, sizeof s->errmsg,
                      "duckdb: the database holds a %.20s %.64s.%.64s that "
-                     "calls a function Hull refuses (sleep_ms / pg_sleep, "
-                     "storage_info, or a table-name function given a "
-                     "run-time value); drop it with the DuckDB CLI before "
-                     "opening the database with Hull",
+                     "Hull refuses to open (%s); drop it with the DuckDB "
+                     "CLI before opening the database with Hull",
                      kind ? kind : "?", schema ? schema : "?",
-                     name ? name : "?");
+                     name ? name : "?", why);
             duckdb_free(kind);
             duckdb_free(schema);
             duckdb_free(name);
@@ -843,81 +927,14 @@ static duckdb_state duck_execute(HlDbDuckCtx *s, duckdb_prepared_statement stmt,
     return rc;
 }
 
-/* query(sql) / query_table(name) / json_execute_serialized_sql(plan) build
- * a statement or a table name at run time, out of reach of the _hull_* text
- * check (audit 25). No stdlib SQL uses them; app SQL that does is refused. */
-static const char DUCK_DYNAMIC_SQL_MSG[] =
-    "duckdb: query(), query_table() and json_execute_serialized_sql() are "
-    "not available (they build SQL at run time, past Hull's _hull_* check)";
-
-/* IMPORT / EXPORT DATABASE and COPY FROM DATABASE run SQL from a file or
- * copy every table without naming one (audit 32). Refused under every file
- * policy: Hull's caps use none of them. */
-static const char DUCK_WHOLE_DB_MSG[] =
-    "duckdb: IMPORT DATABASE, EXPORT DATABASE and COPY FROM DATABASE are "
-    "not available (they run SQL from a file or copy every table, past "
-    "Hull's _hull_* check)";
-
-/* ATTACH / DETACH / USE / SET search_path|schema switch the catalog an
- * unqualified name resolves to; a view or macro stored in a second catalog
- * then reads _hull_* tables cross-catalog with no _hull_ in the app's SQL
- * (audit 33). Refused under every file policy; no stdlib SQL uses them. */
-static const char DUCK_CATALOG_MSG[] =
-    "duckdb: ATTACH, DETACH, USE and SET/RESET of search_path or schema are "
-    "not available (they switch catalogs, which would read _hull_* tables "
-    "through a cross-catalog view past Hull's _hull_* check)";
-
-/* DuckDB constant-folds table-function arguments, so a table name passed
- * as a value can be built at run time (concat('_', 'hull_sessions')):
- * storage_info returned column min / max statistics of _hull_* tables,
- * pragma_table_info / pragma_show / histogram their schema or rows. The
- * profiling / logging calls run past lock_configuration (audit 34). In a
- * macro body a bare name is a parameter the call fills at run time
- * (audit 37). */
-static const char DUCK_TABLE_VALUE_MSG[] =
-    "duckdb: storage_info, the profiling / logging calls, and table-name "
-    "functions (pragma_table_info, pragma_show, histogram, ...) called with "
-    "anything but a plain literal or name (only a '...' literal inside a "
-    "macro or function body, whose bare names are parameters) are not "
-    "available (a table name built at run time gets past Hull's _hull_* "
-    "check)";
-
-/* DuckDB keeps the database file, its WAL sidecars and its temp directory
- * readable (and writable) from SQL whatever external access says, and the
- * list cannot be cleared - DuckDB re-adds them whenever external access is
- * turned off and refuses to change allowed_paths after: read_blob('app.duckdb')
- * returned the raw file, _hull_* rows included (audit 34). */
-static const char DUCK_DB_FILE_MSG[] =
-    "duckdb: SQL may not name the database file, its WAL or temp files, call "
-    "a file function without a declared fs policy, or give a file function / "
-    "COPY a path that is not a plain literal (it could read the database "
-    "file past Hull's _hull_* check)";
-
 /* 0 when @p sql may run, -1 (error set) when it is refused. */
 static int duck_refuse_sql(HlDbDuckCtx *s, const char *sql)
 {
-    if (hl_cap_db_sql_calls_dynamic_sql(sql)) {
-        duck_set_err(s, DUCK_DYNAMIC_SQL_MSG);
-        return -1;
-    }
-    if (hl_cap_db_sql_reads_whole_database(sql)) {
-        duck_set_err(s, DUCK_WHOLE_DB_MSG);
-        return -1;
-    }
-    if (hl_cap_db_sql_switches_catalog(sql)) {
-        duck_set_err(s, DUCK_CATALOG_MSG);
-        return -1;
-    }
-    if (hl_cap_db_sql_names_table_by_value(sql)) {
-        duck_set_err(s, DUCK_TABLE_VALUE_MSG);
-        return -1;
-    }
-    if (hl_cap_db_sql_reaches_db_files(sql, s->deny_file_functions,
-                                       s->protect)) {
-        duck_set_err(s, DUCK_DB_FILE_MSG);
-        return -1;
-    }
-    return 0;
+    const char *msg = duck_sql_refusal(sql, s->deny_file_functions,
+                                       s->protect, 0);
+    if (!msg) return 0;
+    duck_set_err(s, msg);
+    return -1;
 }
 
 static int duck_query(HlDbHandle *h, const char *sql,
