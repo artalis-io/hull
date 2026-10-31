@@ -285,15 +285,35 @@ typedef struct {
 } HlGpuWgslInferred;
 int hl_gpu_wgsl_inferred(const char *wgsl, size_t len, HlGpuWgslInferred *out);
 
+/* How much code @p wgsl is (audit 40): per function body (its header
+ * included) the words - identifiers, keywords and numeric literals -,
+ * the let / var / const declarations and the statements (a `;` outside
+ * parentheses, or a block's `{`); the largest of each over the functions,
+ * the module's totals (module-scope `var` declarations add their words),
+ * and the sum over functions of declarations squared. Returns 0, or -1
+ * for a source the lexer cannot read (the counts then cover what was read
+ * before the bad byte). */
+typedef struct {
+    size_t   fn_words, fn_decls, fn_stmts;
+    size_t   module_words, module_stmts;
+    uint64_t decls_sq;
+} HlGpuWgslSize;
+int hl_gpu_wgsl_size(const char *wgsl, size_t len, HlGpuWgslSize *out);
+
 /* The run-budget units a compile of @p wgsl is charged before it runs:
  * 1 per 8 source bytes plus HL_GPU_WGSL_EXPAND_UNITS per expanded node
- * (audit 39). The gpu.compile / gpu.load bindings charge it. */
+ * (audit 39), plus its size (audit 40): HL_GPU_WGSL_WORD_UNITS per word,
+ * HL_GPU_WGSL_STMT_UNITS per statement and HL_GPU_WGSL_DECL_SQ_UNITS per
+ * declaration squared, per function - charged whether or not the source
+ * then passes the checks or compiles. The gpu.compile / gpu.load bindings
+ * charge it. */
 uint64_t hl_gpu_wgsl_compile_units(const char *wgsl, size_t len);
 
 /* Every pre-compile check hl_cap_gpu_compile runs: size, lexing, the
  * expression / block / type depths, the declaration chains, and the
- * inferred depth / expansion / local chains. 0 when the source passes; -1
- * with a short reason in *why otherwise. */
+ * inferred depth / expansion / local chains, and the function and module
+ * size bounds (audit 40). 0 when the source passes; -1 with a short reason
+ * in *why otherwise. */
 int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why);
 
 /* TEST-ONLY (audit 39): skip hl_gpu_wgsl_precheck in hl_cap_gpu_compile, so
@@ -301,6 +321,11 @@ int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why);
  * the compile thread instead of overflowing a stack. Never set outside the
  * unit tests. */
 void hl_gpu_test_set_precheck_bypass(int on);
+
+/* TEST-ONLY (audit 40): the compile deadline in ms (0 = the default,
+ * HL_GPU_COMPILE_TIMEOUT_MS), so a test can show that a backend compile
+ * that outlives it is abandoned. */
+void hl_gpu_test_set_compile_timeout_ms(uint32_t ms);
 
 /* Persistent named buffer */
 typedef struct HlGpuBuffer {
@@ -343,6 +368,11 @@ typedef struct HlGpuDevice {
      * moves them into stalled_bytes. A timed-out read also counts its
      * staging buffer there. */
     size_t         queued_write_bytes;
+    /* A backend shader compile that outlived its deadline (audit 40) and
+     * still runs on its own thread, owning a copy of its source; the
+     * device refuses GPU work ("gpu_busy") until it has finished. An
+     * HlGpuCompileJob (gpu.c), referenced by the device and the thread. */
+    struct HlGpuCompileJob *compile_job;
     pthread_mutex_t mutex;
 } HlGpuDevice;
 
@@ -516,6 +546,12 @@ int  hl_cap_gpu_device_count(HlGpuCtx *ctx);
 const char *hl_cap_gpu_device_name(HlGpuCtx *ctx, int device);
 
 /* Pipeline */
+/* The error string the gpu.compile / gpu.load bindings report for a
+ * failed hl_cap_gpu_compile: "compile_timeout" (abandoned past its
+ * deadline or the run's - audit 40), "gpu_busy" (an abandoned compile
+ * still runs on the device), else "shader_error". */
+const char *hl_gpu_compile_errstr(int rc);
+
 int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
                        const char *wgsl, size_t wgsl_len);
 

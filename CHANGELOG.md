@@ -86,6 +86,31 @@ release-artifact layout).
   boundary). Also: a new session prunes the `dev-sessions` records of supervisors that are gone
   (a reused pid would otherwise still verify a dead session's stale sidecars), and
   `hull agent inspect` escapes DEL and C1 controls in both its live and standalone output.
+- **A wide shader could hold the event loop for minutes in its compile** (audit 40). Every GPU
+  pre-check bounded a depth; none bounded how much code a shader is, and Metal's compiler
+  (MTLCompilerService, behind pipeline creation) takes time that grows faster than linearly with
+  the code in one function: one entry with N `let vK = o[K] * 3u;` followed by N `s ^= vK;` -
+  every expression three deep - took 4.6 s at N = 4000 and 343 s at N = 30000 (957 KB, under
+  the 1 MiB cap), charged ~120k units. The loop waited in a plain `pthread_join`, so neither the
+  run deadline nor a tripped budget ended it, SIGTERM waited, `gpu.async` dispatches blocked on
+  the device mutex, and a failed compile could be retried freely. Three layers. **Size bounds:**
+  `gpu.compile` / `gpu.load` refuse (`shader_error`, before wgpu) a function body over 2048
+  words (identifiers, keywords and numeric literals; `HL_GPU_WGSL_FN_WORDS_MAX`), 512 let / var /
+  const declarations or 1024 statements, and a module over 4096 words or 2048 statements
+  (module-scope `var` initializers count; folded `const` / `override` / `alias` / `struct` do
+  not). Measured on Apple M1 Max / Metal, every shape tried - live values, independent stores,
+  wide array constructors, dependent chains, code split over functions, `var<private>` tables -
+  compiles in about 1 s or less within them (the measurements are in `include/hull/limits/gpu.h`);
+  the shipped shaders are under 400 words. **Charge:** a compile also costs 4096 units per word,
+  1024 per statement and 32 per declaration squared per function, whether it compiles, fails or is
+  refused - a shader at the bounds costs ~18M units, so a loop of them trips the default budget
+  within a handful. **Deadline:** the loop now waits on a condition variable, asking the run every
+  10 ms (`hl_db_budget_charge(0)`, as every GPU wait) and giving up after
+  `HL_GPU_COMPILE_TIMEOUT_MS` (10 s). A compile past either is abandoned (`compile_timeout`): its
+  detached thread owns copies of the source and name and a device shadow, releases the pipeline it
+  makes, and until it finishes the device refuses compiles, dispatches, pipelines, writes, reads and
+  copies (`gpu_busy`). `hl_cap_gpu_destroy` waits up to 5 s for it, and past that leaves the
+  backend's device and instance unfreed rather than free them under the thread.
 - **Email change could probe whether addresses exist, without limit** (audit 33, both
   runtimes). A taken target address is answered 409 `email already in use`, and that check ran
   before the account's email-change request limit, so a signed-in user could test any number of

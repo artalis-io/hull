@@ -16,6 +16,9 @@
 
 #include "hull/cap/gpu.h"
 #include "hull/cap/audit.h"
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db_budget.h"
+#endif
 #include "hull/limits/gpu.h"
 #include "hull/shared/thread_affinity.h"
 #include "hull/shared/work_charge.h"
@@ -27,6 +30,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
@@ -96,8 +100,13 @@ static void live_release(HlGpuDevice *dev, size_t n)
  * submission, keeps each later call from waiting out its own timeout on the
  * same device - holding the device mutex, and on the sync path the event
  * loop, for every one of them. */
+static int compile_busy(HlGpuDevice *dev);
+static int compile_drain(HlGpuDevice *dev);
+
 static int stalled_refuse(const HlGpuCtx *ctx, HlGpuDevice *dev)
 {
+    /* An abandoned shader compile still running (audit 40). */
+    if (compile_busy(dev)) return 1;
     if (!dev->stalled) return 0;
     if (ctx->backend->queue_idle && !ctx->backend->queue_idle(dev))
         return 1;
@@ -381,6 +390,17 @@ void hl_cap_gpu_destroy(HlGpuCtx *ctx)
     if (!ctx || !ctx->backend)
         return;
 
+    /* An abandoned compile still running uses its device's backend handle
+     * (audit 40): waited for, bounded; past that the backend's devices and
+     * instance are left unfreed rather than freed under it. */
+    int backend_in_use = 0;
+    for (int d = 0; d < ctx->device_count; d++)
+        if (!compile_drain(&ctx->devices[d]))
+            backend_in_use = 1;
+    if (backend_in_use)
+        log_warn("[hull:gpu] a shader compile is still running at "
+                 "teardown: the GPU backend is left unfreed");
+
     /* Destroy all pipelines, buffers, and textures per device */
     for (int d = 0; d < ctx->device_count; d++) {
         HlGpuDevice *dev = &ctx->devices[d];
@@ -403,7 +423,7 @@ void hl_cap_gpu_destroy(HlGpuCtx *ctx)
     }
 
     /* Destroy backend instance */
-    if (ctx->backend_ctx)
+    if (ctx->backend_ctx && !backend_in_use)
         ctx->backend->destroy(ctx);
 
     memset(ctx, 0, sizeof(*ctx));
@@ -2423,6 +2443,126 @@ out:
     return rc;
 }
 
+/* ── Function size (audit 40) ───────────────────────────────────────
+ *
+ * Every check above bounds a depth; none bounded how much code a shader
+ * is. Metal's compiler (MTLCompilerService, out of process, behind
+ * wgpuDeviceCreateComputePipeline) takes time that grows faster than
+ * linearly with the code in one function: one entry with N
+ * `let vK = o[K] * 3u;` followed by N `s ^= vK;` took 4.6 s at N = 4000 and
+ * 343 s at N = 30000 (957 KB, every depth shallow), all on the event loop.
+ * So the size of each function body and of the module is counted here:
+ * words (identifiers, keywords and numeric literals - every operand),
+ * let / var / const declarations, and statements (a `;` outside
+ * parentheses, or a block's `{`). Module-scope `var` declarations count
+ * toward the module's words (a `var<private>` table is initialized in
+ * code); module-scope `const` / `override` / `alias` / `struct` do not
+ * (naga folds them; a 30000-entry const table compiled in 0.11 s). */
+
+typedef struct {
+    size_t words, decls, stmts;
+} WsFn;
+
+static void ws_fn_end(HlGpuWgslSize *out, const WsFn *f)
+{
+    if (f->words > out->fn_words) out->fn_words = f->words;
+    if (f->decls > out->fn_decls) out->fn_decls = f->decls;
+    if (f->stmts > out->fn_stmts) out->fn_stmts = f->stmts;
+    uint64_t sq = (uint64_t)f->decls * (uint64_t)f->decls;
+    out->decls_sq = out->decls_sq > UINT64_MAX - sq ? UINT64_MAX
+                                                     : out->decls_sq + sq;
+}
+
+int hl_gpu_wgsl_size(const char *wgsl, size_t len, HlGpuWgslSize *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!wgsl) return 0;
+    if (!wl_utf8_valid(wgsl, len)) return -1;
+    enum { MK_NONE, MK_FN, MK_VAR, MK_OTHER };
+    const char *s = wgsl;
+    size_t n = len, i = 0;
+    size_t braces = 0, parens = 0;
+    int kind = MK_NONE, in_fn = 0, after_at = 0;
+    WsFn f = { 0, 0, 0 };
+    for (;;) {
+        WlTok t;
+        int k = wl_next(s, n, i, &t);
+        if (k == WL_END) break;
+        if (k == WL_BAD) {
+            if (in_fn) ws_fn_end(out, &f);
+            return -1;
+        }
+        i = t.end;
+        int at = after_at;
+        after_at = 0;
+        if (k == WL_IDENT || k == WL_NUM) {
+            if (in_fn) {
+                f.words++;
+                out->module_words++;
+                if (k == WL_IDENT && (wl_tok_is(s, &t, "let") ||
+                                      wl_tok_is(s, &t, "var") ||
+                                      wl_tok_is(s, &t, "const")))
+                    f.decls++;
+            } else if (braces == 0) {
+                if (kind == MK_NONE && parens == 0 && !at && k == WL_IDENT) {
+                    if (wl_tok_is(s, &t, "fn")) {
+                        kind = MK_FN;
+                        in_fn = 1;               /* the header counts too */
+                        memset(&f, 0, sizeof(f));
+                        f.words = 1;
+                        out->module_words++;
+                        continue;
+                    }
+                    kind = wl_tok_is(s, &t, "var") ? MK_VAR : MK_OTHER;
+                }
+                if (kind == MK_VAR) out->module_words++;
+            }
+            continue;
+        }
+        char c = s[t.start];
+        if (c == '@') { after_at = 1; continue; }
+        if (c == '(') { parens++; continue; }
+        if (c == ')') { if (parens > 0) parens--; continue; }
+        if (c == '{') {
+            braces++;
+            if (in_fn) {
+                f.stmts++;
+                out->module_stmts++;
+            }
+            continue;
+        }
+        if (c == '}') {
+            if (braces > 0) braces--;
+            if (braces == 0) {
+                if (in_fn) ws_fn_end(out, &f);
+                in_fn = 0;
+                kind = MK_NONE;
+                parens = 0;
+            }
+            continue;
+        }
+        if (c == ';') {
+            if (in_fn && parens == 0) {
+                f.stmts++;
+                out->module_stmts++;
+            } else if (braces == 0) {
+                kind = MK_NONE;
+                parens = 0;
+            }
+        }
+    }
+    if (in_fn) ws_fn_end(out, &f);               /* left open: malformed */
+    return 0;
+}
+
+static uint64_t sat_mul_add(uint64_t acc, uint64_t a, uint64_t b)
+{
+    if (a != 0 && b > UINT64_MAX / a) return UINT64_MAX;
+    uint64_t p = a * b;
+    return acc > UINT64_MAX - p ? UINT64_MAX : acc + p;
+}
+
 uint64_t hl_gpu_wgsl_compile_units(const char *wgsl, size_t len)
 {
     uint64_t units = hl_work_bytes_units((uint64_t)len);
@@ -2431,7 +2571,36 @@ uint64_t hl_gpu_wgsl_compile_units(const char *wgsl, size_t len)
         hl_gpu_wgsl_inferred(wgsl, len, &inf) == 0 &&
         inf.expanded <= HL_GPU_WGSL_EXPAND_MAX)
         units += inf.expanded * HL_GPU_WGSL_EXPAND_UNITS;
+    /* The size of the code (audit 40), whether or not the source then
+     * passes the checks: a refused source is charged like one that
+     * compiled, so a loop of refused compiles trips the budget too. */
+    if (wgsl && len <= HL_GPU_WGSL_MAX_BYTES) {
+        HlGpuWgslSize sz;
+        (void)hl_gpu_wgsl_size(wgsl, len, &sz);
+        units = sat_mul_add(units, sz.module_words, HL_GPU_WGSL_WORD_UNITS);
+        units = sat_mul_add(units, sz.module_stmts, HL_GPU_WGSL_STMT_UNITS);
+        units = sat_mul_add(units, sz.decls_sq, HL_GPU_WGSL_DECL_SQ_UNITS);
+    }
     return units;
+}
+
+/* The audit-40 size bounds: NULL when the source is within them. */
+static const char *wl_size_refusal(const char *wgsl, size_t len)
+{
+    HlGpuWgslSize sz;
+    if (hl_gpu_wgsl_size(wgsl, len, &sz) != 0)
+        return "a byte sequence outside WGSL's tokens";
+    if (sz.fn_words > HL_GPU_WGSL_FN_WORDS_MAX)
+        return "a function is too large (words)";
+    if (sz.fn_decls > HL_GPU_WGSL_FN_DECLS_MAX)
+        return "a function declares too many values";
+    if (sz.fn_stmts > HL_GPU_WGSL_FN_STMTS_MAX)
+        return "a function has too many statements";
+    if (sz.module_words > HL_GPU_WGSL_MODULE_WORDS_MAX)
+        return "the shader is too large (words)";
+    if (sz.module_stmts > HL_GPU_WGSL_MODULE_STMTS_MAX)
+        return "the shader has too many statements";
+    return NULL;
 }
 
 int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why)
@@ -2466,6 +2635,8 @@ int hl_gpu_wgsl_precheck(const char *wgsl, size_t len, const char **why)
                 w = "constant expressions expand too far";
             else if (inf.chain > HL_GPU_WGSL_DECL_CHAIN_MAX)
                 w = "function-local declarations refer to one another too deeply";
+            else
+                w = wl_size_refusal(wgsl, len);
         }
     }
     if (why) *why = w;
@@ -2580,41 +2751,129 @@ const char *hl_cap_gpu_device_name(HlGpuCtx *ctx, int device)
  * (HL_GPU_COMPILE_STACK_BYTES, a virtual reservation: only the pages a
  * compile touches are committed, and the thread exits after each compile,
  * so they are returned). The event loop waits for it - the compile was
- * already synchronous. wgpu-native's device is thread-safe (gpu.async
+ * already synchronous - but no longer without end (audit 40): Metal's
+ * compiler service took minutes over a wide shader, and a plain
+ * pthread_join held the loop past the run's deadline, a tripped budget and
+ * SIGTERM. The wait now polls the run and has a deadline of its own; a
+ * compile past either is abandoned to its thread (gpu_compile_wait,
+ * compile_busy). wgpu-native's device is thread-safe (gpu.async
  * dispatches use it from pool threads), and the backend's error flag is
  * thread-local, set and read on the compile thread. Signals are blocked on
  * the thread, so they keep going to the threads that handle them. */
 
 static int g_precheck_bypass;      /* test-only: see gpu.h */
+static uint32_t g_compile_timeout_ms;   /* test-only: 0 = the default */
 
 void hl_gpu_test_set_precheck_bypass(int on)
 {
     g_precheck_bypass = on ? 1 : 0;
 }
 
-typedef struct {
-    HlGpuCtx      *ctx;
-    HlGpuDevice   *dev;
-    const char    *name;
-    const char    *wgsl;
-    size_t         wgsl_len;
-    HlGpuPipeline *slot;
-    int            rc;
-} HlGpuCompileJob;
+void hl_gpu_test_set_compile_timeout_ms(uint32_t ms)
+{
+    g_compile_timeout_ms = ms;
+}
+
+/* One backend compile, shared by the waiting event loop and the compile
+ * thread (audit 40). The wait has a deadline: a compile past it, or past
+ * the run's deadline / budget, is abandoned - the loop returns and the
+ * thread runs on. So the job owns everything the thread touches: copies
+ * of the name and source, the pipeline it builds, and a device shadow
+ * carrying the backend handle (the real HlGpuDevice is the context's,
+ * which teardown clears). The last reference frees it. */
+struct HlGpuCompileJob {
+    const HlGpuBackend *backend;
+    HlGpuDevice        *shadow;
+    char               *name;
+    char               *wgsl;
+    size_t              wgsl_len;
+    HlGpuPipeline       out;
+    int                 rc;
+    pthread_mutex_t     mu;
+    pthread_cond_t      cv;
+    int                 done;       /* the thread is finished with the backend */
+    int                 abandoned;  /* nobody takes `out`: the thread frees it */
+    int                 refs;
+};
+typedef struct HlGpuCompileJob HlGpuCompileJob;
+
+static void compile_job_unref(HlGpuCompileJob *job)
+{
+    pthread_mutex_lock(&job->mu);
+    int last = --job->refs == 0;
+    pthread_mutex_unlock(&job->mu);
+    if (!last) return;
+    pthread_cond_destroy(&job->cv);
+    pthread_mutex_destroy(&job->mu);
+    free(job->shadow);
+    free(job->name);
+    free(job->wgsl);
+    free(job);
+}
+
+static HlGpuCompileJob *compile_job_new(const HlGpuCtx *ctx,
+                                        const HlGpuDevice *dev,
+                                        const char *name,
+                                        const char *wgsl, size_t wgsl_len)
+{
+    HlGpuCompileJob *job = calloc(1, sizeof(*job));
+    if (!job) return NULL;
+    size_t nl = strlen(name);
+    job->backend = ctx->backend;
+    job->shadow = calloc(1, sizeof(*job->shadow));
+    job->name = malloc(nl + 1);
+    job->wgsl = malloc(wgsl_len + 1);
+    if (!job->shadow || !job->name || !job->wgsl) goto fail;
+    if (pthread_mutex_init(&job->mu, NULL) != 0) goto fail;
+    if (pthread_cond_init(&job->cv, NULL) != 0) {
+        pthread_mutex_destroy(&job->mu);
+        goto fail;
+    }
+    memcpy(job->shadow->name, dev->name, sizeof(job->shadow->name));
+    job->shadow->backend_device = dev->backend_device;
+    memcpy(job->name, name, nl + 1);
+    memcpy(job->wgsl, wgsl, wgsl_len);
+    job->wgsl[wgsl_len] = '\0';
+    job->wgsl_len = wgsl_len;
+    job->rc = HL_GPU_ERR_INTERNAL;
+    job->refs = 1;
+    return job;
+fail:
+    free(job->shadow);
+    free(job->name);
+    free(job->wgsl);
+    free(job);
+    return NULL;
+}
 
 static void *gpu_compile_main(void *arg)
 {
     HlGpuCompileJob *job = arg;
-    job->rc = job->ctx->backend->compile(job->dev, job->name, job->wgsl,
-                                         job->wgsl_len, job->slot);
+    int rc = job->backend->compile(job->shadow, job->name, job->wgsl,
+                                   job->wgsl_len, &job->out);
+    pthread_mutex_lock(&job->mu);
+    job->rc = rc;
+    if (job->abandoned) {
+        /* Nobody takes the pipeline: release it before `done`, which is
+         * what tells the device (and teardown) the backend is free. */
+        pthread_mutex_unlock(&job->mu);
+        if (rc == HL_GPU_OK && job->backend->pipeline_destroy)
+            job->backend->pipeline_destroy(job->shadow, &job->out);
+        pthread_mutex_lock(&job->mu);
+    }
+    job->done = 1;
+    pthread_cond_broadcast(&job->cv);
+    pthread_mutex_unlock(&job->mu);
+    compile_job_unref(job);
     return NULL;
 }
 
-/* Run the backend compile on a thread with a large stack and wait for it.
- * A host that cannot reserve the full stack gets a smaller one (still far
- * above the event loop's, with the estimators bounding what reaches it);
- * with no thread at all the compile is refused, never run on the loop. */
-static int gpu_compile_on_big_stack(HlGpuCompileJob *job)
+/* Start the compile thread, detached, holding its own reference. A host
+ * that cannot reserve the full stack gets a smaller one (still far above
+ * the event loop's, with the estimators bounding what reaches it). 0, or
+ * -1 with no thread at all (the compile is then refused, never run on the
+ * loop). */
+static int gpu_compile_start(HlGpuCompileJob *job)
 {
     static const size_t sizes[] = {
         HL_GPU_COMPILE_STACK_BYTES,
@@ -2627,11 +2886,13 @@ static int gpu_compile_on_big_stack(HlGpuCompileJob *job)
     int masked = pthread_sigmask(SIG_SETMASK, &all, &old) == 0;
     int started = 0;
     pthread_t th;
+    job->refs++;                        /* the thread's */
     for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]) && !started; k++) {
         if (k > 0 && sizes[k] >= HL_GPU_COMPILE_STACK_BYTES) continue;
         pthread_attr_t attr;
         if (pthread_attr_init(&attr) != 0) continue;
         if (pthread_attr_setstacksize(&attr, sizes[k]) == 0 &&
+            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
             pthread_create(&th, &attr, gpu_compile_main, job) == 0) {
             started = 1;
             if (k > 0)
@@ -2644,11 +2905,110 @@ static int gpu_compile_on_big_stack(HlGpuCompileJob *job)
     }
     if (masked) pthread_sigmask(SIG_SETMASK, &old, NULL);
     if (!started) {
+        job->refs--;
         log_error("[hull:gpu] no thread for the shader compile: refused");
-        return HL_GPU_ERR_INTERNAL;
+        return -1;
     }
-    pthread_join(th, NULL);
-    return job->rc;
+    return 0;
+}
+
+static uint64_t gpu_mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Whether the calling run was stopped: its deadline passed or its budget
+ * tripped (a 0-unit charge asks, as every GPU wait does - audit 33). */
+static int gpu_compile_run_stopped(void)
+{
+#ifdef HL_ENABLE_DB
+    return hl_db_budget_charge(0) != 0;
+#else
+    return 0;
+#endif
+}
+
+/* Wait for the compile: 1 when it finished, 0 when it was abandoned (the
+ * deadline, or the run stopped). Polled every HL_GPU_COMPILE_POLL_MS. */
+static int gpu_compile_wait(HlGpuCompileJob *job)
+{
+    uint32_t limit = g_compile_timeout_ms ? g_compile_timeout_ms
+                                          : HL_GPU_COMPILE_TIMEOUT_MS;
+    uint64_t deadline = gpu_mono_ms() + limit;
+    pthread_mutex_lock(&job->mu);
+    for (;;) {
+        if (job->done) break;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += (long)HL_GPU_COMPILE_POLL_MS * 1000000L;
+        while (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        (void)pthread_cond_timedwait(&job->cv, &job->mu, &ts);
+        if (job->done) break;
+        pthread_mutex_unlock(&job->mu);
+        int stop = gpu_mono_ms() >= deadline || gpu_compile_run_stopped();
+        pthread_mutex_lock(&job->mu);
+        if (stop && !job->done) {
+            job->abandoned = 1;
+            break;
+        }
+    }
+    int finished = job->done && !job->abandoned;
+    pthread_mutex_unlock(&job->mu);
+    return finished;
+}
+
+/* Whether the device still has an abandoned compile running (audit 40).
+ * Called under the device mutex; drops the device's reference once the
+ * compile is finished. */
+static int compile_busy(HlGpuDevice *dev)
+{
+    HlGpuCompileJob *job = dev->compile_job;
+    if (!job) return 0;
+    pthread_mutex_lock(&job->mu);
+    int done = job->done;
+    pthread_mutex_unlock(&job->mu);
+    if (!done) return 1;
+    dev->compile_job = NULL;
+    compile_job_unref(job);
+    return 0;
+}
+
+/* At teardown: wait (bounded) for a device's abandoned compile. 1 when it
+ * finished (or there was none), 0 when it still runs - the backend's
+ * device must then not be freed under it. */
+static int compile_drain(HlGpuDevice *dev)
+{
+    HlGpuCompileJob *job = dev->compile_job;
+    if (!job) return 1;
+    uint64_t deadline = gpu_mono_ms() + HL_GPU_COMPILE_TEARDOWN_MS;
+    pthread_mutex_lock(&job->mu);
+    while (!job->done && gpu_mono_ms() < deadline) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += (long)HL_GPU_COMPILE_POLL_MS * 1000000L;
+        while (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        (void)pthread_cond_timedwait(&job->cv, &job->mu, &ts);
+    }
+    int done = job->done;
+    pthread_mutex_unlock(&job->mu);
+    dev->compile_job = NULL;
+    compile_job_unref(job);   /* a still-running thread frees it at its end */
+    return done;
+}
+
+const char *hl_gpu_compile_errstr(int rc)
+{
+    if (rc == HL_GPU_ERR_TIMEOUT) return "compile_timeout";
+    if (rc == HL_GPU_ERR_BUSY) return GPU_BUSY_MSG;
+    return "shader_error";
 }
 
 /* ── Pipeline ──────────────────────────────────────────────────────── */
@@ -2692,6 +3052,14 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_OK;
     }
 
+    /* An abandoned compile still running holds the device (audit 40). */
+    if (compile_busy(dev)) {
+        pthread_mutex_unlock(&dev->mutex);
+        log_warn("[hull:gpu] shader '%s' refused: %s (an earlier compile "
+                 "is still running)", name, GPU_BUSY_MSG);
+        return HL_GPU_ERR_BUSY;
+    }
+
     /* Check capacity */
     if (dev->pipeline_count >= HL_GPU_PIPELINE_MAX) {
         pthread_mutex_unlock(&dev->mutex);
@@ -2699,11 +3067,32 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_INTERNAL;
     }
 
-    /* Compile via backend */
+    /* Compile via backend, on a thread of its own (audit 39), waited for
+     * with a deadline (audit 40). */
     HlGpuPipeline *slot = &dev->pipelines[dev->pipeline_count];
-    HlGpuCompileJob job = { ctx, dev, name, wgsl, wgsl_len, slot,
-                            HL_GPU_ERR_INTERNAL };
-    int rc = gpu_compile_on_big_stack(&job);
+    HlGpuCompileJob *job = compile_job_new(ctx, dev, name, wgsl, wgsl_len);
+    int rc;
+    if (!job) {
+        rc = HL_GPU_ERR_INTERNAL;
+    } else if (gpu_compile_start(job) != 0) {
+        compile_job_unref(job);
+        rc = HL_GPU_ERR_INTERNAL;
+    } else if (gpu_compile_wait(job)) {
+        rc = job->rc;
+        if (rc == HL_GPU_OK) {
+            slot->handle = job->out.handle;
+            slot->bind_group_layout = job->out.bind_group_layout;
+        }
+        compile_job_unref(job);
+    } else {
+        /* Abandoned: the device keeps the loop's reference and refuses GPU
+         * work until the thread is done (compile_busy). */
+        dev->compile_job = job;
+        rc = HL_GPU_ERR_TIMEOUT;
+        log_warn("[hull:gpu] shader '%s' compile abandoned: past its "
+                 "deadline or the run's (%zu bytes of WGSL); the device is "
+                 "busy until it finishes", name, wgsl_len);
+    }
     if (rc == HL_GPU_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", name);
         /* Group 0's declared bindings, checked before every dispatch and

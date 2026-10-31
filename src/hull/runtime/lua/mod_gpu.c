@@ -356,7 +356,7 @@ static int l_gpu_load(lua_State *L)
 
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
-        lua_pushstring(L, "shader_error");
+        lua_pushstring(L, hl_gpu_compile_errstr(rc));
         return 2;
     }
     lua_pushboolean(L, 1);
@@ -391,7 +391,7 @@ static int l_gpu_compile(lua_State *L)
     int rc = hl_cap_gpu_compile(ctx, device, name, wgsl, wgsl_len);
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
-        lua_pushstring(L, "shader_error");
+        lua_pushstring(L, hl_gpu_compile_errstr(rc));
         return 2;
     }
     lua_pushboolean(L, 1);
