@@ -850,8 +850,32 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
 {
     s->entry_point = s->cfg.entry_point;
 
-    if (!s->entry_point)
-        s->entry_point = auto_detect_entry();
+    if (!s->entry_point) {
+        /* A built binary (it takes no entry argument) runs its EMBEDDED
+         * entry, and its app directory is its working directory. The
+         * embedded name is never resolved on disk: realpath("app.lua")
+         * followed a symlink planted beside the binary, so the loader ran
+         * another file as the app (its basename missed the embedded key and
+         * the loader fell back to disk), or moved app_dir - the sandbox
+         * grant, data.db, migrations and the fs root - to wherever a
+         * same-named link pointed (audit 40). */
+        const char *embedded = auto_detect_entry();
+        if (embedded && embedded_app_present()) {
+            if (realpath(".", s->app_dir) == NULL) {
+                fprintf(stderr, "hull: cannot resolve the working directory\n");
+                return -1;
+            }
+            int n = snprintf(s->entry_abs, sizeof(s->entry_abs), "%s/%s",
+                             s->app_dir, embedded);
+            if (n < 0 || (size_t)n >= sizeof(s->entry_abs)) {
+                fprintf(stderr, "hull: working directory path too long\n");
+                return -1;
+            }
+            s->entry_point = s->entry_abs;
+            goto default_db;
+        }
+        s->entry_point = embedded;
+    }
 
     if (!s->entry_point) {
         fprintf(stderr, "hull: no entry point found (app.js or app.lua)\n");
@@ -900,6 +924,7 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
         }
     }
 
+default_db:
     /* The default database is the app's <app_dir>/data.db - the one `hull
      * migrate` and `hull agent db|migrate` open. It was "data.db" in the
      * WORKING directory, so `hull myapp/app.lua` from a parent directory

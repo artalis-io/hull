@@ -582,6 +582,16 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
     }
     lua_pop(lua->L, 1); /* pop __hull_modules (or non-table) */
 
+    /* A built binary runs only its embedded entry: a miss is an error, never
+     * a file read from disk (a symlink planted beside the binary ran as the
+     * app; audit 40). The disk load is for development, when the app VFS is
+     * empty (hl_vfs_embedded). */
+    if (hl_vfs_embedded(lua->base.app_vfs)) {
+        log_error("[hull:c] %s is not this binary's embedded entry - a built "
+                  "binary loads no app code from disk", filename);
+        return -1;
+    }
+
     /* Load and execute from filesystem (development mode). Text only: an
      * entry file holding bytecode is refused (luaL_dofile accepts both). */
     /* An entry file named "hull.*" would get the chunkname "@hull.*", which is

@@ -585,6 +585,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-cli
 
+      - name: Built-binary embedded entry E2E tests (audit 40)
+        timeout-minutes: 4
+        run: make e2e-embedded-entry
+
       - name: MCP E2E tests
         timeout-minutes: 2
         run: make e2e-mcp

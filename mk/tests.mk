@@ -1494,6 +1494,12 @@ e2e-teardown: $(BUILDDIR)/hull
 # A database file SQLite holds open is not truncated, replaced or removed
 # through the fs capability (audit 33): compute.stream's file output and an
 # fs.write through a symlink into the -shm killed the process with SIGBUS.
+# A built binary runs only its embedded entry and keeps its working directory as
+# the app root (audit 40): a symlinked app.lua / app.js beside it is ignored.
+.PHONY: e2e-embedded-entry
+e2e-embedded-entry: $(BUILDDIR)/hull
+	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_embedded_entry.sh
+
 .PHONY: e2e-db-live-files
 e2e-db-live-files: $(BUILDDIR)/hull
 	sh tests/e2e_db_live_files.sh
