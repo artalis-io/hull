@@ -477,6 +477,23 @@ release-artifact layout).
   `hull:_task` task of a serving app that admits TUI could run the same synchronous loop and
   re-arm too, holding the event loop for as long as the terminal produced events or idle
   ticks. Only app.main's own run re-arms now; any other entry keeps the single run it got.
+- **A chain of small shader functions could still hold the event loop for seconds** (audit
+  41). Round 40's size bounds count each function as written, so a call reads as a few words;
+  Metal inlines small functions, and a chain of them, each calling the one before several
+  times in one expression, stayed within every bound while its compile grew with each link:
+  16 calls per link over 12 links (1.5 KB) took 4.3 s, 8 per link over 90 links (~3800 words)
+  about 36 s. In a server one such request held the loop for the full 10 s compile deadline
+  and left the device refusing GPU work as busy for ~26 s more, repeatable by changing one
+  literal. The pre-check now also counts words, declarations and statements with every call
+  inlined (`hl_gpu_wgsl_calls`: a function's own count plus each callee's inlined count per
+  call site, saturating; a call cycle is refused) and refuses past 16384 / 2048 / 4096 for the
+  whole shader - a shader at those bounds compiled in ~0.8 s at most on Apple M1 Max / Metal,
+  and helpers called a few times stay far below them. The compile charge counts words and
+  statements as inlined, so a refused chain costs the whole run budget, and the compile
+  deadline is 2 s instead of 10 s, so a shape the bounds miss holds the loop briefly. Lua
+  `gpu.compile` also raises the run's limit before the compile when the budget is already
+  spent; it queued the charge, so a small shader's compile could start on an exhausted
+  budget and leave the device busy.
 - **A Lua coroutine lost its transaction tag when it yielded twice** (audit 37). Round 36
   tags a coroutine that yields inside a transaction it opened, so it cannot be resumed once
   that transaction ended. But every resume rewrote a still-valid tag to "resumed inside a

@@ -184,7 +184,8 @@
  *     counted).
  * Real compute shaders are a few hundred words (the shipped examples are
  * under 400); the bounds are ~5-10x that and keep every shape measured
- * under ~1 s. */
+ * WITHOUT calls under ~1 s. Calls are bounded below
+ * (HL_GPU_WGSL_INLINED_*): these counts read a call as its few words. */
 #ifndef HL_GPU_WGSL_FN_WORDS_MAX
 #define HL_GPU_WGSL_FN_WORDS_MAX     2048
 #endif
@@ -201,15 +202,49 @@
 #define HL_GPU_WGSL_MODULE_STMTS_MAX 2048
 #endif
 
+/* How much code one shader may be with every call inlined (audit 41), as
+ * hl_gpu_wgsl_calls counts it: a function's own words / declarations /
+ * statements plus, at each call site, the callee's inlined count, summed
+ * over the functions no other calls (so every function is bounded too).
+ * The bounds above read a call as a few words, and Metal inlines small
+ * functions: a chain of small functions, each calling the one before a few
+ * times in one expression, stayed within every bound above while its
+ * compile time grew with each link - measured on Apple M1 Max / Metal with
+ * the bounds bypassed: two calls per link 1.4 s at 20 links (1.4 KB),
+ * 6.3 s at 68 links; three per link 2.4 s at 140; sixteen per link 4.3 s
+ * at 12 links (1.5 KB); eight per link ~36 s at 90 (~3800 words). Inlined
+ * counts cost like the code they copy:
+ *   - a helper of N live values called C times from main (inlined words /
+ *     declarations): 16834 / 2080 0.84 s, 17282 / 2112 0.89 s, 19970 /
+ *     2304 0.92 s, 33666 / 4160 4.5 s, 69122 / 8448 11.2 s;
+ *   - a helper building one array of N elements, C calls: 52226 words
+ *     1.24 s, 281602 0.68 s (Metal keeps a large helper a call);
+ *   - every call chain within these bounds (two calls per link to 9 links,
+ *     sixteen to 2) 0.13 s or less.
+ * So a shader at the bounds compiles in ~1 s or less; legitimate shaders
+ * with helpers called a few times are a few hundred to a few thousand
+ * inlined words. */
+#ifndef HL_GPU_WGSL_INLINED_WORDS_MAX
+#define HL_GPU_WGSL_INLINED_WORDS_MAX 16384
+#endif
+#ifndef HL_GPU_WGSL_INLINED_DECLS_MAX
+#define HL_GPU_WGSL_INLINED_DECLS_MAX 2048
+#endif
+#ifndef HL_GPU_WGSL_INLINED_STMTS_MAX
+#define HL_GPU_WGSL_INLINED_STMTS_MAX 4096
+#endif
+
 /* Run-budget units a compile is charged per word, per statement and per
  * declaration squared (per function), on top of the byte and expansion
- * charges (audit 40), whether it compiles, fails or is refused. A shader
- * at the module word bound costs ~4096 x 4096 + ~800 x 1024 ~= 17.6M
- * units (more with many declarations: 512^2 x 32 = 8.4M per function at
- * that bound), about a fifth of the default 100M budget - roughly what a
- * second of script costs, as such a compile takes up to ~1 s - so a loop
- * of large compiles trips the budget within a handful. The shipped
- * example shaders cost under 1M. */
+ * charges (audit 40), whether it compiles, fails or is refused. Words and
+ * statements are counted with every call inlined when that is more (audit
+ * 41). A shader at the module word bound costs ~4096 x 4096 + ~800 x 1024
+ * ~= 17.6M units (more with many declarations: 512^2 x 32 = 8.4M per
+ * function at that bound), about a fifth of the default 100M budget -
+ * roughly what a second of script costs, as such a compile takes up to
+ * ~1 s - so a loop of large compiles trips the budget within a handful;
+ * one at the inlined word bound costs ~67M+. The shipped example shaders
+ * cost under 1M. */
 #ifndef HL_GPU_WGSL_WORD_UNITS
 #define HL_GPU_WGSL_WORD_UNITS    ((uint64_t)4096)
 #endif
@@ -220,16 +255,18 @@
 #define HL_GPU_WGSL_DECL_SQ_UNITS ((uint64_t)32)
 #endif
 
-/* How long the event loop waits for a backend shader compile (audit 40).
- * The wait is also stopped, every HL_GPU_COMPILE_POLL_MS, by the run's
- * deadline or a tripped budget (hl_db_budget_charge(0), as every GPU
- * wait). A compile past either is abandoned: its thread runs on with its
- * own copy of the source and releases what it made, and the device
- * refuses GPU work (gpu_busy) until it finishes. Within the size bounds a
- * compile takes ~1 s at most on the device measured; this is a backstop
- * for slower devices and drivers, and for code with no run bound. */
+/* How long the event loop waits for a backend shader compile (audit 40;
+ * 10 s until audit 41). The wait is also stopped, every
+ * HL_GPU_COMPILE_POLL_MS, by the run's deadline or a tripped budget
+ * (hl_db_budget_charge(0), as every GPU wait). A compile past either is
+ * abandoned: its thread runs on with its own copy of the source and
+ * releases what it made, and the device refuses GPU work (gpu_busy) until
+ * it finishes. Within the size bounds a compile takes ~1 s at most on the
+ * device measured (a fresh process's first compile adds ~0.1-0.2 s); this
+ * is a backstop for a shape the bounds miss, so it holds the loop
+ * briefly, and for slower devices and drivers. */
 #ifndef HL_GPU_COMPILE_TIMEOUT_MS
-#define HL_GPU_COMPILE_TIMEOUT_MS  10000u
+#define HL_GPU_COMPILE_TIMEOUT_MS  2000u
 #endif
 #ifndef HL_GPU_COMPILE_POLL_MS
 #define HL_GPU_COMPILE_POLL_MS     10u

@@ -3275,7 +3275,7 @@ UTEST(hull_cap_gpu_audit40, stopped_run_abandons)
     ASSERT_TRUE(ctx != NULL);
     ctx->backend = &be;
     a40_reset();
-    hl_gpu_test_set_compile_timeout_ms(0);       /* the 10 s default */
+    hl_gpu_test_set_compile_timeout_ms(0);       /* the default */
     HlDbBudgetBinding prev = hl_db_budget_swap(a40_tripped, NULL);
     const char *src = "@compute @workgroup_size(1) fn main() {}";
     double t0 = a40_now();
@@ -3363,6 +3363,319 @@ UTEST(hull_cap_gpu_audit40, real_device_bounded)
     ASSERT_TRUE(live != NULL);
     EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(&ctx, -1, "live", live, strlen(live)));
     free(live);
+    hl_cap_gpu_destroy(&ctx);
+}
+#endif /* HL_ENABLE_GPU */
+
+/* ── Audit 41: calls are inlined ──────────────────────────────────── */
+
+/* A chain of @p depth functions, each calling the one before @p fan times
+ * in one nested expression; main calls the last. Small in source, but
+ * inlined it is fan^depth copies of the first. */
+static char *a41_fan(size_t fan, size_t depth, unsigned salt)
+{
+    size_t cap = (depth + 4) * (fan * 24 + 96) + 512;
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    size_t off = (size_t)snprintf(s, cap,
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "fn g0(x: u32) -> u32 { return (x ^ (x >> 3u)) * 2654435761u + (x << 5u) + %uu; }\n",
+        salt);
+    for (size_t k = 1; k <= depth; k++) {
+        off += (size_t)snprintf(s + off, cap - off,
+                                "fn g%zu(x: u32) -> u32 { return ", k);
+        for (size_t j = 0; j < fan; j++)
+            off += (size_t)snprintf(s + off, cap - off, "g%zu(", k - 1);
+        off += (size_t)snprintf(s + off, cap - off, "x");
+        for (size_t j = 0; j < fan; j++)
+            off += (size_t)snprintf(s + off, cap - off, " ^ %zuu)", j + 1);
+        off += (size_t)snprintf(s + off, cap - off, "; }\n");
+    }
+    snprintf(s + off, cap - off,
+             "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) "
+             "{ data[id.x] = g%zu(data[id.x]); }\n", depth);
+    return s;
+}
+
+
+/* A helper of @p n live values (`let vK = d[K] * 3u + k;` x n, then
+ * `s ^= vK;` x n reversed), or (@p arr) one array constructor of n
+ * `d[K] * 3u + k` elements, called @p calls times from main. */
+static char *a41_helper(size_t n, size_t calls, int arr, unsigned salt)
+{
+    size_t cap = 48 * (2 * n + calls + 16) + 512;
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    size_t off = (size_t)snprintf(s, cap,
+        "@group(0) @binding(0) var<storage, read_write> d: array<u32>;\n"
+        "fn h(k: u32) -> u32 {\n");
+    if (arr) {
+        off += (size_t)snprintf(s + off, cap - off, "let a = array<u32, %zu>(", n);
+        for (size_t k = 0; k < n; k++)
+            off += (size_t)snprintf(s + off, cap - off, "%sd[%zu] * 3u + k",
+                                    k ? ", " : "", k);
+        off += (size_t)snprintf(s + off, cap - off, ");\nreturn a[k & 7u] + %uu;\n}\n", salt);
+    } else {
+        off += (size_t)snprintf(s + off, cap - off, "var s = %uu;\n", salt);
+        for (size_t k = 0; k < n; k++)
+            off += (size_t)snprintf(s + off, cap - off, "let v%zu = d[%zu] * 3u + k;\n", k, k);
+        for (size_t k = n; k-- > 0;)
+            off += (size_t)snprintf(s + off, cap - off, "s ^= v%zu;\n", k);
+        off += (size_t)snprintf(s + off, cap - off, "return s;\n}\n");
+    }
+    off += (size_t)snprintf(s + off, cap - off,
+                            "@compute @workgroup_size(1) fn main() {\n");
+    for (size_t c = 0; c < calls; c++)
+        off += (size_t)snprintf(s + off, cap - off, "d[%zu] = h(%zuu);\n", c, c + 1);
+    snprintf(s + off, cap - off, "}\n");
+    return s;
+}
+
+
+static HlGpuWgslCalls a41_c;
+static int a41_calls(const char *s)
+{
+    return hl_gpu_wgsl_calls(s, strlen(s), &a41_c);
+}
+
+UTEST(hull_cap_gpu_audit41, calls_counted)
+{
+    EXPECT_EQ(-1, hl_gpu_wgsl_calls("x", 1, NULL));
+    EXPECT_EQ(0, hl_gpu_wgsl_calls(NULL, 0, &a41_c));
+    EXPECT_EQ((uint64_t)0, a41_c.module_words);
+    /* h: fn h x u32 u32 return x (7 words, 2 statements); main: fn main
+     * let a h 1u h 2u (8 words, 1 declaration, 2 statements) plus h twice. */
+    ASSERT_EQ(0, a41_calls("fn h(x: u32) -> u32 { return x; }\n"
+                           "fn main() { let a = h(1u) + h(2u); }"));
+    EXPECT_EQ((uint64_t)22, a41_c.fn_words);
+    EXPECT_EQ((uint64_t)1, a41_c.fn_decls);
+    EXPECT_EQ((uint64_t)6, a41_c.fn_stmts);
+    EXPECT_EQ((uint64_t)22, a41_c.module_words);   /* h is called: not a root */
+    EXPECT_EQ((uint64_t)1, a41_c.decls_sq);
+    /* Without calls the counts are hl_gpu_wgsl_size's. */
+    const char *flat = "fn f() -> u32 { let a = 1u; return a; }";
+    HlGpuWgslSize z;
+    ASSERT_EQ(0, hl_gpu_wgsl_size(flat, strlen(flat), &z));
+    ASSERT_EQ(0, a41_calls(flat));
+    EXPECT_EQ((uint64_t)z.fn_words, a41_c.fn_words);
+    EXPECT_EQ((uint64_t)z.fn_decls, a41_c.fn_decls);
+    EXPECT_EQ((uint64_t)z.fn_stmts, a41_c.fn_stmts);
+    /* An unused helper is a root of its own; a local that shadows a
+     * function's name is not a call of it. */
+    ASSERT_EQ(0, a41_calls("fn h() -> u32 { return 1u; }\n"
+                           "fn u() -> u32 { return 2u; }\n"
+                           "fn main() { let h = 3u; let b = h + h; }"));
+    EXPECT_EQ((uint64_t)(5 + 5 + 9), a41_c.module_words);
+    /* Calls in a chain multiply: a 5 words, b 7 + 3a, c 7 + 3b. */
+    ASSERT_EQ(0, a41_calls("fn a() -> u32 { return 1u; }\n"
+                           "fn b() -> u32 { return a() + a() + a(); }\n"
+                           "fn c() -> u32 { return b() + b() + b(); }\n"));
+    EXPECT_EQ((uint64_t)(7 + 3 * (7 + 3 * 5)), a41_c.module_words);
+    /* WGSL forbids recursion: a cycle is refused. */
+    EXPECT_EQ(-1, a41_calls("fn a() { b(); } fn b() { a(); }"));
+    EXPECT_EQ(UINT64_MAX, a41_c.module_words);
+    EXPECT_EQ(-1, a41_calls("fn a() { a(); }"));
+    /* Saturating: a long fan-out chain counts as UINT64_MAX, not a wrap. */
+    char *deep = a41_fan(16, 40, 1);
+    ASSERT_TRUE(deep != NULL);
+    ASSERT_EQ(0, a41_calls(deep));
+    EXPECT_EQ(UINT64_MAX, a41_c.fn_words);
+    EXPECT_EQ(UINT64_MAX, a41_c.module_words);
+    free(deep);
+}
+
+/* The reported shapes are within every audit-40 bound and refused by the
+ * inlined counts, before the backend. */
+UTEST(hull_cap_gpu_audit41, fan_out_chains_refused_before_backend)
+{
+    const char *why = NULL;
+    char *shapes[] = {
+        a41_fan(16, 12, 1),           /* ~2.5 KB: 4.3 s on Metal */
+        a41_fan(8, 90, 2),            /* ~3800 words: ~36 s */
+        a41_fan(2, 20, 3),            /* 1.4 s */
+        a41_fan(2, 68, 4),            /* 6.3 s */
+        a41_fan(3, 140, 5),           /* 2.4 s */
+        a41_fan(4, 8, 6),
+    };
+    size_t n = sizeof(shapes) / sizeof(shapes[0]);
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = mock_compile;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    mock_compiles = 0;
+    for (size_t k = 0; k < n; k++) {
+        ASSERT_TRUE(shapes[k] != NULL);
+        HlGpuWgslSize z;
+        ASSERT_EQ(0, hl_gpu_wgsl_size(shapes[k], strlen(shapes[k]), &z));
+        EXPECT_TRUE(z.fn_words <= HL_GPU_WGSL_FN_WORDS_MAX);
+        EXPECT_TRUE(z.module_words <= HL_GPU_WGSL_MODULE_WORDS_MAX);
+        EXPECT_TRUE(z.module_stmts <= HL_GPU_WGSL_MODULE_STMTS_MAX);
+        EXPECT_EQ(-1, hl_gpu_wgsl_precheck(shapes[k], strlen(shapes[k]), &why));
+        EXPECT_TRUE(why && strstr(why, "calls expand"));
+        EXPECT_EQ(HL_GPU_ERR_SHADER,
+                  hl_cap_gpu_compile(ctx, -1, "fan", shapes[k], strlen(shapes[k])));
+        free(shapes[k]);
+    }
+    EXPECT_EQ(0, mock_compiles);
+    /* A cycle never reaches the backend. */
+    const char *cyc = "fn a() { b(); } fn b() { a(); }\n"
+                      "@compute @workgroup_size(1) fn main() { a(); }";
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "cyc", cyc, strlen(cyc)));
+    EXPECT_EQ(0, mock_compiles);
+    /* At the bound: a helper of 32 live values (~270 words) called as
+     * often as the inlined bounds allow passes; one call more is refused. */
+    size_t per = 32;
+    size_t calls_ok = 1, calls_bad = 1;
+    for (;;) {
+        char *t = a41_helper(per, calls_bad, 0, 1);
+        ASSERT_TRUE(t != NULL);
+        ASSERT_EQ(0, a41_calls(t));
+        int over = a41_c.module_words > HL_GPU_WGSL_INLINED_WORDS_MAX ||
+                   a41_c.module_decls > HL_GPU_WGSL_INLINED_DECLS_MAX ||
+                   a41_c.module_stmts > HL_GPU_WGSL_INLINED_STMTS_MAX;
+        free(t);
+        if (over) break;
+        calls_ok = calls_bad++;
+    }
+    char *ok = a41_helper(per, calls_ok, 0, 1);
+    char *bad = a41_helper(per, calls_bad, 0, 1);
+    ASSERT_TRUE(ok && bad);
+    EXPECT_EQ(0, a37_check(ok));
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(bad, strlen(bad), &why));
+    EXPECT_TRUE(why && strstr(why, "calls expand"));
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "ok", ok, strlen(ok)));
+    EXPECT_EQ(1, mock_compiles);
+    free(ok); free(bad);
+    mock_free(ctx);
+}
+
+/* Shaders with helpers called a few times, and the shipped examples, pass. */
+UTEST(hull_cap_gpu_audit41, helpers_called_a_few_times_pass)
+{
+    const char *helpers =
+        "@group(0) @binding(0) var<storage, read_write> o: array<f32>;\n"
+        "fn hash(x: u32) -> u32 { var h = x * 747796405u + 2891336453u;\n"
+        "  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u; return (h >> 22u) ^ h; }\n"
+        "fn rnd(x: u32) -> f32 { return f32(hash(x)) / 4294967295.0; }\n"
+        "fn noise(p: vec2<f32>) -> f32 {\n"
+        "  let i = vec2<u32>(floor(p)); let f = fract(p);\n"
+        "  let a = rnd(i.x + i.y * 57u); let b = rnd(i.x + 1u + i.y * 57u);\n"
+        "  let c = rnd(i.x + (i.y + 1u) * 57u); let d = rnd(i.x + 1u + (i.y + 1u) * 57u);\n"
+        "  let u = f * f * (3.0 - 2.0 * f);\n"
+        "  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y); }\n"
+        "fn fbm(p: vec2<f32>) -> f32 { var v = 0.0; var q = p;\n"
+        "  for (var k = 0u; k < 6u; k++) { v += noise(q) * 0.5; q = q * 2.0; }\n"
+        "  return v + noise(p * 3.0) + noise(p * 5.0); }\n"
+        "@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "  let p = vec2<f32>(f32(id.x % 256u), f32(id.x / 256u));\n"
+        "  o[id.x] = fbm(p) + fbm(p * 0.5) + rnd(id.x); }\n";
+    EXPECT_EQ(0, a41_calls(helpers));
+    EXPECT_TRUE(a41_c.module_words < 2048);
+    EXPECT_EQ(0, a37_check(helpers));
+    char *few = a41_helper(200, 4, 0, 1);         /* ~1600 words, 4 calls */
+    ASSERT_TRUE(few != NULL);
+    EXPECT_EQ(0, a37_check(few));
+    free(few);
+    size_t len = 0;
+    char *ex = a36_read_file("examples/gpu_search/shaders/cosine_similarity.wgsl", &len);
+    if (ex) {
+        EXPECT_EQ(0, hl_gpu_wgsl_precheck(ex, len, NULL));
+        free(ex);
+    }
+}
+
+/* The compile charge counts the code as inlined: a chain is charged for
+ * what it expands to, and a refused fan-out bomb costs a whole budget. */
+UTEST(hull_cap_gpu_audit41, compile_charge_reflects_expansion)
+{
+    char *t = a41_fan(4, 4, 1);                   /* within the bounds */
+    ASSERT_TRUE(t != NULL);
+    ASSERT_EQ(0, a41_calls(t));
+    EXPECT_EQ(0, a37_check(t));
+    HlGpuWgslSize z;
+    ASSERT_EQ(0, hl_gpu_wgsl_size(t, strlen(t), &z));
+    EXPECT_TRUE(a41_c.module_words > 4 * (uint64_t)z.module_words);
+    uint64_t u = hl_gpu_wgsl_compile_units(t, strlen(t));
+    EXPECT_TRUE(u >= a41_c.module_words * HL_GPU_WGSL_WORD_UNITS +
+                     a41_c.module_stmts * HL_GPU_WGSL_STMT_UNITS);
+    EXPECT_TRUE(u > (uint64_t)z.module_words * HL_GPU_WGSL_WORD_UNITS * 4);
+    free(t);
+    char *bomb = a41_fan(8, 90, 1);
+    ASSERT_TRUE(bomb != NULL);
+    EXPECT_TRUE(hl_gpu_wgsl_compile_units(bomb, strlen(bomb)) > 100000000u);
+    free(bomb);
+    /* A shader whose functions are each called once is charged as before:
+     * inlined, it is no larger than written. */
+    char *flat = a40_stores(1, 64);
+    ASSERT_TRUE(flat != NULL);
+    ASSERT_EQ(0, hl_gpu_wgsl_size(flat, strlen(flat), &z));
+    ASSERT_EQ(0, a41_calls(flat));
+    EXPECT_TRUE(a41_c.module_words <= (uint64_t)z.module_words);
+    EXPECT_TRUE(a41_c.module_stmts <= (uint64_t)z.module_stmts);
+    free(flat);
+}
+
+#ifdef HL_ENABLE_GPU
+/* On a real device (skipped without an adapter): shaders at the inlined
+ * bounds compile within ~1 s, well inside the compile deadline, and the
+ * reported fan-out chains are refused. */
+UTEST(hull_cap_gpu_audit41, real_device_bounded)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+    unsigned salt = a40_nonce();
+    char *shapes[4];
+    /* A helper of 64 live values called as often as the bounds allow (the
+     * slowest inlined shape measured), and the deepest fan-out chains
+     * within them. */
+    size_t calls = 1, d2 = 1, d16 = 1;
+    for (;;) {
+        char *t = a41_helper(64, calls + 1, 0, salt);
+        int fits = t && hl_gpu_wgsl_precheck(t, strlen(t), NULL) == 0;
+        free(t);
+        if (!fits) break;
+        calls++;
+    }
+    for (;;) {
+        char *t = a41_fan(2, d2 + 1, salt);
+        int fits = t && hl_gpu_wgsl_precheck(t, strlen(t), NULL) == 0;
+        free(t);
+        if (!fits) break;
+        d2++;
+    }
+    for (;;) {
+        char *t = a41_fan(16, d16 + 1, salt);
+        int fits = t && hl_gpu_wgsl_precheck(t, strlen(t), NULL) == 0;
+        free(t);
+        if (!fits) break;
+        d16++;
+    }
+    printf("  audit41 bounds: %zu calls, depth %zu (fan 2), depth %zu (fan 16)\n",
+           calls, d2, d16);
+    shapes[0] = a41_helper(64, calls, 0, salt);
+    shapes[1] = a41_fan(2, d2, salt);
+    shapes[2] = a41_fan(16, d16, salt);
+    shapes[3] = a41_helper(400, 8, 1, salt);      /* big helper, kept a call */
+    for (int k = 0; k < 4; k++) {
+        ASSERT_TRUE(shapes[k] != NULL);
+        char name[16];
+        snprintf(name, sizeof(name), "a41_%d", k);
+        double t0 = a40_now();
+        int rc = hl_cap_gpu_compile(&ctx, -1, name, shapes[k], strlen(shapes[k]));
+        double dt = a40_now() - t0;
+        printf("  audit41 shape %d: %zu bytes, rc %d, %.2f s\n",
+               k, strlen(shapes[k]), rc, dt);
+        if (k < 3) EXPECT_EQ(HL_GPU_OK, rc);
+        EXPECT_TRUE(dt < 1.5);   /* ~0.9 s at most measured on Apple M1 Max */
+        free(shapes[k]);
+    }
+    char *bomb = a41_fan(8, 90, salt);
+    ASSERT_TRUE(bomb != NULL);
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(&ctx, -1, "bomb", bomb, strlen(bomb)));
+    EXPECT_TRUE(a40_now() - t0 < 0.5);
+    free(bomb);
     hl_cap_gpu_destroy(&ctx);
 }
 #endif /* HL_ENABLE_GPU */
