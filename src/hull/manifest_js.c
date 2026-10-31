@@ -293,6 +293,11 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     JSValue gpu_val = mjs_own(ctx, manifest, "gpu");
     if (mjs_is_obj(ctx, gpu_val)) {
         out->gpu = 1;
+        /* gpu.dynamicShaders: true - runtime WGSL source in a built binary
+         * (audit convergence §7.3). Only the boolean true opts in. */
+        JSValue dyn = mjs_own(ctx, gpu_val, "dynamicShaders");
+        out->gpu_dynamic_shaders = JS_IsBool(dyn) && JS_ToBool(ctx, dyn);
+        JS_FreeValue(ctx, dyn);
         JSValue devs = mjs_own(ctx, gpu_val, "devices");
         if (JS_IsArray(ctx, devs) == 1) {
             int32_t len = mjs_len(ctx, devs);

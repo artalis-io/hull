@@ -3146,6 +3146,7 @@ const char *hl_gpu_compile_errstr(int rc)
 {
     if (rc == HL_GPU_ERR_TIMEOUT) return "compile_timeout";
     if (rc == HL_GPU_ERR_BUSY) return GPU_BUSY_MSG;
+    if (rc == HL_GPU_ERR_POLICY) return "dynamic_shader_refused";
     return "shader_error";
 }
 
@@ -3154,11 +3155,23 @@ const char *hl_gpu_compile_errstr(int rc)
 int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
                        const char *wgsl, size_t wgsl_len)
 {
+    return hl_cap_gpu_compile_ex(ctx, device, name, wgsl, wgsl_len, 0);
+}
+
+int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
+                          const char *wgsl, size_t wgsl_len, int flags)
+{
     /* Shader compile is event-loop-only (gpu.compile / gpu.load bindings);
      * workers only look up already-compiled pipelines under the device lock. */
     hl_assert_on_event_loop("hl_cap_gpu_compile (gpu.compile/load)");
     if (!ctx || !name || !wgsl)
         return HL_GPU_ERR_INTERNAL;
+    /* A built binary compiles only its embedded shaders unless the manifest
+     * opts into dynamic source (audit convergence §7.3,
+     * cap/gpu_shader_policy.c): the pre-checks below are then a fast filter,
+     * not the boundary. */
+    if (hl_gpu_shader_admit(ctx, name, wgsl, wgsl_len, flags) != HL_GPU_OK)
+        return HL_GPU_ERR_POLICY;
     /* A source naga would recurse over until the stack overflows, or spend
      * unbounded time expanding, is refused before any wgpu call (audits
      * 36 / 37). Every check is a linear scan, bounded by the size cap. */

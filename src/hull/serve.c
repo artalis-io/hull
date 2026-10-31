@@ -1781,6 +1781,21 @@ static int hl_serve_wire_caps(HlServerState *s)
         log_info("[hull:c] gpu device restriction: %d of %d devices allowed",
                  s->manifest.gpu_device_count, gpu_ctx->device_count);
     }
+    /* Shader policy (audit convergence §7.3), sealed with the allowlist: a
+     * built binary (embedded app files) compiles only its embedded
+     * shaders/ unless the manifest sets gpu.dynamic_shaders; development
+     * compiles any source and warns once about inline source. */
+    if (gpu_ctx_ok) {
+        const HlVfs *shader_vfs = hl_app_context_app_vfs(s->app);
+        int embedded = hl_vfs_embedded(shader_vfs);
+        int dynamic = s->manifest.present && s->manifest.gpu_dynamic_shaders;
+        hl_cap_gpu_set_shader_policy(gpu_ctx,
+            embedded ? HL_GPU_SHADERS_EMBEDDED : HL_GPU_SHADERS_DEV,
+            dynamic, shader_vfs);
+        if (embedded && dynamic)
+            log_info("[hull:c] gpu.dynamic_shaders: runtime WGSL source is "
+                     "compiled in-process under the compile deadline");
+    }
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
      * paths - both blob.* and fs.mmap need the cfg). The fs.read/fs.write grants

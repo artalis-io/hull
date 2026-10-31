@@ -58,9 +58,17 @@ myapp/
 ```
 
 `gpu.load("normalize")` reads `shaders/normalize.wgsl` (or embedded
-VFS in built binaries) and caches the compiled pipeline. Equivalent
-to `gpu.compile("normalize", file_contents)`. `hull build .`
-auto-embeds every `shaders/*.wgsl`.
+VFS in built binaries) and caches the compiled pipeline. `hull build .`
+auto-embeds every `shaders/*.wgsl` and pre-checks each (a shader that
+fails the WGSL pre-check, or a test compile when the building hull has a
+GPU, fails the build).
+
+**A built binary compiles only these embedded shaders.** `gpu.compile(name,
+src)` there is refused with `dynamic_shader_refused` unless `src` is
+byte-identical to an embedded `shaders/*.wgsl`, or the manifest opts in
+with `gpu = { dynamic_shaders = true }` (JS `gpu: { dynamicShaders: true
+}`). In development (`hull app.lua`, `hull dev`) inline source still
+compiles, with one WARN. Put shaders in `shaders/` and use `gpu.load`.
 
 ### Minimal WGSL example
 

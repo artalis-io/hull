@@ -14852,6 +14852,81 @@ UTEST(js_gpu, read_backs_past_the_heap_limit_are_refused)
     jgpu_cleanup();
 }
 
+/* Audit convergence §7.3, the twin of lua_gpu_audit_convergence. */
+#define JGPU_OTHER_WGSL \
+    "@group(0) @binding(0) var<storage, read_write> a: array<u32>; fn main() { }"
+
+UTEST(js_gpu_audit_convergence, embedded_shaders_only_by_default)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, jgpu_shader_entries, NULL);
+    js.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(jgpu, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    gpu_mock_compiles = 0;
+    JGPU_EXPECT("gpu.load('id');"
+                "let r = String(gpu.compile('copy', '" HL_TEST_GPU_WGSL "'));"
+                "try { gpu.compile('other', '" JGPU_OTHER_WGSL "'); r += ' compiled'; }"
+                "catch (e) { r += ' ' + e.message; }"
+                "return r;",
+                "true gpu.compile failed: dynamic_shader_refused");
+    EXPECT_EQ(gpu_mock_compiles, 2);
+    js.base.app_vfs = NULL;
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu_audit_convergence, dynamic_source_with_opt_in)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, jgpu_shader_entries, NULL);
+    js.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(jgpu, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    JGPU_EXPECT("return String(gpu.compile('other', '" JGPU_OTHER_WGSL "'));",
+                "true");
+    js.base.app_vfs = NULL;
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu_audit_convergence, dev_mode_compiles_inline_source)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, none, "/nonexistent-app");
+    hl_cap_gpu_set_shader_policy(jgpu, HL_GPU_SHADERS_DEV, 0, &vfs);
+    JGPU_EXPECT("return String(gpu.compile('other', '" JGPU_OTHER_WGSL "'));",
+                "true");
+    jgpu_cleanup();
+}
+
+UTEST(js_gpu_audit_convergence, manifest_dynamic_shaders)
+{
+    static const struct { const char *decl; int dyn; } cases[] = {
+        { "app.manifest({ gpu: { dynamicShaders: true } });",   1 },
+        { "app.manifest({ gpu: { dynamicShaders: false } });",  0 },
+        { "app.manifest({ gpu: { dynamicShaders: 'true' } });", 0 },
+        { "app.manifest({ gpu: { dynamicShaders: 1 } });",      0 },
+        { "app.manifest({ gpu: { dynamic_shaders: true } });",  0 },
+        { "app.manifest({ gpu: true });",                       0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_js();
+        ASSERT_TRUE(js_initialized);
+        char src[512];
+        snprintf(src, sizeof src, "import { app } from 'hull:app';\n%s\n",
+                 cases[i].decl);
+        char *msg = NULL;
+        EXPECT_EQ(a5_module_named("<test>", src, &msg), 0);
+        free(msg);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.gpu_dynamic_shaders, cases[i].dyn, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_js();
+    }
+}
+
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
  *
  * The twins of lua_audit37: fs.list read a whole directory, matching or

@@ -29,14 +29,9 @@ app.manifest({
     },
 })
 
--- GPU shader: double each u32
-gpu.compile("double", [[
-@group(0) @binding(0) var<storage, read_write> data: array<u32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    data[id.x] = data[id.x] * 2u;
-}
-]])
+-- GPU shader: double each u32 (shaders/double.wgsl; a built binary compiles
+-- only shaders embedded from shaders/).
+gpu.load("double")
 
 app.get("/health", function(req, res)
     res:json({

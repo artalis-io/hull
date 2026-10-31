@@ -9,6 +9,7 @@
 // Test: curl localhost:3000/health
 //       curl localhost:3000/process
 
+import { app } from "hull:app";
 import { gpu } from "hull:gpu";
 import { image } from "hull:image";
 

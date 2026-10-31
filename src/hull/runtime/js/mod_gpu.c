@@ -307,7 +307,8 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, name);
         return JS_EXCEPTION;
     }
-    int rc = hl_cap_gpu_compile(gpu, device, name, wgsl, wgsl_len);
+    int rc = hl_cap_gpu_compile_ex(gpu, device, name, wgsl, wgsl_len,
+                                   HL_GPU_COMPILE_FROM_SHADERS);
     free(file_buf);
     JS_FreeCString(ctx, name);
 

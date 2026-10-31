@@ -2114,6 +2114,19 @@ typedef struct {
     end
     if #shader_files > 0 then
         print("hull build: " .. #shader_files .. " shader(s) from " .. shaders_dir)
+        -- A built binary compiles only these shaders (unless the manifest
+        -- sets gpu.dynamic_shaders), so they are checked here: the size cap
+        -- and the WGSL pre-check, plus a test compile when this hull has a
+        -- GPU backend and the host an adapter (audit convergence §7.3).
+        local compiled, err = tool.gpu_shaders_check(shader_files)
+        if compiled == nil then
+            print("hull build: shader check failed: " .. tostring(err))
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+        print("hull build: shader(s) " ..
+              (compiled and "pre-checked and test-compiled"
+                         or "pre-checked (no GPU to test-compile on)"))
     end
 
     -- Resolve CC early (needed for AOT arch detection below).
