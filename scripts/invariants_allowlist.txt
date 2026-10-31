@@ -1,0 +1,373 @@
+# scripts/invariants_allowlist.txt - justified exceptions to `make check-invariants`.
+#
+# One entry per line:   INV-N  path:symbol  # reason
+# `symbol` is the enclosing C function; path and symbol may be shell globs.
+# Every entry needs a reason. An entry nothing matches any more is STALE and
+# fails the lint: when you fix a site, delete its line. A NEW entry needs the
+# reviewer's agreement that its reason holds (docs/invariants/README.md).
+# Rule definitions: scripts/check_invariants.py.
+
+# INV-1: bindings that charge nothing themselves. Phase 2 (design section 6.1)
+# replaces this rule with measured-time charging in a central dispatcher.
+INV-1  src/hull/runtime/*:luaopen_*  # module opener: runs once per require, fixed cost
+INV-1  src/hull/runtime/*:*_gc  # finalizer: runs from the collector, whose work the engine charges; releases one handle
+INV-1  src/hull/runtime/*:*_k  # internal continuation / protected-call body pushed from C, not app-visible; its caller charges
+INV-1  src/hull/runtime/lua/async.c:hl_lua_co_resume  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
+INV-1  src/hull/runtime/lua/async.c:hl_lua_co_status  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
+INV-1  src/hull/runtime/lua/async.c:hl_lua_co_guarded  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
+INV-1  src/hull/runtime/lua/async.c:hl_lua_co_yield  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
+INV-1  src/hull/runtime/lua/async.c:hl_lua_co_auxwrap  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
+INV-1  src/hull/runtime/lua/async.c:hl_lua_co_wrap  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
+INV-1  src/hull/runtime/lua/async.c:lua_hull_sleep  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/async.c:task_hook_call  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/async.c:lua_hull_spawn  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/async.c:lua_task_spawn  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/async.c:lua_hull_token  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/async.c:lua_hull_park  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/async.c:lua_hull_wake  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/async.c:lua_hull_index  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/bindings_response.c:lua_res_status  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/budget.c:budget_pcall  # pcall / xpcall wrapper: re-raises a trip; the protected call's work is charged by the engine
+INV-1  src/hull/runtime/lua/budget.c:budget_msgh  # pcall / xpcall wrapper: re-raises a trip; the protected call's work is charged by the engine
+INV-1  src/hull/runtime/lua/budget.c:budget_xpcall  # pcall / xpcall wrapper: re-raises a trip; the protected call's work is charged by the engine
+INV-1  src/hull/runtime/lua/manifest_extract.c:noop_fn  # manifest-extraction stub: a no-op in the extraction VM
+INV-1  src/hull/runtime/lua/manifest_extract.c:noop_index  # manifest-extraction stub: a no-op in the extraction VM
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_get  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_post  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_put  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_del  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_patch  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_options  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_use  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_use_post  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_every  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_daily  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_ws  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_sse  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_manifest  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_get_manifest  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_app.c:lua_app_main  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/lua/mod_blob.c:lua_writer_abort  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_blob.c:lua_reader_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_blob.c:lua_iter_step  # blob iterator step: the walk charges the fs charge scope opened by blob.iter (LUA_BLOB_WALK)
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_buf_len  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_buf_bytes  # copies a bounded result onto the VM heap; the allocation is charged by the engine (Lua patch 0004 / QuickJS 0005)
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_buf_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_buf_tostring  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_compute_load  # loads an embedded module once (cached); instantiation is charged by the call that uses it
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_inst_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_inst_name  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_inst_closed  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_inst_tostring  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_wasm_inst_index  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_stream_cb_call  # protected-call body for compute.stream's output callback; the stream charges each chunk (before_chunk)
+INV-1  src/hull/runtime/lua/mod_compute.c:lua_compute_available  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_crypto.c:lua_crypto_random  # n capped (HL_RANDOM_MAX_BYTES / 1024); the output lands on the VM heap, whose allocation the engine charges
+INV-1  src/hull/runtime/lua/mod_crypto.c:lua_crypto_random_token  # n capped (HL_RANDOM_MAX_BYTES / 1024); the output lands on the VM heap, whose allocation the engine charges
+INV-1  src/hull/runtime/lua/mod_crypto.c:crypto_push_values  # copies a bounded result onto the VM heap; the allocation is charged by the engine (Lua patch 0004 / QuickJS 0005)
+INV-1  src/hull/runtime/lua/mod_crypto.c:lua_crypto_create_sha256  # fixed-size state / digest; update() is the charged call
+INV-1  src/hull/runtime/lua/mod_crypto.c:lua_sha256_hasher_digest  # fixed-size state / digest; update() is the charged call
+INV-1  src/hull/runtime/lua/mod_crypto.c:lua_crypto_key_destroy  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_crypto.c:lua_crypto_key_tostring  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_crypto.c:crypto_push_bytes  # copies a bounded result onto the VM heap; the allocation is charged by the engine (Lua patch 0004 / QuickJS 0005)
+INV-1  src/hull/runtime/lua/mod_db.c:row_loop_guard_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_query  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_exec  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_last_id  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_in_transaction  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_batch  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_insert_if_absent  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_upsert  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_table_columns  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_quote_identifier  # O(identifier length); the result string's allocation is charged by the engine
+INV-1  src/hull/runtime/lua/mod_db.c:lua_owned_conn_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_default  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_connect  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_internal_conn  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/lua/mod_db_udf.c:lua_db_udf_register  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
+INV-1  src/hull/runtime/lua/mod_db_udf.c:lua_db_udf_unregister  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
+INV-1  src/hull/runtime/lua/mod_env.c:lua_env_allowed  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_fs.c:lua_mmap_len  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_fs.c:lua_mmap_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_fs.c:lua_mmap_tostring  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_fs.c:hl_lua_require  # module load from the VFS, cached after the first require; compiling is charged by the engine
+INV-1  src/hull/runtime/lua/mod_fs.c:hl_lua_require_trusted  # module load from the VFS, cached after the first require; compiling is charged by the engine
+INV-1  src/hull/runtime/lua/mod_gpu.c:gpu_pins_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_gpu.c:l_gpu_available  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_gpu.c:l_gpu_devices  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_gpu.c:gpu_async_tmp_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_http_server.c:lua_server_stats  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_image.c:l_image_width  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_image.c:l_image_height  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_image.c:l_image_format  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_image.c:l_image_size  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_image.c:l_image_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_image.c:l_image_tostring  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_get  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_del  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_has  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_incr  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_clear  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_scan  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_caps  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_backend_name  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_kv.c:l_kv_open  # kv.open: capped by HL_KV_OPEN_MAX; connect / handshake waits ask the budget in the cap layer
+INV-1  src/hull/runtime/lua/mod_request.c:mp_part_chunks  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/lua/mod_request.c:mp_chunks_drive  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/lua/mod_request.c:mp_part_index  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/lua/mod_request.c:mp_iter_drive  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/lua/mod_request.c:lua_req_multipart  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/lua/mod_sse.c:lua_sse_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_ssh.c:lua_ssh_close  # hull.ssh stream: slot-capped (HL_SSH_MAX_LIVE_STREAMS), parks for I/O; per-call syscalls uncharged - phase 2 dispatcher (design 6.1)
+INV-1  src/hull/runtime/lua/mod_ssh.c:lua_ssh_read  # hull.ssh stream: slot-capped (HL_SSH_MAX_LIVE_STREAMS), parks for I/O; per-call syscalls uncharged - phase 2 dispatcher (design 6.1)
+INV-1  src/hull/runtime/lua/mod_ssh.c:lua_ssh_write  # hull.ssh stream: slot-capped (HL_SSH_MAX_LIVE_STREAMS), parks for I/O; per-call syscalls uncharged - phase 2 dispatcher (design 6.1)
+INV-1  src/hull/runtime/lua/mod_ssh.c:lua_ssh_connect  # hull.ssh stream: slot-capped (HL_SSH_MAX_LIVE_STREAMS), parks for I/O; per-call syscalls uncharged - phase 2 dispatcher (design 6.1)
+INV-1  src/hull/runtime/lua/mod_ssh.c:lua_ssh_deadline  # hull.ssh stream: slot-capped (HL_SSH_MAX_LIVE_STREAMS), parks for I/O; per-call syscalls uncharged - phase 2 dispatcher (design 6.1)
+INV-1  src/hull/runtime/lua/mod_ssh.c:lua_ssh_wait  # hull.ssh stream: slot-capped (HL_SSH_MAX_LIVE_STREAMS), parks for I/O; per-call syscalls uncharged - phase 2 dispatcher (design 6.1)
+INV-1  src/hull/runtime/lua/mod_template.c:lua_template_load_raw  # template source lookup (VFS; disk only in development); the compile is charged (8 units / byte)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_call  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_get  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_post  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_put  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_delete  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_patch  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_eq  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_ok  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_test.c:l_test_err  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/lua/mod_time.c:lua_time_now  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_time.c:lua_time_now_ms  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_time.c:lua_time_clock  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_tui.c:lua_tui_leave  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_ws_client.c:lua_ws_client_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_ws_server.c:lua_ws_conn_id  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_ws_server.c:lua_ws_conn_path  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_ws_server.c:lua_ws_conn_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/mod_ws_server.c:lua_ws_conn_index  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_ws_server.c:lua_ws_conn_newindex  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/lua/mod_ws_server.c:lua_ws_connections  # lists the open WebSocket connections: bounded by the server's connection cap
+INV-1  src/hull/runtime/lua/runtime.c:hl_lua_print  # tool / dev VM print; app VMs get hl_lua_app_print, which charges
+INV-1  src/hull/runtime/lua/runtime.c:cli_stdin_read  # app.main CLI stream / settle: app.main blocks nothing else and has its own 10 min run deadline
+INV-1  src/hull/runtime/lua/runtime.c:cli_writer_write  # app.main CLI stream / settle: app.main blocks nothing else and has its own 10 min run deadline
+INV-1  src/hull/runtime/lua/runtime.c:cli_writer_flush  # app.main CLI stream / settle: app.main blocks nothing else and has its own 10 min run deadline
+INV-1  src/hull/runtime/lua/runtime.c:cli_stdin_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/worker_db.c:row_loop_guard_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/lua/worker_db.c:worker_lua_db_query  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/worker_db.c:worker_lua_db_exec  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/worker_db.c:worker_lua_db_batch  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/worker_db.c:worker_lua_db_last_id  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/lua/worker_db.c:lua_worker_db_init_hook  # worker VM setup hook: runs once per worker.dispatch VM
+INV-1  src/hull/runtime/js/async.c:js_hull_sleep  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/js/async.c:js_task_spawn  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/js/bindings.c:js_req_header  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/bindings_response.c:js_res_status  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/harden.c:hl_js_override_get  # SES override-mistake accessor: one property define on an instance
+INV-1  src/hull/runtime/js/harden.c:hl_js_override_set  # SES override-mistake accessor: one property define on an instance
+INV-1  src/hull/runtime/js/mod_app.c:js_app_route  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_use  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_use_post  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_every  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_daily  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_ws  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_sse  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_manifest  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_get_manifest  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_app.c:js_app_main  # app registration at load time (top level, before serving); bounded by the route / timer table
+INV-1  src/hull/runtime/js/mod_blob.c:js_writer_abort  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_blob.c:js_reader_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_compute.c:js_wasm_buf_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_compute.c:js_wasm_buf_bytes  # copies a bounded result onto the VM heap; the allocation is charged by the engine (Lua patch 0004 / QuickJS 0005)
+INV-1  src/hull/runtime/js/mod_compute.c:js_wasm_buf_get_length  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_compute.c:js_compute_load  # loads an embedded module once (cached); instantiation is charged by the call that uses it
+INV-1  src/hull/runtime/js/mod_compute.c:js_wasm_inst_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_compute.c:js_wasm_inst_get_name  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_compute.c:js_wasm_inst_get_closed  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_compute.c:js_wasm_inst_get_async  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_compute.c:js_compute_available  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_crypto.c:js_crypto_random  # n capped (HL_RANDOM_MAX_BYTES / 1024); the output lands on the VM heap, whose allocation the engine charges
+INV-1  src/hull/runtime/js/mod_crypto.c:js_crypto_random_token  # n capped (HL_RANDOM_MAX_BYTES / 1024); the output lands on the VM heap, whose allocation the engine charges
+INV-1  src/hull/runtime/js/mod_crypto.c:js_sha256_hasher_digest  # fixed-size state / digest; update() is the charged call
+INV-1  src/hull/runtime/js/mod_crypto.c:js_crypto_create_sha256  # fixed-size state / digest; update() is the charged call
+INV-1  src/hull/runtime/js/mod_crypto.c:js_crypto_key_destroy  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_crypto.c:js_crypto_key_to_string  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_db.c:js_db_query  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/mod_db.c:js_db_exec  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/mod_db.c:js_db_last_id  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/mod_db.c:js_db_in_transaction  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_db.c:js_db_batch  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/mod_db.c:js_db_insert_if_absent  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/mod_db.c:js_db_upsert  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/mod_db.c:js_db_table_columns  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/mod_db.c:js_db_quote_identifier  # O(identifier length); the result string's allocation is charged by the engine
+INV-1  src/hull/runtime/js/mod_db.c:js_db_owned_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_db.c:js_db_default  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/js/mod_db.c:js_db_connect  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/js/mod_db.c:js_db_internal_conn  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/js/mod_db_udf.c:js_db_udf_register  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
+INV-1  src/hull/runtime/js/mod_db_udf.c:js_db_udf_unregister  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
+INV-1  src/hull/runtime/js/mod_env.c:js_env_allowed  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_fs.c:js_mmap_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_fs.c:js_mmap_get_length  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_gpu.c:js_gpu_available  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_gpu.c:js_gpu_devices  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_http_server.c:js_server_stats  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_image.c:js_image_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_json.c:js_json_encode  # runs QuickJS's JSON builtins, charged inside the engine (QuickJS HULL PATCH 0005)
+INV-1  src/hull/runtime/js/mod_json.c:js_json_decode  # runs QuickJS's JSON builtins, charged inside the engine (QuickJS HULL PATCH 0005)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_get  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_set  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_del  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_has  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_incr  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_cas  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_clear  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_scan  # kv command: reply chunks and scan steps are charged in the cap layer (hl_db_budget_charge)
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_caps  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_backend_name  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_kv.c:js_kv_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_request.c:js_iter_next  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_iter_async_iterator  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_chunks_next  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_chunks_async_iterator  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_part_chunks  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_part_get_name  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_part_get_filename  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_part_get_content_type  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_request.c:js_req_multipart  # multipart read: body bytes are bounded by the server's body cap and parsed by Keel; each chunk lands on the VM heap (allocation charged); parks for data
+INV-1  src/hull/runtime/js/mod_sse.c:js_sse_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_template.c:js_template_load_raw  # template source lookup (VFS; disk only in development); the compile is charged (8 units / byte)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_call  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_get  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_post  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_put  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_del  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_patch  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_eq  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_ok  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_test.c:js_test_err  # hull test harness: test.get & co charge the case's budget with the dispatched request; asserts are O(1)
+INV-1  src/hull/runtime/js/mod_time.c:js_time_now  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_time.c:js_time_now_ms  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_time.c:js_time_clock  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
+INV-1  src/hull/runtime/js/mod_tui.c:js_tui_leave  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_tui.c:js_tui_async  # async primitive: schedules a task; each resumed run is armed and charged
+INV-1  src/hull/runtime/js/mod_ws_client.c:js_ws_client_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_ws_server.c:js_ws_conn_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/mod_ws_server.c:js_ws_connections  # lists the open WebSocket connections: bounded by the server's connection cap
+INV-1  src/hull/runtime/js/runtime.c:js_cli_read  # app.main CLI stream / settle: app.main blocks nothing else and has its own 10 min run deadline
+INV-1  src/hull/runtime/js/runtime.c:js_cli_write  # app.main CLI stream / settle: app.main blocks nothing else and has its own 10 min run deadline
+INV-1  src/hull/runtime/js/runtime.c:js_cli_flush  # app.main CLI stream / settle: app.main blocks nothing else and has its own 10 min run deadline
+INV-1  src/hull/runtime/js/runtime.c:js_cli_close  # close / abort: releases one handle, constant work
+INV-1  src/hull/runtime/js/runtime.c:js_cli_main_settle  # app.main CLI stream / settle: app.main blocks nothing else and has its own 10 min run deadline
+INV-1  src/hull/runtime/js/worker_db.c:worker_js_db_query  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/worker_db.c:worker_js_db_exec  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/worker_db.c:worker_js_db_batch  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+INV-1  src/hull/runtime/js/worker_db.c:worker_js_db_last_id  # SQL work is charged in the cap layer through the thread-bound budget (SQLite progress handler + allocator, wire frame charges)
+
+# INV-2: raw SQLite outside src/hull/cap/
+INV-2  src/hull/agent/db.c:*  # agent read-only reader: needs the raw handle for its prepare / finalize gate (hl_agent_prepare_readonly) and schema introspection
+INV-2  src/hull/agent/db_open.c:*  # agent read-only open: SQLITE_OPEN_READONLY, registers the file, installs hl_cap_db_guard
+INV-2  src/hull/agent/schema_diff.c:*  # agent read-only reader: needs the raw handle for its prepare / finalize gate (hl_agent_prepare_readonly) and schema introspection
+INV-2  src/hull/agent/sql.c:*  # agent read-only reader: needs the raw handle for its prepare / finalize gate (hl_agent_prepare_readonly) and schema introspection
+INV-2  src/hull/runtime/lua/mod_db_udf.c:*  # SQL udf bridge: sqlite3_value / sqlite3_result / create_function are the udf API itself
+INV-2  src/hull/runtime/js/mod_db_udf.c:*  # SQL udf bridge: sqlite3_value / sqlite3_result / create_function are the udf API itself
+
+# INV-4: JS entry machinery
+INV-4  src/hull/runtime/js/async.c:hl_js_run_yield_check  # transaction machinery: rolls back the transaction a waiting run held and fails its run / tag
+INV-4  src/hull/runtime/js/async.c:hl_js_txn_left_open  # transaction machinery: rolls back a transaction code no entry waits on left open; the caller fails the tag
+INV-4  src/hull/runtime/js/async.c:hl_js_run_txn_hold_end  # transaction machinery: a run whose stretch of jobs ended holding a transaction; rolled back and its tag failed
+INV-4  src/hull/runtime/js/mod_tui.c:js_tui_poll_sync  # re-arms app.main's own run after a terminal wait (audits 26 / 28); app.main ends through hl_js_entry_end_txn_check
+INV-4  src/hull/runtime/js/runtime.c:hl_js_reset_request  # helper: arms the run for hl_js_dispatch / hl_js_dispatch_middleware, which end through hl_js_entry_end_txn_check
+
+# INV-6: direct terminal writes reviewed as Hull-owned text
+INV-6  src/hull/compiler.c:hl_compiler_select  # toolchain selection message: Hull constants and resolved tool paths
+INV-6  src/hull/linker_system.c:hl_linker_select  # toolchain selection message: Hull constants and resolved tool paths
+INV-6  src/hull/release_io.c:hl_release_io_get  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/release_io.c:hl_release_io_check_release_tag  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/release_io.c:hl_release_io_fetch_verified_manifest  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/release_io.c:local_check_release  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/release_io.c:hl_release_io_verify_local_asset_release  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/release_io.c:write_new_file  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/release_io.c:hl_release_io_atomic_write  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/release_io.c:hl_release_io_self_replace  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/serve.c:usage  # usage and argument errors: Hull constants and the operator's own argv
+INV-6  src/hull/serve.c:hl_parse_serve_args  # usage and argument errors: Hull constants and the operator's own argv
+INV-6  src/hull/serve_cli.c:cli_parse_args  # usage and argument errors: Hull constants and the operator's own argv
+INV-6  src/hull/tool.c:keygen_write  # tool-mode output: Hull constants, operator paths and argv
+INV-6  src/hull/tool.c:hull_keygen  # tool-mode output: Hull constants, operator paths and argv
+INV-6  src/hull/tool.c:argv_real_dir  # tool-mode output: Hull constants, operator paths and argv
+INV-6  src/hull/tool.c:hull_tool  # tool-mode output: Hull constants, operator paths and argv
+INV-6  src/hull/cap/audit.c:hl_audit_end  # audit record encoded by ShJsonWriter, which escapes control bytes
+INV-6  src/hull/cap/db.c:hl_cap_db_heap_limit_from_env  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
+INV-6  src/hull/cap/db.c:hl_cap_db_init  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
+INV-6  src/hull/cap/db.c:hl_cap_db_guard  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
+INV-6  src/hull/cap/db.c:hl_cap_db_guard_stale_txn  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
+INV-6  src/hull/cap/db_sqlite.c:sqlite_replace_conn  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
+INV-6  src/hull/commands/agent.c:output_result  # JSON built by ShJsonWriter (C0 escaped); agent text is sanitized where it is collected (audit 35)
+INV-6  src/hull/commands/agent.c:cmd_db  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/agent.c:cmd_request  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/agent.c:cmd_auth_status  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/agent.c:cmd_status  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/agent.c:hl_cmd_agent  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:cache_list_text  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:cmd_list  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:cmd_prune  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:cmd_clear  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:verify_visit  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:verify_one_kind  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:cmd_verify  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/cache.c:hl_cmd_cache  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/check.c:hl_cmd_check  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/dev.c:hl_cmd_dev  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/doctor.c:hl_cmd_doctor  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/extract_manifest_js.c:hl_cmd_extract_manifest_js  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/feature.c:feature_cache_dir  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/feature.c:install_asset  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/feature.c:cmd_install  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/feature.c:cmd_list  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/feature.c:cmd_uninstall  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/flavor.c:platform_cache_dir  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/flavor.c:install_asset  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/flavor.c:cmd_install  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/flavor.c:cmd_list  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/jobs.c:hl_cmd_jobs  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/migrate.c:cmd_run  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/migrate.c:cmd_status  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/migrate.c:hl_cmd_migrate  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/modules.c:print_spec_human  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/modules.c:cmd_available  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/modules.c:cmd_explain  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/modules.c:hl_cmd_modules  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/sbom.c:hl_cmd_sbom  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/sign_release.c:read_file  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/sign_release.c:hl_cmd_sign_release  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/test.c:hl_cmd_test  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
+INV-6  src/hull/commands/tools.c:print_list_text  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/tools.c:print_unpublished  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/tools.c:install_one  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/tools.c:cmd_install  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/tools.c:cmd_uninstall  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/tools.c:hl_cmd_tools  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/update.c:hl_cmd_update  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/verify_release.c:read_file  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/verify_release.c:hl_cmd_verify_release  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/verify_self.c:hl_cmd_verify_self  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/commands/version.c:hl_cmd_version  # release / install output: Hull constants, asset names from the signed manifest, operator-supplied paths
+INV-6  src/hull/runtime/js/runtime.c:vt_js_run_main  # run trip reason: a Hull constant (hl_js_trip_reason)
+INV-6  src/hull/runtime/lua/mod_tool.c:l_tool_stderr_raw  # tool VM: stdout_raw / stderr_raw are the documented verbatim writers for text the plugin encoded; the rest prints Hull constants
+INV-6  src/hull/runtime/lua/mod_tool.c:l_tool_stdout_raw  # tool VM: stdout_raw / stderr_raw are the documented verbatim writers for text the plugin encoded; the rest prints Hull constants
+INV-6  src/hull/runtime/lua/mod_tool.c:l_tool_platform_verify  # tool VM: stdout_raw / stderr_raw are the documented verbatim writers for text the plugin encoded; the rest prints Hull constants
+INV-6  src/hull/shared/thread_affinity.c:hl_assert_on_event_loop  # assertion message: a Hull constant naming the caller
+
+# INV-7: JS_RunGC outside the charged retry helper
+INV-7  src/hull/runtime/js/mod_compute.c:js_push_wasm_buffer  # off-heap GC debt: at most one collection per HL_JS_OFFHEAP_GC_DEBT (32 MB) of WasmBuffers, each charged by its own copy
+INV-7  src/hull/runtime/js/runtime.c:hl_js_gc  # embedder API: called by the host between runs, not from app code
+INV-7  src/hull/runtime/js/runtime.c:hl_js_free  # teardown: the VM is being freed, no run is active
+INV-7  src/hull/runtime/js/worker.c:js_dispatch_work_fn  # worker.dispatch teardown: collects the cycles a finished job left, outside the job's run
+INV-7  tests/*:*  # unit tests drive collections directly
+
+# INV-8: SQLite opens
+INV-8  src/hull/cap/db_sqlite.c:sqlite_replace_conn  # reopens a file s->live_path already registers; the old connection stays open and registered until the new one is ready (audit 34)
+
+# INV-9: Lua resumes
+INV-9  src/hull/runtime/lua/async.c:hl_lua_co_resume  # coroutine.resume itself: the app's coroutine library, not a runtime resume path; closes an errored coroutine (hl_lua_close_errored)
+INV-9  src/hull/runtime/lua/async.c:hl_lua_co_auxwrap  # coroutine.wrap's call: the app's coroutine library; closes an errored coroutine with lua_closethread(co, L)
