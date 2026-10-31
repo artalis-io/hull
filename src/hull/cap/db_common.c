@@ -782,7 +782,7 @@ static int catalog_stmt_switches(const char *p, size_t *budget)
         if (!(q = catalog_word(q, nest, budget, &w, &n))) return 1;
         if (catalog_word_is(w, n, "global") || catalog_word_is(w, n, "session") ||
             catalog_word_is(w, n, "local")) {
-            if (!(q = catalog_word(q, nest, budget, &w, &n))) return 1;
+            if (!catalog_word(q, nest, budget, &w, &n)) return 1;
         }
         if (catalog_word_is(w, n, "schema") ||
             catalog_word_is(w, n, "search_path"))
