@@ -207,7 +207,17 @@ static int lua_is_stdlib_caller(lua_State *L, const char *method)
         (strcmp(self.namewhat, "method") != 0 &&
          strcmp(self.namewhat, "field") != 0))
         return 0;
-    return strcmp(self.name, method) == 0;
+    if (strcmp(self.name, method) != 0)
+        return 0;
+    /* hull.search's SQL reaches only its own `_hull_fts_*` index (exempt by
+     * name) and app tables: the authorizer treats it as untrusted, so a read
+     * the index prepares while it runs (an external-content table) cannot
+     * reach another `_hull_*` table (audit 40). */
+    const char *src = ar.source;
+    if (*src == '@' || *src == '=') src++;
+    if (strcmp(src, "hull.search") == 0)
+        return HL_DB_NS_STDLIB_SCOPED;
+    return HL_DB_NS_TRUSTED;
 }
 
 #define HL_LUA_DB_RESERVED_MSG "access denied: _hull_* tables are reserved"

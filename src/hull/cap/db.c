@@ -393,8 +393,19 @@ static int db_name_guarded(const char *name)
      * search.index call, not inside the stdlib call - so they would run
      * untrusted. What they hold is the app's own content, which it reads
      * through search.query anyway. */
-    return hl_cap_db_name_reserved(name) &&
-           strncasecmp(name, "_hull_fts_", 10) != 0;
+    if (!hl_cap_db_name_reserved(name))
+        return 0;
+    if (strncasecmp(name, "_hull_fts_", 10) != 0)
+        return 1;
+    /* Only a name search could have made: `_hull_fts_` + an identifier
+     * (the index) or one of its shadow tables, which append `_data` etc. */
+    const char *p = name + 10;
+    if (!*p) return 1;
+    for (; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_'))
+            return 1;
+    return 0;
 }
 
 static int db_action_reserved(int action, const char *a1, const char *a2)
@@ -414,8 +425,13 @@ static int db_action_reserved(int action, const char *a1, const char *a2)
     case SQLITE_DROP_TEMP_VIEW:
     case SQLITE_ANALYZE:
     case SQLITE_REINDEX:
-    case SQLITE_CREATE_VTABLE:
     case SQLITE_DROP_VTABLE:
+        return db_name_guarded(a1);
+    case SQLITE_CREATE_VTABLE:
+        /* a2 is the module: a `_hull_fts_*` name is exempt only as an fts5
+         * index (audit 40). */
+        if (hl_cap_db_name_reserved(a1) && (!a2 || strcasecmp(a2, "fts5") != 0))
+            return 1;
         return db_name_guarded(a1);
     case SQLITE_CREATE_INDEX:
     case SQLITE_CREATE_TEMP_INDEX:
@@ -709,7 +725,8 @@ void hl_cap_db_sqlite_setup(void)
 }
 
 /* 0 when no view or trigger in @p db's schema names a `_hull_*` table (in
- * its SQL text, its name, or - a trigger - the table it is ON); -1 (logged,
+ * its SQL text, its name, or - a trigger - the table it is ON) and every
+ * virtual table passes hl_cap_db_vtab_definition_ok (audit 40); -1 (logged,
  * the object named) otherwise or when the schema cannot be read. Read the way
  * the text check reads app SQL, so a string literal holding `_hull_` counts
  * too: an app view could not have been created with one either. */
@@ -717,8 +734,8 @@ static int db_check_stored_objects(sqlite3 *db)
 {
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
-            "SELECT type, name, tbl_name, sql FROM main.sqlite_schema "
-            "WHERE type IN ('view', 'trigger')", -1, &st, NULL) != SQLITE_OK) {
+            "SELECT type, name, tbl_name, sql, rootpage FROM main.sqlite_schema "
+            "WHERE type IN ('view', 'trigger', 'table')", -1, &st, NULL) != SQLITE_OK) {
         hl_eprintf_line("hull: sqlite could not read the schema: %s",
                         sqlite3_errmsg(db));
         sqlite3_finalize(st);
@@ -730,6 +747,26 @@ static int db_check_stored_objects(sqlite3 *db)
         const char *name = (const char *)sqlite3_column_text(st, 1);
         const char *tbl  = (const char *)sqlite3_column_text(st, 2);
         const char *sql  = (const char *)sqlite3_column_text(st, 3);
+        if (type && strcmp(type, "table") == 0) {
+            /* A virtual table (rootpage 0, or the text says so - a planted
+             * file can write any rootpage) reads whatever its arguments name:
+             * an fts5 table with content='_hull_sessions' is queried by
+             * search.query, inside a stdlib call (audit 40). Ordinary tables
+             * hold only their own rows. */
+            if (sqlite3_column_int64(st, 4) != 0 &&
+                !hl_cap_db_sql_is_virtual_table(sql))
+                continue;
+            if (hl_cap_db_vtab_definition_ok(name, sql))
+                continue;
+            hl_eprintf_line("hull: the database holds a virtual table "
+                            "'%.64s' that names a reserved _hull_* table or "
+                            "is not a hull/search index (it would read "
+                            "Hull's internal tables past its check); drop it "
+                            "with the sqlite3 CLI before opening the database "
+                            "with Hull", name ? name : "?");
+            rc = -1;
+            break;
+        }
         if (hl_cap_db_name_reserved(name) || hl_cap_db_name_reserved(tbl) ||
             (sql && hl_cap_db_check_namespace(sql) != 0)) {
             hl_eprintf_line("hull: the database holds a %s '%.64s' that names "

@@ -553,13 +553,16 @@ UTEST(db_duckdb, sleep_refused_and_trip_lands_on_time)
 }
 
 /* Audit 38: a view or a column DEFAULT stored in the file that calls
- * sleep_ms refuses the open, as a stored table-name macro does (audit 37). */
+ * sleep_ms refuses the open, as a stored table-name macro does (audit 37);
+ * a CHECK constraint too (audit 40). */
 UTEST(db_duckdb, stored_sleep_view_or_default_refuses_the_open)
 {
     static const char *const ddl[] = {
         "CREATE VIEW v AS SELECT sleep_ms(1000) AS x",
         "CREATE TABLE t (a INT DEFAULT sleep_ms(1000))",
         "CREATE MACRO m(n) AS pg_sleep(n)",
+        /* audit 40: a CHECK constraint runs on every insert too */
+        "CREATE TABLE tc (a INT CHECK (sleep_ms(1000) IS NULL OR a > 0))",
     };
     for (size_t k = 0; k < sizeof ddl / sizeof ddl[0]; k++) {
         char path[] = "/tmp/hull_duck_sleep_XXXXXX";
@@ -579,7 +582,7 @@ UTEST(db_duckdb, stored_sleep_view_or_default_refuses_the_open)
         ASSERT_TRUE(duckdb_connect(db, &con) == DuckDBSuccess);
         ASSERT_TRUE(duckdb_query(con,
             "CREATE SEQUENCE sq; CREATE TABLE ok (id BIGINT DEFAULT "
-            "nextval('sq'), v INT); CREATE VIEW okv AS SELECT v FROM ok",
+            "nextval('sq'), v INT CHECK (v > 0)); CREATE VIEW okv AS SELECT v FROM ok",
             &r) == DuckDBSuccess);
         duckdb_destroy_result(&r);
         duckdb_disconnect(&con);

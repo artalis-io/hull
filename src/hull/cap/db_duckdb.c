@@ -355,13 +355,19 @@ static int duck_check_stored_macros(HlDbDuckCtx *s, duckdb_connection con)
     /* A view or a column DEFAULT stored in the file runs on every query /
      * insert that reaches it: one calling sleep_ms (audit 38), storage_info
      * or a table-name function by value would run past the text check. Read
-     * as app SQL (bare names are columns there, not parameters). */
+     * as app SQL (bare names are columns there, not parameters). A CHECK
+     * constraint runs on every insert / update the same way: DuckDB accepts
+     * `CHECK (sleep_ms(1000) IS NULL OR x > 0)` (no subquery, so it reads no
+     * table), and its expression goes through the same scanners (audit 40). */
     if (duckdb_query(con,
             "SELECT 'view', schema_name, view_name, sql FROM duckdb_views() "
             "WHERE NOT internal UNION ALL "
             "SELECT 'column default of', schema_name, table_name, "
             "column_default FROM duckdb_columns() "
-            "WHERE NOT internal AND column_default IS NOT NULL",
+            "WHERE NOT internal AND column_default IS NOT NULL UNION ALL "
+            "SELECT 'check constraint of', schema_name, table_name, "
+            "expression FROM duckdb_constraints() "
+            "WHERE constraint_type = 'CHECK' AND expression IS NOT NULL",
             &r) != DuckDBSuccess) {
         duckdb_destroy_result(&r);
         duck_set_err(s, "duckdb: could not list the database's views");

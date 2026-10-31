@@ -10,6 +10,24 @@ release-artifact layout).
 
 ### Fixes
 
+- **A planted SQLite virtual table could read `_hull_*` tables through `hull/search`** (audit 40).
+  The audit 39 open-time check read only views and triggers, but a virtual table is stored as
+  `type='table'`. An FTS5 table named like a search index with `content='_hull_sessions'` was
+  queried by `search.query`, with the stdlib's trust set, and FTS5's own read of its content
+  table returned the reserved table's rows to app code. Opening a SQLite database now also
+  checks every virtual table (`hl_cap_db_vtab_definition_ok`): an app virtual table may not name
+  a `_hull_*` object anywhere in its definition (an fts5 `content=`, an `fts5vocab` over a search
+  index), and a `_hull_*` one must be a search index exactly as `search.create_index` writes it
+  (`_hull_fts_<ident>`, fts5, `id` + columns, only tokenize / content / content_rowid, content
+  naming an app table); anything else refuses the open, naming the table. Second layer:
+  `hull/search`'s own SQL now runs untrusted for the authorizer (`HL_DB_NS_STDLIB_SCOPED`; the
+  text check is still waived), since it touches only its `_hull_fts_*` tables, so a read an index
+  prepares during a search cannot reach another `_hull_*` table. The authorizer's FTS exemption
+  covers only names search can make (`_hull_fts_` + an identifier), and creating a `_hull_fts_*`
+  virtual table under any module but fts5 is refused. Also (DuckDB, Low): the open-time check of
+  stored objects reads CHECK constraints too - DuckDB accepts `CHECK (sleep_ms(1000) IS NULL OR
+  x > 0)`, which ran on every insert past the text check.
+
 - **A JS Proxy `ownKeys`, a `JSON.stringify` replacer array or a regexp compile could hold the
   event loop past every limit** (audit 39). Each was one builtin call with nothing charged and
   nothing polled. QuickJS checked a Proxy `ownKeys` result for duplicates (and against a
