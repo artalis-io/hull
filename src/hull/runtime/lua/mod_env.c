@@ -4,6 +4,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_CALL_UNITS (audit 40) */
 #include "hull/cap/env.h"
 
 /* ════════════════════════════════════════════════════════════════════
@@ -19,6 +20,7 @@ static int lua_env_get(lua_State *L)
         return luaL_error(L, "env not configured");
 
     const char *name = luaL_checkstring(L, 1);
+    lua_hlwork(L, HL_WORK_CALL_UNITS, 0);   /* audit 40 */
     const char *val = hl_cap_env_get(lua->base.env_cfg, name);
 
     if (val)

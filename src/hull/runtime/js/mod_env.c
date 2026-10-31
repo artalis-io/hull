@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_CALL_UNITS (audit 40) */
 #include "hull/cap/env.h"
 #include "internal.h"   /* hl_js_export_frozen (audit 18) */
 
@@ -22,6 +23,10 @@ static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name)
         return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, HL_WORK_CALL_UNITS)) {   /* audit 40 */
+        JS_FreeCString(ctx, name);
+        return JS_EXCEPTION;
+    }
 
     const char *val = hl_cap_env_get(js->base.env_cfg, name);
     JS_FreeCString(ctx, name);

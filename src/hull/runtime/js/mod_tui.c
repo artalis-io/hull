@@ -43,7 +43,17 @@ static int ensure_acquired(JSContext *ctx)
         return -1;
     }
     if (g_ctx) return 0;
+    /* Charged (audit 40): the floor before, the time the acquire took
+     * after, capped (the OSC 11 query waits up to 50 ms on a terminal that
+     * does not answer: a wait, bounded by the run deadline). */
+    if (hl_js_budget_charge(ctx, HL_WORK_TUI_ACQUIRE_UNITS)) return -1;
+    int64_t t0 = hl_work_clock_us();
     int rc = hl_cap_tui_acquire(&g_ctx);
+    int saved = errno;
+    if (hl_js_budget_charge(ctx, hl_work_wall_us_units(hl_work_clock_us() - t0,
+                                                 HL_WORK_TUI_ACQUIRE_CAP_US)))
+        return -1;
+    errno = saved;
     if (rc != 0) {
         if (errno == EBUSY) {
             JS_ThrowInternalError(ctx,

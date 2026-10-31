@@ -197,6 +197,13 @@ static int lua_ws_conn_ping(lua_State *L)
 
     size_t len = 0;
     const char *data = luaL_optlstring(L, 2, NULL, &len);
+    /* Charged as a send (audit 40: it was free, ~8M pings a minute), and
+     * the connection checked again after the conversion, which allocates
+     * and can run a __gc that closes it (as send, audit 27). */
+    lua_hlwork(L, (size_t)hl_work_send_units(len, 1), 0);
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!ud->conn || ud->conn->closed || !ud->conn->kl_ws)
+        return 0;
 
     kl_ws_server_send_ping(ud->conn->kl_ws, data, len);
     return 0;

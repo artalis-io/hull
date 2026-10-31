@@ -7,6 +7,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/mime.h"
 #include "internal.h"   /* hl_js_export_frozen (audit 18) */
+#include "hull/shared/work_charge.h"   /* hl_work_mime_units (audit 40) */
 
 /* mime.sniff(bytes) -> string | null
  *
@@ -29,6 +30,13 @@ static JSValue js_mime_sniff(JSContext *ctx, JSValueConst this_val,
     if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
         return JS_ThrowTypeError(ctx,
             "mime.sniff: bytes must be an ArrayBuffer, TypedArray, or string");
+
+    /* Charged before the scan (audit 40): it reads up to the sniff window
+     * several times and was free. */
+    if (hl_js_budget_charge(ctx, hl_work_mime_units(view.len))) {
+        if (needs_free && str) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
 
     const char *mime = hl_cap_mime_sniff((const uint8_t *)view.data, view.len);
 

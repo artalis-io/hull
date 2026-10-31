@@ -569,6 +569,10 @@ static int lua_ws_connect(lua_State *L)
     if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
         return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "ws.connect: too many live WebSocket clients "
                           "(at most %d per VM)", HL_WS_CLIENT_MAX_LIVE);
+    /* The connect - DNS, socket, connect, the TLS handshake for wss:// -
+     * charged before it as an outbound HTTP request is (audit 40), and
+     * before the slot and the self-reference, so a trip leaks neither. */
+    lua_hlwork(L, HL_WORK_WS_CONNECT_UNITS, 0);
     lua->base.ws_clients++;
     ud->slot = &lua->base.ws_clients;
 

@@ -15072,4 +15072,142 @@ UTEST(lua_audit40, string_hash_seed_differs_between_states)
     lua_close(b);
 }
 
+/* ── Audit 40: mime.sniff, ws server ping, per-frame ws / SSE floors ──
+ *
+ * mime.sniff charged nothing, and after an XML declaration its "<svg" scan
+ * compared at every byte of the 4 KiB window (~16 us a call): a loop of
+ * `mime.sniff("<?xml" .. rep)` ran ~300 s per budget. The server conn:ping()
+ * was not charged at all, and a ws frame / SSE event cost 1-3 units for
+ * ~5 us of framing and syscalls. Each is charged at its measured cost now
+ * (hull/shared/work_charge.h): a loop trips a small budget, pcall does not
+ * catch it, and ordinary use still fits. */
+
+#include "hull/shared/work_charge.h"   /* hl_work_send_units */
+
+UTEST(lua_audit40, mime_sniff_is_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    ASSERT_EQ(audit10_run("mime = require('hull.mime') "
+                          "XML = '<?xml' .. string.rep('<', 8000) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* ~1088 units a call over a full window. */
+    EXPECT_NE(audit10_run("for i = 1, 1000 do mime.sniff(XML) end return 1",
+                          500000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run("for i = 1, 1000 do pcall(mime.sniff, XML) end return 1",
+                          500000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    /* Small inputs cost the floor: 100 fit easily. The scan still finds a
+     * root of any case, and gives up at the window. */
+    EXPECT_EQ_MSG(audit10_run(
+        "for i = 1, 100 do assert(mime.sniff('hello') == 'text/plain') end "
+        "assert(mime.sniff('<?xml version=\"1.0\"?><SVG/>') == 'image/svg+xml') "
+        "assert(mime.sniff('<!-- x --><svg></svg>') == 'image/svg+xml') "
+        "assert(mime.sniff('<?xml?><!DOCTYPE html><HTML>') == 'text/html') "
+        "assert(mime.sniff(XML) == 'application/xml') "
+        "assert(mime.sniff('<?xml' .. string.rep(' ', 5000) .. '<svg>') "
+        "       == 'application/xml') "
+        "assert(mime.sniff('<?xml<<svg') == 'image/svg+xml') return 1",
+        100000, err, sizeof err), LUA_OK, err);
+    cleanup_lua_caps();
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+UTEST(lua_audit40, ws_and_sse_frames_are_charged)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char err[512];
+
+    /* The floors are the measured per-frame cost, not 1 unit. */
+    EXPECT_GE(hl_work_send_units(0, 1), 300u);
+    EXPECT_EQ(hl_work_send_units(0, 10), 10 * hl_work_send_units(0, 1));
+    EXPECT_GE(hl_work_sse_units("", 0, 0), 300u);
+    EXPECT_GE(hl_work_sse_units("\n\n\n\n", 4, 0) - hl_work_sse_units("", 0, 0), 4 * 30u);
+
+    /* An empty comment in a loop: ~352 units each (4 before). */
+    struct HlSseStreamUD *ud = (struct HlSseStreamUD *)lua_newuserdata(L, sizeof *ud);
+    memset(ud, 0, sizeof *ud);
+    ud->sse.write_fn = a14_sse_write;
+    luaL_setmetatable(L, "HlSseStream");
+    lua_setglobal(L, "S");
+    EXPECT_NE(audit10_run("for i = 1, 10000 do S:comment('') end return 1",
+                          1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_NE(audit10_run("for i = 1, 10000 do pcall(S.event, S, 'e', '') end return 1",
+                          1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("for i = 1, 100 do S:comment('hi') end return 1",
+                          1000000, err, sizeof err), LUA_OK);
+
+    /* An empty broadcast is a frame per connection (no Keel connection
+     * here, so nothing is sent). */
+    HlAllocator wa;
+    hl_alloc_init(&wa, 0);
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &wa);
+    for (int i = 0; i < 100; i++)
+        ASSERT_NE(hl_ws_registry_add(&reg, "/ws", NULL), NULL);
+    lua_rt.base.ws_registry = &reg;
+    ASSERT_EQ(audit10_run("ws = require('hull.web.ws-server') return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run("for i = 1, 100 do ws.broadcast('/ws', '') end return 1",
+                          1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+
+    /* conn:ping() / conn:send(''): charged before Keel is reached, so one
+     * call over a budget smaller than a frame stops before the placeholder
+     * handle is used - ping was never charged and reached it. */
+    static char placeholder;
+    HlWsConn *c = hl_ws_registry_add(&reg, "/one", (KlWsServerConn *)(void *)&placeholder);
+    ASSERT_NE(c, NULL);
+    hl_lua_ws_push_conn(L, c);
+    lua_setglobal(L, "C");
+    static const char *const calls[] = {
+        "B = 1 C:ping() A = 1 return 1",
+        "B = 1 C:ping('payload') A = 1 return 1",
+        "B = 1 C:send('') A = 1 return 1",
+        "B = 1 C:send_binary('') A = 1 return 1",
+    };
+    for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++) {
+        ASSERT_EQ(audit10_run("B, A = nil, nil return 1",
+                              HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+        EXPECT_NE_MSG(audit10_run(calls[i], 250, err, sizeof err), LUA_OK, calls[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, calls[i]);
+        lua_getglobal(L, "B");
+        EXPECT_TRUE_MSG(lua_toboolean(L, -1), calls[i]);   /* reached the call */
+        lua_getglobal(L, "A");
+        EXPECT_FALSE_MSG(lua_toboolean(L, -1), calls[i]);  /* stopped in it */
+        lua_pop(L, 2);
+    }
+    hl_lua_ws_invalidate_conn(L, c);
+
+    lua_rt.base.ws_registry = NULL;
+    hl_ws_registry_free(&reg);
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+UTEST(lua_audit40, small_calls_have_a_floor)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    static const char *const loops[] = {
+        "local t = require('hull.time') for i = 1, 100000 do t.date() end return 1",
+        "local t = require('hull.time') for i = 1, 100000 do t.datetime() end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 1000000, err, sizeof err), LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    EXPECT_EQ(audit10_run("local t = require('hull.time') "
+                          "for i = 1, 1000 do t.date() t.datetime() end return 1",
+                          1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();

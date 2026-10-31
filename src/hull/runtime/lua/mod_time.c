@@ -4,6 +4,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_CALL_UNITS (audit 40) */
 #include "hull/cap/time.h"
 
 /* ════════════════════════════════════════════════════════════════════
@@ -37,6 +38,7 @@ static int lua_time_clock(lua_State *L)
 static int lua_time_date(lua_State *L)
 {
     char buf[16];
+    lua_hlwork(L, HL_WORK_CALL_UNITS, 0);   /* audit 40 */
     if (hl_cap_time_date(buf, sizeof(buf)) != 0)
         return luaL_error(L, "time.date() failed");
     lua_pushstring(L, buf);
@@ -46,6 +48,7 @@ static int lua_time_date(lua_State *L)
 static int lua_time_datetime(lua_State *L)
 {
     char buf[32];
+    lua_hlwork(L, HL_WORK_CALL_UNITS, 0);   /* audit 40 */
     if (hl_cap_time_datetime(buf, sizeof(buf)) != 0)
         return luaL_error(L, "time.datetime() failed");
     lua_pushstring(L, buf);

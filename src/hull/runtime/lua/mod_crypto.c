@@ -1017,6 +1017,7 @@ static int lua_crypto_key_from_env(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.env_cfg)
         return luaL_error(L, "crypto.key_from_env: no env capability");
+    lua_hlwork(L, HL_WORK_KEY_FROM_ENV_UNITS, 0);   /* audit 40 */
 
     /* The handle is allocated first, so nothing that can raise runs while a
      * key exists outside it. */
