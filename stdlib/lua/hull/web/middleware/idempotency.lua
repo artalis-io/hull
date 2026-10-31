@@ -250,10 +250,34 @@ end
 -- `POST /transfer?to=alice` and then `?to=bob` (same body) replayed
 -- alice's response instead of answering 409, and bob's transfer was never
 -- made.
+--
+-- Version 2 (audit 41) length-prefixes every field: joined with "\0", a path
+-- or query holding a NUL moved bytes from one field to the next, so two
+-- different requests hashed alike and a reused key replayed the first one's
+-- response. The stored value carries its version ("2:" .. hex); a row an
+-- earlier version stored (bare hex) is compared with the old form until it
+-- expires, so an upgrade does not answer a client's retry 409.
+local function lp(v)
+    v = v or ""
+    return #v .. ":" .. v
+end
 local function compute_fingerprint(req)
+    local data = "v2\0" .. lp(req.method) .. lp(req.path) .. lp(query_part(req.query))
+        .. lp(req.body)
+    return "2:" .. encoding.hex.encode(crypto.sha256(data))
+end
+local function legacy_fingerprint(req)
     local data = (req.method or "") .. "\0" .. (req.path or "") .. "\0"
         .. query_part(req.query) .. "\0" .. (req.body or "")
     return encoding.hex.encode(crypto.sha256(data))
+end
+-- Whether a stored fingerprint is this request's (either version).
+local function fingerprint_matches(stored, fingerprint, req)
+    stored = stored or ""
+    if stored:sub(1, 2) ~= "2:" then
+        return crypto.constant_time_eq(stored, legacy_fingerprint(req))
+    end
+    return crypto.constant_time_eq(stored, fingerprint)
 end
 
 --- Build a post-body idempotency middleware.
@@ -464,7 +488,7 @@ function idempotency.middleware(opts)
                 -- We still use the C constant-time compare (crypto.constant_time_eq)
                 -- for consistency with jwt.lua/csrf.lua so the comparison contract
                 -- is one audited implementation everywhere in the stdlib.
-                if not crypto.constant_time_eq(row.fingerprint or "", fingerprint) then
+                if not fingerprint_matches(row.fingerprint, fingerprint, req) then
                     res:status(409):json({
                         error = "idempotency key already used with different request body"
                     })

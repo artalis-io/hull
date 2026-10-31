@@ -688,8 +688,10 @@ function init(opts) {
         }
     }
     const rc = opts.recoveryCodes;
-    if (rc !== undefined && rc !== null && !(Number.isInteger(rc) && rc >= 0)) {
-        throw new Error("totp.init: recoveryCodes must be a whole number >= 0 (got "
+    // At most 32 (audit 41): each code is minted and hashed at enrolment,
+    // inside one request, and the whole set is stored in one row.
+    if (rc !== undefined && rc !== null && !(Number.isInteger(rc) && rc >= 0 && rc <= 32)) {
+        throw new Error("totp.init: recoveryCodes must be a whole number from 0 to 32 (got "
             + String(rc) + ")");
     }
     if (opts.window !== undefined && opts.window !== null

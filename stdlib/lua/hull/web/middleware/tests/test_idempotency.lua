@@ -274,6 +274,42 @@ test("audit 39: a row in the old format still replays", function()
     assert_eq(res._body, '{"old":true}')
 end)
 
+test("audit 41: a NUL cannot make two requests' fingerprints collide", function()
+    -- Joined with "\0", these two hashed the same bytes.
+    local a = mock_req("POST", "/a", "\0b")
+    local b = mock_req("POST", "/a\0", "b")
+    local fa, fb = H.fingerprint(a), H.fingerprint(b)
+    assert_eq(fa:sub(1, 2), "2:", "versioned")
+    assert(fa ~= fb, "fingerprints differ")
+    local mw = idempotency.middleware()
+    a.headers["idempotency-key"] = "a41-nul"
+    local res1 = mock_res()
+    assert_eq(mw(a, res1), 0)
+    idempotency.respond(a, res1, 200, { who = "a" })
+    b.headers["idempotency-key"] = "a41-nul"
+    local res2 = mock_res()
+    assert_eq(mw(b, res2), 1)
+    assert_eq(res2._status, 409, "a different request is refused, not replayed")
+end)
+
+test("audit 41: a row an earlier version fingerprinted still replays", function()
+    local crypto = require('hull.crypto')
+    local encoding = require('hull.encoding')
+    local mw = idempotency.middleware()
+    local req = mock_req("POST", "/old-fp", "x", { ["idempotency-key"] = "a41-legacy" })
+    local old = encoding.hex.encode(crypto.sha256("POST\0/old-fp\0\0x"))
+    H.put_legacy("a41-legacy", "__anon", old, 200, '{"old":true}',
+                 '{"content-type":"application/json"}')
+    local res = mock_res()
+    assert_eq(mw(req, res), 1)
+    assert_eq(res._status, 200, "replayed, not 409")
+    assert_eq(res._body, '{"old":true}')
+    local other = mock_req("POST", "/old-fp", "y", { ["idempotency-key"] = "a41-legacy" })
+    local res2 = mock_res()
+    assert_eq(mw(other, res2), 1)
+    assert_eq(res2._status, 409, "a different body is still refused")
+end)
+
 test("audit 39: a key that is not printable ASCII is a 400", function()
     local mw = idempotency.middleware()
     for _, k in ipairs({ "caf\xc3\xa9", "a\0b", "tab\tkey", "\xff" }) do

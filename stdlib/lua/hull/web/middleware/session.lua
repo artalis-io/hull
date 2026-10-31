@@ -646,7 +646,10 @@ function session.login_handler(cookie_mod, opts)
         if type(meta) ~= "table" then return meta end
         local out = {}
         for k, v in pairs(meta) do
-            if not SCRUB_KEYS[k] then out[k] = v end
+            -- Matched without case (audit 41): "Access_Token" or "CLAIMS"
+            -- slipped past an exact-case list.
+            local lk = type(k) == "string" and k:lower() or k
+            if not SCRUB_KEYS[lk] then out[k] = v end
         end
         return out
     end
@@ -695,10 +698,15 @@ function session.login_handler(cookie_mod, opts)
                     end
                 end
             end
-            local rec_ok, rec_err = pcall(audit_log.record,
-                user.id, audit_kind, req,
-                { session_id = session_ref(sid),
-                  metadata = scrub(audit_meta(user, ctx)) })
+            -- The app's audit_metadata (and the scrub over what it
+            -- returned) runs inside the pcall too, as in the JS twin
+            -- (audit 41): raised outside it, the session row and its
+            -- Set-Cookie were already made and the login answered 500.
+            local rec_ok, rec_err = pcall(function()
+                return audit_log.record(user.id, audit_kind, req,
+                    { session_id = session_ref(sid),
+                      metadata = scrub(audit_meta(user, ctx)) })
+            end)
             if not rec_ok then
                 local log = require("hull.log")
                 log.warn("session.login_handler: audit_log.record "

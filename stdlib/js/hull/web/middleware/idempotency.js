@@ -236,7 +236,25 @@ function queryPart(q) {
  * alice's response instead of answering 409, and bob's transfer was never
  * made.
  */
+//
+// Version 2 (audit 41) length-prefixes every field: joined with "\0", a path
+// or query holding a NUL moved bytes from one field to the next, so two
+// different requests hashed alike and a reused key replayed the first one's
+// response. The stored value carries its version ("2:" + hex); a row an
+// earlier version stored (bare hex) is compared with the old form until it
+// expires, so an upgrade does not answer a client's retry 409.
+function lp(v) {
+    const s = v == null ? "" : String(v);
+    return s.length + ":" + s;
+}
 function computeFingerprint(req) {
+    const head = "v2\0" + lp(req.method) + lp(req.path) + lp(queryPart(req.query));
+    if (req.bodyBytes instanceof ArrayBuffer)
+        return "2:" + encoding.hex.encode(crypto.sha256(head + "b"
+            + lp(encoding.hex.encode(crypto.sha256(req.bodyBytes)))));
+    return "2:" + encoding.hex.encode(crypto.sha256(head + "t" + lp(req.body)));
+}
+function legacyFingerprint(req) {
     const head = (req.method || "") + "\0" + (req.path || "") + "\0"
         + queryPart(req.query) + "\0";
     // A body that is not valid UTF-8 reads with every invalid sequence as
@@ -442,10 +460,13 @@ function middleware(opts) {
                 // Hoist `rfp` so the `charCodeAt` call below can't read off a
                 // (theoretically) null row.fingerprint - schema has NOT NULL
                 // so it's defensive, but explicit > implicit (audit J#3).
-                const rfp = row.fingerprint || "";
-                let diff = rfp.length === fingerprint.length ? 0 : 1;
-                for (let i = 0; i < fingerprint.length && i < rfp.length; i++)
-                    diff |= rfp.charCodeAt(i) ^ fingerprint.charCodeAt(i);
+                const rfp = String(row.fingerprint || "");
+                // A row an earlier version stored (no "2:") is compared with
+                // the old form (audit 41).
+                const want = rfp.startsWith("2:") ? fingerprint : legacyFingerprint(req);
+                let diff = rfp.length === want.length ? 0 : 1;
+                for (let i = 0; i < want.length && i < rfp.length; i++)
+                    diff |= rfp.charCodeAt(i) ^ want.charCodeAt(i);
                 if (diff !== 0) {
                     res.status(409);
                     res.json({ error: "idempotency key already used with different request body" });

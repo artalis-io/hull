@@ -126,6 +126,10 @@ function search.create_index(name, columns, opts)
     -- split-and-validate manually. Mirror semantics in the JS sibling.
     local tokenize = opts.tokenize or "unicode61"
     local function valid_tokenize(s)
+        -- A string only (audit 41): a table with __len / __concat
+        -- metamethods passed the checks and was spliced into the SQL
+        -- through another __concat call that could return anything.
+        if type(s) ~= "string" then return false end
         if #s == 0 then return false end
         local idx = 0
         for part in (s .. " "):gmatch("([^ ]*) ") do

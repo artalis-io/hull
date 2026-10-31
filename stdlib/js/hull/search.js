@@ -130,6 +130,11 @@ function createIndex(name, columns, opts) {
     const tokenize = (o.tokenize === undefined || o.tokenize === null)
         ? "unicode61"
         : o.tokenize;
+    // A primitive string only (audit 41): an object passed the regexp test
+    // through one toString call and was spliced into the SQL through a
+    // second, which could return anything.
+    if (typeof tokenize !== "string")
+        throw new Error("search: invalid tokenize option (must be a string)");
     // FTS5 tokenize names are short identifiers ("unicode61", "porter ascii",
     // "trigram") optionally followed by identifier-or-integer args
     // ("unicode61 remove_diacritics 1"). First token must be an identifier;

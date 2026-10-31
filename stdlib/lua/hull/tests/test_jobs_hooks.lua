@@ -577,6 +577,90 @@ function cases.audit39()
     end)
 end
 
+-- Audit 41: a ctx.step whose result cannot be stored (a cyclic table here;
+-- on MySQL a result over 64 KiB, covered by tests/e2e_mysql.sh) ran its side
+-- effect again on every retry, until max_attempts.
+function cases.audit41()
+    jobs.init({ backoff = function() return 0 end })
+    local function cyclic()
+        local r = { ok = true }
+        r.self = r
+        return r
+    end
+    test("an unstorable step result runs its side effect once and dead-letters", function()
+        local charged, refunded = 0, 0
+        jobs.workflow("cyc41", function(c)
+            c.step("charge", function() charged = charged + 1; return cyclic() end,
+                   { compensate = function() refunded = refunded + 1 end })
+            return "done"
+        end)
+        local id = jobs.start("cyc41", {}, { queue = "cy41", max_attempts = 5 })
+        for _ = 1, 6 do
+            assert_eq(pcall(jobs.work, { batch = 1, queue = "cy41" }), true, "work")
+            hooks.make_due(id)
+        end
+        local j = jobs.get(id)
+        assert_eq(j.status, "dead", "dead")
+        assert_eq(j.attempts, 1, "dead-lettered on the first attempt")
+        assert_eq(charged, 1, "the side effect ran once")
+        assert_eq(refunded, 1, "its own compensation ran")
+        assert_eq(j.last_error:find("step 'charge' ran but its result cannot be stored", 1, true)
+                  ~= nil, true, tostring(j.last_error))
+    end)
+    test("a body that swallows the error still never re-runs the step", function()
+        local runs = 0
+        jobs.workflow("swallow41", function(c)
+            pcall(c.step, "s", function() runs = runs + 1; return cyclic() end)
+            error("body failed", 0)
+        end)
+        local id = jobs.start("swallow41", {}, { queue = "sw41", max_attempts = 3 })
+        for _ = 1, 4 do
+            assert_eq(pcall(jobs.work, { batch = 1, queue = "sw41" }), true, "work")
+            hooks.make_due(id)
+        end
+        assert_eq(jobs.get(id).status, "dead", "dead after its attempts")
+        assert_eq(runs, 1, "the step ran once across retries")
+    end)
+    test("a storable step still memoizes and replays", function()
+        local runs, attempts = 0, 0
+        local seen
+        jobs.workflow("memo41", function(c)
+            local v = c.step("s", function() runs = runs + 1; return { n = 42 } end)
+            attempts = attempts + 1
+            if attempts == 1 then error("again", 0) end
+            seen = v.n
+            return "ok"
+        end)
+        local id = jobs.start("memo41", {}, { queue = "m41", max_attempts = 3 })
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "m41" }), true, "work 1")
+        hooks.make_due(id)
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "m41" }), true, "work 2")
+        assert_eq(jobs.get(id).status, "done", "done")
+        assert_eq(runs, 1, "ran once")
+        assert_eq(seen, 42, "replayed")
+    end)
+    test("an operator's jobs.retry runs the unstored step again", function()
+        local runs = 0
+        local bad = true
+        jobs.workflow("retry41", function(c)
+            c.step("s", function()
+                runs = runs + 1
+                if bad then return cyclic() end
+                return 1
+            end)
+            return "ok"
+        end)
+        local id = jobs.start("retry41", {}, { queue = "r41", max_attempts = 3 })
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "r41" }), true, "work 1")
+        assert_eq(jobs.get(id).status, "dead", "dead")
+        bad = false
+        assert_eq(jobs.retry(id), true, "requeued")
+        assert_eq(pcall(jobs.work, { batch = 1, queue = "r41" }), true, "work 2")
+        assert_eq(jobs.get(id).status, "done", "done")
+        assert_eq(runs, 2, "ran again after the retry")
+    end)
+end
+
 -- The harness sets the case as a global before it runs the script.
 local case = rawget(_G, "__jobs_case")
 test("the case is known", function()

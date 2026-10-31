@@ -845,7 +845,7 @@ end
 --   * `window`         ± step tolerance for clock skew (default `1`,
 --                      ~90s total window).
 --   * `recovery_codes` Number of recovery codes minted at enroll
---                      (default `10`).
+--                      (default `10`, at most `32`).
 --   * `encryption_key`  Optional 32-byte string. Back-compat shorthand
 --                       for `encryption_keys = {[1] = X}, current = 1,
 --                       legacy_key_version = 1`. New apps should use
@@ -901,9 +901,11 @@ function totp.init(opts)
         end
     end
     local rc = opts.recovery_codes
-    if rc ~= nil and not (type(rc) == "number" and rc >= 0 and rc < math.huge
+    -- At most 32 (audit 41): each code is minted and hashed at enrolment,
+    -- inside one request, and the whole set is stored in one row.
+    if rc ~= nil and not (type(rc) == "number" and rc >= 0 and rc <= 32
                           and rc == math.floor(rc)) then
-        error("totp.init: recovery_codes must be a whole number >= 0 (got "
+        error("totp.init: recovery_codes must be a whole number from 0 to 32 (got "
               .. tostring(rc) .. ")", 2)
     end
     if opts.window ~= nil and not (type(opts.window) == "number"
