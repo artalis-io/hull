@@ -15210,4 +15210,98 @@ UTEST(lua_audit40, small_calls_have_a_floor)
     cleanup_lua_caps();
 }
 
+#ifdef HL_ENABLE_WASM
+/* ── Audit 41: compute.stream output is charged ───────────────────────
+ *
+ * Each chunk was charged 1 + input/64; the guest's output - up to
+ * max_output a chunk whatever the input - was copied and written to the
+ * buffer or an fs.write file uncharged (a 512 KiB input wrote 2 GiB under
+ * a 1M budget). big_out.wasm returns its out_cap: 1 MiB per chunk by
+ * default, so 1 KiB in 256-byte chunks is 4 MiB of output. Charged at
+ * 1 unit per 8 bytes, a 300000 budget stops it at the third chunk; before,
+ * buffer mode cost ~65k (the result string) and file mode a few thousand. */
+static const unsigned char a41_big_out_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x01, 0x60,
+  0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05,
+  0x03, 0x01, 0x00, 0x02, 0x07, 0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f,
+  0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72,
+  0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00,
+  0x20, 0x03, 0x0b
+};
+static const HlEntry a41_wasm_entries[] = {
+    { "compute/big_out.wasm", a41_big_out_wasm, sizeof a41_big_out_wasm },
+    { 0, 0, 0 }
+};
+
+UTEST(lua_audit41, compute_stream_output_is_charged)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a41_wasm_entries, NULL);
+
+    static const char *const all[] = { "." };
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a41"), NULL);
+    HlAllocator falloc;
+    hl_alloc_init(&falloc, 0);
+    HlFsPolicy policy = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    ASSERT_EQ(hl_fs_policy_compile_manifest(dir, &falloc, all, 1, all, 1,
+                                            &policy, &perr), 0);
+    HlFsConfig fs = { dir, strlen(dir), &policy };
+
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua v;
+    memset(&v, 0, sizeof v);
+    v.base.wasm_cache = &cache;
+    v.base.app_vfs = &vfs;
+    v.base.fs_cfg = &fs;
+    ASSERT_EQ(hl_lua_init(&v, &cfg), 0);
+    HL_LUA_ARM(&v, v.L);
+    ASSERT_EQ(luaL_dostring(v.L, "compute = require('hull.compute') "
+                                 "ab = string.rep('a', 1024)"), LUA_OK);
+
+    static const char *const modes[] = {
+        "compute.stream('big_out', ab, { chunk_size = 256 }) after = 1",
+        "compute.stream('big_out', ab, { file = 'out.bin' }, "
+        "{ chunk_size = 256 }) after = 1",
+    };
+    int64_t saved = v.max_instructions;
+    for (int i = 0; i < 2; i++) {
+        v.max_instructions = 300000;
+        HL_LUA_ARM(&v, v.L);
+        int rc = luaL_dostring(v.L, modes[i]);
+        EXPECT_NE_MSG(rc, LUA_OK, modes[i]);
+        const char *e = lua_tostring(v.L, -1);
+        EXPECT_TRUE(e && strstr(e, "instruction limit exceeded") != NULL);
+        if (e && !strstr(e, "instruction limit exceeded")) printf("  got: %s\n", e);
+        lua_settop(v.L, 0);
+        EXPECT_EQ(lua_getglobal(v.L, "after"), LUA_TNIL);
+        lua_settop(v.L, 0);
+    }
+    /* The file holds at most the chunks charged before the trip. */
+    char p[HL_TEST_PATH_MAX + 16];
+    snprintf(p, sizeof p, "%s/out.bin", dir);
+    struct stat st;
+    if (stat(p, &st) == 0) EXPECT_LE(st.st_size, (off_t)(2 * 1024 * 1024));
+
+    /* Under the default budget both modes complete. */
+    v.max_instructions = saved;
+    HL_LUA_ARM(&v, v.L);
+    EXPECT_EQ(luaL_dostring(v.L,
+        "local s = compute.stream('big_out', ab, { chunk_size = 256 }) "
+        "assert(#s == 4 * 1024 * 1024) "
+        "assert(compute.stream('big_out', ab, { file = 'out.bin' }, "
+        "{ chunk_size = 256 }) == true)"), LUA_OK);
+    EXPECT_EQ(stat(p, &st), 0);
+    EXPECT_EQ(st.st_size, (off_t)(4 * 1024 * 1024));
+
+    hl_lua_free(&v);
+    hl_fs_policy_free(&policy);
+    nftw(dir, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
+
 UTEST_MAIN();

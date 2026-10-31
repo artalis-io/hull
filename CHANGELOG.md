@@ -498,6 +498,23 @@ release-artifact layout).
   `lock_configuration`, and a table-name function called with anything but a plain literal
   or name. Classifier tests in `test_db.c`, real-engine legs in `tests/e2e_feature_duckdb.sh`.
 
+- **`compute.stream` output was uncharged, and a guest's log lines were unbounded**
+  (audit 41). Each stream chunk was charged 1 unit plus 1 per 64 INPUT bytes, but the
+  guest's output - up to `max_output` a chunk whatever the input - was copied and written to
+  the buffer, the output callback or an `fs.write`-granted file uncharged: a 512 KiB input
+  wrote 2 GiB under a 1M-instruction budget, and at the default budget a 4 MiB input wrote
+  16 GiB in 18 s. A new `HlStreamOpts.after_chunk` hook sees each chunk's output length
+  before the output is copied, written or handed on, and both runtimes charge it 1 unit plus
+  1 per 8 bytes there (as `fs.write`), stopping the stream with the uncatchable limit; a file
+  output also pays the `fs.write` floor once at its open. And a guest's `HL_WASM_OP_LOG`
+  calls were neither capped nor charged (one `compute.call` emitted 512,801 lines, 533 MB,
+  before its timeout): each guest run - a call, an instance call, a stream chunk, a WASM UDF
+  invocation, an instantiation's start functions - now writes at most 64 lines / 64 KiB
+  (`HL_WASM_LOG_MAX_LINES` / `_BYTES`), drops the rest at the cost of a counter, and ends with
+  one "suppressed N log lines" record. The quota lives in the thread-local host-call context,
+  saved and restored around nested runs, so worker threads never share it. Tests:
+  `test_wasm.c` (`a41_*`), `lua_audit41` / `js_audit41`.
+
 - **A shader built by inference could still crash the process, or hold the event loop for
   minutes, past the GPU pre-checks** (audit 39). Rounds 36-38 each bounded one WGSL shape that
   made naga recurse past the event loop's 8 MiB stack; round 39 found two more. Declarations
