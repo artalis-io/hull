@@ -1817,13 +1817,13 @@ UTEST(lua_audit40, entry_reads_disk_only_in_development)
     write_file(path, "__a40 = 40\n");
 
     /* Development (no app VFS): the entry on disk loads. */
-    init_lua_with_appdir(tmpdir);
+    init_lua_with_appdir(NULL); /* hl_lua_load_app sets app_dir */
     ASSERT_TRUE(lua_initialized);
     EXPECT_EQ(hl_lua_load_app(&lua_rt, path), 0);
     EXPECT_EQ(eval_int("__a40 or 0"), 40);
 
     /* Built (non-empty app VFS): it does not. */
-    init_lua_with_appdir(tmpdir);
+    init_lua_with_appdir(NULL); /* hl_lua_load_app sets app_dir */
     ASSERT_TRUE(lua_initialized);
     HlVfs vfs;
     hl_vfs_init(&vfs, a17_built_entries, tmpdir);
