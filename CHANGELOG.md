@@ -429,6 +429,20 @@ release-artifact layout).
   `hl_gpu_wgsl_compile_units`). The estimators stay as the fast first line; the scan is linear
   and iterative, and the examples' and docs' shaders are unaffected.
 
+- **JS idempotency could trip the run limit between the side effect and the store, and re-run
+  the handler** (audit 40, JS). Round 39's byte-exact storage encoded every stored response
+  with a pure-JS WTF-8 loop before sending it, and the replay rebuilt the bytes with another
+  per-byte loop: a 1 MB response took ~0.2 s (was 0.026 s), 8 MB up to 3 s, and a 12-16 MB one
+  hit the instruction limit inside `cacheAndSend` - a 500 after the handler's side effects had
+  committed, the key left in flight (retries 409), and after the 300 s lease a retry ran the
+  handler again. The body and headers are now encoded in one native call
+  (`hull:encoding:_native` `textBase64Encode`, the string's WTF-8 bytes as QuickJS's own
+  conversion gives them, so the stored bytes are unchanged), and the replay decodes straight
+  to an ArrayBuffer for `res.bytes` (`base64DecodeBuffer`). A body over 32 MiB or a headers
+  blob over 256 KiB is refused before anything is encoded and the key marked unstored (both
+  runtimes), so the store cannot be what trips the run. A 16 MB response stores and replays
+  in ~0.1 s under the default budget; the v2 row format and old-row replay are unchanged.
+
 - **A Lua coroutine tagged inside a transaction could still be resumed after that transaction
   was rolled back, and one consumed inside the resumer's transaction was refused for good**
   (audit 36; the second a regression from audit 35). Audit 35 bound the coroutine to the run

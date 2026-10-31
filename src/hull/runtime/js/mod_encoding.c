@@ -10,6 +10,19 @@
  *   hexDecode(text)                -> byte string | null
  *   base64Encode(bytes, url, pad)  -> text | undefined
  *   base64Decode(text, url)        -> byte string | null
+ *   textBase64Encode(text, max)    -> text | null | undefined
+ *   base64DecodeBuffer(text)       -> ArrayBuffer | null
+ *
+ * textBase64Encode takes TEXT, not bytes: the standard padded base64 of the
+ * string's WTF-8 bytes (UTF-8, a lone surrogate as its own 3-byte sequence -
+ * exactly the bytes QuickJS's JS_ToCStringLen gives, so exactly what
+ * res.json / res.html / res.text send). null when those bytes are more than
+ * `max` (a number > 0), undefined when `text` is not a string.
+ * base64DecodeBuffer returns the decoded bytes as an ArrayBuffer, for
+ * res.bytes, with no byte string in between. hull:web:middleware:idempotency
+ * stores and replays responses through these two (audit 40: its pure-JS WTF-8
+ * and byte-string loops tripped the instruction limit on a 12 MB body, after
+ * the handler's side effects had committed).
  *
  * Bytes are what hull:encoding takes: a BYTE STRING (one character per byte,
  * 0..255), an ArrayBuffer or a typed array. Anything else - a string with a
@@ -233,6 +246,52 @@ static JSValue js_base64_decode(JSContext *ctx, JSValueConst this_val,
     return r;
 }
 
+static JSValue js_text_base64_encode(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1 || !JS_IsString(argv[0])) return JS_UNDEFINED;
+    double maxd = 0;
+    if (argc > 1 && JS_ToFloat64(ctx, &maxd, argv[1])) return JS_EXCEPTION;
+    size_t n;
+    const char *s = JS_ToCStringLen(ctx, &n, argv[0]);   /* WTF-8; charged */
+    if (!s) return JS_EXCEPTION;
+    if (maxd > 0 && (double)n > maxd) { JS_FreeCString(ctx, s); return JS_NULL; }
+    size_t len = hl_base64_encoded_len(n, 0);
+    if (len == 0 && n != 0) {
+        JS_FreeCString(ctx, s);
+        return JS_ThrowRangeError(ctx, "encoding: value too large");
+    }
+    if (enc_guard(ctx, 0, len)) { JS_FreeCString(ctx, s); return JS_EXCEPTION; }
+    char *out = malloc(len + 1);
+    if (!out) { JS_FreeCString(ctx, s); return JS_ThrowOutOfMemory(ctx); }
+    int rc = hl_base64_encode((const uint8_t *)s, n, out, len + 1, 0);
+    JS_FreeCString(ctx, s);
+    JSValue r = rc >= 0 ? JS_NewStringLen(ctx, out, len)
+                        : JS_ThrowInternalError(ctx, "encoding: base64 failed");
+    free(out);
+    return r;
+}
+
+static JSValue js_base64_decode_buffer(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1 || !JS_IsString(argv[0])) return JS_NULL;
+    size_t n;
+    const char *text = JS_ToCStringLen(ctx, &n, argv[0]);
+    if (!text) return JS_EXCEPTION;
+    size_t cap = n / 4 * 3 + 3, got = 0;
+    if (enc_guard(ctx, n, cap)) { JS_FreeCString(ctx, text); return JS_EXCEPTION; }
+    uint8_t *out = malloc(cap);
+    if (!out) { JS_FreeCString(ctx, text); return JS_ThrowOutOfMemory(ctx); }
+    int rc = hl_base64_decode(text, n, out, cap, &got, 0);
+    JS_FreeCString(ctx, text);
+    JSValue r = rc != 0 ? JS_NULL : JS_NewArrayBufferCopy(ctx, out, got);
+    free(out);
+    return r;
+}
+
 static int js_encoding_module_init(JSContext *ctx, JSModuleDef *m)
 {
     hl_js_export_frozen(ctx, m, "hexEncode",
@@ -243,6 +302,10 @@ static int js_encoding_module_init(JSContext *ctx, JSModuleDef *m)
                        JS_NewCFunction(ctx, js_base64_encode, "base64Encode", 3));
     hl_js_export_frozen(ctx, m, "base64Decode",
                        JS_NewCFunction(ctx, js_base64_decode, "base64Decode", 2));
+    hl_js_export_frozen(ctx, m, "textBase64Encode",
+                       JS_NewCFunction(ctx, js_text_base64_encode, "textBase64Encode", 2));
+    hl_js_export_frozen(ctx, m, "base64DecodeBuffer",
+                       JS_NewCFunction(ctx, js_base64_decode_buffer, "base64DecodeBuffer", 1));
     return 0;
 }
 
@@ -255,5 +318,7 @@ int hl_js_init_encoding_module(JSContext *ctx, HlJS *js)
     JS_AddModuleExport(ctx, m, "hexDecode");
     JS_AddModuleExport(ctx, m, "base64Encode");
     JS_AddModuleExport(ctx, m, "base64Decode");
+    JS_AddModuleExport(ctx, m, "textBase64Encode");
+    JS_AddModuleExport(ctx, m, "base64DecodeBuffer");
     return 0;
 }

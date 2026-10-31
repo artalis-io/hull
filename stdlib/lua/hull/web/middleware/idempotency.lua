@@ -163,6 +163,11 @@ end
 -- wrote (response_headers a bare JSON object, or NULL) replays as before.
 local STORED_V2 = "v2:"
 local STATE_UNSTORED = "unstored"
+-- The largest response body (bytes) / headers blob stored for replay (audit
+-- 40, parity with the JS twin): a larger one marks the row unstored before
+-- anything is encoded.
+local MAX_STORED_BYTES = 32 * 1024 * 1024
+local MAX_STORED_HEADER_BYTES = 256 * 1024
 -- Test seam (hull._test_hooks fail_store): makes the store raise.
 local _fail_store = false
 
@@ -617,9 +622,14 @@ local function cache_and_send(req, res, status_code, body_str, content_type, ext
         local fp, created = req.ctx._idem_fingerprint, req.ctx._idem_created
         local ok, err = pcall(function()
             if _fail_store then error("injected store failure", 0) end
-            local headers_str = STORED_V2 .. encoding.base64.encode(json.encode(filtered))
-            local body_enc = encoding.base64.encode(
-                type(body_str) == "string" and body_str or tostring(body_str or ""))
+            local body_raw = type(body_str) == "string" and body_str or tostring(body_str or "")
+            if #body_raw > MAX_STORED_BYTES then error("response too large to store", 0) end
+            local headers_raw = json.encode(filtered)
+            if #headers_raw > MAX_STORED_HEADER_BYTES then
+                error("response headers too large to store", 0)
+            end
+            local headers_str = STORED_V2 .. encoding.base64.encode(headers_raw)
+            local body_enc = encoding.base64.encode(body_raw)
             db.exec(
                 "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, "
                 .. "response_body = ?, response_headers = ?, expires_at = ?" .. where,
