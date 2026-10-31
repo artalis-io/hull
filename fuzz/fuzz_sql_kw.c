@@ -48,6 +48,12 @@
 
 #define MAX_SQL 4096
 
+/* db_common.c's DuckDB path checks expand "~" through hl_host_home
+ * (shared/host.c, not linked here): no home, so a "~" path is taken as
+ * written - the scanners refuse it either way. */
+const char *hl_host_home(void);
+const char *hl_host_home(void) { return NULL; }
+
 /* Generated line comments may end at CR (Postgres ends one there), and a
  * '"' may sit inside a literal or comment: the two defects audit 28 found
  * and fixed in the readers. */
