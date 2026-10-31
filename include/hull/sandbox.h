@@ -107,6 +107,16 @@ typedef struct HlSandboxPolicy {
      * next commit), <db>.wal.checkpoint, <db>.wal.recovery and the <db>.tmp/
      * spill directory - see hl_sandbox_duckdb_dir_grant (audit 43). */
     int db_duckdb;
+
+    /* The Hull-owned default internal database (cap/db_internal.h, audit
+     * convergence §7.2): an absolute path, or NULL. Hull reads and writes it
+     * and its -wal / -shm / -journal; app code reaches it by no capability
+     * (it is in the reserved <app>/.hull, or beside a -d database outside
+     * the app directory). On macOS the four files are allowed AFTER the
+     * <app>/.hull deny (the last matching SBPL rule wins), so the rest of
+     * .hull stays denied. Not set by hl_sandbox_policy_from_manifest: the
+     * entry point fills it from the registry. */
+    const char *internal_db_path;
 } HlSandboxPolicy;
 
 /*
@@ -139,6 +149,7 @@ int hl_sandbox_manifest_has_network_db(const HlManifest *m);
 
 void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
                                      const HlManifest *manifest);
+
 
 /*
  * Phase 1: pledge-only sandbox (no unveil) - blocks exec/proc/fork.
@@ -305,6 +316,16 @@ int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
                                          const char *const *ttys, int tty_count,
                                          char *buf, size_t buf_size,
                                          const char **params, size_t max_params);
+
+/* Test seam: the same with @p app_dir (no database, no TLS files, no
+ * terminals) - the app-directory read, the <app>/.hull deny and the internal
+ * database grant (HlSandboxPolicy.internal_db_path) after it. The parameter
+ * values stay valid until the next call. */
+int hl_sandbox_seatbelt_app_profile_for_test(const HlSandboxPolicy *policy,
+                                             const char *app_dir,
+                                             char *buf, size_t buf_size,
+                                             const char **params,
+                                             size_t max_params);
 
 /*
  * OR the `-d` default database into @p policy: a DSN that dials out (network

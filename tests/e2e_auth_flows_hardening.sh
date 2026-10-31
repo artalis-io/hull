@@ -108,7 +108,8 @@ stop_pid() {
 cleanup() {
     stop_pid "$HULL_PID"
     stop_pid "$HIBP_PID"
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal" \
+        "$SRCDIR/.hull/internal.db" "$SRCDIR/.hull/internal.db-shm" "$SRCDIR/.hull/internal.db-wal"
     if [ -n "$TMPDIR_WORK" ] && [ -d "$TMPDIR_WORK" ]; then
         rm -rf "$TMPDIR_WORK"
     fi
@@ -175,7 +176,8 @@ run_flow() {
 
     echo ""
     echo "=== Step ($_label): Start hardening fixture + e2e ==="
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal" \
+        "$SRCDIR/.hull/internal.db" "$SRCDIR/.hull/internal.db-shm" "$SRCDIR/.hull/internal.db-wal"
 
     # HIBP mock port - fixed so the fixture can hardcode it.
     # (Hull's env cap isn't wired during a fixture's top-level

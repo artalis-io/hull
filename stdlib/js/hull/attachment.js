@@ -24,7 +24,11 @@
 import { blob } from "hull:blob";
 import { crypto } from "hull:crypto";
 import { internal as dbInternal } from "hull:db:_internal";
-const db = dbInternal.connection();
+// A declared databases.internal, else the APP connection - never the Hull-owned
+// default internal database: a delete must commit or roll back with the app's
+// own db.batch (audit 5 DA-M1), so the metadata rows stay beside the app's
+// tables, as the outbox does (audit convergence 7.2).
+const db = dbInternal.appConnection();
 import { fs } from "hull:fs";
 import { mime as mimeMod } from "hull:mime";
 import { time } from "hull:time";

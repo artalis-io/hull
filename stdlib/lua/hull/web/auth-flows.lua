@@ -120,6 +120,10 @@ local crypto    = require("hull.crypto")
 local envelope  = require("hull.crypto.envelope")
 local encoding = require("hull.encoding")
 local db        = require("hull.db._internal").connection()
+-- standard_users reads the APP's users table: a declared databases.internal,
+-- else the default connection (never the Hull-owned default internal
+-- database, which holds only _hull_* tables).
+local users_db  = require("hull.db._internal").app_connection()
 local time      = require("hull.time")
 local json      = require("hull.json")
 local pwned     = require("hull.web.pwned")
@@ -2756,14 +2760,15 @@ function M.standard_users(opts)
     -- is safe. The default connection is open by the time this runs, so its
     -- backend dialect is known.
     local name = opts.table or "users"
-    -- The adapter runs on the stdlib's internal connection with stdlib
-    -- identity, which the _hull_* namespace guard lets through: a _hull_
-    -- table name here would read and write the module tables themselves.
+    -- The adapter runs with stdlib identity (on a declared
+    -- databases.internal, else the default connection), which the _hull_*
+    -- namespace guard lets through: a _hull_ table name here would read and
+    -- write the module tables themselves.
     if type(name) ~= "string" or name == "" or name:lower():find("^_hull_") then
         error("auth-flows.standard_users: table must be a non-empty name "
               .. "outside the reserved _hull_ namespace")
     end
-    local tbl    = db.quote_identifier(name)
+    local tbl    = users_db.quote_identifier(name)
     local id_gen = opts.id_gen or function()
         return crypto.random_token(16, "hex")
     end
@@ -2791,10 +2796,10 @@ function M.standard_users(opts)
         find_by_email = function(email)
             if type(email) ~= "string" then return nil end
             local key = email:lower()
-            local rows = db.query(
+            local rows = users_db.query(
                 "SELECT * FROM " .. tbl .. " WHERE email = ?", { key })
             if not rows or #rows == 0 then
-                rows = db.query(
+                rows = users_db.query(
                     "SELECT * FROM " .. tbl .. " WHERE LOWER(email) = ?", { key })
             end
             for _, r in ipairs(rows or {}) do
@@ -2805,14 +2810,14 @@ function M.standard_users(opts)
             return nil
         end,
         get = function(id)
-            local rows = db.query(
+            local rows = users_db.query(
                 "SELECT * FROM " .. tbl .. " WHERE id = ?", { id })
             return rows and rows[1] and row(rows[1]) or nil
         end,
         create = function(email, pwhash)
             local id = id_gen()
             local now = time.now()
-            db.exec(
+            users_db.exec(
                 "INSERT INTO " .. tbl
                 .. " (id, email, password_hash, email_verified, "
                 .. "  created_at, updated_at) "
@@ -2821,19 +2826,19 @@ function M.standard_users(opts)
             return id
         end,
         set_password = function(id, pwhash)
-            db.exec(
+            users_db.exec(
                 "UPDATE " .. tbl
                 .. " SET password_hash = ?, updated_at = ? WHERE id = ?",
                 { pwhash, time.now(), id })
         end,
         set_email = function(id, email)
-            db.exec(
+            users_db.exec(
                 "UPDATE " .. tbl
                 .. " SET email = ?, updated_at = ? WHERE id = ?",
                 { email:lower(), time.now(), id })
         end,
         set_email_verified = function(id, verified)
-            db.exec(
+            users_db.exec(
                 "UPDATE " .. tbl
                 .. " SET email_verified = ?, updated_at = ? WHERE id = ?",
                 { verified and 1 or 0, time.now(), id })

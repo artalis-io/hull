@@ -55,6 +55,7 @@
 #endif
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_internal.h"   /* hl_db_internal_startup (§7.2) */
 #include "hull/cap/db_budget.h"   /* hl_db_op_shutdown */
 #endif
 
@@ -107,6 +108,7 @@ static int embedded_app_present(void)
 typedef struct {
     const char *verify_sig;          /* --verify-sig PUBKEY */
     int         no_verify_platform;  /* --no-verify-platform */
+    int         keep_internal;       /* --keep-internal-in-app-db */
     long        instruction_limit;   /* --max-instructions N (0 = default) */
 #ifdef HL_ENABLE_WASM
     HlWasmCliLimits wasm;            /* --wasm-* ceilings, as serve.c takes them */
@@ -193,6 +195,10 @@ static int cli_parse_args(int argc, char **argv,
         }
         if (strcmp(argv[i], "--no-verify-platform") == 0) {
             x->no_verify_platform = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--keep-internal-in-app-db") == 0) {
+            x->keep_internal = 1;
             continue;
         }
         if (strcmp(argv[i], "--audit") == 0) {
@@ -526,6 +532,7 @@ int hull_serve(int argc, char **argv)
         .no_migrate      = no_migrate,
         .sandbox         = !no_sandbox,
         .gate_modules    = 1,
+        .keep_internal_in_app_db = xo.keep_internal,
         .instruction_limit = xo.instruction_limit,
 #ifdef HL_ENABLE_WASM
         .wasm_cli        = &xo.wasm,
@@ -686,6 +693,14 @@ int hull_serve(int argc, char **argv)
 #ifdef HL_ENABLE_DB
     if (rt->db_registry) {
         hl_db_registry_set_manifest(rt->db_registry, policy);
+        /* Move the stdlib's _hull_* tables into the Hull-owned internal
+         * database (or back, under --keep-internal-in-app-db) before the
+         * sandbox narrows file access (audit convergence §7.2). */
+        if (!no_migrate &&
+            hl_db_internal_startup(rt->db_registry, xo.keep_internal,
+                                   hl_module_set_uses_internal_db(rt->module_set)) != 0)
+            return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
+                            NULL, &seal_arena);
         /* On Postgres / MySQL the _hull_* guard is a check of the SQL
          * text, which SQL that builds a table name at run time gets
          * past. A database role is the real separation. */
@@ -808,6 +823,10 @@ int hull_serve(int argc, char **argv)
          * db.async's worker connection and a reconnect need the socket
          * (audit 25 - serve.c granted it, this runner did not). */
         hl_sandbox_policy_add_default_dsn(&sandbox_policy, db_path);
+#ifdef HL_ENABLE_DB
+        sandbox_policy.internal_db_path =
+            hl_db_internal_sandbox_path(rt->db_registry);
+#endif
 
         /* The file the DSN names, never the DSN: a network one carries its
          * password into unveil and the sandbox's log lines (audit 10). */

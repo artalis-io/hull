@@ -142,6 +142,9 @@ static inline const HlRuntimeFlag *hl_runtime_flags(void)
         { "--tls-key",                HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--verify-sig",             HL_RF_SERVE | HL_RF_CLI },
         { "--no-migrate",             HL_RF_SERVE | HL_RF_CLI },
+        /* Keeps the stdlib's _hull_* tables in the app database (the
+         * pre-§7.2 layout): weakens the separation, so a downgrade. */
+        { "--keep-internal-in-app-db", HL_RF_SERVE | HL_RF_CLI | HL_RF_DOWNGRADE },
         { "--no-sandbox",             HL_RF_SERVE | HL_RF_CLI | HL_RF_DOWNGRADE },
         { "--allow-degraded-sandbox", HL_RF_SERVE | HL_RF_CLI | HL_RF_DOWNGRADE },
         { "--no-verify-platform",     HL_RF_SERVE | HL_RF_CLI | HL_RF_DOWNGRADE },

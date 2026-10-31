@@ -33,7 +33,11 @@
 
 local blob = require("hull.blob")
 local crypto = require("hull.crypto")
-local db = require("hull.db._internal").connection()
+-- A declared databases.internal, else the APP connection - never the Hull-owned
+-- default internal database: a delete must commit or roll back with the app's
+-- own db.batch (audit 5 DA-M1), so the metadata rows stay beside the app's
+-- tables, as the outbox does (audit convergence 7.2).
+local db = require("hull.db._internal").app_connection()
 local fs = require("hull.fs")
 local mime_mod = require("hull.mime")
 local time = require("hull.time")

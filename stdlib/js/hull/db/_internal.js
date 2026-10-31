@@ -19,17 +19,17 @@
 // runs through it.
 import { _internal_conn as native } from "hull:db:_internal_conn";
 
-let cached = null;
-
-function resolve() {
-    if (cached) return cached;
-    const r = native.connection();
-    if (r.final) cached = r.conn;
-    return r.conn;
+function resolver(open) {
+    let cached = null;
+    return () => {
+        if (cached) return cached;
+        const r = open();
+        if (r.final) cached = r.conn;
+        return r.conn;
+    };
 }
 
-/** The internal connection, as a proxy usable at module load. */
-function connection() {
+function proxy(resolve) {
     return new Proxy({}, {
         get(_, k) {
             const v = resolve()[k];
@@ -41,4 +41,20 @@ function connection() {
     });
 }
 
-export const internal = { connection };
+const resolveInternal = resolver(() => native.connection());
+const resolveApp = resolver(() => native.appConnection());
+
+/** The internal connection, as a proxy usable at module load. */
+function connection() {
+    return proxy(resolveInternal);
+}
+
+/** Where an APP table the stdlib reads for the app lives (auth-flows'
+ * standardUsers): a declared databases.internal, else the default
+ * connection - never the Hull-owned default internal database, which holds
+ * only _hull_* tables (audit convergence 7.2). */
+function appConnection() {
+    return proxy(resolveApp);
+}
+
+export const internal = { connection, appConnection };

@@ -441,6 +441,21 @@ static int hl_macos_hardened_runtime_active(void)
 _Static_assert(SEATBELT_PATH_SIZE >= PATH_MAX,
                "SEATBELT_PATH_SIZE must be >= PATH_MAX");
 
+/* @p path with its parent directory canonicalised (the leaf may not exist
+ * yet): Seatbelt matches real paths (/var -> /private/var). */
+static int sb_canonical_file(const char *path, char *out, size_t outsz)
+{
+    char dir[SEATBELT_PATH_SIZE], rdir[SEATBELT_PATH_SIZE];
+    if (snprintf(dir, sizeof dir, "%s", path) >= (int)sizeof dir) return -1;
+    char *sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    const char *leaf = path + (sl - dir) + 1;
+    if (sl == dir) sl[1] = '\0'; else *sl = '\0';
+    if (!realpath(dir, rdir)) return -1;
+    int n = snprintf(out, outsz, "%s/%s", strcmp(rdir, "/") == 0 ? "" : rdir, leaf);
+    return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
 /* Scratch buffers for derived paths (stack-allocated in caller) */
 typedef struct {
     char db_dir[SEATBELT_PATH_SIZE];
@@ -452,6 +467,7 @@ typedef struct {
     char fs_read_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
     char fs_write_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
     char app_hull[SEATBELT_PATH_SIZE];     /* <app_dir>/.hull (audit 37) */
+    char int_file[4][SEATBELT_PATH_SIZE];  /* internal db, -wal, -shm, -journal */
 } SeatbeltScratch;
 
 /*
@@ -813,13 +829,46 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
      * matching rule decides) - the app-dir read, a manifest grant, a -d
      * database. Seatbelt matches the real path without case on a
      * case-insensitive volume, and an in-root symlink resolves to it. */
+    int app_hull_param = 0;
     if (app_dir) {
         int hn = snprintf(scratch->app_hull, sizeof(scratch->app_hull),
                           "%s/.hull", app_dir);
         if (hn > 0 && (size_t)hn < sizeof(scratch->app_hull)) {
             PARAM_ADD("APP_HULL", scratch->app_hull);
+            app_hull_param = 1;
             SBPL_LIT("\n; The app tree's .hull (Hull's own sidecars)\n"
                      "(deny file-read* file-write* (subpath (param \"APP_HULL\")))\n");
+        }
+    }
+
+    /* ── The Hull-owned internal database (audit convergence §7.2) ── */
+
+    /* After the .hull deny, so these four files (and nothing else in .hull)
+     * win: Hull itself opens them; app code reaches them by no capability
+     * (the fs resolver, db.open and databases.named refuse .hull). */
+    if (policy->internal_db_path) {
+        char abs[SEATBELT_PATH_SIZE];
+        if (sb_canonical_file(policy->internal_db_path, abs, sizeof abs) == 0) {
+            static const char *const suffix[4] = { "", "-wal", "-shm", "-journal" };
+            static const char *const key[4] = { "INT_F0", "INT_F1", "INT_F2", "INT_F3" };
+            int ok = 1;
+            for (int k = 0; k < 4; k++) {
+                int n = snprintf(scratch->int_file[k], sizeof(scratch->int_file[k]),
+                                 "%s%s", abs, suffix[k]);
+                if (n < 0 || (size_t)n >= sizeof(scratch->int_file[k])) ok = 0;
+            }
+            if (ok) {
+                for (int k = 0; k < 4; k++) PARAM_ADD(key[k], scratch->int_file[k]);
+                SBPL_LIT("\n; Hull's internal database: the file, its WAL / SHM / journal\n"
+                         "(allow file-read* file-write*\n"
+                         "    (literal (param \"INT_F0\")) (literal (param \"INT_F1\"))\n"
+                         "    (literal (param \"INT_F2\")) (literal (param \"INT_F3\")))\n");
+                /* The registry re-checks the path (no symbolic link below
+                 * the app directory) with lstat: the directory's metadata
+                 * only, never a listing or its other files. */
+                if (app_hull_param)
+                    SBPL_LIT("(allow file-read-metadata (literal (param \"APP_HULL\")))\n");
+            }
         }
     }
 
@@ -947,6 +996,25 @@ int hl_sandbox_seatbelt_profile_db_for_test(const HlSandboxPolicy *policy,
     return rc;
 #else
     (void)policy; (void)app_dir; (void)db_path;
+    (void)buf; (void)buf_size; (void)params; (void)max_params;
+    return -1;
+#endif
+}
+
+int hl_sandbox_seatbelt_app_profile_for_test(const HlSandboxPolicy *policy,
+                                             const char *app_dir,
+                                             char *buf, size_t buf_size,
+                                             const char **params,
+                                             size_t max_params)
+{
+#if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
+    /* Static: the parameters point into it until the next call. */
+    static SeatbeltScratch scratch;
+    return seatbelt_build_profile(policy, app_dir, NULL, NULL, NULL,
+                                  NULL, 0, buf, buf_size,
+                                  params, max_params, &scratch);
+#else
+    (void)policy; (void)app_dir;
     (void)buf; (void)buf_size; (void)params; (void)max_params;
     return -1;
 #endif
@@ -1431,6 +1499,40 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                 }
             }
         }
+    }
+
+    /* Hull's internal database (§7.2) and its sidecars. Opened before this
+     * runs, so the file and its WAL / SHM exist; a -journal may not (unveil
+     * of a missing file fails under Landlock - ignored). On OpenBSD each
+     * file is unveiled under the .hull that was hidden above, so the rest of
+     * .hull stays hidden. Landlock cannot grant creating a sibling through a
+     * file rule, so on Linux the directory itself is unveiled when it is
+     * <app>/.hull - Landlock could not hide .hull anyway (the capability
+     * layer is the boundary there, see above). */
+    if (policy->internal_db_path) {
+        static const char *const suffix[4] = { "", "-wal", "-shm", "-journal" };
+        for (int k = 0; k < 4; k++) {
+            char f[SANDBOX_PATH_MAX];
+            int n = snprintf(f, sizeof f, "%s%s", policy->internal_db_path, suffix[k]);
+            if (n > 0 && (size_t)n < sizeof f && unveil(f, "rwc") != 0 && k == 0)
+                log_warn("[sandbox] unveil failed for the internal database: %s", f);
+        }
+#if !defined(__OpenBSD__)
+        int on_openbsd = 0;
+#if defined(__COSMOPOLITAN__)
+        on_openbsd = IsOpenbsd();
+#endif
+        char app_real[SANDBOX_PATH_MAX];
+        if (!on_openbsd && app_dir && realpath(app_dir, app_real)) {
+            char hull_dir[SANDBOX_PATH_MAX];
+            int hn = snprintf(hull_dir, sizeof hull_dir, "%s/.hull/", app_real);
+            if (hn > 0 && (size_t)hn < sizeof hull_dir &&
+                strncmp(policy->internal_db_path, hull_dir, (size_t)hn) == 0) {
+                hull_dir[hn - 1] = '\0';
+                (void)unveil(hull_dir, "rwc");
+            }
+        }
+#endif
     }
 
     /* No CA bundle unveil (audit 29): the anchor is already in memory

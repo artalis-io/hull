@@ -485,6 +485,9 @@ jobs:
       - name: Internal-database (databases.internal) E2E tests
         timeout-minutes: 2
         run: make e2e-db-internal
+      - name: Hull-owned internal database + migration (audit convergence 7.2) E2E tests
+        timeout-minutes: 3
+        run: make e2e-internal-db
       - name: http.fetch redirect host-check E2E tests
         timeout-minutes: 2
         run: make e2e-http-redirect

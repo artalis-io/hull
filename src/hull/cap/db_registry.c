@@ -16,8 +16,10 @@
 #include "hull/utils/env_ref.h"   /* hl_env_ref */
 #include "hull/cap/policy_seal.h"  /* hl_policy_page_* */
 #include "hull/shared/host.h"     /* hl_host_normalize_path, HL_HOST_PATH_MAX */
+#include "hull/cap/fs_resolve.h"   /* hl_fs_reserved_name */
 
 #include <limits.h>
+#include <sys/stat.h>   /* mkdir */
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -58,6 +60,13 @@ struct HlDbRegistry {
              * value takes over once set. */
             int               has_internal_dsn;
             char              internal_dsn[HL_DB_REGISTRY_DSN_MAX];
+            /* The Hull-owned default internal database (§7.2), used when
+             * neither of the above names one and default_internal_active. */
+            int               has_default_internal;
+            int               default_internal_active;
+            int               default_internal_mkdir;
+            size_t            default_internal_base;
+            char              default_internal[HL_HOST_PATH_MAX + 32];
             /* The app directory a manifest file DSN must stay in (audit
              * 34): its realpath, and the spelling it was given in (an
              * absolute DSN may name the app directory either way). */
@@ -229,7 +238,8 @@ static int has_dotdot(const char *path)
  * absolute path with the original scheme), or NULL + *err. */
 static const char *confine_manifest_dsn(const HlDbRegistry *reg,
                                         const char *dsn, char *buf,
-                                        size_t bufsz, const char **err)
+                                        size_t bufsz, int internal,
+                                        const char **err)
 {
     size_t plen = 0;   /* length of a file scheme's "<scheme>://" prefix */
     const char *sep = strstr(dsn, "://");
@@ -308,6 +318,23 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
         }
         base_len = strlen(reg->app_dir_real);
     }
+    /* <app>/.hull is Hull's (audit 37), and holds the internal database
+     * (§7.2): a databases.named file DSN may not name anything in it. Only
+     * databases.internal may (the stdlib's own connection). */
+    if (!internal && abs[base_len] == '/') {
+        const char *c = abs + base_len + 1;
+        const char *e = strchr(c, '/');
+        /* Past "." and empty components ("./.hull", "//.hull"). */
+        while (e && (e == c || (e - c == 1 && c[0] == '.'))) {
+            c = e + 1;
+            e = strchr(c, '/');
+        }
+        if (hl_fs_reserved_name(c, e ? (size_t)(e - c) : strlen(c))) {
+            *err = "a databases.named file DSN may not name the app's .hull "
+                   "directory (Hull's own)";
+            return NULL;
+        }
+    }
     if (hl_db_path_has_symlink(abs, base_len)) {
         *err = "a file database DSN runs through a symbolic link, or names "
                "something that is not a regular file";
@@ -319,6 +346,24 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
         return NULL;
     }
     return buf;
+}
+
+/* The Hull-owned default internal database (§7.2). Hull's own DSN, like the
+ * operator's -d: not confined to the app tree (a beside file follows a -d
+ * outside it), but checked on every lookup the way a manifest file DSN is -
+ * no symbolic link below its base (<app>/.hull itself included), and a leaf
+ * and SQLite sidecars that are absent or regular files. */
+static const char *default_internal_dsn(const HlDbRegistry *reg,
+                                        const char **err)
+{
+    const char *d = reg->default_internal;
+    if (strcmp(d, ":memory:") == 0) return d;
+    if (hl_db_path_has_symlink(d, reg->default_internal_base)) {
+        *err = "the internal database's path runs through a symbolic link, "
+               "or names something that is not a regular file";
+        return NULL;
+    }
+    return d;
 }
 
 /* Look up the DSN for @p name: manifest databases first (resolving a "$VAR"
@@ -360,6 +405,8 @@ static const char *lookup_dsn(HlDbRegistry *reg, const char *name,
         d = (reg->manifest && reg->manifest->databases.internal)
             ? reg->manifest->databases.internal
             : (reg->has_internal_dsn ? reg->internal_dsn : NULL);
+        if (!d && reg->has_default_internal && reg->default_internal_active)
+            return default_internal_dsn(reg, err);
         char var[128];
         if (d && hl_env_ref(d, var, sizeof var)) {
             const char *v = getenv(var);
@@ -378,7 +425,8 @@ static const char *lookup_dsn(HlDbRegistry *reg, const char *name,
         }
     }
     if (!d) return NULL;
-    return confine_manifest_dsn(reg, d, buf, bufsz, err);
+    return confine_manifest_dsn(reg, d, buf, bufsz,
+                                strcmp(name, INTERNAL_NAME) == 0, err);
 }
 
 static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
@@ -398,7 +446,87 @@ HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
 int hl_db_registry_has_internal(const HlDbRegistry *reg)
 {
     return reg && ((reg->manifest && reg->manifest->databases.internal)
-                   || reg->has_internal_dsn);
+                   || reg->has_internal_dsn
+                   || (reg->has_default_internal && reg->default_internal_active));
+}
+
+int hl_db_registry_internal_is_default(const HlDbRegistry *reg)
+{
+    return reg && !(reg->manifest && reg->manifest->databases.internal)
+        && !reg->has_internal_dsn
+        && reg->has_default_internal && reg->default_internal_active;
+}
+
+HlDbHandle *hl_db_registry_internal_or_app(HlDbRegistry *reg, const char **err)
+{
+    if (err) *err = NULL;
+    if (!reg) return NULL;
+    if (hl_db_registry_internal_is_default(reg))
+        return registry_get(reg, "default", err);
+    return hl_db_registry_internal(reg, err);
+}
+
+int hl_db_registry_set_default_internal(HlDbRegistry *reg, const char *dsn,
+                                        size_t base_len, int mkdir_parent,
+                                        int active)
+{
+    if (!reg || reg->sealed) return -1;
+    if (!dsn || !dsn[0]) {
+        reg->has_default_internal = 0;
+        return 0;
+    }
+    size_t n = strlen(dsn);
+    if (n >= sizeof reg->default_internal) return -1;
+    if (strcmp(dsn, ":memory:") != 0 && (dsn[0] != '/' || base_len >= n))
+        return -1;
+    memcpy(reg->default_internal, dsn, n + 1);
+    reg->default_internal_base = base_len;
+    reg->default_internal_mkdir = mkdir_parent;
+    reg->default_internal_active = active ? 1 : 0;
+    reg->has_default_internal = 1;
+    return 0;
+}
+
+const char *hl_db_registry_default_internal_path(const HlDbRegistry *reg)
+{
+    return (reg && reg->has_default_internal) ? reg->default_internal : NULL;
+}
+
+/* <app>/.hull for the default internal database, made 0700 when missing.
+ * mkdir never follows a symbolic link at its leaf (EEXIST), and the symlink
+ * check that follows refuses a linked one. */
+static void default_internal_mkdir(const HlDbRegistry *reg)
+{
+    if (!reg->default_internal_mkdir) return;
+    char dir[sizeof reg->default_internal];
+    memcpy(dir, reg->default_internal, sizeof dir);
+    char *sl = strrchr(dir, '/');
+    if (!sl || sl == dir) return;
+    *sl = '\0';
+    (void)mkdir(dir, 0700);
+}
+
+int hl_db_registry_open_default_internal(HlDbRegistry *reg, HlDbHandle *out,
+                                         const char **err)
+{
+    if (err) *err = NULL;
+    if (!reg || !out || !reg->has_default_internal) {
+        if (err) *err = "no default internal database";
+        return -1;
+    }
+    const char *e = NULL;
+    const char *dsn = default_internal_dsn(reg, &e);
+    if (!dsn) { if (err) *err = e; return -1; }
+    const HlDbBackend *be = hl_db_backend_select(dsn, &e);
+    if (!be) { if (err) *err = e ? e : "no database backend"; return -1; }
+    memset(out, 0, sizeof *out);
+    out->backend = be;
+    if (be->open(&out->ctx, dsn, reg->alloc) != 0) {
+        out->backend = NULL;
+        if (err) *err = "failed to open database connection";
+        return -1;
+    }
+    return 0;
 }
 
 HlDbHandle *hl_db_registry_internal(HlDbRegistry *reg, const char **err)
@@ -465,6 +593,8 @@ static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
 
     const char *derr = NULL;
     char dsn_buf[HL_HOST_PATH_MAX + 16];
+    if (strcmp(name, INTERNAL_NAME) == 0 && hl_db_registry_internal_is_default(reg))
+        default_internal_mkdir(reg);
     const char *dsn = lookup_dsn(reg, name, &derr, dsn_buf, sizeof dsn_buf);
     if (!dsn) {
         if (err) *err = derr ? derr
