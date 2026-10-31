@@ -17,6 +17,7 @@
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/shared/work_charge.h"   /* hl_work_sql_units (audit 41) */
 
 #include "lua.h"
 #include "lualib.h"
@@ -170,7 +171,13 @@ static void refuse_reentry(lua_State *L)
 static int worker_lua_db_query(lua_State *L)
 {
     refuse_reentry(L);
-    const char *sql = luaL_checkstring(L, 1);
+    size_t sql_len;
+    const char *sql = luaL_checklstring(L, 1, &sql_len);
+    /* Charged to the job's budget before the namespace scan and the
+     * statement cache's compare walk the text (audit 41). */
+    uint64_t sql_units = hl_work_sql_units(sql_len);
+    lua_hlwork(L, sql_units > (uint64_t)SIZE_MAX ? SIZE_MAX
+                                                 : (size_t)sql_units, 0);
     const char *err = NULL;
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);
     if (!h)
@@ -218,7 +225,13 @@ static int worker_lua_db_query(lua_State *L)
 static int worker_lua_db_exec(lua_State *L)
 {
     refuse_reentry(L);
-    const char *sql = luaL_checkstring(L, 1);
+    size_t sql_len;
+    const char *sql = luaL_checklstring(L, 1, &sql_len);
+    /* Charged to the job's budget before the namespace scan and the
+     * statement cache's compare walk the text (audit 41). */
+    uint64_t sql_units = hl_work_sql_units(sql_len);
+    lua_hlwork(L, sql_units > (uint64_t)SIZE_MAX ? SIZE_MAX
+                                                 : (size_t)sql_units, 0);
     const char *err = NULL;
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);
     if (!h)

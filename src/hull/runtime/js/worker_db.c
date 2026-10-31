@@ -17,6 +17,8 @@
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/db_budget.h"       /* hl_db_budget_charge (audit 41) */
+#include "hull/shared/work_charge.h"  /* hl_work_sql_units */
 
 #include "quickjs.h"
 
@@ -239,9 +241,18 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.query requires (sql, params?)");
 
-    const char *sql = JS_ToCString(ctx, argv[0]);
+    size_t sql_len;
+    const char *sql = JS_ToCStringLen(ctx, &sql_len, argv[0]);
     if (!sql)
         return JS_EXCEPTION;
+    /* Charged to the dispatch (the thread's bound db budget) before the
+     * namespace scan and the statement cache's compare walk the text
+     * (audit 41). */
+    if (hl_db_budget_charge((int64_t)hl_work_sql_units(sql_len)) ||
+        hl_js_worker_budget_tripped()) {
+        JS_FreeCString(ctx, sql);
+        return hl_js_budget_throw(ctx);
+    }
 
     const char *err = NULL;
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);
@@ -297,9 +308,18 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.exec requires (sql, params?)");
 
-    const char *sql = JS_ToCString(ctx, argv[0]);
+    size_t sql_len;
+    const char *sql = JS_ToCStringLen(ctx, &sql_len, argv[0]);
     if (!sql)
         return JS_EXCEPTION;
+    /* Charged to the dispatch (the thread's bound db budget) before the
+     * namespace scan and the statement cache's compare walk the text
+     * (audit 41). */
+    if (hl_db_budget_charge((int64_t)hl_work_sql_units(sql_len)) ||
+        hl_js_worker_budget_tripped()) {
+        JS_FreeCString(ctx, sql);
+        return hl_js_budget_throw(ctx);
+    }
 
     const char *err = NULL;
     HlDbHandle *h = hl_worker_db_handle_checked(sql, &err);

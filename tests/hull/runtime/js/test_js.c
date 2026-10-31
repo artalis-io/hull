@@ -1691,6 +1691,58 @@ UTEST(db_audit10, js_sql_allocations_are_charged)
     cleanup_js_caps();
 }
 
+/* Audit 41: the namespace check and the statement cache's compare walk the
+ * whole SQL text and a cache hit allocates almost nothing, so a reused large
+ * SQL string cost no budget. The text (and the dialect helpers'
+ * identifiers) is charged before the scan; ordinary queries still fit. */
+UTEST(db_audit41, js_sql_text_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const char *const loops[] = {
+        "for (let i = 0; i < 500; i++) db.query(s);",
+        "for (let i = 0; i < 500; i++) db.exec(s);",
+        "for (let i = 0; i < 500; i++) { try { db.tableColumns(t); } catch (e) {} }",
+        "db.exec('CREATE TABLE IF NOT EXISTS a41 (k TEXT PRIMARY KEY)');"
+        "for (let i = 0; i < 500; i++) { try { db.insertIfAbsent(t, [], ['k'], ['x']); } catch (e) {} }",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        char code[1024];
+        snprintf(code, sizeof code,
+                 "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
+                 "const s = 'SELECT 1 --' + 'a'.repeat(1 << 20);\n"
+                 "const t = 't'.repeat(1 << 20);\n"
+                 "try { %s } catch (e) { globalThis.__a41_caught = 1; }\n"
+                 "globalThis.__a41_after = 1;\n", loops[i]);
+        js.max_instructions = 2000000;
+        hl_js_budget_arm(&js);
+        JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                              JS_EVAL_TYPE_MODULE);
+        JS_FreeValue(js.ctx, val);
+        hl_js_run_jobs(&js);
+        EXPECT_EQ_MSG(1, js.budget_tripped, loops[i]);
+        js.max_instructions = 0;
+        hl_js_budget_arm(&js);
+        EXPECT_EQ_MSG(0, eval_int("globalThis.__a41_caught === undefined ? 0 : 1"), loops[i]);
+        EXPECT_EQ_MSG(0, eval_int("globalThis.__a41_after === undefined ? 0 : 1"), loops[i]);
+    }
+    /* A thousand ordinary queries fit the same budget. */
+    js.max_instructions = 2000000;
+    hl_js_budget_arm(&js);
+    const char *ok =
+        "import { db as dbMod } from 'hull:db';\nconst db = dbMod.default();\n"
+        "let n = 0; for (let i = 0; i < 1000; i++) n += db.query('SELECT 1 AS n')[0].n;\n"
+        "globalThis.__a41_n = n;\n";
+    JSValue val = JS_Eval(js.ctx, ok, strlen(ok), "<test>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(0, js.budget_tripped);
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+    EXPECT_EQ(1000, eval_int("globalThis.__a41_n|0"));
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, db_parameterized_query)
 {
     init_js_with_caps();
@@ -8339,6 +8391,25 @@ JS_WORKER_CASE(a_db_call_over_the_limit_is_not_catchable,
     "    try { db.batch(() => db.query('WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c')); }\n"
     "    catch (e) { return 'caught: ' + e; } return 'ran'; });\n"
     "  check(m3.includes('instruction limit'), 'batch: ' + m3);\n")
+
+/* Audit 41: a dispatch's query / exec charge their SQL text to the job's
+ * budget before the namespace scan; a reused large SQL string was free. */
+JS_WORKER_CASE(sql_text_is_charged_to_the_job,
+    a10_worker_db_limited(),
+    "  const m1 = await fails(() => {\n"
+    "    const s = 'SELECT 1 --' + 'a'.repeat(1 << 20);\n"
+    "    try { for (let i = 0; i < 500; i++) db.query(s); }\n"
+    "    catch (e) { return 'caught: ' + e; } return 'ran'; });\n"
+    "  check(m1.includes('instruction limit'), 'query: ' + m1);\n"
+    "  const m2 = await fails(() => {\n"
+    "    const s = 'SELECT 1 --' + 'a'.repeat(1 << 20);\n"
+    "    try { for (let i = 0; i < 500; i++) db.exec(s); }\n"
+    "    catch (e) { return 'caught: ' + e; } return 'ran'; });\n"
+    "  check(m2.includes('instruction limit'), 'exec: ' + m2);\n"
+    "  const n = await worker.dispatch(() => { let n = 0;\n"
+    "    for (let i = 0; i < 1000; i++) n += db.query('SELECT 1 AS n')[0].n;\n"
+    "    return n; });\n"
+    "  check(n === 1000, 'ordinary: ' + n);\n")
 
 /* ── Audit 4: the JS runtime ──────────────────────────────────────────── */
 

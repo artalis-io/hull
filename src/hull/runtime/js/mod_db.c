@@ -455,9 +455,16 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.query requires (sql, params?)");
 
-    const char *sql = JS_ToCString(ctx, argv[0]);
+    size_t sql_len;
+    const char *sql = JS_ToCStringLen(ctx, &sql_len, argv[0]);
     if (!sql)
         return JS_EXCEPTION;
+    /* The text check and the statement cache's compare walk the whole
+     * text: charged first, stdlib or not (audit 41). */
+    if (hl_js_budget_charge(ctx, hl_work_sql_units(sql_len))) {
+        JS_FreeCString(ctx, sql);
+        return JS_EXCEPTION;
+    }
 
     int is_stdlib = js_is_stdlib_caller(ctx, this_val);
     HlDbHandle *h;   /* resolved after the parameters: see below */
@@ -538,9 +545,16 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.exec requires (sql, params?)");
 
-    const char *sql = JS_ToCString(ctx, argv[0]);
+    size_t sql_len;
+    const char *sql = JS_ToCStringLen(ctx, &sql_len, argv[0]);
     if (!sql)
         return JS_EXCEPTION;
+    /* The text check and the statement cache's compare walk the whole
+     * text: charged first, stdlib or not (audit 41). */
+    if (hl_js_budget_charge(ctx, hl_work_sql_units(sql_len))) {
+        JS_FreeCString(ctx, sql);
+        return JS_EXCEPTION;
+    }
 
     int is_stdlib = js_is_stdlib_caller(ctx, this_val);
     HlDbHandle *h;   /* resolved after the parameters: see below */
@@ -792,6 +806,18 @@ static JSValue js_db_dialect_write(JSContext *ctx, JSValueConst this_val,
      * may not name a reserved table in any of them (case-insensitive, as the
      * query/exec check is). The handle is resolved last: the conversions above
      * run app code (getters), which can close a db.open handle. */
+    /* The names are scanned here and land in the statement the backend
+     * builds: charged first, stdlib or not (audit 41). */
+    uint64_t id_bytes = strlen(table);
+    for (int i = 0; i < n_conflict; i++) id_bytes += strlen(conflict_cols[i]);
+    for (int i = 0; i < n_cols; i++) id_bytes += strlen(cols[i]);
+    if (hl_js_budget_charge(ctx, hl_work_sql_units((size_t)id_bytes))) {
+        js_free_hl_values(ctx, values, n_values);
+        js_free_string_array(ctx, cols, n_cols);
+        js_free_string_array(ctx, conflict_cols, n_conflict);
+        JS_FreeCString(ctx, table);
+        return JS_EXCEPTION;
+    }
     int denied = 0;
     if (!is_stdlib) {
         denied = hl_cap_db_check_namespace(table) != 0;
@@ -879,9 +905,14 @@ static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.tableColumns requires (table)");
 
-    const char *table = JS_ToCString(ctx, argv[0]);
+    size_t table_len;
+    const char *table = JS_ToCStringLen(ctx, &table_len, argv[0]);
     if (!table)
         return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, hl_work_sql_units(table_len))) {   /* audit 41 */
+        JS_FreeCString(ctx, table);
+        return JS_EXCEPTION;
+    }
 
     int is_stdlib = js_is_stdlib_caller(ctx, this_val);
 
@@ -1109,9 +1140,15 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         if (argc < 1)
             return JS_ThrowTypeError(ctx, "db.async requires (sql, params?)");
 
-        const char *sql = JS_ToCString(ctx, argv[0]);
+        size_t sql_len;
+        const char *sql = JS_ToCStringLen(ctx, &sql_len, argv[0]);
         if (!sql)
             return JS_EXCEPTION;
+        /* Before the scan (audit 41). */
+        if (hl_js_budget_charge(ctx, hl_work_sql_units(sql_len))) {
+            JS_FreeCString(ctx, sql);
+            return JS_EXCEPTION;
+        }
 
         ns_trusted = js_is_stdlib_caller(ctx, this_val);
         if (!ns_trusted && hl_cap_db_check_namespace(sql) != 0) {
