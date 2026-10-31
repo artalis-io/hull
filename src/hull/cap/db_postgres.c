@@ -21,6 +21,8 @@
 #include "hull/utils/alloc.h"
 #include "../utils/hex.h"
 
+#include "log.h"
+
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -124,6 +126,18 @@ static int pg_ready(HlDbPgCtx *s, const char *sql, int pinned)
                  fresh.errmsg[0] ? fresh.errmsg : "unknown error");
         return -1;
     }
+    /* A session-level advisory lock went with the lost session, and the new
+     * one does not hold it. Not refused (audit 41): advisory locks do not
+     * count for the wait gates (they are not a transaction, and an app may
+     * hold one across waits on purpose), the tracking is a conservative
+     * estimate (a pg_try_* that took nothing counts), and refusing would
+     * leave the connection unusable until the entry ends for every app that
+     * merely tried one. Said instead, so a lost lock is not silent. */
+    if (s->adv_locks > 0)
+        log_warn("[hull:c] postgres: the connection was lost while its "
+                 "session may have held %d session-level advisory lock(s); "
+                 "they went with it, and the new connection does not hold "
+                 "them", s->adv_locks);
     hl_pg_conn_close(&s->conn);
     s->conn = fresh;
     s->nlisten = 0;   /* a new session listens to nothing */

@@ -145,7 +145,8 @@ static inline HlSqlTxnKind hl_sql_txn_kind(const char *sql)
  * the two words before it in the same statement ("" when none; a ';' starts a
  * new statement). Skipped: '...' strings (doubled quotes, and backslash
  * escapes when @p backslash), "..." and `...` quoted names, "--" line
- * comments and block comments (nesting when @p nest) - but not an executable
+ * comments (by the dialect's rule: Postgres's when @p nest, else MySQL's) and
+ * block comments (nesting when @p nest) - but not an executable
  * comment (slash-star-bang), whose text MySQL runs. For bookkeeping that only
  * errs on the safe side (audit 39, session-state tracking): a misread word
  * costs a session reset at most.
@@ -176,12 +177,22 @@ static inline void hl_sql_scan_words(const char *sql, int nest, int backslash,
             if (*p) p++;
             continue;
         }
-        /* "--" opens a comment only before whitespace or the end (MySQL's
-         * rule; reading on where Postgres would not only sees more). */
-        if ((c == '-' && p[1] == '-' &&
-             (p[2] == '\0' || p[2] == ' ' || p[2] == '\t' || p[2] == '\n' ||
-              p[2] == '\r')) ||
-            (c == '/' && p[1] == '*' && p[2] != '!')) {
+        /* "--": each dialect's own rule, both ways - text read as code
+         * where the server skips it can release state the session still
+         * holds (audit 41). Postgres (@p nest): always a comment, ended at
+         * LF or CR. MySQL: a comment only before a whitespace or control
+         * byte (<= 0x20, DEL) or the end, ended at LF alone; "5--1" is
+         * arithmetic. */
+        if (c == '-' && p[1] == '-' &&
+            (nest || (unsigned char)p[2] <= 0x20 || p[2] == 0x7f)) {
+            if (nest) {
+                p = hl_sql_skip_space_ex(p, nest);
+            } else {
+                while (*p && *p != '\n') p++;
+            }
+            continue;
+        }
+        if (c == '/' && p[1] == '*' && p[2] != '!') {
             p = hl_sql_skip_space_ex(p, nest);
             continue;
         }

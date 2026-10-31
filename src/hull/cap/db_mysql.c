@@ -49,15 +49,52 @@ typedef struct HlDbMyCtx {
     int      lock_instance;
     int      xa_open;
     int      named_locks;
+    /* MariaDB BACKUP LOCK / BACKUP STAGE not yet ended (audit 41). FLUSH
+     * TABLES ... FOR EXPORT counts as lock_tables (UNLOCK TABLES ends it). */
+    int      backup_lock;
+    int      backup_stage;
+    /* The connection was lost with autocommit off, and the app has since
+     * rolled back (my_ready, audit 41): the next connection is opened with
+     * autocommit off again, the session the app believes it has. */
+    int      ac_off_acked;
 } HlDbMyCtx;
 
 /* A new or reset session holds none of the tracked state. */
 static void my_session_clear(HlDbMyCtx *s)
 {
     s->lock_tables = s->lock_instance = s->xa_open = s->named_locks = 0;
+    s->backup_lock = s->backup_stage = 0;
+    s->ac_off_acked = 0;
 }
 
-static int my_connect(HlMyConn *conn, const char *dsn)
+/* Forget everything the lost session held (the server ended it): the next
+ * call reconnects into a fresh autocommit session. Only at an entry
+ * boundary (the stale-transaction guard) or a reset abandoned. */
+static void my_lost_forget(HlDbMyCtx *s)
+{
+    s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+    s->conn.server_status |= HL_MY_SERVER_STATUS_AUTOCOMMIT;
+    s->txn_aborted = 0;
+    my_session_clear(s);
+}
+
+/* A ROLLBACK on a lost connection, answered without being sent: the server
+ * rolled the transaction back with the session. With autocommit off the app
+ * still believes it has that session, so the next connection is opened with
+ * autocommit off (my_ready, audit 41). */
+static void my_lost_rolled_back(HlDbMyCtx *s)
+{
+    s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+    if (!(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT))
+        s->ac_off_acked = 1;
+}
+
+/* @p autocommit is what the new session runs with: always set explicitly,
+ * since a server whose global default is off (SET GLOBAL autocommit = 0,
+ * init_connect) still reports SERVER_STATUS_AUTOCOMMIT in the handshake, and
+ * every write not committed by hand was then rolled back by the stale guard
+ * (audit 41). One round trip per connect. */
+static int my_connect(HlMyConn *conn, const char *dsn, int autocommit)
 {
     HlMyDsn parsed;
     char err[128];
@@ -69,7 +106,18 @@ static int my_connect(HlMyConn *conn, const char *dsn)
     }
     int rc = hl_my_conn_open(conn, &parsed, 10000 /* 10s connect */);
     hl_my_dsn_scrub(&parsed);   /* password is secret material */
-    return rc;
+    if (rc != 0) return rc;
+    if (hl_my_conn_query(conn, autocommit ? "SET autocommit = 1"
+                                          : "SET autocommit = 0",
+                         NULL, NULL, NULL, NULL) != 0) {
+        conn->broken = 1;   /* first: the close sends no close_notify */
+        char saved[sizeof conn->errmsg];
+        snprintf(saved, sizeof saved, "%s", conn->errmsg);
+        hl_my_conn_close(conn);
+        snprintf(conn->errmsg, sizeof conn->errmsg, "%s", saved);
+        return -1;
+    }
+    return 0;
 }
 
 /* 1 when @p sql has text MySQL runs or skips differently from the shared
@@ -177,16 +225,113 @@ static void scrub_free(char *s)
     free(s);
 }
 
+/* A statement that ends a piece of session state a lost connection held
+ * (audit 41). Only ONE statement (my_sql_single_statement), read by its
+ * leading words. */
+typedef enum {
+    MY_RESTORE_NONE = 0,
+    MY_RESTORE_AUTOCOMMIT,      /* SET [SESSION|LOCAL|@@[session.]]autocommit = 1|ON|TRUE */
+    MY_RESTORE_UNLOCK_TABLES,   /* UNLOCK TABLE[S] */
+    MY_RESTORE_UNLOCK_INSTANCE, /* UNLOCK INSTANCE */
+    MY_RESTORE_BACKUP_UNLOCK,   /* BACKUP UNLOCK (MariaDB) */
+    MY_RESTORE_BACKUP_END,      /* BACKUP STAGE END (MariaDB) */
+    MY_RESTORE_XA_END           /* XA COMMIT / XA ROLLBACK */
+} MyRestore;
+
+static MyRestore my_restore_kind(const char *sql)
+{
+    if (!my_sql_single_statement(sql)) return MY_RESTORE_NONE;
+    char w[16], w2[16], w3[16];
+    const char *p = hl_sql_next_word_ex(sql, w, sizeof w, 0);
+    if (strcmp(w, "set") == 0) {
+        p = hl_sql_skip_space_ex(p, 0);
+        if (p[0] == '@' && p[1] == '@') {
+            p += 2;
+            if (strncasecmp(p, "session.", 8) == 0) p += 8;
+            else if (strncasecmp(p, "local.", 6) == 0) p += 6;
+            p = hl_sql_next_word_ex(p, w2, sizeof w2, 0);
+        } else {
+            p = hl_sql_next_word_ex(p, w2, sizeof w2, 0);
+            if (strcmp(w2, "session") == 0 || strcmp(w2, "local") == 0)
+                p = hl_sql_next_word_ex(p, w2, sizeof w2, 0);
+        }
+        if (strcmp(w2, "autocommit") != 0) return MY_RESTORE_NONE;
+        p = hl_sql_skip_space_ex(p, 0);
+        if (p[0] == ':' && p[1] == '=') p += 2;
+        else if (p[0] == '=') p++;
+        else return MY_RESTORE_NONE;
+        p = hl_sql_next_word_ex(p, w3, sizeof w3, 0);
+        if (strcmp(w3, "1") != 0 && strcmp(w3, "on") != 0 &&
+            strcmp(w3, "true") != 0)
+            return MY_RESTORE_NONE;
+        p = hl_sql_skip_space_ex(p, 0);
+        while (*p == ';') p = hl_sql_skip_space_ex(p + 1, 0);
+        return *p ? MY_RESTORE_NONE : MY_RESTORE_AUTOCOMMIT;
+    }
+    p = hl_sql_next_word_ex(p, w2, sizeof w2, 0);
+    if (strcmp(w, "unlock") == 0) {
+        if (strcmp(w2, "tables") == 0 || strcmp(w2, "table") == 0)
+            return MY_RESTORE_UNLOCK_TABLES;
+        if (strcmp(w2, "instance") == 0) return MY_RESTORE_UNLOCK_INSTANCE;
+        return MY_RESTORE_NONE;
+    }
+    if (strcmp(w, "backup") == 0) {
+        if (strcmp(w2, "unlock") == 0) return MY_RESTORE_BACKUP_UNLOCK;
+        (void)hl_sql_next_word_ex(p, w3, sizeof w3, 0);
+        if (strcmp(w2, "stage") == 0 && strcmp(w3, "end") == 0)
+            return MY_RESTORE_BACKUP_END;
+        return MY_RESTORE_NONE;
+    }
+    if (strcmp(w, "xa") == 0 &&
+        (strcmp(w2, "commit") == 0 || strcmp(w2, "rollback") == 0))
+        return MY_RESTORE_XA_END;
+    return MY_RESTORE_NONE;
+}
+
+/* What a lost connection's session held that a new connection would not
+ * (audit 41), or NULL: autocommit off (not yet acknowledged by a ROLLBACK),
+ * a LOCK TABLES / FLUSH TABLES ... WITH READ LOCK / FOR EXPORT, a LOCK
+ * INSTANCE FOR BACKUP, an XA transaction, a MariaDB BACKUP LOCK / STAGE. */
+static const char *my_lost_held(const HlDbMyCtx *s)
+{
+    if (!(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT) &&
+        !s->ac_off_acked)
+        return "autocommit off (roll back, or SET autocommit = 1)";
+    if (s->lock_tables)   return "LOCK TABLES (UNLOCK TABLES)";
+    if (s->lock_instance) return "LOCK INSTANCE FOR BACKUP (UNLOCK INSTANCE)";
+    if (s->backup_lock)   return "BACKUP LOCK (BACKUP UNLOCK)";
+    if (s->backup_stage)  return "BACKUP STAGE (BACKUP STAGE END)";
+    if (s->xa_open)       return "an XA transaction (XA ROLLBACK / XA COMMIT)";
+    return NULL;
+}
+
 /* Before any use: replace a connection left out of step (HlMyConn.broken), as
  * db_postgres.c's pg_ready does - outside a transaction only. Inside one the
  * server rolled the transaction back when the connection went, and statements
  * run on a new connection would each commit alone, so every call refuses until
  * a ROLLBACK (@p sql), which has in effect already happened and returns 1.
+ *
+ * The same holds for session state the lost session held with no transaction
+ * open (audit 41): autocommit off, a table / instance / backup lock, an XA
+ * transaction. A new connection runs in autocommit with no lock, so the app's
+ * next writes would commit one by one and its ROLLBACK lie, and other sessions
+ * would read the "locked" tables. Calls refuse until the app ends each piece:
+ * a ROLLBACK (autocommit off: the next connection is opened with autocommit
+ * off again), SET autocommit = 1, UNLOCK TABLES, UNLOCK INSTANCE, BACKUP
+ * UNLOCK, BACKUP STAGE END - each answered done without being sent, since the
+ * server ended that state with the session - or XA COMMIT / ROLLBACK, which is
+ * sent on the new connection (a prepared XA transaction outlives the session),
+ * or until the entry ends (the stale-transaction guard forgets it all). Until
+ * then mysql_session_held still reports the state, so waits stay refused.
+ *
  * Returns 0 to go ahead, 1 done, -1 refused. A @p pinned handle (it holds a
  * session-scoped lock: hl_migrate_run) is not reconnected either: the lock
  * went with the session, and the run would go on without it (audit 6 L5). */
 static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
 {
+    /* A call starts: an error code left now is this call's server ERR
+     * (my_note_failure), not an earlier one's. */
+    s->conn.last_err_code = 0;
     if (s->txn_aborted) {
         if (sql_is_rollback(sql)) {   /* the server already rolled back */
             s->txn_aborted = 0;
@@ -201,15 +346,55 @@ static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
     }
     if (!s->conn.broken)
         return 0;
-    if ((s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) && sql_is_rollback(sql)) {
-        s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+    int in_trans = (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) != 0;
+    if ((in_trans || my_lost_held(s)) && sql_is_rollback(sql)) {
+        my_lost_rolled_back(s);
         return 1;
     }
-    if (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) {
+    if (in_trans) {
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "the connection was lost inside a transaction, which the "
                  "server rolled back; roll back and retry");
         return -1;
+    }
+    if (my_lost_held(s)) {
+        switch (my_restore_kind(sql)) {
+        case MY_RESTORE_AUTOCOMMIT:
+            if (s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT) break;
+            s->conn.server_status |= HL_MY_SERVER_STATUS_AUTOCOMMIT;
+            s->ac_off_acked = 0;
+            return 1;
+        case MY_RESTORE_UNLOCK_TABLES:
+            if (!s->lock_tables) break;
+            s->lock_tables = 0;
+            return 1;
+        case MY_RESTORE_UNLOCK_INSTANCE:
+            if (!s->lock_instance) break;
+            s->lock_instance = 0;
+            return 1;
+        case MY_RESTORE_BACKUP_UNLOCK:
+            if (!s->backup_lock) break;
+            s->backup_lock = 0;
+            return 1;
+        case MY_RESTORE_BACKUP_END:
+            if (!s->backup_stage) break;
+            s->backup_stage = 0;
+            return 1;
+        case MY_RESTORE_XA_END:
+            s->xa_open = 0;   /* sent on the new connection, if nothing else */
+            break;
+        case MY_RESTORE_NONE:
+            break;
+        }
+        const char *held = my_lost_held(s);
+        if (held) {
+            snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                     "the connection was lost while its session held %s; the "
+                     "server ended that with the session and a new one would "
+                     "not hold it, so calls are refused until it is ended or "
+                     "the entry ends", held);
+            return -1;
+        }
     }
     if (pinned) {
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
@@ -217,9 +402,11 @@ static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
                  "migration lock), which went with it; not reconnecting");
         return -1;
     }
+    int autocommit = !(s->ac_off_acked &&
+                       !(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT));
     HlMyConn fresh;
     memset(&fresh, 0, sizeof fresh);
-    if (my_connect(&fresh, s->dsn) != 0) {
+    if (my_connect(&fresh, s->dsn, autocommit) != 0) {
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "the connection was lost, and reconnecting failed: %.150s",
                  fresh.errmsg[0] ? fresh.errmsg : "unknown error");
@@ -257,6 +444,18 @@ static void my_track_word(void *ud, const char *w, const char *prev,
     } else if (strcmp(w, "lock") == 0 && strcmp(prev, "read") == 0 &&
                strcmp(prev2, "with") == 0) {
         s->lock_tables = 1;   /* FLUSH TABLES ... WITH READ LOCK (audit 40) */
+    } else if (strcmp(w, "export") == 0 && strcmp(prev, "for") == 0) {
+        s->lock_tables = 1;   /* FLUSH TABLES ... FOR EXPORT (audit 41) */
+    } else if (strcmp(prev, "backup") == 0 &&
+               (strcmp(w, "lock") == 0 || strcmp(w, "unlock") == 0 ||
+                strcmp(w, "stage") == 0)) {
+        /* MariaDB BACKUP LOCK t / BACKUP UNLOCK, BACKUP STAGE x (audit 41) */
+        if (strcmp(w, "lock") == 0) s->backup_lock = 1;
+        else if (strcmp(w, "unlock") == 0) { if (rel) s->backup_lock = 0; }
+        else s->backup_stage = 1;
+    } else if (strcmp(w, "end") == 0 && strcmp(prev, "stage") == 0 &&
+               strcmp(prev2, "backup") == 0) {
+        if (rel) s->backup_stage = 0;   /* BACKUP STAGE END */
     } else if (strcmp(w, "instance") == 0) {
         /* LOCK INSTANCE FOR BACKUP / UNLOCK INSTANCE (audit 40). */
         if (strcmp(prev, "lock") == 0) s->lock_instance = 1;
@@ -338,17 +537,21 @@ static void my_track_session(HlDbHandle *h, const char *sql, int rc)
 static int my_session_leftover(const HlDbMyCtx *s)
 {
     return !(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT) ||
-           s->lock_tables || s->lock_instance || s->xa_open;
+           s->lock_tables || s->lock_instance || s->xa_open ||
+           s->backup_lock || s->backup_stage;
 }
 
 /* hl_db_session_held (audit 40): the same state counts as an open
  * transaction for the wait gates, so an entry holding it cannot park and
  * have the guard that runs before it resumes reset the session under it.
- * Hence, too, every leftover the guard finds belongs to a finished entry. */
+ * Hence, too, every leftover the guard finds belongs to a finished entry.
+ * On a lost connection too (audit 41): the state it last held is what the
+ * app still believes it has, and my_ready refuses calls until it is ended,
+ * so a wait must stay refused as well. */
 static int mysql_session_held(HlDbHandle *h)
 {
     HlDbMyCtx *s = h ? h->ctx : NULL;
-    if (!s || s->conn.broken) return 0;
+    if (!s) return 0;
     return my_session_leftover(s);
 }
 
@@ -358,7 +561,7 @@ static int mysql_session_held(HlDbHandle *h)
 static int mysql_session_dirty(HlDbHandle *h)
 {
     HlDbMyCtx *s = h ? h->ctx : NULL;
-    if (!s || s->conn.broken) return 0;
+    if (!s) return 0;
     return my_session_leftover(s) || s->named_locks > 0;
 }
 
@@ -388,9 +591,7 @@ static void my_reset_session(HlDbHandle *h, const char *why)
         hl_my_conn_close(&s->conn);
     }
     /* Broken: nothing of the session survives; the next call reconnects. */
-    s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
-    s->txn_aborted = 0;
-    my_session_clear(s);
+    my_lost_forget(s);
 }
 
 /* Case-insensitive substring search (strcasestr is not standard C). */
@@ -763,7 +964,7 @@ static int mysql_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     HlDbMyCtx *s = calloc(1, sizeof *s);
     if (!s) return -1;
     s->dsn = strdup(dsn);
-    if (!s->dsn || my_connect(&s->conn, dsn) != 0) {
+    if (!s->dsn || my_connect(&s->conn, dsn, 1) != 0) {
         scrub_free(s->dsn);
         free(s);
         return -1;
@@ -874,7 +1075,7 @@ static int mysql_exec_raw(HlDbHandle *h, const char *sql,
     free(collated);
     if (qrc != 0) {
         if (s->conn.broken && sql_is_rollback(sql)) {   /* see mysql_txn */
-            s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+            my_lost_rolled_back(s);
             return 0;
         }
         return -1;
@@ -951,6 +1152,18 @@ static int my_sql_commits_implicitly(const char *sql)
 static void my_note_failure(HlDbMyCtx *s, const char *sql, int was_in_trans,
                             int rc)
 {
+    /* A statement the server failed outside a transaction may still have
+     * changed the session before it failed (audit 41): a CALL whose
+     * procedure ran START TRANSACTION or SET autocommit = 0 and then raised,
+     * or an earlier statement of a multi-statement text. An ERR carries no
+     * status flags, so the status read before the call stayed - in_txn and
+     * session_held read 0, the wait gates let the entry park, and the next
+     * entry's acknowledged write was rolled back by the guard. Ask. */
+    if (rc < 0 && !was_in_trans && !s->conn.broken &&
+        s->conn.last_err_code != 0) {
+        (void)hl_my_conn_ping(&s->conn);
+        return;
+    }
     if (rc < 0 && was_in_trans && !s->conn.broken &&
         s->conn.last_err_code == HL_MY_ER_LOCK_DEADLOCK) {
         s->txn_aborted = 1;
@@ -1071,7 +1284,7 @@ static int mysql_txn_raw(HlDbHandle *h, const char *sql)
     /* A ROLLBACK that failed because the connection went: the server rolled
      * the transaction back with it. */
     if (rc != 0 && s->conn.broken && sql_is_rollback(sql)) {
-        s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
+        my_lost_rolled_back(s);
         rc = 0;
     }
     return rc;
@@ -1120,8 +1333,7 @@ static void mysql_guard_stale_txn(HlDbHandle *h)
         int rc = mysql_rollback(h);
         if (s->conn.broken) {
             /* Lost: the server ended the session; my_ready reconnects. */
-            if (!(s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS))
-                my_session_clear(s);
+            if (!h->session_pinned) my_lost_forget(s);
             return;
         }
         if (rc != 0 || (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS))
@@ -1129,11 +1341,30 @@ static void mysql_guard_stale_txn(HlDbHandle *h)
         else if (s->named_locks > 0)
             why = "a GET_LOCK";
     }
-    if (!why && !s->conn.broken && my_session_leftover(s))
+    if (s->conn.broken) {
+        /* Lost with session state the entry never ended (audit 41): the
+         * server ended it with the session, and my_ready refused every call
+         * meanwhile. The entry is over, so the next call reconnects into a
+         * fresh autocommit session. */
+        if (!h->session_pinned) my_lost_forget(s);
+        return;
+    }
+    if (!why && my_session_leftover(s))
         why = !(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT)
               ? "autocommit off" : s->xa_open ? "an XA transaction"
               : s->lock_instance ? "LOCK INSTANCE FOR BACKUP"
+              : (s->backup_lock || s->backup_stage) ? "a BACKUP LOCK / STAGE"
               : "LOCK TABLES (or a global read lock)";
+    if (why && (s->backup_lock || s->backup_stage) && !h->session_pinned) {
+        /* Whether COM_RESET_CONNECTION ends a MariaDB backup lock or stage
+         * is not documented; ending the session does. */
+        log_warn("[hull:c] mysql: closing the connection, whose session a "
+                 "finished entry left with %s", why);
+        s->conn.broken = 1;        /* first: the close sends no close_notify */
+        hl_my_conn_close(&s->conn);
+        my_lost_forget(s);
+        return;
+    }
     if (why) my_reset_session(h, why);
 }
 

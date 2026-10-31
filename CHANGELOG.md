@@ -124,6 +124,40 @@ release-artifact layout).
   makes, and until it finishes the device refuses compiles, dispatches, pipelines, writes, reads and
   copies (`gpu_busy`). `hl_cap_gpu_destroy` waits up to 5 s for it, and past that leaves the
   backend's device and instance unfreed rather than free them under the thread.
+- **A lost MySQL connection with autocommit off or a table lock reconnected into autocommit**
+  (audit 41). The backend refused to replace a broken connection only when its last status had
+  IN_TRANS, and `session_held` read 0 while the connection was broken. Right after `SET
+  autocommit = 0`, `LOCK TABLES`, or a COMMIT made with autocommit off, IN_TRANS is clear: the
+  call that met the dead socket (server restart, KILL, `read_timeout`) failed once, the next one
+  reconnected into a fresh autocommit session with no lock, and waits were allowed meanwhile -
+  measured on MySQL 8.4, the retried INSERT autocommitted and the later ROLLBACK reported success
+  with the row left, and under LOCK TABLES other sessions read the "locked" table while
+  `hull.sleep` was allowed. A connection lost with autocommit off, LOCK TABLES (or a global read
+  lock, or FLUSH TABLES ... FOR EXPORT), LOCK INSTANCE FOR BACKUP, a MariaDB BACKUP LOCK / STAGE
+  or an XA transaction now refuses every call, and still counts as held for the wait gates, until
+  the app ends that state - ROLLBACK (answered without being sent, as for a lost transaction; with
+  autocommit off the next connection is opened with autocommit off again), `SET autocommit = 1`,
+  UNLOCK TABLES / INSTANCE, BACKUP UNLOCK / STAGE END, or XA COMMIT / ROLLBACK (sent on the new
+  connection, since a prepared XA transaction outlives the session) - or the entry ends, when the
+  stale-transaction guard forgets it and the next call reconnects. Related Medium: a statement
+  that failed outside a transaction after changing the session - a `CALL` whose procedure ran
+  START TRANSACTION or `SET autocommit = 0` and then raised, or an earlier statement of a
+  multi-statement text - left the status read before it (an ERR carries no status flags): the
+  next request's acknowledged write was rolled back by its end guard, and in the autocommit
+  variant a handler parked and had the session reset under it. Any server ERR outside a
+  transaction is now followed by COM_PING to refresh the status. Lows: the session tracker read
+  a `--` followed by a form feed, vertical tab or other control byte as code, though MySQL takes
+  it as a comment to the end of the line, so a release word there cleared a lock still held
+  (`hl_sql_scan_words` now follows each dialect's rule: MySQL's before any byte <= 0x20 or DEL,
+  to LF; Postgres's always, to LF or CR); a server whose global autocommit is off (`SET GLOBAL
+  autocommit = 0`, `init_connect`) still reported autocommit on, so every write not committed by
+  hand was rolled back by the guard - each connection now sets `autocommit = 1` after the
+  handshake and after COM_RESET_CONNECTION; FLUSH TABLES ... FOR EXPORT and MariaDB BACKUP LOCK /
+  BACKUP STAGE are tracked as held session state (the guard closes a session left in a backup
+  lock or stage rather than trust a reset to end it). Postgres: a reconnect that drops a
+  session-level advisory lock is logged as a WARN, not refused - advisory locks do not count for
+  the wait gates. Covered by `tests/lib/hull_db_session_audit41.sh` (both runtimes, in
+  `e2e_mysql.sh`) and `test_mysql_conn` / `test_db_backend`.
 - **Email change could probe whether addresses exist, without limit** (audit 33, both
   runtimes). A taken target address is answered 409 `email already in use`, and that check ran
   before the account's email-change request limit, so a signed-in user could test any number of
