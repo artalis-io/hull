@@ -245,6 +245,19 @@ static int l_gpu_devices(lua_State *L)
 /* Load WGSL shader from shaders/<name>.wgsl (VFS or disk), compiled on
  * opts.device as gpu.compile is (it compiled on the default device only, so a
  * loaded shader could not be dispatched on another). */
+/* Charge a compile of @p wgsl to the run's budget, with the work the run
+ * has queued but not yet had counted (lua_hltakeowed), WITHOUT raising:
+ * 1 once the run is over its budget or past its deadline, so the binding
+ * raises (hl_lua_budget_raise) before the compile starts (audit 41). */
+static int gpu_compile_charge(lua_State *L, const char *wgsl, size_t len)
+{
+    uint64_t units = hl_gpu_wgsl_compile_units(wgsl, len);
+    uint64_t owed = (uint64_t)lua_hltakeowed(L);
+    units = units > UINT64_MAX - owed ? UINT64_MAX : units + owed;
+    return hl_lua_budget_charge(L, units > (uint64_t)INT64_MAX
+                                   ? INT64_MAX : (int64_t)units);
+}
+
 static int l_gpu_load(lua_State *L)
 {
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
@@ -346,8 +359,7 @@ static int l_gpu_load(lua_State *L)
     /* Charged before the compile, which runs on the event loop in this one
      * call (audit 24), its expansion too (audit 39). Non-raising: file_buf
      * is freed before the trip. */
-    if (hl_lua_budget_charge(L, (int64_t)hl_gpu_wgsl_compile_units(wgsl,
-            wgsl_len))) {
+    if (gpu_compile_charge(L, wgsl, wgsl_len)) {
         free(file_buf);
         return hl_lua_budget_raise(L);
     }
@@ -385,8 +397,12 @@ static int l_gpu_compile(lua_State *L)
                           "(at most %d bytes)", (int)HL_GPU_WGSL_MAX_BYTES);
 
     /* The compile runs on the event loop in this one call: charged before
-     * it, 1 unit per 8 WGSL bytes (audit 24) plus its expansion (audit 39). */
-    lua_hlwork(L, (size_t)hl_gpu_wgsl_compile_units(wgsl, wgsl_len), 0);
+     * it, 1 unit per 8 WGSL bytes (audit 24) plus its expansion (audit 39),
+     * and a run over its budget raises here, before the compile starts
+     * (audit 41: lua_hlwork only queued the charge, so a compile started
+     * on an exhausted budget and its abandonment left the device busy). */
+    if (gpu_compile_charge(L, wgsl, wgsl_len))
+        return hl_lua_budget_raise(L);
 
     int rc = hl_cap_gpu_compile(ctx, device, name, wgsl, wgsl_len);
     if (rc != HL_GPU_OK) {

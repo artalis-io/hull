@@ -14336,6 +14336,37 @@ UTEST(lua_gpu, read_backs_past_the_heap_limit_are_refused)
     lgpu_cleanup();
 }
 
+/* Audit 41: gpu.compile queued its charge (lua_hlwork) without checking
+ * the budget, so a run already at its limit started the compile anyway -
+ * and a compile past its deadline leaves the device gpu_busy. It raises
+ * the limit now, before the backend sees the source, and pcall cannot
+ * swallow it. gpu.load does the same. */
+UTEST(lua_gpu, audit41_exhausted_budget_compile_raises)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    lua_rt.max_instructions = 100000000;
+    HL_LUA_ARM(&lua_rt, lua_rt.L);
+    ASSERT_GT(lua_rt.budget.limit, 0);
+    lua_rt.budget.used = lua_rt.budget.limit - 1;   /* all but one unit */
+    gpu_mock_compiles = 0;
+    /* A small shader: its charge (~9200 units) is under one hook period,
+     * so lua_hlwork never ran the hook before the compile. */
+    int rc = luaL_dostring(lua_rt.L,
+        "local ok = pcall(gpu.compile, 'late', "
+        "  '@compute @workgroup_size(1) fn main() {}') "
+        "R = 'swallowed ' .. tostring(ok)");
+    EXPECT_NE(rc, LUA_OK);
+    const char *e = lua_tostring(lua_rt.L, -1);
+    EXPECT_TRUE(e && strstr(e, "limit") != NULL);
+    EXPECT_EQ(gpu_mock_compiles, 0);
+    EXPECT_EQ(lgpu->devices[0].pipeline_count, 0);
+    lua_settop(lua_rt.L, 0);
+    /* The next entry has a fresh budget: the same compile runs. */
+    LGPU_EXPECT("assert(gpu.compile('late', '" HL_TEST_GPU_WGSL "')) R = 'ok'", "ok");
+    EXPECT_EQ(gpu_mock_compiles, 1);
+    lgpu_cleanup();
+}
+
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
  *
  * fs.list read a whole directory (every entry, matching the grant's pattern
