@@ -300,6 +300,22 @@ typedef struct {
 } HlGpuWgslSize;
 int hl_gpu_wgsl_size(const char *wgsl, size_t len, HlGpuWgslSize *out);
 
+/* How much code @p wgsl is with every call inlined (audit 41), as Metal
+ * compiles it: a function's own words / declarations / statements (as
+ * hl_gpu_wgsl_size counts them) plus, for each call site, the callee's
+ * inlined size, saturating. fn_* is the largest function; module_* sums
+ * the functions no other function calls (the entry points, and unused
+ * helpers); decls_sq sums their inlined declarations squared. Returns 0,
+ * or -1 with every field UINT64_MAX for a source the lexer cannot read,
+ * a cycle of calls or declarations, or a declaration chain past
+ * HL_GPU_WGSL_DECL_CHAIN_MAX. */
+typedef struct {
+    uint64_t fn_words, fn_decls, fn_stmts;
+    uint64_t module_words, module_decls, module_stmts;
+    uint64_t decls_sq;
+} HlGpuWgslCalls;
+int hl_gpu_wgsl_calls(const char *wgsl, size_t len, HlGpuWgslCalls *out);
+
 /* The run-budget units a compile of @p wgsl is charged before it runs:
  * 1 per 8 source bytes plus HL_GPU_WGSL_EXPAND_UNITS per expanded node
  * (audit 39), plus its size (audit 40): HL_GPU_WGSL_WORD_UNITS per word,
