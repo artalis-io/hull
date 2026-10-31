@@ -15235,74 +15235,6 @@ UTEST(js_audit39, blob_walks_are_charged)
 }
 
 UTEST(js_audit39, blob_init_is_charged)
-
-/* ── Audit 39: certificate parses, sync HTTP, collect-and-retry ──────
- *
- * The twins of lua_audit39, plus the JS-only retry: a call refused at a
- * handle cap ran a full JS_RunGC before retrying, uncharged - with the cap
- * held full over a 150k-object heap, `try { fs.mmap(...) } catch {}` cost
- * ~8.6 ms for ~3,000 units. The collection is charged from the heap's size
- * now (hl_js_gc_for_retry). */
-
-UTEST(js_audit39, x509_parse_is_charged)
-{
-    init_js_with_caps();
-    ASSERT_TRUE(js_initialized);
-    EXPECT_EQ(a10_run_tripped(
-        "import { crypto } from 'hull:crypto';\n"
-        "const der = new Uint8Array(60000).fill(48).buffer;\n"
-        "for (let i = 0; i < 1000; i++) { try { crypto.x509PubkeyPem(der); } catch (e) {} }",
-        5000000), 1);
-    EXPECT_EQ(a10_run_tripped(
-        "import { crypto } from 'hull:crypto';\n"
-        "const der = new Uint8Array(2048).fill(48).buffer;\n"
-        "for (let i = 0; i < 100; i++)\n"
-        "  if (crypto.x509PubkeyPem(der) !== null) throw new Error('parsed');\n"
-        "globalThis.__a39_x = 1;", 1000000), 0);
-    EXPECT_EQ(eval_int("globalThis.__a39_x|0"), 1);
-    cleanup_js_caps();
-}
-
-#ifndef __has_feature
-#  define __has_feature(x) 0
-#endif
-/* Not under MSan: the sync connect resolves through libc getaddrinfo,
- * which MSan does not instrument (it flags the result as uninitialised). */
-#if defined(HL_ENABLE_HTTP_CLIENT) && !__has_feature(memory_sanitizer)
-UTEST(js_audit39, sync_http_requests_are_charged)
-{
-    init_js_with_caps();
-    ASSERT_TRUE(js_initialized);
-    static const char *hosts[] = { "127.0.0.1" };
-    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
-    js.base.http_cfg = &cfg;
-    static const char *const loops[] = {
-        "http.get('http://127.0.0.1:1/x')",
-        "http.post('http://127.0.0.1:1/x', '')",
-        "http.delete('http://127.0.0.1:1/x')",
-        "http.request('GET', 'http://127.0.0.1:1/x')",
-        "http.get('http://x.invalid/')",
-    };
-    char code[1024];
-    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
-        snprintf(code, sizeof code,
-                 "import { httpClient as http } from 'hull:http-client';\n"
-                 "for (let i = 0; i < 2000; i++) { try { %s; } catch (e) {} }",
-                 loops[i]);
-        EXPECT_EQ_MSG(a10_run_tripped(code, 5000000), 1, loops[i]);
-    }
-    EXPECT_EQ(a10_run_tripped(
-        "import { httpClient as http } from 'hull:http-client';\n"
-        "let n = 0;\n"
-        "for (let i = 0; i < 20; i++) { try { http.get('http://127.0.0.1:1/x'); } catch (e) { n++; } }\n"
-        "globalThis.__a39_h = n;", 1000000), 0);
-    EXPECT_EQ(eval_int("globalThis.__a39_h|0"), 20);
-    js.base.http_cfg = NULL;
-    cleanup_js_caps();
-}
-#endif /* HL_ENABLE_HTTP_CLIENT */
-
-UTEST(js_audit39, a_collect_and_retry_is_charged)
 {
     init_js_with_caps();
     ASSERT_TRUE(js_initialized);
@@ -15434,6 +15366,78 @@ UTEST(js_audit39, render_string_is_charged_and_not_persisted)
     hl_js_template_cache_reset();
 }
 
+/* ── Audit 39: certificate parses, sync HTTP, collect-and-retry ──────
+ *
+ * The twins of lua_audit39, plus the JS-only retry: a call refused at a
+ * handle cap ran a full JS_RunGC before retrying, uncharged - with the cap
+ * held full over a 150k-object heap, `try { fs.mmap(...) } catch {}` cost
+ * ~8.6 ms for ~3,000 units. The collection is charged from the heap's size
+ * now (hl_js_gc_for_retry). */
+
+UTEST(js_audit39, x509_parse_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a10_run_tripped(
+        "import { crypto } from 'hull:crypto';\n"
+        "const der = new Uint8Array(60000).fill(48).buffer;\n"
+        "for (let i = 0; i < 1000; i++) { try { crypto.x509PubkeyPem(der); } catch (e) {} }",
+        5000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "import { crypto } from 'hull:crypto';\n"
+        "const der = new Uint8Array(2048).fill(48).buffer;\n"
+        "for (let i = 0; i < 100; i++)\n"
+        "  if (crypto.x509PubkeyPem(der) !== null) throw new Error('parsed');\n"
+        "globalThis.__a39_x = 1;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_x|0"), 1);
+    cleanup_js_caps();
+}
+
+#ifndef __has_feature
+#  define __has_feature(x) 0
+#endif
+/* Not under MSan: the sync connect resolves through libc getaddrinfo,
+ * which MSan does not instrument (it flags the result as uninitialised). */
+#if defined(HL_ENABLE_HTTP_CLIENT) && !__has_feature(memory_sanitizer)
+UTEST(js_audit39, sync_http_requests_are_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const char *hosts[] = { "127.0.0.1" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+    js.base.http_cfg = &cfg;
+    static const char *const loops[] = {
+        "http.get('http://127.0.0.1:1/x')",
+        "http.post('http://127.0.0.1:1/x', '')",
+        "http.delete('http://127.0.0.1:1/x')",
+        "http.request('GET', 'http://127.0.0.1:1/x')",
+        "http.get('http://x.invalid/')",
+    };
+    char code[1024];
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        snprintf(code, sizeof code,
+                 "import { httpClient as http } from 'hull:http-client';\n"
+                 "for (let i = 0; i < 2000; i++) { try { %s; } catch (e) {} }",
+                 loops[i]);
+        EXPECT_EQ_MSG(a10_run_tripped(code, 5000000), 1, loops[i]);
+    }
+    EXPECT_EQ(a10_run_tripped(
+        "import { httpClient as http } from 'hull:http-client';\n"
+        "let n = 0;\n"
+        "for (let i = 0; i < 20; i++) { try { http.get('http://127.0.0.1:1/x'); } catch (e) { n++; } }\n"
+        "globalThis.__a39_h = n;", 1000000), 0);
+    EXPECT_EQ(eval_int("globalThis.__a39_h|0"), 20);
+    js.base.http_cfg = NULL;
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_CLIENT */
+
+UTEST(js_audit39, a_collect_and_retry_is_charged)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a38_fs_open(&f), 0);
     /* Hold every SIGBUS guard slot, and build a big heap. */
     ASSERT_EQ(a10_run_tripped(
         "globalThis.HELD = [];\n"
