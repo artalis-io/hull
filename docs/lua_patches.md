@@ -229,6 +229,17 @@ same for its `__close` handlers.
 `lua_sethook` clears both fields, so a re-armed hook starts owing nothing.
 A VM with no count hook (the tool VM, tests) behaves exactly as upstream.
 
+**Audit 40 - the string-hash seed draws platform entropy.** Lua 5.4 already
+randomises its per-state string-hash seed (`luai_makeseed`, `lstate.c`), so
+`hull.json` decoding untrusted object keys into a Lua table hashes string keys
+with a secret seed - not the quadratic path QuickJS's atom hash had (see
+[quickjs_patches.md](quickjs_patches.md) patch 0005, audit 40). Upstream's seed
+mixes only time + ASLR'd addresses; this patch additionally mixes `/dev/urandom`
+(falling back to the stock sources if unavailable), so the seed is unpredictable
+to a remote attacker. Integer / float table keys stay unseeded by design but are
+charged per node walked (above), so a decode that floods them trips the budget
+in bounded time. Covered by `tests/hull/runtime/lua/test_lua.c`, `lua_audit40.*`.
+
 **Not covered:** a `lua_getfield` / `lua_setfield` from C with a long C-string
 key (Hull's bindings use short literal names); and Hull's own C bindings
 charge what they allocate, plus, in `hull.crypto`, the bytes a digest / MAC /

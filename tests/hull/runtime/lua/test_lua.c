@@ -15004,4 +15004,55 @@ UTEST(lua_audit39, sync_http_requests_are_charged)
 }
 #endif /* HL_ENABLE_HTTP_CLIENT */
 
+/* ── audit 40: Lua string-hash seed + charged JSON decode ─────────────
+ *
+ * Lua 5.4 randomises its string-hash seed per state (luai_makeseed, here
+ * strengthened with platform entropy), so hull.json decoding untrusted object
+ * keys into a Lua table hashes string keys with the secret seed - not the slow
+ * path QuickJS had. This confirms a many-key decode stays near-linear, and
+ * that the per-byte/alloc charge (Lua HULL PATCH 0004) bounds a huge decode so
+ * it trips a low budget rather than running unbounded. */
+
+/* Build a JSON object text with N distinct string keys and decode it. */
+UTEST(lua_audit40, json_decode_many_string_keys_bounded)
+{
+    init_lua();
+    /* 20000 distinct string keys. Under the seeded string hash this is O(N);
+     * the default 100M budget is ample and the decode returns every key. */
+    int count = eval_int(
+        "(function() local json = require('hull.json') "
+        "local t = {} for i = 0, 19999 do t[#t+1] = '\"k'..i..'\":'..i end "
+        "local s = '{'..table.concat(t, ',')..'}' "
+        "local o = json.decode(s) "
+        "local c = 0 for _ in pairs(o) do c = c + 1 end return c end)()");
+    ASSERT_EQ(count, 20000);
+    cleanup_lua();
+}
+
+/* A very large decode is charged and trips a low budget in bounded time. */
+UTEST(lua_audit40, json_decode_trips_low_budget)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 2000000; /* low */
+    HlLua limited;
+    memset(&limited, 0, sizeof(limited));
+    limited.base.platform_vfs = &platform_vfs;
+    ASSERT_EQ(0, hl_lua_init(&limited, &cfg));
+
+    /* Decode a large object; the per-byte / allocation charge (patch 0004)
+     * stops it rather than letting it run unbounded. */
+    int rc = luaL_dostring(limited.L,
+        "local json = require('hull.json') "
+        "local t = {} for i = 0, 200000 do t[#t+1] = '\"k'..i..'\":'..i end "
+        "local s = '{'..table.concat(t, ',')..'}' "
+        "json.decode(s)");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(limited.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "instruction limit"), NULL);
+    lua_pop(limited.L, 1);
+
+    hl_lua_free(&limited);
+}
+
 UTEST_MAIN();

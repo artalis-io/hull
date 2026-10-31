@@ -15466,4 +15466,229 @@ UTEST(js_audit39, a_collect_and_retry_is_charged)
     a15_fs_close(&f);
 }
 
+/* ── audit 40: QuickJS atom/string hashes are seeded per runtime ──────
+ *
+ * __JS_NewAtom interns every distinct object key inside one native call, so
+ * JSON.parse of an untrusted body with a precomputed colliding key set was
+ * quadratic work in one call (remote DoS of the event loop). The fix seeds
+ * the per-character multiplier per runtime (so a set precomputed against the
+ * public unseeded hash no longer collides), charges the bucket-chain walk,
+ * and polls per JSON property so the run deadline can stop a parse partway.
+ *
+ * The colliding set below is built against the UNSEEDED recurrence
+ * (h = h*263 + c, the public source constant) - i.e. what an attacker could
+ * precompute offline. Under the seeded runtime it must NOT collide. */
+
+/* The public (unseeded) atom-hash recurrence, replicated for the test. */
+static uint32_t a40_unseeded_hash(const unsigned char *s, size_t len)
+{
+    uint32_t h = 0; /* JS_ATOM_TYPE_STRING == 0 */
+    for (size_t i = 0; i < len; i++)
+        h = h * 263 + s[i];
+    return h;
+}
+
+/* A small deterministic PRNG so the collision search is reproducible. */
+static uint64_t a40_rng_state = 0x9e3779b97f4a7c15ULL;
+static uint32_t a40_rand(void)
+{
+    uint64_t x = a40_rng_state;
+    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+    a40_rng_state = x;
+    return (uint32_t)((x * 0x2545F4914F6CDD1DULL) >> 32);
+}
+
+/* Find two distinct equal-length 8-byte blocks with identical unseeded hash
+ * (a birthday search; ~2^16 tries expected). Concatenations of such blocks
+ * all share one unseeded hash/bucket, so 2^kbits of them collide. Writes the
+ * JSON object text to *out (caller frees) and the key count to *n. Returns 0
+ * on success. */
+#define A40_BLK 8
+static int a40_build_colliding_json(int kbits, char **out, int *n)
+{
+    enum { TBITS = 21, TSIZE = 1 << TBITS, TMASK = TSIZE - 1, BLK = A40_BLK };
+    uint32_t *slot_hash = calloc(TSIZE, sizeof(uint32_t));
+    unsigned char (*slot_blk)[BLK] = calloc(TSIZE, BLK);
+    unsigned char (*slot_used) = calloc(TSIZE, 1);
+    unsigned char A[BLK], B[BLK];
+    int found = 0;
+    a40_rng_state = 0x9e3779b97f4a7c15ULL;
+    if (!slot_hash || !slot_blk || !slot_used) { free(slot_hash); free(slot_blk); free(slot_used); return -1; }
+    /* JSON-safe alphabet (letters + digits): never '"' or '\\', so the keys
+     * embed into the object text verbatim. */
+    static const char AB[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for (long t = 0; t < 4000000 && !found; t++) {
+        unsigned char cand[BLK];
+        for (int i = 0; i < BLK; i++) cand[i] = (unsigned char)AB[a40_rand() % 62];
+        uint32_t h = a40_unseeded_hash(cand, BLK);
+        uint32_t idx = h & TMASK;
+        for (int probe = 0; probe < TSIZE; probe++) {
+            if (!slot_used[idx]) {
+                slot_used[idx] = 1; slot_hash[idx] = h; memcpy(slot_blk[idx], cand, BLK);
+                break;
+            }
+            if (slot_hash[idx] == h && memcmp(slot_blk[idx], cand, BLK) != 0) {
+                memcpy(A, slot_blk[idx], BLK); memcpy(B, cand, BLK); found = 1; break;
+            }
+            idx = (idx + 1) & TMASK; /* linear probe */
+        }
+    }
+    free(slot_hash); free(slot_blk); free(slot_used);
+    if (!found) return -1;
+    /* sanity: equal unseeded hash */
+    if (a40_unseeded_hash(A, BLK) != a40_unseeded_hash(B, BLK)) return -1;
+
+    int count = 1 << kbits;
+    size_t keylen = (size_t)kbits * BLK;
+    size_t cap = (size_t)count * (keylen + 6) + 16;
+    char *json = malloc(cap);
+    if (!json) return -1;
+    char *p = json;
+    *p++ = '{';
+    for (int i = 0; i < count; i++) {
+        if (i) *p++ = ',';
+        *p++ = '"';
+        for (int b = 0; b < kbits; b++) {
+            const unsigned char *blk = ((i >> b) & 1) ? B : A;
+            memcpy(p, blk, BLK); p += BLK;
+        }
+        *p++ = '"'; *p++ = ':'; *p++ = '1';
+    }
+    *p++ = '}'; *p = 0;
+    *out = json; *n = count;
+    return 0;
+}
+
+static char *a40_build_ordinary_json(int count)
+{
+    size_t cap = (size_t)count * 24 + 16;
+    char *json = malloc(cap);
+    if (!json) return NULL;
+    char *p = json; *p++ = '{';
+    for (int i = 0; i < count; i++)
+        p += sprintf(p, "%s\"ord%d\":1", i ? "," : "", i);
+    *p++ = '}'; *p = 0;
+    return json;
+}
+
+/* Put a C string into a JS global so test code can reference it. */
+static void a40_set_global_str(const char *name, const char *s, size_t len)
+{
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JS_SetPropertyStr(js.ctx, g, name, JS_NewStringLen(js.ctx, s, len));
+    JS_FreeValue(js.ctx, g);
+}
+
+/* A precomputed colliding key set no longer floods one bucket: under the
+ * seeded multiplier the parse stays near-linear, so a budget that comfortably
+ * fits O(N) atom work but is far below the old O(N^2) chain walk does not
+ * trip. (Measured: the same set tripped a 2 s deadline mid-parse on an
+ * unseeded build.) */
+UTEST(js_audit40, seeded_collision_set_not_quadratic)
+{
+    init_js_with_caps();
+    char *json = NULL; int n = 0;
+    ASSERT_EQ(0, a40_build_colliding_json(14, &json, &n)); /* 16384 keys */
+    a40_set_global_str("__a40j", json, strlen(json));
+    free(json);
+
+    /* O(N) atom work for 16384 keys is well under 30M units; the old O(N^2)
+     * chain walk (~1.3e8) would blow past it. */
+    js.max_instructions = 30000000;
+    hl_js_budget_arm(&js);
+    JSValue v = JS_Eval(js.ctx,
+        "globalThis.__a40n = Object.keys(JSON.parse(globalThis.__a40j)).length;",
+        strlen("globalThis.__a40n = Object.keys(JSON.parse(globalThis.__a40j)).length;"),
+        "<a40>", JS_EVAL_TYPE_GLOBAL);
+    int tripped = js.budget_tripped;
+    JS_FreeValue(js.ctx, v);
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+
+    ASSERT_FALSE(tripped);
+    ASSERT_EQ(n, eval_int("globalThis.__a40n | 0"));
+    cleanup_js_caps();
+}
+
+/* A large ordinary parse is correct and unaffected by seeding. */
+UTEST(js_audit40, ordinary_parse_correct)
+{
+    init_js_with_caps();
+    char *json = a40_build_ordinary_json(20000);
+    ASSERT_NE(json, NULL);
+    a40_set_global_str("__a40o", json, strlen(json));
+    free(json);
+    ASSERT_EQ(0, eval_int(
+        "(() => { const o = JSON.parse(globalThis.__a40o);"
+        " return (Object.keys(o).length === 20000 && o.ord0 === 1 && o.ord19999 === 1) ? 0 : 1; })()"));
+    cleanup_js_caps();
+}
+
+/* The per-property poll lets a low budget stop a parse DURING the native
+ * JSON.parse call - a deferred charge alone would only act after it returns. */
+UTEST(js_audit40, budget_stops_parse_partway)
+{
+    init_js_with_caps();
+    char *json = a40_build_ordinary_json(200000);
+    ASSERT_NE(json, NULL);
+    a40_set_global_str("__a40b", json, strlen(json));
+    free(json);
+    /* A budget far below the work of parsing 200k keys: the poll trips it. */
+    ASSERT_EQ(1, a10_run_tripped("JSON.parse(globalThis.__a40b);", 500000));
+    cleanup_js_caps();
+}
+
+/* Bytecode serialisation is seed-independent: a module whose top level builds
+ * an object with string keys, serialised under one runtime (one seed), must
+ * deserialise and run correctly under a fresh runtime with a DIFFERENT seed.
+ * Atoms are serialised by string content and re-interned on read, so the
+ * per-runtime hash seed never leaks into the stream (and the sealed bytecode
+ * cache, built on JS_WriteObject/JS_ReadObject, is unaffected). */
+UTEST(js_audit40, bytecode_seed_independent)
+{
+    static const char *A40_PROBE =
+        "const T = { alpha: 10, beta: 20, gamma: 30, delta: 40 };\n"
+        "globalThis.__a40bc = T.alpha + T.beta + T.gamma + T.delta;\n";
+
+    /* Runtime 1: compile-only, then serialise to a bytecode buffer. */
+    JSRuntime *rt1 = JS_NewRuntime();
+    ASSERT_NE(rt1, NULL);
+    JSContext *c1 = JS_NewContext(rt1);
+    ASSERT_NE(c1, NULL);
+    JSValue mod = JS_Eval(c1, A40_PROBE, strlen(A40_PROBE), "test:a40probe",
+                          JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    ASSERT_FALSE(JS_IsException(mod));
+    size_t sz = 0;
+    uint8_t *bc = JS_WriteObject(c1, &sz, mod, JS_WRITE_OBJ_BYTECODE);
+    ASSERT_NE(bc, NULL);
+    ASSERT_GT((int)sz, 0);
+    JS_FreeValue(c1, mod);
+
+    /* Runtime 2: fresh seed. Deserialise and evaluate; the object-literal key
+     * lookups must resolve, proving the hashes were re-derived, not reused. */
+    JSRuntime *rt2 = JS_NewRuntime();
+    ASSERT_NE(rt2, NULL);
+    JSContext *c2 = JS_NewContext(rt2);
+    ASSERT_NE(c2, NULL);
+    JSValue m2 = JS_ReadObject(c2, bc, sz, JS_READ_OBJ_BYTECODE);
+    ASSERT_FALSE(JS_IsException(m2));
+    JSValue ev = JS_EvalFunction(c2, m2); /* consumes m2, evaluates the module */
+    ASSERT_FALSE(JS_IsException(ev));
+    JS_FreeValue(c2, ev);
+    JSValue g = JS_GetGlobalObject(c2);
+    JSValue r = JS_GetPropertyStr(c2, g, "__a40bc");
+    int32_t sum = -1;
+    JS_ToInt32(c2, &sum, r);
+    JS_FreeValue(c2, r);
+    JS_FreeValue(c2, g);
+    ASSERT_EQ(100, sum); /* 10+20+30+40, keys resolved under the new seed */
+
+    js_free(c1, bc); /* bc was allocated by c1's allocator, free while c1 alive */
+    JS_FreeContext(c2);
+    JS_FreeRuntime(rt2);
+    JS_FreeContext(c1);
+    JS_FreeRuntime(rt1);
+}
+
 UTEST_MAIN();

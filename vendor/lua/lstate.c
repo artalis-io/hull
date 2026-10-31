@@ -58,6 +58,7 @@ typedef struct LG {
 #if !defined(luai_makeseed)
 
 #include <time.h>
+#include <stdio.h>  /* HULL PATCH 0004 (audit 40): /dev/urandom seed mix */
 
 /*
 ** Compute an initial seed with some level of randomness.
@@ -72,6 +73,19 @@ static unsigned int luai_makeseed (lua_State *L) {
   char buff[3 * sizeof(size_t)];
   unsigned int h = cast_uint(time(NULL));
   int p = 0;
+  /* HULL PATCH 0004 (audit 40): mix in platform entropy so the string-hash
+     seed is unpredictable to a remote attacker (defence against hash-flooding
+     a Lua table, e.g. hull.json decoding untrusted keys), not only ASLR+time.
+     A read failure falls back to the stock sources below. */
+  {
+    unsigned int r = 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f != NULL) {
+      if (fread(&r, 1, sizeof(r), f) == sizeof(r))
+        h ^= r;
+      fclose(f);
+    }
+  }
   addbuff(buff, p, L);  /* heap variable */
   addbuff(buff, p, &h);  /* local variable */
   addbuff(buff, p, &lua_newstate);  /* public function */

@@ -327,6 +327,19 @@ struct JSRuntime {
     uint32_t *atom_hash;
     JSAtomStruct **atom_array;
     int atom_free_index; /* 0 = none */
+    /* HULL PATCH 0005 (audit 40): a per-runtime secret seed for the
+       string/atom hash so a colliding key set cannot be precomputed
+       offline (hash-flooding DoS, e.g. JSON.parse of untrusted object
+       keys, which intern every distinct key inside one native call).
+       atom_hash_mul is the secret ODD multiplier in the per-character
+       recurrence (replacing the fixed constant, so even same-length
+       collisions depend on the seed); atom_hash_fin mixes into the
+       finalizer. Set before JS_InitAtoms so predefined and app atoms
+       share one seed for the runtime's lifetime. The hash never leaves
+       the runtime (bytecode serialises string content, not hashes), so
+       the sealed bytecode cache is unaffected. See docs/quickjs_patches.md. */
+    uint32_t atom_hash_mul;
+    uint32_t atom_hash_fin;
 
     int class_count;    /* size of class_array */
     JSClass *class_array;
@@ -1157,6 +1170,7 @@ enum OPCodeEnum {
 };
 
 static int JS_InitAtoms(JSRuntime *rt);
+static void js_init_atom_hash_seed(JSRuntime *rt); /* HULL PATCH 0005 (audit 40) */
 static JSAtom __JS_NewAtomInit(JSRuntime *rt, const char *str, int len,
                                int atom_type);
 static void JS_FreeAtomStruct(JSRuntime *rt, JSAtomStruct *p);
@@ -2214,6 +2228,8 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
 #endif
     init_list_head(&rt->job_list);
 
+    js_init_atom_hash_seed(rt); /* HULL PATCH 0005 (audit 40): before any atom */
+
     if (JS_InitAtoms(rt))
         goto fail;
 
@@ -3114,43 +3130,99 @@ static inline BOOL is_num_string(uint32_t *pval, const JSString *p)
 }
 
 /* XXX: could use faster version ? */
-static inline uint32_t hash_string8(const uint8_t *str, size_t len, uint32_t h)
+/* HULL PATCH 0005 (audit 40): the per-character multiplier 'mul' is a
+   per-runtime secret odd value (rt->atom_hash_mul), not a fixed constant.
+   A fixed multiplier makes same-length raw collisions seed-independent, so
+   an attacker could precompute a colliding key set from the public source;
+   a secret odd multiplier breaks that (the collision condition becomes a
+   nonzero polynomial in the secret, which vanishes for only a tiny fraction
+   of seeds). The multiplier is odd so the recurrence stays a bijection. */
+static inline uint32_t hash_string8(const uint8_t *str, size_t len, uint32_t h,
+                                    uint32_t mul)
 {
     size_t i;
 
     for(i = 0; i < len; i++)
-        h = h * 263 + str[i];
+        h = h * mul + str[i];
     return h;
 }
 
 static inline uint32_t hash_string16(const uint16_t *str,
-                                     size_t len, uint32_t h)
+                                     size_t len, uint32_t h, uint32_t mul)
 {
     size_t i;
 
     for(i = 0; i < len; i++)
-        h = h * 263 + str[i];
+        h = h * mul + str[i];
     return h;
 }
 
-static uint32_t hash_string(const JSString *str, uint32_t h)
+static uint32_t hash_string(const JSString *str, uint32_t h, uint32_t mul)
 {
     if (str->is_wide_char)
-        h = hash_string16(str->u.str16, str->len, h);
+        h = hash_string16(str->u.str16, str->len, h, mul);
     else
-        h = hash_string8(str->u.str8, str->len, h);
+        h = hash_string8(str->u.str8, str->len, h, mul);
     return h;
 }
 
-static uint32_t hash_string_rope(JSValueConst val, uint32_t h)
+static uint32_t hash_string_rope(JSValueConst val, uint32_t h, uint32_t mul)
 {
     if (JS_VALUE_GET_TAG(val) == JS_TAG_STRING) {
-        return hash_string(JS_VALUE_GET_STRING(val), h);
+        return hash_string(JS_VALUE_GET_STRING(val), h, mul);
     } else {
         JSStringRope *r = JS_VALUE_GET_STRING_ROPE(val);
-        h = hash_string_rope(r->left, h);
-        return hash_string_rope(r->right, h);
+        h = hash_string_rope(r->left, h, mul);
+        return hash_string_rope(r->right, h, mul);
     }
+}
+
+/* HULL PATCH 0005 (audit 40): the finalizer for the ATOM bucket. The atom
+   table indexes buckets by the low bits of the hash, and a secret odd
+   multiplier alone leaves the lowest bits weakly seed-dependent (an odd
+   multiply preserves bit 0). This avalanche (a lowbias32 fmix, a bijection)
+   folds the seed-dependent high bits down, so the low bits that choose the
+   bucket depend on the seed. Applied only to atom lookups; the Map path
+   finalizes with its own multiply-shift. */
+static inline uint32_t js_atom_hash_final(uint32_t h, uint32_t seed)
+{
+    h ^= seed;
+    h ^= h >> 16;
+    h *= 0x7feb352d;
+    h ^= h >> 15;
+    h *= 0x846ca68b;
+    h ^= h >> 16;
+    return h;
+}
+
+/* HULL PATCH 0005 (audit 40): seed the runtime's string-hash secret from the
+   best available platform entropy, mixed so a weak source still varies per
+   process. The multiplier is forced odd. Called once, before JS_InitAtoms. */
+static void js_init_atom_hash_seed(JSRuntime *rt)
+{
+    uint64_t s[4];
+    uint32_t a, b;
+    size_t got = 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        got = fread(s, 1, sizeof(s), f);
+        fclose(f);
+    }
+    if (got < sizeof(s)) {
+        /* fallback: time + ASLR'd addresses, mixed through the finalizer */
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        s[0] ^= ((uint64_t)tv.tv_sec << 20) ^ (uint64_t)tv.tv_usec;
+        s[1] ^= (uint64_t)(uintptr_t)rt;
+        s[2] ^= (uint64_t)(uintptr_t)&s;
+        s[3] ^= (uint64_t)(uintptr_t)&js_init_atom_hash_seed;
+    }
+    a = js_atom_hash_final((uint32_t)(s[0] ^ (s[0] >> 32)),
+                           (uint32_t)(s[1] ^ (s[1] >> 32)));
+    b = js_atom_hash_final((uint32_t)(s[2] ^ (s[2] >> 32)),
+                           (uint32_t)(s[3] ^ (s[3] >> 32)));
+    rt->atom_hash_mul = a | 1u;          /* must be odd */
+    rt->atom_hash_fin = b;
 }
 
 static __maybe_unused void JS_DumpChar(FILE *fo, int c, int sep)
@@ -3373,16 +3445,22 @@ static JSAtom __JS_NewAtom(JSRuntime *rt, JSString *str, int atom_type)
         /* try and locate an already registered atom */
         len = str->len;
         js_work_add(rt, len); /* HULL PATCH 0005: hashed, maybe compared */
-        h = hash_string(str, atom_type);
+        h = hash_string(str, atom_type, rt->atom_hash_mul);
+        h = js_atom_hash_final(h, rt->atom_hash_fin); /* HULL PATCH 0005 (audit 40) */
         h &= JS_ATOM_HASH_MASK;
         h1 = h & (rt->atom_hash_size - 1);
         i = rt->atom_hash[h1];
         while (i != 0) {
             p = rt->atom_array[i];
+            /* HULL PATCH 0005 (audit 40): charge the bucket-chain walk (one
+               unit per step, plus the bytes a full compare scans) so a long
+               chain is billed to the run's budget; a deferred charge trips
+               the run at the next poll (the JSON.parse loop below adds one). */
+            js_work_add(rt, 1);
             if (p->hash == h &&
                 p->atom_type == atom_type &&
                 p->len == len &&
-                js_string_memcmp(p, 0, str, 0, len) == 0) {
+                (js_work_add(rt, len), js_string_memcmp(p, 0, str, 0, len) == 0)) {
                 if (!__JS_AtomIsConst(i))
                     js_rc(p)->ref_count++;
                 goto done;
@@ -3527,7 +3605,9 @@ static JSAtom __JS_FindAtom(JSRuntime *rt, const char *str, size_t len,
     uint32_t h, h1, i;
     JSAtomStruct *p;
 
-    h = hash_string8((const uint8_t *)str, len, JS_ATOM_TYPE_STRING);
+    h = hash_string8((const uint8_t *)str, len, JS_ATOM_TYPE_STRING,
+                     rt->atom_hash_mul); /* HULL PATCH 0005 (audit 40) */
+    h = js_atom_hash_final(h, rt->atom_hash_fin);
     h &= JS_ATOM_HASH_MASK;
     h1 = h & (rt->atom_hash_size - 1);
     i = rt->atom_hash[h1];
@@ -49724,6 +49804,12 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
             }
             if (s->token.val != '}') {
                 for(;;) {
+                    /* HULL PATCH 0005 (audit 40): poll per property, so the
+                       atom-chain work charged above (and the run deadline) can
+                       stop a parse of untrusted keys partway. A deferred charge
+                       alone only acts after this native call returns. */
+                    if (js_work_check(ctx, 1) < 0)
+                        goto fail;
                     if (s->token.val == TOK_STRING) {
                         prop_name = JS_ValueToAtom(ctx, s->token.u.str.str);
                         if (prop_name == JS_ATOM_NULL)
@@ -52221,11 +52307,14 @@ static uint32_t map_hash_key(JSRuntime *rt, JSValueConst key, int hash_bits)
         break;
     case JS_TAG_STRING:
         js_work_add(rt, JS_VALUE_GET_STRING(key)->len); /* HULL PATCH 0005 */
-        h = map_hash32(hash_string(JS_VALUE_GET_STRING(key), 0) ^ JS_TAG_STRING, hash_bits);
+        /* HULL PATCH 0005 (audit 40): the secret odd multiplier seeds the
+           Map/Set string hash too; map_hash32 then takes the well-mixed high
+           bits, so a precomputed colliding key set no longer floods a bucket. */
+        h = map_hash32(hash_string(JS_VALUE_GET_STRING(key), 0, rt->atom_hash_mul) ^ JS_TAG_STRING, hash_bits);
         break;
     case JS_TAG_STRING_ROPE:
         js_work_add(rt, string_rope_get_len(key)); /* HULL PATCH 0005 */
-        h = map_hash32(hash_string_rope(key, 0) ^ JS_TAG_STRING, hash_bits);
+        h = map_hash32(hash_string_rope(key, 0, rt->atom_hash_mul) ^ JS_TAG_STRING, hash_bits);
         break;
     case JS_TAG_OBJECT:
     case JS_TAG_SYMBOL:

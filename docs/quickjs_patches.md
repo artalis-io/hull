@@ -377,6 +377,66 @@ and a reviver-grown array each trip a 1M budget, uncatchably;
 `long_builtins_see_the_watchdog`; `proxy_own_keys_is_linear`: 300k keys,
 4.5e10 compares before, finish in milliseconds; `ordinary_use_still_works`).
 
+### Audit 40 - the atom/string hash is seeded per runtime
+
+**Files:** `vendor/quickjs/quickjs.c` (`JSRuntime.atom_hash_mul` /
+`atom_hash_fin`, `js_init_atom_hash_seed`, `js_atom_hash_final`, the `mul`
+parameter threaded through `hash_string8` / `hash_string16` / `hash_string` /
+`hash_string_rope`, and the call sites `__JS_NewAtom` / `__JS_FindAtom` /
+`map_hash_key` / the `json_parse_value` per-property poll)
+**Found by:** the fortieth runtime audit (High: remote DoS)
+
+`__JS_NewAtom` interns every distinct object key inside ONE native call, and
+the atom bucket is chosen by the low bits of a multiply-add string hash whose
+multiplier (263) was a public constant. So a key set computed offline to share
+one bucket made `JSON.parse` of an untrusted request body quadratic in that one
+call - thousands of such keys took seconds, and the instruction/deadline trip
+only landed AFTER the native call returned, not during it. A remote DoS of the
+single-threaded event loop.
+
+Three changes, deferred and primary:
+
+1. **Seed (primary).** Each runtime draws a secret per-character multiplier
+   (`atom_hash_mul`, forced odd) and a finalizer seed (`atom_hash_fin`) from
+   platform entropy at `JS_NewRuntime2`, **before `JS_InitAtoms`**, so the
+   predefined atoms and all app atoms share one seed for the runtime's
+   lifetime. A *fixed* multiplier leaves same-length raw collisions
+   seed-independent (the recurrence is linear), so seeding only the initial
+   value would not stop an attacker who reads the public source; a *secret odd*
+   multiplier makes the collision condition a nonzero polynomial in the secret,
+   which vanishes for only a tiny fraction of seeds. `js_atom_hash_final` (a
+   lowbias32 avalanche mixing the seed) then folds the seed-dependent high bits
+   down into the low bits that pick the bucket. The same secret multiplier
+   seeds the Map/Set string hash (`map_hash_key`), whose own multiply-shift
+   already takes well-mixed high bits. Shape hashing was reviewed and left: its
+   keys are interned atom *indices* (assignment-order, not attacker bytes) and
+   it already takes the high bits of a multiply.
+2. **Charge (second line).** The bucket-chain walk in `__JS_NewAtom` charges
+   one unit per step plus the bytes a full compare scans (`js_work_add`), so a
+   long chain is billed to the run's budget.
+3. **Poll (second line).** `json_parse_value`'s per-property loop calls
+   `js_work_check`, which flushes the deferred charges and throws the
+   uncatchable interrupt from inside the parse, so the run deadline / budget
+   can stop a parse of untrusted keys *partway*.
+
+**Bytecode cache is unaffected:** `JS_WriteObject` serialises an atom by its
+string *content* (`JS_WriteString`), and `JS_ReadObject` re-interns it with the
+reading runtime's own seed - no hash value is persisted. The sealed bytecode
+cache (built on these two) therefore round-trips across runtimes with
+different seeds.
+
+**Guard:** `tests/hull/runtime/js/test_js.c`, the `js_audit40` cases
+(`seeded_collision_set_not_quadratic`: a set precomputed against the unseeded
+hash no longer floods one bucket, so a budget far below the old O(N^2) chain
+walk does not trip; `budget_stops_parse_partway`: a low budget stops a large
+parse via the per-property poll; `ordinary_parse_correct`;
+`bytecode_seed_independent`: a module serialised under one runtime deserialises
+and runs under a fresh, different-seed runtime). The Lua side is covered by
+`tests/hull/runtime/lua/test_lua.c`, `lua_audit40.*` (Lua 5.4 already seeds its
+string hash per state - `luai_makeseed`, strengthened here with platform
+entropy - so a many-key `hull.json` decode stays near-linear and a huge decode
+trips a low budget via the patch-0004 per-byte/alloc charge).
+
 ## Patch 0006 - an embedder stop flag polled at every step
 
 **Files:** `vendor/quickjs/quickjs.c` (`JSRuntime.stop_flag`,

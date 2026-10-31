@@ -217,6 +217,18 @@ release-artifact layout).
   `SELECT 'x1' a, 42 n, 'y2' b` gave `a = 'y2'` - in `conn.query`, `db.async`,
   `worker.dispatch` and `table_columns`: short ids and role names could be confused. The value
   now points into the chunk's vector, which outlives the row callback.
+- **`JSON.parse` of an untrusted body could hold the event loop for seconds** (audit 40,
+  JS). QuickJS interns every distinct object key as an atom inside one native call, and the
+  atom bucket was chosen by a string hash whose multiplier was a public constant - so a key
+  set crafted offline to share one bucket made one `JSON.parse` quadratic (tens of thousands
+  of keys took seconds), a remote DoS of the single-threaded event loop, and the run deadline
+  only landed after the call returned. Each QuickJS runtime (the main VM and the
+  `worker.dispatch` VM) now seeds the per-character hash multiplier from platform entropy, so
+  a precomputed colliding set no longer floods a bucket; the Map/Set string hash is seeded the
+  same way. The atom bucket-chain walk is charged to the run's budget, and `JSON.parse` polls
+  per property so the deadline can stop a parse partway. Bytecode is unaffected (atoms
+  serialise by content and re-intern on read). Lua's per-state string-hash seed, which already
+  protects `hull.json` decodes, additionally mixes `/dev/urandom`.
 - **One request could crash the server through a chain of dying Lua tasks** (audit 39,
   Lua). Audit 38 closes a task that raised or made a bare `coroutine.yield()` in the run
   that ended it, but closed it with no resumer (`lua_closethread(co, NULL)`): the closed
