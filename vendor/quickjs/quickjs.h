@@ -995,6 +995,16 @@ uint64_t JS_GetPendingCharge(JSContext *ctx);
    embedder's own plumbing (accessors, promise callbacks it hands to
    QuickJS) is unmarked so its calls skip the call hooks. */
 void JS_SetEmbedderFunction(JSValueConst fn, int on);
+/* HULL PATCH 0012: input ceilings, each 0 for no limit (the default).
+   JSON.parse / JS_ParseJSON refuse a document nested deeper than
+   'json_max_depth' or with an object of more than 'json_max_keys'
+   members; RegExp compilation refuses a source longer than 'regexp_max_source'
+   bytes; String.prototype.normalize and localeCompare refuse an operand
+   longer than 'normalize_max_input' code units. Each throws a RangeError
+   before the work. See Hull's docs/quickjs_patches.md. */
+void JS_SetInputLimits(JSRuntime *rt, uint32_t json_max_depth,
+                       uint32_t json_max_keys, uint32_t regexp_max_source,
+                       uint32_t normalize_max_input);
 /* HULL PATCH 0008: a tag the embedder gives the code it runs. A job runs
    with the tag current when it was queued - a promise reaction job with
    the tag current when its handler was registered (the `await` or `then`),

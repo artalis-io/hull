@@ -307,6 +307,70 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             ctx, lim_val, "requestMs", (int64_t)86400000);
         out->limits_callback_ms = (uint32_t)mjs_wasm_limit(
             ctx, lim_val, "callbackMs", (int64_t)86400000);
+        /* Input ceilings and request concurrency: jsonMaxDepth, jsonMaxKeys,
+         * regexpMaxSource, normalizeMaxInput, perIpConcurrency,
+         * trustedProxies: [...], routeConcurrency: { [pattern]: N }
+         * (hull/limits/input.h). Numbers as for wasm; perIpConcurrency also
+         * takes 0 (cap off). */
+        out->limits.json_max_depth = (uint32_t)mjs_wasm_limit(ctx, lim_val,
+            "jsonMaxDepth", (int64_t)HL_INPUT_JSON_MAX_DEPTH_CEIL);
+        out->limits.json_max_keys = (uint32_t)mjs_wasm_limit(ctx, lim_val,
+            "jsonMaxKeys", (int64_t)HL_INPUT_JSON_MAX_KEYS_CEIL);
+        out->limits.regexp_max_source = (uint32_t)mjs_wasm_limit(ctx, lim_val,
+            "regexpMaxSource", (int64_t)HL_INPUT_REGEXP_MAX_SOURCE_CEIL);
+        out->limits.normalize_max_input = (uint32_t)mjs_wasm_limit(ctx, lim_val,
+            "normalizeMaxInput", (int64_t)HL_INPUT_NORMALIZE_MAX_INPUT_CEIL);
+        JSValue pip = mjs_own(ctx, lim_val, "perIpConcurrency");
+        if (JS_IsNumber(pip)) {
+            double d = -1;
+            JS_ToFloat64(ctx, &d, pip);   /* a number: runs no app code */
+            if (d >= 0 && d == (double)(int64_t)d) {
+                out->limits.per_ip_set = 1;
+                out->limits.per_ip = d >= (double)HL_REQ_PER_IP_CEIL
+                                     ? HL_REQ_PER_IP_CEIL : (uint32_t)d;
+            }
+        }
+        JS_FreeValue(ctx, pip);
+        out->limits.trusted_proxy_count = read_js_string_array(ctx, lim_val,
+            "trustedProxies", out->limits.trusted_proxies,
+            HL_MANIFEST_MAX_TRUSTED_PROXIES, alloc);
+        JSValue rc = mjs_own(ctx, lim_val, "routeConcurrency");
+        if (mjs_is_obj(ctx, rc)) {
+            JSPropertyEnum *props = NULL;
+            uint32_t prop_count = 0;
+            if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, rc,
+                                        JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                for (uint32_t i = 0; i < prop_count; i++) {
+                    if (out->limits.route_count < HL_MANIFEST_MAX_ROUTE_LIMITS) {
+                        size_t nlen = 0;
+                        const char *name = JS_AtomToCStringLen(ctx, &nlen, props[i].atom);
+                        JSValue vv = mjs_own_atom(ctx, rc, props[i].atom);
+                        double d = 0;
+                        if (name && !memchr(name, '\0', nlen) && name[0] == '/' &&
+                            JS_IsNumber(vv)) {
+                            JS_ToFloat64(ctx, &d, vv);
+                            if (d >= 1) {
+                                const char *copy = hl_manifest_strdup(alloc, name);
+                                if (copy) {
+                                    int n = out->limits.route_count++;
+                                    out->limits.route_patterns[n] = copy;
+                                    out->limits.route_max[n] =
+                                        d >= (double)HL_REQ_PER_IP_CEIL
+                                            ? HL_REQ_PER_IP_CEIL : (uint32_t)d;
+                                }
+                            }
+                        }
+                        if (name) JS_FreeCString(ctx, name);
+                        JS_FreeValue(ctx, vv);
+                    }
+                    JS_FreeAtom(ctx, props[i].atom);
+                }
+                js_free(ctx, props);
+            } else {
+                JS_FreeValue(ctx, JS_GetException(ctx));
+            }
+        }
+        JS_FreeValue(ctx, rc);
     }
     JS_FreeValue(ctx, lim_val);
 

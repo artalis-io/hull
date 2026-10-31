@@ -104,6 +104,10 @@
 #include "hull/runtime/cache_common.h"   /* hl_runtime_cache_code_off */
 
 #include <keel/http_cors.h>
+#include <keel/http_connection.h>  /* kl_http_conn_peer_addr */
+#include <keel/sockaddr.h>
+#include "hull/shared/req_limit.h"  /* per-client / per-route concurrency */
+#include "hull/host_match.h"        /* limits.trusted_proxies */
 #include <keel/keel.h>
 #include <keel/thread_pool.h>
 
@@ -285,6 +289,9 @@ static void usage(const char *prog)
             "                       stuck after this long (default: 60000; 0 = never)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
             "  --max-connections N  Max concurrent connections (default: 256)\n"
+            "  --max-requests-per-ip N\n"
+            "                       Requests in flight per client address (default: 8,\n"
+            "                       or manifest limits.per_ip_concurrency; 0 = no cap)\n"
             "  --body-max-size SIZE Max request body size (default: 1m)\n"
             "  --read-timeout MS    Read timeout in milliseconds (default: 30000)\n"
             "  --workers N          Thread pool worker count (default: 4)\n"
@@ -370,6 +377,7 @@ typedef struct {
     int agent_api_mode;
     int drain_timeout;
     int max_connections;
+    long max_req_per_ip;      /* --max-requests-per-ip; -1 = not given */
     long body_max_size;
     int read_timeout;
     int num_workers;
@@ -408,6 +416,7 @@ typedef struct {
     .drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS, \
     .vm_thread_grace_ms = -1, \
     .vm_thread_ceiling_ms = -1, \
+    .max_req_per_ip = -1, \
 }
 
 /* ── Argument parsing ──────────────────────────────────────────────── */
@@ -536,6 +545,14 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->max_connections = (int)v;
+        } else if (strcmp(argv[i], "--max-requests-per-ip") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0 || v > (long)HL_REQ_PER_IP_CEIL) {
+                fprintf(stderr, "hull: invalid max-requests-per-ip: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->max_req_per_ip = v;
         } else if (strcmp(argv[i], "--body-max-size") == 0 && i + 1 < argc) {
             cfg->body_max_size = hl_parse_size(argv[++i]);
             if (cfg->body_max_size <= 0) {
@@ -840,6 +857,12 @@ typedef struct {
     /* Agent API context */
     HlAgentApiCtx        agent_api_ctx;
 
+    /* Request concurrency (audit convergence §6.4, hull/shared/req_limit.h):
+     * per client address and per route, admitted by hl_serve_conc_mw and
+     * released by the access-log hook. */
+    HlReqLimiter         req_limiter;
+    int                  req_limiter_on;
+
     /* Init flags for cleanup ordering */
     int                  server_init;  /* kl_http_server_init succeeded */
     int                  app_loaded;   /* rt->vt->load_app() succeeded */
@@ -1073,6 +1096,8 @@ static void hl_serve_request_done(const KlHttpRequest *req, int status,
 {
     (void)status; (void)body_bytes; (void)duration_ms;
     HlServerState *s = (HlServerState *)user_data;
+    if (s && s->req_limiter_on)
+        hl_req_limit_release(&s->req_limiter, kl_http_request_conn(req));
     HlRuntime *rt = s && s->app ? hl_app_context_runtime(s->app) : NULL;
     if (rt && rt->vt && rt->vt->request_done)
         rt->vt->request_done(rt, req);
@@ -1972,6 +1997,11 @@ static int hl_serve_wire_caps(HlServerState *s)
      * Explicit csp="custom" overrides; csp=false disables.
      * csp="<preset>" expands at startup; unknown names pass through
      * as literal CSP strings (see hl_csp_resolve docs above). */
+    /* The input ceilings (manifest `limits`, hull/limits/input.h): JSON
+     * depth / keys in both runtimes, RegExp source and normalize input in
+     * QuickJS. Defaults when the app declared no manifest. */
+    hl_runtime_apply_input_limits(rt, s->manifest_extracted ? &s->manifest : NULL);
+
     if (s->manifest.csp_set)
         rt->csp_policy = hl_csp_resolve(s->manifest.csp);
     else
@@ -2296,9 +2326,154 @@ static int hl_serve_apply_sandbox(HlServerState *s)
     return 0;
 }
 
+/* ── Request concurrency (audit convergence §6.4) ────────────────────── */
+
+/* A connection whose entry is still recorded: Keel frees its response's
+ * header buffer when it releases the slot and allocates it again only when
+ * the slot's next request starts, so a released (closed) connection reads
+ * NULL here until then - and a new request on the slot replaces the entry
+ * anyway. */
+static int hl_serve_conc_alive(const void *conn, void *user)
+{
+    (void)user;
+    const KlHttpResponse *res = kl_http_conn_response_const((const KlHttpConn *)conn);
+    return res && res->hdr_buf != NULL;
+}
+
+/* The client key of @p req: the TCP peer, or - when the peer is one of the
+ * manifest's limits.trusted_proxies - the last X-Forwarded-For entry (the
+ * stdlib's _request.client_ip rule). Returns -1 when there is no address
+ * (a UNIX socket, a closed connection): not limited. */
+static int hl_serve_conc_key(HlServerState *s, const KlHttpRequest *req, HlReqKey *key)
+{
+    KlHttpConn *conn = kl_http_request_conn(req);
+    const KlSockAddr *pa = conn ? kl_http_conn_peer_addr(conn) : NULL;
+    if (!pa) return -1;
+    KlAddrFamily fam = kl_sockaddr_family(pa);
+    if (fam != KL_AF_INET && fam != KL_AF_INET6) return -1;
+    char peer[KL_SOCKADDR_STRLEN];
+    if (kl_sockaddr_format_ip(pa, peer, sizeof peer) < 0) return -1;
+    if (s->manifest.limits.trusted_proxy_count > 0 &&
+        hl_host_match_any(s->manifest.limits.trusted_proxies,
+                          s->manifest.limits.trusted_proxy_count, peer)) {
+        /* The last X-Forwarded-For header: a proxy appends to it. */
+        const char *xff = NULL;
+        size_t xff_len = 0;
+        for (int i = 0; i < req->num_headers; i++) {
+            if (req->headers[i].name_len == 15 &&
+                kl_ascii_strncasecmp(req->headers[i].name, "x-forwarded-for", 15) == 0) {
+                xff = req->headers[i].value;
+                xff_len = req->headers[i].value_len;
+            }
+        }
+        char client[64];
+        if (xff && hl_req_xff_last(xff, xff_len, client, sizeof client) &&
+            hl_req_key_from_ip(client, key) == 0)
+            return 0;
+    }
+    return hl_req_key_from_ip(peer, key);
+}
+
+/* The manifest route limit that covers @p req, or -1. The pattern is the
+ * app's own route pattern ("/users/:id", matched through Keel's router) or
+ * a path prefix ending in slash-star. */
+static int hl_serve_conc_route(HlServerState *s, const KlHttpRequest *req,
+                               const KlHttpRoute *route)
+{
+    for (int i = 0; i < s->manifest.limits.route_count; i++) {
+        const char *pat = s->manifest.limits.route_patterns[i];
+        if (route && route->pattern && strcmp(route->pattern, pat) == 0)
+            return i;
+        if (hl_req_route_match(pat, req->path, req->path_len))
+            return i;
+    }
+    return -1;
+}
+
+/* Pre-body middleware, registered first: admit the request or answer it
+ * 429 (the client is at its per-IP limit) / 503 (the route is at its limit)
+ * with Retry-After, before the body is read or any script runs. A
+ * WebSocket upgrade to a WebSocket route is not counted: after its 101 the
+ * connection is the socket's, not a request in flight. */
+static int hl_serve_conc_mw(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
+{
+    HlServerState *s = (HlServerState *)user_data;
+    KlHttpConn *conn = kl_http_request_conn(req);
+    if (!s || !s->req_limiter_on || !conn) return 0;
+
+    KlHttpRoute *route = NULL;
+    KlHttpParam params[KL_HTTP_ROUTER_MAX_PARAMS];
+    int nparams = 0;
+    kl_http_router_match(&s->server.router, req->method, req->method_len,
+                         req->path, req->path_len, &route, params, &nparams);
+    if (route && route->ws_config) {
+        const char *up = kl_http_request_header(req, "upgrade");
+        if (up && kl_ascii_strncasecmp(up, "websocket", 9) == 0) {
+            hl_req_limit_release(&s->req_limiter, conn);
+            return 0;
+        }
+    }
+
+    HlReqKey key;
+    if (hl_serve_conc_key(s, req, &key) != 0) {
+        hl_req_limit_release(&s->req_limiter, conn);
+        return 0;
+    }
+    int rc = hl_req_limit_admit(&s->req_limiter, conn, &key,
+                                hl_serve_conc_route(s, req, route));
+    if (rc == HL_REQ_ADMIT) return 0;
+
+    const char *msg = rc == HL_REQ_REFUSE_CLIENT
+        ? "Too Many Requests: this client has too many requests in flight\n"
+        : "Service Unavailable: this route has too many requests in flight\n";
+    char retry[16];
+    snprintf(retry, sizeof retry, "%d", HL_REQ_RETRY_AFTER_S);
+    kl_http_response_status(res, rc == HL_REQ_REFUSE_CLIENT ? 429 : 503);
+    kl_http_response_header(res, "Retry-After", retry);
+    kl_http_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+    kl_http_response_body_borrow(res, msg, strlen(msg));
+    return 1;
+}
+
+/* Size the table and register the middleware, first in the chain. The per-IP
+ * cap: --max-requests-per-ip, else the manifest's limits.per_ip_concurrency,
+ * else HL_REQ_PER_IP_DEFAULT; 0 turns it off. */
+static int hl_serve_wire_concurrency(HlServerState *s)
+{
+    uint32_t per_ip = HL_REQ_PER_IP_DEFAULT;
+    if (s->cfg.max_req_per_ip >= 0)
+        per_ip = (uint32_t)s->cfg.max_req_per_ip;
+    else if (s->manifest.limits.per_ip_set)
+        per_ip = s->manifest.limits.per_ip;
+    int routes = s->manifest.limits.route_count;
+    if (per_ip == 0 && routes == 0) {
+        log_info("[hull:c] request concurrency: no per-client cap");
+        return 0;
+    }
+    int cap = s->cfg.max_connections > 0 ? s->cfg.max_connections : HL_DEFAULT_MAX_CONN;
+    if (hl_req_limit_init(&s->req_limiter, cap, per_ip,
+                          s->manifest.limits.route_max, routes) != 0) {
+        log_error("[hull:c] out of memory for the request concurrency table");
+        return -1;
+    }
+    s->req_limiter.alive = hl_serve_conc_alive;
+    s->req_limiter_on = 1;
+    if (kl_http_server_use(&s->server, "*", "/*", hl_serve_conc_mw, s) != 0) {
+        log_error("[hull:c] could not register the concurrency limit; refusing to start");
+        return -1;
+    }
+    log_info("[hull:c] request concurrency: %u per client%s, %d route limit(s)%s",
+             (unsigned)per_ip, per_ip ? "" : " (off)", routes,
+             s->manifest.limits.trusted_proxy_count
+                 ? ", X-Forwarded-For from trusted proxies" : "");
+    return 0;
+}
+
 /* Phase 3: CORS + route wiring + static + agent API. */
 static int hl_serve_wire_routes(HlServerState *s)
 {
+    if (hl_serve_wire_concurrency(s) != 0)
+        return -1;
     HlRuntime *rt = hl_app_context_runtime(s->app);
     const HlVfs *app_vfs = hl_app_context_app_vfs(s->app);
     if (s->cors_cfg) {
@@ -2496,6 +2671,8 @@ static void hl_serve_free_server(HlServerState *s)
     kl_http_server_free(&s->server);
     s->server_init = 0;
     s->server_tls_ctx = NULL;   /* the server destroyed it */
+    s->req_limiter_on = 0;
+    hl_req_limit_free(&s->req_limiter);
 }
 
 /* Free the worker pool with every running db.async op told to stop: its

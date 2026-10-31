@@ -376,6 +376,11 @@ struct JSRuntime {
     /* HULL PATCH 0009: the per-runtime SipHash key of the atom and Map
        hashes (JS_NewRuntimeKeyed); all zero for JS_NewRuntime2 */
     uint64_t hash_key[2];
+    /* HULL PATCH 0012: input ceilings (JS_SetInputLimits); 0 = no limit */
+    uint32_t json_max_depth;
+    uint32_t json_max_keys;
+    uint32_t regexp_max_source;
+    uint32_t normalize_max_input;
 #ifdef QJS_HULL_TEST_HOOKS
     /* HULL PATCH 0009: test only - every atom hashes to one constant */
     BOOL test_force_atom_hash;
@@ -1934,6 +1939,22 @@ void JS_SetStopFlag(JSRuntime *rt, int *flag)
         JSContext *c = list_entry(el, JSContext, link);
         c->stop_flag = flag;
     }
+}
+
+/* HULL PATCH 0012: input ceilings, each 0 for no limit. A JSON.parse /
+   JS_ParseJSON nested deeper than json_max_depth, or with an object of more
+   than json_max_keys members, a RegExp source longer than
+   regexp_max_source bytes (UTF-8, as compiled), and a normalize /
+   localeCompare operand longer than normalize_max_input code units throw
+   a RangeError before the work. */
+void JS_SetInputLimits(JSRuntime *rt, uint32_t json_max_depth,
+                       uint32_t json_max_keys, uint32_t regexp_max_source,
+                       uint32_t normalize_max_input)
+{
+    rt->json_max_depth = json_max_depth;
+    rt->json_max_keys = json_max_keys;
+    rt->regexp_max_source = regexp_max_source;
+    rt->normalize_max_input = normalize_max_input;
 }
 
 static void js_trigger_gc(JSRuntime *rt, size_t size)
@@ -22722,6 +22743,8 @@ typedef struct JSParseState {
     BOOL is_module; /* parsing a module */
     BOOL allow_html_comments;
     BOOL ext_json; /* JSON parsing: true if accepting JSON superset */
+    /* HULL PATCH 0012: JSON nesting so far */
+    uint32_t json_depth;
     GetLineColCache get_line_col_cache;
 } JSParseState;
 
@@ -47160,7 +47183,23 @@ static int js_string_normalize1(JSContext *ctx, uint32_t **pout_buf,
     int buf_len, out_len;
     uint32_t *buf, *out_buf;
 
+    /* HULL PATCH 0012: an input ceiling, checked before the conversion */
+    if (ctx->rt->normalize_max_input &&
+        JS_VALUE_GET_TAG(val) == JS_TAG_STRING &&
+        JS_VALUE_GET_STRING(val)->len > ctx->rt->normalize_max_input) {
+        JS_ThrowRangeError(ctx, "string too long to normalize (limit %u code units)",
+                           (unsigned)ctx->rt->normalize_max_input);
+        return -1;
+    }
     buf_len = JS_ToUTF32String(ctx, &buf, val);
+    /* HULL PATCH 0012: a rope or another kind of value, after conversion */
+    if (buf_len > 0 && ctx->rt->normalize_max_input &&
+        (uint32_t)buf_len > ctx->rt->normalize_max_input) {
+        js_free(ctx, buf);
+        JS_ThrowRangeError(ctx, "string too long to normalize (limit %u code units)",
+                           (unsigned)ctx->rt->normalize_max_input);
+        return -1;
+    }
     if (buf_len < 0)
         return -1;
     out_len = unicode_normalize(&out_buf, buf, buf_len, n_type,
@@ -48203,6 +48242,12 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
     str = JS_ToCStringLen2(ctx, &len, pattern, !(re_flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS)));
     if (!str)
         return JS_EXCEPTION;
+    /* HULL PATCH 0012: an input ceiling on the source compiled */
+    if (ctx->rt->regexp_max_source && len > ctx->rt->regexp_max_source) {
+        JS_FreeCString(ctx, str);
+        return JS_ThrowRangeError(ctx, "regular expression source too long (limit %u bytes)",
+                                  (unsigned)ctx->rt->regexp_max_source);
+    }
     re_bytecode_buf = lre_compile(&re_bytecode_len, error_msg,
                                   sizeof(error_msg), str, len, re_flags, ctx);
     JS_FreeCString(ctx, str);
@@ -50101,6 +50146,14 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
         pr->value = JS_UNDEFINED;
     }
     
+    /* HULL PATCH 0012: the nesting ceiling (JS_SetInputLimits) */
+    if ((s->token.val == '{' || s->token.val == '[') &&
+        ctx->rt->json_max_depth && s->json_depth >= ctx->rt->json_max_depth) {
+        JS_ThrowRangeError(ctx, "JSON nested too deeply (limit %u)",
+                           (unsigned)ctx->rt->json_max_depth);
+        goto fail;
+    }
+
     switch(s->token.val) {
     case '{':
         {
@@ -50108,6 +50161,7 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
             JSAtom prop_name;
             JSONParseRecord *pr1;
             int pr_size;
+            uint32_t nkeys = 0; /* HULL PATCH 0012 */
             
             if (json_next_token(s))
                 goto fail;
@@ -50118,6 +50172,7 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
                 json_parse_record_init_obj(ctx, pr, val);
                 pr_size = 0;
             }
+            s->json_depth++; /* HULL PATCH 0012 */
             if (s->token.val != '}') {
                 for(;;) {
                     /* HULL PATCH 0009: one parse can make many atoms; poll
@@ -50125,6 +50180,13 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
                        and the run watchdog's stop flag end it partway */
                     if (js_poll_interrupts(ctx))
                         goto fail;
+                    /* HULL PATCH 0012: the member ceiling, per object */
+                    if (ctx->rt->json_max_keys &&
+                        ++nkeys > ctx->rt->json_max_keys) {
+                        JS_ThrowRangeError(ctx, "JSON object has too many keys (limit %u)",
+                                           (unsigned)ctx->rt->json_max_keys);
+                        goto fail;
+                    }
                     if (s->token.val == TOK_STRING) {
                         prop_name = JS_ValueToAtom(ctx, s->token.u.str.str);
                         if (prop_name == JS_ATOM_NULL)
@@ -50168,6 +50230,7 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
             }
             if (json_parse_expect(s, '}'))
                 goto fail;
+            s->json_depth--; /* HULL PATCH 0012 */
         }
         break;
     case '[':
@@ -50186,6 +50249,7 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
                 json_parse_record_init_array(ctx, pr, val);
                 pr_size = 0;
             }
+            s->json_depth++; /* HULL PATCH 0012 */
             if (s->token.val != ']') {
                 idx = 0;
                 for(;;) {
@@ -50217,6 +50281,7 @@ static JSValue json_parse_value(JSParseState *s, JSONParseRecord *pr)
             }
             if (json_parse_expect(s, ']'))
                 goto fail;
+            s->json_depth--; /* HULL PATCH 0012 */
         }
         break;
     case TOK_STRING:

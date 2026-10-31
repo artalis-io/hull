@@ -18,6 +18,19 @@ check the interrupt cadence (`JS_INTERRUPT_COUNTER_INIT` in `quickjs.c`,
 `INTERRUPT_COUNTER_INIT` in `libregexp.c`) against `HL_JS_INTERRUPT_WEIGHT`
 (`runtime/js/internal.h`), and any C code that switches on `JS_VALUE_GET_TAG`.
 
+**An upgrade must pass the engine complexity suite** (`make complexity`,
+`tests/complexity/complexity.c`, the `engine-complexity` CI job; audit
+convergence §6.5). It runs each listed builtin - String (indexOf, includes,
+split, replace, normalize NFC / NFD, localeCompare, padStart, repeat), RegExp
+compile (a large class, many alternatives, a long lookbehind) and linear exec,
+JSON.parse / stringify (deep, wide, many keys), Array (sort, indexOf, splice,
+join), TypedArray (sort, set, fill), Map / Set insert and lookup, and object
+property insertion - at sizes n and 2n on worst-case-shaped ordinary inputs
+and requires t(2n) / t(n) < 2.5. A builtin that has turned quadratic in a new
+upstream release fails it. The forced-collision case (`JS_TestForceAtomHash`,
+patch 0009's test hook) checks that the cost of every atom on one chain is
+charged in step with its time.
+
 ## Upgrade 2024-01-13 -> 2026-06-04 (audit 6 H5)
 
 The reason for the upgrade: in 2024-01-13 a regular expression's
@@ -782,3 +795,52 @@ M-series). A runtime with no hooks set behaves as upstream.
 slow function trips within one call; explicit charges are not counted twice;
 a parked `await hull.sleep` is not charged; a function QuickJS instantiated
 itself is not measured; overhead bound).
+
+## Patch 0012 - input ceilings: JSON depth and keys, RegExp source, normalize input
+
+**Files:** `vendor/quickjs/quickjs.c` (`JSRuntime` fields, `JS_SetInputLimits`,
+`JSParseState.json_depth`, `json_parse_value`, `js_compile_regexp`,
+`js_string_normalize1`), `quickjs.h` (`JS_SetInputLimits`)
+**Found by:** audit convergence §6.4 (defence in depth; no finding)
+**Upstream:** Hull-specific.
+
+QuickJS cannot tell whether a string came from a request, so these are global
+ceilings on one runtime, each 0 for no limit (the upstream behaviour, and the
+default of a runtime made with `JS_NewRuntime`). Over a ceiling the builtin
+throws a `RangeError` before it does the work:
+
+- **JSON** (`JSON.parse`, `JS_ParseJSON*`, so Hull's `hull:json` decode too):
+  a document nested deeper than `json_max_depth` (counted in
+  `JSParseState.json_depth`, checked before an object or array is entered), or
+  an object with more than `json_max_keys` members (counted per object, so a
+  long array of small records is not refused).
+- **RegExp compilation** (`js_compile_regexp`: the `RegExp` constructor,
+  `compile`, and the regexp a `String.prototype.match` / `split` / ... builds
+  from a string): a source longer than `regexp_max_source` bytes, measured as
+  the UTF-8 the compiler reads.
+- **`String.prototype.normalize` / `localeCompare`** (`js_string_normalize1`,
+  which both call for every operand): an operand longer than
+  `normalize_max_input` code units - checked on the string before the UTF-32
+  copy, and on the copy's length for a value that was not a flat string.
+
+Hull sets the defaults (`hull/limits/input.h`: depth 128, 100000 keys per
+object, 64 KiB of RegExp source, 1 MiB of normalize input) in every runtime it
+makes (`hl_js_new_runtime_keyed`, the app VM and each `worker.dispatch` VM),
+and the app VM gets the manifest's `limits` once the manifest is applied
+(`hl_runtime_apply_input_limits` -> `vt_js_apply_input_limits`). Patch 0010
+already made normalize, localeCompare and RegExp compilation linear and
+charged; the ceilings bound how much input one call can be handed at all.
+
+**Re-apply on upgrade:** the four `JSRuntime` fields and `JS_SetInputLimits`,
+the depth check at the top of `json_parse_value` with the increment /
+decrement around each object and array body, the per-object member count in
+the object loop, the source-length check after `JS_ToCStringLen2` in
+`js_compile_regexp`, and the two length checks in `js_string_normalize1`.
+
+**Guard:** `tests/hull/runtime/js/test_js.c`, `js_input_caps.*`: `defaults`
+(128 levels parse and 129 throw; an object of 100000 keys parses and 100001
+throws while 200000 small records parse; a 64 KiB pattern compiles and one
+byte more throws; 1 MiB normalizes and one code unit more throws, in
+`normalize` and both sides of `localeCompare`) and `manifest_limits` (the
+manifest's values apply, and the defaults come back). Tests that measure the
+engine itself on larger inputs lift the ceilings (`a5_no_input_limits`).

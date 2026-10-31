@@ -8620,6 +8620,14 @@ static int a5_limited(HlJS *lim, int64_t max)
     return hl_js_init(lim, &cfg);
 }
 
+/* Lift the input ceilings (QuickJS patch 0012: a RegExp source of 64 KiB,
+ * normalize input of 1 MiB, ...) for a test that measures the engine itself
+ * on inputs larger than an app would be allowed to build. */
+static void a5_no_input_limits(HlJS *lim)
+{
+    JS_SetInputLimits(lim->rt, 0, 0, 0, 0);
+}
+
 static int a5_eval_throws(HlJS *lim, const char *code)
 {
     JSValue v = JS_Eval(lim->ctx, code, strlen(code), "<test>",
@@ -12037,6 +12045,7 @@ static int wd_js_run(const char *code, int *after)
         hl_run_watchdog_configure(-1);
         return -1;
     }
+    a5_no_input_limits(&v);   /* the deadline, not the ceilings, is under test */
     hl_js_budget_arm(&v);
     JSValue r = JS_Eval(v.ctx, code, strlen(code), "<wd>", JS_EVAL_TYPE_GLOBAL);
     int out;
@@ -15557,6 +15566,7 @@ UTEST(js_audit39, ordinary_use_still_works)
 {
     HlJS lim;
     ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    a5_no_input_limits(&lim);   /* a 100 KB pattern (case 12) */
     EXPECT_FALSE(a5_eval_throws(&lim,
         "const own = (t, k) => Reflect.ownKeys(new Proxy(t, { ownKeys: () => k }));\n"
         "const err = (f) => { try { f(); } catch (e) { return e instanceof TypeError; } return false; };\n"
@@ -16377,6 +16387,7 @@ UTEST(js_audit41, large_compiles_are_linear)
 {
     HlJS lim;
     ASSERT_EQ(a5_limited(&lim, 100000000), 0);
+    a5_no_input_limits(&lim);   /* patterns of up to a few MB */
     hl_js_reset_request(&lim);
     long ms = 0;
     EXPECT_FALSE(a41_eval(&lim,
@@ -16456,6 +16467,7 @@ UTEST(js_audit41, large_compiles_are_charged)
     };
     HlJS lim;
     ASSERT_EQ(a5_limited(&lim, 0), 0);
+    a5_no_input_limits(&lim);   /* patterns of a few MB */
     hl_js_reset_request(&lim);
     ASSERT_FALSE(a5_eval_throws(&lim,
         "globalThis.P = Array.from({ length: 400000 },"
@@ -17141,6 +17153,71 @@ UTEST(js_dispatcher, a_trip_raised_from_c_is_reported_as_the_limit)
     }
     jdisp_arm(0);
     cleanup_js();
+}
+
+/* ── Input ceilings (audit convergence §6.4, QuickJS patch 0012) ───────
+ *
+ * Every JSON decode (JSON.parse, hull:json) is held to the nesting depth and
+ * per-object key count of hull/limits/input.h; RegExp compilation to a
+ * source length; normalize / localeCompare to an operand length. Each throws
+ * a RangeError before the work. Defaults, then the manifest's `limits`. */
+
+UTEST(js_input_caps, defaults)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 0), 0);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "const kind = (f) => { try { f(); return 'ok'; } catch (e) {"
+        " return e instanceof RangeError ? 'range' : 'other:' + e; } };\n"
+        "const nest = (n) => '['.repeat(n) + ']'.repeat(n);\n"
+        "const obj = (n) => '{' + Array.from({ length: n }, (_, i) => '\"k' + i + '\":' + i).join(',') + '}';\n"
+        "globalThis.r = [\n"
+        "  kind(() => JSON.parse(nest(128))), kind(() => JSON.parse(nest(129))),\n"
+        "  kind(() => JSON.parse(obj(100000))), kind(() => JSON.parse(obj(100001))),\n"
+        "  kind(() => new RegExp('a'.repeat(65536))), kind(() => new RegExp('a'.repeat(65537))),\n"
+        "  kind(() => 'e'.repeat(1048576).normalize('NFD')),\n"
+        "  kind(() => 'e'.repeat(1048577).normalize('NFC')),\n"
+        "  kind(() => 'e'.repeat(1048577).localeCompare('e')),\n"
+        "  kind(() => 'e'.localeCompare('e'.repeat(1048577))),\n"
+        "].join(',');\n"));
+    EXPECT_TRUE(a41_global_is(&lim, "globalThis.r",
+        "ok,range,ok,range,ok,range,ok,range,range,range"));
+    /* the object-key ceiling is per object, not per document */
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "const a = JSON.parse('[' + Array.from({ length: 200000 }, (_, i) =>"
+        " '{\"id\":' + i + '}').join(',') + ']');\n"
+        "if (a.length !== 200000) throw new Error('arr');\n"));
+    EXPECT_EQ(lim.budget_tripped, 0);
+    hl_js_free(&lim);
+}
+
+UTEST(js_input_caps, manifest_limits)
+{
+    HlJS lim;
+    ASSERT_EQ(a5_limited(&lim, 0), 0);
+    HlManifest m;
+    memset(&m, 0, sizeof m);
+    m.limits.json_max_depth = 4;
+    m.limits.json_max_keys = 2;
+    m.limits.regexp_max_source = 10;
+    m.limits.normalize_max_input = 8;
+    lim.base.vt = &hl_js_vtable;   /* hl_js_init alone sets no vtable */
+    hl_runtime_apply_input_limits(&lim.base, &m);
+    EXPECT_FALSE(a5_eval_throws(&lim,
+        "const kind = (f) => { try { f(); return 'ok'; } catch (e) {"
+        " return e instanceof RangeError ? 'range' : 'other'; } };\n"
+        "globalThis.r = [\n"
+        "  kind(() => JSON.parse('[[[[1]]]]')), kind(() => JSON.parse('[[[[[1]]]]]')),\n"
+        "  kind(() => JSON.parse('{\"a\":1,\"b\":{\"c\":2,\"d\":3}}')),\n"
+        "  kind(() => JSON.parse('{\"a\":1,\"b\":2,\"c\":3}')),\n"
+        "  kind(() => new RegExp('0123456789')), kind(() => new RegExp('0123456789a')),\n"
+        "  kind(() => 'abcdefgh'.normalize()), kind(() => 'abcdefghi'.normalize()),\n"
+        "].join(',');\n"));
+    EXPECT_TRUE(a41_global_is(&lim, "globalThis.r", "ok,range,ok,range,ok,range,ok,range"));
+    /* back to the defaults */
+    hl_runtime_apply_input_limits(&lim.base, NULL);
+    EXPECT_FALSE(a5_eval_throws(&lim, "JSON.parse('[[[[[[[1]]]]]]]'); new RegExp('0123456789abc');"));
+    hl_js_free(&lim);
 }
 
 UTEST_MAIN();

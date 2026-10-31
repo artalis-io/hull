@@ -322,7 +322,19 @@ local function parse_literal(str, i)
 end
 
 
+-- Hull: per-decode ceilings (json.decode's opts). 0 = no limit.
+local max_depth, max_keys = 0, 0
+local depth = 0
+
+local function enter(str, i)
+  depth = depth + 1
+  if max_depth > 0 and depth > max_depth then
+    error(string.format("JSON nested too deeply (limit %d)", max_depth), 0)
+  end
+end
+
 local function parse_array(str, i)
+  enter(str, i)
   local res = {}
   local n = 1
   i = i + 1
@@ -345,12 +357,15 @@ local function parse_array(str, i)
     if chr == "]" then break end
     if chr ~= "," then decode_error(str, i, "expected ']' or ','") end
   end
+  depth = depth - 1
   return res, i
 end
 
 
 local function parse_object(str, i)
+  enter(str, i)
   local res = {}
+  local nkeys = 0
   i = i + 1
   while 1 do
     local key, val
@@ -359,6 +374,10 @@ local function parse_object(str, i)
     if str:sub(i, i) == "}" then
       i = i + 1
       break
+    end
+    nkeys = nkeys + 1
+    if max_keys > 0 and nkeys > max_keys then
+      error(string.format("JSON object has too many keys (limit %d)", max_keys), 0)
     end
     -- Read key
     if str:sub(i, i) ~= '"' then
@@ -382,6 +401,7 @@ local function parse_object(str, i)
     if chr == "}" then break end
     if chr ~= "," then decode_error(str, i, "expected '}' or ','") end
   end
+  depth = depth - 1
   return res, i
 end
 
@@ -417,9 +437,20 @@ parse = function(str, idx)
 end
 
 
-function json.decode(str)
+-- opts (Hull): { max_depth = N, max_keys = N }, ceilings on the nesting
+-- depth and the number of keys in any one object; absent or 0 = no limit. hull.json passes the app VM's (hull/limits/input.h).
+function json.decode(str, opts)
   if type(str) ~= "string" then
     error("expected argument of type string, got " .. type(str))
+  end
+  max_depth, max_keys, depth = 0, 0, 0
+  if type(opts) == "table" then
+    if math.type(opts.max_depth) == "integer" and opts.max_depth > 0 then
+      max_depth = opts.max_depth
+    end
+    if math.type(opts.max_keys) == "integer" and opts.max_keys > 0 then
+      max_keys = opts.max_keys
+    end
   end
   local res, idx = parse(str, next_char(str, 1, space_chars, true))
   idx = next_char(str, idx, space_chars, true)

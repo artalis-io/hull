@@ -437,6 +437,8 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                  * compute call uncapped (round-6 M3). */
                 hl_wasm_config_resolve(ctx->rt, &m, opts->wasm_cli);
 #endif
+                /* The input ceilings (manifest `limits`), as serve.c does. */
+                hl_runtime_apply_input_limits(ctx->rt, &m);
                 hl_manifest_free(&m);
                 if (rc != 0) {
                     hl_eprintf_line("[app-context] module resolver: %s", err);
@@ -446,6 +448,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             } else {
                 /* No manifest declared → resolver still admits intrinsics. */
                 hl_module_resolver_resolve(NULL, &ctx->module_set, NULL, 0);
+                hl_runtime_apply_input_limits(ctx->rt, NULL);
 #ifdef HL_ENABLE_WASM
                 hl_wasm_config_resolve(ctx->rt, NULL, opts->wasm_cli);
 #endif

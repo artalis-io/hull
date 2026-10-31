@@ -515,6 +515,9 @@ jobs:
       - name: Server suites again with every entry on the VM thread
         timeout-minutes: 20
         run: make e2e-vm-thread-all
+      - name: Request concurrency caps (per client / per route) E2E tests
+        timeout-minutes: 3
+        run: make e2e-concurrency
       - name: Live SQLite file protection E2E tests
         timeout-minutes: 2
         run: make e2e-db-live-files
@@ -1862,6 +1865,26 @@ jobs:
         timeout-minutes: 5
         run: make e2e-tool-escape
 
+  # Engine complexity (audit convergence §6.5): every listed QuickJS / Lua
+  # builtin at n and 2n on worst-case-shaped ordinary inputs must scale with
+  # t(2n)/t(n) < 2.5 (median of 5, a failing case measured once more). Prints
+  # every ratio. A QuickJS / Lua upgrade must pass it.
+  engine-complexity:
+    needs: [classify]
+    if: needs.classify.outputs.run_core_common == 'true'
+    name: Engine complexity (QuickJS / Lua builtins)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Engine complexity tests
+        timeout-minutes: 10
+        run: make complexity
+
   sanitizers:
     needs: [classify]
     if: needs.classify.outputs.run_core_common == 'true'
@@ -3147,6 +3170,7 @@ jobs:
       - reproducibility-cosmo
       - reproducibility-cosmo-compare
       - build-pipeline
+      - engine-complexity
       - sanitizers
       - msan
       - tsan

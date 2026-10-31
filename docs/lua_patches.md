@@ -7,6 +7,14 @@ the source with a `HULL PATCH` comment and listed here.
 **On a Lua upgrade:** grep the new tree for `HULL PATCH`, confirm each entry
 below is still needed against upstream, and re-apply the ones that are.
 
+**An upgrade must pass the engine complexity suite** (`make complexity`,
+`tests/complexity/complexity.c`, the `engine-complexity` CI job; audit
+convergence §6.5). It runs `table.insert` / `remove` / `sort` / `concat`,
+`string.rep` / `find` / `gsub` / `format` / `byte` / `char`, a full garbage
+collection and coroutine create / resume at sizes n and 2n on
+worst-case-shaped ordinary inputs and requires t(2n) / t(n) < 2.5. (A weak-
+table ephemeron chain joins the GC cases once the ephemeron fix lands.)
+
 ## Patch 0001 - keep the count hook on inside finalizers
 
 **File:** `vendor/lua/lgc.c`, `GCTM`

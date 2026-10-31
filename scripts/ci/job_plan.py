@@ -72,6 +72,7 @@ GROUP = {
     "build-pipeline": "core-common",
     "flavors": "core-common",
     "sanitizers": "core-common",
+    "engine-complexity": "core-common",
     "msan": "core-common",
     "tsan": "core-common",
     "analyze": "core-common",

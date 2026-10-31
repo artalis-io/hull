@@ -31,6 +31,7 @@
 #include <stdint.h>
 
 #include "hull/limits/gpu.h"  /* HL_GPU_MAX_DEVICES */
+#include "hull/limits/input.h" /* HL_MANIFEST_MAX_ROUTE_LIMITS, ... */
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -258,6 +259,21 @@ typedef struct HlManifest {
      * defaults, cap/run_watchdog.h). */
     uint32_t    limits_request_ms;
     uint32_t    limits_callback_ms;
+    /* Input ceilings and request concurrency (manifest "limits", see
+     * hull/limits/input.h). Every number 0 = not set (the default). */
+    struct {
+        uint32_t    json_max_depth;
+        uint32_t    json_max_keys;
+        uint32_t    regexp_max_source;
+        uint32_t    normalize_max_input;
+        int         per_ip_set;      /* 1 = per_ip came from the manifest */
+        uint32_t    per_ip;          /* 0 (with per_ip_set) = cap off */
+        const char *route_patterns[HL_MANIFEST_MAX_ROUTE_LIMITS];
+        uint32_t    route_max[HL_MANIFEST_MAX_ROUTE_LIMITS];
+        int         route_count;
+        const char *trusted_proxies[HL_MANIFEST_MAX_TRUSTED_PROXIES];
+        int         trusted_proxy_count;
+    } limits;
 
     /* Capability flags */
     int         gpu;              /* 1 if app declares gpu: true or gpu: {...} */

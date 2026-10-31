@@ -1713,6 +1713,98 @@ a sync `http.get` with a 10 s timeout fails with a timeout after at most
 sending or running anything. `http.fetch` and `compute.async` are not clamped:
 the run parks while they wait.
 
+### Request concurrency and input caps (`limits`)
+
+Two kinds of limit apply before your code sees a request, both on by default
+(audit convergence §6.4). Configure them with the manifest's `limits` key:
+
+```lua
+app.manifest({
+    limits = {
+        per_ip_concurrency = 8,                -- requests in flight per client; 0 = off
+        route_concurrency  = { ["/upload"] = 2, ["/reports/*"] = 4 },
+        trusted_proxies    = { "10.0.0.0/8" }, -- whose X-Forwarded-For to believe
+        json_max_depth     = 128,              -- nesting of one JSON document
+        json_max_keys      = 100000,           -- keys in one JSON object
+        regexp_max_source  = 65536,            -- JS: bytes of RegExp source
+        normalize_max_input = 1048576,         -- JS: code units for normalize / localeCompare
+    },
+})
+```
+
+```javascript
+app.manifest({
+    limits: {
+        perIpConcurrency: 8,
+        routeConcurrency: { "/upload": 2, "/reports/*": 4 },
+        trustedProxies: ["10.0.0.0/8"],
+        jsonMaxDepth: 128,
+        jsonMaxKeys: 100000,
+        regexpMaxSource: 65536,
+        normalizeMaxInput: 1048576,
+    },
+});
+```
+
+Every number must be an integer of at least 1 (`per_ip_concurrency` also takes
+0); anything else is ignored and the default applies.
+
+**Concurrency.** A request is *in flight* from the moment its headers arrive
+until its response has been sent - including the time its handler is parked on
+`http.fetch`, `db.async`, `hull.sleep` and the like. A client with
+`per_ip_concurrency` requests in flight gets **429 Too Many Requests** with
+`Retry-After: 1` for the next one; other clients are unaffected. A route listed
+in `route_concurrency` with that many requests in flight (from anyone) answers
+**503 Service Unavailable** with `Retry-After: 1`. Both refusals happen before
+the body is read and before any script runs. A route key is either the app's
+own route pattern (`"/users/:id"`) or a path prefix ending in `/*`.
+
+- A client is its address: IPv4 as itself, IPv6 by its /64 (one host usually
+  holds a whole /64).
+- WebSocket upgrades to a WebSocket route are not counted (the connection then
+  belongs to the socket); an open SSE stream is a request in flight and counts
+  for as long as it stays open.
+- A handler whose client hung up keeps counting until the handler finishes.
+- The operator flag `--max-requests-per-ip N` overrides the manifest (`0` turns
+  the per-client cap off; in a built binary it is `--hull-max-requests-per-ip`).
+
+**Behind a reverse proxy, every request has the proxy's address.** With the
+default cap, eight slow requests from *all* your users together would fill it.
+Either:
+
+- list the proxy in `trusted_proxies` (exact addresses or CIDRs, the
+  `manifest.hosts` syntax). For a request whose TCP peer matches, the client is
+  the **last** address in the last `X-Forwarded-For` header - the rule
+  `hull.web._request.client_ip(req, true)` uses: a proxy appends the peer it
+  saw, so everything to its left is whatever the client wrote. If that last
+  entry is not an IP address, the proxy's own address is used. Behind more
+  than one proxy layer, have the outer proxy own the header (overwrite it) so
+  the last entry is the client. Never list a proxy you do not control: anyone
+  who can reach the app through it picks their own key. Keel's PROXY-protocol
+  support (when the listener is configured for it) also gives the real client
+  as the peer;
+- or raise `per_ip_concurrency` (or set it to 0) and rely on the proxy's own
+  per-client limits.
+
+A request from a client with no IP address (a UNIX socket) is not limited.
+
+**Input caps.** Hull cannot tell which string came from a request, so these
+apply to *every* use in the app VM; the defaults are far above what real
+payloads need:
+
+| Cap | Default | Applies to | Over the cap |
+|---|---|---|---|
+| `json_max_depth` | 128 | Lua `hull.json` decode; JS `JSON.parse` and `hull:json` decode | Lua: error `JSON nested too deeply (limit N)`; JS: `RangeError` |
+| `json_max_keys` | 100000 | the same, counted per object (a long array of small records is fine) | `JSON object has too many keys (limit N)` |
+| `regexp_max_source` | 64 KiB | JS: every RegExp compiled from a string (`new RegExp`, `match` / `split` with a string pattern) | `RangeError` |
+| `normalize_max_input` | 1 MiB | JS: `String.prototype.normalize`, both operands of `localeCompare` | `RangeError` |
+
+A Lua caller can pass its own ceilings for one decode:
+`json.decode(str, { max_depth = 1000, max_keys = 1e6 })`. A `worker.dispatch`
+JS VM runs with the defaults. The request body size is capped separately by
+`--body-max-size` (default 1 MiB; streaming multipart routes have their own
+`max_total_size`).
+
 ### Outbound HTTP timeout (`hull/http-client`)
 
 Every outbound request - the async `http.async.get` / `post` / `put` / `patch` /

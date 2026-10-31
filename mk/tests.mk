@@ -691,6 +691,10 @@ $(BUILDDIR)/test_hex: $(TESTDIR)/hull/test_hex.c $(HEX_OBJ) | $(BUILDDIR)
 $(BUILDDIR)/test_base64: $(TESTDIR)/hull/test_base64.c $(BASE64_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(BASE64_OBJ)
 
+# shared/req_limit.h is header-only (the request concurrency limiter).
+$(BUILDDIR)/test_req_limit: $(TESTDIR)/hull/test_req_limit.c $(INCDIR)/hull/shared/req_limit.h $(INCDIR)/hull/limits/input.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $<
+
 # utils/url.h is header-only; the test needs nothing linked.
 $(BUILDDIR)/test_url: $(TESTDIR)/hull/test_url.c $(SRCDIR)/hull/utils/url.h $(SRCDIR)/hull/utils/hex.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $<
@@ -756,6 +760,19 @@ QJS_TESTHOOK_OBJ := $(BUILDDIR)/qjs_quickjs_testhooks.o
 QJS_TEST_OBJS := $(filter-out $(BUILDDIR)/qjs_quickjs.o,$(QJS_OBJS)) $(QJS_TESTHOOK_OBJ)
 $(QJS_TESTHOOK_OBJ): $(QJS_DIR)/quickjs.c $(QJS_DIR)/quickjs.h | $(BUILDDIR)
 	$(CC) $(QJS_CFLAGS) -DQJS_HULL_TEST_HOOKS -I$(QJS_DIR) -c -o $@ $<
+
+# Engine complexity tests (audit convergence §6.5): each listed QuickJS / Lua
+# builtin at n and 2n on worst-case-shaped ordinary inputs, t(2n)/t(n) < 2.5.
+# The raw vendored engines (Hull's patches, no Hull runtime), QuickJS with the
+# test hooks for the one forced-collision case. Not part of `make test`
+# (timing-based, ~30-60 s); CI runs it as its own job, and a QuickJS / Lua
+# upgrade must pass it.
+$(BUILDDIR)/test_complexity: $(TESTDIR)/complexity/complexity.c $(QJS_TEST_OBJS) $(LUA_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DQJS_HULL_TEST_HOOKS -I$(QJS_DIR) -I$(LUA_DIR) -o $@ $< $(QJS_TEST_OBJS) $(LUA_OBJS) -lm -lpthread
+
+.PHONY: complexity
+complexity: $(BUILDDIR)/test_complexity
+	$(BUILDDIR)/test_complexity
 
 # JS runtime test - needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(MODULE_OBJ) $(CAP_TEST_JS_OBJ) $(STDLIB_FEATURE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(STDLIB_RT_REGISTRY_OBJS) $(STDLIB_TOOLCHAIN_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(JS_RT_OBJS) $(QJS_TEST_OBJS) | $(BUILDDIR)
@@ -1538,6 +1555,12 @@ VM_THREAD_ALL_SUITES := e2e-examples e2e-http e2e-js-runs e2e-timers \
 	e2e-teardown e2e-cli e2e-multipart e2e-refusal-codes e2e-http-timeout
 e2e-vm-thread-all: $(BUILDDIR)/hull
 	HULL_VM_THREAD=1 $(MAKE) --no-print-directory $(VM_THREAD_ALL_SUITES)
+# Request concurrency caps (audit convergence §6.4): a client's 9th request in
+# flight gets 429 while other clients are served, a route limit answers 503,
+# a spoofed X-Forwarded-For does not pick the key, --max-requests-per-ip.
+.PHONY: e2e-concurrency
+e2e-concurrency: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_concurrency.sh
 
 # A database file SQLite holds open is not truncated, replaced or removed
 # through the fs capability (audit 33): compute.stream's file output and an
