@@ -220,6 +220,15 @@ static int lua_is_stdlib_caller(lua_State *L, const char *method)
     return HL_DB_NS_TRUSTED;
 }
 
+/* Charge SQL text (or identifiers) a call is about to scan and hand the
+ * statement cache: one unit per 8 bytes plus the call floor, raising BEFORE
+ * the work once the run is over its budget (audit 41). */
+static void sql_charge(lua_State *L, size_t len)
+{
+    uint64_t u = hl_work_sql_units(len);
+    lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
+}
+
 #define HL_LUA_DB_RESERVED_MSG "access denied: _hull_* tables are reserved"
 
 /* Refuse an app caller's identifier that names a reserved `_hull_*` table.
@@ -234,6 +243,16 @@ static int app_identifiers_ok(lua_State *L, const char *method,
                               const char **a, int na,
                               const char **b, int nb)
 {
+    /* The names are scanned here and land in the statement the backend
+     * builds (and the statement cache compares): charged first, stdlib or
+     * not (audit 41). Non-raising, as the rest of this function. */
+    uint64_t bytes = table ? strlen(table) : 0;
+    for (int i = 0; i < na; i++) bytes += strlen(a[i]);
+    for (int i = 0; i < nb; i++) bytes += strlen(b[i]);
+    uint64_t u = hl_work_sql_units((size_t)bytes);
+    if (hl_lua_budget_charge(L, u > (uint64_t)INT64_MAX ? INT64_MAX
+                                                        : (int64_t)u))
+        return -2;
     if (lua_is_stdlib_caller(L, method))
         return 0;
     int bad = hl_cap_db_check_namespace(table) != 0;
@@ -249,7 +268,10 @@ static void check_app_identifiers(lua_State *L, const char *method,
                                   const char **a, int na,
                                   const char **b, int nb)
 {
-    if (app_identifiers_ok(L, method, table, a, na, b, nb) != 0)
+    int rc = app_identifiers_ok(L, method, table, a, na, b, nb);
+    if (rc == -2)
+        (void)hl_lua_budget_raise(L);
+    if (rc != 0)
         luaL_error(L, HL_LUA_DB_RESERVED_MSG);
 }
 
@@ -378,7 +400,11 @@ static int lua_db_query_impl(lua_State *L)
     if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not available");
 
-    const char *sql = luaL_checkstring(L, 1);
+    size_t sql_len;
+    const char *sql = luaL_checklstring(L, 1, &sql_len);
+    /* The text check and the statement cache's compare walk the whole
+     * text: charged first, stdlib or not (audit 41). */
+    sql_charge(L, sql_len);
 
     int is_stdlib = lua_is_stdlib_caller(L, "query");
     (void)db_call_handle(L);   /* the re-entry check; the handle is resolved below */
@@ -450,7 +476,11 @@ static int lua_db_exec_impl(lua_State *L)
     if (!lua || !db_call_handle(L))
         return luaL_error(L, "database not available");
 
-    const char *sql = luaL_checkstring(L, 1);
+    size_t sql_len;
+    const char *sql = luaL_checklstring(L, 1, &sql_len);
+    /* The text check and the statement cache's compare walk the whole
+     * text: charged first, stdlib or not (audit 41). */
+    sql_charge(L, sql_len);
 
     int is_stdlib = lua_is_stdlib_caller(L, "exec");
     (void)db_call_handle(L);   /* the re-entry check; the handle is resolved below */
@@ -702,13 +732,17 @@ static int lua_db_insert_if_absent(lua_State *L)
                  n_cols, n_vals);
         ok = 0;
     }
-    if (ok && app_identifiers_ok(L, "insert_if_absent", table,
-                                 conflict_cols, n_conflict, cols, n_cols) != 0) {
+    int id_rc = ok ? app_identifiers_ok(L, "insert_if_absent", table,
+                                        conflict_cols, n_conflict,
+                                        cols, n_cols) : 0;
+    if (id_rc != 0) {
         snprintf(err, sizeof err, "%s", HL_LUA_DB_RESERVED_MSG);
         ok = 0;
     }
     if (!ok) {
         if (lua->scratch) lua->scratch->used = scratch_mark_at;
+        if (id_rc == -2)
+            return hl_lua_budget_raise(L);   /* the charge tripped (audit 41) */
         return luaL_error(L, "%s", err);
     }
 
@@ -766,13 +800,17 @@ static int lua_db_upsert(lua_State *L)
                  n_cols, n_vals);
         ok = 0;
     }
-    if (ok && app_identifiers_ok(L, "upsert", table,
-                                 conflict_cols, n_conflict, cols, n_cols) != 0) {
+    int id_rc = ok ? app_identifiers_ok(L, "upsert", table,
+                                        conflict_cols, n_conflict,
+                                        cols, n_cols) : 0;
+    if (id_rc != 0) {
         snprintf(err, sizeof err, "%s", HL_LUA_DB_RESERVED_MSG);
         ok = 0;
     }
     if (!ok) {
         if (lua->scratch) lua->scratch->used = scratch_mark_at;
+        if (id_rc == -2)
+            return hl_lua_budget_raise(L);   /* the charge tripped (audit 41) */
         return luaL_error(L, "%s", err);
     }
 
@@ -1017,7 +1055,9 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         timeout_ms = hl_worker_db_notify_timeout(
             (double)luaL_optinteger(L, 2, 1000));
     } else {
-        sql = luaL_checkstring(L, 1);
+        size_t sql_len;
+        sql = luaL_checklstring(L, 1, &sql_len);
+        sql_charge(L, sql_len);   /* before the scan (audit 41) */
         ns_trusted = lua_is_stdlib_caller(L, kind == HL_WORK_DB_QUERY ? "query" : "exec");
         if (!ns_trusted && hl_cap_db_check_namespace(sql) != 0)
             return luaL_error(L, "access denied: _hull_* tables are reserved");

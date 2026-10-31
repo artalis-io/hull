@@ -292,4 +292,21 @@ static inline uint64_t hl_work_dirent_units(size_t name_len)
     return HL_WORK_FS_DIRENT_UNITS + (uint64_t)name_len / 64;
 }
 
+/* ── SQL text handed to a db call (audit 41) ──────────────────────────
+ *
+ * The namespace check (hl_cap_db_check_namespace) scans the whole text, and
+ * the SQLite statement cache compares it in full (strlen + strcmp) on every
+ * hit - on a hit SQLite allocates almost nothing, so its allocator charge
+ * sees none of it. A reused 32 MB SQL string cost no budget: 300 queries
+ * ran 26 s untripped. Every db call that takes SQL text or identifiers
+ * (query, exec, db.async, the worker.dispatch VMs' query / exec,
+ * insert_if_absent / upsert / table_columns) charges one unit per 8 bytes
+ * of it plus HL_WORK_SQL_CALL_UNITS BEFORE the scan, stdlib callers too. */
+#define HL_WORK_SQL_CALL_UNITS         16u
+
+static inline uint64_t hl_work_sql_units(size_t text_len)
+{
+    return (uint64_t)text_len / 8 + HL_WORK_SQL_CALL_UNITS;
+}
+
 #endif /* HL_SHARED_WORK_CHARGE_H */
