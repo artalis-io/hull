@@ -370,6 +370,12 @@ LUA_API void lua_hlsetstop (lua_State *L, int *flag) {
 }
 
 
+/* HULL PATCH 0006 (docs/lua_patches.md) */
+LUA_API void lua_hlsettripped (lua_State *L, int *flag) {
+  G(L)->hltripped = flag;
+}
+
+
 LUA_API void lua_arith (lua_State *L, int op) {
   lua_lock(L);
   if (op != LUA_OPUNM && op != LUA_OPBNOT)

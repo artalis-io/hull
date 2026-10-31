@@ -303,6 +303,21 @@ release-artifact layout).
   transaction is active" as done. Covered by `test_db_duckdb` (2000 COMMIT / ROLLBACK under
   an always-tripped budget), which also makes `rollback_runs_after_the_budget_tripped`
   deterministic.
+- **A long chain in a weak-keyed Lua table could stall the collector for minutes** (audit 41,
+  Lua runtime). When each key's value is the next key and the keys sit in scattered hash
+  order, Lua's atomic phase converges about one link per pass over the table: O(n²) work
+  inside one instruction, which neither the instruction budget nor the run watchdog could
+  stop (an 80000-link chain ran 31 s past a 1 s deadline, and a later run that only
+  allocated stalled in automatic GC and failed the deadline for work it did not do). Lua
+  HULL PATCH 0006 bounds the convergence: past a work cap linear in the heap (a sixteenth
+  of its size in bytes, at least 65536 units), or once the run's stop flag is raised or its
+  budget has tripped, the remaining ephemeron tables are finished conservatively - their
+  values are marked as if strong for this cycle. That marks a superset of what is
+  reachable, so nothing live is freed and unreachable keys are still cleared; it only
+  delays collecting values. The work stays charged to the run that triggered the
+  collection. Covered by `test_lua` `lua_audit41.*` (a 60000-link chain collects in
+  milliseconds in both GC modes with every link kept, weak-key clearing still correct,
+  and a deadline during such collections trips promptly).
 - **DuckDB returned another column's value for short strings** (audit 35, both runtimes).
   DuckDB stores a VARCHAR / BLOB of up to 12 bytes inline in the vector's string struct; the
   decoder copied that struct to its own stack and pointed the value into the copy, which was

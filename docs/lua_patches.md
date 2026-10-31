@@ -280,3 +280,68 @@ comparator) runs to completion; the watchdog bounds loops of them.
 round-12 triggers under a 200 ms deadline and no instruction limit are stopped;
 the trip survives pcall / xpcall / a coroutine; a worker.dispatch job is
 stopped).
+
+## Patch 0006 - bounded ephemeron convergence
+
+**Files:** `vendor/lua/lgc.c` (`convergeephemerons`, `hl_ephcap`,
+`hl_ephstop`, `hl_ephvalues`, `hl_ephfinish`), `vendor/lua/lstate.h` /
+`lstate.c` (the `hltripped` global field), `lapi.c` + `lua.h`
+(`lua_hlsettripped`); Hull side: `src/hull/runtime/lua/budget.c`
+(`hl_lua_budget_install` points it at the budget's `tripped`)
+**Found by:** audit 41
+**Upstream:** Hull-specific.
+
+`convergeephemerons` re-traverses every ephemeron (weak-keyed) table until a
+pass marks nothing new. A weak-keyed table holding a long chain - each key's
+value is the next key - with the keys in scattered hash order converges about
+one link per pass, so about n passes over a table of n entries: O(n^2) work
+inside the atomic phase, which is not incremental and runs inside one
+instruction. Patch 0004 counted the work, but charges it only when the
+collection returns, and patch 0005's stop flag is read only between
+instructions, so nothing could stop it: an 80000-link chain ran 31 s past a
+1 s deadline, and while the chain stayed alive every later collection - a
+later run that only allocated - stalled the same way.
+
+The patch keeps upstream's loop and checks, before each pass:
+
+- the work this call has done against `hl_ephcap`: at least
+  `HL_EPH_WORK_MIN` (65536) units, else a sixteenth of the heap's size in
+  bytes - about one full mark of the heap, linear in it, and far above what
+  ordinary weak-keyed tables take (they converge in a pass or two);
+- the embedder's stop flag (patch 0005's `hlstop`, read atomically) and its
+  tripped flag (`hltripped`, set with `lua_hlsettripped`; Hull points it at
+  the run budget's `tripped`, same thread). Neither read raises.
+
+When one says stop, `hl_ephfinish` finishes the tables still on the
+`ephemeron` list conservatively: `hl_ephvalues` marks every value whatever its
+key (the table is strong in its values for this cycle), then links the table
+where `traverseephemeron` links one with no white-key / white-value entry -
+`allweak` when it has unmarked keys, else `genlink` - never back on
+`ephemeron`, so each table is finished once; tables newly reached by the
+propagation come back through `ephemeron` and are finished the same way. One
+pass is linear in the tables and what it marks, so the whole call is.
+
+Memory safety: the conservative finish marks a superset of what is reachable,
+so no live object is freed. A key still unmarked afterwards is unreachable from
+every marked object, so `clearbykeys` removing its entry (the table is on
+`allweak`) stays correct, and no entry keeps a pointer to a freed key. It only
+delays collection: values of the remaining tables survive this cycle. A chain
+that is itself garbage converges in one pass (no key is marked) and never
+reaches the finish. `clearbykeys`, `clearbyvalues`, `traverseephemeron` and
+`traversestrongtable` are single passes over each table, so they needed no
+bound.
+
+The work, conservative part included, is still added to `hlgcwork` (patch
+0004), so the run that triggered the collection is charged for it.
+
+**Re-apply:** in `convergeephemerons`, keep a `done` counter of the per-table
+work (`1 + asize + sizenode` plus the `propagateall` it caused) and, at the top
+of each pass, call `hl_ephfinish` and return once `done > hl_ephcap(g)` or
+`hl_ephstop(g)`; carry the four helpers above it, the `hltripped` field
+(initialised to NULL in `lua_newstate`) and `lua_hlsettripped`.
+
+**Guard:** `tests/hull/runtime/lua/test_lua.c`, `lua_audit41.*` (a
+60000-link chain collects in milliseconds in incremental and generational
+mode with every link kept - it took ~32 s per mode before; weak-key clearing
+is correct with and without the finish; a 200 ms deadline during repeated
+collections of such a chain trips promptly - it took ~16 s before).

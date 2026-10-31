@@ -705,6 +705,94 @@ static lu_mem propagateall (global_State *g) {
 
 
 /*
+** HULL PATCH 0006 (docs/lua_patches.md): ephemeron convergence is bounded.
+** A weak-keyed table holding a long chain - each key's value is the next
+** key - with the keys in scattered hash order converges about one link
+** per pass, so about n passes over the table: O(n^2) work inside the
+** non-incremental atomic phase, where neither the count hook nor the run
+** watchdog can stop it (an 80000-link chain ran 31 s past a 1 s
+** deadline). Before each pass, once this call has done more work than
+** 'hl_ephcap' allows, or the embedder's stop flag (patch 0005) or tripped
+** flag is set, the tables still on the 'ephemeron' list are finished
+** conservatively: every value is marked as if the table were strong in
+** its values for this cycle ('hl_ephvalues'). That marks a superset of
+** what is reachable, so no live object is freed; a key still unmarked
+** afterwards is unreachable from every marked object, so 'clearbykeys'
+** removing its entry stays correct. It only delays collection. A single
+** pass is linear in the tables and what it marks, so the whole call is.
+** The work stays counted in 'hlgcwork', so the run that triggered the
+** collection is still charged for it.
+*/
+#if defined(__GNUC__) || defined(__clang__)
+#define hl_loadflag(p)	__atomic_load_n((p), __ATOMIC_RELAXED)
+#else
+#define hl_loadflag(p)	(*(volatile int *)(p))
+#endif
+
+/* convergence work allowed before the conservative finish: at least
+   HL_EPH_WORK_MIN units, else a sixteenth of the heap's size in bytes:
+   linear in the heap, about one full mark of it, and far above what
+   ordinary weak-keyed tables take */
+#define HL_EPH_WORK_MIN	(cast(lu_mem, 1) << 16)
+
+static lu_mem hl_ephcap (global_State *g) {
+  lu_mem part = gettotalbytes(g) / 16;
+  return part > HL_EPH_WORK_MIN ? part : HL_EPH_WORK_MIN;
+}
+
+static int hl_ephstop (global_State *g) {
+  return (g->hlstop != NULL && hl_loadflag(g->hlstop)) ||
+         (g->hltripped != NULL && *g->hltripped);
+}
+
+/*
+** Mark every value of ephemeron table 'h' whatever its key, then link it
+** where 'traverseephemeron' links a table with no white->white entry:
+** 'allweak' when it has unmarked keys (for 'clearbykeys'), else 'genlink'.
+** Never back to 'ephemeron', so each table is finished once.
+*/
+static lu_mem hl_ephvalues (global_State *g, Table *h) {
+  int hasclears = 0;
+  unsigned int i;
+  unsigned int asize = luaH_realasize(h);
+  unsigned int nsize = sizenode(h);
+  for (i = 0; i < asize; i++)
+    markvalue(g, &h->array[i]);
+  for (i = 0; i < nsize; i++) {
+    Node *n = gnode(h, i);
+    if (isempty(gval(n)))  /* entry is empty? */
+      clearkey(n);  /* clear its key */
+    else {
+      if (iscleared(g, gckeyN(n)))  /* key is not marked (yet)? */
+        hasclears = 1;  /* table must be cleared */
+      markvalue(g, gval(n));
+    }
+  }
+  if (hasclears)
+    linkgclist(h, g->allweak);
+  else
+    genlink(g, obj2gco(h));
+  return 1 + asize + nsize;
+}
+
+static void hl_ephfinish (global_State *g) {
+  while (g->ephemeron != NULL) {  /* propagation may add tables again */
+    GCObject *w;
+    GCObject *next = g->ephemeron;
+    g->ephemeron = NULL;
+    while ((w = next) != NULL) {
+      Table *h = gco2t(w);
+      next = h->gclist;
+      nw2black(h);  /* out of the list */
+      hl_gcwork(g, hl_ephvalues(g, h));
+    }
+    /* newly reached ephemeron tables come back through 'ephemeron' */
+    hl_gcwork(g, propagateall(g));
+  }
+}
+
+
+/*
 ** Traverse all ephemeron tables propagating marks from keys to values.
 ** Repeat until it converges, that is, nothing new is marked. 'dir'
 ** inverts the direction of the traversals, trying to speed up
@@ -714,20 +802,29 @@ static lu_mem propagateall (global_State *g) {
 static void convergeephemerons (global_State *g) {
   int changed;
   int dir = 0;
+  lu_mem cap = hl_ephcap(g);  /* HULL PATCH 0006 */
+  lu_mem done = 0;  /* HULL PATCH 0006: work done by this call */
   do {
     GCObject *w;
-    GCObject *next = g->ephemeron;  /* get ephemeron list */
+    GCObject *next;
+    if (done > cap || hl_ephstop(g)) {  /* HULL PATCH 0006 */
+      hl_ephfinish(g);  /* finish the rest conservatively */
+      return;
+    }
+    next = g->ephemeron;  /* get ephemeron list */
     g->ephemeron = NULL;  /* tables may return to this list when traversed */
     changed = 0;
     while ((w = next) != NULL) {  /* for each ephemeron table */
       Table *h = gco2t(w);
+      lu_mem work = 1 + luaH_realasize(h) + sizenode(h);
       next = h->gclist;  /* list is rebuilt during loop */
       nw2black(h);  /* out of the list (for now) */
-      hl_gcwork(g, 1 + luaH_realasize(h) + sizenode(h));  /* HULL PATCH 0004 */
       if (traverseephemeron(g, h, dir)) {  /* marked some value? */
-        hl_gcwork(g, propagateall(g));  /* propagate changes (HULL PATCH 0004) */
+        work += propagateall(g);  /* propagate changes */
         changed = 1;  /* will have to revisit all ephemeron tables */
       }
+      hl_gcwork(g, work);  /* HULL PATCH 0004 */
+      done += work;  /* HULL PATCH 0006 */
     }
     dir = !dir;  /* invert direction next time */
   } while (changed);  /* repeat until no more changes */

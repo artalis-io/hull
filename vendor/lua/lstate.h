@@ -260,6 +260,7 @@ typedef struct global_State {
   lu_mem lastatomic;  /* see function 'genstep' in file 'lgc.c' */
   lu_mem hlgcwork;  /* HULL PATCH 0004: collector work not yet charged */
   int *hlstop;  /* HULL PATCH 0005: the embedder's stop flag (atomic), or NULL */
+  int *hltripped;  /* HULL PATCH 0006: the embedder's tripped flag, or NULL */
   stringtable strt;  /* hash table for strings */
   TValue l_registry;
   TValue nilvalue;  /* a nil value */

@@ -480,6 +480,10 @@ LUA_API size_t (lua_hltakeowed) (lua_State *L);
 /* HULL PATCH 0005 (docs/lua_patches.md): a flag another thread may raise;
    while it is non-zero the count hook runs at every instruction */
 LUA_API void (lua_hlsetstop) (lua_State *L, int *flag);
+/* HULL PATCH 0006 (docs/lua_patches.md): a flag the collector reads
+   (same thread, never raising); while it is non-zero, ephemeron
+   convergence finishes conservatively at once */
+LUA_API void (lua_hlsettripped) (lua_State *L, int *flag);
 
 LUA_API int (lua_setcstacklimit) (lua_State *L, unsigned int limit);
 
