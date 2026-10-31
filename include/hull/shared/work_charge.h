@@ -251,6 +251,96 @@ static inline uint64_t hl_work_mime_units(size_t len)
 #define HL_WORK_TUI_ACQUIRE_UNITS     4096u
 #define HL_WORK_TUI_ACQUIRE_CAP_US    2000
 
+/* ── Round trips, log records, CLI output, small crypto (audit 41) ────
+ *
+ * Same rate (64 units per microsecond of measured time), each charged
+ * BEFORE the work, measured on macOS 26, arm64, loopback:
+ *
+ *   a KV command (Valkey get / set / del / has / incr / cas), one round
+ *     trip: ~95-165 us, nearly all of it the event loop waiting on the
+ *     server - 1 + bytes/64 per reply chunk was all it paid, so a
+ *     budget-sized kv:get loop ran ~400 s (Lua) / ~130 s (JS)
+ *                                 -> HL_WORK_KV_COMMAND_UNITS     8192
+ *   kv.open: DNS, connect, the HELLO / AUTH / SELECT exchange, and the
+ *     close that always follows (~270 us)
+ *                                 -> HL_WORK_KV_OPEN_UNITS       16384
+ *   a statement sent to a network database (Postgres / MySQL): one round
+ *     trip, which paid only a charge per reply frame (~6 units), so a
+ *     budget-sized `SELECT 1` loop ran for hours. Sized like the KV
+ *     command, for a server on the same host (~100-130 us); through
+ *     Docker Desktop's port proxy on macOS `SELECT 1` measured ~950 us,
+ *     and a budget-sized loop there trips in ~11 s. SQLite runs in process
+ *     and is charged by its progress handler and allocator instead, so the
+ *     floor is the network backends' (db_postgres.c / db_mysql.c), not
+ *     hl_db_query's
+ *                                 -> HL_WORK_NET_SQL_UNITS        8192
+ *   a log record (log.* / console.* / an app VM's print): a timestamp,
+ *     the escape pass and an unbuffered stderr write, ~1.7 us to a pipe
+ *     and more to a terminal - each argument is a record of its own; the
+ *     call itself (the caller lookup) pays HL_WORK_LOG_CALL_UNITS. A
+ *     log.info("") loop ran ~40 s per budget, an 8-argument console.log
+ *     ~590 s                      -> HL_WORK_LOG_RECORD_UNITS      256
+ *                                    HL_WORK_LOG_CALL_UNITS         64
+ *     print writes ONE record of all its arguments, tab-separated: the
+ *     call and record floors, plus per argument (its conversion)
+ *                                 -> HL_WORK_LOG_ARG_UNITS          16
+ *   ctx.stdout / ctx.stderr write: a stdio copy (1 per 8 bytes, the
+ *     write itself) plus the call; a flush is a write syscall (~0.8 us to
+ *     a pipe). Neither was charged: 1 MiB writes into a pipe ran ~400 s
+ *     on a 10M budget          -> HL_WORK_CALL_UNITS + bytes / 8
+ *                                 HL_WORK_CLI_FLUSH_UNITS          64
+ *   a crypto call, whatever its size (argument checks, the context
+ *     setup, a random draw, the result string): sha256("") ~0.24 us,
+ *     random_token(32) ~0.5 us, hmac_sha256 ~1.2 us (two digests, each
+ *     charged) - loops ran 4-18 s per budget
+ *                                 -> HL_WORK_CRYPTO_CALL_UNITS      64
+ *     in JS each buffer argument goes through js_get_buffer and the
+ *     digest comes back as a fresh ArrayBuffer: sha256("") ~2.8 us,
+ *     hmacSha256 ~6 us            -> HL_WORK_JS_CRYPTO_CALL_UNITS  256
+ *   a terminal mode toggle (enable_mouse / paste / focus / kitty_kbd):
+ *     an escape sequence written to the tty
+ *                                 -> HL_WORK_TUI_TOGGLE_UNITS      256
+ *   tui.leave: the screen restore, tcsetattr and the tty close
+ *                                 -> HL_WORK_TUI_LEAVE_UNITS      1024
+ *   smtp.send: DNS, connect, TLS and the SMTP conversation, as an HTTP
+ *     request                     -> HL_WORK_SMTP_SEND_UNITS     16384
+ */
+#define HL_WORK_KV_COMMAND_UNITS      8192u
+#define HL_WORK_KV_OPEN_UNITS        16384u
+#define HL_WORK_NET_SQL_UNITS         8192u
+#define HL_WORK_LOG_RECORD_UNITS       256u
+#define HL_WORK_LOG_CALL_UNITS          64u
+#define HL_WORK_LOG_ARG_UNITS           16u
+#define HL_WORK_CLI_FLUSH_UNITS         64u
+#define HL_WORK_CRYPTO_CALL_UNITS       64u
+#define HL_WORK_JS_CRYPTO_CALL_UNITS   256u
+#define HL_WORK_TUI_TOGGLE_UNITS       256u
+#define HL_WORK_TUI_LEAVE_UNITS       1024u
+#define HL_WORK_SMTP_SEND_UNITS      HL_WORK_HTTP_REQUEST_UNITS
+
+/* A KV command sending @p bytes of key and value. */
+static inline uint64_t hl_work_kv_command_units(size_t bytes)
+{
+    return HL_WORK_KV_COMMAND_UNITS + (uint64_t)bytes / 8;
+}
+
+/* One log record of @p len bytes. */
+static inline uint64_t hl_work_log_record_units(size_t len)
+{
+    return HL_WORK_LOG_RECORD_UNITS + (uint64_t)len / 8;
+}
+
+/* A crypto call over @p bytes of input (Lua; JS: hl_work_js_crypto_units). */
+static inline uint64_t hl_work_crypto_units(size_t bytes)
+{
+    return HL_WORK_CRYPTO_CALL_UNITS + (uint64_t)bytes / 8;
+}
+
+static inline uint64_t hl_work_js_crypto_units(size_t bytes)
+{
+    return HL_WORK_JS_CRYPTO_CALL_UNITS + (uint64_t)bytes / 8;
+}
+
 /* A monotonic clock in microseconds, for the calls charged by the time
  * they took (0 if the clock fails: the floor still applies). */
 static inline int64_t hl_work_clock_us(void)

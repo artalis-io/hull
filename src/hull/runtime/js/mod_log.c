@@ -19,11 +19,16 @@
 int hl_js_log_args(JSContext *ctx, int level, const char *file,
                    const char *tag, int argc, JSValueConst *argv)
 {
+    /* The call, then every argument is a record of its own (audit 41: the
+     * bytes alone were charged, so log.info("") - a timestamp, an escape
+     * pass and an unbuffered stderr write - was free, and an 8-argument
+     * console.log loop ran ~590 s per budget). */
+    if (hl_js_budget_charge(ctx, HL_WORK_LOG_CALL_UNITS) < 0) return -1;
     for (int i = 0; i < argc; i++) {
         size_t len = 0;
         const char *str = JS_ToCStringLen(ctx, &len, argv[i]);
         if (!str) return -1;
-        if (hl_js_budget_charge(ctx, hl_work_bytes_units(len)) < 0) {
+        if (hl_js_budget_charge(ctx, hl_work_log_record_units(len)) < 0) {
             JS_FreeCString(ctx, str);
             return -1;
         }

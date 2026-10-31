@@ -146,6 +146,12 @@ int hl_db_budget_charge(int64_t units)
     return stop || atomic_load_explicit(&g_op_shutdown, memory_order_acquire);
 }
 
+int hl_db_net_stmt_charge(int is_rollback)
+{
+    int stop = hl_db_budget_charge((int64_t)HL_WORK_NET_SQL_UNITS);
+    return stop && !is_rollback ? -1 : 0;
+}
+
 void hl_db_op_shutdown(int on)
 {
     atomic_store(&g_op_shutdown, on ? 1 : 0);

@@ -36,6 +36,11 @@ static int lua_log_level(lua_State *L, int level)
         tag = "[hull:lua]";
 
     int n = lua_gettop(L);
+    /* The call (the caller lookup above), then every argument is a record
+     * of its own (audit 41: the bytes alone were charged, so log.info("")
+     * - a timestamp, an escape pass and an unbuffered stderr write - was
+     * free, and a loop of it ran ~40 s per budget). */
+    lua_hlwork(L, HL_WORK_LOG_CALL_UNITS, 0);
     for (int i = 1; i <= n; i++) {
         size_t len = 0;
         const char *s = luaL_tolstring(L, i, &len);
@@ -45,7 +50,7 @@ static int lua_log_level(lua_State *L, int level)
         }
         /* Charged before the write (audit 24): log_log formats and writes
          * the whole message in this one call. */
-        uint64_t u = hl_work_bytes_units((uint64_t)len);
+        uint64_t u = hl_work_log_record_units(len);
         lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
         /* CR / LF go out as the two characters \r / \n (audit 24, as the
          * JS runtime): a message holding a newline wrote a second log line

@@ -2150,6 +2150,17 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
     FILE *f = cli_stream_for(magic);
     if (!f) return JS_ThrowInternalError(ctx, "invalid stream");
 
+    /* A blocking read with no deadline: fine for a CLI, whose app.main
+     * holds nothing else up, but a ctx kept past main and read from a
+     * request handler, a timer or a callback held the event loop until the
+     * terminal or the pipe answered (audit 41). Only app.main's own code
+     * may read. */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->active_cli_main)
+        return JS_ThrowTypeError(ctx, "ctx.stdin.read() is only available in "
+                                      "app.main's own code (it blocks the event loop)");
+    if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0) return JS_EXCEPTION;
+
     /* read()        → "*l" line read
      * read("a"|"l") → that mode
      * read(n)       → n bytes */
@@ -2251,6 +2262,13 @@ static JSValue js_cli_write(JSContext *ctx, JSValueConst this_val,
         size_t n = 0;
         const char *s = JS_ToCStringLen(ctx, &n, argv[i]);
         if (!s) return JS_EXCEPTION;
+        /* Charged before the copy (audit 41: uncharged, and a ctx kept past
+         * app.main reaches request handlers). */
+        if (hl_js_budget_charge(ctx, HL_WORK_CALL_UNITS +
+                                     hl_work_bytes_units((uint64_t)n)) < 0) {
+            JS_FreeCString(ctx, s);
+            return JS_EXCEPTION;
+        }
         if (n && fwrite(s, 1, n, f) != n) {
             JS_FreeCString(ctx, s);
             return JS_ThrowInternalError(ctx, "write failed");
@@ -2263,8 +2281,10 @@ static JSValue js_cli_write(JSContext *ctx, JSValueConst this_val,
 static JSValue js_cli_flush(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
 {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    (void)this_val; (void)argc; (void)argv;
     FILE *f = cli_stream_for(magic);
+    if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0)   /* audit 41 */
+        return JS_EXCEPTION;
     if (f) fflush(f);
     return JS_UNDEFINED;
 }
