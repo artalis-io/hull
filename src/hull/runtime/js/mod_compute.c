@@ -1523,6 +1523,21 @@ static int js_stream_before_chunk(size_t chunk_len, void *user_data)
     return 0;
 }
 
+/* Per-chunk OUTPUT charge (audit 41): the guest's output per chunk is up to
+ * max_output whatever its input, then copied and written (or handed to the
+ * callback). 1 unit per 8 bytes plus 1, as fs.write, before any of it. */
+static int js_stream_after_chunk(size_t out_len, void *user_data)
+{
+    JsStreamBudget *b = (JsStreamBudget *)user_data;
+    if (b->tripped) return 1;
+    if (hl_js_budget_charge(b->ctx,
+                            1 + hl_work_bytes_units((uint64_t)out_len)) < 0) {
+        b->tripped = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* The resolution of a file input / output, charged as fs.read / fs.write
  * charge theirs (audit 38), to the same trip flag. */
 static int js_stream_fs_charge(void *user_data, uint64_t units)
@@ -1655,6 +1670,8 @@ static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
     JsStreamBudget stream_budget = { ctx, 0 };
     stream_opts.before_chunk = js_stream_before_chunk;
     stream_opts.before_chunk_ud = &stream_budget;
+    stream_opts.after_chunk = js_stream_after_chunk;   /* audit 41 */
+    stream_opts.after_chunk_ud = &stream_budget;
     stream_opts.fs_charge = js_stream_fs_charge;
     stream_opts.fs_charge_ud = &stream_budget;
     /* The buffer-mode result becomes one ArrayBuffer on the VM heap. */

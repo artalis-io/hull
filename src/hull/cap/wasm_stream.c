@@ -14,6 +14,7 @@
 #include "hull/cap/fs.h"
 #include "hull/utils/alloc.h"
 #include "hull/limits/wasm.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_FS_WRITE_UNITS (audit 41) */
 #include "hull/vfs.h"
 #include "log.h"
 
@@ -149,7 +150,13 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
         HlFsChargeScope cs = { NULL, NULL, 0 };
         if (opts && opts->fs_charge)
             cs = hl_fs_charge_begin(opts->fs_charge, opts->fs_charge_ud);
-        int out_fd = hl_cap_fs_open_write_fd(fs_cfg, output->path, &ferr);
+        /* The file a stream writes costs what an fs.write's does beyond its
+         * resolution (audit 41): the floor, charged once before the open. */
+        int out_fd = -1;
+        if (opts && opts->fs_charge && hl_fs_charge(HL_WORK_FS_WRITE_UNITS))
+            ferr = "budget_exhausted";
+        else
+            out_fd = hl_cap_fs_open_write_fd(fs_cfg, output->path, &ferr);
         if (opts && opts->fs_charge) (void)hl_fs_charge_end(cs);
         if (out_fd < 0) {
             if (in_file) fclose(in_file);
@@ -265,6 +272,17 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
         hl_cap_wasm_clear_stream_ctx();
 
         if (rc != HL_WASM_OK) break;
+
+        /* The output's own charge (audit 41), before it is copied, written
+         * or handed to app code: up to max_output a chunk whatever its input,
+         * so the input-sized charge above let a small input write gigabytes. */
+        if (chunk_out && chunk_out_len > 0 && opts && opts->after_chunk &&
+            opts->after_chunk(chunk_out_len, opts->after_chunk_ud) != 0) {
+            rc = HL_WASM_ERR_INTERNAL;
+            if (err_msg) *err_msg = "stopped";
+            hl_alloc_free(alloc, chunk_out, chunk_out_len);
+            break;
+        }
 
         /* Route output chunk */
         if (chunk_out && chunk_out_len > 0) {
