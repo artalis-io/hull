@@ -157,8 +157,92 @@
 #define HL_GPU_WGSL_EXPAND_UNITS ((uint64_t)1024)
 #endif
 
+/* How much code one shader may be (audit 40), as hl_gpu_wgsl_size counts
+ * it: words (identifiers, keywords, numeric literals), let / var / const
+ * declarations and statements, per function body and per module. Every
+ * depth bound above leaves width alone, and Metal's compiler
+ * (MTLCompilerService, behind pipeline creation) takes time that grows
+ * faster than linearly with the code in one function. Measured on Apple
+ * M1 Max / Metal with the bounds bypassed (a trivial shader: ~0.06 s):
+ *   - N live values (`let vK = o[K] * 3u;` x N, then `s ^= vK;` x N in
+ *     reverse): N = 290 (~2000 words) 0.13 s, 500 0.28 s, 1000 1.4 s,
+ *     2000 3.8 s, 4000 13.7 s, 30000 (957 KB) 343 s;
+ *   - independent stores `o[K] = o[K] * 3u;`: 400 (~2000 words) 0.25 s,
+ *     1000 0.88 s, 2000 4.0 s, 8000 13.8 s;
+ *   - one array constructor of N `o[K] * 3u` elements: 680 (~2000 words)
+ *     0.59 s, 1000 1.16 s, 4000 16.3 s;
+ *   - `s = max(s, o[K] * 3u) ^ o[J];`: 256 (~2000 words) 0.24 s, 2000
+ *     5.8 s, 4000 21 s;
+ *   - dependent `x = x * Ku + o[J];`: 400 0.10 s, 4000 1.25 s, 8000 5.0 s;
+ *   - the code split into functions costs about the sum of its parts:
+ *     2 functions of ~2000 words each (stores, or array constructors)
+ *     0.6-0.93 s, the worst measured within the bounds below; 4 x 400
+ *     stores (~8000 words) 2.5 s;
+ *   - a module-scope `var<private>` table of 4000 literals 0.9 s (its
+ *     initializer is code); a module-scope `const` table of 30000 0.11 s
+ *     (folded, so module-scope const / override / alias / struct are not
+ *     counted).
+ * Real compute shaders are a few hundred words (the shipped examples are
+ * under 400); the bounds are ~5-10x that and keep every shape measured
+ * under ~1 s. */
+#ifndef HL_GPU_WGSL_FN_WORDS_MAX
+#define HL_GPU_WGSL_FN_WORDS_MAX     2048
+#endif
+#ifndef HL_GPU_WGSL_MODULE_WORDS_MAX
+#define HL_GPU_WGSL_MODULE_WORDS_MAX 4096
+#endif
+#ifndef HL_GPU_WGSL_FN_DECLS_MAX
+#define HL_GPU_WGSL_FN_DECLS_MAX     512
+#endif
+#ifndef HL_GPU_WGSL_FN_STMTS_MAX
+#define HL_GPU_WGSL_FN_STMTS_MAX     1024
+#endif
+#ifndef HL_GPU_WGSL_MODULE_STMTS_MAX
+#define HL_GPU_WGSL_MODULE_STMTS_MAX 2048
+#endif
+
+/* Run-budget units a compile is charged per word, per statement and per
+ * declaration squared (per function), on top of the byte and expansion
+ * charges (audit 40), whether it compiles, fails or is refused. A shader
+ * at the module word bound costs ~4096 x 4096 + ~800 x 1024 ~= 17.6M
+ * units (more with many declarations: 512^2 x 32 = 8.4M per function at
+ * that bound), about a fifth of the default 100M budget - roughly what a
+ * second of script costs, as such a compile takes up to ~1 s - so a loop
+ * of large compiles trips the budget within a handful. The shipped
+ * example shaders cost under 1M. */
+#ifndef HL_GPU_WGSL_WORD_UNITS
+#define HL_GPU_WGSL_WORD_UNITS    ((uint64_t)4096)
+#endif
+#ifndef HL_GPU_WGSL_STMT_UNITS
+#define HL_GPU_WGSL_STMT_UNITS    ((uint64_t)1024)
+#endif
+#ifndef HL_GPU_WGSL_DECL_SQ_UNITS
+#define HL_GPU_WGSL_DECL_SQ_UNITS ((uint64_t)32)
+#endif
+
+/* How long the event loop waits for a backend shader compile (audit 40).
+ * The wait is also stopped, every HL_GPU_COMPILE_POLL_MS, by the run's
+ * deadline or a tripped budget (hl_db_budget_charge(0), as every GPU
+ * wait). A compile past either is abandoned: its thread runs on with its
+ * own copy of the source and releases what it made, and the device
+ * refuses GPU work (gpu_busy) until it finishes. Within the size bounds a
+ * compile takes ~1 s at most on the device measured; this is a backstop
+ * for slower devices and drivers, and for code with no run bound. */
+#ifndef HL_GPU_COMPILE_TIMEOUT_MS
+#define HL_GPU_COMPILE_TIMEOUT_MS  10000u
+#endif
+#ifndef HL_GPU_COMPILE_POLL_MS
+#define HL_GPU_COMPILE_POLL_MS     10u
+#endif
+/* How long hl_cap_gpu_destroy waits for an abandoned compile to finish
+ * before it leaves the backend's device and instance unfreed (the thread
+ * still uses them) rather than free them under it. */
+#ifndef HL_GPU_COMPILE_TEARDOWN_MS
+#define HL_GPU_COMPILE_TEARDOWN_MS 5000u
+#endif
+
 /* The stack of the thread every backend shader compile runs on (audit 39;
- * see gpu_compile_on_big_stack). A virtual reservation: only the pages a
+ * see gpu_compile_start). A virtual reservation: only the pages a
  * compile touches are committed, and the thread exits after each compile.
  * Measured on Apple M1 Max / Metal with every pre-check bypassed, the
  * deepest stack any source under HL_GPU_WGSL_MAX_BYTES reached was a flat

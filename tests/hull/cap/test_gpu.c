@@ -2270,9 +2270,17 @@ UTEST(hull_cap_gpu_audit37, else_if_chains_nest)
                 HL_GPU_WGSL_BLOCK_DEPTH_MAX);
     /* The expression estimate never saw it. */
     EXPECT_TRUE(a36_depth(c5500) < 16);
-    EXPECT_EQ(0, a37_check(c500));
+    /* At the depth bound c500 is past the function size bounds
+     * (audit 40); a chain as deep in fewer words passes. */
+    EXPECT_EQ(-1, a37_check(c500));
     EXPECT_EQ(-1, a37_check(c5500));
     free(c500); free(c5500);
+    char *small = a36_chain("@compute @workgroup_size(1) fn main() { if (true) {}",
+                            " else if (true) {}", 500, " }");
+    ASSERT_TRUE(small != NULL);
+    EXPECT_EQ((size_t)502, hl_gpu_wgsl_block_depth(small, strlen(small)));
+    EXPECT_EQ(0, a37_check(small));
+    free(small);
 
     EXPECT_EQ((size_t)0, hl_gpu_wgsl_block_depth(NULL, 0));
 #define A37_BD(s) hl_gpu_wgsl_block_depth(s, strlen(s))
@@ -2492,8 +2500,14 @@ UTEST(hull_cap_gpu_audit38, chains_at_the_bound)
                       hl_gpu_wgsl_decl_chain(ok, strlen(ok)));
             EXPECT_EQ((size_t)HL_GPU_WGSL_DECL_CHAIN_MAX + 1,
                       hl_gpu_wgsl_decl_chain(over, strlen(over)));
-            EXPECT_EQ(0, a37_check(ok));
             const char *why = NULL;
+            if (kind == A38_FN) {
+                /* 2048 functions are past the module size bound (audit 40). */
+                EXPECT_EQ(-1, hl_gpu_wgsl_precheck(ok, strlen(ok), &why));
+                EXPECT_TRUE(why && strstr(why, "too large"));
+            } else {
+                EXPECT_EQ(0, a37_check(ok));
+            }
             EXPECT_EQ(-1, hl_gpu_wgsl_precheck(over, strlen(over), &why));
             EXPECT_TRUE(why && strstr(why, "declarations"));
             /* Every other estimate stays shallow. */
@@ -2526,7 +2540,9 @@ UTEST(hull_cap_gpu_audit38, compile_refuses_before_backend)
         free(src);
     }
     EXPECT_EQ(0, mock_compiles);
-    char *ok = a38_chain(A38_FN, HL_GPU_WGSL_DECL_CHAIN_MAX - 1, 1);
+    /* A const chain: a function chain this long is past the module size
+     * bound (audit 40). */
+    char *ok = a38_chain(A38_CONST, HL_GPU_WGSL_DECL_CHAIN_MAX - 1, 1);
     ASSERT_TRUE(ok != NULL);
     EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "ok", ok, strlen(ok)));
     EXPECT_EQ(1, mock_compiles);
@@ -2554,7 +2570,10 @@ UTEST(hull_cap_gpu_audit38, real_device_survives)
         EXPECT_EQ(HL_GPU_ERR_SHADER,
                   hl_cap_gpu_compile(&ctx, -1, name, over, strlen(over)));
         snprintf(name, sizeof(name), "ok%d", kind);
-        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, name, ok, strlen(ok)));
+        /* A function chain at the bound is past the module size bound
+         * (audit 40). */
+        EXPECT_EQ(kind == A38_FN ? HL_GPU_ERR_SHADER : HL_GPU_OK,
+                  hl_cap_gpu_compile(&ctx, -1, name, ok, strlen(ok)));
         free(crash); free(over); free(ok);
     }
     hl_cap_gpu_destroy(&ctx);
@@ -2702,8 +2721,13 @@ UTEST(hull_cap_gpu_audit39, inferred_expansion)
     s = a39_shape(A39_EXP_CONST, 10);
     ASSERT_TRUE(s != NULL);
     ASSERT_EQ(0, a39_infer(s));
+    HlGpuWgslSize a39_sz;
+    ASSERT_EQ(0, hl_gpu_wgsl_size(s, strlen(s), &a39_sz));
     EXPECT_EQ(hl_work_bytes_units(strlen(s)) +
-              a39_inf.expanded * HL_GPU_WGSL_EXPAND_UNITS,
+              a39_inf.expanded * HL_GPU_WGSL_EXPAND_UNITS +
+              a39_sz.module_words * HL_GPU_WGSL_WORD_UNITS +
+              a39_sz.module_stmts * HL_GPU_WGSL_STMT_UNITS +
+              a39_sz.decls_sq * HL_GPU_WGSL_DECL_SQ_UNITS,
               hl_gpu_wgsl_compile_units(s, strlen(s)));
     free(s);
 }
@@ -2716,7 +2740,15 @@ UTEST(hull_cap_gpu_audit39, local_chains)
     ASSERT_EQ(0, a39_infer(ok));
     EXPECT_EQ((size_t)HL_GPU_WGSL_DECL_CHAIN_MAX, a39_inf.chain);
     EXPECT_EQ((size_t)0, a39_inf.depth);
-    EXPECT_EQ(0, a37_check(ok));
+    /* 2048 locals are past the per-function size bounds (audit 40), which
+     * now bound a local chain first. */
+    const char *why0 = NULL;
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(ok, strlen(ok), &why0));
+    EXPECT_TRUE(why0 && strstr(why0, "function"));
+    char *fit = a39_shape(A39_LET_CHAIN, HL_GPU_WGSL_FN_DECLS_MAX - 1);
+    ASSERT_TRUE(fit != NULL);
+    EXPECT_EQ(0, a37_check(fit));
+    free(fit);
     ASSERT_EQ(0, a39_infer(over));
     EXPECT_EQ((size_t)HL_GPU_WGSL_DECL_CHAIN_MAX + 1, a39_inf.chain);
     const char *why = NULL;
@@ -2825,6 +2857,21 @@ UTEST(hull_cap_gpu_audit39, real_device_refuses_round39)
     hl_cap_gpu_destroy(&ctx);
 }
 
+/* Compile, first waiting out a device left busy by an abandoned compile
+ * (audit 40). */
+static int a40_compile_settled(HlGpuCtx *ctx, const char *name, const char *src)
+{
+    int rc = HL_GPU_ERR_BUSY;
+    for (int tries = 0; tries < 6000 && rc == HL_GPU_ERR_BUSY; tries++) {
+        rc = hl_cap_gpu_compile(ctx, -1, name, src, strlen(src));
+        if (rc == HL_GPU_ERR_BUSY) {
+            struct timespec ts = { 0, 50 * 1000000L };
+            nanosleep(&ts, NULL);
+        }
+    }
+    return rc;
+}
+
 /* The structural fix: with every estimator bypassed, the shapes that
  * overflowed the event loop's stack in rounds 36-39 fail cleanly (or
  * compile) on the compile thread; the process survives. */
@@ -2844,16 +2891,481 @@ UTEST(hull_cap_gpu_audit39, compile_thread_survives_without_estimators)
         ASSERT_TRUE(shapes[k] != NULL);
         char name[16];
         snprintf(name, sizeof(name), "bypass%d", k);
-        int rc = hl_cap_gpu_compile(&ctx, -1, name, shapes[k], strlen(shapes[k]));
-        EXPECT_TRUE(rc == HL_GPU_OK || rc == HL_GPU_ERR_SHADER);
+        /* A compile past the deadline is abandoned (audit 40); the device
+         * is busy until it finishes. */
+        int rc = a40_compile_settled(&ctx, name, shapes[k]);
+        EXPECT_TRUE(rc == HL_GPU_OK || rc == HL_GPU_ERR_SHADER ||
+                    rc == HL_GPU_ERR_TIMEOUT);
         free(shapes[k]);
     }
     hl_gpu_test_set_precheck_bypass(0);
     /* A shader still compiles after them. */
     const char *ok = "@compute @workgroup_size(1) fn main() {}";
-    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "after", ok, strlen(ok)));
+    EXPECT_EQ(HL_GPU_OK, a40_compile_settled(&ctx, "after", ok));
     hl_cap_gpu_destroy(&ctx);
 }
 #endif /* HL_ENABLE_GPU */
+
+/* ── Audit 40: shader size bounds, compile charge, compile deadline ────
+ *
+ * A shader that passed every depth check could hold the event loop for
+ * minutes: Metal's compiler time grows faster than linearly with the code
+ * in one function (30000 live values: 343 s), and the loop waited for the
+ * compile thread with a plain join. Now the size of each function and of
+ * the module is bounded, the compile is charged by its size, and the wait
+ * has a deadline that also polls the run. */
+
+#include "hull/cap/db_budget.h"
+#include <time.h>
+#include <unistd.h>
+
+/* A value each run's shapes store, so a device's shader cache (Metal
+ * keeps one across processes) never answers for a compile being timed. */
+static unsigned a40_nonce(void)
+{
+    static unsigned n;
+    if (n == 0) n = ((unsigned)time(NULL) ^ (unsigned)getpid() * 2654435761u) | 1u;
+    return n;
+}
+
+/* N live values: `let vK = o[K] * 3u;` x N, then `s ^= vK;` x N reversed. */
+static char *a40_live(size_t n)
+{
+    size_t cap = 96 * (n + 8);
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    size_t off = (size_t)snprintf(s, cap,
+        "@group(0) @binding(0) var<storage, read_write> o: array<u32>;\n"
+        "@compute @workgroup_size(1) fn main() {\nvar s = 0u;\n");
+    for (size_t k = 0; k < n; k++)
+        off += (size_t)snprintf(s + off, cap - off, "let v%zu = o[%zu] * 3u;\n", k, k);
+    for (size_t k = n; k-- > 0;)
+        off += (size_t)snprintf(s + off, cap - off, "s ^= v%zu;\n", k);
+    snprintf(s + off, cap - off, "o[0] = s + %uu;\n}\n", a40_nonce());
+    return s;
+}
+
+/* @p fns functions of @p per independent stores each, called from main. */
+static char *a40_stores(size_t fns, size_t per)
+{
+    size_t cap = 64 * (fns * (per + 4) + 8);
+    char *s = malloc(cap);
+    if (!s) return NULL;
+    size_t off = (size_t)snprintf(s, cap,
+        "@group(0) @binding(0) var<storage, read_write> o: array<u32>;\n");
+    for (size_t f = 0; f < fns; f++) {
+        off += (size_t)snprintf(s + off, cap - off, "fn f%zu() {\n", f);
+        for (size_t k = 0; k < per; k++)
+            off += (size_t)snprintf(s + off, cap - off,
+                                    "o[%zu] = o[%zu] * %zuu;\n", k, k, f + 3);
+        off += (size_t)snprintf(s + off, cap - off, "}\n");
+    }
+    off += (size_t)snprintf(s + off, cap - off,
+                            "@compute @workgroup_size(1) fn main() {\n");
+    for (size_t f = 0; f < fns; f++)
+        off += (size_t)snprintf(s + off, cap - off, "f%zu();\n", f);
+    snprintf(s + off, cap - off, "o[1] = %uu;\n}\n", a40_nonce());
+    return s;
+}
+
+static HlGpuWgslSize a40_sz;
+static int a40_size(const char *s)
+{
+    return hl_gpu_wgsl_size(s, strlen(s), &a40_sz);
+}
+
+UTEST(hull_cap_gpu_audit40, size_counted)
+{
+    EXPECT_EQ(0, hl_gpu_wgsl_size(NULL, 0, &a40_sz));
+    EXPECT_EQ((size_t)0, a40_sz.module_words);
+    EXPECT_EQ(-1, hl_gpu_wgsl_size("x", 1, NULL));
+    /* fn, f, let, a, 1u, return, a: header words count. */
+    ASSERT_EQ(0, a40_size("fn f() -> u32 { let a = 1u; return a; }"));
+    EXPECT_EQ((size_t)8, a40_sz.fn_words);   /* fn f u32 let a 1u return a */
+    EXPECT_EQ((size_t)1, a40_sz.fn_decls);
+    EXPECT_EQ((size_t)3, a40_sz.fn_stmts);   /* { ; ; */
+    EXPECT_EQ((size_t)8, a40_sz.module_words);
+    EXPECT_EQ((uint64_t)1, a40_sz.decls_sq);
+    /* A for header's semicolons are not statements; its var is a declaration;
+     * attributes and comments are not words outside functions. */
+    ASSERT_EQ(0, a40_size("// c c c\n@compute @workgroup_size(64) fn m() {"
+                          " for (var i = 0u; i < 4u; i++) { } }"));
+    EXPECT_EQ((size_t)1, a40_sz.fn_decls);
+    EXPECT_EQ((size_t)2, a40_sz.fn_stmts);   /* the two blocks */
+    EXPECT_EQ((size_t)9, a40_sz.fn_words);   /* fn m for var i 0u i 4u i */
+    /* Module-scope const / override / alias / struct are not counted; a
+     * module-scope var is. */
+    ASSERT_EQ(0, a40_size("const T = array<u32, 4>(1u, 2u, 3u, 4u);"
+                          "override W = 1u; alias A = u32; struct S { a: u32 }"));
+    EXPECT_EQ((size_t)0, a40_sz.module_words);
+    ASSERT_EQ(0, a40_size("var<private> t: array<u32, 2> = array<u32, 2>(1u, 2u);"));
+    EXPECT_EQ((size_t)11, a40_sz.module_words);
+    /* The largest function, and the module's totals. */
+    ASSERT_EQ(0, a40_size("fn a() { let x = 1; let y = 2; } fn b() { let z = 3; }"));
+    EXPECT_EQ((size_t)2, a40_sz.fn_decls);
+    EXPECT_EQ((uint64_t)5, a40_sz.decls_sq);
+    EXPECT_EQ((size_t)5, a40_sz.module_stmts);
+    /* The lexer's refusals carry over. */
+    EXPECT_EQ(-1, a40_size("fn a() { let s = \"q\"; }"));
+}
+
+UTEST(hull_cap_gpu_audit40, each_bound_refused)
+{
+    const char *why = NULL;
+    /* Words in one function: `x = x + 1;` is 3 words, the head 5. */
+    size_t per = HL_GPU_WGSL_FN_WORDS_MAX / 3;
+    char *w_ok = a36_chain("fn main() { var x = 0;", " x = x + 1;", per - 2, " }");
+    char *w_bad = a36_chain("fn main() { var x = 0;", " x = x + 1;", per + 1, " }");
+    /* Declarations: `let aK = 0;` x N (3 words each), in two halves so no
+     * other bound comes first. */
+    char *d_bad = a36_chain("fn main() {", " let a = 0;",
+                            HL_GPU_WGSL_FN_DECLS_MAX + 1, " }");
+    /* Statements: `;` alone. */
+    char *s_bad = a36_chain("fn main() {", ";", HL_GPU_WGSL_FN_STMTS_MAX + 1, " }");
+    /* Module words: three functions of ~1800 words. */
+    char *mw_bad = a36_chain("fn a() { var x = 0;", " x = x + 1;", 600,
+        " } fn b() { var x = 0;");
+    char *mw_bad2 = NULL;
+    ASSERT_TRUE(w_ok && w_bad && d_bad && s_bad && mw_bad);
+    {
+        size_t l = strlen(mw_bad);
+        char *more = a36_chain(" ", " x = x + 1;", 600, " } fn c() { var x = 0;");
+        char *last = a36_chain(" ", " x = x + 1;", 600, " }");
+        ASSERT_TRUE(more && last);
+        mw_bad2 = malloc(l + strlen(more) + strlen(last) + 1);
+        ASSERT_TRUE(mw_bad2 != NULL);
+        strcpy(mw_bad2, mw_bad);
+        strcat(mw_bad2, more);
+        strcat(mw_bad2, last);
+        free(more); free(last);
+    }
+    /* Module statements: functions of `;` alone. */
+    char *ms_bad = a36_chain("fn a() {", ";", HL_GPU_WGSL_FN_STMTS_MAX - 1,
+                             "} fn b() {");
+    char *ms_bad2 = NULL;
+    ASSERT_TRUE(ms_bad != NULL);
+    {
+        char *rest = a36_chain("", ";", HL_GPU_WGSL_FN_STMTS_MAX - 1,
+                               "} fn c() { ; ; }");
+        ASSERT_TRUE(rest != NULL);
+        ms_bad2 = malloc(strlen(ms_bad) + strlen(rest) + 1);
+        ASSERT_TRUE(ms_bad2 != NULL);
+        strcpy(ms_bad2, ms_bad);
+        strcat(ms_bad2, rest);
+        free(rest);
+    }
+    EXPECT_EQ(0, a37_check(w_ok));
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(w_bad, strlen(w_bad), &why));
+    EXPECT_TRUE(why && strstr(why, "function is too large"));
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(d_bad, strlen(d_bad), &why));
+    EXPECT_TRUE(why && strstr(why, "declares too many"));
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(s_bad, strlen(s_bad), &why));
+    EXPECT_TRUE(why && strstr(why, "function has too many statements"));
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(mw_bad2, strlen(mw_bad2), &why));
+    EXPECT_TRUE(why && strstr(why, "shader is too large"));
+    EXPECT_EQ(-1, hl_gpu_wgsl_precheck(ms_bad2, strlen(ms_bad2), &why));
+    EXPECT_TRUE(why && strstr(why, "shader has too many statements"));
+    /* The reported shapes: every depth shallow, refused by size. */
+    char *live = a40_live(24000);
+    char *chain = a36_chain("@group(0) @binding(0) var<storage, read_write> o: array<u32>;\n"
+                            "@compute @workgroup_size(1) fn main() { var x = o[0];",
+                            " x = x * 7u + o[3];", 25000, " o[0] = x; }");
+    ASSERT_TRUE(live && chain);
+    EXPECT_TRUE(strlen(live) <= HL_GPU_WGSL_MAX_BYTES);
+    EXPECT_TRUE(hl_gpu_wgsl_complexity(live, strlen(live)) < 16);
+    EXPECT_EQ(-1, a37_check(live));
+    EXPECT_EQ(-1, a37_check(chain));
+
+    /* Through hl_cap_gpu_compile: refused before the backend. */
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = mock_compile;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    mock_compiles = 0;
+    char *bad[] = { w_bad, d_bad, s_bad, mw_bad2, ms_bad2, live, chain };
+    for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); k++)
+        EXPECT_EQ(HL_GPU_ERR_SHADER,
+                  hl_cap_gpu_compile(ctx, -1, "bad", bad[k], strlen(bad[k])));
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "ok", w_ok, strlen(w_ok)));
+    EXPECT_EQ(1, mock_compiles);
+    mock_free(ctx);
+    free(w_ok); free(w_bad); free(d_bad); free(s_bad); free(mw_bad);
+    free(mw_bad2); free(ms_bad); free(ms_bad2); free(live); free(chain);
+}
+
+/* The compile charge: a shader at the bounds costs a large share of the
+ * default budget, refused ones are charged too, and the examples stay
+ * cheap. */
+UTEST(hull_cap_gpu_audit40, compile_charge)
+{
+    const uint64_t budget = 100000000u;            /* the default */
+    char *big = a40_stores(2, (HL_GPU_WGSL_FN_WORDS_MAX - 16) / 5);
+    ASSERT_TRUE(big != NULL);
+    EXPECT_EQ(0, a37_check(big));
+    uint64_t u = hl_gpu_wgsl_compile_units(big, strlen(big));
+    EXPECT_TRUE(u >= budget / 10);
+    /* A loop of them trips the default budget within a dozen. */
+    uint64_t total = 0;
+    int n = 0;
+    while (total <= budget && n < 100) { total += u; n++; }
+    EXPECT_TRUE(n <= 12);
+    /* Refused is charged like compiled. */
+    char *live = a40_live(24000);
+    ASSERT_TRUE(live != NULL);
+    EXPECT_TRUE(hl_gpu_wgsl_compile_units(live, strlen(live)) > budget);
+    free(live);
+    free(big);
+    /* The shipped example shaders cost under 1M units. */
+    size_t len = 0;
+    char *ex = a36_read_file("examples/gpu_search/shaders/cosine_similarity.wgsl", &len);
+    if (ex) {
+        uint64_t eu = hl_gpu_wgsl_compile_units(ex, len);
+        printf("  audit40 example shader: %llu units\n", (unsigned long long)eu);
+        EXPECT_TRUE(eu < 1000000u);
+        free(ex);
+    }
+}
+
+/* A backend compile that blocks until the test releases it. */
+static pthread_mutex_t a40_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t a40_cv = PTHREAD_COND_INITIALIZER;
+static int a40_release, a40_started, a40_finished, a40_destroyed;
+
+static int a40_slow_compile(HlGpuDevice *dev, const char *name,
+                            const char *wgsl, size_t wgsl_len,
+                            HlGpuPipeline *out)
+{
+    (void)dev; (void)name; (void)wgsl; (void)wgsl_len;
+    pthread_mutex_lock(&a40_mu);
+    a40_started = 1;
+    while (!a40_release)
+        pthread_cond_wait(&a40_cv, &a40_mu);
+    pthread_mutex_unlock(&a40_mu);
+    out->handle = (void *)&a40_destroyed;      /* something to release */
+    pthread_mutex_lock(&a40_mu);
+    a40_finished++;
+    pthread_mutex_unlock(&a40_mu);
+    return HL_GPU_OK;
+}
+
+static void a40_pipeline_destroy(HlGpuDevice *dev, HlGpuPipeline *p)
+{
+    (void)dev;
+    if (p && p->handle) {
+        pthread_mutex_lock(&a40_mu);
+        a40_destroyed++;
+        pthread_mutex_unlock(&a40_mu);
+        p->handle = NULL;
+    }
+}
+
+static void a40_reset(void)
+{
+    pthread_mutex_lock(&a40_mu);
+    a40_release = a40_started = a40_finished = a40_destroyed = 0;
+    pthread_mutex_unlock(&a40_mu);
+}
+
+static void a40_release_now(void)
+{
+    pthread_mutex_lock(&a40_mu);
+    a40_release = 1;
+    pthread_cond_broadcast(&a40_cv);
+    pthread_mutex_unlock(&a40_mu);
+}
+
+static double a40_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void a40_sleep_ms(long ms)
+{
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+/* Wait (bounded) until the device's abandoned compile is gone. */
+static int a40_wait_settled(HlGpuCtx *ctx)
+{
+    (void)ctx;
+    for (int k = 0; k < 500; k++) {
+        int f;
+        pthread_mutex_lock(&a40_mu);
+        f = a40_finished;
+        pthread_mutex_unlock(&a40_mu);
+        if (f) return 1;
+        a40_sleep_ms(10);
+    }
+    return 0;
+}
+
+UTEST(hull_cap_gpu_audit40, deadline_abandons_and_device_recovers)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = a40_slow_compile;
+    be.pipeline_destroy = a40_pipeline_destroy;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    a40_reset();
+    hl_gpu_test_set_compile_timeout_ms(100);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile(ctx, -1, "slow", src, strlen(src)));
+    double dt = a40_now() - t0;
+    EXPECT_TRUE(dt < 2.0);
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    EXPECT_TRUE(ctx->devices[0].compile_job != NULL);
+    /* Busy: compiles, dispatches, writes and reads are refused. */
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_compile(ctx, -1, "next", src, strlen(src)));
+    mock_add_shader(ctx, "sh");
+    mock_dispatches = 0;
+    HlGpuDispatchOpts opts = {
+        .output_buffer = -1, .output_texture = -1, .device = -1,
+    };
+    const char *err = NULL;
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_dispatch(ctx, "sh", &opts, NULL, NULL, &err));
+    EXPECT_TRUE(err && strcmp(err, "gpu_busy") == 0);
+    EXPECT_EQ(0, mock_dispatches);
+    ASSERT_EQ(HL_GPU_OK, hl_cap_gpu_buffer_create(ctx, -1, "b", 16, HL_GPU_USAGE_READWRITE));
+    unsigned char data[16] = { 0 };
+    EXPECT_EQ(HL_GPU_ERR_BUSY, hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0));
+    /* The compile finishes: its pipeline is released, the device is
+     * free again. */
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    for (int k = 0; k < 200 && ctx->devices[0].compile_job; k++) {
+        a40_sleep_ms(10);
+        int rc = hl_cap_gpu_buffer_write(ctx, -1, "b", data, 16, 0);
+        if (rc == HL_GPU_OK) break;
+    }
+    EXPECT_TRUE(ctx->devices[0].compile_job == NULL);
+    pthread_mutex_lock(&a40_mu);
+    EXPECT_EQ(1, a40_destroyed);
+    pthread_mutex_unlock(&a40_mu);
+    /* A compile now completes normally. */
+    hl_gpu_test_set_compile_timeout_ms(0);
+    int before = ctx->devices[0].pipeline_count;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "again", src, strlen(src)));
+    EXPECT_EQ(before + 1, ctx->devices[0].pipeline_count);
+    hl_cap_gpu_buffer_destroy(ctx, -1, "b");
+    mock_free(ctx);
+}
+
+#ifdef HL_ENABLE_DB
+/* The run stopping (deadline or budget: a bound charge that interrupts)
+ * abandons the wait at once, whatever the compile deadline. */
+static int a40_tripped(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return 1;
+}
+
+UTEST(hull_cap_gpu_audit40, stopped_run_abandons)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = a40_slow_compile;
+    be.pipeline_destroy = a40_pipeline_destroy;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    a40_reset();
+    hl_gpu_test_set_compile_timeout_ms(0);       /* the 10 s default */
+    HlDbBudgetBinding prev = hl_db_budget_swap(a40_tripped, NULL);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    double t0 = a40_now();
+    int rc = hl_cap_gpu_compile(ctx, -1, "slow", src, strlen(src));
+    double dt = a40_now() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, rc);
+    EXPECT_TRUE(dt < 1.0);
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    for (int k = 0; k < 200; k++) {
+        if (hl_cap_gpu_compile(ctx, -1, "after", src, strlen(src)) != HL_GPU_ERR_BUSY)
+            break;
+        a40_sleep_ms(10);
+    }
+    EXPECT_TRUE(ctx->devices[0].compile_job == NULL);
+    mock_free(ctx);
+}
+#endif
+
+/* Teardown with an abandoned compile still running waits for it (bounded)
+ * before the backend goes. */
+static void *a40_release_later(void *arg)
+{
+    (void)arg;
+    a40_sleep_ms(200);
+    a40_release_now();
+    return NULL;
+}
+
+UTEST(hull_cap_gpu_audit40, teardown_waits_for_compile)
+{
+    static HlGpuBackend be;                       /* outlives the thread */
+    be = MOCK_BACKEND;
+    be.compile = a40_slow_compile;
+    be.pipeline_destroy = a40_pipeline_destroy;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    a40_reset();
+    hl_gpu_test_set_compile_timeout_ms(50);
+    const char *src = "@compute @workgroup_size(1) fn main() {}";
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile(ctx, -1, "slow", src, strlen(src)));
+    hl_gpu_test_set_compile_timeout_ms(0);
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, a40_release_later, NULL));
+    double t0 = a40_now();
+    hl_cap_gpu_destroy(ctx);                      /* frees the mutex too */
+    double dt = a40_now() - t0;
+    pthread_join(th, NULL);
+    EXPECT_TRUE(dt >= 0.1 && dt < 3.0);
+    pthread_mutex_lock(&a40_mu);
+    EXPECT_EQ(1, a40_finished);
+    EXPECT_EQ(1, a40_destroyed);
+    pthread_mutex_unlock(&a40_mu);
+    free(ctx);
+}
+
+#ifdef HL_ENABLE_GPU
+/* On a real device (skipped without an adapter): shaders at the bounds
+ * compile within a bounded time, and the reported shapes are refused. */
+UTEST(hull_cap_gpu_audit40, real_device_bounded)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+    /* As close to the bounds as each shape gets. */
+    char *shapes[3];
+    shapes[0] = a40_live((HL_GPU_WGSL_FN_WORDS_MAX - 16) / 7);
+    shapes[1] = a40_stores(1, (HL_GPU_WGSL_FN_WORDS_MAX - 16) / 5);
+    shapes[2] = a40_stores(2, (HL_GPU_WGSL_FN_WORDS_MAX - 16) / 5);
+    for (int k = 0; k < 3; k++) {
+        ASSERT_TRUE(shapes[k] != NULL);
+        EXPECT_EQ(0, a37_check(shapes[k]));
+        char name[16];
+        snprintf(name, sizeof(name), "a40_%d", k);
+        double t0 = a40_now();
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, name, shapes[k],
+                                                strlen(shapes[k])));
+        double dt = a40_now() - t0;
+        EXPECT_TRUE(dt < 5.0);   /* ~1 s measured on Apple M1 Max */
+        printf("  audit40 shape %d: %zu bytes, %.2f s\n", k, strlen(shapes[k]), dt);
+        free(shapes[k]);
+    }
+    char *live = a40_live(4000);
+    ASSERT_TRUE(live != NULL);
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(&ctx, -1, "live", live, strlen(live)));
+    free(live);
+    hl_cap_gpu_destroy(&ctx);
+}
+#endif /* HL_ENABLE_GPU */
+
 
 UTEST_MAIN();

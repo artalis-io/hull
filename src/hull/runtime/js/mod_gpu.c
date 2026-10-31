@@ -312,7 +312,7 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     if (rc != HL_GPU_OK)
-        return JS_ThrowInternalError(ctx, "gpu.load: shader_error");
+        return JS_ThrowInternalError(ctx, "gpu.load: %s", hl_gpu_compile_errstr(rc));
 
     return JS_TRUE;
 }
@@ -359,7 +359,7 @@ static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, wgsl);
 
     if (rc != HL_GPU_OK)
-        return JS_ThrowInternalError(ctx, "gpu.compile failed: shader_error");
+        return JS_ThrowInternalError(ctx, "gpu.compile failed: %s", hl_gpu_compile_errstr(rc));
 
     return JS_TRUE;
 }
