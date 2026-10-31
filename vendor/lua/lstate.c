@@ -476,6 +476,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud) {
   g->lastatomic = 0;
   g->hlgcwork = 0;  /* HULL PATCH 0004 */
   g->hlstop = NULL;  /* HULL PATCH 0005 */
+  g->hltripped = NULL;  /* HULL PATCH 0006 */
   setivalue(&g->nilvalue, 0);  /* to signal that state is not yet built */
   setgcparam(g->gcpause, LUAI_GCPAUSE);
   setgcparam(g->gcstepmul, LUAI_GCMUL);

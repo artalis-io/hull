@@ -12083,6 +12083,133 @@ UTEST(lua_run_watchdog, zero_disables_it)
     EXPECT_EQ(hl_run_watchdog_parse_ms("", &v), -1);
 }
 
+/* ── Audit 41: ephemeron convergence is bounded (Lua HULL PATCH 0006) ──
+ *
+ * A weak-keyed table holding a long chain - each key's value is the next
+ * key - with the keys in scattered hash order made the collector's atomic
+ * phase converge one link per pass over the table: O(n^2) work inside one
+ * instruction, out of reach of the count hook and the run watchdog (an
+ * 80000-link chain ran 31 s past a 1 s deadline). The collector now stops
+ * converging past a work cap, or when the stop flag / a tripped budget says
+ * so, and marks the remaining tables' values conservatively. */
+#define A41_CHAIN_SRC(n) \
+    "local n = " #n " " \
+    "W = setmetatable({}, { __mode = 'k' }) " \
+    "local keys = {} " \
+    "for i = 1, n do keys[i] = {} end " \
+    "math.randomseed(42) " \
+    "for i = n, 2, -1 do local j = math.random(i) " \
+    "  keys[i], keys[j] = keys[j], keys[i] end " \
+    "for i = 1, n - 1 do W[keys[i]] = keys[i + 1] end " \
+    "ANCHOR = keys[1] keys = nil "
+/* every link must survive: walk the chain from its anchor */
+#define A41_WALK_SRC \
+    "local function walk() local c, k = 1, ANCHOR " \
+    "  while W[k] do k = W[k] c = c + 1 end return c end "
+
+static double a41_now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
+}
+
+/* A VM with no instruction limit and no deadline runs `code`; returns its
+ * status and the time it took in *ms. */
+static int a41_run(const char *code, double *ms, char *err, size_t n)
+{
+    hl_run_watchdog_configure(0);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 0;
+    HlLua lim;
+    memset(&lim, 0, sizeof lim);
+    if (hl_lua_init(&lim, &cfg) != 0) {
+        hl_run_watchdog_configure(-1);
+        return -100;
+    }
+    HL_LUA_ARM(&lim, lim.L);
+    double t0 = a41_now_ms();
+    int rc = luaL_dostring(lim.L, code);
+    *ms = a41_now_ms() - t0;
+    err[0] = '\0';
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(lim.L, -1);
+        snprintf(err, n, "%s", e ? e : "");
+    }
+    hl_lua_free(&lim);
+    hl_run_watchdog_configure(-1);
+    return rc;
+}
+
+/* 60000 links took ~17 s to converge before; linear now. The bound is wide
+ * for the sanitizer jobs. Every link is still there afterwards. */
+UTEST(lua_audit41, a_long_ephemeron_chain_is_collected_without_a_stall)
+{
+    static const char *const modes[] = { "incremental", "generational", NULL };
+    for (int m = 0; modes[m]; m++) {
+        char code[2048], err[512];
+        snprintf(code, sizeof code,
+                 "collectgarbage('%s') " A41_CHAIN_SRC(60000) A41_WALK_SRC
+                 "collectgarbage() collectgarbage() "
+                 "assert(walk() == n, 'chain broken: ' .. walk()) "
+                 "return 1", modes[m]);
+        double ms = 0;
+        EXPECT_EQ_MSG(a41_run(code, &ms, err, sizeof err), LUA_OK, err);
+        EXPECT_LT_MSG(ms, 5000.0, modes[m]);
+    }
+}
+
+/* Weak-key semantics hold, on the plain path and when the conservative
+ * finish runs: an unreachable key's entry is cleared, a reachable one kept,
+ * and a key reachable only through another entry's value is kept. */
+UTEST(lua_audit41, weak_keys_are_still_cleared_and_kept_correctly)
+{
+    char err[512];
+    double ms = 0;
+    EXPECT_EQ_MSG(a41_run(
+        "local w = setmetatable({}, { __mode = 'k' }) "
+        "local live = {} "
+        "local inner = {} "
+        "w[live] = inner "
+        "w[inner] = 'inner' "
+        "w[{}] = 'dead' "
+        "inner = nil "
+        "collectgarbage() collectgarbage() "
+        "local c = 0 for _ in pairs(w) do c = c + 1 end "
+        "assert(c == 2, 'entries: ' .. c) "
+        "assert(type(w[live]) == 'table' and w[w[live]] == 'inner') "
+        "return 1", &ms, err, sizeof err), LUA_OK, err);
+    EXPECT_STREQ(err, "");
+
+    /* The same table also holds a chain long enough to take the
+     * conservative finish: the unreachable keys are still cleared. */
+    EXPECT_EQ_MSG(a41_run(
+        A41_CHAIN_SRC(60000) A41_WALK_SRC
+        "for i = 1, 100 do W[{}] = {} end "
+        "local live = {} W[live] = 'live' "
+        "collectgarbage() collectgarbage() "
+        "local c = 0 for _ in pairs(W) do c = c + 1 end "
+        "assert(c == n, 'entries: ' .. c) "
+        "assert(W[live] == 'live' and walk() == n) "
+        "return 1", &ms, err, sizeof err), LUA_OK, err);
+    EXPECT_STREQ(err, "");
+}
+
+/* A deadline that passes while such collections run is honoured: the loop
+ * ends with the time-limit trip, not after minutes of convergence. */
+UTEST(lua_audit41, a_deadline_during_a_chain_collection_is_not_stuck)
+{
+    char err[512];
+    double t0 = a41_now_ms();
+    int rc = wd_lua_run(A41_CHAIN_SRC(60000)
+                        "while true do collectgarbage() end",
+                        err, sizeof err);
+    double ms = a41_now_ms() - t0;
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE_MSG(strstr(err, HL_RUN_TIME_LIMIT_MSG), NULL, err);
+    EXPECT_LT(ms, 5000.0);
+}
+
 #ifdef HL_ENABLE_WASM
 /* ── Audit 15: compute.stream chunks are charged to the run ───────────
  *
