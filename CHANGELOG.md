@@ -57,6 +57,19 @@ release-artifact layout).
   The check is one linear scan plus a sort; names are resolved by sorting and binary search, and
   the audit-37 type check now does the same instead of an unseeded hash table that colliding
   names could make quadratic. The examples' and docs' shaders are unaffected.
+- **A retyped `sqlite_schema` row slipped past the SQLite open check** (audit 41). The check
+  that refuses a database file holding a view, trigger or virtual table that reaches a `_hull_*`
+  table selected rows with `type IN ('view', 'trigger', 'table')`, compared case-sensitively.
+  SQLite builds the schema from each row's `sql` and checks `type` only without case, so a file
+  edited through `writable_schema` to say `View`, `TRIGGER` or `Table` was skipped by Hull and
+  still loaded the object. The check now reads every row with SQL and classifies it from the text
+  (CREATE [TEMP] TABLE / VIEW / TRIGGER, CREATE VIRTUAL TABLE, CREATE [UNIQUE] INDEX, past
+  comments; `hl_cap_db_schema_sql_kind`), applies the view / trigger / virtual-table rules by
+  that kind, and refuses the open when the text is not one of those or the `type` is not exactly
+  the lowercase value SQLite itself writes. A table is held to the virtual-table rule by its text,
+  or a stored rootpage of 0. Ordinary databases - tables, indexes, views, triggers, AUTOINCREMENT,
+  ANALYZE statistics, hull/search indexes - open as before. Covered by `hull_cap_db_audit41` in
+  `test_db`.
 - **The app running under `hull dev --agent` could forge what `hull agent` serves as Hull's
   output** (audit 37, both runtimes). Round 36 bound the `.hull/` sidecars to the live session
   by a nonce kept under `$HOME/.hull/dev-sessions/<pid>` - and also written into

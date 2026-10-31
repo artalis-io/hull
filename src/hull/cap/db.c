@@ -736,13 +736,21 @@ void hl_cap_db_sqlite_setup(void)
  * virtual table passes hl_cap_db_vtab_definition_ok (audit 40); -1 (logged,
  * the object named) otherwise or when the schema cannot be read. Read the way
  * the text check reads app SQL, so a string literal holding `_hull_` counts
- * too: an app view could not have been created with one either. */
+ * too: an app view could not have been created with one either.
+ *
+ * Every row is classified by its SQL text, never by its `type` column
+ * (audit 41): SQLite builds the schema by parsing each row's `sql` and does
+ * not look at `type`, so a planted row typed 'View' or 'x' was skipped here
+ * and still loaded as a view. A row whose SQL Hull cannot classify, or whose
+ * `type` is not the one SQLite itself writes for what the SQL builds, fails
+ * the open. Rows with NULL or empty `sql` (automatic indexes) build nothing
+ * from text. */
 static int db_check_stored_objects(sqlite3 *db)
 {
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
             "SELECT type, name, tbl_name, sql, rootpage FROM main.sqlite_schema "
-            "WHERE type IN ('view', 'trigger', 'table')", -1, &st, NULL) != SQLITE_OK) {
+            "WHERE sql IS NOT NULL AND sql <> ''", -1, &st, NULL) != SQLITE_OK) {
         hl_eprintf_line("hull: sqlite could not read the schema: %s",
                         sqlite3_errmsg(db));
         sqlite3_finalize(st);
@@ -754,14 +762,28 @@ static int db_check_stored_objects(sqlite3 *db)
         const char *name = (const char *)sqlite3_column_text(st, 1);
         const char *tbl  = (const char *)sqlite3_column_text(st, 2);
         const char *sql  = (const char *)sqlite3_column_text(st, 3);
-        if (type && strcmp(type, "table") == 0) {
-            /* A virtual table (rootpage 0, or the text says so - a planted
-             * file can write any rootpage) reads whatever its arguments name:
-             * an fts5 table with content='_hull_sessions' is queried by
+        HlDbSchemaKind kind = hl_cap_db_schema_sql_kind(sql);
+        const char *want = hl_cap_db_schema_kind_type(kind);
+        if (!want || !type || strcmp(type, want) != 0) {
+            hl_eprintf_line("hull: the database holds a schema entry "
+                            "'%.64s' (type '%.16s') whose definition Hull "
+                            "cannot match to what SQLite would build from it; "
+                            "the file may have been altered through "
+                            "writable_schema - repair or drop it with the "
+                            "sqlite3 CLI before opening the database with "
+                            "Hull", name ? name : "?", type ? type : "?");
+            rc = -1;
+            break;
+        }
+        if (kind == HL_DB_SCHEMA_INDEX)
+            continue;   /* an index names only its own table's columns */
+        if (kind == HL_DB_SCHEMA_TABLE || kind == HL_DB_SCHEMA_VIRTUAL_TABLE) {
+            /* A virtual table reads whatever its arguments name: an fts5
+             * table with content='_hull_sessions' is queried by
              * search.query, inside a stdlib call (audit 40). Ordinary tables
-             * hold only their own rows. */
-            if (sqlite3_column_int64(st, 4) != 0 &&
-                !hl_cap_db_sql_is_virtual_table(sql))
+             * hold only their own rows; one stored with rootpage 0 is held
+             * to the virtual-table rule too. */
+            if (kind == HL_DB_SCHEMA_TABLE && sqlite3_column_int64(st, 4) != 0)
                 continue;
             if (hl_cap_db_vtab_definition_ok(name, sql))
                 continue;
@@ -775,12 +797,12 @@ static int db_check_stored_objects(sqlite3 *db)
             break;
         }
         if (hl_cap_db_name_reserved(name) || hl_cap_db_name_reserved(tbl) ||
-            (sql && hl_cap_db_check_namespace(sql) != 0)) {
+            hl_cap_db_check_namespace(sql) != 0) {
             hl_eprintf_line("hull: the database holds a %s '%.64s' that names "
                             "a reserved _hull_* table (it would read or copy "
                             "Hull's internal tables past its check); drop it "
                             "with the sqlite3 CLI before opening the database "
-                            "with Hull", type ? type : "?", name ? name : "?");
+                            "with Hull", want, name ? name : "?");
             rc = -1;
             break;
         }

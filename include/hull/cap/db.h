@@ -336,6 +336,29 @@ int  hl_cap_db_name_reserved(const char *name);
  */
 int  hl_cap_db_sql_is_virtual_table(const char *sql);
 
+/** What SQLite builds from a `sqlite_schema.sql` value (audit 41). */
+typedef enum {
+    HL_DB_SCHEMA_UNKNOWN = 0,   /* not a CREATE statement Hull can read */
+    HL_DB_SCHEMA_TABLE,
+    HL_DB_SCHEMA_VIRTUAL_TABLE,
+    HL_DB_SCHEMA_VIEW,
+    HL_DB_SCHEMA_TRIGGER,
+    HL_DB_SCHEMA_INDEX
+} HlDbSchemaKind;
+
+/**
+ * @brief Classify a stored schema row by its SQL text, the way SQLite does
+ * when it loads the schema (it parses `sql` and ignores the `type` column):
+ * CREATE [TEMP|TEMPORARY] TABLE / VIEW / TRIGGER, CREATE VIRTUAL TABLE,
+ * CREATE [UNIQUE] INDEX, read past whitespace and comments. Anything else is
+ * HL_DB_SCHEMA_UNKNOWN (audit 41).
+ */
+HlDbSchemaKind hl_cap_db_schema_sql_kind(const char *sql);
+
+/** The `type` value SQLite itself writes for @p kind ("table", ...), NULL
+ *  for HL_DB_SCHEMA_UNKNOWN. */
+const char *hl_cap_db_schema_kind_type(HlDbSchemaKind kind);
+
 /**
  * @brief Whether a virtual table stored in a database file may be opened
  * (audit 40). @p name is its `sqlite_schema.name`, @p sql its definition.

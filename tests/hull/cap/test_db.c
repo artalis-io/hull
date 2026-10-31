@@ -995,6 +995,159 @@ UTEST(hl_cap_db, authorizer_scopes_a_search_call)
     teardown_db();
 }
 
+/* Audit 41: SQLite builds its schema from each sqlite_schema row's `sql` and
+ * ignores the `type` column, so the open check must classify by the text.
+ * A row retyped through writable_schema ('View', 'TRIGGER', 'x') was skipped
+ * by the old `type IN (...)` filter and still loaded. */
+UTEST(hull_cap_db_audit41, schema_kind_from_sql)
+{
+    EXPECT_EQ(HL_DB_SCHEMA_TABLE, hl_cap_db_schema_sql_kind("CREATE TABLE t(a)"));
+    EXPECT_EQ(HL_DB_SCHEMA_TABLE,
+              hl_cap_db_schema_sql_kind("create /*x*/ temp table t(a)"));
+    EXPECT_EQ(HL_DB_SCHEMA_VIRTUAL_TABLE,
+              hl_cap_db_schema_sql_kind("CREATE --c\n VIRTUAL TABLE v USING fts5(a)"));
+    EXPECT_EQ(HL_DB_SCHEMA_VIEW,
+              hl_cap_db_schema_sql_kind("CREATE TEMPORARY VIEW v AS SELECT 1"));
+    EXPECT_EQ(HL_DB_SCHEMA_VIEW, hl_cap_db_schema_sql_kind("CrEaTe ViEw v AS SELECT 1"));
+    EXPECT_EQ(HL_DB_SCHEMA_TRIGGER,
+              hl_cap_db_schema_sql_kind("CREATE TEMP TRIGGER t AFTER INSERT ON a BEGIN SELECT 1; END"));
+    EXPECT_EQ(HL_DB_SCHEMA_INDEX, hl_cap_db_schema_sql_kind("CREATE UNIQUE INDEX i ON t(a)"));
+    EXPECT_EQ(HL_DB_SCHEMA_INDEX, hl_cap_db_schema_sql_kind("CREATE INDEX i ON t(a)"));
+    EXPECT_EQ(HL_DB_SCHEMA_UNKNOWN, hl_cap_db_schema_sql_kind(NULL));
+    EXPECT_EQ(HL_DB_SCHEMA_UNKNOWN, hl_cap_db_schema_sql_kind(""));
+    EXPECT_EQ(HL_DB_SCHEMA_UNKNOWN, hl_cap_db_schema_sql_kind("SELECT 1"));
+    EXPECT_EQ(HL_DB_SCHEMA_UNKNOWN, hl_cap_db_schema_sql_kind("CREATE VIRTUAL x"));
+    EXPECT_EQ(HL_DB_SCHEMA_UNKNOWN, hl_cap_db_schema_sql_kind("CREATE TEMP INDEX i ON t(a)"));
+    EXPECT_EQ(HL_DB_SCHEMA_UNKNOWN, hl_cap_db_schema_sql_kind("CREATE UNIQUE TABLE t(a)"));
+    EXPECT_EQ(HL_DB_SCHEMA_UNKNOWN, hl_cap_db_schema_sql_kind("CREATE MACRO m AS 1"));
+    EXPECT_STREQ("table", hl_cap_db_schema_kind_type(HL_DB_SCHEMA_VIRTUAL_TABLE));
+    EXPECT_STREQ("view", hl_cap_db_schema_kind_type(HL_DB_SCHEMA_VIEW));
+    EXPECT_TRUE(hl_cap_db_schema_kind_type(HL_DB_SCHEMA_UNKNOWN) == NULL);
+}
+
+static void a41_cleanup(const char *path)
+{
+    char side[700];
+    unlink(path);
+    snprintf(side, sizeof side, "%s-wal", path); unlink(side);
+    snprintf(side, sizeof side, "%s-shm", path); unlink(side);
+    snprintf(side, sizeof side, "%s-journal", path); unlink(side);
+}
+
+/* Make @p path with @p ddl on a raw (unguarded) connection, then rewrite one
+ * row's `type` through writable_schema. Returns 0 when the planted object
+ * still loads (SQLite reads the `sql`, not `type`): @p probe runs. */
+static int a41_plant(const char *path, const char *ddl, const char *name,
+                     const char *type, const char *probe)
+{
+    a41_cleanup(path);
+    sqlite3 *raw = NULL;
+    if (sqlite3_open(path, &raw) != SQLITE_OK) return -1;
+    char sql[512];
+    snprintf(sql, sizeof sql,
+             "PRAGMA writable_schema = ON;"
+             "UPDATE sqlite_schema SET type = '%s' WHERE name = '%s';"
+             "PRAGMA writable_schema = OFF;", type, name);
+    int rc = sqlite3_exec(raw, ddl, NULL, NULL, NULL) == SQLITE_OK &&
+             sqlite3_exec(raw, sql, NULL, NULL, NULL) == SQLITE_OK &&
+             sqlite3_changes(raw) == 1 ? 0 : -1;
+    sqlite3_close(raw);
+    if (rc != 0) return -1;
+    /* the planted object is still built from its sql on a fresh open */
+    if (sqlite3_open(path, &raw) != SQLITE_OK) return -1;
+    rc = sqlite3_exec(raw, probe, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+    sqlite3_close(raw);
+    return rc;
+}
+
+static int a41_hull_open(const char *path)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(path, &db) != SQLITE_OK) { sqlite3_close(db); return -2; }
+    int rc = hl_cap_db_init(db);
+    sqlite3_close(db);
+    return rc;
+}
+
+UTEST(hull_cap_db_audit41, retyped_objects_are_refused)
+{
+    char dir[512];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hull-db-a41") != NULL);
+    char path[600];
+    snprintf(path, sizeof path, "%s/planted.db", dir);
+    hl_cap_db_sqlite_setup();
+
+    static const char *const base =
+        "CREATE TABLE _hull_probe (id TEXT, data TEXT);"
+        "INSERT INTO _hull_probe VALUES ('PLACEHOLDER', 'not-a-secret');"
+        "CREATE TABLE app_log (v TEXT);";
+    /* SQLite compares the row's type to what the SQL builds, but without
+     * case (sqlite3CheckObjectName), so case variants load. */
+    static const struct { const char *ddl, *name, *probe, *types[3]; } objs[] = {
+        { "CREATE VIEW leakv AS SELECT data FROM _hull_probe;",
+          "leakv", "SELECT * FROM leakv", { "View", "VIEW", "vIEw" } },
+        { "CREATE TRIGGER leakt AFTER INSERT ON app_log BEGIN "
+          "  INSERT INTO app_log SELECT data FROM _hull_probe WHERE 0; END;",
+          "leakt", "INSERT INTO app_log VALUES ('a')",
+          { "Trigger", "TRIGGER", "trIGGer" } },
+        { "CREATE VIRTUAL TABLE leakf USING fts5(id, data, "
+          "content='_hull_probe', content_rowid='rowid');",
+          "leakf", "SELECT * FROM leakf", { "Table", "TABLE", "tablE" } },
+    };
+    for (size_t o = 0; o < sizeof objs / sizeof objs[0]; o++) {
+        for (size_t t = 0; t < 3; t++) {
+            char ddl[1024];
+            snprintf(ddl, sizeof ddl, "%s%s", base, objs[o].ddl);
+            int planted = a41_plant(path, ddl, objs[o].name, objs[o].types[t],
+                                    objs[o].probe);
+            ASSERT_EQ(0, planted);   /* SQLite still builds it */
+            EXPECT_NE(0, a41_hull_open(path));
+        }
+    }
+
+    /* A type that is another word altogether: SQLite refuses the schema
+     * itself (malformed), and so does Hull. */
+    ASSERT_NE(0, a41_plant(path,
+        "CREATE TABLE app_log (v TEXT); CREATE VIEW v AS SELECT v FROM app_log;",
+        "v", "trigger", "SELECT * FROM v"));
+    EXPECT_NE(0, a41_hull_open(path));
+
+    a41_cleanup(path);
+    rmdir(dir);
+}
+
+UTEST(hull_cap_db_audit41, ordinary_databases_still_open)
+{
+    char dir[512];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hull-db-a41ok") != NULL);
+    char path[600];
+    snprintf(path, sizeof path, "%s/ok.db", dir);
+    hl_cap_db_sqlite_setup();
+    a41_cleanup(path);
+    sqlite3 *raw = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &raw));
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(raw,
+        "CREATE TABLE _hull_probe (id TEXT PRIMARY KEY, data TEXT);"
+        "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "  slug TEXT UNIQUE, title TEXT, body TEXT);"
+        "CREATE TABLE kv (k TEXT PRIMARY KEY, v BLOB) WITHOUT ROWID;"
+        "CREATE /* c */ INDEX posts_title ON posts(title);"
+        "CREATE UNIQUE INDEX posts_lower ON posts(lower(slug)) WHERE slug IS NOT NULL;"
+        "CREATE VIEW recent AS SELECT id, title FROM posts ORDER BY id DESC;"
+        "CREATE TRIGGER posts_ai AFTER INSERT ON posts BEGIN "
+        "  INSERT INTO kv VALUES (new.slug, NULL); END;"
+        "CREATE VIRTUAL TABLE IF NOT EXISTS _hull_fts_posts USING "
+        "  fts5(id, title, body, tokenize='unicode61', content='posts', "
+        "  content_rowid='id');"
+        "CREATE VIRTUAL TABLE docs USING fts5(a);"
+        "INSERT INTO posts (slug, title, body) VALUES ('a', 'A', 'b');"
+        "ANALYZE;", NULL, NULL, NULL));
+    sqlite3_close(raw);
+    EXPECT_EQ(0, a41_hull_open(path));
+    a41_cleanup(path);
+    rmdir(dir);
+}
+
 /* Audit 25: DuckDB's query() / query_table() build a statement or a table
  * name at run time ('_hu' || 'll_sessions'), past the text check above. */
 UTEST(hl_cap_db, dynamic_sql_calls_are_found)
