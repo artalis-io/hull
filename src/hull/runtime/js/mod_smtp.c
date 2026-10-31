@@ -285,7 +285,10 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
      * a loop of sends refused at admission copied it on every call,
      * uncharged). */
     size_t copy_bytes = hl_smtp_message_bytes(&msg);
-    if (hl_js_budget_charge(ctx, hl_work_bytes_units(copy_bytes)) < 0) {
+    /* Plus the send itself - DNS, connect, TLS and the conversation - as
+     * an HTTP request is (audit 41). */
+    if (hl_js_budget_charge(ctx, HL_WORK_SMTP_SEND_UNITS +
+                                 hl_work_bytes_units(copy_bytes)) < 0) {
         result = JS_EXCEPTION;
         goto cleanup;
     }

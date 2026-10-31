@@ -911,6 +911,17 @@ done
 echo "PASS: advisory lock kept across a wait, BEGIN refuses the wait (Postgres)"
 rm -rf "$A40DIR"
 
+# ── audit 41: every statement pays a round trip's floor (Postgres) ──
+echo "=== audit 41: a SELECT 1 loop trips a small budget (both runtimes) ==="
+A41DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_sql_floor_audit41.sh"
+if db_sql_floor_audit41 ./build/hull "$DSN" "$A41DIR" postgres; then
+    echo "PASS: a network statement is charged before it is sent (Postgres)"
+    rm -rf "$A41DIR"
+else
+    exit 1
+fi
+
 # ── db.exec affected-row count (regression guard) ─────────────────────
 # The pg backend must surface the CommandComplete row count (like sqlite3_changes
 # / MySQL affected_rows); it previously discarded it and returned 0, which broke

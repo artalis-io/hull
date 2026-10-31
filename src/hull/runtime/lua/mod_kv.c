@@ -21,7 +21,7 @@
 #include "hull/cap/kv.h"
 #include "protected.h"         /* hl_lua_pushlstring_safe */
 #include "internal.h"          /* hl_lua_budget_charge */
-#include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
+#include "hull/shared/work_charge.h"   /* hl_work_kv_command_units */
 
 #include <string.h>
 
@@ -38,12 +38,14 @@ typedef struct {
     int close_pending;
 } HlLuaKvConn;
 
-/* Charge the bytes a write sends - 1 unit per 8, before the command is built
- * (audit 39: set / cas sent values of any size uncharged). Raises the trip
- * when the run is over its budget. Allocates nothing. */
-static void kv_charge_bytes(lua_State *L, size_t bytes)
+/* Charge a command before it is built: the round-trip floor plus the bytes
+ * it sends, 1 unit per 8 (audit 39: set / cas sent values of any size
+ * uncharged; audit 41: a command paid only its reply chunks, ~1 unit for a
+ * ~100 us round trip, so a kv:get loop ran ~400 s per budget). Raises the
+ * trip when the run is over its budget. Allocates nothing. */
+static void kv_charge(lua_State *L, size_t bytes)
 {
-    uint64_t units = hl_work_bytes_units((uint64_t)bytes);
+    uint64_t units = hl_work_kv_command_units(bytes);
     if (hl_lua_budget_charge(L, units > (uint64_t)INT64_MAX
                                 ? INT64_MAX : (int64_t)units))
         (void)hl_lua_budget_raise(L);
@@ -77,6 +79,7 @@ static int64_t kv_opt_ttl_ms(lua_State *L, int idx)
 static int l_kv_get(lua_State *L)
 {
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
+    kv_charge(L, klen);
     HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     const uint8_t *val; size_t vlen; int found = 0;
     if (hl_cap_kv_get(c, (const uint8_t *)key, klen, &val, &vlen, &found) != 0)
@@ -103,7 +106,7 @@ static int l_kv_set(lua_State *L)
     const char *key = luaL_checklstring(L, 2, &klen);
     const char *val = luaL_checklstring(L, 3, &vlen);
     int64_t ttl = kv_opt_ttl_ms(L, 4);
-    kv_charge_bytes(L, klen + vlen);
+    kv_charge(L, klen + vlen);
     HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     if (hl_cap_kv_set(c, (const uint8_t *)key, klen, (const uint8_t *)val, vlen, ttl) != 0)
         return hl_lua_raise_copy(L, "", hl_cap_kv_error(c));
@@ -115,6 +118,7 @@ static int l_kv_set(lua_State *L)
 static int l_kv_del(lua_State *L)
 {
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
+    kv_charge(L, klen);
     HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int deleted = 0;
     if (hl_cap_kv_del(c, (const uint8_t *)key, klen, &deleted) != 0)
@@ -127,6 +131,7 @@ static int l_kv_del(lua_State *L)
 static int l_kv_has(lua_State *L)
 {
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
+    kv_charge(L, klen);
     HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int present = 0;
     if (hl_cap_kv_exists(c, (const uint8_t *)key, klen, &present) != 0)
@@ -141,6 +146,7 @@ static int l_kv_incr(lua_State *L)
     size_t klen; const char *key = luaL_checklstring(L, 2, &klen);
     int64_t by = (int64_t)luaL_checkinteger(L, 3);
     int64_t ttl = kv_opt_ttl_ms(L, 4);
+    kv_charge(L, klen);
     HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int64_t nv = 0;
     if (hl_cap_kv_incr(c, (const uint8_t *)key, klen, by, ttl, &nv) != 0)
@@ -159,7 +165,7 @@ static int l_kv_cas(lua_State *L)
     const char *expected = has_expected ? luaL_checklstring(L, 3, &elen) : NULL;
     const char *newv = luaL_checklstring(L, 4, &nlen);
     int64_t ttl = kv_opt_ttl_ms(L, 5);
-    kv_charge_bytes(L, klen + elen + nlen);
+    kv_charge(L, klen + elen + nlen);
     HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     HlKvCasResult r = hl_cap_kv_cas(c, (const uint8_t *)key, klen,
                                     (const uint8_t *)expected, elen, has_expected,
@@ -173,6 +179,7 @@ static int l_kv_cas(lua_State *L)
 static int l_kv_clear(lua_State *L)
 {
     size_t plen; const char *prefix = luaL_checklstring(L, 2, &plen);
+    kv_charge(L, plen);   /* its first SCAN; later steps charge themselves */
     HlKvConn *c = kv_self(L);   /* after the conversions: see kv_self */
     int64_t removed = 0;
     if (hl_cap_kv_clear(c, (const uint8_t *)prefix, plen, &removed) != 0) {
@@ -209,6 +216,7 @@ static int l_kv_scan(lua_State *L)
     HlLuaKvConn *o = luaL_checkudata(L, 1, HL_LUA_KV_MT);
     size_t plen; const char *prefix = luaL_checklstring(L, 2, &plen);
     size_t limit = (size_t)luaL_optinteger(L, 3, 0);
+    kv_charge(L, plen);   /* its first SCAN; later steps charge themselves */
     lua_newtable(L);
     struct kv_scan_lua s = { L, lua_gettop(L), 0, 0 };
     /* Resolved last, and marked scanning before anything else allocates:
@@ -279,6 +287,11 @@ static int l_kv_open(lua_State *L)
      * Fails closed with a policy message when no policy is declared. */
     if (hl_cap_kv_check_dsn(lua ? lua->base.kv_policy : NULL, dsn, err, sizeof err) != 0)
         return luaL_error(L, "%s", err);
+
+    /* The dial, the handshake and the close that follows (audit 41: ~270 us,
+     * uncharged). Before anything is allocated or dialed. */
+    if (hl_lua_budget_charge(L, (int64_t)HL_WORK_KV_OPEN_UNITS))
+        return hl_lua_budget_raise(L);
 
     /* The userdata first: opened first, a memory error making it raised
      * past a live connection. */

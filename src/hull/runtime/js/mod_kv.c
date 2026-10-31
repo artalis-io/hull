@@ -19,6 +19,7 @@
 #include "mod_buffer.h"        /* get_hl_js, js_get_buffer, HlBufferView */
 #include "internal.h"          /* hl_js_budget_throw */
 #include "hull/cap/kv.h"
+#include "hull/shared/work_charge.h"   /* hl_work_kv_command_units */
 
 #include <string.h>
 
@@ -47,6 +48,16 @@ static HlKvConn *kv_self(JSContext *ctx, JSValueConst this_val)
     HlKvConn *c = (HlKvConn *)JS_GetOpaque(this_val, hull_kv_conn_class_id);
     if (!c) { JS_ThrowTypeError(ctx, "kv: connection is closed"); return NULL; }
     return c;
+}
+
+/* Charge a command before it is sent: the round-trip floor plus the bytes
+ * it sends, 1 unit per 8 (audit 41: a command paid only its reply chunks,
+ * ~1 unit for a ~100 us round trip, so a get loop ran ~130 s per budget,
+ * and set / cas sent values of any size uncharged). -1 with the
+ * uncatchable interrupt pending. Runs no app code. */
+static int kv_charge(JSContext *ctx, size_t bytes)
+{
+    return hl_js_budget_charge(ctx, hl_work_kv_command_units(bytes)) < 0 ? -1 : 0;
 }
 
 /* Extract a byte buffer from a JS value (ArrayBuffer/typed array/MappedBuffer/
@@ -82,6 +93,7 @@ static JSValue js_kv_get(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 {
     HlBufferView kv; const char *ks; int kf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "key", &kv, &ks, &kf)) return JS_EXCEPTION;
+    if (kv_charge(ctx, kv.len)) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     const uint8_t *val; size_t vlen; int found = 0;
@@ -104,6 +116,9 @@ static JSValue js_kv_set(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     HlBufferView kb, vb; const char *ks, *vs; int kf, vf;
     if (argc < 2 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
     if (!kv_arg(ctx, argv[1], "value", &vb, &vs, &vf)) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
+    if (kv_charge(ctx, kb.len + vb.len)) {
+        kv_arg_free(ctx, ks, kf); kv_arg_free(ctx, vs, vf); return JS_EXCEPTION;
+    }
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ks, kf); kv_arg_free(ctx, vs, vf); return JS_EXCEPTION; }
     int rc = hl_cap_kv_set(c, (const uint8_t *)kb.data, kb.len,
@@ -118,6 +133,7 @@ static JSValue js_kv_del(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 {
     HlBufferView kb; const char *ks; int kf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
+    if (kv_charge(ctx, kb.len)) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     int deleted = 0;
@@ -132,6 +148,7 @@ static JSValue js_kv_has(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 {
     HlBufferView kb; const char *ks; int kf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
+    if (kv_charge(ctx, kb.len)) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     int present = 0;
@@ -151,6 +168,7 @@ static JSValue js_kv_incr(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     if (kv_opt_ttl_ms(ctx, argc, argv, 2, &ttl) != 0) return JS_EXCEPTION;
     HlBufferView kb; const char *ks; int kf;
     if (!kv_arg(ctx, argv[0], "key", &kb, &ks, &kf)) return JS_EXCEPTION;
+    if (kv_charge(ctx, kb.len)) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ks, kf); return JS_EXCEPTION; }
     int64_t nv = 0;
@@ -174,6 +192,11 @@ static JSValue js_kv_cas(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     }
     if (!kv_arg(ctx, argv[2], "value", &nb, &ns, &nf)) {
         kv_arg_free(ctx, ks, kf); if (has_expected) kv_arg_free(ctx, es, ef);
+        return JS_EXCEPTION;
+    }
+    if (kv_charge(ctx, kb.len + (has_expected ? eb.len : 0) + nb.len)) {
+        kv_arg_free(ctx, ks, kf); if (has_expected) kv_arg_free(ctx, es, ef);
+        kv_arg_free(ctx, ns, nf);
         return JS_EXCEPTION;
     }
     HlKvConn *c = kv_self(ctx, this_val);
@@ -204,6 +227,8 @@ static JSValue js_kv_clear(JSContext *ctx, JSValueConst this_val, int argc, JSVa
 {
     HlBufferView pb; const char *ps; int pf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "prefix", &pb, &ps, &pf)) return JS_EXCEPTION;
+    /* Its first SCAN; later steps charge themselves. */
+    if (kv_charge(ctx, pb.len)) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     int64_t removed = 0;
@@ -245,6 +270,8 @@ static JSValue js_kv_scan(JSContext *ctx, JSValueConst this_val, int argc, JSVal
         return JS_EXCEPTION;
     HlBufferView pb; const char *ps; int pf;
     if (argc < 1 || !kv_arg(ctx, argv[0], "prefix", &pb, &ps, &pf)) return JS_EXCEPTION;
+    /* Its first SCAN; later steps charge themselves. */
+    if (kv_charge(ctx, pb.len)) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     HlKvConn *c = kv_self(ctx, this_val);
     if (!c) { kv_arg_free(ctx, ps, pf); return JS_EXCEPTION; }
     struct kv_scan_js s = { ctx, JS_NewArray(ctx), 0, 0 };
@@ -325,6 +352,12 @@ static JSValue js_kv_open(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     if (hl_cap_kv_check_dsn(js ? js->base.kv_policy : NULL, dsn, err, sizeof err) != 0) {
         JS_FreeCString(ctx, dsn);
         return JS_ThrowInternalError(ctx, "%s", err);
+    }
+    /* The dial, the handshake and the close that follows (audit 41: ~270 us,
+     * uncharged). Before anything is dialed. */
+    if (hl_js_budget_charge(ctx, HL_WORK_KV_OPEN_UNITS) < 0) {
+        JS_FreeCString(ctx, dsn);
+        return JS_EXCEPTION;
     }
     HlKvConn *c = NULL;
     int rc = hl_cap_kv_open(&c, dsn, timeout_ms, js ? js->base.alloc : NULL, err, sizeof err);
