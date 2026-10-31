@@ -554,7 +554,11 @@ static void pg_guard_stale_txn(HlDbHandle *h)
      * held every other session waiting on it until a restart (audit 39).
      * Released here, after a stale transaction - the sign of a failed entry;
      * one an entry left with no transaction open is not seen. Not on a pinned
-     * handle (the migration lock). */
+     * handle (the migration lock). Never the lock of an entry about to
+     * resume: a stale transaction is never its own, since no wait goes ahead
+     * while one is open. A session-level advisory lock does not itself refuse
+     * a wait (HlDbBackend.session_held, audit 40): it is the shared
+     * session's, and another entry's failure here can release it. */
     if (s->adv_locks > 0 && !s->conn.broken && !h->session_pinned &&
         s->conn.tx_status == 'I') {
         fprintf(stderr, "[hull:c] releasing session-level advisory locks "

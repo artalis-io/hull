@@ -2560,6 +2560,114 @@ UTEST(mysql_backend, session_tracker)
     EXPECT_EQ(0, mysql_session_dirty(&h));
 }
 
+/* Audit 40: right after SET autocommit = 0 or LOCK TABLES, with no statement
+ * after it, IN_TRANS is clear - in_txn read 0, the wait gates let the entry
+ * park, and the guard that runs before it resumed reset the session under
+ * it (its INSERT then autocommitted, its ROLLBACK lied). The state counts as
+ * a held transaction for the gates (hl_db_holds_txn), in_txn itself is
+ * unchanged (batch / conn.in_transaction semantics), and a change of it
+ * moves the transaction generation. */
+UTEST(mysql_backend, session_state_holds_a_transaction_for_the_wait_gates)
+{
+    HlDbHandle h; HlDbMyCtx ctx;
+    memset(&h, 0, sizeof h);
+    memset(&ctx, 0, sizeof ctx);
+    h.backend = &hl_db_backend_mysql;
+    h.ctx = &ctx;
+    ctx.conn.server_status = HL_MY_SERVER_STATUS_AUTOCOMMIT;
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    EXPECT_EQ(0, hl_db_session_held(&h));
+
+    /* autocommit off, no statement after it */
+    HlDbTxnSnap was = hl_db_txn_snap(&h);
+    uint64_t gen = hl_db_txn_gen();
+    ctx.conn.server_status = 0;
+    hl_db_txn_note(&h, was, "SET autocommit = 0");
+    EXPECT_NE(gen, hl_db_txn_gen());
+    EXPECT_FALSE(mysql_in_txn(&h));
+    EXPECT_EQ(1, hl_db_session_held(&h));
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    was = hl_db_txn_snap(&h);
+    gen = hl_db_txn_gen();
+    ctx.conn.server_status = HL_MY_SERVER_STATUS_AUTOCOMMIT;
+    hl_db_txn_note(&h, was, "SET autocommit = 1");
+    EXPECT_NE(gen, hl_db_txn_gen());
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+
+    /* LOCK TABLES, a global read lock, LOCK INSTANCE FOR BACKUP, XA */
+    my_track_session(&h, "LOCK TABLES t WRITE", 0);
+    EXPECT_FALSE(mysql_in_txn(&h));
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    my_track_session(&h, "UNLOCK TABLES", 0);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    my_track_session(&h, "FLUSH TABLES WITH READ LOCK", 0);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    my_track_session(&h, "UNLOCK TABLES", 0);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    my_track_session(&h, "LOCK INSTANCE FOR BACKUP", 0);
+    EXPECT_EQ(1, ctx.lock_instance);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    my_track_session(&h, "UNLOCK TABLES", 0);         /* not this one */
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    my_track_session(&h, "UNLOCK INSTANCE", 0);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    my_track_session(&h, "XA START 'q'", 0);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    my_track_session(&h, "XA ROLLBACK 'q'", 0);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+
+    /* A named lock does not count (a GET_LOCK that timed out looks the
+     * same); a broken connection holds nothing. */
+    my_track_session(&h, "SELECT GET_LOCK('n', 0)", 0);
+    EXPECT_EQ(1, mysql_session_dirty(&h));
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    my_track_session(&h, "DO RELEASE_LOCK('n')", 0);
+    ctx.conn.server_status = 0;
+    ctx.conn.broken = 1;
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+}
+
+/* Audit 40: a text the word scanner may misread counts every word as taking
+ * state - quotes and comments included - and none as releasing it: a `#`
+ * comment, an executable comment after another comment or in MariaDB's
+ * form, a backslash (NO_BACKSLASH_ESCAPES). */
+UTEST(mysql_backend, session_tracker_is_conservative_on_unreadable_text)
+{
+    HlDbHandle h; HlDbMyCtx ctx;
+    memset(&h, 0, sizeof h);
+    memset(&ctx, 0, sizeof ctx);
+    h.backend = &hl_db_backend_mysql;
+    h.ctx = &ctx;
+    ctx.conn.server_status = HL_MY_SERVER_STATUS_AUTOCOMMIT;
+
+    /* A release hidden in a # comment does not release. */
+    my_track_session(&h, "LOCK TABLES t WRITE # UNLOCK TABLES", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "SELECT 1 # UNLOCK TABLES", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "UNLOCK TABLES", 0);
+    EXPECT_EQ(0, ctx.lock_tables);
+
+    /* An executable comment after a plain one, and MariaDB's. */
+    my_track_session(&h, "/* x */ /*! LOCK TABLES t WRITE */", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "UNLOCK TABLES", 0);
+    my_track_session(&h, "/*M!100000 XA START 'm' */", 0);
+    EXPECT_EQ(1, ctx.xa_open);
+    my_track_session(&h, "XA ROLLBACK 'm'", 0);
+    EXPECT_EQ(0, ctx.xa_open);
+
+    /* NO_BACKSLASH_ESCAPES: 'a\' ends at the backslash for the server. */
+    my_track_session(&h, "SELECT 'a\\' ; LOCK TABLES t WRITE ; SELECT '", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "UNLOCK TABLES", 0);
+    EXPECT_EQ(0, ctx.lock_tables);
+
+    /* Readable text with the words only in a string stays precise. */
+    my_track_session(&h, "SELECT 'LOCK TABLES t WRITE'", 0);
+    EXPECT_EQ(0, ctx.lock_tables);
+}
+
 /* A receive buffer grown for one big packet is given back once a small
  * reply follows (it kept up to 16 MB per pooled connection). */
 UTEST(mysql_conn, receive_buffer_shrinks_after_a_big_packet)

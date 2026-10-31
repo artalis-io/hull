@@ -884,6 +884,33 @@ else
     cat "$A39DIR/serve.log"; exit 1
 fi
 
+# ── audit 40: a wait is refused only by a real transaction (Postgres) ──
+# The MySQL fix counts autocommit off / LOCK TABLES as an open transaction
+# for the wait gates. A Postgres session-level advisory lock deliberately
+# does not count (a pg_try_advisory_lock that failed looks the same): the
+# wait goes ahead and nothing releases the lock under the handler - the
+# guard's pg_advisory_unlock_all runs only after a stale transaction, which
+# a parked handler cannot hold. BEGIN still refuses the wait.
+echo "=== audit 40: advisory lock kept across a wait; BEGIN refuses it (both runtimes) ==="
+A40DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_session_audit40.sh"
+db_session_audit40_apps "$A40DIR" postgres
+a40fail=0
+for a40app in "$A40DIR/l/app.lua" "$A40DIR/j/app.js"; do
+    ./build/hull -d "$DSN" -p "$PORT" "$a40app" >"$A40DIR/serve.log" 2>&1 &
+    SVR=$!
+    wait_for_server "$A40DIR/serve.log" || exit 1
+    curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 40 setup"; cat "$A40DIR/serve.log"; exit 1; }
+    a40out=$(db_session_audit40_run "$PORT" advisory_wait begin_wait)
+    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+    echo "$a40app"; echo "$a40out"
+    db_session_audit40_ok "$a40out" advisory_wait '"waited":true' '"held_after_wait":1' || a40fail=1
+    db_session_audit40_ok "$a40out" begin_wait '"waited":false' '"code":"wait_refused"' '"rows":0' || a40fail=1
+    [ "$a40fail" = 0 ] || { cat "$A40DIR/serve.log"; exit 1; }
+done
+echo "PASS: advisory lock kept across a wait, BEGIN refuses the wait (Postgres)"
+rm -rf "$A40DIR"
+
 # ── db.exec affected-row count (regression guard) ─────────────────────
 # The pg backend must surface the CommandComplete row count (like sqlite3_changes
 # / MySQL affected_rows); it previously discarded it and returned 0, which broke

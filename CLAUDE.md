@@ -763,7 +763,19 @@ transaction is on a connection other entries are using meanwhile: the guard
 rolled it back under the handler, whose remaining statements then autocommitted
 and whose COMMIT "succeeded" (audit 5 M1). So every Hull wait refuses while a
 registry connection or `db.open` handle is in a transaction
-(`hl_db_registry_open_txn`, the backend's `in_txn` vtable method; Lua:
+(`hl_db_registry_open_txn`, the backend's `in_txn` vtable method - or its
+`session_held`, `hl_db_holds_txn`: MySQL autocommit off, an outstanding LOCK
+TABLES / FLUSH TABLES WITH READ LOCK / LOCK INSTANCE FOR BACKUP, or an XA
+transaction, which the guard resets; right after `SET autocommit = 0` or
+`LOCK TABLES` IN_TRANS is clear, so the wait was allowed and the guard before
+the resume reset the handler's own session under it - its INSERT autocommitted
+and its ROLLBACK lied, audit 40. A change of that state moves the transaction
+generation too. Session-level named / advisory locks - GET_LOCK,
+`pg_advisory_lock` - do NOT count: the tracker cannot tell a GET_LOCK that
+timed out or a `pg_try_advisory_lock` that failed from one that took the lock,
+and counted, one such call would refuse every later wait; they belong to the
+shared session, not to one entry, and another entry's stale-transaction reset
+or `pg_advisory_unlock_all` can drop them; Lua:
 `hl_lua_check_can_wait`, called AFTER the binding has read its arguments and
 options and with no app code between it and the arm - an opts `__index`, a
 `__tostring` or a `__gc` finalizer (any Lua allocation can run one) is app code
@@ -1142,7 +1154,17 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   the reset re-applies `SET NAMES utf8mb4, collation_connection = <id>` (a
   plain `SET NAMES utf8mb4` on MariaDB for the default id 45, which it maps
   through `character_set_collations`, the handshake's included). A
-  pinned handle (the migration run) is never reset.
+  pinned handle (the migration run) is never reset. The same leftovers
+  (autocommit off, LOCK TABLES / FLUSH TABLES WITH READ LOCK / LOCK INSTANCE
+  FOR BACKUP, XA) count as an open transaction for the wait gates
+  (`mysql_session_held`, audit 40), so the guard that runs before a parked
+  handler resumes never finds the handler's own: every leftover it resets
+  belongs to a finished entry. The statement tracker is conservative where it
+  cannot read the text (`my_sql_track_unreadable`: a `#` comment, an
+  executable comment, a backslash, which ends no string under
+  NO_BACKSLASH_ESCAPES): every word then counts as taking state, quotes and
+  comments included, and none as releasing it - a misread refuses a wait and
+  resets the session at the entry's end, no more.
 - **Deadlocks:** an `ER_LOCK_DEADLOCK` (1213) inside a transaction means
   InnoDB rolled the WHOLE transaction back; the backend then refuses every call
   but `ROLLBACK` (as for a connection lost mid-transaction), so later

@@ -87,6 +87,11 @@ static inline void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
  * no transaction ever held across a wait, every transaction the guard finds
  * open at the start of an entry belongs to an entry that has finished, so
  * rolling it back is always right (audit 5 M1).
+ *
+ * Session state that is as good as a transaction counts too
+ * (hl_db_holds_txn: MySQL autocommit off, LOCK TABLES, XA; audit 40): the
+ * guard resets a session holding it, and run before a parked handler
+ * resumes it reset the handler's own `SET autocommit = 0` under it.
  */
 #ifdef HL_ENABLE_DB
 const char *hl_db_registry_open_txn(HlDbRegistry *reg);

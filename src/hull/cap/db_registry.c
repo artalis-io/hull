@@ -131,7 +131,7 @@ const char *hl_db_registry_open_txn(HlDbRegistry *reg)
     if (hl_db_dynamic_in_txn()) return "db.open";
     if (!reg) return NULL;
     for (int i = 0; i < reg->nslots; i++)
-        if (reg->slots[i].open && hl_db_in_txn(&reg->slots[i].handle))
+        if (reg->slots[i].open && hl_db_holds_txn(&reg->slots[i].handle))
             return strcmp(reg->slots[i].name, INTERNAL_NAME) == 0
                    ? "internal" : reg->slots[i].name;
     return NULL;
