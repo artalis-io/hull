@@ -15,6 +15,7 @@
 #include "hull/cap/db_budget.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sql_kw.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_NET_SQL_UNITS */
 #include <limits.h>   /* PATH_MAX */
 #include <stdatomic.h>
 #include <stdint.h>   /* SIZE_MAX */
@@ -140,6 +141,12 @@ int hl_db_budget_charge(int64_t units)
      * ever with --max-run-ms 0 (audit 28). Any bound run's SQL stops (the
      * binding was still asked, so an HlDbOpBudget records its reason). */
     return stop || atomic_load_explicit(&g_op_shutdown, memory_order_acquire);
+}
+
+int hl_db_net_stmt_charge(int is_rollback)
+{
+    int stop = hl_db_budget_charge((int64_t)HL_WORK_NET_SQL_UNITS);
+    return stop && !is_rollback ? -1 : 0;
 }
 
 void hl_db_op_shutdown(int on)

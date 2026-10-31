@@ -559,6 +559,36 @@ release-artifact layout).
   coroutine marked as waiting until its async result is built, so a finalizer that build runs
   cannot resume it. Covered by `test_lua` (`lua_audit36`).
 
+- **KV commands, `kv.open`, network SQL statements, log records and `ctx` output cost almost
+  nothing against the run budget** (audit 41). A Valkey command paid only its reply chunks,
+  about 1 unit for a ~100-165 us loopback round trip the event loop spends waiting, so a
+  budget-sized `kv:get` loop ran ~400 s in Lua and ~130 s in JS, and a served route held the
+  loop for the whole 60 s run deadline; `kv.open` (~270 us: connect, handshake, close) was not
+  charged at all. Each command now pays `HL_WORK_KV_COMMAND_UNITS` (8192) plus 1 unit per 8
+  bytes it sends, and `kv.open` `HL_WORK_KV_OPEN_UNITS` (16384), before anything is sent, in
+  both bindings. A statement sent to Postgres or MySQL had the same gap (only its reply frames
+  were charged, so a `SELECT 1` loop ran for hours); the network backends now charge
+  `HL_WORK_NET_SQL_UNITS` (8192) before the send (`hl_db_net_stmt_charge`; a ROLLBACK is
+  charged but never refused, and SQLite keeps its progress-handler and allocator charges).
+  `log.*`, `console.*` and an app VM's `print` charged only bytes / 8 for a record that formats
+  a timestamp, escapes and writes unbuffered to stderr (`log.info("")` ran ~40 s per budget, an
+  8-argument `console.log` ~590 s): each record now pays 256 units and each call 64.
+  `ctx.stdout:write` / `ctx.stderr:write` and `flush` were not charged at all (1 MiB writes into
+  a pipe ran ~400 s on a 10M budget, and a `ctx` kept past `app.main` reaches request
+  handlers); writes now pay 16 units plus 1 per 8 bytes and a flush 64. `ctx.stdin:read()`
+  blocked the event loop with no deadline when called from a handler, timer or task: it is now
+  refused outside app.main's own code. Also (Low): every crypto call pays a floor before its
+  bytes (64 units in Lua; 256 in JS, whose buffer conversion and ArrayBuffer result cost
+  ~3-6 us), `random` / `random_token` / the hasher's create and digest included - loops of
+  them ran 4-18 s per budget; the TUI mode toggles pay 256 and `tui.leave` 1024; and
+  `smtp.send` pays an HTTP request's floor (16384). A budget-sized loop of any of these now
+  trips in ~0.3-2 s. Bulk work over a network database or KV store in one uninterrupted run
+  (an import loop in `app.main`) now counts ~12,000 statements against the default 100M
+  budget: raise `--max-instructions`, or run it through `db.async` (each op has a budget
+  of its own, and each resume starts a new run). Covered by `test_lua`
+  / `test_js` (`lua_audit41`, `js_audit41`; kv commands against a fake RESP server on a
+  `HL_ENABLE_VALKEY=1` build) and the audit 41 phases of `e2e_postgres` / `e2e_mysql`.
+
 - **A Lua coroutine that raised ran its `__close` handlers in a later run, in autocommit**
   (audit 38). `coroutine.resume`, like Lua's own, did not close a coroutine that raised, so
   its to-be-closed variables stayed pending until `coroutine.close`; and the transaction-tag

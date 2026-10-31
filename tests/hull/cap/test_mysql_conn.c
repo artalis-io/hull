@@ -11,6 +11,7 @@
 #include "hull/cap/mysql_conn.h"
 #include "hull/cap/mysqlwire.h"
 #include "hull/cap/db_budget.h"
+#include "hull/shared/work_charge.h"   /* HL_WORK_NET_SQL_UNITS */
 /* The backend itself, for its static transaction bookkeeping (the build
  * leaves cap_db_mysql.o out of this test's link). */
 #include "../../../src/hull/cap/db_mysql.c"
@@ -1103,11 +1104,15 @@ UTEST(mysql_conn, a_trip_on_the_final_ok_finishes_the_commit)
     close(sv[0]);
 }
 
-/* A budget that trips on its @p my_trip_at'th charge (0-unit asks included). */
+/* A budget that trips on its @p my_trip_at'th charge (0-unit asks included).
+ * The per-statement floor charged before the send (audit 41,
+ * HL_WORK_NET_SQL_UNITS) is not counted: these tests place the trip inside
+ * the exchange, and the floor's own refusal is tested apart. */
 static int my_charges, my_trip_at;
 static int my_count_trip_fn(void *ud, int64_t units)
 {
-    (void)ud; (void)units;
+    (void)ud;
+    if (units == (int64_t)HL_WORK_NET_SQL_UNITS) return 0;
     return ++my_charges >= my_trip_at;
 }
 
@@ -2741,4 +2746,39 @@ UTEST(mysql_backend, implicit_commit_resume_moves_the_generation)
     close(sv[0]);
 }
 
-UTEST_MAIN()
+/* Audit 41: a statement pays HL_WORK_NET_SQL_UNITS before it is sent; a
+ * run already over its budget sends nothing (the server below would never
+ * answer it), and a ROLLBACK is charged but still goes. */
+static int a41_units;
+static int a41_fn(void *ud, int64_t units)
+{
+    (void)ud;
+    a41_units += (int)units;
+    return 1;
+}
+
+UTEST(mysql_backend, a_statement_pays_its_floor_before_the_send)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002);   /* the ROLLBACK's OK */
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    a41_units = 0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(a41_fn, NULL);
+    EXPECT_EQ(-1, mysql_exec(&h, "INSERT INTO a VALUES (1)", NULL, 0));
+    EXPECT_TRUE(a41_units >= (int)HL_WORK_NET_SQL_UNITS);
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "instruction limit") != NULL);
+    EXPECT_EQ(-1, mysql_query(&h, "SELECT 1", NULL, 0, NULL, NULL, NULL));
+    EXPECT_EQ(-1, mysql_exec_script(&h, "SELECT 1; SELECT 2"));
+    EXPECT_EQ(0, mysql_rollback(&h));
+    hl_db_budget_restore(prev);
+    EXPECT_FALSE(ctx.conn.broken);
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+UTEST_MAIN();
+

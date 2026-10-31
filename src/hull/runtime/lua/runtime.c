@@ -280,11 +280,14 @@ static int hl_lua_app_print(lua_State *L)
     /* Convert every argument in place first: the buffer below may not see
      * an unbalanced stack between its operations. */
     int n = lua_gettop(L);
+    /* One log record (audit 41): a timestamp, the escape pass and an
+     * unbuffered stderr write, whatever its size - charged before. */
+    lua_hlwork(L, HL_WORK_LOG_CALL_UNITS + HL_WORK_LOG_RECORD_UNITS, 0);
     for (int i = 1; i <= n; i++) {
         size_t len = 0;
         luaL_tolstring(L, i, &len);
         lua_replace(L, i);
-        uint64_t u = hl_work_bytes_units((uint64_t)len);
+        uint64_t u = HL_WORK_LOG_ARG_UNITS + hl_work_bytes_units((uint64_t)len);
         lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
     }
 
@@ -974,6 +977,17 @@ static int cli_stdin_read(lua_State *L)
     FILE *f = cli_stream(L);
     if (!f) return luaL_error(L, "invalid stream");
 
+    /* A blocking read with no deadline: fine for a CLI, whose app.main
+     * holds nothing else up, but a ctx kept past main and read from a
+     * request handler, a timer or a task held the event loop until the
+     * terminal or the pipe answered (audit 41). Only app.main's own runs
+     * may read. */
+    HlLua *lua = get_hl_lua_from_L(L);
+    if (!lua || !lua->cli_main_co || lua->active_co != lua->cli_main_co)
+        return luaL_error(L, "ctx.stdin:read() is only available in app.main's "
+                             "own code (it blocks the event loop)");
+    lua_hlwork(L, HL_WORK_CLI_FLUSH_UNITS, 0);
+
     /* Accept "*l" (line, no newline), "*a" (all), or a positive integer
      * count of bytes. Default (no arg) → "*l". */
     const char *fmt = "*l";
@@ -1043,6 +1057,11 @@ static int cli_writer_write(lua_State *L)
     for (int i = 2; i <= top; i++) {  /* arg 1 is self */
         size_t n = 0;
         const char *s = luaL_checklstring(L, i, &n);
+        /* Charged before the copy (audit 41: uncharged, 1 MiB writes into
+         * a pipe ran ~400 s on a 10M budget, and a ctx kept past app.main
+         * reaches request handlers). */
+        uint64_t u = HL_WORK_CALL_UNITS + hl_work_bytes_units((uint64_t)n);
+        lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
         if (n && fwrite(s, 1, n, f) != n)
             return luaL_error(L, "write failed");
     }
@@ -1052,6 +1071,7 @@ static int cli_writer_write(lua_State *L)
 static int cli_writer_flush(lua_State *L)
 {
     FILE *f = cli_stream(L);
+    lua_hlwork(L, HL_WORK_CLI_FLUSH_UNITS, 0);   /* a write syscall (audit 41) */
     if (f) fflush(f);
     return 0;
 }

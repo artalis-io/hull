@@ -67,6 +67,15 @@ void hl_db_budget_unbind(const void *ud);
  * job's SQL wait does not hold the join either (audit 28). */
 int hl_db_budget_charge(int64_t units);
 
+/* A statement about to be sent to a network database (Postgres / MySQL):
+ * one round trip, which the per-frame charge paid ~1 unit for (audit 41).
+ * Charges HL_WORK_NET_SQL_UNITS (hull/shared/work_charge.h) to this
+ * thread's binding BEFORE the send. 0 = send it; -1 = the run is over its
+ * budget, nothing sent. A ROLLBACK (@p is_rollback) is charged but never
+ * refused: it is how a tripped run's transaction ends. SQLite is not
+ * charged here - its progress handler and allocator charge its work. */
+int hl_db_net_stmt_charge(int is_rollback);
+
 /* A plain budget for code with no VM of its own (a db.async op).
  *
  * Units alone never stopped a wait: a Postgres / MySQL / Valkey wait asks

@@ -24,7 +24,10 @@
  * arguments and returns JS_EXCEPTION. */
 static int js_crypto_charge(JSContext *ctx, size_t bytes)
 {
-    return hl_js_budget_charge(ctx, (uint64_t)bytes / 8);
+    /* Plus a per-call floor (audit 41): an empty digest, a MAC or a random
+     * draw is ~0.5-6 us of argument conversion, setup and result whatever
+     * its size, and charged 0 units a loop of them ran 4-18 s per budget. */
+    return hl_js_budget_charge(ctx, hl_work_js_crypto_units(bytes));
 }
 
 /* Public-key operations cost far more than their bytes (audit 10, the twin
@@ -269,6 +272,7 @@ static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
     if (n <= 0 || n > HL_RANDOM_MAX_BYTES)
         return JS_ThrowRangeError(ctx, "random bytes must be 1-%d",
                                   HL_RANDOM_MAX_BYTES);
+    if (js_crypto_charge(ctx, (size_t)n)) return JS_EXCEPTION;   /* audit 41 */
 
     uint8_t *buf = js_malloc(ctx, (size_t)n);
     if (!buf)
@@ -312,6 +316,7 @@ static JSValue js_crypto_random_token(JSContext *ctx, JSValueConst this_val,
     if (n <= 0 || n > HL_RANDOM_TOKEN_MAX)
         return JS_ThrowRangeError(ctx, "crypto.randomToken: bytes must be 1-%d",
                                   HL_RANDOM_TOKEN_MAX);
+    if (js_crypto_charge(ctx, (size_t)n)) return JS_EXCEPTION;   /* audit 41 */
 
     uint8_t raw[HL_RANDOM_TOKEN_MAX];
     char out[HL_RANDOM_TOKEN_MAX * 2 + 1];
@@ -1273,6 +1278,7 @@ static JSValue js_sha256_hasher_digest(JSContext *ctx, JSValueConst this_val,
     if (!h) return JS_EXCEPTION;
     if (h->done)
         return JS_ThrowInternalError(ctx, "sha256.digest() already called");
+    if (js_crypto_charge(ctx, 0)) return JS_EXCEPTION;   /* audit 41: the floor */
     uint8_t out[32];
     if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
         return JS_ThrowInternalError(ctx, "sha256.digest() failed");
@@ -1284,6 +1290,7 @@ static JSValue js_crypto_create_sha256(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
+    if (js_crypto_charge(ctx, 0)) return JS_EXCEPTION;   /* audit 41: the floor */
     /* js_malloc routes through QuickJS's allocator, so the runtime's
      * configured memory cap covers Hasher instances - raw malloc would
      * silently bypass JS_SetMemoryLimit. js_free_rt in the finalizer

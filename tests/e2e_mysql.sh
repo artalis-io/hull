@@ -1010,6 +1010,17 @@ done
 echo "PASS: autocommit off / LOCK TABLES refuse a wait instead of being reset under the handler (MySQL)"
 rm -rf "$A40DIR"
 
+# ── audit 41: every statement pays a round trip's floor (MySQL) ──
+echo "=== audit 41: a SELECT 1 loop trips a small budget (both runtimes) ==="
+A41DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_sql_floor_audit41.sh"
+if db_sql_floor_audit41 ./build/hull "$DSN" "$A41DIR" mysql; then
+    echo "PASS: a network statement is charged before it is sent (MySQL)"
+    rm -rf "$A41DIR"
+else
+    exit 1
+fi
+
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
 # plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix
