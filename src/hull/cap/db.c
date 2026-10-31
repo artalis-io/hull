@@ -16,6 +16,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/shared/cache_dir.h"   /* hl_hull_sqlite_temp_dir */
 #include "hull/shared/term_escape.h" /* hl_eprintf_line */
+#include "log.h"
 #include <sqlite3.h>
 #include <errno.h>
 #include <limits.h>
@@ -383,7 +384,15 @@ int hl_cap_db_exec_script(sqlite3 *db, const char *sql)
  * reads and writes of the tables it names - so the authorizer sees what the
  * statement really reaches, whatever spelled it. Table name in a1 for the row
  * actions (a2 is the column), a1 and / or a2 for DDL (index / trigger: a1 the
- * object, a2 its table; ALTER: a2 the table). */
+ * object, a2 its table; ALTER: a2 the table).
+ *
+ * SQLITE_ANALYZE and SQLITE_REINDEX are not guarded (audit 40): a bare
+ * `ANALYZE` or `PRAGMA optimize` asks once per table, `_hull_*` ones included,
+ * so guarding them failed both for every app with a `_hull_migrations` table,
+ * and the shutdown's own PRAGMA optimize with them. Neither returns rows:
+ * ANALYZE writes only row / index counts to sqlite_stat1 (STAT4, which would
+ * store sampled key values, is not compiled in), app SQL still cannot write
+ * sqlite_stat* (db_bookkeeping_write), and REINDEX only rebuilds an index. */
 static int db_name_guarded(const char *name)
 {
     /* hull/search's FTS5 indexes (`_hull_fts_<name>` and FTS5's own shadow
@@ -423,8 +432,6 @@ static int db_action_reserved(int action, const char *a1, const char *a2)
     case SQLITE_CREATE_TEMP_VIEW:
     case SQLITE_DROP_VIEW:
     case SQLITE_DROP_TEMP_VIEW:
-    case SQLITE_ANALYZE:
-    case SQLITE_REINDEX:
     case SQLITE_DROP_VTABLE:
         return db_name_guarded(a1);
     case SQLITE_CREATE_VTABLE:
@@ -938,6 +945,18 @@ int hl_cap_db_guard(sqlite3 *db)
     return 0;
 }
 
+int hl_cap_db_optimize(sqlite3 *db)
+{
+    if (!db)
+        return -1;
+    /* Hull's own fixed SQL: trusted, so its ANALYZEs of `_hull_*` tables are
+     * never refused whatever the authorizer guards (audit 40). */
+    int prev = hl_cap_db_ns_trust(1);
+    int rc = sqlite3_exec(db, "PRAGMA optimize", NULL, NULL, NULL);
+    hl_cap_db_ns_restore(prev);
+    return rc == SQLITE_OK ? 0 : -1;
+}
+
 void hl_cap_db_shutdown(sqlite3 *db)
 {
     if (!db)
@@ -947,7 +966,9 @@ void hl_cap_db_shutdown(sqlite3 *db)
     HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
 
     /* Run PRAGMA optimize - lets SQLite update internal statistics */
-    sqlite3_exec(db, "PRAGMA optimize", NULL, NULL, NULL);
+    if (hl_cap_db_optimize(db) != 0)
+        log_warn("[db] PRAGMA optimize at shutdown failed: %s",
+                 sqlite3_errmsg(db));
 
     /* Final WAL checkpoint - merge WAL back into main DB file */
     sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE,
