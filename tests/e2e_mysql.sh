@@ -1010,6 +1010,70 @@ done
 echo "PASS: autocommit off / LOCK TABLES refuse a wait instead of being reset under the handler (MySQL)"
 rm -rf "$A40DIR"
 
+# ── audit 41: a lost connection keeps refusing what its session held ──
+# A connection lost with autocommit off or under LOCK TABLES (IN_TRANS
+# clear) reconnected silently into autocommit with no lock: the retried
+# INSERT autocommitted and the ROLLBACK lied; waits were allowed. Now
+# refused until ROLLBACK / SET autocommit = 1 / UNLOCK TABLES or the entry
+# ends. Plus: a `--`+form-feed comment does not release a tracked lock, a
+# failed CALL that opened a transaction / turned autocommit off is seen,
+# and a server with global autocommit off keeps a plain write.
+echo "=== audit 41: lost sessions, -- comments, failed CALLs, global autocommit (both runtimes) ==="
+A41DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_session_audit41.sh"
+db_session_audit41_apps "$A41DIR" "$DSN"
+a41fail=0
+for a41app in "$A41DIR/l/app.lua" "$A41DIR/j/app.js"; do
+    ./build/hull -d "$DSN" -p "$PORT" "$a41app" >"$A41DIR/serve.log" 2>&1 &
+    SVR=$!
+    wait_for_server "$A41DIR/serve.log" || exit 1
+    curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 41 setup"; cat "$A41DIR/serve.log"; exit 1; }
+    a41out=$(db_session_audit41_run "$PORT" kill_autocommit kill_locktables kill_and_leave probe dash_comment)
+    curl -fsS "http://127.0.0.1:${PORT}/reset" >/dev/null || a41fail=1
+    a41out2=$(db_session_audit41_run "$PORT" call_txn write60 call_ac write61)
+    a41rows=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM a41")
+    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+    echo "$a41app"; echo "$a41out"; echo "$a41out2"
+    db_session_audit41_ok "$a41out" kill_autocommit '"wrote":false' '"refused":true' '"waited":false' '"code":"wait_refused"' '"rollback_ok":true' '"after_rollback_ok":true' '"ac_after":0' '"rows":0' || a41fail=1
+    db_session_audit41_ok "$a41out" kill_locktables '"wrote":false' '"refused":true' '"waited":false' '"code":"wait_refused"' '"rollback_ok":true' '"still_refused":true' '"unlock_ok":true' '"after_unlock_ok":true' '"wait_after_unlock":true' '"rows":0' || a41fail=1
+    db_session_audit41_ok "$a41out" kill_and_leave '"wrote":false' || a41fail=1
+    db_session_audit41_ok "$a41out" probe '"ac":1' '"waited":true' '"rows":0' || a41fail=1
+    db_session_audit41_ok "$a41out" dash_comment '"waited":false' '"code":"wait_refused"' '"wait_after_unlock":true' || a41fail=1
+    db_session_audit41_ok "$a41out2" call_txn '"call_ok":false' '"in_txn":true' '"waited":false' '"code":"wait_refused"' || a41fail=1
+    db_session_audit41_ok "$a41out2" call_ac '"call_ok":false' '"waited":false' '"code":"wait_refused"' || a41fail=1
+    db_session_audit41_ok "$a41out2" write60 '"ok":true' || a41fail=1
+    db_session_audit41_ok "$a41out2" write61 '"ok":true' || a41fail=1
+    # The failed CALL's own INSERT (50) was rolled back by the guard; the
+    # next requests' acknowledged writes persisted.
+    [ "$a41rows" = "60,61" ] || { echo "::error audit 41: rows after the failed CALLs: '$a41rows' (want 60,61)"; a41fail=1; }
+    [ "$a41fail" = 0 ] || { cat "$A41DIR/serve.log"; exit 1; }
+done
+
+# A server whose global autocommit is off: a plain write persists, also
+# after the guard reset the session (COM_RESET_CONNECTION restores the
+# global default, which Hull then sets back on).
+docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "SET GLOBAL autocommit = 0" >/dev/null 2>&1 || {
+    echo "::error audit 41: SET GLOBAL autocommit = 0 failed"; exit 1; }
+for a41app in "$A41DIR/l/app.lua" "$A41DIR/j/app.js"; do
+    ./build/hull -d "$DSN" -p "$PORT" "$a41app" >"$A41DIR/serve.log" 2>&1 &
+    SVR=$!
+    wait_for_server "$A41DIR/serve.log" || exit 1
+    curl -fsS "http://127.0.0.1:${PORT}/reset" >/dev/null || a41fail=1
+    a41out=$(db_session_audit41_run "$PORT" global_write global_lock global_write2)
+    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+    a41rows=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM a41")
+    echo "$a41app"; echo "$a41out"
+    db_session_audit41_ok "$a41out" global_write '"ac":1' || a41fail=1
+    db_session_audit41_ok "$a41out" global_write2 '"ac":1' || a41fail=1
+    [ "$a41rows" = "70,71" ] || { echo "::error audit 41: global autocommit off lost writes: '$a41rows' (want 70,71)"; a41fail=1; }
+    grep -q "resetting the session" "$A41DIR/serve.log" || { echo "::error audit 41: no session reset logged"; a41fail=1; }
+    [ "$a41fail" = 0 ] || { cat "$A41DIR/serve.log"; break; }
+done
+docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "SET GLOBAL autocommit = 1" >/dev/null 2>&1 || true
+[ "$a41fail" = 0 ] || exit 1
+echo "PASS: a lost session refuses calls instead of reconnecting into autocommit; -- comments, failed CALLs and global autocommit off (MySQL)"
+rm -rf "$A41DIR"
+
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
 # plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix

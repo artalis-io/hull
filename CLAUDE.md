@@ -1071,7 +1071,22 @@ roadmap §2.9.)
   transaction back, and statements on a new connection would each commit alone,
   so calls refuse until a `ROLLBACK` (the batch wrapper's, or the app's own),
   which then succeeds. Covered by the `/reconnect` phase of `e2e_postgres` /
-  `e2e_mysql` (each kills its own session). A run whose budget or deadline
+  `e2e_mysql` (each kills its own session). MySQL treats session state the
+  same way (audit 41, `my_ready` / `my_lost_held`): a connection lost with
+  autocommit off, LOCK TABLES (or a global read lock / FOR EXPORT), LOCK
+  INSTANCE, a MariaDB BACKUP LOCK / STAGE or an XA transaction - IN_TRANS
+  clear - reconnected into autocommit with no lock (a retried INSERT
+  autocommitted and the ROLLBACK lied). It now refuses every call, and
+  `mysql_session_held` keeps reporting the state so waits stay refused, until
+  the app ends each piece: ROLLBACK (answered unsent; with autocommit off the
+  next connection is opened with `SET autocommit = 0`, `ac_off_acked`),
+  `SET autocommit = 1`, UNLOCK TABLES / INSTANCE, BACKUP UNLOCK / STAGE END
+  (each answered unsent: the server ended it with the session), XA COMMIT /
+  ROLLBACK (sent on the new connection: a prepared XA outlives the session) -
+  or the entry ends, when the stale-transaction guard forgets it
+  (`my_lost_forget`, not on a pinned handle). Postgres reconnects even when a
+  session-level advisory lock may have been held (advisory locks do not count
+  for the wait gates), with a WARN that it went with the session. A run whose budget or deadline
   trips while the reply arrives does not read the rest of it: the connection
   is closed and marked broken (`pg_abandon_if_tripped` /
   `reply_frame`) - the server stops the query at its next write, and
@@ -1151,10 +1166,20 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   connection is closed and replaced) on XA / autocommit-off / LOCK TABLES
   leftovers and a failed ROLLBACK - see "Stale transactions". The handshake's
   status flags are kept (`server_status` was 0, read as autocommit off), and
-  the reset re-applies `SET NAMES utf8mb4, collation_connection = <id>` (a
-  plain `SET NAMES utf8mb4` on MariaDB for the default id 45, which it maps
-  through `character_set_collations`, the handshake's included). A
-  pinned handle (the migration run) is never reset. The same leftovers
+  the reset re-applies `SET NAMES utf8mb4, collation_connection = <id>,
+  autocommit = 1` (a plain `SET NAMES utf8mb4, autocommit = 1` on MariaDB for
+  the default id 45, which it maps through `character_set_collations`, the
+  handshake's included). Every new connection also sends `SET autocommit = 1`
+  after the handshake (`my_connect`, audit 41): a server whose global
+  autocommit is off (`SET GLOBAL autocommit = 0`, `init_connect`) still
+  reports SERVER_STATUS_AUTOCOMMIT in the handshake, and every write not
+  committed by hand was rolled back by the guard. A session left in a MariaDB
+  BACKUP LOCK / STAGE is closed rather than reset (whether a reset ends one is
+  not documented). Any server ERR outside a transaction is followed by
+  `COM_PING` (`my_note_failure`, audit 41): a CALL whose procedure ran START
+  TRANSACTION or `SET autocommit = 0` and then raised (or an earlier statement
+  of a multi-statement text) changed the session, and an ERR carries no status
+  flags. A pinned handle (the migration run) is never reset. The same leftovers
   (autocommit off, LOCK TABLES / FLUSH TABLES WITH READ LOCK / LOCK INSTANCE
   FOR BACKUP, XA) count as an open transaction for the wait gates
   (`mysql_session_held`, audit 40), so the guard that runs before a parked
@@ -1164,7 +1189,11 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   executable comment, a backslash, which ends no string under
   NO_BACKSLASH_ESCAPES): every word then counts as taking state, quotes and
   comments included, and none as releasing it - a misread refuses a wait and
-  resets the session at the entry's end, no more.
+  resets the session at the entry's end, no more. The readable path
+  (`hl_sql_scan_words`) takes each dialect's `--` rule (audit 41): MySQL's
+  before any byte <= 0x20 or DEL, to LF only (a form feed after `--` hid an
+  UNLOCK TABLES from the server but not from the scanner); Postgres's always,
+  to LF or CR.
 - **Deadlocks:** an `ER_LOCK_DEADLOCK` (1213) inside a transaction means
   InnoDB rolled the WHOLE transaction back; the backend then refuses every call
   but `ROLLBACK` (as for a connection lost mid-transaction), so later
