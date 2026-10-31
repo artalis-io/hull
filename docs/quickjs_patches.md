@@ -507,3 +507,89 @@ source frontend's tooling session) behaves as upstream.
 
 **Guard:** `tests/e2e_js_runs.sh`, "audit 30 M": without the patch (or the
 Hull side) `/rb` answers after `/ra`'s 1.5 s sleep instead of at once.
+
+## Patch 0009 - keyed atom and Map hashes; charged atom lookups
+
+**Files:** `vendor/quickjs/quickjs.c` (`JSRuntime.hash_key`, the `JSSipState`
+helpers that replace `hash_string8` / `hash_string16`, `hash_string`,
+`hash_string_rope`, `js_atom_hash_str`, `js_atom_hash_ascii`, `__JS_NewAtom`,
+`__JS_FindAtom`, `map_hash_key`, `JS_NewRuntimeKeyed`, `JS_NewRuntime2`,
+`json_parse_value`; test hooks `JS_TestForceAtomHash`, `JS_TestAtomHash`,
+`JS_TestAtomWidths` under `QJS_HULL_TEST_HOOKS`), `quickjs.h`
+(`JS_HASH_KEY_SIZE`, `JS_NewRuntimeKeyed`, the test-hook prototypes)
+**Found by:** audit 40
+**Upstream:** Hull-specific.
+
+Upstream hashes every atom string (property names, identifiers, JSON keys)
+and every Map / Set string key with a fixed multiply-add, `h = h * 263 + c`,
+seeded only by the atom type, and walks a bucket chain charging nothing. The
+bucket of every string is therefore known in advance, and a chain walk is work
+no step sees.
+
+The patch:
+
+- **Keys the string hash.** It is SipHash-1-3 under a 128-bit key held in
+  `JSRuntime.hash_key`, the seed (the atom type, or 0 for a Map key) folded
+  into the first key word. The input is the string's 16-bit code units,
+  little-endian, so an 8-bit and a 16-bit string with the same text hash
+  identically (atoms are compared across widths), and the state streams, so a
+  rope hashes exactly as its flat text does. The atom hash keeps the 30 bits
+  `JSString.hash` stores (`& JS_ATOM_HASH_MASK`); string atoms reserve no
+  value (the reserved ones, 0 and `JS_ATOM_HASH_PRIVATE`, are meanings of the
+  field for SYMBOL atoms, which are not hashed).
+- **Sets the key before the predefined atoms exist.** `JS_NewRuntimeKeyed(mf,
+  opaque, key)` stores the key before `JS_InitAtoms`; `JS_NewRuntime2` (and so
+  `JS_NewRuntime`) is it with a NULL key, all zero - SipHash still, but
+  unkeyed. Hull makes the main runtime and every worker.dispatch VM through
+  `hl_js_new_runtime_keyed` (`runtime/js/runtime.c`), which draws the key from
+  `hl_cap_crypto_random` and fails runtime init when that fails. The JS
+  source frontend's tooling session (`frontend/js_session.c`) stays unkeyed.
+- **Keys the Map / Set hash** for string keys (flat and rope), and also for
+  number keys (one SipHash block over the float64 bits; ints are hashed as
+  their double, so `1` and `1.0` still meet) and BigInt keys (one block per
+  limb, charged per limb), which used the same unkeyed polynomial / multiply.
+  Object and symbol keys hash their pointer, which a script does not choose.
+- **Charges the chain walk.** `__JS_NewAtom` and `__JS_FindAtom` add
+  `JS_WORK_ELEM` (one instruction) per chain step plus the bytes compared,
+  through patch 0005's work charge, once the walk ends.
+- **Polls in JSON.parse.** `json_parse_value` calls `js_poll_interrupts` once
+  per object property and array element, so a tripped work charge (patch
+  0005) or the run watchdog's stop flag (patch 0006) ends one long parse
+  partway, uncatchably (patch 0003), instead of after it returns.
+
+Considered and left: the **shape hash** (`shape_hash`, `get_shape_hash`). Its
+inputs are object-pointer values and atom indexes the runtime assigns, not
+bytes a script supplies, and a seed in a multiply-add would not be a key; a
+keyed mix there would cost every property addition.
+
+Not affected: bytecode (`JS_WriteObject` / `JS_ReadObject`) carries atoms as
+strings and predefined atoms by index, never a hash, so code written by one
+runtime (one key) loads in another and Hull's sealed bytecode cache is
+unchanged; `JS_ResizeAtomHash` re-buckets by the stored `p->hash`, which is
+the keyed value.
+
+Lua needs no twin: Lua 5.4 seeds its string hash per state
+(`luai_makeseed` in `vendor/lua/lstate.c`: the state's address, a stack
+address, a function address and the time), and Hull does not override it.
+
+**Test hooks** (compiled only into `build/qjs_quickjs_testhooks.o`, which only
+`test_js` links; `mk/tests.mk`): `JS_TestForceAtomHash(rt, on)` makes every
+atom hash to one constant (rehashing and re-bucketing the atoms already made,
+so lookups keep working), `JS_TestAtomHash` reads one hash, and
+`JS_TestAtomWidths` checks an 8-bit and a 16-bit copy of a text agree.
+
+**Re-apply on upgrade:** replace the string hash functions with the keyed
+`JSSipState` ones (every caller of `hash_string*` takes the runtime), keep the
+key copy before `JS_InitAtoms` in the runtime constructor, re-add the chain
+charge in the two atom-table walks and the two `js_poll_interrupts` calls at
+the top of `json_parse_value`'s object and array loops, and re-key
+`map_hash_key`'s string / number / BigInt cases. Check that nothing new stores
+or serialises a string hash.
+
+**Guard:** `tests/hull/runtime/js/test_js.c`, `js_audit40.*` (two runtimes
+hash a text differently; 8-bit and 16-bit storage share an atom; bytecode and
+the sealed module cache cross keyed runtimes; under `JS_TestForceAtomHash` a
+JSON.parse of 3000 ordinary keys trips a 1M budget uncatchably and, with no
+limit, the run deadline stops one of 60000; ordinary large parses fit the
+default budget), and `lua_audit40.*` in `test_lua.c` (two Lua states order
+string keys differently).

@@ -377,6 +377,23 @@ void JS_SetMaxStackSize(JSRuntime *rt, size_t stack_size);
    used to check stack overflow. */
 void JS_UpdateStackTop(JSRuntime *rt);
 JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque);
+/* HULL PATCH 0009: as JS_NewRuntime2 ('mf' NULL: the default allocator),
+   with a JS_HASH_KEY_SIZE-byte secret (NULL: all zero) keying the atom and
+   Map / Set hashes (SipHash-1-3). Fill it from a CSPRNG: with a known key
+   the bucket of every property name and Map key is known in advance. See
+   Hull's docs/quickjs_patches.md. */
+#define JS_HASH_KEY_SIZE 16
+JSRuntime *JS_NewRuntimeKeyed(const JSMallocFunctions *mf, void *opaque,
+                              const uint8_t *hash_key);
+#ifdef QJS_HULL_TEST_HOOKS
+/* HULL PATCH 0009: test only (built with -DQJS_HULL_TEST_HOOKS): every atom
+   hashes to one constant while 'on'. Returns -1 on allocation failure. */
+int JS_TestForceAtomHash(JSRuntime *rt, int on);
+/* the hash an 8-bit string atom with this text gets in 'rt' */
+uint32_t JS_TestAtomHash(JSRuntime *rt, const char *ascii);
+/* 1 when 8-bit and 16-bit storage of 'ascii' hash alike and share an atom */
+int JS_TestAtomWidths(JSRuntime *rt, const char *ascii);
+#endif
 void JS_FreeRuntime(JSRuntime *rt);
 void *JS_GetRuntimeOpaque(JSRuntime *rt);
 void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque);

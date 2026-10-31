@@ -320,6 +320,13 @@ int hl_js_budget_charge(JSContext *ctx, uint64_t units);
  * nothing collected. Every retry site goes through this, never a bare
  * JS_RunGC. */
 int hl_js_gc_for_retry(JSContext *ctx);
+/* A QuickJS runtime whose atom and Map / Set hashes are keyed by a fresh
+ * 128-bit secret from hl_cap_crypto_random (QuickJS HULL PATCH 0009,
+ * JS_NewRuntimeKeyed; audit 40). NULL when randomness or the allocation
+ * fails - the caller fails its init: an unkeyed runtime puts every
+ * property name in a bucket known in advance. The main runtime and every
+ * worker.dispatch VM are made through this. */
+JSRuntime *hl_js_new_runtime_keyed(void);
 /* hl_js_budget_charge as an HlFsChargeFn (cap/fs_resolve.h), @p ud the
  * JSContext: for the fs capability's charge scope (mod_fs.c, audit 38). */
 int hl_js_fs_charge(void *ud, uint64_t units);

@@ -15004,4 +15004,42 @@ UTEST(lua_audit39, sync_http_requests_are_charged)
 }
 #endif /* HL_ENABLE_HTTP_CLIENT */
 
+/* ── Audit 40: the Lua string-hash seed ────────────────────────────────────────
+ *
+ * Lua 5.4 seeds its string hash per state (lstate.c luai_makeseed: the
+ * state's address, a stack address, a function address and the time), not
+ * a compile-time constant, and Hull does not override it. The seed shows in
+ * the order pairs() walks string keys: two live states order the same keys
+ * differently. */
+static char *a40_lua_key_order(lua_State *L)
+{
+    static const char code[] =
+        "local t = {} for i = 1, 64 do t['key' .. i] = true end "
+        "local o = {} for k in pairs(t) do o[#o + 1] = k end "
+        "return table.concat(o, ',')";
+    if (luaL_dostring(L, code) != LUA_OK)
+        return NULL;
+    const char *s = lua_tostring(L, -1);
+    char *out = s ? strdup(s) : NULL;
+    lua_pop(L, 1);
+    return out;
+}
+
+UTEST(lua_audit40, string_hash_seed_differs_between_states)
+{
+    lua_State *a = luaL_newstate();
+    lua_State *b = luaL_newstate();
+    ASSERT_TRUE(a != NULL && b != NULL);
+    luaL_openlibs(a);
+    luaL_openlibs(b);
+    char *oa = a40_lua_key_order(a);
+    char *ob = a40_lua_key_order(b);
+    ASSERT_TRUE(oa != NULL && ob != NULL);
+    EXPECT_STRNE(oa, ob);
+    free(oa);
+    free(ob);
+    lua_close(a);
+    lua_close(b);
+}
+
 UTEST_MAIN();
