@@ -127,6 +127,16 @@ void hl_stmt_cache_destroy(HlStmtCache *cache);
 int hl_cap_db_init(sqlite3 *db);
 
 /**
+ * @brief Run `PRAGMA optimize` on @p db as Hull's own (trusted) SQL.
+ *
+ * Called by #hl_cap_db_shutdown; its ANALYZEs of `_hull_*` tables are never
+ * refused by the namespace authorizer (audit 40).
+ *
+ * @return 0 on success, -1 on failure (`sqlite3_errmsg` has the reason).
+ */
+int hl_cap_db_optimize(sqlite3 *db);
+
+/**
  * @brief Flush pending writes and finalize cached statements.
  *
  * Optional - `sqlite3_close` works without it - but recommended for

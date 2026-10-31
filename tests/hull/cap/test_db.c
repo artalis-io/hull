@@ -2926,6 +2926,55 @@ UTEST(hl_cap_db, sqlite_bookkeeping_internal_deletes_allowed)
     teardown_db();
 }
 
+/* Audit 40: a bare ANALYZE / PRAGMA optimize asks the authorizer once per
+ * table, `_hull_*` ones included; guarding SQLITE_ANALYZE failed both for any
+ * app with a `_hull_migrations` table, and the shutdown's own optimize too. */
+UTEST(hl_cap_db, bare_analyze_and_optimize_work_beside_hull_tables)
+{
+    setup_db();
+    int prev = hl_cap_db_ns_trust(1);
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(test_db,
+        "CREATE TABLE _hull_migrations (name TEXT PRIMARY KEY, applied_at TEXT);"
+        "INSERT INTO _hull_migrations VALUES ('001_init.sql', 'x');"
+        "CREATE TABLE _hull_sessions (tok TEXT);"
+        "CREATE INDEX _hull_sessions_tok ON _hull_sessions(tok);"
+        "INSERT INTO _hull_sessions VALUES ('secret');"
+        "CREATE VIEW leakv AS SELECT tok FROM _hull_sessions;",
+        NULL, NULL, NULL));
+    hl_cap_db_ns_restore(prev);
+    ASSERT_EQ(0, hl_cap_db_ns_trusted());
+    ASSERT_EQ(0, hl_cap_db_exec_script(test_db,
+        "INSERT INTO users(name, age) VALUES ('a', 1), ('b', 2);"
+        "CREATE INDEX users_age ON users(age);"));
+
+    /* App SQL, untrusted. */
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "ANALYZE"));
+    EXPECT_GE(hl_cap_db_exec(&test_cache, "ANALYZE", NULL, 0), 0);
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "PRAGMA optimize"));
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "PRAGMA optimize=0x10002"));
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "ANALYZE users"));
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "REINDEX"));
+    EXPECT_EQ(0, hl_cap_db_exec_script(test_db, "VACUUM"));
+    EXPECT_TRUE(count_of("SELECT count(*) FROM sqlite_stat1") > 0);
+
+    /* Reading `_hull_*` is still refused. */
+    int n = 0;
+    EXPECT_NE(0, hl_cap_db_query(&test_cache, "SELECT tok FROM leakv",
+                                 NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(0, n);
+    /* sqlite_stat1 stays unwritable from app SQL. */
+    EXPECT_NE(0, hl_cap_db_exec_script(test_db,
+        "UPDATE sqlite_stat1 SET stat = '1 1'"));
+    EXPECT_NE(0, hl_cap_db_exec_script(test_db,
+        "INSERT INTO sqlite_stat1 VALUES ('users', NULL, '9')"));
+    EXPECT_NE(0, hl_cap_db_exec_script(test_db, "DELETE FROM sqlite_stat1"));
+
+    /* The shutdown's optimize succeeds. */
+    EXPECT_EQ(0, hl_cap_db_optimize(test_db));
+    EXPECT_EQ(0, hl_cap_db_ns_trusted());
+    teardown_db();
+}
+
 /* The agent's read-only gate checks argument-less pragmas too (PRAGMA
  * optimize runs ANALYZE and writes) and refuses ATTACH of any name, DETACH
  * and ANALYZE. */

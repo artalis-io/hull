@@ -347,6 +347,16 @@ release-artifact layout).
   refusal (`hull._refusal` / `hull:_refusal`) is handed back without spending an attempt, as
   the outbox does. Covered by the `jobs_hooks_audit38` cases in `test_lua` / `test_js` and the
   audit 38 legs of `tests/e2e_postgres.sh` / `tests/e2e_mysql.sh`.
+- **A bare `ANALYZE` or `PRAGMA optimize` failed beside any `_hull_*` table** (audit 40,
+  SQLite). The audit 39 authorizer guarded `SQLITE_ANALYZE` and `SQLITE_REINDEX` by name, and a
+  bare `ANALYZE` / `PRAGMA optimize` asks once per table, `_hull_*` ones included - so both
+  failed "not authorized" from app SQL for every app with migrations (`_hull_migrations`), and
+  the `PRAGMA optimize` Hull runs at shutdown failed silently, never refreshing the planner's
+  statistics. Neither callback is guarded any more: neither statement returns rows, ANALYZE
+  writes only row / index counts to `sqlite_stat1` (STAT4 is not compiled in), and app SQL
+  still cannot write `sqlite_stat*`. The shutdown optimize now runs as Hull's own trusted SQL
+  (`hl_cap_db_optimize`) and logs a WARN if it fails. Covered by
+  `bare_analyze_and_optimize_work_beside_hull_tables` in `test_db`.
 - **JS: a run failed for holding a transaction across a wait still resumed later** (audit 33).
   Audit 32 dropped a failed run's queued jobs, but forgot the run's tag as soon as its
   request was answered, and the 32-slot list it lived in overwrote its oldest entry. A
