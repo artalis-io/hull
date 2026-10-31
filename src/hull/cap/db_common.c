@@ -391,6 +391,43 @@ int hl_cap_db_sql_is_virtual_table(const char *sql)
     return vt_kw(&t, "virtual");
 }
 
+HlDbSchemaKind hl_cap_db_schema_sql_kind(const char *sql)
+{
+    HlVtTok t;
+    if (!sql) return HL_DB_SCHEMA_UNKNOWN;
+    const char *p = vt_next(sql, &t);
+    if (!vt_kw(&t, "create")) return HL_DB_SCHEMA_UNKNOWN;
+    p = vt_next(p, &t);
+    if (vt_kw(&t, "virtual")) {
+        (void)vt_next(p, &t);
+        return vt_kw(&t, "table") ? HL_DB_SCHEMA_VIRTUAL_TABLE
+                                  : HL_DB_SCHEMA_UNKNOWN;
+    }
+    if (vt_kw(&t, "unique")) {
+        (void)vt_next(p, &t);
+        return vt_kw(&t, "index") ? HL_DB_SCHEMA_INDEX : HL_DB_SCHEMA_UNKNOWN;
+    }
+    if (vt_kw(&t, "index")) return HL_DB_SCHEMA_INDEX;
+    if (vt_kw(&t, "temp") || vt_kw(&t, "temporary"))
+        (void)vt_next(p, &t);
+    if (vt_kw(&t, "table"))   return HL_DB_SCHEMA_TABLE;
+    if (vt_kw(&t, "view"))    return HL_DB_SCHEMA_VIEW;
+    if (vt_kw(&t, "trigger")) return HL_DB_SCHEMA_TRIGGER;
+    return HL_DB_SCHEMA_UNKNOWN;
+}
+
+const char *hl_cap_db_schema_kind_type(HlDbSchemaKind kind)
+{
+    switch (kind) {
+    case HL_DB_SCHEMA_TABLE:
+    case HL_DB_SCHEMA_VIRTUAL_TABLE: return "table";
+    case HL_DB_SCHEMA_VIEW:          return "view";
+    case HL_DB_SCHEMA_TRIGGER:       return "trigger";
+    case HL_DB_SCHEMA_INDEX:         return "index";
+    default:                         return NULL;
+    }
+}
+
 /* Whether the arguments of an `fts5(...)` definition named @p name are the
  * shape hull.search's create_index writes: `id`, one or more columns, then
  * any of tokenize / content / content_rowid once each, content naming an app
