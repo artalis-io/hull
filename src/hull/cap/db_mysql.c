@@ -41,13 +41,21 @@ typedef struct HlDbMyCtx {
     int      txn_aborted;
     /* Session state a later entry on this shared connection must not inherit,
      * read from the statements run on it (my_track_session; audit 39): a LOCK
-     * TABLES not yet released, an XA transaction begun and not ended, and
-     * GET_LOCK calls not yet matched by RELEASE_LOCK. Cleared when the
-     * session is reset or replaced. */
+     * TABLES (or FLUSH TABLES WITH READ LOCK) not yet released, a LOCK
+     * INSTANCE FOR BACKUP not yet released (audit 40), an XA transaction
+     * begun and not ended, and GET_LOCK calls not yet matched by
+     * RELEASE_LOCK. Cleared when the session is reset or replaced. */
     int      lock_tables;
+    int      lock_instance;
     int      xa_open;
     int      named_locks;
 } HlDbMyCtx;
+
+/* A new or reset session holds none of the tracked state. */
+static void my_session_clear(HlDbMyCtx *s)
+{
+    s->lock_tables = s->lock_instance = s->xa_open = s->named_locks = 0;
+}
 
 static int my_connect(HlMyConn *conn, const char *dsn)
 {
@@ -219,7 +227,7 @@ static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
     }
     hl_my_conn_close(&s->conn);
     s->conn = fresh;
-    s->lock_tables = s->xa_open = s->named_locks = 0;   /* a new session */
+    my_session_clear(s);   /* a new session */
     return 0;
 }
 
@@ -228,6 +236,7 @@ static int my_ready(HlDbMyCtx *s, const char *sql, int pinned)
 typedef struct {
     HlDbMyCtx *s;
     int        ok;        /* the statement succeeded: releasing words count */
+    int        take_only; /* only words that take state count (audit 40) */
 } MyTrack;
 
 static void my_track_word(void *ud, const char *w, const char *prev,
@@ -235,34 +244,87 @@ static void my_track_word(void *ud, const char *w, const char *prev,
 {
     MyTrack *t = ud;
     HlDbMyCtx *s = t->s;
-    (void)prev2;
+    int rel = t->ok && !t->take_only;
     if (strcmp(w, "get_lock") == 0) {
         if (s->named_locks < 1000000) s->named_locks++;
     } else if (strcmp(w, "release_lock") == 0) {
-        if (t->ok && s->named_locks > 0) s->named_locks--;
+        if (rel && s->named_locks > 0) s->named_locks--;
     } else if (strcmp(w, "release_all_locks") == 0) {
-        if (t->ok) s->named_locks = 0;
+        if (rel) s->named_locks = 0;
     } else if (strcmp(w, "table") == 0 || strcmp(w, "tables") == 0) {
         if (strcmp(prev, "lock") == 0) s->lock_tables = 1;
-        else if (strcmp(prev, "unlock") == 0 && t->ok) s->lock_tables = 0;
+        else if (strcmp(prev, "unlock") == 0 && rel) s->lock_tables = 0;
+    } else if (strcmp(w, "lock") == 0 && strcmp(prev, "read") == 0 &&
+               strcmp(prev2, "with") == 0) {
+        s->lock_tables = 1;   /* FLUSH TABLES ... WITH READ LOCK (audit 40) */
+    } else if (strcmp(w, "instance") == 0) {
+        /* LOCK INSTANCE FOR BACKUP / UNLOCK INSTANCE (audit 40). */
+        if (strcmp(prev, "lock") == 0) s->lock_instance = 1;
+        else if (strcmp(prev, "unlock") == 0 && rel) s->lock_instance = 0;
     } else if (strcmp(prev, "xa") == 0) {
         if (strcmp(w, "start") == 0 || strcmp(w, "begin") == 0) s->xa_open = 1;
         else if ((strcmp(w, "commit") == 0 || strcmp(w, "rollback") == 0) &&
-                 t->ok)
+                 rel)
             s->xa_open = 0;
     }
 }
 
+/* Every word of @p sql, read as code: quotes and comments are not skipped
+ * (the take-only pass over a text the scanner may misread). */
+static void my_scan_raw_words(const char *sql, HlSqlWordFn fn, void *ud)
+{
+    char w[HL_SQL_SCAN_WORD_MAX];
+    char prev[HL_SQL_SCAN_WORD_MAX] = "", prev2[HL_SQL_SCAN_WORD_MAX] = "";
+    const char *p = sql;
+    while (*p) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+            (*p >= '0' && *p <= '9') || *p == '_') {
+            size_t n = 0;
+            while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                   (*p >= '0' && *p <= '9') || *p == '_') {
+                char ch = *p++;
+                if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+                if (n + 1 < sizeof w) w[n++] = ch;
+                else n = sizeof w;
+            }
+            w[n < sizeof w ? n : 0] = '\0';
+            fn(ud, w, prev, prev2);
+            memcpy(prev2, prev, sizeof prev2);
+            memcpy(prev, w, sizeof prev);
+            continue;
+        }
+        p++;
+    }
+}
+
+/* A text the session tracker's word scanner may misread (audit 40): what
+ * my_sql_unreadable names (an executable comment - which the scanner also
+ * skips when it follows another comment - or a `#` comment), or a
+ * backslash, which ends no string under NO_BACKSLASH_ESCAPES. */
+static int my_sql_track_unreadable(const char *sql)
+{
+    return my_sql_unreadable(sql) || strchr(sql, '\\') != NULL ||
+           strstr(sql, "/*m!") != NULL;
+}
+
 /* Note what @p sql (run with result @p rc) did to the session. Words that
- * take state (LOCK TABLES, XA START, GET_LOCK) count whether or not the
- * statement succeeded; words that release it only when it did. START
- * TRANSACTION / BEGIN releases LOCK TABLES. A heuristic that errs one way:
- * a misread costs a session reset at the next entry boundary, no more. */
+ * take state (LOCK TABLES, FLUSH TABLES WITH READ LOCK, LOCK INSTANCE, XA
+ * START, GET_LOCK) count whether or not the statement succeeded; words that
+ * release it only when it did. START TRANSACTION / BEGIN releases LOCK
+ * TABLES. Conservative where the text cannot be read reliably (audit 40):
+ * every word of it counts as taking state, quotes and comments included,
+ * and none as releasing it. A misread that way costs a refused wait in the
+ * entry and a session reset at its end, no more. */
 static void my_track_session(HlDbHandle *h, const char *sql, int rc)
 {
     HlDbMyCtx *s = h ? h->ctx : NULL;
     if (!s || !sql) return;
-    MyTrack t = { s, rc >= 0 };
+    if (my_sql_track_unreadable(sql)) {
+        MyTrack t = { s, rc >= 0, 1 };
+        my_scan_raw_words(sql, my_track_word, &t);
+        return;
+    }
+    MyTrack t = { s, rc >= 0, 0 };
     hl_sql_scan_words(sql, 0, 1, my_track_word, &t);
     if (t.ok && my_sql_txn_kind(sql) == HL_SQL_TXN_BEGIN)
         s->lock_tables = 0;
@@ -276,7 +338,18 @@ static void my_track_session(HlDbHandle *h, const char *sql, int rc)
 static int my_session_leftover(const HlDbMyCtx *s)
 {
     return !(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT) ||
-           s->lock_tables || s->xa_open;
+           s->lock_tables || s->lock_instance || s->xa_open;
+}
+
+/* hl_db_session_held (audit 40): the same state counts as an open
+ * transaction for the wait gates, so an entry holding it cannot park and
+ * have the guard that runs before it resumes reset the session under it.
+ * Hence, too, every leftover the guard finds belongs to a finished entry. */
+static int mysql_session_held(HlDbHandle *h)
+{
+    HlDbMyCtx *s = h ? h->ctx : NULL;
+    if (!s || s->conn.broken) return 0;
+    return my_session_leftover(s);
 }
 
 /* hl_db_session_dirty: a pooled worker connection holding any of it - or a
@@ -301,11 +374,11 @@ static void my_reset_session(HlDbHandle *h, const char *why)
     HlDbMyCtx *s = h->ctx;
     if (h->session_pinned) return;
     if (!s->conn.broken) {
-        log_warn("[hull:c] mysql: resetting the session, which an earlier "
+        log_warn("[hull:c] mysql: resetting the session, which a finished "
                  "entry left with %s; session settings, user variables, "
                  "temporary tables and named locks on it are dropped", why);
         if (hl_my_conn_reset(&s->conn) == 0) {
-            s->lock_tables = s->xa_open = s->named_locks = 0;
+            my_session_clear(s);
             s->txn_aborted = 0;
             return;
         }
@@ -317,7 +390,7 @@ static void my_reset_session(HlDbHandle *h, const char *why)
     /* Broken: nothing of the session survives; the next call reconnects. */
     s->conn.server_status &= (uint16_t)~HL_MY_SERVER_STATUS_IN_TRANS;
     s->txn_aborted = 0;
-    s->lock_tables = s->xa_open = s->named_locks = 0;
+    my_session_clear(s);
 }
 
 /* Case-insensitive substring search (strcasestr is not standard C). */
@@ -1048,7 +1121,7 @@ static void mysql_guard_stale_txn(HlDbHandle *h)
         if (s->conn.broken) {
             /* Lost: the server ended the session; my_ready reconnects. */
             if (!(s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS))
-                s->lock_tables = s->xa_open = s->named_locks = 0;
+                my_session_clear(s);
             return;
         }
         if (rc != 0 || (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS))
@@ -1059,7 +1132,8 @@ static void mysql_guard_stale_txn(HlDbHandle *h)
     if (!why && !s->conn.broken && my_session_leftover(s))
         why = !(s->conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT)
               ? "autocommit off" : s->xa_open ? "an XA transaction"
-              : "LOCK TABLES";
+              : s->lock_instance ? "LOCK INSTANCE FOR BACKUP"
+              : "LOCK TABLES (or a global read lock)";
     if (why) my_reset_session(h, why);
 }
 
@@ -1265,6 +1339,7 @@ const HlDbBackend hl_db_backend_mysql = {
     .guard_stale_txn       = mysql_guard_stale_txn,
     .in_txn                = mysql_in_txn,
     .session_dirty         = mysql_session_dirty,
+    .session_held          = mysql_session_held,
     .last_id               = mysql_last_id,
     .errmsg                = mysql_errmsg,
     .insert_if_absent      = mysql_insert_if_absent,

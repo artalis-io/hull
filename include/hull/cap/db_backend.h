@@ -227,6 +227,20 @@ typedef struct HlDbBackend {
      * event-loop connections are reset by guard_stale_txn instead). NULL =
      * never. */
     int    (*session_dirty)(HlDbHandle *h);
+
+    /* Whether the session holds state that makes it as good as inside a
+     * transaction, though in_txn reads 0 (audit 40): MySQL's autocommit off
+     * (the next statement opens one), an outstanding LOCK TABLES / FLUSH
+     * TABLES WITH READ LOCK / LOCK INSTANCE FOR BACKUP, or an XA
+     * transaction. No I/O. The wait gates (hl_db_registry_open_txn) refuse
+     * a wait while it holds: the stale-transaction guard that runs before a
+     * parked entry resumes would otherwise reset the session under it - the
+     * INSERT after `SET autocommit = 0; <wait>` autocommitted and its
+     * ROLLBACK lied. NULL = never. Session-level named / advisory locks
+     * (GET_LOCK, pg_advisory_lock) do not count: the tracker cannot tell a
+     * GET_LOCK that timed out from one that took the lock, and counted, one
+     * such call would refuse every later wait. */
+    int    (*session_held)(HlDbHandle *h);
 } HlDbBackend;
 
 struct HlDbHandle {
@@ -260,6 +274,21 @@ static inline int hl_db_session_dirty(HlDbHandle *h)
     return h->backend->session_dirty(h) ? 1 : 0;
 }
 
+/* 1 when the session holds transaction-like state (HlDbBackend.session_held),
+ * 0 otherwise or unknown. */
+static inline int hl_db_session_held(HlDbHandle *h)
+{
+    if (!h || !h->backend || !h->backend->session_held) return 0;
+    return h->backend->session_held(h) ? 1 : 0;
+}
+
+/* What the wait gates count as an open transaction: one actually open, or
+ * session state that is as good as one (hl_db_session_held). */
+static inline int hl_db_holds_txn(HlDbHandle *h)
+{
+    return hl_db_in_txn(h) || hl_db_session_held(h);
+}
+
 /*
  * Transaction generation (audit 36). A per-thread counter that changes
  * whenever a transaction starts or ends on any connection this thread uses:
@@ -278,6 +307,7 @@ static inline int hl_db_session_dirty(HlDbHandle *h)
 typedef struct {
     int      in_txn;
     uint64_t seq;
+    int      held;    /* hl_db_session_held (audit 40) */
 } HlDbTxnSnap;
 
 static inline uint64_t hl_db_txn_seq(HlDbHandle *h)
@@ -288,7 +318,7 @@ static inline uint64_t hl_db_txn_seq(HlDbHandle *h)
 
 static inline HlDbTxnSnap hl_db_txn_snap(HlDbHandle *h)
 {
-    HlDbTxnSnap s = { hl_db_in_txn(h), 0 };
+    HlDbTxnSnap s = { hl_db_in_txn(h), 0, hl_db_session_held(h) };
     if (s.in_txn) s.seq = hl_db_txn_seq(h);
     return s;
 }

@@ -177,6 +177,24 @@ release-artifact layout).
   legs of `tests/e2e_postgres.sh` / `tests/e2e_mysql.sh` (a trigger refusing the stored
   response proves the key is left processed).
 
+- **A MySQL handler that turned autocommit off or ran LOCK TABLES had its session reset
+  across its own wait** (audit 40, both runtimes; a regression from audit 39). Audit 39's
+  stale-transaction guard resets a session left with autocommit off, LOCK TABLES or an XA
+  transaction, and the guard also runs just before a parked handler resumes. Right after
+  `SET autocommit = 0` or `LOCK TABLES`, with no statement after it, the server reports no
+  open transaction, so the wait gates let the handler park - and the guard reset its session
+  when its own `hull.sleep` / `http.fetch` / `db.async` came back: `SET autocommit = 0;
+  <wait>; INSERT; ROLLBACK` committed the INSERT and the ROLLBACK reported success, and a
+  LOCK TABLES vanished mid-handler, with a WARN blaming "an earlier entry". That state (and
+  FLUSH TABLES WITH READ LOCK, LOCK INSTANCE FOR BACKUP - now tracked - and XA) now counts
+  as an open transaction for the wait gates: the wait is refused with `wait_refused`, as
+  inside `BEGIN`, and the end-of-entry guard still resets what a finished entry left. The
+  statement tracker no longer trusts text it cannot read (a `#` comment, an executable
+  comment after another comment or in MariaDB's form, a backslash under
+  NO_BACKSLASH_ESCAPES): every word of such a statement counts as taking state and none as
+  releasing it. Session-level named and advisory locks (GET_LOCK, `pg_advisory_lock`) still
+  do not refuse a wait - a failed `pg_try_advisory_lock` looks the same as a taken one - and
+  stay shared by every entry on the connection.
 - **A DuckDB macro could read any `_hull_*` table by a name built at run time** (audit 37,
   both runtimes). The table-name functions (`histogram`, `histogram_values`,
   `pragma_table_info`, `pragma_show`, `table_info`, `show`, `duckdb_table_sample`) took a

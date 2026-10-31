@@ -932,7 +932,8 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
         return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait while a transaction is open on "
                           "database connection '%s': other requests use the "
                           "same connection while this one waits. Commit or "
-                          "roll back first (and do the waiting outside "
+                          "roll back first - on MySQL also SET autocommit = 1 and "
+                          "UNLOCK TABLES - (and do the waiting outside "
                           "db.batch)", what, txn);
     return 0;
 }

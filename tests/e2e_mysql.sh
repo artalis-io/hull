@@ -980,6 +980,36 @@ else
     cat "$A39DIR/serve.log"; exit 1
 fi
 
+# ── audit 40: autocommit off / LOCK TABLES count as an open transaction ──
+# Right after SET autocommit = 0 or LOCK TABLES, IN_TRANS is clear, so the
+# wait gates let the handler park - and the audit 39 guard that runs before
+# its resume reset the session under it: the INSERT after the wait
+# autocommitted and the ROLLBACK lied; the LOCK TABLES vanished mid-handler.
+# The wait is now refused (wait_refused) and nothing is reset under it.
+echo "=== audit 40: autocommit off / LOCK TABLES refuse a wait (both runtimes) ==="
+A40DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_session_audit40.sh"
+db_session_audit40_apps "$A40DIR" mysql
+a40fail=0
+for a40app in "$A40DIR/l/app.lua" "$A40DIR/j/app.js"; do
+    ./build/hull -d "$DSN" -p "$PORT" "$a40app" >"$A40DIR/serve.log" 2>&1 &
+    SVR=$!
+    wait_for_server "$A40DIR/serve.log" || exit 1
+    curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 40 setup"; cat "$A40DIR/serve.log"; exit 1; }
+    a40out=$(db_session_audit40_run "$PORT" autocommit_wait locktables_wait autocommit_nowait)
+    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+    echo "$a40app"; echo "$a40out"
+    db_session_audit40_ok "$a40out" autocommit_wait '"waited":false' '"code":"wait_refused"' '"in_txn":true' '"rows":0' || a40fail=1
+    db_session_audit40_ok "$a40out" locktables_wait '"waited":false' '"code":"wait_refused"' '"still_locked":true' '"wait_after_unlock":true' || a40fail=1
+    db_session_audit40_ok "$a40out" autocommit_nowait '"rows":1' '"wait_after_restore":true' || a40fail=1
+    if grep -q "resetting the session" "$A40DIR/serve.log"; then
+        echo "::error audit 40: a session was reset under a live handler"; a40fail=1
+    fi
+    [ "$a40fail" = 0 ] || { cat "$A40DIR/serve.log"; exit 1; }
+done
+echo "PASS: autocommit off / LOCK TABLES refuse a wait instead of being reset under the handler (MySQL)"
+rm -rf "$A40DIR"
+
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the
 # plaintext MariaDB run (MariaDB defaults to mysql_native_password; its TLS matrix

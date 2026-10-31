@@ -76,7 +76,8 @@ int hl_db_dynamic_id_live(uint64_t id);
 
 /* The stale-transaction guard / open-transaction test over every open
  * dynamic handle. Event-loop thread only. hl_db_registry_guard_stale_txns /
- * hl_db_registry_open_txn include these. */
+ * hl_db_registry_open_txn include these. The test counts session state that
+ * is as good as a transaction (hl_db_holds_txn, audit 40). */
 void hl_db_dynamic_guard_stale_txns(void);
 int  hl_db_dynamic_in_txn(void);
 

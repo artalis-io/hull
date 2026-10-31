@@ -30,7 +30,8 @@ static inline int hl_js_db_refuse_wait(JSContext *ctx, const char *what)
     JS_ThrowTypeError(ctx, "%s cannot wait while a transaction is open on "
                       "database connection '%s': other requests use the same "
                       "connection while this one waits. Commit or roll back "
-                      "first (db.batch fn must be synchronous)", what, txn);
+                      "first - on MySQL also SET autocommit = 1 and UNLOCK TABLES - "
+                      "(db.batch fn must be synchronous)", what, txn);
     hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
     return -1;
 }
