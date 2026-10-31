@@ -16,6 +16,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db.h"       /* hl_cap_db_check_namespace */
 #include "hull/cap/db_budget.h"
+#include "hull/cap/db_session_sql.h"  /* the migration lock is Hull's own */
 #include "hull/cap/crypto.h"   /* hl_cap_crypto_sha256 */
 #include "utils/hex.h"        /* hl_hex_encode */
 
@@ -584,7 +585,20 @@ static int mig_first_int_cb(void *ctx, HlColumn *cols, int ncols)
     return 1;
 }
 
+static int mig_lock_impl(HlDbHandle *h, MigLockKind kind);
+
+/* Hull's own session lock: the backends refuse GET_LOCK / pg_advisory_lock
+ * in app SQL (cap/db_session_sql.h) unless this thread's flag says the
+ * statement is Hull's. The migration files run without it. */
 static int mig_lock(HlDbHandle *h, MigLockKind kind)
+{
+    int prev = hl_db_session_sql_trust(1);
+    int rc = mig_lock_impl(h, kind);
+    hl_db_session_sql_trust(prev);
+    return rc;
+}
+
+static int mig_lock_impl(HlDbHandle *h, MigLockKind kind)
 {
     if (kind == MIG_LOCK_PG) {
         if (hl_db_query(h, "SELECT pg_advisory_lock(" HL_MIGRATE_PG_LOCK_KEY ")",
@@ -610,12 +624,14 @@ static int mig_lock(HlDbHandle *h, MigLockKind kind)
 
 static void mig_unlock(HlDbHandle *h, MigLockKind kind)
 {
+    int prev = hl_db_session_sql_trust(1);
     if (kind == MIG_LOCK_PG)
         (void)hl_db_query(h, "SELECT pg_advisory_unlock(" HL_MIGRATE_PG_LOCK_KEY ")",
                           NULL, 0, noop_row_cb, NULL, NULL);
     else if (kind == MIG_LOCK_MY)
         (void)hl_db_query(h, "SELECT RELEASE_LOCK('" HL_MIGRATE_MY_LOCK_NAME "')",
                           NULL, 0, noop_row_cb, NULL, NULL);
+    hl_db_session_sql_trust(prev);
 }
 
 /* ── Public API: run migrations ───────────────────────────────────── */

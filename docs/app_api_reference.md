@@ -124,6 +124,64 @@ app directory: a relative one is opened under it, and `..`, a path elsewhere,
 or a symbolic link on the way to the file (or at it, or at its `-wal` / `-shm`
 / `-journal`) is refused when the connection opens (audit 34).
 
+**MySQL / MariaDB / Postgres: no session state across entries.** Every
+connection a request (or timer, SSE event, WebSocket callback, task,
+`app.main` stretch) used is reset when it ends or waits: MySQL
+`COM_RESET_CONNECTION`, Postgres `DISCARD ALL`. A user variable, a `SET
+search_path` / `SET time_zone`, a temporary table or a prepared statement does
+not survive into the next entry, nor across a wait inside one, and the next
+entry always starts in autocommit. `db.async` worker connections are reset
+after every op. `conn.last_id()` (`conn.lastId()`) on a shared connection is
+reliable only when read immediately after the INSERT, with no await (or other
+wait) in between: another entry's INSERT on the same connection, or the reset
+at the wait, replaces it. Statements whose only point is session state that outlives
+the statement are refused before they reach the server, with an error naming
+the statement and this escape hatch:
+
+| Backend | Refused |
+|---|---|
+| MySQL / MariaDB | `SET autocommit` (any spelling, `SET @@session.autocommit`, a multi-assignment `SET` that includes it), `LOCK TABLES` / `UNLOCK TABLES`, `LOCK INSTANCE FOR BACKUP` / `UNLOCK INSTANCE`, `XA ...`, `GET_LOCK` / `RELEASE_LOCK` / `RELEASE_ALL_LOCKS`, `FLUSH TABLES ... WITH READ LOCK` / `FOR EXPORT`, `BACKUP LOCK` / `BACKUP STAGE`, `SET SESSION` / `GLOBAL TRANSACTION ...` (a bare `SET TRANSACTION`, which applies to the next transaction only, is allowed), `SET NAMES` / `SET CHARACTER SET`, `SET ROLE` |
+| Postgres | `pg_advisory_lock`, `pg_advisory_lock_shared`, `pg_try_advisory_lock[_shared]`, `pg_advisory_unlock[_shared|_all]` (use the transaction-scoped `pg_advisory_xact_lock` family), `SET [SESSION] ROLE` / `RESET ROLE`, `SET` / `RESET SESSION AUTHORIZATION`, `SET SESSION CHARACTERISTICS` / `SET default_transaction_*` (`SET LOCAL ...` is allowed), `set_config()` of those, `LISTEN` / `UNLISTEN` (use `conn.wait_notify`), `PREPARE TRANSACTION` |
+
+Use `db.batch(fn)` or a plain `BEGIN` / `START TRANSACTION` ... `COMMIT` /
+`ROLLBACK` for transactions. The check reads every statement of a
+multi-statement string and errs on the side of refusing: text it cannot read
+the way the server does (a backslash, a MySQL `/*! ... */` comment, an
+unterminated quote or comment) counts quotes and comments as code, and so do a
+Postgres `$$` body and a MySQL `PREPARE ... FROM '...'` string. Migration files
+are checked too (Hull's own migration lock is not affected).
+
+When you need such a statement, declare a **dedicated named connection with
+`session_control`**:
+
+```lua
+app.manifest({
+    modules = { "hull/db@1" },
+    secrets = { "DATABASE_URL" },
+    databases = { named = {
+        locks = { dsn = "$DATABASE_URL", session_control = true },
+    } },
+})
+local locks = require("hull.db").connect("locks")
+locks.exec("LOCK TABLES ledger WRITE")    -- allowed here, refused elsewhere
+```
+
+```javascript
+app.manifest({
+    modules: ["hull/db@1"],
+    secrets: ["DATABASE_URL"],
+    databases: { named: { locks: { dsn: "$DATABASE_URL", sessionControl: true } } },
+});
+```
+
+What you do with its session is your responsibility; Hull still resets it at
+every entry boundary (so a `LOCK TABLES` or `GET_LOCK` never outlives the
+request that took it), refuses to reconnect it silently when it is lost
+mid-entry (calls fail until the entry ends), never uses it for the standard
+library (a stdlib call on it fails), and does not allow it as `default`. A
+stored procedure can still change the session from inside; the reset bounds
+that to the entry.
+
 **MySQL / MariaDB: `_hull_*` collation.** Hull creates its own tables with
 a NO PAD binary collation (`utf8mb4_0900_bin` on MySQL 8.0.17+,
 `utf8mb4_nopad_bin` on MariaDB) so role names, inbox ids, user ids and dedup

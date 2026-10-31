@@ -89,10 +89,17 @@ docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 # --default-authentication-plugin is a MySQL-8-only mysqld option; MariaDB rejects
 # unknown options and exits, and it already defaults to mysql_native_password, so
 # omit the flag there. MariaDB images accept the MYSQL_* env vars as aliases.
+#
+# MySQL 8.4 removed --default-authentication-plugin (the server refuses to
+# start with it) and ships mysql_native_password disabled: there the plugin is
+# loaded with --mysql-native-password=ON and made the default for new
+# accounts (the entrypoint's MYSQL_USER) with --authentication-policy.
 IMG="${MYSQL_IMAGE:-mysql:8.0}"
 SERVER_ARGS="--default-authentication-plugin=mysql_native_password"
 case "$IMG" in
     mariadb*) SERVER_ARGS="" ;;
+    mysql:8.4*|mysql:lts*)
+        SERVER_ARGS="--mysql-native-password=ON --authentication-policy=mysql_native_password,," ;;
 esac
 docker run -d --name "$CONTAINER" \
     -e MYSQL_ROOT_PASSWORD=rootpw \
@@ -1006,147 +1013,75 @@ fi
 docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw hulldb -e \
   "DROP TRIGGER IF EXISTS a39_fail" >/dev/null 2>&1 || true
 
-# ── audit 39: session state a failed request leaves is reset ─────────
-# The stale-transaction guard sent a plain ROLLBACK and ignored the outcome.
-# After XA START it fails (XAER_RMFAIL) with IN_TRANS still set; after SET
-# autocommit = 0 every later statement opened a transaction the next guard
-# rolled back; a LOCK TABLES refused every other table; a GET_LOCK held by a
-# failed request blocked every other session. One failed request, and every
-# later write on the shared connection was acknowledged but never committed
-# (or refused), every wait refused, until a restart. The guard now resets
-# the session (COM_RESET_CONNECTION).
-echo "=== audit 39: XA / autocommit / LOCK TABLES / GET_LOCK leftovers are reset ==="
-A39DIR=$(mktemp -d)
-. "$(dirname "$0")/lib/hull_db_session_audit39.sh"
-db_session_audit39_app "$A39DIR" mysql
-./build/hull -d "$DSN" -p "$PORT" "$A39DIR/app.lua" >"$A39DIR/serve.log" 2>&1 &
-SVR=$!
-wait_for_server "$A39DIR/serve.log" || exit 1
-curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 39 setup"; cat "$A39DIR/serve.log"; exit 1; }
-a39cs0=$(curl -fsS "http://127.0.0.1:${PORT}/charset" || echo FAIL)
-a39out=$(db_session_audit39_run "$PORT" xa autocommit locktables getlock)
-a39cs1=$(curl -fsS "http://127.0.0.1:${PORT}/charset" || echo FAIL)
-echo "$a39out"
+# ── session control (audit convergence phase 3) ───────────────────────
+# Hull infers no session state from SQL text any more: session-altering app
+# SQL is refused on shared connections, every connection an entry used is
+# reset at the entry boundary (COM_RESET_CONNECTION), a session_control
+# connection takes the statements and still starts the next entry clean, and
+# Hull's own migration lock (GET_LOCK) works while a migration file using
+# one is refused. Replaces the audit 39 / 40 / 41 tracker legs.
+echo "=== session control: refusal, reset per entry, session_control escape hatch (both runtimes) ==="
+SCDIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_session_control.sh"
+db_session_control_apps "$SCDIR" mysql
 my_q() {
     docker exec "$CONTAINER" "$MYSQL_CLI" -uhull -ps3cretpw -h127.0.0.1 \
         --protocol=tcp hulldb -N -e "$1" 2>/dev/null
 }
-a39rows=$(my_q "SELECT COUNT(*) FROM s39b WHERE v BETWEEN 1 AND 4")
-a39left=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM s39")
-a39free=$(my_q "SELECT IS_FREE_LOCK('a39lk')")
-kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
-a39fail=0
-for k in xa autocommit locktables getlock; do
-    db_session_audit39_ok "$a39out" "$k" || a39fail=1
-done
-# Rows 1-4 committed (seen from another session); of the failed requests'
-# writes only the LOCK TABLES one (autocommit) committed; the named lock is
-# free; the connection character set survived the resets.
-[ "$a39rows" = 4 ] || { echo "::error audit 39: later writes committed: $a39rows of 4"; a39fail=1; }
-[ "$a39left" = 103 ] || { echo "::error audit 39: failed requests' writes: '$a39left' (want 103)"; a39fail=1; }
-[ "$a39free" = 1 ] || { echo "::error audit 39: GET_LOCK of a failed request still held"; a39fail=1; }
-[ "$a39cs0" = "$a39cs1" ] && [ "$a39cs0" != FAIL ] || { echo "::error audit 39: charset $a39cs0 -> $a39cs1"; a39fail=1; }
-grep -q "resetting the session" "$A39DIR/serve.log" || { echo "::error audit 39: no session reset logged"; a39fail=1; }
-if [ "$a39fail" = 0 ]; then
-    echo "PASS: a failed request's XA / autocommit / LOCK TABLES / GET_LOCK state is reset (MySQL)"
-    rm -rf "$A39DIR"
-else
-    cat "$A39DIR/serve.log"; exit 1
-fi
-
-# ── audit 40: autocommit off / LOCK TABLES count as an open transaction ──
-# Right after SET autocommit = 0 or LOCK TABLES, IN_TRANS is clear, so the
-# wait gates let the handler park - and the audit 39 guard that runs before
-# its resume reset the session under it: the INSERT after the wait
-# autocommitted and the ROLLBACK lied; the LOCK TABLES vanished mid-handler.
-# The wait is now refused (wait_refused) and nothing is reset under it.
-echo "=== audit 40: autocommit off / LOCK TABLES refuse a wait (both runtimes) ==="
-A40DIR=$(mktemp -d)
-. "$(dirname "$0")/lib/hull_db_session_audit40.sh"
-db_session_audit40_apps "$A40DIR" mysql
-a40fail=0
-for a40app in "$A40DIR/l/app.lua" "$A40DIR/j/app.js"; do
-    ./build/hull -d "$DSN" -p "$PORT" "$a40app" >"$A40DIR/serve.log" 2>&1 &
+scfail=0
+for scapp in "$SCDIR/l/app.lua" "$SCDIR/j/app.js"; do
+    HULL_SC_DSN="$DSN" ./build/hull -d "$DSN" -p "$PORT" "$scapp" >"$SCDIR/serve.log" 2>&1 &
     SVR=$!
-    wait_for_server "$A40DIR/serve.log" || exit 1
-    curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 40 setup"; cat "$A40DIR/serve.log"; exit 1; }
-    a40out=$(db_session_audit40_run "$PORT" autocommit_wait locktables_wait autocommit_nowait)
+    wait_for_server "$SCDIR/serve.log" || exit 1
+    scsetup=$(curl -fsS "http://127.0.0.1:${PORT}/setup" || echo FAIL)
+    scout=$(db_session_control_run "$PORT" refused txn var_set var_get sc_hold sc_check)
+    scrows=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM sc")
+    scfree=$(my_q "SELECT IS_FREE_LOCK('hull_sc')")
     kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
-    echo "$a40app"; echo "$a40out"
-    db_session_audit40_ok "$a40out" autocommit_wait '"waited":false' '"code":"wait_refused"' '"in_txn":true' '"rows":0' || a40fail=1
-    db_session_audit40_ok "$a40out" locktables_wait '"waited":false' '"code":"wait_refused"' '"still_locked":true' '"wait_after_unlock":true' || a40fail=1
-    db_session_audit40_ok "$a40out" autocommit_nowait '"rows":1' '"wait_after_restore":true' || a40fail=1
-    if grep -q "resetting the session" "$A40DIR/serve.log"; then
-        echo "::error audit 40: a session was reset under a live handler"; a40fail=1
-    fi
-    [ "$a40fail" = 0 ] || { cat "$A40DIR/serve.log"; exit 1; }
-done
-echo "PASS: autocommit off / LOCK TABLES refuse a wait instead of being reset under the handler (MySQL)"
-rm -rf "$A40DIR"
-
-# ── audit 41: a lost connection keeps refusing what its session held ──
-# A connection lost with autocommit off or under LOCK TABLES (IN_TRANS
-# clear) reconnected silently into autocommit with no lock: the retried
-# INSERT autocommitted and the ROLLBACK lied; waits were allowed. Now
-# refused until ROLLBACK / SET autocommit = 1 / UNLOCK TABLES or the entry
-# ends. Plus: a `--`+form-feed comment does not release a tracked lock, a
-# failed CALL that opened a transaction / turned autocommit off is seen,
-# and a server with global autocommit off keeps a plain write.
-echo "=== audit 41: lost sessions, -- comments, failed CALLs, global autocommit (both runtimes) ==="
-A41DIR=$(mktemp -d)
-. "$(dirname "$0")/lib/hull_db_session_audit41.sh"
-db_session_audit41_apps "$A41DIR" "$DSN"
-a41fail=0
-for a41app in "$A41DIR/l/app.lua" "$A41DIR/j/app.js"; do
-    ./build/hull -d "$DSN" -p "$PORT" "$a41app" >"$A41DIR/serve.log" 2>&1 &
-    SVR=$!
-    wait_for_server "$A41DIR/serve.log" || exit 1
-    curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 41 setup"; cat "$A41DIR/serve.log"; exit 1; }
-    a41out=$(db_session_audit41_run "$PORT" kill_autocommit kill_locktables kill_and_leave probe dash_comment)
-    curl -fsS "http://127.0.0.1:${PORT}/reset" >/dev/null || a41fail=1
-    a41out2=$(db_session_audit41_run "$PORT" call_txn write60 call_ac write61)
-    a41rows=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM a41")
-    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
-    echo "$a41app"; echo "$a41out"; echo "$a41out2"
-    db_session_audit41_ok "$a41out" kill_autocommit '"wrote":false' '"refused":true' '"waited":false' '"code":"wait_refused"' '"rollback_ok":true' '"after_rollback_ok":true' '"ac_after":0' '"rows":0' || a41fail=1
-    db_session_audit41_ok "$a41out" kill_locktables '"wrote":false' '"refused":true' '"waited":false' '"code":"wait_refused"' '"rollback_ok":true' '"still_refused":true' '"unlock_ok":true' '"after_unlock_ok":true' '"wait_after_unlock":true' '"rows":0' || a41fail=1
-    db_session_audit41_ok "$a41out" kill_and_leave '"wrote":false' || a41fail=1
-    db_session_audit41_ok "$a41out" probe '"ac":1' '"waited":true' '"rows":0' || a41fail=1
-    db_session_audit41_ok "$a41out" dash_comment '"waited":false' '"code":"wait_refused"' '"wait_after_unlock":true' || a41fail=1
-    db_session_audit41_ok "$a41out2" call_txn '"call_ok":false' '"in_txn":true' '"waited":false' '"code":"wait_refused"' || a41fail=1
-    db_session_audit41_ok "$a41out2" call_ac '"call_ok":false' '"waited":false' '"code":"wait_refused"' || a41fail=1
-    db_session_audit41_ok "$a41out2" write60 '"ok":true' || a41fail=1
-    db_session_audit41_ok "$a41out2" write61 '"ok":true' || a41fail=1
-    # The failed CALL's own INSERT (50) was rolled back by the guard; the
-    # next requests' acknowledged writes persisted.
-    [ "$a41rows" = "60,61" ] || { echo "::error audit 41: rows after the failed CALLs: '$a41rows' (want 60,61)"; a41fail=1; }
-    [ "$a41fail" = 0 ] || { cat "$A41DIR/serve.log"; exit 1; }
+    echo "$scapp"; echo "$scsetup"; echo "$scout"
+    case "$scsetup" in *'"migrated":true'*) ;; *) echo "::error session control: migrations: $scsetup"; scfail=1 ;; esac
+    db_session_control_ok "$scout" refused '"refused":20' '"total":20' '"bad":"none"' || scfail=1
+    db_session_control_ok "$scout" txn '"rows":2' '"in_txn":false' || scfail=1
+    db_session_control_ok "$scout" var_set '"v":"42"' || scfail=1
+    db_session_control_ok "$scout" var_get '"clear":true' || scfail=1
+    db_session_control_ok "$scout" sc_hold '"locked":true' '"ac":0' '"got_lock":1' || scfail=1
+    db_session_control_ok "$scout" sc_check '"ac":1' '"other_ok":true' '"lock_free":1' '"default_write":true' || scfail=1
+    # The txn leg's two commits, the session_control LOCK TABLES insert
+    # (autocommit, before SET autocommit = 0) and the next entry's write
+    # persisted; the named lock is free from another session too.
+    [ "$scrows" = "1,2,5,6" ] || { echo "::error session control: rows '$scrows' (want 1,2,5,6)"; scfail=1; }
+    [ "$scfree" = 1 ] || { echo "::error session control: GET_LOCK still held after the entry"; scfail=1; }
+    [ "$scfail" = 0 ] || { cat "$SCDIR/serve.log"; exit 1; }
 done
 
-# A server whose global autocommit is off: a plain write persists, also
-# after the guard reset the session (COM_RESET_CONNECTION restores the
-# global default, which Hull then sets back on).
+# A server whose global autocommit is off: the reset restores the global
+# default, which Hull sets back on - a plain write persists.
 docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "SET GLOBAL autocommit = 0" >/dev/null 2>&1 || {
-    echo "::error audit 41: SET GLOBAL autocommit = 0 failed"; exit 1; }
-for a41app in "$A41DIR/l/app.lua" "$A41DIR/j/app.js"; do
-    ./build/hull -d "$DSN" -p "$PORT" "$a41app" >"$A41DIR/serve.log" 2>&1 &
-    SVR=$!
-    wait_for_server "$A41DIR/serve.log" || exit 1
-    curl -fsS "http://127.0.0.1:${PORT}/reset" >/dev/null || a41fail=1
-    a41out=$(db_session_audit41_run "$PORT" global_write global_lock global_write2)
-    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
-    a41rows=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM a41")
-    echo "$a41app"; echo "$a41out"
-    db_session_audit41_ok "$a41out" global_write '"ac":1' || a41fail=1
-    db_session_audit41_ok "$a41out" global_write2 '"ac":1' || a41fail=1
-    [ "$a41rows" = "70,71" ] || { echo "::error audit 41: global autocommit off lost writes: '$a41rows' (want 70,71)"; a41fail=1; }
-    grep -q "resetting the session" "$A41DIR/serve.log" || { echo "::error audit 41: no session reset logged"; a41fail=1; }
-    [ "$a41fail" = 0 ] || { cat "$A41DIR/serve.log"; break; }
-done
+    echo "::error session control: SET GLOBAL autocommit = 0 failed"; exit 1; }
+HULL_SC_DSN="$DSN" ./build/hull -d "$DSN" -p "$PORT" "$SCDIR/l/app.lua" >"$SCDIR/serve.log" 2>&1 &
+SVR=$!
+wait_for_server "$SCDIR/serve.log" || exit 1
+scout=$(db_session_control_run "$PORT" txn var_set txn)
+kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
 docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "SET GLOBAL autocommit = 1" >/dev/null 2>&1 || true
-[ "$a41fail" = 0 ] || exit 1
-echo "PASS: a lost session refuses calls instead of reconnecting into autocommit; -- comments, failed CALLs and global autocommit off (MySQL)"
-rm -rf "$A41DIR"
+scrows=$(my_q "SELECT COALESCE(GROUP_CONCAT(v ORDER BY v), '') FROM sc")
+echo "$scout"
+[ "$scrows" = "1,2" ] || { echo "::error session control: global autocommit off lost writes: '$scrows' (want 1,2)"; cat "$SCDIR/serve.log"; exit 1; }
+
+# A migration file that takes a named lock is refused; the app does not start.
+HULL_SC_DSN="$DSN" ./build/hull -d "$DSN" -p "$PORT" "$SCDIR/bad/app.lua" >"$SCDIR/bad.log" 2>&1 &
+SVR=$!
+i=0
+while [ "$i" -lt 20 ] && kill -0 "$SVR" 2>/dev/null; do sleep 0.5; i=$((i + 1)); done
+if kill -0 "$SVR" 2>/dev/null; then
+    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+    echo "::error session control: an app whose migration takes GET_LOCK started"
+    cat "$SCDIR/bad.log"; exit 1
+fi
+wait "$SVR" 2>/dev/null || true; SVR=
+grep -q "is refused" "$SCDIR/bad.log" || { echo "::error session control: migration refusal not reported"; cat "$SCDIR/bad.log"; exit 1; }
+echo "PASS: session-altering SQL refused, every used connection reset per entry, session_control escape hatch, migration lock (MySQL)"
+rm -rf "$SCDIR"
 # ── audit 41: every statement pays a round trip's floor (MySQL) ──
 echo "=== audit 41: a SELECT 1 loop trips a small budget (both runtimes) ==="
 A41DIR=$(mktemp -d)

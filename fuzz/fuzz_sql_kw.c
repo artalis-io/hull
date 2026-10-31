@@ -10,6 +10,8 @@
  *     of query() / query_table() / json_execute_serialized_sql() (audit 25),
  *     which keeps dynamic SQL from assembling a _hull_* name past
  *   - hl_cap_db_check_namespace (cap/db_common.c).
+ *   - hl_db_session_sql_refused (cap/db_session_sql.c): the MySQL / Postgres
+ *     refusal of session-altering app SQL (audit convergence phase 3).
  *
  * The first byte picks a mode.
  *
@@ -39,6 +41,7 @@
 
 #include "hull/cap/db.h"
 #include "hull/cap/db_sql_kw.h"
+#include "hull/cap/db_session_sql.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -125,13 +128,6 @@ static int is_end_kind(HlSqlTxnKind k)
     return k == HL_SQL_TXN_COMMIT || k == HL_SQL_TXN_ROLLBACK;
 }
 
-static void count_word(void *ud, const char *w, const char *prev,
-                       const char *prev2)
-{
-    (void)w; (void)prev; (void)prev2;
-    (*(size_t *)ud)++;
-}
-
 static void raw_mode(const char *sql)
 {
     static const char *const ws[] = { " ", "\t", "\n", "\r\n", "\f", "\v" };
@@ -165,15 +161,23 @@ static void raw_mode(const char *sql)
         hl_sql_txn_kind_ex(sql, 0) != hl_sql_txn_kind_ex(sql, 1))
         fail("comment rules disagree on a text with no block comment", sql);
 
-    /* The session-state word scanner (audit 41: per-dialect "--" rules):
-     * stays inside the text and is deterministic, in every mode. */
-    for (int nest = 0; nest <= 1; nest++)
-        for (int bs = 0; bs <= 1; bs++) {
-            size_t n1 = 0, n2 = 0;
-            hl_sql_scan_words(sql, nest, bs, count_word, &n1);
-            hl_sql_scan_words(sql, nest, bs, count_word, &n2);
-            if (n1 != n2) fail("word scan not deterministic", sql);
-        }
+    /* The session-SQL refusal (cap/db_session_sql.c, audit convergence
+     * phase 3): stays inside the text, is deterministic, ignores ASCII case,
+     * and a refused statement appended after a newline is refused whatever
+     * came before it (an unterminated quote or comment is read raw). */
+    for (int d = 0; d <= 1; d++) {
+        const char *r = hl_db_session_sql_refused(sql, (HlDbSqlDialect)d);
+        if (hl_db_session_sql_refused(sql, (HlDbSqlDialect)d) != r)
+            fail("session-SQL verdict not deterministic", sql);
+        if ((hl_db_session_sql_refused(up, (HlDbSqlDialect)d) != NULL) != (r != NULL) ||
+            (hl_db_session_sql_refused(lo, (HlDbSqlDialect)d) != NULL) != (r != NULL))
+            fail("ASCII case changed the session-SQL verdict", sql);
+        char *t = cat(sql, d == HL_DB_SQL_MYSQL ? "\n;LOCK TABLES t WRITE"
+                                                : "\n;SELECT pg_advisory_lock(1)");
+        if (!hl_db_session_sql_refused(t, (HlDbSqlDialect)d))
+            fail("a session-altering statement after a newline was allowed", t);
+        free(t);
+    }
 
     int dyn = hl_cap_db_sql_calls_dynamic_sql(sql);
     if (hl_cap_db_sql_calls_dynamic_sql(up) != dyn ||

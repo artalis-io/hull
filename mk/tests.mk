@@ -192,11 +192,11 @@ PG_CRYPTO_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o
 # linked) and HL_PG_NO_SCRAM stays off (the test exercises SCRAM). Only reached
 # under HL_ENABLE_POSTGRES=1. The socketpair handshake tests stay plaintext (the
 # adopt path drives the descriptor directly), so no TLS server is needed.
-PG_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_LIBS))
+PG_CONN_TEST_LIBS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_db_transport.o $(BUILDDIR)/cap_db_postgres.o,$(TEST_COMMON_LIBS))
 PG_CONN_TEST_DEPS := $(filter-out $(BUILDDIR)/cap_pg_conn.o $(BUILDDIR)/cap_pgwire.o $(BUILDDIR)/cap_db_transport.o,$(TEST_COMMON_DEPS))
 $(BUILDDIR)/test_pg_conn: $(TESTDIR)/hull/cap/test_pg_conn.c \
     $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(SRCDIR)/hull/cap/db_transport.c \
-    $(PG_CONN_TEST_DEPS) | $(BUILDDIR)
+    $(SRCDIR)/hull/cap/db_postgres.c $(PG_CONN_TEST_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
 		$(TESTDIR)/hull/cap/test_pg_conn.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c \
 		$(SRCDIR)/hull/cap/db_transport.c $(PG_CONN_TEST_LIBS) $(LDFLAGS)
@@ -1261,7 +1261,8 @@ fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRC
 # oracles over raw text plus a construct mode whose Postgres-lexer meaning is
 # known (a dynamic call must be reported; COMMIT/ROLLBACK + a second statement
 # must not read as COMMIT/ROLLBACK). HL_ENABLE_DB compiles db_common.c's body.
-fuzz/fuzz_sql_kw: fuzz/fuzz_sql_kw.c $(SRCDIR)/hull/cap/db_common.c
+fuzz/fuzz_sql_kw: fuzz/fuzz_sql_kw.c $(SRCDIR)/hull/cap/db_common.c \
+                  $(SRCDIR)/hull/cap/db_session_sql.c
 	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -o $@ $^
 
 # Log-record escaping (shared/cli_log.c, audit 27): every record both log
@@ -1290,8 +1291,8 @@ fuzz/fuzz_dsn_redact: fuzz/fuzz_dsn_redact.c $(SRCDIR)/hull/cap/db_select.c
 # static, so the harness includes the backend TU; the wire client it calls is
 # stubbed (fuzz_mysql_stmt_stubs.c, never reached), keeping cap/crypto and Keel
 # out of the link.
-fuzz/fuzz_mysql_stmt: fuzz/fuzz_mysql_stmt.c fuzz/fuzz_mysql_stmt_stubs.c $(SRCDIR)/hull/cap/db_mysql.c $(VENDDIR)/log.c/log.c
-	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -DHL_ENABLE_MYSQL -I$(VENDDIR)/log.c -o $@ fuzz/fuzz_mysql_stmt.c fuzz/fuzz_mysql_stmt_stubs.c $(VENDDIR)/log.c/log.c
+fuzz/fuzz_mysql_stmt: fuzz/fuzz_mysql_stmt.c fuzz/fuzz_mysql_stmt_stubs.c $(SRCDIR)/hull/cap/db_mysql.c $(SRCDIR)/hull/cap/db_session_sql.c $(VENDDIR)/log.c/log.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_DB -DHL_ENABLE_MYSQL -I$(VENDDIR)/log.c -o $@ fuzz/fuzz_mysql_stmt.c fuzz/fuzz_mysql_stmt_stubs.c $(SRCDIR)/hull/cap/db_session_sql.c $(VENDDIR)/log.c/log.c
 
 # Mapped-span guest SDK math (templates/hull_span.h): the attacker-controlled
 # span-metadata decode + window-read offset arithmetic. Header-only (freestanding

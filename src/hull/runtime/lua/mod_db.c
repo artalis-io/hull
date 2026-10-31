@@ -1163,6 +1163,10 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         op->max_instructions = lua->max_instructions;   /* the op's own */
         op->max_result_bytes = lua->mem_limit;
         op->ns_trusted = ns_trusted;
+        {
+            HlDbHandle *sh = db_resolve_handle(L);
+            op->session_control = sh ? sh->session_control : 0;
+        }
         hl_offheap_shared_init(&op->result_hold, &lua->async_result_bytes,
                                lua->mem_limit);
         op->no_cache = luaL_testudata(L, lua_upvalueindex(1),

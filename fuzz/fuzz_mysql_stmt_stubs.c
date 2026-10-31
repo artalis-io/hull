@@ -32,3 +32,15 @@ void hl_db_txn_note(void);
 void hl_db_txn_note(void) { abort(); }
 int hl_db_net_stmt_charge(int is_rollback);
 int hl_db_net_stmt_charge(int is_rollback) { (void)is_rollback; abort(); }
+/* Session control (audit convergence phase 3): the namespace-trust probe and
+ * the stale-transaction guard's cleanup budget. */
+void hl_cap_db_ns_trusted(void);
+void hl_cap_db_ns_trusted(void) { abort(); }
+void hl_db_budget_swap(void);
+void hl_db_budget_swap(void) { abort(); }
+void hl_db_budget_restore(void);
+void hl_db_budget_restore(void) { abort(); }
+void hl_db_monotonic_ms(void);
+void hl_db_monotonic_ms(void) { abort(); }
+void hl_db_op_budget_charge(void);
+void hl_db_op_budget_charge(void) { abort(); }

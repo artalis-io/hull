@@ -308,9 +308,10 @@ int hl_worker_db_end_job(char *err, size_t errsz)
             found = 1;
             drop = hl_db_rollback(h) != 0 || hl_db_in_txn(h);
         }
-        /* Session state the next job on this thread must not inherit
-         * (audit 39): the close ends it. */
-        if (!drop && h->backend && hl_db_session_dirty(h)) drop = 1;
+        /* Nothing the job left on the session reaches the next job on this
+         * thread: a connection it used is reset (a failed reset abandons
+         * it, and it is dropped). */
+        if (!drop && h->backend && hl_db_reset_session(h) != 0) drop = 1;
         if (drop) {
             *link = n->next;
             h->backend->close(h);
@@ -646,17 +647,22 @@ static void db_work_fn(void *ud)
  * connection is this thread's, reused by every later op that lands here, so a
  * BEGIN through db.async left each of them inside it - never committed, and
  * on SQLite holding the write lock against every other writer until restart.
- * Roll it back and fail the op. Returns 1 when the connection must be dropped
- * (the rollback did not end the transaction, or the session holds state no
- * later op may inherit - MySQL autocommit off, a LOCK TABLES / XA / GET_LOCK,
- * a Postgres advisory lock: hl_db_session_dirty, audit 39 - which the
- * connection's close ends). */
+ * Roll it back and fail the op. Then the session is reset (MySQL / Postgres:
+ * hl_db_reset_session), so nothing the op did to it reaches the next op on
+ * this thread. Returns 1 when the connection must be dropped (the rollback
+ * did not end the transaction, or the reset failed). The op's session_control
+ * flag applies only for its own statements: it is cleared here. */
 static int worker_end_txn(HlWorkerDbOp *op, HlDbHandle *h)
 {
     h->batch_depth = 0;   /* no batch spans ops (hl_db_guard_stale_txn) */
-    if (!hl_db_in_txn(h)) return hl_db_session_dirty(h);
-    int lost = hl_db_rollback(h) != 0 || hl_db_in_txn(h) ||
-               hl_db_session_dirty(h);
+    if (!hl_db_in_txn(h)) {
+        int dropped = hl_db_reset_session(h) != 0;
+        h->session_control = 0;
+        return dropped;
+    }
+    int lost = hl_db_rollback(h) != 0 || hl_db_in_txn(h);
+    if (!lost && hl_db_reset_session(h) != 0) lost = 1;
+    h->session_control = 0;
     if (op->kind == HL_WORK_DB_QUERY) {
         hl_db_result_free(&op->result);
         hl_offheap_shared_drop(&op->result_hold);
@@ -683,6 +689,8 @@ static HlWorkerDb *db_work_run(HlWorkerDbOp *op, int *fresh,
         return NULL;
     }
     HlDbHandle *h = &wdb->handle;
+    if (op->kind != HL_WORK_DB_WAIT_NOTIFY)
+        h->session_control = op->session_control;   /* cleared by worker_end_txn */
 
     if (op->kind == HL_WORK_DB_EXEC) {
         int changes = hl_db_exec(h, op->sql, op->params, op->nparams);

@@ -64,6 +64,12 @@ static inline HlDbHandle *hl_db_registry_default(HlDbRegistry *reg)
  * transaction may span a wait (below), so at each of those points any open
  * transaction belongs to no running entry: run only at the start, a
  * transaction a failed entry left open was joined by whatever resumed next.
+ *
+ * After the rollback, every MySQL / Postgres connection used since its last
+ * reset has its session reset (hl_db_reset_session: COM_RESET_CONNECTION /
+ * DISCARD ALL), so nothing an entry left on the session - a user variable, a
+ * SET, a lock a stored procedure took - reaches the next one. Session state
+ * therefore does not survive an entry boundary or a wait.
  */
 #ifdef HL_ENABLE_DB
 void hl_db_registry_guard_stale_txns(HlDbRegistry *reg);
@@ -88,10 +94,12 @@ static inline void hl_db_registry_guard_stale_txns(HlDbRegistry *reg)
  * open at the start of an entry belongs to an entry that has finished, so
  * rolling it back is always right (audit 5 M1).
  *
- * Session state that is as good as a transaction counts too
- * (hl_db_holds_txn: MySQL autocommit off, LOCK TABLES, XA; audit 40): the
- * guard resets a session holding it, and run before a parked handler
- * resumes it reset the handler's own `SET autocommit = 0` under it.
+ * Only a transaction counts (the backend's in_txn, from the server's own
+ * status). Other session state is not tracked: the guard resets the session
+ * of every connection an entry used, and the statements that would keep
+ * state across statements (SET autocommit, LOCK TABLES, XA, named and
+ * advisory locks) are refused on every connection without session_control
+ * (cap/db_session_sql.h).
  */
 #ifdef HL_ENABLE_DB
 const char *hl_db_registry_open_txn(HlDbRegistry *reg);

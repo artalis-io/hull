@@ -351,6 +351,7 @@ jobs:
           - { label: "PostgreSQL 15", target: e2e-postgres, img_env: PG_IMAGE, image: "postgres:15-alpine" }
           - { label: "PostgreSQL 16", target: e2e-postgres, img_env: PG_IMAGE, image: "postgres:16-alpine" }
           - { label: "MySQL 8.0", target: e2e-mysql, img_env: MYSQL_IMAGE, image: "mysql:8.0" }
+          - { label: "MySQL 8.4", target: e2e-mysql, img_env: MYSQL_IMAGE, image: "mysql:8.4" }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:

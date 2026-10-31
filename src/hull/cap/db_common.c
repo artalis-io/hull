@@ -69,12 +69,7 @@ static int txn_sql_multi(const char *sql)
 void hl_db_txn_note(HlDbHandle *h, HlDbTxnSnap before, const char *sql)
 {
     int now = hl_db_in_txn(h);
-    /* Session state that counts as a transaction for the wait gates
-     * (audit 40) starting or ending is a change too: a coroutine that
-     * yielded after `SET autocommit = 0` must not be resumed in a session
-     * reset and set again since. */
-    int changed = before.in_txn != now ||
-                  before.held != hl_db_session_held(h);
+    int changed = before.in_txn != now;
     if (!changed && before.in_txn) {
         /* Still inside one: was it still the same transaction? A statement
          * that ends one and opens the next shows no change. */

@@ -73,7 +73,7 @@ void hl_db_dynamic_guard_stale_txns(void)
 int hl_db_dynamic_in_txn(void)
 {
     for (int i = 0; i < HL_DB_DYNAMIC_MAX; i++)
-        if (g_dynamic[i] && hl_db_holds_txn(g_dynamic[i])) return 1;
+        if (g_dynamic[i] && hl_db_in_txn(g_dynamic[i])) return 1;
     return 0;
 }
 

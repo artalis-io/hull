@@ -15,6 +15,10 @@
 #include "hull/cap/db_transport.h"
 #include "hull/cap/pgwire.h"
 #include "hull/cap/db_budget.h"
+#include "hull/cap/db_session_sql.h"
+/* The backend itself, for the session refusal / reset legs (cap_db_postgres.o
+ * is filtered out of this link). */
+#include "../../../src/hull/cap/db_postgres.c"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -1927,6 +1931,226 @@ UTEST(pg_scram, low_iteration_count_needs_a_verified_connection)
     EXPECT_TRUE(strstr(e, "iteration count") == NULL);
     EXPECT_NE(0, scram_peer_run("srv", 4096, "", e, sizeof e));
     EXPECT_TRUE(strstr(e, "iteration count") == NULL);
+}
+
+/* ── Backend: refuse session SQL, reset used sessions (audit convergence
+ * phase 3) ─────────────────────────────────────────────────────────── */
+
+/* Everything the client sent that the server end has not read, without
+ * blocking (NUL-terminated). */
+static size_t pgb_sent(int fd, char *buf, size_t cap)
+{
+    size_t n = 0;
+    ssize_t r;
+    while (n < cap - 1 && (r = recv(fd, buf + n, cap - 1 - n, MSG_DONTWAIT)) > 0)
+        n += (size_t)r;
+    buf[n] = '\0';
+    return n;
+}
+
+static int pgb_has(const char *buf, size_t n, const char *text)
+{
+    size_t tl = strlen(text);
+    for (size_t i = 0; i + tl <= n; i++)
+        if (memcmp(buf + i, text, tl) == 0) return 1;
+    return 0;
+}
+
+static void pgb_put_exec_ok(HlPgWriter *s, const char *tag, char status)
+{
+    size_t m;
+    m = hl_pg_msg_begin(s, '1'); hl_pg_msg_end(s, m);   /* ParseComplete */
+    m = hl_pg_msg_begin(s, '2'); hl_pg_msg_end(s, m);   /* BindComplete  */
+    m = hl_pg_msg_begin(s, 'C'); hl_pg_put_cstr(s, tag); hl_pg_msg_end(s, m);
+    m = hl_pg_msg_begin(s, 'Z'); hl_pg_put_u8(s, (uint8_t)status); hl_pg_msg_end(s, m);
+}
+
+static void pgb_put_simple_ok(HlPgWriter *s, const char *tag)
+{
+    size_t m;
+    m = hl_pg_msg_begin(s, 'C'); hl_pg_put_cstr(s, tag); hl_pg_msg_end(s, m);
+    m = hl_pg_msg_begin(s, 'Z'); hl_pg_put_u8(s, 'I'); hl_pg_msg_end(s, m);
+}
+
+/* A backend handle over a socketpair whose server end has @p s queued. */
+static int pgb_start(HlDbHandle *h, HlDbPgCtx *ctx, int sv[2], HlPgWriter *s)
+{
+    memset(h, 0, sizeof *h);
+    memset(ctx, 0, sizeof *ctx);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -1;
+    if (s->len && write(sv[0], s->buf, s->len) != (ssize_t)s->len) return -1;
+    if (!pg_adopt(&ctx->conn, sv[1])) return -1;
+    ctx->conn.tx_status = 'I';
+    ctx->dsn = strdup("postgres://u:p@127.0.0.1:1/db");   /* nothing listens */
+    h->backend = &hl_db_backend_postgres;
+    h->ctx = ctx;
+    return ctx->dsn ? 0 : -1;
+}
+
+static void pgb_free(HlDbPgCtx *ctx, HlPgWriter *s, int sv[2])
+{
+    hl_pg_conn_close(&ctx->conn);
+    scrub_free(ctx->dsn);
+    hl_pg_writer_free(s);
+    close(sv[0]);
+}
+
+UTEST(pg_backend, session_sql_is_refused_before_sending)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    EXPECT_EQ(-1, pg_exec(&h, "SELECT pg_advisory_lock(1)", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "advisory lock") != NULL);
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "session_control") != NULL);
+    EXPECT_EQ(-1, pg_exec(&h, "SET ROLE admin", NULL, 0));
+    EXPECT_EQ(-1, pg_exec_script(&h, "CREATE TABLE t (x int);\nLISTEN ch;"));
+    char got[4096];
+    EXPECT_EQ(0u, pgb_sent(sv[0], got, sizeof got));
+    EXPECT_EQ(0, ctx.used);
+    pgb_free(&ctx, &s, sv);
+}
+
+/* Hull's migration lock runs with the trust flag; a session_control
+ * connection takes session SQL and refuses the stdlib's calls. */
+UTEST(pg_backend, trusted_lock_and_session_control)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    pgb_put_exec_ok(&s, "SELECT 1", 'I');    /* pg_advisory_lock (trusted) */
+    pgb_put_exec_ok(&s, "SET", 'I');         /* SET ROLE (session_control) */
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    int prev = hl_db_session_sql_trust(1);
+    EXPECT_TRUE(pg_exec(&h, "SELECT pg_advisory_lock(42)", NULL, 0) >= 0);
+    hl_db_session_sql_trust(prev);
+    h.session_control = 1;
+    EXPECT_TRUE(pg_exec(&h, "SET ROLE admin", NULL, 0) >= 0);
+    int ns = hl_cap_db_ns_trust(1);
+    EXPECT_EQ(-1, pg_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "standard library") != NULL);
+    hl_cap_db_ns_restore(ns);
+    char got[4096];
+    size_t n = pgb_sent(sv[0], got, sizeof got);
+    EXPECT_TRUE(pgb_has(got, n, "pg_advisory_lock(42)"));
+    EXPECT_TRUE(pgb_has(got, n, "SET ROLE admin"));
+    EXPECT_FALSE(pgb_has(got, n, "SELECT 1"));
+    pgb_free(&ctx, &s, sv);
+}
+
+/* A used connection gets DISCARD ALL at the entry boundary, once; an unused
+ * one gets nothing. */
+UTEST(pg_backend, guard_discards_a_used_session_only)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    pgb_put_exec_ok(&s, "SET", 'I');         /* SET search_path */
+    pgb_put_simple_ok(&s, "DISCARD ALL");
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    char got[4096];
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(0u, pgb_sent(sv[0], got, sizeof got));
+
+    ASSERT_TRUE(pg_exec(&h, "SET search_path = app", NULL, 0) >= 0);
+    EXPECT_EQ(1, ctx.used);
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(0, ctx.used);
+    EXPECT_EQ(0, ctx.conn.broken);
+    hl_db_guard_stale_txn(&h);               /* clean: nothing more */
+    size_t n = pgb_sent(sv[0], got, sizeof got);
+    EXPECT_TRUE(pgb_has(got, n, "DISCARD ALL"));
+    int count = 0;
+    for (size_t i = 0; i + 11 <= n; i++)
+        if (memcmp(got + i, "DISCARD ALL", 11) == 0) count++;
+    EXPECT_EQ(1, count);
+    pgb_free(&ctx, &s, sv);
+}
+
+/* A worker connection that LISTENs for conn.wait_notify keeps its LISTENs:
+ * DISCARD ALL's steps without UNLISTEN *. */
+UTEST(pg_backend, reset_keeps_hull_listens)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    pgb_put_exec_ok(&s, "SELECT 1", 'I');
+    pgb_put_simple_ok(&s, "DISCARD SEQUENCES");
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    ctx.nlisten = 1;
+    snprintf(ctx.listen[0].name, sizeof ctx.listen[0].name, "hull_jobs");
+    ASSERT_TRUE(pg_exec(&h, "SELECT 1", NULL, 0) >= 0);
+    EXPECT_EQ(0, hl_db_reset_session(&h));
+    char got[4096];
+    size_t n = pgb_sent(sv[0], got, sizeof got);
+    EXPECT_TRUE(pgb_has(got, n, "pg_advisory_unlock_all()"));
+    EXPECT_TRUE(pgb_has(got, n, "RESET ALL"));
+    EXPECT_FALSE(pgb_has(got, n, "UNLISTEN"));
+    EXPECT_FALSE(pgb_has(got, n, "DISCARD ALL"));
+    EXPECT_EQ(1, ctx.nlisten);
+    pgb_free(&ctx, &s, sv);
+}
+
+/* A stale transaction: ROLLBACK, then DISCARD ALL (which cannot run inside a
+ * transaction). A reset the server fails abandons the connection. */
+UTEST(pg_backend, guard_rolls_back_then_discards_and_abandons_on_failure)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    pgb_put_exec_ok(&s, "BEGIN", 'T');
+    pgb_put_exec_ok(&s, "ROLLBACK", 'I');
+    size_t m = hl_pg_msg_begin(&s, 'E');     /* DISCARD ALL refused */
+    hl_pg_put_u8(&s, 'S'); hl_pg_put_cstr(&s, "ERROR");
+    hl_pg_put_u8(&s, 'C'); hl_pg_put_cstr(&s, "XX000");
+    hl_pg_put_u8(&s, 'M'); hl_pg_put_cstr(&s, "nope");
+    hl_pg_put_u8(&s, 0);
+    hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    ASSERT_EQ(0, pg_begin(&h));
+    EXPECT_TRUE(pg_in_txn(&h));
+    hl_db_guard_stale_txn(&h);
+    EXPECT_FALSE(pg_in_txn(&h));
+    EXPECT_EQ(1, ctx.conn.broken);           /* abandoned */
+    EXPECT_EQ(0, ctx.used);
+    pgb_free(&ctx, &s, sv);
+}
+
+/* A pinned handle (the migration lock) is never reset. */
+UTEST(pg_backend, guard_leaves_a_pinned_session)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    pgb_put_exec_ok(&s, "SELECT 1", 'I');
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    ASSERT_TRUE(pg_exec(&h, "SELECT 1", NULL, 0) >= 0);
+    h.session_pinned = 1;
+    hl_db_guard_stale_txn(&h);
+    char got[4096];
+    size_t n = pgb_sent(sv[0], got, sizeof got);
+    EXPECT_FALSE(pgb_has(got, n, "DISCARD"));
+    EXPECT_EQ(1, ctx.used);
+    pgb_free(&ctx, &s, sv);
+}
+
+/* A lost shared connection reconnects on the next call; a lost
+ * session_control connection used in this entry refuses until it ends. */
+UTEST(pg_backend, lost_connection_reconnects_unless_session_control)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    ctx.used = 1;
+    ctx.conn.broken = 1;
+    EXPECT_EQ(-1, pg_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "reconnecting failed") != NULL);
+
+    h.session_control = 1;
+    ctx.used = 1;
+    EXPECT_EQ(-1, pg_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "session_control connection was lost") != NULL);
+    hl_db_guard_stale_txn(&h);               /* the entry ends */
+    EXPECT_EQ(0, ctx.used);
+    EXPECT_EQ(-1, pg_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "reconnecting failed") != NULL);
+    pgb_free(&ctx, &s, sv);
 }
 
 UTEST_MAIN()

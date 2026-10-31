@@ -184,6 +184,11 @@ typedef struct HlWorkerDbOp {
      * `_hull_*` text check: the worker sets the SQLite authorizer's flag
      * (hl_cap_db_ns_trust) from it for the op (audit 39). */
     int            ns_trusted;
+    /* The submitting connection is a databases.named one declared with
+     * session_control = true: the worker runs the op on its pooled
+     * connection with the backend's session-SQL refusal off, then resets
+     * the session (as after every op) and clears the flag. */
+    int            session_control;
 
     /* WAIT_NOTIFY input: LISTEN channel (owned) + wait bound in ms. */
     char          *channel;

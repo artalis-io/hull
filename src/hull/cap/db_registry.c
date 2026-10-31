@@ -131,7 +131,7 @@ const char *hl_db_registry_open_txn(HlDbRegistry *reg)
     if (hl_db_dynamic_in_txn()) return "db.open";
     if (!reg) return NULL;
     for (int i = 0; i < reg->nslots; i++)
-        if (reg->slots[i].open && hl_db_holds_txn(&reg->slots[i].handle))
+        if (reg->slots[i].open && hl_db_in_txn(&reg->slots[i].handle))
             return strcmp(reg->slots[i].name, INTERNAL_NAME) == 0
                    ? "internal" : reg->slots[i].name;
     return NULL;
@@ -384,6 +384,17 @@ static const char *lookup_dsn(HlDbRegistry *reg, const char *name,
 static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
                                 const char **err);
 
+/* Whether the manifest declares @p name with session_control = true. */
+static int manifest_session_control(const HlDbRegistry *reg, const char *name)
+{
+    if (!reg->manifest) return 0;
+    for (int i = 0; i < reg->manifest->databases.named_count; i++) {
+        const HlManifestDbNamed *d = &reg->manifest->databases.named[i];
+        if (d->name && strcmp(d->name, name) == 0) return d->session_control;
+    }
+    return 0;
+}
+
 HlDbHandle *hl_db_registry_get(HlDbRegistry *reg, const char *name,
                                const char **err)
 {
@@ -493,6 +504,11 @@ static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
     s->dsn_known = 1;
     s->open = 1;
     s->owned = 1;
+    /* A session_control connection (never "default": the manifest check
+     * refuses it, and never the internal one). */
+    s->handle.session_control =
+        strcmp(name, INTERNAL_NAME) != 0 && strcmp(name, "default") != 0 &&
+        manifest_session_control(reg, name);
     reg->nslots++;
     return &s->handle;
 }

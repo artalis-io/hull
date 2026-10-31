@@ -16,6 +16,9 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_postgres.h"
 #include "hull/cap/db_sql_kw.h"
+#include "hull/cap/db_session_sql.h"
+#include "hull/cap/db.h"          /* hl_cap_db_ns_trusted */
+#include "hull/cap/db_budget.h"   /* the guard's cleanup budget */
 #include "hull/cap/pg_conn.h"
 #include "hull/cap/types.h"
 #include "hull/utils/alloc.h"
@@ -44,10 +47,11 @@ typedef struct HlDbPgCtx {
     HlPgListen   listen[HL_PG_MAX_LISTEN];   /* LISTENed on this connection */
     int          nlisten;
     char        *dsn;         /* to reconnect (secret: scrubbed on close) */
-    /* Session-level advisory locks the statements run on this connection may
-     * still hold (pg_advisory_lock calls not matched by pg_advisory_unlock;
-     * pg_track_session, audit 39). A ROLLBACK does not release them. */
-    int          adv_locks;
+    /* A statement ran on the connection since its session was last reset
+     * (pg_reset_session, at every entry boundary). Hull tracks nothing else
+     * about the session (audit convergence phase 3). A conn.wait_notify
+     * LISTEN does not count: it is Hull's own, kept between waits. */
+    int          used;
 } HlDbPgCtx;
 
 static int pg_connect(HlPgConn *conn, const char *dsn)
@@ -86,7 +90,6 @@ static void scrub_free(char *s)
     while (*p) *p++ = 0;
     free(s);
 }
-
 /* Before any use: a connection a failed send or read left out of step (see
  * HlPgConn.broken) is replaced. It was the shared default connection, so it
  * used to stay broken for every later request - or, with a reply left half
@@ -95,13 +98,19 @@ static void scrub_free(char *s)
  * that transaction back when the connection went, and statements run on a new
  * connection would each commit alone; so every call refuses until a ROLLBACK
  * (@p sql), which has in effect already happened and returns 1 (done).
- * Returns 0 to go ahead, 1 done, -1 refused. A @p pinned handle (it holds a
- * session-scoped lock: hl_migrate_run) is not reconnected either: the lock
- * went with the session, and the run would go on without it (audit 6 L5). */
-static int pg_ready(HlDbPgCtx *s, const char *sql, int pinned)
+ * A session_control connection used in this entry is not reconnected either
+ * (its session state went with it; see db_mysql.c's my_ready): calls refuse
+ * until the entry ends. Returns 0 to go ahead, 1 done, -1 refused. A pinned
+ * handle (it holds a session-scoped lock: hl_migrate_run) is not reconnected
+ * either: the lock went with the session, and the run would go on without it
+ * (audit 6 L5). */
+static int pg_ready(HlDbHandle *h, const char *sql)
 {
-    if (!s->conn.broken)
+    HlDbPgCtx *s = h->ctx;
+    if (!s->conn.broken) {
+        s->used = 1;
         return 0;
+    }
     if (s->conn.tx_status != 'I' && sql_is_rollback(sql)) {
         s->conn.tx_status = 'I';
         return 1;
@@ -112,7 +121,13 @@ static int pg_ready(HlDbPgCtx *s, const char *sql, int pinned)
                  "server rolled back; roll back and retry");
         return -1;
     }
-    if (pinned) {
+    if (h->session_control && s->used) {
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the session_control connection was lost, and its session "
+                 "state with it; a new connection opens when this entry ends");
+        return -1;
+    }
+    if (h->session_pinned) {
         snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
                  "the connection was lost while it held a session lock (the "
                  "migration lock), which went with it; not reconnecting");
@@ -126,67 +141,85 @@ static int pg_ready(HlDbPgCtx *s, const char *sql, int pinned)
                  fresh.errmsg[0] ? fresh.errmsg : "unknown error");
         return -1;
     }
-    /* A session-level advisory lock went with the lost session, and the new
-     * one does not hold it. Not refused (audit 41): advisory locks do not
-     * count for the wait gates (they are not a transaction, and an app may
-     * hold one across waits on purpose), the tracking is a conservative
-     * estimate (a pg_try_* that took nothing counts), and refusing would
-     * leave the connection unusable until the entry ends for every app that
-     * merely tried one. Said instead, so a lost lock is not silent. */
-    if (s->adv_locks > 0)
-        log_warn("[hull:c] postgres: the connection was lost while its "
-                 "session may have held %d session-level advisory lock(s); "
-                 "they went with it, and the new connection does not hold "
-                 "them", s->adv_locks);
     hl_pg_conn_close(&s->conn);
     s->conn = fresh;
     s->nlisten = 0;   /* a new session listens to nothing */
-    s->adv_locks = 0; /* and holds no advisory lock */
+    s->used = 1;
     return 0;
 }
 
-/* -- Session-level advisory locks (audit 39) ------------------------- */
-
-typedef struct {
-    HlDbPgCtx *s;
-    int        ok;
-} PgTrack;
-
-static void pg_track_word(void *ud, const char *w, const char *prev,
-                          const char *prev2)
+/* App SQL that would change the shared session beyond the statement is
+ * refused (cap/db_session_sql.h): session-level advisory locks, SET ROLE /
+ * SESSION AUTHORIZATION / SESSION CHARACTERISTICS, LISTEN. A session_control
+ * connection takes them - and refuses the stdlib. Returns -1 (errmsg set) to
+ * refuse. */
+static int pg_refuse_session_sql(HlDbHandle *h, const char *sql)
 {
-    PgTrack *t = ud;
-    (void)prev; (void)prev2;
-    if (strcmp(w, "pg_advisory_lock") == 0 ||
-        strcmp(w, "pg_advisory_lock_shared") == 0 ||
-        strcmp(w, "pg_try_advisory_lock") == 0 ||
-        strcmp(w, "pg_try_advisory_lock_shared") == 0) {
-        if (t->s->adv_locks < 1000000) t->s->adv_locks++;
-    } else if (strcmp(w, "pg_advisory_unlock") == 0 ||
-               strcmp(w, "pg_advisory_unlock_shared") == 0) {
-        if (t->ok && t->s->adv_locks > 0) t->s->adv_locks--;
-    } else if (strcmp(w, "pg_advisory_unlock_all") == 0) {
-        if (t->ok) t->s->adv_locks = 0;
+    HlDbPgCtx *s = h->ctx;
+    if (h->session_control) {
+        if (!hl_cap_db_ns_trusted()) return 0;
+        snprintf(s->conn.errmsg, sizeof s->conn.errmsg,
+                 "the standard library does not use a session_control "
+                 "connection (its session state is the app's); give it "
+                 "the default connection");
+        return -1;
     }
+    if (hl_db_session_sql_trusted()) return 0;   /* Hull's migration lock */
+    const char *cls = hl_db_session_sql_refused(sql, HL_DB_SQL_POSTGRES);
+    if (!cls) return 0;
+    hl_db_session_sql_message(s->conn.errmsg, sizeof s->conn.errmsg, cls);
+    return -1;
 }
 
-/* Count the session-level advisory locks @p sql may take or release (the
- * transaction-level pg_advisory_xact_* go with the transaction). Taking
- * counts whether or not the statement succeeded (pg_try_* may not have
- * taken it), releasing only when it did: a misread costs an unlock_all at
- * the next stale-transaction guard, no more. Dollar-quoted bodies are read
- * as code (a DO block runs them). */
-static void pg_track_session(HlDbPgCtx *s, const char *sql, int rc)
+/* The connection is gone: forget its session; the next call reconnects. */
+static void pg_abandon(HlDbPgCtx *s)
 {
-    if (!s || !sql) return;
-    PgTrack t = { s, rc >= 0 };
-    hl_sql_scan_words(sql, 1, 0, pg_track_word, &t);
+    if (!s->conn.broken) {
+        s->conn.broken = 1;
+        hl_pg_conn_close(&s->conn);
+    }
+    s->conn.tx_status = 'I';
+    s->used = 0;
 }
 
-static int pg_session_dirty(HlDbHandle *h)
+/* HlDbBackend.reset_session: DISCARD ALL on a connection used since its last
+ * reset - it releases session-level advisory locks, resets every SET (role,
+ * session authorization and search_path included), drops temporary tables,
+ * prepared statements and cursors, and UNLISTENs. Hull's own statements are
+ * unnamed, so nothing it relies on goes. A worker connection that LISTENs for
+ * conn.wait_notify keeps its LISTENs: it gets DISCARD ALL's steps without
+ * UNLISTEN *. DISCARD ALL cannot run inside a transaction: a connection still
+ * in one (the ROLLBACK did not take) is abandoned, as is one whose reset
+ * failed; the next call reconnects. Not on a pinned handle (the migration
+ * lock). */
+static int pg_reset_session(HlDbHandle *h)
 {
     HlDbPgCtx *s = h ? h->ctx : NULL;
-    return s && !s->conn.broken && s->adv_locks > 0;
+    if (!s || !s->used || h->session_pinned) return 0;
+    if (s->conn.broken) {              /* nothing of the session survives */
+        s->conn.tx_status = 'I';
+        s->used = 0;
+        return 0;
+    }
+    if (s->conn.tx_status != 'I') {
+        log_warn("[hull:c] postgres: a transaction outlived its ROLLBACK; "
+                 "closing the connection");
+        pg_abandon(s);
+        return -1;
+    }
+    const char *sql = s->nlisten == 0
+        ? "DISCARD ALL"
+        : "CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; "
+          "DEALLOCATE ALL; SELECT pg_advisory_unlock_all(); DISCARD PLANS; "
+          "DISCARD TEMP; DISCARD SEQUENCES";
+    if (hl_pg_exec_simple(&s->conn, sql) != 0 || s->conn.tx_status != 'I') {
+        log_warn("[hull:c] postgres: session reset failed (%s); closing the "
+                 "connection instead", s->conn.errmsg);
+        pg_abandon(s);
+        return -1;
+    }
+    s->used = 0;
+    return 0;
 }
 
 /* ── Open / close ─────────────────────────────────────────────────── */
@@ -452,7 +485,7 @@ static int pg_query_raw(HlDbHandle *h, const char *sql,
     (void)alloc;
     if (!h || !h->ctx) return -1;
     HlDbPgCtx *s = h->ctx;
-    int ready = pg_ready(s, sql, h->session_pinned);
+    int ready = pg_ready(h, sql);
     if (ready != 0) return ready > 0 ? 0 : -1;
 
     /* COMMIT of a transaction an earlier statement aborted ('E'): the server
@@ -537,10 +570,10 @@ static int pg_query(HlDbHandle *h, const char *sql,
                     const HlValue *params, int nparams,
                     HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
 {
+    if (!h || !h->ctx) return -1;
     if (pg_charge(h, sql) != 0) return -1;
-    int rc = pg_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
-    if (h) pg_track_session(h->ctx, sql, rc);
-    return rc;
+    if (pg_refuse_session_sql(h, sql) != 0) return -1;
+    return pg_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
 }
 
 static int pg_exec(HlDbHandle *h, const char *sql,
@@ -556,44 +589,41 @@ static int pg_exec_script(HlDbHandle *h, const char *sql)
     if (!h || !h->ctx) return -1;
     if (pg_charge(h, sql) != 0) return -1;
     HlDbPgCtx *s = h->ctx;
-    int ready = pg_ready(s, sql, h->session_pinned);
+    if (pg_refuse_session_sql(h, sql) != 0) return -1;
+    int ready = pg_ready(h, sql);
     if (ready != 0) return ready > 0 ? 0 : -1;
-    int rc = hl_pg_exec_simple(&s->conn, sql);
-    pg_track_session(s, sql, rc);
-    return rc;
+    return hl_pg_exec_simple(&s->conn, sql);
 }
 
 static int pg_begin(HlDbHandle *h)    { return pg_exec(h, "BEGIN", NULL, 0); }
 static int pg_commit(HlDbHandle *h)   { return pg_exec(h, "COMMIT", NULL, 0); }
 static int pg_rollback(HlDbHandle *h) { return pg_exec(h, "ROLLBACK", NULL, 0); }
 
-/* A transaction a request left open ('T', or 'E' after a failed statement) is
- * rolled back before the next request runs: without it every later request ran
- * inside it (its writes lost at the eventual rollback, its locks held) or, in
- * 'E', failed with "current transaction is aborted" until a restart. */
+/* At every entry boundary: a transaction a request left open ('T', or 'E'
+ * after a failed statement) is rolled back - without it every later request
+ * ran inside it (its writes lost at the eventual rollback, its locks held)
+ * or, in 'E', failed with "current transaction is aborted" until a restart -
+ * and then the session of a connection used since its last reset is reset
+ * (pg_reset_session). Both under a short cleanup budget of their own, not the
+ * run's (see db_mysql.c's mysql_guard_stale_txn). */
+#define HL_PG_GUARD_MAX_MS 2000
+
 static void pg_guard_stale_txn(HlDbHandle *h)
 {
     if (!h || !h->ctx) return;
     HlDbPgCtx *s = h->ctx;
-    if (s->conn.tx_status == 'I' || s->conn.tx_status == 0) return;
-    fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
-    (void)pg_rollback(h);   /* a lost connection: pg_ready takes the ROLLBACK */
-    /* A failed entry's session-level advisory lock outlives the ROLLBACK and
-     * held every other session waiting on it until a restart (audit 39).
-     * Released here, after a stale transaction - the sign of a failed entry;
-     * one an entry left with no transaction open is not seen. Not on a pinned
-     * handle (the migration lock). Never the lock of an entry about to
-     * resume: a stale transaction is never its own, since no wait goes ahead
-     * while one is open. A session-level advisory lock does not itself refuse
-     * a wait (HlDbBackend.session_held, audit 40): it is the shared
-     * session's, and another entry's failure here can release it. */
-    if (s->adv_locks > 0 && !s->conn.broken && !h->session_pinned &&
-        s->conn.tx_status == 'I') {
-        fprintf(stderr, "[hull:c] releasing session-level advisory locks "
-                        "left by a previous request\n");
-        if (pg_exec(h, "SELECT pg_advisory_unlock_all()", NULL, 0) >= 0)
-            s->adv_locks = 0;
+    int in_txn = s->conn.tx_status == 'T' || s->conn.tx_status == 'E';
+    if (!s->used && !in_txn) return;   /* nothing ran since the reset */
+    HlDbOpBudget cleanup = {
+        .deadline_ms = hl_db_monotonic_ms() + HL_PG_GUARD_MAX_MS,
+    };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &cleanup);
+    if (in_txn) {
+        fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
+        (void)pg_rollback(h);   /* a lost connection: pg_ready takes the ROLLBACK */
     }
+    (void)pg_reset_session(h);
+    hl_db_budget_restore(prev);
 }
 
 /* 'T' (in a transaction) or 'E' (in a failed one); a connection lost inside
@@ -816,7 +846,9 @@ static int pg_wait_notify(HlDbHandle *h, const char *channel, int timeout_ms)
 {
     HlDbPgCtx *s = h->ctx;
     if (!pg_channel_ok(channel)) return -1;
-    if (pg_ready(s, NULL, h->session_pinned) != 0) return -1;
+    int was_used = s->used;
+    if (pg_ready(h, NULL) != 0) return -1;
+    s->used = was_used;   /* the LISTEN is Hull's own, not the app's */
     /* Notifications a later query on this connection reads mark their
      * channel pending too (audit 20). Set on every wait: a reconnect starts
      * the connection over. */
@@ -877,7 +909,7 @@ const HlDbBackend hl_db_backend_postgres = {
     .errmsg               = pg_errmsg,
     .guard_stale_txn      = pg_guard_stale_txn,
     .in_txn               = pg_in_txn,
-    .session_dirty        = pg_session_dirty,
+    .reset_session        = pg_reset_session,
     .insert_if_absent     = pg_insert_if_absent,
     .upsert               = pg_upsert,
     .table_columns        = pg_table_columns,

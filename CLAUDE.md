@@ -656,6 +656,46 @@ no longer passes.
 (The DB connection dials its host directly; `manifest.hosts` gates
 `http.fetch`, not database connections.)
 
+**Session-altering SQL (MySQL / MariaDB / Postgres; audit convergence phase
+3).** App SQL whose point is session state that outlives the statement is
+refused by the backend before anything is sent (`hl_db_session_sql_refused`,
+`cap/db_session_sql.c`, called from the query / exec / exec_script entries):
+MySQL `SET [SESSION|LOCAL|GLOBAL|@@session.]autocommit` (any spelling, a
+multi-assignment SET included), `LOCK` / `UNLOCK TABLES`, `LOCK` / `UNLOCK
+INSTANCE`, any `XA` statement, `GET_LOCK` / `RELEASE_LOCK` /
+`RELEASE_ALL_LOCKS`, `FLUSH ... WITH READ LOCK` / `FOR EXPORT`, MariaDB
+`BACKUP LOCK` / `STAGE`, a session-scoped `SET SESSION|GLOBAL TRANSACTION`
+(or `transaction_isolation` / `transaction_read_only`; a bare `SET
+TRANSACTION` - the next transaction only - is allowed), `SET NAMES` /
+`CHARACTER SET` (the charset `quote_identifier` relies on, audit 20) and `SET
+ROLE`; Postgres session-level advisory locks (`pg_advisory_lock[_shared]`,
+`pg_try_advisory_lock[_shared]`, `pg_advisory_unlock*`; the `_xact_` forms
+are allowed), `SET [SESSION] ROLE` / `RESET ROLE`, `SET` / `RESET SESSION
+AUTHORIZATION`, `SET SESSION CHARACTERISTICS` / `default_transaction_*`
+(`SET LOCAL` forms are transaction-scoped and allowed), `set_config()` of
+those, `LISTEN` / `UNLISTEN` (`conn.wait_notify` is the API; Hull's own LISTEN
+bypasses the vtable) and `PREPARE TRANSACTION`. Transactions use `db.batch`
+or plain BEGIN / START TRANSACTION / COMMIT / ROLLBACK. The classifier is
+conservative: any statement of a multi-statement text counts; a text it
+cannot read the way the server does (a backslash, a MySQL executable
+comment, an unterminated quote or comment) is read raw - quotes and comments
+as code, every word a statement start; a Postgres dollar-quoted body and a
+MySQL PREPARE / EXECUTE IMMEDIATE string are read raw; `U&"..."` is refused.
+Dynamic SQL assembled at run time (CONCAT + PREPARE, EXECUTE format(...) in a
+DO block, a stored procedure) is not seen - the reset at the boundary is the
+guarantee, the refusal makes the ordinary spellings fail loudly. Migration
+files are app SQL and refused too; Hull's own migration lock runs with a
+thread-local trust flag (`hl_db_session_sql_trust`, set only in `migrate.c`
+around GET_LOCK / pg_advisory_lock and their release). The escape hatch is a
+dedicated named connection: `databases.named.<x> = { dsn = "...",
+session_control = true }` (JS `sessionControl: true`; the string form stays).
+The registry sets `HlDbHandle.session_control`; such a connection takes the
+statements (app-author responsibility), refuses every stdlib (ns-trusted)
+call, is never `default` (`hl_manifest_check_env_refs` refuses that) nor the
+internal one, and is still reset at every entry boundary. Its `db.async` ops
+run on the worker's pooled connection with the flag set for the op only
+(`HlWorkerDbOp.session_control`), reset after the op like every other.
+
 **Dynamic connections (`db.open(dsn)`, roadmap §2.2).** For a DSN not known at
 manifest-authoring time (a per-tenant shard, a user-supplied endpoint),
 `db.open(dsn)` opens a **caller-owned** connection after validating the DSN
@@ -732,30 +772,36 @@ transaction is aborted"). The SQLite guard checks its ROLLBACK took
 (`sqlite3_get_autocommit`), retries once after resetting the connection's
 statements, and when the connection is still inside the transaction replaces
 it in place (same ctx, so every handle stays valid) with a new connection to
-the same file - closing the old one rolls it back. The MySQL guard also
-RESETS the session (`COM_RESET_CONNECTION`, `hl_my_conn_reset`, then the
-handshake's charset again) when its ROLLBACK failed or left IN_TRANS set (XA:
-ROLLBACK is refused with XAER_RMFAIL), when `SERVER_STATUS_AUTOCOMMIT` is clear
-(`SET autocommit = 0`), when a LOCK TABLES / XA transaction is outstanding, or -
-after a stale transaction - when a GET_LOCK may be held (`my_track_session`
-reads them from the statement text); a refused reset closes the connection
-(replaced on the next call). One failed request had left every later write on
-the shared connection acknowledged and never committed, and every wait refused,
-until a restart (audit 39). A reset drops every session setting, user variable,
-temporary table and named lock on the connection, an app's deliberate ones
-included (another entry's GET_LOCK too), so session state must not be relied on
-across entries on a shared connection. The Postgres guard runs
-`pg_advisory_unlock_all()` after a stale transaction when a session-level
-advisory lock may be held (`pg_track_session`). Not reset on Postgres: `SET`
-outside a transaction (search_path, `SET ROLE`, `SET SESSION CHARACTERISTICS`:
-indistinguishable from an app's startup `SET TIME ZONE`), LISTEN, temporary
-tables; a `PREPARE TRANSACTION` (and a MySQL `XA PREPARE`) outlives the session
-and must be resolved with `COMMIT / ROLLBACK PREPARED` (`XA COMMIT / ROLLBACK`).
-A worker-pool connection whose session holds such state (`hl_db_session_dirty`,
-the vtable's `session_dirty`) is dropped after its op / job instead of reused.
-An in-memory database is
+the same file - closing the old one rolls it back. An in-memory database is
 not replaced (that would drop it), and `db.udf` registrations do not carry
 over (audit 11).
+
+**Session reset at every entry boundary (audit convergence phase 3).** Hull
+infers nothing about a MySQL / Postgres session from SQL text or status
+flags (the audit 39-41 trackers - `my_track_session`, `pg_track_session`,
+`session_held` / `session_dirty`, the lost-connection held state - are
+gone). Instead, after its rollback the guard RESETS the session of every
+connection the entry used (`HlDbBackend.reset_session`, `hl_db_reset_session`;
+a per-connection `used` flag set by any statement, cleared by the reset):
+MySQL `COM_RESET_CONNECTION` (`hl_my_conn_reset`, then the handshake's
+charset and `autocommit = 1` again), Postgres `DISCARD ALL` (a worker
+connection that LISTENs for `conn.wait_notify` gets DISCARD ALL's steps
+without `UNLISTEN *`). Both run under a 2 s cleanup budget of their own, not
+the run's. A connection whose reset fails, or that is still inside a
+transaction after the ROLLBACK (MySQL XA), is abandoned - the server ends
+the session with it - and the next call reconnects. A pinned handle (the
+migration lock) is exempt. The worker pool resets its connection after
+every `db.async` op and `worker.dispatch` job (`worker_end_txn`,
+`hl_worker_db_end_job`). So session state - a user variable, `SET
+search_path`, a temporary table, a lock a stored procedure took - never
+survives an entry boundary or a wait, on any connection, and must not be
+relied on across one. `conn.last_id()` on a shared connection is reliable only right
+after the INSERT with no await between (another entry's INSERT, or the reset
+at the wait, replaces it). Session-altering app SQL is refused outright on every
+connection without `session_control` (`cap/db_session_sql.c`, below:
+"Session-altering SQL"). A `PREPARE TRANSACTION` / MySQL `XA PREPARE` (only
+possible on a session_control connection) outlives the session and must be
+resolved with `COMMIT / ROLLBACK PREPARED` (`XA COMMIT / ROLLBACK`).
 
 **No transaction across a wait.** The guard cannot tell a dead owner from one
 parked on `http.fetch` / `db.async` / `hull.sleep`, and a parked handler's
@@ -763,19 +809,11 @@ transaction is on a connection other entries are using meanwhile: the guard
 rolled it back under the handler, whose remaining statements then autocommitted
 and whose COMMIT "succeeded" (audit 5 M1). So every Hull wait refuses while a
 registry connection or `db.open` handle is in a transaction
-(`hl_db_registry_open_txn`, the backend's `in_txn` vtable method - or its
-`session_held`, `hl_db_holds_txn`: MySQL autocommit off, an outstanding LOCK
-TABLES / FLUSH TABLES WITH READ LOCK / LOCK INSTANCE FOR BACKUP, or an XA
-transaction, which the guard resets; right after `SET autocommit = 0` or
-`LOCK TABLES` IN_TRANS is clear, so the wait was allowed and the guard before
-the resume reset the handler's own session under it - its INSERT autocommitted
-and its ROLLBACK lied, audit 40. A change of that state moves the transaction
-generation too. Session-level named / advisory locks - GET_LOCK,
-`pg_advisory_lock` - do NOT count: the tracker cannot tell a GET_LOCK that
-timed out or a `pg_try_advisory_lock` that failed from one that took the lock,
-and counted, one such call would refuse every later wait; they belong to the
-shared session, not to one entry, and another entry's stale-transaction reset
-or `pg_advisory_unlock_all` can drop them; Lua:
+(`hl_db_registry_open_txn`, the backend's `in_txn` vtable method, read from the
+server's own status - SQLite autocommit, Postgres `tx_status`, MySQL
+`SERVER_STATUS_IN_TRANS` - and nothing else: other session state is refused
+or reset at the boundary, not tracked, so a wait resets the session of every
+connection the entry used (the park runs the guard); Lua:
 `hl_lua_check_can_wait`, called AFTER the binding has read its arguments and
 options and with no app code between it and the arm - an opts `__index`, a
 `__tostring` or a `__gc` finalizer (any Lua allocation can run one) is app code
@@ -1039,7 +1077,9 @@ roadmap §2.9.)
   race the first `CREATE TABLE` nor re-run a migration (audit 5 L3). While it
   is held the handle is `session_pinned`: a connection lost mid-run is not
   transparently reconnected (the lock went with the session), so the run
-  fails instead of going on unlocked (audit 6 L5).
+  fails instead of going on unlocked (audit 6 L5), and it is not reset. The
+  lock statements are Hull's own (`hl_db_session_sql_trust`); a migration
+  FILE that takes a named or advisory lock is refused like app SQL.
 - **SQLite-only features under Postgres:** `db.udf` and `hull/search` (FTS5)
   are SQLite-only and fail with a clear error on a Postgres connection.
 - **ROLLBACK shortcut is single-statement (Postgres and MySQL):** on a
@@ -1071,22 +1111,13 @@ roadmap §2.9.)
   transaction back, and statements on a new connection would each commit alone,
   so calls refuse until a `ROLLBACK` (the batch wrapper's, or the app's own),
   which then succeeds. Covered by the `/reconnect` phase of `e2e_postgres` /
-  `e2e_mysql` (each kills its own session). MySQL treats session state the
-  same way (audit 41, `my_ready` / `my_lost_held`): a connection lost with
-  autocommit off, LOCK TABLES (or a global read lock / FOR EXPORT), LOCK
-  INSTANCE, a MariaDB BACKUP LOCK / STAGE or an XA transaction - IN_TRANS
-  clear - reconnected into autocommit with no lock (a retried INSERT
-  autocommitted and the ROLLBACK lied). It now refuses every call, and
-  `mysql_session_held` keeps reporting the state so waits stay refused, until
-  the app ends each piece: ROLLBACK (answered unsent; with autocommit off the
-  next connection is opened with `SET autocommit = 0`, `ac_off_acked`),
-  `SET autocommit = 1`, UNLOCK TABLES / INSTANCE, BACKUP UNLOCK / STAGE END
-  (each answered unsent: the server ended it with the session), XA COMMIT /
-  ROLLBACK (sent on the new connection: a prepared XA outlives the session) -
-  or the entry ends, when the stale-transaction guard forgets it
-  (`my_lost_forget`, not on a pinned handle). Postgres reconnects even when a
-  session-level advisory lock may have been held (advisory locks do not count
-  for the wait gates), with a WARN that it went with the session. A run whose budget or deadline
+  `e2e_mysql` (each kills its own session). Nothing else about the lost session
+  is guessed (the audit 41 held-state tracking is gone): a shared connection
+  cannot hold session state (the statements are refused, and the session is
+  reset at every entry boundary), so it reconnects; a `session_control`
+  connection used in this entry refuses every call until the entry ends -
+  whatever the app set up on it went with the session - and the guard then
+  clears it for a reconnect (`my_ready` / `pg_ready`). A run whose budget or deadline
   trips while the reply arrives does not read the rest of it: the connection
   is closed and marked broken (`pg_abandon_if_tripped` /
   `reply_frame`) - the server stops the query at its next write, and
@@ -1161,39 +1192,28 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   fails with a hint. The RSA public-key exchange is not implemented. Once the
   server has cached the account's hash, the fast path works under any
   sslmode).
-- **Session reset (audit 39):** the stale-transaction guard resets the
-  session (`COM_RESET_CONNECTION`, MySQL 5.7.3+ / MariaDB 10.2.4+; else the
-  connection is closed and replaced) on XA / autocommit-off / LOCK TABLES
-  leftovers and a failed ROLLBACK - see "Stale transactions". The handshake's
-  status flags are kept (`server_status` was 0, read as autocommit off), and
-  the reset re-applies `SET NAMES utf8mb4, collation_connection = <id>,
-  autocommit = 1` (a plain `SET NAMES utf8mb4, autocommit = 1` on MariaDB for
-  the default id 45, which it maps through `character_set_collations`, the
-  handshake's included). Every new connection also sends `SET autocommit = 1`
-  after the handshake (`my_connect`, audit 41): a server whose global
-  autocommit is off (`SET GLOBAL autocommit = 0`, `init_connect`) still
-  reports SERVER_STATUS_AUTOCOMMIT in the handshake, and every write not
-  committed by hand was rolled back by the guard. A session left in a MariaDB
-  BACKUP LOCK / STAGE is closed rather than reset (whether a reset ends one is
-  not documented). Any server ERR outside a transaction is followed by
-  `COM_PING` (`my_note_failure`, audit 41): a CALL whose procedure ran START
-  TRANSACTION or `SET autocommit = 0` and then raised (or an earlier statement
-  of a multi-statement text) changed the session, and an ERR carries no status
-  flags. A pinned handle (the migration run) is never reset. The same leftovers
-  (autocommit off, LOCK TABLES / FLUSH TABLES WITH READ LOCK / LOCK INSTANCE
-  FOR BACKUP, XA) count as an open transaction for the wait gates
-  (`mysql_session_held`, audit 40), so the guard that runs before a parked
-  handler resumes never finds the handler's own: every leftover it resets
-  belongs to a finished entry. The statement tracker is conservative where it
-  cannot read the text (`my_sql_track_unreadable`: a `#` comment, an
-  executable comment, a backslash, which ends no string under
-  NO_BACKSLASH_ESCAPES): every word then counts as taking state, quotes and
-  comments included, and none as releasing it - a misread refuses a wait and
-  resets the session at the entry's end, no more. The readable path
-  (`hl_sql_scan_words`) takes each dialect's `--` rule (audit 41): MySQL's
-  before any byte <= 0x20 or DEL, to LF only (a form feed after `--` hid an
-  UNLOCK TABLES from the server but not from the scanner); Postgres's always,
-  to LF or CR.
+- **Session reset:** every connection an entry used is reset at the entry
+  boundary (`COM_RESET_CONNECTION`, MySQL 5.7.3+ / MariaDB 10.2.4+; else the
+  connection is closed and replaced) - see "Session reset at every entry
+  boundary". The handshake's status flags are kept (`server_status` was 0,
+  read as autocommit off), and the reset re-applies `SET NAMES utf8mb4,
+  collation_connection = <id>, autocommit = 1` (a plain `SET NAMES utf8mb4,
+  autocommit = 1` on MariaDB for the default id 45, which it maps through
+  `character_set_collations`, the handshake's included). Every new connection
+  also sends `SET autocommit = 1` after the handshake (`my_connect`, audit
+  41): a server whose global autocommit is off (`SET GLOBAL autocommit = 0`,
+  `init_connect`) still reports SERVER_STATUS_AUTOCOMMIT in the handshake,
+  and every write not committed by hand was rolled back by the guard. A
+  MariaDB `session_control` connection is closed at the boundary rather than
+  reset (whether a reset ends a BACKUP LOCK / STAGE is not documented). Any
+  server ERR outside a transaction is followed by `COM_PING`
+  (`my_note_failure`, audit 41): a CALL whose procedure ran START
+  TRANSACTION and then raised (or an earlier statement of a multi-statement
+  text) changed the session, and an ERR carries no status flags; `in_txn`
+  reads the refreshed IN_TRANS. A pinned handle (the migration run) is never
+  reset. A stored procedure can still change the session (`SET autocommit =
+  0` inside it): Hull does not see that, and the reset at the boundary bounds
+  it to the entry.
 - **Deadlocks:** an `ER_LOCK_DEADLOCK` (1213) inside a transaction means
   InnoDB rolled the WHOLE transaction back; the backend then refuses every call
   but `ROLLBACK` (as for a connection lost mid-transaction), so later
