@@ -655,6 +655,21 @@ static void cr_sort_and_remove_overlap(CharRange *cr)
     cr->len = j;
 }
 
+/* HULL PATCH 0010 (audit 41): cr |= pend, where 'pend' holds intervals in
+   any order, possibly overlapping (a regexp class's members as parsed):
+   one sort and one merge instead of one cr_op1 per interval, which rebuilt
+   the whole list each time. 'pend' is emptied. -1 on allocation failure. */
+int cr_union_pending(CharRange *cr, CharRange *pend)
+{
+    int ret;
+    if (pend->len == 0)
+        return 0;
+    cr_sort_and_remove_overlap(pend);
+    ret = cr_op1(cr, pend->points, pend->len, CR_OP_UNION);
+    pend->len = 0;
+    return ret;
+}
+
 /* canonicalize a character set using the JS regex case folding rules
    (see lre_canonicalize()) */
 int cr_regexp_canonicalize(CharRange *cr, BOOL is_unicode)
@@ -1088,40 +1103,73 @@ static int unicode_get_cc(uint32_t c)
     }
 }
 
-static void sort_cc(int *buf, int len)
-{
-    int i, j, k, cc, cc1, start, ch1;
+/* HULL PATCH 0010 (audit 41): canonical ordering in linear time. Upstream
+   insertion-sorted each run of non-starters, O(n^2) in the run's length
+   inside one String.prototype.normalize / localeCompare call: a long run of
+   combining marks with their classes out of order (80k code units) held the
+   event loop for seconds, and neither the budget nor the run watchdog sees
+   a single builtin. A short run keeps the insertion sort (at most
+   SORT_CC_SMALL^2 / 2 moves, a bounded multiple of its length); a longer one
+   is counting-sorted by class (0..254), which is stable, so the order is
+   exactly the insertion sort's. -1 on allocation failure. See Hull's
+   docs/quickjs_patches.md. */
+#define SORT_CC_SMALL 32
 
+static int sort_cc(int *buf, int len, void *opaque,
+                   DynBufReallocFunc *realloc_func)
+{
+    int i, j, k, cc, cc1, start, ch1, n;
+    int count[256];
+    DynBuf tmp_s, *tmp = &tmp_s;
+
+    dbuf_init2(tmp, opaque, realloc_func);
     for(i = 0; i < len; i++) {
         cc = unicode_get_cc(buf[i]);
         if (cc != 0) {
             start = i;
             j = i + 1;
-            while (j < len) {
-                ch1 = buf[j];
-                cc1 = unicode_get_cc(ch1);
-                if (cc1 == 0)
-                    break;
-                k = j - 1;
-                while (k >= start) {
-                    if (unicode_get_cc(buf[k]) <= cc1)
-                        break;
-                    buf[k + 1] = buf[k];
-                    k--;
-                }
-                buf[k + 1] = ch1;
+            while (j < len && unicode_get_cc(buf[j]) != 0)
                 j++;
+            n = j - start;
+            if (n <= SORT_CC_SMALL) {
+                for(k = start + 1; k < j; k++) {
+                    int m;
+                    ch1 = buf[k];
+                    cc1 = unicode_get_cc(ch1);
+                    m = k - 1;
+                    while (m >= start) {
+                        if (unicode_get_cc(buf[m]) <= cc1)
+                            break;
+                        buf[m + 1] = buf[m];
+                        m--;
+                    }
+                    buf[m + 1] = ch1;
+                }
+            } else {
+                int *out, pos, c;
+                if (dbuf_claim(tmp, (size_t)n * sizeof(int))) {
+                    dbuf_free(tmp);
+                    return -1;
+                }
+                out = (int *)tmp->buf;
+                memset(count, 0, sizeof(count));
+                for(k = start; k < j; k++)
+                    count[unicode_get_cc(buf[k])]++;
+                pos = 0;
+                for(c = 0; c < 256; c++) {
+                    int t = count[c];
+                    count[c] = pos;
+                    pos += t;
+                }
+                for(k = start; k < j; k++)
+                    out[count[unicode_get_cc(buf[k])]++] = buf[k];
+                memcpy(buf + start, out, (size_t)n * sizeof(int));
             }
-#if 0
-            printf("cc:");
-            for(k = start; k < j; k++) {
-                printf(" %3d", unicode_get_cc(buf[k]));
-            }
-            printf("\n");
-#endif
             i = j;
         }
     }
+    dbuf_free(tmp);
+    return 0;
 }
 
 static void to_nfd_rec(DynBuf *dbuf,
@@ -1172,7 +1220,7 @@ int unicode_normalize(uint32_t **pdst, const uint32_t *src, int src_len,
                       UnicodeNormalizationEnum n_type,
                       void *opaque, DynBufReallocFunc *realloc_func)
 {
-    int *buf, buf_len, i, p, starter_pos, cc, last_cc, out_len;
+    int *buf, buf_len, i, p, starter_pos, cc, last_cc, out_len, last_starter;
     BOOL is_compat;
     DynBuf dbuf_s, *dbuf = &dbuf_s;
 
@@ -1198,6 +1246,8 @@ int unicode_normalize(uint32_t **pdst, const uint32_t *src, int src_len,
 
     to_nfd_rec(dbuf, (const int *)src, src_len, is_compat);
     if (dbuf_error(dbuf)) {
+    fail_buf:
+        dbuf_free(dbuf);
     fail:
         *pdst = NULL;
         return -1;
@@ -1205,7 +1255,8 @@ int unicode_normalize(uint32_t **pdst, const uint32_t *src, int src_len,
     buf = (int *)dbuf->buf;
     buf_len = dbuf->size / sizeof(int);
 
-    sort_cc(buf, buf_len);
+    if (sort_cc(buf, buf_len, opaque, realloc_func)) /* HULL PATCH 0010 */
+        goto fail_buf;
 
     if (buf_len <= 1 || (n_type & 1) != 0) {
         /* NFD / NFKD */
@@ -1213,28 +1264,43 @@ int unicode_normalize(uint32_t **pdst, const uint32_t *src, int src_len,
         return buf_len;
     }
 
+    /* HULL PATCH 0010 (audit 41): upstream walked back from the last output
+       character to the starter for every character, a scan of the whole
+       run of non-starters before it. The run is in canonical order, so the
+       character is blocked iff the last output character is a non-starter
+       of a class >= its own; otherwise the starter is the last cc == 0
+       character output, which is kept in 'last_starter' (-1: none). Same
+       result, one step per character. */
     i = 1;
     out_len = 1;
+    last_starter = unicode_get_cc(buf[0]) == 0 ? 0 : -1;
     while (i < buf_len) {
         /* find the starter character and test if it is blocked from
            the character at 'i' */
         last_cc = unicode_get_cc(buf[i]);
-        starter_pos = out_len - 1;
-        while (starter_pos >= 0) {
-            cc = unicode_get_cc(buf[starter_pos]);
-            if (cc == 0)
-                break;
-            if (cc >= last_cc)
-                goto next;
-            last_cc = 256;
-            starter_pos--;
-        }
+        cc = unicode_get_cc(buf[out_len - 1]);
+        if (cc == 0)
+            starter_pos = out_len - 1;
+        else if (cc >= last_cc)
+            goto next;
+        else
+            starter_pos = last_starter;
         if (starter_pos >= 0 &&
             (p = compose_pair(buf[starter_pos], buf[i])) != 0) {
             buf[starter_pos] = p;
             i++;
+            if (unicode_get_cc(p) != 0) {
+                /* not a starter any more (no such composition is known):
+                   find the previous one */
+                last_starter = starter_pos - 1;
+                while (last_starter >= 0 &&
+                       unicode_get_cc(buf[last_starter]) != 0)
+                    last_starter--;
+            }
         } else {
         next:
+            if (last_cc == 0)
+                last_starter = out_len;
             buf[out_len++] = buf[i++];
         }
     }

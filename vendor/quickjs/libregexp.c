@@ -152,14 +152,13 @@ typedef struct {
     REString **hash_table;
 } REStringList;
 
-static uint32_t re_string_hash(int len, const uint32_t *buf)
+/* HULL PATCH 0010 (audit 41): the /v class-string set was hashed with a
+   fixed multiply-add, so a \q{...} of strings built to collide put every
+   one on one chain (a quadratic compile). It is the runtime's keyed hash
+   now (lre_string_hash, QuickJS patch 0009's key). */
+static uint32_t re_string_hash(void *opaque, int len, const uint32_t *buf)
 {
-    int i;
-    uint32_t h;
-    h = 1;
-    for(i = 0; i < len; i++)
-        h = h * 263 + buf[i];
-    return h * 0x61C88647;
+    return lre_string_hash(opaque, buf, len);
 }
 
 static void re_string_list_init(REParseState *s1, REStringList *s)
@@ -289,7 +288,7 @@ static int re_string_find(REStringList *s, int len, const uint32_t *buf,
                           BOOL add_flag)
 {
     uint32_t h0;
-    h0 = re_string_hash(len, buf);
+    h0 = re_string_hash(s->cr.mem_opaque, len, buf); /* HULL PATCH 0010 */
     return re_string_find2(s, len, buf, h0, add_flag);
 }
 
@@ -301,6 +300,79 @@ static int re_string_add(REStringList *s, int len, const uint32_t *buf)
     }
     if (re_string_find(s, len, buf, TRUE) < 0)
         return -1;
+    return 0;
+}
+
+/* HULL PATCH 0010 (audit 41): a class is built from members a pending
+   list collects, unsorted, and that is merged into the class once
+   (cr_union_pending: one sort and one union). Upstream rebuilt the whole
+   range list for every member (cr_union_interval -> cr_op1), so a class of
+   n disjoint members cost O(n^2) inside one RegExp compile (60k members:
+   7 s). The list is merged early once it outgrows the class, so it never
+   holds more than a bounded multiple of the class. The work is charged
+   (lre_check_work), a compile over budget failing with
+   LRE_INTERRUPTED_MSG. See Hull's docs/quickjs_patches.md. */
+#define RE_PEND_SLACK 4096
+
+static int re_class_charge(void *opaque, size_t points)
+{
+    return lre_check_work(opaque, points * sizeof(uint32_t));
+}
+
+/* add the intervals 'pts' (a sorted list or not) to the pending list.
+   -1: out of memory; -2: over budget */
+static int re_pend_add(CharRange *cr, CharRange *pend,
+                       const uint32_t *pts, int len)
+{
+    if (len <= 0)
+        return 0;
+    if (cr_realloc(pend, pend->len + len))
+        return -1;
+    memcpy(pend->points + pend->len, pts, (size_t)len * sizeof(pts[0]));
+    pend->len += len;
+    if (pend->len > 2 * cr->len + RE_PEND_SLACK) {
+        if (re_class_charge(pend->mem_opaque, (size_t)pend->len + cr->len))
+            return -2;
+        if (cr_union_pending(cr, pend))
+            return -1;
+    }
+    return 0;
+}
+
+static int re_pend_interval(CharRange *cr, CharRange *pend,
+                            uint32_t c1, uint32_t c2)
+{
+    uint32_t b_pt[2];
+    b_pt[0] = c1;
+    b_pt[1] = c2 + 1;
+    return re_pend_add(cr, pend, b_pt, 2);
+}
+
+/* merge the pending list into 'cr'. -1: out of memory; -2: over budget */
+static int re_pend_flush(CharRange *cr, CharRange *pend)
+{
+    if (pend->len == 0)
+        return 0;
+    if (re_class_charge(pend->mem_opaque, (size_t)pend->len + cr->len))
+        return -2;
+    if (cr_union_pending(cr, pend))
+        return -1;
+    return 0;
+}
+
+/* the strings of 'b' added to 'a' (its ranges are the caller's) */
+static int re_string_list_union_strings(REStringList *a, REStringList *b)
+{
+    REString *p;
+    int i;
+    if (b->n_strings != 0) {
+        for(i = 0; i < b->hash_size; i++) {
+            for(p = b->hash_table[i]; p != NULL; p = p->next) {
+                if (re_string_find2(a, p->len, p->buf, p->hash, TRUE) < 0)
+                    return -1;
+            }
+        }
+    }
     return 0;
 }
 
@@ -689,6 +761,14 @@ static int re_parse_out_of_memory(REParseState *s)
     return re_parse_error(s, "out of memory");
 }
 
+/* HULL PATCH 0010 (audit 41): report a re_pend_* failure */
+static int re_pend_error(REParseState *s, int r)
+{
+    if (r == -2)
+        return re_parse_error(s, "%s", LRE_INTERRUPTED_MSG);
+    return re_parse_out_of_memory(s);
+}
+
 /* If allow_overflow is false, return -1 in case of
    overflow. Otherwise return INT32_MAX. */
 static int parse_digits(const uint8_t **pp, BOOL allow_overflow)
@@ -864,11 +944,26 @@ static BOOL is_unicode_char(int c)
             (c == '_'));
 }
 
-/* XXX: memory error test */
+/* HULL PATCH 0010 (audit 41): the single code points of a property of
+   strings go through a pending list (one merge, not one range-list rebuild
+   each), and a memory error is reported */
+typedef struct {
+    REStringList *sl;
+    CharRange pend;
+    int err;
+} RESeqPropState;
+
 static void seq_prop_cb(void *opaque, const uint32_t *seq, int seq_len)
 {
-    REStringList *sl = opaque;
-    re_string_add(sl, seq_len, seq);
+    RESeqPropState *st = opaque;
+    if (st->err)
+        return;
+    if (seq_len == 1) {
+        if (re_pend_interval(&st->sl->cr, &st->pend, seq[0], seq[0]))
+            st->err = 1;
+    } else if (re_string_find(st->sl, seq_len, seq, TRUE) < 0) {
+        st->err = 1;
+    }
 }
 
 static int parse_unicode_property(REParseState *s, REStringList *cr,
@@ -948,10 +1043,17 @@ static int parse_unicode_property(REParseState *s, REStringList *cr,
         }
         if (ret < 0 && !is_inv && allow_sequence_prop) {
             CharRange cr_tmp;
+            RESeqPropState st; /* HULL PATCH 0010 */
+            st.sl = cr;
+            st.err = 0;
+            cr_init(&st.pend, s->opaque, lre_realloc);
             cr_init(&cr_tmp, s->opaque, lre_realloc);
-            ret = unicode_sequence_prop(name, seq_prop_cb, cr, &cr_tmp);
+            ret = unicode_sequence_prop(name, seq_prop_cb, &st, &cr_tmp);
             cr_free(&cr_tmp);
-            if (ret == -1) {
+            if (ret != -1 && !st.err && re_pend_flush(&cr->cr, &st.pend))
+                st.err = 1;
+            cr_free(&st.pend);
+            if (ret == -1 || st.err) {
                 re_string_list_free(cr);
                 goto out_of_memory;
             }
@@ -1000,15 +1102,17 @@ static int parse_class_string_disjunction(REParseState *s, REStringList *cr,
 {
     const uint8_t *p;
     DynBuf str;
-    int c;
-    
+    CharRange pend;
+    int c, r;
+
     p = *pp;
     if (*p != '{')
         return re_parse_error(s, "expecting '{' after \\q");
 
     dbuf_init2(&str, s->opaque, lre_realloc);
     re_string_list_init(s, cr);
-    
+    cr_init(&pend, s->opaque, lre_realloc); /* HULL PATCH 0010 */
+
     p++;
     for(;;) {
         str.size = 0;
@@ -1021,13 +1125,25 @@ static int parse_class_string_disjunction(REParseState *s, REStringList *cr,
                 goto fail;
             }
         }
-        if (re_string_add(cr, str.size / 4, (uint32_t *)str.buf)) {
-            re_parse_out_of_memory(s);
+        /* HULL PATCH 0010 (audit 41): a single code point goes to the
+           pending list, merged once below */
+        if (str.size / 4 == 1)
+            r = re_pend_interval(&cr->cr, &pend, ((uint32_t *)str.buf)[0],
+                                 ((uint32_t *)str.buf)[0]);
+        else
+            r = re_string_add(cr, str.size / 4, (uint32_t *)str.buf);
+        if (r) {
+            re_pend_error(s, r);
             goto fail;
         }
         if (*p == '}')
             break;
         p++;
+    }
+    r = re_pend_flush(&cr->cr, &pend);
+    if (r) {
+        re_pend_error(s, r);
+        goto fail;
     }
     if (s->ignore_case) {
         if (re_string_list_canonicalize(s, cr, TRUE))
@@ -1035,10 +1151,12 @@ static int parse_class_string_disjunction(REParseState *s, REStringList *cr,
     }
     p++; /* skip the '}' */
     dbuf_free(&str);
+    cr_free(&pend);
     *pp = p;
     return 0;
  fail:
     dbuf_free(&str);
+    cr_free(&pend);
     re_string_list_free(cr);
     return -1;
 }
@@ -1267,7 +1385,18 @@ static int re_string_cmp_len(const void *a, const void *b, void *arg)
 {
     REString *p1 = *(REString **)a;
     REString *p2 = *(REString **)b;
-    return (p1->len < p2->len) - (p1->len > p2->len);
+    uint32_t i;
+    if (p1->len != p2->len)
+        return (p1->len < p2->len) - (p1->len > p2->len);
+    /* HULL PATCH 0010 (audit 41): strings of one length in code point
+       order. The hash is keyed per runtime now, and the order of the hash
+       table must not reach the bytecode. Distinct strings of one length
+       never match at the same position, so the order changes no result. */
+    for(i = 0; i < p1->len; i++) {
+        if (p1->buf[i] != p2->buf[i])
+            return (p1->buf[i] > p2->buf[i]) - (p1->buf[i] < p2->buf[i]);
+    }
+    return 0;
 }
 
 static void re_emit_char(REParseState *s, int c)
@@ -1390,12 +1519,20 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
     uint32_t c1, c2;
     int ret;
     REStringList cr1_s, *cr1 = &cr1_s;
+    REStringList acc_s, *acc = &acc_s;
+    CharRange pend_s, *pend = &pend_s;
     BOOL invert, is_first;
 
     if (lre_check_stack_overflow(s->opaque, 0))
         return re_parse_error(s, "stack overflow");
 
     re_string_list_init(s, cr);
+    /* HULL PATCH 0010 (audit 41): the members of the union, merged once
+       (re_pend_add / re_pend_flush); and the operands of a '--' chain,
+       subtracted once as their union - A -- B -- C is A -- (B | C) - since
+       subtracting each from the whole class cost O(class) per operand */
+    cr_init(pend, s->opaque, lre_realloc);
+    re_string_list_init(s, acc);
     p = *pp;
     p++;    /* skip '[' */
 
@@ -1404,7 +1541,7 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
         p++;
         invert = TRUE;
     }
-    
+
     /* handle unions */
     is_first = TRUE;
     for(;;) {
@@ -1451,36 +1588,49 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
                     CharRange cr2_s, *cr2 = &cr2_s;
                     cr_init(cr2, s->opaque, lre_realloc);
                     if (cr_add_interval(cr2, c1, c2 + 1) ||
-                        cr_regexp_canonicalize(cr2, s->is_unicode) ||
-                        cr_op1(&cr->cr, cr2->points, cr2->len, CR_OP_UNION)) {
+                        cr_regexp_canonicalize(cr2, s->is_unicode)) {
                         cr_free(cr2);
                         goto memory_error;
                     }
+                    ret = re_pend_add(&cr->cr, pend, cr2->points, cr2->len);
                     cr_free(cr2);
+                    if (ret)
+                        goto pend_error;
                 } else {
-                    if (cr_union_interval(&cr->cr, c1, c2))
-                        goto memory_error;
+                    ret = re_pend_interval(&cr->cr, pend, c1, c2);
+                    if (ret)
+                        goto pend_error;
                 }
                 is_first = FALSE; /* union operation */
             } else {
             class_atom:
                 if (c1 >= CLASS_RANGE_BASE) {
                 class_union:
-                    ret = re_string_list_op(cr, cr1, CR_OP_UNION);
+                    ret = re_pend_add(&cr->cr, pend, cr1->cr.points,
+                                      cr1->cr.len);
+                    if (ret) {
+                        re_string_list_free(cr1);
+                        goto pend_error;
+                    }
+                    ret = re_string_list_union_strings(cr, cr1);
                     re_string_list_free(cr1);
                     if (ret)
                         goto memory_error;
                 } else {
                     if (s->ignore_case)
                         c1 = lre_canonicalize(c1, s->is_unicode);
-                    if (cr_union_interval(&cr->cr, c1, c1))
-                        goto memory_error;
+                    ret = re_pend_interval(&cr->cr, pend, c1, c1);
+                    if (ret)
+                        goto pend_error;
                 }
             }
         }
         if (s->unicode_sets && is_first) {
             if (*p == '&' && p[1] == '&' && p[2] != '&') {
                 /* handle '&&' */
+                ret = re_pend_flush(&cr->cr, pend);
+                if (ret)
+                    goto pend_error;
                 for(;;) {
                     if (*p == ']') {
                         break;
@@ -1491,6 +1641,12 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
                     }
                     if (re_parse_class_set_operand(s, cr1, &p))
                         goto fail;
+                    if (re_class_charge(s->opaque, (size_t)cr->cr.len +
+                                        cr1->cr.len)) {
+                        re_string_list_free(cr1);
+                        ret = -2;
+                        goto pend_error;
+                    }
                     ret = re_string_list_op(cr, cr1, CR_OP_INTER);
                     re_string_list_free(cr1);
                     if (ret)
@@ -1498,6 +1654,9 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
                 }
             } else if (*p == '-' && p[1] == '-') {
                 /* handle '--' */
+                ret = re_pend_flush(&cr->cr, pend);
+                if (ret)
+                    goto pend_error;
                 for(;;) {
                     if (*p == ']') {
                         break;
@@ -1510,17 +1669,38 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
                     }
                     if (re_parse_class_set_operand(s, cr1, &p))
                         goto fail;
-                    ret = re_string_list_op(cr, cr1, CR_OP_SUB);
+                    /* the operand joins the union subtracted below */
+                    ret = re_pend_add(&acc->cr, pend, cr1->cr.points,
+                                      cr1->cr.len);
+                    if (ret) {
+                        re_string_list_free(cr1);
+                        goto pend_error;
+                    }
+                    ret = re_string_list_union_strings(acc, cr1);
                     re_string_list_free(cr1);
                     if (ret)
                         goto memory_error;
                 }
+                ret = re_pend_flush(&acc->cr, pend);
+                if (ret)
+                    goto pend_error;
+                if (re_class_charge(s->opaque, (size_t)cr->cr.len +
+                                    acc->cr.len)) {
+                    ret = -2;
+                    goto pend_error;
+                }
+                ret = re_string_list_op(cr, acc, CR_OP_SUB);
+                if (ret)
+                    goto memory_error;
             }
         }
         is_first = FALSE;
     }
 
     p++;    /* skip ']' */
+    ret = re_pend_flush(&cr->cr, pend);
+    if (ret)
+        goto pend_error;
     *pp = p;
     if (invert) {
         /* XXX: add may_contain_string syntax check to be fully
@@ -1533,10 +1713,17 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
         if (cr_invert(&cr->cr))
             goto memory_error;
     }
+    cr_free(pend);
+    re_string_list_free(acc);
     return 0;
+ pend_error:
+    re_pend_error(s, ret);
+    goto fail;
  memory_error:
     re_parse_out_of_memory(s);
  fail:
+    cr_free(pend);
+    re_string_list_free(acc);
     re_string_list_free(cr);
     return -1;
 }
@@ -2437,43 +2624,81 @@ static int re_parse_term(REParseState *s, BOOL is_backward_dir)
     return re_parse_out_of_memory(s);
 }
 
+/* HULL PATCH 0010 (audit 41): a lookbehind's terms are emitted in reverse
+   order. Upstream moved every term to the front as it was parsed, a move
+   of all the terms before it, so n terms cost O(n^2) in one compile. The
+   start of each term is recorded and the terms reversed once, at the end
+   of the alternative, into the same bytes. */
 static int re_parse_alternative(REParseState *s, BOOL is_backward_dir)
 {
     const uint8_t *p;
     int ret;
-    size_t start, term_start, end, term_size;
+    size_t start, total, i, n, pos, t0, t1;
+    DynBuf terms;
+    uint32_t *tab;
+    uint8_t *tmp;
 
     start = s->byte_code.size;
+    dbuf_init2(&terms, s->opaque, lre_realloc);
     for(;;) {
         p = s->buf_ptr;
         if (p >= s->buf_end)
             break;
         if (*p == '|' || *p == ')')
             break;
-        term_start = s->byte_code.size;
+        if (is_backward_dir &&
+            dbuf_put_u32(&terms, (uint32_t)(s->byte_code.size - start))) {
+            dbuf_free(&terms);
+            return re_parse_out_of_memory(s);
+        }
         ret = re_parse_term(s, is_backward_dir);
-        if (ret)
+        if (ret) {
+            dbuf_free(&terms);
             return ret;
-        if (is_backward_dir) {
-            /* reverse the order of the terms (XXX: inefficient, but
-               speed is not really critical here) */
-            end = s->byte_code.size;
-            term_size = end - term_start;
-            if (dbuf_claim(&s->byte_code, term_size))
-                return -1;
-            memmove(s->byte_code.buf + start + term_size,
-                    s->byte_code.buf + start,
-                    end - start);
-            memcpy(s->byte_code.buf + start, s->byte_code.buf + end,
-                   term_size);
         }
     }
+    n = terms.size / sizeof(uint32_t);
+    if (n > 1 && !dbuf_error(&s->byte_code)) {
+        /* reverse the order of the terms */
+        total = s->byte_code.size - start;
+        if (re_charge(s, total * 2)) {
+            dbuf_free(&terms);
+            return -1;
+        }
+        tmp = lre_realloc(s->opaque, NULL, total);
+        if (!tmp) {
+            dbuf_free(&terms);
+            return re_parse_out_of_memory(s);
+        }
+        tab = (uint32_t *)terms.buf;
+        pos = 0;
+        for(i = n; i-- > 0;) {
+            t0 = tab[i];
+            t1 = (i + 1 < n) ? tab[i + 1] : total;
+            memcpy(tmp + pos, s->byte_code.buf + start + t0, t1 - t0);
+            pos += t1 - t0;
+        }
+        memcpy(s->byte_code.buf + start, tmp, total);
+        lre_realloc(s->opaque, tmp, 0);
+    }
+    dbuf_free(&terms);
     return 0;
 }
 
+/* HULL PATCH 0010 (audit 41): 'A|B|C' compiles to the splits of every
+   alternative after the first, innermost last, ahead of 'A goto B goto C'.
+   Upstream inserted each split at the front as its '|' was parsed, a move
+   of all the bytecode so far, so n alternatives cost O(n^2) in one compile
+   (160k alternatives: 5 s). The start of each alternative is recorded and
+   all the splits inserted with one move once the last one is parsed: the
+   bytecode is the same, byte for byte (the code moved holds only relative
+   offsets, as upstream's repeated moves already required). */
 static int re_parse_disjunction(REParseState *s, BOOL is_backward_dir)
 {
-    int start, len, pos;
+    int start, len, pos, ret;
+    size_t n, k, base;
+    DynBuf alts;
+    const uint32_t *tab;
 
     if (lre_check_stack_overflow(s->opaque, 0))
         return re_parse_error(s, "stack overflow");
@@ -2481,30 +2706,55 @@ static int re_parse_disjunction(REParseState *s, BOOL is_backward_dir)
     start = s->byte_code.size;
     if (re_parse_alternative(s, is_backward_dir))
         return -1;
+    if (*s->buf_ptr != '|')
+        return 0;
+    dbuf_init2(&alts, s->opaque, lre_realloc);
+    ret = -1;
     while (*s->buf_ptr == '|') {
         s->buf_ptr++;
 
-        len = s->byte_code.size - start;
-
-        /* insert a split before the first alternative */
-        if (dbuf_insert(&s->byte_code, start, 5)) {
-            return re_parse_out_of_memory(s);
-        }
-        s->byte_code.buf[start] = REOP_split_next_first;
-        put_u32(s->byte_code.buf + start + 1, len + 5);
-
         pos = re_emit_op_u32(s, REOP_goto, 0);
+        /* where the alternative after this '|' starts */
+        if (dbuf_put_u32(&alts, (uint32_t)(s->byte_code.size - start))) {
+            re_parse_out_of_memory(s);
+            goto done;
+        }
 
         s->group_name_scope++;
-        
+
         if (re_parse_alternative(s, is_backward_dir))
-            return -1;
+            goto done;
 
         /* patch the goto */
+        if (dbuf_error(&s->byte_code)) {
+            re_parse_out_of_memory(s);
+            goto done;
+        }
         len = s->byte_code.size - (pos + 4);
         put_u32(s->byte_code.buf + pos, len);
     }
-    return 0;
+
+    /* insert the splits: split k (k = 1..n, for the k-th '|') sits at
+       start + 5 * (n - k) and jumps to the start of alternative k */
+    n = alts.size / sizeof(uint32_t);
+    if (re_charge(s, (s->byte_code.size - start) + 5 * n))
+        goto done;
+    if (n > (size_t)INT32_MAX / 5 ||
+        dbuf_insert(&s->byte_code, start, (int)(5 * n))) {
+        re_parse_out_of_memory(s);
+        goto done;
+    }
+    tab = (const uint32_t *)alts.buf;
+    for(k = 1; k <= n; k++) {
+        base = start + 5 * (n - k);
+        s->byte_code.buf[base] = REOP_split_next_first;
+        put_u32(s->byte_code.buf + base + 1,
+                (uint32_t)(5 * (k - 1) + tab[k - 1]));
+    }
+    ret = 0;
+ done:
+    dbuf_free(&alts);
+    return ret;
 }
 
 /* Allocate the registers as a stack. The control flow is recursive so

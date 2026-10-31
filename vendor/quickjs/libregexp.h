@@ -65,6 +65,10 @@ int lre_check_timeout(void *opaque);
    fails with the message LRE_INTERRUPTED_MSG */
 int lre_check_work(void *opaque, size_t bytes);
 #define LRE_INTERRUPTED_MSG "interrupted"
+/* HULL PATCH 0010 (audit 41): must be provided by the user. A keyed hash
+   of 'len' code points (the /v class-string set); upstream's fixed
+   multiply-add let a pattern put every string on one chain */
+uint32_t lre_string_hash(void *opaque, const uint32_t *buf, int len);
 void *lre_realloc(void *opaque, void *ptr, size_t size);
 
 #endif /* LIBREGEXP_H */

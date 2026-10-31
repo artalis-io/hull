@@ -233,6 +233,25 @@ release-artifact layout).
   legs of `tests/e2e_postgres.sh` / `tests/e2e_mysql.sh` (a trigger refusing the stored
   response proves the key is left processed).
 
+- **`String.prototype.normalize`, `localeCompare` or a regexp compile could hold the event loop
+  for seconds in one call** (audit 41). Each did quadratic work inside one builtin call, where
+  neither the instruction budget nor the run deadline can stop it. Normalization sorted each run
+  of combining marks with an insertion sort and walked back over the run for every character it
+  composed: a long run with its marks out of order (ordinary text can have one) took 3.7 s at 80k
+  code units, and a 240 KB request body through `localeCompare` held the loop for 8 s. A long run
+  is now counting-sorted by class, which keeps the same stable order, and the starter is tracked
+  instead of searched for. The regexp compiler rebuilt a class's whole range list for every member
+  (a 60k-member class took 7 s), and moved all the bytecode before each `|` (160k alternatives:
+  4.9 s) and each lookbehind term. A class now merges its members once, a `--` chain subtracts
+  its operands' union once, and the splits and the term reversal are done in one move. The
+  bytecode is byte-identical, checked against the old code on 16.5k generated patterns. The `/v`
+  string set is hashed with the runtime's key, and its strings of one length are emitted in code
+  point order, so the bytecode does not depend on that key. The compile work is charged, so a compile that is
+  still large trips the budget uncatchably. The same patch starts each run's interrupt countdown
+  from the same point, so `js_audit40.ws_and_sse_frames_are_charged` no longer fails about 40%
+  of runs on macOS arm64. Covered by the `js_audit41` cases in `test_js` (QuickJS HULL PATCH
+  0010).
+
 - **A MySQL handler that turned autocommit off or ran LOCK TABLES had its session reset
   across its own wait** (audit 40, both runtimes; a regression from audit 39). Audit 39's
   stale-transaction guard resets a session left with autocommit off, LOCK TABLES or an XA

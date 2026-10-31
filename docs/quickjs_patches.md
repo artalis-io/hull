@@ -593,3 +593,120 @@ JSON.parse of 3000 ordinary keys trips a 1M budget uncatchably and, with no
 limit, the run deadline stops one of 60000; ordinary large parses fit the
 default budget), and `lua_audit40.*` in `test_lua.c` (two Lua states order
 string keys differently).
+
+## Patch 0010 - linear normalize and RegExp compilation; the run phase reset
+
+**Files:** `vendor/quickjs/libunicode.c` (`sort_cc`, `unicode_normalize`,
+`cr_union_pending`), `libunicode.h` (`cr_union_pending`), `libregexp.c`
+(`re_string_hash`, `re_pend_add` / `re_pend_interval` / `re_pend_flush` /
+`re_pend_error`, `re_string_list_union_strings`, `seq_prop_cb`,
+`parse_class_string_disjunction`, `re_parse_nested_class`,
+`re_string_cmp_len`, `re_parse_alternative`, `re_parse_disjunction`),
+`libregexp.h` (`lre_string_hash`), `quickjs.c` (`lre_string_hash`,
+`JS_ResetRunPhase`), `quickjs.h` (`JS_ResetRunPhase`)
+**Found by:** audit 41
+**Upstream:** the quadratic algorithms are upstream's; worth sending upstream
+(the run phase reset is Hull-specific).
+
+Each of these was ONE builtin call doing quadratic work. Patch 0005 charges
+work that a step does, and patch 0006's stop flag is seen at steps, so neither
+the budget nor the run watchdog could stop such a call:
+
+- **Canonical reordering** (`sort_cc`): `String.prototype.normalize` (every
+  form but the Latin-1 NFC shortcut) and `localeCompare` (which normalizes
+  both strings) sorted each run of non-starters (combining marks) by class
+  with an insertion sort. A long run whose classes are out of order costs
+  O(n^2): 80k code units took 3.7 s, and a 240 KB request body through
+  `localeCompare` held the event loop for 8 s. A run of up to 32 marks keeps
+  the insertion sort. A longer run is counting-sorted by class (0..254) into a
+  scratch buffer. Both sorts are stable, so the order is exactly the old one.
+- **Canonical composition** (`unicode_normalize`): for every character, the
+  NFC / NFKC pass walked back over the whole run of non-starters before it to
+  find the starter. The run is already in canonical order, so the character is
+  blocked iff the last character output is a non-starter whose class is >=
+  its own. Otherwise the starter is the last class-0 character output, which
+  is now tracked (`last_starter`). If a composition ever yielded a non-starter
+  (Unicode has none), the walk runs once to find the previous starter. The
+  decomposition (`to_nfd_rec`) recurses only as deep as the decomposition
+  tables go, so it is linear.
+- **Class members** (`re_parse_nested_class`, `\q{...}` singles,
+  `seq_prop_cb`): every member was added with `cr_union_interval` ->
+  `cr_op1`, which rebuilt the class's whole range list, so n disjoint members
+  cost O(n^2). A class of 60k members compiled in 7 s. Members now go to a
+  pending interval list. `cr_union_pending` merges it in once with one sort
+  and one union: at `]`, before `&&` / `--`, and early whenever the list
+  outgrows twice the class plus 4096 points, so its size stays a bounded
+  multiple of the class. The canonical range list of a set is unique, so the
+  result is identical. A `--` chain (`A -- B -- C ...`) subtracted each
+  operand from the whole class, O(class) per operand. It is now one
+  subtraction of the operands' union, `A -- (B | C | ...)`, which is the same
+  set for ranges and for strings. An `&&` chain stays as it was: each
+  intersection is bounded by the previous operand.
+- **Alternatives** (`re_parse_disjunction`): every `|` inserted a 5-byte
+  split at the front of the bytecode, a move of everything parsed so far, so
+  n alternatives cost O(n^2). 160k alternatives took 4.9 s. The start of
+  each alternative is now recorded, and all the splits are inserted with one
+  move after the last alternative: split k at `start + 5(n - k)`, jumping
+  `5(k - 1) + (start of alternative k)`. The bytecode is the same byte for
+  byte. The moved code holds only relative offsets, which upstream's repeated
+  moves already required.
+- **Lookbehind terms** (`re_parse_alternative`, backward direction): each
+  term was moved to the front as it was parsed, again O(n^2). The term starts
+  are now recorded and the terms reversed once at the end of the
+  alternative, into the same bytes.
+- **The `/v` class-string set** (`re_string_hash`): the set was hashed with a
+  fixed multiply-add, so a `\q{...}` of strings built to collide shared one
+  chain. It is now `lre_string_hash(opaque, buf, len)`, SipHash under the
+  runtime's patch-0009 key. Because a keyed hash orders the table differently
+  per runtime, `re_string_cmp_len` breaks ties between strings of one length
+  by code point. That keeps the emitted bytecode deterministic. Distinct
+  strings of one length never both match at one position, so the order
+  changes no result.
+
+The compile work is charged through `lre_check_work` (patch 0005), so a
+compile that is large even when linear can still be stopped: each pending
+merge and each class operation charges its points, the split insert charges
+the bytes it moves, and the lookbehind reversal charges twice the bytes it
+copies. Over budget, the compile fails with `LRE_INTERRUPTED_MSG`, which
+`js_compile_regexp` raises as the uncatchable interrupt.
+
+**Run phase reset** (`JS_ResetRunPhase(rt)`): this sets every context's step
+countdown back to `JS_INTERRUPT_COUNTER_INIT` and drops patch 0005's
+deferred work bytes. `hl_js_budget_arm_kind` calls it whenever it re-arms
+the budget. Before this, a run's first poll (weighing `HL_JS_INTERRUPT_WEIGHT`)
+and its first work flush (up to 1024 units) landed wherever the previous run
+had left the counters, so the same code was charged differently from run to
+run (`js_audit40.ws_and_sse_frames_are_charged` failed about 40% of the time
+on a 64-unit margin). The leftover bytes belonged to a run that has already
+ended, and the next run used to be charged for them. The stop flag is still
+read at every step. Nested runs (a `hull:_task` fired inside a `hull test`
+case) also reset the outer run's phase, which loses at most one poll interval
+of the outer run's charge.
+
+**Verification:** the old and new `libregexp.c` / `libunicode.c` were built
+into one harness and run over 16.5k generated patterns: classes in u / ui /
+v / vi with ranges, escapes, `\p{...}`, `\q{...}`, `&&` / `--`,
+alternations, lookbehinds, named groups, and large cases. The emitted
+bytecode was identical, once the old file had the same `re_string_cmp_len`
+tie-break. 200k random sequences normalized identically in all four forms.
+
+**Re-apply on upgrade:** check whether upstream changed `sort_cc`, the
+composition loop, the class parser, `re_parse_disjunction` or
+`re_parse_alternative`. If not, re-apply each rewrite above. Keep the
+`lre_string_hash` hook, the `re_string_cmp_len` tie-break, the charges, and
+`JS_ResetRunPhase` (called from `hl_js_budget_arm_kind`). Then rerun the
+corpus test below: its digest was captured from the unpatched algorithms.
+
+**Guard:** `tests/hull/runtime/js/test_js.c`, `js_audit41.*`:
+`normalize_and_regexp_results_unchanged` (a corpus of normalize /
+localeCompare inputs, including a 3000-mark out-of-order run, and about 300
+patterns against about 50 subjects, digested against the value captured before
+the change), `normalize_is_linear` (a 160k-mark run in all four forms and
+`localeCompare` under the default budget, results checked),
+`large_compiles_are_linear` (60k-member classes in u / ui / v / vi, a 30k-
+operand `--` chain, a 60k-string `\q`, 160k alternatives and an 80k-term
+lookbehind compile and match correctly in well under the default budget),
+`ordinary_use_still_works`, and `large_compiles_are_charged` (400k-member
+classes and alternations trip a small budget, uncatchably).
+`js_audit40.ws_and_sse_frames_are_charged` guards the phase reset: it passed
+50 runs in a row with the reset.

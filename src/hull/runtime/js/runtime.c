@@ -176,6 +176,12 @@ void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
      * next, unrelated run as if a binding had just thrown it. */
     if (js->budget_tripped && js->ctx)
         JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+    /* QuickJS HULL PATCH 0010 (audit 41): the run's first poll and first
+     * work flush come at the same point every time, not wherever the last
+     * run left the step countdown and the deferred work bytes (a poll weighs
+     * HL_JS_INTERRUPT_WEIGHT, a flush up to 1024 units). */
+    if (js->rt)
+        JS_ResetRunPhase(js->rt);
     js->instruction_count = 0;
     js->budget_tripped = 0;
     js->budget_timed_out = 0;
