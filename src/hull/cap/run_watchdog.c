@@ -18,6 +18,7 @@
  */
 
 #include "hull/cap/run_watchdog.h"
+#include "hull/shared/dispatch_meter.h"
 #include "log.h"
 
 #include <errno.h>
@@ -60,6 +61,38 @@ static struct timespec ms_to_ts(uint64_t ms)
     return ts;
 }
 
+/* ── The binding dispatcher's clock (shared/dispatch_meter.h) ─────────── */
+
+_Thread_local uint64_t hl_meter_excluded;
+_Thread_local uint32_t hl_meter_exclude_depth;
+
+uint64_t hl_meter_ticks_units(uint64_t ticks)
+{
+#if defined(__APPLE__)
+    static uint32_t numer, denom;   /* the timebase: ticks * numer / denom ns */
+    uint32_t d = __atomic_load_n(&denom, __ATOMIC_ACQUIRE);
+    uint32_t n = __atomic_load_n(&numer, __ATOMIC_RELAXED);
+    if (d == 0) {
+        mach_timebase_info_data_t tb;
+        if (mach_timebase_info(&tb) != 0 || tb.denom == 0) {
+            tb.numer = 1;
+            tb.denom = 1;
+        }
+        n = tb.numer;
+        d = tb.denom;
+        __atomic_store_n(&numer, n, __ATOMIC_RELAXED);
+        __atomic_store_n(&denom, d, __ATOMIC_RELEASE);
+    }
+    /* ns = ticks * n / d, without overflowing for any realistic interval */
+    uint64_t ns = ticks / d * n + ticks % d * n / d;
+#else
+    uint64_t ns = ticks;
+#endif
+    ns /= HL_METER_SLOWDOWN;
+    return ns / 1000u * HL_WORK_UNITS_PER_US +
+           (ns % 1000u) * HL_WORK_UNITS_PER_US / 1000u;
+}
+
 void hl_run_watchdog_configure(int64_t ms)
 {
     if (ms > (int64_t)HL_RUN_MAX_MS) ms = (int64_t)HL_RUN_MAX_MS;
@@ -81,6 +114,18 @@ static void read_env_once(void)
                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 }
 
+/* The app's manifest defaults (0 = Hull's); atomic. */
+static uint32_t g_app_request_ms;
+static uint32_t g_app_callback_ms;
+
+void hl_run_watchdog_set_app_limits(uint32_t request_ms, uint32_t callback_ms)
+{
+    if (request_ms > HL_RUN_MAX_MS) request_ms = HL_RUN_MAX_MS;
+    if (callback_ms > HL_RUN_MAX_MS) callback_ms = HL_RUN_MAX_MS;
+    __atomic_store_n(&g_app_request_ms, request_ms, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_app_callback_ms, callback_ms, __ATOMIC_RELAXED);
+}
+
 uint32_t hl_run_watchdog_limit_ms(HlRunKind kind)
 {
     int64_t ms = __atomic_load_n(&g_limit_ms, __ATOMIC_RELAXED);
@@ -88,9 +133,22 @@ uint32_t hl_run_watchdog_limit_ms(HlRunKind kind)
         pthread_once(&g_env_once, read_env_once);
         ms = __atomic_load_n(&g_limit_ms, __ATOMIC_RELAXED);
     }
-    if (ms < 0)
-        return kind == HL_RUN_MAIN ? HL_RUN_MAIN_DEFAULT_MS : HL_RUN_DEFAULT_MS;
-    return (uint32_t)ms;
+    if (ms >= 0)
+        return (uint32_t)ms;            /* the operator's, for every run */
+    uint32_t app;
+    switch (kind) {
+    case HL_RUN_MAIN:
+        return HL_RUN_MAIN_DEFAULT_MS;
+    case HL_RUN_HTTP:
+        app = __atomic_load_n(&g_app_request_ms, __ATOMIC_RELAXED);
+        return app ? app : HL_RUN_HTTP_DEFAULT_MS;
+    case HL_RUN_CALLBACK:
+        app = __atomic_load_n(&g_app_callback_ms, __ATOMIC_RELAXED);
+        return app ? app : HL_RUN_CALLBACK_DEFAULT_MS;
+    case HL_RUN_ENTRY:
+    default:
+        return HL_RUN_DEFAULT_MS;
+    }
 }
 
 int hl_run_watchdog_parse_ms(const char *s, int64_t *out)

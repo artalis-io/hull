@@ -542,9 +542,9 @@ static void install_app_timers(lua_State *L)
 {
     lua_getglobal(L, "app");
     if (lua_istable(L, -1)) {
-        lua_pushcfunction(L, lua_app_every);
+        hl_lua_pushcfunction(L, lua_app_every);
         lua_setfield(L, -2, "every");
-        lua_pushcfunction(L, lua_app_daily);
+        hl_lua_pushcfunction(L, lua_app_daily);
         lua_setfield(L, -2, "daily");
     }
     lua_pop(L, 1); /* drop app */
@@ -559,15 +559,15 @@ static void install_app_http_server(lua_State *L)
 {
     lua_getglobal(L, "app");
     if (lua_istable(L, -1)) {
-        lua_pushcfunction(L, lua_app_get);      lua_setfield(L, -2, "get");
-        lua_pushcfunction(L, lua_app_post);     lua_setfield(L, -2, "post");
-        lua_pushcfunction(L, lua_app_put);      lua_setfield(L, -2, "put");
-        lua_pushcfunction(L, lua_app_del);      lua_setfield(L, -2, "delete");
-        lua_pushcfunction(L, lua_app_del);      lua_setfield(L, -2, "del");
-        lua_pushcfunction(L, lua_app_patch);    lua_setfield(L, -2, "patch");
-        lua_pushcfunction(L, lua_app_options);  lua_setfield(L, -2, "options");
-        lua_pushcfunction(L, lua_app_use);      lua_setfield(L, -2, "use");
-        lua_pushcfunction(L, lua_app_use_post); lua_setfield(L, -2, "use_post");
+        hl_lua_pushcfunction(L, lua_app_get);      lua_setfield(L, -2, "get");
+        hl_lua_pushcfunction(L, lua_app_post);     lua_setfield(L, -2, "post");
+        hl_lua_pushcfunction(L, lua_app_put);      lua_setfield(L, -2, "put");
+        hl_lua_pushcfunction(L, lua_app_del);      lua_setfield(L, -2, "delete");
+        hl_lua_pushcfunction(L, lua_app_del);      lua_setfield(L, -2, "del");
+        hl_lua_pushcfunction(L, lua_app_patch);    lua_setfield(L, -2, "patch");
+        hl_lua_pushcfunction(L, lua_app_options);  lua_setfield(L, -2, "options");
+        hl_lua_pushcfunction(L, lua_app_use);      lua_setfield(L, -2, "use");
+        hl_lua_pushcfunction(L, lua_app_use_post); lua_setfield(L, -2, "use_post");
     }
     lua_pop(L, 1);
 
@@ -581,7 +581,7 @@ static void install_app_sse(lua_State *L)
 {
     lua_getglobal(L, "app");
     if (lua_istable(L, -1)) {
-        lua_pushcfunction(L, lua_app_sse);
+        hl_lua_pushcfunction(L, lua_app_sse);
         lua_setfield(L, -2, "sse");
     }
     lua_pop(L, 1);
@@ -594,7 +594,7 @@ static void install_app_ws_server(lua_State *L)
 {
     lua_getglobal(L, "app");
     if (lua_istable(L, -1)) {
-        lua_pushcfunction(L, lua_app_ws);
+        hl_lua_pushcfunction(L, lua_app_ws);
         lua_setfield(L, -2, "ws");
     }
     lua_pop(L, 1);
@@ -756,7 +756,7 @@ static const luaL_Reg app_funcs[] = {
 
 int luaopen_hull_app(lua_State *L)
 {
-    luaL_newlib(L, app_funcs);
+    hl_lua_newlib(L, app_funcs);
     return 1;
 }
 

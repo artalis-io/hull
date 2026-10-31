@@ -421,7 +421,7 @@ int hl_js_init_ws_server_module(JSContext *ctx, HlJS *js)
     JS_NewClassID(&js_ws_conn_class_id);
     JS_NewClass(JS_GetRuntime(ctx), js_ws_conn_class_id, &js_ws_conn_class);
     JSValue proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, proto, js_ws_conn_proto_funcs,
+    hl_js_set_function_list(ctx, proto, js_ws_conn_proto_funcs,
                                sizeof(js_ws_conn_proto_funcs) /
                                sizeof(js_ws_conn_proto_funcs[0]));
     hl_js_set_class_proto_frozen(ctx, js_ws_conn_class_id, proto);

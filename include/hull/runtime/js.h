@@ -84,6 +84,12 @@ typedef struct HlJS {
     int64_t         instruction_count;
     int64_t         max_instructions;
     int             budget_tripped;
+    /* HlRunKind of the run armed last: a continuation keeps it, so the
+     * resume gets the same deadline (cap/run_watchdog.h). */
+    int             run_kind;
+    /* Every unit ever charged to this VM (never re-armed): the binding
+     * dispatcher's meter (shared/dispatch_meter.h, runtime.c). */
+    uint64_t        meter_charged;
     /* The run's wall-clock deadline (cap/run_watchdog.h), armed with the
      * budget. budget_timed_out: the trip was that deadline, not the count. */
     HlRunWatch      run_watch;
@@ -339,6 +345,8 @@ void hl_js_gc(HlJS *js);
  * Call before each request dispatch.
  */
 void hl_js_reset_request(HlJS *js);
+/* As hl_js_reset_request, for a run of @p kind (its deadline). */
+void hl_js_reset_request_as(HlJS *js, HlRunKind kind);
 
 /*
  * Re-arm the instruction budget for a new run: count zero, trip cleared (and
@@ -350,6 +358,8 @@ void hl_js_reset_request(HlJS *js);
  * HL_RUN_MAIN).
  */
 void hl_js_budget_arm(HlJS *js);
+/* As hl_js_budget_arm, for a run of @p kind (its deadline). */
+void hl_js_budget_arm_as(HlJS *js, HlRunKind kind);
 void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind);
 
 /* Audit 35: the end of every JS entry (the list is at the definition in

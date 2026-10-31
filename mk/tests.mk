@@ -1501,6 +1501,14 @@ e2e-refusal-codes: $(BUILDDIR)/hull
 e2e-timers: $(BUILDDIR)/hull
 	sh tests/e2e_timers.sh
 
+# Per-request wall budget (audit convergence §6.2): a spinning handler gets
+# 503 at its deadline (10 s default, manifest limits.request_ms, --max-run-ms),
+# /ping is served meanwhile, a parked handler is not charged its wait, and a
+# spinning timer is stopped by the callback deadline.
+.PHONY: e2e-request-deadline
+e2e-request-deadline: $(BUILDDIR)/hull
+	sh tests/e2e_request_deadline.sh
+
 # Shutdown with work in flight (audit 14 G1 / audit 15): SIGTERM over HTTP and
 # HTTPS with a parked handler, a detached fetch and an open WebSocket, and an
 # app.main that leaves unawaited work - each must exit 0.

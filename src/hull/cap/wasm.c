@@ -10,6 +10,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cap/wasm_aot_stamp.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
@@ -1522,10 +1523,14 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     /* The watch covers the call itself: bound to the instance only while
      * guest code runs, so the watchdog can never touch the instance after it
      * goes back to the pool or is destroyed. */
+    /* Guest time is metered by gas and timeout_ms, not the binding
+     * dispatcher's clock (shared/dispatch_meter.h). */
+    uint64_t hl_mx = hl_meter_exclude_begin();
     hl_wasm_watch_bind(watch, inst);
     int call_ok = wasm_runtime_call_wasm(exec_env, process_fn,
                                          (uint32_t)argc, argv);
     hl_wasm_watch_bind(watch, NULL);
+    hl_meter_exclude_end(hl_mx);
     if (!call_ok) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (wasm_is_gas_exception(exception)) {
@@ -2129,10 +2134,14 @@ static int instance_call_buf_run(HlWasmInstance *pi,
         argc_call = 4;
     }
 
+    /* Guest time is metered by gas and timeout_ms, not the binding
+     * dispatcher's clock (shared/dispatch_meter.h). */
+    uint64_t hl_mx = hl_meter_exclude_begin();
     hl_wasm_watch_bind(watch, inst);
     int call_ok = wasm_runtime_call_wasm(exec_env, process_fn,
                                          (uint32_t)argc_call, argv);
     hl_wasm_watch_bind(watch, NULL);
+    hl_meter_exclude_end(hl_mx);
     if (!call_ok) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (wasm_is_gas_exception(exception)) {

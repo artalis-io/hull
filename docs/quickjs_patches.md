@@ -710,3 +710,55 @@ lookbehind compile and match correctly in well under the default budget),
 classes and alternations trip a small budget, uncatchably).
 `js_audit40.ws_and_sse_frames_are_charged` guards the phase reset: it passed
 50 runs in a row with the reset.
+
+## Patch 0011 - embedder call hooks for the binding dispatcher
+
+**Files:** `vendor/quickjs/quickjs.c` (`JSObject.u.cfunc.embedder`,
+`JSCFunctionDataRecord.embedder`, `JSRuntime.call_enter` / `call_leave` /
+`call_opaque`, `js_new_cfunction2` / `js_new_cfunction_data`,
+`JS_NewCFunction2` / `JS_NewCFunctionData`, `js_call_c_function`,
+`js_c_function_data_call`, `JS_SetEmbedderCallHooks`, `JS_GetPendingCharge`),
+`quickjs.h` (`JSEmbedderCall`, `JSEmbedderCallEnter` / `Leave`,
+`JS_SetEmbedderCallHooks`, `JS_GetPendingCharge`, `JS_SetEmbedderFunction`)
+**Found by:** audit convergence phase 2 (§6.1, measured-time charging)
+**Upstream:** Hull-specific.
+
+Hull's backstop for a binding with a missing or too-small floor is to charge
+its wall time: every call of a C function Hull made goes through a pair of
+hooks (`runtime/js/runtime.c`, `js_call_enter` / `js_call_leave`; the
+`worker.dispatch` VM has its own in `worker.c`). `enter` refuses the call
+once the run's budget or deadline is spent; `leave` charges the call's time
+past what was charged meanwhile and, when that trips the run, replaces the
+result with the uncatchable trip.
+
+The functions are told apart at creation: the public `JS_NewCFunction2`
+(and so `JS_NewCFunction` / `JS_NewCFunctionMagic`) and `JS_NewCFunctionData`
+set an `embedder` bit; QuickJS's own call sites - its intrinsics, function
+lists it instantiates (`JS_SetPropertyFunctionList`, lazily or not), promise
+resolving functions, `%ThrowTypeError%` - use the new internal
+`js_new_cfunction2` / `js_new_cfunction_data`, which do not. So builtins
+(already charged by patch 0005) pay nothing, and a Hull function list goes
+through `hl_js_set_function_list`, which makes each entry with
+`JS_NewCFunction2`.
+
+Hull's own plumbing that QuickJS calls - the harden override accessors, the
+promise callbacks that watch app.main - is unmarked with
+`JS_SetEmbedderFunction(fn, 0)`, so a tripped run's error text and its
+ending are still read.
+
+The hooks run inside `js_call_c_function` after the function's stack frame
+is pushed, so stack inspection (`JS_GetScriptOrModuleName(ctx, 1)`, which the
+`_hull_*` namespace check relies on) sees exactly what it saw before - a
+`JS_NewCFunctionData` trampoline would have pushed no frame and shifted every
+level. `JS_GetPendingCharge` returns the steps since the context's last poll
+(one unit each, as the interrupt handler charges them) plus the deferred work
+charge, so the embedder reads a continuous charge count.
+
+Cost: one byte test per C-function call, plus the hooks for Hull's own
+functions (two clock reads; within noise of a QuickJS call on Apple
+M-series). A runtime with no hooks set behaves as upstream.
+
+**Guard:** `tests/hull/runtime/js/test_js.c`, `js_dispatcher.*` (an uncharged
+slow function trips within one call; explicit charges are not counted twice;
+a parked `await hull.sleep` is not charged; a function QuickJS instantiated
+itself is not measured; overhead bound).

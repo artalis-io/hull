@@ -682,8 +682,9 @@ static void mp_js_pump_impl(HlAsyncCont *self, void *driver)
     mp_cont_set_parked(jc, 0);
 
     /* An entry point: this resume's run gets a budget of its own - but it
-     * is the run that parked, and keeps that run's tag (audit 30). */
-    hl_js_budget_arm(js);
+     * is the run that parked, and keeps that run's tag (audit 30). An HTTP
+     * handler's deadline: the request is being read. */
+    hl_js_budget_arm_kind(js, HL_RUN_HTTP);
     hl_js_run_tag_enter(js, jc->link.run_tag);
     js->active_timer = NULL;
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */

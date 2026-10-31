@@ -66,6 +66,6 @@ static const luaL_Reg time_funcs[] = {
 
 int luaopen_hull_time(lua_State *L)
 {
-    luaL_newlib(L, time_funcs);
+    hl_lua_newlib(L, time_funcs);
     return 1;
 }

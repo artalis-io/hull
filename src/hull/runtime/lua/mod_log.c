@@ -93,6 +93,6 @@ static const luaL_Reg log_funcs[] = {
 
 int luaopen_hull_log(lua_State *L)
 {
-    luaL_newlib(L, log_funcs);
+    hl_lua_newlib(L, log_funcs);
     return 1;
 }

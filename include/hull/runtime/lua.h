@@ -38,13 +38,51 @@ typedef struct HlAsyncCtx HlAsyncCtx;
 
 /* The instruction budget of one VM, charged by every thread's count hook
  * and re-armed at each entry point (runtime/lua/budget.c). */
+/* One binding call in progress under the dispatcher (budget.c): the thread
+ * it runs on, that thread's innermost error handler when it started (an
+ * error thrown to that handler unwinds it), and the clock, excluded-time
+ * and charge readings it started with. */
+typedef struct HlLuaMeterFrame {
+    lua_State  *L;
+    const void *ej;
+    uint64_t    t0;     /* hl_meter_ticks() */
+    uint64_t    x0;     /* hl_meter_excluded */
+    uint64_t    m0;     /* charged + lua_hlpending(L) */
+} HlLuaMeterFrame;
+
+/* Binding calls measured at once (nested calls past it run unmeasured). */
+#define HL_LUA_METER_DEPTH 32
+
 typedef struct HlLuaBudget {
     int64_t limit;      /* 0 = none */
     int64_t used;
     int     tripped;    /* sticky until re-armed */
     int     timed_out;  /* the trip was the run's wall-clock deadline */
     HlRunWatch *watch;  /* the VM's run watchdog (cap/run_watchdog.h) */
+    /* The binding dispatcher (shared/dispatch_meter.h): every unit ever
+     * charged (never re-armed, so a nested run cannot make it go back), and
+     * the binding calls in progress. */
+    uint64_t        charged;
+    int             meter_off;   /* the tool VM: bindings registered plain */
+    int             nframes;
+    HlLuaMeterFrame frames[HL_LUA_METER_DEPTH];
 } HlLuaBudget;
+
+/* Register binding functions through the dispatcher (budget.c): as
+ * luaL_setfuncs / lua_pushcclosure, but each function is a closure that
+ * measures its call and charges the run for it. On a VM with no budget
+ * (the tool VM before install) they are plain registrations. __gc and
+ * __close entries are never wrapped: finalizers run at collection, in
+ * whatever run that is. At most 2 upvalues are wrapped. */
+struct luaL_Reg;
+void hl_lua_setfuncs(lua_State *L, const struct luaL_Reg *l, int nup);
+void hl_lua_pushcclosure(lua_State *L, int (*fn)(lua_State *L), int n);
+#define hl_lua_pushcfunction(L, f) hl_lua_pushcclosure((L), (f), 0)
+/* 1 when the value at @p idx is a dispatched binding (tests, lint). */
+int hl_lua_is_dispatched(lua_State *L, int idx);
+#define hl_lua_newlib(L, l)                                                  \
+    (lua_createtable((L), 0, (int)(sizeof(l) / sizeof((l)[0]) - 1)),         \
+     hl_lua_setfuncs((L), (l), 0))
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -94,6 +132,9 @@ typedef struct HlLua {
     size_t          async_result_bytes;
     int64_t         max_instructions;  /* 0 = no limit */
     HlLuaBudget     budget;            /* shared by all threads of L */
+    int             run_kind;          /* HlRunKind of the run armed last:
+                                          a continuation keeps it, so the
+                                          resume gets the same deadline */
     HlRunWatch      run_watch;         /* the run's wall-clock deadline */
     int             run_watch_on;      /* app VMs only (not the tool VM) */
 

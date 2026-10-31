@@ -203,6 +203,6 @@ static const luaL_Reg template_funcs[] = {
 
 int luaopen_hull_template_bridge(lua_State *L)
 {
-    luaL_newlib(L, template_funcs);
+    hl_lua_newlib(L, template_funcs);
     return 1;
 }

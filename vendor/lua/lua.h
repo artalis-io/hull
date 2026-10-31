@@ -484,6 +484,14 @@ LUA_API void (lua_hlsetstop) (lua_State *L, int *flag);
    (same thread, never raising); while it is non-zero, ephemeron
    convergence finishes conservatively at once */
 LUA_API void (lua_hlsettripped) (lua_State *L, int *flag);
+/* HULL PATCH 0007 (docs/lua_patches.md): a hook told before every throw (an
+   error, or a yield from a C function) unwinds C frames; the innermost
+   error handler of a thread (an opaque identity); and the work a thread did
+   that its count hook has not reported yet */
+typedef void (*lua_HLThrow) (lua_State *L, int status, void *ud);
+LUA_API void (lua_hlsetthrowhook) (lua_State *L, lua_HLThrow f, void *ud);
+LUA_API const void *(lua_hlerrorjmp) (lua_State *L);
+LUA_API size_t (lua_hlpending) (lua_State *L);
 
 LUA_API int (lua_setcstacklimit) (lua_State *L, unsigned int limit);
 

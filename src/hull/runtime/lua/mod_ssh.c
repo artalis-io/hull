@@ -755,11 +755,11 @@ int luaopen_hull_ssh_stream(lua_State *L)
      * freed while a coroutine is parked on it. */
     lua_pushliteral(L, "locked");
     lua_setfield(L, -2, "__metatable");
-    luaL_newlib(L, ssh_stream_methods);
+    hl_lua_newlib(L, ssh_stream_methods);
     lua_setfield(L, -2, "__index");
     lua_pop(L, 1);
 
-    luaL_newlib(L, ssh_module);
+    hl_lua_newlib(L, ssh_module);
     return 1;
 }
 

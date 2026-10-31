@@ -9,6 +9,7 @@
  */
 
 #include "hull/shared/tls_client.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cacert.h"
 
 #include <keel/allocator.h>
@@ -134,7 +135,9 @@ static int tls_handshake_loop(KlTls *tls, int fd, int timeout_ms,
         }
         short events = (r == KL_TLS_WANT_READ) ? POLLIN : POLLOUT;
         struct pollfd pfd = { .fd = fd, .events = events, .revents = 0 };
+        uint64_t hl_mx = hl_meter_exclude_begin();
         int pr = poll(&pfd, 1, wait);
+        hl_meter_exclude_end(hl_mx);
         if (pr < 0) {
             if (errno == EINTR) continue;               /* retry; the clock decides */
             rc = -1; break;

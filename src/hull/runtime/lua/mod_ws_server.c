@@ -262,7 +262,7 @@ void hl_lua_ws_register_conn_mt(lua_State *L)
     luaL_newmetatable(L, HL_WS_CONN_MT);
 
     /* Store methods in the metatable itself (accessed via __index fallback) */
-    luaL_setfuncs(L, ws_conn_methods, 0);
+    hl_lua_setfuncs(L, ws_conn_methods, 0);
 
     /* __index: first check "data" key, then methods */
     lua_pushcfunction(L, lua_ws_conn_index);
@@ -339,6 +339,6 @@ static const luaL_Reg ws_server_funcs[] = {
 int luaopen_hull_ws_server(lua_State *L)
 {
     hl_lua_ws_register_conn_mt(L);
-    luaL_newlib(L, ws_server_funcs);
+    hl_lua_newlib(L, ws_server_funcs);
     return 1;
 }

@@ -427,7 +427,7 @@ void hl_lua_test_register(lua_State *L, KlHttpRouter *router, HlLua *lua)
     lua_setfield(L, LUA_REGISTRYINDEX, TEST_CASES_KEY);
 
     /* Create the test table with methods */
-    luaL_newlib(L, test_methods);
+    hl_lua_newlib(L, test_methods);
 
     /* Create metatable with __call for test("desc", fn) */
     lua_newtable(L); /* metatable */

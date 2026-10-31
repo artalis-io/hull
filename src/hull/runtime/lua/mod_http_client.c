@@ -723,10 +723,10 @@ static const luaL_Reg http_funcs[] = {
 
 int luaopen_hull_http(lua_State *L)
 {
-    luaL_newlib(L, http_funcs);
+    hl_lua_newlib(L, http_funcs);
 
     /* http.async sub-table */
-    luaL_newlib(L, http_async_funcs);
+    hl_lua_newlib(L, http_async_funcs);
     lua_setfield(L, -2, "async");
 
     return 1;

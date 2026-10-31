@@ -980,7 +980,7 @@ static const luaL_Reg sha256_hasher_methods[] = {
 static void register_sha256_hasher_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_SHA256_HASHER_MT);
-    luaL_newlib(L, sha256_hasher_methods);   /* methods apart from the mt */
+    hl_lua_newlib(L, sha256_hasher_methods);   /* methods apart from the mt */
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, lua_sha256_hasher_gc);
     lua_setfield(L, -2, "__gc");
@@ -1124,9 +1124,9 @@ static void register_crypto_key_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_CRYPTO_KEY_MT);
     lua_newtable(L);
-    luaL_setfuncs(L, crypto_key_methods, 0);
+    hl_lua_setfuncs(L, crypto_key_methods, 0);
     lua_setfield(L, -2, "__index");
-    lua_pushcfunction(L, lua_crypto_key_destroy);
+    hl_lua_pushcfunction(L, lua_crypto_key_destroy);
     lua_setfield(L, -2, "__gc");
     lua_pushcfunction(L, lua_crypto_key_tostring);
     lua_setfield(L, -2, "__tostring");
@@ -1567,7 +1567,7 @@ int luaopen_hull_crypto(lua_State *L)
 {
     register_sha256_hasher_mt(L);
     register_crypto_key_mt(L);
-    luaL_newlib(L, crypto_funcs);
+    hl_lua_newlib(L, crypto_funcs);
 
     /* Exported so a caller that reads a work factor out of a FILE can refuse
      * it with a message naming that file, instead of letting the derivation

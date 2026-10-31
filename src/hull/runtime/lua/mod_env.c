@@ -51,6 +51,6 @@ static const luaL_Reg env_funcs[] = {
 
 int luaopen_hull_env(lua_State *L)
 {
-    luaL_newlib(L, env_funcs);
+    hl_lua_newlib(L, env_funcs);
     return 1;
 }

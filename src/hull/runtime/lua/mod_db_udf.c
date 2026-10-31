@@ -506,7 +506,7 @@ void hl_lua_db_attach_udf(lua_State *L, HlDbHandle *h)
     lua_newtable(L);
     for (const luaL_Reg *m = db_udf_funcs; m->name; m++) {
         lua_pushlightuserdata(L, h);
-        lua_pushcclosure(L, m->func, 1);
+        hl_lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }
     lua_setfield(L, -2, "udf");

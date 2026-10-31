@@ -113,6 +113,11 @@ void luaD_seterrorobj (lua_State *L, int errcode, StkId oldtop) {
 
 
 l_noret luaD_throw (lua_State *L, int errcode) {
+  /* HULL PATCH 0007 (docs/lua_patches.md): tell the embedder a throw (an
+     error or a yield from a C function) is about to unwind C frames, before
+     'errorJmp' changes. The hook may not raise, allocate or run Lua code. */
+  if (G(L)->hlthrow)
+    G(L)->hlthrow(L, errcode, G(L)->hlthrowud);
   if (L->errorJmp) {  /* thread has an error handler? */
     L->errorJmp->status = errcode;  /* set status */
     LUAI_THROW(L, L->errorJmp);  /* jump to it */

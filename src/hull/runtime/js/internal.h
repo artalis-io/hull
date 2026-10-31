@@ -323,6 +323,14 @@ int hl_js_init_task_module(JSContext *ctx, HlJS *js);
 void hl_js_tasks_free(HlJS *js);
 void hl_js_sleep_cancel_pending(HlJS *js);
 
+/* As JS_SetPropertyFunctionList, but every JS_CFUNC_DEF / JS_CFUNC_MAGIC_DEF
+ * entry is made with JS_NewCFunction2, so its calls go through the binding
+ * dispatcher (QuickJS HULL PATCH 0011: QuickJS instantiates a function list
+ * with its own, unmarked constructor). Other entries are defined as
+ * JS_SetPropertyFunctionList defines them. 0, or -1 with an exception. */
+int hl_js_set_function_list(JSContext *ctx, JSValueConst obj,
+                            const JSCFunctionListEntry *tab, int len);
+
 /* ── Instruction budget (runtime.c) ─────────────────────────────────── */
 
 /* (hl_js_budget_arm, which re-arms it at each entry point, is in js.h.) */

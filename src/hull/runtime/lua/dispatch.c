@@ -121,8 +121,8 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->active_co = co;
     lua->active_thread_ref = thread_ref;
 
-    /* Arm the instruction budget for this run */
-    HL_LUA_ARM(lua, co);
+    /* Arm the instruction budget for this run (an HTTP handler's deadline) */
+    HL_LUA_ARM_KIND(lua, co, HL_RUN_HTTP);
 
     /* A continuation created while the handler runs captures this, so the
      * life ends when the handler finally completes, or is cancelled. */
@@ -322,7 +322,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     hl_db_registry_guard_stale_txns(lua->base.db_registry);
 
     /* Arm the instruction budget for this middleware call */
-    HL_LUA_ARM(lua, lua->L);
+    HL_LUA_ARM_KIND(lua, lua->L, HL_RUN_HTTP);
 
     /* Reset scratch arena for this middleware call */
     sh_arena_reset(lua->scratch);

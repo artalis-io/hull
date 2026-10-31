@@ -151,7 +151,7 @@ static void hl_lua_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
     lua->active_thread_ref = thread_ref;
 
     /* Arm the instruction budget for this run */
-    HL_LUA_ARM(lua, co);
+    HL_LUA_ARM_KIND(lua, co, HL_RUN_HTTP);
 
     lua->active_on_complete     = hl_lua_req_life_end_cb;
     lua->active_on_complete_ctx = life;

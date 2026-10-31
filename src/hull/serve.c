@@ -1608,6 +1608,9 @@ static int hl_serve_wire_caps(HlServerState *s)
             log_error("[hull:c] seal arena init failed (mmap)");
             return -1;
         }
+        /* The app's run deadlines (cap/run_watchdog.h, manifest limits). */
+        hl_run_watchdog_set_app_limits(s->manifest.limits_request_ms,
+                                       s->manifest.limits_callback_ms);
         HlManifest sealed;
         if (hl_manifest_seal(&sealed, &s->manifest, &s->seal_arena) != 0) {
             log_error("[hull:c] manifest seal failed (arena OOM?)");

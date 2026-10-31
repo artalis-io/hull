@@ -332,7 +332,7 @@ static void ensure_response_metatable(lua_State *L)
 {
     if (luaL_newmetatable(L, HL_RESPONSE_MT)) {
         /* First time - set up metatable */
-        luaL_newlib(L, response_methods);
+        hl_lua_newlib(L, response_methods);
         lua_setfield(L, -2, "__index");
         lua_pushcfunction(L, lua_res_gc);
         lua_setfield(L, -2, "__gc");
@@ -373,7 +373,15 @@ void hl_lua_http_error_response(struct HlLua *lua, struct KlHttpResponse *res)
     /* Whatever the handler set is dropped: its Set-Cookie / Location, a
      * second Content-Type (audit 10). The headers earlier middleware set
      * stay (audit 11). */
-    if (lua)
+    /* A run stopped by its deadline (cap/run_watchdog.h, audit convergence
+     * §6.2) is answered 503 naming the limit: the server gave the request
+     * its time and it was not enough, which is not a bug in the request. */
+    static const char limit_body[] =
+        "Service Unavailable: the request exceeded its time limit";
+    if (lua && lua->budget.tripped && lua->budget.timed_out)
+        hl_res_base_error_reset(&lua->res_bases, res, 503, limit_body,
+                                sizeof limit_body - 1);
+    else if (lua)
         hl_res_base_error_reset(&lua->res_bases, res, 500,
                                 "Internal Server Error", 21);
     else

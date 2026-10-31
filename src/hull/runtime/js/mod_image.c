@@ -547,7 +547,7 @@ int hl_js_init_image_module(JSContext *ctx, HlJS *js)
     JS_NewClass(JS_GetRuntime(ctx), js_image_class_id, &js_image_class);
 
     JSValue proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, proto, js_image_proto,
+    hl_js_set_function_list(ctx, proto, js_image_proto,
                                sizeof(js_image_proto) / sizeof(js_image_proto[0]));
     hl_js_set_class_proto_frozen(ctx, js_image_class_id, proto);
 

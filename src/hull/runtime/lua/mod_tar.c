@@ -513,6 +513,6 @@ static const luaL_Reg tar_funcs[] = {
 
 int luaopen_hull_tar(lua_State *L)
 {
-    luaL_newlib(L, tar_funcs);
+    hl_lua_newlib(L, tar_funcs);
     return 1;
 }

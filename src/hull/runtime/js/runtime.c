@@ -50,6 +50,7 @@
 #include "hull/vfs.h"
 #include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
 #include "hull/shared/work_charge.h"   /* hl_work_bulk_units (audit 39) */
+#include "hull/shared/dispatch_meter.h" /* the binding dispatcher */
 #include "hull/cap/crypto.h"           /* hl_cap_crypto_random (audit 40) */
 #include "hull/utils/secure_zero.h"    /* hl_secure_zero */
 
@@ -80,6 +81,7 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
         return 1;
     }
     js->instruction_count += HL_JS_INTERRUPT_WEIGHT;
+    js->meter_charged += HL_JS_INTERRUPT_WEIGHT;
     if (js->max_instructions > 0 &&
         js->instruction_count > js->max_instructions) {
         js->budget_tripped = 1;
@@ -97,6 +99,7 @@ static int js_budget_add(HlJS *js, uint64_t units)
         js->budget_timed_out = 1;
     }
     if (!js->budget_tripped) {
+        js->meter_charged += units;
         uint64_t room = (uint64_t)(INT64_MAX - js->instruction_count);
         js->instruction_count = units > room
             ? INT64_MAX : js->instruction_count + (int64_t)units;
@@ -132,7 +135,12 @@ static int js_db_budget_charge(void *ud, int64_t units)
 
 void hl_js_budget_arm(HlJS *js)
 {
-    hl_js_budget_arm_kind(js, HL_RUN_ENTRY);
+    hl_js_budget_arm_as(js, HL_RUN_ENTRY);
+}
+
+void hl_js_budget_arm_as(HlJS *js, HlRunKind kind)
+{
+    hl_js_budget_arm_kind(js, kind);
     hl_js_run_tag_new(js);   /* every entry arms: a run of its own (audit 30) */
 }
 
@@ -167,6 +175,7 @@ void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
     if (!js) return;
     /* The run's wall-clock deadline, its flag cleared before any of the
      * run's code (cap/run_watchdog.h). */
+    js->run_kind = (int)kind;
     hl_run_watch_arm(&js->run_watch, hl_run_watchdog_limit_ms(kind));
 #ifdef HL_ENABLE_DB
     (void)hl_db_budget_swap(js_db_budget_charge, js);
@@ -195,6 +204,84 @@ JSValue hl_js_budget_throw(JSContext *ctx)
     JS_ThrowInternalError(ctx, "interrupted (%s)", hl_js_trip_reason(js));
     JS_SetUncatchableException(ctx, 1);
     return JS_EXCEPTION;
+}
+
+/* ── The binding dispatcher (shared/dispatch_meter.h) ─────────────────
+ *
+ * QuickJS HULL PATCH 0011 calls these around every call of a C function
+ * Hull made (JS_NewCFunction*, JS_NewCFunctionData; QuickJS's own builtins
+ * never). enter refuses a call once the run is over - its budget or its
+ * deadline - with the uncatchable trip, and reads the clock, the thread's
+ * excluded time and the run's charge meter (every unit charged so far plus
+ * the steps and deferred work not yet reported). leave charges the call's
+ * wall time past what was charged meanwhile, and when that trips the run it
+ * replaces the result with the trip: what the binding did stands, the run
+ * ends. A JS binding never blocks across a wait: an op that waits returns a
+ * promise at once, so the wait is never inside the call. */
+
+static uint64_t js_meter_reading(HlJS *js, JSContext *ctx)
+{
+    return js->meter_charged + JS_GetPendingCharge(ctx);
+}
+
+static int js_call_enter(JSContext *ctx, void *opaque, JSEmbedderCall *call)
+{
+    HlJS *js = (HlJS *)opaque;
+    if (!js->budget_tripped && hl_run_watch_stopped(&js->run_watch)) {
+        js->budget_tripped = 1;
+        js->budget_timed_out = 1;
+    }
+    if (js->budget_tripped) {
+        hl_js_budget_throw(ctx);
+        return -1;
+    }
+    call->w[3] = js->max_instructions > 0;
+    if (call->w[3]) {
+        call->w[1] = hl_meter_excluded;
+        call->w[2] = js_meter_reading(js, ctx);
+        call->w[0] = hl_meter_ticks();
+    }
+    return 0;
+}
+
+static JSValue js_call_leave(JSContext *ctx, void *opaque,
+                             JSEmbedderCall *call, JSValue ret)
+{
+    HlJS *js = (HlJS *)opaque;
+    if (!call->w[3] || js->budget_tripped)
+        return ret;
+    int64_t charged = (int64_t)(js_meter_reading(js, ctx) - call->w[2]);
+    uint64_t owed = hl_meter_owed(call->w[0], hl_meter_ticks(), call->w[1],
+                                  hl_meter_excluded, charged);
+    if (owed == 0 || !js_budget_add(js, owed))
+        return ret;
+    if (JS_IsException(ret))
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    else
+        JS_FreeValue(ctx, ret);
+    return hl_js_budget_throw(ctx);
+}
+
+int hl_js_set_function_list(JSContext *ctx, JSValueConst obj,
+                            const JSCFunctionListEntry *tab, int len)
+{
+    for (int i = 0; i < len; i++) {
+        const JSCFunctionListEntry *e = &tab[i];
+        if (e->def_type != JS_DEF_CFUNC) {
+            if (JS_SetPropertyFunctionList(ctx, obj, e, 1) < 0)
+                return -1;
+            continue;
+        }
+        JSValue fn = JS_NewCFunction2(ctx, e->u.func.cfunc.generic, e->name,
+                                      e->u.func.length, e->u.func.cproto,
+                                      e->magic);
+        if (JS_IsException(fn))
+            return -1;
+        if (JS_DefinePropertyValueStr(ctx, obj, e->name, fn,
+                                      e->prop_flags) < 0)
+            return -1;
+    }
+    return 0;
 }
 
 int hl_js_budget_charge(JSContext *ctx, uint64_t units)
@@ -1070,6 +1157,8 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     JS_SetWorkHandler(js->rt, hl_js_work_handler, js);
     /* QuickJS HULL PATCH 0006: the run watchdog's flag (cap/run_watchdog.h). */
     JS_SetStopFlag(js->rt, &js->run_watch.stop);
+    /* QuickJS HULL PATCH 0011: every binding call is measured. */
+    JS_SetEmbedderCallHooks(js->rt, js_call_enter, js_call_leave, js);
 
     /* The code-cache seal key, read now - before the kernel sandbox
      * narrows file access (see hl_runtime_cache_seal_prepare). */
@@ -1625,9 +1714,14 @@ void hl_js_gc(HlJS *js)
 
 void hl_js_reset_request(HlJS *js)
 {
+    hl_js_reset_request_as(js, HL_RUN_ENTRY);
+}
+
+void hl_js_reset_request_as(HlJS *js, HlRunKind kind)
+{
     if (!js)
         return;
-    hl_js_budget_arm(js);
+    hl_js_budget_arm_as(js, kind);
     if (js->scratch)
         sh_arena_reset(js->scratch);
 }
@@ -2179,6 +2273,26 @@ static FILE *cli_stream_for(int magic)
     }
 }
 
+/* stdin is the user's time, not the run's work: every read app.main's
+ * ctx.stdin does is excluded from the binding dispatcher's measured charge
+ * (shared/dispatch_meter.h). Only the stdio call is bracketed - nothing in
+ * it raises, so the bracket always closes. */
+static size_t cli_fread(void *buf, size_t sz, size_t n, FILE *f)
+{
+    uint64_t mx = hl_meter_exclude_begin();
+    size_t r = fread(buf, sz, n, f);
+    hl_meter_exclude_end(mx);
+    return r;
+}
+
+static int cli_fgetc(FILE *f)
+{
+    uint64_t mx = hl_meter_exclude_begin();
+    int c = fgetc(f);
+    hl_meter_exclude_end(mx);
+    return c;
+}
+
 static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv, int magic)
 {
@@ -2235,7 +2349,7 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
         if (nbytes == 0) return JS_NewString(ctx, "");
         char *buf = js_malloc(ctx, (size_t)nbytes + 1);
         if (!buf) return JS_EXCEPTION;
-        size_t n = fread(buf, 1, (size_t)nbytes, f);
+        size_t n = cli_fread(buf, 1, (size_t)nbytes, f);
         buf[n] = 0;
         if (n == 0 && feof(f)) { js_free(ctx, buf); return JS_NULL; }
         JSValue r = JS_NewStringLen(ctx, buf, n);
@@ -2249,7 +2363,7 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
         if (!buf) return JS_EXCEPTION;
         char chunk[4096];
         size_t n;
-        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        while ((n = cli_fread(chunk, 1, sizeof(chunk), f)) > 0) {
             if (len + n + 1 > cap) {
                 while (len + n + 1 > cap) cap *= 2;
                 char *nb = js_realloc(ctx, buf, cap);
@@ -2270,7 +2384,7 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
     if (!buf) return JS_EXCEPTION;
     int got = 0;
     for (;;) {
-        int c = fgetc(f);
+        int c = cli_fgetc(f);
         if (c == EOF) break;
         got = 1;
         if (c == '\n') break;
@@ -2645,6 +2759,10 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         JSValue reject_cb = JS_NewCFunctionMagic(
             ctx, (JSCFunctionMagic *)js_cli_main_settle,
             "__hull_main_rejected", 1, JS_CFUNC_generic_magic, 1);
+        /* Plumbing QuickJS calls when main settles: no call hooks (QuickJS
+         * HULL PATCH 0011), so a tripped run still records how it ended. */
+        JS_SetEmbedderFunction(resolve_cb, 0);
+        JS_SetEmbedderFunction(reject_cb, 0);
         int wrc = (JS_IsException(resolve_cb) || JS_IsException(reject_cb))
                 ? -1 : js_cli_main_watch(ctx, ret, resolve_cb, reject_cb);
         JS_FreeValue(ctx, resolve_cb);

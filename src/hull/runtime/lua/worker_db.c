@@ -320,7 +320,7 @@ static int lua_worker_db_init_hook(lua_State *L)
         {"last_id", worker_lua_db_last_id},
         {NULL, NULL}
     };
-    luaL_newlib(L, fns);
+    hl_lua_newlib(L, fns);
     lua_setglobal(L, "db");
     return 0;
 }

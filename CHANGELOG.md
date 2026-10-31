@@ -8,6 +8,29 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Behaviour changes (audit convergence phase 2)
+
+- **An HTTP handler run now has a 10 s deadline by default (was 60 s).** A request handler,
+  a middleware or an SSE endpoint's handler - and each resume of one after it parked on
+  `http.fetch` / `db.async` / `hull.sleep` - is stopped after 10 s holding the event loop
+  (`HL_RUN_HTTP_DEFAULT_MS`), and the request is answered `503 Service Unavailable: the request
+  exceeded its time limit` (it was a bare 500). Timers and WebSocket / SSE callbacks get 5 s
+  (`HL_RUN_CALLBACK_DEFAULT_MS`); app.main keeps 10 min and everything else 60 s. An app sets its
+  own with manifest `limits = { request_ms = N, callback_ms = N }` (JS `limits: { requestMs,
+  callbackMs }`); `--max-run-ms` / `HULL_MAX_RUN_MS` still override every kind. Time spent parked
+  is not counted: the deadline bounds each uninterrupted run. Per-route deadlines are a follow-up.
+- **Every binding call is charged its measured wall time** (§6.1). Each app-facing binding in
+  both runtimes - including `worker.dispatch` VMs and app.main - now goes through one dispatcher
+  that charges the run `max(0, wall time x 64 units/us - what the call charged itself)`, so a
+  binding whose floor is missing or too small can no longer run free: the worst case is one call
+  before the trip. A run under the default 100M budget can therefore spend about 1.5 s inside
+  bindings; CPU-heavy runs (many password hashes in one request) may need `--max-instructions`
+  raised. Waits on a peer or a user (database / Valkey sockets, synchronous HTTP, SMTP, the
+  terminal, stdin), WASM guest code and GPU device waits are excluded. Lua HULL PATCH 0007 (a
+  throw hook) and QuickJS HULL PATCH 0011 (embedder call hooks) carry it; overhead is ~22 ns per
+  Lua call and within noise of a QuickJS call. Lua modules register through `hl_lua_setfuncs` /
+  `hl_lua_newlib` / `hl_lua_pushcfunction`; see docs/design/audit_convergence_dispatcher.md.
+
 ### Process and CI
 
 - **Invariant lint (`make check-invariants`).** Phase 1 of the audit-convergence design

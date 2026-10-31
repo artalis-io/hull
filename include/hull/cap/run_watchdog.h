@@ -47,13 +47,27 @@
  * CLI tool blocks nothing else, and may legitimately spend longer in one
  * stretch (a long synchronous compute.call, a big local SQL statement). */
 #define HL_RUN_MAIN_DEFAULT_MS  600000u
+/* Default for a run of an HTTP handler (audit convergence §6.2): a request
+ * handler or middleware, an SSE endpoint's handler, and each resume of one
+ * (a run that parks on http.fetch / db.async starts a new run when it is
+ * resumed). 10 s rather than 5 s: a handler doing a few synchronous
+ * Postgres queries or a password hash on a loaded host stays well inside
+ * it, while one request can no longer hold the event loop for a minute.
+ * The app sets its own with manifest `limits.request_ms`. */
+#define HL_RUN_HTTP_DEFAULT_MS   10000u
+/* Default for a run of a timer, a WebSocket (server or client) callback or
+ * an SSE stream callback, and each resume of one. The app sets its own with
+ * manifest `limits.callback_ms`. */
+#define HL_RUN_CALLBACK_DEFAULT_MS 5000u
 /* Longest deadline accepted (a larger --max-run-ms is clamped): 24 hours. */
 #define HL_RUN_MAX_MS          86400000u
 
 /* Which default a run gets when none is configured. */
 typedef enum {
-    HL_RUN_ENTRY = 0,   /* every run but app.main's own */
-    HL_RUN_MAIN  = 1,   /* app.main's first run and its resumes */
+    HL_RUN_ENTRY    = 0,   /* every other run: tasks, test cases, jobs, ... */
+    HL_RUN_MAIN     = 1,   /* app.main's first run and its resumes */
+    HL_RUN_HTTP     = 2,   /* an HTTP handler / middleware run, or its resume */
+    HL_RUN_CALLBACK = 3,   /* a timer / WebSocket / SSE callback, or its resume */
 } HlRunKind;
 
 /* One armed deadline. Owned by the VM it bounds (zero-initialised before
@@ -74,6 +88,11 @@ typedef struct HlRunWatch {
  * defaults above, 0 no wall-clock bound at all, > 0 that many ms for every
  * run (clamped to HL_RUN_MAX_MS). Read at each arm. */
 void     hl_run_watchdog_configure(int64_t ms);
+/* The app's own defaults, from its manifest (`limits.request_ms` /
+ * `limits.callback_ms`): 0 keeps Hull's default for that kind. An operator's
+ * --max-run-ms / HULL_MAX_RUN_MS still overrides every kind. */
+void     hl_run_watchdog_set_app_limits(uint32_t request_ms,
+                                        uint32_t callback_ms);
 /* The deadline a run of @p kind gets (0 = none). */
 uint32_t hl_run_watchdog_limit_ms(HlRunKind kind);
 /* Parse a --max-run-ms / HULL_MAX_RUN_MS value: a non-negative decimal

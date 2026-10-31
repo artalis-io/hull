@@ -474,7 +474,7 @@ static int mp_part_chunks(lua_State *L)
 
     /* Return a step closure capturing the chunks userdata as upvalue 1.
      * for chunk in part:chunks() do ... end then drives mp_chunks_drive. */
-    lua_pushcclosure(L, mp_chunks_drive, 1);
+    hl_lua_pushcclosure(L, mp_chunks_drive, 1);
     return 1;
 }
 
@@ -574,11 +574,11 @@ static int mp_part_index(lua_State *L)
         return 1;
     }
     if (strcmp(key, "read") == 0) {
-        lua_pushcfunction(L, mp_part_read);
+        hl_lua_pushcfunction(L, mp_part_read);
         return 1;
     }
     if (strcmp(key, "chunks") == 0) {
-        lua_pushcfunction(L, mp_part_chunks);
+        hl_lua_pushcfunction(L, mp_part_chunks);
         return 1;
     }
     lua_pushnil(L);
@@ -712,7 +712,7 @@ static int lua_req_multipart(lua_State *L)
     hl_req_life_retain(it->life);     /* released by mp_iter_gc */
 
     /* Return the step closure capturing the iter userdata as upvalue 1. */
-    lua_pushcclosure(L, mp_iter_drive, 1);
+    hl_lua_pushcclosure(L, mp_iter_drive, 1);
     return 1;
 }
 
@@ -741,7 +741,7 @@ void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
     o->conn    = conn;
     o->life    = life;
     hl_req_life_retain(life);          /* released by mp_owner_gc */
-    lua_pushcclosure(L, lua_req_multipart, 1);
+    hl_lua_pushcclosure(L, lua_req_multipart, 1);
     lua_setfield(L, -2, "multipart");
 }
 

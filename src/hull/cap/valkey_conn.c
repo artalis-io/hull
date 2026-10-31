@@ -14,6 +14,7 @@
  */
 
 #include "hull/cap/valkey_conn.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "../utils/url.h"
 #include "hull/cap/respwire.h"
 #include "hull/utils/alloc.h"
@@ -373,7 +374,9 @@ static int wait_io(HlValkeyConn *c, short events) {
         int slice = ms > HL_DB_WAIT_SLICE_MS ? HL_DB_WAIT_SLICE_MS : ms;
         if (c->own_socket) hl_db_transport_set_io_timeout(c->transport, ms);
         struct pollfd pfd = { .fd = fd, .events = events, .revents = 0 };
+        uint64_t hl_mx = hl_meter_exclude_begin();
         int pr = poll(&pfd, 1, slice);
+        hl_meter_exclude_end(hl_mx);
         if (pr > 0) return 0;
         if (pr == 0) {
             if (slice == ms) return -1;

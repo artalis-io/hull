@@ -176,6 +176,7 @@ int hl_lua_manifest_json(lua_State *L, char **out, size_t *out_len);
 #define HL_LUA_RUN_MS(lua, kind)                                              \
     ((lua)->run_watch_on ? hl_run_watchdog_limit_ms(kind) : 0u)
 #define HL_LUA_ARM_KIND(lua, thread, kind) do {                               \
+        (lua)->run_kind = (int)(kind);                                        \
         hl_lua_budget_arm((thread), &(lua)->budget, (lua)->max_instructions,  \
                           HL_LUA_RUN_MS((lua), (kind)));                      \
         if ((lua)->scratch) sh_arena_reset((lua)->scratch);                   \

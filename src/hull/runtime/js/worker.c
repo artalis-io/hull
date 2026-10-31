@@ -18,6 +18,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/worker_db.h"   /* hl_worker_db_end_job */
 #include "hull/cap/db_budget.h"
+#include "hull/shared/dispatch_meter.h"   /* the binding dispatcher */
 
 #include <keel/thread_pool.h>
 #include <keel/async.h>
@@ -59,6 +60,7 @@ typedef struct {
     int        tripped;            /* sticky for the dispatch: see below */
     int        timed_out;          /* the trip was the job's deadline */
     HlRunWatch watch;              /* the job's wall-clock deadline */
+    uint64_t   meter_charged;      /* the binding dispatcher's meter */
 } HlJsWorkerCtx;
 
 static pthread_key_t  js_worker_key;
@@ -99,6 +101,7 @@ static int js_worker_interrupt(JSRuntime *rt, void *opaque)
         return 1;
     }
     wctx->instructions += HL_JS_INTERRUPT_WEIGHT;   /* see internal.h */
+    wctx->meter_charged += HL_JS_INTERRUPT_WEIGHT;
     if (wctx->max_instructions > 0 &&
         wctx->instructions > wctx->max_instructions)
         wctx->tripped = 1;
@@ -115,6 +118,7 @@ static int js_worker_charge(HlJsWorkerCtx *wctx, uint64_t units)
         wctx->timed_out = 1;
         return 1;
     }
+    wctx->meter_charged += units;
     wctx->instructions = units > (uint64_t)(INT64_MAX - wctx->instructions)
                          ? INT64_MAX : wctx->instructions + (int64_t)units;
     if (wctx->max_instructions > 0 &&
@@ -138,6 +142,57 @@ static int js_worker_db_charge(void *ud, int64_t units)
                             units > 0 ? (uint64_t)units : 0);
 }
 #endif
+
+/* The binding dispatcher in a worker.dispatch VM (runtime.c has the main
+ * runtime's twin; QuickJS HULL PATCH 0011). */
+static JSValue js_worker_throw_trip(JSContext *ctx, HlJsWorkerCtx *wctx)
+{
+    JS_ThrowInternalError(ctx, "interrupted (%s)",
+                          wctx->timed_out ? HL_RUN_TIME_LIMIT_MSG
+                                          : "instruction limit exceeded");
+    JS_SetUncatchableException(ctx, 1);
+    return JS_EXCEPTION;
+}
+
+static int js_worker_call_enter(JSContext *ctx, void *opaque,
+                                JSEmbedderCall *call)
+{
+    HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)opaque;
+    if (!wctx->tripped && hl_run_watch_stopped(&wctx->watch)) {
+        wctx->tripped = 1;
+        wctx->timed_out = 1;
+    }
+    if (wctx->tripped) {
+        js_worker_throw_trip(ctx, wctx);
+        return -1;
+    }
+    call->w[3] = wctx->max_instructions > 0;
+    if (call->w[3]) {
+        call->w[1] = hl_meter_excluded;
+        call->w[2] = wctx->meter_charged + JS_GetPendingCharge(ctx);
+        call->w[0] = hl_meter_ticks();
+    }
+    return 0;
+}
+
+static JSValue js_worker_call_leave(JSContext *ctx, void *opaque,
+                                    JSEmbedderCall *call, JSValue ret)
+{
+    HlJsWorkerCtx *wctx = (HlJsWorkerCtx *)opaque;
+    if (!call->w[3] || wctx->tripped)
+        return ret;
+    int64_t charged = (int64_t)(wctx->meter_charged +
+                                JS_GetPendingCharge(ctx) - call->w[2]);
+    uint64_t owed = hl_meter_owed(call->w[0], hl_meter_ticks(), call->w[1],
+                                  hl_meter_excluded, charged);
+    if (owed == 0 || !js_worker_charge(wctx, owed))
+        return ret;
+    if (JS_IsException(ret))
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    else
+        JS_FreeValue(ctx, ret);
+    return js_worker_throw_trip(ctx, wctx);
+}
 
 #ifdef HL_ENABLE_DB
 int hl_js_worker_budget_tripped(void)
@@ -166,6 +221,9 @@ static HlJsWorkerCtx *get_js_worker_rt(void)
     JS_SetWorkHandler(wctx->rt, js_worker_work, wctx);
     /* QuickJS HULL PATCH 0006: the job's deadline (cap/run_watchdog.h). */
     JS_SetStopFlag(wctx->rt, &wctx->watch.stop);
+    /* QuickJS HULL PATCH 0011: every binding call is measured. */
+    JS_SetEmbedderCallHooks(wctx->rt, js_worker_call_enter,
+                            js_worker_call_leave, wctx);
     pthread_setspecific(js_worker_key, wctx);
     return wctx;
 }

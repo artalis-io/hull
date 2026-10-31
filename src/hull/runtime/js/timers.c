@@ -143,7 +143,7 @@ static void hl_js_timer_trampoline_impl(void *user_data)
     js->active_timer = t;
 
     /* Reset instruction counter */
-    hl_js_budget_arm(js);
+    hl_js_budget_arm_as(js, HL_RUN_CALLBACK);
 
     /* Look up handler */
     JSValue store = hl_js_internals(ctx);
@@ -173,7 +173,9 @@ static void hl_js_timer_trampoline_impl(void *user_data)
         JSValue exception = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exception);
         if (!msg) JS_FreeValue(ctx, JS_GetException(ctx));   /* a throwing toString (L2) */
-        log_error("[hull:timer] %s", msg ? msg : "unknown error");
+        /* A tripped run's conversion fails too (audit 23): name the trip. */
+        log_error("[hull:timer] %s", msg ? msg : js->budget_tripped
+                  ? hl_js_trip_reason(js) : "unknown error");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exception);
         JS_FreeValue(ctx, ret);

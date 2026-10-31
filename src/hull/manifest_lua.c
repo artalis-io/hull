@@ -228,8 +228,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     lua_pop(L, 1); /* pop http */
 
     /* limits = { vm_thread = true, vm_thread_grace_ms = N,
-     *            vm_thread_ceiling_ms = N }: --vm-thread from the manifest.
-     * The numbers as for wasm: an integer of at least 1 (capped). */
+     *            vm_thread_ceiling_ms = N, request_ms = N, callback_ms = N }:
+     * --vm-thread from the manifest, and the app's run deadlines
+     * (cap/run_watchdog.h). The numbers as for wasm: an integer of at least
+     * 1 (capped to a day); anything else is absent. */
     lua_getfield(L, manifest_idx, "limits");
     if (lua_istable(L, -1)) {
         int lim_idx = lua_gettop(L);
@@ -241,6 +243,10 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             L, lim_idx, "vm_thread_grace_ms", (lua_Integer)86400000);
         out->vm_thread_ceiling_ms = (uint32_t)lua_wasm_limit(
             L, lim_idx, "vm_thread_ceiling_ms", (lua_Integer)86400000);
+        out->limits_request_ms = (uint32_t)lua_wasm_limit(
+            L, lim_idx, "request_ms", (lua_Integer)86400000);
+        out->limits_callback_ms = (uint32_t)lua_wasm_limit(
+            L, lim_idx, "callback_ms", (lua_Integer)86400000);
     }
     lua_pop(L, 1); /* pop limits */
 

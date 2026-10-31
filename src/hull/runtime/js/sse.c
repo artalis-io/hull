@@ -69,7 +69,7 @@ static void hl_js_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
 
     /* Reset scratch + instruction counter */
     sh_arena_reset(js->scratch);
-    hl_js_budget_arm(js);
+    hl_js_budget_arm_as(js, HL_RUN_HTTP);
 
     /* Set per-request async context */
     js->active_conn = kl_http_request_conn(req);

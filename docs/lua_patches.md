@@ -345,3 +345,42 @@ of each pass, call `hl_ephfinish` and return once `done > hl_ephcap(g)` or
 mode with every link kept - it took ~32 s per mode before; weak-key clearing
 is correct with and without the finish; a 200 ms deadline during repeated
 collections of such a chain trips promptly - it took ~16 s before).
+
+## Patch 0007 - a throw hook for the binding dispatcher
+
+**Files:** `vendor/lua/lstate.h` / `lstate.c` (the `hlthrow` / `hlthrowud`
+global fields), `ldo.c` (`luaD_throw`), `lapi.c` + `lua.h`
+(`lua_hlsetthrowhook`, `lua_hlerrorjmp`, `lua_hlpending`)
+**Found by:** audit convergence phase 2 (§6.1, measured-time charging)
+**Upstream:** Hull-specific.
+
+Every app-facing binding is called through a trampoline
+(`runtime/lua/budget.c`, `meter_call`) that reads a monotonic clock before and
+after the call and charges the run's budget for the wall time past what the
+call charged itself. The trampoline calls the real function in the same
+CallInfo, so a call that does not RETURN - one that raises, or one that
+parks with `lua_yieldk` - leaves through a longjmp the trampoline never sees.
+Without help its time would go uncharged (a loop of `pcall(slow_binding)`
+that fails at the end) or its frame would be left open across the park (and
+the parked time charged when it was later closed).
+
+The patch calls an embedder hook at the top of `luaD_throw`, before
+`errorJmp` changes, with the throwing thread and the status. Hull's hook pops
+and charges, up to that moment, the calls in progress on that thread that the
+throw unwinds: on a yield, every one (they are the whole C stack of the
+parking coroutine); on an error, those that started inside the error handler
+it is thrown to (`lua_hlerrorjmp`, recorded per call). The hook allocates
+nothing, raises nothing and runs no Lua code.
+
+`lua_hlpending(L)` returns the work a thread has done that its count hook has
+not reported yet (the used part of the hook period, `hlowed`, whole units of
+`hlbytes`), so the trampoline can read a continuous count of what the run was
+charged during a call and subtract it.
+
+Cost: one pointer test per throw. A state with no hook set behaves exactly as
+upstream.
+
+**Guard:** `tests/hull/runtime/lua/test_lua.c`, `lua_dispatcher.*` (a failed
+call is charged up to its error and its frame is gone; a parked call is
+charged up to its yield and not for the wait; `hull.sleep` parks through the
+trampoline; the frame stack is empty after every case).
