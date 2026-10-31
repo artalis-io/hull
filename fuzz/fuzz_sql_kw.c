@@ -119,6 +119,13 @@ static int is_end_kind(HlSqlTxnKind k)
     return k == HL_SQL_TXN_COMMIT || k == HL_SQL_TXN_ROLLBACK;
 }
 
+static void count_word(void *ud, const char *w, const char *prev,
+                       const char *prev2)
+{
+    (void)w; (void)prev; (void)prev2;
+    (*(size_t *)ud)++;
+}
+
 static void raw_mode(const char *sql)
 {
     static const char *const ws[] = { " ", "\t", "\n", "\r\n", "\f", "\v" };
@@ -151,6 +158,16 @@ static void raw_mode(const char *sql)
     if (!strstr(sql, "/*") &&
         hl_sql_txn_kind_ex(sql, 0) != hl_sql_txn_kind_ex(sql, 1))
         fail("comment rules disagree on a text with no block comment", sql);
+
+    /* The session-state word scanner (audit 41: per-dialect "--" rules):
+     * stays inside the text and is deterministic, in every mode. */
+    for (int nest = 0; nest <= 1; nest++)
+        for (int bs = 0; bs <= 1; bs++) {
+            size_t n1 = 0, n2 = 0;
+            hl_sql_scan_words(sql, nest, bs, count_word, &n1);
+            hl_sql_scan_words(sql, nest, bs, count_word, &n2);
+            if (n1 != n2) fail("word scan not deterministic", sql);
+        }
 
     int dyn = hl_cap_db_sql_calls_dynamic_sql(sql);
     if (hl_cap_db_sql_calls_dynamic_sql(up) != dyn ||

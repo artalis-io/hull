@@ -1925,6 +1925,7 @@ UTEST(mysql_backend, create_index_shim_uses_error_code)
     build_ok(&s, 2);
     build_err(&s, 1, HL_MY_ER_DUP_KEYNAME, "Doppelter Schluesselname 'i'");
     build_err(&s, 1, 1146, "Table 'Duplicate key name' doesn't exist");
+    put_ok_more(&s, 1, 0x0002);   /* PING after the failure (audit 41) */
 
     HlDbHandle h; HlDbMyCtx ctx; int sv[2];
     ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
@@ -1967,6 +1968,7 @@ UTEST(mysql_backend, create_index_shim_is_token_exact)
     build_ok(&s, 2);
     put_ok_more(&s, 1, 0x0002);                         /* rewritten CREATE */
     build_err(&s, 1, HL_MY_ER_DUP_KEYNAME, "Duplicate key name 'i'");
+    put_ok_more(&s, 1, 0x0002);   /* PING after the failure (audit 41) */
 
     HlDbHandle h; HlDbMyCtx ctx; int sv[2];
     ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
@@ -2617,13 +2619,17 @@ UTEST(mysql_backend, session_state_holds_a_transaction_for_the_wait_gates)
     EXPECT_EQ(0, hl_db_holds_txn(&h));
 
     /* A named lock does not count (a GET_LOCK that timed out looks the
-     * same); a broken connection holds nothing. */
+     * same). A lost connection still holds what its session last held
+     * (audit 41): the app believes it has it, and my_ready refuses calls
+     * until it is ended, so waits stay refused too. */
     my_track_session(&h, "SELECT GET_LOCK('n', 0)", 0);
     EXPECT_EQ(1, mysql_session_dirty(&h));
     EXPECT_EQ(0, hl_db_holds_txn(&h));
     my_track_session(&h, "DO RELEASE_LOCK('n')", 0);
     ctx.conn.server_status = 0;
     ctx.conn.broken = 1;
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    ctx.conn.server_status = HL_MY_SERVER_STATUS_AUTOCOMMIT;
     EXPECT_EQ(0, hl_db_holds_txn(&h));
 }
 
@@ -2737,6 +2743,317 @@ UTEST(mysql_backend, implicit_commit_resume_moves_the_generation)
     EXPECT_NE(gen, hl_db_txn_gen());
 
     hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+
+/* ── audit 41: a lost connection's session state ───────────────────── */
+
+/* Bytes the client has sent and the server end has not read yet (without
+ * blocking or shutting anything down). */
+static size_t my_pending(int sv[2])
+{
+    char junk[4096];
+    size_t n = 0;
+    ssize_t r;
+    while ((r = recv(sv[0], junk, sizeof junk, MSG_DONTWAIT)) > 0)
+        n += (size_t)r;
+    return n;
+}
+
+/* A lost connection for the audit 41 legs: the session ran @p stmt
+ * (answered OK with @p status), then the connection went. Its DSN names a
+ * port nothing listens on, so a reconnect shows as "reconnecting failed". */
+static int my_lost_after(HlDbHandle *h, HlDbMyCtx *ctx, int sv[2],
+                         HlMyWriter *s, const char *stmt, uint16_t status)
+{
+    build_handshake(s, 0);
+    build_ok(s, 2);
+    put_ok_more(s, 1, status);
+    if (my_backend_start(h, ctx, sv, s) != 0) return -1;
+    h->batch_depth = 0;
+    if (mysql_exec(h, stmt, NULL, 0) < 0) return -1;
+    (void)my_pending(sv);
+    ctx->dsn = strdup("mysql://u:p@127.0.0.1:1/db");
+    ctx->conn.broken = 1;   /* the server killed the session */
+    return ctx->dsn ? 0 : -1;
+}
+
+static void my_lost_free(HlDbMyCtx *ctx, HlMyWriter *s, int sv[2])
+{
+    hl_my_conn_close(&ctx->conn);
+    scrub_free(ctx->dsn);
+    ctx->dsn = NULL;
+    hl_my_writer_free(s);
+    close(sv[0]);
+}
+
+/* Lost after SET autocommit = 0 (IN_TRANS clear): the retry is refused, not
+ * reconnected into autocommit; the state still holds a transaction for the
+ * wait gates; a ROLLBACK is answered without being sent and lets the next
+ * call reconnect - with autocommit off again. */
+UTEST(mysql_backend, lost_with_autocommit_off_refuses_until_rollback)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_lost_after(&h, &ctx, sv, &s, "SET autocommit = 0", 0x0000));
+
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    EXPECT_EQ(-1, mysql_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "autocommit off") != NULL);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    EXPECT_EQ(0, mysql_rollback(&h));
+    EXPECT_EQ(1, ctx.ac_off_acked);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));   /* still autocommit off */
+    EXPECT_EQ(0u, my_pending(sv));       /* nothing sent */
+    /* Now the next call reconnects (and fails here: nothing listens). */
+    EXPECT_EQ(-1, mysql_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "reconnecting failed") != NULL);
+
+    my_lost_free(&ctx, &s, sv);
+}
+
+/* SET autocommit = 1 ends it too (answered done); then reconnect. A SET
+ * that also names another variable does not. */
+UTEST(mysql_backend, lost_with_autocommit_off_set_autocommit_restores)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_lost_after(&h, &ctx, sv, &s, "SET autocommit = 0", 0x0000));
+
+    EXPECT_EQ(-1, mysql_exec(&h, "SET autocommit = 1, sql_mode = ''", NULL, 0));
+    EXPECT_EQ(0, mysql_exec(&h, "SET @@session.autocommit = ON", NULL, 0));
+    EXPECT_EQ(0, ctx.ac_off_acked);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    EXPECT_EQ(0u, my_pending(sv));
+    EXPECT_EQ(-1, mysql_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "reconnecting failed") != NULL);
+
+    my_lost_free(&ctx, &s, sv);
+}
+
+/* Lost under LOCK TABLES: refused - a ROLLBACK does not release a table
+ * lock, so it does not end the refusal - until UNLOCK TABLES. */
+UTEST(mysql_backend, lost_under_lock_tables_refuses_until_unlock)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_lost_after(&h, &ctx, sv, &s, "LOCK TABLES t WRITE", 0x0002));
+
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    EXPECT_EQ(-1, mysql_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "LOCK TABLES") != NULL);
+    EXPECT_EQ(0, mysql_rollback(&h));
+    EXPECT_EQ(-1, mysql_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "LOCK TABLES") != NULL);
+    EXPECT_EQ(-1, mysql_exec(&h, "UNLOCK TABLES; SELECT 1", NULL, 0));
+    EXPECT_EQ(0, mysql_exec(&h, "unlock tables", NULL, 0));
+    EXPECT_EQ(0, ctx.lock_tables);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    EXPECT_EQ(0u, my_pending(sv));
+    EXPECT_EQ(-1, mysql_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "reconnecting failed") != NULL);
+
+    my_lost_free(&ctx, &s, sv);
+}
+
+/* The entry-end guard forgets what the lost session held: the next entry
+ * reconnects into a fresh autocommit session. */
+UTEST(mysql_backend, guard_forgets_a_lost_session)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_lost_after(&h, &ctx, sv, &s, "LOCK TABLES t WRITE", 0x0000));
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    EXPECT_EQ(0, ctx.lock_tables);
+    EXPECT_TRUE(ctx.conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT);
+    EXPECT_EQ(-1, mysql_exec(&h, "SELECT 1", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "reconnecting failed") != NULL);
+    my_lost_free(&ctx, &s, sv);
+}
+
+/* A pinned handle (the migration run) is not forgotten by the guard. */
+UTEST(mysql_backend, guard_leaves_a_lost_pinned_session)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_lost_after(&h, &ctx, sv, &s, "LOCK TABLES t WRITE", 0x0002));
+    h.session_pinned = 1;
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_lost_free(&ctx, &s, sv);
+}
+
+UTEST(mysql_backend, restore_kind_classifier)
+{
+    EXPECT_EQ(MY_RESTORE_AUTOCOMMIT, (int)my_restore_kind("SET autocommit = 1"));
+    EXPECT_EQ(MY_RESTORE_AUTOCOMMIT, (int)my_restore_kind("set session autocommit=on;"));
+    EXPECT_EQ(MY_RESTORE_AUTOCOMMIT, (int)my_restore_kind("SET @@autocommit := TRUE"));
+    EXPECT_EQ(MY_RESTORE_AUTOCOMMIT, (int)my_restore_kind("SET @@local.autocommit = 1 -- x"));
+    EXPECT_EQ(MY_RESTORE_NONE, (int)my_restore_kind("SET autocommit = 0"));
+    EXPECT_EQ(MY_RESTORE_NONE, (int)my_restore_kind("SET autocommit = 1, @x = 2"));
+    EXPECT_EQ(MY_RESTORE_NONE, (int)my_restore_kind("SET autocommit = 1; DELETE FROM t"));
+    EXPECT_EQ(MY_RESTORE_NONE, (int)my_restore_kind("SET autocommit = 1 # x"));
+    EXPECT_EQ(MY_RESTORE_UNLOCK_TABLES, (int)my_restore_kind("UNLOCK TABLES"));
+    EXPECT_EQ(MY_RESTORE_UNLOCK_TABLES, (int)my_restore_kind("unlock table;"));
+    EXPECT_EQ(MY_RESTORE_UNLOCK_INSTANCE, (int)my_restore_kind("UNLOCK INSTANCE"));
+    EXPECT_EQ(MY_RESTORE_BACKUP_UNLOCK, (int)my_restore_kind("BACKUP UNLOCK"));
+    EXPECT_EQ(MY_RESTORE_BACKUP_END, (int)my_restore_kind("BACKUP STAGE END"));
+    EXPECT_EQ(MY_RESTORE_NONE, (int)my_restore_kind("BACKUP STAGE START"));
+    EXPECT_EQ(MY_RESTORE_XA_END, (int)my_restore_kind("XA ROLLBACK 'x'"));
+    EXPECT_EQ(MY_RESTORE_NONE, (int)my_restore_kind("XA START 'x'"));
+    EXPECT_EQ(MY_RESTORE_NONE, (int)my_restore_kind("SELECT 1"));
+}
+
+/* A CALL that failed outside a transaction after its procedure opened one
+ * (or turned autocommit off): the ERR carries no status, so the backend asks
+ * (COM_PING) and the state is seen - in_txn / session_held, so the wait
+ * gates refuse and the guard rolls back at the entry's end. */
+UTEST(mysql_backend, failed_call_outside_a_transaction_refreshes_status)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    build_err(&s, 1, 1644, "boom");                            /* CALL p() */
+    put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_STATUS_IN_TRANS); /* PING */
+    put_ok_more(&s, 1, 0x0002);                                /* ROLLBACK */
+    build_err(&s, 1, 1644, "boom");                            /* CALL q() */
+    put_ok_more(&s, 1, 0x0000);                                /* PING */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    EXPECT_EQ(-1, mysql_exec(&h, "CALL p()", NULL, 0));
+    EXPECT_TRUE(strstr(ctx.conn.errmsg, "boom") != NULL);   /* kept */
+    EXPECT_TRUE(mysql_in_txn(&h));
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    EXPECT_EQ(0, mysql_rollback(&h));
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+    EXPECT_EQ(-1, mysql_exec(&h, "CALL q()", NULL, 0));
+    EXPECT_FALSE(mysql_in_txn(&h));
+    EXPECT_EQ(1, hl_db_session_held(&h));   /* autocommit off */
+
+    char got[8192];
+    size_t n = my_drain_client(sv, got, sizeof got);
+    EXPECT_TRUE(my_sent_command(got, n, HL_MY_COM_PING));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A refusal by the backend itself (no server ERR this call) sends no PING. */
+UTEST(mysql_backend, a_refused_call_sends_no_ping)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_lost_after(&h, &ctx, sv, &s, "SET autocommit = 0", 0x0000));
+    ctx.conn.broken = 0;
+    ctx.txn_aborted = 1;               /* refused by my_ready */
+    ctx.conn.last_err_code = 1644;     /* stale, from an earlier call */
+    EXPECT_EQ(-1, mysql_exec(&h, "INSERT INTO t VALUES (1)", NULL, 0));
+    EXPECT_EQ(0, ctx.conn.last_err_code);
+    EXPECT_EQ(0u, my_pending(sv));
+    ctx.conn.broken = 1;
+    my_lost_free(&ctx, &s, sv);
+}
+
+/* MySQL takes "--" before any whitespace or control byte (form feed,
+ * vertical tab, ...) as a comment that runs to the end of the line (LF
+ * only): a release word there does not release (audit 41). */
+UTEST(mysql_backend, session_tracker_reads_mysql_dash_comments)
+{
+    HlDbHandle h; HlDbMyCtx ctx;
+    memset(&h, 0, sizeof h);
+    memset(&ctx, 0, sizeof ctx);
+    h.backend = &hl_db_backend_mysql;
+    h.ctx = &ctx;
+    ctx.conn.server_status = HL_MY_SERVER_STATUS_AUTOCOMMIT;
+
+    my_track_session(&h, "LOCK TABLES t WRITE", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "SELECT 1 --\fUNLOCK TABLES", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "SELECT 1 --\vUNLOCK TABLES", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "SELECT 1 --\x01UNLOCK TABLES", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "SELECT 1 -- x\rUNLOCK TABLES", 0);   /* CR: still comment */
+    EXPECT_EQ(1, ctx.lock_tables);
+    my_track_session(&h, "SELECT 1 --\n UNLOCK TABLES", 0);    /* LF ends it */
+    EXPECT_EQ(0, ctx.lock_tables);
+
+    /* FLUSH TABLES ... FOR EXPORT, MariaDB BACKUP LOCK / STAGE */
+    my_track_session(&h, "FLUSH TABLES t FOR EXPORT", 0);
+    EXPECT_EQ(1, ctx.lock_tables);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    my_track_session(&h, "UNLOCK TABLES", 0);
+    EXPECT_EQ(0, ctx.lock_tables);
+    my_track_session(&h, "BACKUP LOCK t", 0);
+    EXPECT_EQ(1, ctx.backup_lock);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    my_track_session(&h, "BACKUP UNLOCK", -1);
+    EXPECT_EQ(1, ctx.backup_lock);
+    my_track_session(&h, "BACKUP UNLOCK", 0);
+    EXPECT_EQ(0, ctx.backup_lock);
+    my_track_session(&h, "BACKUP STAGE START", 0);
+    EXPECT_EQ(1, ctx.backup_stage);
+    my_track_session(&h, "BACKUP STAGE BLOCK_COMMIT", 0);
+    EXPECT_EQ(1, ctx.backup_stage);
+    my_track_session(&h, "BACKUP STAGE END", 0);
+    EXPECT_EQ(0, ctx.backup_stage);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+}
+
+/* The guard closes (does not reset) a session left in a MariaDB backup
+ * stage: whether COM_RESET_CONNECTION ends one is not documented. */
+UTEST(mysql_backend, guard_closes_a_backup_stage)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002);                          /* BACKUP STAGE */
+
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    ASSERT_TRUE(mysql_exec(&h, "BACKUP STAGE START", NULL, 0) >= 0);
+    EXPECT_EQ(1, hl_db_holds_txn(&h));
+    hl_db_guard_stale_txn(&h);
+    EXPECT_EQ(1, ctx.conn.broken);
+    EXPECT_EQ(0, ctx.backup_stage);
+    EXPECT_EQ(0, hl_db_holds_txn(&h));
+
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* The session reset re-applies autocommit = 1 with the character set: a
+ * reset restores the global default, which a server may have off. */
+UTEST(mysql_conn, reset_connection_restores_autocommit)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0000);                        /* RESET */
+    put_ok_more(&s, 1, 0x0002);                        /* SET NAMES */
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_EQ((ssize_t)s.len, write(sv[0], s.buf, s.len));
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err));
+    HlMyConn conn; memset(&conn, 0, sizeof conn);
+    ASSERT_EQ(0, hl_my_conn_start(&conn, sv[1], &dsn));
+    ASSERT_EQ(0, hl_my_conn_reset(&conn));
+    EXPECT_TRUE(conn.server_status & HL_MY_SERVER_STATUS_AUTOCOMMIT);
+    char got[8192];
+    size_t n = my_drain_client(sv, got, sizeof got);
+    EXPECT_TRUE(my_sent_text(got, n, "autocommit = 1"));
+    hl_my_conn_close(&conn);
     hl_my_writer_free(&s);
     close(sv[0]);
 }

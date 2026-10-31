@@ -1038,4 +1038,39 @@ UTEST(db_backend, sql_txn_kind)
     EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind("ROLLBACK -- done\r\n"));
 }
 
+/* hl_sql_scan_words reads "--" by each dialect's rule (audit 41): text read
+ * as code where the server skips it could release tracked session state. */
+static void scan_join(void *ud, const char *w, const char *prev,
+                      const char *prev2)
+{
+    (void)prev; (void)prev2;
+    char *out = ud;
+    size_t n = strlen(out);
+    snprintf(out + n, 256 - n, "%s%s", n ? " " : "", w);
+}
+
+static const char *scan_words(const char *sql, int nest)
+{
+    static char out[256];
+    out[0] = '\0';
+    hl_sql_scan_words(sql, nest, !nest, scan_join, out);
+    return out;
+}
+
+UTEST(db_backend, sql_scan_words_dash_comment_rules)
+{
+    /* MySQL (nest 0): a comment before any whitespace or control byte, to
+     * LF only; "5--1" is arithmetic. */
+    EXPECT_STREQ("select 1", scan_words("SELECT 1 --\fUNLOCK TABLES", 0));
+    EXPECT_STREQ("select 1", scan_words("SELECT 1 --\vUNLOCK", 0));
+    EXPECT_STREQ("select 1", scan_words("SELECT 1 --\x7fUNLOCK", 0));
+    EXPECT_STREQ("select 1", scan_words("SELECT 1 -- a\rUNLOCK", 0));
+    EXPECT_STREQ("select 1 unlock", scan_words("SELECT 1 -- a\nUNLOCK", 0));
+    EXPECT_STREQ("select 5 1", scan_words("SELECT 5--1", 0));
+    EXPECT_STREQ("select 1", scan_words("SELECT 1 --", 0));
+    /* Postgres (nest 1): always a comment, to LF or CR. */
+    EXPECT_STREQ("select 5", scan_words("SELECT 5--pg_advisory_unlock_all()", 1));
+    EXPECT_STREQ("select 1 x", scan_words("SELECT 1 --a\rx", 1));
+}
+
 UTEST_MAIN();

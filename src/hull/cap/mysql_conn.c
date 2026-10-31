@@ -1608,14 +1608,17 @@ int hl_my_conn_reset(HlMyConn *conn)
      * (the server may default to latin1, which double-encodes UTF-8 text).
      * MySQL took the handshake's collation id as given; MariaDB mapped the
      * default one (45) to its character_set_collations choice, which a plain
-     * SET NAMES makes again. */
+     * SET NAMES makes again. The reset also restored the global autocommit,
+     * which a server may default off (SET GLOBAL autocommit = 0): Hull's
+     * sessions run with it on, so set it in the same statement (audit 41). */
     unsigned id = conn->charset ? conn->charset : HL_MY_DEFAULT_CHARSET;
-    char names[64];
+    char names[96];
     if (conn->mariadb && id == HL_MY_DEFAULT_CHARSET)
-        snprintf(names, sizeof names, "SET NAMES utf8mb4");
+        snprintf(names, sizeof names, "SET NAMES utf8mb4, autocommit = 1");
     else
         snprintf(names, sizeof names,
-                 "SET NAMES utf8mb4, collation_connection = %u", id);
+                 "SET NAMES utf8mb4, collation_connection = %u, "
+                 "autocommit = 1", id);
     return hl_my_conn_query(conn, names, NULL, NULL, NULL, NULL) == 0 ? 0 : -1;
 }
 
