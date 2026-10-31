@@ -105,6 +105,14 @@ static int wasm_is_timeout_exception(const char *exc)
 
 /* ── Thread-local callback context for host_call ───────────────────── */
 
+/* Guest log quota of the current guest run (audit 41). */
+typedef struct {
+    int      active;
+    uint32_t lines;
+    uint64_t bytes;
+    uint64_t suppressed;
+} HlWasmLogQuota;
+
 typedef struct {
     HlWasmCallbackFn fn;
     void            *ctx;
@@ -116,9 +124,45 @@ typedef struct {
     /* Streaming I/O metadata (set by wasm_stream.c via set/clear helpers) */
     uint32_t stream_flags;       /* 0 when not streaming */
     uint32_t stream_chunk_index;
+    /* The current guest run's log quota (audit 41). Thread-local
+     * like the rest: each worker thread runs its own guest, and a nested
+     * run (a callback that calls into WASM again) saves and restores it. */
+    HlWasmLogQuota log;
 } HlHostCallCtx;
 
 static _Thread_local HlHostCallCtx tl_host_ctx;
+
+/* Open a fresh log quota for one guest run; returns the one it replaces. */
+static HlWasmLogQuota log_quota_open(void)
+{
+    HlWasmLogQuota saved = tl_host_ctx.log;
+    memset(&tl_host_ctx.log, 0, sizeof tl_host_ctx.log);
+    tl_host_ctx.log.active = 1;
+    return saved;
+}
+
+/* End the run's quota: one record for the lines it dropped, then restore. */
+static void log_quota_flush(void)
+{
+    if (tl_host_ctx.log.suppressed)
+        log_warn("[wasm] suppressed %llu log lines (per-call quota: %d lines, "
+                 "%d bytes)", (unsigned long long)tl_host_ctx.log.suppressed,
+                 HL_WASM_LOG_MAX_LINES, HL_WASM_LOG_MAX_BYTES);
+    memset(&tl_host_ctx.log, 0, sizeof tl_host_ctx.log);
+}
+
+static void log_quota_close(HlWasmLogQuota saved)
+{
+    log_quota_flush();
+    tl_host_ctx.log = saved;
+}
+
+/* Restore the whole host-call ctx at the end of a call, its quota flushed. */
+static void host_ctx_restore(const HlHostCallCtx *saved)
+{
+    log_quota_flush();
+    tl_host_ctx = *saved;
+}
 
 /* Little-endian field stores for the wire record (host endianness may differ from
  * WASM's LE; write byte-explicit so the guest's offset decode is correct on any
@@ -186,6 +230,17 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
      * 2 GiB was never found (audit 17). */
     if (opcode == HL_WASM_OP_LOG) {
         if (len > 0 && len < 4096) {
+            /* Per-run quota (audit 41): past it a line costs a counter
+             * increment - no validate, no escape, no write. Outside any
+             * run's quota (no path Hull runs guest code by) it is dropped. */
+            if (!tl_host_ctx.log.active ||
+                tl_host_ctx.log.lines >= HL_WASM_LOG_MAX_LINES ||
+                tl_host_ctx.log.bytes + (uint64_t)len > HL_WASM_LOG_MAX_BYTES) {
+                if (tl_host_ctx.log.active) tl_host_ctx.log.suppressed++;
+                return 0;
+            }
+            tl_host_ctx.log.lines++;
+            tl_host_ctx.log.bytes += (uint64_t)len;
             if (!wasm_runtime_validate_app_addr(inst, (uint64_t)(uint32_t)ptr, (uint64_t)len))
                 return -1;
             char *msg = wasm_runtime_addr_app_to_native(inst, (uint64_t)(uint32_t)ptr);
@@ -948,8 +1003,10 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             return HL_WASM_ERR_INTERNAL;
         }
         error_buf[0] = '\0';
+        HlWasmLogQuota lq = log_quota_open();   /* start functions (audit 41) */
         wasm_module_inst_t tmp_inst = hl_wasm_watch_instantiate(
             &watch, module, 8192, 8192, error_buf, sizeof(error_buf));
+        log_quota_close(lq);
         if (tmp_inst) {
             /* The pool bound (pool_linear_bound) starts from this: initial
              * memory, the start function and a fixed 8 KiB heap - measured
@@ -968,8 +1025,10 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                     wasm_runtime_set_instruction_count_limit(env, HL_WASM_DEFAULT_GAS);
                     uint32_t argv[1] = {0};
                     hl_wasm_watch_bind(&watch, tmp_inst);
+                    HlWasmLogQuota vq = log_quota_open();   /* audit 41 */
                     if (wasm_runtime_call_wasm(env, ver_fn, 0, argv))
                         abi_version = argv[0];
+                    log_quota_close(vq);
                     hl_wasm_watch_bind(&watch, NULL);
                     wasm_runtime_destroy_exec_env(env);
                 }
@@ -1293,9 +1352,11 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
         error_buf[0] = '\0';
         /* The instance's own start / ctor functions run here, under the
          * call's watch (they are not metered by gas). */
+        HlWasmLogQuota lq = log_quota_open();   /* start functions (audit 41) */
         inst = hl_wasm_watch_instantiate(
             watch, mod->module, stack_size, heap_size,
             error_buf, sizeof(error_buf));
+        log_quota_close(lq);
         if (!inst) {
             log_error("[wasm] instantiate '%s' failed: %s", name, error_buf);
             if (wasm_is_timeout_exception(error_buf)) {
@@ -1428,6 +1489,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
 
     /* Save and set thread-local callback context (reentry-safe) */
     HlHostCallCtx saved_ctx = tl_host_ctx;
+    (void)log_quota_open();   /* the call's own quota (audit 41) */
     tl_host_ctx.fn = callback_fn;
     tl_host_ctx.ctx = callback_ctx;
     tl_host_ctx.shared_data = sd_snapshot;
@@ -1534,7 +1596,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     }
 
     /* Free input allocation - no longer needed */
-    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    host_ctx_restore(&saved_ctx);   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
 
     /* Spans back the INPUT (now consumed by the call): tear the set down HERE,
@@ -1586,7 +1648,7 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     return ok ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
 
 cleanup_bufs_err:
-    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    host_ctx_restore(&saved_ctx);   /* restores (clears) tl_host_ctx.spans before teardown */
     if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
@@ -1768,10 +1830,12 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         if (err_msg) *err_msg = "watchdog_unavailable";
         return NULL;
     }
+    HlWasmLogQuota lq = log_quota_open();   /* start functions (audit 41) */
     wasm_module_inst_t inst = hl_wasm_watch_instantiate_capped(
         &watch, mod->module, stack_size, heap_size,
         persistent_max_pages((wasm_module_t)mod->module, heap_size),
         error_buf, sizeof(error_buf));
+    log_quota_close(lq);
     hl_wasm_watch_disarm(&watch);
     if (!inst) {
         hl_wasm_live_instance_release(cache, inst_bytes);
@@ -2038,6 +2102,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
 
     /* Save and set thread-local callback context */
     HlHostCallCtx saved_ctx = tl_host_ctx;
+    (void)log_quota_open();   /* the call's own quota (audit 41) */
     tl_host_ctx.fn = callback_fn;
     tl_host_ctx.ctx = callback_ctx;
     tl_host_ctx.shared_data = pi_sd;
@@ -2132,7 +2197,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
     }
 
     /* Success - free input, create OWNED output buffer */
-    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    host_ctx_restore(&saved_ctx);   /* restores (clears) tl_host_ctx.spans before teardown */
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
 
     /* Spans back the INPUT (now consumed): detach + tear the set down so the
@@ -2151,7 +2216,7 @@ static int instance_call_buf_run(HlWasmInstance *pi,
     return (*output_buf) ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
 
 cleanup_bufs_err:
-    tl_host_ctx = saved_ctx;   /* restores (clears) tl_host_ctx.spans before teardown */
+    host_ctx_restore(&saved_ctx);   /* restores (clears) tl_host_ctx.spans before teardown */
     if (spans_active) hl_wasm_span_set_teardown(&span_set); /* terminal: no re-read */
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);

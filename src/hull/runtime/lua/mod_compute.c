@@ -1431,6 +1431,20 @@ static int lua_stream_before_chunk(size_t chunk_len, void *user_data)
                                                      : (int64_t)units);
 }
 
+/* Per-chunk OUTPUT charge (audit 41): the guest's output per chunk is up
+ * to max_output whatever its input, and it is copied (into the buffer, or
+ * through the cap's copies to the file or the callback) and written. 1 unit
+ * per 8 bytes plus 1, as fs.write charges its bytes, before any of it - the
+ * input-sized charge alone let a 512 KiB input write 2 GiB. Never raises
+ * (see above). */
+static int lua_stream_after_chunk(size_t out_len, void *user_data)
+{
+    lua_State *L = (lua_State *)user_data;
+    uint64_t units = 1 + hl_work_bytes_units((uint64_t)out_len);
+    return hl_lua_budget_charge(L, units > INT64_MAX ? INT64_MAX
+                                                     : (int64_t)units);
+}
+
 /* compute.stream(name, input, [output], [opts]) -> string | true, err */
 static int lua_compute_stream(lua_State *L)
 {
@@ -1545,6 +1559,8 @@ static int lua_compute_stream(lua_State *L)
     wasm_clamp_opts(&stream_opts.call_opts, &lua->base);
     stream_opts.before_chunk = lua_stream_before_chunk;
     stream_opts.before_chunk_ud = L;
+    stream_opts.after_chunk = lua_stream_after_chunk;   /* audit 41 */
+    stream_opts.after_chunk_ud = L;
     stream_opts.fs_charge = hl_lua_fs_charge;   /* opening a file input / output */
     stream_opts.fs_charge_ud = L;
     /* The buffer-mode result becomes one Lua string on the VM heap: it may

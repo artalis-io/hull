@@ -84,6 +84,14 @@
 
 #ifndef HL_WASM_CALLBACK_BUF_SIZE
 #define HL_WASM_CALLBACK_BUF_SIZE  4096  /* host_call CALLBACK output (stack) */
+
+/* Guest HL_WASM_OP_LOG quota per guest run - one call, one stream chunk, one
+ * UDF invocation, one instantiation's start functions (audit 41). Past either
+ * bound further lines are dropped (counted, nothing escaped or written) and
+ * one "suppressed N log lines" record is written when the run ends: one
+ * compute.call emitted 512,801 lines (533 MB) before its timeout. */
+#define HL_WASM_LOG_MAX_LINES      64
+#define HL_WASM_LOG_MAX_BYTES      (64 * 1024)
 #endif
 
 /* ── WASM instance pool ────────────────────────────────────────────── */

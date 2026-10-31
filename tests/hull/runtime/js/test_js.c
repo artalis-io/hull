@@ -16135,4 +16135,94 @@ UTEST(js_audit41, large_compiles_are_charged)
     hl_js_free(&lim);
 }
 
+#ifdef HL_ENABLE_WASM
+/* ── Audit 41: compute.stream output is charged ───────────────────────
+ * The twin of lua_audit41: each chunk was charged 1 + input/64, and the
+ * guest's output (up to max_output a chunk whatever the input) was copied
+ * and written uncharged. big_out.wasm returns its out_cap (1 MiB by
+ * default): 1 KiB in 256-byte chunks is 4 MiB of output, ~131k units a
+ * chunk now, so a 300000 budget stops it part-way in buffer and file mode. */
+static const unsigned char a41_big_out_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x01, 0x60,
+  0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05,
+  0x03, 0x01, 0x00, 0x02, 0x07, 0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f,
+  0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72,
+  0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00,
+  0x20, 0x03, 0x0b
+};
+static const HlEntry a41_wasm_entries[] = {
+    { "compute/big_out.wasm", a41_big_out_wasm, sizeof a41_big_out_wasm },
+    { 0, 0, 0 }
+};
+
+UTEST(js_audit41, compute_stream_output_is_charged)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, a41_wasm_entries, NULL);
+    a9_init_js_wasm(&cache, &vfs);
+    ASSERT_TRUE(js_initialized);
+
+    static const char *const all[] = { "." };
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a41"), NULL);
+    HlAllocator falloc;
+    hl_alloc_init(&falloc, 0);
+    HlFsPolicy policy = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    ASSERT_EQ(hl_fs_policy_compile_manifest(dir, &falloc, all, 1, all, 1,
+                                            &policy, &perr), 0);
+    HlFsConfig fs = { dir, strlen(dir), &policy };
+    js.base.fs_cfg = &fs;
+    EXPECT_EQ(eval_int("globalThis.ab = new ArrayBuffer(1024); 1"), 1);
+
+    static const char *const modes[] = {
+        "compute.stream('big_out', ab, { chunkSize: 256 });\n"
+        "globalThis.after = 1;\n",
+        "compute.stream('big_out', ab, { file: 'out.bin' }, { chunkSize: 256 });\n"
+        "globalThis.after = 1;\n",
+    };
+    int64_t saved = js.max_instructions;
+    for (int i = 0; i < 2; i++) {
+        js.max_instructions = 300000;
+        hl_js_budget_arm(&js);
+        JSValue r = JS_Eval(js.ctx, modes[i], strlen(modes[i]), "<a41>",
+                            JS_EVAL_TYPE_GLOBAL);
+        EXPECT_TRUE(JS_IsException(r));
+        JS_FreeValue(js.ctx, r);
+        JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+        EXPECT_TRUE(js.budget_tripped);
+        JSValue g = JS_GetGlobalObject(js.ctx);
+        JSValue a = JS_GetPropertyStr(js.ctx, g, "after");
+        EXPECT_TRUE(JS_IsUndefined(a));
+        JS_FreeValue(js.ctx, a);
+        JS_FreeValue(js.ctx, g);
+    }
+    char p[HL_TEST_PATH_MAX + 16];
+    snprintf(p, sizeof p, "%s/out.bin", dir);
+    struct stat st;
+    if (stat(p, &st) == 0) EXPECT_LE(st.st_size, (off_t)(2 * 1024 * 1024));
+
+    /* Under the default budget both modes complete. */
+    js.max_instructions = saved;
+    hl_js_budget_arm(&js);
+    EXPECT_EQ(eval_int(
+        "(new Uint8Array(compute.stream('big_out', ab, { chunkSize: 256 }))"
+        ".length === 4 * 1024 * 1024 && "
+        "compute.stream('big_out', ab, { file: 'out.bin' }, { chunkSize: 256 })"
+        " === true) ? 1 : 0"), 1);
+    EXPECT_EQ(stat(p, &st), 0);
+    EXPECT_EQ(st.st_size, (off_t)(4 * 1024 * 1024));
+
+    js.base.fs_cfg = NULL;
+    js.base.wasm_cache = NULL;
+    js.base.app_vfs = NULL;
+    cleanup_js();
+    hl_fs_policy_free(&policy);
+    nftw(dir, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    hl_cap_wasm_destroy(&cache);
+}
+#endif /* HL_ENABLE_WASM */
+
 UTEST_MAIN();
