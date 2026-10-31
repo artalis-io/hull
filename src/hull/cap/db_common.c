@@ -219,7 +219,10 @@ static _Thread_local int g_db_ns_trusted;
 int hl_cap_db_ns_trust(int trusted)
 {
     int prev = g_db_ns_trusted;
-    g_db_ns_trusted = trusted ? 1 : 0;
+    /* Only HL_DB_NS_TRUSTED (1) trusts; HL_DB_NS_STDLIB_SCOPED (2) is a
+     * stdlib caller whose SQL touches no `_hull_*` table the authorizer
+     * guards (hull.search, audit 40) and so runs untrusted. */
+    g_db_ns_trusted = (trusted == 1);
     return prev;
 }
 
@@ -236,6 +239,247 @@ int hl_cap_db_ns_trusted(void)
 int hl_cap_db_name_reserved(const char *name)
 {
     return name && strncasecmp(name, "_hull_", 6) == 0;
+}
+
+/* ── Stored virtual tables (audit 40) ──────────────────────────────── */
+
+/* A tiny reader for the CREATE VIRTUAL TABLE text SQLite keeps in
+ * sqlite_schema, tokenized the way SQLite's tokenizer reads it: whitespace
+ * and both comment forms are gaps (a block comment does not nest and an
+ * unterminated one runs to the end), identifiers are bare or "..." / `...` /
+ * [...] quoted, strings '...' with a doubled quote for a quote. */
+typedef struct {
+    int         kind;   /* VT_END, VT_IDENT, VT_STRING, VT_PUNCT */
+    const char *s;      /* the token as written (quotes included) */
+    size_t      n;
+} HlVtTok;
+
+enum { VT_END, VT_IDENT, VT_STRING, VT_PUNCT, VT_BAD };
+
+static const char *vt_skip_gap(const char *p)
+{
+    for (;;) {
+        while (*p == ' ' || (*p >= '\t' && *p <= '\r'))
+            p++;
+        if (p[0] == '-' && p[1] == '-') {
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '*') {
+            const char *e = strstr(p + 2, "*/");
+            p = e ? e + 2 : p + strlen(p);
+            continue;
+        }
+        return p;
+    }
+}
+
+static int vt_bare_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '$' || c >= 0x80;
+}
+
+static const char *vt_next(const char *p, HlVtTok *t)
+{
+    p = vt_skip_gap(p);
+    t->s = p;
+    t->n = 0;
+    if (!*p) { t->kind = VT_END; return p; }
+    char close = 0;
+    if (*p == '"' || *p == '`' || *p == '\'') close = *p;
+    else if (*p == '[') close = ']';
+    if (close) {
+        const char *q = p + 1;
+        for (;;) {
+            if (!*q) { t->kind = VT_BAD; return q; }
+            if (*q == close) {
+                if (close != ']' && q[1] == close) { q += 2; continue; }
+                break;
+            }
+            q++;
+        }
+        t->kind = (*p == '\'') ? VT_STRING : VT_IDENT;
+        t->n = (size_t)(q + 1 - p);
+        return q + 1;
+    }
+    if (vt_bare_char((unsigned char)*p)) {
+        const char *q = p;
+        while (vt_bare_char((unsigned char)*q)) q++;
+        t->kind = VT_IDENT;
+        t->n = (size_t)(q - p);
+        return q;
+    }
+    t->kind = VT_PUNCT;
+    t->n = 1;
+    return p + 1;
+}
+
+/* The token's value with its quotes removed (a doubled quote read as one)
+ * into @p out; -1 when it does not fit. */
+static int vt_value(const HlVtTok *t, char *out, size_t cap)
+{
+    const char *s = t->s;
+    size_t n = t->n, o = 0;
+    if (t->kind != VT_IDENT && t->kind != VT_STRING) return -1;
+    char q = 0;
+    if (n >= 2 && (*s == '"' || *s == '`' || *s == '\'' || *s == '[')) {
+        q = (*s == '[') ? ']' : *s;
+        s++;
+        n -= 2;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (q && q != ']' && s[i] == q) i++;   /* doubled quote */
+        if (o + 1 >= cap) return -1;
+        out[o++] = s[i];
+    }
+    out[o] = '\0';
+    return 0;
+}
+
+static int vt_kw(const HlVtTok *t, const char *kw)
+{
+    return t->kind == VT_IDENT && t->n == strlen(kw) &&
+           strncasecmp(t->s, kw, t->n) == 0;
+}
+
+static int vt_plain_ident(const char *s)
+{
+    if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_'))
+        return 0;
+    for (; *s; s++)
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+              (*s >= '0' && *s <= '9') || *s == '_'))
+            return 0;
+    return 1;
+}
+
+/* hull.search's tokenize grammar: an identifier, then single-space separated
+ * identifiers or integers. */
+static int vt_tokenize_ok(const char *s)
+{
+    int first = 1;
+    for (;;) {
+        const char *w = s;
+        if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z')) {
+            while ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+                   (*s >= '0' && *s <= '9') || *s == '_')
+                s++;
+        } else if (!first && *s >= '0' && *s <= '9') {
+            while (*s >= '0' && *s <= '9') s++;
+        }
+        if (s == w) return 0;
+        first = 0;
+        if (!*s) return 1;
+        if (*s != ' ') return 0;
+        s++;
+    }
+}
+
+int hl_cap_db_sql_is_virtual_table(const char *sql)
+{
+    HlVtTok t;
+    if (!sql) return 0;
+    const char *p = vt_next(sql, &t);
+    if (!vt_kw(&t, "create")) return 0;
+    (void)vt_next(p, &t);
+    return vt_kw(&t, "virtual");
+}
+
+/* Whether the arguments of an `fts5(...)` definition named @p name are the
+ * shape hull.search's create_index writes: `id`, one or more columns, then
+ * any of tokenize / content / content_rowid once each, content naming an app
+ * table (never a `_hull_*` one). @p p points just past the `(`. */
+static int vt_search_args_ok(const char *p)
+{
+    char v[256], key[64];
+    int ncols = 0, seen_tok = 0, seen_content = 0, seen_rowid = 0, opts = 0;
+    for (;;) {
+        HlVtTok a, b, c;
+        p = vt_next(p, &a);
+        if (a.kind != VT_IDENT || vt_value(&a, key, sizeof key) != 0)
+            return 0;
+        p = vt_next(p, &b);
+        if (b.kind == VT_PUNCT && *b.s == '=') {
+            p = vt_next(p, &c);
+            if (vt_value(&c, v, sizeof v) != 0) return 0;
+            if (strcasecmp(key, "tokenize") == 0 && !seen_tok) {
+                seen_tok = 1;
+                if (!vt_tokenize_ok(v)) return 0;
+            } else if (strcasecmp(key, "content") == 0 && !seen_content) {
+                seen_content = 1;
+                if (!vt_plain_ident(v) || hl_cap_db_name_reserved(v))
+                    return 0;
+            } else if (strcasecmp(key, "content_rowid") == 0 && !seen_rowid) {
+                seen_rowid = 1;
+                if (!vt_plain_ident(v) || hl_cap_db_name_reserved(v))
+                    return 0;
+            } else {
+                return 0;
+            }
+            opts = 1;
+            p = vt_next(p, &b);
+        } else {
+            /* a column: before every option, plain, `id` first */
+            if (opts || !vt_plain_ident(key) || hl_cap_db_name_reserved(key))
+                return 0;
+            if (ncols == 0 && strcasecmp(key, "id") != 0) return 0;
+            ncols++;
+        }
+        if (b.kind != VT_PUNCT) return 0;
+        if (*b.s == ')') break;
+        if (*b.s != ',') return 0;
+    }
+    if (ncols < 2) return 0;
+    HlVtTok e;
+    (void)vt_next(p, &e);
+    return e.kind == VT_END;
+}
+
+int hl_cap_db_vtab_definition_ok(const char *name, const char *sql)
+{
+    if (!name || !sql) return 0;
+    if (!hl_cap_db_name_reserved(name))
+        /* An app's own virtual table: it may not name a `_hull_*` object
+         * anywhere (an fts5 content= / content_rowid=, an fts5vocab over a
+         * search index, any other module's argument) - read like app SQL. */
+        return hl_cap_db_check_namespace(sql) == 0;
+
+    /* A `_hull_*` virtual table can only be one of hull.search's indexes. */
+    if (strncasecmp(name, "_hull_fts_", 10) != 0 || !vt_plain_ident(name + 10))
+        return 0;
+    HlVtTok t;
+    char v[256];
+    const char *p = vt_next(sql, &t);
+    if (!vt_kw(&t, "create")) return 0;
+    p = vt_next(p, &t);
+    if (!vt_kw(&t, "virtual")) return 0;
+    p = vt_next(p, &t);
+    if (!vt_kw(&t, "table")) return 0;
+    p = vt_next(p, &t);
+    if (vt_kw(&t, "if")) {
+        p = vt_next(p, &t);
+        if (!vt_kw(&t, "not")) return 0;
+        p = vt_next(p, &t);
+        if (!vt_kw(&t, "exists")) return 0;
+        p = vt_next(p, &t);
+    }
+    if (vt_value(&t, v, sizeof v) != 0) return 0;
+    HlVtTok d;
+    const char *q = vt_next(p, &d);
+    if (d.kind == VT_PUNCT && *d.s == '.') {   /* schema.name */
+        if (strcasecmp(v, "main") != 0) return 0;
+        p = vt_next(q, &t);
+        if (vt_value(&t, v, sizeof v) != 0) return 0;
+    }
+    if (strcasecmp(v, name) != 0) return 0;
+    p = vt_next(p, &t);
+    if (!vt_kw(&t, "using")) return 0;
+    p = vt_next(p, &t);
+    if (!vt_kw(&t, "fts5")) return 0;
+    p = vt_next(p, &t);
+    if (t.kind != VT_PUNCT || *t.s != '(') return 0;
+    return vt_search_args_ok(p);
 }
 
 /* ── DuckDB dynamic-SQL table functions (audit 25) ─────────────────── */

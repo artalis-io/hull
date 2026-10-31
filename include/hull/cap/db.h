@@ -311,6 +311,33 @@ int  hl_cap_db_ns_trusted(void);
  */
 int  hl_cap_db_name_reserved(const char *name);
 
+/** Values for #hl_cap_db_ns_trust beyond 0 / 1: a stdlib caller whose SQL
+ * reaches no guarded `_hull_*` table (hull.search: its own `_hull_fts_*`
+ * index is exempt by name). The text check is waived as for any stdlib
+ * caller, but the authorizer treats the SQL as untrusted, so a read an FTS5
+ * index prepares while it runs (an external-content table) cannot reach
+ * another `_hull_*` table (audit 40). */
+#define HL_DB_NS_TRUSTED       1
+#define HL_DB_NS_STDLIB_SCOPED 2
+
+/**
+ * @brief Whether @p sql (a `sqlite_schema.sql` value) is a CREATE VIRTUAL
+ * TABLE statement, read past whitespace and comments the way SQLite does.
+ */
+int  hl_cap_db_sql_is_virtual_table(const char *sql);
+
+/**
+ * @brief Whether a virtual table stored in a database file may be opened
+ * (audit 40). @p name is its `sqlite_schema.name`, @p sql its definition.
+ * An app virtual table may not name a `_hull_*` object anywhere in its text
+ * (an fts5 `content=`, an fts5vocab over a search index, ...); a `_hull_*`
+ * one must be a hull.search index exactly as search.create_index writes it:
+ * `_hull_fts_<ident>`, module fts5, columns `id` + plain identifiers, then
+ * only tokenize / content / content_rowid, content naming a non-`_hull_`
+ * table. 1 when allowed, 0 otherwise.
+ */
+int  hl_cap_db_vtab_definition_ok(const char *name, const char *sql);
+
 /**
  * @brief Whether @p sql calls one of DuckDB's dynamic-SQL table functions -
  * `query(sql)`, `query_table(name)`, `json_execute_serialized_sql(plan)` -

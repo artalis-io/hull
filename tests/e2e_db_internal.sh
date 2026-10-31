@@ -222,6 +222,76 @@ c.execute('DROP VIEW IF EXISTS leakv'); c.execute('DROP TRIGGER IF EXISTS leakt'
     done
 done
 
+# Audit 40: a virtual table is stored as type 'table', so the view / trigger
+# scan never saw one. A planted fts5 table named like a search index with
+# content='_hull_*' was read by search.query inside a stdlib call. Search
+# itself keeps working on the default connection; a database holding such a
+# table (or an fts5vocab over a search index) is refused at open.
+echo "=== planted virtual table over _hull_* (SQLite) ==="
+for ext in lua js; do
+    d="$TMPDIR/v$ext"
+    mkdir -p "$d"
+    if [ "$ext" = lua ]; then
+        cat > "$d/app.lua" <<'EOF5'
+app.manifest({ modules = { "hull/search@1", "hull/db@1" } })
+local search = require("hull.search")
+app.main(function(ctx)
+    search.create_index("notes", { "body" })
+    local db = require("hull.db").default()
+    db.batch(function()
+        search.index("notes", "n1", { body = "hello planted world" })
+    end)
+    local hits = search.query("notes", "hello")
+    ctx.stdout:write("hits=" .. tostring(#hits) .. "\n")
+    return 0
+end)
+EOF5
+    else
+        cat > "$d/app.js" <<'EOF5'
+import { app } from "hull:app";
+import { search } from "hull:search";
+import { db } from "hull:db";
+app.manifest({ modules: ["hull/search@1", "hull/db@1"] });
+app.main((ctx) => {
+    search.createIndex("notes", ["body"]);
+    db.default().batch(() => {
+        search.index("notes", "n1", { body: "hello planted world" });
+    });
+    const hits = search.query("notes", "hello");
+    ctx.stdout.write("hits=" + hits.length + "\n");
+    return 0;
+});
+EOF5
+    fi
+    vdb="$WTMP/v$ext/app.db"
+    out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox -d "$vdb" "app.$ext" 2>&1 || true)
+    case "$out" in
+        *"hits=1"*) pass "$ext: hull/search indexes (lazy writes at COMMIT) and queries" ;;
+        *) fail "$ext: hull/search indexes (lazy writes at COMMIT) and queries" "$out" ;;
+    esac
+    out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox -d "$vdb" "app.$ext" 2>&1 || true)
+    case "$out" in
+        *"hits=1"*) pass "$ext: a database holding a search index reopens" ;;
+        *) fail "$ext: a database holding a search index reopens" "$out" ;;
+    esac
+    # Placeholder table only: no real session data is ever planted.
+    for obj in "CREATE VIRTUAL TABLE _hull_fts_probe USING fts5(id, data, content='_hull_probe', content_rowid='rowid')" \
+               "CREATE VIRTUAL TABLE probe_vocab USING fts5vocab('_hull_fts_notes', 'row')"; do
+        "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
+c.execute('CREATE TABLE IF NOT EXISTS _hull_probe (id TEXT, data TEXT)'); \
+c.execute(sys.argv[2]); c.commit()" "$vdb" "$obj"
+        label=$(echo "$obj" | cut -d" " -f4)
+        out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox -d "$vdb" "app.$ext" 2>&1 || true)
+        case "$out" in
+            *"holds a virtual table"*)
+                pass "$ext: a database holding virtual table '$label' is refused at open" ;;
+            *) fail "$ext: a database holding virtual table '$label' is refused at open" "$out" ;;
+        esac
+        "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
+c.execute('DROP TABLE IF EXISTS _hull_fts_probe'); c.execute('DROP TABLE IF EXISTS probe_vocab'); c.commit()" "$vdb"
+    done
+done
+
 echo ""
 echo "e2e_db_internal: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

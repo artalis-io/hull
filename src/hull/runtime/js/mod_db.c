@@ -333,7 +333,11 @@ static int js_is_stdlib_caller(JSContext *ctx, JSValueConst this_val)
     JS_FreeAtom(ctx, name);
     if (!str)
         return 0;
-    int is_stdlib = (strncmp(str, "hull:", 5) == 0);
+    int is_stdlib = 0;
+    if (strncmp(str, "hull:", 5) == 0)
+        /* hull:search: see HL_DB_NS_STDLIB_SCOPED (audit 40) */
+        is_stdlib = strcmp(str, "hull:search") == 0 ? HL_DB_NS_STDLIB_SCOPED
+                                                    : HL_DB_NS_TRUSTED;
     JS_FreeCString(ctx, str);
     return is_stdlib;
 }

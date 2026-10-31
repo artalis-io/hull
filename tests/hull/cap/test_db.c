@@ -810,6 +810,191 @@ UTEST(hl_cap_db, init_refuses_stored_objects_naming_hull_tables)
     rmdir(dir);
 }
 
+/* Audit 40: a virtual table is stored as type 'table', so the view / trigger
+ * scan never saw one. An fts5 table named like a search index with
+ * content='_hull_*' was queried by search.query inside a stdlib call, and
+ * FTS5's content-table read returned the reserved table's rows. */
+UTEST(hl_cap_db, vtab_definitions_are_checked)
+{
+    /* What search.create_index writes (Lua quotes with ', JS with "). */
+    EXPECT_TRUE(hl_cap_db_vtab_definition_ok("_hull_fts_posts",
+        "CREATE VIRTUAL TABLE _hull_fts_posts USING fts5(id, title, body, "
+        "tokenize='unicode61')"));
+    EXPECT_TRUE(hl_cap_db_vtab_definition_ok("_hull_fts_posts",
+        "CREATE VIRTUAL TABLE _hull_fts_posts USING fts5(id, title, "
+        "tokenize=\"porter ascii\", content=\"posts\", content_rowid=\"rid\")"));
+    EXPECT_TRUE(hl_cap_db_vtab_definition_ok("_hull_fts_p",
+        "create /* c */ virtual table if not exists \"_hull_fts_p\" using "
+        "FTS5 ( id , t , tokenize = 'unicode61 remove_diacritics 1' )"));
+    /* App virtual tables that name nothing reserved. */
+    EXPECT_TRUE(hl_cap_db_vtab_definition_ok("docs",
+        "CREATE VIRTUAL TABLE docs USING fts5(a, content='posts')"));
+    EXPECT_TRUE(hl_cap_db_vtab_definition_ok("v",
+        "CREATE VIRTUAL TABLE v USING fts5vocab('docs', 'row')"));
+
+    static const struct { const char *name, *sql; } bad[] = {
+        /* content= / vocab naming a reserved table */
+        { "_hull_fts_probe", "CREATE VIRTUAL TABLE _hull_fts_probe USING "
+          "fts5(id, data, content='_hull_probe', content_rowid='rowid')" },
+        { "_hull_fts_probe", "CREATE VIRTUAL TABLE _hull_fts_probe USING "
+          "fts5(id, data, content=\"_HULL_PROBE\")" },
+        { "_hull_fts_probe", "CREATE VIRTUAL TABLE _hull_fts_probe USING "
+          "fts5(id, data, content=[_hull_probe])" },
+        { "docs", "CREATE VIRTUAL TABLE docs USING fts5(a, content='_hull_probe')" },
+        { "docs", "CREATE VIRTUAL TABLE docs USING fts5(a, content=_Hull_probe)" },
+        { "v", "CREATE VIRTUAL TABLE v USING fts5vocab('_hull_fts_posts', 'row')" },
+        { "v", "CREATE VIRTUAL TABLE v USING fts5vocab(main, _hull_fts_posts, row)" },
+        /* a reserved name that is not search's shape */
+        { "_hull_fts_v", "CREATE VIRTUAL TABLE _hull_fts_v USING "
+          "fts5vocab('docs', 'row')" },
+        { "_hull_probe", "CREATE VIRTUAL TABLE _hull_probe USING fts5(id, a)" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING fts5(a, b)" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING fts5(id)" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING "
+          "fts5(id, a, content='posts', content='other')" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING "
+          "fts5(id, a, detail=none)" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING "
+          "fts5(id, a, content='main.posts')" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_q USING fts5(id, a)" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING fts5(id, a) x" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING "
+          "fts5(id, a, tokenize='x''y')" },
+        { "_hull_fts_p-x", "CREATE VIRTUAL TABLE \"_hull_fts_p-x\" USING fts5(id, a)" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE other._hull_fts_p USING fts5(id, a)" },
+        { "_hull_fts_p", "CREATE VIRTUAL TABLE _hull_fts_p USING fts5(id, a" },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        EXPECT_FALSE(hl_cap_db_vtab_definition_ok(bad[i].name, bad[i].sql));
+
+    EXPECT_TRUE(hl_cap_db_sql_is_virtual_table("create/**/VIRTUAL table x using fts5(a)"));
+    EXPECT_TRUE(hl_cap_db_sql_is_virtual_table("CREATE --c\n virtual TABLE x USING fts5(a)"));
+    EXPECT_FALSE(hl_cap_db_sql_is_virtual_table("CREATE TABLE virtual (a)"));
+}
+
+static void vtab_plant_db(const char *path, const char *sql)
+{
+    unlink(path);
+    sqlite3 *raw = NULL;
+    if (sqlite3_open(path, &raw) == SQLITE_OK)   /* no guard */
+        (void)sqlite3_exec(raw, sql, NULL, NULL, NULL);
+    sqlite3_close(raw);
+}
+
+UTEST(hl_cap_db, init_refuses_planted_virtual_tables)
+{
+    char dir[512];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "hull-db-vtab") != NULL);
+    char path[600];
+    snprintf(path, sizeof path, "%s/planted.db", dir);
+    static const char *const planted[] = {
+        "CREATE VIRTUAL TABLE _hull_fts_probe USING fts5(id, data, "
+        "content='_hull_probe', content_rowid='rowid')",
+        "CREATE VIRTUAL TABLE docs USING fts5(id, data, content='_hull_probe')",
+        "CREATE VIRTUAL TABLE _hull_fts_posts USING fts5(id, title, "
+        "tokenize='unicode61'); CREATE VIRTUAL TABLE vocab USING "
+        "fts5vocab('_hull_fts_posts', 'row')",
+        "CREATE VIRTUAL TABLE _hull_fts_v USING fts5vocab('docs0', 'row')",
+    };
+    hl_cap_db_sqlite_setup();
+    for (size_t i = 0; i < sizeof planted / sizeof planted[0]; i++) {
+        char sql[1024];
+        snprintf(sql, sizeof sql,
+                 "CREATE TABLE _hull_probe (id TEXT, data TEXT);"
+                 "CREATE VIRTUAL TABLE docs0 USING fts5(a); %s", planted[i]);
+        vtab_plant_db(path, sql);
+        sqlite3 *db = NULL;
+        ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &db));
+        sqlite3_stmt *st = NULL;   /* the plant took */
+        ASSERT_EQ(SQLITE_OK, sqlite3_prepare_v2(db,
+            "SELECT count(*) FROM sqlite_schema WHERE rootpage = 0", -1, &st, NULL));
+        ASSERT_EQ(SQLITE_ROW, sqlite3_step(st));
+        EXPECT_LE(2, sqlite3_column_int(st, 0));
+        sqlite3_finalize(st);
+        EXPECT_NE(0, hl_cap_db_init(db));
+        sqlite3_close(db);
+    }
+    /* A search index (with an app content table) and an app fts5vocab open. */
+    vtab_plant_db(path,
+             "CREATE TABLE _hull_probe (id TEXT, data TEXT);"
+             "CREATE TABLE posts (title TEXT);"
+             "CREATE VIRTUAL TABLE IF NOT EXISTS _hull_fts_posts USING "
+             "fts5(id, title, tokenize='unicode61', content='posts');"
+             "CREATE VIRTUAL TABLE docs USING fts5(a);"
+             "CREATE VIRTUAL TABLE vocab USING fts5vocab('docs', 'row');");
+    sqlite3 *db = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &db));
+    EXPECT_EQ(0, hl_cap_db_init(db));
+    sqlite3_close(db);
+    unlink(path);
+    char side[620];
+    snprintf(side, sizeof side, "%s-wal", path); unlink(side);
+    snprintf(side, sizeof side, "%s-shm", path); unlink(side);
+    rmdir(dir);
+}
+
+/* The second layer: hull.search's calls run with HL_DB_NS_STDLIB_SCOPED,
+ * which the authorizer treats as untrusted. An index whose content= names a
+ * reserved table (made here past the open check, standing in for one the
+ * check missed) cannot read it during a search; its own `_hull_fts_*`
+ * tables stay reachable. */
+UTEST(hl_cap_db, authorizer_scopes_a_search_call)
+{
+    setup_db();
+    int prev = hl_cap_db_ns_trust(HL_DB_NS_TRUSTED);
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(test_db,
+        "CREATE TABLE _hull_probe (id TEXT, data TEXT);"
+        "INSERT INTO _hull_probe VALUES ('PLACEHOLDER', 'not-a-secret');"
+        "CREATE VIRTUAL TABLE _hull_fts_probe USING fts5(id, data, "
+        "content='_hull_probe', content_rowid='rowid');"
+        "INSERT INTO _hull_fts_probe(rowid, id, data) VALUES (1, 'x', 'x');"
+        "CREATE VIRTUAL TABLE _hull_fts_ok USING fts5(id, body);"
+        "INSERT INTO _hull_fts_ok(id, body) VALUES ('1', 'hello');",
+        NULL, NULL, NULL));
+    hl_cap_db_ns_restore(prev);
+
+    /* Fully trusted, the content read goes through (what audit 40 found). */
+    prev = hl_cap_db_ns_trust(HL_DB_NS_TRUSTED);
+    int n = 0;
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache,
+        "SELECT id, data FROM _hull_fts_probe WHERE _hull_fts_probe MATCH 'x'",
+        NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(1, n);
+    hl_cap_db_ns_restore(prev);
+    /* A fresh connection: FTS5 caches its content statement per connection. */
+    teardown_db();
+    setup_db();
+    prev = hl_cap_db_ns_trust(HL_DB_NS_TRUSTED);
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(test_db,
+        "CREATE TABLE _hull_probe (id TEXT, data TEXT);"
+        "INSERT INTO _hull_probe VALUES ('PLACEHOLDER', 'not-a-secret');"
+        "CREATE VIRTUAL TABLE _hull_fts_probe USING fts5(id, data, "
+        "content='_hull_probe', content_rowid='rowid');"
+        "INSERT INTO _hull_fts_probe(rowid, id, data) VALUES (1, 'x', 'x');"
+        "CREATE VIRTUAL TABLE _hull_fts_ok USING fts5(id, body);"
+        "INSERT INTO _hull_fts_ok(id, body) VALUES ('1', 'hello');",
+        NULL, NULL, NULL));
+    hl_cap_db_ns_restore(prev);
+
+    prev = hl_cap_db_ns_trust(HL_DB_NS_STDLIB_SCOPED);
+    EXPECT_EQ(0, hl_cap_db_ns_trusted());
+    n = 0;
+    EXPECT_NE(0, hl_cap_db_query(&test_cache,
+        "SELECT id, data FROM _hull_fts_probe WHERE _hull_fts_probe MATCH 'x'",
+        NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(0, n);
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache,
+        "SELECT id FROM _hull_fts_ok WHERE _hull_fts_ok MATCH 'hello'",
+        NULL, 0, count_rows_cb, &n, NULL));
+    EXPECT_EQ(1, n);
+    /* Creating a `_hull_fts_*` table under another module is refused. */
+    EXPECT_NE(SQLITE_OK, sqlite3_exec(test_db,
+        "CREATE VIRTUAL TABLE _hull_fts_vv USING fts5vocab('_hull_fts_ok', 'row')",
+        NULL, NULL, NULL));
+    hl_cap_db_ns_restore(prev);
+    teardown_db();
+}
+
 /* Audit 25: DuckDB's query() / query_table() build a statement or a table
  * name at run time ('_hu' || 'll_sessions'), past the text check above. */
 UTEST(hl_cap_db, dynamic_sql_calls_are_found)
