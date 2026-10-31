@@ -2880,6 +2880,24 @@ jobs:
       - name: Dry-run inertness gate
         run: make check-dry-run-inert
 
+  # Invariant lint (docs/design/audit_convergence.md section 5.2,
+  # docs/invariants/README.md): CLAUDE.md's "a new X must Y" rules as checks
+  # over the C sources, plus a self-test proving each rule bites on its
+  # fixtures. python3 only, no build, seconds. Full history so INV-10 can
+  # diff the vendored engines against the merge-base with main.
+  invariants:
+    name: Invariant lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Invariant lint (INV-1..INV-10)
+        run: make check-invariants INVARIANTS_BASE="$(git merge-base HEAD origin/main)"
+      - name: Invariant lint self-test (negative)
+        run: make check-invariants-selftest
+
   htmx-browser:
     needs: [classify]
     if: needs.classify.outputs.run_web == 'true'
@@ -3140,6 +3158,7 @@ jobs:
       - project-discovery-lua
       - coverage
       - lint
+      - invariants
       - htmx-browser
       - benchmark
       - embed-rust
