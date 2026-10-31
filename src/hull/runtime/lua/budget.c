@@ -249,6 +249,9 @@ void hl_lua_budget_install(lua_State *L, HlLuaBudget *b)
     lua_rawsetp(L, LUA_REGISTRYINDEX, &hl_lua_budget_time_key);
     /* Lua HULL PATCH 0005: the watchdog's flag reaches every thread's hook. */
     lua_hlsetstop(L, b->watch ? &b->watch->stop : NULL);
+    /* Lua HULL PATCH 0006: the stop flag and a tripped budget also end a
+     * long ephemeron convergence inside the collector (conservatively). */
+    lua_hlsettripped(L, &b->tripped);
     lua_pushcfunction(L, budget_pcall);
     lua_setglobal(L, "pcall");
     lua_pushcfunction(L, budget_xpcall);
