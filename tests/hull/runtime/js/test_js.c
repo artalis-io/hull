@@ -5309,6 +5309,51 @@ UTEST(js_stdlib, middleware_idempotency_suite)
     cleanup_js_caps();
 }
 
+/* Audit 40: the JS idempotency middleware encoded every stored response with
+ * a pure-JS WTF-8 loop and replayed it through another per-byte loop; a 12 MB
+ * body tripped the instruction limit AFTER the handler's side effects had
+ * been made, leaving the key inflight (and the handler re-run after the
+ * lease). A 16 MB response is now stored and replayed under the default
+ * budget, untripped. */
+UTEST(js_audit40, idempotency_large_response_within_budget)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    hl_js_budget_arm(&js);
+    const char *code =
+        "import { idempotency } from 'hull:web:middleware:idempotency';\n"
+        "const H = __testHooks('hull:web:middleware:idempotency');\n"
+        "function rq() { return { method: 'POST', path: '/big', body: 'x', ctx: {}, headers: {},\n"
+        "  header: (n) => n.toLowerCase() === 'idempotency-key' ? 'a40-16m' : null }; }\n"
+        "function rs() { return { status(c) { this.code = c; return this; },\n"
+        "  header(n, v) { return this; }, html(b) { this.sent = b.length; return this; },\n"
+        "  text(b) { this.sent = b.length; return this; },\n"
+        "  bytes(b) { this.buf = b; return this; }, json() { return this; } }; }\n"
+        "function run() {\n"
+        "  idempotency.init();\n"
+        "  const mw = idempotency.middleware();\n"
+        "  const body = 'abcdefgh'.repeat(2 * 1024 * 1024);\n"   /* 16 MiB */
+        "  const r1 = rq(), s1 = rs();\n"
+        "  if (mw(r1, s1) !== 0) return 1;\n"
+        "  idempotency.respondHtml(r1, s1, 201, body);\n"
+        "  if (s1.code !== 201 || s1.sent !== body.length) return 2;\n"
+        "  if (H.rows('a40-16m')[0].state !== 'complete') return 3;\n"
+        "  const s2 = rs();\n"
+        "  if (mw(rq(), s2) !== 1 || s2.code !== 201) return 4;\n"
+        "  if (!(s2.buf instanceof ArrayBuffer) || s2.buf.byteLength !== body.length) return 5;\n"
+        "  const u8 = new Uint8Array(s2.buf);\n"
+        "  if (u8[0] !== 97 || u8[body.length - 1] !== 104) return 6;\n"
+        "  return 0;\n"
+        "}\n"
+        "globalThis.__a40 = run();\n";
+    EXPECT_EQ(js_run_steps(code, "globalThis.__a40"), 0);
+    EXPECT_EQ(js.budget_tripped, 0);
+    js.max_instructions = 0;
+    hl_js_budget_arm(&js);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, middleware_inbox_suite)
 {
     init_js_with_caps();

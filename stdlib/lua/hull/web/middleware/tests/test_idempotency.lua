@@ -249,6 +249,20 @@ test("audit 39: a failed store marks the key processed, never re-runnable", func
     assert_eq(runs, 1)
 end)
 
+test("audit 40: headers past the store cap mark the key unstored", function()
+    local mw = idempotency.middleware()
+    local req1 = mock_req("POST", "/a40h", "x", { ["idempotency-key"] = "a40-hdr" })
+    local res1 = mock_res()
+    assert_eq(mw(req1, res1), 0)
+    idempotency.respond(req1, res1, 201, { ok = true },
+                        { ["Content-Language"] = string.rep("a", 300 * 1024) })
+    assert_eq(res1._status, 201, "the response is still sent")
+    assert_eq(H.rows("a40-hdr")[1].state, "unstored")
+    local res2 = mock_res()
+    assert_eq(mw(mock_req("POST", "/a40h", "x", { ["idempotency-key"] = "a40-hdr" }), res2), 1)
+    assert_eq(res2._status, 409)
+end)
+
 test("audit 39: a row in the old format still replays", function()
     local mw = idempotency.middleware()
     local req = mock_req("POST", "/legacy", "x", { ["idempotency-key"] = "a39-legacy" })

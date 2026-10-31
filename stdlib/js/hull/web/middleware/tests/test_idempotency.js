@@ -37,7 +37,10 @@ function mockRes() {
         json(data) { this._body = json.encode(data); return this; },
         text(data) { this._body = data; return this; },
         html(data) { this._body = data; return this; },
-        bytes(u8) {
+        bytes(x) {
+            // The replay hands res.bytes an ArrayBuffer (audit 40).
+            const u8 = x instanceof ArrayBuffer ? new Uint8Array(x) : x;
+            this._byteLength = u8.length;
             let b = "";
             for (let i = 0; i < u8.length; i++) b += String.fromCharCode(u8[i]);
             this._bytes = b;
@@ -274,6 +277,43 @@ test("audit 39: a key that is not printable ASCII is a 400", () => {
 test("audit 39: a principal the column cannot store is hashed", () => {
     assertEq(H.normPrincipal("u\ud800").slice(0, 7), "sha256:");
     assertEq(H.normPrincipal("u\u0000").slice(0, 7), "sha256:");
+});
+
+// ── audit 40: native encode, a size cap before the store ───────────
+
+test("audit 40: the replay sends an ArrayBuffer of the stored bytes", () => {
+    const mw = idempotency.middleware();
+    const body = "x".repeat(100000) + "\u00e9\ud800";
+    const req1 = mockReq("POST", "/a40", "x", { "idempotency-key": "a40-big" });
+    assertEq(mw(req1, mockRes()), 0);
+    idempotency.respondHtml(req1, mockRes(), 200, body);
+    let seen = null;
+    const res2 = mockRes();
+    res2.bytes = function (x) { seen = x; return this; };
+    const req2 = mockReq("POST", "/a40", "x", { "idempotency-key": "a40-big" });
+    assertEq(mw(req2, res2), 1);
+    assertEq(seen instanceof ArrayBuffer, true, "an ArrayBuffer");
+    assertEq(seen.byteLength, 100000 + 2 + 3, "WTF-8 length");
+    const u8 = new Uint8Array(seen);
+    assertEq(u8[100000], 0xc3); assertEq(u8[100001], 0xa9);
+    assertEq(u8[100002], 0xed); assertEq(u8[100003], 0xa0); assertEq(u8[100004], 0x80);
+});
+
+test("audit 40: headers past the store cap mark the key unstored", () => {
+    const mw = idempotency.middleware();
+    let runs = 0;
+    const req1 = mockReq("POST", "/a40h", "x", { "idempotency-key": "a40-hdr" });
+    const res1 = mockRes();
+    assertEq(mw(req1, res1), 0);
+    runs++;
+    idempotency.respond(req1, res1, 201, { ok: true },
+                        { "Content-Language": "a".repeat(300 * 1024) });
+    assertEq(res1._status, 201, "the response is still sent");
+    assertEq(H.rows("a40-hdr")[0].state, "unstored");
+    const res2 = mockRes();
+    assertEq(mw(mockReq("POST", "/a40h", "x", { "idempotency-key": "a40-hdr" }), res2), 1);
+    assertEq(res2._status, 409);
+    assertEq(runs, 1);
 });
 
 // ── cleanup ─────────────────────────────────────────────────────────

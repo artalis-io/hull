@@ -27,6 +27,7 @@ import { internal as dbInternal } from "hull:db:_internal";
 const db = dbInternal.connection();
 import { crypto } from "hull:crypto";
 import { encoding } from "hull:encoding";
+import * as encNative from "hull:encoding:_native";
 import { time } from "hull:time";
 import { _test_hooks } from "hull:_test_hooks";
 import { json } from "hull:json";
@@ -83,37 +84,24 @@ const STATE_UNSTORED = "unstored";
 // Test seam (hull:_test_hooks failStore): makes the store throw.
 let failStoreForTest = false;
 
-// A JS string as WTF-8 bytes (a byte string). Built in 8 K-code pieces: in
-// this QuickJS `s += x` copies `s` each time.
-function wtf8Bytes(str) {
-    const parts = [];
-    let buf = [];
-    const push = (c) => {
-        buf.push(c);
-        if (buf.length >= 8192) { parts.push(String.fromCharCode.apply(null, buf)); buf = []; }
-    };
-    const n = str.length;
-    for (let i = 0; i < n; i++) {
-        let c = str.charCodeAt(i);
-        if (c < 0x80) { push(c); continue; }
-        if (c >= 0xd800 && c <= 0xdbff && i + 1 < n) {
-            const d = str.charCodeAt(i + 1);
-            if (d >= 0xdc00 && d <= 0xdfff) {
-                c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
-                i++;
-            }
-        }
-        if (c < 0x800) {
-            push(0xc0 | (c >> 6)); push(0x80 | (c & 63));
-        } else if (c < 0x10000) {
-            push(0xe0 | (c >> 12)); push(0x80 | ((c >> 6) & 63)); push(0x80 | (c & 63));
-        } else {
-            push(0xf0 | (c >> 18)); push(0x80 | ((c >> 12) & 63));
-            push(0x80 | ((c >> 6) & 63)); push(0x80 | (c & 63));
-        }
-    }
-    if (buf.length) parts.push(String.fromCharCode.apply(null, buf));
-    return parts.join("");
+// The largest response body (in WTF-8 bytes) stored for replay (audit 40).
+// A larger one marks the row unstored before anything is encoded, so the
+// store can never be what trips the run's limits after the handler's side
+// effects committed. Lua parity: MAX_STORED_BYTES.
+const MAX_STORED_BYTES = 32 * 1024 * 1024;
+// The stored headers blob: the replay decodes it in JS, and a response
+// cannot send more than 64 KiB of headers anyway.
+const MAX_STORED_HEADER_BYTES = 256 * 1024;
+
+// base64 of a JS string's WTF-8 bytes (UTF-8, a lone surrogate as its own
+// 3-byte sequence, as the runtime sends it), in one native call (audit 40:
+// a pure-JS per-code-unit loop here tripped the instruction limit on a 12 MB
+// body). Throws when the bytes are past `max`.
+function storedText(str, max) {
+    if (str.length > max) throw new RangeError("response too large to store");
+    const enc = encNative.textBase64Encode(str, max);
+    if (typeof enc !== "string") throw new RangeError("response too large to store");
+    return enc;
 }
 
 /* M-7 (Phase 5) + Phase 6 audit M-1: allowlist of headers safe to replay
@@ -492,10 +480,12 @@ function middleware(opts) {
                     if (typeof headersJson === "string" && headersJson.startsWith(STORED_V2)) {
                         const hb = encoding.base64.decode(headersJson.slice(STORED_V2.length));
                         headersJson = hb === null ? null : encoding.utf8.decode(hb);
+                        // Decoded natively straight to an ArrayBuffer for
+                        // res.bytes (audit 40: a per-byte JS loop here).
                         const bb = typeof bodyText === "string"
-                            ? encoding.base64.decode(bodyText) : null;
+                            ? encNative.base64DecodeBuffer(bodyText) : null;
                         bodyText = null;
-                        bodyBytes = bb === null ? "" : bb;
+                        bodyBytes = bb === null ? new ArrayBuffer(0) : bb;
                     }
                     res.status(row.status);
                     // Decode once. Walk once. M-7 filtering AND
@@ -531,7 +521,7 @@ function middleware(opts) {
                     res.header("X-Idempotency-Replay", "true");
                     if (bodyBytes !== null) {
                         if (!replayedCt) res.header("Content-Type", "application/json");
-                        res.bytes(encoding.bytes.toU8(bodyBytes));
+                        res.bytes(bodyBytes);
                     } else if (bodyText) {
                         // Default to application/json for back-compat
                         // with old cached rows from before respondHtml()
@@ -635,9 +625,10 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
                        req.ctx._idem_fingerprint, req.ctx._idem_created];
         try {
             if (failStoreForTest) throw new Error("injected store failure");
-            const headersStr = STORED_V2 + encoding.base64.encode(wtf8Bytes(json.encode(filtered)));
-            const bodyEnc = encoding.base64.encode(
-                wtf8Bytes(typeof bodyStr === "string" ? bodyStr : String(bodyStr ?? "")));
+            // Size-checked first, then encoded natively (audit 40).
+            const bodyEnc = storedText(typeof bodyStr === "string" ? bodyStr : String(bodyStr ?? ""),
+                                       MAX_STORED_BYTES);
+            const headersStr = STORED_V2 + storedText(json.encode(filtered), MAX_STORED_HEADER_BYTES);
             db.exec(
                 "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, " +
                 "response_body = ?, response_headers = ?, expires_at = ?" + where,
