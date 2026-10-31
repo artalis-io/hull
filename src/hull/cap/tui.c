@@ -88,6 +88,7 @@ struct HlTuiCtx {
     char  *out_buf;
     size_t out_len;
     size_t out_cap;
+    size_t last_flush_bytes;   /* what the last flush wrote (audit 39) */
 
     /* Shadow + pending cell buffers (rows*cols each).
      * Pending = what the app has staged via tui_write/move/style.
@@ -917,6 +918,7 @@ int hl_cap_tui_flush(HlTuiCtx *ctx)
     if (!ctx->shadow || !ctx->pending) return 0;
 
     ctx->out_len = 0;
+    ctx->last_flush_bytes = 0;
     uint32_t last_fg = ~0u, last_bg = ~0u, last_attr = ~0u;
     int last_x = -2, last_y = -2;
 
@@ -983,10 +985,16 @@ int hl_cap_tui_flush(HlTuiCtx *ctx)
     }
 
     if (ctx->out_len > 0) {
+        ctx->last_flush_bytes = ctx->out_len;
         if (raw_write(ctx->out_fd, ctx->out_buf, ctx->out_len) < 0) return -1;
         ctx->out_len = 0;
     }
     return 0;
+}
+
+size_t hl_cap_tui_last_flush_bytes(const HlTuiCtx *ctx)
+{
+    return ctx ? ctx->last_flush_bytes : 0;
 }
 
 /* ── Public API: input ──────────────────────────────────────────── */

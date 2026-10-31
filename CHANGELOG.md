@@ -596,6 +596,31 @@ release-artifact layout).
   statements, and the `import_database` / `export_database` / `copy_database` pragma names,
   under every file policy (`hl_cap_db_sql_reads_whole_database`, read like the audit-25
   dynamic-SQL check: any case, comments between the words, any statement of the text).
+- **Certificate parses, sync HTTP requests, terminal flushes and JS collect-and-retry ran
+  uncharged; an SSH tunnel took a numeric string as its port** (audit 39). Each was real work
+  for a few units, so a budget-sized loop ran for minutes and only the run watchdog stopped
+  it: `crypto.x509_pubkey_pem` / `x509PubkeyPem` parsed a crafted 64 KiB certificate (~5,400
+  names, ~0.55 ms) for ~10 units; a sync `http.get` / `post` / `put` / `patch` / `delete` /
+  `request` to a refused port (DNS, socket, connect, ~45 us) for ~7 (~10 min per budget; as a
+  route it held the loop until the 60 s watchdog); `tui.flush` / `clear` / `invalidate` walked
+  every cell (~34 us at 200 x 60) for nothing; and a JS call refused at a handle cap
+  (`fs.mmap`, `blob.writer` / `reader`, `kv.open`, `ws.connect`, a compute buffer) ran a full
+  `JS_RunGC` before retrying, ~8.6 ms over a 150k-object heap for ~3,000 units. Each is charged
+  before the work now (`hull/shared/work_charge.h`, both runtimes): a certificate 1,024 units
+  plus one per 2 bytes; an HTTP request a 16,384-unit floor per request (sync, and per
+  `http.fetch` start) and per sync redirect hop, its body as before, and the response body one
+  per 8 bytes once it arrives; a TUI grid call 64 units plus one per 4 cells, and a flush the
+  frame it wrote (`hl_cap_tui_last_flush_bytes`); a JS collect-and-retry one unit per 64 bytes
+  the heap holds (`hl_js_gc_for_retry`, every retry site; QuickJS patch 0005 gains
+  `JS_GetMallocSize`). Each repro loop now trips a 100M budget in 0.4-1.8 s. The SSH bridge
+  took `port` / `via.port` / `timeout_ms` through `lua_tointegerx`, which converts strings:
+  `port = "22e2"` was granted as 2200 while `hull.ssh` wrote `host:22e2` into the relay's
+  destination header, which a relay reading the port with `atoi` dialled as 22. Only Lua
+  integers are taken now, `hull.ssh` refuses a non-integer port / timeout / tunnel port and
+  writes the header from the checked integer (`%d`), and a destination or relay host that is
+  not one host name or IP literal (a glob grant admitted `evil,a.example.com`, which a relay
+  splitting the header on `,` read as `evil`) is refused before any grant check or dial. Also:
+  `env.get` under `--audit` escapes at most 256 bytes of the requested name.
 - **A JS app's module top level could hold a transaction across an await and commit the rest
   in autocommit** (audit 36). The top level is an entry, but it ran under run tag 0 (never
   failed) and never ended through `hl_js_entry_end_txn_check`. `conn.exec("BEGIN"); ...;

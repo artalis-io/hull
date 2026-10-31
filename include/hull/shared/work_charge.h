@@ -168,6 +168,48 @@ static inline uint64_t hl_work_sse_units(const char *text, size_t len, size_t ex
 #define HL_WORK_DB_OPEN_UNITS         4096u
 #define HL_WORK_TEMPLATE_COMPILE_BYTE    8u
 
+/* ── Outbound requests, certificates, terminal flushes (audit 39) ────
+ *
+ * Same rate (64 units per microsecond). Each is charged BEFORE the work:
+ *
+ *   an outbound HTTP request, per request and per redirect hop: DNS,
+ *     socket, connect, TLS handshake (an ECDHE share and a chain
+ *     verify, ~200-300 us of CPU) - a refused connect alone is ~45 us
+ *     and was charged ~7 units, so `pcall(http.get, ...)` in a loop
+ *     ran ~10 min per budget      -> HL_WORK_HTTP_REQUEST_UNITS 16384
+ *     plus the body (1 per 8 bytes) before, and the response body
+ *     (1 per 8 bytes) when it arrives
+ *   crypto.x509_pubkey_pem: a DER parse is ~8.4 ns per byte at its worst
+ *     (a 64 KiB certificate of ~5,400 RDNs, 0.55 ms) - one unit per 2
+ *     bytes - plus the public-key parse and setup
+ *                                 -> HL_WORK_X509_UNITS          1024
+ *   tui.flush / clear / invalidate: a walk of every cell (~34 us at
+ *     200 x 60, ~2.8 ns a cell, ~5.6 ns with the call around it)
+                                 -> 1 unit per 4 cells + HL_WORK_TUI_UNITS 64
+ *     plus the frame a flush writes (1 per 8 bytes), once it is built
+ */
+#define HL_WORK_HTTP_REQUEST_UNITS   16384u
+#define HL_WORK_X509_UNITS            1024u
+#define HL_WORK_TUI_UNITS               64u
+
+/* An outbound HTTP request carrying @p body_len bytes. */
+static inline uint64_t hl_work_http_request_units(size_t body_len)
+{
+    return HL_WORK_HTTP_REQUEST_UNITS + (uint64_t)body_len / 8;
+}
+
+/* crypto.x509_pubkey_pem / x509PubkeyPem over @p der_len bytes. */
+static inline uint64_t hl_work_x509_units(size_t der_len)
+{
+    return HL_WORK_X509_UNITS + (uint64_t)der_len / 2;
+}
+
+/* A terminal-UI call that walks a @p cols x @p rows cell grid. */
+static inline uint64_t hl_work_tui_cells_units(uint64_t cols, uint64_t rows)
+{
+    return HL_WORK_TUI_UNITS + (cols * rows) / 4;
+}
+
 /* One directory entry read (fs.list, the blob tmp/ sweep). */
 static inline uint64_t hl_work_dirent_units(size_t name_len)
 {

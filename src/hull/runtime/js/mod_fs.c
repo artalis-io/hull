@@ -435,9 +435,13 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
     /* Every mapping takes one of the SIGBUS guard's slots until its buffer is
      * freed, and a full table refuses the mapping (audit 20). Buffers held
      * only by a dropped cycle wait for the collector: collect once and retry
-     * (audit 21). */
-    if (!buf && err_msg && strcmp(err_msg, "too_many_mappings") == 0) {
-        JS_RunGC(JS_GetRuntime(ctx));
+     * (audit 21). The collection is charged first (audit 39). */
+    if (!tripped && !buf && err_msg &&
+        strcmp(err_msg, "too_many_mappings") == 0) {
+        if (hl_js_gc_for_retry(ctx)) {
+            JS_FreeCString(ctx, path);
+            return JS_EXCEPTION;
+        }
         err_msg = NULL;
         JS_FS_CHARGED(ctx, tripped,
             buf = windowed

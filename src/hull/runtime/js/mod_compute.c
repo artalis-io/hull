@@ -93,14 +93,15 @@ static JSValue js_push_wasm_buffer(JSContext *ctx, HlWasmBuffer *buf)
      * and asks again before it throws. */
     if (js && hl_wasm_buffer_account(buf, &js->wasm_buf_bytes,
                                      js->max_heap_bytes) != 0) {
-        JS_RunGC(JS_GetRuntime(ctx));
-        js->offheap_gc_debt = 0;
-        if (hl_wasm_buffer_account(buf, &js->wasm_buf_bytes,
-                                   js->max_heap_bytes) != 0) {
+        /* The collection is charged first (audit 39). */
+        int gc_tripped = hl_js_gc_for_retry(ctx) != 0;
+        if (gc_tripped || hl_wasm_buffer_account(buf, &js->wasm_buf_bytes,
+                                                 js->max_heap_bytes) != 0) {
             size_t n = hl_wasm_buffer_len(buf);
             HlAllocator *a = buf->alloc;
             hl_wasm_buffer_destroy(buf);
             hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
+            if (gc_tripped) return JS_EXCEPTION;
             return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx,
                 "buffer of %zu bytes would take the VM's buffers past its "
                 "heap limit (close unused buffers)", n));

@@ -160,6 +160,25 @@ fail:
     return JS_EXCEPTION;
 }
 
+/* The response of a sync request, charged and pushed, then freed: its body
+ * was received, decompressed and is copied into the VM, 1 unit per 8 bytes
+ * (audit 39). Known only once it arrived, so charged after; the floor was
+ * charged before. */
+static JSValue js_http_response_charged(JSContext *ctx, KlHttpClientResponse *resp)
+{
+    JSValue result = hl_js_budget_charge(ctx, hl_work_bytes_units(resp->body_len))
+                         ? JS_EXCEPTION : js_push_http_response(ctx, resp);
+    kl_http_client_response_free(resp);
+    return result;
+}
+
+/* Every request costs DNS, a socket, a connect and maybe a TLS handshake
+ * whatever its size: a floor charged before anything is converted (audit
+ * 39 - a refused connect in a try loop ran ~10 min per budget). */
+#define JS_HTTP_CHARGE_REQUEST(ctx) \
+    do { if (hl_js_budget_charge((ctx), HL_WORK_HTTP_REQUEST_UNITS)) \
+             return JS_EXCEPTION; } while (0)
+
 /* opts.timeoutMs of @p opts (if it is an object): ONE deadline for the whole
  * request (DNS, connect, TLS, send, receive, redirects), a number of at least
  * 1, returned truncated (the cap layer clamps it to the path's ceiling: 60 s
@@ -273,6 +292,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     int timeout_ms = 0;
     if (js_http_timeout_opt(ctx, argc, argv, 2, "http.request", &timeout_ms) != 0)
         return JS_EXCEPTION;
+    JS_HTTP_CHARGE_REQUEST(ctx);   /* audit 39 */
 
     const char *method = JS_ToCString(ctx, argv[0]);
     const char *url = JS_ToCString(ctx, argv[1]);
@@ -334,9 +354,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "http request failed: %s",
                                       kl_strerror(resp.error));
 
-    JSValue result = js_push_http_response(ctx, &resp);
-    kl_http_client_response_free(&resp);
-    return result;
+    return js_http_response_charged(ctx, &resp);
 }
 
 /* http.get(url, opts?) */
@@ -354,6 +372,7 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
     int timeout_ms = 0;
     if (js_http_timeout_opt(ctx, argc, argv, 1, "http.get", &timeout_ms) != 0)
         return JS_EXCEPTION;
+    JS_HTTP_CHARGE_REQUEST(ctx);   /* audit 39 */
 
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url) return JS_EXCEPTION;
@@ -385,9 +404,7 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "http.get failed: %s",
                                       kl_strerror(resp.error));
 
-    JSValue result = js_push_http_response(ctx, &resp);
-    kl_http_client_response_free(&resp);
-    return result;
+    return js_http_response_charged(ctx, &resp);
 }
 
 /* Helper for POST/PUT/PATCH: (url, body, opts?) */
@@ -406,6 +423,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
     if (js_http_timeout_opt(ctx, argc, argv, 2, "http.post/put/patch",
                             &timeout_ms) != 0)
         return JS_EXCEPTION;
+    JS_HTTP_CHARGE_REQUEST(ctx);   /* audit 39 */
 
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url) return JS_EXCEPTION;
@@ -450,9 +468,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
         return JS_ThrowInternalError(ctx, "http.%s failed: %s",
                                       method_name, kl_strerror(resp.error));
 
-    JSValue result = js_push_http_response(ctx, &resp);
-    kl_http_client_response_free(&resp);
-    return result;
+    return js_http_response_charged(ctx, &resp);
 }
 
 static JSValue js_http_post(JSContext *ctx, JSValueConst this_val,
@@ -482,6 +498,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
     int timeout_ms = 0;
     if (js_http_timeout_opt(ctx, argc, argv, 1, "http.delete", &timeout_ms) != 0)
         return JS_EXCEPTION;
+    JS_HTTP_CHARGE_REQUEST(ctx);   /* audit 39 */
 
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url) return JS_EXCEPTION;
@@ -513,9 +530,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "http.del failed: %s",
                                       kl_strerror(resp.error));
 
-    JSValue result = js_push_http_response(ctx, &resp);
-    kl_http_client_response_free(&resp);
-    return result;
+    return js_http_response_charged(ctx, &resp);
 }
 
 /* ── Push async HTTP response into JS ─────────────────────────────── */
@@ -549,6 +564,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     int timeout_ms = 0;
     if (js_http_timeout_opt(ctx, argc, argv, 2, "http.fetch", &timeout_ms) != 0)
         return JS_EXCEPTION;
+    JS_HTTP_CHARGE_REQUEST(ctx);   /* audit 39 */
 
     const char *method = JS_ToCString(ctx, argv[0]);
     const char *url = JS_ToCString(ctx, argv[1]);

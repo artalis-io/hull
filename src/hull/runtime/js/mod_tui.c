@@ -155,11 +155,24 @@ static JSValue js_tui_theme(JSContext *ctx, JSValueConst this_val,
 
 /* ── Rendering ─────────────────────────────────────────────────── */
 
+/* clear / invalidate / flush walk every cell of the grid whatever was drawn:
+ * 1 unit per 4 cells before the work (audit 39; the Lua twin is
+ * tui_charge_cells). 0, or -1 with the uncatchable interrupt pending. */
+static int js_tui_charge_cells(JSContext *ctx)
+{
+    int cols = 0, rows = 0;
+    hl_cap_tui_size(g_ctx, &cols, &rows);
+    return hl_js_budget_charge(ctx,
+        hl_work_tui_cells_units(cols > 0 ? (uint64_t)cols : 0,
+                                rows > 0 ? (uint64_t)rows : 0)) ? -1 : 0;
+}
+
 static JSValue js_tui_clear(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
+    if (js_tui_charge_cells(ctx) != 0) return JS_EXCEPTION;
     hl_cap_tui_clear(g_ctx);
     return JS_UNDEFINED;
 }
@@ -169,6 +182,7 @@ static JSValue js_tui_invalidate(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
+    if (js_tui_charge_cells(ctx) != 0) return JS_EXCEPTION;
     hl_cap_tui_invalidate(g_ctx);
     return JS_UNDEFINED;
 }
@@ -277,7 +291,12 @@ static JSValue js_tui_flush(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
+    if (js_tui_charge_cells(ctx) != 0) return JS_EXCEPTION;
     hl_cap_tui_flush(g_ctx);
+    /* The frame it wrote, 1 unit per 8 bytes (known once it is built). */
+    if (hl_js_budget_charge(ctx,
+            hl_work_bytes_units(hl_cap_tui_last_flush_bytes(g_ctx))))
+        return JS_EXCEPTION;
     return JS_UNDEFINED;
 }
 

@@ -10,6 +10,7 @@
 #include "hull/cap/crypto_key.h"
 #include "hull/cap/env.h"
 #include "hull/limits/core.h"
+#include "hull/shared/work_charge.h"   /* hl_work_x509_units (audit 39) */
 #include "../../utils/base64.h"
 #include "../../utils/hex.h"
 
@@ -772,6 +773,11 @@ static JSValue js_crypto_x509_pubkey_pem(JSContext *ctx,
     if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
         return JS_ThrowTypeError(ctx,
             "crypto.x509PubkeyPem: der must be ArrayBuffer or string");
+    /* Charged before the parse (audit 39; see the Lua twin). */
+    if (hl_js_budget_charge(ctx, hl_work_x509_units(view.len))) {
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
 
     char pem[4096];
     size_t pem_len = 0;

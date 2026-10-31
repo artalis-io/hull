@@ -1859,6 +1859,12 @@ void JS_SetWorkHandler(JSRuntime *rt, JSWorkHandler *cb, void *opaque)
     rt->work_pending = 0;
 }
 
+/* HULL PATCH 0005 (audit 39): see JS_GetMallocSize in quickjs.h */
+size_t JS_GetMallocSize(JSRuntime *rt)
+{
+    return rt->malloc_ctx.malloc_state.malloc_size;
+}
+
 /* HULL PATCH 0008: see JS_SetJobTag in quickjs.h */
 void JS_SetJobTag(JSRuntime *rt, uint64_t tag)
 {

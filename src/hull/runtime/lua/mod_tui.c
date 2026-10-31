@@ -124,9 +124,21 @@ static int lua_tui_theme(lua_State *L)
 
 /* ── Rendering ─────────────────────────────────────────────────── */
 
+/* clear / invalidate / flush walk every cell of the grid whatever was drawn:
+ * 1 unit per 4 cells before the work (audit 39 - a flush at 200 x 60 is
+ * ~34 us and was charged nothing). Holds nothing, so the hook may raise. */
+static void tui_charge_cells(lua_State *L)
+{
+    int cols = 0, rows = 0;
+    hl_cap_tui_size(g_ctx, &cols, &rows);
+    lua_hlwork(L, (size_t)hl_work_tui_cells_units(cols > 0 ? (uint64_t)cols : 0,
+                                                  rows > 0 ? (uint64_t)rows : 0), 0);
+}
+
 static int lua_tui_clear(lua_State *L)
 {
     ensure_acquired(L);
+    tui_charge_cells(L);
     hl_cap_tui_clear(g_ctx);
     return 0;
 }
@@ -134,6 +146,7 @@ static int lua_tui_clear(lua_State *L)
 static int lua_tui_invalidate(lua_State *L)
 {
     ensure_acquired(L);
+    tui_charge_cells(L);
     hl_cap_tui_invalidate(g_ctx);
     return 0;
 }
@@ -212,7 +225,10 @@ static int lua_tui_write(lua_State *L)
 static int lua_tui_flush(lua_State *L)
 {
     ensure_acquired(L);
+    tui_charge_cells(L);
     hl_cap_tui_flush(g_ctx);
+    /* The frame it wrote, 1 unit per 8 bytes (known once it is built). */
+    lua_hlwork(L, (size_t)hl_work_bytes_units(hl_cap_tui_last_flush_bytes(g_ctx)), 0);
     return 0;
 }
 

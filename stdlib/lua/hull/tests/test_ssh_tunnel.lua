@@ -241,6 +241,51 @@ test("an IPv6 destination is bracketed", function()
     assert_match(r.written[1] or "", "Cf-Access-Jump-Destination: [fd00::7]:22\r\n")
 end)
 
+test("ports and timeouts are integers, not numeric strings (audit 39)", function()
+    -- "22e2" passed the binding's grant check as 2200 while tostring put
+    -- "spark-7468:22e2" in the header, which a relay reading the port with
+    -- atoi dialled as 22.
+    local function try(o)
+        o.host = o.host or "spark-7468"; o.user = "operator"; o.key = {}
+        o.crypto = crypto_stub
+        o.tunnel = o.tunnel or { host = "ssh.example.com" }
+        o.open_stream = function() error("nothing may be dialled") end
+        return pcall(ssh.connect, o)
+    end
+    for _, o in ipairs({ { port = "22e2" }, { port = "22" }, { port = 22.0 },
+                         { timeout_ms = "1000" },
+                         { tunnel = { host = "ssh.example.com", port = "443" } } }) do
+        local ok, e = try(o)
+        assert_eq(ok, false)
+        assert_match(tostring(e), "must be an integer")
+    end
+    local r = relay(upgraded())
+    local _, seen = connect_via(r, { host = "ssh.example.com" })
+    assert_eq(math.type(seen.port), "integer")
+    local r2 = relay(upgraded())
+    ssh.connect{
+        host = "spark-7468", port = 2200, user = "operator", key = {},
+        crypto = crypto_stub, tunnel = { host = "ssh.example.com" },
+        open_stream = function() return r2 end,
+    }
+    assert_match(r2.written[1] or "", "Cf-Access-Jump-Destination: spark-7468:2200\r\n")
+end)
+
+test("a destination that is not one host name is refused before dialling (audit 39)", function()
+    -- A glob grant ("*.example.com") admitted "evil,a.example.com", and a
+    -- relay splitting the header on ',' read "evil".
+    for _, h in ipairs({ "evil,a.example.com", "a.example.com x", "a\r\nX: y" }) do
+        local seen
+        local _, err = ssh.connect{
+            host = h, user = "operator", key = {}, crypto = crypto_stub,
+            tunnel = { host = "ssh.example.com" },
+            open_stream = function(o) seen = o; return relay(upgraded()) end,
+        }
+        assert_eq(err and err.code, "denied", h)
+        assert_eq(seen, nil, "nothing may be dialled: " .. h)
+    end
+end)
+
 test("a destination_header that is not a name is a caller error", function()
     local ok = pcall(ssh.connect, {
         host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
