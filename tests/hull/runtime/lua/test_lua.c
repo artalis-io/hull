@@ -14964,7 +14964,12 @@ UTEST(lua_audit39, x509_parse_is_charged)
     cleanup_lua_caps();
 }
 
-#ifdef HL_ENABLE_HTTP_CLIENT
+#ifndef __has_feature
+#  define __has_feature(x) 0
+#endif
+/* Not under MSan: the sync connect resolves through libc getaddrinfo,
+ * which MSan does not instrument (it flags the result as uninitialised). */
+#if defined(HL_ENABLE_HTTP_CLIENT) && !__has_feature(memory_sanitizer)
 UTEST(lua_audit39, sync_http_requests_are_charged)
 {
     init_lua_with_caps();
