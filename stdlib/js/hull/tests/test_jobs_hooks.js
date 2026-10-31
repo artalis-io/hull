@@ -543,6 +543,83 @@ cases.audit39 = async () => {
     });
 };
 
+// Audit 41: a ctx.step whose result cannot be stored (a BigInt, a cycle; on
+// MySQL a result over 64 KiB, covered by tests/e2e_mysql.sh) ran its side
+// effect again on every retry, until maxAttempts.
+cases.audit41 = async () => {
+    jobs.init({ backoff: () => 0 });
+    const cyclic = () => { const r = { ok: true }; r.self = r; return r; };
+    for (const [label, make] of [["BigInt", () => ({ n: 10n })], ["cycle", cyclic]]) {
+        await atest("an unstorable step result (" + label + ") runs its side effect once", async () => {
+            let charged = 0, refunded = 0;
+            const name = "cyc41" + label;
+            jobs.workflow(name, async (c) => {
+                await c.step("charge", () => { charged++; return make(); },
+                    { compensate: () => { refunded++; } });
+                return "done";
+            });
+            const id = jobs.start(name, {}, { queue: "cy41" + label, maxAttempts: 5 });
+            for (let i = 0; i < 6; i++) {
+                await jobs.work({ batch: 1, queue: "cy41" + label });
+                hooks.makeDue(id);
+            }
+            const j = jobs.get(id);
+            assertEq(j.status, "dead", "dead");
+            assertEq(j.attempts, 1, "dead-lettered on the first attempt");
+            assertEq(charged, 1, "the side effect ran once");
+            assertEq(refunded, 1, "its own compensation ran");
+            assertEq(String(j.lastError).includes("step 'charge' ran but its result cannot be stored"),
+                true, String(j.lastError));
+        });
+    }
+    await atest("a body that swallows the error still never re-runs the step", async () => {
+        let runs = 0;
+        jobs.workflow("swallow41", async (c) => {
+            try { await c.step("s", () => { runs++; return { n: 1n }; }); } catch (_) { /* swallowed */ }
+            throw new Error("body failed");
+        });
+        const id = jobs.start("swallow41", {}, { queue: "sw41", maxAttempts: 3 });
+        for (let i = 0; i < 4; i++) {
+            await jobs.work({ batch: 1, queue: "sw41" });
+            hooks.makeDue(id);
+        }
+        assertEq(jobs.get(id).status, "dead", "dead after its attempts");
+        assertEq(runs, 1, "the step ran once across retries");
+    });
+    await atest("a storable step still memoizes and replays", async () => {
+        let runs = 0, attempts = 0, seen;
+        jobs.workflow("memo41", async (c) => {
+            const v = await c.step("s", () => { runs++; return { n: 42 }; });
+            attempts++;
+            if (attempts === 1) throw new Error("again");
+            seen = v.n;
+            return "ok";
+        });
+        const id = jobs.start("memo41", {}, { queue: "m41", maxAttempts: 3 });
+        await jobs.work({ batch: 1, queue: "m41" });
+        hooks.makeDue(id);
+        await jobs.work({ batch: 1, queue: "m41" });
+        assertEq(jobs.get(id).status, "done", "done");
+        assertEq(runs, 1, "ran once");
+        assertEq(seen, 42, "replayed");
+    });
+    await atest("an operator's jobs.retry runs the unstored step again", async () => {
+        let runs = 0, bad = true;
+        jobs.workflow("retry41", async (c) => {
+            await c.step("s", () => { runs++; return bad ? { n: 1n } : 1; });
+            return "ok";
+        });
+        const id = jobs.start("retry41", {}, { queue: "r41", maxAttempts: 3 });
+        await jobs.work({ batch: 1, queue: "r41" });
+        assertEq(jobs.get(id).status, "dead", "dead");
+        bad = false;
+        assertEq(jobs.retry(id), true, "requeued");
+        await jobs.work({ batch: 1, queue: "r41" });
+        assertEq(jobs.get(id).status, "done", "done");
+        assertEq(runs, 2, "ran again after the retry");
+    });
+};
+
 test("the case is known", () => {
     assertEq(typeof cases[globalThis.__jobs_case], "function", String(globalThis.__jobs_case));
 });

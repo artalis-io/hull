@@ -388,8 +388,10 @@ local function refresh_jwks(provider_name)
     if not resp or resp.status ~= 200 or not resp.body then
         return nil, "jwks fetch failed: " .. tostring(resp and resp.status)
     end
-    local doc = json.decode(resp.body)
-    if type(doc) ~= "table" or type(doc.keys) ~= "table" then
+    -- A body that is not JSON is a failed fetch, as in the JS twin (audit
+    -- 41): the decode error escaped into the token verification.
+    local dok, doc = pcall(json.decode, resp.body)
+    if not dok or type(doc) ~= "table" or type(doc.keys) ~= "table" then
         return nil, "jwks: malformed response"
     end
     local by_kid = {}

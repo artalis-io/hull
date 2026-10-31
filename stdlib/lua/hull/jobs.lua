@@ -2714,12 +2714,25 @@ local WF_ABORT = {}
 -- memoized result would carry the workflow on to 'done' over an undone step.
 -- The handler ends the workflow dead instead.
 local WF_UNDONE = {}
+-- Raised by run_step when a step ran but its result cannot be stored (audit
+-- 41): `fn` succeeded, so its side effect stands, and running it again cannot
+-- help - a result the encoder refuses or one over MySQL's TEXT limit fails the
+-- same way every time. The step is recorded as status 'unstored' (its result
+-- column holding why), every later replay raises this again without calling
+-- fn, and the handler compensates and dead-letters the workflow once.
+-- jobs.retry deletes the marker, so an operator's retry runs the step again.
+local WF_UNSTORED = {}
+local function unstored_error(step_key, why)
+    return { [WF_UNSTORED] = step_key, why = why }
+end
 
 -- Run (or replay) one memoized step. Returns fn()'s value; on a re-run of the
 -- workflow the value comes from the store and fn is NOT called again. A
 -- compensation run (`compensating`) replays a compensated step too: it only
 -- re-registers compensations, and run_compensations skips that one.
-local function run_step(workflow_id, step_key, fn, compensating)
+-- `on_ran` (optional) is called before a WF_UNSTORED raise: the step ran, so
+-- ctx.step registers its compensation.
+local function run_step(workflow_id, step_key, fn, compensating, on_ran)
     if type(step_key) ~= "string" or step_key == "" then
         error("ctx.step: name must be a non-empty string")
     end
@@ -2732,6 +2745,11 @@ local function run_step(workflow_id, step_key, fn, compensating)
         if rows[1].status == "compensated" and not compensating then
             error({ [WF_UNDONE] = step_key }, 0)
         end
+        if rows[1].status == "unstored" then
+            if on_ran then on_ran() end
+            error(unstored_error(step_key, rows[1].result
+                or "it could not be stored on an earlier run"), 0)
+        end
         if rows[1].result == nil then return nil end
         local ok, decoded = pcall(json.decode, unstored_json(rows[1].result))
         if ok then return decoded else return rows[1].result end
@@ -2740,13 +2758,31 @@ local function run_step(workflow_id, step_key, fn, compensating)
     -- side effect and this INSERT re-runs the step on resume (steps must be
     -- idempotent, same contract as a job handler).
     local result = fn()
-    -- Bytes that are not UTF-8 are stored byte-exact (stored_json, audit 39).
-    local enc = result ~= nil and stored_json(json.encode(result)) or nil
+    -- Encoded as a job result is (result_json: guarded, held to MySQL's TEXT
+    -- limit; bytes that are not UTF-8 stored byte-exact, audit 39). A result
+    -- that cannot be stored never runs fn again (audit 41): the cyclic table,
+    -- or the 64 KiB+ remote reply on MySQL, failed the INSERT, the attempt
+    -- failed, and every retry repeated the side effect until max_attempts.
+    -- An INSERT that fails for another reason (the database itself) takes
+    -- the normal retry path: at-least-once, as for a crash between fn and
+    -- the INSERT. The text stored is never the cause: result_json escapes
+    -- NULs and stores bytes that are not UTF-8 byte-exact.
+    local enc, why
+    if result ~= nil then enc, why = result_json(result) end
+    if not why then
+        db.exec(
+            "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
+            .. "VALUES (?, ?, ?, 'done', ?)",
+            { workflow_id, step_key, enc, time.now() })
+        return result
+    end
+    why = safe_text(why)
     db.exec(
         "INSERT INTO _hull_workflow_steps (workflow_id, step_key, result, status, created_at) "
-        .. "VALUES (?, ?, ?, 'done', ?)",
-        { workflow_id, step_key, enc, time.now() })
-    return result
+        .. "VALUES (?, ?, ?, 'unstored', ?)",
+        { workflow_id, step_key, why, time.now() })
+    if on_ran then on_ran() end
+    error(unstored_error(step_key, why), 0)
 end
 
 -- Durable timer. `n` is the ordinal of this sleep in the workflow body (stable
@@ -2967,10 +3003,13 @@ local function make_ctx(job, name)
                 { job.id, step_key })
             if not (r and #r > 0) then error(WF_ABORT, 0) end
         end
-        local result = run_step(job.id, step_key, fn, compensating)
-        if opts and type(opts.compensate) == "function" then
-            comps[#comps + 1] = { key = step_key, fn = opts.compensate }
+        local function register()
+            if opts and type(opts.compensate) == "function" then
+                comps[#comps + 1] = { key = step_key, fn = opts.compensate }
+            end
         end
+        local result = run_step(job.id, step_key, fn, compensating, register)
+        register()
         return result
     end
     -- In a compensation run a wait that would park the workflow stops it.
@@ -3099,6 +3138,14 @@ function jobs.workflow(name, fn)
                 .. "' was compensated; the workflow cannot continue past it"
             return { [WF_DEAD] = true,
                      error = with_comp_failures(why, run_compensations(ctx._comps, job.id)) }
+        elseif type(res) == "table" and rawget(res, WF_UNSTORED) then
+            -- The step ran but its result cannot be stored (audit 41): never
+            -- run it again. Compensate (its own compensation included) and
+            -- dead-letter once.
+            local why = "step '" .. safe_text(tostring(rawget(res, WF_UNSTORED)))
+                .. "' ran but its result cannot be stored: " .. safe_text(rawget(res, "why"))
+            return { [WF_DEAD] = true,
+                     error = with_comp_failures(why, run_compensations(ctx._comps, job.id)) }
         elseif refusal.is_busy(res) and busy_streak_open(job) then
             -- A "busy" refusal is local and transient: work() hands the job
             -- back without spending the attempt. Never compensate for it
@@ -3173,6 +3220,12 @@ function jobs.signal(id, name, payload, opts)
         error("jobs.signal: opts.delivery_id must be a non-empty string")
     end
     local enc = payload ~= nil and json.encode(payload) or nil
+    -- The wait memoizes a consumed signal as "S" .. payload in a TEXT column:
+    -- on MySQL a payload of exactly 65535 bytes was stored here and then
+    -- failed the memo's INSERT on every run of the wait (audit 41).
+    if enc and #enc > RESULT_MAX_MYSQL - 1 and db.backend_name == "mysql" then
+        error("jobs.signal: payload JSON is larger than " .. (RESULT_MAX_MYSQL - 1) .. " bytes")
+    end
     local now = time.now()
     local accepted = true
     db.batch(function()
@@ -3383,6 +3436,10 @@ function jobs.retry(id)
         -- replayed, the steps after it run on an unpaid order). A step whose
         -- compensation failed keeps its row - its effect still stands.
         db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='compensated'",
+            { id })
+        -- A step whose result could not be stored (audit 41) runs again on
+        -- an operator's retry: the marker only stopped automatic re-runs.
+        db.exec("DELETE FROM _hull_workflow_steps WHERE workflow_id=? AND status='unstored'",
             { id })
         -- Running the step again is not enough when it is idempotent on a key
         -- (as steps must be): the same key would fetch back the original,

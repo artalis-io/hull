@@ -567,7 +567,9 @@ function loginHandler(cookieMod, opts) {
         if (!meta || typeof meta !== "object") return meta;
         const out = {};
         for (const k in meta) {
-            if (!SCRUB_KEYS.has(k)) out[k] = meta[k];
+            // Matched without case (audit 41): "Access_Token" or "CLAIMS"
+            // slipped past an exact-case list.
+            if (!SCRUB_KEYS.has(k.toLowerCase())) out[k] = meta[k];
         }
         return out;
     };
