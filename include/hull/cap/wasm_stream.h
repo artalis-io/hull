@@ -69,11 +69,22 @@ typedef struct {
  * (audit 15). */
 typedef int (*HlStreamBeforeChunkFn)(size_t chunk_len, void *user_data);
 
+/* Called after a chunk ran with the length of the output the guest produced,
+ * BEFORE that output is copied into the buffer, written to the file or handed
+ * to the output callback. Nonzero stops the stream (it fails "stopped") and
+ * the output is dropped unwritten. The bindings charge the run's budget for
+ * the copies and the write here (1 unit per 8 bytes, as fs.write): a guest's
+ * output per chunk is up to max_output whatever its input, so the input-sized
+ * before_chunk charge let a 512 KiB input write 2 GiB (audit 41). */
+typedef int (*HlStreamAfterChunkFn)(size_t out_len, void *user_data);
+
 typedef struct {
     size_t          chunk_size;  /* 0 = default (64 KB) */
     HlWasmCallOpts  call_opts;   /* per-chunk gas, heap, stack */
     HlStreamBeforeChunkFn before_chunk;   /* NULL = none */
     void           *before_chunk_ud;
+    HlStreamAfterChunkFn after_chunk;     /* NULL = none (audit 41) */
+    void           *after_chunk_ud;
     /* Charge scope for opening a file input / output (cap/fs_resolve.h): the
      * resolution of a deep or mkdir-p output path is charged as fs.write's is
      * (audit 38). NULL = none; a trip fails the stream "budget_exhausted". */

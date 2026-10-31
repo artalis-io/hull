@@ -316,13 +316,59 @@ static const unsigned char guest_alloc_wasm[] = {
 };
 static const unsigned int guest_alloc_wasm_len = 102;
 
+/* Audit 41. big_out.wasm: hull_process returns its out_cap - a guest that
+ * hands back max_output bytes for any input. Built with wat2wasm from:
+ *   (module (memory (export "memory") 2)
+ *     (func (export "hull_process") (param i32 i32 i32 i32) (result i32)
+ *       local.get 3)) */
+static const unsigned char big_out_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x01, 0x60,
+  0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x05,
+  0x03, 0x01, 0x00, 0x02, 0x07, 0x19, 0x02, 0x06, 0x6d, 0x65, 0x6d, 0x6f,
+  0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72,
+  0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00,
+  0x20, 0x03, 0x0b
+};
+static const unsigned int big_out_wasm_len = 63;
+
+/* Audit 41. logspam.wasm: hull_process logs a 100-byte line 1000 times
+ * (host_call(HL_WASM_OP_LOG, 1024, 100)) and returns 0. wat2wasm from:
+ *   (module (import "env" "host_call" (func $hc (param i32 i32 i32) (result i32)))
+ *     (memory (export "memory") 1)
+ *     (func (export "hull_process") (param i32 i32 i32 i32) (result i32)
+ *       (local $i i32)
+ *       (memory.fill (i32.const 1024) (i32.const 65) (i32.const 100))
+ *       (block $done (loop $l
+ *         (br_if $done (i32.ge_u (local.get $i) (i32.const 1000)))
+ *         (drop (call $hc (i32.const 1) (i32.const 1024) (i32.const 100)))
+ *         (local.set $i (i32.add (local.get $i) (i32.const 1)))
+ *         (br $l)))
+ *       i32.const 0)) */
+static const unsigned char logspam_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x02, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x09, 0x68, 0x6f,
+  0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00, 0x00, 0x03, 0x02, 0x01,
+  0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x19, 0x02, 0x06, 0x6d, 0x65,
+  0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f,
+  0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x01, 0x0a, 0x36, 0x01,
+  0x34, 0x01, 0x01, 0x7f, 0x41, 0x80, 0x08, 0x41, 0xc1, 0x00, 0x41, 0xe4,
+  0x00, 0xfc, 0x0b, 0x00, 0x02, 0x40, 0x03, 0x40, 0x20, 0x04, 0x41, 0xe8,
+  0x07, 0x4f, 0x0d, 0x01, 0x41, 0x01, 0x41, 0x80, 0x08, 0x41, 0xe4, 0x00,
+  0x10, 0x00, 0x1a, 0x20, 0x04, 0x41, 0x01, 0x6a, 0x21, 0x04, 0x0c, 0x00,
+  0x0b, 0x0b, 0x41, 0x00, 0x0b
+};
+static const unsigned int logspam_wasm_len = 137;
+
 /* VFS with embedded WASM modules for testing (sorted by name) */
 static const HlEntry test_entries[] = {
+    { "compute/big_out.wasm", big_out_wasm, big_out_wasm_len },
     { "compute/echo.wasm", echo_wasm, echo_wasm_len },
     { "compute/echo64.wasm", echo64_wasm, echo64_wasm_len },
     { "compute/grow.wasm", grow_wasm, grow_wasm_len },
     { "compute/guest_alloc.wasm", guest_alloc_wasm, guest_alloc_wasm_len },
     { "compute/kv_store.wasm", kv_store_wasm, kv_store_wasm_len },
+    { "compute/logspam.wasm", logspam_wasm, logspam_wasm_len },
     { "compute/loop_forever.wasm", loop_forever_wasm, loop_forever_wasm_len },
     { "compute/overrun.wasm", overrun_wasm, overrun_wasm_len },
     { "compute/shared_read.wasm", shared_read_wasm, shared_read_wasm_len },
@@ -4370,6 +4416,161 @@ UTEST(hl_cap_wasm, async_result_hold)
     }
 
     hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Audit 41 ─────────────────────────────────────────────────────────
+ *
+ * M1: compute.stream charged each chunk 1 + input/64 only; the guest's
+ * output (up to max_output a chunk, whatever the input) was copied and
+ * written uncharged. The after_chunk hook sees each chunk's output length
+ * BEFORE it is copied, written or handed on, and stops the stream. */
+typedef struct { int calls; size_t bytes; size_t stop_after; } A41OutHook;
+
+static int a41_after_chunk(size_t out_len, void *ud)
+{
+    A41OutHook *h = (A41OutHook *)ud;
+    h->calls++;
+    h->bytes += out_len;
+    return h->bytes > h->stop_after;
+}
+
+static int a41_cb(const void *data, size_t len, uint32_t idx, int is_last,
+                  void *ud)
+{
+    (void)data; (void)len; (void)idx; (void)is_last;
+    (*(int *)ud)++;
+    return 0;
+}
+
+UTEST(hl_cap_wasm, a41_stream_after_chunk_sees_output_before_it_is_kept)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    static char input[4096];
+    memset(input, 'x', sizeof input);
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = sizeof input;   /* 16 chunks of 256 */
+
+    /* Every chunk's output is reported with its length. */
+    void *out_data = NULL;
+    size_t out_len = 0;
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_BUFFER;
+    out.buffer.data = &out_data;
+    out.buffer.len = &out_len;
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 256;
+    opts.call_opts.max_output = 1024;
+    A41OutHook h = { 0, 0, (size_t)-1 };
+    opts.after_chunk = a41_after_chunk;
+    opts.after_chunk_ud = &h;
+    HlStreamResult res = {0};
+    const char *err = NULL;
+    ASSERT_EQ(hl_cap_wasm_stream(&cache, "big_out", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err), 0);
+    EXPECT_EQ(h.calls, 16);
+    EXPECT_EQ(h.bytes, (size_t)16 * 1024);
+    EXPECT_EQ(out_len, (size_t)16 * 1024);
+    free(out_data);
+    out_data = NULL;
+    out_len = 0;
+
+    /* A stop keeps nothing of the chunk that tripped it. */
+    h = (A41OutHook){ 0, 0, 2 * 1024 };
+    err = NULL;
+    memset(&res, 0, sizeof res);
+    EXPECT_NE(hl_cap_wasm_stream(&cache, "big_out", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err), 0);
+    EXPECT_TRUE(err && strcmp(err, "stopped") == 0);
+    EXPECT_EQ(h.calls, 3);
+    EXPECT_EQ(res.total_output, (size_t)2 * 1024);
+    EXPECT_EQ(out_data, NULL);
+
+    /* A callback output is not called for the chunk that tripped. */
+    h = (A41OutHook){ 0, 0, 2 * 1024 };
+    int cb_calls = 0;
+    HlStreamOutput cbo = {0};
+    cbo.kind = HL_STREAM_OUT_CALLBACK;
+    cbo.callback.fn = a41_cb;
+    cbo.callback.user_data = &cb_calls;
+    err = NULL;
+    EXPECT_NE(hl_cap_wasm_stream(&cache, "big_out", &in, &cbo, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err), 0);
+    EXPECT_EQ(cb_calls, 2);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* M2: a guest's LOG lines are capped per guest run - 64 lines / 64 KiB -
+ * and the rest dropped with one "suppressed N log lines" record at the end
+ * of the run. One compute.call wrote 512,801 lines before its timeout. */
+static atomic_int a41_log_on;
+static atomic_int a41_log_lines;
+static atomic_int a41_log_suppressed;
+static void a41_log_cb(log_Event *ev)
+{
+    if (!atomic_load(&a41_log_on) || !ev->fmt) return;
+    if (ev->level == LOG_INFO && strncmp(ev->fmt, "[wasm] %s", 9) == 0)
+        atomic_fetch_add(&a41_log_lines, 1);
+    else if (ev->level == LOG_WARN && strstr(ev->fmt, "suppressed"))
+        atomic_fetch_add(&a41_log_suppressed, 1);
+}
+
+UTEST(hl_cap_wasm, a41_guest_log_lines_are_capped_per_call)
+{
+    static int registered;
+    if (!registered) {
+        ASSERT_EQ(log_add_callback(a41_log_cb, NULL, LOG_TRACE), 0);
+        registered = 1;
+    }
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    log_set_quiet(true);
+
+    /* Two one-shot calls: each gets its own quota. */
+    for (int i = 0; i < 2; i++) {
+        atomic_store(&a41_log_lines, 0);
+        atomic_store(&a41_log_suppressed, 0);
+        atomic_store(&a41_log_on, 1);
+        void *out = NULL;
+        size_t out_len = 0;
+        const char *err = NULL;
+        int rc = hl_cap_wasm_call(&cache, "logspam", "x", 1, &out, &out_len,
+                                  NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+        atomic_store(&a41_log_on, 0);
+        EXPECT_EQ(rc, 0);
+        free(out);
+        EXPECT_EQ(atomic_load(&a41_log_lines), HL_WASM_LOG_MAX_LINES);
+        EXPECT_EQ(atomic_load(&a41_log_suppressed), 1);
+    }
+
+    /* A persistent instance's call too. */
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "logspam", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+    atomic_store(&a41_log_lines, 0);
+    atomic_store(&a41_log_suppressed, 0);
+    atomic_store(&a41_log_on, 1);
+    void *out = NULL;
+    size_t out_len = 0;
+    EXPECT_EQ(hl_cap_wasm_instance_call(pi, "x", 1, &out, &out_len,
+                                        NULL, NULL, NULL, NULL, &err), 0);
+    atomic_store(&a41_log_on, 0);
+    free(out);
+    EXPECT_EQ(atomic_load(&a41_log_lines), HL_WASM_LOG_MAX_LINES);
+    EXPECT_EQ(atomic_load(&a41_log_suppressed), 1);
+    hl_cap_wasm_instance_destroy(pi);
+
+    log_set_quiet(false);
     hl_cap_wasm_destroy(&cache);
 }
 
