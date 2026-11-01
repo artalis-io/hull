@@ -30,6 +30,7 @@ PASS=0
 FAIL=0
 PORT=19911
 HPID=""
+BG_PIDS=""
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hull-conc.XXXXXX")
 
 if [ ! -x "$HULL" ]; then
@@ -84,11 +85,18 @@ launch() {
         _x=$_xff
         [ "$_xff" = "seq" ] && _x="10.9.0.$_i"
         ( status "$_path" "$_x" >"$TMP/bg.$_i" ) &
+        BG_PIDS="$BG_PIDS $!"
     done
     sleep 0.5   # all parked in hull.sleep
 }
 
-wait_bg() { wait_jobs=$(jobs -p | grep -v "^$HPID\$" || true); for j in $wait_jobs; do wait "$j" 2>/dev/null; done; }
+# Wait for the background requests. Their pids are recorded as they start:
+# `$(jobs -p)` runs in a subshell, which in dash (Linux /bin/sh) has no job
+# table, so it listed nothing and the requests were never waited for.
+wait_bg() {
+    for j in $BG_PIDS; do wait "$j" 2>/dev/null; done
+    BG_PIDS=""
+}
 
 count_bg() {
     # $1 = expected status; prints how many bg.* files hold it
@@ -134,6 +142,7 @@ run_trusted() {
     for _i in $(seq 1 8); do
         curl -s -o /dev/null --max-time 0.3 -H "X-Forwarded-For: 203.0.113.50" \
             "http://127.0.0.1:$PORT/slow" &
+        BG_PIDS="$BG_PIDS $!"
     done
     wait_bg
     sleep 1.6   # the abandoned handlers still count until they finish
