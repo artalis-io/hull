@@ -169,16 +169,29 @@ _Thread_local static struct {
  *     unrestricted one meanwhile is reached too. A thread that has the
  *     signal blocked, or whose call fails, does not answer within
  *     HULL_UNVEIL_SYNC_MS and is counted in hull_unveil_unsynced_threads.
+ *     Audit 43: only ESRCH means a thread has gone. Any other tgkill
+ *     failure (EAGAIN once the pending-signal limit is used up) leaves the
+ *     thread unsignalled, and the tally counts it while /proc/self/task
+ *     still lists it - it used to be taken as gone, so `prlimit
+ *     --sigpending=0` turned an unrestricted thread into a success. And a
+ *     loop that hits its round cap while new threads were still appearing
+ *     returns -1 (unknown), never a count it could not finish.
  *
  * The calling thread and every thread that answered are restricted either
  * way and the seccomp filters below go to every thread (TSYNC, patch 0003);
  * the caller decides what an unsynced thread means (Hull fails closed,
  * src/hull/sandbox.c). hull_unveil_sync_mode reports what was used:
- * 0 = no other thread, 1 = Landlock TSYNC, 2 = per-thread signal. */
+ * 0 = no other thread (TSYNC kernel or not), 1 = Landlock TSYNC reached
+ * other threads, 2 = per-thread signal. */
 #define HULL_LANDLOCK_RESTRICT_SELF_TSYNC (1U << 3)
 #define HULL_UNVEIL_SYNC_SIG (SIGRTMAX - 3)
 #define HULL_UNVEIL_SYNC_MS 2000
 #define HULL_UNVEIL_SYNC_MAX 1024
+/* Rounds of list-and-signal before giving up (audit 43: giving up is a
+ * failure). Overridable for tests only. */
+#ifndef HULL_UNVEIL_SYNC_ROUNDS
+#define HULL_UNVEIL_SYNC_ROUNDS 16
+#endif
 /* Test-only: -DHULL_UNVEIL_TEST_NO_TSYNC=1 takes the per-thread path even on
  * a kernel with Landlock TSYNC, so tests/e2e_sandbox.sh covers both. */
 #ifndef HULL_UNVEIL_TEST_NO_TSYNC
@@ -187,6 +200,11 @@ _Thread_local static struct {
 
 int hull_unveil_unsynced_threads;
 int hull_unveil_sync_mode;
+#if HULL_UNVEIL_TEST_NO_TSYNC
+/* Test-only (audit 43): called at the start of every sync round, so a test
+ * can start a new thread in each one and drive the loop into its cap. */
+void (*hull_unveil_test_round_hook)(void);
+#endif
 
 static volatile int g_sync_fd = -1;
 static int g_ack_n;
@@ -243,7 +261,9 @@ static int unveil_task_alive(pid_t tid) {
  * number of threads that could not be restricted, or -1. */
 static int unveil_sync_by_signal(int fd) {
   static pid_t seen[HULL_UNVEIL_SYNC_MAX], cur[HULL_UNVEIL_SYNC_MAX];
-  int nseen = 0, unsynced = 0;
+  /* HULL PATCH 0004 (audit 43): 1 = signalled, 0 = the send failed. */
+  static unsigned char sent[HULL_UNVEIL_SYNC_MAX];
+  int nseen = 0, unsynced = 0, converged = 0;
   struct sigaction sa, old;
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = unveil_sync_handler;
@@ -252,7 +272,10 @@ static int unveil_sync_by_signal(int fd) {
   g_sync_fd = fd;
   __atomic_store_n(&g_ack_n, 0, __ATOMIC_SEQ_CST);
   if (sigaction(HULL_UNVEIL_SYNC_SIG, &sa, &old) != 0) return -1;
-  for (int round = 0; round < 16; round++) {
+  for (int round = 0; round < HULL_UNVEIL_SYNC_ROUNDS; round++) {
+#if HULL_UNVEIL_TEST_NO_TSYNC
+    if (hull_unveil_test_round_hook) hull_unveil_test_round_hook();
+#endif
     int n = unveil_list_tasks(cur, HULL_UNVEIL_SYNC_MAX);
     if (n < 0) {
       unsynced = -1;
@@ -269,18 +292,26 @@ static int unveil_sync_by_signal(int fd) {
         goto out;
       }
       fresh++;
-      seen[nseen++] = cur[i];
-      if (syscall(__NR_tgkill, getpid(), cur[i], HULL_UNVEIL_SYNC_SIG) != 0)
-        seen[nseen - 1] = 0; /* gone already (ESRCH) */
+      seen[nseen] = cur[i];
+      /* HULL PATCH 0004 (audit 43): a failed send is not a thread that has
+       * gone. Only ESRCH says that; EAGAIN (the RLIMIT_SIGPENDING queue is
+       * full) or anything else leaves a live thread unrestricted, so it is
+       * kept and checked against /proc/self/task in the tally below. */
+      sent[nseen] =
+          syscall(__NR_tgkill, getpid(), cur[i], HULL_UNVEIL_SYNC_SIG) == 0;
+      nseen++;
     }
-    if (!fresh) break;
+    if (!fresh) {
+      converged = 1;
+      break;
+    }
     /* wait until every thread signalled this round has answered */
     for (int waited = 0; waited < HULL_UNVEIL_SYNC_MS; waited++) {
       int all = 1;
       int acks = __atomic_load_n(&g_ack_n, __ATOMIC_SEQ_CST);
       if (acks > HULL_UNVEIL_SYNC_MAX) acks = HULL_UNVEIL_SYNC_MAX;
       for (int j = sent0; j < nseen && all; j++) {
-        if (!seen[j]) continue;
+        if (!sent[j]) continue;   /* nothing to wait for */
         int got = 0;
         for (int k = 0; k < acks; k++)
           if (__atomic_load_n(&g_ack_tid[k], __ATOMIC_SEQ_CST) == seen[j])
@@ -292,17 +323,25 @@ static int unveil_sync_by_signal(int fd) {
       nanosleep(&ts, 0);
     }
   }
-  /* Tally: an answered thread whose call failed, or a live thread that never
-   * answered (its signal is blocked), is not restricted. */
+  /* HULL PATCH 0004 (audit 43): the round cap ended the loop while threads
+   * were still appearing. The ones the last listing missed may have been
+   * started by threads that were not yet restricted; the count is not
+   * known, so it is not reported as complete. */
+  if (unsynced == 0 && !converged) unsynced = -1;
+  /* Tally: an answered thread whose call failed, a live thread that never
+   * answered (its signal is blocked), or one the signal could not be sent
+   * to, is not restricted. A thread that did not answer counts as gone only
+   * when /proc/self/task no longer lists it (the caller is not yet
+   * restricted, so it can still read it). */
   if (unsynced == 0) {
     int acks = __atomic_load_n(&g_ack_n, __ATOMIC_SEQ_CST);
     if (acks > HULL_UNVEIL_SYNC_MAX) acks = HULL_UNVEIL_SYNC_MAX;
     for (int j = 0; j < nseen; j++) {
-      if (!seen[j]) continue;
       int got = -1;
-      for (int k = 0; k < acks; k++)
-        if (__atomic_load_n(&g_ack_tid[k], __ATOMIC_SEQ_CST) == seen[j])
-          got = __atomic_load_n(&g_ack_ok[k], __ATOMIC_SEQ_CST);
+      if (sent[j])
+        for (int k = 0; k < acks; k++)
+          if (__atomic_load_n(&g_ack_tid[k], __ATOMIC_SEQ_CST) == seen[j])
+            got = __atomic_load_n(&g_ack_ok[k], __ATOMIC_SEQ_CST);
       if (got == 1) continue;
       if (got == -1 && !unveil_task_alive(seen[j])) continue;
       unsynced++;
@@ -339,10 +378,16 @@ static int unveil_final(void) {
   hull_unveil_unsynced_threads = 0;
   hull_unveil_sync_mode = 0;
   rc = -1;
+  /* Others first: once this thread is restricted it can no longer list
+   * /proc/self/task. -1 = unreadable, or more than one other thread. */
+  pid_t probe[1];
+  int others = unveil_list_tasks(probe, 1);
   if (landlock_abi_version >= 8 && !HULL_UNVEIL_TEST_NO_TSYNC) {
     rc = landlock_restrict_self(State.fd, HULL_LANDLOCK_RESTRICT_SELF_TSYNC);
     if (rc == 0) {
-      hull_unveil_sync_mode = 1;
+      /* HULL PATCH 0004 (audit 43): mode 0 means "no other thread" on a
+       * TSYNC kernel too, so the caller's log tells whether any existed. */
+      hull_unveil_sync_mode = others == 0 ? 0 : 1;
     } else if (errno != EINVAL) {
       return rc;
     } else {
@@ -350,10 +395,6 @@ static int unveil_final(void) {
     }
   }
   if (rc != 0) {
-    /* Others first: once this thread is restricted it can no longer list
-     * /proc/self/task. */
-    pid_t probe[1];
-    int others = unveil_list_tasks(probe, 1);
     if (others != 0) {
       int u = unveil_sync_by_signal(State.fd);
       hull_unveil_sync_mode = 2;

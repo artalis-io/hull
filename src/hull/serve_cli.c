@@ -49,6 +49,9 @@
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm_watchdog.h"
+#endif
 #include "hull/vfs.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/wasm_config.h"
@@ -521,6 +524,12 @@ int hull_serve(int argc, char **argv)
         }
     }
 
+    /* No watchdog thread before the phase-2 sandbox (audit 43): a cosmo
+     * APE's libc pledge / unveil reach only the calling thread, so a thread
+     * started while the app loads would keep phase-1 permissions. The top
+     * level's deadline is polled meanwhile (cap/run_watchdog.h). */
+    hl_run_watchdog_defer();
+
     /* Init app context - runs migrations + loads the app. */
     HlAppContext *ctx = NULL;
     HlAppContextOpts opts = {
@@ -813,6 +822,11 @@ int hull_serve(int argc, char **argv)
                         &cfg_arena, &seal_arena);
     }
 
+#ifdef HL_ENABLE_WASM
+    /* A WASM watchdog the top level started is stopped, so only this thread
+     * exists when phase 2 applies (audit 43); the next arm restarts it. */
+    hl_wasm_watchdog_quiesce();
+#endif
     if (!no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &manifest);
@@ -841,6 +855,9 @@ int hull_serve(int argc, char **argv)
                             &cfg_arena, &seal_arena);
         }
     }
+
+    /* Watchdog threads from here on are born inside the sandbox. */
+    hl_run_watchdog_release();
 
     const char **env_allow = build_env_allowlist(&manifest);
 

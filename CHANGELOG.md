@@ -189,6 +189,33 @@ release-artifact layout).
   boundary). Also: a new session prunes the `dev-sessions` records of supervisors that are gone
   (a reused pid would otherwise still verify a dead session's stale sidecars), and
   `hull agent inspect` escapes DEL and C1 controls in both its live and standalone output.
+- **The Linux thread-sandbox sync could report success with a thread left unrestricted, and a
+  cosmo build sandboxed only the main thread** (audit 43). Three gaps in the audit 42 change
+  (#986). **A failed send was taken for a thread that had gone:** where the kernel has no
+  Landlock TSYNC, `unveil(NULL, NULL)` signals each other thread to restrict itself, and any
+  `tgkill` failure counted the thread as gone - so under `prlimit --sigpending=0` (EAGAIN: the
+  real-time signal cannot be queued) a pre-existing thread kept full filesystem reach while the
+  sandbox reported itself complete. Only ESRCH means gone now; any other failure leaves the
+  thread in the tally, which counts it while `/proc/self/task/<tid>` still lists it, and
+  `hl_sandbox_apply` refuses to start (unless `--allow-degraded-sandbox`). **The round cap
+  passed for done:** the list-and-signal loop gives up after 16 rounds; if threads were still
+  appearing then, it returned the count of those it had reached. It returns "unknown" (-1)
+  now, which refuses the same way (`vendor/pledge` HULL PATCH 0004, docs/pledge_patches.md).
+  **A cosmo APE's pledge / unveil are per-thread** (Cosmopolitan's libc, not patched), and
+  two threads could exist before phase 2: the run watchdog, started when the app's top level
+  was loaded, and the WASM watchdog, started when the top level ran guest code
+  (`compute.instance` / `compute.call` at load). Both kept their phase-1 permissions there.
+  The runners now defer the run watchdog's thread until phase 2 is in place
+  (`hl_run_watchdog_defer` / `_release`); the top level's deadline is still enforced
+  meanwhile - `hl_run_watch_stopped` compares it with the clock itself - and the JS top level,
+  which ran with no wall-clock deadline at all, now arms one as Lua's does. The WASM watchdog
+  thread is stopped and joined just before phase 2 (`hl_wasm_watchdog_quiesce`) and the next
+  guest call starts a new one, inside the sandbox. As a backstop, a cosmo build on Linux
+  refuses to start (unless `--allow-degraded-sandbox`) when `/proc/self/task` lists more than
+  one thread as the sandbox applies. Tests: `tests/sandbox_violation.c`
+  `sandbox_audit43.sigpending_exhausted` / `round_cap_fails` (in the no-TSYNC build),
+  `tests/e2e_sandbox.sh` Test 9 (`threads: single` for a server and a CLI whose top level runs
+  WASM; a top-level loop stopped by `--max-run-ms` in both runtimes).
 - **A wide shader could hold the event loop for minutes in its compile** (audit 40). Every GPU
   pre-check bounded a depth; none bounded how much code a shader is, and Metal's compiler
   (MTLCompilerService, behind pipeline creation) takes time that grows faster than linearly with

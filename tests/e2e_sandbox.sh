@@ -471,12 +471,22 @@ else
                 "$SRCDIR/vendor/pledge/libc/calls/unveil.c" \
                 $PLEDGE_OBJS2 -lpthread 2>"$WORKDIR/compile2.log"; then
             OUT2=$("$SANDBOX_TEST2" 2>&1); RC2=$?
-            printf '%s\n' "$OUT2" | grep -E "audit42|sync mode" | sed 's/^/    /'
+            printf '%s\n' "$OUT2" | grep -E "audit42|audit43|sync mode|sigpending|every round" | sed 's/^/    /'
             if [ "$RC2" = "0" ] && printf '%s' "$OUT2" | grep -q "PASS: sandbox_audit42.preexisting_thread_landlock"; then
                 pass "sandbox_audit42.per_thread_landlock_path (no TSYNC)"
             else
                 fail "sandbox_audit42.per_thread_landlock_path (exit $RC2)"
             fi
+            # audit 43: on the signal path a send that fails for any reason
+            # but ESRCH (here EAGAIN, RLIMIT_SIGPENDING at 0) leaves a missed
+            # thread, and the round cap ending the loop is a failure.
+            for t43 in sigpending_exhausted round_cap_fails; do
+                if printf '%s\n' "$OUT2" | grep -q "PASS: sandbox_audit43.$t43\$"; then
+                    pass "sandbox_audit43.$t43 (no TSYNC)"
+                else
+                    fail "sandbox_audit43.$t43 (no TSYNC)"
+                fi
+            done
         else
             fail "sandbox_audit42 no-TSYNC build failed: $(cat "$WORKDIR/compile2.log")"
         fi
@@ -542,9 +552,9 @@ fi
 # Checked from OUTSIDE the process: after a few worker.dispatch jobs (pool
 # threads exist) every task in /proc/<pid>/task must read "Seccomp: 2"
 # (filter mode) with the same Seccomp_filters count as the main thread - a
-# thread that missed phase 2 would show fewer filters, one with none 0. The
-# run watchdog thread, started while the app loads (before phase 2), is the
-# pre-existing thread TSYNC must reach. The functional half (a pre-existing
+# thread that missed phase 2 would show fewer filters, one with none 0. (The
+# run watchdog thread used to start while the app loaded; since audit 43 it
+# starts after phase 2 - Test 9.) The functional half (a pre-existing
 # thread's forbidden open refused by seccomp and by Landlock) is in
 # tests/sandbox_violation.c, run by Test 6. Native Linux only.
 
@@ -622,6 +632,122 @@ EOF
     else
         stop_server
         fail "sandbox_audit42 - hull did not start: $(tail -5 "$LOGFILE8")"
+    fi
+fi
+
+# ── Test 9: no thread outlives into phase 2; top-level deadline (audit 43)
+#
+# A cosmo APE's libc pledge / unveil confine only the calling thread, so a
+# thread started before phase 2 keeps phase-1 permissions there. The run
+# watchdog used to start when the app's top level was loaded, and the WASM
+# watchdog when the top level ran guest code. Now the run watchdog's thread
+# starts only after phase 2 (the top level's deadline is polled meanwhile)
+# and the WASM watchdog is stopped before it, so on Linux the sandbox finds
+# no other thread ("threads: single"); a cosmo build refuses to start if it
+# does. The top level stays bounded by time, in both runtimes.
+
+echo ""
+echo "=== Test 9: only the main thread at the phase-2 boundary (audit 43) ==="
+
+# Runs "$@" for at most $1 seconds, output in $WORKDIR/bounded.log; prints
+# the exit code (124 = killed at the limit).
+run_bounded() {
+    _lim=$1; shift
+    "$@" >"$WORKDIR/bounded.log" 2>&1 &
+    _pid=$!
+    _i=0
+    while kill -0 "$_pid" 2>/dev/null; do
+        if [ "$_i" -ge $((_lim * 10)) ]; then
+            kill -9 "$_pid" 2>/dev/null; wait "$_pid" 2>/dev/null
+            echo 124; return
+        fi
+        sleep 0.1; _i=$((_i + 1))
+    done
+    wait "$_pid"; echo $?
+}
+
+mkdir -p "$WORKDIR/t9lua" "$WORKDIR/t9js"
+cat > "$WORKDIR/t9lua/app.lua" << 'EOF'
+app.manifest({})
+local x = 0
+while true do x = x + 1 end
+EOF
+cat > "$WORKDIR/t9js/app.js" << 'EOF'
+import { app } from "hull:app";
+app.manifest({});
+let x = 0;
+while (true) { x++; }
+EOF
+for rt9 in lua js; do
+    RC9=$(run_bounded 20 "$HULL" --max-instructions 100000000000 --max-run-ms 300 "$WORKDIR/t9$rt9/app.$rt9")
+    if [ "$RC9" != "124" ]; then
+        pass "sandbox_audit43.toplevel_deadline_$rt9 (stopped, exit $RC9)"
+    else
+        fail "sandbox_audit43.toplevel_deadline_$rt9 - a top-level loop ran past --max-run-ms 300 for 20 s"
+    fi
+    if [ "$rt9" = "lua" ]; then
+        check_contains "sandbox_audit43.toplevel_deadline_lua_message" \
+            "$(cat "$WORKDIR/bounded.log")" "run exceeded its time limit"
+    fi
+done
+
+T9_COSMO=0
+case "${PLATFORM_CC:-}" in *cosmocc*) T9_COSMO=1 ;; esac
+if [ "$UNAME_S" != "Linux" ]; then
+    skip "sandbox_audit43 phase-2 thread count - Linux only"
+elif [ ! -f "$SRCDIR/examples/compute/compute/echo.wasm" ]; then
+    skip "sandbox_audit43 phase-2 thread count - examples/compute/compute/echo.wasm missing"
+else
+    mkdir -p "$WORKDIR/t9srv/compute" "$WORKDIR/t9cli/compute"
+    cp "$SRCDIR/examples/compute/compute/echo.wasm" "$WORKDIR/t9srv/compute/"
+    cp "$SRCDIR/examples/compute/compute/echo.wasm" "$WORKDIR/t9cli/compute/"
+    # The top level runs guest code (compute.instance instantiates, a call
+    # runs it): both watchdogs used to be running before phase 2 here.
+    cat > "$WORKDIR/t9srv/app.lua" << 'EOF'
+local compute = require("hull.compute")
+app.manifest({ compute = true, modules = { "hull/http-server@1", "hull/compute@1" } })
+local inst = compute.instance("echo")
+local first = compute.call("echo", "top")
+app.get("/echo", function(_req, res)
+    res:json({ top = first, now = compute.call("echo", "req") })
+end)
+EOF
+    cat > "$WORKDIR/t9cli/app.js" << 'EOF'
+import { app } from "hull:app";
+import { compute } from "hull:compute";
+app.manifest({ compute: true, modules: ["hull/compute@1"] });
+const inst = compute.instance("echo");
+const top = compute.call("echo", "top");
+app.main(() => {
+    const now = compute.call("echo", "main");
+    const txt = (b) => String.fromCharCode(...new Uint8Array(b));
+    console.log("echo " + txt(top) + " " + txt(now));
+    return 0;
+});
+EOF
+    LOGFILE9="$WORKDIR/hull_t9.log"
+    "$HULL" -p 19889 "$WORKDIR/t9srv/app.lua" >"$LOGFILE9" 2>&1 &
+    SERVER_PID=$!
+    if wait_for_server 19889; then
+        R9=$(curl -s "http://127.0.0.1:19889/echo")
+        check_contains "sandbox_audit43.compute_after_phase2" "$R9" '"now":"req"'
+        stop_server
+        LOG9=$(cat "$LOGFILE9")
+        if [ "$T9_COSMO" = "1" ]; then
+            check_not_contains "sandbox_audit43.cosmo_no_extra_thread" "$LOG9" "threads when the sandbox"
+        else
+            check_contains "sandbox_audit43.server_single_thread_at_phase2" "$LOG9" "threads: single"
+        fi
+    else
+        stop_server
+        fail "sandbox_audit43 - hull did not start: $(tail -5 "$LOGFILE9")"
+    fi
+    OUT9=$("$HULL" "$WORKDIR/t9cli/app.js" 2>&1)
+    check_contains "sandbox_audit43.cli_compute_after_phase2" "$OUT9" "echo top main"
+    if [ "$T9_COSMO" = "1" ]; then
+        check_not_contains "sandbox_audit43.cosmo_cli_no_extra_thread" "$OUT9" "threads when the sandbox"
+    else
+        check_contains "sandbox_audit43.cli_single_thread_at_phase2" "$OUT9" "threads: single"
     fi
 fi
 

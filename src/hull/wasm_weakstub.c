@@ -63,6 +63,12 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_watchdog.h"
+
+/* ── Watchdog thread at the sandbox boundary (serve.o, serve_cli.o) ──── */
+
+/* Without the feature there is no watchdog thread to stop (audit 43). */
+__attribute__((weak)) void hl_wasm_watchdog_quiesce(void) {}
 
 /* ── Module cache lifecycle (app_context.o, serve.o) ─────────────────── */
 

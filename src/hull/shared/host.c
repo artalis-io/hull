@@ -15,6 +15,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <dirent.h>
+#include <time.h>
 #if !defined(_WIN32)
 #include <pwd.h>
 #endif
@@ -659,4 +661,27 @@ int hl_host_path_too_broad(const char *path)
      * themselves (hl_tool_path_too_broad). */
     if (!hl_host_home()) return 0;
     return hl_host_path_covers_home(rp, NULL);
+}
+
+int hl_host_thread_count(void)
+{
+    DIR *d = opendir("/proc/self/task");
+    if (!d) return -1;
+    int n = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL)
+        if (de->d_name[0] >= '0' && de->d_name[0] <= '9') n++;
+    closedir(d);
+    return n > 0 ? n : -1;
+}
+
+int hl_host_wait_thread_count(int want, int max_ms)
+{
+    int n = hl_host_thread_count();
+    for (int i = 0; n > want && i < max_ms; i++) {
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+        n = hl_host_thread_count();
+    }
+    return n;
 }

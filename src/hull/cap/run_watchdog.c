@@ -32,6 +32,10 @@ static HlRunWatch     *g_head;          /* pending watches */
 static uint64_t        g_wake_ms;       /* when the thread next wakes (0 = idle) */
 static int             g_started;
 static int             g_start_failed;
+/* Audit 43: no thread before hl_run_watchdog_release (see the header). */
+int                    hl_run_watchdog_deferred_;
+#define HL_RUN_WATCH_POLL_EVERY 16u
+static unsigned        g_poll_tick;
 #if !defined(__APPLE__)
 static int             g_cv_monotonic;
 #endif
@@ -151,8 +155,18 @@ static void link_locked(HlRunWatch *w)
     if (g_head) g_head->prev = w;
     g_head = w;
     w->linked = 1;
-    if (g_wake_ms == 0 || w->deadline_ms < g_wake_ms)
+    if (g_started && (g_wake_ms == 0 || w->deadline_ms < g_wake_ms))
         pthread_cond_signal(&g_cv);
+}
+
+/* Caller holds g_mu. Whether a watch may be linked now: the thread runs, or
+ * the start is deferred (hl_run_watch_poll keeps the deadline meanwhile). */
+static int ensure_started_locked(void);
+static int can_link_locked(void)
+{
+    if (__atomic_load_n(&hl_run_watchdog_deferred_, __ATOMIC_RELAXED))
+        return 1;
+    return ensure_started_locked() == 0;
 }
 
 static void *watchdog_main(void *arg)
@@ -231,7 +245,7 @@ void hl_run_watch_arm(HlRunWatch *w, uint32_t ms)
     unlink_locked(w);
     w->armed = 0;
     w->seq++;
-    if (ms > 0 && ensure_started_locked() == 0) {
+    if (ms > 0 && can_link_locked()) {
         if (ms > HL_RUN_MAX_MS) ms = HL_RUN_MAX_MS;
         w->deadline_ms = now_ms() + ms;
         w->armed = 1;
@@ -286,8 +300,59 @@ void hl_run_watch_restore(HlRunWatch *w, uint64_t deadline_ms)
         w->armed = 1;
         if (deadline_ms <= now_ms())
             __atomic_store_n(&w->stop, 1, __ATOMIC_RELAXED);
-        else if (ensure_started_locked() == 0)
+        else if (can_link_locked())
             link_locked(w);
     }
     pthread_mutex_unlock(&g_mu);
+}
+
+/* ── Deferred start (audit 43) ─────────────────────────────────────── */
+
+void hl_run_watchdog_defer(void)
+{
+    pthread_mutex_lock(&g_mu);
+    /* A thread already running stays (nothing to defer); a runner defers
+     * before any VM exists, so this only happens in tests. */
+    if (!g_started)
+        __atomic_store_n(&hl_run_watchdog_deferred_, 1, __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&g_mu);
+}
+
+void hl_run_watchdog_release(void)
+{
+    pthread_mutex_lock(&g_mu);
+    if (__atomic_load_n(&hl_run_watchdog_deferred_, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&hl_run_watchdog_deferred_, 0, __ATOMIC_RELAXED);
+        /* Deadlines armed meanwhile are still linked: hand them to the
+         * thread. When it cannot start (logged), they go unbounded, as an
+         * arm without a thread always has. */
+        if (g_head && ensure_started_locked() == 0) {
+            pthread_cond_signal(&g_cv);
+        } else if (g_head) {
+            HlRunWatch *w = g_head;
+            while (w) {
+                HlRunWatch *nx = w->next;
+                unlink_locked(w);
+                w->armed = 0;
+                w = nx;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+
+int hl_run_watch_poll(HlRunWatch *w)
+{
+    if (!w) return 0;
+    if (__atomic_add_fetch(&g_poll_tick, 1, __ATOMIC_RELAXED)
+            % HL_RUN_WATCH_POLL_EVERY != 0)
+        return __atomic_load_n(&w->stop, __ATOMIC_RELAXED) != 0;
+    pthread_mutex_lock(&g_mu);
+    if (w->linked && w->deadline_ms <= now_ms()) {
+        __atomic_store_n(&w->stop, 1, __ATOMIC_RELAXED);
+        unlink_locked(w);               /* fired, as the thread does */
+    }
+    int stop = __atomic_load_n(&w->stop, __ATOMIC_RELAXED) != 0;
+    pthread_mutex_unlock(&g_mu);
+    return stop;
 }
