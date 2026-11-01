@@ -639,6 +639,149 @@ static void test_wx_anon_rw(void)
     }
 }
 
+
+#if HAS_PLEDGE_MODE
+/* ── audit 42: threads that already exist are sandboxed too ─────────
+ *
+ * The kernel attaches a seccomp filter and a Landlock domain per thread.
+ * Upstream jart/pledge installed both on the CALLING thread only, so a thread
+ * started before pledge() / unveil(NULL, NULL) - Hull's worker pool, its run
+ * watchdog, a GPU driver's or DuckDB's - kept full syscall and filesystem
+ * reach. vendor/pledge patches 0003 (seccomp TSYNC) and 0004 (Landlock TSYNC,
+ * else per-thread self-restriction) close that; these tests start the threads
+ * FIRST, sandbox the main thread, then have the old threads try what the
+ * sandbox forbids. Native Linux polyfill only: a cosmo APE's pledge lives in
+ * Cosmopolitan's libc, which Hull does not patch. */
+
+#include <pthread.h>
+#include <signal.h>
+
+extern int hull_unveil_unsynced_threads;
+extern int hull_unveil_sync_mode;
+
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             go;
+    int             block_signals;   /* block every signal (sync can't reach) */
+    int             open_errno;      /* 0 = open succeeded */
+    int             ready;
+} OldThread;
+
+static void *old_thread_main(void *arg)
+{
+    OldThread *t = arg;
+    if (t->block_signals) {
+        sigset_t all;
+        sigfillset(&all);
+        pthread_sigmask(SIG_SETMASK, &all, NULL);
+    }
+    pthread_mutex_lock(&t->mu);
+    t->ready = 1;
+    pthread_cond_broadcast(&t->cv);
+    while (!t->go) pthread_cond_wait(&t->cv, &t->mu);
+    pthread_mutex_unlock(&t->mu);
+    int fd = open("/etc/hostname", O_RDONLY);
+    if (fd >= 0) { close(fd); t->open_errno = 0; }
+    else t->open_errno = errno ? errno : -1;
+    return NULL;
+}
+
+static int old_thread_start(OldThread *t, pthread_t *th, int block)
+{
+    memset(t, 0, sizeof *t);
+    pthread_mutex_init(&t->mu, NULL);
+    pthread_cond_init(&t->cv, NULL);
+    t->block_signals = block;
+    if (pthread_create(th, NULL, old_thread_main, t) != 0) return -1;
+    pthread_mutex_lock(&t->mu);
+    while (!t->ready) pthread_cond_wait(&t->cv, &t->mu);
+    pthread_mutex_unlock(&t->mu);
+    return 0;
+}
+
+static void old_thread_go(OldThread *t, pthread_t th)
+{
+    pthread_mutex_lock(&t->mu);
+    t->go = 1;
+    pthread_cond_broadcast(&t->cv);
+    pthread_mutex_unlock(&t->mu);
+    pthread_join(th, NULL);
+}
+
+/* sandbox_audit42.preexisting_thread_seccomp: pledge("stdio") on the main
+ * thread must also refuse open() on a thread started before it. */
+static int test_thread_seccomp_child(void)
+{
+    if (access("/etc/hostname", R_OK) != 0) _exit(78);
+    OldThread t; pthread_t th;
+    if (old_thread_start(&t, &th, 0) != 0) _exit(2);
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+    if (pledge("stdio", NULL) != 0) _exit(errno == ENOSYS ? 77 : 2);
+    old_thread_go(&t, th);
+    if (t.open_errno == 0) _exit(1);           /* FAIL: not filtered */
+    _exit(t.open_errno == EPERM || t.open_errno == EACCES ? 0 : 3);
+}
+
+/* sandbox_audit42.preexisting_thread_landlock: unveil("/tmp") + seal must
+ * also confine a thread started before it. A second thread blocks every
+ * signal, so only Landlock TSYNC (ABI 8+) can reach it: with TSYNC it must be
+ * confined, without it unveil must COUNT it (hull_unveil_unsynced_threads ==
+ * 1), which Hull's sandbox turns into a refusal to start. */
+static int test_thread_landlock_child(void)
+{
+    if (access("/etc/hostname", R_OK) != 0) _exit(78);
+    OldThread a, b; pthread_t ta, tb;
+    if (old_thread_start(&a, &ta, 0) != 0) _exit(2);
+    if (old_thread_start(&b, &tb, 1) != 0) _exit(2);
+    if (unveil("/tmp", "r") != 0) _exit(errno == ENOSYS ? 77 : 2);
+    if (unveil(NULL, NULL) != 0) _exit(4);
+    int mode = hull_unveil_sync_mode, unsynced = hull_unveil_unsynced_threads;
+    old_thread_go(&a, ta);
+    old_thread_go(&b, tb);
+    printf("    (landlock sync mode %d, unsynced %d; old thread errno %d, "
+           "signal-blocking thread errno %d)\n",
+           mode, unsynced, a.open_errno, b.open_errno);
+    fflush(stdout);
+    if (a.open_errno != EACCES) _exit(1);      /* FAIL: old thread unconfined */
+    if (mode == 1) _exit(b.open_errno == EACCES && unsynced == 0 ? 0 : 5);
+    if (mode == 2) _exit(unsynced == 1 ? 0 : 6);
+    _exit(7);                                   /* other threads but mode 0 */
+}
+
+static void run_thread_child(const char *name, int (*fn)(void))
+{
+    char buf[200];
+    fflush(stdout);   /* else the child re-prints the parent's buffer */
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) fn();
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0) snprintf(buf, sizeof buf, "%s", name);
+        else if (code == 77) snprintf(buf, sizeof buf, "%s SKIPPED - kernel lacks it", name);
+        else if (code == 78) snprintf(buf, sizeof buf, "%s SKIPPED - no /etc/hostname", name);
+        else snprintf(buf, sizeof buf, "%s - exit %d", name, code);
+        if (code == 0 || code == 77 || code == 78) pass(buf); else fail(buf);
+    } else {
+        snprintf(buf, sizeof buf, "%s - killed by signal %d", name,
+                 WIFSIGNALED(status) ? WTERMSIG(status) : -1);
+        fail(buf);
+    }
+}
+
+static void test_preexisting_threads(void)
+{
+    printf("\n=== audit 42: threads started before the sandbox ===\n");
+    run_thread_child("sandbox_audit42.preexisting_thread_seccomp",
+                     test_thread_seccomp_child);
+    run_thread_child("sandbox_audit42.preexisting_thread_landlock",
+                     test_thread_landlock_child);
+}
+#endif /* HAS_PLEDGE_MODE */
+
 #endif /* !HAS_SEATBELT */
 
 /* ── Test 4: Seatbelt deny-all enforcement (macOS only) ──────────── */
@@ -818,6 +961,9 @@ int main(void)
 #endif
     test_wx_execve();
     test_wx_anon_rw();
+#if HAS_PLEDGE_MODE
+    test_preexisting_threads();
+#endif
 #endif
 
     int total = pass_count + fail_count;

@@ -22,6 +22,7 @@
 
 #include "utest.h"
 #include "hull/shared/cli_log.h"
+#include "hull/shared/term_escape.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -238,6 +239,85 @@ UTEST(cli_log, escape_line_writes_crlf_as_two_characters)
     ASSERT_STREQ("a\\x1b[2Jb\tc\\x7f", out);
     hl_log_escape_line("ab\x1b", out, 6);        /* \x1b would not fit whole */
     ASSERT_STREQ("ab", out);
+}
+
+/* Audit 42: the C1 controls (U+0080-U+009F, UTF-8 C2 80-9F) and stray bytes
+ * 0x80-0x9F passed through raw - 0x9B is CSI and 0x9D OSC to a terminal in
+ * 8-bit mode. They are \xNN per byte now; other UTF-8 is kept whole. */
+UTEST(cli_log_audit42, escape_line_c1_controls)
+{
+    char out[128];
+    hl_log_escape_line("a\xc2\x9b" "2Jb", out, sizeof out);      /* U+009B CSI */
+    ASSERT_STREQ("a\\xc2\\x9b2Jb", out);
+    hl_log_escape_line("\xc2\x9d" "52;c;x\xc2\x9c", out, sizeof out); /* OSC..ST */
+    ASSERT_STREQ("\\xc2\\x9d52;c;x\\xc2\\x9c", out);
+    hl_log_escape_line("x\x9by\x80", out, sizeof out);          /* stray bytes */
+    ASSERT_STREQ("x\\x9by\\x80", out);
+    /* Valid UTF-8 whose continuation bytes are in 0x80-0x9F is kept. */
+    hl_log_escape_line("\xc3\xa9 \xe2\x82\xac \xf0\x9f\x98\x80 \xc2\xa0", out,
+                       sizeof out);
+    ASSERT_STREQ("\xc3\xa9 \xe2\x82\xac \xf0\x9f\x98\x80 \xc2\xa0", out);
+    /* A truncated or overlong sequence is not UTF-8: its 0x80-0x9F bytes are
+     * stray; a stray 0xA0+ byte is kept. */
+    hl_log_escape_line("\xe2\x82" "z\xc0\x9b" "\xff", out, sizeof out);
+    ASSERT_STREQ("\xe2\\x82z\xc0\\x9b\xff", out);
+    /* A unit that does not fit ends the record: never half of one. */
+    hl_log_escape_line("ab\xc2\x9b", out, 10);
+    ASSERT_STREQ("ab", out);
+    hl_log_escape_line("ab\xe2\x82\xac", out, 5);
+    ASSERT_STREQ("ab", out);
+}
+
+UTEST(cli_log_audit42, fputs_escaped_c1_controls)
+{
+    char path[512];
+    capture_path(path, sizeof(path), "c1");
+    FILE *f = fopen(path, "w+");
+    ASSERT_TRUE(f != NULL);
+    hl_log_fputs_escaped(f, "PASS\xc2\x9b" "1A\x9d\xc3\xa9\n");
+    fflush(f);
+    rewind(f);
+    char buf[128] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    remove(path);
+    buf[n] = '\0';
+    ASSERT_STREQ("PASS\\xc2\\x9b1A\\x9d\xc3\xa9\\n", buf);
+}
+
+/* The tool VM's writers (shared/term_escape.h) take the same rule: LF / tab
+ * kept for hl_term_fwrite_escaped, CR / LF escaped for the line writer. */
+UTEST(term_escape_audit42, writers_escape_c1_controls)
+{
+    char path[512];
+    capture_path(path, sizeof(path), "term_c1");
+    FILE *f = fopen(path, "w+");
+    ASSERT_TRUE(f != NULL);
+    const char s[] = "a\xc2\x9b" "b\n\x9c\t\xe2\x82\xac\r";
+    hl_term_fwrite_escaped(f, s, sizeof s - 1);
+    fputc('|', f);
+    hl_term_fputs_line_escaped(f, s);
+    fflush(f);
+    rewind(f);
+    char buf[256] = {0};
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    remove(path);
+    buf[n] = '\0';
+    ASSERT_STREQ("a\\xc2\\x9bb\n\\x9c\t\xe2\x82\xac\\r"
+                 "|a\\xc2\\x9bb\\n\\x9c\t\xe2\x82\xac\\r", buf);
+    /* hl_term_high_unit itself. */
+    int esc = -1;
+    ASSERT_EQ((size_t)2, hl_term_high_unit((const unsigned char *)"\xc2\x85", 2, &esc));
+    ASSERT_EQ(1, esc);
+    ASSERT_EQ((size_t)2, hl_term_high_unit((const unsigned char *)"\xc2\xa0", 2, &esc));
+    ASSERT_EQ(0, esc);
+    ASSERT_EQ((size_t)1, hl_term_high_unit((const unsigned char *)"\xc2", 1, &esc));
+    ASSERT_EQ(0, esc);                       /* truncated lead, >= 0xA0: kept */
+    ASSERT_EQ((size_t)1, hl_term_high_unit((const unsigned char *)"\xed\xa0\x80", 3, &esc));
+    ASSERT_EQ(0, esc);                       /* surrogate form: not UTF-8 */
+    ASSERT_EQ((size_t)1, hl_term_high_unit((const unsigned char *)"\x85", 1, &esc));
+    ASSERT_EQ(1, esc);
 }
 
 UTEST(cli_log, a_record_with_a_newline_is_one_line)

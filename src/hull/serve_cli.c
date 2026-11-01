@@ -466,13 +466,15 @@ int hull_serve(int argc, char **argv)
         }
     }
 
-    /* Create the async event loop + worker pool BEFORE any kernel sandbox.
-     * glibc registers a per-thread rseq area when each thread starts; once
-     * the phase-2 pledge's seccomp filter is installed, the rseq syscall is
-     * rejected and glibc aborts the whole process ("Fatal glibc error: rseq
-     * registration failed"). serve.c creates its pool (hl_serve_init_infra)
-     * before load + sandbox for exactly this reason; mirror that order here.
-     * The pool is assigned onto the runtime once it exists, below. */
+    /* Create the async event loop + worker pool object before the app
+     * context, so the runtime registers hull.worker (it does only when a pool
+     * exists); the pool is assigned onto the runtime once it exists, below.
+     * Its worker THREADS start on the first submit, after the phase-2 sandbox,
+     * so they are born inside it (audit 42, async/poll.c pool_start_workers):
+     * created here they had neither the seccomp filter nor the Landlock
+     * domain, both of which the kernel attaches per thread. (A thread created
+     * under the sandbox can register glibc's rseq area: vendor/pledge patch
+     * 0001.) */
     const HlAsyncBackend *be = hl_async_backend();
     HlAsyncBackendCtx *async_ctx = NULL;
     if (be->init(&async_ctx, NULL) != 0) {

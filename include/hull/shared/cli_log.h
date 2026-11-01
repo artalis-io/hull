@@ -122,7 +122,11 @@ int hl_cli_log_is_native_source(const char *file);
  * (this one and serve.c's) pass every message through it, so app text that
  * reaches a log call by another path - an uncaught exception's message, a
  * ws / SSE error - cannot forge a line (audit 27). A message log.* already
- * escaped holds no CR / LF, so nothing is escaped twice. */
+ * escaped holds no CR / LF, so nothing is escaped twice. Every other C0
+ * control (ESC included) and DEL are written as \xNN (audit 28), and so are
+ * the C1 controls U+0080-U+009F (C2 80-9F, both bytes) and any stray byte
+ * 0x80-0x9F outside a valid UTF-8 sequence (audit 42: 0x9B is CSI to a
+ * terminal in 8-bit mode); other UTF-8 is kept, never cut in half. */
 void hl_log_escape_line(const char *in, char *out, size_t outsz);
 
 /* Write @p s to @p f escaped as hl_log_escape_line escapes it, untruncated.

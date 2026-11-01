@@ -298,27 +298,59 @@ static void keel_watcher_del(HlAsyncBackendCtx *ctx, int fd)
 
 /* ── Thread pool ───────────────────────────────────────────────────── */
 
+/* The workers start on the first submit, not at create (audit 42). Both
+ * runners create the pool before the kernel sandbox applies (the runtime
+ * registers hull.worker only when a pool exists), and Keel starts its threads
+ * in kl_thread_pool_create, so every worker - worker.dispatch VMs, db.async
+ * reply parsing, compute.async WASM - used to predate the sandbox. Started on
+ * first use, which is after the phase-2 sandbox in every runner, a worker is
+ * born inside it and inherits the seccomp filter and the Landlock domain like
+ * any later thread. The vendored pledge also applies both to threads that
+ * already exist (vendor/pledge patches 0003 / 0004, docs/pledge_patches.md),
+ * so this is the second line - and the only one where that polyfill is not
+ * used, as in a cosmo APE. Creating a thread under the sandbox is allowed
+ * (a CLONE_THREAD clone, and rseq per pledge patch 0001), as DuckDB's own
+ * worker pool already relies on. */
 struct HlAsyncBackendPool {
-    KlThreadPool *kpool;
+    KlThreadPool *kpool;          /* NULL until the first submit */
+    KlEventCtx   *kel;
+    int           num_workers;
+    int           queue_capacity;
+    int           start_logged;
 };
 
 static int keel_pool_create(HlAsyncBackendPool **out, HlAsyncBackendCtx *ctx,
                              int num_workers, int queue_capacity)
 {
-    if (!out || !ctx || !ctx->kel) return -1;
+    if (!out || !ctx || !ctx->kel || num_workers <= 0 || queue_capacity <= 0)
+        return -1;
     HlAsyncBackendPool *p = calloc(1, sizeof *p);
     if (!p) return -1;
+    p->kel            = ctx->kel;
+    p->num_workers    = num_workers;
+    p->queue_capacity = queue_capacity;
+    *out = p;
+    return 0;
+}
+
+/* Starts the workers once; a failed start is retried at the next submit. */
+static int keel_pool_start(HlAsyncBackendPool *p)
+{
+    if (p->kpool) return 0;
     KlThreadPoolConfig cfg = {
-        .num_workers     = num_workers,
-        .queue_capacity  = queue_capacity,
+        .num_workers     = p->num_workers,
+        .queue_capacity  = p->queue_capacity,
         .alloc           = NULL,
     };
-    p->kpool = kl_thread_pool_create(ctx->kel, &cfg);
+    p->kpool = kl_thread_pool_create(p->kel, &cfg);
     if (!p->kpool) {
-        free(p);
+        if (!p->start_logged) {
+            p->start_logged = 1;
+            fprintf(stderr, "[hull:c] thread pool could not be started - "
+                            "async work unavailable\n");
+        }
         return -1;
     }
-    *out = p;
     return 0;
 }
 
@@ -335,7 +367,7 @@ static int keel_pool_submit(HlAsyncBackendPool *p,
                              HlAsyncWorkFn cancel_fn,
                              void *user)
 {
-    if (!p || !p->kpool) return -1;
+    if (!p || keel_pool_start(p) != 0) return -1;
     KlWorkItem item = {
         .work_fn   = work_fn,
         .done_fn   = done_fn,

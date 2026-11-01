@@ -684,7 +684,9 @@ void hl_cap_wasm_clear_stream_ctx(void);
 /**
  * Escape a guest's HL_WASM_OP_LOG message for the log (audit 26): CR / LF
  * become the two characters \r / \n, every other C0 control (NUL included)
- * and DEL become \xNN, so a guest cannot write a log line of its own. The
+ * and DEL become \xNN, so a guest cannot write a log line of its own; so do
+ * the C1 controls (C2 80-9F, each byte) and any stray byte 0x80-0x9F outside
+ * a valid UTF-8 sequence (audit 42, hl_term_high_unit). The
  * output is NUL-terminated and truncated (ending "...") to fit @p outsz.
  * Returns the bytes written, excluding the NUL.
  */

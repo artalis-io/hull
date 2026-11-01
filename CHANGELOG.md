@@ -184,6 +184,27 @@ release-artifact layout).
   starting `[hull:busy] `, a rethrown parsed remote `{ code: "busy" }`), so a job is handed back
   at most 20 times in a row per worker process, each a second longer than the last (capped at
   30 s); the next busy failure is counted like any other error.
+- **Linux worker threads ran outside the kernel sandbox** (audit 42). The kernel attaches a
+  seccomp filter and a Landlock domain per thread, and the vendored pledge polyfill installed
+  both on the calling thread only. Both runners created the worker pool - whose threads run
+  `worker.dispatch` VMs, parse Postgres / MySQL `db.async` replies and run `compute.async`
+  WASM - before either sandbox phase, so those threads had no seccomp filter and no Landlock
+  domain, and since threads share one address space a memory-safety bug in one escaped the
+  sandbox for the whole process. Every seccomp filter is now installed on all threads with
+  `SECCOMP_FILTER_FLAG_TSYNC`; the Landlock domain reaches existing threads through
+  `LANDLOCK_RESTRICT_SELF_TSYNC` where the kernel has it (Landlock ABI 8+), and otherwise each
+  thread restricts itself from a signal handler; a thread that cannot be reached (its signals
+  blocked) makes the sandbox refuse to start unless `--allow-degraded-sandbox`. The pool's
+  workers also start on first use, inside the sandbox. A pool thread's own connection to the `-d`
+  database now needs that database's WAL / SHM files granted, so the Linux sandbox unveils
+  them (they worked before only because the pool ran outside the sandbox). The `[sandbox] applied` log line now
+  ends `threads: single|tsync|signal`. vendor/pledge patches 0003 / 0004, see
+  docs/pledge_patches.md.
+- **Log and terminal escaping passed C1 control characters through** (audit 42). The shared
+  escapers (log records, `hull test` output, the tool VM's writers, a WASM guest's log
+  message) wrote U+0080-U+009F (UTF-8 `C2 80`-`C2 9F`) and stray `0x80`-`0x9F` bytes raw; a
+  terminal in 8-bit mode reads `0x9B` as CSI and `0x9D` as OSC. They are written as `\xNN` per
+  byte now; other UTF-8 is unchanged.
 - **An app could kill the process by truncating a database file SQLite holds open** (audit 33,
   both runtimes). SQLite maps a WAL database's index (`<db>-shm`) `MAP_SHARED` in every
   connection, and that mapping is not one of the fs.mmap SIGBUS guard's: `compute.stream("m",
