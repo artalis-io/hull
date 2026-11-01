@@ -25,3 +25,7 @@ void kl_strerror(void) { abort(); }
 void kl_allocator_default(void);
 void kl_allocator_default(void) { abort(); }
 
+/* cap/run_watchdog.c (audit convergence §6.2: the sync request clamps its
+ * timeout to the run's deadline); the request path is never reached. */
+void hl_run_deadline_clamp_ms(void);
+void hl_run_deadline_clamp_ms(void) { abort(); }

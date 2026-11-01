@@ -1697,10 +1697,21 @@ what its slowest route needs, or move that work to `worker.dispatch`.
 is charged its measured wall time (64 units per microsecond) past what it
 charged explicitly, so a run of the default 100M-instruction budget can spend
 about 1.5 s inside bindings. Waits on a peer or a user (a database or Valkey
-socket, a synchronous HTTP request, SMTP, the terminal, stdin), WASM guest
-code (metered by `gas` / `timeout_ms`) and GPU device waits are not counted.
+socket, a synchronous HTTP request, SMTP, the terminal, stdin) and GPU device
+waits are not counted. Synchronous WASM guest code IS counted (gas does not
+meter AOT code), so about 1.5 s of `compute.call` in one run trips the default
+budget; long guests belong in `compute.async`, which runs on a pool thread.
 A handler that legitimately does more CPU work in one run (many password
 hashes, say) needs `--max-instructions` raised or the work split across runs.
+
+**A blocking call ends by the deadline.** A synchronous `http.get` /
+`http.request` and a synchronous `compute.call` / `instance:call` /
+`compute.instance()` hold the run for as long as they take, so each clamps its
+own timeout to what is left of the run's deadline: under `request_ms = 1500`
+a sync `http.get` with a 10 s timeout fails with a timeout after at most
+~1.5 s, and a call made once the deadline has passed fails at once without
+sending or running anything. `http.fetch` and `compute.async` are not clamped:
+the run parks while they wait.
 
 ### Outbound HTTP timeout (`hull/http-client`)
 

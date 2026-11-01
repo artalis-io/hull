@@ -26,8 +26,8 @@ release-artifact layout).
   too small can no longer run free: the worst case is one call before the trip. A run under the
   default 100M budget can therefore spend about 1.5 s inside bindings; CPU-heavy runs (many password
   hashes in one request) may need `--max-instructions` raised. Waits on a peer or a user (database /
-  Valkey sockets, synchronous HTTP, SMTP, the terminal, stdin), WASM guest code, GPU device waits
-  and `fsync` are excluded. Time off the CPU (preemption on a loaded host) is not charged as work: a
+  Valkey sockets, synchronous HTTP, SMTP, the terminal, stdin), GPU device waits and `fsync` are
+  excluded (WASM guest code is charged: see the §6.2 entry below). Time off the CPU (preemption on a loaded host) is not charged as work: a
   slow call is charged at most the run's CPU time so far, and switches the VM to reading the
   thread's CPU clock for the next 100 ms, during which a call costs its CPU time plus at most 32 us
   off the CPU. A trip that lands while a binding raises its own error is re-raised by `pcall` as the
@@ -42,6 +42,22 @@ release-artifact layout).
   the run end normally. The error report of a tripped JS run (app.main, a failed load) names the
   trip from C instead of calling the error's `toString`, which that next-step poll interrupted
   again: it printed "(an error that cannot be shown)" instead of the instruction limit.
+- **A synchronous `http.get` / `http.request` and a synchronous `compute.call` /
+  `instance:call` / `compute.instance()` now end by the calling run's deadline** (audit
+  convergence §6.2; phase-2 confirming audit M1 / M2). Each blocks its run inside one binding
+  call, where the run watchdog's flag is never seen, so it ran to its own timeout: a handler with
+  `limits.request_ms = 1500` calling `http.get` on an upstream that answered after 8 s was
+  answered after 8.1 s, a quadratic guest after 7.6 s, and a `/ping` sent meanwhile waited as
+  long. The request's timeout (and so every redirect hop's) and the guest call's `timeout_ms` are
+  now clamped to what is left of the run (`hl_run_deadline_left_ms`, recorded per thread by the
+  run watch's arm / restore), and a call made after the deadline has passed is refused as a
+  timeout without sending or running anything. `compute.stream` chunks and WASM `db.udf` calls go
+  through the same clamp. Guest time is no longer excluded from the binding dispatcher's measured
+  time: WAMR meters no AOT code, so under a production `hull build` a guest call cost the run
+  nothing; it is now charged at the standard rate (64 units/us), so about 1.5 s of synchronous
+  guest code in one run trips the default 100M budget. Move long guests to `compute.async`
+  (a pool thread: neither clamped nor charged, it holds no loop) or raise `--max-instructions`.
+  `http.fetch` is unchanged: its run parks, and the resume is a new run.
 
 ### Process and CI
 

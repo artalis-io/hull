@@ -503,6 +503,9 @@ jobs:
       - name: Per-request deadline E2E tests
         timeout-minutes: 3
         run: make e2e-request-deadline
+      - name: Blocking calls clamped to the run deadline E2E tests
+        timeout-minutes: 3
+        run: make e2e-convergence-deadline
       - name: Shutdown-with-work-in-flight E2E tests
         timeout-minutes: 3
         run: make e2e-teardown
