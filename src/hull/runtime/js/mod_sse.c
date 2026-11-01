@@ -174,7 +174,7 @@ void hl_js_sse_register_class(JSContext *ctx)
     JS_NewClass(JS_GetRuntime(ctx), js_sse_stream_class_id, &js_sse_stream_class);
 
     JSValue proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, proto, js_sse_stream_proto_funcs,
+    hl_js_set_function_list(ctx, proto, js_sse_stream_proto_funcs,
                                sizeof(js_sse_stream_proto_funcs) /
                                sizeof(js_sse_stream_proto_funcs[0]));
     hl_js_set_class_proto_frozen(ctx, js_sse_stream_class_id, proto);

@@ -43,6 +43,6 @@ static const luaL_Reg server_funcs[] = {
 
 int luaopen_hull_server(lua_State *L)
 {
-    luaL_newlib(L, server_funcs);
+    hl_lua_newlib(L, server_funcs);
     return 1;
 }

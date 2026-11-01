@@ -56,6 +56,7 @@ typedef struct HlLuaAsyncCont {
     void              *on_complete_ctx;
     int                settled;       /* resumed or cancelled */
     int                is_main;       /* co is app.main's: its ref is vt_lua_run_main's */
+    int                run_kind;      /* HlRunKind of the run that parked */
 } HlLuaAsyncCont;
 
 /*
@@ -644,8 +645,8 @@ static void hl_lua_async_resume_impl(HlAsyncCont *self, void *driver)
         hl_db_registry_guard_stale_txns(lua->base.db_registry);
         /* A new run: budget.c. A resume of app.main itself keeps main's
          * deadline default (cap/run_watchdog.h). */
-        HL_LUA_ARM_KIND(lua, co, co == lua->cli_main_co ? HL_RUN_MAIN
-                                                        : HL_RUN_ENTRY);
+        HL_LUA_ARM_KIND(lua, co, co == lua->cli_main_co
+                                     ? HL_RUN_MAIN : (HlRunKind)lc->run_kind);
         *hl_lua_co_mark(co) = &hl_lua_resuming_marker;   /* hl_lua_async_k_ok */
         status = lua_resume(co, lua->L, nargs, &nres);
         if (*hl_lua_co_mark(co) == &hl_lua_resuming_marker)
@@ -889,6 +890,7 @@ HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
      * be suspended concurrently without clobbering each other */
     lc->co         = lua->active_co;
     lc->thread_ref = lua->active_thread_ref;
+    lc->run_kind   = lua->run_kind;   /* the resume's deadline (§6.2) */
     lc->conn       = lua->active_conn;
     lc->req        = lua->active_req;
     lc->timer_ctx  = lua->active_timer;  /* inherit timer ctx if in timer callback */
@@ -1580,7 +1582,7 @@ void hl_lua_tasks_free(HlLua *lua)
 int luaopen_hull_task(lua_State *L)
 {
     lua_newtable(L);
-    lua_pushcfunction(L, lua_task_spawn);
+    hl_lua_pushcfunction(L, lua_task_spawn);
     lua_setfield(L, -2, "spawn");
     return 1;
 }
@@ -1811,9 +1813,9 @@ int luaopen_hull_hull(lua_State *L)
     }
     lua_pop(L, 1);
 
-    luaL_newlib(L, hull_funcs);
+    hl_lua_newlib(L, hull_funcs);
     if (hl_vmt_test_hook_enabled()) {
-        lua_pushcfunction(L, lua_hull_test_native_sleep);
+        hl_lua_pushcfunction(L, lua_hull_test_native_sleep);
         lua_setfield(L, -2, "_test_native_sleep");
     }
     lua_newtable(L);

@@ -1304,7 +1304,7 @@ static void push_bound_subtable(lua_State *L, const luaL_Reg *funcs,
     lua_newtable(L);
     for (const luaL_Reg *m = funcs; m->name; m++) {
         lua_pushlightuserdata(L, h);
-        lua_pushcclosure(L, m->func, 1);
+        hl_lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }
     lua_setfield(L, -2, field);
@@ -1350,7 +1350,7 @@ static int push_conn_object(lua_State *L, HlDbHandle *h)
     lua_createtable(L, 0, 12);
     for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
         lua_pushlightuserdata(L, h);
-        lua_pushcclosure(L, m->func, 1);
+        hl_lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }
     /* async targets this connection's database via the worker pool's per-DSN
@@ -1433,11 +1433,11 @@ static int push_owned_conn_object(lua_State *L, HlLuaOwnedConn *o,
     lua_createtable(L, 0, 10);
     for (const luaL_Reg *m = db_conn_methods; m->name; m++) {
         lua_pushvalue(L, owner);
-        lua_pushcclosure(L, m->func, 1);
+        hl_lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }
     lua_pushvalue(L, owner);
-    lua_pushcclosure(L, lua_owned_conn_close, 1);
+    hl_lua_pushcclosure(L, lua_owned_conn_close, 1);
     lua_setfield(L, -2, "close");
 
     /* async bound to the owner box: conn.async resolves the same live handle +
@@ -1446,7 +1446,7 @@ static int push_owned_conn_object(lua_State *L, HlLuaOwnedConn *o,
     lua_newtable(L);
     for (const luaL_Reg *m = db_async_funcs; m->name; m++) {
         lua_pushvalue(L, owner);
-        lua_pushcclosure(L, m->func, 1);
+        hl_lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }
     lua_setfield(L, -2, "async");
@@ -1601,9 +1601,9 @@ static int lua_db_internal_app_conn(lua_State *L)
 int luaopen_hull_db_internal_conn(lua_State *L)
 {
     lua_createtable(L, 0, 2);
-    lua_pushcfunction(L, lua_db_internal_conn);
+    hl_lua_pushcfunction(L, lua_db_internal_conn);
     lua_setfield(L, -2, "connection");
-    lua_pushcfunction(L, lua_db_internal_app_conn);
+    hl_lua_pushcfunction(L, lua_db_internal_app_conn);
     lua_setfield(L, -2, "app_connection");
     return 1;
 }
@@ -1622,11 +1622,11 @@ int luaopen_hull_db(lua_State *L)
     lua_pop(L, 1);
 
     lua_createtable(L, 0, 3);
-    lua_pushcfunction(L, lua_db_connect);
+    hl_lua_pushcfunction(L, lua_db_connect);
     lua_setfield(L, -2, "connect");
-    lua_pushcfunction(L, lua_db_default);
+    hl_lua_pushcfunction(L, lua_db_default);
     lua_setfield(L, -2, "default");
-    lua_pushcfunction(L, lua_db_open);
+    hl_lua_pushcfunction(L, lua_db_open);
     lua_setfield(L, -2, "open");
     return 1;
 }

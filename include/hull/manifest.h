@@ -252,6 +252,12 @@ typedef struct HlManifest {
     int         vm_thread;
     uint32_t    vm_thread_grace_ms;
     uint32_t    vm_thread_ceiling_ms;
+    /* Run deadlines (from manifest "limits"): the wall-clock bound of one
+     * uninterrupted run of an HTTP handler (request_ms) and of a timer /
+     * WebSocket / SSE callback (callback_ms), in ms. 0 = not set (Hull's
+     * defaults, cap/run_watchdog.h). */
+    uint32_t    limits_request_ms;
+    uint32_t    limits_callback_ms;
 
     /* Capability flags */
     int         gpu;              /* 1 if app declares gpu: true or gpu: {...} */

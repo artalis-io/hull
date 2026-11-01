@@ -30,6 +30,7 @@
  */
 
 #include "hull/cap/smtp_transport.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cap/smtp.h"        /* hl_smtp_parse_response (the one code parser) */
 #include "hull/limits/core.h"     /* HL_SMTP_RECV_BUF_SIZE */
 
@@ -965,7 +966,10 @@ static int pump_until_abs(HlSmtpTransport *t, DonePred done, uint64_t deadline_m
     for (;;) {
         int c = pump_check(t, done, deadline_ms);
         if (c) return c > 0 ? 0 : -1;
-        if (kl_event_ctx_run(&t->ev, 64, step_ms) < 0)
+        uint64_t hl_mx = hl_meter_exclude_begin();   /* the server's time */
+        int hl_rr = kl_event_ctx_run(&t->ev, 64, step_ms);
+        hl_meter_exclude_end(hl_mx);
+        if (hl_rr < 0)
             return -1;
         c = pump_check(t, done, deadline_ms);
         if (c) return c > 0 ? 0 : -1;

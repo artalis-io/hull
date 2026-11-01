@@ -108,7 +108,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_registry_guard_stale_txns(js->base.db_registry);
 
-    hl_js_reset_request(js);
+    hl_js_reset_request_as(js, HL_RUN_HTTP);   /* an HTTP handler's deadline */
 
     /* Set per-request async context (for hull.sleep / http.get access) */
     js->active_conn = kl_http_request_conn(req);
@@ -337,7 +337,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_db_registry_guard_stale_txns(js->base.db_registry);
 
-    hl_js_reset_request(js);
+    hl_js_reset_request_as(js, HL_RUN_HTTP);   /* an HTTP handler's deadline */
     /* The first middleware of a request: a ctx an earlier request on this
      * connection slot left behind is freed now. */
     req_ctx_sweep(js, req);

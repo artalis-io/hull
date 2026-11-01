@@ -599,7 +599,7 @@ static const luaL_Reg tui_funcs[] = {
 
 int luaopen_hull_tui(lua_State *L)
 {
-    luaL_newlib(L, tui_funcs);
+    hl_lua_newlib(L, tui_funcs);
     /* Constant: mod-bit table for ev.mods comparisons. */
     lua_pushinteger(L, HL_TUI_MOD_SHIFT); lua_setfield(L, -2, "MOD_SHIFT");
     lua_pushinteger(L, HL_TUI_MOD_ALT);   lua_setfield(L, -2, "MOD_ALT");

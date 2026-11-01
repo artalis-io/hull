@@ -294,71 +294,105 @@ def rule(rid, title):
 
 
 # INV-1 -------------------------------------------------------------------
-# How it decides: a BINDING is a function in src/hull/runtime/{lua,js}/ with
-# the lua_CFunction signature `(lua_State *L)` or a JSCFunction signature
-# `(JSContext *, JSValue[Const], int, JSValue[Const] *[, int][, ...])` whose
-# address is taken somewhere in those directories (a luaL_Reg row, a
-# JS_CFUNC_DEF, JS_NewCFunction*, lua_pushcfunction, a method table). Getters
-# made with JS_CGETSET_DEF have another signature and are not bindings here.
-# It CHARGES when its body, or a function it calls up to 3 levels down (same
-# file first, else any function of the two runtime directories), names one of
-# CHARGE_TOKENS - directly or through an upper-case macro (defined in the
-# file, a runtime header or include/hull/shared/) whose body does. The tool
-# VM (mod_tool.c) has no budget and is skipped.
-# Phase 2's measured-time dispatcher (design section 6.1) replaces this rule.
-
-CHARGE_TOKENS = re.compile(
-    r"\b(hl_lua_budget_charge|lua_hlwork|lua_hlcharge|hl_js_budget_charge|HL_CHARGE_\w+|"
-    r"hl_work_\w+|hl_fs_charge_begin|hl_fs_charge|hl_db_budget_charge|"
-    r"hl_js_gc_for_retry|hl_lua_fs_charge|hl_js_fs_charge|"
-    r"hl_gpu_(?:dispatch|pipeline)_charge_bytes|hl_gpu_wgsl_compile_units|"
-    r"hl_image_(?:codec|decode|encode)_units|hl_tar_create_size)\b")
+# How it decides (audit convergence phase 2, design section 6.1): every
+# app-facing binding is called through the runtime's binding dispatcher,
+# which charges the run the call's measured wall time past what the call
+# charged itself. So a binding must be REGISTERED with the dispatcher; an
+# explicit charge alone no longer satisfies the rule. Two checks:
+#   (a) Registration sites. In src/hull/runtime/lua/ (budget.c, the
+#       dispatcher itself, and the tool VM's mod_tool.c excepted) a raw
+#       luaL_setfuncs / luaL_newlib / luaL_register is a finding: modules
+#       register through hl_lua_setfuncs / hl_lua_newlib. In
+#       src/hull/runtime/js/ a JS_SetPropertyFunctionList or
+#       JS_SetModuleExportList outside hl_js_set_function_list is a finding:
+#       QuickJS instantiates a function list with its own constructor, which
+#       QuickJS HULL PATCH 0011 leaves unmarked, so its calls skip the hooks.
+#       (Every JS_NewCFunction* / JS_NewCFunctionData function is marked by
+#       the patch, so JS needs no per-binding check.)
+#   (b) Lua bindings. A BINDING is a function in src/hull/runtime/lua/ with
+#       the lua_CFunction signature `(lua_State *L)` whose address is taken
+#       there. It is REGISTERED when it is a row of a luaL_Reg table that the
+#       same file passes to hl_lua_setfuncs / hl_lua_newlib, or when it is
+#       passed to hl_lua_pushcfunction / hl_lua_pushcclosure. Any other
+#       binding (a raw lua_pushcfunction / lua_pushcclosure, a table nothing
+#       registers through the dispatcher) is a finding: a metamethod the
+#       dispatcher never wraps (__gc, __close), a protected-call body pushed
+#       from C or a coroutine primitive is allowlisted with its reason.
 
 LUA_SIG = re.compile(r"^\s*lua_State\s*\*\s*\w+\s*$")
-JS_SIG = re.compile(
-    r"^\s*JSContext\s*\*\s*\w+\s*,\s*JSValue(?:Const)?\s+\w+\s*,\s*int\s+\w+"
-    r"\s*,\s*JSValue(?:Const)?\s*\*\s*\w+\s*(?:,.*)?$", re.S)
-INV1_SKIP = {"src/hull/runtime/lua/mod_tool.c"}
+INV1_LUA_SKIP = {"src/hull/runtime/lua/mod_tool.c",
+                 "src/hull/runtime/lua/budget.c"}
+INV1_LUA_RAW_REG = re.compile(r"\b(luaL_setfuncs|luaL_newlib|luaL_register)\s*\(")
+INV1_JS_RAW_REG = re.compile(
+    r"\b(JS_SetPropertyFunctionList|JS_SetModuleExportList)\s*\(")
+INV1_JS_REGISTRAR = "hl_js_set_function_list"
 
 
-@rule("INV-1", "every exported Lua/JS binding charges the run budget")
+@rule("INV-1", "every exported Lua/JS binding is registered with the binding dispatcher")
 def inv1(tree, ctx):
     findings = []
-    for rt, sig in (("lua", LUA_SIG), ("js", JS_SIG)):
-        d = "src/hull/runtime/" + rt
-        files = [p for p in tree.files(d, exts=(".c",)) if p not in INV1_SKIP]
-        cfs = [tree.cfile(p) for p in files]
-        extra = {}
-        for cf in cfs:
-            for fn in cf.funcs:
-                extra.setdefault(fn.name, fn)
-        macros = {}
-        for h in tree.files(d, "include/hull/shared", exts=(".h",)):
-            macros.update(tree.cfile(h).macros)
-        for cf in cfs:
-            macros.update(cf.macros)
-
-        def charges(f):
-            if CHARGE_TOKENS.search(f.body_code):
-                return True
-            return any(CHARGE_TOKENS.search(macros[w])
-                       for w in set(re.findall(r"\b[A-Z_][A-Z0-9_]+\b",
-                                               f.body_code))
-                       if w in macros)
-
-        refs = set()
-        for cf in cfs:
-            for m in re.finditer(r"\b([A-Za-z_]\w*)\b(?!\s*\()", cf.code):
-                refs.add(m.group(1))
-        for cf in cfs:
-            for fn in cf.funcs:
-                if not sig.match(fn.params) or fn.name not in refs:
-                    continue
-                if closure_hits(fn, cf.by_name, extra, charges, 3):
-                    continue
-                findings.append((f"{cf.rel}:{fn.name}",
-                                 f"binding {fn.name} (line {fn.line}) charges "
-                                 "nothing before its work"))
+    # (a) registration sites
+    for p in tree.files("src/hull/runtime/lua", exts=(".c", ".h")):
+        if p in INV1_LUA_SKIP:
+            continue
+        cf = tree.cfile(p)
+        for m in INV1_LUA_RAW_REG.finditer(cf.code):
+            findings.append((f"{p}:{cf.symbol_at(m.start())}",
+                             f"{m.group(1)} at line {cf.line_of(m.start())} "
+                             "registers bindings outside the dispatcher (use "
+                             "hl_lua_setfuncs / hl_lua_newlib)"))
+    for p in tree.files("src/hull/runtime/js", exts=(".c", ".h")):
+        cf = tree.cfile(p)
+        for m in INV1_JS_RAW_REG.finditer(cf.code):
+            sym = cf.symbol_at(m.start())
+            if sym == INV1_JS_REGISTRAR:
+                continue
+            findings.append((f"{p}:{sym}",
+                             f"{m.group(1)} at line {cf.line_of(m.start())} "
+                             "makes functions the dispatcher never sees (use "
+                             "hl_js_set_function_list)"))
+    # (b) Lua bindings
+    files = [p for p in tree.files("src/hull/runtime/lua", exts=(".c", ".h"))
+             if p not in INV1_LUA_SKIP]
+    cfs = [tree.cfile(p) for p in files]
+    registered, refs = set(), set()
+    push_re = re.compile(r"\bhl_lua_push(?:cfunction|cclosure)\s*\(([^;]*)\)\s*;")
+    for cf in cfs:
+        code = cf.code
+        tables = set(re.findall(
+            r"\bhl_lua_(?:setfuncs|newlib)\s*\(\s*[^,()]+,\s*(\w+)", code))
+        # A function that pushes a table's rows through the dispatcher
+        # (`hl_lua_pushcclosure(L, m->func, n)` in a loop): the tables it
+        # names, and those passed to it, are registered.
+        pushers = [fn for fn in cf.funcs
+                   if re.search(r"\bhl_lua_push(?:cfunction|cclosure)\s*\("
+                                r"\s*[^,()]+,\s*\w+\s*->\s*func\b", fn.body_code)]
+        for fn in pushers:
+            tables.update(re.findall(r"\b(\w+)\b", fn.body_code))
+            for m in re.finditer(r"\b" + re.escape(fn.name) + r"\s*\(([^;]*)\)",
+                                 code):
+                tables.update(re.findall(r"\b(\w+)\b", m.group(1)))
+        for m in re.finditer(
+                r"\bluaL_Reg\s+(\w+)\s*\[\s*\]\s*=\s*\{(.*?)\};", cf.text,
+                re.S):
+            if m.group(1) in tables:
+                registered.update(re.findall(
+                    r"\{\s*\"[^\"]*\"\s*,\s*(\w+)\s*\}", m.group(2)))
+        for m in push_re.finditer(code):
+            registered.update(re.findall(r"\b(\w+)\b", m.group(1)))
+        for m in re.finditer(r"\b([A-Za-z_]\w*)\b(?!\s*\()", code):
+            refs.add(m.group(1))
+    for cf in cfs:
+        for fn in cf.funcs:
+            if not LUA_SIG.match(fn.params) or fn.name not in refs:
+                continue
+            if fn.name in registered:
+                continue
+            findings.append((f"{cf.rel}:{fn.name}",
+                             f"binding {fn.name} (line {fn.line}) is not "
+                             "registered with the binding dispatcher "
+                             "(hl_lua_setfuncs / hl_lua_newlib / "
+                             "hl_lua_pushcfunction)"))
     return findings
 
 
@@ -422,17 +456,17 @@ def inv3(tree, ctx):
 # INV-4 -------------------------------------------------------------------
 # How it decides, two checks over src/hull/runtime/js/ and the JS entries in
 # src/hull/agent/:
-#   (a) a function that ARMS a run (hl_js_budget_arm / _arm_kind) is an entry
+#   (a) a function that ARMS a run (hl_js_budget_arm / _arm_kind / _arm_as) is an entry
 #       start: it, or a function it reaches in the same file, must call
 #       hl_js_entry_end_txn_check (directly or through hl_js_entry_park).
 #   (b) hl_db_registry_guard_stale_txns belongs at entry START only: a
 #       function that calls it must also arm the run, directly or through a
 #       same-file / runtime helper up to 2 levels down (it is the entry
 #       start), else it is a bare guard at an entry's end.
-# hl_js_budget_arm / _arm_kind / hl_js_entry_end_txn_check themselves are the
-# primitives and are skipped.
+# hl_js_budget_arm / _arm_kind / _arm_as / hl_js_entry_end_txn_check
+# themselves are the primitives and are skipped.
 
-INV4_ARM = {"hl_js_budget_arm", "hl_js_budget_arm_kind"}
+INV4_ARM = {"hl_js_budget_arm", "hl_js_budget_arm_kind", "hl_js_budget_arm_as"}
 INV4_END = {"hl_js_entry_end_txn_check", "hl_js_entry_park"}
 INV4_PRIMS = INV4_ARM | {"hl_js_entry_end_txn_check"}
 

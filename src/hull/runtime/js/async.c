@@ -56,6 +56,7 @@ struct HlJsAsyncCont {
     HlReqLife        *life;         /* the handler's request life (ref held) */
     int               attached;     /* counted in life->attached */
     int               cli_main;     /* made by app.main's own code */
+    int               run_kind;     /* HlRunKind of the run that made it */
 };
 
 /* The op no longer holds the connection (its resume is over, or it was
@@ -734,7 +735,8 @@ static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver)
      * inherit whatever count the last entry left - and after one trip,
      * every resume failed at its first poll until the next dispatch). A
      * resume of app.main's own code keeps main's deadline default. */
-    hl_js_budget_arm_kind(js, jc->cli_main ? HL_RUN_MAIN : HL_RUN_ENTRY);
+    hl_js_budget_arm_kind(js, jc->cli_main ? HL_RUN_MAIN
+                                           : (HlRunKind)jc->run_kind);
     /* The run that made this op, not a new one: its code after the await
      * runs with that tag (audit 30). */
     hl_js_run_tag_enter(js, jc->link.run_tag);
@@ -1308,6 +1310,7 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
         jc->life            = NULL;
         jc->cli_main        = js->cli_main_active && js->cli_main_tag != 0 &&
                               JS_GetJobTag(js->rt) == js->cli_main_tag;
+        jc->run_kind        = HL_RUN_ENTRY;
         jc->attached        = 0;
         jc->holds           = 0;
         jc->link.handler_promise = JS_UNDEFINED;
@@ -1327,6 +1330,7 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->on_complete_ctx = js->active_on_complete_ctx;
     jc->life            = js->active_life;
     jc->cli_main        = js->active_cli_main;
+    jc->run_kind        = js->run_kind;   /* the resume's deadline (§6.2) */
     hl_req_life_retain(jc->life);
     /* An op belongs to a request only while the request's live life is the
      * active one. App code can run while a connection is active and its life

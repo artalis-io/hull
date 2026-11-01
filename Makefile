@@ -177,6 +177,9 @@ ifdef COVERAGE
 # tests (cap/wasm.c, worker_db.c, etc.) which otherwise make geninfo
 # fail with "Unexpected negative count" in the CI coverage job.
 CFLAGS  += -g -O0 --coverage -fprofile-update=atomic
+# Instrumented: the binding dispatcher's measured time is divided by 8
+# (include/hull/shared/dispatch_meter.h) so ordinary work fits the budget.
+CFLAGS  += -DHL_METER_SLOWDOWN=8u
 LDFLAGS += --coverage
 endif
 

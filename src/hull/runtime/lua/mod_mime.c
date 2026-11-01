@@ -43,6 +43,6 @@ static const luaL_Reg mime_funcs[] = {
 
 int luaopen_hull_mime(lua_State *L)
 {
-    luaL_newlib(L, mime_funcs);
+    hl_lua_newlib(L, mime_funcs);
     return 1;
 }

@@ -1943,8 +1943,8 @@ static const luaL_Reg gpu_async_funcs[] = {
 
 int luaopen_hull_gpu(lua_State *L)
 {
-    luaL_newlib(L, gpu_funcs);
-    luaL_newlib(L, gpu_async_funcs);
+    hl_lua_newlib(L, gpu_funcs);
+    hl_lua_newlib(L, gpu_async_funcs);
     lua_setfield(L, -2, "async");  /* gpu.async = {...} */
     return 1;
 }

@@ -410,7 +410,7 @@ static void lua_register_mmap_metatable(lua_State *L)
     luaL_newmetatable(L, HL_MMAP_MT);
 
     /* __index = methods table */
-    luaL_newlib(L, mmap_methods);
+    hl_lua_newlib(L, mmap_methods);
     lua_setfield(L, -2, "__index");
 
     /* __gc for automatic cleanup */
@@ -418,7 +418,7 @@ static void lua_register_mmap_metatable(lua_State *L)
     lua_setfield(L, -2, "__gc");
 
     /* __close for Lua 5.4 to-be-closed variables */
-    lua_pushcfunction(L, lua_mmap_close);
+    hl_lua_pushcfunction(L, lua_mmap_close);
     lua_setfield(L, -2, "__close");
 
     /* __tostring */
@@ -449,7 +449,7 @@ int luaopen_hull_fs(lua_State *L)
 {
     lua_register_mmap_metatable(L);
     lua_register_fs_list_guard(L);
-    luaL_newlib(L, fs_funcs);
+    hl_lua_newlib(L, fs_funcs);
     return 1;
 }
 
@@ -1379,7 +1379,7 @@ int hl_lua_register_stdlib(HlLua *lua)
     }
 
     /* Register require as a global function */
-    lua_pushcfunction(L, hl_lua_require);
+    hl_lua_pushcfunction(L, hl_lua_require);
     lua_setglobal(L, "require");
 
     /* Give every stdlib chunk the stdlib's own environment (above): a main

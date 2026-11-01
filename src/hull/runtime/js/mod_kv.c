@@ -388,7 +388,7 @@ static int js_kv_module_init(JSContext *ctx, JSModuleDef *m)
     if (!JS_IsRegisteredClass(JS_GetRuntime(ctx), hull_kv_conn_class_id)) {
         JS_NewClass(JS_GetRuntime(ctx), hull_kv_conn_class_id, &js_kv_conn_class);
         JSValue proto = JS_NewObject(ctx);
-        JS_SetPropertyFunctionList(ctx, proto, js_kv_conn_methods,
+        hl_js_set_function_list(ctx, proto, js_kv_conn_methods,
                                    (int)(sizeof js_kv_conn_methods / sizeof js_kv_conn_methods[0]));
         hl_js_set_class_proto_frozen(ctx, hull_kv_conn_class_id, proto);
     }

@@ -31,6 +31,7 @@
  */
 
 #include "hull/cap/db_transport.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/shared/tls_client.h"   /* hl_tls_client_read/_write/_shutdown/_free */
 #include "hull/utils/alloc.h"         /* optional embedder HlAllocator (D6) */
 
@@ -520,7 +521,10 @@ static int pump_connect(HlDbTransport *t)
         pump_checkpoint(t);
         if (done_connect(t)) return 0;
         if (dl && kl_monotonic_ms() >= dl) return -1;
-        if (kl_event_ctx_run(&t->ev, 64, DBTP_PUMP_STEP_MS) < 0) return -1;
+        uint64_t hl_mx = hl_meter_exclude_begin();   /* the peer's time */
+        int hl_rr = kl_event_ctx_run(&t->ev, 64, DBTP_PUMP_STEP_MS);
+        hl_meter_exclude_end(hl_mx);
+        if (hl_rr < 0) return -1;
         if (done_connect(t)) return 0;
         if (dl && kl_monotonic_ms() >= dl) return -1;
         /* The caller's run is over its budget or past its deadline: a connect
@@ -885,7 +889,10 @@ ssize_t hl_db_transport_recv_sliced(HlDbTransport *t, uint8_t *buf, size_t len,
             int slice = HL_DB_WAIT_SLICE_MS;
             if (left > 0 && left < slice) slice = left;
             struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
-            if (poll(&pfd, 1, slice) < 0 && errno != EINTR) { n = -1; break; }
+            uint64_t hl_mx = hl_meter_exclude_begin();
+            int hl_pr = poll(&pfd, 1, slice);
+            hl_meter_exclude_end(hl_mx);
+            if (hl_pr < 0 && errno != EINTR) { n = -1; break; }
             continue;
         }
         /* A record with no application data (see hl_db_transport_recv). */
@@ -976,7 +983,9 @@ int hl_db_transport_send_sliced(HlDbTransport *t, const uint8_t *buf,
         /* Intentional native-FD escape, as set_io_timeout (KL_SOCK_CAP_NATIVE_FD). */
         struct pollfd pfd = { .fd = fd, .events = t->tls ? want : POLLOUT,
                               .revents = 0 };
+        uint64_t hl_mx = hl_meter_exclude_begin();
         int pr = poll(&pfd, 1, slice);
+        hl_meter_exclude_end(hl_mx);
         if (pr < 0 && errno != EINTR) { rc = -1; break; }
         ready_last = pr > 0;
     }
@@ -1013,7 +1022,9 @@ int hl_db_transport_wait_readable(HlDbTransport *t, int timeout_ms,
         }
         /* Intentional native-FD escape, as set_io_timeout (KL_SOCK_CAP_NATIVE_FD). */
         struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        uint64_t hl_mx = hl_meter_exclude_begin();
         int pr = poll(&pfd, 1, slice);
+        hl_meter_exclude_end(hl_mx);
         if (pr > 0)
             return 1;
         if (pr < 0 && errno != EINTR)

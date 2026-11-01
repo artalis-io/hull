@@ -26,6 +26,12 @@
  *
  * A Lua `next` / `rawget` / `rawlen` / `rawequal` on a view sees the empty
  * view table: use `pairs`, field reads, `#` and `==`.
+ *
+ * Every metamethod is registered with the binding dispatcher
+ * (hl_lua_pushcclosure, audit convergence section 6.1), like any other
+ * binding, and a field read hands back the real table's value - for a
+ * function, the dispatched closure the module registered - so a view never
+ * reaches a binding the dispatcher does not meter.
  */
 
 #include "internal.h"
@@ -86,7 +92,7 @@ static int ro_next(lua_State *L)
 static int ro_pairs(lua_State *L)
 {
     lua_pushvalue(L, lua_upvalueindex(1));
-    lua_pushcclosure(L, ro_next, 1);
+    hl_lua_pushcclosure(L, ro_next, 1);
     lua_pushvalue(L, 1);
     lua_pushnil(L);
     return 3;
@@ -167,26 +173,29 @@ void hl_lua_push_readonly(lua_State *L, int idx)
     lua_pushvalue(L, idx);
     lua_rawset(L, mt);
 
-    static const struct { const char *name; lua_CFunction fn; } mms[] = {
-        { "__index",    ro_index    },
-        { "__pairs",    ro_pairs    },
-        { "__len",      ro_len      },
-        { "__tostring", ro_tostring },
-    };
-    for (size_t i = 0; i < sizeof mms / sizeof mms[0]; i++) {
-        lua_pushvalue(L, idx);
-        lua_pushcclosure(L, mms[i].fn, 1);
-        lua_setfield(L, mt, mms[i].name);
-    }
-    lua_pushcfunction(L, ro_newindex);
+    /* Each closes over the real table. Spelled out, not table-driven, so
+     * every registration names its binding (INV-1). */
+    lua_pushvalue(L, idx);
+    hl_lua_pushcclosure(L, ro_index, 1);
+    lua_setfield(L, mt, "__index");
+    lua_pushvalue(L, idx);
+    hl_lua_pushcclosure(L, ro_pairs, 1);
+    lua_setfield(L, mt, "__pairs");
+    lua_pushvalue(L, idx);
+    hl_lua_pushcclosure(L, ro_len, 1);
+    lua_setfield(L, mt, "__len");
+    lua_pushvalue(L, idx);
+    hl_lua_pushcclosure(L, ro_tostring, 1);
+    lua_setfield(L, mt, "__tostring");
+    hl_lua_pushcfunction(L, ro_newindex);
     lua_setfield(L, mt, "__newindex");
-    lua_pushcfunction(L, ro_eq);
+    hl_lua_pushcfunction(L, ro_eq);
     lua_setfield(L, mt, "__eq");
     /* A call only when the real table answers one. */
     if (luaL_getmetafield(L, idx, "__call") != LUA_TNIL) {
         lua_pop(L, 1);
         lua_pushvalue(L, idx);
-        lua_pushcclosure(L, ro_call, 1);
+        hl_lua_pushcclosure(L, ro_call, 1);
         lua_setfield(L, mt, "__call");
     }
     lua_pushliteral(L, "locked");
@@ -214,6 +223,6 @@ int luaopen_hull_readonly(lua_State *L)
         { "view", lua_ro_view },
         { NULL, NULL }
     };
-    luaL_newlib(L, fns);
+    hl_lua_newlib(L, fns);
     return 1;
 }

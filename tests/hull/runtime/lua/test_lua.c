@@ -366,7 +366,13 @@ static int run_lua_test_in_runtime(const char *script_path, long long *pass_out,
      * (and the runs nested in it), any deadline already armed cleared. */
     hl_run_watchdog_configure(0);
     hl_run_watch_disarm(&lua_rt.run_watch);
+    /* Nor does the instruction budget: the binding dispatcher charges the
+     * suite's password hashing at its wall time, and a suite of them is
+     * many runs' worth of work in one (runs nested in it arm their own). */
+    int64_t saved_limit = lua_rt.budget.limit;
+    lua_rt.budget.limit = 0;
     rc = lua_pcall(lua_rt.L, 0, 1, 0);
+    lua_rt.budget.limit = saved_limit;
     hl_run_watchdog_configure(-1);
     if (rc != LUA_OK) {
         fprintf(stderr, "\n%s: %s\n", script_path, lua_tostring(lua_rt.L, -1));
@@ -3464,7 +3470,11 @@ UTEST(lua_stdlib, totp_rekey_batch_helper)
 
     /* Enroll three users under v1, rotate to v2, call totp.rekey().
      * Expect scanned=3, rekeyed=3, failed=0. Second rekey() reports
-     * scanned=3, rekeyed=0, failed=0 (all already on current). */
+     * scanned=3, rekeyed=0, failed=0 (all already on current). Three
+     * enrolments hash thirty recovery codes in this one run: more than one
+     * request's worth of KDF work at its measured cost (the binding
+     * dispatcher), so the run gets the budget of several. */
+    lua_rt.budget.limit = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
@@ -16175,5 +16185,321 @@ UTEST(lua_audit43, ordinary_module_use_still_works)
     cleanup_lua_caps();
 }
 #endif /* HL_ENABLE_DB */
+
+/* ── The binding dispatcher (audit convergence §6.1) ───────────────────
+ *
+ * Every binding is called through budget.c's trampoline, which charges the
+ * run for the call's wall time past what the call charged itself. Test
+ * bindings are registered here through hl_lua_pushcfunction - what every
+ * Hull module uses - or, for the baseline, a plain lua_pushcfunction. */
+
+#include "hull/shared/dispatch_meter.h"   /* HL_METER_SLOWDOWN */
+#define HL_METER_TEST_SLOWDOWN HL_METER_SLOWDOWN
+
+static uint64_t disp_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+/* Spins for @p ms of this thread's CPU time (not wall time: on a loaded
+ * host a wall-time spin does less work than it says, and the dispatcher
+ * charges CPU work - shared/dispatch_meter.h). */
+static uint64_t disp_cpu_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static void disp_spin_ms(lua_Integer ms)
+{
+    uint64_t end = disp_cpu_ns() + (uint64_t)ms * 1000000u;
+    while (disp_cpu_ns() < end) { }
+}
+
+/* A slow binding with no floor at all: what the dispatcher backstops. */
+static int disp_spin(lua_State *L)
+{
+    disp_spin_ms(luaL_checkinteger(L, 1));
+    return 0;
+}
+
+/* A slow binding that charges its own time (64 units per microsecond). */
+static int disp_spin_charged(lua_State *L)
+{
+    lua_Integer ms = luaL_checkinteger(L, 1);
+    lua_hlwork(L, (size_t)ms * 64000u, 0);
+    disp_spin_ms(ms);
+    return 0;
+}
+
+static int disp_spin_error(lua_State *L)
+{
+    disp_spin_ms(luaL_checkinteger(L, 1));
+    return luaL_error(L, "spun then failed");
+}
+
+static int disp_noop(lua_State *L)
+{
+    (void)L;
+    return 0;
+}
+
+static int disp_park_k(lua_State *L, int status, lua_KContext ctx)
+{
+    (void)status;
+    lua_pushinteger(L, (lua_Integer)ctx);
+    return 1;
+}
+
+/* Spins, then parks (as every waiting Hull op does: lua_yieldk with a
+ * continuation), then the continuation returns 42. */
+static int disp_park(lua_State *L)
+{
+    disp_spin_ms(luaL_optinteger(L, 1, 0));
+    return lua_yieldk(L, 0, 42, disp_park_k);
+}
+
+static void disp_register(lua_State *L)
+{
+    hl_lua_pushcfunction(L, disp_spin);         lua_setglobal(L, "spin");
+    hl_lua_pushcfunction(L, disp_spin_charged); lua_setglobal(L, "spin_charged");
+    hl_lua_pushcfunction(L, disp_spin_error);   lua_setglobal(L, "spin_error");
+    hl_lua_pushcfunction(L, disp_noop);         lua_setglobal(L, "noop");
+    lua_pushcfunction(L, disp_noop);            lua_setglobal(L, "noop_raw");
+    hl_lua_pushcfunction(L, disp_park);         lua_setglobal(L, "park");
+}
+
+/* Re-arm the budget by hand (a fresh run with @p limit units). */
+static void disp_arm(int64_t limit)
+{
+    lua_rt.budget.limit = limit;
+    lua_rt.budget.used = 0;
+    lua_rt.budget.tripped = 0;
+    lua_rt.budget.timed_out = 0;
+}
+
+static uint64_t disp_charged(lua_State *L)
+{
+    return lua_rt.budget.charged + (uint64_t)lua_hlpending(L);
+}
+
+UTEST(lua_dispatcher, bindings_are_registered_through_it)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    static const char *const exprs[] = {
+        "return hull.sleep",
+        "return require('hull.crypto').sha256",
+        "return require('hull.time').now",
+        "return require('hull.db').default",
+        "return require('hull.db').default().query",
+        "return require('hull.db').default().async.query",
+        "return require",
+    };
+    for (size_t i = 0; i < sizeof exprs / sizeof exprs[0]; i++) {
+        ASSERT_EQ_MSG(luaL_dostring(L, exprs[i]), LUA_OK, exprs[i]);
+        EXPECT_TRUE_MSG(hl_lua_is_dispatched(L, -1), exprs[i]);
+        lua_pop(L, 1);
+    }
+    /* Lua's own builtins are not (patch 0004 charges them). */
+    ASSERT_EQ(luaL_dostring(L, "return string.rep"), LUA_OK);
+    EXPECT_FALSE(hl_lua_is_dispatched(L, -1));
+    lua_pop(L, 1);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_dispatcher, an_uncharged_slow_binding_trips_within_one_call)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    disp_register(L);
+
+    /* 20 ms of budget; each call takes 5 ms and charges nothing itself. */
+    disp_arm(20 * 64000 / HL_METER_TEST_SLOWDOWN);
+    uint64_t t0 = disp_now_ns();
+    int rc = luaL_dostring(L, "CALLS = 0 for i = 1, 1000 do CALLS = CALLS + 1 spin(5) end");
+    uint64_t ms = (disp_now_ns() - t0) / 1000000u;
+    ASSERT_NE(rc, LUA_OK);
+    EXPECT_NE(strstr(lua_tostring(L, -1), "instruction limit exceeded"), NULL);
+    lua_pop(L, 1);
+    lua_getglobal(L, "CALLS");
+    lua_Integer calls = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    EXPECT_LE(calls, 6);                 /* 4 calls fill it, the 5th trips */
+    EXPECT_LT(ms, 1000u);                /* not 1000 x 5 ms */
+
+    /* One call longer than the whole budget trips at its end, and a pcall
+     * does not swallow it (the trip is sticky). */
+    disp_arm(20 * 64000 / HL_METER_TEST_SLOWDOWN);
+    rc = luaL_dostring(L, "local ok = pcall(spin, 50) return ok");
+    EXPECT_NE(rc, LUA_OK);
+    if (rc != LUA_OK) lua_pop(L, 1);
+    EXPECT_TRUE(lua_rt.budget.tripped);
+
+    /* Once tripped, the next binding call is refused before it runs. */
+    t0 = disp_now_ns();
+    rc = luaL_dostring(L, "spin(200)");
+    ms = (disp_now_ns() - t0) / 1000000u;
+    EXPECT_NE(rc, LUA_OK);
+    if (rc != LUA_OK) lua_pop(L, 1);
+    EXPECT_LT(ms, 100u);
+    EXPECT_EQ(lua_rt.budget.nframes, 0);
+    disp_arm(lua_rt.max_instructions);
+    cleanup_lua();
+}
+
+UTEST(lua_dispatcher, explicit_charges_are_not_double_counted)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    disp_register(L);
+    disp_arm(1000000000);
+
+    /* A binding that charges its own 20 ms costs ~20 ms of units, not 40.
+     * The upper bounds are against the call's own wall time (a preempted
+     * call on a loaded host may be charged up to it), never the sum. */
+    uint64_t c0 = disp_charged(L);
+    uint64_t w0 = disp_now_ns();
+    ASSERT_EQ(luaL_dostring(L, "spin_charged(20)"), LUA_OK);
+    uint64_t wall = (disp_now_ns() - w0) / 1000u * 64u;
+    uint64_t charged = disp_charged(L) - c0;
+    EXPECT_GE(charged, (uint64_t)19 * 64000);
+    EXPECT_LT(charged, (wall > 20 * 64000u ? wall : 20 * 64000u) + 2 * 64000u);
+
+    /* The same time uncharged is charged by the dispatcher. */
+    c0 = disp_charged(L);
+    w0 = disp_now_ns();
+    ASSERT_EQ(luaL_dostring(L, "spin(20)"), LUA_OK);
+    wall = (disp_now_ns() - w0) / 1000u * 64u;
+    charged = disp_charged(L) - c0;
+    EXPECT_GE(charged, (uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN);
+    EXPECT_LT(charged, wall + 2 * 64000u);
+    EXPECT_EQ(lua_rt.budget.nframes, 0);
+    cleanup_lua();
+}
+
+UTEST(lua_dispatcher, a_failed_call_is_charged_up_to_its_error)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    disp_register(L);
+    disp_arm(1000000000);
+    uint64_t c0 = disp_charged(L);
+    ASSERT_EQ(luaL_dostring(L,
+        "local ok, e = pcall(spin_error, 20) assert(not ok) "
+        "assert(tostring(e):find('spun then failed'))"), LUA_OK);
+    EXPECT_GE(disp_charged(L) - c0, (uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN);
+    /* The unwound call's frame went with the error; an enclosing call's
+     * frame is untouched (nested pcall inside a coroutine). */
+    EXPECT_EQ(lua_rt.budget.nframes, 0);
+    ASSERT_EQ(luaL_dostring(L,
+        "local co = coroutine.wrap(function() "
+        "  local ok = pcall(spin_error, 1) return ok end) "
+        "assert(co() == false)"), LUA_OK);
+    EXPECT_EQ(lua_rt.budget.nframes, 0);
+    cleanup_lua();
+}
+
+UTEST(lua_dispatcher, a_parked_wait_is_not_charged)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    disp_register(L);
+    disp_arm(1000000000);
+
+    /* A binding that spins 10 ms then parks; the host waits 150 ms before
+     * it resumes the continuation. Only the 10 ms is the run's. */
+    lua_State *co = lua_newthread(L);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_getglobal(co, "park");
+    lua_pushinteger(co, 10);
+    uint64_t c0 = disp_charged(co);
+    int nres = 0;
+    ASSERT_EQ(lua_resume(co, L, 1, &nres), LUA_YIELD);
+    EXPECT_EQ(lua_rt.budget.nframes, 0);    /* the yield ended the call */
+    uint64_t at_yield = disp_charged(co) - c0;
+    EXPECT_GE(at_yield, (uint64_t)9 * 64000 / HL_METER_TEST_SLOWDOWN);
+    struct timespec nap = { 0, 150 * 1000000L };
+    nanosleep(&nap, NULL);
+    lua_settop(co, 0);
+    ASSERT_EQ(lua_resume(co, L, 0, &nres), LUA_OK);   /* the continuation */
+    ASSERT_EQ(nres, 1);
+    EXPECT_EQ(lua_tointeger(co, -1), 42);
+    uint64_t total = disp_charged(co) - c0;
+    EXPECT_LT(total, (uint64_t)60 * 64000);           /* not the 150 ms */
+    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+    cleanup_lua();
+}
+
+UTEST(lua_dispatcher, hull_sleep_parks_through_the_trampoline)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    uint64_t c0 = lua_rt.budget.charged;
+    uint64_t t0 = disp_now_ns();
+    lua_State *co;
+    int st = ssh_co_start(&lua_rt,
+        "local n = 0\n"
+        "for i = 1, 3 do hull.sleep(60) n = n + 1 end\n"
+        "OUT = n\n", &co);
+    ASSERT_EQ(st, LUA_YIELD);
+    ssh_tick_until_done(be, lua_rt.base.async_ctx, co);
+    EXPECT_EQ(lua_status(co), LUA_OK);
+    uint64_t ms = (disp_now_ns() - t0) / 1000000u;
+    EXPECT_GE(ms, 150u);                               /* it did wait */
+    lua_getglobal(lua_rt.L, "OUT");
+    EXPECT_EQ(lua_tointeger(lua_rt.L, -1), 3);
+    lua_pop(lua_rt.L, 1);
+    /* 180 ms parked would be 11.5M units; the runs themselves are tiny. */
+    EXPECT_LT(lua_rt.budget.charged - c0, (uint64_t)2000000);
+    EXPECT_EQ(lua_rt.budget.nframes, 0);
+    cleanup_lua();
+    be->free(lua_rt.base.async_ctx);
+    lua_rt.base.async_ctx = NULL;
+}
+
+UTEST(lua_dispatcher, overhead_per_call_is_small)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    disp_register(L);
+    disp_arm(INT64_MAX / 2);
+    const int n = 2000000;
+    char src[160];
+    uint64_t best_raw = UINT64_MAX, best_wrapped = UINT64_MAX;
+    for (int round = 0; round < 3; round++) {
+        snprintf(src, sizeof src, "for i = 1, %d do noop_raw() end", n);
+        uint64_t t0 = disp_now_ns();
+        ASSERT_EQ(luaL_dostring(L, src), LUA_OK);
+        uint64_t raw = disp_now_ns() - t0;
+        snprintf(src, sizeof src, "for i = 1, %d do noop() end", n);
+        t0 = disp_now_ns();
+        ASSERT_EQ(luaL_dostring(L, src), LUA_OK);
+        uint64_t wrapped = disp_now_ns() - t0;
+        if (raw < best_raw) best_raw = raw;
+        if (wrapped < best_wrapped) best_wrapped = wrapped;
+    }
+    double per_call = best_wrapped > best_raw
+                      ? (double)(best_wrapped - best_raw) / n : 0.0;
+    fprintf(stderr, "  lua dispatcher overhead: %.1f ns per call "
+            "(plain %.1f ns, dispatched %.1f ns)\n", per_call,
+            (double)best_raw / n, (double)best_wrapped / n);
+    /* Target ~50 ns; the bound is generous so a loaded CI runner passes. */
+    EXPECT_LT(per_call, 300.0 * HL_METER_TEST_SLOWDOWN);
+    EXPECT_EQ(lua_rt.budget.nframes, 0);
+    cleanup_lua();
+}
 
 UTEST_MAIN();

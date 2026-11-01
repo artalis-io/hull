@@ -677,7 +677,7 @@ static int lua_blob_iter(lua_State *L)
     st->pos      = 0;
 
     /* Push the iterator function with the state as upvalue. */
-    lua_pushcclosure(L, lua_iter_step, 1);
+    hl_lua_pushcclosure(L, lua_iter_step, 1);
     return 1;
 }
 
@@ -773,7 +773,7 @@ static const luaL_Reg reader_methods[] = {
 static void register_writer_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_BLOB_WRITER_MT);
-    luaL_newlib(L, writer_methods);
+    hl_lua_newlib(L, writer_methods);
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, lua_writer_gc);
     lua_setfield(L, -2, "__gc");
@@ -785,7 +785,7 @@ static void register_writer_mt(lua_State *L)
 static void register_reader_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_BLOB_READER_MT);
-    luaL_newlib(L, reader_methods);
+    hl_lua_newlib(L, reader_methods);
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, lua_reader_gc);
     lua_setfield(L, -2, "__gc");
@@ -825,6 +825,6 @@ int luaopen_hull_blob(lua_State *L)
     register_store_mt(L);
     register_writer_mt(L);
     register_reader_mt(L);
-    luaL_newlib(L, blob_funcs);
+    hl_lua_newlib(L, blob_funcs);
     return 1;
 }

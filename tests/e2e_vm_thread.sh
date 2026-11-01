@@ -130,10 +130,10 @@ run_runtime() {
         else
             fail "$rt off: /ping during a stuck run: $out (expected 200 after ~2 s)"
         fi
-        if [ "$st" = "500" ]; then
-            pass "$rt off: the stuck run trips once the call returns (500)"
+        if [ "$st" = "503" ]; then
+            pass "$rt off: the stuck run trips once the call returns (503, the time-limit answer)"
         else
-            fail "$rt off: stuck request answered $st (expected 500)"
+            fail "$rt off: stuck request answered $st (expected 503)"
         fi
         if grep -q "vm-thread" "$WORK/off.log"; then
             fail "$rt off: the VM thread was started without the flag"

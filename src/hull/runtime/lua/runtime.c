@@ -13,6 +13,7 @@
  */
 
 #include "internal.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 
 #include "hull/vfs.h"
 #include "hull/utils/alloc.h"
@@ -359,6 +360,9 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
      * the budget is installed, which hands the flag to Lua. */
     lua->budget.watch = &lua->run_watch;
     lua->run_watch_on = cfg->sandbox ? 1 : 0;
+    /* Nor does it measure binding calls (the dispatcher, budget.c): its one
+     * long run is `hull build` itself. */
+    lua->budget.meter_off = cfg->sandbox ? 0 : 1;
 
     /* Create Lua state with custom allocator */
     lua->L = lua_newstate(hl_lua_alloc, lua);
@@ -415,16 +419,17 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         hl_lua_tool_register_orchestration(lua->L);
     }
 
-    /* Replace print: a log record in an app VM (audit 29), escaped stderr
-     * in the tool VM (the CLI plugins write their output through it;
-     * audit 33). */
-    lua_pushcfunction(lua->L, cfg->sandbox ? hl_lua_app_print
-                                           : hl_lua_print);
-    lua_setglobal(lua->L, "print");
-
     /* The instruction budget: after the base library (it replaces pcall
      * and xpcall), before anything runs. */
     hl_lua_budget_install(lua->L, &lua->budget);
+
+    /* Replace print: a log record in an app VM (audit 29), escaped stderr
+     * in the tool VM (the CLI plugins write their output through it;
+     * audit 33). After the budget, so the app VM's print goes through the
+     * binding dispatcher (the tool VM's meter is off: pushed raw). */
+    hl_lua_pushcfunction(lua->L, cfg->sandbox ? hl_lua_app_print
+                                              : hl_lua_print);
+    lua_setglobal(lua->L, "print");
     /* Before any sandbox (see header): the app runtime's caches, and the
      * tool VM's AOT cache. */
     hl_runtime_cache_seal_prepare();
@@ -988,6 +993,26 @@ static FILE *cli_stream(lua_State *L)
     }
 }
 
+/* stdin is the user's time, not the run's work: every read app.main's
+ * ctx.stdin does is excluded from the binding dispatcher's measured charge
+ * (shared/dispatch_meter.h). Only the stdio call is bracketed - nothing in
+ * it raises, so the bracket always closes. */
+static size_t cli_fread(void *buf, size_t sz, size_t n, FILE *f)
+{
+    uint64_t mx = hl_meter_exclude_begin();
+    size_t r = fread(buf, sz, n, f);
+    hl_meter_exclude_end(mx);
+    return r;
+}
+
+static int cli_fgetc(FILE *f)
+{
+    uint64_t mx = hl_meter_exclude_begin();
+    int c = fgetc(f);
+    hl_meter_exclude_end(mx);
+    return c;
+}
+
 static int cli_stdin_read(lua_State *L)
 {
     FILE *f = cli_stream(L);
@@ -1025,7 +1050,7 @@ static int cli_stdin_read(lua_State *L)
         if (nbytes == 0) { lua_pushliteral(L, ""); return 1; }
         luaL_Buffer b;
         char *buf = luaL_buffinitsize(L, &b, (size_t)nbytes);
-        size_t n = fread(buf, 1, (size_t)nbytes, f);
+        size_t n = cli_fread(buf, 1, (size_t)nbytes, f);
         luaL_pushresultsize(&b, n);
         if (n == 0 && feof(f)) {
             lua_pop(L, 1);
@@ -1039,7 +1064,7 @@ static int cli_stdin_read(lua_State *L)
         luaL_buffinit(L, &b);
         char chunk[4096];
         size_t n;
-        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0)
+        while ((n = cli_fread(chunk, 1, sizeof(chunk), f)) > 0)
             luaL_addlstring(&b, chunk, n);
         luaL_pushresult(&b);
         return 1;
@@ -1050,7 +1075,7 @@ static int cli_stdin_read(lua_State *L)
         luaL_buffinit(L, &b);
         int got = 0;
         for (;;) {
-            int c = fgetc(f);
+            int c = cli_fgetc(f);
             if (c == EOF) break;
             got = 1;
             if (c == '\n') break;
@@ -1107,7 +1132,7 @@ static void cli_push_stream(lua_State *L, int stream_id,
     lua_newtable(L);
     for (const luaL_Reg *m = methods; m->name; m++) {
         lua_pushinteger(L, stream_id);
-        lua_pushcclosure(L, m->func, 1);
+        hl_lua_pushcclosure(L, m->func, 1);
         lua_setfield(L, -2, m->name);
     }
 }

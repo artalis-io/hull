@@ -126,6 +126,6 @@ static const luaL_Reg encoding_native[] = {
 
 int luaopen_hull_encoding_native(lua_State *L)
 {
-    luaL_newlib(L, encoding_native);
+    hl_lua_newlib(L, encoding_native);
     return 1;
 }

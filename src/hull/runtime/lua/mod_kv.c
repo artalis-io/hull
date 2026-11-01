@@ -335,14 +335,14 @@ int luaopen_hull_kv_native(lua_State *L)
     lua_pushcfunction(L, l_kv_gc);
     lua_setfield(L, -2, "__gc");
     lua_newtable(L);
-    luaL_setfuncs(L, kv_methods, 0);
+    hl_lua_setfuncs(L, kv_methods, 0);
     lua_setfield(L, -2, "__index");
     lua_pushliteral(L, "locked");
     lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);   /* pop the metatable */
 
     lua_newtable(L);
-    lua_pushcfunction(L, l_kv_open);
+    hl_lua_pushcfunction(L, l_kv_open);
     lua_setfield(L, -2, "open");
     return 1;
 }

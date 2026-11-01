@@ -363,6 +363,10 @@ struct JSRuntime {
        1/64 instruction units, flushed to work_handler in batches */
     JSWorkHandler *work_handler;
     void *work_opaque;
+    /* HULL PATCH 0011: the embedder's call hooks (JS_SetEmbedderCallHooks) */
+    JSEmbedderCallEnter *call_enter;
+    JSEmbedderCallLeave *call_leave;
+    void *call_opaque;
     /* HULL PATCH 0006: a flag another thread may raise; while it is
        non-zero every step polls the interrupt handler */
     int *stop_flag;
@@ -1065,6 +1069,7 @@ struct JSObject {
             uint8_t length;
             uint8_t cproto;
             int16_t magic;
+            uint8_t embedder; /* HULL PATCH 0011: made by the embedder */
         } cfunc;
         /* array part for fast arrays and typed arrays */
         struct { /* JS_CLASS_ARRAY, JS_CLASS_ARGUMENTS, JS_CLASS_MAPPED_ARGUMENTS, JS_CLASS_UINT8C_ARRAY..JS_CLASS_FLOAT64_ARRAY */
@@ -1890,6 +1895,23 @@ int JS_GetPendingJobTag(JSRuntime *rt, uint64_t *ptag)
         return 0;
     *ptag = list_entry(rt->job_list.next, JSJobEntry, link)->tag;
     return 1;
+}
+
+/* HULL PATCH 0011: see JS_SetEmbedderCallHooks in quickjs.h */
+void JS_SetEmbedderCallHooks(JSRuntime *rt, JSEmbedderCallEnter *enter,
+                             JSEmbedderCallLeave *leave, void *opaque)
+{
+    if (!enter || !leave)
+        enter = NULL, leave = NULL;
+    rt->call_enter = enter;
+    rt->call_leave = leave;
+    rt->call_opaque = opaque;
+}
+
+uint64_t JS_GetPendingCharge(JSContext *ctx)
+{
+    int steps = JS_INTERRUPT_COUNTER_INIT - ctx->interrupt_counter;
+    return (uint64_t)(steps > 0 ? steps : 0) + (ctx->rt->work_pending >> 6);
 }
 
 /* HULL PATCH 0010 (audit 41): see JS_ResetRunPhase in quickjs.h */
@@ -6407,6 +6429,13 @@ static JSValue JS_NewCFunction3(JSContext *ctx, JSCFunction *func,
     p->u.cfunc.length = length;
     p->u.cfunc.cproto = cproto;
     p->u.cfunc.magic = magic;
+    /* HULL PATCH 0011: QuickJS's own function, never the embedder's
+       (JS_NewCFunction2 marks it after). The object comes from js_malloc,
+       which does not zero it, and JS_NewObjectFromShape clears only the
+       first word of 'u': left as it was, a builtin made on reused memory
+       read as the embedder's at random, so its calls went through the
+       embedder's call hooks. */
+    p->u.cfunc.embedder = 0;
     p->is_constructor = (cproto == JS_CFUNC_constructor ||
                          cproto == JS_CFUNC_constructor_magic ||
                          cproto == JS_CFUNC_constructor_or_func ||
@@ -6424,12 +6453,25 @@ static JSValue JS_NewCFunction3(JSContext *ctx, JSCFunction *func,
 }
 
 /* Note: at least 'length' arguments will be readable in 'argv' */
+static JSValue js_new_cfunction2(JSContext *ctx, JSCFunction *func,
+                                 const char *name,
+                                 int length, JSCFunctionEnum cproto, int magic)
+{
+    return JS_NewCFunction3(ctx, func, name, length, cproto, magic,
+                            ctx->function_proto, 0);
+}
+
+/* HULL PATCH 0011: the public constructor marks the function as the
+   embedder's, so its calls go through the embedder's call hooks. QuickJS's
+   own functions are made with js_new_cfunction2 and are never marked. */
 JSValue JS_NewCFunction2(JSContext *ctx, JSCFunction *func,
                          const char *name,
                          int length, JSCFunctionEnum cproto, int magic)
 {
-    return JS_NewCFunction3(ctx, func, name, length, cproto, magic,
-                            ctx->function_proto, 0);
+    JSValue v = js_new_cfunction2(ctx, func, name, length, cproto, magic);
+    if (!JS_IsException(v))
+        JS_VALUE_GET_OBJ(v)->u.cfunc.embedder = 1;
+    return v;
 }
 
 typedef struct JSCFunctionDataRecord {
@@ -6437,6 +6479,7 @@ typedef struct JSCFunctionDataRecord {
     uint8_t length;
     uint8_t data_len;
     uint16_t magic;
+    uint8_t embedder; /* HULL PATCH 0011: made by the embedder */
     JSValue data[0];
 } JSCFunctionDataRecord;
 
@@ -6485,12 +6528,75 @@ static JSValue js_c_function_data_call(JSContext *ctx, JSValueConst func_obj,
         arg_buf = argv;
     }
 
+    /* HULL PATCH 0011: an embedder function's call goes through the
+       embedder's call hooks (see js_call_c_function) */
+    if (unlikely(s->embedder) && ctx->rt->call_enter) {
+        JSRuntime *rt = ctx->rt;
+        JSEmbedderCall call;
+        JSValue ret;
+        if (rt->call_enter(ctx, rt->call_opaque, &call))
+            return JS_EXCEPTION;
+        ret = s->func(ctx, this_val, argc, arg_buf, s->magic, s->data);
+        return rt->call_leave(ctx, rt->call_opaque, &call, ret);
+    }
     return s->func(ctx, this_val, argc, arg_buf, s->magic, s->data);
 }
 
+static JSValue js_new_cfunction_data(JSContext *ctx, JSCFunctionData *func,
+                                     int length, int magic, int data_len,
+                                     JSValueConst *data);
+
+/* HULL PATCH 0011: see JS_NewCFunction2 */
 JSValue JS_NewCFunctionData(JSContext *ctx, JSCFunctionData *func,
                             int length, int magic, int data_len,
                             JSValueConst *data)
+{
+    JSValue v = js_new_cfunction_data(ctx, func, length, magic, data_len,
+                                      data);
+    if (!JS_IsException(v)) {
+        JSCFunctionDataRecord *s = JS_GetOpaque(v, JS_CLASS_C_FUNCTION_DATA);
+        s->embedder = 1;
+    }
+    return v;
+}
+
+#ifdef QJS_HULL_TEST_HOOKS
+/* HULL PATCH 0011: test only - see quickjs.h */
+int JS_TestIsEmbedderFunction(JSValueConst fn)
+{
+    JSObject *p;
+    if (JS_VALUE_GET_TAG(fn) != JS_TAG_OBJECT)
+        return 0;
+    p = JS_VALUE_GET_OBJ(fn);
+    if (p->class_id == JS_CLASS_C_FUNCTION)
+        return p->u.cfunc.embedder != 0;
+    if (p->class_id == JS_CLASS_C_FUNCTION_DATA) {
+        JSCFunctionDataRecord *s = p->u.opaque;
+        return s && s->embedder != 0;
+    }
+    return 0;
+}
+#endif
+
+/* HULL PATCH 0011: see JS_SetEmbedderFunction in quickjs.h */
+void JS_SetEmbedderFunction(JSValueConst fn, int on)
+{
+    JSObject *p;
+    if (JS_VALUE_GET_TAG(fn) != JS_TAG_OBJECT)
+        return;
+    p = JS_VALUE_GET_OBJ(fn);
+    if (p->class_id == JS_CLASS_C_FUNCTION) {
+        p->u.cfunc.embedder = on != 0;
+    } else if (p->class_id == JS_CLASS_C_FUNCTION_DATA) {
+        JSCFunctionDataRecord *s = p->u.opaque;
+        if (s)
+            s->embedder = on != 0;
+    }
+}
+
+static JSValue js_new_cfunction_data(JSContext *ctx, JSCFunctionData *func,
+                                     int length, int magic, int data_len,
+                                     JSValueConst *data)
 {
     JSCFunctionDataRecord *s;
     JSValue func_obj;
@@ -6509,6 +6615,7 @@ JSValue JS_NewCFunctionData(JSContext *ctx, JSCFunctionData *func,
     s->length = length;
     s->data_len = data_len;
     s->magic = magic;
+    s->embedder = 0;
     for(i = 0; i < data_len; i++)
         s->data[i] = JS_DupValue(ctx, data[i]);
     JS_SetOpaque(func_obj, s);
@@ -11503,6 +11610,14 @@ BOOL JS_IsError(JSContext *ctx, JSValueConst val)
 void JS_SetUncatchableException(JSContext *ctx, BOOL flag)
 {
     ctx->rt->current_exception_is_uncatchable = flag;
+    /* HULL PATCH 0003: an uncatchable exception is the embedder's interrupt
+       raised from C (a binding over its budget, the call hooks of PATCH
+       0011): poll at the very next step, as JS_ThrowInterrupted does. A
+       builtin that turns the error into a rejection (Promise.race, the
+       Promise constructor's executor call) went on otherwise, and with no
+       call or backward jump after it the run ended normally. */
+    if (flag)
+        ctx->interrupt_counter = 1;
 }
 
 void JS_SetOpaque(JSValue obj, void *opaque)
@@ -18166,6 +18281,20 @@ static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
     }
     sf->arg_buf = (JSValue*)arg_buf;
 
+    /* HULL PATCH 0011 (docs/quickjs_patches.md): a function the embedder
+       made goes through the embedder's call hooks: 'enter' may refuse the
+       call (an exception pending), 'leave' sees the result and may replace
+       it with an exception. QuickJS's own functions never do. */
+    JSEmbedderCall hl_call;
+    int hl_hooked = 0;
+    if (unlikely(p->u.cfunc.embedder) && rt->call_enter) {
+        if (rt->call_enter(ctx, rt->call_opaque, &hl_call)) {
+            ret_val = JS_EXCEPTION;
+            goto hl_done;
+        }
+        hl_hooked = 1;
+    }
+
     func = p->u.cfunc.c_function;
     switch(cproto) {
     case JS_CFUNC_constructor:
@@ -18250,6 +18379,9 @@ static JSValue js_call_c_function(JSContext *ctx, JSValueConst func_obj,
         abort();
     }
 
+    if (unlikely(hl_hooked))
+        ret_val = rt->call_leave(ctx, rt->call_opaque, &hl_call, ret_val);
+ hl_done:
     rt->current_stack_frame = sf->prev_frame;
     return ret_val;
 }
@@ -21875,7 +22007,7 @@ static int js_async_generator_resolve_function_create(JSContext *ctx,
     JSValue func;
 
     for(i = 0; i < 2; i++) {
-        func = JS_NewCFunctionData(ctx, js_async_generator_resolve_function, 1,
+        func = js_new_cfunction_data(ctx, js_async_generator_resolve_function, 1, /* HULL PATCH 0011 */
                                    i + is_resume_next * 2, 1, &generator);
         if (JS_IsException(func)) {
             if (i == 1)
@@ -31450,8 +31582,8 @@ static void JS_LoadModuleInternal(JSContext *ctx, const char *basename,
     func_data[0] = resolving_funcs[0];
     func_data[1] = resolving_funcs[1];
     func_data[2] = func_obj;
-    evaluate_resolving_funcs[0] = JS_NewCFunctionData(ctx, js_load_module_fulfilled, 0, 0, 3, func_data);
-    evaluate_resolving_funcs[1] = JS_NewCFunctionData(ctx, js_load_module_rejected, 0, 0, 3, func_data);
+    evaluate_resolving_funcs[0] = js_new_cfunction_data(ctx, js_load_module_fulfilled, 0, 0, 3, func_data); /* HULL PATCH 0011 */
+    evaluate_resolving_funcs[1] = js_new_cfunction_data(ctx, js_load_module_rejected, 0, 0, 3, func_data);
     JS_FreeValue(ctx, func_obj);
     ret = js_promise_then(ctx, evaluate_promise, 2, (JSValueConst *)evaluate_resolving_funcs);
     JS_FreeValue(ctx, ret);
@@ -31814,8 +31946,8 @@ static int js_execute_async_module(JSContext *ctx, JSModuleDef *m)
     if (JS_IsException(promise))
         return -1;
     m_obj = JS_NewModuleValue(ctx, m);
-    resolve_funcs[0] = JS_NewCFunctionData(ctx, js_async_module_execution_fulfilled, 0, 0, 1, (JSValueConst *)&m_obj);
-    resolve_funcs[1] = JS_NewCFunctionData(ctx, js_async_module_execution_rejected, 0, 0, 1, (JSValueConst *)&m_obj);
+    resolve_funcs[0] = js_new_cfunction_data(ctx, js_async_module_execution_fulfilled, 0, 0, 1, (JSValueConst *)&m_obj); /* HULL PATCH 0011 */
+    resolve_funcs[1] = js_new_cfunction_data(ctx, js_async_module_execution_rejected, 0, 0, 1, (JSValueConst *)&m_obj);
     ret_val = js_promise_then(ctx, promise, 2, (JSValueConst *)resolve_funcs);
     JS_FreeValue(ctx, ret_val);
     JS_FreeValue(ctx, m_obj);
@@ -40018,7 +40150,7 @@ static JSValue JS_InstantiateFunctionListItem2(JSContext *ctx, JSObject *p,
 
     switch(e->def_type) {
     case JS_DEF_CFUNC:
-        val = JS_NewCFunction2(ctx, e->u.func.cfunc.generic,
+        val = js_new_cfunction2(ctx, e->u.func.cfunc.generic, /* HULL PATCH 0011 */
                                e->name, e->u.func.length, e->u.func.cproto, e->magic);
         break;
     case JS_DEF_PROP_STRING:
@@ -40096,7 +40228,7 @@ static int JS_InstantiateFunctionListItem(JSContext *ctx, JSValueConst obj,
             getter = JS_UNDEFINED;
             if (e->u.getset.get.generic) {
                 snprintf(buf, sizeof(buf), "get %s", e->name);
-                getter = JS_NewCFunction2(ctx, e->u.getset.get.generic,
+                getter = js_new_cfunction2(ctx, e->u.getset.get.generic, /* HULL PATCH 0011 */
                                           buf, 0, e->def_type == JS_DEF_CGETSET_MAGIC ? JS_CFUNC_getter_magic : JS_CFUNC_getter,
                                           e->magic);
                 if (JS_IsException(getter))
@@ -40105,7 +40237,7 @@ static int JS_InstantiateFunctionListItem(JSContext *ctx, JSValueConst obj,
             setter = JS_UNDEFINED;
             if (e->u.getset.set.generic) {
                 snprintf(buf, sizeof(buf), "set %s", e->name);
-                setter = JS_NewCFunction2(ctx, e->u.getset.set.generic,
+                setter = js_new_cfunction2(ctx, e->u.getset.set.generic, /* HULL PATCH 0011 */
                                           buf, 1, e->def_type == JS_DEF_CGETSET_MAGIC ? JS_CFUNC_setter_magic : JS_CFUNC_setter,
                                           e->magic);
                 if (JS_IsException(setter)) {
@@ -40189,7 +40321,7 @@ int JS_SetModuleExportList(JSContext *ctx, JSModuleDef *m,
         const JSCFunctionListEntry *e = &tab[i];
         switch(e->def_type) {
         case JS_DEF_CFUNC:
-            val = JS_NewCFunction2(ctx, e->u.func.cfunc.generic,
+            val = js_new_cfunction2(ctx, e->u.func.cfunc.generic, /* HULL PATCH 0011 */
                                    e->name, e->u.func.length, e->u.func.cproto, e->magic);
             break;
         case JS_DEF_PROP_STRING:
@@ -52056,7 +52188,7 @@ static JSValue js_proxy_revoke(JSContext *ctx, JSValueConst this_val,
 static JSValue js_proxy_revoke_constructor(JSContext *ctx,
                                            JSValueConst proxy_obj)
 {
-    return JS_NewCFunctionData(ctx, js_proxy_revoke, 0, 0, 1, &proxy_obj);
+    return js_new_cfunction_data(ctx, js_proxy_revoke, 0, 0, 1, &proxy_obj); /* HULL PATCH 0011 */
 }
 
 static JSValue js_proxy_revocable(JSContext *ctx, JSValueConst this_val,
@@ -54354,7 +54486,7 @@ static JSValue js_promise_executor_new(JSContext *ctx)
 
     func_data[0] = JS_UNDEFINED;
     func_data[1] = JS_UNDEFINED;
-    return JS_NewCFunctionData(ctx, js_promise_executor, 2,
+    return js_new_cfunction_data(ctx, js_promise_executor, 2, /* HULL PATCH 0011 */
                                0, 2, func_data);
 }
 
@@ -54660,7 +54792,7 @@ static JSValue js_promise_all(JSContext *ctx, JSValueConst this_val,
             resolve_element_data[3] = resolving_funcs[is_promise_any];
             resolve_element_data[4] = resolve_element_env;
             resolve_element =
-                JS_NewCFunctionData(ctx, js_promise_all_resolve_element, 1,
+                js_new_cfunction_data(ctx, js_promise_all_resolve_element, 1, /* HULL PATCH 0011 */
                                     magic, 5, resolve_element_data);
             if (JS_IsException(resolve_element)) {
                 JS_FreeValue(ctx, next_promise);
@@ -54669,7 +54801,7 @@ static JSValue js_promise_all(JSContext *ctx, JSValueConst this_val,
 
             if (magic == PROMISE_MAGIC_allSettled) {
                 reject_element =
-                    JS_NewCFunctionData(ctx, js_promise_all_resolve_element, 1,
+                    js_new_cfunction_data(ctx, js_promise_all_resolve_element, 1, /* HULL PATCH 0011 */
                                         magic | 4, 5, resolve_element_data);
                 if (JS_IsException(reject_element)) {
                     JS_FreeValue(ctx, next_promise);
@@ -54928,10 +55060,10 @@ static JSValue js_promise_then_finally_func(JSContext *ctx, JSValueConst this_va
     if (JS_IsException(promise))
         return promise;
     if (magic == 0) {
-        then_func = JS_NewCFunctionData(ctx, js_promise_finally_value_thunk, 0,
+        then_func = js_new_cfunction_data(ctx, js_promise_finally_value_thunk, 0, /* HULL PATCH 0011 */
                                         0, 1, argv);
     } else {
-        then_func = JS_NewCFunctionData(ctx, js_promise_finally_thrower, 0,
+        then_func = js_new_cfunction_data(ctx, js_promise_finally_thrower, 0, /* HULL PATCH 0011 */
                                         0, 1, argv);
     }
     if (JS_IsException(then_func)) {
@@ -54962,7 +55094,7 @@ static JSValue js_promise_finally(JSContext *ctx, JSValueConst this_val,
         func_data[0] = ctor;
         func_data[1] = onFinally;
         for(i = 0; i < 2; i++) {
-            then_funcs[i] = JS_NewCFunctionData(ctx, js_promise_then_finally_func, 1, i, 2, func_data);
+            then_funcs[i] = js_new_cfunction_data(ctx, js_promise_then_finally_func, 1, i, 2, func_data); /* HULL PATCH 0011 */
             if (JS_IsException(then_funcs[i])) {
                 if (i == 1)
                     JS_FreeValue(ctx, then_funcs[0]);
@@ -55078,7 +55210,7 @@ static JSValue js_async_from_sync_iterator_unwrap_func_create(JSContext *ctx,
     JSValueConst func_data[1];
 
     func_data[0] = (JSValueConst)JS_NewBool(ctx, done);
-    return JS_NewCFunctionData(ctx, js_async_from_sync_iterator_unwrap,
+    return js_new_cfunction_data(ctx, js_async_from_sync_iterator_unwrap, /* HULL PATCH 0011 */
                                1, 0, 1, func_data);
 }
 
@@ -55094,7 +55226,7 @@ static JSValue js_async_from_sync_iterator_close_wrap(JSContext *ctx,
 
 static JSValue js_async_from_sync_iterator_close_wrap_func_create(JSContext *ctx, JSValueConst sync_iter)
 {
-    return JS_NewCFunctionData(ctx, js_async_from_sync_iterator_close_wrap,
+    return js_new_cfunction_data(ctx, js_async_from_sync_iterator_close_wrap, /* HULL PATCH 0011 */
                                1, 0, 1, &sync_iter);
 }
 
@@ -57130,7 +57262,7 @@ int JS_AddIntrinsicBaseObjects(JSContext *ctx)
     JSValue obj1, obj2;
     JSCFunctionType ft;
 
-    ctx->throw_type_error = JS_NewCFunction(ctx, js_throw_type_error, NULL, 0);
+    ctx->throw_type_error = js_new_cfunction2(ctx, js_throw_type_error, NULL, 0, JS_CFUNC_generic, 0); /* HULL PATCH 0011 */
     if (JS_IsException(ctx->throw_type_error))
         return -1;
     /* add caller and arguments properties to throw a TypeError */
@@ -57182,7 +57314,7 @@ int JS_AddIntrinsicBaseObjects(JSContext *ctx)
     // TODO(bnoordhuis) mildly inefficient because JS_NewGlobalCConstructor
     // first creates a .constructor value property that we then replace with
     // an accessor
-    obj1 = JS_NewCFunctionData(ctx, js_iterator_constructor_getset,
+    obj1 = js_new_cfunction_data(ctx, js_iterator_constructor_getset, /* HULL PATCH 0011 */
                                0, 0, 1, (JSValueConst *)&obj2);
     if (JS_IsException(obj1)) {
         JS_FreeValue(ctx, obj2);

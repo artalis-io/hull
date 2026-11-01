@@ -350,12 +350,17 @@ static inline int64_t hl_work_clock_us(void)
     return (int64_t)ts.tv_sec * 1000000 + (int64_t)ts.tv_nsec / 1000;
 }
 
+/* The rate every measured charge uses: units per microsecond of wall time
+ * (the binding dispatcher's, shared/dispatch_meter.h, and the floors above
+ * were sized from it). */
+#define HL_WORK_UNITS_PER_US 64u
+
 /* Measured time of @p us microseconds, at the 64-units-per-us rate, at
  * most @p cap_us of it. */
 static inline uint64_t hl_work_wall_us_units(int64_t us, int64_t cap_us)
 {
     if (us > cap_us) us = cap_us;
-    return us > 0 ? (uint64_t)us * 64u : 0;
+    return us > 0 ? (uint64_t)us * HL_WORK_UNITS_PER_US : 0;
 }
 
 /* An outbound HTTP request carrying @p body_len bytes. */

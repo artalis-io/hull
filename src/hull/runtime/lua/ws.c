@@ -114,7 +114,7 @@ static void hl_lua_ws_on_open_impl(KlWsServerConn *ws_conn, void *user_data)
 
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
     /* Arm the instruction budget for this run */
-    HL_LUA_ARM(lua, co);
+    HL_LUA_ARM_KIND(lua, co, HL_RUN_CALLBACK);
 
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
@@ -197,7 +197,7 @@ static void hl_lua_ws_on_message_impl(KlWsServerConn *ws_conn, const char *data,
 
     hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
     /* Arm the instruction budget for this run */
-    HL_LUA_ARM(lua, co);
+    HL_LUA_ARM_KIND(lua, co, HL_RUN_CALLBACK);
 
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
@@ -292,7 +292,7 @@ static void hl_lua_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code,
         lua->active_timer = NULL;
 
         hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
-        HL_LUA_ARM(lua, co);
+        HL_LUA_ARM_KIND(lua, co, HL_RUN_CALLBACK);
 
         /* Arm the deferred-teardown hook: if the handler yields (async op),
          * hl_lua_async_cont_create captures it so the teardown below runs

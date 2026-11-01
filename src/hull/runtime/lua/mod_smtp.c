@@ -339,6 +339,6 @@ static const luaL_Reg smtp_funcs[] = {
 
 int luaopen_hull_smtp(lua_State *L)
 {
-    luaL_newlib(L, smtp_funcs);
+    hl_lua_newlib(L, smtp_funcs);
     return 1;
 }

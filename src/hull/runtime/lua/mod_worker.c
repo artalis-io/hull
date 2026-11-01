@@ -372,6 +372,6 @@ static const luaL_Reg worker_funcs[] = {
 
 int luaopen_hull_worker(lua_State *L)
 {
-    luaL_newlib(L, worker_funcs);
+    hl_lua_newlib(L, worker_funcs);
     return 1;
 }

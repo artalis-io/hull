@@ -160,7 +160,7 @@ static void hl_lua_timer_trampoline_impl(void *user_data)
     lua->active_thread_ref = thread_ref;
 
     /* Re-arm instruction limit for this callback */
-    HL_LUA_ARM(lua, co);
+    HL_LUA_ARM_KIND(lua, co, HL_RUN_CALLBACK);
 
     int nres = 0;
     int status = lua_resume(co, lua->L, 0, &nres);

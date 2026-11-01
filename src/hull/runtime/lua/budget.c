@@ -44,6 +44,10 @@
 #include "lua.h"
 #include "lauxlib.h"
 
+#include "hull/shared/dispatch_meter.h"
+
+#include <string.h>
+
 /* Work done inside one binding call, where the count hook never fires:
  * charged straight to the budget, never raising. 1 once tripped. */
 static int budget_charge(HlLuaBudget *b, int64_t units)
@@ -54,6 +58,7 @@ static int budget_charge(HlLuaBudget *b, int64_t units)
         b->timed_out = 1;
         return 1;
     }
+    b->charged += (uint64_t)units;      /* the dispatcher's meter */
     if (b->limit <= 0) return 0;
     b->used = units > INT64_MAX - b->used ? INT64_MAX : b->used + units;
     if (b->used >= b->limit) b->tripped = 1;
@@ -116,6 +121,7 @@ static void budget_hook(lua_State *L, lua_Debug *ar)
          * a long-string compare, a big allocation, a table shift - work
          * one instruction did; docs/lua_patches.md). */
         size_t owed = lua_hltakeowed(L);
+        b->charged += (uint64_t)count + owed;   /* the dispatcher's meter */
         int64_t room = INT64_MAX - b->used - count;
         b->used += count + (owed > (uint64_t)room ? room : (int64_t)owed);
         if (b->limit <= 0 || b->used < b->limit) {
@@ -163,6 +169,10 @@ void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
     b->used = 0;
     b->tripped = 0;
     b->timed_out = 0;
+    /* The binding meter's CPU reference (shared/dispatch_meter.h): only
+     * when no binding call is in progress (a nested run arms inside one). */
+    if (b->nframes == 0 && !b->meter_off)
+        hl_meter_arm(&b->meter);
     /* The run's wall-clock deadline: armed (and its flag cleared) before any
      * of the run's code. */
     if (b->watch) hl_run_watch_arm(b->watch, run_ms);
@@ -195,8 +205,11 @@ const char *hl_lua_trip_reason(const HlLuaBudget *b)
 static int budget_finishpcall(lua_State *L, int status, lua_KContext extra)
 {
     if (status != LUA_OK && status != LUA_YIELD) {
+        /* Raise the trip itself, not the error object on top: the call
+         * that failed may have raised its own error and then been tripped
+         * by the dispatcher's charge as it unwound (meter_throw). */
         if (hl_lua_budget_tripped(L))
-            return lua_error(L);           /* the error object is on top */
+            return hl_lua_budget_raise(L);
         lua_pushboolean(L, 0);
         lua_pushvalue(L, -2);
         return 2;
@@ -239,6 +252,149 @@ static int budget_xpcall(lua_State *L)
     return budget_finishpcall(L, status, 2);
 }
 
+/* ── The binding dispatcher (shared/dispatch_meter.h) ─────────────────
+ *
+ * Every binding registered with hl_lua_setfuncs / hl_lua_pushcclosure is a
+ * C closure over its real function, the HlLuaBudget and the binding's own
+ * upvalues (first, so lua_upvalueindex(i) still names them). The trampoline
+ * calls the real function DIRECTLY - the same CallInfo, so lua_getstack,
+ * the caller's name and the stdlib checks see what they saw before, and a
+ * lua_yieldk inside it suspends this very frame (its continuation is
+ * called by Lua on resume, not through the trampoline).
+ *
+ * Around the call it keeps a frame on b->frames: clock, excluded time and
+ * the run's charge meter (b->charged plus the work the thread has not yet
+ * reported to its count hook). On return it charges what the call's wall
+ * time is worth past what was charged meanwhile. A call that does not
+ * return - an error, or a yield - is unwound by a longjmp the trampoline
+ * never sees, so Lua HULL PATCH 0007 calls meter_throw before every throw:
+ * a yield ends every call in progress on the yielding thread (they are the
+ * whole C stack of that coroutine, and the parked time that follows is not
+ * the run's), and an error ends the calls on the throwing thread that
+ * started inside the error handler it is thrown to. Each is charged up to
+ * that moment. */
+
+typedef union { void *p; lua_CFunction f; } HlFnBits;
+
+static uint64_t meter_reading(HlLuaBudget *b, lua_State *L)
+{
+    return b->charged + (uint64_t)lua_hlpending(L);
+}
+
+/* Charge the frame @p fr for its call up to now; never raises. */
+static void meter_settle(HlLuaBudget *b, lua_State *L,
+                         const HlLuaMeterFrame *fr)
+{
+    int64_t charged = (int64_t)(meter_reading(b, L) - fr->m0);
+    uint64_t owed = hl_meter_settle(&fr->mark, charged, &b->meter);
+    if (owed)
+        (void)budget_charge(b, owed > (uint64_t)INT64_MAX ? INT64_MAX
+                                                          : (int64_t)owed);
+}
+
+static void meter_throw(lua_State *L, int status, void *ud)
+{
+    HlLuaBudget *b = (HlLuaBudget *)ud;
+    const void *ej = lua_hlerrorjmp(L);
+    while (b->nframes > 0) {
+        HlLuaMeterFrame *fr = &b->frames[b->nframes - 1];
+        if (fr->L != L) break;
+        if (status != LUA_YIELD && ej != NULL && fr->ej != ej) break;
+        b->nframes--;
+        meter_settle(b, L, fr);
+    }
+}
+
+/* 1 when the run is already over (its budget, or its deadline). */
+static int meter_over(HlLuaBudget *b)
+{
+    if (!b->tripped && hl_run_watch_stopped(b->watch)) {
+        b->tripped = 1;
+        b->timed_out = 1;
+    }
+    return b->tripped;
+}
+
+static int meter_call(lua_State *L, int nup)
+{
+    HlFnBits fn;
+    fn.p = lua_touserdata(L, lua_upvalueindex(nup + 1));
+    HlLuaBudget *b =
+        (HlLuaBudget *)lua_touserdata(L, lua_upvalueindex(nup + 2));
+    if (meter_over(b))
+        return hl_lua_budget_raise(L);
+    int idx = b->nframes;
+    if (b->limit <= 0 || idx >= HL_LUA_METER_DEPTH)
+        return fn.f(L);              /* nothing to charge, or too deep */
+    HlLuaMeterFrame *fr = &b->frames[idx];
+    fr->L  = L;
+    fr->ej = lua_hlerrorjmp(L);
+    fr->m0 = meter_reading(b, L);
+    hl_meter_begin(&fr->mark, b->meter.mode != 0);
+    b->nframes = idx + 1;
+    int n = fn.f(L);
+    if (b->nframes <= idx)           /* already settled (cannot happen) */
+        return n;
+    b->nframes = idx;                /* frames above were unwound */
+    meter_settle(b, L, fr);
+    /* Over now: the call's effects stand, and the run ends here. */
+    if (b->tripped)
+        return hl_lua_budget_raise(L);
+    return n;
+}
+
+static int meter_tramp0(lua_State *L) { return meter_call(L, 0); }
+static int meter_tramp1(lua_State *L) { return meter_call(L, 1); }
+static int meter_tramp2(lua_State *L) { return meter_call(L, 2); }
+
+static const lua_CFunction meter_tramps[] = {
+    meter_tramp0, meter_tramp1, meter_tramp2,
+};
+
+/* Push @p f closed over the @p nup values on top of the stack (consumed). */
+static void meter_push(lua_State *L, HlLuaBudget *b, lua_CFunction f, int nup)
+{
+    if (!b || b->meter_off || nup < 0 || nup > 2) {
+        lua_pushcclosure(L, f, nup);
+        return;
+    }
+    HlFnBits fn;
+    fn.f = f;
+    lua_pushlightuserdata(L, fn.p);
+    lua_pushlightuserdata(L, b);
+    lua_pushcclosure(L, meter_tramps[nup], nup + 2);
+}
+
+int hl_lua_is_dispatched(lua_State *L, int idx)
+{
+    lua_CFunction f = lua_tocfunction(L, idx);
+    return f == meter_tramp0 || f == meter_tramp1 || f == meter_tramp2;
+}
+
+void hl_lua_pushcclosure(lua_State *L, lua_CFunction fn, int n)
+{
+    meter_push(L, budget_of(L), fn, n);
+}
+
+void hl_lua_setfuncs(lua_State *L, const luaL_Reg *l, int nup)
+{
+    HlLuaBudget *b = budget_of(L);
+    luaL_checkstack(L, nup + 2, "too many upvalues");
+    for (; l->name != NULL; l++) {
+        if (l->func == NULL) {
+            lua_pushboolean(L, 0);
+        } else {
+            for (int i = 0; i < nup; i++)
+                lua_pushvalue(L, -nup);
+            int raw = strcmp(l->name, "__gc") == 0 ||
+                      strcmp(l->name, "__close") == 0;
+            meter_push(L, raw ? NULL : b, l->func, nup);
+        }
+        lua_setfield(L, -(nup + 2), l->name);
+    }
+    lua_pop(L, nup);
+}
+
 void hl_lua_budget_install(lua_State *L, HlLuaBudget *b)
 {
     lua_pushlightuserdata(L, b);
@@ -252,6 +408,10 @@ void hl_lua_budget_install(lua_State *L, HlLuaBudget *b)
     /* Lua HULL PATCH 0006: the stop flag and a tripped budget also end a
      * long ephemeron convergence inside the collector (conservatively). */
     lua_hlsettripped(L, &b->tripped);
+    /* Lua HULL PATCH 0007: the dispatcher hears of every throw (an error or
+     * a yield) that unwinds binding calls. */
+    b->nframes = 0;
+    lua_hlsetthrowhook(L, meter_throw, b);
     lua_pushcfunction(L, budget_pcall);
     lua_setglobal(L, "pcall");
     lua_pushcfunction(L, budget_xpcall);

@@ -329,7 +329,7 @@ static void js_ws_client_call(HlJSWsClientUD *ud, JSValueConst fn,
         js->active_on_complete_ctx = NULL;
         js->last_async_cont = NULL;
         js->async_pending = 0;
-        hl_js_budget_arm(js);
+        hl_js_budget_arm_as(js, HL_RUN_CALLBACK);
         hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
     }
     JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
@@ -879,7 +879,7 @@ int hl_js_init_ws_client_module(JSContext *ctx, HlJS *js)
     JS_NewClass(JS_GetRuntime(ctx), js_ws_client_conn_class_id,
                 &js_ws_client_conn_class);
     JSValue client_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, client_proto, js_ws_client_conn_proto_funcs,
+    hl_js_set_function_list(ctx, client_proto, js_ws_client_conn_proto_funcs,
                                sizeof(js_ws_client_conn_proto_funcs) /
                                sizeof(js_ws_client_conn_proto_funcs[0]));
     hl_js_set_class_proto_frozen(ctx, js_ws_client_conn_class_id, client_proto);

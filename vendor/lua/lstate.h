@@ -261,6 +261,8 @@ typedef struct global_State {
   lu_mem hlgcwork;  /* HULL PATCH 0004: collector work not yet charged */
   int *hlstop;  /* HULL PATCH 0005: the embedder's stop flag (atomic), or NULL */
   int *hltripped;  /* HULL PATCH 0006: the embedder's tripped flag, or NULL */
+  void (*hlthrow) (lua_State *L, int status, void *ud);  /* HULL PATCH 0007 */
+  void *hlthrowud;  /* HULL PATCH 0007: hlthrow's argument */
   stringtable strt;  /* hash table for strings */
   TValue l_registry;
   TValue nilvalue;  /* a nil value */

@@ -106,13 +106,13 @@ static void lua_register_wasm_buf_metatable(lua_State *L)
     luaL_newmetatable(L, HL_WASM_BUF_MT);
 
     /* __index = methods table */
-    luaL_newlib(L, methods);
+    hl_lua_newlib(L, methods);
     lua_setfield(L, -2, "__index");
 
     lua_pushcfunction(L, lua_wasm_buf_gc);
     lua_setfield(L, -2, "__gc");
 
-    lua_pushcfunction(L, lua_wasm_buf_close);
+    hl_lua_pushcfunction(L, lua_wasm_buf_close);
     lua_setfield(L, -2, "__close");
 
     lua_pushcfunction(L, lua_wasm_buf_tostring);
@@ -1110,7 +1110,7 @@ static int lua_wasm_inst_index(lua_State *L)
         lua_newtable(L);
         lua_pushvalue(L, 1);  /* push the instance userdata */
         lua_pushvalue(L, -2); /* and the proxy table itself */
-        lua_pushcclosure(L, lua_wasm_inst_async_proxy_call, 2);
+        hl_lua_pushcclosure(L, lua_wasm_inst_async_proxy_call, 2);
         lua_setfield(L, -2, "call");
         return 1;
     }
@@ -1134,7 +1134,7 @@ static void lua_register_wasm_inst_metatable(lua_State *L)
     luaL_newmetatable(L, HL_WASM_INST_MT);
 
     /* __index = closure(lua_wasm_inst_index, methods_table) */
-    luaL_newlib(L, methods);
+    hl_lua_newlib(L, methods);
     lua_pushcclosure(L, lua_wasm_inst_index, 1);
     lua_setfield(L, -2, "__index");
 
@@ -1705,8 +1705,8 @@ int luaopen_hull_compute(lua_State *L)
 {
     lua_register_wasm_buf_metatable(L);
     lua_register_wasm_inst_metatable(L);
-    luaL_newlib(L, compute_funcs);
-    luaL_newlib(L, compute_async_funcs);
+    hl_lua_newlib(L, compute_funcs);
+    hl_lua_newlib(L, compute_async_funcs);
     lua_setfield(L, -2, "async");  /* compute.async = {...} */
     return 1;
 }

@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/dispatch_meter.h"   /* hl_meter_fsync */
 #include "hull/cap/fs.h"
 #include "hull/cap/db_live_files.h"
 #include "hull/shared/host.h"
@@ -415,7 +416,7 @@ static int fs_write_in_place(const HlFsConfig *cfg, const char *path,
     if (fd < 0)
         return -1;
     int rc = (len > 0 && data) ? fs_write_all(fd, data, len) : 0;
-    if (rc == 0 && !(flags & HL_FS_WRITE_NO_SYNC) && fsync(fd) != 0)
+    if (rc == 0 && !(flags & HL_FS_WRITE_NO_SYNC) && hl_meter_fsync(fd) != 0)
         rc = -1;
     if (close(fd) != 0)
         rc = -1;
@@ -554,7 +555,7 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
         (void)fchmod(tfd, target.st_mode & 01777);
 
     if ((len > 0 && data && fs_write_all(tfd, data, len) != 0)
-        || (!(flags & HL_FS_WRITE_NO_SYNC) && fsync(tfd) != 0)) {
+        || (!(flags & HL_FS_WRITE_NO_SYNC) && hl_meter_fsync(tfd) != 0)) {
         fail = "write_failed";
         goto out;
     }
@@ -596,7 +597,7 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
     /* Make the rename itself durable. Not every platform can fsync a
      * directory; the replace has happened either way. */
     if (!(flags & HL_FS_WRITE_NO_SYNC))
-        (void)fsync(par.parent_fd);
+        (void)hl_meter_fsync(par.parent_fd);
     status = FS_ATOMIC_OK;
 
 out:

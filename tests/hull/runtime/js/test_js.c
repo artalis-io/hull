@@ -372,6 +372,11 @@ static int run_js_test(const char *script_path, int *pass_out, int *fail_out)
      * nested in it), any deadline already armed cleared. */
     hl_run_watchdog_configure(0);
     hl_run_watch_disarm(&js.run_watch);
+    /* Nor does the instruction budget: the binding dispatcher charges the
+     * suite's password hashing at its wall time, and a suite of them is many
+     * runs' worth of work in one. */
+    int64_t saved_limit = js.max_instructions;
+    js.max_instructions = 0;
     JSValue val = JS_Eval(js.ctx, buf, got, script_path, JS_EVAL_TYPE_MODULE);
     int failed = JS_IsException(val);
     if (failed) hl_js_dump_error(&js);
@@ -401,6 +406,7 @@ static int run_js_test(const char *script_path, int *pass_out, int *fail_out)
     }
 
     JS_FreeValue(js.ctx, val);
+    js.max_instructions = saved_limit;
     hl_run_watchdog_configure(-1);
     if (failed) return -1;
 
@@ -3202,6 +3208,9 @@ UTEST(js_stdlib, totp_rekey_batch_helper_js)
         "  return 1;\n"
         "}\n"
         "globalThis.__totp_rekey = run();\n";
+    /* Thirty recovery-code hashes in one run: several requests' worth of KDF
+     * work at its measured cost (the binding dispatcher). */
+    js.max_instructions = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val)) hl_js_dump_error(&js);
@@ -14262,7 +14271,10 @@ UTEST(js_audit27, password_prehash_is_charged)
     hl_js_reset_request(&js);
     EXPECT_EQ(eval_int("crypto.verifyPassword(PW, ST) ? 1 : 2"), -9999);
     EXPECT_EQ(js.budget_tripped, 1);
-    /* A short password over the same count fits. */
+    /* A short password over the same count fits a budget sized for the
+     * derivation's measured time (the binding dispatcher charges the
+     * ~100 ms of PBKDF2 at its wall time, past the 1.6M explicit units). */
+    js.max_instructions = 30000000;
     hl_js_reset_request(&js);
     EXPECT_EQ(eval_int("crypto.verifyPassword('pw', ST) ? 1 : 2"), 2);
     EXPECT_EQ(js.budget_tripped, 0);
@@ -15146,6 +15158,123 @@ UTEST(js_audit38, iterator_helper_steps_are_charged)
         EXPECT_EQ_MSG(caught, 0, srcs[i]);   /* the catch never ran */
     }
     hl_js_free(&lim);
+}
+
+/* A Hull binding's trip is raised through hl_js_budget_throw, not QuickJS's
+ * own poll: a builtin that turns an error into a rejection (Promise.race
+ * rejects its result promise when the iterator throws) went on, and with no
+ * call or backward jump after it the run ended normally. An uncatchable
+ * exception now makes the next step poll (QuickJS HULL PATCH 0003), as the
+ * poll's own interrupt does, so the reject call is interrupted too. The
+ * iterator's next is console.log over a string whose record charge alone
+ * is past the budget, so it trips before it writes anything. */
+UTEST(js_audit38, binding_trip_inside_a_builtin_is_not_swallowed)
+{
+    static const char *const srcs[] = {
+        "Promise.race({ [Symbol.iterator]: () => ({ next: "
+        "console.log.bind(console, BIG) }) });",
+        "Promise.all({ [Symbol.iterator]: () => ({ next: "
+        "console.log.bind(console, BIG) }) });",
+        "new Promise(console.log.bind(console, BIG));",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        HlJS lim;
+        ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+        char code[1024];
+        snprintf(code, sizeof code,
+                 "globalThis.__a38b = 0;\n"
+                 "const BIG = 'x'.repeat(9000000);\n"
+                 "try { %s } catch (e) { globalThis.__a38b = 1; }\n", srcs[i]);
+        hl_js_reset_request(&lim);
+        EXPECT_TRUE_MSG(a5_eval_throws(&lim, code), srcs[i]);
+        EXPECT_EQ_MSG(lim.budget_tripped, 1, srcs[i]);
+        hl_js_reset_request(&lim);
+        JSValue v = JS_Eval(lim.ctx, "globalThis.__a38b", 17, "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        int32_t caught = -1;
+        JS_ToInt32(lim.ctx, &caught, v);
+        JS_FreeValue(lim.ctx, v);
+        EXPECT_EQ_MSG(caught, 0, srcs[i]);   /* the catch never ran */
+        hl_js_free(&lim);
+    }
+}
+
+/* QuickJS's own C functions are never the embedder's, whatever the memory
+ * they are made on held (HULL PATCH 0011). JS_NewCFunction3 left the
+ * `embedder` byte as js_malloc returned it, so a builtin made on reused
+ * memory went through Hull's call hooks at random: its run was charged the
+ * builtin's measured time, and a trip there was raised where QuickJS did
+ * not expect one (the macOS failure of iterator_helper_steps_are_charged:
+ * the Promise constructor inside Promise.race was hooked). An allocator
+ * that fills every block with 0xA5 makes the stale byte certain. */
+static void *poison_malloc(JSMallocState *s, size_t size)
+{
+    if (s->malloc_size + size + 16 > s->malloc_limit - 1) return NULL;
+    unsigned char *p = malloc(size + 16);
+    if (!p) return NULL;
+    memcpy(p, &size, sizeof size);
+    memset(p + 16, 0xA5, size);
+    s->malloc_count++;
+    s->malloc_size += size + 16;
+    return p + 16;
+}
+static void poison_free(JSMallocState *s, void *ptr)
+{
+    if (!ptr) return;
+    unsigned char *p = (unsigned char *)ptr - 16;
+    size_t size;
+    memcpy(&size, p, sizeof size);
+    s->malloc_count--;
+    s->malloc_size -= size + 16;
+    free(p);
+}
+static void *poison_realloc(JSMallocState *s, void *ptr, size_t size)
+{
+    if (!ptr) return size ? poison_malloc(s, size) : NULL;
+    if (size == 0) { poison_free(s, ptr); return NULL; }
+    size_t old;
+    memcpy(&old, (unsigned char *)ptr - 16, sizeof old);
+    void *n = poison_malloc(s, size);
+    if (!n) return NULL;
+    memcpy(n, ptr, old < size ? old : size);
+    poison_free(s, ptr);
+    return n;
+}
+static size_t poison_usable(const void *ptr)
+{
+    size_t size;
+    memcpy(&size, (const unsigned char *)ptr - 16, sizeof size);
+    return size;
+}
+
+UTEST(js_audit38, builtins_are_never_embedder_functions)
+{
+    static const JSMallocFunctions mf = {
+        poison_malloc, poison_free, poison_realloc, poison_usable,
+    };
+    JSRuntime *rt = JS_NewRuntime2(&mf, NULL);
+    ASSERT_TRUE(rt != NULL);
+    JSContext *ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    static const char *const builtins[] = {
+        "Promise", "Promise.race", "Promise.prototype.then", "Array.isArray",
+        "Array.prototype.map", "Object.keys", "JSON.parse", "Math.max",
+        "Object.getOwnPropertyDescriptor(Promise, Symbol.species).get",
+        "Iterator.prototype.drop", "String.prototype.indexOf",
+    };
+    for (size_t i = 0; i < sizeof builtins / sizeof builtins[0]; i++) {
+        JSValue v = JS_Eval(ctx, builtins[i], strlen(builtins[i]), "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        EXPECT_TRUE_MSG(JS_IsFunction(ctx, v), builtins[i]);
+        EXPECT_EQ_MSG(JS_TestIsEmbedderFunction(v), 0, builtins[i]);
+        JS_FreeValue(ctx, v);
+    }
+    /* The embedder's own functions are still marked. */
+    JSValue mine = JS_NewCFunction2(ctx, NULL, "mine", 0, JS_CFUNC_generic, 0);
+    EXPECT_EQ(JS_TestIsEmbedderFunction(mine), 1);
+    JS_FreeValue(ctx, mine);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
 }
 
 /* The same single call with NO instruction limit: the run watchdog's stop
@@ -16740,5 +16869,274 @@ UTEST(js_audit42, a_path_module_name_starting_hull_colon_is_app_code)
     cleanup_js_caps();
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
+
+/* ── The binding dispatcher (audit convergence §6.1) ───────────────────
+ *
+ * QuickJS HULL PATCH 0011 sends every call of a C function Hull made through
+ * the runtime's call hooks (runtime.c), which charge the run for the call's
+ * wall time past what the call charged itself. A function made with
+ * JS_NewCFunction is Hull's; one instantiated from a function list by
+ * QuickJS itself is not - the unmeasured baseline below. */
+
+#include "hull/shared/dispatch_meter.h"   /* HL_METER_SLOWDOWN */
+
+static uint64_t jdisp_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+/* Spins for @p ms of this thread's CPU time (not wall time: on a loaded
+ * host a wall-time spin does less work than it says, and the dispatcher
+ * charges CPU work - shared/dispatch_meter.h). */
+static uint64_t jdisp_cpu_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static void jdisp_spin_ms(int64_t ms)
+{
+    uint64_t end = jdisp_cpu_ns() + (uint64_t)ms * 1000000u;
+    while (jdisp_cpu_ns() < end) { }
+}
+
+static JSValue jdisp_spin(JSContext *ctx, JSValueConst this_val, int argc,
+                          JSValueConst *argv)
+{
+    (void)this_val;
+    int64_t ms = 0;
+    if (argc > 0 && JS_ToInt64(ctx, &ms, argv[0]) != 0) return JS_EXCEPTION;
+    jdisp_spin_ms(ms);
+    return JS_UNDEFINED;
+}
+
+static JSValue jdisp_spin_charged(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    int64_t ms = 0;
+    if (argc > 0 && JS_ToInt64(ctx, &ms, argv[0]) != 0) return JS_EXCEPTION;
+    if (hl_js_budget_charge(ctx, (uint64_t)ms * 64000u)) return JS_EXCEPTION;
+    jdisp_spin_ms(ms);
+    return JS_UNDEFINED;
+}
+
+static JSValue jdisp_noop(JSContext *ctx, JSValueConst this_val, int argc,
+                          JSValueConst *argv)
+{
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static const JSCFunctionListEntry jdisp_raw_funcs[] = {
+    JS_CFUNC_DEF("noopRaw", 0, jdisp_noop),
+    JS_CFUNC_DEF("spinRaw", 1, jdisp_spin),
+};
+
+static void jdisp_register(void)
+{
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JS_SetPropertyStr(js.ctx, g, "spin", JS_NewCFunction(js.ctx, jdisp_spin, "spin", 1));
+    JS_SetPropertyStr(js.ctx, g, "spinCharged",
+                      JS_NewCFunction(js.ctx, jdisp_spin_charged, "spinCharged", 1));
+    JS_SetPropertyStr(js.ctx, g, "noop", JS_NewCFunction(js.ctx, jdisp_noop, "noop", 0));
+    /* QuickJS's own instantiation: not marked, not measured. */
+    JS_SetPropertyFunctionList(js.ctx, g, jdisp_raw_funcs, 2);
+    JS_FreeValue(js.ctx, g);
+}
+
+static void jdisp_arm(int64_t limit)
+{
+    js.max_instructions = limit;
+    hl_js_reset_request(&js);
+}
+
+static uint64_t jdisp_charged(void)
+{
+    return js.meter_charged + JS_GetPendingCharge(js.ctx);
+}
+
+UTEST(js_dispatcher, an_uncharged_slow_binding_trips_within_one_call)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    jdisp_register();
+
+    /* 20 ms of budget; each call takes 5 ms and charges nothing itself. */
+    jdisp_arm(20 * 64000 / HL_METER_SLOWDOWN);
+    uint64_t t0 = jdisp_now_ns();
+    EXPECT_EQ(eval_int("globalThis.CALLS = 0;"
+                       "for (let i = 0; i < 1000; i++) { CALLS++; spin(5); } 1"),
+              -9999);
+    uint64_t ms = (jdisp_now_ns() - t0) / 1000000u;
+    EXPECT_EQ(js.budget_tripped, 1);
+    EXPECT_LT(ms, 1000u);
+    jdisp_arm(0);
+    EXPECT_LE(eval_int("CALLS"), 6);
+
+    /* try / catch does not swallow it: the trip is uncatchable. */
+    jdisp_arm(20 * 64000 / HL_METER_SLOWDOWN);
+    EXPECT_EQ(eval_int("let caught = 0; try { spin(50); } catch (e) { caught = 1; }"
+                       " caught + 10"), -9999);
+    EXPECT_EQ(js.budget_tripped, 1);
+
+    /* Once tripped, the next binding call is refused before it runs. */
+    t0 = jdisp_now_ns();
+    EXPECT_EQ(eval_int("spin(200), 1"), -9999);
+    EXPECT_LT((jdisp_now_ns() - t0) / 1000000u, 100u);
+
+    /* A function QuickJS instantiated itself is not Hull's: not measured. */
+    jdisp_arm(20 * 64000 / HL_METER_SLOWDOWN);
+    EXPECT_EQ(eval_int("spinRaw(50), 1"), 1);
+    EXPECT_EQ(js.budget_tripped, 0);
+    jdisp_arm(0);
+    cleanup_js();
+}
+
+UTEST(js_dispatcher, explicit_charges_are_not_double_counted)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    jdisp_register();
+    jdisp_arm(1000000000);
+
+    /* Upper bounds are against the call's own wall time (a preempted call
+     * on a loaded host may be charged up to it), never the sum. */
+    uint64_t c0 = jdisp_charged();
+    uint64_t w0 = jdisp_now_ns();
+    EXPECT_EQ(eval_int("spinCharged(20), 1"), 1);
+    uint64_t wall = (jdisp_now_ns() - w0) / 1000u * 64u;
+    uint64_t charged = jdisp_charged() - c0;
+    EXPECT_GE(charged, (uint64_t)19 * 64000);
+    EXPECT_LT(charged, (wall > 20 * 64000u ? wall : 20 * 64000u) + 2 * 64000u);
+
+    c0 = jdisp_charged();
+    w0 = jdisp_now_ns();
+    EXPECT_EQ(eval_int("spin(20), 1"), 1);
+    wall = (jdisp_now_ns() - w0) / 1000u * 64u;
+    charged = jdisp_charged() - c0;
+    EXPECT_GE(charged, (uint64_t)19 * 64000 / HL_METER_SLOWDOWN);
+    EXPECT_LT(charged, wall + 2 * 64000u);
+    jdisp_arm(0);
+    cleanup_js();
+}
+
+UTEST(js_dispatcher, a_parked_wait_is_not_charged)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main("import { app } from 'hull:app';"
+        "app.main(async () => {"
+        "  let n = 0;"
+        "  for (let i = 0; i < 3; i++) { await hull.sleep(60); n++; }"
+        "  return n;"
+        "});"));
+    uint64_t c0 = js.meter_charged;
+    uint64_t t0 = jdisp_now_ns();
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    EXPECT_EQ(exit_code, 3);
+    EXPECT_GE((jdisp_now_ns() - t0) / 1000000u, 150u);    /* it did wait */
+    /* 180 ms parked would be 11.5M units; the runs themselves are tiny. */
+    EXPECT_LT(js.meter_charged - c0, (uint64_t)2000000);
+    cleanup_js();
+    be->free(loop);
+}
+
+UTEST(js_dispatcher, overhead_per_call_is_small)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    jdisp_register();
+    jdisp_arm(INT64_MAX / 2);
+    const int n = 2000000;
+    char src[160];
+    uint64_t best_raw = UINT64_MAX, best_wrapped = UINT64_MAX;
+    for (int round = 0; round < 3; round++) {
+        snprintf(src, sizeof src, "for (let i = 0; i < %d; i++) noopRaw(); 1", n);
+        uint64_t t0 = jdisp_now_ns();
+        ASSERT_EQ(eval_int(src), 1);
+        uint64_t raw = jdisp_now_ns() - t0;
+        snprintf(src, sizeof src, "for (let i = 0; i < %d; i++) noop(); 1", n);
+        t0 = jdisp_now_ns();
+        ASSERT_EQ(eval_int(src), 1);
+        uint64_t wrapped = jdisp_now_ns() - t0;
+        if (raw < best_raw) best_raw = raw;
+        if (wrapped < best_wrapped) best_wrapped = wrapped;
+    }
+    double per_call = best_wrapped > best_raw
+                      ? (double)(best_wrapped - best_raw) / n : 0.0;
+    fprintf(stderr, "  js dispatcher overhead: %.1f ns per call "
+            "(plain %.1f ns, dispatched %.1f ns)\n", per_call,
+            (double)best_raw / n, (double)best_wrapped / n);
+    /* Target ~50 ns; the bound is generous so a loaded CI runner passes. */
+    EXPECT_LT(per_call, 300.0 * HL_METER_SLOWDOWN);
+    jdisp_arm(0);
+    cleanup_js();
+}
+
+/* The "js error" records hl_js_dump_error printed while g_jdump_on was set
+ * (log.c has no callback removal: registered once, gated by the flag). */
+static char g_jdump_log[2048];
+static int g_jdump_on;
+static void jdump_log_collect(log_Event *ev)
+{
+    if (!g_jdump_on || !ev->fmt || !strstr(ev->fmt, "js error")) return;
+    size_t n = strlen(g_jdump_log);
+    if (n + 2 >= sizeof g_jdump_log) return;
+    vsnprintf(g_jdump_log + n, sizeof g_jdump_log - n - 1, ev->fmt, ev->ap);
+    n = strlen(g_jdump_log);
+    g_jdump_log[n] = '|';
+    g_jdump_log[n + 1] = '\0';
+}
+
+/* PR #981 CI: a trip raised from C (a binding's own charge, or the
+ * dispatcher's leave hook) makes the next step poll the interrupt handler
+ * (QuickJS patch 0003), so the error report's toString call was interrupted
+ * again and app.main printed "(an error that cannot be shown)" instead of
+ * the instruction limit. The report names the trip. */
+UTEST(js_dispatcher, a_trip_raised_from_c_is_reported_as_the_limit)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    jdisp_register();
+    static int registered;
+    if (!registered) {
+        log_add_callback(jdump_log_collect, NULL, LOG_TRACE);
+        registered = 1;
+    }
+    static const char *const srcs[] = {
+        "for (let i = 0; i < 1000; i++) { try { spin(5); } catch (e) {} }",
+        "for (let i = 0; i < 1000; i++) { try { spinCharged(5); } catch (e) {} }",
+        "for (;;) { try { noop(); } catch (e) {} }",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        jdisp_arm(20 * 64000 / HL_METER_SLOWDOWN);
+        JSValue v = JS_Eval(js.ctx, srcs[i], strlen(srcs[i]), "<jdump>",
+                            JS_EVAL_TYPE_GLOBAL);
+        EXPECT_TRUE_MSG(JS_IsException(v), srcs[i]);
+        JS_FreeValue(js.ctx, v);
+        EXPECT_EQ_MSG(js.budget_tripped, 1, srcs[i]);
+        g_jdump_log[0] = '\0';
+        g_jdump_on = 1;
+        hl_js_dump_error(&js);
+        g_jdump_on = 0;
+        EXPECT_TRUE_MSG(strstr(g_jdump_log, "instruction limit exceeded") != NULL,
+                        srcs[i]);
+        EXPECT_TRUE_MSG(strstr(g_jdump_log, "cannot be shown") == NULL, srcs[i]);
+        if (!strstr(g_jdump_log, "instruction limit exceeded"))
+            printf("  got: %s\n", g_jdump_log);
+        EXPECT_FALSE(JS_HasException(js.ctx));
+    }
+    jdisp_arm(0);
+    cleanup_js();
+}
 
 UTEST_MAIN();

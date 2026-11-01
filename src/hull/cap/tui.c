@@ -15,6 +15,7 @@
  */
 
 #include "hull/cap/tui.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cap/tui_width.h"
 #include "tui_internal.h"
 #include "../utils/base64.h"
@@ -522,7 +523,9 @@ static void detect_theme(HlTuiCtx *ctx)
     char  resp[HL_TUI_OSC11_RESP_MAX] = {0};
     size_t got = 0;
     while (got < sizeof resp - 1) {
+        uint64_t hl_mx = hl_meter_exclude_begin();
         int pr = poll(&pfd, 1, HL_TUI_OSC11_TIMEOUT_MS);
+        hl_meter_exclude_end(hl_mx);
         if (pr <= 0) break;
         ssize_t n = read(ctx->in_fd, resp + got, sizeof resp - 1 - got);
         if (n <= 0) break;
@@ -1116,7 +1119,9 @@ int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout_ms, HlTuiEvent *out)
             slice = HL_TUI_ESC_IDLE_MS;
         }
 
+        uint64_t hl_mx = hl_meter_exclude_begin();
         int pr = poll(&pfd, 1, slice);
+        hl_meter_exclude_end(hl_mx);
         if (pr < 0) {
             if (errno == EINTR) {
                 if (consume_winch(ctx) &&

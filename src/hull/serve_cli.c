@@ -624,6 +624,9 @@ int hull_serve(int argc, char **argv)
     /* An app with no manifest runs with the zeroed, deny-everything policy:
      * there are no strings to seal (hl_manifest_seal refuses an absent one,
      * which used to stop every manifest-less app.main program here). */
+    /* The app's run deadlines (cap/run_watchdog.h, manifest limits). */
+    hl_run_watchdog_set_app_limits(manifest.limits_request_ms,
+                                   manifest.limits_callback_ms);
     if (manifest.present) {
         HlManifest sealed;
         if (hl_manifest_seal(&sealed, &manifest, &seal_arena) != 0) {

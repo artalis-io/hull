@@ -255,7 +255,7 @@ static void hl_lua_ws_register_client_conn_mt(lua_State *L)
     lua_pushcfunction(L, lua_ws_client_gc);
     lua_setfield(L, -2, "__gc");
     lua_newtable(L);
-    luaL_setfuncs(L, ws_client_conn_methods, 0);
+    hl_lua_setfuncs(L, ws_client_conn_methods, 0);
     lua_setfield(L, -2, "__index");
     lua_pushliteral(L, "locked");
     lua_setfield(L, -2, "__metatable");
@@ -317,7 +317,7 @@ static void ws_client_call(HlLuaWsClientUD *ud, HlWscCall *c, const char *what)
     /* An entry like a ws-server callback: it neither joins nor leaves a
      * stale transaction (audit 6 M1). */
     hl_db_registry_guard_stale_txns(ud->lua->base.db_registry);
-    HL_LUA_ARM(ud->lua, L);
+    HL_LUA_ARM_KIND(ud->lua, L, HL_RUN_CALLBACK);
     lua_pushcfunction(L, ws_client_call_k);
     lua_pushlightuserdata(L, c);
     int prc = lua_pcall(L, 1, 0, 0);
@@ -662,6 +662,8 @@ static int lua_ws_connect(lua_State *L)
         if (lua->base.shutting_down)
             return luaL_error(L, "ws.connect: runtime is shutting down");
     }
+    /* Read again: the collection's __gc finalizers give slots back. */
+    // cppcheck-suppress duplicateCondition
     if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
         return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "ws.connect: too many live WebSocket clients "
                           "(at most %d per VM)", HL_WS_CLIENT_MAX_LIVE);
@@ -742,6 +744,6 @@ static const luaL_Reg ws_client_funcs[] = {
 int luaopen_hull_ws_client(lua_State *L)
 {
     hl_lua_ws_register_client_conn_mt(L);
-    luaL_newlib(L, ws_client_funcs);
+    hl_lua_newlib(L, ws_client_funcs);
     return 1;
 }

@@ -11,6 +11,7 @@
 #ifdef HL_ENABLE_GPU
 
 #include "hull/cap/gpu.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cap/db_budget.h"   /* hl_db_budget_charge: a GPU wait asks the run */
 #include "webgpu.h"
 #include "wgpu.h"
@@ -90,7 +91,9 @@ static int gpu_poll_with_timeout(WGPUDevice device, uint32_t timeout_ms)
         }
         /* Brief yield to avoid busy-spin */
         struct timespec ts = { 0, 100000 }; /* 100 µs */
+        uint64_t hl_mx = hl_meter_exclude_begin();   /* the device's time */
         nanosleep(&ts, NULL);
+        hl_meter_exclude_end(hl_mx);
     }
 }
 
@@ -274,7 +277,9 @@ static void gpu_wait_map(WGPUDevice device, MapReq *req, uint32_t timeout_ms)
             next_ask = now + GPU_STOP_POLL_MS;
         }
         struct timespec ts = { 0, 100000 };   /* 100 us */
+        uint64_t hl_mx = hl_meter_exclude_begin();   /* the device's time */
         nanosleep(&ts, NULL);
+        hl_meter_exclude_end(hl_mx);
     }
 }
 

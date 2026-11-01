@@ -289,8 +289,10 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                                                         (int64_t)INT32_MAX);
     JS_FreeValue(ctx, http_val);
 
-    /* limits: { vmThread, vmThreadGraceMs, vmThreadCeilingMs }: --vm-thread
-     * from the manifest. The numbers as for wasm (at least 1, capped). */
+    /* limits: { vmThread, vmThreadGraceMs, vmThreadCeilingMs, requestMs,
+     * callbackMs }: --vm-thread from the manifest, and the app's run
+     * deadlines (cap/run_watchdog.h). The numbers as for wasm (at least 1,
+     * capped to a day); anything else is absent. */
     JSValue lim_val = mjs_own(ctx, manifest, "limits");
     if (mjs_is_obj(ctx, lim_val)) {
         JSValue vt = mjs_own(ctx, lim_val, "vmThread");
@@ -301,6 +303,10 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             ctx, lim_val, "vmThreadGraceMs", (int64_t)86400000);
         out->vm_thread_ceiling_ms = (uint32_t)mjs_wasm_limit(
             ctx, lim_val, "vmThreadCeilingMs", (int64_t)86400000);
+        out->limits_request_ms = (uint32_t)mjs_wasm_limit(
+            ctx, lim_val, "requestMs", (int64_t)86400000);
+        out->limits_callback_ms = (uint32_t)mjs_wasm_limit(
+            ctx, lim_val, "callbackMs", (int64_t)86400000);
     }
     JS_FreeValue(ctx, lim_val);
 

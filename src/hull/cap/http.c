@@ -8,6 +8,7 @@
  */
 
 #include "hull/cap/http.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cap/audit.h"
 #include "hull/host_match.h"
 #include "hull/cap/db_budget.h"       /* hl_db_budget_charge: a redirect hop */
@@ -339,6 +340,12 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     /* Delegate to Keel - prefer redirect+pooled > redirect > pooled > plain */
     KlAllocator alloc = kl_allocator_default();
     int rc;
+    /* The request is the server's time (DNS, connect, the transfer), not the
+     * run's work: excluded from the binding dispatcher's measured charge
+     * (shared/dispatch_meter.h). The floor and the body are charged by the
+     * binding; the whole wait is bounded by the timeout and the run's
+     * deadline. */
+    uint64_t hl_mx = hl_meter_exclude_begin();
     if (cfg->follow_redirects) {
         HlHttpSyncChain chain = {
             .kl_cfg      = &kl_cfg,
@@ -372,6 +379,7 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
                                 (const KlHttpClientHeader *)headers, num_headers,
                                 body, body_len, resp);
     }
+    hl_meter_exclude_end(hl_mx);
 
     /* Audit */
     {

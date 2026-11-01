@@ -10,6 +10,7 @@
  */
 
 #include "hull/cap/pg_conn.h"
+#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cap/pgwire.h"
 #include "../utils/base64.h"
 #include "../utils/url.h"
@@ -1818,7 +1819,9 @@ static int wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
             int slice = remaining < HL_DB_WAIT_SLICE_MS ? remaining
                                                         : HL_DB_WAIT_SLICE_MS;
             struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+            uint64_t hl_mx = hl_meter_exclude_begin();
             int pr = poll(&pfd, 1, slice);
+            hl_meter_exclude_end(hl_mx);
             if (pr < 0) { if (errno == EINTR) continue; return -1; }
             if (pr == 0) continue;          /* the loop re-checks the deadline */
             if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;   /* dead conn */

@@ -85,7 +85,7 @@ static void hl_js_ws_on_open_impl(KlWsServerConn *ws_conn, void *user_data)
     js->active_timer = NULL;
     js->last_async_cont = NULL;
     js->async_pending = 0;
-    hl_js_budget_arm(js);
+    hl_js_budget_arm_as(js, HL_RUN_CALLBACK);
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     /* Look up handler */
@@ -185,7 +185,7 @@ static void hl_js_ws_on_message_impl(KlWsServerConn *ws_conn, const char *data,
     js->active_timer = NULL;
     js->last_async_cont = NULL;
     js->async_pending = 0;
-    hl_js_budget_arm(js);
+    hl_js_budget_arm_as(js, HL_RUN_CALLBACK);
     hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
     /* Look up handler */
@@ -309,7 +309,7 @@ static void hl_js_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code,
         js->active_timer = NULL;
         js->last_async_cont = NULL;
         js->async_pending = 0;
-        hl_js_budget_arm(js);
+        hl_js_budget_arm_as(js, HL_RUN_CALLBACK);
         hl_db_registry_guard_stale_txns(js->base.db_registry);   /* audit 6 M1 */
 
         /* Arm the deferred-teardown hook: if the handler awaits, the

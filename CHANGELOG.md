@@ -8,6 +8,41 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Behaviour changes (audit convergence phase 2)
+
+- **An HTTP handler run now has a 10 s deadline by default (was 60 s).** A request handler,
+  a middleware or an SSE endpoint's handler - and each resume of one after it parked on
+  `http.fetch` / `db.async` / `hull.sleep` - is stopped after 10 s holding the event loop
+  (`HL_RUN_HTTP_DEFAULT_MS`), and the request is answered `503 Service Unavailable: the request
+  exceeded its time limit` (it was a bare 500). Timers and WebSocket / SSE callbacks get 5 s
+  (`HL_RUN_CALLBACK_DEFAULT_MS`); app.main keeps 10 min and everything else 60 s. An app sets its
+  own with manifest `limits = { request_ms = N, callback_ms = N }` (JS `limits: { requestMs,
+  callbackMs }`); `--max-run-ms` / `HULL_MAX_RUN_MS` still override every kind. Time spent parked
+  is not counted: the deadline bounds each uninterrupted run. Per-route deadlines are a follow-up.
+- **Every binding call is charged its measured wall time** (§6.1). Each app-facing binding in both
+  runtimes - including `worker.dispatch` VMs and app.main - now goes through one dispatcher that
+  charges the run `max(0, wall time x 64 units/us - 2 x what the call charged itself)` (a calibrated
+  floor is not second-guessed by a slower or loaded machine), so a binding whose floor is missing or
+  too small can no longer run free: the worst case is one call before the trip. A run under the
+  default 100M budget can therefore spend about 1.5 s inside bindings; CPU-heavy runs (many password
+  hashes in one request) may need `--max-instructions` raised. Waits on a peer or a user (database /
+  Valkey sockets, synchronous HTTP, SMTP, the terminal, stdin), WASM guest code, GPU device waits
+  and `fsync` are excluded. Time off the CPU (preemption on a loaded host) is not charged as work: a
+  slow call is charged at most the run's CPU time so far, and switches the VM to reading the
+  thread's CPU clock for the next 100 ms, during which a call costs its CPU time plus at most 32 us
+  off the CPU. A trip that lands while a binding raises its own error is re-raised by `pcall` as the
+  limit, not as that error. Lua HULL PATCH 0007 (a throw hook) and QuickJS HULL PATCH 0011 (embedder
+  call hooks) carry it; overhead is ~22 ns per Lua call and within noise of a QuickJS call. Lua
+  modules register through `hl_lua_setfuncs` / `hl_lua_newlib` / `hl_lua_pushcfunction`; see
+  docs/design/audit_convergence_dispatcher.md.
+  QuickJS's own functions are never measured: `JS_NewCFunction3` left the hook bit as `js_malloc`
+  returned it, so a builtin made on reused memory was hooked at random. An uncatchable trip raised
+  from C (a binding, the hooks) now makes the next step poll, as QuickJS's own interrupt does, so a
+  builtin that turns it into a rejection (`Promise.race`, `Promise.all`, `new Promise`) cannot let
+  the run end normally. The error report of a tripped JS run (app.main, a failed load) names the
+  trip from C instead of calling the error's `toString`, which that next-step poll interrupted
+  again: it printed "(an error that cannot be shown)" instead of the instruction limit.
+
 ### Process and CI
 
 - **Invariant lint (`make check-invariants`).** Phase 1 of the audit-convergence design

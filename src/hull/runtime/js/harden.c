@@ -142,6 +142,10 @@ static int enable_override(JSContext *ctx, JSValueConst proto, const char *name)
     JSValue getter = JS_NewCFunctionData(ctx, hl_js_override_get, 0, 0, 1, gdata);
     JSValue setter = JS_NewCFunctionData(ctx, hl_js_override_set, 1, 0, 2, sdata);
     JS_FreeValue(ctx, nameval);
+    /* Plumbing, not bindings: no call hooks (QuickJS HULL PATCH 0011). A
+     * tripped run's error text reads these accessors from C. */
+    JS_SetEmbedderFunction(getter, 0);
+    JS_SetEmbedderFunction(setter, 0);
 
     int rc = -1;
     if (!JS_IsException(getter) && !JS_IsException(setter)) {

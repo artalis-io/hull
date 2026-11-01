@@ -393,6 +393,9 @@ int JS_TestForceAtomHash(JSRuntime *rt, int on);
 uint32_t JS_TestAtomHash(JSRuntime *rt, const char *ascii);
 /* 1 when 8-bit and 16-bit storage of 'ascii' hash alike and share an atom */
 int JS_TestAtomWidths(JSRuntime *rt, const char *ascii);
+/* HULL PATCH 0011: test only. 1 when 'fn' is a C function marked as the
+   embedder's (its calls go through the embedder's call hooks). */
+int JS_TestIsEmbedderFunction(JSValueConst fn);
 #endif
 void JS_FreeRuntime(JSRuntime *rt);
 void *JS_GetRuntimeOpaque(JSRuntime *rt);
@@ -965,6 +968,33 @@ void JS_SetStopFlag(JSRuntime *rt, int *flag);
    (up to one batch) landed wherever the previous run had left them. Call
    when the embedder re-arms its budget. See Hull's docs/quickjs_patches.md. */
 void JS_ResetRunPhase(JSRuntime *rt);
+/* HULL PATCH 0011: hooks around every call of a C function the embedder
+   made (JS_NewCFunction2 / JS_NewCFunctionMagic / JS_NewCFunction /
+   JS_NewCFunctionData; QuickJS's own functions never go through them).
+   'enter' runs before the call, with the function's stack frame pushed:
+   non-zero refuses it (an exception must be pending). 'leave' runs after
+   it, with the result (or JS_EXCEPTION), and returns the call's result: it
+   may free the value and return an exception instead. 'call' is per-call
+   scratch for the embedder. NULL hooks: calls go straight through. See
+   Hull's docs/quickjs_patches.md. */
+typedef struct JSEmbedderCall {
+    uint64_t w[6];
+} JSEmbedderCall;
+typedef int JSEmbedderCallEnter(JSContext *ctx, void *opaque,
+                                JSEmbedderCall *call);
+typedef JSValue JSEmbedderCallLeave(JSContext *ctx, void *opaque,
+                                    JSEmbedderCall *call, JSValue ret);
+void JS_SetEmbedderCallHooks(JSRuntime *rt, JSEmbedderCallEnter *enter,
+                             JSEmbedderCallLeave *leave, void *opaque);
+/* HULL PATCH 0011: the instruction units this context has run but not yet
+   reported to the interrupt handler (steps since its last poll, one unit
+   each, plus the runtime's deferred work charge), so an embedder can read a
+   continuous count of what it has charged. */
+uint64_t JS_GetPendingCharge(JSContext *ctx);
+/* HULL PATCH 0011: mark (or unmark) a C function as the embedder's: an
+   embedder's own plumbing (accessors, promise callbacks it hands to
+   QuickJS) is unmarked so its calls skip the call hooks. */
+void JS_SetEmbedderFunction(JSValueConst fn, int on);
 /* HULL PATCH 0008: a tag the embedder gives the code it runs. A job runs
    with the tag current when it was queued - a promise reaction job with
    the tag current when its handler was registered (the `await` or `then`),

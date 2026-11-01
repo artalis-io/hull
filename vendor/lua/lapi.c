@@ -376,6 +376,29 @@ LUA_API void lua_hlsettripped (lua_State *L, int *flag) {
 }
 
 
+/* HULL PATCH 0007 (docs/lua_patches.md) */
+LUA_API void lua_hlsetthrowhook (lua_State *L, lua_HLThrow f, void *ud) {
+  G(L)->hlthrow = f;
+  G(L)->hlthrowud = ud;
+}
+
+
+LUA_API const void *lua_hlerrorjmp (lua_State *L) {
+  return L->errorJmp;
+}
+
+
+/* Work thread 'L' did that its count hook has not reported yet: the part of
+** the current hook period used (instructions and lua_hlcharge units), the
+** work past it, and whole units of bulk bytes. */
+LUA_API size_t lua_hlpending (lua_State *L) {
+  size_t n = L->hlowed + L->hlbytes / 64;
+  if ((L->hookmask & LUA_MASKCOUNT) && L->hookcount < L->basehookcount)
+    n += cast_sizet(L->basehookcount - (L->hookcount > 0 ? L->hookcount : 0));
+  return n;
+}
+
+
 LUA_API void lua_arith (lua_State *L, int op) {
   lua_lock(L);
   if (op != LUA_OPUNM && op != LUA_OPBNOT)

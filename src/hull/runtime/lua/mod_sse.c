@@ -115,7 +115,7 @@ void hl_lua_sse_register_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_SSE_STREAM_MT);
     lua_newtable(L);
-    luaL_setfuncs(L, sse_stream_methods, 0);
+    hl_lua_setfuncs(L, sse_stream_methods, 0);
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, lua_sse_gc);
     lua_setfield(L, -2, "__gc");

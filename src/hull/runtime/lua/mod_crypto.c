@@ -933,12 +933,13 @@ static int lua_crypto_create_sha256(lua_State *L)
 
 static int lua_sha256_hasher_update(lua_State *L)
 {
+    crypto_charge(L, 0);   /* the floor first: a refused call pays it too */
     HlLuaSha256Hasher *h = check_hasher(L, 1);
     if (h->done)
         return luaL_error(L, "sha256:update() after digest()");
     size_t len = 0;
     const char *data = luaL_checklstring(L, 2, &len);
-    crypto_charge(L, len);
+    lua_hlwork(L, len / 8, 0);   /* the rest of hl_work_crypto_units(len) */
     if (hl_cap_crypto_sha256_update(&h->ctx, data, len) != 0)
         return luaL_error(L, "sha256:update() failed");
     /* Return the hasher so calls can chain. */
@@ -948,10 +949,11 @@ static int lua_sha256_hasher_update(lua_State *L)
 
 static int lua_sha256_hasher_digest(lua_State *L)
 {
+    crypto_charge(L, 0);   /* audit 41: the per-call floor, before any
+                              refusal, so a failing call pays it too */
     HlLuaSha256Hasher *h = check_hasher(L, 1);
     if (h->done)
         return luaL_error(L, "sha256:digest() already called");
-    crypto_charge(L, 0);   /* audit 41: the per-call floor */
     uint8_t out[32];
     if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
         return luaL_error(L, "sha256:digest() failed");
@@ -980,7 +982,7 @@ static const luaL_Reg sha256_hasher_methods[] = {
 static void register_sha256_hasher_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_SHA256_HASHER_MT);
-    luaL_newlib(L, sha256_hasher_methods);   /* methods apart from the mt */
+    hl_lua_newlib(L, sha256_hasher_methods);   /* methods apart from the mt */
     lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, lua_sha256_hasher_gc);
     lua_setfield(L, -2, "__gc");
@@ -1124,9 +1126,9 @@ static void register_crypto_key_mt(lua_State *L)
 {
     luaL_newmetatable(L, HL_CRYPTO_KEY_MT);
     lua_newtable(L);
-    luaL_setfuncs(L, crypto_key_methods, 0);
+    hl_lua_setfuncs(L, crypto_key_methods, 0);
     lua_setfield(L, -2, "__index");
-    lua_pushcfunction(L, lua_crypto_key_destroy);
+    hl_lua_pushcfunction(L, lua_crypto_key_destroy);
     lua_setfield(L, -2, "__gc");
     lua_pushcfunction(L, lua_crypto_key_tostring);
     lua_setfield(L, -2, "__tostring");
@@ -1567,7 +1569,7 @@ int luaopen_hull_crypto(lua_State *L)
 {
     register_sha256_hasher_mt(L);
     register_crypto_key_mt(L);
-    luaL_newlib(L, crypto_funcs);
+    hl_lua_newlib(L, crypto_funcs);
 
     /* Exported so a caller that reads a work factor out of a FILE can refuse
      * it with a message naming that file, instead of letting the derivation

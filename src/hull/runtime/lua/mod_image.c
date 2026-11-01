@@ -442,7 +442,7 @@ int luaopen_hull_image(lua_State *L)
 
     /* __index = methods table */
     lua_newtable(L);
-    luaL_setfuncs(L, image_methods, 0);
+    hl_lua_setfuncs(L, image_methods, 0);
     lua_setfield(L, -2, "__index");
 
     lua_pushcfunction(L, l_image_gc);
@@ -458,6 +458,6 @@ int luaopen_hull_image(lua_State *L)
     lua_pop(L, 1); /* pop metatable */
 
     /* Create module table */
-    luaL_newlib(L, image_funcs);
+    hl_lua_newlib(L, image_funcs);
     return 1;
 }

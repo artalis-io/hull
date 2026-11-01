@@ -553,7 +553,16 @@ void hl_js_http_error_response(struct HlJS *js, struct KlHttpResponse *res)
     /* Whatever the handler set is dropped: its Set-Cookie / Location, a
      * second Content-Type (audit 10). The headers earlier middleware set
      * stay (audit 11). */
-    if (js)
+    /* A run stopped by its deadline (cap/run_watchdog.h, audit convergence
+     * §6.2) is answered 503 naming the limit: the server gave the request
+     * its time and it was not enough, which is not a bug in the request. */
+    static const char limit_body[] =
+        "Service Unavailable: the request exceeded its time limit";
+    if (js && js->budget_tripped && js->budget_timed_out &&
+        !js->budget_txn_failed)
+        hl_res_base_error_reset(&js->res_bases, res, 503, limit_body,
+                                sizeof limit_body - 1);
+    else if (js)
         hl_res_base_error_reset(&js->res_bases, res, 500,
                                 "Internal Server Error", 21);
     else

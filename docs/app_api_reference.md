@@ -1652,6 +1652,56 @@ end)
 - **Session init at startup:** Call `session.init()` before registering routes. It creates the SQLite table.
 - **Lua vs JS differences:** The Lua and JS APIs are functionally equivalent but differ in naming conventions (snake_case vs camelCase) and some defaults. See the JS stdlib source for JS-specific option names.
 
+### Run deadlines (`limits`)
+
+Every uninterrupted run of app code has a wall-clock deadline, on top of the
+instruction budget. A run that passes it is stopped with the uncatchable
+`run exceeded its time limit` trip (a `try` / `pcall` cannot keep it going),
+and an HTTP request whose handler was stopped this way is answered
+`503 Service Unavailable: the request exceeded its time limit`. The server
+keeps serving: the next request gets a fresh run.
+
+| Run | Default | Set with |
+|-----|---------|----------|
+| HTTP handler, middleware, SSE endpoint handler (and each resume of one) | 10 s | `limits.request_ms` (JS `limits.requestMs`) |
+| Timer (`app.every` / `app.daily`), WebSocket server / client callback, SSE callback (and each resume) | 5 s | `limits.callback_ms` (JS `limits.callbackMs`) |
+| `app.main` (and each resume) | 10 min | - |
+| Everything else (tasks, `hull test` cases, `worker.dispatch` jobs) | 60 s | - |
+
+```lua
+app.manifest({
+    modules = { "hull/http-server@1" },
+    limits  = { request_ms = 30000, callback_ms = 10000 },
+})
+```
+```javascript
+app.manifest({
+    modules: ["hull/http-server@1"],
+    limits: { requestMs: 30000, callbackMs: 10000 },
+});
+```
+
+A value is an integer number of milliseconds of at least 1 (capped to a day);
+anything else is ignored. The operator's `--max-run-ms N` (`--hull-max-run-ms`
+in a built binary) or `HULL_MAX_RUN_MS` overrides every kind, the manifest
+included (`0` turns the deadlines off).
+
+**A run, not a request.** A handler that waits - `http.fetch`, `db.async`,
+`hull.sleep`, a multipart read - parks, and its resume is a new run with a
+deadline of its own, so time spent waiting is never counted. What the deadline
+bounds is the time a run holds the event loop. Per-route deadlines are not
+supported yet (the router has no per-route options); set the app's limit to
+what its slowest route needs, or move that work to `worker.dispatch`.
+
+**Binding time counts toward the instruction budget too.** Every binding call
+is charged its measured wall time (64 units per microsecond) past what it
+charged explicitly, so a run of the default 100M-instruction budget can spend
+about 1.5 s inside bindings. Waits on a peer or a user (a database or Valkey
+socket, a synchronous HTTP request, SMTP, the terminal, stdin), WASM guest
+code (metered by `gas` / `timeout_ms`) and GPU device waits are not counted.
+A handler that legitimately does more CPU work in one run (many password
+hashes, say) needs `--max-instructions` raised or the work split across runs.
+
 ### Outbound HTTP timeout (`hull/http-client`)
 
 Every outbound request - the async `http.async.get` / `post` / `put` / `patch` /

@@ -8,6 +8,7 @@
  */
 
 #include "hull/app_context.h"
+#include "hull/cap/run_watchdog.h"   /* hl_run_watchdog_set_app_limits */
 #include "hull/entry.h"
 #include "hull/manifest.h"
 #include "hull/module_resolver.h"
@@ -379,6 +380,9 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             int manifest_tui = 0;   /* m is freed before the TUI gate opens */
             if (ctx->rt->vt->extract_manifest(ctx->rt, &m) == 0) {
                 manifest_tui = m.tui;
+                /* The app's run deadlines (cap/run_watchdog.h). */
+                hl_run_watchdog_set_app_limits(m.limits_request_ms,
+                                               m.limits_callback_ms);
                 /* Every "$VAR" reference must name a declared variable, as the
                  * serve path and the app.main runner check (audit 17: `hull
                  * test` / `hull agent` resolved databases.internal and the
