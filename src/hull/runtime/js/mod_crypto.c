@@ -1274,11 +1274,12 @@ static JSValue js_sha256_hasher_digest(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv)
 {
     (void)argc; (void)argv;
+    /* audit 41: the floor, before any refusal, so a failing call pays it */
+    if (js_crypto_charge(ctx, 0)) return JS_EXCEPTION;
     HlJsSha256Hasher *h = JS_GetOpaque2(ctx, this_val, hl_js_sha256_hasher_class_id);
     if (!h) return JS_EXCEPTION;
     if (h->done)
         return JS_ThrowInternalError(ctx, "sha256.digest() already called");
-    if (js_crypto_charge(ctx, 0)) return JS_EXCEPTION;   /* audit 41: the floor */
     uint8_t out[32];
     if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
         return JS_ThrowInternalError(ctx, "sha256.digest() failed");

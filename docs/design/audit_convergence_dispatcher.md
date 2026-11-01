@@ -31,6 +31,78 @@ dispatcher charges only the EXCESS of measured time after it. The net cost of a
 call is therefore `max(floor, measured)`, as specified, without the dispatcher
 knowing each binding's floor.
 
+As built, an explicit charge counts DOUBLE against measured time
+(`HL_METER_PAID_WEIGHT`): `owed = max(0, measured - 2 x charged)`, so a call
+costs `max(charged, measured / 2)` at least. The floors were sized from the
+cost measured on an idle machine, and the same work takes up to about twice
+as long on a slower or loaded one (core siblings busy, a low-power core): at
+1x, 500 ordinary fs writes on a loaded Mac crossed the headroom test's 15M
+budget from CPU time alone. The dispatcher is there to catch floors that are
+missing or far too small - the audits found 0 units charged for work worth
+thousands - which a factor of 2 does not hide.
+
+#### Wall time, CPU time and the off-CPU allowance
+
+Wall time also counts time the thread did not run: preempted by another
+process on a loaded host (a CI runner: a 4 ms time slice is 256k units, a
+quarter of a 1M test budget), or blocked in a wait nobody bracketed. Charging
+that in full made budget tests flaky on slow machines, and a CPU clock on
+every call is too dear (`clock_gettime(CLOCK_THREAD_CPUTIME_ID)` is a syscall,
+~170 ns on Apple M-series, against the dispatcher's ~25 ns). So
+(`hl_meter_settle`, `include/hull/shared/dispatch_meter.h`):
+
+- A VM measures in **wall mode** by default: two monotonic reads per call,
+  charged as above.
+- A call that owes more than `HL_METER_SLOW_UNITS` (256 us, 16384 units)
+  past what it charged itself is *slow*. It has no CPU reading of its own, so
+  it is charged at most the thread's CPU time since the run was armed plus
+  the off-CPU allowance below: every arm (`hl_lua_budget_arm`,
+  `hl_js_budget_arm_kind`, a worker.dispatch job) reads the thread's CPU
+  clock once (`hl_meter_arm`, only when no binding call is in progress, so
+  the reading always precedes the call), and that bounds the call's own CPU
+  work from above. A slow call also switches the VM to **CPU mode**.
+- In CPU mode every call also reads the thread's CPU clock and is measured as
+  `min(wall - excluded, cpu + HL_METER_OFFCPU_MAX_UNITS)`: all the CPU work it
+  did, plus at most `HL_METER_OFFCPU_MAX_UNITS` (32 us, 2048 units) of time
+  off the CPU (preemption, or an unbracketed blocking wait). The allowance is
+  small because on a loaded host many calls of one run are preempted: at
+  256 us each, 500 preempted fs writes cost 8M units more. Every slow call
+  keeps the VM in CPU mode; 100 ms of wall time (`HL_METER_CPU_WINDOW_UNITS`)
+  after the last one it goes back to wall mode, so only a VM that is being
+  preempted pays for the CPU clock. A host with no per-thread CPU clock
+  measures wall time.
+
+The guarantee is therefore: a call is never charged less than half the CPU
+work it did (all of it when it charged nothing itself), nor more than its
+wall time. Time off the CPU is charged only as far as the run's CPU time so
+far covers it (a slow call in wall mode) or 32 us a call (CPU mode), so an
+unbracketed blocking wait is bounded by the run's deadline (§6.2) rather
+than by the budget - as a bracketed one always was.
+
+Under load this holds the headroom tests: the budget tests ran 20-25 times
+each with 5, 10 and 16 busy processes on a 10-core Mac with no failure,
+and with a simulated 3 ms fsync the fs headroom tests stay inside 15M.
+
+#### Device flushes
+
+`fsync` (the fs.write data and directory syncs, blob writes) is an excluded
+wait (`hl_meter_fsync`): waiting for the disk is not the run's work, and on a
+CI disk it is milliseconds that vary run to run. The fs / blob floors
+(`HL_WORK_FS_WRITE_UNITS` and the blob ones) were sized from the measured cost
+of the whole write, flush included, so a loop of writes still pays per write.
+Without this, 500 ordinary page writes in `ordinary_fs_work_keeps_its_headroom`
+cost ~2 ms of fsync each on a Linux runner, 64M units, over a 15M budget.
+
+#### A trip while a binding raises
+
+A call that raises its own error (a bad argument) is still charged, by the
+throw hook, as it unwinds. If that charge trips the run, `pcall` / `xpcall`
+re-raise the TRIP (`hl_lua_budget_raise`), not the binding's error that was
+unwinding: before, `for ... do pcall(h.digest) end` ended with "bad argument"
+instead of the limit. A binding's floor is charged before its argument checks
+where it can be (`sha256` hasher `update` / `digest`), so a refused call pays
+it.
+
 Before the call the dispatcher refuses it, with the uncatchable trip, when the
 run's budget is already spent or its deadline has passed. After the call, if
 the excess trips the budget, it raises the trip: the call's effects stand (a
@@ -97,6 +169,7 @@ bracket counts, and nothing inside a bracket may raise):
 | app.main `ctx.stdin` reads | `runtime/{lua,js}/runtime.c` | the user's time |
 | WASM guest execution | `cap/wasm.c` | metered by `gas` and bounded by `timeout_ms` |
 | GPU device waits | `cap/gpu_wgpu.c` | the device's time; bounded by the clamped timeout |
+| `fsync` of written files and their directory | `cap/fs.c`, `shared/blob_store.c` (`hl_meter_fsync`) | the device's time; paid by the write floors |
 
 Waits that PARK (`hull.sleep`, `http.fetch`, `db.async`, Lua `tui.poll`,
 multipart reads) are not inside the call at all and need no bracket.

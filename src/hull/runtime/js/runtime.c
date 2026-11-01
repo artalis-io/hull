@@ -196,6 +196,10 @@ void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind)
     js->budget_timed_out = 0;
     js->budget_txn_failed = 0;
     js->tui_idle_ms = 0;
+    /* The binding meter's CPU reference (shared/dispatch_meter.h): only
+     * when no binding call is in progress (a nested run arms inside one). */
+    if (js->meter_depth == 0)
+        hl_meter_arm(&js->meter);
 }
 
 JSValue hl_js_budget_throw(JSContext *ctx)
@@ -237,9 +241,14 @@ static int js_call_enter(JSContext *ctx, void *opaque, JSEmbedderCall *call)
     }
     call->w[3] = js->max_instructions > 0;
     if (call->w[3]) {
-        call->w[1] = hl_meter_excluded;
+        HlMeterMark m;
         call->w[2] = js_meter_reading(js, ctx);
-        call->w[0] = hl_meter_ticks();
+        hl_meter_begin(&m, js->meter.mode != 0);
+        js->meter_depth++;
+        call->w[0] = m.t0;
+        call->w[1] = m.x0;
+        call->w[4] = m.c0;
+        call->w[5] = (uint64_t)m.cpu;
     }
     return 0;
 }
@@ -248,11 +257,16 @@ static JSValue js_call_leave(JSContext *ctx, void *opaque,
                              JSEmbedderCall *call, JSValue ret)
 {
     HlJS *js = (HlJS *)opaque;
-    if (!call->w[3] || js->budget_tripped)
+    if (!call->w[3])
+        return ret;
+    if (js->meter_depth > 0)
+        js->meter_depth--;
+    if (js->budget_tripped)
         return ret;
     int64_t charged = (int64_t)(js_meter_reading(js, ctx) - call->w[2]);
-    uint64_t owed = hl_meter_owed(call->w[0], hl_meter_ticks(), call->w[1],
-                                  hl_meter_excluded, charged);
+    uint64_t owed = hl_meter_settle(&(HlMeterMark){ .t0 = call->w[0],
+            .x0 = call->w[1], .c0 = call->w[4], .cpu = (int)call->w[5] },
+        charged, &js->meter);
     if (owed == 0 || !js_budget_add(js, owed))
         return ret;
     if (JS_IsException(ret))

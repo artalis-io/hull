@@ -975,7 +975,7 @@ void JS_ResetRunPhase(JSRuntime *rt);
    scratch for the embedder. NULL hooks: calls go straight through. See
    Hull's docs/quickjs_patches.md. */
 typedef struct JSEmbedderCall {
-    uint64_t w[4];
+    uint64_t w[6];
 } JSEmbedderCall;
 typedef int JSEmbedderCallEnter(JSContext *ctx, void *opaque,
                                 JSEmbedderCall *call);

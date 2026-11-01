@@ -88,6 +88,11 @@ uint64_t hl_meter_ticks_units(uint64_t ticks)
 #else
     uint64_t ns = ticks;
 #endif
+    return hl_meter_ns_units(ns);
+}
+
+uint64_t hl_meter_ns_units(uint64_t ns)
+{
     ns /= HL_METER_SLOWDOWN;
     return ns / 1000u * HL_WORK_UNITS_PER_US +
            (ns % 1000u) * HL_WORK_UNITS_PER_US / 1000u;

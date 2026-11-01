@@ -16203,10 +16203,20 @@ static uint64_t disp_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+/* Spins for @p ms of this thread's CPU time (not wall time: on a loaded
+ * host a wall-time spin does less work than it says, and the dispatcher
+ * charges CPU work - shared/dispatch_meter.h). */
+static uint64_t disp_cpu_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
 static void disp_spin_ms(lua_Integer ms)
 {
-    uint64_t end = disp_now_ns() + (uint64_t)ms * 1000000u;
-    while (disp_now_ns() < end) { }
+    uint64_t end = disp_cpu_ns() + (uint64_t)ms * 1000000u;
+    while (disp_cpu_ns() < end) { }
 }
 
 /* A slow binding with no floor at all: what the dispatcher backstops. */
@@ -16351,19 +16361,25 @@ UTEST(lua_dispatcher, explicit_charges_are_not_double_counted)
     disp_register(L);
     disp_arm(1000000000);
 
-    /* A binding that charges its own 20 ms costs ~20 ms of units, not 40. */
+    /* A binding that charges its own 20 ms costs ~20 ms of units, not 40.
+     * The upper bounds are against the call's own wall time (a preempted
+     * call on a loaded host may be charged up to it), never the sum. */
     uint64_t c0 = disp_charged(L);
+    uint64_t w0 = disp_now_ns();
     ASSERT_EQ(luaL_dostring(L, "spin_charged(20)"), LUA_OK);
+    uint64_t wall = (disp_now_ns() - w0) / 1000u * 64u;
     uint64_t charged = disp_charged(L) - c0;
     EXPECT_GE(charged, (uint64_t)19 * 64000);
-    EXPECT_LT(charged, (uint64_t)30 * 64000);
+    EXPECT_LT(charged, (wall > 20 * 64000u ? wall : 20 * 64000u) + 2 * 64000u);
 
     /* The same time uncharged is charged by the dispatcher. */
     c0 = disp_charged(L);
+    w0 = disp_now_ns();
     ASSERT_EQ(luaL_dostring(L, "spin(20)"), LUA_OK);
+    wall = (disp_now_ns() - w0) / 1000u * 64u;
     charged = disp_charged(L) - c0;
     EXPECT_GE(charged, (uint64_t)19 * 64000 / HL_METER_TEST_SLOWDOWN);
-    EXPECT_LT(charged, (uint64_t)30 * 64000);
+    EXPECT_LT(charged, wall + 2 * 64000u);
     EXPECT_EQ(lua_rt.budget.nframes, 0);
     cleanup_lua();
 }

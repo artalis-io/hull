@@ -16770,10 +16770,20 @@ static uint64_t jdisp_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+/* Spins for @p ms of this thread's CPU time (not wall time: on a loaded
+ * host a wall-time spin does less work than it says, and the dispatcher
+ * charges CPU work - shared/dispatch_meter.h). */
+static uint64_t jdisp_cpu_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
 static void jdisp_spin_ms(int64_t ms)
 {
-    uint64_t end = jdisp_now_ns() + (uint64_t)ms * 1000000u;
-    while (jdisp_now_ns() < end) { }
+    uint64_t end = jdisp_cpu_ns() + (uint64_t)ms * 1000000u;
+    while (jdisp_cpu_ns() < end) { }
 }
 
 static JSValue jdisp_spin(JSContext *ctx, JSValueConst this_val, int argc,
@@ -16876,17 +16886,23 @@ UTEST(js_dispatcher, explicit_charges_are_not_double_counted)
     jdisp_register();
     jdisp_arm(1000000000);
 
+    /* Upper bounds are against the call's own wall time (a preempted call
+     * on a loaded host may be charged up to it), never the sum. */
     uint64_t c0 = jdisp_charged();
+    uint64_t w0 = jdisp_now_ns();
     EXPECT_EQ(eval_int("spinCharged(20), 1"), 1);
+    uint64_t wall = (jdisp_now_ns() - w0) / 1000u * 64u;
     uint64_t charged = jdisp_charged() - c0;
     EXPECT_GE(charged, (uint64_t)19 * 64000);
-    EXPECT_LT(charged, (uint64_t)30 * 64000);
+    EXPECT_LT(charged, (wall > 20 * 64000u ? wall : 20 * 64000u) + 2 * 64000u);
 
     c0 = jdisp_charged();
+    w0 = jdisp_now_ns();
     EXPECT_EQ(eval_int("spin(20), 1"), 1);
+    wall = (jdisp_now_ns() - w0) / 1000u * 64u;
     charged = jdisp_charged() - c0;
     EXPECT_GE(charged, (uint64_t)19 * 64000 / HL_METER_SLOWDOWN);
-    EXPECT_LT(charged, (uint64_t)30 * 64000);
+    EXPECT_LT(charged, wall + 2 * 64000u);
     jdisp_arm(0);
     cleanup_js();
 }

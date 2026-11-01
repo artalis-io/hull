@@ -15,6 +15,7 @@
 #include "hull/runtime.h"
 #include "hull/cap/types.h"
 #include "hull/cap/run_watchdog.h"
+#include "hull/shared/dispatch_meter.h" /* HlMeterMark */
 #include "hull/shared/res_base.h" /* HlResBaseList */
 
 /* Forward declarations */
@@ -45,8 +46,7 @@ typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlLuaMeterFrame {
     lua_State  *L;
     const void *ej;
-    uint64_t    t0;     /* hl_meter_ticks() */
-    uint64_t    x0;     /* hl_meter_excluded */
+    HlMeterMark mark;   /* clock, excluded time, CPU time */
     uint64_t    m0;     /* charged + lua_hlpending(L) */
 } HlLuaMeterFrame;
 
@@ -64,6 +64,7 @@ typedef struct HlLuaBudget {
      * the binding calls in progress. */
     uint64_t        charged;
     int             meter_off;   /* the tool VM: bindings registered plain */
+    HlMeterState    meter;       /* mode + CPU reference (hl_meter_settle) */
     int             nframes;
     HlLuaMeterFrame frames[HL_LUA_METER_DEPTH];
 } HlLuaBudget;

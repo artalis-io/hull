@@ -933,12 +933,13 @@ static int lua_crypto_create_sha256(lua_State *L)
 
 static int lua_sha256_hasher_update(lua_State *L)
 {
+    crypto_charge(L, 0);   /* the floor first: a refused call pays it too */
     HlLuaSha256Hasher *h = check_hasher(L, 1);
     if (h->done)
         return luaL_error(L, "sha256:update() after digest()");
     size_t len = 0;
     const char *data = luaL_checklstring(L, 2, &len);
-    crypto_charge(L, len);
+    lua_hlwork(L, len / 8, 0);   /* the rest of hl_work_crypto_units(len) */
     if (hl_cap_crypto_sha256_update(&h->ctx, data, len) != 0)
         return luaL_error(L, "sha256:update() failed");
     /* Return the hasher so calls can chain. */
@@ -948,10 +949,11 @@ static int lua_sha256_hasher_update(lua_State *L)
 
 static int lua_sha256_hasher_digest(lua_State *L)
 {
+    crypto_charge(L, 0);   /* audit 41: the per-call floor, before any
+                              refusal, so a failing call pays it too */
     HlLuaSha256Hasher *h = check_hasher(L, 1);
     if (h->done)
         return luaL_error(L, "sha256:digest() already called");
-    crypto_charge(L, 0);   /* audit 41: the per-call floor */
     uint8_t out[32];
     if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
         return luaL_error(L, "sha256:digest() failed");

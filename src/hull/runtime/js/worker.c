@@ -61,6 +61,7 @@ typedef struct {
     int        timed_out;          /* the trip was the job's deadline */
     HlRunWatch watch;              /* the job's wall-clock deadline */
     uint64_t   meter_charged;      /* the binding dispatcher's meter */
+    HlMeterState meter;            /* mode + CPU reference (hl_meter_settle) */
 } HlJsWorkerCtx;
 
 static pthread_key_t  js_worker_key;
@@ -168,9 +169,13 @@ static int js_worker_call_enter(JSContext *ctx, void *opaque,
     }
     call->w[3] = wctx->max_instructions > 0;
     if (call->w[3]) {
-        call->w[1] = hl_meter_excluded;
+        HlMeterMark m;
         call->w[2] = wctx->meter_charged + JS_GetPendingCharge(ctx);
-        call->w[0] = hl_meter_ticks();
+        hl_meter_begin(&m, wctx->meter.mode != 0);
+        call->w[0] = m.t0;
+        call->w[1] = m.x0;
+        call->w[4] = m.c0;
+        call->w[5] = (uint64_t)m.cpu;
     }
     return 0;
 }
@@ -183,8 +188,9 @@ static JSValue js_worker_call_leave(JSContext *ctx, void *opaque,
         return ret;
     int64_t charged = (int64_t)(wctx->meter_charged +
                                 JS_GetPendingCharge(ctx) - call->w[2]);
-    uint64_t owed = hl_meter_owed(call->w[0], hl_meter_ticks(), call->w[1],
-                                  hl_meter_excluded, charged);
+    uint64_t owed = hl_meter_settle(&(HlMeterMark){ .t0 = call->w[0],
+            .x0 = call->w[1], .c0 = call->w[4], .cpu = (int)call->w[5] },
+        charged, &wctx->meter);
     if (owed == 0 || !js_worker_charge(wctx, owed))
         return ret;
     if (JS_IsException(ret))
@@ -299,6 +305,7 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
     }
     wctx->instructions = 0;
     wctx->max_instructions = op->max_instructions;
+    hl_meter_arm(&wctx->meter);   /* the binding meter's CPU reference */
     /* A job is a run like a request's: the same wall-clock default. */
     hl_run_watch_arm(&wctx->watch, hl_run_watchdog_limit_ms(HL_RUN_ENTRY));
     return ctx;

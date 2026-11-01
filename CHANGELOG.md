@@ -19,17 +19,22 @@ release-artifact layout).
   own with manifest `limits = { request_ms = N, callback_ms = N }` (JS `limits: { requestMs,
   callbackMs }`); `--max-run-ms` / `HULL_MAX_RUN_MS` still override every kind. Time spent parked
   is not counted: the deadline bounds each uninterrupted run. Per-route deadlines are a follow-up.
-- **Every binding call is charged its measured wall time** (§6.1). Each app-facing binding in
-  both runtimes - including `worker.dispatch` VMs and app.main - now goes through one dispatcher
-  that charges the run `max(0, wall time x 64 units/us - what the call charged itself)`, so a
-  binding whose floor is missing or too small can no longer run free: the worst case is one call
-  before the trip. A run under the default 100M budget can therefore spend about 1.5 s inside
-  bindings; CPU-heavy runs (many password hashes in one request) may need `--max-instructions`
-  raised. Waits on a peer or a user (database / Valkey sockets, synchronous HTTP, SMTP, the
-  terminal, stdin), WASM guest code and GPU device waits are excluded. Lua HULL PATCH 0007 (a
-  throw hook) and QuickJS HULL PATCH 0011 (embedder call hooks) carry it; overhead is ~22 ns per
-  Lua call and within noise of a QuickJS call. Lua modules register through `hl_lua_setfuncs` /
-  `hl_lua_newlib` / `hl_lua_pushcfunction`; see docs/design/audit_convergence_dispatcher.md.
+- **Every binding call is charged its measured wall time** (§6.1). Each app-facing binding in both
+  runtimes - including `worker.dispatch` VMs and app.main - now goes through one dispatcher that
+  charges the run `max(0, wall time x 64 units/us - 2 x what the call charged itself)` (a calibrated
+  floor is not second-guessed by a slower or loaded machine), so a binding whose floor is missing or
+  too small can no longer run free: the worst case is one call before the trip. A run under the
+  default 100M budget can therefore spend about 1.5 s inside bindings; CPU-heavy runs (many password
+  hashes in one request) may need `--max-instructions` raised. Waits on a peer or a user (database /
+  Valkey sockets, synchronous HTTP, SMTP, the terminal, stdin), WASM guest code, GPU device waits
+  and `fsync` are excluded. Time off the CPU (preemption on a loaded host) is not charged as work: a
+  slow call is charged at most the run's CPU time so far, and switches the VM to reading the
+  thread's CPU clock for the next 100 ms, during which a call costs its CPU time plus at most 32 us
+  off the CPU. A trip that lands while a binding raises its own error is re-raised by `pcall` as the
+  limit, not as that error. Lua HULL PATCH 0007 (a throw hook) and QuickJS HULL PATCH 0011 (embedder
+  call hooks) carry it; overhead is ~22 ns per Lua call and within noise of a QuickJS call. Lua
+  modules register through `hl_lua_setfuncs` / `hl_lua_newlib` / `hl_lua_pushcfunction`; see
+  docs/design/audit_convergence_dispatcher.md.
 
 ### Process and CI
 

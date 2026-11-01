@@ -169,6 +169,10 @@ void hl_lua_budget_arm(lua_State *thread, HlLuaBudget *b, int64_t limit,
     b->used = 0;
     b->tripped = 0;
     b->timed_out = 0;
+    /* The binding meter's CPU reference (shared/dispatch_meter.h): only
+     * when no binding call is in progress (a nested run arms inside one). */
+    if (b->nframes == 0 && !b->meter_off)
+        hl_meter_arm(&b->meter);
     /* The run's wall-clock deadline: armed (and its flag cleared) before any
      * of the run's code. */
     if (b->watch) hl_run_watch_arm(b->watch, run_ms);
@@ -201,8 +205,11 @@ const char *hl_lua_trip_reason(const HlLuaBudget *b)
 static int budget_finishpcall(lua_State *L, int status, lua_KContext extra)
 {
     if (status != LUA_OK && status != LUA_YIELD) {
+        /* Raise the trip itself, not the error object on top: the call
+         * that failed may have raised its own error and then been tripped
+         * by the dispatcher's charge as it unwound (meter_throw). */
         if (hl_lua_budget_tripped(L))
-            return lua_error(L);           /* the error object is on top */
+            return hl_lua_budget_raise(L);
         lua_pushboolean(L, 0);
         lua_pushvalue(L, -2);
         return 2;
@@ -279,8 +286,7 @@ static void meter_settle(HlLuaBudget *b, lua_State *L,
                          const HlLuaMeterFrame *fr)
 {
     int64_t charged = (int64_t)(meter_reading(b, L) - fr->m0);
-    uint64_t owed = hl_meter_owed(fr->t0, hl_meter_ticks(), fr->x0,
-                                  hl_meter_excluded, charged);
+    uint64_t owed = hl_meter_settle(&fr->mark, charged, &b->meter);
     if (owed)
         (void)budget_charge(b, owed > (uint64_t)INT64_MAX ? INT64_MAX
                                                           : (int64_t)owed);
@@ -323,9 +329,8 @@ static int meter_call(lua_State *L, int nup)
     HlLuaMeterFrame *fr = &b->frames[idx];
     fr->L  = L;
     fr->ej = lua_hlerrorjmp(L);
-    fr->x0 = hl_meter_excluded;
     fr->m0 = meter_reading(b, L);
-    fr->t0 = hl_meter_ticks();
+    hl_meter_begin(&fr->mark, b->meter.mode != 0);
     b->nframes = idx + 1;
     int n = fn.f(L);
     if (b->nframes <= idx)           /* already settled (cannot happen) */

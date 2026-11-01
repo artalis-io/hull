@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "hull/shared/dispatch_meter.h"   /* hl_meter_fsync */
 #include "hull/shared/blob_store.h"
 #include "hull/shared/fs_util.h"
 #include "hull/cap/crypto.h"
@@ -568,7 +569,7 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
     char id[HL_BLOB_STORE_ID_BUF_SIZE];
     hl_hex_encode(digest, 32, id, sizeof(id));
 
-    if (w->durable && fsync(w->fd) < 0) {
+    if (w->durable && hl_meter_fsync(w->fd) < 0) {
         close(w->fd); w->fd = -1;
         writer_unlink_tmp(w);
         writer_release(w);
@@ -604,7 +605,7 @@ int hl_blob_store_writer_finalize(HlBlobStoreWriter *w,
         return -1;
     }
     if (w->durable && placed == 1)
-        (void)fsync(shard_fd);
+        (void)hl_meter_fsync(shard_fd);
     close(shard_fd);
 
     if (out_id) memcpy(out_id, id, HL_BLOB_STORE_ID_BUF_SIZE);

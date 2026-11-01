@@ -16,6 +16,7 @@
 #include "hull/runtime.h"
 #include "hull/cap/types.h"
 #include "hull/cap/run_watchdog.h"
+#include "hull/shared/dispatch_meter.h" /* HlMeterState */
 #include "hull/reqctx.h"          /* HlReqCtxList */
 #include "hull/shared/res_base.h" /* HlResBaseList */
 
@@ -90,6 +91,10 @@ typedef struct HlJS {
     /* Every unit ever charged to this VM (never re-armed): the binding
      * dispatcher's meter (shared/dispatch_meter.h, runtime.c). */
     uint64_t        meter_charged;
+    /* The binding meter's mode and CPU reference (hl_meter_settle), and
+     * the metered binding calls in progress. */
+    HlMeterState    meter;
+    int             meter_depth;
     /* The run's wall-clock deadline (cap/run_watchdog.h), armed with the
      * budget. budget_timed_out: the trip was that deadline, not the count. */
     HlRunWatch      run_watch;
