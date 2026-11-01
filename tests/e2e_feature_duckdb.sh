@@ -491,6 +491,33 @@ fi
 rm -rf "$DDS"
 echo "ok  DuckDB -d database: two starts and a CHECKPOINT under the sandbox"
 
+echo "=== DuckDB SQL cannot reach the app's .hull (composed, served app) ==="
+# Audit convergence §7.2: the fixture's root grant must not hand DuckDB the
+# app's .hull (Hull's internal database). A composed app gets no DuckDB file
+# policy (mode A), so its ordinary reads are refused too; the mode-B case
+# (root split + SQL scan, reads working) is tests/e2e_duckdb_dot_hull.sh,
+# run under a `make HL_ENABLE_DUCKDB=1` hull.
+IDB=$(mktemp -d)
+cp tests/fixtures/duckdb_dot_hull/app.lua "$IDB/"
+mkdir -p "$IDB/data"
+printf 'a,b\n1,2\n3,4\n' > "$IDB/data/x.csv"
+IDB_BUILD=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$IDB/bin" "$IDB" 2>&1) || true
+echo "$IDB_BUILD" | grep -q "composed feature 'duckdb'" || { echo "$IDB_BUILD"; echo "FAIL: .hull app not composed"; rm -rf "$IDB"; exit 1; }
+IDB_PORT=$((20000 + $$ % 10000))
+(cd "$IDB" && exec ./bin -p "$IDB_PORT" > srv.log 2>&1) &
+IDB_PID=$!
+IDB_OUT=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    sleep 0.5
+    IDB_OUT=$(curl -s -m 20 "http://127.0.0.1:$IDB_PORT/probe" 2>/dev/null) && [ -n "$IDB_OUT" ] && break
+done
+kill "$IDB_PID" 2>/dev/null || true
+wait "$IDB_PID" 2>/dev/null || true
+echo "$IDB_OUT" | grep -q "^IDB NOLEAK " || { echo "$IDB_OUT"; tail -5 "$IDB/srv.log"; echo "FAIL: duckdb_convergence_idb.composed_no_leak"; rm -rf "$IDB"; exit 1; }
+[ ! -e "$IDB/.hull/x.csv" ] && [ ! -e "$IDB/late.csv" ] || { echo "FAIL: duckdb_convergence_idb.composed_no_leak wrote a file"; rm -rf "$IDB"; exit 1; }
+rm -rf "$IDB"
+echo "PASS: duckdb_convergence_idb.composed_no_leak"
+
 echo "=== negative: a plain sqlite app must NOT compose duckdb ==="
 printf 'app.manifest({modules={"hull/db@1"}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
     > "$PLAIN/app.lua"

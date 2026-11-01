@@ -62,6 +62,30 @@ renaming the app directory would change the hash and orphan every session and ro
   Only a declared `databases.internal` may point into `.hull`. App SQL on the internal
   connection is impossible: no binding hands it out.
 
+  *Correction (audit convergence §7.2 confirming audit):* as first shipped, this claim did
+  not hold for DuckDB. A `duckdb://` connection does its own file I/O (`read_blob`,
+  `read_csv`, `COPY`, replacement scans), past the fs resolver, and with
+  `fs = { read = {"."}, write = {"."} }` (mode B) the whole app root was in DuckDB's
+  `allowed_directories`: `SELECT hex(content) FROM read_blob('.hull/internal.db')` returned
+  the internal file raw (sessions, TOTP secrets), `-wal` / `-journal` too, and COPY could
+  write there (on Linux `.hull` is unveiled `rwc`; on macOS Seatbelt allows the four internal
+  literals). Fixed in two layers. The boundary is DuckDB's own policy: a grant of the app
+  root is handed to DuckDB as the root's top-level entries - directories in
+  `allowed_directories`, regular files in `allowed_paths` - with `.hull` (any letter case,
+  and by inode) and symbolic links left out (`hl_db_duckdb_split_root`, serve.c
+  `hl_serve_install_duckdb_fs_policy`), and a grant resolving into `.hull` gives no access.
+  DuckDB's `allowed_directories` has no exclusion and cannot change once the configuration
+  is locked, so the split is fixed at startup: an entry made at the root later is not
+  reachable from DuckDB SQL. Defence in depth, the SQL scan
+  (`hl_cap_db_sql_reaches_db_files_ex`): any literal holding a `.hull` path component in any
+  letter case is refused, and in mode B a path that resolves into `.hull` (through its
+  nearest existing ancestor) and a glob that could reach it - DuckDB's glob matches dot
+  entries, so a wildcard component at the root's level followed by more components, or a
+  `**`, is refused. Paths through symbolic links were already refused in mode B (audit 41).
+  Covered by `duckdb_convergence_idb.*` in `test_db_duckdb` and `tests/e2e_duckdb_dot_hull.sh`.
+  (A composed app - `hull build --with=duckdb` on the DuckDB-free base - gets no DuckDB file
+  policy at all, so it runs in mode A and never had the exposure.)
+
 ## 3. Kernel sandbox grants
 
 App code runs in the same process as Hull, so the kernel sandbox cannot tell them apart;

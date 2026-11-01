@@ -25,6 +25,29 @@ extern const HlDbBackend hl_db_backend_duckdb;
  * connection opens; the array + strings must outlive the process (sealed). An
  * empty policy (ndirs <= 0) leaves DuckDB in full lockdown (mode A). */
 void hl_db_duckdb_set_fs_policy(const char *const *dirs, int ndirs);
+
+/* hl_db_duckdb_set_fs_policy, plus @p paths (@p npaths absolute FILE paths,
+ * DuckDB's allowed_paths) and @p reserved_dir, the canonical
+ * `<app root>/.hull` that app SQL may not reach (audit convergence §7.2;
+ * NULL: unknown, only the name check applies). Any granted directory or
+ * file puts DuckDB in mode B. Same lifetime rules: sealed, process life. */
+void hl_db_duckdb_set_fs_policy_ex(const char *const *dirs, int ndirs,
+                                   const char *const *paths, int npaths,
+                                   const char *reserved_dir);
+
+/* A grant of the whole app root would hand DuckDB the reserved `.hull`
+ * directory (Hull's internal database). DuckDB's allowed_directories has no
+ * exclusion, so the root is granted as its top-level entries instead:
+ * hl_db_duckdb_split_root calls @p fn once per entry of @p root (absolute)
+ * with its absolute path and whether it is a directory, leaving out `.hull`
+ * in any letter case (and by inode), symbolic links, and anything neither a
+ * directory nor a regular file. Returns the count, or -1 (unreadable root,
+ * more than HL_DUCK_ROOT_ENTRIES_MAX entries, or @p fn returned non-zero).
+ * DuckDB's lists cannot change once the configuration is locked, so an
+ * entry made at the root later is not reachable from SQL. */
+#define HL_DUCK_ROOT_ENTRIES_MAX 1024
+typedef int (*HlDuckRootEntryFn)(void *ud, const char *abs_path, int is_dir);
+int hl_db_duckdb_split_root(const char *root, HlDuckRootEntryFn fn, void *ud);
 #endif
 
 #endif /* HL_CAP_DB_DUCKDB_H */

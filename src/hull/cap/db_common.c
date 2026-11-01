@@ -1677,7 +1677,57 @@ typedef struct {
     size_t      blen;
     const char *path;
     int         fs;
+    /* The app's reserved directory, `<app root>/.hull` (canonical; NULL:
+     * unknown). It holds Hull's internal database (audit convergence §7.2):
+     * a path or a glob that resolves into it is refused in mode B. */
+    const char *reserved;
 } FvProtect;
+
+/* Whether @p s (@p n bytes, a path or a literal's text) holds a `.hull`
+ * path component, in any letter case (hl_fs_reserved_name's rule): `.hull`
+ * preceded by the start or a separator and followed by the end or a
+ * separator. Every spelling of a path into an app's reserved directory -
+ * relative, absolute, `./`, `x/../`, doubled slashes - holds one (audit
+ * convergence §7.2). Any `.hull` component is refused, not only the app
+ * root's: nothing else in an app tree is meant to be named so. */
+static int fv_names_reserved(const char *s, size_t n)
+{
+    if (n < 5) return 0;
+    for (size_t i = 0; i + 5 <= n; i++) {
+        if (i > 0 && s[i - 1] != '/' && s[i - 1] != '\\') continue;
+        if (strncasecmp(s + i, ".hull", 5) != 0) continue;
+        size_t j = i + 5;
+        if (j == n || s[j] == '/' || s[j] == '\\') return 1;
+    }
+    return 0;
+}
+
+/* Whether any literal in @p sql holds a `.hull` component: every span
+ * between two consecutive `'`, `"` or `$`, whatever the parity, as
+ * fv_literal_names_protected reads them. */
+static int fv_literal_names_reserved(const char *sql)
+{
+    static const char quotes[] = { '\'', '"', '$' };
+    for (size_t k = 0; k < sizeof quotes; k++) {
+        const char *prev = NULL;
+        for (const char *p = strchr(sql, quotes[k]); p;
+             p = strchr(p + 1, quotes[k])) {
+            if (prev && fv_names_reserved(prev + 1, (size_t)(p - prev - 1)))
+                return 1;
+            prev = p;
+        }
+    }
+    return 0;
+}
+
+/* Whether the resolved path @p real is @p reserved or inside it (compared
+ * without case, as the file system may be). */
+static int fv_under_reserved(const char *real, const char *reserved)
+{
+    size_t rl = strlen(reserved);
+    return strncasecmp(real, reserved, rl) == 0 &&
+           (real[rl] == '\0' || real[rl] == '/');
+}
 
 /* Whether @p s (@p n bytes, a path or a literal's text) names the protected
  * file on path-component boundaries: the name preceded by the start or a
@@ -1883,6 +1933,96 @@ static int fv_glob_has_symlink(const char *s)
     return fv_dir_has_symlink(prefix, depth, &seen);
 }
 
+/* Mode B, the app's reserved directory (audit convergence §7.2): 1 when
+ * the glob @p s (spelled for the file system, a wildcard in it) could match
+ * a file inside @p reserved - its fixed directory part resolves into it, or
+ * resolves to the app root or an ancestor of it and the wildcarded rest has
+ * more than one component or a `**`. DuckDB's glob matches dot entries, so
+ * from the root a wildcard first component (`*`, `.h*`, `.hu[l]l`) followed
+ * by `internal.db`, or a `**`, reaches `.hull`; a wildcard only in the last
+ * component at the root's level matches the root's own entries, never a
+ * file inside `.hull`. A directory part that cannot be resolved counts, as
+ * does a tripped budget. */
+static int fv_glob_reaches_reserved(const char *s, const char *reserved)
+{
+    size_t meta = strcspn(s, "*?[{");
+    char prefix[PATH_MAX];
+    size_t cut = 0;
+    int slash = 0;
+    for (size_t i = 0; i < meta; i++)
+        if (s[i] == '/') { cut = i; slash = 1; }
+    if (!slash) {
+        prefix[0] = '.'; prefix[1] = '\0';
+    } else {
+        size_t c = cut == 0 ? 1 : cut;
+        if (c >= sizeof prefix) return 1;
+        memcpy(prefix, s, c);
+        prefix[c] = '\0';
+    }
+    if (hl_db_budget_charge(HL_WORK_FS_LOOKUP_UNITS)) return 1;
+    char rp[PATH_MAX];
+    if (!realpath(prefix, rp)) return 1;
+    if (fv_under_reserved(rp, reserved)) return 1;
+    const char *rs = strrchr(reserved, '/');
+    if (!rs) return 1;
+    size_t rootlen = (size_t)(rs - reserved);
+    size_t rn = strlen(rp);
+    int covers = (rn == 1 && rp[0] == '/') ||
+                 (rn <= rootlen && strncasecmp(reserved, rp, rn) == 0 &&
+                  (rn == rootlen || reserved[rn] == '/'));
+    if (!covers) return 0;
+    const char *rest = s + (slash ? cut + 1 : 0);
+    if (strstr(rest, "**")) return 1;
+    int comps = 0;
+    for (const char *q = rest; *q; ) {
+        while (*q == '/') q++;
+        if (!*q) break;
+        comps++;
+        while (*q && *q != '/') q++;
+    }
+    return comps >= 2;
+}
+
+/* Mode B: 1 when @p path (no wildcard) resolves into @p reserved - through
+ * its nearest existing ancestor when it does not exist (yet), as a COPY
+ * target may not, with a `..` in the part that does not exist refused - or
+ * the budget trips (audit convergence §7.2). realpath catches spellings no
+ * text check knows (another letter case on a case-insensitive file
+ * system); a symbolic link on the way is refused separately. */
+static int fv_path_reaches_reserved(const char *path, const char *reserved)
+{
+    char buf[PATH_MAX];
+    size_t n = strlen(path);
+    if (n == 0) return 0;
+    if (n >= sizeof buf) return 1;
+    memcpy(buf, path, n + 1);
+    for (int i = 0; i < 64; i++) {
+        if (hl_db_budget_charge(HL_WORK_FS_LOOKUP_UNITS)) return 1;
+        char real[PATH_MAX];
+        if (realpath(buf[0] ? buf : ".", real))
+            return fv_under_reserved(real, reserved);
+        size_t l = strlen(buf);
+        while (l > 1 && buf[l - 1] == '/') buf[--l] = '\0';
+        char *sl = strrchr(buf, '/');
+        const char *leaf = sl ? sl + 1 : buf;
+        if (strcmp(leaf, "..") == 0) return 1;
+        if (!sl) buf[0] = '\0';               /* relative: the cwd */
+        else if (sl == buf) buf[1] = '\0';    /* "/x" -> "/" */
+        else *sl = '\0';
+    }
+    return 1;
+}
+
+/* Mode B: whether the path or glob @p body reaches @p reserved. */
+static int fv_fs_reaches_reserved(const char *body, const char *reserved)
+{
+    char path[PATH_MAX];
+    if (fv_fs_spelling(body, path, sizeof path) != 0) return 1;
+    if (path[strcspn(path, "*?[{")])
+        return fv_glob_reaches_reserved(path, reserved);
+    return fv_path_reaches_reserved(path, reserved);
+}
+
 /* Whether the path @p body that a file function or COPY takes runs
  * through a symbolic link (mode B). */
 static int fv_fs_path_refused(const char *body)
@@ -1944,17 +2084,20 @@ static int fv_fs_literal_refused(const char *s, size_t n, const FvProtect *pr)
     if (scan) {
         if (glob) {
             if ((pr->dir && fv_glob_reaches(path, pr->dir)) ||
+                (pr->reserved && fv_glob_reaches_reserved(path, pr->reserved)) ||
                 fv_glob_has_symlink(path))
                 return 1;
-        } else if (fv_path_has_symlink(path)) {
+        } else if (fv_path_has_symlink(path) ||
+                   (pr->reserved && fv_path_reaches_reserved(path, pr->reserved))) {
             return 1;
         }
     }
-    if (glob || !pr->path) return 0;
+    if (glob || (!pr->path && !pr->reserved)) return 0;
     if (hl_db_budget_charge(HL_WORK_FS_LOOKUP_UNITS)) return 1;
     char real[PATH_MAX];
     if (!realpath(path, real)) return 0;
-    return fv_real_is_protected(real, pr->path);
+    if (pr->reserved && fv_under_reserved(real, pr->reserved)) return 1;
+    return pr->path && fv_real_is_protected(real, pr->path);
 }
 
 /* Every literal of @p sql, read as fv_literal_names_protected reads them
@@ -1986,9 +2129,13 @@ static const char *fv_path_literal(const char *p, const FvProtect *pr,
     size_t n = 0;
     const char *after = fv_quoted(p, budget, body, sizeof body, &n);
     if (!after || n == SIZE_MAX) return NULL;
+    if (fv_names_reserved(body, n)) return NULL;
     if (pr && pr->base && fv_names_protected(body, n, pr)) return NULL;
     if (pr && pr->dir && fv_glob_reaches(body, pr->dir)) return NULL;
     if (pr && pr->fs && fv_fs_path_refused(body)) return NULL;
+    if (pr && pr->fs && pr->reserved &&
+        fv_fs_reaches_reserved(body, pr->reserved))
+        return NULL;
     return after;
 }
 
@@ -2122,7 +2269,19 @@ static int fv_copy_refused(const char *p, int nest, const FvProtect *pr,
 int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
                                    const char *protect_path)
 {
+    return hl_cap_db_sql_reaches_db_files_ex(sql, deny_file_functions,
+                                             protect_path, NULL);
+}
+
+int hl_cap_db_sql_reaches_db_files_ex(const char *sql, int deny_file_functions,
+                                      const char *protect_path,
+                                      const char *reserved_dir)
+{
     if (!sql) return 0;
+    /* The app's reserved `.hull` directory, named in any literal (audit
+     * convergence §7.2): refused under every file policy. */
+    if (fv_literal_names_reserved(sql)) return 1;
+    if (reserved_dir && reserved_dir[0] != '/') reserved_dir = NULL;
     size_t len = strlen(sql);
     size_t budget = 2 * len + 65536;
 
@@ -2145,7 +2304,8 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
         if (blen == 0) return 1;
     }
     FvProtect prot = { (base && protect_dir[0]) ? protect_dir : NULL, base, blen,
-                       base ? protect_path : NULL, !deny_file_functions };
+                       base ? protect_path : NULL, !deny_file_functions,
+                       reserved_dir };
     const FvProtect *pr = (base || prot.fs) ? &prot : NULL;
     if (base && fv_literal_names_protected(sql, &prot)) return 1;
     if (prot.fs && fv_fs_literals_refused(sql, &prot)) return 1;

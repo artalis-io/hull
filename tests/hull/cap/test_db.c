@@ -3242,4 +3242,30 @@ UTEST(hl_cap_db, agent_gate_refuses_bare_pragmas_attach_and_analyze)
     teardown_db();
 }
 
+/* Audit convergence §7.2: the DuckDB file-path scan refuses every literal that
+ * names the app's reserved .hull directory (Hull's internal database lives
+ * there), whatever the file policy and however it is spelled. The scan is
+ * backend-neutral C, so this runs in the default build. */
+UTEST(db_convergence_idb, scan_refuses_dot_hull_literals)
+{
+    const char *refused[] = {
+        "SELECT * FROM read_blob('.hull/internal.db')",
+        "SELECT * FROM read_blob('./.HULL/internal.db')",
+        "SELECT * FROM read_text('data/../.hull/internal.db-wal')",
+        "COPY t TO '.Hull/internal.db'",
+        "SELECT * FROM '.hull/internal.db'",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        EXPECT_EQ_MSG(1, hl_cap_db_sql_reaches_db_files(refused[i], 0, NULL),
+                      refused[i]);
+        EXPECT_EQ_MSG(1, hl_cap_db_sql_reaches_db_files(refused[i], 1, NULL),
+                      refused[i]);
+    }
+    /* No false refusal of ordinary paths or of names that merely contain it. */
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(
+        "SELECT * FROM read_csv('data/x.csv')", 0, NULL));
+    EXPECT_EQ(0, hl_cap_db_sql_reaches_db_files(
+        "SELECT * FROM read_csv('data/hull.csv')", 0, NULL));
+}
+
 UTEST_MAIN();
