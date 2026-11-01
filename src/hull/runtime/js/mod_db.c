@@ -1244,6 +1244,10 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
         op->max_instructions = js->max_instructions;   /* the op's own */
         op->max_result_bytes = js->max_heap_bytes;
         op->ns_trusted = ns_trusted;
+        {
+            HlDbHandle *sh = js_call_handle(ctx, this_val);
+            op->session_control = sh ? sh->session_control : 0;
+        }
         hl_offheap_shared_init(&op->result_hold, &js->async_result_bytes,
                                js->max_heap_bytes);
         op->no_cache = JS_GetOpaque(this_val, hull_db_owned_conn_class_id) != NULL;

@@ -73,6 +73,12 @@ typedef struct HlManifestModule {
 typedef struct HlManifestDbNamed {
     const char *name;       /* allocator-owned copy */
     const char *dsn;        /* DSN as written; "$VAR"/"${VAR}" = env ref */
+    /* `{ dsn = "...", session_control = true }`: the connection may run
+     * session-altering SQL (LOCK TABLES, SET autocommit, GET_LOCK,
+     * pg_advisory_lock, ...) that every other connection refuses, and the
+     * stdlib refuses it. Its session is still reset at every entry boundary.
+     * Never "default" (hl_manifest_check_env_refs refuses that). */
+    int         session_control;
 } HlManifestDbNamed;
 
 /* Dynamic-open policy (`databases.dynamic = { hosts = {...}, schemes = {...} }`):
@@ -398,7 +404,8 @@ size_t hl_manifest_seal_bytes(const HlManifest *src);
  * Fields that resolve references: hosts, databases.named[].dsn,
  * databases.dynamic.hosts, kv.dynamic.hosts, ssh.connect.hosts,
  * ssh.tunnel.hosts. Returns 0 when every reference is declared; otherwise -1,
- * with the first offender described in @p err.
+ * with the first offender described in @p err. Also the load-time check that
+ * no session_control connection is named "default" (the stdlib's connection).
  */
 int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size);
 

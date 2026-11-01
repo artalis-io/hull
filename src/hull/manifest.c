@@ -182,8 +182,7 @@ static int manifest_seal_impl(HlManifest *dst, const HlManifest *src, SealCtx *a
         if (seal_str(arena, &dst->databases.named[i].name, src->databases.named[i].name) != 0)
             goto fail;
         if (seal_str(arena, &dst->databases.named[i].dsn, src->databases.named[i].dsn) != 0)
-            goto fail;
-    }
+            goto fail;    }
     if (seal_str(arena, &dst->databases.internal, src->databases.internal) != 0)
         goto fail;
     for (int i = 0; i < src->databases.dynamic.host_count; i++)
@@ -295,6 +294,21 @@ int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
 {
     if (err && err_size) err[0] = '\0';
     if (!m) return 0;
+
+    /* The default connection is the stdlib's and db.default()'s: it never
+     * takes session-altering SQL (audit convergence phase 3). */
+    for (int i = 0; i < m->databases.named_count; i++) {
+        const HlManifestDbNamed *d = &m->databases.named[i];
+        if (!d->session_control || !d->name || strcmp(d->name, "default") != 0)
+            continue;
+        if (err && err_size)
+            snprintf(err, err_size,
+                     "manifest: databases.named.default cannot have "
+                     "session_control = true (the default connection is the "
+                     "standard library's); declare a separate named "
+                     "connection for session-altering SQL");
+        return -1;
+    }
 
     const char *dsns[HL_MANIFEST_MAX_DATABASES + 1];
     int ndsn = 0;

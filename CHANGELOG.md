@@ -476,6 +476,45 @@ release-artifact layout).
   releasing it. Session-level named and advisory locks (GET_LOCK, `pg_advisory_lock`) still
   do not refuse a wait - a failed `pg_try_advisory_lock` looks the same as a taken one - and
   stay shared by every entry on the connection.
+- **MySQL / MariaDB / Postgres: session-altering SQL is refused, and every connection an entry
+  used is reset at the entry boundary** (audit convergence phase 3, §7.1;
+  `docs/design/audit_convergence_sql_session.md`). Hull no longer infers server session state
+  from SQL text and status flags: the audit 39-41 trackers (`my_track_session`,
+  `pg_track_session`, the `session_held` / `session_dirty` vtable methods, the lost-connection
+  held state) are deleted. Instead:
+  - App SQL whose point is session state that outlives the statement fails before it is sent,
+    with an error naming the statement and the escape hatch. MySQL / MariaDB: `SET autocommit`
+    in any spelling, `LOCK` / `UNLOCK TABLES`, `LOCK` / `UNLOCK INSTANCE`, `XA ...`,
+    `GET_LOCK` / `RELEASE_LOCK` / `RELEASE_ALL_LOCKS`, `FLUSH ... WITH READ LOCK` / `FOR
+    EXPORT`, `BACKUP LOCK` / `STAGE`, `SET SESSION|GLOBAL TRANSACTION ...`, `SET NAMES` /
+    `CHARACTER SET`, `SET ROLE`. Postgres: session-level advisory locks (`pg_advisory_lock`,
+    `pg_try_advisory_lock`, `pg_advisory_unlock*`; the `_xact_` forms stay allowed), `SET ROLE`
+    / `RESET ROLE`, `SET` / `RESET SESSION AUTHORIZATION`, `SET SESSION CHARACTERISTICS` /
+    `default_transaction_*`, `set_config()` of those, `LISTEN` / `UNLISTEN`, `PREPARE
+    TRANSACTION`. The check is conservative: any statement of a multi-statement text counts,
+    and text it cannot read the way the server does (a backslash, a MySQL executable comment,
+    an unterminated quote or comment, a Postgres `$$` body) counts quotes and comments as code.
+    Migration files are checked too; Hull's own migration lock is not affected.
+  - At every entry boundary (and so across every wait) each MySQL / Postgres connection the
+    entry used is reset: `COM_RESET_CONNECTION` (then the character set and `autocommit = 1`),
+    or `DISCARD ALL`. `db.async` / `worker.dispatch` worker connections are reset after every
+    op and job. One round trip per used connection per entry.
+  - Escape hatch: `databases.named.<x> = { dsn = "...", session_control = true }` (JS
+    `sessionControl: true`; the plain DSN string form is unchanged). Such a connection takes
+    the statements above (your responsibility), is still reset at every entry boundary, is not
+    reconnected silently when lost mid-entry, refuses standard-library calls, and cannot be
+    `default`.
+
+  **Migration notes.** An app that used `SET autocommit = 0` / `COMMIT` should use `db.batch`
+  or `BEGIN` ... `COMMIT`. One that relied on session state across requests (a user variable, a
+  `SET search_path` / `SET time_zone` at startup, a temporary table, a session-level advisory
+  lock or `GET_LOCK` held between requests) must set it up per request - Postgres advisory locks
+  move to `pg_advisory_xact_lock` inside a transaction - or move the work to a `session_control`
+  connection, where it still lasts one entry at most. `conn.last_id()` on a shared connection is reliable only
+  immediately after the INSERT, with no await in between. `LISTEN` moves to `conn.wait_notify`. A
+  migration file that takes a named or advisory lock now fails the run: drop the lock (Hull
+  holds its own around the whole run).
+
 - **A DuckDB macro could read any `_hull_*` table by a name built at run time** (audit 37,
   both runtimes). The table-name functions (`histogram`, `histogram_values`,
   `pragma_table_info`, `pragma_show`, `table_info`, `show`, `duckdb_table_sample`) took a

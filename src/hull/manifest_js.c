@@ -513,6 +513,26 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                     }
                     JSValue v_val = mjs_own_atom(ctx, named, props[i].atom);
                     const char *dsn_copy = NULL;
+                    int session_control = 0;
+                    /* { dsn: "...", sessionControl: true } (session_control
+                     * is accepted too): own data properties only, as every
+                     * manifest read. Replaced by its DSN below. */
+                    if (mjs_is_obj(ctx, v_val)) {
+                        JSValue sc = mjs_own(ctx, v_val, "sessionControl");
+                        if (JS_IsUndefined(sc)) {
+                            JS_FreeValue(ctx, sc);
+                            sc = mjs_own(ctx, v_val, "session_control");
+                        }
+                        if (JS_IsBool(sc))
+                            session_control = JS_ToBool(ctx, sc);
+                        else if (!JS_IsUndefined(sc) && !JS_IsNull(sc))
+                            log_warn("[manifest] databases.named.%s.sessionControl: "
+                                     "expected a boolean, ignored", name ? name : "?");
+                        JS_FreeValue(ctx, sc);
+                        JSValue d = mjs_own(ctx, v_val, "dsn");
+                        JS_FreeValue(ctx, v_val);
+                        v_val = d;
+                    }
                     if (JS_IsString(v_val)) {
                         const char *s = mjs_str(ctx, v_val);
                         if (s) { dsn_copy = hl_manifest_strdup(alloc, s);
@@ -523,6 +543,8 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
                         if (ncopy) {
                             out->databases.named[out->databases.named_count].name = ncopy;
                             out->databases.named[out->databases.named_count].dsn  = dsn_copy;
+                            out->databases.named[out->databases.named_count].session_control =
+                                session_control;
                             out->databases.named_count++;
                         }
                     } else {

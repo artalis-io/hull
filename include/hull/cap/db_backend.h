@@ -219,28 +219,19 @@ typedef struct HlDbBackend {
      * text (audit 37). NULL = not tracked (the text heuristic applies). */
     uint64_t (*txn_seq)(HlDbHandle *h);
 
-    /* Whether the session holds state a later user of the connection must
-     * not inherit and a ROLLBACK does not clear (audit 39): MySQL's
-     * autocommit off, an outstanding LOCK TABLES / XA transaction / GET_LOCK;
-     * a Postgres session-level advisory lock. No I/O. The worker pool drops
-     * such a connection after the op or job instead of reusing it (the
-     * event-loop connections are reset by guard_stale_txn instead). NULL =
-     * never. */
-    int    (*session_dirty)(HlDbHandle *h);
-
-    /* Whether the session holds state that makes it as good as inside a
-     * transaction, though in_txn reads 0 (audit 40): MySQL's autocommit off
-     * (the next statement opens one), an outstanding LOCK TABLES / FLUSH
-     * TABLES WITH READ LOCK / LOCK INSTANCE FOR BACKUP, or an XA
-     * transaction. No I/O. The wait gates (hl_db_registry_open_txn) refuse
-     * a wait while it holds: the stale-transaction guard that runs before a
-     * parked entry resumes would otherwise reset the session under it - the
-     * INSERT after `SET autocommit = 0; <wait>` autocommitted and its
-     * ROLLBACK lied. NULL = never. Session-level named / advisory locks
-     * (GET_LOCK, pg_advisory_lock) do not count: the tracker cannot tell a
-     * GET_LOCK that timed out from one that took the lock, and counted, one
-     * such call would refuse every later wait. */
-    int    (*session_held)(HlDbHandle *h);
+    /* Reset the server session when the connection was used since its last
+     * reset (audit convergence phase 3): MySQL COM_RESET_CONNECTION (then
+     * the connection character set and autocommit = 1 again), Postgres
+     * DISCARD ALL. Run by guard_stale_txn after its rollback - so at every
+     * entry boundary - and by the worker pool after every op and job.
+     * Hull infers nothing about session state from SQL text: whatever an
+     * entry left on the session (a user variable, SET search_path, a lock a
+     * stored procedure took) goes, on every connection it used. Not on a
+     * pinned handle (the migration lock lives in the session). Returns 0
+     * (reset, or nothing to do) or -1 (the reset failed or a transaction is
+     * still open: the connection was abandoned and the next call
+     * reconnects). NULL = no server session (SQLite, DuckDB). */
+    int    (*reset_session)(HlDbHandle *h);
 } HlDbBackend;
 
 struct HlDbHandle {
@@ -255,6 +246,12 @@ struct HlDbHandle {
      * (the migration lock: hl_migrate_run). A network backend then refuses
      * to reconnect a lost connection instead of going on without it. */
     int                session_pinned;
+    /* A databases.named connection declared with session_control = true:
+     * the backend does not refuse session-altering SQL on it (LOCK TABLES,
+     * SET autocommit, GET_LOCK, pg_advisory_lock, ...; cap/db_session_sql.h)
+     * and refuses the stdlib's calls instead. Its session is still reset at
+     * every entry boundary. Never the default or internal connection. */
+    int                session_control;
 };
 
 /* ── Inline wrappers ──────────────────────────────────────────────── */
@@ -266,27 +263,13 @@ static inline int hl_db_in_txn(HlDbHandle *h)
     return h->backend->in_txn(h) ? 1 : 0;
 }
 
-/* 1 when the session holds state a pooled reuse must not inherit
- * (HlDbBackend.session_dirty), 0 otherwise or unknown. */
-static inline int hl_db_session_dirty(HlDbHandle *h)
+/* Reset the session of a connection used since its last reset
+ * (HlDbBackend.reset_session). 0 = clean, -1 = the connection was
+ * abandoned (the next call reconnects). */
+static inline int hl_db_reset_session(HlDbHandle *h)
 {
-    if (!h || !h->backend || !h->backend->session_dirty) return 0;
-    return h->backend->session_dirty(h) ? 1 : 0;
-}
-
-/* 1 when the session holds transaction-like state (HlDbBackend.session_held),
- * 0 otherwise or unknown. */
-static inline int hl_db_session_held(HlDbHandle *h)
-{
-    if (!h || !h->backend || !h->backend->session_held) return 0;
-    return h->backend->session_held(h) ? 1 : 0;
-}
-
-/* What the wait gates count as an open transaction: one actually open, or
- * session state that is as good as one (hl_db_session_held). */
-static inline int hl_db_holds_txn(HlDbHandle *h)
-{
-    return hl_db_in_txn(h) || hl_db_session_held(h);
+    if (!h || !h->backend || !h->backend->reset_session) return 0;
+    return h->backend->reset_session(h);
 }
 
 /*
@@ -307,7 +290,6 @@ static inline int hl_db_holds_txn(HlDbHandle *h)
 typedef struct {
     int      in_txn;
     uint64_t seq;
-    int      held;    /* hl_db_session_held (audit 40) */
 } HlDbTxnSnap;
 
 static inline uint64_t hl_db_txn_seq(HlDbHandle *h)
@@ -318,7 +300,7 @@ static inline uint64_t hl_db_txn_seq(HlDbHandle *h)
 
 static inline HlDbTxnSnap hl_db_txn_snap(HlDbHandle *h)
 {
-    HlDbTxnSnap s = { hl_db_in_txn(h), 0, hl_db_session_held(h) };
+    HlDbTxnSnap s = { hl_db_in_txn(h), 0 };
     if (s.in_txn) s.seq = hl_db_txn_seq(h);
     return s;
 }
@@ -409,7 +391,9 @@ static inline const char *hl_db_errmsg(HlDbHandle *h)
     return h->backend->errmsg(h);
 }
 
-/* Roll back a transaction left open by an entry that has finished. Any
+/* Roll back a transaction left open by an entry that has finished, and (the
+ * network backends) reset the session of a connection used since its last
+ * reset (HlDbBackend.reset_session). Any
  * db.batch bookkeeping goes with it: a batch cannot legitimately span an
  * entry (its fn cannot wait), so a depth still set here belongs to the
  * transaction just rolled back, and keeping it would turn the next batch's

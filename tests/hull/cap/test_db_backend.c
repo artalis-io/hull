@@ -11,6 +11,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_sql_kw.h"
+#include "hull/cap/db_session_sql.h"
 #include "hull/cap/db.h"
 #include "hull/cap/types.h"
 #include "hull/worker_db.h"     /* hl_worker_db_notify_timeout, _materialize */
@@ -1038,39 +1039,268 @@ UTEST(db_backend, sql_txn_kind)
     EXPECT_EQ(HL_SQL_TXN_ROLLBACK, hl_sql_txn_kind("ROLLBACK -- done\r\n"));
 }
 
-/* hl_sql_scan_words reads "--" by each dialect's rule (audit 41): text read
- * as code where the server skips it could release tracked session state. */
-static void scan_join(void *ud, const char *w, const char *prev,
-                      const char *prev2)
+/* ── Session-altering SQL (cap/db_session_sql.c, audit convergence phase 3) ──
+ * Every class is refused in its ordinary spellings, in any statement of a
+ * text, and read conservatively where the text cannot be read the way the
+ * server reads it; ordinary statements that merely name the words in a
+ * string, a comment or a column are allowed. */
+
+#define MY(sql) hl_db_session_sql_refused((sql), HL_DB_SQL_MYSQL)
+#define PG(sql) hl_db_session_sql_refused((sql), HL_DB_SQL_POSTGRES)
+
+UTEST(db_session_sql, mysql_refused_classes)
 {
-    (void)prev; (void)prev2;
-    char *out = ud;
-    size_t n = strlen(out);
-    snprintf(out + n, 256 - n, "%s%s", n ? " " : "", w);
+    static const char *const refused[] = {
+        "SET autocommit = 0",
+        "SET autocommit=1",
+        "set AUTOCOMMIT := OFF",
+        "SET SESSION autocommit = 0",
+        "SET LOCAL autocommit = 0",
+        "SET @@autocommit = 0",
+        "SET @@session.autocommit = 0",
+        "SET @@SESSION.AUTOCOMMIT = 0",
+        "SET GLOBAL autocommit = 0",
+        "SET @x = 1, autocommit = 0",
+        "SET @x := (SELECT 1), @@autocommit = 0",
+        "SET NAMES gbk",
+        "SET CHARACTER SET latin1",
+        "SET character_set_client = gbk",
+        "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        "SET GLOBAL TRANSACTION READ ONLY",
+        "SET @@transaction_isolation = 'SERIALIZABLE'",
+        "SET tx_read_only = 1",
+        "SET ROLE admin",
+        "LOCK TABLES t WRITE",
+        "lock table t read",
+        "UNLOCK TABLES",
+        "unlock table",
+        "LOCK INSTANCE FOR BACKUP",
+        "UNLOCK INSTANCE",
+        "XA START 'x'",
+        "xa end 'x'",
+        "XA RECOVER",
+        "SELECT GET_LOCK('a', 0)",
+        "SELECT get_lock ('a', 0) AS g",
+        "DO RELEASE_LOCK('a')",
+        "SELECT RELEASE_ALL_LOCKS()",
+        "SELECT `GET_LOCK`('a', 0)",
+        "FLUSH TABLES WITH READ LOCK",
+        "FLUSH TABLES t1, t2 WITH READ LOCK",
+        "FLUSH TABLES t FOR EXPORT",
+        "BACKUP LOCK t",
+        "BACKUP STAGE START",
+        "BACKUP UNLOCK",
+        /* any statement of a multi-statement text */
+        "SELECT 1; SET autocommit = 0",
+        "INSERT INTO t VALUES (1);LOCK TABLES t WRITE",
+        /* a compound body */
+        "CREATE PROCEDURE p() BEGIN SET autocommit = 0; END",
+        "CREATE PROCEDURE p() BEGIN LOCK TABLES t WRITE; END",
+        /* what PREPARE / EXECUTE IMMEDIATE runs from a string */
+        "PREPARE s FROM 'LOCK TABLES t WRITE'",
+        "PREPARE s FROM \"SELECT GET_LOCK('a', 0)\"",
+        "EXECUTE IMMEDIATE 'SET autocommit = 0'",
+        /* comments in between */
+        "SET /* x */ autocommit = 0",
+        "LOCK /* x */ TABLES t WRITE",
+        "SELECT 1 -- x\n; SET autocommit = 0",
+        "SELECT 1 # x\n; LOCK TABLES t WRITE",
+        "SELECT 1 --\tx\nUNLOCK TABLES",
+        NULL,
+    };
+    for (int i = 0; refused[i]; i++) {
+        if (!MY(refused[i])) fprintf(stderr, "allowed: %s\n", refused[i]);
+        EXPECT_TRUE(MY(refused[i]) != NULL);
+        char msg[256];   /* the errmsg size of both wire clients */
+        hl_db_session_sql_message(msg, sizeof msg, MY(refused[i]));
+        EXPECT_TRUE(strstr(msg, "session_control = true") != NULL);
+    }
 }
 
-static const char *scan_words(const char *sql, int nest)
+UTEST(db_session_sql, mysql_conservative_reading)
 {
-    static char out[256];
-    out[0] = '\0';
-    hl_sql_scan_words(sql, nest, !nest, scan_join, out);
-    return out;
+    /* MySQL runs an executable comment; the text is then read raw. */
+    EXPECT_TRUE(MY("/*!50001 SET autocommit = 0 */") != NULL);
+    EXPECT_TRUE(MY("SELECT 1 /*!, GET_LOCK('a', 0) */") != NULL);
+    EXPECT_TRUE(MY("SELECT 1 /*M! ; LOCK TABLES t WRITE */") != NULL);
+    /* A backslash: under NO_BACKSLASH_ESCAPES 'a\' ends the string, so what
+     * follows runs - read raw. */
+    EXPECT_TRUE(MY("SELECT 'a\\'; SET autocommit = 0; -- '") != NULL);
+    EXPECT_TRUE(MY("SELECT 'a\\' , GET_LOCK('x', 0) -- '") != NULL);
+    /* An unterminated quote or comment: read raw. */
+    EXPECT_TRUE(MY("SELECT 1; SET autocommit = 0 /* never closed") != NULL);
+    EXPECT_TRUE(MY("SELECT 'x; LOCK TABLES t WRITE") != NULL);
+    /* "--" with no whitespace after it is not a comment to MySQL. */
+    EXPECT_TRUE(MY("SELECT 1 --x\n; LOCK TABLES t WRITE") != NULL);
+    EXPECT_TRUE(MY("SELECT 5--1, GET_LOCK('a', 0)") != NULL);
+    /* "--" ended at CR reads more as code, never less. */
+    EXPECT_TRUE(MY("SELECT 1 -- x\rUNLOCK TABLES") != NULL);
 }
 
-UTEST(db_backend, sql_scan_words_dash_comment_rules)
+UTEST(db_session_sql, mysql_allowed)
 {
-    /* MySQL (nest 0): a comment before any whitespace or control byte, to
-     * LF only; "5--1" is arithmetic. */
-    EXPECT_STREQ("select 1", scan_words("SELECT 1 --\fUNLOCK TABLES", 0));
-    EXPECT_STREQ("select 1", scan_words("SELECT 1 --\vUNLOCK", 0));
-    EXPECT_STREQ("select 1", scan_words("SELECT 1 --\x7fUNLOCK", 0));
-    EXPECT_STREQ("select 1", scan_words("SELECT 1 -- a\rUNLOCK", 0));
-    EXPECT_STREQ("select 1 unlock", scan_words("SELECT 1 -- a\nUNLOCK", 0));
-    EXPECT_STREQ("select 5 1", scan_words("SELECT 5--1", 0));
-    EXPECT_STREQ("select 1", scan_words("SELECT 1 --", 0));
-    /* Postgres (nest 1): always a comment, to LF or CR. */
-    EXPECT_STREQ("select 5", scan_words("SELECT 5--pg_advisory_unlock_all()", 1));
-    EXPECT_STREQ("select 1 x", scan_words("SELECT 1 --a\rx", 1));
+    static const char *const allowed[] = {
+        "SELECT 1",
+        "BEGIN",
+        "START TRANSACTION",
+        "START TRANSACTION WITH CONSISTENT SNAPSHOT",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT a",
+        "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",   /* next transaction only */
+        "SET @autocommit = 0",                           /* a user variable */
+        "SET @names = 'x'",
+        "SET @x = 'autocommit'",
+        "SET sql_mode = 'STRICT_ALL_TABLES'",
+        "SET time_zone = '+00:00'",
+        "UPDATE t SET autocommit = 1",                   /* a column */
+        "UPDATE users SET role = 'admin' WHERE id = ?",
+        "INSERT INTO log (msg) VALUES ('LOCK TABLES t WRITE')",
+        "INSERT INTO log (msg) VALUES ('GET_LOCK')",
+        "SELECT 'SET autocommit = 0'",
+        "SELECT 1 -- LOCK TABLES t WRITE",
+        "SELECT 1 # SET autocommit = 0",
+        "SELECT 1 /* GET_LOCK('a', 0) */",
+        "SELECT * FROM t FOR UPDATE",
+        "SELECT * FROM t LOCK IN SHARE MODE",
+        "SELECT * FROM t FOR SHARE NOWAIT",
+        "ALTER TABLE t ADD COLUMN x INT, LOCK = NONE",
+        "CREATE TABLE lock_tables (id INT)",
+        "SELECT IS_FREE_LOCK('a')",
+        "SELECT @@autocommit",
+        "FLUSH PRIVILEGES",
+        "SELECT * FROM `xa`",
+        NULL,
+    };
+    for (int i = 0; allowed[i]; i++) {
+        const char *cls = MY(allowed[i]);
+        if (cls) fprintf(stderr, "refused (%s): %s\n", cls, allowed[i]);
+        EXPECT_TRUE(cls == NULL);
+    }
+    EXPECT_TRUE(MY(NULL) == NULL);
 }
+
+UTEST(db_session_sql, postgres_refused_classes)
+{
+    static const char *const refused[] = {
+        "SELECT pg_advisory_lock(1)",
+        "SELECT pg_advisory_lock_shared(1, 2)",
+        "SELECT pg_try_advisory_lock(1)",
+        "SELECT pg_try_advisory_lock_shared(1)",
+        "SELECT pg_advisory_unlock(1)",
+        "SELECT pg_advisory_unlock_shared(1)",
+        "SELECT pg_advisory_unlock_all()",
+        "SELECT pg_catalog.pg_advisory_lock(1)",
+        "SELECT \"pg_advisory_lock\"(1)",
+        "SET ROLE admin",
+        "set role = 'admin'",
+        "SET SESSION ROLE admin",
+        "RESET ROLE",
+        "SET SESSION AUTHORIZATION bob",
+        "SET session_authorization = 'bob'",
+        "RESET SESSION AUTHORIZATION",
+        "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        "SET default_transaction_isolation = 'serializable'",
+        "SET SESSION default_transaction_read_only = on",
+        "LISTEN ch",
+        "UNLISTEN *",
+        "PREPARE TRANSACTION 'x'",
+        "SELECT set_config('role', 'admin', false)",
+        "SELECT set_config('ROLE', 'admin', true)",
+        "SELECT set_config( /* c */ 'session_authorization', 'x', false)",
+        "SELECT set_config(name, 'x', false) FROM t",     /* not a literal */
+        "SELECT set_config(E'role', 'x', false)",
+        /* a DO block / function body runs its dollar-quoted text */
+        "DO $$ BEGIN PERFORM pg_advisory_lock(1); END $$",
+        "DO $body$ BEGIN EXECUTE 'SET ROLE admin'; END $body$",
+        "CREATE FUNCTION f() RETURNS void AS $$ SELECT pg_advisory_lock(1) $$ LANGUAGE sql",
+        /* any statement of a script */
+        "SELECT 1; SET ROLE admin",
+        "CREATE TABLE t (x int);\nLISTEN ch;",
+        /* comments, including nested ones */
+        "SET /* a /* b */ c */ ROLE admin",
+        "SELECT 1 -- x\r; SET ROLE admin",
+        /* an unterminated dollar quote / comment is read raw */
+        "DO $$ PERFORM pg_advisory_lock(1)",
+        "SELECT 1; /* SET ROLE admin",
+        /* U&"..." can spell any name */
+        "SELECT U&\"\\0070g_advisory_lock\"(1)",
+        "select u&\"x\"",
+        NULL,
+    };
+    for (int i = 0; refused[i]; i++) {
+        if (!PG(refused[i])) fprintf(stderr, "allowed: %s\n", refused[i]);
+        EXPECT_TRUE(PG(refused[i]) != NULL);
+        char msg[256];
+        hl_db_session_sql_message(msg, sizeof msg, PG(refused[i]));
+        EXPECT_TRUE(strstr(msg, "session_control = true") != NULL);
+    }
+}
+
+UTEST(db_session_sql, postgres_allowed)
+{
+    static const char *const allowed[] = {
+        "SELECT 1",
+        "BEGIN",
+        "COMMIT",
+        "ABORT",
+        "SELECT pg_advisory_xact_lock(1)",
+        "SELECT pg_try_advisory_xact_lock(1)",
+        "SELECT pg_advisory_xact_lock_shared(1)",
+        "SET LOCAL ROLE admin",                          /* transaction-scoped */
+        "SET LOCAL SESSION AUTHORIZATION bob",
+        "SET search_path = app, public",
+        "SET TIME ZONE 'UTC'",
+        "SET statement_timeout = 1000",
+        "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        "SET LOCAL default_transaction_isolation = 'serializable'",
+        "RESET ALL",
+        "RESET search_path",
+        "NOTIFY ch, 'x'",
+        "SELECT pg_notify('ch', 'x')",
+        "UPDATE users SET role = 'admin' WHERE id = $1",
+        "UPDATE t SET session_x = 1",
+        "INSERT INTO log VALUES ('SET ROLE admin')",
+        "SELECT 'pg_advisory_lock(1)'",
+        "SELECT 1 -- pg_advisory_lock(1)",
+        "SELECT 1 /* outer /* LISTEN ch */ still comment */",
+        "PREPARE q AS SELECT $1",
+        "EXECUTE q(1)",
+        "SELECT set_config('search_path', 'app', false)",
+        "SELECT set_config('application_name', 'x', false)",
+        "SELECT x AS set_config FROM t",
+        "LOCK TABLE t IN ACCESS EXCLUSIVE MODE",            /* transaction-scoped */
+        "SELECT $1::int + $2",
+        "SELECT a$b FROM t",
+        NULL,
+    };
+    for (int i = 0; allowed[i]; i++) {
+        const char *cls = PG(allowed[i]);
+        if (cls) fprintf(stderr, "refused (%s): %s\n", cls, allowed[i]);
+        EXPECT_TRUE(cls == NULL);
+    }
+}
+
+UTEST(db_session_sql, trust_flag_and_message)
+{
+    EXPECT_EQ(0, hl_db_session_sql_trusted());
+    int prev = hl_db_session_sql_trust(1);
+    EXPECT_EQ(0, prev);
+    EXPECT_EQ(1, hl_db_session_sql_trusted());
+    hl_db_session_sql_trust(prev);
+    EXPECT_EQ(0, hl_db_session_sql_trusted());
+
+    char msg[256];
+    hl_db_session_sql_message(msg, sizeof msg, MY("LOCK TABLES t WRITE"));
+    EXPECT_TRUE(strstr(msg, "LOCK TABLES") != NULL);
+    EXPECT_TRUE(strstr(msg, "session_control") != NULL);
+    EXPECT_TRUE(strstr(msg, "db.batch") != NULL);
+    EXPECT_TRUE(strlen(msg) < sizeof msg - 1);   /* not truncated */
+    hl_db_session_sql_message(msg, sizeof msg, PG("SELECT pg_advisory_lock(1)"));
+    EXPECT_TRUE(strstr(msg, "session_control") != NULL);
+}
+
+#undef MY
+#undef PG
 
 UTEST_MAIN();

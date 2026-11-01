@@ -853,63 +853,55 @@ fi
 docker exec "$CONTAINER" psql -U hull -d hulldb -q -c \
   "DROP TRIGGER IF EXISTS a39_fail ON _hull_idempotency_keys" >/dev/null 2>&1 || true
 
-# ── audit 39: a failed request's session-level advisory lock is released ─
-# pg_advisory_lock is session-scoped: the stale-transaction guard's ROLLBACK
-# left it held, and every other session waiting on it hung until a restart.
-# After a stale transaction the guard now runs pg_advisory_unlock_all.
-echo "=== audit 39: a failed request's advisory lock is released ==="
-A39DIR=$(mktemp -d)
-. "$(dirname "$0")/lib/hull_db_session_audit39.sh"
-db_session_audit39_app "$A39DIR" postgres
-./build/hull -d "$DSN" -p "$PORT" "$A39DIR/app.lua" >"$A39DIR/serve.log" 2>&1 &
-SVR=$!
-wait_for_server "$A39DIR/serve.log" || exit 1
-curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 39 setup"; cat "$A39DIR/serve.log"; exit 1; }
-a39out=$(db_session_audit39_run "$PORT" advisory)
-echo "$a39out"
+# ── session control (audit convergence phase 3) ───────────────────────
+# Hull infers no session state from SQL text any more: session-altering app
+# SQL (session-level advisory locks, SET ROLE / SESSION AUTHORIZATION /
+# SESSION CHARACTERISTICS, LISTEN, ...) is refused on shared connections,
+# every connection an entry used gets DISCARD ALL at the entry boundary, a
+# session_control connection takes the statements and still starts the next
+# entry clean, and Hull's own migration lock (pg_advisory_lock) works while
+# a migration file using one is refused. Replaces the audit 39 / 40 legs.
+echo "=== session control: refusal, reset per entry, session_control escape hatch (both runtimes) ==="
+SCDIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_session_control.sh"
+db_session_control_apps "$SCDIR" postgres
 pg_q() { docker exec "$CONTAINER" psql -U hull -d hulldb -tAc "$1" 2>/dev/null; }
-a39rows=$(pg_q "SELECT COUNT(*) FROM s39b WHERE v = 1")
-a39left=$(pg_q "SELECT COUNT(*) FROM s39")
-a39free=$(pg_q "SELECT pg_try_advisory_lock(3939)")
-kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
-a39fail=0
-db_session_audit39_ok "$a39out" advisory || a39fail=1
-[ "$a39rows" = 1 ] || { echo "::error audit 39: the later write did not commit ($a39rows)"; a39fail=1; }
-[ "$a39left" = 0 ] || { echo "::error audit 39: the failed request's write committed ($a39left)"; a39fail=1; }
-[ "$a39free" = t ] || { echo "::error audit 39: the failed request's advisory lock is still held"; a39fail=1; }
-if [ "$a39fail" = 0 ]; then
-    echo "PASS: a failed request's session-level advisory lock is released (Postgres)"
-    rm -rf "$A39DIR"
-else
-    cat "$A39DIR/serve.log"; exit 1
-fi
-
-# ── audit 40: a wait is refused only by a real transaction (Postgres) ──
-# The MySQL fix counts autocommit off / LOCK TABLES as an open transaction
-# for the wait gates. A Postgres session-level advisory lock deliberately
-# does not count (a pg_try_advisory_lock that failed looks the same): the
-# wait goes ahead and nothing releases the lock under the handler - the
-# guard's pg_advisory_unlock_all runs only after a stale transaction, which
-# a parked handler cannot hold. BEGIN still refuses the wait.
-echo "=== audit 40: advisory lock kept across a wait; BEGIN refuses it (both runtimes) ==="
-A40DIR=$(mktemp -d)
-. "$(dirname "$0")/lib/hull_db_session_audit40.sh"
-db_session_audit40_apps "$A40DIR" postgres
-a40fail=0
-for a40app in "$A40DIR/l/app.lua" "$A40DIR/j/app.js"; do
-    ./build/hull -d "$DSN" -p "$PORT" "$a40app" >"$A40DIR/serve.log" 2>&1 &
+scfail=0
+for scapp in "$SCDIR/l/app.lua" "$SCDIR/j/app.js"; do
+    HULL_SC_DSN="$DSN" ./build/hull -d "$DSN" -p "$PORT" "$scapp" >"$SCDIR/serve.log" 2>&1 &
     SVR=$!
-    wait_for_server "$A40DIR/serve.log" || exit 1
-    curl -fsS "http://127.0.0.1:${PORT}/setup" >/dev/null || { echo "::error audit 40 setup"; cat "$A40DIR/serve.log"; exit 1; }
-    a40out=$(db_session_audit40_run "$PORT" advisory_wait begin_wait)
+    wait_for_server "$SCDIR/serve.log" || exit 1
+    scsetup=$(curl -fsS "http://127.0.0.1:${PORT}/setup" || echo FAIL)
+    scout=$(db_session_control_run "$PORT" refused txn var_set var_get sc_hold sc_check)
+    scheld=$(pg_q "SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 4242")
     kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
-    echo "$a40app"; echo "$a40out"
-    db_session_audit40_ok "$a40out" advisory_wait '"waited":true' '"held_after_wait":1' || a40fail=1
-    db_session_audit40_ok "$a40out" begin_wait '"waited":false' '"code":"wait_refused"' '"rows":0' || a40fail=1
-    [ "$a40fail" = 0 ] || { cat "$A40DIR/serve.log"; exit 1; }
+    echo "$scapp"; echo "$scsetup"; echo "$scout"
+    case "$scsetup" in *'"migrated":true'*) ;; *) echo "::error session control: migrations: $scsetup"; scfail=1 ;; esac
+    db_session_control_ok "$scout" refused '"refused":12' '"total":12' '"bad":"none"' || scfail=1
+    db_session_control_ok "$scout" txn '"rows":2' '"in_txn":false' || scfail=1
+    db_session_control_ok "$scout" var_set '"v":"hull_sc"' || scfail=1
+    db_session_control_ok "$scout" var_get '"clear":true' || scfail=1
+    db_session_control_ok "$scout" sc_hold '"got_lock":true' '"ro":"on"' || scfail=1
+    db_session_control_ok "$scout" sc_check '"ro":"off"' '"held":0' '"sc_write":true' || scfail=1
+    [ "$scheld" = 0 ] || { echo "::error session control: advisory lock still held after the entry"; scfail=1; }
+    [ "$scfail" = 0 ] || { cat "$SCDIR/serve.log"; exit 1; }
 done
-echo "PASS: advisory lock kept across a wait, BEGIN refuses the wait (Postgres)"
-rm -rf "$A40DIR"
+
+# A migration file that takes an advisory lock is refused; the app does not
+# start.
+HULL_SC_DSN="$DSN" ./build/hull -d "$DSN" -p "$PORT" "$SCDIR/bad/app.lua" >"$SCDIR/bad.log" 2>&1 &
+SVR=$!
+i=0
+while [ "$i" -lt 20 ] && kill -0 "$SVR" 2>/dev/null; do sleep 0.5; i=$((i + 1)); done
+if kill -0 "$SVR" 2>/dev/null; then
+    kill "$SVR" 2>/dev/null || true; wait "$SVR" 2>/dev/null || true; SVR=
+    echo "::error session control: an app whose migration takes pg_advisory_lock started"
+    cat "$SCDIR/bad.log"; exit 1
+fi
+wait "$SVR" 2>/dev/null || true; SVR=
+grep -q "is refused" "$SCDIR/bad.log" || { echo "::error session control: migration refusal not reported"; cat "$SCDIR/bad.log"; exit 1; }
+echo "PASS: session-altering SQL refused, every used connection reset per entry, session_control escape hatch, migration lock (Postgres)"
+rm -rf "$SCDIR"
 
 # ── audit 41: every statement pays a round trip's floor (Postgres) ──
 echo "=== audit 41: a SELECT 1 loop trips a small budget (both runtimes) ==="

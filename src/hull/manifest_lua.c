@@ -454,8 +454,34 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             int truncated = 0;
             lua_pushnil(L);
             while (lua_next(L, named_idx) != 0) {
+                /* A table entry: { dsn = "...", session_control = true }.
+                 * Read with raw accessors (no metamethods) and replaced on
+                 * the stack by its DSN string, so the rest is shared. */
+                int session_control = 0;
+                if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TTABLE) {
+                    int t = lua_gettop(L);
+                    lua_pushliteral(L, "session_control");
+                    lua_rawget(L, t);
+                    if (lua_type(L, -1) == LUA_TBOOLEAN)
+                        session_control = lua_toboolean(L, -1);
+                    else if (!lua_isnil(L, -1))
+                        log_warn("[manifest] databases.named.%s.session_control: "
+                                 "expected a boolean, ignored",
+                                 mstr(L, -3) ? mstr(L, -3) : "?");
+                    lua_pop(L, 1);
+                    lua_pushliteral(L, "dsn");
+                    lua_rawget(L, t);
+                    lua_remove(L, t);   /* the DSN (or a non-string) in its place */
+                }
                 if (lua_type(L, -2) != LUA_TSTRING ||
-                    lua_type(L, -1) != LUA_TSTRING) { lua_pop(L, 1); continue; }
+                    lua_type(L, -1) != LUA_TSTRING) {
+                    if (lua_type(L, -2) == LUA_TSTRING)
+                        log_warn("[manifest] databases.named.%s: expected a DSN "
+                                 "string or { dsn = ..., session_control = ... }, "
+                                 "ignored", mstr(L, -2) ? mstr(L, -2) : "?");
+                    lua_pop(L, 1);
+                    continue;
+                }
                 if (out->databases.named_count >= HL_MANIFEST_MAX_DATABASES) {
                     if (!truncated) {
                         log_warn("[manifest] databases.named exceeds "
@@ -474,6 +500,8 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                     if (ncopy && dcopy) {
                         out->databases.named[out->databases.named_count].name = ncopy;
                         out->databases.named[out->databases.named_count].dsn  = dcopy;
+                        out->databases.named[out->databases.named_count].session_control =
+                            session_control;
                         out->databases.named_count++;
                     }
                 } else {
