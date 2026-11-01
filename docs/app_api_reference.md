@@ -2084,6 +2084,31 @@ gpu.bufferRead(name)                   // ArrayBuffer
 gpu.bufferCopy(src, dst, opts?)        // GPU-side buffer copy
 ```
 
+**Shader source policy (built binaries compile only build-time shaders).**
+A shader's compile time is decided by a black-box compiler (naga plus the
+platform driver), so a deployed app compiles only the shaders it was built
+with:
+
+| Where the app runs | `gpu.load(name)` | `gpu.compile(name, src)` |
+|---|---|---|
+| Built binary (`hull build` output; serve or `app.main`) | `shaders/<name>.wgsl` embedded at build time | only when `src` is byte-identical to an embedded `shaders/*.wgsl`; otherwise refused with `dynamic_shader_refused` (Lua `nil, err`; JS throws `gpu.compile failed: dynamic_shader_refused`) |
+| Built binary with `gpu.dynamic_shaders = true` (JS `gpu: { dynamicShaders: true }`) | as above | any source, compiled in-process under the compile deadline |
+| Development (`hull app.lua`, `hull dev`, no embedded files) | `shaders/<name>.wgsl` on disk | any source; without the opt-in, the first inline compile logs one WARN that the built binary will refuse it |
+
+`hull build` checks every `shaders/*.wgsl` it embeds: the 1 MiB size cap and
+the WGSL pre-check always, plus a test compile when the building `hull` has a
+GPU backend and the host an adapter. A shader that fails fails the build.
+
+```lua
+app.manifest({ gpu = { dynamic_shaders = true } })   -- opt in (only `true` counts)
+```
+
+Migrating an app that compiles inline source: move each shader to
+`shaders/<name>.wgsl` and call `gpu.load(name)` instead of
+`gpu.compile(name, SRC)`. Set `dynamic_shaders` only when the source is truly
+generated at run time, and never compile request-supplied WGSL: the pre-checks
+and the compile deadline bound it, but they are not a security boundary.
+
 **Dispatch options:**
 ```lua
 gpu.dispatch("shader_name", {

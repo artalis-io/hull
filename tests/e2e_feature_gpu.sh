@@ -45,19 +45,35 @@ APP=$(mktemp -d)
 PLAIN=$(mktemp -d)
 trap 'rm -rf "$APP" "$PLAIN" /tmp/hull_base_gpu_e2e' EXIT
 
+# The shader lives in shaders/: a built binary compiles only shaders embedded
+# from shaders/ unless the manifest sets gpu.dynamic_shaders (audit
+# convergence 7.3). SAME is byte-identical to the file, so gpu.compile of it is
+# the embedded shader; OTHER is not, so it is refused.
+mkdir -p "$APP/shaders"
+printf '%s\n' \
+    '@group(0) @binding(0) var<storage,read_write> d: array<f32>;' \
+    '@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>){ d[id.x]=d[id.x]*2.0; }' \
+    > "$APP/shaders/dbl.wgsl"
 cat > "$APP/app.lua" <<'LUA'
 app.manifest({ gpu = true, modules = { "hull/gpu@1" } })
+local SAME = "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
+    "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>){ d[id.x]=d[id.x]*2.0; }\n"
+local OTHER = "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
+    "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>){ d[id.x]=d[id.x]*3.0; }\n"
 app.main(function()
     -- pcall: on a GPU-capable binary running on a GPU-LESS host, hull.gpu is
     -- not registered (no device), so require errors. That's fine here -- the
     -- build composed the feature and the binary booted, which is the point.
     local ok, gpu = pcall(require, "hull.gpu")
     if ok and gpu and gpu.available() then
-        gpu.compile("dbl",
-            "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
-            "@compute @workgroup_size(1) fn main(" ..
-            "@builtin(global_invocation_id) id: vec3<u32>){ d[id.x]=d[id.x]*2.0; }")
-        local out = gpu.dispatch("dbl", {
+        assert(gpu.load("dbl"), "gpu.load of an embedded shader failed")
+        local okc, err = gpu.compile("tri", OTHER)
+        assert(okc == nil and err == "dynamic_shader_refused",
+               "dynamic source was not refused: " .. tostring(err))
+        print("POLICY: dynamic source refused")
+        assert(gpu.compile("dbl2", SAME), "byte-identical source refused")
+        print("POLICY: embedded source accepted")
+        local out = gpu.dispatch("dbl2", {
             buffers    = {{ data = string.pack("<ffff", 1, 2, 3, 4), usage = "readwrite" }},
             workgroups = { x = 4 },
             output     = 1,
@@ -89,6 +105,56 @@ echo "$RUN_OUT" | grep -q "GPU FEATURE APP OK" || {
     echo "FAIL: composed gpu binary did not boot"; exit 1
 }
 echo "ok  --with=gpu composed + booted"
+if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
+    echo "$RUN_OUT" | grep -q "POLICY: dynamic source refused" \
+        || { echo "FAIL: dynamic source not refused"; exit 1; }
+    echo "ok  built binary: embedded shaders only, dynamic source refused"
+fi
+echo "$BUILD_OUT" | grep -q "shader(s) pre-checked" \
+    || { echo "FAIL: hull build did not check the embedded shaders"; exit 1; }
+echo "ok  hull build pre-checked the embedded shaders"
+
+echo "=== gpu.dynamic_shaders = true: the opt-in compiles runtime source ==="
+DYN=$(mktemp -d)
+cat > "$DYN/app.lua" <<'LUA'
+app.manifest({ gpu = { dynamic_shaders = true }, modules = { "hull/gpu@1" } })
+app.main(function()
+    local ok, gpu = pcall(require, "hull.gpu")
+    if ok and gpu and gpu.available() then
+        assert(gpu.compile("tri",
+            "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
+            "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>){ d[id.x]=d[id.x]*3.0; }"),
+            "the opt-in did not compile dynamic source")
+        print("DYNAMIC OK (compiled on device)")
+    else
+        print("DYNAMIC OK (no GPU device)")
+    end
+    return 0
+end)
+LUA
+"$HULL" build --compiler=system --with=gpu --no-verify-platform -o "$DYN/bin" "$DYN" >/dev/null 2>&1 || true
+DYN_OUT=$("$DYN/bin" 2>&1) || true
+rm -rf "$DYN"
+echo "$DYN_OUT" | grep -q "DYNAMIC OK" || { echo "$DYN_OUT"; echo "FAIL: opt-in app"; exit 1; }
+if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
+    echo "$DYN_OUT" | grep -q "compiled on device" \
+        || { echo "$DYN_OUT"; echo "FAIL: opt-in did not compile on the device"; exit 1; }
+fi
+echo "ok  gpu.dynamic_shaders opt-in"
+
+echo "=== a shader the pre-check refuses fails the build ==="
+BAD=$(mktemp -d)
+mkdir -p "$BAD/shaders"
+printf 'app.manifest({ gpu = true, modules = { "hull/gpu@1" } })\napp.main(function() return 0 end)\n' \
+    > "$BAD/app.lua"
+printf '@compute @workgroup_size(1) fn main() { let $x = 1; }\n' > "$BAD/shaders/bad.wgsl"
+BAD_OUT=$("$HULL" build --compiler=system --with=gpu --no-verify-platform -o "$BAD/bin" "$BAD" 2>&1) && BAD_RC=0 || BAD_RC=$?
+BAD_BIN=0; test -e "$BAD/bin" && BAD_BIN=1
+rm -rf "$BAD"
+[ "$BAD_RC" -ne 0 ] && [ "$BAD_BIN" -eq 0 ] \
+    && echo "$BAD_OUT" | grep -q "shader check failed" \
+    || { echo "$BAD_OUT"; echo "FAIL: a refused shader did not fail the build"; exit 1; }
+echo "ok  a refused shader fails the build"
 
 echo "=== negative: a plain app must NOT compose gpu ==="
 printf 'app.manifest({modules={}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \

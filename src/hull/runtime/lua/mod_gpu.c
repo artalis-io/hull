@@ -363,7 +363,8 @@ static int l_gpu_load(lua_State *L)
         free(file_buf);
         return hl_lua_budget_raise(L);
     }
-    int rc = hl_cap_gpu_compile(ctx, device, name, wgsl, wgsl_len);
+    int rc = hl_cap_gpu_compile_ex(ctx, device, name, wgsl, wgsl_len,
+                                   HL_GPU_COMPILE_FROM_SHADERS);
     free(file_buf);
 
     if (rc != HL_GPU_OK) {

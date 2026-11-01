@@ -43,6 +43,7 @@
 #include "hull/tool.h"                 /* hl_tool_set_dev_session */
 #include "hull/cap/crypto.h"
 #include "hull/cap/tar.h"        /* tool.bundle_verify */
+#include "hull/cap/gpu.h"        /* tool.gpu_shaders_check */
 #include "hull/release.h"        /* hl_release_verify_manifest_sig */
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 #include "hull/manifest_extract_file.h"  /* extract_manifest_js helper */
@@ -2245,7 +2246,87 @@ static int l_tool_frontend_close(lua_State *L)
     return 0;
 }
 
+/* ── tool.gpu_shaders_check({paths}) → compiled | nil, err ─────────
+ *
+ * hull build's check of the shaders it embeds (audit convergence §7.3): a
+ * built binary compiles only these, so they are checked here - the size
+ * cap and the WGSL pre-check always, and a test compile when this hull has
+ * a GPU backend and the host an adapter. Returns true when the test
+ * compile ran, false when only the pre-check did; nil plus a message
+ * naming the file on the first failure.
+ */
+static int l_tool_gpu_shaders_check(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_Integer n = luaL_len(L, 1);
+    if (n < 0 || n > 4096)
+        return luaL_error(L, "gpu_shaders_check: too many shaders");
+    HlToolUnveilCtx *uctx = get_unveil_ctx(L);
+    size_t count = (size_t)n;
+    char  **bufs = calloc(count ? count : 1, sizeof *bufs);
+    size_t *lens = calloc(count ? count : 1, sizeof *lens);
+    const char **paths = calloc(count ? count : 1, sizeof *paths);
+    const char *err = NULL;
+    size_t err_i = 0;
+    if (!bufs || !lens || !paths) { err = "out of memory"; goto done; }
+    /* Every path first (lua_tostring may run no metamethod on a string). */
+    for (size_t i = 0; i < count; i++) {
+        lua_rawgeti(L, 1, (lua_Integer)i + 1);
+        paths[i] = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+        lua_pop(L, 1);   /* the table keeps the string alive */
+        if (!paths[i]) { err = "not a path"; err_i = i; goto done; }
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (uctx && hl_tool_unveil_check(uctx, paths[i], 'r') != 0) {
+            err = "outside the tool sandbox"; err_i = i; goto done;
+        }
+        FILE *f = fopen(paths[i], "rb");
+        if (!f) { err = "cannot open file"; err_i = i; goto done; }
+        size_t cap = HL_GPU_WGSL_MAX_BYTES + 1;
+        bufs[i] = malloc(cap);
+        size_t got = bufs[i] ? fread(bufs[i], 1, cap, f) : 0;
+        int ferr = !bufs[i] || ferror(f);
+        fclose(f);
+        if (ferr) { err = "cannot read file"; err_i = i; goto done; }
+        lens[i] = got;   /* HL_GPU_WGSL_MAX_BYTES + 1 reads as too large */
+    }
+    {
+        const HlGpuBackend *be = NULL;
+        size_t nfeat = 0;
+        const HlGpuBackend *const *feats = hl_gpu_feature_backends(&nfeat);
+        if (nfeat > 0 && feats) be = feats[0];
+#ifdef HL_ENABLE_GPU
+        if (!be) be = &hl_gpu_backend_wgpu;
+#endif
+        int compiled = 0;
+        size_t bad = 0;
+        const char *why = NULL;
+        if (hl_gpu_shaders_build_check(be, (const char *const *)bufs, lens,
+                                       count, &bad, &why, &compiled) != 0) {
+            err = why ? why : "refused";
+            err_i = bad;
+            goto done;
+        }
+        for (size_t i = 0; i < count; i++) free(bufs[i]);
+        free(bufs); free(lens); free(paths);
+        lua_pushboolean(L, compiled);
+        return 1;
+    }
+done:
+    if (bufs) for (size_t i = 0; i < count; i++) free(bufs[i]);
+    free(bufs); free(lens);
+    {
+        const char *p = (paths && err_i < count && paths[err_i])
+                        ? paths[err_i] : "?";
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s: %s", p, err);
+    }
+    free(paths);
+    return 2;
+}
+
 static const luaL_Reg tool_funcs[] = {
+    { "gpu_shaders_check",           l_tool_gpu_shaders_check },
     { "frontend_available",          l_tool_frontend_available },
     { "frontend_open",               l_tool_frontend_open },
     { "frontend_analyze",            l_tool_frontend_analyze },

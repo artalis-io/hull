@@ -14645,6 +14645,84 @@ UTEST(lua_gpu, audit41_exhausted_budget_compile_raises)
     lgpu_cleanup();
 }
 
+/* Audit convergence §7.3: a built binary (embedded app files) compiles only
+ * the shaders embedded from shaders/ unless the manifest sets
+ * gpu.dynamic_shaders; development compiles any source. The policy is set
+ * on the context the way serve.c sets it. */
+static const char lgpu_other_wgsl[] =
+    "@group(0) @binding(0) var<storage, read_write> a: array<u32>; fn main() { }";
+
+UTEST(lua_gpu_audit_convergence, embedded_shaders_only_by_default)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, lgpu_shader_entries, NULL);
+    lua_rt.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(lgpu, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    lua_pushstring(lua_rt.L, lgpu_wgsl);
+    lua_setglobal(lua_rt.L, "SAME");
+    lua_pushstring(lua_rt.L, lgpu_other_wgsl);
+    lua_setglobal(lua_rt.L, "OTHER");
+    gpu_mock_compiles = 0;
+    LGPU_EXPECT("assert(gpu.load('id')) "
+                "local ok1 = gpu.compile('copy', SAME) "
+                "local ok2, e2 = gpu.compile('other', OTHER) "
+                "R = tostring(ok1) .. ' ' .. tostring(ok2) .. ' ' .. tostring(e2)",
+                "true nil dynamic_shader_refused");
+    EXPECT_EQ(gpu_mock_compiles, 2);
+    lua_rt.base.app_vfs = NULL;
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu_audit_convergence, dynamic_source_with_opt_in)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, lgpu_shader_entries, NULL);
+    lua_rt.base.app_vfs = &vfs;
+    hl_cap_gpu_set_shader_policy(lgpu, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    lua_pushstring(lua_rt.L, lgpu_other_wgsl);
+    lua_setglobal(lua_rt.L, "OTHER");
+    LGPU_EXPECT("R = tostring(gpu.compile('other', OTHER))", "true");
+    lua_rt.base.app_vfs = NULL;
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu_audit_convergence, dev_mode_compiles_inline_source)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    static const HlEntry none[] = { { 0, 0, 0 } };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, none, "/nonexistent-app");
+    hl_cap_gpu_set_shader_policy(lgpu, HL_GPU_SHADERS_DEV, 0, &vfs);
+    lua_pushstring(lua_rt.L, lgpu_other_wgsl);
+    lua_setglobal(lua_rt.L, "OTHER");
+    LGPU_EXPECT("R = tostring(gpu.compile('other', OTHER))", "true");
+    lgpu_cleanup();
+}
+
+UTEST(lua_gpu_audit_convergence, manifest_dynamic_shaders)
+{
+    static const struct { const char *decl; int dyn; } cases[] = {
+        { "app.manifest({ gpu = { dynamic_shaders = true } })",   1 },
+        { "app.manifest({ gpu = { dynamic_shaders = false } })",  0 },
+        { "app.manifest({ gpu = { dynamic_shaders = 'true' } })", 0 },
+        { "app.manifest({ gpu = { dynamic_shaders = 1 } })",      0 },
+        { "app.manifest({ gpu = {} })",                           0 },
+        { "app.manifest({ gpu = true })",                         0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        init_lua();
+        ASSERT_TRUE(lua_initialized);
+        ASSERT_EQ(luaL_dostring(lua_rt.L, cases[i].decl), LUA_OK);
+        HlManifest m;
+        ASSERT_EQ(hl_manifest_extract_lua(lua_rt.L, &m, NULL), 0);
+        EXPECT_EQ_MSG(m.gpu_dynamic_shaders, cases[i].dyn, cases[i].decl);
+        hl_manifest_free(&m);
+        cleanup_lua();
+    }
+}
+
 /* ── Audit 37: fs.list, fs.stat and small fs / blob writes are charged ─
  *
  * fs.list read a whole directory (every entry, matching the grant's pattern

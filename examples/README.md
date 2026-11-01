@@ -426,7 +426,7 @@ Six reference WASM modules ship with the compute example, each with C source, pr
 
 ### gpu_search
 
-GPU-accelerated vector similarity search using WGSL compute shaders. Index embedding vectors on the GPU, then query for nearest neighbors via cosine similarity. Demonstrates `gpu.compile()`, `gpu.buffer()`, `gpu.dispatch()` with uniforms, persistent buffers, and workgroup dispatch.
+GPU-accelerated vector similarity search using WGSL compute shaders. Index embedding vectors on the GPU, then query for nearest neighbors via cosine similarity. Demonstrates `gpu.load()` (the shader is `shaders/cosine_similarity.wgsl`), `gpu.buffer()`, `gpu.dispatch()` with uniforms, persistent buffers, and workgroup dispatch.
 
 Requires GPU build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
 
@@ -446,7 +446,7 @@ curl -X POST http://localhost:3000/search \
 ```
 
 **Key GPU features demonstrated:**
-- `gpu.compile(name, wgsl)` - compile WGSL shader once at startup
+- `gpu.load(name)` - compile `shaders/<name>.wgsl` once at startup (a built binary compiles only shaders embedded from `shaders/`)
 - `gpu.buffer(name, data)` - persistent GPU buffer for indexed vectors
 - `gpu.dispatch(name, opts)` - dispatch with uniforms, workgroups, readback
 - `app.manifest({ gpu = true })` - capability declaration

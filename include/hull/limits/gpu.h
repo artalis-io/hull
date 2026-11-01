@@ -238,18 +238,39 @@
  * declaration squared (per function), on top of the byte and expansion
  * charges (audit 40), whether it compiles, fails or is refused. Words and
  * statements are counted with every call inlined when that is more (audit
- * 41). A shader at the module word bound costs ~4096 x 4096 + ~800 x 1024
+ * 41), the part inlining adds at the lower HL_GPU_WGSL_INLINED_* rates
+ * below (audit 42). A shader at the module word bound costs ~4096 x 4096 + ~800 x 1024
  * ~= 17.6M units (more with many declarations: 512^2 x 32 = 8.4M per
  * function at that bound), about a fifth of the default 100M budget -
  * roughly what a second of script costs, as such a compile takes up to
  * ~1 s - so a loop of large compiles trips the budget within a handful;
- * one at the inlined word bound costs ~67M+. The shipped example shaders
+ * a refused one past the inlined word bound costs ~67M+. The shipped example shaders
  * cost under 1M. */
 #ifndef HL_GPU_WGSL_WORD_UNITS
 #define HL_GPU_WGSL_WORD_UNITS    ((uint64_t)4096)
 #endif
 #ifndef HL_GPU_WGSL_STMT_UNITS
 #define HL_GPU_WGSL_STMT_UNITS    ((uint64_t)1024)
+#endif
+/* Run-budget units per word and per statement that inlining adds past
+ * the written ones (audit 42), for a source within the inlined bounds
+ * above; past them it is refused and the extra is charged at the written
+ * rates. Inlined copies compile far faster than written code: a
+ * domain-warp shader (main -> pattern() x6 -> fbm() x5 -> a simplex
+ * noise in a loop; ~610 written words, ~14800 inlined) compiles in
+ * ~0.11 s on Metal, which at 64 units per microsecond is ~7M units, and
+ * every call chain within the inlined bounds compiles in 0.13 s or less
+ * (~8M). At the written rate (audit 41) that shader cost ~63M, and an app
+ * compiling three or four at startup could not load. At these rates it
+ * costs ~6M and a shader at the inlined word bound adds at most
+ * 16384 x 256 + 4096 x 64 ~= 4.5M; the slowest inlined shape measured
+ * (a helper of 64 live values called 31 times, ~0.84 s) is undercharged,
+ * bounded by the refusal caps and the compile deadline. */
+#ifndef HL_GPU_WGSL_INLINED_WORD_UNITS
+#define HL_GPU_WGSL_INLINED_WORD_UNITS ((uint64_t)256)
+#endif
+#ifndef HL_GPU_WGSL_INLINED_STMT_UNITS
+#define HL_GPU_WGSL_INLINED_STMT_UNITS ((uint64_t)64)
 #endif
 #ifndef HL_GPU_WGSL_DECL_SQ_UNITS
 #define HL_GPU_WGSL_DECL_SQ_UNITS ((uint64_t)32)

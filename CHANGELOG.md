@@ -29,7 +29,38 @@ release-artifact layout).
   cap on fix batches, solo engine / protocol patches, a feature freeze per round and the
   converged-area review cadence. A PR template carries the checklist.
 
+### Changed
+
+- **A built binary compiles only the GPU shaders it was built with** (audit convergence
+  phase 3, §7.3). Every audit round found a WGSL shape the compile-cost pre-checks missed, so
+  compile time of a black-box shader compiler is no longer the security boundary. In a built
+  binary (serve or `app.main`), `gpu.load(name)` compiles the embedded `shaders/<name>.wgsl`,
+  and `gpu.compile(name, src)` is refused with `dynamic_shader_refused` (Lua `nil, err`; JS
+  throws) unless `src` is byte-identical to an embedded `shaders/*.wgsl`. The manifest opt-in
+  `gpu = { dynamic_shaders = true }` (JS `gpu: { dynamicShaders: true }`) allows runtime source,
+  compiled in-process under the existing compile deadline (a helper process with a hard kill is
+  a follow-up). Development (`hull app.lua`, `hull dev`) is unchanged: `shaders/` on disk counts
+  as embedded and inline source still compiles, with one WARN that the built binary will refuse
+  it. `hull build` now checks every shader it embeds - the size cap and the WGSL pre-check, plus
+  a test compile when the building hull has a GPU backend and an adapter - and fails the build
+  on one that does not pass.
+
+  **Migration:** move each inline shader to `shaders/<name>.wgsl` and replace
+  `gpu.compile(name, SRC)` with `gpu.load(name)`; or, when the source really is generated at run
+  time, set `gpu.dynamic_shaders = true`. The examples (`gpu_search`, `gpu_pipeline`,
+  `compute_gpu_chain`) now load their shaders from `shaders/`.
+
 ### Fixes
+
+- **An app compiling a few helper-based GPU shaders no longer fails to load** (audit 42). The
+  audit 41 compile charge counted every word as if call-inlined code compiled as slowly as
+  written code, so an ordinary domain-warp shader (main calling `pattern()` 6 times, `pattern`
+  calling `fbm()` 5 times, `fbm` looping over a simplex noise; ~0.11 s to compile on Metal) was
+  charged ~63M of the 100M default budget. Written words and statements keep their rates; the
+  words and statements inlining adds are charged at `HL_GPU_WGSL_INLINED_WORD_UNITS` (256) and
+  `HL_GPU_WGSL_INLINED_STMT_UNITS` (64), so that shader now costs ~6.7M. A source past an inlined
+  refusal bound is still charged the extra at the written rates, and the refusal bounds are
+  unchanged.
 
 - **A planted SQLite virtual table could read `_hull_*` tables through `hull/search`** (audit 40).
   The audit 39 open-time check read only views and triggers, but a virtual table is stored as

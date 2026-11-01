@@ -45,6 +45,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct HlVfs;   /* hull/vfs.h: the app VFS the shader policy reads */
+
 /* ── Error codes ───────────────────────────────────────────────────── */
 
 typedef enum {
@@ -63,7 +65,32 @@ typedef enum {
      * buffer / texture write, read and copy entry points (audit 34);
      * dispatch / pipeline keep HL_GPU_ERR_TIMEOUT with "gpu_busy". */
     HL_GPU_ERR_BUSY          = -10,
+    /* The shader policy refused the source (audit convergence §7.3): a
+     * built binary compiles only shaders embedded from shaders/ at build
+     * time unless the manifest sets gpu.dynamic_shaders
+     * ("dynamic_shader_refused"). */
+    HL_GPU_ERR_POLICY        = -11,
 } HlGpuError;
+
+/* Which WGSL sources hl_cap_gpu_compile accepts (audit convergence §7.3).
+ * The shader compiler is a black box whose compile time the WGSL
+ * pre-checks only estimate, so a deployed app compiles only the shaders it
+ * was built with. */
+typedef enum {
+    /* Any source: unit tests and embedders that set no policy. */
+    HL_GPU_SHADERS_ANY      = 0,
+    /* Development (no embedded app files: `hull app.lua`, `hull dev`):
+     * any source compiles, but a gpu.compile of source that did not come
+     * from shaders/ without gpu.dynamic_shaders logs one WARN, since the
+     * built binary will refuse it. */
+    HL_GPU_SHADERS_DEV      = 1,
+    /* A built binary: only source byte-identical to an embedded
+     * shaders/<name>.wgsl compiles, unless gpu.dynamic_shaders. */
+    HL_GPU_SHADERS_EMBEDDED = 2,
+} HlGpuShaderMode;
+
+/* hl_cap_gpu_compile_ex flags. */
+#define HL_GPU_COMPILE_FROM_SHADERS 0x1  /* gpu.load: read from shaders/ */
 
 /* ── Buffer usage flags ────────────────────────────────────────────── */
 
@@ -540,6 +567,13 @@ struct HlGpuCtx {
         struct {
             int allowed_devices[HL_GPU_MAX_DEVICES]; /* 1 = allowed */
             int device_restriction;                  /* 1 = allowlist active */
+            /* The shader policy (HlGpuShaderMode), whether the manifest
+             * allows dynamic source (gpu.dynamic_shaders), and the app VFS
+             * whose shaders/ entries are the embedded set. Sealed with the
+             * allowlist, so app code cannot widen it. */
+            int                  shader_mode;
+            int                  dynamic_shaders;
+            const struct HlVfs  *shader_vfs;
         };
         unsigned char policy_span[65536];            /* == HL_POLICY_SPAN */
     };
@@ -565,11 +599,48 @@ const char *hl_cap_gpu_device_name(HlGpuCtx *ctx, int device);
 /* The error string the gpu.compile / gpu.load bindings report for a
  * failed hl_cap_gpu_compile: "compile_timeout" (abandoned past its
  * deadline or the run's - audit 40), "gpu_busy" (an abandoned compile
- * still runs on the device), else "shader_error". */
+ * still runs on the device), "dynamic_shader_refused" (the shader policy:
+ * a built binary's source not embedded from shaders/), else
+ * "shader_error". */
 const char *hl_gpu_compile_errstr(int rc);
 
 int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
                        const char *wgsl, size_t wgsl_len);
+
+/* hl_cap_gpu_compile with HL_GPU_COMPILE_* @p flags. The flags only say
+ * where the source came from (for the development warning); they never
+ * widen the shader policy - a built binary looks every source up in its
+ * embedded shaders/ set. */
+int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
+                          const char *wgsl, size_t wgsl_len, int flags);
+
+/* Set the shader policy (audit convergence §7.3; cap/gpu_shader_policy.c).
+ * serve.c calls it before it seals the context: HL_GPU_SHADERS_EMBEDDED
+ * when the app VFS holds embedded files (a built binary), else
+ * HL_GPU_SHADERS_DEV. @p vfs must outlive the context. */
+void hl_cap_gpu_set_shader_policy(HlGpuCtx *ctx, int mode, int dynamic_shaders,
+                                  const struct HlVfs *vfs);
+
+/* 1 when @p wgsl is byte-identical to a shaders/<name>.wgsl entry of
+ * @p vfs, else 0. */
+int hl_gpu_shader_is_embedded(const struct HlVfs *vfs, const char *wgsl,
+                              size_t len);
+
+/* The policy check hl_cap_gpu_compile_ex runs before the pre-checks:
+ * HL_GPU_OK or HL_GPU_ERR_POLICY. Logs the refusal (and, in development,
+ * the one-time warning). */
+int hl_gpu_shader_admit(const HlGpuCtx *ctx, const char *name,
+                        const char *wgsl, size_t len, int flags);
+
+/* hull build's check of the shaders it embeds: each of the @p n sources
+ * must fit HL_GPU_WGSL_MAX_BYTES and pass hl_gpu_wgsl_precheck; when
+ * @p backend is non-NULL and the host has an adapter, each is also test-
+ * compiled (*compiled = 1). 0 when all pass; -1 with the failing index in
+ * *bad and a short reason in *why. */
+int hl_gpu_shaders_build_check(const HlGpuBackend *backend,
+                               const char *const *srcs, const size_t *lens,
+                               size_t n, size_t *bad, const char **why,
+                               int *compiled);
 
 /* Dispatch */
 int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,

@@ -244,6 +244,10 @@ typedef struct HlManifest {
     int         gpu;              /* 1 if app declares gpu: true or gpu: {...} */
     int         gpu_devices[HL_GPU_MAX_DEVICES]; /* allowed device indices */
     int         gpu_device_count; /* 0 = all devices allowed (backward compat) */
+    int         gpu_dynamic_shaders; /* gpu.dynamic_shaders = true (JS
+                                   * gpu.dynamicShaders): a built binary may
+                                   * compile source not embedded from shaders/
+                                   * (audit convergence §7.3) */
     int         compute;          /* 1 if app declares compute: true */
     int         tui;              /* 1 if app declares tui: true (terminal UI) */
 

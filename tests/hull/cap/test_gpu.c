@@ -1904,6 +1904,10 @@ static char *a36_read_file(const char *path, size_t *len)
 static const char *const a36_examples[] = {
     "examples/gpu_search/shaders/cosine_similarity.wgsl",
     "examples/gpu_texture/shaders/invert.wgsl",
+    "examples/gpu_pipeline/shaders/normalize.wgsl",
+    "examples/gpu_pipeline/shaders/weight.wgsl",
+    "examples/gpu_pipeline/shaders/reduce.wgsl",
+    "examples/compute_gpu_chain/shaders/double.wgsl",
 };
 
 UTEST(hull_cap_gpu_audit36, ordinary_shaders_are_shallow)
@@ -2188,13 +2192,11 @@ UTEST(hull_cap_gpu_audit37, legitimate_blankspace_accepted)
     }
 }
 
-/* Every WGSL shader embedded in an example app or the gpu context doc
- * (Lua long strings, JS template literals, ```wgsl fences) passes. */
+/* Every WGSL shader embedded in the gpu context doc (```wgsl fences)
+ * passes. The example apps' shaders moved to shaders/ files (audit
+ * convergence 7.3: a built binary compiles only those) and are checked
+ * through a36_examples. */
 static const char *const a37_hosts[] = {
-    "examples/gpu_pipeline/app.lua",
-    "examples/compute_gpu_chain/app.lua",
-    "examples/gpu_search/app.lua",
-    "examples/gpu_search/app.js",
     "stdlib/context/gpu.md",
 };
 
@@ -2231,7 +2233,7 @@ UTEST(hull_cap_gpu_audit37, embedded_example_shaders_accepted)
         }
         free(src);
     }
-    EXPECT_TRUE(found >= 5);
+    EXPECT_TRUE(found >= 1);
 }
 
 UTEST(hull_cap_gpu_audit37, unclassifiable_bytes_refused)
@@ -3597,9 +3599,15 @@ UTEST(hull_cap_gpu_audit41, compile_charge_reflects_expansion)
     ASSERT_EQ(0, hl_gpu_wgsl_size(t, strlen(t), &z));
     EXPECT_TRUE(a41_c.module_words > 4 * (uint64_t)z.module_words);
     uint64_t u = hl_gpu_wgsl_compile_units(t, strlen(t));
-    EXPECT_TRUE(u >= a41_c.module_words * HL_GPU_WGSL_WORD_UNITS +
-                     a41_c.module_stmts * HL_GPU_WGSL_STMT_UNITS);
-    EXPECT_TRUE(u > (uint64_t)z.module_words * HL_GPU_WGSL_WORD_UNITS * 4);
+    /* Written code at the written rates, what inlining adds at the
+     * inlined rates (audit 42). */
+    EXPECT_TRUE(u >= (uint64_t)z.module_words * HL_GPU_WGSL_WORD_UNITS +
+                     (uint64_t)z.module_stmts * HL_GPU_WGSL_STMT_UNITS +
+                     (a41_c.module_words - z.module_words) * HL_GPU_WGSL_INLINED_WORD_UNITS +
+                     (a41_c.module_stmts - z.module_stmts) * HL_GPU_WGSL_INLINED_STMT_UNITS);
+    EXPECT_TRUE(u > (uint64_t)z.module_words * HL_GPU_WGSL_WORD_UNITS +
+                    (uint64_t)z.module_stmts * HL_GPU_WGSL_STMT_UNITS +
+                    hl_work_bytes_units(strlen(t)));
     free(t);
     char *bomb = a41_fan(8, 90, 1);
     ASSERT_TRUE(bomb != NULL);
@@ -3680,5 +3688,381 @@ UTEST(hull_cap_gpu_audit41, real_device_bounded)
 }
 #endif /* HL_ENABLE_GPU */
 
+/* ── Audit convergence §7.3: the shader policy ─────────────────────────
+ * A built binary compiles only the shaders embedded from shaders/ unless
+ * the manifest sets gpu.dynamic_shaders; development compiles any source.
+ * The policy is enforced in hl_cap_gpu_compile_ex, before the pre-checks
+ * and the backend. */
+#include "hull/vfs.h"
+
+static const char AC_EMBEDDED[] =
+    "@compute @workgroup_size(1) fn main() { let x = 1 + 2; }";
+static const char AC_OTHER[] =
+    "@compute @workgroup_size(1) fn main() { let y = 3 + 4; }";
+/* Same length as AC_EMBEDDED, one byte different. */
+static const char AC_NEAR[] =
+    "@compute @workgroup_size(1) fn main() { let x = 1 + 3; }";
+
+static const HlEntry AC_ENTRIES[] = {
+    { "./app.lua", (const unsigned char *)"-- app", 6 },
+    { "shaders/dbl.wgsl", (const unsigned char *)AC_EMBEDDED,
+      (unsigned int)(sizeof AC_EMBEDDED - 1) },
+    /* Not a shader: same bytes, but under another prefix. */
+    { "templates/x.wgsl", (const unsigned char *)AC_OTHER,
+      (unsigned int)(sizeof AC_OTHER - 1) },
+    { NULL, NULL, 0 },
+};
+
+static HlGpuCtx *ac_ctx(HlGpuBackend *be, HlVfs *vfs)
+{
+    *be = MOCK_BACKEND;
+    be->compile = mock_compile;
+    HlGpuCtx *ctx = mock_ctx();
+    if (!ctx) return NULL;
+    ctx->backend = be;
+    mock_compiles = 0;
+    hl_vfs_init(vfs, AC_ENTRIES, NULL);
+    return ctx;
+}
+
+UTEST(hull_cap_gpu_audit_convergence, embedded_shader_accepted)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    EXPECT_EQ(1, hl_gpu_shader_is_embedded(&vfs, AC_EMBEDDED, strlen(AC_EMBEDDED)));
+    EXPECT_EQ(0, hl_gpu_shader_is_embedded(&vfs, AC_NEAR, strlen(AC_NEAR)));
+    EXPECT_EQ(0, hl_gpu_shader_is_embedded(&vfs, AC_OTHER, strlen(AC_OTHER)));
+    /* gpu.load: the embedded entry's own bytes. */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_ex(ctx, -1, "dbl",
+              (const char *)AC_ENTRIES[1].data, AC_ENTRIES[1].len,
+              HL_GPU_COMPILE_FROM_SHADERS));
+    /* gpu.compile of a byte-identical copy is the same shader. */
+    char copy[sizeof AC_EMBEDDED];
+    memcpy(copy, AC_EMBEDDED, sizeof copy);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "dbl2", copy, strlen(copy)));
+    EXPECT_EQ(2, mock_compiles);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_audit_convergence, dynamic_source_refused_without_opt_in)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 0, &vfs);
+    EXPECT_EQ(HL_GPU_ERR_POLICY, hl_cap_gpu_compile(ctx, -1, "other",
+              AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(HL_GPU_ERR_POLICY, hl_cap_gpu_compile(ctx, -1, "near",
+              AC_NEAR, strlen(AC_NEAR)));
+    /* The source-origin flag never widens the policy. */
+    EXPECT_EQ(HL_GPU_ERR_POLICY, hl_cap_gpu_compile_ex(ctx, -1, "other",
+              AC_OTHER, strlen(AC_OTHER), HL_GPU_COMPILE_FROM_SHADERS));
+    /* Refused before the backend, nothing cached. */
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    EXPECT_STREQ("dynamic_shader_refused", hl_gpu_compile_errstr(HL_GPU_ERR_POLICY));
+    /* A built binary with no shaders at all refuses every source. */
+    static const HlEntry none[] = {
+        { "./app.lua", (const unsigned char *)"-- app", 6 }, { NULL, NULL, 0 },
+    };
+    HlVfs empty;
+    hl_vfs_init(&empty, none, NULL);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 0, &empty);
+    EXPECT_EQ(HL_GPU_ERR_POLICY, hl_cap_gpu_compile(ctx, -1, "dbl",
+              AC_EMBEDDED, strlen(AC_EMBEDDED)));
+    EXPECT_EQ(0, mock_compiles);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_audit_convergence, dynamic_source_with_opt_in)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "other",
+              AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(1, mock_compiles);
+    /* The pre-checks still run on dynamic source. */
+    char *add = a36_chain(A36_ADD_HEAD, "+y", 20000, "; }");
+    ASSERT_TRUE(add != NULL);
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "deep", add, strlen(add)));
+    free(add);
+    EXPECT_EQ(1, mock_compiles);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_audit_convergence, dev_mode_compiles_inline_source)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    /* Development: no embedded files (the VFS is empty, root_dir set). */
+    static const HlEntry none[] = { { NULL, NULL, 0 } };
+    HlVfs dev;
+    hl_vfs_init(&dev, none, "/nonexistent-app");
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_DEV, 0, &dev);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "inline",
+              AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile_ex(ctx, -1, "file",
+              AC_EMBEDDED, strlen(AC_EMBEDDED), HL_GPU_COMPILE_FROM_SHADERS));
+    EXPECT_EQ(2, mock_compiles);
+    /* No policy set (unit tests, embedders) compiles anything too. */
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_ANY, 0, NULL);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "any",
+              AC_NEAR, strlen(AC_NEAR)));
+    EXPECT_EQ(3, mock_compiles);
+    mock_free(ctx);
+}
+
+/* The opt-in compiles in-process, under the compile deadline: a compile
+ * that outlives it is abandoned and the call returns (the helper process
+ * with a hard kill is a follow-up). Uses the round-40 slow-compile hook. */
+UTEST(hull_cap_gpu_audit_convergence, opt_in_compile_abandoned_at_deadline)
+{
+    HlGpuBackend be = MOCK_BACKEND;
+    be.compile = a40_slow_compile;
+    be.pipeline_destroy = a40_pipeline_destroy;
+    HlGpuCtx *ctx = mock_ctx();
+    ASSERT_TRUE(ctx != NULL);
+    ctx->backend = &be;
+    HlVfs vfs;
+    hl_vfs_init(&vfs, AC_ENTRIES, NULL);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    a40_reset();
+    hl_gpu_test_set_compile_timeout_ms(100);
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile(ctx, -1, "slow",
+              AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_TRUE(a40_now() - t0 < 2.0);
+    EXPECT_STREQ("compile_timeout", hl_gpu_compile_errstr(HL_GPU_ERR_TIMEOUT));
+    a40_release_now();
+    EXPECT_TRUE(a40_wait_settled(ctx));
+    for (int k = 0; k < 200 && ctx->devices[0].compile_job; k++) {
+        a40_sleep_ms(10);
+        (void)hl_cap_gpu_compile(ctx, -1, "poke", AC_EMBEDDED, strlen(AC_EMBEDDED));
+    }
+    hl_gpu_test_set_compile_timeout_ms(0);
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_audit_convergence, build_check_runs_the_precheck)
+{
+    const char *srcs[2] = { AC_EMBEDDED, AC_OTHER };
+    size_t lens[2] = { strlen(AC_EMBEDDED), strlen(AC_OTHER) };
+    size_t bad = 99;
+    const char *why = NULL;
+    int compiled = -1;
+    EXPECT_EQ(0, hl_gpu_shaders_build_check(NULL, srcs, lens, 2, &bad, &why,
+                                            &compiled));
+    EXPECT_EQ(0, compiled);
+    /* A source the pre-check refuses fails the build, naming its index. */
+    const char *badsrc = "@compute @workgroup_size(1) fn main() { $ }";
+    srcs[1] = badsrc;
+    lens[1] = strlen(badsrc);
+    EXPECT_EQ(-1, hl_gpu_shaders_build_check(NULL, srcs, lens, 2, &bad, &why,
+                                             &compiled));
+    EXPECT_EQ((size_t)1, bad);
+    EXPECT_TRUE(why != NULL);
+    /* Larger than the size cap. */
+    lens[1] = (size_t)HL_GPU_WGSL_MAX_BYTES + 1;
+    srcs[1] = AC_OTHER;   /* never read past the cap check */
+    EXPECT_EQ(-1, hl_gpu_shaders_build_check(NULL, srcs, lens, 2, &bad, &why,
+                                             &compiled));
+    EXPECT_EQ((size_t)1, bad);
+}
+
+#ifdef HL_ENABLE_GPU
+/* On a real device (skipped without an adapter): the build check test-
+ * compiles, and a source the pre-check passes but naga rejects fails. */
+UTEST(hull_cap_gpu_audit_convergence, build_check_test_compiles_on_device)
+{
+    HlGpuCtx probe;
+    if (!gpu_test_init(&probe)) { ASSERT_TRUE(1); return; }
+    hl_cap_gpu_destroy(&probe);
+    const char *good = "@group(0) @binding(0) var<storage, read_write> d: array<f32>;\n"
+                       "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) {"
+                       " d[id.x] = d[id.x] * 2.0; }";
+    const char *srcs[1] = { good };
+    size_t lens[1] = { strlen(good) };
+    size_t bad = 99;
+    const char *why = NULL;
+    int compiled = 0;
+    EXPECT_EQ(0, hl_gpu_shaders_build_check(&hl_gpu_backend_wgpu, srcs, lens, 1,
+                                            &bad, &why, &compiled));
+    EXPECT_EQ(1, compiled);
+    const char *broken = "@compute @workgroup_size(1) fn main() { let x: u32 = undefined_name; }";
+    srcs[0] = broken;
+    lens[0] = strlen(broken);
+    EXPECT_EQ(-1, hl_gpu_shaders_build_check(&hl_gpu_backend_wgpu, srcs, lens, 1,
+                                             &bad, &why, &compiled));
+    EXPECT_EQ((size_t)0, bad);
+}
+
+/* Measurement for the helper-process follow-up: a source one device
+ * compiled, compiled again on a fresh device. The printed times say how
+ * much a driver cache saves (Apple M1 Max: ~0.64 s, then ~0.01 s; ~6 ms
+ * in a new process); the expectation only bounds it. */
+UTEST(hull_cap_gpu_audit_convergence, recompile_on_a_fresh_device_measured)
+{
+    HlGpuCtx a;
+    if (!gpu_test_init(&a)) { ASSERT_TRUE(1); return; }
+    /* One statement short of audit 40's shape, so no earlier test in this
+     * process compiled this exact source. */
+    char *src = a40_stores(2, (HL_GPU_WGSL_FN_WORDS_MAX - 16) / 5 - 1);
+    ASSERT_TRUE(src != NULL);
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&a, -1, "m", src, strlen(src)));
+    double first = a40_now() - t0;
+    hl_cap_gpu_destroy(&a);
+    HlGpuCtx b;
+    if (gpu_test_init(&b)) {
+        t0 = a40_now();
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&b, -1, "m", src, strlen(src)));
+        double again = a40_now() - t0;
+        printf("  convergence: %zu bytes, first %.2f s, fresh-device again %.2f s\n",
+               strlen(src), first, again);
+        EXPECT_TRUE(again < 5.0);
+        hl_cap_gpu_destroy(&b);
+    }
+    free(src);
+}
+#endif /* HL_ENABLE_GPU */
+
+
+/* ── Audit 42: helper-based shaders fit the budget ──────────────────
+ * The audit-41 compile charge read call-inlined words at the written-word
+ * rate (HL_GPU_WGSL_WORD_UNITS), so an ordinary domain-warp shader - main
+ * calls pattern() 6 times, pattern calls fbm() 5 times, fbm loops over a
+ * simplex noise - was charged 50-70M of the 100M default budget for a
+ * compile Metal finishes in ~0.1 s, and an app compiling three or four
+ * such shaders at startup could not load. Inlined words past the written
+ * ones are now charged at HL_GPU_WGSL_INLINED_WORD_UNITS. */
+static const char A42_WARP[] =
+    "@group(0) @binding(0) var<storage, read_write> out_px: array<vec4<f32>>;\n"
+    "struct Params { width: u32, height: u32, time: f32, scale: f32 }\n"
+    "@group(0) @binding(1) var<uniform> params: Params;\n"
+    "fn mod289_3(x: vec3<f32>) -> vec3<f32> { return x - floor(x * (1.0 / 289.0)) * 289.0; }\n"
+    "fn mod289_4(x: vec4<f32>) -> vec4<f32> { return x - floor(x * (1.0 / 289.0)) * 289.0; }\n"
+    "fn permute4(x: vec4<f32>) -> vec4<f32> { return mod289_4(((x * 34.0) + 10.0) * x); }\n"
+    "fn taylor_inv_sqrt4(r: vec4<f32>) -> vec4<f32> { return 1.79284291400159 - 0.85373472095314 * r; }\n"
+    "fn snoise(v: vec3<f32>) -> f32 {\n"
+    "  let C = vec2<f32>(1.0 / 6.0, 1.0 / 3.0);\n"
+    "  let D = vec4<f32>(0.0, 0.5, 1.0, 2.0);\n"
+    "  var i = floor(v + dot(v, C.yyy));\n"
+    "  let x0 = v - i + dot(i, C.xxx);\n"
+    "  let g = step(x0.yzx, x0.xyz);\n"
+    "  let l = 1.0 - g;\n"
+    "  let i1 = min(g.xyz, l.zxy);\n"
+    "  let i2 = max(g.xyz, l.zxy);\n"
+    "  let x1 = x0 - i1 + C.xxx;\n"
+    "  let x2 = x0 - i2 + C.yyy;\n"
+    "  let x3 = x0 - D.yyy;\n"
+    "  i = mod289_3(i);\n"
+    "  let p = permute4(permute4(permute4(i.z + vec4<f32>(0.0, i1.z, i2.z, 1.0))\n"
+    "        + i.y + vec4<f32>(0.0, i1.y, i2.y, 1.0)) + i.x + vec4<f32>(0.0, i1.x, i2.x, 1.0));\n"
+    "  let n_ = 0.142857142857;\n"
+    "  let ns = n_ * D.wyz - D.xzx;\n"
+    "  let j = p - 49.0 * floor(p * ns.z * ns.z);\n"
+    "  let x_ = floor(j * ns.z);\n"
+    "  let y_ = floor(j - 7.0 * x_);\n"
+    "  let x = x_ * ns.x + ns.yyyy;\n"
+    "  let y = y_ * ns.x + ns.yyyy;\n"
+    "  let h = 1.0 - abs(x) - abs(y);\n"
+    "  let b0 = vec4<f32>(x.xy, y.xy);\n"
+    "  let b1 = vec4<f32>(x.zw, y.zw);\n"
+    "  let s0 = floor(b0) * 2.0 + 1.0;\n"
+    "  let s1 = floor(b1) * 2.0 + 1.0;\n"
+    "  let sh = -step(h, vec4<f32>(0.0));\n"
+    "  let a0 = b0.xzyw + s0.xzyw * sh.xxyy;\n"
+    "  let a1 = b1.xzyw + s1.xzyw * sh.zzww;\n"
+    "  var p0 = vec3<f32>(a0.xy, h.x);\n"
+    "  var p1 = vec3<f32>(a0.zw, h.y);\n"
+    "  var p2 = vec3<f32>(a1.xy, h.z);\n"
+    "  var p3 = vec3<f32>(a1.zw, h.w);\n"
+    "  let norm = taylor_inv_sqrt4(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));\n"
+    "  p0 = p0 * norm.x;\n"
+    "  p1 = p1 * norm.y;\n"
+    "  p2 = p2 * norm.z;\n"
+    "  p3 = p3 * norm.w;\n"
+    "  var m = max(0.5 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.0));\n"
+    "  m = m * m;\n"
+    "  return 105.0 * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));\n"
+    "}\n"
+    "fn fbm(p: vec3<f32>) -> f32 {\n"
+    "  var sum = 0.0;\n"
+    "  var amp = 0.5;\n"
+    "  var q = p;\n"
+    "  for (var o = 0; o < 6; o = o + 1) {\n"
+    "    sum = sum + amp * snoise(q);\n"
+    "    q = q * 2.02 + vec3<f32>(1.7, 9.2, 3.1);\n"
+    "    amp = amp * 0.5;\n"
+    "  }\n"
+    "  return sum;\n"
+    "}\n"
+    "fn pattern(p: vec2<f32>, t: f32) -> f32 {\n"
+    "  let q = vec2<f32>(fbm(vec3<f32>(p, t)), fbm(vec3<f32>(p + vec2<f32>(5.2, 1.3), t)));\n"
+    "  let r = vec2<f32>(fbm(vec3<f32>(p + 4.0 * q + vec2<f32>(1.7, 9.2), t)),\n"
+    "                    fbm(vec3<f32>(p + 4.0 * q + vec2<f32>(8.3, 2.8), t)));\n"
+    "  return fbm(vec3<f32>(p + 4.0 * r, t));\n"
+    "}\n"
+    "@compute @workgroup_size(8, 8)\n"
+    "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n"
+    "  if (gid.x >= params.width || gid.y >= params.height) { return; }\n"
+    "  let uv = vec2<f32>(f32(gid.x), f32(gid.y)) / f32(params.width) * params.scale;\n"
+    "  let t = params.time * 0.1;\n"
+    "  let a = pattern(uv, t);\n"
+    "  let b = pattern(uv + vec2<f32>(0.01, 0.0), t);\n"
+    "  let c = pattern(uv + vec2<f32>(0.0, 0.01), t);\n"
+    "  let d = pattern(uv * 0.5, t + 3.0);\n"
+    "  let e = pattern(uv * 2.0, t - 1.0);\n"
+    "  let f = pattern(uv.yx, t);\n"
+    "  let n = normalize(vec3<f32>(a - b, a - c, 0.02));\n"
+    "  let col = vec3<f32>(a, d * 0.5 + e * 0.5, f) * (0.6 + 0.4 * n.z);\n"
+    "  out_px[gid.y * params.width + gid.x] = vec4<f32>(col, 1.0);\n"
+    "}\n";
+
+UTEST(gpu_audit42, helper_shaders_fit_budget)
+{
+    const size_t len = strlen(A42_WARP);
+    /* Ordinary code: within every pre-check bound. */
+    EXPECT_EQ(0, hl_gpu_wgsl_precheck(A42_WARP, len, NULL));
+    HlGpuWgslSize z;
+    ASSERT_EQ(0, hl_gpu_wgsl_size(A42_WARP, len, &z));
+    HlGpuWgslCalls c;
+    ASSERT_EQ(0, hl_gpu_wgsl_calls(A42_WARP, len, &c));
+    /* The call fan-out is real: inlined, it is many times its written size. */
+    EXPECT_TRUE(c.module_words > 10 * (uint64_t)z.module_words);
+    uint64_t u = hl_gpu_wgsl_compile_units(A42_WARP, len);
+    printf("  audit42 warp shader: %llu written words, %llu inlined, %llu units\n",
+           (unsigned long long)z.module_words, (unsigned long long)c.module_words,
+           (unsigned long long)u);
+    /* Well under the 100M default: several such shaders compile at startup. */
+    EXPECT_TRUE(u < 10000000u);
+    /* Still charged for its expansion, not as written alone. */
+    EXPECT_TRUE(u > (uint64_t)z.module_words * HL_GPU_WGSL_WORD_UNITS);
+}
+
+#ifdef HL_ENABLE_GPU
+/* On a real device (skipped without an adapter): the warp shader compiles
+ * well inside the deadline (~0.11 s on Apple M1 Max / Metal). */
+UTEST(gpu_audit42, helper_shader_real_device)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) return;
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(&ctx, -1, "warp", A42_WARP, strlen(A42_WARP)));
+    double dt = a40_now() - t0;
+    printf("  audit42 warp shader compile: %.3f s\n", dt);
+    EXPECT_TRUE(dt < 1.5);
+    hl_cap_gpu_destroy(&ctx);
+}
+#endif /* HL_ENABLE_GPU */
 
 UTEST_MAIN();

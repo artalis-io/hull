@@ -231,6 +231,12 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     lua_getfield(L, manifest_idx, "gpu");
     if (lua_istable(L, -1)) {
         out->gpu = 1;
+        /* gpu.dynamic_shaders = true: runtime WGSL source in a built binary
+         * (audit convergence §7.3). Only the boolean true opts in. */
+        lua_getfield(L, -1, "dynamic_shaders");
+        out->gpu_dynamic_shaders = lua_type(L, -1) == LUA_TBOOLEAN &&
+                                   lua_toboolean(L, -1);
+        lua_pop(L, 1);
         lua_getfield(L, -1, "devices");
         if (lua_istable(L, -1)) {
             int len = (int)luaL_len(L, -1);
