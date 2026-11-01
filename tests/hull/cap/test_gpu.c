@@ -4338,6 +4338,168 @@ UTEST(hull_cap_gpu_helper, floor_charged_before_round_trip)
 }
 #endif
 
+
+/* ── Audit convergence §7.3 confirming audit ─────────────────────────
+ * M1: the shader policy holds from GPU init, before the app's top level
+ * runs (serve.c wired the context into the runtime with no policy - the
+ * implicit HL_GPU_SHADERS_ANY - and set it only after the manifest was
+ * applied, so a top-level gpu.compile of any source compiled in-process
+ * with no helper). M2: a helper worker's memory is capped. L1: the
+ * worker's stack is never above the server's compile thread's. */
+
+/* A context over a built binary's files that never got a policy refuses
+ * source it did not embed (fail closed), and still takes its own
+ * shaders. */
+UTEST(gpu_convergence_policy, any_mode_refuses_non_embedded_in_a_built_binary)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_ANY, 0, &vfs);
+    int rc = hl_cap_gpu_compile(ctx, -1, "top", AC_OTHER, strlen(AC_OTHER));
+    EXPECT_EQ(HL_GPU_ERR_POLICY, rc);
+    EXPECT_STREQ("dynamic_shader_refused", hl_gpu_compile_errstr(rc));
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(HL_GPU_OK,
+              hl_cap_gpu_compile(ctx, -1, "own", AC_EMBEDDED, strlen(AC_EMBEDDED)));
+    mock_free(ctx);
+}
+
+/* The context the way serve.c sets it up: policy at GPU init over the
+ * embedded app VFS, the top level runs (a compile of stored, non-embedded
+ * source is refused even though the manifest will opt in: the opt-in is
+ * raised only once the manifest is applied), then the manifest's
+ * gpu.dynamic_shaders sends runtime source to the helper. */
+UTEST(gpu_convergence_policy, top_level_compile_refused_before_manifest)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    hl_cap_gpu_init_shader_policy(ctx, &vfs);
+    EXPECT_EQ(HL_GPU_SHADERS_EMBEDDED, ctx->shader_mode);
+    EXPECT_EQ(0, ctx->dynamic_shaders);
+    /* The app's top level. */
+    int rc = hl_cap_gpu_compile(ctx, -1, "stored1", AC_OTHER, strlen(AC_OTHER));
+    EXPECT_EQ(HL_GPU_ERR_POLICY, rc);
+    EXPECT_STREQ("dynamic_shader_refused", hl_gpu_compile_errstr(rc));
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(HL_GPU_OK,
+              hl_cap_gpu_compile(ctx, -1, "own", AC_EMBEDDED, strlen(AC_EMBEDDED)));
+    /* The manifest applied with the opt-in: runtime source now goes to
+     * the helper (none runs here, so it fails closed - never compiled
+     * in-process unchecked). */
+    hl_gpu_helper_stop();
+    hl_gpu_helper_test_reset_cache(1);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    EXPECT_EQ(HL_GPU_ERR_HELPER,
+              hl_cap_gpu_compile(ctx, -1, "stored2", AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(1, mock_compiles);
+    mock_free(ctx);
+
+    /* Development (no embedded files): any source, from the start. */
+    static const HlEntry dev_entries[] = { { NULL, NULL, 0 } };
+    HlVfs dev;
+    hl_vfs_init(&dev, dev_entries, NULL);
+    ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    hl_cap_gpu_init_shader_policy(ctx, &dev);
+    EXPECT_EQ(HL_GPU_SHADERS_DEV, ctx->shader_mode);
+    EXPECT_EQ(HL_GPU_OK,
+              hl_cap_gpu_compile(ctx, -1, "inline", AC_OTHER, strlen(AC_OTHER)));
+    mock_free(ctx);
+}
+
+/* An unknown mode is refused, not admitted. */
+UTEST(gpu_convergence_policy, unknown_mode_refused)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = ac_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    hl_cap_gpu_set_shader_policy(ctx, 77, 0, &vfs);
+    EXPECT_EQ(HL_GPU_ERR_POLICY,
+              hl_cap_gpu_compile(ctx, -1, "x", AC_EMBEDDED, strlen(AC_EMBEDDED)));
+    mock_free(ctx);
+}
+
+#ifndef AGH_NO_HELPER
+/* M2: a worker that allocates past its memory cap (the "alloc" hook: no
+ * shader involved) is stopped - killed by the supervisor on macOS, refused
+ * its allocation by RLIMIT_DATA on Linux - and the source is refused with
+ * shader_helper_failed; the server and the supervisor carry on. */
+UTEST(gpu_convergence_policy, helper_memory_cap_refuses)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("alloc"));
+    hl_gpu_helper_test_set_mem_cap((uint64_t)256 << 20);
+    double t0 = a40_now();
+    int rc = hl_cap_gpu_compile(ctx, -1, "m", AC_OTHER, strlen(AC_OTHER));
+    double dt = a40_now() - t0;
+    EXPECT_EQ(HL_GPU_ERR_HELPER, rc);
+    EXPECT_STREQ("shader_helper_failed", hl_gpu_compile_errstr(rc));
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    printf("  helper: worker past a 256 MiB memory cap stopped after %.2f s\n", dt);
+    EXPECT_TRUE(dt < 5.0);
+    /* The supervisor takes the next request. */
+    EXPECT_EQ(1, hl_gpu_helper_running());
+    hl_gpu_helper_test_set_mem_cap(0);
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+/* The supervisor reports the worker's peak memory (the measurement the cap
+ * is sized from: docs/design/gpu_compile_helper.md section 5). */
+UTEST(gpu_convergence_policy, helper_reports_worker_peak)
+{
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("accept"));
+    HlGpuHelperStats st;
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "p", AC_OTHER, strlen(AC_OTHER)));
+    hl_gpu_helper_stats(&st);
+    EXPECT_TRUE(st.peak_bytes > 0);
+    EXPECT_TRUE(st.peak_bytes < HL_GPU_HELPER_MEM_BYTES);
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+/* L1: the worker's stack is part of the verdict: one checked on a smaller
+ * stack is a different verdict (its own round trip), and the server asks
+ * for no more than its compile thread can get. */
+UTEST(gpu_convergence_policy, helper_stack_follows_the_server)
+{
+    size_t avail = hl_gpu_compile_stack_available();
+    EXPECT_TRUE(avail >= ((size_t)64 << 20));
+    ASSERT_EQ(0, ach_start("accept"));
+    HlGpuHelperStats a, b, c;
+    hl_gpu_helper_stats(&a);
+    EXPECT_EQ(HL_GPU_HELPER_OK,
+              hl_gpu_helper_check(AC_OTHER, strlen(AC_OTHER), 0, "dev", 0));
+    hl_gpu_helper_stats(&b);
+    EXPECT_EQ(a.round_trips + 1, b.round_trips);
+    EXPECT_EQ(HL_GPU_HELPER_OK,
+              hl_gpu_helper_check(AC_OTHER, strlen(AC_OTHER), 0, "dev",
+                                  (size_t)64 << 20));
+    hl_gpu_helper_stats(&c);
+    EXPECT_EQ(b.round_trips + 1, c.round_trips);
+    /* A stack above the helper's own cap is the cap: the same verdict. */
+    EXPECT_EQ(HL_GPU_HELPER_OK,
+              hl_gpu_helper_check(AC_OTHER, strlen(AC_OTHER), 0, "dev",
+                                  (size_t)4 << 30));
+    hl_gpu_helper_stats(&a);
+    EXPECT_EQ(c.round_trips, a.round_trips);
+    hl_gpu_helper_stop();
+}
+#endif /* !AGH_NO_HELPER */
+
 #ifdef HL_ENABLE_GPU
 /* A real compile through the helper, on the device: a valid shader is
  * compiled by the helper and then in-process; an invalid one is refused by
@@ -4353,7 +4515,7 @@ UTEST(hull_cap_gpu_helper, real_compile_on_device)
     hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
     ASSERT_EQ(0, ach_start(NULL));
     double t0 = a40_now();
-    int hs = hl_gpu_helper_check(A42_WARP, strlen(A42_WARP), 0, ctx->devices[0].name);
+    int hs = hl_gpu_helper_check(A42_WARP, strlen(A42_WARP), 0, ctx->devices[0].name, 0);
     double helper_t = a40_now() - t0;
     EXPECT_EQ(HL_GPU_HELPER_OK, hs);
     /* The in-process compile of the source the helper compiled. */
@@ -4441,7 +4603,7 @@ UTEST(hull_cap_gpu_helper, server_residual_measured)
         hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
         t0 = a40_now();
         EXPECT_EQ(HL_GPU_HELPER_OK,
-                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name));
+                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name, 0));
         helper += a40_now() - t0;
         snprintf(name, sizeof name, "warm%d", i);
         t0 = a40_now();
@@ -4472,7 +4634,7 @@ UTEST(hull_cap_gpu_helper, server_residual_measured)
         hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
         t0 = a40_now();
         EXPECT_EQ(HL_GPU_HELPER_OK,
-                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name));
+                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name, 0));
         helper += a40_now() - t0;
         snprintf(name, sizeof name, "bigwarm%d", i);
         t0 = a40_now();
@@ -4483,6 +4645,78 @@ UTEST(hull_cap_gpu_helper, server_residual_measured)
     printf("  helper: large shader (2 x %zu stores), mean of 2: cold in-process "
            "compile %.3f s; helper round trip %.3f s; server compile after the "
            "helper %.3f s\n", per, cold / 2, helper / 2, after / 2);
+    hl_gpu_helper_stop();
+    hl_cap_gpu_destroy(ctx);
+    free(ctx);
+}
+
+/* M2: the worker's peak memory compiling the largest real shaders - the
+ * test suite's (the audit-40 function-size shader, the audit-42
+ * domain-warp shader) and the examples' shaders/ (read from the source
+ * tree when the test runs from the repository root) - which
+ * HL_GPU_HELPER_MEM_BYTES is sized from. Prints the measurement the design
+ * doc quotes; asserts every compile stayed under the cap. */
+static char *agh_read_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = malloc(65536);
+    size_t n = buf ? fread(buf, 1, 65535, f) : 0;
+    fclose(f);
+    if (!buf) return NULL;
+    buf[n] = '\0';
+    return buf;
+}
+
+UTEST(gpu_convergence_policy, worker_peak_measured)
+{
+    HlGpuCtx *ctx = calloc(1, sizeof *ctx);
+    ASSERT_TRUE(ctx != NULL);
+    if (!gpu_test_init(ctx)) { free(ctx); ASSERT_TRUE(1); return; }
+    ASSERT_EQ(0, ach_start(NULL));
+    static const char *const examples[] = {
+        "examples/gpu_search/shaders/cosine_similarity.wgsl",
+        "examples/gpu_pipeline/shaders/normalize.wgsl",
+        "examples/gpu_texture/shaders/invert.wgsl",
+        "examples/gpu_pipeline/shaders/reduce.wgsl",
+        "examples/gpu_pipeline/shaders/weight.wgsl",
+        "examples/compute_gpu_chain/shaders/double.wgsl",
+    };
+    uint64_t worst = 0;
+    HlGpuHelperStats st;
+    size_t per = (HL_GPU_WGSL_FN_WORDS_MAX - 16) / 5 - 3;
+    char *big = a40_stores(2, per);
+    ASSERT_TRUE(big != NULL);
+    struct { const char *what; const char *src; } cases[] = {
+        { "audit-40 large (2 x stores)", big },
+        { "audit-42 domain warp", A42_WARP },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        EXPECT_EQ(HL_GPU_HELPER_OK,
+                  hl_gpu_helper_check(cases[i].src, strlen(cases[i].src), 0,
+                                      ctx->devices[0].name, 0));
+        hl_gpu_helper_stats(&st);
+        printf("  helper: worker peak %.1f MiB: %s (%zu bytes)\n",
+               (double)st.last_peak_bytes / (1 << 20), cases[i].what,
+               strlen(cases[i].src));
+        if (st.last_peak_bytes > worst) worst = st.last_peak_bytes;
+    }
+    free(big);
+    for (size_t i = 0; i < sizeof examples / sizeof examples[0]; i++) {
+        char *src = agh_read_file(examples[i]);
+        if (!src) continue;
+        EXPECT_EQ(HL_GPU_HELPER_OK,
+                  hl_gpu_helper_check(src, strlen(src), 0,
+                                      ctx->devices[0].name, 0));
+        hl_gpu_helper_stats(&st);
+        printf("  helper: worker peak %.1f MiB: %s\n",
+               (double)st.last_peak_bytes / (1 << 20), examples[i]);
+        if (st.last_peak_bytes > worst) worst = st.last_peak_bytes;
+        free(src);
+    }
+    printf("  helper: worst worker peak %.1f MiB (cap %.0f MiB)\n",
+           (double)worst / (1 << 20), (double)HL_GPU_HELPER_MEM_BYTES / (1 << 20));
+    EXPECT_TRUE(worst < HL_GPU_HELPER_MEM_BYTES);
     hl_gpu_helper_stop();
     hl_cap_gpu_destroy(ctx);
     free(ctx);

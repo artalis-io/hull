@@ -33,7 +33,7 @@ fast first line instead of the security boundary.
 | What the helper returns | A **verdict** (OK / refused), not compiled code. The server compiles a source the helper accepted with its existing compile path (option (b) in the task). |
 | Process | Hull's own binary in a hidden mode (`argv[1] == "__hull_gpu_compile_helper"`, taken at the top of `hull_serve`), started with `posix_spawn` and no shell. |
 | Topology | server → **supervisor** (spawned once, before the sandbox) → one fresh **worker** per compile |
-| Bounds | Start-up and compile deadlines with SIGKILL, rlimits (core 0, CPU, Linux `RLIMIT_DATA` and `RLIMIT_NPROC`), a compile stack smaller than the server's, a 512-byte reply cap, and an OS sandbox in the worker |
+| Bounds | Start-up and compile deadlines with SIGKILL, a memory cap (macOS: the supervisor polls the footprint and kills; Linux: `RLIMIT_DATA`), rlimits (core 0, CPU, Linux `RLIMIT_NPROC`), a compile stack below the server's, a 512-byte reply cap, and an OS sandbox in the worker |
 | Event loop | A run-aware wait: the server polls every 10 ms, asks the run's deadline and budget, and sends a cancel when the run stops. Not a promise; see §6. |
 | Charging | `HL_GPU_HELPER_UNITS` (4M) before a round trip on a cache miss. The wait itself is excluded. The existing compile charge is unchanged. |
 | Caching | All verdicts in memory (64 entries). OK verdicts are also kept on disk in the sealed runtime cache (`gpu-shaders`). |
@@ -62,10 +62,20 @@ process boundary, so the only question is what form of the shader the helper cou
 Why the verdict carries over to the server:
 
 - naga is deterministic, the same code in the same binary.
-- The worker's compile stack (`HL_GPU_HELPER_STACK_BYTES`, 768 MiB) is **smaller** than the
-  server's: 2 GiB, or 1 GiB on its first fallback.
-- The worker's compile deadline is the server's (`HL_GPU_HELPER_COMPILE_TIMEOUT_MS` =
-  `HL_GPU_COMPILE_TIMEOUT_MS`).
+- A verdict carries over for stack, time and memory **only because each helper limit is
+  strictly below what the server can afford**:
+  - **Stack.** The worker compiles on `min(HL_GPU_HELPER_STACK_BYTES (768 MiB), 7/8 of the
+    largest stack a compile thread can get in the server now)`. The server measures the latter
+    before each helper round trip (`hl_gpu_compile_stack_available`: 2 GiB, else 1 GiB / 256 /
+    64 MiB on a host short of address space), sends the result in the request (it is part of
+    the verdict's cache key), and refuses to compile a helper-admitted source on a thread
+    smaller than what the worker had (`HlGpuCompileJob.min_stack`). Before the §7.3 confirming
+    audit the worker always had 768 MiB, while the server's thread could fall back to 256 MiB.
+  - **Time.** The worker's compile deadline is the server's (`HL_GPU_HELPER_COMPILE_TIMEOUT_MS`
+    = `HL_GPU_COMPILE_TIMEOUT_MS`).
+  - **Memory.** The worker is capped at `HL_GPU_HELPER_MEM_BYTES` (§5); the server has no
+    memory limit of its own, so a source that compiled within the cap fits it. Before the
+    confirming audit only Linux had a bound (`RLIMIT_DATA` 8 GiB), and macOS none.
 
 So a source that crashes, recurses or runs long does so in the worker, which is killed or dies,
 and the server never compiles it. The server's in-process deadline stays as a backstop for
@@ -133,8 +143,8 @@ worker      (`<self> __hull_gpu_compile_helper worker`)  one per compile, then e
   every other descriptor. On Linux the helper closes descriptors above 3 at startup. Signal mask
   and dispositions are reset. The environment is an **allowlist** (`VK_*`, `MESA_*`, `WGPU_*`,
   `MTL_*`, `__GLX_*`, `HOME`, `TMPDIR`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`,
-  `LD_LIBRARY_PATH`, `HULL_TEST_GPU_HELPER`), so `manifest.secrets` and DSN passwords never
-  reach it.
+  `LD_LIBRARY_PATH`, and `HULL_TEST_GPU_HELPER` in a test build only), so `manifest.secrets`
+  and DSN passwords never reach it.
 - **Lifetime.** The supervisor exits on its socket's EOF: server teardown (`hl_gpu_helper_stop`
   in serve.c), a server crash, or the "no opt-in" stop. On the way out it kills a running worker.
   On Linux both helper roles also set `PR_SET_PDEATHSIG`. The server reaps the supervisor with
@@ -149,11 +159,27 @@ worker      (`<self> __hull_gpu_compile_helper worker`)  one per compile, then e
 | Server's own bound on a round trip | the two above + `HL_GPU_HELPER_MARGIN_MS` (1000 ms) | server: a supervisor past it is dropped (fail closed) |
 | CPU | `RLIMIT_CPU` = the two deadlines in seconds + 2 | worker |
 | Core dumps | `RLIMIT_CORE` 0 | supervisor, worker |
-| Memory | `RLIMIT_DATA` `HL_GPU_HELPER_DATA_BYTES` (8 GiB) on Linux; macOS has no enforced data or address-space rlimit, so the compile deadline bounds growth there | worker |
-| Compile stack | `HL_GPU_HELPER_STACK_BYTES` 768 MiB thread (fallbacks 256 / 64 MiB) | worker |
+| Memory | `HL_GPU_HELPER_MEM_BYTES` 1 GiB (the request may ask for less; the supervisor clamps). macOS: the supervisor reads the worker's `ri_lifetime_max_phys_footprint` (`proc_pid_rusage`) every `HL_GPU_HELPER_MEM_POLL_MS` (5 ms) and SIGKILLs it above the cap (`HL_GPU_HELPER_MEMORY`). Linux: `RLIMIT_DATA` = the cap + the compile stack (a thread stack is a private writable mapping, counted as data); an allocation past it fails and the worker aborts (`CRASHED`). Both are refused as `shader_helper_failed`. Sanitizer builds skip the rlimit (it refuses the shadow reservation). | supervisor (macOS), worker (Linux) |
+| Compile stack | the request's, at most `HL_GPU_HELPER_STACK_BYTES` 768 MiB (§3; a smaller fallback only makes the verdict stricter) | worker |
 | New processes | `RLIMIT_NPROC` 0 on Linux; Seatbelt `deny process-fork` / `process-exec*` on macOS | worker |
 | Request size | header + 8 + `HL_GPU_WGSL_MAX_BYTES` | supervisor and worker frame readers |
 | Reply size | `HL_GPU_HELPER_REPLY_MAX` 512 bytes; longer kills the worker (BADREPLY) | supervisor |
+
+**Sizing the memory cap.** `gpu_convergence_policy.worker_peak_measured` compiles the largest
+real shaders through the helper and prints the worker's peak as the supervisor saw it (the
+reply to the server carries it; `HlGpuHelperStats.peak_bytes`). Apple M1 Max, Metal, macOS 26:
+
+| Shader | Worker peak |
+|---|---|
+| audit-40 large (2 x stores, 17 KB, near the function-size bound) | 22.8 MiB |
+| audit-42 domain warp (3.4 KB) | 21.1 MiB |
+| each of the examples' `shaders/*.wgsl` | 21.0-21.2 MiB |
+
+So the worker's own compile adds about 2 MiB to a ~21 MiB baseline (backend init, Metal
+framework mappings). The Metal back end's driver compile runs in Apple's `MTLCompilerService`
+XPC process, which is not the worker's child and not counted; naga, the part the audits
+attacked, runs in the worker. The cap of 1 GiB is ~45x the measured peak: room for a large
+legitimate shader near the 1 MiB source cap, and far below what the server could absorb.
 
 **The worker's OS sandbox** is applied after backend init, so the device and its driver
 connection are already open, and before the worker reads the source:
@@ -168,15 +194,26 @@ connection are already open, and before the worker reads the source:
   the kernel's ABI knows. Its only grants are read access to the system trees a driver may still
   read during a compile (`/usr`, `/lib`, `/lib64`, `/etc`, `/opt`, `/proc`, `/sys`) and read,
   write and ioctl on existing nodes under `/dev`. Nothing can be created or removed, and the
-  user's home and the app's files cannot be read. Then comes a seccomp filter that returns
-  EPERM / EACCES for `execve`, `execveat`, `socket()` of any family but `AF_UNIX`, x32 and other
-  ABIs, and finally `RLIMIT_NPROC` 0. Landlock and seccomp cover the calling thread and the compile thread it
+  user's home and the app's files cannot be read. On Landlock ABI 4+ the ruleset also handles
+  TCP bind and connect (`handled_access_net`) with no rule granting either; an older kernel
+  gets the filesystem rules only. Then comes a seccomp filter that returns EPERM / EACCES for
+  `execve`, `execveat`, `io_uring_setup` / `io_uring_enter` / `io_uring_register`
+  (`IORING_OP_SOCKET` makes a socket without the `socket()` call the filter checks), `socket()`
+  of any family but `AF_UNIX`, x32 and other ABIs, and finally `RLIMIT_NPROC` 0. Landlock and seccomp cover the calling thread and the compile thread it
   starts. Threads the GPU backend started during init are not covered, since there is no TSYNC.
   On a Linux arm64 VM (kernel 7.0, no GPU) the sandbox applied and the probe test passed: no
   `$HOME` read, no network connect. A compile on a real Linux device (Mesa / NVIDIA) under this
   sandbox has not been run yet, because CI's GPU job is build-only.
 - **Elsewhere**: the helper is native-only, because GPU is a native-only feature. On cosmo and
   Windows the functions are stubs, and the opt-in's runtime source fails closed.
+
+**What the worker sandbox is, and is not.** It is defence in depth. It narrows what a worker
+can reach if a hostile source made the compiler misbehave, but it is not a boundary against a
+naga memory-corruption exploit: the server re-compiles every source the helper accepted, in its
+own process. The helper's guarantee is about the bounded failures (a crash, a deep recursion, a
+long compile, a large allocation) of a deterministic compiler; it moves those out of the server.
+An exploit that makes naga misbehave only on some runs, or that corrupts memory without failing
+in the worker, would reach the server's compile too.
 
 The worker reports in its reply whether its sandbox applied (flag bit 0). If it did not apply, or
 applied only in part (for example, a kernel without Landlock), the server logs **one WARN**. The
@@ -187,10 +224,13 @@ process boundary, the deadlines and the rlimits still hold, so this is not fatal
 Frames have a 16-byte header: magic `HGC1`, type, request id and payload length, each a
 little-endian u32. Payloads:
 
-- REQ: compile deadline (ms), device, then the WGSL.
+- REQ: compile deadline (ms), device, the worker's stack and memory cap (MiB; the supervisor
+  clamps both to `HL_GPU_HELPER_STACK_BYTES` / `HL_GPU_HELPER_MEM_BYTES` and rewrites them in
+  the request the worker reads), then the WGSL. Magic `HGC2` since the stack and memory fields.
 - CANCEL: empty.
 - READY: empty.
-- RESP: status, flags, and an optional detail of at most 512 bytes.
+- RESP: status, flags, and an optional detail of at most 512 bytes. The supervisor's RESP to
+  the server carries the worker's peak memory (KiB) after the flags.
 
 Every reader has a payload cap and treats a bad magic, an unknown type or an over-cap length as
 a protocol error. A worker that does this is killed. A supervisor that does this to the server is
@@ -233,11 +273,11 @@ already sits on a socket that an async backend watcher could take over.
 
 ## 8. Caching
 
-- **Key**: SHA-256 of `hull-gpu-verdict-v1 | HL_VERSION | backend | arch | device index |
-  adapter name | SHA-256(source)`. A new Hull build, and so a new wgpu and naga, never reuses an
+- **Key**: SHA-256 of `hull-gpu-verdict-v2 | HL_VERSION | backend | arch | device index |
+  adapter name | worker stack MiB | worker memory cap MiB | SHA-256(source)`. A new Hull build, and so a new wgpu and naga, never reuses an
   old verdict.
 - **In memory**: 64 entries, round robin, every status (OK, SHADER, TIMEOUT, CRASHED,
-  BADREPLY). A source that timed out or crashed is refused at once on the next attempt, without
+  BADREPLY, MEMORY). A source that timed out or crashed is refused at once on the next attempt, without
   another round trip. CANCELLED and UNAVAILABLE are not cached.
 - **On disk**: OK verdicts only, through the sealed runtime cache
   (`hl_runtime_cache_get_sealed` / `_put_sealed`, HMAC under `~/.hull/cache.key`), cache kind
@@ -271,7 +311,7 @@ embedded shaders in the tool process. Keeping that in-process is deliberate:
 |---|---|
 | Helper refused the source (naga / driver error) | `shader_error` |
 | Helper past its start-up or compile deadline, or the run stopped (cancel), or the floor tripped the budget | `compile_timeout` |
-| Worker crashed or exited without a reply, sent an oversized or malformed reply, or there is no supervisor (not started, lost, stopped) | `shader_helper_failed` |
+| Worker crashed or exited without a reply, went past its memory cap, sent an oversized or malformed reply, or there is no supervisor (not started, lost, stopped) | `shader_helper_failed` |
 | Accepted by the helper, then the in-process compile timed out / device busy | `compile_timeout` / `gpu_busy`, as before |
 
 ## 11. Testing
@@ -290,13 +330,24 @@ embedded shaders in the tool process. Keeping that in-process is deliberate:
   - a real compile on the device (OK, and an invalid shader refused by the helper);
   - the residual-cost measurement in §3.
 - The hooks run in the worker after its sandbox and before any compile, so they also run on
-  hosts without a GPU: `HULL_TEST_GPU_HELPER=crash|slow|oversize|silent|accept|probe`. Only the
-  worker reads the variable, and it can only make the worker fail or vouch in a test.
+  hosts without a GPU: `HULL_TEST_GPU_HELPER=crash|slow|oversize|silent|accept|probe|alloc`.
+  They are compiled only with `-DHL_GPU_HELPER_TEST_HOOKS`: the unit tests link their own copy
+  of `cap/gpu_helper.c` built with it (`mk/tests.mk`), and the GPU e2e builds with
+  `make HL_GPU_HELPER_TEST_HOOKS=1`. A release binary neither has them nor passes the variable
+  to the helper; before the §7.3 confirming audit it honoured `accept`, which made the worker
+  vouch for any source and sealed the OK into the disk cache. `alloc` allocates past the memory
+  cap with no shader involved; `probe` also tries `io_uring_setup` on Linux.
+- `test_gpu` (`gpu_convergence_policy.*`): a worker past a (lowered) memory cap is stopped and
+  the source refused while the supervisor carries on; the supervisor reports the worker's peak;
+  a verdict is per stack size and the server asks for no more than its compile thread can get;
+  the peak measurement in §5.
 - `test_lua` / `test_js`: without a supervisor, the opt-in's runtime source fails with
   `shader_helper_failed` through both bindings.
 - `tests/e2e_feature_gpu.sh`: a served `--with=gpu` binary with the opt-in. For each hook, a
   compile route answers the hook's error (`compile_timeout`, `shader_helper_failed`) while
-  `/ping` keeps answering. Without a hook, runtime source compiles through the helper, and an OK
+  `/ping` keeps answering (the `alloc` hook too: past the memory cap). A top-level compile of
+  runtime source is refused even with the opt-in. Without a hook, runtime source compiles
+  through the helper, and an OK
   verdict lands in the sealed cache. After a restart the cached verdict is used, so the crash
   hook is never reached. The existing build-time cases are unchanged: embedded shaders compile
   in-process, dynamic source is refused without the opt-in, and a refused shader fails the
