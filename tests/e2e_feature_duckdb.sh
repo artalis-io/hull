@@ -449,6 +449,48 @@ echo "$SLP_OUT" | grep -q "DUCKDB SLEEP REFUSED OK" || { echo "FAIL: DuckDB slee
 [ $((T1 - T0)) -lt 20 ] || { echo "FAIL: the sleep app took $((T1 - T0)) s"; exit 1; }
 echo "ok  sleep_ms / pg_sleep refused, nextval literal-only"
 
+echo "=== a DuckDB -d database keeps working across starts under the sandbox ==="
+# Audit 43: the kernel sandbox granted a -d database's sidecars only under
+# SQLite's names (-wal / -shm / -journal). DuckDB unlinks <db>.wal at every
+# checkpoint (each shutdown included) and the next commit creates it again,
+# so on Linux the second start - the database there, its .wal gone - failed
+# every commit with 'Cannot open file "...app.duckdb.wal": Permission denied',
+# and so did the first commit after a CHECKPOINT in one run. No fs grants
+# here: the -d database alone must work.
+DDS=$(mktemp -d)
+mkdir -p "$DDS/data"
+cat > "$DDS/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/db@1" } })
+app.main(function()
+    local d = require("hull.db").default()
+    d.exec("CREATE TABLE IF NOT EXISTS runs (n INTEGER)")
+    d.exec("INSERT INTO runs VALUES (1)")
+    d.exec("CHECKPOINT")                 -- unlinks the .wal
+    d.exec("INSERT INTO runs VALUES (2)") -- creates it again
+    print("DUCKDB RUNS " .. d.query("SELECT count(*) AS c FROM runs")[1].c)
+    return 0
+end)
+LUA
+DDS_BUILD=$("$HULL" build --compiler=system --with=duckdb --no-verify-platform -o "$DDS/bin" "$DDS" 2>&1) || true
+echo "$DDS_BUILD" | grep -q "composed feature 'duckdb'" || { echo "$DDS_BUILD"; echo "FAIL: -d app not composed"; exit 1; }
+DDS1=$(cd "$DDS" && ./bin --hull-d duckdb://data/app.duckdb 2>&1) || true
+echo "$DDS1" | grep -q "DUCKDB RUNS 2" || { echo "$DDS1" | tail -5; echo "FAIL: sandbox_audit43.duckdb_checkpoint_then_commit"; exit 1; }
+echo "PASS: sandbox_audit43.duckdb_checkpoint_then_commit"
+DDS2=$(cd "$DDS" && ./bin --hull-d duckdb://data/app.duckdb 2>&1) || true
+echo "$DDS2" | grep -q "DUCKDB RUNS 4" || { echo "$DDS2" | tail -5; echo "FAIL: sandbox_audit43.duckdb_second_start"; exit 1; }
+echo "PASS: sandbox_audit43.duckdb_second_start"
+# The app tree stays read-only: a database stored in the app directory itself
+# gets no directory grant, and the sandbox says why (Linux, where the grant
+# would have to be the whole directory).
+if [ "$(uname -s)" = "Linux" ]; then
+    DDS3=$(cd "$DDS" && ./bin --hull-d duckdb://root.duckdb 2>&1) || true
+    echo "$DDS3" | grep -q "DuckDB database root.duckdb: its directory is not granted" \
+        || { echo "$DDS3" | tail -5; echo "FAIL: sandbox_audit43.duckdb_app_dir_not_granted"; exit 1; }
+    echo "PASS: sandbox_audit43.duckdb_app_dir_not_granted"
+fi
+rm -rf "$DDS"
+echo "ok  DuckDB -d database: two starts and a CHECKPOINT under the sandbox"
+
 echo "=== negative: a plain sqlite app must NOT compose duckdb ==="
 printf 'app.manifest({modules={"hull/db@1"}})\napp.main(function() print("PLAIN OK") return 0 end)\n' \
     > "$PLAIN/app.lua"

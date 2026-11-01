@@ -245,6 +245,21 @@ release-artifact layout).
   session-level advisory lock is logged as a WARN, not refused - advisory locks do not count for
   the wait gates. Covered by `tests/lib/hull_db_session_audit41.sh` (both runtimes, in
   `e2e_mysql.sh`) and `test_mysql_conn` / `test_db_backend`.
+- **A DuckDB `-d` database failed every commit on its second start under the Linux sandbox**
+  (audit 43). The kernel sandbox granted a `-d` database's sidecars only under SQLite's names
+  (`-wal` / `-shm` / `-journal`). DuckDB unlinks `<db>.wal` at every checkpoint - each shutdown
+  included - and the next commit creates it again, so once the database existed every commit
+  failed with `Cannot open file "...x.duckdb.wal": Permission denied`, as did the first commit
+  after a `CHECKPOINT` in the first run. Landlock grants existing inodes and directory trees only,
+  with no per-name rule, so on Linux the database's directory is now granted read + write +
+  create - never the app directory or an ancestor of it, the app's `.hull`, `/`, `$HOME` or above,
+  or a world-writable directory (`hl_sandbox_duckdb_dir_grant`); a database stored in one of those
+  gets a WARN telling the operator to give it a directory of its own (`-d
+  duckdb://data/app.duckdb`), and the app tree stays read-only. OpenBSD's unveil and macOS's
+  Seatbelt match names, so there the four sidecars (`.wal`, `.wal.checkpoint`, `.wal.recovery`,
+  the `.tmp/` spill directory) are granted by name and the directory stays unwritable (Seatbelt
+  granted none of them before). Covered by `sandbox_audit43.duckdb_*` in
+  `tests/e2e_feature_duckdb.sh` and `test_sandbox_grant`.
 - **Email change could probe whether addresses exist, without limit** (audit 33, both
   runtimes). A taken target address is answered 409 `email already in use`, and that check ran
   before the account's email-change request limit, so a signed-in user could test any number of
