@@ -374,6 +374,7 @@ static pid_t spawn_role(const char *exe, const char *role, int fd)
     pid_t pid = -1;
     if (ok && env) {
         /* posix_spawn takes char *const argv[]: owned copies. */
+        // cppcheck-suppress variableScope
         char a0[PATH_MAX], a1[] = HL_GPU_HELPER_ARGV1, a2[16];
         if (strlen(exe) < sizeof a0 && strlen(role) < sizeof a2) {
             memcpy(a0, exe, strlen(exe) + 1);
@@ -456,6 +457,7 @@ int hl_gpu_helper_start(const char *exe)
     if (g_fd >= 0) return 0;
     char self[PATH_MAX];
     if (!exe) {
+        // cppcheck-suppress knownConditionTrueFalse
         if (self_exe(self, sizeof self) != 0) {
             log_warn("[hull:gpu] compile helper: cannot resolve this binary");
             return -1;
@@ -575,6 +577,7 @@ static int cache_lookup(const uint8_t key[32], const char hex[65])
     for (size_t i = 0; i < HL_GPU_HELPER_CACHE_ENTRIES; i++)
         if (g_cache[i].used && memcmp(g_cache[i].key, key, 32) == 0)
             return g_cache[i].status;
+    // cppcheck-suppress knownConditionTrueFalse
     if (!g_disk_off && hl_runtime_cache_gpu_verdict_get(hex) == 0)
         return HL_GPU_HELPER_OK;
     return -1;
@@ -663,6 +666,7 @@ static int round_trip(const char *wgsl, size_t len, int device)
             helper_lost("no reply within its deadline");
             return HL_GPU_HELPER_UNAVAILABLE;
         }
+        // cppcheck-suppress knownConditionTrueFalse
         if (!cancelled && run_stopped()) {
             cancelled = 1;
             if (write_frame(g_fd, HGC_CANCEL, id, NULL, 0, NULL, 0,
@@ -879,6 +883,7 @@ static int supervisor_main(void)
     struct rlimit core0 = { 0, 0 };
     (void)setrlimit(RLIMIT_CORE, &core0);
     char exe[PATH_MAX];
+    // cppcheck-suppress knownConditionTrueFalse
     if (self_exe(exe, sizeof exe) != 0) return 2;
     int sfd = 3;
     set_nonblock(sfd);
@@ -1155,6 +1160,7 @@ static int worker_main(void)
     /* A sandbox that could not be applied (or only in part: no Landlock,
      * no seccomp) is reported in the reply's flags, and the server warns
      * once; the process boundary, the deadline and the rlimits still hold. */
+    // cppcheck-suppress knownConditionTrueFalse
     if (worker_sandbox() == 0)
         g_worker_flags |= HGC_FLAG_SANDBOXED;
     if (write_frame(fd, HGC_READY, 0, NULL, 0, NULL, 0, 0) != 0)
@@ -1172,6 +1178,7 @@ static int worker_main(void)
     if (hook && strcmp(hook, "crash") == 0) {
         signal(SIGSEGV, SIG_DFL);
         raise(SIGSEGV);
+        // cppcheck-suppress unreachableCode
         _exit(3);
     }
     if (hook && strcmp(hook, "slow") == 0) {
