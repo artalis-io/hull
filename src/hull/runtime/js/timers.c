@@ -10,6 +10,7 @@
  */
 
 #include "internal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
@@ -92,7 +93,28 @@ void hl_js_timer_reschedule(HlJSTimer *t)
                   t->handler_id);
 }
 
+/* --vm-thread (cap/vm_thread.h): a timer runs on the VM thread. */
+static void hl_js_timer_trampoline_impl(void *user_data);
+typedef struct {
+    void *user_data;
+} hl_js_timer_trampoline_vmt_args;
+static void hl_js_timer_trampoline_vmt_job(void *ud)
+{
+    hl_js_timer_trampoline_vmt_args *a = (hl_js_timer_trampoline_vmt_args *)ud;
+    hl_js_timer_trampoline_impl(a->user_data);
+}
 void hl_js_timer_trampoline(void *user_data)
+{
+    HlVmThread *vmt = ((HlJSTimer *)user_data)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_js_timer_trampoline_vmt_args a = { user_data };
+        (void)hl_vmt_run(vmt, hl_js_timer_trampoline_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_js_timer_trampoline_impl(user_data);
+}
+
+static void hl_js_timer_trampoline_impl(void *user_data)
 {
     HlJSTimer *t = (HlJSTimer *)user_data;
     HlJS *js = t->js;

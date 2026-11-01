@@ -503,6 +503,12 @@ jobs:
       - name: Shutdown-with-work-in-flight E2E tests
         timeout-minutes: 3
         run: make e2e-teardown
+      - name: VM thread (--vm-thread) E2E tests
+        timeout-minutes: 4
+        run: make e2e-vm-thread
+      - name: Server suites again with every entry on the VM thread
+        timeout-minutes: 20
+        run: make e2e-vm-thread-all
       - name: Live SQLite file protection E2E tests
         timeout-minutes: 2
         run: make e2e-db-live-files

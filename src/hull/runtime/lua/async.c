@@ -18,6 +18,7 @@
 #include "hull/utils/alloc.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_open_txn */
 #include "hull/cap/db_backend.h"    /* hl_db_txn_gen */
+#include "hull/cap/vm_thread.h"     /* the --vm-thread test hook */
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"     /* hl_db_budget_current (hull._task) */
 #endif
@@ -530,7 +531,29 @@ static int hl_lua_async_push_k(lua_State *L)
     return 1;
 }
 
+/* --vm-thread (cap/vm_thread.h): an async resume runs on the VM thread. */
+static void hl_lua_async_resume_impl(HlAsyncCont *self, void *driver);
+typedef struct {
+    HlAsyncCont *self;
+    void *driver;
+} hl_lua_async_resume_vmt_args;
+static void hl_lua_async_resume_vmt_job(void *ud)
+{
+    hl_lua_async_resume_vmt_args *a = (hl_lua_async_resume_vmt_args *)ud;
+    hl_lua_async_resume_impl(a->self, a->driver);
+}
 static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
+{
+    HlVmThread *vmt = ((HlLuaAsyncCont *)self)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_lua_async_resume_vmt_args a = { self, driver };
+        (void)hl_vmt_run(vmt, hl_lua_async_resume_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_lua_async_resume_impl(self, driver);
+}
+
+static void hl_lua_async_resume_impl(HlAsyncCont *self, void *driver)
 {
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
     lc->settled = 1;
@@ -1383,7 +1406,28 @@ static int lua_task_prepare_k(lua_State *L)
     return 0;
 }
 
+/* --vm-thread (cap/vm_thread.h): a hull._task run runs on the VM thread. */
+static void lua_task_fire_impl(void *user);
+typedef struct {
+    void *user;
+} lua_task_fire_vmt_args;
+static void lua_task_fire_vmt_job(void *ud)
+{
+    lua_task_fire_vmt_args *a = (lua_task_fire_vmt_args *)ud;
+    lua_task_fire_impl(a->user);
+}
 static void lua_task_fire(void *user)
+{
+    HlVmThread *vmt = ((HlLuaTask *)user)->lua->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        lua_task_fire_vmt_args a = { user };
+        (void)hl_vmt_run(vmt, lua_task_fire_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    lua_task_fire_impl(user);
+}
+
+static void lua_task_fire_impl(void *user)
 {
     HlLuaTask *t = (HlLuaTask *)user;
     HlLua *lua = t->lua;
@@ -1706,6 +1750,19 @@ static int lua_hull_wake(lua_State *L)
     return 0;
 }
 
+/* hull._test_native_sleep(ms): the --vm-thread test hook (cap/vm_thread.h),
+ * present only under HULL_TEST_NATIVE_SLEEP=1. Sleeps in C, deaf to the
+ * budget and the run deadline. */
+static int lua_hull_test_native_sleep(lua_State *L)
+{
+    lua_Integer ms = luaL_checkinteger(L, 1);
+    if (ms < 1 || ms > (lua_Integer)HL_VMT_TEST_SLEEP_MAX_MS)
+        return luaL_error(L, "hull._test_native_sleep: ms must be 1..%d",
+                          (int)HL_VMT_TEST_SLEEP_MAX_MS);
+    hl_vmt_test_native_sleep((uint32_t)ms);
+    return 0;
+}
+
 /* ── Module registration ──────────────────────────────────────────── */
 
 static const luaL_Reg hull_funcs[] = {
@@ -1749,6 +1806,10 @@ int luaopen_hull_hull(lua_State *L)
     lua_pop(L, 1);
 
     luaL_newlib(L, hull_funcs);
+    if (hl_vmt_test_hook_enabled()) {
+        lua_pushcfunction(L, lua_hull_test_native_sleep);
+        lua_setfield(L, -2, "_test_native_sleep");
+    }
     lua_newtable(L);
     lua_pushcfunction(L, lua_hull_index);
     lua_setfield(L, -2, "__index");

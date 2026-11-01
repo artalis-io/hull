@@ -1407,6 +1407,11 @@ static void vt_lua_stop_async(HlRuntime *rt)
     ((HlLua *)rt)->server = NULL;
 }
 
+static struct HlRunWatch *vt_lua_run_watch(HlRuntime *rt)
+{
+    return &((HlLua *)rt)->run_watch;
+}
+
 const HlRuntimeVtable hl_lua_vtable = {
     .init                = vt_lua_init,
     .load_app            = vt_lua_load_app,
@@ -1428,4 +1433,5 @@ const HlRuntimeVtable hl_lua_vtable = {
     .request_done        = vt_lua_request_done,
 #endif
     .stop_async          = vt_lua_stop_async,
+    .run_watch           = vt_lua_run_watch,
 };

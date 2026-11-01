@@ -19,6 +19,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_registry.h"
+#include "hull/shared/vmt_http.h"
 
 #include <keel/keel.h>
 
@@ -241,9 +242,56 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     return result;
 }
 
+/* ── --vm-thread (cap/vm_thread.h) ─────────────────────────────────── */
+
+typedef struct {
+    HlJS           *js;
+    int             handler_id;
+    KlHttpRequest  *req;
+    KlHttpResponse *res;
+    int             rc;
+} HlJsVmtJob;
+
+static void vmt_handler_job(void *ud)
+{
+    HlJsVmtJob *j = (HlJsVmtJob *)ud;
+    j->rc = hl_js_dispatch(j->js, j->handler_id, j->req, j->res);
+}
+
+static void vmt_middleware_job(void *ud)
+{
+    HlJsVmtJob *j = (HlJsVmtJob *)ud;
+    j->rc = hl_js_dispatch_middleware(j->js, j->handler_id, j->req, j->res);
+}
+
+/* Run a handler / middleware entry on the VM thread; 1 when the run was
+ * abandoned (*early: a raw 503 already went out on its socket). */
+static int vmt_run_http(HlJsVmtJob *j, void (*fn)(void *), int *early)
+{
+    HlVmtHttp http;
+    hl_vmt_http_capture(&http, j->req, j->res);
+    return hl_vmt_run(j->js->base.vm_thread, fn, j, &http, early)
+           == HL_VMT_ABANDONED;
+}
+
 void hl_js_keel_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlJSRoute *route = (HlJSRoute *)user_data;
+    if (route->js->base.vm_thread &&
+        !hl_vmt_on_vm_thread(route->js->base.vm_thread)) {
+        HlJsVmtJob j = { route->js, route->handler_id, req, res, -1 };
+        int early = 0;
+        int abandoned = vmt_run_http(&j, vmt_handler_job, &early);
+        if (j.rc == 1) return;   /* suspended: the run waits on an op */
+        if (!abandoned) {
+            if (j.rc < 0) hl_js_http_error_response(route->js, res);
+            else          hl_js_res_answered(route->js, res);
+            return;
+        }
+        hl_js_res_answered(route->js, res);   /* its kept headers go */
+        hl_vmt_http_finish_abandoned(req, res, early);
+        return;
+    }
     int rc = hl_js_dispatch(route->js, route->handler_id, req, res);
     if (rc < 0) {
         hl_js_http_error_response(route->js, res);
@@ -434,6 +482,26 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
 int hl_js_keel_middleware(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
 {
     HlJSRoute *ctx = (HlJSRoute *)user_data;
+    if (ctx->js->base.vm_thread &&
+        !hl_vmt_on_vm_thread(ctx->js->base.vm_thread)) {
+        HlJsVmtJob j = { ctx->js, ctx->handler_id, req, res, -1 };
+        int early = 0;
+        int abandoned = vmt_run_http(&j, vmt_middleware_job, &early);
+        if (!abandoned) {
+            if (j.rc < 0) {
+                hl_js_http_error_response(ctx->js, res);
+                return 1;
+            }
+            if (j.rc != 0) hl_js_res_answered(ctx->js, res);
+            return j.rc;
+        }
+        /* Abandoned: short-circuit with the 503. A middleware that completed
+         * (0) left its ctx for a later stage that will not run. */
+        if (j.rc == 0) hl_js_req_ctx_free(ctx->js, req);
+        hl_js_res_answered(ctx->js, res);
+        hl_vmt_http_finish_abandoned(req, res, early);
+        return 1;
+    }
     int rc = hl_js_dispatch_middleware(ctx->js, ctx->handler_id, req, res);
     if (rc < 0) {
         /* Middleware error - short-circuit with 500 */

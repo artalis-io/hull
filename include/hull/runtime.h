@@ -183,7 +183,19 @@ typedef struct HlRuntimeVtable {
      * or app.main) and WebSocket clients - releasing their continuations
      * while the runtime is alive. Runs no app code. Idempotent. */
     void  (*stop_async)(HlRuntime *rt);
+
+    /* --vm-thread (cap/vm_thread.h): the VM is about to run on a thread other
+     * than the one it last ran on. QuickJS re-reads its C stack bounds
+     * (JS_UpdateStackTop); NULL = nothing to do (Lua). Runs no app code. */
+    void  (*thread_switch)(HlRuntime *rt);
+
+    /* The VM's run watch (cap/run_watchdog.h): --vm-thread measures a run
+     * against its deadline. NULL = the runtime has none (then the VM thread
+     * is not used). */
+    struct HlRunWatch *(*run_watch)(HlRuntime *rt);
 } HlRuntimeVtable;
+
+typedef struct HlVmThread HlVmThread;
 
 struct HlRuntime {
     /* ── Capability policy: the leading HL_POLICY_SPAN bytes ──────────
@@ -328,6 +340,11 @@ struct HlRuntime {
      * closed by that teardown runs no on_close handler - the event loop is
      * going away under it (audit 15). */
     int shutting_down;
+    /* --vm-thread (cap/vm_thread.h): the thread the VM's offloaded entries
+     * run on, set by serve.c once the server is about to run and cleared
+     * before it is joined. NULL (the default, and always under hull test /
+     * agent / app.main runner): every entry runs inline, as before. */
+    HlVmThread *vm_thread;
 };
 
 #endif /* HL_RUNTIME_H */

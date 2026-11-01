@@ -227,6 +227,23 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                                                         (lua_Integer)INT32_MAX);
     lua_pop(L, 1); /* pop http */
 
+    /* limits = { vm_thread = true, vm_thread_grace_ms = N,
+     *            vm_thread_ceiling_ms = N }: --vm-thread from the manifest.
+     * The numbers as for wasm: an integer of at least 1 (capped). */
+    lua_getfield(L, manifest_idx, "limits");
+    if (lua_istable(L, -1)) {
+        int lim_idx = lua_gettop(L);
+        lua_getfield(L, lim_idx, "vm_thread");
+        if (lua_isboolean(L, -1))
+            out->vm_thread = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+        out->vm_thread_grace_ms = (uint32_t)lua_wasm_limit(
+            L, lim_idx, "vm_thread_grace_ms", (lua_Integer)86400000);
+        out->vm_thread_ceiling_ms = (uint32_t)lua_wasm_limit(
+            L, lim_idx, "vm_thread_ceiling_ms", (lua_Integer)86400000);
+    }
+    lua_pop(L, 1); /* pop limits */
+
     /* gpu = true  OR  gpu = { devices = {0, 1} } */
     lua_getfield(L, manifest_idx, "gpu");
     if (lua_istable(L, -1)) {

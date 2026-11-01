@@ -9,6 +9,7 @@
  */
 
 #include "internal.h"
+#include "hull/cap/vm_thread.h"   /* --vm-thread */
 #include "hull/shared/req_life.h"
 
 #include "hull/cap/db.h"
@@ -65,10 +66,35 @@ static int push_req_stream(lua_State *L, void *ud)
     return 2;
 }
 
-void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res,
+/* --vm-thread (cap/vm_thread.h): an SSE handler runs on the VM thread. */
+static void hl_lua_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res, void *user_data);
+typedef struct {
+    KlHttpRequest *req;
+    KlHttpResponse *res;
+    void *user_data;
+} hl_lua_sse_handler_vmt_args;
+static void hl_lua_sse_handler_vmt_job(void *ud)
+{
+    hl_lua_sse_handler_vmt_args *a = (hl_lua_sse_handler_vmt_args *)ud;
+    hl_lua_sse_handler_impl(a->req, a->res, a->user_data);
+}
+void hl_lua_sse_handler(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
+{
+    HlVmThread *vmt = (user_data && ((HlLuaSseRoute *)user_data)->lua ? ((HlLuaSseRoute *)user_data)->lua->base.vm_thread : NULL);
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_lua_sse_handler_vmt_args a = { req, res, user_data };
+        (void)hl_vmt_run(vmt, hl_lua_sse_handler_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_lua_sse_handler_impl(req, res, user_data);
+}
+
+static void hl_lua_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
                                  void *user_data)
 {
     HlLuaSseRoute *route = (HlLuaSseRoute *)user_data;
+    if (!route)
+        return;
     HlLua *lua = route->lua;
 
     if (!lua || !lua->L || !req || !res)

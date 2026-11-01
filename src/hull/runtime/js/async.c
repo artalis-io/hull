@@ -17,6 +17,7 @@
 #include "hull/net_backend.h"
 #include "hull/utils/alloc.h"
 #include "hull/cap/db_budget.h"   /* the SQL budget binding (audit 9 H4) */
+#include "hull/cap/vm_thread.h"   /* the --vm-thread test hook */
 
 #include "quickjs.h"
 
@@ -691,7 +692,29 @@ int hl_js_op_suspend(HlJS *js, struct HlSuspendOp *op)
                              (HlReqHandle *)js->active_conn, op);
 }
 
+/* --vm-thread (cap/vm_thread.h): an async resume runs on the VM thread. */
+static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver);
+typedef struct {
+    HlAsyncCont *self;
+    void *driver;
+} hl_js_async_resume_vmt_args;
+static void hl_js_async_resume_vmt_job(void *ud)
+{
+    hl_js_async_resume_vmt_args *a = (hl_js_async_resume_vmt_args *)ud;
+    hl_js_async_resume_impl(a->self, a->driver);
+}
 static void hl_js_async_resume(HlAsyncCont *self, void *driver)
+{
+    HlVmThread *vmt = ((HlJsAsyncCont *)self)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        hl_js_async_resume_vmt_args a = { self, driver };
+        (void)hl_vmt_run(vmt, hl_js_async_resume_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    hl_js_async_resume_impl(self, driver);
+}
+
+static void hl_js_async_resume_impl(HlAsyncCont *self, void *driver)
 {
     HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
     HlJS *js = jc->js;
@@ -1372,7 +1395,28 @@ typedef struct HlJsSleepTimer {
     uint64_t id;
 } HlJsSleepTimer;
 
+/* --vm-thread (cap/vm_thread.h): a hull.sleep wake runs on the VM thread. */
+static void js_sleep_timer_fire_impl(void *user);
+typedef struct {
+    void *user;
+} js_sleep_timer_fire_vmt_args;
+static void js_sleep_timer_fire_vmt_job(void *ud)
+{
+    js_sleep_timer_fire_vmt_args *a = (js_sleep_timer_fire_vmt_args *)ud;
+    js_sleep_timer_fire_impl(a->user);
+}
 static void js_sleep_timer_fire(void *user)
+{
+    HlVmThread *vmt = ((HlJsSleepTimer *)user)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        js_sleep_timer_fire_vmt_args a = { user };
+        (void)hl_vmt_run(vmt, js_sleep_timer_fire_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    js_sleep_timer_fire_impl(user);
+}
+
+static void js_sleep_timer_fire_impl(void *user)
 {
     HlJsSleepTimer *t = user;
     HlJsSleepTimer **link = &t->js->sleep_timers;
@@ -1547,7 +1591,28 @@ static void js_task_log(HlJS *js, JSValueConst err)
     JS_FreeValue(js->ctx, JS_GetException(js->ctx));
 }
 
+/* --vm-thread (cap/vm_thread.h): a hull:_task run runs on the VM thread. */
+static void js_task_fire_impl(void *user);
+typedef struct {
+    void *user;
+} js_task_fire_vmt_args;
+static void js_task_fire_vmt_job(void *ud)
+{
+    js_task_fire_vmt_args *a = (js_task_fire_vmt_args *)ud;
+    js_task_fire_impl(a->user);
+}
 static void js_task_fire(void *user)
+{
+    HlVmThread *vmt = ((HlJsTask *)user)->js->base.vm_thread;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        js_task_fire_vmt_args a = { user };
+        (void)hl_vmt_run(vmt, js_task_fire_vmt_job, &a, NULL, NULL);
+        return;
+    }
+    js_task_fire_impl(user);
+}
+
+static void js_task_fire_impl(void *user)
 {
     HlJsTask *t = (HlJsTask *)user;
     HlJS *js = t->js;
@@ -1711,6 +1776,22 @@ int hl_js_init_task_module(JSContext *ctx, HlJS *js)
     return 0;
 }
 
+/* hull._testNativeSleep(ms): the --vm-thread test hook (cap/vm_thread.h),
+ * present only under HULL_TEST_NATIVE_SLEEP=1. Sleeps in C, deaf to the
+ * budget and the run deadline. */
+static JSValue js_hull_test_native_sleep(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    double ms = 0;
+    if (argc < 1 || !JS_IsNumber(argv[0]) || JS_ToFloat64(ctx, &ms, argv[0]) < 0 ||
+        !(ms >= 1 && ms <= (double)HL_VMT_TEST_SLEEP_MAX_MS))
+        return JS_ThrowRangeError(ctx, "hull._testNativeSleep: ms must be 1..%d",
+                                  (int)HL_VMT_TEST_SLEEP_MAX_MS);
+    hl_vmt_test_native_sleep((uint32_t)ms);
+    return JS_UNDEFINED;
+}
+
 /* ── Global registration ─────────────────────────────────────────── */
 
 void hl_js_add_hull_global(JSContext *ctx)
@@ -1720,6 +1801,9 @@ void hl_js_add_hull_global(JSContext *ctx)
 
     JS_SetPropertyStr(ctx, hull, "sleep",
         JS_NewCFunction(ctx, js_hull_sleep, "sleep", 1));
+    if (hl_vmt_test_hook_enabled())
+        JS_SetPropertyStr(ctx, hull, "_testNativeSleep",
+            JS_NewCFunction(ctx, js_hull_test_native_sleep, "_testNativeSleep", 1));
 
     JS_SetPropertyStr(ctx, global, "hull", hull);
 

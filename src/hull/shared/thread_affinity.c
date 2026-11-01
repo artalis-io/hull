@@ -20,6 +20,10 @@
 
 static pthread_t       s_loop_tid;
 static atomic_bool     s_loop_set = false;
+static _Thread_local int tl_baton;   /* --vm-thread: holds the loop's baton */
+
+void hl_event_loop_baton_enter(void) { tl_baton++; }
+void hl_event_loop_baton_leave(void) { if (tl_baton > 0) tl_baton--; }
 
 void hl_event_loop_mark_current(void)
 {
@@ -35,7 +39,7 @@ void hl_assert_on_event_loop(const char *what)
 {
     if (!atomic_load_explicit(&s_loop_set, memory_order_acquire))
         return; /* no loop captured (boot / tests / tool mode) */
-    if (!pthread_equal(pthread_self(), s_loop_tid)) {
+    if (!pthread_equal(pthread_self(), s_loop_tid) && tl_baton == 0) {
         fprintf(stderr,
                 "FATAL: %s called off the event-loop thread "
                 "(thread-affinity invariant violated)\n",
