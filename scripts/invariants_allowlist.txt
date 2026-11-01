@@ -75,6 +75,7 @@ INV-1  src/hull/runtime/lua/mod_db.c:lua_owned_conn_close  # close / abort: rele
 INV-1  src/hull/runtime/lua/mod_db.c:lua_db_default  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
 INV-1  src/hull/runtime/lua/mod_db.c:lua_db_connect  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
 INV-1  src/hull/runtime/lua/mod_db.c:lua_db_internal_conn  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/lua/mod_db.c:lua_db_internal_app_conn  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
 INV-1  src/hull/runtime/lua/mod_db_udf.c:lua_db_udf_register  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
 INV-1  src/hull/runtime/lua/mod_db_udf.c:lua_db_udf_unregister  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
 INV-1  src/hull/runtime/lua/mod_env.c:lua_env_allowed  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
@@ -172,6 +173,7 @@ INV-1  src/hull/runtime/js/mod_db.c:js_db_owned_close  # close / abort: releases
 INV-1  src/hull/runtime/js/mod_db.c:js_db_default  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
 INV-1  src/hull/runtime/js/mod_db.c:js_db_connect  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
 INV-1  src/hull/runtime/js/mod_db.c:js_db_internal_conn  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
+INV-1  src/hull/runtime/js/mod_db.c:js_db_internal_app_conn  # resolves a registry connection (opened lazily, once); the open and its SQL are charged in the cap layer
 INV-1  src/hull/runtime/js/mod_db_udf.c:js_db_udf_register  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
 INV-1  src/hull/runtime/js/mod_db_udf.c:js_db_udf_unregister  # udf registration: one sqlite3_create_function; each call of the udf runs a charged run
 INV-1  src/hull/runtime/js/mod_env.c:js_env_allowed  # pure accessor: reads a field or the clock, no syscall and no input-proportional work
