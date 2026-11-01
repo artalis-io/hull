@@ -15780,4 +15780,124 @@ UTEST(lua_audit41, kv_open_and_commands_have_a_floor)
     cleanup_lua_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* ── Audit 42: a test file never loads under a stdlib chunk name ──────
+ *
+ * `hull test hull.evil` (a relative app directory named "hull.*") loaded
+ * hull.evil/tests/test_x.lua with luaL_loadfilex, whose chunkname
+ * "@hull.evil/tests/test_x.lua" passed the stdlib's "hull." prefix test:
+ * the test file read _hull_* tables and required hull._template. */
+static const char A42_LUA_PROBE[] =
+    "local ok, e = pcall(function() return db.query('SELECT x FROM _hull_a42') end)\n"
+    "__a42_db = ok and 'read' or tostring(e)\n"
+    "local ok2, e2 = pcall(function() return require('hull._template') end)\n"
+    "__a42_tpl = ok2 and 'loaded' or tostring(e2)\n"
+    "local ok3, e3 = pcall(function() return db.query('SELECT y FROM a42_plain') end)\n"
+    "__a42_plain = ok3 and #e3 or tostring(e3)\n"
+    "test('ordinary', function() assert(1 + 1 == 2) end)\n";
+
+static const char *a42_global(const char *name, char *buf, size_t n)
+{
+    lua_getglobal(lua_rt.L, name);
+    const char *v = lua_tostring(lua_rt.L, -1);
+    snprintf(buf, n, "%s", v ? v : "(nil)");
+    lua_pop(lua_rt.L, 1);
+    return buf;
+}
+
+/* Runs A42_LUA_PROBE as tests/test_x.lua under the relative app dir @p app
+ * (made inside a temp dir that becomes the working directory). */
+static int a42_lua_run(const char *app, char *db, char *tpl, char *plain,
+                       size_t n, int *total, int *passed)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    if (!hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a42")) return -1;
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd) || chdir(tmpdir) != 0) return -1;
+    char dir[256], path[512];
+    snprintf(dir, sizeof dir, "%s/tests", app);
+    mkdir(app, 0700);
+    mkdir(dir, 0700);
+    snprintf(path, sizeof path, "%s/tests/test_x.lua", app);
+    write_file(path, A42_LUA_PROBE);
+
+    init_lua_with_caps();
+    int rc = -2;
+    if (lua_initialized) {
+        trusted_exec(test_db, "CREATE TABLE _hull_a42 (x TEXT);"
+                              "INSERT INTO _hull_a42 VALUES ('secret');"
+                              "CREATE TABLE a42_plain (y TEXT);"
+                              "INSERT INTO a42_plain VALUES ('ok');",
+                     NULL, NULL, NULL);
+        KlHttpRouter router;
+        KlAllocator kalloc = kl_allocator_default();
+        kl_http_router_init(&router, &kalloc);
+        hl_lua_test_register(lua_rt.L, &router, &lua_rt);
+        HlTestCaseResult results[2];
+        memset(results, 0, sizeof results);
+        int failed = 0;
+        const char *err = NULL;
+        rc = hl_lua_vtable.run_test_file(&lua_rt.base, path, results, 2,
+                                         total, passed, &failed, &err);
+        if (rc != 0) printf("  load error: %s\n", err ? err : "?");
+        a42_global("__a42_db", db, n);
+        a42_global("__a42_tpl", tpl, n);
+        a42_global("__a42_plain", plain, n);
+        kl_http_router_free(&router);
+    }
+    cleanup_lua_caps();
+    if (chdir(cwd) != 0) rc = -3;
+    rm_rf(tmpdir);
+    return rc;
+}
+
+UTEST(lua_audit42, test_file_under_a_hull_dot_dir_is_not_stdlib)
+{
+    char db[256], tpl[256], plain[256];
+    int total = 0, passed = 0;
+    ASSERT_EQ(a42_lua_run("hull.a42", db, tpl, plain, sizeof db,
+                          &total, &passed), 0);
+    EXPECT_STRNE(db, "read");
+    EXPECT_TRUE_MSG(strstr(db, "_hull_") != NULL, db);
+    EXPECT_STRNE(tpl, "loaded");
+    /* ordinary app SQL and the test itself still work */
+    EXPECT_STREQ(plain, "1");
+    EXPECT_EQ(total, 1);
+    EXPECT_EQ(passed, 1);
+}
+
+UTEST(lua_audit42, ordinary_test_file_still_works)
+{
+    char db[256], tpl[256], plain[256];
+    int total = 0, passed = 0;
+    ASSERT_EQ(a42_lua_run("plainapp", db, tpl, plain, sizeof db,
+                          &total, &passed), 0);
+    EXPECT_STRNE(db, "read");
+    EXPECT_STRNE(tpl, "loaded");
+    EXPECT_STREQ(plain, "1");
+    EXPECT_EQ(total, 1);
+    EXPECT_EQ(passed, 1);
+}
+
+/* Second line: a chunk named by a path is never stdlib, whatever loaded it. */
+UTEST(lua_audit42, a_path_chunkname_starting_hull_dot_is_app_code)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    trusted_exec(test_db, "CREATE TABLE _hull_a42 (x TEXT);", NULL, NULL, NULL);
+    lua_State *L = lua_rt.L;
+    static const char src[] =
+        "local ok = pcall(function() return db.query('SELECT x FROM _hull_a42') end)\n"
+        "local ok2 = pcall(function() return require('hull._template') end)\n"
+        "return (ok and 'db ' or '') .. (ok2 and 'tpl' or '')\n";
+    ASSERT_EQ(luaL_loadbufferx(L, src, sizeof src - 1,
+                               "@hull.a42/tests/test_x.lua", "t"), LUA_OK);
+    ASSERT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK);
+    const char *got = lua_tostring(L, -1);
+    EXPECT_STREQ(got ? got : "(nil)", "");
+    lua_settop(L, 0);
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 UTEST_MAIN();

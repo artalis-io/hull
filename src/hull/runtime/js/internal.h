@@ -22,6 +22,35 @@
 #include "quickjs.h"
 #include "hull/shared/async.h"   /* HlAsyncCont (the run links below) */
 
+#include <stdio.h>
+#include <string.h>
+
+/* 1 when a script / module name is the stdlib's (audit 42). Trust in this
+ * runtime is decided by name: a "hull:" module may touch _hull_* tables
+ * (mod_db.c) and import the stdlib's internal ":_" modules (the module
+ * normalizer). A stdlib module is named "hull:web:csrf", never a path; a
+ * path-derived name that starts "hull:" - a file under a relative app
+ * directory called "hull:evil", evaluated as "hull:evil/tests/test_x.js" by
+ * `hull test hull:evil` - is app code. Every loader of an app file names it
+ * so it cannot start "hull:" (hl_js_app_module_name); this is the second
+ * line behind them. */
+static inline int hl_js_name_is_stdlib(const char *name)
+{
+    return name && strncmp(name, "hull:", 5) == 0 &&
+           strchr(name, '/') == NULL && strchr(name, '\\') == NULL;
+}
+
+/* The module name an APP file read from disk is evaluated under: its path,
+ * with an explicit "./" in front when the path itself starts "hull:" (it
+ * names the same file). NULL when that does not fit in @p buf. */
+static inline const char *hl_js_app_module_name(char *buf, size_t n,
+                                                const char *path)
+{
+    if (strncmp(path, "hull:", 5) != 0) return path;
+    int len = snprintf(buf, n, "./%s", path);
+    return (len > 0 && (size_t)len < n) ? buf : NULL;
+}
+
 /* Forward declarations to keep internal.h small. */
 typedef struct HlAsyncCtx     HlAsyncCtx;
 typedef struct HlAllocator    HlAllocator;

@@ -80,7 +80,7 @@ static JSValue js_log_level(JSContext *ctx, JSValueConst this_val,
         mod = JS_AtomToCString(ctx, mod_atom);
         JS_FreeAtom(ctx, mod_atom);
     }
-    if (mod && strncmp(mod, "hull:", 5) == 0)
+    if (hl_js_name_is_stdlib(mod))
         tag = "[hull:js]";
 
     int rc = hl_js_log_args(ctx, level, mod ? mod : "js", tag, argc, argv);

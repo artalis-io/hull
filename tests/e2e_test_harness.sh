@@ -244,6 +244,67 @@ for rt in lua js; do
     fi
 done
 
+# ── Audit 42: a test file never runs under a stdlib name ─────────────
+# `hull test hull.evil` from the parent of a repo cloned under that name
+# loaded hull.evil/tests/test_x.lua under the chunkname
+# "@hull.evil/tests/test_x.lua", which passed the stdlib's "hull." prefix
+# test: the test file read _hull_* tables and required hull._template. JS
+# had the same with a "hull:evil" directory ("hull:" module names).
+echo "== audit 42: relative hull.* / hull:* app dir =="
+mkdir -p "$TMP/a42/hull.evil/tests" "$TMP/a42/hull.evil/migrations" \
+         "$TMP/a42/hull:evil/tests" "$TMP/a42/hull:evil/migrations"
+for d in "hull.evil" "hull:evil"; do
+    printf 'CREATE TABLE a42_plain (y TEXT);\nINSERT INTO a42_plain VALUES (%s);\n' \
+        "'ok'" > "$TMP/a42/$d/migrations/001_init.sql"
+done
+cat > "$TMP/a42/hull.evil/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/http-server@1", "hull/db@1" } })
+app.get("/", function(req, res) res:json({ ok = true }) end)
+LUA
+cat > "$TMP/a42/hull.evil/tests/test_x.lua" <<'LUA'
+local db = require("hull.db").default()
+test("a42 internals refused", function()
+    local ok = pcall(function() return db.query("SELECT name FROM _hull_migrations") end)
+    test.ok(not ok, "test file read _hull_migrations")
+    local ok2 = pcall(function() return require("hull._template") end)
+    test.ok(not ok2, "test file required hull._template")
+end)
+test("a42 ordinary query", function()
+    test.eq(#db.query("SELECT y FROM a42_plain"), 1)
+end)
+LUA
+cat > "$TMP/a42/hull:evil/app.js" <<'JS'
+import { app } from "hull:app";
+app.manifest({ modules: ["hull/http-server@1", "hull/db@1"] });
+app.get("/", (req, res) => res.json({ ok: true }));
+JS
+cat > "$TMP/a42/hull:evil/tests/test_x.js" <<'JS'
+import { db as dbMod } from "hull:db";
+const db = dbMod.default();
+let tpl = "refused";
+try { await import("hull:_template"); tpl = "loaded"; } catch (e) {}
+test("a42 internals refused", () => {
+    let read = true;
+    try { db.query("SELECT name FROM _hull_migrations"); } catch (e) { read = false; }
+    test.ok(!read, "test file read _hull_migrations");
+    test.eq(tpl, "refused");
+});
+test("a42 ordinary query", () => {
+    test.eq(db.query("SELECT y FROM a42_plain").length, 1);
+});
+JS
+for d in "hull.evil" "hull:evil"; do
+    rc=0
+    out="$(cd "$TMP/a42" && "$HULL" test "$d" 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ] &&
+       printf '%s\n' "$out" | grep -q 'PASS.*a42 internals refused' &&
+       printf '%s\n' "$out" | grep -q 'PASS.*a42 ordinary query'; then
+        pass "hull test $d: test file gets no stdlib identity"
+    else
+        fail "hull test $d: test file gets no stdlib identity" "rc=$rc $out"
+    fi
+done
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"
