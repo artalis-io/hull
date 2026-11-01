@@ -235,7 +235,10 @@ static inline uint64_t hl_meter_settle(const HlMeterMark *m, int64_t charged,
         /* No CPU reading for this call: the thread's CPU time since the
          * run was armed (before the call began) bounds it from above. */
         uint64_t cn = hl_meter_cpu_ns();
+        /* cppcheck reads the stub hl_meter_cpu_ns (no CPU clock: 0). */
+        // cppcheck-suppress unsignedLessThanZero
         cpu = cn > st->cpu_ref ? cn - st->cpu_ref : 0;
+        // cppcheck-suppress knownConditionTrueFalse
         if (cpu == 0) cpu = UINT64_MAX;    /* no usable reading */
     }
     if (cpu && cpu != UINT64_MAX) {
