@@ -52,18 +52,39 @@ static inline uint64_t hl_meter_ticks(void)
 #endif
 }
 
-/* Sanitizer builds run every binding several times slower than the
- * release build the rate was measured on; their measured time is scaled
- * down by this factor so a run's measured cost stays what it would be in a
- * release build (tests that fit the budget there fit it here). */
-#if defined(__has_feature)
-#  if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || \
-      __has_feature(thread_sanitizer)
+/* Instrumented builds run every binding several times slower than the
+ * release build the rate was measured on, while the instructions a script
+ * runs are counted, not timed; their measured time is divided by this
+ * factor so a run's measured cost stays about what it would be in a
+ * release build (tests that fit the budget there fit it here). A release
+ * build is 1: production charging is unchanged. Slowdowns measured on the
+ * PBKDF2-heavy TOTP tests (lua_stdlib.totp_enroll_confirm_verify) against
+ * the release build on the same host:
+ *
+ *   MSan + UBSan -O1   x86_64 GitHub runner 19x (13.8 s vs 0.71 s),
+ *                      aarch64 2.4x (mbedTLS is built without asm and
+ *                      MSan shadows every SHA-256 round)   -> 64
+ *   ASan + UBSan -O0   x86_64 2.3x                          -> 8
+ *   TSan -O1                                                -> 16
+ *   coverage (-O0 --coverage, atomic counters; the Makefile
+ *   passes -DHL_METER_SLOWDOWN=8, the compiler names no feature) -> 8
+ *
+ * Each factor leaves at least 3x of margin over the worst slowdown seen
+ * (PR #981: MSan at 8 tripped the default budget on ordinary work). A
+ * -DHL_METER_SLOWDOWN=N on the command line wins. */
+#if !defined(HL_METER_SLOWDOWN) && defined(__has_feature)
+#  if __has_feature(memory_sanitizer)
+#    define HL_METER_SLOWDOWN 64u
+#  elif __has_feature(thread_sanitizer)
+#    define HL_METER_SLOWDOWN 16u
+#  elif __has_feature(address_sanitizer)
 #    define HL_METER_SLOWDOWN 8u
 #  endif
 #endif
-#if !defined(HL_METER_SLOWDOWN) && (defined(__SANITIZE_ADDRESS__) || \
-                                    defined(__SANITIZE_THREAD__))
+#if !defined(HL_METER_SLOWDOWN) && defined(__SANITIZE_THREAD__)
+#  define HL_METER_SLOWDOWN 16u
+#endif
+#if !defined(HL_METER_SLOWDOWN) && defined(__SANITIZE_ADDRESS__)
 #  define HL_METER_SLOWDOWN 8u
 #endif
 #ifndef HL_METER_SLOWDOWN

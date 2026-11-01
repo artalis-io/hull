@@ -176,8 +176,18 @@ multipart reads) are not inside the call at all and need no bracket.
 
 ### 1.5 Sanitizers and measured overhead
 
-Sanitizer builds divide measured time by `HL_METER_SLOWDOWN` (8) so tests that
-fit the budget in a release build fit it under ASan / MSan / TSan.
+Instrumented builds divide measured time by `HL_METER_SLOWDOWN` so tests that
+fit the budget in a release build fit it under a sanitizer or coverage: the
+instructions a script runs are counted, not timed, so only the measured half of
+a run slows down. The factor is per instrumentation, with at least 3x of margin
+over the worst slowdown measured on the PBKDF2-heavy TOTP tests: MSan + UBSan
+64 (19x on an x86_64 GitHub runner, where mbedTLS is built without asm and
+every SHA-256 round is shadowed; 2.4x on aarch64), TSan 16, ASan + UBSan 8
+(2.3x), coverage 8 (the Makefile passes `-DHL_METER_SLOWDOWN=8u`; the compiler
+names no feature for `--coverage`). A release build is 1, so production
+charging is unchanged. With a single factor of 8, MSan tripped the default
+budget on `hash_password` loops that use a fraction of it in a release build
+(PR #981 CI), and coverage tripped `lua_audit18.encoding_codecs_are_charged`.
 
 Measured on Apple M-series (release build, `lua_dispatcher.overhead_per_call_is_small`
 / `js_dispatcher.overhead_per_call_is_small`, 2M calls of a no-op binding):
