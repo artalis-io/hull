@@ -662,6 +662,8 @@ static int lua_ws_connect(lua_State *L)
         if (lua->base.shutting_down)
             return luaL_error(L, "ws.connect: runtime is shutting down");
     }
+    /* Read again: the collection's __gc finalizers give slots back. */
+    // cppcheck-suppress duplicateCondition
     if (lua->base.ws_clients >= HL_WS_CLIENT_MAX_LIVE)
         return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "ws.connect: too many live WebSocket clients "
                           "(at most %d per VM)", HL_WS_CLIENT_MAX_LIVE);
