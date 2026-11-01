@@ -41,7 +41,12 @@ failed before the fix.
 For UTEST cases this is checked mechanically: `.github/workflows/audit-regression.yml`
 runs `scripts/check_regression_test.sh` on every PR whose title contains
 "audit". It reverts the PR's non-test files to the merge-base, builds, runs
-only the added cases, and expects at least one to fail. The job is
+only the added cases, and expects at least one to fail AT RUNTIME. A test
+that only fails to build on the pre-fix code is not enough: the gate retries
+with the PR's headers kept and its `tests/regression_stubs/*.c` (pre-fix
+stand-ins for new functions) linked in, and a fix that is nothing but new API
+needs an explicit `REGRESSION-GATE: build-only <reason>` trailer (commit
+message or PR body; audit 43). The job is
 **non-blocking** (`continue-on-error`, outside the `ci-success` gate) until a
 few rounds show it gives no false failures; until then the PR template's
 checklist and the review pass in 2.3 are the requirement. Run it locally in a

@@ -55,6 +55,9 @@ specific signature, parameter list, or return value.
 | [`lua_patches.md`](lua_patches.md) | The vendored Lua patch set (in-tree, marked `HULL PATCH` in source: the instruction budget inside finalizers and pattern matching) and the re-apply procedure for an upgrade. |
 | [`pledge_patches.md`](pledge_patches.md) | The vendored Linux pledge / unveil polyfill patch set (in-tree, marked `HULL PATCH NNNN`: rseq allowed, TRUNCATE as a file right, and since audit 42 seccomp filters and the Landlock domain applied to every thread) and the re-apply procedure for an upstream update. |
 | [`quickjs_patches.md`](quickjs_patches.md) | The vendored QuickJS patch set (in-tree, marked `HULL PATCH` in source) and the re-apply procedure for an upgrade. |
+| [`stb_patches.md`](stb_patches.md) | The vendored stb_image / stb_image_write patch set (none today; `stb_impl.c` is Hull's own) and how a patch is added for INV-10. |
+| [`sqlite_patches.md`](sqlite_patches.md) | The vendored SQLite amalgamation patch set (none today) and how a patch is added for INV-10. |
+| [`mbedtls_patches.md`](mbedtls_patches.md) | The vendored mbedTLS patch set (none today; `hull_config.h` is Hull's own) and how a patch is added for INV-10. |
 | [`backend_vtables.md`](backend_vtables.md) | The `HlAsyncBackend` / `HlNetBackend` vtables that make the event loop / networking composable. |
 | [`benchmark.md`](benchmark.md) | Performance methodology + measured reference numbers (HTTP / DB / WASM AOT / GPU). |
 | [`ci_architecture_design.md`](ci_architecture_design.md) | The change-aware CI architecture: fail-closed path classifier + applicability-aware required gate + focused per-subsystem jobs. **Slices 1-6 implemented**; the branch-protection cutover remains a separate policy decision. |

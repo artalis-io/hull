@@ -157,7 +157,11 @@ TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(RUNTIME_FACTORY_NONE_OBJ) $(ALLOC_OBJ) $(
 # copy resolves sh_seal_arena_* symbols first; Keel's copy stays in
 # libkeel.a but the linker doesn't pull it (its symbols are already
 # satisfied).  Required for MSan instrumentation visibility.
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(RUNTIME_FACTORY_NONE_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CA_TRUST_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(SH_SEAL_ARENA_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(BCRYPT_OBJS) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
+# REGRESSION_STUBS: empty except under scripts/check_regression_test.sh's
+# headers-kept pass, which links the PR's tests/regression_stubs/*.c (pre-fix
+# stand-ins for a fix's new API) into the test binary it rebuilds.
+REGRESSION_STUBS ?=
+TEST_COMMON_LIBS := $(REGRESSION_STUBS) $(TEST_CAP_OBJS) $(RUNTIME_FACTORY_NONE_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(FS_UTIL_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CA_TRUST_OBJ) $(TLS_CLIENT_OBJ) $(TLS_TRANSPORT_OBJ) $(TLS_TRANSPORT_STUB_OBJ) $(SH_SEAL_ARENA_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(BCRYPT_OBJS) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(DUCKDB_LIBS) -lm -lpthread
 # forkpty(3) is in libutil on glibc/musl Linux (used by
 # tests/hull/cap/test_tui_lifecycle.c). macOS / BSD ship it inside
 # libSystem so no extra flag is needed. Cosmopolitan does not provide

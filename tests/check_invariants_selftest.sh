@@ -11,6 +11,8 @@
 # Then the allowlist mechanics: an exact entry and a glob cover a finding,
 # an entry that matches nothing is STALE (fails), an entry without a reason
 # is malformed (fails), and every rule has fixtures.
+# Last, tests/check_regression_gate_selftest.sh proves the audit-fix regression
+# gate (scripts/check_regression_test.sh) wants a runtime failure (audit 43).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
@@ -93,6 +95,13 @@ runs=$((runs + 1))
 if [ "$got" != 1 ] || ! grep -q 'stale allowlist entry' "$tmp/out"; then
   echo "check-invariants-selftest: FAIL - a stale allowlist entry did not fail the run:"
   sed 's/^/    /' "$tmp/out"
+  fail=1
+fi
+
+# The audit-fix regression gate (scripts/check_regression_test.sh, audit 43):
+# a build failure on the pre-fix code is not proof by itself.
+runs=$((runs + 1))
+if ! sh tests/check_regression_gate_selftest.sh; then
   fail=1
 fi
 

@@ -61,7 +61,9 @@ and bounded by the deadline, is Low by definition.
 
 Every audit fix ships a test that fails on the pre-fix code, named `<area>_audit<N>.<case>`.
 The fix PR template requires the reviewer to confirm the test failed before the fix
-(a CI job may verify this by reverting the non-test diff and expecting failure).
+(a CI job verifies this by reverting the non-test diff and expecting a runtime failure;
+a build failure counts only with the PR's headers kept and declared stubs linked, or under an
+explicit `REGRESSION-GATE: build-only <reason>` opt-out - audit 43).
 
 ### 5.2 Invariant lint (`make check-invariants`, run in CI)
 

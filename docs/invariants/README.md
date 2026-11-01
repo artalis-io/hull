@@ -33,7 +33,7 @@ and the exact decision procedure is documented in a comment above the rule in
 | INV-7 | No `JS_RunGC` outside `hl_js_gc_for_retry` | Any `JS_RunGC(` in `src/hull/` or `tests/` outside that function. |
 | INV-8 | Every SQLite open registers with `hl_db_live_file_add` before reading | After each `sqlite3_open*(` (not `":memory:"`), the enclosing function must call `hl_db_live_file_add` (or a same-file function that does) before `hl_cap_db_init` / `hl_cap_db_guard` / `sqlite3_exec` / `sqlite3_prepare*` / `hl_migrate_run`. |
 | INV-9 | No `lua_closethread(..., NULL)` / `lua_resume` without the resumer | `lua_closethread(x, NULL)` and `lua_resume(co, NULL, ...)` anywhere in `src/hull/`; and a function calling `lua_resume` must also call `hl_lua_resume_status`. |
-| INV-10 | Vendored-engine changes carry a documented `HULL PATCH NNNN` marker | The patch numbers used in `vendor/lua` / `vendor/quickjs` markers equal the live `## Patch NNNN` headings of `docs/lua_patches.md` / `docs/quickjs_patches.md`; every `patches/wamr/NNNN-*.patch` is listed in `docs/wamr_patches.md`; `vendor/tweetnacl` carries its markers; and in the diff against the base (`INVARIANTS_BASE`, else the merge-base with `origin/main`) every added line in `vendor/{lua,quickjs,tweetnacl}` has a `HULL PATCH` marker in its hunk or within 40 lines of it. |
+| INV-10 | Vendored-engine changes carry a documented `HULL PATCH NNNN` marker | For every engine Hull edits in tree - `vendor/lua`, `vendor/quickjs`, `vendor/pledge`, `vendor/stb`, `vendor/sqlite`, `vendor/mbedtls` - the patch numbers its markers use equal the live `## Patch NNNN` headings of `docs/<engine>_patches.md` (the file may be absent only while the engine carries no marker; pledge / stb / sqlite / mbedtls markers must be numbered); `vendor/tweetnacl` carries its unnumbered markers; every `patches/wamr/NNNN-*.patch` is listed in `docs/wamr_patches.md`, and the commit `vendor/wamr` is pinned at equals the doc's "Pinned WAMR base commit" (`vendor/keel` is Hull's own library, changed upstream and bumped, never patched here). In the diff against the base (`INVARIANTS_BASE`, else the merge-base with `origin/main`) every added line in those trees has a `HULL PATCH` marker in its hunk or within 40 lines of it, except in Hull-owned files (`vendor/stb/stb_impl.c`, `vendor/mbedtls/hull_config.h`) and in a version upgrade (a diff that changes the engine's version line). Audit 43 widened it from lua / quickjs / tweetnacl. |
 
 ## The allowlist
 
@@ -67,6 +67,20 @@ the same PR:
 3. Run `make check-invariants` and allowlist (with reasons) the existing sites
    that are justified exceptions; fix the rest.
 4. Add the row to the table above.
+
+## The audit-fix regression gate
+
+`scripts/check_regression_test.sh` (CI: `.github/workflows/audit-regression.yml`)
+checks that an audit fix's new UTEST cases fail on the pre-fix code
+([audit_process.md](../audit_process.md) 2.1). Since audit 43 a test that only
+fails to BUILD there proves nothing (any test of the fix's new API does): the
+gate then reruns with the PR's headers kept and the PR's
+`tests/regression_stubs/*.c` - pre-fix stand-ins for the new functions, with
+the OLD behaviour - linked in (`make REGRESSION_STUBS=...`), and needs a case
+to fail at runtime. A fix that is nothing but new API opts out explicitly with
+a `REGRESSION-GATE: build-only <reason>` trailer in a commit message or the PR
+body, which the gate logs. `tests/check_regression_gate_selftest.sh` (run by
+the self-test) proves each outcome on throwaway repositories.
 
 ## Running it
 
