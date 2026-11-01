@@ -14,11 +14,15 @@
  * Wire format (every frame, both sockets): a 16-byte header
  *   magic "HGC1" | type | id | payload length     (u32 little-endian each)
  * then the payload:
- *   REQ    deadline_ms u32 | device i32 | WGSL bytes  (<= 8 + 1 MiB)
+ *   REQ    deadline_ms u32 | device i32 | stack_mib u32 | mem_mib u32 |
+ *          WGSL bytes                               (<= 16 + 1 MiB)
  *   CANCEL (empty)                                  server -> supervisor
  *   READY  (empty)                                  worker -> supervisor
  *   RESP   status i32 | flags u32 | detail          (<= HL_GPU_HELPER_REPLY_MAX)
- * (flags bit 0: the worker's OS sandbox was applied.)
+ * (flags bit 0: the worker's OS sandbox was applied.) The supervisor's RESP
+ * to the server adds peak_kib u32: the worker's peak memory it observed.
+ * stack_mib / mem_mib are the server's asks (0 = the defaults); the
+ * supervisor clamps both to HL_GPU_HELPER_STACK_BYTES / _MEM_BYTES.
  * A frame of another type, or longer than its cap, is a protocol error.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -59,6 +63,7 @@
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <libproc.h>
 #endif
 #if defined(__linux__)
 #include <linux/filter.h>
@@ -91,11 +96,17 @@ __attribute__((weak)) void hl_runtime_cache_gpu_verdict_put(const char *hex)
 extern char **environ;
 
 static uint32_t g_test_init_ms, g_test_compile_ms;
+static uint64_t g_test_mem_cap;
 
 void hl_gpu_helper_test_set_timeouts(uint32_t init_ms, uint32_t compile_ms)
 {
     g_test_init_ms = init_ms;
     g_test_compile_ms = compile_ms;
+}
+
+void hl_gpu_helper_test_set_mem_cap(uint64_t bytes)
+{
+    g_test_mem_cap = bytes;
 }
 
 #ifdef HL_GPU_HELPER_SUPPORTED
@@ -128,13 +139,14 @@ static uint32_t helper_compile_ms(void)
 
 /* ── Frames ────────────────────────────────────────────────────────── */
 
-#define HGC_MAGIC   0x31434748u   /* "HGC1" little-endian */
+#define HGC_MAGIC   0x32434748u   /* "HGC2" little-endian */
 #define HGC_HDR     16u
 #define HGC_REQ     1u
 #define HGC_CANCEL  2u
 #define HGC_RESP    3u
 #define HGC_READY   4u
-#define HGC_REQ_MAX ((uint32_t)(8u + HL_GPU_WGSL_MAX_BYTES))
+#define HGC_REQ_PRE 16u           /* deadline, device, stack, memory */
+#define HGC_REQ_MAX ((uint32_t)(HGC_REQ_PRE + HL_GPU_WGSL_MAX_BYTES))
 #define HGC_FLAG_SANDBOXED 0x1u
 
 static void put32(uint8_t *p, uint32_t v)
@@ -312,15 +324,19 @@ static int frame_read(int fd, FrameRd *r, uint64_t deadline)
 /* ── Spawning ─────────────────────────────────────────────────────── */
 
 /* The environment a helper gets: what the GPU stack reads (Vulkan / Mesa /
- * wgpu knobs, the cache and runtime dirs, the loader path) and the test
- * hook - never the server's secrets (manifest.secrets, DSN passwords). */
+ * wgpu knobs, the cache and runtime dirs, the loader path) and, in a build
+ * with the test hooks, the hook - never the server's secrets
+ * (manifest.secrets, DSN passwords). */
 static int env_allowed(const char *kv)
 {
     static const char *const prefixes[] = { "VK_", "MESA_", "WGPU_", "MTL_",
                                             "__GLX_", NULL };
     static const char *const names[] = { "HOME", "TMPDIR", "XDG_CACHE_HOME",
                                          "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH",
-                                         "HULL_TEST_GPU_HELPER", NULL };
+#ifdef HL_GPU_HELPER_TEST_HOOKS
+                                         "HULL_TEST_GPU_HELPER",
+#endif
+                                         NULL };
     for (int i = 0; prefixes[i]; i++)
         if (strncmp(kv, prefixes[i], strlen(prefixes[i])) == 0) return 1;
     for (int i = 0; names[i]; i++) {
@@ -431,18 +447,33 @@ static void close_extra_fds(void)
 }
 
 /* Reap @p pid within @p ms (it was killed, or is exiting). 1 = reaped (its
- * status in *status), 0 = still there. */
-static int reap(pid_t pid, int *status, uint32_t ms)
+ * status in *status, its peak RSS in bytes in *maxrss when non-NULL),
+ * 0 = still there. */
+static int reap_ru(pid_t pid, int *status, uint32_t ms, uint64_t *maxrss)
 {
     uint64_t deadline = mono_ms() + ms;
     for (;;) {
-        pid_t r = waitpid(pid, status, WNOHANG);
+        struct rusage ru;
+        memset(&ru, 0, sizeof ru);
+        pid_t r = wait4(pid, status, WNOHANG, &ru);
+        if (r == pid && maxrss) {
+#if defined(__APPLE__)
+            *maxrss = (uint64_t)ru.ru_maxrss;            /* bytes */
+#else
+            *maxrss = (uint64_t)ru.ru_maxrss * 1024u;    /* KiB */
+#endif
+        }
         if (r == pid) return 1;
         if (r < 0 && errno != EINTR) return 1;   /* not ours any more */
         if (mono_ms() >= deadline) return 0;
         struct timespec ts = { 0, 5 * 1000000L };
         nanosleep(&ts, NULL);
     }
+}
+
+static int reap(pid_t pid, int *status, uint32_t ms)
+{
+    return reap_ru(pid, status, ms, NULL);
 }
 
 /* ── Client (the server) ──────────────────────────────────────────── */
@@ -555,9 +586,11 @@ static void hex32(const uint8_t in[32], char out[65])
 
 /* The verdict's key: the source, the device it was checked for and
  * everything that decides how it compiles (Hull's version - and with it
- * wgpu / naga's -, the backend, the arch). */
+ * wgpu / naga's -, the backend, the arch, the worker's stack and memory
+ * cap). */
 static int verdict_key(const char *wgsl, size_t len, int device,
-                       const char *adapter, uint8_t out[32])
+                       const char *adapter, uint32_t stack_mib,
+                       uint32_t mem_mib, uint8_t out[32])
 {
     uint8_t src[32];
     if (hl_cap_crypto_sha256(wgsl, len, src) != 0) return -1;
@@ -565,9 +598,11 @@ static int verdict_key(const char *wgsl, size_t len, int device,
     hex32(src, hex);
     char buf[1024];
     const HlGpuBackend *be = helper_backend();
-    int n = snprintf(buf, sizeof buf, "hull-gpu-verdict-v1|%s|%s|%s|%d|%s|%s",
+    int n = snprintf(buf, sizeof buf,
+                     "hull-gpu-verdict-v2|%s|%s|%s|%d|%s|%u|%u|%s",
                      HL_VERSION, be ? be->name : "-", HL_HELPER_ARCH,
-                     device, adapter ? adapter : "-", hex);
+                     device, adapter ? adapter : "-", (unsigned)stack_mib,
+                     (unsigned)mem_mib, hex);
     if (n < 0 || (size_t)n >= sizeof buf) return -1;
     return hl_cap_crypto_sha256(buf, (size_t)n, out);
 }
@@ -606,7 +641,8 @@ static int run_stopped(void)
 #endif
 }
 
-static int round_trip(const char *wgsl, size_t len, int device)
+static int round_trip(const char *wgsl, size_t len, int device,
+                      uint32_t stack_mib, uint32_t mem_mib)
 {
     if (g_fd < 0) return HL_GPU_HELPER_UNAVAILABLE;
     uint32_t id = g_next_id++;
@@ -614,9 +650,11 @@ static int round_trip(const char *wgsl, size_t len, int device)
     uint32_t compile_ms = helper_compile_ms();
     uint64_t deadline = mono_ms() + helper_init_ms() + compile_ms +
                         HL_GPU_HELPER_MARGIN_MS;
-    uint8_t pre[8];
+    uint8_t pre[HGC_REQ_PRE];
     put32(pre, compile_ms);
     put32(pre + 4, (uint32_t)device);
+    put32(pre + 8, stack_mib);
+    put32(pre + 12, mem_mib);
     if (write_frame(g_fd, HGC_REQ, id, pre, sizeof pre, wgsl, len,
                     deadline) != 0) {
         helper_lost("request not sent");
@@ -637,13 +675,17 @@ static int round_trip(const char *wgsl, size_t len, int device)
             uint32_t rid = r.id;
             int status = keep ? (int)get32(r.buf) : -1;
             uint32_t flags = keep ? get32(r.buf + 4) : 0;
+            uint64_t peak = keep && r.len >= 12
+                ? (uint64_t)get32(r.buf + 8) * 1024u : 0;
             frame_reset(&r);
             if (!keep) {
                 helper_lost("malformed reply");
                 return HL_GPU_HELPER_UNAVAILABLE;
             }
             if (rid != id) continue;    /* a cancelled request's reply */
-            if (status < HL_GPU_HELPER_OK || status > HL_GPU_HELPER_CANCELLED)
+            g_stats.last_peak_bytes = peak;
+            if (peak > g_stats.peak_bytes) g_stats.peak_bytes = peak;
+            if (status < HL_GPU_HELPER_OK || status > HL_GPU_HELPER_MEMORY)
                 status = HL_GPU_HELPER_BADREPLY;
             if ((status == HL_GPU_HELPER_OK || status == HL_GPU_HELPER_SHADER)
                 && !(flags & HGC_FLAG_SANDBOXED)) {
@@ -681,14 +723,34 @@ static int round_trip(const char *wgsl, size_t len, int device)
     }
 }
 
+/* The worker's stack / memory in MiB: the caller's ask, never above the
+ * compiled caps (the supervisor clamps them again). */
+static uint32_t helper_stack_mib(size_t stack_bytes)
+{
+    size_t b = stack_bytes && stack_bytes < HL_GPU_HELPER_STACK_BYTES
+        ? stack_bytes : HL_GPU_HELPER_STACK_BYTES;
+    return (uint32_t)(b >> 20);
+}
+
+static uint32_t helper_mem_mib(void)
+{
+    uint64_t b = g_test_mem_cap && g_test_mem_cap < HL_GPU_HELPER_MEM_BYTES
+        ? g_test_mem_cap : HL_GPU_HELPER_MEM_BYTES;
+    return (uint32_t)(b >> 20);
+}
+
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter)
+                        const char *adapter, size_t stack_bytes)
 {
     if (!wgsl || len > HL_GPU_WGSL_MAX_BYTES)
         return HL_GPU_HELPER_BADREPLY;
+    uint32_t stack_mib = helper_stack_mib(stack_bytes);
+    uint32_t mem_mib = helper_mem_mib();
+    if (stack_mib == 0)
+        return HL_GPU_HELPER_UNAVAILABLE;   /* no stack worth checking on */
     uint8_t key[32];
     char hex[65];
-    if (verdict_key(wgsl, len, device, adapter, key) != 0)
+    if (verdict_key(wgsl, len, device, adapter, stack_mib, mem_mib, key) != 0)
         return HL_GPU_HELPER_UNAVAILABLE;
     hex32(key, hex);
     int hit = cache_lookup(key, hex);
@@ -704,10 +766,10 @@ int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
     if (hl_db_budget_charge((int64_t)HL_GPU_HELPER_UNITS) != 0)
         return HL_GPU_HELPER_CANCELLED;
 #endif
-    int status = round_trip(wgsl, len, device);
+    int status = round_trip(wgsl, len, device, stack_mib, mem_mib);
     if (status == HL_GPU_HELPER_OK || status == HL_GPU_HELPER_SHADER ||
         status == HL_GPU_HELPER_TIMEOUT || status == HL_GPU_HELPER_CRASHED ||
-        status == HL_GPU_HELPER_BADREPLY)
+        status == HL_GPU_HELPER_BADREPLY || status == HL_GPU_HELPER_MEMORY)
         cache_store(key, hex, status);
     return status;
 }
@@ -715,9 +777,33 @@ int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
 /* ── Supervisor ──────────────────────────────────────────────────── */
 
 typedef struct {
-    pid_t pid;
-    int   fd;
+    pid_t    pid;
+    int      fd;
+    uint64_t mem_cap;   /* bytes: killed above it (macOS polling) */
+    uint64_t peak;      /* the largest memory seen: footprint / RSS, bytes */
 } Worker;
+
+/* The worker's memory as the supervisor can see it while it runs: on macOS
+ * its peak physical footprint (dirty memory, compressed included); 0 where
+ * it cannot be read (Linux relies on RLIMIT_DATA in the worker and reads
+ * the peak RSS when it reaps it). */
+static uint64_t worker_mem_now(pid_t pid)
+{
+#if defined(__APPLE__)
+    struct rusage_info_v4 ri;
+    if (pid > 0 &&
+        proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&ri) == 0)
+        return ri.ri_lifetime_max_phys_footprint;
+#else
+    (void)pid;
+#endif
+    return 0;
+}
+
+static void worker_note_rss(Worker *w, uint64_t rss)
+{
+    if (rss > w->peak) w->peak = rss;
+}
 
 /* sup_wait_worker's "a frame arrived": outside every HlGpuHelperStatus. */
 #define SUP_FRAME 100
@@ -725,9 +811,12 @@ typedef struct {
 static void worker_kill(Worker *w)
 {
     if (w->pid > 0) {
+        worker_note_rss(w, worker_mem_now(w->pid));
         (void)kill(w->pid, SIGKILL);
         int st;
-        (void)reap(w->pid, &st, 2000);
+        uint64_t rss = 0;
+        (void)reap_ru(w->pid, &st, 2000, &rss);
+        worker_note_rss(w, rss);
         w->pid = -1;
     }
     if (w->fd >= 0) {
@@ -740,9 +829,11 @@ static void worker_kill(Worker *w)
 static int worker_gone(Worker *w)
 {
     int st = 0;
-    int reaped = w->pid > 0 && reap(w->pid, &st, 500);
+    uint64_t rss = 0;
+    int reaped = w->pid > 0 && reap_ru(w->pid, &st, 500, &rss);
     if (w->pid > 0 && !reaped) (void)kill(w->pid, SIGKILL);
-    if (!reaped && w->pid > 0) (void)reap(w->pid, &st, 2000);
+    if (!reaped && w->pid > 0) (void)reap_ru(w->pid, &st, 2000, &rss);
+    worker_note_rss(w, rss);
     w->pid = -1;
     close(w->fd);
     w->fd = -1;
@@ -750,9 +841,10 @@ static int worker_gone(Worker *w)
 }
 
 /* Wait for one frame from the worker, until @p deadline, watching the
- * server's socket for a cancel of request @p id or its EOF. Returns
- * SUP_FRAME (a frame in *wr), or a status: TIMEOUT, CRASHED, BADREPLY,
- * CANCELLED; *server_gone = 1 on the server's EOF / a protocol error. */
+ * server's socket for a cancel of request @p id or its EOF, and (macOS)
+ * the worker's memory every HL_GPU_HELPER_MEM_POLL_MS. Returns SUP_FRAME
+ * (a frame in *wr), or a status: TIMEOUT, CRASHED, BADREPLY, CANCELLED,
+ * MEMORY; *server_gone = 1 on the server's EOF / a protocol error. */
 static int sup_wait_worker(int sfd, Worker *w, FrameRd *wr, uint32_t id,
                            uint64_t deadline, int *server_gone)
 {
@@ -767,6 +859,19 @@ static int sup_wait_worker(int sfd, Worker *w, FrameRd *wr, uint32_t id,
             worker_kill(w);
             return HL_GPU_HELPER_TIMEOUT;
         }
+#if defined(__APPLE__)
+        /* No data / address-space rlimit is enforced on macOS: watch the
+         * footprint instead, often enough that an allocation burst between
+         * two looks stays small next to the cap. */
+        if (left < 0 || left > HL_GPU_HELPER_MEM_POLL_MS)
+            left = HL_GPU_HELPER_MEM_POLL_MS;
+        uint64_t mem = worker_mem_now(w->pid);
+        worker_note_rss(w, mem);
+        if (w->mem_cap && mem > w->mem_cap) {
+            worker_kill(w);
+            return HL_GPU_HELPER_MEMORY;
+        }
+#endif
         int pr = poll(pf, 2, left);
         if (pr < 0 && errno == EINTR) continue;
         if (pr < 0) {
@@ -814,17 +919,32 @@ static int sup_wait_worker(int sfd, Worker *w, FrameRd *wr, uint32_t id,
 
 /* One compile: spawn a worker, wait for it to be ready, hand it the source,
  * wait for its verdict. */
+static int sup_compile_w(int sfd, Worker *w, uint32_t id, uint8_t *req,
+                         uint32_t req_len, uint32_t compile_ms,
+                         int *server_gone, uint32_t *flags);
+
 static int sup_compile(int sfd, const char *exe, uint32_t id,
-                       const uint8_t *req, uint32_t req_len, int *server_gone,
-                       uint32_t *flags)
+                       uint8_t *req, uint32_t req_len, int *server_gone,
+                       uint32_t *flags, uint64_t *peak)
 {
     uint32_t compile_ms = get32(req);
     if (compile_ms == 0 || compile_ms > 600000u) compile_ms = HL_GPU_COMPILE_TIMEOUT_MS;
+    /* The stack and memory the worker gets: the server's asks, never above
+     * the compiled caps; rewritten in the request the worker reads. */
+    uint32_t stack_mib = get32(req + 8);
+    uint32_t mem_mib = get32(req + 12);
+    if (stack_mib == 0 || stack_mib > (uint32_t)(HL_GPU_HELPER_STACK_BYTES >> 20))
+        stack_mib = (uint32_t)(HL_GPU_HELPER_STACK_BYTES >> 20);
+    if (mem_mib == 0 || mem_mib > (uint32_t)(HL_GPU_HELPER_MEM_BYTES >> 20))
+        mem_mib = (uint32_t)(HL_GPU_HELPER_MEM_BYTES >> 20);
+    put32(req + 8, stack_mib);
+    put32(req + 12, mem_mib);
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
         return HL_GPU_HELPER_UNAVAILABLE;
     (void)fcntl(sv[0], F_SETFD, FD_CLOEXEC);
-    Worker w = { .pid = spawn_role(exe, "worker", sv[1]), .fd = sv[0] };
+    Worker w = { .pid = spawn_role(exe, "worker", sv[1]), .fd = sv[0],
+                 .mem_cap = (uint64_t)mem_mib << 20, .peak = 0 };
     close(sv[1]);
     if (w.pid < 0) {
         close(sv[0]);
@@ -832,29 +952,38 @@ static int sup_compile(int sfd, const char *exe, uint32_t id,
     }
     set_nonblock(w.fd);
     set_nosigpipe(w.fd);
+    int rc = sup_compile_w(sfd, &w, id, req, req_len, compile_ms,
+                           server_gone, flags);
+    *peak = w.peak;
+    return rc;
+}
 
+static int sup_compile_w(int sfd, Worker *w, uint32_t id, uint8_t *req,
+                         uint32_t req_len, uint32_t compile_ms,
+                         int *server_gone, uint32_t *flags)
+{
     FrameRd wr = { .max = HL_GPU_HELPER_REPLY_MAX };
     /* Start-up: spawn + backend init + sandbox, until READY. The init
      * deadline is the server's (it knows the configured value) less the
      * compile deadline and margin it budgeted; the supervisor uses the
      * default. */
-    int rc = sup_wait_worker(sfd, &w, &wr, id,
+    int rc = sup_wait_worker(sfd, w, &wr, id,
                              mono_ms() + helper_init_ms(), server_gone);
     if (rc != SUP_FRAME) return rc;
     int ready = wr.type == HGC_READY && wr.len == 0;
     frame_reset(&wr);
     if (!ready) {
-        worker_kill(&w);
+        worker_kill(w);
         return HL_GPU_HELPER_BADREPLY;
     }
     /* The source, then the compile deadline. */
     uint64_t deadline = mono_ms() + compile_ms;
-    if (write_frame(w.fd, HGC_REQ, id, req, req_len, NULL, 0, deadline) != 0) {
-        worker_kill(&w);
+    if (write_frame(w->fd, HGC_REQ, id, req, req_len, NULL, 0, deadline) != 0) {
+        worker_kill(w);
         return mono_ms() >= deadline ? HL_GPU_HELPER_TIMEOUT
                                      : HL_GPU_HELPER_CRASHED;
     }
-    rc = sup_wait_worker(sfd, &w, &wr, id, deadline, server_gone);
+    rc = sup_wait_worker(sfd, w, &wr, id, deadline, server_gone);
     if (rc != SUP_FRAME) return rc;
     int status = HL_GPU_HELPER_BADREPLY;
     if (wr.type == HGC_RESP && wr.id == id && wr.len >= 8) {
@@ -866,7 +995,7 @@ static int sup_compile(int sfd, const char *exe, uint32_t id,
         }
     }
     frame_reset(&wr);
-    worker_kill(&w);   /* it exits after replying; reaped (or killed) here */
+    worker_kill(w);   /* it exits after replying; reaped (or killed) here */
     return status;
 }
 
@@ -899,19 +1028,23 @@ static int supervisor_main(void)
             frame_reset(&r);
             continue;
         }
-        if (r.type != HGC_REQ || r.len < 8) {
+        if (r.type != HGC_REQ || r.len < HGC_REQ_PRE) {
             frame_reset(&r);
             return 2;
         }
         int gone = 0;
         uint32_t flags = 0;
-        int status = sup_compile(sfd, exe, r.id, r.buf, r.len, &gone, &flags);
+        uint64_t peak = 0;
+        int status = sup_compile(sfd, exe, r.id, r.buf, r.len, &gone, &flags,
+                                 &peak);
         uint32_t id = r.id;
         frame_reset(&r);
         if (gone) return 0;
-        uint8_t st[8];
+        uint8_t st[12];
         put32(st, (uint32_t)status);
         put32(st + 4, flags);
+        uint64_t kib = peak >> 10;
+        put32(st + 8, kib > UINT32_MAX ? UINT32_MAX : (uint32_t)kib);
         if (write_frame(sfd, HGC_RESP, id, st, sizeof st, NULL, 0, 0) != 0)
             return 0;
     }
@@ -962,7 +1095,19 @@ static int worker_sandbox(void)
 #define __NR_landlock_add_rule       445
 #define __NR_landlock_restrict_self  446
 #endif
-struct hl_ll_ruleset_attr { uint64_t handled_access_fs; };
+/* ABI 4 added handled_access_net; an older kernel takes the first field
+ * only (the size passed says which). */
+struct hl_ll_ruleset_attr {
+    uint64_t handled_access_fs;
+    uint64_t handled_access_net;
+};
+#define HL_LL_NET_BIND_TCP    (1ull << 0)
+#define HL_LL_NET_CONNECT_TCP (1ull << 1)
+#ifndef __NR_io_uring_setup
+#define __NR_io_uring_setup    425
+#define __NR_io_uring_enter    426
+#define __NR_io_uring_register 427
+#endif
 struct hl_ll_path_beneath {
     uint64_t allowed_access;
     int32_t  parent_fd;
@@ -1002,9 +1147,18 @@ static int worker_sandbox(void)
         if (abi >= 2) mask |= 1ull << 13;          /* REFER */
         if (abi >= 3) mask |= 1ull << 14;          /* TRUNCATE */
         if (abi >= 5) mask |= HL_LL_IOCTL_DEV;
-        struct hl_ll_ruleset_attr attr = { mask };
+        /* ABI 4+: TCP bind and connect handled with no rule granting
+         * either, so both are refused (seccomp below refuses non-local
+         * sockets too; this also holds for a socket made some other way). */
+        struct hl_ll_ruleset_attr attr = { mask, 0 };
+        size_t attr_size = sizeof attr.handled_access_fs;
+        if (abi >= 4) {
+            attr.handled_access_net = HL_LL_NET_BIND_TCP |
+                                      HL_LL_NET_CONNECT_TCP;
+            attr_size = sizeof attr;
+        }
         int fd = (int)syscall(__NR_landlock_create_ruleset, &attr,
-                              sizeof attr, 0u);
+                              attr_size, 0u);
         if (fd >= 0) {
             static const char *const ro[] = { "/usr", "/lib", "/lib64",
                                               "/etc", "/opt", "/proc",
@@ -1022,7 +1176,9 @@ static int worker_sandbox(void)
     } else {
         rc = -1;
     }
-    /* seccomp: no exec, no non-local socket (a compiler needs neither). */
+    /* seccomp: no exec, no non-local socket, no io_uring (a compiler needs
+     * none of them; IORING_OP_SOCKET would make a socket without the
+     * socket() call the filter checks). */
 #if defined(__x86_64__)
 #define HL_AUDIT_ARCH AUDIT_ARCH_X86_64
 #elif defined(__aarch64__)
@@ -1036,9 +1192,12 @@ static int worker_sandbox(void)
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
         /* x32 numbers carry bit 30 on the x86_64 arch: refused. */
-        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000u, 4, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 3, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execveat, 2, 0),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000u, 7, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 6, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execveat, 5, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_setup, 4, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_enter, 3, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_register, 2, 0),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 2, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
@@ -1079,13 +1238,14 @@ static void *worker_compile_main(void *p)
     return NULL;
 }
 
-/* Compile on a thread of HL_GPU_HELPER_STACK_BYTES (smaller fallbacks if
- * that cannot be reserved). */
-static int worker_compile(CompileArg *a)
+/* Compile on a thread of @p stack bytes, the request's (smaller fallbacks if
+ * that cannot be reserved: a smaller stack only makes the verdict
+ * stricter). */
+static int worker_compile(CompileArg *a, size_t stack)
 {
-    static const size_t sizes[] = { HL_GPU_HELPER_STACK_BYTES,
-                                    (size_t)256 << 20, (size_t)64 << 20 };
+    const size_t sizes[] = { stack, (size_t)256 << 20, (size_t)64 << 20 };
     for (size_t k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
+        if (k > 0 && sizes[k] >= stack) continue;
         pthread_attr_t attr;
         if (pthread_attr_init(&attr) != 0) continue;
         pthread_t th;
@@ -1101,6 +1261,33 @@ static int worker_compile(CompileArg *a)
 }
 
 static uint32_t g_worker_flags;
+
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+#    define HL_GPU_HELPER_SANITIZED 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#  define HL_GPU_HELPER_SANITIZED 1
+#endif
+
+/* Lower the worker's RLIMIT_DATA to @p bytes (Linux, non-sanitizer builds;
+ * a no-op elsewhere). Only ever lowers: never above the hard limit the
+ * worker was started with. */
+static void worker_limit_data(uint64_t bytes)
+{
+#if defined(__linux__) && !defined(HL_GPU_HELPER_SANITIZED)
+    struct rlimit cur, rl;
+    if (getrlimit(RLIMIT_DATA, &cur) != 0) return;
+    rlim_t want = (rlim_t)bytes;
+    if (cur.rlim_max != RLIM_INFINITY && cur.rlim_max < want)
+        want = cur.rlim_max;
+    rl.rlim_cur = rl.rlim_max = want;
+    (void)setrlimit(RLIMIT_DATA, &rl);
+#else
+    (void)bytes;
+#endif
+}
 
 static void worker_reply(uint32_t id, int status, const void *extra,
                          size_t extra_len)
@@ -1127,27 +1314,15 @@ static int worker_main(void)
     rl.rlim_cur = cpu;
     rl.rlim_max = cpu + 1;
     (void)setrlimit(RLIMIT_CPU, &rl);
-#if defined(__has_feature)
-#  if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
-#    define HL_GPU_HELPER_SANITIZED 1
-#  endif
-#endif
-#if defined(__SANITIZE_ADDRESS__)
-#  define HL_GPU_HELPER_SANITIZED 1
-#endif
-    /* RLIMIT_DATA counts every private mapping on Linux, so it refuses an
-     * ASan / MSan worker its shadow-memory reservation and the worker dies
-     * at start; sanitizer builds (tests only) run without it. */
-#if defined(__linux__) && !defined(HL_GPU_HELPER_SANITIZED)
-    struct rlimit cur;
-    if (getrlimit(RLIMIT_DATA, &cur) == 0) {
-        rlim_t want = (rlim_t)HL_GPU_HELPER_DATA_BYTES;
-        if (cur.rlim_max != RLIM_INFINITY && cur.rlim_max < want)
-            want = cur.rlim_max;
-        rl.rlim_cur = rl.rlim_max = want;
-        (void)setrlimit(RLIMIT_DATA, &rl);
-    }
-#endif
+    /* Memory (HL_GPU_HELPER_MEM_BYTES): on Linux RLIMIT_DATA, the cap plus
+     * the compile stack (a thread stack is a private writable mapping,
+     * counted as data); lowered to the request's values once it arrives.
+     * RLIMIT_DATA counts every private mapping, so it refuses an ASan /
+     * MSan worker its shadow-memory reservation and the worker dies at
+     * start; sanitizer builds (tests only) run without it. macOS enforces
+     * no data rlimit: the supervisor watches the footprint instead. */
+    worker_limit_data((uint64_t)HL_GPU_HELPER_MEM_BYTES +
+                      (uint64_t)HL_GPU_HELPER_STACK_BYTES);
     int fd = 3;
     set_nosigpipe(fd);
 
@@ -1166,14 +1341,27 @@ static int worker_main(void)
     if (write_frame(fd, HGC_READY, 0, NULL, 0, NULL, 0, 0) != 0)
         _exit(2);
     FrameRd r = { .max = HGC_REQ_MAX };
-    if (frame_read(fd, &r, 0) != FR_DONE || r.type != HGC_REQ || r.len < 8)
+    if (frame_read(fd, &r, 0) != FR_DONE || r.type != HGC_REQ ||
+        r.len < HGC_REQ_PRE)
         _exit(2);
     uint32_t id = r.id;
     int device = (int)get32(r.buf + 4);
+    /* The supervisor clamped both to the compiled caps. */
+    size_t stack = (size_t)get32(r.buf + 8) << 20;
+    uint64_t mem = (uint64_t)get32(r.buf + 12) << 20;
+    if (stack == 0 || stack > HL_GPU_HELPER_STACK_BYTES)
+        stack = HL_GPU_HELPER_STACK_BYTES;
+    if (mem == 0 || mem > HL_GPU_HELPER_MEM_BYTES)
+        mem = HL_GPU_HELPER_MEM_BYTES;
+    worker_limit_data(mem + (uint64_t)stack);
 
-    /* Test hooks (HULL_TEST_GPU_HELPER): exercise the supervision without
-     * an adversarial shader. Read here, after the sandbox, so they run on
-     * hosts with no GPU too. */
+#ifdef HL_GPU_HELPER_TEST_HOOKS
+    /* Test hooks (HULL_TEST_GPU_HELPER), compiled only into test builds
+     * (-DHL_GPU_HELPER_TEST_HOOKS: the unit tests and the GPU e2e): they
+     * exercise the supervision without an adversarial shader, and one of
+     * them ("accept") vouches for any source, so a release binary must not
+     * have them. Read here, after the sandbox, so they run on hosts with
+     * no GPU too. */
     const char *hook = getenv("HULL_TEST_GPU_HELPER");
     if (hook && strcmp(hook, "crash") == 0) {
         signal(SIGSEGV, SIG_DFL);
@@ -1213,6 +1401,14 @@ static int worker_main(void)
                 leaked = 1;      /* the connect reached the stack */
             close(so);
         }
+#if defined(__linux__)
+        /* io_uring would make a socket (IORING_OP_SOCKET) without the
+         * socket() call seccomp checks. */
+        unsigned char params[120];
+        memset(params, 0, sizeof params);
+        long ur = syscall(__NR_io_uring_setup, 1u, params);
+        if (ur >= 0) { leaked = 1; close((int)ur); }
+#endif
         worker_reply(id, leaked ? HL_GPU_HELPER_SHADER : HL_GPU_HELPER_OK,
                      NULL, 0);
         _exit(0);
@@ -1222,15 +1418,34 @@ static int worker_main(void)
         worker_reply(id, HL_GPU_HELPER_OK, NULL, 0);
         _exit(0);
     }
+    if (hook && strcmp(hook, "alloc") == 0) {
+        /* Memory past the cap, no shader involved: touched 16 MiB blocks
+         * until an allocation fails (Linux, RLIMIT_DATA: abort, as an
+         * allocator that cannot allocate does) or the supervisor kills the
+         * worker (macOS). Reaching 4x the cap means nothing stopped it. */
+        uint64_t total = 0;
+        while (total < 4 * (mem + (uint64_t)stack)) {
+            /* Touched through a volatile pointer: an unread malloc'd
+             * block may otherwise be optimised away. */
+            volatile char *blk = malloc((size_t)16 << 20);
+            if (!blk) abort();
+            for (size_t off = 0; off < ((size_t)16 << 20); off += 4096)
+                blk[off] = (char)0xa5;
+            total += (uint64_t)16 << 20;
+        }
+        worker_reply(id, HL_GPU_HELPER_OK, NULL, 0);
+        _exit(0);
+    }
+#endif
 
     if (!have_dev) {
         worker_reply(id, HL_GPU_HELPER_UNAVAILABLE, NULL, 0);
         _exit(0);
     }
     if (device < 0 || device >= ctx->device_count) device = 0;
-    CompileArg a = { be, &ctx->devices[device], (const char *)r.buf + 8,
-                     r.len - 8, HL_GPU_ERR_INTERNAL };
-    int crc = worker_compile(&a);
+    CompileArg a = { be, &ctx->devices[device], (const char *)r.buf + HGC_REQ_PRE,
+                     r.len - HGC_REQ_PRE, HL_GPU_ERR_INTERNAL };
+    int crc = worker_compile(&a, stack);
     worker_reply(id, crc == HL_GPU_OK ? HL_GPU_HELPER_OK : HL_GPU_HELPER_SHADER,
                  NULL, 0);
     /* No teardown: the process is about to go, and freeing the backend can

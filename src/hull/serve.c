@@ -1261,6 +1261,19 @@ static int hl_serve_init_app_context(HlServerState *s)
             && hl_cap_gpu_available(gpu_ctx)) {
             if (s->cfg.gpu_device >= 0 && s->cfg.gpu_device < gpu_ctx->device_count)
                 gpu_ctx->default_device = s->cfg.gpu_device;
+            /* The shader policy holds from here, before the context reaches
+             * the runtime and the app's top level runs (audit convergence
+             * §7.3 confirming audit: the top level compiled any source with
+             * no policy). A built binary compiles only its embedded
+             * shaders/; gpu.dynamic_shaders is raised once the manifest is
+             * applied (hl_serve_wire_caps). The VFS is static: it must
+             * outlive the context. */
+            {
+                extern const HlEntry hl_app_entries[];
+                static HlVfs gpu_shader_vfs;
+                hl_vfs_init(&gpu_shader_vfs, hl_app_entries, s->app_dir);
+                hl_cap_gpu_init_shader_policy(gpu_ctx, &gpu_shader_vfs);
+            }
             gpu_ctx_ok = 1;
         } else if (gpu_be) {
             log_info("[hull:c] GPU compute unavailable - gpu.* disabled");
@@ -2027,7 +2040,9 @@ static int hl_serve_wire_caps(HlServerState *s)
     /* Shader policy (audit convergence §7.3), sealed with the allowlist: a
      * built binary (embedded app files) compiles only its embedded
      * shaders/ unless the manifest sets gpu.dynamic_shaders; development
-     * compiles any source and warns once about inline source. */
+     * compiles any source and warns once about inline source. The mode
+     * itself was set at GPU init (before the top level ran); this raises
+     * the opt-in, which only the applied manifest can grant. */
     if (gpu_ctx_ok) {
         const HlVfs *shader_vfs = hl_app_context_app_vfs(s->app);
         int embedded = hl_vfs_embedded(shader_vfs);
