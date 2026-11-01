@@ -100,6 +100,13 @@ typedef struct HlSandboxPolicy {
      * operator policy rather than a manifest capability: application code
      * must not be able to downgrade its own kernel confinement. */
     int allow_degraded;
+
+    /* 1 when the default (-d) database is a DuckDB file (a duckdb:// DSN).
+     * Set by hl_sandbox_policy_add_default_dsn. DuckDB's sidecars are not
+     * SQLite's: <db>.wal (unlinked at every checkpoint and recreated by the
+     * next commit), <db>.wal.checkpoint, <db>.wal.recovery and the <db>.tmp/
+     * spill directory - see hl_sandbox_duckdb_dir_grant (audit 43). */
+    int db_duckdb;
 } HlSandboxPolicy;
 
 /*
@@ -306,8 +313,35 @@ int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
  * hl_sandbox_policy_from_manifest cannot see it; serve.c and the app.main
  * runner (serve_cli.c) both call this (audit 25: the runner did not, so
  * db.async / a reconnect to a `-d postgres://` database died in the sandbox).
- * NULL @p dsn (no database) is a no-op.
+ * NULL @p dsn (no database) is a no-op. A duckdb:// DSN also sets
+ * policy->db_duckdb (audit 43).
  */
 void hl_sandbox_policy_add_default_dsn(HlSandboxPolicy *policy, const char *dsn);
+
+/*
+ * The directory a DuckDB `-d` database's sidecars live in, for the Linux
+ * (Landlock) grant (audit 43). DuckDB unlinks <db>.wal at every checkpoint and
+ * the next commit creates it again, and it makes <db>.wal.checkpoint /
+ * <db>.wal.recovery and the <db>.tmp/ spill directory on demand; Landlock
+ * grants existing inodes and directory trees only, never a name that does not
+ * exist yet, so the only grant that keeps those working is the database's
+ * directory, read + write + create.
+ *
+ * Returns 0 and writes the canonical directory to @p out when that grant is
+ * acceptable; 1 when it is not - the directory is `/`, $HOME or above, the app
+ * directory or an ancestor of it (the app tree stays read-only), inside the
+ * app's reserved .hull, or world-writable; -1 when it cannot be resolved.
+ */
+int hl_sandbox_duckdb_dir_grant(const char *app_dir, const char *db_path,
+                                char *out, size_t out_sz);
+
+/* Test seam: the Seatbelt profile for a policy plus app / database paths
+ * (NULL off macOS: returns -1). */
+int hl_sandbox_seatbelt_profile_db_for_test(const HlSandboxPolicy *policy,
+                                            const char *app_dir,
+                                            const char *db_path,
+                                            char *buf, size_t buf_size,
+                                            const char **params,
+                                            size_t max_params);
 
 #endif /* HL_SANDBOX_H */

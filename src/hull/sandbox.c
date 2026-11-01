@@ -445,6 +445,8 @@ _Static_assert(SEATBELT_PATH_SIZE >= PATH_MAX,
 typedef struct {
     char db_dir[SEATBELT_PATH_SIZE];
     char db_file[4][SEATBELT_PATH_SIZE];   /* db, -wal, -shm, -journal */
+    char duck_file[4][SEATBELT_PATH_SIZE]; /* .wal, .wal.checkpoint,
+                                              .wal.recovery, .tmp (audit 43) */
     char fs_read_keys[HL_MANIFEST_MAX_PATHS][16];    /* "FS_R_0" .. "FS_R_31" */
     char fs_write_keys[HL_MANIFEST_MAX_PATHS][16];   /* "FS_W_0" .. "FS_W_31" */
     char fs_read_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
@@ -580,6 +582,30 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                  "    (literal (param \"DB_F0\")) (literal (param \"DB_F1\"))\n"
                  "    (literal (param \"DB_F2\")) (literal (param \"DB_F3\")))\n"
                  "(allow file-read* (literal (param \"DB_DIR\")))\n\n");
+
+        /* A DuckDB database's own sidecars (audit 43): its .wal - unlinked
+         * at every checkpoint and made again by the next commit -, the
+         * .wal.checkpoint / .wal.recovery it makes on demand, and the .tmp/
+         * spill directory. Seatbelt matches paths, so each is granted by
+         * name, created or not, and the directory stays unwritable. */
+        if (policy->db_duckdb) {
+            static const char *const dsuf[4] = {
+                ".wal", ".wal.checkpoint", ".wal.recovery", ".tmp"
+            };
+            static const char *const dkey[4] = {
+                "DUCK_F0", "DUCK_F1", "DUCK_F2", "DUCK_TMP"
+            };
+            for (int k = 0; k < 4; k++) {
+                snprintf(scratch->duck_file[k], sizeof(scratch->duck_file[k]),
+                         "%s%s", abs, dsuf[k]);
+                PARAM_ADD(dkey[k], scratch->duck_file[k]);
+            }
+            SBPL_LIT("; DuckDB database: its .wal, .wal.checkpoint, "
+                     ".wal.recovery and .tmp/\n"
+                     "(allow file-read* file-write*\n"
+                     "    (literal (param \"DUCK_F0\")) (literal (param \"DUCK_F1\"))\n"
+                     "    (literal (param \"DUCK_F2\")) (subpath (param \"DUCK_TMP\")))\n\n");
+        }
     }
 
     /* ── Manifest fs_read[] paths ───────────────────────────── */
@@ -904,10 +930,72 @@ int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
 #endif
 }
 
+int hl_sandbox_seatbelt_profile_db_for_test(const HlSandboxPolicy *policy,
+                                            const char *app_dir,
+                                            const char *db_path,
+                                            char *buf, size_t buf_size,
+                                            const char **params,
+                                            size_t max_params)
+{
+#if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
+    SeatbeltScratch *scratch = calloc(1, sizeof *scratch);
+    if (!scratch) return -1;
+    int rc = seatbelt_build_profile(policy, app_dir, db_path, NULL, NULL,
+                                    NULL, 0, buf, buf_size,
+                                    params, max_params, scratch);
+    free(scratch);
+    return rc;
+#else
+    (void)policy; (void)app_dir; (void)db_path;
+    (void)buf; (void)buf_size; (void)params; (void)max_params;
+    return -1;
+#endif
+}
+
 void hl_sandbox_policy_add_default_dsn(HlSandboxPolicy *policy, const char *dsn)
 {
-    if (policy && dsn && hl_sandbox_dsn_is_network(dsn))
+    if (!policy || !dsn) return;
+    if (hl_sandbox_dsn_is_network(dsn))
         policy->network_outbound = 1;
+    if (strncasecmp(dsn, "duckdb://", 9) == 0 && hl_sandbox_db_path(dsn))
+        policy->db_duckdb = 1;
+}
+
+int hl_sandbox_duckdb_dir_grant(const char *app_dir, const char *db_path,
+                                char *out, size_t out_sz)
+{
+    if (!db_path || !*db_path || !out || out_sz == 0) return -1;
+    char dir[SANDBOX_PATH_MAX];
+    if ((size_t)snprintf(dir, sizeof dir, "%s", db_path) >= sizeof dir)
+        return -1;
+    char *sl = strrchr(dir, '/');
+    if (!sl) snprintf(dir, sizeof dir, ".");
+    else if (sl == dir) sl[1] = '\0';
+    else *sl = '\0';
+
+    char real[SANDBOX_PATH_MAX];
+    struct stat st;
+    if (!realpath(dir, real) || stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
+        return -1;
+    if (hl_host_path_too_broad(real)) return 1;
+    if (st.st_mode & S_IWOTH) return 1;     /* /tmp, a shared drop dir */
+
+    if (app_dir) {
+        char app[SANDBOX_PATH_MAX];
+        if (!realpath(app_dir, app)) return 1;
+        size_t rn = strlen(real), an = strlen(app);
+        /* The app directory itself or an ancestor of it: the app tree. */
+        if (rn <= an && strncmp(app, real, rn) == 0 &&
+            (app[rn] == '\0' || app[rn] == '/' || strcmp(real, "/") == 0))
+            return 1;
+        /* Inside the app's reserved .hull (any letter case; audit 37). */
+        if (rn > an + 5 && strncmp(real, app, an) == 0 && real[an] == '/' &&
+            strncasecmp(real + an + 1, ".hull", 5) == 0 &&
+            (real[an + 6] == '\0' || real[an + 6] == '/'))
+            return 1;
+    }
+    if ((size_t)snprintf(out, out_sz, "%s", real) >= out_sz) return -1;
+    return 0;
 }
 
 /* ── Phase 1: pre-load pledge ──────────────────────────────────────── */
@@ -1289,6 +1377,59 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             if (lstat(sc, &sst) == 0 && S_ISREG(sst.st_mode) &&
                 unveil(sc, "rw") != 0)
                 log_warn("[sandbox] unveil failed for database file: %s", sc);
+        }
+        /* A DuckDB database's sidecars are not SQLite's (audit 43): the
+         * database's .wal is unlinked at every checkpoint (each shutdown
+         * included) and created again by the next commit, and .wal.checkpoint,
+         * .wal.recovery and the .tmp/ spill directory are made on demand.
+         * With only SQLite's names granted, a second start - the file now
+         * there, its .wal gone - failed every commit with "Cannot open file
+         * x.duckdb.wal: Permission denied"; and a CHECKPOINT failed the next
+         * commit of the first. OpenBSD's unveil takes a name that does not
+         * exist yet, so the four names are granted there; Landlock grants
+         * existing inodes only and has no per-name rule, so on Linux the
+         * database's directory is granted rwc - never the app directory, an
+         * ancestor of it, $HOME or above, or a world-writable directory
+         * (hl_sandbox_duckdb_dir_grant), which keeps the app tree read-only.
+         * A database stored there gets a WARN naming the fix instead. */
+        if (policy->db_duckdb) {
+            int on_linux = 0;
+#if defined(__COSMOPOLITAN__)
+            on_linux = IsLinux();
+#elif defined(__linux__)
+            on_linux = 1;
+#endif
+            if (on_linux) {
+                char ddir[SANDBOX_PATH_MAX];
+                int g = hl_sandbox_duckdb_dir_grant(app_dir, db_path,
+                                                    ddir, sizeof ddir);
+                if (g == 0) {
+                    if (unveil(ddir, "rwc") != 0)
+                        log_warn("[sandbox] unveil failed for DuckDB "
+                                 "database directory: %s", ddir);
+                } else {
+                    log_warn("[sandbox] DuckDB database %s: its directory is "
+                             "not granted (the app directory or an ancestor, "
+                             "too broad, or world-writable). DuckDB recreates "
+                             "its .wal there after every checkpoint, which the "
+                             "Linux sandbox can allow only by making that "
+                             "directory writable, so commits will fail with "
+                             "\"Permission denied\". Put the database in a "
+                             "directory of its own, e.g. "
+                             "-d duckdb://data/app.duckdb.", db_path);
+                }
+            } else {
+                static const char *const dsc[] = {
+                    ".wal", ".wal.checkpoint", ".wal.recovery", ".tmp"
+                };
+                for (size_t k = 0; k < sizeof dsc / sizeof dsc[0]; k++) {
+                    char sc[SANDBOX_PATH_MAX];
+                    if ((size_t)snprintf(sc, sizeof sc, "%s%s", db_path,
+                                         dsc[k]) >= sizeof sc)
+                        continue;
+                    (void)unveil(sc, "rwc");
+                }
+            }
         }
     }
 

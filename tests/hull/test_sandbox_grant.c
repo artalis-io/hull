@@ -258,6 +258,120 @@ UTEST(sandbox_grant, default_dsn_grants_outbound_only_when_it_dials)
     EXPECT_EQ(p.network_outbound, 1);
 }
 
+/* Audit 43: a DuckDB -d database is marked, so the sandbox grants DuckDB's
+ * own sidecars (its .wal, .wal.checkpoint, .wal.recovery, .tmp/), not only
+ * SQLite's names. An in-memory DuckDB has no file. */
+UTEST(sandbox_audit43, duckdb_dsn_marks_the_policy)
+{
+    HlSandboxPolicy p;
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    EXPECT_EQ(p.db_duckdb, 0);
+    hl_sandbox_policy_add_default_dsn(&p, "data/app.db");
+    EXPECT_EQ(p.db_duckdb, 0);
+    hl_sandbox_policy_add_default_dsn(&p, "duckdb://:memory:");
+    EXPECT_EQ(p.db_duckdb, 0);
+    hl_sandbox_policy_add_default_dsn(&p, "DuckDB://data/app.duckdb");
+    EXPECT_EQ(p.db_duckdb, 1);
+    EXPECT_EQ(p.network_outbound, 0);
+}
+
+/* Audit 43: on Linux a DuckDB database's directory is granted rwc (Landlock
+ * cannot grant a name that does not exist yet, and DuckDB recreates its .wal
+ * after every checkpoint) - but never the app directory or an ancestor of it,
+ * the app's .hull, or a world-writable directory. */
+UTEST(sandbox_audit43, duckdb_dir_grant_keeps_the_app_tree_read_only)
+{
+    char base[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(base, sizeof base, "hull_duck") != NULL);
+    char real_base[PATH_MAX];
+    ASSERT_TRUE(realpath(base, real_base) != NULL);
+    char app[PATH_MAX], data[PATH_MAX + 8], hull[PATH_MAX + 8], pub[PATH_MAX];
+    char db[PATH_MAX + 32], out[PATH_MAX], want[PATH_MAX + 8];
+    snprintf(app, sizeof app, "%s/app", real_base);
+    snprintf(data, sizeof data, "%s/data", app);
+    snprintf(hull, sizeof hull, "%s/.hull", app);
+    snprintf(pub, sizeof pub, "%s/pub", real_base);
+    ASSERT_EQ(mkdir(app, 0755), 0);
+    ASSERT_EQ(mkdir(data, 0755), 0);
+    ASSERT_EQ(mkdir(hull, 0755), 0);
+    ASSERT_EQ(mkdir(pub, 0755), 0);
+    ASSERT_EQ(chmod(pub, 0777), 0);
+
+    /* A directory of its own inside the app: granted. */
+    snprintf(db, sizeof db, "%s/x.duckdb", data);
+    ASSERT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), 0);
+    EXPECT_STREQ(out, data);
+    /* The app directory itself, and an ancestor of it: refused. */
+    snprintf(db, sizeof db, "%s/x.duckdb", app);
+    EXPECT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), 1);
+    snprintf(db, sizeof db, "%s/x.duckdb", real_base);
+    EXPECT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), 1);
+    snprintf(db, sizeof db, "%s/../x.duckdb", data);
+    EXPECT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), 1);
+    /* The reserved .hull: refused. */
+    snprintf(db, sizeof db, "%s/x.duckdb", hull);
+    EXPECT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), 1);
+    /* World-writable: refused. */
+    snprintf(db, sizeof db, "%s/x.duckdb", pub);
+    EXPECT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), 1);
+    /* /: refused. A directory that does not exist: an error. */
+    EXPECT_EQ(hl_sandbox_duckdb_dir_grant(app, "/x.duckdb", out, sizeof out), 1);
+    snprintf(db, sizeof db, "%s/nope/x.duckdb", real_base);
+    EXPECT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), -1);
+    /* Outside the app tree, its own directory: granted. */
+    snprintf(want, sizeof want, "%s/var", real_base);
+    ASSERT_EQ(mkdir(want, 0755), 0);
+    snprintf(db, sizeof db, "%s/x.duckdb", want);
+    ASSERT_EQ(hl_sandbox_duckdb_dir_grant(app, db, out, sizeof out), 0);
+    EXPECT_STREQ(out, want);
+
+    rmdir(want); rmdir(pub); rmdir(hull); rmdir(data); rmdir(app);
+    rmdir(base);
+}
+
+#if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
+/* Audit 43: Seatbelt matches paths, so a DuckDB database's sidecars are
+ * granted by name - its .wal, .wal.checkpoint, .wal.recovery and the .tmp/
+ * subtree - and its directory stays unwritable. A SQLite database gets none. */
+UTEST(sandbox_audit43, duckdb_seatbelt_names_its_sidecars)
+{
+    static char buf[16384];
+    const char *params[256];
+    HlSandboxPolicy p;
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    hl_sandbox_policy_add_default_dsn(&p, "duckdb:///srv/app/data/x.duckdb");
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_db_for_test(
+                  &p, NULL, "/srv/app/data/x.duckdb", buf, sizeof buf,
+                  params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "(literal (param \"DUCK_F0\")) (literal (param \"DUCK_F1\"))\n"
+                            "    (literal (param \"DUCK_F2\")) (subpath (param \"DUCK_TMP\")))")
+                != NULL);
+    EXPECT_TRUE(strstr(buf, "(subpath (param \"DB_DIR\"))") == NULL);
+    static const char *const want[][2] = {
+        { "DUCK_F0", "/srv/app/data/x.duckdb.wal" },
+        { "DUCK_F1", "/srv/app/data/x.duckdb.wal.checkpoint" },
+        { "DUCK_F2", "/srv/app/data/x.duckdb.wal.recovery" },
+        { "DUCK_TMP", "/srv/app/data/x.duckdb.tmp" },
+    };
+    for (size_t w = 0; w < 4; w++) {
+        int found = 0;
+        for (int i = 0; params[i]; i += 2)
+            if (strcmp(params[i], want[w][0]) == 0) {
+                EXPECT_STREQ(params[i + 1], want[w][1]);
+                found = 1;
+            }
+        EXPECT_EQ(found, 1);
+    }
+
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    hl_sandbox_policy_add_default_dsn(&p, "/srv/app/data/x.db");
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_db_for_test(
+                  &p, NULL, "/srv/app/data/x.db", buf, sizeof buf,
+                  params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "DUCK_") == NULL);
+}
+#endif
+
 /* Audit 25: a TUI's terminal grant names only real tty device paths. */
 UTEST(sandbox_tty, path_validation)
 {
