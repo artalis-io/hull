@@ -444,6 +444,12 @@ static uint64_t cd_mono_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
+#ifndef __has_feature
+#  define __has_feature(x) 0
+#endif
+/* Not under MSan: the sync connect resolves through libc getaddrinfo,
+ * which MSan does not instrument (it flags the result as uninitialised). */
+#if !__has_feature(memory_sanitizer)
 UTEST(http_convergence_deadline, sync_request_ends_at_the_run_deadline)
 {
     int port = 0;
@@ -508,5 +514,6 @@ UTEST(http_convergence_deadline, request_past_the_run_deadline_is_refused)
     EXPECT_EQ(-1, rc);
     EXPECT_GE(took, (uint64_t)350);    /* its own 400 ms */
 }
+#endif /* !memory_sanitizer */
 
 UTEST_MAIN()
