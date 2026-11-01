@@ -1950,8 +1950,17 @@ void hl_js_dump_error(HlJS *js)
         return;
 
     JSValue exception = JS_GetException(js->ctx);
-    const char *str = JS_ToCString(js->ctx, exception);
-    if (str) {
+    /* A tripped run's error is the trip. Its toString is a call, and the
+     * step after a trip polls the interrupt handler (QuickJS HULL PATCH
+     * 0003, also for a trip raised from C by JS_SetUncatchableException),
+     * which interrupts again while the run is over - so converting the
+     * error only reported "cannot be shown". Name the trip from C. */
+    const char *str = js->budget_tripped ? NULL
+                                         : JS_ToCString(js->ctx, exception);
+    if (js->budget_tripped) {
+        log_error("[hull:c] js error: InternalError: interrupted (%s)",
+                  hl_js_trip_reason(js));
+    } else if (str) {
         log_error("[hull:c] js error: %s", str);
         JS_FreeCString(js->ctx, str);
     } else {

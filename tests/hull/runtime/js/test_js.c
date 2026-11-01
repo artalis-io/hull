@@ -17082,4 +17082,61 @@ UTEST(js_dispatcher, overhead_per_call_is_small)
     cleanup_js();
 }
 
+/* The "js error" records hl_js_dump_error printed while g_jdump_on was set
+ * (log.c has no callback removal: registered once, gated by the flag). */
+static char g_jdump_log[2048];
+static int g_jdump_on;
+static void jdump_log_collect(log_Event *ev)
+{
+    if (!g_jdump_on || !ev->fmt || !strstr(ev->fmt, "js error")) return;
+    size_t n = strlen(g_jdump_log);
+    if (n + 2 >= sizeof g_jdump_log) return;
+    vsnprintf(g_jdump_log + n, sizeof g_jdump_log - n - 1, ev->fmt, ev->ap);
+    n = strlen(g_jdump_log);
+    g_jdump_log[n] = '|';
+    g_jdump_log[n + 1] = '\0';
+}
+
+/* PR #981 CI: a trip raised from C (a binding's own charge, or the
+ * dispatcher's leave hook) makes the next step poll the interrupt handler
+ * (QuickJS patch 0003), so the error report's toString call was interrupted
+ * again and app.main printed "(an error that cannot be shown)" instead of
+ * the instruction limit. The report names the trip. */
+UTEST(js_dispatcher, a_trip_raised_from_c_is_reported_as_the_limit)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    jdisp_register();
+    static int registered;
+    if (!registered) {
+        log_add_callback(jdump_log_collect, NULL, LOG_TRACE);
+        registered = 1;
+    }
+    static const char *const srcs[] = {
+        "for (let i = 0; i < 1000; i++) { try { spin(5); } catch (e) {} }",
+        "for (let i = 0; i < 1000; i++) { try { spinCharged(5); } catch (e) {} }",
+        "for (;;) { try { noop(); } catch (e) {} }",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        jdisp_arm(20 * 64000 / HL_METER_SLOWDOWN);
+        JSValue v = JS_Eval(js.ctx, srcs[i], strlen(srcs[i]), "<jdump>",
+                            JS_EVAL_TYPE_GLOBAL);
+        EXPECT_TRUE_MSG(JS_IsException(v), srcs[i]);
+        JS_FreeValue(js.ctx, v);
+        EXPECT_EQ_MSG(js.budget_tripped, 1, srcs[i]);
+        g_jdump_log[0] = '\0';
+        g_jdump_on = 1;
+        hl_js_dump_error(&js);
+        g_jdump_on = 0;
+        EXPECT_TRUE_MSG(strstr(g_jdump_log, "instruction limit exceeded") != NULL,
+                        srcs[i]);
+        EXPECT_TRUE_MSG(strstr(g_jdump_log, "cannot be shown") == NULL, srcs[i]);
+        if (!strstr(g_jdump_log, "instruction limit exceeded"))
+            printf("  got: %s\n", g_jdump_log);
+        EXPECT_FALSE(JS_HasException(js.ctx));
+    }
+    jdisp_arm(0);
+    cleanup_js();
+}
+
 UTEST_MAIN();

@@ -39,7 +39,9 @@ release-artifact layout).
   returned it, so a builtin made on reused memory was hooked at random. An uncatchable trip raised
   from C (a binding, the hooks) now makes the next step poll, as QuickJS's own interrupt does, so a
   builtin that turns it into a rejection (`Promise.race`, `Promise.all`, `new Promise`) cannot let
-  the run end normally.
+  the run end normally. The error report of a tripped JS run (app.main, a failed load) names the
+  trip from C instead of calling the error's `toString`, which that next-step poll interrupted
+  again: it printed "(an error that cannot be shown)" instead of the instruction limit.
 
 ### Process and CI
 
