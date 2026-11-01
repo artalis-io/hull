@@ -25,6 +25,10 @@ import { _request }  from "hull:web:_request";
 import { _task }     from "hull:_task";
 import { internal as dbInternal } from "hull:db:_internal";
 const db = dbInternal.connection();
+// standardUsers reads the APP's users table: a declared databases.internal,
+// else the default connection (never the Hull-owned default internal
+// database, which holds only _hull_* tables).
+const usersDb = dbInternal.appConnection();
 import { time }     from "hull:time";
 import { json }     from "hull:json";
 
@@ -2268,13 +2272,14 @@ function standardUsers(opts) {
     // reserved word ("user", "order") or a future MySQL backend (backtick) is
     // safe. The default connection's backend is known by the time this runs.
     const name = opts.table || "users";
-    // The adapter runs on the internal connection with stdlib identity, which
-    // the _hull_* namespace guard lets through: refuse the reserved names.
+    // The adapter runs with stdlib identity (on a declared databases.internal,
+    // else the default connection), which the _hull_* namespace guard lets
+    // through: refuse the reserved names.
     if (typeof name !== "string" || name === "" || /^_hull_/i.test(name)) {
         throw new Error("auth-flows.standardUsers: table must be a non-empty "
             + "name outside the reserved _hull_ namespace");
     }
-    const tbl = db.quoteIdentifier(name);
+    const tbl = usersDb.quoteIdentifier(name);
     const idGen = opts.idGen || (() => crypto.randomToken(16, "hex"));
 
     function row(r) {
@@ -2296,10 +2301,10 @@ function standardUsers(opts) {
         findByEmail(email) {
             if (typeof email !== "string") return null;
             const key = asciiLower(email);
-            let rows = db.query(
+            let rows = usersDb.query(
                 "SELECT * FROM " + tbl + " WHERE email = ?", [key]) || [];
             if (rows.length === 0) {
-                rows = db.query(
+                rows = usersDb.query(
                     "SELECT * FROM " + tbl + " WHERE LOWER(email) = ?", [key]) || [];
             }
             for (const r of rows) {
@@ -2308,14 +2313,14 @@ function standardUsers(opts) {
             return null;
         },
         get(id) {
-            const rows = db.query(
+            const rows = usersDb.query(
                 "SELECT * FROM " + tbl + " WHERE id = ?", [id]);
             return rows && rows[0] ? row(rows[0]) : null;
         },
         create(email, pwhash) {
             const id = idGen();
             const now = time.now();
-            db.exec(
+            usersDb.exec(
                 "INSERT INTO " + tbl
                 + " (id, email, password_hash, email_verified, "
                 + "  created_at, updated_at) "
@@ -2324,19 +2329,19 @@ function standardUsers(opts) {
             return id;
         },
         setPassword(id, pwhash) {
-            db.exec(
+            usersDb.exec(
                 "UPDATE " + tbl
                 + " SET password_hash = ?, updated_at = ? WHERE id = ?",
                 [pwhash, time.now(), id]);
         },
         setEmail(id, email) {
-            db.exec(
+            usersDb.exec(
                 "UPDATE " + tbl
                 + " SET email = ?, updated_at = ? WHERE id = ?",
                 [asciiLower(email), time.now(), id]);
         },
         setEmailVerified(id, verified) {
-            db.exec(
+            usersDb.exec(
                 "UPDATE " + tbl
                 + " SET email_verified = ?, updated_at = ? WHERE id = ?",
                 [verified ? 1 : 0, time.now(), id]);

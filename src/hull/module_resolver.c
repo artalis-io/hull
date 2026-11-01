@@ -71,6 +71,27 @@ bool hl_module_set_contains_spec(const HlResolvedModuleSet *s,
     return get_bit(s, hl_module_registry_index(spec));
 }
 
+bool hl_module_set_uses_internal_db(const HlResolvedModuleSet *set)
+{
+    /* A module that depends on one of these (auth-flows on session) has it
+     * in the resolved set too. Attachment is not here: it keeps its tables on
+     * the app connection unless databases.internal is declared. */
+    static const char *const internal_modules[] = {
+        "hull/web/middleware/session",
+        "hull/web/middleware/rbac",
+        "hull/web/middleware/totp",
+        "hull/web/middleware/audit-log",
+        "hull/web/middleware/idempotency",
+        "hull/web/auth-flows",
+        "hull/web/auth-health",
+        NULL
+    };
+    if (!set) return true;
+    for (int i = 0; internal_modules[i]; i++)
+        if (hl_module_set_contains_name(set, internal_modules[i])) return true;
+    return false;
+}
+
 bool hl_module_set_contains_name(const HlResolvedModuleSet *s,
                                   const char *canonical_name)
 {

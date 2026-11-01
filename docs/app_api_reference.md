@@ -197,13 +197,19 @@ each `_hull_*` table (with `FOREIGN_KEY_CHECKS = 0` around it); CLAUDE.md
 
 **`databases.internal`** (optional). Where the stdlib keeps its own `_hull_*`
 tables: sessions, auth-flows tokens and lockouts, TOTP, the audit log, RBAC,
-idempotency keys and attachment metadata. Point it at a database (or a
+idempotency keys and (when declared) attachment metadata. Point it at a database (or a
 schema) reached under a role your app's connection has **no grants on**, and
-the database itself keeps app SQL away from those tables. Without it they
-share the app's default connection and Hull's check of the SQL text is the
-only separation - enough on SQLite (which also has an authorizer), but SQL
-that builds a table name at run time can get past it on Postgres / MySQL, so
-Hull logs a warning at startup there. Postgres sketch:
+the database itself keeps app SQL away from those tables. Without it, on a
+SQLite app, Hull keeps them in a SQLite file of its own - `<app>/.hull/internal.db`
+(or `<database>.hull-internal` beside a `-d` database outside the app directory;
+a separate in-memory database for an in-memory app) - never in the app's
+database file, and moves them there from the app database on the first start
+(`--keep-internal-in-app-db` keeps the old layout for one release; see
+[design/internal_db_separation.md](design/internal_db_separation.md)). On a
+Postgres / MySQL / DuckDB default connection with none declared they share the
+app's connection, and Hull's check of the SQL text is the only separation -
+SQL that builds a table name at run time can get past it there, so Hull logs a
+warning at startup. Postgres sketch:
 
 ```sql
 CREATE ROLE hull_internal LOGIN PASSWORD '...';
@@ -213,7 +219,9 @@ REVOKE ALL ON SCHEMA hull_internal FROM PUBLIC;   -- the app role gets nothing
 ```
 
 Outbox, inbox and jobs deliberately stay on the app's connection: their rows
-must commit in the same transaction as the app's own writes. Search (its index
+must commit in the same transaction as the app's own writes. Attachment
+metadata does too unless `databases.internal` is declared (Hull's own file
+never holds it: a delete must roll back with the app's batch). Search (its index
 reads app tables) and the KV SQL store (on the connection you open it with)
 stay there too. Those tables keep the SQL-text check only.
 
@@ -550,10 +558,12 @@ verify step between successful first-factor auth and `on_login` when
     DB-backend-agnostic (works on whatever backend `hull/db` is
     wired to). Apps with a custom schema either pass the 6
     callbacks directly or post-process the adapter table.
-    **The adapter runs on the stdlib's internal connection** (audit 15):
+    **The adapter runs on a declared internal connection** (audit 15):
     it reads and writes the users table through `databases.internal`
     when the manifest declares one (the same connection as the
-    `_hull_*` tables), and through the default connection otherwise. So
+    `_hull_*` tables), and through the default connection otherwise -
+    never Hull's own internal database file, which holds only `_hull_*`
+    tables. So
     with `databases.internal` declared, the users table must live in the
     internal database - or pass the six `user_*` callbacks yourself,
     querying `db.default()` (`require("hull.db").default()`).

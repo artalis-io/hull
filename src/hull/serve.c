@@ -39,6 +39,7 @@
 #include "hull/cap/body.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_internal.h"   /* hl_db_internal_startup (§7.2) */
 #include "hull/cap/db_backend.h"    /* hl_db_backend_select (runtime default-DSN probe) */
 #endif
 #include "hull/shared/async_backend.h"
@@ -338,6 +339,7 @@ typedef struct {
     int gpu_device;
     int log_level;
     int no_migrate;
+    int keep_internal;   /* --keep-internal-in-app-db */
     int no_sandbox;
     int allow_degraded_sandbox;
     int no_db;
@@ -448,6 +450,8 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             cfg->verify_sig_path = argv[++i];
         } else if (strcmp(argv[i], "--no-migrate") == 0) {
             cfg->no_migrate = 1;
+        } else if (strcmp(argv[i], "--keep-internal-in-app-db") == 0) {
+            cfg->keep_internal = 1;
         } else if (strcmp(argv[i], "--no-sandbox") == 0) {
             cfg->no_sandbox = 1;
         } else if (strcmp(argv[i], "--allow-degraded-sandbox") == 0) {
@@ -1237,6 +1241,7 @@ static int hl_serve_init_app_context(HlServerState *s)
         .entry_point       = s->entry_point,
         .db_path           = s->cfg.no_db ? NULL : s->cfg.db_path,
         .no_migrate        = s->cfg.no_migrate,
+        .keep_internal_in_app_db = s->cfg.keep_internal,
         .no_db             = s->cfg.no_db,
         .sandbox           = 1,
         .alloc             = &s->alloc,
@@ -1732,6 +1737,17 @@ static int hl_serve_wire_caps(HlServerState *s)
     hl_tui_admit_resolved(s->manifest_sealed ? &s->manifest : NULL,
                           rt->module_set);
 
+#ifdef HL_ENABLE_DB
+    /* The stdlib's _hull_* tables move into the Hull-owned internal database
+     * (or back, under --keep-internal-in-app-db): once the module set is
+     * resolved and the signed policy checked, before the phase-2 sandbox
+     * narrows file access (audit convergence §7.2). */
+    if (rt->db_registry && !s->cfg.no_migrate &&
+        hl_db_internal_startup(rt->db_registry, s->cfg.keep_internal,
+                               hl_module_set_uses_internal_db(rt->module_set)) != 0)
+        return -1;
+#endif
+
     /* Wire CSP policy to runtime.
      * Default CSP is always active - even without app.manifest().
      * Explicit csp="custom" overrides; csp=false disables.
@@ -2012,6 +2028,13 @@ static int hl_serve_apply_sandbox(HlServerState *s)
          * grant it here so a DB-only app isn't SIGKILLed on connect. */
         hl_sandbox_policy_add_default_dsn(&sandbox_policy,
                                           s->cfg.no_db ? NULL : s->cfg.db_path);
+#ifdef HL_ENABLE_DB
+        {
+            HlRuntime *irt = hl_app_context_runtime(s->app);
+            sandbox_policy.internal_db_path =
+                irt ? hl_db_internal_sandbox_path(irt->db_registry) : NULL;
+        }
+#endif
 
         /* CLI-mode apps (app.main registered) never accept inbound
          * connections - narrow the sandbox accordingly. The runtime

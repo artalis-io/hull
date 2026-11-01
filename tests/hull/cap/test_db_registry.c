@@ -10,11 +10,14 @@
 
 #include "utest.h"
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_internal.h"
 #include "hull/cap/db.h"   /* hl_cap_db_ns_trust */
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/manifest.h"
 #include "hull/utils/env_ref.h"
+#include <dirent.h>
+#include <sqlite3.h>
 
 #include <limits.h>
 #include <stdio.h>
@@ -362,11 +365,33 @@ static int confine_fixture(char *root, size_t rsz, char *app, size_t asz)
     return mkdir(app, 0700);
 }
 
+/* Removes a tree in C (lstat: no symlink is followed): the Cosmopolitan
+ * test environment's `rm` takes no -r, so a shelled-out `rm -rf` left the
+ * tree behind there; opendir / readdir rather than nftw, whose FTW_* flags
+ * glibc hides without _XOPEN_SOURCE. */
 static void rm_tree(const char *root)
 {
-    char cmd[PATH_MAX + 16];
-    snprintf(cmd, sizeof cmd, "rm -rf '%s'", root);
-    (void)system(cmd);
+    struct stat st;
+    if (lstat(root, &st) != 0)
+        return;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(root);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                    continue;
+                char child[PATH_MAX];
+                int n = snprintf(child, sizeof child, "%s/%s", root, e->d_name);
+                if (n > 0 && (size_t)n < sizeof child)
+                    rm_tree(child);
+            }
+            closedir(d);
+        }
+        (void)rmdir(root);
+    } else {
+        (void)unlink(root);
+    }
 }
 
 static HlDbHandle *get_named(const char *app, const char *dsn,
@@ -502,6 +527,280 @@ UTEST(db_registry, env_memory_internal_and_no_app_dir)
     err = NULL;
     EXPECT_TRUE(hl_db_registry_get(reg, "default", &err) != NULL);
     hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
+/* ── audit convergence §7.2: the Hull-owned internal database ─────────── */
+
+/* Where the default internal database goes, for every kind of default DSN. */
+UTEST(db_internal, default_dsn_resolution)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char out[PATH_MAX + 64], dsn[PATH_MAX + 64], want[PATH_MAX + 64];
+    size_t base = 0;
+    int in_hull = 0;
+
+    /* A SQLite file in the app tree (the implicit data.db, or below it). */
+    snprintf(dsn, sizeof dsn, "%s/data.db", app);
+    snprintf(want, sizeof want, "%s/.hull/internal.db", app);
+    EXPECT_EQ(1, hl_db_internal_default_dsn(app, dsn, out, sizeof out, &base, &in_hull));
+    EXPECT_STREQ(want, out);
+    EXPECT_EQ(strlen(app), base);
+    EXPECT_EQ(1, in_hull);
+    snprintf(dsn, sizeof dsn, "sqlite://%s/sub/x.db", app);
+    EXPECT_EQ(1, hl_db_internal_default_dsn(app, dsn, out, sizeof out, &base, &in_hull));
+    EXPECT_STREQ(want, out);
+
+    /* A -d file outside the app tree: beside it, never in .hull. */
+    snprintf(dsn, sizeof dsn, "%s/vol/app.db", root);
+    snprintf(want, sizeof want, "%s/vol/app.db.hull-internal", root);
+    EXPECT_EQ(1, hl_db_internal_default_dsn(app, dsn, out, sizeof out, &base, &in_hull));
+    EXPECT_STREQ(want, out);
+    EXPECT_EQ(0, in_hull);
+    EXPECT_EQ(strlen(root) + 4, base);   /* "<root>/vol" */
+
+    /* In-memory: a separate in-memory database. */
+    EXPECT_EQ(2, hl_db_internal_default_dsn(app, ":memory:", out, sizeof out, &base, &in_hull));
+    EXPECT_STREQ(":memory:", out);
+    EXPECT_EQ(2, hl_db_internal_default_dsn(app, "sqlite://:memory:", out, sizeof out, &base, &in_hull));
+
+    /* Network, DuckDB, an env reference, none: no default. */
+    EXPECT_EQ(0, hl_db_internal_default_dsn(app, "postgres://u:p@h/db", out, sizeof out, &base, &in_hull));
+    EXPECT_EQ(0, hl_db_internal_default_dsn(app, "MySQL://h/db", out, sizeof out, &base, &in_hull));
+    EXPECT_EQ(0, hl_db_internal_default_dsn(app, "duckdb://x.duckdb", out, sizeof out, &base, &in_hull));
+    EXPECT_EQ(0, hl_db_internal_default_dsn(app, "$DATABASE_URL", out, sizeof out, &base, &in_hull));
+    EXPECT_EQ(0, hl_db_internal_default_dsn(app, NULL, out, sizeof out, &base, &in_hull));
+
+    /* The default database IS the internal file: nothing separate. */
+    snprintf(dsn, sizeof dsn, "%s/.hull/internal.db", app);
+    EXPECT_EQ(0, hl_db_internal_default_dsn(app, dsn, out, sizeof out, &base, &in_hull));
+    rm_tree(root);
+}
+
+/* The registry opens the default internal database (making .hull 0700), it
+ * is the internal connection unless databases.internal is declared, and a
+ * symlinked .hull is refused. */
+UTEST(db_internal, registry_default_internal)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char idb[PATH_MAX + 32], hull[PATH_MAX + 16];
+    snprintf(hull, sizeof hull, "%s/.hull", app);
+    snprintf(idb, sizeof idb, "%s/internal.db", hull);
+
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    EXPECT_EQ(0, hl_db_registry_has_internal(reg));
+    ASSERT_EQ(0, hl_db_registry_set_default_internal(reg, idb, strlen(app), 1, 1));
+    EXPECT_EQ(1, hl_db_registry_has_internal(reg));
+    EXPECT_EQ(1, hl_db_registry_internal_is_default(reg));
+    EXPECT_STREQ(idb, hl_db_internal_sandbox_path(reg));
+    const char *err = NULL;
+    HlDbHandle *in = hl_db_registry_internal(reg, &err);
+    ASSERT_TRUE(in != NULL);
+    EXPECT_TRUE(in != hl_db_registry_get(reg, "default", &err));
+    ASSERT_TRUE(hl_db_exec(in, "CREATE TABLE t (x INTEGER)", NULL, 0) >= 0);
+    struct stat st;
+    ASSERT_EQ(0, stat(hull, &st));
+    EXPECT_EQ(0700, (int)(st.st_mode & 0777));
+    EXPECT_EQ(0, stat(idb, &st));
+    hl_db_registry_destroy(reg);
+
+    /* Inactive (--keep-internal-in-app-db): recorded, not used. */
+    reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_default_internal(reg, idb, strlen(app), 1, 0));
+    EXPECT_EQ(0, hl_db_registry_internal_is_default(reg));
+    EXPECT_STREQ(idb, hl_db_registry_default_internal_path(reg));
+    EXPECT_TRUE(hl_db_internal_sandbox_path(reg) == NULL);
+    hl_db_registry_destroy(reg);
+
+    /* A declared databases.internal wins. */
+    HlManifest m = {0};
+    m.databases.internal = ":memory:";
+    reg = hl_db_registry_create(&m, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_default_internal(reg, idb, strlen(app), 1, 1));
+    EXPECT_EQ(0, hl_db_registry_internal_is_default(reg));
+    EXPECT_TRUE(hl_db_internal_sandbox_path(reg) == NULL);
+    hl_db_registry_destroy(reg);
+
+    /* An in-memory default internal is never a sandbox path. */
+    reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_default_internal(reg, ":memory:", 0, 0, 1));
+    EXPECT_TRUE(hl_db_internal_sandbox_path(reg) == NULL);
+    EXPECT_TRUE(hl_db_registry_internal(reg, &err) != NULL);
+    hl_db_registry_destroy(reg);
+
+    /* A relative path is refused (only Hull's own absolute paths). */
+    reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    EXPECT_EQ(-1, hl_db_registry_set_default_internal(reg, ".hull/internal.db", 0, 1, 1));
+    hl_db_registry_destroy(reg);
+
+    /* A planted .hull symlink is refused, and nothing is made through it. */
+    rm_tree(hull);
+    char elsewhere[PATH_MAX + 16];
+    snprintf(elsewhere, sizeof elsewhere, "%s/elsewhere", root);
+    ASSERT_EQ(0, mkdir(elsewhere, 0700));
+    ASSERT_EQ(0, symlink("../elsewhere", hull));
+    reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_default_internal(reg, idb, strlen(app), 1, 1));
+    err = NULL;
+    EXPECT_TRUE(hl_db_registry_internal(reg, &err) == NULL);
+    EXPECT_TRUE(err != NULL);
+    hl_db_registry_destroy(reg);
+    char through[PATH_MAX + 32];
+    snprintf(through, sizeof through, "%s/internal.db", elsewhere);
+    EXPECT_NE(0, lstat(through, &st));
+    rm_tree(root);
+}
+
+/* A databases.named file DSN may not name the app's .hull (any case); the
+ * declared databases.internal may. */
+UTEST(db_internal, named_dsn_may_not_name_dot_hull)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char abs[PATH_MAX + 32];
+    snprintf(abs, sizeof abs, "%s/.hull/internal.db", app);
+    const char *cases[] = { ".hull/internal.db", ".HULL/x.db", "./.Hull/x.db", abs };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        HlManifest m;
+        HlDbRegistry *reg = NULL;
+        const char *err = NULL;
+        EXPECT_TRUE(get_named(app, cases[i], &reg, &m, &err) == NULL);
+        EXPECT_TRUE(err != NULL && strstr(err, ".hull") != NULL);
+        hl_db_registry_destroy(reg);
+    }
+    HlManifest mi = {0};
+    mi.databases.internal = ".hull/mine.db";
+    HlDbRegistry *reg = hl_db_registry_create(&mi, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    char hull[PATH_MAX + 16];
+    snprintf(hull, sizeof hull, "%s/.hull", app);
+    ASSERT_EQ(0, mkdir(hull, 0700));
+    const char *err = NULL;
+    EXPECT_TRUE(hl_db_registry_internal(reg, &err) != NULL);
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
+static int count_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    if (ncols > 0 && cols[0].value.type == HL_TYPE_INT) *(long long *)ctx = cols[0].value.i;
+    return 0;
+}
+
+static long long count(HlDbHandle *h, const char *sql)
+{
+    long long n = -1;
+    int prev = hl_cap_db_ns_trust(1);
+    if (hl_db_query(h, sql, NULL, 0, count_cb, &n, NULL) < 0) n = -1;
+    hl_cap_db_ns_restore(prev);
+    return n;
+}
+
+static int texec(HlDbHandle *h, const char *sql)
+{
+    int prev = hl_cap_db_ns_trust(1);
+    int rc = hl_db_exec(h, sql, NULL, 0);
+    hl_cap_db_ns_restore(prev);
+    return rc;
+}
+
+/* The move copies every internal table with its rows and indexes, drops it
+ * from the source, leaves app tables alone, and a re-run in the crash state
+ * (a table on both sides) merges without losing or doubling a row. */
+UTEST(db_internal, move_copies_drops_and_merges)
+{
+    HlDbHandle src = {0}, dst = {0};
+    src.backend = dst.backend = &hl_db_backend_sqlite;
+    ASSERT_EQ(0, src.backend->open(&src.ctx, ":memory:", NULL));
+    ASSERT_EQ(0, dst.backend->open(&dst.ctx, ":memory:", NULL));
+
+    ASSERT_TRUE(texec(&src, "CREATE TABLE _hull_sessions (id VARCHAR(255) PRIMARY KEY, "
+                            "data TEXT, expires_at INTEGER)") >= 0);
+    ASSERT_TRUE(texec(&src, "CREATE INDEX _hull_sessions_expires ON _hull_sessions(expires_at)") >= 0);
+    ASSERT_TRUE(texec(&src, "INSERT INTO _hull_sessions VALUES ('a', '{}', 1), ('b', x'00ff', 2)") >= 0);
+    ASSERT_TRUE(texec(&src, "CREATE TABLE _hull_roles (name VARCHAR(255) PRIMARY KEY)") >= 0);
+    ASSERT_TRUE(texec(&src, "CREATE TABLE _hull_user_roles (user_id VARCHAR(255), "
+                            "role VARCHAR(255) REFERENCES _hull_roles(name) ON DELETE CASCADE, "
+                            "PRIMARY KEY (user_id, role))") >= 0);
+    ASSERT_TRUE(texec(&src, "INSERT INTO _hull_roles VALUES ('admin')") >= 0);
+    ASSERT_TRUE(texec(&src, "INSERT INTO _hull_user_roles VALUES ('alice', 'admin')") >= 0);
+    ASSERT_TRUE(texec(&src, "CREATE TABLE _hull_outbox (id INTEGER PRIMARY KEY)") >= 0);
+    ASSERT_TRUE(texec(&src, "CREATE TABLE app_t (x INTEGER)") >= 0);
+
+    /* The crash state for one table: already copied, not yet dropped. */
+    ASSERT_TRUE(texec(&dst, "CREATE TABLE _hull_roles (name VARCHAR(255) PRIMARY KEY)") >= 0);
+    ASSERT_TRUE(texec(&dst, "INSERT INTO _hull_roles VALUES ('admin')") >= 0);
+
+    char err[256];
+    EXPECT_EQ(3, hl_db_internal_move(&src, &dst, "test", err, sizeof err));
+    EXPECT_EQ(2, count(&dst, "SELECT count(*) FROM _hull_sessions"));
+    EXPECT_EQ(1, count(&dst, "SELECT count(*) FROM _hull_sessions WHERE data = x'00ff'"));
+    EXPECT_EQ(1, count(&dst, "SELECT count(*) FROM sqlite_master WHERE name = '_hull_sessions_expires'"));
+    EXPECT_EQ(1, count(&dst, "SELECT count(*) FROM _hull_roles"));
+    EXPECT_EQ(1, count(&dst, "SELECT count(*) FROM _hull_user_roles"));
+    EXPECT_EQ(0, count(&src, "SELECT count(*) FROM sqlite_master WHERE name IN "
+                             "('_hull_sessions', '_hull_roles', '_hull_user_roles')"));
+    /* Not internal: the outbox (atomic with app writes) and app tables stay. */
+    EXPECT_EQ(1, count(&src, "SELECT count(*) FROM sqlite_master WHERE name = '_hull_outbox'"));
+    EXPECT_EQ(1, count(&src, "SELECT count(*) FROM sqlite_master WHERE name = 'app_t'"));
+    EXPECT_EQ(0, count(&dst, "SELECT count(*) FROM sqlite_master WHERE name = '_hull_outbox'"));
+
+    /* Nothing left: a second run moves nothing. */
+    EXPECT_EQ(0, hl_db_internal_move(&src, &dst, "test", err, sizeof err));
+
+    src.backend->close(&src);
+    dst.backend->close(&dst);
+}
+
+/* A planted app database can hold any text under any type in sqlite_master
+ * (writable_schema). A trigger disguised as an index entry never reaches the
+ * internal database, and the move fails instead of half-running. */
+UTEST(db_internal, move_refuses_a_forged_schema_statement)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/planted.db", app);
+    sqlite3 *raw = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &raw));
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(raw,
+        "CREATE TABLE _hull_roles (name VARCHAR(255) PRIMARY KEY);"
+        "INSERT INTO _hull_roles VALUES ('admin');"
+        "PRAGMA writable_schema = ON;"
+        "INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES "
+        "('index', 'evil', '_hull_roles', 0, "
+        "'CREATE TRIGGER evil AFTER INSERT ON _hull_roles BEGIN DELETE FROM _hull_roles; END');"
+        "PRAGMA writable_schema = OFF;", NULL, NULL, NULL));
+    sqlite3_close(raw);
+
+    HlDbHandle src = {0}, dst = {0};
+    src.backend = dst.backend = &hl_db_backend_sqlite;
+    /* Opened without the open-time checks (hl_cap_db_init would refuse some
+     * forged files outright): the move must not rely on them. */
+    raw = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &raw));
+    ASSERT_EQ(0, hl_db_sqlite_wrap(&src, raw));
+    ASSERT_EQ(0, dst.backend->open(&dst.ctx, ":memory:", NULL));
+    char err[256];
+    /* SQLite itself refuses this schema when it loads it (the move fails
+     * before any DDL; ddl_allowed is the second line for a forgery SQLite
+     * would accept). Either way: an error, and nothing in the target. */
+    EXPECT_EQ(-1, hl_db_internal_move(&src, &dst, "test", err, sizeof err));
+    EXPECT_TRUE(err[0] != '\0');
+    EXPECT_EQ(0, count(&dst, "SELECT count(*) FROM sqlite_master"));
+    hl_db_sqlite_unwrap(&src);
+    sqlite3_close(raw);
+    dst.backend->close(&dst);
     rm_tree(root);
 }
 

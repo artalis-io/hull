@@ -26,6 +26,9 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (agent handle) */
 #include "hull/cap/db_registry.h"
+#include "hull/cap/db_internal.h"
+#include "hull/shared/host.h"   /* HL_HOST_PATH_MAX */
+#include <limits.h>
 #include "hull/migrate.h"
 #include "hull/worker_db.h"
 #include <sqlite3.h>
@@ -256,6 +259,34 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                 return -1;
             }
             ctx->db_open = 1;
+        }
+        /* The Hull-owned internal database (audit convergence §7.2): the
+         * stdlib's _hull_* tables live there, not in the app's database
+         * file, unless the manifest declares databases.internal. Decided
+         * from the default DSN: <app>/.hull/internal.db for a SQLite file
+         * in the app tree, a file beside a -d database outside it, a
+         * separate :memory: for an in-memory default (hull test / agent),
+         * none for a network or DuckDB default. Moved into by
+         * hl_db_internal_startup once the manifest is wired. */
+        if (db_path) {
+            char app_real[PATH_MAX], idsn[HL_HOST_PATH_MAX + 32];
+            size_t ibase = 0;
+            int in_hull = 0;
+            int k = realpath(ctx->app_dir_copy, app_real)
+                    ? hl_db_internal_default_dsn(app_real, db_path, idsn,
+                                                 sizeof idsn, &ibase, &in_hull)
+                    : 0;
+            if (k < 0 ||
+                (k > 0 && hl_db_registry_set_default_internal(
+                              ctx->db_registry, idsn, ibase, in_hull,
+                              !opts->keep_internal_in_app_db) != 0)) {
+                fprintf(stderr, "hull: cannot work out the internal database "
+                                "path\n");
+                hl_db_registry_destroy(ctx->db_registry);
+                ctx->db_registry = NULL;
+                hl_app_context_free(ctx);
+                return -1;
+            }
         }
     }
 #endif

@@ -1738,10 +1738,8 @@ static JSValue js_db_connect(JSContext *ctx, JSValueConst this_val,
  * the manifest is wired; before that (a stdlib init() at app top level) the
  * DSN is read from the app's manifest on the spot, and the caller (the
  * hull:db:_internal proxy) must not cache the result. */
-static JSValue js_db_internal_conn(JSContext *ctx, JSValueConst this_val,
-                                   int argc, JSValueConst *argv)
+static JSValue js_db_internal_conn_impl(JSContext *ctx, int app_table)
 {
-    (void)this_val; (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     HlDbRegistry *reg = js ? js->base.db_registry : NULL;
     int final = 1;
@@ -1769,7 +1767,8 @@ static JSValue js_db_internal_conn(JSContext *ctx, JSValueConst this_val,
                 return JS_ThrowInternalError(ctx, "hull internal database: %s", ref_err);
         }
         const char *err = NULL;
-        h = hl_db_registry_internal(reg, &err);
+        h = app_table ? hl_db_registry_internal_or_app(reg, &err)
+                      : hl_db_registry_internal(reg, &err);
         if (!h && hl_db_registry_has_internal(reg))
             return JS_ThrowInternalError(ctx, "hull internal database: %s",
                                          err ? err : "cannot open databases.internal");
@@ -1780,6 +1779,24 @@ static JSValue js_db_internal_conn(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyStr(ctx, out, "conn", conn);
     JS_SetPropertyStr(ctx, out, "final", JS_NewBool(ctx, final));
     return out;
+}
+
+static JSValue js_db_internal_conn(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    return js_db_internal_conn_impl(ctx, 0);
+}
+
+/* _internal_conn.appConnection() -> { conn, final }: where an APP table the
+ * stdlib reads for the app lives (auth-flows' standardUsers): a declared
+ * databases.internal, else the default connection - never the Hull-owned
+ * default internal database (§7.2). */
+static JSValue js_db_internal_app_conn(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    return js_db_internal_conn_impl(ctx, 1);
 }
 
 /* ── Module init ─────────────────────────────────────────────────────── */
@@ -1807,6 +1824,8 @@ static int js_db_internal_conn_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue o = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, o, "connection",
                       JS_NewCFunction(ctx, js_db_internal_conn, "connection", 0));
+    JS_SetPropertyStr(ctx, o, "appConnection",
+                      JS_NewCFunction(ctx, js_db_internal_app_conn, "appConnection", 0));
     hl_js_export_frozen(ctx, m, "_internal_conn", o);
     return 0;
 }

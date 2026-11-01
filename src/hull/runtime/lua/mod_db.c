@@ -1542,7 +1542,7 @@ static int lua_db_connect(lua_State *L)
  * the manifest is wired; before that (a stdlib init() at app top level) the
  * DSN is read from the app's manifest table on the spot, and the caller (the
  * hull.db._internal proxy) must not cache the result. */
-static int lua_db_internal_conn(lua_State *L)
+static int lua_db_internal_conn_impl(lua_State *L, int app_table)
 {
     HlLua *lua = get_hl_lua(L);
     HlDbRegistry *reg = lua ? lua->base.db_registry : NULL;
@@ -1574,7 +1574,8 @@ static int lua_db_internal_conn(lua_State *L)
             return luaL_error(L, "hull internal database: %s", ref_err);
     }
     const char *err = NULL;
-    HlDbHandle *h = hl_db_registry_internal(reg, &err);
+    HlDbHandle *h = app_table ? hl_db_registry_internal_or_app(reg, &err)
+                              : hl_db_registry_internal(reg, &err);
     if (!h && hl_db_registry_has_internal(reg))
         return luaL_error(L, "hull internal database: %s",
                           err ? err : "cannot open databases.internal");
@@ -1583,11 +1584,27 @@ static int lua_db_internal_conn(lua_State *L)
     return 2;
 }
 
+static int lua_db_internal_conn(lua_State *L)
+{
+    return lua_db_internal_conn_impl(L, 0);
+}
+
+/* hull.db._internal_conn.app_connection() -> (conn, final): where an APP
+ * table the stdlib reads for the app lives (auth-flows' standard_users): a
+ * declared databases.internal, else the default connection - never the
+ * Hull-owned default internal database (§7.2). */
+static int lua_db_internal_app_conn(lua_State *L)
+{
+    return lua_db_internal_conn_impl(L, 1);
+}
+
 int luaopen_hull_db_internal_conn(lua_State *L)
 {
-    lua_createtable(L, 0, 1);
+    lua_createtable(L, 0, 2);
     lua_pushcfunction(L, lua_db_internal_conn);
     lua_setfield(L, -2, "connection");
+    lua_pushcfunction(L, lua_db_internal_app_conn);
+    lua_setfield(L, -2, "app_connection");
     return 1;
 }
 

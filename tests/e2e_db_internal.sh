@@ -166,9 +166,12 @@ esac
 
 # Audit 39: a view or trigger stored in the app's database that names a
 # _hull_* table expands into reads of Hull's tables that app SQL never names
-# (`SELECT tok FROM leakv`). The stdlib still reaches its own tables on the
-# default connection (the SQLite authorizer trusts it); a database holding
-# such a view or trigger is refused at open, naming it.
+# (`SELECT tok FROM leakv`). Since audit convergence §7.2 the stdlib's tables
+# live in the Hull-owned internal database by default (tests/e2e_internal_db.sh),
+# so this is defence in depth; it is exercised on the old layout
+# (--keep-internal-in-app-db), where the stdlib still reaches its own tables
+# on the default connection (the SQLite authorizer trusts it) and a database
+# holding such a view or trigger is refused at open, naming it.
 echo "=== planted view / trigger over _hull_* (SQLite) ==="
 for ext in lua js; do
     d="$TMPDIR/p$ext"
@@ -203,7 +206,7 @@ EOF4
     pdb="$WTMP/p$ext/app.db"
     "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
 c.execute('CREATE TABLE app_t (x INTEGER)'); c.commit()" "$pdb"
-    out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox -d "$pdb" "app.$ext" 2>&1 || true)
+    out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox --keep-internal-in-app-db -d "$pdb" "app.$ext" 2>&1 || true)
     [ "$(has_table "$pdb")" = 1 ] && case "$out" in *"app_query=true"*) true ;; *) false ;; esac \
         && pass "$ext: the stdlib creates and uses _hull_sessions on the default connection" \
         || fail "$ext: the stdlib creates and uses _hull_sessions on the default connection" "$out"
@@ -211,7 +214,7 @@ c.execute('CREATE TABLE app_t (x INTEGER)'); c.commit()" "$pdb"
                "CREATE TRIGGER leakt AFTER INSERT ON _hull_sessions BEGIN INSERT INTO app_t VALUES (1); END"; do
         "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
 c.execute(sys.argv[2]); c.commit()" "$pdb" "$obj"
-        out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox -d "$pdb" "app.$ext" 2>&1 || true)
+        out=$(cd "$d" && "$OLDPWD/$HULL" --no-sandbox --keep-internal-in-app-db -d "$pdb" "app.$ext" 2>&1 || true)
         case "$out" in
             *"names a reserved _hull_* table"*)
                 pass "$ext: a database holding '$(echo "$obj" | cut -d" " -f1-3)' is refused at open" ;;

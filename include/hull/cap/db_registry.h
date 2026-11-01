@@ -161,8 +161,41 @@ int hl_db_registry_seal(HlDbRegistry *reg);
  * failure. */
 HlDbHandle *hl_db_registry_internal(HlDbRegistry *reg, const char **err);
 
-/* Whether a separate internal connection is declared. */
+/* Whether the internal connection is separate from the default one: declared
+ * (databases.internal) or the Hull-owned default internal database. */
 int hl_db_registry_has_internal(const HlDbRegistry *reg);
+
+/* The Hull-owned default internal database (cap/db_internal.h, audit
+ * convergence §7.2): the DSN hl_db_internal_default_dsn worked out, used as
+ * the internal connection when the manifest declares no databases.internal.
+ * @p base_len is where the symlink check starts below; @p mkdir_parent makes
+ * the leaf's directory (<app>/.hull, 0700) when it is missing; @p active 0
+ * records the path without using it (--keep-internal-in-app-db, so the
+ * startup step can move tables back). In the sealed span, like the -d DSN;
+ * -1 once sealed or for a DSN too long. */
+int hl_db_registry_set_default_internal(HlDbRegistry *reg, const char *dsn,
+                                        size_t base_len, int mkdir_parent,
+                                        int active);
+
+/* The default internal DSN recorded above (active or not), or NULL. */
+const char *hl_db_registry_default_internal_path(const HlDbRegistry *reg);
+
+/* 1 when the internal connection resolves to the ACTIVE default internal
+ * database (no databases.internal declared or learned). */
+int hl_db_registry_internal_is_default(const HlDbRegistry *reg);
+
+/* The connection auth-flows' standard_users adapter keeps the app's users
+ * table on: a DECLARED databases.internal (the users table then lives there,
+ * under the internal role), else the default connection - never the
+ * Hull-owned default internal database, which holds only _hull_* tables (the
+ * users table is the app's, made by its migrations). NULL + *err. */
+HlDbHandle *hl_db_registry_internal_or_app(HlDbRegistry *reg, const char **err);
+
+/* Open the recorded default internal database into @p out, outside the
+ * registry (the caller closes it with out->backend->close) - the keep-flag
+ * move back. 0, or -1 + *err. */
+int hl_db_registry_open_default_internal(HlDbRegistry *reg, HlDbHandle *out,
+                                         const char **err);
 
 /* Before the manifest is wired, a stdlib init() at app top level may already
  * need the internal connection: the runtime reads `databases.internal` from

@@ -548,6 +548,47 @@ release-artifact layout).
   transaction is active" as done. Covered by `test_db_duckdb` (2000 COMMIT / ROLLBACK under
   an always-tripped budget), which also makes `rollback_runs_after_the_budget_tripped`
   deterministic.
+- **Sessions, roles, TOTP, the audit log, idempotency keys and auth-flows state no longer live
+  in the app's database file** (audit convergence §7.2,
+  [docs/design/internal_db_separation.md](docs/design/internal_db_separation.md)). Unless the
+  manifest declares `databases.internal`, the stdlib keeps those 17 `_hull_*` tables in a SQLite
+  file Hull owns: `<app>/.hull/internal.db` when the database is a SQLite file in the app
+  directory (the default `data.db`), or `<database>.hull-internal` beside a `-d` database outside
+  it (the generated Dockerfile's `/data/data.db` gets `/data/data.db.hull-internal`, on the same
+  volume). `.hull` is reserved from every app capability, so a planted or cloned app database has
+  no internal data to reach, and app SQL on the app database sees none; the open-time
+  stored-object checks become defence in depth. A `databases.named` file DSN may no longer name
+  `.hull`. In-memory apps (`hull test`, `hull agent`, `app.main` without `-d`) get a separate
+  in-memory internal database.
+
+- **Migration, automatic and one-time.** On the first start, Hull moves those tables (rows,
+  indexes) out of the app database into the internal one - one transaction per table, the drops
+  only after every copy committed - logs a WARN naming the count, and records the move. A start
+  interrupted part-way finishes the move on the next start, losing and doubling nothing; a copy
+  that fails drops nothing and stops the app with the cause. After the move, `_hull_*` tables that
+  reappear in the app database (a restored backup, a planted file) are ignored with a WARN, never
+  merged. Skipped with `--no-migrate`.
+
+- **Rollback for one release:** `--keep-internal-in-app-db` (in a built binary
+  `--hull-keep-internal-in-app-db`) keeps the old layout and moves already-moved tables back into
+  the app database.
+
+- **What does not move:** outbox, inbox, jobs and attachment metadata (they commit atomically
+  with the app's writes), search, the kv SQL store and `_hull_migrations` stay in the app
+  database. auth-flows'
+  `standard_users` adapter keeps reading the app's users table on the default connection (or on a
+  declared `databases.internal`, as before).
+
+- **Deployments:** persist the internal file with the data - `<app>/.hull/` when the database is
+  the default `data.db`, nothing new when `-d` points at a volume. Back it up with `data.db`.
+  Deleting `data.db` to reset an app no longer resets its sessions and roles: delete the
+  internal file too.
+
+- **Postgres / MySQL / DuckDB default connections are unchanged:** a per-instance local file would
+  split sessions across instances, so with no `databases.internal` the tables stay on the default
+  connection (the startup WARN still recommends a separate database under its own role; the design
+  note lists the manual steps).
+
 - **A long chain in a weak-keyed Lua table could stall the collector for minutes** (audit 41,
   Lua runtime). When each key's value is the next key and the keys sit in scattered hash
   order, Lua's atomic phase converges about one link per pass over the table: O(n²) work

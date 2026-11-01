@@ -16,21 +16,37 @@ local native = require("hull.db._internal_conn")
 
 local M = {}
 
-local cached
-
-local function resolve()
-    if cached then return cached end
-    local conn, final = native.connection()
-    if final then cached = conn end
-    return conn
+local function resolver(open)
+    local cached
+    return function()
+        if cached then return cached end
+        local conn, final = open()
+        if final then cached = conn end
+        return conn
+    end
 end
 
---- The internal connection, as a proxy usable at module load.
-function M.connection()
+local function proxy(resolve)
     return setmetatable({}, {
         __index = function(_, k) return resolve()[k] end,
         __newindex = function() error("hull.db._internal: read-only", 2) end,
     })
+end
+
+local resolve_internal = resolver(function() return native.connection() end)
+local resolve_app = resolver(function() return native.app_connection() end)
+
+--- The internal connection, as a proxy usable at module load.
+function M.connection()
+    return proxy(resolve_internal)
+end
+
+--- Where an APP table the stdlib reads for the app lives (auth-flows'
+--- standard_users): a declared databases.internal, else the default
+--- connection - never the Hull-owned default internal database, which holds
+--- only _hull_* tables (audit convergence 7.2).
+function M.app_connection()
+    return proxy(resolve_app)
 end
 
 return M

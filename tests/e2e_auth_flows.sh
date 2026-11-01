@@ -110,7 +110,8 @@ cleanup() {
     stop_pid "$HULL_PID"
     # hull's default DB lives in the cwd; tests use it briefly then
     # leave nothing behind.
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal" \
+        "$SRCDIR/.hull/internal.db" "$SRCDIR/.hull/internal.db-shm" "$SRCDIR/.hull/internal.db-wal"
     if [ -n "$TMPDIR_WORK" ] && [ -d "$TMPDIR_WORK" ]; then
         rm -rf "$TMPDIR_WORK"
     fi
@@ -161,7 +162,8 @@ run_flow() {
     echo "=== Step ($_label): Start fixture + run auth-flows e2e ==="
 
     # Clean any leftover DB in the cwd hull picks up by default.
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal" \
+        "$SRCDIR/.hull/internal.db" "$SRCDIR/.hull/internal.db-shm" "$SRCDIR/.hull/internal.db-wal"
 
     PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
     HULL_LOG="$TMPDIR_WORK/hull_$_label.log"

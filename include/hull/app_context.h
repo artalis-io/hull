@@ -101,6 +101,12 @@ typedef struct HlAppContextOpts {
      * Defaults to 0 so a zero-initialized opts struct is still a
      * legal (permissive) call; new consumers should set it explicitly. */
     int           gate_modules;
+
+    /* --keep-internal-in-app-db: the stdlib's _hull_* tables stay on the
+     * default connection (the pre-§7.2 layout) instead of the Hull-owned
+     * internal database (cap/db_internal.h). The default internal path is
+     * still recorded, so the startup step can move tables back. */
+    int           keep_internal_in_app_db;
 } HlAppContextOpts;
 
 typedef struct HlAppContext HlAppContext;

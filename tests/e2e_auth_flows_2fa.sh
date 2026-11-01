@@ -102,7 +102,8 @@ stop_pid() {
 
 cleanup() {
     stop_pid "$HULL_PID"
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal" \
+        "$SRCDIR/.hull/internal.db" "$SRCDIR/.hull/internal.db-shm" "$SRCDIR/.hull/internal.db-wal"
     if [ -n "$TMPDIR_WORK" ] && [ -d "$TMPDIR_WORK" ]; then
         rm -rf "$TMPDIR_WORK"
     fi
@@ -203,7 +204,8 @@ run_flow() {
     echo ""
     echo "=== Step ($_label): Start 2FA fixture + run e2e ==="
 
-    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal"
+    rm -f "$SRCDIR/data.db" "$SRCDIR/data.db-shm" "$SRCDIR/data.db-wal" \
+        "$SRCDIR/.hull/internal.db" "$SRCDIR/.hull/internal.db-shm" "$SRCDIR/.hull/internal.db-wal"
 
     PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
     HULL_LOG="$TMPDIR_WORK/hull_$_label.log"

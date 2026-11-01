@@ -621,11 +621,56 @@ check, then keeps app SQL away from them. The stdlib reaches it through the
 stdlib-only `hull.db._internal` / `hull:db:_internal` proxy (a lazily resolved
 connection: a module takes it at load, before the manifest is wired, and a
 stdlib `init()` at app top level reads `databases.internal` from the app's
-manifest on the spot); `db.connect` cannot name it. Undeclared, everything
-stays on the default connection. Outbox, inbox and jobs stay on the APP
-connection by design - they must commit atomically with the app's own writes
-- as do search (its FTS index reads app tables) and the kv SQL store, so those
-tables keep only the SQL-text check. Covered by `tests/e2e_db_internal.sh`.
+manifest on the spot); `db.connect` cannot name it. Outbox, inbox and jobs
+stay on the APP connection by design - they must commit atomically with the
+app's own writes - as do search (its FTS index reads app tables), the kv SQL
+store and `_hull_migrations` (it tracks the app's migrations), so those tables
+keep only the SQL-text check. Attachment's tables are on a declared internal
+database, else the app connection (they must roll back with the app's batch). Covered by `tests/e2e_db_internal.sh`.
+
+**Undeclared, the internal database is Hull's own (audit convergence §7.2,
+[docs/design/internal_db_separation.md](docs/design/internal_db_separation.md)).**
+`cap/db_internal.c` works it out from the default DSN in `app_context.c`
+(`hl_db_internal_default_dsn` -> `hl_db_registry_set_default_internal`): a
+SQLite file in the app tree (the implicit `data.db`) -> `<app>/.hull/internal.db`
+(`.hull` made 0700 by the registry before the open); a `-d` SQLite file outside
+the app tree (a deploy volume) -> `<that file>.hull-internal` beside it, so it
+persists where the data does; `:memory:` (`hull test`, `hull agent`, an
+`app.main` program without `-d`) -> a separate `:memory:`; a Postgres / MySQL /
+DuckDB / `$VAR` default -> none, the tables stay on the default connection (a
+per-instance local file would split sessions across instances; the startup WARN
+still says to declare `databases.internal`). A declared `databases.internal`
+always wins. The default path is Hull's own DSN (not confined like a manifest
+one) but re-checked on every lookup with `hl_db_path_has_symlink` (a linked
+`.hull`, leaf or sidecar is refused), and a `databases.named` file DSN may not
+name `.hull` in any case (`confine_manifest_dsn`). Both runners call
+`hl_db_internal_startup` once the manifest is wired and BEFORE the phase-2
+sandbox (unless `--no-migrate`): it opens the internal database and, on a SQLite
+default, moves the 17 tables of `hl_db_internal_tables()` out of the app database
+- per table, one transaction on the internal side (the source's own DDL when the
+table is missing, CREATE TABLE / INDEX only - a planted `sqlite_master` can hold
+any text - then `INSERT OR IGNORE` of the shared columns), then every
+drop, referrers first - and records the move (`_hull_internal_meta`,
+`app_db_moved`); an app whose modules reach no internal table
+(`hl_module_set_uses_internal_db`), with none to move and no file yet, gets no
+file. Crash-safe: a re-run copies again (nothing lost or doubled) and
+drops; a failed copy drops nothing and stops the app. After the record, internal
+tables that turn up in the app database again (a restored or planted `data.db`)
+are ignored with a WARN, never merged. `--keep-internal-in-app-db` (a downgrade
+row in `hl_runtime_flags()`) uses the default connection again and moves the
+tables back, clearing the record; kept for one release. auth-flows'
+`standard_users` adapter (the APP's users table) and attachment (its rows must
+roll back with the app's own `db.batch`, audit 5) go through
+`hull.db._internal.app_connection()` / `appConnection()` (a declared internal
+database, else the default connection - never Hull's file). The sandbox grants
+Hull the four files (`HlSandboxPolicy.internal_db_path`): Seatbelt allows them by
+literal AFTER the `.hull` deny (plus `file-read-metadata` on `.hull` itself, for
+the lstat re-check); OpenBSD unveils them under the hidden `.hull`; on Linux
+(Landlock) the `.hull` directory is unveiled `rwc`, the capability layer staying
+the boundary there. A new stdlib module that keeps `_hull_*` tables on the
+internal connection adds them to `INTERNAL_TABLES` (`cap/db_internal.c`), in
+dependency order. Covered by `tests/e2e_internal_db.sh` (`make
+e2e-internal-db`) and the `db_internal.*` / `sandbox_internal_db.*` unit tests.
 
 **Named connections via the manifest.** Additional connections are declared
 under `manifest.databases.named` (a name -> DSN map). A DSN value of exactly
@@ -2049,7 +2094,7 @@ hull agent inspect [app_dir]             # analyzed project model: annotated dec
 
 **A `.hull/` sidecar is repo content until its MAC verifies under the live session's key (audits 36 / 37).** The app tree may be a cloned repo, and an agent reads `hull agent` output as Hull's own. `hull dev --agent` makes its session nonce before the first spawn and keeps it ONLY at `$HOME/.hull/dev-sessions/<supervisor pid>` (a new session prunes the records of dead pids); it is a KEY, in no file under the app tree (audit 37: `dev.json` carried it, and an app granted `.hull/` read it and forged sidecars with it). Every sidecar carries an HMAC-SHA256 under it (`hl_dev_sidecar_mac` / `_mac_ok`, `include/hull/shared/dev_session.h`, through `hl_cap_crypto_hmac_sha256`) over `hull-dev-sidecar-v1`, the kind, `realpath(app_dir)`, the supervisor pid and SHA-256 of the exact content: `dev.json` (`port=.. pid=.. started_at=..`, written by dev.c), `last_error.json` (`<timestamp>\n<error>`, written by serve.c with the supervisor as `getppid()`) and `discovery.json` (the document, its MAC appended as the last member `session_mac` by `hull.project.publish` through `tool.dev_sidecar_mac`). The served child and the publisher take the key from `HULL_DEV_SESSION` with `hl_dev_session_take_env` (copies, overwrites the value in the environment block - `/proc/<pid>/environ` and KERN_PROCARGS2 read it back after unsetenv - and unsets) before any app code or tool VM runs; serve.c keeps it in `HlServeConfig.dev_session` only until the app has loaded, the publisher in `mod_tool.c` (the VM sees only the MAC), serve_cli.c drops it. `hl_agent_dev_session` (`src/hull/agent/session.c`) reads the key from `$HOME`, verifies dev.json's MAC and (off Windows) that the pid is alive, and hands the key to the caller, which verifies its own sidecar's MAC in constant time: `hull agent inspect` (then streams the document without `session_mac`, DEL / C1 escaped), `hull agent errors` / MCP `hull_errors` / `/errors` (only `error`, which must begin `failed to load `, and `timestamp`, re-encoded), and `hull agent status` (dev.json's port). `hull agent logs` / `hull_logs` read no file (Hull writes no `dev.log`). A new agent / MCP command that surfaces a file from the app tree as Hull output MACs and verifies it the same way, or labels it as repo content; a new sidecar writer gets the key the same way and never writes it to the tree.
 
-**`<app>/.hull` is reserved from app code (audit 37).** `split_caller` and `hl_fs_grant_parse` (`cap/fs_policy.c`) refuse a first component that is `.hull` in any letter case (`reserved_path`; a grant of it fails the manifest), so every capability that selects through the fs policy - fs.read / write / stat / list / mmap / delete, `compute.stream` file output, blob roots, `db.open` file DSNs - refuses it. `hl_fs_policy_compile` registers the app root (`hl_fs_reserve_root`, `cap/fs_resolve.c`, up to 16 roots per process), and so does every entry point at startup (`hl_fs_reserve_root_path` in serve.c, serve_cli.c and the app context; audit 42: an app with no fs grant compiled no policy, so the dev-mode disk loaders followed a `templates -> .hull` symlink), and the resolver refuses STEPPING from a registered root into its `.hull` by name or, for a directory, by inode - an in-root symlink, a case variant, an HFS+ ignorable spelling - in the manual walk, at the parent of a metadata op, and for the terminal of a DIR open; the Linux openat2 fast path is skipped while a registered root has a `.hull`. `fs.list` of the root leaves it out. Seatbelt adds `(deny file-read* file-write* (subpath APP_HULL))` LAST (SBPL: the last matching rule wins); unveil hides it on OpenBSD (`unveil(path, "")`), which Landlock cannot do, so on Linux the capability layer is the boundary. A new capability that takes an app path must select through the fs policy (or call `hl_fs_reserved_name` on its first component and resolve through `fs_resolve`).
+**`<app>/.hull` is reserved from app code (audit 37).** `split_caller` and `hl_fs_grant_parse` (`cap/fs_policy.c`) refuse a first component that is `.hull` in any letter case (`reserved_path`; a grant of it fails the manifest), so every capability that selects through the fs policy - fs.read / write / stat / list / mmap / delete, `compute.stream` file output, blob roots, `db.open` file DSNs - refuses it. `hl_fs_policy_compile` registers the app root (`hl_fs_reserve_root`, `cap/fs_resolve.c`, up to 16 roots per process), and so does every entry point at startup (`hl_fs_reserve_root_path` in serve.c, serve_cli.c and the app context; audit 42: an app with no fs grant compiled no policy, so the dev-mode disk loaders followed a `templates -> .hull` symlink), and the resolver refuses STEPPING from a registered root into its `.hull` by name or, for a directory, by inode - an in-root symlink, a case variant, an HFS+ ignorable spelling - in the manual walk, at the parent of a metadata op, and for the terminal of a DIR open; the Linux openat2 fast path is skipped while a registered root has a `.hull`. `fs.list` of the root leaves it out. Seatbelt adds `(deny file-read* file-write* (subpath APP_HULL))` near the end (SBPL: the last matching rule wins); only the Hull-owned internal database's four files (§7.2) are allowed after it, by literal; unveil hides it on OpenBSD (`unveil(path, "")`), which Landlock cannot do, so on Linux the capability layer is the boundary. A `databases.named` file DSN may not name `.hull` either. A new capability that takes an app path must select through the fs policy (or call `hl_fs_reserved_name` on its first component and resolve through `fs_resolve`).
 
 **Agent output is never app-produced JSON copied raw (audit 35).** `hull agent eval` / MCP `hull_eval` encodes a Lua result in C (`src/hull/agent/eval.c`: raw accessors, no metamethods, depth / size bounded, cycles refused; the snippet is its own chunk under a C `lua_pcall`), never with the app's `hull.json` or its `pcall` / `tostring` globals - a cloned app replacing `json.encode` wrote raw ESC / OSC and forged records. JS uses QuickJS's C `JS_JSONStringify`. Either result goes out through `eval_write_json_safe`, which also escapes DEL and C1 controls. A new agent / MCP command that embeds text from an app VM writes it with the escaping string writers, or validates it first (`hl_agent_text_is_terminal_safe` + `sh_json_parse`, as `hl_agent_errors` does).
 

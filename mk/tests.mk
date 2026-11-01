@@ -1486,6 +1486,9 @@ e2e-named-connections: $(BUILDDIR)/hull
 e2e-db-internal: $(BUILDDIR)/hull
 	sh tests/e2e_db_internal.sh
 
+e2e-internal-db: $(BUILDDIR)/hull
+	sh tests/e2e_internal_db.sh
+
 e2e-http-redirect: $(BUILDDIR)/hull
 	sh tests/e2e_http_redirect.sh
 

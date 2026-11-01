@@ -92,7 +92,8 @@ stop_pid() {
 cleanup() {
     stop_pid "$HULL_PID"
     for _d in "$SRCDIR/tests/fixtures/sign_in_events_lua" "$SRCDIR/tests/fixtures/sign_in_events_js"; do
-        rm -f "$_d/data.db" "$_d/data.db-shm" "$_d/data.db-wal"
+        rm -f "$_d/data.db" "$_d/data.db-shm" "$_d/data.db-wal" \
+        "$_d/.hull/internal.db" "$_d/.hull/internal.db-shm" "$_d/.hull/internal.db-wal"
     done
     if [ -n "$TMPDIR_WORK" ] && [ -d "$TMPDIR_WORK" ]; then
         rm -rf "$TMPDIR_WORK"
@@ -168,7 +169,8 @@ run_flow() {
     # its app dir): left from an earlier run, its devices made this run's
     # first login look known, so no new-device alert fired.
     _fx=$(dirname "$_entry")
-    rm -f "$_fx/data.db" "$_fx/data.db-shm" "$_fx/data.db-wal"
+    rm -f "$_fx/data.db" "$_fx/data.db-shm" "$_fx/data.db-wal" \
+        "$_fx/.hull/internal.db" "$_fx/.hull/internal.db-shm" "$_fx/.hull/internal.db-wal"
 
     PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
     HULL_LOG="$TMPDIR_WORK/hull_$_label.log"

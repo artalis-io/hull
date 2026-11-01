@@ -453,6 +453,58 @@ UTEST(sandbox_tty, seatbelt_profile_names_only_own_ttys)
     EXPECT_TRUE(strstr(buf, "/dev/tty\"") == NULL);
     EXPECT_TRUE(strstr(buf, "TTY_0") == NULL);
 }
+
+/* Audit convergence §7.2: the Hull-owned internal database lives in the app's
+ * reserved .hull, which Seatbelt denies (audit 37). Its four files are
+ * allowed AFTER that deny (the last matching SBPL rule wins), by literal, so
+ * the rest of .hull stays denied; without an internal database nothing in
+ * .hull is allowed. */
+UTEST(sandbox_internal_db, seatbelt_allows_only_the_internal_files_after_the_deny)
+{
+    char app[HL_TEST_PATH_MAX], real[PATH_MAX], hull[PATH_MAX + 16];
+    ASSERT_TRUE(hl_test_mkdtemp(app, sizeof app, "hull_sbint") != NULL);
+    ASSERT_TRUE(realpath(app, real) != NULL);
+    snprintf(hull, sizeof hull, "%s/.hull", real);
+    ASSERT_EQ(mkdir(hull, 0700), 0);
+    char idb[PATH_MAX + 32];
+    snprintf(idb, sizeof idb, "%s/internal.db", hull);
+
+    static char buf[16384];
+    const char *params[256];
+    HlSandboxPolicy p;
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    p.internal_db_path = idb;
+    ASSERT_EQ(hl_sandbox_seatbelt_app_profile_for_test(&p, real, buf, sizeof buf,
+                                                       params, 256), 0);
+    const char *deny = strstr(buf, "(deny file-read* file-write* (subpath (param \"APP_HULL\")))");
+    const char *allow = strstr(buf, "(literal (param \"INT_F0\")) (literal (param \"INT_F1\"))");
+    ASSERT_TRUE(deny != NULL);
+    ASSERT_TRUE(allow != NULL);
+    EXPECT_TRUE(allow > deny);
+    EXPECT_TRUE(strstr(buf, "(allow file-read* file-write* (subpath (param \"APP_HULL\")") == NULL);
+    static const char *const want[4][2] = { { "INT_F0", "" }, { "INT_F1", "-wal" },
+                                            { "INT_F2", "-shm" }, { "INT_F3", "-journal" } };
+    for (int k = 0; k < 4; k++) {
+        char v[PATH_MAX + 48];
+        snprintf(v, sizeof v, "%s%s", idb, want[k][1]);
+        int found = 0;
+        for (int i = 0; params[i]; i += 2)
+            if (strcmp(params[i], want[k][0]) == 0) {
+                EXPECT_STREQ(params[i + 1], v);
+                found = 1;
+            }
+        EXPECT_EQ(found, 1);
+    }
+
+    /* No internal database: no grant into .hull at all. */
+    p.internal_db_path = NULL;
+    ASSERT_EQ(hl_sandbox_seatbelt_app_profile_for_test(&p, real, buf, sizeof buf,
+                                                       params, 256), 0);
+    EXPECT_TRUE(strstr(buf, "INT_F0") == NULL);
+    EXPECT_TRUE(strstr(buf, "APP_HULL") != NULL);
+    rmdir(hull);
+    rmdir(real);
+}
 #endif
 
 UTEST_MAIN()

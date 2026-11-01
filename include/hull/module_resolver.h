@@ -76,6 +76,12 @@ bool hl_module_set_contains_spec(const HlResolvedModuleSet *set,
 bool hl_module_set_contains_name(const HlResolvedModuleSet *set,
                                   const char *canonical_name);
 
+/* True iff the set holds a module that keeps tables on the stdlib's internal
+ * connection (session, rbac, totp, audit-log, idempotency, auth-flows,
+ * auth-health), so the Hull-owned internal database is needed (audit
+ * convergence 7.2, cap/db_internal.h). NULL -> true (unknown: assume so). */
+bool hl_module_set_uses_internal_db(const HlResolvedModuleSet *set);
+
 /* True iff a short or canonical name is in the set. */
 bool hl_module_set_contains_short(const HlResolvedModuleSet *set,
                                    const char *name);
