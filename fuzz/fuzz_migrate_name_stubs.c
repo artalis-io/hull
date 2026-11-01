@@ -30,3 +30,5 @@ void hl_cap_db_ns_trust(void);
 void hl_cap_db_ns_trust(void) { abort(); }
 void hl_cap_db_ns_restore(void);
 void hl_cap_db_ns_restore(void) { abort(); }
+void hl_db_session_sql_trust(void);
+void hl_db_session_sql_trust(void) { abort(); }
