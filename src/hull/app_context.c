@@ -16,6 +16,7 @@
 #include "hull/vfs.h"
 #include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
 
+#include "hull/cap/fs_resolve.h"   /* hl_fs_reserve_root_path (audit 42) */
 #include "hull/cap/fs.h"          /* HlFsConfig - test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
 #include "hull/utils/alloc.h"     /* HlAllocator + hl_alloc_init for the fs policy */
@@ -191,6 +192,11 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     /* Own a stable copy of app_dir for fs_cfg.base_dir (see struct comment). */
     ctx->app_dir_copy = strdup(opts->app_dir);
     if (!ctx->app_dir_copy) { free(ctx); return -1; }
+
+    /* `.hull` is reserved from the disk loaders whether or not a policy
+     * compiles (audit 42: only a compile registered the root, so an app with
+     * no fs grant let a planted in-root symlink reach .hull). */
+    (void)hl_fs_reserve_root_path(ctx->app_dir_copy);
 
     /* Detect entry point and runtime type */
     char entry_buf[4096];

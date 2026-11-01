@@ -13,6 +13,8 @@
  *   "10.0.0.0/8"       CIDR; matches only when the host is an IP literal in
  *   "2001:db8::/32"    that range. A hostname never matches a CIDR (no DNS
  *                      resolution here, so no rebinding surprise).
+ *                      Both the network and the host must be canonical IP
+ *                      literals (see hl_host_ip_canonical; audit 42).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -22,7 +24,21 @@
 
 #include <stddef.h>
 
-/* 1 if @p host matches @p pattern, else 0. NULL-safe (returns 0). */
+/* Audit 42: 1 if @p host is an IP literal in the one spelling every resolver
+ * reads the same way - IPv4 as four decimal octets 0-255 with no leading zero
+ * (but a lone "0"), IPv6 as 1-4-digit hex groups with at most one "::", an
+ * optional canonical IPv4 tail and an optional "%zone" - else 0. */
+int hl_host_ip_canonical(const char *host);
+
+/* Audit 42: 0 if @p host looks like an IP literal (contains ':', or every
+ * dot-separated label is decimal digits or 0x-hex: "0177.0.0.1", "127.1",
+ * "2130706433", "0x7f.0.0.1") but is not canonical; 1 for a canonical literal
+ * or anything else (a DNS name). hl_host_match refuses a host this rejects,
+ * against every pattern, "*" included. */
+int hl_host_literal_ok(const char *host);
+
+/* 1 if @p host matches @p pattern, else 0. NULL-safe (returns 0). A host that
+ * hl_host_literal_ok rejects never matches. */
 int hl_host_match(const char *pattern, const char *host);
 
 /* 1 if @p host matches any of the @p n patterns, else 0. */

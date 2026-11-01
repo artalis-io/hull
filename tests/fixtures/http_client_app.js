@@ -13,7 +13,9 @@ import { httpClient } from "hull:http-client";
 
 app.manifest({
     modules: ["hull/http-client@1", "hull/http-server@1", "hull/log@1"],
-    hosts: ["127.0.0.1"],
+    // The non-canonical entries exist for /test/noncanonical (audit 42).
+    hosts: ["127.0.0.1", "127.0.0.0/8", "0177.0.0.1", "127.1", "0x7f.0.0.1",
+            "2130706433", "127.000.000.001"],
     env: ["ECHO_PORT"],
 });
 
@@ -73,6 +75,22 @@ app.get("/test/denied", (_req, res) => {
     } catch (e) {
         res.json({ denied: true, message: e.message });
     }
+});
+
+// GET /test/noncanonical - an IP literal a resolver may read differently
+// from the allowlist check matches no grant (audit 42).
+app.get("/test/noncanonical", (_req, res) => {
+    const reached = [];
+    for (const h of ["0177.0.0.1", "127.1", "0x7f.0.0.1", "2130706433",
+                     "127.000.000.001", "127.0.0.01"]) {
+        try {
+            const r = httpClient.get(`http://${h}:19860/echo`, { timeoutMs: 2000 });
+            if (r && r.status === 200) reached.push(h);
+        } catch (e) { /* refused */ }
+    }
+    let canonical = 0;
+    try { canonical = httpClient.get(`${ECHO_BASE}/echo`).status; } catch (e) { canonical = 0; }
+    res.json({ reached: "[" + reached.join(",") + "]", canonical });
 });
 
 // Health check for readiness

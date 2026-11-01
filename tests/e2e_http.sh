@@ -203,6 +203,11 @@ run_http_tests() {
     RESP=$(curl -s "http://127.0.0.1:$PORT/test/denied")
     check_contains "$LABEL denied host rejected" "$RESP" '"denied":true'
 
+    # ── Non-canonical IP literals refused (audit 42) ──
+    RESP=$(curl -s "http://127.0.0.1:$PORT/test/noncanonical")
+    check_contains "$LABEL non-canonical IP literals reach nothing" "$RESP" '"reached":"[]"'
+    check_contains "$LABEL canonical 127.0.0.1 still reaches" "$RESP" '"canonical":200'
+
     stop_pid "$SERVER_PID"
     SERVER_PID=""
 }

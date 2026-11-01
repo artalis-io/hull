@@ -21,6 +21,7 @@
 #include "hull/shared/host.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_policy.h"
+#include "hull/cap/fs_resolve.h"
 #include "hull/cap/db_live_files.h"
 #include "hull/utils/alloc.h"
 #include <errno.h>
@@ -1445,5 +1446,93 @@ UTEST(hl_cap_fs, an_in_place_write_refuses_an_alias_to_a_sidecar_name)
 }
 
 #endif /* HL_ENABLE_SQLITE */
+
+/* ── Audit 42 ─────────────────────────────────────────────────────────── */
+
+/* `.hull` is reserved once the app root is registered by path, with no fs
+ * policy compiled: a planted in-root symlink to it (templates -> .hull)
+ * cannot be followed by the dev-mode disk loaders (hl_fs_fopen_read). */
+UTEST(fs_audit42, hull_reserved_without_a_policy)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "a42res") != NULL);
+    char p[HL_TEST_PATH_MAX + 64];
+    snprintf(p, sizeof p, "%s/.hull", dir);
+    ASSERT_EQ(0, mkdir(p, 0700));
+    snprintf(p, sizeof p, "%s/.hull/secret.html", dir);
+    FILE *w = fopen(p, "w");
+    ASSERT_TRUE(w != NULL);
+    fputs("SECRET", w);
+    fclose(w);
+    snprintf(p, sizeof p, "%s/templates", dir);
+    ASSERT_EQ(0, symlink(".hull", p));
+    snprintf(p, sizeof p, "%s/ok.txt", dir);
+    w = fopen(p, "w");
+    ASSERT_TRUE(w != NULL);
+    fputs("ok", w);
+    fclose(w);
+
+    ASSERT_EQ(0, hl_fs_reserve_root_path(dir));
+
+    FILE *f = hl_fs_fopen_read(dir, "templates/secret.html");
+    EXPECT_TRUE(f == NULL);
+    if (f) fclose(f);
+    f = hl_fs_fopen_read(dir, ".hull/secret.html");
+    EXPECT_TRUE(f == NULL);
+    if (f) fclose(f);
+    f = hl_fs_fopen_read(dir, ".HULL/secret.html");
+    EXPECT_TRUE(f == NULL);
+    if (f) fclose(f);
+    /* The rest of the tree is unaffected. */
+    f = hl_fs_fopen_read(dir, "ok.txt");
+    EXPECT_TRUE(f != NULL);
+    if (f) fclose(f);
+
+    EXPECT_EQ(-1, hl_fs_reserve_root_path(NULL));
+    EXPECT_EQ(-1, hl_fs_reserve_root_path(p));   /* a file, not a directory */
+    (void)nftw(dir, teardown_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+/* fs_write_atomic's temp opens O_CREAT|O_EXCL|O_NOFOLLOW: an existing file
+ * or a symlink at the name is never opened, truncated or written through. */
+UTEST(fs_audit42, write_excl_temp_never_opens_an_existing_name)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_TRUE(hl_test_mkdtemp(dir, sizeof dir, "a42excl") != NULL);
+    char p[HL_TEST_PATH_MAX + 64], victim[HL_TEST_PATH_MAX + 64];
+    snprintf(victim, sizeof victim, "%s/victim", dir);
+    FILE *w = fopen(victim, "w");
+    ASSERT_TRUE(w != NULL);
+    fputs("KEEP", w);
+    fclose(w);
+    snprintf(p, sizeof p, "%s/.hull-tmp-planted", dir);
+    ASSERT_EQ(0, symlink("victim", p));
+
+    const char *err = NULL;
+    int root = hl_fs_open_base(dir, &err);
+    ASSERT_GE(root, 0);
+    /* Symlink at the name: refused, the target untouched. */
+    int fd = hl_fs_open_at_ex(root, ".hull-tmp-planted", HL_FS_OPEN_WRITE_EXCL,
+                              HL_FS_SYMLINK_FOLLOW, 0644, &err);
+    EXPECT_LT(fd, 0);
+    if (fd >= 0) close(fd);
+    /* An existing regular file: refused, not truncated. */
+    err = NULL;
+    fd = hl_fs_open_at_ex(root, "victim", HL_FS_OPEN_WRITE_EXCL,
+                          HL_FS_SYMLINK_FOLLOW, 0644, &err);
+    EXPECT_LT(fd, 0);
+    if (fd >= 0) close(fd);
+    struct stat st;
+    ASSERT_EQ(0, stat(victim, &st));
+    EXPECT_EQ((long long)st.st_size, 4LL);
+    /* A new name (parents made) opens. */
+    err = NULL;
+    fd = hl_fs_open_at_ex(root, "sub/new", HL_FS_OPEN_WRITE_EXCL,
+                          HL_FS_SYMLINK_FOLLOW, 0644, &err);
+    EXPECT_GE(fd, 0);
+    if (fd >= 0) close(fd);
+    close(root);
+    (void)nftw(dir, teardown_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
 
 UTEST_MAIN();

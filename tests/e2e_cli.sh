@@ -201,6 +201,53 @@ JS
 run_fs_roundtrip "lua" "lua"
 run_fs_roundtrip "js"  "js"
 
+# ── .hull reserved without an fs policy (audit 42) ────
+# `.hull` is reserved from the disk loaders only once the app root is
+# registered, which happened only when an fs policy compiled. An app with no fs
+# grant then let a planted in-root symlink (templates -> .hull) read the dev
+# sidecars through the template loader. Every entry point registers the root
+# at startup now. --no-sandbox isolates the capability layer: Seatbelt also
+# denies .hull on macOS, but Landlock cannot hide it, so on Linux this check
+# is the boundary. Exit 0 = the render was refused.
+run_hull_reserved_without_policy() {
+    runtime="$1"; ext="$2"
+    echo "--- .hull reserved without an fs policy (${runtime}) ---"
+    d=$(mktemp -d)
+    mkdir "${d}/.hull"
+    printf 'SECRET-SIDECAR' > "${d}/.hull/secret.html"
+    ln -s .hull "${d}/templates"
+    if [ "$ext" = "lua" ]; then
+        cat > "${d}/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/template@1" } })
+app.main(function()
+  local template = require("hull.template")
+  local ok, out = pcall(template.render, "secret.html", {})
+  if ok and tostring(out):find("SECRET-SIDECAR", 1, true) then return 3 end
+  return 0
+end)
+LUA
+    else
+        cat > "${d}/app.js" <<'JS'
+import { app } from "hull:app";
+import { template } from "hull:template";
+app.manifest({ modules: ["hull/template@1"] });
+app.main(() => {
+  try {
+    const out = template.render("secret.html", {});
+    if (String(out).includes("SECRET-SIDECAR")) return 3;
+  } catch (e) { /* refused */ }
+  return 0;
+});
+JS
+    fi
+    rc=$(hull_rc "${HULL_BIN}" --no-sandbox "${d}/app.${ext}")
+    expect_eq "${runtime} .hull unreadable through a symlink with no fs grant" "0" "${rc}"
+    rm -rf "${d}"
+}
+
+run_hull_reserved_without_policy "lua" "lua"
+run_hull_reserved_without_policy "js"  "js"
+
 # ── fs.stat + fs.list parity through app.main ─────────
 # Proves the Lua and JS bindings return EQUIVALENT values + error tokens for the
 # metadata (stat) and enumeration (list) surface: present -> metadata, absent ->

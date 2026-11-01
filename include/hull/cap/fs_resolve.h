@@ -96,6 +96,10 @@ typedef enum {
                        * the opened leaf (strips setuid / setgid) and truncates
                        * it only then, so a refused write leaves the file as it
                        * was (audit 27). Open-only: policy selection takes WRITE. */
+    HL_FS_OPEN_WRITE_EXCL, /* as WRITE, but O_CREAT|O_EXCL|O_NOFOLLOW and no
+                       * O_TRUNC: the leaf must not exist, so an existing file
+                       * or a symlink planted at the name is never opened
+                       * (fs_write_atomic's temp; audit 42). Open-only. */
 } HlFsOpenMode;
 
 /*
@@ -232,12 +236,20 @@ int hl_fs_resolve_parent(int root_fd, const char *relpath, HlFsSymlink symlink,
  * refuses, with "reserved_path", any step from that root into its `.hull` - by
  * name in any letter case, or by inode when it is a directory, so an in-root
  * symlink or another spelling does not reach it either. hl_fs_policy_compile
- * calls it.
+ * calls it, and every entry point registers the app directory at startup
+ * (hl_fs_reserve_root_path; audit 42).
  *
  * hl_fs_is_reserved_root: 1 iff @p dirfd is a registered root.
  */
 int  hl_fs_reserved_name(const char *name, size_t len);
 void hl_fs_reserve_root(int base_fd);
+
+/* Audit 42: hl_fs_reserve_root on the directory @p dir names (opened
+ * O_DIRECTORY, not kept). Every entry point calls it for the app directory at
+ * startup, so `.hull` is reserved from the disk loaders even in an app whose
+ * manifest grants no fs path (no policy compiles there). Returns 0, or -1 when
+ * @p dir cannot be opened as a directory. */
+int  hl_fs_reserve_root_path(const char *dir);
 int  hl_fs_is_reserved_root(int dirfd);
 
 #endif /* HULL_CAP_FS_RESOLVE_H */

@@ -9,7 +9,11 @@
 
 app.manifest({
     modules = { "hull/http-client@1", "hull/http-server@1", "hull/log@1" },
-    hosts = {"127.0.0.1"},
+    -- The non-canonical entries exist for /test/noncanonical (audit 42):
+    -- spelled exactly like the URL host, or inside 127.0.0.0/8 as libc
+    -- inet_pton reads it, each used to pass the check and dial 127.0.0.1.
+    hosts = {"127.0.0.1", "127.0.0.0/8", "0177.0.0.1", "127.1", "0x7f.0.0.1",
+             "2130706433", "127.000.000.001"},
     env = {"ECHO_PORT"},
 })
 
@@ -73,6 +77,22 @@ app.get("/test/denied", function(_req, res)
     else
         res:json({ denied = true, message = tostring(err) })
     end
+end)
+
+-- GET /test/noncanonical - an IP literal a resolver may read differently
+-- from the allowlist check matches no grant (audit 42): every spelling below
+-- names 127.0.0.1 to some resolver, and none may reach the echo server.
+app.get("/test/noncanonical", function(_req, res)
+    local reached = {}
+    for _, h in ipairs({ "0177.0.0.1", "127.1", "0x7f.0.0.1", "2130706433",
+                         "127.000.000.001", "127.0.0.01" }) do
+        local ok, r = pcall(http_client.get,
+                            "http://" .. h .. ":19860/echo", { timeout_ms = 2000 })
+        if ok and r and r.status == 200 then reached[#reached + 1] = h end
+    end
+    local ok, r = pcall(http_client.get, ECHO_BASE .. "/echo")
+    res:json({ reached = "[" .. table.concat(reached, ",") .. "]",
+               canonical = (ok and r and r.status) or 0 })
 end)
 
 -- Health check for readiness

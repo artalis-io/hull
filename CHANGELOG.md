@@ -156,6 +156,30 @@ release-artifact layout).
   makes, and until it finishes the device refuses compiles, dispatches, pipelines, writes, reads and
   copies (`gpu_busy`). `hl_cap_gpu_destroy` waits up to 5 s for it, and past that leaves the
   backend's device and instance unfreed rather than free them under the thread.
+- **A host allowlist could be passed with an IP literal the dial reads as another address**
+  (audit 42). `hl_host_match` read an IP literal with `inet_pton`; the connection then hands the
+  same string to `getaddrinfo` or Keel's `kl_sockaddr_parse`, and the two do not agree on every
+  spelling. On Cosmopolitan (the released `hull-cosmo`) `inet_pton` reads a leading-zero octet as
+  decimal and `getaddrinfo` as octal, so with `hosts = { "177.0.0.0/8" }` a fetch of
+  `http://0177.0.0.1/` was checked as 177.0.0.1 and dialled 127.0.0.1 (`012.0.0.1` reached
+  10.0.0.1). An exact entry spelled like the URL host, or `*`, passed hex (`0x7f.0.0.1`),
+  shorthand (`127.1`) and single-integer (`2130706433`) forms that a resolver reads as loopback on
+  every libc. The matcher now reads only the one spelling every parser reads the same way
+  (`hl_host_ip_canonical`): IPv4 as four decimal octets 0-255, at most three digits, no leading
+  zero but a lone `0`; IPv6 as 1-4-digit hex groups with at most one `::`, an optional IPv4 tail
+  in that form and an optional `%zone` (never part of a CIDR match). A host that looks like an IP
+  literal (it contains `:`, or every dot-separated label is decimal digits or `0x`-hex) but is not
+  canonical matches no pattern at all, `*` and an identical exact entry included
+  (`hl_host_literal_ok`), so it never reaches a dial; a CIDR's network must be canonical too. This
+  gates `http.fetch`, `ws.connect`, `smtp.send`, `databases.dynamic.hosts`, `kv.dynamic.hosts` and
+  the `hull.ssh` grants. Write IP grants and URLs in that form (`127.0.0.1`, `2001:db8::1`).
+  Three Lows ride along: a Lua query key is pushed with its decoded length, as JS does
+  (`?admin%00x=1` was the key `admin`); every entry point (serve.c, serve_cli.c, the app context)
+  registers the app root at startup (`hl_fs_reserve_root_path`), so `.hull` is reserved from the
+  dev-mode disk loaders in an app with no fs grant (only an fs policy compile registered it, and a
+  `templates -> .hull` symlink read the dev sidecars where the kernel sandbox does not hide it); and
+  `fs.write`'s temp file opens `O_CREAT|O_EXCL|O_NOFOLLOW` (`HL_FS_OPEN_WRITE_EXCL`), never an
+  existing file or a symlink at its name.
 - **A lost MySQL connection with autocommit off or a table lock reconnected into autocommit**
   (audit 41). The backend refused to replace a broken connection only when its last status had
   IN_TRANS, and `session_held` read 0 while the connection was broken. Right after `SET

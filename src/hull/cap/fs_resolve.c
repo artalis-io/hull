@@ -191,6 +191,16 @@ int hl_fs_reserved_name(const char *name, size_t len)
     return name && len == 5 && strncasecmp(name, ".hull", 5) == 0;
 }
 
+int hl_fs_reserve_root_path(const char *dir)
+{
+    if (!dir || !*dir) return -1;
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    hl_fs_reserve_root(fd);
+    close(fd);
+    return 0;
+}
+
 void hl_fs_reserve_root(int base_fd)
 {
     struct stat st;
@@ -480,7 +490,8 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                 }
                 if (fstatat(stack[depth - 1], comp, &lst, AT_SYMLINK_NOFOLLOW) != 0) {
                     if (errno == ENOENT && (mode == HL_FS_OPEN_WRITE ||
-                                            mode == HL_FS_OPEN_WRITE_KEEP)) {
+                                            mode == HL_FS_OPEN_WRITE_KEEP ||
+                                            mode == HL_FS_OPEN_WRITE_EXCL)) {
                         /* A directory created (mkdir-p): charged before it
                          * is made, so a tripped walk creates nothing more. */
                         if (hl_fs_charge(HL_WORK_FS_MKDIR_UNITS)) {
@@ -584,7 +595,8 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
             int flags = (mode == HL_FS_OPEN_READ)
                           ? (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
                           : (O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
-                             | (mode == HL_FS_OPEN_WRITE ? O_TRUNC : 0));
+                             | (mode == HL_FS_OPEN_WRITE ? O_TRUNC : 0)
+                             | (mode == HL_FS_OPEN_WRITE_EXCL ? O_EXCL : 0));
             int fd = openat(stack[depth - 1], comp, flags, cmode);
             if (fd >= 0) {
                 if (mode == HL_FS_OPEN_READ && hl_fs_charge(HL_WORK_FS_LEAF_UNITS)) {

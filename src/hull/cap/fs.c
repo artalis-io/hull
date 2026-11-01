@@ -476,8 +476,11 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
     }
 
     const char *e = NULL;
-    int tfd = hl_fs_open_at_ex(t.anchor_fd, tmprel, HL_FS_OPEN_WRITE, t.sym,
-                               0644, &e);
+    /* O_CREAT|O_EXCL|O_NOFOLLOW (audit 42): the temp is always a new file -
+     * a file or symlink already at the name (planted, or another writer's)
+     * is never opened, truncated or written through. */
+    int tfd = hl_fs_open_at_ex(t.anchor_fd, tmprel, HL_FS_OPEN_WRITE_EXCL,
+                               t.sym, 0644, &e);
     if (tfd < 0) {
         /* The directory refuses a new file (read-only, or not writable) -
          * but the target itself may be writable, as with an EXACT grant on

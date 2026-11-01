@@ -42,6 +42,7 @@
 #include "hull/sandbox.h"
 #include "hull/serve.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_resolve.h"   /* hl_fs_reserve_root_path (audit 42) */
 #include "hull/cap/env.h"
 #include "hull/cap/audit.h"
 #include "hull/cap/policy_seal.h"   /* hl_policy_seal_* - every build seals its policy */
@@ -452,6 +453,10 @@ int hull_serve(int argc, char **argv)
         }
         entry = entry_abs;
     }
+
+    /* `.hull` is reserved from the disk loaders whether or not the app's
+     * manifest compiles an fs policy (audit 42). */
+    (void)hl_fs_reserve_root_path(app_dir);
 
     /* Verify the app signature BEFORE any app code is loaded (serve.c's
      * RT-01): a tampered app never runs. The embedded entries are what a
