@@ -326,3 +326,5 @@ INV-8  src/hull/cap/db_sqlite.c:sqlite_replace_conn  # reopens a file s->live_pa
 # INV-9: Lua resumes
 INV-9  src/hull/runtime/lua/async.c:hl_lua_co_resume  # coroutine.resume itself: the app's coroutine library, not a runtime resume path; closes an errored coroutine (hl_lua_close_errored)
 INV-9  src/hull/runtime/lua/async.c:hl_lua_co_auxwrap  # coroutine.wrap's call: the app's coroutine library; closes an errored coroutine with lua_closethread(co, L)
+INV-1  src/hull/runtime/lua/async.c:lua_hull_test_native_sleep  # --vm-thread test hook, present only under HULL_TEST_NATIVE_SLEEP=1: deliberately uncharged native work the VM-thread preemption tests stop
+INV-1  src/hull/runtime/js/async.c:js_hull_test_native_sleep  # --vm-thread test hook, present only under HULL_TEST_NATIVE_SLEEP=1: deliberately uncharged native work the VM-thread preemption tests stop
