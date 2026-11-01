@@ -89,6 +89,9 @@
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
 #include "hull/cap/vm_thread.h"     /* --vm-thread */
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm_watchdog.h"
+#endif
 #include "hull/static.h"
 #include "hull/tool.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
@@ -2053,6 +2056,11 @@ static void hl_serve_undo_caps(HlServerState *s)
 /* Phase 2: apply the OS-level sandbox built from the resolved manifest. */
 static int hl_serve_apply_sandbox(HlServerState *s)
 {
+#ifdef HL_ENABLE_WASM
+    /* A WASM watchdog the top level started is stopped, so only this thread
+     * exists when phase 2 applies (audit 43); the next arm restarts it. */
+    hl_wasm_watchdog_quiesce();
+#endif
     if (!s->cfg.no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &s->manifest);
@@ -2097,6 +2105,8 @@ static int hl_serve_apply_sandbox(HlServerState *s)
     } else {
         log_warn("[hull:c] kernel sandbox disabled (--no-sandbox)");
     }
+    /* Watchdog threads from here on are born inside the sandbox. */
+    hl_run_watchdog_release();
     return 0;
 }
 
@@ -2761,6 +2771,12 @@ int hull_serve(int argc, char **argv)
      * or its verify-full handshake would not see --ca-bundle. */
     if (!s.cfg.no_db && hl_sandbox_dsn_is_network(s.cfg.db_path))
         hl_ca_trust_publish(s.cfg.skip_ca_bundle, s.cfg.ca_bundle_override);
+
+    /* No watchdog thread before the phase-2 sandbox (audit 43): a cosmo
+     * APE's libc pledge / unveil reach only the calling thread, so a thread
+     * started while the app loads would keep phase-1 permissions. The top
+     * level's deadline is polled meanwhile (cap/run_watchdog.h). */
+    hl_run_watchdog_defer();
 
     /* Phase 9: signature verify, phase-1 sandbox, then VFS + DB + migrations +
      * runtime init via HlAppContext (deferred app load) */

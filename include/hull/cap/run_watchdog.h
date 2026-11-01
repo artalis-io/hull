@@ -102,10 +102,37 @@ void     hl_run_watch_restore(HlRunWatch *w, uint64_t deadline_ms);
  * has armed the watch yet. */
 void hl_run_watch_peek(HlRunWatch *w, uint64_t *deadline_ms, uint64_t *seq);
 
-/* Whether @p w's deadline has passed. Any thread; lock-free. */
-static inline int hl_run_watch_stopped(const HlRunWatch *w)
+/* ── Deferred start (audit 43) ─────────────────────────────────────
+ *
+ * A thread that exists when the phase-2 sandbox is applied keeps the
+ * permissions it had before: on native Linux the vendored pledge reaches it
+ * (TSYNC, docs/pledge_patches.md), but a cosmo APE's libc pledge / unveil
+ * apply to the calling thread only. The runners therefore call
+ * hl_run_watchdog_defer() before the app's top level is loaded and
+ * hl_run_watchdog_release() once phase 2 is in place, so the watchdog THREAD
+ * is born inside the sandbox. In between, an armed deadline is still kept:
+ * hl_run_watch_stopped() compares it with the clock itself (every
+ * HL_RUN_WATCH_POLL_EVERY calls - the budget hook, the QuickJS interrupt
+ * handler and every work / SQL charge call it), so the top level's run stays
+ * bounded with no thread. Entry points that never defer (hull test, hull
+ * agent, workers) are unchanged. */
+void hl_run_watchdog_defer(void);
+void hl_run_watchdog_release(void);
+
+extern int hl_run_watchdog_deferred_;   /* atomic; read by the inline below */
+/* Deferred mode only: raise @p w's flag when its deadline has passed.
+ * Returns the flag. */
+int hl_run_watch_poll(HlRunWatch *w);
+
+/* Whether @p w's deadline has passed. Any thread; lock-free except while
+ * deferred (one uncontended lock every HL_RUN_WATCH_POLL_EVERY calls). */
+static inline int hl_run_watch_stopped(HlRunWatch *w)
 {
-    return w && __atomic_load_n(&w->stop, __ATOMIC_RELAXED) != 0;
+    if (!w) return 0;
+    if (__atomic_load_n(&w->stop, __ATOMIC_RELAXED) != 0) return 1;
+    if (__atomic_load_n(&hl_run_watchdog_deferred_, __ATOMIC_RELAXED))
+        return hl_run_watch_poll(w);
+    return 0;
 }
 
 /* The trip's message, shared by both runtimes. */

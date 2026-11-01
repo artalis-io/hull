@@ -240,4 +240,14 @@ int hl_host_path_covers_home(const char *path, const char *sub);
  */
 int hl_host_path_under_home(const char *path, const char *sub);
 
+/* The number of threads in this process, from /proc/self/task: -1 where it
+ * cannot be read (not Linux, /proc not mounted). Used to check that only the
+ * main thread exists when the phase-2 sandbox applies (audit 43). */
+int hl_host_thread_count(void);
+
+/* Wait (up to @p max_ms) until hl_host_thread_count() is at most @p want: a
+ * joined thread stays listed for a moment after pthread_join returns. The
+ * last count read (-1 unreadable). */
+int hl_host_wait_thread_count(int want, int max_ms);
+
 #endif /* HL_SHARED_HOST_H */

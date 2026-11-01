@@ -772,6 +772,98 @@ static void run_thread_child(const char *name, int (*fn)(void))
     }
 }
 
+/* ── audit 43: the per-thread sync fails closed ──────────────────────
+ *
+ * Patch 0004's signal path took ANY tgkill failure as "the thread has gone",
+ * and returned its count when the 16-round loop hit its cap with threads
+ * still appearing. Both meant a success with a thread left unrestricted.
+ * Meaningful in the no-TSYNC build (tests/e2e_sandbox.sh compiles one); with
+ * Landlock TSYNC (mode 1) the kernel reaches every thread and both pass. */
+
+#include <sys/resource.h>
+
+/* sandbox_audit43.sigpending_exhausted: with RLIMIT_SIGPENDING at 0 the sync
+ * signal cannot be queued (tgkill fails EAGAIN, not ESRCH). The live thread
+ * it missed must be counted, never reported as synced. */
+static int test_sigpending_child(void)
+{
+    if (access("/etc/hostname", R_OK) != 0) _exit(78);
+    OldThread a; pthread_t ta;
+    if (old_thread_start(&a, &ta, 0) != 0) _exit(2);
+    struct rlimit rl = { 0, 0 };
+    if (setrlimit(RLIMIT_SIGPENDING, &rl) != 0) _exit(2);
+    if (unveil("/tmp", "r") != 0) _exit(errno == ENOSYS ? 77 : 2);
+    if (unveil(NULL, NULL) != 0) _exit(4);
+    int mode = hull_unveil_sync_mode, unsynced = hull_unveil_unsynced_threads;
+    old_thread_go(&a, ta);
+    printf("    (sigpending 0: sync mode %d, unsynced %d; old thread errno %d)\n",
+           mode, unsynced, a.open_errno);
+    fflush(stdout);
+    if (mode == 1) _exit(a.open_errno == EACCES && unsynced == 0 ? 0 : 5);
+    if (mode == 2) {
+        if (unsynced == 0 && a.open_errno != EACCES)
+            _exit(1);              /* FAIL: unrestricted thread, "synced" */
+        _exit(unsynced != 0 ? 0 : 6);
+    }
+    _exit(7);
+}
+
+#if defined(HULL_UNVEIL_TEST_NO_TSYNC) && HULL_UNVEIL_TEST_NO_TSYNC
+/* The no-TSYNC test build's per-round hook (vendor/pledge unveil.c): each
+ * round of the sync loop starts one more thread, alive through the round,
+ * so every listing of /proc/self/task finds a thread it has not seen. */
+extern void (*hull_unveil_test_round_hook)(void);
+
+static void *round_child(void *arg)
+{
+    (void)arg;
+    struct timespec ts = { 0, 300000000 };
+    nanosleep(&ts, NULL);
+    return NULL;
+}
+
+static void round_hook_spawn(void)
+{
+    pthread_attr_t at;
+    pthread_t th;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    (void)pthread_create(&th, &at, round_child, NULL);
+    pthread_attr_destroy(&at);
+}
+#define HAVE_ROUND_HOOK 1
+#else
+#define HAVE_ROUND_HOOK 0
+#endif
+
+/* sandbox_audit43.round_cap_fails: new threads appear in every round, so the
+ * loop ends on its cap - which must be a failure (-1), not the count of the
+ * threads it did reach. Only the no-TSYNC build can drive the signal path;
+ * with TSYNC the kernel reaches every thread and there is no loop. */
+static int test_round_cap_child(void)
+{
+    /* One thread that already exists, so the sync loop runs at all. */
+    OldThread a; pthread_t ta;
+    if (old_thread_start(&a, &ta, 0) != 0) _exit(2);
+#if HAVE_ROUND_HOOK
+    hull_unveil_test_round_hook = round_hook_spawn;
+#endif
+    if (unveil("/tmp", "r") != 0) _exit(errno == ENOSYS ? 77 : 2);
+    int rc = unveil(NULL, NULL);
+    old_thread_go(&a, ta);
+    int mode = hull_unveil_sync_mode, unsynced = hull_unveil_unsynced_threads;
+#if HAVE_ROUND_HOOK
+    hull_unveil_test_round_hook = NULL;
+#endif
+    printf("    (a new thread every round: unveil rc %d, sync mode %d, "
+           "unsynced %d)\n", rc, mode, unsynced);
+    fflush(stdout);
+    if (rc != 0) _exit(4);
+    if (!HAVE_ROUND_HOOK) _exit(unsynced == 0 ? 0 : 5);   /* nothing to drive */
+    if (mode == 2) _exit(unsynced == -1 ? 0 : 1);   /* FAIL: cap passed as done */
+    _exit(7);
+}
+
 static void test_preexisting_threads(void)
 {
     printf("\n=== audit 42: threads started before the sandbox ===\n");
@@ -779,6 +871,11 @@ static void test_preexisting_threads(void)
                      test_thread_seccomp_child);
     run_thread_child("sandbox_audit42.preexisting_thread_landlock",
                      test_thread_landlock_child);
+    printf("\n=== audit 43: the per-thread sync fails closed ===\n");
+    run_thread_child("sandbox_audit43.sigpending_exhausted",
+                     test_sigpending_child);
+    run_thread_child("sandbox_audit43.round_cap_fails",
+                     test_round_cap_child);
 }
 #endif /* HAS_PLEDGE_MODE */
 

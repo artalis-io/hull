@@ -1331,8 +1331,14 @@ static int hl_js_settle_module(HlJS *js, JSValue val)
  * lenient, bounded drain) evaluates no real app run. */
 static void js_toplevel_begin(HlJS *js)
 {
-    if (!js->manifest_extract_lenient)
+    if (!js->manifest_extract_lenient) {
         hl_js_run_tag_new(js);
+        /* The top level's wall-clock deadline, as Lua's load has (audit
+         * 43): it ran with none, its only bound the instruction count. In
+         * the runners it is polled, not watched by a thread, until the
+         * phase-2 sandbox is in place (cap/run_watchdog.h). */
+        hl_run_watch_arm(&js->run_watch, hl_run_watchdog_limit_ms(HL_RUN_ENTRY));
+    }
 }
 
 int hl_js_load_app(HlJS *js, const char *filename)

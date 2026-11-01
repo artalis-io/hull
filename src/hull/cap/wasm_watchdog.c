@@ -27,6 +27,7 @@
 
 #include "hull/cap/wasm_watchdog.h"
 #include "hull/limits/wasm.h"
+#include "hull/shared/host.h"
 #include "log.h"
 #include "wasm_export.h"
 
@@ -43,6 +44,8 @@ static HlWasmWatch    *g_head;          /* armed watches */
 static uint64_t        g_wake_ms;       /* when the thread next wakes (0 = idle) */
 static int             g_started;       /* thread running (under g_mu) */
 static int             g_start_failed;
+static int             g_quit;          /* hl_wasm_watchdog_quiesce: exit */
+static pthread_t       g_thread;        /* joinable, for the quiesce */
 #if !defined(__APPLE__)
 static int             g_cv_monotonic;  /* g_cv's timed wait uses CLOCK_MONOTONIC */
 #endif
@@ -123,6 +126,7 @@ static void *watchdog_main(void *arg)
     (void)arg;
     pthread_mutex_lock(&g_mu);
     for (;;) {
+        if (g_quit) break;              /* hl_wasm_watchdog_quiesce */
         uint64_t now = now_ms();
         uint64_t next = 0;
         int running_expired = 0;
@@ -150,6 +154,7 @@ static void *watchdog_main(void *arg)
         g_wake_ms = next;
         wait_locked(next);
     }
+    pthread_mutex_unlock(&g_mu);
     return NULL;
 }
 
@@ -181,7 +186,8 @@ static int ensure_started_locked(void)
         g_start_failed = 1;
         return -1;
     }
-    pthread_attr_setdetachstate(&ta, PTHREAD_CREATE_DETACHED);
+    /* Joinable: hl_wasm_watchdog_quiesce stops it before the phase-2
+     * sandbox (audit 43). */
     rc = pthread_create(&th, &ta, watchdog_main, NULL);
     pthread_attr_destroy(&ta);
     if (rc != 0) {
@@ -191,6 +197,7 @@ static int ensure_started_locked(void)
                   "compute calls are refused", rc);
         return -1;
     }
+    g_thread = th;
     g_started = 1;
     return 0;
 }
@@ -290,6 +297,43 @@ void *hl_wasm_watch_instantiate_capped(HlWasmWatch *w, void *module,
         (wasm_module_t)module, &args, error_buf, error_buf_size);
     tl_pending = saved;
     return inst;
+}
+
+/* Audit 43: a thread that exists when the phase-2 sandbox applies keeps its
+ * phase-1 permissions on a cosmo APE (Cosmopolitan's libc pledge / unveil
+ * reach the calling thread only), and this one starts as soon as the app's
+ * top level runs guest code (compute.instance / compute.call at load). The
+ * runners stop it here, just before phase 2; the next arm starts a new one,
+ * inside the sandbox. Called on the event-loop thread at that boundary only,
+ * when no guest code runs. */
+void hl_wasm_watchdog_quiesce(void)
+{
+    pthread_mutex_lock(&g_mu);
+    if (!g_started) {
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
+    if (g_head) {
+        /* A watch is armed: guest code is running somewhere. Not expected at
+         * the boundary; the thread stays (the sandbox check reports it). */
+        pthread_mutex_unlock(&g_mu);
+        log_warn("[wasm] watchdog busy at the sandbox boundary; left running");
+        return;
+    }
+    int before = hl_host_thread_count();
+    pthread_t th = g_thread;
+    g_quit = 1;
+    pthread_cond_signal(&g_cv);
+    pthread_mutex_unlock(&g_mu);
+    pthread_join(th, NULL);
+    pthread_mutex_lock(&g_mu);
+    g_quit = 0;
+    g_started = 0;
+    g_wake_ms = 0;
+    pthread_cond_destroy(&g_cv);
+    pthread_mutex_unlock(&g_mu);
+    /* The kernel lists a joined thread for a moment longer. */
+    if (before > 0) (void)hl_host_wait_thread_count(before - 1, 200);
 }
 
 #endif /* HL_ENABLE_WASM */

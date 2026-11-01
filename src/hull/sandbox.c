@@ -1247,6 +1247,42 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         return 0;
     }
 
+#if defined(__COSMOPOLITAN__)
+    /* Cosmopolitan's libc pledge() / unveil() install the seccomp filter and
+     * the Landlock domain on the CALLING thread only (vendor/pledge's TSYNC
+     * patches are for the native build; Hull does not patch cosmo's libc). A
+     * thread that exists now would keep the phase-1 permissions for good, and
+     * threads share one address space. The runners start no thread before
+     * phase 2 (the worker pool on first submit, the watchdogs deferred /
+     * stopped - audit 43), so more than one here is a thread something else
+     * started: an incomplete backend, which fails closed like a kernel
+     * without Landlock. A joined thread stays listed for a moment, hence the
+     * short wait. */
+    if (IsLinux()) {
+        int nthreads = hl_host_wait_thread_count(1, 100);
+        if (nthreads != 1) {
+            char nthr[32];
+            if (nthreads < 0)
+                snprintf(nthr, sizeof nthr, "an unknown number of threads "
+                         "(/proc/self/task unreadable)");
+            else
+                snprintf(nthr, sizeof nthr, "%d threads", nthreads);
+            if (!policy->allow_degraded) {
+                log_error("[sandbox] this process has %s when the sandbox "
+                          "applies, and a Cosmopolitan build's pledge / unveil "
+                          "confine only the calling thread - refusing to report "
+                          "a full sandbox. Use a native Linux build of hull "
+                          "(its sandbox reaches every thread), or "
+                          "--allow-degraded-sandbox", nthr);
+                return -1;
+            }
+            log_warn("[sandbox] DEGRADED: %s at sandbox time; only this one "
+                     "is confined (Cosmopolitan pledge / unveil are "
+                     "per-thread)", nthr);
+        }
+    }
+#endif
+
 #ifdef __linux__
     int landlock_abi = linux_landlock_abi();
     if (landlock_abi < 1 && !policy->allow_degraded) {

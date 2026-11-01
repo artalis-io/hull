@@ -2456,6 +2456,23 @@ without Landlock, is the opposite case and still fails closed unless
 `__APPLE__` one, so an APE on macOS does not reach Seatbelt - giving it one is a
 tracked follow-up, and would add protection rather than only honesty.
 
+**No thread may exist when phase 2 applies (audit 43).** The kernel attaches a
+seccomp filter and a Landlock domain per thread. The native Linux build reaches
+threads that already exist (vendor/pledge patches 0003 / 0004: seccomp TSYNC,
+Landlock TSYNC or per-thread self-restriction, a thread it cannot confirm -
+send failed other than ESRCH, no answer, round cap hit - counted and refused
+unless `--allow-degraded-sandbox`), but a cosmo APE's libc pledge / unveil
+confine the CALLING thread only. So the runners start no thread before phase 2:
+the worker pool on first submit, the run watchdog deferred
+(`hl_run_watchdog_defer` before load, `hl_run_watchdog_release` after phase 2;
+the top level's deadline is polled by `hl_run_watch_stopped` meanwhile), and the
+WASM watchdog a top-level `compute.*` call started stopped and joined
+(`hl_wasm_watchdog_quiesce`) just before it. A cosmo build on Linux refuses to
+start when `/proc/self/task` lists more than one thread at `hl_sandbox_apply`.
+A new thread a runner (or a library it initialises) starts before phase 2 must
+be deferred or joined the same way; `tests/e2e_sandbox.sh` Test 9 checks
+`threads: single` (mode 0 now means "no other thread" on a TSYNC kernel too).
+
 ### Capability Enforcement Invariants
 
 - **SQL injection impossible:** All DB access uses `sqlite3_bind_*` parameterized binding. SQL is always a literal string. A JS param is a string, number, boolean, BigInt in the int64 range, null / undefined, or an ArrayBuffer / typed array (a BLOB, its bytes copied at once); anything else throws (`hl_js_db_param_other`, both the event loop's and the worker VM's binding - audit 23: an object, a Date or a buffer bound NULL, silently).

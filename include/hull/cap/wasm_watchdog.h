@@ -74,6 +74,11 @@ void *hl_wasm_watch_instantiate_capped(HlWasmWatch *w, void *module,
                                        uint32_t max_memory_pages,
                                        char *error_buf, uint32_t error_buf_size);
 
+/* Stop the watchdog thread (if any) and wait until it is gone; the next arm
+ * starts a new one. The runners call it just before the phase-2 sandbox, so
+ * no thread started by the app's top level outlives into it (audit 43). */
+void hl_wasm_watchdog_quiesce(void);
+
 /* Effective timeout: @p ms when non-zero, else the default, clamped to the
  * compile-time maximum. */
 uint32_t hl_wasm_timeout_resolve(uint64_t ms);
