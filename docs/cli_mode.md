@@ -77,6 +77,12 @@ app.main(async (ctx) => {
 });
 ```
 
+`ctx.stdin`'s read blocks until the terminal or the pipe answers, with no
+deadline. That is fine in app.main, which holds nothing else up, so a read is
+allowed only in app.main's own code: from a request handler, a timer or a task
+(a `ctx` kept past main) it raises. Writes and flushes work anywhere and are
+charged to the run's instruction budget like any other output (audit 41).
+
 ### Where `ctx.args` comes from
 
 Under `hull`, the first bare word is the entry file and the app's arguments go

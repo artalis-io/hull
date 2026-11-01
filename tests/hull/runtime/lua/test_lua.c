@@ -15577,4 +15577,207 @@ UTEST(lua_audit41, compute_stream_output_is_charged)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* ── Audit 41: round trips, log records, ctx output, small crypto ─────
+ *
+ * A kv command paid only its reply chunks (~1 unit for a ~100 us round
+ * trip), kv.open nothing, a log record or print only its bytes, ctx.stdout
+ * / ctx.stderr writes nothing at all, and a small crypto call or sync
+ * smtp.send nothing past its bytes. Each has a per-call floor now
+ * (hull/shared/work_charge.h): a loop trips a small budget, pcall does not
+ * catch it, and ordinary use still fits. */
+
+#include "../../fake_resp.h"
+
+/* Point stdout at /dev/null while a test writes megabytes to it. */
+#include <fcntl.h>
+static int a41_stdout_mute(void)
+{
+    fflush(stdout);
+    int saved = dup(1);
+    int nul = open("/dev/null", O_WRONLY);
+    if (nul >= 0) { dup2(nul, 1); close(nul); }
+    return saved;
+}
+static void a41_stdout_restore(int saved)
+{
+    fflush(stdout);
+    if (saved >= 0) { dup2(saved, 1); close(saved); }
+}
+
+UTEST(lua_audit41, floors_are_the_measured_cost)
+{
+    EXPECT_GE(hl_work_kv_command_units(0), 6000u);
+    EXPECT_GE((uint64_t)HL_WORK_KV_OPEN_UNITS, 16000u);
+    EXPECT_GE((uint64_t)HL_WORK_NET_SQL_UNITS, 6000u);
+    EXPECT_GE(hl_work_log_record_units(0), 100u);
+    EXPECT_GE(hl_work_crypto_units(0), 64u);
+    EXPECT_GE((uint64_t)HL_WORK_SMTP_SEND_UNITS, 16000u);
+}
+
+UTEST(lua_audit41, log_and_print_have_a_floor)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    log_set_quiet(true);
+    static const char *const loops[] = {
+        "local log = require('hull.log') for i = 1, 10000 do log.info('') end return 1",
+        "local log = require('hull.log') for i = 1, 10000 do log.debug('') end return 1",
+        "local log = require('hull.log') for i = 1, 100000 do log.info() end return 1",
+        "local log = require('hull.log') "
+        "for i = 1, 10000 do pcall(log.info, '', '', '', '') end return 1",
+        "for i = 1, 10000 do print('') end return 1",
+        "for i = 1, 10000 do pcall(print) end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 1000000, err, sizeof err), LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    EXPECT_EQ(audit10_run("local log = require('hull.log') "
+                          "for i = 1, 100 do log.info('a', 'b') print('c', 1) end return 1",
+                          1000000, err, sizeof err), LUA_OK);
+    log_set_quiet(false);
+    cleanup_lua_caps();
+}
+
+UTEST(lua_audit41, small_crypto_calls_have_a_floor)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    static const char *const loops[] = {
+        "for i = 1, 100000 do crypto.sha256('') end return 1",
+        "for i = 1, 100000 do crypto.sha1('') end return 1",
+        "for i = 1, 100000 do crypto.sha512('') end return 1",
+        "for i = 1, 100000 do crypto.random(1) end return 1",
+        "for i = 1, 100000 do crypto.random_token(1) end return 1",
+        "for i = 1, 100000 do crypto.hmac_sha256('', 'k') end return 1",
+        "for i = 1, 100000 do crypto.create_sha256() end return 1",
+        "for i = 1, 100000 do pcall(crypto.create_sha256().digest) end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 1000000, err, sizeof err), LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    EXPECT_EQ(audit10_run("for i = 1, 1000 do crypto.sha256('x') crypto.random_token(16) "
+                          "crypto.hmac_sha256('m', 'k') "
+                          "local h = crypto.create_sha256() h:update('x') h:digest() "
+                          "end return 1",
+                          1000000, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+}
+
+/* ctx.stdout / ctx.stderr writes and flushes were not charged at all, and
+ * ctx is a table app.main can keep for request handlers; ctx.stdin:read()
+ * blocked the loop with no deadline from there. Writes are charged, and a
+ * read outside app.main's own code is refused. */
+UTEST(lua_audit41, ctx_output_is_charged_and_stdin_is_mains)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    ASSERT_EQ(luaL_dostring(lua_rt.L, "app.main(function(ctx) SAVED = ctx return 0 end)"),
+              LUA_OK);
+    int exit_code = 99;
+    ASSERT_EQ(hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    ASSERT_EQ(exit_code, 0);
+    static const char *const loops[] = {
+        "for i = 1, 100000 do SAVED.stderr:write('') end return 1",
+        "for i = 1, 100000 do SAVED.stdout:write('', '') end return 1",
+        "local big = string.rep('x', 1048576) "
+        "for i = 1, 100 do SAVED.stdout:write(big, big) end return 1",
+        "for i = 1, 100000 do SAVED.stderr:flush() end return 1",
+    };
+    int muted = a41_stdout_mute();
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 1000000, err, sizeof err), LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    a41_stdout_restore(muted);
+    EXPECT_EQ(audit10_run("for i = 1, 100 do SAVED.stderr:write('') SAVED.stderr:flush() end "
+                          "return 1", 1000000, err, sizeof err), LUA_OK);
+    /* Outside app.main: refused before it reads. */
+    EXPECT_NE(audit10_run("return SAVED.stdin:read()", 1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "only available in app.main"), NULL);
+    cleanup_lua_caps();
+}
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+UTEST(lua_audit41, sync_smtp_send_has_a_floor)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlSmtpConfig smtp = {0};
+    lua_rt.base.smtp_cfg = &smtp;
+    char err[512];
+    log_set_quiet(true);
+    /* host_not_allowed returns at once: the floor is paid before it. */
+    static const char *const o =
+        "local o = { host = 'mail.invalid', from = 'a@x.test', to = 'b@x.test', "
+        "            subject = 's', body = 'b' } ";
+    char code[512];
+    snprintf(code, sizeof code, "%s for i = 1, 1000 do smtp.send(o) end return 1", o);
+    EXPECT_NE(audit10_run(code, 1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    snprintf(code, sizeof code, "%s for i = 1, 10 do smtp.send(o) end return 1", o);
+    EXPECT_EQ(audit10_run(code, 1000000, err, sizeof err), LUA_OK);
+    log_set_quiet(false);
+    lua_rt.base.smtp_cfg = NULL;
+    cleanup_lua_caps();
+}
+#endif
+
+/* kv.open is charged before the policy-checked DSN is dialed - on a build
+ * with no KV backend too, where the open then fails at once. */
+UTEST(lua_audit41, kv_open_and_commands_have_a_floor)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    static HlManifestKvDynamic pol = {
+        .hosts = { "127.0.0.1" }, .host_count = 1,
+        .schemes = { "redis" }, .scheme_count = 1, .declared = 1,
+    };
+    lua_rt.base.kv_policy = &pol;
+    lua_State *L = lua_rt.L;
+    lua_pushcfunction(L, hl_lua_require_trusted);
+    lua_pushstring(L, "hull.kv._native");
+    ASSERT_EQ(lua_pcall(L, 1, 1, 0), LUA_OK);
+    lua_setglobal(L, "KVN");
+    char err[512];
+    EXPECT_NE(audit10_run("for i = 1, 100 do pcall(KVN.open, 'redis://127.0.0.1:1') end "
+                          "return 1", 1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    EXPECT_EQ(audit10_run("for i = 1, 10 do pcall(KVN.open, 'redis://127.0.0.1:1') end "
+                          "return 1", 1000000, err, sizeof err), LUA_OK);
+#ifdef HL_ENABLE_VALKEY
+    /* Commands against a server: each pays a round trip's floor. */
+    HlFakeResp srv;
+    ASSERT_EQ(fake_resp_start(&srv), 0);
+    char code[512];
+    snprintf(code, sizeof code, "K = KVN.open('redis://127.0.0.1:%d') return 1", srv.port);
+    ASSERT_EQ_MSG(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+    static const char *const loops[] = {
+        "for i = 1, 1000 do K:get('a') end return 1",
+        "for i = 1, 1000 do K:set('a', 'x') end return 1",
+        "for i = 1, 1000 do K:has('a') end return 1",
+        "for i = 1, 1000 do K:del('a') end return 1",
+        "for i = 1, 1000 do pcall(K.get, K, 'a') end return 1",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++) {
+        EXPECT_NE_MSG(audit10_run(loops[i], 1000000, err, sizeof err), LUA_OK, loops[i]);
+        EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, loops[i]);
+    }
+    EXPECT_EQ_MSG(audit10_run("for i = 1, 10 do assert(K:get('a') == 'x') K:set('a', 'x') end "
+                              "K:close() return 1", 1000000, err, sizeof err), LUA_OK, err);
+    snprintf(code, sizeof code, "for i = 1, 100 do KVN.open('redis://127.0.0.1:%d'):close() "
+             "end return 1", srv.port);
+    EXPECT_NE(audit10_run(code, 1000000, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "instruction limit"), NULL);
+    lua_gc(L, LUA_GCCOLLECT);   /* anything the trip left open */
+    fake_resp_stop(&srv);
+#endif
+    lua_rt.base.kv_policy = NULL;
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();

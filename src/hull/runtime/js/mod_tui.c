@@ -91,10 +91,15 @@ static JSValue js_tui_enter(JSContext *ctx, JSValueConst this_val,
 static JSValue js_tui_leave(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    (void)this_val; (void)argc; (void)argv;
     if (g_ctx) {
         hl_cap_tui_release(g_ctx);
         g_ctx = NULL;
+        /* The restore, tcsetattr and tty close (audit 41: a leave / enter
+         * loop paid only the enter). Charged after the release, so a trip
+         * never leaves the terminal in raw mode. */
+        if (hl_js_budget_charge(ctx, HL_WORK_TUI_LEAVE_UNITS) < 0)
+            return JS_EXCEPTION;
     }
     return JS_UNDEFINED;
 }
@@ -643,6 +648,9 @@ static JSValue js_tui_clipboard_set(JSContext *ctx, JSValueConst this_val,
     {                                                                   \
         (void)this_val;                                                 \
         if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;             \
+        /* a tty write (audit 41) */                                    \
+        if (hl_js_budget_charge(ctx, HL_WORK_TUI_TOGGLE_UNITS) < 0)     \
+            return JS_EXCEPTION;                                        \
         int on = (argc >= 1) ? JS_ToBool(ctx, argv[0]) : 0;             \
         CFUNC(g_ctx, on);                                               \
         return JS_UNDEFINED;                                            \

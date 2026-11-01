@@ -225,7 +225,10 @@ static int lua_smtp_send(lua_State *L)
      * pcall'd loop of sends refused at admission copied the message on
      * every call, uncharged). */
     size_t copy_bytes = hl_smtp_message_bytes(&msg);
-    if (hl_lua_budget_charge(L, (int64_t)hl_work_bytes_units(copy_bytes))) {
+    /* Plus the send itself - DNS, connect, TLS and the conversation - as
+     * an HTTP request is (audit 41). */
+    if (hl_lua_budget_charge(L, (int64_t)(HL_WORK_SMTP_SEND_UNITS +
+                                          hl_work_bytes_units(copy_bytes)))) {
         smtp_scratch_release(lua, scratch_mark);
         return hl_lua_budget_raise(L);
     }

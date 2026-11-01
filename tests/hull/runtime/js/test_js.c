@@ -16313,4 +16313,188 @@ UTEST(js_audit41, compute_stream_output_is_charged)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* ── Audit 41: round trips, log records, ctx output, small crypto ─────
+ *
+ * The twins of lua_audit41: a kv command paid only its reply chunks,
+ * kv.open nothing, a log / console record only its bytes, ctx.stdout /
+ * ctx.stderr writes nothing, and a small crypto call or sync smtp.send
+ * nothing past its bytes. Each has a per-call floor now. */
+
+#include "../../fake_resp.h"
+#include "hull/shared/work_charge.h"
+
+/* Point stdout at /dev/null while a test writes megabytes to it. */
+#include <fcntl.h>
+static int a41_stdout_mute(void)
+{
+    fflush(stdout);
+    int saved = dup(1);
+    int nul = open("/dev/null", O_WRONLY);
+    if (nul >= 0) { dup2(nul, 1); close(nul); }
+    return saved;
+}
+static void a41_stdout_restore(int saved)
+{
+    fflush(stdout);
+    if (saved >= 0) { dup2(saved, 1); close(saved); }
+}
+
+UTEST(js_audit41, log_and_console_have_a_floor)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    log_set_quiet(true);
+    EXPECT_EQ(a10_run_tripped(
+        "import { log } from 'hull:log';\n"
+        "for (let i = 0; i < 10000; i++) log.info('');", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "import { log } from 'hull:log';\n"
+        "for (let i = 0; i < 100000; i++) log.debug();", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 10000; i++) console.log('');", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 1000; i++) "
+        "  try { console.log('', '', '', '', '', '', '', ''); } catch (e) {}", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "import { log } from 'hull:log';\n"
+        "for (let i = 0; i < 100; i++) { log.info('a', 'b'); console.log('c', 1); }",
+        1000000), 0);
+    log_set_quiet(false);
+    cleanup_js_caps();
+}
+
+UTEST(js_audit41, small_crypto_calls_have_a_floor)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static const char *const loops[] = {
+        "for (let i = 0; i < 100000; i++) crypto.sha256('');",
+        "for (let i = 0; i < 100000; i++) crypto.sha1('');",
+        "for (let i = 0; i < 100000; i++) crypto.sha512('');",
+        "for (let i = 0; i < 100000; i++) crypto.random(1);",
+        "for (let i = 0; i < 100000; i++) crypto.randomToken(1);",
+        "for (let i = 0; i < 100000; i++) crypto.hmacSha256('', 'k');",
+        "for (let i = 0; i < 100000; i++) crypto.createSha256();",
+        "for (let i = 0; i < 100000; i++) try { crypto.createSha256().digest(); } catch (e) {}",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++)
+        EXPECT_EQ_MSG(a10_run_tripped(loops[i], 1000000), 1, loops[i]);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 1000; i++) { crypto.sha256('x'); crypto.randomToken(16);"
+        "  crypto.hmacSha256('m', 'k');"
+        "  const h = crypto.createSha256(); h.update('x'); h.digest(); }", 2000000), 0);
+    cleanup_js_caps();
+}
+
+/* ctx.stdout / ctx.stderr writes and flushes were not charged, and a ctx
+ * kept past app.main reached request handlers, where ctx.stdin.read()
+ * blocked the loop with no deadline. */
+UTEST(js_audit41, ctx_output_is_charged_and_stdin_is_mains)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main((ctx) => { globalThis.SAVED = ctx; return 0; });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int exit_code = 99;
+    ASSERT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    ASSERT_EQ(exit_code, 0);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 100000; i++) SAVED.stderr.write('');", 1000000), 1);
+    int muted = a41_stdout_mute();
+    EXPECT_EQ(a10_run_tripped(
+        "const big = 'x'.repeat(1048576);\n"
+        "for (let i = 0; i < 100; i++) SAVED.stdout.write(big, big);", 1000000), 1);
+    a41_stdout_restore(muted);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 100000; i++) SAVED.stderr.flush();", 1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 100; i++) { SAVED.stderr.write(''); SAVED.stderr.flush(); }",
+        1000000), 0);
+    EXPECT_EQ(eval_int("(() => { try { SAVED.stdin.read(); return 0; } catch (e) {"
+                       "  return /only available in app.main/.test(e.message) ? 1 : 2; } })()"),
+              1);
+    cleanup_js_caps();
+}
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+UTEST(js_audit41, sync_smtp_send_has_a_floor)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlSmtpConfig smtp = {0};
+    js.base.smtp_cfg = &smtp;
+    log_set_quiet(true);
+    static const char *const pre =
+        "const o = { host: 'mail.invalid', from: 'a@x.test', to: 'b@x.test', "
+        "            subject: 's', body: 'b' };\n";
+    char code[512];
+    snprintf(code, sizeof code, "%sfor (let i = 0; i < 1000; i++) smtp.send(o);", pre);
+    EXPECT_EQ(a10_run_tripped(code, 1000000), 1);
+    snprintf(code, sizeof code, "%sfor (let i = 0; i < 10; i++) smtp.send(o);", pre);
+    EXPECT_EQ(a10_run_tripped(code, 1000000), 0);
+    log_set_quiet(false);
+    js.base.smtp_cfg = NULL;
+    cleanup_js_caps();
+}
+#endif
+
+UTEST(js_audit41, kv_open_and_commands_have_a_floor)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    static HlManifestKvDynamic pol = {
+        .hosts = { "127.0.0.1" }, .host_count = 1,
+        .schemes = { "redis" }, .scheme_count = 1, .declared = 1,
+    };
+    js.base.kv_policy = &pol;
+    /* Only a hull: module may import the internal kv binding: the harness
+     * evaluates its own, from C. */
+    static const char *KV =
+        "import { open } from 'hull:kv:_native';\n"
+        "globalThis.KVN = open;\n";
+    JSValue v = JS_Eval(js.ctx, KV, strlen(KV), "hull:__a41_kv", JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("typeof KVN === 'function' ? 1 : 0"), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 100; i++) try { KVN('redis://127.0.0.1:1'); } catch (e) {}",
+        1000000), 1);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 10; i++) try { KVN('redis://127.0.0.1:1'); } catch (e) {}",
+        1000000), 0);
+#ifdef HL_ENABLE_VALKEY
+    HlFakeResp srv;
+    ASSERT_EQ(fake_resp_start(&srv), 0);
+    char code[512];
+    snprintf(code, sizeof code, "globalThis.K = KVN('redis://127.0.0.1:%d');", srv.port);
+    EXPECT_EQ(a10_run_tripped(code, 0), 0);
+    ASSERT_EQ(eval_int("typeof K === 'object' ? 1 : 0"), 1);
+    static const char *const loops[] = {
+        "for (let i = 0; i < 1000; i++) K.get('a');",
+        "for (let i = 0; i < 1000; i++) K.set('a', 'x');",
+        "for (let i = 0; i < 1000; i++) K.has('a');",
+        "for (let i = 0; i < 1000; i++) K.del('a');",
+        "for (let i = 0; i < 1000; i++) try { K.get('a'); } catch (e) {}",
+    };
+    for (size_t i = 0; i < sizeof loops / sizeof loops[0]; i++)
+        EXPECT_EQ_MSG(a10_run_tripped(loops[i], 1000000), 1, loops[i]);
+    EXPECT_EQ(a10_run_tripped(
+        "for (let i = 0; i < 10; i++) {"
+        "  if (new Uint8Array(K.get('a'))[0] !== 120) throw new Error('get');"
+        "  K.set('a', 'x'); }\n"
+        "K.close();", 1000000), 0);
+    snprintf(code, sizeof code,
+             "for (let i = 0; i < 100; i++) KVN('redis://127.0.0.1:%d').close();", srv.port);
+    EXPECT_EQ(a10_run_tripped(code, 1000000), 1);
+    JS_RunGC(js.rt);   /* anything the trip left open */
+    fake_resp_stop(&srv);
+#endif
+    js.base.kv_policy = NULL;
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

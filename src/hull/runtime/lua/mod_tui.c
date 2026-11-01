@@ -89,10 +89,13 @@ static int lua_tui_enter(lua_State *L)
 
 static int lua_tui_leave(lua_State *L)
 {
-    (void)L;
     if (g_ctx) {
         hl_cap_tui_release(g_ctx);
         g_ctx = NULL;
+        /* The restore, tcsetattr and tty close (audit 41: a leave / enter
+         * loop paid only the enter). Charged after the release, so a trip
+         * never leaves the terminal in raw mode. */
+        lua_hlwork(L, HL_WORK_TUI_LEAVE_UNITS, 0);
     }
     return 0;
 }
@@ -530,6 +533,7 @@ static int lua_tui_clipboard_set(lua_State *L)
 static int lua_tui_enable_mouse(lua_State *L)
 {
     ensure_acquired(L);
+    lua_hlwork(L, HL_WORK_TUI_TOGGLE_UNITS, 0);   /* a tty write (audit 41) */
     int on = lua_toboolean(L, 1);
     hl_cap_tui_enable_mouse(g_ctx, on);
     return 0;
@@ -538,6 +542,7 @@ static int lua_tui_enable_mouse(lua_State *L)
 static int lua_tui_enable_paste(lua_State *L)
 {
     ensure_acquired(L);
+    lua_hlwork(L, HL_WORK_TUI_TOGGLE_UNITS, 0);   /* a tty write (audit 41) */
     int on = lua_toboolean(L, 1);
     hl_cap_tui_enable_paste(g_ctx, on);
     return 0;
@@ -546,6 +551,7 @@ static int lua_tui_enable_paste(lua_State *L)
 static int lua_tui_enable_focus(lua_State *L)
 {
     ensure_acquired(L);
+    lua_hlwork(L, HL_WORK_TUI_TOGGLE_UNITS, 0);   /* a tty write (audit 41) */
     int on = lua_toboolean(L, 1);
     hl_cap_tui_enable_focus(g_ctx, on);
     return 0;
@@ -554,6 +560,7 @@ static int lua_tui_enable_focus(lua_State *L)
 static int lua_tui_enable_kitty_kbd(lua_State *L)
 {
     ensure_acquired(L);
+    lua_hlwork(L, HL_WORK_TUI_TOGGLE_UNITS, 0);   /* a tty write (audit 41) */
     int on = lua_toboolean(L, 1);
     hl_cap_tui_enable_kitty_kbd(g_ctx, on);
     return 0;

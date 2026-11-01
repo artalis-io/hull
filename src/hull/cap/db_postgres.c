@@ -521,10 +521,23 @@ static int pg_query_raw(HlDbHandle *h, const char *sql,
     return 0;
 }
 
+/* The per-statement floor (audit 41), before anything is sent: a
+ * refused statement never reached the server. */
+static int pg_charge(HlDbHandle *h, const char *sql)
+{
+    if (hl_db_net_stmt_charge(sql_is_rollback(sql)) == 0) return 0;
+    if (h && h->ctx)
+        snprintf(((HlDbPgCtx *)h->ctx)->conn.errmsg,
+                 sizeof ((HlDbPgCtx *)h->ctx)->conn.errmsg,
+                 "interrupted (instruction limit exceeded)");
+    return -1;
+}
+
 static int pg_query(HlDbHandle *h, const char *sql,
                     const HlValue *params, int nparams,
                     HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
 {
+    if (pg_charge(h, sql) != 0) return -1;
     int rc = pg_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
     if (h) pg_track_session(h->ctx, sql, rc);
     return rc;
@@ -541,6 +554,7 @@ static int pg_exec(HlDbHandle *h, const char *sql,
 static int pg_exec_script(HlDbHandle *h, const char *sql)
 {
     if (!h || !h->ctx) return -1;
+    if (pg_charge(h, sql) != 0) return -1;
     HlDbPgCtx *s = h->ctx;
     int ready = pg_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;

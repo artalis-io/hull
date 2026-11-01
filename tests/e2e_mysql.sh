@@ -1147,6 +1147,16 @@ docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw -e "SET GLOBAL autocommit 
 [ "$a41fail" = 0 ] || exit 1
 echo "PASS: a lost session refuses calls instead of reconnecting into autocommit; -- comments, failed CALLs and global autocommit off (MySQL)"
 rm -rf "$A41DIR"
+# ── audit 41: every statement pays a round trip's floor (MySQL) ──
+echo "=== audit 41: a SELECT 1 loop trips a small budget (both runtimes) ==="
+A41DIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_sql_floor_audit41.sh"
+if db_sql_floor_audit41 ./build/hull "$DSN" "$A41DIR" mysql; then
+    echo "PASS: a network statement is charged before it is sent (MySQL)"
+    rm -rf "$A41DIR"
+else
+    exit 1
+fi
 
 # The TLS + caching_sha2_password phase below is MySQL-8-specific (caching_sha2
 # full auth). SKIP_TLS=1 stops here after the plaintext phases - used for the

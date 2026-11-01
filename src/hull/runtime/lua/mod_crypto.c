@@ -38,7 +38,11 @@
  * allocates, so the raise leaks nothing. */
 static void crypto_charge(lua_State *L, size_t n)
 {
-    lua_hlwork(L, n / 8, 0);
+    /* Plus a per-call floor (audit 41): an empty digest, a MAC or a random
+     * draw is ~0.2-1.2 us of setup whatever its size, and charged 0 units
+     * a loop of them ran 4-18 s per budget. */
+    uint64_t u = hl_work_crypto_units(n);
+    lua_hlwork(L, u > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)u, 0);
 }
 
 /* Charge a key derivation of @p rounds rounds at @p per_round units each,
@@ -149,6 +153,7 @@ static int lua_crypto_random(lua_State *L)
     lua_Integer n = luaL_checkinteger(L, 1);
     if (n <= 0 || n > HL_RANDOM_MAX_BYTES)
         return luaL_error(L, "random bytes must be 1-%d", HL_RANDOM_MAX_BYTES);
+    crypto_charge(L, (size_t)n);   /* audit 41 */
 
     /* On the VM heap, not the scratch arena: the arena is reset only when
      * a run starts, so 160 calls of 64 KiB in one run filled it and every
@@ -174,6 +179,7 @@ static int lua_crypto_random_token(lua_State *L)
         return luaL_error(L, "crypto.random_token: format must be \"base64url\" or \"hex\"");
     if (n <= 0 || n > HL_RANDOM_TOKEN_MAX)
         return luaL_error(L, "crypto.random_token: bytes must be 1-%d", HL_RANDOM_TOKEN_MAX);
+    crypto_charge(L, (size_t)n);   /* audit 41 */
 
     uint8_t raw[HL_RANDOM_TOKEN_MAX];
     char out[HL_RANDOM_TOKEN_MAX * 2 + 1];
@@ -916,6 +922,7 @@ static HlLuaSha256Hasher *check_hasher(lua_State *L, int idx)
 
 static int lua_crypto_create_sha256(lua_State *L)
 {
+    crypto_charge(L, 0);   /* audit 41: the per-call floor */
     HlLuaSha256Hasher *h = (HlLuaSha256Hasher *)
         lua_newuserdatauv(L, sizeof(*h), 0);
     hl_cap_crypto_sha256_init(&h->ctx);
@@ -944,6 +951,7 @@ static int lua_sha256_hasher_digest(lua_State *L)
     HlLuaSha256Hasher *h = check_hasher(L, 1);
     if (h->done)
         return luaL_error(L, "sha256:digest() already called");
+    crypto_charge(L, 0);   /* audit 41: the per-call floor */
     uint8_t out[32];
     if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
         return luaL_error(L, "sha256:digest() failed");

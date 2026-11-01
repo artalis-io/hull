@@ -1235,10 +1235,23 @@ static void my_resume_after_implicit_commit(HlDbHandle *h, const char *sql,
     hl_db_txn_note(h, before, NULL);
 }
 
+/* The per-statement floor (audit 41), before anything is sent: a
+ * refused statement never reached the server, so no failure is noted. */
+static int my_charge(HlDbHandle *h, const char *sql)
+{
+    if (hl_db_net_stmt_charge(sql_is_rollback(sql)) == 0) return 0;
+    if (h && h->ctx)
+        snprintf(((HlDbMyCtx *)h->ctx)->conn.errmsg,
+                 sizeof ((HlDbMyCtx *)h->ctx)->conn.errmsg,
+                 "interrupted (instruction limit exceeded)");
+    return -1;
+}
+
 static int mysql_query(HlDbHandle *h, const char *sql,
                        const HlValue *params, int nparams,
                        HlRowCallback cb, void *cb_ctx, HlAllocator *alloc)
 {
+    if (my_charge(h, sql) != 0) return -1;
     int was = my_in_trans(h);
     int rc = mysql_query_raw(h, sql, params, nparams, cb, cb_ctx, alloc);
     my_track_session(h, sql, rc);
@@ -1250,6 +1263,7 @@ static int mysql_query(HlDbHandle *h, const char *sql,
 static int mysql_exec(HlDbHandle *h, const char *sql,
                       const HlValue *params, int nparams)
 {
+    if (my_charge(h, sql) != 0) return -1;
     int was = my_in_trans(h);
     int rc = mysql_exec_raw(h, sql, params, nparams);
     my_track_session(h, sql, rc);
@@ -1263,6 +1277,7 @@ static int mysql_exec_script(HlDbHandle *h, const char *sql)
     /* Migrations are multi-statement; the connection advertises
      * CLIENT_MULTI_STATEMENTS so the whole script runs as one COM_QUERY. */
     if (!h || !h->ctx) return -1;
+    if (my_charge(h, sql) != 0) return -1;
     HlDbMyCtx *s = h->ctx;
     int ready = my_ready(s, sql, h->session_pinned);
     if (ready != 0) return ready > 0 ? 0 : -1;
@@ -1292,6 +1307,7 @@ static int mysql_txn_raw(HlDbHandle *h, const char *sql)
 
 static int mysql_txn(HlDbHandle *h, const char *sql)
 {
+    if (my_charge(h, sql) != 0) return -1;
     int was = my_in_trans(h);
     int rc = mysql_txn_raw(h, sql);
     my_track_session(h, sql, rc);
