@@ -275,7 +275,7 @@ static int frame_read_some(int fd, FrameRd *r)
             r->len  = get32(r->hdr + 12);
             if (r->len > r->max) return FR_OVERSIZE;
             if (r->len > 0) {
-                r->buf = malloc(r->len);
+                r->buf = calloc(1, r->len);   /* zeroed: never read uninitialised */
                 if (!r->buf) return FR_ERROR;
             }
         }
@@ -886,13 +886,18 @@ static int supervisor_main(void)
     FrameRd r = { .max = HGC_REQ_MAX };
     for (;;) {
         int rc = frame_read(sfd, &r, 0);
-        if (rc == FR_EOF) return 0;
-        if (rc != FR_DONE) return 2;
+        if (rc != FR_DONE) {
+            frame_reset(&r);
+            return rc == FR_EOF ? 0 : 2;
+        }
         if (r.type == HGC_CANCEL) {      /* nothing running: ignore */
             frame_reset(&r);
             continue;
         }
-        if (r.type != HGC_REQ || r.len < 8) return 2;
+        if (r.type != HGC_REQ || r.len < 8) {
+            frame_reset(&r);
+            return 2;
+        }
         int gone = 0;
         uint32_t flags = 0;
         int status = sup_compile(sfd, exe, r.id, r.buf, r.len, &gone, &flags);

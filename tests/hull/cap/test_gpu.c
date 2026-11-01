@@ -3729,6 +3729,19 @@ static int ach_start(const char *hook)
     return rc;
 }
 
+/* No compile helper where GPU never runs (cap/gpu_helper.c: cosmo and
+ * Windows have no GPU backend, and an APE cannot spawn itself as the
+ * helper): hl_gpu_helper_start fails and opted-in runtime source is
+ * refused (dynamic_source_with_opt_in checks that); the supervision
+ * tests skip. */
+#if defined(__COSMOPOLITAN__) || defined(_WIN32)
+#define AGH_NO_HELPER 1
+#define AGH_NEED_HELPER() \
+    UTEST_SKIP("no GPU compile helper on this platform (GPU is native-only)")
+#else
+#define AGH_NEED_HELPER() do { } while (0)
+#endif
+
 static HlGpuCtx *ac_ctx(HlGpuBackend *be, HlVfs *vfs)
 {
     *be = MOCK_BACKEND;
@@ -3808,6 +3821,17 @@ UTEST(hull_cap_gpu_audit_convergence, dynamic_source_with_opt_in)
               AC_OTHER, strlen(AC_OTHER)));
     EXPECT_STREQ("shader_helper_failed", hl_gpu_compile_errstr(HL_GPU_ERR_HELPER));
     EXPECT_EQ(0, mock_compiles);
+#ifdef AGH_NO_HELPER
+    /* No helper on this platform: it never starts, and opted-in runtime
+     * source is refused with shader_helper_failed, never hung on. */
+    EXPECT_EQ(-1, ach_start("accept"));
+    EXPECT_EQ(0, hl_gpu_helper_running());
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "other",
+              AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(0, mock_compiles);
+    mock_free(ctx);
+    return;
+#endif
     ASSERT_EQ(0, ach_start("accept"));
     EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "other",
               AC_OTHER, strlen(AC_OTHER)));
@@ -3860,6 +3884,7 @@ UTEST(hull_cap_gpu_audit_convergence, dev_mode_compiles_inline_source)
  * and the call returns. Uses the round-40 slow-compile hook. */
 UTEST(hull_cap_gpu_audit_convergence, opt_in_compile_abandoned_at_deadline)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be = MOCK_BACKEND;
     be.compile = a40_slow_compile;
     be.pipeline_destroy = a40_pipeline_destroy;
@@ -4118,6 +4143,7 @@ static HlGpuCtx *agh_ctx(HlGpuBackend *be, HlVfs *vfs)
 
 UTEST(hull_cap_gpu_helper, accepted_source_compiles_and_is_cached)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4143,6 +4169,7 @@ UTEST(hull_cap_gpu_helper, accepted_source_compiles_and_is_cached)
 
 UTEST(hull_cap_gpu_helper, crash_is_an_error_not_a_crash)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4165,6 +4192,7 @@ UTEST(hull_cap_gpu_helper, crash_is_an_error_not_a_crash)
 
 UTEST(hull_cap_gpu_helper, killed_at_its_deadline)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4191,6 +4219,7 @@ UTEST(hull_cap_gpu_helper, killed_at_its_deadline)
 
 UTEST(hull_cap_gpu_helper, oversized_reply_refused)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4208,6 +4237,7 @@ UTEST(hull_cap_gpu_helper, oversized_reply_refused)
  * host could not apply it (stats.unsandboxed), the server warned instead. */
 UTEST(hull_cap_gpu_helper, worker_sandbox_denies_home_and_network)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4231,6 +4261,7 @@ UTEST(hull_cap_gpu_helper, worker_sandbox_denies_home_and_network)
 
 UTEST(hull_cap_gpu_helper, lost_supervisor_fails_closed)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4256,6 +4287,7 @@ static int agh_stop_after_polls(void *ud, int64_t units)
 
 UTEST(hull_cap_gpu_helper, stopped_run_cancels)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4287,6 +4319,7 @@ static int agh_exhausted(void *ud, int64_t units)
 
 UTEST(hull_cap_gpu_helper, floor_charged_before_round_trip)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
