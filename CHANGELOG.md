@@ -52,6 +52,16 @@ release-artifact layout).
 
 ### Fixes
 
+- **An app compiling a few helper-based GPU shaders no longer fails to load** (audit 42). The
+  audit 41 compile charge counted every word as if call-inlined code compiled as slowly as
+  written code, so an ordinary domain-warp shader (main calling `pattern()` 6 times, `pattern`
+  calling `fbm()` 5 times, `fbm` looping over a simplex noise; ~0.11 s to compile on Metal) was
+  charged ~63M of the 100M default budget. Written words and statements keep their rates; the
+  words and statements inlining adds are charged at `HL_GPU_WGSL_INLINED_WORD_UNITS` (256) and
+  `HL_GPU_WGSL_INLINED_STMT_UNITS` (64), so that shader now costs ~6.7M. A source past an inlined
+  refusal bound is still charged the extra at the written rates, and the refusal bounds are
+  unchanged.
+
 - **A planted SQLite virtual table could read `_hull_*` tables through `hull/search`** (audit 40).
   The audit 39 open-time check read only views and triggers, but a virtual table is stored as
   `type='table'`. An FTS5 table named like a search index with `content='_hull_sessions'` was

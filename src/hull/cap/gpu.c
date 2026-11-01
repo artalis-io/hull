@@ -2696,13 +2696,28 @@ uint64_t hl_gpu_wgsl_compile_units(const char *wgsl, size_t len)
          * inlined copies are independent code, and their cost is in the
          * words. */
         uint64_t words = sz.module_words, stmts = sz.module_stmts;
-        HlGpuWgslCalls calls;
-        if (hl_gpu_wgsl_calls(wgsl, len, &calls) == 0) {
-            if (calls.module_words > words) words = calls.module_words;
-            if (calls.module_stmts > stmts) stmts = calls.module_stmts;
-        }
         units = sat_mul_add(units, words, HL_GPU_WGSL_WORD_UNITS);
         units = sat_mul_add(units, stmts, HL_GPU_WGSL_STMT_UNITS);
+        /* The words and statements inlining adds past the written ones
+         * compile far faster than written code (limits/gpu.h), so they
+         * are charged at their own, lower rate (audit 42: at the written
+         * rate an ordinary helper-based shader cost half the default
+         * budget) - unless the inlined size is past a refusal bound, when
+         * the source is refused and charged at the written rate, so a
+         * refused fan-out chain still costs the whole budget. */
+        HlGpuWgslCalls calls;
+        if (hl_gpu_wgsl_calls(wgsl, len, &calls) == 0) {
+            uint64_t xw = calls.module_words > words ? calls.module_words - words : 0;
+            uint64_t xs = calls.module_stmts > stmts ? calls.module_stmts - stmts : 0;
+            /* wl_size_refusal's inlined bounds. */
+            int refused = calls.module_words > HL_GPU_WGSL_INLINED_WORDS_MAX ||
+                          calls.module_decls > HL_GPU_WGSL_INLINED_DECLS_MAX ||
+                          calls.module_stmts > HL_GPU_WGSL_INLINED_STMTS_MAX;
+            units = sat_mul_add(units, xw, refused ? HL_GPU_WGSL_WORD_UNITS
+                                                   : HL_GPU_WGSL_INLINED_WORD_UNITS);
+            units = sat_mul_add(units, xs, refused ? HL_GPU_WGSL_STMT_UNITS
+                                                   : HL_GPU_WGSL_INLINED_STMT_UNITS);
+        }
         units = sat_mul_add(units, sz.decls_sq, HL_GPU_WGSL_DECL_SQ_UNITS);
     }
     return units;
