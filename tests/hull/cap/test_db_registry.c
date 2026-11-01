@@ -16,6 +16,7 @@
 #include "hull/cap/db_sqlite.h"
 #include "hull/manifest.h"
 #include "hull/utils/env_ref.h"
+#include <ftw.h>
 #include <sqlite3.h>
 
 #include <limits.h>
@@ -364,11 +365,23 @@ static int confine_fixture(char *root, size_t rsz, char *app, size_t asz)
     return mkdir(app, 0700);
 }
 
+/* Removes a tree in C (nftw, no symlinks followed): the Cosmopolitan
+ * test environment's `rm` takes no -r, so a shelled-out `rm -rf` left the
+ * tree behind there. */
+static int rm_tree_entry(const char *path, const struct stat *sb, int flag,
+                         struct FTW *ftw)
+{
+    (void)sb; (void)ftw;
+    if (flag == FTW_DP)
+        (void)rmdir(path);
+    else
+        (void)unlink(path);
+    return 0;
+}
+
 static void rm_tree(const char *root)
 {
-    char cmd[PATH_MAX + 16];
-    snprintf(cmd, sizeof cmd, "rm -rf '%s'", root);
-    (void)system(cmd);
+    (void)nftw(root, rm_tree_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
 static HlDbHandle *get_named(const char *app, const char *dsn,
