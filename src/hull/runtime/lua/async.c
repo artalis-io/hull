@@ -18,9 +18,9 @@
 #include "hull/utils/alloc.h"
 #include "hull/cap/db_registry.h"   /* hl_db_registry_open_txn */
 #include "hull/cap/db_backend.h"    /* hl_db_txn_gen */
+#include "hull/cap/vm_thread.h"     /* the --vm-thread test hook */
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"     /* hl_db_budget_current (hull._task) */
-#include "hull/cap/vm_thread.h"     /* the --vm-thread test hook */
 #endif
 
 #include "lua.h"
