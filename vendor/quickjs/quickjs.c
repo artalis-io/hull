@@ -21974,7 +21974,7 @@ static int js_async_generator_resolve_function_create(JSContext *ctx,
     JSValue func;
 
     for(i = 0; i < 2; i++) {
-        func = js_new_cfunction_data(ctx, js_async_generator_resolve_function, 1,
+        func = js_new_cfunction_data(ctx, js_async_generator_resolve_function, 1, /* HULL PATCH 0011 */
                                    i + is_resume_next * 2, 1, &generator);
         if (JS_IsException(func)) {
             if (i == 1)
@@ -31549,7 +31549,7 @@ static void JS_LoadModuleInternal(JSContext *ctx, const char *basename,
     func_data[0] = resolving_funcs[0];
     func_data[1] = resolving_funcs[1];
     func_data[2] = func_obj;
-    evaluate_resolving_funcs[0] = js_new_cfunction_data(ctx, js_load_module_fulfilled, 0, 0, 3, func_data);
+    evaluate_resolving_funcs[0] = js_new_cfunction_data(ctx, js_load_module_fulfilled, 0, 0, 3, func_data); /* HULL PATCH 0011 */
     evaluate_resolving_funcs[1] = js_new_cfunction_data(ctx, js_load_module_rejected, 0, 0, 3, func_data);
     JS_FreeValue(ctx, func_obj);
     ret = js_promise_then(ctx, evaluate_promise, 2, (JSValueConst *)evaluate_resolving_funcs);
@@ -31913,7 +31913,7 @@ static int js_execute_async_module(JSContext *ctx, JSModuleDef *m)
     if (JS_IsException(promise))
         return -1;
     m_obj = JS_NewModuleValue(ctx, m);
-    resolve_funcs[0] = js_new_cfunction_data(ctx, js_async_module_execution_fulfilled, 0, 0, 1, (JSValueConst *)&m_obj);
+    resolve_funcs[0] = js_new_cfunction_data(ctx, js_async_module_execution_fulfilled, 0, 0, 1, (JSValueConst *)&m_obj); /* HULL PATCH 0011 */
     resolve_funcs[1] = js_new_cfunction_data(ctx, js_async_module_execution_rejected, 0, 0, 1, (JSValueConst *)&m_obj);
     ret_val = js_promise_then(ctx, promise, 2, (JSValueConst *)resolve_funcs);
     JS_FreeValue(ctx, ret_val);
@@ -40117,7 +40117,7 @@ static JSValue JS_InstantiateFunctionListItem2(JSContext *ctx, JSObject *p,
 
     switch(e->def_type) {
     case JS_DEF_CFUNC:
-        val = js_new_cfunction2(ctx, e->u.func.cfunc.generic,
+        val = js_new_cfunction2(ctx, e->u.func.cfunc.generic, /* HULL PATCH 0011 */
                                e->name, e->u.func.length, e->u.func.cproto, e->magic);
         break;
     case JS_DEF_PROP_STRING:
@@ -40195,7 +40195,7 @@ static int JS_InstantiateFunctionListItem(JSContext *ctx, JSValueConst obj,
             getter = JS_UNDEFINED;
             if (e->u.getset.get.generic) {
                 snprintf(buf, sizeof(buf), "get %s", e->name);
-                getter = js_new_cfunction2(ctx, e->u.getset.get.generic,
+                getter = js_new_cfunction2(ctx, e->u.getset.get.generic, /* HULL PATCH 0011 */
                                           buf, 0, e->def_type == JS_DEF_CGETSET_MAGIC ? JS_CFUNC_getter_magic : JS_CFUNC_getter,
                                           e->magic);
                 if (JS_IsException(getter))
@@ -40204,7 +40204,7 @@ static int JS_InstantiateFunctionListItem(JSContext *ctx, JSValueConst obj,
             setter = JS_UNDEFINED;
             if (e->u.getset.set.generic) {
                 snprintf(buf, sizeof(buf), "set %s", e->name);
-                setter = js_new_cfunction2(ctx, e->u.getset.set.generic,
+                setter = js_new_cfunction2(ctx, e->u.getset.set.generic, /* HULL PATCH 0011 */
                                           buf, 1, e->def_type == JS_DEF_CGETSET_MAGIC ? JS_CFUNC_setter_magic : JS_CFUNC_setter,
                                           e->magic);
                 if (JS_IsException(setter)) {
@@ -40288,7 +40288,7 @@ int JS_SetModuleExportList(JSContext *ctx, JSModuleDef *m,
         const JSCFunctionListEntry *e = &tab[i];
         switch(e->def_type) {
         case JS_DEF_CFUNC:
-            val = js_new_cfunction2(ctx, e->u.func.cfunc.generic,
+            val = js_new_cfunction2(ctx, e->u.func.cfunc.generic, /* HULL PATCH 0011 */
                                    e->name, e->u.func.length, e->u.func.cproto, e->magic);
             break;
         case JS_DEF_PROP_STRING:
@@ -52155,7 +52155,7 @@ static JSValue js_proxy_revoke(JSContext *ctx, JSValueConst this_val,
 static JSValue js_proxy_revoke_constructor(JSContext *ctx,
                                            JSValueConst proxy_obj)
 {
-    return js_new_cfunction_data(ctx, js_proxy_revoke, 0, 0, 1, &proxy_obj);
+    return js_new_cfunction_data(ctx, js_proxy_revoke, 0, 0, 1, &proxy_obj); /* HULL PATCH 0011 */
 }
 
 static JSValue js_proxy_revocable(JSContext *ctx, JSValueConst this_val,
@@ -54453,7 +54453,7 @@ static JSValue js_promise_executor_new(JSContext *ctx)
 
     func_data[0] = JS_UNDEFINED;
     func_data[1] = JS_UNDEFINED;
-    return js_new_cfunction_data(ctx, js_promise_executor, 2,
+    return js_new_cfunction_data(ctx, js_promise_executor, 2, /* HULL PATCH 0011 */
                                0, 2, func_data);
 }
 
@@ -54759,7 +54759,7 @@ static JSValue js_promise_all(JSContext *ctx, JSValueConst this_val,
             resolve_element_data[3] = resolving_funcs[is_promise_any];
             resolve_element_data[4] = resolve_element_env;
             resolve_element =
-                js_new_cfunction_data(ctx, js_promise_all_resolve_element, 1,
+                js_new_cfunction_data(ctx, js_promise_all_resolve_element, 1, /* HULL PATCH 0011 */
                                     magic, 5, resolve_element_data);
             if (JS_IsException(resolve_element)) {
                 JS_FreeValue(ctx, next_promise);
@@ -54768,7 +54768,7 @@ static JSValue js_promise_all(JSContext *ctx, JSValueConst this_val,
 
             if (magic == PROMISE_MAGIC_allSettled) {
                 reject_element =
-                    js_new_cfunction_data(ctx, js_promise_all_resolve_element, 1,
+                    js_new_cfunction_data(ctx, js_promise_all_resolve_element, 1, /* HULL PATCH 0011 */
                                         magic | 4, 5, resolve_element_data);
                 if (JS_IsException(reject_element)) {
                     JS_FreeValue(ctx, next_promise);
@@ -55027,10 +55027,10 @@ static JSValue js_promise_then_finally_func(JSContext *ctx, JSValueConst this_va
     if (JS_IsException(promise))
         return promise;
     if (magic == 0) {
-        then_func = js_new_cfunction_data(ctx, js_promise_finally_value_thunk, 0,
+        then_func = js_new_cfunction_data(ctx, js_promise_finally_value_thunk, 0, /* HULL PATCH 0011 */
                                         0, 1, argv);
     } else {
-        then_func = js_new_cfunction_data(ctx, js_promise_finally_thrower, 0,
+        then_func = js_new_cfunction_data(ctx, js_promise_finally_thrower, 0, /* HULL PATCH 0011 */
                                         0, 1, argv);
     }
     if (JS_IsException(then_func)) {
@@ -55061,7 +55061,7 @@ static JSValue js_promise_finally(JSContext *ctx, JSValueConst this_val,
         func_data[0] = ctor;
         func_data[1] = onFinally;
         for(i = 0; i < 2; i++) {
-            then_funcs[i] = js_new_cfunction_data(ctx, js_promise_then_finally_func, 1, i, 2, func_data);
+            then_funcs[i] = js_new_cfunction_data(ctx, js_promise_then_finally_func, 1, i, 2, func_data); /* HULL PATCH 0011 */
             if (JS_IsException(then_funcs[i])) {
                 if (i == 1)
                     JS_FreeValue(ctx, then_funcs[0]);
@@ -55177,7 +55177,7 @@ static JSValue js_async_from_sync_iterator_unwrap_func_create(JSContext *ctx,
     JSValueConst func_data[1];
 
     func_data[0] = (JSValueConst)JS_NewBool(ctx, done);
-    return js_new_cfunction_data(ctx, js_async_from_sync_iterator_unwrap,
+    return js_new_cfunction_data(ctx, js_async_from_sync_iterator_unwrap, /* HULL PATCH 0011 */
                                1, 0, 1, func_data);
 }
 
@@ -55193,7 +55193,7 @@ static JSValue js_async_from_sync_iterator_close_wrap(JSContext *ctx,
 
 static JSValue js_async_from_sync_iterator_close_wrap_func_create(JSContext *ctx, JSValueConst sync_iter)
 {
-    return js_new_cfunction_data(ctx, js_async_from_sync_iterator_close_wrap,
+    return js_new_cfunction_data(ctx, js_async_from_sync_iterator_close_wrap, /* HULL PATCH 0011 */
                                1, 0, 1, &sync_iter);
 }
 
@@ -57229,7 +57229,7 @@ int JS_AddIntrinsicBaseObjects(JSContext *ctx)
     JSValue obj1, obj2;
     JSCFunctionType ft;
 
-    ctx->throw_type_error = js_new_cfunction2(ctx, js_throw_type_error, NULL, 0, JS_CFUNC_generic, 0);
+    ctx->throw_type_error = js_new_cfunction2(ctx, js_throw_type_error, NULL, 0, JS_CFUNC_generic, 0); /* HULL PATCH 0011 */
     if (JS_IsException(ctx->throw_type_error))
         return -1;
     /* add caller and arguments properties to throw a TypeError */
@@ -57281,7 +57281,7 @@ int JS_AddIntrinsicBaseObjects(JSContext *ctx)
     // TODO(bnoordhuis) mildly inefficient because JS_NewGlobalCConstructor
     // first creates a .constructor value property that we then replace with
     // an accessor
-    obj1 = js_new_cfunction_data(ctx, js_iterator_constructor_getset,
+    obj1 = js_new_cfunction_data(ctx, js_iterator_constructor_getset, /* HULL PATCH 0011 */
                                0, 0, 1, (JSValueConst *)&obj2);
     if (JS_IsException(obj1)) {
         JS_FreeValue(ctx, obj2);

@@ -152,13 +152,17 @@ outage for that process, and the instruction budget (now including binding
 time) stops a CPU-bound run in ~1.5 s anyway; the deadline is the backstop for
 whatever the budget still cannot see.
 
-## 4. INV-1 follow-up
+## 4. INV-1 follow-up (done in this PR)
 
-PR #977's invariant lint INV-1 requires an explicit charge per binding plus an
-allowlist. With the dispatcher it should instead require that every app-facing
-binding is registered through it: no `luaL_setfuncs` / `luaL_newlib` /
-bare `lua_pushcfunction` of an app-facing function in `src/hull/runtime/lua/`
-(outside `mod_tool.c` and finalizers), and no `JS_SetPropertyFunctionList` in
-`src/hull/runtime/js/` (use `hl_js_set_function_list`). The per-binding charge
-allowlist then shrinks to the bindings whose determinism tests need an exact
-floor.
+PR #977's invariant lint INV-1 required an explicit charge per binding plus an
+allowlist. With the dispatcher it now requires that every app-facing binding
+is registered through it: no `luaL_setfuncs` / `luaL_newlib` /
+`luaL_register` in `src/hull/runtime/lua/` (outside `budget.c` and
+`mod_tool.c`), every Lua binding a row of a table passed to
+`hl_lua_setfuncs` / `hl_lua_newlib` (or pushed row by row with
+`hl_lua_pushcclosure`) or pushed with `hl_lua_pushcfunction`, and no
+`JS_SetPropertyFunctionList` / `JS_SetModuleExportList` in
+`src/hull/runtime/js/` outside `hl_js_set_function_list`. An explicit charge
+alone no longer passes. The allowlist shrank from 208 entries to 32: the
+functions still pushed raw (finalizers and `__close`, protected-call bodies
+and continuations, the coroutine library, cheap metamethods, module openers).

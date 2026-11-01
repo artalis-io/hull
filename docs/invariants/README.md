@@ -24,7 +24,7 @@ and the exact decision procedure is documented in a comment above the rule in
 
 | ID | Invariant | How it decides |
 |---|---|---|
-| INV-1 | Every exported Lua / JS binding charges the run budget | A binding is a `lua_CFunction` / `JSCFunction`-signature function in `src/hull/runtime/{lua,js}/` whose address is taken (a `luaL_Reg` row, `JS_CFUNC_DEF`, `JS_NewCFunction*`, `lua_pushcfunction`, a method table). It charges when it, or a function it calls up to 3 levels down, names a charging call (`hl_lua_budget_charge`, `lua_hlwork`, `lua_hlcharge`, `hl_js_budget_charge`, `HL_CHARGE_*`, `hl_work_*`, `hl_fs_charge_begin`, `hl_db_budget_charge`, ...) directly or through a macro. The tool VM (`mod_tool.c`) is skipped. Phase 2's measured-time dispatcher replaces this rule. |
+| INV-1 | Every exported Lua / JS binding is registered with the binding dispatcher | Phase 2 (docs/design/audit_convergence_dispatcher.md): the dispatcher charges each call its measured wall time, so a binding must go through it. (a) No `luaL_setfuncs` / `luaL_newlib` / `luaL_register` in `src/hull/runtime/lua/` (outside `budget.c` and the tool VM's `mod_tool.c`), and no `JS_SetPropertyFunctionList` / `JS_SetModuleExportList` in `src/hull/runtime/js/` outside `hl_js_set_function_list` (QuickJS instantiates a function list unmarked; `JS_NewCFunction*` functions are marked by QuickJS HULL PATCH 0011). (b) A Lua binding - a `lua_CFunction`-signature function in `src/hull/runtime/lua/` whose address is taken - must be a row of a `luaL_Reg` table the file passes to `hl_lua_setfuncs` / `hl_lua_newlib` (or pushes row by row with `hl_lua_pushcclosure`), or be pushed with `hl_lua_pushcfunction` / `hl_lua_pushcclosure`. An explicit charge alone does not pass; functions pushed raw on purpose (finalizers, protected-call bodies, the coroutine library) are allowlisted. |
 | INV-2 | No `sqlite3_*` call outside `src/hull/cap/` | Any `sqlite3_<name>(` call in `src/hull/` outside `cap/`. |
 | INV-3 | Every JS operation that parks calls `hl_js_db_refuse_wait` before arming | In `src/hull/runtime/js/`, every same-file root that reaches a call of `hl_js_async_cont_create` / `hl_js_op_suspend` / `hl_cap_multipart_park` must reach `hl_js_db_refuse_wait` (or, for a resume that parks again, `hl_js_run_yield_check`). |
 | INV-4 | Every JS entry ends through `hl_js_entry_end_txn_check` | A function that arms a run (`hl_js_budget_arm*`) must reach `hl_js_entry_end_txn_check` (or `hl_js_entry_park`); and a function that calls `hl_db_registry_guard_stale_txns` must arm the run itself (the guard belongs at entry START only). |
@@ -51,8 +51,8 @@ INV-N  path:symbol  # reason
 - An entry that no longer matches a finding is **stale** and fails the lint,
   so the list only shrinks: fix the code, then delete the line.
 - A new entry needs the reviewer's agreement that its reason holds. Seeding
-  INV-1 with today's uncharged bindings is what makes the rule useful now: a
-  NEW binding that charges nothing fails.
+  INV-1 with today's raw-pushed functions is what makes the rule useful now:
+  a NEW binding that skips the dispatcher fails.
 
 ## Adding a rule
 

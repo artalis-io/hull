@@ -419,16 +419,17 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         hl_lua_tool_register_orchestration(lua->L);
     }
 
-    /* Replace print: a log record in an app VM (audit 29), escaped stderr
-     * in the tool VM (the CLI plugins write their output through it;
-     * audit 33). */
-    lua_pushcfunction(lua->L, cfg->sandbox ? hl_lua_app_print
-                                           : hl_lua_print);
-    lua_setglobal(lua->L, "print");
-
     /* The instruction budget: after the base library (it replaces pcall
      * and xpcall), before anything runs. */
     hl_lua_budget_install(lua->L, &lua->budget);
+
+    /* Replace print: a log record in an app VM (audit 29), escaped stderr
+     * in the tool VM (the CLI plugins write their output through it;
+     * audit 33). After the budget, so the app VM's print goes through the
+     * binding dispatcher (the tool VM's meter is off: pushed raw). */
+    hl_lua_pushcfunction(lua->L, cfg->sandbox ? hl_lua_app_print
+                                              : hl_lua_print);
+    lua_setglobal(lua->L, "print");
     /* Before any sandbox (see header): the app runtime's caches, and the
      * tool VM's AOT cache. */
     hl_runtime_cache_seal_prepare();
