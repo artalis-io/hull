@@ -21,4 +21,14 @@ function M.get(name)
     return hooks[name]
 end
 
+-- The real table behind a stdlib module, for a test that stubs what the
+-- stdlib calls (http-client's async.post): app code, the tests included,
+-- gets a read-only view of every module since audit 43. Required here by
+-- name, from this stdlib chunk, so the result is the stdlib's own table.
+hooks["hull._test_hooks"] = {
+    real = function(name)
+        return require(name)
+    end,
+}
+
 return M

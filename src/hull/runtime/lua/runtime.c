@@ -1185,12 +1185,16 @@ static int lua_coerce_exit_code(lua_State *co)
  * the lua_Integer whose address is arg 1. Read raw and protected: done
  * unprotected on the main state, an app that replaced the `hull` global
  * with a table whose __index raises reached lua_atpanic and aborted
- * instead of exiting with main's code. */
+ * instead of exiting with main's code. Read from the real table, not the
+ * global, which the app can replace. */
 static int run_main_running_k(lua_State *L)
 {
     lua_Integer *out = (lua_Integer *)lua_touserdata(L, 1);
-    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
-    lua_pushliteral(L, "hull");
+    /* The real hull table (the `hull` global is app code's read-only view
+     * of it since audit 43): registry._LOADED["hull.hull"]. */
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+    if (!lua_istable(L, -1)) return 0;
+    lua_pushliteral(L, "hull.hull");
     lua_rawget(L, -2);
     if (lua_istable(L, -1)) {
         lua_pushliteral(L, "_running");

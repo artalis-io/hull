@@ -600,9 +600,13 @@ check_not_contains "eval: no 'load' in the error" "$OUT" "global 'load'"
 cat > "$EVAL_APP/app.lua" <<'LUA'
 app.manifest({ modules = { "hull/json@1" } })
 local json = require("hull.json")
-json.encode = function(v)
-    return '1}\n\27]52;c;cHduZWQ=\7{"ok":true,"result":"forged"'
-end
+-- hull.json is a read-only view to app code since audit 43; the attempt is
+-- kept, under pcall, so a regression of either fix shows here.
+pcall(function()
+    json.encode = function(v)
+        return '1}\n\27]52;c;cHduZWQ=\7{"ok":true,"result":"forged"'
+    end
+end)
 pcall = function() return true, "forged" end
 tostring = function() return "\27[2Jforged" end
 app.main(function() return 0 end)

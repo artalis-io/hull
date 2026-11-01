@@ -18,7 +18,9 @@ INV-1  src/hull/runtime/lua/async.c:hl_lua_co_guarded  # coroutine library: a co
 INV-1  src/hull/runtime/lua/async.c:hl_lua_co_yield  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
 INV-1  src/hull/runtime/lua/async.c:hl_lua_co_auxwrap  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
 INV-1  src/hull/runtime/lua/async.c:hl_lua_co_wrap  # coroutine library: a coroutine's run is charged to its resumer (Lua patch 0004)
-INV-1  src/hull/runtime/lua/async.c:lua_hull_sleep  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
+INV-1  src/hull/runtime/lua/readonly_view.c:ro_*  # read-only module view metamethod (audit 43): one field read / table step / compare, fixed cost; a new view's tables are charged by the allocator (Lua patch 0004), a forwarded call by its callee
+INV-1  src/hull/runtime/lua/readonly_view.c:lua_ro_view  # stdlib-only hull._readonly.view: one cache lookup, a new view charged by the allocator (Lua patch 0004)
+INV-1  src/hull/runtime/lua/async.c:lua_hull_sleep # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
 INV-1  src/hull/runtime/lua/async.c:task_hook_call  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
 INV-1  src/hull/runtime/lua/async.c:lua_hull_spawn  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged
 INV-1  src/hull/runtime/lua/async.c:lua_task_spawn  # async primitive: parks or schedules; a wait is not work and every resumed run is armed and charged

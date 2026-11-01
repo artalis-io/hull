@@ -78,6 +78,21 @@ release-artifact layout).
   The check is one linear scan plus a sort; names are resolved by sorting and binary search, and
   the audit-37 type check now does the same instead of an unseeded hash table that colliding
   names could make quadratic. The examples' and docs' shaders are unaffected.
+- **A Lua app could replace functions the stdlib calls on a shared module table** (audit 43).
+  `require` returned the one cached table of each module to app code and to stdlib chunks
+  alike, and those tables were writable. totp calls `sealbox.seal(keyring(), secret, ctx)` /
+  `sealbox.open(keyring(), blob, ctx)` by field lookup at call time, so an app that declared
+  `hull/crypto/sealbox` and `hull/web/middleware/totp` and assigned its own `sealbox.seal`
+  had totp hand its function the keyring and every TOTP secret; the same held for every stdlib
+  module both sides reach (`hull.crypto`, `hull.json`, `hull.encoding`, `hull.crypto.otp`, ...)
+  and for the `hull` global (`hull.async` / `hull._spawn` received the stdlib's task closures
+  and their arguments). App code now gets a read-only VIEW of every `hull.*` module: reads go
+  through to the real table, an assignment raises, a table read from it (`encoding.hex`,
+  `compute.async`, `jobs.RETRY`) is a view too, `rawset` changes only the view, `pairs` / `#`
+  / `==` / `tostring` work, the metatable is locked, and `require(x) == require(x)` still
+  holds. The stdlib keeps the real tables, and its own `hull` binding; jobs' chainable calls
+  return the view. App code that assigned into a stdlib module (monkey-patching) now gets an
+  error; tests use the module's `hull._test_hooks` seam, as JS already does.
 - **`hull test` ran a test file with stdlib privilege under a relative app directory named
   `hull.*`** (audit 42). The Lua runner loaded `<app>/tests/test_x.lua` by its path, so
   `hull test hull.evil` - run from the parent of a repo cloned under that name - gave the file the

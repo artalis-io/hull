@@ -64,7 +64,7 @@ end)
 test("oauth: a JWKS body that is not JSON is a failed fetch", function()
     oauth.init({ secret = ("s"):rep(32),
                  providers = { g = { preset = "google", client_id = "cid" } } })
-    local hc = require("hull.http-client")
+    local hc = __test_hooks("hull._test_hooks").real("hull.http-client")  -- the stdlib's table (audit 43)
     local real = hc.async.get
     hc.async.get = function() return { status = 200, body = "<html>not json</html>" } end
     local ok, by_kid, err = pcall(__test_hooks("hull.web.middleware.oauth").refresh_jwks, "g")

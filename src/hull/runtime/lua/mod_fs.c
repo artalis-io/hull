@@ -1179,7 +1179,24 @@ static int require_impl(lua_State *L, int trusted)
     return luaL_error(L, "module not found: %s", name);
 }
 
-static int hl_lua_require(lua_State *L) { return require_impl(L, 0); }
+/* The `require` global. A stdlib module (any hull.* name: embedded Lua
+ * modules and native ones alike) goes to app code as a read-only view
+ * (readonly_view.c, audit 43): the module table is shared with the stdlib,
+ * which calls through it at call time - totp's `sealbox.seal(keyring(), ...)`
+ * - so an app assigning `sealbox.seal` had totp hand its function the
+ * keyring. Stdlib code requiring by name keeps the real table. The caller is
+ * judged before the lookup runs app-visible code (a module's top level). */
+static int hl_lua_require(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    int app_view = strncmp(name, "hull.", 5) == 0 && !require_named_by_stdlib(L);
+    int n = require_impl(L, 0);
+    if (app_view && n == 1 && lua_type(L, -1) == LUA_TTABLE) {
+        hl_lua_push_readonly(L, -1);
+        lua_remove(L, -2);
+    }
+    return n;
+}
 
 int hl_lua_require_trusted(lua_State *L) { return require_impl(L, 1); }
 
@@ -1253,7 +1270,18 @@ static void build_stdlib_env(lua_State *L)
     }
     lua_pop(L, 1);                                     /* "" */
 
-    /* Anything else (hull globals, _G itself) reads and writes through. */
+    /* The real `hull` table (hull.sleep, hull._spawn, hull.async, the task
+     * count hull._async keeps in hull._running). App code's `hull` global
+     * is a read-only view of it (hl_lua_register_stdlib), and this binding
+     * is the stdlib's own: an app replacing `hull.async` / `hull._spawn` had
+     * the stdlib's task closures and their arguments handed to its function
+     * (audit 43). */
+    lua_getglobal(L, "hull");
+    lua_setfield(L, env, "hull");
+
+    /* Anything else (app, _G itself) reads and writes through. `app` is the
+     * app's own intrinsic: the stdlib registers routes on it, which the app
+     * controls anyway. */
     lua_newtable(L);
     lua_pushglobaltable(L);
     lua_setfield(L, -2, "__index");
@@ -1292,6 +1320,11 @@ int hl_lua_register_stdlib(HlLua *lua)
     /* Create __hull_loaded cache table */
     lua_newtable(L);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+
+    /* hull._readonly (stdlib-only: the leading underscore) for the stdlib
+     * functions that return their own module (audit 43). */
+    luaL_requiref(L, "hull._readonly", luaopen_hull_readonly, 0);
+    lua_pop(L, 1);
 
     /* Create __hull_modules table and populate with compiled chunks.
      * Iterates the platform VFS entries, skipping the ones this VM does not
@@ -1367,6 +1400,14 @@ int hl_lua_register_stdlib(HlLua *lua)
             lua_pop(L, 1);
         }
         lua_pop(L, 1);                                 /* env */
+
+        /* App code's `hull` global: a view of the table the stdlib env
+         * holds (build_stdlib_env, audit 43). */
+        if (lua_getglobal(L, "hull") == LUA_TTABLE) {
+            hl_lua_push_readonly(L, -1);
+            lua_setglobal(L, "hull");
+        }
+        lua_pop(L, 1);
     }
 
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_modules");
