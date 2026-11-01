@@ -1469,9 +1469,9 @@ int hl_gpu_helper_start(const char *exe) { (void)exe; return -1; }
 int hl_gpu_helper_running(void) { return 0; }
 void hl_gpu_helper_stop(void) {}
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter)
+                        const char *adapter, size_t stack_bytes)
 {
-    (void)wgsl; (void)len; (void)device; (void)adapter;
+    (void)wgsl; (void)len; (void)device; (void)adapter; (void)stack_bytes;
     return HL_GPU_HELPER_UNAVAILABLE;
 }
 void hl_gpu_helper_test_reset_cache(int disk_off) { (void)disk_off; }
