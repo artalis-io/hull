@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <limits.h>   /* PATH_MAX */
 #include <sys/stat.h> /* mkdir */
+#include <dirent.h>   /* opendir: idb_rm_tree */
 
 /* Open a fresh in-memory DuckDB handle. */
 static int duck_open_mem(HlDbHandle *h)
@@ -1239,6 +1240,345 @@ UTEST(db_duckdb, mode_b_paths_through_symlinks_are_refused)
     rmdir(rdir);
 }
 
+/* ── Audit convergence §7.2: DuckDB SQL cannot reach the app's .hull ──
+ *
+ * The app's reserved `.hull` directory holds Hull's internal database
+ * (sessions, roles, TOTP secrets). A duckdb:// connection with fs.read =
+ * fs.write = {"."} (mode B) had the whole app root in allowed_directories,
+ * so read_blob('.hull/internal.db') returned the internal file raw and COPY
+ * could write into `.hull`. Two layers now: the root is granted as its
+ * top-level entries minus `.hull` (hl_db_duckdb_split_root), and the SQL scan
+ * refuses a literal naming `.hull` and a path or glob that resolves into it.
+ * Each fixture runs from a fresh app root (DuckDB resolves relative paths
+ * against the working directory). */
+
+typedef struct {
+    char root[PATH_MAX];      /* canonical */
+    char reserved[PATH_MAX + 8];
+    char dbdir[PATH_MAX];
+    char db[PATH_MAX + 32];
+    char cwd[PATH_MAX];
+} IdbTree;
+
+static void idb_write(const char *path, const char *text)
+{
+    FILE *fp = fopen(path, "w");
+    if (fp) { fputs(text, fp); fclose(fp); }
+}
+
+static void idb_rm_tree(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+                    continue;
+                char child[PATH_MAX + 256];
+                snprintf(child, sizeof child, "%s/%s", path, de->d_name);
+                idb_rm_tree(child);
+            }
+            closedir(d);
+        }
+        rmdir(path);
+    } else {
+        unlink(path);
+    }
+}
+
+/* <root>/.hull/{internal.db,internal.db-wal,data.csv}, <root>/data/x.csv,
+ * <root>/top.csv, an empty <root>/db, the database at <dbdir>/ana.duckdb;
+ * the working directory is the root. 0 / -1. */
+static int idb_setup(IdbTree *t)
+{
+    char tmpl[] = "/tmp/hull_duck_idb_XXXXXX";
+    if (!mkdtemp(tmpl) || !realpath(tmpl, t->root)) return -1;
+    if (!getcwd(t->cwd, sizeof t->cwd)) return -1;
+    snprintf(t->reserved, sizeof t->reserved, "%s/.hull", t->root);
+    /* The database outside the app root (a deploy volume): the
+     * database-directory glob check (audit 41) refuses a glob from any
+     * ancestor of the database's directory, so a database inside the root
+     * would refuse every root glob already and hide the checks tested. */
+    char dtmpl[] = "/tmp/hull_duck_idb_db_XXXXXX";
+    if (!mkdtemp(dtmpl) || !realpath(dtmpl, t->dbdir)) return -1;
+    snprintf(t->db, sizeof t->db, "%s/ana.duckdb", t->dbdir);
+    char p[PATH_MAX + 64];
+    if (mkdir(t->reserved, 0700) != 0) return -1;
+    snprintf(p, sizeof p, "%s/db", t->root);
+    if (mkdir(p, 0700) != 0) return -1;
+    snprintf(p, sizeof p, "%s/internal.db", t->reserved);
+    idb_write(p, "SQLite format 3 SECRET-SESSION-TOKEN\n");
+    snprintf(p, sizeof p, "%s/internal.db-wal", t->reserved);
+    idb_write(p, "WAL SECRET\n");
+    snprintf(p, sizeof p, "%s/data.csv", t->reserved);
+    idb_write(p, "a\n1\n");
+    snprintf(p, sizeof p, "%s/data", t->root);
+    if (mkdir(p, 0700) != 0) return -1;
+    snprintf(p, sizeof p, "%s/data/x.csv", t->root);
+    idb_write(p, "a,b\n1,2\n3,4\n");
+    snprintf(p, sizeof p, "%s/top.csv", t->root);
+    idb_write(p, "a\n5\n");
+    return chdir(t->root);
+}
+
+static void idb_teardown(IdbTree *t)
+{
+    hl_db_duckdb_set_fs_policy(NULL, 0);
+    if (chdir(t->cwd) != 0) { /* nothing to do */ }
+    idb_rm_tree(t->root);
+    idb_rm_tree(t->dbdir);
+}
+
+typedef struct {
+    char *dirs[64];
+    int   nd;
+    char *files[64];
+    int   nf;
+} IdbSplit;
+
+static int idb_split_cb(void *ud, const char *path, int is_dir)
+{
+    IdbSplit *s = ud;
+    if (is_dir ? s->nd >= 64 : s->nf >= 64) return -1;
+    char *c = strdup(path);
+    if (!c) return -1;
+    if (is_dir) s->dirs[s->nd++] = c; else s->files[s->nf++] = c;
+    return 0;
+}
+
+static void idb_split_free(IdbSplit *s)
+{
+    for (int i = 0; i < s->nd; i++) free(s->dirs[i]);
+    for (int i = 0; i < s->nf; i++) free(s->files[i]);
+    s->nd = s->nf = 0;
+}
+
+static int idb_run(HlDbHandle *h, const char *tmpl, const char *root)
+{
+    char sql[3 * PATH_MAX];
+    a41_subst(sql, sizeof sql, tmpl, root);
+    int rc = hl_db_query(h, sql, NULL, 0, NULL, NULL, NULL);
+    if (rc == 0) fprintf(stderr, "ran: %s\n", sql);
+    else if (getenv("IDB_DEBUG")) fprintf(stderr, "refused: %s: %s\n", sql, hl_db_errmsg(h));
+    return rc;
+}
+
+/* Every spelling of a path into .hull, with the app root granted whole (as
+ * serve.c granted it before the fix) and nothing else known: the name check
+ * alone refuses them. */
+UTEST(duckdb_convergence_idb, dot_hull_paths_refused)
+{
+    IdbTree t;
+    ASSERT_EQ(0, idb_setup(&t));
+    static const char *dirs[1];
+    dirs[0] = t.root;
+    hl_db_duckdb_set_fs_policy(dirs, 1);
+    char dsn[PATH_MAX + 64];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", t.db);
+    HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(0, hl_db_backend_duckdb.open(&h.ctx, dsn, NULL));
+
+    static const char *const refused[] = {
+        "SELECT size FROM read_blob('.hull/internal.db')",
+        "SELECT hex(content) FROM read_blob('.hull/internal.db')",
+        "SELECT content FROM read_text('.hull/internal.db-wal')",
+        "SELECT size FROM read_blob('.HULL/internal.db')",
+        "SELECT size FROM read_blob('.HuLl/internal.db')",
+        "SELECT size FROM read_blob('./.hull/internal.db')",
+        "SELECT size FROM read_blob('.//.hull//internal.db')",
+        "SELECT size FROM read_blob('data/../.hull/internal.db')",
+        "SELECT size FROM read_blob('x/../.hull/internal.db')",
+        "SELECT size FROM read_blob('%s/.hull/internal.db')",
+        "SELECT size FROM read_blob('%s/data/../.hull/internal.db')",
+        "SELECT size FROM read_blob('file://%s/.hull/internal.db')",
+        "SELECT size FROM read_blob(['data/x.csv', '.hull/internal.db'])",
+        "SELECT * FROM read_csv('.hull/data.csv')",
+        "SELECT * FROM '.hull/data.csv'",
+        "SELECT * FROM '.hull/internal.db'",
+        "SELECT size FROM '.hull/internal.db'.read_blob()",
+        "SELECT * FROM glob('.hull/*')",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_EQ(-1, idb_run(&h, refused[i], t.root));
+
+    static const char *const writes[] = {
+        "COPY (SELECT 'CORRUPTED' AS a) TO '.hull/internal.db' (FORMAT csv)",
+        "COPY (SELECT 1 AS a) TO '.hull/internal.db-journal'",
+        "COPY (SELECT 1 AS a) TO './.HULL/new.csv'",
+        "COPY (SELECT 1 AS a) TO '%s/.hull/new.csv'",
+        "CREATE TABLE t AS SELECT 1 AS a; COPY t FROM '.hull/data.csv'",
+    };
+    for (size_t i = 0; i < sizeof writes / sizeof writes[0]; i++) {
+        char sql[3 * PATH_MAX];
+        a41_subst(sql, sizeof sql, writes[i], t.root);
+        int rc = hl_db_exec(&h, sql, NULL, 0);
+        if (rc == 0) fprintf(stderr, "ran: %s\n", sql);
+        EXPECT_EQ(-1, rc);
+    }
+    char p[PATH_MAX + 64];
+    snprintf(p, sizeof p, "%s/new.csv", t.reserved);
+    struct stat st;
+    EXPECT_NE(0, stat(p, &st));
+    snprintf(p, sizeof p, "%s/internal.db", t.reserved);
+    FILE *fp = fopen(p, "r");
+    char head[16] = {0};
+    if (fp) { if (!fgets(head, sizeof head, fp)) head[0] = '\0'; fclose(fp); }
+    EXPECT_EQ(0, strncmp(head, "SQLite format 3", 15));
+
+    h.backend->close(&h);
+    idb_teardown(&t);
+}
+
+/* Globs from the app root reach .hull (DuckDB's glob matches dot entries):
+ * with the root still granted whole, the resolved check (the reserved
+ * directory known) refuses every one whose wildcards could reach a file in
+ * it, and keeps a last-component wildcard in a subdirectory. */
+UTEST(duckdb_convergence_idb, globs_reaching_dot_hull_refused)
+{
+    IdbTree t;
+    ASSERT_EQ(0, idb_setup(&t));
+    static const char *dirs[1];
+    static char reserved[PATH_MAX + 8];
+    dirs[0] = t.root;
+    snprintf(reserved, sizeof reserved, "%s", t.reserved);
+    hl_db_duckdb_set_fs_policy_ex(dirs, 1, NULL, 0, reserved);
+    char dsn[PATH_MAX + 64];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", t.db);
+    HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(0, hl_db_backend_duckdb.open(&h.ctx, dsn, NULL));
+
+    static const char *const refused[] = {
+        "SELECT size FROM read_blob('*/internal.db')",
+        "SELECT size FROM read_blob('**/*.db')",
+        "SELECT size FROM read_blob('**')",
+        "SELECT size FROM read_blob('.h*/internal.db')",
+        "SELECT size FROM read_blob('.hu[l]l/internal.db')",
+        "SELECT size FROM read_blob('.hul?/internal.db*')",
+        "SELECT size FROM read_blob('%s/*/internal.db')",
+        "SELECT size FROM read_blob('data/../*/internal.db')",
+        "SELECT file FROM glob('**')",
+        "SELECT file FROM glob('*/*')",
+        "SELECT * FROM read_csv('*/*.csv')",
+        "SELECT * FROM '*/*.csv'",
+        "SELECT * FROM '**/*.csv'",
+        "COPY (SELECT 1 AS a) TO '*/x.csv'",
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
+        EXPECT_EQ(-1, idb_run(&h, refused[i], t.root));
+
+    int64_t n = 0;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM glob('data/*.csv')",
+                             NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(1, n);
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM read_csv('data/*.csv')",
+                             NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(2, n);
+
+    h.backend->close(&h);
+    idb_teardown(&t);
+}
+
+/* The structural layer: the root split into its entries (as serve.c grants a
+ * root grant now) leaves .hull and symbolic links out, and with it DuckDB
+ * itself refuses a glob from the root - here with the scan's resolved checks
+ * off (no reserved directory given), so only allowed_directories stands in
+ * the way. */
+UTEST(duckdb_convergence_idb, root_grant_split_keeps_dot_hull_out)
+{
+    IdbTree t;
+    ASSERT_EQ(0, idb_setup(&t));
+    char lnk[PATH_MAX + 32];
+    snprintf(lnk, sizeof lnk, "%s/lnk", t.root);
+    ASSERT_EQ(0, symlink(".hull", lnk));
+
+    IdbSplit sp = {0};
+    int n = hl_db_duckdb_split_root(t.root, idb_split_cb, &sp);
+    EXPECT_EQ(3, n);              /* data, db, top.csv (not .hull, not lnk) */
+    EXPECT_EQ(2, sp.nd);
+    EXPECT_EQ(1, sp.nf);
+    for (int i = 0; i < sp.nd; i++) {
+        EXPECT_TRUE(strstr(sp.dirs[i], "/.hull") == NULL);
+        EXPECT_TRUE(strstr(sp.dirs[i], "/lnk") == NULL);
+    }
+    char want[PATH_MAX + 32], want2[PATH_MAX + 32];
+    snprintf(want, sizeof want, "%s/data", t.root);
+    snprintf(want2, sizeof want2, "%s/db", t.root);
+    int seen = 0;
+    for (int i = 0; i < sp.nd; i++)
+        seen += strcmp(sp.dirs[i], want) == 0 || strcmp(sp.dirs[i], want2) == 0;
+    EXPECT_EQ(2, seen);
+    snprintf(want, sizeof want, "%s/top.csv", t.root);
+    EXPECT_STREQ(want, sp.nf > 0 ? sp.files[0] : "");
+
+    hl_db_duckdb_set_fs_policy_ex((const char *const *)sp.dirs, sp.nd,
+                                  (const char *const *)sp.files, sp.nf, NULL);
+    char dsn[PATH_MAX + 64];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", t.db);
+    HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(0, hl_db_backend_duckdb.open(&h.ctx, dsn, NULL));
+
+    EXPECT_EQ(-1, idb_run(&h, "SELECT size FROM read_blob('*/internal.db')", t.root));
+    EXPECT_EQ(-1, idb_run(&h, "SELECT size FROM read_blob('%s/*/internal.db')", t.root));
+    EXPECT_EQ(-1, idb_run(&h, "SELECT file FROM glob('*/*')", t.root));
+    /* A file made at the root after the policy was installed is not granted. */
+    EXPECT_EQ(-1, hl_db_exec(&h, "COPY (SELECT 1 AS a) TO 'late.csv'", NULL, 0));
+
+    int64_t c = 0;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM read_csv('top.csv')",
+                             NULL, 0, count_cb, &c, NULL));
+    EXPECT_EQ(1, c);
+
+    h.backend->close(&h);
+    idb_split_free(&sp);
+    unlink(lnk);
+    idb_teardown(&t);
+}
+
+/* No false refusal: ordinary mode-B reads and writes in other directories,
+ * under the policy serve.c installs (root split + reserved directory). */
+UTEST(duckdb_convergence_idb, ordinary_mode_b_files_still_work)
+{
+    IdbTree t;
+    ASSERT_EQ(0, idb_setup(&t));
+    IdbSplit sp = {0};
+    ASSERT_EQ(3, hl_db_duckdb_split_root(t.root, idb_split_cb, &sp));
+    static char reserved[PATH_MAX + 8];
+    snprintf(reserved, sizeof reserved, "%s", t.reserved);
+    hl_db_duckdb_set_fs_policy_ex((const char *const *)sp.dirs, sp.nd,
+                                  (const char *const *)sp.files, sp.nf, reserved);
+    char dsn[PATH_MAX + 64];
+    snprintf(dsn, sizeof dsn, "duckdb://%s", t.db);
+    HlDbHandle h = { .backend = &hl_db_backend_duckdb };
+    ASSERT_EQ(0, hl_db_backend_duckdb.open(&h.ctx, dsn, NULL));
+
+    int64_t n = 0;
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM read_csv('data/x.csv')",
+                             NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(2, n);
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM glob('data/*.csv')",
+                             NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(1, n);
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM 'data/x.csv'",
+                             NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(2, n);
+    EXPECT_EQ(0, hl_db_exec(&h, "COPY (SELECT 7 AS a) TO 'data/out.csv'", NULL, 0));
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM read_csv('data/out.csv')",
+                             NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(1, n);
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT count(*) FROM read_csv('top.csv')",
+                             NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(1, n);
+    /* A string that merely contains the letters is not a path component. */
+    EXPECT_EQ(0, hl_db_query(&h, "SELECT 'shull' || 'x.hull' AS s",
+                             NULL, 0, NULL, NULL, NULL));
+
+    h.backend->close(&h);
+    idb_split_free(&sp);
+    idb_teardown(&t);
+}
 
 UTEST_MAIN()
 

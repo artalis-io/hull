@@ -184,6 +184,24 @@ static void raw_mode(const char *sql)
         hl_cap_db_sql_calls_dynamic_sql(lo) != dyn)
         fail("ASCII case changed the dynamic-SQL verdict", sql);
 
+    /* The DuckDB file scan's `.hull` name check (audit convergence §7.2),
+     * mode A so no file system is read: deterministic, ASCII case does not
+     * change it, and a `.hull` path literal appended after a newline is
+     * refused whatever came before it (every span between two consecutive
+     * quotes is read, whatever the parity). */
+    int rf = hl_cap_db_sql_reaches_db_files_ex(sql, 1, NULL, NULL);
+    if (hl_cap_db_sql_reaches_db_files_ex(sql, 1, NULL, NULL) != rf)
+        fail("db-file scan verdict not deterministic", sql);
+    if (hl_cap_db_sql_reaches_db_files_ex(up, 1, NULL, NULL) != rf ||
+        hl_cap_db_sql_reaches_db_files_ex(lo, 1, NULL, NULL) != rf)
+        fail("ASCII case changed the db-file scan verdict", sql);
+    {
+        char *t = cat(sql, "\nSELECT * FROM './.HuLl/internal.db'");
+        if (!hl_cap_db_sql_reaches_db_files_ex(t, 1, NULL, NULL))
+            fail("a .hull path literal appended after a newline was allowed", t);
+        free(t);
+    }
+
     int ns = hl_cap_db_check_namespace(sql);
     if (hl_cap_db_check_namespace(up) != ns || hl_cap_db_check_namespace(lo) != ns)
         fail("ASCII case changed the namespace verdict", sql);

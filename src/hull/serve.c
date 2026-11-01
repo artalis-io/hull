@@ -1488,12 +1488,106 @@ static int duckdb_grant_dir(const char *app_dir, const char *e,
     return (n > 0 && (size_t)n < out_sz) ? 0 : -1;
 }
 
+/* Whether the granted directory @p real (canonical) is the app's reserved
+ * `.hull` (@p reserved) or inside it - by name in any letter case, or by
+ * inode, so a `data -> .hull` link the tree ships is caught too (audit
+ * convergence §7.2). */
+static int duckdb_dir_is_reserved(const char *real, const char *reserved)
+{
+    size_t rl = strlen(reserved);
+    if (strncasecmp(real, reserved, rl) == 0 &&
+        (real[rl] == '\0' || real[rl] == '/'))
+        return 1;
+    struct stat a, b;
+    return stat(real, &a) == 0 && stat(reserved, &b) == 0 &&
+           a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+
+/* Root-split collection (hl_db_duckdb_split_root's callback): malloc'd
+ * copies, sealed by the caller. */
+typedef struct {
+    char *dirs[HL_DUCK_ROOT_ENTRIES_MAX];
+    int   ndirs;
+    char *files[HL_DUCK_ROOT_ENTRIES_MAX];
+    int   nfiles;
+    size_t bytes;
+} DuckRootSplit;
+
+static int duckdb_split_cb(void *ud, const char *path, int is_dir)
+{
+    DuckRootSplit *rs = ud;
+    char *c = strdup(path);
+    if (!c) return -1;
+    if (is_dir) {
+        if (rs->ndirs >= HL_DUCK_ROOT_ENTRIES_MAX) { free(c); return -1; }
+        rs->dirs[rs->ndirs++] = c;
+    } else {
+        if (rs->nfiles >= HL_DUCK_ROOT_ENTRIES_MAX) { free(c); return -1; }
+        rs->files[rs->nfiles++] = c;
+    }
+    rs->bytes += strlen(path) + 1 + sizeof(char *) + 16;
+    return 0;
+}
+
+static void duckdb_split_free(DuckRootSplit *rs)
+{
+    for (int i = 0; i < rs->ndirs; i++) free(rs->dirs[i]);
+    for (int i = 0; i < rs->nfiles; i++) free(rs->files[i]);
+    rs->ndirs = rs->nfiles = 0;
+}
+
+/* Whether some fs.read grant resolves to the app root itself. */
+static int duckdb_grants_root(const HlManifest *m, const char *app_dir,
+                              const char *root)
+{
+    for (int r = 0; r < m->fs_read_count; r++) {
+        char rdir[PATH_MAX];
+        if (m->fs_read[r] && m->fs_read[r][0] &&
+            duckdb_grant_dir(app_dir, m->fs_read[r], rdir, sizeof rdir) == 0 &&
+            strcmp(rdir, root) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Seal-arena bytes the DuckDB policy's root split needs (0 when no grant is
+ * the root): sized before the arena is made, which cannot grow. */
+static size_t hl_serve_duckdb_split_bytes(const HlManifest *m,
+                                          const char *app_dir)
+{
+    char root[PATH_MAX];
+    if (m->fs_read_count <= 0 || !realpath(app_dir, root) ||
+        !duckdb_grants_root(m, app_dir, root))
+        return 0;
+    DuckRootSplit *rs = calloc(1, sizeof *rs);
+    if (!rs) return 0;
+    size_t bytes = 0;
+    if (hl_db_duckdb_split_root(root, duckdb_split_cb, rs) >= 0)
+        bytes = rs->bytes;
+    duckdb_split_free(rs);
+    free(rs);
+    /* Room for entries made between this count and the split. */
+    return bytes + bytes / 4 + 4096;
+}
+
 /* DuckDB's allowed_directories grants read AND write, recursively. So a
  * directory goes in only when the manifest grants it whole for both: one in
  * fs.read and in fs.write. Before, read and write grants were merged, a file
  * widened to its parent and a leading glob ("*.csv") to all of app_dir - an
  * fs.read = {"*.csv"} app could COPY over app.lua or read data.db raw through
  * a duckdb:// connection. Any other grant is left out (logged), never widened.
+ *
+ * The app's reserved `.hull` directory holds Hull's internal database
+ * (sessions, roles, TOTP secrets), and allowed_directories has no exclusion
+ * (audit convergence §7.2): a grant of the app root itself is granted as the
+ * root's top-level entries instead - each directory in allowed_directories,
+ * each regular file in allowed_paths, `.hull` (any letter case, by inode)
+ * and symbolic links left out - and a grant that resolves into `.hull` is
+ * refused. DuckDB's lists cannot change once its configuration is locked, so
+ * a file or directory made at the root after startup is not reachable from
+ * DuckDB SQL (keep DuckDB's files in a subdirectory). The SQL scan's `.hull`
+ * checks (hl_cap_db_sql_reaches_db_files_ex) stay as defence in depth.
+ *
  * The strings live in the (about-to-be-sealed) policy arena; with nothing
  * usable DuckDB stays in full lockdown (mode A). Must run before the arena is
  * sealed and before any DuckDB connection opens. */
@@ -1502,9 +1596,19 @@ static void hl_serve_install_duckdb_fs_policy(HlServerState *s)
     const HlManifest *m = &s->manifest;
     if (m->fs_read_count + m->fs_write_count <= 0) return;
 
+    char root[PATH_MAX];
+    char reserved[PATH_MAX + 8];
+    if (!realpath(s->app_dir, root) ||
+        (size_t)snprintf(reserved, sizeof reserved, "%s/.hull",
+                         strcmp(root, "/") == 0 ? "" : root) >= sizeof reserved)
+        return;   /* fail closed: mode A */
+    const char *sealed_reserved = sh_seal_arena_strdup(&s->seal_arena, reserved);
+    if (!sealed_reserved) return;
+
     const char *uniq[HL_MANIFEST_MAX_PATHS];
     int nuniq = 0;
     int skipped = 0;
+    int split = 0;
 
     for (int r = 0; r < m->fs_read_count; r++) {
         const char *re = m->fs_read[r];
@@ -1523,6 +1627,13 @@ static void hl_serve_install_duckdb_fs_policy(HlServerState *s)
                 writable = 1;
         }
         if (!writable) { skipped++; continue; }
+        if (duckdb_dir_is_reserved(rdir, reserved)) {
+            log_warn("[hull:c] duckdb: fs grant '%s' resolves into the app's "
+                     ".hull directory; it gives a duckdb:// connection no "
+                     "file access", re);
+            continue;
+        }
+        if (strcmp(rdir, root) == 0) { split = 1; continue; }
 
         int dup = 0;
         for (int j = 0; j < nuniq; j++)
@@ -1540,15 +1651,64 @@ static void hl_serve_install_duckdb_fs_policy(HlServerState *s)
                  "and fs.write is usable (DuckDB cannot limit a directory to "
                  "reading, or to some of its files)", skipped);
 
-    if (nuniq <= 0) return;
-    const char **arr = sh_seal_arena_alloc(&s->seal_arena,
-                                           (size_t)nuniq * sizeof(char *),
-                                           _Alignof(char *));
-    if (!arr) return;
-    for (int i = 0; i < nuniq; i++) arr[i] = uniq[i];
-    hl_db_duckdb_set_fs_policy(arr, nuniq);
+    DuckRootSplit *rs = NULL;
+    if (split) {
+        rs = calloc(1, sizeof *rs);
+        if (!rs) return;
+        if (hl_db_duckdb_split_root(root, duckdb_split_cb, rs) < 0) {
+            log_warn("[hull:c] duckdb: the app root could not be granted as "
+                     "its entries (unreadable, or more than %d of them); the "
+                     "root grant gives a duckdb:// connection no file access",
+                     HL_DUCK_ROOT_ENTRIES_MAX);
+            duckdb_split_free(rs);
+        }
+    }
+
+    int maxd = nuniq + (rs ? rs->ndirs : 0);
+    int maxf = rs ? rs->nfiles : 0;
+    const char **darr = NULL, **farr = NULL;
+    int nd = 0, nf = 0;
+    if (maxd > 0) {
+        darr = sh_seal_arena_alloc(&s->seal_arena, (size_t)maxd * sizeof(char *),
+                                   _Alignof(char *));
+        if (!darr) goto oom;
+        for (int i = 0; i < nuniq; i++) darr[nd++] = uniq[i];
+        for (int i = 0; rs && i < rs->ndirs; i++) {
+            int dup = 0;
+            for (int j = 0; j < nuniq; j++)
+                if (strcmp(uniq[j], rs->dirs[i]) == 0) { dup = 1; break; }
+            if (dup) continue;
+            char *sealed = sh_seal_arena_strdup(&s->seal_arena, rs->dirs[i]);
+            if (!sealed) goto oom;
+            darr[nd++] = sealed;
+        }
+    }
+    if (maxf > 0) {
+        farr = sh_seal_arena_alloc(&s->seal_arena, (size_t)maxf * sizeof(char *),
+                                   _Alignof(char *));
+        if (!farr) goto oom;
+        for (int i = 0; i < rs->nfiles; i++) {
+            char *sealed = sh_seal_arena_strdup(&s->seal_arena, rs->files[i]);
+            if (!sealed) goto oom;
+            farr[nf++] = sealed;
+        }
+    }
+    if (rs) { duckdb_split_free(rs); free(rs); }
+    hl_db_duckdb_set_fs_policy_ex(darr, nd, farr, nf, sealed_reserved);
+    return;
+oom:
+    log_warn("[hull:c] duckdb: policy arena full; a duckdb:// connection gets "
+             "no file access");
+    if (rs) { duckdb_split_free(rs); free(rs); }
 }
 #endif /* HL_ENABLE_DUCKDB */
+
+#ifdef HL_ENABLE_DUCKDB
+#define HL_SERVE_DUCKDB_SPLIT_BYTES(s) \
+    (PATH_MAX + 64 + hl_serve_duckdb_split_bytes(&(s)->manifest, (s)->app_dir))
+#else
+#define HL_SERVE_DUCKDB_SPLIT_BYTES(s) ((size_t)0)
+#endif
 
 /* Phase 1: extract manifest + resolve module set + wire per-capability configs.
  *
@@ -1603,7 +1763,8 @@ static int hl_serve_wire_caps(HlServerState *s)
                                 /* the DuckDB policy's absolute fs paths */
                                 (size_t)(s->manifest.fs_read_count +
                                          s->manifest.fs_write_count) *
-                                    (strlen(s->app_dir) + 32),
+                                    (strlen(s->app_dir) + 32) +
+                                HL_SERVE_DUCKDB_SPLIT_BYTES(s),
                                 "manifest-policy") != 0) {
             log_error("[hull:c] seal arena init failed (mmap)");
             return -1;

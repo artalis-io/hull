@@ -491,6 +491,26 @@ int hl_cap_db_sql_reaches_db_files(const char *sql, int deny_file_functions,
                                    const char *protect_path);
 
 /**
+ * @brief hl_cap_db_sql_reaches_db_files, and the app's reserved directory
+ *        (audit convergence §7.2).
+ *
+ * Also refused, under every file policy: any literal holding a `.hull` path
+ * component in any letter case (every spelling of a path into the app's
+ * reserved directory, which holds Hull's internal database). With
+ * @p deny_file_functions clear (mode B) and @p reserved_dir set (the
+ * canonical `<app root>/.hull`): a file-function path, COPY target or
+ * replacement-scan literal that resolves into @p reserved_dir (through its
+ * nearest existing ancestor; another letter case on a case-insensitive file
+ * system), and a glob whose fixed directory part resolves into it, or to the
+ * app root or an ancestor with more than one wildcarded component or a `**`
+ * after it (DuckDB's glob matches dot entries). NULL @p reserved_dir skips
+ * the resolved checks. 1 = refused.
+ */
+int hl_cap_db_sql_reaches_db_files_ex(const char *sql, int deny_file_functions,
+                                      const char *protect_path,
+                                      const char *reserved_dir);
+
+/**
  * @brief Install Hull's SQL guard on a connection: the authorizer that refuses
  *        ATTACH of a file / VACUUM INTO and the file-moving pragmas,
  *        SQLITE_DBCONFIG_DEFENSIVE, the progress handler that charges the

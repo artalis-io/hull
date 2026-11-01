@@ -44,6 +44,8 @@
 #include <time.h>       /* nanosleep */
 #include <pthread.h>    /* the shared-instance registry */
 #include <limits.h>     /* PATH_MAX */
+#include <dirent.h>     /* opendir: hl_db_duckdb_split_root */
+#include <sys/stat.h>   /* lstat */
 
 /* VARCHAR/BLOB inline threshold: a duckdb_string_t of length <= 12 stores its
  * bytes inline; longer strings live behind value.pointer.ptr. See duckdb.h. */
@@ -168,28 +170,88 @@ static void duck_set_err(HlDbDuckCtx *s, const char *msg)
  * empty and duck_open applies full lockdown (mode A). */
 static const char *const *g_duck_allowed_dirs = NULL;
 static int                g_duck_allowed_ndirs = 0;
+/* Single files granted at the app root (allowed_paths), and the app's
+ * reserved directory `<root>/.hull` for the SQL scan (audit convergence
+ * §7.2). */
+static const char *const *g_duck_allowed_paths = NULL;
+static int                g_duck_allowed_npaths = 0;
+static const char        *g_duck_reserved = NULL;
 
 void hl_db_duckdb_set_fs_policy(const char *const *dirs, int ndirs)
 {
-    g_duck_allowed_dirs  = (ndirs > 0) ? dirs : NULL;
-    g_duck_allowed_ndirs = (ndirs > 0 && dirs) ? ndirs : 0;
+    hl_db_duckdb_set_fs_policy_ex(dirs, ndirs, NULL, 0, NULL);
 }
 
-/* Build the DuckDB list literal ['d1','d2',...] for the declared policy (single
- * quotes doubled), used for both the config-time allowed_directories option and
- * the post-connect SET. Returns a malloc'd string, or NULL (empty policy/OOM). */
-static char *duck_alloc_dirs_list(void)
+void hl_db_duckdb_set_fs_policy_ex(const char *const *dirs, int ndirs,
+                                   const char *const *paths, int npaths,
+                                   const char *reserved_dir)
 {
-    if (g_duck_allowed_ndirs <= 0 || !g_duck_allowed_dirs) return NULL;
+    g_duck_allowed_dirs   = (ndirs > 0 && dirs) ? dirs : NULL;
+    g_duck_allowed_ndirs  = (ndirs > 0 && dirs) ? ndirs : 0;
+    g_duck_allowed_paths  = (npaths > 0 && paths) ? paths : NULL;
+    g_duck_allowed_npaths = (npaths > 0 && paths) ? npaths : 0;
+    g_duck_reserved       = (reserved_dir && reserved_dir[0] == '/')
+                                ? reserved_dir : NULL;
+}
+
+/* Mode B: any directory or file granted. */
+static int duck_mode_b(void)
+{
+    return g_duck_allowed_ndirs > 0 || g_duck_allowed_npaths > 0;
+}
+
+int hl_db_duckdb_split_root(const char *root, HlDuckRootEntryFn fn, void *ud)
+{
+    if (!root || root[0] != '/' || !fn) return -1;
+    char hull[PATH_MAX];
+    if ((size_t)snprintf(hull, sizeof hull, "%s/.hull", root) >= sizeof hull)
+        return -1;
+    struct stat hst;
+    int have_hull = (stat(hull, &hst) == 0);
+    DIR *d = opendir(root);
+    if (!d) return -1;
+    int count = 0, rc = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *nm = de->d_name;
+        if (nm[0] == '.' && (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0')))
+            continue;
+        if (strlen(nm) == 5 && strncasecmp(nm, ".hull", 5) == 0) continue;
+        char child[PATH_MAX];
+        int w = snprintf(child, sizeof child, "%s/%s", root, nm);
+        if (w < 0 || (size_t)w >= sizeof child) continue;
+        struct stat st;
+        if (lstat(child, &st) != 0) continue;
+        /* A symbolic link (DuckDB's prefix check would follow it, and a
+         * mode-B path through one is refused anyway), and the reserved
+         * directory under another spelling (by inode). */
+        if (S_ISLNK(st.st_mode)) continue;
+        if (have_hull && st.st_dev == hst.st_dev && st.st_ino == hst.st_ino)
+            continue;
+        if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)) continue;
+        if (++count > HL_DUCK_ROOT_ENTRIES_MAX) { rc = -1; break; }
+        if (fn(ud, child, S_ISDIR(st.st_mode)) != 0) { rc = -1; break; }
+    }
+    closedir(d);
+    return rc == 0 ? count : -1;
+}
+
+/* Build the DuckDB list literal ['d1','d2',...] for @p n entries of @p arr
+ * (single quotes doubled), used for the post-connect SET of
+ * allowed_directories / allowed_paths. Returns a malloc'd string, or NULL
+ * (empty list/OOM). */
+static char *duck_alloc_list(const char *const *arr, int n)
+{
+    if (n <= 0 || !arr) return NULL;
     size_t cap = 8;
-    for (int i = 0; i < g_duck_allowed_ndirs; i++)
-        cap += (g_duck_allowed_dirs[i] ? strlen(g_duck_allowed_dirs[i]) : 0) * 2 + 8;
+    for (int i = 0; i < n; i++)
+        cap += (arr[i] ? strlen(arr[i]) : 0) * 2 + 8;
     char *s = malloc(cap);
     if (!s) return NULL;
     size_t off = 0;
     s[off++] = '[';
-    for (int i = 0; i < g_duck_allowed_ndirs; i++) {
-        const char *d = g_duck_allowed_dirs[i] ? g_duck_allowed_dirs[i] : "";
+    for (int i = 0; i < n; i++) {
+        const char *d = arr[i] ? arr[i] : "";
         if (i > 0 && off < cap) s[off++] = ',';
         if (off < cap) s[off++] = '\'';
         for (const char *p = d; *p && off + 2 < cap; p++) {
@@ -239,32 +301,47 @@ static int duck_apply_config_security(duckdb_config config)
         return -1;
     /* Mode B enables external access but bounds it to allowed_directories;
      * mode A leaves it off (DB file + :memory: only). */
-    const char *ext = (g_duck_allowed_ndirs > 0) ? "true" : "false";
+    const char *ext = duck_mode_b() ? "true" : "false";
     if (duckdb_set_config(config, "enable_external_access", ext) != DuckDBSuccess)
         return -1;
     return 0;
 }
 
-/* Emit `SET allowed_directories = ['d1','d2',...]` for the declared policy and
- * run it on @p con (single quotes in a path are doubled). Returns 0, or -1 on
- * allocation / execution failure (with *errmsg set via the caller). No-op
- * returning 0 when the policy is empty. Called after connect, before the lock. */
-static int duck_apply_allowed_dirs(duckdb_connection con)
+/* Run `SET <name> = ['p1','p2',...]` for @p n entries of @p arr on @p con
+ * (single quotes in a path are doubled). Returns 0 (also for an empty list),
+ * or -1 on allocation / execution failure. */
+static int duck_set_list(duckdb_connection con, const char *name,
+                         const char *const *arr, int n)
 {
-    if (g_duck_allowed_ndirs <= 0 || !g_duck_allowed_dirs) return 0;   /* mode A */
-    char *list = duck_alloc_dirs_list();
+    if (n <= 0) return 0;
+    char *list = duck_alloc_list(arr, n);
     if (!list) return -1;
-    size_t cap = strlen(list) + 32;   /* "SET allowed_directories = " + NUL */
+    size_t cap = strlen(list) + strlen(name) + 16;   /* "SET x = " + NUL */
     char *sql = malloc(cap);
     if (!sql) { free(list); return -1; }
-    snprintf(sql, cap, "SET allowed_directories = %s", list);
+    snprintf(sql, cap, "SET %s = %s", name, list);
     free(list);
-
     duckdb_result r;
     int ok = (duckdb_query(con, sql, &r) == DuckDBSuccess);
     duckdb_destroy_result(&r);
     free(sql);
-    if (!ok) return -1;
+    return ok ? 0 : -1;
+}
+
+/* Mode B: set allowed_directories and allowed_paths (the root's files, when
+ * a root grant was split, audit convergence §7.2) for the declared policy,
+ * then turn external access off. Returns 0, or -1 on failure (the caller
+ * sets the error). No-op returning 0 under mode A. Called after connect,
+ * before the lock. */
+static int duck_apply_allowed_dirs(duckdb_connection con)
+{
+    if (!duck_mode_b()) return 0;   /* mode A */
+    if (duck_set_list(con, "allowed_directories", g_duck_allowed_dirs,
+                      g_duck_allowed_ndirs) != 0 ||
+        duck_set_list(con, "allowed_paths", g_duck_allowed_paths,
+                      g_duck_allowed_npaths) != 0)
+        return -1;
+    duckdb_result r;
 
     /* The list is INERT while external access is on: DuckDB's
      * DBConfig::CanAccessFile returns "allowed" for every path as long as
@@ -330,7 +407,8 @@ static const char DUCK_TABLE_VALUE_MSG[] =
  * turned off and refuses to change allowed_paths after: read_blob('app.duckdb')
  * returned the raw file, _hull_* rows included (audit 34). */
 static const char DUCK_DB_FILE_MSG[] =
-    "duckdb: SQL may not name the database file, its WAL or temp files, call "
+    "duckdb: SQL may not name the database file, its WAL or temp files, or "
+    "the app's .hull directory, call "
     "a file function without a declared fs policy, or give a file function / "
     "COPY a path that is not a plain literal or that runs through a symbolic "
     "link (it could read the database file past Hull's _hull_* check)";
@@ -353,7 +431,7 @@ static const char *duck_sql_refusal(const char *sql, int deny,
     if (hl_cap_db_sql_switches_catalog(sql)) return DUCK_CATALOG_MSG;
     if (hl_cap_db_sql_names_table_by_value_ex(sql, strict))
         return DUCK_TABLE_VALUE_MSG;
-    if (hl_cap_db_sql_reaches_db_files(sql, deny, protect))
+    if (hl_cap_db_sql_reaches_db_files_ex(sql, deny, protect, g_duck_reserved))
         return DUCK_DB_FILE_MSG;
     return NULL;
 }
@@ -597,7 +675,7 @@ static int duck_open(void **out_ctx, const char *dsn, HlAllocator *alloc)
     if (path[0] == '\0')
         path = ":memory:";
 
-    s->deny_file_functions = (g_duck_allowed_ndirs <= 0);
+    s->deny_file_functions = !duck_mode_b();
 
     if (strncmp(path, ":memory:", 8) == 0) {
         /* DuckDB's temp directory for an in-memory database is <cwd>/.tmp,

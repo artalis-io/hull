@@ -630,6 +630,25 @@ release-artifact layout).
   Deleting `data.db` to reset an app no longer resets its sessions and roles: delete the
   internal file too.
 
+- **DuckDB SQL can no longer read or write the app's `.hull` directory** (audit convergence
+  §7.2). A `duckdb://` connection with `fs = { read = {"."}, write = {"."} }` (mode B) had the
+  whole app root in DuckDB's `allowed_directories`, so `read_blob('.hull/internal.db')` returned
+  Hull's internal database raw (session tokens, TOTP secrets) and `COPY ... TO '.hull/...'`
+  wrote into it; the SQL scan protected only the connection's own database file. Two layers
+  now. The boundary: a grant of the app root itself is handed to DuckDB as the root's top-level
+  entries - each directory in `allowed_directories`, each regular file in `allowed_paths` -
+  leaving out `.hull` (any letter case, and by inode) and symbolic links, and a grant that
+  resolves into `.hull` (a `data -> .hull` link) gives no access. Defence in depth: the SQL scan
+  refuses any literal holding a `.hull` path component in any letter case (relative, absolute,
+  `./`, `x/../`, doubled slashes, file function arguments, COPY targets, replacement scans), and
+  in mode B a path that resolves into `.hull` and a glob that could reach it (DuckDB's glob
+  matches dot entries: `*/internal.db`, `**`, `.h*/x` from the root). **Behaviour change:**
+  DuckDB's lists cannot change once its configuration is locked, so with a root grant a file or
+  directory created at the app root after startup is not reachable from DuckDB SQL - keep
+  DuckDB's files in a subdirectory (`fs = { read = {"data/"}, write = {"data/"} }`), which is
+  unaffected. Covered by `duckdb_convergence_idb.*` in `test_db_duckdb`, `tests/e2e_duckdb_dot_hull.sh`
+  (the DuckDB CI job) and a leg of `tests/e2e_feature_duckdb.sh`.
+
 - **Postgres / MySQL / DuckDB default connections are unchanged:** a per-instance local file would
   split sessions across instances, so with no `databases.internal` the tables stay on the default
   connection (the startup WARN still recommends a separate database under its own role; the design

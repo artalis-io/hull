@@ -2510,6 +2510,10 @@ jobs:
           ./build/test_db_select
           ./build/test_crypto   # Hull's own mbedTLS must stay unaffected by the isolation
 
+      - name: DuckDB SQL cannot reach the app's .hull (audit convergence §7.2)
+        timeout-minutes: 5
+        run: sh tests/e2e_duckdb_dot_hull.sh
+
       - name: DuckDB feature archive (link-smoke, no --start-group)
         timeout-minutes: 5
         run: |
