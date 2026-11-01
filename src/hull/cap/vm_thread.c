@@ -419,7 +419,10 @@ int hl_vmt_run(HlVmThread *t, void (*fn)(void *), void *ud,
     uint64_t seq0 = 0;
     hl_run_watch_peek(t->cfg.watch, NULL, &seq0);
     uint64_t start = now_ms();
-    uint32_t fallback = hl_run_watchdog_limit_ms(HL_RUN_ENTRY);
+    /* The deadline the run's own arm will set: an HTTP entry's limit when
+     * this is one (audit convergence section 6.2), else every other run's. */
+    uint32_t fallback = hl_run_watchdog_limit_ms(http ? HL_RUN_HTTP
+                                                      : HL_RUN_ENTRY);
 
     pthread_mutex_lock(&t->mu);
     t->fn = fn;
