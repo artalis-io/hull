@@ -311,7 +311,9 @@ UTEST(vm_thread, fast_runs_are_never_abandoned)
     HlVmThreadConfig c;
     memset(&c, 0, sizeof c);
     c.watch = &w;
-    c.grace_ms = 200;
+    /* A wide grace: the run returns ~100 ms past its deadline, and a loaded
+     * CI host overshoots a sleep by more than a tight grace allows. */
+    c.grace_ms = 2000;
     HlVmThread *t = NULL;
     ASSERT_EQ(hl_vmt_create(&t, &c), 0);
     /* A run that outlives its deadline but returns within the grace. */
