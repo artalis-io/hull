@@ -9,6 +9,15 @@
 
 #include "utest.h"
 #include "hull/cap/http.h"
+#include "hull/cap/run_watchdog.h"   /* §6.2: the run deadline */
+
+#include <keel/error.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -397,5 +406,114 @@ UTEST(fetch_admit, the_body_counts_against_the_heap_limit)
     hl_offheap_drop(&a);
     EXPECT_EQ((size_t)0, total);
 }
+
+/* ── Audit convergence §6.2: a synchronous request ends by the run's deadline ──
+ *
+ * hl_cap_http_request blocks its run (on the server, the event loop) for up
+ * to its timeout, with the wait excluded from the binding dispatcher's
+ * measured time and no instruction running, so the run's deadline was never
+ * seen: a /slow handler under limits.request_ms = 1500 held the loop for the
+ * upstream's full 8 s. The request's timeout is now clamped to what is left
+ * of the calling thread's run. A listener that never accepts stands in for a
+ * slow upstream: the kernel completes the connect, nobody ever answers. */
+
+static int cd_mute_listener(int *port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    socklen_t len = sizeof sa;
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
+        listen(fd, 8) != 0 ||
+        getsockname(fd, (struct sockaddr *)&sa, &len) != 0) {
+        close(fd);
+        return -1;
+    }
+    *port = ntohs(sa.sin_port);
+    return fd;
+}
+
+static uint64_t cd_mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+#ifndef __has_feature
+#  define __has_feature(x) 0
+#endif
+/* Not under MSan: the sync connect resolves through libc getaddrinfo,
+ * which MSan does not instrument (it flags the result as uninitialised). */
+#if !__has_feature(memory_sanitizer)
+UTEST(http_convergence_deadline, sync_request_ends_at_the_run_deadline)
+{
+    int port = 0;
+    int lfd = cd_mute_listener(&port);
+    ASSERT_GE(lfd, 0);
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/slow", port);
+    const char *hosts[] = { "127.0.0.1" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+
+    HlRunWatch run;
+    memset(&run, 0, sizeof run);
+    hl_run_watch_arm(&run, 300);
+    KlHttpClientResponse resp;
+    uint64_t t0 = cd_mono_ms();
+    int rc = hl_cap_http_request(&cfg, 6000, "GET", url, NULL, 0, NULL, 0,
+                                 &resp);
+    uint64_t took = cd_mono_ms() - t0;
+    int err = resp.error;
+    hl_run_watch_disarm(&run);
+    kl_http_client_response_free(&resp);
+    close(lfd);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(KL_ERR_TIMEOUT, err);
+    EXPECT_LT(took, (uint64_t)2500);   /* the run's 300 ms, not the call's 6 s */
+}
+
+/* Past the run's deadline the request is refused before anything is sent;
+ * with the run's watch disarmed the request has its own timeout again. */
+UTEST(http_convergence_deadline, request_past_the_run_deadline_is_refused)
+{
+    int port = 0;
+    int lfd = cd_mute_listener(&port);
+    ASSERT_GE(lfd, 0);
+    char url[64];
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/slow", port);
+    const char *hosts[] = { "127.0.0.1" };
+    HlHttpConfig cfg = { .allowed_hosts = hosts, .count = 1 };
+
+    HlRunWatch run;
+    memset(&run, 0, sizeof run);
+    hl_run_watch_arm(&run, 1);
+    struct timespec ts = { 0, 20 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    KlHttpClientResponse resp;
+    uint64_t t0 = cd_mono_ms();
+    int rc = hl_cap_http_request(&cfg, 3000, "GET", url, NULL, 0, NULL, 0,
+                                 &resp);
+    uint64_t took = cd_mono_ms() - t0;
+    int err = resp.error;
+    kl_http_client_response_free(&resp);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(KL_ERR_TIMEOUT, err);
+    EXPECT_LT(took, (uint64_t)1000);
+
+    hl_run_watch_disarm(&run);
+    t0 = cd_mono_ms();
+    rc = hl_cap_http_request(&cfg, 400, "GET", url, NULL, 0, NULL, 0, &resp);
+    took = cd_mono_ms() - t0;
+    kl_http_client_response_free(&resp);
+    close(lfd);
+    EXPECT_EQ(-1, rc);
+    EXPECT_GE(took, (uint64_t)350);    /* its own 400 ms */
+}
+#endif /* !memory_sanitizer */
 
 UTEST_MAIN()

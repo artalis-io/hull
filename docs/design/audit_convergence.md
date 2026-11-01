@@ -129,6 +129,16 @@ HTTP handler runs default to a 5 s wall deadline (`HL_RUN_HTTP_DEFAULT_MS`), con
 app and per route. app.main keeps 10 min; timers and ws callbacks 5 s. The existing watchdog
 enforces it.
 
+**Status.** Built in #981 (10 s default for HTTP runs; `limits.request_ms` / `callback_ms`;
+docs/design/audit_convergence_dispatcher.md §2). The phase-2 confirming audit found two
+Mediums where a blocking native call outlived the deadline because the watchdog's flag is
+not seen inside one call: a synchronous `http.get` (M1) and a synchronous `compute.call` (M2).
+Fixed by clamping each call's own timeout to what is left of the calling run
+(`hl_run_deadline_left_ms`) and by charging WASM guest time to the budget
+(dispatcher doc §2.1); regression tests `http_convergence_deadline.*`,
+`wasm_convergence_deadline.*` and `tests/e2e_convergence_deadline.sh`. Per-route deadlines
+remain a follow-up.
+
 ### 6.3 Preemption of long native calls
 
 **Phase 1.** Run each app VM's request handlers on a dedicated VM thread, with the event loop

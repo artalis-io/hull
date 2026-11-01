@@ -9,6 +9,7 @@
 
 #include "hull/cap/http.h"
 #include "hull/shared/dispatch_meter.h"   /* excluded waits */
+#include "hull/cap/run_watchdog.h"     /* hl_run_deadline_clamp_ms (§6.2) */
 #include "hull/cap/audit.h"
 #include "hull/host_match.h"
 #include "hull/cap/db_budget.h"       /* hl_db_budget_charge: a redirect hop */
@@ -330,6 +331,15 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
      * redirect hook below keeps the whole chain inside the same deadline. */
     int timeout = hl_http_timeout_resolve(timeout_ms, cfg->timeout_ms,
                                           HL_HTTP_SYNC_MAX_TIMEOUT_MS);
+    /* Audit convergence §6.2: and to what is left of the calling run's
+     * deadline. The wait is excluded from the dispatcher's measured charge
+     * (below) and no instruction runs during it, so neither the budget nor
+     * the run watchdog's flag could stop it: a request with
+     * limits.request_ms = 1500 held the event loop for the upstream's full
+     * 8 s. Every redirect hop takes what is left of this clamped timeout
+     * (hl_http_sync_redirect_hop), so the chain ends by the run's deadline
+     * too. Nothing left: refused as a timeout, nothing sent. */
+    timeout = (int)hl_run_deadline_clamp_ms((uint64_t)timeout);
     KlHttpClientConfig kl_cfg = {
         .timeout_ms        = timeout,
         .max_response_size = cfg->max_response_size,
@@ -343,10 +353,14 @@ int hl_cap_http_request(const HlHttpConfig *cfg, int timeout_ms,
     /* The request is the server's time (DNS, connect, the transfer), not the
      * run's work: excluded from the binding dispatcher's measured charge
      * (shared/dispatch_meter.h). The floor and the body are charged by the
-     * binding; the whole wait is bounded by the timeout and the run's
-     * deadline. */
+     * binding; the whole wait is bounded by the timeout, clamped above to
+     * the run's deadline (the deadline itself is not seen during the wait).
+     * The blocking getaddrinfo is the one part no timeout interrupts. */
     uint64_t hl_mx = hl_meter_exclude_begin();
-    if (cfg->follow_redirects) {
+    if (timeout <= 0) {
+        resp->error = KL_ERR_TIMEOUT;   /* the run's deadline has passed */
+        rc = -1;
+    } else if (cfg->follow_redirects) {
         HlHttpSyncChain chain = {
             .kl_cfg      = &kl_cfg,
             .deadline_ms = kl_monotonic_ms() + (uint64_t)timeout,

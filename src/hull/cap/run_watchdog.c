@@ -41,6 +41,15 @@ static unsigned        g_poll_tick;
 static int             g_cv_monotonic;
 #endif
 
+/* Audit convergence §6.2: the deadline of the run the CALLING THREAD is in,
+ * for a blocking native call to clamp its own timeout to
+ * (hl_run_deadline_left_ms). A COPY, set by every arm / restore on the
+ * thread that runs the VM and cleared by that watch's disarm: the owner
+ * pointer is only compared, never followed, so a watch freed on another
+ * thread leaves at worst a stale deadline here, never a dangling read. */
+static _Thread_local const HlRunWatch *tl_owner;
+static _Thread_local uint64_t          tl_deadline_ms;   /* 0 = none */
+
 /* The configured limit (-1 = the defaults); atomic, read by every arm on
  * any thread. Until a runner configures it, HULL_MAX_RUN_MS is read once
  * (so hull test / hull agent and every other entry honour it too). */
@@ -314,6 +323,8 @@ void hl_run_watch_arm(HlRunWatch *w, uint32_t ms)
         w->armed = 1;
         link_locked(w);
     }
+    tl_owner = w;
+    tl_deadline_ms = w->armed ? w->deadline_ms : 0;
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -325,7 +336,27 @@ void hl_run_watch_disarm(HlRunWatch *w)
     w->armed = 0;
     w->seq++;
     __atomic_store_n(&w->stop, 0, __ATOMIC_RELAXED);
+    if (tl_owner == w) {
+        tl_owner = NULL;
+        tl_deadline_ms = 0;
+    }
     pthread_mutex_unlock(&g_mu);
+}
+
+int64_t hl_run_deadline_left_ms(void)
+{
+    uint64_t d = tl_deadline_ms;
+    if (d == 0) return -1;
+    uint64_t now = now_ms();
+    return d > now ? (int64_t)(d - now) : 0;
+}
+
+uint64_t hl_run_deadline_clamp_ms(uint64_t ms)
+{
+    int64_t left = hl_run_deadline_left_ms();
+    if (left < 0) return ms;
+    if (left == 0) return 0;
+    return ms == 0 || (uint64_t)left < ms ? (uint64_t)left : ms;
 }
 
 void hl_run_watch_peek(HlRunWatch *w, uint64_t *deadline_ms, uint64_t *seq)
@@ -366,6 +397,8 @@ void hl_run_watch_restore(HlRunWatch *w, uint64_t deadline_ms)
         else if (can_link_locked())
             link_locked(w);
     }
+    tl_owner = w;
+    tl_deadline_ms = w->armed ? w->deadline_ms : 0;
     pthread_mutex_unlock(&g_mu);
 }
 

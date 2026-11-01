@@ -21,6 +21,9 @@
 #include "hull/shared/log_lock.h"
 #include "log.h"
 #include "hull/vfs.h"
+#include "hull/cap/run_watchdog.h"       /* §6.2: the run deadline */
+#include "hull/shared/dispatch_meter.h"   /* hl_meter_excluded */
+#include "hull/shared/work_charge.h"      /* HL_WORK_UNITS_PER_US */
 #include "hull/entry.h"
 #include "gen_echo64_aot.h" /* build-generated: echo64_aot[] + _len (0 if no wamrc) */
 #include <limits.h>
@@ -4588,6 +4591,162 @@ UTEST(hl_cap_wasm, a41_guest_log_lines_are_capped_per_call)
     hl_cap_wasm_instance_destroy(pi);
 
     log_set_quiet(false);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Audit convergence §6.2: a synchronous call ends by the run's deadline ──
+ *
+ * A synchronous compute.call / instance:call holds its run (on the server,
+ * the event loop), and the run watchdog's flag is not seen while guest code
+ * runs, so the call's own timeout_ms (10 s default, up to 1 h) outlived the
+ * run's deadline: a quadratic guest under limits.request_ms = 1500 answered
+ * 503 after 7.5 s. These tests arm a run watch on the test thread, as a
+ * request's arm does, and run loop_forever - `(loop br 0)`, which never
+ * returns - with gas out of the way (the maximum, and AOT code is never
+ * metered) and a per-call timeout far past the run's deadline. */
+
+static void cd_arm_run(HlRunWatch *w, uint32_t ms)
+{
+    memset(w, 0, sizeof *w);
+    hl_run_watch_arm(w, ms);
+}
+
+UTEST(wasm_convergence_deadline, sync_call_ends_at_the_run_deadline)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlRunWatch run;
+    cd_arm_run(&run, 300);
+    HlWasmCallOpts opts = {0};
+    opts.gas = HL_WASM_MAX_GAS;
+    opts.timeout_ms = 6000;
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    uint64_t t0 = mono_ms();
+    int rc = hl_cap_wasm_call(&cache, "loop_forever", "x", 1, &out, &out_len,
+                              &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    uint64_t took = mono_ms() - t0;
+    hl_run_watch_disarm(&run);
+    free(out);
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    EXPECT_LT(took, (uint64_t)2500);   /* the run's 300 ms, not the call's 6 s */
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(wasm_convergence_deadline, instance_call_ends_at_the_run_deadline)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts opts = {0};
+    opts.gas = HL_WASM_MAX_GAS;
+    opts.timeout_ms = 6000;
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "loop_forever",
+                                                     &opts, &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+
+    HlRunWatch run;
+    cd_arm_run(&run, 300);
+    void *out = NULL;
+    size_t out_len = 0;
+    uint64_t t0 = mono_ms();
+    int rc = hl_cap_wasm_instance_call(pi, "x", 1, &out, &out_len, &opts,
+                                       NULL, NULL, NULL, &err);
+    uint64_t took = mono_ms() - t0;
+    hl_run_watch_disarm(&run);
+    free(out);
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    EXPECT_LT(took, (uint64_t)2500);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* A call made once the run's deadline has passed runs no guest code. */
+UTEST(wasm_convergence_deadline, call_past_the_run_deadline_is_refused)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlRunWatch run;
+    cd_arm_run(&run, 1);
+    struct timespec ts = { 0, 20 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    int rc = hl_cap_wasm_call(&cache, "echo", "hello", 5, &out, &out_len,
+                              NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    free(out);
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    if (err) EXPECT_STREQ(err, "timeout");
+
+    /* Once the watch is disarmed (the run's VM is gone) nothing is left on
+     * the thread: a call runs again. */
+    hl_run_watch_disarm(&run);
+    out = NULL;
+    EXPECT_EQ(hl_cap_wasm_call(&cache, "echo", "hello", 5, &out, &out_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err), 0);
+    free(out);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* With no run on the thread (a compute.async pool thread) the call keeps its
+ * own timeout. */
+UTEST(wasm_convergence_deadline, no_run_keeps_the_call_timeout)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    HlWasmCallOpts opts = {0};
+    opts.gas = HL_WASM_MAX_GAS;
+    opts.timeout_ms = 400;
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    uint64_t t0 = mono_ms();
+    int rc = hl_cap_wasm_call(&cache, "loop_forever", "x", 1, &out, &out_len,
+                              &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    uint64_t took = mono_ms() - t0;
+    free(out);
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    EXPECT_GE(took, (uint64_t)350);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Guest time is the run's work: it is no longer excluded from the binding
+ * dispatcher's measured time (shared/dispatch_meter.h), so an AOT guest -
+ * which gas never meters - is charged to the budget. Before, the whole call
+ * sat inside an exclude bracket and cost the run nothing. */
+UTEST(wasm_convergence_deadline, guest_time_is_not_excluded_from_the_meter)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+    HlWasmCallOpts opts = {0};
+    opts.gas = HL_WASM_MAX_GAS;
+    opts.timeout_ms = 300;
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    uint64_t x0 = hl_meter_excluded;
+    int rc = hl_cap_wasm_call(&cache, "loop_forever", "x", 1, &out, &out_len,
+                              &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    uint64_t excluded_units = hl_meter_ticks_units(hl_meter_excluded - x0);
+    free(out);
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    /* ~300 ms of guest time is ~19M units; allow 20 ms of anything else. */
+    EXPECT_LT(excluded_units, (uint64_t)20000 * HL_WORK_UNITS_PER_US);
     hl_cap_wasm_destroy(&cache);
 }
 

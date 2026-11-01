@@ -1509,6 +1509,14 @@ e2e-timers: $(BUILDDIR)/hull
 e2e-request-deadline: $(BUILDDIR)/hull
 	sh tests/e2e_request_deadline.sh
 
+# A blocking native call ends by its run's deadline (audit convergence §6.2,
+# phase-2 confirming audit M1 / M2): a sync http.get to a slow upstream and a
+# sync compute.call of a never-returning guest end at limits.request_ms, a
+# /ping is served meanwhile, and guest time is charged to the budget.
+.PHONY: e2e-convergence-deadline
+e2e-convergence-deadline: $(BUILDDIR)/hull
+	sh tests/e2e_convergence_deadline.sh
+
 # Shutdown with work in flight (audit 14 G1 / audit 15): SIGTERM over HTTP and
 # HTTPS with a parked handler, a detached fetch and an open WebSocket, and an
 # app.main that leaves unawaited work - each must exit 0.

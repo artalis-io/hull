@@ -239,7 +239,12 @@ HlAsyncCtx *hl_async_http_start(KlHttpServer *server, KlHttpConn *conn,
     }
 
     /* One deadline for the whole request: the per-call option, else the
-     * manifest's http.timeout_ms, else 30 s; clamped to the fetch ceiling. */
+     * manifest's http.timeout_ms, else 30 s; clamped to the fetch ceiling.
+     * NOT clamped to the run's deadline (audit convergence §6.2), unlike the
+     * synchronous request (cap/http.c): the run that awaits a fetch parks,
+     * the event loop serves other requests meanwhile, and the resume is a
+     * new run with a deadline of its own. The run deadline bounds the time
+     * a run HOLDS the loop; this timeout bounds the request's total time. */
     timeout_ms = hl_http_timeout_resolve(timeout_ms, http_cfg->timeout_ms,
                                          HL_HTTP_FETCH_MAX_TIMEOUT_MS);
 

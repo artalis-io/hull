@@ -163,16 +163,20 @@ bracket counts, and nothing inside a bracket may raise):
 | Postgres LISTEN wait | `cap/pg_conn.c` | the server's time |
 | Valkey command wait | `cap/valkey_conn.c` | the server's time |
 | TLS handshake poll | `shared/tls_client.c` | the peer's time |
-| Synchronous HTTP request | `cap/http.c` | DNS, connect, transfer: the server's time; floor + body charged explicitly, bounded by the timeout |
+| Synchronous HTTP request | `cap/http.c` | DNS, connect, transfer: the server's time; floor + body charged explicitly, bounded by the timeout, which is clamped to the run's deadline (§2.1) |
 | SMTP pump | `cap/smtp_transport.c` | the server's time |
 | Terminal input poll, OSC 11 query | `cap/tui.c` | the user's / terminal's time (`tui.pollSync`) |
 | app.main `ctx.stdin` reads | `runtime/{lua,js}/runtime.c` | the user's time |
-| WASM guest execution | `cap/wasm.c` | metered by `gas` and bounded by `timeout_ms` |
 | GPU device waits | `cap/gpu_wgpu.c` | the device's time; bounded by the clamped timeout |
 | `fsync` of written files and their directory | `cap/fs.c`, `shared/blob_store.c` (`hl_meter_fsync`) | the device's time; paid by the write floors |
 
 Waits that PARK (`hull.sleep`, `http.fetch`, `db.async`, Lua `tui.poll`,
 multipart reads) are not inside the call at all and need no bracket.
+
+WASM guest execution was excluded too, "metered by `gas`" - but WAMR meters no
+AOT code, which a production `hull build` with wamrc runs, so a synchronous
+guest call cost the run nothing (phase-2 confirming audit M2). It is now
+measured like any other binding work (§2.1).
 
 ### 1.5 Sanitizers and measured overhead
 
@@ -218,6 +222,36 @@ limit` (an instruction-limit trip stays a 500).
 The deadline bounds each uninterrupted run - the time a run holds the event
 loop - not the request's total time, which the op timeouts bound. Per-route
 deadlines need router options Hull does not have; follow-up.
+
+### 2.1 Blocking native calls (phase-2 confirming audit M1 / M2)
+
+The watchdog's flag is polled between instructions, so a binding that blocks
+inside ONE native call is not stopped by it. Two such calls ran to their own
+timeouts past the run's deadline: a synchronous `http.get` (30 s default,
+60 s max; `request_ms = 1500` and an upstream answering after 8 s gave a 503
+after 8085 ms, a concurrent `/ping` waiting 7.7 s) and a synchronous
+`compute.call` (10 s default, 1 h max; a quadratic guest gave a 503 after
+7575 ms). Both also sat inside an exclude bracket, so the budget did not see
+them either.
+
+Fix: `hl_run_watch_arm` / `_restore` record the deadline they set in a
+per-thread copy (cleared by the watch's disarm; the owner pointer is compared,
+never followed), and `hl_run_deadline_left_ms` / `hl_run_deadline_clamp_ms`
+read it. `hl_cap_http_request` clamps its timeout to it before the request
+(every redirect hop takes what is left of that timeout), and the WASM entry
+points (`hl_cap_wasm_call_buf`, the persistent instance's create and call -
+so `compute.stream` chunks and WASM `db.udf` too) clamp their watch's
+`timeout_ms`. Past the deadline the call is refused as a timeout with nothing
+sent or run. The guest call is no longer excluded from measured time.
+
+Not clamped, by design: `http.fetch` (its run parks; the resume is a new run
+with its own deadline, and the op timeout bounds the request's total time) and
+`compute.async` (a pool thread is in no run and holds no loop). The other
+blocking waits ask the run every step already: the sync SMTP send's cancel
+poll and the DB transport's connect pump / sliced send and receive / TLS
+handshake call `hl_db_budget_charge(0)` or their stop function each slice, and
+that charge sees the deadline (`budget_charge` / `js_budget_add`). The one part
+no timeout interrupts is a blocking `getaddrinfo`.
 
 ## 3. Open questions answered
 

@@ -121,6 +121,25 @@ void     hl_run_watch_restore(HlRunWatch *w, uint64_t deadline_ms);
  * has armed the watch yet. */
 void hl_run_watch_peek(HlRunWatch *w, uint64_t *deadline_ms, uint64_t *seq);
 
+/* ── A blocking native call inside a run (audit convergence §6.2) ──
+ *
+ * The watchdog's flag is seen between instructions, so ONE blocking native
+ * call (a synchronous http.get, a synchronous compute.call) ran to its own
+ * timeout - up to 60 s / 1 h - past the run's deadline, holding the event
+ * loop. Such a call clamps its timeout to what is left of the run it was made
+ * from. The deadline is the one the CALLING THREAD's last arm / restore set
+ * (hl_run_watch_arm / _restore record it per thread; the watch's disarm
+ * clears it), so a pool thread (compute.async, db.async, SMTP workers) has
+ * none and its ops keep their own timeouts.
+ *
+ * hl_run_deadline_left_ms: ms left, 0 = the deadline has passed, -1 = the
+ * thread is in no run with a deadline.
+ * hl_run_deadline_clamp_ms: min(@p ms, left) (@p ms 0 = unbounded); 0 =
+ * nothing left (refuse the call as timed out); @p ms unchanged when there is
+ * no deadline. */
+int64_t  hl_run_deadline_left_ms(void);
+uint64_t hl_run_deadline_clamp_ms(uint64_t ms);
+
 /* ── Deferred start (audit 43) ─────────────────────────────────────
  *
  * A thread that exists when the phase-2 sandbox is applied keeps the

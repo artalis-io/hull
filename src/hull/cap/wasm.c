@@ -10,12 +10,12 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
-#include "hull/shared/dispatch_meter.h"   /* excluded waits */
 #include "hull/cap/wasm_aot_stamp.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
 #include "hull/cap/wasm_spans.h"
 #include "hull/cap/wasm_watchdog.h"
+#include "hull/cap/run_watchdog.h"   /* hl_run_deadline_clamp_ms (§6.2) */
 #include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/cap/fs_resolve.h"
@@ -1186,6 +1186,23 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
 
 static const char *const err_timeout = "timeout";
 
+/* The wall-clock bound of a call made from a run (audit convergence §6.2):
+ * the call's own timeout (@p requested, 0 = the default, clamped to the
+ * maximum) and no later than the calling run's deadline. A synchronous
+ * compute.call / instance:call / compute.instance() holds the run - and the
+ * event loop - for its whole length, and the run watchdog's flag is not seen
+ * while guest code runs, so the guest's 10 s default (up to 1 h) outlived a
+ * request_ms of 1.5 s. A pool thread (compute.async) is in no run, so its
+ * calls keep their own timeout: they hold no loop. -1 = the run's deadline
+ * has passed (refuse as a timeout, run nothing). */
+static int wasm_run_timeout(uint32_t requested, uint32_t *out)
+{
+    uint64_t ms = hl_run_deadline_clamp_ms(hl_wasm_timeout_resolve(requested));
+    if (ms == 0) return -1;
+    *out = (uint32_t)ms;
+    return 0;
+}
+
 /* Bytes of the instance's default linear memory right now: its initial
  * memory, the app heap WAMR inserted and whatever memory.grow added. */
 static uint64_t linear_memory_bytes(wasm_module_inst_t inst)
@@ -1523,14 +1540,16 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     /* The watch covers the call itself: bound to the instance only while
      * guest code runs, so the watchdog can never touch the instance after it
      * goes back to the pool or is destroyed. */
-    /* Guest time is metered by gas and timeout_ms, not the binding
-     * dispatcher's clock (shared/dispatch_meter.h). */
-    uint64_t hl_mx = hl_meter_exclude_begin();
+    /* Guest time is the run's work (audit convergence §6.2): NOT excluded
+     * from the binding dispatcher's measured charge (shared/dispatch_meter.h).
+     * Gas meters interpreted code only - WAMR meters no AOT code, which a
+     * production `hull build` with wamrc runs - so a guest call was free to
+     * the budget. A call on a pool thread (compute.async) is in no binding
+     * call and charges nothing: it holds no loop. */
     hl_wasm_watch_bind(watch, inst);
     int call_ok = wasm_runtime_call_wasm(exec_env, process_fn,
                                          (uint32_t)argc, argv);
     hl_wasm_watch_bind(watch, NULL);
-    hl_meter_exclude_end(hl_mx);
     if (!call_ok) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (wasm_is_gas_exception(exception)) {
@@ -1672,8 +1691,14 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 {
     /* Gas bounds interpreted code only; this wall-clock watch bounds the
      * whole call - AOT code and the instance's start / ctor functions too. */
+    uint32_t timeout_ms;
+    if (wasm_run_timeout(opts ? opts->timeout_ms : 0, &timeout_ms) != 0) {
+        if (output_buf) *output_buf = NULL;
+        if (err_msg) *err_msg = err_timeout;
+        return HL_WASM_ERR_TIMEOUT;
+    }
     HlWasmWatch watch = {0};
-    if (hl_wasm_watch_arm(&watch, opts ? opts->timeout_ms : 0, NULL) != 0) {
+    if (hl_wasm_watch_arm(&watch, timeout_ms, NULL) != 0) {
         if (output_buf) *output_buf = NULL;
         if (err_msg) *err_msg = "watchdog_unavailable";
         return HL_WASM_ERR_INTERNAL;
@@ -1829,8 +1854,14 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
      * follow-up): it lives across calls, outside every VM heap limit. */
     char error_buf[256];
     error_buf[0] = '\0';
+    uint32_t start_ms;
+    if (wasm_run_timeout(opts ? opts->timeout_ms : 0, &start_ms) != 0) {
+        hl_wasm_live_instance_release(cache, inst_bytes);
+        if (err_msg) *err_msg = err_timeout;
+        return NULL;
+    }
     HlWasmWatch watch = {0};
-    if (hl_wasm_watch_arm(&watch, opts ? opts->timeout_ms : 0, NULL) != 0) {
+    if (hl_wasm_watch_arm(&watch, start_ms, NULL) != 0) {
         hl_wasm_live_instance_release(cache, inst_bytes);
         if (err_msg) *err_msg = "watchdog_unavailable";
         return NULL;
@@ -2134,14 +2165,12 @@ static int instance_call_buf_run(HlWasmInstance *pi,
         argc_call = 4;
     }
 
-    /* Guest time is metered by gas and timeout_ms, not the binding
-     * dispatcher's clock (shared/dispatch_meter.h). */
-    uint64_t hl_mx = hl_meter_exclude_begin();
+    /* Guest time is the run's work, charged by the dispatcher (see
+     * call_buf_impl; audit convergence §6.2). */
     hl_wasm_watch_bind(watch, inst);
     int call_ok = wasm_runtime_call_wasm(exec_env, process_fn,
                                          (uint32_t)argc_call, argv);
     hl_wasm_watch_bind(watch, NULL);
-    hl_meter_exclude_end(hl_mx);
     if (!call_ok) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (wasm_is_gas_exception(exception)) {
@@ -2244,6 +2273,11 @@ static int instance_call_buf_impl(HlWasmInstance *pi,
 {
     uint32_t timeout_ms = opts && opts->timeout_ms ? opts->timeout_ms
                         : pi ? pi->default_timeout_ms : 0;
+    if (wasm_run_timeout(timeout_ms, &timeout_ms) != 0) {
+        if (output_buf) *output_buf = NULL;
+        if (err_msg) *err_msg = err_timeout;
+        return HL_WASM_ERR_TIMEOUT;
+    }
     HlWasmWatch watch = {0};
     if (hl_wasm_watch_arm(&watch, timeout_ms, NULL) != 0) {
         if (output_buf) *output_buf = NULL;
