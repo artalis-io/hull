@@ -337,6 +337,17 @@ static inline const char *hl_lua_chunkname(char *buf, size_t n,
  * internal modules to app code - a C caller has no Lua frame to check. */
 int hl_lua_require_trusted(lua_State *L);
 
+/* Pushes app code's read-only view of the table at @p idx (readonly_view.c,
+ * audit 43): reads go through to it, writes raise, nested tables read through
+ * it are views too, one view per table per VM. A non-table, or a view, is
+ * pushed as it is. The untrusted `require` hands app code a view of every
+ * stdlib module, and the app's `hull` global is a view; the stdlib keeps the
+ * real tables. */
+void hl_lua_push_readonly(lua_State *L, int idx);
+
+/* hull._readonly (stdlib-only): view(t). */
+int luaopen_hull_readonly(lua_State *L);
+
 /* on_complete hook (HlLua::active_on_complete) that ends a request life
  * (shared/req_life.h): the handler that owned it has finished, failed, or
  * was cancelled because the client went away. */

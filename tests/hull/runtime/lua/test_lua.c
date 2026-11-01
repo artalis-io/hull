@@ -9315,12 +9315,19 @@ UTEST(lua_stdlib, audit19_stdlib_parity)
         "    return 0 "
         "  end "
         "  local left = 0 "
-        "  tui.enter = function() end "
-        "  tui.leave = function() left = left + 1 end "
-        "  tui.size = function() return 80, 24 end "
-        "  tui.flush = function() end "
-        "  tui.poll = function() error('poll failed') end "
+        /* App code gets a read-only view of hull.tui since audit 43: stub
+         * the stdlib's own table through the test-hooks seam, and put it
+         * back after. */
+        "  local real = __test_hooks('hull._test_hooks').real('hull.tui') "
+        "  local saved = { enter = real.enter, leave = real.leave, "
+        "                  size = real.size, flush = real.flush, poll = real.poll } "
+        "  real.enter = function() end "
+        "  real.leave = function() left = left + 1 end "
+        "  real.size = function() return 80, 24 end "
+        "  real.flush = function() end "
+        "  real.poll = function() error('poll failed') end "
         "  local rok, err = pcall(tui.run, { draw = function() end }) "
+        "  for k, f in pairs(saved) do real[k] = f end "
         "  if rok or not tostring(err):find('poll failed', 1, true) then return 3 end "
         "  if left ~= 1 then return 4 end "
         "  return 0 "
@@ -10356,7 +10363,8 @@ UTEST(lua_audit5, manifest_json_ignores_app_tampering)
         "setmetatable(m, { __index = { hosts = { '*' } } }) "
         "m.fs = { read = { '/' } } "
         "local ok, json = pcall(require, 'hull.json') "
-        "if ok and json then json.encode = function() return '{}' end end"), LUA_OK);
+        "if ok and json then pcall(function() "
+        "json.encode = function() return '{}' end end) end"), LUA_OK);
     char *j = NULL;
     size_t jl = 0;
     ASSERT_EQ(hl_lua_manifest_json(L, &j, &jl), 0);
@@ -16013,5 +16021,159 @@ UTEST(lua_audit42, a_path_chunkname_starting_hull_dot_is_app_code)
     cleanup_lua_caps();
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
+
+/* ── audit 43: app code gets read-only views of stdlib module tables ──
+ * require handed the app the same table the stdlib calls through at call
+ * time: an app assigning sealbox.seal had totp hand its function the keyring.
+ * App code now gets a view (readonly_view.c); the stdlib keeps the table. */
+
+#ifdef HL_ENABLE_DB
+/* An app's sealbox.seal / .open - assigned (refused) or rawset on its view -
+ * never runs inside totp; enroll, confirm and verify still work. */
+UTEST(lua_audit43, totp_does_not_call_an_app_sealbox_or_crypto)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char *got = eval_str(
+        "(function() "
+        "  local crypto = require('hull.crypto') "
+        "  local sealbox = require('hull.crypto.sealbox') "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  local calls = 0 "
+        "  local function wrap(f) return function(...) calls = calls + 1; return f(...) end end "
+        "  local a1 = pcall(function() sealbox.seal = wrap(sealbox.seal) end) "
+        "  local a2 = pcall(function() sealbox.open = wrap(sealbox.open) end) "
+        "  local a3 = pcall(function() crypto.random = wrap(crypto.random) end) "
+        "  rawset(sealbox, 'seal', wrap(sealbox.seal)) "
+        "  rawset(sealbox, 'open', wrap(sealbox.open)) "
+        "  rawset(crypto, 'random', wrap(crypto.random)) "
+        "  rawset(crypto, 'hmac_sha1', wrap(crypto.hmac_sha1)) "
+        "  local t = __test_hooks('hull.web.middleware.totp') "
+        "  t.reset() "
+        "  totp.init({ issuer = 'T', encryption_keys = { [1] = string.rep('k', 32) }, current = 1 }) "
+        "  local r = totp.enroll('u1') "
+        "  local secret = t.base32_decode(r.secret_base32) "
+        "  local step = t.current_step() "
+        "  local ok_c = totp.confirm('u1', t.totp_at_step(secret, step, 6)) "
+        "  local ok_v = totp.verify('u1', t.totp_at_step(secret, step + 1, 6)) "
+        "  return table.concat({ tostring(a1), tostring(a2), tostring(a3), "
+        "                        tostring(ok_c), tostring(ok_v), tostring(calls) }, ' ') "
+        "end)()");
+    ASSERT_NE(got, NULL);
+    /* Assignments refused; the rawset wrappers sit on the app's views only,
+     * and nothing but totp could call them - which must not. */
+    EXPECT_STREQ(got, "false false false true true 0");
+    free(got);
+    cleanup_lua_caps();
+}
+
+/* rawset on the app's view changes the view only: the stdlib's table (the
+ * __hull_loaded entry) keeps its own function, and the app reads its own. */
+UTEST(lua_audit43, rawset_on_a_view_does_not_reach_the_stdlib)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "local sb = require('hull.crypto.sealbox') "
+        "__a43_ok = pcall(function() hull.sleep = print end) "
+        "rawset(sb, 'seal', function() return 'app' end) "
+        "rawset(hull, 'sleep', function() return 'app' end) "
+        "__a43_seal = require('hull.crypto.sealbox').seal()"), LUA_OK);
+    lua_getglobal(L, "__a43_seal");
+    EXPECT_STREQ(lua_tostring(L, -1), "app");
+    lua_getglobal(L, "__a43_ok");
+    EXPECT_FALSE(lua_toboolean(L, -1));
+    lua_settop(L, 0);
+    /* The real tables. */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+    lua_getfield(L, -1, "hull.crypto.sealbox");
+    ASSERT_EQ(lua_type(L, -1), LUA_TTABLE);
+    lua_getfield(L, -1, "seal");
+    EXPECT_EQ(lua_type(L, -1), LUA_TFUNCTION);
+    lua_settop(L, 0);
+    ASSERT_EQ(luaL_dostring(L,
+        "return require('hull.crypto.sealbox').seal"), LUA_OK);
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+    lua_getfield(L, -1, "hull.crypto.sealbox");
+    lua_getfield(L, -1, "seal");
+    EXPECT_FALSE(lua_rawequal(L, -4, -1));    /* the app's is not the stdlib's */
+    lua_settop(L, 0);
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+    lua_getfield(L, -1, "hull.hull");
+    ASSERT_EQ(lua_type(L, -1), LUA_TTABLE);
+    lua_getfield(L, -1, "sleep");
+    EXPECT_TRUE(lua_iscfunction(L, -1));      /* still Hull's */
+    lua_settop(L, 0);
+    /* And the stdlib's sealbox still seals. */
+    char *got = eval_str(
+        "(function() "
+        "  local t = __test_hooks('hull.web.middleware.totp') "
+        "  t.reset() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp.init({ issuer = 'T', encryption_keys = { [1] = string.rep('k', 32) }, current = 1 }) "
+        "  return type(totp.enroll('u2').secret_base32) "
+        "end)()");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "string");
+    free(got);
+    cleanup_lua_caps();
+}
+
+/* Ordinary use still works through a view: calls, nested tables, pairs, #,
+ * identity, the locked metatable, a sentinel's tostring and ==, a chainable
+ * stdlib call returning the module. */
+UTEST(lua_audit43, ordinary_module_use_still_works)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char *got = eval_str(
+        "(function() "
+        "  local crypto = require('hull.crypto') "
+        "  local enc = require('hull.encoding') "
+        "  local jobs = require('hull.jobs') "
+        "  local r = {} "
+        "  r[#r + 1] = tostring(#crypto.sha256('x') > 0) "
+        "  r[#r + 1] = enc.hex.encode('A') "
+        "  r[#r + 1] = tostring(enc.hex == enc.hex) "
+        "  r[#r + 1] = tostring(require('hull.crypto') == crypto) "
+        "  r[#r + 1] = tostring(getmetatable(crypto)) "
+        "  local nfn, hit = 0, false "
+        "  for k, v in pairs(crypto) do "
+        "    if type(v) == 'function' then nfn = nfn + 1 end "
+        "    if k == 'sha256' and v == crypto.sha256 then hit = true end "
+        "  end "
+        "  r[#r + 1] = tostring(nfn > 5 and hit) "
+        "  local sub = 0 "
+        "  for k, v in pairs(enc) do if type(v) == 'table' then sub = sub + 1 end end "
+        "  r[#r + 1] = tostring(sub > 0) "
+        "  r[#r + 1] = tostring(jobs.RETRY) "
+        "  r[#r + 1] = tostring(jobs.RETRY == jobs.RETRY and jobs.RETRY ~= jobs.DEAD) "
+        "  local chained = jobs.handler('a43', function() end) "
+        "  r[#r + 1] = tostring(chained == jobs) "
+        "  r[#r + 1] = tostring(pcall(function() chained.enqueue = print end)) "
+        "  r[#r + 1] = tostring(pcall(setmetatable, crypto, nil)) "
+        "  r[#r + 1] = tostring(pcall(function() enc.hex.encode = print end)) "
+        "  return table.concat(r, ' ') "
+        "end)()");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "true 41 true true locked true true jobs.RETRY true "
+                      "true false false false");
+    free(got);
+
+    /* The app's view of a sentinel equals the stdlib's real one (a handler
+     * returning jobs.RETRY is compared against the real table). */
+    ASSERT_EQ(luaL_dostring(L, "return require('hull.jobs').RETRY"), LUA_OK);
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+    lua_getfield(L, -1, "hull.jobs");
+    lua_getfield(L, -1, "RETRY");
+    EXPECT_FALSE(lua_rawequal(L, -4, -1));    /* a view, not the table */
+    EXPECT_TRUE(lua_compare(L, -4, -1, LUA_OPEQ));
+    EXPECT_TRUE(lua_compare(L, -1, -4, LUA_OPEQ));
+    lua_settop(L, 0);
+    cleanup_lua_caps();
+}
+#endif /* HL_ENABLE_DB */
 
 UTEST_MAIN();

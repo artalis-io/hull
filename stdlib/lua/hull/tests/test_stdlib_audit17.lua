@@ -108,7 +108,9 @@ end)
 -- from such a place marked the row failed, unsent.
 
 local outbox = require("hull.web.middleware.outbox")
-local http_client = require("hull.http-client")
+-- The stdlib's own table, to stub what outbox / pwned call (an app's is a
+-- read-only view since audit 43).
+local http_client = __test_hooks("hull._test_hooks").real("hull.http-client")
 local db = require("hull.db").default()
 
 local function counts()

@@ -26,6 +26,10 @@ local db     = require("hull.db").default()
 local time   = require("hull.time")
 local json   = require("hull.json")
 local crypto = require("hull.crypto")
+-- The chainable calls (jobs.handler(...), jobs.limit(...), ...) return the
+-- app's read-only view of this table, never the table itself: stdlib code
+-- calls through it, so app code must not be able to write it (audit 43).
+local view   = require("hull._readonly").view
 
 local jobs = {}
 
@@ -627,7 +631,7 @@ function jobs.init(opts)
         if not ok then _skip_locked = false end
     end
 
-    return jobs
+    return view(jobs)
 end
 
 -- ── Workflow dependencies (jobs.enqueue depends_on) ─────────────────────────
@@ -1001,7 +1005,7 @@ end
 -- @tparam[opt] table opts  { rate = <max jobs>, per = 1 } - nil/false removes it
 -- @treturn table the jobs module (for chaining)
 function jobs.limit(queue, opts)
-    if opts == nil or opts == false then _limits[queue] = nil; return jobs end
+    if opts == nil or opts == false then _limits[queue] = nil; return view(jobs) end
     -- rate: a whole number of jobs (audit 38: a fraction left a fractional
     -- grant, which Postgres refuses for the INTEGER counter, and NaN passed
     -- the `< 1` check); per: a finite number of seconds > 0.
@@ -1015,7 +1019,7 @@ function jobs.limit(queue, opts)
         error("jobs.limit: opts.per must be a number of seconds > 0", 2)
     end
     _limits[queue] = { rate = rate, per = per }
-    return jobs
+    return view(jobs)
 end
 
 -- Atomically reserve up to `want` slots in the current window for `key`, rolling
@@ -1092,7 +1096,7 @@ local function set_paused(queue, v)
     -- nothing and the second INSERT failed on the key.
     db.upsert("_hull_queue", { "name" }, { "name", "paused" }, { queue, v })
     _paused_at = 0   -- invalidate this process's cache so the change is seen now
-    return jobs
+    return view(jobs)
 end
 
 --- Pause a queue: workers stop claiming from it (in-flight jobs finish; enqueue
@@ -1376,7 +1380,7 @@ function jobs.handler(job_type, fn)
     end
     if type(fn) ~= "function" then error("jobs.handler: handler must be a function") end
     _handlers[job_type] = fn
-    return jobs
+    return view(jobs)
 end
 
 --- Optional catch-all for job types with no registered handler. Without it, an
@@ -1385,7 +1389,7 @@ end
 function jobs.default(fn)
     if type(fn) ~= "function" then error("jobs.default: handler must be a function") end
     _default = fn
-    return jobs
+    return view(jobs)
 end
 
 --- Register an in-process lifecycle listener. `event` is one of "completed",
@@ -1411,7 +1415,7 @@ function jobs.on(event, fn)
     if type(fn) ~= "function" then error("jobs.on: listener must be a function") end
     local L = _listeners[event]
     L[#L + 1] = fn
-    return jobs
+    return view(jobs)
 end
 
 -- Every transition out of 'running' is guarded by the claim: the job must
@@ -2042,7 +2046,7 @@ function jobs.cron(name, spec, data, opts)
               spec, job_type, payload, queue, priority, max_attempts,
               tz_offset, now, name })
     end
-    return jobs
+    return view(jobs)
 end
 
 --- Remove a cron schedule by name. Returns whether a schedule was removed.
@@ -3166,7 +3170,7 @@ function jobs.workflow(name, fn)
         end
         error(res, 0)
     end)
-    return jobs
+    return view(jobs)
 end
 
 --- Start a durable workflow instance. Returns the workflow id (a job id); the
@@ -3564,14 +3568,14 @@ function jobs.subscribe(name, handler, opts)
             { types_csv, max_f, now, name })
     end
     _subscribers[name] = { handler = handler }
-    return jobs
+    return view(jobs)
 end
 
 --- Remove a subscription: this worker's handler and the durable row (cursor).
 function jobs.unsubscribe(name)
     _subscribers[name] = nil
     db.exec("DELETE FROM _hull_job_subscriptions WHERE name=?", { name })
-    return jobs
+    return view(jobs)
 end
 
 -- Synchronous drain (the testability keystone; a test hook, never on the

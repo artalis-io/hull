@@ -7,7 +7,7 @@
 -- same outputs. Runs in the caps-bearing state (run_lua_test_in_runtime in
 -- tests/hull/runtime/lua/test_lua.c): logx needs hull.log, cache hull.time.
 
-local log    = require("hull.log")
+-- hull.log is declared for logx; lines are captured through logx's test hook.
 local logx   = require("hull.logx")
 local cache  = require("hull.cache")
 local i18n   = require("hull.i18n")
@@ -67,12 +67,12 @@ end)
 
 test("logx: the message's control bytes are escaped", function()
     local got
-    local saved = log.info
-    log.info = function(s) got = s end
+    local LX = __test_hooks("hull.logx")
+    local saved = LX.set_log({ info = function(s) got = s end })
     local ok, err = pcall(function()
         logx.with({ k = "v" }).info("line1\nforged\27x")
     end)
-    log.info = saved
+    LX.set_log(saved)
     assert(ok, err)
     -- Audit 11: the message is the leading msg="..." field, quoted and
     -- escaped as a value, so "k=v" inside it is not a field.
@@ -81,12 +81,12 @@ end)
 
 test("logx (audit 11): a message cannot forge a field", function()
     local got
-    local saved = log.info
-    log.info = function(s) got = s end
+    local LX = __test_hooks("hull.logx")
+    local saved = LX.set_log({ info = function(s) got = s end })
     local ok, err = pcall(function()
         logx.with({ k = "v" }).info('done user=admin "q')
     end)
-    log.info = saved
+    LX.set_log(saved)
     assert(ok, err)
     assert_eq(got, 'msg="done user=admin \\"q" k=v')
 end)

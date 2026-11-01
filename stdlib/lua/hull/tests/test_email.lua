@@ -163,7 +163,7 @@ expect_code("an address ending in NBSP throws",
 -- that was never sent. The fetch is stubbed to refuse (busy, as the 64-fetch
 -- cap does); tests/e2e_refusal_codes.sh drives the real cap.
 do
-    local hc = require("hull.http-client")
+    local hc = __test_hooks("hull._test_hooks").real("hull.http-client")  -- the stdlib's table (audit 43)
     local orig = hc.async.post
     hc.async.post = function() error("[hull:busy] http.fetch: test cap", 0) end
     for _, prov in ipairs({ "postmark", "sendgrid", "resend" }) do

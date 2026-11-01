@@ -111,4 +111,15 @@ for _, lvl in ipairs(LEVELS) do
     end
 end
 
+-- Test-only hook (hull._test_hooks): swap the log sink to capture lines.
+-- hull.log is a read-only view to app code (audit 43), so a test can no
+-- longer assign log.info; set_log returns the previous sink.
+require("hull._test_hooks").register("hull.logx", {
+    set_log = function(t)
+        local prev = log
+        log = t or require("hull.log")
+        return prev
+    end,
+})
+
 return logx
