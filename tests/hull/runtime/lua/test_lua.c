@@ -14701,7 +14701,12 @@ UTEST(lua_gpu_audit_convergence, dynamic_source_with_opt_in)
     hl_cap_gpu_set_shader_policy(lgpu, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
     lua_pushstring(lua_rt.L, lgpu_other_wgsl);
     lua_setglobal(lua_rt.L, "OTHER");
-    LGPU_EXPECT("R = tostring(gpu.compile('other', OTHER))", "true");
+    /* Runtime source is compiled first in the compile helper process
+     * (cap/gpu_helper.c); with none running (no server spawned one) it
+     * fails closed, with its own error. test_gpu drives the helper. */
+    LGPU_EXPECT("local ok, e = gpu.compile('other', OTHER) "
+                "R = tostring(ok) .. ' ' .. tostring(e)",
+                "nil shader_helper_failed");
     lua_rt.base.app_vfs = NULL;
     lgpu_cleanup();
 }

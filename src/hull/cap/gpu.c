@@ -15,6 +15,7 @@
  * supplies the wgpu backend via hl_gpu_feature_backends() / serve.c. */
 
 #include "hull/cap/gpu.h"
+#include "hull/cap/gpu_helper.h"
 #include "hull/cap/audit.h"
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"
@@ -3162,6 +3163,7 @@ const char *hl_gpu_compile_errstr(int rc)
     if (rc == HL_GPU_ERR_TIMEOUT) return "compile_timeout";
     if (rc == HL_GPU_ERR_BUSY) return GPU_BUSY_MSG;
     if (rc == HL_GPU_ERR_POLICY) return "dynamic_shader_refused";
+    if (rc == HL_GPU_ERR_HELPER) return "shader_helper_failed";
     return "shader_error";
 }
 
@@ -3185,7 +3187,8 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
      * opts into dynamic source (audit convergence §7.3,
      * cap/gpu_shader_policy.c): the pre-checks below are then a fast filter,
      * not the boundary. */
-    if (hl_gpu_shader_admit(ctx, name, wgsl, wgsl_len, flags) != HL_GPU_OK)
+    int admit = hl_gpu_shader_admit(ctx, name, wgsl, wgsl_len, flags);
+    if (admit < 0)
         return HL_GPU_ERR_POLICY;
     /* A source naga would recurse over until the stack overflows, or spend
      * unbounded time expanding, is refused before any wgpu call (audits
@@ -3210,6 +3213,38 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
+
+    /* Runtime source a built binary opted into is compiled first in the
+     * helper process (audit convergence §7.3, cap/gpu_helper.c): a source
+     * that holds it past its deadline, crashes it, overflows its (smaller)
+     * stack or exhausts its memory never reaches this process's compiler.
+     * Done before the device lock: the helper can take seconds, and the
+     * gpu.async workers take that lock. */
+    if (admit == HL_GPU_ADMIT_HELPER) {
+        pthread_mutex_lock(&dev->mutex);
+        int have = find_pipeline(dev, name) != NULL;
+        pthread_mutex_unlock(&dev->mutex);
+        if (have)
+            return HL_GPU_OK;
+        int hs = hl_gpu_helper_check(wgsl, wgsl_len, dev_idx, dev->name);
+        if (hs != HL_GPU_HELPER_OK) {
+            int hrc = hs == HL_GPU_HELPER_SHADER ? HL_GPU_ERR_SHADER
+                    : (hs == HL_GPU_HELPER_TIMEOUT ||
+                       hs == HL_GPU_HELPER_CANCELLED) ? HL_GPU_ERR_TIMEOUT
+                    : HL_GPU_ERR_HELPER;
+            static const char *const helper_why[] = {
+                "ok", "the compiler refused it", "killed at its deadline",
+                "crashed", "sent a malformed or oversized reply",
+                "unavailable", "cancelled (the run stopped)",
+            };
+            log_warn("[hull:gpu] shader '%s' refused by the compile helper: "
+                     "%s (%zu bytes of WGSL)", name,
+                     hs >= 0 && hs <= HL_GPU_HELPER_CANCELLED ? helper_why[hs] : "?",
+                     wgsl_len);
+            return hrc;
+        }
+    }
+
     pthread_mutex_lock(&dev->mutex);
 
     /* Check if already compiled */

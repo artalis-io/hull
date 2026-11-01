@@ -14943,8 +14943,12 @@ UTEST(js_gpu_audit_convergence, dynamic_source_with_opt_in)
     hl_vfs_init(&vfs, jgpu_shader_entries, NULL);
     js.base.app_vfs = &vfs;
     hl_cap_gpu_set_shader_policy(jgpu, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
-    JGPU_EXPECT("return String(gpu.compile('other', '" JGPU_OTHER_WGSL "'));",
-                "true");
+    /* Runtime source is compiled first in the compile helper process
+     * (cap/gpu_helper.c); with none running (no server spawned one) it
+     * fails closed, with its own error. test_gpu drives the helper. */
+    JGPU_EXPECT("try { gpu.compile('other', '" JGPU_OTHER_WGSL "'); return 'compiled'; }"
+                " catch (e) { return e.message; }",
+                "gpu.compile failed: shader_helper_failed");
     js.base.app_vfs = NULL;
     jgpu_cleanup();
 }

@@ -17,7 +17,8 @@ trust chain that backs the `tools` store, see
 
 The caches that are loaded as code - `lua-bytecode`, `js-bytecode`,
 `templates`, `js-templates` and `compute-aot` (native code `hull build`
-embeds) - are sealed: each entry is stored as an
+embeds) - are sealed, and so is `gpu-shaders` (the GPU compile helper's
+verdicts: a sealed OK lets a runtime shader skip the helper): each entry is stored as an
 HMAC-SHA256 followed by the bytes, keyed by a per-user secret at
 `$HOME/.hull/cache.key` (32 random bytes, mode 0600, created on first use).
 Neither Lua nor QuickJS verifies bytecode, so an unsealed cache let anything
@@ -78,7 +79,9 @@ $HOME/.hull/blobs/
 │   │   └── blobs/<XX>/<sha256>
 │   ├── templates/
 │   │   └── blobs/<XX>/<sha256>
-│   └── js-templates/
+│   ├── js-templates/
+│   │   └── blobs/<XX>/<sha256>
+│   └── gpu-shaders/
 │       └── blobs/<XX>/<sha256>
 └── tools/                    ← signed system store (NOT swept)
     └── blobs/<XX>/<sha256>
@@ -98,6 +101,7 @@ directory becomes pathological at ~50K entries - sharding keeps
 | `compute-aot` | `wamrc` AOT output for every `compute/*.wasm` | wasm sha256 + wamrc version + target triple | full `wamrc` invocation (seconds) |
 | `templates` | Generated Lua render function (bytecode) for every `templates/*.html` | template source sha256 + engine version | template parse + Lua codegen + `luaL_loadbuffer` |
 | `js-templates` | Generated JS render function (bytecode) for every `templates/*.html` | template source sha256 + engine version + name | template parse + JS codegen + `JS_Eval` |
+| `gpu-shaders` | `"ok"` for a runtime WGSL source the GPU compile helper process compiled cleanly (`gpu.dynamic_shaders`; [design](design/gpu_compile_helper.md)); refusals stay in memory only | Hull version + backend + arch + device + adapter + source sha256 | a helper round trip (~50 ms - 0.3 s): spawn a sandboxed worker, init the GPU, compile |
 | `tools` | Signed binaries downloaded by `hull tools install` (e.g. `wamrc`) | sha256 of the binary | full `~6 MB` HTTPS download + Ed25519 verify |
 
 Only NAMED templates (`template.render` / `compile` of a `templates/*`
@@ -106,7 +110,7 @@ anonymous source every call and never reads or writes the cache: the
 source is often request-influenced, and every distinct string was a new
 sealed file in the shared pool, without bound (audit 39).
 
-The five runtime caches share the same C primitive (`hl_blob_store_*`)
+The six runtime caches share the same C primitive (`hl_blob_store_*`)
 and the same management commands. `tools` is a separate "system store":
 it's content-addressed in the strict sense (filename IS `sha256(contents)`)
 because the install pipeline only writes a file once the sha matches the
@@ -133,6 +137,7 @@ js-bytecode         0          0 B  ok      /Users/me/.hull/blobs/runtime/js-byt
 compute-aot         4       2.1 MB  ok      /Users/me/.hull/blobs/runtime/compute-aot
 templates          11        38 KB  ok      /Users/me/.hull/blobs/runtime/templates
 js-templates        0          0 B  ok      /Users/me/.hull/blobs/runtime/js-templates
+gpu-shaders         0          0 B  ok      /Users/me/.hull/blobs/runtime/gpu-shaders
 tools               1       6.4 MB  n/a     /Users/me/.hull/blobs/tools
 
 set HULL_NO_<KIND>_CACHE=1 to disable a single cache (e.g.
@@ -238,6 +243,7 @@ debugging "why isn't my warm path warm".
 | `HULL_NO_AOT_CACHE=1` | unset | Disable just the compute AOT cache. |
 | `HULL_NO_TEMPLATE_CACHE=1` | unset | Disable just the Lua template cache. |
 | `HULL_NO_JS_TEMPLATE_CACHE=1` | unset | Disable just the JS template cache. |
+| `HULL_NO_GPU_SHADER_CACHE=1` | unset | Disable just the GPU compile-helper verdict cache (verdicts are then kept in memory only). |
 
 **Truthiness.** All `HULL_NO_*` variables follow the same rule: set to
 any non-empty value other than the case-insensitive strings `0`, `false`,

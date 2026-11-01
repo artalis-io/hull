@@ -70,6 +70,10 @@ typedef enum {
      * time unless the manifest sets gpu.dynamic_shaders
      * ("dynamic_shader_refused"). */
     HL_GPU_ERR_POLICY        = -11,
+    /* The compile helper process (audit convergence §7.3) crashed, sent a
+     * reply past its cap, or is gone ("shader_helper_failed"): dynamic
+     * source fails closed. */
+    HL_GPU_ERR_HELPER        = -12,
 } HlGpuError;
 
 /* Which WGSL sources hl_cap_gpu_compile accepts (audit convergence §7.3).
@@ -88,6 +92,11 @@ typedef enum {
      * shaders/<name>.wgsl compiles, unless gpu.dynamic_shaders. */
     HL_GPU_SHADERS_EMBEDDED = 2,
 } HlGpuShaderMode;
+
+/* What hl_gpu_shader_admit returns for runtime source a built binary's
+ * manifest opted into (gpu.dynamic_shaders): admitted, but to be compiled
+ * in the helper process first (cap/gpu_helper.c). */
+#define HL_GPU_ADMIT_HELPER 1
 
 /* hl_cap_gpu_compile_ex flags. */
 #define HL_GPU_COMPILE_FROM_SHADERS 0x1  /* gpu.load: read from shaders/ */
@@ -598,10 +607,11 @@ const char *hl_cap_gpu_device_name(HlGpuCtx *ctx, int device);
 /* Pipeline */
 /* The error string the gpu.compile / gpu.load bindings report for a
  * failed hl_cap_gpu_compile: "compile_timeout" (abandoned past its
- * deadline or the run's - audit 40), "gpu_busy" (an abandoned compile
- * still runs on the device), "dynamic_shader_refused" (the shader policy:
- * a built binary's source not embedded from shaders/), else
- * "shader_error". */
+ * deadline or the run's - audit 40 -, or killed in the compile helper at
+ * its deadline), "gpu_busy" (an abandoned compile still runs on the
+ * device), "dynamic_shader_refused" (the shader policy: a built binary's
+ * source not embedded from shaders/), "shader_helper_failed" (the compile
+ * helper crashed, replied past its cap, or is gone), else "shader_error". */
 const char *hl_gpu_compile_errstr(int rc);
 
 int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
@@ -627,8 +637,9 @@ int hl_gpu_shader_is_embedded(const struct HlVfs *vfs, const char *wgsl,
                               size_t len);
 
 /* The policy check hl_cap_gpu_compile_ex runs before the pre-checks:
- * HL_GPU_OK or HL_GPU_ERR_POLICY. Logs the refusal (and, in development,
- * the one-time warning). */
+ * HL_GPU_OK, HL_GPU_ADMIT_HELPER (a built binary's opted-in runtime source:
+ * compile it in the helper process first) or HL_GPU_ERR_POLICY. Logs the
+ * refusal (and, in development, the one-time warning). */
 int hl_gpu_shader_admit(const HlGpuCtx *ctx, const char *name,
                         const char *wgsl, size_t len, int flags);
 

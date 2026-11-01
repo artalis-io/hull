@@ -67,8 +67,11 @@ GPU, fails the build).
 src)` there is refused with `dynamic_shader_refused` unless `src` is
 byte-identical to an embedded `shaders/*.wgsl`, or the manifest opts in
 with `gpu = { dynamic_shaders = true }` (JS `gpu: { dynamicShaders: true
-}`). In development (`hull app.lua`, `hull dev`) inline source still
-compiles, with one WARN. Put shaders in `shaders/` and use `gpu.load`.
+}`). With the opt-in, runtime source compiles first in a sandboxed helper
+process that is killed at its deadline (errors: `shader_error`,
+`compile_timeout`, `shader_helper_failed`). In development (`hull app.lua`,
+`hull dev`) inline source still compiles in-process, with one WARN. Put shaders
+in `shaders/` and use `gpu.load`.
 
 ### Minimal WGSL example
 

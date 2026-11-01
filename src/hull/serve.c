@@ -100,6 +100,7 @@
 #include "hull/cap/wasm.h"
 #endif
 #include "hull/cap/gpu.h"
+#include "hull/cap/gpu_helper.h"
 #include "hull/runtime/cache_common.h"   /* hl_runtime_cache_code_off */
 
 #include <keel/http_cors.h>
@@ -1266,6 +1267,21 @@ static int hl_serve_init_app_context(HlServerState *s)
         }
     }
 
+    /* The shader compile helper (audit convergence §7.3, cap/gpu_helper.c):
+     * a built binary with a GPU device may opt into runtime WGSL source
+     * (gpu.dynamic_shaders), which is compiled first in a helper process.
+     * The phase-1 sandbox below forbids spawning and the manifest is not
+     * known yet, so the supervisor is spawned now and stopped once the
+     * manifest is applied if the app did not opt in. */
+    if (gpu_ctx_ok) {
+        extern const HlEntry hl_app_entries[];
+        HlVfs hvfs;
+        hl_vfs_init(&hvfs, hl_app_entries, s->app_dir);
+        if (hl_vfs_embedded(&hvfs) && hl_gpu_helper_start(NULL) != 0)
+            log_warn("[hull:c] GPU compile helper did not start: runtime "
+                     "WGSL source (gpu.dynamic_shaders) will be refused");
+    }
+
     /* Phase 1 sandbox (exec/proc/fork blocked) before the context runs any
      * of the app's SQL or code; after the WAMR / GPU device init above. */
     if (!s->cfg.no_sandbox) {
@@ -2021,7 +2037,13 @@ static int hl_serve_wire_caps(HlServerState *s)
             dynamic, shader_vfs);
         if (embedded && dynamic)
             log_info("[hull:c] gpu.dynamic_shaders: runtime WGSL source is "
-                     "compiled in-process under the compile deadline");
+                     "compiled first in a helper process%s",
+                     hl_gpu_helper_running() ? ""
+                         : " (not running: such source is refused)");
+        else
+            hl_gpu_helper_stop();   /* no runtime source to check */
+    } else {
+        hl_gpu_helper_stop();
     }
 
     /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
@@ -2612,6 +2634,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * gpu_ctx_ok via the feature hook, so the destroy must NOT be
      * #ifdef-gated or the GPU context leaks on shutdown. hl_cap_gpu_destroy
      * lives in base-resident gpu.c and is NULL-safe + idempotent. */
+    hl_gpu_helper_stop();
     if (gpu_ctx_ok) {
         hl_policy_page_unseal(gpu_ctx);   /* destroy writes the span */
         hl_cap_gpu_destroy(gpu_ctx);
@@ -2882,6 +2905,12 @@ static void hl_serve_cleanup(HlServerState *s)
 
 int hull_serve(int argc, char **argv)
 {
+    /* The shader compile helper (cap/gpu_helper.c) is this same binary,
+     * spawned with this argv[1] by the server before its sandbox. Taken
+     * before any argument parsing or app loading. */
+    if (argc >= 2 && strcmp(argv[1], HL_GPU_HELPER_ARGV1) == 0)
+        return hl_gpu_helper_main(argc >= 3 ? argv[2] : NULL);
+
     HlServerState s;
     memset(&s, 0, sizeof(s));
     /* fds default -1 so a teardown before the policy is compiled never close(0)s

@@ -2265,7 +2265,7 @@ with:
 | Where the app runs | `gpu.load(name)` | `gpu.compile(name, src)` |
 |---|---|---|
 | Built binary (`hull build` output; serve or `app.main`) | `shaders/<name>.wgsl` embedded at build time | only when `src` is byte-identical to an embedded `shaders/*.wgsl`; otherwise refused with `dynamic_shader_refused` (Lua `nil, err`; JS throws `gpu.compile failed: dynamic_shader_refused`) |
-| Built binary with `gpu.dynamic_shaders = true` (JS `gpu: { dynamicShaders: true }`) | as above | any source, compiled in-process under the compile deadline |
+| Built binary with `gpu.dynamic_shaders = true` (JS `gpu: { dynamicShaders: true }`) | as above | any source, compiled first in a sandboxed helper process that is killed at its deadline, then in-process; errors `shader_error`, `compile_timeout`, `shader_helper_failed` |
 | Development (`hull app.lua`, `hull dev`, no embedded files) | `shaders/<name>.wgsl` on disk | any source; without the opt-in, the first inline compile logs one WARN that the built binary will refuse it |
 
 `hull build` checks every `shaders/*.wgsl` it embeds: the 1 MiB size cap and
@@ -2279,8 +2279,13 @@ app.manifest({ gpu = { dynamic_shaders = true } })   -- opt in (only `true` coun
 Migrating an app that compiles inline source: move each shader to
 `shaders/<name>.wgsl` and call `gpu.load(name)` instead of
 `gpu.compile(name, SRC)`. Set `dynamic_shaders` only when the source is truly
-generated at run time, and never compile request-supplied WGSL: the pre-checks
-and the compile deadline bound it, but they are not a security boundary.
+generated at run time. Runtime source compiles first in a helper process: one
+worker process per compile, with an OS sandbox, a compile deadline at which it
+is killed, and a smaller stack than the server's. A source that hangs or crashes
+the compiler takes down the worker, not the server. Each distinct source still
+costs a helper round trip (about 50 ms to 0.3 s; the verdict is cached) during
+which the call waits, so treat request-supplied WGSL as a cost to bound
+(authentication, rate limits), not as something to accept freely.
 
 **Dispatch options:**
 ```lua
