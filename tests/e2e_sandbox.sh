@@ -457,6 +457,30 @@ else
             fail "kernel enforcement tests failed (exit $RC)"
         fi
     fi
+
+    # audit 42: the same program with unveil.c rebuilt to skip Landlock TSYNC,
+    # so the per-thread self-restriction path (vendor/pledge patch 0004) is
+    # exercised whatever the kernel - a CI kernel without TSYNC takes it
+    # anyway, a newer one would otherwise only test TSYNC.
+    if [ "$COMPILE_OK" = "1" ] && [ "$UNAME_S" = "Linux" ] && [ "$IS_COSMO" = "0" ]; then
+        SANDBOX_TEST2="$BUILDDIR/sandbox_test_no_tsync"
+        PLEDGE_OBJS2=$(printf '%s\n' $PLEDGE_OBJS | grep -v '/unveil\.o$' | tr '\n' ' ')
+        if $CC -std=c11 -O2 -D_GNU_SOURCE -DHULL_UNVEIL_TEST_NO_TSYNC=1 -w \
+                -I"$SRCDIR/vendor/pledge" -o "$SANDBOX_TEST2" \
+                "$SRCDIR/tests/sandbox_violation.c" \
+                "$SRCDIR/vendor/pledge/libc/calls/unveil.c" \
+                $PLEDGE_OBJS2 -lpthread 2>"$WORKDIR/compile2.log"; then
+            OUT2=$("$SANDBOX_TEST2" 2>&1); RC2=$?
+            printf '%s\n' "$OUT2" | grep -E "audit42|sync mode" | sed 's/^/    /'
+            if [ "$RC2" = "0" ] && printf '%s' "$OUT2" | grep -q "PASS: sandbox_audit42.preexisting_thread_landlock"; then
+                pass "sandbox_audit42.per_thread_landlock_path (no TSYNC)"
+            else
+                fail "sandbox_audit42.per_thread_landlock_path (exit $RC2)"
+            fi
+        else
+            fail "sandbox_audit42 no-TSYNC build failed: $(cat "$WORKDIR/compile2.log")"
+        fi
+    fi
 fi
 
 # ── Test 7: CLI app.main writing to a real TTY under the sandbox ──────
@@ -500,6 +524,104 @@ PY
         pass "app.main stdout under a PTY not killed by the sandbox"
     else
         fail "app.main under a PTY failed (exit $RC): $TTY_OUT"
+    fi
+fi
+
+# ── Test 8: every thread carries the seccomp filter (audit 42) ────────
+#
+# The kernel attaches a seccomp filter and a Landlock domain per THREAD. Hull
+# used to start its worker pool before either sandbox phase, so the threads
+# that run worker.dispatch VMs, parse db.async replies and run compute.async
+# WASM had no filter and no domain, and since threads share one address space
+# that voided the sandbox for the whole process. Now the vendored pledge
+# installs every filter with SECCOMP_FILTER_FLAG_TSYNC (vendor/pledge patch
+# 0003), the Landlock domain reaches existing threads by
+# LANDLOCK_RESTRICT_SELF_TSYNC or per-thread self-restriction (patch 0004),
+# and the pool's workers start on first use, inside the sandbox.
+#
+# Checked from OUTSIDE the process: after a few worker.dispatch jobs (pool
+# threads exist) every task in /proc/<pid>/task must read "Seccomp: 2"
+# (filter mode) with the same Seccomp_filters count as the main thread - a
+# thread that missed phase 2 would show fewer filters, one with none 0. The
+# run watchdog thread, started while the app loads (before phase 2), is the
+# pre-existing thread TSYNC must reach. The functional half (a pre-existing
+# thread's forbidden open refused by seccomp and by Landlock) is in
+# tests/sandbox_violation.c, run by Test 6. Native Linux only.
+
+echo ""
+echo "=== Test 8: every thread carries the seccomp filter (audit 42) ==="
+
+T8_COSMO=0
+case "${PLATFORM_CC:-}" in *cosmocc*) T8_COSMO=1 ;; esac
+if [ "$UNAME_S" != "Linux" ] || [ "$T8_COSMO" = "1" ]; then
+    skip "sandbox_audit42 thread checks - native Linux only"
+elif [ ! -r /proc/self/status ] || ! grep -q '^Seccomp_filters:' /proc/self/status; then
+    skip "sandbox_audit42 thread checks - /proc Seccomp_filters unavailable (Linux < 5.9)"
+else
+    cat > "$WORKDIR/threads.lua" << 'EOF'
+local worker = require("hull.worker")
+app.manifest({ modules = { "hull/http-server@1", "hull/worker@1", "hull/db@1" } })
+app.get("/work", function(_req, res)
+    local r = worker.dispatch(function(ctx) return { n = ctx.v * 2 } end,
+                              { v = 21 })
+    res:json(r)
+end)
+-- A pool thread opens its own connection to the -d database AFTER the
+-- sandbox: the WAL / SHM files must be granted to it (sandbox.c), which
+-- nothing tested while the pool ran outside the sandbox.
+app.get("/dbwork", function(_req, res)
+    local r = worker.dispatch(function(ctx)
+        local db = _G.db
+        db.exec("CREATE TABLE IF NOT EXISTS t (v TEXT)")
+        db.exec("INSERT INTO t (v) VALUES (?)", { ctx.v })
+        return { n = db.query("SELECT COUNT(*) AS n FROM t")[1].n }
+    end, { v = "x" })
+    res:json(r)
+end)
+app.get("/", function(_req, res) res:json({ ok = true }) end)
+EOF
+    LOGFILE8="$WORKDIR/hull_threads.log"
+    "$HULL" -p 19887 -d "$WORKDIR/test8.db" "$WORKDIR/threads.lua" >"$LOGFILE8" 2>&1 &
+    SERVER_PID=$!
+    if wait_for_server 19887; then
+        W1=$(curl -s "http://127.0.0.1:19887/work")
+        check_contains "sandbox_audit42.worker_dispatch_runs" "$W1" "42"
+        D1=$(curl -s "http://127.0.0.1:19887/dbwork")
+        check_contains "sandbox_audit42.worker_db_under_sandbox" "$D1" '"n":'
+        for _j in 1 2 3 4 5 6; do
+            curl -s "http://127.0.0.1:19887/work" >/dev/null 2>&1 &
+        done
+        sleep 2
+        NTASK=0; BAD=""
+        MAIN_FILTERS=$(awk '/^Seccomp_filters:/ {print $2}' "/proc/$SERVER_PID/status" 2>/dev/null)
+        for st in /proc/"$SERVER_PID"/task/*/status; do
+            [ -r "$st" ] || continue
+            NTASK=$((NTASK + 1))
+            MODE=$(awk '/^Seccomp:/ {print $2}' "$st")
+            NF=$(awk '/^Seccomp_filters:/ {print $2}' "$st")
+            NAME=$(awk '/^Name:/ {print $2}' "$st")
+            TID=$(basename "$(dirname "$st")")
+            if [ "$MODE" != "2" ] || [ "$NF" != "$MAIN_FILTERS" ]; then
+                BAD="$BAD tid=$TID($NAME):Seccomp=$MODE,filters=$NF"
+            fi
+        done
+        if [ "$NTASK" -ge 2 ]; then
+            pass "sandbox_audit42.threads_exist ($NTASK tasks)"
+        else
+            fail "sandbox_audit42.threads_exist - expected the pool's workers, saw $NTASK task(s)"
+        fi
+        if [ -n "$MAIN_FILTERS" ] && [ "$MAIN_FILTERS" -ge 2 ] && [ -z "$BAD" ]; then
+            pass "sandbox_audit42.every_thread_seccomp (all $NTASK tasks Seccomp: 2, $MAIN_FILTERS filters)"
+        else
+            fail "sandbox_audit42.every_thread_seccomp - main filters=$MAIN_FILTERS;$BAD"
+        fi
+        stop_server
+        LOG8=$(cat "$LOGFILE8")
+        check_contains "sandbox_audit42.landlock_thread_mode_logged" "$LOG8" "threads: "
+        check_not_contains "sandbox_audit42.no_unsynced_thread" "$LOG8" "could not be applied"
+    else
+        stop_server
+        fail "sandbox_audit42 - hull did not start: $(tail -5 "$LOGFILE8")"
     fi
 fi
 

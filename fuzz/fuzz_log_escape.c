@@ -33,15 +33,78 @@ static void fail(const char *what)
     abort();
 }
 
+/* Reference UTF-8 reader, written apart from hl_utf8_seq_len: decode the
+ * code point and reject overlong, surrogate and out-of-range forms. Returns
+ * the sequence length, or 0 when @p s does not start a well-formed one. */
+static size_t ref_utf8(const unsigned char *s, size_t avail, unsigned *cp)
+{
+    size_t n;
+    unsigned v, min;
+    if (s[0] >= 0xF0 && s[0] <= 0xF7)      { n = 4; v = s[0] & 0x07; min = 0x10000; }
+    else if (s[0] >= 0xE0 && s[0] <= 0xEF) { n = 3; v = s[0] & 0x0F; min = 0x800; }
+    else if (s[0] >= 0xC0 && s[0] <= 0xDF) { n = 2; v = s[0] & 0x1F; min = 0x80; }
+    else return 0;
+    if (avail < n) return 0;
+    for (size_t k = 1; k < n; k++) {
+        if ((s[k] & 0xC0) != 0x80) return 0;
+        v = (v << 6) | (s[k] & 0x3F);
+    }
+    if (v < min || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) return 0;
+    *cp = v;
+    return n;
+}
+
+/* True when the escaped output carries a C1 control or a stray 0x80-0x9F
+ * byte raw (audit 42). */
+static int has_raw_c1(const unsigned char *o, size_t len)
+{
+    for (size_t i = 0; i < len; ) {
+        if (o[i] < 0x80) { i++; continue; }
+        unsigned cp = 0;
+        size_t n = ref_utf8(o + i, len - i, &cp);
+        if (n) {
+            if (cp <= 0x9F) return 1;
+            i += n;
+            continue;
+        }
+        if (o[i] <= 0x9F) return 1;
+        i++;
+    }
+    return 0;
+}
+
 /* Reference: escape @p in into a fresh buffer, recording each token's end. */
 static size_t ref_escape(const char *in, char *out, size_t *tok_end, size_t *ntok)
 {
-    size_t o = 0, t = 0;
+    static const char hx[] = "0123456789abcdef";
+    size_t o = 0, t = 0, len = strlen(in);
     for (const char *p = in; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 0x80) {
+            /* audit 42: a whole UTF-8 sequence is one token, kept unless it
+             * is a C1 control; a stray 0x80-0x9F is \xNN, a stray 0xA0+
+             * byte is kept. */
+            unsigned cp = 0;
+            size_t n = ref_utf8((const unsigned char *)p,
+                                len - (size_t)(p - in), &cp);
+            int esc = n ? cp <= 0x9F : c <= 0x9F;
+            if (!n) n = 1;
+            for (size_t k = 0; k < n; k++) {
+                unsigned char b = (unsigned char)p[k];
+                if (esc) {
+                    out[o++] = '\\'; out[o++] = 'x';
+                    out[o++] = hx[b >> 4]; out[o++] = hx[b & 15];
+                } else {
+                    out[o++] = (char)b;
+                }
+            }
+            p += n - 1;
+            tok_end[t++] = o;
+            continue;
+        }
         if (*p == '\n')      { out[o++] = '\\'; out[o++] = 'n'; }
         else if (*p == '\r') { out[o++] = '\\'; out[o++] = 'r'; }
         else if (((unsigned char)*p < 0x20 && *p != '\t') || *p == 0x7f) {
-            static const char hx[] = "0123456789abcdef";
             out[o++] = '\\'; out[o++] = 'x';
             out[o++] = hx[(unsigned char)*p >> 4];
             out[o++] = hx[(unsigned char)*p & 15];
@@ -74,6 +137,8 @@ static void check(const char *in, size_t outsz, const char *ref,
         if ((c < 0x20 && c != '\t') || c == 0x7f)
             fail("raw control byte in escaped output");
     }
+    if (has_raw_c1((const unsigned char *)out, olen))
+        fail("raw C1 control or stray 0x80-0x9F byte in escaped output");
     /* Expected: tokens while the token's end + NUL fits. */
     size_t want = 0;
     for (size_t t = 0; t < ntok && tok_end[t] + 1 <= outsz; t++)

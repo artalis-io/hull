@@ -1113,7 +1113,10 @@ static void hl_serve_init_infra(HlServerState *s)
     /* Create thread pool for async work (db queries, file I/O) via
      * the vtable. With the keel backend this still ends up calling
      * kl_thread_pool_create under the hood, just routed through
-     * HlAsyncBackend so future backends slot in. */
+     * HlAsyncBackend so future backends slot in - but on the first submit,
+     * not here: this runs before both sandbox phases, and a worker started
+     * now would carry neither the seccomp filter nor the Landlock domain,
+     * which the kernel attaches per thread (audit 42, async/keel.c). */
     const HlAsyncBackend *be = hl_async_backend();
     int num_workers    = s->cfg.num_workers > 0 ? s->cfg.num_workers : HL_THREAD_POOL_WORKERS;
     int queue_capacity = s->cfg.queue_capacity > 0 ? s->cfg.queue_capacity : HL_THREAD_POOL_CAPACITY;

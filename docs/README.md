@@ -53,6 +53,7 @@ specific signature, parameter list, or return value.
 | [`wamr_architecture.md`](wamr_architecture.md) | WASM compute design. WAMR integration, ABI, gas metering, pooling, segments, streaming, AOT, Memory64. |
 | [`wamr_patches.md`](wamr_patches.md) | The vendored WAMR patch set (numbered, out-of-tree, against the pinned base commit). |
 | [`lua_patches.md`](lua_patches.md) | The vendored Lua patch set (in-tree, marked `HULL PATCH` in source: the instruction budget inside finalizers and pattern matching) and the re-apply procedure for an upgrade. |
+| [`pledge_patches.md`](pledge_patches.md) | The vendored Linux pledge / unveil polyfill patch set (in-tree, marked `HULL PATCH NNNN`: rseq allowed, TRUNCATE as a file right, and since audit 42 seccomp filters and the Landlock domain applied to every thread) and the re-apply procedure for an upstream update. |
 | [`quickjs_patches.md`](quickjs_patches.md) | The vendored QuickJS patch set (in-tree, marked `HULL PATCH` in source) and the re-apply procedure for an upgrade. |
 | [`backend_vtables.md`](backend_vtables.md) | The `HlAsyncBackend` / `HlNetBackend` vtables that make the event loop / networking composable. |
 | [`benchmark.md`](benchmark.md) | Performance methodology + measured reference numbers (HTTP / DB / WASM AOT / GPU). |

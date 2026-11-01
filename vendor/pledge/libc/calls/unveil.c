@@ -22,6 +22,7 @@
 #include "libc/calls/blockcancel.internal.h"
 #include "libc/calls/calls.h"
 #include "libc/calls/landlock.h"
+#include "libc/calls/pledge.internal.h" /* HULL PATCH 0003 */
 /*
 #include "libc/calls/struct/bpf.h"
 #include "libc/calls/struct/filter.h"
@@ -60,9 +61,13 @@
 #include "libc/thread/tls.h"
 */
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <signal.h>
+#include <stdio.h>
+#include <time.h>
 #include <limits.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -88,7 +93,7 @@
    LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK | \
    LANDLOCK_ACCESS_FS_MAKE_SYM)
 
-/* HULL PATCH: TRUNCATE is a file right (Landlock ABI >= 3; masked out by
+/* HULL PATCH 0002: TRUNCATE is a file right (Landlock ABI >= 3; masked out by
  * State.fs_mask below that). Without it a write grant on an existing FILE
  * could not O_TRUNC it. */
 #define FILE_BITS                                                 \
@@ -146,6 +151,173 @@ _Thread_local static struct {
   int fd;
 } State;
 
+/* HULL PATCH 0004: the Landlock domain reaches every thread (audit 42).
+ *
+ * landlock_restrict_self(fd, 0) restricts the CALLING thread only. A thread
+ * that already existed when unveil(NULL, NULL) ran - a worker pool, a
+ * watchdog, a GPU driver or DuckDB thread - kept its full filesystem reach,
+ * and because threads share one address space, code running in any of them
+ * voided the domain for the process. So:
+ *
+ *  1. Where the kernel has LANDLOCK_RESTRICT_SELF_TSYNC (Landlock ABI >= 8),
+ *     the domain is applied to every thread atomically.
+ *  2. Otherwise every other thread is asked to restrict ITSELF: each thread
+ *     listed in /proc/self/task gets HULL_UNVEIL_SYNC_SIG (tgkill), whose
+ *     handler sets no_new_privs and calls landlock_restrict_self on the same
+ *     ruleset (the libpsx / glibc setxid pattern). The list is re-read until
+ *     a round finds no thread it has not seen, so a thread started by an
+ *     unrestricted one meanwhile is reached too. A thread that has the
+ *     signal blocked, or whose call fails, does not answer within
+ *     HULL_UNVEIL_SYNC_MS and is counted in hull_unveil_unsynced_threads.
+ *
+ * The calling thread and every thread that answered are restricted either
+ * way and the seccomp filters below go to every thread (TSYNC, patch 0003);
+ * the caller decides what an unsynced thread means (Hull fails closed,
+ * src/hull/sandbox.c). hull_unveil_sync_mode reports what was used:
+ * 0 = no other thread, 1 = Landlock TSYNC, 2 = per-thread signal. */
+#define HULL_LANDLOCK_RESTRICT_SELF_TSYNC (1U << 3)
+#define HULL_UNVEIL_SYNC_SIG (SIGRTMAX - 3)
+#define HULL_UNVEIL_SYNC_MS 2000
+#define HULL_UNVEIL_SYNC_MAX 1024
+/* Test-only: -DHULL_UNVEIL_TEST_NO_TSYNC=1 takes the per-thread path even on
+ * a kernel with Landlock TSYNC, so tests/e2e_sandbox.sh covers both. */
+#ifndef HULL_UNVEIL_TEST_NO_TSYNC
+#define HULL_UNVEIL_TEST_NO_TSYNC 0
+#endif
+
+int hull_unveil_unsynced_threads;
+int hull_unveil_sync_mode;
+
+static volatile int g_sync_fd = -1;
+static int g_ack_n;
+static pid_t g_ack_tid[HULL_UNVEIL_SYNC_MAX];
+static int g_ack_ok[HULL_UNVEIL_SYNC_MAX];
+
+static void unveil_sync_handler(int sig) {
+  (void)sig;
+  int e = errno;
+  pid_t tid = (pid_t)syscall(__NR_gettid);
+  int ok = 0;
+  if (g_sync_fd >= 0) {
+    syscall(__NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    ok = syscall(__NR_landlock_restrict_self, g_sync_fd, 0) == 0;
+  }
+  int i = __atomic_fetch_add(&g_ack_n, 1, __ATOMIC_SEQ_CST);
+  if (i >= 0 && i < HULL_UNVEIL_SYNC_MAX) {
+    __atomic_store_n(&g_ack_ok[i], ok, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_ack_tid[i], tid, __ATOMIC_SEQ_CST);
+  }
+  errno = e;
+}
+
+/* The thread ids in /proc/self/task, without the caller. -1 when it cannot
+ * be read (that must not pass for "single-threaded"). */
+static int unveil_list_tasks(pid_t *out, int max) {
+  pid_t self = (pid_t)syscall(__NR_gettid);
+  DIR *d = opendir("/proc/self/task");
+  if (!d) return -1;
+  int n = 0;
+  struct dirent *de;
+  while ((de = readdir(d))) {
+    if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+    pid_t t = (pid_t)strtol(de->d_name, 0, 10);
+    if (t <= 0 || t == self) continue;
+    if (n == max) {
+      closedir(d);
+      return -1;
+    }
+    out[n++] = t;
+  }
+  closedir(d);
+  return n;
+}
+
+static int unveil_task_alive(pid_t tid) {
+  char p[64];
+  struct stat st;
+  snprintf(p, sizeof p, "/proc/self/task/%d", (int)tid);
+  return stat(p, &st) == 0;
+}
+
+/* Restricts every other thread through the signal handler. Returns the
+ * number of threads that could not be restricted, or -1. */
+static int unveil_sync_by_signal(int fd) {
+  static pid_t seen[HULL_UNVEIL_SYNC_MAX], cur[HULL_UNVEIL_SYNC_MAX];
+  int nseen = 0, unsynced = 0;
+  struct sigaction sa, old;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = unveil_sync_handler;
+  sa.sa_flags = SA_RESTART;
+  sigemptyset(&sa.sa_mask);
+  g_sync_fd = fd;
+  __atomic_store_n(&g_ack_n, 0, __ATOMIC_SEQ_CST);
+  if (sigaction(HULL_UNVEIL_SYNC_SIG, &sa, &old) != 0) return -1;
+  for (int round = 0; round < 16; round++) {
+    int n = unveil_list_tasks(cur, HULL_UNVEIL_SYNC_MAX);
+    if (n < 0) {
+      unsynced = -1;
+      break;
+    }
+    int sent0 = nseen, fresh = 0;
+    for (int i = 0; i < n; i++) {
+      int known = 0;
+      for (int j = 0; j < nseen; j++)
+        if (seen[j] == cur[i]) known = 1;
+      if (known) continue;
+      if (nseen == HULL_UNVEIL_SYNC_MAX) {
+        unsynced = -1;
+        goto out;
+      }
+      fresh++;
+      seen[nseen++] = cur[i];
+      if (syscall(__NR_tgkill, getpid(), cur[i], HULL_UNVEIL_SYNC_SIG) != 0)
+        seen[nseen - 1] = 0; /* gone already (ESRCH) */
+    }
+    if (!fresh) break;
+    /* wait until every thread signalled this round has answered */
+    for (int waited = 0; waited < HULL_UNVEIL_SYNC_MS; waited++) {
+      int all = 1;
+      int acks = __atomic_load_n(&g_ack_n, __ATOMIC_SEQ_CST);
+      if (acks > HULL_UNVEIL_SYNC_MAX) acks = HULL_UNVEIL_SYNC_MAX;
+      for (int j = sent0; j < nseen && all; j++) {
+        if (!seen[j]) continue;
+        int got = 0;
+        for (int k = 0; k < acks; k++)
+          if (__atomic_load_n(&g_ack_tid[k], __ATOMIC_SEQ_CST) == seen[j])
+            got = 1;
+        if (!got) all = 0;
+      }
+      if (all) break;
+      struct timespec ts = {0, 1000000};
+      nanosleep(&ts, 0);
+    }
+  }
+  /* Tally: an answered thread whose call failed, or a live thread that never
+   * answered (its signal is blocked), is not restricted. */
+  if (unsynced == 0) {
+    int acks = __atomic_load_n(&g_ack_n, __ATOMIC_SEQ_CST);
+    if (acks > HULL_UNVEIL_SYNC_MAX) acks = HULL_UNVEIL_SYNC_MAX;
+    for (int j = 0; j < nseen; j++) {
+      if (!seen[j]) continue;
+      int got = -1;
+      for (int k = 0; k < acks; k++)
+        if (__atomic_load_n(&g_ack_tid[k], __ATOMIC_SEQ_CST) == seen[j])
+          got = __atomic_load_n(&g_ack_ok[k], __ATOMIC_SEQ_CST);
+      if (got == 1) continue;
+      if (got == -1 && !unveil_task_alive(seen[j])) continue;
+      unsynced++;
+    }
+  }
+out:
+  /* A late delivery (a thread unblocking the signal later) must not take
+   * the default action, which for a real-time signal ends the process. */
+  g_sync_fd = -1;
+  sa.sa_handler = SIG_IGN;
+  sigaction(HULL_UNVEIL_SYNC_SIG, &sa, 0);
+  (void)old;
+  return unsynced;
+}
+
 static int unveil_final(void) {
   int e, rc;
   struct sock_fprog sandbox = {
@@ -161,9 +333,33 @@ static int unveil_final(void) {
   e = errno;
   prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
   errno = e;
-  if ((rc = landlock_restrict_self(State.fd, 0)) != -1 &&
-      (rc = close(State.fd)) != -1 &&
-      (rc = prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sandbox)) != -1) {
+  hull_unveil_unsynced_threads = 0;
+  hull_unveil_sync_mode = 0;
+  rc = -1;
+  if (landlock_abi_version >= 8 && !HULL_UNVEIL_TEST_NO_TSYNC) {
+    rc = landlock_restrict_self(State.fd, HULL_LANDLOCK_RESTRICT_SELF_TSYNC);
+    if (rc == 0) {
+      hull_unveil_sync_mode = 1;
+    } else if (errno != EINVAL) {
+      return rc;
+    } else {
+      errno = e;
+    }
+  }
+  if (rc != 0) {
+    /* Others first: once this thread is restricted it can no longer list
+     * /proc/self/task. */
+    pid_t probe[1];
+    int others = unveil_list_tasks(probe, 1);
+    if (others != 0) {
+      int u = unveil_sync_by_signal(State.fd);
+      hull_unveil_sync_mode = 2;
+      hull_unveil_unsynced_threads = u < 0 ? -1 : u;
+    }
+    if ((rc = landlock_restrict_self(State.fd, 0)) == -1) return rc;
+  }
+  if ((rc = close(State.fd)) != -1 &&
+      (rc = hull_seccomp_install(&sandbox)) != -1) {
     State.fd = 0;
   }
   return rc;

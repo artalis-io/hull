@@ -17,4 +17,8 @@ extern const struct Pledges kPledge[PROMISE_LEN_];
 int sys_pledge_linux(unsigned long, int);
 int ParsePromises(const char *, unsigned long *);
 
+/* HULL PATCH 0003: install a seccomp filter on every thread (TSYNC). */
+struct sock_fprog;
+int hull_seccomp_install(const struct sock_fprog *);
+
 #endif

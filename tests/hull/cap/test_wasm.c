@@ -394,6 +394,23 @@ UTEST(hl_cap_wasm, log_escape_controls)
     ASSERT_STREQ("\xc3\xa9", out);
 }
 
+/* Audit 42: a guest's C1 controls (C2 80-9F) and stray 0x80-0x9F bytes went
+ * to the log raw; each byte is \xNN now, other UTF-8 kept whole. */
+UTEST(wasm_audit42, log_escape_c1_controls)
+{
+    char out[64];
+    hl_cap_wasm_log_escape("a\xc2\x9b" "2J\x9d" "b", 7, out, sizeof out);
+    ASSERT_STREQ("a\\xc2\\x9b2J\\x9db", out);
+    hl_cap_wasm_log_escape("\xe2\x82\xac\xc2\xa0", 5, out, sizeof out);
+    ASSERT_STREQ("\xe2\x82\xac\xc2\xa0", out);
+    /* An escaped unit is never split by the "...": "a" + "..." fits 8. */
+    hl_cap_wasm_log_escape("a\xc2\x9b" "bcdef", 8, out, 8);
+    ASSERT_STREQ("a...", out);
+    /* A kept multi-byte character is not cut in half either. */
+    hl_cap_wasm_log_escape("ab\xf0\x9f\x98\x80" "cdef", 10, out, 8);
+    ASSERT_STREQ("ab...", out);
+}
+
 UTEST(hl_cap_wasm, log_escape_truncates)
 {
     char out[8];

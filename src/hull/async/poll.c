@@ -733,6 +733,7 @@ struct HlAsyncBackendPool {
 
     pthread_t         *workers;
     int                num_workers;
+    int                started;      /* workers running; 0 until first submit */
 };
 
 /* Ownership transfers to the queue. No allocation after work is accepted. */
@@ -771,6 +772,25 @@ static void *worker_main(void *arg)
     }
 }
 
+/* Starts the workers on first use (audit 42). The runners create the pool
+ * before the kernel sandbox applies (the runtime registers hull.worker only
+ * when a pool exists); spawned there, every worker - the threads that run
+ * worker.dispatch VMs, parse db.async replies and run compute.async WASM -
+ * predated the seccomp filter and the Landlock domain. Spawned here, on the
+ * first submit, they are created inside the sandbox and inherit both. Called
+ * on the loop thread with no lock held; a partial start keeps the workers
+ * that came up, a total failure is retried at the next submit. */
+static int pool_start_workers(HlAsyncBackendPool *p)
+{
+    if (p->started > 0) return 0;
+    int n = 0;
+    for (; n < p->num_workers; n++)
+        if (pthread_create(&p->workers[n], NULL, worker_main, p) != 0)
+            break;
+    p->started = n;
+    return n > 0 ? 0 : -1;
+}
+
 static int poll_pool_create(HlAsyncBackendPool **out, HlAsyncBackendCtx *ctx,
                               int num_workers, int queue_capacity)
 {
@@ -792,22 +812,9 @@ static int poll_pool_create(HlAsyncBackendPool **out, HlAsyncBackendCtx *ctx,
         goto fail;
     }
 
-    /* Spawn workers. If any fails, signal shutdown + join the ones
-     * that came up. */
-    int started = 0;
-    for (; started < num_workers; started++) {
-        if (pthread_create(&p->workers[started], NULL, worker_main, p) != 0) {
-            pthread_mutex_lock(&p->queue_lock);
-            p->shutdown = 1;
-            pthread_cond_broadcast(&p->queue_cv);
-            pthread_mutex_unlock(&p->queue_lock);
-            for (int j = 0; j < started; j++) pthread_join(p->workers[j], NULL);
-            pthread_cond_destroy(&p->queue_cv);
-            pthread_mutex_destroy(&p->queue_lock);
-            goto fail;
-        }
-    }
-
+    /* The workers start on the first submit, after the kernel sandbox in
+     * every runner, so each is born inside it (audit 42; see
+     * pool_start_workers and the matching note in async/keel.c). */
     *out = p;
     return 0;
 
@@ -830,7 +837,7 @@ static void poll_pool_free(HlAsyncBackendPool *p)
     pthread_mutex_unlock(&p->queue_lock);
 
     /* Wait for workers to drain in-flight + see shutdown. */
-    for (int i = 0; i < p->num_workers; i++)
+    for (int i = 0; i < p->started; i++)
         pthread_join(p->workers[i], NULL);
 
     /* Work that finished but whose done_fn the loop has not run yet: deliver
@@ -887,6 +894,7 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
                               void *user)
 {
     if (!p) return -1;
+    if (pool_start_workers(p) != 0) return -1;
     pthread_mutex_lock(&p->queue_lock);
     if (p->shutdown || p->queue_count == p->queue_cap) {
         pthread_mutex_unlock(&p->queue_lock);

@@ -536,7 +536,7 @@ static const struct thatispacked SyscallName {
 
 static const uint16_t kPledgeDefault[] = {
     __NR_exit,  // thread return / exit()
-    // HULL PATCH: allow rseq unconditionally (see kPledgeStart). glibc registers
+    // HULL PATCH 0001: allow rseq unconditionally (see kPledgeStart). glibc registers
     // rseq per-thread; a thread created after the sandbox is installed must be
     // able to register it or glibc aborts ("rseq registration failed"). Benign
     // restartable-sequences syscall; grants no fs/net/exec capability.
@@ -683,6 +683,9 @@ static const uint16_t kPledgeStdio[] = {
     __NR_wait4,
     __NR_uname,
     __NR_prctl | STDIO,
+    // HULL PATCH 0003: seccomp(SECCOMP_SET_MODE_FILTER, TSYNC) only - see
+    // AllowSeccompTsync and docs/pledge_patches.md.
+    __NR_seccomp | STDIO,
     __NR_clone | THREAD,
     __NR_futex,
     __NR_set_robust_list,
@@ -1010,7 +1013,7 @@ static const struct sock_filter kPledgeStart[] = {
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
     // each filter assumes ordinal is already loaded into accumulator
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(nr)),
-    // HULL PATCH: rseq is NOT ENOSYS-stubbed here (upstream stubbed it). glibc
+    // HULL PATCH 0001: rseq is NOT ENOSYS-stubbed here (upstream stubbed it). glibc
     // >= 2.35 registers rseq per-thread and treats a registration that returns
     // ENOSYS *after* an earlier thread succeeded as FATAL ("rseq registration
     // failed"). Hull's main thread registers rseq before the sandbox is applied,
@@ -1891,6 +1894,25 @@ static void AllowPrctlStdio(struct Filter *f) {
   AppendFilter(f, PLEDGE(fragment));
 }
 
+// HULL PATCH 0003: seccomp() may only install a filter on every thread:
+// op SECCOMP_SET_MODE_FILTER with flags exactly SECCOMP_FILTER_FLAG_TSYNC.
+// A new filter can only narrow what the older ones allow, so this grants no
+// authority; it is how the next pledge() / unveil() reaches the threads that
+// already exist (PR_SET_SECCOMP covers the calling thread only).
+static void AllowSeccompTsync(struct Filter *f) {
+  static const struct sock_filter fragment[] = {
+      /*L0*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_seccomp, 0, 7 - 1),
+      /*L1*/ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(args[0])),
+      /*L2*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SECCOMP_SET_MODE_FILTER, 0, 3),
+      /*L3*/ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(args[1])),
+      /*L4*/ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SECCOMP_FILTER_FLAG_TSYNC, 0, 1),
+      /*L5*/ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+      /*L6*/ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, OFF(nr)),
+      /*L7*/ /* next filter */
+  };
+  AppendFilter(f, PLEDGE(fragment));
+}
+
 #ifdef __NR_chmod
 // The mode parameter of chmod() can't have the following:
 //
@@ -2035,6 +2057,9 @@ static void AppendPledge(struct Filter *f,   //
       case __NR_prctl | STDIO:
         AllowPrctlStdio(f);
         break;
+      case __NR_seccomp | STDIO:  // HULL PATCH 0003
+        AllowSeccompTsync(f);
+        break;
 #ifdef __NR_open
       case __NR_open | CREATONLY:
         AllowOpenCreatonly(f);
@@ -2117,6 +2142,37 @@ static void AppendPledge(struct Filter *f,   //
 }
 
 /**
+ * HULL PATCH 0003: installs a seccomp filter on every thread of the process.
+ *
+ * prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER) - what upstream calls - attaches
+ * the filter to the CALLING thread only. A thread that already existed (a
+ * worker pool, a watchdog, a GPU driver or DuckDB thread) kept running with
+ * no filter, and since threads share one address space, code running in it
+ * voided the filter for the whole process (audit 42). seccomp(2) with
+ * SECCOMP_FILTER_FLAG_TSYNC attaches it to all of them atomically, and sets
+ * no_new_privs on each where the caller has it.
+ *
+ * Returns 0, or -1 with errno set. A positive return from the kernel (the id
+ * of a thread whose filter tree is not an ancestor of ours, so it cannot be
+ * synchronised) is a failure: EPERM. Only when the seccomp(2) system call is
+ * missing (Linux < 3.17) does it fall back to prctl, which can cover the
+ * calling thread only.
+ */
+int hull_seccomp_install(const struct sock_fprog *prog) {
+  long rc = syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
+                    SECCOMP_FILTER_FLAG_TSYNC, prog);
+  if (rc == 0) return 0;
+  if (rc > 0) {
+    errno = EPERM;
+    return -1;
+  }
+  if (errno == ENOSYS) {
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prog, 0, 0);
+  }
+  return -1;
+}
+
+/**
  * Installs SECCOMP BPF filter on Linux thread.
  *
  * @param ipromises is inverted integer bitmask of pledge() promises
@@ -2188,8 +2244,10 @@ int sys_pledge_linux(unsigned long ipromises, int mode) {
   prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 
   // register our seccomp filter with the kernel
+  // HULL PATCH 0003: on EVERY thread of the process (TSYNC), not only the
+  // calling one - see hull_seccomp_install below.
   struct sock_fprog sandbox = {.len = f.n, .filter = f.p};
-  rc = prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sandbox, 0, 0);
+  rc = hull_seccomp_install(&sandbox);
 
   // the EINVAL error could mean a lot of things. it could mean the bpf
   // code is broken. it could also mean we're running on RHEL5 which

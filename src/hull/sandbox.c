@@ -330,6 +330,11 @@ static int sb_supported(void) { return 1; }
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
 extern int __pledge_mode;
+/* vendor/pledge HULL PATCH 0004 (docs/pledge_patches.md): how the Landlock
+ * domain reached the threads that already existed at unveil(NULL, NULL), and
+ * how many it could not reach. */
+extern int hull_unveil_unsynced_threads;
+extern int hull_unveil_sync_mode;
 extern int landlock_create_ruleset(const void *attr, size_t size,
                                     unsigned int flags);
 
@@ -1265,6 +1270,26 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     if (db_path) {
         if (unveil(db_path, "rwc") != 0)
             log_warn("[sandbox] unveil failed for database: %s", db_path);
+        /* And its WAL / SHM / journal files, as the Seatbelt profile grants
+         * them (audit 42). Landlock grants an existing inode only, so a file
+         * that is not there now cannot be named; the connection that is
+         * open at this point (migrations, the default handle) keeps -wal and
+         * -shm in place for the process's life. Before, nothing but the
+         * main thread's already-open descriptors reached them, and every
+         * later connection - a db.async / worker.dispatch pool thread's -
+         * worked only because those threads ran outside the sandbox. A link
+         * is not followed into a grant. */
+        static const char *const sidecar[] = { "-wal", "-shm", "-journal" };
+        for (size_t k = 0; k < sizeof sidecar / sizeof sidecar[0]; k++) {
+            char sc[SANDBOX_PATH_MAX];
+            struct stat sst;
+            if ((size_t)snprintf(sc, sizeof sc, "%s%s", db_path, sidecar[k])
+                    >= sizeof sc)
+                continue;
+            if (lstat(sc, &sst) == 0 && S_ISREG(sst.st_mode) &&
+                unveil(sc, "rw") != 0)
+                log_warn("[sandbox] unveil failed for database file: %s", sc);
+        }
     }
 
     /* No CA bundle unveil (audit 29): the anchor is already in memory
@@ -1363,6 +1388,39 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         log_error("[sandbox] failed to seal filesystem restrictions");
         return -1;
     }
+
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+    /* Every thread must carry the Landlock domain, not only this one (audit
+     * 42): a thread that already existed - a library's (a GPU driver's,
+     * DuckDB's), or a watchdog started at app load - and kept its full
+     * filesystem reach voided the domain for the whole process, since threads
+     * share one address space. The polyfill applies it with
+     * LANDLOCK_RESTRICT_SELF_TSYNC where the kernel has it, else asks each
+     * thread to restrict itself (patch 0004); a thread it could not reach
+     * (its signal blocked, its call refused, /proc unreadable) is counted.
+     * That is an incomplete backend, so it fails closed like a kernel without
+     * Landlock. The seccomp filters go to every thread through TSYNC (patch
+     * 0003), which needs no such check. */
+    if (landlock_abi >= 1 && hull_unveil_unsynced_threads != 0) {
+        if (!policy->allow_degraded) {
+            char nthr[32];
+            if (hull_unveil_unsynced_threads < 0)
+                snprintf(nthr, sizeof nthr, "an unknown number of");
+            else
+                snprintf(nthr, sizeof nthr, "%d", hull_unveil_unsynced_threads);
+            log_error("[sandbox] the Landlock filesystem domain could not be "
+                      "applied to %s other thread(s) of this process (this "
+                      "kernel's Landlock ABI %d has no TSYNC, and those threads "
+                      "did not restrict themselves) - refusing to report a full "
+                      "sandbox. Use a kernel with Landlock TSYNC (ABI 8+), or "
+                      "--allow-degraded-sandbox", nthr, landlock_abi);
+            return -1;
+        }
+        log_warn("[sandbox] DEGRADED: %d thread(s) lack the Landlock "
+                 "filesystem domain (seccomp still applies to every thread)",
+                 hull_unveil_unsynced_threads);
+    }
+#endif
 
     /* ── Pledge: restrict syscall families ──────────────────── */
 
@@ -1465,8 +1523,19 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     } else
 #endif
     {
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+        /* threads: how the Landlock domain reached the threads that already
+         * existed - "single" (none), "tsync" (Landlock TSYNC) or "signal"
+         * (each restricted itself). Seccomp always reaches all (TSYNC). */
+        log_info("[sandbox] applied (unveil: %d read, %d write; pledge: %s; "
+                 "threads: %s)",
+                 policy->fs_read_count, policy->fs_write_count, promises,
+                 hull_unveil_sync_mode == 1 ? "tsync"
+                 : hull_unveil_sync_mode == 2 ? "signal" : "single");
+#else
         log_info("[sandbox] applied (unveil: %d read, %d write; pledge: %s)",
                  policy->fs_read_count, policy->fs_write_count, promises);
+#endif
     }
 
     return 0;

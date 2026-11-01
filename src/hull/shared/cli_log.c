@@ -8,6 +8,7 @@
 
 #include "hull/shared/cli_log.h"
 
+#include "hull/shared/term_escape.h"   /* hl_term_high_unit (audit 42) */
 #include "log.h"
 
 #include <stdarg.h>
@@ -55,8 +56,33 @@ void hl_log_escape_line(const char *in, char *out, size_t outsz)
     static const char hex[] = "0123456789abcdef";
     if (!out || outsz == 0) return;
     size_t o = 0;
-    for (const char *p = in ? in : ""; *p; p++) {
+    const char *base = in ? in : "";
+    size_t len = strlen(base);
+    for (const char *p = base; *p; p++) {
         unsigned char c = (unsigned char)*p;
+        if (c >= 0x80) {
+            /* A C1 control (C2 80-9F) or a stray 0x80-0x9F as \xNN per byte,
+             * other UTF-8 kept whole (audit 42; hl_term_high_unit). A unit
+             * that does not fit ends the record: never half a character. */
+            int esc;
+            size_t n = hl_term_high_unit((const unsigned char *)p,
+                                         len - (size_t)(p - base), &esc);
+            size_t need = esc ? 4 * n : n;
+            if (o + need >= outsz) break;
+            for (size_t k = 0; k < n; k++) {
+                unsigned char b = (unsigned char)p[k];
+                if (esc) {
+                    out[o++] = '\\';
+                    out[o++] = 'x';
+                    out[o++] = hex[b >> 4];
+                    out[o++] = hex[b & 15];
+                } else {
+                    out[o++] = (char)b;
+                }
+            }
+            p += n - 1;
+            continue;
+        }
         if (c == '\n' || c == '\r') {
             if (o + 2 >= outsz) break;
             out[o++] = '\\';
@@ -80,22 +106,11 @@ void hl_log_escape_line(const char *in, char *out, size_t outsz)
 
 void hl_log_fputs_escaped(FILE *f, const char *s)
 {
-    static const char hex[] = "0123456789abcdef";
+    /* The same rules as hl_log_escape_line - C0 / DEL, and since audit 42
+     * the C1 controls and stray 0x80-0x9F bytes - from the one shared
+     * writer (shared/term_escape.h). */
     if (!f) return;
-    for (const char *p = s ? s : ""; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        if (c == '\n' || c == '\r') {
-            fputc('\\', f);
-            fputc(c == '\n' ? 'n' : 'r', f);
-        } else if ((c < 0x20 && c != '\t') || c == 0x7f) {
-            fputc('\\', f);
-            fputc('x', f);
-            fputc(hex[c >> 4], f);
-            fputc(hex[c & 15], f);
-        } else {
-            fputc(c, f);
-        }
-    }
+    hl_term_fputs_line_escaped(f, s);
 }
 
 /* Lower-case level word for the terse default line ("warn", "error"). */
