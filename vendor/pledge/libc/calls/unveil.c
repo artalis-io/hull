@@ -333,6 +333,9 @@ static int unveil_final(void) {
   e = errno;
   prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
   errno = e;
+  /* HULL PATCH 0004: restrict every thread (TSYNC, else the signal sync
+   * above), and install the seccomp filter through HULL PATCH 0003's
+   * hull_seccomp_install; upstream restricted only the calling thread. */
   hull_unveil_unsynced_threads = 0;
   hull_unveil_sync_mode = 0;
   rc = -1;

@@ -111,7 +111,7 @@ jobs:
 
       - name: Restore the grown corpus
         if: steps.sel.outputs.run == 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: build/fuzz-nightly/corpus
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -159,7 +159,7 @@ jobs:
 
       - name: Save the grown corpus
         if: always() && steps.sel.outputs.run == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: build/fuzz-nightly/corpus
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}

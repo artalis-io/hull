@@ -46,6 +46,9 @@ jobs:
       - name: Added tests fail on the pre-fix code
         env:
           BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+          # The PR body may carry 'REGRESSION-GATE: build-only <reason>' (an env
+          # value, never interpolated into the script).
+          REGRESSION_GATE_NOTE: ${{ github.event.pull_request.body }}
         run: |
           rc=0
           sh scripts/check_regression_test.sh "$BASE_REF" || rc=$?

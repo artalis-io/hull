@@ -28,6 +28,18 @@ release-artifact layout).
   `audit-regression` job, `scripts/check_regression_test.sh`), an independent review pass, a
   cap on fix batches, solo engine / protocol patches, a feature freeze per round and the
   converged-area review cadence. A PR template carries the checklist.
+- **Audit 43 ratchets.** The regression gate (`scripts/check_regression_test.sh`) no longer
+  counts "does not build on the pre-fix code" as proof, since any test of a fix's new API does
+  that: it retries with the PR's headers kept and its `tests/regression_stubs/*.c` (pre-fix
+  stand-ins for new functions) linked in, and needs a case to fail at runtime; a fix that is
+  nothing but new API opts out with a logged `REGRESSION-GATE: build-only <reason>` trailer.
+  INV-10 now covers `vendor/pledge`, `vendor/stb`, `vendor/sqlite` and `vendor/mbedtls` too
+  (numbered markers, a `docs/<engine>_patches.md` per patched engine, Hull-owned files and
+  version upgrades exempt from the diff check), and checks that `vendor/wamr` is at the commit
+  docs/wamr_patches.md pins; it found an unmarked audit 42 hunk in pledge's `unveil_final`,
+  now marked. The self-test covers both. `fuzz-nightly.yml` pins `actions/cache` to a commit.
+  A `hull test` leg checks that `.hull` stays reserved with no fs grant on the app_context.c
+  path (audit 42 had a test for the serve path only).
 
 ### Changed
 

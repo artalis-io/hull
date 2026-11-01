@@ -1,0 +1,6 @@
+diff --git a/vendor/mbedtls/library/ssl_tls.c b/vendor/mbedtls/library/ssl_tls.c
+--- a/vendor/mbedtls/library/ssl_tls.c
++++ b/vendor/mbedtls/library/ssl_tls.c
+@@ -3,1 +3,1 @@
+-    return -1;
++    return 0;

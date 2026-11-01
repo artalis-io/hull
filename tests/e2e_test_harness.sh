@@ -305,6 +305,62 @@ for d in "hull.evil" "hull:evil"; do
     fi
 done
 
+# ── Audit 43: .hull is reserved under `hull test` with no fs grant ───
+# Audit 42 made every entry point register the app root
+# (hl_fs_reserve_root_path), so `.hull` is refused to the disk loaders even
+# when no fs policy compiles; only the serve path had a test. `hull test` (and
+# the app.main runner, hull agent) reach the loaders through app_context.c:
+# an app with no fs grant and a planted templates -> .hull symlink must not
+# render the dev sidecars there either.
+echo "== audit 43: .hull reserved under hull test without an fs policy =="
+for rt in lua js; do
+    d="$TMP/a43_$rt"
+    mkdir -p "$d/tests" "$d/.hull"
+    printf 'SECRET-SIDECAR' > "$d/.hull/secret.html"
+    ln -s .hull "$d/templates"
+done
+cat > "$TMP/a43_lua/app.lua" <<'LUA'
+app.manifest({ modules = { "hull/http-server@1", "hull/template@1" } })
+local template = require("hull.template")
+app.get("/s", function(req, res)
+    local ok, out = pcall(template.render, "secret.html", {})
+    res:text(ok and tostring(out) or "refused")
+end)
+LUA
+cat > "$TMP/a43_lua/tests/test_x.lua" <<'LUA'
+test("a43 .hull not rendered", function()
+    local res = test.get("/s")
+    test.ok(not tostring(res.body):find("SECRET-SIDECAR", 1, true),
+            "the template loader read .hull through templates -> .hull")
+end)
+LUA
+cat > "$TMP/a43_js/app.js" <<'JS'
+import { app } from "hull:app";
+import { template } from "hull:template";
+app.manifest({ modules: ["hull/http-server@1", "hull/template@1"] });
+app.get("/s", (req, res) => {
+    let out = "refused";
+    try { out = String(template.render("secret.html", {})); } catch (e) {}
+    res.text(out);
+});
+JS
+cat > "$TMP/a43_js/tests/test_x.js" <<'JS'
+test("a43 .hull not rendered", () => {
+    const res = test.get("/s");
+    test.ok(!String(res.body).includes("SECRET-SIDECAR"),
+            "the template loader read .hull through templates -> .hull");
+});
+JS
+for rt in lua js; do
+    rc=0
+    out="$("$HULL" test "$TMP/a43_$rt" 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASS.*a43 .hull not rendered'; then
+        pass "test_harness_audit43.hull_reserved_no_policy ($rt)"
+    else
+        fail "test_harness_audit43.hull_reserved_no_policy ($rt)" "rc=$rc $out"
+    fi
+done
+
 echo ""
 echo "=== Summary ==="
 echo "PASSED: $PASS"

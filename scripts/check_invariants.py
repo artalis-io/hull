@@ -683,28 +683,90 @@ def inv9(tree, ctx):
 
 
 # INV-10 ------------------------------------------------------------------
+# Every vendored engine Hull edits in tree is listed in ENGINES (numbered
+# markers, one docs file each) or UNNUMBERED; a submodule in SUBMODULES.
 # How it decides:
-#   (a) For vendor/lua and vendor/quickjs, the set of patch numbers used in
-#       `HULL PATCH NNNN` markers must equal the set of `## Patch NNNN`
-#       headings in docs/lua_patches.md / docs/quickjs_patches.md (a heading
-#       that says "dropped" counts as retired and must not be used).
+#   (a) For each ENGINES entry (lua, quickjs, pledge, stb, sqlite, mbedtls),
+#       the set of patch numbers used in `HULL PATCH NNNN` markers must equal
+#       the set of `## Patch NNNN` headings in its docs file (a heading that
+#       says "dropped" counts as retired and must not be used). A docs file
+#       may be absent only while the engine carries no marker. In the engines
+#       numbered since audit 43 (pledge, stb, sqlite, mbedtls) a marker
+#       without a number is a finding too.
 #   (b) Each patches/wamr/NNNN-*.patch must be named, number and file, in
-#       docs/wamr_patches.md.
+#       docs/wamr_patches.md; and the commit vendor/wamr is pinned at (the
+#       gitlink in HEAD, or a `wamr.gitlink` file in a self-test root) must
+#       be the "Pinned WAMR base commit" docs/wamr_patches.md names, since
+#       every patch is expressed against it. vendor/keel is Hull's own
+#       library (artalis-io/keel): it is changed upstream and bumped, never
+#       patched here, so there is nothing to check.
 #   (c) vendor/tweetnacl carries unnumbered `HULL PATCH:` markers; at least
 #       one must exist while the file differs from upstream (it always does).
 #   (d) The diff of the change under test against its base (--base, else the
 #       merge-base with origin/main when available; --diff FILE or a
 #       `vendor.diff` in the root for the self-test) must not add or change
-#       a line in vendor/{lua,quickjs,tweetnacl} unless the hunk's added
-#       lines, or the 40 lines around it in the new file, carry a
-#       `HULL PATCH` marker.
+#       a line in a vendored tree (DIFF_DIRS) unless the hunk's added lines,
+#       or the 40 lines around it in the new file, carry a `HULL PATCH`
+#       marker. Hull-owned files inside those trees (HULL_OWNED) are exempt,
+#       and so is a version upgrade: a diff that changes the engine's version
+#       line (VERSION_LINES) replaces the tree wholesale, so its hunks are not
+#       checked one by one ((a) still holds on the result).
 
 ENGINES = (("lua", "vendor/lua", "docs/lua_patches.md"),
-           ("quickjs", "vendor/quickjs", "docs/quickjs_patches.md"))
+           ("quickjs", "vendor/quickjs", "docs/quickjs_patches.md"),
+           ("pledge", "vendor/pledge", "docs/pledge_patches.md"),
+           ("stb", "vendor/stb", "docs/stb_patches.md"),
+           ("sqlite", "vendor/sqlite", "docs/sqlite_patches.md"),
+           ("mbedtls", "vendor/mbedtls", "docs/mbedtls_patches.md"))
+NUMBERED_ONLY = {"pledge", "stb", "sqlite", "mbedtls"}
+DIFF_DIRS = ("lua", "quickjs", "tweetnacl", "pledge", "stb", "sqlite",
+             "mbedtls")
+HULL_OWNED = {
+    # Hull's stb glue: the implementation TU + the size-prefixed allocator.
+    "vendor/stb/stb_impl.c",
+    # Hull's mbedTLS configuration (MBEDTLS_CONFIG_FILE), not upstream code.
+    "vendor/mbedtls/hull_config.h",
+}
+VERSION_LINES = {
+    "lua": r"#define\s+LUA_VERSION_RELEASE\b",
+    "quickjs": r"^20\d\d-\d\d-\d\d$",
+    "sqlite": r"#define\s+SQLITE_VERSION\s",
+    "mbedtls": r"#define\s+MBEDTLS_VERSION_STRING\s",
+    "stb": r"^/\* stb_image(_write)? - v\d",
+    "pledge": r"$^",
+    "tweetnacl": r"$^",
+}
+
+
+def _upgraded_engines(diff_text):
+    """Engines whose version line the diff both removes and adds."""
+    out, cur = set(), None
+    rem, add = {}, {}
+    for ln in diff_text.split("\n"):
+        if ln.startswith("+++ ") or ln.startswith("--- "):
+            t = ln[4:].strip()
+            t = t[2:] if t[:2] in ("a/", "b/") else t
+            if t != "/dev/null":
+                m = re.match(r"vendor/([a-z]+)/", t)
+                cur = m.group(1) if m else None
+            continue
+        if cur not in VERSION_LINES:
+            continue
+        pat = VERSION_LINES[cur]
+        if ln.startswith("-") and re.search(pat, ln[1:]):
+            rem[cur] = True
+        elif ln.startswith("+") and re.search(pat, ln[1:]):
+            add[cur] = True
+    for e in rem:
+        if add.get(e):
+            out.add(e)
+    return out
 
 
 def _hunk_findings(tree, diff_text):
     findings = []
+    upgraded = _upgraded_engines(diff_text)
+    dirs = "|".join(DIFF_DIRS)
     cur, new_line, hunk_added, hunk_start = None, 0, [], 0
 
     def flush():
@@ -732,7 +794,9 @@ def _hunk_findings(tree, diff_text):
             hunk_added = []
             t = ln[4:].strip()
             t = t[2:] if t.startswith("b/") else t
-            cur = t if re.match(r"vendor/(lua|quickjs|tweetnacl)/", t) else None
+            m = re.match(r"vendor/(" + dirs + r")/", t)
+            cur = (t if m and t not in HULL_OWNED and m.group(1) not in upgraded
+                   else None)
         elif ln.startswith("@@"):
             flush()
             hunk_added = []
@@ -751,6 +815,21 @@ def _hunk_findings(tree, diff_text):
     return findings
 
 
+def _wamr_gitlink(root):
+    """The commit vendor/wamr is pinned at: a self-test root's wamr.gitlink
+    file, else the gitlink in HEAD. None when neither is available."""
+    fp = os.path.join(root, "wamr.gitlink")
+    if os.path.exists(fp):
+        return open(fp, encoding="utf-8").read().strip() or None
+    try:
+        r = subprocess.run(["git", "-C", root, "ls-tree", "HEAD", "vendor/wamr"],
+                           capture_output=True, text=True)
+    except OSError:
+        return None
+    m = re.match(r"160000 commit ([0-9a-f]{40})\t", r.stdout)
+    return m.group(1) if r.returncode == 0 and m else None
+
+
 @rule("INV-10", "vendored-engine changes carry a documented HULL PATCH marker")
 def inv10(tree, ctx):
     findings = []
@@ -760,8 +839,13 @@ def inv10(tree, ctx):
             with open(os.path.join(tree.root, p), encoding="utf-8",
                       errors="replace") as f:
                 for i, ln in enumerate(f, 1):
-                    for m in re.finditer(r"HULL PATCH[ #]*(\d{4})", ln):
-                        used.setdefault(m.group(1), f"{p}:{i}")
+                    for m in re.finditer(r"HULL PATCH[ #]*(\d{4})?", ln):
+                        if m.group(1):
+                            used.setdefault(m.group(1), f"{p}:{i}")
+                        elif eng in NUMBERED_ONLY:
+                            findings.append((f"{p}:line{i}",
+                                             f"{p}:{i}: {eng} HULL PATCH "
+                                             "marker has no NNNN number"))
         docp = os.path.join(tree.root, doc)
         if not os.path.exists(docp):
             if used:
@@ -790,6 +874,18 @@ def inv10(tree, ctx):
                 findings.append((f"patches/wamr/{f}:*",
                                  f"patches/wamr/{f} is not listed in "
                                  "docs/wamr_patches.md"))
+        pin = re.search(r"Pinned WAMR base commit:\**\s*`([0-9a-f]{40})`", doc)
+        link = _wamr_gitlink(tree.root)
+        if link and not pin:
+            findings.append(("docs/wamr_patches.md:pin",
+                             "docs/wamr_patches.md names no 'Pinned WAMR "
+                             "base commit'"))
+        elif link and pin and link != pin.group(1):
+            findings.append(("vendor/wamr:pin",
+                             f"vendor/wamr is at {link[:12]} but "
+                             "docs/wamr_patches.md pins "
+                             f"{pin.group(1)[:12]}: re-check every patch "
+                             "against the new base and update the pin"))
     tn = tree.files("vendor/tweetnacl", exts=(".c",))
     if tn and not any("HULL PATCH" in open(os.path.join(tree.root, p),
                                            encoding="utf-8",
@@ -848,7 +944,7 @@ def git_diff(root, base):
                 return None
             base = r.stdout.strip()
         r = subprocess.run(["git", "-C", root, "diff", "-U0", base, "--",
-                            "vendor/lua", "vendor/quickjs", "vendor/tweetnacl"],
+                            *("vendor/" + d for d in DIFF_DIRS)],
                            capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else None
     except OSError:
