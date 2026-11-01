@@ -965,13 +965,12 @@ int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
                                          const char **params, size_t max_params)
 {
 #if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
-    SeatbeltScratch *scratch = calloc(1, sizeof *scratch);
-    if (!scratch) return -1;
-    int rc = seatbelt_build_profile(policy, NULL, NULL, NULL, NULL,
-                                    ttys, tty_count, buf, buf_size,
-                                    params, max_params, scratch);
-    free(scratch);
-    return rc;
+    /* Static: the parameters point into it until the next call. */
+    static SeatbeltScratch scratch;
+    memset(&scratch, 0, sizeof scratch);
+    return seatbelt_build_profile(policy, NULL, NULL, NULL, NULL,
+                                  ttys, tty_count, buf, buf_size,
+                                  params, max_params, &scratch);
 #else
     (void)policy; (void)ttys; (void)tty_count;
     (void)buf; (void)buf_size; (void)params; (void)max_params;
@@ -987,13 +986,13 @@ int hl_sandbox_seatbelt_profile_db_for_test(const HlSandboxPolicy *policy,
                                             size_t max_params)
 {
 #if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
-    SeatbeltScratch *scratch = calloc(1, sizeof *scratch);
-    if (!scratch) return -1;
-    int rc = seatbelt_build_profile(policy, app_dir, db_path, NULL, NULL,
-                                    NULL, 0, buf, buf_size,
-                                    params, max_params, scratch);
-    free(scratch);
-    return rc;
+    /* Static: the parameters point into it until the next call (freed, the
+     * caller read them from a freed buffer). */
+    static SeatbeltScratch scratch;
+    memset(&scratch, 0, sizeof scratch);
+    return seatbelt_build_profile(policy, app_dir, db_path, NULL, NULL,
+                                  NULL, 0, buf, buf_size,
+                                  params, max_params, &scratch);
 #else
     (void)policy; (void)app_dir; (void)db_path;
     (void)buf; (void)buf_size; (void)params; (void)max_params;
@@ -1010,6 +1009,7 @@ int hl_sandbox_seatbelt_app_profile_for_test(const HlSandboxPolicy *policy,
 #if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
     /* Static: the parameters point into it until the next call. */
     static SeatbeltScratch scratch;
+    memset(&scratch, 0, sizeof scratch);
     return seatbelt_build_profile(policy, app_dir, NULL, NULL, NULL,
                                   NULL, 0, buf, buf_size,
                                   params, max_params, &scratch);
