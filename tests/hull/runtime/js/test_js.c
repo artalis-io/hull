@@ -15160,6 +15160,123 @@ UTEST(js_audit38, iterator_helper_steps_are_charged)
     hl_js_free(&lim);
 }
 
+/* A Hull binding's trip is raised through hl_js_budget_throw, not QuickJS's
+ * own poll: a builtin that turns an error into a rejection (Promise.race
+ * rejects its result promise when the iterator throws) went on, and with no
+ * call or backward jump after it the run ended normally. An uncatchable
+ * exception now makes the next step poll (QuickJS HULL PATCH 0003), as the
+ * poll's own interrupt does, so the reject call is interrupted too. The
+ * iterator's next is console.log over a string whose record charge alone
+ * is past the budget, so it trips before it writes anything. */
+UTEST(js_audit38, binding_trip_inside_a_builtin_is_not_swallowed)
+{
+    static const char *const srcs[] = {
+        "Promise.race({ [Symbol.iterator]: () => ({ next: "
+        "console.log.bind(console, BIG) }) });",
+        "Promise.all({ [Symbol.iterator]: () => ({ next: "
+        "console.log.bind(console, BIG) }) });",
+        "new Promise(console.log.bind(console, BIG));",
+    };
+    for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++) {
+        HlJS lim;
+        ASSERT_EQ(a5_limited(&lim, 1000000), 0);
+        char code[1024];
+        snprintf(code, sizeof code,
+                 "globalThis.__a38b = 0;\n"
+                 "const BIG = 'x'.repeat(9000000);\n"
+                 "try { %s } catch (e) { globalThis.__a38b = 1; }\n", srcs[i]);
+        hl_js_reset_request(&lim);
+        EXPECT_TRUE_MSG(a5_eval_throws(&lim, code), srcs[i]);
+        EXPECT_EQ_MSG(lim.budget_tripped, 1, srcs[i]);
+        hl_js_reset_request(&lim);
+        JSValue v = JS_Eval(lim.ctx, "globalThis.__a38b", 17, "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        int32_t caught = -1;
+        JS_ToInt32(lim.ctx, &caught, v);
+        JS_FreeValue(lim.ctx, v);
+        EXPECT_EQ_MSG(caught, 0, srcs[i]);   /* the catch never ran */
+        hl_js_free(&lim);
+    }
+}
+
+/* QuickJS's own C functions are never the embedder's, whatever the memory
+ * they are made on held (HULL PATCH 0011). JS_NewCFunction3 left the
+ * `embedder` byte as js_malloc returned it, so a builtin made on reused
+ * memory went through Hull's call hooks at random: its run was charged the
+ * builtin's measured time, and a trip there was raised where QuickJS did
+ * not expect one (the macOS failure of iterator_helper_steps_are_charged:
+ * the Promise constructor inside Promise.race was hooked). An allocator
+ * that fills every block with 0xA5 makes the stale byte certain. */
+static void *poison_malloc(JSMallocState *s, size_t size)
+{
+    if (s->malloc_size + size + 16 > s->malloc_limit - 1) return NULL;
+    unsigned char *p = malloc(size + 16);
+    if (!p) return NULL;
+    memcpy(p, &size, sizeof size);
+    memset(p + 16, 0xA5, size);
+    s->malloc_count++;
+    s->malloc_size += size + 16;
+    return p + 16;
+}
+static void poison_free(JSMallocState *s, void *ptr)
+{
+    if (!ptr) return;
+    unsigned char *p = (unsigned char *)ptr - 16;
+    size_t size;
+    memcpy(&size, p, sizeof size);
+    s->malloc_count--;
+    s->malloc_size -= size + 16;
+    free(p);
+}
+static void *poison_realloc(JSMallocState *s, void *ptr, size_t size)
+{
+    if (!ptr) return size ? poison_malloc(s, size) : NULL;
+    if (size == 0) { poison_free(s, ptr); return NULL; }
+    size_t old;
+    memcpy(&old, (unsigned char *)ptr - 16, sizeof old);
+    void *n = poison_malloc(s, size);
+    if (!n) return NULL;
+    memcpy(n, ptr, old < size ? old : size);
+    poison_free(s, ptr);
+    return n;
+}
+static size_t poison_usable(const void *ptr)
+{
+    size_t size;
+    memcpy(&size, (const unsigned char *)ptr - 16, sizeof size);
+    return size;
+}
+
+UTEST(js_audit38, builtins_are_never_embedder_functions)
+{
+    static const JSMallocFunctions mf = {
+        poison_malloc, poison_free, poison_realloc, poison_usable,
+    };
+    JSRuntime *rt = JS_NewRuntime2(&mf, NULL);
+    ASSERT_TRUE(rt != NULL);
+    JSContext *ctx = JS_NewContext(rt);
+    ASSERT_TRUE(ctx != NULL);
+    static const char *const builtins[] = {
+        "Promise", "Promise.race", "Promise.prototype.then", "Array.isArray",
+        "Array.prototype.map", "Object.keys", "JSON.parse", "Math.max",
+        "Object.getOwnPropertyDescriptor(Promise, Symbol.species).get",
+        "Iterator.prototype.drop", "String.prototype.indexOf",
+    };
+    for (size_t i = 0; i < sizeof builtins / sizeof builtins[0]; i++) {
+        JSValue v = JS_Eval(ctx, builtins[i], strlen(builtins[i]), "<t>",
+                            JS_EVAL_TYPE_GLOBAL);
+        EXPECT_TRUE_MSG(JS_IsFunction(ctx, v), builtins[i]);
+        EXPECT_EQ_MSG(JS_TestIsEmbedderFunction(v), 0, builtins[i]);
+        JS_FreeValue(ctx, v);
+    }
+    /* The embedder's own functions are still marked. */
+    JSValue mine = JS_NewCFunction2(ctx, NULL, "mine", 0, JS_CFUNC_generic, 0);
+    EXPECT_EQ(JS_TestIsEmbedderFunction(mine), 1);
+    JS_FreeValue(ctx, mine);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
 /* The same single call with NO instruction limit: the run watchdog's stop
  * flag is seen at each native step, not only after the builtin returns. */
 UTEST(js_audit38, iterator_helper_steps_see_the_watchdog)

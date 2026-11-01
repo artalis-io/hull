@@ -6429,6 +6429,13 @@ static JSValue JS_NewCFunction3(JSContext *ctx, JSCFunction *func,
     p->u.cfunc.length = length;
     p->u.cfunc.cproto = cproto;
     p->u.cfunc.magic = magic;
+    /* HULL PATCH 0011: QuickJS's own function, never the embedder's
+       (JS_NewCFunction2 marks it after). The object comes from js_malloc,
+       which does not zero it, and JS_NewObjectFromShape clears only the
+       first word of 'u': left as it was, a builtin made on reused memory
+       read as the embedder's at random, so its calls went through the
+       embedder's call hooks. */
+    p->u.cfunc.embedder = 0;
     p->is_constructor = (cproto == JS_CFUNC_constructor ||
                          cproto == JS_CFUNC_constructor_magic ||
                          cproto == JS_CFUNC_constructor_or_func ||
@@ -6552,6 +6559,24 @@ JSValue JS_NewCFunctionData(JSContext *ctx, JSCFunctionData *func,
     }
     return v;
 }
+
+#ifdef QJS_HULL_TEST_HOOKS
+/* HULL PATCH 0011: test only - see quickjs.h */
+int JS_TestIsEmbedderFunction(JSValueConst fn)
+{
+    JSObject *p;
+    if (JS_VALUE_GET_TAG(fn) != JS_TAG_OBJECT)
+        return 0;
+    p = JS_VALUE_GET_OBJ(fn);
+    if (p->class_id == JS_CLASS_C_FUNCTION)
+        return p->u.cfunc.embedder != 0;
+    if (p->class_id == JS_CLASS_C_FUNCTION_DATA) {
+        JSCFunctionDataRecord *s = p->u.opaque;
+        return s && s->embedder != 0;
+    }
+    return 0;
+}
+#endif
 
 /* HULL PATCH 0011: see JS_SetEmbedderFunction in quickjs.h */
 void JS_SetEmbedderFunction(JSValueConst fn, int on)
@@ -11585,6 +11610,14 @@ BOOL JS_IsError(JSContext *ctx, JSValueConst val)
 void JS_SetUncatchableException(JSContext *ctx, BOOL flag)
 {
     ctx->rt->current_exception_is_uncatchable = flag;
+    /* HULL PATCH 0003: an uncatchable exception is the embedder's interrupt
+       raised from C (a binding over its budget, the call hooks of PATCH
+       0011): poll at the very next step, as JS_ThrowInterrupted does. A
+       builtin that turns the error into a rejection (Promise.race, the
+       Promise constructor's executor call) went on otherwise, and with no
+       call or backward jump after it the run ended normally. */
+    if (flag)
+        ctx->interrupt_counter = 1;
 }
 
 void JS_SetOpaque(JSValue obj, void *opaque)

@@ -393,6 +393,9 @@ int JS_TestForceAtomHash(JSRuntime *rt, int on);
 uint32_t JS_TestAtomHash(JSRuntime *rt, const char *ascii);
 /* 1 when 8-bit and 16-bit storage of 'ascii' hash alike and share an atom */
 int JS_TestAtomWidths(JSRuntime *rt, const char *ascii);
+/* HULL PATCH 0011: test only. 1 when 'fn' is a C function marked as the
+   embedder's (its calls go through the embedder's call hooks). */
+int JS_TestIsEmbedderFunction(JSValueConst fn);
 #endif
 void JS_FreeRuntime(JSRuntime *rt);
 void *JS_GetRuntimeOpaque(JSRuntime *rt);

@@ -35,6 +35,11 @@ release-artifact layout).
   call hooks) carry it; overhead is ~22 ns per Lua call and within noise of a QuickJS call. Lua
   modules register through `hl_lua_setfuncs` / `hl_lua_newlib` / `hl_lua_pushcfunction`; see
   docs/design/audit_convergence_dispatcher.md.
+  QuickJS's own functions are never measured: `JS_NewCFunction3` left the hook bit as `js_malloc`
+  returned it, so a builtin made on reused memory was hooked at random. An uncatchable trip raised
+  from C (a binding, the hooks) now makes the next step poll, as QuickJS's own interrupt does, so a
+  builtin that turns it into a rejection (`Promise.race`, `Promise.all`, `new Promise`) cannot let
+  the run end normally.
 
 ### Process and CI
 

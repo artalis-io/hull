@@ -147,6 +147,16 @@ tripped); the generator `throw` path throws the app's own value, and module
 evaluation rethrows only to Hull's own loader. No C loop was found that
 swallows an interrupt and keeps iterating.
 
+Audit convergence phase 2: `JS_SetUncatchableException(ctx, TRUE)` sets the
+countdown to 1 as well. That rejection case relies on the countdown, and only
+`JS_ThrowInterrupted` set it: an uncatchable error raised from C - a binding
+over its budget (`hl_js_budget_throw`), the dispatcher's call hooks (patch
+0011) - left the countdown wherever it was, so `Promise.race` / `Promise.all`
+over an iterator whose `next` was a tripping binding, or `new Promise` with
+one as executor, rejected its promise, the reject call did not poll, and with
+no call or backward jump after it the run ended normally. Guard:
+`js_audit38.binding_trip_inside_a_builtin_is_not_swallowed`.
+
 **Guard:** `tests/hull/runtime/js/test_js.c`,
 `js_audit5.async_bodies_do_not_escape_the_instruction_limit`; for the
 audit 38 part, `js_audit38.iterator_helper_steps_are_charged` (the catch
@@ -740,6 +750,16 @@ resolving functions, `%ThrowTypeError%` - use the new internal
 (already charged by patch 0005) pay nothing, and a Hull function list goes
 through `hl_js_set_function_list`, which makes each entry with
 `JS_NewCFunction2`.
+
+`JS_NewCFunction3` clears the bit for every function QuickJS makes. Its
+object comes from `js_malloc`, which does not zero it, and
+`JS_NewObjectFromShape` clears only the first word of the `u` union, so a
+builtin made on reused memory read as the embedder's at random: its calls
+were measured, and a trip there was raised inside QuickJS code that expected
+none (the Promise constructor inside `Promise.race`, on macOS CI). Guard:
+`js_audit38.builtins_are_never_embedder_functions` (an allocator that fills
+every block with 0xA5; test hook `JS_TestIsEmbedderFunction`, built with
+`-DQJS_HULL_TEST_HOOKS`).
 
 Hull's own plumbing that QuickJS calls - the harden override accessors, the
 promise callbacks that watch app.main - is unmarked with
