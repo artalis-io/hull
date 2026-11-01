@@ -119,7 +119,7 @@ employer step is needed.
 make            # build clean, zero non-vendor warnings
 make test       # 35+ unit suites
 make e2e        # 22+ end-to-end tests
-make lint       # Lua + JS lint, SDK-header + docs-integrity gates
+make lint       # Lua + JS lint, SDK-header + docs-integrity gates, invariant lint
 make cppcheck   # static analysis
 ```
 
@@ -181,6 +181,30 @@ of the commit (so we can correlate sign-offs with accounts).
   must behave identically; add tests in both `test_lua.c` and `test_js.c`.
 - **Vendor changes.** Submit upstream first, then bump the vendored
   copy here. Don't fork in-tree.
+
+## Audit fixes
+
+Security audit rounds follow [docs/audit_process.md](docs/audit_process.md).
+In short:
+
+- **Rate** every finding with the A1 / A2 / A3 rubric (unauthenticated remote
+  client / malicious repo or planted file / app author). A finding only the
+  app author reaches, bounded by the run deadline, is Low.
+- **Test**: each fix ships a test named `<area>_audit<N>.<case>` that fails on
+  the pre-fix code. For a PR titled "...audit...", CI's (non-blocking for now)
+  `audit-regression` job reverts the non-test changes and checks that an added
+  UTEST fails.
+- **Review**: an independent pass by someone other than the author, for
+  regressions, false refusals of ordinary use, flavor builds and docs drift.
+- **Land**: at most 5 audit fix PRs per round before main is green again;
+  vendored-engine and protocol-state patches land alone; no feature work
+  merges between a round's start and the merge of its fixes.
+- **Cadence**: converged areas get a diff-only review each round and a full
+  sweep every fourth round; one High / Medium takes an area out of converged
+  status, three clean rounds bring it back.
+- **Invariants**: `make check-invariants` must pass
+  ([docs/invariants/README.md](docs/invariants/README.md)). A new "a new X
+  must Y" rule in CLAUDE.md adds a lint rule in the same PR.
 
 ## What we don't accept
 

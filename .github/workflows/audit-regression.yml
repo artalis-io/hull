@@ -1,0 +1,56 @@
+name: Audit fix regression test
+
+# docs/design/audit_convergence.md section 5.1: every audit fix ships a test
+# that FAILS on the pre-fix code. For a PR whose title mentions "audit", this
+# job reverts the PR's non-test changes to the merge-base, builds, runs only
+# the UTEST cases the PR adds, and expects at least one of them to fail
+# (scripts/check_regression_test.sh).
+#
+# NON-BLOCKING for now (continue-on-error, and not part of ci.yml's ci-success
+# gate): the PR template's checklist and the independent review pass
+# (docs/audit_process.md) remain the requirement. It becomes blocking once a
+# few rounds show it gives no false failures (a fix whose test is an e2e or
+# stdlib script, not a UTEST, gets exit 2 = "nothing to check").
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-regression-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  regression-test:
+    if: contains(github.event.pull_request.title, 'audit')
+    name: New test fails without the fix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+          submodules: true
+          fetch-depth: 0
+          # The PR's own head (not the merge commit), so the merge-base with
+          # the base branch is exactly what the PR changes.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Build at the PR head (warms the object cache)
+        run: make -j"$(nproc)"
+
+      - name: Added tests fail on the pre-fix code
+        env:
+          BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+        run: |
+          rc=0
+          sh scripts/check_regression_test.sh "$BASE_REF" || rc=$?
+          case "$rc" in
+            0) echo "::notice::an added test fails without the fix" ;;
+            2) echo "::warning::nothing to check: no UTEST case added, or no non-test change (section 5.1 asks for a test named <area>_audit<N>.<case>)" ;;
+            *) echo "::error::every added test passes on the pre-fix code; it does not prove the fix" ; exit 1 ;;
+          esac

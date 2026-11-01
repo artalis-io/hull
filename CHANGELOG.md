@@ -8,6 +8,27 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Process and CI
+
+- **Invariant lint (`make check-invariants`).** Phase 1 of the audit-convergence design
+  (docs/design/audit_convergence.md): CLAUDE.md's "a new X must Y" rules become checks over the
+  C sources, run by a new `invariants` CI job and by `make lint`. INV-1..INV-10 cover budget
+  charging in bindings, raw `sqlite3_*` outside the cap layer, JS waits inside a transaction,
+  JS entry ends, disk loaders in built binaries, raw terminal writes, uncharged `JS_RunGC`,
+  SQLite opens registered before they are read, Lua resumes without the resumer, and
+  undocumented vendored-engine changes. Today's justified exceptions are listed with reasons in
+  `scripts/invariants_allowlist.txt`, and a stale entry fails the lint, so the list only
+  shrinks; `make check-invariants-selftest` proves each rule fails on a bad fixture.
+  docs/invariants/README.md describes how each rule decides.
+- **Nightly fuzzing with a kept corpus.** `.github/workflows/fuzz-nightly.yml` runs every
+  libFuzzer target for 30 minutes a night from the committed seeds plus the corpus grown on
+  earlier nights (cached, minimized), uploads any crashing input and opens an issue for it.
+- **Audit process.** docs/audit_process.md: the A1 / A2 / A3 severity rubric, a regression
+  test per finding that fails on the pre-fix code (checked for "audit" PRs by a non-blocking
+  `audit-regression` job, `scripts/check_regression_test.sh`), an independent review pass, a
+  cap on fix batches, solo engine / protocol patches, a feature freeze per round and the
+  converged-area review cadence. A PR template carries the checklist.
+
 ### Fixes
 
 - **A planted SQLite virtual table could read `_hull_*` tables through `hull/search`** (audit 40).
