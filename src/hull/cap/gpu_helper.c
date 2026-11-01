@@ -1117,7 +1117,18 @@ static int worker_main(void)
     rl.rlim_cur = cpu;
     rl.rlim_max = cpu + 1;
     (void)setrlimit(RLIMIT_CPU, &rl);
-#if defined(__linux__)
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+#    define HL_GPU_HELPER_SANITIZED 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#  define HL_GPU_HELPER_SANITIZED 1
+#endif
+    /* RLIMIT_DATA counts every private mapping on Linux, so it refuses an
+     * ASan / MSan worker its shadow-memory reservation and the worker dies
+     * at start; sanitizer builds (tests only) run without it. */
+#if defined(__linux__) && !defined(HL_GPU_HELPER_SANITIZED)
     struct rlimit cur;
     if (getrlimit(RLIMIT_DATA, &cur) == 0) {
         rlim_t want = (rlim_t)HL_GPU_HELPER_DATA_BYTES;
