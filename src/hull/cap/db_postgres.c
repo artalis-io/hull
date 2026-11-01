@@ -171,13 +171,16 @@ static int pg_refuse_session_sql(HlDbHandle *h, const char *sql)
     return -1;
 }
 
-/* The connection is gone: forget its session; the next call reconnects. */
+/* The connection is gone: close it, forget its session; the next call
+ * reconnects. One already marked broken whose socket is still open (a reply
+ * left part-read, a failed send) is closed too: left open, the server kept
+ * its session - and any advisory lock a function took in it - until the
+ * slot's next call (audit convergence §7.1). */
 static void pg_abandon(HlDbPgCtx *s)
 {
-    if (!s->conn.broken) {
-        s->conn.broken = 1;
+    s->conn.broken = 1;            /* first: no Terminate, no close_notify */
+    if (s->conn.transport)
         hl_pg_conn_close(&s->conn);
-    }
     s->conn.tx_status = 'I';
     s->used = 0;
 }
@@ -196,9 +199,8 @@ static int pg_reset_session(HlDbHandle *h)
 {
     HlDbPgCtx *s = h ? h->ctx : NULL;
     if (!s || !s->used || h->session_pinned) return 0;
-    if (s->conn.broken) {              /* nothing of the session survives */
-        s->conn.tx_status = 'I';
-        s->used = 0;
+    if (s->conn.broken) {              /* out of step: close it, now */
+        pg_abandon(s);
         return 0;
     }
     if (s->conn.tx_status != 'I') {

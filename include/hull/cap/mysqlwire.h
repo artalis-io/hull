@@ -216,6 +216,21 @@ uint8_t hl_my_client_charset(uint8_t server_default);
  * they get utf8mb4_bin, and db_mysql.c WARNs once (audit 23). */
 const char *hl_my_bin_collation(const char *server_version);
 
+/* 1 when a server whose handshake named @p server_version has roles and
+ * CURRENT_ROLE(): MySQL 8.0.0+, MariaDB 10.0.5+. */
+int hl_my_roles_supported(const char *server_version);
+
+/* The statement that makes the roles active at login active again, from
+ * CURRENT_ROLE()'s value then (@p value NULL for SQL NULL): "SET ROLE NONE",
+ * or "SET ROLE " + the list. MySQL returns `role`@`host` items already
+ * quoted (checked to be exactly that); MariaDB one bare name, quoted here.
+ * COM_RESET_CONNECTION leaves the active role as it was, so a role an entry
+ * set through PREPARE or a CALLed procedure - which the session-statement
+ * refusal cannot see - carried into later entries (audit convergence §7.1).
+ * Returns 0, or -1 (a value of another shape, or @p outsz too small). */
+int hl_my_role_restore_sql(int mariadb, const char *value, size_t len,
+                           char *out, size_t outsz);
+
 /* ── Result-set column definitions (UNTRUSTED) ────────────────────── */
 
 /* Column type codes (MYSQL_TYPE_*), subset Hull maps to HlValue. */

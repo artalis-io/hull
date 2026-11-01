@@ -635,7 +635,13 @@ static void hl_lua_async_resume_impl(HlAsyncCont *self, void *driver)
         if (!refused || *hl_lua_co_mark(co) != &hl_lua_died_marker)
             hl_lua_set_abandoned(co);
     } else {
-        hl_db_registry_guard_stale_txns(lua->base.db_registry);  /* audit 6 M1: a stale txn must not be joined */
+        /* audit 6 M1: a stale txn must not be joined. The guard also resets
+         * the session of every connection used since its last reset, here
+         * and after the resume: Lua has no shared job queue, so this resume
+         * is the only point where one run's code follows another's, and no
+         * session state (user variables, GUCs, a role) crosses it - the
+         * twin of hl_js_run_session_switch (audit convergence §7.1). */
+        hl_db_registry_guard_stale_txns(lua->base.db_registry);
         /* A new run: budget.c. A resume of app.main itself keeps main's
          * deadline default (cap/run_watchdog.h). */
         HL_LUA_ARM_KIND(lua, co, co == lua->cli_main_co ? HL_RUN_MAIN

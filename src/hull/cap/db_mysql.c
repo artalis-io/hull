@@ -60,13 +60,16 @@ static void my_forget_session(HlDbMyCtx *s)
     s->used = 0;
 }
 
-/* Close the connection without a close_notify, and forget its session. */
+/* Close the connection without a close_notify, and forget its session. A
+ * connection already marked broken whose socket is still open (a reply left
+ * part-read, a stopped run) is closed too: left open, the server kept its
+ * session - and any lock a procedure took in it - until the slot's next call
+ * (audit convergence §7.1). */
 static void my_abandon(HlDbMyCtx *s)
 {
-    if (!s->conn.broken) {
-        s->conn.broken = 1;        /* first: the close sends no close_notify */
+    s->conn.broken = 1;            /* first: the close sends no close_notify */
+    if (s->conn.transport)
         hl_my_conn_close(&s->conn);
-    }
     my_forget_session(s);
 }
 
@@ -81,7 +84,7 @@ static void my_lost_rolled_back(HlDbMyCtx *s)
  * whose global default is off (SET GLOBAL autocommit = 0, init_connect)
  * still reports SERVER_STATUS_AUTOCOMMIT in the handshake, and every write
  * not committed by hand was then rolled back by the stale guard (audit 41).
- * One round trip per connect. */
+ * Two round trips per connect (that, and the login's role and database). */
 static int my_connect(HlMyConn *conn, const char *dsn)
 {
     HlMyDsn parsed;
@@ -95,8 +98,12 @@ static int my_connect(HlMyConn *conn, const char *dsn)
     int rc = hl_my_conn_open(conn, &parsed, 10000 /* 10s connect */);
     hl_my_dsn_scrub(&parsed);   /* password is secret material */
     if (rc != 0) return rc;
+    /* And the role and database the login made active, which every session
+     * reset puts back (COM_RESET_CONNECTION leaves both as they were; audit
+     * convergence §7.1). */
     if (hl_my_conn_query(conn, "SET autocommit = 1",
-                         NULL, NULL, NULL, NULL) != 0) {
+                         NULL, NULL, NULL, NULL) != 0 ||
+        hl_my_conn_capture_login(conn) != 0) {
         conn->broken = 1;   /* first: the close sends no close_notify */
         char saved[sizeof conn->errmsg];
         snprintf(saved, sizeof saved, "%s", conn->errmsg);
@@ -318,7 +325,8 @@ static int my_refuse_session_sql(HlDbHandle *h, const char *sql)
  * its last reset. It rolls back, ends XA, drops LOCK TABLES / GET_LOCK /
  * temporary tables / user variables / prepared statements and restores every
  * session variable; hl_my_conn_reset then puts the connection character set
- * and autocommit = 1 back. When the server refuses it (MySQL before 5.7.3,
+ * and autocommit = 1 back, and the login's active role and current database,
+ * which the reset leaves as they were (audit convergence §7.1). When the server refuses it (MySQL before 5.7.3,
  * MariaDB before 10.2.4) or it fails, or a transaction is still open (a
  * ROLLBACK cannot end an XA transaction), the connection is abandoned
  * instead - the server ends the session with it - and the next call
@@ -329,8 +337,8 @@ static int mysql_reset_session(HlDbHandle *h)
 {
     HlDbMyCtx *s = h ? h->ctx : NULL;
     if (!s || !s->used || h->session_pinned) return 0;
-    if (s->conn.broken) {              /* nothing of the session survives */
-        my_forget_session(s);
+    if (s->conn.broken) {              /* out of step: close it, now */
+        my_abandon(s);
         return 0;
     }
     if (s->conn.server_status & HL_MY_SERVER_STATUS_IN_TRANS) {

@@ -558,6 +558,13 @@ int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag)
     return 1;
 }
 
+void hl_js_run_session_switch(HlJS *js)
+{
+    if (!js) return;
+    js->session_switches++;
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
+}
+
 /* The end of every JS entry (audit 35). Each entry kind ends here instead of
  * with a bare hl_db_registry_guard_stale_txns:
  *

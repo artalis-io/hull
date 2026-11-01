@@ -903,6 +903,17 @@ grep -q "is refused" "$SCDIR/bad.log" || { echo "::error session control: migrat
 echo "PASS: session-altering SQL refused, every used connection reset per entry, session_control escape hatch, migration lock (Postgres)"
 rm -rf "$SCDIR"
 
+# ── audit convergence §7.1: a drain switch resets the session (Postgres) ──
+# A request's continuation run in another request's drain reads none of that
+# request's set_config GUCs or time zone.
+echo "=== convergence §7.1: drain switch resets the session ==="
+CSDIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_convergence_sql.sh"
+db_convergence_sql_apps "$CSDIR"
+db_convergence_sql_drain ./build/hull "$DSN" "$CSDIR" "$PORT" || exit 1
+echo "PASS: no session state crosses runs in a drain (Postgres)"
+rm -rf "$CSDIR"
+
 # ── audit 41: every statement pays a round trip's floor (Postgres) ──
 echo "=== audit 41: a SELECT 1 loop trips a small budget (both runtimes) ==="
 A41DIR=$(mktemp -d)

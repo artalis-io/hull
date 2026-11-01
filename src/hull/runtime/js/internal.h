@@ -418,6 +418,16 @@ void hl_js_run_tags_free(HlJS *js);
  * that run continues it. Nothing while the guard is held
  * (hl_db_registry_guard_held: a test case's live transaction). 1 = found. */
 int hl_js_run_tag_txn_check(HlJS *js, uint64_t tag);
+/* The drain is about to switch from one run's code to another's (a job of
+ * another tag, or the end of another run's stretch, back to the active
+ * entry): reset the session of every connection used since its last reset
+ * (hl_db_registry_guard_stale_txns), so session state - user variables,
+ * set_config GUCs, the time zone, a role - never crosses runs (audit
+ * convergence §7.1: a request's continuation run in another request's drain
+ * read that request's session). The transaction checks above run first, so
+ * none is open here but a held test case's (the guard does nothing then).
+ * Cheap when nothing was used: each backend's guard returns at once. */
+void hl_js_run_session_switch(HlJS *js);
 /* (hl_js_entry_end_txn_check, the end of every JS entry, is in js.h.) */
 /* 1 when run @p tag held a transaction across a wait (above, or
  * hl_js_run_yield_check): its continuations resume without continuing it. */

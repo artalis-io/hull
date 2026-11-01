@@ -9233,6 +9233,55 @@ UTEST(js_audit33, failed_tag_kept_while_a_reaction_can_run)
     cleanup_js_caps();
 }
 
+/* Audit convergence §7.1: a drain that runs another run's job resets the
+ * used connections' sessions before it (and again once that run's stretch
+ * ends, back to the active entry), whether or not a transaction is open:
+ * request A's continuation run in request B's drain read B's user
+ * variables, set_config GUCs and time zone. Consecutive jobs of one run
+ * switch nothing. */
+UTEST(js_convergence_sql, drain_resets_sessions_at_every_run_switch)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    char *msg = NULL;
+    /* Run A (tag 900) waits on a promise another run settles. */
+    hl_js_run_tag_enter(&js, 900);
+    EXPECT_EQ(a5_module_named("<cs-a>",
+        "globalThis.__csGate = new Promise((r) => { globalThis.__csRel = r; });\n"
+        "globalThis.__csGate.then(() => { globalThis.__csRan = 1; });\n",
+        &msg), 0);
+    free(msg);
+
+    /* Run B (tag 901) settles it: A's reaction is queued under A's tag. */
+    hl_js_run_tag_enter(&js, 901);
+    static const char rel[] = "globalThis.__csRel();";
+    JSValue v = JS_Eval(js.ctx, rel, strlen(rel), "<cs-b>", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_FALSE(JS_IsException(v));
+    JS_FreeValue(js.ctx, v);
+    uint64_t before = js.session_switches;
+    hl_js_run_jobs(&js);
+    /* into A's job, then back to B */
+    EXPECT_EQ(js.session_switches - before, (uint64_t)2);
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue ran = JS_GetPropertyStr(js.ctx, g, "__csRan");
+    JS_FreeValue(js.ctx, g);
+    int32_t r = 0;
+    JS_ToInt32(js.ctx, &r, ran);
+    JS_FreeValue(js.ctx, ran);
+    EXPECT_EQ(r, 1);
+
+    /* B's own jobs: no switch. */
+    static const char own[] =
+        "Promise.resolve().then(() => 1).then(() => 2);";
+    v = JS_Eval(js.ctx, own, strlen(own), "<cs-b2>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, v);
+    before = js.session_switches;
+    hl_js_run_jobs(&js);
+    EXPECT_EQ(js.session_switches - before, (uint64_t)0);
+    hl_js_run_tag_enter(&js, 0);
+    cleanup_js_caps();
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* L5: res.text / res.html cut the body at the first NUL. */
 UTEST(js_audit6, res_text_keeps_embedded_nul)

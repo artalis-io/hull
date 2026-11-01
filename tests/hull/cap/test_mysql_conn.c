@@ -2892,4 +2892,173 @@ UTEST(mysql_backend, insert_if_absent_pays_its_floor_before_the_send)
     close(sv[0]);
 }
 
+/* ── Audit convergence §7.1: roles, broken connections ────────────── */
+
+/* The statement that puts the login's active roles back: MySQL's list is
+ * taken as quoted (and refused in any other shape), MariaDB's bare name is
+ * quoted here, NONE / NULL is SET ROLE NONE. */
+UTEST(mysql_convergence_sql, role_restore_statement)
+{
+    char out[128];
+    EXPECT_EQ(0, hl_my_role_restore_sql(0, "NONE", 4, out, sizeof out));
+    EXPECT_STREQ("SET ROLE NONE", out);
+    EXPECT_EQ(0, hl_my_role_restore_sql(1, NULL, 0, out, sizeof out));
+    EXPECT_STREQ("SET ROLE NONE", out);
+    const char *l = "`rr`@`%`,`a``b`@`h`";
+    EXPECT_EQ(0, hl_my_role_restore_sql(0, l, strlen(l), out, sizeof out));
+    EXPECT_STREQ("SET ROLE `rr`@`%`,`a``b`@`h`", out);
+    EXPECT_EQ(0, hl_my_role_restore_sql(1, "r`x", 3, out, sizeof out));
+    EXPECT_STREQ("SET ROLE `r``x`", out);
+    /* not the server's quoted list: refused */
+    const char *bad[] = { "rr", "`rr`", "`rr`@`%`;DROP", "`rr`@`%`,", "``@`%`",
+                          "`rr`@`%", "`r`r`@`%`" };
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++)
+        EXPECT_EQ(-1, hl_my_role_restore_sql(0, bad[i], strlen(bad[i]),
+                                             out, sizeof out));
+    EXPECT_EQ(-1, hl_my_role_restore_sql(0, l, strlen(l), out, 12));
+    EXPECT_EQ(-1, hl_my_role_restore_sql(1, "r\0x", 3, out, sizeof out));
+    EXPECT_EQ(1, hl_my_roles_supported("8.0.35"));
+    EXPECT_EQ(0, hl_my_roles_supported("5.7.44"));
+    EXPECT_EQ(1, hl_my_roles_supported("5.5.5-10.6.18-MariaDB"));
+    EXPECT_EQ(1, hl_my_roles_supported("11.4.2-MariaDB"));
+    EXPECT_EQ(0, hl_my_roles_supported("5.5.5-10.0.4-MariaDB"));
+}
+
+/* One row of (CURRENT_ROLE(), DATABASE()) - NULL for a NULL argument -
+ * starting at sequence 1; @p last_status is the final EOF's status (MORE_RESULTS
+ * when another statement's result follows). */
+static void put_login_row(HlMyWriter *s, const char *role, const char *db,
+                          uint16_t last_status)
+{
+    size_t m = hl_my_packet_begin(s, 1);
+    hl_my_put_lenenc_int(s, 2);
+    hl_my_packet_end(s, m);
+    put_col_def(s, 2, "CURRENT_ROLE()", HL_MY_TYPE_VAR_STRING);
+    put_col_def(s, 3, "DATABASE()", HL_MY_TYPE_VAR_STRING);
+    put_eof(s, 4);
+    m = hl_my_packet_begin(s, 5);
+    if (role) hl_my_put_lenenc_str(s, role, strlen(role));
+    else hl_my_put_u8(s, 0xFB);
+    if (db) hl_my_put_lenenc_str(s, db, strlen(db));
+    else hl_my_put_u8(s, 0xFB);
+    hl_my_packet_end(s, m);
+    m = hl_my_packet_begin(s, 6);
+    hl_my_put_u8(s, HL_MY_PKT_EOF);
+    hl_my_put_u16(s, 0);
+    hl_my_put_u16(s, last_status);
+    hl_my_packet_end(s, m);
+}
+
+/* A connection whose login was captured (role @p login_role, database
+ * @p login_db), then reset with the session at @p now_role / @p now_db.
+ * @p restore: the server answers a second (restore) statement. Returns the
+ * reset's result; the client's bytes in @p got. */
+static int my_reset_with_login(const char *login_role, const char *login_db,
+                               const char *now_role, const char *now_db,
+                               int restore, char *got, size_t cap, size_t *n)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -9;
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);                            /* 8.0.35: roles */
+    build_ok(&s, 2);
+    put_login_row(&s, login_role, login_db, 0x0002);   /* capture */
+    put_ok_more(&s, 1, 0x0002);                        /* RESET */
+    put_login_row(&s, now_role, now_db,
+                  0x0002 | HL_MY_SERVER_MORE_RESULTS); /* SELECT; SET NAMES */
+    put_ok_more(&s, 7, 0x0002);
+    if (restore) {
+        put_ok_more(&s, 1, 0x0002 | HL_MY_SERVER_MORE_RESULTS);
+        put_ok_more(&s, 2, 0x0002);
+    }
+    int rc = -9;
+    if (write(sv[0], s.buf, s.len) == (ssize_t)s.len) {
+        HlMyDsn dsn; char err[128];
+        HlMyConn conn;
+        if (hl_my_dsn_parse("mysql://u:p@localhost/db", &dsn, err, sizeof err) == 0 &&
+            hl_my_conn_start(&conn, sv[1], &dsn) == 0) {
+            if (hl_my_conn_capture_login(&conn) == 0 && conn.login_captured)
+                rc = hl_my_conn_reset(&conn);
+            *n = my_drain_client(sv, got, cap);
+            hl_my_conn_close(&conn);
+        }
+    }
+    hl_my_writer_free(&s);
+    close(sv[0]);
+    return rc;
+}
+
+/* COM_RESET_CONNECTION leaves the active role as it was: a role set through
+ * PREPARE from a user variable, or by a CALLed procedure (both past the
+ * session-statement refusal) carried into later entries. The reset reads
+ * the role and database in its SET NAMES round trip and puts the login's
+ * back - SET ROLE, then USE (MySQL drops the current database's privileges
+ * at SET ROLE until the next USE). */
+UTEST(mysql_convergence_sql, reset_restores_the_login_role)
+{
+    char got[8192]; size_t n = 0;
+    EXPECT_EQ(0, my_reset_with_login("NONE", "hulldb", "`rr`@`%`", "hulldb", 1,
+                                     got, sizeof got, &n));
+    EXPECT_TRUE(my_sent_text(got, n, "SELECT CURRENT_ROLE(), DATABASE()"));
+    EXPECT_TRUE(my_sent_command(got, n, HL_MY_COM_RESET_CONNECTION));
+    EXPECT_TRUE(my_sent_text(got, n, "SELECT CURRENT_ROLE(), DATABASE(); SET NAMES"));
+    EXPECT_TRUE(my_sent_text(got, n, "SET ROLE NONE; USE `hulldb`"));
+}
+
+/* A USE an entry ran is undone too (the reset keeps the current database). */
+UTEST(mysql_convergence_sql, reset_restores_the_login_database)
+{
+    char got[8192]; size_t n = 0;
+    EXPECT_EQ(0, my_reset_with_login("NONE", "hulldb", "NONE", "oth`er", 1,
+                                     got, sizeof got, &n));
+    EXPECT_FALSE(my_sent_text(got, n, "SET ROLE"));
+    EXPECT_TRUE(my_sent_text(got, n, "USE `hulldb`"));
+}
+
+/* The session as the login left it: no second round trip. */
+UTEST(mysql_convergence_sql, reset_with_nothing_changed_sets_nothing)
+{
+    char got[8192]; size_t n = 0;
+    EXPECT_EQ(0, my_reset_with_login("`a`@`%`", "hulldb", "`a`@`%`", "hulldb", 0,
+                                     got, sizeof got, &n));
+    EXPECT_FALSE(my_sent_text(got, n, "SET ROLE"));
+    EXPECT_FALSE(my_sent_text(got, n, "USE `"));
+}
+
+/* A database selected on a connection that started with none cannot be left
+ * again: the reset fails (its caller abandons the connection). */
+UTEST(mysql_convergence_sql, reset_refuses_a_database_it_cannot_leave)
+{
+    char got[8192]; size_t n = 0;
+    EXPECT_EQ(-1, my_reset_with_login("NONE", NULL, "NONE", "other", 0,
+                                      got, sizeof got, &n));
+}
+
+/* A connection marked broken whose socket is still open (a reply left
+ * part-read) is closed at the entry boundary's reset: only forgotten, the
+ * server kept its session - and any lock a procedure took - until the
+ * slot's next call. */
+UTEST(mysql_convergence_sql, reset_closes_a_broken_connection)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake(&s, 0);
+    build_ok(&s, 2);
+    put_ok_more(&s, 1, 0x0002);                        /* DO 1 */
+    HlDbHandle h; HlDbMyCtx ctx; int sv[2];
+    ASSERT_EQ(0, my_backend_start(&h, &ctx, sv, &s));
+    h.batch_depth = 0;
+    ASSERT_TRUE(mysql_exec(&h, "DO 1", NULL, 0) >= 0);
+    (void)my_pending(sv);
+    ctx.conn.broken = 1;                               /* reply left part-read */
+    ASSERT_TRUE(ctx.conn.transport != NULL);
+    EXPECT_EQ(0, hl_db_reset_session(&h));
+    EXPECT_TRUE(ctx.conn.transport == NULL);           /* closed */
+    EXPECT_EQ(0, ctx.used);
+    char b;
+    EXPECT_EQ(0, (int)recv(sv[0], &b, 1, MSG_DONTWAIT)); /* the peer sees EOF */
+    hl_my_conn_close(&ctx.conn);
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
 UTEST_MAIN()
