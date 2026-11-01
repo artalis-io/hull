@@ -927,7 +927,23 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
     /* Loading a test file runs its top level: an entry of its own (budget
      * and wall-clock deadline), not the tail of the last file's last case. */
     HL_LUA_ARM(lua, lua->L);
-    if (luaL_loadfilex(lua->L, file_path, "t") != LUA_OK ||   /* text only */
+    /* A test file is app code. Under a relative app directory named "hull.*"
+     * (`hull test hull.evil`) its path - and so luaL_loadfilex's chunkname,
+     * "@hull.evil/tests/test_x.lua" - started "hull.", which is how the
+     * stdlib is recognised (hl_lua_source_is_stdlib): the file read _hull_*
+     * tables and required hull._template (audit 42). Load it by an explicit
+     * "./" path, which names the same file, as the entry loader does. */
+    char test_path[4096];
+    const char *load_name = file_path;
+    if (strncmp(file_path, "hull.", 5) == 0) {
+        int n = snprintf(test_path, sizeof test_path, "./%s", file_path);
+        if (n < 0 || (size_t)n >= sizeof test_path) {
+            if (load_err) *load_err = "test file path too long";
+            return -1;
+        }
+        load_name = test_path;
+    }
+    if (luaL_loadfilex(lua->L, load_name, "t") != LUA_OK ||   /* text only */
         lua_pcall(lua->L, 0, LUA_MULTRET, 0) != LUA_OK) {
         const char *err = lua_tostring(lua->L, -1);
         if (load_err) *load_err = err ? err : "unknown";

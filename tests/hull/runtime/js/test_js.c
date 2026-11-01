@@ -16497,4 +16497,124 @@ UTEST(js_audit41, kv_open_and_commands_have_a_floor)
     cleanup_js_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* ── Audit 42: a test file never evaluates under a stdlib module name ──
+ *
+ * `hull test hull:evil` (a relative app directory named "hull:*") evaluated
+ * hull:evil/tests/test_x.js under its path, a name that starts "hull:" - the
+ * stdlib's: the file read _hull_* tables (js_is_stdlib_caller) and imported
+ * hull:_template (the module normalizer's base-name check). */
+static const char A42_JS_PROBE[] =
+    "import { db as dbMod } from 'hull:db';\n"
+    "const db = dbMod.default();\n"
+    "try { db.query('SELECT x FROM _hull_a42'); globalThis.__a42_db = 'read'; }\n"
+    "catch (e) { globalThis.__a42_db = String(e && e.message); }\n"
+    "try { await import('hull:_template'); globalThis.__a42_tpl = 'loaded'; }\n"
+    "catch (e) { globalThis.__a42_tpl = String(e && e.message); }\n"
+    "globalThis.__a42_plain = db.query('SELECT y FROM a42_plain').length;\n"
+    "test('ordinary', () => { if (1 + 1 !== 2) throw new Error('math'); });\n";
+
+static int a42_js_run(const char *app, char **db, char **tpl, int *plain,
+                      int *total, int *passed)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    if (!hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a42j")) return -1;
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd) || chdir(tmpdir) != 0) return -1;
+    char dir[256], path[512];
+    snprintf(dir, sizeof dir, "%s/tests", app);
+    mkdir(app, 0700);
+    mkdir(dir, 0700);
+    snprintf(path, sizeof path, "%s/tests/test_x.js", app);
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    fputs(A42_JS_PROBE, f);
+    fclose(f);
+
+    init_js_with_caps();
+    int rc = -2;
+    if (js_initialized) {
+        trusted_exec(test_db, "CREATE TABLE _hull_a42 (x TEXT);"
+                              "INSERT INTO _hull_a42 VALUES ('secret');"
+                              "CREATE TABLE a42_plain (y TEXT);"
+                              "INSERT INTO a42_plain VALUES ('ok');",
+                     NULL, NULL, NULL);
+        KlHttpRouter router;
+        KlAllocator alloc = kl_allocator_default();
+        kl_http_router_init(&router, &alloc);
+        hl_js_test_register(js.ctx, &router, &js);
+        HlTestCaseResult results[2] = {{0}};
+        int failed = 0;
+        const char *err = NULL;
+        rc = hl_js_vtable.run_test_file(&js.base, path, results, 2,
+                                        total, passed, &failed, &err);
+        if (rc != 0) printf("  load error: %s\n", err ? err : "?");
+        *db = eval_str("String(globalThis.__a42_db)");
+        *tpl = eval_str("String(globalThis.__a42_tpl)");
+        *plain = eval_int("globalThis.__a42_plain|0");
+        kl_http_router_free(&router);
+    }
+    cleanup_js_caps();
+    remove(path);
+    rmdir(dir);
+    rmdir(app);
+    if (chdir(cwd) != 0) rc = -3;
+    rmdir(tmpdir);
+    return rc;
+}
+
+UTEST(js_audit42, test_file_under_a_hull_colon_dir_is_not_stdlib)
+{
+    char *db = NULL, *tpl = NULL;
+    int plain = 0, total = 0, passed = 0;
+    ASSERT_EQ(a42_js_run("hull:a42", &db, &tpl, &plain, &total, &passed), 0);
+    EXPECT_TRUE_MSG(db && strcmp(db, "read") != 0 && strstr(db, "_hull_"),
+                    db ? db : "(null)");
+    EXPECT_TRUE_MSG(tpl && strcmp(tpl, "loaded") != 0, tpl ? tpl : "(null)");
+    EXPECT_EQ(plain, 1);
+    EXPECT_EQ(total, 1);
+    EXPECT_EQ(passed, 1);
+    free(db);
+    free(tpl);
+}
+
+UTEST(js_audit42, ordinary_test_file_still_works)
+{
+    char *db = NULL, *tpl = NULL;
+    int plain = 0, total = 0, passed = 0;
+    ASSERT_EQ(a42_js_run("plainapp", &db, &tpl, &plain, &total, &passed), 0);
+    EXPECT_TRUE_MSG(db && strcmp(db, "read") != 0, db ? db : "(null)");
+    EXPECT_TRUE_MSG(tpl && strcmp(tpl, "loaded") != 0, tpl ? tpl : "(null)");
+    EXPECT_EQ(plain, 1);
+    EXPECT_EQ(total, 1);
+    EXPECT_EQ(passed, 1);
+    free(db);
+    free(tpl);
+}
+
+/* Second line: a module named by a path is never stdlib, whatever loaded it. */
+UTEST(js_audit42, a_path_module_name_starting_hull_colon_is_app_code)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    trusted_exec(test_db, "CREATE TABLE _hull_a42 (x TEXT);", NULL, NULL, NULL);
+    static const char src[] =
+        "import { db as dbMod } from 'hull:db';\n"
+        "const db = dbMod.default();\n"
+        "let r = '';\n"
+        "try { db.query('SELECT x FROM _hull_a42'); r += 'db '; } catch (e) {}\n"
+        "try { await import('hull:_template'); r += 'tpl'; } catch (e) {}\n"
+        "globalThis.__a42_path = r;\n";
+    JSValue v = JS_Eval(js.ctx, src, sizeof src - 1, "hull:a42/tests/test_x.js",
+                        JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    char *got = eval_str("String(globalThis.__a42_path)");
+    EXPECT_STREQ(got ? got : "(null)", "");
+    free(got);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 UTEST_MAIN();

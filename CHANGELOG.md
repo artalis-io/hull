@@ -78,6 +78,17 @@ release-artifact layout).
   The check is one linear scan plus a sort; names are resolved by sorting and binary search, and
   the audit-37 type check now does the same instead of an unseeded hash table that colliding
   names could make quadratic. The examples' and docs' shaders are unaffected.
+- **`hull test` ran a test file with stdlib privilege under a relative app directory named
+  `hull.*`** (audit 42). The Lua runner loaded `<app>/tests/test_x.lua` by its path, so
+  `hull test hull.evil` - run from the parent of a repo cloned under that name - gave the file the
+  chunkname `@hull.evil/tests/test_x.lua`, which passed the stdlib's `hull.` prefix test: the test
+  file read and wrote `_hull_*` tables (the SQL check and the SQLite authorizer's trusted flag
+  both waived) and required `hull._template` / `hull.db._internal_conn`. JS had the same with a
+  directory named `hull:*`, for the test file and the app entry (a `hull:` module name). Test files
+  and the JS entry now load under an explicit `./` path, as the Lua entry already did, and as a
+  second line a chunk or module name that contains a path separator is never stdlib
+  (`hl_lua_source_is_stdlib`, `hl_js_name_is_stdlib`): stdlib modules are named `hull.web.csrf` /
+  `hull:web:csrf`, never by a path.
 - **A retyped `sqlite_schema` row slipped past the SQLite open check** (audit 41). The check
   that refuses a database file holding a view, trigger or virtual table that reaches a `_hull_*`
   table selected rows with `type IN ('view', 'trigger', 'table')`, compared case-sensitively.

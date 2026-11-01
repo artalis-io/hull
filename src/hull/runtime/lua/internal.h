@@ -390,7 +390,15 @@ static inline int hl_lua_source_is_stdlib(const char *source)
 {
     if (!source) return 0;
     if (*source == '@' || *source == '=') source++;
-    return strncmp(source, "hull.", 5) == 0;
+    if (strncmp(source, "hull.", 5) != 0) return 0;
+    /* A stdlib chunk is named by its dotted module name ("@hull.web.csrf"),
+     * never by a path. A path-derived name that happens to start "hull." -
+     * a file under a relative app directory called "hull.evil", loaded as
+     * "@hull.evil/tests/test_x.lua" by `hull test hull.evil` - is app code
+     * (audit 42): every loader of an app file names it so it cannot start
+     * "hull." (hl_lua_app_chunkname, the "./" entry / test-file prefix), and
+     * this is the second line behind them. */
+    return strchr(source, '/') == NULL && strchr(source, '\\') == NULL;
 }
 
 #endif /* HL_RUNTIME_LUA_INTERNAL_H */

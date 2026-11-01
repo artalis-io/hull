@@ -281,8 +281,7 @@ static char *hl_js_module_normalize(JSContext *ctx,
          * these names are not in the registry, so the import tracker never
          * sees a static import of one, and every static import runs first. */
         HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-        if (js && strstr(name, ":_") &&
-            strncmp(base_name ? base_name : "", "hull:", 5) != 0) {
+        if (js && strstr(name, ":_") && !hl_js_name_is_stdlib(base_name)) {
             JS_ThrowReferenceError(ctx,
                 "module '%s' is internal to the Hull stdlib", name);
             return NULL;
@@ -293,7 +292,7 @@ static char *hl_js_module_normalize(JSContext *ctx,
          * registry module nor part of one is not the app's to import - the
          * loader served any stdlib file the registry does not list
          * (hull:verify) with no declaration at all. */
-        if (js && strncmp(base_name ? base_name : "", "hull:", 5) != 0 &&
+        if (js && !hl_js_name_is_stdlib(base_name) &&
             !hl_module_registry_find_runtime(name, ':')) {
             const HlModuleSpec *pspec = NULL;
             char parent[256];
@@ -1474,8 +1473,18 @@ int hl_js_load_app(HlJS *js, const char *filename)
     /* Evaluate as ES module. ASYNC so a deferred top-level throw / rejected
      * import is observable as a rejected eval promise (see hl_js_settle_module),
      * not silently swallowed. */
+    /* An entry path starting "hull:" (a relative app directory of that
+     * name) would evaluate under a stdlib name (audit 42). */
+    char entry_name[4096];
+    const char *eval_name = hl_js_app_module_name(entry_name,
+                                                  sizeof entry_name, filename);
+    if (!eval_name) {
+        js->scratch->used = arena_saved;
+        log_error("[hull:c] entry path too long: %s", filename);
+        return -1;
+    }
     js_toplevel_begin(js);
-    JSValue val = JS_Eval(js->ctx, buf, nread, filename,
+    JSValue val = JS_Eval(js->ctx, buf, nread, eval_name,
                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
 
     /* Reclaim file buffer - QuickJS owns the bytecode now */
@@ -2037,8 +2046,19 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
 
     /* Loading a test file runs its top level: an entry of its own (budget
      * and wall-clock deadline), not the tail of the last file's last case. */
+    /* A test file is app code: under a relative app directory named
+     * "hull:*" its path started "hull:", a stdlib module name - it read
+     * _hull_* tables and imported hull:_template (audit 42). */
+    char test_name[4096];
+    const char *eval_name = hl_js_app_module_name(test_name, sizeof test_name,
+                                                  file_path);
+    if (!eval_name) {
+        free(src);
+        if (load_err) *load_err = "test file path too long";
+        return -1;
+    }
     hl_js_budget_arm(js);
-    JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file_path,
+    JSValue result = JS_Eval(js->ctx, src, (size_t)flen, eval_name,
                              JS_EVAL_TYPE_MODULE);
     free(src);
 
