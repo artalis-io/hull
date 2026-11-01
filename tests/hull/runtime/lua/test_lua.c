@@ -2492,6 +2492,42 @@ UTEST(lua_middleware, dispatch_number_return_matches_js)
     }
 }
 
+/* Audit 42: a query key is pushed with its decoded length, as JS does. As a
+ * C string "admin%00x" became the key "admin", so a proxy or WAF and the app
+ * disagreed about which parameter was sent. */
+UTEST(lua_audit42, query_key_keeps_decoded_nul)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.use('*', '/*', function(req, res)\n"
+        "  local s = ''\n"
+        "  s = s .. (req.query.admin == nil and 'U' or 'p')\n"
+        "  s = s .. (req.query['admin\\0x'] == '1' and 'K' or 'k')\n"
+        "  s = s .. (req.query.b == '2' and 'B' or 'b')\n"
+        "  A42_Q = s; return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    int handler_id = (int)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 3);
+
+    static const char q[] = "admin%00x=1&b=2";
+    KlHttpRequest req = {0};
+    req.query = q;
+    req.query_len = sizeof q - 1;
+    KlHttpResponse res = {0};
+    ASSERT_EQ(hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res), 0);
+    lua_getglobal(lua_rt.L, "A42_Q");
+    const char *got = lua_tostring(lua_rt.L, -1);
+    EXPECT_STREQ(got ? got : "(nil)", "UKB");
+    lua_pop(lua_rt.L, 1);
+    free_lua_req_ctx(&req);
+    cleanup_lua();
+}
+
 /* A `res` kept past its request fails closed: middleware stashes it, the
  * request finishes, and using it later raises instead of writing into a
  * response that was sent (on a connection that may be gone). */

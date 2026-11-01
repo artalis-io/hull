@@ -63,6 +63,7 @@
 #include "hull/cap/audit.h"
 #include "hull/cap/env.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_resolve.h"   /* hl_fs_reserve_root_path (audit 42) */
 #include "sh_json.h"
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
@@ -945,6 +946,10 @@ default_db:
             return -1;
         }
     }
+
+    /* Register the app root so `.hull` is reserved from the disk loaders
+     * from here on, with or without an fs policy (audit 42). */
+    (void)hl_fs_reserve_root_path(s->app_dir);
 
     return 0;
 }

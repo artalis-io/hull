@@ -178,15 +178,17 @@ void hl_lua_make_request(lua_State *L, KlHttpRequest *req,
             }
             /* In place, form rules (utils/url.h): never fails here, since the
              * value only shrinks and its NUL slot is already there. */
-            /* The key is used as a C string below, NUL-terminated by the
-             * decode, so its new length is not needed. */
-            (void)hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
+            long kdec = hl_url_decode(pair, klen, pair, klen + 1, HL_URL_FORM);
             if (vlen > 0)
                 vlen = (size_t)hl_url_decode((char *)(uintptr_t)val, vlen,
                                              (char *)(uintptr_t)val, vlen + 1,
                                              HL_URL_FORM);
+            /* The key by its decoded LENGTH, as JS does (audit 42): as a C
+             * string "admin%00x" became the key "admin", and a proxy or WAF
+             * and the app disagreed about which parameter was sent. */
+            lua_pushlstring(L, pair, kdec >= 0 ? (size_t)kdec : 0);
             lua_pushlstring(L, val, vlen);
-            lua_setfield(L, -2, pair);
+            lua_rawset(L, -3);
             pair = strtok_r(NULL, "&", &saveptr);
         }
     }

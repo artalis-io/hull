@@ -12,6 +12,7 @@
 
 #include "hull/host_match.h"
 
+#include <arpa/inet.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -34,6 +35,23 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     (void)hl_host_match(pat, host);
     const char *pats[] = { pat };
     (void)hl_host_match_any(pats, 1, host);
+
+    /* Audit 42: a literal the matcher calls canonical must be one inet_pton
+     * reads, and an IPv4 one must round-trip through inet_ntop exactly - the
+     * one spelling every resolver reads the same way. */
+    (void)hl_host_literal_ok(host);
+    if (hl_host_ip_canonical(host) && !strchr(host, '%')) {
+        unsigned char b[16];
+        if (!strchr(host, ':')) {
+            char back[INET_ADDRSTRLEN];
+            if (inet_pton(AF_INET, host, b) != 1 ||
+                !inet_ntop(AF_INET, b, back, sizeof back) ||
+                strcmp(back, host) != 0)
+                abort();
+        } else if (inet_pton(AF_INET6, host, b) != 1) {
+            abort();
+        }
+    }
 
     free(pat);
     free(host);
