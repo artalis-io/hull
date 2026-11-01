@@ -93,6 +93,8 @@ static void hl_lua_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
                                  void *user_data)
 {
     HlLuaSseRoute *route = (HlLuaSseRoute *)user_data;
+    if (!route)
+        return;
     HlLua *lua = route->lua;
 
     if (!lua || !lua->L || !req || !res)
