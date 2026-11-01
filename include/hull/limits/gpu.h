@@ -312,4 +312,60 @@
 #define HL_GPU_COMPILE_STACK_BYTES ((size_t)2 << 30)   /* 2 GiB */
 #endif
 
+/* ── The shader compile helper (audit convergence §7.3; cap/gpu_helper.c,
+ * docs/design/gpu_compile_helper.md) ──────────────────────────────── */
+
+/* How long a helper worker may take to start: spawn, GPU backend init and
+ * its sandbox, until it reports ready. Killed past it (the compile is
+ * refused as compile_timeout). Measured on Apple M1 Max / Metal: ~50 ms
+ * warm, ~0.3 s for the first start after a build or boot. */
+#ifndef HL_GPU_HELPER_INIT_TIMEOUT_MS
+#define HL_GPU_HELPER_INIT_TIMEOUT_MS    3000u
+#endif
+/* How long a worker may spend compiling once it has the source: the same
+ * deadline the server's own compile runs under, so a source the helper
+ * compiled in time compiles in time in the server too. */
+#ifndef HL_GPU_HELPER_COMPILE_TIMEOUT_MS
+#define HL_GPU_HELPER_COMPILE_TIMEOUT_MS HL_GPU_COMPILE_TIMEOUT_MS
+#endif
+/* The server's own bound on a round trip, past the two deadlines above: a
+ * supervisor that has not answered by then is taken as wedged, its socket
+ * closed, and every later dynamic compile fails closed. */
+#ifndef HL_GPU_HELPER_MARGIN_MS
+#define HL_GPU_HELPER_MARGIN_MS          1000u
+#endif
+/* The worker's compile thread stack: SMALLER than the server's
+ * (HL_GPU_COMPILE_STACK_BYTES, and its 1 GiB fallback), so a source that
+ * compiled in the helper cannot overflow the server's compile thread;
+ * larger than the deepest stack any source under HL_GPU_WGSL_MAX_BYTES
+ * reached with every pre-check bypassed (~576 MiB, see above). */
+#ifndef HL_GPU_HELPER_STACK_BYTES
+#define HL_GPU_HELPER_STACK_BYTES        ((size_t)768 << 20)
+#endif
+/* RLIMIT_DATA for a worker on Linux (private writable memory, the compile
+ * stack included). macOS enforces no address-space or data rlimit, so
+ * there the compile deadline bounds a worker's memory growth. */
+#ifndef HL_GPU_HELPER_DATA_BYTES
+#define HL_GPU_HELPER_DATA_BYTES         ((uint64_t)8 << 30)
+#endif
+/* The largest reply frame payload a worker may send (a status and an
+ * optional short detail); a longer one kills the worker (BADREPLY). */
+#ifndef HL_GPU_HELPER_REPLY_MAX
+#define HL_GPU_HELPER_REPLY_MAX          512u
+#endif
+/* Verdicts kept in memory (keyed by SHA-256 of the source + device), every
+ * status; the sealed on-disk cache keeps OK verdicts across restarts. */
+#ifndef HL_GPU_HELPER_CACHE_ENTRIES
+#define HL_GPU_HELPER_CACHE_ENTRIES      64
+#endif
+/* Run-budget units a helper round trip is charged, before it starts, on a
+ * cache miss (on top of the compile charge every gpu.compile pays). The
+ * wait itself is excluded (it is the helper's time, not the server's). 2^22
+ * units is ~65 ms at the standard 64 units per us, about one warm round
+ * trip (~40-55 ms measured on Apple M1 Max / Metal), and bounds one run to
+ * ~24 helper compiles per 100M default budget. */
+#ifndef HL_GPU_HELPER_UNITS
+#define HL_GPU_HELPER_UNITS              ((uint64_t)1 << 22)
+#endif
+
 #endif /* HL_LIMITS_GPU_H */

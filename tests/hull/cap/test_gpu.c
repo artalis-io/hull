@@ -864,6 +864,7 @@ UTEST(hull_cap_gpu, disabled_placeholder)
 /* ── Bind-group slot accounting (base-resident, no device needed) ──── */
 
 #include "hull/cap/gpu.h"
+#include "hull/cap/gpu_helper.h"
 #include "hull/shared/work_charge.h"
 
 UTEST(hull_cap_gpu, tex_binding_slots)
@@ -3713,6 +3714,34 @@ static const HlEntry AC_ENTRIES[] = {
     { NULL, NULL, 0 },
 };
 
+/* Restart the compile helper (audit convergence §7.3) with the test hook
+ * @p hook (HULL_TEST_GPU_HELPER, NULL = none) and an empty verdict cache.
+ * The helper is this test binary (main below routes HL_GPU_HELPER_ARGV1). */
+static int ach_start(const char *hook)
+{
+    hl_gpu_helper_stop();
+    if (hook) setenv("HULL_TEST_GPU_HELPER", hook, 1);
+    else unsetenv("HULL_TEST_GPU_HELPER");
+    hl_gpu_helper_test_reset_cache(1);
+    hl_gpu_helper_test_set_timeouts(0, 0);
+    int rc = hl_gpu_helper_start(NULL);
+    unsetenv("HULL_TEST_GPU_HELPER");
+    return rc;
+}
+
+/* No compile helper where GPU never runs (cap/gpu_helper.c: cosmo and
+ * Windows have no GPU backend, and an APE cannot spawn itself as the
+ * helper): hl_gpu_helper_start fails and opted-in runtime source is
+ * refused (dynamic_source_with_opt_in checks that); the supervision
+ * tests skip. */
+#if defined(__COSMOPOLITAN__) || defined(_WIN32)
+#define AGH_NO_HELPER 1
+#define AGH_NEED_HELPER() \
+    UTEST_SKIP("no GPU compile helper on this platform (GPU is native-only)")
+#else
+#define AGH_NEED_HELPER() do { } while (0)
+#endif
+
 static HlGpuCtx *ac_ctx(HlGpuBackend *be, HlVfs *vfs)
 {
     *be = MOCK_BACKEND;
@@ -3785,15 +3814,44 @@ UTEST(hull_cap_gpu_audit_convergence, dynamic_source_with_opt_in)
     HlGpuCtx *ctx = ac_ctx(&be, &vfs);
     ASSERT_TRUE(ctx != NULL);
     hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    /* Runtime source goes through the compile helper first; with none
+     * running it fails closed, before the backend. */
+    hl_gpu_helper_stop();
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "other",
+              AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_STREQ("shader_helper_failed", hl_gpu_compile_errstr(HL_GPU_ERR_HELPER));
+    EXPECT_EQ(0, mock_compiles);
+#ifdef AGH_NO_HELPER
+    /* No helper on this platform: it never starts, and opted-in runtime
+     * source is refused with shader_helper_failed, never hung on. */
+    EXPECT_EQ(-1, ach_start("accept"));
+    EXPECT_EQ(0, hl_gpu_helper_running());
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "other",
+              AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(0, mock_compiles);
+    mock_free(ctx);
+    return;
+#endif
+    ASSERT_EQ(0, ach_start("accept"));
     EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "other",
               AC_OTHER, strlen(AC_OTHER)));
     EXPECT_EQ(1, mock_compiles);
+    /* An embedded shader never goes to the helper. */
+    HlGpuHelperStats st0, st1;
+    hl_gpu_helper_stats(&st0);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "emb",
+              AC_EMBEDDED, strlen(AC_EMBEDDED)));
+    hl_gpu_helper_stats(&st1);
+    EXPECT_EQ(st0.round_trips, st1.round_trips);
+    EXPECT_EQ(st0.cache_hits, st1.cache_hits);
+    EXPECT_EQ(2, mock_compiles);
     /* The pre-checks still run on dynamic source. */
     char *add = a36_chain(A36_ADD_HEAD, "+y", 20000, "; }");
     ASSERT_TRUE(add != NULL);
     EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "deep", add, strlen(add)));
     free(add);
-    EXPECT_EQ(1, mock_compiles);
+    EXPECT_EQ(2, mock_compiles);
+    hl_gpu_helper_stop();
     mock_free(ctx);
 }
 
@@ -3821,11 +3879,12 @@ UTEST(hull_cap_gpu_audit_convergence, dev_mode_compiles_inline_source)
     mock_free(ctx);
 }
 
-/* The opt-in compiles in-process, under the compile deadline: a compile
- * that outlives it is abandoned and the call returns (the helper process
- * with a hard kill is a follow-up). Uses the round-40 slow-compile hook. */
+/* Once the compile helper has accepted runtime source, the in-process
+ * compile keeps its own deadline: a compile that outlives it is abandoned
+ * and the call returns. Uses the round-40 slow-compile hook. */
 UTEST(hull_cap_gpu_audit_convergence, opt_in_compile_abandoned_at_deadline)
 {
+    AGH_NEED_HELPER();
     HlGpuBackend be = MOCK_BACKEND;
     be.compile = a40_slow_compile;
     be.pipeline_destroy = a40_pipeline_destroy;
@@ -3835,6 +3894,7 @@ UTEST(hull_cap_gpu_audit_convergence, opt_in_compile_abandoned_at_deadline)
     HlVfs vfs;
     hl_vfs_init(&vfs, AC_ENTRIES, NULL);
     hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    ASSERT_EQ(0, ach_start("accept"));
     a40_reset();
     hl_gpu_test_set_compile_timeout_ms(100);
     double t0 = a40_now();
@@ -3849,6 +3909,7 @@ UTEST(hull_cap_gpu_audit_convergence, opt_in_compile_abandoned_at_deadline)
         (void)hl_cap_gpu_compile(ctx, -1, "poke", AC_EMBEDDED, strlen(AC_EMBEDDED));
     }
     hl_gpu_test_set_compile_timeout_ms(0);
+    hl_gpu_helper_stop();
     mock_free(ctx);
 }
 
@@ -4065,4 +4126,376 @@ UTEST(gpu_audit42, helper_shader_real_device)
 }
 #endif /* HL_ENABLE_GPU */
 
-UTEST_MAIN();
+/* ── Audit convergence §7.3: the compile helper process ──────────────
+ * A built binary's opted-in runtime source is compiled first in a helper
+ * process (cap/gpu_helper.c). These drive the supervision with the
+ * HULL_TEST_GPU_HELPER hooks (crash / slow / oversize / silent / accept),
+ * which act in the worker after it has its sandbox and before it compiles,
+ * so they run on hosts with no GPU too; the real compile is tested when a
+ * device is present. */
+
+static HlGpuCtx *agh_ctx(HlGpuBackend *be, HlVfs *vfs)
+{
+    HlGpuCtx *ctx = ac_ctx(be, vfs);
+    if (ctx) hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, vfs);
+    return ctx;
+}
+
+UTEST(hull_cap_gpu_helper, accepted_source_compiles_and_is_cached)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("accept"));
+    HlGpuHelperStats a, b, c;
+    hl_gpu_helper_stats(&a);
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "one", AC_OTHER, strlen(AC_OTHER)));
+    hl_gpu_helper_stats(&b);
+    EXPECT_EQ(a.round_trips + 1, b.round_trips);
+    /* The same source under another name: the verdict is cached. */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "two", AC_OTHER, strlen(AC_OTHER)));
+    hl_gpu_helper_stats(&c);
+    EXPECT_EQ(b.round_trips, c.round_trips);
+    EXPECT_EQ(b.cache_hits + 1, c.cache_hits);
+    EXPECT_EQ(2, mock_compiles);
+    /* An already-compiled name is not sent again. */
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "one", AC_NEAR, strlen(AC_NEAR)));
+    EXPECT_EQ(2, mock_compiles);
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_helper, crash_is_an_error_not_a_crash)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("crash"));
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "c", AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(0, ctx->devices[0].pipeline_count);
+    /* The supervisor survives its worker's crash and takes the next one. */
+    EXPECT_EQ(1, hl_gpu_helper_running());
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "d", AC_NEAR, strlen(AC_NEAR)));
+    EXPECT_EQ(1, hl_gpu_helper_running());
+    /* A worker that exits without a reply counts the same. */
+    ASSERT_EQ(0, ach_start("silent"));
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "e", AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(0, mock_compiles);
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_helper, killed_at_its_deadline)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("slow"));
+    hl_gpu_helper_test_set_timeouts(0, 200);
+    double t0 = a40_now();
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile(ctx, -1, "s", AC_OTHER, strlen(AC_OTHER)));
+    double dt = a40_now() - t0;
+    printf("  helper: killed at a 200 ms compile deadline after %.2f s\n", dt);
+    EXPECT_TRUE(dt < 2.5);
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_STREQ("compile_timeout", hl_gpu_compile_errstr(HL_GPU_ERR_TIMEOUT));
+    /* The supervisor is still there, and the timed-out verdict is cached:
+     * the same source is refused at once, without another 200 ms. */
+    EXPECT_EQ(1, hl_gpu_helper_running());
+    t0 = a40_now();
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile(ctx, -1, "s2", AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_TRUE(a40_now() - t0 < 0.1);
+    hl_gpu_helper_test_set_timeouts(0, 0);
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_helper, oversized_reply_refused)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("oversize"));
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "o", AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(0, mock_compiles);
+    EXPECT_EQ(1, hl_gpu_helper_running());
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+/* The worker's OS sandbox: once applied, it can neither read the user's
+ * home nor reach the network (the "probe" hook tries both). Where the
+ * host could not apply it (stats.unsandboxed), the server warned instead. */
+UTEST(hull_cap_gpu_helper, worker_sandbox_denies_home_and_network)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("probe"));
+    HlGpuHelperStats a, b;
+    hl_gpu_helper_stats(&a);
+    int rc = hl_cap_gpu_compile(ctx, -1, "p", AC_OTHER, strlen(AC_OTHER));
+    hl_gpu_helper_stats(&b);
+    if (b.unsandboxed == a.unsandboxed) {
+        EXPECT_EQ(HL_GPU_OK, rc);
+    } else {
+        printf("  helper: no OS sandbox on this host (warned)\n");
+    }
+#ifdef __APPLE__
+    EXPECT_EQ(a.unsandboxed, b.unsandboxed);
+#endif
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+UTEST(hull_cap_gpu_helper, lost_supervisor_fails_closed)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("accept"));
+    hl_gpu_helper_stop();
+    EXPECT_EQ(0, hl_gpu_helper_running());
+    EXPECT_EQ(HL_GPU_ERR_HELPER, hl_cap_gpu_compile(ctx, -1, "l", AC_OTHER, strlen(AC_OTHER)));
+    EXPECT_EQ(0, mock_compiles);
+    mock_free(ctx);
+}
+
+#ifdef HL_ENABLE_DB
+/* The run stopping while the helper works sends a cancel: the worker is
+ * killed and the call returns at once, whatever the helper's deadline. */
+static int agh_polls;
+static int agh_stop_after_polls(void *ud, int64_t units)
+{
+    (void)ud;
+    if (units > 0) return 0;          /* the floor is paid */
+    return ++agh_polls > 20;          /* ~0.2 s of 10 ms polls */
+}
+
+UTEST(hull_cap_gpu_helper, stopped_run_cancels)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("slow"));
+    hl_gpu_helper_test_set_timeouts(0, 10000);
+    agh_polls = 0;
+    HlDbBudgetBinding prev = hl_db_budget_swap(agh_stop_after_polls, NULL);
+    double t0 = a40_now();
+    int rc = hl_cap_gpu_compile(ctx, -1, "x", AC_OTHER, strlen(AC_OTHER));
+    double dt = a40_now() - t0;
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, rc);
+    EXPECT_TRUE(dt < 2.0);
+    /* The supervisor answered the cancel and takes the next request. */
+    EXPECT_EQ(1, hl_gpu_helper_running());
+    hl_gpu_helper_test_set_timeouts(0, 0);
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+
+/* An exhausted budget refuses the round trip before it starts (the floor,
+ * HL_GPU_HELPER_UNITS). */
+static int agh_exhausted(void *ud, int64_t units)
+{
+    (void)ud;
+    return units > 0;
+}
+
+UTEST(hull_cap_gpu_helper, floor_charged_before_round_trip)
+{
+    AGH_NEED_HELPER();
+    HlGpuBackend be;
+    HlVfs vfs;
+    HlGpuCtx *ctx = agh_ctx(&be, &vfs);
+    ASSERT_TRUE(ctx != NULL);
+    ASSERT_EQ(0, ach_start("accept"));
+    HlGpuHelperStats a, b;
+    hl_gpu_helper_stats(&a);
+    HlDbBudgetBinding prev = hl_db_budget_swap(agh_exhausted, NULL);
+    EXPECT_EQ(HL_GPU_ERR_TIMEOUT, hl_cap_gpu_compile(ctx, -1, "f", AC_OTHER, strlen(AC_OTHER)));
+    hl_db_budget_restore(prev);
+    hl_gpu_helper_stats(&b);
+    EXPECT_EQ(a.round_trips, b.round_trips);
+    EXPECT_EQ(0, mock_compiles);
+    hl_gpu_helper_stop();
+    mock_free(ctx);
+}
+#endif
+
+#ifdef HL_ENABLE_GPU
+/* A real compile through the helper, on the device: a valid shader is
+ * compiled by the helper and then in-process; an invalid one is refused by
+ * the helper, never compiled here. Prints the measurements the design doc
+ * quotes. */
+UTEST(hull_cap_gpu_helper, real_compile_on_device)
+{
+    HlGpuCtx *ctx = calloc(1, sizeof *ctx);
+    ASSERT_TRUE(ctx != NULL);
+    if (!gpu_test_init(ctx)) { free(ctx); ASSERT_TRUE(1); return; }
+    HlVfs vfs;
+    hl_vfs_init(&vfs, AC_ENTRIES, NULL);
+    hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+    ASSERT_EQ(0, ach_start(NULL));
+    double t0 = a40_now();
+    int hs = hl_gpu_helper_check(A42_WARP, strlen(A42_WARP), 0, ctx->devices[0].name);
+    double helper_t = a40_now() - t0;
+    EXPECT_EQ(HL_GPU_HELPER_OK, hs);
+    /* The in-process compile of the source the helper compiled. */
+    t0 = a40_now();
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "warp", A42_WARP, strlen(A42_WARP)));
+    double server_t = a40_now() - t0;
+    printf("  helper: domain-warp shader (%zu bytes): helper round trip %.3f s, "
+           "server compile after it %.3f s\n", strlen(A42_WARP), helper_t, server_t);
+    /* A small shader: the round trip is mostly the worker's start-up. */
+    static const char small[] =
+        "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n"
+        "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>)"
+        "{ d[id.x] = d[id.x] * 5.0; }\n";
+    hl_gpu_helper_test_reset_cache(1);
+    t0 = a40_now();
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "small", small, strlen(small)));
+    double small_t = a40_now() - t0;
+    t0 = a40_now();
+    EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, "small2", small, strlen(small)));
+    double cached_t = a40_now() - t0;
+    printf("  helper: small shader: helper + server %.3f s; cached verdict + "
+           "server %.4f s\n", small_t, cached_t);
+    /* An invalid shader: refused by the helper, no pipeline here. */
+    int before = ctx->devices[0].pipeline_count;
+    static const char bad[] =
+        "@compute @workgroup_size(1) fn main() { let x: u32 = undefined_name; }\n";
+    EXPECT_EQ(HL_GPU_ERR_SHADER, hl_cap_gpu_compile(ctx, -1, "bad", bad, strlen(bad)));
+    EXPECT_EQ(before, ctx->devices[0].pipeline_count);
+#ifdef __APPLE__
+    /* The worker compiled under its Seatbelt profile. */
+    HlGpuHelperStats st;
+    hl_gpu_helper_stats(&st);
+    EXPECT_EQ(0u, st.unsandboxed);
+#endif
+    hl_gpu_helper_stop();
+    hl_cap_gpu_destroy(ctx);
+    free(ctx);
+}
+
+/* What the server's own compile costs once the helper has compiled the
+ * same source, against a cold in-process compile of a source no process
+ * has compiled: each run makes its sources unique (a constant derived from
+ * the clock), so no shader cache has seen them. Prints, asserts nothing
+ * but success: the design doc quotes it. */
+static char *agh_unique_warp(unsigned tag)
+{
+    /* The tag goes into a constant the shader uses, so the generated
+     * platform code differs too (naga drops an unused declaration). */
+    static const char pat[] = "1.79284291400159";
+    const char *at = strstr(A42_WARP, pat);
+    if (!at) return NULL;
+    size_t n = sizeof A42_WARP + 64;
+    char *s = malloc(n);
+    if (!s) return NULL;
+    snprintf(s, n, "%.*s1.79284%u%s", (int)(at - A42_WARP), A42_WARP, tag,
+             at + sizeof pat - 1);
+    return s;
+}
+
+UTEST(hull_cap_gpu_helper, server_residual_measured)
+{
+    HlGpuCtx *ctx = calloc(1, sizeof *ctx);
+    ASSERT_TRUE(ctx != NULL);
+    if (!gpu_test_init(ctx)) { free(ctx); ASSERT_TRUE(1); return; }
+    unsigned base = (unsigned)(a40_now() * 1000.0);
+    double cold = 0, helper = 0, after = 0;
+    const int rounds = 3;
+    HlVfs vfs;
+    hl_vfs_init(&vfs, AC_ENTRIES, NULL);
+    ASSERT_EQ(0, ach_start(NULL));
+    for (int i = 0; i < rounds; i++) {
+        char name[32];
+        /* Cold, in-process, no helper. */
+        char *a = agh_unique_warp(base + 2u * (unsigned)i);
+        ASSERT_TRUE(a != NULL);
+        hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_ANY, 0, NULL);
+        snprintf(name, sizeof name, "cold%d", i);
+        double t0 = a40_now();
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, name, a, strlen(a)));
+        cold += a40_now() - t0;
+        free(a);
+        /* Through the helper, then in-process. */
+        char *b = agh_unique_warp(base + 2u * (unsigned)i + 1u);
+        ASSERT_TRUE(b != NULL);
+        hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+        t0 = a40_now();
+        EXPECT_EQ(HL_GPU_HELPER_OK,
+                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name));
+        helper += a40_now() - t0;
+        snprintf(name, sizeof name, "warm%d", i);
+        t0 = a40_now();
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, name, b, strlen(b)));
+        after += a40_now() - t0;
+        free(b);
+    }
+    printf("  helper: domain-warp, mean of %d unique sources: cold in-process "
+           "compile %.3f s; helper round trip %.3f s; server compile after the "
+           "helper %.3f s\n", rounds, cold / rounds, helper / rounds,
+           after / rounds);
+    /* A large shader near the audit-40 function-size bound (a40_stores
+     * makes each source unique). */
+    cold = helper = after = 0;
+    size_t per = (HL_GPU_WGSL_FN_WORDS_MAX - 16) / 5 - 3;
+    for (int i = 0; i < 2; i++) {
+        char name[32];
+        char *a = a40_stores(2, per);
+        ASSERT_TRUE(a != NULL);
+        hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_ANY, 0, NULL);
+        snprintf(name, sizeof name, "bigcold%d", i);
+        double t0 = a40_now();
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, name, a, strlen(a)));
+        cold += a40_now() - t0;
+        free(a);
+        char *b = a40_stores(2, per);
+        ASSERT_TRUE(b != NULL);
+        hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
+        t0 = a40_now();
+        EXPECT_EQ(HL_GPU_HELPER_OK,
+                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name));
+        helper += a40_now() - t0;
+        snprintf(name, sizeof name, "bigwarm%d", i);
+        t0 = a40_now();
+        EXPECT_EQ(HL_GPU_OK, hl_cap_gpu_compile(ctx, -1, name, b, strlen(b)));
+        after += a40_now() - t0;
+        free(b);
+    }
+    printf("  helper: large shader (2 x %zu stores), mean of 2: cold in-process "
+           "compile %.3f s; helper round trip %.3f s; server compile after the "
+           "helper %.3f s\n", per, cold / 2, helper / 2, after / 2);
+    hl_gpu_helper_stop();
+    hl_cap_gpu_destroy(ctx);
+    free(ctx);
+}
+#endif /* HL_ENABLE_GPU */
+
+/* The test binary is also the compile helper: hl_gpu_helper_start(NULL)
+ * spawns this executable with HL_GPU_HELPER_ARGV1, as a built binary
+ * spawns itself. */
+UTEST_STATE();
+int main(int argc, const char *const argv[])
+{
+    if (argc >= 2 && strcmp(argv[1], HL_GPU_HELPER_ARGV1) == 0)
+        return hl_gpu_helper_main(argc >= 3 ? argv[2] : NULL);
+    return utest_main(argc, argv);
+}

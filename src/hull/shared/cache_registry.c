@@ -30,6 +30,7 @@ static const HlCacheKind REGISTRY[] = {
     { "compute-aot",  "WASM AOT artifacts (wamrc output, sha-keyed)",          1, "aot",          0 },
     { "templates",    "Lua template render functions (parse + pcall skip)",    1, "template",     0 },
     { "js-templates", "JS template render functions (parse + IIFE skip)",      1, "js_template",  0 },
+    { "gpu-shaders",  "GPU shader compile-helper verdicts (sha-keyed, OK only)", 1, "gpu_shader",   0 },
     { "tools",        "Signed side-loaded tool binaries (wamrc, ...)",         0, NULL,           1 },
     { NULL, NULL, 0, NULL, 0 }
 };

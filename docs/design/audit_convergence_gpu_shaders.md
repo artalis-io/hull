@@ -1,6 +1,7 @@
 # Amendment: audit convergence §7.3 - GPU shader source
 
-- **Status:** Implemented (phase 3, GPU half); helper process is a follow-up
+- **Status:** Implemented (phase 3, GPU half); the helper process is implemented too (see
+  `gpu_compile_helper.md`)
 - **Amends:** the audit-convergence design (`audit_convergence` in this directory, landing with phase 1) §7.3 ("GPU shader source"), §10, §11
 - **Code:** `src/hull/cap/gpu_shader_policy.c`, the policy fields in `HlGpuCtx`'s sealed span
   (`include/hull/cap/gpu.h`), `serve.c` (sets the policy), `tool.gpu_shaders_check`
@@ -28,7 +29,7 @@ both runtimes and any future caller get it.
 | Mode | When | `gpu.load(name)` | `gpu.compile(name, src)` |
 |---|---|---|---|
 | `HL_GPU_SHADERS_EMBEDDED` | the app VFS holds embedded files (`hl_vfs_embedded`): every built binary, served or `app.main` | the embedded `shaders/<name>.wgsl` | accepted only when `src` is byte-identical to an embedded `shaders/*.wgsl`; else `HL_GPU_ERR_POLICY` / `dynamic_shader_refused` |
-| same, `gpu.dynamic_shaders = true` | manifest opt-in (JS `gpu.dynamicShaders`; only the boolean `true`) | as above | any source, in-process under the compile deadline |
+| same, `gpu.dynamic_shaders = true` | manifest opt-in (JS `gpu.dynamicShaders`; only the boolean `true`) | as above | any source, compiled first in the helper process (`gpu_compile_helper.md`), then in-process under the compile deadline |
 | `HL_GPU_SHADERS_DEV` | no embedded files: `hull app.lua`, `hull dev` | `shaders/<name>.wgsl` on disk (the existing dev fallback) | any source; one WARN per process when the opt-in is absent and the source did not come from `shaders/` |
 | `HL_GPU_SHADERS_ANY` | no policy set: unit tests, embedders | any | any |
 
@@ -65,6 +66,11 @@ built binary still compiles its embedded shaders at `gpu.load`, but only shaders
 shipped and the build checked.
 
 ### Dynamic source: in-process, helper deferred
+
+> **Superseded:** the helper process is implemented; see `gpu_compile_helper.md`. It uses a
+> supervisor spawned before the sandbox and one worker per compile rather than a fork, and the
+> server still compiles an accepted source in-process, as reasoned below. The text below is the
+> reasoning at the time of #978.
 
 With `dynamic_shaders = true`, runtime source goes through the existing in-process path: the
 pre-checks, the large-stack compile thread, and the round-40 deadline with abandoned-compile

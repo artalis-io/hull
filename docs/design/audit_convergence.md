@@ -188,6 +188,12 @@ table/string/GC operations) at sizes n and 2n on worst-case-shaped ordinary inpu
   in a helper process with a hard kill at the compile deadline.
 - Result: the lexical size / depth / expansion estimators become a fast pre-filter, not the
   security boundary.
+- **Status: implemented.** Embedded-only compiles and the opt-in landed in #978
+  (`audit_convergence_gpu_shaders.md`). The helper process is described in
+  `gpu_compile_helper.md`: a supervisor spawned before the sandbox, a fresh sandboxed worker per
+  compile killed at its deadline, and a verdict the server acts on before its own compile.
+  `gpu.compile` stays synchronous; the wait is bounded by the deadlines and the run, and an
+  async compile is a follow-up.
 
 ## 8. Part D - Fix-regression controls (class 6)
 

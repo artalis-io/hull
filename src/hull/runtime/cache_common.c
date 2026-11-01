@@ -11,6 +11,7 @@
 
 #include "hull/shared/host.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/gpu_helper.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -327,4 +328,44 @@ void hl_tool_cache_put_sealed(HlBlobStore *store, const char *kind,
                               const char *key, const uint8_t *data, size_t len)
 {
     cache_put_sealed(1, store, kind, key, data, len);
+}
+
+/* ── GPU shader compile-helper verdicts (cap/gpu_helper.c) ──────────── */
+
+
+#define GPU_VERDICT_KIND "gpu-shaders"
+
+static HlRuntimeCacheSlot g_gpu_verdict_slot;
+
+static void gpu_verdict_close(void)
+{
+    hl_runtime_cache_singleton_reset(&g_gpu_verdict_slot);
+}
+
+static HlBlobStore *gpu_verdict_store(void)
+{
+    if (hl_hull_cache_disabled("gpu_shader")) return NULL;
+    return hl_runtime_cache_singleton(GPU_VERDICT_KIND, &g_gpu_verdict_slot,
+                                      gpu_verdict_close);
+}
+
+int hl_runtime_cache_gpu_verdict_get(const char *hex)
+{
+    HlBlobStore *st = hex ? gpu_verdict_store() : NULL;
+    if (!st) return -1;
+    uint8_t *data = NULL;
+    size_t len = 0;
+    if (hl_runtime_cache_get_sealed(st, GPU_VERDICT_KIND, hex, &data, &len) != 0)
+        return -1;
+    int ok = len == 2 && memcmp(data, "ok", 2) == 0;
+    free(data);
+    return ok ? 0 : -1;
+}
+
+void hl_runtime_cache_gpu_verdict_put(const char *hex)
+{
+    HlBlobStore *st = hex ? gpu_verdict_store() : NULL;
+    if (st)
+        hl_runtime_cache_put_sealed(st, GPU_VERDICT_KIND, hex,
+                                    (const uint8_t *)"ok", 2);
 }

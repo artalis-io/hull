@@ -18,9 +18,10 @@
  *     since the built binary will refuse it.
  *   - No policy (HL_GPU_SHADERS_ANY): unit tests and embedders.
  *
- * With the opt-in, dynamic source goes through the in-process compile and
- * its deadline / abandoned-compile machinery (audit 40). A helper process
- * with a hard kill at the deadline is a tracked follow-up.
+ * With the opt-in, dynamic source is compiled first in a bounded helper
+ * process (cap/gpu_helper.c, killed at its deadline); only a source the
+ * helper compiled cleanly reaches the in-process compile, which keeps its
+ * own deadline / abandoned-compile machinery (audit 40).
  *
  * The policy lives in the context's sealed policy span (serve.c seals it
  * after hl_cap_gpu_set_shader_policy), so app code cannot widen it.
@@ -81,9 +82,12 @@ int hl_gpu_shader_admit(const HlGpuCtx *ctx, const char *name,
     if (!ctx) return HL_GPU_OK;
     switch (ctx->shader_mode) {
     case HL_GPU_SHADERS_EMBEDDED:
-        if (ctx->dynamic_shaders ||
-            hl_gpu_shader_is_embedded(ctx->shader_vfs, wgsl, len))
+        if (hl_gpu_shader_is_embedded(ctx->shader_vfs, wgsl, len))
             return HL_GPU_OK;
+        /* The opt-in: runtime source, checked first in the compile helper
+         * process (cap/gpu_helper.c) before the server compiles it. */
+        if (ctx->dynamic_shaders)
+            return HL_GPU_ADMIT_HELPER;
         log_warn("[hull:gpu] shader '%s' refused: its source is not a "
                  "shader embedded at build time (shaders/<name>.wgsl). "
                  "Move it to shaders/ and use gpu.load, or set "

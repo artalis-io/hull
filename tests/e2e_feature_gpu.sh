@@ -142,6 +142,85 @@ if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
 fi
 echo "ok  gpu.dynamic_shaders opt-in"
 
+echo "=== the compile helper: a served opt-in app compiles runtime source in a helper process ==="
+# The built binary spawns itself as the helper before its sandbox
+# (cap/gpu_helper.c). HULL_TEST_GPU_HELPER makes the helper's worker hang,
+# crash or send an oversized reply; the server must answer the compile with
+# an error and keep serving. Needs a GPU device (the helper is spawned only
+# when the binary has one); skipped otherwise.
+if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
+    HAPP=$(mktemp -d)
+    HCACHE=$(mktemp -d)
+    cat > "$HAPP/app.lua" <<'LUA'
+app.manifest({ gpu = { dynamic_shaders = true },
+               modules = { "hull/gpu@1", "hull/http-server@1" } })
+local SRC = "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
+    "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>)" ..
+    "{ d[id.x] = d[id.x] * 7.0; }\n"
+local n = 0
+app.get("/ping", function(req, res) res:text("pong") end)
+app.get("/compile", function(req, res)
+    local gpu = require("hull.gpu")
+    n = n + 1
+    local ok, err = gpu.compile("t" .. n, SRC)
+    res:text(ok and "compiled" or ("error:" .. tostring(err)))
+end)
+LUA
+    "$HULL" build --compiler=system --with=gpu --no-verify-platform -o "$HAPP/bin" "$HAPP" >/dev/null 2>&1 || true
+    test -x "$HAPP/bin" || { echo "FAIL: helper app did not build"; exit 1; }
+
+    # One server per hook; prints "<compile reply>|<ping reply>".
+    helper_case() {
+        _port=$1; _hook=$2
+        (cd "$HAPP" && HULL_CACHE_DIR="$HCACHE" HULL_TEST_GPU_HELPER="$_hook" \
+            exec ./bin -p "$_port") >"$HAPP/srv-$_port.log" 2>&1 &
+        _pid=$!
+        _up=0
+        for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            if curl -s "http://127.0.0.1:$_port/ping" >/dev/null 2>&1; then _up=1; break; fi
+            sleep 0.25
+        done
+        if [ "$_up" -eq 1 ]; then
+            _c=$(curl -s --max-time 30 "http://127.0.0.1:$_port/compile")
+            _p=$(curl -s --max-time 5 "http://127.0.0.1:$_port/ping")
+        else
+            _c="(no server)"; _p=""
+        fi
+        kill "$_pid" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null || true
+        echo "$_c|$_p"
+    }
+    # The failures first: an OK verdict is cached on disk, so the hooks
+    # would not be reached for the same source afterwards.
+    OUT=$(helper_case 19931 slow)
+    [ "$OUT" = "error:compile_timeout|pong" ] \
+        || { cat "$HAPP/srv-19931.log"; echo "got: $OUT"; echo "FAIL: helper past its deadline"; exit 1; }
+    echo "ok  helper past its deadline: killed, compile_timeout, server keeps serving"
+    OUT=$(helper_case 19932 crash)
+    [ "$OUT" = "error:shader_helper_failed|pong" ] \
+        || { cat "$HAPP/srv-19932.log"; echo "got: $OUT"; echo "FAIL: helper crash"; exit 1; }
+    echo "ok  helper crash: shader_helper_failed, server keeps serving"
+    OUT=$(helper_case 19933 oversize)
+    [ "$OUT" = "error:shader_helper_failed|pong" ] \
+        || { cat "$HAPP/srv-19933.log"; echo "got: $OUT"; echo "FAIL: oversized helper reply"; exit 1; }
+    echo "ok  oversized helper reply refused"
+    OUT=$(helper_case 19934 "")
+    [ "$OUT" = "compiled|pong" ] \
+        || { cat "$HAPP/srv-19934.log"; echo "got: $OUT"; echo "FAIL: helper compile"; exit 1; }
+    echo "ok  runtime source compiled through the helper"
+    ls "$HCACHE"/gpu-shaders/blobs/*/* >/dev/null 2>&1 \
+        || { ls -R "$HCACHE"; echo "FAIL: no sealed verdict cached"; exit 1; }
+    # A restart finds the verdict in the sealed cache: the helper is not
+    # asked (its crash hook would refuse the compile otherwise).
+    OUT=$(helper_case 19935 crash)
+    [ "$OUT" = "compiled|pong" ] \
+        || { cat "$HAPP/srv-19935.log"; echo "got: $OUT"; echo "FAIL: cached verdict not used"; exit 1; }
+    echo "ok  a cached verdict skips the helper after a restart"
+    rm -rf "$HAPP" "$HCACHE"
+else
+    echo "skip  compile helper cases (no GPU device)"
+fi
+
 echo "=== a shader the pre-check refuses fails the build ==="
 BAD=$(mktemp -d)
 mkdir -p "$BAD/shaders"

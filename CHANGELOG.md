@@ -85,8 +85,7 @@ release-artifact layout).
   and `gpu.compile(name, src)` is refused with `dynamic_shader_refused` (Lua `nil, err`; JS
   throws) unless `src` is byte-identical to an embedded `shaders/*.wgsl`. The manifest opt-in
   `gpu = { dynamic_shaders = true }` (JS `gpu: { dynamicShaders: true }`) allows runtime source,
-  compiled in-process under the existing compile deadline (a helper process with a hard kill is
-  a follow-up). Development (`hull app.lua`, `hull dev`) is unchanged: `shaders/` on disk counts
+  which is compiled first in a bounded helper process (next entry). Development (`hull app.lua`, `hull dev`) is unchanged: `shaders/` on disk counts
   as embedded and inline source still compiles, with one WARN that the built binary will refuse
   it. `hull build` now checks every shader it embeds - the size cap and the WGSL pre-check, plus
   a test compile when the building hull has a GPU backend and an adapter - and fails the build
@@ -96,6 +95,29 @@ release-artifact layout).
   `gpu.compile(name, SRC)` with `gpu.load(name)`; or, when the source really is generated at run
   time, set `gpu.dynamic_shaders = true`. The examples (`gpu_search`, `gpu_pipeline`,
   `compute_gpu_chain`) now load their shaders from `shaders/`.
+
+- **Runtime GPU shader source compiles first in a bounded helper process** (audit convergence
+  phase 3, §7.3; docs/design/gpu_compile_helper.md). With `gpu.dynamic_shaders = true`, a built
+  binary no longer compiles runtime WGSL in the server first. It spawns itself as a supervisor
+  before its sandbox applies. For each compile, the supervisor starts a fresh worker, which
+  initializes the GPU, applies its own sandbox (macOS: Seatbelt with no network, no spawning,
+  no file writes and no `$HOME` reads; Linux: NO_NEW_PRIVS, a Landlock domain that can only read
+  the system trees and use existing device nodes, and a seccomp filter against exec and network
+  sockets) and compiles the source on a
+  smaller stack than the server's, under rlimits. The worker is killed at its start-up or
+  compile deadline, and a reply longer than 512 bytes is refused. Only a source the helper
+  compiled cleanly is then compiled in the server, so a source that hangs, crashes, recurses or
+  exhausts memory takes down the worker, not the server. On Metal the server's compile after
+  the helper reuses the system shader cache (0.006 s for a shader whose cold compile takes
+  0.31 s). The app sees `shader_error` when the compiler refuses a source and `compile_timeout`
+  when the helper passes its deadline or the run stops. It sees the new `shader_helper_failed`
+  when the helper crashed, sent a bad reply or is gone; the sandboxed server cannot start
+  another, so later compiles also fail. Verdicts are cached by source hash: all in memory, and
+  OK ones on disk in the new sealed cache kind `gpu-shaders` (`HULL_NO_GPU_SHADER_CACHE`, off
+  under `--verify-sig`). A cache miss charges `HL_GPU_HELPER_UNITS` (about 4.2M) before the round
+  trip. `gpu.compile` is still synchronous; the wait is bounded by the deadlines and by the run,
+  which can cancel it. Shaders embedded at build time and `hull build`'s shader check are
+  unaffected and compile in-process.
 
 ### Fixes
 
