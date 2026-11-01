@@ -201,7 +201,7 @@ _Thread_local static struct {
 int hull_unveil_unsynced_threads;
 int hull_unveil_sync_mode;
 #if HULL_UNVEIL_TEST_NO_TSYNC
-/* Test-only (audit 43): called at the start of every sync round, so a test
+/* HULL PATCH 0004 (audit 43), test-only: called at the start of every sync round, so a test
  * can start a new thread in each one and drive the loop into its cap. */
 void (*hull_unveil_test_round_hook)(void);
 #endif
