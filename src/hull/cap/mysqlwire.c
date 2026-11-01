@@ -395,6 +395,90 @@ const char *hl_my_bin_collation(const char *server_version)
     return "utf8mb4_bin";
 }
 
+int hl_my_roles_supported(const char *server_version)
+{
+    const char *v = server_version ? server_version : "";
+    for (const char *p = v; *p; p++)
+        if (strncasecmp(p, "mariadb", 7) == 0) {
+            const char *mv = strncmp(v, "5.5.5-", 6) == 0 ? v + 6 : v;
+            return my_version_at_least(mv, 10, 0, 5);
+        }
+    return my_version_at_least(v, 8, 0, 0);
+}
+
+/* MySQL's CURRENT_ROLE() list: one or more `name`@`host` (backtick-quoted,
+ * a backtick inside doubled), comma-separated. 1 when @p v is exactly that. */
+static int my_role_list_ok(const char *v, size_t n)
+{
+    size_t i = 0;
+    for (;;) {
+        for (int part = 0; part < 2; part++) {
+            if (i >= n || v[i] != '`') return 0;
+            i++;
+            size_t start = i;
+            for (;;) {
+                if (i >= n || v[i] == '\0') return 0;
+                if (v[i] == '`') {
+                    if (i + 1 < n && v[i + 1] == '`') { i += 2; continue; }
+                    break;
+                }
+                i++;
+            }
+            if (part == 0 && i == start) return 0;   /* empty role name */
+            i++;                                     /* closing backtick */
+            if (part == 0) {
+                if (i >= n || v[i] != '@') return 0;
+                i++;
+            }
+        }
+        if (i == n) return 1;
+        if (v[i] != ',') return 0;
+        i++;
+    }
+}
+
+int hl_my_role_restore_sql(int mariadb, const char *value, size_t len,
+                           char *out, size_t outsz)
+{
+    static const char none[] = "SET ROLE NONE";
+    static const char pre[] = "SET ROLE ";
+    if (!out || outsz == 0) return -1;
+    out[0] = '\0';
+    if (!value || (!mariadb && len == 4 && memcmp(value, "NONE", 4) == 0)) {
+        if (outsz < sizeof none) return -1;
+        memcpy(out, none, sizeof none);
+        return 0;
+    }
+    size_t pl = sizeof pre - 1;
+    if (len == 0 || pl >= outsz) return -1;
+    memcpy(out, pre, pl);
+    size_t o = pl;
+    if (!mariadb) {
+        /* MySQL hands the list back already quoted. */
+        if (!my_role_list_ok(value, len) || o + len >= outsz) {
+            out[0] = '\0';
+            return -1;
+        }
+        memcpy(out + o, value, len);
+        o += len;
+    } else {
+        /* MariaDB: one bare role name; quote it, doubling backticks. */
+        out[o++] = '`';
+        for (size_t i = 0; i < len; i++) {
+            size_t need = value[i] == '`' ? 2 : 1;
+            if (value[i] == '\0' || o + need + 2 > outsz) {
+                out[0] = '\0';
+                return -1;
+            }
+            if (value[i] == '`') out[o++] = '`';
+            out[o++] = value[i];
+        }
+        out[o++] = '`';
+    }
+    out[o] = '\0';
+    return 0;
+}
+
 uint8_t hl_my_client_charset(uint8_t server_default)
 {
     uint8_t id = server_default;

@@ -76,6 +76,8 @@ int hl_my_caching_sha2_scramble(const char *password,
 /* ── Connection (socket + handshake) ────────────────────── */
 
 #define HL_MY_ERRMSG_SIZE    256    /* connection error-message buffer */
+#define HL_MY_ROLE_RESTORE_MAX 1024 /* CURRENT_ROLE() value kept for the reset */
+#define HL_MY_LOGIN_DB_MAX   260    /* DATABASE(): 64 characters of utf8mb4 */
 #define HL_MY_RECV_BUF_INIT  8192   /* initial receive-buffer capacity */
 #define HL_MY_RECV_BUF_SHRINK ((size_t)1 << 20) /* give back a buffer grown past this */
 
@@ -130,6 +132,18 @@ typedef struct HlMyConn {
      * (MariaDB 11: utf8mb4 -> utf8mb4_uca1400_ai_ci), the handshake's
      * included, so the reset names no collation for the default id. */
     uint8_t  mariadb;
+    /* The server has roles (hl_my_roles_supported of its version). */
+    uint8_t  roles;
+    /* What the login left active, read once by hl_my_conn_capture_login:
+     * CURRENT_ROLE()'s value (role_null for SQL NULL; empty with no roles)
+     * and DATABASE() (db_null for none). COM_RESET_CONNECTION leaves both as
+     * the session had them, so hl_my_conn_reset compares and puts them back
+     * (audit convergence §7.1). login_captured: they were read. */
+    uint8_t  login_captured;
+    uint8_t  login_role_null;
+    uint8_t  login_db_null;
+    char     login_role[HL_MY_ROLE_RESTORE_MAX];
+    char     login_db[HL_MY_LOGIN_DB_MAX];
     char     errmsg[HL_MY_ERRMSG_SIZE];
 } HlMyConn;
 
@@ -278,12 +292,30 @@ int hl_my_conn_ping(HlMyConn *conn);
  * LOCK TABLES and GET_LOCK locks, drops temporary tables, user variables
  * and prepared statements, and restores every session variable (autocommit
  * included) to its global value (audit 39). A prepared XA transaction is
- * detached and stays prepared on the server. Updates conn->server_status.
+ * detached and stays prepared on the server. The same round trip reads the
+ * active role and current database, which the reset leaves as they were;
+ * when they differ from the login's (hl_my_conn_capture_login), a second
+ * one sets them back - SET ROLE, then USE, which MySQL needs after SET ROLE
+ * to see the database's privileges again (audit convergence §7.1). A
+ * database the login had none of cannot be left again: -1. Updates
+ * conn->server_status.
  * Returns 0, or -1 (the server refused the command - MySQL before 5.7.3,
  * MariaDB before 10.2.4 - or the connection failed; conn->errmsg says which).
  * Asks no budget, as hl_my_conn_ping.
  */
 int hl_my_conn_reset(HlMyConn *conn);
+
+/*
+ * Read what the login left active - CURRENT_ROLE() on a server with roles
+ * (conn->roles) and DATABASE() - into conn->login_*, which every later
+ * hl_my_conn_reset compares with the session's and puts back: the reset
+ * leaves the active role and the current database as they were, and a role
+ * set through PREPARE from a user variable or by a CALLed procedure (past the
+ * session-statement refusal), or a USE, carried into later entries (audit
+ * convergence §7.1). Called once per connection, before app SQL runs on it.
+ * Returns 0, or -1 (conn->errmsg says why).
+ */
+int hl_my_conn_capture_login(HlMyConn *conn);
 #endif
 
 #endif /* HL_CAP_MYSQL_CONN_H */

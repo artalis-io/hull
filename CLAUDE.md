@@ -784,15 +784,29 @@ gone). Instead, after its rollback the guard RESETS the session of every
 connection the entry used (`HlDbBackend.reset_session`, `hl_db_reset_session`;
 a per-connection `used` flag set by any statement, cleared by the reset):
 MySQL `COM_RESET_CONNECTION` (`hl_my_conn_reset`, then the handshake's
-charset and `autocommit = 1` again), Postgres `DISCARD ALL` (a worker
+charset and `autocommit = 1` again, and the login's active role and current
+database when they changed), Postgres `DISCARD ALL` (a worker
 connection that LISTENs for `conn.wait_notify` gets DISCARD ALL's steps
 without `UNLISTEN *`). Both run under a 2 s cleanup budget of their own, not
 the run's. A connection whose reset fails, or that is still inside a
 transaction after the ROLLBACK (MySQL XA), is abandoned - the server ends
 the session with it - and the next call reconnects. A pinned handle (the
-migration lock) is exempt. The worker pool resets its connection after
-every `db.async` op and `worker.dispatch` job (`worker_end_txn`,
-`hl_worker_db_end_job`). So session state - a user variable, `SET
+migration lock) is exempt. A connection already marked broken whose socket
+is still open (a reply left part-read, a stopped run) is CLOSED at the reset
+(`my_abandon` / `pg_abandon` close whenever a transport is left), not only
+forgotten: the server kept its session, and any lock a procedure took in it,
+until the slot's next call (audit convergence §7.1). The worker pool resets
+its connection after every `db.async` op and `worker.dispatch` job
+(`worker_end_txn`, `hl_worker_db_end_job`). In JS the drain resets too: when
+`hl_js_run_jobs` switches from one run's jobs to another's (a request's
+continuation run in another request's drain, and back to the active entry
+once that stretch ends) it runs the guard (`hl_js_run_session_switch`)
+whether or not a transaction is open - it ran only with one open, so the
+continuation read the other request's user variables, `set_config` GUCs and
+time zone (§7.1). Consecutive jobs of one run cost nothing; a switch costs
+one reset per used connection. Lua has no shared job queue: every resume is
+a loop-level entry guarded at both ends (`hl_lua_async_resume`). So session
+state - a user variable, `SET
 search_path`, a temporary table, a lock a stored procedure took - never
 survives an entry boundary or a wait, on any connection, and must not be
 relied on across one. `conn.last_id()` on a shared connection is reliable only right
@@ -1199,7 +1213,25 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   read as autocommit off), and the reset re-applies `SET NAMES utf8mb4,
   collation_connection = <id>, autocommit = 1` (a plain `SET NAMES utf8mb4,
   autocommit = 1` on MariaDB for the default id 45, which it maps through
-  `character_set_collations`, the handshake's included). Every new connection
+  `character_set_collations`, the handshake's included). COM_RESET_CONNECTION
+  leaves the active ROLE and the current DATABASE as the session had them,
+  and a role set through `PREPARE` from a user variable or by a `CALL`ed
+  procedure, or a `USE`, gets past the session-statement refusal - each
+  carried into later entries. So a new connection reads `CURRENT_ROLE()`
+  (on a server with roles: MySQL 8.0+, MariaDB 10.0.5+,
+  `hl_my_roles_supported`) and `DATABASE()` once (`hl_my_conn_capture_login`),
+  the reset reads them again as the first statement of its `SET NAMES` round
+  trip, and only when they differ does a second round trip put the login's
+  back: `SET ROLE <the login's list>` / `SET ROLE NONE`, then `USE` - MySQL
+  keeps the current database's privileges as of the last USE and SET ROLE
+  drops them (a plain `SET ROLE NONE` made the app's own tables "SELECT
+  command denied"). `hl_my_role_restore_sql`: MySQL's backtick-quoted list is
+  checked and used as given, MariaDB's bare name quoted. The login's list
+  rather than `SET ROLE DEFAULT`: MariaDB has no `SET ROLE DEFAULT`, and under
+  MySQL's `activate_all_roles_on_login` the login activates every granted
+  role, not only the defaults. A database selected on a connection that
+  started with none cannot be deselected: the reset fails and the connection
+  is abandoned (audit convergence §7.1). Every new connection
   also sends `SET autocommit = 1` after the handshake (`my_connect`, audit
   41): a server whose global autocommit is off (`SET GLOBAL autocommit = 0`,
   `init_connect`) still reports SERVER_STATUS_AUTOCOMMIT in the handshake,

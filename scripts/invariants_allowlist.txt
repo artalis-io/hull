@@ -230,6 +230,7 @@ INV-2  src/hull/runtime/js/mod_db_udf.c:*  # SQL udf bridge: sqlite3_value / sql
 INV-4  src/hull/runtime/js/async.c:hl_js_run_yield_check  # transaction machinery: rolls back the transaction a waiting run held and fails its run / tag
 INV-4  src/hull/runtime/js/async.c:hl_js_txn_left_open  # transaction machinery: rolls back a transaction code no entry waits on left open; the caller fails the tag
 INV-4  src/hull/runtime/js/async.c:hl_js_run_txn_hold_end  # transaction machinery: a run whose stretch of jobs ended holding a transaction; rolled back and its tag failed
+INV-4  src/hull/runtime/js/async.c:hl_js_run_session_switch  # drain machinery (audit convergence 7.1): resets used sessions where hl_js_run_jobs switches runs; the transaction checks ran first, and each entry still ends through hl_js_entry_end_txn_check
 INV-4  src/hull/runtime/js/mod_tui.c:js_tui_poll_sync  # re-arms app.main's own run after a terminal wait (audits 26 / 28); app.main ends through hl_js_entry_end_txn_check
 INV-4  src/hull/runtime/js/runtime.c:hl_js_reset_request  # helper: arms the run for hl_js_dispatch / hl_js_dispatch_middleware, which end through hl_js_entry_end_txn_check
 

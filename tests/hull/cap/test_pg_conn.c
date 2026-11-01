@@ -2065,6 +2065,29 @@ UTEST(pg_backend, guard_discards_a_used_session_only)
     pgb_free(&ctx, &s, sv);
 }
 
+/* Audit convergence §7.1: a connection marked broken whose socket is still
+ * open (a reply left part-read, a failed send) is closed at the entry
+ * boundary's reset. Only forgotten, the server kept its session - and any
+ * advisory lock a function took in it - until the slot's next call. */
+UTEST(pg_convergence_sql, reset_closes_a_broken_connection)
+{
+    HlPgWriter s; hl_pg_writer_init(&s);
+    pgb_put_exec_ok(&s, "SELECT 1", 'I');
+    HlDbHandle h; HlDbPgCtx ctx; int sv[2];
+    ASSERT_EQ(0, pgb_start(&h, &ctx, sv, &s));
+    ASSERT_TRUE(pg_exec(&h, "SELECT 1", NULL, 0) >= 0);
+    char got[4096];
+    (void)pgb_sent(sv[0], got, sizeof got);
+    ctx.conn.broken = 1;                       /* reply left part-read */
+    ASSERT_TRUE(ctx.conn.transport != NULL);
+    EXPECT_EQ(0, hl_db_reset_session(&h));
+    EXPECT_TRUE(ctx.conn.transport == NULL);   /* closed */
+    EXPECT_EQ(0, ctx.used);
+    char b;
+    EXPECT_EQ(0, (int)recv(sv[0], &b, 1, MSG_DONTWAIT));   /* EOF, no Terminate */
+    pgb_free(&ctx, &s, sv);
+}
+
 /* A worker connection that LISTENs for conn.wait_notify keeps its LISTENs:
  * DISCARD ALL's steps without UNLISTEN *. */
 UTEST(pg_backend, reset_keeps_hull_listens)

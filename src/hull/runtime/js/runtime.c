@@ -1570,13 +1570,29 @@ int hl_js_run_jobs(HlJS *js)
                 continue;
             }
         } else {
+            /* The head job is another run's code than the code that ran
+             * last: reset the used connections' sessions first, so it does
+             * not read (or keep) what that run set on them (audit
+             * convergence §7.1). One reset per used connection per switch;
+             * consecutive jobs of one run cost nothing. */
+            uint64_t head = foreign ? tag : js->entry_tag;
+            if (head != last_tag && JS_IsJobPending(js->rt))
+                hl_js_run_session_switch(js);
             ret = JS_ExecutePendingJob(js->rt, &ctx1);
             if (ret == 0)
                 break;
         }
         last_tag = foreign ? tag : js->entry_tag;
-        if (foreign && (!JS_GetPendingJobTag(js->rt, &next) || next != tag))
+        if (foreign && (!JS_GetPendingJobTag(js->rt, &next) || next != tag)) {
             hl_js_run_tag_txn_check(js, tag);
+            /* Back to the active entry's code (the queue is empty): the
+             * other run's session state does not go with it. A job of a
+             * third run is reset for at the top of the next turn. */
+            if (!JS_IsJobPending(js->rt)) {
+                hl_js_run_session_switch(js);
+                last_tag = js->entry_tag;
+            }
+        }
         if (ret > 0) {
             count++;
             continue;

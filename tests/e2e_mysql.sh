@@ -1082,6 +1082,30 @@ wait "$SVR" 2>/dev/null || true; SVR=
 grep -q "is refused" "$SCDIR/bad.log" || { echo "::error session control: migration refusal not reported"; cat "$SCDIR/bad.log"; exit 1; }
 echo "PASS: session-altering SQL refused, every used connection reset per entry, session_control escape hatch, migration lock (MySQL)"
 rm -rf "$SCDIR"
+
+# ── audit convergence §7.1: the reset's remaining gaps (MySQL) ─────────
+# A request's continuation run in another request's drain reads none of that
+# request's session state, and a role set where the session-statement
+# refusal cannot see it (PREPARE from a user variable, a CALLed procedure)
+# is back to the login's in the next entry.
+echo "=== convergence §7.1: drain switch resets the session; reset restores the login role ==="
+CSDIR=$(mktemp -d)
+. "$(dirname "$0")/lib/hull_db_convergence_sql.sh"
+db_convergence_sql_apps "$CSDIR"
+db_convergence_sql_drain ./build/hull "$DSN" "$CSDIR" "$PORT" || exit 1
+docker exec "$CONTAINER" "$MYSQL_CLI" -uroot -prootpw hulldb -e "
+    CREATE ROLE IF NOT EXISTS hull_cs_rr;
+    GRANT SELECT ON hulldb.* TO hull_cs_rr;
+    GRANT hull_cs_rr TO 'hull'@'%';
+    DROP PROCEDURE IF EXISTS hull_cs_set_rr;
+    CREATE PROCEDURE hull_cs_set_rr() SQL SECURITY INVOKER SET ROLE hull_cs_rr;
+    GRANT EXECUTE ON PROCEDURE hulldb.hull_cs_set_rr TO 'hull'@'%';
+    CREATE DATABASE IF NOT EXISTS hull_cs_db2;
+    GRANT ALL ON hull_cs_db2.* TO 'hull'@'%';" >/dev/null 2>&1 || {
+    echo "::error convergence role: role setup failed"; exit 1; }
+db_convergence_sql_role ./build/hull "$DSN" "$CSDIR" "$PORT" || exit 1
+echo "PASS: no session state crosses runs in a drain; the login role is restored per entry (MySQL)"
+rm -rf "$CSDIR"
 # ── audit 41: every statement pays a round trip's floor (MySQL) ──
 echo "=== audit 41: a SELECT 1 loop trips a small budget (both runtimes) ==="
 A41DIR=$(mktemp -d)

@@ -592,6 +592,7 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
     conn->charset = charset;
     conn->mariadb = strstr(hs.server_version, "MariaDB") != NULL;
     conn->bin_collation = hl_my_bin_collation(hs.server_version);
+    conn->roles = (uint8_t)hl_my_roles_supported(hs.server_version);
     /* The session's starting status (autocommit), until the first OK: it was
      * left 0, which read as autocommit off (audit 39). */
     conn->server_status = hs.status;
@@ -1566,6 +1567,20 @@ int hl_my_conn_ping(HlMyConn *conn)
     return rc;
 }
 
+/* The session's active role and current database, as one row. */
+typedef struct {
+    int  rows;
+    int  role_null;
+    int  db_null;
+    int  too_long;
+    char role[HL_MY_ROLE_RESTORE_MAX];
+    char db[HL_MY_LOGIN_DB_MAX];
+} MyLoginCap;
+
+static int my_login_row(void *ctx, const char *const *values,
+                        const size_t *lengths, int ncols);
+static int my_restore_login(HlMyConn *conn, const MyLoginCap *now);
+
 int hl_my_conn_reset(HlMyConn *conn)
 {
     my_cmd_reset(conn);
@@ -1612,14 +1627,126 @@ int hl_my_conn_reset(HlMyConn *conn)
      * which a server may default off (SET GLOBAL autocommit = 0): Hull's
      * sessions run with it on, so set it in the same statement (audit 41). */
     unsigned id = conn->charset ? conn->charset : HL_MY_DEFAULT_CHARSET;
-    char names[96];
+    /* The reset leaves the active role and the current database as the
+     * session had them: a role set through PREPARE or a CALLed procedure, or
+     * a USE, carried into later entries (audit convergence §7.1). The same
+     * round trip reads both (the first statement, whose rows the call
+     * returns), and they are put back below only when they differ from the
+     * login's, so an ordinary reset costs no further round trip. */
+    const char *sel = !conn->login_captured ? ""
+                    : conn->roles ? "SELECT CURRENT_ROLE(), DATABASE(); "
+                                  : "SELECT NULL, DATABASE(); ";
+    char names[160];
     if (conn->mariadb && id == HL_MY_DEFAULT_CHARSET)
-        snprintf(names, sizeof names, "SET NAMES utf8mb4, autocommit = 1");
+        snprintf(names, sizeof names, "%sSET NAMES utf8mb4, autocommit = 1", sel);
     else
         snprintf(names, sizeof names,
-                 "SET NAMES utf8mb4, collation_connection = %u, "
-                 "autocommit = 1", id);
-    return hl_my_conn_query(conn, names, NULL, NULL, NULL, NULL) == 0 ? 0 : -1;
+                 "%sSET NAMES utf8mb4, collation_connection = %u, "
+                 "autocommit = 1", sel, id);
+    MyLoginCap now;
+    memset(&now, 0, sizeof now);
+    if (hl_my_conn_query(conn, names, NULL,
+                         conn->login_captured ? my_login_row : NULL,
+                         &now, NULL) != 0)
+        return -1;
+    if (!conn->login_captured) return 0;
+    if (now.rows != 1 || now.too_long) {
+        conn_set_err(conn, "could not read the session's role and database");
+        return -1;
+    }
+    return my_restore_login(conn, &now);
+}
+
+static int my_login_row(void *ctx, const char *const *values,
+                        const size_t *lengths, int ncols)
+{
+    MyLoginCap *c = ctx;
+    if (c->rows++ || ncols != 2) return 0;
+    /* A NUL inside either is nothing SET ROLE / USE can name. */
+    if ((values[0] && memchr(values[0], '\0', lengths[0])) ||
+        (values[1] && memchr(values[1], '\0', lengths[1]))) {
+        c->too_long = 1;
+        return 0;
+    }
+    if (!values[0]) c->role_null = 1;
+    else if (lengths[0] >= sizeof c->role) c->too_long = 1;
+    else { memcpy(c->role, values[0], lengths[0]); c->role[lengths[0]] = '\0'; }
+    if (!values[1]) c->db_null = 1;
+    else if (lengths[1] >= sizeof c->db) c->too_long = 1;
+    else { memcpy(c->db, values[1], lengths[1]); c->db[lengths[1]] = '\0'; }
+    return 0;
+}
+
+/* Put the login's role and database back when @p now (the session's, read
+ * by the reset) differs. SET ROLE first, then USE: MySQL keeps the current
+ * database's privileges as they were at the last USE, and SET ROLE drops
+ * them until the next one (a SELECT on the app's own table was denied). */
+static int my_restore_login(HlMyConn *conn, const MyLoginCap *now)
+{
+    int role_differs = conn->roles &&
+        (now->role_null != conn->login_role_null ||
+         (!now->role_null && strcmp(now->role, conn->login_role) != 0));
+    int db_differs = now->db_null != conn->login_db_null ||
+        (!now->db_null && strcmp(now->db, conn->login_db) != 0);
+    if (!role_differs && !db_differs) return 0;
+    if (conn->login_db_null && !now->db_null) {
+        conn_set_err(conn, "the session selected a database the connection "
+                           "did not start with, and none can be deselected");
+        return -1;
+    }
+    char sql[HL_MY_ROLE_RESTORE_MAX + 2 * HL_MY_LOGIN_DB_MAX + 32];
+    size_t o = 0;
+    if (role_differs) {
+        if (hl_my_role_restore_sql(conn->mariadb,
+                                   conn->login_role_null ? NULL : conn->login_role,
+                                   strlen(conn->login_role), sql, sizeof sql) != 0) {
+            conn_set_err(conn, "could not restore the session's active roles");
+            return -1;
+        }
+        o = strlen(sql);
+    }
+    if (!conn->login_db_null) {
+        const char *d = conn->login_db;
+        int n = snprintf(sql + o, sizeof sql - o, "%sUSE `", o ? "; " : "");
+        if (n < 0 || (size_t)n >= sizeof sql - o) return -1;
+        o += (size_t)n;
+        for (; *d; d++) {
+            if (o + 4 >= sizeof sql) return -1;
+            if (*d == '`') sql[o++] = '`';
+            sql[o++] = *d;
+        }
+        sql[o++] = '`';
+        sql[o] = '\0';
+    }
+    if (o == 0) return 0;
+    return hl_my_conn_query(conn, sql, NULL, NULL, NULL, NULL) == 0 ? 0 : -1;
+}
+
+int hl_my_conn_capture_login(HlMyConn *conn)
+{
+    conn->login_captured = 0;
+    conn->login_role[0] = conn->login_db[0] = '\0';
+    MyLoginCap c;
+    memset(&c, 0, sizeof c);
+    if (hl_my_conn_query(conn, conn->roles ? "SELECT CURRENT_ROLE(), DATABASE()"
+                                           : "SELECT NULL, DATABASE()",
+                         NULL, my_login_row, &c, NULL) != 0)
+        return -1;
+    char check[HL_MY_ROLE_RESTORE_MAX + 16];
+    if (c.rows != 1 || c.too_long ||
+        (conn->roles &&
+         hl_my_role_restore_sql(conn->mariadb, c.role_null ? NULL : c.role,
+                                strlen(c.role), check, sizeof check) != 0)) {
+        conn_set_err(conn, "could not read the session's active roles and "
+                           "database");
+        return -1;
+    }
+    conn->login_role_null = (uint8_t)c.role_null;
+    conn->login_db_null = (uint8_t)c.db_null;
+    memcpy(conn->login_role, c.role, sizeof conn->login_role);
+    memcpy(conn->login_db, c.db, sizeof conn->login_db);
+    conn->login_captured = 1;
+    return 0;
 }
 
 int hl_my_conn_exec_multi(HlMyConn *conn, const char *sql)

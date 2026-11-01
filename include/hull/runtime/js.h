@@ -197,6 +197,10 @@ typedef struct HlJS {
     uint64_t        run_tag_next;   /* last tag handed out */
     uint64_t        entry_tag;      /* the active run's */
     uint64_t        cli_main_tag;   /* app.main's own run's (0 = none) */
+    /* Times hl_js_run_jobs switched runs and reset the used connections'
+     * sessions (hl_js_run_session_switch; audit convergence §7.1). Read by
+     * the unit tests. */
+    uint64_t        session_switches;
     /* Runs that held a transaction across a wait (audits 31-33): their
      * tags, sorted. A resume of a continuation whose run_tag is here is not
      * continued, and a pending job queued under one is dropped unrun

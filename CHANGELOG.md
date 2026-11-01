@@ -64,6 +64,20 @@ release-artifact layout).
 
 ### Fixes
 
+- **No MySQL / Postgres session state crosses runs, roles included** (audit convergence §7.1).
+  Three gaps the per-entry session reset left: (1) `COM_RESET_CONNECTION` leaves an active
+  MySQL role and the current database as they were, and a role set through `PREPARE` from a
+  user variable or by a `CALL`ed procedure, or a `USE`, gets past the session-statement
+  refusal, so each carried into later entries. A new connection now reads `CURRENT_ROLE()`
+  (MySQL 8.0+, MariaDB 10.0.5+) and `DATABASE()` once; every reset reads them again in its
+  `SET NAMES` round trip and, only when they changed, puts the login's back (`SET ROLE <list>`
+  / `SET ROLE NONE`, then `USE`, which MySQL needs after `SET ROLE` to see the database's
+  privileges again). (2) In JS, a request's continuation run in another request's drain
+  read that request's session (user variables, `set_config` GUCs, the time zone): the drain
+  reset only when a transaction was open. It now resets the used connections whenever it
+  switches from one run's jobs to another's, and back. (3) A connection marked broken with its
+  socket still open was only forgotten at the reset, so the server kept its session (and any
+  lock a procedure took) until the slot's next call; it is closed now, on MySQL and Postgres.
 - **An app compiling a few helper-based GPU shaders no longer fails to load** (audit 42). The
   audit 41 compile charge counted every word as if call-inlined code compiled as slowly as
   written code, so an ordinary domain-warp shader (main calling `pattern()` 6 times, `pattern`
