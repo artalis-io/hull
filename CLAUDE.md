@@ -2494,7 +2494,8 @@ be deferred or joined the same way; `tests/e2e_sandbox.sh` Test 9 checks
 - **Request concurrency and input caps (audit convergence §6.4):** serve.c registers a pre-body
   Keel middleware FIRST (`hl_serve_conc_mw`, `hl_serve_wire_concurrency`) over the header-only
   limiter `include/hull/shared/req_limit.h`: at most `per_ip` requests in flight per client key
-  (IPv4 as itself, IPv6 by /64; default `HL_REQ_PER_IP_DEFAULT` 8, manifest
+  (IPv4 as itself, IPv6 by /64; default half of `--max-connections`, `hl_req_per_ip_default` -
+  128 at 256: it bounds one client's share, it is not a rate limit; manifest
   `limits.per_ip_concurrency`, flag `--max-requests-per-ip`, a DOWNGRADE row in
   `hl_runtime_flags()`; 0 = off) answered 429 + Retry-After, and per manifest
   `limits.route_concurrency` pattern (matched against Keel's route pattern or a `/x/*` prefix)

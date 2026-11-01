@@ -23,7 +23,8 @@
  *                            trustedProxies, routeConcurrency }
  *
  * A value must be an integer of at least 1 (capped at the ceiling below);
- * anything else is absent and the default applies. per_ip_concurrency also
+ * anything else is absent and the default applies (per_ip_concurrency:
+ * hl_req_per_ip_default(max_connections)). per_ip_concurrency also
  * takes 0, which turns the per-IP cap off. The operator flag
  * --max-requests-per-ip N overrides the manifest (0 = off).
  *
@@ -51,14 +52,30 @@
 #define HL_INPUT_REGEXP_MAX_SOURCE_CEIL      (64u * 1024u * 1024u)
 #define HL_INPUT_NORMALIZE_MAX_INPUT_CEIL    (256u * 1024u * 1024u)
 
-/* Requests in flight per client address; 0 = off. */
-#define HL_REQ_PER_IP_DEFAULT                8u
+/* Requests in flight per client address; 0 = off. The default is derived
+ * from the server's connection limit: one client may hold at most HALF of
+ * it (128 at the default --max-connections 256), so another client always
+ * finds room. The cap bounds one client's share of the server; it is not a
+ * rate limit. Half leaves ordinary single-address traffic alone - a browser
+ * (6 connections per host over HTTP/1.1) with several tabs and open SSE
+ * streams, an SPA polling, a NAT or CGNAT address shared by many users, a
+ * load test at -c 100 - while one client still cannot take every slot. */
+#define HL_REQ_PER_IP_DEFAULT_DIVISOR        2u
 #define HL_REQ_PER_IP_CEIL                   1000000u
 /* Route patterns with a limit of their own, and trusted proxy entries. */
 #define HL_MANIFEST_MAX_ROUTE_LIMITS         32
 #define HL_MANIFEST_MAX_TRUSTED_PROXIES      32
 /* Seconds in the Retry-After of a refused request. */
 #define HL_REQ_RETRY_AFTER_S                 1
+
+/* The per-client cap when neither the manifest nor the operator sets one:
+ * half the connection limit, at least 1. */
+static inline uint32_t hl_req_per_ip_default(int max_connections)
+{
+    if (max_connections <= 0) return 1u;
+    uint32_t v = (uint32_t)max_connections / HL_REQ_PER_IP_DEFAULT_DIVISOR;
+    return v ? v : 1u;
+}
 
 typedef struct HlInputLimits {
     uint32_t json_max_depth;

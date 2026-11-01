@@ -1721,7 +1721,7 @@ Two kinds of limit apply before your code sees a request, both on by default
 ```lua
 app.manifest({
     limits = {
-        per_ip_concurrency = 8,                -- requests in flight per client; 0 = off
+        per_ip_concurrency = 32,               -- requests in flight per client; 0 = off
         route_concurrency  = { ["/upload"] = 2, ["/reports/*"] = 4 },
         trusted_proxies    = { "10.0.0.0/8" }, -- whose X-Forwarded-For to believe
         json_max_depth     = 128,              -- nesting of one JSON document
@@ -1735,7 +1735,7 @@ app.manifest({
 ```javascript
 app.manifest({
     limits: {
-        perIpConcurrency: 8,
+        perIpConcurrency: 32,
         routeConcurrency: { "/upload": 2, "/reports/*": 4 },
         trustedProxies: ["10.0.0.0/8"],
         jsonMaxDepth: 128,
@@ -1759,6 +1759,12 @@ in `route_concurrency` with that many requests in flight (from anyone) answers
 the body is read and before any script runs. A route key is either the app's
 own route pattern (`"/users/:id"`) or a path prefix ending in `/*`.
 
+- The default `per_ip_concurrency` is half the server's connection limit
+  (`--max-connections`, default 256, so 128): one client can never hold more
+  than half the server, and ordinary traffic from one address - a browser's six
+  connections and its open SSE streams, an SPA polling, an office NAT, a load
+  test at `-c 100` - is not refused. The cap bounds one client's share; it is
+  not a rate limit. Lower it for an app with slow handlers and many clients.
 - A client is its address: IPv4 as itself, IPv6 by its /64 (one host usually
   holds a whole /64).
 - WebSocket upgrades to a WebSocket route are not counted (the connection then
@@ -1769,7 +1775,8 @@ own route pattern (`"/users/:id"`) or a path prefix ending in `/*`.
   the per-client cap off; in a built binary it is `--hull-max-requests-per-ip`).
 
 **Behind a reverse proxy, every request has the proxy's address.** With the
-default cap, eight slow requests from *all* your users together would fill it.
+default cap, half the server's connections from *all* your users together
+would fill it.
 Either:
 
 - list the proxy in `trusted_proxies` (exact addresses or CIDRs, the

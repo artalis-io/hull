@@ -23,10 +23,19 @@ the limiter first sweeps entries whose connection Keel has released (its respons
 is freed on release) and counts again. A handler whose client hung up keeps its entry until it
 finishes: it is still using the VM.
 
-**Defaults and refusals.** 8 requests per client (`HL_REQ_PER_IP_DEFAULT`), `429` with
+**Defaults and refusals.** Half the connection limit per client (`hl_req_per_ip_default`:
+`--max-connections` / `HL_REQ_PER_IP_DEFAULT_DIVISOR`, 128 at the default 256), `429` with
 `Retry-After: 1`; a route at its `route_concurrency` limit answers `503` with `Retry-After: 1`
 (the route is out of capacity, not the client at fault). WebSocket upgrades to a WebSocket route
 are exempt; SSE streams count while open.
+
+*Why half, not 8.* The first cut defaulted to 8. That refused ordinary single-address traffic: a
+browser opens six HTTP/1.1 connections per host and each open SSE stream holds one, an office
+NAT or a CGNAT address carries many users, a load test from one host runs 100 connections, and
+`tests/e2e_refusal_codes.sh` (65 requests from localhost to reach the 64-fetch cap) failed with
+429s. The cap's purpose is to bound one client's share of the server, so it is sized against the
+server: with half the slots per client, one client cannot starve the others, and it scales with
+`--max-connections`. An app with slow handlers and many clients lowers it in the manifest.
 
 **Configuration.** Manifest `limits.per_ip_concurrency` (`0` = off), `limits.route_concurrency`
 (pattern -> limit; the app's route pattern, or a `/x/*` prefix), `limits.trusted_proxies`; the

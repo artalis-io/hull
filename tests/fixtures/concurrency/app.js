@@ -6,6 +6,7 @@ import { app } from "hull:app";
 app.manifest({
     modules: ["hull/http-server@1"],
     limits: {
+        perIpConcurrency: 8,
         trustedProxies: ["127.0.0.1", "::1"],
         routeConcurrency: { "/narrow": 2 },
     },

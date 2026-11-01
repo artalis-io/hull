@@ -112,7 +112,9 @@ release-artifact layout).
   time, set `gpu.dynamic_shaders = true`. The examples (`gpu_search`, `gpu_pipeline`,
   `compute_gpu_chain`) now load their shaders from `shaders/`.
 - **Request concurrency and input caps are on by default** (audit convergence §6.4). A client
-  address (IPv4, or an IPv6 /64) may have at most **8 requests in flight**; the next one gets
+  address (IPv4, or an IPv6 /64) may have at most **half the server's connection limit in flight**
+  (128 at the default `--max-connections 256`, so one client cannot take every slot while a
+  browser, an SPA, a shared NAT address or a single-host load test is left alone); the next one gets
   `429 Too Many Requests` with `Retry-After: 1` before its body is read or any script runs, while
   other clients are served. Set it with the manifest's `limits.per_ip_concurrency` (JS
   `perIpConcurrency`; `0` = off) or the operator flag `--max-requests-per-ip N` (reserved as

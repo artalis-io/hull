@@ -290,8 +290,9 @@ static void usage(const char *prog)
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
             "  --max-connections N  Max concurrent connections (default: 256)\n"
             "  --max-requests-per-ip N\n"
-            "                       Requests in flight per client address (default: 8,\n"
-            "                       or manifest limits.per_ip_concurrency; 0 = no cap)\n"
+            "                       Requests in flight per client address (default:\n"
+            "                       manifest limits.per_ip_concurrency, else half of\n"
+            "                       --max-connections; 0 = no cap)\n"
             "  --body-max-size SIZE Max request body size (default: 1m)\n"
             "  --read-timeout MS    Read timeout in milliseconds (default: 30000)\n"
             "  --workers N          Thread pool worker count (default: 4)\n"
@@ -2437,10 +2438,11 @@ static int hl_serve_conc_mw(KlHttpRequest *req, KlHttpResponse *res, void *user_
 
 /* Size the table and register the middleware, first in the chain. The per-IP
  * cap: --max-requests-per-ip, else the manifest's limits.per_ip_concurrency,
- * else HL_REQ_PER_IP_DEFAULT; 0 turns it off. */
+ * else half the connection limit (hl_req_per_ip_default); 0 turns it off. */
 static int hl_serve_wire_concurrency(HlServerState *s)
 {
-    uint32_t per_ip = HL_REQ_PER_IP_DEFAULT;
+    int cap = s->cfg.max_connections > 0 ? s->cfg.max_connections : HL_DEFAULT_MAX_CONN;
+    uint32_t per_ip = hl_req_per_ip_default(cap);
     if (s->cfg.max_req_per_ip >= 0)
         per_ip = (uint32_t)s->cfg.max_req_per_ip;
     else if (s->manifest.limits.per_ip_set)
@@ -2450,7 +2452,6 @@ static int hl_serve_wire_concurrency(HlServerState *s)
         log_info("[hull:c] request concurrency: no per-client cap");
         return 0;
     }
-    int cap = s->cfg.max_connections > 0 ? s->cfg.max_connections : HL_DEFAULT_MAX_CONN;
     if (hl_req_limit_init(&s->req_limiter, cap, per_ip,
                           s->manifest.limits.route_max, routes) != 0) {
         log_error("[hull:c] out of memory for the request concurrency table");

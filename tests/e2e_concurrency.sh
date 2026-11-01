@@ -1,7 +1,8 @@
 #!/bin/sh
 # E2E request-concurrency caps (audit convergence §6.4).
 #
-#   1. Per client: eight slow requests from one client address are in flight;
+#   1. Per client (manifest per_ip_concurrency = 8): eight slow requests from
+#      one client address are in flight;
 #      the ninth from that address gets 429 + Retry-After, while another
 #      address is served. Client addresses come from X-Forwarded-For, which
 #      the fixture trusts from 127.0.0.1 (limits.trusted_proxies).
@@ -10,7 +11,8 @@
 #      503 + Retry-After.
 #   4. Untrusted X-Forwarded-For: without trusted_proxies the header is the
 #      client's own text and does not pick the key - nine requests that each
-#      claim another address are still one client.
+#      claim another address are still one client. That fixture sets no
+#      limit: the default is half --max-connections (16 here, so 8).
 #   5. --max-requests-per-ip 0 turns the per-client cap off.
 #
 # Usage: sh tests/e2e_concurrency.sh  (RUNTIME=lua|js|all)
@@ -153,12 +155,23 @@ run_trusted() {
 
 run_untrusted() {
     echo "-- untrusted X-Forwarded-For"
-    start_server "$FIX/untrusted/app.lua" || { fail "server start (untrusted)"; return; }
+    # No manifest limit: the default cap is half of --max-connections.
+    start_server "$FIX/untrusted/app.lua" --max-connections 16 || { fail "server start (untrusted)"; return; }
     rm -f "$TMP"/bg.*
     launch 8 /slow seq
     s9=$(status /slow 10.9.0.99)
     [ "$s9" = "429" ] && pass "spoofed X-Forwarded-For does not escape the cap" \
                       || fail "spoofed XFF 9th request: got $s9, want 429"
+    wait_bg
+    stop_server
+
+    echo "-- default cap without --max-connections"
+    start_server "$FIX/untrusted/app.lua" || { fail "server start (default)"; return; }
+    rm -f "$TMP"/bg.*
+    launch 12 /slow ""
+    s13=$(status /ping "")
+    [ "$s13" = "200" ] && pass "default cap (half of 256) admits 13 concurrent requests" \
+                       || fail "default cap: 13th concurrent request got $s13, want 200"
     wait_bg
     stop_server
 

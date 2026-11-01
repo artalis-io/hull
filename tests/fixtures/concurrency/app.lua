@@ -4,6 +4,7 @@
 app.manifest({
     modules = { "hull/http-server@1" },
     limits = {
+        per_ip_concurrency = 8,
         trusted_proxies = { "127.0.0.1", "::1" },
         route_concurrency = { ["/narrow"] = 2 },
     },
