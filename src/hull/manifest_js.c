@@ -308,9 +308,9 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         out->limits_callback_ms = (uint32_t)mjs_wasm_limit(
             ctx, lim_val, "callbackMs", (int64_t)86400000);
         /* Input ceilings and request concurrency: jsonMaxDepth, jsonMaxKeys,
-         * regexpMaxSource, normalizeMaxInput, perIpConcurrency,
+         * regexpMaxSource, normalizeMaxInput, perIpConcurrency, perIpConnections,
          * trustedProxies: [...], routeConcurrency: { [pattern]: N }
-         * (hull/limits/input.h). Numbers as for wasm; perIpConcurrency also
+         * (hull/limits/input.h). Numbers as for wasm; perIpConcurrency / perIpConnections also
          * takes 0 (cap off). */
         out->limits.json_max_depth = (uint32_t)mjs_wasm_limit(ctx, lim_val,
             "jsonMaxDepth", (int64_t)HL_INPUT_JSON_MAX_DEPTH_CEIL);
@@ -331,6 +331,17 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
             }
         }
         JS_FreeValue(ctx, pip);
+        JSValue pic = mjs_own(ctx, lim_val, "perIpConnections");
+        if (JS_IsNumber(pic)) {
+            double d = -1;
+            JS_ToFloat64(ctx, &d, pic);   /* a number: runs no app code */
+            if (d >= 0 && d == (double)(int64_t)d) {
+                out->limits.per_ip_conn_set = 1;
+                out->limits.per_ip_conn = d >= (double)HL_REQ_PER_IP_CEIL
+                                          ? HL_REQ_PER_IP_CEIL : (uint32_t)d;
+            }
+        }
+        JS_FreeValue(ctx, pic);
         out->limits.trusted_proxy_count = read_js_string_array(ctx, lim_val,
             "trustedProxies", out->limits.trusted_proxies,
             HL_MANIFEST_MAX_TRUSTED_PROXIES, alloc);

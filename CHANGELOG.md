@@ -8,6 +8,29 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Behaviour changes (audit convergence §6.4: connections)
+
+- **One client can no longer hold every connection.** The request limiter counted only requests
+  whose headers had arrived, and Keel's `max_connections` is global, so a client that opened that
+  many connections - each idle after one request, or each sending its headers a byte at a time
+  inside the read timeout - refused every other client (confirming audit M1). The server's
+  sockets now go through a socket provider decorating Keel's built-in one (`serve.c`,
+  `hl_serve_conn_*`, over `src/hull/cap/conn_limit.c`), which counts open connections per client
+  from accept to close - idle keep-alive connections, connections still sending headers and
+  upgraded WebSockets included - and closes a connection over the cap as soon as it is accepted
+  (a best-effort `429` first on a plain-HTTP listener). The key is the request limiter's (IPv4,
+  IPv4-mapped as IPv4, IPv6 by /64) taken from the TCP peer; peers in `limits.trusted_proxies`
+  are not counted. Default: half of `--max-connections` (128 at 256); manifest
+  `limits.per_ip_connections` (JS `perIpConnections`), operator flag `--max-connections-per-ip N`
+  (`--hull-max-connections-per-ip` in a built binary), `0` = off.
+- **Request heads and idle keep-alive connections have deadlines.** A connection must deliver a
+  complete request head within 10 s of its first byte (of its accept, for its first request - a
+  TLS handshake included); Keel's read timeout restarts on every byte, so it never stopped a
+  client dripping its headers. A keep-alive connection that sends nothing for 5 s after a
+  response is closed (it was held for the 30 s read timeout). Flags `--header-timeout MS` /
+  `--keepalive-timeout MS` (`0` = none). A request being handled, and a WebSocket, are under
+  neither deadline.
+
 ### Behaviour changes (audit convergence phase 2)
 
 - **An HTTP handler run now has a 10 s deadline by default (was 60 s).** A request handler,

@@ -268,6 +268,8 @@ typedef struct HlManifest {
         uint32_t    normalize_max_input;
         int         per_ip_set;      /* 1 = per_ip came from the manifest */
         uint32_t    per_ip;          /* 0 (with per_ip_set) = cap off */
+        int         per_ip_conn_set; /* 1 = per_ip_conn came from the manifest */
+        uint32_t    per_ip_conn;     /* open connections per client; 0 = off */
         const char *route_patterns[HL_MANIFEST_MAX_ROUTE_LIMITS];
         uint32_t    route_max[HL_MANIFEST_MAX_ROUTE_LIMITS];
         int         route_count;
