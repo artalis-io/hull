@@ -162,6 +162,7 @@ static inline const HlRuntimeFlag *hl_runtime_flags(void)
         { "--vm-thread-grace-ms",     HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--vm-thread-ceiling-ms",   HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--max-connections",        HL_RF_SERVE | HL_RF_DOWNGRADE },
+        { "--max-requests-per-ip",    HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--body-max-size",          HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--read-timeout",           HL_RF_SERVE | HL_RF_DOWNGRADE },
         { "--workers",                HL_RF_SERVE | HL_RF_DOWNGRADE },

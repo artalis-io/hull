@@ -261,7 +261,11 @@ wait_up() {
 run_runtime() {
     rt=$1; entry=$2
     echo "-- $rt --"
+    # 65 requests from one address are in flight at once below (64 held
+    # fetches + the probe): turn the per-client concurrency cap off so the
+    # VM's fetch cap is what refuses, not a 429 from the connection layer.
     ( cd "$TMPDIR/$rt" && exec "$HULL" "$entry" -p "$PORT" --no-sandbox \
+        --max-requests-per-ip 0 \
         > "$TMPDIR/$rt.log" 2>&1 ) &
     SERVER_PID=$!
     if ! wait_up; then

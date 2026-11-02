@@ -193,6 +193,9 @@ typedef struct HlRuntimeVtable {
      * against its deadline. NULL = the runtime has none (then the VM thread
      * is not used). */
     struct HlRunWatch *(*run_watch)(HlRuntime *rt);
+    /* rt->input_limits changed (hl_runtime_apply_input_limits): push them
+     * into the engine. NULL = the runtime reads rt->input_limits itself. */
+    void  (*apply_input_limits)(HlRuntime *rt);
 } HlRuntimeVtable;
 
 typedef struct HlVmThread HlVmThread;
@@ -345,6 +348,26 @@ struct HlRuntime {
      * before it is joined. NULL (the default, and always under hull test /
      * agent / app.main runner): every entry runs inline, as before. */
     HlVmThread *vm_thread;
+    /* Input ceilings (hull/limits/input.h): the defaults, with the manifest's
+     * `limits` over them once it is applied (hl_runtime_apply_input_limits).
+     * Read by the Lua JSON decoder (hull._limits); pushed into QuickJS by
+     * vt->apply_input_limits. Zero = not resolved yet: the defaults. */
+    HlInputLimits input_limits;
 };
+
+/* Resolve the manifest's `limits` (NULL: none) into rt->input_limits and hand
+ * them to the runtime. Called by every entry point once the manifest is
+ * extracted (serve.c, the app context behind app.main / hull test / agent). */
+static inline void hl_runtime_apply_input_limits(HlRuntime *rt, const HlManifest *m)
+{
+    if (!rt) return;
+    rt->input_limits = m ? hl_input_limits_resolve(m->limits.json_max_depth,
+                                                   m->limits.json_max_keys,
+                                                   m->limits.regexp_max_source,
+                                                   m->limits.normalize_max_input)
+                         : hl_input_limits_default();
+    if (rt->vt && rt->vt->apply_input_limits)
+        rt->vt->apply_input_limits(rt);
+}
 
 #endif /* HL_RUNTIME_H */

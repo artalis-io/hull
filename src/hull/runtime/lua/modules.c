@@ -82,6 +82,8 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull._task", luaopen_hull_task);
     /* The C codecs behind hull.encoding (pure computation, no authority). */
     register_native_module(L, "hull.encoding._native", luaopen_hull_encoding_native);
+    /* The input ceilings hull.json's decoder reads (underscore: stdlib-only). */
+    register_native_module(L, "hull._limits", luaopen_hull_limits_native);
     register_native_module(L, "hull.time",   luaopen_hull_time);
     register_native_module(L, "hull.env",    luaopen_hull_env);
     register_native_module(L, "hull.crypto", luaopen_hull_crypto);

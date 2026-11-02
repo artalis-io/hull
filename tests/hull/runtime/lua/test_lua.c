@@ -16507,4 +16507,62 @@ UTEST(lua_dispatcher, overhead_per_call_is_small)
     cleanup_lua();
 }
 
+/* ── Input ceilings (audit convergence §6.4) ────────────────────────────
+ *
+ * hull.json's decode is held to the JSON nesting depth and per-object key
+ * count of hull/limits/input.h: the defaults (128 / 100000), and the
+ * manifest's `limits` once applied (hl_runtime_apply_input_limits). */
+
+#define JC_DECODES(expr) \
+    "(function() local j = require('hull.json') " \
+    "local ok, e = pcall(j.decode, " expr ") " \
+    "if ok then return 1 end " \
+    "if tostring(e):find('too deeply', 1, true) then return 2 end " \
+    "if tostring(e):find('too many keys', 1, true) then return 3 end " \
+    "return 4 end)()"
+
+UTEST(lua_input_caps, json_defaults)
+{
+    init_lua();
+    EXPECT_EQ(eval_int(JC_DECODES("string.rep('[', 128) .. string.rep(']', 128)")), 1);
+    EXPECT_EQ(eval_int(JC_DECODES("string.rep('[', 129) .. string.rep(']', 129)")), 2);
+    EXPECT_EQ(eval_int(JC_DECODES("string.rep('{\"a\":', 129) .. '1' .. string.rep('}', 129)")), 2);
+    /* 100000 keys in one object fit; one more does not */
+    EXPECT_EQ(eval_int(
+        "(function() local j = require('hull.json') local t = {} "
+        "for i = 1, 100000 do t[i] = '\"k' .. i .. '\":' .. i end "
+        "local o = j.decode('{' .. table.concat(t, ',') .. '}') "
+        "t[100001] = '\"x\":0' "
+        "local ok, e = pcall(j.decode, '{' .. table.concat(t, ',') .. '}') "
+        "return (o.k100000 == 100000 and not ok and "
+        "tostring(e):find('too many keys', 1, true)) and 1 or 0 end)()"), 1);
+    /* many small objects are fine: the key count is per object */
+    EXPECT_EQ(eval_int(
+        "(function() local j = require('hull.json') local t = {} "
+        "for i = 1, 10000 do t[i] = '{\"a\":1,\"b\":2,\"c\":3}' end "
+        "return #j.decode('[' .. table.concat(t, ',') .. ']') == 10000 and 1 or 0 end)()"), 1);
+    cleanup_lua();
+}
+
+UTEST(lua_input_caps, json_manifest_limits_and_opts)
+{
+    init_lua();
+    HlManifest m;
+    memset(&m, 0, sizeof m);
+    m.limits.json_max_depth = 5;
+    m.limits.json_max_keys = 3;
+    hl_runtime_apply_input_limits(&lua_rt.base, &m);
+    EXPECT_EQ(eval_int(JC_DECODES("'[[[[[1]]]]]'")), 1);
+    EXPECT_EQ(eval_int(JC_DECODES("'[[[[[[1]]]]]]'")), 2);
+    EXPECT_EQ(eval_int(JC_DECODES("'{\"a\":1,\"b\":2,\"c\":3}'")), 1);
+    EXPECT_EQ(eval_int(JC_DECODES("'{\"a\":1,\"b\":2,\"c\":3,\"d\":4}'")), 3);
+    /* a caller's own opts for one decode */
+    EXPECT_EQ(eval_int(JC_DECODES("'[[[[[[1]]]]]]', { max_depth = 10 }")), 1);
+    /* back to the defaults */
+    hl_runtime_apply_input_limits(&lua_rt.base, NULL);
+    EXPECT_EQ(eval_int(JC_DECODES("'[[[[[[1]]]]]]'")), 1);
+    cleanup_lua();
+}
+#undef JC_DECODES
+
 UTEST_MAIN();

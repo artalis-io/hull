@@ -320,6 +320,14 @@ JSRuntime *hl_js_new_runtime_keyed(void)
     }
     rt = JS_NewRuntimeKeyed(NULL, NULL, key);
     hl_secure_zero(key, sizeof(key));
+    /* The input ceilings start at their defaults (QuickJS patch 0012); the
+     * app VM gets the manifest's values once it is applied
+     * (vt_js_apply_input_limits), a worker.dispatch VM keeps these. */
+    if (rt) {
+        HlInputLimits l = hl_input_limits_default();
+        JS_SetInputLimits(rt, l.json_max_depth, l.json_max_keys,
+                          l.regexp_max_source, l.normalize_max_input);
+    }
     return rt;
 }
 
@@ -2904,6 +2912,16 @@ static struct HlRunWatch *vt_js_run_watch(HlRuntime *rt)
     return &((HlJS *)rt)->run_watch;
 }
 
+/* QuickJS patch 0012: the manifest's input ceilings (rt->input_limits). */
+static void vt_js_apply_input_limits(HlRuntime *rt)
+{
+    HlJS *js = (HlJS *)rt;
+    if (!js || !js->rt) return;
+    HlInputLimits l = rt->input_limits;
+    JS_SetInputLimits(js->rt, l.json_max_depth, l.json_max_keys,
+                      l.regexp_max_source, l.normalize_max_input);
+}
+
 const HlRuntimeVtable hl_js_vtable = {
     .init                 = vt_js_init,
     .load_app             = vt_js_load_app,
@@ -2927,4 +2945,5 @@ const HlRuntimeVtable hl_js_vtable = {
     .stop_async           = vt_js_stop_async,
     .thread_switch        = vt_js_thread_switch,
     .run_watch            = vt_js_run_watch,
+    .apply_input_limits   = vt_js_apply_input_limits,
 };

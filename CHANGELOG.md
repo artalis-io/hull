@@ -111,6 +111,32 @@ release-artifact layout).
   `gpu.compile(name, SRC)` with `gpu.load(name)`; or, when the source really is generated at run
   time, set `gpu.dynamic_shaders = true`. The examples (`gpu_search`, `gpu_pipeline`,
   `compute_gpu_chain`) now load their shaders from `shaders/`.
+- **Request concurrency and input caps are on by default** (audit convergence §6.4). A client
+  address (IPv4, or an IPv6 /64) may have at most **half the server's connection limit in flight**
+  (128 at the default `--max-connections 256`, so one client cannot take every slot while a
+  browser, an SPA, a shared NAT address or a single-host load test is left alone); the next one gets
+  `429 Too Many Requests` with `Retry-After: 1` before its body is read or any script runs, while
+  other clients are served. Set it with the manifest's `limits.per_ip_concurrency` (JS
+  `perIpConcurrency`; `0` = off) or the operator flag `--max-requests-per-ip N` (reserved as
+  `--hull-max-requests-per-ip` in a built binary). `limits.route_concurrency` caps a route
+  pattern for all clients together (`503` + `Retry-After`). **Behind a reverse proxy every request
+  shares the proxy's address:** list the proxy in `limits.trusted_proxies` (addresses / CIDRs) to
+  key on the last `X-Forwarded-For` entry - the stdlib's `client_ip(req, true)` rule - or raise
+  the cap. Every JSON decode in an app VM (Lua `hull.json`, JS `JSON.parse` / `hull:json`) now
+  refuses a document nested deeper than **128** levels or an object of more than **100000** keys
+  (`limits.json_max_depth` / `json_max_keys`), and in JS a RegExp source over **64 KiB** and a
+  `normalize` / `localeCompare` operand over **1 MiB** throw a `RangeError`
+  (`limits.regexp_max_source` / `normalize_max_input`; QuickJS patch 0012). Hull cannot tell
+  which string came from a request, so these are global ceilings; the defaults are far above what
+  real payloads need. See docs/app_api_reference.md "Request concurrency and input caps".
+
+### Added
+
+- **Engine complexity suite in CI** (audit convergence §6.5): `make complexity` runs the listed
+  QuickJS and Lua builtins (string, RegExp compile and exec, JSON, Array, TypedArray, Map / Set,
+  object properties; Lua table, string, GC and coroutine operations) at sizes n and 2n on
+  worst-case-shaped ordinary inputs and requires t(2n) / t(n) < 2.5, printing every ratio. A
+  QuickJS or Lua upgrade must pass it.
 
 - **Runtime GPU shader source compiles first in a bounded helper process** (audit convergence
   phase 3, §7.3; docs/design/gpu_compile_helper.md). With `gpu.dynamic_shaders = true`, a built

@@ -63,6 +63,7 @@ int luaopen_hull_db(lua_State *L);
 int luaopen_hull_db_internal_conn(lua_State *L);   /* hull.db._internal_conn (stdlib-only) */
 int luaopen_hull_kv_native(lua_State *L);   /* hull.kv._native (KV connection cap) */
 int luaopen_hull_encoding_native(lua_State *L); /* hull.encoding._native (C codecs) */
+int luaopen_hull_limits_native(lua_State *L);   /* hull._limits (input ceilings) */
 int luaopen_hull_ssh_stream(lua_State *L);  /* hull.ssh._stream (private byte stream) */
 int luaopen_hull_time(lua_State *L);
 int luaopen_hull_env(lua_State *L);

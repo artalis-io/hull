@@ -247,6 +247,54 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             L, lim_idx, "request_ms", (lua_Integer)86400000);
         out->limits_callback_ms = (uint32_t)lua_wasm_limit(
             L, lim_idx, "callback_ms", (lua_Integer)86400000);
+        /* Input ceilings and request concurrency: json_max_depth,
+         * json_max_keys, regexp_max_source, normalize_max_input,
+         * per_ip_concurrency, trusted_proxies = {...},
+         * route_concurrency = { [pat] = N } (hull/limits/input.h). Numbers as
+         * for wasm; per_ip_concurrency also takes 0 (cap off). */
+        out->limits.json_max_depth = (uint32_t)lua_wasm_limit(L, lim_idx,
+            "json_max_depth", (lua_Integer)HL_INPUT_JSON_MAX_DEPTH_CEIL);
+        out->limits.json_max_keys = (uint32_t)lua_wasm_limit(L, lim_idx,
+            "json_max_keys", (lua_Integer)HL_INPUT_JSON_MAX_KEYS_CEIL);
+        out->limits.regexp_max_source = (uint32_t)lua_wasm_limit(L, lim_idx,
+            "regexp_max_source", (lua_Integer)HL_INPUT_REGEXP_MAX_SOURCE_CEIL);
+        out->limits.normalize_max_input = (uint32_t)lua_wasm_limit(L, lim_idx,
+            "normalize_max_input", (lua_Integer)HL_INPUT_NORMALIZE_MAX_INPUT_CEIL);
+        lua_getfield(L, lim_idx, "per_ip_concurrency");
+        if (lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0) {
+            lua_Integer v = lua_tointeger(L, -1);
+            out->limits.per_ip_set = 1;
+            out->limits.per_ip = (uint32_t)(v > (lua_Integer)HL_REQ_PER_IP_CEIL
+                                            ? (lua_Integer)HL_REQ_PER_IP_CEIL : v);
+        }
+        lua_pop(L, 1);
+        out->limits.trusted_proxy_count = read_string_array(L, lim_idx,
+            "trusted_proxies", out->limits.trusted_proxies,
+            HL_MANIFEST_MAX_TRUSTED_PROXIES, alloc);
+        lua_getfield(L, lim_idx, "route_concurrency");
+        if (lua_istable(L, -1)) {
+            int rc_idx = lua_gettop(L);
+            lua_pushnil(L);
+            while (lua_next(L, rc_idx) != 0) {
+                if (lua_type(L, -2) == LUA_TSTRING && lua_isinteger(L, -1) &&
+                    lua_tointeger(L, -1) >= 1 &&
+                    out->limits.route_count < HL_MANIFEST_MAX_ROUTE_LIMITS) {
+                    const char *pat = mstr(L, -2);
+                    lua_Integer v = lua_tointeger(L, -1);
+                    const char *copy = (pat && pat[0] == '/')
+                                       ? hl_manifest_strdup(alloc, pat) : NULL;
+                    if (copy) {
+                        int n = out->limits.route_count++;
+                        out->limits.route_patterns[n] = copy;
+                        out->limits.route_max[n] = (uint32_t)(
+                            v > (lua_Integer)HL_REQ_PER_IP_CEIL
+                                ? (lua_Integer)HL_REQ_PER_IP_CEIL : v);
+                    }
+                }
+                lua_pop(L, 1);   /* pop value, keep key for lua_next */
+            }
+        }
+        lua_pop(L, 1); /* pop route_concurrency */
     }
     lua_pop(L, 1); /* pop limits */
 

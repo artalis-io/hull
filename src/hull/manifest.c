@@ -108,6 +108,10 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->ssh.tunnel.hosts[i]);
     for (int i = 0; i < m->ssh.user_count; i++)
         hl_manifest_str_free(a, &m->ssh.users[i]);
+    for (int i = 0; i < m->limits.route_count; i++)
+        hl_manifest_str_free(a, &m->limits.route_patterns[i]);
+    for (int i = 0; i < m->limits.trusted_proxy_count; i++)
+        hl_manifest_str_free(a, &m->limits.trusted_proxies[i]);
 
     memset(m, 0, sizeof(*m));
 }
@@ -222,6 +226,14 @@ static int manifest_seal_impl(HlManifest *dst, const HlManifest *src, SealCtx *a
     for (int i = 0; i < src->ssh.user_count; i++)
         if (seal_str(arena, &dst->ssh.users[i], src->ssh.users[i]) != 0)
             goto fail;
+    /* limits: the route patterns the concurrency cap matches and the
+     * proxies whose X-Forwarded-For it believes. */
+    for (int i = 0; i < src->limits.route_count; i++)
+        if (seal_str(arena, &dst->limits.route_patterns[i],
+                     src->limits.route_patterns[i]) != 0) goto fail;
+    for (int i = 0; i < src->limits.trusted_proxy_count; i++)
+        if (seal_str(arena, &dst->limits.trusted_proxies[i],
+                     src->limits.trusted_proxies[i]) != 0) goto fail;
 
     return 0;
 
