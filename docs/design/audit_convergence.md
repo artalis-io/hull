@@ -221,7 +221,23 @@ table/string/GC operations) at sizes n and 2n on worst-case-shaped ordinary inpu
 | 2 | §6.1 dispatcher charging, §6.2 HTTP deadline, §6.4 caps | No uncharged-work finding reachable by A1 in the next round |
 | 3 | §7.1 session-statement refusal + reset, §7.3 build-time shaders | MySQL / GPU findings stop |
 | 4 | §7.2 internal database separation with migration | Planted-file findings drop to defence-in-depth Lows |
-| 5 | §6.3 VM thread / preemption, §6.5 complexity tests, §5.3 nightly fuzzing | Engine super-linearity bounded to one request |
+| 5 | §6.3 VM thread / preemption, §6.5 complexity tests, §5.3 nightly fuzzing | No super-linear builtin reachable by A1 with ordinary input; the class held by the work charging, the engine patches and the CI complexity tests, with `--vm-thread` as the opt-in structural backstop (see the note below) |
+
+**Phase 5 exit, as decided after its confirming audit.** The original criterion - engine
+super-linearity bounded to one request - holds structurally only under `--vm-thread`, and even
+there the abandoned run puts the whole server in standby (new connections 503) until the native
+call returns, exiting with status 75 at the 60 s ceiling. The VM thread stays opt-in. In the
+default mode one long builtin call is bounded by finishing; the class is held by enumeration:
+the in-builtin work charging (Lua patches 0002 / 0004, QuickJS patch 0005), the linearity patches,
+the §6.4 input caps and the `make complexity` CI job. The confirming audit found no super-linear
+builtin reachable by A1 with ordinary input. A new super-linear builtin an audit finds is a
+regression against that enumeration: it gets a fix plus a complexity case, not a new design phase.
+Complexity cases still missing for paths earlier audits flagged (Lua ephemerons, colliding
+integer / float hash keys and rehash, long-string keys, backtracking patterns; JS Proxy `ownKeys`,
+forward `\k<name>`, `RegExp[Symbol.split]`, the `JSON.parse` reviver, BigInt multiply / divide /
+`toString`, `TypedArray.from` of an array-like, iterator helpers, backtracking regexp exec) are
+follow-ups. A stronger default bound (a VM pool, or replacing the stuck VM while other requests
+continue) would need its own design.
 
 ## 10. Testing
 
