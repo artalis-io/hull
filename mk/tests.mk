@@ -134,8 +134,15 @@ endif
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
 TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 
-# Test objects need hull capability sources but NOT main.o or runtime objects
-TEST_CAP_OBJS := $(CAP_OBJS)
+# Test objects need hull capability sources but NOT main.o or runtime objects.
+# cap/gpu_helper.c is the one exception: the tests link a copy built with
+# -DHL_GPU_HELPER_TEST_HOOKS (the HULL_TEST_GPU_HELPER hooks the helper tests
+# drive), so the hull binary and the platform library keep a build without
+# them (audit convergence §7.3).
+GPU_HELPER_TH_OBJ := $(BUILDDIR)/cap_gpu_helper_th.o
+TEST_CAP_OBJS := $(filter-out $(BUILDDIR)/cap_gpu_helper.o,$(CAP_OBJS)) $(GPU_HELPER_TH_OBJ)
+$(GPU_HELPER_TH_OBJ): $(SRCDIR)/hull/cap/gpu_helper.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -DHL_GPU_HELPER_TEST_HOOKS $(INCLUDES) -c -o $@ $<
 
 # `hull doctor --fix` calls hl_cmd_tools (commands/tools.c) to run the
 # ordinary `hull tools install` path.  The base filters that source out of

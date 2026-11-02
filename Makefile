@@ -1048,6 +1048,16 @@ ifeq ($(HL_ENABLE_TUI),0)
       $(CAP_SRCS))
 endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
+# The GPU compile helper's test hooks (HULL_TEST_GPU_HELPER, cap/gpu_helper.c;
+# one of them makes the worker vouch for any source) are compiled in only
+# with -DHL_GPU_HELPER_TEST_HOOKS: always in the unit tests' own copy of
+# cap/gpu_helper.c (mk/tests.mk), and in the whole build with
+# `make HL_GPU_HELPER_TEST_HOOKS=1` (tests/e2e_feature_gpu.sh). A release
+# build never has them (audit convergence §7.3).
+HL_GPU_HELPER_TEST_HOOKS ?= 0
+ifeq ($(HL_GPU_HELPER_TEST_HOOKS),1)
+  CFLAGS += -DHL_GPU_HELPER_TEST_HOOKS
+endif
 # host_match is a domain-free leaf util (src/hull/utils/host_match.c) shared by
 # the db / http / smtp host allowlists. Its link footprint is coextensive with
 # the cap layer that calls it, so it rides in CAP_OBJS (which also feeds
@@ -2115,6 +2125,7 @@ BUILD_FINGERPRINT := \
   VALKEY=$(HL_ENABLE_VALKEY)|\
   WASM=$(HL_ENABLE_WASM)|\
   GPU=$(HL_ENABLE_GPU)|\
+  GPU_HELPER_HOOKS=$(HL_GPU_HELPER_TEST_HOOKS)|\
   TUI=$(HL_ENABLE_TUI)|\
   TUI_TC=$(HL_TUI_TOOLCHAIN)|\
   IMAGE=$(HL_ENABLE_IMAGE)|\

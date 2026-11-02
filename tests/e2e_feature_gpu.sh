@@ -23,15 +23,18 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# HL_GPU_HELPER_TEST_HOOKS=1: the compile helper's HULL_TEST_GPU_HELPER hooks
+# (used below) are compiled only into a test build (audit convergence 7.3); a
+# release hull never has them.
 echo "=== build base hull (EMBED_PLATFORM=1; base is GPU-free) ==="
-make EMBED_PLATFORM=1 >/dev/null
+make EMBED_PLATFORM=1 HL_GPU_HELPER_TEST_HOOKS=1 >/dev/null
 # Stash the base hull: `make feature-gpu` re-invokes make with HL_ENABLE_GPU=1,
 # and the build-config sentinel cleans build/ on the flag flip. Save the
 # build-tool binary first so it survives the feature-archive build.
 cp build/hull /tmp/hull_base_gpu_e2e
 
 echo "=== build the GPU feature archive ==="
-make feature-gpu >/dev/null
+make feature-gpu HL_GPU_HELPER_TEST_HOOKS=1 >/dev/null
 ls -la build/libhull_feature-gpu.a
 # Symbol present? (macOS nm prefixes a leading '_', Linux doesn't - match both.)
 nm build/libhull_feature-gpu.a 2>/dev/null | grep -qE '[ _]hl_gpu_backend_wgpu$' \
@@ -60,12 +63,26 @@ local SAME = "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
     "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>){ d[id.x]=d[id.x]*2.0; }\n"
 local OTHER = "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
     "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>){ d[id.x]=d[id.x]*3.0; }\n"
+-- The top level runs before the manifest is applied: the shader policy must
+-- already hold (audit convergence 7.3 confirming audit - it compiled any
+-- source here, in-process, with no policy).
+local TOP_OK, TOP_ERR
+do
+    local okr, g = pcall(require, "hull.gpu")
+    if okr and g and g.available() then
+        TOP_OK, TOP_ERR = g.compile("top", OTHER)
+        TOP_OK = TOP_OK and true or false
+    end
+end
 app.main(function()
     -- pcall: on a GPU-capable binary running on a GPU-LESS host, hull.gpu is
     -- not registered (no device), so require errors. That's fine here -- the
     -- build composed the feature and the binary booted, which is the point.
     local ok, gpu = pcall(require, "hull.gpu")
     if ok and gpu and gpu.available() then
+        assert(TOP_OK == false and TOP_ERR == "dynamic_shader_refused",
+               "top-level dynamic source was not refused: " .. tostring(TOP_ERR))
+        print("POLICY: top-level dynamic source refused")
         assert(gpu.load("dbl"), "gpu.load of an embedded shader failed")
         local okc, err = gpu.compile("tri", OTHER)
         assert(okc == nil and err == "dynamic_shader_refused",
@@ -108,7 +125,9 @@ echo "ok  --with=gpu composed + booted"
 if echo "$RUN_OUT" | grep -q "dispatch verified on device"; then
     echo "$RUN_OUT" | grep -q "POLICY: dynamic source refused" \
         || { echo "FAIL: dynamic source not refused"; exit 1; }
-    echo "ok  built binary: embedded shaders only, dynamic source refused"
+    echo "$RUN_OUT" | grep -q "POLICY: top-level dynamic source refused" \
+        || { echo "FAIL: top-level dynamic source not refused"; exit 1; }
+    echo "ok  built binary: embedded shaders only, dynamic source refused (top level included)"
 fi
 echo "$BUILD_OUT" | grep -q "shader(s) pre-checked" \
     || { echo "FAIL: hull build did not check the embedded shaders"; exit 1; }
@@ -158,6 +177,15 @@ local SRC = "@group(0) @binding(0) var<storage,read_write> d: array<f32>;\n" ..
     "@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>)" ..
     "{ d[id.x] = d[id.x] * 7.0; }\n"
 local n = 0
+-- Even with the opt-in, the top level (manifest not applied yet) refuses
+-- runtime source: dynamic_shaders is raised only once the manifest is.
+local TOP = "unset"
+do
+    local g = require("hull.gpu")
+    local okc, err = g.compile("top", SRC)
+    TOP = okc and "compiled" or ("error:" .. tostring(err))
+end
+app.get("/top", function(req, res) res:text(TOP) end)
 app.get("/ping", function(req, res) res:text("pong") end)
 app.get("/compile", function(req, res)
     local gpu = require("hull.gpu")
@@ -181,7 +209,7 @@ LUA
             sleep 0.25
         done
         if [ "$_up" -eq 1 ]; then
-            _c=$(curl -s --max-time 30 "http://127.0.0.1:$_port/compile")
+            _c=$(curl -s --max-time 30 "http://127.0.0.1:$_port/${3:-compile}")
             _p=$(curl -s --max-time 5 "http://127.0.0.1:$_port/ping")
         else
             _c="(no server)"; _p=""
@@ -200,6 +228,14 @@ LUA
     [ "$OUT" = "error:shader_helper_failed|pong" ] \
         || { cat "$HAPP/srv-19932.log"; echo "got: $OUT"; echo "FAIL: helper crash"; exit 1; }
     echo "ok  helper crash: shader_helper_failed, server keeps serving"
+    OUT=$(helper_case 19936 "" top)
+    [ "$OUT" = "error:dynamic_shader_refused|pong" ] \
+        || { cat "$HAPP/srv-19936.log"; echo "got: $OUT"; echo "FAIL: top-level runtime source compiled"; exit 1; }
+    echo "ok  the top level refuses runtime source even with the opt-in"
+    OUT=$(helper_case 19937 alloc)
+    [ "$OUT" = "error:shader_helper_failed|pong" ] \
+        || { cat "$HAPP/srv-19937.log"; echo "got: $OUT"; echo "FAIL: helper past its memory cap"; exit 1; }
+    echo "ok  helper past its memory cap: stopped, shader_helper_failed, server keeps serving"
     OUT=$(helper_case 19933 oversize)
     [ "$OUT" = "error:shader_helper_failed|pong" ] \
         || { cat "$HAPP/srv-19933.log"; echo "got: $OUT"; echo "FAIL: oversized helper reply"; exit 1; }

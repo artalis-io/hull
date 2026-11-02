@@ -21,8 +21,15 @@ those.
 
 ### The rule
 
-The policy is a property of the GPU context, set by `serve.c` after the manifest is applied and
-sealed with the device allowlist (so app code cannot widen it). One enforcement point:
+The policy is a property of the GPU context, sealed with the device allowlist (so app code cannot
+widen it). `serve.c` sets the mode at GPU init, right after `hl_cap_gpu_init` and before the
+context reaches the runtime (`hl_cap_gpu_init_shader_policy`: `HL_GPU_SHADERS_EMBEDDED` over a
+built binary's files, else `HL_GPU_SHADERS_DEV`, never dynamic source), and raises
+`gpu.dynamic_shaders` only after the manifest is applied. The app's top level runs in between,
+so it compiles only embedded shaders in a built binary, opt-in or not. (Until the §7.3
+confirming audit the whole policy was set after the manifest, and the top level ran with none:
+a top-level `gpu.compile` of source a request had stored compiled in-process, unchecked.) One
+enforcement point:
 `hl_cap_gpu_compile_ex` runs `hl_gpu_shader_admit` before the pre-checks and the backend, so
 both runtimes and any future caller get it.
 
@@ -31,7 +38,7 @@ both runtimes and any future caller get it.
 | `HL_GPU_SHADERS_EMBEDDED` | the app VFS holds embedded files (`hl_vfs_embedded`): every built binary, served or `app.main` | the embedded `shaders/<name>.wgsl` | accepted only when `src` is byte-identical to an embedded `shaders/*.wgsl`; else `HL_GPU_ERR_POLICY` / `dynamic_shader_refused` |
 | same, `gpu.dynamic_shaders = true` | manifest opt-in (JS `gpu.dynamicShaders`; only the boolean `true`) | as above | any source, compiled first in the helper process (`gpu_compile_helper.md`), then in-process under the compile deadline |
 | `HL_GPU_SHADERS_DEV` | no embedded files: `hull app.lua`, `hull dev` | `shaders/<name>.wgsl` on disk (the existing dev fallback) | any source; one WARN per process when the opt-in is absent and the source did not come from `shaders/` |
-| `HL_GPU_SHADERS_ANY` | no policy set: unit tests, embedders | any | any |
+| `HL_GPU_SHADERS_ANY` | no policy set: unit tests, embedders | any | any, except that a context whose VFS holds a built binary's files refuses source it did not embed (fail closed). An unknown mode refuses everything. |
 
 "Byte-identical" is checked by comparing against the `shaders/` entries of the same length
 (`hl_gpu_shader_is_embedded`). A hash table would add nothing: an app embeds a handful of
@@ -112,8 +119,12 @@ the opt-in is documented as "never compile request-supplied WGSL".
 - `test_lua` / `test_js` (`*_gpu_audit_convergence`): the same rules through the bindings over
   the mock backend, and the manifest field (`dynamic_shaders` / `dynamicShaders`, only `true`).
 - `tests/e2e_feature_gpu.sh`: a built `--with=gpu` app loads its embedded shader, has inline
-  source refused and an identical copy accepted, dispatches; an opt-in app compiles runtime
-  source; a shader the pre-check refuses fails `hull build`.
+  source refused (at the top level too) and an identical copy accepted, dispatches; an opt-in
+  app compiles runtime source from a handler and has it refused at the top level; a shader the
+  pre-check refuses fails `hull build`.
+- `test_gpu` (`gpu_convergence_policy`): the context as serve.c sets it up (policy at init, the
+  top level refused, the opt-in raised after), `ANY` over a built binary's files and an unknown
+  mode refused.
 
 ## Migration
 

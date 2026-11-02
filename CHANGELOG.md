@@ -137,6 +137,39 @@ release-artifact layout).
 
 ### Fixes
 
+- **The GPU shader policy holds from the app's first line; helper verdicts bound memory**
+  (audit convergence §7.3). The confirming audit of the build-time shader policy and the
+  compile helper found:
+  - **The app's top level ran with no shader policy.** serve.c set the policy only after the
+    manifest was applied, but the GPU context reached the runtime before the top level ran, so
+    a top-level `gpu.compile` of any source (for example source a request had stored in the
+    database) compiled in-process in a built `--with=gpu` app, with no policy and no helper.
+    The policy is now set at GPU init (`hl_cap_gpu_init_shader_policy`: embedded-only in a
+    built binary), before the app loads; `gpu.dynamic_shaders` is raised only once the manifest
+    is applied, so runtime source is refused at the top level even with the opt-in (compile it
+    from a handler or `app.main`). A context left without a policy (`HL_GPU_SHADERS_ANY`) now
+    refuses source it did not embed when its VFS holds a built binary's files, and an unknown
+    mode is refused.
+  - **A helper verdict did not bound memory.** A worker's memory is now capped at
+    `HL_GPU_HELPER_MEM_BYTES` (1 GiB; the measured peak compiling the largest shaders in the
+    test suite and the examples is 23 MiB on Apple M1 Max / Metal): on macOS the supervisor
+    reads the worker's footprint (`proc_pid_rusage`) every 5 ms and kills it above the cap; on
+    Linux `RLIMIT_DATA` is the cap plus the compile stack (was 8 GiB). Either way the source is
+    refused with `shader_helper_failed`, and the server and the supervisor keep going.
+  - **The worker's stack could exceed the server's.** The server now asks the helper for at
+    most 7/8 of the stack its own compile thread can get (`hl_gpu_compile_stack_available`, the
+    request carries it, and it is part of the verdict's cache key), and refuses to compile a
+    helper-admitted source on a thread smaller than what the worker had.
+  - **Release binaries honoured `HULL_TEST_GPU_HELPER`**, whose `accept` hook made the worker
+    vouch for any source and sealed the OK into the disk cache. The hooks are compiled only with
+    `-DHL_GPU_HELPER_TEST_HOOKS` (the unit tests' own copy of `cap/gpu_helper.c`, and
+    `make HL_GPU_HELPER_TEST_HOOKS=1` for the GPU e2e).
+  - **Linux worker sandbox:** seccomp also refuses `io_uring_setup` / `_enter` / `_register`
+    (`IORING_OP_SOCKET` made a socket without `socket()`), and on Landlock ABI 4+ TCP bind and
+    connect are handled with no rule granting them. The worker sandbox is defence in depth, not
+    a boundary against a naga memory-corruption exploit: the server compiles an accepted source
+    again itself.
+
 - **No MySQL / Postgres session state crosses runs, roles included** (audit convergence §7.1).
   Three gaps the per-entry session reset left: (1) `COM_RESET_CONNECTION` leaves an active
   MySQL role and the current database as they were, and a role set through `PREPARE` from a

@@ -1110,11 +1110,12 @@ size_t hl_gpu_wgsl_block_depth(const char *wgsl, size_t len)
             if (top >= WL_BLOCKS) return HL_GPU_WGSL_UNREADABLE;
             level[top++] = d;
         } else if (c == '}' && top > 0) {
-            size_t closed = level[--top];
-            size_t parent = top ? level[top - 1] : 0;
-            size_t extra = closed - parent - 1;   /* the else-if chain so far */
+            --top;
             WlTok e, f;
             if (wl_next(s, n, i, &e) == WL_IDENT && wl_tok_is(s, &e, "else")) {
+                size_t closed = level[top];
+                size_t parent = top ? level[top - 1] : 0;
+                size_t extra = closed - parent - 1;   /* the else-if chain so far */
                 (void)wl_next(s, n, e.end, &f);
                 pending = wl_tok_is(s, &f, "if") ? extra + 1 : extra;
             }
@@ -2948,6 +2949,9 @@ struct HlGpuCompileJob {
     int                 done;       /* the thread is finished with the backend */
     int                 abandoned;  /* nobody takes `out`: the thread frees it */
     int                 refs;
+    size_t              min_stack;  /* refuse a thread smaller than this (0 = any):
+                                     * the stack the compile helper's verdict
+                                     * was for (audit convergence §7.3) */
 };
 typedef struct HlGpuCompileJob HlGpuCompileJob;
 
@@ -3022,27 +3026,58 @@ static void *gpu_compile_main(void *arg)
     return NULL;
 }
 
+/* The compile thread's stack sizes, tried in order: the full reservation,
+ * then smaller ones on a host short of address space. */
+static const size_t g_compile_stack_sizes[] = {
+    HL_GPU_COMPILE_STACK_BYTES,
+    (size_t)1 << 30,
+    (size_t)256 << 20,
+    (size_t)64 << 20,
+};
+#define GPU_COMPILE_STACK_N \
+    (sizeof(g_compile_stack_sizes) / sizeof(g_compile_stack_sizes[0]))
+
+static void *gpu_stack_probe_main(void *arg)
+{
+    return arg;
+}
+
+size_t hl_gpu_compile_stack_available(void)
+{
+    for (size_t k = 0; k < GPU_COMPILE_STACK_N; k++) {
+        size_t sz = g_compile_stack_sizes[k];
+        if (k > 0 && sz >= HL_GPU_COMPILE_STACK_BYTES) continue;
+        pthread_attr_t attr;
+        if (pthread_attr_init(&attr) != 0) continue;
+        pthread_t th;
+        int ok = pthread_attr_setstacksize(&attr, sz) == 0 &&
+                 pthread_create(&th, &attr, gpu_stack_probe_main, NULL) == 0;
+        pthread_attr_destroy(&attr);
+        if (ok) {
+            pthread_join(th, NULL);
+            return sz;
+        }
+    }
+    return 0;
+}
+
 /* Start the compile thread, detached, holding its own reference. A host
  * that cannot reserve the full stack gets a smaller one (still far above
- * the event loop's, with the estimators bounding what reaches it). 0, or
- * -1 with no thread at all (the compile is then refused, never run on the
- * loop). */
+ * the event loop's, with the estimators bounding what reaches it), never
+ * one below job->min_stack. 0, or -1 with no thread at all (the compile is
+ * then refused, never run on the loop). */
 static int gpu_compile_start(HlGpuCompileJob *job)
 {
-    static const size_t sizes[] = {
-        HL_GPU_COMPILE_STACK_BYTES,
-        (size_t)1 << 30,
-        (size_t)256 << 20,
-        (size_t)64 << 20,
-    };
+    const size_t *sizes = g_compile_stack_sizes;
     sigset_t all, old;
     sigfillset(&all);
     int masked = pthread_sigmask(SIG_SETMASK, &all, &old) == 0;
     int started = 0;
     pthread_t th;
     job->refs++;                        /* the thread's */
-    for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]) && !started; k++) {
+    for (size_t k = 0; k < GPU_COMPILE_STACK_N && !started; k++) {
         if (k > 0 && sizes[k] >= HL_GPU_COMPILE_STACK_BYTES) continue;
+        if (sizes[k] < job->min_stack) break;
         pthread_attr_t attr;
         if (pthread_attr_init(&attr) != 0) continue;
         if (pthread_attr_setstacksize(&attr, sizes[k]) == 0 &&
@@ -3060,7 +3095,12 @@ static int gpu_compile_start(HlGpuCompileJob *job)
     if (masked) pthread_sigmask(SIG_SETMASK, &old, NULL);
     if (!started) {
         job->refs--;
-        log_error("[hull:gpu] no thread for the shader compile: refused");
+        if (job->min_stack)
+            log_error("[hull:gpu] no compile thread with at least the %zu MiB "
+                      "stack the compile helper checked this source on: "
+                      "refused", job->min_stack >> 20);
+        else
+            log_error("[hull:gpu] no thread for the shader compile: refused");
         return -1;
     }
     return 0;
@@ -3220,13 +3260,29 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
      * stack or exhausts its memory never reaches this process's compiler.
      * Done before the device lock: the helper can take seconds, and the
      * gpu.async workers take that lock. */
+    size_t helper_stack = 0;
     if (admit == HL_GPU_ADMIT_HELPER) {
         pthread_mutex_lock(&dev->mutex);
         int have = find_pipeline(dev, name) != NULL;
         pthread_mutex_unlock(&dev->mutex);
         if (have)
             return HL_GPU_OK;
-        int hs = hl_gpu_helper_check(wgsl, wgsl_len, dev_idx, dev->name);
+        /* The verdict carries over only if the worker's stack is below the
+         * one this compile will run on: ask for 7/8 of what a compile
+         * thread can get here (the helper's own cap when that is more),
+         * and refuse a compile thread smaller than what the worker had. */
+        size_t avail = hl_gpu_compile_stack_available();
+        if (avail == 0) {
+            log_error("[hull:gpu] shader '%s' refused: no compile thread "
+                      "could be started", name);
+            return HL_GPU_ERR_INTERNAL;
+        }
+        helper_stack = avail - avail / 8;
+        if (helper_stack > HL_GPU_HELPER_STACK_BYTES)
+            helper_stack = HL_GPU_HELPER_STACK_BYTES;
+        helper_stack &= ~(((size_t)1 << 20) - 1);   /* whole MiB on the wire */
+        int hs = hl_gpu_helper_check(wgsl, wgsl_len, dev_idx, dev->name,
+                                     helper_stack);
         if (hs != HL_GPU_HELPER_OK) {
             int hrc = hs == HL_GPU_HELPER_SHADER ? HL_GPU_ERR_SHADER
                     : (hs == HL_GPU_HELPER_TIMEOUT ||
@@ -3236,10 +3292,11 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
                 "ok", "the compiler refused it", "killed at its deadline",
                 "crashed", "sent a malformed or oversized reply",
                 "unavailable", "cancelled (the run stopped)",
+                "killed above its memory cap",
             };
             log_warn("[hull:gpu] shader '%s' refused by the compile helper: "
                      "%s (%zu bytes of WGSL)", name,
-                     hs >= 0 && hs <= HL_GPU_HELPER_CANCELLED ? helper_why[hs] : "?",
+                     hs >= 0 && hs <= HL_GPU_HELPER_MEMORY ? helper_why[hs] : "?",
                      wgsl_len);
             return hrc;
         }
@@ -3273,6 +3330,8 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
     HlGpuPipeline *slot = &dev->pipelines[dev->pipeline_count];
     HlGpuCompileJob *job = compile_job_new(ctx, dev, name, wgsl, wgsl_len);
     int rc;
+    if (job)
+        job->min_stack = helper_stack;
     if (!job) {
         rc = HL_GPU_ERR_INTERNAL;
     } else if (gpu_compile_start(job) != 0) {

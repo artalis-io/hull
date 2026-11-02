@@ -16,7 +16,12 @@
  *     compiles, so a shader can be edited inline; a gpu.compile of source
  *     that did not come from shaders/ logs one WARN without the opt-in,
  *     since the built binary will refuse it.
- *   - No policy (HL_GPU_SHADERS_ANY): unit tests and embedders.
+ *   - No policy (HL_GPU_SHADERS_ANY): unit tests and embedders. Refused
+ *     when the context's VFS holds embedded app files: serve.c sets the
+ *     policy at GPU init (hl_cap_gpu_init_shader_policy), before the app's
+ *     top level runs, and raises gpu.dynamic_shaders only once the
+ *     manifest is applied (the §7.3 confirming audit found the top level
+ *     ran with no policy at all).
  *
  * With the opt-in, dynamic source is compiled first in a bounded helper
  * process (cap/gpu_helper.c, killed at its deadline); only a source the
@@ -45,6 +50,14 @@ void hl_cap_gpu_set_shader_policy(HlGpuCtx *ctx, int mode, int dynamic_shaders,
     ctx->shader_mode = mode;
     ctx->dynamic_shaders = dynamic_shaders ? 1 : 0;
     ctx->shader_vfs = vfs;
+}
+
+void hl_cap_gpu_init_shader_policy(HlGpuCtx *ctx, const struct HlVfs *vfs)
+{
+    hl_cap_gpu_set_shader_policy(ctx,
+        vfs && hl_vfs_embedded(vfs) ? HL_GPU_SHADERS_EMBEDDED
+                                    : HL_GPU_SHADERS_DEV,
+        0, vfs);
 }
 
 /* An entry is a shader when it is shaders/<something>.wgsl. */
@@ -92,7 +105,9 @@ int hl_gpu_shader_admit(const HlGpuCtx *ctx, const char *name,
                  "shader embedded at build time (shaders/<name>.wgsl). "
                  "Move it to shaders/ and use gpu.load, or set "
                  "gpu.dynamic_shaders = true (JS gpu.dynamicShaders) in the "
-                 "manifest to compile runtime source",
+                 "manifest to compile runtime source (from a handler or "
+                 "app.main: while the app's top level runs, the manifest is "
+                 "not applied yet and runtime source is always refused)",
                  name ? name : "?");
         return HL_GPU_ERR_POLICY;
     case HL_GPU_SHADERS_DEV:
@@ -104,8 +119,20 @@ int hl_gpu_shader_admit(const HlGpuCtx *ctx, const char *name,
                      "gpu.dynamic_shaders = true (JS gpu.dynamicShaders)",
                      name ? name : "?");
         return HL_GPU_OK;
-    default:
+    case HL_GPU_SHADERS_ANY:
+        /* No policy is for unit tests and embedders. A context over a
+         * built binary's files that never got one is a wiring bug: refuse
+         * anything not embedded rather than compile it unchecked. */
+        if (ctx->shader_vfs && hl_vfs_embedded(ctx->shader_vfs) &&
+            !hl_gpu_shader_is_embedded(ctx->shader_vfs, wgsl, len)) {
+            log_warn("[hull:gpu] shader '%s' refused: no shader policy is "
+                     "set for a built binary's GPU context",
+                     name ? name : "?");
+            return HL_GPU_ERR_POLICY;
+        }
         return HL_GPU_OK;
+    default:
+        return HL_GPU_ERR_POLICY;
     }
 }
 
