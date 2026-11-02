@@ -4424,6 +4424,23 @@ UTEST(gpu_convergence_policy, unknown_mode_refused)
     mock_free(ctx);
 }
 
+/* Sanitizer builds: the worker's memory cap is not applied (RLIMIT_DATA would
+ * refuse ASan / MSan their shadow reservation) and the shadow memory inflates
+ * its measured peak past the cap, so the memory tests skip there. */
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || __has_feature(thread_sanitizer)
+#    define AGH_SANITIZED 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#  define AGH_SANITIZED 1
+#endif
+#ifdef AGH_SANITIZED
+#define AGH_NEED_REAL_MEMORY() UTEST_SKIP("sanitizer build: the helper memory cap is not applied")
+#else
+#define AGH_NEED_REAL_MEMORY() do { } while (0)
+#endif
+
 #ifndef AGH_NO_HELPER
 /* M2: a worker that allocates past its memory cap (the "alloc" hook: no
  * shader involved) is stopped - killed by the supervisor on macOS, refused
@@ -4431,6 +4448,7 @@ UTEST(gpu_convergence_policy, unknown_mode_refused)
  * shader_helper_failed; the server and the supervisor carry on. */
 UTEST(gpu_convergence_policy, helper_memory_cap_refuses)
 {
+    AGH_NEED_REAL_MEMORY();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
@@ -4457,6 +4475,7 @@ UTEST(gpu_convergence_policy, helper_memory_cap_refuses)
  * is sized from: docs/design/gpu_compile_helper.md section 5). */
 UTEST(gpu_convergence_policy, helper_reports_worker_peak)
 {
+    AGH_NEED_REAL_MEMORY();
     HlGpuBackend be;
     HlVfs vfs;
     HlGpuCtx *ctx = agh_ctx(&be, &vfs);
