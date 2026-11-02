@@ -4455,6 +4455,11 @@ UTEST(gpu_convergence_policy, helper_memory_cap_refuses)
     ASSERT_TRUE(ctx != NULL);
     ASSERT_EQ(0, ach_start("alloc"));
     hl_gpu_helper_test_set_mem_cap((uint64_t)256 << 20);
+    /* The cap includes the compile stack (768 MiB), so the hook touches
+     * about 1 GiB before the limit refuses it: past the default compile
+     * deadline on a slow CI runner. A long deadline keeps the verdict the
+     * memory cap's, not the clock's. */
+    hl_gpu_helper_test_set_timeouts(0, 20000);
     double t0 = a40_now();
     int rc = hl_cap_gpu_compile(ctx, -1, "m", AC_OTHER, strlen(AC_OTHER));
     double dt = a40_now() - t0;
@@ -4463,10 +4468,11 @@ UTEST(gpu_convergence_policy, helper_memory_cap_refuses)
     EXPECT_EQ(0, mock_compiles);
     EXPECT_EQ(0, ctx->devices[0].pipeline_count);
     printf("  helper: worker past a 256 MiB memory cap stopped after %.2f s\n", dt);
-    EXPECT_TRUE(dt < 5.0);
+    EXPECT_TRUE(dt < 20.0);
     /* The supervisor takes the next request. */
     EXPECT_EQ(1, hl_gpu_helper_running());
     hl_gpu_helper_test_set_mem_cap(0);
+    hl_gpu_helper_test_set_timeouts(0, 0);
     hl_gpu_helper_stop();
     mock_free(ctx);
 }
