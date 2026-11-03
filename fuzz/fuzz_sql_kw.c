@@ -99,6 +99,33 @@ static char *recase(const char *s, int upper)
     return r;
 }
 
+/* recase(), except that every Postgres dollar-quote tag candidate keeps its
+ * case: a '$', a tag ([A-Za-z\200-\377_][A-Za-z\200-\377_0-9]*), a '$'.
+ * Postgres matches a closing tag to the opening one byte for byte, so
+ * "$a$ ... $A$" is one unterminated quote and "$a$ ... $a$" a closed one -
+ * recasing a tag can rightly move where a string ends, and with it the
+ * session-SQL verdict. Every '$' is tried as a start (a tag holds no '$', so
+ * the closing '$' may open the next candidate), so each span the reader could
+ * compare as a tag is left as written, wherever it sits. */
+static int pg_tag_start(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80;
+}
+
+static char *recase_pg(const char *s, int upper)
+{
+    char *r = recase(s, upper);
+    for (size_t i = 0; s[i]; i++) {
+        if (s[i] != '$' || !pg_tag_start((unsigned char)s[i + 1])) continue;
+        size_t j = i + 1;
+        while (pg_tag_start((unsigned char)s[j]) || (s[j] >= '0' && s[j] <= '9')) j++;
+        if (s[j] != '$') continue;
+        memcpy(r + i + 1, s + i + 1, j - i - 1);   /* the tag, as written */
+        i = j - 1;                                 /* its closing '$' is tried next */
+    }
+    return r;
+}
+
 /* Does @p s end inside a block comment, read the way hl_sql_skip_space_ex
  * reads comments (with the same nesting rule)? Only meaningful for a text the
  * reader classified COMMIT / ROLLBACK: such a text is words, ';' and gaps, so
@@ -162,22 +189,36 @@ static void raw_mode(const char *sql)
         fail("comment rules disagree on a text with no block comment", sql);
 
     /* The session-SQL refusal (cap/db_session_sql.c, audit convergence
-     * phase 3): stays inside the text, is deterministic, ignores ASCII case,
-     * and a refused statement appended after a newline is refused whatever
-     * came before it (an unterminated quote or comment is read raw). */
+     * phase 3): stays inside the text, is deterministic, ignores ASCII case
+     * (outside Postgres dollar-quote tags, which are case-sensitive: see
+     * recase_pg), and a refused statement appended after a newline is
+     * refused whatever came before it (an unterminated quote or comment is
+     * read raw). */
+    char *pg_up = recase_pg(sql, 1), *pg_lo = recase_pg(sql, 0);
     for (int d = 0; d <= 1; d++) {
         const char *r = hl_db_session_sql_refused(sql, (HlDbSqlDialect)d);
         if (hl_db_session_sql_refused(sql, (HlDbSqlDialect)d) != r)
             fail("session-SQL verdict not deterministic", sql);
-        if ((hl_db_session_sql_refused(up, (HlDbSqlDialect)d) != NULL) != (r != NULL) ||
-            (hl_db_session_sql_refused(lo, (HlDbSqlDialect)d) != NULL) != (r != NULL))
+        const char *cu = d == HL_DB_SQL_POSTGRES ? pg_up : up;
+        const char *cl = d == HL_DB_SQL_POSTGRES ? pg_lo : lo;
+        if ((hl_db_session_sql_refused(cu, (HlDbSqlDialect)d) != NULL) != (r != NULL) ||
+            (hl_db_session_sql_refused(cl, (HlDbSqlDialect)d) != NULL) != (r != NULL))
             fail("ASCII case changed the session-SQL verdict", sql);
         char *t = cat(sql, d == HL_DB_SQL_MYSQL ? "\n;LOCK TABLES t WRITE"
                                                 : "\n;SELECT pg_advisory_lock(1)");
         if (!hl_db_session_sql_refused(t, (HlDbSqlDialect)d))
             fail("a session-altering statement after a newline was allowed", t);
         free(t);
+        if (d == HL_DB_SQL_POSTGRES) {
+            /* A DO body runs a nested dollar quote through EXECUTE: the '$'
+             * that closes it must not glue it into one word. */
+            t = cat(sql, "\n;DO $zz$ BEGIN EXECUTE $q$SET ROLE x$q$; END $zz$");
+            if (!hl_db_session_sql_refused(t, (HlDbSqlDialect)d))
+                fail("a session-altering statement in a nested dollar quote was allowed", t);
+            free(t);
+        }
     }
+    free(pg_up); free(pg_lo);
 
     int dyn = hl_cap_db_sql_calls_dynamic_sql(sql);
     if (hl_cap_db_sql_calls_dynamic_sql(up) != dyn ||

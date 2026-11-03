@@ -78,9 +78,14 @@ Conservative reading: a backslash anywhere, a MySQL executable comment, or an
 unterminated quote / comment / dollar quote makes the text "raw" - quotes and
 comments count as code and every word anchors. A Postgres dollar-quoted body
 (a DO block or function body runs it) and the statement a MySQL `PREPARE` /
-`EXECUTE IMMEDIATE` takes from a string are always read raw. The classifier is
-fuzzed in `fuzz_sql_kw` (deterministic, case-insensitive, and a refused
-statement appended after a newline is refused whatever precedes it).
+`EXECUTE IMMEDIATE` takes from a string are always read raw. On Postgres, a raw
+`$` ends a word (it may close a nested dollar quote: `EXECUTE $q$SET ROLE
+x$q$`), and a word that starts with a digit is a number, ending at the first
+byte that is not a digit or `_` (`8$$` is 8 and a dollar quote). The classifier
+is fuzzed in `fuzz_sql_kw` (deterministic, case-insensitive outside Postgres
+dollar-quote tags, which are case-sensitive, and a refused statement appended
+after a newline - or in a nested dollar quote of a DO body - is refused
+whatever precedes it).
 
 Known limit, by design: SQL assembled at run time (`CONCAT` + `PREPARE`,
 `EXECUTE format(...)` in a DO block, a stored procedure that runs `SET
