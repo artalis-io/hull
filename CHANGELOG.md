@@ -8,19 +8,92 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-03
+
+Full PR list:
+[GitHub release v0.18.0](https://github.com/artalis-io/hull/releases/tag/v0.18.0).
+
+This release carries security audit rounds 18-43 and the audit-convergence campaign
+([docs/design/audit_convergence.md](docs/design/audit_convergence.md)). Instead of fixing each
+finding call by call, five recurring classes of finding were removed or bounded structurally:
+- **Uncharged work:** every binding call is charged its measured time, and every request has a
+  deadline.
+- **Remote cost:** request and connection concurrency caps, plus input caps.
+- **MySQL / Postgres session state:** session-altering SQL is refused, and connections are reset
+  at entry boundaries.
+- **Planted database files:** Hull's internal tables move to a database file Hull owns.
+- **GPU compile time:** a built binary compiles only its embedded shaders.
+
+Each phase was followed by a confirming audit.
+
+**What the guarantees cover.** "Closed" means each phase met its agreed exit criterion, not
+that the class is proven absent. In particular:
+- **Engine super-linearity (QuickJS / Lua builtins):** held in the default mode by work charging,
+  the engine patches, input caps and a CI complexity job. It is not bounded structurally.
+- **`--vm-thread`:** opt-in. It gives a per-request 503 at the deadline, but the whole server
+  stands by until the stuck call returns.
+
+The residual risks are listed precisely in §11a of the design doc.
+
+**Not resolved.** One question raised in round 42 has neither severity nor verdict: whether a
+WAMR heap bounds check covers a whole heap node or only its start. Every automated attempt to
+analyse it was stopped, and no patch for it is in this release.
+
+Many calls that used to pass silently now refuse, are charged to the instruction budget, or
+answer differently. Read the upgrade notes, then the sections below.
+
 ### Upgrade notes
 
-- **`req.remote_addr` on a dual-stack listener (`-b ::`).** An IPv4 client now reads as its IPv4
-  address (`127.0.0.1`), not the IPv4-mapped form Keel formats (`::ffff:7f00:1`). An app that
-  stores, compares or keys on `remote_addr` (allowlists, audit records, rate-limit or lockout keys)
-  sees a different string for the same client after upgrading; entries keyed on the old form stop
-  matching. IPv4-only and IPv6 listeners are unchanged.
-- **Connection limits and deadlines are on by default.** One client key may hold at most half of
-  `--max-connections` open connections (`--max-connections-per-ip`, `limits.per_ip_connections`;
-  trusted proxies exempt), a request head must arrive within 10 s (`--header-timeout`) and an idle
-  keep-alive connection is closed after 5 s (`--keepalive-timeout`). Clients that hold idle
-  connections longer reconnect; a deployment behind a proxy not listed in `limits.trusted_proxies`
-  shares one key for every user.
+- **Internal tables move out of the app database (automatic, one-time).**
+  - **What moves:** sessions, roles, TOTP secrets, the audit log, idempotency keys and auth-flows
+    state, unless the manifest declares `databases.internal`.
+  - **Where they go:** a SQLite file Hull owns. That is `<app>/.hull/internal.db` for the default
+    `data.db`, or `<database>.hull-internal` beside a `-d` database elsewhere (the generated
+    Dockerfile's `/data/data.db` gets `/data/data.db.hull-internal`).
+  - **How the move runs:** on the first start, Hull copies the tables one transaction per table
+    and drops them only after every copy committed. An interrupted start finishes the move next
+    time. `--no-migrate` skips it.
+  - **Deployments:** persist and back up the internal file together with `data.db`. Deleting
+    `data.db` no longer resets sessions and roles.
+  - **Rollback, this release only:** `--keep-internal-in-app-db` (`--hull-keep-internal-in-app-db`
+    in a built binary) keeps the old layout and moves already-moved tables back.
+  - **What stays in the app database:** outbox, inbox, jobs, attachment metadata, search, the kv
+    SQL store and `_hull_migrations`.
+- **Connection limits and deadlines are on by default.**
+  - **Per client key:** at most half of `--max-connections` open connections
+    (`--max-connections-per-ip`, `limits.per_ip_connections`), and at most half of it in requests
+    in flight (`--max-requests-per-ip`, `limits.per_ip_concurrency`; 429 over the cap).
+  - **Deadlines:** a request head must arrive within 10 s (`--header-timeout`), and an idle
+    keep-alive connection closes after 5 s (`--keepalive-timeout`).
+  - **Behind a reverse proxy:** list the proxy in `limits.trusted_proxies`, or every user shares
+    one key.
+  - **Not a fairness guarantee:** the cap stops one client key from monopolising the server, but
+    two keys can still take every connection.
+- **Request handlers have a 10 s deadline (was 60 s).**
+  - **What is stopped:** a handler, a middleware, or one resume of either that holds the event
+    loop longer is stopped and answered `503`.
+  - **Callbacks:** timers and WebSocket / SSE callbacks get 5 s.
+  - **How to set it:** `limits.request_ms` / `callback_ms`, or `--max-run-ms` for every kind.
+  - **Blocking calls:** synchronous `http.*` and `compute.*` calls, the SQLite lock wait and a WASM
+    module's first load now end at that deadline.
+  - **Charging:** every binding call is charged its measured time, so a CLI `app.main` doing long
+    synchronous compute can trip its budget where it did not before.
+- **`req.remote_addr` on a dual-stack listener (`-b ::`)** now reads as the client's IPv4
+  address (`127.0.0.1`), not the IPv4-mapped form (`::ffff:7f00:1`). Apps that store, compare or
+  key on it see a different string for the same client. IPv4-only and IPv6 listeners are
+  unchanged.
+- **MySQL / MariaDB / Postgres: session-altering app SQL is refused** before it is sent.
+  - **Refused:** `SET autocommit`, `LOCK TABLES`, `XA`, `GET_LOCK`, `SET ROLE`, session advisory
+    locks, `LISTEN`, and similar.
+  - **Reset:** every connection an entry used is reset at the entry boundary. Do not rely on
+    session state across requests.
+- **A built binary compiles only its embedded GPU shaders.**
+  - **Migration:** move inline WGSL to `shaders/<name>.wgsl` and call `gpu.load(name)`.
+  - **Runtime source:** set `gpu.dynamic_shaders = true` when source really is generated at run
+    time. It is then checked in a bounded helper process first.
+- **Input caps.** JSON documents nested deeper than 128 levels or with objects over 100000 keys
+  are refused. In JS, a RegExp source over 64 KiB and a `normalize` / `localeCompare` operand over
+  1 MiB throw. Raise them with the `limits` keys.
 
 ### Fixed (audit convergence §6.4: dual-stack proxies, accept refusals)
 
