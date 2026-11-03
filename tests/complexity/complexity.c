@@ -273,7 +273,11 @@ static const JsCase js_cases[] = {
       "function setup(n) { const a = new Float64Array(n); let x = 7;"
       " for (let i = 0; i < n; i++) a[i] = (x = (x * 1103515245 + 12345) % 2147483648); return a; }\n"
       "function work(a) { a.slice().sort(); }\n", 0 },
-    { "js.typedarray.set_fill", 16000000, JS_PRE
+    /* Memory-bound: n is large enough that both sizes (2 x 64 MB and
+     * 2 x 128 MB) are well past any last-level cache. At 16 MB the n run
+     * fit a CI runner's cache and the 2n run did not, so the ratio read
+     * 2.7 with no super-linear work. */
+    { "js.typedarray.set_fill", 64000000, JS_PRE
       "function setup(n) { return [new Uint8Array(n), new Uint8Array(n)]; }\n"
       "function work(s) { for (let i = 0; i < 10; i++) { s[0].fill(i); s[1].set(s[0]); } }\n", 0 },
     /* Map / Set (keyed hash, patch 0009) */
