@@ -2,7 +2,7 @@
  * complexity.c - engine complexity tests (audit convergence §6.5)
  *
  * Runs each listed QuickJS / Lua builtin on a worst-case-SHAPED ordinary
- * input at sizes n and 2n and asserts t(2n) / t(n) < 2.5: a linear builtin
+ * input at sizes n and 2n and asserts t(2n) / t(n) < 3.2: a linear builtin
  * doubles, an n log n one (sort) a little more, a quadratic one quadruples.
  * Each time is the THREAD CPU time of the work (CLOCK_THREAD_CPUTIME_ID), so
  * a loaded or preempted runner does not count time the thread spent off the
@@ -42,7 +42,11 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
-#define RATIO_MAX   2.5
+/* Linear is 2.0 and n log n about 2.1; quadratic is 4.0. Memory-bound
+ * linear cases (string building, object insertion, fills) read up to ~3.0
+ * on a shared CI runner (allocator, page faults, cache), so the bar sits
+ * between those and quadratic. */
+#define RATIO_MAX   3.2
 #define RUNS        5        /* minimum of */
 #define ATTEMPTS    3        /* a failing case is measured again */
 #define MIN_MS      4.0      /* a case whose t(n) is below this is too small */

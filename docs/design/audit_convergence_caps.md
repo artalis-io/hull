@@ -79,7 +79,7 @@ manifest's `limits`.
 vendored engines - Hull's patches, no Hull runtime - so the numbers are the engine's own. Each
 case defines `setup(n)` (untimed) and `work(state)` (timed); the time is the thread CPU time
 (`CLOCK_THREAD_CPUTIME_ID`, so time preempted by other load is not counted), the least of five
-runs (noise only adds time) at n and at 2n, the assertion t(2n)/t(n) < 2.5, and a failing case is
+runs (noise only adds time) at n and at 2n, the assertion t(2n)/t(n) < 3.2, and a failing case is
 measured again, up to three attempts, before it counts. The verdict is a ratio, so a slower
 machine or a sanitizer build needs no adjustment. The suite runs in about 30 s and prints every ratio.
 
@@ -88,7 +88,7 @@ character classes, many alternatives, long lookbehinds, deep and wide JSON, obje
 keys. Hash structures run on the keyed hash; no input is built to collide. The one collision case
 uses QuickJS's test-only hook (`JS_TestForceAtomHash`, `QJS_HULL_TEST_HOOKS`) to put every atom
 on one chain; insertion is then quadratic by construction, and the case asserts instead that the
-charged work grows in step with the time (time ratio / charge ratio within 2.5x), which is what
+charged work grows in step with the time (time ratio / charge ratio within 3.2x), which is what
 lets the budget stop it in Hull. Map / Set have no such hook and are tested for linearity only.
 
 The Lua weak-table ephemeron case is deferred until the ephemeron fix (PR #969) is on main.

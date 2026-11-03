@@ -138,7 +138,7 @@ make debug              # debug build with ASan + UBSan (recompiles from clean)
                         #   equivalent single invocation CI uses.
 make msan               # MSan + UBSan (Linux clang only)
 make check              # full validation: clean + ASan + test + e2e
-make complexity         # engine complexity: QuickJS / Lua builtins at n and 2n, t(2n)/t(n) < 2.5 (~30 s)
+make complexity         # engine complexity: QuickJS / Lua builtins at n and 2n, t(2n)/t(n) < 3.2 (~30 s)
 make analyze            # Clang static analyzer (scan-build)
 make cppcheck           # cppcheck static analysis
 make platform           # build libhull_platform.a (everything except main/build-tool code)
@@ -2530,7 +2530,7 @@ be deferred or joined the same way; `tests/e2e_sandbox.sh` Test 9 checks
   `test_req_limit`, `js_input_caps.*`, `lua_input_caps.*`.
 - **Engine complexity (audit convergence §6.5):** `make complexity` (`tests/complexity/complexity.c`,
   CI job `engine-complexity`, not part of `make test`) runs the raw vendored engines' builtins at
-  n and 2n on worst-case-shaped ordinary inputs and requires t(2n)/t(n) < 2.5 (thread CPU time, least of 5,
+  n and 2n on worst-case-shaped ordinary inputs and requires t(2n)/t(n) < 3.2 (thread CPU time, least of 5,
   up to 3 attempts, so a loaded runner or a sanitizer build does not change the verdict). A QuickJS or Lua upgrade, or a patch that touches a builtin's algorithm, must pass it;
   a new super-linear builtin found by an audit gets a case there.
 - **JS middleware is synchronous:** `hl_js_dispatch_middleware` answers 500 for a returned Promise / thenable (it coerced to 0, "continue"), and every Hull async op checks `hl_js_async_gate` (`runtime/js/async.c`), which refuses inside middleware (`HlJS.in_middleware`) and while a `req.multipart()` read is parked on the request (`HlReqLife.parked`). A multipart park in turn is refused while an attached op holds the connection or is resuming (`HlReqLife.attached`): Keel re-arms no read for a resumed handler that waits for more body. Add the gate (and `hl_js_op_suspend` for the suspend) to any new async op binding.
