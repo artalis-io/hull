@@ -272,7 +272,7 @@ Register with `app.use(method, pattern, mw)`:
 | `totp` | `hull.web.middleware.totp` | `hull:web:middleware:totp` | RFC 6238 TOTP 2FA with QR enrollment, recovery codes, replay-protection, optional at-rest encryption |
 | `auth-flows` | `hull.web.auth-flows` | `hull:web:auth-flows` | Registration, email-verify, login, password-reset, magic-link, email-change. HMAC-signed single-use tokens, PBKDF2, app-provided storage + templates |
 | `envelope` | `hull.crypto.envelope` | `hull:crypto:envelope` | HMAC-signed JSON-payload stateless tokens (`base64url(payload) "." hex(HMAC)`). Used internally by `hull/web/auth-flows` and `hull/web/middleware/oauth`; available standalone for any app that wants a tamper-detectable signed envelope without DB state |
-| `crypto` | `hull.crypto` | `hull:crypto` | Primitives: `sha256`/`sha512`/`sha1`, `hmac_sha256` (+`_verify`), `hmac_sha1`, `hash_password`/`verify_password` (PBKDF2), `ed25519_*`, `verify` and `sign` (RS256/384/512, PS256, ES256/384 over a PEM key; ECDSA as raw r||s, RSA modulus-length), `rsa_private_pem(n, e, d, p, q)` (JS `rsaPrivatePem`: a PKCS#1 PEM from RSA components, CRT values derived, key checked), `key_from_env(var)` (JS `keyFromEnv`: a 32-byte secretbox key read from an allowlisted environment variable into C-owned memory; the handle seals and opens but never yields the bytes), `x25519`, `secretbox`/`box`, `auth`, `random`, `random_token(n [, "hex"])` (JS `randomToken`: `n` random bytes as unpadded base64url or hex, for ids, nonces and secrets), and `constant_time_eq(a, b)` for comparing secrets (never `==`); Lua also has the SSH set (`gcm_seal`/`gcm_open`, `aes256ctr`, `chacha20(key, nonce12, counter, data)` and `poly1305(key, msg)` (RFC 8439, raw: the caller composes the AEAD), `bcrypt_pbkdf`). **Bytes in, bytes out:** keys, nonces, signatures, tags, digests and ciphertexts are raw bytes of their exact size (a Lua string; a JS `ArrayBuffer` out, any buffer in), never hex; keypairs are `pk, sk` in Lua and `{ publicKey, secretKey }` in JS. For hex or base64, wrap with `hull.encoding` (`encoding.hex.encode(crypto.sha256(s))`). `hash_password`'s stored `pbkdf2:...` string is the one text format. **Bytes vs text:** a Lua string is its bytes; in JS pass bytes as a buffer (`encoding.bytes.toU8(s)`), since a JS string is taken as text and hashed as its UTF-8 |
+| `crypto` | `hull.crypto` | `hull:crypto` | Primitives: `sha256`/`sha512`/`sha1`, `hmac_sha256` (+`_verify`), `hmac_sha1`, `hash_password`/`verify_password` (PBKDF2), `ed25519_*`, `verify` and `sign` (RS256/384/512, PS256, ES256/384 over a PEM key; ECDSA as raw r||s, RSA modulus-length), `rsa_private_pem(n, e, d, p, q)` (JS `rsaPrivatePem`: a PKCS#1 PEM from RSA components, CRT values derived, key checked), `key_from_env(var)` (JS `keyFromEnv`: a 32-byte secretbox key read from an allowlisted environment variable into C-owned memory; the handle seals and opens but never yields the bytes), `x25519`, `secretbox`/`box`, `auth`, `random`, `random_token(n [, "hex"])` (JS `randomToken`: `n` random bytes as unpadded base64url or hex, for ids, nonces and secrets), and `constant_time_eq(a, b)` for comparing secrets (never `==`); both runtimes have the SSH set (`gcm_seal`/`gcm_open`, `aes256ctr`, `chacha20(key, nonce12, counter, data)` and `poly1305(key, msg)` (RFC 8439, raw: the caller composes the AEAD), `bcrypt_pbkdf` / `bcrypt_pbkdf_env(var, ...)`, `BCRYPT_MAX_ROUNDS`; JS `gcmSeal` -> `{ ciphertext, tag }`, `gcmOpen` -> ArrayBuffer or `null` for a tag that does not verify, `aes256ctr`, `chacha20`, `poly1305`, `bcryptPbkdf` / `bcryptPbkdfEnv`). **Bytes in, bytes out:** keys, nonces, signatures, tags, digests and ciphertexts are raw bytes of their exact size (a Lua string; a JS `ArrayBuffer` out, any buffer in), never hex; keypairs are `pk, sk` in Lua and `{ publicKey, secretKey }` in JS. For hex or base64, wrap with `hull.encoding` (`encoding.hex.encode(crypto.sha256(s))`). `hash_password`'s stored `pbkdf2:...` string is the one text format. **Bytes vs text:** a Lua string is its bytes; in JS pass bytes as a buffer (`encoding.bytes.toU8(s)`), since a JS string is taken as text and hashed as its UTF-8 |
 | `encoding` | `hull.encoding` | `hull:encoding` | Byte <-> text codecs: `hex`, `base64` (`{ url = true }` for base64url), `base32`, `utf8` (text <-> UTF-8 bytes, strict), and `url` (RFC 3986 percent-encoding: `url.encode(s, { keep = "..." })`, `url.decode(s, { form = true })` reads `+` as a space and leaves a value with a malformed escape, escapes that are not UTF-8, or (JS) a lone surrogate as written - the same in both runtimes, never throwing on a string); strict decoding by default (`{ lenient = true }` skips whitespace). A refused decode is `nil, reason` in Lua (`bad_length`, `invalid_char`, `bad_padding`, `non_canonical`, `invalid_utf8`); in JS `decode` returns `null` and `why(same args)` gives the same reason. JS also has `bytes.toU8` / `bytes.fromBuffer`. See [encoding_consolidation_plan.md](encoding_consolidation_plan.md) |
 | `hkdf` | `hull.crypto.hkdf` | `hull:crypto:hkdf` | HKDF-SHA256 (RFC 5869): `derive(ikm, length, { salt?, info? })`, plus `extract(salt, ikm)` / `expand(prk, info, length)`. Several independent keys from one high-entropy secret, each bound to its `info` label (at most 8160 bytes). Not a password hash (`crypto.hash_password` is). Lua returns a byte string, JS an ArrayBuffer |
 | `otp` | `hull.crypto.otp` | `hull:crypto:otp` | HOTP (RFC 4226): `hotp(key, counter, digits?)` and `step(now, period?)` for TOTP (RFC 6238). The algorithm under `hull/web/middleware/totp` |
@@ -304,6 +304,7 @@ Register with `app.use(method, pattern, mw)`:
 | `image` | `hull.image` | `hull:image` | Image decode/encode (stb_image), raw pixel buffers |
 | `ws-server` | `hull.web.ws-server` | `hull:web:ws-server` | WebSocket server (`app.ws`, `broadcast`, `connections`) |
 | `ws-client` | `hull.web.ws-client` | `hull:web:ws-client` | WebSocket client (`ws.connect`) |
+| `ssh` | `hull.ssh` | `hull:ssh` | SSH-2 client: exec, SFTP, WebSocket-relay tunnels, host-key trust stores; reach granted by `manifest.ssh`. See [SSH client](#ssh-client-hullssh) and [ssh.md](ssh.md) |
 | `sse` | `hull.web.sse` (decorates `app.sse`) | `hull:web:sse` (decorates `app.sse`) | Server-Sent Events |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
@@ -2145,6 +2146,74 @@ until the run is done). An op still running when the handler has completed
 
 `tui.async(fn)` stays fire-and-forget. Design:
 [task_join_design.md](task_join_design.md).
+
+### SSH client (`hull/ssh`)
+
+An SSH-2 client in both runtimes: exec, SFTP, a WebSocket-relay tunnel,
+host-key trust stores. The full guide is [ssh.md](ssh.md); this section is the
+API in each runtime and how the two line up.
+
+Both clients are the same design over the same capability layer. The grants
+(`manifest.ssh.connect` / `ssh.tunnel`), the relay's TLS, the dial and its
+clamp (`HL_SSH_CONNECT_MS_MAX`), the per-process live-stream cap
+(`HL_SSH_MAX_LIVE_STREAMS`, 32: `too_many_streams`) and the stream's waits are
+decided in C (`hl_cap_ssh_open`, `cap/net_stream.c`), so a runtime cannot
+decide them differently. The protocol itself is stdlib code, written twice
+(`stdlib/lua/hull/ssh/`, `stdlib/js/hull/ssh/`), each the line-for-line twin of
+the other, with the same suites.
+
+**Lua:**
+```lua
+local ssh = require("hull.ssh")
+local conn, err = ssh.connect{ host = "build.internal", user = "deploy",
+                               key = fs.read("id_ed25519"), trust = trust }
+if not conn then return err.code end
+local r = conn:exec("uname -a", { timeout_ms = 30000 })   -- { status, signal, stdout, stderr }
+conn:close()
+```
+
+**JS:**
+```javascript
+import { ssh } from "hull:ssh";
+try {
+    const conn = await ssh.connect({ host: "build.internal", user: "deploy",
+                                     key: fs.read("id_ed25519"), trust });
+    const r = await conn.exec("uname -a", { timeoutMs: 30000 });   // { status, signal, stdout, stderr }
+    conn.close();
+} catch (e) {
+    // e.code: "host_unknown", "auth_failed", "denied", "timeout", ...
+}
+```
+
+| Lua | JS | Notes |
+|-----|----|-------|
+| `require("hull.ssh")` | `import { ssh } from "hull:ssh"` | The manifest declares `"hull/ssh@1"` in both; it admits hull/crypto, hull/encoding and hull/fs. |
+| `ssh = { connect = { hosts, ports, users }, tunnel = { hosts, ports } }` | `ssh: { connect: { hosts, ports, users }, tunnel: { hosts, ports } }` | The same grant, read by each runtime's manifest extractor into one `HlManifestSsh`. Ports are integers. |
+| `ssh.connect(opts)` -> conn \| `nil, err` | `await ssh.connect(opts)` -> conn, or rejects | Options camelCase: `timeout_ms` -> `timeoutMs`, `keepalive_ms` / `keepalive_max` / `idle_ms`, `passphrase_env` -> `passphraseEnv`, `on_banner` -> `onBanner`, `tunnel.tls_hostname` -> `tlsHostname`, `tunnel.destination_header` -> `destinationHeader`. `port`, `timeoutMs` and `tunnel.port` must be integers (`Number.isInteger`), as Lua's `math.type`. |
+| `ssh.load_key(text, opts)` | `ssh.loadKey(text, opts)` | Synchronous. A refusal raises / throws with `code` (`passphrase_required`, `bad_passphrase`, `unsupported_key_type`). |
+| `ssh.memory_store(seed)`, `ssh.file_store(path, opts)`, `ssh.kv_store(kv, opts)` | `ssh.memoryStore(seed)`, `ssh.fileStore(path, opts)`, `ssh.kvStore(kv, opts)` | A trust store is `{ get, put, forget, revoked?, entries }`; JS awaits each call, so a store may be synchronous or return a Promise. |
+| `ssh.accept_host(trust, host, blob, port)` -> `true` \| `nil, err` | `await ssh.acceptHost(trust, host, blob, port)` -> `true` | `already_trusted`, `host_key_invalid`, `host_revoked`, `store_failed` reject. |
+| `ssh.forget_host(trust, host, port)` | `await ssh.forgetHost(trust, host, port)` | |
+| `ssh.fingerprint(blob)` | `ssh.fingerprint(blob)` | `SHA256:...`, as `ssh-keygen -l` prints. |
+| `conn:exec(cmd, opts)` | `await conn.exec(cmd, opts)` | `on_stdout` / `on_stderr` -> `onStdout` / `onStderr` (may be async), `max_output` -> `maxOutput`, `timeout_ms` -> `timeoutMs`; `stdin` is bytes (128 KiB cap) or a source function (sync or async) returning chunks until null / "". A non-zero exit is `r.status`, not an error. |
+| `conn:sftp(opts)` | `await conn.sftp(opts)` | `reply_timeout_ms` -> `replyTimeoutMs`. |
+| `conn:rekey()` | `await conn.rekey()` | |
+| `conn:stats()` | `conn.stats()` | `{ rekeys, authKey, bytesSent, bytesReceived, packetsSent, packetsReceived, rekeyDue }`. `authKey` is a 0-based index into `keys` (Lua's `auth_key` is 1-based). |
+| `conn:negotiated()`, `conn:fingerprint()`, `conn:close()` | `conn.negotiated()`, `conn.fingerprint()`, `conn.close()` | `negotiated()` keys camelCase (`cipherC2s`, `hostKey`, ...). |
+| `sftp:list(path)` -> `entries, refused` | `await f.list(path)` -> `{ entries, refused }` | One object for Lua's two values. |
+| `sftp:read/write/stat/lstat/mkdir/rmdir/remove/rename/chmod/setstat/realpath/open/close` | `await f.read(...)` etc. | Same arguments, same results. |
+| `file:read/write/stat/close`, `file:seek/tell` | `await file.read(...)` etc.; `file.seek` / `file.tell` synchronous | |
+| err `{ code, detail, fingerprint, stored_fingerprint, key_blob, methods, key, status }` | `e.code`, `e.detail`, `e.fingerprint`, `e.storedFingerprint`, `e.keyBlob`, `e.methods`, `e.key`, `e.status` | Every Lua `(nil, err)` is a rejection in JS. `e.key` (which entry of `keys` failed to load) is 0-based. |
+| a runtime refusal raised as `"[hull:wait_refused] ..."` / `"[hull:busy] ..."` | thrown unchanged, `e.code` `wait_refused` / `busy` | For example, a connect or exec inside a database transaction. Never wrapped as `io_error` in either runtime. |
+| an error raised by the app's own callback | thrown unchanged | Not a connection failure. |
+| bytes are Lua strings | bytes are **byte strings** (one code unit 0..255 per byte); inputs also take an `ArrayBuffer` / typed array | Key text, `stdin`, the command, SFTP paths and data, `keyBlob`. A string with a character above 0xFF is a TypeError: pass text through `encoding.utf8.encode` (and output through `encoding.utf8.decode`). Outputs (`stdout`, `stderr`, chunks, SFTP reads) are byte strings. |
+
+Only representation differs (camelCase, 0-based indices, rejections, byte
+strings). The JS client adds no capability the Lua one lacks. `crypto.gcmSeal`
+/ `gcmOpen` / `aes256ctr` / `chacha20` / `poly1305` / `bcryptPbkdf` /
+`bcryptPbkdfEnv` are the JS twins of the Lua primitives the protocol composes.
+The test seams (`opts.crypto`, `opts.openStream`) are as in Lua, and the
+transport seam is the internal `hull:_test_hooks` hook.
 
 ### WASM Compute Plugins
 

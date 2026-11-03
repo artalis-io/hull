@@ -439,6 +439,14 @@ decision is revisited explicitly rather than arrived at by drift.
 
 ## 12a. Open: language-neutral stdlib implementations
 
+**Resolved for SSH (v0.19.0) by the per-runtime option:** the JS client is a
+line-for-line port of the Lua one (`stdlib/js/hull/ssh/`), over a JS binding
+(`src/hull/runtime/js/mod_ssh.c`) to the same capability - the grants, TLS,
+dial, stream cap and waits stay in C, so the two cannot drift there. Parity
+is held by twin suites and by `tests/e2e_ssh_parity.sh` /
+`tests/e2e_ssh_tunnel.sh`, which run every scenario on both runtimes. The
+general question below stays open.
+
 `hull/ssh` is Lua-only for v1, so `hsctl` is Lua. That is acceptable now and
 unsatisfying later, and the general problem is not SSH's to solve:
 

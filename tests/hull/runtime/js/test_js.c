@@ -18046,6 +18046,68 @@ UTEST(js_ssh_bridge, a_bounded_wait_comes_back_coded_and_the_stream_lives)
     js_ssh_close_fix(&f);
 }
 
+UTEST(js_ssh_bridge, a_known_hosts_line_hashed_by_openssh_is_matched)
+{
+    /* The Lua twin's line: ssh-keygen's own hashed entry for web1.internal,
+     * checked through the real hull:crypto HMAC (the unit suite uses a
+     * stand-in). */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(
+        "import { ssh } from 'hull:ssh';\n"
+        "import { encoding } from 'hull:encoding';\n"
+        "const key = 'AAAAC3NzaC1lZDI1NTE5AAAAIIVv0Mu44/XjxMDB01Pok3Zpil+AvjX4noCS12D4xykm';\n"
+        "const line = '|1|Ni3Ir1hENwtFHCWUUHN1PzRJcIw=|L939wIPq3PCppqUZb9UObH57zdQ= "
+        "ssh-ed25519 ' + key;\n"
+        "const fs = { read: () => new TextBytes(line + '\\n'), write: () => true };\n"
+        "function TextBytes(s) { const u = new Uint8Array(s.length);\n"
+        "  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }\n"
+        "const st = ssh.fileStore('known_hosts', { fs });\n"
+        "const want = encoding.base64.decode(key);\n"
+        "globalThis.__v = st.get('web1.internal') !== want ? 'no match'\n"
+        "  : st.get('web2.internal') !== null && st.get('web2.internal') !== undefined"
+        " ? 'matched another' : 'ok';\n", 0);
+    char out[256];
+    js_ssh_verdict(out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, a_trust_store_over_the_real_hull_kv)
+{
+    /* The real memory backend under ssh.kvStore: set-if-absent, no
+     * overwrite, entries and forget, as the Lua twin. */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(
+        "import { ssh } from 'hull:ssh';\n"
+        "import { kv as kvm } from 'hull:kv';\n"
+        "const kv = kvm.open({ backend: 'memory', namespace: 'ssh-trust-test' });\n"
+        "const st = ssh.kvStore(kv);\n"
+        "const u32 = (n) => String.fromCharCode(n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);\n"
+        "const ed = (b) => u32(11) + 'ssh-ed25519' + u32(32) + b.repeat(32);\n"
+        "const blob = ed('1');\n"
+        "(async () => {\n"
+        "  if ((await ssh.acceptHost(st, 'web1', blob)) !== true) return 'accept';\n"
+        "  if (st.get('web1') !== blob) return 'get';\n"
+        "  let code = 'none';\n"
+        "  try { await ssh.acceptHost(st, 'web1', ed('2')); } catch (e) { code = e.code; }\n"
+        "  if (code !== 'already_trusted') return 'overwrite:' + code;\n"
+        "  if (st.entries().web1 !== blob) return 'entries';\n"
+        "  if ((await ssh.forgetHost(st, 'web1')) !== true) return 'forget';\n"
+        "  const g = st.get('web1');\n"
+        "  if (g !== null && g !== undefined) return 'still there';\n"
+        "  return 'ok';\n"
+        "})().then((v) => { globalThis.__v = v; },"
+        " (e) => { globalThis.__v = 'threw:' + e.message; });\n", 0);
+    char out[256];
+    js_ssh_verdict(out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    cleanup_js();
+}
+
 UTEST(js_ssh_bridge, teardown_with_a_parked_reader_releases_the_stream)
 {
     /* A reader parked when the runtime goes: the teardown list stops it

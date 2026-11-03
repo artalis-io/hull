@@ -992,8 +992,24 @@ test_ssh_fleet() {
     check_contains "lua ssh_fleet names its key variable" "$OUT" "HULL_SSH_KEY"
 }
 
+# The JS twin (examples/ssh_fleet/app.js): the same entry-point check.
+test_ssh_fleet_js() {
+    HULL_ABS=$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")
+    OUT=$(cd examples/ssh_fleet && "$HULL_ABS" --no-sandbox app.js 2>&1) || true
+    check_contains "js ssh_fleet with no host prints usage" "$OUT" "usage:"
+    check_contains "js ssh_fleet names its key variable" "$OUT" "HULL_SSH_KEY"
+    # The manifest's grant is enforced before a socket exists: a host outside
+    # ssh.connect.hosts is denied (no network, no key needed past the load).
+    OUT=$(cd examples/ssh_fleet && HULL_SSH_KEY=missing_key \
+          "$HULL_ABS" --no-sandbox app.js -- web1.internal 2>&1) || true
+    check_contains "js ssh_fleet reports an unreadable key" "$OUT" "cannot read missing_key"
+}
+
 if [ "$RUNTIME" != "js" ]; then
     test_ssh_fleet
+fi
+if [ "$RUNTIME" != "lua" ]; then
+    test_ssh_fleet_js
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

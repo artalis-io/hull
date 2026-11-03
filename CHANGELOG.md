@@ -8,6 +8,24 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **`hull/ssh` for JavaScript.** `import { ssh } from "hull:ssh"` is the JS twin of the Lua SSH
+  client: exec, SFTP, WebSocket-relay tunnels and host-key trust stores. It sits over the same
+  capability layer (`hl_cap_ssh_open`, the net stream), so `manifest.ssh` grants, the dial clamp,
+  the 32-stream cap (`too_many_streams`), host-key verification and every error code are the same.
+  The protocol stack is a line-for-line port with twin suites, and `e2e_ssh_parity` /
+  `e2e_ssh_tunnel` / `e2e_ssh_key_passphrase` now run every scenario on both runtimes.
+  - The JS API is idiomatic: Promises, camelCase options, failures rejected as Errors carrying
+    `.code`, byte strings for bytes (buffers accepted as input), and 0-based `authKey` / `e.key`.
+  - `hull:crypto` gains the primitives the protocol composes: `gcmSeal` / `gcmOpen`,
+    `aes256ctr`, `chacha20`, `poly1305`, `bcryptPbkdf` / `bcryptPbkdfEnv`, and
+    `BCRYPT_MAX_ROUNDS`, matching Lua.
+  - `examples/ssh_fleet/app.js` is the JS twin of the Lua example. The parity table is in
+    [docs/app_api_reference.md](docs/app_api_reference.md#ssh-client-hullssh).
+  - Lua change: a runtime refusal (`[hull:wait_refused]`, e.g. an exec inside a transaction) is
+    now raised unchanged by `hull.ssh`. It used to be returned as `io_error`.
+
 ## [0.18.0] - 2026-11-03
 
 Full PR list:

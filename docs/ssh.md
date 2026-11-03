@@ -12,9 +12,13 @@ declared up front and enforced in C, not assembled at runtime from strings.
 Worked example: [`examples/ssh_fleet/`](../examples/ssh_fleet/app.lua).
 Design record: [`ssh_module_design.md`](ssh_module_design.md).
 
-**Lua only.** There is no JS implementation today; see
-[`ssh_module_design.md` §8](ssh_module_design.md) for why, and what it would
-take.
+**Both runtimes.** The examples below are Lua; the JS client (`import { ssh }
+from "hull:ssh"`) is its line-for-line twin over the same capability layer,
+with the same grants, host-key rules, timeouts, stream cap and error codes.
+§12 shows the JS shape, and
+[app_api_reference.md](app_api_reference.md#ssh-client-hullssh) has the full
+Lua / JS parity table. JS worked example:
+[`examples/ssh_fleet/app.js`](../examples/ssh_fleet/app.js).
 
 ## 1. The shortest thing that works
 
@@ -532,9 +536,13 @@ the stricter Terrapin-resistant rules.
 Every method - `connect`, `exec`, `sftp`, every SFTP operation, `rekey`,
 `accept_host` - returns `nil` plus a table with a `code` when it fails, so an
 application branches on a value rather than on a message, and never needs
-`pcall`. `detail` says more, for a person. The one thing that still raises is
-an error from your own callback (an `on_stdout` that raised): that is your
-bug, not a connection failure, and it comes back to you unchanged.
+`pcall`. `detail` says more, for a person. Two things still raise, unchanged:
+an error from your own callback (an `on_stdout` that raised), which is your
+bug, not a connection failure; and a runtime refusal - `[hull:wait_refused]`
+for a connect or exec inside a database transaction, `[hull:busy]` - which says
+nothing about the connection either, so it is never wrapped as `io_error`. In
+JS every failure is a rejection; those two keep their own error object (a
+refusal's `e.code` is `wait_refused` / `busy`).
 
 **Reaching the host**
 
@@ -591,4 +599,60 @@ reporting it as authenticated would skip one.
   remote side. `exec` runs one command without a terminal.
 - **Certificates**, for host or user keys. A `known_hosts` file's
   `@cert-authority` lines are skipped (§3).
-- **A JS implementation.** See §8 of the design record.
+
+## 12. From JavaScript
+
+The same client, the same manifest, the same codes. What changes is only what
+JS changes: names are camelCase, a failure is a **rejection** carrying `.code`
+(Lua returns `nil, err`), and bytes are **byte strings** - one character per
+byte, as `hull:encoding` returns them - with an `ArrayBuffer` or typed array
+accepted wherever bytes go in.
+
+```javascript
+import { app } from "hull:app";
+import { ssh } from "hull:ssh";
+import { fs } from "hull:fs";
+
+app.manifest({
+    modules: ["hull/ssh@1", "hull/fs@1"],
+    fs: { read: ["id_ed25519"] },
+    ssh: { connect: { hosts: ["build.internal"], ports: [22], users: ["deploy"] } },
+});
+
+app.main(async (ctx) => {
+    const trust = ssh.memoryStore();
+    const opts = { host: "build.internal", user: "deploy",
+                   key: fs.read("id_ed25519"), trust };
+    let conn;
+    try {
+        conn = await ssh.connect(opts);
+    } catch (e) {
+        if (e.code !== "host_unknown") { ctx.stderr.write(e.code + "\n"); return 1; }
+        // show e.fingerprint to an operator first: accepting is a decision
+        await ssh.acceptHost(trust, opts.host, e.keyBlob);
+        conn = await ssh.connect(opts);
+    }
+    const r = await conn.exec("uname -a", {
+        onStdout: (chunk) => ctx.stdout.write(chunk),   // or leave it buffered in r.stdout
+        timeoutMs: 30000,
+    });
+    conn.close();
+    return r.status;
+});
+```
+
+- `exec` options: `stdin` (bytes, or a sync / async source function), `onStdout`,
+  `onStderr` (may be async), `maxOutput`, `timeoutMs`. Result `{ status, signal,
+  stdout, stderr }`.
+- `conn.sftp({ replyTimeoutMs })` gives the same SFTP methods, each a Promise;
+  `list` resolves to `{ entries, refused }`.
+- `conn.stats().authKey` is a 0-based index into `keys`, as is `e.key` when a
+  key in `keys` fails to load (both 1-based in Lua).
+- Errors: `e.code`, `e.detail`, and the host-key fields `e.fingerprint`,
+  `e.storedFingerprint`, `e.keyBlob`; `auth_failed` / `partial_success` carry
+  `e.methods`. A runtime refusal (`wait_refused` inside a transaction, `busy`)
+  and an error your own callback throws come through unchanged.
+- Text with characters outside Latin-1 goes in through `encoding.utf8.encode`
+  and comes out through `encoding.utf8.decode`; a string with a character above
+  0xFF is refused rather than guessed at.
+
