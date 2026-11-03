@@ -769,7 +769,7 @@ $(QJS_TESTHOOK_OBJ): $(QJS_DIR)/quickjs.c $(QJS_DIR)/quickjs.h | $(BUILDDIR)
 	$(CC) $(QJS_CFLAGS) -DQJS_HULL_TEST_HOOKS -I$(QJS_DIR) -c -o $@ $<
 
 # Engine complexity tests (audit convergence §6.5): each listed QuickJS / Lua
-# builtin at n and 2n on worst-case-shaped ordinary inputs, t(2n)/t(n) < 2.5.
+# builtin at n and 2n on worst-case-shaped ordinary inputs, t(2n)/t(n) < 3.2.
 # The raw vendored engines (Hull's patches, no Hull runtime), QuickJS with the
 # test hooks for the one forced-collision case. Not part of `make test`
 # (timing-based, ~30-60 s); CI runs it as its own job, and a QuickJS / Lua

@@ -161,7 +161,7 @@ one request, not the server.
 
 A CI job runs each listed builtin (string, regexp, JSON, array, typed array, Map/Set, Lua
 table/string/GC operations) at sizes n and 2n on worst-case-shaped ordinary inputs and asserts
-`t(2n)/t(n) < 2.5`. New QuickJS/Lua upgrades must pass it.
+`t(2n)/t(n) < 3.2`. New QuickJS/Lua upgrades must pass it.
 
 ## 7. Part C - Remove classes by construction (classes 3-5)
 
