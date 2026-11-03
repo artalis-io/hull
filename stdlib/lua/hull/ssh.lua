@@ -52,6 +52,7 @@
 -- is the same as having no trust store.
 
 local _text = require("hull._text")   -- linear trims (see hull._text)
+local refusal = require("hull._refusal")
 local transport  = require('hull.ssh.transport')
 local packet     = require('hull.ssh.packet')
 local privatekey = require('hull.ssh.privatekey')
@@ -256,10 +257,17 @@ M.CONNECT_TIMEOUT_MS = 30000
 -- An error from the caller's OWN callback - an on_stdout that raised - is the
 -- caller's bug, not a connection failure: it travels up wrapped as
 -- { app_error = e } and is raised again here, unchanged.
+--
+-- A runtime refusal (a "[hull:wait_refused] " / "[hull:busy] " string: an
+-- exec inside a transaction, a wait in middleware) is raised again unchanged,
+-- never wrapped as io_error: it says nothing about the connection, and a
+-- caller (or the jobs runner) branches on its code (CLAUDE.md audit 39). The
+-- JS twin rethrows the same refusals.
 local function guard(fn, ...)
     local r = table.pack(pcall(fn, ...))
     if r[1] then return table.unpack(r, 2, r.n) end
     local e = r[2]
+    if refusal.code(e) then error(e, 0) end
     if type(e) == "table" then
         if e.app_error ~= nil then error(e.app_error, 0) end
         if e.code then return nil, e end
