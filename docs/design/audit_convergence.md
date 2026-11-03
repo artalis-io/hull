@@ -266,6 +266,57 @@ continue) would need its own design.
 - **VM threading (§6.3)** is the largest change and touches every runtime entry; it is
   scheduled last and can ship behind a flag.
 
+## 11a. Outcome and residual risks (2026-11-03)
+
+Rounds 42 and 43 ran under the §4 rubric; round 44 was not needed. Each phase merged and was
+followed by a confirming audit; the audits that found issues had them fixed and re-checked.
+"Closed" below means the phase met its §9 exit criterion as written (phase 5 as amended), not that
+the class is proven absent.
+
+| Phase | Status | Basis |
+|---|---|---|
+| 1 Ratchets | in place | regression gate (runtime failure required), `make check-invariants`, nightly fuzzing, §8 controls |
+| 2 Uncharged work | closed | confirming audit; its Medium (one client holding every connection) fixed by #998 and re-checked; dual-stack proxy follow-up fixed by #1003 |
+| 3 MySQL / GPU | closed | confirming audits; a later fuzz finding in the session-SQL classifier fixed by #1002 |
+| 4 Planted DB files | closed | confirming audit; its Medium fixed by #993 |
+| 5 Engine super-linearity | closed by enumeration | §9 note: default mode relies on charging, engine patches and input caps; `--vm-thread` opt-in |
+
+**Residual risks, stated precisely:**
+
+- **Engine super-linearity (default mode).** No structural bound: one long builtin call is bounded
+  only by finishing. The guarantee is "no super-linear builtin reachable by A1 with ordinary input
+  is known", held by work charging, the linearity patches, the §6.4 input caps and the complexity
+  job. `--vm-thread` gives a per-request 503 at the deadline but puts the whole server in standby
+  until the stuck call returns (exit 75 at the 60 s ceiling).
+- **The complexity job is a regression heuristic.** `t(2n)/t(n) < 3.2` catches clear quadratic
+  scaling (about 4.0) in the listed cases; it does not establish linearity, and it says nothing
+  about paths without a case. Missing cases (Lua ephemerons, colliding integer / float keys and
+  rehash, long-string keys, backtracking patterns; JS Proxy `ownKeys`, forward `\k<name>`,
+  `RegExp[Symbol.split]`, the `JSON.parse` reviver, BigInt multiply / divide / `toString`,
+  `TypedArray.from` of an array-like, iterator helpers, backtracking regexp exec) matter more than
+  the threshold.
+- **Connection fairness.** The per-client connection cap defaults to half of `max_connections`.
+  It stops one client key monopolising the server; it is not a fairness guarantee. Two keys (two
+  IPv4 addresses, or two /64s from one /56 or /48) can still take every connection. A lower
+  default, coarser IPv6 grouping or a free-slot reserve are policy choices left open.
+- **Session-SQL refusal (§7.1, Postgres raw text).** Raw mode does not parse comments, so a comment
+  between two positionally matched keywords inside a dollar-quoted body or after a backslash
+  string (`SET /*x*/ ROLE`) is not refused. The per-entry session reset remains the guarantee, as
+  for SQL assembled at run time. Closing it would refuse much ordinary SQL with backslashes.
+- **WAMR heap check: unresolved, not rated.** Round 42 raised whether a WAMR heap bounds check
+  covers a whole heap node or only its start. Every automated attempt to analyse it was stopped,
+  so it has no severity and no verdict. The proposed defensive patch (bound the whole node) has not
+  landed. It needs a maintainer review, ideally under ASan, before it is rated or closed.
+- **Recorded Lows** (not fixed): GPU helper - the macOS footprint is not re-checked when the worker
+  replies; TIMEOUT / CRASHED verdicts are cached for the life of the process; the verdict key has
+  no driver version; the macOS worker sandbox is allow-default; `tests/e2e_feature_gpu.sh` uses
+  fixed ports. Elsewhere: a composed `--with=duckdb` app gets no DuckDB fs policy; query strings
+  truncate at 4 KiB; a stale run deadline on the event-loop thread could cut a lock wait short
+  outside a run (no path found that triggers it).
+
+**Behaviour changes that need upgrade notes** are in CHANGELOG (Unreleased), notably the
+`req.remote_addr` normalisation on dual-stack listeners and the new connection deadlines.
+
 ## 12. Open questions
 
 1. Should the dispatcher charge measured time in worker.dispatch and app.main runs too, or only
