@@ -46,6 +46,8 @@
 #define RUNS        5        /* minimum of */
 #define ATTEMPTS    3        /* a failing case is measured again */
 #define MIN_MS      4.0      /* a case whose t(n) is below this is too small */
+#define TARGET_MS   20.0     /* n is doubled (up to MAX_SCALE x) until t(n) reaches it */
+#define MAX_SCALE   4
 
 static const char *g_filter;
 static int g_verbose;
@@ -360,8 +362,19 @@ static void report(const char *name, double t1, double t2, double ratio, int ok,
 static void run_js(const JsCase *c)
 {
     if (!wanted(c->name)) return;
+    /* A t(n) of a few ms is mostly noise (cache, scheduler): grow n first. */
+    long n = c->n;
+    for (int scale = 1; scale < MAX_SCALE; scale *= 2) {
+        double t = js_time(c, n, NULL);
+        if (t < 0 || t >= TARGET_MS) break;
+        n *= 2;
+    }
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
-        double t1 = js_time(c, c->n, NULL), t2 = js_time(c, 2 * c->n, NULL);
+        double t1 = js_time(c, n, NULL), t2 = js_time(c, 2 * n, NULL);
+        if ((t1 < 0 || t2 < 0) && n != c->n) {
+            n = c->n;   /* a grown n may pass an input cap: measure as written */
+            t1 = js_time(c, n, NULL); t2 = js_time(c, 2 * n, NULL);
+        }
         if (t1 < 0 || t2 < 0) { report(c->name, t1, t2, 0, 0, "error"); return; }
         double ratio = t2 / (t1 > 0.001 ? t1 : 0.001);
         int ok = ratio < RATIO_MAX;
@@ -398,8 +411,19 @@ static void run_js_collision(void)
 static void run_lua(const LuaCase *c)
 {
     if (!wanted(c->name)) return;
+    /* A t(n) of a few ms is mostly noise (cache, scheduler): grow n first. */
+    long n = c->n;
+    for (int scale = 1; scale < MAX_SCALE; scale *= 2) {
+        double t = lua_time(c, n);
+        if (t < 0 || t >= TARGET_MS) break;
+        n *= 2;
+    }
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
-        double t1 = lua_time(c, c->n), t2 = lua_time(c, 2 * c->n);
+        double t1 = lua_time(c, n), t2 = lua_time(c, 2 * n);
+        if ((t1 < 0 || t2 < 0) && n != c->n) {
+            n = c->n;   /* a grown n may pass an input cap: measure as written */
+            t1 = lua_time(c, n); t2 = lua_time(c, 2 * n);
+        }
         if (t1 < 0 || t2 < 0) { report(c->name, t1, t2, 0, 0, "error"); return; }
         double ratio = t2 / (t1 > 0.001 ? t1 : 0.001);
         int ok = ratio < RATIO_MAX;
