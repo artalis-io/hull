@@ -265,6 +265,19 @@ release-artifact layout).
   refusal bound is still charged the extra at the written rates, and the refusal bounds are
   unchanged.
 
+- **A nested dollar quote in a DO body no longer hides a session statement** (audit
+  convergence §7.1, found by `fuzz_sql_kw`). The Postgres session-SQL refusal reads a
+  dollar-quoted body raw, but raw a `$` was a word character, so the `$` that closes a nested
+  quote glued it to the next word: `DO $d$ BEGIN EXECUTE $q$SET ROLE admin$q$; END $d$` read as
+  the word `q$set` and was allowed, as were `LISTEN`, `RESET ROLE`, `SET SESSION
+  AUTHORIZATION` and `PREPARE TRANSACTION` spelled that way (and after a backslash, which makes
+  the whole text raw). Read raw, a `$` now ends a word. A word that starts with a digit now ends
+  where a Postgres number does (at a byte that is not a digit or `_`): `8$$` is `8` and a dollar
+  quote to the server, and the classifier read the `'` inside that quote as a string opener
+  and skipped the statement after it. The session reset at the entry boundary already undid
+  such a change when the entry ended. The fuzzer's case oracle now keeps Postgres dollar-quote
+  tags as written (they are case-sensitive: `$a$` is not closed by `$A$`), and a new oracle
+  appends a nested-dollar-quote `SET ROLE` that must be refused.
 - **A planted SQLite virtual table could read `_hull_*` tables through `hull/search`** (audit 40).
   The audit 39 open-time check read only views and triggers, but a virtual table is stored as
   `type='table'`. An FTS5 table named like a search index with `content='_hull_sessions'` was

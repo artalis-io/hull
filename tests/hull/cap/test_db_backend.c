@@ -1281,6 +1281,55 @@ UTEST(db_session_sql, postgres_allowed)
     }
 }
 
+/* Audit convergence §7.1, found by fuzz_sql_kw: a dollar-quoted body is read
+ * raw, and raw a '$' was a word character, so the '$' that closes a nested
+ * dollar quote glued it to the next word - EXECUTE $q$SET ROLE admin$q$ in a
+ * DO body read as the word "q$set" and was allowed, though PL/pgSQL runs it. */
+UTEST(db_convergence_session_sql, nested_dollar_quote_refused)
+{
+    static const char *const refused[] = {
+        "DO $d$ BEGIN EXECUTE $q$SET ROLE admin$q$; END $d$",
+        "DO $$ BEGIN EXECUTE $q$LISTEN ch$q$; END $$",
+        "DO $d$ BEGIN EXECUTE $Q$RESET ROLE$Q$; END $d$",
+        "DO $d$ BEGIN EXECUTE $x$SET SESSION AUTHORIZATION bob$x$; END $d$",
+        "DO $d$ BEGIN EXECUTE $q$PREPARE TRANSACTION 'x'$q$; END $d$",
+        "DO $d$ BEGIN EXECUTE $\xc3\xa9" "$UNLISTEN *$\xc3\xa9" "$; END $d$",
+        /* the same with no outer quote, read raw for its backslash */
+        "SELECT E'\\\\'; SELECT x$q$SET ROLE admin",
+        NULL,
+    };
+    for (int i = 0; refused[i]; i++) {
+        if (!PG(refused[i])) fprintf(stderr, "allowed: %s\n", refused[i]);
+        EXPECT_TRUE(PG(refused[i]) != NULL);
+    }
+}
+
+/* A Postgres number ends at the first byte that is not a digit or '_': "8$$"
+ * is 8 and then a dollar quote to the server. Read as the one word "8$$", the
+ * classifier took the ' inside that quote for a string opener and skipped the
+ * statement the server runs after it. */
+UTEST(db_convergence_session_sql, number_then_dollar_quote)
+{
+    EXPECT_TRUE(PG("SELECT 8$$ ' $$; LISTEN ch; SELECT '") != NULL);
+    EXPECT_TRUE(PG("SELECT 1_0$$ ' $$; SET ROLE admin; SELECT '") != NULL);
+    EXPECT_TRUE(PG("SELECT 1_000 + 0x1F, 1.5e3") == NULL);
+    /* MySQL: 1abc is a valid identifier there; no dollar quotes */
+    EXPECT_TRUE(MY("SELECT 1abc FROM t") == NULL);
+}
+
+/* Dollar-quote tags are case-sensitive (Postgres compares the closing tag
+ * byte for byte), which is why fuzz_sql_kw keeps tags as written when it
+ * checks the verdict ignores case. $A$ ... $A$ is closed and the SET ROLE
+ * after it is code; $A$ does not close $a$, so the LISTEN is inside the
+ * string - whose body is still read raw, so it is refused either way. */
+UTEST(db_convergence_session_sql, dollar_tags_are_case_sensitive)
+{
+    EXPECT_TRUE(PG("SELECT $A$ x $A$; SET ROLE admin") != NULL);
+    EXPECT_TRUE(PG("SELECT $a$ x $A$; LISTEN ch; $a$") != NULL);
+    EXPECT_TRUE(PG("SELECT $a$ x $A$ y $a$") == NULL);
+    EXPECT_TRUE(PG("SELECT $Tag$ it's $Tag$, 'x'") == NULL);
+}
+
 UTEST(db_session_sql, trust_flag_and_message)
 {
     EXPECT_EQ(0, hl_db_session_sql_trusted());

@@ -90,6 +90,22 @@ static int is_word_start(const Scan *s, unsigned char c)
     return is_word_char(c);
 }
 
+/* Does @p c continue the word that began with @p first? Postgres only:
+ *   - a word that starts with a digit is a number, which ends at the first
+ *     byte that is not a digit or '_': "8$$" is 8 then a dollar quote to the
+ *     server, so the one word "8$$" put the reader out of step with it;
+ *   - read raw, '$' ends a word: a raw text is read as code wherever it might
+ *     be code, and there a '$' may close a dollar quote - a DO body's
+ *     EXECUTE $q$SET ROLE admin$q$ read as the one word "q$set". */
+static int is_word_cont(const Scan *s, unsigned char first, unsigned char c)
+{
+    if (s->d == HL_DB_SQL_POSTGRES) {
+        if (first >= '0' && first <= '9') return (c >= '0' && c <= '9') || c == '_';
+        if (s->raw && c == '$') return 0;
+    }
+    return is_word_char(c);
+}
+
 /* Scan [b, e) raw with a child scanner; its refusal is ours. */
 static void scan_raw(Scan *s, const char *b, const char *e)
 {
@@ -392,7 +408,8 @@ static void scan(Scan *s, const char *p, const char *end)
             char w[W_MAX];
             size_t n = 0;
             int ok = 1;
-            while (p < end && is_word_char((unsigned char)*p)) {
+            const char *w0 = p;
+            while (p < end && (p == w0 || is_word_cont(s, c, (unsigned char)*p))) {
                 char ch = *p++;
                 if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
                 if (n + 1 < sizeof w) w[n++] = ch;
