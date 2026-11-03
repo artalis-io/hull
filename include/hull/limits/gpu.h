@@ -338,15 +338,34 @@
  * (HL_GPU_COMPILE_STACK_BYTES, and its 1 GiB fallback), so a source that
  * compiled in the helper cannot overflow the server's compile thread;
  * larger than the deepest stack any source under HL_GPU_WGSL_MAX_BYTES
- * reached with every pre-check bypassed (~576 MiB, see above). */
+ * reached with every pre-check bypassed (~576 MiB, see above). When the
+ * server's compile thread cannot get that much (a host short of address
+ * space), the request carries a smaller one (hl_cap_gpu_compile_ex sends
+ * 7/8 of what the server can reserve), and the server's compile of a
+ * helper-admitted source then refuses a thread smaller than what the
+ * worker had. */
 #ifndef HL_GPU_HELPER_STACK_BYTES
 #define HL_GPU_HELPER_STACK_BYTES        ((size_t)768 << 20)
 #endif
-/* RLIMIT_DATA for a worker on Linux (private writable memory, the compile
- * stack included). macOS enforces no address-space or data rlimit, so
- * there the compile deadline bounds a worker's memory growth. */
-#ifndef HL_GPU_HELPER_DATA_BYTES
-#define HL_GPU_HELPER_DATA_BYTES         ((uint64_t)8 << 30)
+/* The worker's memory cap. Measured on Apple M1 Max / Metal (the peak
+ * physical footprint of a worker, backend init included, compiling the
+ * largest shaders in the test suite and the examples - the audit-40
+ * function-size shader, the audit-42 domain-warp shader, the examples'
+ * shaders/): see docs/design/gpu_compile_helper.md section 5. The server
+ * itself has no memory limit, so a source the worker compiled within this
+ * cap fits the server too.
+ *   - macOS: the supervisor reads the worker's footprint
+ *     (proc_pid_rusage, ri_lifetime_max_phys_footprint) every
+ *     HL_GPU_HELPER_MEM_POLL_MS and kills it above the cap (MEMORY);
+ *   - Linux: RLIMIT_DATA = this + the compile stack reservation (a thread
+ *     stack is a private writable mapping, counted as data); an
+ *     allocation past it fails, the worker aborts (CRASHED).
+ * Either way the source is refused (shader_helper_failed). */
+#ifndef HL_GPU_HELPER_MEM_BYTES
+#define HL_GPU_HELPER_MEM_BYTES          ((uint64_t)1 << 30)   /* 1 GiB */
+#endif
+#ifndef HL_GPU_HELPER_MEM_POLL_MS
+#define HL_GPU_HELPER_MEM_POLL_MS        5
 #endif
 /* The largest reply frame payload a worker may send (a status and an
  * optional short detail); a longer one kills the worker (BADREPLY). */

@@ -48,6 +48,7 @@ typedef enum {
     HL_GPU_HELPER_BADREPLY    = 4,  /* reply malformed or past its size cap */
     HL_GPU_HELPER_UNAVAILABLE = 5,  /* no helper, or no GPU device in it */
     HL_GPU_HELPER_CANCELLED   = 6,  /* the calling run stopped first */
+    HL_GPU_HELPER_MEMORY      = 7,  /* killed above its memory cap */
 } HlGpuHelperStatus;
 
 /* Run this process as the helper (argv[1] == HL_GPU_HELPER_ARGV1, @p role =
@@ -70,7 +71,10 @@ int hl_gpu_helper_running(void);
 void hl_gpu_helper_stop(void);
 
 /* Check @p wgsl in the helper, for device @p device (whose adapter name is
- * @p adapter, part of the verdict's cache key). Looks the verdict up in the
+ * @p adapter, part of the verdict's cache key). The worker compiles on a
+ * thread of min(@p stack_bytes, HL_GPU_HELPER_STACK_BYTES) (0 = the
+ * latter): the caller passes no more than its own compile thread will
+ * have, so the verdict carries over (also part of the key). Looks the verdict up in the
  * in-memory cache, then the sealed on-disk cache ("gpu-shaders", OK
  * verdicts only); on a miss charges HL_GPU_HELPER_UNITS to the calling
  * thread's run budget, then asks the supervisor and waits - polling the
@@ -78,7 +82,7 @@ void hl_gpu_helper_stop(void);
  * when it stops - at most the helper's deadlines plus a margin. Returns a
  * HlGpuHelperStatus. Event-loop only. */
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter);
+                        const char *adapter, size_t stack_bytes);
 
 /* TEST-ONLY: drop every cached verdict (memory) and skip the on-disk cache
  * while @p off (so a test's compile reaches the helper). */
@@ -87,6 +91,10 @@ void hl_gpu_helper_test_reset_cache(int disk_off);
 /* TEST-ONLY: the deadlines in ms (0 = the defaults): the worker's start-up
  * (spawn + backend init + sandbox) and its compile. */
 void hl_gpu_helper_test_set_timeouts(uint32_t init_ms, uint32_t compile_ms);
+
+/* TEST-ONLY: the worker's memory cap in bytes (0 = HL_GPU_HELPER_MEM_BYTES;
+ * never above it: the supervisor clamps what a request asks for). */
+void hl_gpu_helper_test_set_mem_cap(uint64_t bytes);
 
 /* The sealed on-disk verdict cache (cache kind "gpu-shaders",
  * HULL_NO_GPU_SHADER_CACHE): @p hex is the verdict key (64 hex chars). get:
@@ -104,6 +112,10 @@ typedef struct {
     uint64_t round_trips;
     uint64_t cache_hits;
     uint64_t unsandboxed;   /* verdicts from a worker without its sandbox */
+    uint64_t peak_bytes;    /* the largest worker memory the supervisor saw
+                             * (macOS: peak physical footprint; Linux: peak
+                             * RSS), over every round trip */
+    uint64_t last_peak_bytes; /* the same, for the last round trip */
 } HlGpuHelperStats;
 void hl_gpu_helper_stats(HlGpuHelperStats *out);
 

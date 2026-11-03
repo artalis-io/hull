@@ -81,7 +81,10 @@ typedef enum {
  * pre-checks only estimate, so a deployed app compiles only the shaders it
  * was built with. */
 typedef enum {
-    /* Any source: unit tests and embedders that set no policy. */
+    /* Any source: unit tests and embedders that set no policy. Fails closed
+     * when the context's shader VFS holds embedded app files (a built
+     * binary): a context wired into a built app must carry its policy from
+     * GPU init on (hl_cap_gpu_init_shader_policy), never this default. */
     HL_GPU_SHADERS_ANY      = 0,
     /* Development (no embedded app files: `hull app.lua`, `hull dev`):
      * any source compiles, but a gpu.compile of source that did not come
@@ -630,6 +633,21 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
  * HL_GPU_SHADERS_DEV. @p vfs must outlive the context. */
 void hl_cap_gpu_set_shader_policy(HlGpuCtx *ctx, int mode, int dynamic_shaders,
                                   const struct HlVfs *vfs);
+
+/* The policy a context holds from GPU init on, before any app code runs:
+ * HL_GPU_SHADERS_EMBEDDED when @p vfs holds embedded app files, else
+ * HL_GPU_SHADERS_DEV, and never dynamic source - gpu.dynamic_shaders is
+ * raised (hl_cap_gpu_set_shader_policy) only once the manifest is applied,
+ * after the app's top level ran. serve.c calls it right after
+ * hl_cap_gpu_init, before the context is handed to the runtime. @p vfs must
+ * outlive the context. */
+void hl_cap_gpu_init_shader_policy(HlGpuCtx *ctx, const struct HlVfs *vfs);
+
+/* The largest stack a shader compile thread can get on this host now (the
+ * sizes gpu_compile_start tries), or 0 when none can be started. The
+ * compile helper's worker is asked for less (cap/gpu_helper.c), so its
+ * verdict holds for the server's compile. */
+size_t hl_gpu_compile_stack_available(void);
 
 /* 1 when @p wgsl is byte-identical to a shaders/<name>.wgsl entry of
  * @p vfs, else 0. */
