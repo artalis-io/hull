@@ -16558,6 +16558,11 @@ UTEST(lua_input_caps, json_manifest_limits_and_opts)
     EXPECT_EQ(eval_int(JC_DECODES("'{\"a\":1,\"b\":2,\"c\":3,\"d\":4}'")), 3);
     /* a caller's own opts for one decode */
     EXPECT_EQ(eval_int(JC_DECODES("'[[[[[[1]]]]]]', { max_depth = 10 }")), 1);
+    /* ...overrides only what it names: the key ceiling stays (convergence
+     * phase 2, L3 - a partial opts table dropped it), and vice versa */
+    EXPECT_EQ(eval_int(JC_DECODES("'{\"a\":1,\"b\":2,\"c\":3,\"d\":4}', { max_depth = 10 }")), 3);
+    EXPECT_EQ(eval_int(JC_DECODES("'[[[[[[1]]]]]]', { max_keys = 10 }")), 2);
+    EXPECT_EQ(eval_int(JC_DECODES("'{\"a\":1,\"b\":2,\"c\":3,\"d\":4}', {}")), 3);
     /* back to the defaults */
     hl_runtime_apply_input_limits(&lua_rt.base, NULL);
     EXPECT_EQ(eval_int(JC_DECODES("'[[[[[[1]]]]]]'")), 1);

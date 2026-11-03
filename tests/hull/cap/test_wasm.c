@@ -4699,6 +4699,47 @@ UTEST(wasm_convergence_deadline, call_past_the_run_deadline_is_refused)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* Convergence phase 2, L2: modules load lazily at the first compute.call, and
+ * the load-time probe (start / ctor functions, hull_version) was bounded by
+ * the 10 s default only, past the run's deadline. It is clamped to the run's
+ * deadline now; stopped by it, the load reports a timeout and is not cached
+ * (the module is not refused for good - another run may load it). */
+UTEST(wasm_convergence_deadline, load_probe_ends_at_the_run_deadline)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlRunWatch run;
+    cd_arm_run(&run, 300);
+    uint64_t t0 = mono_ms();
+    int rc = hl_cap_wasm_load(&cache, "start_loop", &vfs, NULL);
+    uint64_t took = mono_ms() - t0;
+    /* Unlink before cd_arm_run zeroes the watch again (a linked watch must
+     * never be memset: the watchdog's list would be corrupted). */
+    hl_run_watch_disarm(&run);
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    EXPECT_EQ(cache.count, 0);
+    EXPECT_LT(took, (uint64_t)2500);   /* the run's 300 ms, not the 10 s default */
+
+    /* Through a call, which loads on demand: reported as a timeout. */
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err = NULL;
+    cd_arm_run(&run, 300);
+    t0 = mono_ms();
+    rc = hl_cap_wasm_call(&cache, "start_loop", "x", 1, &out, &out_len,
+                          NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    took = mono_ms() - t0;
+    hl_run_watch_disarm(&run);
+    free(out);
+    EXPECT_EQ(rc, HL_WASM_ERR_TIMEOUT);
+    if (err) EXPECT_STREQ(err, "timeout");
+    EXPECT_LT(took, (uint64_t)2500);
+    hl_cap_wasm_destroy(&cache);
+}
+
 /* With no run on the thread (a compute.async pool thread) the call keeps its
  * own timeout. */
 UTEST(wasm_convergence_deadline, no_run_keeps_the_call_timeout)

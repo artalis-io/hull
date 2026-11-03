@@ -997,8 +997,21 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     int detected_memory64 = 0;
     uint64_t probe_linear = 0;
     {
+        /* The probe's deadline is the default compute timeout, clamped to
+         * what is left of the run that loads the module: modules load lazily
+         * at the first compute.call, so a start function ran up to the full
+         * default past the run's deadline (request_ms) on the event loop
+         * (convergence phase 2, L2). Nothing left: refuse as timed out. */
+        const uint64_t probe_full = hl_wasm_timeout_resolve(0);
+        const uint64_t probe_ms = hl_run_deadline_clamp_ms(probe_full);
+        if (probe_ms == 0) {
+            wasm_runtime_unload(module);
+            free(buf);
+            return HL_WASM_ERR_TIMEOUT;
+        }
+        const int probe_clamped = probe_ms < probe_full;
         HlWasmWatch watch = {0};
-        if (hl_wasm_watch_arm(&watch, 0, NULL) != 0) {
+        if (hl_wasm_watch_arm(&watch, (uint32_t)probe_ms, NULL) != 0) {
             wasm_runtime_unload(module);
             free(buf);
             return HL_WASM_ERR_INTERNAL;
@@ -1043,6 +1056,16 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             wasm_runtime_deinstantiate(tmp_inst);
         }
         hl_wasm_watch_disarm(&watch);
+        /* Stopped by the run's deadline, not the compute timeout: the module
+         * may be fine, the run is out of time. Not cached; the next run
+         * loads it again. */
+        if (!tmp_inst && probe_clamped && wasm_is_timeout_exception(error_buf)) {
+            log_warn("[wasm] module '%s': loading it ran past the run's "
+                     "deadline", name);
+            wasm_runtime_unload(module);
+            free(buf);
+            return HL_WASM_ERR_TIMEOUT;
+        }
         /* A start function that runs past the deadline would do so again at
          * every instantiation: refuse the module outright. */
         if (!tmp_inst && wasm_is_timeout_exception(error_buf)) {
@@ -1312,7 +1335,9 @@ static int call_buf_impl(HlWasmCache *cache, const char *name,
     if (!mod) {
         int rc = hl_cap_wasm_load(cache, name, app_vfs, app_dir);
         if (rc != 0) {
-            if (err_msg) *err_msg = (rc == HL_WASM_ERR_NOT_FOUND) ? err_not_found : err_load;
+            if (err_msg) *err_msg = rc == HL_WASM_ERR_NOT_FOUND ? err_not_found
+                                  : rc == HL_WASM_ERR_TIMEOUT   ? err_timeout
+                                                                : err_load;
             return rc;
         }
         pthread_mutex_lock(&cache->pool_mutex);
@@ -1820,7 +1845,9 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     if (!mod) {
         int rc = hl_cap_wasm_load(cache, name, app_vfs, app_dir);
         if (rc != 0) {
-            if (err_msg) *err_msg = (rc == HL_WASM_ERR_NOT_FOUND) ? err_not_found : err_load;
+            if (err_msg) *err_msg = rc == HL_WASM_ERR_NOT_FOUND ? err_not_found
+                                  : rc == HL_WASM_ERR_TIMEOUT   ? err_timeout
+                                                                : err_load;
             return NULL;
         }
         pthread_mutex_lock(&cache->pool_mutex);

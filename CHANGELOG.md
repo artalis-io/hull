@@ -81,6 +81,28 @@ release-artifact layout).
   guest code in one run trips the default 100M budget. Move long guests to `compute.async`
   (a pool thread: neither clamped nor charged, it holds no loop) or raise `--max-instructions`.
   `http.fetch` is unchanged: its run parks, and the resume is a new run.
+- **A SQLite busy wait and a WASM module's load now end by the run's deadline; a partial
+  `json.decode` options table keeps the other ceiling** (audit convergence §6.2; phase-2
+  confirming audit L1 / L2 / L3).
+  - *L1.* SQLite's own `busy_timeout` handler slept the event loop without asking the run's budget
+    or deadline: under `request_ms = 1500`, a write behind a `db.async` bulk INSERT answered 503
+    after ~4.9 s and a concurrent request waited ~4.6 s, none of it charged. Hull connections now
+    use their own busy handler (`db_busy`, `cap/db.c`): it keeps the connection's busy_timeout
+    (5000 ms, at most `HL_DB_MAX_BUSY_TIMEOUT_MS`) as its total, sleeps in 10 ms slices excluded
+    from the binding meter, asks the bound budget with a 0-unit charge before each slice and stops
+    at the calling thread's run deadline (`hl_run_deadline_left_ms`); a db.async op (no run
+    deadline on a pool thread) waits under its own op budget. An app `PRAGMA busy_timeout = N`
+    (still capped at 5000) now sets that handler's total instead of installing SQLite's sleeping
+    one: the pragma is applied by Hull and skipped (no error, no row), so a bare
+    `PRAGMA busy_timeout` reads 0 on a Hull connection.
+  - *L2.* Modules load lazily at the first `compute.call`, and the load-time probe (start / ctor
+    functions, `hull_version`) ran under the 10 s default whatever was left of the run. It is now
+    clamped to the run's deadline; a load with no time left, or stopped by the run's deadline, is
+    reported as `timeout` (`HL_WASM_ERR_TIMEOUT`) and not cached, rather than refusing the module.
+  - *L3.* `hull.json.decode(s, { max_depth = 10 })` dropped the configured key ceiling entirely
+    (and `{ max_keys = N }` the depth one). The options are now merged over the configured
+    limits: only the fields given override. The JS `hull:json` decode takes no options (its
+    ceilings are runtime-wide, `JS_SetInputLimits`), so it had no such gap.
 
 ### Process and CI
 
