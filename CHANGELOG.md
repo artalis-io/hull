@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **`req.remote_addr` on a dual-stack listener (`-b ::`).** An IPv4 client now reads as its IPv4
+  address (`127.0.0.1`), not the IPv4-mapped form Keel formats (`::ffff:7f00:1`). An app that
+  stores, compares or keys on `remote_addr` (allowlists, audit records, rate-limit or lockout keys)
+  sees a different string for the same client after upgrading; entries keyed on the old form stop
+  matching. IPv4-only and IPv6 listeners are unchanged.
+- **Connection limits and deadlines are on by default.** One client key may hold at most half of
+  `--max-connections` open connections (`--max-connections-per-ip`, `limits.per_ip_connections`;
+  trusted proxies exempt), a request head must arrive within 10 s (`--header-timeout`) and an idle
+  keep-alive connection is closed after 5 s (`--keepalive-timeout`). Clients that hold idle
+  connections longer reconnect; a deployment behind a proxy not listed in `limits.trusted_proxies`
+  shares one key for every user.
+
 ### Fixed (audit convergence §6.4: dual-stack proxies, accept refusals)
 
 - **A dual-stack listener recognises an IPv4 trusted proxy.** On `-b ::` an IPv4 peer arrives
