@@ -2503,7 +2503,16 @@ be deferred or joined the same way; `tests/e2e_sandbox.sh` Test 9 checks
   (`hl_serve_request_done` releases it) or the connection's next request; an entry whose
   connection Keel released (its response `hdr_buf` NULL) is swept when the cap would refuse. The
   key is the TCP peer, or - for a peer in `limits.trusted_proxies` - the last entry of the last
-  X-Forwarded-For header when it is an IP (the stdlib `client_ip(req, true)` rule). WebSocket
+  X-Forwarded-For header when it is an IP (the stdlib `client_ip(req, true)` rule). Every match
+  of a peer against `trusted_proxies` goes through `hl_conn_peer_ip` (`cap/conn_limit.c`): a
+  dual-stack listener (`-b ::`) reports an IPv4 peer IPv4-mapped, which Keel formats
+  `::ffff:7f00:1`, and `hl_host_match` neither compares it to `127.0.0.1` nor matches a CIDR
+  across families - every proxied request was keyed to the proxy, so one busy client behind it
+  got every other one 429s. `req.remote_addr` is normalised the same way (both bindings), so
+  the stdlib's per-client keys see the IPv4 address, not a /64 shared by every IPv4 client. The
+  provider's accept refuses at most `HL_CONN_ACCEPT_REFUSE_MAX` (64) connections per call, then
+  reports would-block (`errno = EAGAIN`): Keel stops its accept loop and re-arms the
+  level-triggered listen socket, so refusals cannot hold the loop in one callback. WebSocket
   upgrades to a ws route are not counted. OPEN CONNECTIONS are counted separately (confirming
   audit M1: idle keep-alive connections, slow header senders and WebSockets counted for nothing,
   and Keel's `max_connections` is global, so one client holding them all refused everyone): the

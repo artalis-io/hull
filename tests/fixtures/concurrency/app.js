@@ -25,3 +25,7 @@ app.get("/narrow", async (_req, res) => {
 app.get("/ping", (_req, res) => {
     res.text("pong");
 });
+
+app.get("/ip", (req, res) => {
+    res.text(req.remote_addr || "");
+});

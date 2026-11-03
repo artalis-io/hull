@@ -10,6 +10,7 @@
  */
 #include "utest.h"
 #include "hull/cap/conn_limit.h"
+#include "hull/host_match.h"
 
 #include <string.h>
 
@@ -171,6 +172,43 @@ UTEST(conn_convergence_cap, stale_entries_and_many_keys)
         EXPECT_EQ(hl_conn_limit_count(&l, &k), (uint32_t)(i % 2));
     }
     hl_conn_limit_free(&l);
+}
+
+/* The peer a trusted-proxy check matches: a dual-stack listener reports an
+ * IPv4 peer as ::ffff:a.b.c.d, which matched neither "127.0.0.1" nor
+ * "10.0.0.0/8" in limits.trusted_proxies (audit convergence §6.4 M-A). */
+UTEST(conn_convergence_proxy, mapped_peer_is_its_ipv4_address)
+{
+    char buf[64];
+    EXPECT_STREQ(hl_conn_peer_ip("::ffff:127.0.0.1", buf, sizeof buf), "127.0.0.1");
+    EXPECT_STREQ(hl_conn_peer_ip("::FFFF:10.1.2.3", buf, sizeof buf), "10.1.2.3");
+    EXPECT_STREQ(hl_conn_peer_ip("0:0:0:0:0:ffff:192.0.2.9", buf, sizeof buf), "192.0.2.9");
+    EXPECT_STREQ(hl_conn_peer_ip("::ffff:7f00:1", buf, sizeof buf), "127.0.0.1");
+}
+
+UTEST(conn_convergence_proxy, other_peers_are_unchanged)
+{
+    char buf[64];
+    const char *in[] = { "127.0.0.1", "::1", "2001:db8::5", "::127.0.0.1",
+                         "::ffff:", "::ffff:999.1.1.1", "not an address", "" };
+    for (size_t i = 0; i < sizeof in / sizeof in[0]; i++)
+        EXPECT_EQ(hl_conn_peer_ip(in[i], buf, sizeof buf), in[i]);
+    EXPECT_EQ(hl_conn_peer_ip(NULL, buf, sizeof buf), (const char *)NULL);
+    /* A buffer too small for any IPv4 address: unchanged, not truncated. */
+    char tiny[8];
+    const char *m = "::ffff:127.0.0.1";
+    EXPECT_EQ(hl_conn_peer_ip(m, tiny, sizeof tiny), m);
+}
+
+/* The normalised peer matches the trusted-proxy forms an operator writes. */
+UTEST(conn_convergence_proxy, mapped_peer_matches_ipv4_proxies)
+{
+    const char *proxies[] = { "127.0.0.1", "10.0.0.0/8" };
+    char buf[64];
+    EXPECT_TRUE(hl_host_match_any(proxies, 2, hl_conn_peer_ip("::ffff:127.0.0.1", buf, sizeof buf)));
+    EXPECT_TRUE(hl_host_match_any(proxies, 2, hl_conn_peer_ip("::ffff:10.20.30.40", buf, sizeof buf)));
+    EXPECT_FALSE(hl_host_match_any(proxies, 2, hl_conn_peer_ip("::ffff:192.0.2.1", buf, sizeof buf)));
+    EXPECT_FALSE(hl_host_match_any(proxies, 2, hl_conn_peer_ip("::1", buf, sizeof buf)));
 }
 
 UTEST_MAIN()

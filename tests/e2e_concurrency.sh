@@ -14,6 +14,10 @@
 #      claim another address are still one client. That fixture sets no
 #      limit: the default is half --max-connections (16 here, so 8).
 #   5. --max-requests-per-ip 0 turns the per-client cap off.
+#   5b. Dual-stack (-b ::): an IPv4 peer arrives IPv4-mapped; the trusted
+#      proxy "127.0.0.1" still matches it (both limiters), so one forwarded
+#      client at its cap does not refuse the others, and req.remote_addr
+#      is the IPv4 address.
 #   6. Open connections per client (limits.per_ip_connections = 4): client A
 #      holds four idle keep-alive connections (one request each, then
 #      nothing); its fifth connection is refused while client B (::1 against
@@ -172,6 +176,40 @@ run_trusted() {
     stop_server
 }
 
+# A dual-stack listener (-b ::) reports an IPv4 peer as ::ffff:127.0.0.1:
+# the trusted proxy "127.0.0.1" must still match, or every proxied request is
+# keyed to the proxy and one busy client refuses all the others.
+run_trusted_dualstack() {
+    _entry=$1
+    echo "-- $(basename "$_entry"): IPv4 trusted proxy on a dual-stack listener"
+    if ! start_server "$_entry" -b :: >/dev/null 2>&1; then
+        stop_server
+        echo "  SKIP: no dual-stack listener on this host"
+        return
+    fi
+    ra=$(curl -s "http://127.0.0.1:$PORT/ip")
+    [ "$ra" = "127.0.0.1" ] && pass "an IPv4 peer on -b :: is remote_addr 127.0.0.1" \
+                            || fail "IPv4 peer on -b :: remote_addr '$ra', want 127.0.0.1"
+    rm -f "$TMP"/bg.*
+    launch 8 /slow seq          # 8 distinct clients through 127.0.0.1
+    sv4=$(status /ping 198.51.100.9)
+    [ "$sv4" = "200" ] && pass "another proxied client is served through 127.0.0.1 on -b ::" \
+                       || fail "proxied client through 127.0.0.1 on -b :: got $sv4, want 200"
+    sv6=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: 198.51.100.9" \
+            "http://[::1]:$PORT/ping" 2>/dev/null)
+    case "$sv6" in
+        200) pass "another proxied client is served through [::1]" ;;
+        000) echo "  SKIP: [::1] not reachable" ;;
+        *)   fail "proxied client through [::1] got $sv6, want 200" ;;
+    esac
+    launch 8 /slow 203.0.113.7
+    s9=$(status /slow 203.0.113.7)
+    [ "$s9" = "429" ] && pass "the forwarded client is still capped on -b :: (429)" \
+                      || fail "9th request from one forwarded client on -b :: got $s9, want 429"
+    wait_bg
+    stop_server
+}
+
 run_untrusted() {
     echo "-- untrusted X-Forwarded-For"
     # No manifest limit: the default cap is half of --max-connections. The
@@ -266,6 +304,14 @@ run_conncap_trusted() {
     [ "$(cat "$TMP/hold.out")" = "ok 5" ] && pass "a trusted proxy holds 5 connections over a cap of 2" \
         || fail "trusted proxy: $(cat "$TMP/hold.out"), want ok 5"
     stop_server
+    if start_server "$FIX/app.lua" --max-connections-per-ip 2 -b :: >/dev/null 2>&1; then
+        conn hold 127.0.0.1 "$PORT" 5 1 >"$TMP/hold.out"
+        [ "$(cat "$TMP/hold.out")" = "ok 5" ] && pass "a trusted IPv4 proxy on -b :: holds 5 connections over a cap of 2" \
+            || fail "trusted IPv4 proxy on -b ::: $(cat "$TMP/hold.out"), want ok 5"
+    else
+        echo "  SKIP: no dual-stack listener on this host"
+    fi
+    stop_server
 
     echo "-- --max-connections-per-ip 0"
     start_server "$FIX/conncap/app.lua" --max-connections-per-ip 0 || { fail "server start (conn off)"; return; }
@@ -299,6 +345,11 @@ case "$RUNTIME" in
     lua) run_trusted "$FIX/app.lua" ;;
     js)  run_trusted "$FIX/app.js" ;;
     *)   run_trusted "$FIX/app.lua"; run_trusted "$FIX/app.js" ;;
+esac
+case "$RUNTIME" in
+    lua) run_trusted_dualstack "$FIX/app.lua" ;;
+    js)  run_trusted_dualstack "$FIX/app.js" ;;
+    *)   run_trusted_dualstack "$FIX/app.lua"; run_trusted_dualstack "$FIX/app.js" ;;
 esac
 run_untrusted
 if command -v python3 >/dev/null 2>&1; then

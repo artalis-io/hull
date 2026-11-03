@@ -25,6 +25,7 @@ _Static_assert(sizeof(JSValue) <= sizeof(((HlReqCtx *)0)->js_val_bytes),
 #include <keel/http_response.h>
 #include <keel/http_router.h>
 #include <keel/http_connection.h>  /* kl_http_conn_peer_addr */
+#include "hull/cap/conn_limit.h"   /* hl_conn_peer_ip */
 #include <keel/sockaddr.h>         /* KlSockAddr, kl_sockaddr_format_ip */
 
 #include <stdlib.h>
@@ -108,7 +109,14 @@ static void hl_request_peer_ip_js(KlHttpRequest *req, char *buf, size_t buflen)
      * format (matches the previous getpeername path). NULL when unavailable. */
     const KlSockAddr *pa = kl_http_conn_peer_addr(conn);
     if (!pa) return;
-    kl_sockaddr_format_ip(pa, buf, buflen);
+    if (kl_sockaddr_format_ip(pa, buf, buflen) < 0) { buf[0] = '\0'; return; }
+    /* A dual-stack listener (-b ::) reports an IPv4 peer IPv4-mapped, which
+     * Keel formats "::ffff:7f00:1": the stdlib's per-client keys and
+     * prefixes read that as an IPv6 /64 shared by every IPv4 client. The
+     * app sees the IPv4 address, as on an IPv4 listener. */
+    char v4[INET_ADDRSTRLEN];
+    const char *bare = hl_conn_peer_ip(buf, v4, sizeof v4);
+    if (bare != buf) snprintf(buf, buflen, "%s", bare);
 }
 
 /*
