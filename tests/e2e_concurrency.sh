@@ -14,9 +14,19 @@
 #      claim another address are still one client. That fixture sets no
 #      limit: the default is half --max-connections (16 here, so 8).
 #   5. --max-requests-per-ip 0 turns the per-client cap off.
+#   6. Open connections per client (limits.per_ip_connections = 4): client A
+#      holds four idle keep-alive connections (one request each, then
+#      nothing); its fifth connection is refused while client B (::1 against
+#      a dual-stack listener, or 127.0.0.2 on Linux) is served. A trusted
+#      proxy's connections are not counted. Idle and WebSocket connections
+#      counted for nothing before (confirming audit M1).
+#   7. Header and idle deadlines: a client sending its request head a byte at
+#      a time (each byte well inside the read timeout) is closed at
+#      --header-timeout; a keep-alive connection that sends nothing after its
+#      response is closed at --keepalive-timeout.
 #
 # Usage: sh tests/e2e_concurrency.sh  (RUNTIME=lua|js|all)
-# Requires: build/hull, curl.
+# Requires: build/hull, curl, python3 (sections 6-7; skipped without it).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -164,8 +174,11 @@ run_trusted() {
 
 run_untrusted() {
     echo "-- untrusted X-Forwarded-For"
-    # No manifest limit: the default cap is half of --max-connections.
-    start_server "$FIX/untrusted/app.lua" --max-connections 16 || { fail "server start (untrusted)"; return; }
+    # No manifest limit: the default cap is half of --max-connections. The
+    # connection cap (also half by default) is off here: it would refuse the
+    # ninth connection before the request cap could answer 429.
+    start_server "$FIX/untrusted/app.lua" --max-connections 16 \
+        --max-connections-per-ip 0 || { fail "server start (untrusted)"; return; }
     rm -f "$TMP"/bg.*
     launch 8 /slow seq
     s9=$(status /slow 10.9.0.99)
@@ -208,12 +221,97 @@ run_untrusted() {
     stop_server
 }
 
+HELPER="$SRCDIR/tests/e2e_conn_helper.py"
+conn() { python3 "$HELPER" "$@"; }
+
+run_conncap() {
+    _entry=$1
+    echo "-- $(basename "$_entry"): open connections per client"
+    # A dual-stack listener, so ::1 is a second client on every host.
+    _b=127.0.0.1; _hostb=""
+    if start_server "$_entry" -b :: 2>/dev/null && [ "$(conn probe ::1 "$PORT")" = "200" ]; then
+        _hostb=::1
+    else
+        stop_server
+        start_server "$_entry" -b 0.0.0.0 || { fail "server start (conncap)"; return; }
+        if [ "$(conn probe 127.0.0.2 "$PORT")" = "200" ]; then _hostb=127.0.0.2; fi
+    fi
+    conn hold "$_b" "$PORT" 4 3 >"$TMP/hold.out" &
+    _hp=$!
+    sleep 1
+    [ "$(cat "$TMP/hold.out")" = "ok 4" ] && pass "client A holds 4 idle keep-alive connections" \
+        || fail "client A: $(cat "$TMP/hold.out"), want ok 4"
+    s5=$(conn probe "$_b" "$PORT")
+    [ "$s5" != "200" ] && pass "client A's 5th connection is refused ($s5)" \
+                       || fail "client A's 5th connection was served (cap not applied)"
+    if [ -n "$_hostb" ]; then
+        sb=$(conn probe "$_hostb" "$PORT")
+        [ "$sb" = "200" ] && pass "client B ($_hostb) is served while A holds its cap" \
+                          || fail "client B ($_hostb): got $sb, want 200"
+    else
+        echo "  SKIP: no second loopback address for client B"
+    fi
+    wait "$_hp" 2>/dev/null
+    sleep 0.3
+    sa=$(conn probe "$_b" "$PORT")
+    [ "$sa" = "200" ] && pass "closed connections give their slots back" \
+                      || fail "client A after closing: got $sa, want 200"
+    stop_server
+}
+
+run_conncap_trusted() {
+    echo "-- trusted proxy connections are not counted"
+    start_server "$FIX/app.lua" --max-connections-per-ip 2 || { fail "server start (trusted conn)"; return; }
+    conn hold 127.0.0.1 "$PORT" 5 1 >"$TMP/hold.out"
+    [ "$(cat "$TMP/hold.out")" = "ok 5" ] && pass "a trusted proxy holds 5 connections over a cap of 2" \
+        || fail "trusted proxy: $(cat "$TMP/hold.out"), want ok 5"
+    stop_server
+
+    echo "-- --max-connections-per-ip 0"
+    start_server "$FIX/conncap/app.lua" --max-connections-per-ip 0 || { fail "server start (conn off)"; return; }
+    conn hold 127.0.0.1 "$PORT" 6 1 >"$TMP/hold.out"
+    [ "$(cat "$TMP/hold.out")" = "ok 6" ] && pass "cap off: 6 connections from one client" \
+        || fail "cap off: $(cat "$TMP/hold.out"), want ok 6"
+    stop_server
+}
+
+run_deadlines() {
+    echo "-- header and keep-alive deadlines"
+    start_server "$FIX/conncap/app.lua" --header-timeout 1500 --keepalive-timeout 1000 \
+        || { fail "server start (deadlines)"; return; }
+    d=$(conn drip 127.0.0.1 "$PORT" 0.3 8)
+    case "$d" in
+        "closed 1."*|"closed 2."*) pass "a slow header sender is closed at the header deadline ($d)" ;;
+        *) fail "slow header sender: $d, want closed after ~1.5 s" ;;
+    esac
+    i=$(conn idle 127.0.0.1 "$PORT" 8)
+    case "$i" in
+        "closed 1."*|"closed 0."*|"closed 2."*) pass "an idle keep-alive connection is closed ($i)" ;;
+        *) fail "idle keep-alive connection: $i, want closed after ~1 s" ;;
+    esac
+    s=$(conn probe 127.0.0.1 "$PORT")
+    [ "$s" = "200" ] && pass "a prompt request is unaffected by the deadlines" \
+                     || fail "prompt request: got $s, want 200"
+    stop_server
+}
+
 case "$RUNTIME" in
     lua) run_trusted "$FIX/app.lua" ;;
     js)  run_trusted "$FIX/app.js" ;;
     *)   run_trusted "$FIX/app.lua"; run_trusted "$FIX/app.js" ;;
 esac
 run_untrusted
+if command -v python3 >/dev/null 2>&1; then
+    case "$RUNTIME" in
+        lua) run_conncap "$FIX/conncap/app.lua" ;;
+        js)  run_conncap "$FIX/conncap/app.js" ;;
+        *)   run_conncap "$FIX/conncap/app.lua"; run_conncap "$FIX/conncap/app.js" ;;
+    esac
+    run_conncap_trusted
+    run_deadlines
+else
+    echo "  SKIP: python3 not found (connection cap and deadline sections)"
+fi
 
 echo ""
 echo "e2e_concurrency: $PASS passed, $FAIL failed"

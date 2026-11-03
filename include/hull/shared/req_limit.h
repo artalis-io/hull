@@ -78,6 +78,7 @@ static inline int hl_req_xff_last(const char *xff, size_t len, char *out, size_t
     while (start < end && (*start == ' ' || *start == '\t')) start++;
     while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
     size_t l = (size_t)(end - start);
+    // cppcheck-suppress knownConditionTrueFalse
     if (l == 0 || l >= n) return 0;
     memcpy(out, start, l);
     out[l] = '\0';

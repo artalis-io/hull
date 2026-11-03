@@ -1722,6 +1722,7 @@ Two kinds of limit apply before your code sees a request, both on by default
 app.manifest({
     limits = {
         per_ip_concurrency = 32,               -- requests in flight per client; 0 = off
+        per_ip_connections = 64,               -- open connections per client; 0 = off
         route_concurrency  = { ["/upload"] = 2, ["/reports/*"] = 4 },
         trusted_proxies    = { "10.0.0.0/8" }, -- whose X-Forwarded-For to believe
         json_max_depth     = 128,              -- nesting of one JSON document
@@ -1736,6 +1737,7 @@ app.manifest({
 app.manifest({
     limits: {
         perIpConcurrency: 32,
+        perIpConnections: 64,
         routeConcurrency: { "/upload": 2, "/reports/*": 4 },
         trustedProxies: ["10.0.0.0/8"],
         jsonMaxDepth: 128,
@@ -1747,7 +1749,7 @@ app.manifest({
 ```
 
 Every number must be an integer of at least 1 (`per_ip_concurrency` also takes
-0); anything else is ignored and the default applies.
+0, as does `per_ip_connections`); anything else is ignored and the default applies.
 
 **Concurrency.** A request is *in flight* from the moment its headers arrive
 until its response has been sent - including the time its handler is parked on
@@ -1773,6 +1775,37 @@ own route pattern (`"/users/:id"`) or a path prefix ending in `/*`.
 - A handler whose client hung up keeps counting until the handler finishes.
 - The operator flag `--max-requests-per-ip N` overrides the manifest (`0` turns
   the per-client cap off; in a built binary it is `--hull-max-requests-per-ip`).
+
+**Open connections.** Requests are counted once their headers arrive, so a
+second cap counts *connections*: `per_ip_connections` (JS `perIpConnections`)
+is how many connections one client may hold open at once - idle keep-alive
+connections, connections still sending their headers, and upgraded WebSockets
+included, each from accept until it closes. A connection over the cap is
+closed as soon as it is accepted (on a plain-HTTP listener it gets a
+`429 Too Many Requests` first, best effort). The default is half of
+`--max-connections`, the same as `per_ip_concurrency`; since every request in
+flight needs a connection of its own over HTTP/1.1, lower `per_ip_concurrency`
+rather than this one to get 429s for requests. The client is the TCP peer
+(IPv4 as itself, IPv6 by /64); connections from a peer in `trusted_proxies`
+are not counted - a proxy carries every client's connections. The operator
+flag `--max-connections-per-ip N` overrides the manifest (`0` = off; in a
+built binary `--hull-max-connections-per-ip`).
+
+```lua
+limits = { per_ip_connections = 64 }      -- JS: limits: { perIpConnections: 64 }
+```
+
+Two deadlines apply to every connection, operator-set only:
+
+- `--header-timeout MS` (default 10000): a request head must be complete within
+  this long of its first byte (of the accept, for a connection's first request,
+  a TLS handshake included). More bytes do not restart it.
+- `--keepalive-timeout MS` (default 5000): a keep-alive connection that sends
+  nothing for this long after a response is closed.
+
+`0` turns either off. While a request is being handled (its body, a parked
+handler, an SSE stream) and once a connection is a WebSocket, neither applies;
+Keel's `--read-timeout` (30 s, restarted by every byte) still does.
 
 **Behind a reverse proxy, every request has the proxy's address.** With the
 default cap, half the server's connections from *all* your users together

@@ -108,6 +108,11 @@
 #include <keel/sockaddr.h>
 #include "hull/shared/req_limit.h"  /* per-client / per-route concurrency */
 #include "hull/host_match.h"        /* limits.trusted_proxies */
+#include "hull/cap/conn_limit.h"     /* per-client connections + deadlines */
+#include <keel/socket.h>            /* the decorating socket provider */
+#include <keel/timer.h>
+#include <keel/clock.h>
+#include <sys/socket.h>             /* shutdown */
 #include <keel/keel.h>
 #include <keel/thread_pool.h>
 
@@ -293,6 +298,15 @@ static void usage(const char *prog)
             "                       Requests in flight per client address (default:\n"
             "                       manifest limits.per_ip_concurrency, else half of\n"
             "                       --max-connections; 0 = no cap)\n"
+            "  --max-connections-per-ip N\n"
+            "                       Open connections per client address, idle and\n"
+            "                       WebSocket ones included (default: manifest\n"
+            "                       limits.per_ip_connections, else half of\n"
+            "                       --max-connections; 0 = no cap)\n"
+            "  --header-timeout MS  Time a connection has to send a whole request head\n"
+            "                       (default: 10000; 0 = none)\n"
+            "  --keepalive-timeout MS  Idle time before a keep-alive connection is\n"
+            "                       closed (default: 5000; 0 = none)\n"
             "  --body-max-size SIZE Max request body size (default: 1m)\n"
             "  --read-timeout MS    Read timeout in milliseconds (default: 30000)\n"
             "  --workers N          Thread pool worker count (default: 4)\n"
@@ -302,8 +316,9 @@ static void usage(const char *prog)
             "                       Allow seccomp + capability enforcement when Linux\n"
             "                       Landlock filesystem confinement is unavailable\n"
             "  --no-sandbox         Disable kernel sandbox (dev/debug only)\n"
-            "\n"
-            "WASM compute options:\n"
+            "\n", prog);
+    /* Two strings: one literal would pass the 4095 bytes C11 guarantees. */
+    fputs("WASM compute options:\n"
             "  --wasm-heap SIZE     WASM instance heap ceiling (default: 2m, max: ~4g)\n"
             "  --wasm-stack SIZE    WASM stack size ceiling (default: 64k, max: 8m)\n"
             "  --wasm-gas N         WASM instruction gas ceiling (default: 10m, max: 100b)\n"
@@ -336,7 +351,7 @@ static void usage(const char *prog)
             "\n"
             "AI agents: bootstrap with\n"
             "  hull agent context --task=orientation --level=minimal\n",
-            prog);
+            stderr);
 }
 
 /* ── Server configuration (parsed from CLI + env) ──────────────────── */
@@ -379,6 +394,9 @@ typedef struct {
     int drain_timeout;
     int max_connections;
     long max_req_per_ip;      /* --max-requests-per-ip; -1 = not given */
+    long max_conn_per_ip;     /* --max-connections-per-ip; -1 = not given */
+    long header_timeout;      /* --header-timeout MS; -1 = not given */
+    long keepalive_timeout;   /* --keepalive-timeout MS; -1 = not given */
     long body_max_size;
     int read_timeout;
     int num_workers;
@@ -418,6 +436,9 @@ typedef struct {
     .vm_thread_grace_ms = -1, \
     .vm_thread_ceiling_ms = -1, \
     .max_req_per_ip = -1, \
+    .max_conn_per_ip = -1, \
+    .header_timeout = -1, \
+    .keepalive_timeout = -1, \
 }
 
 /* ── Argument parsing ──────────────────────────────────────────────── */
@@ -554,6 +575,26 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             cfg->max_req_per_ip = v;
+        } else if (strcmp(argv[i], "--max-connections-per-ip") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0 || v > (long)HL_REQ_PER_IP_CEIL) {
+                fprintf(stderr, "hull: invalid max-connections-per-ip: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->max_conn_per_ip = v;
+        } else if ((strcmp(argv[i], "--header-timeout") == 0 ||
+                    strcmp(argv[i], "--keepalive-timeout") == 0) && i + 1 < argc) {
+            int hdr = argv[i][2] == 'h';
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0 || v > (long)HL_CONN_TIMEOUT_CEIL_MS) {
+                fprintf(stderr, "hull: invalid %s: %s\n",
+                        hdr ? "header-timeout" : "keepalive-timeout", argv[i]);
+                return -1;
+            }
+            if (hdr) cfg->header_timeout = v;
+            else     cfg->keepalive_timeout = v;
         } else if (strcmp(argv[i], "--body-max-size") == 0 && i + 1 < argc) {
             cfg->body_max_size = hl_parse_size(argv[++i]);
             if (cfg->body_max_size <= 0) {
@@ -864,6 +905,16 @@ typedef struct {
     HlReqLimiter         req_limiter;
     int                  req_limiter_on;
 
+    /* Open connections per client and the header / idle deadlines
+     * (hull/cap/conn_limit.h), kept by a socket provider decorating Keel's
+     * own (hl_serve_conn_*): installed at server init, active once the
+     * manifest is known (hl_serve_wire_conn_limit). */
+    HlConnLimit          conn_limit;
+    int                  conn_limit_on;
+    KlSocketProvider     conn_provider;
+    KlSocketOps          conn_ops;
+    int64_t              conn_sweep_timer;   /* -1 = none */
+
     /* Init flags for cleanup ordering */
     int                  server_init;  /* kl_http_server_init succeeded */
     int                  app_loaded;   /* rt->vt->load_app() succeeded */
@@ -1085,6 +1136,239 @@ static int hl_serve_init_logging(HlServerState *s)
 
 /* Phase 6 (DB init) - now handled inside hl_app_context_init. */
 
+/* ── Connections per client and connection deadlines (audit convergence
+ *    §6.4, hull/cap/conn_limit.h) ───────────────────────────────────── */
+
+/* Keel counts admitted requests nowhere and caps connections only globally,
+ * and the request limiter runs after the headers arrive: one client holding
+ * every connection - idle after one request each, or sending its headers a
+ * byte at a time - refused every other client. So the server's sockets go
+ * through a provider decorating Keel's built-in one (keel/socket.h; Keel
+ * documents this decorator pattern): accept admits a connection or closes it
+ * on the spot when its client is at the cap, recv notes bytes arriving on an
+ * idle connection, close forgets it. The copied ops take the built-in
+ * provider's own context (NULL on POSIX), so the table is reached through
+ * this pointer - one server per process. */
+static HlServerState          *g_conn_state;
+static const KlSocketProvider *g_conn_base;
+
+/* The client key of @p peer for the connection cap, or -1 when the peer is
+ * not counted: no IP address, or one of the manifest's trusted proxies
+ * (every client behind it shares its address; the request limiter keys
+ * those requests by X-Forwarded-For instead). */
+static int hl_serve_conn_key(HlServerState *s, const KlSockAddr *peer, HlReqKey *key)
+{
+    KlAddrFamily fam = kl_sockaddr_family(peer);
+    if (fam != KL_AF_INET && fam != KL_AF_INET6) return -1;
+    char ip[KL_SOCKADDR_STRLEN];
+    if (kl_sockaddr_format_ip(peer, ip, sizeof ip) < 0) return -1;
+    if (hl_req_key_from_ip(ip, key) != 0) return -1;
+    if (s->manifest.limits.trusted_proxy_count > 0) {
+        /* A dual-stack listener reports an IPv4 peer IPv4-mapped. */
+        const char *bare = ip;
+        if (kl_ascii_strncasecmp(ip, "::ffff:", 7) == 0 && strchr(ip + 7, '.'))
+            bare = ip + 7;
+        if (hl_host_match_any(s->manifest.limits.trusted_proxies,
+                              s->manifest.limits.trusted_proxy_count, bare))
+            return -1;
+    }
+    return 0;
+}
+
+/* A connection over the cap: say why when the listener speaks plain HTTP
+ * (best effort, one non-blocking write), then close it. */
+static void hl_serve_conn_refuse(HlServerState *s, void *ctx, KlSocketHandle fd)
+{
+    if (!s->cfg.tls_cert_path && g_conn_base->ops->send) {
+        static const char msg[] =
+            "HTTP/1.1 429 Too Many Requests\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "Retry-After: 1\r\n"
+            "Connection: close\r\n"
+            "Content-Length: 56\r\n"
+            "\r\n"
+            "Too Many Requests: this client has too many connections\n";
+        (void)g_conn_base->ops->send(ctx, fd, msg, sizeof msg - 1);
+    }
+    g_conn_base->ops->close(ctx, fd);
+    /* One line a second at most: a client at its cap may be retrying fast. */
+    static uint64_t last_log_ms;
+    uint64_t now = kl_monotonic_ms();
+    if (now - last_log_ms >= 1000) {
+        last_log_ms = now;
+        log_warn("[hull:c] connection refused: a client is at its limit of %u open "
+                 "connections (%llu refused so far)",
+                 (unsigned)s->conn_limit.per_ip,
+                 (unsigned long long)s->conn_limit.refused);
+    }
+}
+
+static KlSocketHandle hl_serve_conn_accept(void *ctx, KlSocketHandle lfd, KlSockAddr *peer)
+{
+    for (;;) {
+        KlSocketHandle fd = g_conn_base->ops->accept(ctx, lfd, peer);
+        HlServerState *s = g_conn_state;
+        if (!kl_handle_valid(fd) || !s || !s->conn_limit_on) return fd;
+        HlReqKey key;
+        int counted = peer && hl_serve_conn_key(s, peer, &key) == 0;
+        if (hl_conn_limit_open(&s->conn_limit, (int)fd, counted ? &key : NULL,
+                               kl_monotonic_ms()) == HL_CONN_ADMIT)
+            return fd;
+        hl_serve_conn_refuse(s, ctx, fd);
+        /* Next in the backlog; the last accept's would-block ends the loop. */
+    }
+}
+
+static kl_ssize_t hl_serve_conn_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len)
+{
+    kl_ssize_t r = g_conn_base->ops->recv(ctx, fd, buf, len);
+    HlServerState *s = g_conn_state;
+    if (r > 0 && s && s->conn_limit_on)
+        hl_conn_limit_bytes_in(&s->conn_limit, (int)fd, kl_monotonic_ms());
+    return r;
+}
+
+static int hl_serve_conn_close(void *ctx, KlSocketHandle fd)
+{
+    HlServerState *s = g_conn_state;
+    if (s && s->conn_limit_on)
+        hl_conn_limit_close(&s->conn_limit, (int)fd);
+    return g_conn_base->ops->close(ctx, fd);
+}
+
+/* Install the decorating provider in @p config. The table itself starts
+ * with the manifest (hl_serve_wire_conn_limit); until then every op passes
+ * straight through. Not installed (the cap and deadlines then unavailable,
+ * logged at wiring) when the built-in provider lacks an op it wraps. */
+static void hl_serve_conn_provider_install(HlServerState *s, KlHttpServerConfig *config)
+{
+    s->conn_sweep_timer = -1;
+#ifdef _WIN32
+    const KlSocketProvider *base = kl_socket_provider_winsock();
+#else
+    const KlSocketProvider *base = kl_socket_provider_posix();
+#endif
+    if (!base || !base->ops || !base->ops->accept || !base->ops->recv ||
+        !base->ops->close)
+        return;
+    g_conn_base = base;
+    g_conn_state = s;
+    s->conn_ops = *base->ops;
+    s->conn_ops.accept = hl_serve_conn_accept;
+    s->conn_ops.recv = hl_serve_conn_recv;
+    s->conn_ops.close = hl_serve_conn_close;
+    s->conn_ops.destroy = NULL;              /* the built-in provider is static */
+    s->conn_ops.name = "hull-conn-limit";
+    s->conn_provider = *base;
+    s->conn_provider.ops = &s->conn_ops;
+    config->sockets = &s->conn_provider;
+}
+
+/* A connection past its deadline: shut its socket down. Keel then reads the
+ * end of stream and closes the connection the ordinary way (through
+ * hl_serve_conn_close); the descriptor is not closed here, so it cannot be
+ * reused under Keel. */
+static void hl_serve_conn_expire(int fd, int why, void *user)
+{
+    (void)why; (void)user;
+    if (g_conn_base && g_conn_base->ops->shutdown)
+        (void)g_conn_base->ops->shutdown(g_conn_base->context, (KlSocketHandle)fd,
+                                         KL_SHUT_RDWR);
+    else
+        (void)shutdown(fd, SHUT_RDWR);
+}
+
+static void hl_serve_conn_sweep(void *user)
+{
+    HlServerState *s = (HlServerState *)user;
+    s->conn_sweep_timer = -1;
+    if (!s->conn_limit_on) return;
+    hl_conn_limit_sweep(&s->conn_limit, kl_monotonic_ms(), hl_serve_conn_expire, s);
+    s->conn_sweep_timer = kl_timer_add(&s->server.ev, HL_CONN_SWEEP_MS,
+                                       hl_serve_conn_sweep, s);
+}
+
+/* The descriptor of the connection serving @p req, or -1. */
+static int hl_serve_req_fd(const KlHttpRequest *req)
+{
+    KlHttpConn *conn = kl_http_request_conn(req);
+    const KlHttpResponse *res = conn ? kl_http_conn_response_const(conn) : NULL;
+    return res && kl_handle_valid(res->conn_fd) ? (int)res->conn_fd : -1;
+}
+
+/* Pre-body middleware, registered first: the request head is complete, so
+ * the header deadline is met and the request is being handled. */
+static int hl_serve_conn_mw(KlHttpRequest *req, KlHttpResponse *res, void *user_data)
+{
+    (void)res;
+    HlServerState *s = (HlServerState *)user_data;
+    if (s && s->conn_limit_on)
+        hl_conn_limit_request(&s->conn_limit, hl_serve_req_fd(req));
+    return 0;
+}
+
+/* Start the table once the manifest is known: the cap (--max-connections-
+ * per-ip, else the manifest's limits.per_ip_connections, else half the
+ * connection limit), the deadlines (--header-timeout / --keepalive-timeout,
+ * else the defaults), the middleware and the sweep. */
+static int hl_serve_wire_conn_limit(HlServerState *s)
+{
+    int cap = s->cfg.max_connections > 0 ? s->cfg.max_connections : HL_DEFAULT_MAX_CONN;
+    uint32_t per_ip = hl_req_per_ip_default(cap);
+    if (s->cfg.max_conn_per_ip >= 0)
+        per_ip = (uint32_t)s->cfg.max_conn_per_ip;
+    else if (s->manifest.limits.per_ip_conn_set)
+        per_ip = s->manifest.limits.per_ip_conn;
+    uint32_t header_ms = s->cfg.header_timeout >= 0 ? (uint32_t)s->cfg.header_timeout
+                                                    : HL_CONN_HEADER_TIMEOUT_MS_DEFAULT;
+    uint32_t idle_ms = s->cfg.keepalive_timeout >= 0 ? (uint32_t)s->cfg.keepalive_timeout
+                                                     : HL_CONN_KEEPALIVE_TIMEOUT_MS_DEFAULT;
+    if (per_ip == 0 && header_ms == 0 && idle_ms == 0) {
+        log_info("[hull:c] connections: no per-client cap, no header / idle deadline");
+        return 0;
+    }
+    if (s->server.ev.sockets != &s->conn_provider) {
+        /* A completion backend adopted its own provider, or the built-in one
+         * could not be wrapped: Keel's global limit and read timeout only. */
+        log_warn("[hull:c] connections: the per-client cap and header / idle "
+                 "deadlines are unavailable with this event backend");
+        return 0;
+    }
+    if (hl_conn_limit_init(&s->conn_limit, cap, per_ip, header_ms, idle_ms) != 0) {
+        log_error("[hull:c] out of memory for the connection table");
+        return -1;
+    }
+    s->conn_limit_on = 1;
+    if (kl_http_server_use(&s->server, "*", "/*", hl_serve_conn_mw, s) != 0) {
+        log_error("[hull:c] could not register the connection limit; refusing to start");
+        return -1;
+    }
+    if (header_ms || idle_ms) {
+        s->conn_sweep_timer = kl_timer_add(&s->server.ev, HL_CONN_SWEEP_MS,
+                                           hl_serve_conn_sweep, s);
+        if (s->conn_sweep_timer < 0) {
+            log_error("[hull:c] could not start the connection deadline timer; "
+                      "refusing to start");
+            return -1;
+        }
+    }
+    log_info("[hull:c] connections: %u per client%s, request head within %u ms, "
+             "keep-alive idle %u ms (0 = none)",
+             (unsigned)per_ip, per_ip ? "" : " (off)",
+             (unsigned)header_ms, (unsigned)idle_ms);
+    return 0;
+}
+
+/* The table goes after the server: kl_http_server_free closes every
+ * connection still open through hl_serve_conn_close. */
+static void hl_serve_conn_limit_free(HlServerState *s)
+{
+    s->conn_limit_on = 0;
+    hl_conn_limit_free(&s->conn_limit);
+    if (g_conn_state == s) g_conn_state = NULL;
+}
+
+
 /* Keel's access-log hook, called once a response is fully sent - the one
  * per-request end Keel reports, including the 404 / 405 it answers itself
  * after the pre-body middleware ran. The runtime drops what it kept for the
@@ -1095,10 +1379,13 @@ static void hl_serve_request_done(const KlHttpRequest *req, int status,
                                   size_t body_bytes, double duration_ms,
                                   void *user_data)
 {
-    (void)status; (void)body_bytes; (void)duration_ms;
+    (void)body_bytes; (void)duration_ms;
     HlServerState *s = (HlServerState *)user_data;
     if (s && s->req_limiter_on)
         hl_req_limit_release(&s->req_limiter, kl_http_request_conn(req));
+    if (s && s->conn_limit_on)
+        hl_conn_limit_response_done(&s->conn_limit, hl_serve_req_fd(req), status,
+                                    kl_monotonic_ms());
     HlRuntime *rt = s && s->app ? hl_app_context_runtime(s->app) : NULL;
     if (rt && rt->vt && rt->vt->request_done)
         rt->vt->request_done(rt, req);
@@ -1122,6 +1409,9 @@ static int hl_serve_init_server(HlServerState *s)
         .access_log = hl_serve_request_done,
         .access_log_data = s,
     };
+    /* Connections per client + deadlines (hull/cap/conn_limit.h). */
+    hl_serve_conn_provider_install(s, &config);
+
     /* Streaming-multipart routes bypass max_body_size; their unset
      * max_total_size defaults to the same limit (audit 34). */
     hl_cap_multipart_set_body_limit(config.max_body_size);
@@ -2488,6 +2778,10 @@ static int hl_serve_wire_concurrency(HlServerState *s)
 /* Phase 3: CORS + route wiring + static + agent API. */
 static int hl_serve_wire_routes(HlServerState *s)
 {
+    /* The connection middleware first: it marks the request head complete
+     * before the concurrency middleware may answer 429 / 503. */
+    if (hl_serve_wire_conn_limit(s) != 0)
+        return -1;
     if (hl_serve_wire_concurrency(s) != 0)
         return -1;
     HlRuntime *rt = hl_app_context_runtime(s->app);
@@ -2689,6 +2983,8 @@ static void hl_serve_free_server(HlServerState *s)
     s->server_tls_ctx = NULL;   /* the server destroyed it */
     s->req_limiter_on = 0;
     hl_req_limit_free(&s->req_limiter);
+    s->conn_sweep_timer = -1;   /* the server freed its timers */
+    hl_serve_conn_limit_free(s);
 }
 
 /* Free the worker pool with every running db.async op told to stop: its

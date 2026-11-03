@@ -2504,7 +2504,23 @@ be deferred or joined the same way; `tests/e2e_sandbox.sh` Test 9 checks
   connection Keel released (its response `hdr_buf` NULL) is swept when the cap would refuse. The
   key is the TCP peer, or - for a peer in `limits.trusted_proxies` - the last entry of the last
   X-Forwarded-For header when it is an IP (the stdlib `client_ip(req, true)` rule). WebSocket
-  upgrades to a ws route are not counted. Input ceilings (`include/hull/limits/input.h`,
+  upgrades to a ws route are not counted. OPEN CONNECTIONS are counted separately (confirming
+  audit M1: idle keep-alive connections, slow header senders and WebSockets counted for nothing,
+  and Keel's `max_connections` is global, so one client holding them all refused everyone): the
+  server's `KlHttpServerConfig.sockets` is a provider decorating Keel's built-in one
+  (`hl_serve_conn_provider_install`; copied ops, so the table is reached through `g_conn_state`,
+  one server per process). Its accept admits or closes (a best-effort 429 on plain HTTP) through
+  `src/hull/cap/conn_limit.c` (per-client count from accept to close, key = `HlReqKey` of the TCP
+  peer, trusted proxies uncounted; default half of `--max-connections`, manifest
+  `limits.per_ip_connections`, DOWNGRADE flag `--max-connections-per-ip`, 0 = off), its recv
+  marks an idle connection as starting a head and its close forgets the fd. Deadlines: a request
+  head complete within `--header-timeout` (10 s) of its first byte / the accept, an idle keep-alive
+  connection closed after `--keepalive-timeout` (5 s); `hl_serve_conn_mw` (registered before the
+  concurrency middleware) marks the head complete, the access-log hook marks the response sent
+  (101 = WebSocket, no deadline). A 250 ms Keel timer sweeps and `shutdown(SHUT_RDWR)`s an
+  expired socket - never closes it, so the fd cannot be reused under Keel; Keel reads EOF and
+  closes through the provider. A completion backend that swaps in its own provider disables both
+  (WARN at wiring). Input ceilings (`include/hull/limits/input.h`,
   `HlRuntime.input_limits`, applied by `hl_runtime_apply_input_limits` in serve.c and
   app_context.c): JSON depth 128 / 100000 keys per object in Lua `hull.json` (the C module
   `hull._limits`, read per decode) and JS `JSON.parse` / `JS_ParseJSON`; JS RegExp source 64 KiB

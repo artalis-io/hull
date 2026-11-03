@@ -249,9 +249,9 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             L, lim_idx, "callback_ms", (lua_Integer)86400000);
         /* Input ceilings and request concurrency: json_max_depth,
          * json_max_keys, regexp_max_source, normalize_max_input,
-         * per_ip_concurrency, trusted_proxies = {...},
+         * per_ip_concurrency, per_ip_connections, trusted_proxies = {...},
          * route_concurrency = { [pat] = N } (hull/limits/input.h). Numbers as
-         * for wasm; per_ip_concurrency also takes 0 (cap off). */
+         * for wasm; per_ip_concurrency / per_ip_connections also take 0 (cap off). */
         out->limits.json_max_depth = (uint32_t)lua_wasm_limit(L, lim_idx,
             "json_max_depth", (lua_Integer)HL_INPUT_JSON_MAX_DEPTH_CEIL);
         out->limits.json_max_keys = (uint32_t)lua_wasm_limit(L, lim_idx,
@@ -266,6 +266,14 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             out->limits.per_ip_set = 1;
             out->limits.per_ip = (uint32_t)(v > (lua_Integer)HL_REQ_PER_IP_CEIL
                                             ? (lua_Integer)HL_REQ_PER_IP_CEIL : v);
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, lim_idx, "per_ip_connections");
+        if (lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0) {
+            lua_Integer v = lua_tointeger(L, -1);
+            out->limits.per_ip_conn_set = 1;
+            out->limits.per_ip_conn = (uint32_t)(v > (lua_Integer)HL_REQ_PER_IP_CEIL
+                                                 ? (lua_Integer)HL_REQ_PER_IP_CEIL : v);
         }
         lua_pop(L, 1);
         out->limits.trusted_proxy_count = read_string_array(L, lim_idx,

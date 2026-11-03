@@ -16,16 +16,17 @@
  *
  * Manifest (Lua):  limits = { json_max_depth = N, json_max_keys = N,
  *                             regexp_max_source = N, normalize_max_input = N,
- *                             per_ip_concurrency = N, trusted_proxies = {...},
+ *                             per_ip_concurrency = N, per_ip_connections = N,
+ *                             trusted_proxies = {...},
  *                             route_concurrency = { ["/upload"] = 2 } }
  * Manifest (JS):   limits: { jsonMaxDepth, jsonMaxKeys, regexpMaxSource,
- *                            normalizeMaxInput, perIpConcurrency,
+ *                            normalizeMaxInput, perIpConcurrency, perIpConnections,
  *                            trustedProxies, routeConcurrency }
  *
  * A value must be an integer of at least 1 (capped at the ceiling below);
  * anything else is absent and the default applies (per_ip_concurrency:
  * hl_req_per_ip_default(max_connections)). per_ip_concurrency also
- * takes 0, which turns the per-IP cap off. The operator flag
+ * takes 0, which turns the per-IP cap off (per_ip_connections too). The operator flag
  * --max-requests-per-ip N overrides the manifest (0 = off).
  *
  * Header-only: used by the manifest parsers, serve.c, both runtimes and the
@@ -62,6 +63,23 @@
  * load test at -c 100 - while one client still cannot take every slot. */
 #define HL_REQ_PER_IP_DEFAULT_DIVISOR        2u
 #define HL_REQ_PER_IP_CEIL                   1000000u
+/* Open connections per client address (hull/cap/conn_limit.h): the same
+ * default as requests in flight (hl_req_per_ip_default), counted from accept
+ * to close - idle keep-alive connections, connections still sending headers
+ * and upgraded WebSockets included. Manifest limits.per_ip_connections /
+ * perIpConnections, flag --max-connections-per-ip; 0 = off.
+ *
+ * Connection deadlines (ms; flags --header-timeout / --keepalive-timeout,
+ * 0 = none): a request head must be complete within HEADER of its first byte
+ * (of the accept, for a connection's first request - a TLS handshake
+ * included), and a keep-alive connection that sends nothing for KEEPALIVE
+ * after a response is closed. Keel's read timeout restarts on every byte, so
+ * on its own it never stopped a client dripping its headers. */
+#define HL_CONN_HEADER_TIMEOUT_MS_DEFAULT    10000u
+#define HL_CONN_KEEPALIVE_TIMEOUT_MS_DEFAULT 5000u
+#define HL_CONN_TIMEOUT_CEIL_MS              600000u
+/* How often the deadlines are checked. */
+#define HL_CONN_SWEEP_MS                     250u
 /* Route patterns with a limit of their own, and trusted proxy entries. */
 #define HL_MANIFEST_MAX_ROUTE_LIMITS         32
 #define HL_MANIFEST_MAX_TRUSTED_PROXIES      32
