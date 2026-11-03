@@ -46,7 +46,7 @@ permissions:
 env:
   COSMOCC_VERSION: 4.0.2
   COSMOCC_SHA256: 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
-  BUSYBOX_URL: https://frippery.org/files/busybox/busybox64u.exe
+  BUSYBOX_URL: https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe
 
 jobs:
   build-cosmo-hull:

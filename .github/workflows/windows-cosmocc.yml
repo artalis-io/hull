@@ -215,7 +215,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path cosmo | Out-Null
           tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
           New-Item -ItemType Directory -Force -Path bb | Out-Null
-          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe"
           "int main(void){return 42;}" | Set-Content -NoNewline hello.c -Encoding ascii
 
       - name: Drive cosmocc with shared TMPDIR, NO /bin/sh plant
@@ -279,7 +279,7 @@ jobs:
           tar.exe -xpf cosmocc.zip -C cosmo 2>&1 | Write-Host
           New-Item -ItemType Directory -Force -Path bb | Out-Null
           # busybox-w64 (Ron Yorston). Single native PE, no Cygwin/MSYS runtime.
-          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox64u.exe"
+          curl.exe -fsSL --retry 3 -L -o bb\busybox.exe "https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe"
           Write-Host "busybox.exe size: $((Get-Item bb\busybox.exe).Length)"
 
       - name: busybox-w64 runs on Windows (sh + coreutils applets)
