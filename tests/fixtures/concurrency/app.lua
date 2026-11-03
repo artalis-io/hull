@@ -23,3 +23,7 @@ end)
 app.get("/ping", function(_req, res)
     res:text("pong")
 end)
+
+app.get("/ip", function(req, res)
+    res:text(req.remote_addr or "")
+end)

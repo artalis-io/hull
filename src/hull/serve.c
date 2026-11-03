@@ -109,6 +109,7 @@
 #include "hull/shared/req_limit.h"  /* per-client / per-route concurrency */
 #include "hull/host_match.h"        /* limits.trusted_proxies */
 #include "hull/cap/conn_limit.h"     /* per-client connections + deadlines */
+#include <errno.h>                   /* EAGAIN: a bounded accept call */
 #include <keel/socket.h>            /* the decorating socket provider */
 #include <keel/timer.h>
 #include <keel/clock.h>
@@ -1165,11 +1166,10 @@ static int hl_serve_conn_key(HlServerState *s, const KlSockAddr *peer, HlReqKey 
     if (hl_req_key_from_ip(ip, key) != 0) return -1;
     if (s->manifest.limits.trusted_proxy_count > 0) {
         /* A dual-stack listener reports an IPv4 peer IPv4-mapped. */
-        const char *bare = ip;
-        if (kl_ascii_strncasecmp(ip, "::ffff:", 7) == 0 && strchr(ip + 7, '.'))
-            bare = ip + 7;
+        char v4[KL_SOCKADDR_STRLEN];
         if (hl_host_match_any(s->manifest.limits.trusted_proxies,
-                              s->manifest.limits.trusted_proxy_count, bare))
+                              s->manifest.limits.trusted_proxy_count,
+                              hl_conn_peer_ip(ip, v4, sizeof v4)))
             return -1;
     }
     return 0;
@@ -1205,7 +1205,16 @@ static void hl_serve_conn_refuse(HlServerState *s, void *ctx, KlSocketHandle fd)
 
 static KlSocketHandle hl_serve_conn_accept(void *ctx, KlSocketHandle lfd, KlSockAddr *peer)
 {
-    for (;;) {
+    for (int refused = 0;; refused++) {
+        /* Bounded: a refusal takes no pool credit, so a client arriving
+         * faster than it is refused kept the event loop in this call. After
+         * HL_CONN_ACCEPT_REFUSE_MAX refusals report would-block; Keel's
+         * accept loop then stops, re-arms the level-triggered listen socket
+         * and takes the rest of the backlog on a later tick. */
+        if (refused >= HL_CONN_ACCEPT_REFUSE_MAX) {
+            errno = EAGAIN;
+            return KL_INVALID_SOCKET;
+        }
         KlSocketHandle fd = g_conn_base->ops->accept(ctx, lfd, peer);
         HlServerState *s = g_conn_state;
         if (!kl_handle_valid(fd) || !s || !s->conn_limit_on) return fd;
@@ -2659,9 +2668,11 @@ static int hl_serve_conc_key(HlServerState *s, const KlHttpRequest *req, HlReqKe
     if (fam != KL_AF_INET && fam != KL_AF_INET6) return -1;
     char peer[KL_SOCKADDR_STRLEN];
     if (kl_sockaddr_format_ip(pa, peer, sizeof peer) < 0) return -1;
+    char peer_v4[KL_SOCKADDR_STRLEN];   /* a dual-stack listener maps IPv4 peers */
     if (s->manifest.limits.trusted_proxy_count > 0 &&
         hl_host_match_any(s->manifest.limits.trusted_proxies,
-                          s->manifest.limits.trusted_proxy_count, peer)) {
+                          s->manifest.limits.trusted_proxy_count,
+                          hl_conn_peer_ip(peer, peer_v4, sizeof peer_v4))) {
         /* The last X-Forwarded-For header: a proxy appends to it. */
         const char *xff = NULL;
         size_t xff_len = 0;

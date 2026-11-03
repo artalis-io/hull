@@ -255,3 +255,14 @@ int hl_conn_limit_phase(HlConnLimit *l, int fd)
     pthread_mutex_unlock(&l->mu);
     return p;
 }
+
+const char *hl_conn_peer_ip(const char *ip, char *buf, size_t n)
+{
+    static const uint8_t v4mapped[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
+    uint8_t a[16];
+    if (!ip || !buf || n < 16) return ip;
+    if (inet_pton(AF_INET6, ip, a) != 1 || memcmp(a, v4mapped, 12) != 0)
+        return ip;
+    if (!inet_ntop(AF_INET, a + 12, buf, (socklen_t)n)) return ip;
+    return buf;
+}

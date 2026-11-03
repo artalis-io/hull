@@ -8,6 +8,25 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed (audit convergence §6.4: dual-stack proxies, accept refusals)
+
+- **A dual-stack listener recognises an IPv4 trusted proxy.** On `-b ::` an IPv4 peer arrives
+  IPv4-mapped, which Keel formats `::ffff:7f00:1`. The request limiter matched that raw string
+  against `limits.trusted_proxies`, and the host matcher neither equates it with `127.0.0.1` nor
+  matches a CIDR such as `10.0.0.0/8` across address families, so every request through the proxy
+  was keyed to the proxy's address: one client behind it with `per_ip_concurrency` requests in
+  flight got every other proxied client a 429. The connection limiter's own strip looked for the
+  dotted form and missed it too, counting a trusted proxy's connections. Both now go through one
+  helper, `hl_conn_peer_ip` (`src/hull/cap/conn_limit.c`), which maps any IPv4-mapped spelling to
+  the IPv4 address before matching. `req.remote_addr` gets the same normalisation, so on `-b ::`
+  an IPv4 client is `127.0.0.1`, not `::ffff:7f00:1` - which the stdlib's per-client keys
+  (rate limits, lockouts, audit-log prefixes) read as one IPv6 /64 shared by every IPv4 client.
+- **Accept refusals are bounded per call.** The connection cap's accept refused and accepted the
+  next connection until the backlog was empty; a refused connection takes no pool credit, so
+  connections arriving faster than they were refused kept the event loop inside one accept
+  callback. After 64 refusals (`HL_CONN_ACCEPT_REFUSE_MAX`) the accept reports would-block; Keel
+  re-arms the level-triggered listen socket and takes the rest on a later tick.
+
 ### Behaviour changes (audit convergence §6.4: connections)
 
 - **One client can no longer hold every connection.** The request limiter counted only requests

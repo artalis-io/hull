@@ -121,6 +121,25 @@ void hl_conn_limit_response_done(HlConnLimit *l, int fd, int status, uint64_t no
 typedef void (*HlConnExpireFn)(int fd, int why, void *user);
 int  hl_conn_limit_sweep(HlConnLimit *l, uint64_t now_ms, HlConnExpireFn fn, void *user);
 
+/* The address @p ip (a peer as Keel formats it) to match against the
+ * manifest's limits.trusted_proxies: an IPv4-mapped IPv6 address
+ * ("::ffff:127.0.0.1", any spelling inet_pton takes) as its IPv4 address,
+ * written to @p buf; anything else - a plain IPv4 or IPv6 address, or text
+ * that is not an address - is returned unchanged. A dual-stack listener
+ * (-b ::) reports every IPv4 peer mapped, and the host matcher compares
+ * exact strings and never matches a CIDR across families, so the raw form
+ * matched neither "127.0.0.1" nor "10.0.0.0/8". Used by both limiters'
+ * trusted-proxy checks in serve.c; a new one must go through it too. */
+const char *hl_conn_peer_ip(const char *ip, char *buf, size_t n);
+
+/* Connections one accept call refuses before it reports would-block and
+ * returns to the event loop (serve.c's provider accept). A refused
+ * connection takes no pool credit, so without a bound an arrival rate
+ * above the refusal rate kept the loop inside one accept callback. The
+ * listen socket is level-triggered: what is left in the backlog is taken
+ * on the next tick. */
+#define HL_CONN_ACCEPT_REFUSE_MAX 64
+
 /* Open, counted connections under @p key. */
 uint32_t hl_conn_limit_count(HlConnLimit *l, const HlReqKey *key);
 /* The phase of @p fd (HL_CONN_NONE if untracked). */
