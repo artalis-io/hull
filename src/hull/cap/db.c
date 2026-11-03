@@ -26,6 +26,9 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/types.h>   /* uid_t / gid_t (db_fchown) */
+#include <time.h>        /* nanosleep (db_busy) */
+#include "hull/cap/run_watchdog.h"      /* hl_run_deadline_left_ms */
+#include "hull/shared/dispatch_meter.h" /* hl_meter_exclude_begin / _end */
 #include <unistd.h>      /* fchown */
 
 /* ── Prepared statement cache ──────────────────────────────────────── */
@@ -180,6 +183,39 @@ static int db_synchronous_ok(const char *v)
     return 0;
 }
 
+
+/* A busy_timeout value db_busy_timeout_ok accepted, in ms (negative = 0). */
+static int db_busy_timeout_value(const char *v)
+{
+    if (v[0] == '-') return 0;
+    if (v[0] == '+') v++;
+    return (int)atol(v);
+}
+
+/* Per-connection state, kept as the connection's client data (freed by
+ * sqlite3_close): the authorizer's read-only flag and the busy handler's
+ * total and start. */
+typedef struct HlDbConnState {
+    int      refuse_txn;      /* hl_cap_db_refuse_txn_control */
+    int      busy_ms;         /* busy_timeout, <= HL_DB_MAX_BUSY_TIMEOUT_MS */
+    uint64_t busy_start_ms;   /* when the current busy wait began */
+} HlDbConnState;
+
+static const char DB_CONN_STATE_KEY[] = "hull.conn";
+
+static HlDbConnState *db_conn_state(sqlite3 *db)
+{
+    if (!db) return NULL;
+    HlDbConnState *st = sqlite3_get_clientdata(db, DB_CONN_STATE_KEY);
+    if (st) return st;
+    st = calloc(1, sizeof *st);
+    if (!st) return NULL;
+    /* On failure (its own allocation is charged to the run's budget, so a
+     * tripped run fails it) SQLite has already run the destructor on st. */
+    if (sqlite3_set_clientdata(db, DB_CONN_STATE_KEY, st, free) != SQLITE_OK)
+        return NULL;
+    return st;
+}
 
 /* SQLite's own bookkeeping tables (audit 29). sqlite_sequence holds every
  * AUTOINCREMENT table's high-water mark: an app `UPDATE sqlite_sequence SET
@@ -468,10 +504,13 @@ static int db_vacuum_target(const char *dbname)
     return dbname && strncasecmp(dbname, "vacuum_", 7) == 0;
 }
 
-static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
+static int db_authorizer(void *arg, int action, const char *a1, const char *a2,
                          const char *a3, const char *a4)
 {
     (void)a3; (void)a4;
+    HlDbConnState *st = arg;
+    /* Non-zero under the agent's read-only gate (hl_cap_db_refuse_txn_control). */
+    const int ud = st && st->refuse_txn;
     if (db_bookkeeping_write(action, a1, a2, a3, a4))
         return SQLITE_DENY;
     /* `_hull_*` objects: only for SQL the stdlib / Hull runs (the thread's
@@ -542,8 +581,18 @@ static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
             if (n == 0 || n > 3 || strncasecmp(a2, "wal", n) != 0)
                 return SQLITE_DENY;
         }
-        if (strcasecmp(a1, "busy_timeout") == 0 && !db_busy_timeout_ok(a2))
-            return SQLITE_DENY;
+        if (strcasecmp(a1, "busy_timeout") == 0) {
+            if (!db_busy_timeout_ok(a2))
+                return SQLITE_DENY;
+            /* SQLite would run sqlite3_busy_timeout(), which replaces Hull's
+             * busy handler with its own: one that sleeps without asking the
+             * run's budget or deadline. Keep the value as Hull's handler's
+             * total instead and skip the pragma (SQLITE_IGNORE: no error,
+             * no row) - see db_busy (convergence phase 2, L1). */
+            if (st)
+                st->busy_ms = db_busy_timeout_value(a2);
+            return SQLITE_IGNORE;
+        }
         if (strcasecmp(a1, "synchronous") == 0 && !db_synchronous_ok(a2))
             return SQLITE_DENY;
         return SQLITE_OK;
@@ -555,14 +604,62 @@ static int db_authorizer(void *ud, int action, const char *a1, const char *a2,
     }
 }
 
-/* A non-NULL authorizer argument: refuse transaction control. */
-static char db_refuse_txn_tag;
-
 void hl_cap_db_refuse_txn_control(sqlite3 *db, int on)
 {
-    if (db)
-        (void)sqlite3_set_authorizer(db, db_authorizer,
-                                     on ? &db_refuse_txn_tag : NULL);
+    HlDbConnState *st = db_conn_state(db);
+    if (!st) return;
+    st->refuse_txn = on ? 1 : 0;
+    (void)sqlite3_set_authorizer(db, db_authorizer, st);
+}
+
+/* -- Busy handler (convergence phase 2, L1) ------------------------------
+ *
+ * SQLite's own busy_timeout handler sleeps on a locked database without
+ * calling the progress handler or seeing the run's stop flag: on the event
+ * loop a write behind a db.async bulk INSERT slept its whole 5 s, past the
+ * run's deadline (request_ms), and the dispatcher charged none of it. Hull's
+ * handler keeps the connection's busy_timeout (st->busy_ms, at most
+ * HL_DB_MAX_BUSY_TIMEOUT_MS) as its total, but sleeps in DB_BUSY_SLICE_MS
+ * slices, asks the bound budget with a 0-unit charge before each one (a
+ * tripped budget, an op past its deadline, a cancel, pool shutdown) and gives
+ * up once the calling thread's run deadline has passed; each slice is
+ * excluded meter time, like the other DB waits. Giving up returns
+ * SQLITE_BUSY, and a tripped run raises its limit. A pool thread has no run
+ * deadline (hl_run_deadline_left_ms -1), so a db.async op waits up to its
+ * busy_timeout under its own budget. */
+#define DB_BUSY_SLICE_MS 10u
+
+static int db_busy(void *arg, int count)
+{
+    HlDbConnState *st = arg;
+    if (!st || st->busy_ms <= 0)
+        return 0;
+    uint64_t now = hl_db_monotonic_ms();
+    if (count <= 0)
+        st->busy_start_ms = now;
+    uint64_t waited = now - st->busy_start_ms;
+    if (waited >= (uint64_t)st->busy_ms)
+        return 0;
+    if (hl_db_budget_charge(0) != 0)
+        return 0;
+    int64_t left = hl_run_deadline_left_ms();
+    if (left == 0)
+        return 0;
+    uint64_t slice = (uint64_t)st->busy_ms - waited;
+    if (slice > DB_BUSY_SLICE_MS) slice = DB_BUSY_SLICE_MS;
+    if (left > 0 && (uint64_t)left < slice) slice = (uint64_t)left;
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = (long)slice * 1000000L };
+    uint64_t mx = hl_meter_exclude_begin();   /* the lock holder's time */
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+    hl_meter_exclude_end(mx);
+    return 1;
+}
+
+static void db_install_busy(sqlite3 *db, HlDbConnState *st)
+{
+    /* sqlite3_busy_handler also clears SQLite's own busyTimeout, so a bare
+     * `PRAGMA busy_timeout` reads 0 on a Hull connection. */
+    (void)sqlite3_busy_handler(db, db_busy, st);
 }
 
 /* ── Process-wide setup: every SQLite allocation is charged (audit 10 H3) ──
@@ -844,12 +941,18 @@ int hl_cap_db_init(sqlite3 *db)
      */
     /* REQUIRED: a failure here is a genuine error and aborts the open.
      *
-     * busy_timeout goes first because the pragmas after it can contend, and
-     * with SQLite's default timeout of 0 a locked file fails instantly rather
-     * than waiting. foreign_keys is semantic - an app that believes its
+     * The busy handler (db_busy, busy_timeout 5000) goes first because the
+     * pragmas after it can contend, and with SQLite's default timeout of 0 a
+     * locked file fails instantly rather than waiting. foreign_keys is semantic - an app that believes its
      * referential integrity is enforced must not run if it is not. */
+    HlDbConnState *st = db_conn_state(db);
+    if (!st) {
+        fprintf(stderr, "hull: sqlite connection state: out of memory\n");
+        return -1;
+    }
+    st->busy_ms = HL_DB_MAX_BUSY_TIMEOUT_MS;
+    db_install_busy(db, st);
     static const char *required[] = {
-        "PRAGMA busy_timeout=5000",
         "PRAGMA foreign_keys=ON",
         NULL,
     };
@@ -948,8 +1051,10 @@ int hl_cap_db_guard(sqlite3 *db)
 {
     if (!db)
         return -1;
-    if (sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, (int *)NULL) != SQLITE_OK ||
-        sqlite3_set_authorizer(db, db_authorizer, NULL) != SQLITE_OK) {
+    HlDbConnState *st = db_conn_state(db);
+    if (!st ||
+        sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, (int *)NULL) != SQLITE_OK ||
+        sqlite3_set_authorizer(db, db_authorizer, st) != SQLITE_OK) {
         fprintf(stderr, "hull: sqlite could not install its SQL guard: %s\n",
                 sqlite3_errmsg(db));
         return -1;
@@ -958,6 +1063,10 @@ int hl_cap_db_guard(sqlite3 *db)
      * loop for good. With no budget bound (migrations, tooling) the handler
      * never interrupts. */
     sqlite3_progress_handler(db, HL_DB_PROGRESS_OPS, db_progress, NULL);
+    /* Hull's busy handler, never SQLite's sleeping one: a connection opened
+     * without hl_cap_db_init (the agent's) keeps busy_ms 0 and fails a
+     * locked file at once, as before. */
+    db_install_busy(db, st);
     /* randomblob(1e9) / zeroblob(1e9) / a long replace() built a value of up
      * to SQLite's 1 GB default outside the VM heap limit; nothing larger
      * than a VM could hold is any use to it. */

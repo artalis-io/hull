@@ -1807,7 +1807,8 @@ payloads need:
 | `normalize_max_input` | 1 MiB | JS: `String.prototype.normalize`, both operands of `localeCompare` | `RangeError` |
 
 A Lua caller can pass its own ceilings for one decode:
-`json.decode(str, { max_depth = 1000, max_keys = 1e6 })`. A `worker.dispatch`
+`json.decode(str, { max_depth = 1000, max_keys = 1000000 })` (positive integers;
+a field left out keeps the configured ceiling). A `worker.dispatch`
 JS VM runs with the defaults. The request body size is capped separately by
 `--body-max-size` (default 1 MiB; streaming multipart routes have their own
 `max_total_size`).

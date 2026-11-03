@@ -121,5 +121,43 @@ test("a surrogate pair decodes; a lone surrogate is an error", function()
     end
 end)
 
+-- Convergence phase 2, L3: a caller's partial opts override only the fields
+-- it names; the other ceiling stays the configured one. This harness runs
+-- in a vanilla state with no hull._limits, so load a second copy of
+-- hull.json against stand-in limits (depth 5, keys 3).
+test("partial decode opts keep the other configured ceiling", function()
+    local saved_mod, saved_lim = package.loaded["hull.json"], package.loaded["hull._limits"]
+    local saved_pre = package.preload["hull._limits"]
+    package.loaded["hull.json"] = nil
+    package.loaded["hull._limits"] = nil
+    package.preload["hull._limits"] = function()
+        return { json = function() return 5, 3 end }
+    end
+    local ok, err = pcall(function()
+        local j = require("hull.json")
+        local four_keys = '{"a":1,"b":2,"c":3,"d":4}'
+        local deep6 = '[[[[[[1]]]]]]'
+        -- no opts: both configured ceilings
+        assert_eq(pcall(j.decode, four_keys), false, "keys cap, no opts")
+        assert_eq(pcall(j.decode, deep6), false, "depth cap, no opts")
+        -- max_depth alone raises depth, the key ceiling stays
+        assert_eq(pcall(j.decode, deep6, { max_depth = 10 }), true, "depth override")
+        local okk, e = pcall(j.decode, four_keys, { max_depth = 10 })
+        assert_eq(okk, false, "keys cap kept with max_depth opts")
+        assert(tostring(e):find("too many keys", 1, true), tostring(e))
+        -- max_keys alone: the depth ceiling stays
+        assert_eq(pcall(j.decode, four_keys, { max_keys = 10 }), true, "keys override")
+        local okd, e2 = pcall(j.decode, deep6, { max_keys = 10 })
+        assert_eq(okd, false, "depth cap kept with max_keys opts")
+        assert(tostring(e2):find("too deeply", 1, true), tostring(e2))
+        -- an empty opts table is the configured ceilings
+        assert_eq(pcall(j.decode, four_keys, {}), false, "empty opts")
+    end)
+    package.loaded["hull.json"] = saved_mod
+    package.loaded["hull._limits"] = saved_lim
+    package.preload["hull._limits"] = saved_pre
+    if not ok then error(err, 0) end
+end)
+
 -- Return results for C test harness
 return {pass = pass, fail = fail}

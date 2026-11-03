@@ -12,6 +12,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"
 #include "hull/cap/db_budget.h"
+#include "hull/cap/run_watchdog.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/db_udf.h"
 #ifdef HL_ENABLE_WASM
@@ -2742,6 +2743,86 @@ UTEST(hl_cap_db, busy_timeout_and_synchronous_are_bounded)
     for (size_t i = 0; i < sizeof allowed / sizeof allowed[0]; i++)
         EXPECT_EQ(SQLITE_OK, sqlite3_exec(test_db, allowed[i], NULL, NULL, NULL));
     teardown_db();
+}
+
+/* Convergence phase 2, L1: SQLite's own busy_timeout handler slept the
+ * calling thread (the event loop) for its whole 5 s on a locked database,
+ * past the run's deadline and uncharged. Hull's handler asks the bound
+ * budget and the run deadline each slice, and an app `PRAGMA busy_timeout`
+ * keeps it (SQLite's pragma installs its sleeping handler). */
+static int64_t busy_elapsed_ms(sqlite3 *db, const char *sql, int *rc_out)
+{
+    uint64_t t0 = hl_db_monotonic_ms();
+    *rc_out = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    return (int64_t)(hl_db_monotonic_ms() - t0);
+}
+
+UTEST(hl_cap_db, busy_wait_ends_at_the_budget_and_run_deadline)
+{
+    char path[HL_TEST_PATH_MAX];
+    ASSERT_EQ(0, hl_test_path(path, sizeof path, "hull_busy_%ld.db",
+                              (long)getpid()));
+    remove(path);
+    hl_cap_db_sqlite_setup();
+    sqlite3 *a = NULL, *b = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &a));
+    ASSERT_EQ(0, hl_cap_db_init(a));
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(a, "CREATE TABLE t(x)", NULL, NULL, NULL));
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(path, &b));
+    ASSERT_EQ(0, hl_cap_db_init(b));
+    /* a holds the write lock for the whole test. */
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(a, "BEGIN IMMEDIATE; INSERT INTO t VALUES (1)",
+                                      NULL, NULL, NULL));
+    int rc = 0;
+
+    /* 1. A bound budget whose deadline passes (a db.async op's). */
+    HlDbOpBudget ob = { .deadline_ms = hl_db_monotonic_ms() + 300 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &ob);
+    int64_t ms = busy_elapsed_ms(b, "INSERT INTO t VALUES (2)", &rc);
+    hl_db_budget_restore(prev);
+    EXPECT_NE(SQLITE_OK, rc);
+    EXPECT_EQ(1, ob.tripped);
+    EXPECT_LT(ms, 2000);
+
+    /* 2. The calling thread's run deadline (the event loop's request_ms),
+     *    after app SQL set busy_timeout itself - which must not restore
+     *    SQLite's sleeping handler. */
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(b, "PRAGMA busy_timeout=5000", NULL, NULL, NULL));
+    HlRunWatch w;
+    memset(&w, 0, sizeof w);
+    hl_run_watch_arm(&w, 300);
+    ms = busy_elapsed_ms(b, "INSERT INTO t VALUES (3)", &rc);
+    hl_run_watch_disarm(&w);
+    EXPECT_EQ(SQLITE_BUSY, rc);
+    EXPECT_GE(ms, 200);
+    EXPECT_LT(ms, 2000);
+
+    /* 3. busy_timeout=0 from app SQL: fail at once, as SQLite's would. */
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(b, "PRAGMA busy_timeout=0", NULL, NULL, NULL));
+    ms = busy_elapsed_ms(b, "INSERT INTO t VALUES (4)", &rc);
+    EXPECT_EQ(SQLITE_BUSY, rc);
+    EXPECT_LT(ms, 200);
+
+    /* 4. Unbound and with no deadline the wait is the busy_timeout, and it
+     *    succeeds once the holder lets go. */
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(b, "PRAGMA busy_timeout=150", NULL, NULL, NULL));
+    ms = busy_elapsed_ms(b, "INSERT INTO t VALUES (5)", &rc);
+    EXPECT_EQ(SQLITE_BUSY, rc);
+    EXPECT_GE(ms, 140);
+    EXPECT_LT(ms, 1500);
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(a, "COMMIT", NULL, NULL, NULL));
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(b, "INSERT INTO t VALUES (6)", NULL, NULL, NULL));
+
+    hl_cap_db_shutdown(b);
+    sqlite3_close(b);
+    hl_cap_db_shutdown(a);
+    sqlite3_close(a);
+    remove(path);
+    char side[HL_TEST_PATH_MAX + 8];
+    snprintf(side, sizeof side, "%s-wal", path);
+    remove(side);
+    snprintf(side, sizeof side, "%s-shm", path);
+    remove(side);
 }
 
 /* The selector and the sandbox match a DSN scheme case-insensitively, so the
