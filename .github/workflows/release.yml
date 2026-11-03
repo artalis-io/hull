@@ -956,7 +956,8 @@ jobs:
     # build otherwise). Its SHA-256 lands in the signed hull.sha256 below (same
     # release-key trust chain as wamrc/zig). cosmocc version + digest kept in
     # lockstep with mk/fetch.mk; the busybox digest is the pinned frippery.org
-    # busybox64u.exe (fail-closed if upstream rolls the "latest" file).
+    # busybox-w64u build FRP-6075, by its versioned URL: the unversioned
+    # busybox64u.exe is "latest" and rolled to FRP-6354, failing the v0.18.0 run.
     name: Build cosmocc bundle
     runs-on: ubuntu-24.04
     steps:
@@ -969,7 +970,7 @@ jobs:
         run: |
           sh scripts/build_cosmocc_bundle.sh \
              4.0.2 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44 \
-             https://frippery.org/files/busybox/busybox64u.exe \
+             https://frippery.org/files/busybox/busybox-w64u-FRP-6075-g169694ebd.exe \
              6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c \
              hull-cosmocc.tar
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
