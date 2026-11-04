@@ -117,10 +117,17 @@ app.manifest({
 local http = require("hull.http-client")
 
 app.get("/probe", function(req, res)
-    local resp = http.async.request("GET", "https://example.com/")
+    -- A failed fetch returns nil (the reason is in the --audit record);
+    -- pcall catches a raise so the reason reaches the test either way.
+    local ok, resp = pcall(http.async.request, "GET", "https://example.com/")
+    if not ok then
+        res:status(502)
+        res:json({ error = "raised: " .. tostring(resp) })
+        return
+    end
     if not resp or not resp.status then
-        res:status(500)
-        res:json({ error = "no response" })
+        res:status(502)
+        res:json({ error = "no response (see the http.fetch audit record)" })
         return
     end
     -- We don't care about the body content - just that the TLS handshake worked.
@@ -144,7 +151,7 @@ cd "$WORKDIR/myapp"
 SERVER_PID=$!
 wait_for_port "$PORT" || echo "  (port $PORT never opened)"
 
-BODY=$(curl -fsS --max-time 30 "http://127.0.0.1:$PORT/probe" 2>&1 || echo "FAIL: $?")
+BODY=$(curl -sS --max-time 30 "http://127.0.0.1:$PORT/probe" 2>&1 || echo "FAIL: curl exit $?")
 if ! echo "$BODY" | grep -q '"ok":true'; then
     echo "  response: $BODY"
     echo "  --- server.log ---"
@@ -169,20 +176,81 @@ SERVER_PID=""
 # uses the embedded one. Either case is correct; just confirm a TLS-capable
 # context was created.
 
+# --audit: a failed fetch's reason ("TLS handshake failed", a DNS or
+# connect error) is only in its http.fetch audit record.
 "$HULL" "$WORKDIR/myapp/app.lua" -p $((PORT + 1)) -d "$WORKDIR/data2.db" \
-    > "$WORKDIR/server2.log" 2>&1 &
+    --audit > "$WORKDIR/server2.log" 2>&1 &
 SERVER_PID=$!
 wait_for_port $((PORT + 1)) || echo "  (port $((PORT + 1)) never opened)"
 
-BODY=$(curl -fsS --max-time 30 "http://127.0.0.1:$((PORT + 1))/probe" 2>&1 || echo "FAIL: $?")
-if ! echo "$BODY" | grep -q '"ok":true'; then
+BODY=$(curl -sS --max-time 30 "http://127.0.0.1:$((PORT + 1))/probe" 2>&1 || echo "FAIL: curl exit $?")
+if echo "$BODY" | grep -q '"ok":true'; then
+    assert "hull app fetched HTTPS via default CA resolution" true
+else
     echo "  response: $BODY"
     echo "  --- server2.log ---"
     sed 's/^/  | /' "$WORKDIR/server2.log"
     echo "  --- end server2.log ---"
+    # The probe depends on a third party: example.com's chain (Cloudflare,
+    # anchored at "SSL.com TLS ECC Root CA 2022", cross-signed by Comodo
+    # "AAA Certificate Services") must chain to a root in whichever store
+    # the resolver picked. The vendored Mozilla bundle has it (the fetch
+    # above passed); a host's system store need not. That is the host's
+    # store, not Hull - but only when an independent verifier agrees. So:
+    # a TLS handshake failure against a SYSTEM store that OpenSSL also
+    # cannot verify example.com against (with -partial_chain, as lenient
+    # as mbedTLS's trust of any listed CA) is a SKIP naming the store;
+    # anything else - DNS, timeout, a 500, the embedded bundle, or a store
+    # OpenSSL does verify against - stays a FAIL.
+    SYS_STORE=$(sed -n 's/.*using CA bundle: \(.*\)$/\1/p' "$WORKDIR/server2.log" | head -n 1)
+    TLS_FAIL=0
+    grep -q '"cap":"http.fetch".*"error":"TLS handshake failed"' "$WORKDIR/server2.log" && TLS_FAIL=1
+    STORE_VERIFIES=unknown
+    # The verifier must be real OpenSSL: Apple's LibreSSL openssl (and
+    # Apple's curl) also trust the default store / keychain whatever
+    # -CAfile says, so they would vouch for any file.
+    OSSL=""
+    for c in openssl /opt/homebrew/opt/openssl@3/bin/openssl \
+             /usr/local/opt/openssl@3/bin/openssl; do
+        if "$c" version 2>/dev/null | grep -q '^OpenSSL '; then OSSL="$c"; break; fi
+    done
+    if [ -n "$SYS_STORE" ] && [ -r "$SYS_STORE" ] && [ -n "$OSSL" ]; then
+        # Only a "Verify return code:" line decides: a connect failure
+        # leaves the answer unknown.
+        # -no-CAstore is OpenSSL 3; 1.1.1 knows only -no-CApath.
+        echo | "$OSSL" s_client -connect example.com:443 -servername example.com \
+            -CAfile "$SYS_STORE" -no-CApath -no-CAstore -partial_chain >"$WORKDIR/openssl.log" 2>&1
+        if grep -qi "unknown option\|usage" "$WORKDIR/openssl.log"; then
+            echo | "$OSSL" s_client -connect example.com:443 -servername example.com \
+                -CAfile "$SYS_STORE" -no-CApath -partial_chain >"$WORKDIR/openssl.log" 2>&1
+        fi
+        VRC=$(sed -n 's/.*Verify return code: \([0-9][0-9]*\).*/\1/p' "$WORKDIR/openssl.log" | tail -n 1)
+        if [ "$VRC" = 0 ]; then
+            STORE_VERIFIES=yes
+        elif [ -n "$VRC" ]; then
+            STORE_VERIFIES=no
+        fi
+        echo "  --- $("$OSSL" version) s_client -CAfile $SYS_STORE (verify: $STORE_VERIFIES) ---"
+        if [ "$STORE_VERIFIES" = unknown ]; then
+            tail -n 15 "$WORKDIR/openssl.log" | sed 's/^/  | /'
+        else
+            grep -E '^ *[0-9]+ s:|^ *i:|[Vv]erif' "$WORKDIR/openssl.log" | sed 's/^/  | /'
+        fi
+        for r in "SSL.com TLS ECC Root CA 2022" "AAA Certificate Services"; do
+            if grep -q "$r" "$SYS_STORE"; then echo "  | $SYS_STORE has: $r"
+            else echo "  | $SYS_STORE lacks: $r"; fi
+        done
+    elif [ -n "$SYS_STORE" ]; then
+        echo "  (no OpenSSL to check $SYS_STORE independently - not skipping)"
+    fi
+    if [ "$TLS_FAIL" -eq 1 ] && [ "$STORE_VERIFIES" = no ]; then
+        echo "  skip default CA resolution picked the system store $SYS_STORE, which"
+        echo "       cannot verify example.com's current chain (OpenSSL agrees);"
+        echo "       the same fetch verified against the vendored bundle above"
+    else
+        assert "hull app fetched HTTPS via default CA resolution" false
+    fi
 fi
-echo "$BODY" | grep -q '"ok":true'
-assert "hull app fetched HTTPS via default CA resolution" [ $? -eq 0 ]
 
 # At least one of system / embedded must have been chosen
 grep -qE "using CA bundle|using embedded CA bundle" "$WORKDIR/server2.log"
