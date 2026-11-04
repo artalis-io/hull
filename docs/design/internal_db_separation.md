@@ -160,6 +160,23 @@ yet gets no file at all.
   is the default one again, and tables an earlier start moved are moved back into the app
   database the same way, clearing the move record, so the next start without the flag moves
   them in again. Kept for one release.
+- **`--no-migrate` and `hull migrate`.** `--no-migrate` skips the move, so both runners call
+  `hl_db_internal_check_unmoved` instead of `hl_db_internal_startup`. It refuses to start,
+  naming `hull migrate`, when the stdlib would read a database that does not hold its tables:
+  the app database holds internal tables and the internal database records no move, or, under
+  `--keep-internal-in-app-db`, the internal file still holds them. It creates no file. A fresh
+  app, a recorded move (strays get the usual WARN), a declared `databases.internal`, and a
+  network, DuckDB or in-memory default all pass. Without this check, a pre-0.18 deployment
+  started with `--no-migrate` (the "run `hull migrate` separately" pattern) read an empty
+  internal file. Sessions and roles then failed closed, but an empty `_hull_totp` reads as "not
+  enrolled", so auth-flows completed a password-only login for a user who had 2FA. `hull migrate`
+  makes the move itself, after the SQL migrations, with the same `hl_db_internal_startup`
+  semantics and `--keep-internal-in-app-db`. It loads the app (as `hull test` / `hull agent` do)
+  to read the manifest, so a declared `databases.internal` moves nothing. A directory with no
+  app entry has no manifest. Every entry point derives the default internal path through
+  `hl_db_internal_configure`: `hl_app_context_init` for serve, the app.main runner, `hull test`
+  and `hull agent`, and `hull migrate`'s no-entry path. `hull test` and `hull agent` run on an
+  in-memory default with a separate in-memory internal database, so there is nothing to move.
 
 ## 5. Postgres, MySQL and DuckDB default connections
 

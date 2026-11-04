@@ -17,6 +17,12 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap + raw */
+#include "hull/cap/db_internal.h" /* hl_db_internal_startup / _configure */
+#include "hull/cap/db_registry.h"
+#include "hull/app_context.h"
+#include "hull/manifest.h"
+#include "hull/module_resolver.h" /* hl_module_set_uses_internal_db */
+#include "hull/runtime.h"
 #include "hull/tool.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
 #include "hull/shared/cli_log.h"   /* hl_log_fputs_escaped */
@@ -40,6 +46,10 @@ static void migrate_usage(void)
         "\n"
         "Options:\n"
         "  -d FILE             Database file (default: data.db)\n"
+        "  --keep-internal-in-app-db\n"
+        "                      Move the stdlib's _hull_* tables back into the\n"
+        "                      app database instead of the Hull-owned internal\n"
+        "                      database (the pre-0.18 layout)\n"
         "  [app_dir]           App directory (default: .)\n");
 }
 
@@ -78,14 +88,87 @@ static int cmd_run(const char *app_dir, const char *db_path)
     }
     if (result == HL_MIGRATE_NO_DIR) {
         printf("hull migrate: no migrations found\n");
-        return 0;
-    }
-    if (result == 0) {
+    } else if (result == 0) {
         printf("hull migrate: already up to date\n");
     } else {
         printf("hull migrate: applied %d migration(s)\n", result);
     }
     return 0;
+}
+
+/* ── The internal-database move ───────────────────────────────────── */
+
+/* 1 when @p app_dir holds an app entry (app.lua / app.js). */
+static int has_entry(const char *app_dir)
+{
+    static const char *const names[] = { "app.lua", "app.js" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        char p[PATH_MAX];
+        int n = snprintf(p, sizeof p, "%s/%s", app_dir, names[i]);
+        if (n > 0 && (size_t)n < sizeof p && access(p, F_OK) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Move the stdlib's _hull_* tables into the Hull-owned internal database (or
+ * back, under --keep-internal-in-app-db), exactly as a start without
+ * --no-migrate does (hl_db_internal_startup): the documented "run `hull
+ * migrate` separately, start with --no-migrate" deployment otherwise never
+ * moved them, and a start refuses while they are not moved. The app is
+ * loaded (as `hull test` / `hull agent` load it) to learn whether its
+ * manifest declares databases.internal, in which case nothing moves; a
+ * directory with no app entry has no manifest. */
+static int cmd_move_internal(const char *app_dir, const char *db_path, int keep)
+{
+    int rc = 1;
+    if (!has_entry(app_dir)) {
+        HlDbRegistry *reg = hl_db_registry_create(NULL, db_path, NULL);
+        const char *derr = NULL;
+        if (!reg || hl_db_registry_set_app_dir(reg, app_dir) != 0 ||
+            !hl_db_registry_get(reg, "default", &derr) ||
+            hl_db_internal_configure(reg, app_dir, db_path, keep) != 0) {
+            fprintf(stderr, "hull migrate: cannot open the app database for "
+                            "the internal-table move\n");
+        } else if (hl_db_internal_startup(reg, keep, 0) == 0) {
+            rc = 0;
+        }
+        hl_db_registry_destroy(reg);
+        return rc;
+    }
+
+    HlAppContextOpts opts = {
+        .app_dir = app_dir,
+        .db_path = db_path,
+        .no_migrate = 1,               /* cmd_run applied them */
+        .gate_modules = 1,
+        .keep_internal_in_app_db = keep,
+    };
+    HlAppContext *ctx = NULL;
+    if (hl_app_context_init(&ctx, &opts) != 0) {
+        fprintf(stderr, "hull migrate: cannot load the app to read its "
+                        "manifest (databases.internal); the stdlib's _hull_* "
+                        "tables were not moved\n");
+        return 1;
+    }
+    HlRuntime *rt = hl_app_context_runtime(ctx);
+    HlManifest m;
+    memset(&m, 0, sizeof m);
+    int have_m = rt && rt->vt->extract_manifest &&
+                 rt->vt->extract_manifest(rt, &m) == 0;
+    if (rt && rt->db_registry) {
+        if (have_m) hl_db_registry_set_manifest(rt->db_registry, &m);
+        if (hl_db_internal_startup(rt->db_registry, keep,
+                                   hl_module_set_uses_internal_db(rt->module_set)) == 0)
+            rc = 0;
+        hl_db_registry_set_manifest(rt->db_registry, NULL);
+    } else {
+        rc = 0;   /* no database: nothing to move */
+    }
+    if (have_m) hl_manifest_free(&m);
+    hl_app_context_free(ctx);
+    if (rc != 0)
+        fprintf(stderr, "hull migrate: the internal-table move failed\n");
+    return rc;
 }
 
 /* ── Status subcommand ────────────────────────────────────────────── */
@@ -156,6 +239,7 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
     const char *db_path = NULL;   /* default: <app_dir>/data.db (below) */
     const char *subcmd = NULL;
     int tui = 0;
+    int keep_internal = 0;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -166,6 +250,8 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
             return 0;
         } else if (strcmp(argv[i], "--tui") == 0) {
             tui = 1;
+        } else if (strcmp(argv[i], "--keep-internal-in-app-db") == 0) {
+            keep_internal = 1;
         } else if (!subcmd && argv[i][0] != '-') {
             /* First positional arg: could be subcommand or app_dir */
             if (strcmp(argv[i], "status") == 0 ||
@@ -228,8 +314,11 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
         return cmd_status(app_dir, db_path);
     }
 
-    /* Default: run migrations */
-    return cmd_run(app_dir, db_path);
+    /* Default: run migrations, then the internal-table move a start
+     * without --no-migrate would make. */
+    int rc = cmd_run(app_dir, db_path);
+    if (rc != 0) return rc;
+    return cmd_move_internal(app_dir ? app_dir : ".", db_path, keep_internal);
 }
 
 #endif /* HL_ENABLE_DB */

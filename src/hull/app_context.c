@@ -270,17 +270,9 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
          * none for a network or DuckDB default. Moved into by
          * hl_db_internal_startup once the manifest is wired. */
         if (db_path) {
-            char app_real[PATH_MAX], idsn[HL_HOST_PATH_MAX + 32];
-            size_t ibase = 0;
-            int in_hull = 0;
-            int k = realpath(ctx->app_dir_copy, app_real)
-                    ? hl_db_internal_default_dsn(app_real, db_path, idsn,
-                                                 sizeof idsn, &ibase, &in_hull)
-                    : 0;
-            if (k < 0 ||
-                (k > 0 && hl_db_registry_set_default_internal(
-                              ctx->db_registry, idsn, ibase, in_hull,
-                              !opts->keep_internal_in_app_db) != 0)) {
+            if (hl_db_internal_configure(ctx->db_registry, ctx->app_dir_copy,
+                                         db_path,
+                                         opts->keep_internal_in_app_db) != 0) {
                 fprintf(stderr, "hull: cannot work out the internal database "
                                 "path\n");
                 hl_db_registry_destroy(ctx->db_registry);

@@ -65,9 +65,24 @@ HlWsConn *hl_ws_registry_add(HlWsRegistry *reg, const char *path,
 /* Remove a connection from the registry and free it. */
 void hl_ws_registry_remove(HlWsRegistry *reg, HlWsConn *conn);
 
-/* Find an HlWsConn by its underlying Keel connection pointer. */
+/* Find the LIVE HlWsConn for a Keel connection pointer.
+ *
+ * Invariant: a node whose on_close ran is never returned. Keel frees the
+ * KlWsServerConn when on_close returns, while a node whose async on_close
+ * handler is parked stays in the list until its completion hook removes it;
+ * a new connection may then get the same address. So on_close marks the
+ * node with hl_ws_registry_mark_closed (closed = 1, kl_ws = NULL) before any
+ * app code runs, and find skips closed nodes: a later callback for the reused
+ * address resolves to the new node (or to none), never to the stale one,
+ * whatever order the list holds them in. Every send path checks `closed` /
+ * `kl_ws` too. */
 HlWsConn *hl_ws_registry_find(HlWsRegistry *reg, const char *path,
                                 KlWsServerConn *kl_ws);
+
+/* Mark @p conn closed as its on_close starts: closed = 1 and kl_ws = NULL
+ * (Keel frees it when on_close returns). The node stays allocated, and in
+ * the list, until hl_ws_registry_remove; find no longer returns it. */
+void hl_ws_registry_mark_closed(HlWsConn *conn);
 
 /* Broadcast a text message to all connections on a path.
  * Returns the number of connections sent to. */

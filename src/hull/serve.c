@@ -2298,10 +2298,15 @@ static int hl_serve_wire_caps(HlServerState *s)
     /* The stdlib's _hull_* tables move into the Hull-owned internal database
      * (or back, under --keep-internal-in-app-db): once the module set is
      * resolved and the signed policy checked, before the phase-2 sandbox
-     * narrows file access (audit convergence §7.2). */
-    if (rt->db_registry && !s->cfg.no_migrate &&
-        hl_db_internal_startup(rt->db_registry, s->cfg.keep_internal,
-                               hl_module_set_uses_internal_db(rt->module_set)) != 0)
+     * narrows file access (audit convergence §7.2). --no-migrate skips the
+     * move, so it refuses to start while the tables have not been moved:
+     * the stdlib would read an empty internal database (sessions, roles,
+     * and TOTP enrolments gone - a password alone signed in). */
+    if (rt->db_registry &&
+        (s->cfg.no_migrate
+             ? hl_db_internal_check_unmoved(rt->db_registry, s->cfg.keep_internal)
+             : hl_db_internal_startup(rt->db_registry, s->cfg.keep_internal,
+                                      hl_module_set_uses_internal_db(rt->module_set))) != 0)
         return -1;
 #endif
 

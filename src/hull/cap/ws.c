@@ -142,11 +142,20 @@ HlWsConn *hl_ws_registry_find(HlWsRegistry *reg, const char *path,
     if (!ep)
         return NULL;
 
+    /* A closed node (on_close ran: Keel freed its connection, and the
+     * address may belong to a new one) is never returned - see the header. */
     for (HlWsConn *c = ep->conns; c; c = c->next) {
-        if (c->kl_ws == kl_ws)
+        if (!c->closed && c->kl_ws && c->kl_ws == kl_ws)
             return c;
     }
     return NULL;
+}
+
+void hl_ws_registry_mark_closed(HlWsConn *conn)
+{
+    if (!conn) return;
+    conn->closed = 1;
+    conn->kl_ws = NULL;
 }
 
 int hl_ws_broadcast_text(HlWsRegistry *reg, const char *path,

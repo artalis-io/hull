@@ -804,4 +804,78 @@ UTEST(db_internal, move_refuses_a_forged_schema_statement)
     rm_tree(root);
 }
 
+/* A registry for <app>/data.db with the default internal database recorded,
+ * as hl_app_context_init / hull migrate build it. */
+static HlDbRegistry *app_registry(const char *app, int keep)
+{
+    char db[PATH_MAX + 16];
+    snprintf(db, sizeof db, "%s/data.db", app);
+    HlDbRegistry *reg = hl_db_registry_create(NULL, db, NULL);
+    const char *err = NULL;
+    if (!reg || hl_db_registry_set_app_dir(reg, app) != 0 ||
+        !hl_db_registry_get(reg, "default", &err) ||
+        hl_db_internal_configure(reg, app, db, keep) != 0) {
+        hl_db_registry_destroy(reg);
+        return NULL;
+    }
+    return reg;
+}
+
+/* --no-migrate skips the move, so it must never let the stdlib read an
+ * internal database that does not hold its tables: a pre-0.18 app database
+ * (a TOTP enrolment in data.db) is refused, without making the internal
+ * file; once moved it passes (strays ignored), a fresh app passes, and under
+ * --keep-internal-in-app-db tables still in the internal file are refused. */
+UTEST(db_internal, no_migrate_refuses_unmoved_tables)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char idb[PATH_MAX + 32];
+    snprintf(idb, sizeof idb, "%s/.hull/internal.db", app);
+    struct stat st;
+
+    /* Fresh: nothing anywhere. */
+    HlDbRegistry *reg = app_registry(app, 0);
+    ASSERT_TRUE(reg != NULL);
+    EXPECT_EQ(0, hl_db_internal_check_unmoved(reg, 0));
+    EXPECT_EQ(0, hl_db_internal_check_unmoved(reg, 1));
+
+    /* The v0.17 layout: a TOTP enrolment in the app database. */
+    HlDbHandle *def = hl_db_registry_default(reg);
+    ASSERT_TRUE(texec(def, "CREATE TABLE _hull_totp (user_id VARCHAR(255) "
+                           "PRIMARY KEY, secret TEXT)") >= 0);
+    ASSERT_TRUE(texec(def, "INSERT INTO _hull_totp VALUES ('alice', 's')") >= 0);
+    EXPECT_EQ(-1, hl_db_internal_check_unmoved(reg, 0));
+    EXPECT_NE(0, lstat(idb, &st));          /* the check made no file */
+
+    /* An internal file a top-level init() made, with no move record: still
+     * refused. */
+    const char *err = NULL;
+    HlDbHandle *in = hl_db_registry_internal(reg, &err);
+    ASSERT_TRUE(in != NULL);
+    ASSERT_TRUE(texec(in, "CREATE TABLE _hull_totp (user_id VARCHAR(255) "
+                          "PRIMARY KEY, secret TEXT)") >= 0);
+    EXPECT_EQ(-1, hl_db_internal_check_unmoved(reg, 0));
+
+    /* The move (what a start without --no-migrate, or hull migrate, does). */
+    EXPECT_EQ(0, hl_db_internal_startup(reg, 0, 1));
+    EXPECT_EQ(1, count(in, "SELECT count(*) FROM _hull_totp"));
+    EXPECT_EQ(0, hl_db_internal_check_unmoved(reg, 0));
+    /* A planted stray after the move is ignored, not refused. */
+    ASSERT_TRUE(texec(def, "CREATE TABLE _hull_roles (name VARCHAR(255))") >= 0);
+    EXPECT_EQ(0, hl_db_internal_check_unmoved(reg, 0));
+    ASSERT_TRUE(texec(def, "DROP TABLE _hull_roles") >= 0);
+    hl_db_registry_destroy(reg);
+
+    /* --keep-internal-in-app-db: the tables are in the internal file. */
+    reg = app_registry(app, 1);
+    ASSERT_TRUE(reg != NULL);
+    EXPECT_EQ(-1, hl_db_internal_check_unmoved(reg, 1));
+    EXPECT_EQ(0, hl_db_internal_startup(reg, 1, 1));     /* moved back */
+    EXPECT_EQ(0, hl_db_internal_check_unmoved(reg, 1));
+    EXPECT_EQ(1, count(hl_db_registry_default(reg), "SELECT count(*) FROM _hull_totp"));
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
 UTEST_MAIN()

@@ -261,6 +261,68 @@ PYEOF
         && pass "$ext: planted rows never reach the internal database" \
         || fail "$ext: planted rows never reach the internal database" "$out"
 
+    echo "=== $ext: --no-migrate never reads an unmoved internal database ==="
+    # A pre-0.18 deployment (tables in data.db) started with --no-migrate -
+    # the "run hull migrate separately" pattern. --no-migrate skips the move,
+    # so the stdlib read an empty .hull/internal.db: sessions and roles gone,
+    # and an empty _hull_totp read as "not enrolled" (2FA skipped).
+    d="$TMPDIR/nomig_$ext"
+    write_app "$d" "$ext"
+    out=$(hrun "$d" "$ext" --keep-internal-in-app-db -- seed)
+    sid=$(field "$out" sid)
+    out=$(hrun "$d" "$ext" --no-migrate -- "$sid")
+    case "$out" in
+        *"roles="*) fail "$ext: --no-migrate refuses to start while the tables are unmoved" "$out" ;;
+        *"not yet moved"*"hull migrate"*)
+            pass "$ext: --no-migrate refuses to start while the tables are unmoved" ;;
+        *) fail "$ext: --no-migrate refuses to start while the tables are unmoved" "$out" ;;
+    esac
+    [ "$(sql "$d/data.db" "SELECT count(*) FROM _hull_user_roles")" = 1 ] \
+        && [ "$(has_table "$d/.hull/internal.db" _hull_user_roles)" != 1 ] \
+        && pass "$ext: the refused start leaves the tables in data.db" \
+        || fail "$ext: the refused start leaves the tables in data.db" "$out"
+    out=$(cd "$d" && "$HULL" migrate -d data.db . 2>&1 || true)
+    [ "$(has_table "$d/data.db" _hull_user_roles)" = 0 ] \
+        && [ "$(sql "$d/.hull/internal.db" "SELECT count(*) FROM _hull_user_roles")" = 1 ] \
+        && [ "$(sql "$d/.hull/internal.db" "SELECT count(*) FROM _hull_internal_meta WHERE key='app_db_moved'")" = 1 ] \
+        && pass "$ext: hull migrate performs the move" \
+        || fail "$ext: hull migrate performs the move" "$out"
+    out=$(hrun "$d" "$ext" --no-migrate -- "$sid")
+    case "$out" in
+        *"roles=admin"*"session=true"*"app_db_hull_tables=0"*)
+            pass "$ext: after hull migrate, --no-migrate starts with sessions and roles" ;;
+        *) fail "$ext: after hull migrate, --no-migrate starts with sessions and roles" "$out" ;;
+    esac
+    out=$(hrun "$d" "$ext" --no-migrate --keep-internal-in-app-db -- "$sid")
+    case "$out" in
+        *"roles="*) fail "$ext: --no-migrate --keep-internal-in-app-db refuses while the tables are in the internal database" "$out" ;;
+        *"hull migrate --keep-internal-in-app-db"*)
+            pass "$ext: --no-migrate --keep-internal-in-app-db refuses while the tables are in the internal database" ;;
+        *) fail "$ext: --no-migrate --keep-internal-in-app-db refuses while the tables are in the internal database" "$out" ;;
+    esac
+    out=$(cd "$d" && "$HULL" migrate --keep-internal-in-app-db -d data.db . 2>&1 || true)
+    [ "$(sql "$d/data.db" "SELECT count(*) FROM _hull_user_roles")" = 1 ] \
+        && [ "$(has_table "$d/.hull/internal.db" _hull_user_roles)" = 0 ] \
+        && pass "$ext: hull migrate --keep-internal-in-app-db moves them back" \
+        || fail "$ext: hull migrate --keep-internal-in-app-db moves them back" "$out"
+    out=$(hrun "$d" "$ext" --no-migrate --keep-internal-in-app-db -- "$sid")
+    case "$out" in
+        *"roles=admin"*"session=true"*)
+            pass "$ext: then --no-migrate --keep-internal-in-app-db starts on the old layout" ;;
+        *) fail "$ext: then --no-migrate --keep-internal-in-app-db starts on the old layout" "$out" ;;
+    esac
+
+    d="$TMPDIR/nomig_fresh_$ext"
+    write_app "$d" "$ext"
+    out=$(hrun "$d" "$ext" --no-migrate -- seed)
+    sid=$(field "$out" sid)
+    out=$(hrun "$d" "$ext" --no-migrate -- "$sid")
+    case "$out" in
+        *"roles=admin"*"session=true"*"app_db_hull_tables=0"*)
+            pass "$ext: a fresh app starts under --no-migrate" ;;
+        *) fail "$ext: a fresh app starts under --no-migrate" "$out" ;;
+    esac
+
     echo "=== $ext: -d outside the app directory ==="
     d="$TMPDIR/out_$ext"
     write_app "$d" "$ext"
@@ -284,6 +346,14 @@ PYEOF
     [ "$(has_table "$d/mine.db" _hull_sessions)" = 1 ] && [ ! -e "$d/.hull/internal.db" ] \
         && pass "$ext: the declared internal database is used, .hull/internal.db is not made" \
         || fail "$ext: the declared internal database is used, .hull/internal.db is not made" "$out"
+    # hull migrate reads the manifest: a declared databases.internal means
+    # nothing moves into .hull/internal.db.
+    "$PY" -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); \
+c.execute('CREATE TABLE _hull_user_roles (user_id VARCHAR(255), role VARCHAR(255))'); c.commit()" "$d/data.db"
+    out=$(cd "$d" && "$HULL" migrate -d data.db . 2>&1 || true)
+    [ "$(has_table "$d/data.db" _hull_user_roles)" = 1 ] && [ ! -e "$d/.hull/internal.db" ] \
+        && pass "$ext: hull migrate moves nothing when databases.internal is declared" \
+        || fail "$ext: hull migrate moves nothing when databases.internal is declared" "$out"
 done
 
 echo "=== databases.named may not name .hull ==="
