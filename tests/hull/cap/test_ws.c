@@ -183,6 +183,63 @@ UTEST(ws_registry, find_by_kl_ws)
     teardown_reg();
 }
 
+/* Keel frees the KlWsServerConn when on_close returns, while a node whose
+ * async on_close handler is parked stays in the list; a new connection may
+ * get the same address. find must never return the closed node - whatever
+ * order the list holds the two in. */
+UTEST(ws_registry, find_never_returns_a_closed_node)
+{
+    setup_reg();
+    int fake = 0;
+    KlWsServerConn *ws = (KlWsServerConn *)&fake;
+
+    /* on_close ran (closed set, as the runtimes did before the fix): */
+    HlWsConn *stale = hl_ws_registry_add(&test_reg, "/ws", ws);
+    ASSERT_TRUE(stale != NULL);
+    stale->closed = 1;
+    EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", ws) == NULL);
+
+    /* The address reused by a new connection: the new node, in either list
+     * order (add prepends; the fresh node is added FIRST here so the stale
+     * one is ahead of it). */
+    hl_ws_registry_remove(&test_reg, stale);
+    HlWsConn *fresh = hl_ws_registry_add(&test_reg, "/ws", ws);
+    stale = hl_ws_registry_add(&test_reg, "/ws", ws);
+    ASSERT_TRUE(fresh != NULL && stale != NULL);
+    stale->closed = 1;
+    EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", ws) == fresh);
+
+    /* mark_closed: closed, and its Keel pointer dropped. */
+    hl_ws_registry_mark_closed(fresh);
+    EXPECT_EQ(1, fresh->closed);
+    EXPECT_TRUE(fresh->kl_ws == NULL);
+    EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", ws) == NULL);
+    EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", NULL) == NULL);
+    hl_ws_registry_mark_closed(NULL);   /* no crash */
+
+    /* A broadcast skips closed nodes (nothing to send to). */
+    EXPECT_EQ(0, hl_ws_broadcast_text(&test_reg, "/ws", "x", 1));
+
+    hl_ws_registry_remove(&test_reg, fresh);
+    hl_ws_registry_remove(&test_reg, stale);
+    teardown_reg();
+}
+
+/* A failed add (the runtimes then close the Keel connection) returns NULL
+ * and registers nothing. */
+UTEST(ws_registry, add_failure_registers_nothing)
+{
+    HlAllocator tiny;
+    hl_alloc_init(&tiny, 1);   /* every allocation fails */
+    HlWsRegistry reg;
+    hl_ws_registry_init(&reg, &tiny);
+    int fake = 0;
+    EXPECT_TRUE(hl_ws_registry_add(&reg, "/ws", (KlWsServerConn *)&fake) == NULL);
+    EXPECT_TRUE(hl_ws_registry_find(&reg, "/ws", (KlWsServerConn *)&fake) == NULL);
+    EXPECT_EQ((size_t)0, hl_ws_connections(&reg, "/ws"));
+    hl_ws_registry_free(&reg);
+}
+
 UTEST(ws_registry, null_safety)
 {
     /* All functions should handle NULL gracefully */

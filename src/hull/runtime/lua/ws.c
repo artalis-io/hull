@@ -93,8 +93,14 @@ static void hl_lua_ws_on_open_impl(KlWsServerConn *ws_conn, void *user_data)
     /* Register the connection in the registry */
     HlWsConn *conn = hl_ws_registry_add(lua->base.ws_registry,
                                           route->path, ws_conn);
-    if (!conn)
+    if (!conn) {
+        /* Unregistered, the connection would stay open with every later
+         * callback finding no node: close it instead (Keel's on_close then
+         * finds none and returns). */
+        log_error("[hull:ws] cannot register a WebSocket connection: closing it");
+        (void)kl_ws_server_close(ws_conn, 1011, "server error", 12);
         return;
+    }
 
     if (route->on_open_id < 0)
         return;
@@ -270,9 +276,12 @@ static void hl_lua_ws_on_close_impl(KlWsServerConn *ws_conn, uint16_t code,
     HlWsConn *conn = hl_ws_registry_find(lua->base.ws_registry,
                                            route->path, ws_conn);
     if (!conn)
-        return;
+        return;   /* unregistered, or its on_close already ran (find skips it) */
 
-    conn->closed = 1;
+    /* Before any app code: Keel frees ws_conn when this returns, and a node
+     * whose async handler parks outlives it, so find must never return it
+     * again (a new connection may reuse the address). */
+    hl_ws_registry_mark_closed(conn);
 
     HlWsArgs args = { conn, 2, reason, reason_len, 0, code };
     int thread_ref = LUA_NOREF, nargs = 0;
