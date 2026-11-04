@@ -217,16 +217,29 @@ else
     if [ -n "$SYS_STORE" ] && [ -r "$SYS_STORE" ] && [ -n "$OSSL" ]; then
         # Only a "Verify return code:" line decides: a connect failure
         # leaves the answer unknown.
+        # -no-CAstore is OpenSSL 3; 1.1.1 knows only -no-CApath.
         echo | "$OSSL" s_client -connect example.com:443 -servername example.com \
             -CAfile "$SYS_STORE" -no-CApath -no-CAstore -partial_chain >"$WORKDIR/openssl.log" 2>&1
+        if grep -qi "unknown option\|usage" "$WORKDIR/openssl.log"; then
+            echo | "$OSSL" s_client -connect example.com:443 -servername example.com \
+                -CAfile "$SYS_STORE" -no-CApath -partial_chain >"$WORKDIR/openssl.log" 2>&1
+        fi
         VRC=$(sed -n 's/.*Verify return code: \([0-9][0-9]*\).*/\1/p' "$WORKDIR/openssl.log" | tail -n 1)
         if [ "$VRC" = 0 ]; then
             STORE_VERIFIES=yes
         elif [ -n "$VRC" ]; then
             STORE_VERIFIES=no
         fi
-        echo "  --- $OSSL s_client -CAfile $SYS_STORE (verify: $STORE_VERIFIES) ---"
-        grep -E '^ *[0-9]+ s:|^ *i:|[Vv]erif' "$WORKDIR/openssl.log" | sed 's/^/  | /'
+        echo "  --- $("$OSSL" version) s_client -CAfile $SYS_STORE (verify: $STORE_VERIFIES) ---"
+        if [ "$STORE_VERIFIES" = unknown ]; then
+            tail -n 15 "$WORKDIR/openssl.log" | sed 's/^/  | /'
+        else
+            grep -E '^ *[0-9]+ s:|^ *i:|[Vv]erif' "$WORKDIR/openssl.log" | sed 's/^/  | /'
+        fi
+        for r in "SSL.com TLS ECC Root CA 2022" "AAA Certificate Services"; do
+            if grep -q "$r" "$SYS_STORE"; then echo "  | $SYS_STORE has: $r"
+            else echo "  | $SYS_STORE lacks: $r"; fi
+        done
     elif [ -n "$SYS_STORE" ]; then
         echo "  (no OpenSSL to check $SYS_STORE independently - not skipping)"
     fi
