@@ -8,6 +8,24 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **TOTP recovery codes use a salted fast hash; enrolment no longer costs a large share of the run
+  budget (audit-lua M1).** `totp.enroll` hashed each of its 10 default recovery codes with
+  `crypto.hash_password` (PBKDF2-100k): 16M units of explicit charge plus the measured time, ~59M
+  units (~60% of a default 100M-unit run) on an idle host, so enrol + confirm + verify in one request
+  tripped `instruction limit exceeded` on a loaded one (a 500 in production; four unit tests failed
+  under parallel load). Recovery codes are random, not passwords a person chose, so a slow KDF buys
+  nothing: new codes are 16 characters (`ABCD-EFGH-JKMN-PQRS`, ~77 bits of min-entropy, up from 12
+  characters / ~59 bits) and are stored as `rch1$<16-byte salt hex>$<HMAC-SHA256(salt, code) hex>`,
+  verified in constant time (`hmac_sha256_verify` / `hmacSha256Verify`). Enrolment now costs ~5.8M
+  units (~6% of the budget) in both runtimes. Lua (`totp.lua`) and JS (`totp.js`) write and read the
+  same format. **Backward compatible:** a stored `pbkdf2:` hash (a 12-character code minted before
+  this change) still verifies through `verify_password` and is consumed once, exactly as before;
+  each format is tried only for codes of its own length, so a new code never pays a PBKDF2 against
+  a legacy row. Existing enrolments keep working; re-enrolling mints new-format codes. The two
+  `totp_rekey_batch_helper` tests run at the default budget again.
+
 ## [0.18.0] - 2026-11-03
 
 Full PR list:

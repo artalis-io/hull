@@ -260,61 +260,100 @@ end
 -- hull.crypto.otp.
 local totp_at_step = otp.hotp
 
--- Recovery codes: 12 chars from an unambiguous 31-char alphabet,
--- formatted as ABCD-EFGH-IJKL. ~59.5 bits of entropy per code - well
--- above brute-force feasibility at any reasonable verify rate.
+-- Recovery codes: 16 chars from an unambiguous 31-char alphabet,
+-- formatted as ABCD-EFGH-JKMN-PQRS. 16 x log2(31) = 79.3 bits; with the
+-- modulo bias of a byte reduced mod 31 (the likeliest character has
+-- probability 9/256) the min-entropy is still 16 x 4.83 = 77 bits.
 -- Alphabet skips 0/O/1/I/L (common confusables when transcribed).
+--
+-- Codes minted before audit-lua M1 were 12 characters (59.5 bits) and
+-- stored as crypto.hash_password (PBKDF2-100k) hashes; they still verify
+-- (verify_recovery_code below) until used or replaced by a re-enrolment.
 local RECOVERY_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  -- 31 chars
+local RECOVERY_CODE_LEN = 16
+local LEGACY_RECOVERY_CODE_LEN = 12
 
 -- Strip everything outside the recovery alphabet (hyphens, spaces,
 -- accidental punctuation) and uppercase. Stored hashes are computed
 -- against the normalized form so users can paste back the displayed
--- "ABCD-EFGH-IJKL" or the unhyphenated "ABCDEFGHIJKL" interchangeably,
+-- "ABCD-EFGH-JKMN-PQRS" or the unhyphenated form interchangeably,
 -- and case sensitivity isn't a lockout trap.
 local function normalize_recovery_code(s)
     if type(s) ~= "string" then return "" end
     return (s:upper():gsub("[^A-Z0-9]", ""))
 end
 
+-- Stored form of a recovery code (audit-lua M1):
+--
+--     rch1$<salt: 16 random bytes, hex>$<HMAC-SHA256(key = salt, code), hex>
+--
+-- A recovery code is a 77-bit random string, not a password a person chose,
+-- so a slow KDF buys nothing: no offline guessing of 2^77 candidates is
+-- feasible at any hash speed. PBKDF2-100k per code made totp.enroll (10
+-- codes) cost 16M units of explicit charge plus its measured time, a large
+-- share of one run's budget, and tripped it on a loaded host. The salt keeps
+-- equal codes (across users) from sharing a stored value and makes each row
+-- its own target; the compare is constant-time in C (hmac_sha256_verify).
+-- The JS twin (totp.js) writes and reads the same format.
+local RECOVERY_HASH_PREFIX = "rch1$"
+local LEGACY_HASH_PREFIX   = "pbkdf2:"
+
+local function hash_recovery_code(code)
+    local salt = crypto.random(16)
+    local mac = crypto.hmac_sha256(normalize_recovery_code(code), salt)
+    return RECOVERY_HASH_PREFIX .. encoding.hex.encode(salt) .. "$"
+        .. encoding.hex.encode(mac)
+end
+
+-- Verify against either stored format. A code can only match the format it
+-- was minted under, and each format's codes have one length, so a code of
+-- the other length is refused without hashing (a 16-character code never
+-- pays a PBKDF2 against a legacy row).
+local function verify_recovery_code(code, hash)
+    if type(hash) ~= "string" then return false end
+    local n = normalize_recovery_code(code)
+    if hash:sub(1, #RECOVERY_HASH_PREFIX) == RECOVERY_HASH_PREFIX then
+        if #n ~= RECOVERY_CODE_LEN or #hash ~= #RECOVERY_HASH_PREFIX + 32 + 1 + 64 then
+            return false
+        end
+        local salt_hex, mac_hex = hash:match("^rch1%$([0-9a-f]+)%$([0-9a-f]+)$")
+        if not salt_hex or #salt_hex ~= 32 or #mac_hex ~= 64 then return false end
+        local salt, mac = encoding.hex.decode(salt_hex), encoding.hex.decode(mac_hex)
+        if not salt or not mac then return false end
+        return crypto.hmac_sha256_verify(n, salt, mac)
+    elseif hash:sub(1, #LEGACY_HASH_PREFIX) == LEGACY_HASH_PREFIX then
+        if #n ~= LEGACY_RECOVERY_CODE_LEN then return false end
+        return crypto.verify_password(n, hash)
+    end
+    return false
+end
+
 local function generate_recovery_codes(n)
     local codes, hashes = {}, {}
     for i = 1, n do
-        -- Need 12 chars × log2(31) ≈ 59.5 bits → 12 random bytes is
-        -- plenty. Modulo bias on 31 from a uniform byte is < 0.4%
-        -- per char and ignorable at this entropy scale.
-        local raw = crypto.random(12)
+        local raw = crypto.random(RECOVERY_CODE_LEN)
         local parts = {}
-        for j = 1, 12 do
+        for j = 1, RECOVERY_CODE_LEN do
             local b = string.byte(raw, j)
             parts[j] = RECOVERY_ALPHA:sub((b % 31) + 1, (b % 31) + 1)
         end
         local plain = table.concat(parts)  -- unhyphenated, used for hash
-        local display = parts[1] .. parts[2] .. parts[3] .. parts[4] .. "-"
-                      .. parts[5] .. parts[6] .. parts[7] .. parts[8] .. "-"
-                      .. parts[9] .. parts[10] .. parts[11] .. parts[12]
-        codes[i] = display
-        hashes[i] = crypto.hash_password(plain)
+        codes[i] = table.concat(parts, "", 1, 4) .. "-"
+                .. table.concat(parts, "", 5, 8) .. "-"
+                .. table.concat(parts, "", 9, 12) .. "-"
+                .. table.concat(parts, "", 13, 16)
+        hashes[i] = hash_recovery_code(plain)
     end
     return codes, hashes
 end
 
--- Recovery-code hash matches crypto.hash_password's pbkdf2 format,
--- so verify uses crypto.verify_password (constant-time at C layer).
-local function hash_recovery_code(code)
-    return crypto.hash_password(normalize_recovery_code(code))
-end
-
-local function verify_recovery_code(code, hash)
-    return crypto.verify_password(normalize_recovery_code(code), hash)
-end
-
--- Every recovery code is 12 characters once normalized. Anything else - a
--- 6-digit TOTP code above all - cannot match one, and checking it anyway cost
--- a PBKDF2 hash per unused code (10 by default) on the event loop for every
--- wrong code submitted.
-local RECOVERY_CODE_LEN = 12
+-- A recovery code is 16 characters once normalized (12 for one minted
+-- before audit-lua M1). Anything else - a 6-digit TOTP code above all -
+-- cannot match one, and checking it anyway cost a hash per unused code on
+-- the event loop for every wrong code submitted.
 local function recovery_shaped(code)
-    return #normalize_recovery_code(code) == RECOVERY_CODE_LEN
+    local n = #normalize_recovery_code(code)
+    return n == RECOVERY_CODE_LEN or n == LEGACY_RECOVERY_CODE_LEN
 end
 
 -- Constant-time string equality. Used for TOTP code matching where
@@ -1619,6 +1658,18 @@ require("hull._test_hooks").register("hull.web.middleware.totp", {
     generate_recovery_codes = generate_recovery_codes,
     hash_recovery_code      = hash_recovery_code,
     verify_recovery_code    = verify_recovery_code,
+    -- Store a recovery-code hash for a confirmed user as-is (an old-format
+    -- PBKDF2 row, for the backward-compatibility tests).
+    add_recovery_hash       = function(user_id, code_hash)
+        db.exec("INSERT INTO _hull_totp_recovery (user_id, code_hash) "
+                .. "VALUES (?, ?)", { user_id, code_hash })
+    end,
+    recovery_used_count     = function(user_id)
+        local r = db.query("SELECT COUNT(*) AS n FROM _hull_totp_recovery "
+                           .. "WHERE user_id = ? AND used_at IS NOT NULL",
+                           { user_id })
+        return (r and r[1] and r[1].n) or 0
+    end,
     encrypt_secret          = encrypt_secret,
     decrypt_secret          = decrypt_secret,
     build_otpauth_url       = build_otpauth_url,
