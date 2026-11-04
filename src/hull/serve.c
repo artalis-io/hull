@@ -2643,6 +2643,7 @@ static int hl_serve_apply_sandbox(HlServerState *s)
     }
     /* Watchdog threads from here on are born inside the sandbox. */
     hl_run_watchdog_release();
+    hl_async_pool_release();
     return 0;
 }
 
@@ -3475,6 +3476,8 @@ int hull_serve(int argc, char **argv)
      * started while the app loads would keep phase-1 permissions. The top
      * level's deadline is polled meanwhile (cap/run_watchdog.h). */
     hl_run_watchdog_defer();
+    /* Nor a worker-pool thread (C audit L4; shared/async_backend.h). */
+    hl_async_pool_hold();
 
     /* Phase 9: signature verify, phase-1 sandbox, then VFS + DB + migrations +
      * runtime init via HlAppContext (deferred app load) */

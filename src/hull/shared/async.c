@@ -203,3 +203,22 @@ void hl_detached_timer_fire(void *user_data)
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     hl_async_ctx_resume_detached(ctx);
 }
+
+/* ── Phase-2 gate on the worker pool (C audit L4) ───────────────────── */
+
+static int g_pool_held;   /* atomic */
+
+void hl_async_pool_hold(void)
+{
+    __atomic_store_n(&g_pool_held, 1, __ATOMIC_RELEASE);
+}
+
+void hl_async_pool_release(void)
+{
+    __atomic_store_n(&g_pool_held, 0, __ATOMIC_RELEASE);
+}
+
+int hl_async_pool_held(void)
+{
+    return __atomic_load_n(&g_pool_held, __ATOMIC_ACQUIRE);
+}

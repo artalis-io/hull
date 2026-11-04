@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -75,48 +76,55 @@ const char *hl_ca_bundle_find_system(void)
     return NULL;
 }
 
-/* The published anchor (see cacert.h). Plain statics: written at startup,
- * read-only afterwards. */
-static int                  g_active_set;
-static const unsigned char *g_active_data;
-static size_t               g_active_len;
-static unsigned char       *g_active_owned;
-
-/* Owned buffers a later publish replaced. Startup can publish twice (early
- * for a network -d DSN, then at the full resolve), and the worker pool
- * already exists by the second, so the first buffer is kept rather than
- * freed under a reader. Freed only by reset, which runs when nothing is
- * reading. Two publishes happen at most; past the bound a buffer is
- * leaked, never freed early. */
-#define HL_CA_RETIRED_MAX 4
-static unsigned char *g_retired[HL_CA_RETIRED_MAX];
-static int            g_retired_n;
-
-/* The SEALED anchor (see hl_ca_bundle_seal_active): the descriptor - and the
- * bytes, when they were a heap copy - in a read-only arena. Once set, it is
- * all hl_ca_bundle_active reads, and no publish changes it. */
+/* The published anchor (see cacert.h): ONE immutable record behind ONE
+ * atomic pointer (C audit L4a). A reader loads the pointer once and reads a
+ * record nobody writes again, so it can never see a torn {set, data, len}
+ * - three plain globals written at startup let a thread started early read
+ * the new data with the old length. Records (and the owned bytes they name)
+ * are never freed while anything may read them: a later publish retires the
+ * old record, and only reset, which runs when nothing is reading, frees
+ * them. Startup publishes twice at most (early for a network -d DSN, then
+ * at the full resolve); past the bound a record is leaked, never freed
+ * early. */
 typedef struct {
     int                  set;
     const unsigned char *data;
     size_t               len;
 } CaAnchor;
 
+#define HL_CA_RETIRED_MAX 4
+static _Atomic(const CaAnchor *) g_anchor;
+static CaAnchor      *g_recs[HL_CA_RETIRED_MAX];     /* heap records */
+static int            g_recs_n;
+static unsigned char *g_owned[HL_CA_RETIRED_MAX];    /* heap bundle bytes */
+static int            g_owned_n;
+/* The writer's view of the current record's bytes when they are a heap
+ * copy (seal copies them into the read-only arena). Startup thread only. */
+static unsigned char *g_cur_owned;
+
+/* Publishing fails closed: a record that cannot be allocated is replaced
+ * by "an anchor was resolved, and it is empty", so verifying clients fail
+ * rather than fall back to the embedded bundle. */
+static const CaAnchor g_failed_anchor = { 1, NULL, 0 };
+
+/* The SEALED anchor (see hl_ca_bundle_seal_active): the record - and the
+ * bytes, when they were a heap copy - in a read-only arena. Once set it is
+ * what g_anchor points at, and no publish changes it. */
 static ShSealArena     g_seal_arena;
 static const CaAnchor *g_sealed;
 
 void hl_ca_bundle_reset_active(void)
 {
+    atomic_store_explicit(&g_anchor, NULL, memory_order_release);
     if (g_sealed) {
         sh_seal_arena_destroy(&g_seal_arena);
         g_sealed = NULL;
     }
-    free(g_active_owned);
-    for (int i = 0; i < g_retired_n; i++) free(g_retired[i]);
-    g_retired_n    = 0;
-    g_active_owned = NULL;
-    g_active_data  = NULL;
-    g_active_len   = 0;
-    g_active_set   = 0;
+    for (int i = 0; i < g_recs_n; i++) free(g_recs[i]);
+    for (int i = 0; i < g_owned_n; i++) free(g_owned[i]);
+    g_recs_n    = 0;
+    g_owned_n   = 0;
+    g_cur_owned = NULL;
 }
 
 void hl_ca_bundle_set_active(const unsigned char *data, size_t len, int owned)
@@ -127,29 +135,40 @@ void hl_ca_bundle_set_active(const unsigned char *data, size_t len, int owned)
         if (owned) free((void *)(uintptr_t)data);
         return;
     }
-    if (g_active_owned && g_retired_n < HL_CA_RETIRED_MAX)
-        g_retired[g_retired_n++] = g_active_owned;
-    g_active_owned = NULL;
-    g_active_set   = 1;
-    g_active_data  = data;
-    g_active_len   = data ? len : 0;
-    g_active_owned = (owned && data) ? (unsigned char *)(uintptr_t)data : NULL;
+    unsigned char *own = (owned && data) ? (unsigned char *)(uintptr_t)data
+                                         : NULL;
+    if (own) {
+        if (g_owned_n < HL_CA_RETIRED_MAX) g_owned[g_owned_n++] = own;
+        /* else leaked: never freed under a reader */
+    }
+    CaAnchor *rec = NULL;
+    if (g_recs_n < HL_CA_RETIRED_MAX) rec = malloc(sizeof *rec);
+    if (!rec) {
+        g_cur_owned = NULL;
+        atomic_store_explicit(&g_anchor, &g_failed_anchor,
+                              memory_order_release);
+        return;
+    }
+    rec->set  = 1;
+    rec->data = data;
+    rec->len  = data ? len : 0;
+    g_recs[g_recs_n++] = rec;
+    g_cur_owned = own;
+    atomic_store_explicit(&g_anchor, rec, memory_order_release);
 }
 
 int hl_ca_bundle_active(const unsigned char **data, size_t *len)
 {
     if (!data || !len) return -1;
-    int                  set = g_sealed ? g_sealed->set  : g_active_set;
-    const unsigned char *d   = g_sealed ? g_sealed->data : g_active_data;
-    size_t               n   = g_sealed ? g_sealed->len  : g_active_len;
-    if (!set) return hl_embedded_ca_bundle(data, len);
-    if (!d || n == 0) {
+    const CaAnchor *a = atomic_load_explicit(&g_anchor, memory_order_acquire);
+    if (!a || !a->set) return hl_embedded_ca_bundle(data, len);
+    if (!a->data || a->len == 0) {
         *data = NULL;
         *len  = 0;
         return -1;
     }
-    *data = d;
-    *len  = n;
+    *data = a->data;
+    *len  = a->len;
     return 0;
 }
 
@@ -157,29 +176,33 @@ int hl_ca_bundle_seal_active(void)
 {
     if (g_sealed) return 0;   /* nothing can have changed since */
 
+    const CaAnchor *cur = atomic_load_explicit(&g_anchor,
+                                               memory_order_acquire);
     /* A heap anchor (--ca-bundle, the system store) is copied in; the
      * embedded one is .rodata already and is only pointed at. */
-    size_t copy = g_active_owned ? g_active_len : 0;
+    size_t copy = (cur && g_cur_owned) ? cur->len : 0;
     if (sh_seal_arena_init(&g_seal_arena, sizeof(CaAnchor) + copy + 64,
                            "hull-ca-anchor") != 0)
         return -1;
     CaAnchor *a = sh_seal_arena_alloc(&g_seal_arena, sizeof *a,
                                       _Alignof(CaAnchor));
     unsigned char *bytes = copy
-        ? sh_seal_arena_memdup(&g_seal_arena, g_active_data, copy) : NULL;
+        ? sh_seal_arena_memdup(&g_seal_arena, cur->data, copy) : NULL;
     if (!a || (copy && !bytes)) {
         sh_seal_arena_destroy(&g_seal_arena);
         return -1;
     }
-    a->set  = g_active_set;
-    a->data = copy ? bytes : g_active_data;
-    a->len  = g_active_len;
+    a->set  = cur ? cur->set : 0;
+    a->data = copy ? bytes : (cur ? cur->data : NULL);
+    a->len  = cur ? cur->len : 0;
     if (sh_seal_arena_seal(&g_seal_arena) != 0) {
         sh_seal_arena_destroy(&g_seal_arena);
         return -1;
     }
-    /* The heap copy stays allocated (retired): a connection that read the
-     * pointer just before this may still be parsing it. Freed by reset. */
+    /* The heap record and copy stay allocated (retired): a connection that
+     * loaded the pointer just before this may still be parsing it. Freed by
+     * reset. */
     g_sealed = a;
+    atomic_store_explicit(&g_anchor, a, memory_order_release);
     return 0;
 }

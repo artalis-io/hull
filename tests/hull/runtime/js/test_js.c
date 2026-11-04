@@ -1671,6 +1671,52 @@ UTEST(db_audit9, js_a_runaway_query_hits_the_instruction_limit)
     cleanup_js_caps();
 }
 
+/* C audit L1: a run that is over does not start an op it would park on.
+ * Under --vm-thread an abandoned run whose stuck native call returned
+ * straight into an op parked after standby had answered its connection.
+ * QuickJS polls the stop flag at every call, but not inside one native call
+ * that blocks and then parks, so the op gate itself must. The C function
+ * below is such a call: it raises the run's stop flag (what the watchdog
+ * does at the deadline) and then reaches the gate every op goes through. */
+int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what);
+static int l1_passed;
+static JSValue l1_stop_then_gate(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    __atomic_store_n(&js.run_watch.stop, 1, __ATOMIC_RELAXED);
+    if (hl_js_async_gate(ctx, &js, "l1") != 0) return JS_EXCEPTION;
+    l1_passed = 1;
+    return JS_UNDEFINED;
+}
+
+UTEST(js_audit_c_l1, an_over_run_does_not_start_an_op)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    hl_js_budget_arm(&js);
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JS_SetPropertyStr(js.ctx, g, "__l1_stop_then_gate",
+        JS_NewCFunction(js.ctx, l1_stop_then_gate, "__l1_stop_then_gate", 0));
+    JS_FreeValue(js.ctx, g);
+
+    const char *code =
+        "try { __l1_stop_then_gate(); } catch (e) { globalThis.__l1 = 1; }\n";
+    l1_passed = 0;
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<l1>",
+                          JS_EVAL_TYPE_GLOBAL);
+    /* Fixed: the gate raises the uncatchable trip. Before: it let the over
+     * run through. */
+    EXPECT_EQ(l1_passed, 0);
+    EXPECT_TRUE(JS_IsException(val));
+    if (JS_IsException(val)) JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    JS_FreeValue(js.ctx, val);
+    EXPECT_EQ(1, js.budget_tripped);
+    hl_js_budget_arm(&js);
+    EXPECT_EQ(0, eval_int("globalThis.__l1 === undefined ? 0 : 1"));
+    cleanup_js_caps();
+}
+
 /* Audit 10 H3: SQL allocations are charged by size, so a loop of
  * allocation-heavy one-opcode queries hits the limit. */
 UTEST(db_audit10, js_sql_allocations_are_charged)
@@ -7803,6 +7849,85 @@ UTEST(js_db_async, submit_failure_clears_last_async_cont)
 }
 
 
+/* ── C audit L4: the app's module top level starts no async op ───────
+ *
+ * Lua's top level cannot wait (`L != active_co`); JS's could: a top level
+ * calling db.async / compute.async / worker.dispatch submitted to the pool,
+ * whose first submit started its threads - before the phase-2 sandbox.
+ * hl_js_async_gate now refuses for the whole load, the code after a top-level
+ * await included, with the wait_refused code; and the backends refuse to
+ * start the pool while a runner holds it (hl_async_pool_hold). */
+static int l4_load_app(const char *src)
+{
+    char path[HL_TEST_PATH_MAX];
+    int fd = hl_test_mkstemp(path, sizeof path, "hull_js_l4", ".js");
+    if (fd < 0) return -999;
+    size_t n = strlen(src);
+    ssize_t w = write(fd, src, n);
+    close(fd);
+    if (w != (ssize_t)n) { unlink(path); return -998; }
+    int rc = hl_js_load_app(&js, path);
+    unlink(path);
+    return rc;
+}
+
+UTEST(js_audit_c_l4, top_level_async_op_is_refused)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    HlAsyncBackendPool *pool = NULL;
+    ASSERT_EQ(be->pool_create(&pool, actx, 1, 4), 0);
+    pending_async_ctx   = actx;
+    pending_thread_pool = pool;
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *src =
+        "const code = (f) => { try { f(); return 'started'; }\n"
+        "                      catch (e) { return String(e.code); } };\n"
+        "globalThis.__l4_sync = code(() => globalThis.db.async.query('SELECT 1'));\n"
+        "await null;\n"
+        "globalThis.__l4_after = code(() => globalThis.db.async.query('SELECT 1'));\n";
+    EXPECT_EQ(l4_load_app(src), 0);
+    char *a = eval_str("globalThis.__l4_sync");
+    char *b = eval_str("globalThis.__l4_after");
+    EXPECT_TRUE(a && strcmp(a, "wait_refused") == 0);
+    EXPECT_TRUE(b && strcmp(b, "wait_refused") == 0);
+    free(a);
+    free(b);
+    EXPECT_EQ(js.in_load, 0);
+
+    /* Outside the load (an entry's code), the op is allowed again. */
+    const char *ok = "globalThis.db.async.query('SELECT 1'); 1";
+    JSValue rv = JS_Eval(js.ctx, ok, strlen(ok), "l4", JS_EVAL_TYPE_GLOBAL);
+    EXPECT_FALSE(JS_IsException(rv));
+    if (JS_IsException(rv)) JS_FreeValue(js.ctx, JS_GetException(js.ctx));
+    JS_FreeValue(js.ctx, rv);
+    for (int i = 0; i < 50; i++) { be->tick(actx, 10); hl_js_run_jobs(&js); }
+
+    be->pool_free(pool);
+    js.base.thread_pool = NULL;
+    cleanup_js_caps();
+    be->free(actx);
+}
+
+UTEST(js_audit_c_l4, held_pool_starts_no_worker)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    HlAsyncBackendPool *pool = NULL;
+    ASSERT_EQ(be->pool_create(&pool, actx, 1, 4), 0);
+    hl_async_pool_hold();
+    EXPECT_NE(be->pool_submit(pool, dbsat_noop, dbsat_noop, dbsat_noop, NULL), 0);
+    hl_async_pool_release();
+    EXPECT_EQ(be->pool_submit(pool, dbsat_noop, dbsat_noop, dbsat_noop, NULL), 0);
+    for (int i = 0; i < 20; i++) be->tick(actx, 5);
+    be->pool_free(pool);
+    be->free(actx);
+}
+
 /* ── hull.map (docs/task_join_design.md) ─────────────────────────────
  *
  * On a real loop: the module sets globalThis.__map to "ok" or to what went
@@ -8504,6 +8629,47 @@ UTEST(js_audit4, udf_cannot_query_its_own_connection)
     EXPECT_NE(strstr(msg, "own connection"), NULL);
     free(msg);
     EXPECT_EQ(eval_int("globalThis.__a4_after"), 2);   /* the connection still works */
+    cleanup_js_caps();
+}
+
+/* C audit L15: transaction control on the connection a UDF is running on
+ * was not refused like a query: conn.batch inside the UDF ran BEGIN
+ * IMMEDIATE on the stepping connection, and its COMMIT / ROLLBACK then hit
+ * the statement still running. Refused now (HL_DB_ERR_REENTERED), and the
+ * enclosing statement completes. */
+UTEST(js_audit_c_l15, udf_cannot_batch_on_its_own_connection)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(a4_module(
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "c.exec('CREATE TABLE l15 (x INTEGER)');\n"
+        "c.exec('INSERT INTO l15 VALUES (1), (2)');\n"
+        "let inner = 'no error';\n"
+        "c.udf.register('hull_l15f', () => {\n"
+        "  try { c.batch(() => 1); }\n"
+        "  catch (e) { inner = String(e && e.message || e); }\n"
+        "  return 1;\n"
+        "});\n"
+        "let outer = 'ok';\n"
+        "try { c.query('SELECT hull_l15f() AS v FROM l15'); }\n"
+        "catch (e) { outer = String(e && e.message || e); }\n"
+        "globalThis.__l15_inner = inner;\n"
+        "globalThis.__l15_outer = outer;\n"
+        "globalThis.__l15_txn = c.inTransaction() ? 1 : 0;\n"
+        "globalThis.__l15_n = c.query('SELECT count(*) AS n FROM l15')[0].n;\n"
+        "c.udf.unregister('hull_l15f');\n"), 0);
+    char *inner = eval_str("globalThis.__l15_inner");
+    char *outer = eval_str("globalThis.__l15_outer");
+    ASSERT_NE(inner, NULL);
+    ASSERT_NE(outer, NULL);
+    EXPECT_NE(strstr(inner, "own connection"), NULL);
+    EXPECT_STREQ(outer, "ok");
+    free(inner);
+    free(outer);
+    EXPECT_EQ(eval_int("globalThis.__l15_txn"), 0);
+    EXPECT_EQ(eval_int("globalThis.__l15_n"), 2);
     cleanup_js_caps();
 }
 

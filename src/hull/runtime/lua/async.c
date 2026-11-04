@@ -927,6 +927,8 @@ int hl_lua_can_wait(lua_State *L)
         return 0;
     if (lua->base.shutting_down)   /* audit 29, see hl_lua_check_can_wait */
         return 0;
+    if (hl_lua_budget_charge(L, 0) != 0)   /* C audit L1, see below */
+        return 0;
     const char *txn = hl_db_registry_open_txn(lua->base.db_registry);
     /* Always NULL only in a DB-less build (the inline stub). */
     // cppcheck-suppress knownConditionTrueFalse
@@ -952,6 +954,14 @@ int hl_lua_check_can_wait(lua_State *L, const char *what)
     if (lua->base.shutting_down)
         return hl_lua_refuse(L, HL_LUA_REFUSAL_WAIT "%s cannot wait: the runtime is shutting down",
                           what);
+    /* A run that is over - its deadline passed, its budget spent - does not
+     * park (C audit L1). The trip lands at the next instruction, but a
+     * binding that parks runs none: under --vm-thread an abandoned run
+     * whose stuck native call returned straight into a wait parked after
+     * standby had already answered its connection 503, and its resume came
+     * back with a fresh deadline to a shut socket. Raise the trip here. */
+    if (hl_lua_budget_charge(L, 0) != 0)
+        return hl_lua_budget_raise(L);
     /* Another request, SSE event or timer runs while this one is parked, on
      * the SAME connection: a transaction held across the wait was rolled
      * back under it (or joined by the other entry), and the rest of this

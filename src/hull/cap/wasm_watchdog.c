@@ -331,7 +331,20 @@ void hl_wasm_watchdog_quiesce(void)
     g_started = 0;
     g_wake_ms = 0;
     pthread_cond_destroy(&g_cv);
+    /* An arm that ran between the unlock and the join saw g_started still
+     * set, linked its watch and signalled a thread that was quitting (C
+     * audit L4b): that watch has no thread now. Start a new one for it
+     * rather than leave the guest unbounded. */
+    int restarted = 0;
+    if (g_head) {
+        restarted = 1;
+        if (ensure_started_locked() == 0) pthread_cond_signal(&g_cv);
+    }
     pthread_mutex_unlock(&g_mu);
+    if (restarted) {
+        log_warn("[wasm] watchdog armed at the sandbox boundary; restarted");
+        return;
+    }
     /* The kernel lists a joined thread for a moment longer. */
     if (before > 0) (void)hl_host_wait_thread_count(before - 1, 200);
 }

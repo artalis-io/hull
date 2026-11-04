@@ -253,4 +253,19 @@ typedef struct HlAsyncBackend {
  */
 const HlAsyncBackend *hl_async_backend(void);
 
+/* ── Phase-2 gate on the worker pool (C audit L4) ──────────────────────
+ *
+ * The pool's workers start on the first submit (audit 42), which every
+ * runner reaches only after the phase-2 sandbox - as long as no code before
+ * it submits. The runners make that a property of the backend, not of each
+ * runtime's gate: hl_async_pool_hold() before the app's top level is loaded,
+ * hl_async_pool_release() once phase 2 is applied (or skipped under
+ * --no-sandbox). While held, both backends' pool start refuses, so the
+ * submit fails and no worker thread exists before the sandbox. Entry points
+ * that never hold (hull test, hull agent, unit tests) are unchanged. Any
+ * thread; an atomic flag. */
+void hl_async_pool_hold(void);
+void hl_async_pool_release(void);
+int  hl_async_pool_held(void);
+
 #endif /* HL_ASYNC_BACKEND_H */

@@ -1442,8 +1442,10 @@ static int hl_js_settle_module(HlJS *js, JSValue val)
  * lenient, bounded drain) evaluates no real app run. */
 static void js_toplevel_begin(HlJS *js)
 {
+    js->in_load = 1;
     if (!js->manifest_extract_lenient) {
         hl_js_run_tag_new(js);
+        js->load_tag = js->entry_tag;
         /* The top level's wall-clock deadline, as Lua's load has (audit
          * 43): it ran with none, its only bound the instruction count. In
          * the runners it is polled, not watched by a thread, until the
@@ -1517,7 +1519,9 @@ int hl_js_load_app(HlJS *js, const char *filename)
                                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_ASYNC);
                 js->scratch->used = arena_saved;
 
-                if (hl_js_settle_module(js, val) != 0)
+                int settled = hl_js_settle_module(js, val);
+                js->in_load = 0;
+                if (settled != 0)
                     return -1;
                 sh_arena_reset(js->scratch);
                 return 0;
@@ -1607,7 +1611,9 @@ int hl_js_load_app(HlJS *js, const char *filename)
     /* Reclaim file buffer - QuickJS owns the bytecode now */
     js->scratch->used = arena_saved;
 
-    if (hl_js_settle_module(js, val) != 0)
+    int settled = hl_js_settle_module(js, val);
+    js->in_load = 0;
+    if (settled != 0)
         return -1;
 
     /* Reset scratch arena - startup module loads no longer needed */

@@ -285,6 +285,19 @@ static int sqlite_exec(HlDbHandle *h, const char *sql,
     return rc;
 }
 
+/* Transaction control and scripts while one of this connection's
+ * statements is stepping - a UDF calling conn.batch on the connection that is
+ * running it - are refused like a query (C audit L15): BEGIN IMMEDIATE on the
+ * stepping connection, then the batch's ROLLBACK, aborted the enclosing
+ * statement and rolled back the app's own transaction. One backend check
+ * covers both runtimes and any later binding. */
+static int sqlite_refuse_stepping(HlDbSqliteCtx *s)
+{
+    if (!s->cache.stepping) return 0;
+    s->own_err = REENTERED_MSG;
+    return 1;
+}
+
 /* Multi-statement script, no params: compiles + runs every ;-separated
  * statement in one call (unlike the single-statement stmt cache path), each
  * through hl_cap_db_prepare. The specific error stays reachable via
@@ -293,6 +306,7 @@ static int sqlite_exec_script(HlDbHandle *h, const char *sql)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (sqlite_refuse_broken(s)) return -1;
+    if (sqlite_refuse_stepping(s)) return HL_DB_ERR_REENTERED;
     s->own_err = NULL;
     return hl_cap_db_exec_script(s->db, sql);
 }
@@ -301,6 +315,7 @@ static int sqlite_begin(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (sqlite_refuse_broken(s)) return -1;
+    if (sqlite_refuse_stepping(s)) return HL_DB_ERR_REENTERED;
     s->own_err = NULL;
     return hl_cap_db_begin(s->db);
 }
@@ -309,6 +324,7 @@ static int sqlite_commit(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (sqlite_refuse_broken(s)) return -1;
+    if (sqlite_refuse_stepping(s)) return HL_DB_ERR_REENTERED;
     s->own_err = NULL;
     return hl_cap_db_commit(s->db);
 }
@@ -317,6 +333,7 @@ static int sqlite_rollback(HlDbHandle *h)
 {
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     if (sqlite_refuse_broken(s)) return -1;
+    if (sqlite_refuse_stepping(s)) return HL_DB_ERR_REENTERED;
     s->own_err = NULL;
     return hl_cap_db_rollback(s->db);
 }

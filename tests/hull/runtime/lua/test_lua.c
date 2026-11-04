@@ -7909,6 +7909,46 @@ UTEST(lua_async, a_wait_inside_a_transaction_is_refused)
     ASSERT_STREQ(out, "ok");
 }
 
+/* C audit L1: a run that is over does not park. Under --vm-thread an
+ * abandoned run whose stuck native call returned straight into a wait (no
+ * Lua instruction between, so the stop flag's trip never landed) parked
+ * after standby had answered its connection. The binding dispatcher checks
+ * the flag at a binding's entry, but not inside one that blocks and then
+ * parks, so the park gate itself must. The C function below is such a
+ * binding: it raises the run's stop flag (what the watchdog does at the
+ * deadline) and then reaches the park gate every wait goes through. */
+static int l1_passed;    /* the gates' verdicts: bit 0 can_wait, bit 1 check */
+static int l1_stop_then_wait(lua_State *L)
+{
+    __atomic_store_n(&lua_rt.run_watch.stop, 1, __ATOMIC_RELAXED);
+    if (hl_lua_can_wait(L)) l1_passed |= 1;
+    hl_lua_check_can_wait(L, "l1");
+    l1_passed |= 2;
+    return 0;
+}
+
+UTEST(lua_audit_c_l1, an_over_run_does_not_park)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_pushcfunction(lua_rt.L, l1_stop_then_wait);
+    lua_setglobal(lua_rt.L, "__l1_stop_then_wait");
+    lua_State *co;
+    l1_passed = 0;
+    int st = ssh_co_start(&lua_rt, "pcall(__l1_stop_then_wait)\n", &co);
+    /* Fixed: both gates refuse, check_can_wait by raising the trip. Before:
+     * both let the over run through (l1_passed == 3). */
+    EXPECT_NE(st, LUA_OK);
+    EXPECT_EQ(l1_passed, 0);
+    __atomic_store_n(&lua_rt.run_watch.stop, 0, __ATOMIC_RELAXED);
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
 #define TASK_CASE(name, body)                                   \
     UTEST(lua_async, name)                                      \
     {                                                           \

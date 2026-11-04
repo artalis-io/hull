@@ -783,6 +783,8 @@ static void *worker_main(void *arg)
 static int pool_start_workers(HlAsyncBackendPool *p)
 {
     if (p->started > 0) return 0;
+    /* No worker before the phase-2 sandbox (C audit L4). */
+    if (hl_async_pool_held()) return -1;
     int n = 0;
     for (; n < p->num_workers; n++)
         if (pthread_create(&p->workers[n], NULL, worker_main, p) != 0)

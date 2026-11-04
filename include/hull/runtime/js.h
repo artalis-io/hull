@@ -208,6 +208,14 @@ typedef struct HlJS {
     uint64_t        run_tag_next;   /* last tag handed out */
     uint64_t        entry_tag;      /* the active run's */
     uint64_t        cli_main_tag;   /* app.main's own run's (0 = none) */
+    /* The app's module top level (C audit L4): set while hl_js_load_app
+     * evaluates it, and the tag it ran under (0 = none, or manifest
+     * extraction). hl_js_async_gate refuses a Hull async op while either
+     * says the top level is the code running - its twin of Lua's
+     * `L != active_co` rule, so the top level cannot start the worker pool
+     * before the phase-2 sandbox. */
+    int             in_load;
+    uint64_t        load_tag;
     /* Times hl_js_run_jobs switched runs and reset the used connections'
      * sessions (hl_js_run_session_switch; audit convergence §7.1). Read by
      * the unit tests. */
