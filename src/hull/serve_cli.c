@@ -707,10 +707,13 @@ int hull_serve(int argc, char **argv)
         hl_db_registry_set_manifest(rt->db_registry, policy);
         /* Move the stdlib's _hull_* tables into the Hull-owned internal
          * database (or back, under --keep-internal-in-app-db) before the
-         * sandbox narrows file access (audit convergence §7.2). */
-        if (!no_migrate &&
-            hl_db_internal_startup(rt->db_registry, xo.keep_internal,
-                                   hl_module_set_uses_internal_db(rt->module_set)) != 0)
+         * sandbox narrows file access (audit convergence §7.2). --no-migrate
+         * skips the move, so it refuses while the tables are not moved
+         * (hl_db_internal_check_unmoved). */
+        if ((no_migrate
+                 ? hl_db_internal_check_unmoved(rt->db_registry, xo.keep_internal)
+                 : hl_db_internal_startup(rt->db_registry, xo.keep_internal,
+                                          hl_module_set_uses_internal_db(rt->module_set))) != 0)
             return cli_fail(ctx, rt, be, async_ctx, pool, &manifest,
                             NULL, &seal_arena);
         /* On Postgres / MySQL the _hull_* guard is a check of the SQL

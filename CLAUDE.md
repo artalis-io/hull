@@ -659,7 +659,17 @@ drops; a failed copy drops nothing and stops the app. After the record, internal
 tables that turn up in the app database again (a restored or planted `data.db`)
 are ignored with a WARN, never merged. `--keep-internal-in-app-db` (a downgrade
 row in `hl_runtime_flags()`) uses the default connection again and moves the
-tables back, clearing the record; kept for one release. auth-flows'
+tables back, clearing the record; kept for one release. `--no-migrate` skips the
+move, so both runners call `hl_db_internal_check_unmoved` in its place: it refuses
+to start, naming `hull migrate`, while the app database holds internal tables and
+the internal database records no move (or, under the keep flag, while the
+internal file still holds them) - a 0.17 deployment started with `--no-migrate`
+read an empty internal file, and an empty `_hull_totp` signed a 2FA user in with a
+password alone. `hull migrate` performs the move after the SQL migrations (same
+`hl_db_internal_startup`, `--keep-internal-in-app-db` honoured), loading the app as
+`hull test` does to read `databases.internal`. Every entry point derives the
+default path through `hl_db_internal_configure`; a new one that applies it must
+also run startup or the check before the stdlib reads it. auth-flows'
 `standard_users` adapter (the APP's users table) and attachment (its rows must
 roll back with the app's own `db.batch`, audit 5) go through
 `hull.db._internal.app_connection()` / `appConnection()` (a declared internal

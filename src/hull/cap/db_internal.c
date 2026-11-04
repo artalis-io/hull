@@ -541,6 +541,114 @@ static int count_internal_tables(HlDbHandle *h)
     return n;
 }
 
+int hl_db_internal_check_unmoved(HlDbRegistry *reg, int keep)
+{
+    if (!reg) return 0;
+    HlDbHandle *def = hl_db_registry_default(reg);
+    if (!def || !is_sqlite(def)) return 0;
+    const char *path = hl_db_registry_default_internal_path(reg);
+    if (!path || strcmp(path, ":memory:") == 0) return 0;
+
+    if (!keep) {
+        /* A declared databases.internal is the operator's: nothing moves. */
+        if (!hl_db_registry_internal_is_default(reg)) return 0;
+        int held = count_internal_tables(def);
+        if (held < 0) {
+            log_error("[hull:c] cannot inspect the app database: %s",
+                      hl_db_errmsg(def));
+            return -1;
+        }
+        if (held == 0) return 0;   /* a fresh app, or the move is done */
+        struct stat st;
+        int done = 0;
+        if (lstat(path, &st) == 0) {
+            if (!S_ISREG(st.st_mode)) {
+                log_error("[hull:c] the internal database %s is not a "
+                          "regular file", path);
+                return -1;
+            }
+            const char *oerr = NULL;
+            HlDbHandle tmp = {0};
+            if (hl_db_registry_open_default_internal(reg, &tmp, &oerr) != 0) {
+                log_error("[hull:c] cannot open the internal database: %s",
+                          oerr ? oerr : "unknown error");
+                return -1;
+            }
+            done = moved_marker(&tmp);
+            tmp.backend->close(&tmp);
+            if (done < 0) {
+                log_error("[hull:c] cannot read the internal database %s",
+                          path);
+                return -1;
+            }
+        }
+        if (done) {
+            /* Moved earlier: strays the stdlib never reads, as
+             * hl_db_internal_startup reports them. */
+            log_warn("[hull:c] the app database holds %d stdlib _hull_* "
+                     "table(s) Hull no longer reads (they moved to the "
+                     "internal database %s earlier): ignored.", held, path);
+            return 0;
+        }
+        log_error("[hull:c] the app database holds %d stdlib _hull_* "
+                  "table(s) (sessions, roles, TOTP, audit log, ...) not yet "
+                  "moved into the Hull-owned internal database %s, and "
+                  "--no-migrate skips that move: the app would run without "
+                  "them. Run `hull migrate` first (it performs the move), "
+                  "start once without --no-migrate, or run with "
+                  "--keep-internal-in-app-db.", held, path);
+        return -1;
+    }
+
+    /* --keep-internal-in-app-db: the stdlib reads the app database, so the
+     * default internal file must not still hold tables an earlier start
+     * moved into it. */
+    struct stat st;
+    if (lstat(path, &st) != 0) return 0;
+    if (!S_ISREG(st.st_mode)) {
+        log_error("[hull:c] the internal database %s is not a regular file",
+                  path);
+        return -1;
+    }
+    const char *oerr = NULL;
+    HlDbHandle tmp = {0};
+    if (hl_db_registry_open_default_internal(reg, &tmp, &oerr) != 0) {
+        log_error("[hull:c] cannot open the internal database: %s",
+                  oerr ? oerr : "unknown error");
+        return -1;
+    }
+    int held = count_internal_tables(&tmp);
+    tmp.backend->close(&tmp);
+    if (held < 0) {
+        log_error("[hull:c] cannot read the internal database %s", path);
+        return -1;
+    }
+    if (held == 0) return 0;
+    log_error("[hull:c] the internal database %s holds %d stdlib _hull_* "
+              "table(s) (sessions, roles, TOTP, ...), and --no-migrate skips "
+              "moving them back for --keep-internal-in-app-db: the app would "
+              "run without them. Run `hull migrate --keep-internal-in-app-db` "
+              "first, or start once without --no-migrate.", path, held);
+    return -1;
+}
+
+int hl_db_internal_configure(HlDbRegistry *reg, const char *app_dir,
+                             const char *default_dsn, int keep)
+{
+    if (!reg || !app_dir || !default_dsn) return 0;
+    char app_real[PATH_MAX], idsn[HL_HOST_PATH_MAX + 32];
+    size_t ibase = 0;
+    int in_hull = 0;
+    int k = realpath(app_dir, app_real)
+            ? hl_db_internal_default_dsn(app_real, default_dsn, idsn,
+                                         sizeof idsn, &ibase, &in_hull)
+            : 0;
+    if (k < 0) return -1;
+    if (k == 0) return 0;
+    return hl_db_registry_set_default_internal(reg, idsn, ibase, in_hull,
+                                               !keep) != 0 ? -1 : 0;
+}
+
 const char *hl_db_internal_sandbox_path(const HlDbRegistry *reg)
 {
     if (!hl_db_registry_internal_is_default(reg)) return NULL;

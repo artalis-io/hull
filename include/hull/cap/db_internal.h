@@ -97,6 +97,31 @@ int hl_db_internal_move(HlDbHandle *src, HlDbHandle *dst, const char *what,
  * would run without its sessions / roles). */
 int hl_db_internal_startup(HlDbRegistry *reg, int keep, int needed);
 
+/* The step both runners call INSTEAD of hl_db_internal_startup under
+ * --no-migrate, which skips the move. It refuses (-1, after logging an error
+ * naming `hull migrate`) when the stdlib would read a database that does not
+ * hold its tables:
+ *   - normal: the app database holds internal tables and the default
+ *     internal database does not record the move as done (a pre-§7.2
+ *     deployment started with --no-migrate: sessions, roles and TOTP
+ *     enrolments would read as empty - and an empty _hull_totp reads as "not
+ *     enrolled", so a password alone signed in);
+ *   - @p keep: the default internal file still holds internal tables an
+ *     earlier start moved into it.
+ * A fresh app (no internal table anywhere), a declared databases.internal, a
+ * network / DuckDB / in-memory default, and a move already recorded (strays
+ * in the app database are then ignored with a WARN) return 0. Creates no
+ * file. */
+int hl_db_internal_check_unmoved(HlDbRegistry *reg, int keep);
+
+/* Record the default internal database for app directory @p app_dir and
+ * default DSN @p default_dsn (hl_db_internal_default_dsn), active unless
+ * @p keep: the one derivation every entry point (hl_app_context_init,
+ * `hull migrate`) uses. 0 (nothing recorded when there is no default), or
+ * -1 when the path does not fit. */
+int hl_db_internal_configure(HlDbRegistry *reg, const char *app_dir,
+                             const char *default_dsn, int keep);
+
 /* The file the kernel sandbox must let Hull read and write
  * (HlSandboxPolicy.internal_db_path): the active default internal database
  * when it is a file, else NULL. */

@@ -52,7 +52,16 @@ answer differently. Read the upgrade notes, then the sections below.
     Dockerfile's `/data/data.db` gets `/data/data.db.hull-internal`).
   - **How the move runs:** on the first start, Hull copies the tables one transaction per table
     and drops them only after every copy committed. An interrupted start finishes the move next
-    time. `--no-migrate` skips it.
+    time.
+  - **`--no-migrate` deployments:** `hull migrate` performs the move too (it reads the manifest,
+    so a declared `databases.internal` moves nothing; `hull migrate --keep-internal-in-app-db`
+    moves the tables back). A start with `--no-migrate` skips the move, and refuses to start
+    while the app database still holds tables that were not moved, naming `hull migrate`. So
+    "run `hull migrate`, then start with `--no-migrate`" works unchanged, and a start that skipped
+    `hull migrate` stops instead of running without its sessions, roles and TOTP enrolments.
+    Before this check, such a start read an empty internal file. Sessions and roles then failed
+    closed, but an empty TOTP table reads as "not enrolled", so a password alone signed in a
+    user who had 2FA.
   - **Deployments:** persist and back up the internal file together with `data.db`. Deleting
     `data.db` no longer resets sessions and roles.
   - **Rollback, this release only:** `--keep-internal-in-app-db` (`--hull-keep-internal-in-app-db`
@@ -936,7 +945,25 @@ answer differently. Read the upgrade notes, then the sections below.
   interrupted part-way finishes the move on the next start, losing and doubling nothing; a copy
   that fails drops nothing and stops the app with the cause. After the move, `_hull_*` tables that
   reappear in the app database (a restored backup, a planted file) are ignored with a WARN, never
-  merged. Skipped with `--no-migrate`.
+  merged. `hull migrate` makes the same move (it loads the app to read `databases.internal`, as
+  `hull test` does, and honours `--keep-internal-in-app-db`). A start with `--no-migrate` skips
+  it and refuses to start (`hl_db_internal_check_unmoved`) while the app database holds `_hull_*`
+  tables and the internal database records no move - or, under `--keep-internal-in-app-db`, while
+  the internal file still holds them. Without that check a 0.17 deployment started with
+  `--no-migrate` read an empty internal database, and an empty `_hull_totp` let a password alone
+  sign in a user enrolled in 2FA. A fresh app starts normally under `--no-migrate`. Covered by
+  `test_db_registry` (`db_internal.no_migrate_refuses_unmoved_tables`) and `e2e_internal_db`
+  (both runtimes).
+
+- **WebSocket registry: a closed connection's node is never looked up again.** Keel frees a
+  `KlWsServerConn` when `on_close` returns, while the node of an `on_close` handler that parks
+  on an async op stays registered until the handler completes, and a new connection may reuse
+  the address. `on_close` now marks the node with `hl_ws_registry_mark_closed` (closed, Keel
+  pointer dropped) before any app code, and `hl_ws_registry_find` skips closed nodes, so a
+  callback for the reused address reaches the new connection. Before, correctness rested on
+  `hl_ws_registry_add` prepending. A connection whose registration fails (out of memory) is now
+  closed with 1011 instead of staying open and unregistered (both runtimes). Covered by
+  `test_ws`.
 
 - **Rollback for one release:** `--keep-internal-in-app-db` (in a built binary
   `--hull-keep-internal-in-app-db`) keeps the old layout and moves already-moved tables back into
