@@ -2750,6 +2750,12 @@ UTEST(hl_cap_db, busy_timeout_and_synchronous_are_bounded)
  * past the run's deadline and uncharged. Hull's handler asks the bound
  * budget and the run deadline each slice, and an app `PRAGMA busy_timeout`
  * keeps it (SQLite's pragma installs its sleeping handler). */
+static int busy_never_trips(void *ud, int64_t units)
+{
+    (void)ud; (void)units;
+    return 0;
+}
+
 static int64_t busy_elapsed_ms(sqlite3 *db, const char *sql, int *rc_out)
 {
     uint64_t t0 = hl_db_monotonic_ms();
@@ -2787,15 +2793,28 @@ UTEST(hl_cap_db, busy_wait_ends_at_the_budget_and_run_deadline)
     /* 2. The calling thread's run deadline (the event loop's request_ms),
      *    after app SQL set busy_timeout itself - which must not restore
      *    SQLite's sleeping handler. */
+    /*    A run binds its budget (here one that never trips), and the run
+     *    deadline is consulted only then (C audit L5). */
     EXPECT_EQ(SQLITE_OK, sqlite3_exec(b, "PRAGMA busy_timeout=5000", NULL, NULL, NULL));
     HlRunWatch w;
     memset(&w, 0, sizeof w);
     hl_run_watch_arm(&w, 300);
+    prev = hl_db_budget_swap(busy_never_trips, NULL);
     ms = busy_elapsed_ms(b, "INSERT INTO t VALUES (3)", &rc);
-    hl_run_watch_disarm(&w);
+    hl_db_budget_restore(prev);
     EXPECT_EQ(SQLITE_BUSY, rc);
     EXPECT_GE(ms, 200);
     EXPECT_LT(ms, 2000);
+
+    /* 2b. C audit L5: the deadline outlives its run (a watch is not
+     *     disarmed when a run returns). Hull's own SQL after the run - no
+     *     budget bound - is not cut short by it: it waits its busy_timeout. */
+    EXPECT_EQ(SQLITE_OK, sqlite3_exec(b, "PRAGMA busy_timeout=300", NULL, NULL, NULL));
+    ASSERT_EQ(0, hl_run_deadline_left_ms());      /* stale, passed */
+    ms = busy_elapsed_ms(b, "INSERT INTO t VALUES (31)", &rc);
+    EXPECT_EQ(SQLITE_BUSY, rc);
+    EXPECT_GE(ms, 250);
+    hl_run_watch_disarm(&w);
 
     /* 3. busy_timeout=0 from app SQL: fail at once, as SQLite's would. */
     EXPECT_EQ(SQLITE_OK, sqlite3_exec(b, "PRAGMA busy_timeout=0", NULL, NULL, NULL));
