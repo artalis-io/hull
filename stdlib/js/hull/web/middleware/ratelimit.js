@@ -111,8 +111,10 @@ function check(buckets, key, limit, window, now, saturated) {
  * (Redis bucket, edge rate-limit at the LB, etc.).
  *
  * @param {Object}  [opts]
- * @param {number}  [opts.limit=60]
- * @param {number}  [opts.window=60]  Seconds.
+ * @param {number}  [opts.limit=60]  Requests per window; a finite number >= 1
+ *   (anything else throws here).
+ * @param {number}  [opts.window=60]  Seconds; a finite number > 0 (anything
+ *   else throws here). A refused request (429) carries `Retry-After`.
  * @param {string|((req) => string)} [opts.key]  Limit key. Default: the client
  *   IP (one bucket per client). A fixed string makes one bucket shared by
  *   every client.
@@ -132,6 +134,15 @@ function middleware(opts) {
 
     const limit = o.limit !== undefined ? o.limit : 60;
     const window = o.window !== undefined ? o.window : 60;
+    // Checked here, not per request (audit 44): a 0 / negative / NaN limit
+    // denied everything, a 0 / negative window never limited, and a NaN
+    // window never expired a bucket, so a key stayed blocked for good.
+    if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) {
+        throw new TypeError("ratelimit: limit must be a finite number >= 1");
+    }
+    if (typeof window !== "number" || !Number.isFinite(window) || !(window > 0)) {
+        throw new TypeError("ratelimit: window must be a finite number of seconds > 0");
+    }
     let keyFn = o.key;
     const buckets = cache.new({ maxEntries: MAX_BUCKETS });
     const saturated = new Map();   // see check
@@ -167,6 +178,9 @@ function middleware(opts) {
         res.header("X-RateLimit-Reset", String(result.reset));
 
         if (!result.allowed) {
+            // The header clients and proxies honour (audit 44): seconds until
+            // the window resets, at least 1.
+            res.header("Retry-After", String(Math.max(1, Math.ceil(result.reset - now))));
             res.status(429).json({ error: "rate limit exceeded", retry_after: window });
             return 1;
         }

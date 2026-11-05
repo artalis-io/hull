@@ -173,6 +173,33 @@ static int read_js_string_array(JSContext *ctx, JSValueConst obj,
     return count;
 }
 
+/* `ports` of an ssh grant: integers 1..65535, anything else skipped - as the
+ * Lua parser's read_port_array (a string "22" is not a port: the grant is
+ * checked against the integer the binding takes). Own elements only. */
+static int read_js_port_array(JSContext *ctx, JSValueConst obj, int *out)
+{
+    int n = 0;
+    if (!mjs_is_obj(ctx, obj)) return 0;
+    JSValue arr = mjs_own(ctx, obj, "ports");
+    if (JS_IsArray(ctx, arr) != 1) {
+        JS_FreeValue(ctx, arr);
+        return 0;
+    }
+    int32_t len = mjs_len(ctx, arr);
+    for (int32_t i = 0; i < len && n < HL_MANIFEST_MAX_NET_PORTS; i++) {
+        JSValue elem = mjs_elem(ctx, arr, (uint32_t)i);
+        if (JS_IsNumber(elem)) {
+            double d = 0;
+            JS_ToFloat64(ctx, &d, elem);   /* a number: runs no app code */
+            if (d >= 1 && d <= 65535 && d == (double)(int)d)
+                out[n++] = (int)d;
+        }
+        JS_FreeValue(ctx, elem);
+    }
+    JS_FreeValue(ctx, arr);
+    return n;
+}
+
 int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
 {
     if (!ctx || !out)
@@ -718,6 +745,41 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         JS_FreeValue(ctx, kdyn);
     }
     JS_FreeValue(ctx, kv_val);
+
+    /* ssh: { connect: { hosts: [...], ports: [...], users: [...] },
+     *       tunnel:  { hosts: [...], ports: [...] } }
+     * The mirror of the Lua parser: the only manifest key that grants
+     * outbound stream authority, granted to the SSH stdlib (HlManifestSsh).
+     * `tunnel` is a separate grant - which relay may be dialled - with no
+     * users; absent, no tunnel is permitted. */
+    JSValue ssh_val = mjs_own(ctx, manifest, "ssh");
+    if (mjs_is_obj(ctx, ssh_val)) {
+        out->ssh.declared = 1;
+        JSValue sconn = mjs_own(ctx, ssh_val, "connect");
+        if (mjs_is_obj(ctx, sconn)) {
+            out->ssh.connect.declared = 1;
+            out->ssh.connect.host_count =
+                read_js_string_array(ctx, sconn, "hosts", out->ssh.connect.hosts,
+                                     HL_MANIFEST_MAX_NET_HOSTS, alloc);
+            out->ssh.user_count =
+                read_js_string_array(ctx, sconn, "users", out->ssh.users,
+                                     HL_MANIFEST_MAX_SSH_USERS, alloc);
+            out->ssh.connect.port_count =
+                read_js_port_array(ctx, sconn, out->ssh.connect.ports);
+        }
+        JS_FreeValue(ctx, sconn);
+        JSValue stun = mjs_own(ctx, ssh_val, "tunnel");
+        if (mjs_is_obj(ctx, stun)) {
+            out->ssh.tunnel.declared = 1;
+            out->ssh.tunnel.host_count =
+                read_js_string_array(ctx, stun, "hosts", out->ssh.tunnel.hosts,
+                                     HL_MANIFEST_MAX_NET_HOSTS, alloc);
+            out->ssh.tunnel.port_count =
+                read_js_port_array(ctx, stun, out->ssh.tunnel.ports);
+        }
+        JS_FreeValue(ctx, stun);
+    }
+    JS_FreeValue(ctx, ssh_val);
 
     /* allowDynamicCode: true - opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox.

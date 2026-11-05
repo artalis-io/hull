@@ -304,6 +304,60 @@ local function key_opt(v, what, who, allow_int, max)
     return v
 end
 
+-- A queue name (audit 44): nil or "" is "default", else a string of at most
+-- 255 bytes (key_opt). A number was stored as its text but bound raw in every
+-- later probe, so on MySQL queue 5 also matched '05' / '5.0', and a table or
+-- an over-long name failed the INSERT with a driver error. The JS twin's
+-- queueOpt.
+local function queue_opt(v, who)
+    if v == nil or v == "" then return "default" end
+    return key_opt(v, "queue", who, false)
+end
+
+-- A job type (audit 44): a non-empty string of at most 255 bytes, the column.
+local function type_opt(v, who)
+    if type(v) ~= "string" or v == "" then
+        error(who .. ": type must be a non-empty string", 3)
+    end
+    return key_opt(v, "type", who, false)
+end
+
+-- The history option: true / false, or { queues = { "a", "b" } } (audit 44).
+local function history_opt(v)
+    if v == true or v == false then return v end
+    if type(v) == "table" and v.queues ~= nil then
+        local qs, n = caller_strings(v.queues, "jobs.init: history.queues")
+        local out = {}
+        for i = 1, n do out[i] = qs[i] end
+        return { queues = out }
+    end
+    error("jobs.init: history must be true, false or { queues = { ... } }", 3)
+end
+
+-- A poll interval in milliseconds (jobs.run_worker poll_ms, jobs.await
+-- interval; audit 44): a finite number >= 0 (a numeric string counts, as for
+-- duration_opt), as whole milliseconds in POLL_MS_MIN..POLL_MS_MAX - a
+-- hull.sleep of 0 / NaN / a fraction is no wait (or an error), so the idle
+-- loop spun inside one run. The JS twin's pollMsOpt.
+local POLL_MS_MIN = 10
+local POLL_MS_MAX = 86400000
+local CONCURRENCY_MAX = 1024
+-- A finite number of milliseconds >= 0 (jobs.await timeout).
+local function ms_opt(v, who, name)
+    local n = tonumber(v)
+    if type(n) ~= "number" or n ~= n or n < 0 or n == math.huge then
+        error(who .. ": " .. name
+              .. " must be a finite number of milliseconds >= 0, got " .. tostring(v), 4)
+    end
+    return n
+end
+local function poll_ms_opt(v, who, name)
+    local n = ms_opt(v, who, name or "poll_ms")
+    if n < POLL_MS_MIN then n = POLL_MS_MIN end
+    if n > POLL_MS_MAX then n = POLL_MS_MAX end
+    return math.ceil(n)
+end
+
 -- A count option (limit / offset / batch) as an integer in lo..hi: a number
 -- or a numeric string counts, anything else and NaN take the default, and
 -- +/-inf clamps to the bound. The JS sibling (countOpt) applies the same
@@ -342,8 +396,14 @@ function jobs.init(opts)
         end
         _cfg.backoff = opts.backoff
     end
-    if opts.history ~= nil then _cfg.history = opts.history end
-    if opts.history_retention ~= nil then _cfg.history_retention = opts.history_retention end
+    -- history and history_retention are checked as the other options are
+    -- (audit 44): a NaN retention deleted every attempt row at each cleanup,
+    -- a numeric string made cleanup raise, a negative one deleted fresh rows.
+    if opts.history ~= nil then _cfg.history = history_opt(opts.history) end
+    if opts.history_retention ~= nil then
+        _cfg.history_retention = opts.history_retention ~= false
+            and duration_opt("history_retention", opts.history_retention) or nil
+    end
     if opts.events ~= nil then _cfg.events = opts.events end
     if opts.events_grace ~= nil then
         local g = opts.events_grace
@@ -776,10 +836,12 @@ end
 -- @tparam[opt]    number opts.concurrency      max jobs of that group running at once
 -- @treturn number|nil  the new job id, or nil when a dedup_key collapsed it
 function jobs.enqueue(job_type, data, opts)
-    if type(job_type) ~= "string" or job_type == "" then
-        error("jobs.enqueue: type must be a non-empty string")
-    end
+    type_opt(job_type, "jobs.enqueue")
     opts = opts or {}
+    -- queue and trace are checked as the keys are (audit 44; see queue_opt).
+    local queue = queue_opt(opts.queue, "jobs.enqueue")
+    local trace = opts.trace ~= nil
+        and key_opt(opts.trace, "trace", "jobs.enqueue", false) or nil
     local now    = time.now()
     -- Schedule: absolute `at` (unix ts) wins, else `run_at`, else now + `delay`.
     local run_at
@@ -807,7 +869,7 @@ function jobs.enqueue(job_type, data, opts)
     if throttle > 0 then
         local hit = db.query(
             "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
-            { opts.queue or "default", job_type, now - throttle })
+            { queue, job_type, now - throttle })
         if hit and #hit > 0 then return nil end
     end
     -- The dependency ids, copied and checked: whole, positive, distinct. A
@@ -847,9 +909,11 @@ function jobs.enqueue(job_type, data, opts)
     local conc_key = opts.concurrency_key ~= nil
         and key_opt(opts.concurrency_key, "concurrency_key", "jobs.enqueue", true) or nil
     local vals = {
-        opts.queue or "default",
+        queue,
         job_type,
-        data ~= nil and json.encode(data) or nil,
+        -- Stored as results are (stored_json, audit 44): a payload holding a
+        -- NUL or bytes that are not UTF-8 is JSON Postgres / MySQL refuse.
+        data ~= nil and stored_json(json.encode(data)) or nil,
         priority,
         max_attempts,
         run_at,
@@ -862,8 +926,8 @@ function jobs.enqueue(job_type, data, opts)
         cols[#cols + 1] = "status"; vals[#vals + 1] = "blocked"
     end
     -- Optional W3C trace context, carried through to the handler as job.trace.
-    if opts.trace ~= nil then
-        cols[#cols + 1] = "trace_context"; vals[#vals + 1] = opts.trace
+    if trace ~= nil then
+        cols[#cols + 1] = "trace_context"; vals[#vals + 1] = trace
     end
     -- Optional per-key concurrency: at most `concurrency` jobs sharing
     -- `concurrency_key` run at once. Soft (default) reconciles at claim (may
@@ -891,7 +955,7 @@ function jobs.enqueue(job_type, data, opts)
             -- index), and it needs no change to an existing database's index.
             db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? "
                 .. "AND status IN ('done', 'dead', 'compensated')",
-                { opts.queue or "default", dedup_key })
+                { queue, dedup_key })
             -- INSERT ... ON CONFLICT(queue,dedup_key) DO NOTHING / INSERT OR IGNORE.
             local n = db.insert_if_absent("_hull_jobs", { "queue", "dedup_key" }, cols, vals)
             if not (n and n > 0) then
@@ -901,7 +965,7 @@ function jobs.enqueue(job_type, data, opts)
             -- Portable id fetch: the unique (queue, dedup_key) identifies the new row.
             -- (db.last_id is unsupported on Postgres, which has no last-insert-rowid.)
             local rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
-                { opts.queue or "default", dedup_key })
+                { queue, dedup_key })
             id = rows and rows[1] and rows[1].id
         else
             local ph = {}
@@ -941,7 +1005,7 @@ function jobs.enqueue(job_type, data, opts)
     -- Durable "enqueued" event (opt-in). Emitted here so it joins the caller's
     -- db.batch when enqueue is called inside one (transactional coupling).
     emit_durable("enqueued",
-        { id = id, type = job_type, queue = opts.queue or "default", trace = opts.trace }, {})
+        { id = id, type = job_type, queue = queue, trace = trace }, {})
     -- Low-latency job pickup: wake an idle worker on the new job. When events
     -- are on, emit_durable above already issued the NOTIFY (coalesced within the
     -- transaction), so only nudge directly when it did not.
@@ -985,8 +1049,10 @@ end
 local function shape(row)
     local data
     if row.payload ~= nil and row.payload ~= "" then
-        local ok, decoded = pcall(json.decode, row.payload)
-        data = ok and decoded or nil
+        -- A payload of false stays false (audit 44: `ok and decoded or nil`
+        -- turned it into nil; the JS twin keeps it).
+        local ok, decoded = pcall(json.decode, unstored_json(row.payload))
+        if ok then data = decoded end
     end
     return {
         id = row.id, type = row.type, data = data,
@@ -1091,7 +1157,8 @@ local function is_paused(queue)
     return _paused[queue] == true
 end
 
-local function set_paused(queue, v)
+local function set_paused(queue, v, who)
+    queue = queue_opt(queue, who)   -- audit 44 (see queue_opt)
     -- One statement: UPDATE-then-INSERT raced - two callers both updated
     -- nothing and the second INSERT failed on the key.
     db.upsert("_hull_queue", { "name" }, { "name", "paused" }, { queue, v })
@@ -1103,12 +1170,12 @@ end
 -- still works). Durable + fleet-wide. Takes effect within ~1s on other workers.
 -- @tparam string queue
 -- @treturn table the jobs module (for chaining)
-function jobs.pause(queue) return set_paused(queue, 1) end
+function jobs.pause(queue) return set_paused(queue, 1, "jobs.pause") end
 
 --- Resume a paused queue.
 -- @tparam string queue
 -- @treturn table the jobs module (for chaining)
-function jobs.resume(queue) return set_paused(queue, 0) end
+function jobs.resume(queue) return set_paused(queue, 0, "jobs.resume") end
 
 --- Delete jobs from a queue (the "clear the backlog" op). Defaults to `pending`
 -- only, leaving in-flight and terminal rows; pass opts.statuses to widen (e.g.
@@ -1120,6 +1187,7 @@ function jobs.resume(queue) return set_paused(queue, 0) end
 -- @tparam[opt] table opts  { statuses = { "pending" } }
 -- @treturn number
 function jobs.purge(queue, opts)
+    queue = queue_opt(queue, "jobs.purge")   -- audit 44 (see queue_opt)
     opts = opts or {}
     local statuses, ns = { "pending" }, 1
     if opts.statuses ~= nil then
@@ -1153,14 +1221,17 @@ end
 --     independently). Zero/negative weights and non-number values are dropped.
 local function resolve_queue_order(opts)
     local qs = opts.queues
-    if qs == nil then return { opts.queue or "default" } end
+    -- Every name is checked as jobs.enqueue checks it (audit 44, queue_opt).
+    if qs == nil then return { queue_opt(opts.queue, "jobs.claim") } end
+    if type(qs) ~= "table" then error("jobs.claim: queues must be a list or a map", 3) end
     if qs[1] ~= nil then                          -- list form (strict priority)
         local order = {}
-        for i = 1, #qs do order[i] = qs[i] end
+        for i = 1, #qs do order[i] = queue_opt(qs[i], "jobs.claim") end
         return order
     end
     local names, weights, total = {}, {}, 0       -- map form (weighted)
     for name, w in pairs(qs) do
+        queue_opt(name, "jobs.claim")
         if type(w) == "number" and w > 0 then
             names[#names + 1] = name; weights[name] = w; total = total + w
         end
@@ -1929,6 +2000,32 @@ end
 -- INTEGER column holds on every backend), with the reason in last_error.
 local CRON_DISABLED_AT = 2147483647
 
+-- Park a schedule that can no longer fire (next_run_at = CRON_DISABLED_AT),
+-- with the reason in last_error, and emit cron_disabled. jobs.cron re-enables.
+local function park_cron(c, now, why)
+    why = safe_text(why)
+    local off = db.exec(
+        "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? "
+        .. "WHERE name=? AND next_run_at=?",
+        { CRON_DISABLED_AT, why, now, c.name, c.next_run_at })
+    if (off or 0) > 0 then
+        emit_durable("cron_disabled", { type = c.type, queue = c.queue }, { error = why })
+    end
+end
+
+-- The enqueue options a stored schedule fires with, checked as jobs.enqueue
+-- checks them. A row an older Hull wrote (an empty type, max_attempts 0, a
+-- queue that is not a string) fails here for good, not transiently.
+local function cron_row_opts(c)
+    type_opt(c.type, "jobs.enqueue")
+    local o = { queue = queue_opt(c.queue, "jobs.enqueue"),
+                priority = priority_opt(c.priority, "jobs.enqueue") }
+    if c.max_attempts ~= nil then
+        o.max_attempts = attempts_opt(c.max_attempts, "jobs.enqueue")
+    end
+    return o
+end
+
 -- Fire due schedules: compare-and-set next_run_at (multi-worker-safe on every
 -- backend), then enqueue. Missed ticks (worker down) advance to the next future
 -- occurrence - fire-once, no backfill storm. Called (throttled) from jobs.work.
@@ -1948,14 +2045,17 @@ local function process_cron(now)
                 .. (parsed and ("spec '" .. tostring(c.spec) .. "' has no upcoming occurrence")
                     or ("spec '" .. tostring(c.spec) .. "' is invalid ("
                         .. tostring(perr or "invalid cron field") .. ")"))
-            why = safe_text(why)
-            local off = db.exec(
-                "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? "
-                .. "WHERE name=? AND next_run_at=?",
-                { CRON_DISABLED_AT, why, now, c.name, c.next_run_at })
-            if (off or 0) > 0 then
-                emit_durable("cron_disabled", { type = c.type, queue = c.queue }, { error = why })
-            end
+            park_cron(c, now, why)
+            goto next_schedule
+        end
+        -- A row whose enqueue cannot succeed is parked the same way (audit
+        -- 44): its error was discarded and every worker retried it every tick
+        -- for ever. Only the deterministic checks park; a failure inside the
+        -- batch below (a dropped connection) is retried by the next tick.
+        local rok, ropts = pcall(cron_row_opts, c)
+        if not rok then
+            local why = tostring(ropts):gsub("^[^\n]-:%d+: ", "")
+            park_cron(c, now, "schedule '" .. tostring(c.name) .. "' disabled: " .. why)
             goto next_schedule
         end
         -- The compare-and-set and the enqueue commit together (audit 12): a
@@ -1975,11 +2075,10 @@ local function process_cron(now)
             if (won or 0) > 0 then
                 local data
                 if c.payload and c.payload ~= "" then
-                    local ok, d = pcall(json.decode, c.payload)
+                    local ok, d = pcall(json.decode, unstored_json(c.payload))
                     if ok then data = d end
                 end
-                jobs.enqueue(c.type, data,
-                    { queue = c.queue, priority = c.priority, max_attempts = c.max_attempts })
+                jobs.enqueue(c.type, data, ropts)
             end
         end) end)
         ::next_schedule::
@@ -2015,8 +2114,9 @@ function jobs.cron(name, spec, data, opts)
     if type(job_type) ~= "string" then
         error("jobs.cron: opts.type must be a non-empty string", 2)
     end
-    local payload  = data ~= nil and json.encode(data) or nil
-    local queue    = opts.queue or "default"
+    type_opt(job_type, "jobs.cron")
+    local payload  = data ~= nil and stored_json(json.encode(data)) or nil
+    local queue    = queue_opt(opts.queue, "jobs.cron")
     local priority = priority_opt(opts.priority, "jobs.cron")
     local max_attempts = opts.max_attempts ~= nil
         and attempts_opt(opts.max_attempts, "jobs.cron") or nil
@@ -2072,6 +2172,21 @@ _hooks.cron_set_next_run_at = function(name, at)
     db.exec("UPDATE _hull_cron SET next_run_at=? WHERE name=?", { at, name })
 end
 _hooks.CRON_DISABLED_AT = CRON_DISABLED_AT
+-- Audit 44: write a stored schedule's column as an older Hull could have
+-- (jobs.cron now refuses such values) and read the row back.
+local CRON_SETTABLE = { type = true, queue = true, priority = true, max_attempts = true }
+_hooks.cron_set_field = function(name, col, v)
+    if not CRON_SETTABLE[col] then error("cron_set_field: column not allowed") end
+    db.exec("UPDATE _hull_cron SET " .. col .. "=? WHERE name=?", { v, name })
+end
+_hooks.job_payload = function(id)
+    local r = db.query("SELECT payload FROM _hull_jobs WHERE id=?", { id })
+    return r[1] and r[1].payload
+end
+_hooks.cron_row = function(name)
+    local r = db.query("SELECT next_run_at, last_error FROM _hull_cron WHERE name=?", { name })
+    return r[1]
+end
 -- Audit 39: make a handed-back job due now (the real clock would wait out
 -- its hand-back delay), read / set its busy hand-back streak, and mark a
 -- workflow step compensated (the state the round-38 regression left).
@@ -2371,10 +2486,17 @@ function jobs.run_worker(opts)
     if opts.reap_interval ~= nil then
         duration_opt("reap_interval", opts.reap_interval, "jobs.run_worker")
     end
-    local poll_ms = opts.poll_ms or 1000
+    -- poll_ms, max_empty_polls and concurrency are checked here too (audit
+    -- 44): a NaN or 0 poll_ms made the idle loop a hot loop inside one run,
+    -- and a string one raised only after the first empty poll. poll_ms is
+    -- whole milliseconds, at least POLL_MS_MIN.
+    local poll_ms = opts.poll_ms ~= nil
+        and poll_ms_opt(opts.poll_ms, "jobs.run_worker") or 1000
     -- drain = "exit as soon as the queue is empty" (== max_empty_polls 1).
-    local max_empty = opts.max_empty_polls or (opts.drain and 1 or 0)
-    local concurrency = (opts.concurrency and opts.concurrency > 1) and opts.concurrency or 1
+    local max_empty = opts.max_empty_polls ~= nil
+        and count_opt(opts.max_empty_polls, 0, 0, 2147483647) or (opts.drain and 1 or 0)
+    local concurrency = opts.concurrency ~= nil
+        and count_opt(opts.concurrency, 1, 1, CONCURRENCY_MAX) or 1
     _running = true
 
     -- Idle wait between empty polls. On a NOTIFY-capable backend (Postgres) a
@@ -2691,8 +2813,12 @@ end
 -- @treturn table|nil  the terminal `jobs.result`, a timed-out view, or nil
 function jobs.await(id, opts)
     opts = opts or {}
-    local interval = math.max(opts.interval or 100, 10)   -- floor: never a tight yield-loop
-    local deadline = opts.timeout and (time.clock() + opts.timeout) or nil
+    -- interval and timeout (both ms) are checked (audit 44): a NaN interval
+    -- slept NaN - a tight yield loop - and a NaN timeout never ended.
+    local interval = opts.interval ~= nil
+        and poll_ms_opt(opts.interval, "jobs.await", "interval") or 100
+    local deadline = opts.timeout ~= nil
+        and (time.clock() + ms_opt(opts.timeout, "jobs.await", "timeout")) or nil
     while true do
         local r = jobs.result(id)
         if r == nil then return nil end                     -- unknown / purged
@@ -2834,7 +2960,7 @@ local SIG_TIMEOUT = "T"   -- memo of a timed-out wait; a signal is "S" .. payloa
 
 local function decode_payload(enc)
     if enc == nil or enc == "" then return nil end
-    local ok, decoded = pcall(json.decode, enc)
+    local ok, decoded = pcall(json.decode, unstored_json(enc))
     if ok then return decoded end
     return enc
 end
@@ -3223,7 +3349,8 @@ function jobs.signal(id, name, payload, opts)
     if delivery ~= nil and (type(delivery) ~= "string" or delivery == "") then
         error("jobs.signal: opts.delivery_id must be a non-empty string")
     end
-    local enc = payload ~= nil and json.encode(payload) or nil
+    -- Stored as results are (stored_json, audit 44): see jobs.enqueue.
+    local enc = payload ~= nil and stored_json(json.encode(payload)) or nil
     -- The wait memoizes a consumed signal as "S" .. payload in a TEXT column:
     -- on MySQL a payload of exactly 65535 bytes was stored here and then
     -- failed the memo's INSERT on every run of the wait (audit 41).
@@ -3744,7 +3871,7 @@ function jobs.cleanup(opts)
         .. " AND updated_at < ?"
     if opts.queue then
         sql = sql .. " AND queue=?"
-        params[#params + 1] = opts.queue
+        params[#params + 1] = queue_opt(opts.queue, "jobs.cleanup")
     end
     local deleted = db.exec(sql, params) or 0
     -- Drop results + workflow steps whose producing job is gone (store hygiene).

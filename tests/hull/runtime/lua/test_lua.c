@@ -3258,6 +3258,122 @@ UTEST(lua_stdlib, totp_recovery_accepts_user_typed_forms)
     cleanup_lua_caps();
 }
 
+/* audit-lua M1: a recovery code is a 77-bit random string, so it is stored
+ * as a salted HMAC-SHA256 ("rch1$salt$mac"), not a PBKDF2-100k password hash.
+ * Ten of those made totp.enroll cost 16M units of explicit charge alone (plus
+ * its measured time), which tripped the run budget on a loaded host. The
+ * enrolment, at defaults, must now cost a small share of one run's budget.
+ * The budget is armed far above the default so the pre-fix code completes
+ * and is measured rather than tripping. */
+UTEST(lua_stdlib, totp_enroll_costs_a_small_share_of_the_run_budget)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(eval_int(
+        "(function() "
+        "  __test_hooks('hull.web.middleware.totp').reset() "
+        "  require('hull.web.middleware.totp').init({ issuer = 'TestApp' }) "
+        "  return 1 "
+        "end)()"), 1);
+    lua_rt.budget.limit = 10 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    lua_rt.budget.used = 0;
+    lua_rt.budget.tripped = 0;
+    lua_rt.budget.timed_out = 0;
+    uint64_t before = lua_rt.budget.charged + (uint64_t)lua_hlpending(L);
+    int n = eval_int(
+        "(function() "
+        "  return #require('hull.web.middleware.totp').enroll('cost-user').recovery_codes "
+        "end)()");
+    uint64_t after = lua_rt.budget.charged + (uint64_t)lua_hlpending(L);
+    ASSERT_EQ(n, 10);
+    uint64_t cost = after - before;
+    EXPECT_LT_MSG(cost, (uint64_t)HL_DEFAULT_INSTRUCTIONS / 10,
+                  "totp.enroll at defaults costs 10% or more of the run budget");
+    cleanup_lua_caps();
+}
+
+/* New-format codes: 16 characters (ABCD-EFGH-JKMN-PQRS), stored as rch1$,
+ * verify once, a wrong code (right shape) is rejected and a 12-character
+ * code is not taken for one. */
+UTEST(lua_stdlib, totp_recovery_codes_use_the_salted_hmac_format)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char *got = eval_str(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  local t = __test_hooks('hull.web.middleware.totp') "
+        "  t.reset() "
+        "  totp.init({ issuer = 'TestApp', recovery_codes = 3 }) "
+        "  local codes, hashes = t.generate_recovery_codes(2) "
+        "  local g = ('[ABCDEFGHJKMNPQRSTUVWXYZ2-9]'):rep(4) "
+        "  local shape = codes[1]:match('^' .. g .. '%-' .. g .. '%-' .. g .. '%-' .. g .. '$') "
+        "  local fmt = hashes[1]:match('^rch1%$' .. ('%x'):rep(32) .. '%$' .. ('%x'):rep(64) .. '$') "
+        "  local salted = hashes[1] ~= t.hash_recovery_code(codes[1]) "
+        "  local direct = t.verify_recovery_code(codes[1], hashes[1]) "
+        "    and t.verify_recovery_code((codes[1]:lower():gsub('-', '')), hashes[1]) "
+        "    and not t.verify_recovery_code(codes[2], hashes[1]) "
+        "    and not t.verify_recovery_code(codes[1]:sub(1, 14), hashes[1]) "
+        /* A fixed vector the JS test checks too (salt 00..0f, code
+         * 'ABCDEFGHJKMNPQRS'): both runtimes read one stored format. */
+        "  local vec = 'rch1$000102030405060708090a0b0c0d0e0f$' "
+        "    .. '9dd0de33cfd3aa884cd7c75ce252131ed55005c3eaa2e0cc01fa6d1b4d26c5dd' "
+        "  direct = direct and t.verify_recovery_code('ABCD-EFGH-JKMN-PQRS', vec) "
+        "    and not t.verify_recovery_code('ABCD-EFGH-JKMN-PQRT', vec) "
+        "  local r = totp.enroll('fmt-user') "
+        "  local secret = t.base32_decode(r.secret_base32) "
+        "  if not totp.confirm('fmt-user', t.totp_at_step(secret, t.current_step(), 6)) then "
+        "    return 'confirm failed' end "
+        "  local wrong = 'ABCD-EFGH-JKMN-PQRS' "
+        "  local w_ok = totp.verify('fmt-user', wrong) "
+        "  local ok1, k1 = totp.verify_with_kind('fmt-user', r.recovery_codes[1]) "
+        "  local again = totp.verify('fmt-user', r.recovery_codes[1]) "
+        "  return table.concat({ tostring(not not shape), tostring(not not fmt), "
+        "    tostring(salted), tostring(direct), tostring(w_ok), tostring(ok1), "
+        "    tostring(k1), tostring(again), tostring(t.recovery_used_count('fmt-user')) }, ' ') "
+        "end)()");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "true true true true false true recovery false 1");
+    free(got);
+    cleanup_lua_caps();
+}
+
+/* Backward compatibility: a recovery code stored before audit-lua M1 (12
+ * characters, a crypto.hash_password PBKDF2 hash) still verifies, once, and
+ * is marked used like a new one. */
+UTEST(lua_stdlib, totp_legacy_pbkdf2_recovery_codes_still_verify_once)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_rt.budget.limit = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    char *got = eval_str(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  local crypto = require('hull.crypto') "
+        "  local t = __test_hooks('hull.web.middleware.totp') "
+        "  t.reset() "
+        "  totp.init({ issuer = 'TestApp', recovery_codes = 0 }) "
+        "  local r = totp.enroll('old-user') "
+        "  local secret = t.base32_decode(r.secret_base32) "
+        "  if not totp.confirm('old-user', t.totp_at_step(secret, t.current_step(), 6)) then "
+        "    return 'confirm failed' end "
+        "  local legacy = crypto.hash_password('ABCDEFGHJKMN') "
+        "  t.add_recovery_hash('old-user', legacy) "
+        "  local direct = t.verify_recovery_code('abcd-efgh-jkmn', legacy) "
+        "    and not t.verify_recovery_code('ABCD-EFGH-JKMP', legacy) "
+        "  local wrong = totp.verify('old-user', 'ABCD-EFGH-JKMP') "
+        "  local ok1, k1 = totp.verify_with_kind('old-user', 'ABCD-EFGH-JKMN') "
+        "  local again = totp.verify('old-user', 'ABCD-EFGH-JKMN') "
+        "  return table.concat({ tostring(direct), tostring(wrong), tostring(ok1), "
+        "    tostring(k1), tostring(again), tostring(t.recovery_used_count('old-user')) }, ' ') "
+        "end)()");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "true false true recovery false 1");
+    free(got);
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_encryption_at_rest)
 {
     init_lua_with_caps();
@@ -3471,10 +3587,8 @@ UTEST(lua_stdlib, totp_rekey_batch_helper)
     /* Enroll three users under v1, rotate to v2, call totp.rekey().
      * Expect scanned=3, rekeyed=3, failed=0. Second rekey() reports
      * scanned=3, rekeyed=0, failed=0 (all already on current). Three
-     * enrolments hash thirty recovery codes in this one run: more than one
-     * request's worth of KDF work at its measured cost (the binding
-     * dispatcher), so the run gets the budget of several. */
-    lua_rt.budget.limit = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+     * enrolments mint thirty recovery codes in this one run, at the default
+     * budget: they are a salted HMAC each, not a PBKDF2 (audit-lua M1). */
     int ok = eval_int(
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
@@ -5776,6 +5890,121 @@ JOBS_HOOKS_CASE(audit38)
 JOBS_HOOKS_CASE(audit39)
 JOBS_HOOKS_CASE(audit41)
 #undef JOBS_HOOKS_CASE
+
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Stdlib Lows from audit 44 (stdlib/lua/hull/tests/test_stdlib_audit44.lua):
+ * option validation (session, rbac, validate, ratelimit, jobs, search,
+ * retry), cron parking, the reset token checked before the pwned lookup, and
+ * hull._text.storable's ellipsis. Each case runs the script in a fresh state
+ * and a fresh :memory: database, named in the global __audit44_case. One
+ * UTEST per case, written out, so scripts/check_regression_test.sh sees each. */
+static int run_audit44_case(const char *name, long long *pass, long long *fail)
+{
+    init_lua_with_caps();
+    if (!lua_initialized) return -1;
+    lua_pushstring(lua_rt.L, name);
+    lua_setglobal(lua_rt.L, "__audit44_case");
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit44.lua", pass, fail);
+    cleanup_lua_caps();
+    return rc;
+}
+
+UTEST(lua_stdlib_audit44, pwned_reset_order)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("pwned_reset_order", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, session_update_sid)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("session_update_sid", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, rbac_string_permission)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("rbac_string_permission", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, validate_unknown_type)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("validate_unknown_type", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, ratelimit_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("ratelimit_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_poll_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_poll_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_key_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_key_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_history_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_history_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_cron_park)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_cron_park", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, search_snippet_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("search_snippet_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, retry_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("retry_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, text_storable)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("text_storable", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+#endif
 
 UTEST(lua_stdlib, ws_stream_suite)
 {

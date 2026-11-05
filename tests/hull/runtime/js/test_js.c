@@ -254,6 +254,27 @@ static void init_js_with_caps(void)
     js_initialized = (rc == 0);
     if (js_initialized) expose_internals(&js);
     if (js_initialized) install_test_js_globals(&js);
+    if (js_initialized) {
+        /* What this build links, for the co-located suites that need a backend
+         * (the JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto legs):
+         * tls = mbedTLS is linked (AES-CTR / GCM, ChaCha20, Poly1305, RSA,
+         * ECDSA); net = the outbound socket layer (hull:ssh:_stream). Set from
+         * the build's own macros, so a suite skips only where the backend is
+         * really absent. */
+        static const char *BUILD =
+#ifdef HL_LINK_TLS
+            "globalThis.__hull_build = { tls: true, "
+#else
+            "globalThis.__hull_build = { tls: false, "
+#endif
+#ifdef HL_ENABLE_HTTP_CLIENT
+            "net: true };";
+#else
+            "net: false };";
+#endif
+        JSValue bv = JS_Eval(js.ctx, BUILD, strlen(BUILD), "<build>", JS_EVAL_TYPE_GLOBAL);
+        JS_FreeValue(js.ctx, bv);
+    }
 }
 
 static void cleanup_js_caps(void)
@@ -2909,6 +2930,121 @@ UTEST(js_stdlib, totp_brute_force_lockout)
     cleanup_js_caps();
 }
 
+/* audit-lua M1 (JS twin): a recovery code is a 77-bit random string, so it
+ * is stored as a salted HMAC-SHA256 ("rch1$salt$mac"), not a PBKDF2-100k
+ * password hash. Ten of those made totp.enroll a large share of one run's
+ * budget, which tripped it on a loaded host. The enrolment, at defaults, must
+ * now cost a small share. The budget is armed far above the default so the
+ * pre-fix code completes and is measured rather than tripping. */
+static void totp_m1_eval_module(const char *code)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+}
+
+UTEST(js_stdlib, totp_enroll_costs_a_small_share_of_the_run_budget_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    totp_m1_eval_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "__testHooks('hull:web:middleware:totp').reset();\n"
+        "totp.init({ issuer: 'TestApp' });\n"
+        "globalThis.__totp_m1 = totp;\n");
+    js.max_instructions = 10 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    hl_js_reset_request(&js);
+    uint64_t before = js.meter_charged + JS_GetPendingCharge(js.ctx);
+    int n = eval_int("globalThis.__totp_m1.enroll('cost-user').recoveryCodes.length");
+    uint64_t after = js.meter_charged + JS_GetPendingCharge(js.ctx);
+    ASSERT_EQ(n, 10);
+    EXPECT_LT_MSG(after - before, (uint64_t)HL_DEFAULT_INSTRUCTIONS / 10,
+                  "totp.enroll at defaults costs 10% or more of the run budget");
+    cleanup_js_caps();
+}
+
+/* New-format codes: 16 characters (ABCD-EFGH-JKMN-PQRS), stored as rch1$,
+ * readable by the Lua side's format, verify once, a wrong code of the right
+ * shape is rejected and a 12-character code is not taken for one. */
+UTEST(js_stdlib, totp_recovery_codes_use_the_salted_hmac_format_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    totp_m1_eval_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  const t = __testHooks('hull:web:middleware:totp');\n"
+        "  t.reset();\n"
+        "  totp.init({ issuer: 'TestApp', recoveryCodes: 3 });\n"
+        "  const [codes, hashes] = t.generateRecoveryCodes(2);\n"
+        "  const g = '[ABCDEFGHJKMNPQRSTUVWXYZ2-9]{4}';\n"
+        "  const shape = new RegExp('^' + g + '-' + g + '-' + g + '-' + g + '$').test(codes[0]);\n"
+        "  const fmt = /^rch1\\$[0-9a-f]{32}\\$[0-9a-f]{64}$/.test(hashes[0]);\n"
+        "  const salted = hashes[0] !== t.hashRecoveryCode(codes[0]);\n"
+        "  const direct = t.verifyRecoveryCode(codes[0], hashes[0])\n"
+        "    && t.verifyRecoveryCode(codes[0].toLowerCase().replace(/-/g, ''), hashes[0])\n"
+        "    && !t.verifyRecoveryCode(codes[1], hashes[0])\n"
+        "    && !t.verifyRecoveryCode(codes[0].slice(0, 14), hashes[0]);\n"
+        /* The fixed vector the Lua test checks too (salt 00..0f, code
+         * 'ABCDEFGHJKMNPQRS'): both runtimes read one stored format. */
+        "  const lua = 'rch1$000102030405060708090a0b0c0d0e0f$'\n"
+        "    + '9dd0de33cfd3aa884cd7c75ce252131ed55005c3eaa2e0cc01fa6d1b4d26c5dd';\n"
+        "  const interop = t.verifyRecoveryCode('ABCD-EFGH-JKMN-PQRS', lua)\n"
+        "    && !t.verifyRecoveryCode('ABCD-EFGH-JKMN-PQRT', lua);\n"
+        "  const r = totp.enroll('fmt-user');\n"
+        "  const secret = t.base32Decode(r.secretBase32);\n"
+        "  if (!totp.confirm('fmt-user', t.totpAtStep(secret, t.currentStep(), 6))) return 'confirm failed';\n"
+        "  const wOk = totp.verify('fmt-user', 'ABCD-EFGH-JKMN-PQRS');\n"
+        "  const v1 = totp.verifyWithKind('fmt-user', r.recoveryCodes[0]);\n"
+        "  const again = totp.verify('fmt-user', r.recoveryCodes[0]);\n"
+        "  return [shape, fmt, salted, direct, interop, wOk, v1[0], v1[1], again,\n"
+        "          t.recoveryUsedCount('fmt-user')].join(' ');\n"
+        "}\n"
+        "globalThis.__totp_m1_fmt = run();\n");
+    char *got = eval_str("globalThis.__totp_m1_fmt");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "true true true true true false true recovery false 1");
+    free(got);
+    cleanup_js_caps();
+}
+
+/* Backward compatibility: a recovery code stored before audit-lua M1 (12
+ * characters, a crypto.hashPassword PBKDF2 hash) still verifies, once, and is
+ * marked used like a new one. */
+UTEST(js_stdlib, totp_legacy_pbkdf2_recovery_codes_still_verify_once_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    totp_m1_eval_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "import { crypto } from 'hull:crypto';\n"
+        "function run() {\n"
+        "  const t = __testHooks('hull:web:middleware:totp');\n"
+        "  t.reset();\n"
+        "  totp.init({ issuer: 'TestApp', recoveryCodes: 0 });\n"
+        "  const r = totp.enroll('old-user');\n"
+        "  const secret = t.base32Decode(r.secretBase32);\n"
+        "  if (!totp.confirm('old-user', t.totpAtStep(secret, t.currentStep(), 6))) return 'confirm failed';\n"
+        "  const legacy = crypto.hashPassword('ABCDEFGHJKMN');\n"
+        "  t.addRecoveryHash('old-user', legacy);\n"
+        "  const direct = t.verifyRecoveryCode('abcd-efgh-jkmn', legacy)\n"
+        "    && !t.verifyRecoveryCode('ABCD-EFGH-JKMP', legacy);\n"
+        "  const wrong = totp.verify('old-user', 'ABCD-EFGH-JKMP');\n"
+        "  const v1 = totp.verifyWithKind('old-user', 'ABCD-EFGH-JKMN');\n"
+        "  const again = totp.verify('old-user', 'ABCD-EFGH-JKMN');\n"
+        "  return [direct, wrong, v1[0], v1[1], again, t.recoveryUsedCount('old-user')].join(' ');\n"
+        "}\n"
+        "globalThis.__totp_m1_old = run();\n");
+    char *got = eval_str("globalThis.__totp_m1_old");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "true false true recovery false 1");
+    free(got);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, totp_recovery_and_disable)
 {
     init_js_with_caps();
@@ -3254,9 +3390,8 @@ UTEST(js_stdlib, totp_rekey_batch_helper_js)
         "  return 1;\n"
         "}\n"
         "globalThis.__totp_rekey = run();\n";
-    /* Thirty recovery-code hashes in one run: several requests' worth of KDF
-     * work at its measured cost (the binding dispatcher). */
-    js.max_instructions = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    /* Thirty recovery codes in one run, at the default budget: a salted
+     * HMAC each, not a PBKDF2 (audit-lua M1). */
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val)) hl_js_dump_error(&js);
@@ -5330,6 +5465,276 @@ UTEST(js_stdlib, encoding_suite)
     cleanup_js_caps();
 }
 
+/* hull:ssh - the JS twin of the Lua SSH stack. One leg per co-located suite,
+ * each the port of stdlib/lua/hull/tests/test_ssh_<name>.lua (test_ws_stream.lua
+ * for ws_stream). They run with the real capability layer; a suite that uses
+ * stand-in crypto builds its own. */
+UTEST(js_stdlib, ssh_bytes_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_bytes.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_wire_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_wire.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_packet_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_packet.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_kexinit_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_kexinit.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_kex_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_kex.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_cipher_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_cipher.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_chacha_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_chacha.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_hostkey_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_hostkey.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_hostkey_vectors_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_hostkey_vectors.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_known_hosts_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_known_hosts.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_privatekey_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_privatekey.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_rsa_key_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_rsa_key.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_ecdsa_key_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_ecdsa_key.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_userauth_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_userauth.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_channel_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_channel.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_transport_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_transport.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_sftp_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_sftp.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_ws_stream_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ws_stream.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, ssh_tunnel_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_ssh_tunnel.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, csv_suite)
 {
     init_js_with_caps();
@@ -6174,6 +6579,172 @@ JOBS_HOOKS_CASE(audit38)
 JOBS_HOOKS_CASE(audit39)
 JOBS_HOOKS_CASE(audit41)
 #undef JOBS_HOOKS_CASE
+
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Stdlib Lows from audit 44 (stdlib/js/hull/tests/test_stdlib_audit44.js):
+ * option validation (session, rbac, validate, ratelimit, jobs, search,
+ * retry), cron parking, the reset token checked before the pwned lookup,
+ * audit-log metadata, prototype-free lookup tables and hull:_text's
+ * storable. Each case runs the script in a fresh context and a fresh
+ * :memory: database, named in globalThis.__audit44_case. One UTEST per case,
+ * written out, so scripts/check_regression_test.sh sees each. */
+static int run_audit44_case(const char *name, int *pass, int *fail)
+{
+    init_js_with_caps();
+    if (!js_initialized) return -1;
+    char set[128];
+    snprintf(set, sizeof set, "globalThis.__audit44_case = '%s';", name);
+    JSValue v = JS_Eval(js.ctx, set, strlen(set), "<audit44-case>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, v);
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit44.js", pass, fail);
+    cleanup_js_caps();
+    return rc;
+}
+
+UTEST(js_stdlib_audit44, pwned_reset_order)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("pwned_reset_order", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, session_update_sid)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("session_update_sid", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, rbac_string_permission)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("rbac_string_permission", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, validate_unknown_type)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("validate_unknown_type", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, ratelimit_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("ratelimit_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_poll_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_poll_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_key_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_key_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_history_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_history_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_cron_park)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_cron_park", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, search_snippet_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("search_snippet_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, retry_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("retry_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, text_storable)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("text_storable", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+/* retry.run's maxAttempts: Infinity passed the `>= 1` check and the loop
+ * never ended (audit 44); it is capped at 1000. The retries sleep between
+ * attempts, so this runs as app.main on an async backend, not in the script
+ * above (whose context has no event loop). retryOnError stops an uncapped
+ * loop at 1001 calls. */
+UTEST(js_stdlib_audit44, retry_max_attempts_capped)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main(
+        "import { app } from 'hull:app';\n"
+        "import { retry } from 'hull:retry';\n"
+        "app.main(async () => {\n"
+        "  let calls = 0;\n"
+        "  try {\n"
+        "    await retry.run(() => { calls++; throw new Error('x'); },\n"
+        "      { maxAttempts: Infinity, baseMs: 1, capMs: 1,\n"
+        "        retryOnError: () => calls < 1001 });\n"
+        "  } catch (e) { if (String(e && e.message) !== 'x') return 3; }\n"
+        "  return calls === 1000 ? 7 : (calls > 1000 ? 4 : 5);\n"
+        "});"));
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    EXPECT_EQ(exit_code, 7);
+    cleanup_js_caps();
+    be->free(loop);
+}
+
+UTEST(js_stdlib_audit44, audit_log_meta)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("audit_log_meta", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, proto_lookups)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("proto_lookups", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+#endif
 
 UTEST(js_stdlib, toast_suite)
 {
@@ -17426,5 +17997,646 @@ UTEST(js_input_caps, manifest_limits)
     EXPECT_FALSE(a5_eval_throws(&lim, "JSON.parse('[[[[[[[1]]]]]]]'); new RegExp('0123456789abc');"));
     hl_js_free(&lim);
 }
+
+/* ── the ssh byte-stream bridge (JS twin of lua_ssh_bridge) ─────────── */
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+#include "hull/cap/ssh.h"    /* hl_cap_ssh_live_streams, HL_SSH_MAX_LIVE_STREAMS */
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+/* Run a module under a stdlib name, which is how the bridge recognises
+ * trusted callers (a "hull:" module name, never a path: hl_js_name_is_stdlib).
+ * From C, which no script can do. Each eval gets a fresh name. */
+static int js_ssh_probe_n;
+static void js_ssh_eval_as(const char *src, int stdlib)
+{
+    char name[64];
+    snprintf(name, sizeof name, stdlib ? "hull:ssh:probe%d" : "<ssh-app-%d>",
+             ++js_ssh_probe_n);
+    JSValue v = JS_Eval(js.ctx, src, strlen(src), name, JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+}
+
+/* globalThis.__v as a string ("" while undefined). */
+static void js_ssh_verdict(char *out, size_t n)
+{
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue v = JS_GetPropertyStr(js.ctx, g, "__v");
+    JS_FreeValue(js.ctx, g);
+    out[0] = '\0';
+    if (!JS_IsUndefined(v)) {
+        const char *s = JS_ToCString(js.ctx, v);
+        snprintf(out, n, "%s", s ? s : "(unprintable)");
+        if (s) JS_FreeCString(js.ctx, s);
+    }
+    JS_FreeValue(js.ctx, v);
+}
+
+static void js_ssh_reset_verdict(void)
+{
+    JSValue r = JS_Eval(js.ctx, "globalThis.__v = undefined;", 27, "<r>",
+                        JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, r);
+}
+
+static HlManifest js_ssh_manifest;
+static int        js_ssh_manifest_live;
+
+/* Declare a manifest and apply its ssh grant, the way serve_cli.c does after
+ * load (app.manifest alone wires nothing). */
+static int js_ssh_declare(const char *manifest_obj)
+{
+    char src[1024];
+    snprintf(src, sizeof src,
+             "import { app } from 'hull:app';\napp.manifest(%s);\n", manifest_obj);
+    JSValue v = JS_Eval(js.ctx, src, strlen(src), "<ssh-manifest>",
+                        JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) { hl_js_dump_error(&js); return -1; }
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+    if (js_ssh_manifest_live) hl_manifest_free(&js_ssh_manifest);
+    js_ssh_manifest_live = 0;
+    if (hl_manifest_extract_js(js.ctx, &js_ssh_manifest, js.base.alloc) != 0)
+        return -1;
+    js_ssh_manifest_live = 1;
+    js.base.ssh_policy = &js_ssh_manifest.ssh;
+    return 0;
+}
+
+static void js_ssh_undeclare(void)
+{
+    js.base.ssh_policy = NULL;
+    if (js_ssh_manifest_live) hl_manifest_free(&js_ssh_manifest);
+    js_ssh_manifest_live = 0;
+}
+
+/* The second slot of a synchronous connect's result, as __v. */
+static void js_ssh_connect_err(const char *opts, char *out, size_t n)
+{
+    char src[768];
+    js_ssh_reset_verdict();
+    snprintf(src, sizeof src,
+             "import { connect } from 'hull:ssh:_stream';\n"
+             "const r = connect(%s);\n"
+             "globalThis.__v = r[0] === null ? String(r[1]) + '|' + String(r[2])"
+             " : 'connected';\n", opts);
+    js_ssh_eval_as(src, 1);
+    js_ssh_verdict(out, n);
+}
+
+UTEST(js_ssh_bridge, app_code_cannot_reach_the_byte_stream)
+{
+    /* The module is underscore-named, so app code cannot import it; and a
+     * connect function a stdlib module leaked is inert in app code (the
+     * caller gate). */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(
+        "let m = 'imported';\n"
+        "try { await import('hull:ssh:_stream'); } catch (e) { m = String(e && e.message); }\n"
+        "globalThis.__v = m;\n", 0);
+    char out[256];
+    js_ssh_verdict(out, sizeof out);
+    EXPECT_TRUE_MSG(strstr(out, "imported") == NULL, out);
+
+    js_ssh_eval_as("import { connect } from 'hull:ssh:_stream';\n"
+                   "globalThis.__leaked = connect;\n", 1);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(
+        "let m = 'reached';\n"
+        "try { globalThis.__leaked({ host: 'spark.local', port: 22, user: 'operator' }); }\n"
+        "catch (e) { m = String(e && e.message); }\n"
+        "globalThis.__v = m;\n", 0);
+    js_ssh_verdict(out, sizeof out);
+    EXPECT_TRUE_MSG(strstr(out, "internal to the SSH module") != NULL, out);
+    EXPECT_TRUE_MSG(strstr(out, "hull:ssh") != NULL, out);
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, an_undeclared_manifest_denies_every_connect)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    char out[256];
+    js_ssh_connect_err("{ host: 'spark.local', port: 22, user: 'operator' }",
+                       out, sizeof out);
+    EXPECT_TRUE_MSG(strstr(out, "ssh") != NULL && strstr(out, "connected") == NULL, out);
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, a_host_outside_the_grant_is_denied)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(js_ssh_declare("{ modules: ['hull/ssh@1'], ssh: { connect: {"
+        " hosts: ['spark.local'], ports: [22], users: ['operator'] } } }"), 0);
+    char out[256];
+    js_ssh_connect_err("{ host: 'evil.example.com', port: 22, user: 'operator' }",
+                       out, sizeof out);
+    EXPECT_STREQ(out, "host is not in ssh.connect.hosts|denied");
+    js_ssh_undeclare();
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, a_user_outside_the_grant_is_denied)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(js_ssh_declare("{ modules: ['hull/ssh@1'], ssh: { connect: {"
+        " hosts: ['spark.local'], ports: [22], users: ['operator'] } } }"), 0);
+    char out[256];
+    js_ssh_connect_err("{ host: 'spark.local', port: 22, user: 'root' }",
+                       out, sizeof out);
+    EXPECT_STREQ(out, "user is not in ssh.connect.users|denied");
+    js_ssh_undeclare();
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, an_out_of_range_port_is_refused_not_wrapped)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(js_ssh_declare("{ modules: ['hull/ssh@1'], ssh: { connect: {"
+        " hosts: ['spark.local'], ports: [22], users: ['operator'] } } }"), 0);
+    const char *cases[] = {
+        "{ host: 'spark.local', port: 4294967318, user: 'operator' }",
+        "{ host: 'spark.local', port: 22, user: 'operator', timeoutMs: -5 }",
+        "{ host: 'spark.local', port: 22, user: 'operator', via: { host: 'r', port: 70000 } }",
+    };
+    const char *want[] = { "port must be", "timeoutMs must be", "via.port must be" };
+    for (int i = 0; i < 3; i++) {
+        char out[256];
+        js_ssh_connect_err(cases[i], out, sizeof out);
+        EXPECT_TRUE_MSG(strstr(out, want[i]) != NULL, cases[i]);
+    }
+    js_ssh_undeclare();
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, ports_must_be_integers_audit39)
+{
+    /* As the Lua twin: a numeric string ("22e2") or a fraction is refused for
+     * port, via.port and timeoutMs; a host that is not one name is refused
+     * before any grant or dial. (JS numbers have no integer / float split, so
+     * the Lua case port = 22.0 has no twin; 22.5 stands in for it.) */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(js_ssh_declare("{ modules: ['hull/ssh@1'], ssh: {"
+        " connect: { hosts: ['spark.local', '*.example.com'], ports: [22, 2200],"
+        " users: ['operator'] }, tunnel: { hosts: ['r.example.com'], ports: [443] } } }"), 0);
+    const char *cases[] = {
+        "{ host: 'spark.local', port: '22e2', user: 'operator' }",
+        "{ host: 'spark.local', port: 22.5, user: 'operator' }",
+        "{ host: 'spark.local', port: 22, user: 'operator', timeoutMs: '1000' }",
+        "{ host: 'spark.local', port: 22, user: 'operator', via: { host: 'r.example.com', port: '443' } }",
+        "{ host: 'evil,a.example.com', port: 22, user: 'operator', via: { host: 'r.example.com', port: 443 } }",
+    };
+    const char *want[] = { "port must be", "port must be", "timeoutMs must be",
+                           "via.port must be", "host must be a host name" };
+    for (int i = 0; i < 5; i++) {
+        char out[256];
+        js_ssh_connect_err(cases[i], out, sizeof out);
+        EXPECT_TRUE_MSG(strstr(out, want[i]) != NULL, cases[i]);
+    }
+    js_ssh_undeclare();
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, a_manifest_denial_carries_its_code)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(js_ssh_declare("{ modules: ['hull/ssh@1'], ssh: { connect: {"
+        " hosts: ['spark.local'], ports: [22], users: ['operator'] } } }"), 0);
+    char out[256];
+    js_ssh_connect_err("{ host: 'elsewhere', port: 22, user: 'operator' }",
+                       out, sizeof out);
+    const char *bar = strchr(out, '|');
+    EXPECT_TRUE_MSG(bar && strcmp(bar + 1, "denied") == 0, out);
+    js_ssh_undeclare();
+    cleanup_js();
+}
+
+/* A stream the SSH stdlib has connected to a loopback listener, on a real
+ * loop, with the manifest applied. The handle is globalThis.H, a stream as
+ * hull:ssh:_io hands it out (read / write return [..] arrays once settled).
+ * Probes run as hull: modules, which is what lets them hold it at all. */
+typedef struct {
+    const HlAsyncBackend *be;
+    HlAsyncBackendCtx *actx;
+    HlAsyncBackendPool *pool;
+    int lfd, peer, port;
+} JsSshFix;
+
+static int js_ssh_backlog = 4;
+
+/* Run `body` (an async function body, in a hull: module that imports _io as
+ * `io` and the raw connect as `raw`) and tick the loop until it sets __v. */
+static void js_ssh_run(JsSshFix *f, const char *body, char *out, size_t n)
+{
+    static const char pre[] =
+        "import { _io as io } from 'hull:ssh:_io';\n"
+        "import { connect as raw } from 'hull:ssh:_stream';\n"
+        "(async () => {\n";
+    static const char post[] =
+        "})().then((v) => { globalThis.__v = String(v); },\n"
+        "          (e) => { globalThis.__v = 'threw:' + String(e && e.message)"
+        " + ':' + String(e && e.code); });\n";
+    size_t len = strlen(pre) + strlen(body) + strlen(post) + 1;
+    char *src = malloc(len);
+    if (!src) { snprintf(out, n, "(oom)"); return; }
+    snprintf(src, len, "%s%s%s", pre, body, post);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(src, 1);
+    free(src);
+    for (int i = 0; i < 300; i++) {
+        js_ssh_verdict(out, n);
+        if (out[0]) return;
+        f->be->tick(f->actx, 20);
+        hl_js_run_jobs(&js);
+    }
+    js_ssh_verdict(out, n);
+    if (!out[0]) snprintf(out, n, "(no verdict)");
+}
+
+/* Start `body` without waiting for it (it parks); its verdict lands in
+ * `var` instead of __v. */
+static void js_ssh_start(const char *var, const char *body)
+{
+    char src[2048];
+    snprintf(src, sizeof src,
+        "import { _io as io } from 'hull:ssh:_io';\n"
+        "(async () => {\n%s\n})().then((v) => { globalThis.%s = String(v); },\n"
+        "  (e) => { globalThis.%s = 'threw:' + String(e && e.message); });\n",
+        body, var, var);
+    js_ssh_eval_as(src, 1);
+}
+
+static void js_ssh_global(const char *var, char *out, size_t n)
+{
+    JSValue g = JS_GetGlobalObject(js.ctx);
+    JSValue v = JS_GetPropertyStr(js.ctx, g, var);
+    JS_FreeValue(js.ctx, g);
+    out[0] = '\0';
+    if (!JS_IsUndefined(v)) {
+        const char *s = JS_ToCString(js.ctx, v);
+        snprintf(out, n, "%s", s ? s : "");
+        if (s) JS_FreeCString(js.ctx, s);
+    }
+    JS_FreeValue(js.ctx, v);
+}
+
+static int js_ssh_open(JsSshFix *f)
+{
+    memset(f, 0, sizeof *f);
+    f->lfd = f->peer = -1;
+    f->be = hl_async_backend();
+    if (!f->be) return 1;
+    f->lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (f->lfd < 0) return 2;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t alen = sizeof a;
+    if (bind(f->lfd, (struct sockaddr *)&a, sizeof a) != 0 ||
+        listen(f->lfd, js_ssh_backlog) != 0 ||
+        getsockname(f->lfd, (struct sockaddr *)&a, &alen) != 0) return 3;
+    f->port = ntohs(a.sin_port);
+    if (f->be->init(&f->actx, NULL) != 0) return 4;
+    if (f->be->pool_create(&f->pool, f->actx, 2, 16) != 0) return 5;
+    pending_async_ctx = f->actx;
+    pending_thread_pool = f->pool;
+    init_js_with_caps();
+    if (!js_initialized) return 6;
+    char m[512];
+    snprintf(m, sizeof m, "{ modules: ['hull/ssh@1', 'hull/db@1'], ssh: { connect: {"
+             " hosts: ['127.0.0.1'], ports: [%d], users: ['operator'] } } }", f->port);
+    if (js_ssh_declare(m) != 0) return 7;
+    char body[512], out[256];
+    snprintf(body, sizeof body,
+        "const [s, e, c] = await io.connect({ host: '127.0.0.1', port: %d,"
+        " user: 'operator' });\n"
+        "if (!s) return 'fail:' + e + ':' + c;\n"
+        "globalThis.H = s;\n"
+        "return 'ok';\n", f->port);
+    js_ssh_run(f, body, out, sizeof out);
+    if (strcmp(out, "ok") != 0) { fprintf(stderr, "connect: %s\n", out); return 8; }
+    f->peer = accept(f->lfd, NULL, NULL);
+    return f->peer >= 0 ? 0 : 9;
+}
+
+static void js_ssh_close_fix(JsSshFix *f)
+{
+    if (js_initialized)
+        js_ssh_eval_as("if (globalThis.H) globalThis.H.close();\n"
+                       "globalThis.H = undefined;\n", 1);
+    js_ssh_undeclare();
+    cleanup_js_caps();
+    if (f->be && f->actx) {
+        f->be->tick(f->actx, 0);
+        if (f->pool) f->be->pool_free(f->pool);
+        f->be->free(f->actx);
+    }
+    if (f->peer >= 0) close(f->peer);
+    if (f->lfd >= 0) close(f->lfd);
+}
+
+UTEST(js_ssh_bridge, a_read_size_is_not_an_allocation_size)
+{
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    ASSERT_EQ(send(f.peer, "hi", 2, 0), (ssize_t)2);
+    char out[256];
+    js_ssh_run(&f, "const [d] = await H.read(2 ** 30); return d;\n", out, sizeof out);
+    EXPECT_STREQ(out, "hi");
+    js_ssh_close_fix(&f);
+}
+
+UTEST(js_ssh_bridge, bytes_cross_as_byte_strings_both_ways)
+{
+    /* Every byte value is one code unit, and a write takes a byte string or
+     * a buffer; a code unit above 0xFF is refused, not mangled. */
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    const unsigned char hi[3] = { 0x00, 0xC3, 0xFF };
+    ASSERT_EQ(send(f.peer, hi, 3, 0), (ssize_t)3);
+    char out[256];
+    js_ssh_run(&f,
+        "const [d] = await H.read(16);\n"
+        "if (d.length !== 3 || d.charCodeAt(1) !== 0xC3 || d.charCodeAt(2) !== 0xFF)\n"
+        "  return 'read:' + d.length;\n"
+        "const [w] = await H.write('\\x00\\xe9\\xff');\n"
+        "const [w2] = await H.write(new Uint8Array([1, 2]));\n"
+        "let refused = 'no';\n"
+        "try { await H.write('\\u0100'); } catch (e) { refused = 'yes'; }\n"
+        "return [w, w2, refused].join(',');\n", out, sizeof out);
+    EXPECT_STREQ(out, "true,true,yes");
+    unsigned char got[8] = {0};
+    ssize_t n = 0;
+    for (int i = 0; i < 50 && n < 5; i++) {   /* two writes: maybe two segments */
+        ssize_t r = recv(f.peer, got + n, sizeof got - (size_t)n, MSG_DONTWAIT);
+        if (r > 0) n += r;
+        else { f.be->tick(f.actx, 10); }
+    }
+    EXPECT_EQ(n, (ssize_t)5);
+    EXPECT_EQ(got[1], 0xE9);
+    EXPECT_EQ(got[2], 0xFF);
+    EXPECT_EQ(got[4], 0x02);
+    js_ssh_close_fix(&f);
+}
+
+UTEST(js_ssh_bridge, a_second_waiter_on_one_stream_is_refused_not_parked)
+{
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    /* B parks on the raw handle (hull:ssh:_io would retry). */
+    js_ssh_start("__b", "const [d] = await H.read(16); return d;");
+    char out[256];
+    js_ssh_global("__b", out, sizeof out);
+    EXPECT_STREQ_MSG(out, "", "the first reader parks");
+    /* C: refused at once, coded busy. */
+    js_ssh_run(&f, "const r = H.h.read(16);\n"
+                   "return Array.isArray(r) ? String(r[0]) + '|' + r[1] + '|' + r[2] : 'parked';\n",
+               out, sizeof out);
+    EXPECT_TRUE_MSG(strstr(out, "null|busy") == out && strstr(out, "|busy") != NULL, out);
+    /* B still gets the data. */
+    ASSERT_EQ(send(f.peer, "ping", 4, 0), (ssize_t)4);
+    for (int i = 0; i < 100; i++) {
+        js_ssh_global("__b", out, sizeof out);
+        if (out[0]) break;
+        f.be->tick(f.actx, 20);
+        hl_js_run_jobs(&js);
+    }
+    EXPECT_STREQ(out, "ping");
+    js_ssh_close_fix(&f);
+}
+
+UTEST(js_ssh_bridge, a_close_wakes_its_waiter_from_the_loop)
+{
+    /* Audit 18 M3's twin: the closer keeps its transaction and can still
+     * wait; the reader is woken from the loop, after the closer's run, and
+     * finds the stream closed. */
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    js_ssh_start("__b", "const [d, m, code] = await H.read(16); return code;");
+    char out[256];
+    js_ssh_eval_as(
+        "import { db as dbm } from 'hull:db';\n"
+        "const db = dbm.default();\n"
+        "db.exec('CREATE TABLE sc (x INTEGER)');\n"
+        "db.exec('BEGIN');\n"
+        "db.exec('INSERT INTO sc VALUES (1)');\n"
+        "globalThis.H.close();\n"
+        "globalThis.__intx = db.inTransaction() ? 'yes' : 'no';\n"
+        "db.exec('COMMIT');\n"
+        "globalThis.__b_now = String(globalThis.__b);\n"
+        "globalThis.__c = hull.sleep(5).then(() =>"
+        " String(db.query('SELECT COUNT(*) AS n FROM sc')[0].n));\n", 1);
+    js_ssh_global("__intx", out, sizeof out);
+    EXPECT_STREQ(out, "yes");
+    js_ssh_global("__b_now", out, sizeof out);
+    EXPECT_STREQ_MSG(out, "undefined", "the reader is not resumed inside the closer's run");
+    for (int i = 0; i < 100; i++) {
+        js_ssh_global("__b", out, sizeof out);
+        if (out[0]) break;
+        f.be->tick(f.actx, 20);
+        hl_js_run_jobs(&js);
+    }
+    EXPECT_STREQ(out, "closed");
+    js_ssh_close_fix(&f);
+}
+
+UTEST(js_ssh_bridge, a_wait_inside_a_transaction_is_refused)
+{
+    /* A read that would park inside a transaction is refused, coded
+     * wait_refused (the Lua binding raises the same refusal). */
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    char out[256];
+    js_ssh_run(&f,
+        "const { db: dbm } = await import('hull:db');\n"
+        "const db = dbm.default();\n"
+        "db.exec('BEGIN');\n"
+        "let code = 'none';\n"
+        "try { H.h.read(8); } catch (e) { code = e.code + ':' +"
+        " (String(e.message).includes('transaction') ? 'txn' : 'other'); }\n"
+        "db.exec('ROLLBACK');\n"
+        "return code;\n", out, sizeof out);
+    EXPECT_STREQ(out, "wait_refused:txn");
+    js_ssh_close_fix(&f);
+}
+
+UTEST(js_ssh_bridge, live_streams_are_capped_and_dropped_ones_are_collected)
+{
+    JsSshFix f;
+    js_ssh_backlog = 128;
+    int orc = js_ssh_open(&f);
+    js_ssh_backlog = 4;
+    ASSERT_EQ(orc, 0);
+    ASSERT_EQ(hl_cap_ssh_live_streams(), 1);      /* H */
+    char body[768], out[256];
+    snprintf(body, sizeof body,
+        "globalThis.T = [];\n"
+        "for (let i = 1; i <= %d; i++) {\n"
+        "  const [h, e, code] = await io.connect({ host: '127.0.0.1', port: %d,"
+        " user: 'operator' });\n"
+        "  if (!h) return i + '|' + e + '|' + code;\n"
+        "  T.push(h);\n"
+        "}\n"
+        "return '0';\n", HL_SSH_MAX_LIVE_STREAMS + 4, f.port);
+    js_ssh_run(&f, body, out, sizeof out);
+    char want[64];
+    snprintf(want, sizeof want, "%d|", HL_SSH_MAX_LIVE_STREAMS);
+    EXPECT_TRUE_MSG(strncmp(out, want, strlen(want)) == 0, out);
+    EXPECT_TRUE_MSG(strstr(out, "too many open SSH connections") != NULL, out);
+    EXPECT_TRUE_MSG(strstr(out, "|too_many_streams") != NULL, out);
+    EXPECT_EQ(hl_cap_ssh_live_streams(), HL_SSH_MAX_LIVE_STREAMS);
+    /* Dropped without close: the refusal collects them and the retry
+     * succeeds. */
+    snprintf(body, sizeof body,
+        "globalThis.T = undefined;\n"
+        "const [h, e, code] = await io.connect({ host: '127.0.0.1', port: %d,"
+        " user: 'operator' });\n"
+        "if (!h) return 'fail:' + e + ':' + code;\n"
+        "h.close();\n"
+        "return 'ok';\n", f.port);
+    js_ssh_run(&f, body, out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    js_ssh_close_fix(&f);
+    EXPECT_EQ(hl_cap_ssh_live_streams(), 0);
+}
+
+UTEST(js_ssh_bridge, app_code_holding_a_stream_is_refused)
+{
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    const char *calls[] = { "globalThis.H.h.read(1)", "globalThis.H.h.write('x')",
+                            "globalThis.H.h.close()", "globalThis.H.h.wait(1)",
+                            "globalThis.H.h.deadline(1)",
+                            "globalThis.H.h.connectResult()" };
+    for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++) {
+        char src[256], out[256];
+        snprintf(src, sizeof src,
+                 "let m = 'reached';\ntry { %s; } catch (e) { m = String(e && e.message); }\n"
+                 "globalThis.__v = m;\n", calls[i]);
+        js_ssh_reset_verdict();
+        js_ssh_eval_as(src, 0);
+        js_ssh_verdict(out, sizeof out);
+        EXPECT_TRUE_MSG(strstr(out, "internal to the SSH module") != NULL, calls[i]);
+    }
+    js_ssh_close_fix(&f);
+}
+
+UTEST(js_ssh_bridge, a_bounded_wait_comes_back_coded_and_the_stream_lives)
+{
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    char out[256];
+    js_ssh_run(&f, "H.wait(50); const [d, m, code] = await H.read(8); return code;\n",
+               out, sizeof out);
+    EXPECT_STREQ(out, "timeout");
+    js_ssh_run(&f, "H.wait(0); H.deadline(50); const [d, m, code] = await H.read(8);"
+                   " return code;\n", out, sizeof out);
+    EXPECT_STREQ(out, "deadline");
+    ASSERT_EQ(send(f.peer, "ok", 2, 0), (ssize_t)2);
+    js_ssh_run(&f, "H.deadline(0); const [d] = await H.read(8); return d;\n",
+               out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    js_ssh_run(&f, "try { H.wait(-1); return 'clamped'; } catch (e) { return 'refused'; }\n",
+               out, sizeof out);
+    EXPECT_STREQ(out, "refused");
+    js_ssh_close_fix(&f);
+}
+
+UTEST(js_ssh_bridge, a_known_hosts_line_hashed_by_openssh_is_matched)
+{
+    /* The Lua twin's line: ssh-keygen's own hashed entry for web1.internal,
+     * checked through the real hull:crypto HMAC (the unit suite uses a
+     * stand-in). */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(
+        "import { ssh } from 'hull:ssh';\n"
+        "import { encoding } from 'hull:encoding';\n"
+        "const key = 'AAAAC3NzaC1lZDI1NTE5AAAAIIVv0Mu44/XjxMDB01Pok3Zpil+AvjX4noCS12D4xykm';\n"
+        "const line = '|1|Ni3Ir1hENwtFHCWUUHN1PzRJcIw=|L939wIPq3PCppqUZb9UObH57zdQ= "
+        "ssh-ed25519 ' + key;\n"
+        "const fs = { read: () => new TextBytes(line + '\\n'), write: () => true };\n"
+        "function TextBytes(s) { const u = new Uint8Array(s.length);\n"
+        "  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }\n"
+        "const st = ssh.fileStore('known_hosts', { fs });\n"
+        "const want = encoding.base64.decode(key);\n"
+        "globalThis.__v = st.get('web1.internal') !== want ? 'no match'\n"
+        "  : st.get('web2.internal') !== null && st.get('web2.internal') !== undefined"
+        " ? 'matched another' : 'ok';\n", 0);
+    char out[256];
+    js_ssh_verdict(out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, a_trust_store_over_the_real_hull_kv)
+{
+    /* The real memory backend under ssh.kvStore: set-if-absent, no
+     * overwrite, entries and forget, as the Lua twin. */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(
+        "import { ssh } from 'hull:ssh';\n"
+        "import { kv as kvm } from 'hull:kv';\n"
+        "const kv = kvm.open({ backend: 'memory', namespace: 'ssh-trust-test' });\n"
+        "const st = ssh.kvStore(kv);\n"
+        "const u32 = (n) => String.fromCharCode(n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);\n"
+        "const ed = (b) => u32(11) + 'ssh-ed25519' + u32(32) + b.repeat(32);\n"
+        "const blob = ed('1');\n"
+        "(async () => {\n"
+        "  if ((await ssh.acceptHost(st, 'web1', blob)) !== true) return 'accept';\n"
+        "  if (st.get('web1') !== blob) return 'get';\n"
+        "  let code = 'none';\n"
+        "  try { await ssh.acceptHost(st, 'web1', ed('2')); } catch (e) { code = e.code; }\n"
+        "  if (code !== 'already_trusted') return 'overwrite:' + code;\n"
+        "  if (st.entries().web1 !== blob) return 'entries';\n"
+        "  if ((await ssh.forgetHost(st, 'web1')) !== true) return 'forget';\n"
+        "  const g = st.get('web1');\n"
+        "  if (g !== null && g !== undefined) return 'still there';\n"
+        "  return 'ok';\n"
+        "})().then((v) => { globalThis.__v = v; },"
+        " (e) => { globalThis.__v = 'threw:' + e.message; });\n", 0);
+    char out[256];
+    js_ssh_verdict(out, sizeof out);
+    EXPECT_STREQ(out, "ok");
+    cleanup_js();
+}
+
+UTEST(js_ssh_bridge, teardown_with_a_parked_reader_releases_the_stream)
+{
+    /* A reader parked when the runtime goes: the teardown list stops it
+     * (on_shutdown closes the stream) and the slot comes back. */
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    js_ssh_start("__b", "const [d] = await H.read(16); return d;");
+    EXPECT_EQ(hl_cap_ssh_live_streams(), 1);
+    js.base.vt = &hl_js_vtable;
+    if (js.base.vt && js.base.vt->stop_async) js.base.vt->stop_async(&js.base);
+    js_ssh_undeclare();
+    cleanup_js_caps();
+    f.be->tick(f.actx, 0);
+    EXPECT_EQ(hl_cap_ssh_live_streams(), 0);
+    if (f.pool) f.be->pool_free(f.pool);
+    f.be->free(f.actx);
+    close(f.peer);
+    close(f.lfd);
+}
+
+#endif /* HL_ENABLE_HTTP_CLIENT */
+
 
 UTEST_MAIN();

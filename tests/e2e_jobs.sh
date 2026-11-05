@@ -2525,8 +2525,10 @@ PY
         *) fail "$label: removed dependency" "$out" ;;
     esac
     case "$out|$row" in
-        *"CRONTX raised=0"*"|1")
-            pass "$label: a cron whose enqueue fails keeps its schedule (CAS rolled back) and work goes on" ;;
+        # Audit 44: a stored row whose enqueue cannot succeed (an empty type)
+        # is parked like an invalid spec, not retried every tick for ever.
+        *"CRONTX raised=0"*"|2147483647")
+            pass "$label: a cron whose enqueue cannot succeed is parked and work goes on" ;;
         *) fail "$label: cron CAS + enqueue atomicity" "$out | $row" ;;
     esac
     rm -rf "$T"

@@ -130,9 +130,9 @@ end
 function Sftp:pump()
     if self.broken then error(self.broken, 0) end
     local t, ms = self.t, self.reply_ms
-    if ms > 0 then t:set_deadline(ms) end
+    local dl = ms > 0 and t:push_deadline(ms) or nil
     local ok, m = pcall(t.channel_message, t, self.ch)
-    if ms > 0 then t:set_deadline(0) end
+    t:pop_deadline(dl)
     if not ok then
         if type(m) == "table" and m.code == "deadline" then self:abandon() end
         error(m, 0)
@@ -624,9 +624,10 @@ function Sftp:abandon()
     self.broken = { code = "timeout",
                     detail = "no reply from the sftp server within "
                              .. tostring(self.reply_ms) .. " ms; the session is closed" }
-    t:set_deadline(ABANDON_MS)
-    t:close_channel(self.ch)
-    t:set_deadline(0)
+    local dl = t:push_deadline(ABANDON_MS, true)
+    local cok, cerr = pcall(t.close_channel, t, self.ch)
+    t:pop_deadline(dl)
+    if not cok then error(cerr, 0) end
     if not self.ch.closed then
         t.dead = { code = "timeout", detail = "a timed-out sftp session's channel did not close" }
         t:close()

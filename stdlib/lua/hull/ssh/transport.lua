@@ -65,6 +65,8 @@ function M.new(stream, crypto, opts)
     opts = opts or {}
     local function opt(v, default) if v == nil then return default end return v end
     local t = setmetatable({
+        clock         = opts.clock,
+        deadlines     = {},
         -- Liveness. Every read waits at most wait_ms (see apply_wait); each
         -- time one expires the silence is counted, and once authenticated a
         -- keepalive asks whether the server is still there.
@@ -127,8 +129,66 @@ function Transport:apply_wait()
 end
 
 -- Bound the current phase: the stream's deadline, `ms` from now (0 clears).
+-- Replaces every bound push_deadline set: the connect's own.
 function Transport:set_deadline(ms)
-    if self.stream.deadline then self.stream:deadline(ms) end
+    self.deadlines = {}
+    if ms > 0 then return self:push_deadline(ms) end
+    if self.stream.deadline then self.stream:deadline(0) end
+    return nil
+end
+
+-- The monotonic clock deadlines are measured on (opts.clock in a test).
+-- hull.time is required on first use, so a suite that never nests a
+-- deadline needs no capability layer.
+function Transport:now()
+    if not self.clock then self.clock = require('hull.time').clock end
+    return self.clock()
+end
+
+-- A bound for one operation, which may run inside another's (an SFTP call or
+-- a second exec from an exec's on_stdout): the stream has ONE deadline, and
+-- an inner operation that cleared it when done left the outer one with none.
+-- So bounds nest: the stream gets the soonest one active, and
+-- pop_deadline(token) puts back what is left of the rest. A `cleanup` bound
+-- (closing a channel that timed out) holds alone while it is active - an
+-- outer bound already past must not stop the close.
+function Transport:push_deadline(ms, cleanup)
+    local now = self:now()
+    local tok = { at = now + ms, cleanup = cleanup == true }
+    local d = self.deadlines
+    d[#d + 1] = tok
+    self:apply_deadline(now)
+    return tok
+end
+
+function Transport:pop_deadline(tok)
+    if not tok then return end
+    local d = self.deadlines
+    for i = #d, 1, -1 do
+        if d[i] == tok then
+            table.remove(d, i)
+            self:apply_deadline(self:now())
+            return
+        end
+    end
+end
+
+function Transport:apply_deadline(now)
+    if not self.stream.deadline then return end
+    local d = self.deadlines
+    if #d == 0 then self.stream:deadline(0) return end
+    local at
+    for i = #d, 1, -1 do
+        if d[i].cleanup then at = d[i].at break end
+    end
+    if not at then
+        for i = 1, #d do
+            if not at or d[i].at < at then at = d[i].at end
+        end
+    end
+    local left = at - now
+    -- Already past: the next wait reports the deadline at once.
+    self.stream:deadline(left > 0 and left or 1)
 end
 
 local KEEPALIVE = wire.writer():byte(80):string("keepalive@openssh.com")

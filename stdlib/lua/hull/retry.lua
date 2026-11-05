@@ -31,6 +31,20 @@ local refusal = require("hull._refusal")
 local retry = {}
 
 local DEFAULTS = { max_attempts = 3, base_ms = 100, factor = 2, cap_ms = 30000 }
+-- The most attempts one retry.run makes (audit 44): math.huge passed the
+-- `>= 1` check and `for attempt = 1, inf` never ended.
+local MAX_ATTEMPTS = 1000
+
+-- base_ms / cap_ms: nil takes the default, anything else must be a finite
+-- number >= 0 (audit 44: a negative one made hull.sleep a no-op, so the
+-- retries ran back to back).
+local function ms_opt(v, name, def)
+    if v == nil then return def end
+    if type(v) ~= "number" or v ~= v or v < 0 or v == math.huge then
+        error("retry: " .. name .. " must be a finite number of milliseconds >= 0", 3)
+    end
+    return v
+end
 
 --- Backoff delay (ms) for a 1-based attempt number: `base * factor^(n-1)`,
 -- clamped to `cap`, with optional full jitter (uniform in `[0, delay]`).
@@ -41,9 +55,9 @@ local DEFAULTS = { max_attempts = 3, base_ms = 100, factor = 2, cap_ms = 30000 }
 -- @treturn integer  Delay in milliseconds.
 function retry.backoff(attempt, opts)
     opts = opts or {}
-    local base = opts.base_ms or DEFAULTS.base_ms
+    local base = ms_opt(opts.base_ms, "base_ms", DEFAULTS.base_ms)
     local factor = opts.factor or DEFAULTS.factor
-    local cap = opts.cap_ms or DEFAULTS.cap_ms
+    local cap = ms_opt(opts.cap_ms, "cap_ms", DEFAULTS.cap_ms)
     local d = base * (factor ^ (attempt - 1))
     if d > cap then d = cap end
     if opts.jitter then
@@ -64,7 +78,9 @@ end
 --   (Only the first value used to come back, so `nil, err` arrived as plain
 --   `nil` with the reason lost.)
 -- @tparam[opt] table opts
---   - `max_attempts`   (integer, default 3) total attempts, including the first.
+--   - `max_attempts`   (integer, default 3) total attempts, including the first;
+--                      at most 1000 (a larger value, math.huge included, is 1000).
+--                      `base_ms` / `cap_ms` must be finite numbers >= 0.
 --   - `base_ms` / `factor` / `cap_ms` / `jitter` - see @{retry.backoff}.
 --   - `retry_on`       `function(...) -> boolean` - called with every value
 --                      `fn` returned; retry on a "bad" success (e.g. an HTTP
@@ -99,7 +115,12 @@ function retry.run(fn, opts)
     if type(max) ~= "number" or max ~= max or max < 1 then
         max = DEFAULTS.max_attempts
     end
+    -- At most MAX_ATTEMPTS, as an integer (audit 44: math.huge looped for
+    -- ever, each hull.sleep re-arming the run's budget).
+    if max > MAX_ATTEMPTS then max = MAX_ATTEMPTS end
     max = math.floor(max)
+    ms_opt(opts.base_ms, "base_ms", 0)   -- refused up front, before fn runs
+    ms_opt(opts.cap_ms, "cap_ms", 0)
     local last = { n = 1, false }
     for attempt = 1, max do
         local r = table.pack(pcall(fn))

@@ -103,9 +103,18 @@ end
 --
 -- @function rbac.define_role
 -- @tparam string name         Role name (e.g. `"admin"`, `"editor"`).
--- @tparam[opt] table permissions  Array of permission names to grant.
+-- @tparam[opt] table|string permissions  Array of permission names to grant
+-- (one name may be passed bare; any other non-table raises).
 function rbac.define_role(name, permissions)
     require_name(name, "role name")
+    -- One permission name may be passed bare; anything else that is not a
+    -- table is refused (audit 44: ipairs over a string granted nothing,
+    -- silently; the JS twin granted one permission per character).
+    if type(permissions) == "string" then
+        permissions = { permissions }
+    elseif permissions ~= nil and type(permissions) ~= "table" then
+        error("rbac.define_role: permissions must be an array of names", 2)
+    end
     if permissions then
         for _, perm in ipairs(permissions) do require_name(perm, "permission name") end
     end

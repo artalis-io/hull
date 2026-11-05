@@ -10,6 +10,11 @@
 -- The live behaviour of the crypto is covered by the interop work and by
 -- test_crypto.c; what is exercised here is the state machine around it.
 
+-- The transport measures nested deadlines on hull.time's clock, a C module
+-- this vanilla Lua state (no capability layer) does not have.
+package.preload['hull.time'] = package.preload['hull.time']
+    or function() return { clock = function() return 0 end } end
+
 local transport = require('hull.ssh.transport')
 local packet    = require('hull.ssh.packet')
 local kexinit   = require('hull.ssh.kexinit')
@@ -2227,6 +2232,32 @@ test("message_ready puts the wait back when the read raises", function()
     t.io_busy = true
     assert_eq(raised_code(function() t:message_ready() end), "busy")
     assert_eq(s.waits[#s.waits], 30000, "wait after the raise:")
+end)
+
+test("deadlines nest: an inner operation puts back what is left of the outer one", function()
+    local s = scripted_stream({})
+    local now = 0
+    local t = transport.new(s, stub_crypto(), { clock = function() return now end })
+    local outer = t:push_deadline(5000)       -- an exec with timeout_ms 5000
+    now = 1000
+    local inner = t:push_deadline(60000)      -- an SFTP call from its on_stdout
+    now = 2000
+    t:pop_deadline(inner)
+    t:pop_deadline(outer)
+    assert_eq(table.concat(s.deadlines, ","), "5000,4000,3000,0",
+              "the outer bound survives the inner one:")
+end)
+
+test("a cleanup bound holds alone, even past an expired outer one", function()
+    local s = scripted_stream({})
+    local now = 0
+    local t = transport.new(s, stub_crypto(), { clock = function() return now end })
+    local outer = t:push_deadline(10)
+    now = 100
+    local drain = t:push_deadline(500, true)
+    t:pop_deadline(drain)
+    t:pop_deadline(outer)
+    assert_eq(table.concat(s.deadlines, ","), "10,500,1,0", "cleanup, then the expired outer:")
 end)
 
 return {pass = pass, fail = fail}

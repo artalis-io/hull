@@ -171,49 +171,97 @@ const base32Decode = (s) => encoding.base32.decode(s, { lenient: true });
 // hull:crypto:otp.
 const totpAtStep = otp.hotp;
 
-// Recovery codes: 12 chars from a 31-char no-confusables alphabet,
-// formatted as ABCD-EFGH-IJKL. Modulo bias on 31 from a uniform byte
-// is negligible at our scale. Returns plaintext + PBKDF2 hashes.
+// Recovery codes: 16 chars from a 31-char no-confusables alphabet,
+// formatted as ABCD-EFGH-JKMN-PQRS. 16 x log2(31) = 79.3 bits; with the
+// modulo bias of a byte reduced mod 31 (the likeliest character has
+// probability 9/256) the min-entropy is still 16 x 4.83 = 77 bits.
+//
+// Codes minted before audit-lua M1 were 12 characters (59.5 bits) and
+// stored as crypto.hashPassword (PBKDF2-100k) hashes; they still verify
+// (verifyRecoveryCode below) until used or replaced by a re-enrolment.
 const RECOVERY_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";  // 31 chars
+const RECOVERY_CODE_LEN = 16;
+const LEGACY_RECOVERY_CODE_LEN = 12;
 
 // Strip everything outside the recovery alphabet (hyphens, spaces,
 // accidental punctuation) and uppercase. Stored hashes are computed
-// against the normalized form so users can paste back "ABCD-EFGH-IJKL",
-// "ABCDEFGHIJKL", or "abcd efgh ijkl" interchangeably without a UX
-// lockout trap. Matches the Lua side's normalize_recovery_code.
+// against the normalized form so users can paste back the displayed
+// "ABCD-EFGH-JKMN-PQRS", the unhyphenated form, or lower case
+// interchangeably without a UX lockout trap. Matches the Lua side's
+// normalize_recovery_code.
 function normalizeRecoveryCode(s) {
     if (typeof s !== "string") return "";
     return s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+// Stored form of a recovery code (audit-lua M1), shared with totp.lua:
+//
+//     rch1$<salt: 16 random bytes, hex>$<HMAC-SHA256(key = salt, code), hex>
+//
+// A recovery code is a 77-bit random string, not a password a person chose,
+// so a slow KDF buys nothing: no offline guessing of 2^77 candidates is
+// feasible at any hash speed. PBKDF2-100k per code made totp.enroll (10
+// codes) a large share of one run's budget and tripped it on a loaded host.
+// The salt keeps equal codes from sharing a stored value; the compare is
+// constant-time in C (hmacSha256Verify).
+const RECOVERY_HASH_PREFIX = "rch1$";
+const LEGACY_HASH_PREFIX = "pbkdf2:";
+const RECOVERY_HASH_RE = /^rch1\$([0-9a-f]{32})\$([0-9a-f]{64})$/;
+
+function hexToU8(h) {
+    const out = new Uint8Array(h.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
+    return out;
+}
+
+function hashRecoveryCode(code) {
+    const salt = crypto.random(16);
+    const mac = crypto.hmacSha256(normalizeRecoveryCode(code), salt);
+    return RECOVERY_HASH_PREFIX + encoding.hex.encode(salt) + "$"
+         + encoding.hex.encode(mac);
+}
+
+// Verify against either stored format. A code can only match the format it
+// was minted under, and each format's codes have one length, so a code of
+// the other length is refused without hashing (a 16-character code never
+// pays a PBKDF2 against a legacy row).
+function verifyRecoveryCode(code, hash) {
+    if (typeof hash !== "string") return false;
+    const n = normalizeRecoveryCode(code);
+    if (hash.startsWith(RECOVERY_HASH_PREFIX)) {
+        if (n.length !== RECOVERY_CODE_LEN) return false;
+        const m = RECOVERY_HASH_RE.exec(hash);
+        if (!m) return false;
+        return crypto.hmacSha256Verify(n, hexToU8(m[1]), hexToU8(m[2]));
+    }
+    if (hash.startsWith(LEGACY_HASH_PREFIX)) {
+        if (n.length !== LEGACY_RECOVERY_CODE_LEN) return false;
+        return crypto.verifyPassword(n, hash);
+    }
+    return false;
 }
 
 function generateRecoveryCodes(n) {
     const codes = new Array(n);
     const hashes = new Array(n);
     for (let i = 0; i < n; i++) {
-        const raw = new Uint8Array(crypto.random(12));
-        const parts = new Array(12);
-        for (let j = 0; j < 12; j++) parts[j] = RECOVERY_ALPHA[raw[j] % 31];
-        const plain = parts.join("");  // unhyphenated, used for hash
-        const display = parts[0] + parts[1] + parts[2] + parts[3] + "-"
-                      + parts[4] + parts[5] + parts[6] + parts[7] + "-"
-                      + parts[8] + parts[9] + parts[10] + parts[11];
-        codes[i]  = display;
-        hashes[i] = crypto.hashPassword(plain);
+        const raw = new Uint8Array(crypto.random(RECOVERY_CODE_LEN));
+        let plain = "";  // unhyphenated, used for hash
+        for (let j = 0; j < RECOVERY_CODE_LEN; j++) plain += RECOVERY_ALPHA[raw[j] % 31];
+        codes[i]  = plain.slice(0, 4) + "-" + plain.slice(4, 8) + "-"
+                  + plain.slice(8, 12) + "-" + plain.slice(12, 16);
+        hashes[i] = hashRecoveryCode(plain);
     }
     return [codes, hashes];
 }
 
-function verifyRecoveryCode(code, hash) {
-    return crypto.verifyPassword(normalizeRecoveryCode(code), hash);
-}
-
-// Every recovery code is 12 characters once normalized. Anything else - a
-// 6-digit TOTP code above all - cannot match one, and checking it anyway cost
-// a PBKDF2 hash per unused code (10 by default) on the event loop for every
-// wrong code submitted.
-const RECOVERY_CODE_LEN = 12;
+// A recovery code is 16 characters once normalized (12 for one minted
+// before audit-lua M1). Anything else - a 6-digit TOTP code above all -
+// cannot match one, and checking it anyway cost a hash per unused code on
+// the event loop for every wrong code submitted.
 function recoveryShaped(code) {
-    return normalizeRecoveryCode(code).length === RECOVERY_CODE_LEN;
+    const n = normalizeRecoveryCode(code).length;
+    return n === RECOVERY_CODE_LEN || n === LEGACY_RECOVERY_CODE_LEN;
 }
 
 // Constant-time string equality. TOTP code matching where both
@@ -1270,7 +1318,19 @@ const _test = {
     ctEq,
     normalizeRecoveryCode,
     generateRecoveryCodes,
+    hashRecoveryCode,
     verifyRecoveryCode,
+    // Store a recovery-code hash for a user as-is (an old-format PBKDF2 row,
+    // for the backward-compatibility tests).
+    addRecoveryHash: (userId, codeHash) => {
+        db.exec("INSERT INTO _hull_totp_recovery (user_id, code_hash) VALUES (?, ?)",
+                [userId, codeHash]);
+    },
+    recoveryUsedCount: (userId) => {
+        const r = db.query("SELECT COUNT(*) AS n FROM _hull_totp_recovery "
+                         + "WHERE user_id = ? AND used_at IS NOT NULL", [userId]);
+        return (r && r[0] && r[0].n) || 0;
+    },
     encryptSecret,
     decryptSecret,
     buildOtpauthUrl,

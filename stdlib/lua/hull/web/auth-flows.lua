@@ -2102,6 +2102,18 @@ local function handle_password_reset_confirm(req, res)
     if not password_len_ok(body.password) then
         return res:status(400):json({ error = "invalid password length" })
     end
+    -- The token is checked (without consuming it) BEFORE the pwned-password
+    -- lookup: that lookup is an outbound fetch, and a garbage token must not
+    -- buy one (audit 44). It is consumed after the lookup.
+    do
+        local penv, perr = parse_token(body.token, ACTIONS.password_reset)
+        if not penv then
+            return res:status(400):json({ error = "reset failed: " .. (perr or "?") })
+        end
+        if token_already_used(body.token) then
+            return res:status(400):json({ error = "reset failed: replayed" })
+        end
+    end
     -- Same pwned-password gate as register so a reset can't be used
     -- to land on a breached password.
     if check_pwned(body.password) then
@@ -3327,6 +3339,7 @@ require("hull._test_hooks").register("hull.web.auth-flows", {
         magic_link_consume   = handle_magic_link_consume,
         verify_page          = handle_verify_page,
         verify               = handle_verify,
+        password_reset_confirm = handle_password_reset_confirm,
     },
     ACTIONS            = ACTIONS,
     email_rate_allow   = function(to, exact) return email_rate_allow(to, exact) end,

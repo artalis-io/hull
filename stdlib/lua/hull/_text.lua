@@ -74,7 +74,8 @@ end
 --     overlongs included, as Lua 5.4's strict utf8 reads them) becomes
 --     U+FFFD;
 --   * the text is capped at @p max bytes (default M.TEXT_MAX), cut on a code
---     point, with "..." appended when @p ellipsis is true and it was cut.
+--     point; when @p ellipsis is true and it was cut, it is cut at max - 3
+--     and "..." appended, so the result is never longer than @p max.
 -- The JS twin is hull:_text's storable, applying the same rules to code
 -- units (a lone surrogate becomes U+FFFD). A new stdlib write of app,
 -- request or remote text goes through this (CLAUDE.md).
@@ -116,7 +117,9 @@ function M.storable(v, max, ellipsis, unconvertible)
         s = table.concat(out)
     end
     if #s > max then s = cut_utf8(s, max); cut = true end
-    if cut and ellipsis then s = s .. "..." end
+    -- The ellipsis fits inside @p max (audit 44: appended after a cut at max,
+    -- the result was max + 3 bytes); a cap under 3 bytes takes no ellipsis.
+    if cut and ellipsis and max >= 3 then s = cut_utf8(s, max - 3) .. "..." end
     return s
 end
 
