@@ -8,6 +8,46 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+Lows from the post-v0.18.0 C audit:
+
+- **JS top level (L4):** a JS app's module top level can no longer start an async op
+  (`db.async`, `compute.async`, `worker.dispatch`, `http.fetch`, `hull.sleep`, ...): it is refused
+  with `wait_refused`, as Lua's top level already was, and so is the code after a top-level
+  `await`. A top level that did this started the worker pool before the phase-2 sandbox. As a
+  second line the runners hold the worker pool until phase 2 is applied. **Upgrade note:** move
+  startup async work into `app.main`. The CA anchor is now published as one record behind one
+  atomic pointer, and the WASM watchdog restarts its thread for a watch armed while it was being
+  stopped.
+- **`--vm-thread` (L1, L2, L3):** a run whose budget or deadline is spent no longer parks on an
+  op (both runtimes), so an abandoned run cannot park after standby answered 503. Standby sends
+  the early 503 and starts accepting before it logs, never takes the log lock or blocks on a full
+  stderr, and `die()` exits the same way. Standby's per-connection I/O is non-blocking with short
+  waits, and a batch is bounded by wall time with the ceiling checked inside it.
+- **SQLite busy wait (L5):** the run deadline is consulted only inside a run, so Hull's own SQL
+  after a run (the teardown checkpoint, agent connections) is no longer cut short by a stale one.
+- **SQLite UDFs (L15):** a UDF can no longer begin / commit / roll back a transaction, or run a
+  script, on the connection that is running it (`HL_DB_ERR_REENTERED`).
+- **Internal-database move (L14):** an allocation failure while the column list is read fails
+  the move instead of copying a table with fewer columns.
+- **GPU compile helper (L6, L7, L16):** verdicts for runtime source are no longer written to the
+  sealed `gpu-shaders` disk cache (one file per distinct source, possibly request text); the
+  supervisor answers before it reaps a worker that is slow to die, so the reply no longer misses
+  the server's deadline and drops the helper; a stopped supervisor is reaped at the next check
+  instead of staying a zombie; on macOS a clean verdict from a worker whose footprint passed its
+  memory cap is reported as a memory refusal.
+- **Manifest and input caps (L10, L13):** JS `perIpConcurrency` / `perIpConnections` are compared
+  with the ceiling before any integer cast (a huge whole number is clamped); Lua `json.decode`'s
+  per-call `max_depth` / `max_keys` are clamped to the ceilings; a JS `worker.dispatch` VM uses
+  the app's input ceilings instead of the defaults.
+- **Lua binding meter (L18):** a binding nested deeper than the meter depth is charged a fixed
+  floor instead of running uncharged.
+- **Dev tooling (L11):** the `last_error.json` MAC is computed over a buffer sized from the
+  message.
+- Hygiene (I1-I8): comments, `const`, an overflow guard, seal-phase aliases cleared on failure,
+  `sandbox_free_error`.
+
 ## [0.18.0] - 2026-11-03
 
 Full PR list:

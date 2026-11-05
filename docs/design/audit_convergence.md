@@ -303,16 +303,24 @@ the class is proven absent.
   between two positionally matched keywords inside a dollar-quoted body or after a backslash
   string (`SET /*x*/ ROLE`) is not refused. The per-entry session reset remains the guarantee, as
   for SQL assembled at run time. Closing it would refuse much ordinary SQL with backslashes.
+  Three plain-text spellings are recorded limits too (C audit L9, left as a classifier design
+  decision): a Postgres `set_config` whose first argument is a concatenation of two literals (only
+  the first literal is read); a Postgres function body given as a plain `'...'` string after `AS`
+  (skipped as a literal, while a `$$` body is scanned raw) and run by a later call; and a MySQL
+  `SET @var = '<session statement>'` followed in a later call by `PREPARE ... FROM @var; EXECUTE`
+  (the PREPARE is rescanned raw, but the string lives in the earlier statement, whose literals
+  are skipped). Each is self-harm within one entry; the per-entry session reset still holds.
 - **WAMR heap check: unresolved, not rated.** Round 42 raised whether a WAMR heap bounds check
   covers a whole heap node or only its start. Every automated attempt to analyse it was stopped,
   so it has no severity and no verdict. The proposed defensive patch (bound the whole node) has not
   landed. It needs a maintainer review, ideally under ASan, before it is rated or closed.
-- **Recorded Lows** (not fixed): GPU helper - the macOS footprint is not re-checked when the worker
-  replies; TIMEOUT / CRASHED verdicts are cached for the life of the process; the verdict key has
-  no driver version; the macOS worker sandbox is allow-default; `tests/e2e_feature_gpu.sh` uses
-  fixed ports. Elsewhere: a composed `--with=duckdb` app gets no DuckDB fs policy; query strings
-  truncate at 4 KiB; a stale run deadline on the event-loop thread could cut a lock wait short
-  outside a run (no path found that triggers it).
+- **Recorded Lows** (not fixed): GPU helper - TIMEOUT / CRASHED verdicts are cached for the life
+  of the process; the verdict key has no driver version; the macOS worker sandbox is
+  allow-default; `tests/e2e_feature_gpu.sh` uses fixed ports. Elsewhere: a composed
+  `--with=duckdb` app gets no DuckDB fs policy; query strings truncate at 4 KiB. (Fixed since by
+  the post-release C audit: the macOS footprint is re-checked when the worker replies, and a stale
+  run deadline no longer cuts a lock wait short outside a run - the teardown checkpoint was a
+  concrete path.)
 
 **Behaviour changes that need upgrade notes** are in CHANGELOG (Unreleased), notably the
 `req.remote_addr` normalisation on dual-stack listeners and the new connection deadlines.

@@ -101,7 +101,7 @@ directory becomes pathological at ~50K entries - sharding keeps
 | `compute-aot` | `wamrc` AOT output for every `compute/*.wasm` | wasm sha256 + wamrc version + target triple | full `wamrc` invocation (seconds) |
 | `templates` | Generated Lua render function (bytecode) for every `templates/*.html` | template source sha256 + engine version | template parse + Lua codegen + `luaL_loadbuffer` |
 | `js-templates` | Generated JS render function (bytecode) for every `templates/*.html` | template source sha256 + engine version + name | template parse + JS codegen + `JS_Eval` |
-| `gpu-shaders` | `"ok"` for a runtime WGSL source the GPU compile helper process compiled cleanly (`gpu.dynamic_shaders`; [design](design/gpu_compile_helper.md)); refusals stay in memory only | Hull version + backend + arch + device + adapter + source sha256 | a helper round trip (~50 ms - 0.3 s): spawn a sandboxed worker, init the GPU, compile |
+| `gpu-shaders` | `"ok"` for a WGSL source the GPU compile helper process compiled cleanly and its caller marked persistable ([design](design/gpu_compile_helper.md)); runtime `gpu.dynamic_shaders` source is never written (it may be request text), so the kind stays empty today; refusals stay in memory only | Hull version + backend + arch + device + adapter + source sha256 | a helper round trip (~50 ms - 0.3 s): spawn a sandboxed worker, init the GPU, compile |
 | `tools` | Signed binaries downloaded by `hull tools install` (e.g. `wamrc`) | sha256 of the binary | full `~6 MB` HTTPS download + Ed25519 verify |
 
 Only NAMED templates (`template.render` / `compile` of a `templates/*`
