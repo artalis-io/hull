@@ -6,6 +6,11 @@
 -- so these drive it against a fake relay and assert on the bytes that relay
 -- was sent - which is the part a tunnel gets wrong.
 
+-- The transport measures nested deadlines on hull.time's clock, a C module
+-- this vanilla Lua state (no capability layer) does not have.
+package.preload['hull.time'] = package.preload['hull.time']
+    or function() return { clock = function() return 0 end } end
+
 local ssh = require('hull.ssh')
 local ws  = require('hull.ssh.ws_stream')
 
@@ -587,6 +592,18 @@ test("bytes from inside the tunnel reach the SSH transport", function()
     assert_eq(err.code ~= "upgrade_failed", true, "but not at the upgrade")
     assert_eq(err.code ~= "upgrade_refused", true)
     assert_eq(err.code ~= "denied", true)
+end)
+
+test("the upgrade runs under the connect deadline", function()
+    local r = relay(upgraded())
+    local log = {}
+    r.deadline = function(_, ms) log[#log + 1] = "deadline:" .. tostring(ms) end
+    local write = r.write
+    r.write = function(self, x) log[#log + 1] = "write"; return write(self, x) end
+    connect_via(r)
+    assert_eq(log[1], "deadline:30000", "bounded before the request goes out: "
+              .. table.concat(log, " "))
+    assert_eq(log[2], "write")
 end)
 
 return { pass = pass, fail = fail }

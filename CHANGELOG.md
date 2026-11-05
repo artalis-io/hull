@@ -8,6 +8,62 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **`hull/ssh` for JavaScript.** `import { ssh } from "hull:ssh"` is the JS twin of the Lua SSH
+  client: exec, SFTP, WebSocket-relay tunnels and host-key trust stores. It sits over the same
+  capability layer (`hl_cap_ssh_open`, the net stream), so `manifest.ssh` grants, the dial clamp,
+  the 32-stream cap (`too_many_streams`), host-key verification and every error code are the same.
+  The protocol stack is a line-for-line port with twin suites, and `e2e_ssh_parity` /
+  `e2e_ssh_tunnel` / `e2e_ssh_key_passphrase` now run every scenario on both runtimes.
+  - The JS API is idiomatic: Promises, camelCase options, failures rejected as Errors carrying
+    `.code`, byte strings for bytes (buffers accepted as input), and 0-based `authKey` / `e.key`.
+  - `hull:crypto` gains the primitives the protocol composes: `gcmSeal` / `gcmOpen`,
+    `aes256ctr`, `chacha20`, `poly1305`, `bcryptPbkdf` / `bcryptPbkdfEnv`, and
+    `BCRYPT_MAX_ROUNDS`, matching Lua.
+  - `examples/ssh_fleet/app.js` is the JS twin of the Lua example. The parity table is in
+    [docs/app_api_reference.md](docs/app_api_reference.md#ssh-client-hullssh).
+  - Lua change: a runtime refusal (`[hull:wait_refused]`, e.g. an exec inside a transaction) is
+    now raised unchanged by `hull.ssh`. It used to be returned as `io_error`.
+  - Hardened before merge (JS-only, from a review of the port): a packet's send and read each
+    hold the connection for their whole duration, and the sequence number is spent before any
+    await - a second task resuming between a write and its bookkeeping sealed under the number
+    just used (the chacha20-poly1305 nonce), and a read that threw dropped bytes already buffered.
+    `tunnel.headers` entries must be primitive strings and the tunnel options are read once, so
+    a `new String(...)` header can no longer smuggle CR LF (and a second destination header) past
+    the checks, nor a getter hand the grant check one relay name and the `Host` header another.
+    The connection's own `busy` failure is marked as hull:ssh's (`hull:_refusal` no longer takes
+    it for a runtime refusal, which `hull:jobs` handed back uncounted, re-running the command),
+    and an SFTP request cut short mid-frame leaves the session broken.
+  - Also from that review: peer text the JS client hands the app (a banner, an exit-signal
+    message, names in error details) is decoded text, so a kept non-ASCII character no longer
+    reaches a log as C1 controls; an SFTP size past 2^53 - 1 reads as `null` instead of failing
+    the whole call; `maxOutput` must be a non-negative integer (`0` is a 0-byte cap, as in Lua);
+    `mod_ssh.c`'s integer checks no longer cast an out-of-range double (undefined behaviour).
+  - Both runtimes: the WebSocket upgrade through a tunnel runs under the connect deadline (a relay
+    that never answered it parked the caller with no bound), and an operation's deadline nests
+    inside another's - an SFTP call or a second exec from an exec's output callback cleared the
+    outer command's `timeout_ms`, and now puts back what is left of it. `hull/ssh` admits
+    `hull/time` for the clock.
+
+### Fixed
+
+- **TOTP recovery codes use a salted fast hash; enrolment no longer costs a large share of the run
+  budget (audit-lua M1).** `totp.enroll` hashed each of its 10 default recovery codes with
+  `crypto.hash_password` (PBKDF2-100k): 16M units of explicit charge plus the measured time, ~59M
+  units (~60% of a default 100M-unit run) on an idle host, so enrol + confirm + verify in one request
+  tripped `instruction limit exceeded` on a loaded one (a 500 in production; four unit tests failed
+  under parallel load). Recovery codes are random, not passwords a person chose, so a slow KDF buys
+  nothing: new codes are 16 characters (`ABCD-EFGH-JKMN-PQRS`, ~77 bits of min-entropy, up from 12
+  characters / ~59 bits) and are stored as `rch1$<16-byte salt hex>$<HMAC-SHA256(salt, code) hex>`,
+  verified in constant time (`hmac_sha256_verify` / `hmacSha256Verify`). Enrolment now costs ~5.8M
+  units (~6% of the budget) in both runtimes. Lua (`totp.lua`) and JS (`totp.js`) write and read the
+  same format. **Backward compatible:** a stored `pbkdf2:` hash (a 12-character code minted before
+  this change) still verifies through `verify_password` and is consumed once, exactly as before;
+  each format is tried only for codes of its own length, so a new code never pays a PBKDF2 against
+  a legacy row. Existing enrolments keep working; re-enrolling mints new-format codes. The two
+  `totp_rekey_batch_helper` tests run at the default budget again.
+
 ### Behaviour changes (stdlib audit 44 Lows, both runtimes)
 
 - **Options that were silently misread now raise.** `ratelimit.middleware` refuses a `limit`

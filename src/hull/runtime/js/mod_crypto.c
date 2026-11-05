@@ -1519,6 +1519,463 @@ static void js_register_crypto_key_class(JSContext *ctx)
     hl_js_set_class_proto_frozen(ctx, hl_js_crypto_key_class_id, proto);
 }
 
+/* ── Byte-level primitives (Lua parity) ────────────────────────────── */
+
+/* The primitives hull/ssh's protocol layer composes itself: OpenSSH key
+ * passphrases (bcrypt_pbkdf + AES-256-CTR), AES-256-GCM packets, and the two
+ * halves of chacha20-poly1305@openssh.com. Lua has had them since the SSH
+ * work (crypto.gcm_seal & co, runtime/lua/mod_crypto.c); these are the JS
+ * twins over the same cap entry points, with the same length checks and the
+ * same charges (1 unit per 8 bytes, bcrypt per round per block before the
+ * derivation). Buffers in, ArrayBuffers out: a string argument is taken as its
+ * UTF-8 text, as everywhere in hull:crypto, so bytes go in as a buffer. */
+
+#define HL_JS_BCRYPT_UNITS_PER_HASH ((uint64_t)1 << 17)   /* = Lua's */
+
+/* bcrypt_pbkdf: one bcrypt_hash per round per 32-byte block, charged BEFORE
+ * it runs (the round count comes from a key file). */
+static int js_bcrypt_charge(JSContext *ctx, int64_t rounds, int64_t outlen)
+{
+    uint64_t blocks = ((uint64_t)outlen + 31u) / 32u;
+    uint64_t u = (uint64_t)rounds * blocks;
+    u = (u > UINT64_MAX / HL_JS_BCRYPT_UNITS_PER_HASH)
+            ? UINT64_MAX : u * HL_JS_BCRYPT_UNITS_PER_HASH;
+    return hl_js_budget_charge(ctx, u);
+}
+
+/* The shared numeric checks of both bcrypt entry points, before anything
+ * secret is in hand. 0, or -1 with a pending exception. */
+static int js_bcrypt_args(JSContext *ctx, JSValueConst r, JSValueConst l,
+                          const char *fn, int64_t *rounds, int64_t *outlen)
+{
+    if (!JS_IsNumber(r) || !JS_IsNumber(l)) {
+        JS_ThrowTypeError(ctx, "crypto.%s: rounds and length must be integers", fn);
+        return -1;
+    }
+    double dr = 0, dl = 0;
+    if (JS_ToFloat64(ctx, &dr, r) || JS_ToFloat64(ctx, &dl, l)) return -1;
+    if (!(dr > 0 && dr <= (double)HL_BCRYPT_MAX_ROUNDS) ||
+        dr != (double)(int64_t)dr) {
+        JS_ThrowRangeError(ctx, "crypto.%s: rounds is out of range", fn);
+        return -1;
+    }
+    if (!(dl > 0 && dl <= (double)HL_BCRYPT_MAX_OUT) ||
+        dl != (double)(int64_t)dl) {
+        JS_ThrowRangeError(ctx, "crypto.%s: length is out of range", fn);
+        return -1;
+    }
+    *rounds = (int64_t)dr;
+    *outlen = (int64_t)dl;
+    return 0;
+}
+
+/* crypto.bcryptPbkdf(passphrase, salt, rounds, length) -> ArrayBuffer
+ *
+ * As Lua's crypto.bcrypt_pbkdf: the passphrase is held by the caller (a JS
+ * string or buffer Hull cannot scrub). bcryptPbkdfEnv keeps it out of the
+ * heap altogether. */
+static JSValue js_crypto_bcrypt_pbkdf(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx, "crypto.bcryptPbkdf requires (passphrase, salt, rounds, length)");
+    int64_t rounds = 0, outlen = 0;
+    if (js_bcrypt_args(ctx, argv[2], argv[3], "bcryptPbkdf", &rounds, &outlen))
+        return JS_EXCEPTION;
+    JsMsg pass, salt;
+    if (!js_msg_get(ctx, argv[0], &pass))
+        return JS_ThrowTypeError(ctx, "crypto.bcryptPbkdf: passphrase must be a string or a buffer");
+    if (!js_msg_get(ctx, argv[1], &salt)) {
+        js_msg_free(ctx, &pass);
+        return JS_ThrowTypeError(ctx, "crypto.bcryptPbkdf: salt must be a buffer");
+    }
+    JSValue ret = JS_EXCEPTION;
+    if (!pass.view.len) {
+        JS_ThrowTypeError(ctx, "crypto.bcryptPbkdf: empty passphrase");
+    } else if (!salt.view.len) {
+        JS_ThrowTypeError(ctx, "crypto.bcryptPbkdf: empty salt");
+    } else if (!js_crypto_charge(ctx, pass.view.len + salt.view.len) &&
+               !js_bcrypt_charge(ctx, rounds, outlen)) {
+        uint8_t out[HL_BCRYPT_MAX_OUT];
+        if (hl_cap_crypto_bcrypt_pbkdf(pass.view.data, pass.view.len,
+                                       salt.view.data, salt.view.len,
+                                       (unsigned int)rounds, out,
+                                       (size_t)outlen) != 0)
+            /* Never echo the passphrase, its length, or a derived byte. */
+            JS_ThrowInternalError(ctx, "crypto.bcryptPbkdf: derivation failed");
+        else
+            ret = JS_NewArrayBufferCopy(ctx, out, (size_t)outlen);
+        secure_zero(out, sizeof out);
+    }
+    js_msg_free(ctx, &pass);
+    js_msg_free(ctx, &salt);
+    return ret;
+}
+
+/* crypto.bcryptPbkdfEnv(varName, salt, rounds, length) -> ArrayBuffer
+ *
+ * As Lua's crypto.bcrypt_pbkdf_env: JS passes only the NAME of a variable in
+ * manifest.env; the C layer reads the value, derives from a copy it scrubs,
+ * and the passphrase never becomes a JS value. One message for "not
+ * declared" and "declared but unset", as in Lua. */
+static JSValue js_crypto_bcrypt_pbkdf_env(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx, "crypto.bcryptPbkdfEnv requires (name, salt, rounds, length)");
+    if (!JS_IsString(argv[0]))
+        return JS_ThrowTypeError(ctx, "crypto.bcryptPbkdfEnv: name must be a string");
+    int64_t rounds = 0, outlen = 0;
+    if (js_bcrypt_args(ctx, argv[2], argv[3], "bcryptPbkdfEnv", &rounds, &outlen))
+        return JS_EXCEPTION;
+    JsMsg salt;
+    if (!js_msg_get(ctx, argv[1], &salt))
+        return JS_ThrowTypeError(ctx, "crypto.bcryptPbkdfEnv: salt must be a buffer");
+    if (!salt.view.len) {
+        js_msg_free(ctx, &salt);
+        return JS_ThrowTypeError(ctx, "crypto.bcryptPbkdfEnv: empty salt");
+    }
+    /* Charged before the passphrase is read (audit 9 H3). */
+    if (js_crypto_charge(ctx, salt.view.len) ||
+        js_bcrypt_charge(ctx, rounds, outlen)) {
+        js_msg_free(ctx, &salt);
+        return JS_EXCEPTION;
+    }
+    const char *var = JS_ToCString(ctx, argv[0]);
+    if (!var) { js_msg_free(ctx, &salt); return JS_EXCEPTION; }
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.env_cfg) {
+        JS_FreeCString(ctx, var);
+        js_msg_free(ctx, &salt);
+        return JS_ThrowInternalError(ctx, "crypto.bcryptPbkdfEnv: no env capability");
+    }
+    const char *val = hl_cap_env_get(js->base.env_cfg, var);
+    if (!val || !*val) {
+        JSValue e = JS_ThrowInternalError(ctx, "crypto.bcryptPbkdfEnv: '%s' is not "
+                                          "available (declare it in manifest.env "
+                                          "and set it)", var);
+        JS_FreeCString(ctx, var);
+        js_msg_free(ctx, &salt);
+        return e;
+    }
+    JS_FreeCString(ctx, var);
+
+    /* A copy WE can wipe; the environment's own is the OS's. */
+    size_t n = strlen(val);
+    char *copy = malloc(n);
+    if (!copy) {
+        js_msg_free(ctx, &salt);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    memcpy(copy, val, n);
+    uint8_t out[HL_BCRYPT_MAX_OUT];
+    int rc = hl_cap_crypto_bcrypt_pbkdf(copy, n, salt.view.data, salt.view.len,
+                                        (unsigned int)rounds, out, (size_t)outlen);
+    secure_zero(copy, n);
+    free(copy);
+    js_msg_free(ctx, &salt);
+    JSValue ret = rc != 0
+        ? JS_ThrowInternalError(ctx, "crypto.bcryptPbkdfEnv: derivation failed")
+        : JS_NewArrayBufferCopy(ctx, out, (size_t)outlen);
+    /* Unconditional, whether or not the buffer could be made. */
+    secure_zero(out, sizeof out);
+    return ret;
+}
+
+/* An optional byte argument (data, aad, plaintext, ciphertext): absent,
+ * undefined or null is empty. 1, or 0 with a pending exception. */
+static int js_opt_bytes(JSContext *ctx, int argc, JSValueConst *argv, int i,
+                        JsMsg *m, const char *fn, const char *what)
+{
+    if (i >= argc || JS_IsUndefined(argv[i]) || JS_IsNull(argv[i])) {
+        memset(m, 0, sizeof *m);
+        m->view.data = "";
+        return 1;
+    }
+    if (!js_msg_get(ctx, argv[i], m)) {
+        JS_ThrowTypeError(ctx, "crypto.%s: %s must be a buffer", fn, what);
+        return 0;
+    }
+    return 1;
+}
+
+/* crypto.aes256ctr(key, iv, data) -> ArrayBuffer. One function for both
+ * directions; unauthenticated (the caller brings its own integrity check). */
+static JSValue js_crypto_aes256ctr(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.aes256ctr requires (key, iv, data)");
+    JsMsg key, iv, in;
+    if (!js_fixed_arg(ctx, argv[0], &key, HL_AEAD_KEY_LEN, "aes256ctr", "key"))
+        return JS_EXCEPTION;
+    if (!js_fixed_arg(ctx, argv[1], &iv, HL_AES_CTR_IV_LEN, "aes256ctr", "iv")) {
+        js_msg_free(ctx, &key);
+        return JS_EXCEPTION;
+    }
+    if (!js_opt_bytes(ctx, argc, argv, 2, &in, "aes256ctr", "data")) {
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &iv);
+        return JS_EXCEPTION;
+    }
+    JSValue ret = JS_EXCEPTION;
+    size_t len = in.view.len;
+    if (!len) {
+        ret = JS_NewArrayBufferCopy(ctx, (const uint8_t *)"", 0);
+    } else if (!js_msg_over_heap(ctx, &in, "aes256ctr") &&
+               !js_crypto_charge(ctx, len)) {
+        uint8_t *out = js_malloc(ctx, len);
+        if (out) {
+            int rc = hl_cap_crypto_aes256ctr(out, key.view.data, iv.view.data,
+                                             in.view.data, len);
+            if (rc != 0)
+                JS_ThrowInternalError(ctx, rc == -3
+                    ? "crypto.aes256ctr: no AES backend in this build (TLS is not composed)"
+                    : "crypto.aes256ctr: bad argument");
+            else
+                ret = JS_NewArrayBufferCopy(ctx, out, len);
+            secure_zero(out, len);
+            js_free(ctx, out);
+        }
+    }
+    js_msg_free(ctx, &key);
+    js_msg_free(ctx, &iv);
+    js_msg_free(ctx, &in);
+    return ret;
+}
+
+/* crypto.chacha20(key, nonce, counter, data) -> ArrayBuffer (RFC 8439
+ * layout: 32-byte key, 12-byte nonce, 32-bit block counter). */
+static JSValue js_crypto_chacha20(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "crypto.chacha20 requires (key, nonce, counter, data)");
+    if (!JS_IsNumber(argv[2]))
+        return JS_ThrowTypeError(ctx, "crypto.chacha20: counter must be 0..2^32-1");
+    double dc = 0;
+    if (JS_ToFloat64(ctx, &dc, argv[2])) return JS_EXCEPTION;
+    if (!(dc >= 0 && dc <= 4294967295.0) || dc != (double)(int64_t)dc)
+        return JS_ThrowRangeError(ctx, "crypto.chacha20: counter must be 0..2^32-1");
+    JsMsg key, nonce, in;
+    if (!js_fixed_arg(ctx, argv[0], &key, HL_CHACHA20_KEY_LEN, "chacha20", "key"))
+        return JS_EXCEPTION;
+    if (!js_fixed_arg(ctx, argv[1], &nonce, HL_CHACHA20_NONCE_LEN, "chacha20", "nonce")) {
+        js_msg_free(ctx, &key);
+        return JS_EXCEPTION;
+    }
+    if (!js_opt_bytes(ctx, argc, argv, 3, &in, "chacha20", "data")) {
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &nonce);
+        return JS_EXCEPTION;
+    }
+    JSValue ret = JS_EXCEPTION;
+    size_t len = in.view.len;
+    if (!len) {
+        ret = JS_NewArrayBufferCopy(ctx, (const uint8_t *)"", 0);
+    } else if (!js_msg_over_heap(ctx, &in, "chacha20") &&
+               !js_crypto_charge(ctx, len)) {
+        uint8_t *out = js_malloc(ctx, len);
+        if (out) {
+            int rc = hl_cap_crypto_chacha20(out, key.view.data, nonce.view.data,
+                                            (uint32_t)dc, in.view.data, len);
+            if (rc != 0)
+                JS_ThrowInternalError(ctx, rc == -3
+                    ? "crypto.chacha20: no ChaCha20 backend in this build (TLS is not composed)"
+                    : "crypto.chacha20: bad argument (or the block counter would wrap)");
+            else
+                ret = JS_NewArrayBufferCopy(ctx, out, len);
+            secure_zero(out, len);
+            js_free(ctx, out);
+        }
+    }
+    js_msg_free(ctx, &key);
+    js_msg_free(ctx, &nonce);
+    js_msg_free(ctx, &in);
+    return ret;
+}
+
+/* crypto.poly1305(key, msg) -> ArrayBuffer (16-byte tag). The key is
+ * ONE-TIME. */
+static JSValue js_crypto_poly1305(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.poly1305 requires (key, msg)");
+    JsMsg key, msg;
+    if (!js_fixed_arg(ctx, argv[0], &key, HL_POLY1305_KEY_LEN, "poly1305", "key"))
+        return JS_EXCEPTION;
+    if (!js_opt_bytes(ctx, argc, argv, 1, &msg, "poly1305", "msg")) {
+        js_msg_free(ctx, &key);
+        return JS_EXCEPTION;
+    }
+    JSValue ret = JS_EXCEPTION;
+    if (!js_crypto_charge(ctx, msg.view.len)) {
+        uint8_t tag[HL_POLY1305_TAG_LEN];
+        int rc = hl_cap_crypto_poly1305(tag, key.view.data, msg.view.data,
+                                        msg.view.len);
+        if (rc != 0)
+            JS_ThrowInternalError(ctx, rc == -3
+                ? "crypto.poly1305: no Poly1305 backend in this build (TLS is not composed)"
+                : "crypto.poly1305: bad argument");
+        else
+            ret = JS_NewArrayBufferCopy(ctx, tag, sizeof tag);
+    }
+    js_msg_free(ctx, &key);
+    js_msg_free(ctx, &msg);
+    return ret;
+}
+
+/* crypto.gcmSeal(key, iv, aad, plaintext) -> { ciphertext, tag }
+ *
+ * AES-256-GCM with the fixed 32/12/16 lengths, checked rather than clamped:
+ * GCM with a wrong-length IV is a different construction. */
+static JSValue js_crypto_gcm_seal(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.gcmSeal requires (key, iv, aad, plaintext)");
+    JsMsg key, iv, aad, pt;
+    if (!js_fixed_arg(ctx, argv[0], &key, HL_AEAD_KEY_LEN, "gcmSeal", "key"))
+        return JS_EXCEPTION;
+    if (!js_fixed_arg(ctx, argv[1], &iv, HL_AEAD_IV_LEN, "gcmSeal", "iv")) {
+        js_msg_free(ctx, &key);
+        return JS_EXCEPTION;
+    }
+    if (!js_opt_bytes(ctx, argc, argv, 2, &aad, "gcmSeal", "aad")) {
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &iv);
+        return JS_EXCEPTION;
+    }
+    if (!js_opt_bytes(ctx, argc, argv, 3, &pt, "gcmSeal", "plaintext")) {
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &iv);
+        js_msg_free(ctx, &aad);
+        return JS_EXCEPTION;
+    }
+    JSValue ret = JS_EXCEPTION;
+    size_t ptlen = pt.view.len;
+    if (!js_msg_over_heap(ctx, &pt, "gcmSeal") &&
+        !js_crypto_charge(ctx, aad.view.len) &&
+        !js_crypto_charge(ctx, ptlen)) {
+        uint8_t *out = js_malloc(ctx, ptlen ? ptlen : 1);
+        if (out) {
+            uint8_t tag[HL_AEAD_TAG_LEN];
+            int rc = hl_cap_crypto_aes256gcm_seal(out, tag, key.view.data,
+                                                  iv.view.data,
+                                                  aad.view.len ? aad.view.data : NULL,
+                                                  aad.view.len,
+                                                  ptlen ? pt.view.data : NULL, ptlen);
+            if (rc != 0) {
+                JS_ThrowInternalError(ctx, rc == -3
+                    ? "crypto.gcmSeal: no AEAD backend in this build (TLS is not composed)"
+                    : "crypto.gcmSeal: bad argument");
+            } else {
+                JSValue obj = JS_NewObject(ctx);
+                JSValue ct = JS_IsException(obj) ? JS_EXCEPTION
+                           : JS_NewArrayBufferCopy(ctx, out, ptlen);
+                JSValue tg = JS_IsException(ct) ? JS_EXCEPTION
+                           : JS_NewArrayBufferCopy(ctx, tag, sizeof tag);
+                if (JS_IsException(tg)) {
+                    JS_FreeValue(ctx, ct);
+                    JS_FreeValue(ctx, obj);
+                } else if (JS_DefinePropertyValueStr(ctx, obj, "ciphertext", ct,
+                                                     JS_PROP_C_W_E) < 0) {
+                    JS_FreeValue(ctx, tg);
+                    JS_FreeValue(ctx, obj);
+                } else if (JS_DefinePropertyValueStr(ctx, obj, "tag", tg,
+                                                     JS_PROP_C_W_E) < 0) {
+                    JS_FreeValue(ctx, obj);
+                } else {
+                    ret = obj;
+                }
+            }
+            secure_zero(out, ptlen ? ptlen : 1);
+            js_free(ctx, out);
+        }
+    }
+    js_msg_free(ctx, &key);
+    js_msg_free(ctx, &iv);
+    js_msg_free(ctx, &aad);
+    js_msg_free(ctx, &pt);
+    return ret;
+}
+
+/* crypto.gcmOpen(key, iv, aad, ciphertext, tag) -> ArrayBuffer | null
+ *
+ * null for a tag that does not verify, or one of the wrong length: forged or
+ * corrupted input is data, not an error. A build with no AEAD backend
+ * throws, since no packet could ever open. */
+static JSValue js_crypto_gcm_open(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 5)
+        return JS_ThrowTypeError(ctx, "crypto.gcmOpen requires (key, iv, aad, ciphertext, tag)");
+    JsMsg key, iv, aad, ct, tag;
+    if (!js_fixed_arg(ctx, argv[0], &key, HL_AEAD_KEY_LEN, "gcmOpen", "key"))
+        return JS_EXCEPTION;
+    if (!js_fixed_arg(ctx, argv[1], &iv, HL_AEAD_IV_LEN, "gcmOpen", "iv")) {
+        js_msg_free(ctx, &key);
+        return JS_EXCEPTION;
+    }
+    if (!js_opt_bytes(ctx, argc, argv, 2, &aad, "gcmOpen", "aad")) {
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &iv);
+        return JS_EXCEPTION;
+    }
+    if (!js_opt_bytes(ctx, argc, argv, 3, &ct, "gcmOpen", "ciphertext")) {
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &iv);
+        js_msg_free(ctx, &aad);
+        return JS_EXCEPTION;
+    }
+    if (!js_msg_get(ctx, argv[4], &tag)) {
+        js_msg_free(ctx, &key);
+        js_msg_free(ctx, &iv);
+        js_msg_free(ctx, &aad);
+        js_msg_free(ctx, &ct);
+        return JS_ThrowTypeError(ctx, "crypto.gcmOpen: tag must be a buffer");
+    }
+    JSValue ret = JS_EXCEPTION;
+    size_t ctlen = ct.view.len;
+    if (tag.view.len != HL_AEAD_TAG_LEN) {
+        ret = JS_NULL;
+    } else if (!js_msg_over_heap(ctx, &ct, "gcmOpen") &&
+               !js_crypto_charge(ctx, aad.view.len) &&
+               !js_crypto_charge(ctx, ctlen)) {
+        uint8_t *out = js_malloc(ctx, ctlen ? ctlen : 1);
+        if (out) {
+            int rc = hl_cap_crypto_aes256gcm_open(out, key.view.data, iv.view.data,
+                                                  aad.view.len ? aad.view.data : NULL,
+                                                  aad.view.len,
+                                                  ctlen ? ct.view.data : NULL, ctlen,
+                                                  tag.view.data);
+            if (rc == -3)
+                JS_ThrowInternalError(ctx, "crypto.gcmOpen: no AEAD backend in "
+                                      "this build (TLS is not composed)");
+            else if (rc != 0)
+                ret = JS_NULL;
+            else
+                ret = JS_NewArrayBufferCopy(ctx, out, ctlen);
+            secure_zero(out, ctlen ? ctlen : 1);
+            js_free(ctx, out);
+        }
+    }
+    js_msg_free(ctx, &key);
+    js_msg_free(ctx, &iv);
+    js_msg_free(ctx, &aad);
+    js_msg_free(ctx, &ct);
+    js_msg_free(ctx, &tag);
+    return ret;
+}
+
 static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/crypto", "hull:crypto") != 0)
@@ -1587,6 +2044,24 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_hmac_sha256_verify, "hmacSha256Verify", 3));
     JS_SetPropertyStr(ctx, crypto, "constantTimeEq",
                       JS_NewCFunction(ctx, js_crypto_constant_time_eq, "constantTimeEq", 2));
+    JS_SetPropertyStr(ctx, crypto, "bcryptPbkdf",
+                      JS_NewCFunction(ctx, js_crypto_bcrypt_pbkdf, "bcryptPbkdf", 4));
+    JS_SetPropertyStr(ctx, crypto, "bcryptPbkdfEnv",
+                      JS_NewCFunction(ctx, js_crypto_bcrypt_pbkdf_env, "bcryptPbkdfEnv", 4));
+    JS_SetPropertyStr(ctx, crypto, "aes256ctr",
+                      JS_NewCFunction(ctx, js_crypto_aes256ctr, "aes256ctr", 3));
+    JS_SetPropertyStr(ctx, crypto, "chacha20",
+                      JS_NewCFunction(ctx, js_crypto_chacha20, "chacha20", 4));
+    JS_SetPropertyStr(ctx, crypto, "poly1305",
+                      JS_NewCFunction(ctx, js_crypto_poly1305, "poly1305", 2));
+    JS_SetPropertyStr(ctx, crypto, "gcmSeal",
+                      JS_NewCFunction(ctx, js_crypto_gcm_seal, "gcmSeal", 4));
+    JS_SetPropertyStr(ctx, crypto, "gcmOpen",
+                      JS_NewCFunction(ctx, js_crypto_gcm_open, "gcmOpen", 5));
+    /* As Lua's crypto.BCRYPT_MAX_ROUNDS: a caller reading a work factor from
+     * a file refuses it naming that file. */
+    JS_SetPropertyStr(ctx, crypto, "BCRYPT_MAX_ROUNDS",
+                      JS_NewInt32(ctx, (int32_t)HL_BCRYPT_MAX_ROUNDS));
     hl_js_export_frozen(ctx, m, "crypto", crypto);
     return 0;
 }

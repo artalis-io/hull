@@ -394,8 +394,12 @@ static const HlModuleSpec REGISTRY[] = {
          * same reason: without it an app that used file_store without also
          * naming hull/fs failed at the require. Admitting the MODULE grants
          * no file access - every path still has to be in manifest
-         * fs.read / fs.write, checked at the call. */
-        .deps = {"hull/crypto", "hull/encoding", "hull/fs", 0},
+         * fs.read / fs.write, checked at the call.
+         *
+         * hull/time for the transport's monotonic clock: an operation's
+         * deadline nests inside another's (an SFTP call from an exec's
+         * on_stdout), and what is left of the outer one is put back. */
+        .deps = {"hull/crypto", "hull/encoding", "hull/fs", "hull/time", 0},
     },
     {
         /* Template engine stays flat in v0.2.0: content-type
