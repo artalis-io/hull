@@ -64,6 +64,54 @@ release-artifact layout).
   a legacy row. Existing enrolments keep working; re-enrolling mints new-format codes. The two
   `totp_rekey_batch_helper` tests run at the default budget again.
 
+### Behaviour changes (stdlib audit 44 Lows, both runtimes)
+
+- **Options that were silently misread now raise.** `ratelimit.middleware` refuses a `limit`
+  that is not a finite number >= 1 and a `window` that is not a finite number > 0 when it is
+  created (a NaN window blocked a key for good, a 0 one never limited). `validate.check` raises
+  `validate: unknown type ...` for a `type` outside string / number / integer / boolean (a typo
+  passed every value). `rbac.define_role` / `defineRole` takes one permission name as a bare
+  string and raises on any other non-array (JS granted the string's characters as
+  permissions). `search.query`'s snippet / highlight `column` (0..32767) and `tokens` (1..64)
+  must be integers. `retry.run` refuses a negative or non-finite `base_ms` / `cap_ms`
+  (`baseMs` / `capMs`) before calling `fn`, and caps `max_attempts` at 1000 (`math.huge` /
+  `Infinity` looped for ever).
+- **jobs option checks.** A `queue` (enqueue, cron, claim / work / run_worker, pause, resume,
+  purge, cleanup) must be a string of at most 255 bytes (`nil` / `""` is `"default"`): a
+  number was bound raw and on MySQL `5` matched `'05'`. A job `type` and `trace` are capped at
+  255 bytes. `run_worker`'s `poll_ms` (`pollMs`) and `await`'s `interval` are finite
+  milliseconds raised to at least 10 (0 / NaN made the idle loop spin inside one run), `await`'s
+  `timeout` is finite, and `concurrency` / `max_empty_polls` (`maxEmptyPolls`) are counts.
+  `init`'s `history` must be `true`, `false` or `{ queues = {...} }`, and `history_retention`
+  (`historyRetention`) a finite number of seconds >= 0 (a NaN deleted every attempt row).
+- **A cron schedule whose enqueue cannot succeed is parked.** A stored row an older Hull wrote
+  (an empty type, `max_attempts` 0, a non-string queue) failed its enqueue on every tick, on
+  every worker, with the error discarded. It is now parked as an invalid spec is:
+  `next_run_at` set to the disabled marker, `last_error` naming why, a `cron_disabled` event.
+  `jobs.cron` re-enables it. A failure inside the enqueue's transaction (a dropped connection)
+  is still retried by the next tick.
+- **ratelimit's 429 carries `Retry-After`** (the whole seconds until the window resets, at
+  least 1); clients and proxies honour the header, not the body's `retry_after`.
+- **JS audit-log metadata is capped in UTF-8 bytes**, as the Lua sibling's is: the 4096 cap
+  counted UTF-16 units, so up to ~12 KiB of non-ASCII JSON was stored; it is also made storable
+  (`_text.storable`) like every other stored app text.
+
+### Fixes (stdlib audit 44 Lows)
+
+- **auth-flows checks a password-reset token before the pwned-password lookup.** The HIBP check
+  (an outbound fetch) ran before any token validation, so a POST with a garbage token bought one
+  fetch. The token is now parsed and checked for reuse without being consumed, then the
+  password is checked, then the token is consumed.
+- **`session.update` takes only a session id** (64 lowercase hex), as `destroy` does since
+  audit 39: a raw cookie value with a `%00` failed the UPDATE on Postgres.
+- **Lookup tables have no prototype (JS):** idempotency's method gate (`Object.create(null)`)
+  and the kv SQL store's backend gate (a `Set`); a method or backend named `constructor` passed.
+- **`_text.storable`'s ellipsis fits inside `max`** in both runtimes (it was `max + 3`): a cut
+  text is cut at `max - 3` and the ellipsis appended.
+- **Lua jobs keeps a payload of `false`** (it reached the handler as `nil`; JS kept it), and
+  stores an enqueue, cron or signal payload holding a NUL or bytes that are not UTF-8 as results
+  are stored (`b64:` + base64 of the JSON), so Postgres / MySQL accept it. JS reads that form.
+
 ## [0.18.0] - 2026-11-03
 
 Full PR list:

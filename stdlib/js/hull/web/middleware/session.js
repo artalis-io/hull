@@ -301,7 +301,10 @@ function load(sessionId, opts) {
  * @param {Object} [opts]  `{ ttl }`.
  */
 function update(sessionId, data, opts) {
-    if (!sessionId || typeof sessionId !== "string")
+    // Only an id generateId makes names a session (audit 44, as destroy):
+    // a raw cookie value with a %00 failed the UPDATE on Postgres. isSid is
+    // a hoisted function declaration below.
+    if (!isSid(sessionId))
         return false;
 
     const now = time.now();

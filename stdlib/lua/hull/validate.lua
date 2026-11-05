@@ -94,6 +94,8 @@ end
 -- @tparam table schema  Rules. Non-table input → `true, nil`.
 -- @treturn boolean ok   `true` if all fields pass.
 -- @treturn ?table errors  Maps field-name → error message. `nil` on success.
+local KNOWN_TYPES = { string = true, number = true, integer = true, boolean = true }
+
 function validate.check(data, schema)
     if type(data) ~= "table" then data = {} end
     if type(schema) ~= "table" then return true, nil end
@@ -104,6 +106,12 @@ function validate.check(data, schema)
         local value = data[field]
         local err = nil
         local custom_msg = rules.message
+        -- An unknown type is a schema error, raised whatever the input
+        -- (audit 44: a typo such as "array" or "int" passed every value).
+        if rules.type and not KNOWN_TYPES[rules.type] then
+            error("validate: unknown type '" .. tostring(rules.type)
+                  .. "' for field '" .. tostring(field) .. "'", 2)
+        end
 
         -- 1. trim (mutates data[field] in-place - caller's table is modified)
         if rules.trim and type(value) == "string" then

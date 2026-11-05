@@ -368,7 +368,9 @@ function middleware(opts) {
     const headerName = o.headerName || HEADER_NAME;
 
     const methodList = o.methods || ["POST"];
-    const methods = {};
+    // No prototype (audit 44): a method token naming an Object.prototype
+    // member ("constructor", "toString") read truthy from a plain object.
+    const methods = Object.create(null);
     for (let i = 0; i < methodList.length; i++)
         methods[methodList[i]] = true;
 
@@ -380,7 +382,7 @@ function middleware(opts) {
     let customWarned = false;
 
     return function(req, res) {
-        if (!methods[req.method])
+        if (methods[req.method] !== true)
             return 0;
 
         const key = req.header(headerName);

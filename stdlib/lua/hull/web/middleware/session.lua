@@ -339,6 +339,11 @@ function session.load(session_id, opts)
     return decoded
 end
 
+-- A session id as generate_id makes it: 64 lowercase hex characters.
+local function is_sid(s)
+    return type(s) == "string" and #s == 64 and s:find("^[0-9a-f]+$") ~= nil
+end
+
 --- Replace the data for an existing session and refresh expiry.
 --
 -- @tparam string session_id
@@ -347,7 +352,9 @@ end
 -- @treturn boolean  true if a row was updated, false otherwise
 -- (unknown / expired session id). Mirrors JS.
 function session.update(session_id, data, opts)
-    if not session_id or session_id == "" then
+    -- Only an id generate_id makes names a session (audit 44, as destroy):
+    -- a raw cookie value with a %00 failed the UPDATE on Postgres.
+    if not is_sid(session_id) then
         return false
     end
 
@@ -387,11 +394,6 @@ end
 --
 -- @tparam string session_id  Empty / nil is a no-op.
 -- @treturn boolean  true if a row was deleted, false otherwise.
--- A session id as generate_id makes it: 64 lowercase hex characters.
-local function is_sid(s)
-    return type(s) == "string" and #s == 64 and s:find("^[0-9a-f]+$") ~= nil
-end
-
 function session.destroy(session_id)
     -- Anything else names no session (audit 39). The id comes from a cookie,
     -- whose %00 decodes to a NUL: the DELETE then failed on Postgres - from

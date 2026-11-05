@@ -100,6 +100,8 @@ const hasOwn = Object.prototype.hasOwnProperty;
  * @returns {[boolean, Object<string,string>|null]}  `[ok, errors]` where
  *   errors maps field name → message, or `null` on success.
  */
+const KNOWN_TYPES = new Set(["string", "number", "integer", "boolean"]);
+
 function check(data, schema) {
     if (typeof data !== "object" || data === null) data = {};
     if (typeof schema !== "object" || schema === null) return [true, null];
@@ -116,6 +118,13 @@ function check(data, schema) {
         let value = hasOwn.call(data, field) ? data[field] : undefined;
         let err = null;
         const customMsg = rules.message || null;
+        // An unknown type is a schema error, refused whatever the input
+        // (audit 44: a typo such as "array" or "int" passed every value).
+        if (rules.type !== undefined && rules.type !== null && rules.type !== false
+            && !KNOWN_TYPES.has(rules.type)) {
+            throw new Error("validate: unknown type '" + String(rules.type)
+                + "' for field '" + field + "'");
+        }
 
         // 1. trim (mutates in-place, not an error)
         if (rules.trim && typeof value === "string") {

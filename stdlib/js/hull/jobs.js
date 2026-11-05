@@ -255,8 +255,13 @@ function init(opts) {
         _cfg.visibilityTimeout = durationOpt("visibilityTimeout", o.visibilityTimeout);
     if (o.reapInterval !== undefined)
         _cfg.reapInterval = durationOpt("reapInterval", o.reapInterval);
-    if (o.history !== undefined) _cfg.history = o.history;
-    if (o.historyRetention !== undefined) _cfg.historyRetention = o.historyRetention;
+    // history and historyRetention are checked as the other options are
+    // (audit 44): a NaN retention deleted every attempt row at each cleanup,
+    // a negative one deleted fresh rows. null / false clears the retention.
+    if (o.history !== undefined) _cfg.history = historyOpt(o.history);
+    if (o.historyRetention !== undefined)
+        _cfg.historyRetention = o.historyRetention === null || o.historyRetention === false
+            ? null : durationOpt("historyRetention", o.historyRetention);
     if (o.events !== undefined) _cfg.events = o.events;
     if (o.eventsGrace !== undefined && o.eventsGrace !== null) {
         // Infinity would hold every event back for good (NaN already failed
@@ -620,6 +625,51 @@ function keyOpt(v, what, who, allowInt, max) {
     return v;
 }
 
+// A queue name (audit 44): undefined / null / "" is "default", else a string
+// of at most 255 bytes (keyOpt). A number was stored as its text but bound raw
+// in every later probe, so on MySQL queue 5 also matched '05' / '5.0', and an
+// over-long name failed the INSERT with a driver error. The Lua twin's
+// queue_opt.
+function queueOpt(v, who) {
+    if (v === undefined || v === null || v === "") return "default";
+    return keyOpt(v, "queue", who, false);
+}
+
+// A job type (audit 44): a non-empty string of at most 255 bytes, the column.
+function typeOpt(v, who) {
+    if (typeof v !== "string" || v === "")
+        throw new Error(who + ": type must be a non-empty string");
+    return keyOpt(v, "type", who, false);
+}
+
+// A finite number of milliseconds >= 0 (a numeric string read as Lua reads
+// it); a poll interval (runWorker pollMs, jobs.await interval) is also made
+// whole milliseconds in POLL_MS_MIN..POLL_MS_MAX (audit 44): hull.sleep of
+// NaN / null / a non-numeric string / Infinity / 0 is a synchronous no-op, so
+// the idle loop spun inside one run until the watchdog stopped it.
+const POLL_MS_MIN = 10;
+const POLL_MS_MAX = 86400000;
+const CONCURRENCY_MAX = 1024;
+function msOpt(v, who, name) {
+    const n = (typeof v === "string" && v.trim() !== "") ? luaToNumber(v) : v;
+    if (typeof n !== "number" || !Number.isFinite(n) || !(n >= 0))
+        throw new Error(who + ": " + name
+            + " must be a finite number of milliseconds >= 0, got " + String(v));
+    return n;
+}
+function pollMsOpt(v, who, name) {
+    const n = msOpt(v, who, name || "pollMs");
+    return Math.ceil(Math.min(Math.max(n, POLL_MS_MIN), POLL_MS_MAX));
+}
+
+// The history option: true / false, or { queues: ["a", "b"] } (audit 44).
+function historyOpt(v) {
+    if (v === true || v === false) return v;
+    if (v && typeof v === "object" && v.queues !== undefined && v.queues !== null)
+        return { queues: callerStrings(v.queues, "jobs.init: history.queues") };
+    throw new Error("jobs.init: history must be true, false or { queues: [...] }");
+}
+
 // "?,?,...": n placeholders, from a count alone.
 function placeholders(n) {
     let s = "";
@@ -803,9 +853,12 @@ function resultJson(result) {
  * @returns {number|null}   the new job id, or null when a dedupKey collapsed it
  */
 function enqueue(jobType, data, opts) {
-    if (typeof jobType !== "string" || jobType === "")
-        throw new Error("jobs.enqueue: type must be a non-empty string");
+    typeOpt(jobType, "jobs.enqueue");
     const o = opts || {};
+    // queue and trace are checked as the keys are (audit 44; see queueOpt).
+    const queue = queueOpt(o.queue, "jobs.enqueue");
+    const trace = o.trace !== undefined && o.trace !== null
+        ? keyOpt(o.trace, "trace", "jobs.enqueue", false) : null;
     const now = time.now();
     // Schedule: absolute `at` (unix ts) wins, else `runAt`, else now + `delay`.
     const runAt = o.at !== undefined && o.at !== null ? schedSecs(o.at, "at")
@@ -830,7 +883,7 @@ function enqueue(jobType, data, opts) {
     if (throttle > 0) {
         const hit = db.query(
             "SELECT 1 AS x FROM _hull_jobs WHERE queue=? AND type=? AND created_at > ? LIMIT 1",
-            [o.queue || "default", jobType, now - throttle]);
+            [queue, jobType, now - throttle]);
         if (hit.length) return null;
     }
     // The dependency ids, copied by a counted loop and checked: whole,
@@ -857,7 +910,7 @@ function enqueue(jobType, data, opts) {
     const concKey = o.concurrencyKey !== undefined && o.concurrencyKey !== null
         ? keyOpt(o.concurrencyKey, "concurrencyKey", "jobs.enqueue", true) : null;
     const vals = [
-        o.queue || "default",
+        queue,
         jobType,
         data !== undefined && data !== null ? json.encode(data) : null,
         priority,
@@ -870,7 +923,7 @@ function enqueue(jobType, data, opts) {
                   "run_at", "dedup_key", "created_at", "updated_at"];
     if (hasDeps) { cols.push("status"); vals.push("blocked"); }
     // Optional W3C trace context, carried through to the handler as job.trace.
-    if (o.trace !== undefined && o.trace !== null) { cols.push("trace_context"); vals.push(o.trace); }
+    if (trace !== null) { cols.push("trace_context"); vals.push(trace); }
     // Optional per-key concurrency: at most `concurrency` jobs sharing
     // `concurrencyKey` run at once. Soft (default) reconciles at claim (may
     // briefly overshoot); `concurrencyStrict: true` opts into the counter-backed
@@ -895,13 +948,13 @@ function enqueue(jobType, data, opts) {
             // index), and it needs no change to an existing database's index.
             db.exec("UPDATE _hull_jobs SET dedup_key=NULL WHERE queue=? AND dedup_key=? " +
                 "AND status IN ('done', 'dead', 'compensated')",
-                [o.queue || "default", dedupKey]);
+                [queue, dedupKey]);
             const n = db.insertIfAbsent("_hull_jobs", ["queue", "dedup_key"], cols, vals);
             if (!(n && n > 0)) { collapsed = true; return; }   // an un-run job with this (queue, dedupKey) exists
             // Portable id fetch: the unique (queue, dedup_key) identifies the new row.
             // (db.lastId is unsupported on Postgres, which has no last-insert-rowid.)
             const rows = db.query("SELECT id FROM _hull_jobs WHERE queue=? AND dedup_key=?",
-                [o.queue || "default", dedupKey]);
+                [queue, dedupKey]);
             id = rows.length ? rows[0].id : null;
         } else {
             const ph = cols.map(() => "?");
@@ -935,7 +988,7 @@ function enqueue(jobType, data, opts) {
     // Durable "enqueued" event (opt-in). Emitted here so it joins the caller's
     // db.batch when enqueue is called inside one (transactional coupling).
     emitDurable("enqueued",
-        { id, type: jobType, queue: o.queue || "default", trace: o.trace }, {});
+        { id, type: jobType, queue: queue, trace: trace === null ? undefined : trace }, {});
     // Low-latency job pickup: wake an idle worker on the new job. When events
     // are on, emitDurable already issued the NOTIFY (coalesced within the
     // transaction), so only nudge directly when it did not.
@@ -976,7 +1029,7 @@ function enqueueMany(items) {
 function shape(row) {
     let data = null;
     if (row.payload !== undefined && row.payload !== null && row.payload !== "") {
-        try { data = json.decode(row.payload); } catch (_e) { data = null; }
+        try { data = json.decode(unstoredJson(row.payload)); } catch (_e) { data = null; }
     }
     return { id: row.id, type: row.type, data,
              attempts: row.attempts, maxAttempts: row.max_attempts,
@@ -1150,7 +1203,8 @@ function isPaused(queue) {
     return _paused[queue] === true;
 }
 
-function setPaused(queue, v) {
+function setPaused(queue, v, who) {
+    queue = queueOpt(queue, who);   // audit 44 (see queueOpt)
     // One statement: UPDATE-then-INSERT raced - two callers both updated
     // nothing and the second INSERT failed on the key.
     db.upsert("_hull_queue", ["name"], ["name", "paused"], [queue, v]);
@@ -1164,14 +1218,14 @@ function setPaused(queue, v) {
  * @param {string} queue
  * @returns {object} the jobs module (for chaining)
  */
-function pause(queue) { return setPaused(queue, 1); }
+function pause(queue) { return setPaused(queue, 1, "jobs.pause"); }
 
 /**
  * Resume a paused queue.
  * @param {string} queue
  * @returns {object} the jobs module (for chaining)
  */
-function resume(queue) { return setPaused(queue, 0); }
+function resume(queue) { return setPaused(queue, 0, "jobs.resume"); }
 
 /**
  * Delete jobs from a queue (the "clear the backlog" op). Defaults to `pending`
@@ -1184,6 +1238,7 @@ function resume(queue) { return setPaused(queue, 0); }
  * @returns {number}
  */
 function purge(queue, opts) {
+    queue = queueOpt(queue, "jobs.purge");   // audit 44 (see queueOpt)
     const o = opts || {};
     const statuses = o.statuses !== undefined && o.statuses !== null
         ? callerStrings(o.statuses, "jobs.purge: statuses") : ["pending"];
@@ -1222,11 +1277,18 @@ function purge(queue, opts) {
 // fleet gives fleet-wide fairness). Zero/negative/non-number weights are dropped.
 function resolveQueueOrder(opts) {
     const qs = opts.queues;
-    if (qs == null) return [opts.queue || "default"];
-    if (Array.isArray(qs)) return qs.slice();                 // list (strict priority)
+    // Every name is checked as enqueue checks it (audit 44, queueOpt).
+    if (qs == null) return [queueOpt(opts.queue, "jobs.claim")];
+    if (Array.isArray(qs)) {                                  // list (strict priority)
+        const n = qs.length, order = [];
+        for (let i = 0; i < n; i++) order.push(queueOpt(qs[i], "jobs.claim"));
+        return order;
+    }
+    if (typeof qs !== "object") throw new Error("jobs.claim: queues must be an array or a map");
     const names = [], weights = Object.create(null);          // map (weighted; no prototype, audit 20)
     let total = 0;
     for (const name of Object.keys(qs)) {
+        queueOpt(name, "jobs.claim");
         const w = qs[name];
         if (typeof w === "number" && w > 0) { names.push(name); weights[name] = w; total += w; }
     }
@@ -1755,6 +1817,33 @@ function cronNext(c, fromTs, offset) {
 // INTEGER column holds on every backend), with the reason in last_error.
 const CRON_DISABLED_AT = 2147483647;
 
+// Park a schedule that can no longer fire (next_run_at = CRON_DISABLED_AT),
+// with the reason in last_error, and emit cron_disabled. jobs.cron re-enables.
+function parkCron(c, now, why) {
+    why = safeText(why);
+    const off = db.exec(
+        "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? " +
+        "WHERE name=? AND next_run_at=?",
+        [CRON_DISABLED_AT, why, now, c.name, c.next_run_at]);
+    if ((off || 0) > 0)
+        emitDurable("cron_disabled", { type: c.type, queue: c.queue }, { error: why });
+}
+
+// The enqueue options a stored schedule fires with, checked as enqueue checks
+// them. A row an older Hull wrote (an empty type, max_attempts 0, a queue that
+// is not a string) fails here for good, not transiently.
+function cronRowOpts(c) {
+    typeOpt(c.type, "jobs.enqueue");
+    return {
+        queue: queueOpt(c.queue, "jobs.enqueue"),
+        priority: priorityOpt(c.priority, "jobs.enqueue"),
+        // NULL (no override) -> undefined so enqueue applies its default,
+        // not a NULL bind into the NOT-NULL max_attempts column.
+        maxAttempts: c.max_attempts === null || c.max_attempts === undefined
+            ? undefined : attemptsOpt(c.max_attempts, "jobs.enqueue"),
+    };
+}
+
 // Fire due schedules: compare-and-set next_run_at (multi-worker-safe on every
 // backend), then enqueue. Missed ticks advance to the next future occurrence
 // (fire-once, no backfill). Called (throttled) from work().
@@ -1773,12 +1862,16 @@ function processCron(now) {
             // jobs.cron re-enables.
             const why = safeText(`schedule '${c.name}' disabled: spec '${c.spec}' ` +
                 (parsed ? "has no upcoming occurrence" : "is invalid (invalid cron field)"));
-            const off = db.exec(
-                "UPDATE _hull_cron SET next_run_at=?, last_error=?, updated_at=? " +
-                "WHERE name=? AND next_run_at=?",
-                [CRON_DISABLED_AT, why, now, c.name, c.next_run_at]);
-            if ((off || 0) > 0)
-                emitDurable("cron_disabled", { type: c.type, queue: c.queue }, { error: why });
+            parkCron(c, now, why);
+            continue;
+        }
+        // A row whose enqueue cannot succeed is parked the same way (audit
+        // 44): its error was discarded and every worker retried it every tick
+        // for ever. Only the deterministic checks park; a failure inside the
+        // batch below (a dropped connection) is retried by the next tick.
+        let ropts;
+        try { ropts = cronRowOpts(c); } catch (e) {
+            parkCron(c, now, "schedule '" + c.name + "' disabled: " + errText(e));
             continue;
         }
         // The compare-and-set and the enqueue commit together (audit 12): a
@@ -1794,13 +1887,8 @@ function processCron(now) {
                 [nxt, now, now, c.name, c.next_run_at]);
             if ((won || 0) > 0) {
                 let data = null;
-                if (c.payload) { try { data = json.decode(c.payload); } catch (_e) { data = null; } }
-                enqueue(c.type, data, {
-                    queue: c.queue, priority: c.priority,
-                    // NULL (no override) -> undefined so enqueue applies its default,
-                    // not a NULL bind into the NOT-NULL max_attempts column.
-                    maxAttempts: c.max_attempts === null ? undefined : c.max_attempts,
-                });
+                if (c.payload) { try { data = json.decode(unstoredJson(c.payload)); } catch (_e) { data = null; } }
+                enqueue(c.type, data, ropts);
             }
         }); } catch (_e) { /* this tick is retried by the next due-check */ }
     }
@@ -1832,8 +1920,9 @@ function cron(name, spec, data, opts) {
     const jobType = (o.type === undefined || o.type === null || o.type === "") ? name : o.type;
     if (typeof jobType !== "string")
         throw new Error("jobs.cron: opts.type must be a non-empty string");
+    typeOpt(jobType, "jobs.cron");
     const payload = data !== undefined && data !== null ? json.encode(data) : null;
-    const queue = o.queue || "default";
+    const queue = queueOpt(o.queue, "jobs.cron");
     const priority = priorityOpt(o.priority, "jobs.cron");
     const ma = o.maxAttempts !== undefined && o.maxAttempts !== null
         ? attemptsOpt(o.maxAttempts, "jobs.cron") : null;
@@ -2149,9 +2238,15 @@ async function runWorker(opts) {
         durationOpt("visibilityTimeout", o.visibilityTimeout, "jobs.runWorker");
     if (o.reapInterval !== undefined && o.reapInterval !== null)
         durationOpt("reapInterval", o.reapInterval, "jobs.runWorker");
-    const pollMs = o.pollMs !== undefined ? o.pollMs : 1000;
-    const maxEmpty = o.maxEmptyPolls !== undefined ? o.maxEmptyPolls : (o.drain ? 1 : 0);
-    const concurrency = (o.concurrency && o.concurrency > 1) ? o.concurrency : 1;
+    // pollMs, maxEmptyPolls and concurrency are checked here too (audit 44):
+    // a NaN / null / 0 pollMs made the idle loop a hot loop inside one run.
+    // pollMs is whole milliseconds, at least POLL_MS_MIN.
+    const pollMs = o.pollMs !== undefined && o.pollMs !== null
+        ? pollMsOpt(o.pollMs, "jobs.runWorker") : 1000;
+    const maxEmpty = o.maxEmptyPolls !== undefined && o.maxEmptyPolls !== null
+        ? countOpt(o.maxEmptyPolls, 0, 0, 2147483647) : (o.drain ? 1 : 0);
+    const concurrency = o.concurrency !== undefined && o.concurrency !== null
+        ? countOpt(o.concurrency, 1, 1, CONCURRENCY_MAX) : 1;
     _running = true;
 
     // Idle wait between empty polls. On a NOTIFY-capable backend (Postgres) a
@@ -2443,8 +2538,12 @@ function result(id) {
  */
 async function await_(id, opts) {
     opts = opts || {};
-    const interval = Math.max(opts.interval || 100, 10);   // floor: never a tight loop
-    const deadline = opts.timeout != null ? time.clock() + opts.timeout : null;
+    // interval and timeout (both ms) are checked (audit 44): a NaN interval
+    // made hull.sleep a no-op - a tight loop - and a NaN timeout never ended.
+    const interval = opts.interval != null
+        ? pollMsOpt(opts.interval, "jobs.await", "interval") : 100;
+    const deadline = opts.timeout != null
+        ? time.clock() + msOpt(opts.timeout, "jobs.await", "timeout") : null;
     for (;;) {
         const r = result(id);
         if (r === null) return null;                            // unknown / purged
@@ -2604,7 +2703,7 @@ const SIG_TIMEOUT = "T";   // memo of a timed-out wait; a signal is "S" + payloa
 
 function decodePayload(enc) {
     if (enc == null || enc === "") return null;
-    try { return JSON.parse(enc); } catch (e) { return enc; }
+    try { return JSON.parse(unstoredJson(enc)); } catch (e) { return enc; }
 }
 
 function runWaitSignal(workflowId, n, name, opts, replayOnly) {
@@ -3482,7 +3581,7 @@ function cleanup(opts) {
     let sql = "DELETE FROM _hull_jobs WHERE " +
         (statuses.length ? "status IN (" + placeholders(statuses.length) + ")" : "1=0") +
         " AND updated_at < ?";
-    if (o.queue) { sql += " AND queue=?"; params.push(o.queue); }
+    if (o.queue) { sql += " AND queue=?"; params.push(queueOpt(o.queue, "jobs.cleanup")); }
     const deleted = db.exec(sql, params) || 0;
     // Drop results whose producing job is gone (workflow result store hygiene).
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)");
@@ -3555,6 +3654,15 @@ _test_hooks.register("hull:jobs", {
     markStepCompensated: (id, key) => db.exec(
         "UPDATE _hull_workflow_steps SET status='compensated' WHERE workflow_id=? AND step_key=?",
         [id, key]),
+    // Audit 44: write a stored schedule's column as an older Hull could have
+    // (jobs.cron now refuses such values) and read the row back.
+    cronSetField: (name, col, v) => {
+        if (["type", "queue", "priority", "max_attempts"].indexOf(col) < 0)
+            throw new Error("cronSetField: column not allowed");
+        db.exec("UPDATE _hull_cron SET " + col + "=? WHERE name=?", [v, name]);
+    },
+    cronRow: (name) => db.query(
+        "SELECT next_run_at, last_error FROM _hull_cron WHERE name=?", [name])[0] || null,
 });
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,

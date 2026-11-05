@@ -319,11 +319,16 @@ Register with `app.use(method, pattern, mw)`:
 - Returns `1` on OPTIONS preflight (sends 204), `0` otherwise.
 
 **ratelimit.middleware(opts)**. Per-key request rate limiting (in-memory, resets on restart).
-- `opts.limit`. Max requests per window (default: `60`)
-- `opts.window`. Window in seconds (default: `60`)
+- `opts.limit`. Max requests per window (default: `60`); a finite number >= 1.
+- `opts.window`. Window in seconds (default: `60`); a finite number > 0.
+  Anything else for either raises when the middleware is created (audit 44:
+  a 0 / negative / NaN limit denied everything, a 0 / negative window never
+  limited, a NaN window blocked a key for good).
 - `opts.key`. String or `function(req) -> string` (default: per client IP). The function must return a string or a number synchronously; anything else (a table / object, a Promise from an `async` key function) raises, since a fresh object per request was a fresh bucket and nothing was limited.
 - Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers.
-- Returns `1` on limit exceeded (sends 429 + JSON), `0` otherwise.
+- Returns `1` on limit exceeded (sends 429 + JSON, with a `Retry-After`
+  header: the whole seconds until the window resets, at least 1), `0`
+  otherwise.
 - A key whose allowance is spent (`count >= limit`, not only one already
   refused) is kept apart from the LRU bucket store until its window ends, so
   flooding other keys to evict it does not buy a fresh allowance.
@@ -1027,7 +1032,7 @@ verify step between successful first-factor auth and `on_login` when
 - `session.init(opts)`. Creates `hull_sessions` table; runs PRAGMA-checked additive migrations (adds `user_id`, `ip`, `user_agent` columns for the device-management helpers). `opts.ttl` = lifetime in seconds (default: `86400`). A ttl - `opts.ttl`, `opts.absolute_ttl` (`absoluteTtl`, or `false` to turn the cap off) and the per-call `{ ttl }` of `create` / `load` / `update` - must be a positive, finite number in both runtimes; anything else (a string such as `"86400"`, `0`, NaN, infinity) raises (audit 15: JS concatenated a string onto the expiry, Lua coerced it, and an invalid `absolute_ttl` used to turn the cap off with a warning).
 - `session.create(data, opts?)` → 64-char hex session ID. `opts.req` lets it capture ip + ua + user_id columns at create time. `data.user_id` is auto-populated into the column.
 - `session.load(session_id)` → data table or nil. Auto-extends expiry.
-- `session.update(session_id, data)`. Updates session data.
+- `session.update(session_id, data)`. Updates session data. An id that is not a session id (64 lowercase hex characters, as `session.create` makes them) answers `false` without touching the database, as `session.destroy` does (audit 44).
 - `session.destroy(session_id)`. Deletes session.
 - `session.cleanup()` → count of deleted expired sessions.
 - **Device management** - `session.list_for_user(user_id, current?)` → array of `{ref, current, created_at, last_accessed, ip, user_agent}` (JS `listForUser`). No row carries the session id, a bearer credential (audit 24): `ref` is the first 32 hex characters of `sha256(sid)` (the value the audit log records as `session_id`), and `current` is true for the caller's session, passed as its id or as the request (`req.ctx.session_id`); `session.destroy_ref(user_id, ref)` (`destroyRef`) signs out that one session, scoped to the user (0 or 1); `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
@@ -1071,7 +1076,7 @@ verify step between successful first-factor auth and `on_login` when
 
 **validate.check(data, schema)**. Declarative input validation.
 - `schema` maps field names to rule tables.
-- Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator: return `true` / `nil` for valid, `false` for invalid - the error is `message` or "is invalid" - or a string error message; any other return fails closed), `message` (custom error).
+- Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`; any other type raises `validate: unknown type ...` - a schema error, whatever the input; audit 44), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator: return `true` / `nil` for valid, `false` for invalid - the error is `message` or "is invalid" - or a string error message; any other return fails closed), `message` (custom error).
 - `min`/`max` apply to string length or numeric value depending on field type. A string's length is its characters - Unicode code points - in both runtimes, so `"été"` is 3 and an emoji is 1 (audit 17: Lua counted bytes and JS UTF-16 units); a Lua string that is not valid UTF-8 counts its bytes.
 - JS reads only the data object's own properties: an inherited `constructor` or `toString` is absent (audit 17).
 - Returns `(ok, errors)` where `errors` maps field names to error strings.
@@ -1313,7 +1318,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `search.remove(name, id)`. Delete document.
 - `search.query(name, query, opts?)`. Full-text search. Returns `{id, rank}` array.
   - `opts.limit` (default: 20), `opts.offset` (default: 0)
-  - `opts.snippet = {column, tokens, before, after, ellipsis}` / `opts.highlight = {column, before, after}` add a `snippet` / `highlight` field. The indexed text in it is HTML-escaped; only `before` / `after` (default `<b>` / `</b>`) and `ellipsis` are inserted as given, so the field is safe to render raw (`{{{ r.snippet }}}`) as long as those markers are your own markup (audit 26).
+  - `opts.snippet = {column, tokens, before, after, ellipsis}` / `opts.highlight = {column, before, after}` add a `snippet` / `highlight` field. `column` is an integer in 0..32767 and `tokens` an integer in 1..64; a string, a fraction, NaN or a value out of range raises (audit 44). The indexed text in it is HTML-escaped; only `before` / `after` (default `<b>` / `</b>`) and `ellipsis` are inserted as given, so the field is safe to render raw (`{{{ r.snippet }}}`) as long as those markers are your own markup (audit 26).
   - `opts.limit` and `opts.offset` clamp: a number or a numeric string
     (`req.query.offset`) counts, is floored and clamped to 1..1000 (limit) /
     0..2147483647 (offset); anything else (a non-numeric string, NaN, a
@@ -1342,6 +1347,27 @@ on a bad value instead of silently turning the bound off:
   as `run_at` is (audit 27: Postgres refused a fraction). `nil` / JS
   `null` `max_attempts` means "the default" in `init`, `enqueue` and
   `cron`.
+- `jobs` (audit 44): a `queue` (`enqueue`, `cron`, `claim` / `work` /
+  `run_worker`'s `queue` and `queues`, `pause`, `resume`, `purge`,
+  `cleanup`) is a string of at most 255 bytes (`nil` / `""` is
+  `"default"`); a number is refused, since it compared numerically against
+  the column on MySQL. A job `type` is a non-empty string of at most 255
+  bytes and `trace` a string of at most 255 bytes. `run_worker`'s `poll_ms`
+  (`pollMs`) and `await`'s `interval` are finite numbers of milliseconds,
+  raised to at least 10 (and at most a day); `await`'s `timeout` is a
+  finite number of milliseconds >= 0; `concurrency` (1..1024) and
+  `max_empty_polls` (`maxEmptyPolls`) are counts (a numeric string counts,
+  anything else takes the default). `init`'s `history` is `true`, `false`
+  or `{ queues = {...} }`, and `history_retention` (`historyRetention`) a
+  finite number of seconds >= 0 (`false` / JS `null` clears it); a NaN
+  retention deleted every attempt row. A stored cron schedule whose
+  enqueue cannot succeed (a row an older Hull wrote: an empty type,
+  `max_attempts` 0) is parked like an invalid spec - `next_run_at` set to
+  the disabled marker, `last_error` naming why, a `cron_disabled` event -
+  instead of being retried every tick; `jobs.cron` re-enables it. In Lua a
+  payload of `false` reaches the handler as `false`, and a payload (or
+  signal payload) holding a NUL or bytes that are not UTF-8 is stored as
+  results are (`b64:` + base64 of the JSON).
 - `email.send` refuses an address holding a C1 control character
   (U+0080-009F, including NEL) or a Unicode line / space separator, as the
   auth-flows address check does, in both runtimes.
@@ -1351,7 +1377,7 @@ on a bad value instead of silently turning the bound off:
 
 **rbac**. Role-based access control backed by SQLite.
 - `rbac.init()`. Creates `_hull_roles`, `_hull_permissions`, `_hull_role_permissions`, `_hull_user_roles` tables.
-- `rbac.define_role(name, permissions?)`. Create role with optional permissions.
+- `rbac.define_role(name, permissions?)`. Create role with optional permissions: an array of names, or one name as a string; any other non-array raises (audit 44: JS granted a string's characters as permissions).
 - `rbac.assign(user_id, role)` / `rbac.revoke(user_id, role)`. Manage user roles.
 - `rbac.roles(user_id)` → array of role names.
 - `rbac.has_role(user_id, role)` → boolean.

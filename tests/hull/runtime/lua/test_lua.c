@@ -5891,6 +5891,121 @@ JOBS_HOOKS_CASE(audit39)
 JOBS_HOOKS_CASE(audit41)
 #undef JOBS_HOOKS_CASE
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Stdlib Lows from audit 44 (stdlib/lua/hull/tests/test_stdlib_audit44.lua):
+ * option validation (session, rbac, validate, ratelimit, jobs, search,
+ * retry), cron parking, the reset token checked before the pwned lookup, and
+ * hull._text.storable's ellipsis. Each case runs the script in a fresh state
+ * and a fresh :memory: database, named in the global __audit44_case. One
+ * UTEST per case, written out, so scripts/check_regression_test.sh sees each. */
+static int run_audit44_case(const char *name, long long *pass, long long *fail)
+{
+    init_lua_with_caps();
+    if (!lua_initialized) return -1;
+    lua_pushstring(lua_rt.L, name);
+    lua_setglobal(lua_rt.L, "__audit44_case");
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_audit44.lua", pass, fail);
+    cleanup_lua_caps();
+    return rc;
+}
+
+UTEST(lua_stdlib_audit44, pwned_reset_order)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("pwned_reset_order", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, session_update_sid)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("session_update_sid", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, rbac_string_permission)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("rbac_string_permission", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, validate_unknown_type)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("validate_unknown_type", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, ratelimit_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("ratelimit_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_poll_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_poll_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_key_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_key_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_history_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_history_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, jobs_cron_park)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_cron_park", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, search_snippet_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("search_snippet_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, retry_options)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("retry_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+
+UTEST(lua_stdlib_audit44, text_storable)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("text_storable", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 1LL);
+}
+#endif
+
 UTEST(lua_stdlib, ws_stream_suite)
 {
     long long pass = 0, fail = -1;

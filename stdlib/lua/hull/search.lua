@@ -299,6 +299,8 @@ local function count_opt(v, def, lo, hi)
 end
 
 local SEARCH_MAX_LIMIT = 1000
+-- A snippet / highlight column index (SQLite's SQLITE_MAX_COLUMN ceiling).
+local SNIPPET_MAX_COLUMN = 32767
 local SEARCH_MAX_OFFSET = 2147483647
 
 function search.query(name, query, opts)
@@ -342,9 +344,10 @@ function search.query(name, query, opts)
 
     if opts.snippet then
         local s = opts.snippet
-        local col = math.floor(tonumber(s.column) or 1)
-        if col < 0 then error("search: snippet column must be non-negative") end
-        local tokens = tonumber(s.tokens) or 32
+        -- Integers, as the paging options are (audit 44): math.huge / NaN /
+        -- 1e300 were spliced in as inf / nan / 1e+300, a SQL syntax error.
+        local col = int_opt(s, "column", 1, 0, SNIPPET_MAX_COLUMN)
+        local tokens = int_opt(s, "tokens", 32, 1, 64)
         select_cols[#select_cols + 1] = "snippet(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?, ?, " .. tostring(tokens) .. ") AS snippet"
         params[#params + 1] = MARK_BEFORE
@@ -354,8 +357,7 @@ function search.query(name, query, opts)
                   tostring(s.ellipsis or "...") }
     elseif opts.highlight then
         local h = opts.highlight
-        local col = math.floor(tonumber(h.column) or 1)
-        if col < 0 then error("search: highlight column must be non-negative") end
+        local col = int_opt(h, "column", 1, 0, SNIPPET_MAX_COLUMN)
         select_cols[#select_cols + 1] = "highlight(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?) AS highlight"
         params[#params + 1] = MARK_BEFORE

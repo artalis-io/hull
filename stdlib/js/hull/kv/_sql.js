@@ -11,7 +11,9 @@
 
 import util from "hull:kv:_util";
 
-const SUPPORTED = { sqlite: true, postgres: true };
+// A Set (audit 44): a plain object let a backendName of "constructor" or
+// "toString" pass the gate through Object.prototype.
+const SUPPORTED = new Set(["sqlite", "postgres"]);
 
 const DDL =
     "CREATE TABLE IF NOT EXISTS _hull_kv (" +
@@ -32,7 +34,7 @@ class SqlStore {
         if (!conn || typeof conn.exec !== "function")
             util.error("invalid_argument", "kv: sql backend needs a db connection (database: ...)");
         const backend = conn.backendName || "?";
-        if (!SUPPORTED[backend])
+        if (!SUPPORTED.has(backend))
             util.error("unsupported",
                 "kv: sql backend does not support '" + backend + "' yet (sqlite/postgres)");
         ensureTable(conn);

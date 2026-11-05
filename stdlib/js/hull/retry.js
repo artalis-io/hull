@@ -31,6 +31,20 @@ import { _refusal } from "hull:_refusal";
 const retry = {};
 
 const DEFAULTS = { maxAttempts: 3, baseMs: 100, factor: 2, capMs: 30000 };
+// The most attempts one retry.run makes (audit 44): Infinity passed the
+// `>= 1` check and the loop never ended.
+const MAX_ATTEMPTS = 1000;
+
+// baseMs / capMs: undefined / null takes the default (as does 0, the
+// `||` rule), anything else must be a finite number >= 0 (audit 44: a
+// negative one made hull.sleep a no-op, so the retries ran back to back, and
+// an infinite capMs slept Infinity, also a no-op).
+function msOpt(v, name, def) {
+    if (v === undefined || v === null) return def;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0)
+        throw new RangeError("retry: " + name + " must be a finite number of milliseconds >= 0");
+    return v || def;
+}
 
 /**
  * Backoff delay (ms) for a 1-based attempt: `base * factor^(n-1)`, clamped to
@@ -42,9 +56,9 @@ const DEFAULTS = { maxAttempts: 3, baseMs: 100, factor: 2, capMs: 30000 };
  */
 retry.backoff = function(attempt, opts) {
     opts = opts || {};
-    const base = opts.baseMs || DEFAULTS.baseMs;
+    const base = msOpt(opts.baseMs, "baseMs", DEFAULTS.baseMs);
     const factor = opts.factor || DEFAULTS.factor;
-    const cap = opts.capMs || DEFAULTS.capMs;
+    const cap = msOpt(opts.capMs, "capMs", DEFAULTS.capMs);
     let d = base * Math.pow(factor, attempt - 1);
     if (d > cap) d = cap;
     if (opts.jitter) {
@@ -61,7 +75,9 @@ retry.backoff = function(attempt, opts) {
  *   is passed through on success; a throw/reject or a `retryOn`-flagged result
  *   triggers a retry.
  * @param {Object} [opts]
- *   - `maxAttempts` (default 3) total attempts incl. the first.
+ *   - `maxAttempts` (default 3) total attempts incl. the first; at most 1000
+ *     (a larger value, Infinity included, is 1000). `baseMs` / `capMs` must
+ *     be finite numbers >= 0.
  *   - `baseMs` / `factor` / `capMs` / `jitter` - see backoff.
  *   - `retryOn(result) -> boolean | Promise<boolean>` - retry on a "bad" success value.
  *   - `retryOnError(err) -> boolean | Promise<boolean>` - return false to re-throw
@@ -83,7 +99,12 @@ retry.run = async function(fn, opts) {
     // and the call threw undefined (audit 20).
     let max = opts.maxAttempts;
     if (typeof max !== "number" || !(max >= 1)) max = DEFAULTS.maxAttempts;
+    // At most MAX_ATTEMPTS, as an integer (audit 44: Infinity looped for
+    // ever, each hull.sleep re-arming the run's budget).
+    if (max > MAX_ATTEMPTS) max = MAX_ATTEMPTS;
     max = Math.floor(max);
+    msOpt(opts.baseMs, "baseMs", 0);   // refused up front, before fn runs
+    msOpt(opts.capMs, "capMs", 0);
     let lastOk = false, lastVal;
     for (let attempt = 1; attempt <= max; attempt++) {
         let ok, val;

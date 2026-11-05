@@ -206,6 +206,21 @@ function ipPrefix(ip) {
 // recorded and onNewDevice fired on every login). The fingerprint is
 // computed from these same values.
 const UA_MAX = 512, IP_MAX = 64;
+// UTF-8 byte length of a string (a lone surrogate counted as the 3 bytes of
+// the U+FFFD storable makes it).
+function utf8Bytes(s) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length
+                 && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+        else n += 3;
+    }
+    return n;
+}
+
 function storableUa(ua) {
     return ua === null || ua === undefined ? null : _text.storable(ua, UA_MAX);
 }
@@ -270,10 +285,20 @@ function record(userId, kind, req, opts) {
     // overflow rather than truncating - a truncated JSON tail is
     // unparseable.
     const META_MAX = 4096;
+    // The cap counts UTF-8 bytes, as the Lua sibling's #meta does (audit 44:
+    // meta.length counted UTF-16 units, so up to ~12 KiB passed), and the
+    // kept JSON is made storable as Lua's is (never cut: it is under the cap).
     let meta = opts.metadata !== undefined ? json.encode(opts.metadata) : null;
-    if (meta !== null && meta.length > META_MAX) {
-        log.warn("audit-log: metadata for kind '" + kind + "' is "
-            + meta.length + " bytes (max " + META_MAX + "); dropping");
+    if (typeof meta === "string") {
+        const metaBytes = utf8Bytes(meta);
+        if (metaBytes > META_MAX) {
+            log.warn("audit-log: metadata for kind '" + kind + "' is "
+                + metaBytes + " bytes (max " + META_MAX + "); dropping");
+            meta = null;
+        } else {
+            meta = _text.storable(meta, META_MAX + 1024);
+        }
+    } else {
         meta = null;
     }
     db.exec(
