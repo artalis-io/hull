@@ -772,6 +772,27 @@ static void *worker_main(void *arg)
     }
 }
 
+/* ── Phase-2 gate on the worker pool (C audit L4) ─────────────────────
+ * The flag lives here, in the base-resident backend both runners link (and
+ * the Keel backend references), see shared/async_backend.h. */
+
+static int g_pool_held;   /* atomic */
+
+void hl_async_pool_hold(void)
+{
+    __atomic_store_n(&g_pool_held, 1, __ATOMIC_RELEASE);
+}
+
+void hl_async_pool_release(void)
+{
+    __atomic_store_n(&g_pool_held, 0, __ATOMIC_RELEASE);
+}
+
+int hl_async_pool_held(void)
+{
+    return __atomic_load_n(&g_pool_held, __ATOMIC_ACQUIRE);
+}
+
 /* Starts the workers on first use (audit 42). The runners create the pool
  * before the kernel sandbox applies (the runtime registers hull.worker only
  * when a pool exists); spawned there, every worker - the threads that run
