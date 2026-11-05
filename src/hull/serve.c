@@ -2081,9 +2081,27 @@ oom:
  * version mismatch, missing capability, undeclared dep). Module
  * resolution failures are fatal because they indicate the manifest
  * doesn't match what the runtime is about to be configured to expose. */
+/* A failure while the seal arena is being filled: destroy it and drop every
+ * alias into it (I5) - s->policy, the CORS config, the registry's manifest
+ * borrow and the runtime's module set (put back to @p prev_set) - so no later
+ * cleanup can read the destroyed pages. */
+static void hl_serve_seal_abort(HlServerState *s, HlRuntime *rt,
+                                const HlResolvedModuleSet *prev_set)
+{
+#ifdef HL_ENABLE_DB
+    if (s->policy && rt->db_registry)
+        hl_db_registry_set_manifest(rt->db_registry, NULL);
+#endif
+    rt->module_set = prev_set;
+    s->policy = NULL;
+    s->cors_cfg = NULL;
+    sh_seal_arena_destroy(&s->seal_arena);
+}
+
 static int hl_serve_wire_caps(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
+    const HlResolvedModuleSet *prev_set = rt->module_set;
 
     /* The server's event loop was wrapped in init_infra (so the thread
      * pool could go through the backend); just lend the existing wrap
@@ -2152,7 +2170,7 @@ static int hl_serve_wire_caps(HlServerState *s)
         s->policy = HL_SEAL_DUP(&s->seal_arena, &sealed, HlManifest);
         if (!s->policy) {
             log_error("[hull:c] seal arena alloc(manifest) failed");
-            sh_seal_arena_destroy(&s->seal_arena);
+            hl_serve_seal_abort(s, rt, prev_set);
             return -1;
         }
 
@@ -2188,7 +2206,7 @@ static int hl_serve_wire_caps(HlServerState *s)
                 &s->seal_arena, sizeof(*cc), _Alignof(KlHttpCorsConfig));
             if (!cc) {
                 log_error("[hull:c] seal arena alloc(cors) failed");
-                sh_seal_arena_destroy(&s->seal_arena);
+                hl_serve_seal_abort(s, rt, prev_set);
                 return -1;
             }
             kl_http_cors_init(cc);
@@ -2222,7 +2240,7 @@ static int hl_serve_wire_caps(HlServerState *s)
             if (hl_module_resolver_resolve(&s->manifest, &s->module_set,
                                             err, sizeof(err)) != 0) {
                 log_error("[hull:c] %s", err);
-                sh_seal_arena_destroy(&s->seal_arena);
+                hl_serve_seal_abort(s, rt, prev_set);
                 return -1;
             }
             /* Aligned alloc + copy, NOT memdup: the set is a uint64_t bitset
@@ -2236,7 +2254,7 @@ static int hl_serve_wire_caps(HlServerState *s)
                                     _Alignof(HlResolvedModuleSet));
             if (!resolved) {
                 log_error("[hull:c] seal arena alloc(module_set) failed");
-                sh_seal_arena_destroy(&s->seal_arena);
+                hl_serve_seal_abort(s, rt, prev_set);
                 return -1;
             }
             memcpy(resolved, &s->module_set, sizeof(HlResolvedModuleSet));
@@ -2251,7 +2269,7 @@ static int hl_serve_wire_caps(HlServerState *s)
 
         if (sh_seal_arena_seal(&s->seal_arena) != 0) {
             log_error("[hull:c] seal arena mprotect failed");
-            sh_seal_arena_destroy(&s->seal_arena);
+            hl_serve_seal_abort(s, rt, prev_set);
             return -1;
         }
         s->manifest_sealed = 1;

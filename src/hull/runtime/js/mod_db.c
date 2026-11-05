@@ -75,7 +75,8 @@ static int js_query_row_cb(void *opaque, HlColumn *cols, int ncols)
          * app code, inside the statement's row loop, where it could close
          * the connection or evict the statement being stepped. */
         if (JS_IsException(val) ||
-            JS_DefinePropertyValueStr(qc->ctx, row, cols[i].name, val,
+            JS_DefinePropertyValueStr(qc->ctx, row,
+                                      cols[i].name ? cols[i].name : "?", val,
                                       JS_PROP_C_W_E) < 0) {
             JS_FreeValue(qc->ctx, row);
             qc->failed = 1;

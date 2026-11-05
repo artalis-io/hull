@@ -370,9 +370,11 @@ static int sb_supported(void) { return 1; }
  * Phase 1 (pledge) is a no-op on macOS; phase 2 applies the full
  * Seatbelt profile.
  */
-/* sandbox.h is deprecated since macOS 10.8 - use free() for error strings.
- * stdlib.h is included at the top of the file. */
+/* sandbox.h is deprecated since macOS 10.8, so the two entry points are
+ * declared here; an error string is released with sandbox_free_error, as
+ * Apple documents (it is free() today). */
 
+extern void sandbox_free_error(char *errorbuf);
 extern int sandbox_init_with_parameters(const char *profile,
                                          uint64_t flags,
                                          const char **parameters,
@@ -1364,7 +1366,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             log_error("[sandbox] seatbelt init failed: %s",
                        errorbuf ? errorbuf : "unknown error");
             if (errorbuf)
-                free(errorbuf);
+                sandbox_free_error(errorbuf);
             return -1;
         }
 

@@ -1144,6 +1144,7 @@ static int supervisor_main(void)
 /* The worker's sandbox, applied after the GPU backend is up (the device
  * and its driver connection are open) and before it reads the source. */
 #if defined(__APPLE__)
+extern void sandbox_free_error(char *errorbuf);
 extern int sandbox_init_with_parameters(const char *profile, uint64_t flags,
                                         const char **parameters,
                                         char **errorbuf);
@@ -1173,7 +1174,7 @@ static int worker_sandbox(void)
     const char *params[] = { "HOME", rhome, NULL };
     char *err = NULL;
     if (sandbox_init_with_parameters(profile, 0, params, &err) != 0) {
-        free(err);
+        if (err) sandbox_free_error(err);
         return -1;
     }
     return 0;
