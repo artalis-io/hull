@@ -19,9 +19,14 @@ const BUSY = "busy";
 
 const hasOwn = Object.prototype.hasOwnProperty;
 
-// The refusal code of a caught error, or null when it is not a refusal.
+// The refusal code of a caught error, or null when it is not a refusal. An
+// error hull:ssh raised for its own connection (an own `ssh` marker) is not
+// one, whatever its code: its "busy" says THIS connection is in use by another
+// task, after the command may already have run, and a caller that took it for
+// an admission refusal (hull:jobs hands those back uncounted) re-ran it.
 function code(e) {
     if (e === null || typeof e !== "object" || !hasOwn.call(e, "code")) return null;
+    if (hasOwn.call(e, "ssh")) return null;
     const c = e.code;
     return c === WAIT || c === BUSY ? c : null;
 }

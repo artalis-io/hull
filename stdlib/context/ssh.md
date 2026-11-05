@@ -1,5 +1,5 @@
 <!-- minimal -->
-## SSH client (`hull/ssh@1`, Lua only)
+## SSH client (`hull/ssh@1`, Lua and JS)
 
 Hull speaks SSH-2 itself: no `ssh` binary, no agent, no `~/.ssh`, no shell
 quoting. The hosts, ports and logins an app may reach are declared in the
@@ -29,8 +29,20 @@ end)
 ```
 
 Run with `hull run app.lua`. Every call returns a value or `nil, { code, detail }`
-- never raises (only your own callback's error is re-raised). A non-zero
+- never raises, except your own callback's error and a runtime refusal
+(`[hull:wait_refused]` inside a transaction), both re-raised as they are. A non-zero
 remote exit is `r.status`, not an error.
+
+JS (`import { ssh } from "hull:ssh"`) is the same client: camelCase names,
+`await` on anything that talks to the server, and a failure is a rejection
+with `e.code` (the same codes). Bytes are byte strings (one char per byte;
+buffers accepted as input). `stats().authKey` is 0-based.
+
+```javascript
+const conn = await ssh.connect({ host: "build.internal", user: "deploy",
+                                 key: fs.read("id_ed25519"), trust });
+const r = await conn.exec("uname -a", { timeoutMs: 30000 });
+```
 
 <!-- compact -->
 ## The manifest is the allowlist
