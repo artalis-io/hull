@@ -518,6 +518,19 @@ int hl_gpu_helper_running(void)
     return g_fd >= 0;
 }
 
+/* A stopped supervisor not reaped within hl_gpu_helper_stop's moment (C
+ * audit L16): Hull installs no SIGCHLD handler, so it stayed a zombie for
+ * the server's life. Reaped without waiting at the next check. */
+static pid_t g_pid_exiting = -1;
+
+static void helper_reap_exiting(void)
+{
+    if (g_pid_exiting > 0) {
+        int st;
+        if (reap(g_pid_exiting, &st, 0)) g_pid_exiting = -1;
+    }
+}
+
 void hl_gpu_helper_stop(void)
 {
     if (g_fd >= 0) {
@@ -527,8 +540,11 @@ void hl_gpu_helper_stop(void)
     if (g_pid > 0) {
         int st;
         /* It exits on the EOF, killing a running worker first; give it a
-         * moment, then leave it (it will exit; init reaps it). */
-        (void)reap(g_pid, &st, 200);
+         * moment, then reap it later (helper_reap_exiting). */
+        if (!reap(g_pid, &st, 200)) {
+            helper_reap_exiting();         /* an older one, if any */
+            if (g_pid_exiting <= 0) g_pid_exiting = g_pid;
+        }
         g_pid = -1;
     }
 }
@@ -618,15 +634,18 @@ static int cache_lookup(const uint8_t key[32], const char hex[65])
     return -1;
 }
 
-static void cache_store(const uint8_t key[32], const char hex[65], int status)
+static void cache_store(const uint8_t key[32], const char hex[65], int status,
+                        int persist)
 {
     Verdict *v = &g_cache[g_cache_next++ % HL_GPU_HELPER_CACHE_ENTRIES];
     memcpy(v->key, key, 32);
     v->status = status;
     v->used = 1;
     /* Only a clean compile is kept across restarts: a timeout or a crash
-     * may be the host's load, not the source. */
-    if (status == HL_GPU_HELPER_OK && !g_disk_off)
+     * may be the host's load, not the source. And only for a source the
+     * caller says may be persisted - never runtime request text, which
+     * would mint one sealed file per distinct source (C audit L6). */
+    if (persist && status == HL_GPU_HELPER_OK && !g_disk_off)
         hl_runtime_cache_gpu_verdict_put(hex);
 }
 
@@ -740,7 +759,7 @@ static uint32_t helper_mem_mib(void)
 }
 
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter, size_t stack_bytes)
+                        const char *adapter, size_t stack_bytes, int persist)
 {
     if (!wgsl || len > HL_GPU_WGSL_MAX_BYTES)
         return HL_GPU_HELPER_BADREPLY;
@@ -750,6 +769,7 @@ int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
         return HL_GPU_HELPER_UNAVAILABLE;   /* no stack worth checking on */
     uint8_t key[32];
     char hex[65];
+    helper_reap_exiting();
     if (verdict_key(wgsl, len, device, adapter, stack_mib, mem_mib, key) != 0)
         return HL_GPU_HELPER_UNAVAILABLE;
     hex32(key, hex);
@@ -770,7 +790,7 @@ int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
     if (status == HL_GPU_HELPER_OK || status == HL_GPU_HELPER_SHADER ||
         status == HL_GPU_HELPER_TIMEOUT || status == HL_GPU_HELPER_CRASHED ||
         status == HL_GPU_HELPER_BADREPLY || status == HL_GPU_HELPER_MEMORY)
-        cache_store(key, hex, status);
+        cache_store(key, hex, status, persist);
     return status;
 }
 
@@ -808,16 +828,72 @@ static void worker_note_rss(Worker *w, uint64_t rss)
 /* sup_wait_worker's "a frame arrived": outside every HlGpuHelperStatus. */
 #define SUP_FRAME 100
 
+/* How long the supervisor waits for a killed worker to be reaped before it
+ * answers the server (C audit L7). The server's deadline is init + compile +
+ * HL_GPU_HELPER_MARGIN_MS; a worker slow to die after SIGKILL (inside a
+ * driver call) used to be reaped for up to 2 s - 2.5 s on the crash path -
+ * BEFORE the verdict was written, so the reply could miss the server's
+ * deadline, which then dropped the helper for the process's life. A worker
+ * not reaped by now is reaped later (sup_reap_pending), after the reply. */
+#define SUP_REAP_QUICK_MS 50u
+#define SUP_REAP_PENDING_MAX 8
+
+static pid_t g_reap_pending[SUP_REAP_PENDING_MAX];
+static int   g_reap_pending_n;
+
+/* Test hook: a worker that is slow to die (the quick reap never sees it). */
+static int sup_slowdie(void)
+{
+#ifdef HL_GPU_HELPER_TEST_HOOKS
+    const char *hook = getenv("HULL_TEST_GPU_HELPER");
+    return hook && strcmp(hook, "slowdie") == 0;
+#else
+    return 0;
+#endif
+}
+
+/* Reap the killed workers still pending: without waiting (@p block 0), or
+ * each for up to 2 s. */
+static void sup_reap_pending(int block)
+{
+    int keep = 0;
+    for (int i = 0; i < g_reap_pending_n; i++) {
+        int st;
+        pid_t pid = g_reap_pending[i];
+        if (block && sup_slowdie()) {
+            struct timespec ts = { 2, 500 * 1000000L };   /* its slow death */
+            nanosleep(&ts, NULL);
+        }
+        if (!reap_ru(pid, &st, block ? 2000u : 0u, NULL))
+            g_reap_pending[keep++] = pid;
+    }
+    g_reap_pending_n = keep;
+}
+
+/* Reap a worker that was just killed, for at most SUP_REAP_QUICK_MS; one
+ * that is not gone by then is queued for sup_reap_pending. */
+static void worker_reap_quick(Worker *w)
+{
+    int st;
+    uint64_t rss = 0;
+    int reaped = !sup_slowdie() &&
+                 reap_ru(w->pid, &st, SUP_REAP_QUICK_MS, &rss);
+    worker_note_rss(w, rss);
+    if (!reaped) {
+        if (g_reap_pending_n == SUP_REAP_PENDING_MAX) sup_reap_pending(1);
+        if (g_reap_pending_n < SUP_REAP_PENDING_MAX)
+            g_reap_pending[g_reap_pending_n++] = w->pid;
+        /* else left to init when this supervisor exits */
+    }
+    w->pid = -1;
+}
+
 static void worker_kill(Worker *w)
 {
     if (w->pid > 0) {
         worker_note_rss(w, worker_mem_now(w->pid));
         (void)kill(w->pid, SIGKILL);
-        int st;
-        uint64_t rss = 0;
-        (void)reap_ru(w->pid, &st, 2000, &rss);
-        worker_note_rss(w, rss);
-        w->pid = -1;
+        worker_reap_quick(w);
     }
     if (w->fd >= 0) {
         close(w->fd);
@@ -828,13 +904,11 @@ static void worker_kill(Worker *w)
 /* The status a worker that closed its socket without a reply gets. */
 static int worker_gone(Worker *w)
 {
-    int st = 0;
-    uint64_t rss = 0;
-    int reaped = w->pid > 0 && reap_ru(w->pid, &st, 500, &rss);
-    if (w->pid > 0 && !reaped) (void)kill(w->pid, SIGKILL);
-    if (!reaped && w->pid > 0) (void)reap_ru(w->pid, &st, 2000, &rss);
-    worker_note_rss(w, rss);
-    w->pid = -1;
+    if (w->pid > 0) {
+        worker_note_rss(w, worker_mem_now(w->pid));
+        (void)kill(w->pid, SIGKILL);   /* no-op when it has exited */
+        worker_reap_quick(w);
+    }
     close(w->fd);
     w->fd = -1;
     return HL_GPU_HELPER_CRASHED;
@@ -952,6 +1026,7 @@ static int sup_compile(int sfd, const char *exe, uint32_t id,
     }
     set_nonblock(w.fd);
     set_nosigpipe(w.fd);
+    sup_reap_pending(0);   /* earlier workers that were slow to die */
     int rc = sup_compile_w(sfd, &w, id, req, req_len, compile_ms,
                            server_gone, flags);
     *peak = w.peak;
@@ -996,6 +1071,17 @@ static int sup_compile_w(int sfd, Worker *w, uint32_t id, uint8_t *req,
     }
     frame_reset(&wr);
     worker_kill(w);   /* it exits after replying; reaped (or killed) here */
+    /* macOS polls the footprint only while it waits: an allocation burst
+     * between the last look and the reply may have passed the cap, which
+     * the reap's footprint (worker_kill) shows. A clean verdict from a
+     * worker over its cap is not clean (it would not fit the server's
+     * compile either). Linux enforces the cap in the worker (RLIMIT_DATA)
+     * and its peak is the reap's RSS, shared pages included, so the
+     * recheck is macOS's. */
+#if defined(__APPLE__)
+    if (status == HL_GPU_HELPER_OK && w->mem_cap && w->peak > w->mem_cap)
+        return HL_GPU_HELPER_MEMORY;
+#endif
     return status;
 }
 
@@ -1047,6 +1133,9 @@ static int supervisor_main(void)
         put32(st + 8, kib > UINT32_MAX ? UINT32_MAX : (uint32_t)kib);
         if (write_frame(sfd, HGC_RESP, id, st, sizeof st, NULL, 0, 0) != 0)
             return 0;
+        /* The verdict is out: now the workers that were slow to die may
+         * take their time (C audit L7). */
+        sup_reap_pending(1);
     }
 }
 
@@ -1369,7 +1458,7 @@ static int worker_main(void)
         // cppcheck-suppress unreachableCode
         _exit(3);
     }
-    if (hook && strcmp(hook, "slow") == 0) {
+    if (hook && (strcmp(hook, "slow") == 0 || strcmp(hook, "slowdie") == 0)) {
         for (;;) pause();
     }
     if (hook && strcmp(hook, "oversize") == 0) {
@@ -1469,9 +1558,10 @@ int hl_gpu_helper_start(const char *exe) { (void)exe; return -1; }
 int hl_gpu_helper_running(void) { return 0; }
 void hl_gpu_helper_stop(void) {}
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter, size_t stack_bytes)
+                        const char *adapter, size_t stack_bytes, int persist)
 {
     (void)wgsl; (void)len; (void)device; (void)adapter; (void)stack_bytes;
+    (void)persist;
     return HL_GPU_HELPER_UNAVAILABLE;
 }
 void hl_gpu_helper_test_reset_cache(int disk_off) { (void)disk_off; }

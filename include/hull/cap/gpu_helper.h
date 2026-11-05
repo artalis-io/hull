@@ -76,13 +76,14 @@ void hl_gpu_helper_stop(void);
  * latter): the caller passes no more than its own compile thread will
  * have, so the verdict carries over (also part of the key). Looks the verdict up in the
  * in-memory cache, then the sealed on-disk cache ("gpu-shaders", OK
- * verdicts only); on a miss charges HL_GPU_HELPER_UNITS to the calling
+ * verdicts only, written only when @p persist - never for runtime source,
+ * which may be request text: C audit L6); on a miss charges HL_GPU_HELPER_UNITS to the calling
  * thread's run budget, then asks the supervisor and waits - polling the
  * run's deadline / budget every HL_GPU_COMPILE_POLL_MS, sending a cancel
  * when it stops - at most the helper's deadlines plus a margin. Returns a
  * HlGpuHelperStatus. Event-loop only. */
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter, size_t stack_bytes);
+                        const char *adapter, size_t stack_bytes, int persist);
 
 /* TEST-ONLY: drop every cached verdict (memory) and skip the on-disk cache
  * while @p off (so a test's compile reaches the helper). */
