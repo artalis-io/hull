@@ -831,12 +831,17 @@ run_multipart_tests() {
     else
         echo "  SKIP: $LABEL header flood (needs python)"
     fi
-    # With no caps at all the body total is the server body limit (1 MB):
-    # a 2 MB file is refused, a small field still goes through.
+    # With no caps at all the body total is the server body limit (1 MiB):
+    # a file just over it is refused, a small field still goes through.
+    # Just over (1 MiB + 1 KiB), not 2 MB: the cap ends the stream and the
+    # server drains at most 64 KiB / 500 ms of the body after answering,
+    # so a file a megabyte over left that much in flight, the close reset
+    # the connection, and on a loaded runner curl read no status (000).
+    head -c 1049600 "$TMPDIR_WORK/medium.bin" > "$TMPDIR_WORK/over_total.bin"
     STATUS=$(curl --max-time 10 -sS -o /tmp/.mp_resp -w '%{http_code}' \
         -X POST "http://127.0.0.1:$PORT/upload-nocaps" \
-        -F "f=@$TMPDIR_WORK/medium.bin" 2>/dev/null) || STATUS=000
-    check_contains "$LABEL no caps: 2 MB body over the default total refused" "$STATUS" "413"
+        -F "f=@$TMPDIR_WORK/over_total.bin" 2>/dev/null) || STATUS=000
+    check_contains "$LABEL no caps: body over the default total refused" "$STATUS" "413"
     RESP=$(curl --max-time 5 -sS -X POST "http://127.0.0.1:$PORT/upload-nocaps" \
         -F "a=1" -F "b=2" 2>/dev/null)
     check_contains "$LABEL no caps: small body accepted" "$RESP" '"count":2'
