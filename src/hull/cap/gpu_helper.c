@@ -634,19 +634,18 @@ static int cache_lookup(const uint8_t key[32], const char hex[65])
     return -1;
 }
 
-static void cache_store(const uint8_t key[32], const char hex[65], int status,
-                        int persist)
+static void cache_store(const uint8_t key[32], int status)
 {
     Verdict *v = &g_cache[g_cache_next++ % HL_GPU_HELPER_CACHE_ENTRIES];
     memcpy(v->key, key, 32);
     v->status = status;
     v->used = 1;
-    /* Only a clean compile is kept across restarts: a timeout or a crash
-     * may be the host's load, not the source. And only for a source the
-     * caller says may be persisted - never runtime request text, which
-     * would mint one sealed file per distinct source (C audit L6). */
-    if (persist && status == HL_GPU_HELPER_OK && !g_disk_off)
-        hl_runtime_cache_gpu_verdict_put(hex);
+    /* Memory only (C audit L6). Every source reaching the helper is runtime
+     * source a built binary opted into, possibly request text: writing its
+     * OK verdict to the sealed disk cache minted one file per distinct
+     * source, without bound - the shape audit 39 closed for
+     * template.render_string. The disk side is read (cache_lookup) but no
+     * longer written from here. */
 }
 
 /* ── The round trip ──────────────────────────────────────────────── */
@@ -759,7 +758,7 @@ static uint32_t helper_mem_mib(void)
 }
 
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter, size_t stack_bytes, int persist)
+                        const char *adapter, size_t stack_bytes)
 {
     if (!wgsl || len > HL_GPU_WGSL_MAX_BYTES)
         return HL_GPU_HELPER_BADREPLY;
@@ -790,7 +789,7 @@ int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
     if (status == HL_GPU_HELPER_OK || status == HL_GPU_HELPER_SHADER ||
         status == HL_GPU_HELPER_TIMEOUT || status == HL_GPU_HELPER_CRASHED ||
         status == HL_GPU_HELPER_BADREPLY || status == HL_GPU_HELPER_MEMORY)
-        cache_store(key, hex, status, persist);
+        cache_store(key, status);
     return status;
 }
 
@@ -1559,10 +1558,9 @@ int hl_gpu_helper_start(const char *exe) { (void)exe; return -1; }
 int hl_gpu_helper_running(void) { return 0; }
 void hl_gpu_helper_stop(void) {}
 int hl_gpu_helper_check(const char *wgsl, size_t len, int device,
-                        const char *adapter, size_t stack_bytes, int persist)
+                        const char *adapter, size_t stack_bytes)
 {
     (void)wgsl; (void)len; (void)device; (void)adapter; (void)stack_bytes;
-    (void)persist;
     return HL_GPU_HELPER_UNAVAILABLE;
 }
 void hl_gpu_helper_test_reset_cache(int disk_off) { (void)disk_off; }

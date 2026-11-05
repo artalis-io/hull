@@ -4281,7 +4281,7 @@ UTEST(gpu_helper_audit_c_l7, verdict_is_not_held_by_a_slow_reap)
     hl_gpu_helper_stop();
     a40_sleep_ms(3500);                         /* it has exited by now */
     EXPECT_EQ(HL_GPU_HELPER_UNAVAILABLE,
-              hl_gpu_helper_check("x", 1, 0, "dev", 0, 0));
+              hl_gpu_helper_check("x", 1, 0, "dev", 0));
     EXPECT_TRUE(waitpid(-1, &st, WNOHANG) <= 0);   /* nothing left to reap */
     hl_gpu_helper_test_set_timeouts(0, 0);
     mock_free(ctx);
@@ -4577,18 +4577,18 @@ UTEST(gpu_convergence_policy, helper_stack_follows_the_server)
     HlGpuHelperStats a, b, c;
     hl_gpu_helper_stats(&a);
     EXPECT_EQ(HL_GPU_HELPER_OK,
-              hl_gpu_helper_check(AC_OTHER, strlen(AC_OTHER), 0, "dev", 0, 0));
+              hl_gpu_helper_check(AC_OTHER, strlen(AC_OTHER), 0, "dev", 0));
     hl_gpu_helper_stats(&b);
     EXPECT_EQ(a.round_trips + 1, b.round_trips);
     EXPECT_EQ(HL_GPU_HELPER_OK,
               hl_gpu_helper_check(AC_OTHER, strlen(AC_OTHER), 0, "dev",
-                                  (size_t)64 << 20, 0));
+                                  (size_t)64 << 20));
     hl_gpu_helper_stats(&c);
     EXPECT_EQ(b.round_trips + 1, c.round_trips);
     /* A stack above the helper's own cap is the cap: the same verdict. */
     EXPECT_EQ(HL_GPU_HELPER_OK,
               hl_gpu_helper_check(AC_OTHER, strlen(AC_OTHER), 0, "dev",
-                                  (size_t)4 << 30, 0));
+                                  (size_t)4 << 30));
     hl_gpu_helper_stats(&a);
     EXPECT_EQ(c.round_trips, a.round_trips);
     hl_gpu_helper_stop();
@@ -4610,7 +4610,7 @@ UTEST(hull_cap_gpu_helper, real_compile_on_device)
     hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
     ASSERT_EQ(0, ach_start(NULL));
     double t0 = a40_now();
-    int hs = hl_gpu_helper_check(A42_WARP, strlen(A42_WARP), 0, ctx->devices[0].name, 0, 0);
+    int hs = hl_gpu_helper_check(A42_WARP, strlen(A42_WARP), 0, ctx->devices[0].name, 0);
     double helper_t = a40_now() - t0;
     EXPECT_EQ(HL_GPU_HELPER_OK, hs);
     /* The in-process compile of the source the helper compiled. */
@@ -4698,7 +4698,7 @@ UTEST(hull_cap_gpu_helper, server_residual_measured)
         hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
         t0 = a40_now();
         EXPECT_EQ(HL_GPU_HELPER_OK,
-                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name, 0, 0));
+                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name, 0));
         helper += a40_now() - t0;
         snprintf(name, sizeof name, "warm%d", i);
         t0 = a40_now();
@@ -4729,7 +4729,7 @@ UTEST(hull_cap_gpu_helper, server_residual_measured)
         hl_cap_gpu_set_shader_policy(ctx, HL_GPU_SHADERS_EMBEDDED, 1, &vfs);
         t0 = a40_now();
         EXPECT_EQ(HL_GPU_HELPER_OK,
-                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name, 0, 0));
+                  hl_gpu_helper_check(b, strlen(b), 0, ctx->devices[0].name, 0));
         helper += a40_now() - t0;
         snprintf(name, sizeof name, "bigwarm%d", i);
         t0 = a40_now();
@@ -4789,7 +4789,7 @@ UTEST(gpu_convergence_policy, worker_peak_measured)
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         EXPECT_EQ(HL_GPU_HELPER_OK,
                   hl_gpu_helper_check(cases[i].src, strlen(cases[i].src), 0,
-                                      ctx->devices[0].name, 0, 0));
+                                      ctx->devices[0].name, 0));
         hl_gpu_helper_stats(&st);
         printf("  helper: worker peak %.1f MiB: %s (%zu bytes)\n",
                (double)st.last_peak_bytes / (1 << 20), cases[i].what,
@@ -4802,7 +4802,7 @@ UTEST(gpu_convergence_policy, worker_peak_measured)
         if (!src) continue;
         EXPECT_EQ(HL_GPU_HELPER_OK,
                   hl_gpu_helper_check(src, strlen(src), 0,
-                                      ctx->devices[0].name, 0, 0));
+                                      ctx->devices[0].name, 0));
         hl_gpu_helper_stats(&st);
         printf("  helper: worker peak %.1f MiB: %s\n",
                (double)st.last_peak_bytes / (1 << 20), examples[i]);

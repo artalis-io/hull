@@ -3286,7 +3286,7 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
          * ~/.hull without bound (C audit L6, as audit 39 for
          * template.render_string). The in-memory verdict ring stays. */
         int hs = hl_gpu_helper_check(wgsl, wgsl_len, dev_idx, dev->name,
-                                     helper_stack, 0);
+                                     helper_stack);
         if (hs != HL_GPU_HELPER_OK) {
             int hrc = hs == HL_GPU_HELPER_SHADER ? HL_GPU_ERR_SHADER
                     : (hs == HL_GPU_HELPER_TIMEOUT ||
