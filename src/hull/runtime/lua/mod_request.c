@@ -111,6 +111,10 @@ typedef struct {
      * iterator has moved past is not the current one, and its read() /
      * chunks() consumed the NEXT part's body. */
     unsigned  gen;
+    /* Its read() was refused for size (#1014): the accumulator is freed, so
+     * a later read() / chunks() would return the part's tail as if it were
+     * the whole. Both raise; the outer iterator skips the rest of it. */
+    int       refused;
     /* part:read()'s accumulator, kept across parks: allocated through the
      * VM's allocator (so it counts against the Lua memory limit), grown
      * geometrically, freed once the value is pushed or by __gc. */
@@ -315,6 +319,15 @@ static void mp_part_check_current(lua_State *L, HlMpPart *p)
     }
 }
 
+#define MP_REFUSED_PART "req:multipart(): this part's read() was refused " \
+                        "for size; the iterator skips the rest of it"
+
+/* Refuse a Part whose read() was refused for size (#1014). */
+static void mp_part_check_refused(lua_State *L, HlMpPart *p)
+{
+    if (p->refused) luaL_error(L, "%s", MP_REFUSED_PART);
+}
+
 /* part:read() - accumulate every PART_DATA event until PART_END, return
  * one big string. Convenience for small fields; large uploads should use
  * part:chunks() instead. */
@@ -342,7 +355,16 @@ static void mp_part_acc_add(lua_State *L, HlMpPart *p, const char *data,
 {
     if (n == 0) return;   /* nothing to copy (and acc may still be NULL) */
     if (n > p->acc_cap - p->acc_len) {
+        /* A refusal frees what was read and marks only this part (#1014):
+         * the parser is intact, so the outer iterator skips the rest of the
+         * part and the handler can read the body to its end before it
+         * answers - answered with the body in flight, past Keel's bounded
+         * drain, the close reset the connection and the client often lost
+         * the 4xx. Kept, the accumulator held up to the whole VM heap
+         * until __gc while the handler went on. */
         if (n > SIZE_MAX / 2 - p->acc_len) {
+            mp_part_acc_free(L, p);
+            p->refused = 1;
             luaL_error(L, "req:multipart(): part too large");
             return;   /* not reached: luaL_error does not return */
         }
@@ -353,6 +375,8 @@ static void mp_part_acc_add(lua_State *L, HlMpPart *p, const char *data,
         lua_Alloc f = lua_getallocf(L, &ud);
         char *nb = (char *)f(ud, p->acc, p->acc ? p->acc_cap : 0, cap);
         if (!nb) {
+            mp_part_acc_free(L, p);
+            p->refused = 1;
             luaL_error(L, "req:multipart(): out of memory reading a part");
             return;   /* not reached */
         }
@@ -386,6 +410,7 @@ static int mp_part_read_pump(lua_State *L)
 
     mp_check_usable(L, it);
     mp_part_check_current(L, p);
+    mp_part_check_refused(L, p);
     lua_settop(L, 1);
 
     for (;;) {
@@ -462,6 +487,7 @@ static int mp_part_chunks(lua_State *L)
     HlMpPart *p = check_part(L, 1);
     /* arg 2 is the optional advisory min-bytes hint; ignored for now. */
     if (!lua_isnoneornil(L, 2)) (void)luaL_checkinteger(L, 2);
+    mp_part_check_refused(L, p);
 
     HlMpChunks *c = (HlMpChunks *)lua_newuserdatauv(L, sizeof(*c), 1);
     c->part = p;
@@ -490,6 +516,7 @@ static int mp_chunks_drive(lua_State *L)
         return 1;
     }
     mp_part_check_current(L, p);
+    mp_part_check_refused(L, p);
     if (!it->in_part) {
         lua_pushnil(L);
         return 1;
