@@ -16,6 +16,17 @@
 // read() returning SHORT is normal. Every method that reaches the stream is
 // async; where Lua's coroutines interleave at yields, two JS callers
 // interleave at awaits, and the same io_busy flag refuses the second.
+//
+// One difference the port has to make up for: a Lua coroutine resumed from a
+// stream call runs straight on to its next statement, but a JS caller resumes
+// through a chain of awaits, and other promise jobs run in between - after
+// streamCall has cleared ioBusy and before the caller has finished its
+// bookkeeping. So a packet's whole send (seal, sequence number, write) and a
+// packet's whole read (buffer, sequence number, keys) each hold a lock of
+// their own (sendBusy / readBusy) for their duration, and the state they
+// advance is advanced before the first await (audit of #1009: a second task
+// sealed with the sequence number the first had just used - the
+// chacha20-poly1305 nonce).
 
 import { packet } from "hull:ssh:packet";
 import { kexinit } from "hull:ssh:kexinit";
@@ -53,6 +64,9 @@ function sshError(code, detail, extra) {
     e.code = code;
     if (detail !== undefined) e.detail = detail;
     if (extra) for (const k of Object.keys(extra)) e[k] = extra[k];
+    // The connection's own failure, never a runtime refusal (hull:_refusal):
+    // its "busy" means this connection is in use, not an admission cap.
+    Object.defineProperty(e, "ssh", { value: true, enumerable: false });
     return e;
 }
 
@@ -159,11 +173,16 @@ class Transport {
     }
 
     // Pull at least `n` bytes into the buffer.
+    // Each chunk goes into the buffer as it arrives: kept in a local until the
+    // fill was done, it was lost when a later read of the same fill threw.
     async fill(n) {
-        const [buf, ok] = await wire.gather(this.inbuf, n,
-            async (m) => [await this.readSome(m)], READ_CHUNK);
-        this.inbuf = buf;
-        if (!ok) throw new Error("ssh: connection closed by peer");
+        while (this.inbuf.length < n) {
+            let want = n - this.inbuf.length;
+            if (want > READ_CHUNK) want = READ_CHUNK;
+            const chunk = await this.readSome(want);
+            if (chunk === "") throw new Error("ssh: connection closed by peer");
+            this.inbuf = this.inbuf + chunk;
+        }
     }
 
     // Write all of `bytes`, retried under the liveness rules on a timeout.
@@ -213,45 +232,63 @@ class Transport {
                  "the connection is no longer usable"
                  + (this.dead.detail ? (": " + String(this.dead.detail)) : ""));
         }
-        if (this.ioBusy) {
+        if (this.ioBusy || this.sendBusy) {
             fail("busy", "another coroutine is using this connection");
         }
-        if (this.c2s) {
-            const sealed = this.c2s.seal(this.aead, payload, this.crypto.random, this.sendSeq);
-            try {
-                await this.sendRaw(sealed);
-            } catch (e) {
-                if (!this.dead) {
-                    this.dead = { code: "send_failed",
-                                  detail: "a sealed packet could not be written" };
+        // The sequence number is spent HERE, before anything awaits: a packet
+        // is sealed under it once, whether or not its write then succeeds (a
+        // failed sealed write kills the connection below).
+        const seq = this.sendSeq;
+        this.sendSeq = (seq + 1) >>> 0;
+        this.sendBusy = true;
+        try {
+            if (this.c2s) {
+                const sealed = this.c2s.seal(this.aead, payload, this.crypto.random, seq);
+                try {
+                    await this.sendRaw(sealed);
+                } catch (e) {
+                    if (!this.dead) {
+                        this.dead = { code: "send_failed",
+                                      detail: "a sealed packet could not be written" };
+                    }
+                    throw e;
                 }
-                throw e;
+            } else {
+                await this.sendRaw(packet.frame(payload, 8, this.crypto.random));
             }
-        } else {
-            await this.sendRaw(packet.frame(payload, 8, this.crypto.random));
+        } finally {
+            this.sendBusy = false;
         }
-        this.sendSeq = (this.sendSeq + 1) >>> 0;
     }
 
     // One packet off the wire: plaintext framing before NEWKEYS, the AEAD
     // after. The parser bounds the declared length before anything waits.
+    // The read holds readBusy throughout, so no other reader consumes the
+    // buffer or advances recvSeq / s2c under it (both are read only then).
     async readPacket() {
-        const s2c = this.s2c, aead = this.aead, seq = this.recvSeq;
-        const parse = (buf) => {
-            if (s2c) return s2c.open(aead, buf, seq);
-            return packet.parse(buf, 8);
-        };
-
-        await this.fill(4);
-        let [payload, used] = parse(this.inbuf);
-        if (payload === null || payload === undefined) {
-            await this.fill(s2c ? s2c.needed(this.inbuf, seq)
-                                : wire.peekUint32(this.inbuf) + 4);
-            [payload, used] = parse(this.inbuf);
+        if (this.readBusy) {
+            fail("busy", "another coroutine is using this connection");
         }
-        this.inbuf = this.inbuf.slice(used);
-        this.recvSeq = (this.recvSeq + 1) >>> 0;
-        return payload;
+        this.readBusy = true;
+        try {
+            await this.fill(4);
+            const s2c = this.s2c, aead = this.aead, seq = this.recvSeq;
+            const parse = (buf) => {
+                if (s2c) return s2c.open(aead, buf, seq);
+                return packet.parse(buf, 8);
+            };
+            let [payload, used] = parse(this.inbuf);
+            if (payload === null || payload === undefined) {
+                await this.fill(s2c ? s2c.needed(this.inbuf, seq)
+                                    : wire.peekUint32(this.inbuf) + 4);
+                [payload, used] = parse(this.inbuf);
+            }
+            this.inbuf = this.inbuf.slice(used);
+            this.recvSeq = (seq + 1) >>> 0;
+            return payload;
+        } finally {
+            this.readBusy = false;
+        }
     }
 
     // Hold a message that arrived during a rekey WE started.
@@ -371,6 +408,9 @@ class Transport {
         };
         if (whole()) return true;
         if (!this.stream.wait) return false;
+        if (this.readBusy) {
+            fail("busy", "another coroutine is using this connection");
+        }
 
         this.stream.wait(1);
         // The wait is put back however the read ends (audit 21).
@@ -576,7 +616,7 @@ class Transport {
         if (!this.sessionId) return [null, { code: "not_handshaken" }];
         if (this.dead) return [null, this.dead];
         if (this.inKex) return [true];          // one is already running
-        if (this.ioBusy) {
+        if (this.ioBusy || this.sendBusy || this.readBusy) {
             return [null, { code: "busy",
                             detail: "another coroutine is using this connection" }];
         }
@@ -773,6 +813,8 @@ function newTransport(stream, crypto, opts) {
     };
     t.rawSha = crypto.sha256;
     t.ioBusy = false;
+    t.sendBusy = false;
+    t.readBusy = false;
     t.applyWait();
     return t;
 }

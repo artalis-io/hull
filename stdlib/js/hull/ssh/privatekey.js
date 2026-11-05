@@ -27,6 +27,8 @@ function sshError(code, detail, extra) {
     e.code = code;
     if (detail !== undefined) e.detail = detail;
     if (extra) for (const k of Object.keys(extra)) e[k] = extra[k];
+    // The connection's own failure, never a runtime refusal (hull:_refusal).
+    Object.defineProperty(e, "ssh", { value: true, enumerable: false });
     return e;
 }
 

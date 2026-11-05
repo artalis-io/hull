@@ -1151,6 +1151,17 @@ async function sftpOver(rest, chunk, window) {
     return [f, s];
 }
 
+await test("a request cut short mid-frame leaves the session broken (#1009 audit)", async () => {
+    // A 20-byte window: INIT takes 9, so the STAT frame goes out in part and
+    // the wait for more window then meets the end of the stream.
+    const [f, s] = await sftpOver("", 11, 20);
+    await assertRaises(() => f.stat("/a/rather/long/path/name"), "the stat");
+    const before = s.written.length;
+    const msg = await assertRaises(() => f.stat("/x"), "a later request");
+    assertOk(has(msg, "cut short"), "says why: " + msg);
+    assertEq(s.written.length, before, "and sends nothing:");
+});
+
 await test("stat returns the attributes the server sent", async () => {
     const [f] = await sftpOver(sAttrs(1, { size: 1234, permissions: 0x41ed,
                                            uid: 1, gid: 2, atime: 5, mtime: 6 }));
@@ -1988,6 +1999,75 @@ await test("message_ready puts the wait back when the read raises", async () => 
     t.ioBusy = true;
     assertEq(await raisedCode(() => t.messageReady()), "busy");
     assertEq(s.waits[s.waits.length - 1], 30000, "wait after the raise:");
+});
+
+// Interleaving at awaits (#1009 audit) --------------------------------------
+// A Lua coroutine resumed from a stream call runs straight on; a JS caller
+// resumes through awaits, with other promise jobs in between. These run a
+// second caller in exactly that gap: a reaction on the very promise the
+// stream call is waiting on runs right after the transport's own.
+
+await test("a send in the gap after a write cannot reuse its sequence number", async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const s = fakeStream("", 1);
+    s.write = function (x) { this.written.push(x); this.p = gate.then(() => [true]); return this.p; };
+    const t = transport.new(s, stubCrypto());
+    const seqs = [];
+    t.c2s = { seal: (aead, p, rnd, seq) => { seqs.push(seq); return "sealed" + String(seq); } };
+    const a = t.sendPacket("A");
+    let bDone = null, bErr = null;
+    s.p.then(() => { bDone = t.sendPacket("B").catch((e) => { bErr = e; }); });
+    release();
+    await a;
+    await gate; await null;
+    if (bDone) await bDone;
+    assertOk(bDone !== null, "the second send ran in the gap:");
+    assertEq(new Set(seqs).size, seqs.length, "no sequence number sealed twice: " + seqs.join(","));
+    assertEq(t.sendSeq, seqs.length, "every seal spent a number:");
+    if (bErr) assertEq(bErr.code, "busy", "or the second send is refused:");
+});
+
+await test("bytes a fill already read survive a later read that throws", async () => {
+    const s = scriptedStream(["abc"]);
+    s.read = function (n) {
+        const idx = this.i; this.i = idx + 1;
+        if (idx === 0) return ["abc"];
+        return [null, "another caller is waiting", "busy"];
+    };
+    const t = transport.new(s, stubCrypto());
+    assertEq(await raisedCode(() => t.fill(6)), "busy");
+    assertEq(t.inbuf, "abc", "the chunk read before the refusal is kept:");
+});
+
+await test("a second reader cannot take a packet under the first one's sequence number", async () => {
+    const t = transport.new(fakeStream("", 1), stubCrypto());
+    const seen = [];
+    t.s2c = {
+        open: (aead, buf, seq) => {
+            seen.push(seq);
+            if (buf.length < 4) return [null];
+            return [buf.slice(0, 4), 4];
+        },
+        needed: () => 4,
+    };
+    t.inbuf = "AAAABBBB";
+    const a = t.readPacket();
+    const bErr = await raisedCode(() => t.readPacket());
+    assertEq(await a, "AAAA");
+    assertEq(bErr, "busy", "the second read is refused while the first holds the buffer:");
+    assertEq(t.recvSeq, 1);
+    assertEq(await t.readPacket(), "BBBB");
+    assertEq(seen.join(","), "0,1", "each packet opened under its own number:");
+});
+
+await test("the connection's own busy failure is not a runtime refusal", async () => {
+    const t = transport.new(fakeStream("", 1), stubCrypto());
+    t.ioBusy = true;
+    let err = null;
+    try { await t.sendPacket("x"); } catch (e) { err = e; }
+    assertEq(err && err.code, "busy");
+    assertEq(Object.prototype.hasOwnProperty.call(err, "ssh"), true, "marked as the connection's:");
 });
 
 globalThis.__test_pass = pass;

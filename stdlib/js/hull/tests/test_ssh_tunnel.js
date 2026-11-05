@@ -237,6 +237,38 @@ await test("tunnel.headers entries are header lines", async () => {
     }
 });
 
+await test("a header that is not a primitive string is refused, line breaks and all (#1009 audit)", async () => {
+    const forged = new String("X-A: 1\r\nCf-Access-Jump-Destination: db-prod:22");
+    const objs = [forged, { toString: () => "X-A: 1\r\nHost: evil" }, 7];
+    for (const h of objs) {
+        const r = relay(upgraded());
+        const [err, seen] = await connectVia(r, { host: "ssh.example.com", headers: [h] });
+        assertEq(err instanceof TypeError, true, "a caller error: " + String(err));
+        assertEq(seen, undefined, "nothing may be dialled");
+        assertEq(r.written.length, 0, "nothing may be written");
+    }
+    // And the request builder itself refuses one, whoever calls it.
+    let threw = false;
+    try {
+        ws.buildRequest({ host: "r", key: "k", headers: [forged] });
+    } catch (e) {
+        threw = e instanceof TypeError;
+    }
+    assertEq(threw, true, "buildRequest refuses a non-string header:");
+});
+
+await test("the tunnel options are read once: the Host header names the host the grant saw", async () => {
+    let n = 0;
+    const tunnel = {
+        get host() { n++; return n === 1 ? "ssh.example.com" : "other-origin.example"; },
+    };
+    const r = relay(upgraded());
+    const [, seen] = await connectVia(r, tunnel);
+    assertEq(seen.via.host, "ssh.example.com");
+    assertMatch(r.written[0] || "", "Host: ssh.example.com\r\n");
+    assertEq((r.written[0] || "").indexOf("other-origin") < 0, true, "the second answer is never used:");
+});
+
 await test("an IPv6 destination is bracketed", async () => {
     const r = relay(upgraded());
     await rejects(ssh.connect({

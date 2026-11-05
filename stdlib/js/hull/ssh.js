@@ -423,11 +423,11 @@ function destinationValue(host, port) {
 
 // The headers to send: the caller's, with the destination header checked
 // against the granted destination, or added -> [headers] | [null, reason].
+// `tunnel` is tunnelOpener's snapshot: every header already a plain string.
 function tunnelHeaders(tunnel, host, port) {
     let name = tunnel.destinationHeader;
     if (name === undefined || name === null) name = DEFAULT_DESTINATION_HEADER;
-    const out = [];
-    for (const line of (tunnel.headers || [])) out.push(line);
+    const out = tunnel.headers.slice();
 
     const checked = new Set([DEFAULT_DESTINATION_HEADER.toLowerCase()]);
     if (name !== false) checked.add(name.toLowerCase());
@@ -478,12 +478,50 @@ function streamResult(r) {
 // Reach the host through a WebSocket relay instead of dialling it directly.
 // `dial` is how the RELAY is reached, defaulting to the capability-checked
 // stream.
-function tunnelOpener(tunnel, crypto, dial) {
-    if (tunnel === null || typeof tunnel !== "object") {
+//
+// Every option is read ONCE, here, into a plain snapshot that the rest uses:
+// a getter read again could hand the grant check (the dial's via.host /
+// tlsHostname) one name and the upgrade's Host header another, and a header
+// that is not a primitive string got past the CR / LF checks and was turned
+// into text, line breaks and all, only when the request was joined.
+function tunnelOpener(tunnelIn, crypto, dial) {
+    if (tunnelIn === null || typeof tunnelIn !== "object") {
         throw new TypeError("ssh.connect: tunnel must be an object");
     }
+    const tunnel = {
+        host: tunnelIn.host,
+        tlsHostname: tunnelIn.tlsHostname,
+        destinationHeader: tunnelIn.destinationHeader,
+        path: tunnelIn.path,
+        port: tunnelIn.port,
+        tls: tunnelIn.tls,
+        headers: tunnelIn.headers,
+    };
     if (typeof tunnel.host !== "string" || tunnel.host === "") {
         throw new TypeError("ssh.connect: tunnel.host is required");
+    }
+    if (tunnel.tlsHostname === "") tunnel.tlsHostname = undefined;
+    if (!isNil(tunnel.tlsHostname) && typeof tunnel.tlsHostname !== "string") {
+        throw new TypeError("ssh.connect: tunnel.tlsHostname must be a host name");
+    }
+    if (!isNil(tunnel.port) && !Number.isInteger(tunnel.port)) {
+        throw new TypeError("ssh.connect: tunnel.port must be an integer");
+    }
+    {
+        const list = tunnel.headers;
+        if (!isNil(list) && !Array.isArray(list)) {
+            throw new TypeError("ssh.connect: tunnel.headers must be a list of 'Name: value' strings");
+        }
+        const n = isNil(list) ? 0 : list.length;
+        const copy = [];
+        for (let i = 0; i < n; i++) {
+            const line = list[i];
+            if (typeof line !== "string") {
+                throw new TypeError("ssh.connect: tunnel.headers entries must be strings");
+            }
+            copy.push(line);
+        }
+        tunnel.headers = copy;
     }
     const dh = tunnel.destinationHeader;
     if (!isNil(dh) && dh !== false && (typeof dh !== "string" || dh === "")) {

@@ -86,8 +86,13 @@ function buildRequest(opts) {
     }
     // CR, LF or NUL anywhere in a value injects a line of its own (or reads as
     // a terminator), so every interpolated part is checked.
+    // A value that is not a primitive string is refused outright: it would be
+    // turned into text only when the lines are joined, past this check.
     const noCrlf = (what, v) => {
-        if (typeof v === "string" && /[\r\n\x00]/.test(v)) {
+        if (typeof v !== "string") {
+            throw new TypeError("ssh.ws_stream: " + what + " must be a string");
+        }
+        if (/[\r\n\x00]/.test(v)) {
             throw new TypeError("ssh.ws_stream: " + what + " contains CR, LF or NUL: "
                 + v.replace(/[\r\n\x00]/g, "?"));
         }

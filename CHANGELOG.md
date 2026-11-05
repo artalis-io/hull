@@ -25,6 +25,16 @@ release-artifact layout).
     [docs/app_api_reference.md](docs/app_api_reference.md#ssh-client-hullssh).
   - Lua change: a runtime refusal (`[hull:wait_refused]`, e.g. an exec inside a transaction) is
     now raised unchanged by `hull.ssh`. It used to be returned as `io_error`.
+  - Hardened before merge (JS-only, from a review of the port): a packet's send and read each
+    hold the connection for their whole duration, and the sequence number is spent before any
+    await - a second task resuming between a write and its bookkeeping sealed under the number
+    just used (the chacha20-poly1305 nonce), and a read that threw dropped bytes already buffered.
+    `tunnel.headers` entries must be primitive strings and the tunnel options are read once, so
+    a `new String(...)` header can no longer smuggle CR LF (and a second destination header) past
+    the checks, nor a getter hand the grant check one relay name and the `Host` header another.
+    The connection's own `busy` failure is marked as hull:ssh's (`hull:_refusal` no longer takes
+    it for a runtime refusal, which `hull:jobs` handed back uncounted, re-running the command),
+    and an SFTP request cut short mid-frame leaves the session broken.
 
 ## [0.18.0] - 2026-11-03
 

@@ -23,6 +23,8 @@ function sshError(code, detail, extra) {
     e.code = code;
     if (detail !== undefined) e.detail = detail;
     if (extra) for (const k of Object.keys(extra)) e[k] = extra[k];
+    // The connection's own failure, never a runtime refusal (hull:_refusal).
+    Object.defineProperty(e, "ssh", { value: true, enumerable: false });
     return e;
 }
 
@@ -71,15 +73,25 @@ class Sftp {
         if (this.broken) this._throwBroken();
         const bytes = sftp.frame(payload);
         let off = 0;
-        while (off < bytes.length) {
-            let room = this.ch.sendable();
-            while (room <= 0) {
-                await this.pump();
-                room = this.ch.sendable();
+        try {
+            while (off < bytes.length) {
+                let room = this.ch.sendable();
+                while (room <= 0) {
+                    await this.pump();
+                    room = this.ch.sendable();
+                }
+                const chunk = bytes.slice(off, off + room);
+                await this.t.sendPacket(this.ch.dataMessage(chunk));
+                off += chunk.length;
             }
-            const chunk = bytes.slice(off, off + room);
-            await this.t.sendPacket(this.ch.dataMessage(chunk));
-            off += chunk.length;
+        } catch (e) {
+            // Part of the frame is on the wire: the server would read the next
+            // request's bytes as the rest of this one, so nothing more goes.
+            if (off > 0 && !this.broken) {
+                this.broken = sshError("io_error",
+                    "ssh.sftp: a request was cut short mid-frame");
+            }
+            throw e;
         }
     }
 
