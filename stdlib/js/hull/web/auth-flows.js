@@ -1733,6 +1733,16 @@ async function handlePasswordResetConfirm(req, res) {
     if (!passwordLenOk(body.password)) {
         return res.status(400).json({ error: "invalid password length" });
     }
+    // The token is checked (without consuming it) BEFORE the pwned-password
+    // lookup, an outbound fetch a garbage token must not buy (audit 44); it
+    // is consumed after the lookup. See the Lua sibling.
+    const pre = parseToken(body.token, ACTIONS.password_reset);
+    if (!pre[0]) {
+        return res.status(400).json({ error: "reset failed: " + (pre[1] || "?") });
+    }
+    if (tokenAlreadyUsed(body.token)) {
+        return res.status(400).json({ error: "reset failed: replayed" });
+    }
     if (await checkPwned(body.password)) {
         return res.status(400).json({
             error: "password appears in known data breaches; choose another",
@@ -2749,6 +2759,7 @@ const _test = {
         magicLinkConsume: handleMagicLinkConsume,
         verifyPage: handleVerifyPage,
         verify: handleVerify,
+        passwordResetConfirm: handlePasswordResetConfirm,
     },
     ACTIONS,
     emailRateAllow: (to, exact) => emailRateAllow(to, exact),

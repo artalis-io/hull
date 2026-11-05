@@ -316,6 +316,8 @@ function countOpt(v, def, lo, hi) {
 }
 
 const SEARCH_MAX_LIMIT = 1000;
+// A snippet / highlight column index (SQLite's SQLITE_MAX_COLUMN ceiling).
+const SNIPPET_MAX_COLUMN = 32767;
 const SEARCH_MAX_OFFSET = 2147483647;
 
 function query(name, q, opts) {
@@ -358,13 +360,14 @@ function query(name, q, opts) {
 
     if (o.snippet) {
         const s = o.snippet;
-        const sCol = Number(s.column !== undefined ? s.column : 0);
-        if (!Number.isInteger(sCol) || sCol < 0)
-            throw new Error("search: snippet column must be a non-negative integer");
+        // Integers, as the paging options are (audit 44): tokens was bound
+        // unchecked (NaN / a string / 1e300 reached FTS5), and column took
+        // Number("1") / Number(true).
+        const sCol = intOpt(s, "column", 0, 0, SNIPPET_MAX_COLUMN);
         const sBefore = String(s.before || "<b>");
         const sAfter = String(s.after || "</b>");
         const sEllipsis = String(s.ellipsis || "...");
-        const sTokens = s.tokens !== undefined ? s.tokens : 32;
+        const sTokens = intOpt(s, "tokens", 32, 1, 64);
         selectCols += ", snippet(" + table + ", " + sCol +
             ", ?, ?, ?, ?) AS snippet";
         snippetParams = [MARK_BEFORE, MARK_AFTER, MARK_ELLIPSIS, sTokens];
@@ -373,9 +376,7 @@ function query(name, q, opts) {
 
     if (o.highlight) {
         const h = o.highlight;
-        const hCol = Number(h.column !== undefined ? h.column : 0);
-        if (!Number.isInteger(hCol) || hCol < 0)
-            throw new Error("search: highlight column must be a non-negative integer");
+        const hCol = intOpt(h, "column", 0, 0, SNIPPET_MAX_COLUMN);
         const hBefore = String(h.before || "<b>");
         const hAfter = String(h.after || "</b>");
         selectCols += ", highlight(" + table + ", " + hCol +

@@ -6129,6 +6129,172 @@ JOBS_HOOKS_CASE(audit39)
 JOBS_HOOKS_CASE(audit41)
 #undef JOBS_HOOKS_CASE
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Stdlib Lows from audit 44 (stdlib/js/hull/tests/test_stdlib_audit44.js):
+ * option validation (session, rbac, validate, ratelimit, jobs, search,
+ * retry), cron parking, the reset token checked before the pwned lookup,
+ * audit-log metadata, prototype-free lookup tables and hull:_text's
+ * storable. Each case runs the script in a fresh context and a fresh
+ * :memory: database, named in globalThis.__audit44_case. One UTEST per case,
+ * written out, so scripts/check_regression_test.sh sees each. */
+static int run_audit44_case(const char *name, int *pass, int *fail)
+{
+    init_js_with_caps();
+    if (!js_initialized) return -1;
+    char set[128];
+    snprintf(set, sizeof set, "globalThis.__audit44_case = '%s';", name);
+    JSValue v = JS_Eval(js.ctx, set, strlen(set), "<audit44-case>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, v);
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_audit44.js", pass, fail);
+    cleanup_js_caps();
+    return rc;
+}
+
+UTEST(js_stdlib_audit44, pwned_reset_order)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("pwned_reset_order", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, session_update_sid)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("session_update_sid", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, rbac_string_permission)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("rbac_string_permission", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, validate_unknown_type)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("validate_unknown_type", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, ratelimit_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("ratelimit_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_poll_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_poll_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_key_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_key_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_history_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_history_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, jobs_cron_park)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("jobs_cron_park", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, search_snippet_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("search_snippet_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, retry_options)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("retry_options", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, text_storable)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("text_storable", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+/* retry.run's maxAttempts: Infinity passed the `>= 1` check and the loop
+ * never ended (audit 44); it is capped at 1000. The retries sleep between
+ * attempts, so this runs as app.main on an async backend, not in the script
+ * above (whose context has no event loop). retryOnError stops an uncapped
+ * loop at 1001 calls. */
+UTEST(js_stdlib_audit44, retry_max_attempts_capped)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    HlAsyncBackendCtx *loop = NULL;
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+    ASSERT_TRUE(register_cli_main(
+        "import { app } from 'hull:app';\n"
+        "import { retry } from 'hull:retry';\n"
+        "app.main(async () => {\n"
+        "  let calls = 0;\n"
+        "  try {\n"
+        "    await retry.run(() => { calls++; throw new Error('x'); },\n"
+        "      { maxAttempts: Infinity, baseMs: 1, capMs: 1,\n"
+        "        retryOnError: () => calls < 1001 });\n"
+        "  } catch (e) { if (String(e && e.message) !== 'x') return 3; }\n"
+        "  return calls === 1000 ? 7 : (calls > 1000 ? 4 : 5);\n"
+        "});"));
+    int exit_code = 99;
+    EXPECT_EQ(hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code), 0);
+    EXPECT_EQ(exit_code, 7);
+    cleanup_js_caps();
+    be->free(loop);
+}
+
+UTEST(js_stdlib_audit44, audit_log_meta)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("audit_log_meta", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(js_stdlib_audit44, proto_lookups)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_audit44_case("proto_lookups", &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+#endif
+
 UTEST(js_stdlib, toast_suite)
 {
     init_js_with_caps();

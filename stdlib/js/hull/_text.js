@@ -16,9 +16,12 @@
 //   * NULs are dropped;
 //   * a lone surrogate becomes U+FFFD;
 //   * the text is capped at `max` UTF-8 bytes (default TEXT_MAX), cut on a
-//     code point, with "..." appended when `ellipsis` is true and it was cut.
+//     code point; when `ellipsis` is true and it was cut, it is cut at
+//     max - 3 and "..." appended, so the result is never longer than max.
 // The Lua twin (hull._text.storable) applies the same rules to bytes. A new
 // stdlib write of app, request or remote text goes through this (CLAUDE.md).
+
+import { _test_hooks } from "hull:_test_hooks";
 
 const TEXT_MAX = 4096;
 const UNCONVERTIBLE = "(a value that could not be converted to text)";
@@ -62,7 +65,26 @@ function storable(v, max, ellipsis, unconvertible) {
     }
     parts.push(s.slice(start, i));
     const out = parts.join("");
-    return cut && ellipsis ? out + "..." : out;
+    // The ellipsis fits inside max (audit 44: appended after a cut at max,
+    // the result was max + 3 bytes); a cap under 3 bytes takes no ellipsis.
+    if (cut && ellipsis && max >= 3) return cutBytes(out, max - 3) + "...";
+    return out;
+}
+
+// The longest prefix of s (NUL-free, no lone surrogate) that is at most
+// limit UTF-8 bytes, cut on a code point.
+function cutBytes(s, limit) {
+    let bytes = 0, i = 0;
+    const n = s.length;
+    for (; i < n; i++) {
+        const c = s.charCodeAt(i);
+        const w = c < 0x80 ? 1 : c < 0x800 ? 2
+            : (c >= 0xd800 && c <= 0xdbff) ? 4 : 3;
+        if (bytes + w > limit) break;
+        bytes += w;
+        if (w === 4) i++;
+    }
+    return s.slice(0, i);
 }
 
 // A byte string (one character per byte) read as UTF-8, each byte that does
@@ -105,4 +127,7 @@ function fromUtf8Lenient(bs) {
 }
 
 export const _text = { TEXT_MAX, UNCONVERTIBLE, storable, fromUtf8Lenient };
+// The suite reaches the module through hull:_test_hooks (this one is
+// internal: an app cannot import it).
+_test_hooks.register("hull:_text", { storable, fromUtf8Lenient });
 export default _text;

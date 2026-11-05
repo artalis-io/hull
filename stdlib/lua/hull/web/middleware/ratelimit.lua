@@ -122,8 +122,11 @@ end
 --
 -- @tparam[opt] table opts
 --
---   - `limit`  (integer, default `60`): max requests per window.
---   - `window` (integer, default `60`): window length in seconds.
+--   - `limit`  (number, default `60`): max requests per window; a finite
+--     number >= 1 (anything else raises here).
+--   - `window` (number, default `60`): window length in seconds; a finite
+--     number > 0 (anything else raises here). A refused request (429)
+--     carries `Retry-After`.
 --   - `key`    (string or `function(req) -> string`): limit key.
 --     Default: the client IP (one bucket per client). A fixed string
 --     makes one bucket shared by every client.
@@ -143,6 +146,16 @@ function ratelimit.middleware(opts)
 
     local limit = opts.limit or 60
     local window = opts.window or 60
+    -- Checked here, not per request (audit 44): a 0 / negative / NaN limit
+    -- denied everything, a 0 / negative window never limited, and a NaN
+    -- window never expired a bucket, so a key stayed blocked for good.
+    if type(limit) ~= "number" or limit ~= limit or limit == math.huge or limit < 1 then
+        error("ratelimit: limit must be a finite number >= 1", 2)
+    end
+    if type(window) ~= "number" or window ~= window or window == math.huge
+       or not (window > 0) then
+        error("ratelimit: window must be a finite number of seconds > 0", 2)
+    end
     local key_fn = opts.key
     local buckets = cache.new({ max_entries = MAX_BUCKETS })
     local saturated = { map = {}, n = 0 }   -- see ratelimit.check
@@ -178,6 +191,10 @@ function ratelimit.middleware(opts)
         res:header("X-RateLimit-Reset", tostring(result.reset))
 
         if not result.allowed then
+            -- The header clients and proxies honour (audit 44): seconds until
+            -- the window resets, at least 1.
+            res:header("Retry-After",
+                       string.format("%d", math.max(1, math.ceil(result.reset - now))))
             res:status(429):json({ error = "rate limit exceeded", retry_after = window })
             return 1
         end

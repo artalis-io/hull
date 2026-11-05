@@ -85,10 +85,19 @@ function validName(value) {
  * Define a role and optionally grant it permissions. Idempotent.
  *
  * @param {string} name             Role name (e.g. `"admin"`).
- * @param {string[]} [permissions]  Array of permission names to grant.
+ * @param {string[]|string} [permissions]  Array of permission names to grant
+ *   (one name may be passed bare; any other non-array throws).
  */
 function defineRole(name, permissions) {
     const roleName = requireName(name, "role name");
+    // One permission name may be passed bare; anything else that is not an
+    // array is refused (audit 44: a string was walked per character, granting
+    // the permissions "u", "s", "e", ...).
+    if (typeof permissions === "string") permissions = [permissions];
+    else if (permissions !== undefined && permissions !== null
+             && !Array.isArray(permissions)) {
+        throw new TypeError("rbac.defineRole: permissions must be an array of names");
+    }
     db.insertIfAbsent("_hull_roles", ["name"], ["name"], [roleName]);
 
     if (permissions) {
