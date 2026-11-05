@@ -859,6 +859,7 @@ static void sup_reap_pending(int block)
     for (int i = 0; i < g_reap_pending_n; i++) {
         int st;
         pid_t pid = g_reap_pending[i];
+        // cppcheck-suppress knownConditionTrueFalse
         if (block && sup_slowdie()) {
             struct timespec ts = { 2, 500 * 1000000L };   /* its slow death */
             nanosleep(&ts, NULL);
@@ -875,6 +876,7 @@ static void worker_reap_quick(Worker *w)
 {
     int st;
     uint64_t rss = 0;
+    // cppcheck-suppress knownConditionTrueFalse
     int reaped = !sup_slowdie() &&
                  reap_ru(w->pid, &st, SUP_REAP_QUICK_MS, &rss);
     worker_note_rss(w, rss);
