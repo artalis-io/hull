@@ -17,6 +17,18 @@ async function test(name, fn) {
     catch (e) { fail++; console.log("FAIL: " + name + ": " + (e && e.stack || e)); }
 }
 
+// A case that needs the mbedTLS backend (AES-CTR / GCM, ChaCha20, Poly1305,
+// RSA, ECDSA). The JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto
+// legs: the C harness sets __hull_build from the build's own macros, so a case
+// is skipped only in a build without TLS (hull:crypto throws "no ... backend"
+// there, as Lua's does), never in one that has it.
+const TLS = !globalThis.__hull_build || globalThis.__hull_build.tls !== false;
+function realTest(name, fn) {
+    if (TLS) return test(name, fn);
+    console.log("SKIP: " + name + " (mbedTLS is not linked in this build)");
+    return undefined;
+}
+
 function assertEq(a, b, msg) {
     if (a !== b) throw new Error((msg || "") + " expected " + String(b) + ", got " + String(a));
 }
@@ -277,7 +289,7 @@ const realAead = {
     open: (k, iv, aad, c, t) => bytes.crypto.gcmOpen(k, iv, aad, c, t),
 };
 
-await test("real crypto: seal and open round trip, tamper refused", () => {
+await realTest("real crypto: seal and open round trip, tamper refused", () => {
     const key = bytes.crypto.random(32), iv = bytes.crypto.random(12);
     const enc = cipher.new(key, iv), dec = cipher.new(key, iv);
     for (const payload of ["", "x", "\xff\x00".repeat(300)]) {

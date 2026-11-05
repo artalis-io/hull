@@ -254,6 +254,27 @@ static void init_js_with_caps(void)
     js_initialized = (rc == 0);
     if (js_initialized) expose_internals(&js);
     if (js_initialized) install_test_js_globals(&js);
+    if (js_initialized) {
+        /* What this build links, for the co-located suites that need a backend
+         * (the JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto legs):
+         * tls = mbedTLS is linked (AES-CTR / GCM, ChaCha20, Poly1305, RSA,
+         * ECDSA); net = the outbound socket layer (hull:ssh:_stream). Set from
+         * the build's own macros, so a suite skips only where the backend is
+         * really absent. */
+        static const char *BUILD =
+#ifdef HL_LINK_TLS
+            "globalThis.__hull_build = { tls: true, "
+#else
+            "globalThis.__hull_build = { tls: false, "
+#endif
+#ifdef HL_ENABLE_HTTP_CLIENT
+            "net: true };";
+#else
+            "net: false };";
+#endif
+        JSValue bv = JS_Eval(js.ctx, BUILD, strlen(BUILD), "<build>", JS_EVAL_TYPE_GLOBAL);
+        JS_FreeValue(js.ctx, bv);
+    }
 }
 
 static void cleanup_js_caps(void)

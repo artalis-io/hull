@@ -28,6 +28,18 @@ async function test(name, fn) {
     catch (e) { fail++; console.log("FAIL: " + name + ": " + ((e && e.message) || e) + "\n" + ((e && e.stack) || "")); }
 }
 
+// A case that needs the mbedTLS backend (AES-CTR / GCM, ChaCha20, Poly1305,
+// RSA, ECDSA). The JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto
+// legs: the C harness sets __hull_build from the build's own macros, so a case
+// is skipped only in a build without TLS (hull:crypto throws "no ... backend"
+// there, as Lua's does), never in one that has it.
+const TLS = !globalThis.__hull_build || globalThis.__hull_build.tls !== false;
+function realTest(name, fn) {
+    if (TLS) return test(name, fn);
+    console.log("SKIP: " + name + " (mbedTLS is not linked in this build)");
+    return undefined;
+}
+
 function assertEq(a, b, msg) {
     if (a !== b) throw new Error((msg || "") + " expected " + String(b) + ", got " + String(a));
 }
@@ -165,21 +177,21 @@ await test("an ECDSA signature goes on the wire as mpint r, mpint s", () => {
 
 // against the real hull:crypto (bytes.crypto) ----------------------------------
 
-await test("a P-256 key signs, and the signature verifies against ssh-keygen's export", () => {
+await realTest("a P-256 key signs, and the signature verifies against ssh-keygen's export", () => {
     const k = privatekey.load(EC256);
     const sig = crypto.sign("ES256", k.pem, MSG);
     assertEq(sig.length, 64);
     assertEq(crypto.verify("ES256", EC256_SPKI, MSG, sig), true);
 });
 
-await test("a P-384 key signs, and the signature verifies", () => {
+await realTest("a P-384 key signs, and the signature verifies", () => {
     const k = privatekey.load(EC384);
     const sig = crypto.sign("ES384", k.pem, MSG);
     assertEq(sig.length, 96);
     assertEq(crypto.verify("ES384", EC384_SPKI, MSG, sig), true);
 });
 
-await test("a passphrase-protected copy loads to the same key and signs", () => {
+await realTest("a passphrase-protected copy loads to the same key and signs", () => {
     const k = privatekey.load(EC256_ENC, { passphrase: PASSPHRASE });
     assertEq(k.blob, EC256_PUB);
     const sig = crypto.sign("ES256", k.pem, MSG);

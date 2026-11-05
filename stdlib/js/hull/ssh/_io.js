@@ -22,7 +22,19 @@
 // nothing when it would wait, and a write is all-or-none, so neither can
 // half-apply and then repeat.
 
-import { connect as nativeConnect } from "hull:ssh:_stream";
+// The native module is imported on first use, not at load: it exists only in a
+// build with the outbound socket layer (HL_ENABLE_HTTP_CLIENT), and hull:ssh
+// must still load without it - its codecs, trust stores and the openStream
+// seam need no socket. Lua requires hull.ssh._stream lazily for the same
+// reason. (The resolver refuses hull/ssh@1 to an app on such a build.)
+let nativeConnect = null;
+async function native() {
+    if (!nativeConnect) {
+        const m = await import("hull:ssh:_stream");
+        nativeConnect = m.connect;
+    }
+    return nativeConnect;
+}
 
 // The native result, retried for as long as it reports "woken, try again".
 // Each wait is bounded by the stream's own deadline / wait bound (an expiry
@@ -60,7 +72,7 @@ class Stream {
 // connectResult() then reports the dial: [true], [null, message, code], or a
 // Promise to wait on before asking again.
 async function connect(opts) {
-    const r = nativeConnect(opts);
+    const r = (await native())(opts);
     if (r[0] === null) return r;
     const h = r[0];
     for (;;) {

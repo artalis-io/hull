@@ -25,6 +25,18 @@ async function test(name, fn) {
     catch (e) { fail++; console.log("FAIL: " + name + ": " + ((e && e.message) || e) + "\n" + ((e && e.stack) || "")); }
 }
 
+// A case that needs the mbedTLS backend (AES-CTR / GCM, ChaCha20, Poly1305,
+// RSA, ECDSA). The JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto
+// legs: the C harness sets __hull_build from the build's own macros, so a case
+// is skipped only in a build without TLS (hull:crypto throws "no ... backend"
+// there, as Lua's does), never in one that has it.
+const TLS = !globalThis.__hull_build || globalThis.__hull_build.tls !== false;
+function realTest(name, fn) {
+    if (TLS) return test(name, fn);
+    console.log("SKIP: " + name + " (mbedTLS is not linked in this build)");
+    return undefined;
+}
+
 function assertEq(a, b, msg) {
     if (a !== b) throw new Error((msg || "") + " expected " + String(b) + ", got " + String(a));
 }
@@ -174,19 +186,19 @@ await test("components that do not form a key are reported as a damaged key", ()
 
 // against the real hull:crypto (bytes.crypto) ----------------------------------
 
-await test("the loaded key signs exactly as OpenSSL does with the same key", () => {
+await realTest("the loaded key signs exactly as OpenSSL does with the same key", () => {
     const k = privatekey.load(USER_RSA);
     assertEq(crypto.sign("RS512", k.pem, MSG), SIG_512, "RS512");
     assertEq(crypto.sign("RS256", k.pem, MSG), SIG_256, "RS256");
 });
 
-await test("a passphrase-protected RSA key loads to the same key", () => {
+await realTest("a passphrase-protected RSA key loads to the same key", () => {
     const k = privatekey.load(USER_RSA_ENC, { passphrase: PASSPHRASE });
     assertEq(k.blob, PUB_BLOB);
     assertEq(crypto.sign("RS512", k.pem, MSG), SIG_512);
 });
 
-await test("its signature verifies against the public key ssh-keygen exported", () => {
+await realTest("its signature verifies against the public key ssh-keygen exported", () => {
     const k = privatekey.load(USER_RSA);
     assertEq(crypto.verify("RS512", SPKI, MSG, crypto.sign("RS512", k.pem, MSG)), true);
 });

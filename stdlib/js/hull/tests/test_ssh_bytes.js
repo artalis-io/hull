@@ -20,6 +20,18 @@ function test(name, fn) {
     }
 }
 
+// A case that needs the mbedTLS backend (AES-CTR / GCM, ChaCha20, Poly1305,
+// RSA, ECDSA). The JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto
+// legs: the C harness sets __hull_build from the build's own macros, so a case
+// is skipped only in a build without TLS (hull:crypto throws "no ... backend"
+// there, as Lua's does), never in one that has it.
+const TLS = !globalThis.__hull_build || globalThis.__hull_build.tls !== false;
+function realTest(name, fn) {
+    if (TLS) return test(name, fn);
+    console.log("SKIP: " + name + " (mbedTLS is not linked in this build)");
+    return undefined;
+}
+
 function assertEq(a, b, msg) {
     if (a !== b) throw new Error((msg || "") + " expected " + b + ", got " + a);
 }
@@ -67,7 +79,7 @@ test("sha256 / sha1 are raw digests of the bytes", () => {
     assertEq(hex(c.sha256("\xff")), hex(bytes.fromBuf(crypto.sha256(new Uint8Array([255])))));
 });
 
-test("aes256ctr: NIST SP 800-38A F.5.5", () => {
+realTest("aes256ctr: NIST SP 800-38A F.5.5", () => {
     const key = unhex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4");
     const iv = unhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
     const pt = unhex("6bc1bee22e409f96e93d7e117393172a");
@@ -78,7 +90,7 @@ test("aes256ctr: NIST SP 800-38A F.5.5", () => {
     assertThrows(() => c.aes256ctr(key, iv.slice(1), pt), "short iv");
 });
 
-test("chacha20: RFC 8439 2.4.2", () => {
+realTest("chacha20: RFC 8439 2.4.2", () => {
     const key = unhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
     const nonce = unhex("000000000000004a00000000");
     const pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
@@ -89,13 +101,13 @@ test("chacha20: RFC 8439 2.4.2", () => {
     assertThrows(() => c.chacha20(key, nonce, 2 ** 32, pt), "counter past 2^32-1");
 });
 
-test("poly1305: RFC 8439 2.5.2", () => {
+realTest("poly1305: RFC 8439 2.5.2", () => {
     const key = unhex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b");
     assertEq(hex(c.poly1305(key, "Cryptographic Forum Research Group")),
         "a8061dc1305136c6c22b8baf0c0127a9");
 });
 
-test("gcm: seal / open round trip, tamper and wrong-length tag fail as null", () => {
+realTest("gcm: seal / open round trip, tamper and wrong-length tag fail as null", () => {
     const key = c.random(32), iv = c.random(12);
     const [ct, tag] = c.gcmSeal(key, iv, "aad", "hello, ssh");
     assertEq(ct.length, 10);
@@ -110,7 +122,7 @@ test("gcm: seal / open round trip, tamper and wrong-length tag fail as null", ()
     assertEq(c.gcmOpen(key, iv, "", "", et), "");
 });
 
-test("gcm: NIST test case 14 (zero key, zero block)", () => {
+realTest("gcm: NIST test case 14 (zero key, zero block)", () => {
     const key = unhex("0000000000000000000000000000000000000000000000000000000000000000");
     const iv = unhex("000000000000000000000000");
     const [ct, tag] = c.gcmSeal(key, iv, "", unhex("00000000000000000000000000000000"));

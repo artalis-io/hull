@@ -14,6 +14,18 @@ async function test(name, fn) {
     try { await fn(); pass++; }
     catch (e) { fail++; console.log("FAIL: " + name + ": " + (e && e.stack || e)); }
 }
+
+// A case that needs the mbedTLS backend (AES-CTR / GCM, ChaCha20, Poly1305,
+// RSA, ECDSA). The JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto
+// legs: the C harness sets __hull_build from the build's own macros, so a case
+// is skipped only in a build without TLS (hull:crypto throws "no ... backend"
+// there, as Lua's does), never in one that has it.
+const TLS = !globalThis.__hull_build || globalThis.__hull_build.tls !== false;
+function realTest(name, fn) {
+    if (TLS) return test(name, fn);
+    console.log("SKIP: " + name + " (mbedTLS is not linked in this build)");
+    return undefined;
+}
 function assertEq(a, b, msg) {
     if (a !== b) throw new Error((msg || "") + " expected " + String(b) + ", got " + String(a));
 }
@@ -57,8 +69,9 @@ const flip = (s, i) => s.slice(0, i) + String.fromCharCode(s.charCodeAt(i) ^ 1) 
 
 for (const prims of [TOY, REAL]) {
     const tag = prims === TOY ? "[toy] " : "[real] ";
+    const t = prims === TOY ? test : realTest;
 
-    await test(tag + "a sealed packet opens under the same key and sequence number", () => {
+    await t(tag + "a sealed packet opens under the same key and sequence number", () => {
         const a = chacha.new(KEY, prims), b = chacha.new(KEY, prims);
         const frame = a.seal(null, "hello, server", zeros, 7);
         assertEq(b.needed(frame, 7), frame.length);
@@ -67,18 +80,18 @@ for (const prims of [TOY, REAL]) {
         assertEq(used, frame.length);
     });
 
-    await test(tag + "the length is encrypted, so the frame cannot be sized by peeking", () => {
+    await t(tag + "the length is encrypted, so the frame cannot be sized by peeking", () => {
         const frame = chacha.new(KEY, prims).seal(null, "x", zeros, 0);
         const plainLen = frame.length - chacha.LENGTH_LEN - chacha.TAG_LEN;
         assertEq(wire.peekUint32(frame) !== plainLen, true);
     });
 
-    await test(tag + "another sequence number does not open it", () => {
+    await t(tag + "another sequence number does not open it", () => {
         const frame = chacha.new(KEY, prims).seal(null, "payload", zeros, 3);
         assertRaises(() => chacha.new(KEY, prims).open(null, frame, 4));
     });
 
-    await test(tag + "a flipped byte anywhere fails authentication", () => {
+    await t(tag + "a flipped byte anywhere fails authentication", () => {
         const frame = chacha.new(KEY, prims).seal(null, "payload payload", zeros, 1);
         const bad = flip(frame, chacha.LENGTH_LEN + 2);   // Lua index LENGTH_LEN + 3
         assertRaises(() => chacha.new(KEY, prims).open(null, bad, 1), "failed authentication");
@@ -86,13 +99,13 @@ for (const prims of [TOY, REAL]) {
         assertRaises(() => chacha.new(KEY, prims).open(null, badtag, 1), "failed authentication");
     });
 
-    await test(tag + "the payload key and the length key are different halves", () => {
+    await t(tag + "the payload key and the length key are different halves", () => {
         const swapped = KEY.slice(32, 64) + KEY.slice(0, 32);
         const frame = chacha.new(KEY, prims).seal(null, "payload", zeros, 0);
         assertRaises(() => chacha.new(swapped, prims).open(null, frame, 0));
     });
 
-    await test(tag + "an incomplete frame asks for more rather than failing", () => {
+    await t(tag + "an incomplete frame asks for more rather than failing", () => {
         const frame = chacha.new(KEY, prims).seal(null, "payload", zeros, 9);
         const r = chacha.new(KEY, prims);
         assertEq(r.open(null, frame.slice(0, 3), 9)[1], "need_more");
@@ -100,7 +113,7 @@ for (const prims of [TOY, REAL]) {
         assertEq(r.needed(frame.slice(0, 3), 9), 4);
     });
 
-    await test(tag + "padding aligns the encrypted region to 8, length excluded", () => {
+    await t(tag + "padding aligns the encrypted region to 8, length excluded", () => {
         for (let n = 0; n <= 20; n++) {
             const frame = chacha.new(KEY, prims).seal(null, "p".repeat(n), zeros, 0);
             const region = frame.length - chacha.LENGTH_LEN - chacha.TAG_LEN;

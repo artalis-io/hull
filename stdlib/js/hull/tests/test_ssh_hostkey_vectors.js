@@ -20,6 +20,18 @@ async function test(name, fn) {
     catch (e) { fail++; console.log("FAIL: " + name + ": " + ((e && e.message) || e) + "\n" + ((e && e.stack) || "")); }
 }
 
+// A case that needs the mbedTLS backend (AES-CTR / GCM, ChaCha20, Poly1305,
+// RSA, ECDSA). The JS twin of test_lua.c's #ifdef HL_LINK_TLS real-crypto
+// legs: the C harness sets __hull_build from the build's own macros, so a case
+// is skipped only in a build without TLS (hull:crypto throws "no ... backend"
+// there, as Lua's does), never in one that has it.
+const TLS = !globalThis.__hull_build || globalThis.__hull_build.tls !== false;
+function realTest(name, fn) {
+    if (TLS) return test(name, fn);
+    console.log("SKIP: " + name + " (mbedTLS is not linked in this build)");
+    return undefined;
+}
+
 function assertEq(a, b, msg) {
     if (a !== b) throw new Error((msg || "") + " expected " + String(b) + ", got " + String(a));
 }
@@ -209,21 +221,21 @@ await test("a short RSA signature is padded to the modulus length", () => {
 
 // against the real hull:crypto (bytes.crypto) ----------------------------------
 
-await test("the OpenSSL signatures verify through hull.crypto", () => {
+await realTest("the OpenSSL signatures verify through hull.crypto", () => {
     for (const v of VECTORS) {
         const [ok, why] = hostkey.verifySignature(crypto, blob(v), sigb(v), H, v.alg);
         assertEq(ok, true, v.alg + " " + String(why));
     }
 });
 
-await test("a different exchange hash does not verify", () => {
+await realTest("a different exchange hash does not verify", () => {
     for (const v of VECTORS) {
         const [ok] = hostkey.verifySignature(crypto, blob(v), sigb(v), H + "!", v.alg);
         assertEq(ok, false, v.alg);
     }
 });
 
-await test("a signature with one byte changed does not verify", () => {
+await realTest("a signature with one byte changed does not verify", () => {
     for (const v of VECTORS) {
         const s = sigb(v);
         const i = s.length - 4;     // Lua's #s - 3, as a 0-based index
