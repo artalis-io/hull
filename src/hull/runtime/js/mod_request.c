@@ -126,6 +126,10 @@ typedef struct HlJsMpIter {
 typedef struct {
     HlJsMpIter *iter;
     int         spent;          /* PART_END reached for this Part */
+    /* Its read() was refused for size (#1014): the bytes read so far are
+     * gone, so a later read() / chunks() would return the part's tail as
+     * if it were the whole. Both refuse; the iterator skips the rest. */
+    int         refused;
     /* The iterator's gen when this Part began (audit 9, the twin of Lua's
      * L5): a Part the iterator has moved past is not the current one, and
      * its read() / chunks() consumed the NEXT part's body. */
@@ -141,6 +145,9 @@ typedef struct {
  * Lua twin's wording). */
 #define MP_STALE_PART "req.multipart(): this part is no longer current " \
                       "(the iterator has moved to a later part)"
+/* What read() / chunks() of a Part whose read() was refused raise. */
+#define MP_REFUSED_PART "req.multipart(): this part's read() was refused " \
+                        "for size; the iterator skips the rest of it"
 
 /* Chunks-iter view: pumps PART_DATA events out of iter for one part.
  *
@@ -361,6 +368,7 @@ static JSValue make_js_part(JSContext *ctx, HlJsMpIter *it)
     if (!p) { JS_FreeValue(ctx, obj); return JS_ThrowOutOfMemory(ctx); }
     p->iter = hl_mp_iter_ref(it);
     p->spent = 0;
+    p->refused = 0;
     p->gen = it->gen;
     p->name = it->name ? JS_NewStringLen(ctx, it->name, it->name_len)
                        : JS_NewString(ctx, "");
@@ -596,15 +604,28 @@ static PumpStep pump_read_step(JSContext *ctx, HlJsMpCont *jc)
                     return s;
                 }
                 int arc = read_buf_append(jc, data, data_len);
-                if (arc != 0) {
-                    it->errored = 1;
+                if (arc == -2 || arc == -3) {
+                    /* A size refusal is about this part, not the stream
+                     * (#1014): the parser is intact, so the iterator's next
+                     * step skips the rest of the part and the handler can
+                     * read the body to its end before answering. Erroring
+                     * the stream left it answering with the body in flight,
+                     * past Keel's bounded drain: the close reset the
+                     * connection and the client often lost the 413. The
+                     * accumulator goes with the cont, which the caller
+                     * destroys once the rejection is delivered. */
+                    if (p) p->refused = 1;
                     s.ready = 1;
                     s.error = make_mp_error(ctx, arc == -2
                         ? "multipart: part is larger than the heap limit"
-                        : arc == -3
-                        ? "multipart: the parts being read are larger than "
-                          "the heap limit together"
-                        : "multipart: out of memory");
+                        : "multipart: the parts being read are larger than "
+                          "the heap limit together");
+                    return s;
+                }
+                if (arc != 0) {
+                    it->errored = 1;
+                    s.ready = 1;
+                    s.error = make_mp_error(ctx, "multipart: out of memory");
                     return s;
                 }
             }
@@ -1205,6 +1226,8 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     if (bad) return JS_ThrowInternalError(ctx, "%s", bad);
     if (!p->spent && p->gen != it->gen)
         return JS_ThrowInternalError(ctx, "%s", MP_STALE_PART);
+    if (p->refused)
+        return JS_ThrowInternalError(ctx, "%s", MP_REFUSED_PART);
 
     if (p->spent || !it->in_part)
         return resolve_with(ctx, JS_NewStringLen(ctx, "", 0));
@@ -1348,6 +1371,8 @@ static JSValue js_part_chunks(JSContext *ctx, JSValueConst this_val,
     }
     if (!p->spent && p->gen != p->iter->gen)
         return JS_ThrowInternalError(ctx, "%s", MP_STALE_PART);
+    if (p->refused)
+        return JS_ThrowInternalError(ctx, "%s", MP_REFUSED_PART);
     JSValue obj = make_js_chunks(ctx, p->iter, p->gen);
     if (p->spent && !JS_IsException(obj)) {
         /* A drained part's chunks are done, whatever the iterator does next. */

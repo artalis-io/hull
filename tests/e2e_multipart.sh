@@ -997,6 +997,129 @@ EOF2
     SERVER_PID=""
 fi
 
+# ── Scenario 21: a size refusal skips its part, not the stream (#1014) ──
+# A part.read() refused for size errored the whole JS stream: the handler
+# had to answer with the rest of the body in flight, Keel's bounded drain
+# (64 KiB / 500 ms) could not take it, the close reset the connection, and
+# the client often lost the 413. Now only the part is refused: the iterator
+# skips the rest of it, the next part reads whole, a second read() of the
+# refused part raises, and a handler that answers after the loop always
+# gets its answer through. Lua kept its stream, but held the partial
+# accumulator until __gc and let a second read() return the part's tail.
+mp_refusal_app() {
+    if [ "$1" = "lua" ]; then
+        cat <<'EOF2'
+app.manifest({
+    name    = "mp-refuse-lua",
+    version = "0.0.1",
+    modules = { "hull/http-server@1" },
+})
+
+app.get("/health", function(req, res) res:text("ok") end)
+
+app.post("/refuse", function(req, res)
+    local out = { refused = false }
+    for part in req:multipart() do
+        if part.name == "big" then
+            local ok, err = pcall(part.read, part)
+            if not ok then
+                out.refused = true
+                out.reason = tostring(err)
+                local ok2, err2 = pcall(part.read, part)
+                out.reread_refused = (not ok2) and tostring(err2):find("refused for size", 1, true) ~= nil
+            end
+        else
+            out[part.name] = part:read()
+        end
+    end
+    if out.refused then res:status(413) end
+    res:json(out)
+end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
+EOF2
+    else
+        cat <<'EOF2'
+import { app } from "hull:app";
+
+app.manifest({
+    name    : "mp-refuse-js",
+    version : "0.0.1",
+    modules : ["hull/http-server@1"],
+});
+
+app.get("/health", async (req, res) => res.text("ok"));
+
+app.post("/refuse", async (req, res) => {
+    const out = { refused: false };
+    for await (const part of req.multipart()) {
+        if (part.name === "big") {
+            try {
+                await part.read();
+            } catch (e) {
+                out.refused = true;
+                out.reason = String(e && e.message || e);
+                try { await part.read(); out.reread_refused = false; }
+                catch (e2) { out.reread_refused = String(e2.message).includes("refused for size"); }
+            }
+        } else {
+            out[part.name] = (await part.read()).byteLength;
+        }
+    }
+    if (out.refused) res.status(413);
+    res.json(out);
+}, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
+EOF2
+    fi
+}
+
+head -c 12582912 /dev/zero | tr '\0' 'r' > "$TMPDIR_WORK/refuse_big.txt"
+REFUSE_PORT=17815
+for RT in lua js; do
+    [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "$RT" ] && continue
+    echo ""
+    echo "=== E2E multipart: $RT size refusal skips its part (#1014) ==="
+    mp_refusal_app "$RT" > "$TMPDIR_WORK/refuse_app.$RT"
+    "$HULL" -m 8M -p "$REFUSE_PORT" "$TMPDIR_WORK/refuse_app.$RT" \
+        >"$TMPDIR_WORK/refuse_server.log" 2>&1 &
+    SERVER_PID=$!
+    if wait_for_server "$REFUSE_PORT"; then
+        # Repeated: the lost answer was a race (a few in 100 under load).
+        LOST=0
+        i=0
+        while [ "$i" -lt 10 ]; do
+            RESP=$(curl --max-time 30 -sS -w ' code=%{http_code}' -X POST \
+                "http://127.0.0.1:$REFUSE_PORT/refuse" \
+                -F "big=<$TMPDIR_WORK/refuse_big.txt" -F "after=tail-ok" \
+                2>/dev/null || true)
+            case "$RESP" in *'code=413'*) ;; *) LOST=$((LOST + 1)) ;; esac
+            i=$((i + 1))
+        done
+        check_contains "$RT size refusal: answered 413 every time (lost $LOST/10)" \
+            "lost=$LOST" "lost=0"
+        check_contains "$RT size refusal: refused"          "$RESP" '"refused":true'
+        if [ "$RT" = "js" ]; then
+            check_contains "$RT size refusal: next part whole" "$RESP" '"after":7'
+        else
+            check_contains "$RT size refusal: next part whole" "$RESP" '"after":"tail-ok"'
+        fi
+        check_contains "$RT size refusal: re-read refused"  "$RESP" '"reread_refused":true'
+        if [ "$RT" = "js" ]; then
+            check_contains "$RT size refusal: reason" "$RESP" 'heap limit'
+        else
+            check_contains "$RT size refusal: reason" "$RESP" 'reading a part'
+        fi
+        RESP=$(curl --max-time 5 -sS "http://127.0.0.1:$REFUSE_PORT/health" 2>/dev/null || true)
+        check_contains "$RT size refusal: server still serves" "$RESP" "ok"
+    else
+        fail "$RT size-refusal server startup"
+    fi
+    stop_pid "$SERVER_PID"
+    SERVER_PID=""
+    if [ "$FAIL" -gt 0 ]; then
+        echo "  --- size-refusal server log (tail) ---"
+        tail -n 20 "$TMPDIR_WORK/refuse_server.log" 2>/dev/null || true
+    fi
+done
+
 # ── Summary ──────────────────────────────────────────────────────────
 
 TOTAL=$((PASS + FAIL))

@@ -152,6 +152,26 @@ Lows from the post-v0.18.0 C audit:
 - Hygiene (I1-I8): comments, `const`, an overflow guard, seal-phase aliases cleared on failure,
   `sandbox_free_error`.
 
+### Fixed (multipart size refusals, #1014)
+
+- **A `part.read()` refused for size skips that part, not the rest of the upload (both
+  runtimes).** In JS the refusal (`multipart: part is larger than the heap limit`, and the
+  "together" variant) errored the whole stream, so every later step threw `multipart: parser
+  error` and the handler had to answer with the rest of the body still in flight. Keel drains at
+  most 64 KiB / 500 ms after an early answer, so the close reset the connection and the client
+  often never saw the 413 (a few requests in 100 under load). Now only the part is refused: the
+  iterator skips the rest of it and later parts read normally, so a handler that keeps iterating
+  and answers after the loop always gets its answer through. In Lua the stream already survived
+  (`out of memory reading a part`), but the partial accumulator, up to the whole VM heap, was
+  kept until `__gc`; it is freed at the refusal.
+  - **Behaviour change:** a second `read()` or a `chunks()` of a refused part now raises
+    (`... read() was refused for size; the iterator skips the rest of it`). It used to return
+    the part's remaining bytes as if they were the whole part (JS), or carry on from the bytes
+    already read (Lua).
+  - Route caps (`maxPartSize` / `max_part_size`, `maxTotalSize`, `maxParts`, ...) are parser
+    errors and still end the stream; past the bounded drain that can still reset the connection,
+    by design. Covered by the new size-refusal scenario of `e2e_multipart` (both runtimes).
+
 ## [0.18.0] - 2026-11-03
 
 Full PR list:
