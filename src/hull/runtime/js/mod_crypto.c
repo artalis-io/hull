@@ -1864,9 +1864,9 @@ static JSValue js_crypto_gcm_seal(JSContext *ctx, JSValueConst this_val,
     if (!js_msg_over_heap(ctx, &pt, "gcmSeal") &&
         !js_crypto_charge(ctx, aad.view.len) &&
         !js_crypto_charge(ctx, ptlen)) {
-        uint8_t tag[HL_AEAD_TAG_LEN];
         uint8_t *out = js_malloc(ctx, ptlen ? ptlen : 1);
         if (out) {
+            uint8_t tag[HL_AEAD_TAG_LEN];
             int rc = hl_cap_crypto_aes256gcm_seal(out, tag, key.view.data,
                                                   iv.view.data,
                                                   aad.view.len ? aad.view.data : NULL,
