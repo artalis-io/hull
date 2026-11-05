@@ -46,6 +46,22 @@
 
 set -e
 
+# Both runtimes. The suite runs once per runtime (HULL_E2E_RUNTIME=lua|js picks
+# one): the JS app is the twin of the Lua one, through hull:ssh, and every
+# assertion is the same, so the two clients are held to one behaviour.
+RT="${HULL_E2E_RUNTIME:-}"
+if [ -z "$RT" ]; then
+    _rc=0
+    HULL_E2E_RUNTIME=lua sh "$0" "$@" || _rc=1
+    HULL_E2E_RUNTIME=js sh "$0" "$@" || _rc=1
+    exit $_rc
+fi
+case "$RT" in
+    lua) EXT=lua; FALLBACK_WANT=2 ;;   # stats().auth_key is 1-based in Lua
+    js)  EXT=js;  FALLBACK_WANT=1 ;;   # and authKey 0-based in JS
+    *)   echo "e2e_ssh_tunnel: HULL_E2E_RUNTIME must be lua or js"; exit 1 ;;
+esac
+
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 HULL="$SRCDIR/build/hull"
 SHIM="$SRCDIR/tests/fixtures/ws_tcp_shim.py"
@@ -69,8 +85,8 @@ if ! command -v ssh-keygen >/dev/null 2>&1; then
     exit 1
 fi
 
-pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL: $1${2:+ - got: $2}"; FAIL=$((FAIL + 1)); }
+pass() { echo "  PASS: [$RT] $1"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: [$RT] $1${2:+ - got: $2}"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
     [ -n "$SHIM_PID" ] && kill "$SHIM_PID" 2>/dev/null || true
@@ -142,14 +158,14 @@ stop_shim() {
     SHIM_PID=""
 }
 
-# Write app.lua. Ports must be literals: the manifest takes integers, and a
+# Write app.lua (write_app_lua; write_app_js below is its twin). Ports must be literals: the manifest takes integers, and a
 # "$VAR" env ref is only allowed for hosts. So the app is generated per run
 # with the ports the kernel just handed us - which also lets the deny cases
 # use a deliberately wrong grant.
 #
 # $1 app dir  $2 ssh host  $3 ssh port  $4 relay host  $5 relay port
 # $6 grant-hosts  $7 grant-ports  $8 tunnel-hosts  $9 tunnel-ports
-write_app() {
+write_app_lua() {
     mkdir -p "$1"
     cp "${CLIENT_KEY:-$WORK/client_key}" "$1/client_key"   # CLIENT_KEY: another key type
     cp "$WORK/decoy_key" "$1/decoy_key"
@@ -389,6 +405,230 @@ end)
 LUA
 }
 
+# The JS twin of write_app_lua: the same calls through hull:ssh, printing the
+# same KEY=VALUE lines. Failures come back as rejections carrying `.code`
+# (Lua's nil, { code }), and stats().authKey is 0-based (Lua: 1-based).
+write_app_js() {
+    mkdir -p "$1"
+    cp "${CLIENT_KEY:-$WORK/client_key}" "$1/client_key"
+    cp "$WORK/decoy_key" "$1/decoy_key"
+    chmod 600 "$1/client_key" "$1/decoy_key"
+    cat > "$1/app.js" <<JS
+import { app } from "hull:app";
+import { ssh } from "hull:ssh";
+import { fs } from "hull:fs";
+import { time } from "hull:time";
+
+app.manifest({
+    modules: ["hull/ssh@1", "hull/fs@1", "hull/time@1"],
+    fs: { read: ["client_key", "decoy_key"] },
+    ssh: {
+        connect: { hosts: [ $6 ], ports: [ $7 ], users: ["$SSH_LOGIN"] },
+        tunnel:  { hosts: [ $8 ], ports: [ $9 ] },
+    },
+});
+
+const TUNNEL = {
+    host: "$4",
+    port: $5,
+    tls: false,               // see the header of tests/e2e_ssh_tunnel.sh
+    headers: [
+        "Cf-Access-Client-Id: e2e.access",
+        "Cf-Access-Client-Secret: e2e-secret",
+        "Cf-Access-Jump-Destination: $2:$3",
+    ],
+};
+
+// A failed call is a rejection carrying the code; this gives back
+// [value, error] like Lua's (value | nil, err).
+async function attempt(p) {
+    try { return [await p, null]; } catch (e) { return [null, e]; }
+}
+const trimEnd = (s) => String(s === null || s === undefined ? "" : s).replace(/\s+$/, "");
+
+app.main(async () => {
+    const key = fs.read("client_key");
+    const trust = ssh.memoryStore();
+
+    let [conn, err] = await attempt(ssh.connect({
+        host: "$2", port: $3, user: "$SSH_LOGIN",
+        key, trust, tunnel: TUNNEL,
+    }));
+    if (!conn) {
+        console.log("first_code=" + String(err && err.code));
+        if (!err || err.code !== "host_unknown") {
+            console.log("detail=" + String(err && (err.detail || err.status || err.message)));
+            return 1;
+        }
+        console.log("fingerprint_shape=" + String(/^SHA256:/.test(err.fingerprint)));
+        await ssh.acceptHost(trust, "$2", err.keyBlob, $3);   // keyed by host AND port
+        [conn, err] = await attempt(ssh.connect({
+            host: "$2", port: $3, user: "$SSH_LOGIN",
+            key, trust, tunnel: TUNNEL,
+        }));
+    }
+    if (!conn) {
+        console.log("second_code=" + String(err && err.code));
+        console.log("detail=" + String(err && (err.detail || err.status || err.message)));
+        return 1;
+    }
+    console.log("connected=yes");
+    console.log("negotiated_kex=" + String(conn.negotiated().kex));
+    console.log("negotiated_cipher=" + String(conn.negotiated().cipherC2s));
+    console.log("negotiated_hostkey=" + String(conn.negotiated().hostKey));
+
+    const r = await conn.exec("echo hull-tunnel-ok");
+    console.log("exec_status=" + String(r.status));
+    console.log("exec_stdout=" + trimEnd(r.stdout));
+
+    const r2 = await conn.exec("exit 3");
+    console.log("exit3_status=" + String(r2.status));
+
+    if ("${FULL_INTEROP:-0}" === "1") {
+        const t0 = time.nowMs();
+        const outs = await hull.map([1, 2, 3, 4], async (i) => {
+            const c = await ssh.connect({
+                host: "$2", port: $3, user: "$SSH_LOGIN",
+                key, trust, tunnel: TUNNEL,
+            });
+            const rr = await c.exec("sleep 1; echo fan-" + i);
+            c.close();
+            return trimEnd(rr.stdout);
+        }, { limit: 4 });
+        const took = time.nowMs() - t0;
+        console.log("fanout_outputs=" + outs.join(","));
+        console.log("fanout_concurrent=" + String(took < 3000) + ":" + took + "ms");
+
+        const decoy = fs.read("decoy_key");
+        const [ck, ce] = await attempt(ssh.connect({
+            host: "$2", port: $3, user: "$SSH_LOGIN",
+            keys: [decoy, key], trust, tunnel: TUNNEL,
+        }));
+        console.log("fallback_key=" + (ck ? String(ck.stats().authKey)
+                                          : "error:" + String(ce && ce.code)));
+        if (ck) ck.close();
+        const [, de] = await attempt(ssh.connect({
+            host: "$2", port: $3, user: "$SSH_LOGIN",
+            keys: [decoy], trust, tunnel: TUNNEL,
+        }));
+        console.log("decoy_only_code=" + String(de && de.code));
+
+        const [cc, cce] = await attempt(ssh.connect({
+            host: "$2", port: $3, user: "$SSH_LOGIN",
+            key, trust, tunnel: TUNNEL,
+            offer: {
+                kex: ["curve25519-sha256", "kex-strict-c-v00@openssh.com"],
+                hostKey: ["ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                          "rsa-sha2-512", "rsa-sha2-256"],
+                cipher: ["chacha20-poly1305@openssh.com"],
+                mac: ["hmac-sha2-256"],
+                compression: ["none"],
+            },
+        }));
+        if (cc) {
+            console.log("chacha_cipher=" + String(cc.negotiated().cipherC2s));
+            let got = 0;
+            const [rc] = await attempt(cc.exec("head -c 2000000 /dev/zero",
+                                       { onStdout: (c) => { got += c.length; } }));
+            console.log("chacha_bytes=" + String(rc ? got : rc));
+            console.log("chacha_rekeyed=" + String(cc.stats().rekeys >= 1));
+            let left = 16, back = 0;
+            const [rs2] = await attempt(cc.exec("cat", {
+                stdin: () => {
+                    if (left === 0) return null;
+                    left--;
+                    return "c".repeat(65536);
+                },
+                onStdout: (c) => { back += c.length; },
+                timeoutMs: 60000,
+            }));
+            console.log("chacha_stdin=" + String(rs2 ? back : rs2));
+            cc.close();
+        } else {
+            console.log("chacha_cipher=error:" + String(cce && cce.code)
+                        + ":" + String(cce && cce.detail));
+        }
+        const [rs] = await attempt(conn.exec("cat", { stdin: "hull-stdin-ok" }));
+        console.log("stdin_echo=" + String(rs && rs.stdout));
+
+        const block = "s".repeat(64 * 1024);
+        let left2 = 80, back2 = 0;
+        const [rstream, estream] = await attempt(conn.exec("cat", {
+            stdin: () => {
+                if (left2 === 0) return null;
+                left2--;
+                return block;
+            },
+            onStdout: (c) => { back2 += c.length; },
+            timeoutMs: 60000,
+        }));
+        console.log("stdin_streamed=" + (rstream ? String(back2)
+                                         : "error:" + String(estream && estream.code)));
+
+        let got2 = 0, chunks = 0;
+        const rb = await conn.exec("head -c 3000000 /dev/zero", {
+            onStdout: (c) => { got2 += c.length; chunks++; },
+        });
+        console.log("streamed_bytes=" + String(got2));
+        console.log("streamed_in_chunks=" + String(chunks > 1));
+        console.log("streamed_buffered=" + String(rb && rb.stdout.length));
+        console.log("server_rekeyed=" + String(conn.stats().rekeys >= 1));
+
+        const [, em] = await attempt(conn.exec("head -c 100000 /dev/zero", { maxOutput: 1000 }));
+        console.log("max_output_code=" + String(em && em.code));
+
+        const before = conn.stats().rekeys;
+        console.log("client_rekey=" + String(await conn.rekey()));
+        console.log("rekey_counted=" + String(conn.stats().rekeys === before + 1));
+        const ra = await conn.exec("echo after-rekey");
+        console.log("after_rekey=" + trimEnd(ra.stdout));
+
+        const [f, fe] = await attempt(conn.sftp());
+        if (!f) {
+            console.log("sftp_open=" + String(fe && fe.code));
+        } else {
+            const data = "hull-sftp ".repeat(20000);      // 200 KB, several windows
+            const name = "hull_e2e_sftp.txt";
+            console.log("sftp_write=" + String(await f.write(name, data)));
+            console.log("sftp_read_back=" + String((await f.read(name)) === data));
+            const a = await f.stat(name);
+            console.log("sftp_size=" + String(a && a.size));
+            let found = false;
+            for (const e of (await f.list(".")).entries) {
+                if (e.filename === name) found = true;
+            }
+            console.log("sftp_listed=" + String(found));
+            console.log("sftp_remove=" + String(await f.remove(name)));
+            const [, gone] = await attempt(f.stat(name));
+            console.log("sftp_gone=" + String(gone && gone.code));
+            await f.close();
+            const rx = await conn.exec("echo after-sftp");
+            console.log("after_sftp=" + trimEnd(rx.stdout));
+        }
+
+        const [d, dde] = await attempt(ssh.connect({
+            host: "$2", port: $3, user: "$SSH_LOGIN", key, trust,
+        }));
+        if (d) {
+            const rd = await d.exec("echo hull-direct-ok");
+            console.log("direct=" + trimEnd(rd.stdout));
+            d.close();
+        } else {
+            console.log("direct=" + String(dde && dde.code) + " " + String(dde && dde.detail));
+        }
+    }
+
+    conn.close();
+    console.log("done=yes");
+    return 0;
+});
+JS
+}
+
+write_app() {
+    if [ "$RT" = "js" ]; then write_app_js "$@"; else write_app_lua "$@"; fi
+}
+
 # Every case talks to a loopback peer, so a run that has not finished in 20s
 # is not slow, it is stuck. Bounded here rather than left to the caller's
 # budget: a suite that HANGS spends a CI job's whole allowance and reports
@@ -407,13 +647,13 @@ LUA
 run_app() {
     r_dir="$1"; shift
     if command -v timeout >/dev/null 2>&1; then
-        (cd "$r_dir" && timeout 20 "$HULL" --no-sandbox "$@" app.lua 2>&1) || true
+        (cd "$r_dir" && timeout 20 "$HULL" --no-sandbox "$@" "app.$EXT" 2>&1) || true
     else
-        (cd "$r_dir" && "$HULL" --no-sandbox "$@" app.lua 2>&1) || true
+        (cd "$r_dir" && "$HULL" --no-sandbox "$@" "app.$EXT" 2>&1) || true
     fi
 }
 
-echo "e2e_ssh_tunnel: hull/ssh through a WebSocket relay"
+echo "e2e_ssh_tunnel: hull/ssh through a WebSocket relay ($RT)"
 
 # ── The seam: tunnel plumbing, no SSH server needed ─────────────────────
 echo
@@ -571,8 +811,9 @@ PY
             '"127.0.0.1"' "$PEER2_PORT" '"localhost"' "$TLS_PORT"
         # Not `sed -i`: BSD sed wants an argument after -i and GNU sed does
         # not, so the one spelling that works on both is a temp file.
-        sed 's/tls  = false/tls  = true/' "$WORK/t1/app.lua" > "$WORK/t1/app.tmp"
-        mv "$WORK/t1/app.tmp" "$WORK/t1/app.lua"
+        sed -e 's/tls  = false/tls  = true/' -e 's/tls: false/tls: true/' \
+            "$WORK/t1/app.$EXT" > "$WORK/t1/app.tmp"
+        mv "$WORK/t1/app.tmp" "$WORK/t1/app.$EXT"
 
         # 1. The default trust anchor must REFUSE this certificate. If this
         #    passes, verification is not on and every other TLS assertion here
@@ -698,7 +939,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "exec_status" "0" "live: exec succeeded over the tunnel"
         assert_line "$OUT" "exec_stdout" "hull-tunnel-ok" "live: command output came back through the tunnel"
         assert_line "$OUT" "exit3_status" "3" "live: a non-zero remote exit is a status, not an error"
-        assert_line "$OUT" "fallback_key" "2" "live: a refused key gives way to the next"
+        assert_line "$OUT" "fallback_key" "$FALLBACK_WANT" "live: a refused key gives way to the next"
         assert_line "$OUT" "decoy_only_code" "auth_failed" "live: an unknown key alone is auth_failed"
         assert_line "$OUT" "chacha_cipher" "chacha20-poly1305@openssh.com" "live: chacha20-poly1305 negotiated under strict KEX"
         assert_line "$OUT" "chacha_bytes" "2000000" "live: 2 MB through chacha20-poly1305"
@@ -814,5 +1055,5 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
 fi
 
 echo
-echo "e2e_ssh_tunnel: $PASS passed, $FAIL failed"
+echo "e2e_ssh_tunnel [$RT]: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

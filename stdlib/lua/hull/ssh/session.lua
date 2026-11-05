@@ -481,18 +481,19 @@ function Session:exec(command, opts)
         return nil
     end
 
-    if timeout then self:set_deadline(timeout) end
+    local dl = timeout and self:push_deadline(timeout) or nil
     local ok, failure = pcall(drive)
-    if timeout then self:set_deadline(0) end
+    self:pop_deadline(dl)
     if not ok then
         if type(failure) == "table" and failure.code == "deadline" then
             -- The COMMAND ran out of time; the connection may be fine. Close
             -- the channel under a short bound of its own, so the next command
             -- starts clean. If even that does not finish, the connection is
             -- not trusted with another one.
-            self:set_deadline(CHANNEL_DRAIN_MS)
-            self:close_channel(ch)
-            self:set_deadline(0)
+            local drain_dl = self:push_deadline(CHANNEL_DRAIN_MS, true)
+            local dok, derr = pcall(self.close_channel, self, ch)
+            self:pop_deadline(drain_dl)
+            if not dok then error(derr, 0) end
             if not ch.closed then
                 self.dead = { code = "timeout",
                               detail = "a timed-out command's channel did not close" }

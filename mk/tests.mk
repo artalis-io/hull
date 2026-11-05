@@ -1641,6 +1641,14 @@ e2e-oauth: $(BUILDDIR)/hull
 e2e-ssh-tunnel: $(BUILDDIR)/hull
 	sh tests/e2e_ssh_tunnel.sh
 
+# hull/ssh in both runtimes against the same peers: denied, timeout, the
+# live-stream cap, a wait refused in a transaction, a request cancelled at
+# shutdown, SIGTERM with a parked stream, and (with sshd) host_changed /
+# host_unknown / exec. Every scenario asserts the same code for Lua and JS.
+.PHONY: e2e-ssh-parity
+e2e-ssh-parity: $(BUILDDIR)/hull
+	sh tests/e2e_ssh_parity.sh
+
 # Passphrase-protected OpenSSH keys, checked against ssh-keygen as the oracle
 # rather than against ourselves - a round trip would pass just as happily with
 # a wrong KDF, consistently wrong.

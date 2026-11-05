@@ -191,6 +191,9 @@ int hl_js_init_tui_module(JSContext *ctx, HlJS *js);
 int hl_js_init_ws_server_module(JSContext *ctx, HlJS *js);
 int hl_js_init_ws_client_module(JSContext *ctx, HlJS *js);
 
+/* hull:ssh:_stream - the SSH stdlib's byte stream (mod_ssh.c). */
+int hl_js_init_ssh_module(JSContext *ctx, HlJS *js);
+
 /* Server-side conn class ID (in mod_ws_server.c) - referenced by
  * runtime/js/ws.c (Keel callback dispatcher). */
 extern JSClassID js_ws_conn_class_id;

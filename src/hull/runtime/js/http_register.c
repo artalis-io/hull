@@ -35,6 +35,10 @@ int hl_js_register_http_modules(void *js_ctx, void *hl_js)
         return -1;
     if (hl_js_init_smtp_module(ctx, js) != 0)
         return -1;
+    /* hull:ssh:_stream, the SSH stdlib's byte stream (mod_ssh.c): it rides
+     * the outbound socket layer, as in the Lua registry. */
+    if (hl_js_init_ssh_module(ctx, js) != 0)
+        return -1;
 #endif
 #ifdef HL_ENABLE_HTTP_SERVER
     /* hull:http-server (server.stats); the get/post/use verbs land on the app
