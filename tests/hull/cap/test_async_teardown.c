@@ -11,6 +11,7 @@
 
 #include "utest.h"
 #include "hull/shared/async.h"
+#include "hull/shared/async_backend.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -165,6 +166,28 @@ UTEST(async_teardown, a_ctx_gives_its_inflight_count_back)
     EXPECT_EQ(1, inflight);
     hl_async_teardown_run(&list, NULL);        /* cancelled at teardown */
     EXPECT_EQ(0, inflight);
+}
+
+/* C audit L4, second line: a runner holds the worker pool from before the
+ * app loads until the phase-2 sandbox is applied, and while it is held
+ * neither backend starts a worker, so a submit fails. Released, the same
+ * submit runs. */
+static void l4_noop(void *u) { (void)u; }
+
+UTEST(async_audit_c_l4, held_pool_starts_no_worker)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *actx = NULL;
+    ASSERT_EQ(be->init(&actx, NULL), 0);
+    HlAsyncBackendPool *pool = NULL;
+    ASSERT_EQ(be->pool_create(&pool, actx, 1, 4), 0);
+    hl_async_pool_hold();
+    EXPECT_NE(be->pool_submit(pool, l4_noop, l4_noop, l4_noop, NULL), 0);
+    hl_async_pool_release();
+    EXPECT_EQ(be->pool_submit(pool, l4_noop, l4_noop, l4_noop, NULL), 0);
+    for (int i = 0; i < 20; i++) be->tick(actx, 5);
+    be->pool_free(pool);
+    be->free(actx);
 }
 
 UTEST_MAIN();

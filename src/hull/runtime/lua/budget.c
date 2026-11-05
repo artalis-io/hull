@@ -324,8 +324,15 @@ static int meter_call(lua_State *L, int nup)
     if (meter_over(b))
         return hl_lua_budget_raise(L);
     int idx = b->nframes;
-    if (b->limit <= 0 || idx >= HL_LUA_METER_DEPTH)
-        return fn.f(L);              /* nothing to charge, or too deep */
+    if (b->limit <= 0)
+        return fn.f(L);              /* nothing to charge */
+    if (idx >= HL_LUA_METER_DEPTH) {
+        /* Too deep to measure: a fixed floor before the call instead of
+         * running it uncharged (C audit L18). */
+        if (budget_charge(b, HL_LUA_METER_DEEP_UNITS))
+            return hl_lua_budget_raise(L);
+        return fn.f(L);
+    }
     HlLuaMeterFrame *fr = &b->frames[idx];
     fr->L  = L;
     fr->ej = lua_hlerrorjmp(L);

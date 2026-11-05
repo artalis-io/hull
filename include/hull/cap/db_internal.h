@@ -81,6 +81,10 @@ const char *const *hl_db_internal_tables(void);
 int hl_db_internal_move(HlDbHandle *src, HlDbHandle *dst, const char *what,
                         char *err, size_t errsz);
 
+/* Unit-test seam: let @p after column-name pushes succeed, then fail every
+ * later one, as an allocation failure would (-1 = off). */
+void hl_db_internal_fail_column_push_for_test(int after);
+
 /* The startup step both runners call once the manifest is wired and before
  * the kernel sandbox applies:
  *   - normal: when the internal connection is the default internal database

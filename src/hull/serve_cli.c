@@ -529,6 +529,8 @@ int hull_serve(int argc, char **argv)
      * started while the app loads would keep phase-1 permissions. The top
      * level's deadline is polled meanwhile (cap/run_watchdog.h). */
     hl_run_watchdog_defer();
+    /* Nor a worker-pool thread (C audit L4; shared/async_backend.h). */
+    hl_async_pool_hold();
 
     /* Init app context - runs migrations + loads the app. */
     HlAppContext *ctx = NULL;
@@ -864,6 +866,7 @@ int hull_serve(int argc, char **argv)
 
     /* Watchdog threads from here on are born inside the sandbox. */
     hl_run_watchdog_release();
+    hl_async_pool_release();
 
     const char **env_allow = build_env_allowlist(&manifest);
 

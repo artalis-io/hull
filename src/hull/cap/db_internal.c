@@ -189,6 +189,7 @@ static int table_exists(HlDbHandle *h, const char *name)
 typedef struct {
     char **sql;
     int    n, cap;
+    int    oom;      /* a push failed: the list is incomplete (C audit L14) */
 } StrList;
 
 static void strlist_free(StrList *l)
@@ -223,10 +224,27 @@ static int ddl_row(void *ctx, HlColumn *cols, int ncols)
     return strlist_push(ctx, cols[0].value.s, cols[0].value.len) == 0 ? 0 : 1;
 }
 
+/* Test seam (hl_db_internal_fail_column_push_for_test): the column pushes
+ * that succeed before every later one fails; -1 = off. */
+static int g_col_push_fail_after = -1;
+
+void hl_db_internal_fail_column_push_for_test(int after)
+{
+    g_col_push_fail_after = after;
+}
+
+/* A void callback, so a failed push is recorded on the list: copy_table
+ * refuses an incomplete column list rather than copy a table with fewer
+ * columns and commit it as a success (C audit L14). */
 static void column_cb(void *ctx, const char *name)
 {
     StrList *l = ctx;
-    (void)strlist_push(l, name, strlen(name));
+    if (g_col_push_fail_after == 0) {
+        l->oom = 1;
+        return;
+    }
+    if (g_col_push_fail_after > 0) g_col_push_fail_after--;
+    if (strlist_push(l, name, strlen(name)) != 0) l->oom = 1;
 }
 
 static int has_name(const StrList *l, const char *name)
@@ -348,7 +366,8 @@ static long long copy_table(HlDbHandle *src, HlDbHandle *dst, const char *t,
 
     /* The columns both sides have (the target may be a newer schema). */
     if (hl_db_table_columns(src, t, column_cb, &scols) < 0 ||
-        hl_db_table_columns(dst, t, column_cb, &dcols) < 0 || scols.n == 0) {
+        hl_db_table_columns(dst, t, column_cb, &dcols) < 0 || scols.n == 0 ||
+        scols.oom || dcols.oom) {
         snprintf(err, errsz, "cannot read the columns of %s", t);
         goto out;
     }

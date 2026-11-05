@@ -19,6 +19,10 @@
 #   manifest  limits.vm_thread turns it on without the flag;
 #   env       so does HULL_VM_THREAD=1;
 #   ceiling   still stuck after the hard ceiling: the process exits, status 75;
+#   slow      the same with 48 connections dripping a byte every 90 ms during
+#             standby: each costs standby a few ms, not a blocking socket
+#             timeout per read, so the ceiling still ends the process on time
+#             (C audit L2);
 #   sigterm   SIGTERM during standby: the process exits within the drain time.
 #
 # Requires build/hull and curl.
@@ -271,6 +275,47 @@ run_runtime() {
             fail "$rt ceiling: exit status $st (expected 75)"
         fi
         wait 2>/dev/null || true
+    fi
+
+    # ── slow clients during standby (C audit L2) ───────────────────────
+    # Standby used to read each accepted connection with blocking 100 ms
+    # socket timeouts and looked at the ceiling only between batches of 16,
+    # so clients dripping a byte at a time pushed the exit well past the
+    # ceiling (1500 ms here; it measured ~2700 ms with 48 such clients).
+    if command -v nc >/dev/null 2>&1; then
+        next_port
+        if start "$app" "$WORK/s.log" --vm-thread $STD --vm-thread-ceiling-ms 1500; then
+            req "/stuck?ms=20000" > /dev/null &
+            ( sleep 15; kill -9 "$SERVER_PID" 2>/dev/null ) 2>/dev/null &
+            wd=$!
+            sleep 2
+            (
+                i=0
+                while [ $i -lt 48 ]; do
+                    ( for k in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                          printf G; sleep 0.09
+                      done | nc 127.0.0.1 "$PORT" ) &
+                    i=$((i + 1))
+                done
+                wait
+            ) > /dev/null 2>&1 &
+            st=0
+            wait "$SERVER_PID" 2>/dev/null || st=$?
+            kill "$wd" 2>/dev/null || true
+            wait "$wd" 2>/dev/null || true
+            SERVER_PID=""
+            pkill -f "nc 127.0.0.1 $PORT" 2>/dev/null || true
+            stuck=$(sed -n 's/.*hard ceiling reached: .* for \([0-9]*\) ms.*/\1/p' "$WORK/s.log" | head -1)
+            if [ "$st" = "75" ] && [ -n "$stuck" ] && [ "$stuck" -le 2000 ]; then
+                pass "$rt slow: the ceiling still exits on time (${stuck} ms)"
+            else
+                fail "$rt slow: exit status $st, ceiling exit after '${stuck}' ms (expected 75 within 2000 ms)"
+                sed 's/^/    | /' "$WORK/s.log"
+            fi
+            wait 2>/dev/null || true
+        fi
+    else
+        skip "$rt slow: nc not found"
     fi
 
     # ── SIGTERM during standby ─────────────────────────────────────────

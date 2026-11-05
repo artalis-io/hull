@@ -50,8 +50,13 @@ typedef struct HlLuaMeterFrame {
     uint64_t    m0;     /* charged + lua_hlpending(L) */
 } HlLuaMeterFrame;
 
-/* Binding calls measured at once (nested calls past it run unmeasured). */
+/* Binding calls measured at once. A call nested deeper (binding -> script
+ * -> binding ... past this depth) is not measured; it is charged
+ * HL_LUA_METER_DEEP_UNITS before it runs instead (C audit L18), so the
+ * depth is no way to run bindings free. */
 #define HL_LUA_METER_DEPTH 32
+/* 1 ms at the measured rate of hull/shared/work_charge.h (64 units / us). */
+#define HL_LUA_METER_DEEP_UNITS 65536
 
 typedef struct HlLuaBudget {
     int64_t limit;      /* 0 = none */

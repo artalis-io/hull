@@ -762,6 +762,37 @@ UTEST(db_internal, move_copies_drops_and_merges)
     dst.backend->close(&dst);
 }
 
+/* C audit L14: a column name that could not be recorded (an allocation
+ * failure) left the column list incomplete, and the move copied the table
+ * with fewer columns and committed it as a success. It fails now. */
+UTEST(db_internal_audit_c_l14, move_fails_on_an_incomplete_column_list)
+{
+    HlDbHandle src = {0}, dst = {0};
+    src.backend = dst.backend = &hl_db_backend_sqlite;
+    ASSERT_EQ(0, src.backend->open(&src.ctx, ":memory:", NULL));
+    ASSERT_EQ(0, dst.backend->open(&dst.ctx, ":memory:", NULL));
+    ASSERT_TRUE(texec(&src, "CREATE TABLE _hull_sessions (id VARCHAR(255) PRIMARY KEY, "
+                            "data TEXT, expires_at INTEGER)") >= 0);
+    ASSERT_TRUE(texec(&src, "INSERT INTO _hull_sessions VALUES ('a', '{}', 1)") >= 0);
+
+    char err[256];
+    hl_db_internal_fail_column_push_for_test(1);   /* only "id" is recorded */
+    int rc = hl_db_internal_move(&src, &dst, "test", err, sizeof err);
+    hl_db_internal_fail_column_push_for_test(-1);
+    EXPECT_EQ(-1, rc);
+    EXPECT_NE(NULL, strstr(err, "columns"));
+    /* Nothing copied, and the source keeps its table. */
+    EXPECT_LE(count(&dst, "SELECT count(*) FROM _hull_sessions"), 0);  /* none, or no table */
+    EXPECT_EQ(1, count(&src, "SELECT count(*) FROM _hull_sessions"));
+
+    /* Without the failure the same move succeeds, every column copied. */
+    EXPECT_EQ(1, hl_db_internal_move(&src, &dst, "test", err, sizeof err));
+    EXPECT_EQ(1, count(&dst, "SELECT count(*) FROM _hull_sessions WHERE data = '{}' "
+                             "AND expires_at = 1"));
+    src.backend->close(&src);
+    dst.backend->close(&dst);
+}
+
 /* A planted app database can hold any text under any type in sqlite_master
  * (writable_schema). A trigger disguised as an index entry never reaches the
  * internal database, and the move fails instead of half-running. */

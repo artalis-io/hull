@@ -244,6 +244,12 @@ static JSContext *js_worker_context_new(HlJsWorkerCtx *wctx,
                                                    : (size_t)-1);
     if (op->max_stack_bytes > 0)
         JS_SetMaxStackSize(wctx->rt, op->max_stack_bytes);
+    /* The app's input ceilings too (C audit L13): the runtime is shared by
+     * every app's dispatches on this thread and kept the defaults. */
+    JS_SetInputLimits(wctx->rt, op->input_limits.json_max_depth,
+                      op->input_limits.json_max_keys,
+                      op->input_limits.regexp_max_source,
+                      op->input_limits.normalize_max_input);
     JS_UpdateStackTop(wctx->rt);
     wctx->instructions = 0;
     wctx->tripped = 0;

@@ -626,7 +626,9 @@ void hl_cap_db_refuse_txn_control(sqlite3 *db, int on)
  * excluded meter time, like the other DB waits. Giving up returns
  * SQLITE_BUSY, and a tripped run raises its limit. A pool thread has no run
  * deadline (hl_run_deadline_left_ms -1), so a db.async op waits up to its
- * busy_timeout under its own budget. */
+ * busy_timeout under its own budget; and with no budget bound (no run: Hull's
+ * own SQL at teardown, in the agent, in migrations) the run deadline is not
+ * consulted at all - it is the last run's, stale (C audit L5). */
 #define DB_BUSY_SLICE_MS 10u
 
 static int db_busy(void *arg, int count)
@@ -642,7 +644,13 @@ static int db_busy(void *arg, int count)
         return 0;
     if (hl_db_budget_charge(0) != 0)
         return 0;
-    int64_t left = hl_run_deadline_left_ms();
+    /* The run deadline counts only while a budget is bound, i.e. inside a
+     * run (C audit L5): the thread-local deadline outlives its run (a watch
+     * is not disarmed when a run returns), and Hull's own unbound SQL after
+     * it - hl_cap_db_shutdown's checkpoint at teardown, the agent's
+     * read-only connections, migrations - read a deadline long passed and
+     * gave up on the first busy call. */
+    int64_t left = hl_db_budget_current().fn ? hl_run_deadline_left_ms() : -1;
     if (left == 0)
         return 0;
     uint64_t slice = (uint64_t)st->busy_ms - waited;

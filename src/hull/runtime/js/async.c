@@ -671,6 +671,26 @@ static void hl_js_unwired_txn_check(HlJS *js, HlJsAsyncCont *jc)
 int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
 {
     if (!js) return 0;
+    /* A run that is over - its deadline passed, its budget spent - does not
+     * start an op it would park on (C audit L1): under --vm-thread an
+     * abandoned run whose stuck native call returned straight into an op
+     * parked after standby had already answered its connection 503. The
+     * charge raises the uncatchable trip. */
+    if (hl_js_budget_charge(ctx, 0) != 0)
+        return -1;
+    /* The app's module top level waits on nothing (C audit L4), as Lua's
+     * does (`L != active_co`): it runs before the phase-2 sandbox, and its
+     * first async op would start the worker pool there. Its code after an
+     * await, run later in another run's drain, keeps the top level's tag
+     * and is refused too. */
+    if (js->in_load ||
+        (js->load_tag && js->rt && JS_GetJobTag(js->rt) == js->load_tag)) {
+        JS_ThrowTypeError(ctx,
+            "%s cannot run at the app's top level: start async work in "
+            "app.main, a route handler or a timer", what);
+        hl_js_refusal_tag(ctx, HL_REFUSAL_WAIT);
+        return -1;
+    }
     if (js->in_middleware) {
         JS_ThrowTypeError(ctx,
             "%s cannot run in middleware: middleware is synchronous (it "

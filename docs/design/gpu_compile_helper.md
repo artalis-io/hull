@@ -36,7 +36,7 @@ fast first line instead of the security boundary.
 | Bounds | Start-up and compile deadlines with SIGKILL, a memory cap (macOS: the supervisor polls the footprint and kills; Linux: `RLIMIT_DATA`), rlimits (core 0, CPU, Linux `RLIMIT_NPROC`), a compile stack below the server's, a 512-byte reply cap, and an OS sandbox in the worker |
 | Event loop | A run-aware wait: the server polls every 10 ms, asks the run's deadline and budget, and sends a cancel when the run stops. Not a promise; see §6. |
 | Charging | `HL_GPU_HELPER_UNITS` (4M) before a round trip on a cache miss. The wait itself is excluded. The existing compile charge is unchanged. |
-| Caching | All verdicts in memory (64 entries). OK verdicts are also kept on disk in the sealed runtime cache (`gpu-shaders`). |
+| Caching | All verdicts in memory (64 entries). Nothing is written to the sealed `gpu-shaders` disk cache any more (C audit L6): every source the helper checks is runtime source, possibly request text. The disk side is still read. |
 | `hull build` | Stays in-process (tool mode); see §8 |
 | Failure | Fail closed. A dead or missing supervisor refuses all runtime source (`shader_helper_failed`); the sandboxed server cannot spawn a new one. |
 
@@ -279,7 +279,10 @@ already sits on a socket that an async backend watcher could take over.
 - **In memory**: 64 entries, round robin, every status (OK, SHADER, TIMEOUT, CRASHED,
   BADREPLY, MEMORY). A source that timed out or crashed is refused at once on the next attempt, without
   another round trip. CANCELLED and UNAVAILABLE are not cached.
-- **On disk**: OK verdicts only, through the sealed runtime cache
+- **On disk**: read, no longer written (C audit L6). Every source that reaches the helper is
+  runtime source a built binary opted into, possibly request text, and one sealed file per distinct
+  accepted source grew `~/.hull` without bound - the shape audit 39 closed for
+  `template.render_string`. The lookup still goes through the sealed runtime cache
   (`hl_runtime_cache_get_sealed` / `_put_sealed`, HMAC under `~/.hull/cache.key`), cache kind
   `gpu-shaders` (`hull cache list | prune | clear`), opt-out `HULL_NO_GPU_SHADER_CACHE`. Like the
   bytecode caches, it is off under `--verify-sig` (`hl_runtime_cache_code_off`). Timeouts and

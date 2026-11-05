@@ -868,7 +868,9 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             }
             if (fsize > 0 && (uint64_t)fsize < HL_WASM_MAX_IO_SIZE
                 && (uint64_t)fsize <= UINT32_MAX) {
-                /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
+                /* Raw malloc: the module cache keeps this buffer for the module's
+                 * life (wasm_runtime_load does NOT take it) and free()s it at
+                 * unload - see the cache insert below. */
                 buf = malloc((size_t)fsize);
                 if (buf) {
                     size_t nr = fread(buf, 1, (size_t)fsize, f);

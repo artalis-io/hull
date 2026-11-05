@@ -337,6 +337,8 @@ static int keel_pool_create(HlAsyncBackendPool **out, HlAsyncBackendCtx *ctx,
 static int keel_pool_start(HlAsyncBackendPool *p)
 {
     if (p->kpool) return 0;
+    /* No worker before the phase-2 sandbox (C audit L4). */
+    if (hl_async_pool_held()) return -1;
     KlThreadPoolConfig cfg = {
         .num_workers     = p->num_workers,
         .queue_capacity  = p->queue_capacity,

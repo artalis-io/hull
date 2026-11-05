@@ -45,9 +45,12 @@
 #define HL_INPUT_REGEXP_MAX_SOURCE_DEFAULT   (64u * 1024u)
 #define HL_INPUT_NORMALIZE_MAX_INPUT_DEFAULT (1024u * 1024u)
 
-/* Manifest values above these are clamped. The JSON depth ceiling stays
- * below what either engine's stack holds (Lua's C-call limit ends a
- * recursive decode near 200 levels anyway). */
+/* Manifest values (and Lua's per-call json.decode values) above these are
+ * clamped. The JSON depth ceiling stays below what either engine's stack
+ * holds: QuickJS's parser recurses on the C stack (~160 B a level, ~1.6 MB
+ * at the ceiling); Lua's decoder is pure Lua, whose calls do not count
+ * toward the C-call limit, so its bound is the Lua stack (LUAI_MAXSTACK),
+ * past which a decode fails with a catchable, charged error. */
 #define HL_INPUT_JSON_MAX_DEPTH_CEIL         10000u
 #define HL_INPUT_JSON_MAX_KEYS_CEIL          100000000u
 #define HL_INPUT_REGEXP_MAX_SOURCE_CEIL      (64u * 1024u * 1024u)

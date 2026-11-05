@@ -23,6 +23,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,12 +41,18 @@
 /* Standby: how long one poll of the listener waits before the job state and
  * the ceiling are looked at again. */
 #define VMT_STANDBY_SLICE_MS   25
-/* Standby: connections answered per poll wake-up (the rest wait for the next
- * slice, so the done check is never starved). */
-#define VMT_STANDBY_BATCH      16
-/* Standby: per-connection socket timeout for reading the request head and
- * writing the answer. */
-#define VMT_CONN_IO_MS        100
+/* Standby: how long one batch of accepts may take before the job state,
+ * the ceiling and the drain are looked at again (C audit L2: a count bound
+ * let 16 slow clients hold the loop thread for seconds). */
+#define VMT_STANDBY_BATCH_MS   50u
+/* Standby: per-connection waits, on a non-blocking socket - reading the
+ * request head, writing the answer, letting the FIN cross. Each is one short
+ * poll budget, not a blocking socket timeout per call (C audit L2). */
+#define VMT_CONN_HEAD_MS       20u
+#define VMT_CONN_SEND_MS       10u
+#define VMT_CONN_DRAIN_MS      10u
+/* A standby log line's wait for stderr to take it (C audit L3). */
+#define VMT_LOG_WAIT_MS        20
 
 struct HlVmThread {
     pthread_t        tid;
@@ -260,73 +267,109 @@ static const char k_503[] =
     "\r\n"
     "Service Unavailable\n";
 
-static void send_all(int fd, const char *p, size_t n)
+/* Milliseconds left of a budget that ends at @p end (monotonic ms). */
+static int ms_left(uint64_t end)
+{
+    uint64_t now = now_ms();
+    return now >= end ? 0 : (int)(end - now);
+}
+
+/* Write all of @p p on a NON-BLOCKING socket, waiting for room at most until
+ * @p end. A short write past it is dropped: the client sees a cut answer, the
+ * loop thread is not held. */
+static void send_bounded(int fd, const char *p, size_t n, uint64_t end)
 {
     while (n > 0) {
         ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            return;
+        if (w > 0) {
+            p += w;
+            n -= (size_t)w;
+            continue;
         }
-        p += w;
-        n -= (size_t)w;
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            int left = ms_left(end);
+            if (left <= 0) return;
+            struct pollfd pf = { fd, POLLOUT, 0 };
+            if (poll(&pf, 1, left) <= 0) return;
+            continue;
+        }
+        return;
     }
 }
 
-static void set_io_timeouts(int fd, int ms)
+/* One receive on a NON-BLOCKING socket, waiting for data at most until
+ * @p end. Returns what recv returned, or -1 once the budget is spent. */
+static ssize_t recv_bounded(int fd, char *buf, size_t n, uint64_t end)
 {
-    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    for (;;) {
+        ssize_t r = recv(fd, buf, n, 0);
+        if (r >= 0) return r;
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+        int left = ms_left(end);
+        if (left <= 0) return -1;
+        struct pollfd pf = { fd, POLLIN, 0 };
+        if (poll(&pf, 1, left) <= 0) return -1;
+    }
+}
+
+/* A standby log line that never waits on the log lock or a full stderr (C
+ * audit L3). The VM thread may be stuck INSIDE a log write - holding the log
+ * mutex, blocked on a full supervisor / journal pipe - which is exactly when
+ * standby has to keep answering and the ceiling has to end the process. So
+ * the line is formatted here and written straight to fd 2, only if fd 2 takes
+ * it within @p wait_ms; otherwise it is dropped. Hull's own text only. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void raw_log(int wait_ms, const char *fmt, ...)
+{
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof line - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n > sizeof line - 2) n = (int)(sizeof line - 2);
+    line[n++] = '\n';
+    struct pollfd pf = { STDERR_FILENO, POLLOUT, 0 };
+    if (poll(&pf, 1, wait_ms) <= 0 || !(pf.revents & POLLOUT)) return;
+    /* One write of at most PIPE_BUF (512 bytes): atomic on a pipe. */
+    ssize_t w;
+    do w = write(STDERR_FILENO, line, (size_t)n);
+    while (w < 0 && errno == EINTR);
 }
 
 /* Answer one connection standby accepted: read its request head (so closing
  * does not reset the connection before the client reads the answer), write
- * the 503, close. Bounded by VMT_CONN_IO_MS per step. */
+ * the 503, close. The socket stays non-blocking and each step has one short
+ * wait (C audit L2): a client dripping a byte at a time costs at most
+ * VMT_CONN_HEAD_MS + VMT_CONN_SEND_MS + VMT_CONN_DRAIN_MS. */
 static void answer_503(int c)
 {
     int fl = fcntl(c, F_GETFL);
-    if (fl >= 0) (void)fcntl(c, F_SETFL, fl & ~O_NONBLOCK);
+    if (fl >= 0) (void)fcntl(c, F_SETFL, fl | O_NONBLOCK);
     (void)fcntl(c, F_SETFD, FD_CLOEXEC);
 #ifdef SO_NOSIGPIPE
     int on = 1;
     (void)setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
 #endif
-    set_io_timeouts(c, VMT_CONN_IO_MS);
     char buf[4096];
     size_t got = 0;
-    for (int i = 0; i < 4 && got < sizeof buf - 1; i++) {
-        ssize_t r = recv(c, buf + got, sizeof buf - 1 - got, 0);
+    uint64_t end = now_ms() + VMT_CONN_HEAD_MS;
+    while (got < sizeof buf - 1) {
+        ssize_t r = recv_bounded(c, buf + got, sizeof buf - 1 - got, end);
         if (r <= 0) break;
         got += (size_t)r;
         buf[got] = '\0';
         if (strstr(buf, "\r\n\r\n")) break;
     }
-    send_all(c, k_503, sizeof k_503 - 1);
+    send_bounded(c, k_503, sizeof k_503 - 1, now_ms() + VMT_CONN_SEND_MS);
     (void)shutdown(c, SHUT_WR);
-    for (int i = 0; i < 2; i++) {             /* let the FIN cross */
-        if (recv(c, buf, sizeof buf, 0) <= 0) break;
-    }
+    end = now_ms() + VMT_CONN_DRAIN_MS;      /* let the FIN cross */
+    while (recv_bounded(c, buf, sizeof buf, end) > 0) {}
     close(c);
-}
-
-static void accept_batch(HlVmThread *t, int lfd)
-{
-    for (int i = 0; i < VMT_STANDBY_BATCH; i++) {
-        /* Keel's listener is non-blocking, but standby never relies on it:
-         * accept only what poll says is there. */
-        if (i > 0) {
-            struct pollfd p = { lfd, POLLIN, 0 };
-            if (poll(&p, 1, 0) <= 0 || !(p.revents & POLLIN)) return;
-        }
-        int c = accept(lfd, NULL, NULL);
-        if (c < 0) {
-            if (errno == EINTR) continue;
-            return;                          /* EAGAIN, or the listener is gone */
-        }
-        answer_503(c);
-        __atomic_fetch_add(&t->n_503, 1, __ATOMIC_RELAXED);
-    }
 }
 
 static int job_done(HlVmThread *t)
@@ -347,59 +390,99 @@ static int server_stopping(const HlVmThread *t)
            __atomic_load_n(t->cfg.server_running, __ATOMIC_RELAXED) == 0;
 }
 
+/* End the process with no teardown, and without the log lock or a blocking
+ * write (C audit L3): the VM thread may hold the lock inside a write to a
+ * full pipe. One preformatted line goes to fd 2 if it takes it within a
+ * moment, then _exit. */
 static void die(int status, const char *why, uint64_t stuck_ms)
 {
-    log_fatal("[hull:vm-thread] %s: the VM thread has been stuck in one "
-              "native call for %llu ms; exiting without teardown (status %d) "
-              "so a supervisor restarts the process",
-              why, (unsigned long long)stuck_ms, status);
-    fflush(stderr);
-    fflush(stdout);
+    raw_log(100, "FATAL [hull:vm-thread] %s: the VM thread has been stuck in "
+            "one native call for %llu ms; exiting without teardown (status "
+            "%d) so a supervisor restarts the process",
+            why, (unsigned long long)stuck_ms, status);
     _exit(status);
+}
+
+/* Standby's exits: the ceiling, and a stop request past the drain timeout.
+ * Never returns when one is due. */
+static void standby_check_exits(HlVmThread *t, uint64_t start,
+                                uint64_t *stop_seen)
+{
+    uint64_t now = now_ms();
+    if (t->cfg.ceiling_ms && now - start >= t->cfg.ceiling_ms)
+        die(HL_VMT_EXIT_STUCK, "hard ceiling reached", now - start);
+    if (server_stopping(t)) {
+        if (!*stop_seen) *stop_seen = now;
+        else if (now - *stop_seen >= t->cfg.drain_ms)
+            die(1, "stop requested and the drain timeout passed",
+                now - start);
+    }
+}
+
+/* Answer what is waiting on the listener, for at most VMT_STANDBY_BATCH_MS of
+ * wall time, looking at the job and the exits between connections. */
+static void accept_batch(HlVmThread *t, int lfd, uint64_t start,
+                         uint64_t *stop_seen)
+{
+    uint64_t end = now_ms() + VMT_STANDBY_BATCH_MS;
+    for (int first = 1; ; first = 0) {
+        if (!first) {
+            standby_check_exits(t, start, stop_seen);
+            if (job_done(t) || now_ms() >= end) return;
+            /* Keel's listener is non-blocking, but standby never relies on
+             * it: accept only what poll says is there. */
+            struct pollfd p = { lfd, POLLIN, 0 };
+            if (poll(&p, 1, 0) <= 0 || !(p.revents & POLLIN)) return;
+        }
+        int c = accept(lfd, NULL, NULL);
+        if (c < 0) {
+            if (errno == EINTR) continue;
+            return;                          /* EAGAIN, or the listener is gone */
+        }
+        answer_503(c);
+        __atomic_fetch_add(&t->n_503, 1, __ATOMIC_RELAXED);
+    }
 }
 
 /* The run outlived its deadline + grace. Answer what can be answered without
  * touching anything the VM thread may be using, until the job is done (or the
- * ceiling ends the process). */
+ * ceiling ends the process). Nothing here takes the log lock until the job is
+ * done (C audit L3): the early 503 goes out and the accept loop starts first,
+ * and the one line standby writes meanwhile goes through raw_log. */
 static void standby(HlVmThread *t, const HlVmtHttp *http, int *early_sent,
                     uint64_t deadline)
 {
     uint64_t start = now_ms();
     __atomic_fetch_add(&t->n_abandoned, 1, __ATOMIC_RELAXED);
-    log_warn("[hull:vm-thread] run abandoned: still running %llu ms past its "
-             "deadline, inside a native call that does not stop; answering "
-             "503 until it returns",
-             (unsigned long long)(start > deadline ? start - deadline : 0));
 
     if (http && http->early_ok && http->fd >= 0) {
-        send_all(http->fd, k_503, sizeof k_503 - 1);
+        send_bounded(http->fd, k_503, sizeof k_503 - 1,
+                     now_ms() + VMT_CONN_SEND_MS);
         (void)shutdown(http->fd, SHUT_WR);
         if (early_sent) *early_sent = 1;
     }
+
+    raw_log(0, "WARN  [hull:vm-thread] run abandoned: still running %llu ms "
+            "past its deadline, inside a native call that does not stop; "
+            "answering 503 until it returns",
+            (unsigned long long)(start > deadline ? start - deadline : 0));
 
     /* Read on this (the loop) thread, which is the one Keel binds it on. */
     int lfd = t->cfg.listen_fd ? (int)*t->cfg.listen_fd : -1;
     uint64_t stop_seen = 0;
     while (!job_done(t)) {
-        uint64_t now = now_ms();
-        if (t->cfg.ceiling_ms && now - start >= t->cfg.ceiling_ms)
-            die(HL_VMT_EXIT_STUCK, "hard ceiling reached", now - start);
-        if (server_stopping(t)) {
-            if (!stop_seen) stop_seen = now;
-            else if (now - stop_seen >= t->cfg.drain_ms)
-                die(1, "stop requested and the drain timeout passed",
-                    now - start);
-        }
+        standby_check_exits(t, start, &stop_seen);
         if (lfd >= 0) {
             struct pollfd p = { lfd, POLLIN, 0 };
             int r = poll(&p, 1, VMT_STANDBY_SLICE_MS);
             if (r > 0 && (p.revents & POLLIN))
-                accept_batch(t, lfd);
+                accept_batch(t, lfd, start, &stop_seen);
         } else {
             struct timespec ts = { 0, VMT_STANDBY_SLICE_MS * 1000000L };
             (void)nanosleep(&ts, NULL);
         }
     }
+    /* The job is done: the VM thread holds no lock now. */
     log_warn("[hull:vm-thread] the abandoned run returned after %llu ms in "
              "standby; serving again",
              (unsigned long long)(now_ms() - start));

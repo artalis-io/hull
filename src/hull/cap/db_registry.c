@@ -369,8 +369,8 @@ static const char *default_internal_dsn(const HlDbRegistry *reg,
 /* Look up the DSN for @p name: manifest databases first (resolving a "$VAR"
  * env reference from the environment), then any seeded fallback is handled by
  * the cache scan in _get. Returns NULL + *err on failure. */
-static const char *resolve_manifest_dsn(HlDbRegistry *reg, const char *name,
-                                         const char **err)
+static const char *resolve_manifest_dsn(const HlDbRegistry *reg,
+                                         const char *name, const char **err)
 {
     if (!reg->manifest) return NULL;
     for (int i = 0; i < reg->manifest->databases.named_count; i++) {
@@ -397,7 +397,7 @@ static const char *resolve_manifest_dsn(HlDbRegistry *reg, const char *name,
  * rewritten one); the operator's -d DSN is taken as given. Worked out afresh
  * on every call rather than kept per connection: a stored copy would be
  * writable heap the worker pool connects to. */
-static const char *lookup_dsn(HlDbRegistry *reg, const char *name,
+static const char *lookup_dsn(const HlDbRegistry *reg, const char *name,
                               const char **err, char *buf, size_t bufsz)
 {
     const char *d = NULL;
@@ -568,8 +568,7 @@ int hl_db_registry_default_is_network(const HlDbRegistry *reg)
     if (!reg) return 0;
     const char *err = NULL;
     char buf[HL_HOST_PATH_MAX + 16];
-    const char *dsn = lookup_dsn((HlDbRegistry *)(uintptr_t)reg, "default", &err,
-                                 buf, sizeof buf);
+    const char *dsn = lookup_dsn(reg, "default", &err, buf, sizeof buf);
     if (!dsn) return 0;
     if (dsn[0] == '$') return 1;
     /* Without case (audit 14): the backend selector reads the scheme that
@@ -650,7 +649,10 @@ const char *hl_db_registry_dsn_for(HlDbRegistry *reg, const HlDbHandle *h)
         const RegSlot *s = &reg->slots[i];
         if (s->open && &s->handle == h) {
             if (!s->dsn_known) return NULL;
-            /* The worker copies the DSN before this thread calls again. */
+            /* A per-thread buffer: the result is valid only until this
+             * thread's next call into the registry, so every caller copies
+             * it at once (both db.async bindings strdup it before anything
+             * else). */
             static _Thread_local char buf[HL_HOST_PATH_MAX + 16];
             const char *err = NULL;
             const char *dsn = lookup_dsn(reg, s->name, &err, buf, sizeof buf);

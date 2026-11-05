@@ -3281,6 +3281,10 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
         if (helper_stack > HL_GPU_HELPER_STACK_BYTES)
             helper_stack = HL_GPU_HELPER_STACK_BYTES;
         helper_stack &= ~(((size_t)1 << 20) - 1);   /* whole MiB on the wire */
+        /* Never persisted: this is runtime source, possibly request text,
+         * and one sealed file per distinct accepted source would grow
+         * ~/.hull without bound (C audit L6, as audit 39 for
+         * template.render_string). The in-memory verdict ring stays. */
         int hs = hl_gpu_helper_check(wgsl, wgsl_len, dev_idx, dev->name,
                                      helper_stack);
         if (hs != HL_GPU_HELPER_OK) {

@@ -103,9 +103,13 @@ static int dump_writer(lua_State *L, const void *p, size_t sz, void *ud)
     (void)L;
     DumpAcc *a = (DumpAcc *)ud;
     if (a->failed) return 1;
+    if (sz > SIZE_MAX / 2 - a->len) { a->failed = 1; return 1; }
     if (a->len + sz > a->cap) {
         size_t new_cap = a->cap ? a->cap * 2 : 4096;
-        while (new_cap < a->len + sz) new_cap *= 2;
+        while (new_cap < a->len + sz) {
+            if (new_cap > SIZE_MAX / 2) { a->failed = 1; return 1; }
+            new_cap *= 2;
+        }
         uint8_t *nb = (uint8_t *)realloc(a->buf, new_cap);
         if (!nb) { a->failed = 1; return 1; }
         a->buf = nb;

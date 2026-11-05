@@ -8138,6 +8138,115 @@ UTEST(lua_async, a_wait_inside_a_transaction_is_refused)
     ASSERT_STREQ(out, "ok");
 }
 
+/* C audit L1: a run that is over does not park. Under --vm-thread an
+ * abandoned run whose stuck native call returned straight into a wait (no
+ * Lua instruction between, so the stop flag's trip never landed) parked
+ * after standby had answered its connection. The binding dispatcher checks
+ * the flag at a binding's entry, but not inside one that blocks and then
+ * parks, so the park gate itself must. The C function below is such a
+ * binding: it raises the run's stop flag (what the watchdog does at the
+ * deadline) and then reaches the park gate every wait goes through. */
+static int l1_passed;    /* the gates' verdicts: bit 0 can_wait, bit 1 check */
+static int l1_stop_then_wait(lua_State *L)
+{
+    __atomic_store_n(&lua_rt.run_watch.stop, 1, __ATOMIC_RELAXED);
+    if (hl_lua_can_wait(L)) l1_passed |= 1;
+    hl_lua_check_can_wait(L, "l1");
+    l1_passed |= 2;
+    return 0;
+}
+
+UTEST(lua_audit_c_l1, an_over_run_does_not_park)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    lua_pushcfunction(lua_rt.L, l1_stop_then_wait);
+    lua_setglobal(lua_rt.L, "__l1_stop_then_wait");
+    lua_State *co;
+    l1_passed = 0;
+    int st = ssh_co_start(&lua_rt, "pcall(__l1_stop_then_wait)\n", &co);
+    /* Fixed: both gates refuse, check_can_wait by raising the trip. Before:
+     * both let the over run through (l1_passed == 3). */
+    EXPECT_NE(st, LUA_OK);
+    EXPECT_EQ(l1_passed, 0);
+    __atomic_store_n(&lua_rt.run_watch.stop, 0, __ATOMIC_RELAXED);
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
+/* C audit L13: json.decode's per-call max_depth was taken as given; it is
+ * held to the same ceiling (HL_INPUT_JSON_MAX_DEPTH_CEIL) as the
+ * manifest's value. */
+UTEST(lua_audit_c_l13, per_call_json_depth_is_clamped_to_the_ceiling)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    char code[512];
+    snprintf(code, sizeof code,
+        "local json = require('hull.json')\n"
+        "local n = %u + 50\n"
+        "local doc = string.rep('[', n) .. '1' .. string.rep(']', n)\n"
+        "local ok = pcall(json.decode, doc, { max_depth = n * 2 })\n"
+        "local ok2 = pcall(json.decode, '[[1]]', { max_depth = n * 2 })\n"
+        "return (ok and 'parsed' or 'refused') .. ',' .. (ok2 and 'ok' or 'bad')",
+        (unsigned)HL_INPUT_JSON_MAX_DEPTH_CEIL);
+    lua_settop(lua_rt.L, 0);
+    ASSERT_EQ(LUA_OK, luaL_loadstring(lua_rt.L, code));
+    int rc = lua_pcall(lua_rt.L, 0, 1, 0);
+    const char *r = lua_tostring(lua_rt.L, -1);
+    EXPECT_EQ(LUA_OK, rc);
+    EXPECT_STREQ("refused,ok", r ? r : "(nil)");
+    lua_settop(lua_rt.L, 0);
+    cleanup_lua();
+}
+
+/* C audit L18: past HL_LUA_METER_DEPTH nested binding frames (binding ->
+ * script -> binding ...) a binding ran unmeasured and uncharged. It is
+ * charged a fixed floor now. l18_rec is a binding (registered through the
+ * dispatcher) that calls back into script. */
+static int l18_rec(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_pushvalue(L, 1);
+    lua_call(L, 0, 0);
+    return 0;
+}
+
+static int64_t l18_used_for_depth(int depth)
+{
+    static const luaL_Reg fns[] = { { "rec", l18_rec }, { NULL, NULL } };
+    hl_lua_newlib(lua_rt.L, fns);
+    lua_setglobal(lua_rt.L, "__l18");
+    char code[256];
+    snprintf(code, sizeof code,
+        "local function r(n) if n > 0 then __l18.rec(function() r(n - 1) end) end end\n"
+        "r(%d)\n", depth);
+    lua_rt.max_instructions = 1000000000;
+    hl_lua_arm_entry(&lua_rt);
+    int64_t before = lua_rt.budget.used;
+    if (luaL_dostring(lua_rt.L, code) != LUA_OK) return -1;
+    return lua_rt.budget.used - before;
+}
+
+UTEST(lua_audit_c_l18, bindings_past_the_meter_depth_are_charged)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    int64_t shallow = l18_used_for_depth(HL_LUA_METER_DEPTH);
+    int64_t deep = l18_used_for_depth(HL_LUA_METER_DEPTH + 8);
+    ASSERT_GE(shallow, 0);
+    ASSERT_GE(deep, 0);
+    /* Eight calls past the depth: about eight floors more (the two runs'
+     * own instruction counts differ by a few units either way; unmetered,
+     * the difference was a few thousand). */
+    EXPECT_GE(deep - shallow, (int64_t)7 * HL_LUA_METER_DEEP_UNITS);
+    cleanup_lua();
+}
+
 #define TASK_CASE(name, body)                                   \
     UTEST(lua_async, name)                                      \
     {                                                           \
