@@ -153,7 +153,7 @@ function ratelimit.middleware(opts)
         error("ratelimit: limit must be a finite number >= 1", 2)
     end
     if type(window) ~= "number" or window ~= window or window == math.huge
-       or not (window > 0) then
+       or window <= 0 then
         error("ratelimit: window must be a finite number of seconds > 0", 2)
     end
     local key_fn = opts.key
