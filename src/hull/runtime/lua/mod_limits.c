@@ -12,7 +12,9 @@
 #include "mod_buffer.h"           /* get_hl_lua */
 #include "hull/limits/input.h"
 
-/* json() -> max_depth, max_keys */
+/* json() -> max_depth, max_keys, depth_ceil, keys_ceil. The ceilings bound
+ * a per-call { max_depth, max_keys } as they bound the manifest's values (C
+ * audit L13). */
 static int lua_limits_json(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -21,7 +23,9 @@ static int lua_limits_json(lua_State *L)
         l = lua->base.input_limits;
     lua_pushinteger(L, (lua_Integer)l.json_max_depth);
     lua_pushinteger(L, (lua_Integer)l.json_max_keys);
-    return 2;
+    lua_pushinteger(L, (lua_Integer)HL_INPUT_JSON_MAX_DEPTH_CEIL);
+    lua_pushinteger(L, (lua_Integer)HL_INPUT_JSON_MAX_KEYS_CEIL);
+    return 4;
 }
 
 int luaopen_hull_limits_native(lua_State *L)

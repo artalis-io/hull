@@ -7949,6 +7949,73 @@ UTEST(lua_audit_c_l1, an_over_run_does_not_park)
     be->free(actx);
 }
 
+/* C audit L13: json.decode's per-call max_depth was taken as given; it is
+ * held to the same ceiling (HL_INPUT_JSON_MAX_DEPTH_CEIL) as the
+ * manifest's value. */
+UTEST(lua_audit_c_l13, per_call_json_depth_is_clamped_to_the_ceiling)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    char code[512];
+    snprintf(code, sizeof code,
+        "local json = require('hull.json')\n"
+        "local n = %u + 50\n"
+        "local doc = string.rep('[', n) .. '1' .. string.rep(']', n)\n"
+        "local ok = pcall(json.decode, doc, { max_depth = n * 2 })\n"
+        "local ok2 = pcall(json.decode, '[[1]]', { max_depth = n * 2 })\n"
+        "return (ok and 'parsed' or 'refused') .. ',' .. (ok2 and 'ok' or 'bad')",
+        (unsigned)HL_INPUT_JSON_MAX_DEPTH_CEIL);
+    lua_settop(lua_rt.L, 0);
+    ASSERT_EQ(LUA_OK, luaL_loadstring(lua_rt.L, code));
+    int rc = lua_pcall(lua_rt.L, 0, 1, 0);
+    const char *r = lua_tostring(lua_rt.L, -1);
+    EXPECT_EQ(LUA_OK, rc);
+    EXPECT_STREQ("refused,ok", r ? r : "(nil)");
+    lua_settop(lua_rt.L, 0);
+    cleanup_lua();
+}
+
+/* C audit L18: past HL_LUA_METER_DEPTH nested binding frames (binding ->
+ * script -> binding ...) a binding ran unmeasured and uncharged. It is
+ * charged a fixed floor now. l18_rec is a binding (registered through the
+ * dispatcher) that calls back into script. */
+static int l18_rec(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_pushvalue(L, 1);
+    lua_call(L, 0, 0);
+    return 0;
+}
+
+static int64_t l18_used_for_depth(int depth)
+{
+    static const luaL_Reg fns[] = { { "rec", l18_rec }, { NULL, NULL } };
+    hl_lua_newlib(lua_rt.L, fns);
+    lua_setglobal(lua_rt.L, "__l18");
+    char code[256];
+    snprintf(code, sizeof code,
+        "local function r(n) if n > 0 then __l18.rec(function() r(n - 1) end) end end\n"
+        "r(%d)\n", depth);
+    lua_rt.max_instructions = 1000000000;
+    hl_lua_arm_entry(&lua_rt);
+    int64_t before = lua_rt.budget.used;
+    if (luaL_dostring(lua_rt.L, code) != LUA_OK) return -1;
+    return lua_rt.budget.used - before;
+}
+
+UTEST(lua_audit_c_l18, bindings_past_the_meter_depth_are_charged)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    int64_t shallow = l18_used_for_depth(HL_LUA_METER_DEPTH);
+    int64_t deep = l18_used_for_depth(HL_LUA_METER_DEPTH + 8);
+    ASSERT_GE(shallow, 0);
+    ASSERT_GE(deep, 0);
+    /* Eight calls past the depth: at least eight floors more. */
+    EXPECT_GE(deep - shallow, (int64_t)8 * HL_LUA_METER_DEEP_UNITS);
+    cleanup_lua();
+}
+
 #define TASK_CASE(name, body)                                   \
     UTEST(lua_async, name)                                      \
     {                                                           \

@@ -19,6 +19,7 @@
 #include "hull/cap/types.h"   /* HlKV for worker dispatch op */
 #include "hull/shared/offheap.h"   /* HlOffheapHold */
 #include "hull/limits/core.h" /* HL_WORKER_ERR_SIZE */
+#include "hull/limits/input.h" /* HlInputLimits */
 #include "quickjs.h"
 #include "hull/shared/async.h"   /* HlAsyncCont (the run links below) */
 
@@ -91,6 +92,10 @@ typedef struct HlJsWorkerDispatchOp {
     size_t        max_stack_bytes;
     int64_t       max_instructions;
     int           with_db;
+    /* The app VM's input ceilings (the manifest's `limits`), applied to the
+     * worker runtime per dispatch (C audit L13): a worker VM kept the
+     * defaults, so a tightened cap was not honoured there. */
+    HlInputLimits input_limits;
 
     /* The fn and ctx copies, held on the submitting VM's off-heap total
      * under its heap limit: uncounted, a ctx whose keys all named one big

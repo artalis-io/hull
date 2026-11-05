@@ -93,6 +93,20 @@ static int64_t mjs_wasm_limit(JSContext *ctx, JSValueConst wasm,
     return out;
 }
 
+/* A count that may be 0 (perIpConcurrency / perIpConnections): a whole
+ * number >= 0, clamped to @p ceil. The ceiling is compared while the value
+ * is still a double (C audit L10): `(int64_t)d` of 1e300 or Infinity is
+ * undefined, and the equality test that followed it dropped the value.
+ * Returns 1 and sets *out when the value is taken. */
+static int mjs_count_limit(double d, uint32_t ceil, uint32_t *out)
+{
+    if (!(d >= 0)) return 0;                    /* negative, NaN */
+    if (d >= (double)ceil) { *out = ceil; return 1; }
+    if (d != (double)(int64_t)d) return 0;      /* in range: a defined cast */
+    *out = (uint32_t)d;
+    return 1;
+}
+
 /* A plain object (not an array, not null): where the manifest expects an
  * object, an array is treated as absent. */
 static int mjs_is_obj(JSContext *ctx, JSValueConst v)
@@ -324,22 +338,17 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         if (JS_IsNumber(pip)) {
             double d = -1;
             JS_ToFloat64(ctx, &d, pip);   /* a number: runs no app code */
-            if (d >= 0 && d == (double)(int64_t)d) {
+            if (mjs_count_limit(d, HL_REQ_PER_IP_CEIL, &out->limits.per_ip))
                 out->limits.per_ip_set = 1;
-                out->limits.per_ip = d >= (double)HL_REQ_PER_IP_CEIL
-                                     ? HL_REQ_PER_IP_CEIL : (uint32_t)d;
-            }
         }
         JS_FreeValue(ctx, pip);
         JSValue pic = mjs_own(ctx, lim_val, "perIpConnections");
         if (JS_IsNumber(pic)) {
             double d = -1;
             JS_ToFloat64(ctx, &d, pic);   /* a number: runs no app code */
-            if (d >= 0 && d == (double)(int64_t)d) {
+            if (mjs_count_limit(d, HL_REQ_PER_IP_CEIL,
+                                &out->limits.per_ip_conn))
                 out->limits.per_ip_conn_set = 1;
-                out->limits.per_ip_conn = d >= (double)HL_REQ_PER_IP_CEIL
-                                          ? HL_REQ_PER_IP_CEIL : (uint32_t)d;
-            }
         }
         JS_FreeValue(ctx, pic);
         out->limits.trusted_proxy_count = read_js_string_array(ctx, lim_val,

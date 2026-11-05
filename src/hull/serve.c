@@ -1747,15 +1747,23 @@ static int hl_serve_load_app(HlServerState *s)
                      * the live session's key (audit 36 / 37). The
                      * supervisor is our parent (dev.c spawns us). */
                     if (s->cfg.dev_session[0]) {
-                        char content[600], mac[HL_DEV_SIDECAR_MAC_LEN + 1];
-                        int cn = snprintf(content, sizeof content, "%lld\n%s",
-                                          (long long)ts, msg);
-                        if (cn > 0 && (size_t)cn < sizeof content &&
+                        /* Sized from the message, never a fixed stack
+                         * buffer a longer message would outgrow and leave
+                         * the record without its MAC (C audit L11). */
+                        char mac[HL_DEV_SIDECAR_MAC_LEN + 1];
+                        size_t csz = strlen(msg) + 32;
+                        char *content = malloc(csz);
+                        int cn = content
+                            ? snprintf(content, csz, "%lld\n%s",
+                                       (long long)ts, msg)
+                            : -1;
+                        if (cn > 0 && (size_t)cn < csz &&
                             hl_dev_sidecar_mac(s->cfg.dev_session,
                                                HL_DEV_SIDECAR_LAST_ERROR,
                                                s->app_dir, (long)getppid(),
                                                content, (size_t)cn, mac) == 0)
                             sh_json_write_kv_string(&w, "mac", mac);
+                        free(content);
                     }
                     sh_json_write_object_end(&w);
                     fputc('\n', ef);

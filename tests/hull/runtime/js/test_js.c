@@ -8461,6 +8461,20 @@ JS_WORKER_CASE(db_async_rows_are_built_like_db_query_rows,
     "  const d = Object.getOwnPropertyDescriptor(r, '__proto__');\n"
     "  check(d && d.value === 7, 'no own __proto__ column');\n")
 
+/* C audit L13: a worker.dispatch VM decoded with the default input
+ * ceilings whatever the manifest set; it gets the app VM's now. */
+static void l13_tight_limits(void)
+{
+    js.base.input_limits = hl_input_limits_default();
+    js.base.input_limits.json_max_depth = 4;
+}
+JS_WORKER_CASE(dispatch_vm_gets_the_app_input_limits,
+    l13_tight_limits(),
+    "  const e = await fails(() => JSON.parse('[[[[[[[[1]]]]]]]]'));\n"
+    "  check(e !== '(no error)', 'a document past the depth ceiling parsed');\n"
+    "  const r = await worker.dispatch(() => JSON.parse('[[1]]')[0][0]);\n"
+    "  check(r === 1, 'a shallow document failed: ' + JSON.stringify(r));\n")
+
 /* Audit 7 M4: a transaction a job left open stayed open on the worker
  * thread's pooled connection (write lock held, later jobs inside it, rolled
  * back with their writes by the next db.async op). It ends with the job. */
@@ -9113,6 +9127,49 @@ UTEST(js_audit5, manifest_ignores_prototype_tampering)
         "delete Object.prototype.write;";
     JS_FreeValue(js.ctx, JS_Eval(js.ctx, undo, sizeof undo - 1, "<c>",
                                  JS_EVAL_TYPE_GLOBAL));
+    cleanup_js();
+}
+
+/* C audit L10: perIpConcurrency / perIpConnections were cast to int64_t
+ * before the ceiling was compared - undefined for 1e300 or 2 ** 70, and
+ * the value was dropped. A whole number past the ceiling is clamped to it,
+ * as the wasm limits are; a fraction or a negative number is still absent. */
+UTEST(js_audit_c_l10, huge_per_ip_limits_clamp_to_the_ceiling)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ limits: { perIpConcurrency: 1e300,\n"
+        "                         perIpConnections: 2 ** 70 } });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<l10>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    HlManifest m;
+    ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+    EXPECT_EQ(m.limits.per_ip_set, 1);
+    EXPECT_EQ(m.limits.per_ip, (uint32_t)HL_REQ_PER_IP_CEIL);
+    EXPECT_EQ(m.limits.per_ip_conn_set, 1);
+    EXPECT_EQ(m.limits.per_ip_conn, (uint32_t)HL_REQ_PER_IP_CEIL);
+    hl_manifest_free(&m);
+    cleanup_js();
+
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code2 =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ limits: { perIpConcurrency: 2.5,\n"
+        "                         perIpConnections: -1 } });\n";
+    val = JS_Eval(js.ctx, code2, strlen(code2), "<l10b>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(hl_manifest_extract_js(js.ctx, &m, NULL), 0);
+    EXPECT_EQ(m.limits.per_ip_set, 0);
+    EXPECT_EQ(m.limits.per_ip_conn_set, 0);
+    hl_manifest_free(&m);
     cleanup_js();
 }
 

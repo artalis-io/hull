@@ -325,6 +325,8 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
                            js->max_heap_bytes);
     op->max_stack_bytes = js->max_stack_bytes;
     op->max_instructions = js->max_instructions;
+    op->input_limits = js->base.input_limits.json_max_depth
+        ? js->base.input_limits : hl_input_limits_default();
     op->with_db = js->base.module_set &&
                   hl_module_set_contains_short(js->base.module_set, "db");
     /* Copy source text (JS_ToCStringLen returns js_malloc'd memory) */
