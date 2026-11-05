@@ -492,8 +492,15 @@ Authy, 1Password - supports).
     a warning) or `false`; anything else (a string, NaN, infinity) makes
     `init` raise (audit 26: a string never expired).
 - `totp.enroll(user_id)` → `{ secret_base32, otpauth_url, qr_svg,
-  recovery_codes }`. Recovery codes are returned ONCE; only PBKDF2
-  hashes persist. Re-enrolling overwrites - intentional, it's the
+  recovery_codes }`. Recovery codes are returned ONCE, as 16 characters
+  (`ABCD-EFGH-JKMN-PQRS`, 31-letter no-confusables alphabet, ~77 bits); only
+  a salted HMAC-SHA256 of each persists (`rch1$<salt hex>$<mac hex>`, the
+  same format in Lua and JS, compared in constant time). They are random,
+  not chosen by a person, so no slow KDF is needed: enrolment costs ~6% of
+  a default run budget (it was ~60% with PBKDF2-100k per code, audit-lua
+  M1). Codes minted before that (12 characters, stored as PBKDF2 hashes)
+  still verify, once, until used or replaced by a re-enrolment; verify and
+  normalisation accept either length. Re-enrolling overwrites - intentional, it's the
   recovery path when both authenticator and codes are lost.
 - `totp.confirm(user_id, code)` → bool. Pairs the authenticator;
   flips the row's `confirmed` flag.

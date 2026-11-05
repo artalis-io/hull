@@ -2884,6 +2884,121 @@ UTEST(js_stdlib, totp_brute_force_lockout)
     cleanup_js_caps();
 }
 
+/* audit-lua M1 (JS twin): a recovery code is a 77-bit random string, so it
+ * is stored as a salted HMAC-SHA256 ("rch1$salt$mac"), not a PBKDF2-100k
+ * password hash. Ten of those made totp.enroll a large share of one run's
+ * budget, which tripped it on a loaded host. The enrolment, at defaults, must
+ * now cost a small share. The budget is armed far above the default so the
+ * pre-fix code completes and is measured rather than tripping. */
+static void totp_m1_eval_module(const char *code)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+}
+
+UTEST(js_stdlib, totp_enroll_costs_a_small_share_of_the_run_budget_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    totp_m1_eval_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "__testHooks('hull:web:middleware:totp').reset();\n"
+        "totp.init({ issuer: 'TestApp' });\n"
+        "globalThis.__totp_m1 = totp;\n");
+    js.max_instructions = 10 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    hl_js_reset_request(&js);
+    uint64_t before = js.meter_charged + JS_GetPendingCharge(js.ctx);
+    int n = eval_int("globalThis.__totp_m1.enroll('cost-user').recoveryCodes.length");
+    uint64_t after = js.meter_charged + JS_GetPendingCharge(js.ctx);
+    ASSERT_EQ(n, 10);
+    EXPECT_LT_MSG(after - before, (uint64_t)HL_DEFAULT_INSTRUCTIONS / 10,
+                  "totp.enroll at defaults costs 10% or more of the run budget");
+    cleanup_js_caps();
+}
+
+/* New-format codes: 16 characters (ABCD-EFGH-JKMN-PQRS), stored as rch1$,
+ * readable by the Lua side's format, verify once, a wrong code of the right
+ * shape is rejected and a 12-character code is not taken for one. */
+UTEST(js_stdlib, totp_recovery_codes_use_the_salted_hmac_format_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    totp_m1_eval_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  const t = __testHooks('hull:web:middleware:totp');\n"
+        "  t.reset();\n"
+        "  totp.init({ issuer: 'TestApp', recoveryCodes: 3 });\n"
+        "  const [codes, hashes] = t.generateRecoveryCodes(2);\n"
+        "  const g = '[ABCDEFGHJKMNPQRSTUVWXYZ2-9]{4}';\n"
+        "  const shape = new RegExp('^' + g + '-' + g + '-' + g + '-' + g + '$').test(codes[0]);\n"
+        "  const fmt = /^rch1\\$[0-9a-f]{32}\\$[0-9a-f]{64}$/.test(hashes[0]);\n"
+        "  const salted = hashes[0] !== t.hashRecoveryCode(codes[0]);\n"
+        "  const direct = t.verifyRecoveryCode(codes[0], hashes[0])\n"
+        "    && t.verifyRecoveryCode(codes[0].toLowerCase().replace(/-/g, ''), hashes[0])\n"
+        "    && !t.verifyRecoveryCode(codes[1], hashes[0])\n"
+        "    && !t.verifyRecoveryCode(codes[0].slice(0, 14), hashes[0]);\n"
+        /* The fixed vector the Lua test checks too (salt 00..0f, code
+         * 'ABCDEFGHJKMNPQRS'): both runtimes read one stored format. */
+        "  const lua = 'rch1$000102030405060708090a0b0c0d0e0f$'\n"
+        "    + '9dd0de33cfd3aa884cd7c75ce252131ed55005c3eaa2e0cc01fa6d1b4d26c5dd';\n"
+        "  const interop = t.verifyRecoveryCode('ABCD-EFGH-JKMN-PQRS', lua)\n"
+        "    && !t.verifyRecoveryCode('ABCD-EFGH-JKMN-PQRT', lua);\n"
+        "  const r = totp.enroll('fmt-user');\n"
+        "  const secret = t.base32Decode(r.secretBase32);\n"
+        "  if (!totp.confirm('fmt-user', t.totpAtStep(secret, t.currentStep(), 6))) return 'confirm failed';\n"
+        "  const wOk = totp.verify('fmt-user', 'ABCD-EFGH-JKMN-PQRS');\n"
+        "  const v1 = totp.verifyWithKind('fmt-user', r.recoveryCodes[0]);\n"
+        "  const again = totp.verify('fmt-user', r.recoveryCodes[0]);\n"
+        "  return [shape, fmt, salted, direct, interop, wOk, v1[0], v1[1], again,\n"
+        "          t.recoveryUsedCount('fmt-user')].join(' ');\n"
+        "}\n"
+        "globalThis.__totp_m1_fmt = run();\n");
+    char *got = eval_str("globalThis.__totp_m1_fmt");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "true true true true true false true recovery false 1");
+    free(got);
+    cleanup_js_caps();
+}
+
+/* Backward compatibility: a recovery code stored before audit-lua M1 (12
+ * characters, a crypto.hashPassword PBKDF2 hash) still verifies, once, and is
+ * marked used like a new one. */
+UTEST(js_stdlib, totp_legacy_pbkdf2_recovery_codes_still_verify_once_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    totp_m1_eval_module(
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "import { crypto } from 'hull:crypto';\n"
+        "function run() {\n"
+        "  const t = __testHooks('hull:web:middleware:totp');\n"
+        "  t.reset();\n"
+        "  totp.init({ issuer: 'TestApp', recoveryCodes: 0 });\n"
+        "  const r = totp.enroll('old-user');\n"
+        "  const secret = t.base32Decode(r.secretBase32);\n"
+        "  if (!totp.confirm('old-user', t.totpAtStep(secret, t.currentStep(), 6))) return 'confirm failed';\n"
+        "  const legacy = crypto.hashPassword('ABCDEFGHJKMN');\n"
+        "  t.addRecoveryHash('old-user', legacy);\n"
+        "  const direct = t.verifyRecoveryCode('abcd-efgh-jkmn', legacy)\n"
+        "    && !t.verifyRecoveryCode('ABCD-EFGH-JKMP', legacy);\n"
+        "  const wrong = totp.verify('old-user', 'ABCD-EFGH-JKMP');\n"
+        "  const v1 = totp.verifyWithKind('old-user', 'ABCD-EFGH-JKMN');\n"
+        "  const again = totp.verify('old-user', 'ABCD-EFGH-JKMN');\n"
+        "  return [direct, wrong, v1[0], v1[1], again, t.recoveryUsedCount('old-user')].join(' ');\n"
+        "}\n"
+        "globalThis.__totp_m1_old = run();\n");
+    char *got = eval_str("globalThis.__totp_m1_old");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "true false true recovery false 1");
+    free(got);
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, totp_recovery_and_disable)
 {
     init_js_with_caps();
@@ -3229,9 +3344,8 @@ UTEST(js_stdlib, totp_rekey_batch_helper_js)
         "  return 1;\n"
         "}\n"
         "globalThis.__totp_rekey = run();\n";
-    /* Thirty recovery-code hashes in one run: several requests' worth of KDF
-     * work at its measured cost (the binding dispatcher). */
-    js.max_instructions = 4 * (int64_t)HL_DEFAULT_INSTRUCTIONS;
+    /* Thirty recovery codes in one run, at the default budget: a salted
+     * HMAC each, not a PBKDF2 (audit-lua M1). */
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val)) hl_js_dump_error(&js);
