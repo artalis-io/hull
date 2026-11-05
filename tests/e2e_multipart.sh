@@ -863,13 +863,20 @@ fi
 # part.read() buffered a whole part on the server allocator, uncharged and
 # with no cap (the route's multipart caps defaulted to unlimited), and past
 # the heap the ArrayBuffer copy's JS_EXCEPTION was RESOLVED as the value.
-# Under an 8 MB heap a 12 MB field is refused with a rejection the handler
-# catches; a 1 MB one still reads whole.
+# Under an 8 MB heap a field one byte over 8 MiB is refused with a rejection
+# the handler catches; a 2 MB one still reads whole. The refused field is
+# one byte over on purpose: the refusal ends the stream and the handler
+# answers at once, and the server drains at most 64 KiB / 500 ms of the body
+# after an early answer, so a field megabytes over the limit left megabytes
+# in flight, the close reset the connection, and on a loaded runner curl's
+# send failed ("Broken pipe") before it read the 413. One byte over is
+# refused on the chunk that carries the field's last byte, so only the
+# closing boundary is left to drain.
 if [ "$RUNTIME" != "lua" ]; then
     echo ""
     echo "=== E2E multipart: js part.read() under a small heap ==="
     # Text fields (curl -F "name=<file" sends a file's bytes as a field value).
-    head -c 12582912 /dev/zero | tr '\0' 'h' > "$TMPDIR_WORK/huge.txt"
+    head -c 8388609 /dev/zero | tr '\0' 'h' > "$TMPDIR_WORK/huge.txt"
     head -c 2097152 /dev/zero | tr '\0' 'm' > "$TMPDIR_WORK/medium.txt"
     cat > "$TMPDIR_WORK/heap_app.js" <<'EOF2'
 import { app } from "hull:app";
