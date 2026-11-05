@@ -199,6 +199,14 @@ await test("attrs decode only the flagged fields", () => {
     assertEq(a.mtime, undefined);
 });
 
+await test("a size past 2^53 - 1 decodes as null, not a failure (#1009 review)", () => {
+    const at = (hi, lo) => sftp.decodeAttrs(wire.reader(
+        wire.writer().uint32(sftp.ATTR_SIZE).uint32(hi).uint32(lo).build())).size;
+    assertEq(at(0x001FFFFF, 0xFFFFFFFF), Number.MAX_SAFE_INTEGER);
+    assertEq(at(0x00200000, 0), null);
+    assertEq(at(0xFFFFFFFF, 0xFFFFFFFF), null);
+});
+
 await test("a dishonest extended count runs out of buffer", () => {
     const blob = wire.writer().uint32(sftp.ATTR_EXTENDED).uint32(1000).build();
     assertRaises(() => sftp.decodeAttrs(wire.reader(blob)), "lying extended count");

@@ -256,10 +256,24 @@ await test("directional overrides are dropped", () => {
     assertEq(wire.safeName(s, 200), "filetxt.exex");
 });
 
-await test("ordinary non-ASCII text is kept intact", () => {
+// JS hands back DECODED text (Lua keeps the bytes): a kept multi-byte
+// character as byte-string code units would be UTF-8-encoded again when
+// logged, and a continuation byte 0x80-0x9F became a real C1 control.
+await test("ordinary non-ASCII text is kept intact, as decoded text", () => {
     const s = utf8("Grüße, 日本, ") + u8(0x1F600);
-    assertEq(wire.safeText(s), s);
-    assertEq(wire.safeName(s, 200), s);
+    const want = "Grüße, 日本, \u{1F600}";
+    assertEq(wire.safeText(s), want);
+    assertEq(wire.safeName(s, 200), want);
+});
+
+await test("a kept character never yields a C1 code unit (#1009 review)", () => {
+    // U+00DB is C3 9B in UTF-8: kept byte for byte it was U+009B, CSI.
+    const out = wire.safeText(utf8("Û") + utf8("€"));
+    assertEq(out, "Û€");
+    for (let i = 0; i < out.length; i++) {
+        const c = out.charCodeAt(i);
+        assertEq(c >= 0x80 && c <= 0x9F, false, "code unit " + c.toString(16) + ":");
+    }
 });
 
 await test("malformed UTF-8 is dropped byte by byte, not passed through", () => {
@@ -270,7 +284,7 @@ await test("malformed UTF-8 is dropped byte by byte, not passed through", () => 
 await test("truncation never leaves half a character", () => {
     const e = utf8("é");
     const out = wire.safeName(e.repeat(40), 7);   // 2 bytes each
-    assertEq(out, e + e + e + "...");
+    assertEq(out, "ééé...");
 });
 
 // peek_uint32 -----------------------------------------------------------

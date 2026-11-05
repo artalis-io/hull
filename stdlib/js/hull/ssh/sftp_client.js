@@ -110,16 +110,16 @@ class Sftp {
     async pump() {
         if (this.broken) this._throwBroken();
         const t = this.t, ms = this.replyMs;
-        if (ms > 0) t.setDeadline(ms);
+        const dl = ms > 0 ? t.pushDeadline(ms) : null;
         let m;
         try {
             m = await t.channelMessage(this.ch);
         } catch (e) {
-            if (ms > 0) t.setDeadline(0);
+            t.popDeadline(dl);
             if (e && typeof e === "object" && e.code === "deadline") await this.abandon();
             throw e;
         }
-        if (ms > 0) t.setDeadline(0);
+        t.popDeadline(dl);
         if (m.type === "data") {
             if (m.data.length > 0) {
                 this.chunks.push(m.data);
@@ -342,9 +342,12 @@ class Sftp {
         const t = this.t;
         this.broken = sshError("timeout", "no reply from the sftp server within "
             + String(this.replyMs) + " ms; the session is closed");
-        t.setDeadline(ABANDON_MS);
-        await t.closeChannel(this.ch);
-        t.setDeadline(0);
+        const dl = t.pushDeadline(ABANDON_MS, true);
+        try {
+            await t.closeChannel(this.ch);
+        } finally {
+            t.popDeadline(dl);
+        }
         if (!this.ch.closed) {
             t.dead = { code: "timeout", detail: "a timed-out sftp session's channel did not close" };
             t.close();

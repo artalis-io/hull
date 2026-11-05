@@ -488,6 +488,20 @@ await test("without a callback the output cap still applies", async () => {
     assertEq(hasType(s, 97), true, "an aborted exec must close its channel:");
 });
 
+await test("maxOutput 0 is a 0-byte cap; a non-integer is refused (#1009 review)", async () => {
+    const s = fakeStream(conf() + okReply() + data("x") + status(0) + eof() + fin(), 64);
+    const t = transport.new(s, stubCrypto());
+    const [r, err] = await t.exec("cmd", { maxOutput: 0 });
+    assertEq(r, null);
+    assertEq(err.code, "output_too_large");
+    for (const bad of [NaN, "16", -1, 1.5, {}]) {
+        const t2 = transport.new(fakeStream("", 64), stubCrypto());
+        const [r2, err2] = await t2.exec("cmd", { maxOutput: bad });
+        assertEq(r2, null);
+        assertEq(err2 && err2.code, "bad_argument", String(bad));
+    }
+});
+
 await test("streaming one stream still accumulates the other", async () => {
     const s = fakeStream(conf() + okReply() + data("out") + errdata("err")
         + status(0) + eof() + fin(), 7);
@@ -2068,6 +2082,32 @@ await test("the connection's own busy failure is not a runtime refusal", async (
     try { await t.sendPacket("x"); } catch (e) { err = e; }
     assertEq(err && err.code, "busy");
     assertEq(Object.prototype.hasOwnProperty.call(err, "ssh"), true, "marked as the connection's:");
+});
+
+await test("deadlines nest: an inner operation puts back what is left of the outer one", async () => {
+    const s = scriptedStream([]);
+    let now = 0;
+    const t = transport.new(s, stubCrypto(), { clock: () => now });
+    const outer = t.pushDeadline(5000);        // an exec with timeoutMs 5000
+    now = 1000;
+    const inner = t.pushDeadline(60000);       // an SFTP call from its onStdout
+    now = 2000;
+    t.popDeadline(inner);
+    t.popDeadline(outer);
+    assertEq(s.deadlines.join(","), "5000,4000,3000,0",
+             "the outer bound survives the inner one:");
+});
+
+await test("a cleanup bound holds alone, even past an expired outer one", async () => {
+    const s = scriptedStream([]);
+    let now = 0;
+    const t = transport.new(s, stubCrypto(), { clock: () => now });
+    const outer = t.pushDeadline(10);
+    now = 100;
+    const drain = t.pushDeadline(500, true);
+    t.popDeadline(drain);
+    t.popDeadline(outer);
+    assertEq(s.deadlines.join(","), "10,500,1,0", "cleanup, then the expired outer:");
 });
 
 globalThis.__test_pass = pass;

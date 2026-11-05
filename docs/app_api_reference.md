@@ -2187,7 +2187,7 @@ try {
 
 | Lua | JS | Notes |
 |-----|----|-------|
-| `require("hull.ssh")` | `import { ssh } from "hull:ssh"` | The manifest declares `"hull/ssh@1"` in both; it admits hull/crypto, hull/encoding and hull/fs. |
+| `require("hull.ssh")` | `import { ssh } from "hull:ssh"` | The manifest declares `"hull/ssh@1"` in both; it admits hull/crypto, hull/encoding, hull/fs and hull/time (the transport's deadline clock). |
 | `ssh = { connect = { hosts, ports, users }, tunnel = { hosts, ports } }` | `ssh: { connect: { hosts, ports, users }, tunnel: { hosts, ports } }` | The same grant, read by each runtime's manifest extractor into one `HlManifestSsh`. Ports are integers. |
 | `ssh.connect(opts)` -> conn \| `nil, err` | `await ssh.connect(opts)` -> conn, or rejects | Options camelCase: `timeout_ms` -> `timeoutMs`, `keepalive_ms` / `keepalive_max` / `idle_ms`, `passphrase_env` -> `passphraseEnv`, `on_banner` -> `onBanner`, `tunnel.tls_hostname` -> `tlsHostname`, `tunnel.destination_header` -> `destinationHeader`. `port`, `timeoutMs` and `tunnel.port` must be integers (`Number.isInteger`), as Lua's `math.type`. |
 | `ssh.load_key(text, opts)` | `ssh.loadKey(text, opts)` | Synchronous. A refusal raises / throws with `code` (`passphrase_required`, `bad_passphrase`, `unsupported_key_type`). |
@@ -2206,6 +2206,10 @@ try {
 | err `{ code, detail, fingerprint, stored_fingerprint, key_blob, methods, key, status }` | `e.code`, `e.detail`, `e.fingerprint`, `e.storedFingerprint`, `e.keyBlob`, `e.methods`, `e.key`, `e.status` | Every Lua `(nil, err)` is a rejection in JS. `e.key` (which entry of `keys` failed to load) is 0-based. |
 | a runtime refusal raised as `"[hull:wait_refused] ..."` / `"[hull:busy] ..."` | thrown unchanged, `e.code` `wait_refused` / `busy` | For example, a connect or exec inside a database transaction. Never wrapped as `io_error` in either runtime. |
 | an error raised by the app's own callback | thrown unchanged | Not a connection failure. |
+| peer text (a banner, an exit-signal message) is UTF-8 bytes, controls stripped | the same text, **decoded** (one character per code point), controls stripped | A kept character as byte-string code units would be UTF-8-encoded again when logged, and its continuation bytes would read as C1 controls. |
+| an SFTP `size` is an integer | a number, or `null` past 2^53 - 1 | A JS number cannot hold it exactly; one such entry no longer fails a whole `list`. |
+| `max_output` | `maxOutput`: a non-negative integer, else `bad_argument` | `0` is a 0-byte cap in both. |
+| `tunnel.headers` entries are strings | must be primitive strings (a TypeError otherwise) | A `String` object or an object with `toString` is refused: it would have been turned into text, line breaks and all, past the CR / LF check. |
 | bytes are Lua strings | bytes are **byte strings** (one code unit 0..255 per byte); inputs also take an `ArrayBuffer` / typed array | Key text, `stdin`, the command, SFTP paths and data, `keyBlob`. A string with a character above 0xFF is a TypeError: pass text through `encoding.utf8.encode` (and output through `encoding.utf8.decode`). Outputs (`stdout`, `stderr`, chunks, SFTP reads) are byte strings. |
 
 Only representation differs (camelCase, 0-based indices, rejections, byte

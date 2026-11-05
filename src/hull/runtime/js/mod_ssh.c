@@ -402,6 +402,14 @@ static JSValue ssh_park(JSContext *ctx, HlJsSshStream *o, const char *what,
     return promise;
 }
 
+/* Whether `d` is an integer in [lo, hi]. The range is tested first: casting a
+ * double outside int64_t's range (1e300, an infinity, NaN) to it is undefined
+ * behaviour, which the old `d != (double)(int64_t)d` test hit first. */
+static int ssh_int_in(double d, double lo, double hi)
+{
+    return d >= lo && d <= hi && d == (double)(int64_t)d;
+}
+
 /* A second waiter on a stream that already has one parked: refused before
  * anything is touched, coded "busy" (audit 36), as in Lua. NULL when free. */
 static int ssh_busy(const HlJsSshStream *o)
@@ -431,7 +439,7 @@ static JSValue js_ssh_read(JSContext *ctx, JSValueConst this_val,
         if (!JS_IsNumber(argv[0]))
             return JS_ThrowTypeError(ctx, "ssh: read size must be an integer");
         if (JS_ToFloat64(ctx, &want, argv[0])) return JS_EXCEPTION;
-        if (want != (double)(int64_t)want)
+        if (!ssh_int_in(want, -9007199254740991.0, 9007199254740991.0))
             return JS_ThrowTypeError(ctx, "ssh: read size must be an integer");
     }
     if (!(want > 0)) return push_err(ctx, "read size must be positive");
@@ -528,7 +536,7 @@ static int bound_arg(JSContext *ctx, int argc, JSValueConst *argv, int *ms)
 {
     double v = 0;
     if (argc < 1 || !JS_IsNumber(argv[0]) || JS_ToFloat64(ctx, &v, argv[0]) ||
-        v != (double)(int64_t)v || v < 0 || v > 24.0 * 3600 * 1000) {
+        !ssh_int_in(v, 0, 24.0 * 3600 * 1000)) {
         if (!JS_HasException(ctx))
             JS_ThrowRangeError(ctx, "ssh: a wait bound must be 0..86400000 ms");
         return -1;
@@ -599,7 +607,7 @@ static long opt_int_in(JSContext *ctx, JSValueConst obj, const char *name,
     if (!JS_IsUndefined(v) && !JS_IsNull(v)) {
         double d = 0;
         if (!JS_IsNumber(v) || JS_ToFloat64(ctx, &d, v) ||
-            d != (double)(int64_t)d || d < (double)lo || d > (double)hi)
+            !ssh_int_in(d, (double)lo, (double)hi))
             out = -1;
         else
             out = (long)d;

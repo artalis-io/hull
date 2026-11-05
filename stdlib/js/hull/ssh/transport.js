@@ -29,6 +29,7 @@
 // chacha20-poly1305 nonce).
 
 import { packet } from "hull:ssh:packet";
+import { time } from "hull:time";
 import { kexinit } from "hull:ssh:kexinit";
 import { kex } from "hull:ssh:kex";
 import { hostkey } from "hull:ssh:hostkey";
@@ -95,9 +96,52 @@ class Transport {
         if (w > 0 && this.stream.wait) this.stream.wait(w);
     }
 
-    // Bound the current phase: the stream's deadline, `ms` from now (0 clears).
+    // Bound the current phase: the stream's deadline, `ms` from now (0
+    // clears). Replaces every bound set by pushDeadline: the connect's own.
     setDeadline(ms) {
-        if (this.stream.deadline) this.stream.deadline(ms);
+        this.deadlines = [];
+        if (ms > 0) return this.pushDeadline(ms);
+        if (this.stream.deadline) this.stream.deadline(0);
+        return null;
+    }
+
+    // A bound for one operation, which may run inside another's (an SFTP call
+    // or a second exec from an exec's onStdout): the stream has ONE deadline,
+    // and an inner operation that cleared it when done left the outer one
+    // with none. So bounds nest: the stream gets the soonest one active, and
+    // popDeadline(token) puts back what is left of the rest. A `cleanup`
+    // bound (closing a channel that timed out) holds alone while it is
+    // active - an outer bound already past must not stop the close.
+    pushDeadline(ms, cleanup) {
+        const now = this.clock();
+        const tok = { at: now + ms, cleanup: cleanup === true };
+        this.deadlines.push(tok);
+        this.applyDeadline(now);
+        return tok;
+    }
+
+    popDeadline(tok) {
+        if (!tok) return;
+        const i = this.deadlines.indexOf(tok);
+        if (i < 0) return;
+        this.deadlines.splice(i, 1);
+        this.applyDeadline(this.clock());
+    }
+
+    applyDeadline(now) {
+        if (!this.stream.deadline) return;
+        const d = this.deadlines;
+        if (d.length === 0) { this.stream.deadline(0); return; }
+        let at = null;
+        for (let i = d.length - 1; i >= 0; i--) {
+            if (d[i].cleanup) { at = d[i].at; break; }
+        }
+        if (at === null) {
+            for (const t of d) if (at === null || t.at < at) at = t.at;
+        }
+        const left = at - now;
+        // Already past: the next wait reports the deadline at once.
+        this.stream.deadline(left > 0 ? left : 1);
     }
 
     // A wait expired with nothing from the server. See the Lua twin.
@@ -789,6 +833,8 @@ function newTransport(stream, crypto, opts) {
     opts = opts || {};
     const opt = (v, d) => (v === undefined || v === null) ? d : v;
     const t = new Transport();
+    t.clock = opts.clock || time.clock;
+    t.deadlines = [];
     t.keepaliveMs = opt(opts.keepaliveMs, KEEPALIVE_MS);
     t.keepaliveMax = opt(opts.keepaliveMax, KEEPALIVE_MAX);
     t.idleMs = opt(opts.idleMs, IDLE_MS);

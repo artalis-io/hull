@@ -133,7 +133,13 @@ function encodeAttrs(a) {
 function decodeAttrs(r) {
     const flags = r.uint32();
     const a = { flags };
-    if ((flags & ATTR_SIZE) !== 0) a.size = r.uint64();
+    if ((flags & ATTR_SIZE) !== 0) {
+        // A size past 2^53 - 1 is no exact JS number: reported as null, not
+        // thrown - one such entry failed a whole list() (#1009 review).
+        const hi = r.uint32(), lo = r.uint32();
+        const v = hi * 0x100000000 + lo;
+        a.size = v <= Number.MAX_SAFE_INTEGER ? v : null;
+    }
     if ((flags & ATTR_UIDGID) !== 0) { a.uid = r.uint32(); a.gid = r.uint32(); }
     if ((flags & ATTR_PERMISSIONS) !== 0) a.permissions = r.uint32();
     if ((flags & ATTR_ACMODTIME) !== 0) { a.atime = r.uint32(); a.mtime = r.uint32(); }

@@ -265,12 +265,17 @@ function decodeAt(s, i, len) {
 }
 
 // Keep what a terminal will display as written: a malformed or stray byte is
-// dropped, a control code point is dropped, and everything else is kept
-// byte-for-byte. `keepLayout` lets tab and newline through.
-function stripControls(s, keepLayout) {
+// dropped, a control code point is dropped, and everything else is kept.
+// `keepLayout` lets tab and newline through. Unlike Lua, which keeps the
+// bytes, the result is DECODED text (one code point per character, not one
+// code unit per byte): a kept "\u00DB" as the byte string "\xC3\x9B" would
+// be UTF-8-encoded again when logged, and its 0x9B byte became a real C1 CSI
+// (#1009 review). `maxBytes` bounds the input bytes kept, as Lua's
+// `s:sub(1, max)` does, and stops on a whole character; -> [text, truncated].
+function stripControls(s, keepLayout, maxBytes) {
     const out = [];
     const n = s.length;
-    let i = 0;
+    let i = 0, kept = 0;
     while (i < n) {
         const c = s.charCodeAt(i);
         const len = (c < 0x80 && 1) || (c >= 0xC2 && c <= 0xDF && 2)
@@ -282,29 +287,33 @@ function stripControls(s, keepLayout) {
         } else {
             if ((cp >= 0x20 && cp !== 0x7F && !isInvisibleControl(cp))
                 || (keepLayout && (cp === 0x09 || cp === 0x0A))) {
-                out.push(s.slice(i, i + len));
+                if (maxBytes !== undefined && kept + len > maxBytes) {
+                    return [out.join(""), true];
+                }
+                out.push(String.fromCodePoint(cp));
+                kept += len;
             }
             i += len;
         }
     }
-    return out.join("");
+    return [out.join(""), false];
 }
 
 // Multi-line text: a banner. Tab and newline survive; CR and every other
 // control go.
 function safeText(s) {
     if (typeof s !== "string") return String(s);
-    return stripControls(s, true);
+    return stripControls(s, true)[0];
 }
 
 // Single-line text: a name or reason interpolated into one line of an error
-// message. Tab and newline go too, and the result is bounded.
+// message. Tab and newline go too, and the result is bounded (in bytes of the
+// kept text, as Lua's).
 function safeName(s, max) {
     if (typeof s !== "string") return String(s);
-    s = stripControls(s, false);
     if (max === undefined || max === null) max = 64;
-    if (s.length > max) return stripControls(s.slice(0, max), false) + "...";
-    return s;
+    const [text, truncated] = stripControls(s, false, max);
+    return truncated ? text + "..." : text;
 }
 
 // Convenience --------------------------------------------------------

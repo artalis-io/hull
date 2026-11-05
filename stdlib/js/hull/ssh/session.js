@@ -232,6 +232,14 @@ const Session = {
             && (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400000)) {
             return [null, { code: "bad_timeout", detail: String(timeout) }];
         }
+        // 0 is a 0-byte cap, as in Lua; anything else that is not a
+        // non-negative integer is refused (a NaN limit never capped at all).
+        const maxOutput = opts.maxOutput;
+        if (maxOutput !== undefined && maxOutput !== null
+            && (!Number.isInteger(maxOutput) || maxOutput < 0)) {
+            return [null, { code: "bad_argument",
+                            detail: "maxOutput must be a non-negative integer" }];
+        }
 
         const [ch, cerr] = await this.openSession();
         if (!ch) return [null, cerr];
@@ -247,7 +255,8 @@ const Session = {
         }
 
         const out = [], errout = [];
-        const limit = opts.maxOutput || (8 * 1024 * 1024);
+        const limit = (maxOutput === undefined || maxOutput === null)
+            ? 8 * 1024 * 1024 : maxOutput;
         let buffered = 0;
         let overflow = false;
 
@@ -354,17 +363,20 @@ const Session = {
             return null;
         };
 
-        if (timeout) this.setDeadline(timeout);
+        const dl = timeout ? this.pushDeadline(timeout) : null;
         let failure;
         try {
             failure = await drive();
         } catch (e) {
-            if (timeout) this.setDeadline(0);
+            this.popDeadline(dl);
             if (e && typeof e === "object" && e.code === "deadline") {
                 // The COMMAND ran out of time; the connection may be fine.
-                this.setDeadline(CHANNEL_DRAIN_MS);
-                await this.closeChannel(ch);
-                this.setDeadline(0);
+                const drainDl = this.pushDeadline(CHANNEL_DRAIN_MS, true);
+                try {
+                    await this.closeChannel(ch);
+                } finally {
+                    this.popDeadline(drainDl);
+                }
                 if (!ch.closed) {
                     this.dead = { code: "timeout",
                                   detail: "a timed-out command's channel did not close" };
@@ -377,7 +389,7 @@ const Session = {
             await this.closeChannel(ch);
             throw e;
         }
-        if (timeout) this.setDeadline(0);
+        this.popDeadline(dl);
         if (failure) return await abort(failure);
         await this.closeChannel(ch);
 

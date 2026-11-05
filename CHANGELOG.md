@@ -35,6 +35,16 @@ release-artifact layout).
     The connection's own `busy` failure is marked as hull:ssh's (`hull:_refusal` no longer takes
     it for a runtime refusal, which `hull:jobs` handed back uncounted, re-running the command),
     and an SFTP request cut short mid-frame leaves the session broken.
+  - Also from that review: peer text the JS client hands the app (a banner, an exit-signal
+    message, names in error details) is decoded text, so a kept non-ASCII character no longer
+    reaches a log as C1 controls; an SFTP size past 2^53 - 1 reads as `null` instead of failing
+    the whole call; `maxOutput` must be a non-negative integer (`0` is a 0-byte cap, as in Lua);
+    `mod_ssh.c`'s integer checks no longer cast an out-of-range double (undefined behaviour).
+  - Both runtimes: the WebSocket upgrade through a tunnel runs under the connect deadline (a relay
+    that never answered it parked the caller with no bound), and an operation's deadline nests
+    inside another's - an SFTP call or a second exec from an exec's output callback cleared the
+    outer command's `timeout_ms`, and now puts back what is left of it. `hull/ssh` admits
+    `hull/time` for the clock.
 
 ## [0.18.0] - 2026-11-03
 

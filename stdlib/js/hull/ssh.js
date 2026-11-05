@@ -556,6 +556,12 @@ function tunnelOpener(tunnelIn, crypto, dial) {
         }));
         if (!raw) return [null, { code: code || "connect_failed", detail: err }];
 
+        // The dial's bound ends at TCP + TLS; the upgrade's reply would wait
+        // with none (a relay that never answers parked the caller for good).
+        // The transport sets its own deadline once the stream is handed over.
+        if (Number.isInteger(o.timeoutMs) && o.timeoutMs > 0 && raw.deadline) {
+            raw.deadline(o.timeoutMs);
+        }
         const [s, werr] = await wsStream.connect(raw, {
             host: tunnel.tlsHostname || tunnel.host,
             path: tunnel.path,

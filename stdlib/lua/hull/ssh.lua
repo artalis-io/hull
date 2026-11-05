@@ -550,6 +550,12 @@ local function tunnel_opener(tunnel, crypto, dial)
         })
         if not raw then return nil, { code = code or "connect_failed", detail = err } end
 
+        -- The dial's bound ends at TCP + TLS; the upgrade's reply would wait
+        -- with none (a relay that never answers parked the caller for good).
+        -- The transport sets its own deadline once the stream is handed over.
+        if math.type(o.timeout_ms) == "integer" and o.timeout_ms > 0 and raw.deadline then
+            raw:deadline(o.timeout_ms)
+        end
         local s, werr = ws.connect(raw, {
             host    = tunnel.tls_hostname or tunnel.host,
             path    = tunnel.path,

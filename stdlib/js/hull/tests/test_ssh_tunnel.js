@@ -269,6 +269,17 @@ await test("the tunnel options are read once: the Host header names the host the
     assertEq((r.written[0] || "").indexOf("other-origin") < 0, true, "the second answer is never used:");
 });
 
+await test("the upgrade runs under the connect deadline (#1009 review)", async () => {
+    const r = relay(upgraded());
+    const log = [];
+    r.deadline = (ms) => { log.push("deadline:" + String(ms)); };
+    const write = r.write;
+    r.write = async function (x) { log.push("write"); return write.call(this, x); };
+    await connectVia(r);
+    assertEq(log[0], "deadline:30000", "bounded before the request goes out: " + log.join(" "));
+    assertEq(log.indexOf("write") > 0, true);
+});
+
 await test("an IPv6 destination is bracketed", async () => {
     const r = relay(upgraded());
     await rejects(ssh.connect({

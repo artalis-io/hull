@@ -652,6 +652,11 @@ app.main(async (ctx) => {
   `e.storedFingerprint`, `e.keyBlob`; `auth_failed` / `partial_success` carry
   `e.methods`. A runtime refusal (`wait_refused` inside a transaction, `busy`)
   and an error your own callback throws come through unchanged.
+- Peer text handed to the app - an `onBanner` banner, an exit-signal message,
+  the names inside error details - is decoded text with controls stripped (Lua
+  hands back the UTF-8 bytes). An SFTP `size` past 2^53 - 1 reads as `null`.
+  `maxOutput` must be a non-negative integer (`bad_argument` otherwise), and
+  `tunnel.headers` entries primitive strings.
 - Text with characters outside Latin-1 goes in through `encoding.utf8.encode`
   and comes out through `encoding.utf8.decode`; a string with a character above
   0xFF is refused rather than guessed at.
