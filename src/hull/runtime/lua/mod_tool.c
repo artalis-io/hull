@@ -90,7 +90,7 @@ static HlToolUnveilCtx *get_unveil_ctx(lua_State *L)
     return ctx;
 }
 
-const HlToolUnveilCtx *hl_lua_tool_unveil_ctx(lua_State *L)
+HlToolUnveilCtx *hl_lua_tool_unveil_ctx(lua_State *L)
 {
     return get_unveil_ctx(L);
 }

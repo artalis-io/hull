@@ -444,7 +444,7 @@ static int l_tool_migrate_status(lua_State *L)
                           "file only (use `hull migrate status` for others)");
         return 2;
     }
-    const HlToolUnveilCtx *uctx = hl_lua_tool_unveil_ctx(L);
+    HlToolUnveilCtx *uctx = hl_lua_tool_unveil_ctx(L);
     if (uctx && hl_tool_unveil_check(uctx, file, 'r') != 0) {
         lua_pushnil(L);
         lua_pushfstring(L, "the tool sandbox does not grant %s", file);

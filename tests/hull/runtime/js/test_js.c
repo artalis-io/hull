@@ -7855,8 +7855,8 @@ UTEST(js_db_async, submit_failure_clears_last_async_cont)
  * calling db.async / compute.async / worker.dispatch submitted to the pool,
  * whose first submit started its threads - before the phase-2 sandbox.
  * hl_js_async_gate now refuses for the whole load, the code after a top-level
- * await included, with the wait_refused code; and the backends refuse to
- * start the pool while a runner holds it (hl_async_pool_hold). */
+ * await included, with the wait_refused code. (The pool hold, the second
+ * line, is tested in tests/hull/cap/test_async_teardown.c.) */
 static int l4_load_app(const char *src)
 {
     char path[HL_TEST_PATH_MAX];
@@ -7909,22 +7909,6 @@ UTEST(js_audit_c_l4, top_level_async_op_is_refused)
     be->pool_free(pool);
     js.base.thread_pool = NULL;
     cleanup_js_caps();
-    be->free(actx);
-}
-
-UTEST(js_audit_c_l4, held_pool_starts_no_worker)
-{
-    const HlAsyncBackend *be = hl_async_backend();
-    HlAsyncBackendCtx *actx = NULL;
-    ASSERT_EQ(be->init(&actx, NULL), 0);
-    HlAsyncBackendPool *pool = NULL;
-    ASSERT_EQ(be->pool_create(&pool, actx, 1, 4), 0);
-    hl_async_pool_hold();
-    EXPECT_NE(be->pool_submit(pool, dbsat_noop, dbsat_noop, dbsat_noop, NULL), 0);
-    hl_async_pool_release();
-    EXPECT_EQ(be->pool_submit(pool, dbsat_noop, dbsat_noop, dbsat_noop, NULL), 0);
-    for (int i = 0; i < 20; i++) be->tick(actx, 5);
-    be->pool_free(pool);
     be->free(actx);
 }
 
