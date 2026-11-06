@@ -199,5 +199,24 @@ do
     ok(n_diag(all, "lua.limit.max_depth") >= 1, "depth: max_depth trips")
 end
 
+-- A field cut off at max_depth consumes no token. With blank space before it, its
+-- range used to end at the previous token, before its own start (#1017, found by
+-- fuzz_lua_source). Every node keeps start <= stop and its slice matches.
+do
+    local deep = "{ " .. string.rep("{ ", 60)
+    local root, all = parse_expr(deep, { limits = { max_depth = 20 } })
+    ok(n_diag(all, "lua.limit.max_depth") >= 1, "depth: table nesting trips max_depth")
+    local good = true
+    local function walk(n)
+        if type(n) ~= "table" then return end
+        if n.range then
+            if n.range.stop < n.range.start then good = false end
+        end
+        for k, v in pairs(n) do if k ~= "range" then walk(v) end end
+    end
+    walk(root)
+    ok(good, "depth: no node ends before it starts after a max_depth cut")
+end
+
 print(string.format("test_parser: %d passed, %d failed", pass, fail))
 return { pass = pass, fail = fail, failures = failures }
