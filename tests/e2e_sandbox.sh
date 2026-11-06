@@ -726,7 +726,7 @@ app.main(() => {
 });
 EOF
     LOGFILE9="$WORKDIR/hull_t9.log"
-    "$HULL" -p 19889 "$WORKDIR/t9srv/app.lua" >"$LOGFILE9" 2>&1 &
+    "$HULL" -l debug -p 19889 "$WORKDIR/t9srv/app.lua" >"$LOGFILE9" 2>&1 &
     SERVER_PID=$!
     if wait_for_server 19889; then
         R9=$(curl -s "http://127.0.0.1:19889/echo")
@@ -742,7 +742,7 @@ EOF
         stop_server
         fail "sandbox_audit43 - hull did not start: $(tail -5 "$LOGFILE9")"
     fi
-    OUT9=$("$HULL" "$WORKDIR/t9cli/app.js" 2>&1)
+    OUT9=$("$HULL" -l debug "$WORKDIR/t9cli/app.js" 2>&1)
     check_contains "sandbox_audit43.cli_compute_after_phase2" "$OUT9" "echo top main"
     if [ "$T9_COSMO" = "1" ]; then
         check_not_contains "sandbox_audit43.cosmo_cli_no_extra_thread" "$OUT9" "threads when the sandbox"
