@@ -1,0 +1,248 @@
+--- a/core/shared/mem-alloc/ems/ems_alloc.c
++++ b/core/shared/mem-alloc/ems/ems_alloc.c
+@@ -26,13 +26,33 @@
+ #define UNLOCK_HEAP(heap) os_mutex_unlock(&heap->lock)
+ #endif
+ 
++/* Hull ext (0009): these checks covered only a node's START address, and
++ * the allocator then read or wrote the whole node (a chunk header, a
++ * normal-list node, a tree node, a free chunk up to its size). An app heap
++ * sits inside guest linear memory, which the guest can write, and Hull builds
++ * with no guard region (WASM_DISABLE_HW_BOUND_CHECK=1): a 1-page module's heap
++ * ends where the mapping does. So every check now requires the WHOLE accessed
++ * range to lie in [heap_base_addr, heap_end_addr), with overflow-safe
++ * arithmetic; a failure is heap corruption, handled as before. */
+ static inline bool
+-hmu_is_in_heap(void *hmu, gc_uint8 *heap_base_addr, gc_uint8 *heap_end_addr)
++hmu_range_in_heap(void *hmu, uintptr_t size, gc_uint8 *heap_base_addr,
++                  gc_uint8 *heap_end_addr)
+ {
+     gc_uint8 *addr = (gc_uint8 *)hmu;
+-    return (addr >= heap_base_addr && addr < heap_end_addr) ? true : false;
++    return (addr >= heap_base_addr && addr < heap_end_addr
++            && size <= (uintptr_t)(heap_end_addr - addr))
++               ? true
++               : false;
+ }
+ 
++/* A chunk header: every caller reads or writes at least that. */
++#define hmu_is_in_heap(hmu, base, end) \
++    hmu_range_in_heap((hmu), HMU_SIZE, (base), (end))
++#define hmu_normal_node_in_heap(node, base, end) \
++    hmu_range_in_heap((node), sizeof(hmu_normal_node_t), (base), (end))
++#define hmu_tree_node_in_heap(node, base, end) \
++    hmu_range_in_heap((node), sizeof(hmu_tree_node_t), (base), (end))
++
+ /**
+  * Remove a node from the tree it belongs to
+  *
+@@ -55,10 +75,15 @@
+     bh_assert(p);
+ 
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
++    /* Hull ext (0009): check p before reading p->parent. */
++    if (p == root /* p can not be the ROOT node */
++        || !hmu_tree_node_in_heap(p, base_addr, end_addr)) {
++        goto fail;
++    }
+     parent = p->parent;
+-    if (!parent || p == root /* p can not be the ROOT node */
+-        || !hmu_is_in_heap(p, base_addr, end_addr)
+-        || (parent != root && !hmu_is_in_heap(parent, base_addr, end_addr))) {
++    if (!parent
++        || (parent != root
++            && !hmu_tree_node_in_heap(parent, base_addr, end_addr))) {
+         goto fail;
+     }
+ #endif
+@@ -93,7 +118,7 @@
+         *slot = p->right;
+         if (p->right) {
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-            if (!hmu_is_in_heap(p->right, base_addr, end_addr)) {
++            if (!hmu_tree_node_in_heap(p->right, base_addr, end_addr)) {
+                 goto fail;
+             }
+ #endif
+@@ -108,7 +133,7 @@
+         /* move left child up*/
+         *slot = p->left;
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-        if (!hmu_is_in_heap(p->left, base_addr, end_addr)) {
++        if (!hmu_tree_node_in_heap(p->left, base_addr, end_addr)) {
+             goto fail;
+         }
+ #endif
+@@ -122,14 +147,14 @@
+     /* both left & right exist, find p's predecessor at first*/
+     q = p->left;
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-    if (!hmu_is_in_heap(q, base_addr, end_addr)) {
++    if (!hmu_tree_node_in_heap(q, base_addr, end_addr)) {
+         goto fail;
+     }
+ #endif
+     while (q->right) {
+         q = q->right;
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-        if (!hmu_is_in_heap(q, base_addr, end_addr)) {
++        if (!hmu_tree_node_in_heap(q, base_addr, end_addr)) {
+             goto fail;
+         }
+ #endif
+@@ -145,7 +170,7 @@
+     q->right = p->right;
+     if (q->left) {
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-        if (!hmu_is_in_heap(q->left, base_addr, end_addr)) {
++        if (!hmu_tree_node_in_heap(q->left, base_addr, end_addr)) {
+             goto fail;
+         }
+ #endif
+@@ -153,7 +178,7 @@
+     }
+     if (q->right) {
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-        if (!hmu_is_in_heap(q->right, base_addr, end_addr)) {
++        if (!hmu_tree_node_in_heap(q->right, base_addr, end_addr)) {
+             goto fail;
+         }
+ #endif
+@@ -202,7 +227,7 @@
+ 
+         while (node) {
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-            if (!hmu_is_in_heap(node, base_addr, end_addr)) {
++            if (!hmu_normal_node_in_heap(node, base_addr, end_addr)) {
+                 heap->is_heap_corrupted = true;
+                 return false;
+             }
+@@ -271,6 +296,14 @@
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+     base_addr = heap->base_addr;
+     end_addr = base_addr + heap->current_size;
++    /* Hull ext (0009): the header, the footer hmu_set_free_size writes at
++     * hmu + size - 4, and the list / tree node fields all lie in
++     * [hmu, hmu + size); size may come from a corrupted header. */
++    if (size < sizeof(hmu_normal_node_t)
++        || !hmu_range_in_heap(hmu, size, base_addr, end_addr)) {
++        heap->is_heap_corrupted = true;
++        return false;
++    }
+ #endif
+ 
+     hmu_set_ut(hmu, HMU_FC);
+@@ -280,7 +313,7 @@
+     if (HMU_IS_FC_NORMAL(size)) {
+         np = (hmu_normal_node_t *)hmu;
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-        if (!hmu_is_in_heap(np, base_addr, end_addr)) {
++        if (!hmu_normal_node_in_heap(np, base_addr, end_addr)) {
+             heap->is_heap_corrupted = true;
+             return false;
+         }
+@@ -319,7 +352,7 @@
+             tp = tp->left;
+         }
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-        if (!hmu_is_in_heap(tp, base_addr, end_addr)) {
++        if (!hmu_tree_node_in_heap(tp, base_addr, end_addr)) {
+             heap->is_heap_corrupted = true;
+             return false;
+         }
+@@ -382,7 +415,9 @@
+ 
+             p = normal_head->next;
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-            if (!hmu_is_in_heap(p, base_addr, end_addr)) {
++            /* Hull ext (0009): the whole chunk of this list's size. */
++            if (!hmu_range_in_heap(p, (uintptr_t)node_idx << 3, base_addr,
++                                   end_addr)) {
+                 heap->is_heap_corrupted = true;
+                 return NULL;
+             }
+@@ -430,7 +465,7 @@
+     tp = root->right;
+     while (tp) {
+ #if BH_ENABLE_GC_CORRUPTION_CHECK != 0
+-        if (!hmu_is_in_heap(tp, base_addr, end_addr)) {
++        if (!hmu_tree_node_in_heap(tp, base_addr, end_addr)) {
+             heap->is_heap_corrupted = true;
+             return NULL;
+         }
+@@ -449,6 +484,15 @@
+     if (last_tp) {
+         bh_assert(last_tp->size >= size);
+ 
++#if BH_ENABLE_GC_CORRUPTION_CHECK != 0
++        /* Hull ext (0009): the chosen chunk, by the size its node records,
++         * is split / marked below. */
++        if (!hmu_range_in_heap(last_tp, last_tp->size, base_addr, end_addr)) {
++            heap->is_heap_corrupted = true;
++            return NULL;
++        }
++#endif
++
+         /* alloc in last_p*/
+ 
+         /* remove node last_p from tree*/
+@@ -644,17 +688,22 @@
+     }
+ #endif
+ 
++    base_addr = heap->base_addr;
++    end_addr = base_addr + heap->current_size;
++
+     if (obj_old) {
+         hmu_old = obj_to_hmu(obj_old);
++#if BH_ENABLE_GC_CORRUPTION_CHECK != 0
++        /* Hull ext (0009): read no header outside the heap. */
++        if (!hmu_is_in_heap(hmu_old, base_addr, end_addr))
++            return NULL;
++#endif
+         tot_size_old = hmu_get_size(hmu_old);
+         if (tot_size <= tot_size_old)
+             /* current node already meets requirement */
+             return obj_old;
+     }
+ 
+-    base_addr = heap->base_addr;
+-    end_addr = base_addr + heap->current_size;
+-
+     LOCK_HEAP(heap);
+ 
+     if (hmu_old) {
+@@ -662,6 +711,17 @@
+         if (hmu_is_in_heap(hmu_next, base_addr, end_addr)) {
+             ut = hmu_get_ut(hmu_next);
+             tot_size_next = hmu_get_size(hmu_next);
++#if BH_ENABLE_GC_CORRUPTION_CHECK != 0
++            /* Hull ext (0009): the merge below zeroes into hmu_next's
++             * chunk, by the size its header records. */
++            if (ut == HMU_FC
++                && !hmu_range_in_heap(hmu_next, tot_size_next, base_addr,
++                                      end_addr)) {
++                heap->is_heap_corrupted = true;
++                UNLOCK_HEAP(heap);
++                return NULL;
++            }
++#endif
+             if (ut == HMU_FC && tot_size <= tot_size_old + tot_size_next) {
+                 /* current node and next node meets requirement */
+                 if (!unlink_hmu(heap, hmu_next)) {
+@@ -889,6 +949,15 @@
+ #endif
+ 
+             if (!hmu_get_pinuse(hmu)) {
++#if BH_ENABLE_GC_CORRUPTION_CHECK != 0
++                /* Hull ext (0009): the previous chunk's footer sits just
++                 * before hmu; the first chunk has none. */
++                if ((uintptr_t)((gc_uint8 *)hmu - base_addr) < sizeof(int)) {
++                    heap->is_heap_corrupted = true;
++                    ret = GC_ERROR;
++                    goto out;
++                }
++#endif
+                 prev = (hmu_t *)((char *)hmu - *((int *)hmu - 1));
+ 
+                 if (hmu_is_in_heap(prev, base_addr, end_addr)
