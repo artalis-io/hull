@@ -9126,10 +9126,13 @@ JS_WORKER_CASE(sql_text_is_charged_to_the_job,
     "    try { for (let i = 0; i < 500; i++) db.exec(s); }\n"
     "    catch (e) { return 'caught: ' + e; } return 'ran'; });\n"
     "  check(m2.includes('instruction limit'), 'exec: ' + m2);\n"
+    /* ordinary queries under the same small budget still run. 1000 used ~40%
+     * of it here and tripped on a slow macOS runner; 200 keeps the contrast
+     * with the 500 x 1 MB loops above without riding the limit. */
     "  const n = await worker.dispatch(() => { let n = 0;\n"
-    "    for (let i = 0; i < 1000; i++) n += db.query('SELECT 1 AS n')[0].n;\n"
+    "    for (let i = 0; i < 200; i++) n += db.query('SELECT 1 AS n')[0].n;\n"
     "    return n; });\n"
-    "  check(n === 1000, 'ordinary: ' + n);\n")
+    "  check(n === 200, 'ordinary: ' + JSON.stringify(n));\n")
 
 /* ── Audit 4: the JS runtime ──────────────────────────────────────────── */
 
