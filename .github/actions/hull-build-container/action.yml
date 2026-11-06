@@ -33,11 +33,12 @@ runs:
       shell: bash
       # Retry the BUILD, not just apt inside it.
       #
-      # Dockerfile.build already passes Acquire::Retries=5, and its comment
-      # explains why: snapshot.ubuntu.com is a single Canonical service with no
-      # public mirror, so a transient 5xx cannot be routed around. Those retries
-      # happen INSIDE one apt invocation; when they are exhausted the layer
-      # build exits 100 and the whole job fails, which apt cannot help with.
+      # Dockerfile.build already sets Acquire::Retries=10 with apt's exponential
+      # backoff, and its comment explains why: snapshot.ubuntu.com is a single
+      # Canonical service with no public mirror, so a transient 5xx cannot be
+      # routed around. Those retries happen INSIDE one apt invocation; when
+      # they are exhausted the layer build exits 100 and the whole job fails,
+      # which apt cannot help with.
       #
       # Measured 2026-09-16: four unrelated PRs failed here in one day - one
       # touching a shell test script, one a workflow and a doc - and every one
@@ -50,29 +51,49 @@ runs:
       # Dockerfile error either - that fails identically three times and still
       # stops the job.
       #
-      # It does NOT defend against an OUTAGE. On 2026-09-08 the service
-      # returned 502/503 across all three of its IPs for hours; three attempts
-      # over ~45s would have failed the same. That still needs something that
-      # skips the network, and the layer cache tried at hull#473 evicted the
-      # artifacts the reproducibility compare depends on, so it remains open.
+      # The budget is TIME, not attempts: a 502/503 spell on the snapshot
+      # service usually lasts minutes (2026-11-06: three reproducible-build
+      # jobs on one PR and a release run failed, and a rerun minutes later
+      # passed), which three attempts over ~45s never covered. So attempts
+      # back off exponentially (30s, 60s, 120s, then every 240s) until 15
+      # minutes have passed since the first one; one more attempt starts only
+      # inside that window. A real Dockerfile error therefore costs ~15
+      # minutes before it stops the job - the price of not needing a manual
+      # `gh run rerun --failed` for an outage of that length.
+      #
+      # It does NOT defend against a LONG outage. On 2026-09-08 the service
+      # returned 502/503 across all three of its IPs for hours. That still
+      # needs something that skips the network, and the layer cache tried at
+      # hull#473 evicted the artifacts the reproducibility compare depends on,
+      # so it remains open.
+      env:
+        HULL_SDE: ${{ inputs.source-date-epoch }}
       run: |
-        for attempt in 1 2 3; do
+        budget=900
+        delay=30
+        attempt=1
+        start=$SECONDS
+        while :; do
           if docker build \
-               --build-arg SOURCE_DATE_EPOCH="${{ inputs.source-date-epoch }}" \
+               --build-arg SOURCE_DATE_EPOCH="$HULL_SDE" \
                -t hull-build:pinned \
                -f .github/docker/Dockerfile.build \
                .github/docker; then
             [ "$attempt" = 1 ] || echo "container build succeeded on attempt $attempt"
             break
           fi
-          if [ "$attempt" = 3 ]; then
-            echo "::error::reproducible container build failed 3 times - if this is"
-            echo "::error::snapshot.ubuntu.com returning 5xx, see the note in"
-            echo "::error::.github/docker/Dockerfile.build: retries do not cover an outage"
+          elapsed=$((SECONDS - start))
+          if [ $((elapsed + delay)) -gt "$budget" ]; then
+            echo "::error::reproducible container build failed $attempt times over ${elapsed}s - if"
+            echo "::error::this is snapshot.ubuntu.com returning 5xx, see the note in"
+            echo "::error::.github/docker/Dockerfile.build: retries do not cover a long outage"
             exit 1
           fi
-          echo "container build failed (attempt $attempt/3); retrying in $((attempt * 15))s"
-          sleep "$((attempt * 15))"
+          echo "container build failed (attempt $attempt, ${elapsed}s of ${budget}s); retrying in ${delay}s"
+          sleep "$delay"
+          attempt=$((attempt + 1))
+          delay=$((delay * 2))
+          [ "$delay" -le 240 ] || delay=240
         done
     - name: Run in reproducible container
       shell: bash

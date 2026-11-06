@@ -35,20 +35,36 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 # main / restricted / universe / multiverse / -updates / -security / -backports
 # pockets, so security-patched package versions are frozen too.
 COPY repro-sources-list.sh /usr/local/bin/repro-sources-list.sh
-# Acquire::Retries is not tuning: snapshot.ubuntu.com is a single Canonical
+# The retry policy is not tuning: snapshot.ubuntu.com is a single Canonical
 # service with no public mirror (ordinary Ubuntu mirrors carry the CURRENT
 # archive and have no /ubuntu/<timestamp>/ space at all), so a transient 5xx
-# there cannot be routed around and fails the whole image build. Retrying
-# absorbs a blip. It does NOT absorb an outage - on 2026-09-08 the service
-# returned 502/503 across all three of its IPs for hours and every
-# reproducible-build job failed right here, before any Hull code compiled.
-# Defending against an outage of that length needs something that skips the
-# network entirely; a layer cache was tried and evicted the artifacts the
-# reproducibility compare depends on (hull#473), so it is still open.
-RUN chmod 0755 /usr/local/bin/repro-sources-list.sh \
+# there cannot be routed around and fails the whole image build.
+#
+# It goes in apt.conf.d BEFORE repro-sources-list.sh runs, so it also covers
+# the helper's own `apt-get update` / `install ca-certificates`: the vendored
+# script passes no retry option, and those two calls failed on the first 5xx.
+# noble's apt backs off exponentially between retries (Acquire::Retries::Delay,
+# capped at 30 s), so 10 retries ride out roughly three minutes per file, and
+# the Timeouts bound a connection that hangs instead of failing. The composite
+# action retries the whole build on top of this, for ~15 minutes
+# (.github/actions/hull-build-container). None of it changes what is
+# installed: the snapshot pins every version and apt checks the signed Release
+# files, so a retried build is the same image or fails the same way.
+#
+# It does NOT absorb a long outage - on 2026-09-08 the service returned
+# 502/503 across all three of its IPs for hours. Defending against that needs
+# something that skips the network entirely; a layer cache was tried and
+# evicted the artifacts the reproducibility compare depends on (hull#473), so
+# it is still open.
+RUN printf '%s\n' \
+      'Acquire::Retries "10";' \
+      'Acquire::http::Timeout "60";' \
+      'Acquire::https::Timeout "60";' \
+      > /etc/apt/apt.conf.d/80hull-retries \
+ && chmod 0755 /usr/local/bin/repro-sources-list.sh \
  && /usr/local/bin/repro-sources-list.sh \
- && apt-get -o Acquire::Retries=5 update \
- && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
       build-essential clang xxd curl ca-certificates git unzip \
  && rm -rf /var/lib/apt/lists/*
 
