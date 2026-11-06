@@ -146,6 +146,8 @@ jobs:
   build-platform-cosmo:
     name: Build platform (cosmo, multi-arch)
     runs-on: ubuntu-24.04
+    # Cosmo builds take 8-19 min; a hung cosmocc step otherwise runs to the 6 h default.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -361,6 +363,8 @@ jobs:
   build-cosmo:
     name: Build (Cosmopolitan APE)
     runs-on: ubuntu-24.04
+    # Cosmo builds take 8-19 min; a hung cosmocc step otherwise runs to the 6 h default.
+    timeout-minutes: 45
     needs: [build-platform-cosmo, sign-platform-manifest]
 
     steps:
