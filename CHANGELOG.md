@@ -36,6 +36,16 @@ release-artifact layout).
   build is the same image. There is no second source for the Ubuntu snapshot archive, so a
   multi-hour outage still fails the job.
 
+### Security (defensive hardening)
+
+- **WAMR's app-heap corruption checks cover the whole node (WAMR patch 0009).** The allocator behind a
+  module's inserted app heap keeps its bookkeeping inside guest linear memory, and its integrity checks
+  tested only a node's start address before reading or writing the node. With no guard region, a
+  one-page module's heap ends where the mapping does. Each check now requires the whole node (or chunk)
+  inside the heap, with overflow-safe arithmetic; a failure is reported as heap corruption and the call
+  fails, as before. No exploit is known; this closes a gap earlier audit rounds left open as a
+  non-finding. See [docs/wamr_patches.md](docs/wamr_patches.md).
+
 ## [0.18.1] - 2026-11-06
 
 Full PR list:
