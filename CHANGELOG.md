@@ -22,6 +22,20 @@ release-artifact layout).
   `$` closing a nested dollar quote no longer glued to the next word). The input joins the corpus
   as a regression seed.
 
+### Process and CI
+
+- **The reproducible build container rides out a snapshot.ubuntu.com 502/503 spell of ~15
+  minutes.** Three reproducible-build jobs on one PR and a release run failed on it, and the only
+  fix was waiting and `gh run rerun --failed`. The apt retry policy (`Acquire::Retries` 10, with
+  noble apt's exponential backoff, plus 60 s http / https timeouts) now sits in
+  `/etc/apt/apt.conf.d` before `repro-sources-list.sh` runs, so it also covers the helper's own
+  `apt-get update` / `install ca-certificates`, which had no retries at all. The composite action
+  retries the whole image build with exponential backoff (30 s, 60 s, 120 s, then every 240 s)
+  until 15 minutes have passed, instead of three attempts over ~45 s. The package set is
+  unchanged: the snapshot pins every version and apt checks the signed Release files, so a retried
+  build is the same image. There is no second source for the Ubuntu snapshot archive, so a
+  multi-hour outage still fails the job.
+
 ## [0.18.1] - 2026-11-06
 
 Full PR list:
