@@ -113,6 +113,7 @@ typedef struct {
     int         no_verify_platform;  /* --no-verify-platform */
     int         keep_internal;       /* --keep-internal-in-app-db */
     long        instruction_limit;   /* --max-instructions N (0 = default) */
+    int         verbose;             /* --verbose under hull: DEBUG records */
 #ifdef HL_ENABLE_WASM
     HlWasmCliLimits wasm;            /* --wasm-* ceilings, as serve.c takes them */
 #endif
@@ -245,7 +246,8 @@ static int cli_parse_args(int argc, char **argv,
              * A built binary has no dispatcher: they are the app's, like any
              * option Hull does not take (`./tool --verbose`). */
             if (!embedded_app_present()) {
-                if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "--json") == 0 ||
+                if (strcmp(argv[i], "--verbose") == 0) { x->verbose = 1; continue; }
+                if (strcmp(argv[i], "--json") == 0 ||
                     strncmp(argv[i], "--app-dir=", 10) == 0)
                     continue;
                 if (strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc) { i++; continue; }
@@ -501,10 +503,12 @@ int hull_serve(int argc, char **argv)
     /* One escaped line per record, as serve.c's: log.c's default callback
      * printed app text (an uncaught error's message) raw, so a newline in it
      * forged a record (audit 28). Sole owner, as in serve.c, if a subcommand
-     * reached this in-process with the CLI policy installed. LOG_TRACE keeps
-     * log.c's default level. */
+     * reached this in-process with the CLI policy installed. INFO, serve.c's
+     * default: a built CLI's run prints only the app's output and real
+     * warnings - Hull's own step notes (sandbox applied, ...) are DEBUG,
+     * shown by `hull --verbose app.lua`. */
     hl_cli_log_suspend();
-    hl_log_install_line_callback(LOG_TRACE);
+    hl_log_install_line_callback(xo.verbose ? LOG_DEBUG : LOG_INFO);
     hl_log_make_threadsafe();
     hl_event_loop_mark_current();
     HlAsyncBackendPool *pool = NULL;

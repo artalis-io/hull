@@ -651,8 +651,10 @@ is not (e.g. the binary has been re-signed without `--options=runtime`,
 or stripped of its signature), the sandbox refuses to start.
 
 Self-built binaries from `make` are unsigned and lack Hardened Runtime.
-In that case the `csops` check downgrades to a warning so dev workflows
-continue to function. The Seatbelt `(deny dynamic-code-generation)`
+In that case the `csops` check downgrades to a DEBUG line (`-l debug` /
+`hull --verbose`) so dev workflows - and every app `hull build` links,
+which ld64 only ad-hoc signs - start without it on every run;
+`scripts/check_hardening.sh` reports the signing state. The Seatbelt `(deny dynamic-code-generation)`
 clause and the C-level capability layer still apply.
 
 **Active C-level defenses (defense-in-depth):**

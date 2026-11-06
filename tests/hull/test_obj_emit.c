@@ -234,6 +234,47 @@ UTEST(obj_emit, macho_x86_64) {   /* MH_MAGIC_64=0xFEEDFACF, cputype@4 */
 UTEST(obj_emit, macho_arm64) {
     check_container(utest_result, HL_OBJ_MACHO, HL_OBJ_AARCH64, 0xFEEDFACF, 4, 4, 0x0100000C);
 }
+/* The Mach-O object carries LC_BUILD_VERSION (platform macOS), so ld64 does
+ * not warn "no platform load command found ... assuming: macOS" on every
+ * `hull build`. Walks the load commands: ncmds@16, sizeofcmds@20, commands
+ * from offset 32. */
+static void check_macho_build_version(int *utest_result, HlObjArch arch,
+                                      uint32_t want_minos) {
+    HlEmitEntry ents[] = { { "./app", (const unsigned char *)"x", 1 } };
+    HlObjTarget tgt = { HL_OBJ_MACHO, arch, 0, 0 };
+    unsigned char *o = NULL; size_t olen = 0;
+    ASSERT_EQ(0, hl_obj_emit_app_registry(&tgt, ents, 1, &o, &olen));
+    uint32_t ncmds = rd32(o + 16), sizeofcmds = rd32(o + 20);
+    ASSERT_LE((size_t)32 + sizeofcmds, olen);
+    size_t off = 32, end = 32 + sizeofcmds;
+    int found = 0;
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        ASSERT_LE(off + 8, end);
+        uint32_t cmd = rd32(o + off), cmdsize = rd32(o + off + 4);
+        ASSERT_GE(cmdsize, (uint32_t)8);
+        if (cmd == 0x32) {               /* LC_BUILD_VERSION */
+            ASSERT_EQ((uint32_t)24, cmdsize);
+            ASSERT_EQ((uint32_t)1, rd32(o + off + 8));   /* PLATFORM_MACOS */
+            ASSERT_EQ(want_minos, rd32(o + off + 12));
+            ASSERT_EQ((uint32_t)0, rd32(o + off + 20));  /* ntools */
+            found++;
+        }
+        sum += cmdsize;
+        off += cmdsize;
+    }
+    ASSERT_EQ(sizeofcmds, sum);
+    ASSERT_EQ(1, found);
+    free(o);
+}
+
+UTEST(obj_emit, macho_build_version_arm64) {   /* 11.0 */
+    check_macho_build_version(utest_result, HL_OBJ_AARCH64, 0x000B0000u);
+}
+UTEST(obj_emit, macho_build_version_x86_64) {  /* 10.13 */
+    check_macho_build_version(utest_result, HL_OBJ_X86_64, 0x000A0D00u);
+}
+
 UTEST(obj_emit, coff_x86_64) {    /* machine@0 (u16): AMD64=0x8664 */
     check_container(utest_result, HL_OBJ_COFF, HL_OBJ_X86_64, 0x8664, 2, 0, 0x8664);
 }

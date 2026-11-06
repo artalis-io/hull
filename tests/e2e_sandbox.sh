@@ -2,7 +2,7 @@
 # E2E sandbox tests - verify pledge/unveil enforcement
 #
 # Tests:
-#   1. Hull with manifest logs "[sandbox] applied" (Linux/cosmo only)
+#   1. Hull with manifest logs "[sandbox] applied" (a DEBUG line: -l debug)
 #   2. Hull without manifest - default-deny sandbox still applied
 #   3. Manifest without hosts - no dns promise
 #   4. JS manifest app - sandbox applied (feature parity)
@@ -158,7 +158,7 @@ end)
 EOF
 
 LOGFILE="$WORKDIR/hull_sandbox.log"
-"$HULL" -p 19880 -d "$WORKDIR/test.db" "$WORKDIR/app.lua" >"$LOGFILE" 2>&1 &
+"$HULL" -l debug -p 19880 -d "$WORKDIR/test.db" "$WORKDIR/app.lua" >"$LOGFILE" 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19880; then
@@ -206,7 +206,7 @@ end)
 EOF
 
 LOGFILE2="$WORKDIR/hull_nosandbox.log"
-"$HULL" -p 19881 -d "$WORKDIR/test2.db" "$WORKDIR/nomanifest.lua" >"$LOGFILE2" 2>&1 &
+"$HULL" -l debug -p 19881 -d "$WORKDIR/test2.db" "$WORKDIR/nomanifest.lua" >"$LOGFILE2" 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19881; then
@@ -253,7 +253,7 @@ end)
 EOF
 
 LOGFILE3="$WORKDIR/hull_nohosts.log"
-"$HULL" -p 19882 -d "$WORKDIR/test3.db" "$WORKDIR/nohosts.lua" >"$LOGFILE3" 2>&1 &
+"$HULL" -l debug -p 19882 -d "$WORKDIR/test3.db" "$WORKDIR/nohosts.lua" >"$LOGFILE3" 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19882; then
@@ -300,7 +300,7 @@ app.get("/health", (req, res) => {
 EOF
 
 LOGFILE4="$WORKDIR/hull_js_sandbox.log"
-"$HULL" -p 19883 -d "$WORKDIR/test4.db" "$WORKDIR/jsapp.js" >"$LOGFILE4" 2>&1 &
+"$HULL" -l debug -p 19883 -d "$WORKDIR/test4.db" "$WORKDIR/jsapp.js" >"$LOGFILE4" 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19883; then
@@ -334,7 +334,7 @@ echo ""
 echo "=== Test 5: Phase 1 pledge - applied before load_app ==="
 
 LOGFILE5="$WORKDIR/hull_phase1.log"
-"$HULL" -p 19884 -d "$WORKDIR/test5.db" "$WORKDIR/app.lua" >"$LOGFILE5" 2>&1 &
+"$HULL" -l debug -p 19884 -d "$WORKDIR/test5.db" "$WORKDIR/app.lua" >"$LOGFILE5" 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19884; then
@@ -591,7 +591,7 @@ end)
 app.get("/", function(_req, res) res:json({ ok = true }) end)
 EOF
     LOGFILE8="$WORKDIR/hull_threads.log"
-    "$HULL" -p 19887 -d "$WORKDIR/test8.db" "$WORKDIR/threads.lua" >"$LOGFILE8" 2>&1 &
+    "$HULL" -l debug -p 19887 -d "$WORKDIR/test8.db" "$WORKDIR/threads.lua" >"$LOGFILE8" 2>&1 &
     SERVER_PID=$!
     if wait_for_server 19887; then
         W1=$(curl -s "http://127.0.0.1:19887/work")

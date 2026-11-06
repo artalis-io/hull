@@ -1111,7 +1111,7 @@ int hl_sandbox_apply_pledge(void)
     if (!sb_supported()) {
         /* Terse here on purpose: this is a step note, and phase 2 carries the
          * one loud verdict about what is - and is not - enforcing. */
-        log_info("[sandbox] phase 1 skipped (no kernel sandbox on this host)");
+        log_debug("[sandbox] phase 1 skipped (no kernel sandbox on this host)");
         return 0;
     }
 
@@ -1120,7 +1120,7 @@ int hl_sandbox_apply_pledge(void)
      * Phase 2 applies the full Seatbelt profile after manifest extraction.
      * C-level runtime sandboxes (Lua: os removed, JS: no std/os) prevent
      * exec during load_app(). */
-    log_info("[sandbox] phase 1 skipped (macOS seatbelt applied in phase 2)");
+    log_debug("[sandbox] phase 1 skipped (macOS seatbelt applied in phase 2)");
     return 0;
 #endif
 
@@ -1159,7 +1159,7 @@ int hl_sandbox_apply_pledge(void)
     }
     g_pledged = 1;
 
-    log_info("[sandbox] phase 1 pledge applied (exec/proc/fork blocked)");
+    log_debug("[sandbox] phase 1 pledge applied (exec/proc/fork blocked)");
     return 0;
 }
 
@@ -1317,8 +1317,16 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                   "with --options=runtime and notarized.");
         return -1;
 #else
-        log_warn("[sandbox] Hardened Runtime not active - local/dev build. "
-                 "Release binaries must be signed with --options=runtime.");
+        /* DEBUG, not WARN: the Seatbelt sandbox below is fully applied
+         * either way. This reports how the binary was SIGNED - every app
+         * `hull build` links is ad-hoc signed by ld64, so the line fired on
+         * every start of every built app and its operator can do nothing
+         * about it at run time. Signing with --options=runtime is a
+         * distribution step (docs/security.md "Hardened Runtime"), and
+         * scripts/check_hardening.sh reports it. A line that reports a real
+         * loss of confinement (no kernel sandbox, DEGRADED) stays WARN. */
+        log_debug("[sandbox] Hardened Runtime not active (binary not signed "
+                  "with --options=runtime); Seatbelt still applies");
 #endif
     }
 
@@ -1370,7 +1378,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             return -1;
         }
 
-        log_info("[sandbox] applied (seatbelt: %d read, %d write%s)",
+        log_debug("[sandbox] applied (seatbelt: %d read, %d write%s)",
                  policy->fs_read_count, policy->fs_write_count,
                  policy->network_outbound ? ", network-outbound" : "");
         return 0;
@@ -1808,13 +1816,13 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         /* threads: how the Landlock domain reached the threads that already
          * existed - "single" (none), "tsync" (Landlock TSYNC) or "signal"
          * (each restricted itself). Seccomp always reaches all (TSYNC). */
-        log_info("[sandbox] applied (unveil: %d read, %d write; pledge: %s; "
+        log_debug("[sandbox] applied (unveil: %d read, %d write; pledge: %s; "
                  "threads: %s)",
                  policy->fs_read_count, policy->fs_write_count, promises,
                  hull_unveil_sync_mode == 1 ? "tsync"
                  : hull_unveil_sync_mode == 2 ? "signal" : "single");
 #else
-        log_info("[sandbox] applied (unveil: %d read, %d write; pledge: %s)",
+        log_debug("[sandbox] applied (unveil: %d read, %d write; pledge: %s)",
                  policy->fs_read_count, policy->fs_write_count, promises);
 #endif
     }
