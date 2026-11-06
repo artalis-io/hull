@@ -398,7 +398,7 @@ if [ "$(uname -s)" = Darwin ]; then
     write_app "$d" lua
     out=$(cd "$d" && "$HULL" -d data.db app.lua -- seed 2>&1 || true)
     sid=$(field "$out" sid)
-    out=$(cd "$d" && "$HULL" -d data.db app.lua -- "$sid" 2>&1 || true)
+    out=$(cd "$d" && "$HULL" -l debug -d data.db app.lua -- "$sid" 2>&1 || true)
     case "$out" in
         *"[sandbox] applied"*"roles=admin"*"session=true"*)
             pass "Seatbelt: sessions and roles are read from .hull/internal.db after the sandbox applies" ;;

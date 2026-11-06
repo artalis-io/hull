@@ -246,9 +246,18 @@ static int emit_macho(const HlObjTarget *tgt, const Plan *pl,
     for (size_t i = 0; i < pl->nreloc; i++)
         buf_patch64(&sec, pl->relocs[i].site, pl->relocs[i].target);
 
+    /* LC_BUILD_VERSION minos, packed xxxx.yy.zz. Without the command ld64
+     * warns "no platform load command found in 'app_registry.o', assuming:
+     * macOS" on every `hull build`. The object holds data only, so it may
+     * name the OLDEST macOS for its arch: the linked binary's minimum comes
+     * from the driver's -platform_version, and an object older than it never
+     * warns (a newer one would: "built for newer macOS version").
+     * arm64: 11.0, the first Apple silicon release; x86_64: 10.13. */
+    uint32_t minos = (tgt->arch == HL_OBJ_AARCH64) ? 0x000B0000u : 0x000A0D00u;
+
     uint32_t nreloc = (uint32_t)pl->nreloc;
-    /* Layout: header+loadcmds (208) | secdata | relocs | symtab | strtab */
-    uint64_t off_sec = 208;                          /* 208 % 8 == 0 */
+    /* Layout: header+loadcmds (232) | secdata | relocs | symtab | strtab */
+    uint64_t off_sec = 232;                          /* 232 % 8 == 0 */
     uint64_t off_rel = off_sec + sec.len; off_rel = (off_rel + 3) & ~3ull;
     uint64_t off_sym = off_rel + (uint64_t)nreloc * 8; off_sym = (off_sym + 7) & ~7ull;
     uint64_t off_str = off_sym + 16;                 /* one nlist_64 */
@@ -257,7 +266,7 @@ static int emit_macho(const HlObjTarget *tgt, const Plan *pl,
     Buf o = {0};
     /* mach_header_64 */
     buf_u32(&o, 0xFEEDFACF); buf_u32(&o, cputype); buf_u32(&o, cpusub);
-    buf_u32(&o, 1 /*MH_OBJECT*/); buf_u32(&o, 2 /*ncmds*/); buf_u32(&o, 176 /*sizeofcmds*/);
+    buf_u32(&o, 1 /*MH_OBJECT*/); buf_u32(&o, 3 /*ncmds*/); buf_u32(&o, 200 /*sizeofcmds*/);
     buf_u32(&o, 0 /*flags*/); buf_u32(&o, 0 /*reserved*/);
     /* LC_SEGMENT_64 (one __DATA,__const section) */
     buf_u32(&o, 0x19); buf_u32(&o, 152 /*cmdsize*/);
@@ -273,6 +282,10 @@ static int emit_macho(const HlObjTarget *tgt, const Plan *pl,
     buf_u32(&o, (uint32_t)off_rel /*reloff*/); buf_u32(&o, nreloc /*nreloc*/);
     buf_u32(&o, 0 /*S_REGULAR*/);
     buf_u32(&o, 0); buf_u32(&o, 0); buf_u32(&o, 0); /*reserved1..3*/
+    /* LC_BUILD_VERSION: platform PLATFORM_MACOS (1), minos, sdk 0 (n/a), no tools */
+    buf_u32(&o, 0x32); buf_u32(&o, 24 /*cmdsize*/);
+    buf_u32(&o, 1 /*PLATFORM_MACOS*/); buf_u32(&o, minos);
+    buf_u32(&o, 0 /*sdk*/); buf_u32(&o, 0 /*ntools*/);
     /* LC_SYMTAB */
     buf_u32(&o, 0x2); buf_u32(&o, 24 /*cmdsize*/);
     buf_u32(&o, (uint32_t)off_sym); buf_u32(&o, 1 /*nsyms*/);

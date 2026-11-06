@@ -46,6 +46,23 @@ release-artifact layout).
   fails, as before. No exploit is known; this closes a gap earlier audit rounds left open as a
   non-finding. See [docs/wamr_patches.md](docs/wamr_patches.md).
 
+### Changed (quiet built apps on macOS)
+
+- **`hull build` on macOS no longer prints `ld: warning: no platform load command found in
+  '.../app_registry.o', assuming: macOS`.** The compiler-free object emitter now writes an
+  `LC_BUILD_VERSION` load command (platform macOS, minimum 11.0 on arm64 / 10.13 on x86_64 - the
+  object holds data only, and an object older than the link's deployment target never warns).
+  Covered by two `test_obj_emit` cases.
+- **A built app prints only its own output on start.** Hull's step notes are now DEBUG, not
+  INFO / WARN: `[sandbox] phase 1 skipped` / `phase 1 pledge applied`, `[sandbox] applied (...)`,
+  `[sandbox] Hardened Runtime not active` (a code-signing fact, identical on every run of every
+  app `hull build` links, with Seatbelt applied either way), and `[hull:c] manifest: ...`,
+  `modules resolved`, `compute not declared`, `running app.main`, `app.main exited`. The app.main
+  runner of a slim-base app now logs at INFO (it printed every level, app `log.debug` included),
+  like the server. Lines reporting a real loss of protection stay WARN: `NO kernel sandbox on this
+  host`, every `DEGRADED` line, failed unveils. See them with `-l debug` (server) or
+  `hull --verbose app.lua`. No sandbox behaviour changes.
+
 ## [0.18.1] - 2026-11-06
 
 Full PR list:

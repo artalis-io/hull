@@ -696,8 +696,12 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             usage(argv[0]);
             return 1; /* signal help shown, exit 0 */
         } else if (!embedded_app_present() &&
-                   (strcmp(argv[i], "--verbose") == 0 ||
-                    strcmp(argv[i], "--json") == 0 ||
+                   strcmp(argv[i], "--verbose") == 0) {
+            /* The dispatcher's global flag; here it also shows Hull's DEBUG
+             * step notes (sandbox applied, manifest counts, app.main). */
+            cfg->log_level = LOG_DEBUG;
+        } else if (!embedded_app_present() &&
+                   (strcmp(argv[i], "--json") == 0 ||
                     strncmp(argv[i], "--app-dir=", 10) == 0)) {
             /* Global flags: the command dispatcher reads them, then hands
              * this parser the same argv. Nothing to do here. A built binary
@@ -2116,7 +2120,7 @@ static int hl_serve_wire_caps(HlServerState *s)
     memset(&s->manifest, 0, sizeof(s->manifest));
     if (rt->vt->extract_manifest(rt, &s->manifest) == 0) {
         s->manifest_extracted = 1;
-        log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d modules=%d",
+        log_debug("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d modules=%d",
                  s->manifest.fs_read_count, s->manifest.fs_write_count,
                  s->manifest.env_count, s->manifest.hosts_count,
                  s->manifest.modules_count);
@@ -2274,7 +2278,7 @@ static int hl_serve_wire_caps(HlServerState *s)
         }
         s->manifest_sealed = 1;
 
-        log_info("[hull:c] modules resolved: %d admitted",
+        log_debug("[hull:c] modules resolved: %d admitted",
                  hl_module_set_count(rt->module_set));
     } else {
         /* No manifest: resolve admits only the intrinsic core.  No
@@ -2291,7 +2295,7 @@ static int hl_serve_wire_caps(HlServerState *s)
             return -1;
         }
         rt->module_set = &s->module_set;
-        log_info("[hull:c] modules resolved: %d admitted",
+        log_debug("[hull:c] modules resolved: %d admitted",
                  hl_module_set_count(rt->module_set));
     }
 
@@ -2365,7 +2369,7 @@ static int hl_serve_wire_caps(HlServerState *s)
             admit = !s->manifest.present || s->manifest.compute;
         if (!admit) {
             rt->wasm_cache = NULL;
-            log_info("[hull:c] compute not declared - compute.* disabled");
+            log_debug("[hull:c] compute not declared - compute.* disabled");
         }
     }
 
@@ -3210,7 +3214,7 @@ static int hl_serve_run_main(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
     const char **env_allow = hl_build_env_allowlist(&s->manifest);
-    log_info("[hull:c] running app.main (%s runtime)", rt->vt->name);
+    log_debug("[hull:c] running app.main (%s runtime)", rt->vt->name);
 
     int rc = 1;
     int run = rt->vt->run_main(rt, &s->server,
@@ -3222,7 +3226,7 @@ static int hl_serve_run_main(HlServerState *s)
     if (run != 0)
         return -1;
 
-    log_info("[hull:c] app.main exited with code %d", rc);
+    log_debug("[hull:c] app.main exited with code %d", rc);
     return 0;
 }
 
