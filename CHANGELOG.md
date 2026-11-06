@@ -172,6 +172,20 @@ Lows from the post-v0.18.0 C audit:
     errors and still end the stream; past the bounded drain that can still reset the connection,
     by design. Covered by the new size-refusal scenario of `e2e_multipart` (both runtimes).
 
+### Fixed (nightly fuzz crashes, #996 / #1017)
+
+- **A Lua node cut off at `max_depth` no longer ends before it starts (#1017).** When nesting
+  reached the parser's depth limit, the innermost expression returned without consuming a token,
+  and the enclosing table field took its end from the token BEFORE its start: with blank space in
+  between (`{ { { ...`), its range had `stop < start`, which `hull analyze`, `hull agent inspect`
+  and discovery slice source by. `finish()` now gives a node that consumed nothing an empty range
+  at its own start. Found by the nightly `fuzz_lua_source`; covered by a `test_parser` case and two
+  corpus seeds.
+- **`fuzz_sql_kw` #996 was already fixed by #1002.** Its input reproduces at the commit it was
+  found on (940c3cfc) and not after #1002 (case-sensitive dollar-quote tags in the harness, and a
+  `$` closing a nested dollar quote no longer glued to the next word). The input joins the corpus
+  as a regression seed.
+
 ## [0.18.0] - 2026-11-03
 
 Full PR list:

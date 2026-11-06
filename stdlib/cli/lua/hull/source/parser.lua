@@ -87,9 +87,14 @@ function P:expect_kw(text)
     self:err("'" .. text .. "' expected"); return nil
 end
 
--- node spanning [start_off, self.prev.stop)
+-- node spanning [start_off, self.prev.stop). A node that consumed no token (its
+-- child stopped at max_depth without advancing) ends where it starts: prev is then
+-- the token BEFORE start_off, and with blank space between them its stop would
+-- fall below start.
 function P:finish(node, start_off)
-    node.range = { start = start_off, stop = (self.prev and self.prev.range.stop) or start_off }
+    local stop = (self.prev and self.prev.range.stop) or start_off
+    if stop < start_off then stop = start_off end
+    node.range = { start = start_off, stop = stop }
     return node
 end
 
