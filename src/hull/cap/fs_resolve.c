@@ -390,7 +390,7 @@ static int splice_link(const char *link, const char *rest,
 }
 
 static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
-                          HlFsSymlink sympol, mode_t cmode,
+                          HlFsSymlink sympol, mode_t cmode, mode_t dir_mode,
                           char *leaf, size_t leaf_sz, const char **err)
 {
     int stack[HL_FS_MAX_DEPTH];
@@ -497,7 +497,7 @@ static int resolve_manual(int root_fd, const char *relpath, HlFsOpenMode mode,
                         if (hl_fs_charge(HL_WORK_FS_MKDIR_UNITS)) {
                             *err = HL_FS_BUDGET_ERR; goto fail;
                         }
-                        if (mkdirat(stack[depth - 1], comp, 0755) != 0 && errno != EEXIST) {
+                        if (mkdirat(stack[depth - 1], comp, dir_mode) != 0 && errno != EEXIST) {
                             map_errno(errno, err); goto fail;
                         }
                         if (++reclass > HL_FS_RECLASSIFY_MAX) { *err = "io_error"; goto fail; }
@@ -675,6 +675,10 @@ int hl_fs_open_at_leaf(int root_fd, const char *relpath, HlFsOpenMode mode,
                        char *leaf, size_t leaf_sz, const char **err)
 {
     const char *e = "io_error";
+    /* The one flag riding on the mode: created parents 0700 (an fs.write with
+     * a private mode) instead of 0755. Stripped here; the walk sees a mode. */
+    mode_t dir_mode = ((unsigned)mode & HL_FS_OPEN_PRIVATE_DIRS) ? 0700 : 0755;
+    mode = (HlFsOpenMode)((unsigned)mode & ~(unsigned)HL_FS_OPEN_PRIVATE_DIRS);
     if (leaf && leaf_sz) leaf[0] = '\0';
     if (root_fd < 0 || !relpath) { if (err) *err = "invalid_args"; return -1; }
     if (!caller_path_ok(relpath)) { if (err) *err = "invalid_path"; return -1; }
@@ -725,7 +729,7 @@ int hl_fs_open_at_leaf(int root_fd, const char *relpath, HlFsOpenMode mode,
     }
 #endif
 
-    int fd = resolve_manual(root_fd, relpath, mode, sympol, create_mode,
+    int fd = resolve_manual(root_fd, relpath, mode, sympol, create_mode, dir_mode,
                             leaf, leaf_sz, &e);
     if (fd < 0 && err) *err = e;
     return fd;

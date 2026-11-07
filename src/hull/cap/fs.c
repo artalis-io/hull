@@ -25,6 +25,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>   /* pthread_once: the umask read */
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -198,13 +199,24 @@ static int fs_select(const HlFsConfig *cfg, const char *path, HlFsOpenMode mode,
     return 0;
 }
 
+/* The policy's view of an open mode: KEEP / EXCL are WRITE authority, and
+ * the HL_FS_OPEN_PRIVATE_DIRS flag (the resolver's, not the policy's) is
+ * stripped - the selector fails closed on a mode it does not know. */
+static HlFsOpenMode fs_select_mode(HlFsOpenMode mode)
+{
+    unsigned bare = (unsigned)mode & ~(unsigned)HL_FS_OPEN_PRIVATE_DIRS;
+    if (bare == HL_FS_OPEN_WRITE_KEEP || bare == HL_FS_OPEN_WRITE_EXCL)
+        return HL_FS_OPEN_WRITE;
+    return (HlFsOpenMode)bare;
+}
+
 static int fs_resolve_fd(const HlFsConfig *cfg, const char *path,
                          HlFsOpenMode mode, mode_t cmode, const char **err_msg)
 {
     char scratch[HL_FS_PATH_MAX];
     FsTarget t;
-    HlFsOpenMode sel_mode = mode == HL_FS_OPEN_WRITE_KEEP ? HL_FS_OPEN_WRITE : mode;
-    if (fs_select(cfg, path, sel_mode, scratch, sizeof(scratch), &t, err_msg) != 0)
+    if (fs_select(cfg, path, fs_select_mode(mode), scratch, sizeof(scratch), &t,
+                  err_msg) != 0)
         return -1;
     const char *e = NULL;
     int fd = hl_fs_open_at_ex(t.anchor_fd, t.residual, mode, t.sym, cmode, &e);
@@ -220,8 +232,8 @@ static int fs_resolve_fd_leaf(const HlFsConfig *cfg, const char *path,
 {
     char scratch[HL_FS_PATH_MAX];
     FsTarget t;
-    HlFsOpenMode sel_mode = mode == HL_FS_OPEN_WRITE_KEEP ? HL_FS_OPEN_WRITE : mode;
-    if (fs_select(cfg, path, sel_mode, scratch, sizeof(scratch), &t, err_msg) != 0)
+    if (fs_select(cfg, path, fs_select_mode(mode), scratch, sizeof(scratch), &t,
+                  err_msg) != 0)
         return -1;
     const char *e = NULL;
     int fd = hl_fs_open_at_leaf(t.anchor_fd, t.residual, mode, t.sym, cmode,
@@ -282,16 +294,26 @@ int hl_fs_strip_setid(int fd)
  * its -shm, so either it registered first and the match refuses, or the
  * truncate finished before it mapped anything. Checked then truncated
  * without the lock, a connection opened in between was truncated under. */
-int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
-                            const char **err_msg)
+/* A write whose mode has no group or other bit makes the parents it creates
+ * 0700 (HL_FS_OPEN_PRIVATE_DIRS); 0 = the resolver's 0755. */
+static unsigned fs_private_dirs_flag(mode_t mode)
+{
+    return (mode && !(mode & 0077)) ? HL_FS_OPEN_PRIVATE_DIRS : 0u;
+}
+
+/* @p cmode is the mode a file created here gets (under the umask); @p oflags
+ * is HL_FS_OPEN_PRIVATE_DIRS or 0 (the parents the open creates). */
+static int fs_open_write_fd(const HlFsConfig *cfg, const char *path,
+                            mode_t cmode, unsigned oflags, const char **err_msg)
 {
     if (hl_db_sidecar_name(path)) {
         if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
         return -1;
     }
     char leaf[NAME_MAX + 1];
-    int fd = fs_resolve_fd_leaf(cfg, path, HL_FS_OPEN_WRITE_KEEP, 0644,
-                                leaf, sizeof leaf, err_msg);
+    int fd = fs_resolve_fd_leaf(cfg, path,
+                                (HlFsOpenMode)(HL_FS_OPEN_WRITE_KEEP | oflags),
+                                cmode, leaf, sizeof leaf, err_msg);
     if (fd < 0)
         return -1;
     if (hl_db_sidecar_name(leaf)) {
@@ -313,6 +335,12 @@ int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
         return -1;
     }
     return fd;
+}
+
+int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
+                            const char **err_msg)
+{
+    return fs_open_write_fd(cfg, path, 0644, 0, err_msg);
 }
 
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
@@ -407,14 +435,21 @@ static int fs_write_all(int fd, const char *data, size_t len)
  * THROUGH the link to its target, and a rename would replace the link. */
 static int fs_write_in_place(const HlFsConfig *cfg, const char *path,
                              const char *data, size_t len, unsigned flags,
-                             const char **err_msg)
+                             mode_t mode, const char **err_msg)
 {
     /* Not setuid / setgid on new content, as the atomic replace already
-     * drops them (audit 22); hl_cap_fs_open_write_fd strips them (audit 23,
-     * fail closed since audit 25). */
-    int fd = hl_cap_fs_open_write_fd(cfg, path, err_msg);
+     * drops them (audit 22); fs_open_write_fd strips them (audit 23, fail
+     * closed since audit 25). With a mode given a file created here starts
+     * 0600 and gets its bits, exactly, once the open has truncated it. */
+    int fd = fs_open_write_fd(cfg, path, mode ? 0600 : 0644,
+                              fs_private_dirs_flag(mode), err_msg);
     if (fd < 0)
         return -1;
+    if (mode && fchmod(fd, mode) != 0) {
+        close(fd);
+        if (err_msg) *err_msg = "write_failed";
+        return -1;
+    }
     int rc = (len > 0 && data) ? fs_write_all(fd, data, len) : 0;
     if (rc == 0 && !(flags & HL_FS_WRITE_NO_SYNC) && hl_meter_fsync(fd) != 0)
         rc = -1;
@@ -430,6 +465,35 @@ static void fs_unlink_temp(int parent_fd, const char *name)
     if (parent_fd >= 0) (void)unlinkat(parent_fd, name, 0);
 }
 
+/* The bits a NEW file gets when the write names no mode: 0644 under the
+ * process umask, as the kernel would give an open(O_CREAT, 0644). The temp
+ * is created 0600 (so the bytes are the owner's alone until the rename), so
+ * the umask is applied by hand. Reading it is a set-and-restore, done ONCE
+ * per process: Hull never changes its umask, and no other Hull thread
+ * creates a file in that first microsecond. */
+static mode_t fs_umask_cached;
+static pthread_once_t fs_umask_once = PTHREAD_ONCE_INIT;
+static void fs_umask_read(void)
+{
+    mode_t u = umask(0);
+    (void)umask(u);
+    fs_umask_cached = u;
+}
+static mode_t fs_default_file_mode(void)
+{
+    pthread_once(&fs_umask_once, fs_umask_read);
+    return (mode_t)(0644 & ~fs_umask_cached);
+}
+
+static void (*fs_observe_fn)(int fd, void *ud);
+static void *fs_observe_ud;
+
+void hl_cap_fs_write_observe_for_test(void (*fn)(int fd, void *ud), void *ud)
+{
+    fs_observe_fn = fn;
+    fs_observe_ud = ud;
+}
+
 enum { FS_ATOMIC_OK = 0, FS_ATOMIC_FAILED = -1, FS_ATOMIC_IN_PLACE = 1 };
 
 /* Write to a temp file beside the target, then rename it over the target, so a
@@ -441,7 +505,7 @@ enum { FS_ATOMIC_OK = 0, FS_ATOMIC_FAILED = -1, FS_ATOMIC_IN_PLACE = 1 };
  * directory. */
 static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
                            const char *data, size_t len, unsigned flags,
-                           const char **err_msg)
+                           mode_t mode, const char **err_msg)
 {
     char scratch[HL_FS_PATH_MAX];
     FsTarget t;
@@ -479,9 +543,13 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
     const char *e = NULL;
     /* O_CREAT|O_EXCL|O_NOFOLLOW (audit 42): the temp is always a new file -
      * a file or symlink already at the name (planted, or another writer's)
-     * is never opened, truncated or written through. */
-    int tfd = hl_fs_open_at_ex(t.anchor_fd, tmprel, HL_FS_OPEN_WRITE_EXCL,
-                               t.sym, 0644, &e);
+     * is never opened, truncated or written through. Created 0600 whatever
+     * the final bits are: a secret is never world-readable for the write's
+     * duration (the bits are set right before the rename, below). */
+    int tfd = hl_fs_open_at_ex(t.anchor_fd, tmprel,
+                               (HlFsOpenMode)(HL_FS_OPEN_WRITE_EXCL
+                                              | fs_private_dirs_flag(mode)),
+                               t.sym, 0600, &e);
     if (tfd < 0) {
         /* The directory refuses a new file (read-only, or not writable) -
          * but the target itself may be writable, as with an EXACT grant on
@@ -547,17 +615,30 @@ static int fs_write_atomic(const HlFsConfig *cfg, const char *path,
         fail = "io_error";
         goto out;
     }
-    /* A replaced file keeps its permission bits (a 0600 secret stays 0600),
-     * not setuid / setgid: an in-place write had the kernel clear them, so
-     * copied onto new content they made it a setuid executable of the app's
-     * choosing (audit 22). */
-    if (have_target)
-        (void)fchmod(tfd, target.st_mode & 01777);
-
     if ((len > 0 && data && fs_write_all(tfd, data, len) != 0)
         || (!(flags & HL_FS_WRITE_NO_SYNC) && hl_meter_fsync(tfd) != 0)) {
         fail = "write_failed";
         goto out;
+    }
+    if (fs_observe_fn) fs_observe_fn(tfd, fs_observe_ud);
+    /* The final bits, now that the data is on the 0600 temp. A mode the
+     * caller gave is applied exactly - the umask does not touch it, and a
+     * replaced file's bits are replaced, not merged - and a mode that cannot
+     * be applied fails the write. Otherwise a replaced file keeps its
+     * permission bits (a 0600 secret stays 0600), not setuid / setgid: an
+     * in-place write had the kernel clear them, so copied onto new content
+     * they made it a setuid executable of the app's choosing (audit 22); a
+     * new file gets 0644 under the umask. Those two are best effort: a
+     * failed fchmod leaves the file 0600, tighter than meant, never looser. */
+    if (mode) {
+        if (fchmod(tfd, mode) != 0) {
+            fail = "write_failed";
+            goto out;
+        }
+    } else if (have_target) {
+        (void)fchmod(tfd, target.st_mode & 01777);
+    } else {
+        (void)fchmod(tfd, fs_default_file_mode());
     }
     if (close(tfd) != 0) {
         tfd = -1;
@@ -608,25 +689,72 @@ out:
     return status;
 }
 
-int hl_cap_fs_write_ex(const HlFsConfig *cfg, const char *path,
-                       const char *data, size_t len, unsigned flags,
-                       const char **err_msg)
+int hl_cap_fs_write_mode(const HlFsConfig *cfg, const char *path,
+                         const char *data, size_t len, unsigned flags,
+                         mode_t mode, const char **err_msg)
 {
     int result = -1;
-    int status = fs_write_atomic(cfg, path, data, len, flags, err_msg);
-    if (status == FS_ATOMIC_OK)
-        result = 0;
-    else if (status == FS_ATOMIC_IN_PLACE)
-        result = fs_write_in_place(cfg, path, data, len, flags, err_msg);
+    if (mode & ~(mode_t)HL_FS_WRITE_MODE_MASK) {
+        /* No execute, setuid, setgid or sticky bit from app code, whatever
+         * the binding let through. */
+        if (err_msg) *err_msg = "invalid_mode";
+        goto audit;
+    }
+    {
+        int status = fs_write_atomic(cfg, path, data, len, flags, mode, err_msg);
+        if (status == FS_ATOMIC_OK)
+            result = 0;
+        else if (status == FS_ATOMIC_IN_PLACE)
+            result = fs_write_in_place(cfg, path, data, len, flags, mode, err_msg);
+    }
 
+audit:
     {
         ShJsonWriter w = hl_audit_begin("fs.write");
         sh_json_write_kv_string(&w, "path", path);
         sh_json_write_kv_int(&w, "len", (int64_t)len);
+        if (mode) sh_json_write_kv_int(&w, "mode", (int64_t)mode);
         sh_json_write_kv_int(&w, "result", result);
         hl_audit_end(&w);
     }
     return result;
+}
+
+int hl_cap_fs_write_ex(const HlFsConfig *cfg, const char *path,
+                       const char *data, size_t len, unsigned flags,
+                       const char **err_msg)
+{
+    return hl_cap_fs_write_mode(cfg, path, data, len, flags, 0, err_msg);
+}
+
+/* A number is not taken at all (the bindings refuse it before this): a
+ * decimal 600 is the classic mistake, and an octal string cannot be one. */
+int hl_fs_parse_mode_string(const char *s, size_t n, mode_t *out,
+                            const char **err)
+{
+    if (!s || (n != 3 && n != 4)) {
+        *err = "mode must be an octal string of 3 or 4 digits, such as \"600\"";
+        return 0;
+    }
+    unsigned v = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '7') {
+            *err = "mode must be an octal string of 3 or 4 digits, such as \"600\"";
+            return 0;
+        }
+        v = v * 8 + (unsigned)(s[i] - '0');
+    }
+    if (v & ~HL_FS_WRITE_MODE_MASK) {
+        *err = "mode may set only read and write bits (within 0666): "
+               "no execute, setuid, setgid or sticky bit";
+        return 0;
+    }
+    if (v == 0) {
+        *err = "mode 000 would leave the file unreadable";
+        return 0;
+    }
+    *out = (mode_t)v;
+    return 1;
 }
 
 int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,

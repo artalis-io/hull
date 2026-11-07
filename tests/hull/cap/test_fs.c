@@ -62,6 +62,8 @@ static const char *const test_grants[] = {
     "nope.txt", "size.txt", "test.txt", "whole.txt",
     "win_borrow.bin", "win_cross.bin", "win_eof.bin", "win_rej.bin", "win_zero.bin",
     "shrink.bin", "many.bin", "suid.bin", "trunc.bin",
+    "priv/deep/secret.txt", "grp/shared.txt", "rebits.txt", "midwrite.txt",
+    "exec.sh", "setuid.bin",
 };
 
 static void setup_fs(void)
@@ -250,6 +252,173 @@ UTEST(hl_cap_fs, write_keeps_the_mode_of_a_replaced_file)
     teardown_fs();
 }
 
+/* ── fs.write with a mode (design doc §8, gap 2) ───────────────────── */
+
+/* The process umask, read the way the cap does (set and restore). */
+static mode_t test_umask(void)
+{
+    mode_t u = umask(0);
+    (void)umask(u);
+    return u;
+}
+
+/* A new file written with mode 0600 reads 0600 (the umask does not apply),
+ * and the parents the write created are 0700, not 0755. */
+UTEST(hl_cap_fs, write_mode_600_makes_a_private_file_and_private_parents)
+{
+    if (hl_host_is_windows()) return;          /* no POSIX permission bits */
+    setup_fs();
+    const char *err = NULL;
+    ASSERT_EQ(hl_cap_fs_write_mode(&test_cfg, "priv/deep/secret.txt", "k", 1,
+                                   0, 0600, &err), 0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("priv/deep/secret.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0600);
+    ASSERT_EQ(host_path_stat("priv", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0700);
+    ASSERT_EQ(host_path_stat("priv/deep", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0700);
+    char buf[8];
+    EXPECT_EQ(hl_cap_fs_read(&test_cfg, "priv/deep/secret.txt", buf, sizeof buf, NULL), 1);
+    EXPECT_FALSE(temp_left("priv/deep"));
+    teardown_fs();
+}
+
+/* A mode with a group or other bit keeps the resolver's 0755 parents (under
+ * the umask, as mkdir gives them), and the file gets exactly its bits. */
+UTEST(hl_cap_fs, write_mode_with_group_bits_keeps_0755_parents)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write_mode(&test_cfg, "grp/shared.txt", "g", 1,
+                                   0, 0640, NULL), 0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("grp/shared.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0640);
+    ASSERT_EQ(host_path_stat("grp", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), (int)(0755 & ~test_umask()));
+    teardown_fs();
+}
+
+/* An existing 0644 file rewritten with 0600 reads 0600; rewritten with 0644
+ * again it reads 0644: the bits are replaced, not merged. Without a mode a
+ * new file is 0644 under the umask, as before. */
+UTEST(hl_cap_fs, write_mode_replaces_the_bits_of_an_existing_file)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    struct stat st;
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "rebits.txt", "a", 1, NULL), 0);
+    ASSERT_EQ(host_path_stat("rebits.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), (int)(0644 & ~test_umask()));
+    char p[512];
+    snprintf(p, sizeof p, "%s/rebits.txt", test_dir);
+    ASSERT_EQ(chmod(p, 0644), 0);
+    ASSERT_EQ(hl_cap_fs_write_mode(&test_cfg, "rebits.txt", "b", 1, 0, 0600, NULL), 0);
+    ASSERT_EQ(host_path_stat("rebits.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0600);
+    ASSERT_EQ(hl_cap_fs_write_mode(&test_cfg, "rebits.txt", "c", 1, 0, 0644, NULL), 0);
+    ASSERT_EQ(host_path_stat("rebits.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0644);
+    /* And a write with no mode keeps what is there (0644). */
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "rebits.txt", "d", 1, NULL), 0);
+    ASSERT_EQ(host_path_stat("rebits.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0644);
+    teardown_fs();
+}
+
+/* No bit outside 0666 is reachable: execute, setuid, setgid, sticky. The
+ * refusal is before anything is created. */
+UTEST(hl_cap_fs, write_mode_refuses_bits_outside_0666)
+{
+    setup_fs();
+    const char *err = NULL;
+    EXPECT_EQ(hl_cap_fs_write_mode(&test_cfg, "exec.sh", "#!", 2, 0, 0755, &err), -1);
+    EXPECT_STREQ(err, "invalid_mode");
+    err = NULL;
+    EXPECT_EQ(hl_cap_fs_write_mode(&test_cfg, "setuid.bin", "x", 1, 0, 04600, &err), -1);
+    EXPECT_STREQ(err, "invalid_mode");
+    EXPECT_EQ(hl_cap_fs_write_mode(&test_cfg, "setuid.bin", "x", 1, 0, 02644, &err), -1);
+    EXPECT_EQ(hl_cap_fs_write_mode(&test_cfg, "setuid.bin", "x", 1, 0, 01644, &err), -1);
+    EXPECT_EQ(hl_cap_fs_write_mode(&test_cfg, "setuid.bin", "x", 1, 0, 0100, &err), -1);
+    struct stat st;
+    EXPECT_NE(host_path_stat("exec.sh", &st), 0);
+    EXPECT_NE(host_path_stat("setuid.bin", &st), 0);
+    /* 0666 itself, the ceiling, is fine. */
+    EXPECT_EQ(hl_cap_fs_write_mode(&test_cfg, "exec.sh", "#!", 2, 0, 0666, &err), 0);
+    teardown_fs();
+}
+
+static int observed_mode = -1;
+static int observed_calls;
+static void observe_temp_mode(int fd, void *ud)
+{
+    (void)ud;
+    struct stat st;
+    observed_mode = fstat(fd, &st) == 0 ? (int)(st.st_mode & 07777) : -2;
+    observed_calls++;
+}
+
+/* The temp file is 0600 while the data is on it, whatever the final bits:
+ * here the target exists as 0644 and no mode is given, so before this change
+ * the temp was created 0644 and carried the bytes world-readable until the
+ * rename. The final file still reads 0644. */
+UTEST(hl_cap_fs, write_temp_file_is_0600_until_the_rename)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "midwrite.txt", "old", 3, NULL), 0);
+    char p[512];
+    snprintf(p, sizeof p, "%s/midwrite.txt", test_dir);
+    ASSERT_EQ(chmod(p, 0644), 0);
+    observed_mode = -1;
+    observed_calls = 0;
+    hl_cap_fs_write_observe_for_test(observe_temp_mode, NULL);
+    int rc = hl_cap_fs_write(&test_cfg, "midwrite.txt", "secret", 6, NULL);
+    hl_cap_fs_write_observe_for_test(NULL, NULL);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(observed_calls, 1);
+    EXPECT_EQ(observed_mode, (int)(0600 & ~test_umask()));
+    struct stat st;
+    ASSERT_EQ(host_path_stat("midwrite.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0644);
+    /* And with an explicit mode the temp is 0600 too (trivially), the file
+     * ends as asked. */
+    observed_mode = -1;
+    hl_cap_fs_write_observe_for_test(observe_temp_mode, NULL);
+    rc = hl_cap_fs_write_mode(&test_cfg, "midwrite.txt", "s2", 2, 0, 0640, NULL);
+    hl_cap_fs_write_observe_for_test(NULL, NULL);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(observed_mode, (int)(0600 & ~test_umask()));
+    ASSERT_EQ(host_path_stat("midwrite.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0640);
+    teardown_fs();
+}
+
+/* The bindings' option parser: octal strings of 3 or 4 digits within 0666. */
+UTEST(hl_cap_fs, parse_mode_string)
+{
+    mode_t m = 0;
+    const char *err = NULL;
+    EXPECT_TRUE(hl_fs_parse_mode_string("600", 3, &m, &err));  EXPECT_EQ((int)m, 0600);
+    EXPECT_TRUE(hl_fs_parse_mode_string("0600", 4, &m, &err)); EXPECT_EQ((int)m, 0600);
+    EXPECT_TRUE(hl_fs_parse_mode_string("640", 3, &m, &err));  EXPECT_EQ((int)m, 0640);
+    EXPECT_TRUE(hl_fs_parse_mode_string("644", 3, &m, &err));  EXPECT_EQ((int)m, 0644);
+    EXPECT_TRUE(hl_fs_parse_mode_string("0666", 4, &m, &err)); EXPECT_EQ((int)m, 0666);
+    EXPECT_FALSE(hl_fs_parse_mode_string("755", 3, &m, &err));   /* execute */
+    EXPECT_NE(strstr(err, "0666"), NULL);
+    EXPECT_FALSE(hl_fs_parse_mode_string("4600", 4, &m, &err));  /* setuid */
+    EXPECT_FALSE(hl_fs_parse_mode_string("2644", 4, &m, &err));  /* setgid */
+    EXPECT_FALSE(hl_fs_parse_mode_string("1644", 4, &m, &err));  /* sticky */
+    EXPECT_FALSE(hl_fs_parse_mode_string("000", 3, &m, &err));   /* unreadable */
+    EXPECT_FALSE(hl_fs_parse_mode_string("60", 2, &m, &err));    /* too short */
+    EXPECT_FALSE(hl_fs_parse_mode_string("00600", 5, &m, &err)); /* too long */
+    EXPECT_FALSE(hl_fs_parse_mode_string("680", 3, &m, &err));   /* not octal */
+    EXPECT_FALSE(hl_fs_parse_mode_string("6o0", 3, &m, &err));
+    EXPECT_FALSE(hl_fs_parse_mode_string("", 0, &m, &err));
+    EXPECT_FALSE(hl_fs_parse_mode_string(NULL, 3, &m, &err));
+}
+
 /* Audit 22: the atomic replace copied setuid / setgid onto new content (an
  * in-place write had the kernel clear them). */
 UTEST(hl_cap_fs, write_drops_setuid_and_setgid_of_a_replaced_file)
@@ -320,6 +489,42 @@ UTEST(hl_cap_fs, write_goes_through_an_in_root_symlink_under_a_subtree)
     ASSERT_EQ(n, 5);                           /* ...whose target was written */
     EXPECT_EQ(memcmp(buf, "after", 5), 0);
     EXPECT_FALSE(temp_left("sub"));
+    teardown_fs();
+}
+
+/* The in-place path (a write through an in-root link) takes a mode too: the
+ * link's target gets the bits after the truncate, and the link stays a link.
+ * The private-dirs flag rides on the open mode through the policy selector
+ * here (it is the resolver's, never the policy's). */
+UTEST(hl_cap_fs, an_in_place_write_takes_a_mode)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    char p[512];
+    snprintf(p, sizeof(p), "%s/sub/real2.txt", test_dir);
+    FILE *f = fopen(p, "wb");
+    ASSERT_TRUE(f != NULL);
+    fputs("before", f);
+    fclose(f);
+    ASSERT_EQ(chmod(p, 0644), 0);
+    snprintf(p, sizeof(p), "%s/sub/alias2.txt", test_dir);
+    ASSERT_EQ(symlink("real2.txt", p), 0);
+
+    const char *err = NULL;
+    ASSERT_EQ(hl_cap_fs_write_mode(&test_cfg, "sub/alias2.txt", "after", 5,
+                                   0, 0600, &err), 0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("sub/alias2.txt", &st), 0);
+    EXPECT_TRUE(S_ISLNK(st.st_mode));
+    ASSERT_EQ(host_path_stat("sub/real2.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0600);
+    char buf[16];
+    ASSERT_EQ(hl_cap_fs_read(&test_cfg, "sub/real2.txt", buf, sizeof(buf), NULL), 5);
+    EXPECT_EQ(memcmp(buf, "after", 5), 0);
+    /* And 0640 (a group bit, no private-dirs flag) the same way. */
+    ASSERT_EQ(hl_cap_fs_write_mode(&test_cfg, "sub/alias2.txt", "x", 1, 0, 0640, &err), 0);
+    ASSERT_EQ(host_path_stat("sub/real2.txt", &st), 0);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0640);
     teardown_fs();
 }
 
