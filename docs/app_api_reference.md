@@ -2696,6 +2696,48 @@ GPU latency is constant ~2.6ms (dominated by submit+poll overhead). Crossover vs
 
 **Build:** `make fetch-wgpu` downloads and SHA-256 verifies wgpu-native. Then `make HL_ENABLE_GPU=1` auto-detects `vendor/wgpu/`. macOS links Metal + QuartzCore + CoreGraphics + Foundation; Linux links `-lvulkan`. Not compatible with Cosmopolitan builds.
 
+### Filesystem writes (`hull/fs`: `fs.write`)
+
+`fs.write(path, bytes [, opts])` writes `bytes` to `path` (relative to the app
+directory, authorized by the manifest's `fs.write` grants), creating missing
+parent directories, atomically: the bytes go to a temp file beside the target
+that is flushed and renamed over it, so a reader - or the file after a crash -
+sees the old contents or the new, never a mix. Lua returns `true` or
+`nil, err`; JS returns `true` or throws.
+
+```lua
+local fs = require("hull.fs")
+fs.write("data/report.json", body)                          -- 0644 (under the umask); a replaced file keeps its bits
+fs.write("data/keys/app.key", pem, { mode = "600" })        -- exactly 0600; the new data/keys/ is 0700
+fs.write("data/keys/app.key", pem, { private = true })      -- the same: private is shorthand for "600"
+fs.write("data/shared.csv", csv, { mode = "0640" })         -- a leading 0 is fine; parents stay 0755
+```
+
+```javascript
+import { fs } from "hull:fs";
+fs.write("data/report.json", body);
+fs.write("data/keys/app.key", pem, { mode: "600" });
+fs.write("data/keys/app.key", pem, { private: true });
+fs.write("data/shared.csv", csv, { mode: "0640" });
+```
+
+`opts` (the same two names in both runtimes):
+
+| Option | Value | Effect |
+|--------|-------|--------|
+| `mode` | an octal **string** of 3 or 4 digits: `"600"`, `"640"`, `"644"`, `"0600"` | The permission bits the file ends up with, exactly: the umask does not apply, and a replaced file's bits are **replaced, not merged**. Every bit must be within **0666** - no execute, setuid, setgid or sticky bit is reachable from app code (`"755"`, `"4600"`, `"1644"` are refused), and `"000"` is refused too. A **number** is refused with a message saying to pass an octal string (a decimal `600` is the classic mistake). |
+| `private` | `true` | Shorthand for `mode = "600"`. May be given with `mode = "600"`; given with any other mode the two disagree and the call is refused. |
+
+With no mode a new file is created 0644 under the process umask and a
+replaced file keeps its permission bits (never setuid / setgid), as before.
+When the mode has no group or other bits (`"600"`, `"400"`, `private`), the
+parent directories **this write creates** are made 0700 instead of 0755;
+directories that already exist are never re-moded. Whatever the mode, the
+temp file is created 0600 and gets its final bits only after the data is
+written and flushed, right before the rename - the bytes are never readable by
+anyone but the owner while a write is in progress. The write's cost to the
+instruction budget is unchanged.
+
 ### Unified Buffer Protocol
 
 All compute and GPU functions accept any buffer type as input via the unified buffer protocol (`HlBufferView` in `include/hull/buffer.h`):

@@ -21,6 +21,7 @@
 #include "../../client_ip_matrix.h"
 #include "utest.h"
 #include "hull/runtime/js.h"
+#include "hull/shared/host.h"        /* hl_host_is_windows */
 #include "hull/runtime/js_bytecode_cache.h"
 #include "hull/runtime/js_template_cache.h"
 #include "hull/reqctx.h"
@@ -11492,6 +11493,83 @@ UTEST(js_audit15, fs_read_is_charged_and_bounded)
     if (r && !strstr(r, "file_too_large")) printf("  got: %s\n", r);
     free(r);
     js.max_heap_bytes = saved;
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+/* ── fs.write(path, bytes, opts): opts.mode / opts.private ─────────────
+ * (design doc §8, gap 2). The option names and rules are the Lua binding's. */
+
+/* fs.stat reports st_mode & 0777: 0600 = 384, 0640 = 416, 0644 = 420,
+ * 0700 = 448. */
+UTEST(js_fs_write_mode, mode_and_private_set_the_bits)
+{
+    if (hl_host_is_windows()) return;
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    EXPECT_EQ(eval_int("fs.write('s.txt', 'k', { mode: '600' }); fs.stat('s.txt').mode"), 384);
+    EXPECT_EQ(eval_int("new Uint8Array(fs.read('s.txt'))[0] === 107 ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("fs.write('p.txt', 'k', { private: true }); fs.stat('p.txt').mode"), 384);
+    /* private: true and mode: "600" agree. */
+    EXPECT_EQ(eval_int("fs.write('pm.txt', 'k', { private: true, mode: '600' }); "
+                       "fs.stat('pm.txt').mode"), 384);
+    /* A leading zero and a group bit. */
+    EXPECT_EQ(eval_int("fs.write('g/x.txt', 'k', { mode: '0640' }); fs.stat('g/x.txt').mode"), 416);
+    /* A 0644 file rewritten with "600" reads 0600; without a mode it keeps it. */
+    EXPECT_EQ(eval_int("fs.write('r.txt', 'a', { mode: '644' }); fs.stat('r.txt').mode"), 420);
+    EXPECT_EQ(eval_int("fs.write('r.txt', 'b', { mode: '600' }); fs.stat('r.txt').mode"), 384);
+    EXPECT_EQ(eval_int("fs.write('r.txt', 'c'); fs.stat('r.txt').mode"), 384);
+    /* Private parents: "600" under a new directory makes it 0700. */
+    EXPECT_EQ(eval_int("fs.write('pd/in/s.txt', 'k', { private: true }); fs.stat('pd').mode"), 448);
+    EXPECT_EQ(eval_int("fs.stat('pd/in').mode"), 448);
+    /* An ArrayBuffer body with options: the view is taken after them. */
+    EXPECT_EQ(eval_int("fs.write('ab.bin', new Uint8Array([1, 2, 3]), { mode: '600' }); "
+                       "fs.stat('ab.bin').size === 3 && fs.stat('ab.bin').mode === 384 ? 1 : 0"), 1);
+    /* {} / private: false / null are "no option". */
+    EXPECT_EQ(eval_int("fs.write('n.txt', 'k', {}); fs.write('n2.txt', 'k', { private: false }); "
+                       "fs.write('n3.txt', 'k', null); 1"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_fs_write_mode, bad_options_are_refused_before_the_write)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char *r;
+    /* A number: the decimal-600 mistake. */
+    r = a15_throws("fs.write('x.txt', 'k', { mode: 600 })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "octal string"), NULL); free(r);
+    /* Execute, setuid, sticky bits. */
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '755' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "0666"), NULL); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '4600' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "setuid"), NULL); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '1644' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    /* Not an octal string at all; 000; a non-string. */
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '0o600' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '000' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: true })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    /* private and mode disagreeing; private not a boolean; opts not an object. */
+    r = a15_throws("fs.write('x.txt', 'k', { private: true, mode: '644' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "disagree"), NULL); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { private: 'yes' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', '600')");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    /* A getter that throws fails the call with its own error. */
+    r = a15_throws("fs.write('x.txt', 'k', { get mode() { throw new Error('mine'); } })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "mine"), NULL); free(r);
+    /* Nothing was written by any of them. */
+    EXPECT_EQ(eval_int("fs.stat('x.txt') === null ? 1 : 0"), 1);
     cleanup_js_caps();
     a15_fs_close(&f);
 }

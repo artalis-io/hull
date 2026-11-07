@@ -103,6 +103,16 @@ typedef enum {
 } HlFsOpenMode;
 
 /*
+ * OR'd into the `mode` argument of hl_fs_open_at / _ex / _leaf (cast to
+ * HlFsOpenMode): the parent directories a WRITE-kind open creates (its
+ * contained mkdir-p) are made 0700 instead of 0755 - an fs.write whose mode
+ * has no group or other bits keeps its parents private too. Directories that
+ * already exist are never re-moded. Stripped before the mode is read, so it
+ * changes nothing else about the resolution.
+ */
+#define HL_FS_OPEN_PRIVATE_DIRS 0x100
+
+/*
  * Symlink policy for a resolution. Independent of the open mode.
  *   HL_FS_SYMLINK_FOLLOW - follow in-root symlinks, virtual-root contained
  *     (re-root / clamp at root_fd). The default and back-compatible behavior;
