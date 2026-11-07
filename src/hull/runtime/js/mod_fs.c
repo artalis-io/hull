@@ -161,8 +161,73 @@ static JSValue js_fs_read(JSContext *ctx, JSValueConst this_val,
     return ab;
 }
 
-/* fs.write(path, bytes) - accepts ArrayBuffer / TypedArray / string.
- * Throws on error; returns true on success. */
+/* The optional opts of fs.write: { mode: "600" } and / or { private: true }
+ * (= "600"). Writes the mode (0 for none) to *out and returns 0, or throws
+ * and returns -1. Same names and rules as the Lua binding
+ * (hl_fs_parse_mode_string). */
+static int js_fs_write_opts(JSContext *ctx, JSValueConst opts, mode_t *out)
+{
+    *out = 0;
+    if (JS_IsUndefined(opts) || JS_IsNull(opts))
+        return 0;
+    if (!JS_IsObject(opts)) {
+        JS_ThrowTypeError(ctx, "fs.write: opts must be an object");
+        return -1;
+    }
+    mode_t mode = 0, priv = 0;
+    JSValue vm = JS_GetPropertyStr(ctx, opts, "mode");
+    if (JS_IsException(vm)) return -1;
+    if (JS_IsNumber(vm)) {
+        JS_FreeValue(ctx, vm);
+        JS_ThrowTypeError(ctx, "fs.write: mode must be an octal string such "
+                          "as \"600\", not a number (600 would be decimal)");
+        return -1;
+    }
+    if (!JS_IsUndefined(vm)) {
+        if (!JS_IsString(vm)) {
+            JS_FreeValue(ctx, vm);
+            JS_ThrowTypeError(ctx, "fs.write: mode must be an octal string "
+                              "such as \"600\"");
+            return -1;
+        }
+        size_t n = 0;
+        const char *s = JS_ToCStringLen(ctx, &n, vm);
+        JS_FreeValue(ctx, vm);
+        if (!s) return -1;
+        const char *err = NULL;
+        int ok = hl_fs_parse_mode_string(s, n, &mode, &err);
+        JS_FreeCString(ctx, s);
+        if (!ok) {
+            JS_ThrowTypeError(ctx, "fs.write: %s", err);
+            return -1;
+        }
+    } else {
+        JS_FreeValue(ctx, vm);
+    }
+    JSValue vp = JS_GetPropertyStr(ctx, opts, "private");
+    if (JS_IsException(vp)) return -1;
+    if (JS_IsBool(vp)) {
+        if (JS_ToBool(ctx, vp)) priv = 0600;
+    } else if (!JS_IsUndefined(vp)) {
+        JS_FreeValue(ctx, vp);
+        JS_ThrowTypeError(ctx, "fs.write: private must be a boolean");
+        return -1;
+    }
+    JS_FreeValue(ctx, vp);
+    if (priv && mode && mode != priv) {
+        JS_ThrowTypeError(ctx, "fs.write: private: true and mode: \"%03o\" "
+                          "disagree (private means \"600\")", (unsigned)mode);
+        return -1;
+    }
+    *out = mode ? mode : priv;
+    return 0;
+}
+
+/* fs.write(path, bytes [, opts]) - accepts ArrayBuffer / TypedArray /
+ * string. opts.mode (an octal string within 0666) / opts.private (= "600")
+ * set the file's permission bits; without them a new file is 0644 under the
+ * umask and a replaced file keeps its bits. Throws on error; returns true on
+ * success. */
 static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
@@ -176,6 +241,14 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
 
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
+
+    /* The options first: their getters are app code, and the buffer view
+     * below is taken after the last of it. */
+    mode_t mode = 0;
+    if (argc >= 3 && js_fs_write_opts(ctx, argv[2], &mode) != 0) {
+        JS_FreeCString(ctx, path);
+        return JS_EXCEPTION;
+    }
 
     HlBufferView view = {0};
     const char *str = NULL;
@@ -201,8 +274,9 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
     const char *err_msg = NULL;
     int rc, tripped;
     JS_FS_CHARGED(ctx, tripped,
-        rc = hl_cap_fs_write(js->base.fs_cfg, path,
-                             (const char *)view.data, view.len, &err_msg));
+        rc = hl_cap_fs_write_mode(js->base.fs_cfg, path,
+                                  (const char *)view.data, view.len, 0, mode,
+                                  &err_msg));
     if (needs_free && str) JS_FreeCString(ctx, str);
     JS_FreeCString(ctx, path);
     if (tripped) return JS_EXCEPTION;

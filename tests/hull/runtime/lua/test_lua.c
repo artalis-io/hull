@@ -13107,6 +13107,103 @@ UTEST(lua_audit15, fs_read_is_charged_and_bounded)
     a15_fs_close(&f);
 }
 
+/* ── fs.write(path, bytes, opts): opts.mode / opts.private ─────────────
+ * (design doc §8, gap 2). The option names and rules are the JS binding's. */
+
+/* fs.stat reports st_mode & 0777: 0600 = 384, 0640 = 416, 0644 = 420. */
+UTEST(lua_fs_write_mode, mode_and_private_set_the_bits)
+{
+    if (hl_host_is_windows()) return;
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    EXPECT_EQ(audit10_run(
+        "assert(fs.write('s.txt', 'k', { mode = '600' })) "
+        "assert(fs.stat('s.txt').mode == 384, fs.stat('s.txt').mode) "
+        "assert(fs.read('s.txt') == 'k') return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_EQ(audit10_run(
+        "assert(fs.write('p.txt', 'k', { private = true })) "
+        "assert(fs.stat('p.txt').mode == 384) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* private = true and mode = "600" agree. */
+    EXPECT_EQ(audit10_run(
+        "assert(fs.write('pm.txt', 'k', { private = true, mode = '600' })) "
+        "assert(fs.stat('pm.txt').mode == 384) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* A leading zero and a group bit; the created parent stays 0755 then. */
+    EXPECT_EQ(audit10_run(
+        "assert(fs.write('g/x.txt', 'k', { mode = '0640' })) "
+        "assert(fs.stat('g/x.txt').mode == 416) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* A 0644 file rewritten with "600" reads 0600; the bits are replaced. */
+    EXPECT_EQ(audit10_run(
+        "assert(fs.write('r.txt', 'a', { mode = '644' })) "
+        "assert(fs.stat('r.txt').mode == 420) "
+        "assert(fs.write('r.txt', 'b', { mode = '600' })) "
+        "assert(fs.stat('r.txt').mode == 384) "
+        "assert(fs.write('r.txt', 'c')) "            /* no mode: kept */
+        "assert(fs.stat('r.txt').mode == 384) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* private parents: "600" under a new directory makes it 0700. */
+    EXPECT_EQ(audit10_run(
+        "assert(fs.write('pd/in/s.txt', 'k', { private = true })) "
+        "assert(fs.stat('pd').mode == 448, fs.stat('pd').mode) "
+        "assert(fs.stat('pd/in').mode == 448) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* false and an empty table are "no option". */
+    EXPECT_EQ(audit10_run(
+        "assert(fs.write('n.txt', 'k', {})) "
+        "assert(fs.write('n2.txt', 'k', { private = false })) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(lua_fs_write_mode, bad_options_are_refused_before_the_write)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char err[512];
+    /* A number: the decimal-600 mistake. */
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { mode = 600 })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "octal string"), NULL);
+    /* Execute, setuid, sticky bits. */
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { mode = '755' })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "0666"), NULL);
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { mode = '4600' })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "setuid"), NULL);
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { mode = '1644' })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* Not an octal string at all; 000. */
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { mode = '0o600' })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { mode = '000' })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { mode = true })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* private and mode disagreeing; private not a boolean; opts not a table. */
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { private = true, mode = '644' })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(strstr(err, "disagree"), NULL);
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', { private = 'yes' })",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    EXPECT_NE(audit10_run("fs.write('x.txt', 'k', '600')",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    /* Nothing was written by any of them. */
+    EXPECT_EQ(audit10_run("assert(fs.stat('x.txt') == nil) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+    a15_fs_close(&f);
+}
+
 UTEST(lua_audit15, blob_reads_are_charged_and_clamped)
 {
     init_lua_with_caps();

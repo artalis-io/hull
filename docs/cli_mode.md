@@ -68,8 +68,11 @@ app.main(async (ctx) => {
     // ctx.args   : Array<string>
     // ctx.env    : Object<string, string>
     // ctx.stdin  : { readLine(), readAll(), read(n), close() }. All return Promise<string|null>
-    // ctx.stdout : { write(str), flush() }
-    // ctx.stderr : { write(str), flush() }
+    // ctx.stdout : { write(...chunks), flush() }
+    // ctx.stderr : { write(...chunks), flush() }
+    //   a chunk is a string (written as UTF-8), an ArrayBuffer or a typed
+    //   array (written as its bytes); a DataView or any other object is a
+    //   TypeError
 
     const name = ctx.args[0] ?? "world";
     ctx.stdout.write(`hello ${name}\n`);

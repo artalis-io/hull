@@ -116,8 +116,55 @@ static int lua_fs_read(lua_State *L)
     return 1;
 }
 
-/* fs.write(path, bytes) - writes bytes to path (binary-safe). Creates
- * parent dirs as needed. Returns true or (nil, err). */
+/* The optional opts table of fs.write: { mode = "600" } and / or
+ * { private = true } (= "600"). Raises on a bad option; returns the mode,
+ * 0 for none. Reads the fields before anything else of the call is done,
+ * so an __index on opts runs before the write and never during it. */
+static mode_t lua_fs_write_opts(lua_State *L, int idx)
+{
+    if (lua_isnoneornil(L, idx))
+        return 0;
+    luaL_checktype(L, idx, LUA_TTABLE);
+    mode_t mode = 0, priv = 0;
+    const char *err = NULL;
+    lua_getfield(L, idx, "mode");
+    int mt = lua_type(L, -1);
+    if (mt == LUA_TNUMBER) {
+        return (mode_t)luaL_error(L, "fs.write: mode must be an octal string "
+                                  "such as \"600\", not a number (600 would "
+                                  "be decimal)");
+    } else if (mt == LUA_TSTRING) {
+        size_t n;
+        const char *s = lua_tolstring(L, -1, &n);
+        if (!hl_fs_parse_mode_string(s, n, &mode, &err))
+            return (mode_t)luaL_error(L, "fs.write: %s", err);
+    } else if (mt != LUA_TNIL) {
+        return (mode_t)luaL_error(L, "fs.write: mode must be an octal string "
+                                  "such as \"600\"");
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, idx, "private");
+    int pt = lua_type(L, -1);
+    if (pt == LUA_TBOOLEAN) {
+        if (lua_toboolean(L, -1)) priv = 0600;
+    } else if (pt != LUA_TNIL) {
+        return (mode_t)luaL_error(L, "fs.write: private must be a boolean");
+    }
+    lua_pop(L, 1);
+    if (priv && mode && mode != priv) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "fs.write: private = true and mode = \"%03o\" "
+                 "disagree (private means \"600\")", (unsigned)mode);
+        return (mode_t)luaL_error(L, "%s", msg);
+    }
+    return mode ? mode : priv;
+}
+
+/* fs.write(path, bytes [, opts]) - writes bytes to path (binary-safe).
+ * Creates parent dirs as needed. opts.mode (an octal string within 0666) /
+ * opts.private (= "600") set the file's permission bits; without them a new
+ * file is 0644 under the umask and a replaced file keeps its bits. Returns
+ * true or (nil, err). */
 static int lua_fs_write(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -129,6 +176,7 @@ static int lua_fs_write(lua_State *L)
     const char *path = luaL_checkstring(L, 1);
     size_t len;
     const char *bytes = luaL_checklstring(L, 2, &len);
+    mode_t mode = lua_fs_write_opts(L, 3);
     /* Charged BEFORE the write (audit 10): one call writes up to the whole
      * heap and counted as one instruction. One unit per 8 bytes, as blob.put;
      * lua_hlwork raises at once when the run is over, with nothing written.
@@ -141,7 +189,8 @@ static int lua_fs_write(lua_State *L)
     const char *err_msg = NULL;
     int rc, tripped;
     LUA_FS_CHARGED(L, tripped,
-        rc = hl_cap_fs_write(lua->base.fs_cfg, path, bytes, len, &err_msg));
+        rc = hl_cap_fs_write_mode(lua->base.fs_cfg, path, bytes, len, 0, mode,
+                                  &err_msg));
     if (tripped) return hl_lua_budget_raise(L);
     if (rc != 0) {
         lua_pushnil(L);

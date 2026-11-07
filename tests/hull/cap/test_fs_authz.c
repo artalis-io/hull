@@ -83,6 +83,13 @@ UTEST(fs_authz, independent_sets_and_deny)
     ASSERT_STREQ("permission", err);
     ASSERT_EQ(0, hl_cap_fs_write(&c, "w.txt", "hi", 2, &err));                  /* write OK (create) */
     err = NULL;
+    /* A mode changes nothing about the authority: the WRITE set still decides
+     * (the HL_FS_OPEN_PRIVATE_DIRS flag a private mode adds is the resolver's,
+     * never the policy's). */
+    ASSERT_EQ(-1, hl_cap_fs_write_mode(&c, "r.txt", "x", 1, 0, 0600, &err));
+    ASSERT_STREQ("permission", err);
+    ASSERT_EQ(0, hl_cap_fs_write_mode(&c, "w.txt", "hi", 2, 0, 0600, &err));
+    err = NULL;
     ASSERT_EQ((int64_t)-1, hl_cap_fs_read(&c, "w.txt", buf, sizeof(buf), &err));/* not readable */
     ASSERT_STREQ("permission", err);
     err = NULL;

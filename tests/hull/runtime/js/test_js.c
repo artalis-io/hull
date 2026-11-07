@@ -21,6 +21,7 @@
 #include "../../client_ip_matrix.h"
 #include "utest.h"
 #include "hull/runtime/js.h"
+#include "hull/shared/host.h"        /* hl_host_is_windows */
 #include "hull/runtime/js_bytecode_cache.h"
 #include "hull/runtime/js_template_cache.h"
 #include "hull/reqctx.h"
@@ -11496,6 +11497,83 @@ UTEST(js_audit15, fs_read_is_charged_and_bounded)
     a15_fs_close(&f);
 }
 
+/* ── fs.write(path, bytes, opts): opts.mode / opts.private ─────────────
+ * (design doc §8, gap 2). The option names and rules are the Lua binding's. */
+
+/* fs.stat reports st_mode & 0777: 0600 = 384, 0640 = 416, 0644 = 420,
+ * 0700 = 448. */
+UTEST(js_fs_write_mode, mode_and_private_set_the_bits)
+{
+    if (hl_host_is_windows()) return;
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    EXPECT_EQ(eval_int("fs.write('s.txt', 'k', { mode: '600' }); fs.stat('s.txt').mode"), 384);
+    EXPECT_EQ(eval_int("new Uint8Array(fs.read('s.txt'))[0] === 107 ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("fs.write('p.txt', 'k', { private: true }); fs.stat('p.txt').mode"), 384);
+    /* private: true and mode: "600" agree. */
+    EXPECT_EQ(eval_int("fs.write('pm.txt', 'k', { private: true, mode: '600' }); "
+                       "fs.stat('pm.txt').mode"), 384);
+    /* A leading zero and a group bit. */
+    EXPECT_EQ(eval_int("fs.write('g/x.txt', 'k', { mode: '0640' }); fs.stat('g/x.txt').mode"), 416);
+    /* A 0644 file rewritten with "600" reads 0600; without a mode it keeps it. */
+    EXPECT_EQ(eval_int("fs.write('r.txt', 'a', { mode: '644' }); fs.stat('r.txt').mode"), 420);
+    EXPECT_EQ(eval_int("fs.write('r.txt', 'b', { mode: '600' }); fs.stat('r.txt').mode"), 384);
+    EXPECT_EQ(eval_int("fs.write('r.txt', 'c'); fs.stat('r.txt').mode"), 384);
+    /* Private parents: "600" under a new directory makes it 0700. */
+    EXPECT_EQ(eval_int("fs.write('pd/in/s.txt', 'k', { private: true }); fs.stat('pd').mode"), 448);
+    EXPECT_EQ(eval_int("fs.stat('pd/in').mode"), 448);
+    /* An ArrayBuffer body with options: the view is taken after them. */
+    EXPECT_EQ(eval_int("fs.write('ab.bin', new Uint8Array([1, 2, 3]), { mode: '600' }); "
+                       "fs.stat('ab.bin').size === 3 && fs.stat('ab.bin').mode === 384 ? 1 : 0"), 1);
+    /* {} / private: false / null are "no option". */
+    EXPECT_EQ(eval_int("fs.write('n.txt', 'k', {}); fs.write('n2.txt', 'k', { private: false }); "
+                       "fs.write('n3.txt', 'k', null); 1"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
+UTEST(js_fs_write_mode, bad_options_are_refused_before_the_write)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char *r;
+    /* A number: the decimal-600 mistake. */
+    r = a15_throws("fs.write('x.txt', 'k', { mode: 600 })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "octal string"), NULL); free(r);
+    /* Execute, setuid, sticky bits. */
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '755' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "0666"), NULL); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '4600' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "setuid"), NULL); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '1644' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    /* Not an octal string at all; 000; a non-string. */
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '0o600' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: '000' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { mode: true })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    /* private and mode disagreeing; private not a boolean; opts not an object. */
+    r = a15_throws("fs.write('x.txt', 'k', { private: true, mode: '644' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "disagree"), NULL); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', { private: 'yes' })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    r = a15_throws("fs.write('x.txt', 'k', '600')");
+    ASSERT_NE(r, NULL); EXPECT_NE(strcmp(r, "no throw"), 0); free(r);
+    /* A getter that throws fails the call with its own error. */
+    r = a15_throws("fs.write('x.txt', 'k', { get mode() { throw new Error('mine'); } })");
+    ASSERT_NE(r, NULL); EXPECT_NE(strstr(r, "mine"), NULL); free(r);
+    /* Nothing was written by any of them. */
+    EXPECT_EQ(eval_int("fs.stat('x.txt') === null ? 1 : 0"), 1);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
 UTEST(js_audit15, blob_reads_are_charged_and_clamped)
 {
     init_js_with_caps();
@@ -17468,6 +17546,97 @@ UTEST(js_audit41, ctx_output_is_charged_and_stdin_is_mains)
                        "  return /only available in app.main/.test(e.message) ? 1 : 2; } })()"),
               1);
     cleanup_js_caps();
+}
+
+/* Read a pipe's read end to EOF (the write end is closed) into got[]. */
+static size_t gap6_drain(int fd, unsigned char *got, size_t cap)
+{
+    size_t n = 0;
+    while (n < cap) {
+        ssize_t r = read(fd, got + n, cap - n);
+        if (r <= 0) break;
+        n += (size_t)r;
+    }
+    return n;
+}
+
+/* ctx.stdout.write / ctx.stderr.write take bytes (platform_gaps_hsctl §5):
+ * JS_ToCStringLen wrote a Uint8Array as "1,2,3" and an ArrayBuffer as
+ * "[object ArrayBuffer]". A main writes a Uint8Array holding 0x00, 0x80 and
+ * 0xff (not UTF-8 text) to a pipe on fd 1; the reader sees exactly those
+ * three bytes. Then, past main (writes work anywhere), an ArrayBuffer, a
+ * subarray view, a string and two primitives in one call to stderr on a
+ * pipe, and a DataView / plain object refused with a TypeError. */
+UTEST(js_platform_gaps, ctx_stdout_write_takes_bytes)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main((ctx) => {\n"
+        "  ctx.stdout.write(new Uint8Array([0x00, 0x80, 0xff]));\n"
+        "  ctx.stdout.flush();\n"
+        "  globalThis.SAVED = ctx;\n"
+        "  return 0;\n"
+        "});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    ASSERT_FALSE(JS_IsException(val));
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int fds[2];
+    ASSERT_EQ(pipe(fds), 0);
+    fflush(stdout);
+    int saved = dup(1);
+    ASSERT_TRUE(saved >= 0);
+    ASSERT_TRUE(dup2(fds[1], 1) >= 0);
+    close(fds[1]);
+    int exit_code = 99;
+    int run_rc = hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 0);
+
+    unsigned char got[32] = {0};
+    size_t n = gap6_drain(fds[0], got, sizeof(got));
+    close(fds[0]);
+    ASSERT_EQ(n, (size_t)3);
+    EXPECT_EQ(got[0], 0x00);
+    EXPECT_EQ(got[1], 0x80);
+    EXPECT_EQ(got[2], 0xff);
+
+    ASSERT_EQ(pipe(fds), 0);
+    fflush(stderr);
+    saved = dup(2);
+    ASSERT_TRUE(saved >= 0);
+    ASSERT_TRUE(dup2(fds[1], 2) >= 0);
+    close(fds[1]);
+    int bad = eval_int(
+        "(() => {\n"
+        "  const ab = new Uint8Array([1, 2, 3, 4]).buffer;\n"
+        "  const sub = new Uint8Array(ab, 1, 2);\n"
+        "  SAVED.stderr.write(ab, sub, 'z', 7, true);\n"
+        "  SAVED.stderr.flush();\n"
+        "  let bad = 0;\n"
+        "  try { SAVED.stderr.write(new DataView(ab)); } catch (e) {\n"
+        "    if (e instanceof TypeError) bad += 1; }\n"
+        "  try { SAVED.stderr.write({ toString() { return 'x'; } }); } catch (e) {\n"
+        "    if (e instanceof TypeError) bad += 10; }\n"
+        "  SAVED.stderr.flush();\n"
+        "  return bad;\n"
+        "})()");
+    fflush(stderr);
+    dup2(saved, 2);
+    close(saved);
+    EXPECT_EQ(bad, 11);
+    n = gap6_drain(fds[0], got, sizeof(got));
+    close(fds[0]);
+    static const unsigned char want[] = { 1, 2, 3, 4, 2, 3, 'z', '7', 't', 'r', 'u', 'e' };
+    ASSERT_EQ(n, sizeof(want));
+    EXPECT_EQ(memcmp(got, want, sizeof(want)), 0);
+    cleanup_js();
 }
 
 #ifdef HL_ENABLE_HTTP_CLIENT
