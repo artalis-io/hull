@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added (hsctl platform gaps: JS CLI byte output)
+
+- **JS `ctx.stdout.write` / `ctx.stderr.write` take bytes.** Every argument went through
+  `JS_ToCStringLen`, so a `Uint8Array` was written as `"1,2,3"` and an `ArrayBuffer` as
+  `"[object ArrayBuffer]"` - a JS CLI could not emit binary output, while Lua's writer was
+  byte-safe already. Each argument now goes through the unified buffer helper the other
+  byte-taking bindings use: a string (or another primitive) is written as its UTF-8 as before,
+  an `ArrayBuffer`, typed array, `WasmBuffer` or `MappedBuffer` as its bytes, and a `DataView`
+  or any other object is a `TypeError` (its `toString` is app code; the convention every byte
+  binding follows). The per-argument charge is unchanged. Design:
+  `docs/design/platform_gaps_hsctl.md` §5 (gap 6; `ctx.stdin.read(n, { bytes: true })` is
+  the follow-up). Covered by `test_js.c::js_platform_gaps.ctx_stdout_write_takes_bytes`
+  (0x00 0x80 0xff through a pipe, mixed arguments, the refusals).
+
 ### Fixed (built apps killed with stdout on /dev/null)
 
 - **On Linux, an `app.main` app no longer dies (exit 134, `pledge ... for ioctl`) when its

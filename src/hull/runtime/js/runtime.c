@@ -2452,21 +2452,33 @@ static JSValue js_cli_write(JSContext *ctx, JSValueConst this_val,
     FILE *f = cli_stream_for(magic);
     if (!f) return JS_ThrowInternalError(ctx, "invalid stream");
     for (int i = 0; i < argc; i++) {
-        size_t n = 0;
-        const char *s = JS_ToCStringLen(ctx, &n, argv[i]);
-        if (!s) return JS_EXCEPTION;
+        /* A string (or another primitive) is written as its UTF-8, an
+         * ArrayBuffer, typed array, WasmBuffer or MappedBuffer as its bytes
+         * (docs/design/platform_gaps_hsctl.md §5: JS_ToCStringLen wrote a
+         * Uint8Array as "1,2,3" and an ArrayBuffer as "[object ArrayBuffer]";
+         * Lua's writer was byte-safe already). A DataView is not a byte view
+         * js_get_buffer takes, and no other object is converted - its
+         * toString is app code. Each argument is converted and written
+         * before the next is looked at, so no view is held across app code. */
+        HlBufferView view = {0};
+        const char *s = NULL;
+        int needs_free = 0;
+        if (!js_get_buffer(ctx, argv[i], &view, &s, &needs_free))
+            return JS_ThrowTypeError(ctx, "write: expected a string, ArrayBuffer "
+                                          "or typed array");
+        size_t n = view.len;
         /* Charged before the copy (audit 41: uncharged, and a ctx kept past
          * app.main reaches request handlers). */
         if (hl_js_budget_charge(ctx, HL_WORK_CALL_UNITS +
                                      hl_work_bytes_units((uint64_t)n)) < 0) {
-            JS_FreeCString(ctx, s);
+            if (needs_free && s) JS_FreeCString(ctx, s);
             return JS_EXCEPTION;
         }
-        if (n && fwrite(s, 1, n, f) != n) {
-            JS_FreeCString(ctx, s);
+        if (n && fwrite(view.data, 1, n, f) != n) {
+            if (needs_free && s) JS_FreeCString(ctx, s);
             return JS_ThrowInternalError(ctx, "write failed");
         }
-        JS_FreeCString(ctx, s);
+        if (needs_free && s) JS_FreeCString(ctx, s);
     }
     return JS_UNDEFINED;
 }
