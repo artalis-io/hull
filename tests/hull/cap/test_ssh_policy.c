@@ -16,6 +16,7 @@
 
 #include "utest.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "hull/cap/net_policy.h"
@@ -259,6 +260,91 @@ UTEST(ssh_policy, a_second_listed_user_is_allowed)
     ASSERT_EQ((int)hl_ssh_check_connect(&g, "spark.local", 22, "deploy"),
               (int)HL_SSH_ALLOW);
     ASSERT_EQ((int)hl_ssh_check_connect(&g, "spark.local", 22, "operator"),
+              (int)HL_SSH_ALLOW);
+}
+
+/* ── "$VAR" users: one login from the environment, never a wider grant ── */
+
+#define ENV_USER_VAR "HULL_TEST_SSH_LOGIN"
+
+static HlSshAuth env_user_check(const char *entry, const char *value,
+                                const char *login)
+{
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "*.local", 22);        /* seeds "operator" */
+    g.users[g.user_count++] = entry;
+    if (value) setenv(ENV_USER_VAR, value, 1);
+    else       unsetenv(ENV_USER_VAR);
+    HlSshAuth a = hl_ssh_check_connect(&g, "spark.local", 22, login);
+    unsetenv(ENV_USER_VAR);
+    return a;
+}
+
+UTEST(ssh_policy, env_ref_user_allowed_when_set)
+{
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, "deploy", "deploy"),
+              (int)HL_SSH_ALLOW);
+    ASSERT_EQ((int)env_user_check("${" ENV_USER_VAR "}", "deploy", "deploy"),
+              (int)HL_SSH_ALLOW);
+    /* The literal entries beside it still work. */
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, "deploy", "operator"),
+              (int)HL_SSH_ALLOW);
+}
+
+UTEST(ssh_policy, env_ref_user_is_exact_and_case_sensitive)
+{
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, "deploy", "Deploy"),
+              (int)HL_SSH_DENY_USER);
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, "deploy", "root"),
+              (int)HL_SSH_DENY_USER);
+    /* The reference itself is not a login: "$HULL_TEST_SSH_LOGIN" as the
+     * requested user matches nothing, set or unset. */
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, "deploy", "$" ENV_USER_VAR),
+              (int)HL_SSH_DENY_USER);
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, NULL, "$" ENV_USER_VAR),
+              (int)HL_SSH_DENY_USER);
+}
+
+UTEST(ssh_policy, env_ref_user_unset_matches_nothing)
+{
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, NULL, "deploy"),
+              (int)HL_SSH_DENY_USER);
+    ASSERT_EQ((int)env_user_check("${" ENV_USER_VAR "}", NULL, "deploy"),
+              (int)HL_SSH_DENY_USER);
+}
+
+UTEST(ssh_policy, env_ref_user_value_must_be_one_plausible_login)
+{
+    /* An env value cannot widen the grant past one login: `*`, a list, an
+     * empty value, or anything with whitespace / glob / separator characters
+     * matches nothing - not even a user spelled exactly like it. */
+    static const char *const bad[] = {
+        "*", "a,b", "", " ", "dep loy", "deploy ", "?", "[a]", "a/b", "$x",
+        "dep\tloy", "dep\nloy",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, bad[i], bad[i]),
+                  (int)HL_SSH_DENY_USER);
+        ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, bad[i], "deploy"),
+                  (int)HL_SSH_DENY_USER);
+        ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, bad[i], "root"),
+                  (int)HL_SSH_DENY_USER);
+    }
+    char longname[300];
+    memset(longname, 'a', sizeof longname - 1);
+    longname[sizeof longname - 1] = '\0';
+    ASSERT_EQ((int)env_user_check("$" ENV_USER_VAR, longname, longname),
+              (int)HL_SSH_DENY_USER);
+}
+
+UTEST(ssh_policy, a_literal_that_merely_contains_a_dollar_is_a_literal)
+{
+    /* "a$b" is not a reference (hl_env_ref wants the whole value), so it is
+     * compared as the string it is. */
+    HlManifestSsh g; mf_init(&g);
+    mf_allow(&g, "*.local", 22);
+    g.users[g.user_count++] = "svc$acct";
+    ASSERT_EQ((int)hl_ssh_check_connect(&g, "spark.local", 22, "svc$acct"),
               (int)HL_SSH_ALLOW);
 }
 

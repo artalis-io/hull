@@ -337,6 +337,8 @@ int hl_manifest_check_env_refs(const HlManifest *m, char *err, size_t err_size)
                    m->kv.dynamic.host_count, err, err_size) != 0 ||
         check_refs(m, "ssh.connect.hosts", m->ssh.connect.hosts,
                    m->ssh.connect.host_count, err, err_size) != 0 ||
+        check_refs(m, "ssh.connect.users", m->ssh.users,
+                   m->ssh.user_count, err, err_size) != 0 ||
         check_refs(m, "ssh.tunnel.hosts", m->ssh.tunnel.hosts,
                    m->ssh.tunnel.host_count, err, err_size) != 0)
         return -1;

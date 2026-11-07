@@ -434,7 +434,7 @@ UTEST(manifest_env_refs, a_reference_must_name_a_declared_variable)
 
     const char **fields[] = {
         &m.databases.dynamic.hosts[0], &m.kv.dynamic.hosts[0],
-        &m.ssh.connect.hosts[0], &m.ssh.tunnel.hosts[0],
+        &m.ssh.connect.hosts[0], &m.ssh.tunnel.hosts[0], &m.ssh.users[0],
     };
     for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
         const char *saved = *fields[i];
@@ -446,6 +446,27 @@ UTEST(manifest_env_refs, a_reference_must_name_a_declared_variable)
     m.hosts[0] = "$HOME";
     EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
     m.hosts[0] = saved_host;
+
+    /* ssh.connect.users takes a reference too, under the same rule: a
+     * declared variable (in secrets, or in env) loads; an undeclared one
+     * refuses, naming the field. ssh.connect.hosts likewise. */
+    const char *saved_user = m.ssh.users[0];
+    m.ssh.users[0] = "$PG_URL";              /* secrets */
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.ssh.users[0] = "${DATABASE_URL}";      /* env */
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.ssh.users[0] = "$SSH_LOGIN";
+    EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "ssh.connect.users") != NULL);
+    EXPECT_TRUE(strstr(err, "SSH_LOGIN") != NULL);
+    m.ssh.users[0] = saved_user;
+    const char *saved_ssh_host = m.ssh.connect.hosts[0];
+    m.ssh.connect.hosts[0] = "$PG_URL";
+    EXPECT_EQ(0, hl_manifest_check_env_refs(&m, err, sizeof err));
+    m.ssh.connect.hosts[0] = "$FLEET_HOSTS";
+    EXPECT_EQ(-1, hl_manifest_check_env_refs(&m, err, sizeof err));
+    EXPECT_TRUE(strstr(err, "ssh.connect.hosts") != NULL);
+    m.ssh.connect.hosts[0] = saved_ssh_host;
 
     /* A value that merely CONTAINS a '$' is literal, not a reference. */
     m.databases.named[0].dsn = "postgres://u:pa$$word@db/app";

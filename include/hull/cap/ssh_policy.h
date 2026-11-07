@@ -63,6 +63,11 @@ typedef enum HlSshAuth {
  * The user is matched EXACTLY and case-sensitively. Unix logins are
  * case-sensitive, and the glob / CIDR vocabulary that makes sense for hosts
  * would only invite `*` here, which is the grant this check exists to refuse.
+ * A users entry that is exactly "$VAR" / "${VAR}" is read from the environment
+ * at check time (declared in `env` or `secrets`, as for hosts) and names one
+ * login; an unset variable, or a value that is not a plausible login (empty,
+ * whitespace, a comma, `*` `?` `[` `/` `$`, a control byte, over 255 bytes),
+ * matches nothing.
  */
 HlSshAuth hl_ssh_check_connect(const HlManifestSsh *ssh, const char *host,
                                int port, const char *user);
