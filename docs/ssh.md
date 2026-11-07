@@ -87,9 +87,14 @@ Three properties worth being precise about:
   `tunnel.hosts`, and `tunnel.headers` may not set `Host`, `Upgrade`,
   `Connection` or `Sec-WebSocket-*` - behind a CDN those choose the origin.
 
-Only `hosts` entries may be `"$VAR"` env references. Ports are integers,
-because a port read from the environment is a grant that changes shape after
-the manifest was reviewed.
+`hosts` and `users` entries may be `"$VAR"` / `"${VAR}"` env references,
+resolved when the connection is checked; the variable must be declared in
+`env` or `secrets`, and the manifest seals the literal `"$VAR"`. A `users`
+reference still names ONE login: the value is accepted only as a plausible
+account name (non-empty, no whitespace, comma, `*` `?` `[` `/` `$` or control
+byte, at most 255 bytes), so an environment set to `*` or `a,b` grants nothing
+rather than everything. Ports are integers, because a port read from the
+environment is a grant that changes shape after the manifest was reviewed.
 
 ## 3. Host keys: Hull refuses, you decide
 

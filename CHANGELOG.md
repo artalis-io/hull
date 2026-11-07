@@ -8,6 +8,23 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added (hsctl platform gaps: ssh login from env)
+
+- **`ssh.connect.users` entries may be `"$VAR"` / `"${VAR}"` env references, like `hosts`.**
+  A fleet tool whose login differs per deployment had to bake it into app source, since
+  `hl_ssh_check_connect` compared each entry literally and the load-time env-ref check skipped
+  `users`. The reference is read at check time through the same `hl_env_ref` parser the host
+  allowlists use, the variable must be declared in `env` or `secrets`
+  (`hl_manifest_check_env_refs` now covers `ssh.connect.users`), and the sealed manifest keeps
+  the literal `"$VAR"`. One reference is one login: the value is accepted only as a plausible
+  account name (non-empty, no whitespace, comma, `*` `?` `[` `/` `$` or control byte, at most
+  255 bytes), so an environment holding `*` or `a,b` matches nothing - the no-glob rule for
+  users survives. Ports stay integers. Design: `docs/design/platform_gaps_hsctl.md` §7.
+  Covered by `test_ssh_policy` (`env_ref_user_*`: set / unset / `${VAR}` / `*` / `a,b` / empty /
+  whitespace / over-long values, a literal containing `$`) and `test_manifest_seal`
+  (`manifest_env_refs`: undeclared refused for `users` and `hosts`, declared in `env` or
+  `secrets` loads).
+
 ### Fixed (built apps killed with stdout on /dev/null)
 
 - **On Linux, an `app.main` app no longer dies (exit 134, `pledge ... for ioctl`) when its

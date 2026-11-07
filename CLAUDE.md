@@ -692,7 +692,8 @@ a password) is literal. The variable must be DECLARED, in `manifest.secrets`
 `hl_manifest_check_env_refs` (`manifest.c`) refuses app load otherwise, for every
 field that resolves references (`hosts`, `databases.named`,
 `databases.dynamic.hosts`, `kv.dynamic.hosts`, `ssh.connect.hosts`,
-`ssh.tunnel.hosts`). Before this a reference could read ANY variable - an SQLite
+`ssh.connect.users` - resolved by `hl_ssh_check_connect` to ONE plausible
+login, never a pattern - and `ssh.tunnel.hosts`). Before this a reference could read ANY variable - an SQLite
 DSN's value is readable back through `PRAGMA database_list`. The app context
 behind `hull test` / `hull agent` runs the same check, and so does the stdlib's
 internal-connection lookup before a top-level `init()` uses a `"$VAR"`

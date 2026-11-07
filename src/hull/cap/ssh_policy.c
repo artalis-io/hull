@@ -7,10 +7,12 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "hull/cap/ssh_policy.h"
 #include "hull/cap/net_policy.h"
+#include "hull/utils/env_ref.h"   /* hl_env_ref: the "$VAR" parser hosts use */
 
 /* The generic reasons, in the words of the grant that was checked. The two
  * tables differ only in which list they name, and they have to: a denial that
@@ -31,6 +33,30 @@ static HlSshAuth from_reach(HlNetReach r, int tunnel)
     return tunnel ? HL_SSH_DENY_TUNNEL_NO_POLICY : HL_SSH_DENY_NO_POLICY;
 }
 
+/* The login a "$VAR" users entry resolves to, or NULL when the variable is
+ * unset or its value is not a plausible login: empty, over 255 bytes, or
+ * holding whitespace, a comma, a glob character (`*` `?` `[`), `/`, `$` or a
+ * control byte. The environment is operator-controlled, not app-controlled,
+ * but it is also where a review never looked, so what comes out of it is held
+ * to the shape of one Unix account name and nothing wider. */
+static const char *user_from_env(const char *var)
+{
+    const char *v = getenv(var);
+    if (!v || !v[0]) return NULL;
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)v; *p; p++, n++) {
+        if (n >= 255) return NULL;
+        if (*p <= 0x20 || *p == 0x7f) return NULL;  /* control, space */
+        switch (*p) {
+        case ',': case '*': case '?': case '[': case '/': case '$':
+            return NULL;
+        default:
+            break;
+        }
+    }
+    return v;
+}
+
 HlSshAuth hl_ssh_check_connect(const HlManifestSsh *ssh, const char *host,
                                int port, const char *user)
 {
@@ -49,9 +75,20 @@ HlSshAuth hl_ssh_check_connect(const HlManifestSsh *ssh, const char *host,
     /* Exact and case-sensitive. Unix logins are case-sensitive, and no glob
      * vocabulary is offered here on purpose: the only pattern anyone would
      * reach for is `*`, which is precisely the grant this check exists to
-     * refuse. Listing three users costs three lines. */
+     * refuse. Listing three users costs three lines. The one exception is an
+     * entry that is exactly "$VAR" / "${VAR}" (the same env reference hosts
+     * take): it is read from the environment at check time and still names
+     * ONE login - a value that is not a plausible login (user_from_env)
+     * matches nothing, so the environment cannot widen the grant to `*`. */
     for (int i = 0; i < ssh->user_count; i++) {
-        if (ssh->users[i] && strcmp(ssh->users[i], user) == 0)
+        const char *want = ssh->users[i];
+        if (!want) continue;
+        char var[128];
+        if (hl_env_ref(want, var, sizeof var)) {
+            want = user_from_env(var);
+            if (!want) continue;
+        }
+        if (strcmp(want, user) == 0)
             return HL_SSH_ALLOW;
     }
     return HL_SSH_DENY_USER;
