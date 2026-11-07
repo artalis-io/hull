@@ -554,7 +554,8 @@ refusal's `e.code` is `wait_refused` / `busy`).
 | code | meaning |
 |---|---|
 | `denied` | the manifest refused the host, port, login or relay - and only that |
-| `connect_failed` | the host did not resolve, refused, was unreachable, or TLS to the relay failed |
+| `connect_failed` | the host did not resolve, refused, was unreachable, or TLS to the relay failed. When the dial itself failed, `errno` names the socket error - `"ECONNREFUSED"`, `"EHOSTUNREACH"`, `"ENETUNREACH"`, ... (`"E<number>"` for one Hull has no name for) - and `detail` ends with it, e.g. `connection refused or unreachable: EHOSTUNREACH (No route to host)`. A host that did not resolve, or a relay whose TLS handshake failed, carries no `errno`. Branch on `err.errno`, never on the text; no host, port or credential is added to `detail` |
+| `connect_failed` with `errno = "EHOSTUNREACH"` to a private or link-local address | on macOS 15+ a binary not yet allowed under Local Network privacy gets exactly this; allow it in System Settings > Privacy & Security > Local Network, and again after every `hull build` (each build is a new binary to macOS). `detail` says so when the host the app dialled - the relay, with a tunnel - is an IP literal in 10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7 or fe80::/10; a host NAME gets no hint, since what it resolved to never reaches the error |
 | `timeout` | not connected and authenticated within `timeout_ms`; or, later, the server stopped answering (see §6a) |
 | `upgrade_refused` / `upgrade_failed` | the relay refused the WebSocket upgrade (carries `status`) / answered with something that is not one |
 | `no_identification` / `bad_identification` | the server never sent an SSH version line / sent an unusable one |

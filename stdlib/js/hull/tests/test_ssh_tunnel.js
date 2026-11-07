@@ -585,5 +585,73 @@ await test("bytes from inside the tunnel reach the SSH transport", async () => {
     assertEq(err.code !== "denied", true);
 });
 
+// The dial's errno ---------------------------------------------------------------
+//
+// The binding's fourth value is the socket error's symbolic name; the stdlib
+// hands it to the app as `e.errno`, so a health check branches on a value and
+// never on `detail`. The stub stands in for the binding: EHOSTUNREACH is not
+// reproducible portably, and the hint is stdlib text in any case.
+
+const LOCAL_NET = "Privacy & Security > Local Network";
+async function dialFails(errnoName, extra) {
+    const o = Object.assign({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+        openStream: () => [null, "connection refused or unreachable: " + String(errnoName)
+                                 + " (No route to host)", "connect_failed", errnoName] },
+        extra || {});
+    return rejects(ssh.connect(o));
+}
+
+await test("connect_failed carries the errno name, and the hint for a link-local literal", async () => {
+    const err = await dialFails("EHOSTUNREACH", { host: "169.254.1.2" });
+    assertEq(err.code, "connect_failed");
+    assertEq(err.errno, "EHOSTUNREACH");
+    assertMatch(err.detail, "EHOSTUNREACH (No route to host)", "the C text is kept");
+    assertMatch(err.detail, LOCAL_NET, "the macOS hint follows it");
+    assertMatch(err.detail, "after every hull build");
+    assertEq(err.detail.indexOf("169.254"), -1, "no host is added to detail");
+});
+
+await test("the hint is for EHOSTUNREACH to a private or link-local literal only", async () => {
+    for (const h of ["10.0.0.7", "172.16.5.5", "172.31.255.1", "192.168.1.1",
+                     "[fe80::1%en0]", "fd12:3456::1", "FC00::1"]) {
+        const err = await dialFails("EHOSTUNREACH", { host: h });
+        assertEq(err.errno, "EHOSTUNREACH");
+        assertMatch(err.detail, LOCAL_NET, h);
+    }
+    for (const h of ["203.0.113.5", "172.32.0.1", "172.15.0.1", "8.8.8.8",
+                     "2001:db8::1", "h", "router.local", "999.168.1.1"]) {
+        const err = await dialFails("EHOSTUNREACH", { host: h });
+        assertEq(err.errno, "EHOSTUNREACH");
+        assertEq(err.detail.indexOf(LOCAL_NET), -1, h + " gets no hint");
+    }
+    // A refusal on a private address is a closed port, not privacy.
+    const err = await dialFails("ECONNREFUSED", { host: "192.168.1.1" });
+    assertEq(err.errno, "ECONNREFUSED");
+    assertEq(err.detail.indexOf(LOCAL_NET), -1);
+});
+
+await test("a dial that reports no errno (DNS, TLS) sets none", async () => {
+    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+        openStream: () => [null, "host did not resolve", "connect_failed"] }));
+    assertEq(err.code, "connect_failed");
+    assertEq(err.errno, undefined);
+    assertEq(err.detail, "host did not resolve");
+});
+
+await test("through a tunnel the errno is the relay's, and the hint reads the relay host", async () => {
+    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+        tunnel: { host: "fe80::1" },
+        openStream: () => [null, "no route", "connect_failed", "EHOSTUNREACH"] }));
+    assertEq(err.code, "connect_failed");
+    assertEq(err.errno, "EHOSTUNREACH");
+    assertMatch(err.detail, LOCAL_NET);
+    // The SSH destination is a name here; the relay literal decides.
+    const err2 = await rejects(ssh.connect({ host: "169.254.1.2", user: "u", key: {},
+        crypto: cryptoStub, tunnel: { host: "relay.example" },
+        openStream: () => [null, "no route", "connect_failed", "EHOSTUNREACH"] }));
+    assertEq(err2.errno, "EHOSTUNREACH");
+    assertEq(err2.detail.indexOf(LOCAL_NET), -1, "a relay NAME gets no hint");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;

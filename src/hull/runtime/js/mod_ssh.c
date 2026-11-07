@@ -61,6 +61,7 @@
 
 #include "hull/cap/ssh.h"         /* hl_cap_ssh_open */
 #include "hull/cap/net_stream.h"
+#include "hull/shared/errno_name.h"
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/shared/refusal.h"  /* HL_REFUSAL_BUSY */
@@ -68,6 +69,7 @@
 #include "hull/net_backend.h"     /* hl_net_op_complete, HlSuspendOp */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -170,6 +172,30 @@ static const char *net_err_code(int rc)
 static JSValue push_net_err(JSContext *ctx, int rc)
 {
     return result3(ctx, JS_NULL, hl_net_stream_strerror(rc), net_err_code(rc));
+}
+
+/* [null, message, code, errnoName] for a dial that failed with a socket
+ * errno, as the Lua binding's push_net_connect_err: the name ("EHOSTUNREACH")
+ * becomes the stdlib's `e.errno`, and the message gains it with the C strerror
+ * text. No host or port is added - the app knows what it dialled. Without an
+ * errno (DNS, TLS) this is push_net_err. */
+static JSValue push_net_connect_err(JSContext *ctx, int rc, int en)
+{
+    if (en == 0) return push_net_err(ctx, rc);
+    char nbuf[HL_ERRNO_NAME_MAX];
+    const char *name = hl_errno_name(en, nbuf, sizeof nbuf);
+    char msg[256];
+    snprintf(msg, sizeof msg, "%s: %s (%s)", hl_net_stream_strerror(rc), name,
+             strerror(en));
+    JSValue arr = result3(ctx, JS_NULL, msg, net_err_code(rc));
+    if (JS_IsException(arr)) return arr;
+    JSValue nm = JS_NewString(ctx, name);
+    if (JS_IsException(nm) ||
+        JS_DefinePropertyValueUint32(ctx, arr, 3, nm, JS_PROP_C_W_E) < 0) {
+        JS_FreeValue(ctx, arr);
+        return JS_EXCEPTION;
+    }
+    return arr;
 }
 
 /* ── byte strings ───────────────────────────────────────────────────── */
@@ -587,10 +613,11 @@ static JSValue js_ssh_connect_result(JSContext *ctx, JSValueConst this_val,
     if (rc == HL_NET_OK) return result3(ctx, JS_TRUE, NULL, NULL);
     if (rc == HL_NET_E_AGAIN)
         return ssh_park(ctx, o, "ssh connect", "cannot wait for the connection");
+    int en = hl_net_stream_connect_errno(o->s);
     hl_net_stream_set_user(o->s, NULL);
     hl_net_stream_free(o->s);
     o->s = NULL;
-    return push_net_err(ctx, rc);
+    return push_net_connect_err(ctx, rc, en);
 }
 
 /* An optional integer option, within [lo, hi]: the value, def when absent

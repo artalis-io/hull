@@ -193,6 +193,15 @@ int hl_net_stream_connect(HlNetStream **out, const HlNetStreamConfig *cfg);
 int hl_net_stream_connect_result(HlNetStream *s);
 
 /**
+ * The socket errno behind an HL_NET_E_CONNECT result (ECONNREFUSED,
+ * EHOSTUNREACH, ...): that of the last address attempted, from the connect
+ * itself or from making the socket. 0 for any other result - a host that did
+ * not resolve made no socket, and a failed TLS handshake is deliberately
+ * undetailed - and while the connect is still in flight.
+ */
+int hl_net_stream_connect_errno(HlNetStream *s);
+
+/**
  * The op to suspend on after any HL_NET_E_AGAIN. Borrowed and owned by the
  * stream; the caller fills on_resume and hands it to the async backend, and
  * must not free it or outlive the stream. NULL when nothing is pending.

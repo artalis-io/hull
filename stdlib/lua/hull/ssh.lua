@@ -435,6 +435,58 @@ local function destination_value(host, port)
     return string.format("%s:%d", host, port)
 end
 
+-- The one sentence a person on a Mac needs when the dial itself says "no route
+-- to host" towards an address on their own network: macOS 15+ answers
+-- EHOSTUNREACH for a binary not yet allowed under Local Network privacy, and
+-- nothing in the error says so. Stdlib text, not C: the C layer reports the
+-- socket's errno and no more.
+local MACOS_LOCAL_NETWORK_HINT =
+    "on macOS 15+ a binary not yet allowed under Local Network privacy gets"
+    .. " this; allow it in System Settings > Privacy & Security > Local Network,"
+    .. " and again after every hull build"
+
+-- Whether `host` is an IP LITERAL in a private or link-local range (10/8,
+-- 172.16/12, 192.168/16, 169.254/16, fc00::/7, fe80::/10). Only a literal
+-- the app itself wrote is read: what a name resolved to never reaches this
+-- layer, and must not reach `detail`.
+local function is_local_ip_literal(host)
+    if type(host) ~= "string" then return false end
+    local h = host:lower()
+    h = h:match("^%[(.*)%]$") or h
+    h = h:gsub("%%.*$", "")                       -- an IPv6 zone index
+    local a, b, c, d = h:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if a then
+        a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+        if a > 255 or b > 255 or c > 255 or d > 255 then return false end
+        return a == 10 or (a == 172 and b >= 16 and b <= 31)
+            or (a == 192 and b == 168) or (a == 169 and b == 254)
+    end
+    if h:find(":", 1, true) then
+        local first = h:match("^(%x+):")
+        if not first or #first > 4 then return false end
+        local v = tonumber(first, 16)
+        return (v >= 0xfc00 and v <= 0xfdff) or (v >= 0xfe80 and v <= 0xfebf)
+    end
+    return false
+end
+
+-- The reason table for a dial that failed: the binding's code and message,
+-- plus `errno` - the socket error's symbolic name ("EHOSTUNREACH",
+-- "ECONNREFUSED"; absent for a DNS or TLS failure) - so an app branches on
+-- `err.errno`, never on `detail`. `dialled` is the host the app asked to
+-- have dialled: the relay with a tunnel, else the SSH host.
+local function dial_failure(code, detail, errno_name, dialled)
+    local e = { code = code or "connect_failed", detail = detail }
+    if type(errno_name) == "string" then
+        e.errno = errno_name
+        if errno_name == "EHOSTUNREACH" and is_local_ip_literal(dialled) then
+            e.detail = (detail ~= nil and (tostring(detail) .. "; ") or "")
+                .. MACOS_LOCAL_NETWORK_HINT
+        end
+    end
+    return e
+end
+
 -- The headers to send: the caller's, with the destination header checked
 -- against the granted destination, or added. Returns headers, or nil plus a
 -- reason.
@@ -536,7 +588,7 @@ local function tunnel_opener(tunnel, crypto, dial)
         local headers, herr = tunnel_headers(tunnel, o.host, o.port)
         if not headers then return nil, herr end
 
-        local raw, err, code = dial({
+        local raw, err, code, errno_name = dial({
             host       = o.host,      -- the SSH destination: what the grant,
             port       = o.port,      -- the host key and the login are about
             user       = o.user,
@@ -548,7 +600,8 @@ local function tunnel_opener(tunnel, crypto, dial)
                 tls_hostname = tunnel.tls_hostname,
             },
         })
-        if not raw then return nil, { code = code or "connect_failed", detail = err } end
+        -- The errno is the RELAY's: that is the machine the socket reached for.
+        if not raw then return nil, dial_failure(code, err, errno_name, tunnel.host) end
 
         -- The dial's bound ends at TCP + TLS; the upgrade's reply would wait
         -- with none (a relay that never answers parked the caller for good).
@@ -578,6 +631,10 @@ end
 ---   { code = "host_revoked", fingerprint = ... }   the store revokes the key
 ---   { code = "auth_failed",  methods = {...} }
 ---   { code = "denied",       detail = ... }      manifest refused it
+---   { code = "connect_failed", detail = ..., errno = "EHOSTUNREACH" }
+---                                                the dial failed; `errno` is
+---                                                the socket error's name, absent
+---                                                for a DNS or relay-TLS failure
 ---   { code = "too_many_streams", detail = ... }  the per-process cap on live
 ---                                                SSH streams (32) is reached
 ---
@@ -670,7 +727,7 @@ function M.connect(opts)
         open = function(o) return _stream.connect(o) end
     end
 
-    local stream, serr, scode = open({
+    local stream, serr, scode, serrno = open({
         host = opts.host,
         port = opts.port or 22,
         user = opts.user,
@@ -681,11 +738,12 @@ function M.connect(opts)
         -- distinguishes a relay refusing the upgrade (`upgrade_refused`) from
         -- the manifest refusing. Otherwise the binding's code says which
         -- happened: `denied` (the manifest), `connect_failed` (DNS, refused,
-        -- unreachable, TLS) or `timeout`. A host that is down used to be
-        -- reported as `denied`, which is the one distinction a health check
-        -- exists to make.
+        -- unreachable, TLS) or `timeout`, and its fourth value - the socket
+        -- errno's name, when the dial itself failed - becomes `err.errno`.
+        -- A host that is down used to be reported as `denied`, which is the
+        -- one distinction a health check exists to make.
         if type(serr) == "table" and serr.code then return nil, serr end
-        return nil, { code = scode or "connect_failed", detail = serr }
+        return nil, dial_failure(scode, serr, serrno, opts.host)
     end
 
     local t = transport.new(stream, crypto, {

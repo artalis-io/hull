@@ -606,4 +606,75 @@ test("the upgrade runs under the connect deadline", function()
     assert_eq(log[2], "write")
 end)
 
+-- The dial's errno ---------------------------------------------------------------
+--
+-- The binding's fourth value is the socket error's symbolic name; the stdlib
+-- hands it to the app as `err.errno`, so a health check branches on a value
+-- and never on `detail`. The stub stands in for the binding: EHOSTUNREACH is
+-- not reproducible portably, and the hint is stdlib text in any case.
+
+local LOCAL_NET = "Privacy & Security > Local Network"
+local function dial_fails(errno_name, extra)
+    local o = { host = "h", user = "u", key = {}, crypto = crypto_stub,
+        open_stream = function()
+            return nil, "connection refused or unreachable: " .. tostring(errno_name)
+                        .. " (No route to host)", "connect_failed", errno_name
+        end }
+    for k, v in pairs(extra or {}) do o[k] = v end
+    local _, err = ssh.connect(o)
+    return err
+end
+
+test("connect_failed carries the errno name, and the hint for a link-local literal", function()
+    local err = dial_fails("EHOSTUNREACH", { host = "169.254.1.2" })
+    assert_eq(err.code, "connect_failed")
+    assert_eq(err.errno, "EHOSTUNREACH")
+    assert_match(err.detail, "EHOSTUNREACH (No route to host)", "the C text is kept")
+    assert_match(err.detail, LOCAL_NET, "the macOS hint follows it")
+    assert_match(err.detail, "after every hull build")
+    assert_eq(err.detail:find("169.254", 1, true), nil, "no host is added to detail")
+end)
+
+test("the hint is for EHOSTUNREACH to a private or link-local literal only", function()
+    for _, h in ipairs({ "10.0.0.7", "172.16.5.5", "172.31.255.1", "192.168.1.1",
+                         "[fe80::1%en0]", "fd12:3456::1", "FC00::1" }) do
+        local err = dial_fails("EHOSTUNREACH", { host = h })
+        assert_eq(err.errno, "EHOSTUNREACH")
+        assert_match(err.detail, LOCAL_NET, h)
+    end
+    for _, h in ipairs({ "203.0.113.5", "172.32.0.1", "172.15.0.1", "8.8.8.8",
+                         "2001:db8::1", "h", "router.local", "999.168.1.1" }) do
+        local err = dial_fails("EHOSTUNREACH", { host = h })
+        assert_eq(err.errno, "EHOSTUNREACH")
+        assert_eq(err.detail:find(LOCAL_NET, 1, true), nil, h .. " gets no hint")
+    end
+    -- A refusal on a private address is a closed port, not privacy.
+    local err = dial_fails("ECONNREFUSED", { host = "192.168.1.1" })
+    assert_eq(err.errno, "ECONNREFUSED")
+    assert_eq(err.detail:find(LOCAL_NET, 1, true), nil)
+end)
+
+test("a dial that reports no errno (DNS, TLS) sets none", function()
+    local _, err = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+        open_stream = function() return nil, "host did not resolve", "connect_failed" end }
+    assert_eq(err.code, "connect_failed")
+    assert_eq(err.errno, nil)
+    assert_eq(err.detail, "host did not resolve")
+end)
+
+test("through a tunnel the errno is the relay's, and the hint reads the relay host", function()
+    local _, err = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+        tunnel = { host = "fe80::1" },
+        open_stream = function() return nil, "no route", "connect_failed", "EHOSTUNREACH" end }
+    assert_eq(err.code, "connect_failed")
+    assert_eq(err.errno, "EHOSTUNREACH")
+    assert_match(err.detail, LOCAL_NET)
+    -- The SSH destination is a name here; the relay literal decides.
+    local _, err2 = ssh.connect{ host = "169.254.1.2", user = "u", key = {}, crypto = crypto_stub,
+        tunnel = { host = "relay.example" },
+        open_stream = function() return nil, "no route", "connect_failed", "EHOSTUNREACH" end }
+    assert_eq(err2.errno, "EHOSTUNREACH")
+    assert_eq(err2.detail:find(LOCAL_NET, 1, true), nil, "a relay NAME gets no hint")
+end)
+
 return { pass = pass, fail = fail }
