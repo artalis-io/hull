@@ -17470,6 +17470,97 @@ UTEST(js_audit41, ctx_output_is_charged_and_stdin_is_mains)
     cleanup_js_caps();
 }
 
+/* Read a pipe's read end to EOF (the write end is closed) into got[]. */
+static size_t gap6_drain(int fd, unsigned char *got, size_t cap)
+{
+    size_t n = 0;
+    while (n < cap) {
+        ssize_t r = read(fd, got + n, cap - n);
+        if (r <= 0) break;
+        n += (size_t)r;
+    }
+    return n;
+}
+
+/* ctx.stdout.write / ctx.stderr.write take bytes (platform_gaps_hsctl §5):
+ * JS_ToCStringLen wrote a Uint8Array as "1,2,3" and an ArrayBuffer as
+ * "[object ArrayBuffer]". A main writes a Uint8Array holding 0x00, 0x80 and
+ * 0xff (not UTF-8 text) to a pipe on fd 1; the reader sees exactly those
+ * three bytes. Then, past main (writes work anywhere), an ArrayBuffer, a
+ * subarray view, a string and two primitives in one call to stderr on a
+ * pipe, and a DataView / plain object refused with a TypeError. */
+UTEST(js_platform_gaps, ctx_stdout_write_takes_bytes)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main((ctx) => {\n"
+        "  ctx.stdout.write(new Uint8Array([0x00, 0x80, 0xff]));\n"
+        "  ctx.stdout.flush();\n"
+        "  globalThis.SAVED = ctx;\n"
+        "  return 0;\n"
+        "});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    ASSERT_FALSE(JS_IsException(val));
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int fds[2];
+    ASSERT_EQ(pipe(fds), 0);
+    fflush(stdout);
+    int saved = dup(1);
+    ASSERT_TRUE(saved >= 0);
+    ASSERT_TRUE(dup2(fds[1], 1) >= 0);
+    close(fds[1]);
+    int exit_code = 99;
+    int run_rc = hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 0);
+
+    unsigned char got[32] = {0};
+    size_t n = gap6_drain(fds[0], got, sizeof(got));
+    close(fds[0]);
+    ASSERT_EQ(n, (size_t)3);
+    EXPECT_EQ(got[0], 0x00);
+    EXPECT_EQ(got[1], 0x80);
+    EXPECT_EQ(got[2], 0xff);
+
+    ASSERT_EQ(pipe(fds), 0);
+    fflush(stderr);
+    saved = dup(2);
+    ASSERT_TRUE(saved >= 0);
+    ASSERT_TRUE(dup2(fds[1], 2) >= 0);
+    close(fds[1]);
+    int bad = eval_int(
+        "(() => {\n"
+        "  const ab = new Uint8Array([1, 2, 3, 4]).buffer;\n"
+        "  const sub = new Uint8Array(ab, 1, 2);\n"
+        "  SAVED.stderr.write(ab, sub, 'z', 7, true);\n"
+        "  SAVED.stderr.flush();\n"
+        "  let bad = 0;\n"
+        "  try { SAVED.stderr.write(new DataView(ab)); } catch (e) {\n"
+        "    if (e instanceof TypeError) bad += 1; }\n"
+        "  try { SAVED.stderr.write({ toString() { return 'x'; } }); } catch (e) {\n"
+        "    if (e instanceof TypeError) bad += 10; }\n"
+        "  SAVED.stderr.flush();\n"
+        "  return bad;\n"
+        "})()");
+    fflush(stderr);
+    dup2(saved, 2);
+    close(saved);
+    EXPECT_EQ(bad, 11);
+    n = gap6_drain(fds[0], got, sizeof(got));
+    close(fds[0]);
+    static const unsigned char want[] = { 1, 2, 3, 4, 2, 3, 'z', '7', 't', 'r', 'u', 'e' };
+    ASSERT_EQ(n, sizeof(want));
+    EXPECT_EQ(memcmp(got, want, sizeof(want)), 0);
+    cleanup_js();
+}
+
 #ifdef HL_ENABLE_HTTP_CLIENT
 UTEST(js_audit41, sync_smtp_send_has_a_floor)
 {
