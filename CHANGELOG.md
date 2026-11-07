@@ -8,6 +8,8 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-07
+
 ### Fixed (nightly fuzz crashes, #996 / #1017)
 
 - **A Lua node cut off at `max_depth` no longer ends before it starts (#1017).** When nesting
