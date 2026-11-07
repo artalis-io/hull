@@ -1094,6 +1094,11 @@ CAP_OBJS += $(HOST_OBJ)
 # the log.c dependency always resolves.
 CLI_LOG_OBJ := $(BUILDDIR)/cli_log.o
 CAP_OBJS += $(CLI_LOG_OBJ)
+# errno_name is the libc-only table behind `err.errno` on an SSH connect
+# failure ("EHOSTUNREACH", ...): a value an app compares, where strerror is
+# prose. Rides CAP_OBJS like host, so it reaches every list with one edit.
+ERRNO_NAME_OBJ := $(BUILDDIR)/errno_name.o
+CAP_OBJS += $(ERRNO_NAME_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3285,6 +3290,9 @@ $(HOST_OBJ): $(SRCDIR)/hull/shared/host.c $(INCDIR)/hull/shared/host.h | $(BUILD
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(CLI_LOG_OBJ): $(SRCDIR)/hull/shared/cli_log.c $(INCDIR)/hull/shared/cli_log.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(ERRNO_NAME_OBJ): $(SRCDIR)/hull/shared/errno_name.c $(INCDIR)/hull/shared/errno_name.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)

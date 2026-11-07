@@ -99,6 +99,8 @@ struct HlNetStream {
     int          connect_done;
     int          connect_detached;  /* the ownership release signal         */
     int          result;            /* HL_NET_* once connect_done           */
+    int          last_errno;        /* the last attempt's socket errno; 0 for
+                                       a DNS or TLS failure, which carry none */
 
     KlSockAddr   addrs[NET_MAX_ADDRS];
     int          naddrs;
@@ -350,6 +352,11 @@ static void attempt_ready(int fd, unsigned ready, void *user)
         s->attempt_fd[idx] = KL_INVALID_SOCKET;   /* op owns it now */
         kl_connect_op_on_attempt_connected(&s->connect_op, idx, h);
     } else {
+        /* Kept for hl_net_stream_connect_errno: the op flattens every failed
+         * attempt into KL_ERR_CONNECT, and "no route to host" and "refused"
+         * are the distinction an application (and a person on macOS, where
+         * Local Network privacy answers EHOSTUNREACH) acts on. */
+        s->last_errno = err;
         sp_close(h);
         s->attempt_fd[idx] = KL_INVALID_SOCKET;
         kl_connect_op_on_attempt_failed(&s->connect_op, idx, (int)KL_ERR_CONNECT);
@@ -361,11 +368,17 @@ static int co_start_attempt(void *ctx, int idx, int *out_err)
     HlNetStream *s = ctx;
     if (idx < 0 || idx >= s->naddrs) { *out_err = (int)KL_ERR_CONNECT; return -1; }
 
+    errno = 0;
     KlSocketHandle fd = sp_socket(s->addrs[idx].family == KL_AF_INET6 ? AF_INET6
                                                                      : AF_INET,
                                   SOCK_STREAM, 0);
-    if (!kl_handle_valid(fd)) { *out_err = (int)KL_ERR_CONNECT; return -1; }
+    if (!kl_handle_valid(fd)) {
+        s->last_errno = errno;
+        *out_err = (int)KL_ERR_CONNECT; return -1;
+    }
+    errno = 0;
     if (sp_set_nonblocking(fd) < 0) {
+        s->last_errno = errno;
         sp_close(fd); *out_err = (int)KL_ERR_CONNECT; return -1;
     }
 
@@ -378,6 +391,7 @@ static int co_start_attempt(void *ctx, int idx, int *out_err)
         return 0;
     }
     if (ce != EINPROGRESS) {
+        s->last_errno = ce;             /* the synchronous twin of attempt_ready */
         sp_close(fd); *out_err = (int)KL_ERR_CONNECT; return -1;
     }
 
@@ -1050,6 +1064,15 @@ int hl_net_stream_connect_result(HlNetStream *s)
      * goes nowhere. */
     if (s->result == HL_NET_OK && s->tls && !s->tls_done) return HL_NET_E_AGAIN;
     return s->result;
+}
+
+int hl_net_stream_connect_errno(HlNetStream *s)
+{
+    if (!s || !s->connect_done) return 0;
+    /* Only a failed ATTEMPT has one. A DNS failure never made a socket, and a
+     * TLS failure is deliberately undetailed (tls_step): neither is this. */
+    if (s->result != HL_NET_E_CONNECT) return 0;
+    return s->last_errno;
 }
 
 struct HlAsyncOp *hl_net_stream_pending_op(HlNetStream *s)

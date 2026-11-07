@@ -19,6 +19,7 @@
 
 #include "hull/cap/net_stream.h"
 #include "hull/shared/async_backend.h"
+#include "hull/shared/errno_name.h"
 #include "../test_dns.h"
 
 #include <arpa/inet.h>
@@ -200,11 +201,28 @@ UTEST(net_stream, refused_port_reports_connect_not_timeout)
     if (s) {
         rc = pump_connect(&f, s, 400);
         ASSERT_EQ(rc, HL_NET_E_CONNECT);
+        /* And WHY: the op flattens every failed attempt into one code, so the
+         * socket's errno is kept beside the result. An app (and the macOS
+         * Local Network hint) tell a refusal from "no route" by this. */
+        ASSERT_EQ(hl_net_stream_connect_errno(s), ECONNREFUSED);
         hl_net_stream_free(s);
     } else {
         ASSERT_EQ(rc, HL_NET_E_CONNECT);
     }
     fix_free(&f);
+}
+
+UTEST(net_stream, errno_names_are_symbolic_and_never_null)
+{
+    char buf[HL_ERRNO_NAME_MAX];
+    ASSERT_STREQ(hl_errno_name(ECONNREFUSED, buf, sizeof buf), "ECONNREFUSED");
+    ASSERT_STREQ(hl_errno_name(EHOSTUNREACH, buf, sizeof buf), "EHOSTUNREACH");
+    ASSERT_STREQ(hl_errno_name(ENETUNREACH, buf, sizeof buf), "ENETUNREACH");
+    /* Unknown values are still a value an app can compare, never NULL. */
+    ASSERT_STREQ(hl_errno_name(0, buf, sizeof buf), "E0");
+    ASSERT_STREQ(hl_errno_name(99999, buf, sizeof buf), "E99999");
+    /* No stream, or one that has not finished, has no errno. */
+    ASSERT_EQ(hl_net_stream_connect_errno(NULL), 0);
 }
 
 UTEST(net_stream, unresolvable_host_reports_resolve)
@@ -224,11 +242,15 @@ UTEST(net_stream, unresolvable_host_reports_resolve)
 
     HlNetStream *s = NULL;
     int rc = hl_net_stream_connect(&s, &cfg);
+    int en = -1;
     if (s) {
         rc = pump_connect(&f, s, 400);
+        en = hl_net_stream_connect_errno(s);
         hl_net_stream_free(s);
     }
     ASSERT_EQ(rc, HL_NET_E_RESOLVE);
+    /* A name that did not resolve made no socket: nothing to name. */
+    if (s) ASSERT_EQ(en, 0);
     fix_free(&f);
 }
 

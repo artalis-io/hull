@@ -421,6 +421,58 @@ function destinationValue(host, port) {
     return host + ":" + String(port);
 }
 
+// The one sentence a person on a Mac needs when the dial itself says "no route
+// to host" towards an address on their own network: macOS 15+ answers
+// EHOSTUNREACH for a binary not yet allowed under Local Network privacy, and
+// nothing in the error says so. Stdlib text, not C: the C layer reports the
+// socket's errno and no more.
+const MACOS_LOCAL_NETWORK_HINT =
+    "on macOS 15+ a binary not yet allowed under Local Network privacy gets"
+    + " this; allow it in System Settings > Privacy & Security > Local Network,"
+    + " and again after every hull build";
+
+// Whether `host` is an IP LITERAL in a private or link-local range (10/8,
+// 172.16/12, 192.168/16, 169.254/16, fc00::/7, fe80::/10). Only a literal
+// the app itself wrote is read: what a name resolved to never reaches this
+// layer, and must not reach `detail`.
+function isLocalIpLiteral(host) {
+    if (typeof host !== "string") return false;
+    let h = host.toLowerCase();
+    const br = /^\[(.*)\]$/.exec(h);
+    if (br) h = br[1];
+    h = h.replace(/%.*$/, "");                     // an IPv6 zone index
+    const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(h);
+    if (v4) {
+        const [a, b, c, d] = v4.slice(1).map(Number);
+        if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+        return a === 10 || (a === 172 && b >= 16 && b <= 31)
+            || (a === 192 && b === 168) || (a === 169 && b === 254);
+    }
+    if (h.indexOf(":") >= 0) {
+        const first = /^([0-9a-f]{1,4}):/.exec(h);
+        if (!first) return false;
+        const v = parseInt(first[1], 16);
+        return (v >= 0xfc00 && v <= 0xfdff) || (v >= 0xfe80 && v <= 0xfebf);
+    }
+    return false;
+}
+
+// The reason for a dial that failed: the binding's code and message, plus
+// `errno` - the socket error's symbolic name ("EHOSTUNREACH", "ECONNREFUSED";
+// absent for a DNS or TLS failure) - so an app branches on `e.errno`, never
+// on `detail`. `dialled` is the host the app asked to have dialled: the relay
+// with a tunnel, else the SSH host.
+function dialFailure(code, detail, errnoName, dialled) {
+    const e = { code: code || "connect_failed", detail };
+    if (typeof errnoName === "string") {
+        e.errno = errnoName;
+        if (errnoName === "EHOSTUNREACH" && isLocalIpLiteral(dialled)) {
+            e.detail = (isNil(detail) ? "" : String(detail) + "; ") + MACOS_LOCAL_NETWORK_HINT;
+        }
+    }
+    return e;
+}
+
 // The headers to send: the caller's, with the destination header checked
 // against the granted destination, or added -> [headers] | [null, reason].
 // `tunnel` is tunnelOpener's snapshot: every header already a plain string.
@@ -542,7 +594,7 @@ function tunnelOpener(tunnelIn, crypto, dial) {
         const [headers, herr] = tunnelHeaders(tunnel, o.host, o.port);
         if (!headers) return [null, herr];
 
-        const [raw, err, code] = streamResult(await dial({
+        const [raw, err, code, errnoName] = streamResult(await dial({
             host: o.host,
             port: o.port,
             user: o.user,
@@ -554,7 +606,8 @@ function tunnelOpener(tunnelIn, crypto, dial) {
                 tlsHostname: tunnel.tlsHostname,
             },
         }));
-        if (!raw) return [null, { code: code || "connect_failed", detail: err }];
+        // The errno is the RELAY's: that is the machine the socket reached for.
+        if (!raw) return [null, dialFailure(code, err, errnoName, tunnel.host)];
 
         // The dial's bound ends at TCP + TLS; the upgrade's reply would wait
         // with none (a relay that never answers parked the caller for good).
@@ -580,8 +633,9 @@ function tunnelOpener(tunnelIn, crypto, dial) {
 /** Open a connection. Resolves to a connection handle, or rejects with a
  *  coded Error: host_unknown (fingerprint, keyBlob), host_changed
  *  (fingerprint, storedFingerprint, keyBlob), host_revoked, auth_failed
- *  (methods), partial_success, denied, connect_failed, timeout,
- *  too_many_streams, bad_key (key: 0-based index into keys), ... */
+ *  (methods), partial_success, denied, connect_failed (errno: the socket
+ *  error's name, "EHOSTUNREACH", absent for a DNS or relay-TLS failure),
+ *  timeout, too_many_streams, bad_key (key: 0-based index into keys), ... */
 async function connect(opts) {
     if (opts === null || typeof opts !== "object") {
         throw new TypeError("ssh.connect: expected an options object");
@@ -651,12 +705,16 @@ async function connect(opts) {
     }
 
     const port = isNil(opts.port) ? 22 : opts.port;
-    const [stream, serr, scode] = streamResult(await open({
+    const [stream, serr, scode, serrno] = streamResult(await open({
         host: opts.host, port, user: opts.user, timeoutMs: timeout,
     }));
     if (!stream) {
+        // A reason that already carries a code keeps it (the tunnel path's
+        // `upgrade_refused`); otherwise the binding's code says which
+        // happened, and its fourth value - the socket errno's name, when the
+        // dial itself failed - becomes `e.errno`.
         if (serr !== null && typeof serr === "object" && serr.code) throw toError(serr);
-        throw toError({ code: scode || "connect_failed", detail: serr });
+        throw toError(dialFailure(scode, serr, serrno, opts.host));
     }
 
     const t = newTransport(stream, crypto, {

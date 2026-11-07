@@ -20,6 +20,26 @@ release-artifact layout).
   on a terminal, fully buffered otherwise), so the probe never runs under the filter. Found by
   a downstream app's CI. Covered by `tests/e2e_sandbox.sh` Test 7b.
 
+### Added (hsctl platform gaps: ssh connect errno)
+
+- **`hull/ssh` `connect_failed` now names the socket error.** A dial that failed carries
+  `err.errno` (Lua) / `e.errno` (JS): the errno's symbolic name - `"ECONNREFUSED"`,
+  `"EHOSTUNREACH"`, `"ENETUNREACH"`, ... (`"E<number>"` for one Hull has no name for) - so an
+  app branches on a value, never on `detail`, which now ends `: EHOSTUNREACH (No route to
+  host)`. The capability keeps the last attempt's errno (`HlNetStream.last_errno`, read with
+  `hl_net_stream_connect_errno` beside `hl_net_stream_connect_result`; the name table is
+  `src/hull/shared/errno_name.c`); a host that did not resolve, or a relay whose TLS
+  handshake failed, carries none, as before. No host, port or credential is added to
+  `detail`. Both runtime clients, with twin suite cases and a cap test against a closed
+  loopback port (ECONNREFUSED). Design: `docs/design/platform_gaps_hsctl.md` §6.
+- **The macOS Local Network hint.** When that errno is `EHOSTUNREACH` and the host the app
+  dialled (the relay, with a tunnel) is an IP literal in a private or link-local range
+  (10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7, fe80::/10), `detail` gains one
+  sentence naming System Settings > Privacy & Security > Local Network: on macOS 15+ a
+  binary not yet allowed there gets exactly this, and again after every `hull build`.
+  Stdlib text, read from the literal the app wrote; a resolved address never reaches it.
+  `docs/ssh.md` §10 has the row.
+
 ## [0.18.2] - 2026-11-07
 
 ### Fixed (nightly fuzz crashes, #996 / #1017)

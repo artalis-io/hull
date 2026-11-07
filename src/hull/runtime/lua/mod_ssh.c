@@ -55,6 +55,7 @@
 
 #include "hull/cap/ssh.h"         /* hl_cap_ssh_open */
 #include "hull/cap/net_stream.h"
+#include "hull/shared/errno_name.h"
 #include "hull/shared/async.h"
 #include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"   /* hl_net_op_suspend / _complete, HlSuspendOp */
@@ -153,6 +154,24 @@ static int push_net_err(lua_State *L, int rc)
     lua_pushstring(L, hl_net_stream_strerror(rc));
     lua_pushstring(L, net_err_code(rc));
     return 3;
+}
+
+/* Push (nil, message, code, errno_name) for a dial that failed with a socket
+ * errno: the name ("EHOSTUNREACH") is what the stdlib hands the app as
+ * `err.errno`, and the message gains it with the C strerror text. No host or
+ * port is added - the app knows what it dialled. Without an errno (DNS, TLS)
+ * this is push_net_err. */
+static int push_net_connect_err(lua_State *L, int rc, int en)
+{
+    if (en == 0) return push_net_err(L, rc);
+    char nbuf[HL_ERRNO_NAME_MAX];
+    const char *name = hl_errno_name(en, nbuf, sizeof nbuf);
+    lua_pushnil(L);
+    lua_pushfstring(L, "%s: %s (%s)", hl_net_stream_strerror(rc), name,
+                    strerror(en));
+    lua_pushstring(L, net_err_code(rc));
+    lua_pushstring(L, name);
+    return 4;
 }
 
 /* Hand a parked coroutine back, once. Only ever from the loop: the stream's
@@ -535,10 +554,11 @@ static int ssh_connect_step(lua_State *L, HlLuaSshStream *o)
 
     /* Terminal failure. Release the stream now rather than leaving a dead
      * handle for __gc: the caller is getting an error, not a connection. */
+    int en = hl_net_stream_connect_errno(o->s);
     hl_net_stream_set_user(o->s, NULL);
     hl_net_stream_free(o->s);
     o->s = NULL;
-    return push_net_err(L, rc);
+    return push_net_connect_err(L, rc, en);
 }
 
 /*
