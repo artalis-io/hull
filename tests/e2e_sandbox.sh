@@ -537,6 +537,39 @@ PY
     fi
 fi
 
+# ── Test 7b: CLI app.main with stdout / stdin on /dev/null ────────────
+#
+# /dev/null is a character device that is not a terminal. glibc's first
+# write (or read) on a character device probes isatty() -> ioctl(TCGETS);
+# no pledge promise is granted for it there (no terminal is present), so the
+# process was killed (exit 134) the moment it printed with stdout redirected
+# to /dev/null - the commonest redirect in scripts and CI. Phase 1 now pins
+# stdin's and stdout's buffering before the filter, so the probe never runs.
+# Native-Linux-only for the same reason as Test 7.
+
+echo ""
+echo "=== Test 7b: CLI app.main with stdout and stdin on /dev/null ==="
+
+if [ "$UNAME_S" != "Linux" ] || [ "${IS_COSMO:-0}" = "1" ]; then
+    skip "/dev/null stdio regression - native Linux only"
+else
+    cat > "$WORKDIR/cli_null.lua" << 'EOF'
+app.manifest({ modules = {} })
+app.main(function(ctx)
+    local got = ctx.stdin:read("a")
+    ctx.stdout:write("cli-null-ok " .. tostring(got and #got or 0) .. "\n")
+    return 0
+end)
+EOF
+    "$HULL" "$WORKDIR/cli_null.lua" >/dev/null 2>"$WORKDIR/cli_null.err" </dev/null
+    RC=$?
+    if [ "$RC" = "0" ]; then
+        pass "app.main with stdout and stdin on /dev/null not killed by the sandbox"
+    else
+        fail "app.main with stdout on /dev/null exited $RC: $(grep -v INFO "$WORKDIR/cli_null.err" | tail -3)"
+    fi
+fi
+
 # ── Test 8: every thread carries the seccomp filter (audit 42) ────────
 #
 # The kernel attaches a seccomp filter and a Landlock domain per THREAD. Hull

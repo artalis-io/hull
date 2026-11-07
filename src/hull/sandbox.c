@@ -1108,6 +1108,20 @@ int hl_sandbox_apply_pledge(void)
         g_std_tty[fd] = isatty(fd) ? 1 : 0;
     g_stdio_is_tty = (g_std_tty[0] || g_std_tty[1] || g_std_tty[2]) ? 1 : 0;
 
+    /* Pin stdin's and stdout's buffering now, while unsandboxed. glibc
+     * otherwise decides at the stream's first read or write: its buffer
+     * allocation fstat()s the descriptor and, for ANY character device,
+     * calls isatty() -> ioctl(TCGETS). On a terminal the `tty` promise
+     * covers that; on a character device that is not a terminal - /dev/null,
+     * the commonest redirect there is - no promise covers it, and the
+     * seccomp filter killed the process at its first write
+     * (`app > /dev/null`, exit 134) or read. setvbuf allocates the buffer
+     * here, so the probe never runs under the filter. The modes are glibc's
+     * own defaults: line-buffered on a terminal, fully buffered otherwise;
+     * stderr stays unbuffered. */
+    setvbuf(stdin,  NULL, g_std_tty[0] ? _IOLBF : _IOFBF, BUFSIZ);
+    setvbuf(stdout, NULL, g_std_tty[1] ? _IOLBF : _IOFBF, BUFSIZ);
+
     if (!sb_supported()) {
         /* Terse here on purpose: this is a step note, and phase 2 carries the
          * one loud verdict about what is - and is not - enforcing. */
