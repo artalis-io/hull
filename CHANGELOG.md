@@ -8,6 +8,18 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed (built apps killed with stdout on /dev/null)
+
+- **On Linux, an `app.main` app no longer dies (exit 134, `pledge ... for ioctl`) when its
+  stdout or stdin is `/dev/null`.** glibc's first write or read on a character device probes
+  `isatty()` with `ioctl(TCGETS)`. Phase 1 grants the `tty` promise that covers that only
+  when a terminal is present, and `/dev/null` is a character device that is not one, so the
+  seccomp filter killed the process the first time it printed under `app > /dev/null`, the
+  commonest redirect in scripts and CI. Both runtimes were affected. Phase 1 now sets stdin's
+  and stdout's buffering itself while still unsandboxed (glibc's own defaults: line-buffered
+  on a terminal, fully buffered otherwise), so the probe never runs under the filter. Found by
+  a downstream app's CI. Covered by `tests/e2e_sandbox.sh` Test 7b.
+
 ## [0.18.2] - 2026-11-07
 
 ### Fixed (nightly fuzz crashes, #996 / #1017)
