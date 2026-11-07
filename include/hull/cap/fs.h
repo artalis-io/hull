@@ -22,6 +22,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>            /* mode_t */
 #include "hull/cap/fs_policy.h"   /* HlFsPolicy - path-authorization policy */
 
 /* Forward declaration */
@@ -146,6 +147,43 @@ int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
 int hl_cap_fs_write_ex(const HlFsConfig *cfg, const char *path,
                        const char *data, size_t len, unsigned flags,
                        const char **err_msg);
+
+/** The permission bits an app may give a written file: read / write for
+ *  owner, group and other. No execute, setuid, setgid or sticky bit. */
+#define HL_FS_WRITE_MODE_MASK 0666u
+
+/**
+ * @brief hl_cap_fs_write_ex with the file's permission bits.
+ *
+ * @param mode  0 = as hl_cap_fs_write_ex: a new file is created 0644 under
+ *              the process umask, a replaced file keeps its bits. Otherwise
+ *              the bits the file ends up with, exactly (the umask does not
+ *              apply, and a replaced file's bits are replaced, not merged);
+ *              a bit outside HL_FS_WRITE_MODE_MASK fails "invalid_mode".
+ *              With no group or other bit the parent directories this write
+ *              creates are made 0700 instead of 0755 (existing directories
+ *              are left as they are).
+ *
+ * @note Whatever the mode, the temp file of the atomic write is created 0600
+ *       and set to its final bits only after the data is written and
+ *       flushed, right before the rename - the bytes are never readable by
+ *       anyone but the owner while the write is in progress.
+ */
+int hl_cap_fs_write_mode(const HlFsConfig *cfg, const char *path,
+                         const char *data, size_t len, unsigned flags,
+                         mode_t mode, const char **err_msg);
+
+/* The bindings' opts.mode: an octal STRING of 3 or 4 digits ("600", "0640"),
+ * every bit within HL_FS_WRITE_MODE_MASK and not all zero. 1 and *out set
+ * when it parses; 0 with *err a static message (what was wrong) otherwise.
+ * Shared by the Lua and JS fs.write so the two refuse the same spellings. */
+int hl_fs_parse_mode_string(const char *s, size_t n, mode_t *out,
+                            const char **err);
+
+/* Test seam: @p fn is called with the atomic write's temp fd once the data
+ * is written and before the temp gets its final bits, so a test can observe
+ * the mid-write permissions. NULL (the default) observes nothing. */
+void hl_cap_fs_write_observe_for_test(void (*fn)(int fd, void *ud), void *ud);
 
 /**
  * @brief Test whether a file exists at @p path.

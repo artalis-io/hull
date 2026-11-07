@@ -25,6 +25,20 @@ release-artifact layout).
   (`manifest_env_refs`: undeclared refused for `users` and `hosts`, declared in `env` or
   `secrets` loads).
 
+### Added (hsctl platform gaps: JS CLI byte output)
+
+- **JS `ctx.stdout.write` / `ctx.stderr.write` take bytes.** Every argument went through
+  `JS_ToCStringLen`, so a `Uint8Array` was written as `"1,2,3"` and an `ArrayBuffer` as
+  `"[object ArrayBuffer]"` - a JS CLI could not emit binary output, while Lua's writer was
+  byte-safe already. Each argument now goes through the unified buffer helper the other
+  byte-taking bindings use: a string (or another primitive) is written as its UTF-8 as before,
+  an `ArrayBuffer`, typed array, `WasmBuffer` or `MappedBuffer` as its bytes, and a `DataView`
+  or any other object is a `TypeError` (its `toString` is app code; the convention every byte
+  binding follows). The per-argument charge is unchanged. Design:
+  `docs/design/platform_gaps_hsctl.md` §5 (gap 6; `ctx.stdin.read(n, { bytes: true })` is
+  the follow-up). Covered by `test_js.c::js_platform_gaps.ctx_stdout_write_takes_bytes`
+  (0x00 0x80 0xff through a pipe, mixed arguments, the refusals).
+
 ### Fixed (built apps killed with stdout on /dev/null)
 
 - **On Linux, an `app.main` app no longer dies (exit 134, `pledge ... for ioctl`) when its
@@ -36,6 +50,32 @@ release-artifact layout).
   and stdout's buffering itself while still unsandboxed (glibc's own defaults: line-buffered
   on a terminal, fully buffered otherwise), so the probe never runs under the filter. Found by
   a downstream app's CI. Covered by `tests/e2e_sandbox.sh` Test 7b.
+
+### Added (hsctl platform gaps: fs.write mode)
+
+- **`fs.write(path, bytes, opts)` takes the file's permission bits** (`docs/design/platform_gaps_hsctl.md`
+  §8, gap 2): `opts.mode` is an octal STRING of 3 or 4 digits (`"600"`, `"640"`, `"0644"`), and
+  `opts.private = true` (JS `private: true`) is shorthand for `"600"`; the two may be given
+  together only when they agree. Same names in both runtimes. The bits are applied exactly - the
+  umask does not touch them, and a replaced file's bits are replaced, not merged. A number is
+  refused with a message saying to pass an octal string (a decimal `600` is the classic mistake),
+  and so is any bit outside 0666: no execute, setuid, setgid or sticky bit is reachable from app
+  code, in the binding (`hl_fs_parse_mode_string`, shared by both) and again in the cap layer
+  (`hl_cap_fs_write_mode`, `invalid_mode`). Without a mode nothing changes: a new file is 0644
+  under the umask, a replaced file keeps its bits.
+- **A private mode makes private parents.** When the mode has no group or other bit, the parent
+  directories the write creates are made 0700 instead of 0755 (`HL_FS_OPEN_PRIVATE_DIRS`, a flag
+  the resolver reads at its `mkdirat`); directories that already exist are never re-moded.
+- **Hardening: the atomic write's temp file is now always created 0600** and `fchmod`ed to its
+  final bits only after the data is written and flushed, right before the rename - before, it was
+  created 0644 and carried the bytes world-readable (under the umask) until the rename, even when
+  it was replacing a 0600 secret. Holds for every `fs.write`, with or without a mode, and for the
+  tar extractor's writes. The in-place fallback (a write through an in-root symlink, a read-only
+  directory) creates with 0600 and `fchmod`s after its truncate when a mode is given. Charging is
+  unchanged. Covered by `test_fs` (`write_mode_*`, `write_temp_file_is_0600_until_the_rename`
+  through the `hl_cap_fs_write_observe_for_test` seam, `parse_mode_string`) and the
+  `lua_fs_write_mode.*` / `js_fs_write_mode.*` binding suites. Documented in
+  `docs/app_api_reference.md` ("Filesystem writes").
 
 ## [0.18.2] - 2026-11-07
 
