@@ -836,6 +836,30 @@ const HlCryptoAsymBackend *hl_crypto_asym_active_backend(void)
 
 /* ── AEAD (AES-256-GCM) ─────────────────────────────────────────────── */
 
+/* Which TU answers the weak accessor below depends on the BASE SHAPE, not on
+ * link luck. A plain-archive link (every `hull build` on a TLS-full base, the
+ * one `make platform && make EMBED_PLATFORM=1` produces) pulls an archive
+ * member only to resolve an undefined symbol, and cap/crypto_aead_mbedtls.c
+ * exports nothing but its strong override of a symbol this TU already defines
+ * weakly - so the member was never pulled and every built app sealed with the
+ * fail-closed stub ("no AEAD backend in this build") while `hull dev`, which
+ * links objects, worked. The hmac TU escapes by being byte-identical to the
+ * portable default; the asym TU by also exporting hl_cap_crypto_x509_pubkey_pem,
+ * which the runtime bridge references. So on a TLS-full base (HL_LINK_TLS, and
+ * not the HL_TLS_FEATURE=1 sub-build that moves the mbedTLS TUs into
+ * libhull_feature-tls.a) the default NAMES the mbedTLS backend: the hard
+ * reference pulls the TU, whose strong override then answers. The TLS-less
+ * base keeps the stub and gets the override from the whole-archived feature. */
+#if defined(HL_LINK_TLS) && !defined(HL_TLS_FEATURE)
+
+__attribute__((weak))
+const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void)
+{
+    return &hl_crypto_aead_backend_mbedtls;   /* anchors cap_crypto_aead_mbedtls.o */
+}
+
+#else
+
 /* Fail-closed stub. No portable fallback on purpose: HMAC has one because the
  * portable and mbedTLS constructions are byte-identical, but hand-rolling
  * AES-GCM is precisely what this seam exists to avoid. A TLS-less build refuses
@@ -899,6 +923,8 @@ const HlCryptoAeadBackend *hl_crypto_aead_active_backend(void)
 {
     return &hl_crypto_aead_backend_stub;   /* fail-closed; mbedTLS TU overrides */
 }
+
+#endif /* HL_LINK_TLS && !HL_TLS_FEATURE */
 
 /* The vendored OpenBSD KDF. Declared here rather than via a vendor header:
  * vendor/bcrypt ships no public header, and this wrapper is the only thing in

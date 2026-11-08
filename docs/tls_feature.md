@@ -163,6 +163,27 @@ symbol; the concrete mbedTLS backend is a **strong override in its own TU**. Thi
 same `--start-group` / link-granularity rule governs the TLS archive below.
 Dormant: HTTP builds still use mbedTLS, TLS-less builds fail closed.
 
+**Link-granularity, the other way round (2026-11-08).** The rule above keeps a
+TLS-less base linking; it does not by itself get the override INTO a TLS-full
+app. `hull build` links `libhull_platform.a` as an ordinary archive, and an
+archive member is pulled only to resolve an undefined symbol. A backend TU that
+exports nothing but its strong override of a symbol `crypto.o` already defines
+weakly is therefore never pulled, and the weak default stands in every built
+app - which is exactly what happened to AES-GCM on a plain `make platform &&
+make EMBED_PLATFORM=1` hull (`crypto.gcm_seal: no AEAD backend in this build`,
+found by hsctl; `hull dev` links objects and never saw it; the release base is
+TLS-less and whole-archives the feature, so released binaries were fine). The
+HMAC TU escaped by being byte-identical to the portable default, the asym TU by
+also exporting `hl_cap_crypto_x509_pubkey_pem`, which the runtime bridge
+references. So on a TLS-full base (`HL_LINK_TLS` and not the `HL_TLS_FEATURE=1`
+sub-build, which now defines `-DHL_TLS_FEATURE`) `crypto.c`'s weak AEAD default
+NAMES `hl_crypto_aead_backend_mbedtls`: the hard reference pulls the TU, whose
+strong override answers. A backend TU added to this seam later must either be
+referenced by a TU every app pulls or follow the same base-shape `#if` - and the
+focused test link sets (`CRYPTO_TEST_OBJS`, `PG_CRYPTO_OBJS` in `mk/tests.mk`)
+must list it. Gate: `tests/e2e_build.sh` builds a Lua and a JS `app.main` app
+on the plain base and round-trips `gcm_seal` / `gcm_open`.
+
 ### Phase 2+3 - The Keel move: base drops Keel+mbedTLS, HTTP feature composes them
 The transport is **not** a series of dormant Hull-side weak stubs (see "The
 finding that reframes Phases 2-3"): the base's remaining mbedTLS coupling is

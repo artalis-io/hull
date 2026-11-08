@@ -102,6 +102,13 @@ endif
 # references kl_tls_*). Used only by the TLSLESS_PLATFORM_LIB sub-build; the hull
 # binary + a plain `make` are unaffected. Native only. Default 0.
 HL_TLS_FEATURE     ?= 0
+# Surface the flag to C: cap/crypto.c keeps its fail-closed AEAD default on the
+# TLS-less base (the feature archive's strong override answers), while on a
+# TLS-full base it names the mbedTLS backend so a plain-archive `hull build`
+# link pulls cap_crypto_aead_mbedtls.o at all (nothing else references it).
+ifeq ($(HL_TLS_FEATURE),1)
+CFLAGS += -DHL_TLS_FEATURE
+endif
 
 # HL_KEEL_FEATURE=1 builds a Keel-less app-build base (docs/keel_feature.md):
 # the base uses the Keel-free serve_cli.o app-entry (weak hull_serve)
