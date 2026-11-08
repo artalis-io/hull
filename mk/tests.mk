@@ -1694,6 +1694,12 @@ e2e-db-open-failure: $(BUILDDIR)/hull
 e2e-cli-poll: $(BUILDDIR)/hull
 	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_cli_poll.sh
 
+# app.main observes SIGINT / SIGTERM (shared/main_signal.h, platform gap 7):
+# both runtimes, on whichever runner this build has.
+.PHONY: e2e-cli-interrupt
+e2e-cli-interrupt: $(BUILDDIR)/hull
+	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_cli_interrupt.sh
+
 e2e-migrate: $(BUILDDIR)/hull
 	sh tests/e2e_migrate.sh
 

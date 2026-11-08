@@ -31,6 +31,8 @@
 #include "hull/cap/db_budget.h"
 #include "hull/shared/work_charge.h"   /* hl_work_bytes_units */
 #include "hull/shared/term_escape.h"   /* hl_term_fwrite_escaped (audit 33) */
+#include "hull/shared/main_signal.h"   /* app.main's interrupt (gap 7) */
+#include "hull/cap/vm_thread.h"           /* the interrupt run on the VM thread */
 
 #include "lua.h"
 #include "lualib.h"
@@ -1229,6 +1231,176 @@ static int run_main_running_k(lua_State *L)
     return 0;
 }
 
+/* ── app.main's interrupt (shared/main_signal.h, platform gap 7) ─────────
+ *
+ * ctx.interrupted()      -> nil, or "SIGINT" / "SIGTERM" once one arrived
+ * ctx.on_interrupt(fn)   -> register ONE callback, fn(name); nil clears it
+ *
+ * The signal is delivered on the loop thread as a run of its own
+ * (vt_lua_main_interrupt): the callback runs in a fresh coroutine with the
+ * budget, deadline and stale-transaction guard a hull._task gets, and may
+ * wait (hull.sleep, http.fetch) like any entry. Main itself is not woken:
+ * a main parked on a long hull.sleep sees the interrupt at its next
+ * ctx.interrupted() poll, so poll between short waits. Either call marks
+ * main as registered, which is what earns it the grace - a main that never
+ * asked is ended at once. */
+static int cli_interrupted(lua_State *L)
+{
+    HlLua *lua = get_hl_lua_from_L(L);
+    if (!lua) return luaL_error(L, "ctx.interrupted(): no runtime");
+    lua->main_sig_watched = 1;
+    if (lua->main_sig) lua_pushstring(L, hl_main_signal_name(lua->main_sig));
+    else lua_pushnil(L);
+    return 1;
+}
+
+static int cli_on_interrupt(lua_State *L)
+{
+    HlLua *lua = get_hl_lua_from_L(L);
+    if (!lua) return luaL_error(L, "ctx.on_interrupt(): no runtime");
+    /* ctx.on_interrupt(fn) and ctx:on_interrupt(fn) both work. */
+    int a = lua_istable(L, 1) ? 2 : 1;
+    if (!lua_isnoneornil(L, a) && !lua_isfunction(L, a))
+        return luaL_argerror(L, a, "function or nil expected");
+    if (lua->main_sig_ref != LUA_NOREF) {
+        luaL_unref(L, LUA_REGISTRYINDEX, lua->main_sig_ref);
+        lua->main_sig_ref = LUA_NOREF;
+    }
+    if (lua_isfunction(L, a)) {
+        lua_pushvalue(L, a);
+        lua->main_sig_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    lua->main_sig_watched = 1;
+    return 0;
+}
+
+static const luaL_Reg cli_signal_methods[] = {
+    { "interrupted",  cli_interrupted  },
+    { "on_interrupt", cli_on_interrupt },
+    { NULL, NULL }
+};
+
+/* The callback's coroutine, under lua_pcall (lua_newthread and luaL_ref
+ * allocate, and this runs from a loop callback with no handler above). */
+typedef struct {
+    int         fn_ref;
+    const char *name;
+    int         co_ref;
+    lua_State  *co;
+} HlLuaSigPrep;
+
+static int main_sig_prepare_k(lua_State *L)
+{
+    HlLuaSigPrep *p = (HlLuaSigPrep *)lua_touserdata(L, 1);
+    lua_State *co = lua_newthread(L);
+    p->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);   /* pops the thread */
+    p->co = co;
+    if (!lua_checkstack(co, 2))
+        return luaL_error(L, "not enough memory");
+    lua_rawgeti(co, LUA_REGISTRYINDEX, p->fn_ref);
+    lua_pushstring(co, p->name);
+    return 0;
+}
+
+static int vt_lua_main_interrupt_impl(HlRuntime *rt, int sig);
+typedef struct { HlRuntime *rt; int sig; int handled; } lua_main_interrupt_vmt_args;
+static void vt_lua_main_interrupt_vmt_job(void *ud)
+{
+    lua_main_interrupt_vmt_args *a = (lua_main_interrupt_vmt_args *)ud;
+    a->handled = vt_lua_main_interrupt_impl(a->rt, a->sig);
+}
+
+/* HlRuntimeVtable.main_interrupt: the runtime's half of the design above. */
+static int vt_lua_main_interrupt(HlRuntime *rt, int sig)
+{
+    HlVmThread *vmt = rt ? rt->vm_thread : NULL;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        lua_main_interrupt_vmt_args a = { rt, sig, 0 };
+        (void)hl_vmt_run(vmt, vt_lua_main_interrupt_vmt_job, &a, NULL, NULL);
+        return a.handled;
+    }
+    return vt_lua_main_interrupt_impl(rt, sig);
+}
+
+static int vt_lua_main_interrupt_impl(HlRuntime *rt, int sig)
+{
+    HlLua *lua = (HlLua *)rt;
+    if (!lua || !lua->L || !lua->cli_main_co) return 0;
+    lua_State *L = lua->L;
+    lua->main_sig = sig;
+    int handled = lua->main_sig_watched;
+    if (lua->main_sig_ref == LUA_NOREF) return handled;
+
+    HlLuaSigPrep prep = { lua->main_sig_ref, hl_main_signal_name(sig), LUA_NOREF, NULL };
+    if (!lua_checkstack(L, 3)) {
+        log_error("[hull:main] interrupt handler: out of stack");
+        return handled;
+    }
+    lua_pushcfunction(L, main_sig_prepare_k);
+    lua_pushlightuserdata(L, &prep);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        lua_pop(L, 1);
+        if (prep.co_ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, prep.co_ref);
+        log_error("[hull:main] interrupt handler: out of memory");
+        return handled;
+    }
+    lua_State *co = prep.co;
+
+    /* A run of its own, as hull._task's fire (async.c): nothing of main's
+     * stretch is active, and what this clobbers is put back after. */
+    lua_State      *save_co         = lua->active_co;
+    int             save_thread_ref = lua->active_thread_ref;
+    KlHttpConn     *save_conn       = lua->active_conn;
+    KlHttpRequest  *save_req        = lua->active_req;
+    void           *save_timer      = lua->active_timer;
+    void          (*save_oc)(struct HlLua *, void *) = lua->active_on_complete;
+    void           *save_oc_ctx     = lua->active_on_complete_ctx;
+    HlLuaBudget     save_budget     = lua->budget;
+    uint64_t        save_deadline   = hl_run_watch_save(&lua->run_watch);
+#ifdef HL_ENABLE_DB
+    HlDbBudgetBinding save_db_budget = hl_db_budget_current();
+#endif
+    lua->active_co              = co;
+    lua->active_thread_ref      = prep.co_ref;
+    lua->active_conn            = NULL;
+    lua->active_req             = NULL;
+    lua->active_timer           = NULL;
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
+
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
+    HL_LUA_ARM(lua, co);
+    int nres = 0;
+    int st = lua_resume(co, L, 1, &nres);
+    st = hl_lua_resume_status(co, L, st);
+    hl_db_registry_guard_stale_txns(lua->base.db_registry);
+
+    if (st == LUA_OK) {
+        luaL_unref(L, LUA_REGISTRYINDEX, prep.co_ref);
+    } else if (st == LUA_YIELD) {
+        /* Parked on a Hull op: hl_lua_async_resume owns the ref now. */
+    } else {
+        char ebuf[512];
+        log_error("[hull:main] interrupt handler error: %s",
+                  hl_lua_error_text(lua, co, -1, ebuf, sizeof(ebuf)));
+        luaL_unref(L, LUA_REGISTRYINDEX, prep.co_ref);
+    }
+
+    lua->active_co              = save_co;
+    lua->active_thread_ref      = save_thread_ref;
+    lua->active_conn            = save_conn;
+    lua->active_req             = save_req;
+    lua->active_timer           = save_timer;
+    lua->active_on_complete     = save_oc;
+    lua->active_on_complete_ctx = save_oc_ctx;
+    lua->budget                 = save_budget;
+    hl_run_watch_restore(&lua->run_watch, save_deadline);
+#ifdef HL_ENABLE_DB
+    hl_db_budget_restore(save_db_budget);
+#endif
+    return 1;
+}
+
 /* main's coroutine, main itself and its ctx table, under lua_pcall
  * (vt_lua_run_main, audit 9 L2). Returns main and ctx on L. */
 typedef struct {
@@ -1277,6 +1449,10 @@ static int main_prepare_k(lua_State *L)
     cli_push_stream(L, 0, cli_stdin_methods);   lua_setfield(L, -2, "stdin");
     cli_push_stream(L, 1, cli_writer_methods);  lua_setfield(L, -2, "stdout");
     cli_push_stream(L, 2, cli_writer_methods);  lua_setfield(L, -2, "stderr");
+    for (const luaL_Reg *m = cli_signal_methods; m->name; m++) {
+        hl_lua_pushcfunction(L, m->func);
+        lua_setfield(L, -2, m->name);
+    }
     return 2;
 }
 
@@ -1307,6 +1483,9 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     HlLuaMainPrep prep = { argc, argv, env_allowlist, NULL, LUA_NOREF };
     if (!lua_checkstack(L, 4))
         return -1;
+    lua->main_sig         = 0;
+    lua->main_sig_ref     = LUA_NOREF;
+    lua->main_sig_watched = 0;
     int base = lua_gettop(L);
     lua_pushcfunction(L, main_prepare_k);
     lua_pushlightuserdata(L, &prep);
@@ -1377,9 +1556,15 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
 
     /* `co`'s stack now holds main's return value (LUA_OK) or an error
      * message (LUA_ERRRUN etc.) - either way, the top of the stack is
-     * what we read. */
+     * what we read. Unless an interrupt ended main (shared/main_signal.h):
+     * then main is still parked, nothing on its stack is a result, and the
+     * exit status is 128 + the signal. */
     int rc;
-    if (status == LUA_OK) {
+    int ended = hl_main_signal_ended();
+    if (ended && status == LUA_YIELD) {
+        rc = 128 + ended;
+        status = LUA_ERRRUN;   /* not main's own return: the caller reads rc */
+    } else if (status == LUA_OK) {
         rc = lua_coerce_exit_code(co);
     } else {
         char ebuf[512];
@@ -1394,6 +1579,10 @@ static int vt_lua_run_main(HlRuntime *rt, KlHttpServer *server,
     lua->active_thread_ref = saved_thread_ref;
     lua->cli_main_co       = NULL;
     luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+    if (lua->main_sig_ref != LUA_NOREF) {
+        luaL_unref(L, LUA_REGISTRYINDEX, lua->main_sig_ref);
+        lua->main_sig_ref = LUA_NOREF;
+    }
 
     /* Tasks started with hull.async and never joined are abandoned when the
      * process ends here - it does unless main returned 0 and routes are
@@ -1458,6 +1647,7 @@ const HlRuntimeVtable hl_lua_vtable = {
     .has_main            = vt_lua_has_main,
     .has_server_handlers = vt_lua_has_server_handlers,
     .run_main            = vt_lua_run_main,
+    .main_interrupt      = vt_lua_main_interrupt,
 #ifdef HL_ENABLE_HTTP_SERVER
     .request_done        = vt_lua_request_done,
 #endif

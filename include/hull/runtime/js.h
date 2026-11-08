@@ -261,6 +261,12 @@ typedef struct HlJS {
     int             active_cli_main;
     int             cli_main_rejected;   /* 1 = Promise rejected, 0 = fulfilled */
     void           *cli_main_value;      /* JSValue * - borrowed in runtime.c */
+    /* app.main's ctx.signal (shared/main_signal.h, platform gap 7): an
+     * HlJsMainSignal* (runtime.c) alive for the main window - the promise's
+     * resolve function, the onabort callback, the signal delivered and
+     * whether main registered for it. NULL outside run_main: the getters
+     * on a ctx.signal kept past main read "not aborted". */
+    void           *main_signal;
 
     /* The ORIGINAL Function.prototype.toString (JSValue *, owned), taken
      * before any app code runs. worker.dispatch compiles the function's

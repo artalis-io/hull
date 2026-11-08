@@ -1099,6 +1099,11 @@ CAP_OBJS += $(CLI_LOG_OBJ)
 # prose. Rides CAP_OBJS like host, so it reaches every list with one edit.
 ERRNO_NAME_OBJ := $(BUILDDIR)/errno_name.o
 CAP_OBJS += $(ERRNO_NAME_OBJ)
+# main_signal lets app.main observe SIGINT / SIGTERM (shared/main_signal.h,
+# platform gap 7): both runners install it around the main window. libc +
+# the async backend vtable only; rides CAP_OBJS like host.
+MAIN_SIGNAL_OBJ := $(BUILDDIR)/main_signal.o
+CAP_OBJS += $(MAIN_SIGNAL_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3293,6 +3298,9 @@ $(CLI_LOG_OBJ): $(SRCDIR)/hull/shared/cli_log.c $(INCDIR)/hull/shared/cli_log.h 
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(ERRNO_NAME_OBJ): $(SRCDIR)/hull/shared/errno_name.c $(INCDIR)/hull/shared/errno_name.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(MAIN_SIGNAL_OBJ): $(SRCDIR)/hull/shared/main_signal.c $(INCDIR)/hull/shared/main_signal.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)

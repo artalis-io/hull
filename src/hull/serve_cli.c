@@ -49,6 +49,8 @@
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
+#include "hull/shared/main_signal.h" /* app.main's interrupt (gap 7) */
+#include "hull/limits/core.h"         /* HL_DEFAULT_DRAIN_TIMEOUT_MS */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_watchdog.h"
 #endif
@@ -113,6 +115,7 @@ typedef struct {
     int         no_verify_platform;  /* --no-verify-platform */
     int         keep_internal;       /* --keep-internal-in-app-db */
     long        instruction_limit;   /* --max-instructions N (0 = default) */
+    int         interrupt_grace_ms;  /* --interrupt-grace-ms N (gap 7) */
     int         verbose;             /* --verbose under hull: DEBUG records */
 #ifdef HL_ENABLE_WASM
     HlWasmCliLimits wasm;            /* --wasm-* ceilings, as serve.c takes them */
@@ -227,6 +230,15 @@ static int cli_parse_args(int argc, char **argv,
                 return -2;
             }
             hl_run_watchdog_configure(ms);
+            continue;
+        }
+        if (strcmp(argv[i], "--interrupt-grace-ms") == 0 && i + 1 < argc) {
+            /* How long app.main may go on after SIGINT / SIGTERM
+             * (shared/main_signal.h). */
+            if (hl_main_signal_parse_ms(argv[++i], &x->interrupt_grace_ms) != 0) {
+                fprintf(stderr, "hull: invalid interrupt-grace-ms: %s\n", argv[i]);
+                return -2;
+            }
             continue;
         }
 #ifdef HL_ENABLE_WASM
@@ -385,6 +397,7 @@ int hull_serve(int argc, char **argv)
     const char *ca_bundle_override = NULL;
 
     CliOpts xo = { 0 };
+    xo.interrupt_grace_ms = HL_DEFAULT_DRAIN_TIMEOUT_MS;
     int entry_idx = cli_parse_args(argc, argv, &app_argc, &app_argv,
                                     &no_migrate, &no_sandbox,
                                     &allow_degraded_sandbox, &db_path,
@@ -876,8 +889,13 @@ int hull_serve(int argc, char **argv)
 
     /* async_ctx + pool were created up top, before the sandbox (see the rseq
      * note there), and assigned onto rt after app-context init. */
+    /* SIGINT / SIGTERM reach the app while main runs (shared/main_signal.h,
+     * gap 7); before, they killed the process with no teardown and no flush.
+     * A failed install is logged and main runs as before. */
+    (void)hl_main_signal_install(async_ctx, rt, xo.interrupt_grace_ms);
     int rc = 1;
     int run = rt->vt->run_main(rt, NULL, app_argc, app_argv, env_allow, &rc);
+    hl_main_signal_remove();
 
     /* main has returned; what it left running is retired while the runtime,
      * its cap configs and the loop are all still in place (audit 14 G1).

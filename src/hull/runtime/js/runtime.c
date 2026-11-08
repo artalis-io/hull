@@ -49,6 +49,9 @@
 /* VFS: O(log n) lookups into sorted entry arrays */
 #include "hull/vfs.h"
 #include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
+#include "hull/shared/main_signal.h"   /* app.main's interrupt (gap 7) */
+#include "hull/cap/db_registry.h"      /* hl_db_registry_guard_stale_txns */
+#include "hull/cap/vm_thread.h"           /* the interrupt run on the VM thread */
 #include "hull/shared/work_charge.h"   /* hl_work_bulk_units (audit 39) */
 #include "hull/shared/dispatch_meter.h" /* the binding dispatcher */
 #include "hull/cap/crypto.h"           /* hl_cap_crypto_random (audit 40) */
@@ -2503,6 +2506,267 @@ static JSValue js_cli_close(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* ── app.main's ctx.signal (shared/main_signal.h, platform gap 7) ───────
+ *
+ * A minimal AbortSignal-shaped object made in C (QuickJS has no AbortSignal,
+ * and Hull adds no event machinery): `aborted`, `reason` ("SIGINT" /
+ * "SIGTERM"), `onabort` (a function, settable) and `promise`, which settles
+ * with the reason. Non-extensible, every property an accessor onto this
+ * struct, so app code cannot forge a delivery or detach the promise.
+ *
+ * The signal is delivered on the loop thread as a run of its own
+ * (vt_js_main_interrupt): onabort is called, the promise resolved and the
+ * jobs that queues - main's continuation after `await ctx.signal.promise` -
+ * drained, under the budget, deadline and stale-transaction guard a
+ * hull:_task gets. Setting onabort or reading `promise` marks main as
+ * registered, which is what earns it the grace; a main that never asked is
+ * ended at once. */
+typedef struct HlJsMainSignal {
+    JSValue promise;
+    JSValue resolve;
+    JSValue reject;
+    JSValue onabort;    /* JS_UNDEFINED or a function */
+    int     sig;        /* delivered signal, 0 = none */
+    int     watched;
+} HlJsMainSignal;
+
+static HlJsMainSignal *js_main_signal(JSContext *ctx)
+{
+    HlJS *js = JS_GetContextOpaque(ctx);
+    return js ? (HlJsMainSignal *)js->main_signal : NULL;
+}
+
+static JSValue js_sig_get_aborted(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJsMainSignal *ms = js_main_signal(ctx);
+    return JS_NewBool(ctx, ms && ms->sig != 0);
+}
+
+static JSValue js_sig_get_reason(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJsMainSignal *ms = js_main_signal(ctx);
+    if (!ms || !ms->sig) return JS_UNDEFINED;
+    return JS_NewString(ctx, hl_main_signal_name(ms->sig));
+}
+
+static JSValue js_sig_get_onabort(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJsMainSignal *ms = js_main_signal(ctx);
+    if (!ms) return JS_NULL;
+    return JS_IsUndefined(ms->onabort) ? JS_NULL : JS_DupValue(ctx, ms->onabort);
+}
+
+static JSValue js_sig_set_onabort(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJsMainSignal *ms = js_main_signal(ctx);
+    if (!ms) return JS_ThrowTypeError(ctx, "ctx.signal: app.main has ended");
+    JSValueConst v = argc > 0 ? argv[0] : JS_UNDEFINED;
+    if (!JS_IsNull(v) && !JS_IsUndefined(v) && !JS_IsFunction(ctx, v))
+        return JS_ThrowTypeError(ctx, "ctx.signal.onabort must be a function or null");
+    JS_FreeValue(ctx, ms->onabort);
+    ms->onabort = JS_IsFunction(ctx, v) ? JS_DupValue(ctx, v) : JS_UNDEFINED;
+    ms->watched = 1;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_sig_get_promise(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJsMainSignal *ms = js_main_signal(ctx);
+    if (!ms) return JS_ThrowTypeError(ctx, "ctx.signal: app.main has ended");
+    ms->watched = 1;
+    return JS_DupValue(ctx, ms->promise);
+}
+
+/* Build ctx.signal onto @p ms, or JS_EXCEPTION. */
+static JSValue js_main_signal_make(JSContext *ctx, HlJsMainSignal *ms)
+{
+    JSValue funcs[2];
+    ms->promise = JS_NewPromiseCapability(ctx, funcs);
+    if (JS_IsException(ms->promise)) return JS_EXCEPTION;
+    ms->resolve = funcs[0];
+    ms->reject  = funcs[1];
+    ms->onabort = JS_UNDEFINED;
+
+    JSValue obj = JS_NewObject(ctx);
+    if (JS_IsException(obj)) return JS_EXCEPTION;
+    struct { const char *name; JSCFunction *get; JSCFunction *set; } props[] = {
+        { "aborted", js_sig_get_aborted, NULL },
+        { "reason",  js_sig_get_reason,  NULL },
+        { "onabort", js_sig_get_onabort, js_sig_set_onabort },
+        { "promise", js_sig_get_promise, NULL },
+    };
+    for (size_t i = 0; i < sizeof props / sizeof props[0]; i++) {
+        JSAtom atom = JS_NewAtom(ctx, props[i].name);
+        JSValue g = JS_NewCFunction(ctx, props[i].get, props[i].name, 0);
+        JSValue st = props[i].set
+            ? JS_NewCFunction(ctx, props[i].set, props[i].name, 1) : JS_UNDEFINED;
+        int rc = (JS_IsException(g) || JS_IsException(st)) ? -1
+               : JS_DefinePropertyGetSet(ctx, obj, atom, g, st, JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, atom);
+        if (rc < 0) {
+            JS_FreeValue(ctx, obj);
+            return JS_EXCEPTION;
+        }
+    }
+    if (JS_PreventExtensions(ctx, obj) < 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+    return obj;
+}
+
+static void js_main_signal_free(JSContext *ctx, HlJsMainSignal *ms)
+{
+    if (!ms) return;
+    JS_FreeValue(ctx, ms->promise);
+    JS_FreeValue(ctx, ms->resolve);
+    JS_FreeValue(ctx, ms->reject);
+    JS_FreeValue(ctx, ms->onabort);
+    free(ms);
+}
+
+static void js_main_signal_log(HlJS *js, JSValueConst err)
+{
+    const char *msg = js->budget_tripped ? NULL : JS_ToCString(js->ctx, err);
+    log_error("[hull:main] interrupt handler error: %s",
+              msg ? msg : js->budget_tripped ? hl_js_trip_reason(js)
+                                             : "(unknown)");
+    if (msg) JS_FreeCString(js->ctx, msg);
+    JS_FreeValue(js->ctx, JS_GetException(js->ctx));
+}
+
+static int vt_js_main_interrupt_impl(HlRuntime *rt, int sig);
+typedef struct { HlRuntime *rt; int sig; int handled; } js_main_interrupt_vmt_args;
+static void vt_js_main_interrupt_vmt_job(void *ud)
+{
+    js_main_interrupt_vmt_args *a = (js_main_interrupt_vmt_args *)ud;
+    a->handled = vt_js_main_interrupt_impl(a->rt, a->sig);
+}
+
+/* HlRuntimeVtable.main_interrupt: the runtime's half of the design above. */
+static int vt_js_main_interrupt(HlRuntime *rt, int sig)
+{
+    HlVmThread *vmt = rt ? rt->vm_thread : NULL;
+    if (vmt && !hl_vmt_on_vm_thread(vmt)) {
+        js_main_interrupt_vmt_args a = { rt, sig, 0 };
+        (void)hl_vmt_run(vmt, vt_js_main_interrupt_vmt_job, &a, NULL, NULL);
+        return a.handled;
+    }
+    return vt_js_main_interrupt_impl(rt, sig);
+}
+
+static int vt_js_main_interrupt_impl(HlRuntime *rt, int sig)
+{
+    HlJS *js = (HlJS *)rt;
+    if (!js || !js->ctx || !js->main_signal || !js->cli_main_active) return 0;
+    JSContext *ctx = js->ctx;
+    HlJsMainSignal *ms = (HlJsMainSignal *)js->main_signal;
+    if (ms->sig) return ms->watched;   /* delivered once */
+    ms->sig = sig;
+    int handled = ms->watched;
+
+    /* A run of its own, as hull:_task's fire (async.c): nothing of main's
+     * stretch is active, and what this clobbers is put back after. */
+    KlHttpConn   *save_conn        = js->active_conn;
+    KlHttpRequest *save_req        = js->active_req;
+    void         *save_timer       = js->active_timer;
+    struct HlReqLife *save_life    = js->active_life;
+    void        (*save_on_complete)(struct HlJS *, void *) = js->active_on_complete;
+    void         *save_on_complete_ctx = js->active_on_complete_ctx;
+    int           save_cli_main    = js->active_cli_main;
+    void         *save_last_cont   = js->last_async_cont;
+    int           save_pending     = js->async_pending;
+    int64_t       save_count       = js->instruction_count;
+    int           save_tripped     = js->budget_tripped;
+    int           save_timed_out   = js->budget_timed_out;
+    int           save_txn_failed  = js->budget_txn_failed;
+    uint64_t      save_deadline    = hl_run_watch_save(&js->run_watch);
+    uint64_t      save_entry_tag   = js->entry_tag;
+    uint64_t      save_job_tag     = JS_GetJobTag(js->rt);
+#ifdef HL_ENABLE_DB
+    HlDbBudgetBinding save_budget  = hl_db_budget_current();
+#endif
+    js->active_conn            = NULL;
+    js->active_req             = NULL;
+    js->active_timer           = NULL;
+    js->active_life            = NULL;
+    js->active_on_complete     = NULL;
+    js->active_on_complete_ctx = NULL;
+    js->active_cli_main        = 0;
+    js->last_async_cont        = NULL;
+    js->async_pending          = 0;
+    hl_js_budget_arm(js);
+    hl_db_registry_guard_stale_txns(js->base.db_registry);
+
+    JSValue reason = JS_NewString(ctx, hl_main_signal_name(sig));
+    if (!JS_IsUndefined(ms->onabort)) {
+        JSValue fn = JS_DupValue(ctx, ms->onabort);
+        JSValueConst argv1[1] = { reason };
+        JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 1, argv1);
+        JS_FreeValue(ctx, fn);
+        if (JS_IsException(ret)) {
+            JSValue exc = JS_GetException(ctx);
+            js_main_signal_log(js, exc);
+            JS_FreeValue(ctx, exc);
+        } else {
+            int st;
+            (void)hl_js_entry_park(js, ret, &st);
+            if (st == JS_PROMISE_REJECTED) {
+                JSValue r = JS_PromiseResult(ctx, ret);
+                js_main_signal_log(js, r);
+                JS_FreeValue(ctx, r);
+            }
+        }
+        JS_FreeValue(ctx, ret);
+    }
+    /* The promise settles with the reason; its reactions - main's own code
+     * after `await ctx.signal.promise`, under main's tag (QuickJS HULL PATCH
+     * 0008) - run in the drain below. */
+    {
+        JSValueConst argv1[1] = { reason };
+        JSValue r = JS_Call(ctx, ms->resolve, JS_UNDEFINED, 1, argv1);
+        if (JS_IsException(r)) JS_FreeValue(ctx, JS_GetException(ctx));
+        JS_FreeValue(ctx, r);
+    }
+    JS_FreeValue(ctx, reason);
+    hl_js_run_jobs(js);
+    js->last_async_cont = NULL;
+    (void)hl_js_entry_end_txn_check(js);
+
+    if (js->budget_tripped)
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    js->active_conn            = save_conn;
+    js->active_req             = save_req;
+    js->active_timer           = save_timer;
+    js->active_life            = save_life;
+    js->active_on_complete     = save_on_complete;
+    js->active_on_complete_ctx = save_on_complete_ctx;
+    js->active_cli_main        = save_cli_main;
+    js->last_async_cont        = save_last_cont;
+    js->async_pending          = save_pending;
+    js->instruction_count      = save_count;
+    js->budget_tripped         = save_tripped;
+    js->budget_timed_out       = save_timed_out;
+    js->budget_txn_failed      = save_txn_failed;
+    hl_run_watch_restore(&js->run_watch, save_deadline);
+    js->entry_tag = save_entry_tag;
+    JS_SetJobTag(js->rt, save_job_tag);
+#ifdef HL_ENABLE_DB
+    hl_db_budget_restore(save_budget);
+#endif
+    return handled || !JS_IsUndefined(ms->onabort) ? 1 : 0;
+}
+
 /* .then / .catch callback wired to main's Promise in CLI mode. magic=0
  * → resolved, magic=1 → rejected. Captures the value on the runtime
  * and stops the event loop so vt_js_run_main can return. */
@@ -2726,6 +2990,30 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         JS_SetPropertyStr(ctx, ctxobj, streams[i].prop, s);
     }
 
+    /* ctx.signal (gap 7). Alive for the main window: freed below. */
+    HlJsMainSignal *msig = calloc(1, sizeof *msig);
+    if (!msig) {
+        JS_FreeValue(ctx, ctxobj);
+        JS_FreeValue(ctx, main_fn);
+        JS_FreeValue(ctx, store);
+        return -1;
+    }
+    msig->promise = JS_UNDEFINED;
+    msig->resolve = JS_UNDEFINED;
+    msig->reject  = JS_UNDEFINED;
+    msig->onabort = JS_UNDEFINED;
+    JSValue sigobj = js_main_signal_make(ctx, msig);
+    if (JS_IsException(sigobj)) {
+        hl_js_dump_error(js);
+        js_main_signal_free(ctx, msig);
+        JS_FreeValue(ctx, ctxobj);
+        JS_FreeValue(ctx, main_fn);
+        JS_FreeValue(ctx, store);
+        return -1;
+    }
+    JS_SetPropertyStr(ctx, ctxobj, "signal", sigobj);
+    js->main_signal = msig;
+
     /* Call main(ctx): an entry point like any other - its own budget, no
      * request active, and no continuation from earlier to chain to. Each
      * later resume of main's awaits re-arms the budget (async.c), so a
@@ -2751,6 +3039,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
         JS_FreeValue(ctx, store);
+        js_main_signal_free(ctx, msig);
+        js->main_signal = NULL;
         return -1;
     }
 
@@ -2788,6 +3078,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, main_fn);
         JS_FreeValue(ctx, store);
+        js_main_signal_free(ctx, msig);
+        js->main_signal = NULL;
         return -1;
     }
 
@@ -2800,6 +3092,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, main_fn);
             JS_FreeValue(ctx, store);
+            js_main_signal_free(ctx, msig);
+            js->main_signal = NULL;
             return -1;
         }
 
@@ -2837,6 +3131,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, main_fn);
             JS_FreeValue(ctx, store);
+            js_main_signal_free(ctx, msig);
+            js->main_signal = NULL;
             return -1;
         }
 
@@ -2850,6 +3146,22 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
              * callbacks attached above (js_cli_main_settle) call
              * backend->stop when main's promise settles. */
             int srv_rc = hl_async_backend()->run(js->base.async_ctx);
+            int ended = hl_main_signal_ended();
+            if (srv_rc >= 0 && js->cli_main_active && ended) {
+                /* An interrupt ended main (shared/main_signal.h): it is
+                 * still pending, and the exit status is 128 + the signal. */
+                js->cli_main_value = NULL;
+                js->cli_main_active = 0;
+                hl_js_sleep_cancel_pending(js);
+                JS_FreeValue(ctx, settled_slot);
+                JS_FreeValue(ctx, ret);
+                JS_FreeValue(ctx, main_fn);
+                JS_FreeValue(ctx, store);
+                js_main_signal_free(ctx, msig);
+                js->main_signal = NULL;
+                *exit_code_out = 128 + ended;
+                return -1;
+            }
             if (srv_rc < 0 || js->cli_main_active) {
                 fprintf(stderr, "[hull:main] event loop ended before main settled\n");
                 js->cli_main_value = NULL;
@@ -2859,6 +3171,8 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
                 JS_FreeValue(ctx, ret);
                 JS_FreeValue(ctx, main_fn);
                 JS_FreeValue(ctx, store);
+                js_main_signal_free(ctx, msig);
+                js->main_signal = NULL;
                 return -1;
             }
             hl_js_run_jobs(js);  /* drain anything that landed after stop */
@@ -2890,6 +3204,9 @@ static int vt_js_run_main(HlRuntime *rt, KlHttpServer *server,
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, main_fn);
     JS_FreeValue(ctx, store);
+
+    js_main_signal_free(ctx, msig);
+    js->main_signal = NULL;
 
     *exit_code_out = rc;
     return rejected ? -1 : 0;
@@ -2957,6 +3274,7 @@ const HlRuntimeVtable hl_js_vtable = {
     .has_main             = vt_js_has_main,
     .has_server_handlers  = vt_js_has_server_handlers,
     .run_main             = vt_js_run_main,
+    .main_interrupt       = vt_js_main_interrupt,
 #ifdef HL_ENABLE_HTTP_SERVER
     .request_done         = vt_js_request_done,
 #endif

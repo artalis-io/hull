@@ -1685,9 +1685,14 @@ registers.
 4. Extract manifest; run module resolver; sandbox phase 2
 5. Run migrations (HL_ENABLE_DB + ./migrations/ + not --no-migrate)
 6. If app.main is registered, invoke it once on the event-loop thread.
-     ctx = { args, env, stdin, stdout, stderr }
+     ctx = { args, env, stdin, stdout, stderr, signal (JS) /
+             interrupted() + on_interrupt(fn) (Lua) }
      async ops (compute.async / gpu.async / http.fetch / hull.sleep)
      yield via coroutine/Promise. Main awaits naturally.
+     SIGINT / SIGTERM reach the app (shared/main_signal.c, gap 7): delivered
+     on the loop as a run of its own; main then has --interrupt-grace-ms
+     (5 s) to return, else teardown and exit 128 + signal; with nothing
+     registered, teardown and exit at once. See docs/cli_mode.md "Interrupts".
 7. After main returns:
      - non-zero return → exit with that code, skip the serve loop
      - zero/nil return + handlers registered → enter the serve loop
@@ -1938,7 +1943,7 @@ Table-driven dispatcher in `src/hull/commands/dispatch.c`. 25 commands:
 
 ```
 hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | flavor | feature | cache | sign-release | verify-release | help
-Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH, --vm-thread [--vm-thread-grace-ms MS] [--vm-thread-ceiling-ms MS] (serve only; the two limits are downgrade flags)
+Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH, --vm-thread [--vm-thread-grace-ms MS] [--vm-thread-ceiling-ms MS] (serve only; the two limits are downgrade flags), --interrupt-grace-ms MS (how long app.main may go on after SIGINT / SIGTERM; a downgrade flag)
 Every runtime flag also takes the spelling --hull-<name> (--hull-d PATH = -d PATH). In a BUILT binary the flags that weaken
 the process (--no-sandbox, --allow-degraded-sandbox, --no-ca-bundle/--skip-ca-bundle, --ca-bundle, --no-verify-platform,
 --agent, --agent-api, --max-instructions, --max-connections, --read-timeout, --workers, --queue-capacity, --drain-timeout,

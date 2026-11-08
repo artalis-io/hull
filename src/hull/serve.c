@@ -88,6 +88,7 @@
 #include "hull/signature.h"
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
+#include "hull/shared/main_signal.h" /* app.main's interrupt (gap 7) */
 #include "hull/cap/vm_thread.h"     /* --vm-thread */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_watchdog.h"
@@ -279,6 +280,9 @@ static void usage(const char *prog)
             "  --no-verify-platform Skip gethull platform-sig check (v0.1.3+; for\n"
             "                       dev hulls or forks signing with their own key)\n"
             "  --drain-timeout MS   Graceful shutdown drain timeout (default: 5000)\n"
+            "  --interrupt-grace-ms MS  How long app.main may go on after SIGINT /\n"
+            "                       SIGTERM before the process exits 128+signal\n"
+            "                       (default: 5000)\n"
             "  --no-migrate         Skip auto-run migrations on startup\n"
             "  --no-ca-bundle       Skip TLS certificate verification (dev mode)\n"
             "  --ca-bundle PATH     Use custom CA bundle (overrides system + embedded)\n"
@@ -393,6 +397,7 @@ typedef struct {
     char dev_session[65];
     int agent_api_mode;
     int drain_timeout;
+    int interrupt_grace_ms;   /* --interrupt-grace-ms (shared/main_signal.h) */
     int max_connections;
     long max_req_per_ip;      /* --max-requests-per-ip; -1 = not given */
     long max_conn_per_ip;     /* --max-connections-per-ip; -1 = not given */
@@ -434,6 +439,7 @@ typedef struct {
     .gpu_device = -1, \
     .log_level = LOG_INFO, \
     .drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS, \
+    .interrupt_grace_ms = HL_DEFAULT_DRAIN_TIMEOUT_MS, \
     .vm_thread_grace_ms = -1, \
     .vm_thread_ceiling_ms = -1, \
     .max_req_per_ip = -1, \
@@ -544,6 +550,13 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
                 return -1;
             }
             hl_run_watchdog_configure(ms);
+        } else if (strcmp(argv[i], "--interrupt-grace-ms") == 0 && i + 1 < argc) {
+            /* How long app.main may go on after SIGINT / SIGTERM
+             * (shared/main_signal.h). */
+            if (hl_main_signal_parse_ms(argv[++i], &cfg->interrupt_grace_ms) != 0) {
+                fprintf(stderr, "hull: invalid interrupt-grace-ms: %s\n", argv[i]);
+                return -1;
+            }
         } else if (strcmp(argv[i], "--vm-thread") == 0) {
             cfg->vm_thread = 1;
         } else if ((strcmp(argv[i], "--vm-thread-grace-ms") == 0 ||
@@ -3216,10 +3229,15 @@ static int hl_serve_run_main(HlServerState *s)
     const char **env_allow = hl_build_env_allowlist(&s->manifest);
     log_debug("[hull:c] running app.main (%s runtime)", rt->vt->name);
 
+    /* SIGINT / SIGTERM reach the app while main runs (shared/main_signal.h,
+     * gap 7): Keel's own handler is installed only by kl_http_server_run,
+     * after this window. Removed before the serve loop can start. */
+    (void)hl_main_signal_install(rt->async_ctx, rt, s->cfg.interrupt_grace_ms);
     int rc = 1;
     int run = rt->vt->run_main(rt, &s->server,
                                 s->cfg.app_argc, s->cfg.app_args,
                                 env_allow, &rc);
+    hl_main_signal_remove();
     free((void *)env_allow);
 
     s->cli_exit_code = rc;

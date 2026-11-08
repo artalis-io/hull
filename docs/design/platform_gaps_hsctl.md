@@ -178,7 +178,19 @@ parse, `private` and `mode` together refused.
 
 ## 9. Gap 7: `app.main` observes an interrupt
 
-**Today.** No runner installs SIGINT/SIGTERM handlers while main runs: `serve_cli.c` has
+**Status (2026-11-08): built as below**, with two refinements found in the
+implementation. (a) The wake is not EINTR but a self-pipe the handler writes
+and the loop watches, so the signal is delivered on the loop thread whichever
+thread the kernel handed it to (a pool thread takes it as readily as the loop).
+(b) "No handler registered" is decided by the runtime: a JS main that set
+`onabort` or READ `ctx.signal.promise`, a Lua main that called `on_interrupt`
+or `interrupted()` at least once, is registered; nothing else is. A second
+signal before the first could be delivered (main in a synchronous stretch)
+resets the default action and re-raises, so a stuck tool still dies on the
+second Ctrl-C. Covered by `tests/e2e_cli_interrupt.sh`, both runtimes on both
+runners, rather than legs in `e2e_cli_poll.sh` (which needs an HTTP-free build).
+
+**Today (before the change).** No runner installs SIGINT/SIGTERM handlers while main runs: `serve_cli.c` has
 none at all, and `serve.c` runs main (`hl_serve_run_main`) BEFORE `kl_http_server_run`,
 which is where Keel installs its handler. Ctrl-C kills the process with no teardown and no
 stdout flush. Only `cap/tui.c` installs a handler, to restore the terminal.
@@ -343,7 +355,7 @@ of them. hsctl then bumps `HULL_VERSION` in its CI and drops its gap 8 workaroun
 | 4 | enrollment uses `pendingTrust()` + `hostKey()` + `sessionId()`; adoption may stay two-connection or move to the same flow |
 | 5 | `users: ["$HSCTL_LOGIN"]` with `HSCTL_LOGIN` in `env`, default documented |
 | 6 | `hsctl run` writes the remote's bytes straight through; `--json` keeps base64 |
-| 7 | `pair start` traps `ctx.signal` and stops both ranks within the grace |
+| 7 | `pair start` traps `ctx.signal` and stops both ranks within the grace (Hull side built, unreleased as of 2026-11-08) |
 | 8 | CI pin to v0.18.3 |
 | 9 | none until §11 lands: `state/` is pre-created 0755 by the sandbox, so the mode check stays a repair hint (`chmod 700 state`) rather than something the app can satisfy; `@state/` (created 0700) retires it |
 

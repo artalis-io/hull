@@ -199,6 +199,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-db-open-failure
 
+      - name: app.main observes SIGINT / SIGTERM (gap 7)
+        timeout-minutes: 3
+        run: make e2e-cli-interrupt
+
       - name: Test-harness fs + multipart E2E tests
         timeout-minutes: 2
         run: make e2e-test-harness
@@ -1657,6 +1661,11 @@ jobs:
         if: matrix.name == 'pure-compute (no http at all)'
         timeout-minutes: 3
         run: make ${{ matrix.flags }} e2e-cli-poll
+
+      - name: app.main observes SIGINT / SIGTERM on the app.main runner (gap 7)
+        if: matrix.name == 'pure-compute (no http at all)'
+        timeout-minutes: 3
+        run: make ${{ matrix.flags }} e2e-cli-interrupt
 
       # The unit tests in the configurations without HTTP. Nothing ran them
       # before: in pure-compute they did not even build (suites for subsystems
