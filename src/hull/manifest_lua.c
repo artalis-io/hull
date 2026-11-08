@@ -393,15 +393,14 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
         if (!hl_state_dir_name_valid(sname)) {
             log_error("[manifest] state.name must be a directory name: [a-z0-9] "
                       "then up to 63 of [a-z0-9._-], no \"..\"");
-            lua_pop(L, 2);
-            return -1;
+            out->state_invalid = 1;   /* the entry point refuses to start */
+        } else {
+            out->state_name = hl_manifest_strdup(alloc, sname);
         }
-        out->state_name = hl_manifest_strdup(alloc, sname);
         lua_pop(L, 1);
     } else if (!lua_isnil(L, -1)) {
         log_error("[manifest] state must be a table: state = { name = \"...\" }");
-        lua_pop(L, 1);
-        return -1;
+        out->state_invalid = 1;
     }
     lua_pop(L, 1);
 

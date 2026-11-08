@@ -506,12 +506,12 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         if (!ok) {
             log_error("[manifest] state.name must be a directory name: [a-z0-9] "
                       "then up to 63 of [a-z0-9._-], no \"..\"");
-            return -1;
+            out->state_invalid = 1;   /* the entry point refuses to start */
         }
     } else if (!JS_IsUndefined(state_val) && !JS_IsNull(state_val)) {
         JS_FreeValue(ctx, state_val);
         log_error("[manifest] state must be an object: state: { name: \"...\" }");
-        return -1;
+        out->state_invalid = 1;
     } else {
         JS_FreeValue(ctx, state_val);
     }

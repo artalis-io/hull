@@ -400,6 +400,13 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                  * it. An app that declared one and cannot have it does not
                  * start. */
                 ctx->state_dir[0] = '\0';
+                if (m.state_invalid) {
+                    hl_eprintf_line("[app-context] the manifest's `state` is not "
+                                    "usable (see above); refusing to start");
+                    hl_manifest_free(&m);
+                    hl_app_context_free(ctx);
+                    return -1;
+                }
                 if (m.state_name) {
                     if (hl_state_dir_resolve(m.state_name, ctx->state_dir,
                                              sizeof ctx->state_dir) != 0) {

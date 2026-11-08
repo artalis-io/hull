@@ -2457,6 +2457,11 @@ static int hl_serve_wire_caps(HlServerState *s)
      * not start. Registered as a root like the app directory (its .hull is
      * reserved from app code, audit 37 / 42). */
     s->state_dir[0] = '\0';
+    if (s->manifest.state_invalid) {
+        log_error("[hull:c] the manifest's `state` is not usable (see above); "
+                  "refusing to start");
+        return -1;
+    }
     if (s->manifest.state_name) {
         if (hl_state_dir_resolve(s->manifest.state_name, s->state_dir,
                                  sizeof s->state_dir) != 0) {

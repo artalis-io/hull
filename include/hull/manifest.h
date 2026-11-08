@@ -294,6 +294,12 @@ typedef struct HlManifest {
      * (hl_state_dir_name_valid) by the extractor; an invalid one is refused
      * at load. Allocator-owned copy. */
     const char *state_name;
+    /* 1 when the manifest's `state` was present but not usable (not a table,
+     * or a name hl_state_dir_name_valid refuses). The extractors report it
+     * here rather than by failing the extraction, which the app.main runner
+     * takes as "no manifest" and runs on without a policy; every entry point
+     * refuses to start on it. */
+    int         state_invalid;
 
     /* Declared first-party module set.
      *
