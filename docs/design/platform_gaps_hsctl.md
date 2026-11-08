@@ -281,7 +281,17 @@ one pending connection, a command run, the key then accepted into a `file_store`
 
 ## 11. Gap 3: a per-user state directory for `app.main` tools
 
-**Today.** A built binary's app directory is its working directory (`serve_cli.c` ~:443-465,
+**Status (2026-11-09): PR (a) built** - the manifest `state = { name }`, the resolver
+(`shared/state_dir.c`, with `HULL_STATE_DIR` through the same validator as
+`HULL_CACHE_DIR`), the fs policy's second root, the kernel grant and the fs bindings;
+`tests/e2e_state_dir.sh`. Two details fixed in the implementation: `@state/` grants are
+skipped by the sandbox's per-grant walk (the whole state directory is granted instead),
+and `~/.local` / `~/.local/state` are made 0755 (the XDG layout) with only `<name>` 0700.
+PRs (b) (DSN confinement + the `-d`-less default + migrate / agent) and (c) (rootless
+built binaries) are next; gap 9 retires with (a) for a tool that moves its state under
+`@state/`.
+
+**Today (before the change).** A built binary's app directory is its working directory (`serve_cli.c` ~:443-465,
 `serve.c` ~:972-1050, `realpath(".")`), every `fs` grant is relative to it, and
 `hl_sandbox_apply` refuses an app directory that is `/` or `$HOME` or above. So a CLI must
 be run from a dedicated directory, and `cd ~ && hsctl status` is refused outright. The one
@@ -359,13 +369,13 @@ of them. hsctl then bumps `HULL_VERSION` in its CI and drops its gap 8 workaroun
 |-----|--------------|
 | 1 | `remote.describe` prints `e.detail`; the `--via cloudflare` note in its README stays |
 | 2 | `trust.key(true)` writes with `{ private: true }`; the `state/` mode check becomes a one-time repair hint |
-| 3 | manifest `state = { name = "hsctl" }`, grants under `@state/`, `data.db` under it, `hsctl key import` from stdin; README "fleet directory" section goes |
+| 3 | manifest `state = { name = "hsctl" }`, grants under `@state/`, `data.db` under it, `hsctl key import` from stdin; README "fleet directory" section goes (Hull side: the `@state/` root built 2026-11-09, unreleased; the database and the rootless binary follow) |
 | 4 | enrollment uses `pendingTrust()` + `hostKey()` + `sessionId()` + `acceptHost(store)`; adoption may stay two-connection or move to the same flow (Hull side built, unreleased as of 2026-11-08) |
 | 5 | `users: ["$HSCTL_LOGIN"]` with `HSCTL_LOGIN` in `env`, default documented |
 | 6 | `hsctl run` writes the remote's bytes straight through; `--json` keeps base64 |
 | 7 | `pair start` traps `ctx.signal` and stops both ranks within the grace (Hull side built, unreleased as of 2026-11-08) |
 | 8 | CI pin to v0.18.3 |
-| 9 | none until §11 lands: `state/` is pre-created 0755 by the sandbox, so the mode check stays a repair hint (`chmod 700 state`) rather than something the app can satisfy; `@state/` (created 0700) retires it |
+| 9 | none until §11 lands: `state/` is pre-created 0755 by the sandbox, so the mode check stays a repair hint (`chmod 700 state`) rather than something the app can satisfy; `@state/` (created 0700, built 2026-11-09) retires it once hsctl moves its state there |
 
 **Status after v0.18.3 (2026-11-08).** hsctl pinned CI to v0.18.3 and closed gaps 1, 2, 5,
 6 and 8 as above. Gaps 3, 4 and 7 stay open. hsctl reported one new gap, 9, below.

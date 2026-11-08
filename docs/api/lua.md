@@ -104,6 +104,7 @@ route is registered.
 |----------------|---------------------------------------|-------------|
 | `fs.read`      | `string[]`                            | Read grants: a directory, an exact file, or a single-`*` component pattern. See [Filesystem grants](#filesystem-grants). |
 | `fs.write`     | `string[]`                            | Write grants (may create missing parents + the target). Same forms as `fs.read`. |
+| `state`        | `table{ name }`                       | The app's per-user **state directory**, reached through the `@state/` grant root: `$XDG_STATE_HOME/<name>`, else `~/.local/state/<name>` (Windows `%LOCALAPPDATA%\<name>`), made 0700 by Hull before the sandbox applies. `name` is `[a-z0-9]` then up to 63 of `[a-z0-9._-]`. See [Filesystem grants](#filesystem-grants). |
 | `hosts`        | `string[]`                            | Outbound HTTP host allowlist for `http.*` / `ws.connect`. Supports `*.domain.com`. |
 | `http`         | `table{ timeout_ms }`                 | App-wide outbound HTTP timeout: one deadline for the whole request (connect, TLS, send, receive, every redirect hop; a blocking DNS lookup counts but is not interrupted). Default 30000 ms; a per-call `opts.timeout_ms` overrides it; clamped to 10 min for `http.async.*`, 60 s for the sync calls. See [docs/app_api_reference.md](../app_api_reference.md#outbound-http-timeout-hullhttp-client). |
 | `env`          | `string[]`                            | Env var names that `env.get` is permitted to read. Max 32 entries. |
@@ -144,6 +145,25 @@ re-rooted or clamped, never followed out):
 All grant paths are **relative to the app root** and confined to it; an absolute
 path (e.g. `/tmp/x` or `/etc/passwd`) is **rejected** at load - read/write an
 external file by placing it under the app directory (or a bind mount) instead.
+
+**The `@state/` root.** A grant whose first component is exactly `@state`
+(`"@state/keys/"`, `"@state/notes.txt"`, `"@state/"` for the whole directory)
+is the same grammar under a SECOND root: the app's per-user state directory,
+declared with `state = { name = "hsctl" }` and resolved by Hull before the
+sandbox applies - `$XDG_STATE_HOME/<name>`, else `~/.local/state/<name>`
+(Windows `%LOCALAPPDATA%\<name>`; `HULL_STATE_DIR=/abs/path` overrides it, with
+the same refusals as `HULL_CACHE_DIR`: never `/`, the home or above, or inside
+`~/.hull`). Hull makes it 0700 and refuses one it does not own or that others
+can write. A built `app.main` tool keeps its state there wherever it is run
+from, instead of under its working directory. The two roots are separate
+namespaces (`keys/x` and `@state/keys/x` are different files, each needing its
+own grant), `..` after the prefix is refused like anywhere else, the state
+root's `.hull` is reserved like the app's, and every other `@...` first
+component is reserved. A `@state/` grant with no `state.name` fails the
+manifest (`state_dir_missing`). Every capability that selects through the fs
+policy takes `@state/` paths: `fs.*`, blob roots, `compute.stream` output,
+`tar`. (The `-d`-less default database under the state directory and
+"rootless" built binaries are the next steps; see docs/cli_mode.md.)
 
 **Pattern rules (v1):** `*` matches zero or more bytes **within a single path
 component** and never crosses `/`. Only `*` is supported; `?`, `[`, `]`, `{`, `}`,

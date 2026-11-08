@@ -203,6 +203,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-cli-interrupt
 
+      - name: The per-user state directory and the @state/ root (gap 3)
+        timeout-minutes: 3
+        run: make e2e-state-dir
+
       - name: Test-harness fs + multipart E2E tests
         timeout-minutes: 2
         run: make e2e-test-harness
@@ -1666,6 +1670,11 @@ jobs:
         if: matrix.name == 'pure-compute (no http at all)'
         timeout-minutes: 3
         run: make ${{ matrix.flags }} e2e-cli-interrupt
+
+      - name: The @state/ root on the app.main runner (gap 3)
+        if: matrix.name == 'pure-compute (no http at all)'
+        timeout-minutes: 3
+        run: make ${{ matrix.flags }} e2e-state-dir
 
       # The unit tests in the configurations without HTTP. Nothing ran them
       # before: in pure-compute they did not even build (suites for subsystems

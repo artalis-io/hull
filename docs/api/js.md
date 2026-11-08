@@ -84,6 +84,7 @@ route is registered.
 |---------------|--------------------------------------------|-------------|
 | `fs.read`     | `string[]`                                 | Allowed read paths. |
 | `fs.write`    | `string[]`                                 | Allowed write paths. |
+| `state`       | `{ name }`                                 | The app's per-user state directory, reached through the `@state/` grant root (`$XDG_STATE_HOME/<name>`, else `~/.local/state/<name>`; made 0700 by Hull). Same grammar and rules as the Lua side: see [Filesystem grants](lua.md#filesystem-grants). |
 | `hosts`       | `string[]`                                 | Outbound HTTP / WS host allowlist. |
 | `http`        | `{ timeoutMs }`                            | App-wide outbound HTTP timeout: one deadline for the whole request. Default 30000 ms; per-call `opts.timeoutMs` overrides it; clamped to 10 min for `httpClient.async.*`, 60 s for sync calls. See [app_api_reference.md](../app_api_reference.md#outbound-http-timeout-hullhttp-client). |
 | `env`         | `string[]`                                 | Env var allowlist. |

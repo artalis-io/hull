@@ -14,6 +14,7 @@
 
 #include "utest.h"
 #include "hull/cap/fs_policy.h"
+#include "hull/shared/state_dir.h"
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
 #include <errno.h>
@@ -659,6 +660,120 @@ UTEST(fs_policy, hull_dir_grant_is_refused)
     ASSERT_EQ(0, hl_fs_grant_parse("data/.hull/x", 12, &a, &g, &err)); hl_fs_grant_free(&g);
     ASSERT_EQ(0, hl_fs_grant_parse(".hullx", 6, &a, &g, &err));        hl_fs_grant_free(&g);
     ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+}
+
+/* ── the @state/ root (shared/state_dir.h, platform gap 3) ───────────────────── */
+UTEST(fs_policy, state_grant_parses_and_other_at_roots_are_reserved)
+{
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsGrant g = HL_FS_GRANT_INIT; const char *err = NULL;
+    ASSERT_EQ(0, hl_fs_grant_parse("@state/keys/", 12, &a, &g, &err));
+    EXPECT_EQ(1, g.state); EXPECT_EQ((size_t)1, g.n); EXPECT_STREQ("keys", g.comp[0]);
+    EXPECT_EQ(1, g.directory_intent);
+    hl_fs_grant_free(&g);
+    ASSERT_EQ(0, hl_fs_grant_parse("@state/", 7, &a, &g, &err));      /* the state root itself */
+    EXPECT_EQ(1, g.state); EXPECT_EQ((size_t)0, g.n);
+    hl_fs_grant_free(&g);
+    ASSERT_EQ(0, hl_fs_grant_parse("@state", 6, &a, &g, &err));
+    EXPECT_EQ(1, g.state); EXPECT_EQ((size_t)0, g.n);
+    hl_fs_grant_free(&g);
+    const char *bad[] = { "@other/x", "@", "@State/x", "@state/@state/x", "@statex/y",
+                          "@state/.hull/x" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        err = NULL;
+        EXPECT_EQ(-1, hl_fs_grant_parse(bad[i], strlen(bad[i]), &a, &g, &err));
+        EXPECT_STREQ("reserved_path", err);
+    }
+    /* '@' is reserved only as the FIRST component */
+    ASSERT_EQ(0, hl_fs_grant_parse("data/@x", 7, &a, &g, &err)); EXPECT_EQ(0, g.state); hl_fs_grant_free(&g);
+    EXPECT_EQ(1, hl_fs_grant_is_state("@state/keys"));
+    EXPECT_EQ(1, hl_fs_grant_is_state("@state"));
+    EXPECT_EQ(0, hl_fs_grant_is_state("@statex"));
+    EXPECT_EQ(0, hl_fs_grant_is_state("keys/@state"));
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+}
+
+UTEST(fs_policy, state_name_is_a_plain_directory_name)
+{
+    const char *ok[] = { "hsctl", "a", "my-tool.v2", "x_y", "0abc" };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++)
+        EXPECT_EQ(1, hl_state_dir_name_valid(ok[i]));
+    const char *bad[] = { "", ".", "..", "a..b", "-x", "_x", ".x", "Hsctl", "a/b", "a b",
+                          "a\\b", NULL };
+    for (size_t i = 0; bad[i]; i++)
+        EXPECT_EQ(0, hl_state_dir_name_valid(bad[i]));
+    EXPECT_EQ(0, hl_state_dir_name_valid(NULL));
+    char longname[66];
+    memset(longname, 'a', 65); longname[65] = '\0';
+    EXPECT_EQ(0, hl_state_dir_name_valid(longname));   /* 65 > 64 */
+    longname[64] = '\0';
+    EXPECT_EQ(1, hl_state_dir_name_valid(longname));
+}
+
+UTEST(fs_policy, state_grant_without_a_state_dir_fails_to_compile)
+{
+    setup(); build_tree();
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *wr[] = { "@state/keys/" };
+    ASSERT_EQ(-1, hl_fs_policy_compile_manifest(base, &a, NULL, 0, wr, 1, &p, &err));
+    EXPECT_STREQ("state_dir_missing", err);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    teardown();
+}
+
+UTEST(fs_policy, state_root_is_a_second_namespace)
+{
+    setup(); build_tree();
+    char state[300];
+    snprintf(state, sizeof state, "%s_state", base);
+    mkdir(state, 0700);
+    { char p[512]; snprintf(p, sizeof p, "%s/keys", state); mkdir(p, 0700);
+      snprintf(p, sizeof p, "%s/keys/trust.key", state);
+      FILE *f = fopen(p, "wb"); if (f) { fputs("k", f); fclose(f); }
+      snprintf(p, sizeof p, "%s/.hull", state); mkdir(p, 0700); }
+    HlAllocator a; hl_alloc_init(&a, 0);
+    HlFsPolicy p = HL_FS_POLICY_INIT; const char *err = NULL;
+    const char *rd[] = { "@state/", "data" };
+    const char *wr[] = { "@state/keys/", "@state/notes.txt" };
+    ASSERT_EQ(0, hl_fs_policy_compile_manifest_ex(base, state, &a, rd, 2, wr, 2, &p, &err));
+    ASSERT_TRUE(p.state_fd >= 0);
+    ASSERT_EQ((size_t)2, p.read_n); ASSERT_EQ((size_t)2, p.write_n);
+
+    char sc[256];
+    /* a state path selects a state entry, anchored under the state dir */
+    HlFsSelection s = hl_fs_policy_select(&p, "@state/keys/trust.key", HL_FS_OPEN_WRITE, sc, sizeof sc);
+    ASSERT_TRUE(s.entry != NULL); EXPECT_EQ(1, s.entry->state); EXPECT_STREQ("trust.key", s.residual);
+    s = hl_fs_policy_select(&p, "@state/keys/trust.key", HL_FS_OPEN_READ, sc, sizeof sc);
+    ASSERT_TRUE(s.entry != NULL); EXPECT_EQ(1, s.entry->state);
+    s = hl_fs_policy_select(&p, "@state/notes.txt", HL_FS_OPEN_WRITE, sc, sizeof sc);
+    ASSERT_TRUE(s.entry != NULL); EXPECT_EQ((int)HL_FS_ENTRY_CREATE, (int)s.entry->kind);
+    /* the SAME relative path under the app root is another namespace: no grant */
+    s = hl_fs_policy_select(&p, "keys/trust.key", HL_FS_OPEN_WRITE, sc, sizeof sc);
+    EXPECT_TRUE(s.entry == NULL); EXPECT_STREQ("permission", s.err);
+    /* and an app grant does not reach into the state root */
+    s = hl_fs_policy_select(&p, "@state/data/a.csv", HL_FS_OPEN_READ, sc, sizeof sc);
+    EXPECT_TRUE(s.entry != NULL); EXPECT_EQ(1, s.entry->state);   /* the "@state/" read root governs */
+    s = hl_fs_policy_select(&p, "data/a.csv", HL_FS_OPEN_READ, sc, sizeof sc);
+    ASSERT_TRUE(s.entry != NULL); EXPECT_EQ(0, s.entry->state);
+    /* reserved and lexical refusals hold on the state side too */
+    s = hl_fs_policy_select(&p, "@state/.hull/x", HL_FS_OPEN_READ, sc, sizeof sc);
+    EXPECT_TRUE(s.entry == NULL); EXPECT_STREQ("reserved_path", s.err);
+    s = hl_fs_policy_select(&p, "@state/../x", HL_FS_OPEN_READ, sc, sizeof sc);
+    EXPECT_TRUE(s.entry == NULL); EXPECT_STREQ("invalid_path", s.err);
+    s = hl_fs_policy_select(&p, "@other/x", HL_FS_OPEN_READ, sc, sizeof sc);
+    EXPECT_TRUE(s.entry == NULL); EXPECT_STREQ("reserved_path", s.err);
+    /* the state root lists and stats */
+    HlFsListSelection l = hl_fs_policy_select_list(&p, "@state", sc, sizeof sc);
+    ASSERT_TRUE(l.entry != NULL); EXPECT_EQ(1, l.entry->state); EXPECT_STREQ(".", l.residual);
+    s = hl_fs_policy_select_stat(&p, "@state/keys", sc, sizeof sc);
+    ASSERT_TRUE(s.entry != NULL); EXPECT_EQ(1, s.entry->state);
+
+    hl_fs_policy_free(&p);
+    EXPECT_EQ(-1, p.state_fd);
+    ASSERT_EQ((size_t)0, hl_alloc_used(&a));
+    { char cmd[700]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", state); (void)system(cmd); }
+    teardown();
 }
 
 UTEST(fs_policy, hull_dir_caller_paths_are_refused)

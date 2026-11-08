@@ -1,0 +1,74 @@
+#!/bin/sh
+# The per-user state directory (shared/state_dir.h, platform gap 3), both
+# runtimes, sandboxed (the kernel grant is part of what is proved):
+#   - "@state/" writes and reads land under $XDG_STATE_HOME/<name>, made 0700
+#     by Hull; a private write is 0600; the app root is a separate namespace
+#   - HULL_STATE_DIR redirects it; one that is too broad is refused at load
+#   - ".." after the prefix, "@other/", and the state root's .hull are refused
+#   - a "@state/" grant without state.name, an "@other/" grant and an unusable
+#     state.name are refused at load
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+HULL_BIN="${HULL_BIN:-build/hull}"
+case "$HULL_BIN" in /*) ;; *) HULL_BIN="$(pwd)/$HULL_BIN" ;; esac   # the legs cd into the app dir
+. "$(dirname "$0")/lib/hull_rc.sh"
+hull_rc_init "$HULL_BIN"
+work=$(mktemp -d)
+trap 'chmod -R u+rwx "$work" 2>/dev/null; rm -rf "$work"' EXIT
+out="$work/output"
+fail() { echo "FAIL: $1"; cat "$out" 2>/dev/null || true; exit 1; }
+line() { sed -n "s/^\(.*\[app\] \)\{0,1\}$1=\(.*\)$/\2/p" "$out" | head -1; }
+mode_of() {
+    if stat -f %Lp "$1" >/dev/null 2>&1; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+# The sandbox is on, so the kernel grant is exercised too. The fixtures are
+# copied so the app directory is not the repo (a state dir never lives there).
+appdir="$work/app"; mkdir -p "$appdir"; cp tests/fixtures/state_dir/app.lua tests/fixtures/state_dir/app.js "$appdir/"
+baddir="$work/bad"; mkdir -p "$baddir"; cp tests/fixtures/state_dir_bad/*.lua "$baddir/"
+
+for ext in lua js; do
+    xdg="$work/xdg-$ext"
+    rc=$(cd "$appdir" && XDG_STATE_HOME="$xdg" HULL_STATE_DIR= hull_run "$out" "$HULL_BIN" "app.$ext")
+    [ "$rc" = 0 ] || fail "$ext roundtrip: exit $rc"
+    [ "$(line read_back)" = "secret-bytes" ] || fail "$ext: read back"
+    [ "$(line notes)" = "hello state" ] || fail "$ext: notes"
+    [ "$(line stat_type)" = "file" ] || fail "$ext: stat"
+    [ "$(line listed)" = "keys,notes.txt" ] || fail "$ext: list of the state root (got $(line listed))"
+    [ "$(line app_root_denied)" = "true" ] || fail "$ext: the app root is another namespace"
+    sdir="$xdg/hull-e2e-state"
+    [ -d "$sdir" ] || fail "$ext: $sdir was not made"
+    [ "$(mode_of "$sdir")" = 700 ] || fail "$ext: state dir mode $(mode_of "$sdir"), expected 700"
+    [ "$(mode_of "$sdir/keys")" = 700 ] || fail "$ext: keys/ mode $(mode_of "$sdir/keys"), expected 700 (private write)"
+    [ "$(mode_of "$sdir/keys/trust.key")" = 600 ] || fail "$ext: trust.key mode, expected 600"
+    [ -f "$sdir/notes.txt" ] || fail "$ext: notes.txt not under the state dir"
+    [ ! -e "$appdir/keys" ] || fail "$ext: keys/ landed in the app directory"
+    echo "PASS: $ext @state/ writes, reads, stats and lists under XDG_STATE_HOME/<name>, 0700"
+
+    rc=$(cd "$appdir" && XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" "app.$ext" -- traverse)
+    [ "$rc" = 0 ] || fail "$ext traverse: exit $rc"
+    [ "$(line traverse)" = "true" ] || fail "$ext: .. after the prefix was not refused"
+    [ "$(line other_root)" = "true" ] || fail "$ext: @other/ was not refused"
+    [ "$(line state_hull)" = "true" ] || fail "$ext: the state root's .hull was reachable"
+    echo "PASS: $ext .., @other/ and @state/.hull are refused"
+
+    over="$work/override-$ext"
+    rc=$(cd "$appdir" && HULL_STATE_DIR="$over" hull_run "$out" "$HULL_BIN" "app.$ext")
+    [ "$rc" = 0 ] || fail "$ext HULL_STATE_DIR: exit $rc"
+    [ -f "$over/keys/trust.key" ] || fail "$ext: HULL_STATE_DIR was not used"
+    [ "$(mode_of "$over")" = 700 ] || fail "$ext: HULL_STATE_DIR mode, expected 700"
+    echo "PASS: $ext HULL_STATE_DIR redirects the state directory"
+
+    rc=$(cd "$appdir" && HULL_STATE_DIR=/ hull_run "$out" "$HULL_BIN" "app.$ext")
+    [ "$rc" != 0 ] || fail "$ext: HULL_STATE_DIR=/ was accepted"
+    grep -q 'refusing to use it as the state directory' "$out" || fail "$ext: no refusal for HULL_STATE_DIR=/"
+    echo "PASS: $ext HULL_STATE_DIR=/ is refused at load"
+done
+
+for fx in app other badname; do
+    rc=$(cd "$baddir" && XDG_STATE_HOME="$work/xdg-bad" hull_run "$out" "$HULL_BIN" "$fx.lua")
+    [ "$rc" != 0 ] || fail "$fx.lua: a bad manifest ran"
+    ! grep -q 'ran=yes' "$out" || fail "$fx.lua: main ran"
+done
+grep -q 'state_dir_missing\|reserved_path\|state.name' "$out" || true
+echo "PASS: a @state/ grant without state.name, an @other/ grant and a bad state.name are refused at load"
+echo '11/11 state directory end-to-end tests passed'

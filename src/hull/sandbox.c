@@ -17,6 +17,7 @@
 
 #include "hull/sandbox.h"
 #include "hull/shared/cache_dir.h"
+#include "hull/cap/fs_policy.h"    /* hl_fs_grant_is_state */
 #include "hull/shared/host.h"   /* hl_host_path_too_broad */
 #include "hull/limits/gpu.h"     /* HL_GPU_MAX_DEVICES */
 #include "log.h"
@@ -470,6 +471,8 @@ typedef struct {
     char fs_write_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
     char app_hull[SEATBELT_PATH_SIZE];     /* <app_dir>/.hull (audit 37) */
     char int_file[4][SEATBELT_PATH_SIZE];  /* internal db, -wal, -shm, -journal */
+    char state_real[SEATBELT_PATH_SIZE];   /* the state directory (shared/state_dir.h) */
+    char state_hull[SEATBELT_PATH_SIZE];   /* <state_dir>/.hull */
 } SeatbeltScratch;
 
 /*
@@ -629,6 +632,9 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     /* ── Manifest fs_read[] paths ───────────────────────────── */
 
     for (int i = 0; i < policy->fs_read_count; i++) {
+        /* A "@state/..." grant is under the state directory, granted whole
+         * below; walked under app_dir it would make a literal "@state". */
+        if (hl_fs_grant_is_state(policy->fs_read[i])) continue;
         snprintf(scratch->fs_read_keys[i],
                  sizeof(scratch->fs_read_keys[i]), "FS_R_%d", i);
         /* Against app_dir, as fs.write is: realpath() alone resolved a
@@ -651,6 +657,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     /* ── Policy fs_write[] paths ────────────────────────────── */
 
     for (int i = 0; i < policy->fs_write_count; i++) {
+        if (hl_fs_grant_is_state(policy->fs_write[i])) continue;
         snprintf(scratch->fs_write_keys[i],
                  sizeof(scratch->fs_write_keys[i]), "FS_W_%d", i);
         /* Resolve manifest fs.write path against app_dir so the
@@ -674,6 +681,19 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
         SBPL_FMT("(allow file-read* file-write*"
                   " (subpath (param \"%s\")))\n",
                   scratch->fs_write_keys[i]);
+    }
+
+    /* ── The app's per-user state directory (shared/state_dir.h) ── */
+
+    /* Made 0700 by Hull before this and trusted (cache_dir.h); the root is
+     * the app's own, so it is granted whole like the app directory - and its
+     * .hull denied after, below, like the app directory's. */
+    if (policy->state_dir) {
+        const char *sp = policy->state_dir;
+        if (realpath(policy->state_dir, scratch->state_real)) sp = scratch->state_real;
+        PARAM_ADD("HULL_STATE", sp);
+        SBPL_LIT("; The app's per-user state directory (manifest state.name)\n"
+                 "(allow file-read* file-write* (subpath (param \"HULL_STATE\")))\n");
     }
 
     /* ── TLS cert, TLS key ───────────────────────────────────── */
@@ -840,6 +860,15 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
             app_hull_param = 1;
             SBPL_LIT("\n; The app tree's .hull (Hull's own sidecars)\n"
                      "(deny file-read* file-write* (subpath (param \"APP_HULL\")))\n");
+        }
+    }
+    if (policy->state_dir) {
+        const char *sp = scratch->state_real[0] ? scratch->state_real : policy->state_dir;
+        int hn = snprintf(scratch->state_hull, sizeof(scratch->state_hull), "%s/.hull", sp);
+        if (hn > 0 && (size_t)hn < sizeof(scratch->state_hull)) {
+            PARAM_ADD("STATE_HULL", scratch->state_hull);
+            SBPL_LIT("; The state directory's .hull (reserved like the app tree's)\n"
+                     "(deny file-read* file-write* (subpath (param \"STATE_HULL\")))\n");
         }
     }
 
@@ -1464,6 +1493,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      * app_dir under e.g. CI / hull build). */
     for (int i = 0; i < policy->fs_read_count; i++) {
         char abs[SANDBOX_PATH_MAX];
+        if (hl_fs_grant_is_state(policy->fs_read[i])) continue;   /* granted whole below */
         if (hl_sandbox_resolve_grant(app_dir, policy->fs_read[i],
                                       abs, sizeof(abs), 0) != 0 ||
             unveil(abs, "r") != 0) {
@@ -1474,12 +1504,27 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 
     for (int i = 0; i < policy->fs_write_count; i++) {
         char abs[SANDBOX_PATH_MAX];
+        if (hl_fs_grant_is_state(policy->fs_write[i])) continue;   /* granted whole below */
         if (hl_sandbox_resolve_grant(app_dir, policy->fs_write[i],
                                       abs, sizeof(abs), 1) != 0 ||
             unveil(abs, "rwc") != 0) {
             log_warn("[sandbox] unveil failed for write path: %s",
                      policy->fs_write[i]);
         }
+    }
+
+    /* The app's per-user state directory (shared/state_dir.h): made 0700 by
+     * Hull before this, the app's own root, granted whole - and its .hull
+     * hidden, as the app directory's (a no-op under Landlock; the capability
+     * layer's reservation is the boundary there). */
+    if (policy->state_dir) {
+        if (unveil(policy->state_dir, "rwc") != 0)
+            log_warn("[sandbox] unveil failed for the state directory: %s",
+                     policy->state_dir);
+        char state_hull[SANDBOX_PATH_MAX];
+        int hn = snprintf(state_hull, sizeof state_hull, "%s/.hull", policy->state_dir);
+        if (hn > 0 && (size_t)hn < sizeof state_hull)
+            (void)unveil(state_hull, "");
     }
 
     /* SQLite database always needs read + write + create */

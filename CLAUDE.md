@@ -2407,6 +2407,27 @@ treats a malformed `platform.public_key`, or a `composed` / `composed.platform_d
 present but not an object, as an error rather than a reason to skip the check (audit 15), and
 a dev-mode static file's ETag 304 is answered only after the disk gate passed it.
 
+**The `@state/` root (platform gap 3, `shared/state_dir.c`, PR 1 of 3).** A manifest
+`state = { name = "x" }` (JS `state: { name }`) gives the app a per-user state directory -
+`$XDG_STATE_HOME/<name>`, else `<home>/.local/state/<name>`, Windows `%LOCALAPPDATA%\<name>`,
+`HULL_STATE_DIR` overriding - that every entry point (serve.c, app_context.c for the app.main
+runner / `hull test` / `hull agent`) resolves with `hl_state_dir_resolve` after the manifest is
+extracted and BEFORE the fs policy compiles and the sandbox applies: made 0700 (mkdir -p),
+refused when it is `/`, the home or above, `~/.hull` or inside it, or not trusted
+(`hl_hull_dir_trusted`, the caches' rule - one validator, `hl_hull_private_dir_prepare`, serves
+HULL_CACHE_DIR and HULL_STATE_DIR). The fs policy has a SECOND root (`HlFsPolicy.state_fd`,
+`HlFsGrant.state` / `HlFsAuthEntry.state`): a grant or caller path whose first component is
+exactly `@state` selects among state entries, dropped from the components; any other `@...`
+first component is `reserved_path`; a `@state/` grant with no state directory is
+`state_dir_missing`. The state root is registered with `hl_fs_reserve_root` (its `.hull` is
+reserved too). The kernel sandbox takes `HlSandboxPolicy.state_dir`: Seatbelt `subpath`
+read-write + a `.hull` deny after, unveil `rwc` + `.hull` hidden; `@state/` grants are skipped
+by the per-grant walk under the app directory (`hl_fs_grant_is_state`). `HlFsConfig.state_dir`
+serves blob roots. A new cap that builds an absolute path from a grant must branch on
+`hl_fs_grant_is_state` the same way; one that selects through the policy gets `@state/` for
+free. Covered by `tests/e2e_state_dir.sh` (`make e2e-state-dir`, both runtimes, sandboxed) and
+`test_fs_policy`. docs/cli_mode.md "A per-user state directory".
+
 **The app directory may not be `/`, or `$HOME` or above.** A built binary takes its app
 directory from its working directory; `hl_sandbox_apply` refuses `/` (that unveiled the whole
 filesystem) and the user's home or any ancestor of it (every file the user owns) - run it from

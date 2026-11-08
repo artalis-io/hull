@@ -35,13 +35,30 @@ static int resolve_root(const HlFsConfig *fs_cfg, const char *dir,
                         char *out, size_t out_cap)
 {
     if (!fs_cfg || !fs_cfg->base_dir || !dir) return -1;
-    size_t base_len = fs_cfg->base_len;
+    const char *base = fs_cfg->base_dir;
+    size_t base_len  = fs_cfg->base_len;
+    /* "@state/..." is under the app's state directory (shared/state_dir.h),
+     * the second fs root; the policy select below authorizes it like any
+     * other grant. */
+    if (hl_fs_grant_is_state(dir)) {
+        if (!fs_cfg->state_dir) return -1;
+        base = fs_cfg->state_dir;
+        base_len = fs_cfg->state_len;
+        while (*dir == '/') dir++;
+        dir += strcspn(dir, "/");            /* past "@state" */
+        while (*dir == '/') dir++;
+        if (*dir == '\0') {                  /* the state root itself */
+            if (base_len + 1 > out_cap) return -1;
+            memcpy(out, base, base_len + 1);
+            return 0;
+        }
+    }
     size_t dir_len  = strlen(dir);
     while (dir_len > 0 && dir[dir_len - 1] == '/') dir_len--;
     if (dir_len == 0) return -1;
 
     if (base_len + 1 + dir_len + 1 > out_cap) return -1;
-    memcpy(out, fs_cfg->base_dir, base_len);
+    memcpy(out, base, base_len);
     out[base_len] = '/';
     memcpy(out + base_len + 1, dir, dir_len);
     out[base_len + 1 + dir_len] = '\0';

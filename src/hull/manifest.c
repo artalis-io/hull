@@ -80,6 +80,7 @@ void hl_manifest_free(HlManifest *m)
     for (int i = 0; i < m->hosts_count; i++)
         hl_manifest_str_free(a, &m->hosts[i]);
     hl_manifest_str_free(a, &m->csp);
+    hl_manifest_str_free(a, &m->state_name);
     for (int i = 0; i < m->cors_origin_count; i++)
         hl_manifest_str_free(a, &m->cors_origins[i]);
     hl_manifest_str_free(a, &m->cors_methods);
@@ -174,6 +175,7 @@ static int manifest_seal_impl(HlManifest *dst, const HlManifest *src, SealCtx *a
     for (int i = 0; i < src->hosts_count; i++)
         if (seal_str(arena, &dst->hosts[i], src->hosts[i]) != 0) goto fail;
     if (seal_str(arena, &dst->csp, src->csp) != 0) goto fail;
+    if (seal_str(arena, &dst->state_name, src->state_name) != 0) goto fail;
     for (int i = 0; i < src->cors_origin_count; i++)
         if (seal_str(arena, &dst->cors_origins[i], src->cors_origins[i]) != 0)
             goto fail;

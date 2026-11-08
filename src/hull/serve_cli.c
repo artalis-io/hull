@@ -866,6 +866,9 @@ int hull_serve(int argc, char **argv)
         sandbox_policy.internal_db_path =
             hl_db_internal_sandbox_path(rt->db_registry);
 #endif
+        /* The per-user state directory (shared/state_dir.h), resolved by the
+         * app context with the fs policy. */
+        sandbox_policy.state_dir = hl_app_context_state_dir(ctx);
 
         /* The file the DSN names, never the DSN: a network one carries its
          * password into unveil and the sandbox's log lines (audit 10). */

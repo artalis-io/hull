@@ -45,6 +45,12 @@ typedef struct HlFsConfig {
     const char        *base_dir;   /**< Absolute path of the app's root directory. */
     size_t             base_len;   /**< `strlen(base_dir)` cached for hot-path prefix checks. */
     const HlFsPolicy  *policy;     /**< Compiled read/write authorization policy (may be NULL). */
+    /** The app's per-user STATE directory (shared/state_dir.h), the second
+     *  root a "@state/..." path is under, or NULL when none is declared. The
+     *  policy's state entries anchor there; this copy serves the consumers
+     *  that build an absolute path (blob roots). */
+    const char        *state_dir;
+    size_t             state_len;
 } HlFsConfig;
 
 /**

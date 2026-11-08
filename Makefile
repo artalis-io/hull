@@ -1104,6 +1104,11 @@ CAP_OBJS += $(ERRNO_NAME_OBJ)
 # the async backend vtable only; rides CAP_OBJS like host.
 MAIN_SIGNAL_OBJ := $(BUILDDIR)/main_signal.o
 CAP_OBJS += $(MAIN_SIGNAL_OBJ)
+# state_dir resolves the per-user state directory an app.main tool declares
+# (shared/state_dir.h, platform gap 3). libc + cache_dir's trust rule; rides
+# CAP_OBJS like host.
+STATE_DIR_OBJ := $(BUILDDIR)/state_dir.o
+CAP_OBJS += $(STATE_DIR_OBJ)
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness - depends on KlRouter
 # and the rest of Keel's request/response machinery. Server-only.
@@ -3301,6 +3306,9 @@ $(ERRNO_NAME_OBJ): $(SRCDIR)/hull/shared/errno_name.c $(INCDIR)/hull/shared/errn
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(MAIN_SIGNAL_OBJ): $(SRCDIR)/hull/shared/main_signal.c $(INCDIR)/hull/shared/main_signal.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(STATE_DIR_OBJ): $(SRCDIR)/hull/shared/state_dir.c $(INCDIR)/hull/shared/state_dir.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)

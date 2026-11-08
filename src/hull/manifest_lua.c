@@ -8,6 +8,7 @@
  */
 
 #include "hull/manifest.h"
+#include "hull/shared/state_dir.h"   /* hl_state_dir_name_valid */
 #include "hull/utils/alloc.h"
 #include "manifest_internal.h"
 #include "log.h"
@@ -379,6 +380,29 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     /* tui = true */
     lua_getfield(L, manifest_idx, "tui");
     out->tui = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+
+    /* state = { name = "hsctl" }: the per-user state directory
+     * (shared/state_dir.h). A name Hull does not take fails the extraction:
+     * the "@state/" grants that depend on it would otherwise fail later with
+     * a less specific message. */
+    lua_getfield(L, manifest_idx, "state");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "name");
+        const char *sname = lua_isstring(L, -1) ? mstr(L, -1) : NULL;
+        if (!hl_state_dir_name_valid(sname)) {
+            log_error("[manifest] state.name must be a directory name: [a-z0-9] "
+                      "then up to 63 of [a-z0-9._-], no \"..\"");
+            lua_pop(L, 2);
+            return -1;
+        }
+        out->state_name = hl_manifest_strdup(alloc, sname);
+        lua_pop(L, 1);
+    } else if (!lua_isnil(L, -1)) {
+        log_error("[manifest] state must be a table: state = { name = \"...\" }");
+        lua_pop(L, 1);
+        return -1;
+    }
     lua_pop(L, 1);
 
     /* modules = { crypto = "1", fs = "1", ["hull/http"] = "1" }
