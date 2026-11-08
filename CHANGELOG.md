@@ -8,6 +8,8 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-11-08
+
 ### Added (hsctl platform gaps: ssh login from env)
 
 - **`ssh.connect.users` entries may be `"$VAR"` / `"${VAR}"` env references, like `hosts`.**
