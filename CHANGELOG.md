@@ -24,6 +24,16 @@ release-artifact layout).
   (`state_dir_missing`). `fs.*`, blob roots, `compute.stream` output and `tar` take `@state/`
   paths. docs/api/lua.md "Filesystem grants", docs/cli_mode.md "A per-user state directory";
   `tests/e2e_state_dir.sh` (both runtimes, sandboxed) + `test_fs_policy`.
+- **The state directory holds the database too** (gap 3, PR 2 of 3). A `databases.named` /
+  `databases.internal` file DSN, and `db.open`'s, may be `"@state/<file>"`, confined to the
+  state directory as an app-relative one is to the app directory; and `databases.named.default
+  = "@state/data.db"` names the app's DEFAULT database when no `-d` is given: the implicit
+  default (`:memory:` for a built CLI, `<app_dir>/data.db` under `hull app.lua`, whose file is
+  removed again) is replaced once the manifest is read, the migrations run on the named one,
+  and its internal database is `<state>/.hull/internal.db`. `hull migrate` and `hull agent db`
+  with no `-d` open the same file. An operator's `-d` still wins; `hull test` keeps `:memory:`.
+  `hl_cap_fs_root_for` is now the one place the `@state` prefix is stripped for a consumer that
+  builds an absolute path. e2e legs in `tests/e2e_state_dir.sh`; `test_db_registry`.
 - **`hull/ssh`: one transport, one host key** (platform gap 4, `docs/design/platform_gaps_hsctl.md`
   §10). `ssh.pending_trust()` (JS `pendingTrust()`) is a single-use trust: the first host key
   the server presents is the key that connection is held to (a rekey is pinned as always), a

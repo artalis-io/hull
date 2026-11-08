@@ -35,23 +35,16 @@ static int resolve_root(const HlFsConfig *fs_cfg, const char *dir,
                         char *out, size_t out_cap)
 {
     if (!fs_cfg || !fs_cfg->base_dir || !dir) return -1;
-    const char *base = fs_cfg->base_dir;
-    size_t base_len  = fs_cfg->base_len;
-    /* "@state/..." is under the app's state directory (shared/state_dir.h),
-     * the second fs root; the policy select below authorizes it like any
-     * other grant. */
-    if (hl_fs_grant_is_state(dir)) {
-        if (!fs_cfg->state_dir) return -1;
-        base = fs_cfg->state_dir;
-        base_len = fs_cfg->state_len;
-        while (*dir == '/') dir++;
-        dir += strcspn(dir, "/");            /* past "@state" */
-        while (*dir == '/') dir++;
-        if (*dir == '\0') {                  /* the state root itself */
-            if (base_len + 1 > out_cap) return -1;
-            memcpy(out, base, base_len + 1);
-            return 0;
-        }
+    /* The root the directory is under ("@state/..." is the app's state
+     * directory, shared/state_dir.h; the policy select below authorizes it
+     * like any other grant), and the path below it. */
+    const char *base = NULL, *rerr = NULL;
+    size_t base_len = 0;
+    if (hl_cap_fs_root_for(fs_cfg, dir, &base, &base_len, &dir, &rerr) != 0) return -1;
+    if (*dir == '\0') {                      /* the state root itself */
+        if (base_len + 1 > out_cap) return -1;
+        memcpy(out, base, base_len + 1);
+        return 0;
     }
     size_t dir_len  = strlen(dir);
     while (dir_len > 0 && dir[dir_len - 1] == '/') dir_len--;

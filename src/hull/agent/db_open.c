@@ -23,6 +23,7 @@
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_wrap/_unwrap */
 #include "hull/cap/db_live_files.h"
 #include "hull/migrate.h"
+#include "hull/sandbox.h"       /* hl_sandbox_db_path */
 #include "hull/shared/host.h"
 #include "hull/shared/fs_util.h"   /* hl_default_db_path_check */
 #include <sqlite3.h>
@@ -69,6 +70,27 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
             return NULL;
         if (access(default_path, F_OK) == 0)
             db_path = default_path;
+    }
+    /* No implicit data.db: an app whose manifest names its default database
+     * (databases.named.default - a "@state/" database, gap 3) is read there,
+     * as `hull migrate` reads it. The app is loaded (no migrations run) for
+     * the confined DSN - only now, so an app with its data.db in place, or
+     * none and no such manifest, is read as before, without running its top
+     * level. A file one is opened read-only below. */
+    if (!db_path) {
+        HlAppContextOpts opts = {
+            .app_dir = app_dir, .no_migrate = 1, .gate_modules = 1, .manifest_default_db = 1,
+        };
+        HlAppContext *actx = NULL;
+        if (hl_app_context_init(&actx, &opts) == 0) {
+            const char *d = hl_app_context_default_db_path(actx);
+            const char *f = d ? hl_sandbox_db_path(d) : NULL;
+            if (f && strcmp(f, ":memory:") != 0 &&
+                snprintf(default_path, sizeof default_path, "%s", f) < (int)sizeof default_path &&
+                access(default_path, F_OK) == 0)
+                db_path = default_path;
+            hl_app_context_free(actx);
+        }
     }
 
     if (db_path) {

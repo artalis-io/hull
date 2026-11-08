@@ -73,6 +73,22 @@ typedef struct HlFsConfig {
  * @note Every mutating function (`_read` / `_write` / `_delete` / `_mmap`)
  *       calls this first. Direct callers from C should too.
  */
+/**
+ * @brief Which root an app path is under, and the path below it.
+ *
+ * A path whose first component is exactly "@state" is under the app's
+ * per-user state directory (shared/state_dir.h); every other path is under
+ * the app directory. *root / *root_len name the directory, *rest the path
+ * below it with the "@state" component and its separators dropped ("" for
+ * the state root itself). -1 with *err "no_state_dir" when the path names
+ * the state root and the config has none. The ONE place the prefix is
+ * stripped for a consumer that builds an absolute path (hl_cap_fs_validate,
+ * blob roots, db.open); the policy selectors strip it themselves.
+ */
+int hl_cap_fs_root_for(const HlFsConfig *cfg, const char *path,
+                       const char **root, size_t *root_len,
+                       const char **rest, const char **err);
+
 int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
                        const char **err_msg);
 

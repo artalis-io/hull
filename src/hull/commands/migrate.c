@@ -272,8 +272,31 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
 
     /* The app's database, as `hull agent migrate` / `agent db` open it: the
      * default was "data.db" in the WORKING directory, so `hull migrate
-     * myapp` migrated (or created) ./data.db rather than myapp/data.db. */
+     * myapp` migrated (or created) ./data.db rather than myapp/data.db. An
+     * app whose manifest names its default (databases.named.default - a
+     * "@state/" database, gap 3) is migrated there: the app is loaded to read
+     * it, as the internal-table move loads it. */
     char default_db[4096];
+    if (!db_path && has_entry(app_dir ? app_dir : ".")) {
+        HlAppContextOpts opts = {
+            .app_dir = app_dir ? app_dir : ".",
+            .no_migrate = 1,
+            .gate_modules = 1,
+            .manifest_default_db = 1,
+            .keep_internal_in_app_db = keep_internal,
+        };
+        HlAppContext *ctx = NULL;
+        if (hl_app_context_init(&ctx, &opts) != 0) {
+            fprintf(stderr, "hull migrate: cannot load the app to read its manifest\n");
+            return 1;
+        }
+        const char *d = hl_app_context_default_db_path(ctx);
+        if (d) {
+            int n = snprintf(default_db, sizeof default_db, "%s", d);
+            if (n > 0 && (size_t)n < sizeof default_db) db_path = default_db;
+        }
+        hl_app_context_free(ctx);
+    }
     if (!db_path) {
         int n = snprintf(default_db, sizeof default_db, "%s/data.db",
                          app_dir ? app_dir : ".");

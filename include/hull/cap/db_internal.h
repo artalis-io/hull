@@ -61,6 +61,15 @@ int hl_db_internal_default_dsn(const char *app_dir_real,
                                const char *default_dsn,
                                char *out, size_t outsz,
                                size_t *base_len, int *in_app_hull);
+/* The same with the app's state directory (shared/state_dir.h; canonical,
+ * or NULL): a default database under it gets <state>/.hull/internal.db -
+ * the state root reserves .hull as the app root does - with base_len that
+ * directory's and *in_app_hull 1 (its .hull is made the same way). */
+int hl_db_internal_default_dsn_ex(const char *app_dir_real,
+                                  const char *state_dir_real,
+                                  const char *default_dsn,
+                                  char *out, size_t outsz,
+                                  size_t *base_len, int *in_app_hull);
 
 /* The `_hull_*` tables the stdlib keeps on the internal connection, in an
  * order where a referenced table comes before its referrers (NULL ends it).
@@ -125,6 +134,10 @@ int hl_db_internal_check_unmoved(HlDbRegistry *reg, int keep);
  * -1 when the path does not fit. */
 int hl_db_internal_configure(HlDbRegistry *reg, const char *app_dir,
                              const char *default_dsn, int keep);
+/* The same, given the app's state directory too (NULL = none). */
+int hl_db_internal_configure_ex(HlDbRegistry *reg, const char *app_dir,
+                                const char *state_dir,
+                                const char *default_dsn, int keep);
 
 /* The file the kernel sandbox must let Hull read and write
  * (HlSandboxPolicy.internal_db_path): the active default internal database

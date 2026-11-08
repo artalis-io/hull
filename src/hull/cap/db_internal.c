@@ -110,6 +110,16 @@ int hl_db_internal_default_dsn(const char *app_dir_real,
                                char *out, size_t outsz,
                                size_t *base_len, int *in_app_hull)
 {
+    return hl_db_internal_default_dsn_ex(app_dir_real, NULL, default_dsn,
+                                         out, outsz, base_len, in_app_hull);
+}
+
+int hl_db_internal_default_dsn_ex(const char *app_dir_real,
+                                  const char *state_dir_real,
+                                  const char *default_dsn,
+                                  char *out, size_t outsz,
+                                  size_t *base_len, int *in_app_hull)
+{
     if (base_len) *base_len = 0;
     if (in_app_hull) *in_app_hull = 0;
     if (!out || outsz == 0) return -1;
@@ -149,6 +159,14 @@ int hl_db_internal_default_dsn(const char *app_dir_real,
         if (strcmp(db, hull_db) == 0) return 0;
         n = snprintf(out, outsz, "%s", hull_db);
         if (base_len) *base_len = strlen(app_dir_real);
+        if (in_app_hull) *in_app_hull = 1;
+    } else if (state_dir_real && state_dir_real[0] && at_or_under(db, state_dir_real)) {
+        /* Under the app's state directory (shared/state_dir.h): its .hull,
+         * reserved from app code like the app root's. */
+        n = snprintf(out, outsz, "%s/.hull/" HL_DB_INTERNAL_FILE,
+                     strcmp(state_dir_real, "/") == 0 ? "" : state_dir_real);
+        if (n > 0 && (size_t)n < outsz && strcmp(db, out) == 0) { out[0] = '\0'; return 0; }
+        if (base_len) *base_len = strlen(state_dir_real);
         if (in_app_hull) *in_app_hull = 1;
     } else {
         n = snprintf(out, outsz, "%s" HL_DB_INTERNAL_BESIDE_SUFFIX, db);
@@ -654,13 +672,22 @@ int hl_db_internal_check_unmoved(HlDbRegistry *reg, int keep)
 int hl_db_internal_configure(HlDbRegistry *reg, const char *app_dir,
                              const char *default_dsn, int keep)
 {
+    return hl_db_internal_configure_ex(reg, app_dir, NULL, default_dsn, keep);
+}
+
+int hl_db_internal_configure_ex(HlDbRegistry *reg, const char *app_dir,
+                                const char *state_dir,
+                                const char *default_dsn, int keep)
+{
     if (!reg || !app_dir || !default_dsn) return 0;
-    char app_real[PATH_MAX], idsn[HL_HOST_PATH_MAX + 32];
+    char app_real[PATH_MAX], state_real[PATH_MAX], idsn[HL_HOST_PATH_MAX + 32];
     size_t ibase = 0;
     int in_hull = 0;
+    const char *sreal = (state_dir && state_dir[0] && realpath(state_dir, state_real))
+                        ? state_real : NULL;
     int k = realpath(app_dir, app_real)
-            ? hl_db_internal_default_dsn(app_real, default_dsn, idsn,
-                                         sizeof idsn, &ibase, &in_hull)
+            ? hl_db_internal_default_dsn_ex(app_real, sreal, default_dsn, idsn,
+                                            sizeof idsn, &ibase, &in_hull)
             : 0;
     if (k < 0) return -1;
     if (k == 0) return 0;

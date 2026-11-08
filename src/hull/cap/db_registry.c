@@ -11,6 +11,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "hull/cap/db_registry.h"
+#include "hull/cap/fs_policy.h"   /* hl_fs_grant_is_state */
 #include "hull/cap/db_dynamic.h"   /* hl_db_dynamic_guard_stale_txns */
 #include "hull/manifest.h"
 #include "hull/utils/env_ref.h"   /* hl_env_ref */
@@ -73,6 +74,10 @@ struct HlDbRegistry {
             int               has_app_dir;
             char              app_dir_real[HL_HOST_PATH_MAX];
             char              app_dir_raw[HL_HOST_PATH_MAX];
+            /* The state directory a "@state/..." manifest DSN is under
+             * (shared/state_dir.h), canonical. */
+            int               has_state_dir;
+            char              state_dir_real[HL_HOST_PATH_MAX];
         };
         unsigned char policy_span[HL_POLICY_SPAN];
     };
@@ -201,6 +206,17 @@ int hl_db_registry_set_app_dir(HlDbRegistry *reg, const char *app_dir)
     return 0;
 }
 
+int hl_db_registry_set_state_dir(HlDbRegistry *reg, const char *state_dir)
+{
+    if (!reg || reg->sealed || !state_dir || !state_dir[0]) return -1;
+    char real[PATH_MAX];
+    if (!realpath(state_dir, real)) return -1;
+    if (copy_dir(real, reg->state_dir_real, sizeof reg->state_dir_real) != 0)
+        return -1;
+    reg->has_state_dir = 1;
+    return 0;
+}
+
 /* 1 when @p path starts with directory @p dir followed by '/'. */
 static int under_dir(const char *path, const char *dir)
 {
@@ -277,7 +293,29 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
 
     char abs[HL_HOST_PATH_MAX];
     size_t base_len;
-    if (path[0] == '/') {
+    if (hl_fs_grant_is_state(path)) {
+        /* "@state/<path>": under the app's state directory (shared/
+         * state_dir.h), the second root - the same confinement as below,
+         * with that directory as the base. */
+        if (!reg->has_state_dir) {
+            *err = "a \"@state/\" database DSN needs the app's state directory "
+                   "(declare state = { name = ... })";
+            return NULL;
+        }
+        while (*path == '/') path++;
+        path += strcspn(path, "/");
+        while (*path == '/') path++;
+        if (!path[0]) {
+            *err = "a \"@state/\" database DSN must name a file under the state directory";
+            return NULL;
+        }
+        int n = snprintf(abs, sizeof abs, "%s/%s", reg->state_dir_real, path);
+        if (n < 0 || (size_t)n >= sizeof abs) {
+            *err = "database path too long";
+            return NULL;
+        }
+        base_len = strlen(reg->state_dir_real);
+    } else if (path[0] == '/') {
         size_t n = strlen(path);
         if (n >= sizeof abs) { *err = "database path too long"; return NULL; }
         memcpy(abs, path, n + 1);
@@ -581,6 +619,41 @@ int hl_db_registry_default_is_network(const HlDbRegistry *reg)
 int hl_db_registry_manifest_wired(const HlDbRegistry *reg)
 {
     return reg && reg->manifest;
+}
+
+const char *hl_db_registry_manifest_default_dsn(HlDbRegistry *reg, char *buf,
+                                                size_t bufsz, const char **err)
+{
+    if (err) *err = NULL;
+    if (!reg || !reg->manifest || !buf) return NULL;
+    const char *e = NULL;
+    const char *d = resolve_manifest_dsn(reg, "default", &e);
+    if (!d) { if (err) *err = e; return NULL; }
+    const char *c = confine_manifest_dsn(reg, d, buf, bufsz, 0, &e);
+    if (!c) { if (err) *err = e ? e : "the manifest's default DSN cannot be used"; return NULL; }
+    return c;
+}
+
+int hl_db_registry_repoint_default(HlDbRegistry *reg, const char *dsn)
+{
+    if (!reg || reg->sealed || !dsn) return -1;
+    size_t n = strlen(dsn);
+    if (n == 0 || n >= sizeof reg->default_dsn) return -1;
+    for (int i = 0; i < reg->nslots; i++) {
+        RegSlot *s = &reg->slots[i];
+        if (!s->open || strcmp(s->name, "default") != 0) continue;
+        if (s->owned && s->handle.backend && s->handle.backend->close)
+            s->handle.backend->close(&s->handle);
+        free(s->name);
+        /* Keep the array dense: move the last slot into this one. */
+        if (i != reg->nslots - 1) reg->slots[i] = reg->slots[reg->nslots - 1];
+        memset(&reg->slots[reg->nslots - 1], 0, sizeof reg->slots[0]);
+        reg->nslots--;
+        break;
+    }
+    memcpy(reg->default_dsn, dsn, n + 1);
+    reg->has_default_dsn = 1;
+    return 0;
 }
 
 static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,

@@ -555,6 +555,8 @@ int hull_serve(int argc, char **argv)
         .app_dir         = app_dir,
         .entry_point     = entry,
         .db_path         = db_path,        /* NULL → ":memory:" */
+        .db_path_explicit = db_path != NULL,
+        .manifest_default_db = 1,          /* databases.named.default, gap 3 */
         .worker_db_path  = db_path,        /* worker-thread sqlite connection */
         .thread_pool     = pool,           /* worker imports register during init */
         .no_migrate      = no_migrate,
@@ -579,6 +581,11 @@ int hull_serve(int argc, char **argv)
         be->free(async_ctx);
         return 1;
     }
+
+    /* The manifest's default database replaced the implicit :memory: (gap
+     * 3): the sandbox grants below follow it. */
+    if (hl_app_context_default_db_path(ctx))
+        db_path = hl_app_context_default_db_path(ctx);
 
     HlRuntime *rt = hl_app_context_runtime(ctx);
     if (!rt || !rt->vt) {

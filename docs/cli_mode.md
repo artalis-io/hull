@@ -181,9 +181,19 @@ end)
   policy: `fs.read/write/stat/list/mmap`, blob roots, `compute.stream` output,
   `tar`. The app root stays a separate namespace, so `keys/x` and
   `@state/keys/x` are different files with different grants.
-- Not yet: a `-d`-less default database under the state directory, and a
-  built binary that needs NOTHING from its working directory (so it can run
-  from `~` or `/`). Both are the next steps of the same design
+- **The database lives there too.** A `databases.named` / `databases.internal`
+  file DSN may be `"@state/<file>"`, confined to the state directory as an
+  app-relative one is to the app directory (no `..`, no `.hull`, no symbolic
+  link), and so may `db.open`'s. And `databases.named.default = "@state/data.db"`
+  names the app's **default** database when no `-d` is given: the implicit
+  default (`:memory:` for a built CLI, `<app_dir>/data.db` under `hull app.lua`,
+  whose file is removed again) is replaced once the manifest is read, the
+  migrations run on the named one, and its internal database (the stdlib's
+  `_hull_*` tables) is `<state>/.hull/internal.db`. `hull migrate` and `hull
+  agent db` with no `-d` open the same file (they load the app to read the
+  manifest). An operator's `-d` still wins; `hull test` keeps its `:memory:`.
+- Not yet: a built binary that needs NOTHING from its working directory (so it
+  can run from `~` or `/`), the last step of the same design
   (`docs/design/platform_gaps_hsctl.md` §11); until then a built tool is still
   run from a directory of its own, and its `@state/` holds the state.
 
