@@ -363,21 +363,30 @@ at a time, and no such limit.
 
 ## 10. Host key exposure
 
-The host key object is available to the caller before any trust decision, and
-carries raw canonical bytes, not only a formatted fingerprint:
+*(Rewritten 2026-11-08 to what is built; the `host_key` callback field this
+section once described was never implemented - a hook is a thing applications
+wire to "return true" once and forget.)*
+
+An unknown host is a structured refusal of `connect` carrying the key before
+any trust decision - `err.fingerprint` and `err.key_blob`, the raw canonical
+SSH wire encoding - and trusting it is a separate act, `ssh.accept_host(store,
+host, key_blob, port)`. Every connection then exposes what it was built on:
 
 ```lua
-{
-    algorithm   = "ssh-ed25519",
-    raw         = "<32 bytes, canonical SSH wire encoding>",
-    fingerprint = "SHA256:abc...",     -- convenience only
-}
+conn:host_key()     -- { blob, type, algorithm, fingerprint }
+conn:session_id()   -- RFC 4253 §7.2, the first exchange hash, bytes
+conn:accept_host(store)
 ```
 
-`raw` is what `hsctl` binds into its enrollment HMAC. There is no default-accept
-path: `host_key` is a **required** field, and returning anything other than an
-explicit accept rejects the connection. No global `known_hosts` is read or
-written; trust storage is the application's, in its own SQLite.
+For a proof that must bind to the host key of the SAME connection it travels
+over (hsctl's enrollment), `ssh.pending_trust()` is a single-use trust: it
+accepts the first key presented, pins the connection to it (a rekey presenting
+another key is `host_changed_midsession`), refuses a second `connect`
+(`already_used`) and is not a store (`accept_host` into it is `not_a_store`).
+`conn:trust_pending()` says a connection was made that way. `blob` is what an
+enrollment HMAC binds, with `session_id()`. No global `known_hosts` is read or
+written; trust storage is the application's (`memory_store`, `file_store`,
+`kv_store`, or its own). See docs/ssh.md §3.
 
 ## 11. Phasing
 

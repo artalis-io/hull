@@ -238,6 +238,37 @@ app.main(function()
     local r2 = conn:exec("exit 3")
     print("exit3_status=" .. tostring(r2.status))
 
+    -- One transport, one host key (platform gap 4): a pending trust takes
+    -- the key this connection presents, exposes it with the session id, and
+    -- accept_host then records it in a real store.
+    local pending = ssh.pending_trust()
+    local pconn, perr = ssh.connect{
+        host = "$2", port = $3, user = "$SSH_LOGIN",
+        key = key, trust = pending, tunnel = TUNNEL,
+    }
+    print("pending_connected=" .. tostring(pconn ~= nil) .. (pconn and "" or (":" .. tostring(perr.code))))
+    if pconn then
+        local hk = pconn:host_key()
+        print("pending_trust_pending=" .. tostring(pconn:trust_pending()))
+        print("pending_key_same=" .. tostring(hk.blob == conn:host_key().blob))
+        print("pending_key_type=" .. tostring(hk.type) .. "/" .. tostring(hk.algorithm))
+        print("pending_fingerprint_same=" .. tostring(hk.fingerprint == pconn:fingerprint()))
+        print("pending_session_id_len=" .. tostring(#pconn:session_id()))
+        print("pending_session_id_distinct=" .. tostring(pconn:session_id() ~= conn:session_id()))
+        local fresh = ssh.memory_store()
+        local aok = pconn:accept_host(fresh)
+        local _, aerr = pconn:accept_host(fresh)
+        print("pending_accept=" .. tostring(aok) .. "/" .. tostring(aerr and aerr.code))
+        local _, nerr = pconn:accept_host(pending)
+        print("pending_not_a_store=" .. tostring(nerr and nerr.code))
+        local _, uerr = ssh.connect{
+            host = "$2", port = $3, user = "$SSH_LOGIN",
+            key = key, trust = pending, tunnel = TUNNEL,
+        }
+        print("pending_reuse=" .. tostring(uerr and uerr.code))
+        pconn:close()
+    end
+
     -- The rest of what hull/ssh does, against a real sshd. Run once (the first
     -- session), not for every key type below: it moves a few megabytes.
     if "${FULL_INTEROP:-0}" == "1" then
@@ -483,6 +514,35 @@ app.main(async () => {
 
     const r2 = await conn.exec("exit 3");
     console.log("exit3_status=" + String(r2.status));
+
+    // One transport, one host key (platform gap 4) - the Lua leg's twin.
+    const pending = ssh.pendingTrust();
+    const [pconn, perr] = await attempt(ssh.connect({
+        host: "$2", port: $3, user: "$SSH_LOGIN",
+        key, trust: pending, tunnel: TUNNEL,
+    }));
+    console.log("pending_connected=" + String(pconn !== null) + (pconn ? "" : ":" + String(perr && perr.code)));
+    if (pconn) {
+        const hk = pconn.hostKey();
+        console.log("pending_trust_pending=" + String(pconn.trustPending()));
+        console.log("pending_key_same=" + String(hk.blob === conn.hostKey().blob));
+        console.log("pending_key_type=" + String(hk.type) + "/" + String(hk.algorithm));
+        console.log("pending_fingerprint_same=" + String(hk.fingerprint === pconn.fingerprint()));
+        console.log("pending_session_id_len=" + String(pconn.sessionId().length));
+        console.log("pending_session_id_distinct=" + String(pconn.sessionId() !== conn.sessionId()));
+        const fresh = ssh.memoryStore();
+        const [aok] = await attempt(pconn.acceptHost(fresh));
+        const [, aerr] = await attempt(pconn.acceptHost(fresh));
+        console.log("pending_accept=" + String(aok) + "/" + String(aerr && aerr.code));
+        const [, nerr] = await attempt(pconn.acceptHost(pending));
+        console.log("pending_not_a_store=" + String(nerr && nerr.code));
+        const [, uerr] = await attempt(ssh.connect({
+            host: "$2", port: $3, user: "$SSH_LOGIN",
+            key, trust: pending, tunnel: TUNNEL,
+        }));
+        console.log("pending_reuse=" + String(uerr && uerr.code));
+        pconn.close();
+    }
 
     if ("${FULL_INTEROP:-0}" === "1") {
         const t0 = time.nowMs();
@@ -939,6 +999,16 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $SSH_PORT)) == 0 else 1)
         assert_line "$OUT" "exec_status" "0" "live: exec succeeded over the tunnel"
         assert_line "$OUT" "exec_stdout" "hull-tunnel-ok" "live: command output came back through the tunnel"
         assert_line "$OUT" "exit3_status" "3" "live: a non-zero remote exit is a status, not an error"
+        assert_line "$OUT" "pending_connected" "true" "live: a pending trust connects to a host no store knows"
+        assert_line "$OUT" "pending_trust_pending" "true" "live: the connection says its trust is pending"
+        assert_line "$OUT" "pending_key_same" "true" "live: host_key().blob is the key the store-trusted connection saw"
+        assert_line "$OUT" "pending_key_type" "ssh-ed25519/ssh-ed25519" "live: host_key() names the key type and the negotiated algorithm"
+        assert_line "$OUT" "pending_fingerprint_same" "true" "live: host_key().fingerprint is conn:fingerprint()"
+        assert_line "$OUT" "pending_session_id_len" "32" "live: session_id() is the 32-byte exchange hash"
+        assert_line "$OUT" "pending_session_id_distinct" "true" "live: each connection has its own session id"
+        assert_line "$OUT" "pending_accept" "true/already_trusted" "live: accept_host records the key once into a real store"
+        assert_line "$OUT" "pending_not_a_store" "not_a_store" "live: a pending trust is refused as the store to accept into"
+        assert_line "$OUT" "pending_reuse" "already_used" "live: a pending trust is single use"
         assert_line "$OUT" "fallback_key" "$FALLBACK_WANT" "live: a refused key gives way to the next"
         assert_line "$OUT" "decoy_only_code" "auth_failed" "live: an unknown key alone is auth_failed"
         assert_line "$OUT" "chacha_cipher" "chacha20-poly1305@openssh.com" "live: chacha20-poly1305 negotiated under strict KEX"

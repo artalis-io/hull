@@ -191,6 +191,66 @@ test("forget then accept_new is how a rotated host is re-trusted", function()
     assert_eq(hostkey.check(store, "spark.local", key_blob(KEY_B)), hostkey.TRUSTED)
 end)
 
+-- pending trust (platform gap 4) ------------------------------------------------
+
+test("a pending trust accepts the first key presented and is then held to it", function()
+    local ssh = require('hull.ssh')
+    local p = ssh.pending_trust()
+    assert_eq(p.get("spark.local"), nil, "nothing before a key is presented:")
+    local status, stored = hostkey.check(p, "spark.local", key_blob(KEY_A))
+    assert_eq(status, hostkey.TRUSTED)
+    assert_eq(stored, key_blob(KEY_A))
+    assert_eq(p.get("spark.local"), key_blob(KEY_A), "the accepted key is readable:")
+    -- The same key again (a rekey's check) is trusted; another key for the
+    -- same host is CHANGED, never unknown; the key under another name is not
+    -- carried over.
+    assert_eq(hostkey.check(p, "spark.local", key_blob(KEY_A)), hostkey.TRUSTED)
+    local st2, stored2 = hostkey.check(p, "spark.local", key_blob(KEY_B))
+    assert_eq(st2, hostkey.CHANGED)
+    assert_eq(stored2, key_blob(KEY_A))
+    assert_eq(hostkey.check(p, "other.local", key_blob(KEY_A)), hostkey.CHANGED,
+              "one pending trust, one host:")
+    assert_eq(p.put, nil, "a pending trust persists nothing:")
+end)
+
+test("accept_host refuses a pending trust as the store", function()
+    local ssh = require('hull.ssh')
+    local p = ssh.pending_trust()
+    local ok, err = ssh.accept_host(p, "spark.local", key_blob(KEY_A))
+    assert_eq(ok, nil)
+    assert_eq(err.code, "not_a_store")
+    assert_eq(p.get("spark.local"), nil, "and recorded nothing:")
+end)
+
+test("a pending trust is single use: the second connect is refused before any dial", function()
+    local ssh = require('hull.ssh')
+    local p = ssh.pending_trust()
+    -- The first connect takes it (it fails at the dial here, which does not
+    -- give it back: the refusal is about the object, not the outcome).
+    local c1, e1 = ssh.connect{
+        host = "spark.local", user = "operator", key = {}, crypto = {}, trust = p,
+        open_stream = function() return nil, "no route", "connect_failed" end,
+    }
+    assert_eq(c1, nil)
+    assert_eq(e1.code, "connect_failed")
+    local dialled = false
+    local c2, e2 = ssh.connect{
+        host = "spark.local", user = "operator", key = {}, crypto = {}, trust = p,
+        open_stream = function() dialled = true; error("nothing may be dialled") end,
+    }
+    assert_eq(c2, nil)
+    assert_eq(e2.code, "already_used")
+    assert_eq(dialled, false, "refused before the dial:")
+    -- A fresh one connects (as far as the dial) again.
+    local c3, e3 = ssh.connect{
+        host = "spark.local", user = "operator", key = {}, crypto = {},
+        trust = ssh.pending_trust(),
+        open_stream = function() return nil, "no route", "connect_failed" end,
+    }
+    assert_eq(c3, nil)
+    assert_eq(e3.code, "connect_failed")
+end)
+
 -- signature verification -----------------------------------------------------------
 
 local function fake_sha(data) return (data .. string.rep("\0", 32)):sub(1, 32) end

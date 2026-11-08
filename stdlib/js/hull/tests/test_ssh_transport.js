@@ -8,6 +8,7 @@
 // host stops the connection with a fingerprint instead of proceeding.
 
 import { transport } from "hull:ssh:transport";
+import { ssh } from "hull:ssh";
 import { packet } from "hull:ssh:packet";
 import { kexinit } from "hull:ssh:kexinit";
 import { wire } from "hull:ssh:wire";
@@ -376,6 +377,32 @@ await test("a rekey presenting another host key is refused as host_changed_midse
     assertEq(och, null);
     assertEq(oerr.code, "host_changed_midsession");
     await assertRaises(() => t.sendPacket("\x02"), "send after a failed rekey");
+});
+
+await test("a pending trust lets an unknown host through, holds it, and pins the rekey", async () => {
+    const KEY_A = edKey("A"), KEY_B = edKey("B");
+    const offer = offerWith({ hostKey: ["ssh-ed25519"] });
+    const serverKexinit = kexinit.build(offer, zeros(16));
+    const reply = (key) => wire.writer().byte(31).string(key).string("Q".repeat(32))
+        .string(edSig()).build();
+    const inbound = "SSH-2.0-Test\r\n" + plain(serverKexinit) + plain(reply(KEY_A))
+        + plain("\x15")
+        + sealed([serverKexinit, reply(KEY_B)]);
+    const calls = [];
+    const c = fullCrypto(calls);
+    c.sha256 = (d) => (zeros(32) + d).slice(-32);
+    const pending = ssh.pendingTrust();
+    const t = transport.new(fakeStream(inbound, 64), c);
+    const [ok, err] = await t.handshake({ host: "h", trust: pending });
+    assertEq(ok, true, err && err.code);
+    assertEq(t.hostKeyBlob, KEY_A, "the presented key is the connection's:");
+    assertEq(typeof t.sessionId === "string" && t.sessionId.length === 32, true, "session id:");
+    assertEq(pending.get("h"), KEY_A, "the pending trust holds it:");
+    assertEq(t.kexOpts.trust, pending, "kept for conn.trustPending():");
+
+    const [rok, rerr] = await t.rekey();
+    assertEq(rok, null);
+    assertEq(rerr.code, "host_changed_midsession");
 });
 
 // The host key algorithms in the first KEXINIT this client sent.

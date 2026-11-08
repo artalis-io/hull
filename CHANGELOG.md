@@ -10,6 +10,18 @@ release-artifact layout).
 
 ### Added
 
+- **`hull/ssh`: one transport, one host key** (platform gap 4, `docs/design/platform_gaps_hsctl.md`
+  §10). `ssh.pending_trust()` (JS `pendingTrust()`) is a single-use trust: the first host key
+  the server presents is the key that connection is held to (a rekey is pinned as always), a
+  second `connect` with it fails `already_used`, and nothing reaches a store (`accept_host` into
+  it is `not_a_store`). Every connection exposes `conn:host_key()` (`{ blob, type, algorithm,
+  fingerprint }`), `conn:session_id()` (the RFC 4253 §7.2 identifier) and
+  `conn:accept_host(store)` (the connection's own key into a real store), plus
+  `conn:trust_pending()`; JS `hostKey()` / `sessionId()` / `acceptHost()` / `trustPending()`. An
+  enrollment proof can now bind to the host key and session of the connection it travels over,
+  and the app's check - after the key is known, never a handshake callback - is the trust
+  decision. docs/ssh.md §3 "Pending trust"; `docs/ssh_module_design.md` §10 rewritten to what
+  is built. Covered in both stdlib suites and the live-sshd phase of `tests/e2e_ssh_tunnel.sh`.
 - **`app.main` observes SIGINT / SIGTERM** (platform gap 7, `docs/design/platform_gaps_hsctl.md`
   §9). Before, no handler was installed while main ran: Ctrl-C killed the process with no
   teardown and no stdout flush, so a tool could not stop what it had started. Now both runners

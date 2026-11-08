@@ -406,6 +406,39 @@ test("a rekey presenting another host key is refused as host_changed_midsession"
     assert_raises(function() t:send_packet("\2") end, "send after a failed rekey")
 end)
 
+test("a pending trust lets an unknown host through, holds it, and pins the rekey", function()
+    -- Platform gap 4: one transport, one host key. The first key presented is
+    -- accepted and exposed (host_key_blob, session_id); a rekey presenting
+    -- another key is still refused as host_changed_midsession.
+    local KEY_A, KEY_B = ed_key("A"), ed_key("B")
+    local offer = {}
+    for k, v in pairs(kexinit.DEFAULT_OFFER) do offer[k] = v end
+    offer.host_key = { "ssh-ed25519" }
+    local server_kexinit = kexinit.build(offer, string.rep("\0", 16))
+    local function reply(key)
+        return wire.writer():byte(31):string(key):string(string.rep("Q", 32))
+                  :string(ed_sig()):build()
+    end
+    local inbound = "SSH-2.0-Test\r\n" .. plain(server_kexinit) .. plain(reply(KEY_A))
+                 .. plain("\21")
+                 .. sealed({ server_kexinit, reply(KEY_B) })
+    local calls = {}
+    local c = full_crypto(calls)
+    c.sha256 = function(d) return (string.rep("\0", 32) .. d):sub(-32) end
+    local pending = require('hull.ssh').pending_trust()
+    local t = transport.new(fake_stream(inbound, 64), c)
+    local ok, err = t:handshake({ host = "h", trust = pending })
+    assert_eq(ok, true, err and err.code)
+    assert_eq(t.host_key_blob, KEY_A, "the presented key is the connection's:")
+    assert_eq(type(t.session_id) == "string" and #t.session_id == 32, true, "session id:")
+    assert_eq(pending.get("h"), KEY_A, "the pending trust holds it:")
+    assert_eq(t.kex_opts.trust, pending, "kept for conn:trust_pending():")
+
+    local rok, rerr = t:rekey()
+    assert_eq(rok, nil)
+    assert_eq(rerr.code, "host_changed_midsession")
+end)
+
 -- The host key algorithms in the first KEXINIT this client sent.
 local function offered_host_keys(s)
     for _, w in ipairs(s.written) do

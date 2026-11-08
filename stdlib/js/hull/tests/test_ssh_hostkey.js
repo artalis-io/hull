@@ -6,6 +6,7 @@
 
 import { hostkey } from "hull:ssh:hostkey";
 import { wire } from "hull:ssh:wire";
+import { ssh } from "hull:ssh";
 
 let pass = 0;
 let fail = 0;
@@ -155,6 +156,51 @@ await test("forget then accept_new is how a rotated host is re-trusted", async (
     assertEq((await hostkey.check(store, "spark.local", keyBlob(KEY_B)))[0], hostkey.UNKNOWN);
     await hostkey.acceptNew(store, "spark.local", keyBlob(KEY_B));
     assertEq((await hostkey.check(store, "spark.local", keyBlob(KEY_B)))[0], hostkey.TRUSTED);
+});
+
+// pending trust (platform gap 4) -------------------------------------------
+
+await test("a pending trust accepts the first key presented and is then held to it", async () => {
+    const p = ssh.pendingTrust();
+    assertEq(p.get("spark.local"), null, "nothing before a key is presented:");
+    const [status, stored] = await hostkey.check(p, "spark.local", keyBlob(KEY_A));
+    assertEq(status, hostkey.TRUSTED);
+    assertEq(stored, keyBlob(KEY_A));
+    assertEq(p.get("spark.local"), keyBlob(KEY_A), "the accepted key is readable:");
+    assertEq((await hostkey.check(p, "spark.local", keyBlob(KEY_A)))[0], hostkey.TRUSTED);
+    const [st2, stored2] = await hostkey.check(p, "spark.local", keyBlob(KEY_B));
+    assertEq(st2, hostkey.CHANGED);
+    assertEq(stored2, keyBlob(KEY_A));
+    assertEq((await hostkey.check(p, "other.local", keyBlob(KEY_A)))[0], hostkey.CHANGED,
+             "one pending trust, one host:");
+    assertEq(p.put, undefined, "a pending trust persists nothing:");
+});
+
+await test("acceptHost refuses a pending trust as the store", async () => {
+    const p = ssh.pendingTrust();
+    let code = null;
+    try { await ssh.acceptHost(p, "spark.local", keyBlob(KEY_A)); } catch (e) { code = e.code; }
+    assertEq(code, "not_a_store");
+    assertEq(p.get("spark.local"), null, "and recorded nothing:");
+});
+
+await test("a pending trust is single use: the second connect is refused before any dial", async () => {
+    const p = ssh.pendingTrust();
+    const attempt = async (o) => { try { await ssh.connect(o); return null; } catch (e) { return e.code; } };
+    assertEq(await attempt({
+        host: "spark.local", user: "operator", key: {}, crypto: {}, trust: p,
+        openStream: () => [null, "no route", "connect_failed"],
+    }), "connect_failed");
+    let dialled = false;
+    assertEq(await attempt({
+        host: "spark.local", user: "operator", key: {}, crypto: {}, trust: p,
+        openStream: () => { dialled = true; throw new Error("nothing may be dialled"); },
+    }), "already_used");
+    assertEq(dialled, false, "refused before the dial:");
+    assertEq(await attempt({
+        host: "spark.local", user: "operator", key: {}, crypto: {}, trust: ssh.pendingTrust(),
+        openStream: () => [null, "no route", "connect_failed"],
+    }), "connect_failed");
 });
 
 // signature verification -----------------------------------------------------------
