@@ -163,8 +163,12 @@ Neither binding takes options; the only cap flag is `HL_FS_WRITE_NO_SYNC`.
   replaced, not merged.
 - Directories: when the mode has no group or other bits, the parents the resolver creates
   for THIS write are made 0700 instead of 0755 (`HL_FS_OPEN_*` gains a private-dirs bit the
-  resolver reads at its mkdir). Existing directories are never re-moded: hsctl's own
-  `state/` check (mode & 077 == 0) stays valid and is now satisfiable from the app.
+  resolver reads at its mkdir). Existing directories are never re-moded. **This does not
+  make hsctl's `state/` check (mode & 077 == 0) satisfiable from the app** (gap 9, §14, found
+  once hsctl pinned v0.18.3): the sandbox pre-creates every `dir/` write grant at startup,
+  with 0755, so the granted root always exists by the time the app writes and the private
+  bit only ever reaches the file and any parent the write itself creates below it. The check
+  is satisfied by the `@state/` root (§11, created 0700), not by this change.
 - Charging: unchanged (the floor and per-byte charge cover the extra `fchmod`).
 
 **Test.** `test_fs.c`: created-with-600 stat reads 0600 and its new parent 0700; `"755"`
@@ -341,3 +345,28 @@ of them. hsctl then bumps `HULL_VERSION` in its CI and drops its gap 8 workaroun
 | 6 | `hsctl run` writes the remote's bytes straight through; `--json` keeps base64 |
 | 7 | `pair start` traps `ctx.signal` and stops both ranks within the grace |
 | 8 | CI pin to v0.18.3 |
+| 9 | none until §11 lands: `state/` is pre-created 0755 by the sandbox, so the mode check stays a repair hint (`chmod 700 state`) rather than something the app can satisfy; `@state/` (created 0700) retires it |
+
+**Status after v0.18.3 (2026-11-08).** hsctl pinned CI to v0.18.3 and closed gaps 1, 2, 5,
+6 and 8 as above. Gaps 3, 4 and 7 stay open. hsctl reported one new gap, 9, below.
+
+## 14. Gap 9: the sandbox pre-creates write-grant directories with 0755
+
+**Today.** `hl_sandbox_resolve_grant` (`src/hull/sandbox.c`) walks every `fs.write` grant
+before unveil / Seatbelt so the kernel grant can be canonicalised, and a `dir/` grant whose
+directory does not exist yet is made on the spot with `mkdir(buf, 0755)` - before the app's
+first line runs. So an app that writes its first secret with `fs.write(path, bytes,
+{ private = true })` under a `state/` grant gets a 0600 file inside a 0755 `state/`: the
+private-dirs bit of §8 applies only to parents the resolver creates during that write, and
+the granted root is never one of them. Nothing secret is exposed (the file is 0600, and a
+sibling account can at most list the directory), but a tool that checks its state
+directory's mode, as hsctl does, cannot satisfy that check from app code, and §8's claim
+that it could was wrong.
+
+**Resolution.** By the `@state/` root (§11): it is created 0700 with mkdir-p, by Hull,
+before the sandbox, and a tool's state no longer lives in a write grant under the working
+directory at all. hsctl keeps its mode check as a one-time repair hint until then. A
+narrower fix - pre-creating a write grant 0700 - is NOT taken: a grant does not say whether
+its contents are private (non-goal: "a per-path secret attribute on `fs.write` grants"), and
+a 0700 `uploads/` or `static/` root would break a reverse proxy or a second user reading the
+app's own output.
