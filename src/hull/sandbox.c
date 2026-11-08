@@ -557,7 +557,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
 
     /* ── App directory (read-only) ──────────────────────────── */
 
-    if (app_dir) {
+    if (app_dir && !policy->rootless) {
         PARAM_ADD("APP_DIR", app_dir);
         SBPL_LIT("; App directory (read-only)\n"
                  "(allow file-read* (subpath (param \"APP_DIR\")))\n\n");
@@ -852,7 +852,7 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
      * database. Seatbelt matches the real path without case on a
      * case-insensitive volume, and an in-root symlink resolves to it. */
     int app_hull_param = 0;
-    if (app_dir) {
+    if (app_dir && !policy->rootless) {
         int hn = snprintf(scratch->app_hull, sizeof(scratch->app_hull),
                           "%s/.hull", app_dir);
         if (hn > 0 && (size_t)hn < sizeof(scratch->app_hull)) {
@@ -1224,7 +1224,9 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      * from / (a systemd unit with no WorkingDirectory, a container whose
      * WORKDIR is /) unveiled the whole filesystem for reading - and its
      * relative grants resolved from /. Refused rather than granted. */
-    if (app_dir) {
+    /* A rootless built tool (HlSandboxPolicy.rootless) is granted nothing
+     * on its working directory, so that directory may be anything. */
+    if (app_dir && !policy->rootless) {
         char real[SANDBOX_PATH_MAX];
         const char *r = realpath(app_dir, real) ? real : app_dir;
         if (strcmp(r, "/") == 0) {
@@ -1441,8 +1443,9 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     const char *sqlite_tmp = sb_sqlite_temp_dir();
 #endif
 
-    /* App directory: always readable (templates, static assets, source) */
-    if (app_dir) {
+    /* App directory: readable (templates, static assets, source) - unless
+     * the app is a rootless built tool, which has nothing there. */
+    if (app_dir && !policy->rootless) {
         if (unveil(app_dir, "r") != 0)
             log_warn("[sandbox] unveil failed for app dir: %s", app_dir);
         /* ...except its .hull (the `hull dev --agent` sidecars; audit 37).
@@ -1977,6 +1980,55 @@ static int kv_scheme_is_network(const char *s)
  * blocks the connect (pledge SIGKILL on Linux). The `-d` default DSN is not in
  * the manifest (it lives in cfg); both entry points OR it in through
  * hl_sandbox_policy_add_default_dsn. */
+int hl_sandbox_manifest_rootless_ok(const HlManifest *m)
+{
+    if (!m || !m->state_name) return 0;
+    for (int i = 0; i < m->fs_read_count; i++)
+        if (!hl_fs_grant_is_state(m->fs_read[i])) return 0;
+    for (int i = 0; i < m->fs_write_count; i++)
+        if (!hl_fs_grant_is_state(m->fs_write[i])) return 0;
+    /* A file DSN must be under the state root; a network DSN, an env
+     * reference (resolved to one at open, confined then) or :memory: needs
+     * no directory. hl_sandbox_db_path gives a file DSN's path. */
+    for (int i = 0; i <= m->databases.named_count; i++) {
+        const char *d = i < m->databases.named_count ? m->databases.named[i].dsn
+                                                     : m->databases.internal;
+        if (!d || d[0] == '$') continue;
+        const char *f = hl_sandbox_db_path(d);
+        if (!f || strcmp(f, ":memory:") == 0) continue;
+        if (!hl_fs_grant_is_state(f)) return 0;
+    }
+    return 1;
+}
+
+/* @p path is @p dir or below it (both absolute). */
+static int path_under(const char *path, const char *dir)
+{
+    size_t n = strlen(dir);
+    if (n == 1 && dir[0] == '/') return path[0] == '/';
+    return strncmp(path, dir, n) == 0 && (path[n] == '/' || path[n] == '\0');
+}
+
+int hl_sandbox_rootless_db_ok(const char *dsn, const char *app_dir,
+                              const char *state_dir)
+{
+    if (!dsn) return 1;
+    const char *f = hl_sandbox_db_path(dsn);
+    if (!f || strcmp(f, ":memory:") == 0) return 1;
+    if (f[0] != '/') return 0;                 /* relative: the app directory's */
+    if (state_dir && state_dir[0]) {
+        char sreal[SANDBOX_PATH_MAX];
+        if (path_under(f, realpath(state_dir, sreal) ? sreal : state_dir)) return 1;
+    }
+    if (!app_dir) return 1;
+    char real[SANDBOX_PATH_MAX];
+    const char *a = realpath(app_dir, real) ? real : app_dir;
+    /* Under / or the home everything lies: a file there is not the state
+     * directory's, so it is not a rootless tool's. */
+    if (strcmp(a, "/") == 0 || hl_host_path_too_broad(a)) return 0;
+    return !path_under(f, a);
+}
+
 int hl_sandbox_manifest_has_network_db(const HlManifest *m)
 {
     if (!m) return 0;

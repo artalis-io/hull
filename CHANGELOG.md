@@ -34,6 +34,14 @@ release-artifact layout).
   with no `-d` open the same file. An operator's `-d` still wins; `hull test` keeps `:memory:`.
   `hl_cap_fs_root_for` is now the one place the `@state` prefix is stripped for a consumer that
   builds an absolute path. e2e legs in `tests/e2e_state_dir.sh`; `test_db_registry`.
+- **A built tool that keeps everything under `@state/` is rootless** (gap 3, PR 3 of 3 - the
+  gap is closed on the Hull side). A BUILT `app.main` binary whose manifest declares `state` and
+  keeps every fs grant and every file database, the default included, under `@state/` needs
+  nothing from its working directory: the sandbox grants it nothing there and no longer refuses
+  `/` or the home directory, so `cd ~ && hsctl status` works. Any app-relative grant or
+  database, a route handler, or dev mode keeps today's rules. A built binary started from `/`
+  or the home gets an in-memory implicit default database until its manifest names one, so no
+  `data.db` is made there. `tests/e2e_state_dir_built.sh` (`make e2e-state-dir-built`).
 - **`hull/ssh`: one transport, one host key** (platform gap 4, `docs/design/platform_gaps_hsctl.md`
   §10). `ssh.pending_trust()` (JS `pendingTrust()`) is a single-use trust: the first host key
   the server presents is the key that connection is held to (a rekey is pinned as always), a

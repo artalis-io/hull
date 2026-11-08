@@ -2408,7 +2408,7 @@ treats a malformed `platform.public_key`, or a `composed` / `composed.platform_d
 present but not an object, as an error rather than a reason to skip the check (audit 15), and
 a dev-mode static file's ETag 304 is answered only after the disk gate passed it.
 
-**The `@state/` root (platform gap 3, `shared/state_dir.c`, PRs 1-2 of 3).** A manifest
+**The `@state/` root (platform gap 3, `shared/state_dir.c`).** A manifest
 `state = { name = "x" }` (JS `state: { name }`) gives the app a per-user state directory -
 `$XDG_STATE_HOME/<name>`, else `<home>/.local/state/<name>`, Windows `%LOCALAPPDATA%\<name>`,
 `HULL_STATE_DIR` overriding - that every entry point (serve.c, app_context.c for the app.main
@@ -2440,10 +2440,19 @@ serve.c calls once it has the manifest, before the internal-table move. `hull te
 flag off (its `:memory:` is deliberate). Covered by `tests/e2e_state_dir.sh` (`make e2e-state-dir`, both runtimes, sandboxed) and
 `test_fs_policy`. docs/cli_mode.md "A per-user state directory".
 
-**The app directory may not be `/`, or `$HOME` or above.** A built binary takes its app
-directory from its working directory; `hl_sandbox_apply` refuses `/` (that unveiled the whole
-filesystem) and the user's home or any ancestor of it (every file the user owns) - run it from
-its own directory (`WorkingDirectory=`, `WORKDIR`; the generated Dockerfile sets `WORKDIR /srv`).
+**The app directory may not be `/`, or `$HOME` or above - unless the app is ROOTLESS.** A built
+binary takes its app directory from its working directory; `hl_sandbox_apply` refuses `/` (that
+unveiled the whole filesystem) and the user's home or any ancestor of it (every file the user
+owns) - run it from its own directory (`WorkingDirectory=`, `WORKDIR`; the generated Dockerfile
+sets `WORKDIR /srv`). The exception (gap 3, PR 3; `HlSandboxPolicy.rootless`): a BUILT app.main-
+only binary (embedded VFS, no handlers) whose manifest declares `state` and keeps every fs grant
+and every file database - the default included - under `@state/` (`hl_sandbox_manifest_rootless_ok`
++ `hl_sandbox_rootless_db_ok`, decided by both runners) needs nothing from its working
+directory: the sandbox grants it nothing there (no app-dir read grant, no `.hull` deny) and the
+refusal is skipped. serve.c also gives a built binary started from `/` or the home an in-memory
+implicit default database until the manifest names one, so no `data.db` is made there. Dev mode
+is never rootless. `tests/e2e_state_dir_built.sh` (`make e2e-state-dir-built`, needs the platform
+library) runs a built tool from a fake home and from `/`, and a stateless built app refused.
 One rule with the tool sandbox (`hl_host_path_too_broad`, `shared/host.c`): home is `$HOME`, else
 `$USERPROFILE`, compared without case on Windows, and a bare drive root (`/C`) is a root (audit 9).
 A top-level `fs.write` glob (`"*.log"`) can only be granted as the whole app directory at the kernel
