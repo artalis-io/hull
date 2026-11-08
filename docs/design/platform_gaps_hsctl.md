@@ -229,7 +229,15 @@ shared.
 
 ## 10. Gap 4: trust for this connection only, host key and session id exposed
 
-**Today.** Trust is only `opts.trust`, a store with `get` / `put` / `forget` / `entries`
+**Status (2026-11-08): built as below.** Two details fixed in the
+implementation: `host_key()` also carries `type` (the key type the blob
+declares) beside `algorithm` (the negotiated signature algorithm - for an RSA
+host key `ssh-rsa` vs `rsa-sha2-512`); and JS bytes (`hostKey().blob`,
+`sessionId()`) are byte strings, the module's convention for every byte value
+(`e.keyBlob`), not ArrayBuffers. A pending trust is taken by the connect that
+uses it, success or not. `accept_host` into a pending trust is `not_a_store`.
+
+**Today (before the change).** Trust is only `opts.trust`, a store with `get` / `put` / `forget` / `entries`
 (`memory_store`, `file_store`, `kv_store`). An unknown key fails the connect with
 `host_unknown` carrying `fingerprint` and `key_blob` / `keyBlob`, so meeting a key costs one
 connection and authenticating costs a second (hsctl's adoption). The transport holds the
@@ -352,7 +360,7 @@ of them. hsctl then bumps `HULL_VERSION` in its CI and drops its gap 8 workaroun
 | 1 | `remote.describe` prints `e.detail`; the `--via cloudflare` note in its README stays |
 | 2 | `trust.key(true)` writes with `{ private: true }`; the `state/` mode check becomes a one-time repair hint |
 | 3 | manifest `state = { name = "hsctl" }`, grants under `@state/`, `data.db` under it, `hsctl key import` from stdin; README "fleet directory" section goes |
-| 4 | enrollment uses `pendingTrust()` + `hostKey()` + `sessionId()`; adoption may stay two-connection or move to the same flow |
+| 4 | enrollment uses `pendingTrust()` + `hostKey()` + `sessionId()` + `acceptHost(store)`; adoption may stay two-connection or move to the same flow (Hull side built, unreleased as of 2026-11-08) |
 | 5 | `users: ["$HSCTL_LOGIN"]` with `HSCTL_LOGIN` in `env`, default documented |
 | 6 | `hsctl run` writes the remote's bytes straight through; `--json` keeps base64 |
 | 7 | `pair start` traps `ctx.signal` and stops both ranks within the grace (Hull side built, unreleased as of 2026-11-08) |

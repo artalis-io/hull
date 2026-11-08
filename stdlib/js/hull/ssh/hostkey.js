@@ -298,6 +298,20 @@ async function check(store, host, keyBlob) {
     if (!store || typeof store !== "object" || typeof store.get !== "function") {
         throw new TypeError("ssh.hostkey: a store with a get function is required");
     }
+    // A pending trust (hull:ssh pendingTrust, platform gap 4): the FIRST key
+    // presented is the one its single connection is held to, and nothing is
+    // stored anywhere. Once it holds a key, only that key for that host is
+    // trusted - a rekey is pinned by the transport as well, and a second
+    // connect never gets this far (ssh.connect refuses a used one).
+    if (store.pending === true) {
+        if (store.key === null || store.key === undefined) {
+            store.key = keyBlob;
+            store.name = host;
+            return [TRUSTED, keyBlob];
+        }
+        if (store.key === keyBlob && store.name === host) return [TRUSTED, store.key];
+        return [CHANGED, store.key];
+    }
     if (typeof store.revoked === "function" && await store.revoked(keyBlob)) {
         return [REVOKED, null];
     }

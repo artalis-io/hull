@@ -69,6 +69,34 @@ function M.load_key(text, opts)
     return privatekey.load(text, opts)
 end
 
+--- A single-use trust for ONE connection (platform gap 4): the first host key
+--- the server presents is the key that connection is held to - a rekey is
+--- pinned to it as on every connection - and nothing is stored anywhere. A
+--- second connect with the same object is refused (`already_used`), and
+--- accept_host refuses it as a store (`not_a_store`).
+---
+--- For enrollment, where a node's proof must be bound to the host key of the
+--- SAME connection it travels over: connect with a pending trust,
+--- authenticate (the publickey signature is bound to this session's exchange
+--- hash, so a man in the middle cannot forward it), receive the proof, check
+--- it against conn:host_key(), conn:session_id() and the operator's
+--- out-of-band fingerprint, then conn:accept_host(store) or conn:close(). The
+--- app's check IS the trust decision, so it runs after the key is known
+--- rather than inside the handshake - a pending connection is untrusted until
+--- that check passes, and nothing the server says before it is evidence.
+function M.pending_trust()
+    local p = { pending = true, used = false, key = nil, name = nil }
+    p.get = function(name)
+        if p.key ~= nil and p.name == name then return p.key end
+        return nil
+    end
+    p.entries = function()
+        if p.key ~= nil then return { [p.name] = p.key } end
+        return {}
+    end
+    return p
+end
+
 --- An in-memory trust store, for callers that persist it themselves (a DB
 --- row, a config map) or not at all. For a file, see file_store.
 function M.memory_store(seed)
@@ -375,6 +403,55 @@ function Conn:close() return inner[self]:close() end
 function Conn:fingerprint() return inner[self].host_fingerprint end
 function Conn:negotiated() return inner[self].negotiated end
 
+--- Whether this connection was made with ssh.pending_trust(): its host key
+--- is the one the server presented, not one a store vouched for. Until the
+--- app's own check of host_key() / session_id() passes, nothing the server
+--- says is evidence.
+function Conn:trust_pending()
+    local o = inner[self].kex_opts
+    return type(o) == "table" and type(o.trust) == "table" and o.trust.pending == true
+end
+
+--- The host key this connection is bound to, as presented at the handshake
+--- and re-presented at every rekey: { blob, type, algorithm, fingerprint }.
+--- `blob` is the key's SSH wire encoding (what ssh.accept_host takes, and
+--- what an enrollment proof binds); `type` the key type it declares
+--- ("ssh-ed25519", "ssh-rsa", ...); `algorithm` the signature algorithm
+--- negotiated for it ("rsa-sha2-512" differs from the type); `fingerprint`
+--- SHA256:<base64>, as conn:fingerprint().
+function Conn:host_key()
+    local t = inner[self]
+    if not t.host_key_blob then return nil, { code = "not_handshaken" } end
+    return {
+        blob        = t.host_key_blob,
+        type        = hostkey.key_type(t.host_key_blob),
+        algorithm   = t.negotiated and t.negotiated.host_key,
+        fingerprint = t.host_fingerprint,
+    }
+end
+
+--- The session identifier (RFC 4253 section 7.2): the exchange hash of the
+--- FIRST key exchange, fixed for the connection's life, as bytes. The
+--- userauth signature is bound to it, and so is anything a peer proves about
+--- "this connection" - a proof over host_key().blob and session_id() names
+--- one transport and one transcript.
+function Conn:session_id()
+    local t = inner[self]
+    if not t.session_id then return nil, { code = "not_handshaken" } end
+    return t.session_id
+end
+
+--- Record this connection's host key in a real store, for the host and port
+--- it was dialled as: ssh.accept_host with the connection's own key. Refuses
+--- like it (`already_trusted`, `host_revoked`, `store_failed`), and refuses a
+--- pending trust as the store (`not_a_store`).
+function Conn:accept_host(store)
+    local t = inner[self]
+    if not t.host_key_blob then return nil, { code = "not_handshaken" } end
+    local o = t.kex_opts or {}
+    return M.accept_host(store, o.host, t.host_key_blob, o.port)
+end
+
 --- Ask the server for new keys now. Returns true, or nil plus a reason.
 ---
 --- A long-lived connection does not need this: hull/ssh already asks on its
@@ -626,9 +703,12 @@ end
 
 --- Open a connection. Returns a connection, or nil plus a reason table:
 ---
----   { code = "host_unknown", fingerprint = ... }
----   { code = "host_changed", fingerprint = ..., stored_fingerprint = ... }
+---   { code = "host_unknown", fingerprint = ..., key_blob = ... }
+---                                                key_blob is what accept_host takes
+---   { code = "host_changed", fingerprint = ..., stored_fingerprint = ...,
+---                            key_blob = ... }
 ---   { code = "host_revoked", fingerprint = ... }   the store revokes the key
+---   { code = "already_used" }                    a pending_trust used before
 ---   { code = "auth_failed",  methods = {...} }
 ---   { code = "denied",       detail = ... }      manifest refused it
 ---   { code = "connect_failed", detail = ..., errno = "EHOSTUNREACH" }
@@ -687,6 +767,18 @@ function M.connect(opts)
         keys[#keys + 1] = k
     end
     local trust = opts.trust or M.memory_store()
+    -- A pending trust is for ONE connection: the object that holds a key it
+    -- accepted must not vouch for a second server (hull.ssh.hostkey.check).
+    -- Taken at the connect, success or not: the refusal is a value, before
+    -- anything is dialled.
+    if type(trust) == "table" and trust.pending == true then
+        if trust.used then
+            return nil, { code = "already_used",
+                          detail = "a pending trust is for one connection; "
+                                   .. "make another with ssh.pending_trust()" }
+        end
+        trust.used = true
+    end
 
     -- One budget for everything up to an authenticated connection: TCP (and a
     -- relay's TLS), the version exchange, the key exchange and userauth. A
@@ -800,6 +892,13 @@ function M.accept_host(trust, host, key_blob, port)
             error({ code = "host_key_invalid",
                     detail = "not a host key blob Hull verifies (ssh-ed25519, "
                              .. "ecdsa-sha2-nistp256/384 or ssh-rsa)" }, 0)
+        end
+        -- A pending trust holds one connection's key and persists nothing:
+        -- "accepting into it" would record nothing anywhere.
+        if type(trust) == "table" and trust.pending == true then
+            error({ code = "not_a_store",
+                    detail = "a pending trust holds one connection's key and "
+                             .. "persists nothing; pass the real store" }, 0)
         end
         if type(trust) == "table" and type(trust.revoked) == "function"
            and trust.revoked(key_blob) then

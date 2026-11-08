@@ -152,6 +152,21 @@ function loadKey(text, opts) {
     return privatekey.load(isBuf(text) ? bytes.fromBuf(text) : text, opts);
 }
 
+/** A single-use trust for ONE connection (platform gap 4): the first host key
+ *  the server presents is the key that connection is held to (a rekey is
+ *  pinned to it as on every connection), and nothing is stored anywhere. A
+ *  second connect with the same object rejects `already_used`; acceptHost
+ *  rejects it as a store (`not_a_store`). For enrollment: connect with it,
+ *  authenticate, receive the node's proof, check it against conn.hostKey()
+ *  and conn.sessionId() and the operator's out-of-band fingerprint, then
+ *  conn.acceptHost(store) or conn.close(). See ssh.lua. */
+function pendingTrust() {
+    const p = { pending: true, used: false, key: null, name: null };
+    p.get = (name) => (p.key !== null && p.name === name ? p.key : null);
+    p.entries = () => (p.key !== null ? { [p.name]: p.key } : {});
+    return p;
+}
+
 /** An in-memory trust store. */
 function memoryStore(seed) {
     const t = Object.create(null);
@@ -387,6 +402,42 @@ const ConnHandle = Object.freeze({
     close() { return self(this).close(); },
     fingerprint() { return self(this).hostFingerprint; },
     negotiated() { return self(this).negotiated; },
+    /** Made with ssh.pendingTrust(): the host key is the one the server
+     *  presented, not one a store vouched for. See ssh.lua. */
+    trustPending() {
+        const o = self(this).kexOpts;
+        return !!(o && o.trust && typeof o.trust === "object" && o.trust.pending === true);
+    },
+    /** The host key this connection is bound to: { blob, type, algorithm,
+     *  fingerprint } - blob the SSH wire encoding as a byte string (what
+     *  acceptHost takes, what an enrollment proof binds), type the key type it
+     *  declares, algorithm the signature algorithm negotiated for it. */
+    hostKey() {
+        const t = self(this);
+        if (!t.hostKeyBlob) throw toError({ code: "not_handshaken" });
+        return {
+            blob: t.hostKeyBlob,
+            type: hostkey.keyType(t.hostKeyBlob),
+            algorithm: t.negotiated ? t.negotiated.hostKey : undefined,
+            fingerprint: t.hostFingerprint,
+        };
+    },
+    /** The RFC 4253 section 7.2 session identifier (the first exchange hash,
+     *  fixed for the connection's life), as a byte string. */
+    sessionId() {
+        const t = self(this);
+        if (!t.sessionId) throw toError({ code: "not_handshaken" });
+        return t.sessionId;
+    },
+    /** Record this connection's host key in a real store, for the host and
+     *  port it was dialled as (ssh.acceptHost with the connection's own key)
+     *  -> true. Rejects like it, and rejects a pending trust (not_a_store). */
+    acceptHost(store) {
+        const t = self(this);
+        if (!t.hostKeyBlob) return Promise.reject(toError({ code: "not_handshaken" }));
+        const o = t.kexOpts || {};
+        return acceptHost(store, o.host, t.hostKeyBlob, o.port);
+    },
     /** Ask the server for new keys now -> true. Call BETWEEN operations. */
     rekey() { const o = self(this); return guard(() => o.rekey()); },
     /** { rekeys, authKey, bytesSent, bytesReceived, packetsSent,
@@ -632,7 +683,8 @@ function tunnelOpener(tunnelIn, crypto, dial) {
 
 /** Open a connection. Resolves to a connection handle, or rejects with a
  *  coded Error: host_unknown (fingerprint, keyBlob), host_changed
- *  (fingerprint, storedFingerprint, keyBlob), host_revoked, auth_failed
+ *  (fingerprint, storedFingerprint, keyBlob), host_revoked, already_used (a
+ *  pendingTrust used before), auth_failed
  *  (methods), partial_success, denied, connect_failed (errno: the socket
  *  error's name, "EHOSTUNREACH", absent for a DNS or relay-TLS failure),
  *  timeout, too_many_streams, bad_key (key: 0-based index into keys), ... */
@@ -675,6 +727,15 @@ async function connect(opts) {
         keys.push(k);
     }
     const trust = opts.trust || memoryStore();
+    // A pending trust is for ONE connection (hull:ssh:hostkey check); taken
+    // at the connect, success or not, before anything is dialled.
+    if (trust !== null && typeof trust === "object" && trust.pending === true) {
+        if (trust.used) {
+            throw toError({ code: "already_used", detail: "a pending trust is for one "
+                + "connection; make another with ssh.pendingTrust()" });
+        }
+        trust.used = true;
+    }
 
     const timeout = isNil(opts.timeoutMs) ? CONNECT_TIMEOUT_MS : opts.timeoutMs;
     if (!isNil(opts.port) && !Number.isInteger(opts.port)) {
@@ -768,6 +829,10 @@ async function acceptHost(trust, host, keyBlob, port) {
                 detail: "not a host key blob Hull verifies (ssh-ed25519, "
                     + "ecdsa-sha2-nistp256/384 or ssh-rsa)" });
         }
+        if (trust !== null && typeof trust === "object" && trust.pending === true) {
+            throw toError({ code: "not_a_store", detail: "a pending trust holds one "
+                + "connection's key and persists nothing; pass the real store" });
+        }
         if (trust !== null && typeof trust === "object" && typeof trust.revoked === "function"
             && await trust.revoked(blob)) {
             throw toError({ code: "host_revoked", detail: "the trust store revokes this key" });
@@ -794,7 +859,7 @@ function fingerprint(keyBlob, opts) {
 }
 
 export const ssh = {
-    loadKey, memoryStore, fileStore, kvStore, connect, acceptHost, forgetHost,
-    fingerprint, CONNECT_TIMEOUT_MS,
+    loadKey, pendingTrust, memoryStore, fileStore, kvStore, connect, acceptHost,
+    forgetHost, fingerprint, CONNECT_TIMEOUT_MS,
 };
 export default ssh;

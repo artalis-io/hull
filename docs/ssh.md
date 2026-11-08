@@ -166,6 +166,48 @@ key, and Hull pins it against the key **this connection was built on**, not
 merely against the store. A server therefore cannot present one identity at
 handshake and another at rekey, even one the store would have accepted.
 
+### Pending trust: one transport, one host key
+
+Meeting a key costs one connection and authenticating costs a second, and
+that is right for adoption: the second connection uses the key the operator
+approved. It is wrong for an **enrollment** in which the node's proof must be
+bound to the host key of the same connection it travels over. For that, a
+single-use trust:
+
+```lua
+local pending = ssh.pending_trust()
+local conn, err = ssh.connect{ host = host, user = user, key = key, trust = pending }
+-- conn:trust_pending() is true: the key is the one the SERVER presented, and
+-- nothing the server says is evidence until your own check passes.
+local hk  = conn:host_key()      -- { blob, type, algorithm, fingerprint }
+local sid = conn:session_id()    -- the RFC 4253 §7.2 session identifier, bytes
+local proof = conn:exec("hs-node prove")
+if verify(proof.stdout, hk.blob, sid, operator_fingerprint) then
+    conn:accept_host(store)      -- record THIS connection's key in a real store
+else
+    conn:close()
+end
+```
+
+- `ssh.pending_trust()` accepts the first host key presented to it and is then
+  held to it: a rekey is pinned as on every connection, and the object vouches
+  for no second server - a second `connect` with it fails `already_used`, and
+  `accept_host(pending, ...)` fails `not_a_store`. Nothing reaches a store.
+- `conn:host_key()` and `conn:session_id()` are on **every** connection.
+  `blob` is the key's SSH wire encoding, what `accept_host` takes; `type` the
+  key type it declares (`ssh-ed25519`, `ssh-rsa`); `algorithm` the signature
+  algorithm negotiated for it (`rsa-sha2-512` differs from the type). The
+  publickey userauth signature is bound to the session identifier, so a man
+  in the middle cannot forward the authentication; a proof over
+  `host_key().blob` and `session_id()` names one transport and one
+  transcript.
+- `conn:accept_host(store)` is `ssh.accept_host` with the connection's own key,
+  host and port: it never overwrites (`already_trusted`), and may fail
+  `host_revoked` or `store_failed` like it.
+
+The app's check is the trust decision, and it runs **after** the key is known
+rather than inside the handshake - which is why this is not a callback.
+
 ## 4. Keys and passphrases
 
 `ssh.load_key(text, opts)` reads an OpenSSH private key
@@ -584,6 +626,9 @@ refusal's `e.code` is `wait_refused` / `busy`).
 | `bad_reply` | the SFTP server answered with a message that does not fit the request |
 | `bad_software` | `connect`'s `software` option is not a valid identification string (letters, digits, `.`, `_`) |
 | `already_trusted` | `accept_host` for a host that already has a key; `forget_host` it first |
+| `already_used` | `connect` with a `pending_trust()` that a connect already took; make another |
+| `not_a_store` | `accept_host` with a `pending_trust()` as the store; it persists nothing - pass the real store |
+| `not_handshaken` | `host_key` / `session_id` / `accept_host` on a connection that never finished connecting (not reachable through `connect`) |
 | `host_revoked` / `host_key_invalid` | `accept_host` for a key the store revokes / a blob that is not a host key Hull verifies (Ed25519, ECDSA P-256/384, RSA) |
 | `not_handshaken` | `rekey` on a connection that never finished connecting |
 | `io_error` | the stream failed in some other way; `detail` says how |
@@ -652,6 +697,9 @@ app.main(async (ctx) => {
   stdout, stderr }`.
 - `conn.sftp({ replyTimeoutMs })` gives the same SFTP methods, each a Promise;
   `list` resolves to `{ entries, refused }`.
+- Pending trust (§3): `ssh.pendingTrust()`, `conn.trustPending()`,
+  `conn.hostKey()` (`blob` a byte string), `conn.sessionId()` (a byte string),
+  `conn.acceptHost(store)` (a Promise).
 - `conn.stats().authKey` is a 0-based index into `keys`, as is `e.key` when a
   key in `keys` fails to load (both 1-based in Lua).
 - Errors: `e.code`, `e.detail`, and the host-key fields `e.fingerprint`,

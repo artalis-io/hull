@@ -362,6 +362,19 @@ function M.check(store, host, key_blob)
     if type(store) ~= "table" or type(store.get) ~= "function" then
         error("ssh.hostkey: a store with a get function is required", 2)
     end
+    -- A pending trust (hull.ssh.pending_trust, platform gap 4): the FIRST key
+    -- presented is the one its single connection is held to, and nothing is
+    -- stored anywhere. Once it holds a key, only that key for that host is
+    -- trusted - a rekey is pinned by the transport as well, and a second
+    -- connect never gets this far (ssh.connect refuses a used one).
+    if store.pending == true then
+        if store.key == nil then
+            store.key, store.name = key_blob, host
+            return M.TRUSTED, key_blob
+        end
+        if store.key == key_blob and store.name == host then return M.TRUSTED, store.key end
+        return M.CHANGED, store.key
+    end
     -- Revocation first: a revoked key is refused even if some line trusts it.
     -- `revoked` is optional; only stores that can revoke (file_store) have it.
     if type(store.revoked) == "function" and store.revoked(key_blob) then
