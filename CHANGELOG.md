@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **`app.main` observes SIGINT / SIGTERM** (platform gap 7, `docs/design/platform_gaps_hsctl.md`
+  §9). Before, no handler was installed while main ran: Ctrl-C killed the process with no
+  teardown and no stdout flush, so a tool could not stop what it had started. Now both runners
+  install one around the main window (`src/hull/shared/main_signal.c`): the signal is delivered
+  on the event loop as a run of its own - JS `ctx.signal` (`aborted`, `reason`, `onabort`,
+  `promise`; AbortSignal-shaped, made in C), Lua `ctx.interrupted()` / `ctx.on_interrupt(fn)` -
+  and main then has `--interrupt-grace-ms` (default 5000; `--hull-interrupt-grace-ms` in a
+  built binary) to return with its own exit code; past it, or on a second signal, teardown runs
+  and the exit status is 128 + the signal. A main that registered nothing is not continued:
+  teardown and 128 + signal at once, with buffered stdout flushed. `tests/e2e_cli_interrupt.sh`
+  (`make e2e-cli-interrupt`) covers both runtimes on both runners. docs/cli_mode.md "Interrupts".
+
 ## [0.18.4] - 2026-11-08
 
 ### Fixed

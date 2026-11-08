@@ -188,6 +188,16 @@ typedef struct HlRuntimeVtable {
      * than the one it last ran on. QuickJS re-reads its C stack bounds
      * (JS_UpdateStackTop); NULL = nothing to do (Lua). Runs no app code. */
     void  (*thread_switch)(HlRuntime *rt);
+    /* app.main observed SIGINT / SIGTERM (shared/main_signal.h): deliver
+     * @p sig to the app as a run of its own - JS: ctx.signal's onabort and
+     * promise; Lua: the ctx.on_interrupt callback - with the budget, the
+     * deadline and the stale-transaction guard every entry gets. Returns 1
+     * when the app had registered for it (an onabort, a read of
+     * ctx.signal.promise, an on_interrupt callback, or a ctx.interrupted()
+     * poll), so main is given the grace to finish; 0 when it had not, so the
+     * runner ends the process at once. Called on the loop thread, inside the
+     * main window only. NULL = no delivery (the runner ends at once). */
+    int   (*main_interrupt)(HlRuntime *rt, int sig);
 
     /* The VM's run watch (cap/run_watchdog.h): --vm-thread measures a run
      * against its deadline. NULL = the runtime has none (then the VM thread

@@ -52,6 +52,8 @@ app.main(function(ctx)
     -- ctx.stdin  : reader . :read("*l" | "*a" | bytes_n) → string|nil, :close()
     -- ctx.stdout : writer . :write(str), :flush()
     -- ctx.stderr : writer . :write(str), :flush()
+    -- ctx.interrupted()    : nil, or "SIGINT" / "SIGTERM" once one arrived
+    -- ctx.on_interrupt(fn) : register one callback, fn(name) (see "Interrupts")
 
     local name = ctx.args[1] or "world"
     ctx.stdout:write("hello " .. name .. "\n")
@@ -73,6 +75,8 @@ app.main(async (ctx) => {
     //   a chunk is a string (written as UTF-8), an ArrayBuffer or a typed
     //   array (written as its bytes); a DataView or any other object is a
     //   TypeError
+    // ctx.signal : { aborted, reason, onabort, promise } - an AbortSignal-shaped
+    //   view of SIGINT / SIGTERM (see "Interrupts")
 
     const name = ctx.args[0] ?? "world";
     ctx.stdout.write(`hello ${name}\n`);
@@ -85,6 +89,60 @@ deadline. That is fine in app.main, which holds nothing else up, so a read is
 allowed only in app.main's own code: from a request handler, a timer or a task
 (a `ctx` kept past main) it raises. Writes and flushes work anywhere and are
 charged to the run's instruction budget like any other output (audit 41).
+
+### Interrupts (SIGINT / SIGTERM)
+
+While `app.main` runs, Ctrl-C and `kill` reach the app instead of killing the
+process (`src/hull/shared/main_signal.c`, platform gap 7). The signal is
+delivered on the event loop as a run of its own, with the instruction budget,
+the run deadline and the stale-transaction guard every entry gets:
+
+```js
+app.main(async (ctx) => {
+    const ranks = await startRanks();
+    ctx.signal.onabort = (reason) => ctx.stderr.write(`${reason}: stopping\n`);
+    await Promise.race([ranks.done(), ctx.signal.promise]);
+    if (ctx.signal.aborted) { await ranks.stop(); return 130; }
+    return 0;
+});
+```
+
+```lua
+app.main(function(ctx)
+    ctx.on_interrupt(function(name) ctx.stderr:write(name .. ": stopping\n") end)
+    local ranks = start_ranks()
+    while not ranks:done() and not ctx.interrupted() do hull.sleep(200) end
+    if ctx.interrupted() then ranks:stop(); return 130 end
+    return 0
+end)
+```
+
+- **JS `ctx.signal`** is a minimal AbortSignal shape made in C (QuickJS has no
+  AbortSignal, and Hull adds no event machinery): `aborted`, `reason`
+  (`"SIGINT"` / `"SIGTERM"`), `onabort` (a function or null, called once with
+  the reason) and `promise`, which resolves with the reason. The object is
+  non-extensible and every property is an accessor onto the runtime, so app
+  code cannot forge a delivery.
+- **Lua** gets `ctx.interrupted()` (nil, or the signal's name) and
+  `ctx.on_interrupt(fn)` (one callback, `fn(name)`, run in a coroutine of its
+  own, so it may wait). Main itself is not woken: a main parked on a long
+  `hull.sleep` sees the interrupt at its next poll, so poll between short
+  waits.
+- **Grace.** From the first delivered signal main has `--interrupt-grace-ms`
+  (default 5000, the serve loop's drain timeout; a downgrade flag, so
+  `--hull-interrupt-grace-ms` in a built binary) to return. Its return value
+  is then the exit code. If it has not, teardown runs in the normal order and
+  the exit status is 128 + the signal (130 / 143).
+- **No handler.** A main that never set `onabort`, read `ctx.signal.promise`,
+  called `ctx.interrupted()` or `ctx.on_interrupt()` is not continued: the
+  process tears down at once and exits 128 + the signal. This differs from
+  before only by the teardown and the stdout flush.
+- **A second signal** during the grace ends the process at once, 128 + the
+  signal. A second signal BEFORE the first could be delivered (main in a
+  synchronous stretch the loop never gets to) kills the process as before.
+- The main window only: once a full build enters the serve loop, Keel's own
+  handler and drain apply. Covered by `tests/e2e_cli_interrupt.sh`
+  (`make e2e-cli-interrupt`, both runtimes, both runners).
 
 ### Where `ctx.args` comes from
 

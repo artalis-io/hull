@@ -213,6 +213,15 @@ typedef struct HlLua {
      * from lua_status (audit 38). LUA_YIELD while main has not ended. */
     int         cli_main_status;
 
+    /* app.main's interrupt (shared/main_signal.h, platform gap 7): the
+     * signal delivered (0 = none), the registry ref of the ctx.on_interrupt
+     * callback (LUA_NOREF = none), and whether main registered for it at all
+     * (a callback set, or ctx.interrupted() polled) - the runner gives an
+     * unregistered main no grace. Reset by vt_lua_run_main. */
+    int         main_sig;
+    int         main_sig_ref;
+    int         main_sig_watched;
+
     /* hull._task tasks spawned but not yet run (HlLuaTask list, async.c);
      * released by hl_lua_free. */
     void       *tasks;
