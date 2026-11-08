@@ -8,6 +8,22 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plain source build (`make platform && make EMBED_PLATFORM=1`) built apps with no AEAD
+  backend.** `crypto.gcm_seal` / `gcmSeal` (and `gcm_open`, `aes256ctr`, `chacha20`,
+  `poly1305` - everything `hull/ssh` encrypts with) failed in every BUILT app with
+  `no AEAD backend in this build (TLS is not composed)`, while `hull dev` worked. `hull build`
+  links `libhull_platform.a` as an ordinary archive, and `cap/crypto_aead_mbedtls.c` exported
+  nothing but its strong override of the weak `hl_crypto_aead_active_backend` that `crypto.o`
+  already defines, so no undefined symbol ever named the member and the fail-closed default
+  stood. Released binaries were unaffected (their base is TLS-less and whole-archives
+  `libhull_feature-tls.a`). On a TLS-full base the weak default now names the mbedTLS backend,
+  which pulls the TU; the `HL_TLS_FEATURE=1` sub-build defines `-DHL_TLS_FEATURE` and keeps
+  the stub. Found by hsctl against v0.18.3. Design note: `docs/tls_feature.md` (Phase 1).
+  Covered by `tests/e2e_build.sh` (a Lua and a JS `app.main` app built on the plain base
+  round-trip `gcm_seal` / `gcm_open` and refuse a wrong tag).
+
 ## [0.18.3] - 2026-11-08
 
 ### Added (hsctl platform gaps: ssh login from env)

@@ -191,7 +191,8 @@ $(BUILDDIR)/test_pgwire: $(TESTDIR)/hull/cap/test_pgwire.c $(SRCDIR)/hull/cap/pg
 
 # pgwire crypto objects, still used by the mysql tests below.
 PG_CRYPTO_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o \
-                  $(BUILDDIR)/cap_crypto_asym_mbedtls.o $(MBEDTLS_OBJS) $(TWEETNACL_OBJ) $(BCRYPT_OBJS)
+                  $(BUILDDIR)/cap_crypto_asym_mbedtls.o $(BUILDDIR)/cap_crypto_aead_mbedtls.o \
+                  $(MBEDTLS_OBJS) $(TWEETNACL_OBJ) $(BCRYPT_OBJS)
 
 # pgwire connection / DSN / handshake test. hl_pg_conn_start rides the shared
 # HlDbTransport byte transport (Keel v3; docs/db_transport_extraction.md), so the test source-compiles pg_conn.c +
@@ -869,8 +870,11 @@ $(BUILDDIR)/test_tools_install: $(TESTDIR)/hull/test_tools_install.c $(TOOLS_INS
 # release_io/sbom/verify_self now hash via the cap layer's self-contained
 # SHA-256 (hl_cap_crypto_sha256) instead of mbedtls_sha256, so these focused
 # test binaries must link cap/crypto.o - plus its TweetNaCl (SHA-512/ed25519)
-# dependency and the mbedTLS HMAC backend it references in HTTP builds.
-CRYPTO_TEST_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o $(TWEETNACL_OBJ) $(BCRYPT_OBJS)
+# dependency and the mbedTLS HMAC + AEAD backends it references in HTTP builds
+# (the AEAD default names the mbedTLS backend on a TLS-full base so a plain
+# archive link pulls that TU; every consumer here already links MBEDTLS_OBJS).
+CRYPTO_TEST_OBJS := $(BUILDDIR)/cap_crypto.o $(BUILDDIR)/cap_crypto_hmac_mbedtls.o \
+                    $(BUILDDIR)/cap_crypto_aead_mbedtls.o $(TWEETNACL_OBJ) $(BCRYPT_OBJS)
 
 # Shared release I/O helpers (platform id, SHA-256, manifest parse,
 # atomic write). Skipped on HL_ENABLE_HTTP_CLIENT=0 builds where the

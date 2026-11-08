@@ -1040,6 +1040,66 @@ else
     fail "signed CLI app binary missing"
 fi
 
+# ── AEAD backend in a built app on a TLS-full base ───────────────────
+#
+# A plain `make platform && make EMBED_PLATFORM=1` hull (this suite's Step 0)
+# builds apps against a TLS-FULL libhull_platform.a linked as an ordinary
+# archive. The AES-GCM backend TU exported only its strong override of a weak
+# default crypto.o already defines, so no undefined symbol ever named it, the
+# linker left the member out, and every BUILT app's crypto.gcm_seal failed with
+# "no AEAD backend in this build" - while `hull dev`, which links objects,
+# worked (found by hsctl, 2026-11-08). crypto.o now names the mbedTLS backend
+# on a TLS-full base. Both runtimes, since both bridges reach the same cap.
+
+echo ""
+echo "=== AEAD backend survives the archive link (built app.main, both runtimes) ==="
+
+mkdir -p "$WORKDIR/gcm_lua" "$WORKDIR/gcm_js"
+cat > "$WORKDIR/gcm_lua/app.lua" << 'APPEOF'
+app.manifest({ modules = { "hull/crypto@1" } })
+local crypto = require("hull.crypto")
+app.main(function(ctx)
+    local key, iv = string.rep("k", 32), string.rep("n", 12)
+    local ct, tag = crypto.gcm_seal(key, iv, "aad", "hello")
+    local pt = crypto.gcm_open(key, iv, "aad", ct, tag)
+    local bad = crypto.gcm_open(key, iv, "aad", ct, string.rep("\0", 16))
+    if pt == "hello" and #tag == 16 and bad == nil then
+        ctx.stdout:write("gcm-ok\n")
+        return 0
+    end
+    ctx.stdout:write("gcm-mismatch\n")
+    return 1
+end)
+APPEOF
+cat > "$WORKDIR/gcm_js/app.js" << 'APPEOF'
+import { app } from "hull:app";
+import { crypto } from "hull:crypto";
+app.manifest({ modules: ["hull/crypto@1"] });
+app.main((ctx) => {
+    const key = new Uint8Array(32).fill(0x6b);
+    const iv = new Uint8Array(12).fill(0x6e);
+    const { ciphertext, tag } = crypto.gcmSeal(key, iv, "aad", "hello");
+    const pt = crypto.gcmOpen(key, iv, "aad", ciphertext, tag);
+    const bad = crypto.gcmOpen(key, iv, "aad", ciphertext, new Uint8Array(16));
+    if (pt && pt.byteLength === 5 && tag.byteLength === 16 && bad === null) {
+        ctx.stdout.write("gcm-ok\n");
+        return 0;
+    }
+    ctx.stdout.write("gcm-mismatch\n");
+    return 1;
+});
+APPEOF
+for rt in lua js; do
+    hull_do "$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/gcm_$rt/gcm" "$WORKDIR/gcm_$rt"
+    check_exit "build $rt gcm app exits 0" 0 $RC
+    if [ -x "$WORKDIR/gcm_$rt/gcm" ]; then
+        GCM_OUT=$(cd "$WORKDIR/gcm_$rt" && ./gcm --hull-no-verify-platform 2>&1)
+        check_contains "$rt: built app seals and opens with AES-GCM (backend TU pulled)" "$GCM_OUT" "gcm-ok"
+    else
+        fail "$rt gcm app binary missing"
+    fi
+done
+
 # ── Audit 32: no output through a symlink; app text escaped ──────────
 
 echo ""
