@@ -8,6 +8,8 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-11-08
+
 ### Fixed
 
 - **A plain source build (`make platform && make EMBED_PLATFORM=1`) built apps with no AEAD
