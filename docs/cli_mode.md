@@ -192,10 +192,19 @@ end)
   `_hull_*` tables) is `<state>/.hull/internal.db`. `hull migrate` and `hull
   agent db` with no `-d` open the same file (they load the app to read the
   manifest). An operator's `-d` still wins; `hull test` keeps its `:memory:`.
-- Not yet: a built binary that needs NOTHING from its working directory (so it
-  can run from `~` or `/`), the last step of the same design
-  (`docs/design/platform_gaps_hsctl.md` §11); until then a built tool is still
-  run from a directory of its own, and its `@state/` holds the state.
+- **A built tool that keeps everything under `@state/` is rootless.** When a
+  BUILT `app.main` binary's manifest declares `state` and every fs grant and
+  every file database (the default included) is under `@state/`, it needs
+  nothing from its working directory: the embedded VFS holds the app. The
+  working directory is then granted nothing to the kernel sandbox, and the
+  refusal of `/` and the home directory does not apply - `cd ~ && hsctl
+  status` works, and so does a systemd unit with no `WorkingDirectory=`. Any
+  app-relative grant or file database, or a route handler, makes the app
+  rooted again, with the rules above; dev mode (`hull app.lua`) is always
+  rooted, since it reads the source from disk. A built binary started from
+  `/` or the home gets an in-memory implicit default database until its
+  manifest names one, so nothing is written there even for an app that turns
+  out rooted and is refused.
 
 ### Where `ctx.args` comes from
 

@@ -90,6 +90,7 @@
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
 #include "hull/shared/main_signal.h" /* app.main's interrupt (gap 7) */
 #include "hull/shared/state_dir.h"   /* the @state/ root (gap 3) */
+#include "hull/shared/host.h"        /* hl_host_path_too_broad */
 #include "hull/cap/vm_thread.h"     /* --vm-thread */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_watchdog.h"
@@ -1072,8 +1073,19 @@ default_db:
      * migrate` and `hull agent db|migrate` open. It was "data.db" in the
      * WORKING directory, so `hull myapp/app.lua` from a parent directory
      * served a database `hull migrate myapp` never touched. (A built binary
-     * takes its app directory from its working directory: no change there.) */
+     * takes its app directory from its working directory: no change there.)
+     *
+     * Except a BUILT binary run from / or the user's home or above (gap 3,
+     * PR 3): either it is a rootless tool, whose manifest names its default
+     * database (under "@state/") and which is granted nothing there, or the
+     * sandbox refuses that directory below. Neither wants a data.db made in
+     * / or ~, so the implicit default is in-memory there until the manifest
+     * says otherwise. */
     if (s->cfg.db_path && strcmp(s->cfg.db_path, HL_DEFAULT_DB_PATH) == 0 &&
+        s->cfg.db_path_is_default && embedded_app_present() &&
+        (strcmp(s->app_dir, "/") == 0 || hl_host_path_too_broad(s->app_dir))) {
+        s->cfg.db_path = ":memory:";
+    } else if (s->cfg.db_path && strcmp(s->cfg.db_path, HL_DEFAULT_DB_PATH) == 0 &&
         s->cfg.db_path_is_default) {
         int n = snprintf(s->default_db, sizeof(s->default_db), "%s/%s",
                          s->app_dir, HL_DEFAULT_DB_PATH);
@@ -2719,6 +2731,18 @@ static int hl_serve_apply_sandbox(HlServerState *s)
              * so the server loop can run after main returns. */
             sandbox_policy.network_inbound = 0;
         }
+        /* A built app.main tool that keeps everything under its state
+         * directory needs nothing from its working directory (gap 3, PR 3):
+         * run it from anywhere, ~ and / included. Never in dev mode, which
+         * reads the source from disk. */
+        sandbox_policy.rootless = has_main_only &&
+                                  hl_vfs_embedded(hl_app_context_app_vfs(s->app)) &&
+                                  hl_sandbox_manifest_rootless_ok(&s->manifest) &&
+                                  hl_sandbox_rootless_db_ok(s->cfg.no_db ? NULL : s->cfg.db_path,
+                                                            s->app_dir,
+                                                            s->state_dir[0] ? s->state_dir : NULL);
+        if (sandbox_policy.rootless)
+            log_debug("[hull:c] rootless: nothing is granted on %s", s->app_dir);
 
         if (hl_sandbox_apply(&sandbox_policy, s->app_dir,
                               s->cfg.no_db ? NULL : hl_sandbox_db_path(s->cfg.db_path),

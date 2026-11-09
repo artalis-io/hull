@@ -1706,6 +1706,12 @@ e2e-cli-interrupt: $(BUILDDIR)/hull
 e2e-state-dir: $(BUILDDIR)/hull
 	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_state_dir.sh
 
+# A rootless BUILT tool (gap 3, PR 3): everything under @state/, run from the
+# home directory and from /. Needs the platform library to build it with.
+.PHONY: e2e-state-dir-built
+e2e-state-dir-built: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
+	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_state_dir_built.sh
+
 e2e-migrate: $(BUILDDIR)/hull
 	sh tests/e2e_migrate.sh
 

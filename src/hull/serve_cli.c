@@ -865,6 +865,15 @@ int hull_serve(int argc, char **argv)
         sandbox_policy.allow_degraded = allow_degraded_sandbox;
         /* CLI mode → no inbound network. */
         sandbox_policy.network_inbound = 0;
+        /* A built tool that keeps everything under its state directory needs
+         * nothing from its working directory (gap 3, PR 3): run it from
+         * anywhere, ~ and / included. */
+        sandbox_policy.rootless = embedded_app_present() &&
+                                  hl_sandbox_manifest_rootless_ok(&manifest) &&
+                                  hl_sandbox_rootless_db_ok(db_path, app_dir,
+                                                            hl_app_context_state_dir(ctx));
+        if (sandbox_policy.rootless)
+            log_debug("[hull:cli] rootless: nothing is granted on %s", app_dir);
         /* A `-d postgres://...` (or `-d $DATABASE_URL`) database dials out:
          * db.async's worker connection and a reconnect need the socket
          * (audit 25 - serve.c granted it, this runner did not). */

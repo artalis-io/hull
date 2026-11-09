@@ -127,6 +127,17 @@ typedef struct HlSandboxPolicy {
      * hl_sandbox_policy_from_manifest (the manifest holds a NAME; the entry
      * point resolves it). */
     const char *state_dir;
+
+    /* ROOTLESS (platform gap 3, PR 3): a BUILT app.main binary whose manifest
+     * keeps everything under "@state/" - every fs grant, every file database,
+     * the default included - needs nothing from its working directory (the
+     * embedded VFS holds the app). The app directory is then granted nothing
+     * and may be / or the home or above: the refusal of such a directory
+     * and its read grant are skipped. Decided by the entry point
+     * (hl_sandbox_manifest_rootless_ok + hl_sandbox_rootless_db_ok, an
+     * embedded VFS and app.main only); never for a dev-mode app, which reads
+     * its source from disk. */
+    int rootless;
 } HlSandboxPolicy;
 
 /*
@@ -156,6 +167,23 @@ const char *hl_sandbox_db_path(const char *dsn);
  * points' decision to resolve a TLS trust anchor.
  */
 int hl_sandbox_manifest_has_network_db(const HlManifest *m);
+
+/* Whether the manifest lets a BUILT app.main binary run ROOTLESS (gap 3, PR
+ * 3): it declares a state directory, and every fs grant and every file
+ * database DSN (databases.named, databases.internal) is under "@state/" (a
+ * network or :memory: DSN is fine). The caller adds the other conditions: an
+ * embedded VFS, app.main only, and the default database
+ * (hl_sandbox_rootless_db_ok). */
+int hl_sandbox_manifest_rootless_ok(const HlManifest *m);
+
+/* Whether the DEFAULT database DSN @p dsn (NULL = none) needs nothing from
+ * the app directory @p app_dir: none, :memory:, a network DSN, an absolute
+ * file under the state directory @p state_dir (NULL = none), or an absolute
+ * file outside an app directory that is itself a real directory (not / or
+ * the home, under which everything lies). A relative file is the app
+ * directory's. */
+int hl_sandbox_rootless_db_ok(const char *dsn, const char *app_dir,
+                              const char *state_dir);
 
 void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
                                      const HlManifest *manifest);

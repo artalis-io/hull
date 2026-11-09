@@ -281,7 +281,13 @@ one pending connection, a command run, the key then accepted into a `file_store`
 
 ## 11. Gap 3: a per-user state directory for `app.main` tools
 
-**Status (2026-11-09): PRs (a) and (b) built.** (a): the manifest `state = { name }`, the
+**Status (2026-11-09): PRs (a), (b) and (c) built - gap 3 is closed on the Hull side.** (c):
+`HlSandboxPolicy.rootless`, decided by both runners from an embedded VFS + app.main only +
+`hl_sandbox_manifest_rootless_ok` (state declared, every grant and file DSN under `@state/`)
++ `hl_sandbox_rootless_db_ok` (the default database none / :memory: / network / under the state
+directory); the sandbox then grants nothing on the working directory and skips the `/` / home
+refusal, and serve.c gives a built binary started there an in-memory implicit default until the
+manifest names one. `tests/e2e_state_dir_built.sh`. Details of (a) and (b): (a): the manifest `state = { name }`, the
 resolver (`shared/state_dir.c`, with `HULL_STATE_DIR` through the same validator as
 `HULL_CACHE_DIR`), the fs policy's second root, the kernel grant and the fs bindings. (b):
 `"@state/<file>"` DSNs in `databases.named` / `.internal` and `db.open`, and
@@ -293,8 +299,7 @@ given `<state>/.hull/internal.db`), rather than chosen up front; `hull migrate` 
 agent's db commands load the app to learn it. `tests/e2e_state_dir.sh`. Other details:
 `@state/` grants are skipped by the sandbox's per-grant walk (the whole state directory is
 granted instead), and `~/.local` / `~/.local/state` are made 0755 (the XDG layout) with only
-`<name>` 0700. PR (c) (rootless built binaries) is next; gap 9 retires for a tool that moves
-its state under `@state/`.
+`<name>` 0700. Gap 9 retires for a tool that moves its state under `@state/`.
 
 **Today (before the change).** A built binary's app directory is its working directory (`serve_cli.c` ~:443-465,
 `serve.c` ~:972-1050, `realpath(".")`), every `fs` grant is relative to it, and
@@ -374,7 +379,7 @@ of them. hsctl then bumps `HULL_VERSION` in its CI and drops its gap 8 workaroun
 |-----|--------------|
 | 1 | `remote.describe` prints `e.detail`; the `--via cloudflare` note in its README stays |
 | 2 | `trust.key(true)` writes with `{ private: true }`; the `state/` mode check becomes a one-time repair hint |
-| 3 | manifest `state = { name = "hsctl" }`, grants under `@state/`, `data.db` under it, `hsctl key import` from stdin; README "fleet directory" section goes (Hull side: the `@state/` root built 2026-11-09, unreleased; the database and the rootless binary follow) |
+| 3 | manifest `state = { name = "hsctl" }`, grants under `@state/`, `databases.named.default = "@state/data.db"`, `hsctl key import` from stdin; README "fleet directory" section goes (Hull side built 2026-11-09 in three PRs, unreleased) |
 | 4 | enrollment uses `pendingTrust()` + `hostKey()` + `sessionId()` + `acceptHost(store)`; adoption may stay two-connection or move to the same flow (Hull side built, unreleased as of 2026-11-08) |
 | 5 | `users: ["$HSCTL_LOGIN"]` with `HSCTL_LOGIN` in `env`, default documented |
 | 6 | `hsctl run` writes the remote's bytes straight through; `--json` keeps base64 |
