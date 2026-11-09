@@ -10,6 +10,20 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
 - **`hull/ssh` audit 44: the Lua and JS clients brought back into line, and their edges
   closed.** Lua `Sftp:send` now marks the session broken when a multi-chunk request is cut
   short between chunks (a refusal, a closed channel), as JS did, so the next request cannot
@@ -27,6 +41,36 @@ release-artifact layout).
   the most it can take before reading, so a trip no longer discards bytes already taken.
   Tests `ssh_audit44.*`, `ssh_sftp_audit44.*`, `ssh_tunnel_audit44.*`,
   `js_ssh_audit44.read_trip_consumes_nothing`.
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
