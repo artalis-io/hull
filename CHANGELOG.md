@@ -10,6 +10,12 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
 - **app.main's interrupt handling (audit 44, `src/hull/shared/main_signal.c`).** An app with
   `app.main` AND handlers whose main handled SIGTERM / SIGINT and returned 0 fell through into
   the serve loop, so the stop request was lost and the process served until SIGKILL: a signal
@@ -21,6 +27,44 @@ release-artifact layout).
   atomic. JS: main's own code after `await ctx.signal.promise` may read `ctx.stdin` again.
   Tests: `main_signal_audit44.*`, `cli_interrupt_audit44.main_then_serve_sigterm`,
   `{js,lua}_main_signal_audit44.stdin_after_signal_await`.
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
