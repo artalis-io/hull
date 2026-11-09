@@ -10,6 +10,40 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
 - **Audit 44, tooling and runtime edges (all Low).** `--verbose` CLI logging (and the
   `-DDEBUG` line callback) printed a log record's source field - a script's module name,
   so a cloned tree's file name - raw; it is escaped like the message. `hull agent` results
@@ -23,6 +57,16 @@ release-artifact layout).
   silently; opts go third, as in JS). A read-only stdlib module view's `pairs` hands out
   table keys as views too. JS `compute.buffer`'s error message no longer lists WasmBuffer /
   MappedBuffer, which it does not take.
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
