@@ -10,6 +10,16 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
 - **The `@state/` default database (v0.19.0, gap 3) is now seamless for the app's top level,
   `hull migrate` and the agent** (audit 44). When `databases.named.default` replaces the
   implicit default: the old connection is closed in place, so a `db.default()` object captured
@@ -30,6 +40,40 @@ release-artifact layout).
   cannot be carried (a view, a virtual table, a default that is not SQLite) is named in a WARN. `hull agent db` / `sql` no longer create the state database and directory (the MCP
   reload no longer opens the state database at all), and `blob.init` on an `@state/` root
   checks for symbolic links from the state directory, not the app directory's length.
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
