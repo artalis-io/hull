@@ -10,6 +10,32 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
 - **Auth stdlib Lows from audit 44, both runtimes.** `oauth.init` refuses a `state_ttl` /
   `jwks_ttl` (`stateTtl` / `jwksTtl`) that is not a positive number of seconds (a string one
   made every JS callback "expired", a negative one expired every state); a failed JWKS fetch is
@@ -26,6 +52,24 @@ release-artifact layout).
   role / permission argument when the middleware is made. Lua `auth.session_middleware` /
   `jwt_middleware` take only the literal `optional = true`. Tests:
   `stdlib/{lua,js}/hull/tests/test_auth_audit44.*`.
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
