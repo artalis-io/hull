@@ -481,8 +481,12 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
                 hl_app_context_free(*warm_ctx_ptr);
                 *warm_ctx_ptr = NULL;
             }
-            HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1,
-                                      .manifest_default_db = 1 };
+            /* As the warm context was made at startup: its database is the
+             * context's own :memory: one (the db tools take a db_path for a
+             * file). With manifest_default_db the reload opened the app's
+             * "@state/" default read-write - creating it, migrating it, and
+             * handing it to hull_eval / hull_request code (audit 44). */
+            HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1 };
             if (hl_app_context_init(warm_ctx_ptr, &opts) != 0)
                 *warm_ctx_ptr = NULL;
         }

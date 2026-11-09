@@ -32,7 +32,7 @@
  * fall-through but `hl_blob_store_open` takes ownership of a copy
  * (the store keeps its own buffer). */
 static int resolve_root(const HlFsConfig *fs_cfg, const char *dir,
-                        char *out, size_t out_cap)
+                        char *out, size_t out_cap, size_t *root_len)
 {
     if (!fs_cfg || !fs_cfg->base_dir || !dir) return -1;
     /* The root the directory is under ("@state/..." is the app's state
@@ -41,6 +41,7 @@ static int resolve_root(const HlFsConfig *fs_cfg, const char *dir,
     const char *base = NULL, *rerr = NULL;
     size_t base_len = 0;
     if (hl_cap_fs_root_for(fs_cfg, dir, &base, &base_len, &dir, &rerr) != 0) return -1;
+    *root_len = base_len;
     if (*dir == '\0') {                      /* the state root itself */
         if (base_len + 1 > out_cap) return -1;
         memcpy(out, base, base_len + 1);
@@ -88,8 +89,8 @@ static int blob_dir_granted(const HlFsConfig *cfg, const char *dir)
     return sel.entry && sel.entry->kind == HL_FS_ENTRY_CREATE;
 }
 
-/* 1 when a component of @p abs_root below the app directory (@p base_len
- * bytes of it) is a symbolic link. The store opens its root by absolute path,
+/* 1 when a component of @p abs_root below its root (the app or the state
+ * directory, @p base_len bytes of it) is a symbolic link. The store opens its root by absolute path,
  * following links, while the fs policy that granted the directory confines a
  * path to its grant's anchor: with `data/` granted and a planted
  * `data/blobs -> ../migrations`, blob.init("data/blobs") put the store - and
@@ -161,9 +162,13 @@ int hl_cap_blob_init_ex(HlBlob **out,
     if (!blob_dir_granted(fs_cfg, trimmed)) return -1;
 
     char abs_root[PATH_MAX];
-    if (resolve_root(fs_cfg, trimmed, abs_root, sizeof(abs_root)) != 0)
+    size_t root_len = 0;
+    if (resolve_root(fs_cfg, trimmed, abs_root, sizeof(abs_root), &root_len) != 0)
         return -1;
-    if (root_has_symlink(abs_root, fs_cfg->base_len))
+    /* Checked from the root the directory is under - the state directory's
+     * length for "@state/...", not the app directory's (audit 44: an app
+     * path longer than the state root's skipped every component). */
+    if (root_has_symlink(abs_root, root_len))
         return -1;
 
     return hl_blob_store_open_ex(out, alloc, abs_root,

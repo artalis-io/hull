@@ -1054,4 +1054,220 @@ UTEST(db_registry, manifest_default_repoints_the_implicit_default)
     rm_tree(root);
 }
 
+/* ── Audit 44 ─────────────────────────────────────────────────────── */
+
+/* A file holding @p table (sqlite_master), opened read-only on the side. */
+static int file_has_table(const char *path, const char *table)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_stmt *st = NULL;
+    int found = 0;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE name = ?",
+                           -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC);
+        found = sqlite3_step(st) == SQLITE_ROW;
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return found;
+}
+
+/* M1: the repoint compacted the slot array, moving the last slot into the
+ * closed default's place. A connection object captured at the app's top
+ * level holds &slots[i].handle, so it then drove the other slot (the
+ * internal database a top-level stdlib init() had opened). The default is
+ * closed in place: the captured address is the reopened default. */
+UTEST(db_registry_audit44, repoint_keeps_captured_default)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+    char idb[PATH_MAX + 32];
+    snprintf(idb, sizeof idb, "%s/.hull/internal.db", app);
+
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    ASSERT_EQ(0, hl_db_registry_set_state_dir(reg, state));
+    ASSERT_EQ(0, hl_db_registry_set_default_internal(reg, idb, strlen(app), 1, 1));
+    const char *err = NULL;
+    HlDbHandle *captured = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(captured != NULL);
+    HlDbHandle *in = hl_db_registry_internal(reg, &err);   /* a later slot */
+    ASSERT_TRUE(in != NULL);
+    ASSERT_TRUE(in != captured);
+
+    char want[PATH_MAX + 16];
+    snprintf(want, sizeof want, "%s/data.db", state);
+    ASSERT_EQ(0, hl_db_registry_repoint_default(reg, want));
+    err = NULL;
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(def != NULL);
+    EXPECT_TRUE(def == captured);             /* same address, reopened */
+    EXPECT_TRUE(hl_db_registry_default(reg) == captured);
+    ASSERT_TRUE(hl_db_exec(captured, "CREATE TABLE notes (x INTEGER)", NULL, 0) >= 0);
+    EXPECT_TRUE(file_has_table(want, "notes"));
+    EXPECT_FALSE(file_has_table(idb, "notes"));
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
+/* M1 (second half): the internal connection a top-level stdlib init() opened
+ * kept the DSN worked out from the implicit default; a new default internal
+ * path closes it in place, so the next use opens the new file. */
+UTEST(db_internal_audit44, repoint_reopens_internal)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+    char implicit[PATH_MAX + 16], old_in[PATH_MAX + 32];
+    snprintf(implicit, sizeof implicit, "%s/data.db", app);
+    snprintf(old_in, sizeof old_in, "%s/.hull/internal.db", app);
+
+    HlDbRegistry *reg = hl_db_registry_create(NULL, implicit, NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    ASSERT_EQ(0, hl_db_registry_set_state_dir(reg, state));
+    ASSERT_EQ(0, hl_db_internal_configure(reg, app, implicit, 0));
+    EXPECT_STREQ(old_in, hl_db_registry_default_internal_path(reg));
+    const char *err = NULL;
+    HlDbHandle *in = hl_db_registry_internal(reg, &err);
+    ASSERT_TRUE(in != NULL);
+
+    char want[PATH_MAX + 16], new_in[PATH_MAX + 32];
+    snprintf(want, sizeof want, "%s/data.db", state);
+    snprintf(new_in, sizeof new_in, "%s/.hull/internal.db", state);
+    ASSERT_EQ(0, hl_db_registry_repoint_default(reg, want));
+    ASSERT_EQ(0, hl_db_internal_configure_ex(reg, app, state, want, 0));
+    EXPECT_STREQ(new_in, hl_db_registry_default_internal_path(reg));
+    err = NULL;
+    HlDbHandle *in2 = hl_db_registry_internal(reg, &err);
+    ASSERT_TRUE(in2 != NULL);
+    EXPECT_TRUE(in2 == in);                    /* the same slot, reopened */
+    ASSERT_TRUE(hl_db_exec(in2, "CREATE TABLE _probe (x INTEGER)", NULL, 0) >= 0);
+    EXPECT_TRUE(file_has_table(new_in, "_probe"));
+    EXPECT_FALSE(file_has_table(old_in, "_probe"));
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
+/* M4: a network / "$VAR" default has no default internal database (the
+ * tables stay on the default connection, and the startup WARN asks for
+ * databases.internal). configure_ex returned early on such a default and
+ * kept the internal path the implicit default had given: _hull_* stayed in a
+ * per-instance local file, and the WARN was suppressed. */
+UTEST(db_internal_audit44, configure_clears_for_network_default)
+{
+    char root[PATH_MAX], app[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    char implicit[PATH_MAX + 16];
+    snprintf(implicit, sizeof implicit, "%s/data.db", app);
+    static const char *const nets[] = { "postgres://db.example/app", "$APP_DB" };
+    for (size_t i = 0; i < sizeof nets / sizeof nets[0]; i++) {
+        HlDbRegistry *reg = hl_db_registry_create(NULL, implicit, NULL);
+        ASSERT_TRUE(reg != NULL);
+        ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+        ASSERT_EQ(0, hl_db_internal_configure(reg, app, implicit, 0));
+        EXPECT_EQ(1, hl_db_registry_has_internal(reg));
+        const char *err = NULL;
+        HlDbHandle *in = hl_db_registry_internal(reg, &err);   /* opened at top level */
+        ASSERT_TRUE(in != NULL);
+        HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+        ASSERT_TRUE(def != NULL && def != in);
+
+        ASSERT_EQ(0, hl_db_internal_configure_ex(reg, app, NULL, nets[i], 0));
+        EXPECT_EQ(0, hl_db_registry_has_internal(reg));
+        EXPECT_TRUE(hl_db_registry_default_internal_path(reg) == NULL);
+        EXPECT_TRUE(hl_db_internal_sandbox_path(reg) == NULL);
+        /* the stdlib's connection is the default one again */
+        EXPECT_TRUE(hl_db_registry_internal(reg, &err) == def);
+        hl_db_registry_destroy(reg);
+    }
+    rm_tree(root);
+}
+
+static int count_row(void *ctx, HlColumn *cols, int ncols)
+{
+    if (ncols >= 1 && cols[0].value.type == HL_TYPE_INT)
+        *(long long *)ctx = cols[0].value.i;
+    return 0;
+}
+
+static long long count_of(HlDbHandle *h, const char *sql)
+{
+    long long n = -1;
+    int prev = hl_cap_db_ns_trust(1);
+    if (hl_db_query(h, sql, NULL, 0, count_row, &n, NULL) < 0) n = -1;
+    hl_cap_db_ns_restore(prev);
+    return n;
+}
+
+/* Audit 44: the tables the app's top level made in the implicit default
+ * (a top-level jobs.init(): _hull_jobs and its rows) were lost when the
+ * manifest's default replaced it. The old connection is handed over open
+ * (hl_db_registry_repoint_default_ex) and every table the new default lacks
+ * is carried, in one transaction; _hull_migrations and tables the target
+ * already has are left alone, and a view is reported, not replayed. */
+UTEST(db_registry_audit44, repoint_carries_toplevel_default_tables)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    const char *err = NULL;
+    HlDbHandle *imp = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(imp != NULL);
+    int prev = hl_cap_db_ns_trust(1);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE TABLE _hull_jobs (id INTEGER PRIMARY KEY "
+                                "AUTOINCREMENT, type TEXT NOT NULL)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE INDEX idx_jobs_type ON _hull_jobs(type)",
+                           NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "INSERT INTO _hull_jobs (type) VALUES ('top'), ('two')",
+                           NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE TABLE _hull_migrations (name TEXT)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "INSERT INTO _hull_migrations VALUES ('001')", NULL, 0) >= 0);
+    hl_cap_db_ns_restore(prev);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE TABLE notes (x INTEGER)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "INSERT INTO notes VALUES (7)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE VIEW v_notes AS SELECT x FROM notes", NULL, 0) >= 0);
+
+    char want[PATH_MAX + 16];
+    snprintf(want, sizeof want, "%s/data.db", state);
+    HlDbHandle old = {0};
+    ASSERT_EQ(0, hl_db_registry_repoint_default_ex(reg, want, &old));
+    ASSERT_TRUE(old.backend != NULL);              /* handed over, still open */
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(def != NULL);
+    /* the migrations made notes in the new default too */
+    ASSERT_TRUE(hl_db_exec(def, "CREATE TABLE notes (x INTEGER)", NULL, 0) >= 0);
+
+    char lost[256] = {0}, cerr[256] = {0};
+    EXPECT_EQ(1, hl_db_carry_new_tables(&old, def, lost, sizeof lost, cerr, sizeof cerr));
+    EXPECT_STREQ("v_notes", lost);
+    old.backend->close(&old);
+
+    EXPECT_EQ(2, count_of(def, "SELECT count(*) FROM _hull_jobs"));
+    EXPECT_EQ(1, count_of(def, "SELECT count(*) FROM sqlite_master WHERE name = 'idx_jobs_type'"));
+    EXPECT_EQ(0, count_of(def, "SELECT count(*) FROM sqlite_master WHERE name = '_hull_migrations'"));
+    EXPECT_EQ(0, count_of(def, "SELECT count(*) FROM notes"));   /* the target's own, untouched */
+    EXPECT_EQ(0, count_of(def, "SELECT count(*) FROM sqlite_master WHERE name = 'v_notes'"));
+    /* the next AUTOINCREMENT id follows the carried rows */
+    prev = hl_cap_db_ns_trust(1);
+    ASSERT_TRUE(hl_db_exec(def, "INSERT INTO _hull_jobs (type) VALUES ('main')", NULL, 0) >= 0);
+    hl_cap_db_ns_restore(prev);
+    EXPECT_EQ(3, count_of(def, "SELECT max(id) FROM _hull_jobs"));
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
 UTEST_MAIN()

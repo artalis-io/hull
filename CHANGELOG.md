@@ -47,6 +47,27 @@ release-artifact layout).
 
 <!-- audit44:state-db -->
 
+- **The `@state/` default database (v0.19.0, gap 3) is now seamless for the app's top level,
+  `hull migrate` and the agent** (audit 44). When `databases.named.default` replaces the
+  implicit default: the old connection is closed in place, so a `db.default()` object captured
+  at the top level is the new default (the registry compacted its slots, and that object then
+  drove another connection, typically the internal database); an internal connection a
+  top-level `session.init()` / `rbac.init()` opened is reopened on the new internal database,
+  with the `_hull_*` tables it made carried over; `worker.dispatch`'s `db` follows the new
+  default on the server path (it kept the removed `<app>/data.db`). `hull migrate` moves the
+  stdlib's tables into `<state>/.hull/internal.db`, the file the runner reads - it used
+  `<state>/data.db.hull-internal`, and a later `--no-migrate` start passed its check with an
+  empty internal database (no TOTP rows: a 2FA user signed in with a password). A network /
+  `"$VAR"` manifest default clears the internal database worked out from the implicit one, so
+  `_hull_*` no longer stay in a per-instance local file and the `databases.internal` WARN is
+  given. Tables a top-level `init()` made on the implicit default itself (`jobs`, outbox,
+  inbox, the kv SQL store, search, and the `_hull_*` tables under `--keep-internal-in-app-db`)
+  are carried into the new default when the implicit one was created by this run - a top-level
+  `jobs.init()` app failed with "no such table" against its `@state/` default; a table that
+  cannot be carried (a view, a virtual table, a default that is not SQLite) is named in a WARN. `hull agent db` / `sql` no longer create the state database and directory (the MCP
+  reload no longer opens the state database at all), and `blob.init` on an `@state/` root
+  checks for symbolic links from the state directory, not the app directory's length.
+
 
 
 <!-- audit44:ssh -->

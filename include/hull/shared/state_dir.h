@@ -49,4 +49,10 @@ int hl_state_dir_name_valid(const char *name);
  * refused, the directory cannot be made or is not trusted. */
 int hl_state_dir_resolve(const char *name, char *out, size_t out_sz);
 
+/* The same directory for a read-only look (`hull agent db ...`): nothing is
+ * made. 1 and @p out set (checked as hl_state_dir_resolve checks it) when
+ * the directory exists, 0 when it does not (yet), -1 when it is refused or
+ * the name is not valid. */
+int hl_state_dir_peek(const char *name, char *out, size_t out_sz);
+
 #endif /* HL_SHARED_STATE_DIR_H */

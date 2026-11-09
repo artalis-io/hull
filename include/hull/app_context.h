@@ -120,6 +120,12 @@ typedef struct HlAppContextOpts {
      * (shared/state_dir.h). 0 (hull test, inspection commands): the implicit
      * default stays. */
     int           manifest_default_db;
+    /* With manifest_default_db: only LOOK (the read-only `hull agent db` /
+     * `sql` commands, audit 44). The manifest's default is resolved and
+     * reported by hl_app_context_default_db_path, but neither opened nor
+     * migrated, and the state directory is not made - a missing one is no
+     * state directory - so inspecting an app creates no database. */
+    int           manifest_default_db_peek;
 } HlAppContextOpts;
 
 struct HlManifest;

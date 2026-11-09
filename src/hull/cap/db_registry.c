@@ -44,6 +44,9 @@ typedef struct {
     HlDbHandle  handle;
     int         open;
     int         owned;   /* 1 = registry closes it; 0 = seeded/borrowed */
+    /* The internal slot opened from the Hull-owned default internal path
+     * (not a declared databases.internal): closed when that path changes. */
+    int         from_default_internal;
 } RegSlot;
 
 struct HlDbRegistry {
@@ -85,6 +88,12 @@ struct HlDbRegistry {
     HlAllocator      *alloc;       /* borrowed */
     RegSlot           slots[HL_DB_REGISTRY_MAX];
     int               nslots;
+    /* An internal connection opened from a default internal path that has
+     * since changed (hl_db_registry_set_default_internal), kept for the
+     * caller to carry its tables over (hl_db_registry_take_replaced_internal)
+     * and closed at seal / close_all when nobody did. */
+    int               has_replaced_internal;
+    HlDbHandle        replaced_internal;
     /* Set by hl_db_registry_close_all: every connection is closed and nothing
      * opens again. The memory stays until hl_db_registry_destroy (audit 17). */
     int               closed;
@@ -107,10 +116,13 @@ HlDbRegistry *hl_db_registry_create(const HlManifest *manifest,
     return r;
 }
 
+static void replaced_internal_close(HlDbRegistry *reg);
+
 int hl_db_registry_seal(HlDbRegistry *reg)
 {
     if (!reg) return -1;
     if (reg->sealed) return 0;
+    replaced_internal_close(reg);   /* nobody carried its tables over */
     if (hl_policy_page_seal(reg) != 0) return -1;
     reg->sealed = 1;
     return 0;
@@ -515,12 +527,84 @@ HlDbHandle *hl_db_registry_internal_or_app(HlDbRegistry *reg, const char **err)
     return hl_db_registry_internal(reg, err);
 }
 
+/* Close @p s where it is (audit 44): the slot keeps its index and name and
+ * the next registry_get of that name reopens it there. A runtime connection
+ * object holds &s->handle - one captured at the app's top level outlives a
+ * re-point - so moving another slot into this index would hand that object
+ * a different database. Meanwhile the handle has no backend, and every call
+ * on it fails "not available". */
+static void slot_close_in_place(RegSlot *s)
+{
+    if (!s->open) return;
+    HlDbTxnSnap was = hl_db_txn_snap(&s->handle);
+    if (s->owned && s->handle.backend && s->handle.backend->close)
+        s->handle.backend->close(&s->handle);
+    memset(&s->handle, 0, sizeof s->handle);
+    s->open = 0;
+    s->dsn_known = 0;
+    s->from_default_internal = 0;
+    hl_db_txn_note(&s->handle, was, NULL);   /* a transaction ended with it */
+}
+
+/* The open internal slot that came from the default internal path, or NULL. */
+static RegSlot *default_internal_slot(HlDbRegistry *reg)
+{
+    for (int i = 0; i < reg->nslots; i++) {
+        RegSlot *s = &reg->slots[i];
+        if (s->open && s->from_default_internal &&
+            strcmp(s->name, INTERNAL_NAME) == 0)
+            return s;
+    }
+    return NULL;
+}
+
+static void replaced_internal_close(HlDbRegistry *reg)
+{
+    if (!reg->has_replaced_internal) return;
+    HlDbHandle *h = &reg->replaced_internal;
+    HlDbTxnSnap was = hl_db_txn_snap(h);
+    if (h->backend && h->backend->close) h->backend->close(h);
+    memset(h, 0, sizeof *h);
+    hl_db_txn_note(h, was, NULL);
+    reg->has_replaced_internal = 0;
+}
+
+/* Detach the open default-internal slot's connection into
+ * reg->replaced_internal (closing one held before), leaving the slot closed
+ * in place: its next use opens the new path there. */
+static void replace_default_internal_slot(HlDbRegistry *reg, RegSlot *s)
+{
+    if (!s->owned) { slot_close_in_place(s); return; }
+    replaced_internal_close(reg);
+    reg->replaced_internal = s->handle;
+    reg->has_replaced_internal = 1;
+    memset(&s->handle, 0, sizeof s->handle);
+    s->open = 0;
+    s->dsn_known = 0;
+    s->from_default_internal = 0;
+}
+
+int hl_db_registry_take_replaced_internal(HlDbRegistry *reg, HlDbHandle *out)
+{
+    if (out) memset(out, 0, sizeof *out);
+    if (!reg || !out || !reg->has_replaced_internal) return 0;
+    *out = reg->replaced_internal;    /* the caller closes it */
+    memset(&reg->replaced_internal, 0, sizeof reg->replaced_internal);
+    reg->has_replaced_internal = 0;
+    return 1;
+}
+
 int hl_db_registry_set_default_internal(HlDbRegistry *reg, const char *dsn,
                                         size_t base_len, int mkdir_parent,
                                         int active)
 {
     if (!reg || reg->sealed) return -1;
+    /* A connection opened from the old path keeps it (cached by name) until
+     * it is closed: a stdlib init() at the app's top level opens it before
+     * the manifest's default re-points (audit 44). */
+    RegSlot *open_in = default_internal_slot(reg);
     if (!dsn || !dsn[0]) {
+        if (open_in) replace_default_internal_slot(reg, open_in);
         reg->has_default_internal = 0;
         return 0;
     }
@@ -528,6 +612,10 @@ int hl_db_registry_set_default_internal(HlDbRegistry *reg, const char *dsn,
     if (n >= sizeof reg->default_internal) return -1;
     if (strcmp(dsn, ":memory:") != 0 && (dsn[0] != '/' || base_len >= n))
         return -1;
+    if (open_in && (!reg->has_default_internal ||
+                    strcmp(reg->default_internal, dsn) != 0 ||
+                    reg->default_internal_active != (active ? 1 : 0)))
+        replace_default_internal_slot(reg, open_in);
     memcpy(reg->default_internal, dsn, n + 1);
     reg->default_internal_base = base_len;
     reg->default_internal_mkdir = mkdir_parent;
@@ -636,20 +724,34 @@ const char *hl_db_registry_manifest_default_dsn(HlDbRegistry *reg, char *buf,
 
 int hl_db_registry_repoint_default(HlDbRegistry *reg, const char *dsn)
 {
+    return hl_db_registry_repoint_default_ex(reg, dsn, NULL);
+}
+
+int hl_db_registry_repoint_default_ex(HlDbRegistry *reg, const char *dsn,
+                                      HlDbHandle *old_out)
+{
+    if (old_out) memset(old_out, 0, sizeof *old_out);
     if (!reg || reg->sealed || !dsn) return -1;
     size_t n = strlen(dsn);
     if (n == 0 || n >= sizeof reg->default_dsn) return -1;
+    /* Closed in place, never moved (audit 44): a db.default() object the
+     * app's top level captured holds this slot's handle, and is the
+     * re-pointed default once registry_get reopens it here. With @p old_out
+     * the old connection is handed over open instead of closed. */
     for (int i = 0; i < reg->nslots; i++) {
         RegSlot *s = &reg->slots[i];
-        if (!s->open || strcmp(s->name, "default") != 0) continue;
-        if (s->owned && s->handle.backend && s->handle.backend->close)
-            s->handle.backend->close(&s->handle);
-        free(s->name);
-        /* Keep the array dense: move the last slot into this one. */
-        if (i != reg->nslots - 1) reg->slots[i] = reg->slots[reg->nslots - 1];
-        memset(&reg->slots[reg->nslots - 1], 0, sizeof reg->slots[0]);
-        reg->nslots--;
-        break;
+        if (s->open && strcmp(s->name, "default") == 0) {
+            if (old_out && s->owned) {
+                *old_out = s->handle;   /* the caller closes it */
+                memset(&s->handle, 0, sizeof s->handle);
+                s->open = 0;
+                s->dsn_known = 0;
+                s->from_default_internal = 0;
+            } else {
+                slot_close_in_place(s);
+            }
+            break;
+        }
     }
     memcpy(reg->default_dsn, dsn, n + 1);
     reg->has_default_dsn = 1;
@@ -664,19 +766,25 @@ static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
         return NULL;
     }
 
-    /* Cache hit (includes seeded connections like "default"). */
-    for (int i = 0; i < reg->nslots; i++)
-        if (reg->slots[i].open && strcmp(reg->slots[i].name, name) == 0)
-            return &reg->slots[i].handle;
+    /* Cache hit (includes seeded connections like "default"); a slot of
+     * this name closed in place is reopened where it is. */
+    RegSlot *reuse = NULL;
+    for (int i = 0; i < reg->nslots; i++) {
+        if (strcmp(reg->slots[i].name, name) != 0) continue;
+        if (reg->slots[i].open) return &reg->slots[i].handle;
+        reuse = &reg->slots[i];
+    }
 
-    if (reg->nslots >= HL_DB_REGISTRY_MAX) {
+    if (!reuse && reg->nslots >= HL_DB_REGISTRY_MAX) {
         if (err) *err = "too many database connections";
         return NULL;
     }
 
     const char *derr = NULL;
     char dsn_buf[HL_HOST_PATH_MAX + 16];
-    if (strcmp(name, INTERNAL_NAME) == 0 && hl_db_registry_internal_is_default(reg))
+    int from_default = strcmp(name, INTERNAL_NAME) == 0 &&
+                       hl_db_registry_internal_is_default(reg);
+    if (from_default)
         default_internal_mkdir(reg);
     const char *dsn = lookup_dsn(reg, name, &derr, dsn_buf, sizeof dsn_buf);
     if (!dsn) {
@@ -692,26 +800,32 @@ static HlDbHandle *registry_get(HlDbRegistry *reg, const char *name,
         return NULL;
     }
 
-    RegSlot *s = &reg->slots[reg->nslots];
-    memset(s, 0, sizeof *s);
-    s->name = strdup(name);
-    if (!s->name) { if (err) *err = "out of memory"; return NULL; }
+    RegSlot *s = reuse ? reuse : &reg->slots[reg->nslots];
+    if (!reuse) {
+        memset(s, 0, sizeof *s);
+        s->name = strdup(name);
+        if (!s->name) { if (err) *err = "out of memory"; return NULL; }
+    }
     s->handle.backend = be;
     if (be->open(&s->handle.ctx, dsn, reg->alloc) != 0) {
-        free(s->name);
-        s->name = NULL;
+        memset(&s->handle, 0, sizeof s->handle);
+        if (!reuse) {
+            free(s->name);
+            s->name = NULL;
+        }
         if (err) *err = "failed to open database connection";
         return NULL;
     }
     s->dsn_known = 1;
     s->open = 1;
     s->owned = 1;
+    s->from_default_internal = from_default;
     /* A session_control connection (never "default": the manifest check
      * refuses it, and never the internal one). */
     s->handle.session_control =
         strcmp(name, INTERNAL_NAME) != 0 && strcmp(name, "default") != 0 &&
         manifest_session_control(reg, name);
-    reg->nslots++;
+    if (!reuse) reg->nslots++;
     return &s->handle;
 }
 
@@ -754,6 +868,7 @@ void hl_db_registry_close_all(HlDbRegistry *reg)
 {
     if (!reg) return;
     reg->closed = 1;   /* first: a backend close cannot reopen through _get */
+    replaced_internal_close(reg);
     for (int i = 0; i < reg->nslots; i++) {
         RegSlot *s = &reg->slots[i];
         HlDbTxnSnap was = { 0, 0 };
