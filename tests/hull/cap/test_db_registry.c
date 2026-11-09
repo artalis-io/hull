@@ -1192,4 +1192,82 @@ UTEST(db_internal_audit44, configure_clears_for_network_default)
     rm_tree(root);
 }
 
+static int count_row(void *ctx, HlColumn *cols, int ncols)
+{
+    if (ncols >= 1 && cols[0].value.type == HL_TYPE_INT)
+        *(long long *)ctx = cols[0].value.i;
+    return 0;
+}
+
+static long long count_of(HlDbHandle *h, const char *sql)
+{
+    long long n = -1;
+    int prev = hl_cap_db_ns_trust(1);
+    if (hl_db_query(h, sql, NULL, 0, count_row, &n, NULL) < 0) n = -1;
+    hl_cap_db_ns_restore(prev);
+    return n;
+}
+
+/* Audit 44: the tables the app's top level made in the implicit default
+ * (a top-level jobs.init(): _hull_jobs and its rows) were lost when the
+ * manifest's default replaced it. The old connection is handed over open
+ * (hl_db_registry_repoint_default_ex) and every table the new default lacks
+ * is carried, in one transaction; _hull_migrations and tables the target
+ * already has are left alone, and a view is reported, not replayed. */
+UTEST(db_registry_audit44, repoint_carries_toplevel_default_tables)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    const char *err = NULL;
+    HlDbHandle *imp = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(imp != NULL);
+    int prev = hl_cap_db_ns_trust(1);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE TABLE _hull_jobs (id INTEGER PRIMARY KEY "
+                                "AUTOINCREMENT, type TEXT NOT NULL)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE INDEX idx_jobs_type ON _hull_jobs(type)",
+                           NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "INSERT INTO _hull_jobs (type) VALUES ('top'), ('two')",
+                           NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE TABLE _hull_migrations (name TEXT)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "INSERT INTO _hull_migrations VALUES ('001')", NULL, 0) >= 0);
+    hl_cap_db_ns_restore(prev);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE TABLE notes (x INTEGER)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "INSERT INTO notes VALUES (7)", NULL, 0) >= 0);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE VIEW v_notes AS SELECT x FROM notes", NULL, 0) >= 0);
+
+    char want[PATH_MAX + 16];
+    snprintf(want, sizeof want, "%s/data.db", state);
+    HlDbHandle old = {0};
+    ASSERT_EQ(0, hl_db_registry_repoint_default_ex(reg, want, &old));
+    ASSERT_TRUE(old.backend != NULL);              /* handed over, still open */
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(def != NULL);
+    /* the migrations made notes in the new default too */
+    ASSERT_TRUE(hl_db_exec(def, "CREATE TABLE notes (x INTEGER)", NULL, 0) >= 0);
+
+    char lost[256] = {0}, cerr[256] = {0};
+    EXPECT_EQ(1, hl_db_carry_new_tables(&old, def, lost, sizeof lost, cerr, sizeof cerr));
+    EXPECT_STREQ("v_notes", lost);
+    old.backend->close(&old);
+
+    EXPECT_EQ(2, count_of(def, "SELECT count(*) FROM _hull_jobs"));
+    EXPECT_EQ(1, count_of(def, "SELECT count(*) FROM sqlite_master WHERE name = 'idx_jobs_type'"));
+    EXPECT_EQ(0, count_of(def, "SELECT count(*) FROM sqlite_master WHERE name = '_hull_migrations'"));
+    EXPECT_EQ(0, count_of(def, "SELECT count(*) FROM notes"));   /* the target's own, untouched */
+    EXPECT_EQ(0, count_of(def, "SELECT count(*) FROM sqlite_master WHERE name = 'v_notes'"));
+    /* the next AUTOINCREMENT id follows the carried rows */
+    prev = hl_cap_db_ns_trust(1);
+    ASSERT_TRUE(hl_db_exec(def, "INSERT INTO _hull_jobs (type) VALUES ('main')", NULL, 0) >= 0);
+    hl_cap_db_ns_restore(prev);
+    EXPECT_EQ(3, count_of(def, "SELECT max(id) FROM _hull_jobs"));
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
 UTEST_MAIN()

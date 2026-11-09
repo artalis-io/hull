@@ -23,7 +23,11 @@ release-artifact layout).
   empty internal database (no TOTP rows: a 2FA user signed in with a password). A network /
   `"$VAR"` manifest default clears the internal database worked out from the implicit one, so
   `_hull_*` no longer stay in a per-instance local file and the `databases.internal` WARN is
-  given. `hull agent db` / `sql` no longer create the state database and directory (the MCP
+  given. Tables a top-level `init()` made on the implicit default itself (`jobs`, outbox,
+  inbox, the kv SQL store, search, and the `_hull_*` tables under `--keep-internal-in-app-db`)
+  are carried into the new default when the implicit one was created by this run - a top-level
+  `jobs.init()` app failed with "no such table" against its `@state/` default; a table that
+  cannot be carried (a view, a virtual table, a default that is not SQLite) is named in a WARN. `hull agent db` / `sql` no longer create the state database and directory (the MCP
   reload no longer opens the state database at all), and `blob.init` on an `@state/` root
   checks for symbolic links from the state directory, not the app directory's length.
 

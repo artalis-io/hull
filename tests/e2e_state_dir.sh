@@ -184,6 +184,23 @@ for ext in lua js; do
     [ "$(line roles)" = 1 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): --no-migrate does not see the moved rows (roles=$(line roles))"
     echo "PASS: migrate_audit44.move_internal_follows_state_default ($ext)"; a44=$((a44 + 1))
 
+    # db_registry_audit44.repoint_carries_toplevel_default_tables: a
+    # top-level jobs.init() + jobs.enqueue() made _hull_jobs in the implicit
+    # default; it is carried into the @state/ default, its row with it.
+    d="$work/a44-jobs-$ext"; a44_app "$d" jobs "$ext"
+    xdg="$work/xdg-a44-jobs-$ext"; sdir="$xdg/hull-e2e-a44j"
+    rc=$(cd "$d" && XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" "app.$ext")
+    [ "$rc" = 0 ] || fail "db_registry_audit44.repoint_carries_toplevel_default_tables ($ext): exit $rc"
+    [ "$(line enqueued)" = 2 ] || fail "db_registry_audit44.repoint_carries_toplevel_default_tables ($ext): app.main's enqueue failed"
+    if [ -n "$PY" ]; then
+        [ "$(sql "$sdir/data.db" "SELECT count(*) FROM _hull_jobs")" = 2 ] \
+            || fail "db_registry_audit44.repoint_carries_toplevel_default_tables ($ext): the jobs are not in <state>/data.db (got $(sql "$sdir/data.db" "SELECT count(*) FROM _hull_jobs"))"
+        [ "$(sql "$sdir/data.db" "SELECT count(*) FROM _hull_jobs WHERE type = 'top'")" = 1 ] \
+            || fail "db_registry_audit44.repoint_carries_toplevel_default_tables ($ext): the top-level job was not carried"
+    fi
+    [ ! -e "$d/data.db" ] || fail "db_registry_audit44.repoint_carries_toplevel_default_tables ($ext): stray <app>/data.db"
+    echo "PASS: db_registry_audit44.repoint_carries_toplevel_default_tables ($ext)"; a44=$((a44 + 1))
+
     # agent_audit44.db_schema_creates_no_state_db: a read-only `hull agent
     # db schema` makes no state database (nor the state directory).
     if [ "$has_agent" = 1 ]; then

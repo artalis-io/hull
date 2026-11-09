@@ -304,14 +304,22 @@ static int app_context_repoint_default(HlAppContext *ctx, const char *dsn)
         }
     }
     const char *implicit = ctx->implicit_db_dsn[0] ? ctx->implicit_db_dsn : ":memory:";
-    if (hl_db_registry_repoint_default(ctx->db_registry, dsn) != 0) {
+    /* Everything in an implicit default this run created (or an in-memory
+     * one) was made by the app's top level and the migrations: it is kept
+     * open across the re-point so the tables the top level made (jobs,
+     * outbox, inbox, kv, ...) are carried into the new default (audit 44).
+     * An implicit file that was there before the run is not read. */
+    int carry = ctx->implicit_db_absent || strcmp(implicit, ":memory:") == 0;
+    HlDbHandle old = {0};
+    if (hl_db_registry_repoint_default_ex(ctx->db_registry, dsn,
+                                          carry ? &old : NULL) != 0) {
         hl_eprintf_line("[app-context] cannot make the manifest's default database the default");
         return -1;
     }
-    if (ctx->implicit_db_absent) remove_implicit_db(implicit);
     const char *derr = NULL;
     HlDbHandle *def = hl_db_registry_get(ctx->db_registry, "default", &derr);
     if (!def) {
+        if (old.backend) old.backend->close(&old);
         hl_eprintf_line("[app-context] databases.named.default: %s",
                         derr ? derr : "cannot open the database");
         return -1;
@@ -319,9 +327,43 @@ static int app_context_repoint_default(HlAppContext *ctx, const char *dsn)
     ctx->db_open = 1;
     if (!ctx->opt_no_migrate &&
         hl_migrate_run(def, &ctx->app_vfs) == HL_MIGRATE_ERR) {
+        if (old.backend) old.backend->close(&old);
         hl_eprintf_line("[app-context] migrations failed on the manifest's default database");
         return -1;
     }
+    /* The manifest may name the implicit file itself: nothing to carry, and
+     * it is not removed. */
+    int same = 0;
+    {
+        const char *fi = hl_sandbox_db_path(implicit);
+        struct stat a, b;
+        same = fi && f && strcmp(fi, ":memory:") != 0 &&
+               stat(fi, &a) == 0 && stat(f, &b) == 0 &&
+               a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+    }
+    if (old.backend) {
+        if (!same) {
+            char lost[512] = {0}, err[512] = {0};
+            int carried = hl_db_carry_new_tables(&old, def, lost, sizeof lost,
+                                                 err, sizeof err);
+            if (carried < 0) {
+                old.backend->close(&old);
+                hl_eprintf_line("[app-context] cannot carry the tables the app's top "
+                                "level made into the manifest's default database: %s",
+                                err);
+                return -1;
+            }
+            if (lost[0])
+                log_warn("[hull:c] the app's top level made table(s) %s in the "
+                         "implicit default database before the manifest's default "
+                         "was known, and they cannot be carried into it (a view, a "
+                         "virtual table, or a default that is not SQLite): they are "
+                         "lost. Create them in app.main or a handler, or in a "
+                         "migration.", lost);
+        }
+        old.backend->close(&old);
+    }
+    if (ctx->implicit_db_absent && !same) remove_implicit_db(implicit);
     if (hl_db_internal_configure_ex(ctx->db_registry, ctx->app_dir_copy,
                                     ctx->state_dir[0] ? ctx->state_dir : NULL,
                                     dsn, ctx->opt_keep_internal) != 0) {

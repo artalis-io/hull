@@ -2436,7 +2436,13 @@ move lands in `<state>/.hull/internal.db` (audit 44); `db_path_explicit` marks a
 implicit default opened and migrated at init is closed IN PLACE (`hl_db_registry_repoint_default`:
 the slot keeps its index, so a `db.default()` object the top level captured - it holds the slot's
 handle - is the new default once reopened; compacting the array handed it another slot, audit 44),
-the file it created removed, the manifest's opened, migrated and given its internal database
+the manifest's opened and migrated, every table the app's top level made in an implicit
+default this run created (or in an in-memory one) that the new default lacks carried into it -
+jobs, outbox, inbox, kv, search, `_hull_*` under `--keep-internal-in-app-db`; the old connection
+is handed over open (`hl_db_registry_repoint_default_ex`) and `hl_db_carry_new_tables` replays
+only CREATE TABLE / INDEX, in one transaction, skipping `_hull_migrations` and naming a view /
+virtual table / non-SQLite target in a WARN (audit 44) - the file it created removed, and the
+default given its internal database
 (`hl_db_internal_default_dsn_ex`: `<state>/.hull/internal.db` for a database under the state
 root) - all in `hl_app_context_manifest_db`, which the context runs when it loads the app and
 serve.c calls once it has the manifest, before the internal-table move. A changed (or cleared -

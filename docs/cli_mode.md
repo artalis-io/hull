@@ -191,9 +191,13 @@ end)
   migrations run on the named one, and its internal database (the stdlib's
   `_hull_*` tables) is `<state>/.hull/internal.db`. The replacement is
   seamless for the app's top level: a `db.default()` object taken there is the
-  new default afterwards, `worker.dispatch`'s `db` follows it, and the
-  `_hull_*` tables a top-level `session.init()` / `rbac.init()` made before the
-  manifest was read are carried into `<state>/.hull/internal.db`. `hull
+  new default afterwards, `worker.dispatch`'s `db` follows it, the tables a
+  top-level `jobs.init()` (outbox, inbox, kv, search) made in the implicit
+  default are carried into the new one, and the `_hull_*` tables a top-level
+  `session.init()` / `rbac.init()` made before the manifest was read are
+  carried into `<state>/.hull/internal.db`. (A view or virtual table made at
+  the top level, or any table when the default is not SQLite, cannot be
+  carried: a WARN names it.) `hull
   migrate` with no `-d` opens the same files (it loads the app to read the
   manifest) and moves the stdlib's tables where the runner reads them; `hull
   agent db` reads the default only if it exists - it creates neither the

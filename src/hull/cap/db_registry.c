@@ -724,16 +724,32 @@ const char *hl_db_registry_manifest_default_dsn(HlDbRegistry *reg, char *buf,
 
 int hl_db_registry_repoint_default(HlDbRegistry *reg, const char *dsn)
 {
+    return hl_db_registry_repoint_default_ex(reg, dsn, NULL);
+}
+
+int hl_db_registry_repoint_default_ex(HlDbRegistry *reg, const char *dsn,
+                                      HlDbHandle *old_out)
+{
+    if (old_out) memset(old_out, 0, sizeof *old_out);
     if (!reg || reg->sealed || !dsn) return -1;
     size_t n = strlen(dsn);
     if (n == 0 || n >= sizeof reg->default_dsn) return -1;
     /* Closed in place, never moved (audit 44): a db.default() object the
      * app's top level captured holds this slot's handle, and is the
-     * re-pointed default once registry_get reopens it here. */
+     * re-pointed default once registry_get reopens it here. With @p old_out
+     * the old connection is handed over open instead of closed. */
     for (int i = 0; i < reg->nslots; i++) {
         RegSlot *s = &reg->slots[i];
         if (s->open && strcmp(s->name, "default") == 0) {
-            slot_close_in_place(s);
+            if (old_out && s->owned) {
+                *old_out = s->handle;   /* the caller closes it */
+                memset(&s->handle, 0, sizeof s->handle);
+                s->open = 0;
+                s->dsn_known = 0;
+                s->from_default_internal = 0;
+            } else {
+                slot_close_in_place(s);
+            }
             break;
         }
     }

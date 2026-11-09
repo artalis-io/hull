@@ -171,6 +171,12 @@ const char *hl_db_registry_manifest_default_dsn(HlDbRegistry *reg, char *buf,
  * hl_db_registry_get("default") opens it there. -1 once sealed, or when
  * @p dsn does not fit. */
 int hl_db_registry_repoint_default(HlDbRegistry *reg, const char *dsn);
+/* The same, handing the old default connection over OPEN in *@p old_out
+ * (backend NULL when there was none; the caller closes it) instead of
+ * closing it - to carry the tables the app's top level made there into the
+ * new default (hl_db_carry_new_tables, audit 44). */
+int hl_db_registry_repoint_default_ex(HlDbRegistry *reg, const char *dsn,
+                                      HlDbHandle *old_out);
 
 /* Make the registry's DSN sources (the manifest pointer and the -d DSN)
  * read-only for the rest of the process - the last step of wiring, after
