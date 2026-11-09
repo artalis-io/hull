@@ -72,6 +72,8 @@ done
 echo "PASS: a @state/ grant or database without state.name, an @other/ grant and a bad state.name are refused at load"
 
 # ── The default database under the state directory (PR 2) ───────────────
+has_agent=1
+if "$HULL_BIN" doctor --json 2>/dev/null | grep -q '"http":false'; then has_agent=0; fi
 for ext in lua js; do
     dbdir="$work/db-$ext"; mkdir -p "$dbdir/migrations"
     cp "tests/fixtures/state_dir_db/app.$ext" "$dbdir/"; cp tests/fixtures/state_dir_db/migrations/001_init.sql "$dbdir/migrations/"
@@ -94,9 +96,14 @@ for ext in lua js; do
     rc=$(XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" migrate "$dbdir")
     [ "$rc" = 0 ] || fail "$ext migrate: exit $rc"
     grep -q 'already up to date' "$out" || fail "$ext migrate did not find the state database migrated"
-    rc=$(XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" agent db schema "$dbdir")
-    [ "$rc" = 0 ] || fail "$ext agent db schema: exit $rc"
-    grep -q '"name":"notes"' "$out" || fail "$ext agent db schema does not see the state database"
-    echo "PASS: $ext hull migrate and hull agent db schema open the state database with no -d"
+    # `hull agent` needs the HTTP server (an HTTP-free build has no agent).
+    if [ "$has_agent" = 1 ]; then
+        rc=$(XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" agent db schema "$dbdir")
+        [ "$rc" = 0 ] || fail "$ext agent db schema: exit $rc"
+        grep -q '"name":"notes"' "$out" || fail "$ext agent db schema does not see the state database"
+        echo "PASS: $ext hull migrate and hull agent db schema open the state database with no -d"
+    else
+        echo "PASS: $ext hull migrate opens the state database with no -d (no hull agent in this build)"
+    fi
 done
 echo '15/15 state directory end-to-end tests passed'
