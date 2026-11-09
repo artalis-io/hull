@@ -8,6 +8,8 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-09
+
 ### Added
 
 - **A per-user state directory for `app.main` tools: the `@state/` root** (platform gap 3,
