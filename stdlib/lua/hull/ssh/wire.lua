@@ -210,6 +210,29 @@ function Reader:mpint()
     return ssub(s, i)
 end
 
+-- As mpint, but only the one minimal encoding RFC 4251 section 5 names: a
+-- leading zero byte only when the next byte has its top bit set, and zero as
+-- the empty string. For a value that identifies something by its bytes (an
+-- RSA host key: trust and @revoked compare blobs), where a second encoding of
+-- the same number would be a second identity (audit 44).
+function Reader:mpint_canonical()
+    local n = self:uint32()
+    self:need(n)
+    local s = self:raw(n)
+    if #s == 0 then return "" end
+    local b1 = sbyte(s, 1)
+    if b1 >= 0x80 then
+        error("ssh.wire: negative mpint is not supported", 2)
+    end
+    if b1 == 0 then
+        if #s == 1 or sbyte(s, 2) < 0x80 then
+            error("ssh.wire: mpint is not minimally encoded", 2)
+        end
+        return ssub(s, 2)
+    end
+    return s
+end
+
 function Reader:namelist()
     local s = self:string()
     local out = {}

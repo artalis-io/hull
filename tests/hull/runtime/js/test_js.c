@@ -18754,6 +18754,52 @@ UTEST(js_ssh_bridge, app_code_holding_a_stream_is_refused)
     js_ssh_close_fix(&f);
 }
 
+/* Audit 44: a read whose charge trips the run must leave the bytes in the
+ * stream. The charge came after the read, so a run that ran out on it
+ * consumed up to 64 KiB and threw them away with the trip; the next read on
+ * the same stream started mid-message. Charged before the read, as Lua's
+ * buffer is allocated (and charged) before it. */
+UTEST(js_ssh_audit44, read_trip_consumes_nothing)
+{
+    JsSshFix f;
+    ASSERT_EQ(js_ssh_open(&f), 0);
+    /* "x" then 4096 bytes in one send: the first read (one byte) waits for
+     * them, and the rest stays in the stream's buffer for the next read to
+     * take at once. */
+    char big[4097];
+    big[0] = 'x';
+    memset(big + 1, 'a', sizeof big - 1);
+    ASSERT_EQ(send(f.peer, big, sizeof big, 0), (ssize_t)sizeof big);
+    char out[256];
+    js_ssh_run(&f, "const [d] = await H.read(1); return d;\n", out, sizeof out);
+    ASSERT_STREQ(out, "x");
+
+    /* A run with less budget left than the read's charge (4096 bytes = 512
+     * units), but enough for everything around it: what the same call costs
+     * when it is refused before any charge (a read of 0), plus 300. */
+    int64_t saved = js.max_instructions;
+    js.budget_tripped = 0;
+    js.max_instructions = 0;
+    int64_t before = js.instruction_count;
+    js_ssh_eval_as("globalThis.H.read(0);\n", 1);
+    int64_t around = js.instruction_count - before;
+    js.max_instructions = js.instruction_count + around + 300;
+    js_ssh_eval_as("globalThis.H.read(65536);\n", 1);
+    EXPECT_EQ(js.budget_tripped, 1);
+    js.budget_tripped = 0;
+    js.budget_timed_out = 0;
+    js.max_instructions = saved;
+    js.instruction_count = 0;
+
+    ASSERT_EQ(send(f.peer, "Z", 1, 0), (ssize_t)1);
+    for (int i = 0; i < 5; i++) f.be->tick(f.actx, 10);
+    js_ssh_run(&f, "const [d] = await H.read(65536);\n"
+                   "return d.length >= 4096 && d[0] === 'a' ? 'kept' : 'lost:' + d.length;\n",
+               out, sizeof out);
+    EXPECT_STREQ(out, "kept");
+    js_ssh_close_fix(&f);
+}
+
 UTEST(js_ssh_bridge, a_bounded_wait_comes_back_coded_and_the_stream_lives)
 {
     JsSshFix f;

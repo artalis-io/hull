@@ -245,6 +245,13 @@ function Channel:handle(msg)
     end
 
     if msg.type == "open_confirmation" then
+        -- One answer per open: a second confirmation (or one after a
+        -- failure) would replace the peer's id and reset the send window
+        -- mid-session (audit 44).
+        if self.open or self.closed or self.remote_id ~= nil then
+            error("ssh.channel: a second open confirmation for channel "
+                  .. tostring(self.local_id))
+        end
         self.remote_id       = msg.sender
         self.send_window     = msg.window
         self.send_max_packet = msg.max_packet

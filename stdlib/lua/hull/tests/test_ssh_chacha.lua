@@ -120,6 +120,13 @@ for _, prims in ipairs({ TOY, REAL }) do
     end)
 end
 
+test("ssh_audit44.empty_payload_refused", function()
+    -- An authenticated packet with an empty payload is malformed (every SSH
+    -- message has a type byte).
+    local frame = chacha.new(KEY, TOY):seal(nil, "", zeros, 2)
+    assert_raises(function() chacha.new(KEY, TOY):open(nil, frame, 2) end, "payload")
+end)
+
 test("an implausible decrypted length is refused before any wait", function()
     -- Forge a frame whose length decrypts (under the toy stream) to 2^31.
     local c = chacha.new(KEY, TOY)

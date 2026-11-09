@@ -51,6 +51,24 @@ release-artifact layout).
 
 <!-- audit44:ssh -->
 
+- **`hull/ssh` audit 44: the Lua and JS clients brought back into line, and their edges
+  closed.** Lua `Sftp:send` now marks the session broken when a multi-chunk request is cut
+  short between chunks (a refusal, a closed channel), as JS did, so the next request cannot
+  continue a cut-off frame. Lua reads every `tunnel` option once (`rawget`, headers copied as
+  strings), so a table answering differently on a later read cannot hand the dial and the
+  upgrade's `Host` / path something other than what was checked. A runtime refusal raised by
+  the relay stream's write (`wait_refused`, `busy`) reaches the caller unchanged instead of
+  as `io_error`, and a refusal during the upgrade closes the relay stream at once. Both
+  runtimes now refuse an RSA host key whose `e` or `n` is not minimally encoded (one key,
+  one blob, as trust and `@revoked` compare them), a packet with an empty payload in all
+  three framings, a second CHANNEL_OPEN_CONFIRMATION, and an exec `max_output` / SFTP read
+  `max` that is not a non-negative integer (`bad_argument`); an `on_banner` / `onBanner`
+  error is re-raised as is (and Lua closes the transport, as JS); a `connect` refused for its
+  own arguments no longer spends a `pending_trust()`. JS `read` on the byte stream charges
+  the most it can take before reading, so a trip no longer discards bytes already taken.
+  Tests `ssh_audit44.*`, `ssh_sftp_audit44.*`, `ssh_tunnel_audit44.*`,
+  `js_ssh_audit44.read_trip_consumes_nothing`.
+
 
 
 <!-- audit44:stdlib-data -->

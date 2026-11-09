@@ -678,13 +678,21 @@ end
 
 -- Returns true, or nil plus a structured reason. The host-key cases carry the
 -- fingerprint, because the caller has to be able to show it.
+-- The caller's on_banner, with its own error carried up as { app_error }
+-- (as on_stdout's), so hull.ssh raises it unchanged rather than reporting the
+-- connection's io_error (audit 44).
+local function banner(cb, text)
+    local ok, e = pcall(cb, text)
+    if not ok then error({ app_error = e }, 0) end
+end
+
 function Transport:handshake(opts)
     -- identification
     local v_s
     for _ = 1, 32 do
         v_s = self:read_line()
         if v_s:match("^SSH%-") then break end
-        if opts.on_banner then opts.on_banner(wire.safe_text(v_s)) end
+        if opts.on_banner then banner(opts.on_banner, wire.safe_text(v_s)) end
         v_s = nil
     end
     if not v_s then return nil, { code = "no_identification" } end
@@ -1056,7 +1064,7 @@ local function offer_key(self, user, key, on_banner)
         for _ = 1, 16 do
             local r = userauth.parse_response(self:next_message())
             if r.type == "banner" then
-                if on_banner then on_banner(r.message) end
+                if on_banner then banner(on_banner, r.message) end
             elseif r.type == "success" then
                 return true
             elseif r.type == "failure" then

@@ -241,6 +241,10 @@ function Cipher:open(aead, buf)
         -- sending something malformed rather than an attacker.
         error("ssh.cipher: padding of " .. tostring(pad) .. " is not usable")
     end
+    if pad + 2 > #plain then
+        -- Every message carries its type byte (audit 44).
+        error("ssh.cipher: the packet has no payload")
+    end
     return plain:sub(2, #plain - pad), total
 end
 

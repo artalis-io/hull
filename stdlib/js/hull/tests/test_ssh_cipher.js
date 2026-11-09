@@ -86,7 +86,7 @@ await test("seal and open round trip", () => {
     const aead = fakeAead();
     const enc = cipher.new(KEY, IV);
     const dec = cipher.new(KEY, IV);
-    for (const payload of ["", "x", "abc".repeat(200)]) {
+    for (const payload of ["x", "abc".repeat(200)]) {
         const w = enc.seal(aead, payload, zeros);
         const [got, used] = dec.open(aead, w);
         assertEq(got, payload);
@@ -292,7 +292,7 @@ const realAead = {
 await realTest("real crypto: seal and open round trip, tamper refused", () => {
     const key = bytes.crypto.random(32), iv = bytes.crypto.random(12);
     const enc = cipher.new(key, iv), dec = cipher.new(key, iv);
-    for (const payload of ["", "x", "\xff\x00".repeat(300)]) {
+    for (const payload of ["x", "\xff\x00".repeat(300)]) {
         const w = enc.seal(realAead, payload, bytes.crypto.random);
         const [got, used] = dec.open(realAead, w);
         assertEq(got, payload);
@@ -301,6 +301,14 @@ await realTest("real crypto: seal and open round trip, tamper refused", () => {
     const w = enc.seal(realAead, "secret", bytes.crypto.random);
     const t = w.slice(0, 10) + String.fromCharCode(w.charCodeAt(10) ^ 1) + w.slice(11);
     assertRaises(() => dec.open(realAead, t), "tampered");
+});
+
+await test("ssh_audit44.empty_payload_refused", () => {
+    // An authenticated packet with an empty payload is malformed (every SSH
+    // message has a type byte).
+    const aead = fakeAead();
+    const w = cipher.new(KEY, IV).seal(aead, "", zeros);
+    assertRaises(() => cipher.new(KEY, IV).open(aead, w), "an empty payload");
 });
 
 globalThis.__test_pass = pass;

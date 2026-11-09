@@ -29,7 +29,7 @@ end)
 ```
 
 Run with `hull run app.lua`. Every call returns a value or `nil, { code, detail }`
-- never raises, except your own callback's error and a runtime refusal
+- never raises, except your own callback's error (`on_banner` included) and a runtime refusal
 (`[hull:wait_refused]` inside a transaction), both re-raised as they are. A non-zero
 remote exit is `r.status`, not an error.
 
@@ -99,6 +99,7 @@ conn:exec(cmd, {
     on_stdout  = function(chunk) ... end,   -- stream instead of buffering
     on_stderr  = function(chunk) ... end,
     max_output = 8 * 1024 * 1024,           -- buffered cap -> output_too_large
+                                            -- (a non-negative integer)
     timeout_ms = 30000,                     -- whole command -> timeout
 })
 ```

@@ -212,6 +212,13 @@ class Channel {
         }
 
         if (msg.type === "open_confirmation") {
+            // One answer per open: a second confirmation (or one after a
+            // failure) would replace the peer's id and reset the send window
+            // mid-session (audit 44).
+            if (this.open || this.closed || (this.remoteId !== null && this.remoteId !== undefined)) {
+                throw new Error("ssh.channel: a second open confirmation for channel "
+                    + String(this.localId));
+            }
             this.remoteId      = msg.sender;
             this.sendWindow    = msg.window;
             this.sendMaxPacket = msg.maxPacket;

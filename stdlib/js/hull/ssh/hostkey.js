@@ -134,8 +134,8 @@ function parseKey(blob) {
                 + a.curve + " point");
         }
     } else if (t === "ssh-rsa") {
-        out.e = r.mpint();
-        out.n = r.mpint();
+        out.e = r.mpintCanonical();   // one encoding per key (audit 44)
+        out.n = r.mpintCanonical();
         if (out.n === "") throw new Error("ssh.hostkey: RSA modulus is zero");
         out.bits = rsaBits(out.n);
         if (out.bits < RSA_MIN_BITS) {

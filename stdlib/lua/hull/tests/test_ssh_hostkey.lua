@@ -71,6 +71,27 @@ test("parse_key refuses another algorithm", function()
     assert_raises(function() hostkey.parse_key(blob) end, "ssh-rsa")
 end)
 
+test("ssh_audit44.rsa_noncanonical_mpint_refused", function()
+    -- One key, one encoding: trust and @revoked compare blobs byte for byte,
+    -- so an e or n with a redundant leading zero would be the same key under
+    -- a second blob. mpint bytes are written raw (wire string) to control them.
+    local N = "\193" .. string.rep("\7", 255)          -- 2048 bits, top bit set
+    local function rsa(e_raw, n_raw)
+        return wire.writer():string("ssh-rsa"):string(e_raw):string(n_raw):build()
+    end
+    local k = hostkey.parse_key(rsa("\1\0\1", "\0" .. N))
+    assert_eq(k.algorithm, "ssh-rsa", "the canonical form parses:")
+    assert_raises(function() hostkey.parse_key(rsa("\0\1\0\1", "\0" .. N)) end,
+                  "a zero before e's first byte below 0x80")
+    assert_raises(function() hostkey.parse_key(rsa("\0\0\1\0\1", "\0" .. N)) end,
+                  "two zeros before e")
+    assert_raises(function() hostkey.parse_key(rsa("\1\0\1", "\0\0" .. N)) end,
+                  "two zeros before n")
+    local n_low = "\65" .. string.rep("\7", 255)
+    assert_raises(function() hostkey.parse_key(rsa("\1\0\1", "\0" .. n_low)) end,
+                  "a zero before n's first byte below 0x80")
+end)
+
 test("parse_key refuses a key of the wrong length", function()
     assert_raises(function()
         hostkey.parse_key(key_blob(string.rep("\1", 31)))

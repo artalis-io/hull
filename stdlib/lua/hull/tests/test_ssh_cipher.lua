@@ -78,11 +78,19 @@ end)
 
 -- round trip ------------------------------------------------------------------
 
+test("ssh_audit44.empty_payload_refused", function()
+    -- An authenticated packet with an empty payload is malformed (every SSH
+    -- message has a type byte).
+    local aead = fake_aead()
+    local w = cipher.new(KEY, IV):seal(aead, "", zeros)
+    assert_raises(function() cipher.new(KEY, IV):open(aead, w) end, "an empty payload")
+end)
+
 test("seal and open round trip", function()
     local aead = fake_aead()
     local enc = cipher.new(KEY, IV)
     local dec = cipher.new(KEY, IV)
-    for _, payload in ipairs({ "", "x", string.rep("abc", 200) }) do
+    for _, payload in ipairs({ "x", string.rep("abc", 200) }) do
         local wire = enc:seal(aead, payload, zeros)
         local got, used = dec:open(aead, wire)
         assert_eq(got, payload)
