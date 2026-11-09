@@ -10,6 +10,48 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
 - **MySQL / Postgres wire clients (audit 44).** MySQL: the server facts that
   drive SQL Hull writes - the `_hull_*` tables' binary collation, MariaDB vs
   MySQL, whether the server has roles - came from the plaintext Handshake v10
@@ -34,6 +76,8 @@ release-artifact layout).
   ErrorResponse fields, column definitions, text and binary rows) over a fake
   transport; `fuzz_mysqlwire` now also reaches the column-definition,
   PREPARE_OK, version and CURRENT_ROLE()-list readers.
+
+
 
 ## [0.19.0] - 2026-11-09
 
