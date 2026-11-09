@@ -24,6 +24,7 @@
 #include "hull/shared/fs_util.h"  /* hl_default_db_path_check */
 #include "hull/sandbox.h"        /* hl_sandbox_db_path */
 #include <limits.h>
+#include "hull/shared/host.h"   /* HL_HOST_PATH_MAX */
 #include "hull/cap/fs.h"          /* HlFsConfig - test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
 #include "hull/utils/alloc.h"     /* HlAllocator + hl_alloc_init for the fs policy */
@@ -34,7 +35,6 @@
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (agent handle) */
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_internal.h"
-#include "hull/shared/host.h"   /* HL_HOST_PATH_MAX */
 #include <limits.h>
 #include "hull/migrate.h"
 #include "hull/worker_db.h"
