@@ -131,8 +131,8 @@ a44_app() {   # a44_app <dir> <fixture> <ext>
     cp tests/fixtures/state_dir_audit44/migrations/001_init.sql "$1/migrations/"
 }
 a44=0
-# The top / migr fixtures declare middleware modules (they admit
-# hull/http-server), so app.main returns 3 to exit before the serve loop.
+# The fixtures use only HTTP-free modules (audit-log keeps _hull_audit_log on
+# the internal database), so these legs run on every flavor with a database.
 for ext in lua js; do
     # db_registry_audit44.repoint_keeps_captured_default: a db.default()
     # object captured at top level, and a top-level rbac.init() /
@@ -140,16 +140,14 @@ for ext in lua js; do
     d="$work/a44-top-$ext"; a44_app "$d" top "$ext"
     xdg="$work/xdg-a44-top-$ext"; sdir="$xdg/hull-e2e-a44"
     rc=$(cd "$d" && XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" "app.$ext")
-    [ "$rc" = 3 ] || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): exit $rc"
+    [ "$rc" = 0 ] || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): exit $rc"
     [ "$(line notes)" = 1 ] || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): notes (got $(line notes))"
-    [ "$(line roles)" = 1 ] || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): roles (got $(line roles))"
+    [ "$(line events)" = 1 ] || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): events (got $(line events))"
     if [ -n "$PY" ]; then
         [ "$(sql "$sdir/data.db" "SELECT count(*) FROM notes")" = 1 ] \
             || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): the captured write is not in <state>/data.db"
-        [ "$(sql "$sdir/.hull/internal.db" "SELECT count(*) FROM _hull_user_roles")" = 1 ] \
-            || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): _hull_* are not in <state>/.hull/internal.db"
-        [ "$(sql "$sdir/.hull/internal.db" "SELECT count(*) FROM sqlite_master WHERE name='_hull_sessions'")" = 1 ] \
-            || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): the top-level session table is not in <state>/.hull/internal.db"
+        [ "$(sql "$sdir/.hull/internal.db" "SELECT count(*) FROM _hull_audit_log")" = 1 ] \
+            || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): _hull_audit_log (made by the top-level init) is not in <state>/.hull/internal.db"
     fi
     [ ! -e "$d/data.db" ] || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): stray <app>/data.db"
     [ ! -e "$d/.hull/internal.db" ] || fail "db_registry_audit44.repoint_keeps_captured_default ($ext): stray <app>/.hull/internal.db"
@@ -170,8 +168,8 @@ for ext in lua js; do
     d="$work/a44-migr-$ext"; a44_app "$d" migr "$ext"
     xdg="$work/xdg-a44-migr-$ext"; sdir="$xdg/hull-e2e-a44m"
     rc=$(cd "$d" && XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" "app.$ext" --keep-internal-in-app-db -- seed)
-    [ "$rc" = 3 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): seed exit $rc"
-    [ "$(line roles)" = 1 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): seed roles"
+    [ "$rc" = 0 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): seed exit $rc"
+    [ "$(line events)" = 1 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): seed events"
     rc=$(XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" migrate "$d")
     [ "$rc" = 0 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): hull migrate exit $rc"
     [ ! -e "$sdir/data.db.hull-internal" ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): moved into data.db.hull-internal"
@@ -180,8 +178,8 @@ for ext in lua js; do
             || fail "migrate_audit44.move_internal_follows_state_default ($ext): no move record in <state>/.hull/internal.db"
     fi
     rc=$(cd "$d" && XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" "app.$ext" --no-migrate)
-    [ "$rc" = 3 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): --no-migrate exit $rc"
-    [ "$(line roles)" = 1 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): --no-migrate does not see the moved rows (roles=$(line roles))"
+    [ "$rc" = 0 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): --no-migrate exit $rc"
+    [ "$(line events)" = 1 ] || fail "migrate_audit44.move_internal_follows_state_default ($ext): --no-migrate does not see the moved rows (events=$(line events))"
     echo "PASS: migrate_audit44.move_internal_follows_state_default ($ext)"; a44=$((a44 + 1))
 
     # db_registry_audit44.repoint_carries_toplevel_default_tables: a
