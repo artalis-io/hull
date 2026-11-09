@@ -10,6 +10,8 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
 - **A WebSocket the app closes itself runs its `on_close` again** (audit 44 M5, a
   regression from #1007): `conn:close()` / `conn.close()` set the node's `closed`
   flag, and the registry lookup skipped closed nodes, so when Keel delivered the
@@ -24,6 +26,48 @@ release-artifact layout).
   loop is reachable, shutting down or not (the Lua twin since audit 38). Tests:
   `ws_audit44.*` (`tests/e2e_ws_close.sh`, `make e2e-ws-close`; test_ws, test_lua),
   `js_ws_client_audit44.finalizer_disarms_while_shutting_down`.
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
