@@ -281,15 +281,20 @@ one pending connection, a command run, the key then accepted into a `file_store`
 
 ## 11. Gap 3: a per-user state directory for `app.main` tools
 
-**Status (2026-11-09): PR (a) built** - the manifest `state = { name }`, the resolver
-(`shared/state_dir.c`, with `HULL_STATE_DIR` through the same validator as
-`HULL_CACHE_DIR`), the fs policy's second root, the kernel grant and the fs bindings;
-`tests/e2e_state_dir.sh`. Two details fixed in the implementation: `@state/` grants are
-skipped by the sandbox's per-grant walk (the whole state directory is granted instead),
-and `~/.local` / `~/.local/state` are made 0755 (the XDG layout) with only `<name>` 0700.
-PRs (b) (DSN confinement + the `-d`-less default + migrate / agent) and (c) (rootless
-built binaries) are next; gap 9 retires with (a) for a tool that moves its state under
-`@state/`.
+**Status (2026-11-09): PRs (a) and (b) built.** (a): the manifest `state = { name }`, the
+resolver (`shared/state_dir.c`, with `HULL_STATE_DIR` through the same validator as
+`HULL_CACHE_DIR`), the fs policy's second root, the kernel grant and the fs bindings. (b):
+`"@state/<file>"` DSNs in `databases.named` / `.internal` and `db.open`, and
+`databases.named.default` as the app's default when no `-d` is given - with one departure
+from the text below: the manifest cannot be read before the implicit default is opened and
+migrated, so the default is RE-POINTED once the manifest is known (`hl_app_context_manifest_db`:
+the implicit connection closed, the file it made removed, the named one opened, migrated and
+given `<state>/.hull/internal.db`), rather than chosen up front; `hull migrate` and the
+agent's db commands load the app to learn it. `tests/e2e_state_dir.sh`. Other details:
+`@state/` grants are skipped by the sandbox's per-grant walk (the whole state directory is
+granted instead), and `~/.local` / `~/.local/state` are made 0755 (the XDG layout) with only
+`<name>` 0700. PR (c) (rootless built binaries) is next; gap 9 retires for a tool that moves
+its state under `@state/`.
 
 **Today (before the change).** A built binary's app directory is its working directory (`serve_cli.c` ~:443-465,
 `serve.c` ~:972-1050, `realpath(".")`), every `fs` grant is relative to it, and

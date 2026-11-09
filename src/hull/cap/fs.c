@@ -9,6 +9,7 @@
 
 #include "hull/shared/dispatch_meter.h"   /* hl_meter_fsync */
 #include "hull/cap/fs.h"
+#include "hull/cap/fs_policy.h"   /* hl_fs_grant_is_state */
 #include "hull/cap/db_live_files.h"
 #include "hull/shared/host.h"
 #include "hull/cap/fs_resolve.h"
@@ -42,6 +43,31 @@ static uint64_t validate_realpath_units(const char *path)
     return comps * HL_WORK_FS_LOOKUP_UNITS;
 }
 
+int hl_cap_fs_root_for(const HlFsConfig *cfg, const char *path,
+                       const char **root, size_t *root_len,
+                       const char **rest, const char **err)
+{
+    if (err) *err = NULL;
+    if (!cfg || !path || !cfg->base_dir || !root || !root_len || !rest) {
+        if (err) *err = "invalid_args";
+        return -1;
+    }
+    if (hl_fs_grant_is_state(path)) {
+        if (!cfg->state_dir) { if (err) *err = "no_state_dir"; return -1; }
+        while (*path == '/') path++;
+        path += strcspn(path, "/");            /* past "@state" */
+        while (*path == '/') path++;
+        *root = cfg->state_dir;
+        *root_len = cfg->state_len;
+        *rest = path;
+        return 0;
+    }
+    *root = cfg->base_dir;
+    *root_len = cfg->base_len;
+    *rest = path;
+    return 0;
+}
+
 int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
                        const char **err_msg)
 {
@@ -54,6 +80,19 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
     if (path[0] == '\0') {
         if (err_msg) *err_msg = "empty_path";
         return -1;
+    }
+
+    /* The root the path is under (the state directory for "@state/...").
+     * The state root itself ("@state") is a valid, existing directory. */
+    const char *root = NULL, *rest = NULL, *rerr = NULL;
+    size_t root_len = 0;
+    if (hl_cap_fs_root_for(cfg, path, &root, &root_len, &rest, &rerr) != 0) {
+        if (err_msg) *err_msg = rerr ? rerr : "invalid_args";
+        return -1;
+    }
+    if (rest != path) {
+        if (rest[0] == '\0') return 0;
+        path = rest;
     }
 
     /* Reject absolute paths */
@@ -85,13 +124,13 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
      * deep blob.init / db.open path was O(depth^2) lookups a call, and a
      * fresh one strips a missing component per realpath). No scope (Hull's
      * own callers) charges nothing; a trip fails the validation. */
-    if (hl_fs_charge(validate_realpath_units(cfg->base_dir))) {
+    if (hl_fs_charge(validate_realpath_units(root))) {
         if (err_msg) *err_msg = "budget_exhausted";
         return -1;
     }
     /* Resolve the base directory (must exist) */
     char resolved_base[PATH_MAX];
-    if (realpath(cfg->base_dir, resolved_base) == NULL) {
+    if (realpath(root, resolved_base) == NULL) {
         if (err_msg) *err_msg = "validate_failed";
         return -1; /* base dir must exist */
     }

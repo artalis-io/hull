@@ -1655,6 +1655,8 @@ static int hl_serve_init_app_context(HlServerState *s)
         .app_dir           = s->app_dir,
         .entry_point       = s->entry_point,
         .db_path           = s->cfg.no_db ? NULL : s->cfg.db_path,
+        .db_path_explicit  = !s->cfg.db_path_is_default,
+        .manifest_default_db = 1,
         .no_migrate        = s->cfg.no_migrate,
         .keep_internal_in_app_db = s->cfg.keep_internal,
         .no_db             = s->cfg.no_db,
@@ -2159,6 +2161,37 @@ static int hl_serve_wire_caps(HlServerState *s)
             log_error("[hull:c] %s", ref_err);
             return -1;
         }
+        /* The per-user state directory (shared/state_dir.h, gap 3): resolved,
+         * made 0700 and trusted here, before the registry's "@state/" DSNs
+         * resolve, the policy compiles against it and the sandbox grants it;
+         * an app that declared one and cannot have it does not start.
+         * Registered as a root like the app directory (its .hull is reserved
+         * from app code, audit 37 / 42). */
+        s->state_dir[0] = '\0';
+        if (s->manifest.state_invalid) {
+            log_error("[hull:c] the manifest's `state` is not usable (see above); "
+                      "refusing to start");
+            return -1;
+        }
+        if (s->manifest.state_name) {
+            if (hl_state_dir_resolve(s->manifest.state_name, s->state_dir,
+                                     sizeof s->state_dir) != 0) {
+                log_error("[hull:c] the state directory for state.name %s is not usable",
+                          s->manifest.state_name);
+                return -1;
+            }
+            (void)hl_fs_reserve_root_path(s->state_dir);
+            log_debug("[hull:c] state directory: %s", s->state_dir);
+        }
+        /* The manifest's databases (gap 3, PR 2): the state root for its
+         * "@state/" DSNs and, with no -d, its own default database - before
+         * the registry takes the sealed manifest and the internal-table move
+         * runs on the default. The sandbox grants follow the new default. */
+        if (hl_app_context_manifest_db(s->app, &s->manifest,
+                                       s->state_dir[0] ? s->state_dir : NULL) != 0)
+            return -1;
+        if (!s->cfg.no_db && hl_app_context_default_db_path(s->app))
+            s->cfg.db_path = hl_app_context_default_db_path(s->app);
         /* Sized to the manifest: a fixed 16 KiB refused a large legitimate
          * one at startup. The 16 KiB stays for the module set, the DuckDB
          * policy and the struct copy that follow. */
@@ -2451,27 +2484,8 @@ static int hl_serve_wire_caps(HlServerState *s)
      * app leaves rt->fs_cfg NULL -> fs denied (unchanged fail-closed behavior). */
     memset(&s->fs_cfg_storage, 0, sizeof(s->fs_cfg_storage));
     s->fs_policy_storage = HL_FS_POLICY_INIT;
-    /* The per-user state directory (shared/state_dir.h, gap 3): resolved,
-     * made 0700 and trusted here, before the policy compiles against it and
-     * the sandbox grants it; an app that declared one and cannot have it does
-     * not start. Registered as a root like the app directory (its .hull is
-     * reserved from app code, audit 37 / 42). */
-    s->state_dir[0] = '\0';
-    if (s->manifest.state_invalid) {
-        log_error("[hull:c] the manifest's `state` is not usable (see above); "
-                  "refusing to start");
-        return -1;
-    }
-    if (s->manifest.state_name) {
-        if (hl_state_dir_resolve(s->manifest.state_name, s->state_dir,
-                                 sizeof s->state_dir) != 0) {
-            log_error("[hull:c] the state directory for state.name %s is not usable",
-                      s->manifest.state_name);
-            return -1;
-        }
-        (void)hl_fs_reserve_root_path(s->state_dir);
-        log_debug("[hull:c] state directory: %s", s->state_dir);
-    }
+    /* s->state_dir was resolved with the manifest, above (the registry's
+     * "@state/" DSNs needed it first). */
     if (s->manifest.fs_read_count > 0 || s->manifest.fs_write_count > 0) {
         const char *perr = NULL;
         if (hl_fs_policy_compile_manifest_ex(

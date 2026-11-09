@@ -149,6 +149,27 @@ void hl_db_registry_set_manifest(HlDbRegistry *reg, const HlManifest *manifest);
  * resolved. The -d DSN (the operator's) is not checked. */
 int hl_db_registry_set_app_dir(HlDbRegistry *reg, const char *app_dir);
 
+/* The app's per-user STATE directory (shared/state_dir.h): a manifest file
+ * DSN whose first component is "@state" opens under it, confined to it as an
+ * app-relative one is to the app directory. Set with the app directory,
+ * before any manifest connection opens; until set, a "@state/" DSN is
+ * refused. -1 once sealed or when @p dir cannot be resolved. */
+int hl_db_registry_set_state_dir(HlDbRegistry *reg, const char *state_dir);
+
+/* The manifest's own "default" connection, confined (confine_manifest_dsn),
+ * or NULL: with *err NULL the manifest declares none; with *err set it
+ * declares one that cannot be used. Needs the manifest set
+ * (hl_db_registry_set_manifest). @p buf holds a rewritten file DSN. */
+const char *hl_db_registry_manifest_default_dsn(HlDbRegistry *reg, char *buf,
+                                                size_t bufsz, const char **err);
+
+/* Replace the registry's default DSN with @p dsn (already confined), closing
+ * an open "default" connection first (the implicit one opened at init: the
+ * manifest named the app's default and no -d was given). The next
+ * hl_db_registry_get("default") opens the new one. -1 once sealed, or when
+ * @p dsn does not fit. */
+int hl_db_registry_repoint_default(HlDbRegistry *reg, const char *dsn);
+
 /* Make the registry's DSN sources (the manifest pointer and the -d DSN)
  * read-only for the rest of the process - the last step of wiring, after
  * set_manifest. 0 on success; -1 is fatal for the caller. Destroy undoes it. */

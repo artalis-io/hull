@@ -1627,10 +1627,14 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
 #if defined(__COSMOPOLITAN__)
         on_openbsd = IsOpenbsd();
 #endif
-        char app_real[SANDBOX_PATH_MAX];
-        if (!on_openbsd && app_dir && realpath(app_dir, app_real)) {
+        /* The internal database's .hull may be the app directory's or the
+         * state directory's (shared/state_dir.h): whichever holds it. */
+        const char *roots[2] = { app_dir, policy->state_dir };
+        for (int r = 0; !on_openbsd && r < 2; r++) {
+            char root_real[SANDBOX_PATH_MAX];
+            if (!roots[r] || !realpath(roots[r], root_real)) continue;
             char hull_dir[SANDBOX_PATH_MAX];
-            int hn = snprintf(hull_dir, sizeof hull_dir, "%s/.hull/", app_real);
+            int hn = snprintf(hull_dir, sizeof hull_dir, "%s/.hull/", root_real);
             if (hn > 0 && (size_t)hn < sizeof hull_dir &&
                 strncmp(policy->internal_db_path, hull_dir, (size_t)hn) == 0) {
                 hull_dir[hn - 1] = '\0';

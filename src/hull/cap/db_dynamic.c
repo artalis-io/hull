@@ -241,18 +241,26 @@ HlDbHandle *hl_db_dynamic_open_ex(const char *dsn,
             /* Open it where it was checked. The backend resolves a relative
              * path against the process's working directory, which is not the
              * app directory when hull runs an app elsewhere - the check and the
-             * open would name two different files. */
+             * open would name two different files. A "@state/..." path is under
+             * the state directory (hl_cap_fs_root_for, the one place the prefix
+             * is stripped). */
+            const char *root = NULL, *rest = NULL, *rerr = NULL;
+            size_t root_len = 0;
+            if (hl_cap_fs_root_for(fs_cfg, path, &root, &root_len, &rest, &rerr) != 0
+                || rest[0] == '\0') {
+                if (err) *err = "db.open: a file DSN needs a file path under its root";
+                return NULL;
+            }
             int n = scheme[0]
-                ? snprintf(abs_dsn, sizeof abs_dsn, "%s://%s/%s", scheme,
-                           fs_cfg->base_dir, path)
-                : snprintf(abs_dsn, sizeof abs_dsn, "%s/%s", fs_cfg->base_dir, path);
+                ? snprintf(abs_dsn, sizeof abs_dsn, "%s://%s/%s", scheme, root, rest)
+                : snprintf(abs_dsn, sizeof abs_dsn, "%s/%s", root, rest);
             if (n < 0 || (size_t)n >= sizeof abs_dsn) {
                 if (err) *err = "db.open: file path too long";
                 return NULL;
             }
             /* No symbolic link on the way to the file, nor at it (audit 29). */
             const char *abs_path = abs_dsn + (scheme[0] ? strlen(scheme) + 3 : 0);
-            if (hl_db_path_has_symlink(abs_path, strlen(fs_cfg->base_dir))) {
+            if (hl_db_path_has_symlink(abs_path, root_len)) {
                 if (err) *err = "db.open: the file path runs through a symbolic "
                                 "link, or names something that is not a "
                                 "regular file";

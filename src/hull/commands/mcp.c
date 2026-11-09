@@ -481,7 +481,8 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
                 hl_app_context_free(*warm_ctx_ptr);
                 *warm_ctx_ptr = NULL;
             }
-            HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1 };
+            HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1,
+                                      .manifest_default_db = 1 };
             if (hl_app_context_init(warm_ctx_ptr, &opts) != 0)
                 *warm_ctx_ptr = NULL;
         }

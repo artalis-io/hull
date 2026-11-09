@@ -909,4 +909,149 @@ UTEST(db_internal, no_migrate_refuses_unmoved_tables)
     rm_tree(root);
 }
 
+/* ── gap 3: the @state/ root for manifest file DSNs, the internal database
+ * under it, and the manifest's own default database ──────────────────── */
+
+UTEST(db_registry, state_file_dsn_opens_under_the_state_dir)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+    HlManifest m;
+    HlDbRegistry *reg = NULL;
+    const char *err = NULL;
+
+    /* Without a state directory a "@state/" DSN is refused. */
+    HlDbHandle *h = get_named(app, "@state/cache.db", &reg, &m, &err);
+    EXPECT_TRUE(h == NULL);
+    EXPECT_TRUE(err && strstr(err, "state directory") != NULL);
+    hl_db_registry_destroy(reg);
+
+    /* With one it opens there, and the worker pool is handed that file. */
+    memset(&m, 0, sizeof m);
+    m.databases.named[0].name = "cache";
+    m.databases.named[0].dsn = "@state/cache.db";
+    m.databases.named_count = 1;
+    reg = hl_db_registry_create(&m, NULL, NULL);
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    ASSERT_EQ(0, hl_db_registry_set_state_dir(reg, state));
+    err = NULL;
+    h = hl_db_registry_get(reg, "cache", &err);
+    ASSERT_TRUE(h != NULL);
+    ASSERT_TRUE(hl_db_exec(h, "CREATE TABLE t (x INTEGER)", NULL, 0) >= 0);
+    char want[PATH_MAX + 16];
+    snprintf(want, sizeof want, "%s/cache.db", state);
+    struct stat st;
+    EXPECT_EQ(0, stat(want, &st));
+    EXPECT_STREQ(want, hl_db_registry_dsn_for(reg, h));
+    snprintf(want, sizeof want, "%s/cache.db", app);
+    EXPECT_NE(0, stat(want, &st));   /* not under the app directory */
+    hl_db_registry_destroy(reg);
+
+    /* The state root keeps the app root's rules: no "..", no .hull, a file. */
+    static const char *const bad[] = { "@state/../x.db", "@state/.hull/x.db", "@state",
+                                       "@state/", "@other/x.db" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        memset(&m, 0, sizeof m);
+        m.databases.named[0].name = "cache";
+        m.databases.named[0].dsn = bad[i];
+        m.databases.named_count = 1;
+        reg = hl_db_registry_create(&m, NULL, NULL);
+        ASSERT_TRUE(reg != NULL);
+        ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+        ASSERT_EQ(0, hl_db_registry_set_state_dir(reg, state));
+        err = NULL;
+        EXPECT_TRUE(hl_db_registry_get(reg, "cache", &err) == NULL);
+        hl_db_registry_destroy(reg);
+    }
+    rm_tree(root);
+}
+
+UTEST(db_registry, internal_default_under_the_state_dir)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+    char out[PATH_MAX + 64], dsn[PATH_MAX + 64], want[PATH_MAX + 64];
+    size_t base = 0;
+    int in_hull = 0;
+
+    snprintf(dsn, sizeof dsn, "%s/data.db", state);
+    snprintf(want, sizeof want, "%s/.hull/internal.db", state);
+    EXPECT_EQ(1, hl_db_internal_default_dsn_ex(app, state, dsn, out, sizeof out, &base, &in_hull));
+    EXPECT_STREQ(want, out);
+    EXPECT_EQ(strlen(state), base);
+    EXPECT_EQ(1, in_hull);
+    /* the internal file itself: nothing separate */
+    EXPECT_EQ(0, hl_db_internal_default_dsn_ex(app, state, want, out, sizeof out, &base, &in_hull));
+    /* the app tree still wins its own rule */
+    snprintf(dsn, sizeof dsn, "%s/data.db", app);
+    snprintf(want, sizeof want, "%s/.hull/internal.db", app);
+    EXPECT_EQ(1, hl_db_internal_default_dsn_ex(app, state, dsn, out, sizeof out, &base, &in_hull));
+    EXPECT_STREQ(want, out);
+    /* outside both: beside */
+    snprintf(dsn, sizeof dsn, "%s/vol.db", root);
+    snprintf(want, sizeof want, "%s/vol.db.hull-internal", root);
+    EXPECT_EQ(1, hl_db_internal_default_dsn_ex(app, state, dsn, out, sizeof out, &base, &in_hull));
+    EXPECT_STREQ(want, out);
+    EXPECT_EQ(0, in_hull);
+    rm_tree(root);
+}
+
+UTEST(db_registry, manifest_default_repoints_the_implicit_default)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+    HlManifest m;
+    memset(&m, 0, sizeof m);
+    m.databases.named[0].name = "default";
+    m.databases.named[0].dsn = "@state/data.db";
+    m.databases.named_count = 1;
+
+    HlDbRegistry *reg = hl_db_registry_create(NULL, ":memory:", NULL);   /* the implicit default */
+    ASSERT_TRUE(reg != NULL);
+    ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+    ASSERT_EQ(0, hl_db_registry_set_state_dir(reg, state));
+    const char *err = NULL;
+    HlDbHandle *imp = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(imp != NULL);
+    ASSERT_TRUE(hl_db_exec(imp, "CREATE TABLE gone (x INTEGER)", NULL, 0) >= 0);
+
+    /* No manifest: no manifest default, no error. */
+    char buf[PATH_MAX + 32];
+    err = NULL;
+    EXPECT_TRUE(hl_db_registry_manifest_default_dsn(reg, buf, sizeof buf, &err) == NULL);
+    EXPECT_TRUE(err == NULL);
+
+    hl_db_registry_set_manifest(reg, &m);
+    const char *d = hl_db_registry_manifest_default_dsn(reg, buf, sizeof buf, &err);
+    hl_db_registry_set_manifest(reg, NULL);
+    ASSERT_TRUE(d != NULL);
+    char want[PATH_MAX + 16];
+    snprintf(want, sizeof want, "%s/data.db", state);
+    EXPECT_STREQ(want, d);
+
+    ASSERT_EQ(0, hl_db_registry_repoint_default(reg, d));
+    EXPECT_TRUE(hl_db_registry_default(reg) == NULL);   /* the implicit one is closed */
+    err = NULL;
+    HlDbHandle *def = hl_db_registry_get(reg, "default", &err);
+    ASSERT_TRUE(def != NULL);
+    EXPECT_TRUE(hl_db_registry_default(reg) == def);
+    EXPECT_STREQ(want, hl_db_registry_dsn_for(reg, def));
+    /* a fresh database: the in-memory table is not here */
+    EXPECT_TRUE(hl_db_exec(def, "SELECT x FROM gone", NULL, 0) < 0);
+    struct stat st;
+    EXPECT_EQ(0, stat(want, &st));
+
+    ASSERT_EQ(0, hl_db_registry_seal(reg));
+    EXPECT_EQ(-1, hl_db_registry_repoint_default(reg, ":memory:"));   /* sealed */
+    hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
 UTEST_MAIN()

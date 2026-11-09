@@ -195,6 +195,17 @@ collation - nothing converts them and nothing warns. Convert them once with
 each `_hull_*` table (with `FOREIGN_KEY_CHECKS = 0` around it); CLAUDE.md
 ("MySQL/MariaDB specifics") has the generator query.
 
+**`@state/` DSNs** (app.main tools; platform gap 3). An app that declares a
+per-user state directory (`state = { name = "hsctl" }`, see docs/cli_mode.md
+"A per-user state directory") may put a `databases.named` / `databases.internal`
+file DSN, and a `db.open` one, under it as `"@state/<file>"` - confined to that
+directory the way an app-relative DSN is to the app directory. And
+`databases.named.default = "@state/data.db"` names the app's **default**
+database when no `-d` is given: the implicit default is replaced once the
+manifest is read, the migrations run on the named one, its internal database
+is `<state>/.hull/internal.db`, and `hull migrate` / `hull agent db` with no
+`-d` open the same file. An operator's `-d` still wins.
+
 **`databases.internal`** (optional). Where the stdlib keeps its own `_hull_*`
 tables: sessions, auth-flows tokens and lockouts, TOTP, the audit log, RBAC,
 idempotency keys and (when declared) attachment metadata. Point it at a database (or a

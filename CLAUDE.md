@@ -700,7 +700,8 @@ internal-connection lookup before a top-level `init()` uses a `"$VAR"`
 `databases.internal` (audit 17: both read an undeclared variable).
 
 A file DSN in `databases.named` / `databases.internal` (scheme-less, `sqlite://`, `file://`,
-`duckdb://`; a `"$VAR"` one after resolution) is confined to the app tree
+`duckdb://`; a `"$VAR"` one after resolution) is confined to the app tree - or, spelled
+`"@state/<file>"`, to the app's state directory (gap 3; `hl_db_registry_set_state_dir`) -
 (`confine_manifest_dsn`, `cap/db_registry.c`, audit 34): a relative path is opened under the
 app directory (`hl_db_registry_set_app_dir`, set by `app_context.c` for every entry point),
 not the working directory, and `..`, a path outside the app directory, a symbolic link below
@@ -2407,7 +2408,7 @@ treats a malformed `platform.public_key`, or a `composed` / `composed.platform_d
 present but not an object, as an error rather than a reason to skip the check (audit 15), and
 a dev-mode static file's ETag 304 is answered only after the disk gate passed it.
 
-**The `@state/` root (platform gap 3, `shared/state_dir.c`, PR 1 of 3).** A manifest
+**The `@state/` root (platform gap 3, `shared/state_dir.c`, PRs 1-2 of 3).** A manifest
 `state = { name = "x" }` (JS `state: { name }`) gives the app a per-user state directory -
 `$XDG_STATE_HOME/<name>`, else `<home>/.local/state/<name>`, Windows `%LOCALAPPDATA%\<name>`,
 `HULL_STATE_DIR` overriding - that every entry point (serve.c, app_context.c for the app.main
@@ -2423,9 +2424,20 @@ first component is `reserved_path`; a `@state/` grant with no state directory is
 reserved too). The kernel sandbox takes `HlSandboxPolicy.state_dir`: Seatbelt `subpath`
 read-write + a `.hull` deny after, unveil `rwc` + `.hull` hidden; `@state/` grants are skipped
 by the per-grant walk under the app directory (`hl_fs_grant_is_state`). `HlFsConfig.state_dir`
-serves blob roots. A new cap that builds an absolute path from a grant must branch on
-`hl_fs_grant_is_state` the same way; one that selects through the policy gets `@state/` for
-free. Covered by `tests/e2e_state_dir.sh` (`make e2e-state-dir`, both runtimes, sandboxed) and
+serves the consumers that build an absolute path through `hl_cap_fs_root_for` (the ONE place
+the prefix is stripped: `hl_cap_fs_validate`, blob roots, `db.open`); a new such cap calls it
+rather than joining `base_dir` itself, and one that selects through the policy gets `@state/`
+for free. The database side (PR 2): `hl_db_registry_set_state_dir` lets `confine_manifest_dsn`
+take a `"@state/<file>"` `databases.named` / `.internal` DSN under the state root (same `..` /
+`.hull` / symlink rules); `databases.named.default` is the app's DEFAULT database when the
+operator gave no `-d` (`HlAppContextOpts.manifest_default_db`, set by both runners, `hull
+migrate`, the agent's db commands and the MCP context; `db_path_explicit` marks a `-d`): the
+implicit default opened and migrated at init is closed (`hl_db_registry_repoint_default`), the
+file it created removed, the manifest's opened, migrated and given its internal database
+(`hl_db_internal_default_dsn_ex`: `<state>/.hull/internal.db` for a database under the state
+root) - all in `hl_app_context_manifest_db`, which the context runs when it loads the app and
+serve.c calls once it has the manifest, before the internal-table move. `hull test` leaves the
+flag off (its `:memory:` is deliberate). Covered by `tests/e2e_state_dir.sh` (`make e2e-state-dir`, both runtimes, sandboxed) and
 `test_fs_policy`. docs/cli_mode.md "A per-user state directory".
 
 **The app directory may not be `/`, or `$HOME` or above.** A built binary takes its app

@@ -107,8 +107,22 @@ typedef struct HlAppContextOpts {
      * internal database (cap/db_internal.h). The default internal path is
      * still recorded, so the startup step can move tables back. */
     int           keep_internal_in_app_db;
+    /* 1 when db_path is the OPERATOR's (-d): never replaced by the
+     * manifest's. 0 when it is the implicit default (<app_dir>/data.db under
+     * serve, :memory: elsewhere), which manifest_default_db may replace. */
+    int           db_path_explicit;
+    /* 1 (the runners, `hull migrate`, the agent's database commands): when
+     * the manifest declares `databases.named.default` and db_path is not the
+     * operator's, the app's default database is THAT one - re-pointed after
+     * the manifest is read, migrated, the internal database configured for
+     * it, and a file the implicit default created meanwhile removed. The
+     * way an app.main tool keeps its database under "@state/"
+     * (shared/state_dir.h). 0 (hull test, inspection commands): the implicit
+     * default stays. */
+    int           manifest_default_db;
 } HlAppContextOpts;
 
+struct HlManifest;
 typedef struct HlAppContext HlAppContext;
 
 /*
@@ -160,6 +174,21 @@ const char   *hl_app_context_app_dir(HlAppContext *ctx);
  * state.name), resolved and made at init, or NULL when none is declared. The
  * app.main runner grants it to the kernel sandbox. */
 const char   *hl_app_context_state_dir(HlAppContext *ctx);
+/* The app's default database DSN when the manifest's databases.named.default
+ * replaced the implicit one (HlAppContextOpts.manifest_default_db) -
+ * confined, absolute for a file - else NULL. What `hull migrate` and the
+ * kernel sandbox take as the default database. */
+const char   *hl_app_context_default_db_path(HlAppContext *ctx);
+/* The manifest step for the databases (gap 3): tell the registry the state
+ * directory (NULL = none) so "@state/" DSNs confine to it, and - under
+ * HlAppContextOpts.manifest_default_db with no operator -d - make the
+ * manifest's `databases.named.default` the app's default (closing the
+ * implicit one, migrating, configuring the internal database). The context
+ * runs it itself when it loads the app; serve.c, which defers the load,
+ * calls it once it has the manifest, before the internal-table move. 0 /
+ * -1 (reported). */
+int           hl_app_context_manifest_db(HlAppContext *ctx, const struct HlManifest *m,
+                                         const char *state_dir);
 /* The resolved runtime factory (NULL before resolution). Agnostic; the
  * runtime-typed accessors below build on it. */
 const HlRuntimeFactory *hl_app_context_factory(HlAppContext *ctx);

@@ -19,7 +19,12 @@
 
 #include "hull/cap/fs_resolve.h"   /* hl_fs_reserve_root_path (audit 42) */
 #include "hull/shared/state_dir.h"  /* the @state/ root (gap 3) */
+#include <errno.h>
+#include <sys/stat.h>
+#include "hull/shared/fs_util.h"  /* hl_default_db_path_check */
+#include "hull/sandbox.h"        /* hl_sandbox_db_path */
 #include <limits.h>
+#include "hull/shared/host.h"   /* HL_HOST_PATH_MAX */
 #include "hull/cap/fs.h"          /* HlFsConfig - test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
 #include "hull/utils/alloc.h"     /* HlAllocator + hl_alloc_init for the fs policy */
@@ -30,7 +35,6 @@
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (agent handle) */
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_internal.h"
-#include "hull/shared/host.h"   /* HL_HOST_PATH_MAX */
 #include <limits.h>
 #include "hull/migrate.h"
 #include "hull/worker_db.h"
@@ -83,6 +87,20 @@ struct HlAppContext {
      * manifest state.name; "" = none. The CLI runner grants it to the sandbox
      * (hl_app_context_state_dir). */
     char           state_dir[PATH_MAX];
+    /* The manifest's default database when it replaced the implicit one
+     * (HlAppContextOpts.manifest_default_db); "" = not replaced. And whether
+     * the implicit FILE default was absent when init opened it, so the file
+     * it made can be removed once the manifest named another. */
+    char           default_db_dsn[HL_HOST_PATH_MAX + 16];
+    int            implicit_db_absent;
+    /* The init options the manifest step (hl_app_context_manifest_db)
+     * needs: serve.c defers the app load and runs that step itself. */
+    int            opt_no_migrate;
+    int            opt_keep_internal;
+    int            opt_db_path_explicit;
+    int            opt_manifest_default_db;
+    int            opt_no_db;
+    char           implicit_db_dsn[HL_HOST_PATH_MAX + 16];
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
      * its lifetime matches the runtime - rt->module_set borrows. */
@@ -188,6 +206,116 @@ static int load_app_code(HlAppContext *ctx, const char *entry)
 
 /* ── Init ──────────────────────────────────────────────────────────── */
 
+#ifdef HL_ENABLE_DB
+/* Remove the file (and SQLite sidecars) the implicit default made at init,
+ * now that the manifest named another default: Hull made it seconds ago and
+ * only its own migrations touched it. Regular files only, never a link. */
+static void remove_implicit_db(const char *dsn)
+{
+    const char *f = hl_sandbox_db_path(dsn);
+    if (!f || strcmp(f, ":memory:") == 0) return;
+    static const char *const suffixes[] = { "", "-wal", "-shm", "-journal" };
+    for (size_t i = 0; i < sizeof suffixes / sizeof suffixes[0]; i++) {
+        char p[PATH_MAX];
+        int n = snprintf(p, sizeof p, "%s%s", f, suffixes[i]);
+        if (n < 0 || (size_t)n >= sizeof p) return;
+        struct stat st;
+        if (lstat(p, &st) == 0 && S_ISREG(st.st_mode)) (void)unlink(p);
+    }
+}
+
+/* Make @p dsn (confined) the app's default database: close the implicit
+ * default, open this one, check a file default the way the implicit one is
+ * checked (hl_default_db_path_check), run the migrations on it, and give it
+ * its internal database. 0 / -1 (reported). */
+static int app_context_repoint_default(HlAppContext *ctx, const char *dsn)
+{
+    const char *f = hl_sandbox_db_path(dsn);
+    if (f && strcmp(f, ":memory:") != 0) {
+        char why[PATH_MAX + 160];
+        if (hl_default_db_path_check(f, why, sizeof why) != 0) {
+            hl_eprintf_line("[app-context] databases.named.default: %s", why);
+            return -1;
+        }
+    }
+    const char *implicit = ctx->implicit_db_dsn[0] ? ctx->implicit_db_dsn : ":memory:";
+    if (hl_db_registry_repoint_default(ctx->db_registry, dsn) != 0) {
+        hl_eprintf_line("[app-context] cannot make the manifest's default database the default");
+        return -1;
+    }
+    if (ctx->implicit_db_absent) remove_implicit_db(implicit);
+    const char *derr = NULL;
+    HlDbHandle *def = hl_db_registry_get(ctx->db_registry, "default", &derr);
+    if (!def) {
+        hl_eprintf_line("[app-context] databases.named.default: %s",
+                        derr ? derr : "cannot open the database");
+        return -1;
+    }
+    ctx->db_open = 1;
+    if (!ctx->opt_no_migrate &&
+        hl_migrate_run(def, &ctx->app_vfs) == HL_MIGRATE_ERR) {
+        hl_eprintf_line("[app-context] migrations failed on the manifest's default database");
+        return -1;
+    }
+    if (hl_db_internal_configure_ex(ctx->db_registry, ctx->app_dir_copy,
+                                    ctx->state_dir[0] ? ctx->state_dir : NULL,
+                                    dsn, ctx->opt_keep_internal) != 0) {
+        hl_eprintf_line("[app-context] cannot work out the internal database path");
+        return -1;
+    }
+    size_t n = strlen(dsn);
+    if (n >= sizeof ctx->default_db_dsn) return -1;
+    memcpy(ctx->default_db_dsn, dsn, n + 1);
+    return 0;
+}
+#endif
+
+int hl_app_context_manifest_db(HlAppContext *ctx, const HlManifest *m,
+                               const char *state_dir)
+{
+#ifdef HL_ENABLE_DB
+    if (!ctx || !m || !ctx->db_registry) return 0;
+    /* The registry learns the state root first, so a "@state/" DSN
+     * (databases.named / .internal / the default) confines to it. The copy
+     * is the context's: serve.c resolved the directory itself. */
+    if (state_dir && state_dir[0]) {
+        if (!ctx->state_dir[0]) {
+            size_t n = strlen(state_dir);
+            if (n < sizeof ctx->state_dir) memcpy(ctx->state_dir, state_dir, n + 1);
+        }
+        if (hl_db_registry_set_state_dir(ctx->db_registry, state_dir) != 0) {
+            hl_eprintf_line("[app-context] cannot resolve the state directory for "
+                            "the database registry");
+            return -1;
+        }
+    }
+    /* The manifest's own default database (platform gap 3, PR 2):
+     * `databases.named.default` names the app's default when the operator
+     * gave no -d - the way an app.main tool keeps its database under
+     * "@state/". The implicit default was opened and migrated at init,
+     * before the manifest could be read: it is closed here, the file it
+     * made removed, and the manifest's opened, migrated and given its
+     * internal database. */
+    if (!ctx->opt_manifest_default_db || ctx->opt_db_path_explicit || ctx->opt_no_db)
+        return 0;
+    hl_db_registry_set_manifest(ctx->db_registry, m);
+    const char *derr = NULL;
+    char dbuf[HL_HOST_PATH_MAX + 16];
+    const char *d = hl_db_registry_manifest_default_dsn(ctx->db_registry, dbuf,
+                                                        sizeof dbuf, &derr);
+    hl_db_registry_set_manifest(ctx->db_registry, NULL);
+    if (!d && derr) {
+        hl_eprintf_line("[app-context] databases.named.default: %s", derr);
+        return -1;
+    }
+    if (d && app_context_repoint_default(ctx, d) != 0) return -1;
+    return 0;
+#else
+    (void)ctx; (void)m; (void)state_dir;
+    return 0;
+#endif
+}
+
 int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 {
     if (!out || !opts || !opts->app_dir) return -1;
@@ -252,6 +380,22 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             hl_app_context_free(ctx);
             return -1;
         }
+        /* Whether the implicit file default is there yet: a manifest default
+         * (below) may replace it, and the file this open makes is then
+         * removed. The operator's -d is never touched. */
+        if (db_path && !opts->db_path_explicit) {
+            const char *f = hl_sandbox_db_path(db_path);
+            struct stat st;
+            ctx->implicit_db_absent = f && strcmp(f, ":memory:") != 0 &&
+                                      lstat(f, &st) != 0 && errno == ENOENT;
+        }
+        ctx->opt_no_migrate          = opts->no_migrate;
+        ctx->opt_keep_internal       = opts->keep_internal_in_app_db;
+        ctx->opt_db_path_explicit    = opts->db_path_explicit;
+        ctx->opt_manifest_default_db = opts->manifest_default_db;
+        ctx->opt_no_db               = opts->no_db;
+        if (db_path && strlen(db_path) < sizeof ctx->implicit_db_dsn)
+            memcpy(ctx->implicit_db_dsn, db_path, strlen(db_path) + 1);
         /* Open the default connection only when a default DSN exists. With none
          * (postgres-only build, no -d), the app runs DB-less: db.default() is
          * lazy and errors only on use, matching a compute-only build. */
@@ -456,6 +600,17 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                     }
                     ctx->rt->fs_cfg = &ctx->fs_cfg_storage;
                 }
+#ifdef HL_ENABLE_DB
+                /* The manifest's databases under the state root, and its own
+                 * default database (gap 3, PR 2). serve.c, which defers the
+                 * load, calls this itself once it has the manifest. */
+                if (hl_app_context_manifest_db(ctx, &m,
+                                               ctx->state_dir[0] ? ctx->state_dir : NULL) != 0) {
+                    hl_manifest_free(&m);
+                    hl_app_context_free(ctx);
+                    return -1;
+                }
+#endif
 #ifdef HL_ENABLE_WASM
                 /* The manifest's `wasm` ceilings (and the operator's flags),
                  * as serve.c resolves them for the server: without this an
@@ -505,7 +660,9 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 
     /* Init worker DB after runtime init (needs db_path). */
 #ifdef HL_ENABLE_DB
-    if (opts->worker_db_path)
+    if (ctx->default_db_dsn[0])
+        hl_worker_db_init(ctx->default_db_dsn);   /* the manifest's default */
+    else if (opts->worker_db_path)
         hl_worker_db_init(opts->worker_db_path);
 #endif
 
@@ -656,6 +813,11 @@ const char *hl_app_context_app_dir(HlAppContext *ctx)
 const char *hl_app_context_state_dir(HlAppContext *ctx)
 {
     return (ctx && ctx->state_dir[0]) ? ctx->state_dir : NULL;
+}
+
+const char *hl_app_context_default_db_path(HlAppContext *ctx)
+{
+    return (ctx && ctx->default_db_dsn[0]) ? ctx->default_db_dsn : NULL;
 }
 
 /* Agnostic accessor: the runtime factory the context resolved (or NULL before

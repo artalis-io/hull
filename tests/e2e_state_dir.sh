@@ -64,11 +64,46 @@ for ext in lua js; do
     echo "PASS: $ext HULL_STATE_DIR=/ is refused at load"
 done
 
-for fx in app other badname; do
+for fx in app other badname db; do
     rc=$(cd "$baddir" && XDG_STATE_HOME="$work/xdg-bad" hull_run "$out" "$HULL_BIN" "$fx.lua")
     [ "$rc" != 0 ] || fail "$fx.lua: a bad manifest ran"
     ! grep -q 'ran=yes' "$out" || fail "$fx.lua: main ran"
 done
-grep -q 'state_dir_missing\|reserved_path\|state.name' "$out" || true
-echo "PASS: a @state/ grant without state.name, an @other/ grant and a bad state.name are refused at load"
-echo '11/11 state directory end-to-end tests passed'
+echo "PASS: a @state/ grant or database without state.name, an @other/ grant and a bad state.name are refused at load"
+
+# ── The default database under the state directory (PR 2) ───────────────
+has_agent=1
+if "$HULL_BIN" doctor --json 2>/dev/null | grep -q '"http":false'; then has_agent=0; fi
+for ext in lua js; do
+    dbdir="$work/db-$ext"; mkdir -p "$dbdir/migrations"
+    cp "tests/fixtures/state_dir_db/app.$ext" "$dbdir/"; cp tests/fixtures/state_dir_db/migrations/001_init.sql "$dbdir/migrations/"
+    xdg="$work/xdg-db-$ext"; sdir="$xdg/hull-e2e-state-db"
+    rc=$(cd "$dbdir" && XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" "app.$ext")
+    [ "$rc" = 0 ] || fail "$ext db: exit $rc"
+    [ "$(line count)" = 1 ] || fail "$ext db: count after the first run (got $(line count))"
+    [ "$(line cache_rows)" = 1 ] || fail "$ext db: the named cache connection"
+    [ -f "$sdir/data.db" ] || fail "$ext db: data.db is not under the state dir"
+    [ -f "$sdir/cache.db" ] || fail "$ext db: cache.db is not under the state dir"
+    [ ! -e "$dbdir/data.db" ] || fail "$ext db: the implicit data.db was left in the app directory"
+    rc=$(cd "$dbdir" && XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" "app.$ext")
+    [ "$rc" = 0 ] || fail "$ext db: second run exit $rc"
+    [ "$(line count)" = 2 ] || fail "$ext db: the state database did not persist (got $(line count))"
+    echo "PASS: $ext databases.named.default under @state/ is the migrated default, persistent, no stray data.db"
+
+    rc=$(XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" migrate status "$dbdir")
+    [ "$rc" = 0 ] || fail "$ext migrate status: exit $rc"
+    grep -q '\[x\] 001_init.sql' "$out" || fail "$ext migrate status does not see the state database"
+    rc=$(XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" migrate "$dbdir")
+    [ "$rc" = 0 ] || fail "$ext migrate: exit $rc"
+    grep -q 'already up to date' "$out" || fail "$ext migrate did not find the state database migrated"
+    # `hull agent` needs the HTTP server (an HTTP-free build has no agent).
+    if [ "$has_agent" = 1 ]; then
+        rc=$(XDG_STATE_HOME="$xdg" hull_run "$out" "$HULL_BIN" agent db schema "$dbdir")
+        [ "$rc" = 0 ] || fail "$ext agent db schema: exit $rc"
+        grep -q '"name":"notes"' "$out" || fail "$ext agent db schema does not see the state database"
+        echo "PASS: $ext hull migrate and hull agent db schema open the state database with no -d"
+    else
+        echo "PASS: $ext hull migrate opens the state database with no -d (no hull agent in this build)"
+    fi
+done
+echo '15/15 state directory end-to-end tests passed'
