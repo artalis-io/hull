@@ -1696,7 +1696,9 @@ registers.
      registered, teardown and exit at once. See docs/cli_mode.md "Interrupts".
 7. After main returns:
      - non-zero return → exit with that code, skip the serve loop
-     - zero/nil return + handlers registered → enter the serve loop
+     - zero/nil return + handlers registered → enter the serve loop,
+       unless a SIGINT / SIGTERM arrived while main ran: then teardown
+       and exit 128 + signal, never serving (audit 44)
      - zero/nil return + no handlers → exit 0
    If app.main is NOT registered: go straight to the serve loop
    (today's pure web-app behavior).

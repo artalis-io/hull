@@ -31,6 +31,18 @@ release-artifact layout).
 
 <!-- audit44:main-signal -->
 
+- **app.main's interrupt handling (audit 44, `src/hull/shared/main_signal.c`).** An app with
+  `app.main` AND handlers whose main handled SIGTERM / SIGINT and returned 0 fell through into
+  the serve loop, so the stop request was lost and the process served until SIGKILL: a signal
+  that arrived while main ran now ends the process before the server starts (exit 128 + the
+  signal; main's non-zero code still wins). An inherited SIG_IGN is left ignored; removing the
+  handler no longer clobbers one installed after it (the TUI's) and a handler left in that
+  chain passes signals on; the self-pipe's write end stays open for the process lifetime, so a
+  handler on another thread never writes to a reused descriptor; the signal counter is an
+  atomic. JS: main's own code after `await ctx.signal.promise` may read `ctx.stdin` again.
+  Tests: `main_signal_audit44.*`, `cli_interrupt_audit44.main_then_serve_sigterm`,
+  `{js,lua}_main_signal_audit44.stdin_after_signal_await`.
+
 
 
 <!-- audit44:state-db -->

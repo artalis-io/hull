@@ -2350,9 +2350,16 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
      * holds nothing else up, but a ctx kept past main and read from a
      * request handler, a timer or a callback held the event loop until the
      * terminal or the pipe answered (audit 41). Only app.main's own code
-     * may read. */
+     * may read. That includes main's code run as a promise job under main's
+     * own tag while main is still pending - after `await ctx.signal.promise`
+     * it runs in the interrupt's drain, where active_cli_main is 0 (audit
+     * 44); QuickJS gives a job the tag of the code that awaited it (HULL
+     * PATCH 0008), so no other run's code carries it. */
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->active_cli_main)
+    int mains = js && (js->active_cli_main ||
+                       (js->cli_main_active && js->cli_main_tag != 0 &&
+                        JS_GetJobTag(js->rt) == js->cli_main_tag));
+    if (!mains)
         return JS_ThrowTypeError(ctx, "ctx.stdin.read() is only available in "
                                       "app.main's own code (it blocks the event loop)");
     if (hl_js_budget_charge(ctx, HL_WORK_CLI_FLUSH_UNITS) < 0) return JS_EXCEPTION;

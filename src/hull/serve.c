@@ -950,6 +950,8 @@ typedef struct {
                                           *     is skipped and the process
                                           *     exits with cli_exit_code. */
     int                  cli_exit_code; /* main's return value (0..255) */
+    int                  main_signal;   /* SIGINT / SIGTERM that arrived
+                                         * while main ran, else 0 */
 
     /* --vm-thread (cap/vm_thread.h): NULL when off. */
     HlVmThread          *vm_thread;
@@ -3310,6 +3312,7 @@ static int hl_serve_run_main(HlServerState *s)
     free((void *)env_allow);
 
     s->cli_exit_code = rc;
+    s->main_signal   = hl_main_signal_received();
     if (run != 0)
         return -1;
 
@@ -3362,6 +3365,19 @@ static int hl_serve_wire_and_start(HlServerState *s)
             hl_serve_teardown_after_serve(s);
             return 0;        /* hl_serve_wire_and_start success; the
                               * outer caller reads s->cli_exit_code. */
+        }
+        if (has_handlers && s->main_signal) {
+            /* A SIGINT / SIGTERM arrived while main ran and main returned
+             * 0 (it handled the interrupt, or returned before it was
+             * delivered). Keel's own handler is not installed yet, so the
+             * stop request would be lost and the process would serve until
+             * SIGKILL (audit 44). The signal ends the process: no serve
+             * loop, exit 128 + the signal. */
+            log_info("[hull:main] %s during app.main; not starting the server",
+                     hl_main_signal_name(s->main_signal));
+            s->cli_exit_code = 128 + s->main_signal;
+            hl_serve_teardown_after_serve(s);
+            return 0;
         }
         if (!has_handlers) {
             /* Pure CLI - main was the whole program. */
