@@ -404,10 +404,14 @@ static JSValue js_test_eq(JSContext *ctx, JSValueConst this_val,
         equal = (a == b);
     } else if (JS_IsString(argv[0]) && JS_IsString(argv[1])) {
         const char *a = JS_ToCString(ctx, argv[0]);
-        const char *b = JS_ToCString(ctx, argv[1]);
+        const char *b = a ? JS_ToCString(ctx, argv[1]) : NULL;
         equal = (a && b && strcmp(a, b) == 0);
         if (a) JS_FreeCString(ctx, a);
         if (b) JS_FreeCString(ctx, b);
+        /* A conversion that failed (out of memory, the run's budget running
+         * out in the scan) left its exception pending: pass it on, never a
+         * test.eq TypeError over it (audit 44, test.ok's twin). */
+        if (!a || !b) return JS_EXCEPTION;
     } else if (JS_IsBool(argv[0]) && JS_IsBool(argv[1])) {
         equal = (JS_ToBool(ctx, argv[0]) == JS_ToBool(ctx, argv[1]));
     } else if (JS_IsNull(argv[0]) && JS_IsNull(argv[1])) {
@@ -420,23 +424,35 @@ static JSValue js_test_eq(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!equal) {
-        const char *msg = (argc >= 3 && JS_IsString(argv[2]))
-                          ? JS_ToCString(ctx, argv[2]) : NULL;
+        int want_msg = argc >= 3 && JS_IsString(argv[2]);
+        const char *msg = want_msg ? JS_ToCString(ctx, argv[2]) : NULL;
+        if (want_msg && !msg) return JS_EXCEPTION;   /* as above (audit 44) */
         JSValue a_str = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
-        JSValue b_str = JS_JSONStringify(ctx, argv[1], JS_UNDEFINED, JS_UNDEFINED);
-        const char *a = JS_ToCString(ctx, a_str);
-        const char *b = JS_ToCString(ctx, b_str);
+        JSValue b_str = JS_IsException(a_str) ? JS_EXCEPTION
+            : JS_JSONStringify(ctx, argv[1], JS_UNDEFINED, JS_UNDEFINED);
+        const char *a = JS_IsException(b_str) ? NULL : JS_ToCString(ctx, a_str);
+        const char *b = a ? JS_ToCString(ctx, b_str) : NULL;
+        if (!a || !b) {
+            /* A side that cannot be described (its JSON or the conversion
+             * failed): the pending exception goes on (audit 44). */
+            if (a) JS_FreeCString(ctx, a);
+            JS_FreeValue(ctx, a_str);
+            JS_FreeValue(ctx, b_str);
+            if (msg) JS_FreeCString(ctx, msg);
+            if (!JS_HasException(ctx)) JS_ThrowOutOfMemory(ctx);
+            return JS_EXCEPTION;
+        }
 
         JSValue err;
         if (msg)
             err = JS_ThrowTypeError(ctx, "test.eq failed: %s\n  expected: %s\n  actual:   %s",
-                                    msg, b ? b : "?", a ? a : "?");
+                                    msg, b, a);
         else
             err = JS_ThrowTypeError(ctx, "test.eq failed\n  expected: %s\n  actual:   %s",
-                                    b ? b : "?", a ? a : "?");
+                                    b, a);
 
-        if (a) JS_FreeCString(ctx, a);
-        if (b) JS_FreeCString(ctx, b);
+        JS_FreeCString(ctx, a);
+        JS_FreeCString(ctx, b);
         JS_FreeValue(ctx, a_str);
         JS_FreeValue(ctx, b_str);
         if (msg) JS_FreeCString(ctx, msg);

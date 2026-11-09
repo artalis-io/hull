@@ -14326,6 +14326,38 @@ UTEST(js_test_audit44, ok_null_message)
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 44 (test.ok's twin): test.eq's conversions (the compared strings,
+ * the message, the JSON of each side) can fail the same way, and it then
+ * threw its TypeError with "?" over the pending exception - making the
+ * uncatchable interrupt catchable. The pending exception is passed on. */
+UTEST(js_test_audit44, eq_conversion_failure_keeps_exception)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_http_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+    EXPECT_EQ(a10_run_tripped("globalThis.__a44big = 'x'.repeat(32 << 20);", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "try { test.eq(__a44big, 'y'); } catch (e) { globalThis.__a44_eq_caught = 1; }\n",
+        100000), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44_eq_caught | 0"), 0);   /* uncatchable */
+    EXPECT_EQ(a10_run_tripped(
+        "try { test.eq(1, 2, __a44big); } catch (e) { globalThis.__a44_eq_caught2 = 1; }\n",
+        100000), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44_eq_caught2 | 0"), 0);
+    /* Ordinary use is unchanged. */
+    EXPECT_EQ(eval_int("(() => { test.eq('a', 'a'); test.eq(1, 1); "
+                       "try { test.eq(1, 2, 'm'); return 0; } catch (e) { "
+                       "return e.message.indexOf('test.eq failed: m') === 0 ? 1 : 2; } })()"), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44big = undefined, 1"), 1);
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 /* ── Audit 23 G2: a binding's loop over app strings stops at the budget ─ */
 
 /* JS_ToCStringLen's ASCII path charged its scan but ignored the trip, so a

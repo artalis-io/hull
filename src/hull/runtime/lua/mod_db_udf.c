@@ -73,7 +73,9 @@ static int udf_value_bytes(sqlite3_value *val, int type,
     const void *p = type == SQLITE_TEXT ? (const void *)sqlite3_value_text(val)
                                         : sqlite3_value_blob(val);
     int n = sqlite3_value_bytes(val);
-    if (!p && (n > 0 || sqlite3_value_type(val) != type))
+    /* An empty TEXT is "", never NULL; a zero-length BLOB is NULL with
+     * length 0 and its type kept (a failed expansion turns it NULL). */
+    if (!p && (type == SQLITE_TEXT || n > 0 || sqlite3_value_type(val) != type))
         return -1;
     *out = p ? (const char *)p : "";
     *len = n > 0 ? (size_t)n : 0;

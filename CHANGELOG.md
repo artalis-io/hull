@@ -26,8 +26,8 @@ release-artifact layout).
   a request object that could not be built is answered 500 without calling
   the handler (it was handed over holding exceptions); a spent multipart
   part's `read()` resolves an empty ArrayBuffer, not a string; `test.ok`
-  passes on a failed message conversion instead of throwing
-  `TypeError("%s", NULL)` over it. Lua `test.eq(1, 1.0)` compares numbers by
+  and `test.eq` pass on a failed conversion instead of throwing their
+  TypeError over the pending exception. Lua `test.eq(1, 1.0)` compares numbers by
   value and strings by their bytes, and `test.get` raises past 64 headers
   instead of dropping them. A timer that fired while its previous run was
   in flight re-added itself at shutdown (both runtimes). The macOS Seatbelt
