@@ -10,6 +10,28 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
 - **GPU / compute / TUI (audit 44).** A synchronous `gpu.*` call no longer
   blocks the event loop behind `gpu.async` jobs holding the device: it waits
   in short slices that ask the run and is refused `gpu_busy` once the run's
@@ -20,6 +42,28 @@ release-artifact layout).
   teardown, so its mmap borrows are released (it was lost in a dead stack
   variable). The TUI input parser drops a partial UTF-8 sequence at ESC and
   re-reads a lead byte that arrives mid-sequence instead of dropping it.
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
