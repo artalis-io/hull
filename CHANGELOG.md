@@ -10,6 +10,44 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
 - **Audit 44, runtime / C batch.** `fs.write(path, bytes, { mode = ... })`
   through an in-root symlink (the in-place path) truncated the target before
   `fchmod`; a target the process may write but does not own failed that
@@ -33,6 +71,12 @@ release-artifact layout).
   in flight re-added itself at shutdown (both runtimes). The macOS Seatbelt
   profile built its state directory's `.hull` deny from an uninitialised
   scratch when `realpath` failed.
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
