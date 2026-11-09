@@ -110,7 +110,17 @@ run_cases() {
   for f in "$@"; do
     bin=build/$(basename "$f" .c)
     rm -f -- "$bin"
-    if ! make -j"$jobs" "$bin" REGRESSION_STUBS="$stubs" > "$tmp/build.log" 2>&1; then
+    # The network DB backends are off by default and their test binaries
+    # build only with the backend on (test_mysql_conn / test_pg_conn include
+    # the backend TU, whose body is #ifdef'd out otherwise).
+    feat=
+    case "$(basename "$f" .c)" in
+      test_mysql*) feat="HL_ENABLE_MYSQL=1" ;;
+      test_pg*)    feat="HL_ENABLE_POSTGRES=1" ;;
+      test_valkey*|test_respwire) feat="HL_ENABLE_VALKEY=1" ;;
+    esac
+    # shellcheck disable=SC2086 # $feat is one VAR=1 word or empty
+    if ! make -j"$jobs" "$bin" $feat REGRESSION_STUBS="$stubs" > "$tmp/build.log" 2>&1; then
       echo "check-regression-test: [$pass] $bin does not build on the pre-fix code:"
       { grep -E 'error:|Error [0-9]' "$tmp/build.log" || tail -5 "$tmp/build.log"; } |
         head -20 | cut -c1-240 | sed 's/^/    /'
