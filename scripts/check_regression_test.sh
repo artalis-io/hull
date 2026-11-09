@@ -8,11 +8,9 @@
 #   1. find the UTEST cases the change adds under tests/ (UTEST(suite, case)
 #      lines added in `git diff <merge-base> HEAD -- tests/`);
 #   2. put every NON-test file back to the merge-base (modified and deleted
-#      files restored, added files removed; tests/, docs, *.md, CHANGELOG,
-#      .github/, scripts/ci/ and this script keep the PR's version);
-#   3. build the test binaries those cases live in (build/<file basename>,
-#      with the network DB backend on for test_mysql* / test_pg* /
-#      test_valkey*, whose binaries need it);
+#      files restored, added files removed; tests/, docs, *.md and CHANGELOG
+#      keep the PR's version);
+#   3. build the test binaries those cases live in (build/<file basename>);
 #   4. run only the added cases (utest --filter=suite.case) and expect AT
 #      LEAST ONE to fail AT RUNTIME;
 #   5. a binary that does not build against the pre-fix code proves nothing
@@ -90,7 +88,7 @@ sed 's/^/  /' "$tmp/added"
 # 2. Put the non-test changes back to the merge-base.
 git diff --name-status --no-renames "$mb" HEAD | while IFS="$(printf '\t')" read -r st path; do
   case "$path" in
-    tests/*|docs/*|*.md|CHANGELOG*|.github/*|scripts/check_regression_test.sh|scripts/ci/*) continue ;;
+    tests/*|docs/*|*.md|CHANGELOG*|.github/*) continue ;;
   esac
   case "$st" in
     A) rm -f -- "$path" ;;
