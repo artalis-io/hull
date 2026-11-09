@@ -10,6 +10,36 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
 - **Template, TUI, health and csv Lua / JS parity (audit 44, stdlib Lows).** The Lua template
   engine emitted literal template text as a long string, which Lua's lexer reads with CR, CRLF
   and LFCR folded to LF: `"A\r\nB"` rendered as `"A\nB"` while the JS twin kept the bytes. It is
@@ -29,6 +59,20 @@ release-artifact layout).
   `tui_audit44.input_surrogate_backspace_js`, `tui_audit44.input_max_len_codepoints_lua`). The
   layout and editing arithmetic moved to the internal `hull._tui_layout` /
   `hull:_tui_layout`, testable without a terminal.
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
