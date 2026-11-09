@@ -117,6 +117,11 @@ __attribute__((weak)) void hl_lua_request_done(HlLua *lua, const KlHttpRequest *
 {
     (void)lua; (void)req;
 }
+
+__attribute__((weak)) void hl_lua_ws_conns_release(HlLua *lua)
+{
+    (void)lua;
+}
 #endif /* HL_ENABLE_LUA */
 
 #ifdef HL_ENABLE_JS

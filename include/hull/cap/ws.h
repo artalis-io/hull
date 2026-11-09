@@ -26,10 +26,13 @@ typedef struct HlAllocator HlAllocator;
 /* ── Per-connection handle ─────────────────────────────────────────── */
 
 typedef struct HlWsConn {
-    KlWsServerConn *kl_ws;      /* Keel connection (NULL after close) */
+    KlWsServerConn *kl_ws;      /* Keel connection (NULL once on_close ran) */
     uint64_t        id;         /* monotonic connection ID */
     const char     *path;       /* borrowed from endpoint */
-    int             closed;     /* 1 after close frame sent/received */
+    int             closed;     /* 1 once no frame may be sent: the app's
+                                 * close() asked Keel to close (Keel still
+                                 * holds the connection and delivers its
+                                 * on_close later), or on_close ran */
     void           *user_data;  /* runtime-specific (Lua ref, JS value) */
     struct HlWsConn *next;
     struct HlWsConn *prev;
@@ -65,17 +68,22 @@ HlWsConn *hl_ws_registry_add(HlWsRegistry *reg, const char *path,
 /* Remove a connection from the registry and free it. */
 void hl_ws_registry_remove(HlWsRegistry *reg, HlWsConn *conn);
 
-/* Find the LIVE HlWsConn for a Keel connection pointer.
+/* Find the HlWsConn Keel still holds for a Keel connection pointer.
  *
  * Invariant: a node whose on_close ran is never returned. Keel frees the
  * KlWsServerConn when on_close returns, while a node whose async on_close
  * handler is parked stays in the list until its completion hook removes it;
  * a new connection may then get the same address. So on_close marks the
  * node with hl_ws_registry_mark_closed (closed = 1, kl_ws = NULL) before any
- * app code runs, and find skips closed nodes: a later callback for the reused
- * address resolves to the new node (or to none), never to the stale one,
- * whatever order the list holds them in. Every send path checks `closed` /
- * `kl_ws` too. */
+ * app code runs, and find skips nodes whose kl_ws is NULL: a later callback
+ * for the reused address resolves to the new node (or to none), never to the
+ * stale one, whatever order the list holds them in.
+ *
+ * A node the APP closed (conn:close(): closed = 1, kl_ws kept) IS returned:
+ * Keel still holds that connection and delivers its on_close later, which
+ * must find the node to run the app's on_close and remove it (audit 44: a
+ * find that skipped `closed` leaked the node and never ran on_close). Every
+ * send path checks `closed` / `kl_ws`. */
 HlWsConn *hl_ws_registry_find(HlWsRegistry *reg, const char *path,
                                 KlWsServerConn *kl_ws);
 

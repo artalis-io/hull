@@ -12002,6 +12002,55 @@ UTEST(js_audit14, ws_client_sends_are_charged)
     ud->closed = 1;
     cleanup_js_caps();
 }
+
+/* Audit 44 (Low): the client finalizer left the connect / close deadline
+ * armed whenever the runtime was shutting down, so a GC at teardown freed ud
+ * with a backend timer still holding it. The Lua twin cancels it whenever
+ * the loop is reachable (audit 38); so does this one now. The timer here is
+ * a stand-in callback: it must never fire once the object is collected. */
+static int a44_client_timer_fired;
+static void a44_client_timer_cb(void *user)
+{
+    (void)user;
+    a44_client_timer_fired++;
+}
+
+UTEST(js_ws_client_audit44, finalizer_disarms_while_shutting_down)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *loop = NULL;
+    ASSERT_EQ(be->init(&loop, NULL), 0);
+    js.base.async_ctx = loop;
+
+    JSValue o = JS_NewObjectClass(js.ctx, (int)js_ws_client_conn_class_id);
+    ASSERT_FALSE(JS_IsException(o));
+    HlJSWsClientUD *ud = js_mallocz(js.ctx, sizeof *ud);
+    ASSERT_TRUE(ud != NULL);
+    ud->on_open = ud->on_message = JS_UNDEFINED;
+    ud->on_close = ud->on_error = JS_UNDEFINED;
+    ud->self_ref = JS_UNDEFINED;
+    ud->closed = 1;
+    ud->ctx = js.ctx;
+    ud->js = &js;
+    a44_client_timer_fired = 0;
+    ud->connect_timer = be->timer_add(loop, 1, a44_client_timer_cb, NULL);
+    ASSERT_NE(ud->connect_timer, (uint64_t)0);
+    JS_SetOpaque(o, ud);
+
+    js.base.shutting_down = 1;
+    JS_FreeValue(js.ctx, o);   /* finalized here */
+    JS_RunGC(js.rt);
+    js.base.shutting_down = 0;
+
+    for (int i = 0; i < 5; i++) be->tick(loop, 10);
+    EXPECT_EQ(a44_client_timer_fired, 0);
+
+    be->free(loop);
+    js.base.async_ctx = NULL;
+    cleanup_js_caps();
+}
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_HTTP_CLIENT
