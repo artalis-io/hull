@@ -17009,4 +17009,127 @@ UTEST(lua_input_caps, json_manifest_limits_and_opts)
 }
 #undef JC_DECODES
 
+/* Audit 44 M9: a UDF argument is copied with the pointer and length read in
+ * one expression. A zeroblob's bytes are made only when the pointer is
+ * asked for, through Hull's budget allocator; once the run's budget is
+ * spent that allocation fails, sqlite3_value_blob returns NULL while
+ * sqlite3_value_bytes still says 60 MB, and the copy read from NULL. A NULL
+ * pointer is now an error inside the UDF's protected call, and the run ends
+ * on its limit. */
+UTEST(db_udf_audit44, zeroblob_arg_budget_trip)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    char err[512];
+    int rc = audit10_run(
+        "if not db or not db.udf then error('instruction limit (no udf)') end "
+        "A44_SEEN = {} "
+        "db.udf.register('hull_a44_len', function(b) "
+        "  A44_SEEN[#A44_SEEN + 1] = #b return #b end) "
+        "db.query('WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 "
+        "FROM r WHERE i < 200) SELECT hull_a44_len(zeroblob(60000000)) AS n FROM r') "
+        "return 1", 200000, err, sizeof err);
+    EXPECT_NE(rc, LUA_OK);
+    EXPECT_NE_MSG(strstr(err, "instruction limit"), NULL, err);
+    /* The UDF never ran on a value other than the one SQL passed (with the
+     * pointer read first, a failed expansion read as an empty blob). */
+    EXPECT_EQ_MSG(audit10_run(
+        "for _, n in ipairs(A44_SEEN) do "
+        "  assert(n == 60000000, 'udf saw a ' .. n .. '-byte argument') end "
+        "return 1", HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+    /* The VM is still usable. */
+    EXPECT_EQ(audit10_run("assert(db.query('SELECT 1 AS v')[1].v == 1) return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    cleanup_lua_caps();
+}
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 44: test.eq compared two numbers as strings ("1" vs "1.0": unequal)
+ * and two strings with strcmp (equal up to an embedded NUL). */
+UTEST(lua_test_audit44, eq_int_float)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    hl_lua_test_register(L, &router, &lua_rt);
+    int rc = luaL_dostring(L,
+        "test.eq(1, 1.0) test.eq(2^53, 2^53 | 0) test.eq('a', 'a') "
+        "assert(not pcall(test.eq, 1, 2)) "
+        "assert(not pcall(test.eq, 'a\\0b', 'a\\0c'), 'embedded NUL') "
+        "assert(not pcall(test.eq, 1, '1'), 'number vs string') "
+        "return 1");
+    EXPECT_EQ_MSG(rc, LUA_OK, rc == LUA_OK ? "" : lua_tostring(L, -1));
+    lua_settop(L, 0);
+    kl_http_router_free(&router);
+    cleanup_lua_caps();
+}
+
+/* Audit 44: past KL_MAX_HEADERS, test.get dropped the rest of opts.headers
+ * silently (and left the table walk's key and value on the stack); it
+ * raises now. */
+UTEST(lua_test_audit44, too_many_headers)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.get('/h', function(req, res) res:json({ ok = true }) end)\n"),
+        LUA_OK);
+    KlHttpRouter router;
+    KlAllocator kalloc = kl_allocator_default();
+    kl_http_router_init(&router, &kalloc);
+    ASSERT_EQ(hl_lua_wire_routes(&lua_rt, &router), 0);
+    hl_lua_test_register(L, &router, &lua_rt);
+    int rc = luaL_dostring(L,
+        "local h = {} for i = 1, 100 do h['x-h' .. i] = 'v' end "
+        "local ok, e = pcall(test.get, '/h', { headers = h }) "
+        "assert(not ok, 'too many headers were dropped silently') "
+        "assert(tostring(e):find('headers', 1, true), tostring(e)) "
+        "local h2 = {} for i = 1, 10 do h2['x-h' .. i] = 'v' end "
+        "assert(test.get('/h', { headers = h2 }).status == 200) "
+        "return 1");
+    EXPECT_EQ_MSG(rc, LUA_OK, rc == LUA_OK ? "" : lua_tostring(L, -1));
+    lua_settop(L, 0);
+    kl_http_router_free(&router);
+    cleanup_lua_caps();
+}
+#endif
+
+/* Audit 44: a timer that fires while its previous run is still in flight
+ * re-adds itself 1 s later - and did so at shutdown too, unlike
+ * hl_lua_timer_reschedule, adding a timer to a loop being torn down. */
+UTEST(lua_timer_audit44, inflight_retry_not_rearmed_at_shutdown)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(be->init(&lua_rt.base.async_ctx, NULL), 0);
+    static HlLuaTimer t;
+    memset(&t, 0, sizeof t);
+    t.lua         = &lua_rt;
+    t.handler_id  = 1;
+    t.interval_ms = 20;
+    t.in_flight   = 1;
+    /* Not shutting down: the retry is armed. */
+    hl_lua_timer_trampoline(&t);
+    EXPECT_NE(t.timer_id, 0);
+    if (t.timer_id > 0) be->timer_cancel(lua_rt.base.async_ctx, (uint64_t)t.timer_id);
+    t.timer_id = 0;
+    /* Shutting down: nothing is added to the loop. */
+    lua_rt.base.shutting_down = 1;
+    hl_lua_timer_trampoline(&t);
+    EXPECT_EQ(t.timer_id, 0);
+    if (t.timer_id > 0) be->timer_cancel(lua_rt.base.async_ctx, (uint64_t)t.timer_id);
+    lua_rt.base.shutting_down = 0;
+    HlAsyncBackendCtx *actx = lua_rt.base.async_ctx;
+    cleanup_lua();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+
 UTEST_MAIN();

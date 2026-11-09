@@ -463,14 +463,26 @@ static int lua_tui_poll(lua_State *L)
     lua_pop(L, 1);
 
     if (!lua || !lua->base.async_ctx) {
-        /* No event loop wired - fall back to blocking. This happens
-         * in test harnesses and tool VMs that don't init the async
-         * backend. Behaviorally identical to the old API. */
-        rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
-        if (rc < 0) return luaL_error(L, "tui.poll failed (errno=%d)", errno);
-        if (rc == 1) { lua_pushnil(L); return 1; }
-        push_event(L, &ev);
-        return 1;
+        /* No event loop wired - fall back to blocking. This happens in
+         * test harnesses, tool VMs and the app context behind hull test /
+         * hull agent, which don't init the async backend. One cap poll with
+         * the caller's timeout (a negative one waits for ever) never asked
+         * the run, so its deadline could not end it (audit 44): wait in
+         * slices instead and ask the run after each (a 0-unit charge: the
+         * deadline and a tripped budget). */
+        int left = timeout_ms;   /* < 0: no limit of the caller's own */
+        for (;;) {
+            int slice = (left < 0 || left > HL_TUI_POLL_ESC_IDLE_MS)
+                        ? HL_TUI_POLL_ESC_IDLE_MS : left;
+            rc = hl_cap_tui_poll(g_ctx, slice, &ev);
+            if (rc < 0) return luaL_error(L, "tui.poll failed (errno=%d)", errno);
+            if (rc == 0) { push_event(L, &ev); return 1; }
+            if (left >= 0) {
+                left -= slice;
+                if (left <= 0) { lua_pushnil(L); return 1; }
+            }
+            if (hl_lua_budget_charge(L, 0)) return hl_lua_budget_raise(L);
+        }
     }
 
     if (timeout_ms < 0) timeout_ms = INT_MAX;

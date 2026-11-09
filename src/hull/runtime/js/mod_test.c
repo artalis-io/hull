@@ -452,10 +452,15 @@ static JSValue js_test_ok(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     if (argc < 1 || !JS_ToBool(ctx, argv[0])) {
-        const char *msg = (argc >= 2 && JS_IsString(argv[1]))
-                          ? JS_ToCString(ctx, argv[1]) : "test.ok failed";
+        int own = argc >= 2 && JS_IsString(argv[1]);
+        const char *msg = own ? JS_ToCString(ctx, argv[1]) : "test.ok failed";
+        /* A conversion that failed (out of memory, the run's budget running
+         * out in the scan) left its exception pending: pass it on, never a
+         * TypeError("%s", NULL) over it - that made the uncatchable
+         * interrupt catchable (audit 44). */
+        if (!msg) return JS_EXCEPTION;
         JSValue err = JS_ThrowTypeError(ctx, "%s", msg);
-        if (argc >= 2 && JS_IsString(argv[1]))
+        if (own)
             JS_FreeCString(ctx, msg);
         return err;
     }

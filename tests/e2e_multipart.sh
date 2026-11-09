@@ -457,6 +457,19 @@ app.post("/upload-stale", async (req, res) => {
                error, second: bufToString(await second.read()) });
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
 
+// js_multipart_audit44.read_after_spent_is_arraybuffer: read() of a part
+// already read (spent) resolved an empty STRING; every other read() resolves
+// an ArrayBuffer.
+app.post("/upload-reread", async (req, res) => {
+    const it = req.multipart();
+    const part = (await it.next()).value;
+    const first = await part.read();
+    const again = await part.read();
+    res.json({ first: bufToString(first),
+               again_is_buffer: again instanceof ArrayBuffer,
+               again_len: typeof again === "string" ? -1 : again.byteLength });
+}, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
+
 // A handler that fails after its body parked (see the Lua sibling).
 app.use("*", "/upload-throw", (_req, res) => {
     res.header("X-Mw-Kept", "yes");
@@ -778,6 +791,14 @@ run_multipart_tests() {
     check_contains "$LABEL stale part: next name"    "$RESP" '"second_name":"b"'
     if [ "$LABEL" = "js" ]; then
         check_contains "$LABEL stale part: chunks refused" "$RESP" '"chunks_refused":true'
+        # js_multipart_audit44.read_after_spent_is_arraybuffer
+        RESP=$(curl -sS -X POST "http://127.0.0.1:$PORT/upload-reread" -F "a=one")
+        check_contains "js_multipart_audit44.read_after_spent_is_arraybuffer: first read" \
+            "$RESP" '"first":"one"'
+        check_contains "js_multipart_audit44.read_after_spent_is_arraybuffer: ArrayBuffer" \
+            "$RESP" '"again_is_buffer":true'
+        check_contains "js_multipart_audit44.read_after_spent_is_arraybuffer: empty" \
+            "$RESP" '"again_len":0'
     fi
 
     # ── Scenario 19: a handler failing after a parked body (audit 17) ──

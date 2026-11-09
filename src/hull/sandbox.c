@@ -689,8 +689,13 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
      * the app's own, so it is granted whole like the app directory - and its
      * .hull denied after, below, like the app directory's. */
     if (policy->state_dir) {
+        /* realpath leaves the buffer undefined on failure (macOS writes the
+         * part it resolved): the given path is used then, and the scratch
+         * cleared so the .hull deny below derives from the same path
+         * (audit 44: it read stale or partial bytes). */
         const char *sp = policy->state_dir;
         if (realpath(policy->state_dir, scratch->state_real)) sp = scratch->state_real;
+        else scratch->state_real[0] = '\0';
         PARAM_ADD("HULL_STATE", sp);
         SBPL_LIT("; The app's per-user state directory (manifest state.name)\n"
                  "(allow file-read* file-write* (subpath (param \"HULL_STATE\")))\n");
@@ -1005,6 +1010,26 @@ int hl_sandbox_seatbelt_profile_for_test(const HlSandboxPolicy *policy,
 #else
     (void)policy; (void)ttys; (void)tty_count;
     (void)buf; (void)buf_size; (void)params; (void)max_params;
+    return -1;
+#endif
+}
+
+int hl_sandbox_seatbelt_profile_stale_scratch_for_test(const HlSandboxPolicy *policy,
+                                                       char *buf, size_t buf_size,
+                                                       const char **params,
+                                                       size_t max_params)
+{
+#if defined(__APPLE__) && !defined(__COSMOPOLITAN__)
+    /* The scratch the builder gets is not zeroed here: its state path holds
+     * stale bytes, as an uninitialised stack scratch would (audit 44). */
+    static SeatbeltScratch scratch;
+    memset(&scratch, 0, sizeof scratch);
+    snprintf(scratch.state_real, sizeof scratch.state_real, "/stale/garbage");
+    return seatbelt_build_profile(policy, NULL, NULL, NULL, NULL,
+                                  NULL, 0, buf, buf_size,
+                                  params, max_params, &scratch);
+#else
+    (void)policy; (void)buf; (void)buf_size; (void)params; (void)max_params;
     return -1;
 #endif
 }
@@ -1380,6 +1405,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         char profile_buf[SEATBELT_PROFILE_SIZE];
         const char *params[SEATBELT_MAX_PARAMS];
         SeatbeltScratch scratch;
+        memset(&scratch, 0, sizeof scratch);
 
         /* Resolve symlinks - Seatbelt matches against real paths.
          * e.g. /tmp → /private/tmp on macOS.  Fall back to original

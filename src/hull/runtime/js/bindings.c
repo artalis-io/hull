@@ -135,9 +135,55 @@ static void hl_request_peer_ip_js(KlHttpRequest *req, char *buf, size_t buflen)
  * app put on Object.prototype), and app code run while `req` is built - with
  * the connection active - could start an op there (audit 8 H1).
  */
+/* Test seam: the @p n-th value hl_js_make_request makes (1-based) fails as
+ * an allocation failure would; 0 = off. */
+static int req_fail_at, req_made;
+
+void hl_js_make_request_fail_for_test(int n)
+{
+    req_fail_at = n;
+    req_made = 0;
+}
+
+static JSValue req_val(JSContext *ctx, JSValue v)
+{
+    if (req_fail_at && ++req_made == req_fail_at) {
+        req_fail_at = 0;
+        JS_FreeValue(ctx, v);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    return v;
+}
+
+/* Define @p v on @p target, noting in @p bad a value that could not be made
+ * (an exception) or a define that failed: the request is then not handed to
+ * app code (audit 44: nothing was checked, and a property held an
+ * exception). @p v is consumed either way. */
+static void req_def(JSContext *ctx, JSValueConst target, const char *name,
+                    JSValue v, int *bad)
+{
+    if (JS_IsException(v)) { *bad = 1; return; }
+    if (*bad) { JS_FreeValue(ctx, v); return; }
+    if (JS_DefinePropertyValueStr(ctx, target, name, v, JS_PROP_C_W_E) < 0)
+        *bad = 1;
+}
+
+static void req_def_atom(JSContext *ctx, JSValueConst target, JSAtom name,
+                         JSValue v, int *bad)
+{
+    if (JS_IsException(v)) { *bad = 1; return; }
+    if (*bad) { JS_FreeValue(ctx, v); return; }
+    if (JS_DefinePropertyValue(ctx, target, name, v, JS_PROP_C_W_E) < 0)
+        *bad = 1;
+}
+
+/* JS_EXCEPTION (with the exception pending) when any value could not be
+ * made: the caller answers 500 and runs no handler. */
 JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife *life)
 {
-    JSValue obj = JS_NewObject(ctx);
+    JSValue obj = req_val(ctx, JS_NewObject(ctx));
+    if (JS_IsException(obj)) return obj;
+    int bad = 0;
 
     /* method (Keel stores as string).  All reads via kl_http_request_*
      * accessors so they route through req->sealed (mprotect-RO) when
@@ -145,25 +191,25 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
      * fields otherwise.  See vendor/keel/include/keel/http_request.h. */
     const char *m = req->method;
     if (m)
-        JS_DefinePropertyValueStr(ctx, obj, "method",
-                          JS_NewStringLen(ctx, m, req->method_len), JS_PROP_C_W_E);
+        req_def(ctx, obj, "method",
+                          req_val(ctx, JS_NewStringLen(ctx, m, req->method_len)), &bad);
     else
-        JS_DefinePropertyValueStr(ctx, obj, "method", JS_NewString(ctx, "GET"), JS_PROP_C_W_E);
+        req_def(ctx, obj, "method", req_val(ctx, JS_NewString(ctx, "GET")), &bad);
 
     /* path */
     const char *p = req->path;
     if (p)
-        JS_DefinePropertyValueStr(ctx, obj, "path",
-                          JS_NewStringLen(ctx, p, req->path_len), JS_PROP_C_W_E);
+        req_def(ctx, obj, "path",
+                          req_val(ctx, JS_NewStringLen(ctx, p, req->path_len)), &bad);
     else
-        JS_DefinePropertyValueStr(ctx, obj, "path", JS_NewString(ctx, "/"), JS_PROP_C_W_E);
+        req_def(ctx, obj, "path", req_val(ctx, JS_NewString(ctx, "/")), &bad);
 
     /* query string → object. Query, params and headers have no prototype:
      * the client's names are their only keys, so `req.headers.constructor`
      * or `req.query.toString` is undefined unless it was sent, and a lookup
      * by a chosen name (`req.header("hasOwnProperty")`) does not find an
      * inherited function. */
-    JSValue query_obj = JS_NewObjectProto(ctx, JS_NULL);
+    JSValue query_obj = req_val(ctx, JS_NewObjectProto(ctx, JS_NULL));
     const char *q = req->query;
     size_t q_len = req->query_len;
     if (q && q_len > 0) {
@@ -205,18 +251,17 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
             JSAtom katom = JS_NewAtomLen(ctx, pair,
                                          kdec >= 0 ? (size_t)kdec : 0);
             if (katom != JS_ATOM_NULL) {
-                JS_DefinePropertyValue(ctx, query_obj, katom,
-                                       JS_NewStringLen(ctx, val, vlen),
-                                       JS_PROP_C_W_E);
+                req_def_atom(ctx, query_obj, katom,
+                             req_val(ctx, JS_NewStringLen(ctx, val, vlen)), &bad);
                 JS_FreeAtom(ctx, katom);
             }
             pair = strtok_r(NULL, "&", &saveptr);
         }
     }
-    JS_DefinePropertyValueStr(ctx, obj, "query", query_obj, JS_PROP_C_W_E);
+    req_def(ctx, obj, "query", query_obj, &bad);
 
     /* params - route params from Keel (e.g. :id → params.id) */
-    JSValue params_obj = JS_NewObjectProto(ctx, JS_NULL);
+    JSValue params_obj = req_val(ctx, JS_NewObjectProto(ctx, JS_NULL));
     int n_params = req->num_params;
     for (int i = 0; i < n_params; i++) {
         KlHttpParam param = req->params[i];
@@ -225,13 +270,13 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
                       ? param.name_len : HL_PARAM_NAME_MAX - 1;
         memcpy(name, param.name, nlen);
         name[nlen] = '\0';
-        JS_DefinePropertyValueStr(ctx, params_obj, name,
-            JS_NewStringLen(ctx, param.value, param.value_len), JS_PROP_C_W_E);
+        req_def(ctx, params_obj, name,
+            req_val(ctx, JS_NewStringLen(ctx, param.value, param.value_len)), &bad);
     }
-    JS_DefinePropertyValueStr(ctx, obj, "params", params_obj, JS_PROP_C_W_E);
+    req_def(ctx, obj, "params", params_obj, &bad);
 
     /* headers → object (names lowercased for case-insensitive lookup) */
-    JSValue headers_obj = JS_NewObjectProto(ctx, JS_NULL);
+    JSValue headers_obj = req_val(ctx, JS_NewObjectProto(ctx, JS_NULL));
     int n_headers = req->num_headers;
     for (int i = 0; i < n_headers; i++) {
         /* KlHttpRequest is a concrete struct in Keel 3.x; headers[] is read
@@ -246,12 +291,11 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
                 name_buf[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
             }
             name_buf[nlen] = '\0';
-            JS_DefinePropertyValueStr(ctx, headers_obj, name_buf,
-                              JS_NewStringLen(ctx, req->headers[i].value, req->headers[i].value_len),
-                              JS_PROP_C_W_E);
+            req_def(ctx, headers_obj, name_buf,
+                              req_val(ctx, JS_NewStringLen(ctx, req->headers[i].value, req->headers[i].value_len)), &bad);
         }
     }
-    JS_DefinePropertyValueStr(ctx, obj, "headers", headers_obj, JS_PROP_C_W_E);
+    req_def(ctx, obj, "headers", headers_obj, &bad);
 
     /* remote_addr: numeric peer IP from the socket, absent when unavailable.
      * The un-spoofable client address; IP-gating middleware uses it as the
@@ -260,7 +304,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
         char peer[INET6_ADDRSTRLEN];
         hl_request_peer_ip_js(req, peer, sizeof peer);
         if (peer[0])
-            JS_DefinePropertyValueStr(ctx, obj, "remote_addr", JS_NewString(ctx, peer), JS_PROP_C_W_E);
+            req_def(ctx, obj, "remote_addr", req_val(ctx, JS_NewString(ctx, peer)), &bad);
     }
 
     /* body - extract from buffer reader if available. Streaming-multipart
@@ -273,27 +317,27 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
         const char *data;
         size_t len = hl_cap_body_data(req->body_reader, &data);
         if (len > 0) {
-            JS_DefinePropertyValueStr(ctx, obj, "body",
-                              JS_NewStringLen(ctx, data, len), JS_PROP_C_W_E);
+            req_def(ctx, obj, "body",
+                              req_val(ctx, JS_NewStringLen(ctx, data, len)), &bad);
             /* req.body decodes the bytes as UTF-8, replacing every invalid
              * sequence with U+FFFD, so two binary bodies could read as the
              * same text (the idempotency fingerprint matched across them;
              * audit 24). Such a body is also handed over as its bytes. */
             if (!body_is_utf8((const unsigned char *)data, len))
-                JS_DefinePropertyValueStr(ctx, obj, "bodyBytes",
-                    JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len),
-                    JS_PROP_C_W_E);
+                req_def(ctx, obj, "bodyBytes",
+                    req_val(ctx, JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len)), &bad);
         } else
-            JS_DefinePropertyValueStr(ctx, obj, "body", JS_NewString(ctx, ""), JS_PROP_C_W_E);
+            req_def(ctx, obj, "body", req_val(ctx, JS_NewString(ctx, "")), &bad);
     } else {
-        JS_DefinePropertyValueStr(ctx, obj, "body", JS_NULL, JS_PROP_C_W_E);
+        req_def(ctx, obj, "body", JS_NULL, &bad);
     }
 
     /* req.multipart() - only installed for streaming-multipart routes.
      * Defined in mod_request.c. */
-    if (is_multipart_stream)
+    if (is_multipart_stream && !bad &&
         hl_js_request_install_multipart(ctx, obj, req->body_reader, life,
-                                        kl_http_request_conn(req), req);
+                                        kl_http_request_conn(req), req) != 0)
+        bad = 1;
 
     /* ctx - per-request context object (middleware → handler).
      * If req->ctx carries a native JS ref, retrieve it directly;
@@ -305,27 +349,32 @@ JSValue hl_js_make_request(JSContext *ctx, KlHttpRequest *req, struct HlReqLife 
             /* Native JS object - reconstruct JSValue from stored bytes */
             JSValue val;
             memcpy(&val, rctx->js_val_bytes, sizeof(val));
-            JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_DupValue(ctx, val), JS_PROP_C_W_E);
+            req_def(ctx, obj, "ctx", JS_DupValue(ctx, val), &bad);
         } else if (rctx->kind == HL_REQCTX_JSON) {
             /* JSON string (from test dispatch) - parse it */
             JSValue parsed = JS_ParseJSON(ctx, rctx->json.data,
                                           rctx->json.len, "<ctx>");
             if (JS_IsException(parsed)) {
                 JS_FreeValue(ctx, JS_GetException(ctx));
-                JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_NewObject(ctx), JS_PROP_C_W_E);
+                req_def(ctx, obj, "ctx", req_val(ctx, JS_NewObject(ctx)), &bad);
             } else {
-                JS_DefinePropertyValueStr(ctx, obj, "ctx", parsed, JS_PROP_C_W_E);
+                req_def(ctx, obj, "ctx", parsed, &bad);
             }
         } else {
-            JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_NewObject(ctx), JS_PROP_C_W_E);
+            req_def(ctx, obj, "ctx", req_val(ctx, JS_NewObject(ctx)), &bad);
         }
     } else {
-        JS_DefinePropertyValueStr(ctx, obj, "ctx", JS_NewObject(ctx), JS_PROP_C_W_E);
+        req_def(ctx, obj, "ctx", req_val(ctx, JS_NewObject(ctx)), &bad);
     }
 
     /* req.header(name) - convenience method for case-insensitive lookup */
-    JS_DefinePropertyValueStr(ctx, obj, "header",
-                      JS_NewCFunction(ctx, js_req_header, "header", 1), JS_PROP_C_W_E);
+    req_def(ctx, obj, "header",
+                      req_val(ctx, JS_NewCFunction(ctx, js_req_header, "header", 1)), &bad);
 
+    if (bad) {
+        JS_FreeValue(ctx, obj);
+        if (!JS_HasException(ctx)) JS_ThrowOutOfMemory(ctx);
+        return JS_EXCEPTION;
+    }
     return obj;
 }

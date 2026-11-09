@@ -120,8 +120,14 @@ static void hl_js_timer_trampoline_impl(void *user_data)
     HlJS *js = t->js;
     JSContext *ctx = js->ctx;
 
-    /* Skip if previous invocation still in flight (async) */
+    /* Skip if previous invocation still in flight (async), and try again
+     * in a second - unless the loop is being torn down: like a reschedule,
+     * the retry must not add a timer to it (audit 44). */
     if (t->in_flight) {
+        if (js->base.shutting_down || !js->base.async_ctx) {
+            t->timer_id = 0;
+            return;
+        }
         const HlAsyncBackend *be = hl_async_backend();
         t->timer_id = (int64_t)be->timer_add(js->base.async_ctx, 1000,
                                               hl_js_timer_trampoline, t);

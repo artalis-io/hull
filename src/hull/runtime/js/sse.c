@@ -113,9 +113,14 @@ static void hl_js_sse_handler_impl(KlHttpRequest *req, KlHttpResponse *res,
     hl_js_req_ctx_free(js, req);   /* js_req.ctx holds its own reference */
 
     /* Create SSE stream object (calls kl_http_sse_begin) */
-    JSValue stream_obj = life ? hl_js_sse_create_stream(ctx, res, life)
-                              : JS_EXCEPTION;
+    /* A request that could not be built (audit 44) fails the endpoint like
+     * a stream that could not be: 500, and the handler is not called. */
+    JSValue stream_obj = (life && !JS_IsException(js_req))
+                         ? hl_js_sse_create_stream(ctx, res, life)
+                         : JS_EXCEPTION;
     if (JS_IsException(stream_obj)) {
+        if (JS_HasException(ctx))   /* cleared: the endpoint is answered 500 */
+            JS_FreeValue(ctx, JS_GetException(ctx));
         js->active_life = NULL;
         hl_req_life_end(life);
         JS_FreeValue(ctx, handler);

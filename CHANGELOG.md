@@ -8,6 +8,32 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Audit 44, runtime / C batch.** `fs.write(path, bytes, { mode = ... })`
+  through an in-root symlink (the in-place path) truncated the target before
+  `fchmod`; a target the process may write but does not own failed that
+  `fchmod` with the file already emptied. The mode is applied before the
+  truncate, under the same lock, and a refusal leaves the content intact.
+  A `db.udf` argument (and a query's TEXT / BLOB column, and a WASM UDF's
+  argument) read the pointer and the length in one expression; when the
+  bytes could not be made (a zeroblob expanded through the budget
+  allocator) the UDF ran on an empty value or copied from NULL. A failed
+  allocation is an error now, in both runtimes. Lua `tui.poll` / JS
+  `tui.poll` with no event loop (`hull test`, `hull agent`) and JS
+  `tui.pollSync` outside app.main waited in one blocking poll the run
+  deadline could not end; they wait in 50 ms slices that ask the run. JS:
+  a request object that could not be built is answered 500 without calling
+  the handler (it was handed over holding exceptions); a spent multipart
+  part's `read()` resolves an empty ArrayBuffer, not a string; `test.ok`
+  passes on a failed message conversion instead of throwing
+  `TypeError("%s", NULL)` over it. Lua `test.eq(1, 1.0)` compares numbers by
+  value and strings by their bytes, and `test.get` raises past 64 headers
+  instead of dropping them. A timer that fired while its previous run was
+  in flight re-added itself at shutdown (both runtimes). The macOS Seatbelt
+  profile built its state directory's `.hull` deny from an uninitialised
+  scratch when `realpath` failed.
+
 ## [0.19.0] - 2026-11-09
 
 ### Added
