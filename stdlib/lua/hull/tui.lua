@@ -22,40 +22,15 @@ local tui = require("hull._tui")
 
 -- ── Internal ───────────────────────────────────────────────────
 
-local function clamp(v, lo, hi)
-    if v < lo then return lo end
-    if v > hi then return hi end
-    return v
-end
-
--- A codepoint is "printable input" if it isn't a C0 control byte
--- (< 0x20), DEL (0x7F), or a C1 control (0x80..0x9F). Used by
--- tui.input to reject keystrokes that would otherwise insert
--- terminal-escape bytes into the returned string. The cap layer
--- already strips these on the way to cells (sanitization in
--- hl_cap_tui_write), but rejecting at insertion-time keeps the
--- returned buffer free of injected control bytes.
-local function is_printable_cp(cp)
-    if not cp then return false end
-    if cp < 0x20 then return false end
-    if cp == 0x7F then return false end
-    if cp >= 0x80 and cp <= 0x9F then return false end
-    return true
-end
-
--- UTF-8-safe truncate: trim `s` to at most `max_cells` Lua chars
--- WITHOUT cutting a multi-byte codepoint in half. We approximate
--- "cell width" with `utf8.len` (one count per codepoint) - wide
--- chars (CJK / emoji) over-count, but the result never produces
--- a 0xFFFD glyph from a half-cut continuation byte. Returns the
--- truncated string. Lua's utf8 lib is in the sandboxed Lua stdlib.
-local function utf8_truncate(s, max_cells)
-    if max_cells <= 0 then return "" end
-    if utf8.len(s) and utf8.len(s) <= max_cells then return s end
-    local last = utf8.offset(s, max_cells + 1)
-    if not last then return s end
-    return string.sub(s, 1, last - 1)
-end
+-- The pure layout / line-editing arithmetic (clamp, code-point truncate,
+-- the frame's top edge, the list's height, tui.input's key handling) lives
+-- in hull._tui_layout, which has no terminal dependency and so is testable
+-- on a TUI-free build. The cap layer still strips control bytes on the way
+-- to cells; tui.input rejecting them at insertion keeps the returned
+-- buffer clean too.
+local layout = require("hull._tui_layout")
+local clamp = layout.clamp
+local utf8_truncate = layout.truncate
 
 -- A draw-context handed to the user's `draw` function. Holds
 -- current size + a few convenience methods that delegate to the
@@ -185,8 +160,7 @@ function tui.list(items, opts)
     local top = 1   -- index of the first visible item
 
     local function fit_height(ctx)
-        local h = opts.height or ctx.rows - (title and 2 or 0)
-        return clamp(h, 1, count)
+        return layout.list_height(ctx.rows, title, opts.height, count)
     end
 
     return tui.run({
@@ -288,21 +262,8 @@ function tui.frame(opts, fn)
 
     if style then tui.style(style) end
 
-    -- Top edge
-    local top = b.tl .. string.rep(b.h, w - 2) .. b.tr
-    if title and #title > 0 and w - 5 > 0 then
-        -- Slot the title into the top edge: ┌─ title ─...─┐
-        -- The framing reserves five chars: tl + h + " " around the
-        -- title prefix, then " " + tr at the suffix end, plus 0+
-        -- horizontal fill in between. So the title can use at most
-        -- w-5 columns. Using w-4 (the previous cap) overshoots by
-        -- one cell when the title exactly fills the room.
-        local tt = utf8_truncate(title, w - 5)
-        local prefix = b.tl .. b.h .. " "
-        local suffix_len = w - #prefix - #tt - 2
-        if suffix_len < 0 then suffix_len = 0 end
-        top = prefix .. tt .. " " .. string.rep(b.h, suffix_len) .. b.tr
-    end
+    -- Top edge, the title slotted in (┌─ title ─...─┐), sized in cells.
+    local top = layout.frame_top(b, w, title)
     tui.print(x, y, top)
 
     -- Side edges
@@ -345,39 +306,9 @@ end
 --
 -- opts = { initial = "", prompt = "", max_len = 1024, password = false }
 --
--- Editing is by codepoint, not byte: the cursor is a byte index that
--- always sits on a character boundary. It used to step one byte, so
--- backspace after "é" removed half of it and the result was invalid
--- UTF-8. `max_len` is in bytes and never splits a character.
-
-local function is_cont(s, i)
-    local b = string.byte(s, i)
-    return b ~= nil and b >= 0x80 and b < 0xC0
-end
-
--- Byte index where the character before byte position `i` starts.
-local function prev_char(s, i)
-    local j = i - 1
-    while j > 1 and is_cont(s, j) do j = j - 1 end
-    return j
-end
-
--- Byte index just past the character that starts at `i`.
-local function next_char(s, i)
-    local j = i + 1
-    while j <= #s and is_cont(s, j) do j = j + 1 end
-    return j
-end
-
--- Characters (codepoints) in s[1 .. i-1]; a malformed byte counts as one.
-local function chars_before(s, i)
-    local n, j = 0, 1
-    while j < i do
-        n = n + 1
-        j = next_char(s, j)
-    end
-    return n
-end
+-- Editing is by codepoint, not byte (hull._tui_layout.input_step): the
+-- cursor always sits on a character boundary, and `max_len` counts code
+-- points, as the JS twin's maxLen does.
 
 function tui.input(prompt, opts)
     opts = opts or {}
@@ -393,59 +324,18 @@ function tui.input(prompt, opts)
         draw = function(t)
             t:clear()
             t:print(1, 1, prompt_str)
-            local display
-            if password then
-                display = string.rep("*", chars_before(buf, #buf + 1))
-            else
-                display = buf
-            end
-            local x = chars_before(prompt_str, #prompt_str + 1) + 1
+            local display, x, cx = layout.input_view(prompt_str, buf, cursor, password)
             t:print(x, 1, display)
             -- Show the cursor by moving there; the terminal's actual
             -- cursor follows tui.move via the flush. (A column count, so
             -- characters, not bytes.)
-            t:move(x + chars_before(buf, cursor), 1)
+            t:move(cx, 1)
         end,
         on_event = function(ev)
             if ev.kind ~= "key" then return end
-            local k = ev.key
-            if k == "enter" then return buf
-            elseif k == "escape" or k == "ctrl+c" then return false
-            elseif k == "backspace" then
-                if cursor > 1 then
-                    local p = prev_char(buf, cursor)
-                    buf = string.sub(buf, 1, p - 1) .. string.sub(buf, cursor)
-                    cursor = p
-                end
-            elseif k == "delete" then
-                if cursor <= #buf then
-                    buf = string.sub(buf, 1, cursor - 1)
-                          .. string.sub(buf, next_char(buf, cursor))
-                end
-            elseif k == "left" then
-                if cursor > 1 then cursor = prev_char(buf, cursor) end
-            elseif k == "right" then
-                if cursor <= #buf then cursor = next_char(buf, cursor) end
-            elseif k == "home" then
-                cursor = 1
-            elseif k == "end" then
-                cursor = #buf + 1
-            elseif k == "ctrl+u" then
-                buf = string.sub(buf, cursor)
-                cursor = 1
-            elseif k == "ctrl+k" then
-                buf = string.sub(buf, 1, cursor - 1)
-            elseif is_printable_cp(ev.codepoint) and not ev.ctrl and not ev.alt then
-                -- Encode codepoint as UTF-8 (use the key string which
-                -- already has it encoded). is_printable_cp has filtered
-                -- out C0/DEL/C1 ranges so ev.key can't carry an
-                -- ANSI-injection payload here.
-                local ch = ev.key
-                if type(ch) == "string" and #buf + #ch <= max_len then
-                    buf = string.sub(buf, 1, cursor - 1) .. ch .. string.sub(buf, cursor)
-                    cursor = cursor + #ch
-                end
-            end
+            local nb, nc, done = layout.input_step(buf, cursor, ev, max_len)
+            if nb == nil then return done end
+            buf, cursor = nb, nc
         end,
         tick_ms = opts.tick_ms,
     }) or nil   -- false → nil (aborted)

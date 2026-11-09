@@ -653,7 +653,7 @@ These are what docs, examples, and scaffolding lead with.
 | `tui.run(opts)` | `tui.run(opts)` → `Promise<string>` | immediate-mode loop. *the entry point* |
 | `tui.frame(opts, fn)` | `tui.frame(opts, fn)` | bordered area + nested cursor scope |
 | `tui.list(items, opts)` | `tui.list(items, opts)` | scrollable list; returns picked index or nil |
-| `tui.input(prompt, opts?)` | `tui.input(prompt, opts?)` | line input with editing; returns string or nil |
+| `tui.input(prompt, opts?)` | `tui.input(prompt, opts?)` | line input with editing by code point; `max_len` / `maxLen` (default 1024) counts code points; returns string or nil |
 | `tui.progress(pct, opts?)` | `tui.progress(pct, opts?)` | render a progress bar |
 | `tui.spinner(state)` | `tui.spinner(state)` | next frame of a spinner |
 | `tui.confirm(msg)` | `tui.confirm(msg)` → `Promise<bool>` | y/n prompt |
@@ -663,7 +663,10 @@ These are what docs, examples, and scaffolding lead with.
 
 Helpers are pure Lua/JS over `tui.run` + `tui.frame`. They live in
 stdlib (not the cap layer) so an app can drop in its own replacement
-easily. `tui.list` in particular is opinionated about styling.
+easily. `tui.list` in particular is opinionated about styling. Their layout
+and line-editing arithmetic is in the internal `hull._tui_layout` /
+`hull:_tui_layout` (no terminal needed, so unit-tested on a TUI-free build);
+text is measured in code points, one cell each.
 
 `tui.async(fn)` only lives here because it has no other caller today
 . It exists so `tui.run`'s event handlers can kick off background work

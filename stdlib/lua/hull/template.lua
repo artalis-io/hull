@@ -648,13 +648,15 @@ end
 -- longer followed either - the JS twin reads own properties only.
 local function gen_dot_path(path, prefix, locals_set)
     prefix = prefix or "__d"
+    if path == "" then
+        error("empty expression in template")
+    end
+    -- Every segment, empty ones included: "[^.]+" skipped them, so "a..b",
+    -- ".a" and "a." compiled where the JS twin refuses them (audit 44).
     local parts = {}
-    for part in path:gmatch("[^.]+") do
+    for part in (path .. "."):gmatch("([^.]*)%.") do
         validate_ident(part, "dot path '" .. path .. "'")
         parts[#parts + 1] = part
-    end
-    if #parts == 0 then
-        error("empty expression in template")
     end
 
     local code, i = prefix, 1
@@ -723,23 +725,16 @@ local function gen_cond(cond, negated, locals_set)
     return path
 end
 
+-- Literal template text as a Lua string literal that reads back as exactly
+-- the same bytes. A quoted literal from string.format("%q"), not a long
+-- string: Lua's lexer folds CR, CRLF and LFCR inside a long string to LF, so
+-- "A\r\nB" rendered as "A\nB" while the JS twin kept the bytes (audit 44).
+-- %q escapes '"', '\\', NUL and every control byte (CR as \13), and writes a
+-- newline as backslash + newline; that pair is rewritten to "\n" so the
+-- generated line holds no raw newline. The text is the template's own, never
+-- render data, and no byte of it can end the literal early.
 local function lua_quote(s)
-    -- Use Lua long string to avoid escaping issues
-    -- Find a level of [=...=[ that doesn't appear in the string
-    -- Search s .. "]", not s: the closing "]=*]" is appended right after s,
-    -- so a chunk ending in "]" (text like "a[1]" just before a tag) or
-    -- "]=" formed the delimiter early and the template failed to compile.
-    local level = 0
-    local probe = s .. "]"
-    while probe:find("%]" .. string.rep("=", level) .. "%]") do
-        level = level + 1
-    end
-    local eq = string.rep("=", level)
-    -- M-6: Lua silently strips the first newline immediately after `[[`
-    -- (or `[==[` etc.), so a template chunk starting with "\n..." would
-    -- lose its leading newline at render time. Prepend an extra newline
-    -- so the lexer eats THAT one and `s` is preserved byte-for-byte.
-    return "[" .. eq .. "[\n" .. s .. "]" .. eq .. "]"
+    return (string.format("%q", s):gsub("\\\n", "\\n"))
 end
 
 local function codegen(ast)

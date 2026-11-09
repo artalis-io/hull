@@ -1397,7 +1397,7 @@ on a bad value instead of silently turning the bound off:
 - `rbac.require_permission(perm)` → middleware function (403 on denial).
 
 **health**. Liveness (`/health`) and readiness (`/ready`) endpoints with DB ping, custom checks, and server stats.
-- `health.register(name, fn)`. Register a custom health check. `fn()` returns `true` or `false`. Checks are synchronous: in JS a check that returns a Promise fails (its Promise used to read as `ok`).
+- `health.register(name, fn)`. Register a custom health check. `fn()` returns `true` or `false`. The name `"db"` is reserved for the built-in DB ping and raises (a check under it overwrote the ping's result). Checks are synchronous: in JS a check that returns a Promise fails (its Promise used to read as `ok`).
 - `health.unregister(name)`. Remove a registered check.
 - `health.run_checks(opts)` → `{ checks, all_ok }`. `opts.db_check` (default: `true`).
 - `health.middleware(opts)`. Returns middleware that intercepts `/health` and `/ready`.
