@@ -8,6 +8,25 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Auth stdlib Lows from audit 44, both runtimes.** `oauth.init` refuses a `state_ttl` /
+  `jwks_ttl` (`stateTtl` / `jwksTtl`) that is not a positive number of seconds (a string one
+  made every JS callback "expired", a negative one expired every state); a failed JWKS fetch is
+  throttled for `JWKS_MIN_REFRESH` like an unknown kid (each callback fetched again, twice in
+  JS); a Lua token reply that is not JSON answers 502 instead of raising. The
+  `session.login_handler` audit-metadata scrub compares keys lower-cased with `_` / `-` dropped
+  (`idToken`, `accessToken`) and reaches nested tables up to 8 levels (`{ oauth = ctx }` stored
+  the IdP tokens); Lua `session.load` destroys a row whose data cannot be decoded instead of
+  raising. auth-flows matches the request Host to `trusted_hosts` without case (a mixed-case
+  Host passed the cross-site check but its mails were dropped) and prunes its expired rows
+  daily from `init` (`cleanup` / `cleanup_at`, exported as `cleanup()`), so the lockout rows of
+  unknown addresses no longer accumulate. `rbac.require_role` / `require_permission` answer
+  401 for a session user id they cannot key (it was a 500) and refuse a missing or malformed
+  role / permission argument when the middleware is made. Lua `auth.session_middleware` /
+  `jwt_middleware` take only the literal `optional = true`. Tests:
+  `stdlib/{lua,js}/hull/tests/test_auth_audit44.*`.
+
 ## [0.19.0] - 2026-11-09
 
 ### Added

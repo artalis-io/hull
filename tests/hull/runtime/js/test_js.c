@@ -6196,6 +6196,24 @@ UTEST(js_stdlib, auth_audit12_suite)
 }
 #endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Auth stdlib regressions from audit 44 (the JS twin of
+ * lua_stdlib.auth_audit44_suite). */
+UTEST(js_stdlib, auth_audit44_suite)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    int pass = 0, fail = -1;
+    int rc = run_js_test("stdlib/js/hull/tests/test_auth_audit44.js", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+
+    cleanup_js_caps();
+}
+#endif
+
 /* The _hull_jobs / _hull_cron tables as a database from before jobs.init's
  * additive columns has them (progress .. claim_started_at, tz_offset,
  * last_error). Created by the harness: app code may not touch _hull_*. */

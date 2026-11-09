@@ -5362,6 +5362,27 @@ UTEST(lua_stdlib, auth_audit12_suite)
 }
 #endif
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* Auth stdlib regressions from audit 44 (oauth ttl types, the JWKS failure
+ * throttle and a non-JSON token reply; the nested / camelCase audit-metadata
+ * scrub and undecodable session data; the trusted-host match without case
+ * and auth-flows cleanup(); rbac's 401 for a malformed user id and its
+ * factory checks; auth's literal `optional = true`). */
+UTEST(lua_stdlib, auth_audit44_suite)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    long long pass = 0, fail = -1;
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_auth_audit44.lua", &pass, &fail);
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(fail, 0LL);
+    EXPECT_GT(pass, 0LL);
+
+    cleanup_lua_caps();
+}
+#endif
+
 /* The _hull_jobs / _hull_cron tables as a database from before jobs.init's
  * additive columns has them (progress .. claim_started_at, tz_offset,
  * last_error). Created by the harness: app code may not touch _hull_*. */

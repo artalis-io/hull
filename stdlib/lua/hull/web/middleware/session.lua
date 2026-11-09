@@ -330,8 +330,11 @@ function session.load(session_id, opts)
         { now, now + ttl, session_id }
     )
 
-    local decoded = json.decode(row.data)
-    if not decoded then
+    -- Data that cannot be decoded (not JSON, or nested past the decoder's
+    -- depth ceiling) is corrupt, as in the JS twin (audit 44): the decode
+    -- error raised out of every request that carried the cookie.
+    local dec_ok, decoded = pcall(json.decode, row.data)
+    if not dec_ok or type(decoded) ~= "table" then
         -- Corrupted session data - destroy and return nil
         db.exec("DELETE FROM _hull_sessions WHERE id = ?", { session_id })
         return nil
@@ -637,21 +640,29 @@ function session.login_handler(cookie_mod, opts)
     -- secret surfaces. If you need to log claim details, pull them
     -- out by name in a custom audit_metadata - never pass the raw
     -- ctx through.
+    --
+    -- Keys are compared NORMALISED - lower-cased, "_" and "-" dropped - so
+    -- "Access_Token" (audit 41), "accessToken", "idToken" and "refresh-token"
+    -- all match, and the scrub reaches nested tables (audit 44: it was one
+    -- level deep, so `{ oauth = ctx }` stored ctx.tokens and ctx.claims).
+    -- Past SCRUB_MAX_DEPTH levels a table is dropped whole, which also ends a
+    -- cycle.
     local SCRUB_KEYS = {
-        tokens         = true, token        = true,
-        access_token   = true, refresh_token = true,
-        id_token       = true, claims       = true,
-        password       = true, password_hash = true,
-        pwhash         = true, secret       = true,
+        tokens       = true, token        = true,
+        accesstoken  = true, refreshtoken = true,
+        idtoken      = true, claims       = true,
+        password     = true, passwordhash = true,
+        pwhash       = true, secret       = true,
     }
-    local function scrub(meta)
+    local SCRUB_MAX_DEPTH = 8
+    local function scrub(meta, depth)
         if type(meta) ~= "table" then return meta end
+        depth = depth or 1
+        if depth > SCRUB_MAX_DEPTH then return nil end
         local out = {}
         for k, v in pairs(meta) do
-            -- Matched without case (audit 41): "Access_Token" or "CLAIMS"
-            -- slipped past an exact-case list.
-            local lk = type(k) == "string" and k:lower() or k
-            if not SCRUB_KEYS[lk] then out[k] = v end
+            local nk = type(k) == "string" and k:lower():gsub("[_%-]", "") or k
+            if not SCRUB_KEYS[nk] then out[k] = scrub(v, depth + 1) end
         end
         return out
     end

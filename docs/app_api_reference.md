@@ -397,7 +397,8 @@ cross-provider or by a CSRF.
 
 - `oauth.init(opts)`. Call once at app startup. Required: `state_secret`
   (≥16 bytes), `providers = { name = {...}, ... }`. Optional: `state_cookie`,
-  `state_ttl`, `find_user(provider, claims) -> user` (required when
+  `state_ttl` / `jwks_ttl` (positive numbers of seconds; anything else raises -
+  audit 44), `find_user(provider, claims) -> user` (required when
   `on_login` is set), `on_login(req, res, user, ctx) -> path?` (signature
   matches `hull/web/auth-flows` so a single `session.login_handler(cookie)`
   wires both; `ctx = { provider, claims, tokens }` exposes OIDC-specific
@@ -662,9 +663,16 @@ verify step between successful first-factor auth and `on_login` when
     count locked every address out after two tries in Lua and fell back
     to the default in JS; NaN turned the lockout off).
   - `opts.prefix` (default `"/auth"`).
+  - `opts.cleanup` (default on) / `opts.cleanup_at` (`cleanupAt`, an
+    `"HH:MM"` string, default `"03:00"`): init prunes expired consumed
+    tokens, pending email changes and stale lockout rows once and then
+    daily through `app.daily`; `cleanup = false` opts out, and
+    `auth_flows.cleanup()` (`authFlows.cleanup()`) runs the same prune from
+    your own scheduler (audit 44: the lockout rows `/login` writes for
+    unknown addresses were never pruned).
   - Emailed links need an origin: `opts.public_origin` (one canonical
     URL), or `opts.trusted_hosts` (the request's Host must match an entry
-    exactly; the link is built from that entry, never from the request,
+    exactly, ASCII case aside - audit 44; the link is built from that entry, never from the request,
     so a bare host gives a link without a port and an entry
     `"host:port"` - which matches a request on that port only - gives
     that port), or `opts.trust_request_host = true` (dev / tests only:
@@ -1056,7 +1064,7 @@ verify step between successful first-factor auth and `on_login` when
 - Returning a string overrides the post-login redirect target (oauth honors this; auth-flows uses the redirect from `login_redirect` opt).
 - `on_logout(req, res)` is the matching shape - no `user` arg because the session row is the source of truth there.
 
-**Audit-metadata scrub at the session.login_handler seam.** When `audit_log` is wired, the factory calls your `audit_metadata(user, ctx)` and then **strips** these keys from the result before passing it to `audit_log.record`: `tokens`, `token`, `access_token`, `refresh_token`, `id_token`, `claims`, `password`, `password_hash`, `pwhash`, `secret`. This is defense in depth - the **OAuth ctx already contains `claims` and `tokens`** (the raw IdP tokens), so a `audit_metadata = function(_,c) return c end` override would otherwise persist access_token + refresh_token in `_hull_audit_log.metadata` for `retain_days` (default 365). The scrub is top-level only; if you need to log claim details, pull them out by name in your custom `audit_metadata` (e.g. `return { factors = "oauth:" .. ctx.provider, sub = ctx.claims.sub }`) - never pass the raw `ctx` through.
+**Audit-metadata scrub at the session.login_handler seam.** When `audit_log` is wired, the factory calls your `audit_metadata(user, ctx)` and then **strips** these keys from the result before passing it to `audit_log.record`: `tokens`, `token`, `access_token`, `refresh_token`, `id_token`, `claims`, `password`, `password_hash`, `pwhash`, `secret`. This is defense in depth - the **OAuth ctx already contains `claims` and `tokens`** (the raw IdP tokens), so a `audit_metadata = function(_,c) return c end` override would otherwise persist access_token + refresh_token in `_hull_audit_log.metadata` for `retain_days` (default 365). Keys are compared lower-cased with `_` and `-` dropped (so `accessToken`, `idToken`, `refresh-token` match too), and the scrub reaches nested tables / arrays up to 8 levels (deeper ones are dropped) - audit 44. If you need to log claim details, pull them out by name in your custom `audit_metadata` (e.g. `return { factors = "oauth:" .. ctx.provider, sub = ctx.claims.sub }`) - never pass the raw `ctx` through.
 
 **cookie**. Cookie helpers (not middleware).
 - `cookie.parse(header)` → table `{ name = value, ... }`. When a name
@@ -1395,6 +1403,9 @@ on a bad value instead of silently turning the bound off:
 - `rbac.has_permission(user_id, permission)` → boolean.
 - `rbac.require_role(role)` → middleware function (403 on denial).
 - `rbac.require_permission(perm)` → middleware function (403 on denial).
+  Both take a name or a non-empty list of names and raise otherwise when the
+  middleware is made; a session user id rbac cannot key (`1.5`, a table,
+  `true`, `""`) answers 401 like a missing one (audit 44).
 
 **health**. Liveness (`/health`) and readiness (`/ready`) endpoints with DB ping, custom checks, and server stats.
 - `health.register(name, fn)`. Register a custom health check. `fn()` returns `true` or `false`. Checks are synchronous: in JS a check that returns a Promise fails (its Promise used to read as `ok`).
