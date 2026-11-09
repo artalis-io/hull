@@ -638,7 +638,7 @@ SQLite file in the app tree (the implicit `data.db`) -> `<app>/.hull/internal.db
 the app tree (a deploy volume) -> `<that file>.hull-internal` beside it, so it
 persists where the data does; `:memory:` (`hull test`, `hull agent`, an
 `app.main` program without `-d`) -> a separate `:memory:`; a Postgres / MySQL /
-DuckDB / `$VAR` default -> none, the tables stay on the default connection (a
+DuckDB / `$VAR` default -> none (one worked out earlier is cleared, audit 44), the tables stay on the default connection (a
 per-instance local file would split sessions across instances; the startup WARN
 still says to declare `databases.internal`). A declared `databases.internal`
 always wins. The default path is Hull's own DSN (not confined like a manifest
@@ -2430,13 +2430,23 @@ rather than joining `base_dir` itself, and one that selects through the policy g
 for free. The database side (PR 2): `hl_db_registry_set_state_dir` lets `confine_manifest_dsn`
 take a `"@state/<file>"` `databases.named` / `.internal` DSN under the state root (same `..` /
 `.hull` / symlink rules); `databases.named.default` is the app's DEFAULT database when the
-operator gave no `-d` (`HlAppContextOpts.manifest_default_db`, set by both runners, `hull
-migrate`, the agent's db commands and the MCP context; `db_path_explicit` marks a `-d`): the
-implicit default opened and migrated at init is closed (`hl_db_registry_repoint_default`), the
-file it created removed, the manifest's opened, migrated and given its internal database
+operator gave no `-d` (`HlAppContextOpts.manifest_default_db`, set by both runners and `hull
+migrate` - its internal-table move resolves the default the same way, never as a `-d`, so the
+move lands in `<state>/.hull/internal.db` (audit 44); `db_path_explicit` marks a `-d`): the
+implicit default opened and migrated at init is closed IN PLACE (`hl_db_registry_repoint_default`:
+the slot keeps its index, so a `db.default()` object the top level captured - it holds the slot's
+handle - is the new default once reopened; compacting the array handed it another slot, audit 44),
+the file it created removed, the manifest's opened, migrated and given its internal database
 (`hl_db_internal_default_dsn_ex`: `<state>/.hull/internal.db` for a database under the state
 root) - all in `hl_app_context_manifest_db`, which the context runs when it loads the app and
-serve.c calls once it has the manifest, before the internal-table move. `hull test` leaves the
+serve.c calls once it has the manifest, before the internal-table move. A changed (or cleared -
+a network / `$VAR` default has none) default internal path takes an internal connection opened
+from the old one out of its slot (`hl_db_registry_take_replaced_internal`): the step moves the
+`_hull_*` tables a top-level stdlib `init()` made there into the new internal database and
+removes the file when this run made it. The step also re-points the worker pool's default
+(`hl_worker_db_init`; serve.c set it at init). The read-only agent commands only LOOK
+(`manifest_default_db_peek`: the default resolved, never opened, no state directory made); the
+MCP warm context keeps its `:memory:` database. `hull test` leaves the
 flag off (its `:memory:` is deliberate). Covered by `tests/e2e_state_dir.sh` (`make e2e-state-dir`, both runtimes, sandboxed) and
 `test_fs_policy`. docs/cli_mode.md "A per-user state directory".
 

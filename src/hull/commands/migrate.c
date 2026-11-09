@@ -118,7 +118,8 @@ static int has_entry(const char *app_dir)
  * loaded (as `hull test` / `hull agent` load it) to learn whether its
  * manifest declares databases.internal, in which case nothing moves; a
  * directory with no app entry has no manifest. */
-static int cmd_move_internal(const char *app_dir, const char *db_path, int keep)
+static int cmd_move_internal(const char *app_dir, const char *db_path, int keep,
+                             int from_manifest)
 {
     int rc = 1;
     if (!has_entry(app_dir)) {
@@ -136,9 +137,18 @@ static int cmd_move_internal(const char *app_dir, const char *db_path, int keep)
         return rc;
     }
 
+    /* A default the manifest names (databases.named.default, "@state/") is
+     * resolved exactly as the runners resolve it - re-pointed, with the
+     * state directory - so the internal database is the one they read
+     * (<state>/.hull/internal.db). Handed over as a -d it was a database
+     * outside the app tree, given <file>.hull-internal beside it: the move
+     * went there, and a later --no-migrate start passed its check with an
+     * empty internal database (audit 44). */
     HlAppContextOpts opts = {
         .app_dir = app_dir,
-        .db_path = db_path,
+        .db_path = from_manifest ? NULL : db_path,
+        .db_path_explicit = !from_manifest,
+        .manifest_default_db = from_manifest,
         .no_migrate = 1,               /* cmd_run applied them */
         .gate_modules = 1,
         .keep_internal_in_app_db = keep,
@@ -277,6 +287,7 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
      * "@state/" database, gap 3) is migrated there: the app is loaded to read
      * it, as the internal-table move loads it. */
     char default_db[4096];
+    int db_from_manifest = 0;
     if (!db_path && has_entry(app_dir ? app_dir : ".")) {
         HlAppContextOpts opts = {
             .app_dir = app_dir ? app_dir : ".",
@@ -293,7 +304,10 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
         const char *d = hl_app_context_default_db_path(ctx);
         if (d) {
             int n = snprintf(default_db, sizeof default_db, "%s", d);
-            if (n > 0 && (size_t)n < sizeof default_db) db_path = default_db;
+            if (n > 0 && (size_t)n < sizeof default_db) {
+                db_path = default_db;
+                db_from_manifest = 1;
+            }
         }
         hl_app_context_free(ctx);
     }
@@ -341,7 +355,8 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
      * without --no-migrate would make. */
     int rc = cmd_run(app_dir, db_path);
     if (rc != 0) return rc;
-    return cmd_move_internal(app_dir ? app_dir : ".", db_path, keep_internal);
+    return cmd_move_internal(app_dir ? app_dir : ".", db_path, keep_internal,
+                             db_from_manifest);
 }
 
 #endif /* HL_ENABLE_DB */

@@ -165,8 +165,10 @@ const char *hl_db_registry_manifest_default_dsn(HlDbRegistry *reg, char *buf,
 
 /* Replace the registry's default DSN with @p dsn (already confined), closing
  * an open "default" connection first (the implicit one opened at init: the
- * manifest named the app's default and no -d was given). The next
- * hl_db_registry_get("default") opens the new one. -1 once sealed, or when
+ * manifest named the app's default and no -d was given). The connection is
+ * closed IN PLACE (audit 44): its handle keeps its address, so a db.default()
+ * object captured at the app's top level is the new default once the next
+ * hl_db_registry_get("default") opens it there. -1 once sealed, or when
  * @p dsn does not fit. */
 int hl_db_registry_repoint_default(HlDbRegistry *reg, const char *dsn);
 
@@ -194,9 +196,23 @@ int hl_db_registry_has_internal(const HlDbRegistry *reg);
  * records the path without using it (--keep-internal-in-app-db, so the
  * startup step can move tables back). In the sealed span, like the -d DSN;
  * -1 once sealed or for a DSN too long. */
+/* A change of path (or a NULL / "" @p dsn, which clears it) also takes an
+ * internal connection opened from the old path out of its slot (audit 44: a
+ * stdlib init() at the app's top level opens it before the manifest's
+ * default is known): the next use opens the new path in the same slot, and
+ * the old connection waits for hl_db_registry_take_replaced_internal. */
 int hl_db_registry_set_default_internal(HlDbRegistry *reg, const char *dsn,
                                         size_t base_len, int mkdir_parent,
                                         int active);
+
+/* The internal connection that was open on the default internal path when
+ * hl_db_registry_set_default_internal changed (or cleared) that path: 1 and
+ * *@p out set (the caller closes it), else 0. The registry keeps it until
+ * then - closing it at seal / close_all when nobody takes it - so the _hull_*
+ * tables a top-level stdlib init() made there (an in-memory database
+ * included) can be carried into the new internal database of a re-pointed
+ * default (hl_app_context_manifest_db, audit 44). */
+int hl_db_registry_take_replaced_internal(HlDbRegistry *reg, HlDbHandle *out);
 
 /* The default internal DSN recorded above (active or not), or NULL. */
 const char *hl_db_registry_default_internal_path(const HlDbRegistry *reg);

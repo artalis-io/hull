@@ -690,7 +690,14 @@ int hl_db_internal_configure_ex(HlDbRegistry *reg, const char *app_dir,
                                             sizeof idsn, &ibase, &in_hull)
             : 0;
     if (k < 0) return -1;
-    if (k == 0) return 0;
+    /* No default internal database for this default (network / DuckDB /
+     * "$VAR" / the internal file itself): clear one an earlier call worked
+     * out from the implicit default, and close an internal connection opened
+     * from it, so the tables stay on the default connection and the startup
+     * WARN about databases.internal is given (audit 44: kept, they stayed in
+     * a per-instance local file or :memory:). */
+    if (k == 0)
+        return hl_db_registry_set_default_internal(reg, NULL, 0, 0, 0) != 0 ? -1 : 0;
     return hl_db_registry_set_default_internal(reg, idsn, ibase, in_hull,
                                                !keep) != 0 ? -1 : 0;
 }

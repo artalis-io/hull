@@ -130,8 +130,10 @@ int hl_db_internal_check_unmoved(HlDbRegistry *reg, int keep);
 /* Record the default internal database for app directory @p app_dir and
  * default DSN @p default_dsn (hl_db_internal_default_dsn), active unless
  * @p keep: the one derivation every entry point (hl_app_context_init,
- * `hull migrate`) uses. 0 (nothing recorded when there is no default), or
- * -1 when the path does not fit. */
+ * `hull migrate`) uses. 0, or -1 when the path does not fit. A default with
+ * no internal database of its own (network / DuckDB / "$VAR") CLEARS an
+ * earlier recorded one and closes an internal connection opened from it
+ * (audit 44), so a re-pointed default never keeps the implicit one's. */
 int hl_db_internal_configure(HlDbRegistry *reg, const char *app_dir,
                              const char *default_dsn, int keep);
 /* The same, given the app's state directory too (NULL = none). */

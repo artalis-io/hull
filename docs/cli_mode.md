@@ -189,9 +189,16 @@ end)
   default (`:memory:` for a built CLI, `<app_dir>/data.db` under `hull app.lua`,
   whose file is removed again) is replaced once the manifest is read, the
   migrations run on the named one, and its internal database (the stdlib's
-  `_hull_*` tables) is `<state>/.hull/internal.db`. `hull migrate` and `hull
-  agent db` with no `-d` open the same file (they load the app to read the
-  manifest). An operator's `-d` still wins; `hull test` keeps its `:memory:`.
+  `_hull_*` tables) is `<state>/.hull/internal.db`. The replacement is
+  seamless for the app's top level: a `db.default()` object taken there is the
+  new default afterwards, `worker.dispatch`'s `db` follows it, and the
+  `_hull_*` tables a top-level `session.init()` / `rbac.init()` made before the
+  manifest was read are carried into `<state>/.hull/internal.db`. `hull
+  migrate` with no `-d` opens the same files (it loads the app to read the
+  manifest) and moves the stdlib's tables where the runner reads them; `hull
+  agent db` reads the default only if it exists - it creates neither the
+  database nor the state directory. An operator's `-d` still wins; `hull
+  test` keeps its `:memory:`.
 - **A built tool that keeps everything under `@state/` is rootless.** When a
   BUILT `app.main` binary's manifest declares `state` and every fs grant and
   every file database (the default included) is under `@state/`, it needs
