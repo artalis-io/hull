@@ -1143,6 +1143,8 @@ verify step between successful first-factor auth and `on_login` when
   - Cache hit + different fingerprint → returns 409 Conflict.
   - Fingerprint: `SHA-256(method + path + body)`.
 - `idempotency.respond(req, res, status, data)`. Sends response and caches it for replay. The response is stored BEFORE it is sent, body and headers base64 encoded, so a body holding bytes that are not UTF-8 or a NUL (or, in JS, a lone surrogate) replays byte-exact on every backend; a store that still fails (a body past the column, a lost connection) marks the key processed, and its retries get a 409 rather than running the handler again (audit 39). A client key that is not printable ASCII is a 400. Works on MySQL (the `key` column is quoted; `key` is a reserved word there).
+  The body is encoded once, inside the store's guard, and that exact string is sent (with `Content-Type: application/json` unless `extra_headers` names one); a value that cannot be encoded marks the key processed (unstored) and the error is raised (audit 44: the encode ran before the guard, leaving the key in flight).
+- An in-flight key is held for 660 s (the 10 min `http.fetch` ceiling plus a minute, as the outbox's claim lease), whatever the key's `ttl` - a retry while the handler may still be parked on a fetch gets 409 rather than running it again (audit 44: the lease was 300 s, or the TTL if shorter).
 - `idempotency.complete(req)`. Marks key as processed without caching response body.
 - **Replay-header allowlist (security):** when `idempotency.respond` is
   called with `extra_headers`, only headers on a strict allowlist are
@@ -1166,16 +1168,16 @@ verify step between successful first-factor auth and `on_login` when
   - `opts.destination`. Target URL or address.
   - `opts.payload`. Payload string.
   - `opts.headers`. JSON-encoded headers (optional).
-  - `opts.idempotency_key`. Dedup key for delivery (optional).
+  - `opts.idempotency_key`. Dedup key for delivery (optional; `""` is no key, stored NULL in both runtimes - audit 44).
   - `opts.max_attempts` (whole number >= 0) and `opts.delay` (seconds: a finite number or a numeric string, rounded up to whole seconds; anything else is an error / TypeError - audit 25).
 - `outbox.flush(opts)`. Deliver pending items. Exponential backoff (`2^attempt * 10s`, capped at 1hr). Delivery waits on the network, so flush raises inside `db.batch` / an open transaction, and a [runtime refusal](#runtime-refusal-codes) is never counted as a failed attempt: the claim is given back and the row stays pending. A `wait_refused` refusal (middleware, outside a handler) is raised (audit 18); a `busy` one (the VM's fetch cap, its off-heap copy total) stops the flush, which returns with `busy = true` (Lua) / `busy: true` (JS) and leaves the rest of the rows pending, unattempted (audit 35).
 - `outbox.middleware()`. Sets `req.ctx._outbox_flush = true` for auto-flush.
 - `outbox.stats()` → `{ pending, delivered, failed }` counts.
-- `outbox.cleanup(max_age)`. Delete old delivered items.
+- `outbox.cleanup(max_age, opts?)`. Delete old delivered items. `max_age` (seconds, default 7 days) must be a finite number >= 0, else it raises; `opts.also_failed` (`alsoFailed`) also deletes failed rows created more than `max_age` ago - in both runtimes (audit 44: Lua had no such option).
 
 **inbox**. Inbox deduplication for incoming events/webhooks.
 - `inbox.init(opts)`. Creates `_hull_inbox_processed` table. `opts.ttl` = record lifetime (default: `86400`); it and the per-call `{ ttl }` of `mark_processed` / `check_and_mark` must be a whole number of seconds in 1..31622400 (366 days), or they raise (audit 15, audit 26).
-- `inbox.is_duplicate(message_id, source?)` → boolean. Default source: `"default"`. `message_id` and `source` are strings or integers (an integer is stored as its decimal string, so `42` and `"42"` are the same source); any other type, or one over 255 characters, raises (audit 10 added the check for `source`).
+- `inbox.is_duplicate(message_id, source?)` → boolean. Default source: `"default"`; an empty `source` is the default source too, in both runtimes (audit 44: Lua kept `""` as a source of its own). `message_id` and `source` are strings or integers (an integer is stored as its decimal string, so `42` and `"42"` are the same source); any other type, or one over 255 characters, raises (audit 10 added the check for `source`).
 - `inbox.mark_processed(message_id, source?, opts?)`. Record as processed.
 - `inbox.check_and_mark(message_id, source?, opts?)` → boolean (true = duplicate, false = new + marked).
 - `inbox.cleanup()` → count of deleted expired records.
@@ -1329,7 +1331,7 @@ also useful for WiFi codes, contact cards, payment links, etc.
 - `search.remove(name, id)`. Delete document.
 - `search.query(name, query, opts?)`. Full-text search. Returns `{id, rank}` array.
   - `opts.limit` (default: 20), `opts.offset` (default: 0)
-  - `opts.snippet = {column, tokens, before, after, ellipsis}` / `opts.highlight = {column, before, after}` add a `snippet` / `highlight` field. `column` is an integer in 0..32767 and `tokens` an integer in 1..64; a string, a fraction, NaN or a value out of range raises (audit 44). The indexed text in it is HTML-escaped; only `before` / `after` (default `<b>` / `</b>`) and `ellipsis` are inserted as given, so the field is safe to render raw (`{{{ r.snippet }}}`) as long as those markers are your own markup (audit 26).
+  - `opts.snippet = {column, tokens, before, after, ellipsis}` / `opts.highlight = {column, before, after}` add a `snippet` / `highlight` field. `column` is an integer in 0..32767 and `tokens` an integer in 1..64; a string, a fraction, NaN or a value out of range raises (audit 44). `column` defaults to 1, the first indexed column (0 is the id), in both runtimes, and `snippet` and `highlight` may be asked for together (audit 44 round 2: JS defaulted to the id, Lua ignored `highlight` beside `snippet`). `max_query_len` / `maxQueryLen` counts UTF-8 bytes in both runtimes. `search.index` takes at least one column, each a string or a number (JS: a null / undefined value is no column). The indexed text in it is HTML-escaped; only `before` / `after` (default `<b>` / `</b>`) and `ellipsis` are inserted as given, so the field is safe to render raw (`{{{ r.snippet }}}`) as long as those markers are your own markup (audit 26).
   - `opts.limit` and `opts.offset` clamp: a number or a numeric string
     (`req.query.offset`) counts, is floored and clamped to 1..1000 (limit) /
     0..2147483647 (offset); anything else (a non-numeric string, NaN, a

@@ -92,6 +92,8 @@ test("jobs.cleanup: fractional before / older_than are accepted", function()
     local id = jobs.enqueue("a27clean", {}, { queue = "a27clean" })
     jobs.work({ queue = "a27clean", batch = 1 })
     assert_eq(jobs.get(id).status, "done", "ran")
+    -- A later job: cleanup keeps the newest row as a high-water mark (audit 44).
+    jobs.enqueue("a27clean", {}, { queue = "a27later" })
     assert_eq(jobs.cleanup({ queue = "a27clean", older_than = 0.5 }), 0, "young row kept")
     assert_eq(jobs.cleanup({ queue = "a27clean", before = time.now() - 0.5 }), 0,
               "before rounds up, row kept")

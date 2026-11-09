@@ -314,6 +314,33 @@ local function queue_opt(v, who)
     return key_opt(v, "queue", who, false)
 end
 
+-- An optional queue SCOPE (jobs.dead / stats / metrics, audit 44 round 2):
+-- nil, false or "" is every queue (nil returned), anything else a queue name
+-- checked as queue_opt checks it. It was bound raw - a number matched '05' on
+-- MySQL, a table raised a driver error - as the JS twin's scopeQueue.
+local function scope_queue(v, who)
+    if v == nil or v == false or v == "" then return nil end
+    return key_opt(v, "queue", who, false)
+end
+
+-- An event-type list (jobs.events / jobs.subscribe, audit 44 round 2): a
+-- caller_strings array, so a hole, a non-string or a table with its own
+-- metamethods is refused instead of read through ipairs / table.concat.
+-- Each type is a non-empty string without a comma (a subscription stores the
+-- list comma-joined; a comma split it into other types) of at most 32 bytes
+-- (the _hull_job_events.type column).
+local function event_types(v, who)
+    local ts, n = caller_strings(v, who .. ": types")
+    for i = 1, n do
+        local t = ts[i]
+        if t == "" or #t > 32 or t:find(",", 1, true) then
+            error(who .. ": types must be non-empty event type names of at most 32 "
+                .. "bytes without a comma", 3)
+        end
+    end
+    return ts, n
+end
+
 -- A job type (audit 44): a non-empty string of at most 255 bytes, the column.
 local function type_opt(v, who)
     if type(v) ~= "string" or v == "" then
@@ -428,13 +455,13 @@ function jobs.init(opts)
         .. "priority     INTEGER      NOT NULL DEFAULT 0,"
         .. "attempts     INTEGER      NOT NULL DEFAULT 0,"
         .. "max_attempts INTEGER      NOT NULL DEFAULT 25,"
-        .. "run_at       INTEGER      NOT NULL DEFAULT 0,"
+        .. "run_at       BIGINT       NOT NULL DEFAULT 0,"
         .. "claim_token  VARCHAR(255),"
-        .. "claimed_at   INTEGER,"
+        .. "claimed_at   BIGINT,"
         .. "dedup_key    VARCHAR(255),"
         .. "last_error   TEXT,"
-        .. "created_at   INTEGER      NOT NULL,"
-        .. "updated_at   INTEGER      NOT NULL,"
+        .. "created_at   BIGINT       NOT NULL,"
+        .. "updated_at   BIGINT       NOT NULL,"
         .. "progress     INTEGER      NOT NULL DEFAULT 0,"
         .. "trace_context VARCHAR(255),"
         -- Per-key concurrency (jobs.enqueue concurrency_key/concurrency): at most
@@ -446,7 +473,7 @@ function jobs.init(opts)
         -- When the current claim began. claimed_at is the claim's lease and
         -- moves with every jobs.heartbeat; this does not, so the soft
         -- concurrency rank (conc_apply) orders running peers by claim age.
-        .. "claim_started_at   INTEGER)")
+        .. "claim_started_at   BIGINT)")
 
     -- Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec([[
@@ -488,9 +515,9 @@ function jobs.init(opts)
         .. "queue        VARCHAR(255) NOT NULL DEFAULT 'default',"
         .. "priority     INTEGER      NOT NULL DEFAULT 0,"
         .. "max_attempts INTEGER,"
-        .. "next_run_at  INTEGER      NOT NULL,"
-        .. "last_run_at  INTEGER,"
-        .. "updated_at   INTEGER      NOT NULL,"
+        .. "next_run_at  BIGINT       NOT NULL,"
+        .. "last_run_at  BIGINT,"
+        .. "updated_at   BIGINT       NOT NULL,"
         .. "tz_offset    INTEGER      NOT NULL DEFAULT 0,"
         -- Why a schedule was disabled (its spec stopped parsing or has no
         -- next occurrence); NULL while it is live. jobs.cron clears it.
@@ -530,7 +557,7 @@ function jobs.init(opts)
     ensure_column("_hull_jobs", "concurrency_limit", "concurrency_limit INTEGER")
     ensure_column("_hull_jobs", "concurrency_strict", "concurrency_strict INTEGER")
     ensure_column("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0")
-    ensure_column("_hull_jobs", "claim_started_at", "claim_started_at INTEGER")
+    ensure_column("_hull_jobs", "claim_started_at", "claim_started_at BIGINT")
     ensure_column("_hull_cron", "last_error", "last_error TEXT")
 
     -- Concurrency reconcile path: running jobs of a key, ranked by claim age.
@@ -547,7 +574,7 @@ function jobs.init(opts)
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_ratelimit ("
         .. "name         VARCHAR(255) NOT NULL PRIMARY KEY,"
-        .. "window_start INTEGER      NOT NULL,"
+        .. "window_start BIGINT       NOT NULL,"
         .. "n            INTEGER      NOT NULL)")
     -- Blocking FOR UPDATE serializes reservers on PG/MySQL; SQLite's write txn
     -- already serializes (and rejects FOR UPDATE syntactically).
@@ -601,7 +628,7 @@ function jobs.init(opts)
         .. "step_key    VARCHAR(255) NOT NULL,"
         .. "result      TEXT,"
         .. "status      VARCHAR(16)  NOT NULL DEFAULT 'done',"
-        .. "created_at  INTEGER      NOT NULL,"
+        .. "created_at  BIGINT       NOT NULL,"
         .. "PRIMARY KEY (workflow_id, step_key))")
 
     -- Durable-execution signals (jobs.signal / ctx.wait_signal). One row per
@@ -612,8 +639,8 @@ function jobs.init(opts)
         .. "workflow_id INTEGER      NOT NULL,"
         .. "name        VARCHAR(255) NOT NULL,"
         .. "payload     TEXT,"
-        .. "created_at  INTEGER      NOT NULL,"
-        .. "consumed_at INTEGER,"
+        .. "created_at  BIGINT       NOT NULL,"
+        .. "consumed_at BIGINT,"
         .. "PRIMARY KEY (workflow_id, name))")
 
     -- Opt-in attempt history (jobs.init { history=true }). One row per attempt,
@@ -650,7 +677,7 @@ function jobs.init(opts)
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_job_events ("
         .. "id       " .. db.autoincrement_id_ddl .. ", "
-        .. "ts       INTEGER      NOT NULL,"
+        .. "ts       BIGINT       NOT NULL,"
         .. "type     VARCHAR(32)  NOT NULL,"
         .. "job_id   INTEGER,"
         .. "job_type VARCHAR(255),"
@@ -674,10 +701,10 @@ function jobs.init(opts)
         .. "cursor_id   INTEGER      NOT NULL DEFAULT 0,"
         .. "types       VARCHAR(255),"
         .. "lease_token VARCHAR(255),"
-        .. "lease_until INTEGER,"
+        .. "lease_until BIGINT,"
         .. "failures    INTEGER      NOT NULL DEFAULT 0,"
         .. "max_failures INTEGER,"    -- skip a poison event after N failures (NULL = never)
-        .. "updated_at  INTEGER      NOT NULL)")
+        .. "updated_at  BIGINT       NOT NULL)")
 
     -- Verify the server actually parses SKIP LOCKED (the compile-time dialect
     -- flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -2604,11 +2631,12 @@ end
 
 function jobs.stats(opts)
     opts = opts or {}
+    local queue = scope_queue(opts.queue, "jobs.stats")
     local rows
-    if opts.queue then
+    if queue then
         rows = db.query(
             "SELECT status, COUNT(*) AS c FROM _hull_jobs WHERE queue=? GROUP BY status",
-            { opts.queue })
+            { queue })
     else
         rows = db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status")
     end
@@ -2628,6 +2656,7 @@ end
 -- @treturn table
 function jobs.metrics(opts)
     opts = opts or {}
+    local queue = scope_queue(opts.queue, "jobs.metrics")
     local now = time.now()
     local LIVE = { pending = true, running = true, waiting = true, blocked = true, dead = true }
     local function new_bucket()
@@ -2636,8 +2665,8 @@ function jobs.metrics(opts)
     local queues, totals = {}, new_bucket()
     local rows = db.query(
         "SELECT queue, status, COUNT(*) AS n FROM _hull_jobs"
-        .. (opts.queue and " WHERE queue=?" or "") .. " GROUP BY queue, status",
-        opts.queue and { opts.queue } or {})
+        .. (queue and " WHERE queue=?" or "") .. " GROUP BY queue, status",
+        queue and { queue } or {})
     for _, r in ipairs(rows or {}) do
         local q = queues[r.queue]
         if not q then q = new_bucket(); queues[r.queue] = q end
@@ -2650,8 +2679,8 @@ function jobs.metrics(opts)
     local ages = db.query(
         "SELECT queue, MIN(created_at) AS oldest FROM _hull_jobs "
         .. "WHERE status='pending' AND run_at<=?"
-        .. (opts.queue and " AND queue=?" or "") .. " GROUP BY queue",
-        opts.queue and { now, opts.queue } or { now })
+        .. (queue and " AND queue=?" or "") .. " GROUP BY queue",
+        queue and { now, queue } or { now })
     for _, r in ipairs(ages or {}) do
         local q = queues[r.queue]
         if q and r.oldest then q.oldest_pending_age = now - r.oldest end
@@ -2668,8 +2697,8 @@ function jobs.metrics(opts)
     end
     local sample = db.query(
         "SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ?"
-        .. (opts.queue and " AND queue=?" or "") .. " ORDER BY finished_ms DESC LIMIT 5000",
-        opts.queue and { (now - window) * 1000, opts.queue } or { (now - window) * 1000 })
+        .. (queue and " AND queue=?" or "") .. " ORDER BY finished_ms DESC LIMIT 5000",
+        queue and { (now - window) * 1000, queue } or { (now - window) * 1000 })
     if sample and #sample > 0 then
         local waits, runs, done_n, dead_n = {}, {}, 0, 0
         for _, r in ipairs(sample) do
@@ -3509,12 +3538,13 @@ function jobs.dead(opts)
     -- bind.
     local limit = count_opt(opts.limit, 100, 1, 1000)
     local offset = count_opt(opts.offset, 0, 0, 2 ^ 53 - 1)
+    local queue = scope_queue(opts.queue, "jobs.dead")
     local rows
-    if opts.queue then
+    if queue then
         rows = db.query(
             "SELECT * FROM _hull_jobs WHERE status='dead' AND queue=? "
             .. "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
-            { opts.queue, limit, offset })
+            { queue, limit, offset })
     else
         rows = db.query(
             "SELECT * FROM _hull_jobs WHERE status='dead' "
@@ -3638,10 +3668,13 @@ function jobs.events(opts)
     opts = opts or {}
     local where, params = { "1=1" }, {}
     if opts.since ~= nil then where[#where + 1] = "id > ?"; params[#params + 1] = opts.since end
-    if type(opts.types) == "table" and #opts.types > 0 then
-        local ph = {}
-        for _, t in ipairs(opts.types) do ph[#ph + 1] = "?"; params[#params + 1] = t end
-        where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
+    if opts.types ~= nil then
+        local ts, n = event_types(opts.types, "jobs.events")
+        if n > 0 then
+            local ph = {}
+            for i = 1, n do ph[i] = "?"; params[#params + 1] = ts[i] end
+            where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
+        end
     end
     -- 1..1000: a negative LIMIT is "no limit" on SQLite, and NaN / a fraction
     -- is not an integer bind.
@@ -3675,8 +3708,20 @@ function jobs.subscribe(name, handler, opts)
     end
     if type(handler) ~= "function" then error("jobs.subscribe: handler must be a function") end
     opts = opts or {}
+    -- The type list as checked strings, joined here (audit 44 round 2: ipairs
+    -- and table.concat over the caller's table took a hole as the end and
+    -- concatenated whatever was there), and at most the column's 255 bytes
+    -- (a longer list failed the INSERT on Postgres / MySQL).
     local types_csv
-    if type(opts.types) == "table" and #opts.types > 0 then types_csv = table.concat(opts.types, ",") end
+    if opts.types ~= nil then
+        local ts, n = event_types(opts.types, "jobs.subscribe")
+        if n > 0 then
+            types_csv = table.concat(ts, ",", 1, n)
+            if #types_csv > 255 then
+                error("jobs.subscribe: types too long (at most 255 bytes comma-joined)", 2)
+            end
+        end
+    end
     local max_f = (type(opts.max_failures) == "number" and opts.max_failures > 0) and opts.max_failures or nil
     -- Start cursor: "now" (default) skips existing history; "beginning" replays all.
     local start = 0
@@ -3751,20 +3796,39 @@ events_drain = function(name, opts)
     -- and the default grace is 0 (no added latency).
     local grace = opts.grace or _cfg.events_grace
     if grace == nil then grace = (db.backend_name == "sqlite") and 0 or EVENTS_GRACE_DEFAULT end
+    local young
     if grace > 0 then
         local y = db.query("SELECT MIN(id) AS m FROM _hull_job_events WHERE id > ? AND ts > ?",
             { cursor, now - grace })
-        local young = y[1] and y[1].m
+        young = y[1] and y[1].m
         if young ~= nil then
             where[#where + 1] = "id < ?"; params[#params + 1] = young
         end
     end
+    -- A typed subscription scans past events it does not take (audit 44
+    -- M10). Its SELECT returned only the matching ones, so with none past the
+    -- cursor the cursor never moved: jobs.cleanup keeps every event at or
+    -- above MIN(cursor_id), so the log grew without bound, and jobs.metrics
+    -- reported an ever larger lag. The scanned horizon - the newest event
+    -- past the cursor, below the commit-order horizon - is read FIRST and
+    -- bounds the SELECT, so an event inserted between the two is never
+    -- passed over; when the batch is not full every matching event up to it
+    -- was delivered, and the cursor moves to it (below).
+    local horizon
     if row[1].types and row[1].types ~= "" then
         local ph = {}
         for t in tostring(row[1].types):gmatch("[^,]+") do ph[#ph + 1] = "?"; params[#params + 1] = t end
         where[#where + 1] = "type IN (" .. table.concat(ph, ",") .. ")"
+        local hq = db.query("SELECT MAX(id) AS m FROM _hull_job_events WHERE id > ?"
+            .. (young ~= nil and " AND id < ?" or ""),
+            young ~= nil and { cursor, young } or { cursor })
+        horizon = hq[1] and hq[1].m
+        if horizon ~= nil then
+            where[#where + 1] = "id <= ?"; params[#params + 1] = horizon
+        end
     end
-    params[#params + 1] = count_opt(opts.batch, 100, 1, 1000)
+    local batch = count_opt(opts.batch, 100, 1, 1000)
+    params[#params + 1] = batch
     local evs = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events "
         .. "WHERE " .. table.concat(where, " AND ") .. " ORDER BY id LIMIT ?", params)
@@ -3817,6 +3881,11 @@ events_drain = function(name, opts)
             end
         end
     end
+    -- A filtered batch that was not full delivered every matching event up
+    -- to the scanned horizon: move past the ones it does not take (M10).
+    if horizon ~= nil and not poison and #evs < batch and horizon > new_cursor then
+        new_cursor = horizon
+    end
     if opts.commit_cursor == false then new_cursor = cursor end
     local release = opts.release_lease ~= false
     db.exec(
@@ -3828,6 +3897,35 @@ events_drain = function(name, opts)
              skipped = (poison ~= nil and new_cursor == poison.id) or false }
 end
 _hooks.events_drain = events_drain
+-- Audit 44 round 2: a column's declared type (SQLite's table_info), the
+-- event / job ids and a subscription's cursor, read back by the suite.
+_hooks.column_type = function(tbl, col)
+    if type(tbl) ~= "string" or not tbl:match("^_hull_[a-z_]+$") then
+        error("column_type: not a jobs table")
+    end
+    for _, r in ipairs(db.query("PRAGMA table_info(" .. tbl .. ")")) do
+        if r.name == col then return r.type end
+    end
+    return nil
+end
+_hooks.event_ids = function()
+    local out = {}
+    for _, r in ipairs(db.query("SELECT id FROM _hull_job_events ORDER BY id")) do
+        out[#out + 1] = r.id
+    end
+    return out
+end
+_hooks.job_ids = function()
+    local out = {}
+    for _, r in ipairs(db.query("SELECT id FROM _hull_jobs ORDER BY id")) do
+        out[#out + 1] = r.id
+    end
+    return out
+end
+_hooks.cursor = function(name)
+    local r = db.query("SELECT cursor_id FROM _hull_job_subscriptions WHERE name=?", { name })
+    return r[1] and r[1].cursor_id
+end
 
 --- Purge terminal jobs (done + dead by default) whose last update is older than
 -- a retention age. Run it from `app.daily` to bound table growth. Only touches
@@ -3873,6 +3971,17 @@ function jobs.cleanup(opts)
         sql = sql .. " AND queue=?"
         params[#params + 1] = queue_opt(opts.queue, "jobs.cleanup")
     end
+    -- Never the newest job row (audit 44): MySQL before 8.0 (InnoDB) sets a
+    -- table's AUTO_INCREMENT to MAX(id)+1 when the server restarts, so a
+    -- cleanup that emptied the table let new jobs reuse the ids of deleted
+    -- ones - and an event, a result or an edge still naming an old id then
+    -- named the new job. The newest row is kept as the high-water mark.
+    local jmx = db.query("SELECT MAX(id) AS m FROM _hull_jobs")
+    jmx = jmx[1] and jmx[1].m
+    if jmx ~= nil then
+        sql = sql .. " AND id < ?"
+        params[#params + 1] = jmx
+    end
     local deleted = db.exec(sql, params) or 0
     -- Drop results + workflow steps whose producing job is gone (store hygiene).
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)")
@@ -3886,11 +3995,17 @@ function jobs.cleanup(opts)
     -- Durable event log: retained by age, but NEVER past an unconsumed event -
     -- min(cursor) across subscriptions is the safe watermark. No subscriptions ->
     -- age only (the base behavior).
-    local mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions")
-    local watermark = mc[1] and mc[1].m
-    if watermark == nil then
-        db.exec("DELETE FROM _hull_job_events WHERE ts < ?", { cutoff })
-    else
+    -- The newest event is never deleted (audit 44): it is the high-water mark
+    -- that keeps a restarted MySQL < 8.0 from handing out ids at or below a
+    -- subscription's cursor again (AUTO_INCREMENT reset to MAX(id)+1), which
+    -- every subscription would then skip. Read first, bound as a value (MySQL
+    -- refuses a subquery on the table a DELETE deletes from).
+    local emx = db.query("SELECT MAX(id) AS m FROM _hull_job_events")
+    emx = emx[1] and emx[1].m
+    if emx ~= nil then
+        local mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions")
+        local watermark = mc[1] and mc[1].m
+        if watermark == nil or watermark >= emx then watermark = emx - 1 end
         db.exec("DELETE FROM _hull_job_events WHERE ts < ? AND id <= ?", { cutoff, watermark })
     end
     return deleted

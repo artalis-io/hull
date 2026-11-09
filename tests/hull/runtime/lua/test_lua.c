@@ -17009,4 +17009,190 @@ UTEST(lua_input_caps, json_manifest_limits_and_opts)
 }
 #undef JC_DECODES
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* ── Audit 44: stdlib data-layer findings ─────────────────────────────
+ * stdlib/lua/hull/tests/test_stdlib_data_audit44.lua: jobs subscription
+ * cursors (M10), the idempotency in-flight lease (M11), cleanup high-water
+ * rows, BIGINT timestamps, type-list / queue-scope checks, respond's single
+ * encode, attachment.read_to_file's hash check, the kv.open cap refusal,
+ * retry's factor, search / inbox / outbox parity. Each case runs the script
+ * in a fresh state and a fresh :memory: database, named in the global
+ * __data44_case. One UTEST per case, written out, so
+ * scripts/check_regression_test.sh sees each. */
+#include "hull/cap/kv_backend.h"
+
+#ifndef HL_ENABLE_VALKEY
+/* A KV backend that opens without dialing, so kv.open's live-connection cap
+ * can be reached from a binding (a base build composes no KV backend). Off
+ * unless a case turns it on: the strong hook returns the weak default's
+ * empty set otherwise. */
+static int data44_kv_on;
+static const char *const DATA44_SCHEMES[] = { "redis", NULL };
+static int data44_kv_open(HlKvHandle **out, const char *dsn, int timeout_ms,
+                          HlAllocator *alloc, char *errbuf, size_t errlen)
+{
+    (void)dsn; (void)timeout_ms; (void)alloc; (void)errbuf; (void)errlen;
+    static int token;
+    *out = (HlKvHandle *)&token;
+    return 0;
+}
+static void data44_kv_close(HlKvHandle *h) { (void)h; }
+static const HlKvBackend DATA44_KV = {
+    .name = "data44", .schemes = DATA44_SCHEMES,
+    .open = data44_kv_open, .close = data44_kv_close,
+};
+const HlKvBackend *const *hl_kv_feature_backends(size_t *count)
+{
+    static const HlKvBackend *const arr[] = { &DATA44_KV };
+    if (!data44_kv_on) { if (count) *count = 0; return NULL; }
+    if (count) *count = 1;
+    return arr;
+}
+#endif
+
+enum { DATA44_FS = 1, DATA44_KV_ON = 2 };
+
+static int run_data44_case(const char *name, int flags, long long *pass, long long *fail)
+{
+    init_lua_with_caps();
+    if (!lua_initialized) return -1;
+    A15Fs f;
+    int have_fs = 0;
+    if (flags & DATA44_FS) {
+        if (a15_fs_open(&f) != 0) { cleanup_lua_caps(); return -1; }
+        have_fs = 1;
+    }
+    static HlManifestKvDynamic pol = {
+        .hosts = { "127.0.0.1" }, .host_count = 1,
+        .schemes = { "redis" }, .scheme_count = 1, .declared = 1,
+    };
+    if (flags & DATA44_KV_ON) {
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 1;
+#endif
+        lua_rt.base.kv_policy = &pol;
+        lua_State *L = lua_rt.L;
+        lua_pushcfunction(L, hl_lua_require_trusted);
+        lua_pushstring(L, "hull.kv._native");
+        if (lua_pcall(L, 1, 1, 0) != LUA_OK) { lua_pop(L, 1); return -1; }
+        lua_getfield(L, -1, "open");
+        lua_setglobal(L, "__kvn");
+        lua_pop(L, 1);
+    }
+    lua_pushstring(lua_rt.L, name);
+    lua_setglobal(lua_rt.L, "__data44_case");
+    int rc = run_lua_test_in_runtime("stdlib/lua/hull/tests/test_stdlib_data_audit44.lua",
+                                     pass, fail);
+    if (flags & DATA44_KV_ON) {
+        lua_gc(lua_rt.L, LUA_GCCOLLECT);
+        lua_rt.base.kv_policy = NULL;
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 0;
+#endif
+    }
+    cleanup_lua_caps();
+    if (have_fs) a15_fs_close(&f);
+    return rc;
+}
+
+UTEST(jobs_audit44, typed_subscription_cursor_advances_past_unmatched)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_typed_cursor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, cleanup_keeps_high_water_row)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_high_water", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, schedule_past_int32_stored)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_schedule_bigint", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, events_types_caller_strings_parity)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_types_queue", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(idempotency_audit44, inflight_lease_outlives_parked_handler)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_inflight_lease", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(idempotency_audit44, respond_encode_error_marks_unstored)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_respond_encode", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(attachment_audit44, read_to_file_refuses_tampered_blob)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("attachment_tamper", DATA44_FS, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+#ifndef HL_ENABLE_VALKEY
+UTEST(kv_audit44, open_cap_is_busy_refusal)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("kv_open_busy", DATA44_KV_ON, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+#endif
+
+UTEST(retry_audit44, factor_validated)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("retry_factor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(search_audit44, snippet_default_column_parity)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("search_parity", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(inbox_audit44, empty_source_is_default)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("inbox_source", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(outbox_audit44, cleanup_parity)
+{
+    long long pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("outbox_cleanup", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+#endif /* HL_ENABLE_HTTP_CLIENT && HL_ENABLE_HTTP_SERVER */
+
+
 UTEST_MAIN();

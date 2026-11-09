@@ -134,7 +134,10 @@ function newStore(opts, storeNs) {
         util.error("invalid_argument",
             "kv.open: valkey backend needs dsn = 'valkey://...' (or 'redis://...')");
     util.checkTtl(opts.defaultTtl, "default_ttl");
-    const conn = nativeOpen(dsn);   // throws backend_error on connect failure
+    // Throws on a connect failure; at the live-connection cap (HL_KV_OPEN_MAX)
+    // a refusal whose code is "busy" (hull:_refusal), passed through unchanged
+    // (audit 44: it was a plain error).
+    const conn = nativeOpen(dsn);
     const store = makeStore(conn, storeNs, opts);
     return [store, conn.backendName()];
 }

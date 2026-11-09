@@ -186,7 +186,12 @@ end
 -- @tparam string name    Index name.
 -- @tparam string|number id  Document identifier.
 -- @tparam table  fields  Map of column name → value (e.g. `{title=..., body=...}`).
--- @raise If `id` is nil or any field name fails validation.
+--   At least one column; each value a string or a number (bound as given).
+-- @raise If `id` is nil, `fields` names no column, a field name fails
+--   validation, or a value is not a string or a number (audit 44: the JS
+--   twin refused an empty `fields` and stringified every value - running an
+--   object's toString - while this side indexed only the id and bound a
+--   boolean as 0 / 1; both now take strings and numbers only).
 function search.index(name, id, fields)
     require_sqlite()
     validate_identifier(name, "index name")
@@ -204,9 +209,15 @@ function search.index(name, id, fields)
 
     for col, val in pairs(fields) do
         validate_identifier(col, "field name")
+        if type(val) ~= "string" and type(val) ~= "number" then
+            error("search.index: field values must be strings or numbers")
+        end
         col_names[#col_names + 1] = col
         placeholders[#placeholders + 1] = "?"
         values[#values + 1] = val
+    end
+    if #col_names == 1 then
+        error("search.index: fields must have at least one column")
     end
 
     -- Delete, then insert. FTS5's OR REPLACE conflicts only on rowid, not on
@@ -272,7 +283,10 @@ end
 --   so the result is safe to render raw (audit 26).
 -- @tparam[opt] table opts.highlight
 --   `{ column = N, before = "<b>", after = "</b>" }` -
---   adds a `highlight` column (HTML-escaped like `snippet`).
+--   adds a `highlight` column (HTML-escaped like `snippet`). `snippet` and
+--   `highlight` may be asked for together; each `column` defaults to 1, the
+--   first indexed column (0 is the id). Audit 44: this side honoured only
+--   `snippet` when both were given, and the JS twin defaulted to column 0.
 -- @tparam[opt="rank"] string opts.order  `"rank"` or `"rowid"`.
 -- @treturn {table,...}  Array of `{id, rank, snippet?, highlight?}` rows.
 -- Integer option in [min, max], or `def` when nil. A string, NaN or a
@@ -340,7 +354,7 @@ function search.query(name, query, opts)
     -- Build SELECT columns and params
     local select_cols = { "id" }
     local params = {}
-    local marks = nil   -- { column, before, after, ellipsis? }
+    local marks = {}   -- { { column, before, after, ellipsis? }, ... }
 
     if opts.snippet then
         local s = opts.snippet
@@ -353,16 +367,18 @@ function search.query(name, query, opts)
         params[#params + 1] = MARK_BEFORE
         params[#params + 1] = MARK_AFTER
         params[#params + 1] = MARK_ELLIPSIS
-        marks = { "snippet", tostring(s.before or "<b>"), tostring(s.after or "</b>"),
-                  tostring(s.ellipsis or "...") }
-    elseif opts.highlight then
+        marks[#marks + 1] = { "snippet", tostring(s.before or "<b>"),
+                              tostring(s.after or "</b>"), tostring(s.ellipsis or "...") }
+    end
+    if opts.highlight then
         local h = opts.highlight
         local col = int_opt(h, "column", 1, 0, SNIPPET_MAX_COLUMN)
         select_cols[#select_cols + 1] = "highlight(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?) AS highlight"
         params[#params + 1] = MARK_BEFORE
         params[#params + 1] = MARK_AFTER
-        marks = { "highlight", tostring(h.before or "<b>"), tostring(h.after or "</b>") }
+        marks[#marks + 1] = { "highlight", tostring(h.before or "<b>"),
+                              tostring(h.after or "</b>") }
     end
 
     select_cols[#select_cols + 1] = "rank"
@@ -392,10 +408,10 @@ function search.query(name, query, opts)
     -- pcall(db.query, ...) does not.
     local ok, rows = pcall(function() return db.query(sql, params) end)
     if ok then
-        if marks then
-            local col = marks[1]
+        for _, m in ipairs(marks) do
+            local col = m[1]
             for _, row in ipairs(rows) do
-                row[col] = escape_marked(row[col], marks[2], marks[3], marks[4])
+                row[col] = escape_marked(row[col], m[2], m[3], m[4])
             end
         end
         return rows

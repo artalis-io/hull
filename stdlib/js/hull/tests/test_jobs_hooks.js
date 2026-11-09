@@ -118,7 +118,8 @@ cases.events = () => {
         assertEq(jobs.events({ limit: 100 }).length, before, "retained");
         hooks.eventsDrain("lag", { now: 1000 });
         jobs.cleanup({ before: future });
-        assertEq(jobs.events({ limit: 100 }).length, 0, "purged");
+        // All but the newest event, kept as the high-water mark (audit 44).
+        assertEq(jobs.events({ limit: 100 }).length, 1, "purged");
     });
 };
 

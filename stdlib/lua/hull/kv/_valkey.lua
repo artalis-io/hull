@@ -128,7 +128,10 @@ function M.new(opts, store_ns)
             "kv.open: valkey backend needs dsn = 'valkey://...' (or 'redis://...')")
     end
     u.check_ttl(opts.default_ttl, "default_ttl")
-    local conn = native.open(dsn)   -- raises backend_error on connect failure
+    -- Raises on a connect failure; at the live-connection cap (HL_KV_OPEN_MAX)
+    -- a coded "[hull:busy] " refusal (hull._refusal), passed through unchanged
+    -- (audit 44: it was a plain error).
+    local conn = native.open(dsn)
 
     local caps_bits = conn:caps()
     local self = setmetatable({
