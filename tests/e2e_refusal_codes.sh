@@ -279,9 +279,11 @@ run_runtime() {
     curl -sS -o /dev/null "http://127.0.0.1:$PORT/enq"
 
     # Hold the VM's 64 fetch slots.
+    HOLD_PIDS=""
     i=0
     while [ $i -lt 64 ]; do
         curl -s -m 20 -o /dev/null "http://127.0.0.1:$PORT/hold" &
+        HOLD_PIDS="$HOLD_PIDS $!"
         i=$((i + 1))
     done
     sleep 1.5
@@ -335,6 +337,11 @@ run_runtime() {
         [ "$(jget "$out" code)" != "busy" ] && [ -n "$out" ] && break
         sleep 0.1; i=$((i + 1))
     done
+    # One free slot (what /chk needs) is not three: the held fetches end one
+    # by one, and a flush started as the first slot freed delivered one row
+    # and met the cap again on the next (CI macOS, PR #1048). Every /hold
+    # answers only once its fetch is over, so wait for all of them.
+    for p in $HOLD_PIDS; do wait "$p" 2>/dev/null || true; done
     out=$(curl -sS "http://127.0.0.1:$PORT/flush")
     [ "$(jget "$out" delivered)" = "3" ] && pass "$rt: once the slots free, the rows are delivered" \
         || fail "$rt: flush after the cap" "$out"
