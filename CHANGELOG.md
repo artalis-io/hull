@@ -22,6 +22,50 @@ release-artifact layout).
   `js_audit11.rsa_verify_is_charged_by_the_key` runs 100 oversized-signature verifies, not 1000,
   under its 1M budget (1000 used ~67% of it and tripped on a slow macOS runner).
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
+
 ## [0.19.0] - 2026-11-09
 
 ### Added
