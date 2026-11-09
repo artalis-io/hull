@@ -95,8 +95,15 @@ await test("a block smaller than 8 is raised to 8", () => {
 
 // framing ----------------------------------------------------------------
 
+await test("ssh_audit44.empty_payload_refused", () => {
+    // Every SSH message carries at least its type byte: a packet whose
+    // payload is empty is malformed, refused where it is parsed.
+    const b = packet.frame("", 8, zeros);
+    assertRaises(() => packet.parse(b, 8), "an empty payload");
+});
+
 await test("frame and parse round trip", () => {
-    for (const payload of ["", "x", "abc".repeat(100)]) {
+    for (const payload of ["x", "abc".repeat(100)]) {
         const b = packet.frame(payload, 8, zeros);
         const [got, used] = packet.parse(b, 8);
         assertEq(got, payload);

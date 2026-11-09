@@ -330,6 +330,13 @@ function Session:exec(command, opts)
                            or timeout > 86400000) then
         return nil, { code = "bad_timeout", detail = tostring(timeout) }
     end
+    -- 0 is a 0-byte cap; anything else that is not a non-negative integer is
+    -- refused (a NaN or infinite limit never capped at all; audit 44, as JS).
+    local max_output = opts.max_output
+    if max_output ~= nil and (math.type(max_output) ~= "integer" or max_output < 0) then
+        return nil, { code = "bad_argument",
+                      detail = "max_output must be a non-negative integer" }
+    end
 
     local ch, cerr = self:open_session()
     if not ch then return nil, cerr end
@@ -348,7 +355,7 @@ function Session:exec(command, opts)
     end
 
     local out, errout = {}, {}
-    local limit = opts.max_output or (8 * 1024 * 1024)
+    local limit = max_output or (8 * 1024 * 1024)
     local buffered = 0
     local overflow = false
 

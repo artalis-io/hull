@@ -6191,7 +6191,7 @@ UTEST(lua_stdlib, ssh_sftp_suite)
 }
 
 /* chacha20-poly1305@openssh.com. Vanilla: the framing under stand-in
- * primitives (10). With the capability layer the same file runs again over
+ * primitives (11). With the capability layer the same file runs again over
  * hull.crypto's real ChaCha20 / Poly1305 (7 more). */
 UTEST(lua_stdlib, ssh_chacha_suite)
 {
@@ -6199,7 +6199,7 @@ UTEST(lua_stdlib, ssh_chacha_suite)
     int rc = run_lua_test("stdlib/lua/hull/tests/test_ssh_chacha.lua", &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
-    EXPECT_EQ(pass, 10LL);
+    EXPECT_EQ(pass, 11LL);
 }
 
 #ifdef HL_LINK_TLS
@@ -6213,7 +6213,7 @@ UTEST(lua_stdlib, ssh_chacha_real_crypto)
                                      &pass, &fail);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(fail, 0LL);
-    EXPECT_EQ(pass, 17LL);
+    EXPECT_EQ(pass, 18LL);
 
     cleanup_lua_caps();
 }

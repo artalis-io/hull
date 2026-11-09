@@ -475,15 +475,17 @@ static JSValue js_ssh_read(JSContext *ctx, JSValueConst this_val,
 
     if (!o->s) return push_net_err(ctx, HL_NET_E_CLOSED);
     size_t n_want = (size_t)want;
+    /* The byte-string conversion is this binding's own work, charged for
+     * the most it can be BEFORE the read (audit 44): charged after, a trip
+     * threw away the bytes the read had already taken from the stream, and
+     * the next read started mid-message. Lua's buffer is allocated, and
+     * charged, before its read the same way. */
+    if (hl_js_budget_charge(ctx, hl_work_bytes_units(n_want)))
+        return JS_EXCEPTION;
     uint8_t *buf = js_malloc(ctx, n_want);
     if (!buf) return JS_EXCEPTION;
     long n = hl_net_stream_read(o->s, buf, n_want);
     if (n >= 0) {
-        /* The byte-string conversion is this binding's own work. */
-        if (hl_js_budget_charge(ctx, hl_work_bytes_units((size_t)n))) {
-            js_free(ctx, buf);
-            return JS_EXCEPTION;
-        }
         JSValue s = new_byte_string(ctx, buf, (size_t)n);   /* "" = EOF */
         js_free(ctx, buf);
         if (JS_IsException(s)) return s;

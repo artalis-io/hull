@@ -16,6 +16,7 @@
 
 import { encoding } from "hull:encoding";
 import { wire } from "hull:ssh:wire";
+import { _refusal } from "hull:_refusal";
 
 const base64 = encoding.base64;
 
@@ -351,6 +352,10 @@ class Stream {
         try {
             r = await this._send(OP_BIN, data);
         } catch (e) {
+            // A runtime refusal (a wait inside a transaction, an admission
+            // cap) goes on unchanged: as text it read as the connection's
+            // io_error (audit 44).
+            if (_refusal.code(e) !== null) throw e;
             return [null, errText(e)];
         }
         const [ok, err, code] = r;

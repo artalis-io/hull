@@ -167,6 +167,10 @@ function Chacha:open(_aead, buf, seq)
     if pad < packet.MIN_PADDING or pad + 1 > #plain then
         error("ssh.chacha: padding of " .. tostring(pad) .. " is not usable")
     end
+    if pad + 2 > #plain then
+        -- Every message carries its type byte (audit 44).
+        error("ssh.chacha: the packet has no payload")
+    end
     return plain:sub(2, #plain - pad), total
 end
 

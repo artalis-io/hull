@@ -127,6 +127,10 @@ class Chacha {
         if (pad < packet.MIN_PADDING || pad + 1 > plain.length) {
             throw new Error("ssh.chacha: padding of " + String(pad) + " is not usable");
         }
+        if (pad + 2 > plain.length) {
+            // Every message carries its type byte (audit 44).
+            throw new Error("ssh.chacha: the packet has no payload");
+        }
         return [plain.slice(1, plain.length - pad), total];
     }
 }

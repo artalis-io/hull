@@ -288,5 +288,24 @@ await test("a valid signature does not by itself mean trusted", async () => {
     assertEq(d.status, hostkey.UNKNOWN);
 });
 
+await test("ssh_audit44.rsa_noncanonical_mpint_refused", async () => {
+    // One key, one encoding: trust and @revoked compare blobs byte for byte,
+    // so an e or n with a redundant leading zero would be the same key under
+    // a second blob. mpint bytes are written raw (wire string) to control them.
+    const N = "\xc1" + "\x07".repeat(255);              // 2048 bits, top bit set
+    const rsa = (eRaw, nRaw) => wire.writer().string("ssh-rsa").string(eRaw).string(nRaw).build();
+    const k = hostkey.parseKey(rsa("\x01\x00\x01", "\x00" + N));
+    assertEq(k.algorithm, "ssh-rsa", "the canonical form parses:");
+    await assertRaises(() => hostkey.parseKey(rsa("\x00\x01\x00\x01", "\x00" + N)),
+                       "a zero before e's first byte below 0x80");
+    await assertRaises(() => hostkey.parseKey(rsa("\x00\x00\x01\x00\x01", "\x00" + N)),
+                       "two zeros before e");
+    await assertRaises(() => hostkey.parseKey(rsa("\x01\x00\x01", "\x00\x00" + N)),
+                       "two zeros before n");
+    const nLow = "\x41" + "\x07".repeat(255);
+    await assertRaises(() => hostkey.parseKey(rsa("\x01\x00\x01", "\x00" + nLow)),
+                       "a zero before n's first byte below 0x80");
+});
+
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;
