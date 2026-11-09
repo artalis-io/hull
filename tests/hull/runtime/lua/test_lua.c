@@ -13603,6 +13603,48 @@ UTEST(lua_audit17, ws_conn_data_after_close_is_collected)
     hl_ws_registry_free(&reg);
     cleanup_lua_caps();
 }
+
+/* Audit 44 (Low, teardown): hl_lua_free freed the ws registry before
+ * lua_close, so a __gc that lua_close ran and that used a conn whose node was
+ * still registered read a freed node. The conns still registered are
+ * invalidated first now (as JS's hl_js_ws_conns_release): the conn reads as
+ * closed. */
+static int a44_gc_note;
+static int a44_note(lua_State *L)
+{
+    a44_gc_note = (int)luaL_checkinteger(L, 1);
+    return 0;
+}
+
+UTEST(ws_audit44, teardown_gc_conn_access)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    char err[512];
+
+    HlWsRegistry *reg = hl_alloc_malloc(lua_rt.base.alloc, sizeof *reg);
+    ASSERT_TRUE(reg != NULL);
+    hl_ws_registry_init(reg, lua_rt.base.alloc);
+    lua_rt.base.ws_registry = reg;   /* owned by the runtime, as routes.c does */
+    ASSERT_EQ(audit10_run("ws = require('hull.web.ws-server') return 1",
+                          HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK);
+    HlWsConn *c = hl_ws_registry_add(reg, "/t", NULL);
+    ASSERT_NE(c, NULL);
+    hl_lua_ws_push_conn(L, c);
+    lua_setglobal(L, "C");
+    lua_pushcfunction(L, a44_note);
+    lua_setglobal(L, "__a44_note");
+    EXPECT_EQ_MSG(audit10_run(
+        "KEEP = setmetatable({}, { __gc = function() "
+        "  local ok = pcall(function() return C:id() end) "
+        "  __a44_note(ok and 1 or 2) end }) return 1",
+        HL_DEFAULT_INSTRUCTIONS, err, sizeof err), LUA_OK, err);
+
+    a44_gc_note = 0;
+    cleanup_lua_caps();   /* hl_lua_free: registry, then lua_close */
+    EXPECT_EQ(a44_gc_note, 2);   /* the conn reads as closed */
+}
 #endif /* HL_ENABLE_HTTP_SERVER */
 
 #ifdef HL_ENABLE_IMAGE

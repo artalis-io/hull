@@ -744,6 +744,9 @@ void hl_lua_free(HlLua *lua)
     /* Free WebSocket registry - HTTP-only; CLI builds never create one. */
 #ifdef HL_ENABLE_HTTP_SERVER
     if (lua->base.ws_registry) {
+        /* The finalizers lua_close runs below may still hold a conn: it
+         * must read as closed, not reach the node freed here (audit 44). */
+        hl_lua_ws_conns_release(lua);
         hl_http_ws_registry_free(lua->base.ws_registry);
         hl_alloc_free(lua->base.alloc, lua->base.ws_registry,
                       sizeof(HlWsRegistry));

@@ -12,6 +12,21 @@ release-artifact layout).
 
 <!-- audit44:ws-close -->
 
+- **A WebSocket the app closes itself runs its `on_close` again** (audit 44 M5, a
+  regression from #1007): `conn:close()` / `conn.close()` set the node's `closed`
+  flag, and the registry lookup skipped closed nodes, so when Keel delivered the
+  close the runtime found no node - the app's `on_close` never ran, and the node,
+  its conn object and the endpoint's count leaked (`ws.connections()` over-reported
+  for good, `ws.broadcast` was over-charged). The lookup now skips only nodes whose
+  `on_close` ran (their Keel pointer is cleared), so a reused address still never
+  resolves to a stale node. Also: Lua's teardown invalidates every conn still
+  registered before the registry is freed, so a `__gc` that `lua_close` runs reads
+  the conn as closed instead of a freed node (as JS already did); and the JS
+  `ws.connect` client finalizer cancels its connect / close deadline whenever the
+  loop is reachable, shutting down or not (the Lua twin since audit 38). Tests:
+  `ws_audit44.*` (`tests/e2e_ws_close.sh`, `make e2e-ws-close`; test_ws, test_lua),
+  `js_ws_client_audit44.finalizer_disarms_while_shutting_down`.
+
 
 
 <!-- audit44:main-signal -->
