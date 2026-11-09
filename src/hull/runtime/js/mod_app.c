@@ -969,6 +969,14 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
      * signed, enforced one (audit 7 L1). */
     if (js->manifest || js->manifest_busy)
         return JS_ThrowTypeError(ctx, "app.manifest() can only be called once");
+    /* Only the top level declares the manifest: a call from app.main, a
+     * handler or code after a top-level await would install decorations and
+     * report a manifest the runner never extracted, resolved or verified
+     * (audit 44). */
+    if (js->base.manifest_closed)
+        return JS_ThrowTypeError(ctx, "app.manifest() can only be called at "
+                                      "the app's top level, before it "
+                                      "finishes loading");
     js->manifest_busy = 1;
     JSValue r = js_app_manifest_store(ctx, js, argv[0]);
     js->manifest_busy = 0;

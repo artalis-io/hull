@@ -1842,6 +1842,75 @@ UTEST(lua_audit40, entry_reads_disk_only_in_development)
     rm_rf(tmpdir);
 }
 
+/* Audit 44: app.manifest() had no phase gate. An app that declared none at
+ * top level could call it later (from app.main or a handler), installing
+ * the hull/timers decoration and making app.get_manifest() report a
+ * manifest the runner never extracted, resolved or verified. It is refused
+ * once the top level has run. */
+UTEST(app_audit44, manifest_after_load_refused)
+{
+    char tmpdir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(tmpdir, sizeof tmpdir, "hull_a44m"), NULL);
+    char path[HL_TEST_PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/app.lua", tmpdir);
+    write_file(path, "__a44app = app\n");
+
+    init_lua_with_appdir(NULL);
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_EQ(hl_lua_load_app(&lua_rt, path), 0);
+    EXPECT_EQ(eval_int("(function() local ok, e = pcall(__a44app.manifest, "
+                       "{ modules = { 'hull/timers@1' } }) "
+                       "return (not ok and tostring(e):find('top level', 1, "
+                       "true)) and 1 or 0 end)()"), 1);
+    EXPECT_EQ(eval_int("__a44app.every == nil and 1 or 0"), 1);
+    EXPECT_EQ(eval_int("__a44app.get_manifest() == nil and 1 or 0"), 1);
+
+    cleanup_lua();
+    unlink(path);
+    rmdir(tmpdir);
+}
+
+/* Audit 44: a read-only view's `pairs` wrapped table VALUES as views but
+ * returned table KEYS raw, so a stdlib module table keyed by a table handed
+ * app code the real key table, writable. Keys are views now (one per table,
+ * so the same key compares equal), and the iteration still walks every
+ * entry. */
+UTEST(lua_readonly_audit44, next_wraps_table_keys)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    lua_State *L = lua_rt.L;
+    ASSERT_EQ(luaL_dostring(L,
+        "__a44k = { secret = 1 } "
+        "__a44real = { [__a44k] = 'v', plain = 2, [3] = 'three' } "), LUA_OK);
+    lua_getglobal(L, "__a44real");
+    hl_lua_push_readonly(L, -1);
+    lua_setglobal(L, "__a44view");
+    lua_settop(L, 0);
+    char *got = eval_str(
+        "(function() "
+        "  local n, raw, readable, wrote, same = 0, false, false, false, false "
+        "  for k, v in pairs(__a44view) do "
+        "    n = n + 1 "
+        "    if type(k) == 'table' then "
+        "      raw = rawequal(k, __a44k) "
+        "      readable = (k.secret == 1) "
+        "      wrote = pcall(function() k.secret = 2 end) "
+        "      for k2 in pairs(__a44view) do "
+        "        if type(k2) == 'table' then same = (k2 == k) end "
+        "      end "
+        "    end "
+        "  end "
+        "  return table.concat({ n, tostring(raw), tostring(readable), "
+        "                        tostring(wrote), tostring(same), "
+        "                        __a44k.secret }, ' ') "
+        "end)()");
+    ASSERT_NE(got, NULL);
+    EXPECT_STREQ(got, "3 false true false true 1");
+    free(got);
+    cleanup_lua_caps();
+}
+
 /* ── Crypto tests ──────────────────────────────────────────────────── */
 
 UTEST(lua_cap, crypto_sha256)
@@ -12216,6 +12285,53 @@ UTEST(lua_http_timeout, per_call_option_is_validated)
                       LUA_OK, good[i]);
         EXPECT_EQ_MSG(strstr(err, "timeout_ms"), NULL, good[i]);
         EXPECT_NE_MSG(strstr(err, "failed"), NULL, good[i]);
+    }
+    lua_rt.base.http_cfg = NULL;
+    cleanup_lua_caps();
+}
+
+/* Audit 44: http.post / put / patch and their http.async twins take
+ * (url, body, opts). An opts TABLE given as the second argument (no body)
+ * was dropped without a word - its headers and timeout_ms never applied.
+ * The second argument is the body, as in JS (where a plain object there is
+ * a TypeError): anything but a string / number / nil raises now. */
+UTEST(lua_http_audit44, async_post_opts_without_body)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    HlHttpConfig cfg = {0};          /* no hosts: every request is refused */
+    lua_rt.base.http_cfg = &cfg;
+    char err[512];
+    static const char *const bad[] = {
+        "http.async.post('http://x.invalid/', { headers = { ['X-A'] = '1' } })",
+        "http.async.put('http://x.invalid/', { timeout_ms = 5 })",
+        "http.async.patch('http://x.invalid/', true)",
+        "http.post('http://x.invalid/', { headers = { ['X-A'] = '1' } })",
+        "http.put('http://x.invalid/', { timeout_ms = 5 })",
+        "http.patch('http://x.invalid/', function() end)",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') %s", bad[i]);
+        EXPECT_NE_MSG(audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err),
+                      LUA_OK, bad[i]);
+        EXPECT_NE_MSG(strstr(err, "body must be a string"), NULL, bad[i]);
+    }
+    /* A string or nil body (opts third) is unchanged: it reaches the host
+     * check (sync) or the wait gate (async). */
+    static const char *const good[] = {
+        "http.post('http://x.invalid/', nil, { headers = {} })",
+        "http.post('http://x.invalid/', 'b')",
+        "http.put('http://x.invalid/')",
+        "http.async.post('http://x.invalid/', nil, { headers = {} })",
+    };
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        char code[512];
+        snprintf(code, sizeof code,
+                 "local http = require('hull.http-client') %s", good[i]);
+        audit10_run(code, HL_DEFAULT_INSTRUCTIONS, err, sizeof err);
+        EXPECT_EQ_MSG(strstr(err, "body must be"), NULL, good[i]);
     }
     lua_rt.base.http_cfg = NULL;
     cleanup_lua_caps();

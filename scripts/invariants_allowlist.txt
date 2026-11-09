@@ -83,7 +83,6 @@ INV-6  src/hull/cap/db.c:hl_cap_db_init  # SQLite error for a Hull-issued statem
 INV-6  src/hull/cap/db.c:hl_cap_db_guard  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
 INV-6  src/hull/cap/db.c:hl_cap_db_guard_stale_txn  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
 INV-6  src/hull/cap/db_sqlite.c:sqlite_replace_conn  # SQLite error for a Hull-issued statement, or the operator's own HULL_SQLITE_HEAP_LIMIT value
-INV-6  src/hull/commands/agent.c:output_result  # JSON built by ShJsonWriter (C0 escaped); agent text is sanitized where it is collected (audit 35)
 INV-6  src/hull/commands/agent.c:cmd_db  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
 INV-6  src/hull/commands/agent.c:cmd_request  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)
 INV-6  src/hull/commands/agent.c:cmd_auth_status  # CLI subcommand output: Hull constants, the operator's argv / paths, Hull-encoded JSON (app text goes through hl_log_fputs_escaped)

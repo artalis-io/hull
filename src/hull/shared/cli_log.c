@@ -160,8 +160,13 @@ static void cli_log_callback(log_Event *ev)
     if (g_verbose) {
         /* Full diagnostics: level, source coordinates, and an explicit marker
          * when the record came from user app code executed by a build tool. */
+        /* The source field is a script's module name for a Lua / JS
+         * record - the app's path as given - so it is escaped like the
+         * message (audit 44). */
+        char file[256];
+        hl_log_escape_line(ev->file, file, sizeof file);
         fprintf(f, "%-5s %s:%d: %s%s\n",
-                log_level_string(ev->level), ev->file, ev->line,
+                log_level_string(ev->level), file, ev->line,
                 g_app_phase ? "[build-eval] " : "", msg);
     } else {
         fprintf(f, "hull: %s: %s\n", level_word(ev->level), msg);
@@ -198,8 +203,10 @@ static void line_callback(log_Event *ev)
     hl_log_escape_line(raw, msg, sizeof msg);
 
 #ifdef DEBUG
+    char file[256];
+    hl_log_escape_line(ev->file, file, sizeof file);   /* audit 44 */
     fprintf((FILE *)ev->udata, "%s %-5s %s:%d: %s\n",
-            ts, log_level_string(ev->level), ev->file, ev->line, msg);
+            ts, log_level_string(ev->level), file, ev->line, msg);
 #else
     fprintf((FILE *)ev->udata, "%s %-5s %s\n",
             ts, log_level_string(ev->level), msg);

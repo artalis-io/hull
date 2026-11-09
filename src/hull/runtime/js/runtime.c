@@ -1457,7 +1457,7 @@ static void js_toplevel_begin(HlJS *js)
     }
 }
 
-int hl_js_load_app(HlJS *js, const char *filename)
+static int js_load_app_impl(HlJS *js, const char *filename)
 {
     if (!js || !js->ctx || !filename)
         return -1;
@@ -1623,6 +1623,15 @@ int hl_js_load_app(HlJS *js, const char *filename)
     sh_arena_reset(js->scratch);
 
     return 0;
+}
+
+int hl_js_load_app(HlJS *js, const char *filename)
+{
+    int rc = js_load_app_impl(js, filename);
+    /* The top level has run (code after a top-level await included, which
+     * runs past the extraction): app.manifest() is closed (audit 44). */
+    if (js) js->base.manifest_closed = 1;
+    return rc;
 }
 
 int hl_js_run_jobs(HlJS *js)

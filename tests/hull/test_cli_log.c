@@ -359,3 +359,33 @@ UTEST(cli_log, line_callback_escapes_and_omits_file_line)
 }
 
 UTEST_MAIN()
+
+/* Audit 44: under --verbose the record's source field (log.c's `file`) was
+ * printed raw. A Lua / JS log call passes the caller's module name there, and
+ * an app module's name is its path as given, so a cloned tree's file name
+ * holding ESC / OSC bytes reached the terminal. The field is escaped as the
+ * message is. */
+UTEST(cli_log_audit44, verbose_file_field_escaped)
+{
+    FILE *saved = NULL;
+    char path[512];
+    capture_path(path, sizeof(path), "verbose-file");
+
+    hl_cli_log_init(1);
+    capture_begin(&saved, path);
+    log_log(LOG_INFO, "./r\x1b]52;c;eA==\x07" "x\xc2\x9b" "2J\n.lua", 7,
+            "[app] hello");
+    capture_end(path);
+    (void)saved;
+
+    ASSERT_TRUE(strchr(captured, 0x1b) == NULL);
+    ASSERT_TRUE(strchr(captured, 0x07) == NULL);
+    ASSERT_TRUE(strstr(captured, "\xc2\x9b") == NULL);
+    ASSERT_TRUE(strstr(captured, "./r\\x1b]52;c;eA==\\x07x\\xc2\\x9b2J\\n.lua:7")
+                != NULL);
+    ASSERT_TRUE(strstr(captured, "hello") != NULL);
+    ASSERT_TRUE(strstr(captured, "2J\n.lua") == NULL);   /* no raw newline */
+
+    hl_cli_log_init(0);
+    remove(path);
+}

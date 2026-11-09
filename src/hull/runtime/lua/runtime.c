@@ -524,7 +524,7 @@ static int lua_load_entry_checked(lua_State *L, const char *load_name,
     return rc;
 }
 
-int hl_lua_load_app(HlLua *lua, const char *filename)
+static int lua_load_app_impl(HlLua *lua, const char *filename)
 {
     if (!lua || !lua->L || !filename)
         return -1;
@@ -636,6 +636,14 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
     sh_arena_reset(lua->scratch);
 
     return 0;
+}
+
+int hl_lua_load_app(HlLua *lua, const char *filename)
+{
+    int rc = lua_load_app_impl(lua, filename);
+    /* The top level has run: app.manifest() is closed (audit 44). */
+    if (lua) lua->base.manifest_closed = 1;
+    return rc;
 }
 
 /* Free an HlLuaRoute and everything it owns. Lives here, not in

@@ -31,6 +31,7 @@
 #include "hull/shared/host.h"   /* hl_host_is_windows: kill(pid,0) is not inert there */
 #include "hull/shared/dev_session.h"   /* discovery MAC (audit 37) */
 #include "hull/utils/secure_zero.h"
+#include "hull/shared/json_term_safe.h"   /* audit 44 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,10 +45,13 @@
 
 /* ── Output helper ─────────────────────────────────────────────────── */
 
+/* Every agent result is JSON that may carry app-tree text (a data.db value or
+ * column name, a queries.json key): written with DEL and the C1 controls
+ * escaped, as the same JSON value (audit 44; the encoder escapes only C0). */
 static int output_result(ShJsonBuf *buf, int rc)
 {
     if (buf->buf) {
-        fputs(buf->buf, stdout);
+        hl_json_fwrite_terminal_safe(stdout, buf->buf, buf->len);
         putchar('\n');
     }
     sh_json_buf_free(buf);
@@ -759,36 +763,6 @@ static int json_document_valid(const char *buf, size_t len)
     return ok;
 }
 
-/* Write valid JSON text with the bytes a terminal acts on escaped: DEL and the UTF-8
- * C1 controls (U+0080..U+009F), which a JSON encoder leaves raw inside a string, and
- * any C0 control but the tab / CR / LF whitespace between tokens. Outside a string
- * valid JSON holds only ASCII structural bytes and whitespace, so the output is the
- * same JSON value (as agent/eval.c's eval_write_json_safe; audit 37 Low). */
-static void inspect_write_json_safe(FILE *out, const char *json, size_t len)
-{
-    size_t run = 0;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)json[i];
-        unsigned code;
-        size_t skip = 1;
-        if (c < 0x20 || c == 0x7f) {
-            if (c == '\t' || c == '\n' || c == '\r') continue;
-            code = c;
-        } else if (c == 0xc2 && i + 1 < len &&
-                   (unsigned char)json[i + 1] >= 0x80 &&
-                   (unsigned char)json[i + 1] <= 0x9f) {
-            code = (unsigned char)json[i + 1];
-            skip = 2;
-        } else {
-            continue;
-        }
-        if (i > run) fwrite(json + run, 1, i - run, out);
-        fprintf(out, "\\u%04x", code);
-        run = i + skip;
-        i += skip - 1;
-    }
-    if (len > run) fwrite(json + run, 1, len - run, out);
-}
 
 /* If a LIVE dev session has published a discovery generation for `app_dir`, stream it to
  * stdout and return 0. "Live" (D9): both .hull/discovery.json and .hull/dev.json exist,
@@ -873,7 +847,7 @@ static int agent_inspect_stream_live(const char *app_dir)
      * -- whose complete on-disk document is invalid -- falls back to standalone. */
     if (!json_document_valid(disc, disc_len)) { free(disc); return -1; }
 
-    inspect_write_json_safe(stdout, disc, disc_len);
+    hl_json_fwrite_terminal_safe(stdout, disc, disc_len);
     fputc('\n', stdout);
     free(disc);
     return 0;
