@@ -14905,6 +14905,24 @@ UTEST(lua_gpu, devices_are_listed)
     lgpu_cleanup();
 }
 
+/* Audit 44: gpu.async.dispatch copied the shader name into a fixed
+ * HL_GPU_NAME_MAX slot, cutting a longer one to a prefix that could name
+ * another compiled shader. It is refused before anything else. */
+UTEST(gpu_audit44, async_dispatch_long_name)
+{
+    ASSERT_EQ(lgpu_init(1), 0);
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.dispatch, string.rep('s', 300), {}) "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('name too long', 1, true) and 'long' or tostring(e))",
+                "false long");
+    /* A name that fits is not refused for its length. */
+    LGPU_EXPECT("local ok, e = pcall(gpu.async.dispatch, string.rep('s', 255), {}) "
+                "R = tostring(ok) .. ' ' .. "
+                "(tostring(e):find('name too long', 1, true) and 'long' or 'other')",
+                "false other");
+    lgpu_cleanup();
+}
+
 UTEST(lua_gpu, buffers_are_per_device)
 {
     ASSERT_EQ(lgpu_init(2), 0);

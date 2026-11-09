@@ -8,6 +8,19 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **GPU / compute / TUI (audit 44).** A synchronous `gpu.*` call no longer
+  blocks the event loop behind `gpu.async` jobs holding the device: it waits
+  in short slices that ask the run and is refused `gpu_busy` once the run's
+  deadline or budget stops it (M7). `gpu.async.dispatch` refuses a shader name
+  of `HL_GPU_NAME_MAX` bytes or more instead of cutting it to a prefix that
+  could name another compiled shader (Lua and JS). A per-invocation WASM span
+  set whose teardown fails is kept on the cache and retried at runtime
+  teardown, so its mmap borrows are released (it was lost in a dead stack
+  variable). The TUI input parser drops a partial UTF-8 sequence at ESC and
+  re-reads a lead byte that arrives mid-sequence instead of dropping it.
+
 ## [0.19.0] - 2026-11-09
 
 ### Added

@@ -140,7 +140,7 @@ INV-6  src/hull/runtime/lua/mod_tool.c:l_tool_platform_verify  # tool VM: stdout
 INV-6  src/hull/shared/thread_affinity.c:hl_assert_on_event_loop  # assertion message: a Hull constant naming the caller
 
 # INV-7: JS_RunGC outside the charged retry helper
-INV-7  src/hull/runtime/js/mod_compute.c:js_push_wasm_buffer  # off-heap GC debt: at most one collection per HL_JS_OFFHEAP_GC_DEBT (32 MB) of WasmBuffers, each charged by its own copy
+INV-7  src/hull/runtime/js/mod_compute.c:js_push_wasm_buffer  # off-heap GC debt: at most one collection per HL_JS_OFFHEAP_GC_DEBT (32 MB) of WasmBuffer footprint pushed; the collection itself is not charged - an owned buffer pays for its copy, but a zero-copy buffer:true result is not copied (it holds a checked-out instance, bounded by the live-instance caps), so the bound is the debt threshold, not a charge
 INV-7  src/hull/runtime/js/runtime.c:hl_js_gc  # embedder API: called by the host between runs, not from app code
 INV-7  src/hull/runtime/js/runtime.c:hl_js_free  # teardown: the VM is being freed, no run is active
 INV-7  src/hull/runtime/js/worker.c:js_dispatch_work_fn  # worker.dispatch teardown: collects the cycles a finished job left, outside the job's run
