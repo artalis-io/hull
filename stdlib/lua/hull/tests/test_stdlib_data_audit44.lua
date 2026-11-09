@@ -351,6 +351,44 @@ function cases.search_parity()
     end)
 end
 
+-- Low: the auth-flows and audit-log timestamp columns are BIGINT too.
+function cases.authflows_timestamps()
+    local af = require("hull.web.auth-flows")
+    local AF = __test_hooks("hull.web.auth-flows")
+    local audit_log = require("hull.web.middleware.audit-log")
+    local AL = __test_hooks("hull.web.middleware.audit-log")
+    AF.reset()
+    af.init({
+        secret = ("s"):rep(32), trust_request_host = true, email_rate_limit = false,
+        email_send = function() end, templates = {},
+        user_find_by_email = function() return nil end,
+        user_get = function() return nil end,
+        user_create = function() return 1 end,
+        user_set_password = function() end,
+        user_set_email = function() end,
+        user_set_email_verified = function() end,
+        on_login = function(_req, res) res:json({ ok = true }) end,
+        on_password_reset = function() end,
+    })
+    audit_log.init({ fingerprint_salt = "salt-a44-salt" })
+    test("the auth-flows timestamp columns are declared BIGINT", function()
+        local cols = {
+            { "_hull_auth_used_tokens", "used_at" }, { "_hull_auth_used_tokens", "expires_at" },
+            { "_hull_auth_pending_email_changes", "created_at" },
+            { "_hull_auth_pending_email_changes", "expires_at" },
+            { "_hull_auth_pending_email_changes", "confirmed_at" },
+            { "_hull_auth_login_attempts", "last_failed_at" },
+            { "_hull_auth_login_attempts", "locked_until" },
+        }
+        for _, c in ipairs(cols) do
+            assert_eq(AF.column_type(c[1], c[2]), "BIGINT", c[1] .. "." .. c[2])
+        end
+    end)
+    test("audit-log event_at is declared BIGINT", function()
+        assert_eq(AL.column_type("_hull_audit_log", "event_at"), "BIGINT", "event_at")
+    end)
+end
+
 -- Low: inbox source parity.
 function cases.inbox_source()
     local inbox = require("hull.web.middleware.inbox")

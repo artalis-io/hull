@@ -18981,6 +18981,14 @@ UTEST(search_audit44, snippet_default_column_parity)
     EXPECT_GT(pass, 1);
 }
 
+UTEST(authflows_audit44, timestamp_columns_bigint)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("authflows_timestamps", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
 UTEST(inbox_audit44, empty_source_is_default)
 {
     int pass = 0, fail = -1;

@@ -34,7 +34,7 @@ release-artifact layout).
   as the default source and stores an empty outbox idempotency key as NULL, as
   JS does; Lua `outbox.cleanup` takes `also_failed`, and both check `max_age`.
   Timestamp and size columns of the jobs, attachment, session, totp, inbox,
-  outbox and idempotency tables are now `BIGINT` (32-bit `INTEGER` on
+  outbox, idempotency, auth-flows and audit-log tables are now `BIGINT` (32-bit `INTEGER` on
   PostgreSQL / MySQL ended in 2038). **Existing PostgreSQL / MySQL deployments:
   migrate by hand** - `CREATE TABLE IF NOT EXISTS` leaves existing tables as
   they are. On PostgreSQL, `ALTER TABLE <t> ALTER COLUMN <c> TYPE BIGINT` for
@@ -54,8 +54,11 @@ release-artifact layout).
   locked_until), `_hull_totp_attempts_by_ip_user` (last_failed_at),
   `_hull_inbox_processed` (processed_at, expires_at), `_hull_outbox`
   (next_attempt_at, created_at, delivered_at), `_hull_idempotency_keys`
-  (created_at, expires_at). Tests: `jobs_audit44.*`, `idempotency_audit44.*`,
-  `attachment_audit44.*`, `kv_audit44.*`, `retry_audit44.*`, `search_audit44.*`,
+  (created_at, expires_at), `_hull_auth_used_tokens` (used_at, expires_at),
+  `_hull_auth_pending_email_changes` (created_at, expires_at, confirmed_at),
+  `_hull_auth_login_attempts` (last_failed_at, locked_until), `_hull_audit_log`
+  (event_at). Tests: `jobs_audit44.*`, `idempotency_audit44.*`,
+  `attachment_audit44.*`, `kv_audit44.*`, `retry_audit44.*`, `search_audit44.*`, `authflows_audit44.*`,
   `inbox_audit44.*`, `outbox_audit44.*` (test_lua and test_js).
 
 ## [0.19.0] - 2026-11-09

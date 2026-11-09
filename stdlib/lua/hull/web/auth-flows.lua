@@ -320,26 +320,26 @@ local _state = {
 local SCHEMA = [[
 CREATE TABLE IF NOT EXISTS _hull_auth_used_tokens (
     token_hash  VARCHAR(255) PRIMARY KEY,
-    used_at     INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
+    used_at     BIGINT NOT NULL,
+    expires_at  BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
     user_id      VARCHAR(255) PRIMARY KEY,
     new_email    TEXT NOT NULL,
     token_hash   TEXT NOT NULL,
-    created_at   INTEGER NOT NULL,
-    expires_at   INTEGER NOT NULL,
+    created_at   BIGINT NOT NULL,
+    expires_at   BIGINT NOT NULL,
     old_email    TEXT,
-    confirmed_at INTEGER,
+    confirmed_at BIGINT,
     old_verified INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
     user_id        VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
-    last_failed_at INTEGER,
-    locked_until   INTEGER
+    last_failed_at BIGINT,
+    locked_until   BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS _hull_auth_used_tokens_exp
@@ -2755,8 +2755,8 @@ end
 --       email         TEXT NOT NULL UNIQUE,
 --       password_hash TEXT,
 --       email_verified INTEGER NOT NULL DEFAULT 0,
---       created_at    INTEGER NOT NULL,
---       updated_at    INTEGER NOT NULL
+--       created_at    BIGINT NOT NULL,
+--       updated_at    BIGINT NOT NULL
 --   )
 --
 -- @tparam ?table opts
@@ -3156,7 +3156,7 @@ function M.init(opts)
         cols[n] = true
     end
     for _, c in ipairs({ { "old_email", "old_email TEXT" },
-                         { "confirmed_at", "confirmed_at INTEGER" },
+                         { "confirmed_at", "confirmed_at BIGINT" },
                          { "old_verified", "old_verified INTEGER" } }) do
         if not cols[c[1]] then
             local ok, err = pcall(function()
@@ -3300,6 +3300,17 @@ end
 -- Test-only hooks, registered with the stdlib-internal hull._test_hooks
 -- rather than exported (audit 16): app code could call them.
 require("hull._test_hooks").register("hull.web.auth-flows", {
+    -- Audit 44: a column's declared type (SQLite's table_info), read back
+    -- by the suite (the timestamp columns are BIGINT).
+    column_type = function(tbl, col)
+        if type(tbl) ~= "string" or not tbl:match("^_hull_[a-z_]+$") then
+            error("column_type: not a hull table")
+        end
+        for _, r in ipairs(db.query("PRAGMA table_info(" .. tbl .. ")")) do
+            if r.name == col then return r.type end
+        end
+        return nil
+    end,
     origin_for         = origin_for,
     state              = _state,
     issue_token        = issue_token,

@@ -15,6 +15,8 @@
 // globalThis.__data44_case.
 
 import { jobs } from "hull:jobs";
+import { authFlows } from "hull:web:auth-flows";
+import { auditLog } from "hull:web:middleware:audit-log";
 import { idempotency } from "hull:web:middleware:idempotency";
 import { attachment } from "hull:attachment";
 import { blob } from "hull:blob";
@@ -348,6 +350,41 @@ cases.search_parity = async () => {
     });
     await test("maxQueryLen counts bytes", () => {
         raises(() => search.query("s44", "ééé", { maxQueryLen: 5 }), "too long");
+    });
+};
+
+// Low: the auth-flows and audit-log timestamp columns are BIGINT too.
+cases.authflows_timestamps = async () => {
+    const AF = __testHooks("hull:web:auth-flows");
+    const AL = __testHooks("hull:web:middleware:audit-log");
+    AF.reset();
+    authFlows.init({
+        secret: "s".repeat(32), trustRequestHost: true, emailRateLimit: false,
+        emailSend: () => {}, templates: {},
+        userFindByEmail: () => null,
+        userGet: () => null,
+        userCreate: () => 1,
+        userSetPassword: () => {},
+        userSetEmail: () => {},
+        userSetEmailVerified: () => {},
+        onLogin: (_req, res) => { res.json({ ok: true }); },
+        onPasswordReset: () => {},
+    });
+    auditLog.init({ fingerprintSalt: "salt-a44-salt" });
+    await test("the auth-flows timestamp columns are declared BIGINT", () => {
+        const cols = [
+            ["_hull_auth_used_tokens", "used_at"], ["_hull_auth_used_tokens", "expires_at"],
+            ["_hull_auth_pending_email_changes", "created_at"],
+            ["_hull_auth_pending_email_changes", "expires_at"],
+            ["_hull_auth_pending_email_changes", "confirmed_at"],
+            ["_hull_auth_login_attempts", "last_failed_at"],
+            ["_hull_auth_login_attempts", "locked_until"],
+        ];
+        for (const tc of cols)
+            assertEq(AF.columnType(tc[0], tc[1]), "BIGINT", tc[0] + "." + tc[1]);
+    });
+    await test("audit-log event_at is declared BIGINT", () => {
+        assertEq(AL.columnType("_hull_audit_log", "event_at"), "BIGINT", "event_at");
     });
 };
 
