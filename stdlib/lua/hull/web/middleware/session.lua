@@ -107,9 +107,9 @@ function session.init(opts)
         CREATE TABLE IF NOT EXISTS _hull_sessions (
             id VARCHAR(255) PRIMARY KEY,
             data TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            last_accessed INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL
+            created_at BIGINT NOT NULL,
+            last_accessed BIGINT NOT NULL,
+            expires_at BIGINT NOT NULL
         )
     ]])
     db.exec([[

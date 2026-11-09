@@ -18906,4 +18906,200 @@ UTEST(js_ssh_bridge, teardown_with_a_parked_reader_releases_the_stream)
 #endif /* HL_ENABLE_HTTP_CLIENT */
 
 
+#if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
+/* ── Audit 44: stdlib data-layer findings ─────────────────────────────
+ * stdlib/js/hull/tests/test_stdlib_data_audit44.js (the Lua twin's runner
+ * is in test_lua.c): jobs subscription cursors (M10), the idempotency
+ * in-flight lease (M11), cleanup high-water rows, BIGINT timestamps, type /
+ * queue checks, respond's single encode, attachment.readToFile's hash check,
+ * the kv.open cap refusal, retry's factor, search / inbox / outbox parity.
+ * Each case runs the script in a fresh context and a fresh :memory:
+ * database, named in globalThis.__data44_case. One UTEST per case, written
+ * out, so scripts/check_regression_test.sh sees each. */
+#include "hull/cap/kv_backend.h"
+
+#ifndef HL_ENABLE_VALKEY
+/* A KV backend that opens without dialing, so kv.open's live-connection cap
+ * can be reached from a binding (a base build composes no KV backend). Off
+ * unless a case turns it on: the strong hook returns the weak default's
+ * empty set otherwise. */
+static int data44_kv_on;
+static const char *const DATA44_SCHEMES[] = { "redis", NULL };
+static int data44_kv_open(HlKvHandle **out, const char *dsn, int timeout_ms,
+                          HlAllocator *alloc, char *errbuf, size_t errlen)
+{
+    (void)dsn; (void)timeout_ms; (void)alloc; (void)errbuf; (void)errlen;
+    static int token;
+    *out = (HlKvHandle *)&token;
+    return 0;
+}
+static void data44_kv_close(HlKvHandle *h) { (void)h; }
+static const HlKvBackend DATA44_KV = {
+    .name = "data44", .schemes = DATA44_SCHEMES,
+    .open = data44_kv_open, .close = data44_kv_close,
+};
+const HlKvBackend *const *hl_kv_feature_backends(size_t *count)
+{
+    static const HlKvBackend *const arr[] = { &DATA44_KV };
+    if (!data44_kv_on) { if (count) *count = 0; return NULL; }
+    if (count) *count = 1;
+    return arr;
+}
+#endif
+
+enum { DATA44_FS = 1, DATA44_KV_ON = 2 };
+
+static int run_data44_case(const char *name, int flags, int *pass, int *fail)
+{
+    init_js_with_caps();
+    if (!js_initialized) return -1;
+    A15Fs f;
+    int have_fs = 0;
+    if (flags & DATA44_FS) {
+        if (a15_fs_open(&f) != 0) { cleanup_js_caps(); return -1; }
+        have_fs = 1;
+    }
+    static HlManifestKvDynamic pol = {
+        .hosts = { "127.0.0.1" }, .host_count = 1,
+        .schemes = { "redis" }, .scheme_count = 1, .declared = 1,
+    };
+    if (flags & DATA44_KV_ON) {
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 1;
+#endif
+        js.base.kv_policy = &pol;
+        /* Only a hull: module may import the internal kv binding: the
+         * harness evaluates its own, from C. */
+        static const char *KV =
+            "import { open } from 'hull:kv:_native';\n"
+            "globalThis.__kvn = open;\n";
+        JSValue m = JS_Eval(js.ctx, KV, strlen(KV), "hull:__d44_kv", JS_EVAL_TYPE_MODULE);
+        JS_FreeValue(js.ctx, m);
+        hl_js_run_jobs(&js);
+    }
+    char set[128];
+    snprintf(set, sizeof set, "globalThis.__data44_case = '%s';", name);
+    JSValue v = JS_Eval(js.ctx, set, strlen(set), "<data44-case>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, v);
+    int rc = run_js_test("stdlib/js/hull/tests/test_stdlib_data_audit44.js", pass, fail);
+    if (flags & DATA44_KV_ON) {
+        JS_RunGC(js.rt);   /* any connection the script left open */
+        js.base.kv_policy = NULL;
+#ifndef HL_ENABLE_VALKEY
+        data44_kv_on = 0;
+#endif
+    }
+    cleanup_js_caps();
+    if (have_fs) a15_fs_close(&f);
+    return rc;
+}
+
+UTEST(jobs_audit44, typed_subscription_cursor_advances_past_unmatched)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_typed_cursor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, cleanup_keeps_high_water_row)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_high_water", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, schedule_past_int32_stored)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_schedule_bigint", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(jobs_audit44, events_types_caller_strings_parity)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("jobs_types_queue", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(idempotency_audit44, inflight_lease_outlives_parked_handler)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_inflight_lease", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(idempotency_audit44, respond_encode_error_marks_unstored)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("idem_respond_encode", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(attachment_audit44, read_to_file_refuses_tampered_blob)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("attachment_tamper", DATA44_FS, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+#ifndef HL_ENABLE_VALKEY
+UTEST(kv_audit44, open_cap_is_busy_refusal)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("kv_open_busy", DATA44_KV_ON, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+#endif
+
+UTEST(retry_audit44, factor_validated)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("retry_factor", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(search_audit44, snippet_default_column_parity)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("search_parity", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(authflows_audit44, timestamp_columns_bigint)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("authflows_timestamps", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+
+UTEST(inbox_audit44, empty_source_is_default)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("inbox_source", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 0);
+}
+
+UTEST(outbox_audit44, cleanup_parity)
+{
+    int pass = 0, fail = -1;
+    ASSERT_EQ(run_data44_case("outbox_cleanup", 0, &pass, &fail), 0);
+    EXPECT_EQ(fail, 0);
+    EXPECT_GT(pass, 1);
+}
+#endif /* HL_ENABLE_HTTP_CLIENT && HL_ENABLE_HTTP_SERVER */
+
+
 UTEST_MAIN();

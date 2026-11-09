@@ -53,11 +53,19 @@ local idempotency = {}
 
 local _ttl = 86400  -- default 24 hours
 
--- An in-flight key expires after this many seconds (or the TTL, if shorter).
--- A handler that raised never completes its row, and with the full TTL every
--- retry got 409 for a day - defeating the point of an idempotent retry. A
--- completed response keeps the full TTL (completed_expiry).
-local INFLIGHT_LEASE = 300
+-- An in-flight key expires after this many seconds. A handler that raised
+-- never completes its row, and with the full TTL every retry got 409 for a
+-- day - defeating the point of an idempotent retry. A completed response
+-- keeps the full TTL (completed_expiry).
+--
+-- The lease must outlive any handler that is still running, though (audit
+-- 44 M11): a handler parked on one http.fetch can wait up to its 10 min
+-- ceiling (HL_HTTP_FETCH_MAX_TIMEOUT_MS), and once the in-flight row
+-- expired a client retry deleted it, claimed the key and ran the handler a
+-- second time. So it is that ceiling plus a minute - the outbox's
+-- CLAIM_LEASE (audit 24) - whatever the key's TTL: a TTL shorter than the
+-- lease applies to the completed response, not to the claim.
+local INFLIGHT_LEASE = 660
 
 local function completed_expiry(req)
     return time.now() + (req.ctx._idem_ttl or _ttl)
@@ -217,8 +225,8 @@ function idempotency.init(opts)
             response_body  ]] .. body_type .. [[,
             response_headers ]] .. body_type .. [[,
             state          VARCHAR(16) NOT NULL DEFAULT 'inflight',
-            created_at     INTEGER NOT NULL,
-            expires_at     INTEGER NOT NULL,
+            created_at     BIGINT NOT NULL,
+            expires_at     BIGINT NOT NULL,
             PRIMARY KEY (principal_id, ]] .. k .. [[)
         )
     ]])
@@ -574,7 +582,7 @@ function idempotency.middleware(opts)
             { K, "principal_id", "fingerprint", "endpoint",
               "state", "created_at", "expires_at" },
             { key, principal_id, fingerprint, endpoint,
-              "inflight", now, now + math.min(ttl, INFLIGHT_LEASE) }
+              "inflight", now, now + INFLIGHT_LEASE }
         )
         if inserted == 0 then
             -- Another request claimed this key between our SELECT and INSERT
@@ -616,8 +624,18 @@ end
 -- Shared cache-write path. `body_str` is the literal response bytes;
 -- `content_type` is folded into the cached headers blob so the replay
 -- path serves the response with the correct mime.
-local function cache_and_send(req, res, status_code, body_str, content_type, extra_headers, send_fn)
-    if req.ctx._idem_key then
+--
+-- `make_body` returns the body string; it runs INSIDE the store's guard
+-- (audit 44): respond's json.encode used to run before it, as an argument,
+-- so an encode error left the row in flight (a retry after the lease ran the
+-- handler again), and the JSON sent was a second encode of the data, not the
+-- string stored. Now an encode error marks the row unstored and is raised,
+-- and the stored string is the one sent.
+local function cache_and_send(req, res, status_code, make_body, content_type, extra_headers, send_fn)
+    local body_str
+    if not req.ctx._idem_key then
+        body_str = make_body()
+    else
         -- Phase 6 audit M-3: filter headers through the allowlist
         -- before writing to SQLite so credential headers never
         -- persist on disk for the TTL.
@@ -644,7 +662,10 @@ local function cache_and_send(req, res, status_code, body_str, content_type, ext
         local where = " WHERE principal_id = ? AND " .. key_col() .. " = ?" .. CLAIM_GUARD
         local p, k = req.ctx._idem_principal, req.ctx._idem_key
         local fp, created = req.ctx._idem_fingerprint, req.ctx._idem_created
+        local made, make_err = false, nil
         local ok, err = pcall(function()
+            body_str = make_body()
+            made = true
             if _fail_store then error("injected store failure", 0) end
             local body_raw = type(body_str) == "string" and body_str or tostring(body_str or "")
             if #body_raw > MAX_STORED_BYTES then error("response too large to store", 0) end
@@ -677,7 +698,11 @@ local function cache_and_send(req, res, status_code, body_str, content_type, ext
                     .. _text.storable(err2, 512, true) .. "); a retry after the "
                     .. INFLIGHT_LEASE .. " s lease runs the handler again")
             end
+            -- The body could not be made: nothing to send, the error is the
+            -- caller's (the key is now processed, never re-runnable).
+            if not made then make_err = err end
         end
+        if make_err ~= nil then error(make_err, 0) end
     end
 
     res:status(status_code)
@@ -693,9 +718,18 @@ end
 
 function idempotency.respond(req, res, status_code, data, extra_headers)
     cache_and_send(req, res, status_code,
-        json.encode(data), "application/json",
+        function() return json.encode(data) end, "application/json",
         extra_headers,
-        function(r, _) r:json(data) end)
+        function(r, body)
+            -- The stored string itself, as the replay sends it. A caller's
+            -- own Content-Type (extra_headers, set above) wins.
+            local has_ct = false
+            for k in pairs(extra_headers or {}) do
+                if type(k) == "string" and k:lower() == "content-type" then has_ct = true end
+            end
+            if not has_ct then r:header("Content-Type", "application/json") end
+            r:text(body)
+        end)
 end
 
 --- Send an HTML response and cache it for idempotency replay.
@@ -716,7 +750,7 @@ end
 -- @tparam[opt]  table extra_headers Map of `Header-Name -> value`.
 function idempotency.respond_html(req, res, status_code, html, extra_headers)
     cache_and_send(req, res, status_code,
-        html, "text/html; charset=utf-8",
+        function() return html end, "text/html; charset=utf-8",
         extra_headers,
         function(r, body) r:html(body) end)
 end
@@ -756,7 +790,8 @@ end
 -- inside the module, where the _hull_* namespace check admits the query.
 require("hull._test_hooks").register("hull.web.middleware.idempotency", {
     rows = function(key)
-        return db.query("SELECT state, status, response_body, response_headers "
+        return db.query("SELECT state, status, response_body, response_headers, "
+                        .. "created_at, expires_at "
                         .. "FROM _hull_idempotency_keys WHERE " .. key_col() .. " = ?",
                         { key })
     end,
@@ -767,6 +802,7 @@ require("hull._test_hooks").register("hull.web.middleware.idempotency", {
     -- Make the response store fail (audit 39: a failed store must leave the
     -- key processed, never re-runnable).
     fail_store = function(on) _fail_store = on and true or false end,
+    inflight_lease = INFLIGHT_LEASE,
     -- A completed row in the format an earlier Hull wrote (raw body, bare
     -- JSON headers), for the backward-compatibility check.
     put_legacy = function(key, principal, fingerprint, status, body, headers_json)

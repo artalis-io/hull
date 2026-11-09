@@ -73,6 +73,57 @@ release-artifact layout).
 
 <!-- audit44:stdlib-data -->
 
+- **stdlib data layer (audit 44).** A typed `jobs.subscribe` (`types = {...}`)
+  now moves its cursor past the events it does not take when a drain's batch
+  is not full (bounded by the commit-order horizon); its cursor stayed at the
+  last matching event, so `jobs.cleanup` kept the whole event log and
+  `jobs.metrics` lag grew without bound (M10). The idempotency in-flight lease
+  is 660 s (the 10 min `http.fetch` ceiling plus a minute, as the outbox's
+  claim lease) whatever the key's TTL; at 300 s a retry while the handler was
+  still parked on a fetch ran it again (M11). `jobs.cleanup` never deletes the
+  newest event or job row (MySQL before 8.0 resets AUTO_INCREMENT to
+  `MAX(id)+1` on restart, so an emptied table reused ids below subscription
+  cursors). `attachment.read_to_file` / `readToFile` checks the blob's
+  SHA-256 against its id, as `read` does. `idempotency.respond` encodes once
+  inside the store's guard and sends that string; an encode error marks the
+  key unstored. `kv.open` at its 16-connection cap is a coded `busy` refusal.
+  `retry.backoff` / `retry.run` require a finite `factor >= 1`. Search parity:
+  `snippet` / `highlight` default to column 1 in JS too and may be combined in
+  Lua; `search.index` takes at least one column of strings / numbers in both
+  (JS no longer `String()`s values); JS `maxQueryLen` counts UTF-8 bytes. Lua
+  `jobs.events` / `subscribe` copy their type lists checked (no comma, at most
+  32 bytes, the list at most 255 bytes joined), and `jobs.dead` / `stats` /
+  `metrics` check their `queue` scope, in both runtimes. Lua inbox treats `""`
+  as the default source and stores an empty outbox idempotency key as NULL, as
+  JS does; Lua `outbox.cleanup` takes `also_failed`, and both check `max_age`.
+  Timestamp and size columns of the jobs, attachment, session, totp, inbox,
+  outbox, idempotency, auth-flows and audit-log tables are now `BIGINT` (32-bit `INTEGER` on
+  PostgreSQL / MySQL ended in 2038). **Existing PostgreSQL / MySQL deployments:
+  migrate by hand** - `CREATE TABLE IF NOT EXISTS` leaves existing tables as
+  they are. On PostgreSQL, `ALTER TABLE <t> ALTER COLUMN <c> TYPE BIGINT` for
+  each column below; on MySQL, `ALTER TABLE <t> MODIFY <c> BIGINT` keeping the
+  column's `NOT NULL` / `DEFAULT` (e.g. `ALTER TABLE _hull_jobs MODIFY run_at
+  BIGINT NOT NULL DEFAULT 0, MODIFY claimed_at BIGINT, MODIFY created_at BIGINT
+  NOT NULL, ...`):
+  `_hull_jobs` (run_at, claimed_at, created_at, updated_at, claim_started_at),
+  `_hull_cron` (next_run_at, last_run_at, updated_at), `_hull_ratelimit`
+  (window_start), `_hull_workflow_steps` (created_at), `_hull_workflow_signals`
+  (created_at, consumed_at), `_hull_job_events` (ts), `_hull_job_subscriptions`
+  (lease_until, updated_at), `_hull_attachments` (size, uploaded_at),
+  `_hull_attachment_orphans` (queued_at), `_hull_sessions` (created_at,
+  last_accessed, expires_at), `_hull_totp` (created_at, updated_at),
+  `_hull_totp_recovery` (used_at), `_hull_totp_pending` (created_at),
+  `_hull_totp_attempts` / `_hull_totp_attempts_by_ip` (last_failed_at,
+  locked_until), `_hull_totp_attempts_by_ip_user` (last_failed_at),
+  `_hull_inbox_processed` (processed_at, expires_at), `_hull_outbox`
+  (next_attempt_at, created_at, delivered_at), `_hull_idempotency_keys`
+  (created_at, expires_at), `_hull_auth_used_tokens` (used_at, expires_at),
+  `_hull_auth_pending_email_changes` (created_at, expires_at, confirmed_at),
+  `_hull_auth_login_attempts` (last_failed_at, locked_until), `_hull_audit_log`
+  (event_at). Tests: `jobs_audit44.*`, `idempotency_audit44.*`,
+  `attachment_audit44.*`, `kv_audit44.*`, `retry_audit44.*`, `search_audit44.*`, `authflows_audit44.*`,
+  `inbox_audit44.*`, `outbox_audit44.*` (test_lua and test_js).
+
 
 
 <!-- audit44:gpu-compute -->
