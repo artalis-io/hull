@@ -67,6 +67,8 @@ jobs:
           - mysqlwire
           - mysql_dsn
           - mysql_stmt
+          - pg_msg
+          - mysql_rows
           - respwire
           - valkey_dsn
           - sql_kw

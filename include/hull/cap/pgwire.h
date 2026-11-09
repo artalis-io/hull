@@ -84,7 +84,11 @@ typedef enum HlPgResult {
  * hostile length field. Override at compile time if a workload legitimately
  * streams larger single messages. */
 #ifndef HL_PG_MAX_MSG
-#define HL_PG_MAX_MSG (256u * 1024u * 1024u)
+/* 64 MiB, as Valkey's reply cap: a frame is buffered whole off the VM heap
+ * before it is decoded, and 256 MiB was more than any VM heap limit (audit
+ * 44). A row (or a Notice) larger than this fails its query; a bytea over
+ * ~32 MiB (hex-encoded in text mode) is past it. */
+#define HL_PG_MAX_MSG (64u * 1024u * 1024u)
 #endif
 
 /*

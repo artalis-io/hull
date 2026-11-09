@@ -183,6 +183,8 @@ void hl_my_dsn_scrub(HlMyDsn *dsn)
 #include "hull/cap/db_transport.h"
 #include "hull/cap/db_budget.h"     /* hl_db_budget_charge: a tripped run */
 #include "hull/shared/tls_client.h"
+#include "log.h"
+#include <pthread.h>
 #endif
 
 /* TLS handshake timeout (blocking), distinct from the TCP connect timeout. */
@@ -482,6 +484,16 @@ static int send_auth_data(HlMyConn *conn, uint8_t seq,
 
 /* ── Handshake ────────────────────────────────────────────────────── */
 
+/* The server facts that drive SQL Hull writes - MariaDB vs MySQL (the reset's
+ * SET NAMES / SET ROLE spelling), the `_hull_*` tables' binary collation and
+ * whether the server has roles - from its version string. */
+static void my_set_server_facts(HlMyConn *conn, const char *version)
+{
+    conn->mariadb = strstr(version, "MariaDB") != NULL;
+    conn->bin_collation = hl_my_bin_collation(version);
+    conn->roles = (uint8_t)hl_my_roles_supported(version);
+}
+
 /* sslmode -> policy (mirrors cap/pg_conn.c's names for cross-backend parity). */
 enum {
     HL_MY_SSL_DISABLE = 0,   /* never TLS */
@@ -529,6 +541,57 @@ static void set_unsupported_plugin_err(HlMyConn *conn, const char *plugin)
         snprintf(conn->errmsg, sizeof conn->errmsg,
                  "unsupported auth plugin '%s' (native / caching_sha2 only)",
                  plugin ? plugin : "?");
+}
+
+/* Distinct DSNs (user@host:port) a WARN below has named; past this many the
+ * WARN stops rather than repeat. */
+#define HL_MY_UNVERIFIED_WARN_MAX 64
+
+/* 1 when a password-derived auth response would go over a channel whose
+ * server was not verified, on a DSN that did not opt into plaintext: sslmode
+ * prefer / require. */
+static int my_auth_unverified(int tls_verified, int sslmode)
+{
+    return !tls_verified && sslmode != HL_MY_SSL_DISABLE;
+}
+
+/* WARN once per DSN that a password-derived response (a native SHA-1 or
+ * caching_sha2 scramble of the server's nonce) went over a connection whose
+ * server certificate was not verified: whoever answered can test passwords
+ * against it offline (audit 44, the MySQL twin of audit 29). */
+static void my_warn_unverified_auth(const HlMyDsn *dsn, const char *plugin,
+                                    int sslmode)
+{
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t seen[HL_MY_UNVERIFIED_WARN_MAX];
+    static int nseen;
+    uint64_t h = 1469598103934665603ULL;               /* FNV-1a */
+    const char *parts[3] = { dsn->user, dsn->host, dsn->port };
+    for (int i = 0; i < 3; i++) {
+        for (const char *p = parts[i]; *p; p++) {
+            h ^= (uint8_t)*p;
+            h *= 1099511628211ULL;
+        }
+        h ^= 0xff;
+        h *= 1099511628211ULL;
+    }
+    int fresh = 0;
+    pthread_mutex_lock(&mu);
+    int found = 0;
+    for (int i = 0; i < nseen; i++)
+        if (seen[i] == h) { found = 1; break; }
+    if (!found && nseen < HL_MY_UNVERIFIED_WARN_MAX) {
+        seen[nseen++] = h;
+        fresh = 1;
+    }
+    pthread_mutex_unlock(&mu);
+    if (!fresh) return;
+    log_warn("[hull:c] mysql: %s authentication for %s@%s:%s answered the "
+             "server's challenge over a connection whose server certificate "
+             "was not verified (sslmode=%s): whoever answered can test "
+             "passwords against the response offline; use sslmode=verify-full "
+             "(or verify-ca)", plugin, dsn->user, dsn->host, dsn->port,
+             sslmode == HL_MY_SSL_REQUIRE ? "require" : "prefer");
 }
 
 static int reply_frame(HlMyConn *conn, HlMyFrame *f, unsigned may_end);
@@ -590,9 +653,12 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
      * (hl_my_client_charset, audit 20). */
     uint8_t charset = hl_my_client_charset(hs.charset);
     conn->charset = charset;
-    conn->mariadb = strstr(hs.server_version, "MariaDB") != NULL;
-    conn->bin_collation = hl_my_bin_collation(hs.server_version);
-    conn->roles = (uint8_t)hl_my_roles_supported(hs.server_version);
+    /* Provisional: the greeting comes BEFORE TLS, so an on-path attacker
+     * can rewrite its version string even under sslmode=verify-full. Every
+     * connection the backend opens reads the version again over the
+     * authenticated session (hl_my_conn_session_init) before any SQL these
+     * facts drive runs (audit 44). */
+    my_set_server_facts(conn, hs.server_version);
     /* The session's starting status (autocommit), until the first OK: it was
      * left 0, which read as autocommit off (audit 39). */
     conn->server_status = hs.status;
@@ -671,9 +737,16 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
     hl_my_writer_free(&w);
     if (se) { conn_set_err(conn, "failed to send handshake response");
               hl_my_conn_close(conn); return -1; }
+    /* The greeting's own plugin is answered on any sslmode: it is the
+     * server's default (mysql_native_password on MariaDB and MySQL 5.7), and
+     * refusing it would break their default accounts under the default
+     * sslmode. An unverified channel is reported instead. */
+    if (authlen > 0 && my_auth_unverified(tls_verified, sslmode))
+        my_warn_unverified_auth(dsn, plugin, sslmode);
 
     /* Auth result: OK, ERR, an AuthSwitchRequest (0xFE), or an AuthMoreData
      * (0x01) fast/full-auth exchange for caching_sha2_password. */
+    int switched = 0;
     for (int npkt = 0;; npkt++) {
         if (npkt >= HL_MY_AUTH_MAX_PACKETS) {
             conn_set_err(conn, "too many packets during authentication");
@@ -702,6 +775,13 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
         }
 
         if (hdr == HL_MY_PKT_EOF) {          /* 0xFE AuthSwitchRequest */
+            /* At most one switch: every switch is a fresh password-derived
+             * response to a nonce the server picks (audit 44). */
+            if (switched) {
+                conn_set_err(conn, "second auth switch from the server refused");
+                hl_my_conn_close(conn); return -1;
+            }
+            switched = 1;
             HlMyCursor c; hl_my_cursor_init(&c, &f);
             (void)hl_my_get_u8(&c);          /* 0xFE */
             const char *sw = hl_my_get_cstr(&c);
@@ -709,6 +789,19 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
             const uint8_t *data = hl_my_get_eof_str(&c, &dlen);
             if (!sw) { conn_set_err(conn, "malformed auth-switch request");
                        hl_my_conn_close(conn); return -1; }
+            /* A switch to mysql_native_password (a SHA-1 response to the
+             * server's nonce) only over a verified server or an explicit
+             * sslmode=disable, as Postgres keeps cleartext and a weak SCRAM
+             * count to those (audit 29; audit 44). */
+            if (strcmp(sw, "mysql_native_password") == 0 &&
+                my_auth_unverified(tls_verified, sslmode)) {
+                conn_set_err(conn,
+                    "auth switch to mysql_native_password refused over a "
+                    "connection whose server certificate was not verified: "
+                    "set sslmode=verify-full or verify-ca, or move the account "
+                    "to caching_sha2_password");
+                hl_my_conn_close(conn); return -1;
+            }
             uint8_t nonce[HL_MY_SCRAMBLE_LEN];
             memset(nonce, 0, sizeof nonce);
             if (data)
@@ -723,6 +816,8 @@ static int my_start_over_transport(HlMyConn *conn, HlDbTransport *t,
                 conn_set_err(conn, "auth-switch response failed");
                 hl_my_conn_close(conn); return -1;
             }
+            if (n2 > 0 && my_auth_unverified(tls_verified, sslmode))
+                my_warn_unverified_auth(dsn, sw, sslmode);
             continue;   /* read the next result (OK / ERR / AuthMoreData) */
         }
 
@@ -1746,6 +1841,43 @@ int hl_my_conn_capture_login(HlMyConn *conn)
     memcpy(conn->login_role, c.role, sizeof conn->login_role);
     memcpy(conn->login_db, c.db, sizeof conn->login_db);
     conn->login_captured = 1;
+    return 0;
+}
+
+/* VERSION()'s one value, into a fixed buffer. */
+typedef struct {
+    int  rows;
+    int  bad;
+    char v[128];
+} MyVersionCap;
+
+static int my_version_row(void *ctx, const char *const *values,
+                          const size_t *lengths, int ncols)
+{
+    MyVersionCap *c = ctx;
+    if (c->rows++ || ncols != 1) { c->bad = 1; return 0; }
+    if (!values[0] || lengths[0] == 0 || lengths[0] >= sizeof c->v ||
+        memchr(values[0], '\0', lengths[0])) {
+        c->bad = 1;
+        return 0;
+    }
+    memcpy(c->v, values[0], lengths[0]);
+    c->v[lengths[0]] = '\0';
+    return 0;
+}
+
+int hl_my_conn_session_init(HlMyConn *conn)
+{
+    MyVersionCap c;
+    memset(&c, 0, sizeof c);
+    if (hl_my_conn_query(conn, "SELECT VERSION(); SET autocommit = 1",
+                         NULL, my_version_row, &c, NULL) != 0)
+        return -1;
+    if (c.rows != 1 || c.bad) {
+        conn_set_err(conn, "could not read the server's version");
+        return -1;
+    }
+    my_set_server_facts(conn, c.v);
     return 0;
 }
 

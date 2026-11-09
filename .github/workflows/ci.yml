@@ -2085,12 +2085,12 @@ jobs:
             fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite \
             fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire \
             fuzz/fuzz_valkey_dsn fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact \
-            fuzz/fuzz_mysql_stmt
+            fuzz/fuzz_mysql_stmt fuzz/fuzz_pg_msg fuzz/fuzz_mysql_rows
       - name: Run DB wire fuzzers (60s each)
-        timeout-minutes: 18
+        timeout-minutes: 22
         run: |
           set -e
-          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn sql_kw dsn_redact mysql_stmt; do
+          for f in pgwire pg_dsn pg_rewrite mysqlwire mysql_dsn respwire valkey_dsn sql_kw dsn_redact mysql_stmt pg_msg mysql_rows; do
             echo "== fuzz $f =="
             ./fuzz/fuzz_$f fuzz/corpus_$f/ -max_total_time=60
           done
