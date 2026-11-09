@@ -10162,14 +10162,18 @@ UTEST(lua_worker, sql_text_is_charged_to_the_job)
         "local r2 = w.dispatch(function()\n"
         "  local s = 'SELECT 1 --' .. string.rep('a', 1 << 20)\n"
         "  for i = 1, 500 do db.exec(s) end return 'ran' end)\n"
+        /* ordinary queries under the same small budget still run. 1000 used a
+         * large share of it and tripped on a slow macOS runner (as the JS twin
+         * did, #1020); 200 keeps the contrast with the 500 x 1 MB loops above
+         * without riding the limit. */
         "local r3 = w.dispatch(function() local n = 0\n"
-        "  for i = 1, 1000 do n = n + db.query('SELECT 1 AS n')[1].n end\n"
+        "  for i = 1, 200 do n = n + db.query('SELECT 1 AS n')[1].n end\n"
         "  return n end)\n"
         "return msg(r1) .. '|' .. msg(r2) .. '|' .. msg(r3)\n", out, sizeof out);
     const char *bar = strchr(out, '|');
     EXPECT_NE_MSG(strstr(out, "instruction limit"), NULL, out);
     EXPECT_TRUE_MSG(bar && strstr(bar + 1, "instruction limit") != NULL, out);
-    EXPECT_NE_MSG(strstr(out, "|1000"), NULL, out);
+    EXPECT_NE_MSG(strstr(out, "|200"), NULL, out);
 
     lua_rt.max_instructions = HL_DEFAULT_INSTRUCTIONS;
     lua_rt.base.module_set = NULL;
