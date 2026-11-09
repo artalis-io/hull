@@ -10,6 +10,24 @@ release-artifact layout).
 
 ### Fixed
 
+<!-- audit44:ws-close -->
+
+
+
+<!-- audit44:main-signal -->
+
+
+
+<!-- audit44:state-db -->
+
+
+
+<!-- audit44:ssh -->
+
+
+
+<!-- audit44:stdlib-data -->
+
 - **stdlib data layer (audit 44).** A typed `jobs.subscribe` (`types = {...}`)
   now moves its cursor past the events it does not take when a drain's batch
   is not full (bounded by the commit-order horizon); its cursor stayed at the
@@ -60,6 +78,32 @@ release-artifact layout).
   (event_at). Tests: `jobs_audit44.*`, `idempotency_audit44.*`,
   `attachment_audit44.*`, `kv_audit44.*`, `retry_audit44.*`, `search_audit44.*`, `authflows_audit44.*`,
   `inbox_audit44.*`, `outbox_audit44.*` (test_lua and test_js).
+
+
+
+<!-- audit44:gpu-compute -->
+
+
+
+<!-- audit44:auth -->
+
+
+
+<!-- audit44:template-utils -->
+
+
+
+<!-- audit44:tooling -->
+
+
+
+<!-- audit44:runtime-c -->
+
+
+
+<!-- audit44:wire -->
+
+
 
 ## [0.19.0] - 2026-11-09
 
