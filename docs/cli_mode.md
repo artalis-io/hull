@@ -140,8 +140,23 @@ end)
 - **A second signal** during the grace ends the process at once, 128 + the
   signal. A second signal BEFORE the first could be delivered (main in a
   synchronous stretch the loop never gets to) kills the process as before.
+- **Main then serve.** In an app that registers `app.main` AND handlers, a
+  signal that arrived while main ran is a stop request: the server is not
+  started. A non-zero return from main is still the exit code; a main that
+  handled the interrupt and returned 0 (or returned before it was delivered)
+  exits 128 + the signal, the status of a process the signal ended. Returning
+  0 means "start serving", which the signal countermands; an `app.main`-only
+  program keeps main's return value as its exit code.
+- **Ignored signals stay ignored.** A SIGINT or SIGTERM the process inherited
+  as ignored (a background job of a shell without job control, a supervisor
+  that ignores SIGINT) is left alone and never reaches main.
+- **Stdin after the interrupt.** Main's own code keeps `ctx.stdin` after the
+  interrupt (in JS, its code after `await ctx.signal.promise`); the
+  `onabort` / `on_interrupt` callback is a run of its own and cannot read it.
 - The main window only: once a full build enters the serve loop, Keel's own
-  handler and drain apply. Covered by `tests/e2e_cli_interrupt.sh`
+  handler and drain apply. A handler installed after main's (the TUI's, still
+  acquired when main returns) is left in place; main's, still in its chain,
+  then only passes signals on to what it replaced. Covered by `tests/e2e_cli_interrupt.sh`
   (`make e2e-cli-interrupt`, both runtimes, both runners).
 
 ### A per-user state directory (`@state/`)
