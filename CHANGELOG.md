@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **WAMR app-heap allocator bounds: rated and tested** (audit 44). The round-42 question - whether
+  WAMR's `ems` allocator checked a whole heap node or only its start - is closed: only the start,
+  so a guest module could corrupt its own app-heap metadata and make the host allocator read or
+  write a node's fields past the end of linear memory (no guard region). Rated A3 / Medium, A2 for
+  a planted `.wasm` in development; fixed by WAMR patch 0009 (#1022), which landed without a test.
+  New regression test `wamr_audit44.ems_node_past_heap_end_is_corruption`
+  (`tests/hull/cap/test_wamr_ems.c`) faults with 0009 reverted and reports heap corruption with it.
+  The Postgres raw-text session-SQL residual (a comment between keywords) is recorded as an
+  accepted residual in `docs/design/audit_convergence.md` §11a. Test-only:
+  `js_audit11.rsa_verify_is_charged_by_the_key` runs 100 oversized-signature verifies, not 1000,
+  under its 1M budget (1000 used ~67% of it and tripped on a slow macOS runner).
+
 ## [0.19.0] - 2026-11-09
 
 ### Added

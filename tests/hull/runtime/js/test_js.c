@@ -12617,12 +12617,16 @@ UTEST(js_audit11, rsa_verify_is_charged_by_the_key)
         "   if (crypto.verify('RS256', pem, 'm', sig)) return 2;"
         " return 1; })()"), 1);
     EXPECT_EQ(js.budget_tripped, 0);
-    /* An oversized signature is false and costs nothing beyond its data. */
+    /* An oversized signature is false and costs nothing beyond its data.
+     * 1000 calls used ~67% of the 1M budget here (the binding meter charges
+     * each call's measured time) and tripped on a slow macOS runner; 100
+     * keep the contrast - one call charged by the 20000-byte key would be
+     * ~67M - without riding the limit (as #1020 / #1039 did). */
     js.max_instructions = 1000000;
     hl_js_reset_request(&js);
     EXPECT_EQ(eval_int(
         "(() => { const pem = 'A'.repeat(20000), sig = 's'.repeat(4096);"
-        " for (let i = 0; i < 1000; i++)"
+        " for (let i = 0; i < 100; i++)"
         "   if (crypto.verify('PS256', pem, 'm', sig)) return 2;"
         " return 1; })()"), 1);
     EXPECT_EQ(js.budget_tripped, 0);

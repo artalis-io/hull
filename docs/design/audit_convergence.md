@@ -302,7 +302,9 @@ the class is proven absent.
 - **Session-SQL refusal (§7.1, Postgres raw text).** Raw mode does not parse comments, so a comment
   between two positionally matched keywords inside a dollar-quoted body or after a backslash
   string (`SET /*x*/ ROLE`) is not refused. The per-entry session reset remains the guarantee, as
-  for SQL assembled at run time. Closing it would refuse much ordinary SQL with backslashes.
+  for SQL assembled at run time. Closing it would refuse much ordinary SQL with backslashes, so the
+  maintainer decided on 2026-11-09 NOT to extend raw mode to comments between keywords: closed as
+  an accepted residual (audit 44).
   Three plain-text spellings are recorded limits too (C audit L9, left as a classifier design
   decision): a Postgres `set_config` whose first argument is a concatenation of two literals (only
   the first literal is read); a Postgres function body given as a plain `'...'` string after `AS`
@@ -310,10 +312,17 @@ the class is proven absent.
   `SET @var = '<session statement>'` followed in a later call by `PREPARE ... FROM @var; EXECUTE`
   (the PREPARE is rescanned raw, but the string lives in the earlier statement, whose literals
   are skipped). Each is self-harm within one entry; the per-entry session reset still holds.
-- **WAMR heap check: unresolved, not rated.** Round 42 raised whether a WAMR heap bounds check
-  covers a whole heap node or only its start. Every automated attempt to analyse it was stopped,
-  so it has no severity and no verdict. The proposed defensive patch (bound the whole node) has not
-  landed. It needs a maintainer review, ideally under ASan, before it is rated or closed.
+- **WAMR heap check: fixed, rated A3 / Medium (audit 44).** Round 42 raised whether WAMR's `ems`
+  app-heap allocator checked a whole heap node or only its start. Only the start: a guest module
+  could corrupt its own app-heap metadata (it lives in linear memory, which the guest writes) so
+  that the host allocator read or wrote a node's fields past the end of linear memory, which has
+  no guard region (`WASM_DISABLE_HW_BOUND_CHECK=1`). Attacker A3 (a hostile module), also A2 for a
+  planted `.wasm` run in development. Fixed by WAMR patch 0009 (#1022,
+  `patches/wamr/0009-ems-heap-node-bounds.patch`: every corruption check covers the whole node via
+  `hmu_range_in_heap`), which landed as defensive with no test; audit 44 added
+  `wamr_audit44.ems_node_past_heap_end_is_corruption` (`tests/hull/cap/test_wamr_ems.c`), which
+  faults past the heap end with 0009 reverted (an ASan BUS in `alloc_hmu`) and reports heap
+  corruption with it.
 - **Recorded Lows** (not fixed): GPU helper - TIMEOUT / CRASHED verdicts are cached for the life
   of the process; the verdict key has no driver version; the macOS worker sandbox is
   allow-default; `tests/e2e_feature_gpu.sh` uses fixed ports. Elsewhere: a composed
