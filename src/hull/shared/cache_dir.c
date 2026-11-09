@@ -49,8 +49,9 @@ static int name_valid(const char *name)
  *
  * Not on Windows: Cosmopolitan reports no meaningful owner or mode bits
  * there, and the cache lives under the user's own profile. */
-static int cache_dir_trusted(const char *path)
+int hl_hull_dir_trusted(const char *path, const char **why_out)
 {
+    if (why_out) *why_out = NULL;
     if (hl_host_is_windows()) return 1;
     struct stat st;
     const char *why = NULL;
@@ -81,6 +82,14 @@ static int cache_dir_trusted(const char *path)
         }
     }
     if (!why) return 1;
+    if (why_out) *why_out = why;
+    return 0;
+}
+
+static int cache_dir_trusted(const char *path)
+{
+    const char *why = NULL;
+    if (hl_hull_dir_trusted(path, &why)) return 1;
     static int warned;
     if (!warned) {
         warned = 1;
@@ -90,6 +99,60 @@ static int cache_dir_trusted(const char *path)
     }
     errno = EPERM;
     return 0;
+}
+
+int hl_hull_private_dir_prepare(const char *value, mode_t mode,
+                                char *out, size_t out_sz, const char **why)
+{
+    const char *w = NULL;
+    if (why) *why = NULL;
+    if (!value || !*value || !out) { if (why) *why = "is empty"; return -1; }
+
+    /* A Git Bash / MSYS2 user exports "C:/x", the mixed form that shell hands
+     * a native program: absolute, so taken in its rooted spelling. No-op off
+     * Windows and on an already-rooted path. */
+    char ovr[HL_HOST_PATH_MAX];
+    if (hl_host_normalize_path(value, ovr, sizeof ovr) < 0) { w = "is too long"; goto refuse; }
+    if (ovr[0] != '/') { w = "is not an absolute path"; goto refuse; }
+    /* A '.' or '..' component is refused before anything is made: in the part
+     * that does not exist yet it cannot be resolved, and =~/.hull/x/../keys/y
+     * had its directories made inside ~/.hull/keys (audit 14). */
+    for (const char *c = ovr; *c; ) {
+        while (*c == '/') c++;
+        size_t cl = strcspn(c, "/");
+        if ((cl == 1 && c[0] == '.') || (cl == 2 && c[0] == '.' && c[1] == '.')) {
+            w = "has a '.' or '..' component"; goto refuse;
+        }
+        c += cl;
+    }
+    size_t olen = strlen(ovr);
+    while (olen > 1 && ovr[olen - 1] == '/') olen--;
+    if (olen + 1 > out_sz) { w = "is too long"; goto refuse; }
+    memcpy(out, ovr, olen);
+    out[olen] = '\0';
+
+    /* ~/.hull (the cache and tool-cache keys, the signed tool store) is
+     * refused BEFORE the mkdir (audit 12): a path that does not exist yet is
+     * resolved through its nearest existing ancestor, and a symlinked ~/.hull
+     * is matched through its target. The root / home test needs the
+     * directory, and those always exist: a mkdir there makes nothing. */
+    if (hl_host_path_covers_home(out, ".hull") || hl_host_path_under_home(out, ".hull")) {
+        w = "is ~/.hull, inside it or above"; goto refuse;
+    }
+    if (hl_mkdir_p(out, mode) != 0) { w = "cannot be created"; goto refuse; }
+    /* The directory is granted read-write-create to the app and tool
+     * sandboxes, so / or the home made the filesystem or every file the user
+     * owns writable (audit 9). */
+    if (hl_host_path_too_broad(out)) {
+        w = "is the filesystem root, your home directory or above"; goto refuse;
+    }
+    if (!hl_hull_dir_trusted(out, &w)) goto refuse;
+    return 0;
+
+refuse:
+    if (why) *why = w ? w : "is refused";
+    errno = EPERM;
+    return -1;
 }
 
 int hl_hull_cache_dir(char *out, size_t out_sz)
@@ -114,87 +177,29 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
      * for the registry-wide path-resolution rules. */
     const char *override = getenv("HULL_CACHE_DIR");
     if (override && *override) {
-        /* A Git Bash / MSYS2 user exports this as "C:/hull-cache", the mixed
-         * form that shell hands a native program. That is absolute, so accept
-         * it by rewriting to the rooted form the rest of this function (and
-         * blob_store, which also tests for a leading '/') requires. No-op off
-         * Windows and on an already-rooted path. */
-        char ovr[HL_HOST_PATH_MAX];
-        if (hl_host_normalize_path(override, ovr, sizeof ovr) < 0) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        override = ovr;
-
-        if (override[0] != '/') { errno = EINVAL; return -1; }
-        /* A '.' or '..' component is refused before anything is made: in the
-         * part that does not exist yet it cannot be resolved, and
-         * =~/.hull/x/../keys/y had its directories made inside ~/.hull/keys
-         * (audit 14). A cache directory has no reason to spell one. */
-        for (const char *c = override; *c; ) {
-            while (*c == '/') c++;
-            size_t cl = strcspn(c, "/");
-            if ((cl == 1 && c[0] == '.') ||
-                (cl == 2 && c[0] == '.' && c[1] == '.')) {
-                static int warned_dots;
-                if (!warned_dots) {
-                    warned_dots = 1;
-                    log_warn("[cache] HULL_CACHE_DIR %s has a '.' or '..' "
-                             "component; the bytecode / template / AOT caches "
-                             "are off (spell the directory without one)",
-                             override);
-                }
-                errno = EINVAL;
-                return -1;
-            }
-            c += cl;
-        }
-        size_t olen = strlen(override);
-        /* Strip trailing slashes for canonical form. */
-        while (olen > 1 && override[olen - 1] == '/') olen--;
-        if (olen + 2 > out_sz) { errno = ENAMETOOLONG; return -1; }
-        memcpy(out, override, olen);
-        out[olen]     = '/';
-        out[olen + 1] = '\0';
-
-        /* mkdir -p the override path. Use a private buffer to avoid
-         * mutating `out`. */
+        /* The one validator every operator-given private directory goes
+         * through (hl_hull_private_dir_prepare, also HULL_STATE_DIR): absolute,
+         * no '.' / '..', not ~/.hull or inside or above it (checked BEFORE the
+         * mkdir, audit 12 / 14), made 0700, not / or the home or above (audit
+         * 9), and trusted. Refused with the caches off and one WARN. */
         char abspath[PATH_MAX];
-        if (olen >= sizeof(abspath)) { errno = ENAMETOOLONG; return -1; }
-        memcpy(abspath, override, olen);
-        abspath[olen] = '\0';
-        /* The ~/.hull checks run BEFORE the mkdir too (audit 12): it made
-         * =~/.hull/keys/x's directories before refusing them. They resolve a
-         * path that does not exist yet through its nearest existing ancestor,
-         * and match a symlinked ~/.hull through its target. (The root / home
-         * test needs the directory, and those always exist: a mkdir there
-         * makes nothing.) */
-        int pre_refused = hl_host_path_covers_home(abspath, ".hull") ||
-                          hl_host_path_under_home(abspath, ".hull");
-        if (!pre_refused && hl_mkdir_p(abspath, 0700) != 0) return -1;
-        /* The cache directory is granted read-write-create to the app and
-         * tool sandboxes, so HULL_CACHE_DIR=/ or =$HOME made the filesystem
-         * or every file the user owns writable, and =~/.hull the cache and
-         * tool-cache keys (audit 9). Refused with the caches off, as for an
-         * untrusted directory. A directory INSIDE ~/.hull is refused too
-         * (audit 10): =~/.hull/blobs/tools or =~/.hull/keys handed the app
-         * the signed tool store or the signing keys. */
-        if (pre_refused || hl_host_path_too_broad(abspath) ||
-            hl_host_path_covers_home(abspath, ".hull") ||
-            hl_host_path_under_home(abspath, ".hull")) {
-            static int warned_broad;
-            if (!warned_broad) {
-                warned_broad = 1;
-                log_warn("[cache] HULL_CACHE_DIR %s is the filesystem root, "
-                         "your home directory or above, or ~/.hull, inside it "
-                         "or above; "
-                         "the bytecode / template / AOT caches are off (set "
-                         "it to a directory of its own)", abspath);
+        const char *why = NULL;
+        if (hl_hull_private_dir_prepare(override, 0700, abspath, sizeof abspath, &why) != 0) {
+            static int warned_override;
+            if (!warned_override) {
+                warned_override = 1;
+                log_warn("[cache] HULL_CACHE_DIR %s %s; the bytecode / template / "
+                         "AOT caches are off (set it to a private directory of "
+                         "its own)", override, why ? why : "is refused");
             }
             errno = EPERM;
             return -1;
         }
-        if (!cache_dir_trusted(abspath)) return -1;
+        size_t olen = strlen(abspath);
+        if (olen + 2 > out_sz) { errno = ENAMETOOLONG; return -1; }
+        memcpy(out, abspath, olen);
+        out[olen]     = '/';
+        out[olen + 1] = '\0';
         return 0;
     }
 

@@ -117,6 +117,16 @@ typedef struct HlSandboxPolicy {
      * .hull stays denied. Not set by hl_sandbox_policy_from_manifest: the
      * entry point fills it from the registry. */
     const char *internal_db_path;
+
+    /* The app's per-user STATE directory (shared/state_dir.h, platform gap
+     * 3): an absolute path Hull made 0700 before this, or NULL. Granted
+     * read-write-create whole (Seatbelt subpath / unveil rwc), as the app
+     * directory is granted read - the root is the app's own - with its
+     * `.hull` denied after, like the app directory's. The "@state/..." fs
+     * grants are then not walked under the app directory. Not set by
+     * hl_sandbox_policy_from_manifest (the manifest holds a NAME; the entry
+     * point resolves it). */
+    const char *state_dir;
 } HlSandboxPolicy;
 
 /*

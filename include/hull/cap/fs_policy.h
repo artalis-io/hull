@@ -134,11 +134,17 @@ typedef struct {
                                      * REJECTED at parse when first_pattern < n: a
                                      * trailing-slash pattern grant (`data/` + `*` + `/`)
                                      * has no defined descendant semantics in v1. */
+    /* The root the grant is under: 0 = the app directory, 1 = the app's
+     * per-user STATE directory (shared/state_dir.h, platform gap 3), named by
+     * a first component of exactly "@state" which is dropped from comp[].
+     * Any other first component beginning with '@' is reserved
+     * ("reserved_path"), so no app-relative path can collide. */
+    int           state;
     HlAllocator  *alloc;            /* allocator that owns comp[]/strings (for _free) */
 } HlFsGrant;
 
 #define HL_FS_GRANT_INIT ((HlFsGrant){ .comp = NULL, .n = 0, .first_pattern = 0, \
-                                       .directory_intent = 0, .alloc = NULL })
+                                       .directory_intent = 0, .state = 0, .alloc = NULL })
 
 /*
  * One compiled authorization entry. `anchor_fd` is a HELD, always-existing
@@ -182,6 +188,10 @@ typedef struct {
      * with conflicting intent are REJECTED at compile (never order-dependent). */
     size_t           literal_components;
     size_t           literal_bytes;
+    /* The root the entry's anchor was walked from (HlFsGrant.state): a caller
+     * path under "@state/" selects only among state entries, and one without
+     * only among app entries. */
+    int              state;
 } HlFsAuthEntry;
 
 /*
@@ -198,13 +208,16 @@ typedef struct {
 typedef struct {
     HlAllocator    *alloc;
     int             base_fd;          /* app-root dirfd, or -1 when uninitialized/freed */
+    int             state_fd;         /* the state root's dirfd (shared/state_dir.h), or -1:
+                                       * no state directory - a "@state/" grant then fails
+                                       * to compile ("state_dir_missing") */
     HlFsAuthEntry  *read;             /* READ set (read/mmap/stat/list select here) */
     size_t          read_n;
     HlFsAuthEntry  *write;            /* WRITE set (write selects here) */
     size_t          write_n;
 } HlFsPolicy;
 
-#define HL_FS_POLICY_INIT ((HlFsPolicy){ .alloc = NULL, .base_fd = -1, \
+#define HL_FS_POLICY_INIT ((HlFsPolicy){ .alloc = NULL, .base_fd = -1, .state_fd = -1, \
                                          .read = NULL, .read_n = 0,     \
                                          .write = NULL, .write_n = 0 })
 
@@ -305,6 +318,28 @@ int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
                                   const char *const *read,  size_t read_n,
                                   const char *const *write, size_t write_n,
                                   HlFsPolicy *out, const char **err);
+
+/* The same two, with the app's STATE directory (shared/state_dir.h) as the
+ * second root: a "@state/..." grant anchors under @p state_dir, which is
+ * opened and registered as a root (hl_fs_reserve_root) like base_dir. NULL
+ * state_dir = no state root (the plain compile): a "@state/" grant then fails
+ * with "state_dir_missing" - the manifest must declare `state = { name }`. */
+int hl_fs_policy_compile_ex(const char *base_dir, const char *state_dir,
+                            HlAllocator *alloc,
+                            const HlFsGrant *read,  size_t read_n,
+                            const HlFsGrant *write, size_t write_n,
+                            HlFsPolicy *out, const char **err);
+int hl_fs_policy_compile_manifest_ex(const char *base_dir, const char *state_dir,
+                                     HlAllocator *alloc,
+                                     const char *const *read,  size_t read_n,
+                                     const char *const *write, size_t write_n,
+                                     HlFsPolicy *out, const char **err);
+
+/* 1 when the raw grant / caller path @p raw names the state root: its first
+ * component is exactly "@state" ("@state", "@state/", "@state/keys/x"). Pure
+ * string test, used by the kernel sandbox to skip the per-grant walk under
+ * the app directory (the whole state directory is granted instead). */
+int hl_fs_grant_is_state(const char *raw);
 
 /*
  * Select the authorizing entry for `caller_path` (relative, no "..", no trailing

@@ -18,6 +18,8 @@
 #include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
 
 #include "hull/cap/fs_resolve.h"   /* hl_fs_reserve_root_path (audit 42) */
+#include "hull/shared/state_dir.h"  /* the @state/ root (gap 3) */
+#include <limits.h>
 #include "hull/cap/fs.h"          /* HlFsConfig - test/agent fs sandbox wiring
                                    * (unconditional: fs_cfg is not DB-gated) */
 #include "hull/utils/alloc.h"     /* HlAllocator + hl_alloc_init for the fs policy */
@@ -77,6 +79,10 @@ struct HlAppContext {
     HlFsConfig     fs_cfg_storage;
     HlFsPolicy     fs_policy_storage; /* compiled fs authorization policy */
     HlAllocator    fs_alloc;          /* owns the policy's memory (opts->alloc may be NULL) */
+    /* The app's per-user state directory (shared/state_dir.h), resolved from
+     * manifest state.name; "" = none. The CLI runner grants it to the sandbox
+     * (hl_app_context_state_dir). */
+    char           state_dir[PATH_MAX];
 
     /* Resolved module set (opt-in via opts.gate_modules). Lives here so
      * its lifetime matches the runtime - rt->module_set borrows. */
@@ -389,6 +395,29 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                 char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
                 int rc = hl_module_resolver_resolve(&m, &ctx->module_set,
                                                      err, sizeof(err));
+                /* The per-user state directory (shared/state_dir.h, gap 3),
+                 * as serve.c resolves it: before the policy compiles against
+                 * it. An app that declared one and cannot have it does not
+                 * start. */
+                ctx->state_dir[0] = '\0';
+                if (m.state_invalid) {
+                    hl_eprintf_line("[app-context] the manifest's `state` is not "
+                                    "usable (see above); refusing to start");
+                    hl_manifest_free(&m);
+                    hl_app_context_free(ctx);
+                    return -1;
+                }
+                if (m.state_name) {
+                    if (hl_state_dir_resolve(m.state_name, ctx->state_dir,
+                                             sizeof ctx->state_dir) != 0) {
+                        hl_eprintf_line("[app-context] the state directory for "
+                                        "state.name %s is not usable", m.state_name);
+                        hl_manifest_free(&m);
+                        hl_app_context_free(ctx);
+                        return -1;
+                    }
+                    (void)hl_fs_reserve_root_path(ctx->state_dir);
+                }
                 /* Wire the fs capability from the manifest, mirroring the serve
                  * path (serve.c::hl_serve_wire_caps). Without this rt->fs_cfg
                  * stays NULL and blob.init / fs.read/write / fs.mmap fail with
@@ -406,8 +435,9 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                      * sandbox), so a test that reads outside its declared grants is
                      * denied. */
                     const char *perr = NULL;
-                    if (hl_fs_policy_compile_manifest(
-                            ctx->app_dir_copy, &ctx->fs_alloc,
+                    if (hl_fs_policy_compile_manifest_ex(
+                            ctx->app_dir_copy,
+                            ctx->state_dir[0] ? ctx->state_dir : NULL, &ctx->fs_alloc,
                             m.fs_read,  (size_t)m.fs_read_count,
                             m.fs_write, (size_t)m.fs_write_count,
                             &ctx->fs_policy_storage, &perr) != 0) {
@@ -420,6 +450,10 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                     ctx->fs_cfg_storage.base_dir = ctx->app_dir_copy;
                     ctx->fs_cfg_storage.base_len = strlen(ctx->app_dir_copy);
                     ctx->fs_cfg_storage.policy   = &ctx->fs_policy_storage;
+                    if (ctx->state_dir[0]) {
+                        ctx->fs_cfg_storage.state_dir = ctx->state_dir;
+                        ctx->fs_cfg_storage.state_len = strlen(ctx->state_dir);
+                    }
                     ctx->rt->fs_cfg = &ctx->fs_cfg_storage;
                 }
 #ifdef HL_ENABLE_WASM
@@ -617,6 +651,11 @@ HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 const char *hl_app_context_app_dir(HlAppContext *ctx)
 {
     return ctx ? ctx->app_vfs.root_dir : NULL;
+}
+
+const char *hl_app_context_state_dir(HlAppContext *ctx)
+{
+    return (ctx && ctx->state_dir[0]) ? ctx->state_dir : NULL;
 }
 
 /* Agnostic accessor: the runtime factory the context resolved (or NULL before

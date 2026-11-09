@@ -156,6 +156,10 @@ const HlVfs  *hl_app_context_platform_vfs(HlAppContext *ctx);
 HlStmtCache  *hl_app_context_stmt_cache(HlAppContext *ctx);
 int           hl_app_context_is_lua(HlAppContext *ctx);
 const char   *hl_app_context_app_dir(HlAppContext *ctx);
+/* The app's per-user state directory (shared/state_dir.h; manifest
+ * state.name), resolved and made at init, or NULL when none is declared. The
+ * app.main runner grants it to the kernel sandbox. */
+const char   *hl_app_context_state_dir(HlAppContext *ctx);
 /* The resolved runtime factory (NULL before resolution). Agnostic; the
  * runtime-typed accessors below build on it. */
 const HlRuntimeFactory *hl_app_context_factory(HlAppContext *ctx);

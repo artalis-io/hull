@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include "hull/cap/fs_policy.h"
+#include "hull/shared/state_dir.h"   /* HL_FS_STATE_PREFIX */
 #include "hull/cap/fs_resolve.h"
 #include "hull/utils/alloc.h"
 #include "hull/shared/host.h"   /* hl_host_is_windows */
@@ -138,6 +139,14 @@ static int pat_match(const char *pat, size_t pn, const char *s, size_t sn)
 
 /* ── grant parse ─────────────────────────────────────────────────────────────── */
 
+/* Is component @p seg (len @p l) exactly the state-root selector "@state"?
+ * Read once here for the grant parser, the caller-path splitter and
+ * hl_fs_grant_is_state alike. */
+static int is_state_component(const char *seg, size_t l)
+{
+    return l == sizeof(HL_FS_STATE_PREFIX) - 1 && memcmp(seg, HL_FS_STATE_PREFIX, l) == 0;
+}
+
 int hl_fs_grant_parse(const char *raw, size_t raw_len, HlAllocator *alloc,
                       HlFsGrant *out, const char **err)
 {
@@ -152,6 +161,7 @@ int hl_fs_grant_parse(const char *raw, size_t raw_len, HlAllocator *alloc,
     char *tmp[HL_FS_MAX_DEPTH];
     size_t n = 0;
     size_t first_pattern = (size_t)-1;
+    int state = 0;
 
     size_t i = 0;
     while (i < raw_len) {
@@ -165,8 +175,16 @@ int hl_fs_grant_parse(const char *raw, size_t raw_len, HlAllocator *alloc,
         if (seglen == 1 && seg[0] == '.') continue;    /* "." adds no depth */
         if (seglen == 2 && seg[0] == '.' && seg[1] == '.') { e = "invalid_path"; goto fail; }
         if (seglen > NAME_MAX) { e = "invalid_path"; goto fail; }
+        /* A first component "@state" selects the state root (shared/state_dir.h)
+         * and is not a path component; any other '@'-component there is
+         * reserved so no app-relative path can ever collide with a root name. */
+        if (n == 0 && seg[0] == '@') {
+            if (!state && is_state_component(seg, seglen)) { state = 1; continue; }
+            e = "reserved_path"; goto fail;
+        }
         /* A grant of <app>/.hull (or anything in it) - Hull's own directory, which
-         * no app capability reaches - fails the manifest (audit 37). */
+         * no app capability reaches - fails the manifest (audit 37). The state
+         * root keeps the same reservation. */
         if (n == 0 && hl_fs_reserved_name(seg, seglen)) { e = "reserved_path"; goto fail; }
 
         int has_star = 0;
@@ -200,6 +218,7 @@ int hl_fs_grant_parse(const char *raw, size_t raw_len, HlAllocator *alloc,
     out->n = n;
     out->first_pattern = first_pattern;
     out->directory_intent = (n == 0) ? 0 : directory_intent;
+    out->state = state;
     out->alloc = alloc;
     return 0;
 
@@ -233,6 +252,7 @@ static int comps_cmp(char *const *a, size_t an, char *const *b, size_t bn)
 /* Two grants are "the same path" iff component-identical. */
 static int grants_same_path(const HlFsGrant *a, const HlFsGrant *b)
 {
+    if (a->state != b->state) return 0;             /* different roots */
     return a->n == b->n && comps_cmp(a->comp, a->n, b->comp, b->n) == 0;
 }
 
@@ -282,6 +302,7 @@ static int compile_one(int base_fd, HlAllocator *alloc, const HlFsGrant *g,
         out->terminal = HL_FS_TERMINAL_FILE;
         out->literal_components = 0;
         out->literal_bytes = 0;
+        out->state = g->state;
         return 0;
     }
 
@@ -310,6 +331,7 @@ static int compile_one(int base_fd, HlAllocator *alloc, const HlFsGrant *g,
                 out->first_pattern = g->first_pattern;
                 out->terminal = HL_FS_TERMINAL_FILE;
                 specificity(g->comp, g->n, &out->literal_components, &out->literal_bytes);
+                out->state = g->state;
                 return 0;
             }
             /* not_a_directory (a file -> EXACT) or not_found (-> CREATE) continue to
@@ -390,6 +412,7 @@ done_walk:;
     out->first_pattern = g->first_pattern;
     out->terminal = term;
     specificity(g->comp, g->n, &out->literal_components, &out->literal_bytes);
+    out->state = g->state;
     return 0;
 
 fail:
@@ -411,7 +434,7 @@ static int entry_priority_cmp(const void *pa, const void *pb)
     return comps_cmp(a->grant, a->grant_n, b->grant, b->grant_n);        /* grant-text ASC */
 }
 
-static int compile_set(int base_fd, HlAllocator *alloc,
+static int compile_set(int base_fd, int state_fd, HlAllocator *alloc,
                        const HlFsGrant *grants, size_t n,
                        HlFsAuthEntry **out, size_t *out_n, const char **err)
 {
@@ -448,7 +471,17 @@ static int compile_set(int base_fd, HlAllocator *alloc,
     size_t w = 0;
     for (size_t i = 0; i < n; i++) {
         if (!keep[i]) continue;
-        if (compile_one(base_fd, alloc, &grants[i], &entries[w], err) != 0) {
+        int root_fd = grants[i].state ? state_fd : base_fd;
+        if (root_fd < 0) {
+            /* A "@state/" grant with no state directory: the manifest must
+             * declare `state = { name = ... }` (shared/state_dir.h). */
+            if (err) *err = "state_dir_missing";
+            for (size_t k = 0; k < w; k++) entry_free(alloc, &entries[k]);
+            hl_alloc_free(alloc, entries, m * sizeof(HlFsAuthEntry));
+            hl_alloc_free(alloc, keep, n);
+            return -1;
+        }
+        if (compile_one(root_fd, alloc, &grants[i], &entries[w], err) != 0) {
             for (size_t k = 0; k < w; k++) entry_free(alloc, &entries[k]);
             hl_alloc_free(alloc, entries, m * sizeof(HlFsAuthEntry));
             hl_alloc_free(alloc, keep, n);
@@ -468,10 +501,11 @@ static int compile_set(int base_fd, HlAllocator *alloc,
 
 /* ── public compile / free ───────────────────────────────────────────────────── */
 
-int hl_fs_policy_compile(const char *base_dir, HlAllocator *alloc,
-                         const HlFsGrant *read, size_t read_n,
-                         const HlFsGrant *write, size_t write_n,
-                         HlFsPolicy *out, const char **err)
+int hl_fs_policy_compile_ex(const char *base_dir, const char *state_dir,
+                            HlAllocator *alloc,
+                            const HlFsGrant *read, size_t read_n,
+                            const HlFsGrant *write, size_t write_n,
+                            HlFsPolicy *out, const char **err)
 {
     const char *e = "io_error";
     if (!base_dir || !alloc || !out) { if (err) *err = "invalid_args"; return -1; }
@@ -483,9 +517,16 @@ int hl_fs_policy_compile(const char *base_dir, HlAllocator *alloc,
     /* Every resolution in this process refuses stepping into base_dir/.hull
      * (audit 37), whatever route reaches it. */
     hl_fs_reserve_root(p.base_fd);
+    if (state_dir) {
+        /* The second root (shared/state_dir.h): the same ceiling and the same
+         * .hull reservation as the app directory. */
+        p.state_fd = hl_fs_open_base(state_dir, &e);
+        if (p.state_fd < 0) goto fail;
+        hl_fs_reserve_root(p.state_fd);
+    }
 
-    if (compile_set(p.base_fd, alloc, read, read_n, &p.read, &p.read_n, &e) != 0) goto fail;
-    if (compile_set(p.base_fd, alloc, write, write_n, &p.write, &p.write_n, &e) != 0) goto fail;
+    if (compile_set(p.base_fd, p.state_fd, alloc, read, read_n, &p.read, &p.read_n, &e) != 0) goto fail;
+    if (compile_set(p.base_fd, p.state_fd, alloc, write, write_n, &p.write, &p.write_n, &e) != 0) goto fail;
 
     *out = p;
     return 0;
@@ -496,10 +537,35 @@ fail:
     return -1;
 }
 
+int hl_fs_policy_compile(const char *base_dir, HlAllocator *alloc,
+                         const HlFsGrant *read, size_t read_n,
+                         const HlFsGrant *write, size_t write_n,
+                         HlFsPolicy *out, const char **err)
+{
+    return hl_fs_policy_compile_ex(base_dir, NULL, alloc, read, read_n, write, write_n, out, err);
+}
+
+int hl_fs_grant_is_state(const char *raw)
+{
+    if (!raw) return 0;
+    while (*raw == '/') raw++;
+    return is_state_component(raw, strcspn(raw, "/"));
+}
+
 int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
                                   const char *const *read, size_t read_n,
                                   const char *const *write, size_t write_n,
                                   HlFsPolicy *out, const char **err)
+{
+    return hl_fs_policy_compile_manifest_ex(base_dir, NULL, alloc, read, read_n,
+                                            write, write_n, out, err);
+}
+
+int hl_fs_policy_compile_manifest_ex(const char *base_dir, const char *state_dir,
+                                     HlAllocator *alloc,
+                                     const char *const *read, size_t read_n,
+                                     const char *const *write, size_t write_n,
+                                     HlFsPolicy *out, const char **err)
 {
     const char *e = "io_error";
     HlFsGrant *rg = NULL, *wg = NULL;
@@ -524,7 +590,7 @@ int hl_fs_policy_compile_manifest(const char *base_dir, HlAllocator *alloc,
     for (wi = 0; wi < write_n; wi++)
         if (hl_fs_grant_parse(write[wi], strlen(write[wi]), alloc, &wg[wi], &e) != 0) goto done;
 
-    rc = hl_fs_policy_compile(base_dir, alloc, rg, read_n, wg, write_n, out, &e);
+    rc = hl_fs_policy_compile_ex(base_dir, state_dir, alloc, rg, read_n, wg, write_n, out, &e);
 
 done:
     for (size_t i = 0; i < ri; i++) hl_fs_grant_free(&rg[i]);
@@ -544,6 +610,7 @@ void hl_fs_policy_free(HlFsPolicy *policy)
     if (policy->read)  hl_alloc_free(a, policy->read,  policy->read_n  * sizeof(HlFsAuthEntry));
     if (policy->write) hl_alloc_free(a, policy->write, policy->write_n * sizeof(HlFsAuthEntry));
     if (policy->base_fd >= 0) close(policy->base_fd);
+    if (policy->state_fd >= 0) close(policy->state_fd);
     *policy = HL_FS_POLICY_INIT;
 }
 
@@ -565,8 +632,9 @@ static int has_short_name_tilde(const char *s, size_t l)
 }
 
 static long split_caller(const char *path, const char **comp, size_t *len,
-                         int allow_empty, const char **err)
+                         int allow_empty, int *state, const char **err)
 {
+    *state = 0;
     if (!path || path[0] == '\0') { *err = "invalid_path"; return -1; }
     if (path[0] == '/' || path[0] == '\\') { *err = "invalid_path"; return -1; }
     /* On Windows the OS also splits on a backslash and reads "C:" as a
@@ -599,6 +667,12 @@ static long split_caller(const char *path, const char **comp, size_t *len,
         if (l == 2 && s[0] == '.' && s[1] == '.') { *err = "invalid_path"; return -1; }
         if (l > NAME_MAX) { *err = "invalid_path"; return -1; }
         if (n >= HL_FS_MAX_DEPTH) { *err = "invalid_path"; return -1; }
+        /* "@state" first selects the state root (as in hl_fs_grant_parse); any
+         * other '@' first component is reserved. */
+        if (n == 0 && s[0] == '@') {
+            if (!*state && is_state_component(s, l)) { *state = 1; continue; }
+            *err = "reserved_path"; return -1;
+        }
         /* <app>/.hull is Hull's own (the `hull dev --agent` sidecars an agent
          * trusts); app code may not name it, in any letter case (audit 37). The
          * resolver also refuses reaching it through a symlink. */
@@ -701,11 +775,13 @@ static HlFsSelection select_in_set(const HlFsAuthEntry *set, size_t set_n,
     const char *ccomp[HL_FS_MAX_DEPTH];
     size_t clen[HL_FS_MAX_DEPTH];
     const char *e = NULL;
-    long cn = split_caller(caller_path, ccomp, clen, allow_empty, &e);
+    int cstate = 0;
+    long cn = split_caller(caller_path, ccomp, clen, allow_empty, &cstate, &e);
     if (cn < 0) { sel.err = e; return sel; }
 
     for (size_t i = 0; i < set_n; i++) {                  /* pre-sorted: first match wins */
         const HlFsAuthEntry *ent = &set[i];
+        if (ent->state != cstate) continue;               /* the other root's entries */
         if (!entry_matches(ent, ccomp, clen, cn)) continue;
         return make_selection(ent, ccomp, clen, (size_t)cn, scratch, scratch_len);
     }
@@ -753,7 +829,8 @@ HlFsListSelection hl_fs_policy_select_list(const HlFsPolicy *policy,
     const char *ccomp[HL_FS_MAX_DEPTH];
     size_t clen[HL_FS_MAX_DEPTH];
     const char *e = NULL;
-    long cn = split_caller(caller_path, ccomp, clen, 1 /*allow_empty*/, &e);
+    int cstate = 0;
+    long cn = split_caller(caller_path, ccomp, clen, 1 /*allow_empty*/, &cstate, &e);
     if (cn < 0) { sel.err = e; return sel; }
 
     /* Scan in stored priority order (most-specific first). MOST-SPECIFIC SHADOWING
@@ -762,6 +839,7 @@ HlFsListSelection hl_fs_policy_select_list(const HlFsPolicy *policy,
      * skipped to fall through to a broader grant. */
     for (size_t i = 0; i < policy->read_n; i++) {
         const HlFsAuthEntry *ent = &policy->read[i];
+        if (ent->state != cstate) continue;               /* the other root's entries */
         int governs = 0, listable = 0;
         HlFsSymlink sym = HL_FS_SYMLINK_FOLLOW;
         const char *filter = NULL;

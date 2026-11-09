@@ -10,6 +10,20 @@ release-artifact layout).
 
 ### Added
 
+- **A per-user state directory for `app.main` tools: the `@state/` root** (platform gap 3,
+  PR 1 of 3; `docs/design/platform_gaps_hsctl.md` §11). `app.manifest({ state = { name =
+  "hsctl" } })` (JS `state: { name }`) gives the app a second fs root: a grant or path whose
+  first component is `@state` lives under `$XDG_STATE_HOME/<name>`, else `~/.local/state/<name>`
+  (Windows `%LOCALAPPDATA%\<name>`; `HULL_STATE_DIR` overrides, under the same refusals as
+  `HULL_CACHE_DIR`), which Hull makes 0700 and trust-checks before the sandbox applies and
+  grants whole to the kernel sandbox (its `.hull` denied, like the app's). So a built CLI keeps
+  its keys and state in a private directory of its own wherever it is run from, and a
+  `fs.write(..., { private = true })` under it is a 0600 file in a 0700 tree - which retires
+  hsctl's gap 9 once it moves there. The two roots are separate namespaces; every other `@...`
+  first component is reserved; a `@state/` grant without `state.name` fails the manifest
+  (`state_dir_missing`). `fs.*`, blob roots, `compute.stream` output and `tar` take `@state/`
+  paths. docs/api/lua.md "Filesystem grants", docs/cli_mode.md "A per-user state directory";
+  `tests/e2e_state_dir.sh` (both runtimes, sandboxed) + `test_fs_policy`.
 - **`hull/ssh`: one transport, one host key** (platform gap 4, `docs/design/platform_gaps_hsctl.md`
   §10). `ssh.pending_trust()` (JS `pendingTrust()`) is a single-use trust: the first host key
   the server presents is the key that connection is held to (a rekey is pinned as always), a

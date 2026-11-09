@@ -288,6 +288,19 @@ typedef struct HlManifest {
     int         compute;          /* 1 if app declares compute: true */
     int         tui;              /* 1 if app declares tui: true (terminal UI) */
 
+    /* `state = { name = "hsctl" }` (JS `state: { name }`): the app's per-user
+     * STATE directory (shared/state_dir.h, platform gap 3), reached through
+     * the second fs root "@state/". NULL = none declared. The name is checked
+     * (hl_state_dir_name_valid) by the extractor; an invalid one is refused
+     * at load. Allocator-owned copy. */
+    const char *state_name;
+    /* 1 when the manifest's `state` was present but not usable (not a table,
+     * or a name hl_state_dir_name_valid refuses). The extractors report it
+     * here rather than by failing the extraction, which the app.main runner
+     * takes as "no manifest" and runs on without a policy; every entry point
+     * refuses to start on it. */
+    int         state_invalid;
+
     /* Declared first-party module set.
      *
      * `modules = { crypto = "1", fs = "1" }` in the manifest. Names

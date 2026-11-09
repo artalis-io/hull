@@ -89,6 +89,7 @@ int hl_policy_seal_cap_configs(HlRuntime *rt, ShSealArena *arena)
     if (rt->fs_cfg) {
         need += sizeof(HlFsConfig) + 16;
         if (rt->fs_cfg->base_dir) need += strlen(rt->fs_cfg->base_dir) + 16;
+        if (rt->fs_cfg->state_dir) need += strlen(rt->fs_cfg->state_dir) + 16;
         need += hl_fs_policy_sealed_size(rt->fs_cfg->policy);
     }
     if (rt->env_cfg) need += sizeof(HlEnvConfig) + 16;
@@ -111,6 +112,11 @@ int hl_policy_seal_cap_configs(HlRuntime *rt, ShSealArena *arena)
         if (rt->fs_cfg->base_dir) {
             fs->base_dir = sh_seal_arena_strdup(arena, rt->fs_cfg->base_dir);
             if (!fs->base_dir) goto fail;
+        }
+        /* The state root's path (shared/state_dir.h), read by blob roots. */
+        if (rt->fs_cfg->state_dir) {
+            fs->state_dir = sh_seal_arena_strdup(arena, rt->fs_cfg->state_dir);
+            if (!fs->state_dir) goto fail;
         }
         if (rt->fs_cfg->policy) {
             fs->policy = hl_fs_policy_copy_sealed(rt->fs_cfg->policy, arena);

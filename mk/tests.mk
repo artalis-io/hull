@@ -1700,6 +1700,12 @@ e2e-cli-poll: $(BUILDDIR)/hull
 e2e-cli-interrupt: $(BUILDDIR)/hull
 	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_cli_interrupt.sh
 
+# The per-user state directory and the @state/ fs root (shared/state_dir.h,
+# platform gap 3): both runtimes, sandboxed.
+.PHONY: e2e-state-dir
+e2e-state-dir: $(BUILDDIR)/hull
+	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_state_dir.sh
+
 e2e-migrate: $(BUILDDIR)/hull
 	sh tests/e2e_migrate.sh
 

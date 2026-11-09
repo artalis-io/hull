@@ -89,6 +89,7 @@
 #include "hull/runtime_flags.h"
 #include "hull/cap/run_watchdog.h"   /* --max-run-ms */
 #include "hull/shared/main_signal.h" /* app.main's interrupt (gap 7) */
+#include "hull/shared/state_dir.h"   /* the @state/ root (gap 3) */
 #include "hull/cap/vm_thread.h"     /* --vm-thread */
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_watchdog.h"
@@ -898,6 +899,10 @@ typedef struct {
     HlResolvedModuleSet  module_set; /* frozen after resolver; consulted by gating */
     HlFsConfig           fs_cfg_storage;
     HlFsPolicy           fs_policy_storage; /* compiled fs authorization policy */
+    /* The app's per-user state directory (shared/state_dir.h), resolved from
+     * manifest state.name before the fs policy compiles and the sandbox
+     * applies; "" = none declared. */
+    char                 state_dir[PATH_MAX];
     HlEnvConfig          env_cfg_storage;
     HlHttpConfig         http_cfg_storage;
     HlSmtpConfig         smtp_cfg_storage;
@@ -2446,10 +2451,31 @@ static int hl_serve_wire_caps(HlServerState *s)
      * app leaves rt->fs_cfg NULL -> fs denied (unchanged fail-closed behavior). */
     memset(&s->fs_cfg_storage, 0, sizeof(s->fs_cfg_storage));
     s->fs_policy_storage = HL_FS_POLICY_INIT;
+    /* The per-user state directory (shared/state_dir.h, gap 3): resolved,
+     * made 0700 and trusted here, before the policy compiles against it and
+     * the sandbox grants it; an app that declared one and cannot have it does
+     * not start. Registered as a root like the app directory (its .hull is
+     * reserved from app code, audit 37 / 42). */
+    s->state_dir[0] = '\0';
+    if (s->manifest.state_invalid) {
+        log_error("[hull:c] the manifest's `state` is not usable (see above); "
+                  "refusing to start");
+        return -1;
+    }
+    if (s->manifest.state_name) {
+        if (hl_state_dir_resolve(s->manifest.state_name, s->state_dir,
+                                 sizeof s->state_dir) != 0) {
+            log_error("[hull:c] the state directory for state.name %s is not usable",
+                      s->manifest.state_name);
+            return -1;
+        }
+        (void)hl_fs_reserve_root_path(s->state_dir);
+        log_debug("[hull:c] state directory: %s", s->state_dir);
+    }
     if (s->manifest.fs_read_count > 0 || s->manifest.fs_write_count > 0) {
         const char *perr = NULL;
-        if (hl_fs_policy_compile_manifest(
-                s->app_dir, &s->alloc,
+        if (hl_fs_policy_compile_manifest_ex(
+                s->app_dir, s->state_dir[0] ? s->state_dir : NULL, &s->alloc,
                 s->manifest.fs_read,  (size_t)s->manifest.fs_read_count,
                 s->manifest.fs_write, (size_t)s->manifest.fs_write_count,
                 &s->fs_policy_storage, &perr) != 0) {
@@ -2459,6 +2485,10 @@ static int hl_serve_wire_caps(HlServerState *s)
         s->fs_cfg_storage.base_dir = s->app_dir;
         s->fs_cfg_storage.base_len = strlen(s->app_dir);
         s->fs_cfg_storage.policy   = &s->fs_policy_storage;
+        if (s->state_dir[0]) {
+            s->fs_cfg_storage.state_dir = s->state_dir;
+            s->fs_cfg_storage.state_len = strlen(s->state_dir);
+        }
         rt->fs_cfg = &s->fs_cfg_storage;
     }
 
@@ -2658,6 +2688,7 @@ static int hl_serve_apply_sandbox(HlServerState *s)
                 irt ? hl_db_internal_sandbox_path(irt->db_registry) : NULL;
         }
 #endif
+        sandbox_policy.state_dir = s->state_dir[0] ? s->state_dir : NULL;
 
         /* CLI-mode apps (app.main registered) never accept inbound
          * connections - narrow the sandbox accordingly. The runtime

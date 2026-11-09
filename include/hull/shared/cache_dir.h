@@ -20,6 +20,7 @@
 #define HL_CACHE_DIR_H
 
 #include <stddef.h>
+#include <sys/types.h>   /* mode_t */
 
 /**
  * @brief Resolve the runtime-cache root, creating all layers.
@@ -44,6 +45,24 @@
  *         invalid override path, or mkdir failure.
  */
 int hl_hull_cache_dir(char *out, size_t out_sz);
+
+/* The private-directory trust rule the caches apply, for any directory Hull
+ * keeps per user (the state directory too, shared/state_dir.h): @p path is a
+ * real directory (not a symlink) owned by this user and not group- or
+ * world-writable, and every directory above it is the user's or root's and
+ * shared-writable only when sticky. 1 when trusted; else 0 with *why_out (a
+ * short phrase) set. Always 1 on Windows (no meaningful owner / mode bits). */
+int hl_hull_dir_trusted(const char *path, const char **why_out);
+
+/* The ONE validator for an operator-given private directory (HULL_CACHE_DIR,
+ * HULL_STATE_DIR - shared/state_dir.h): @p value must be absolute (a Git Bash
+ * "C:/x" is taken in its rooted form) with no '.' / '..' component; it may not
+ * be ~/.hull, inside it or above (checked before anything is made); it is
+ * then made with @p mode (mkdir -p), refused when it is /, the home or above,
+ * and held to hl_hull_dir_trusted. 0 with *out the canonical path (no trailing
+ * slash); -1 with *why a short phrase the caller logs. errno EPERM on refusal. */
+int hl_hull_private_dir_prepare(const char *value, mode_t mode,
+                                char *out, size_t out_sz, const char **why);
 
 /**
  * @brief Resolve `$HOME/.hull/blobs/runtime/<name>/`, creating all

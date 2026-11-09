@@ -9,6 +9,7 @@
  */
 
 #include "hull/manifest.h"
+#include "hull/shared/state_dir.h"   /* hl_state_dir_name_valid */
 #include "hull/utils/alloc.h"
 #include "manifest_internal.h"
 #include "log.h"
@@ -489,6 +490,31 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     if (JS_IsBool(tui_val))
         out->tui = JS_ToBool(ctx, tui_val);
     JS_FreeValue(ctx, tui_val);
+
+    /* state: { name: "hsctl" } - the per-user state directory
+     * (shared/state_dir.h); an unusable name fails the extraction, as in
+     * manifest_lua.c. */
+    JSValue state_val = mjs_own(ctx, manifest, "state");
+    if (JS_IsObject(state_val)) {
+        JSValue name_val = mjs_own(ctx, state_val, "name");
+        const char *sname = JS_IsString(name_val) ? mjs_str(ctx, name_val) : NULL;
+        int ok = hl_state_dir_name_valid(sname);
+        if (ok) out->state_name = hl_manifest_strdup(alloc, sname);
+        if (sname) JS_FreeCString(ctx, sname);
+        JS_FreeValue(ctx, name_val);
+        JS_FreeValue(ctx, state_val);
+        if (!ok) {
+            log_error("[manifest] state.name must be a directory name: [a-z0-9] "
+                      "then up to 63 of [a-z0-9._-], no \"..\"");
+            out->state_invalid = 1;   /* the entry point refuses to start */
+        }
+    } else if (!JS_IsUndefined(state_val) && !JS_IsNull(state_val)) {
+        JS_FreeValue(ctx, state_val);
+        log_error("[manifest] state must be an object: state: { name: \"...\" }");
+        out->state_invalid = 1;
+    } else {
+        JS_FreeValue(ctx, state_val);
+    }
 
     /* modules: ["hull/crypto@1", "hull/db@1", ...] - an array of
      * canonical spec strings. The local variable / imported identifier

@@ -144,6 +144,49 @@ end)
   handler and drain apply. Covered by `tests/e2e_cli_interrupt.sh`
   (`make e2e-cli-interrupt`, both runtimes, both runners).
 
+### A per-user state directory (`@state/`)
+
+A built binary's app directory is its working directory and every `fs` grant
+is relative to it, so a CLI had to run from a dedicated directory and could
+keep nothing in `~/.config`. A tool that declares a **state directory** gets a
+second fs root instead (platform gap 3, `src/hull/shared/state_dir.c`):
+
+```lua
+app.manifest({
+    state = { name = "hsctl" },                           -- JS: state: { name: "hsctl" }
+    modules = { "hull/fs@1" },
+    fs = { read = { "@state/" }, write = { "@state/keys/", "@state/fleet.json" } },
+})
+app.main(function(ctx)
+    fs.write("@state/keys/trust.key", key, { private = true })   -- 0600 in a 0700 directory
+    ...
+end)
+```
+
+- The directory is `$XDG_STATE_HOME/<name>`, else `~/.local/state/<name>`
+  (Windows `%LOCALAPPDATA%\<name>`), resolved from `hl_host_home` (never a raw
+  relative `$HOME`), **made 0700 by Hull before the sandbox applies**, and held
+  to the cache directory's trust rule: owned by the user, not group- or
+  world-writable, parents likewise. An app that declared one and cannot have
+  it does not start.
+- `HULL_STATE_DIR=/abs/path` redirects it, under the same refusals as
+  `HULL_CACHE_DIR` (`/`, the home or above, `~/.hull`, inside or above it, a
+  `.` / `..` component): the directory is granted read-write-create to the app.
+- The kernel sandbox grants the whole state directory (Seatbelt `subpath` /
+  unveil `rwc`) and denies its `.hull`, as it does for the app directory; the
+  capability layer then applies the grants exactly (`@state/keys/` is not
+  `@state/`). The `@state/...` grants are not walked under the working
+  directory.
+- `@state/` paths are taken by every capability that selects through the fs
+  policy: `fs.read/write/stat/list/mmap`, blob roots, `compute.stream` output,
+  `tar`. The app root stays a separate namespace, so `keys/x` and
+  `@state/keys/x` are different files with different grants.
+- Not yet: a `-d`-less default database under the state directory, and a
+  built binary that needs NOTHING from its working directory (so it can run
+  from `~` or `/`). Both are the next steps of the same design
+  (`docs/design/platform_gaps_hsctl.md` §11); until then a built tool is still
+  run from a directory of its own, and its `@state/` holds the state.
+
 ### Where `ctx.args` comes from
 
 Under `hull`, the first bare word is the entry file and the app's arguments go
