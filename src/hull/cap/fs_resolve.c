@@ -133,8 +133,8 @@ static int finalize_regular_leaf(int fd, const char **err)
 static int caller_path_ok(const char *p)
 {
     if (!p || p[0] == '\0' || p[0] == '/') return 0;   /* empty or absolute */
-    /* Windows separators and drive letters (see split_caller, fs_policy.c). */
-    if (hl_host_is_windows() && strpbrk(p, "\\:")) return 0;
+    /* What Windows reads differently (shared/host.h, the one rule). */
+    if (hl_host_path_unsafe_on_windows(p)) return 0;
     size_t len = strlen(p);
     if (p[len - 1] == '/') return 0;                   /* trailing slash (dir-shaped) */
     const char *c = p;

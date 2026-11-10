@@ -11,6 +11,9 @@
 #include "hull/cap/fs.h"
 #include "hull/cap/fs_policy.h"
 #include "hull/utils/alloc.h"
+#include "hull/shared/host.h"   /* hl_host_test_force_windows */
+#include <limits.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -257,5 +260,59 @@ UTEST(db_dynamic, network_host_gate)
     ASSERT_TRUE(strstr(err, "host") == NULL);
 }
 #endif
+
+/* Audit 44: on Windows a backslash is a separator and "C:" a drive, a
+ * trailing dot or space is dropped and "~1" opens a long name. A db.open
+ * file DSN under a root write grant, spelled any of those ways, is refused
+ * (forced-Windows) and nothing is made; an ordinary one still opens. */
+UTEST(db_dynamic_audit44, windows_backslash_refused)
+{
+    const char *t = getenv("TMPDIR");
+    char tmpl[PATH_MAX], base[PATH_MAX];
+    snprintf(tmpl, sizeof tmpl, "%s/hull_dyn44_XXXXXX", (t && t[0]) ? t : "/tmp");
+    ASSERT_TRUE(mkdtemp(tmpl) != NULL);
+    ASSERT_TRUE(realpath(tmpl, base) != NULL);
+    char sub[PATH_MAX + 8];
+    snprintf(sub, sizeof sub, "%s/data", base);
+    ASSERT_EQ(0, mkdir(sub, 0700));
+    hl_host_test_force_windows(1);
+
+    const char *wr[] = { "." };
+    HlAllocator alloc = {0};
+    HlFsPolicy pol = HL_FS_POLICY_INIT;
+    const char *perr = NULL;
+    ASSERT_EQ(0, hl_fs_policy_compile_manifest(base, &alloc, NULL, 0, wr, 1, &pol, &perr));
+    HlFsConfig fs = { .base_dir = base, .base_len = strlen(base), .policy = &pol };
+    HlManifestDbDynamic p = policy_sqlite();
+    p.schemes[1] = "file";
+    p.scheme_count = 2;
+    char opened[HL_DB_DYNAMIC_DSN_MAX];
+
+    static const char *const bad[] = {
+        "data\\..\\..\\x.db", "sqlite://data\\..\\x.db", "C:x.db",
+        "data/x.db.", "data/x.db ", "data/PROGRA~1/x.db",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        const char *err = NULL;
+        HlDbHandle *h = hl_db_dynamic_open_ex(bad[i], &p, &fs, opened, sizeof opened, &err);
+        EXPECT_TRUE(h == NULL);
+        if (h) { fprintf(stderr, "accepted on Windows: %s\n", bad[i]); hl_db_dynamic_close(h); }
+    }
+    const char *err = NULL;
+    HlDbHandle *h = hl_db_dynamic_open_ex("data/ok.db", &p, &fs, opened, sizeof opened, &err);
+    EXPECT_TRUE(h != NULL);
+    if (h) hl_db_dynamic_close(h);
+    hl_host_test_force_windows(-1);
+    hl_fs_policy_free(&pol);
+    static const char *const leftovers[] = { "data/ok.db", "data/ok.db-wal",
+                                             "data/ok.db-shm", "data/ok.db-journal" };
+    char f[PATH_MAX + 32];
+    for (size_t i = 0; i < sizeof leftovers / sizeof leftovers[0]; i++) {
+        snprintf(f, sizeof f, "%s/%s", base, leftovers[i]);
+        (void)remove(f);
+    }
+    (void)rmdir(sub);
+    (void)rmdir(base);
+}
 
 UTEST_MAIN()

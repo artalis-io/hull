@@ -151,3 +151,6 @@ INV-8  src/hull/cap/db_sqlite.c:sqlite_replace_conn  # reopens a file s->live_pa
 # INV-9: Lua resumes
 INV-9  src/hull/runtime/lua/async.c:hl_lua_co_resume  # coroutine.resume itself: the app's coroutine library, not a runtime resume path; closes an errored coroutine (hl_lua_close_errored)
 INV-9  src/hull/runtime/lua/async.c:hl_lua_co_auxwrap  # coroutine.wrap's call: the app's coroutine library; closes an errored coroutine with lua_closethread(co, L)
+
+# INV-11: Windows app-path checks
+INV-11  src/hull/cap/tool.c:tool_canonical_path  # tool-mode unveil check of the OPERATOR's paths: it rewrites backslashes to walk to an existing ancestor (not an app path joined with a root); its trailing-dot / colon refusals are tool_tail_comp_unsafe's

@@ -8,6 +8,19 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows: a manifest file DSN with a backslash or a drive could leave the app tree** (audit 44,
+  A2 / A3, Medium on Windows). `databases.named` / `databases.internal` file DSNs (`@state/` ones too)
+  were confined with checks that split only on `/`, so on Windows - a cosmo APE, with no kernel sandbox
+  there - `data\..\..\x.db` or `@state/a\..\b.db` had no `..` component for them and opened outside
+  the root, and `C:x.db`, a trailing dot or space and an 8.3 short name were read differently by the OS.
+  The app-supplied part of such a DSN is now refused with the fs policy's rule, which is one predicate
+  (`hl_host_path_unsafe_on_windows`) shared by the fs policy, the fs resolver and `hl_cap_fs_validate`
+  (`db.open`, blob roots). New lint rule INV-11. Tests:
+  `db_registry_audit44.windows_backslash_dsn_refused`, `db_dynamic_audit44.windows_backslash_refused`,
+  `fs_policy_audit44.windows_rule_is_shared`.
+
 ## [0.20.0] - 2026-11-10
 
 Audit round 44 over v0.19.0 (C, JS and Lua), with every finding fixed: no High, 13 Medium and

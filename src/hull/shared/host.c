@@ -51,8 +51,17 @@ static int detect_windows(void)
 #endif
 }
 
+#ifdef HL_HOST_TEST_HOOKS
+/* Test builds only (mk/tests.mk links host_th.o): -1 = the real host. */
+static int g_force_windows = -1;
+void hl_host_test_force_windows(int v) { g_force_windows = v; }
+#endif
+
 int hl_host_is_windows(void)
 {
+#ifdef HL_HOST_TEST_HOOKS
+    if (g_force_windows >= 0) return g_force_windows;
+#endif
     /* Cache: this is consulted per rendered hint and per PATH probe. The
      * host cannot change mid-process. -1 = not yet computed. */
     static int cached = -1;
@@ -463,6 +472,32 @@ char *hl_host_path_absolute_only(const char *path_env)
 }
 
 /* -- Path form ----------------------------------------------------- */
+
+/* A "~<digit>" in a component: the shape of an 8.3 short name. */
+static int has_short_name_tilde(const char *s, size_t l)
+{
+    for (size_t i = 0; i + 1 < l; i++)
+        if (s[i] == '~' && s[i + 1] >= '0' && s[i + 1] <= '9') return 1;
+    return 0;
+}
+
+int hl_host_path_unsafe_on_windows(const char *path)
+{
+    if (!path || !hl_host_is_windows()) return 0;
+    if (strpbrk(path, "\\:")) return 1;
+    for (const char *p = path; *p; ) {
+        const char *e = strchr(p, '/');
+        size_t l = e ? (size_t)(e - p) : strlen(p);
+        int dots = (l == 1 && p[0] == '.') || (l == 2 && p[0] == '.' && p[1] == '.');
+        if (l > 0 && !dots &&
+            (p[l - 1] == '.' || p[l - 1] == ' ' || has_short_name_tilde(p, l)))
+            return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
 
 int hl_host_normalize_path(const char *path, char *out, size_t out_sz)
 {

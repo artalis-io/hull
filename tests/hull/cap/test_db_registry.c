@@ -16,6 +16,7 @@
 #include "hull/cap/db_sqlite.h"
 #include "hull/manifest.h"
 #include "hull/utils/env_ref.h"
+#include "hull/shared/host.h"   /* hl_host_test_force_windows */
 #include <dirent.h>
 #include <sqlite3.h>
 
@@ -1267,6 +1268,82 @@ UTEST(db_registry_audit44, repoint_carries_toplevel_default_tables)
     hl_cap_db_ns_restore(prev);
     EXPECT_EQ(3, count_of(def, "SELECT max(id) FROM _hull_jobs"));
     hl_db_registry_destroy(reg);
+    rm_tree(root);
+}
+
+/* ── audit 44: a manifest file DSN on Windows ────────────────────────── */
+
+/* On Windows the OS also splits a path on a backslash and reads "C:" as a
+ * drive, drops a trailing dot or space, and opens an 8.3 short name as its
+ * long name. confine_manifest_dsn split only on '/', so a DSN spelled with
+ * backslashes had no ".." component for it and, opened, left the app tree
+ * (or the state directory). Forced-Windows: every such spelling is refused
+ * and no file is made; ordinary ones still open. */
+UTEST(db_registry_audit44, windows_backslash_dsn_refused)
+{
+    char root[PATH_MAX], app[PATH_MAX], state[PATH_MAX];
+    ASSERT_EQ(0, confine_fixture(root, sizeof root, app, sizeof app));
+    snprintf(state, sizeof state, "%s/state", root);
+    ASSERT_EQ(0, mkdir(state, 0700));
+    char data[PATH_MAX + 8];
+    snprintf(data, sizeof data, "%s/data", app);
+    ASSERT_EQ(0, mkdir(data, 0700));
+    hl_host_test_force_windows(1);
+
+    static const char *const bad[] = {
+        "data\\..\\..\\x.db",
+        "sqlite://data\\..\\..\\x.db",
+        "@state/a\\..\\b.db",
+        "C:x.db",
+        "C:/x.db",
+        "data/app.db.",
+        "data/app.db ",
+        "data/PROGRA~1/x.db",
+        "LONGNA~1.db",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        HlManifest m;
+        memset(&m, 0, sizeof m);
+        m.databases.named[0].name = "cache";
+        m.databases.named[0].dsn = bad[i];
+        m.databases.named_count = 1;
+        HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
+        ASSERT_TRUE(reg != NULL);
+        ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+        ASSERT_EQ(0, hl_db_registry_set_state_dir(reg, state));
+        const char *err = NULL;
+        HlDbHandle *h = hl_db_registry_get(reg, "cache", &err);
+        EXPECT_TRUE(h == NULL);
+        if (h) fprintf(stderr, "accepted on Windows: %s\n", bad[i]);
+        hl_db_registry_destroy(reg);
+    }
+    /* Nothing was made beside the app tree or in it under such a name. */
+    DIR *d = opendir(app);
+    ASSERT_TRUE(d != NULL);
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL)
+        EXPECT_TRUE(strchr(e->d_name, '\\') == NULL && strchr(e->d_name, ':') == NULL);
+    closedir(d);
+
+    /* Ordinary spellings still open, under their root. */
+    static const char *const good[] = { "data/app.db", "./cache.db", "@state/data.db" };
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        HlManifest m;
+        memset(&m, 0, sizeof m);
+        m.databases.named[0].name = "cache";
+        m.databases.named[0].dsn = good[i];
+        m.databases.named_count = 1;
+        HlDbRegistry *reg = hl_db_registry_create(&m, NULL, NULL);
+        ASSERT_TRUE(reg != NULL);
+        ASSERT_EQ(0, hl_db_registry_set_app_dir(reg, app));
+        ASSERT_EQ(0, hl_db_registry_set_state_dir(reg, state));
+        const char *err = NULL;
+        HlDbHandle *h = hl_db_registry_get(reg, "cache", &err);
+        EXPECT_TRUE(h != NULL);
+        if (!h) fprintf(stderr, "refused on Windows: %s (%s)\n", good[i], err ? err : "?");
+        hl_db_registry_destroy(reg);
+    }
+    hl_host_test_force_windows(-1);
     rm_tree(root);
 }
 

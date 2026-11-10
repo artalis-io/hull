@@ -368,6 +368,18 @@ static const char *confine_manifest_dsn(const HlDbRegistry *reg,
         }
         base_len = strlen(reg->app_dir_real);
     }
+    /* What Windows reads differently from the '/'-split checks here and
+     * below: a backslash is a separator there and "C:" a drive, so
+     * "data\..\..\x.db" had no ".." component for has_dotdot and left the
+     * root when opened; a trailing dot or space is dropped and "~1" opens a
+     * long name. Checked on the app-supplied part only (the root's own
+     * spelling may hold a short name), with the fs policy's rule
+     * (hl_host_path_unsafe_on_windows; audit 44). */
+    if (hl_host_path_unsafe_on_windows(abs + base_len)) {
+        *err = "a file database DSN may not hold a backslash, a drive, a "
+               "component ending in a dot or space, or a short name on Windows";
+        return NULL;
+    }
     /* <app>/.hull is Hull's (audit 37), and holds the internal database
      * (§7.2): a databases.named file DSN may not name anything in it. Only
      * databases.internal may (the stdlib's own connection). */
