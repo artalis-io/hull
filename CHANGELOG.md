@@ -8,6 +8,13 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-11-10
+
+Three audit 44 follow-ups, mainly a Windows fix: on Windows (no kernel sandbox there) a manifest
+database path written with a backslash or a drive letter could open a SQLite file outside the app
+tree or state directory. One behaviour change: `hull/ssh` refuses a `crypto` option (an
+undocumented test seam) with an error naming it.
+
 ### Fixed
 
 - **Audit 44 Lows: a TLS handshake through a caller's config with no server name, and JS
