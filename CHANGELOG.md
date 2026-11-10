@@ -22,8 +22,6 @@ release-artifact layout).
   `js_audit11.rsa_verify_is_charged_by_the_key` runs 100 oversized-signature verifies, not 1000,
   under its 1M budget (1000 used ~67% of it and tripped on a slow macOS runner).
 
-<!-- audit44:ws-close -->
-
 - **A WebSocket the app closes itself runs its `on_close` again** (audit 44 M5, a
   regression from #1007): `conn:close()` / `conn.close()` set the node's `closed`
   flag, and the registry lookup skipped closed nodes, so when Keel delivered the
@@ -39,10 +37,6 @@ release-artifact layout).
   `ws_audit44.*` (`tests/e2e_ws_close.sh`, `make e2e-ws-close`; test_ws, test_lua),
   `js_ws_client_audit44.finalizer_disarms_while_shutting_down`.
 
-
-
-<!-- audit44:main-signal -->
-
 - **app.main's interrupt handling (audit 44, `src/hull/shared/main_signal.c`).** An app with
   `app.main` AND handlers whose main handled SIGTERM / SIGINT and returned 0 fell through into
   the serve loop, so the stop request was lost and the process served until SIGKILL: a signal
@@ -54,10 +48,6 @@ release-artifact layout).
   atomic. JS: main's own code after `await ctx.signal.promise` may read `ctx.stdin` again.
   Tests: `main_signal_audit44.*`, `cli_interrupt_audit44.main_then_serve_sigterm`,
   `{js,lua}_main_signal_audit44.stdin_after_signal_await`.
-
-
-
-<!-- audit44:state-db -->
 
 - **The `@state/` default database (v0.19.0, gap 3) is now seamless for the app's top level,
   `hull migrate` and the agent** (audit 44). When `databases.named.default` replaces the
@@ -80,10 +70,6 @@ release-artifact layout).
   reload no longer opens the state database at all), and `blob.init` on an `@state/` root
   checks for symbolic links from the state directory, not the app directory's length.
 
-
-
-<!-- audit44:ssh -->
-
 - **`hull/ssh` audit 44: the Lua and JS clients brought back into line, and their edges
   closed.** Lua `Sftp:send` now marks the session broken when a multi-chunk request is cut
   short between chunks (a refusal, a closed channel), as JS did, so the next request cannot
@@ -101,10 +87,6 @@ release-artifact layout).
   the most it can take before reading, so a trip no longer discards bytes already taken.
   Tests `ssh_audit44.*`, `ssh_sftp_audit44.*`, `ssh_tunnel_audit44.*`,
   `js_ssh_audit44.read_trip_consumes_nothing`.
-
-
-
-<!-- audit44:stdlib-data -->
 
 - **stdlib data layer (audit 44).** A typed `jobs.subscribe` (`types = {...}`)
   now moves its cursor past the events it does not take when a drain's batch
@@ -157,10 +139,6 @@ release-artifact layout).
   `attachment_audit44.*`, `kv_audit44.*`, `retry_audit44.*`, `search_audit44.*`, `authflows_audit44.*`,
   `inbox_audit44.*`, `outbox_audit44.*` (test_lua and test_js).
 
-
-
-<!-- audit44:gpu-compute -->
-
 - **GPU / compute / TUI (audit 44).** A synchronous `gpu.*` call no longer
   blocks the event loop behind `gpu.async` jobs holding the device: it waits
   in short slices that ask the run and is refused `gpu_busy` once the run's
@@ -171,10 +149,6 @@ release-artifact layout).
   teardown, so its mmap borrows are released (it was lost in a dead stack
   variable). The TUI input parser drops a partial UTF-8 sequence at ESC and
   re-reads a lead byte that arrives mid-sequence instead of dropping it.
-
-
-
-<!-- audit44:auth -->
 
 - **Auth stdlib Lows from audit 44, both runtimes.** `oauth.init` refuses a `state_ttl` /
   `jwks_ttl` (`stateTtl` / `jwksTtl`) that is not a positive number of seconds (a string one
@@ -192,10 +166,6 @@ release-artifact layout).
   role / permission argument when the middleware is made. Lua `auth.session_middleware` /
   `jwt_middleware` take only the literal `optional = true`. Tests:
   `stdlib/{lua,js}/hull/tests/test_auth_audit44.*`.
-
-
-
-<!-- audit44:template-utils -->
 
 - **Template, TUI, health and csv Lua / JS parity (audit 44, stdlib Lows).** The Lua template
   engine emitted literal template text as a long string, which Lua's lexer reads with CR, CRLF
@@ -217,10 +187,6 @@ release-artifact layout).
   layout and editing arithmetic moved to the internal `hull._tui_layout` /
   `hull:_tui_layout`, testable without a terminal.
 
-
-
-<!-- audit44:tooling -->
-
 - **Audit 44, tooling and runtime edges (all Low).** `--verbose` CLI logging (and the
   `-DDEBUG` line callback) printed a log record's source field - a script's module name,
   so a cloned tree's file name - raw; it is escaped like the message. `hull agent` results
@@ -234,10 +200,6 @@ release-artifact layout).
   silently; opts go third, as in JS). A read-only stdlib module view's `pairs` hands out
   table keys as views too. JS `compute.buffer`'s error message no longer lists WasmBuffer /
   MappedBuffer, which it does not take.
-
-
-
-<!-- audit44:runtime-c -->
 
 - **Audit 44, runtime / C batch.** `fs.write(path, bytes, { mode = ... })`
   through an in-root symlink (the in-place path) truncated the target before
@@ -263,10 +225,6 @@ release-artifact layout).
   profile built its state directory's `.hull` deny from an uninitialised
   scratch when `realpath` failed.
 
-
-
-<!-- audit44:wire -->
-
 - **MySQL / Postgres wire clients (audit 44).** MySQL: the server facts that
   drive SQL Hull writes - the `_hull_*` tables' binary collation, MariaDB vs
   MySQL, whether the server has roles - came from the plaintext Handshake v10
@@ -291,8 +249,6 @@ release-artifact layout).
   ErrorResponse fields, column definitions, text and binary rows) over a fake
   transport; `fuzz_mysqlwire` now also reaches the column-definition,
   PREPARE_OK, version and CURRENT_ROLE()-list readers.
-
-
 
 ## [0.19.0] - 2026-11-09
 
