@@ -69,7 +69,10 @@ app.manifest({ modules: ["hull/fs@1"] });
 app.main(async (ctx) => {
     // ctx.args   : Array<string>
     // ctx.env    : Object<string, string>
-    // ctx.stdin  : { readLine(), readAll(), read(n), close() }. All return Promise<string|null>
+    // ctx.stdin  : { read(mode), close() }. read is synchronous: a string, or
+    //   null at end of input. mode "l" (the default) is the next line without
+    //   its newline, "a" the rest of the input, a number n up to n bytes
+    //   ("*l" / "*a" are accepted too, as in Lua)
     // ctx.stdout : { write(...chunks), flush() }
     // ctx.stderr : { write(...chunks), flush() }
     //   a chunk is a string (written as UTF-8), an ArrayBuffer or a typed
