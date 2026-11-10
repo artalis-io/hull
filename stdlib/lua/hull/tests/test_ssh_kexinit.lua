@@ -425,11 +425,16 @@ test("ssh.connect refuses a bad offer before dialling anything", function()
     local o = copy_offer()
     o.cipher = { "arcfour" }
     local dialled = false
-    local ok, err = pcall(require('hull.ssh').connect, {
+    local ssh = require('hull.ssh')
+    -- The crypto under test goes in through hull._test_hooks ("hull.ssh"):
+    -- a `crypto` option on a public hull.ssh entry point is refused (audit 44).
+    local hooks = require('hull._test_hooks').get('hull.ssh')
+    hooks.set_crypto({ random = function(n) return string.rep("\0", n) end })
+    local ok, err = pcall(ssh.connect, {
         host = "h", user = "u", key = {}, offer = o,
-        crypto = { random = function(n) return string.rep("\0", n) end },
         open_stream = function() dialled = true end,
     })
+    hooks.set_crypto(nil)
     assert_eq(ok, false)
     assert_eq(tostring(err):find("arcfour", 1, true) ~= nil, true, tostring(err))
     assert_eq(dialled, false)

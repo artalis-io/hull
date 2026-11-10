@@ -51,6 +51,11 @@ end
 local BLOB22, BLOB2222 = ed_blob("\1"), ed_blob("\2")
 local function stub_sha1() return string.rep("\7", 20) end
 local crypto_stub = { random = stub_random, sha1 = stub_sha1 }
+-- The crypto under test goes in through hull._test_hooks ("hull.ssh"):
+-- a `crypto` option on a public hull.ssh entry point is refused (audit 44).
+-- Every connect in this suite runs on the stub.
+local ssh_hooks = require('hull._test_hooks').get('hull.ssh')
+ssh_hooks.set_crypto(crypto_stub)
 
 local function relay(inbound)
     return {
@@ -78,7 +83,7 @@ end
 local function connect_via(r, tunnel)
     local seen
     local _, err = ssh.connect{
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         tunnel = tunnel or { host = "ssh.example.com" },
         open_stream = function(o) seen = o; return r end,
     }
@@ -241,7 +246,7 @@ test("ssh_tunnel_audit44.lua_tunnel_options_read_once", function()
     local r = relay(upgraded())
     local seen
     pcall(ssh.connect, {
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         tunnel = proxy,
         open_stream = function(o) seen = o; return r end,
     })
@@ -269,7 +274,7 @@ test("ssh_tunnel_audit44.lua_tunnel_options_read_once", function()
     local r2 = relay(upgraded())
     local seen2
     ssh.connect{
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         tunnel = half,
         open_stream = function(o) seen2 = o; return r2 end,
     }
@@ -293,7 +298,7 @@ test("ssh_tunnel_audit44.write_refusal_unchanged", function()
         return true
     end
     local ok, e = pcall(ssh.connect, {
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         tunnel = { host = "ssh.example.com" },
         open_stream = function() return r end,
     })
@@ -316,7 +321,7 @@ test("ssh_audit44.banner_callback_error_reraised", function()
     -- stream is closed.
     local r = relay("a banner line\r\nSSH-2.0-Fake\r\n")
     local ok, e = pcall(ssh.connect, {
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         open_stream = function() return r end,
         on_banner = function() error("my bug", 0) end,
     })
@@ -331,7 +336,7 @@ test("ssh_audit44.pending_trust_not_spent_by_bad_args", function()
     local pt = ssh.pending_trust()
     local function try(o)
         o.host = "spark-7468"; o.user = "operator"; o.key = {}
-        o.crypto = crypto_stub; o.trust = pt
+        o.trust = pt
         o.open_stream = o.open_stream or function() error("nothing may be dialled") end
         return pcall(ssh.connect, o)
     end
@@ -359,7 +364,7 @@ test("ssh_tunnel_audit44.upgrade_refusal_closes_raw", function()
     local r = relay(upgraded())
     r.write = function() error(REFUSAL, 0) end
     local ok, e = pcall(ssh.connect, {
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         tunnel = { host = "ssh.example.com" },
         open_stream = function() return r end,
     })
@@ -384,7 +389,7 @@ end)
 test("an IPv6 destination is bracketed", function()
     local r = relay(upgraded())
     ssh.connect{
-        host = "fd00::7", user = "operator", key = {}, crypto = crypto_stub,
+        host = "fd00::7", user = "operator", key = {},
         tunnel = { host = "ssh.example.com" },
         open_stream = function() return r end,
     }
@@ -397,7 +402,6 @@ test("ports and timeouts are integers, not numeric strings (audit 39)", function
     -- atoi dialled as 22.
     local function try(o)
         o.host = o.host or "spark-7468"; o.user = "operator"; o.key = {}
-        o.crypto = crypto_stub
         o.tunnel = o.tunnel or { host = "ssh.example.com" }
         o.open_stream = function() error("nothing may be dialled") end
         return pcall(ssh.connect, o)
@@ -415,7 +419,7 @@ test("ports and timeouts are integers, not numeric strings (audit 39)", function
     local r2 = relay(upgraded())
     ssh.connect{
         host = "spark-7468", port = 2200, user = "operator", key = {},
-        crypto = crypto_stub, tunnel = { host = "ssh.example.com" },
+        tunnel = { host = "ssh.example.com" },
         open_stream = function() return r2 end,
     }
     assert_match(r2.written[1] or "", "Cf-Access-Jump-Destination: spark-7468:2200\r\n")
@@ -427,7 +431,7 @@ test("a destination that is not one host name is refused before dialling (audit 
     for _, h in ipairs({ "evil,a.example.com", "a.example.com x", "a\r\nX: y" }) do
         local seen
         local _, err = ssh.connect{
-            host = h, user = "operator", key = {}, crypto = crypto_stub,
+            host = h, user = "operator", key = {},
             tunnel = { host = "ssh.example.com" },
             open_stream = function(o) seen = o; return relay(upgraded()) end,
         }
@@ -438,7 +442,7 @@ end)
 
 test("a destination_header that is not a name is a caller error", function()
     local ok = pcall(ssh.connect, {
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         tunnel = { host = "ssh.example.com", destination_header = 7 },
     })
     assert_eq(ok, false)
@@ -466,7 +470,7 @@ local function connect_with_fake_transport()
     local real_new = transport.new
     transport.new = function() return fake end
     local ok, conn, err = pcall(ssh.connect, {
-        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        host = "spark-7468", user = "operator", key = {},
         open_stream = function() return {} end,
     })
     transport.new = real_new
@@ -504,7 +508,7 @@ test("connect hands the port to the host-key check", function()
                  close = function() end }
     end
     pcall(ssh.connect, { host = "spark-7468", port = 2222, user = "operator",
-                         key = {}, crypto = crypto_stub,
+                         key = {},
                          open_stream = function() return {} end })
     transport.new = real_new
     assert_eq(seen and seen.port, 2222)
@@ -539,7 +543,6 @@ local function conn_over(fake_methods)
     local real_new = transport.new
     transport.new = function() return fake end
     local conn = ssh.connect{ host = "spark-7468", user = "operator", key = {},
-                              crypto = crypto_stub,
                               open_stream = function() return {} end }
     transport.new = real_new
     return conn
@@ -593,13 +596,12 @@ end)
 
 test("an unreadable key comes back as bad_key, not a raise", function()
     local _, err = ssh.connect{ host = "h", user = "u", key = "not a key",
-                                crypto = crypto_stub,
                                 open_stream = function() error("must not dial") end }
     assert_eq(err.code, "bad_key")
 end)
 
 test("exactly one of key and keys, and keys is a non-empty list", function()
-    local base = { host = "h", user = "u", crypto = crypto_stub,
+    local base = { host = "h", user = "u",
                    open_stream = function() error("must not dial") end }
     local function try(extra)
         local o = {}
@@ -615,7 +617,6 @@ end)
 
 test("a bad key anywhere in keys fails before the dial, and says which", function()
     local _, err = ssh.connect{ host = "h", user = "u", keys = { {}, "not a key" },
-                                crypto = crypto_stub,
                                 open_stream = function() error("must not dial") end }
     assert_eq(err.code, "bad_key")
     assert_eq(err.key, 2)
@@ -624,7 +625,6 @@ end)
 test("a key in another tool's format is unsupported_key_type", function()
     local _, err = ssh.connect{ host = "h", user = "u",
         key = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
-        crypto = crypto_stub,
         open_stream = function() error("must not dial") end }
     assert_eq(err.code, "unsupported_key_type")
 end)
@@ -632,7 +632,6 @@ end)
 test("an unusable software string is bad_software, before any dial", function()
     for _, sw in ipairs({ "", "Hull 1.0", "Hull\r\nX", 7 }) do
         local _, err = ssh.connect{ host = "h", user = "u", key = {}, software = sw,
-                                    crypto = crypto_stub,
                                     open_stream = function() error("must not dial") end }
         assert_eq(err.code, "bad_software", tostring(sw))
     end
@@ -649,10 +648,10 @@ end)
 test("a host that cannot be reached is connect_failed, not denied", function()
     -- `denied` means the manifest said no. A health check exists to tell
     -- that apart from a machine that is down.
-    local _, err = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+    local _, err = ssh.connect{ host = "h", user = "u", key = {},
         open_stream = function() return nil, "connection refused", "connect_failed" end }
     assert_eq(err.code, "connect_failed")
-    local _, err2 = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+    local _, err2 = ssh.connect{ host = "h", user = "u", key = {},
         open_stream = function() return nil, "timed out", "timeout" end }
     assert_eq(err2.code, "timeout")
 end)
@@ -667,7 +666,7 @@ test("the handshake runs under the connect budget, reported as timeout", functio
                      handshake = function() error({ code = "deadline" }, 0) end,
                      close = function() end }
         end
-        local c, e = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+        local c, e = ssh.connect{ host = "h", user = "u", key = {},
                                   timeout_ms = 4000,
                                   open_stream = function() return {} end }
         transport.new = real_new
@@ -702,7 +701,7 @@ test("a dial that is refused keeps the refusal", function()
     local err
     do
         local _, e = ssh.connect{
-            host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+            host = "spark-7468", user = "operator", key = {},
             tunnel = { host = "ssh.example.com" },
             open_stream = function() return nil, "tunnel host is not in ssh.tunnel.hosts", "denied" end,
         }
@@ -716,7 +715,7 @@ test("a tunnel without a host is refused before anything is dialled", function()
     local dialled = false
     local ok = pcall(function()
         ssh.connect{
-            host = "h", user = "u", key = {}, crypto = crypto_stub,
+            host = "h", user = "u", key = {},
             tunnel = { port = 443 },
             open_stream = function() dialled = true; return relay(upgraded()) end,
         }
@@ -760,7 +759,7 @@ end)
 
 local LOCAL_NET = "Privacy & Security > Local Network"
 local function dial_fails(errno_name, extra)
-    local o = { host = "h", user = "u", key = {}, crypto = crypto_stub,
+    local o = { host = "h", user = "u", key = {},
         open_stream = function()
             return nil, "connection refused or unreachable: " .. tostring(errno_name)
                         .. " (No route to host)", "connect_failed", errno_name
@@ -800,7 +799,7 @@ test("the hint is for EHOSTUNREACH to a private or link-local literal only", fun
 end)
 
 test("a dial that reports no errno (DNS, TLS) sets none", function()
-    local _, err = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+    local _, err = ssh.connect{ host = "h", user = "u", key = {},
         open_stream = function() return nil, "host did not resolve", "connect_failed" end }
     assert_eq(err.code, "connect_failed")
     assert_eq(err.errno, nil)
@@ -808,18 +807,20 @@ test("a dial that reports no errno (DNS, TLS) sets none", function()
 end)
 
 test("through a tunnel the errno is the relay's, and the hint reads the relay host", function()
-    local _, err = ssh.connect{ host = "h", user = "u", key = {}, crypto = crypto_stub,
+    local _, err = ssh.connect{ host = "h", user = "u", key = {},
         tunnel = { host = "fe80::1" },
         open_stream = function() return nil, "no route", "connect_failed", "EHOSTUNREACH" end }
     assert_eq(err.code, "connect_failed")
     assert_eq(err.errno, "EHOSTUNREACH")
     assert_match(err.detail, LOCAL_NET)
     -- The SSH destination is a name here; the relay literal decides.
-    local _, err2 = ssh.connect{ host = "169.254.1.2", user = "u", key = {}, crypto = crypto_stub,
+    local _, err2 = ssh.connect{ host = "169.254.1.2", user = "u", key = {},
         tunnel = { host = "relay.example" },
         open_stream = function() return nil, "no route", "connect_failed", "EHOSTUNREACH" end }
     assert_eq(err2.errno, "EHOSTUNREACH")
     assert_eq(err2.detail:find(LOCAL_NET, 1, true), nil, "a relay NAME gets no hint")
 end)
+
+ssh_hooks.set_crypto(nil)
 
 return { pass = pass, fail = fail }

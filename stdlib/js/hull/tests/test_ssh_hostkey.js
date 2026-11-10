@@ -187,20 +187,28 @@ await test("acceptHost refuses a pending trust as the store", async () => {
 await test("a pending trust is single use: the second connect is refused before any dial", async () => {
     const p = ssh.pendingTrust();
     const attempt = async (o) => { try { await ssh.connect(o); return null; } catch (e) { return e.code; } };
+    // The crypto under test goes in through hull:_test_hooks ("hull:ssh"):
+    // a `crypto` option on a public hull:ssh entry point is refused (audit 44).
+    const hooks = __testHooks("hull:ssh");
+    hooks.setCrypto({});
+    try {
     assertEq(await attempt({
-        host: "spark.local", user: "operator", key: {}, crypto: {}, trust: p,
+        host: "spark.local", user: "operator", key: {}, trust: p,
         openStream: () => [null, "no route", "connect_failed"],
     }), "connect_failed");
     let dialled = false;
     assertEq(await attempt({
-        host: "spark.local", user: "operator", key: {}, crypto: {}, trust: p,
+        host: "spark.local", user: "operator", key: {}, trust: p,
         openStream: () => { dialled = true; throw new Error("nothing may be dialled"); },
     }), "already_used");
     assertEq(dialled, false, "refused before the dial:");
     assertEq(await attempt({
-        host: "spark.local", user: "operator", key: {}, crypto: {}, trust: ssh.pendingTrust(),
+        host: "spark.local", user: "operator", key: {}, trust: ssh.pendingTrust(),
         openStream: () => [null, "no route", "connect_failed"],
     }), "connect_failed");
+    } finally {
+        hooks.setCrypto(null);
+    }
 });
 
 // signature verification -----------------------------------------------------------
