@@ -314,8 +314,9 @@ its connections run in turn (there is no task-spawning primitive for
     and `ws_stream`'s `_need`; each keeps its own policy (the transport
     raises at EOF and keepalives between timeouts, the tunnel reports EOF).
 - **Facade hygiene.** Done: `ssh.lua` no longer re-exports `hostkey` /
-  `privatekey`; `ssh.fingerprint(blob)` takes just the blob (`opts.crypto`
-  is the test seam); `hostkey.verify` takes one crypto adapter (`sha256`,
+  `privatekey`; `ssh.fingerprint(blob)` takes just the blob (the crypto
+  test seam is `hull._test_hooks` / `hull:_test_hooks`, never an option -
+  audit 44); `hostkey.verify` takes one crypto adapter (`sha256`,
   `ed25519_verify`) instead of a separate digest function. The WebSocket
   tunnel stream: done - `hull/web/ws-stream` (published, but no app could
   obtain a stream to give it, not a web concern, no JS twin) is now

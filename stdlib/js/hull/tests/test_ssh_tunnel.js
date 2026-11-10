@@ -58,6 +58,10 @@ function withTransport(fake, fn) {
 const stubRandom = (n) => "\x2a".repeat(n);
 const stubSha1 = () => "\x07".repeat(20);
 const cryptoStub = { random: stubRandom, sha1: stubSha1 };
+// The crypto under test goes in through hull:_test_hooks ("hull:ssh"):
+// a `crypto` option on a public hull:ssh entry point is refused (audit 44).
+// Every connect in this suite runs on the stub.
+testHooks.setCrypto(cryptoStub);
 
 // ssh-ed25519 public key blobs, which acceptHost checks for.
 const edBlob = (byte) => wire.writer().string("ssh-ed25519").string(byte.repeat(32)).build();
@@ -90,7 +94,7 @@ async function connectVia(r, tunnel) {
     let seen;
     try {
         await ssh.connect({
-            host: "spark-7468", user: "operator", key: {}, crypto: cryptoStub,
+            host: "spark-7468", user: "operator", key: {},
             tunnel: tunnel || { host: "ssh.example.com" },
             openStream: (o) => { seen = o; return r; },
         });
@@ -303,7 +307,7 @@ await test("ssh_audit44.banner_callback_error_reraised", async () => {
     // is closed.
     const r = relay("a banner line\r\nSSH-2.0-Fake\r\n");
     const e = await rejects(ssh.connect({
-        host: "spark-7468", user: "operator", key: {}, crypto: cryptoStub,
+        host: "spark-7468", user: "operator", key: {},
         openStream: () => r,
         onBanner: () => { throw "my bug"; },
     }), "connect");
@@ -317,7 +321,7 @@ await test("ssh_audit44.pending_trust_not_spent_by_bad_args", async () => {
     const pt = ssh.pendingTrust();
     const tryConnect = (o) => {
         o.host = "spark-7468"; o.user = "operator"; o.key = {};
-        o.crypto = cryptoStub; o.trust = pt;
+        o.trust = pt;
         o.openStream = o.openStream || (() => { throw new Error("nothing may be dialled"); });
         return ssh.connect(o);
     };
@@ -360,7 +364,7 @@ await test("the upgrade runs under the connect deadline (#1009 review)", async (
 await test("an IPv6 destination is bracketed", async () => {
     const r = relay(upgraded());
     await rejects(ssh.connect({
-        host: "fd00::7", user: "operator", key: {}, crypto: cryptoStub,
+        host: "fd00::7", user: "operator", key: {},
         tunnel: { host: "ssh.example.com" },
         openStream: () => r,
     }));
@@ -370,7 +374,6 @@ await test("an IPv6 destination is bracketed", async () => {
 await test("ports and timeouts are integers, not numeric strings (audit 39)", async () => {
     const tryIt = (o) => {
         o.host = o.host || "spark-7468"; o.user = "operator"; o.key = {};
-        o.crypto = cryptoStub;
         o.tunnel = o.tunnel || { host: "ssh.example.com" };
         o.openStream = () => { throw new Error("nothing may be dialled"); };
         return rejects(ssh.connect(o));
@@ -389,7 +392,7 @@ await test("ports and timeouts are integers, not numeric strings (audit 39)", as
     const r2 = relay(upgraded());
     await rejects(ssh.connect({
         host: "spark-7468", port: 2200, user: "operator", key: {},
-        crypto: cryptoStub, tunnel: { host: "ssh.example.com" },
+        tunnel: { host: "ssh.example.com" },
         openStream: () => r2,
     }));
     assertMatch(r2.written[0] || "", "Cf-Access-Jump-Destination: spark-7468:2200\r\n");
@@ -399,7 +402,7 @@ await test("a destination that is not one host name is refused before dialling (
     for (const h of ["evil,a.example.com", "a.example.com x", "a\r\nX: y"]) {
         let seen;
         const err = await rejects(ssh.connect({
-            host: h, user: "operator", key: {}, crypto: cryptoStub,
+            host: h, user: "operator", key: {},
             tunnel: { host: "ssh.example.com" },
             openStream: (o) => { seen = o; return relay(upgraded()); },
         }));
@@ -410,7 +413,7 @@ await test("a destination that is not one host name is refused before dialling (
 
 await test("a destination_header that is not a name is a caller error", async () => {
     const e = await rejects(ssh.connect({
-        host: "spark-7468", user: "operator", key: {}, crypto: cryptoStub,
+        host: "spark-7468", user: "operator", key: {},
         tunnel: { host: "ssh.example.com", destinationHeader: 7 },
     }));
     assertEq(e instanceof TypeError, true);
@@ -432,7 +435,7 @@ function connectWithFakeTransport() {
         },
     };
     return withTransport(fake, () => ssh.connect({
-        host: "spark-7468", user: "operator", key: {}, crypto: cryptoStub,
+        host: "spark-7468", user: "operator", key: {},
         openStream: () => ({}),
     }));
 }
@@ -464,7 +467,7 @@ await test("connect hands the port to the host-key check", async () => {
         setDeadline: () => {},
         close: () => {},
     }, () => ssh.connect({ host: "spark-7468", port: 2222, user: "operator",
-                           key: {}, crypto: cryptoStub, openStream: () => ({}) })));
+                           key: {}, openStream: () => ({}) })));
     assertEq(seen && seen.port, 2222);
 });
 
@@ -491,7 +494,7 @@ function connOver(fakeMethods) {
     };
     for (const k of Object.keys(fakeMethods)) fake[k] = fakeMethods[k];
     return withTransport(fake, () => ssh.connect({
-        host: "spark-7468", user: "operator", key: {}, crypto: cryptoStub,
+        host: "spark-7468", user: "operator", key: {},
         openStream: () => ({}),
     }));
 }
@@ -546,12 +549,12 @@ await test("an sftp file is a handle too, and its errors come back coded", async
 
 await test("an unreadable key comes back as bad_key, not a raise", async () => {
     const err = await rejects(ssh.connect({ host: "h", user: "u", key: "not a key",
-        crypto: cryptoStub, openStream: () => { throw new Error("must not dial"); } }));
+        openStream: () => { throw new Error("must not dial"); } }));
     assertEq(err.code, "bad_key");
 });
 
 await test("exactly one of key and keys, and keys is a non-empty list", async () => {
-    const base = { host: "h", user: "u", crypto: cryptoStub,
+    const base = { host: "h", user: "u",
                    openStream: () => { throw new Error("must not dial"); } };
     const tryIt = async (extra) => {
         const e = await rejects(ssh.connect(Object.assign({}, base, extra)));
@@ -565,7 +568,7 @@ await test("exactly one of key and keys, and keys is a non-empty list", async ()
 
 await test("a bad key anywhere in keys fails before the dial, and says which", async () => {
     const err = await rejects(ssh.connect({ host: "h", user: "u", keys: [{}, "not a key"],
-        crypto: cryptoStub, openStream: () => { throw new Error("must not dial"); } }));
+        openStream: () => { throw new Error("must not dial"); } }));
     assertEq(err.code, "bad_key");
     assertEq(err.key, 1, "0-based (Lua: 2)");
 });
@@ -573,7 +576,6 @@ await test("a bad key anywhere in keys fails before the dial, and says which", a
 await test("a key in another tool's format is unsupported_key_type", async () => {
     const err = await rejects(ssh.connect({ host: "h", user: "u",
         key: "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
-        crypto: cryptoStub,
         openStream: () => { throw new Error("must not dial"); } }));
     assertEq(err.code, "unsupported_key_type");
 });
@@ -581,7 +583,6 @@ await test("a key in another tool's format is unsupported_key_type", async () =>
 await test("an unusable software string is bad_software, before any dial", async () => {
     for (const sw of ["", "Hull 1.0", "Hull\r\nX", 7]) {
         const err = await rejects(ssh.connect({ host: "h", user: "u", key: {}, software: sw,
-            crypto: cryptoStub,
             openStream: () => { throw new Error("must not dial"); } }));
         assertEq(err.code, "bad_software", String(sw));
     }
@@ -595,10 +596,10 @@ await test("a key already trusted is an answer, not a raise", async () => {
 });
 
 await test("a host that cannot be reached is connect_failed, not denied", async () => {
-    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {},
         openStream: () => [null, "connection refused", "connect_failed"] }));
     assertEq(err.code, "connect_failed");
-    const err2 = await rejects(ssh.connect({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+    const err2 = await rejects(ssh.connect({ host: "h", user: "u", key: {},
         openStream: () => [null, "timed out", "timeout"] }));
     assertEq(err2.code, "timeout");
 });
@@ -609,7 +610,7 @@ await test("the handshake runs under the connect budget, reported as timeout", a
         setDeadline: (ms) => { if (budget === undefined) budget = ms; },
         handshake: () => { throw { code: "deadline" }; },
         close: () => {},
-    }, () => ssh.connect({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+    }, () => ssh.connect({ host: "h", user: "u", key: {},
                            timeoutMs: 4000, openStream: () => ({}) })));
     assertEq(budget, 4000);
     assertEq(err.code, "timeout");
@@ -633,7 +634,7 @@ await test("a relay that is not a WebSocket server is not mistaken for one", asy
 
 await test("a dial that is refused keeps the refusal", async () => {
     const err = await rejects(ssh.connect({
-        host: "spark-7468", user: "operator", key: {}, crypto: cryptoStub,
+        host: "spark-7468", user: "operator", key: {},
         tunnel: { host: "ssh.example.com" },
         openStream: () => [null, "tunnel host is not in ssh.tunnel.hosts", "denied"],
     }));
@@ -644,7 +645,7 @@ await test("a dial that is refused keeps the refusal", async () => {
 await test("a tunnel without a host is refused before anything is dialled", async () => {
     let dialled = false;
     const e = await rejects(ssh.connect({
-        host: "h", user: "u", key: {}, crypto: cryptoStub,
+        host: "h", user: "u", key: {},
         tunnel: { port: 443 },
         openStream: () => { dialled = true; return relay(upgraded()); },
     }), "a tunnel with no host should raise");
@@ -671,7 +672,7 @@ await test("bytes from inside the tunnel reach the SSH transport", async () => {
 
 const LOCAL_NET = "Privacy & Security > Local Network";
 async function dialFails(errnoName, extra) {
-    const o = Object.assign({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+    const o = Object.assign({ host: "h", user: "u", key: {},
         openStream: () => [null, "connection refused or unreachable: " + String(errnoName)
                                  + " (No route to host)", "connect_failed", errnoName] },
         extra || {});
@@ -708,7 +709,7 @@ await test("the hint is for EHOSTUNREACH to a private or link-local literal only
 });
 
 await test("a dial that reports no errno (DNS, TLS) sets none", async () => {
-    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {},
         openStream: () => [null, "host did not resolve", "connect_failed"] }));
     assertEq(err.code, "connect_failed");
     assertEq(err.errno, undefined);
@@ -716,7 +717,7 @@ await test("a dial that reports no errno (DNS, TLS) sets none", async () => {
 });
 
 await test("through a tunnel the errno is the relay's, and the hint reads the relay host", async () => {
-    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {}, crypto: cryptoStub,
+    const err = await rejects(ssh.connect({ host: "h", user: "u", key: {},
         tunnel: { host: "fe80::1" },
         openStream: () => [null, "no route", "connect_failed", "EHOSTUNREACH"] }));
     assertEq(err.code, "connect_failed");
@@ -724,11 +725,13 @@ await test("through a tunnel the errno is the relay's, and the hint reads the re
     assertMatch(err.detail, LOCAL_NET);
     // The SSH destination is a name here; the relay literal decides.
     const err2 = await rejects(ssh.connect({ host: "169.254.1.2", user: "u", key: {},
-        crypto: cryptoStub, tunnel: { host: "relay.example" },
+        tunnel: { host: "relay.example" },
         openStream: () => [null, "no route", "connect_failed", "EHOSTUNREACH"] }));
     assertEq(err2.errno, "EHOSTUNREACH");
     assertEq(err2.detail.indexOf(LOCAL_NET), -1, "a relay NAME gets no hint");
 });
+
+testHooks.setCrypto(null);
 
 globalThis.__test_pass = pass;
 globalThis.__test_fail = fail;

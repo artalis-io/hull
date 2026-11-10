@@ -96,6 +96,14 @@ byte, at most 255 bytes), so an environment set to `*` or `a,b` grants nothing
 rather than everything. Ports are integers, because a port read from the
 environment is a grant that changes shape after the manifest was reviewed.
 
+The protocol always runs on `hull.crypto` (`hull:crypto`). `connect`,
+`fingerprint`, `load_key` and `file_store` (JS `loadKey` / `fileStore`) refuse
+a `crypto` option with an error naming it: the transport takes its randomness,
+key exchange, ciphers and host-key verification from that table, so one an
+application supplied would choose every byte sent to the granted host and
+could make any host key verify. The suites stand crypto in through the
+stdlib-internal test hooks, which application code cannot reach.
+
 ## 3. Host keys: Hull refuses, you decide
 
 Hull ships no on-disk `known_hosts`, and `ssh.connect` never trusts a host key

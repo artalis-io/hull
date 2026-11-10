@@ -379,13 +379,16 @@ await test("ssh.connect refuses a bad offer before dialling anything", async () 
     let dialled = false;
     const { ssh } = await import("hull:ssh");
     let ok = true, err = null;
+    // The crypto under test goes in through hull:_test_hooks ("hull:ssh"):
+    // a `crypto` option on a public hull:ssh entry point is refused (audit 44).
+    const hooks = __testHooks("hull:ssh");
+    hooks.setCrypto({ random: (n) => "\x00".repeat(n) });
     try {
         await ssh.connect({
             host: "h", user: "u", key: {}, offer: o,
-            crypto: { random: (n) => "\x00".repeat(n) },
             openStream: () => { dialled = true; },
         });
-    } catch (e) { ok = false; err = e; }
+    } catch (e) { ok = false; err = e; } finally { hooks.setCrypto(null); }
     assertEq(ok, false);
     assertEq(has(String(err && err.message), "arcfour"), true, String(err));
     assertEq(dialled, false);
