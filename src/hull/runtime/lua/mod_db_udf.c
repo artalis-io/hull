@@ -96,8 +96,9 @@ static void lua_push_sqlite_value(lua_State *L, sqlite3_value *val)
         break;
     case SQLITE_TEXT:
     case SQLITE_BLOB: {
-        const char *p;
-        size_t n;
+        /* Initialised for the analyzer: luaL_error below does not return. */
+        const char *p = "";
+        size_t n = 0;
         if (udf_value_bytes(val, type, &p, &n) != 0)
             luaL_error(L, "udf: out of memory reading an argument");
         lua_pushlstring(L, p, n);
