@@ -100,6 +100,14 @@ int hl_cap_db_udf_register_wasm(struct HlDbHandle *handle,
  */
 int hl_cap_db_udf_unregister(struct HlDbHandle *handle, const char *sql_name);
 
+/* Test seam: marshal @p argc SQLite values the way a WASM scalar UDF does.
+ * Bytes written, -1 when @p buf_size is too small, -2 when an argument's
+ * bytes could not be made (a failed allocation; the UDF then reports
+ * SQLITE_NOMEM). */
+struct sqlite3_value;
+int hl_cap_db_udf_marshal_for_test(uint8_t *buf, size_t buf_size, int argc,
+                                   struct sqlite3_value **argv);
+
 #endif /* HL_ENABLE_WASM */
 
 #endif /* HL_CAP_DB_UDF_H */

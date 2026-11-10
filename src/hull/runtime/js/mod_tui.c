@@ -463,6 +463,31 @@ static void js_tui_poll_shutdown(HlAsyncCtx *ctx, HlAsyncBackendCtx *loop)
     if (op) op->timer_id = 0;
 }
 
+/* A blocking poll that the run can stop (audit 44): one cap poll with the
+ * caller's timeout - -1 waits for ever - never asked the run, so its
+ * deadline could not end it (tui.poll with no event loop, which is how
+ * hull test / hull agent build an app; tui.pollSync outside app.main). It
+ * waits in HL_TUI_BLOCKING_SLICE_MS slices instead and asks the run after
+ * each (a 0-unit charge: the deadline and a tripped budget). 0 an event,
+ * 1 the timeout, -1 a cap failure, -2 the run said stop (its interrupt is
+ * pending). */
+#define HL_TUI_BLOCKING_SLICE_MS 50
+static int js_tui_poll_blocking(JSContext *ctx, int timeout_ms, HlTuiEvent *ev)
+{
+    int left = timeout_ms;   /* < 0: no limit of the caller's own */
+    for (;;) {
+        int slice = (left < 0 || left > HL_TUI_BLOCKING_SLICE_MS)
+                    ? HL_TUI_BLOCKING_SLICE_MS : left;
+        int rc = hl_cap_tui_poll(g_ctx, slice, ev);
+        if (rc != 1) return rc;
+        if (left >= 0) {
+            left -= slice;
+            if (left <= 0) return 1;
+        }
+        if (hl_js_budget_charge(ctx, 0) < 0) return -2;
+    }
+}
+
 static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -482,8 +507,10 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
     /* Slow path: schedule timer and return a Promise. */
     HlJS *js = JS_GetContextOpaque(ctx);
     if (!js || !js->base.async_ctx) {
-        /* No event loop - fall back to blocking. */
-        rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
+        /* No event loop - fall back to blocking, in slices that ask the
+         * run (audit 44). */
+        rc = js_tui_poll_blocking(ctx, timeout_ms, &ev);
+        if (rc == -2) return JS_EXCEPTION;
         if (rc < 0) return JS_ThrowInternalError(ctx, "tui.poll failed");
         if (rc == 1) return JS_NULL;
         return event_to_js(ctx, &ev);
@@ -586,7 +613,13 @@ static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
     HlTuiEvent ev = {0};
     const HlAsyncBackend *be = hl_async_backend();
     uint64_t t0 = be->monotonic_ms();
-    int rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
+    /* Outside app.main's own run (which re-arms itself per event, below) the
+     * wait is the entry's: in slices that ask the run, so its deadline ends
+     * it (audit 44: a timer or ws callback waited for ever). */
+    int rc = (js && !js->active_cli_main)
+             ? js_tui_poll_blocking(ctx, timeout_ms, &ev)
+             : hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
+    if (rc == -2) return JS_EXCEPTION;
     uint64_t waited = be->monotonic_ms() - t0;
     /* Only a user event, or real waiting adding up to the minimum since the
      * last arm, starts a new run. A hangup adds nothing, and neither does a

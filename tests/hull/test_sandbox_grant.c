@@ -454,6 +454,33 @@ UTEST(sandbox_tty, seatbelt_profile_names_only_own_ttys)
     EXPECT_TRUE(strstr(buf, "TTY_0") == NULL);
 }
 
+/* Audit 44: the Seatbelt builder's scratch was not zeroed by hl_sandbox_apply,
+ * and state_real was written only when realpath succeeded, so a state
+ * directory that did not resolve built STATE_HULL from stack garbage. */
+UTEST(sandbox_audit44, seatbelt_state_realpath_fail_uses_given_path)
+{
+    static char buf[16384];
+    const char *params[256];
+    HlSandboxPolicy p;
+    hl_sandbox_policy_from_manifest(&p, NULL);
+    p.state_dir = "/nonexistent-hull-audit44/state";
+    ASSERT_EQ(hl_sandbox_seatbelt_profile_stale_scratch_for_test(&p, buf, sizeof buf,
+                                                                 params, 256), 0);
+    int found_state = 0, found_hull = 0;
+    for (int i = 0; params[i]; i += 2) {
+        if (strcmp(params[i], "HULL_STATE") == 0) {
+            EXPECT_STREQ(params[i + 1], "/nonexistent-hull-audit44/state");
+            found_state = 1;
+        }
+        if (strcmp(params[i], "STATE_HULL") == 0) {
+            EXPECT_STREQ(params[i + 1], "/nonexistent-hull-audit44/state/.hull");
+            found_hull = 1;
+        }
+    }
+    EXPECT_EQ(found_state, 1);
+    EXPECT_EQ(found_hull, 1);
+}
+
 /* Audit convergence §7.2: the Hull-owned internal database lives in the app's
  * reserved .hull, which Seatbelt denies (audit 37). Its four files are
  * allowed AFTER that deny (the last matching SBPL rule wins), by literal, so

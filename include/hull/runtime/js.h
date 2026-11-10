@@ -381,6 +381,10 @@ void hl_js_budget_arm(HlJS *js);
 void hl_js_budget_arm_as(HlJS *js, HlRunKind kind);
 void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind);
 
+/* Test seam: the @p n-th value the request object is built from (1-based)
+ * fails as an allocation failure would; 0 = off (bindings.c). */
+void hl_js_make_request_fail_for_test(int n);
+
 /* Audit 35: the end of every JS entry (the list is at the definition in
  * runtime/js/async.c - the app's module top level included, audit 36).
  * Rolls back a transaction still open - as the bare stale guard did - and,

@@ -162,9 +162,13 @@ int hl_js_dispatch(HlJS *js, int handler_id,
      * the handler is called, however the handler ends. */
     hl_js_req_ctx_free(js, req);
 
-    /* Call handler(req, res) */
+    /* Call handler(req, res) - not when either could not be built: the
+     * failure (its exception pending) is answered 500 below, and the
+     * handler never sees a half-made request (audit 44). */
     JSValue argv[2] = { js_req, js_res };
-    JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
+    JSValue ret = (JS_IsException(js_req) || JS_IsException(js_res))
+                  ? JS_EXCEPTION
+                  : JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
 
     int result = 0;
     if (JS_IsException(ret)) {
@@ -389,9 +393,12 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     JSValue js_req = hl_js_make_request(js->ctx, req, life);
     JSValue js_res = hl_js_make_response_life(js, req, res, life);
 
-    /* Call handler(req, res) - capture return value. */
+    /* Call handler(req, res) - capture return value. Not when either could
+     * not be built: answered 500 below (audit 44). */
     JSValue argv[2] = { js_req, js_res };
-    JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
+    JSValue ret = (JS_IsException(js_req) || JS_IsException(js_res))
+                  ? JS_EXCEPTION
+                  : JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
     hl_req_life_end(life);
 
     int result = 0;

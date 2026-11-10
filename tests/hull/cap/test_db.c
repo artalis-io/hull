@@ -3368,4 +3368,132 @@ UTEST(db_convergence_idb, scan_refuses_dot_hull_literals)
         "SELECT * FROM read_csv('data/hull.csv')", 0, NULL));
 }
 
+/* ── Audit 44: TEXT / BLOB bytes that cannot be made ─────────────────── */
+
+typedef struct {
+    int rows;
+    int type;
+    size_t len;
+    int null_ptr;
+} A44Col;
+
+static int a44_col_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    A44Col *c = (A44Col *)ctx;
+    c->rows++;
+    if (ncols > 0) {
+        c->type = (int)cols[0].value.type;
+        c->len = cols[0].value.len;
+        c->null_ptr = cols[0].value.s == NULL;
+    }
+    return 0;
+}
+
+/* A TEXT column whose bytes must be converted when they are asked for (a
+ * UTF-16 database read as UTF-8 - here the text of hex(zeroblob(N)), made
+ * during the step) allocates through Hull's budget allocator at fetch time.
+ * Once the run's budget is spent that allocation fails,
+ * sqlite3_column_text returns NULL and the value turns NULL: the row was
+ * handed over as an empty TEXT. It fails the query now, with no row. A
+ * genuinely empty value still reads as empty. */
+UTEST(db_audit44, column_zeroblob_budget_fails_query)
+{
+    hl_cap_db_sqlite_setup();
+    sqlite3 *db = NULL;
+    ASSERT_EQ(SQLITE_OK, sqlite3_open(":memory:", &db));
+    ASSERT_EQ(SQLITE_OK, sqlite3_exec(db, "PRAGMA encoding='UTF-16le'", NULL, NULL, NULL));
+    hl_cap_db_init(db);
+    /* An earlier test noted a 1 MB heap limit (the value-length cap). */
+    sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 100000000);
+    HlStmtCache cache;
+    hl_stmt_cache_init(&cache, db, NULL);
+    /* Enough for the step (the zeroblob and its hex, ~350k units), not for
+     * the UTF-8 copy of 4 MB of text at the fetch (~600k in all). */
+    HlDbOpBudget b = { .limit = 450000, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    A44Col c;
+    memset(&c, 0, sizeof c);
+    int rc = hl_cap_db_query(&cache, "SELECT hex(zeroblob(2000000)) AS t",
+                             NULL, 0, a44_col_cb, &c, NULL);
+    hl_db_budget_restore(prev);
+    EXPECT_NE(0, rc);
+    EXPECT_EQ(0, c.rows);   /* no row handed over with an empty value */
+    /* With room, the same query reads the whole text. */
+    b = (HlDbOpBudget){ .limit = 5000000, .used = 0, .tripped = 0 };
+    prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    memset(&c, 0, sizeof c);
+    EXPECT_EQ(0, hl_cap_db_query(&cache, "SELECT hex(zeroblob(2000000)) AS t",
+                                 NULL, 0, a44_col_cb, &c, NULL));
+    hl_db_budget_restore(prev);
+    EXPECT_EQ(1, c.rows);
+    EXPECT_EQ((size_t)4000000, c.len);
+    hl_stmt_cache_destroy(&cache);
+    hl_cap_db_shutdown(db);
+    sqlite3_close(db);
+
+    setup_db();
+    /* '' and x'' (unbound, nothing fails): empty TEXT / BLOB, no error. */
+    memset(&c, 0, sizeof c);
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT x'' AS b",
+                                 NULL, 0, a44_col_cb, &c, NULL));
+    EXPECT_EQ(1, c.rows);
+    EXPECT_EQ((int)HL_TYPE_BLOB, c.type);
+    EXPECT_EQ((size_t)0, c.len);
+    memset(&c, 0, sizeof c);
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT '' AS t",
+                                 NULL, 0, a44_col_cb, &c, NULL));
+    EXPECT_EQ(1, c.rows);
+    EXPECT_EQ((int)HL_TYPE_TEXT, c.type);
+    EXPECT_EQ((size_t)0, c.len);
+    /* And a zeroblob that fits is made. */
+    memset(&c, 0, sizeof c);
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache, "SELECT zeroblob(16) AS z",
+                                 NULL, 0, a44_col_cb, &c, NULL));
+    EXPECT_EQ((size_t)16, c.len);
+    teardown_db();
+}
+
+#ifdef HL_ENABLE_WASM
+/* The WASM UDF marshaller read the pointer and length the same way: a
+ * NULL pointer from a failed zeroblob expansion was marshalled as an empty
+ * argument. It is -2 now (the UDF reports SQLITE_NOMEM). */
+static int a44_marshal_rc[4];
+static int a44_marshal_n;
+static void a44_marshal_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    uint8_t buf[256];
+    int rc = hl_cap_db_udf_marshal_for_test(buf, sizeof buf, argc, argv);
+    if (a44_marshal_n < 4) a44_marshal_rc[a44_marshal_n++] = rc;
+    sqlite3_result_int(ctx, rc);
+}
+
+UTEST(db_udf_audit44, wasm_arg_null_is_nomem)
+{
+    setup_db();
+    sqlite3_limit(test_db, SQLITE_LIMIT_LENGTH, 100000000);   /* see above */
+    ASSERT_EQ(SQLITE_OK, sqlite3_create_function(test_db, "a44_marshal", 1,
+              SQLITE_UTF8, NULL, a44_marshal_fn, NULL, NULL));
+    a44_marshal_n = 0;
+    HlDbOpBudget b = { .limit = 200000, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &b);
+    int64_t n = 0;
+    (void)hl_cap_db_query(&test_cache, "SELECT a44_marshal(zeroblob(60000000)) AS r",
+                          NULL, 0, count_cb, &n, NULL);
+    hl_db_budget_restore(prev);
+    ASSERT_GE(a44_marshal_n, 1);
+    EXPECT_EQ(-2, a44_marshal_rc[0]);
+
+    /* Empty TEXT and zero-length BLOB (NULL pointer, length 0) marshal as
+     * empty arguments: opcode + argc + tag + 4-byte length = 7 bytes. */
+    a44_marshal_n = 0;
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache,
+        "SELECT a44_marshal(x'') AS r", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(7, (int)n);
+    EXPECT_EQ(0, hl_cap_db_query(&test_cache,
+        "SELECT a44_marshal('') AS r", NULL, 0, count_cb, &n, NULL));
+    EXPECT_EQ(7, (int)n);
+    teardown_db();
+}
+#endif /* HL_ENABLE_WASM */
+
 UTEST_MAIN();

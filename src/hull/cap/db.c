@@ -1158,9 +1158,16 @@ static int bind_params(sqlite3_stmt *stmt, const HlValue *params, int n)
 
 /* ── Internal: convert a column to HlValue ────────────────────────── */
 
-static void column_to_value(sqlite3_stmt *stmt, int col, HlValue *out)
+/* -1 when a TEXT / BLOB column's bytes could not be made (a zeroblob or an
+ * encoding conversion is an allocation through Hull's budget allocator): the
+ * pointer comes back NULL and the row would have read an empty value as if
+ * the query had returned one (audit 44). An empty TEXT reads as "" (never
+ * NULL); a zero-length BLOB's NULL pointer is told apart by its length and
+ * type (a failed zeroblob expansion turns the value NULL). */
+static int column_to_value(sqlite3_stmt *stmt, int col, HlValue *out)
 {
-    switch (sqlite3_column_type(stmt, col)) {
+    int type = sqlite3_column_type(stmt, col);
+    switch (type) {
     case SQLITE_INTEGER:
         out->type = HL_TYPE_INT;
         out->i    = sqlite3_column_int64(stmt, col);
@@ -1173,17 +1180,22 @@ static void column_to_value(sqlite3_stmt *stmt, int col, HlValue *out)
         out->type = HL_TYPE_TEXT;
         out->s    = (const char *)sqlite3_column_text(stmt, col);
         out->len  = (size_t)sqlite3_column_bytes(stmt, col);
+        if (!out->s)    /* empty TEXT is "", never NULL: a failed conversion */
+            return -1;
         break;
     case SQLITE_BLOB:
         out->type = HL_TYPE_BLOB;
         out->s    = (const char *)sqlite3_column_blob(stmt, col);
         out->len  = (size_t)sqlite3_column_bytes(stmt, col);
+        if (!out->s && (out->len > 0 || sqlite3_column_type(stmt, col) != type))
+            return -1;
         break;
     case SQLITE_NULL:
     default:
         out->type = HL_TYPE_NIL;
         break;
     }
+    return 0;
 }
 
 /* ── Public API ─────────────────────────────────────────────────────── */
@@ -1255,9 +1267,15 @@ static int db_query_inner(HlStmtCache *cache, const char *sql,
                 cols[i].name = sqlite3_column_name(stmt, i);
             names_populated = 1;
         }
-        for (int i = 0; i < ncols; i++) {
-            column_to_value(stmt, i, &vals[i]);
+        int bad_col = 0;
+        for (int i = 0; i < ncols && !bad_col; i++) {
+            if (column_to_value(stmt, i, &vals[i]) != 0)
+                bad_col = 1;
             cols[i].value = vals[i];
+        }
+        if (bad_col) {
+            rc = SQLITE_NOMEM;
+            break;
         }
         /* INVARIANT: the row callback MUST NOT re-enter the statement cache
          * (db.query / db.exec with a new SQL string). `stmt` is mid-iteration

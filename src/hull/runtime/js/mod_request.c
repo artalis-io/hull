@@ -1214,7 +1214,7 @@ static JSValue js_iter_async_iterator(JSContext *ctx, JSValueConst this_val,
     return JS_DupValue(ctx, this_val);
 }
 
-/* part.read() - returns a Promise<string> over the full part body. */
+/* part.read() - returns a Promise<ArrayBuffer> over the full part body. */
 static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
@@ -1229,8 +1229,13 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
     if (p->refused)
         return JS_ThrowInternalError(ctx, "%s", MP_REFUSED_PART);
 
-    if (p->spent || !it->in_part)
-        return resolve_with(ctx, JS_NewStringLen(ctx, "", 0));
+    /* An empty ArrayBuffer, as every other read() resolves (audit 44: an
+     * empty string). */
+    if (p->spent || !it->in_part) {
+        JSValue empty = JS_NewArrayBufferCopy(ctx, (const uint8_t *)"", 0);
+        if (JS_IsException(empty)) return empty;
+        return resolve_with(ctx, empty);
+    }
 
     /* Allocate a real cont upfront - read() accumulates across yields,
      * so the staging-on-stack trick doesn't help. */
@@ -1521,17 +1526,20 @@ static JSValue js_req_multipart(JSContext *ctx, JSValueConst this_val,
  * hl_js_make_request only when the body_reader is a multipart wrapper
  * (i.e. the route was registered via kl_http_server_route_streaming).
  */
-void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
-                                      KlHttpBodyReader *body_reader,
-                                      HlReqLife *life, KlHttpConn *conn,
-                                      KlHttpRequest *req)
+int hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
+                                     KlHttpBodyReader *body_reader,
+                                     HlReqLife *life, KlHttpConn *conn,
+                                     KlHttpRequest *req)
 {
-    if (!body_reader || !hl_cap_multipart_inner(body_reader)) return;
+    if (!body_reader || !hl_cap_multipart_inner(body_reader)) return 0;
 
+    /* -1 with an exception pending when it cannot be installed: the request
+     * is then not handed to the handler (audit 44: a multipart route ran its
+     * handler with no req.multipart()). */
     JSValue owner = JS_NewObjectClass(ctx, (int)hl_mp_owner_class_id);
-    if (JS_IsException(owner)) return;
+    if (JS_IsException(owner)) return -1;
     HlJsMpOwner *o = calloc(1, sizeof *o);
-    if (!o) { JS_FreeValue(ctx, owner); return; }
+    if (!o) { JS_FreeValue(ctx, owner); JS_ThrowOutOfMemory(ctx); return -1; }
     o->wrapper = body_reader;
     o->life    = life;
     hl_req_life_retain(life);
@@ -1542,8 +1550,9 @@ void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
     JSValueConst func_data[1] = { owner };
     JSValue fn = JS_NewCFunctionData(ctx, js_req_multipart, 0, 0, 1, func_data);
     JS_FreeValue(ctx, owner);
-    if (JS_IsException(fn)) return;
-    JS_DefinePropertyValueStr(ctx, req_obj, "multipart", fn, JS_PROP_C_W_E);
+    if (JS_IsException(fn)) return -1;
+    return JS_DefinePropertyValueStr(ctx, req_obj, "multipart", fn,
+                                     JS_PROP_C_W_E) < 0 ? -1 : 0;
 }
 
 /* ── Class registration ─────────────────────────────────────────────── */

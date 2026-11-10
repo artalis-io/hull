@@ -226,12 +226,18 @@ static int l_test_http(lua_State *L, const char *method)
         lua_getfield(L, 2, "headers");
         if (lua_istable(L, -1)) {
             lua_pushnil(L);
-            while (lua_next(L, -2) != 0 && num_headers < KL_MAX_HEADERS) {
+            while (lua_next(L, -2) != 0) {
                 /* Real strings only: lua_tostring on a number KEY converts it
                  * in place and breaks lua_next, and a converted value is not
                  * anchored by the table (see body above). */
                 if (lua_type(L, -2) == LUA_TSTRING &&
                     lua_type(L, -1) == LUA_TSTRING) {
+                    /* More than a request can carry is the test's error, not
+                     * headers dropped silently (audit 44). Nothing here is
+                     * allocated off the Lua stack yet. */
+                    if (num_headers >= KL_MAX_HEADERS)
+                        return luaL_error(L, "test request: more than %d "
+                                          "headers", KL_MAX_HEADERS);
                     header_names[num_headers] = lua_tostring(L, -2);
                     header_values[num_headers] = lua_tostring(L, -1);
                     num_headers++;
@@ -333,20 +339,11 @@ static int l_test_eq(lua_State *L)
 {
     int equal = 0;
 
-    if (lua_type(L, 1) == lua_type(L, 2)) {
-        if (lua_isstring(L, 1) && lua_isstring(L, 2)) {
-            equal = (strcmp(lua_tostring(L, 1), lua_tostring(L, 2)) == 0);
-        } else if (lua_isnumber(L, 1) && lua_isnumber(L, 2)) {
-            equal = (lua_tonumber(L, 1) == lua_tonumber(L, 2));
-        } else if (lua_isboolean(L, 1) && lua_isboolean(L, 2)) {
-            equal = (lua_toboolean(L, 1) == lua_toboolean(L, 2));
-        } else if (lua_isnil(L, 1) && lua_isnil(L, 2)) {
-            equal = 1;
-        } else {
-            /* For tables/userdata, compare by reference */
-            equal = lua_rawequal(L, 1, 2);
-        }
-    }
+    /* Raw equality for every type: numbers by value (1 == 1.0; compared
+     * as strings, "1" ~= "1.0"), strings by their bytes (strcmp stopped at
+     * an embedded NUL), tables / userdata by reference (audit 44). */
+    if (lua_type(L, 1) == lua_type(L, 2))
+        equal = lua_rawequal(L, 1, 2);
 
     if (!equal) {
         const char *msg = lua_isstring(L, 3) ? lua_tostring(L, 3) : NULL;

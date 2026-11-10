@@ -9497,6 +9497,40 @@ UTEST(js_audit5, udf_interrupt_is_not_a_catchable_sql_error)
     cleanup_js_caps();
 }
 
+/* Audit 44 M9: a UDF argument is copied with the pointer and length read in
+ * one expression. A zeroblob's bytes are made only when the pointer is
+ * asked for, through Hull's budget allocator; once the run's budget is
+ * spent that allocation fails and the argument read as an empty buffer (or,
+ * with the length read first, a 60 MB copy from NULL). A NULL pointer is now
+ * an error inside the UDF call, and the run ends on its limit. */
+UTEST(db_udf_audit44, zeroblob_arg_budget_trip)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    js.max_instructions = 200000;
+    hl_js_reset_request(&js);
+    char *msg = NULL;
+    EXPECT_EQ(a5_module_named("<test>",
+        "import { db as dbMod } from 'hull:db';\n"
+        "const c = dbMod.default();\n"
+        "globalThis.__a44_seen = [];\n"
+        "c.udf.register('hull_a44_len', (b) => {\n"
+        "  globalThis.__a44_seen.push(b.byteLength); return b.byteLength; });\n"
+        "c.query('WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 '\n"
+        "  + 'FROM r WHERE i < 200) SELECT hull_a44_len(zeroblob(60000000)) AS n FROM r');\n"
+        "globalThis.__a44_done = 1;\n", &msg), -1);
+    free(msg);
+    EXPECT_EQ(js.budget_tripped, 1);
+    js.max_instructions = HL_DEFAULT_INSTRUCTIONS;
+    hl_js_reset_request(&js);
+    EXPECT_EQ(eval_int("globalThis.__a44_done === undefined ? 1 : 0"), 1);
+    /* The UDF never ran on a value other than the one SQL passed. */
+    EXPECT_EQ(eval_int("globalThis.__a44_seen.every((n) => n === 60000000) ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("(() => { globalThis.db.udf.unregister('hull_a44_len'); "
+                       "return globalThis.db.query('SELECT 1 AS v')[0].v; })()"), 1);
+    cleanup_js_caps();
+}
+
 #ifdef HL_ENABLE_HTTP_SERVER
 /* Register `handler_src` as middleware and dispatch it. */
 static int a5_middleware(const char *handler_src, KlHttpRequest *req,
@@ -9655,6 +9689,48 @@ UTEST(js_audit5, a_handler_over_budget_is_answered_500)
     EXPECT_EQ(hl_js_dispatch(&js, last, &req2, &res2), 0);
     EXPECT_EQ(res2.status, 204);
     free_req_ctx(&req2);
+    cleanup_js();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 44: hl_js_make_request checked none of the values it made, and
+ * dispatch called the handler with whatever came back - a request whose
+ * properties held an exception, or JS_EXCEPTION itself. A failed build is
+ * now answered 500 without calling the handler. */
+UTEST(js_dispatch_audit44, request_build_oom_is_500)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "app.get('/a44', (req, res) => { globalThis.__a44_called = "
+        "(globalThis.__a44_called || 0) + 1; res.status(204); });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    int last = eval_int("globalThis.__hull_internals.__hull_routes.length - 1");
+    /* Each of the first few values the request is built from, in turn: the
+     * object itself, method, path, query, params, headers, body, ctx. */
+    for (int n = 1; n <= 8; n++) {
+        KlHttpRequest req = {0};
+        KlHttpResponse res = {0};
+        hl_js_make_request_fail_for_test(n);
+        EXPECT_EQ_MSG(hl_js_dispatch(&js, last, &req, &res), -1, "a failed request build");
+        hl_js_make_request_fail_for_test(0);
+        free_req_ctx(&req);
+        EXPECT_FALSE(JS_HasException(js.ctx));
+    }
+    EXPECT_EQ(eval_int("globalThis.__a44_called === undefined ? 1 : 0"), 1);
+    /* And a request built whole is served. */
+    KlHttpRequest req = {0};
+    KlHttpResponse res = {0};
+    EXPECT_EQ(hl_js_dispatch(&js, last, &req, &res), 0);
+    EXPECT_EQ(res.status, 204);
+    free_req_ctx(&req);
     cleanup_js();
 }
 #endif /* HL_ENABLE_HTTP_SERVER */
@@ -14315,6 +14391,65 @@ UTEST(js_audit20, worker_ctx_keys_are_own_properties)
     EXPECT_STREQ(out, "ok");
     js_worker_close(be, actx, pool);
 }
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 44: test.ok's message conversion can fail (out of memory, or the
+ * run's budget running out in the scan, audit 23), and it then threw
+ * TypeError("%s", NULL) - replacing the uncatchable interrupt with a
+ * catchable error. The conversion's own exception is passed on now. */
+UTEST(js_test_audit44, ok_null_message)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_http_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+    EXPECT_EQ(a10_run_tripped("globalThis.__a44big = 'x'.repeat(32 << 20);", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "try { test.ok(false, __a44big); } catch (e) { globalThis.__a44_caught = 1; }\n",
+        100000), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44_caught | 0"), 0);   /* uncatchable */
+    /* An ordinary failure still carries its message. */
+    EXPECT_EQ(eval_int("(() => { try { test.ok(false, 'the msg'); return 0; }"
+                       " catch (e) { return e.message === 'the msg' ? 1 : 2; } })()"), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44big = undefined, 1"), 1);
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
+
+#ifdef HL_ENABLE_HTTP_SERVER
+/* Audit 44 (test.ok's twin): test.eq's conversions (the compared strings,
+ * the message, the JSON of each side) can fail the same way, and it then
+ * threw its TypeError with "?" over the pending exception - making the
+ * uncatchable interrupt catchable. The pending exception is passed on. */
+UTEST(js_test_audit44, eq_conversion_failure_keeps_exception)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    KlHttpRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_http_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+    EXPECT_EQ(a10_run_tripped("globalThis.__a44big = 'x'.repeat(32 << 20);", 0), 0);
+    EXPECT_EQ(a10_run_tripped(
+        "try { test.eq(__a44big, 'y'); } catch (e) { globalThis.__a44_eq_caught = 1; }\n",
+        100000), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44_eq_caught | 0"), 0);   /* uncatchable */
+    EXPECT_EQ(a10_run_tripped(
+        "try { test.eq(1, 2, __a44big); } catch (e) { globalThis.__a44_eq_caught2 = 1; }\n",
+        100000), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44_eq_caught2 | 0"), 0);
+    /* Ordinary use is unchanged. */
+    EXPECT_EQ(eval_int("(() => { test.eq('a', 'a'); test.eq(1, 1); "
+                       "try { test.eq(1, 2, 'm'); return 0; } catch (e) { "
+                       "return e.message.indexOf('test.eq failed: m') === 0 ? 1 : 2; } })()"), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44big = undefined, 1"), 1);
+    kl_http_router_free(&router);
+    cleanup_js_caps();
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── Audit 23 G2: a binding's loop over app strings stops at the budget ─ */
 
@@ -19102,6 +19237,39 @@ UTEST(template_audit44, dot_path_empty_segment_refused)
         "globalThis.__a44_d = r;\n", "globalThis.__a44_d"), 0);
     cleanup_js_caps();
 }
+
+#ifdef HL_ENABLE_HTTP_SERVER   /* timers are part of the HTTP feature */
+/* Audit 44 (the Lua twin's): a timer that fires while its previous run is
+ * still in flight re-added itself 1 s later at shutdown too, unlike
+ * hl_js_timer_reschedule. */
+UTEST(js_timer_audit44, inflight_retry_not_rearmed_at_shutdown)
+{
+    const HlAsyncBackend *be = hl_async_backend();
+    ASSERT_TRUE(be != NULL);
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    ASSERT_EQ(be->init(&js.base.async_ctx, NULL), 0);
+    static HlJSTimer t;
+    memset(&t, 0, sizeof t);
+    t.js          = &js;
+    t.handler_id  = 0;
+    t.interval_ms = 20;
+    t.in_flight   = 1;
+    hl_js_timer_trampoline(&t);
+    EXPECT_NE(t.timer_id, 0);
+    if (t.timer_id > 0) be->timer_cancel(js.base.async_ctx, (uint64_t)t.timer_id);
+    t.timer_id = 0;
+    js.base.shutting_down = 1;
+    hl_js_timer_trampoline(&t);
+    EXPECT_EQ(t.timer_id, 0);
+    if (t.timer_id > 0) be->timer_cancel(js.base.async_ctx, (uint64_t)t.timer_id);
+    js.base.shutting_down = 0;
+    HlAsyncBackendCtx *actx = js.base.async_ctx;
+    cleanup_js();
+    be->tick(actx, 0);
+    be->free(actx);
+}
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 #if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* ── Audit 44: stdlib data-layer findings ─────────────────────────────

@@ -403,4 +403,12 @@ int hl_sandbox_seatbelt_profile_db_for_test(const HlSandboxPolicy *policy,
                                             const char **params,
                                             size_t max_params);
 
+/* Test seam: the Seatbelt profile for @p policy built on a scratch whose
+ * state-directory path holds stale bytes (as an uninitialised one would);
+ * the profile must not depend on them (audit 44). */
+int hl_sandbox_seatbelt_profile_stale_scratch_for_test(const HlSandboxPolicy *policy,
+                                                       char *buf, size_t buf_size,
+                                                       const char **params,
+                                                       size_t max_params);
+
 #endif /* HL_SANDBOX_H */

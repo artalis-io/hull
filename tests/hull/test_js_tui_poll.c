@@ -32,11 +32,34 @@ int hl_js_async_gate(JSContext *ctx, HlJS *js, const char *what)
 const char *hl_db_registry_open_txn(HlDbRegistry *reg)
 { (void)reg; return NULL; }
 #endif
+/* The run: hl_js_budget_charge says "over" (and leaves the interrupt
+ * pending) once `run_stop_after` charges have been asked; 0 = never. */
+static int run_charges, run_stop_after;
 int hl_js_budget_charge(JSContext *ctx, uint64_t units)   /* audit 40 */
-{ (void)ctx; (void)units; return 0; }
+{
+    (void)units;
+    run_charges++;
+    if (run_stop_after && run_charges >= run_stop_after) {
+        JS_ThrowInternalError(ctx, "run exceeded its time limit");
+        return -1;
+    }
+    return 0;
+}
+JSValue hl_js_budget_throw(JSContext *ctx)
+{ return JS_ThrowInternalError(ctx, "run exceeded its time limit"); }
+void hl_js_budget_arm_kind(HlJS *js, HlRunKind kind) { (void)js; (void)kind; }
 int hl_cap_tui_acquire(HlTuiCtx **out) { (void)out; return -1; }
+/* Every poll times out (no input), recording the longest wait asked for;
+ * -1 is "wait for ever". */
+static int poll_calls, poll_max_timeout, poll_unbounded;
 int hl_cap_tui_poll(HlTuiCtx *ctx, int timeout, HlTuiEvent *out)
-{ (void)ctx; (void)timeout; (void)out; return 1; }
+{
+    (void)ctx; (void)out;
+    poll_calls++;
+    if (timeout < 0) { poll_unbounded++; return 1; }
+    if (timeout > poll_max_timeout) poll_max_timeout = timeout;
+    return 1;
+}
 int hl_cap_tui_drain(HlTuiCtx *ctx) { (void)ctx; return 0; }
 int hl_cap_tui_next_event(HlTuiCtx *ctx, HlTuiEvent *out)
 { (void)ctx; (void)out; return 1; }
@@ -111,6 +134,8 @@ static void setup(HlJS *js, int failure)
     live_contexts = 0; live_conts = 0;
     pending_tick = NULL; pending_user = NULL;
     tracked = NULL; cancelled_timer = 0;
+    run_charges = 0; run_stop_after = 0;
+    poll_calls = 0; poll_max_timeout = 0; poll_unbounded = 0;
 }
 static void teardown(HlJS *js)
 {
@@ -176,4 +201,42 @@ UTEST(js_tui_poll, pending_poll_is_stopped_at_teardown)
     JS_FreeValue(js.ctx, timeout);
     teardown(&js);
 }
+/* Audit 44: with no event loop wired (hull test / hull agent build their app
+ * with no async ctx) tui.poll fell back to ONE blocking cap poll with the
+ * caller's timeout - -1 waited for ever - and never asked the run, so the
+ * run deadline could not end it. It now waits in slices, asking the run
+ * after each, and raises the run's limit once it says stop. So does
+ * tui.pollSync outside app.main's own run. */
+UTEST(tui_audit44, blocking_poll_honours_deadline)
+{
+    HlJS js; setup(&js, 0);
+    js.base.async_ctx = NULL;          /* no event loop: the blocking path */
+    run_stop_after = 3;
+    JSValue forever = JS_NewInt32(js.ctx, -1);
+    JSValue result = js_tui_poll(js.ctx, JS_UNDEFINED, 1, &forever);
+    EXPECT_TRUE(JS_IsException(result));
+    EXPECT_EQ(poll_unbounded, 0);
+    EXPECT_GT(poll_calls, 1);
+    EXPECT_LE(poll_max_timeout, 50);
+    JSValue err = JS_GetException(js.ctx);
+    JS_FreeValue(js.ctx, err);
+
+    /* A bounded poll that runs out first is a timeout (null). */
+    run_charges = 0; run_stop_after = 0; poll_calls = 0;
+    JSValue small = JS_NewInt32(js.ctx, 120);
+    result = js_tui_poll(js.ctx, JS_UNDEFINED, 1, &small);
+    EXPECT_TRUE(JS_IsNull(result));
+    EXPECT_EQ(poll_unbounded, 0);
+
+    /* pollSync outside app.main's own run (a timer, a ws callback). */
+    run_charges = 0; run_stop_after = 3; poll_calls = 0; poll_unbounded = 0;
+    js.active_cli_main = 0;
+    result = js_tui_poll_sync(js.ctx, JS_UNDEFINED, 1, &forever);
+    EXPECT_TRUE(JS_IsException(result));
+    EXPECT_EQ(poll_unbounded, 0);
+    err = JS_GetException(js.ctx);
+    JS_FreeValue(js.ctx, err);
+    teardown(&js);
+}
+
 UTEST_MAIN();

@@ -333,6 +333,24 @@ int hl_fs_strip_setid(int fd)
  * its -shm, so either it registered first and the match refuses, or the
  * truncate finished before it mapped anything. Checked then truncated
  * without the lock, a connection opened in between was truncated under. */
+/* Test seam: the next mode fchmod of a write fails with @p err (0 = off). */
+static int fs_fchmod_fail_errno;
+
+void hl_cap_fs_fail_mode_fchmod_for_test(int err)
+{
+    fs_fchmod_fail_errno = err;
+}
+
+static int fs_mode_fchmod(int fd, mode_t mode)
+{
+    if (fs_fchmod_fail_errno) {
+        errno = fs_fchmod_fail_errno;
+        fs_fchmod_fail_errno = 0;
+        return -1;
+    }
+    return fchmod(fd, mode);
+}
+
 /* A write whose mode has no group or other bit makes the parents it creates
  * 0700 (HL_FS_OPEN_PRIVATE_DIRS); 0 = the resolver's 0755. */
 static unsigned fs_private_dirs_flag(mode_t mode)
@@ -341,9 +359,15 @@ static unsigned fs_private_dirs_flag(mode_t mode)
 }
 
 /* @p cmode is the mode a file created here gets (under the umask); @p oflags
- * is HL_FS_OPEN_PRIVATE_DIRS or 0 (the parents the open creates). */
+ * is HL_FS_OPEN_PRIVATE_DIRS or 0 (the parents the open creates). A non-zero
+ * @p set_mode is given to the file exactly BEFORE the truncate (it holds no
+ * setuid / setgid bit, so it also clears those): a target the process may
+ * write but does not own fails that fchmod (EPERM), and the write is then
+ * refused with the content intact (audit 44: fchmod'ed after the truncate,
+ * the refusal had already emptied the file). */
 static int fs_open_write_fd(const HlFsConfig *cfg, const char *path,
-                            mode_t cmode, unsigned oflags, const char **err_msg)
+                            mode_t cmode, unsigned oflags, mode_t set_mode,
+                            const char **err_msg)
 {
     if (hl_db_sidecar_name(path)) {
         if (err_msg) *err_msg = HL_DB_LIVE_FILE_ERR;
@@ -365,7 +389,9 @@ static int fs_open_write_fd(const HlFsConfig *cfg, const char *path,
     hl_db_live_files_lock();
     if (fstat(fd, &st) != 0 || hl_db_live_file_match_locked(&st))
         fail = HL_DB_LIVE_FILE_ERR;
-    else if (hl_fs_strip_setid(fd) != 0 || ftruncate(fd, 0) != 0)
+    else if ((set_mode ? fs_mode_fchmod(fd, set_mode)
+                       : hl_fs_strip_setid(fd)) != 0
+             || ftruncate(fd, 0) != 0)
         fail = "write_failed";
     hl_db_live_files_unlock();
     if (fail) {
@@ -379,7 +405,7 @@ static int fs_open_write_fd(const HlFsConfig *cfg, const char *path,
 int hl_cap_fs_open_write_fd(const HlFsConfig *cfg, const char *path,
                             const char **err_msg)
 {
-    return fs_open_write_fd(cfg, path, 0644, 0, err_msg);
+    return fs_open_write_fd(cfg, path, 0644, 0, 0, err_msg);
 }
 
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
@@ -479,16 +505,13 @@ static int fs_write_in_place(const HlFsConfig *cfg, const char *path,
     /* Not setuid / setgid on new content, as the atomic replace already
      * drops them (audit 22); fs_open_write_fd strips them (audit 23, fail
      * closed since audit 25). With a mode given a file created here starts
-     * 0600 and gets its bits, exactly, once the open has truncated it. */
+     * 0600 and gets its bits, exactly, before the open truncates it - a
+     * mode that cannot be set refuses the write with the file untouched
+     * (audit 44). */
     int fd = fs_open_write_fd(cfg, path, mode ? 0600 : 0644,
-                              fs_private_dirs_flag(mode), err_msg);
+                              fs_private_dirs_flag(mode), mode, err_msg);
     if (fd < 0)
         return -1;
-    if (mode && fchmod(fd, mode) != 0) {
-        close(fd);
-        if (err_msg) *err_msg = "write_failed";
-        return -1;
-    }
     int rc = (len > 0 && data) ? fs_write_all(fd, data, len) : 0;
     if (rc == 0 && !(flags & HL_FS_WRITE_NO_SYNC) && hl_meter_fsync(fd) != 0)
         rc = -1;

@@ -207,6 +207,11 @@ int hl_fs_parse_mode_string(const char *s, size_t n, mode_t *out,
  * the mid-write permissions. NULL (the default) observes nothing. */
 void hl_cap_fs_write_observe_for_test(void (*fn)(int fd, void *ud), void *ud);
 
+/* Test seam: the next fchmod a write makes to give the file its mode fails
+ * with errno @p err (EPERM: a file the process can write but does not own).
+ * 0 (the default) turns it off. */
+void hl_cap_fs_fail_mode_fchmod_for_test(int err);
+
 /**
  * @brief Test whether a file exists at @p path.
  *

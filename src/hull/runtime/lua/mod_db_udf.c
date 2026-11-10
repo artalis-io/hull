@@ -60,10 +60,34 @@ typedef struct {
     int ctx_table_ref;  /* 0 = not initialized */
 } LuaAggGroupState;
 
-/* Push sqlite3_value as a Lua value */
+/* The bytes of a TEXT / BLOB argument: the pointer is asked for FIRST (it
+ * may expand a zeroblob or convert the encoding, an allocation through
+ * Hull's budget allocator), then the length. A NULL pointer whose value is
+ * no longer of @p type (a failed expansion leaves it NULL) or whose length
+ * is not 0 is a failed allocation; -1 then (audit 44: the pointer and length
+ * were read in one expression, and an empty value or a copy from NULL went
+ * to the UDF). */
+static int udf_value_bytes(sqlite3_value *val, int type,
+                           const char **out, size_t *len)
+{
+    const void *p = type == SQLITE_TEXT ? (const void *)sqlite3_value_text(val)
+                                        : sqlite3_value_blob(val);
+    int n = sqlite3_value_bytes(val);
+    /* An empty TEXT is "", never NULL; a zero-length BLOB is NULL with
+     * length 0 and its type kept (a failed expansion turns it NULL). */
+    if (!p && (type == SQLITE_TEXT || n > 0 || sqlite3_value_type(val) != type))
+        return -1;
+    *out = p ? (const char *)p : "";
+    *len = n > 0 ? (size_t)n : 0;
+    return 0;
+}
+
+/* Push sqlite3_value as a Lua value (raises on a failed allocation: called
+ * under the UDF's protected call) */
 static void lua_push_sqlite_value(lua_State *L, sqlite3_value *val)
 {
-    switch (sqlite3_value_type(val)) {
+    int type = sqlite3_value_type(val);
+    switch (type) {
     case SQLITE_INTEGER:
         lua_pushinteger(L, (lua_Integer)sqlite3_value_int64(val));
         break;
@@ -71,13 +95,15 @@ static void lua_push_sqlite_value(lua_State *L, sqlite3_value *val)
         lua_pushnumber(L, (lua_Number)sqlite3_value_double(val));
         break;
     case SQLITE_TEXT:
-        lua_pushlstring(L, (const char *)sqlite3_value_text(val),
-                        (size_t)sqlite3_value_bytes(val));
+    case SQLITE_BLOB: {
+        /* Initialised for the analyzer: luaL_error below does not return. */
+        const char *p = "";
+        size_t n = 0;
+        if (udf_value_bytes(val, type, &p, &n) != 0)
+            luaL_error(L, "udf: out of memory reading an argument");
+        lua_pushlstring(L, p, n);
         break;
-    case SQLITE_BLOB:
-        lua_pushlstring(L, (const char *)sqlite3_value_blob(val),
-                        (size_t)sqlite3_value_bytes(val));
-        break;
+    }
     default: /* SQLITE_NULL */
         lua_pushnil(L);
         break;

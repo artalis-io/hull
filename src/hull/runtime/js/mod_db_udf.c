@@ -51,21 +51,47 @@ typedef struct {
     int     initialized;
 } JsAggGroupState;
 
-/* Push sqlite3_value as a JS value */
+/* The bytes of a TEXT / BLOB argument: the pointer is asked for FIRST (it
+ * may expand a zeroblob or convert the encoding, an allocation through
+ * Hull's budget allocator), then the length. A NULL pointer whose value is
+ * no longer of @p type (a failed expansion leaves it NULL) or whose length
+ * is not 0 is a failed allocation; -1 then (audit 44: the pointer and length
+ * were read in one expression, and an empty value or a copy from NULL went
+ * to the UDF). */
+static int udf_value_bytes(sqlite3_value *val, int type,
+                           const char **out, size_t *len)
+{
+    const void *p = type == SQLITE_TEXT ? (const void *)sqlite3_value_text(val)
+                                        : sqlite3_value_blob(val);
+    int n = sqlite3_value_bytes(val);
+    /* An empty TEXT is "", never NULL; a zero-length BLOB is NULL with
+     * length 0 and its type kept (a failed expansion turns it NULL). */
+    if (!p && (type == SQLITE_TEXT || n > 0 || sqlite3_value_type(val) != type))
+        return -1;
+    *out = p ? (const char *)p : "";
+    *len = n > 0 ? (size_t)n : 0;
+    return 0;
+}
+
+/* Push sqlite3_value as a JS value (JS_EXCEPTION on a failed allocation) */
 static JSValue js_from_sqlite_value(JSContext *ctx, sqlite3_value *val)
 {
-    switch (sqlite3_value_type(val)) {
+    int type = sqlite3_value_type(val);
+    const char *p;
+    size_t n;
+    switch (type) {
     case SQLITE_INTEGER:
         return JS_NewInt64(ctx, sqlite3_value_int64(val));
     case SQLITE_FLOAT:
         return JS_NewFloat64(ctx, sqlite3_value_double(val));
     case SQLITE_TEXT:
-        return JS_NewStringLen(ctx, (const char *)sqlite3_value_text(val),
-                               (size_t)sqlite3_value_bytes(val));
+        if (udf_value_bytes(val, type, &p, &n) != 0)
+            return JS_ThrowOutOfMemory(ctx);
+        return JS_NewStringLen(ctx, p, n);
     case SQLITE_BLOB:
-        return JS_NewArrayBufferCopy(ctx,
-                                      (const uint8_t *)sqlite3_value_blob(val),
-                                      (size_t)sqlite3_value_bytes(val));
+        if (udf_value_bytes(val, type, &p, &n) != 0)
+            return JS_ThrowOutOfMemory(ctx);
+        return JS_NewArrayBufferCopy(ctx, (const uint8_t *)p, n);
     default: /* SQLITE_NULL */
         return JS_NULL;
     }

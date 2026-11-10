@@ -475,10 +475,11 @@ int hl_js_op_suspend(HlJS *js, struct HlSuspendOp *op);
 #define HL_JS_OFFHEAP_GC_DEBT ((size_t)32 * 1024 * 1024)
 
 struct HlReqLife;
-void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
-                                      struct KlHttpBodyReader *body_reader,
-                                      struct HlReqLife *life, KlHttpConn *conn,
-                                      KlHttpRequest *req);
+/* 0, or -1 with an exception pending (a value could not be made). */
+int hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
+                                    struct KlHttpBodyReader *body_reader,
+                                    struct HlReqLife *life, KlHttpConn *conn,
+                                    KlHttpRequest *req);
 
 /* db.batch's synchronous-fn checks (mod_db.c), shared with the worker VM's
  * batch (worker_db.c). hl_js_fn_is_async: 1 when @p fn is an async (or

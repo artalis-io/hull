@@ -528,6 +528,39 @@ UTEST(hl_cap_fs, an_in_place_write_takes_a_mode)
     teardown_fs();
 }
 
+/* Audit 44 M8: the in-place write truncated the link's target and only
+ * then fchmod'ed it; a target the process may write but does not own fails
+ * that fchmod (EPERM) - after the file was emptied. The mode is applied
+ * before the truncate now, so a refused mode leaves the content alone. */
+UTEST(fs_audit44, write_mode_inplace_fchmod_fail_keeps_content)
+{
+    if (hl_host_is_windows()) return;
+    setup_fs();
+    char p[512];
+    snprintf(p, sizeof(p), "%s/sub/owned.txt", test_dir);
+    FILE *f = fopen(p, "wb");
+    ASSERT_TRUE(f != NULL);
+    fputs("precious", f);
+    fclose(f);
+    ASSERT_EQ(chmod(p, 0644), 0);
+    snprintf(p, sizeof(p), "%s/sub/owned_alias.txt", test_dir);
+    ASSERT_EQ(symlink("owned.txt", p), 0);
+
+    hl_cap_fs_fail_mode_fchmod_for_test(EPERM);
+    const char *err = NULL;
+    EXPECT_EQ(hl_cap_fs_write_mode(&test_cfg, "sub/owned_alias.txt", "new", 3,
+                                   0, 0600, &err), -1);
+    hl_cap_fs_fail_mode_fchmod_for_test(0);
+    struct stat st;
+    ASSERT_EQ(host_path_stat("sub/owned.txt", &st), 0);
+    EXPECT_EQ((long long)st.st_size, 8LL);
+    EXPECT_EQ((int)(st.st_mode & 07777), 0644);
+    char buf[16];
+    ASSERT_EQ(hl_cap_fs_read(&test_cfg, "sub/owned.txt", buf, sizeof(buf), NULL), 8);
+    EXPECT_EQ(memcmp(buf, "precious", 8), 0);
+    teardown_fs();
+}
+
 /* Audit 23: the in-place write (through an in-root link under a subtree
  * grant) kept setuid / setgid when Hull ran as root - the kernel clears
  * them on a write only for a writer without CAP_FSETID. */

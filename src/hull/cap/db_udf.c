@@ -49,7 +49,8 @@ typedef struct {
  * Marshal sqlite3_value[] into the UDF wire format:
  *   [opcode: u8] [argc: u8] [type_1: u8] [len_1: u32 LE] [data_1...] ...
  *
- * Returns bytes written, or -1 if buffer too small.
+ * Returns bytes written, -1 if the buffer is too small, or -2 when an
+ * argument's bytes could not be made (an allocation failed).
  */
 static int marshal_udf_input(uint8_t *buf, size_t buf_size,
                               uint8_t opcode, int argc,
@@ -85,12 +86,16 @@ static int marshal_udf_input(uint8_t *buf, size_t buf_size,
             tag = HL_UDF_TYPE_TEXT;
             data = sqlite3_value_text(argv[i]);
             data_len = (uint32_t)sqlite3_value_bytes(argv[i]);
+            if (!data)   /* empty TEXT is "": the bytes could not be made */
+                return -2;   /* (audit 44) */
             break;
         }
         case SQLITE_BLOB: {
             tag = HL_UDF_TYPE_BLOB;
             data = sqlite3_value_blob(argv[i]);
             data_len = (uint32_t)sqlite3_value_bytes(argv[i]);
+            if (!data && (data_len > 0 || sqlite3_value_type(argv[i]) != vtype))
+                return -2;   /* the bytes could not be made (audit 44) */
             break;
         }
         default: /* SQLITE_NULL */
@@ -190,6 +195,14 @@ static int unmarshal_udf_output(sqlite3_context *ctx,
 
 /* ── Scalar WASM UDF callback ──────────────────────────────────────── */
 
+/* Test seam: the argument marshaller itself (bytes written, -1 too large,
+ * -2 an argument's bytes could not be made). */
+int hl_cap_db_udf_marshal_for_test(uint8_t *buf, size_t buf_size, int argc,
+                                   sqlite3_value **argv)
+{
+    return marshal_udf_input(buf, buf_size, HL_UDF_OP_SCALAR, argc, argv);
+}
+
 static void wasm_scalar_func(sqlite3_context *ctx, int argc,
                               sqlite3_value **argv)
 {
@@ -199,6 +212,10 @@ static void wasm_scalar_func(sqlite3_context *ctx, int argc,
     uint8_t input_buf[HL_UDF_MAX_INPUT_SIZE];
     int input_len = marshal_udf_input(input_buf, sizeof(input_buf),
                                        HL_UDF_OP_SCALAR, argc, argv);
+    if (input_len == -2) {
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
     if (input_len < 0) {
         sqlite3_result_error(ctx, "UDF input exceeds 8KB limit", -1);
         return;
@@ -275,6 +292,10 @@ static void wasm_step_func(sqlite3_context *ctx, int argc,
     uint8_t input_buf[HL_UDF_MAX_INPUT_SIZE];
     int input_len = marshal_udf_input(input_buf, sizeof(input_buf),
                                        HL_UDF_OP_STEP, argc, argv);
+    if (input_len == -2) {
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
     if (input_len < 0) {
         sqlite3_result_error(ctx, "UDF step input exceeds 64KB limit", -1);
         return;
