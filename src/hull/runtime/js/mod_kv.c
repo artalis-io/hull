@@ -18,6 +18,7 @@
 
 #include "mod_buffer.h"        /* get_hl_js, js_get_buffer, HlBufferView */
 #include "internal.h"          /* hl_js_budget_throw */
+#include "refusal.h"           /* hl_js_refuse */
 #include "hull/cap/kv.h"
 #include "hull/shared/work_charge.h"   /* hl_work_kv_command_units */
 
@@ -373,6 +374,11 @@ static JSValue js_kv_open(JSContext *ctx, JSValueConst this_val, int argc, JSVal
         rc = hl_cap_kv_open(&c, dsn, timeout_ms, js ? js->base.alloc : NULL, err, sizeof err);
     }
     JS_FreeCString(ctx, dsn);
+    /* Still at the cap: an admission cap of this VM, coded "busy" (audit 44)
+     * like the blob handle cap - it was a plain error, so the stdlib read it
+     * as a backend failure and a retry loop spent attempts on it. */
+    if (rc == HL_KV_ERR_TOO_MANY)
+        return hl_js_refuse(ctx, HL_REFUSAL_BUSY, JS_ThrowRangeError(ctx, "%s", err));
     if (rc != 0) return JS_ThrowInternalError(ctx, "%s", err);
 
     JSValue obj = JS_NewObjectClass(ctx, (int)hull_kv_conn_class_id);

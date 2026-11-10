@@ -223,6 +223,151 @@ test("tunnel.path is origin-form only", function()
     assert_match(r.written[1] or "", "GET /ssh?x=1 HTTP/1.1\r\n")
 end)
 
+test("ssh_tunnel_audit44.lua_tunnel_options_read_once", function()
+    -- A tunnel table whose fields answer differently on a later read: the
+    -- first read of host / path passes the checks, later reads would name
+    -- another relay and an absolute-form target. Whatever the options are
+    -- read as, the dial and the upgrade must use exactly what was checked.
+    local reads = {}
+    local first = { host = "ssh.example.com", path = "/ok",
+                    tls_hostname = "ssh.example.com" }
+    local later = { host = "other.internal.example", path = "/other",
+                    tls_hostname = "other.internal.example" }
+    local proxy = setmetatable({}, { __index = function(_, k)
+        reads[k] = (reads[k] or 0) + 1
+        if reads[k] == 1 then return first[k] end
+        return later[k]
+    end })
+    local r = relay(upgraded())
+    local seen
+    pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = proxy,
+        open_stream = function(o) seen = o; return r end,
+    })
+    if not seen then
+        -- Refused before anything was dialled is a correct answer too.
+        assert_eq(#r.written, 0, "nothing may be sent when refused:")
+    else
+        assert_eq(seen.via.host, "ssh.example.com", "the relay dialled:")
+        local req = r.written[1] or ""
+        assert_match(req, "Host: ssh.example.com\r\n", "the Host sent")
+        assert_match(req, "GET /ok HTTP/1.1\r\n", "the path sent")
+        assert_eq(req:find("other", 1, true), nil, "no later answer is used")
+    end
+
+    -- Plain host and path, and a tls_hostname that is absent when first
+    -- read and names another host after: the upgrade's Host is what the
+    -- dial was granted for.
+    local n = 0
+    local half = setmetatable({ host = "ssh.example.com", path = "/ok" },
+        { __index = function(_, k)
+            if k ~= "tls_hostname" then return nil end
+            n = n + 1
+            if n > 1 then return "other.internal.example" end
+        end })
+    local r2 = relay(upgraded())
+    local seen2
+    ssh.connect{
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = half,
+        open_stream = function(o) seen2 = o; return r2 end,
+    }
+    assert_eq(seen2 and seen2.via.tls_hostname, nil, "the TLS name dialled:")
+    assert_match(r2.written[1] or "", "Host: ssh.example.com\r\n", "the Host sent")
+end)
+
+test("ssh_tunnel_audit44.write_refusal_unchanged", function()
+    -- The relay's stream refuses every write after the upgrade the way the
+    -- runtime refuses a wait inside a transaction. The refusal says nothing
+    -- about the connection: it must reach the caller as it was raised, not
+    -- as io_error text.
+    local REFUSAL = "[hull:wait_refused] hull.ssh: cannot wait inside a transaction"
+    local ident = string.char(0x80 | ws.OP_BIN, 14) .. "SSH-2.0-Fake\r\n"
+    local r = relay(upgraded(ident))
+    local writes = 0
+    r.write = function(self, s)
+        writes = writes + 1
+        if writes > 1 then error(REFUSAL, 0) end
+        self.written[#self.written + 1] = s
+        return true
+    end
+    local ok, e = pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = { host = "ssh.example.com" },
+        open_stream = function() return r end,
+    })
+    assert_eq(ok, false, "connect raises the refusal:")
+    assert_eq(e, REFUSAL, "unchanged:")
+
+    -- And the stream itself, under any caller.
+    local r2 = relay(upgraded())
+    local s = assert(ws.connect(r2, { host = "ssh.example.com", random = stub_random,
+                                      sha1 = stub_sha1 }))
+    r2.write = function() error(REFUSAL, 0) end
+    local ok2, e2 = pcall(s.write, s, "abc")
+    assert_eq(ok2, false, "write raises the refusal:")
+    assert_eq(e2, REFUSAL, "unchanged:")
+end)
+
+test("ssh_audit44.banner_callback_error_reraised", function()
+    -- The caller's own on_banner raising is the caller's bug, not the
+    -- connection's: it comes back as raised, like on_stdout's, and the
+    -- stream is closed.
+    local r = relay("a banner line\r\nSSH-2.0-Fake\r\n")
+    local ok, e = pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        open_stream = function() return r end,
+        on_banner = function() error("my bug", 0) end,
+    })
+    assert_eq(ok, false, "connect raises:")
+    assert_eq(e, "my bug", "the callback's own error:")
+    assert_eq(r.closed, true, "the stream is closed:")
+end)
+
+test("ssh_audit44.pending_trust_not_spent_by_bad_args", function()
+    -- A connect refused for its own arguments dials nothing, so it must not
+    -- use up the one connection a pending trust is for.
+    local pt = ssh.pending_trust()
+    local function try(o)
+        o.host = "spark-7468"; o.user = "operator"; o.key = {}
+        o.crypto = crypto_stub; o.trust = pt
+        o.open_stream = o.open_stream or function() error("nothing may be dialled") end
+        return pcall(ssh.connect, o)
+    end
+    for _, o in ipairs({ { port = "22" }, { timeout_ms = 1.5 },
+                         { tunnel = { host = "ssh.example.com", port = "443" } },
+                         { tunnel = { host = "ssh.example.com", path = "relay" } } }) do
+        local ok = try(o)
+        assert_eq(ok, false, "a bad argument raises")
+    end
+    local ok, r, e = try({ software = "Hull\r\nX" })
+    assert_eq(ok and r == nil and e and e.code, "bad_software")
+    local ok2, _, e2 = try({ open_stream = function() return relay("") end })
+    assert_eq(ok2, true)
+    assert_eq(e2 and e2.code ~= "already_used", true,
+              "the trust is still unused: " .. tostring(e2 and e2.code))
+    local _, _, e3 = try({ open_stream = function() return relay("") end })
+    assert_eq(e3 and e3.code, "already_used", "and the dialled connect spent it:")
+end)
+
+test("ssh_tunnel_audit44.upgrade_refusal_closes_raw", function()
+    -- The runtime refuses the upgrade's own write (a wait inside a
+    -- transaction): the refusal reaches the caller unchanged, and the relay
+    -- stream is closed then, not left open until it is collected.
+    local REFUSAL = "[hull:wait_refused] hull.ssh: cannot wait inside a transaction"
+    local r = relay(upgraded())
+    r.write = function() error(REFUSAL, 0) end
+    local ok, e = pcall(ssh.connect, {
+        host = "spark-7468", user = "operator", key = {}, crypto = crypto_stub,
+        tunnel = { host = "ssh.example.com" },
+        open_stream = function() return r end,
+    })
+    assert_eq(ok, false, "connect raises:")
+    assert_eq(e, REFUSAL, "unchanged:")
+    assert_eq(r.closed, true, "the relay stream is closed:")
+end)
+
 test("tunnel.headers entries are header lines", function()
     -- No name, a name that is not a token, or a continuation line a relay
     -- could unfold onto the destination header (audit 22).

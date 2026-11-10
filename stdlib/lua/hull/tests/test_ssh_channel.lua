@@ -102,6 +102,26 @@ test("open confirmation carries both ids and the peer limits", function()
     assert_eq(m.max_packet, 256)
 end)
 
+test("ssh_audit44.duplicate_open_confirmation_refused", function()
+    -- A second confirmation would replace the peer's channel id and reset the
+    -- send window and packet size mid-session: a protocol error.
+    local ch = channel.new({ id = 0 })
+    local conf = function(sender, window)
+        return channel.parse(wire.writer():byte(91):uint32(0):uint32(sender)
+                             :uint32(window):uint32(256):build())
+    end
+    ch:handle(conf(7, 2048))
+    assert_eq(ch.remote_id, 7)
+    assert_raises(function() ch:handle(conf(9, 4096)) end, "a second confirmation")
+    assert_eq(ch.remote_id, 7, "the peer id stands:")
+    assert_eq(ch.send_window, 2048, "the window stands:")
+    -- Nor does a confirmation follow a failure.
+    local ch2 = channel.new({ id = 0 })
+    ch2:handle(channel.parse(wire.writer():byte(92):uint32(0):uint32(4)
+                             :string("no"):string("en"):build()))
+    assert_raises(function() ch2:handle(conf(7, 2048)) end, "a confirmation after a failure")
+end)
+
 test("open failure carries a reason a human can read", function()
     local p = wire.writer():byte(92):uint32(0):uint32(4)
         :string("administratively prohibited"):string("en"):build()

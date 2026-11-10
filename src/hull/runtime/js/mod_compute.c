@@ -133,17 +133,26 @@ static JSValue js_push_wasm_buffer(JSContext *ctx, HlWasmBuffer *buf)
  * JS_FreeCString it), any other object a TypeError: a Float32Array went in
  * as its toString "1,2,3", any object as "[object Object]". NULL with an
  * exception pending on failure. */
+/* @p handles: whether the caller takes an open WasmBuffer / MappedBuffer
+ * itself before it gets here (the call paths do; compute.buffer, which makes
+ * a WasmBuffer from bytes, does not), so the message names what the call
+ * really accepts (audit 44). */
 static const uint8_t *js_compute_input_bytes(JSContext *ctx, JSValueConst v,
                                              size_t *len, int *is_string,
-                                             const char *what)
+                                             const char *what, int handles)
 {
     *is_string = 0;
     *len = 0;
     if (JS_IsObject(v)) {
         const uint8_t *p = hl_js_bytes_view(ctx, len, v);
         if (p) return p;
-        JS_ThrowTypeError(ctx, "%s: input must be a string, ArrayBuffer, "
-                               "typed array, WasmBuffer, or MappedBuffer", what);
+        if (handles)
+            JS_ThrowTypeError(ctx, "%s: input must be a string, ArrayBuffer, "
+                                   "typed array, or an open WasmBuffer or "
+                                   "MappedBuffer", what);
+        else
+            JS_ThrowTypeError(ctx, "%s: input must be a string, ArrayBuffer "
+                                   "or typed array", what);
         return NULL;
     }
     const char *s = JS_ToCStringLen(ctx, len, v);
@@ -162,7 +171,7 @@ static JSValue js_compute_buffer(JSContext *ctx, JSValueConst this_val,
     size_t len = 0;
     int is_string = 0;
     const uint8_t *data = js_compute_input_bytes(ctx, argv[0], &len,
-                                                 &is_string, "compute.buffer");
+                                                 &is_string, "compute.buffer", 0);
     if (!data)
         return JS_EXCEPTION;
 
@@ -490,7 +499,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
             input_len = mmap_buf->len;
         } else {
             input = js_compute_input_bytes(ctx, argv[1], &input_len,
-                                           &input_is_string, "compute.call");
+                                           &input_is_string, "compute.call", 1);
             if (!input) {
                 js_free_span_names(ctx, span_reqs, span_holders, span_count);
                 JS_FreeCString(ctx, name);
@@ -699,7 +708,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         } else {
             input = js_compute_input_bytes(ctx, argv[1], &input_len,
                                            &input_is_string,
-                                           "compute.async.call");
+                                           "compute.async.call", 1);
             if (!input) {
                 JS_FreeCString(ctx, name);
                 return JS_EXCEPTION;
@@ -924,7 +933,7 @@ static JSValue js_wasm_inst_call(JSContext *ctx, JSValueConst this_val,
         } else {
             input = js_compute_input_bytes(ctx, argv[0], &input_len,
                                            &input_is_string,
-                                           "WasmInstance.call");
+                                           "WasmInstance.call", 1);
             if (!input) {
                 js_free_span_names(ctx, span_reqs, span_holders, span_count);
                 return JS_EXCEPTION;
@@ -1104,7 +1113,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         } else {
             input = js_compute_input_bytes(ctx, argv[0], &input_len,
                                            &input_is_string,
-                                           "WasmInstance.async.call");
+                                           "WasmInstance.async.call", 1);
             if (!input)
                 return JS_EXCEPTION;
         }

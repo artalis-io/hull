@@ -412,7 +412,13 @@ function Stream:write(data)
     -- One binary frame per write. The caller above is already sending whole
     -- SSH packets, so this adds no buffering of its own.
     local pok, ok, err, code = pcall(self._send, self, M.OP_BIN, data)
-    if not pok then return nil, tostring(ok) end
+    if not pok then
+        -- A runtime refusal (a wait inside a transaction, an admission cap)
+        -- goes on unchanged: as text it read as the connection's io_error
+        -- (audit 44).
+        if require('hull._refusal').code(ok) then error(ok, 0) end
+        return nil, tostring(ok)
+    end
     if not ok then return nil, err, code end
     return true
 end

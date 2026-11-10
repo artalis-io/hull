@@ -92,14 +92,14 @@ CREATE TABLE IF NOT EXISTS _hull_totp (
     digits         INTEGER NOT NULL DEFAULT 6,
     period         INTEGER NOT NULL DEFAULT 30,
     last_used_step INTEGER NOT NULL DEFAULT -1,
-    created_at     INTEGER NOT NULL,
-    updated_at     INTEGER NOT NULL
+    created_at     BIGINT NOT NULL,
+    updated_at     BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_recovery (
     user_id   VARCHAR(255) NOT NULL,
     code_hash VARCHAR(255) NOT NULL,
-    used_at   INTEGER,
+    used_at   BIGINT,
     PRIMARY KEY (user_id, code_hash)
 );
 
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS _hull_totp_pending (
     encrypted  INTEGER NOT NULL DEFAULT 0,
     digits     INTEGER NOT NULL DEFAULT 6,
     period     INTEGER NOT NULL DEFAULT 30,
-    created_at INTEGER NOT NULL
+    created_at BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
@@ -121,15 +121,15 @@ CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
 CREATE TABLE IF NOT EXISTS _hull_totp_attempts (
     user_id        VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
-    last_failed_at INTEGER,
-    locked_until   INTEGER
+    last_failed_at BIGINT,
+    locked_until   BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
     ip             VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
-    last_failed_at INTEGER,
-    locked_until   INTEGER
+    last_failed_at BIGINT,
+    locked_until   BIGINT
 );
 
 -- The failures each account had from one IP (audit 28): see the Lua twin.
@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip_user (
     ip             VARCHAR(255) NOT NULL,
     user_id        VARCHAR(255) NOT NULL,
     failed_count   INTEGER NOT NULL DEFAULT 0,
-    last_failed_at INTEGER,
+    last_failed_at BIGINT,
     PRIMARY KEY (ip, user_id)
 );
 

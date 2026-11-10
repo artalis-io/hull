@@ -90,6 +90,20 @@ const char *const *hl_db_internal_tables(void);
 int hl_db_internal_move(HlDbHandle *src, HlDbHandle *dst, const char *what,
                         char *err, size_t errsz);
 
+/* Carry every ordinary table of @p src (SQLite) that @p dst lacks into
+ * @p dst, in ONE transaction on it: the source's CREATE TABLE / INDEX
+ * statements (nothing else is replayed) and every row. Skips
+ * `_hull_migrations`, SQLite's own tables and a virtual table's shadow
+ * tables. A view or virtual table @p dst lacks - or, when @p dst is not
+ * SQLite, every table it would have needed - is named in @p lost
+ * (comma-separated) instead. Used when a manifest default replaces an
+ * implicit default this run created (audit 44): what the app's top level
+ * made there (jobs, outbox, inbox, kv, search, the _hull_* tables under
+ * --keep-internal-in-app-db) must not vanish with it. Returns the tables
+ * carried, or -1 with *@p err set (nothing committed). */
+int hl_db_carry_new_tables(HlDbHandle *src, HlDbHandle *dst,
+                           char *lost, size_t lostsz, char *err, size_t errsz);
+
 /* Unit-test seam: let @p after column-name pushes succeed, then fail every
  * later one, as an allocation failure would (-1 = off). */
 void hl_db_internal_fail_column_push_for_test(int after);
@@ -130,8 +144,10 @@ int hl_db_internal_check_unmoved(HlDbRegistry *reg, int keep);
 /* Record the default internal database for app directory @p app_dir and
  * default DSN @p default_dsn (hl_db_internal_default_dsn), active unless
  * @p keep: the one derivation every entry point (hl_app_context_init,
- * `hull migrate`) uses. 0 (nothing recorded when there is no default), or
- * -1 when the path does not fit. */
+ * `hull migrate`) uses. 0, or -1 when the path does not fit. A default with
+ * no internal database of its own (network / DuckDB / "$VAR") CLEARS an
+ * earlier recorded one and closes an internal connection opened from it
+ * (audit 44), so a re-pointed default never keeps the implicit one's. */
 int hl_db_internal_configure(HlDbRegistry *reg, const char *app_dir,
                              const char *default_dsn, int keep);
 /* The same, given the app's state directory too (NULL = none). */

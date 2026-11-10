@@ -10,6 +10,7 @@
 #include "hull/shared/host.h"
 
 #include <errno.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,9 +59,14 @@ static int join(const char *base, const char *name, char *buf, size_t sz)
     return (n < 0 || (size_t)n >= sz) ? -1 : 0;
 }
 
-int hl_state_dir_resolve(const char *name, char *out, size_t out_sz)
+/* The state directory's path for @p name into @p path (not made, not
+ * checked): HULL_STATE_DIR, else %LOCALAPPDATA%\<name> on Windows, else
+ * $XDG_STATE_HOME/<name>, else <home>/.local/state/<name>. With
+ * @p make_parents the XDG ~/.local and ~/.local/state are made 0755 when
+ * absent. 0 / -1 (logged). */
+static int state_dir_path(const char *name, char *path, size_t path_sz,
+                          int make_parents)
 {
-    if (!out || out_sz < 2) return -1;
     if (!hl_state_dir_name_valid(name)) {
         log_error("[state] state.name %s is not a directory name Hull takes "
                   "([a-z0-9] then up to 63 of [a-z0-9._-], no \"..\")",
@@ -68,31 +74,35 @@ int hl_state_dir_resolve(const char *name, char *out, size_t out_sz)
         return -1;
     }
 
-    char path[PATH_MAX];
     const char *override = getenv("HULL_STATE_DIR");
-    if (override && *override) return finish(override, out, out_sz);
+    if (override && *override) {
+        size_t n = strlen(override);
+        if (n >= path_sz) { log_error("[state] state directory path is too long"); return -1; }
+        memcpy(path, override, n + 1);
+        return 0;
+    }
 
     if (hl_host_is_windows()) {
         const char *local = getenv("LOCALAPPDATA");
         char base[HL_HOST_PATH_MAX];
         if (local && *local && hl_host_normalize_path(local, base, sizeof base) == 0
             && base[0] == '/') {
-            if (join(base, name, path, sizeof path) != 0) {
+            if (join(base, name, path, path_sz) != 0) {
                 log_error("[state] state directory path is too long");
                 return -1;
             }
-            return finish(path, out, out_sz);
+            return 0;
         }
         /* No LOCALAPPDATA: fall through to the POSIX layout under the home. */
     }
 
     const char *xdg = getenv("XDG_STATE_HOME");
     if (xdg && xdg[0] == '/') {          /* a '.' / '..' in it is refused by finish */
-        if (join(xdg, name, path, sizeof path) != 0) {
+        if (join(xdg, name, path, path_sz) != 0) {
             log_error("[state] state directory path is too long");
             return -1;
         }
-        return finish(path, out, out_sz);
+        return 0;
     }
 
     const char *home = hl_host_home();
@@ -108,16 +118,37 @@ int hl_state_dir_resolve(const char *name, char *out, size_t out_sz)
     }
     /* ~/.local and ~/.local/state are the user's, made 0755 if absent (the
      * XDG layout); only <name> below them is private. */
-    char local_dir[PATH_MAX];
-    n = snprintf(local_dir, sizeof local_dir, "%s/.local", home);
-    if (n < 0 || (size_t)n >= sizeof local_dir) return -1;
-    if (hl_ensure_dir(local_dir, 0755) != 0 || hl_ensure_dir(local_state, 0755) != 0) {
-        log_error("[state] cannot create %s: %s", local_state, strerror(errno));
-        return -1;
+    if (make_parents) {
+        char local_dir[PATH_MAX];
+        n = snprintf(local_dir, sizeof local_dir, "%s/.local", home);
+        if (n < 0 || (size_t)n >= sizeof local_dir) return -1;
+        if (hl_ensure_dir(local_dir, 0755) != 0 || hl_ensure_dir(local_state, 0755) != 0) {
+            log_error("[state] cannot create %s: %s", local_state, strerror(errno));
+            return -1;
+        }
     }
-    if (join(local_state, name, path, sizeof path) != 0) {
+    if (join(local_state, name, path, path_sz) != 0) {
         log_error("[state] state directory path is too long");
         return -1;
     }
+    return 0;
+}
+
+int hl_state_dir_resolve(const char *name, char *out, size_t out_sz)
+{
+    if (!out || out_sz < 2) return -1;
+    char path[PATH_MAX];
+    if (state_dir_path(name, path, sizeof path, 1) != 0) return -1;
     return finish(path, out, out_sz);
+}
+
+int hl_state_dir_peek(const char *name, char *out, size_t out_sz)
+{
+    if (!out || out_sz < 2) return -1;
+    out[0] = '\0';
+    char path[PATH_MAX];
+    if (state_dir_path(name, path, sizeof path, 0) != 0) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;   /* not made yet */
+    return finish(path, out, out_sz) == 0 ? 1 : -1;
 }

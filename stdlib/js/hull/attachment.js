@@ -15,7 +15,7 @@
  * tools. The web-specific auth-gated `serve(req, res, id, { authCheck })`
  * helper lives in the separate hull:web:attachment-serve module.
  *
- * Portable SQL: `?` placeholders, INTEGER timestamps + refcount,
+ * Portable SQL: `?` placeholders, BIGINT timestamps + size (audit 44), INTEGER refcount,
  * TEXT ids, no AUTOINCREMENT, no PRAGMAs.
  *
  * @license AGPL-3.0-or-later
@@ -99,9 +99,9 @@ function init(opts) {
         "  original_name TEXT NOT NULL," +
         "  mime TEXT NOT NULL," +
         "  declared_mime TEXT," +
-        "  size INTEGER NOT NULL," +
+        "  size BIGINT NOT NULL," +
         "  uploaded_by TEXT," +
-        "  uploaded_at INTEGER NOT NULL," +
+        "  uploaded_at BIGINT NOT NULL," +
         "  refcount INTEGER NOT NULL DEFAULT 1" +
         ")"
     );
@@ -113,7 +113,7 @@ function init(opts) {
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_attachment_orphans (" +
         "  blob_id VARCHAR(255) PRIMARY KEY," +
-        "  queued_at INTEGER NOT NULL" +
+        "  queued_at BIGINT NOT NULL" +
         ")"
     );
 }
@@ -296,7 +296,8 @@ function read(id) {
  * @param {string} id
  * @param {string} dst  Destination file path (must be inside a declared
  *   `manifest.fs.write` allowlist path).
- * @returns {number|null}  Bytes written, or null when missing.
+ * @returns {number|null}  Bytes written, or null when missing or when the
+ *   blob's bytes no longer hash to its id (nothing is written then).
  */
 function readToFile(id, dst) {
     const meta = metadata(id);
@@ -309,15 +310,33 @@ function readToFile(id, dst) {
     // can allocate the destination buffer once and stream chunks
     // directly into it - O(file_size) memory instead of the 2x of a
     // parts-array + concat scheme.
+    //
+    // The bytes are hashed as they are read and must be exactly meta.size
+    // bytes that hash to the blob id (content-addressed: the id IS their
+    // SHA-256), as blob.get checks (audit 44): a blob file changed on disk
+    // was written to dst as is - a shorter one zero-padded - while read() of
+    // the same id returned null. The Lua twin checks the same.
+    const h = crypto.createSha256();
     const combined = new Uint8Array(meta.size);
-    let offset = 0;
-    while (offset < meta.size) {
-        const chunk = r.read(64 * 1024);
-        if (!chunk || chunk.byteLength === 0) break;
-        combined.set(new Uint8Array(chunk), offset);
-        offset += chunk.byteLength;
+    let offset = 0, fits = true;
+    try {
+        for (;;) {
+            const chunk = r.read(64 * 1024);
+            if (!chunk || chunk.byteLength === 0) break;
+            if (offset + chunk.byteLength > meta.size) { fits = false; break; }
+            h.update(chunk);
+            combined.set(new Uint8Array(chunk), offset);
+            offset += chunk.byteLength;
+        }
+    } finally {
+        r.close();
     }
-    r.close();
+    if (!fits || offset !== meta.size) return null;
+    const digest = new Uint8Array(h.digest());
+    let hex = "";
+    for (let i = 0; i < digest.length; i++)
+        hex += (digest[i] < 16 ? "0" : "") + digest[i].toString(16);
+    if (hex !== meta.blob_id) return null;
 
     fs.write(dst, combined.buffer);
     return offset;

@@ -332,10 +332,11 @@ static int ddl_allowed(const char *sql)
     return 0;
 }
 
-/* Copy table @p t from @p src into @p dst inside one transaction on @p dst.
- * Returns the rows copied, or -1 with @p err set. */
-static long long copy_table(HlDbHandle *src, HlDbHandle *dst, const char *t,
-                            char *err, size_t errsz)
+/* Copy table @p t from @p src into @p dst - inside one transaction of its
+ * own on @p dst, or (@p own_txn 0) inside the caller's. Returns the rows
+ * copied, or -1 with @p err set. */
+static long long copy_table_ex(HlDbHandle *src, HlDbHandle *dst, const char *t,
+                               char *err, size_t errsz, int own_txn)
 {
     long long result = -1;
     StrList ddl = {0}, scols = {0}, dcols = {0};
@@ -355,12 +356,14 @@ static long long copy_table(HlDbHandle *src, HlDbHandle *dst, const char *t,
         goto out;
     }
 
-    if (hl_db_begin(dst) != 0) {
-        snprintf(err, errsz, "cannot begin a transaction on the target: %s",
-                 hl_db_errmsg(dst));
-        goto out;
+    if (own_txn) {
+        if (hl_db_begin(dst) != 0) {
+            snprintf(err, errsz, "cannot begin a transaction on the target: %s",
+                     hl_db_errmsg(dst));
+            goto out;
+        }
+        in_txn = 1;
     }
-    in_txn = 1;
 
     int exists = table_exists(dst, t);
     if (exists < 0) {
@@ -437,7 +440,7 @@ static long long copy_table(HlDbHandle *src, HlDbHandle *dst, const char *t,
                  cc.failed ? hl_db_errmsg(dst) : hl_db_errmsg(src));
         goto out;
     }
-    if (hl_db_commit(dst) != 0) {
+    if (own_txn && hl_db_commit(dst) != 0) {
         snprintf(err, errsz, "cannot commit the copy of %s: %s", t,
                  hl_db_errmsg(dst));
         goto out;
@@ -453,6 +456,118 @@ out:
     strlist_free(&scols);
     strlist_free(&dcols);
     return result;
+}
+
+static long long copy_table(HlDbHandle *src, HlDbHandle *dst, const char *t,
+                            char *err, size_t errsz)
+{
+    return copy_table_ex(src, dst, t, err, errsz, 1);
+}
+
+/* pragma_table_list rows: (name, type). */
+typedef struct {
+    StrList names;
+    StrList types;
+} TableList;
+
+static int table_list_row(void *ctx, HlColumn *cols, int ncols)
+{
+    TableList *l = ctx;
+    if (ncols < 2 || cols[0].value.type != HL_TYPE_TEXT ||
+        cols[1].value.type != HL_TYPE_TEXT)
+        return 0;
+    if (strlist_push(&l->names, cols[0].value.s, cols[0].value.len) != 0 ||
+        strlist_push(&l->types, cols[1].value.s, cols[1].value.len) != 0)
+        return 1;
+    return 0;
+}
+
+/* Append "name" to the comma-separated @p lost list (truncated quietly). */
+static void lost_add(char *lost, size_t lostsz, const char *name)
+{
+    if (!lost || lostsz == 0) return;
+    size_t n = strlen(lost);
+    int w = snprintf(lost + n, lostsz - n, "%s%s", n ? ", " : "", name);
+    if (w < 0 || (size_t)w >= lostsz - n) lost[lostsz - 1] = '\0';
+}
+
+int hl_db_carry_new_tables(HlDbHandle *src, HlDbHandle *dst,
+                           char *lost, size_t lostsz, char *err, size_t errsz)
+{
+    char ebuf[512];
+    if (!err || errsz == 0) { err = ebuf; errsz = sizeof ebuf; }
+    err[0] = '\0';
+    if (lost && lostsz) lost[0] = '\0';
+    if (!src || !dst || !is_sqlite(src)) return 0;
+    int dst_sqlite = is_sqlite(dst);
+
+    /* Startup work, not an app run: unbudgeted, and the copy of _hull_*
+     * tables (--keep-internal-in-app-db, outbox, jobs, ...) is Hull's own. */
+    HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+    int ns_prev = hl_cap_db_ns_trust(1);
+    TableList tl = {0};
+    int rc = 0, carried = 0, in_txn = 0;
+
+    /* pragma_table_list says what each object IS (a virtual table's shadow
+     * tables are "shadow"), whatever sqlite_master's type column holds. */
+    if (hl_db_query(src, "SELECT name, type FROM pragma_table_list "
+                         "WHERE schema = 'main' ORDER BY name",
+                    NULL, 0, table_list_row, &tl, NULL) < 0 ||
+        tl.names.oom || tl.types.oom) {
+        snprintf(err, errsz, "cannot list the tables of the source: %s",
+                 hl_db_errmsg(src));
+        rc = -1;
+        goto out;
+    }
+    for (int i = 0; i < tl.names.n; i++) {
+        const char *t = tl.names.sql[i], *ty = tl.types.sql[i];
+        if (strncmp(t, "sqlite_", 7) == 0 || strcmp(t, "_hull_migrations") == 0 ||
+            strcmp(ty, "shadow") == 0)
+            continue;
+        int exists = dst_sqlite ? table_exists(dst, t) : 0;
+        if (exists < 0) {
+            snprintf(err, errsz, "cannot inspect the target: %s", hl_db_errmsg(dst));
+            rc = -1;
+            goto out;
+        }
+        if (exists) continue;                       /* the target has it */
+        if (!dst_sqlite || strcmp(ty, "table") != 0) {
+            lost_add(lost, lostsz, t);              /* a view, a virtual table */
+            continue;
+        }
+        if (!in_txn) {
+            if (hl_db_begin(dst) != 0) {
+                snprintf(err, errsz, "cannot begin a transaction on the target: %s",
+                         hl_db_errmsg(dst));
+                rc = -1;
+                goto out;
+            }
+            in_txn = 1;
+        }
+        long long rows = copy_table_ex(src, dst, t, err, errsz, 0);
+        if (rows < 0) { rc = -1; goto out; }
+        log_info("[hull:c] default database: carried %s (%lld rows) from the "
+                 "implicit default the app's top level used", t, rows);
+        carried++;
+    }
+    if (in_txn) {
+        if (hl_db_commit(dst) != 0) {
+            snprintf(err, errsz, "cannot commit the carried tables: %s",
+                     hl_db_errmsg(dst));
+            rc = -1;
+            goto out;
+        }
+        in_txn = 0;
+    }
+    rc = carried;
+
+out:
+    if (in_txn) (void)hl_db_rollback(dst);
+    strlist_free(&tl.names);
+    strlist_free(&tl.types);
+    hl_cap_db_ns_restore(ns_prev);
+    hl_db_budget_restore(budget);
+    return rc;
 }
 
 int hl_db_internal_move(HlDbHandle *src, HlDbHandle *dst, const char *what,
@@ -690,7 +805,14 @@ int hl_db_internal_configure_ex(HlDbRegistry *reg, const char *app_dir,
                                             sizeof idsn, &ibase, &in_hull)
             : 0;
     if (k < 0) return -1;
-    if (k == 0) return 0;
+    /* No default internal database for this default (network / DuckDB /
+     * "$VAR" / the internal file itself): clear one an earlier call worked
+     * out from the implicit default, and close an internal connection opened
+     * from it, so the tables stay on the default connection and the startup
+     * WARN about databases.internal is given (audit 44: kept, they stayed in
+     * a per-instance local file or :memory:). */
+    if (k == 0)
+        return hl_db_registry_set_default_internal(reg, NULL, 0, 0, 0) != 0 ? -1 : 0;
     return hl_db_registry_set_default_internal(reg, idsn, ibase, in_hull,
                                                !keep) != 0 ? -1 : 0;
 }

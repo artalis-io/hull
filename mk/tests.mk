@@ -1567,6 +1567,12 @@ e2e-convergence-deadline: $(BUILDDIR)/hull
 e2e-teardown: $(BUILDDIR)/hull
 	sh tests/e2e_teardown.sh
 
+# A WebSocket the app closes itself (conn:close() from on_open / on_message)
+# still runs its on_close and leaves the registry (audit 44 M5). Both runtimes.
+.PHONY: e2e-ws-close
+e2e-ws-close: $(BUILDDIR)/hull
+	sh tests/e2e_ws_close.sh
+
 # --vm-thread (cap/vm_thread.h, audit convergence §6.3 phase 1): a run stuck
 # in a native call past its deadline is answered 503, new connections are
 # refused 503 meanwhile, the server serves again once the call returns, and

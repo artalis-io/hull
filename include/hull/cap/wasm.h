@@ -165,6 +165,10 @@ typedef struct HlWasmCache {
     int          live_instances;
     uint64_t     live_instance_bytes;
     int          max_live_instances;
+    /* Per-invocation span sets whose teardown could not destroy every heap
+     * (audit 44): kept here, heap handles and mmap borrows included, and
+     * retried by hl_cap_wasm_destroy. Guarded by pool_mutex. */
+    struct HlWasmRetainedSpans *retained_spans;
 } HlWasmCache;
 
 /* ── Call options ──────────────────────────────────────────────────── */

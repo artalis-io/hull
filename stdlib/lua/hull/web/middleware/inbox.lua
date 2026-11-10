@@ -49,12 +49,14 @@ local function norm_id(message_id)
     return message_id
 end
 
--- A source as stored (audit 10), checked as message_id is: nil is "default",
--- an integer its decimal string, any other non-string an error. A number
+-- A source as stored (audit 10), checked as message_id is: nil or "" is
+-- "default" (audit 44: "" was its own source here and "default" in the JS
+-- twin, so one inbox shared between the runtimes deduplicated it twice), an
+-- integer its decimal string, any other non-string an error. A number
 -- reached the VARCHAR column as a number - MySQL then compared it
 -- numerically - and `#` on one raised.
 local function norm_source(source)
-    if source == nil then return "default" end
+    if source == nil or source == "" then return "default" end
     if math.type(source) == "integer" then return tostring(source) end
     if type(source) ~= "string" then
         error("inbox: source must be a string or an integer", 3)
@@ -123,8 +125,8 @@ function inbox.init(opts)
         CREATE TABLE IF NOT EXISTS _hull_inbox_processed (
             message_id   VARCHAR(255) NOT NULL,
             source       VARCHAR(255) NOT NULL,
-            processed_at INTEGER NOT NULL,
-            expires_at   INTEGER NOT NULL,
+            processed_at BIGINT NOT NULL,
+            expires_at   BIGINT NOT NULL,
             PRIMARY KEY (source, message_id)
         )
     ]])

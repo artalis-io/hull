@@ -90,9 +90,9 @@ function init(opts) {
         "CREATE TABLE IF NOT EXISTS _hull_sessions (" +
         "  id VARCHAR(255) PRIMARY KEY," +
         "  data TEXT NOT NULL," +
-        "  created_at INTEGER NOT NULL," +
-        "  last_accessed INTEGER NOT NULL," +
-        "  expires_at INTEGER NOT NULL" +
+        "  created_at BIGINT NOT NULL," +
+        "  last_accessed BIGINT NOT NULL," +
+        "  expires_at BIGINT NOT NULL" +
         ")"
     );
     db.exec(
@@ -561,18 +561,32 @@ function loginHandler(cookieMod, opts) {
     // and covers OAuth, password, and TOTP secret surfaces. If you
     // need to log claim details, pull them out by name in a custom
     // auditMetadata - never pass the raw ctx through.
+    //
+    // Keys are compared NORMALISED - lower-cased, "_" and "-" dropped - so
+    // "Access_Token" (audit 41), "accessToken", "idToken" and "refresh-token"
+    // all match, and the scrub reaches nested objects and arrays (audit 44:
+    // it was one level deep, so `{ oauth: ctx }` stored ctx.tokens and
+    // ctx.claims). Past SCRUB_MAX_DEPTH levels an object is dropped whole,
+    // which also ends a cycle.
     const SCRUB_KEYS = new Set([
-        "tokens", "token", "access_token", "refresh_token",
-        "id_token", "claims",
-        "password", "password_hash", "pwhash", "secret",
+        "tokens", "token", "accesstoken", "refreshtoken",
+        "idtoken", "claims",
+        "password", "passwordhash", "pwhash", "secret",
     ]);
-    const scrub = (meta) => {
+    const SCRUB_MAX_DEPTH = 8;
+    const scrub = (meta, depth) => {
         if (!meta || typeof meta !== "object") return meta;
+        depth = depth || 1;
+        if (depth > SCRUB_MAX_DEPTH) return undefined;
+        if (Array.isArray(meta)) {
+            const arr = [];
+            for (let i = 0; i < meta.length; i++) arr.push(scrub(meta[i], depth + 1));
+            return arr;
+        }
         const out = {};
-        for (const k in meta) {
-            // Matched without case (audit 41): "Access_Token" or "CLAIMS"
-            // slipped past an exact-case list.
-            if (!SCRUB_KEYS.has(k.toLowerCase())) out[k] = meta[k];
+        for (const k of Object.keys(meta)) {
+            if (!SCRUB_KEYS.has(k.toLowerCase().replace(/[_-]/g, "")))
+                out[k] = scrub(meta[k], depth + 1);
         }
         return out;
     };

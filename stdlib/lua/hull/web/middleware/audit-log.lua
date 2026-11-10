@@ -110,7 +110,7 @@ function audit_log.init(opts)
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
         .. "id          " .. id_column_ddl("_hull_audit_log_id_seq") .. ", "
         .. "user_id     VARCHAR(255) NOT NULL,"
-        .. "event_at    INTEGER NOT NULL,"
+        .. "event_at    BIGINT NOT NULL,"
         .. "kind        TEXT    NOT NULL,"
         .. "ip          TEXT,"
         .. "user_agent  TEXT,"
@@ -626,6 +626,17 @@ end
 -- Test-only hooks, registered with the stdlib-internal hull._test_hooks
 -- rather than exported (audit 16): app code could call them.
 require("hull._test_hooks").register("hull.web.middleware.audit-log", {
+    -- Audit 44: a column's declared type (SQLite's table_info), read back
+    -- by the suite (the timestamp columns are BIGINT).
+    column_type = function(tbl, col)
+        if type(tbl) ~= "string" or not tbl:match("^_hull_[a-z_]+$") then
+            error("column_type: not a hull table")
+        end
+        for _, r in ipairs(db.query("PRAGMA table_info(" .. tbl .. ")")) do
+            if r.name == col then return r.type end
+        end
+        return nil
+    end,
     normalize_ua = normalize_ua,
     ip_prefix    = ip_prefix,
     reset = function()

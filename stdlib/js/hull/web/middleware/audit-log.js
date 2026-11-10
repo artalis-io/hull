@@ -87,7 +87,7 @@ function init(opts) {
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
         + "id          " + idColumnDdl("_hull_audit_log_id_seq") + ", "
         + "user_id     VARCHAR(255) NOT NULL,"
-        + "event_at    INTEGER NOT NULL,"
+        + "event_at    BIGINT NOT NULL,"
         + "kind        TEXT    NOT NULL,"
         + "ip          TEXT,"
         + "user_agent  TEXT,"
@@ -524,6 +524,15 @@ function recomputeFingerprints() {
 }
 
 const _test = {
+    // Audit 44: a column's declared type (SQLite's table_info), read back by
+    // the suite (the timestamp columns are BIGINT).
+    columnType(tbl, col) {
+        if (typeof tbl !== "string" || !/^_hull_[a-z_]+$/.test(tbl))
+            throw new Error("columnType: not a hull table");
+        const rows = db.query("PRAGMA table_info(" + tbl + ")");
+        for (const r of rows) if (r.name === col) return r.type;
+        return null;
+    },
     normalizeUa,
     ipPrefix,
     reset: () => {

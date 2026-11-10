@@ -166,6 +166,10 @@ function M.parse(buf, block)
         -- Padding longer than the packet claiming to contain it.
         error("ssh.packet: padding exceeds the packet")
     end
+    if payload_len < 1 then
+        -- Every message carries its type byte (audit 44).
+        error("ssh.packet: the packet has no payload")
+    end
     local payload = ssub(buf, 6, 5 + payload_len)
     return payload, packet_length + 4
 end

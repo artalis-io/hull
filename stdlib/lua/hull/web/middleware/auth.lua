@@ -48,7 +48,9 @@ function auth.session_middleware(opts)
     opts = opts or {}
     local cookie_name = opts.name or opts.cookie_name or "hull_session"
     local cookie_opts = opts.cookie_opts
-    local optional = opts.optional or false
+    -- Only the literal true, as in the JS twin (audit 44): "no" or 1 made
+    -- the middleware optional.
+    local optional = opts.optional == true
     local login_path = opts.login_path
     local exclude_paths = opts.exclude_paths or {}
 
@@ -133,7 +135,9 @@ function auth.jwt_middleware(opts)
     -- brute-forceable. Not hard-rejected (back-compat), but strongly recommended.
 
     local secret = opts.secret
-    local optional = opts.optional or false
+    -- Only the literal true, as in the JS twin (audit 44): "no" or 1 made
+    -- the middleware optional.
+    local optional = opts.optional == true
     local exclude_paths = opts.exclude_paths or {}
     local verify_opts = {
         -- A token must expire unless the app says otherwise: jwt.sign

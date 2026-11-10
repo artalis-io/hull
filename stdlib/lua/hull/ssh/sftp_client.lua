@@ -98,17 +98,29 @@ function Sftp:send(payload)
     -- connection under it now reports.
     if self.broken then error(self.broken, 0) end
     local bytes, off = sftp.frame(payload), 1
-    while off <= #bytes do
-        local room = self.ch:sendable()
-        while room <= 0 do
-            -- Only the peer can grant more, and while we wait it may still be
-            -- sending reply bytes: pump keeps them, it does not drop them.
-            self:pump()
-            room = self.ch:sendable()
+    local ok, e = pcall(function()
+        while off <= #bytes do
+            local room = self.ch:sendable()
+            while room <= 0 do
+                -- Only the peer can grant more, and while we wait it may still
+                -- be sending reply bytes: pump keeps them, it does not drop them.
+                self:pump()
+                room = self.ch:sendable()
+            end
+            local chunk = bytes:sub(off, off + room - 1)
+            self.t:send_packet(self.ch:data_message(chunk))
+            off = off + #chunk
         end
-        local chunk = bytes:sub(off, off + room - 1)
-        self.t:send_packet(self.ch:data_message(chunk))
-        off = off + #chunk
+    end)
+    if not ok then
+        -- Part of the frame is on the wire: the server would read the next
+        -- request's bytes as the rest of this one, so nothing more goes
+        -- (audit 44). The error itself - a refusal included - goes on as is.
+        if off > 1 and not self.broken then
+            self.broken = { code = "io_error",
+                            detail = "ssh.sftp: a request was cut short mid-frame" }
+        end
+        error(e, 0)
     end
 end
 
@@ -582,6 +594,13 @@ end
 --- chooses the size.
 function Sftp:read(path, max)
     max = max or (16 * 1024 * 1024)
+    -- A non-negative integer no larger than 2^53 - 1 (the JS twin's range):
+    -- a NaN or infinite limit bounded nothing, and math.maxinteger + 1 wrapped
+    -- the first read's size negative (audit 44).
+    if math.type(max) ~= "integer" or max < 0 or max > 9007199254740991 then
+        return nil, { code = "bad_argument",
+                      detail = "max must be a non-negative integer" }
+    end
     local f, err = self:open(path, "r")
     if not f then return nil, err end
     local parts, total = {}, 0

@@ -663,16 +663,25 @@ function tunnelOpener(tunnelIn, crypto, dial) {
         // The dial's bound ends at TCP + TLS; the upgrade's reply would wait
         // with none (a relay that never answers parked the caller for good).
         // The transport sets its own deadline once the stream is handed over.
-        if (Number.isInteger(o.timeoutMs) && o.timeoutMs > 0 && raw.deadline) {
-            raw.deadline(o.timeoutMs);
+        // Every way out that is not a stream drops the socket, a throw (a
+        // runtime refusal of the upgrade's write or read) included: it was
+        // left open until collected (audit 44).
+        let s, werr;
+        try {
+            if (Number.isInteger(o.timeoutMs) && o.timeoutMs > 0 && raw.deadline) {
+                raw.deadline(o.timeoutMs);
+            }
+            [s, werr] = await wsStream.connect(raw, {
+                host: tunnel.tlsHostname || tunnel.host,
+                path: tunnel.path,
+                headers,
+                random: crypto.random,
+                sha1: crypto.sha1,
+            });
+        } catch (e) {
+            try { raw.close(); } catch (e2) { /* the original error goes on */ }
+            throw e;
         }
-        const [s, werr] = await wsStream.connect(raw, {
-            host: tunnel.tlsHostname || tunnel.host,
-            path: tunnel.path,
-            headers,
-            random: crypto.random,
-            sha1: crypto.sha1,
-        });
         if (!s) {
             raw.close();
             return [null, werr];
@@ -727,15 +736,6 @@ async function connect(opts) {
         keys.push(k);
     }
     const trust = opts.trust || memoryStore();
-    // A pending trust is for ONE connection (hull:ssh:hostkey check); taken
-    // at the connect, success or not, before anything is dialled.
-    if (trust !== null && typeof trust === "object" && trust.pending === true) {
-        if (trust.used) {
-            throw toError({ code: "already_used", detail: "a pending trust is for one "
-                + "connection; make another with ssh.pendingTrust()" });
-        }
-        trust.used = true;
-    }
 
     const timeout = isNil(opts.timeoutMs) ? CONNECT_TIMEOUT_MS : opts.timeoutMs;
     if (!isNil(opts.port) && !Number.isInteger(opts.port)) {
@@ -763,6 +763,18 @@ async function connect(opts) {
         open = opts.openStream;
     } else {
         open = (o) => _io.connect(o);
+    }
+
+    // A pending trust is for ONE connection (hull:ssh:hostkey check); taken
+    // at the connect, success or not, before anything is dialled - and only
+    // once every argument has been checked, so a connect refused for its own
+    // arguments does not spend it (audit 44).
+    if (trust !== null && typeof trust === "object" && trust.pending === true) {
+        if (trust.used) {
+            throw toError({ code: "already_used", detail: "a pending trust is for one "
+                + "connection; make another with ssh.pendingTrust()" });
+        }
+        trust.used = true;
     }
 
     const port = isNil(opts.port) ? 22 : opts.port;

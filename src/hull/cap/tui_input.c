@@ -382,6 +382,10 @@ static size_t parse_bytes(HlTuiParser *p, const char *bytes, size_t len)
 
         case HL_TUI_PS_GROUND:
             if (c == 0x1B) {
+                /* An escape ends a partial UTF-8 sequence: left pending, the
+                 * first byte after the escape sequence completed it into a
+                 * character never typed (audit 44). */
+                p->utf8_len = p->utf8_need = 0;
                 p->state = HL_TUI_PS_ESC;
                 p->acc_len = 0;
                 break;
@@ -408,8 +412,12 @@ static size_t parse_bytes(HlTuiParser *p, const char *bytes, size_t len)
                 p->utf8_len = 1;
             } else {
                 if ((c & 0xC0) != 0x80) {
-                    /* Invalid continuation; reset. */
+                    /* Not a continuation: the partial sequence is dropped,
+                     * and this byte - a new lead - starts its own character
+                     * rather than being dropped with it (audit 44). Re-read
+                     * with nothing pending, so it cannot come back here. */
                     p->utf8_len = p->utf8_need = 0;
+                    i--;
                     break;
                 }
                 p->utf8[p->utf8_len++] = (char)c;

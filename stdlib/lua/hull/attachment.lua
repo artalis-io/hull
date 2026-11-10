@@ -27,7 +27,7 @@
 -- `serve(req, res, id, { auth_check })` helper lives in the separate
 -- `hull/web/attachment-serve@1` module.
 --
--- Portable SQL: `?` placeholders, INTEGER timestamps + refcount,
+-- Portable SQL: `?` placeholders, BIGINT timestamps + size (audit 44), INTEGER refcount,
 -- TEXT ids, no AUTOINCREMENT, no PRAGMAs - the schema works as-is
 -- on the future Postgres backend.
 
@@ -116,9 +116,9 @@ function attachment.init(opts)
             original_name TEXT NOT NULL,
             mime TEXT NOT NULL,
             declared_mime TEXT,
-            size INTEGER NOT NULL,
+            size BIGINT NOT NULL,
             uploaded_by TEXT,
-            uploaded_at INTEGER NOT NULL,
+            uploaded_at BIGINT NOT NULL,
             refcount INTEGER NOT NULL DEFAULT 1
         )
     ]])
@@ -131,7 +131,7 @@ function attachment.init(opts)
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_attachment_orphans (
             blob_id VARCHAR(255) PRIMARY KEY,
-            queued_at INTEGER NOT NULL
+            queued_at BIGINT NOT NULL
         )
     ]])
 end
@@ -325,7 +325,8 @@ end
 -- @tparam string dst  Destination file path (must be inside a declared
 --   `manifest.fs.write` allowlist path).
 -- @treturn[1] integer  Bytes written.
--- @treturn[2] nil  When the attachment or its blob is missing.
+-- @treturn[2] nil  When the attachment or its blob is missing, or the blob's
+--   bytes no longer hash to its id (nothing is written then).
 function attachment.read_to_file(id, dst)
     local meta = attachment.metadata(id)
     if not meta then return nil end
@@ -335,14 +336,28 @@ function attachment.read_to_file(id, dst)
     -- Buffered read + single fs.write. A true streaming fs.write_stream
     -- API could replace this later; for now memory is O(file_size)
     -- which is fine for the typical attachment use case.
+    --
+    -- The bytes are hashed as they are read and must hash to the blob id
+    -- (content-addressed: the id IS their SHA-256), as blob.get checks
+    -- (audit 44): a blob file changed on disk was written to dst as is,
+    -- while attachment.read of the same id returned nil.
+    local h = crypto.create_sha256()
     local parts, total = {}, 0
-    while true do
-        local chunk = r:read(64 * 1024)
-        if not chunk or #chunk == 0 then break end
-        parts[#parts + 1] = chunk
-        total = total + #chunk
-    end
+    local ok, err = pcall(function()
+        while true do
+            local chunk = r:read(64 * 1024)
+            if not chunk or #chunk == 0 then break end
+            h:update(chunk)
+            parts[#parts + 1] = chunk
+            total = total + #chunk
+        end
+    end)
     r:close()
+    if not ok then error(err, 0) end
+    local digest = h:digest()
+    local hex = {}
+    for i = 1, #digest do hex[i] = string.format("%02x", digest:byte(i)) end
+    if table.concat(hex) ~= meta.blob_id then return nil end
     fs.write(dst, table.concat(parts))
     return total
 end

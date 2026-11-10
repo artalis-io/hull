@@ -167,6 +167,18 @@ OUT=$(cat "$RC_TMP")
 check_contains "db query bad SQL error"    "$OUT" '"error"'
 check_exit     "db query bad SQL exit"     "$EXIT_CODE" "1"
 
+# agent_audit44.db_query_escapes_c1: a value read from the database went out
+# with DEL and the C1 controls raw (the JSON encoder escapes only C0), so a
+# planted data.db row rewrote the terminal of whoever read the output. They
+# are \u escapes now (a stray 0x80-0x9F byte \ufffd); the JSON is the same.
+OUT=$($HULL agent db query "SELECT char(155) || '2J' || char(127) || CAST(x'9d' AS TEXT) AS v" examples/rest_api 2>&1)
+if printf '%s' "$OUT" | LC_ALL=C grep -q "$(printf '[\177\200-\237]')"; then
+    fail "agent_audit44.db_query_escapes_c1 - raw DEL / C1 byte in: $(printf '%s' "$OUT" | od -c | head -3)"
+else
+    pass "agent_audit44.db_query_escapes_c1"
+fi
+check_contains "agent_audit44.db_query_escapes_c1 value" "$OUT" '\u009b2J\u007f\ufffd'
+
 # Read-only means read-only (audit 9 M2): a write, a transaction left open
 # on the app's connection, a file written by VACUUM INTO or read by ATTACH
 # are all refused.

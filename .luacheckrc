@@ -8,5 +8,5 @@ ignore = { "21./_.*" }
 -- The C unit-test harness (tests/hull/runtime/lua/test_lua.c) gives the
 -- stdlib test scripts __test_hooks(name): a module's test hooks, which it
 -- no longer exports (audit 16).
-files["stdlib/lua/hull/tests/"] = { read_globals = { "__test_hooks", "__audit44_case" } }
+files["stdlib/lua/hull/tests/"] = { read_globals = { "__test_hooks", "__audit44_case", "__data44_case", "__kvn" } }
 files["stdlib/lua/hull/web/middleware/tests/"] = { read_globals = { "__test_hooks" } }

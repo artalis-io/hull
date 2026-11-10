@@ -17,7 +17,8 @@
  *     `compute.async`, the jobs sentinels), made on first read;
  *   - `rawset` on a view writes the view table only: nothing reads it but the
  *     app, since the stdlib holds the real table;
- *   - `pairs` enumerates the real table (`__pairs`), `#` measures it, `==`
+ *   - `pairs` enumerates the real table (`__pairs`), its table keys and
+ *     values as views (audit 44), `#` measures it, `==`
  *     compares the real tables (`__eq`: a sentinel the stdlib hands back, such
  *     as a real jobs.RETRY, equals the app's view of it), and `tostring` /
  *     a call go to the real table's own metamethods when it has them;
@@ -77,15 +78,25 @@ static int ro_newindex(lua_State *L)
                                                     : luaL_typename(L, 2));
 }
 
-/* The iterator __pairs hands out: lua_next over the real table, table
- * values as views. */
+/* The iterator __pairs hands out: lua_next over the real table, table keys
+ * and values as views (audit 44: a table KEY went out raw, so a module table
+ * keyed by a table handed app code the real key). The key the loop hands
+ * back is the view it was given, so it is mapped to its real table first -
+ * unless the real table holds that view itself as a key. */
 static int ro_next(lua_State *L)
 {
     lua_settop(L, 2);
+    if (lua_type(L, 2) == LUA_TTABLE) {
+        lua_pushvalue(L, 2);
+        int present = lua_rawget(L, lua_upvalueindex(1)) != LUA_TNIL;
+        lua_pop(L, 1);
+        if (!present && ro_push_real(L, 2))
+            lua_replace(L, 2);
+    }
     if (!lua_next(L, lua_upvalueindex(1)))
         return 0;
-    hl_lua_push_readonly(L, -1);
-    lua_replace(L, -2);
+    hl_lua_push_readonly(L, -2);               /* key */
+    hl_lua_push_readonly(L, -2);               /* value */
     return 2;
 }
 

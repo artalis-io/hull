@@ -95,6 +95,24 @@ await test("open confirmation carries both ids and the peer limits", () => {
     assertEq(m.maxPacket, 256);
 });
 
+await test("ssh_audit44.duplicate_open_confirmation_refused", () => {
+    // A second confirmation would replace the peer's channel id and reset the
+    // send window and packet size mid-session: a protocol error.
+    const ch = channel.new({ id: 0 });
+    const conf = (sender, window) => channel.parse(wire.writer().byte(91).uint32(0)
+        .uint32(sender).uint32(window).uint32(256).build());
+    ch.handle(conf(7, 2048));
+    assertEq(ch.remoteId, 7);
+    assertRaises(() => ch.handle(conf(9, 4096)), "a second confirmation");
+    assertEq(ch.remoteId, 7, "the peer id stands:");
+    assertEq(ch.sendWindow, 2048, "the window stands:");
+    // Nor does a confirmation follow a failure.
+    const ch2 = channel.new({ id: 0 });
+    ch2.handle(channel.parse(wire.writer().byte(92).uint32(0).uint32(4)
+        .string("no").string("en").build()));
+    assertRaises(() => ch2.handle(conf(7, 2048)), "a confirmation after a failure");
+});
+
 await test("open failure carries a reason a human can read", () => {
     const p = wire.writer().byte(92).uint32(0).uint32(4)
         .string("administratively prohibited").string("en").build();
