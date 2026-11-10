@@ -10,6 +10,18 @@ release-artifact layout).
 
 ### Fixed
 
+- **Audit 44 Lows: a TLS handshake through a caller's config with no server name, and JS
+  `hull:fs` errors with no code.** `hl_tls_client_handshake_cfg` (the caller-owned TLS config
+  path) now refuses a NULL or empty host before it makes a session, as the CA-bundle path has
+  since audit 29: the caller's context may verify, and with no name set the handshake checked
+  the certificate chain but not the name. JS `fs.read` / `write` / `stat` / `list` / `mmap`
+  errors now carry an own `code` (`not_found`, `invalid_path`, ...; the message is unchanged,
+  except an unnamed `fs.mmap` failure now reads `fs.mmap: mmap_failed`), and `ssh.fileStore`
+  recognises a missing known_hosts file by `e.code`, no longer by matching the message text.
+  (The third finding of the batch, a manifest `limits.route_concurrency` prefix sidestepped by
+  another spelling of the path, was checked and not reproducible: Keel's router normalises no
+  path, so only a path that starts with the prefix reaches a route under it.)
+
 - **Windows: a manifest file DSN with a backslash or a drive could leave the app tree** (audit 44,
   A2 / A3, Medium on Windows). `databases.named` / `databases.internal` file DSNs (`@state/` ones too)
   were confined with checks that split only on `/`, so on Windows - a cosmo APE, with no kernel sandbox

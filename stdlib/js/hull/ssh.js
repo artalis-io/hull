@@ -217,7 +217,8 @@ function fileStore(path, opts) {
         try {
             ab = fsm.read(path);
         } catch (e) {
-            if (/not_found$/.test(errText(e))) return "";
+            // By the error's code (hull:fs sets one), never its message.
+            if (e && typeof e === "object" && e.code === "not_found") return "";
             throw toError({ code: "store_failed", detail: errText(e) });
         }
         return bytes.fromBuf(ab);

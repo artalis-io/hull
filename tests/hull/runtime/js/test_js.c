@@ -19504,4 +19504,38 @@ UTEST(outbox_audit44, cleanup_parity)
 #endif /* HL_ENABLE_HTTP_CLIENT && HL_ENABLE_HTTP_SERVER */
 
 
+/* ── Audit 44: hull:fs errors carry a code ──────────────────────────────
+ * A JS fs.* error was an InternalError("fs.read: not_found") and nothing
+ * else, so the stdlib (ssh's fileStore) told a missing file from a refused
+ * one by matching the message text. The error now has an own `code`, the
+ * capability's error code; the message is unchanged. */
+UTEST(js_fs_audit44, error_carries_code)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    A15Fs f;
+    ASSERT_EQ(a15_fs_open(&f), 0);
+    char *r = eval_str("(() => { try { fs.read('missing.txt'); } "
+                       "catch (e) { return e.code + '|' + e.message; } "
+                       "return 'no throw'; })()");
+    EXPECT_TRUE(r && strcmp(r, "not_found|fs.read: not_found") == 0);
+    if (r && strcmp(r, "not_found|fs.read: not_found") != 0) printf("  got: %s\n", r);
+    free(r);
+    /* Another op, another code: a path outside the grants. */
+    r = eval_str("(() => { try { fs.write('../x.txt', 'k'); } "
+                 "catch (e) { return typeof e.code === 'string' && e.code.length > 0 && "
+                 "e.message === 'fs.write: ' + e.code ? 'ok' : 'bad:' + e.code + '|' + e.message; } "
+                 "return 'no throw'; })()");
+    EXPECT_TRUE(r && strcmp(r, "ok") == 0);
+    if (r && strcmp(r, "ok") != 0) printf("  got: %s\n", r);
+    free(r);
+    r = eval_str("(() => { try { fs.list('nope'); } catch (e) { return e.code; } "
+                 "return 'no throw'; })()");
+    EXPECT_TRUE(r && strcmp(r, "not_found") == 0);
+    if (r && strcmp(r, "not_found") != 0) printf("  got: %s\n", r);
+    free(r);
+    cleanup_js_caps();
+    a15_fs_close(&f);
+}
+
 UTEST_MAIN();

@@ -49,6 +49,34 @@ static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, (int64_t)buf->len);
 }
 
+/* Give the pending exception (an Error object) an own `code` of @p code and
+ * re-throw it. On a failure to make the property, the new exception (out of
+ * memory) is left pending instead. Always returns JS_EXCEPTION. */
+static JSValue js_fs_tag_code(JSContext *ctx, const char *code)
+{
+    JSValue e = JS_GetException(ctx);
+    if (JS_IsObject(e)) {
+        JSValue c = JS_NewString(ctx, code);
+        if (JS_IsException(c) ||
+            JS_DefinePropertyValueStr(ctx, e, "code", c,
+                                      JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE) < 0) {
+            JS_FreeValue(ctx, e);
+            return JS_EXCEPTION;
+        }
+    }
+    return JS_Throw(ctx, e);
+}
+/* Throw an InternalError "fs.<op>: <code>" carrying an own `code` property:
+ * the capability's error code (not_found, invalid_path, ...). The stdlib tells
+ * one failure from another by the code, never by matching the message text
+ * (audit 44: ssh's fileStore recognised a missing file by a regex on it).
+ * The Lua binding returns the same code as its second result. */
+static JSValue js_fs_throw(JSContext *ctx, const char *op, const char *code)
+{
+    JS_ThrowInternalError(ctx, "fs.%s: %s", op, code);
+    return js_fs_tag_code(ctx, code);
+}
+
 /* The run's budget as the fs capability's charge function (@p ud is the
  * JSContext): every step a path resolution takes, charged as the resolver
  * does it (audit 38). Over the budget the uncatchable interrupt is left
@@ -77,7 +105,7 @@ static JSValue js_fs_read_into_new_ab(JSContext *ctx, const HlFsConfig *fs,
     uint8_t *store = JS_GetArrayBuffer(ctx, &ab_len, ab);
     if (!store || ab_len != size) {
         JS_FreeValue(ctx, ab);
-        return JS_ThrowInternalError(ctx, "fs.read: read_failed");
+        return js_fs_throw(ctx, "read", "read_failed");
     }
     int64_t got;
     int tripped;
@@ -89,8 +117,7 @@ static JSValue js_fs_read_into_new_ab(JSContext *ctx, const HlFsConfig *fs,
     }
     if (got < 0) {
         JS_FreeValue(ctx, ab);
-        return JS_ThrowInternalError(ctx, "fs.read: %s",
-                                     *err_msg ? *err_msg : "read_failed");
+        return js_fs_throw(ctx, "read", *err_msg ? *err_msg : "read_failed");
     }
     if ((size_t)got == size) return ab;
     /* What was read, not the size probed before it. */
@@ -130,8 +157,7 @@ static JSValue js_fs_read(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
     if (size < 0) {
-        JSValue exc = JS_ThrowInternalError(ctx, "fs.read: %s",
-                                             err_msg ? err_msg : "read_failed");
+        JSValue exc = js_fs_throw(ctx, "read", err_msg ? err_msg : "read_failed");
         JS_FreeCString(ctx, path);
         return exc;
     }
@@ -146,7 +172,8 @@ static JSValue js_fs_read(JSContext *ctx, JSValueConst this_val,
      * JS_SetMemoryLimit - and a whole-file read counted as one step. */
     if (js->max_heap_bytes && (uint64_t)size > (uint64_t)js->max_heap_bytes) {
         JS_FreeCString(ctx, path);
-        return JS_ThrowRangeError(ctx, "fs.read: file_too_large");
+        JS_ThrowRangeError(ctx, "fs.read: file_too_large");
+        return js_fs_tag_code(ctx, "file_too_large");
     }
     if (hl_js_budget_charge(ctx, hl_work_bytes_units((uint64_t)size))) {
         JS_FreeCString(ctx, path);
@@ -281,8 +308,7 @@ static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, path);
     if (tripped) return JS_EXCEPTION;
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "fs.write: %s",
-                                     err_msg ? err_msg : "write_failed");
+        return js_fs_throw(ctx, "write", err_msg ? err_msg : "write_failed");
     return JS_TRUE;
 }
 
@@ -330,7 +356,7 @@ static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
     if (tripped) return JS_EXCEPTION;
     if (rc == 1) return JS_NULL;                          /* absent */
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "fs.stat: %s", err ? err : "stat_failed");
+        return js_fs_throw(ctx, "stat", err ? err : "stat_failed");
 
     JSValue o = JS_NewObject(ctx);
     if (JS_IsException(o)) return o;
@@ -402,7 +428,7 @@ static JSValue js_fs_list(JSContext *ctx, JSValueConst this_val,
     if (lc.tripped)
         return JS_EXCEPTION;   /* the uncatchable trip, left pending */
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "fs.list: %s", err ? err : "list_failed");
+        return js_fs_throw(ctx, "list", err ? err : "list_failed");
 
     JSValue arr = JS_NewArray(ctx);
     if (JS_IsException(arr)) {
@@ -531,8 +557,7 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!buf)
-        return JS_ThrowInternalError(ctx, "fs.mmap: %s",
-                                     err_msg ? err_msg : "failed to map file");
+        return js_fs_throw(ctx, "mmap", err_msg ? err_msg : "mmap_failed");
 
     JSValue obj = JS_NewObjectClass(ctx, (int)js_mmap_class_id);
     if (JS_IsException(obj)) {

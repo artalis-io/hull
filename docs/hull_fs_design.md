@@ -483,6 +483,9 @@ never follows symlinks - §6), `"too_large"`, `"io_error"`. **No `outside_root`
 token** - resolution cannot escape (§5, virtual-root); an escape is impossible, not
 an error. (Exact
 tokens confirmed at implementation; today's messages are not a stable contract.)
+In JS the thrown error carries the token as an own `code` property (message
+`"fs.<op>: <token>"`); code that tells one failure from another tests
+`e.code`, never the message text (audit 44).
 
 ## 7. Lua/JS parity
 

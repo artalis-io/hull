@@ -130,13 +130,25 @@ await test("without drops a name, keeps its neighbours and every other line", ()
 // file_store ---------------------------------------------------------------------
 //
 // A fake with hull:fs's JS shape: read returns an ArrayBuffer or throws
-// "fs.read: <reason>"; write throws on refusal.
+// an Error "fs.read: <code>" with an own `code`; write throws on refusal.
+
+function fsError(op, code) {
+    const e = new Error("fs." + op + ": " + code);
+    e.code = code;
+    return e;
+}
 
 function fakeFs(initial) {
     const fs = { files: { kh: initial }, writes: 0 };
     fs.read = (p) => {
-        if (fs.failRead) throw new Error("fs.read: io_error");
-        if (fs.files[p] === undefined || fs.files[p] === null) throw new Error("fs.read: not_found");
+        if (fs.failRead) throw fsError("read", "io_error");
+        if (fs.misleadingRead) {
+            // The message ends like a missing file, the code says otherwise.
+            const e = new Error("fs.read: not_found");
+            e.code = "permission_denied";
+            throw e;
+        }
+        if (fs.files[p] === undefined || fs.files[p] === null) throw fsError("read", "not_found");
         return bytes.toU8(fs.files[p]).buffer;
     };
     fs.write = (p, text) => {
@@ -237,6 +249,16 @@ await test("a store that cannot write says store_failed, not a raise", async () 
     const [ok, err] = await call(() => ssh.acceptHost(store(fs), "web1", ED_A));
     assertEq(ok, null);
     assertEq(err.code, "store_failed");
+});
+
+await test("js_fs_audit44: a read failure is told by its code, not its message", async () => {
+    const fs = fakeFs(line("web1", ED_A) + "\n");
+    fs.misleadingRead = true;
+    const st = store(fs);
+    let err = null;
+    try { await st.get("web1"); } catch (e) { err = e; }
+    assertEq(err && err.code, "store_failed");
+    assertEq(fs.writes, 0);
 });
 
 await test("a store that cannot READ says store_failed and writes nothing", async () => {
