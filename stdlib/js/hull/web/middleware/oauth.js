@@ -121,6 +121,9 @@ const _state = {
     callbackPath:   "/auth/{provider}/callback",
     logoutPath:     "/auth/logout",
     _jwksCache:     Object.create(null),  // name -> { fetchedAt, byKid: { kid: pem } }
+    // name -> time of the last failed JWKS fetch (throttled as
+    // JWKS_MIN_REFRESH throttles an unknown kid).
+    _jwksFailedAt:  Object.create(null),
     // TTL on cached JWKS in seconds (forces a refresh past this age
     // even if the kid is still present). Default 1 hour. IdPs may
     // rotate a key while reusing the same kid for emergency
@@ -292,6 +295,16 @@ function buildUrl(base, params) {
     return base + sep + parts.join("&");
 }
 
+const DEFAULT_STATE_TTL = 600;
+const DEFAULT_JWKS_TTL  = 3600;
+
+// The IdP calls; the suite stands in for them through the test hooks
+// (setGet / setPost), as outbox's setPost.
+const realGet  = (url, opts) => httpClient.async.get(url, opts);
+const realPost = (url, body, opts) => httpClient.async.post(url, body, opts);
+let httpGet  = realGet;
+let httpPost = realPost;
+
 // ── State cookie ───────────────────────────────────────────────────
 //
 // Payload: { provider, verifier, state, nonce, return_to, exp }.
@@ -319,12 +332,13 @@ function verifyState(cookieValue) {
 async function refreshJwks(providerName) {
     const cfg = _state.providers[providerName];
     if (!cfg) return null;
-    const resp = await httpClient.async.get(cfg.jwksUri);
-    if (!resp || resp.status !== 200 || !resp.body) return null;
+    const resp = await httpGet(cfg.jwksUri);
+    const failed = () => { _state._jwksFailedAt[providerName] = time.now(); return null; };
+    if (!resp || resp.status !== 200 || !resp.body) return failed();
     let doc;
     try { doc = json.decode(resp.body); }
-    catch (_e) { return null; }
-    if (!doc || !Array.isArray(doc.keys)) return null;
+    catch (_e) { return failed(); }
+    if (!doc || !Array.isArray(doc.keys)) return failed();
     const byKid = Object.create(null);   // kid comes from the token
     for (const k of doc.keys) {
         if (k && typeof k.kid === "string" && Array.isArray(k.x5c)
@@ -341,6 +355,7 @@ async function refreshJwks(providerName) {
         }
     }
     _state._jwksCache[providerName] = { fetchedAt: time.now(), byKid };
+    delete _state._jwksFailedAt[providerName];
     return byKid;
 }
 
@@ -373,6 +388,13 @@ function jwksResolver(providerName) {
         // request.
         if (cache && !cache.byKid[kid]
             && (time.now() - (cache.fetchedAt || 0)) < JWKS_MIN_REFRESH) {
+            return null;
+        }
+        // Nor is a FAILED fetch retried within the minute (audit 44): a
+        // failure wrote no cache entry, so every callback past the token
+        // exchange fetched the IdP's JWKS again (twice), with no back-off.
+        const failedAt = _state._jwksFailedAt[providerName];
+        if (failedAt !== undefined && (time.now() - failedAt) < JWKS_MIN_REFRESH) {
             return null;
         }
         // Stale OR unknown kid: refresh once. A still-unknown kid
@@ -512,7 +534,7 @@ async function handleCallback(req, res) {
             bodyParts.push(urlenc(k) + "=" + urlenc(bodyParams[k]));
         }
     }
-    const resp = await httpClient.async.post(cfg.tokenEndpoint,
+    const resp = await httpPost(cfg.tokenEndpoint,
         bodyParts.join("&"),
         { headers: {
             "Content-Type": "application/x-www-form-urlencoded",
@@ -538,11 +560,9 @@ async function handleCallback(req, res) {
     // refetched on ANY failed verify, so a forged token cost a fetch each.
     const kid = tokenKid(tokens.id_token);
     const resolve = jwksResolver(providerName);
-    let pem = await resolve(kid, null);
-    // One more try when the JWKS FETCH failed (no cache entry was written,
-    // so the resolver fetches again). An unknown kid with a fresh cache stays
-    // throttled inside the resolver, so a forged token cannot buy fetches.
-    if (!pem && !_state._jwksCache[providerName]) pem = await resolve(kid, null);
+    // One fetch at most: a failed one is throttled inside the resolver like
+    // an unknown kid (audit 44: a second try here fetched again at once).
+    const pem = await resolve(kid, null);
     const syncResolver = (k, _alg) => (k === kid ? pem : null);
     const [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
         { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"],
@@ -652,8 +672,19 @@ function init(opts) {
     }
     if (opts.stateCookieSecure !== undefined)
         _state.stateCookieSecure = opts.stateCookieSecure === true;
-    _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
-    _state.jwksTtl     = opts.jwksTtl     || _state.jwksTtl;
+    // A ttl is a positive, finite NUMBER of seconds (audit 44), the rule
+    // session.init applies: a string one was concatenated onto every state's
+    // expiry (now + "600"), so every callback answered "expired"; a negative
+    // one expired every state at once.
+    for (const k of ["stateTtl", "jwksTtl"]) {
+        const v = opts[k];
+        if (v !== undefined && v !== null
+            && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
+            throw new TypeError("oauth.init: " + k + " must be a positive number of seconds");
+        }
+    }
+    _state.stateTtl    = opts.stateTtl    || DEFAULT_STATE_TTL;
+    _state.jwksTtl     = opts.jwksTtl     || DEFAULT_JWKS_TTL;
     // redirect_uri origin. Preferred: an explicit baseUrl ("https://app.com").
     // Otherwise the origin is derived from the request; trustProxy gates
     // whether the (spoofable) X-Forwarded-Proto/Host headers are honored.
@@ -746,6 +777,8 @@ const _test = {
     safeReturnTo,
     issuerOk,
     presets: PRESETS,
+    setGet(fn)  { httpGet  = fn || realGet; },
+    setPost(fn) { httpPost = fn || realPost; },
     reset: () => {
         _state.stateSecret = null;
         _state.providers      = Object.create(null);
@@ -753,6 +786,9 @@ const _test = {
         _state.onLogin        = null;
         _state.onLogout       = null;
         _state._jwksCache     = Object.create(null);
+        _state._jwksFailedAt  = Object.create(null);
+        _state.stateTtl       = DEFAULT_STATE_TTL;
+        _state.jwksTtl        = DEFAULT_JWKS_TTL;
     },
 };
 // Registered with the stdlib-internal hull:_test_hooks rather than exported
