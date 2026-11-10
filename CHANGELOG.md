@@ -8,6 +8,37 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-10
+
+Audit round 44 over v0.19.0 (C, JS and Lua), with every finding fixed: no High, 13 Medium and
+about 60 Low. Five of the Mediums are in v0.19.0's `@state/` database code, and one in its
+SIGINT / SIGTERM handling, so apps on v0.19.0 should take this release. Read the upgrade notes:
+one change refuses a MySQL login that used to work.
+
+### Upgrade notes
+
+- **MySQL 8 accounts using `mysql_native_password` over unverified TLS are refused.** A MySQL 8
+  server reaches a native-password account through an auth switch, and that switch now goes
+  through only when the server certificate was verified (`sslmode=verify-ca` /
+  `verify-full`) or under `sslmode=disable`: over `prefer` / `require` the SHA-1 response to the
+  server's nonce could be cracked offline by whoever answered. Move the account to
+  `caching_sha2_password`, or verify the server. MariaDB and MySQL 5.7, whose default plugin is
+  native, keep working on any sslmode (with a one-time WARN when unverified).
+- **PostgreSQL / MySQL: widen the stdlib's timestamp and size columns by hand.** New `_hull_*`
+  tables declare them `BIGINT`; existing tables keep 32-bit `INTEGER` (2038, 2 GiB attachments)
+  until you run the `ALTER TABLE` statements listed under Fixed (the data-layer entry). SQLite is
+  unaffected.
+- **Smaller behaviour changes:**
+  - An inherited ignored SIGINT / SIGTERM stays ignored (`hull app.lua &` from a script no longer
+    reacts to `kill -INT`); an app with `app.main` and routes exits 128 + the signal, without
+    serving, when a signal arrived while main ran.
+  - The idempotency in-flight lease is 660 s, whatever the key's TTL.
+  - `jobs.cleanup` keeps the newest job and event row (a high-water mark for MySQL before 8.0).
+  - Lua `http.post` / `put` / `patch` (sync and async) raise on a table body; options go third.
+  - Lua `tui.input`'s `max_len` counts code points, not bytes; a health check may not be named
+    `db`; `app.manifest()` is refused after the app's top level.
+  - PostgreSQL replies are capped at 64 MiB per message.
+
 ### Fixed
 
 - **WAMR app-heap allocator bounds: rated and tested** (audit 44). The round-42 question - whether
