@@ -18965,6 +18965,143 @@ UTEST(js_ssh_bridge, teardown_with_a_parked_reader_releases_the_stream)
 
 #endif /* HL_ENABLE_HTTP_CLIENT */
 
+/* ── Audit 44: template / tui / health / csv (stdlib Lows) ──────────── */
+
+/* Evaluate `code` as a module under `name`, drain its jobs, then read the
+ * int32 `global`. A "hull:" name lets the harness import a stdlib-internal
+ * module (hull:_tui_layout), which no app script can. */
+static int a44_module(const char *name, const char *code, const char *global)
+{
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), name, JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    return eval_int(global);
+}
+
+/* The JS engine keeps literal template text byte for byte; the Lua twin
+ * folded CR / CRLF / LFCR to LF (template_audit44.crlf_preserved_lua). Both
+ * runtimes must give the same bytes. */
+UTEST(template_audit44, crlf_preserved_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a44_module("<a44>",
+        "import { template } from 'hull:template';\n"
+        "let r = 0;\n"
+        "const cases = ['A\\r\\nB\\rC\\n\\rD\\n', '\\r\\n', '\\n\\r', '\\nlead', 'x\\0y',\n"
+        "               'a]]b]=]c]==]', '\\r', '\\r9'];\n"
+        "cases.forEach((s, i) => {\n"
+        "  if (!r && template.renderString(s, {}) !== s) r = i + 1;\n"
+        "  if (!r && template.renderString(s + '{{ x }}' + s, { x: 1 }) !== s + '1' + s) r = 100 + i;\n"
+        "});\n"
+        "globalThis.__a44_t = r;\n", "globalThis.__a44_t"), 0);
+    cleanup_js_caps();
+}
+
+#if defined(HL_ENABLE_HTTP_SERVER)
+/* A readiness check registered as "db" overwrote the built-in DB ping's
+ * entry in the results, so a failed ping read "ok" in the /ready body. */
+UTEST(health_audit44, custom_db_name_does_not_mask_ping)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a44_module("<a44>",
+        "import { health } from 'hull:web:middleware:health';\n"
+        "let r = 0;\n"
+        "try { health.register('db', () => true); health.unregister('db'); r = 1; }\n"
+        "catch (e) { if (!/reserved/.test(String(e && e.message))) r = 2; }\n"
+        "if (!r) {\n"
+        "  health.register('cache', () => true);\n"
+        "  const out = health.runChecks({ dbCheck: false });\n"
+        "  health.unregister('cache');\n"
+        "  if (!out.checks.cache || out.checks.cache.status !== 'ok') r = 3;\n"
+        "  else if (out.checks.db !== undefined) r = 4;\n"
+        "}\n"
+        "globalThis.__a44_h = r;\n", "globalThis.__a44_h"), 0);
+    cleanup_js_caps();
+}
+#endif
+
+/* tui.input edited by UTF-16 unit: backspace after an emoji left a lone high
+ * surrogate, left / right parked between the halves, the password mask drew
+ * two stars per astral character, the cursor column counted prompt units,
+ * and maxLen counted units (the Lua twin: bytes). Measured through
+ * hull:_tui_layout, the pure part of hull:tui. */
+UTEST(tui_audit44, input_surrogate_backspace_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a44_module("hull:__a44_tui_harness",
+        "import { _tui_layout as L } from 'hull:_tui_layout';\n"
+        "const E = '\\u{1F600}';\n"
+        "const key = (k) => ({ key: k, codepoint: k.codePointAt(0) });\n"
+        "let r = 0;\n"
+        "function step(s, ev, max) { return L.inputStep(s.buf, s.cursor, ev, max ?? 1024); }\n"
+        "let s = { buf: '', cursor: 0 };\n"
+        "s = step(s, key('a')); s = step(s, key(E));\n"
+        "if (s.buf !== 'a' + E || s.cursor !== 3) r = 1;\n"
+        "let b = step(s, { key: 'backspace' });\n"
+        "if (!r && (b.buf !== 'a' || b.cursor !== 1)) r = 2;\n"
+        "let l = step(s, { key: 'left' });\n"
+        "if (!r && l.cursor !== 1) r = 3;\n"
+        "let rt = step(l, { key: 'right' });\n"
+        "if (!r && rt.cursor !== 3) r = 4;\n"
+        "let d = step(l, { key: 'delete' });\n"
+        "if (!r && (d.buf !== 'a' || d.cursor !== 1)) r = 5;\n"
+        "const v = L.inputView('\\u00e9' + E + '> ', s.buf, s.cursor, true);\n"
+        "if (!r && v.display !== '**') r = 6;\n"
+        "if (!r && (v.x !== 5 || v.cursorX !== 7)) r = 7;\n"
+        "let m = { buf: '', cursor: 0 };\n"
+        "for (const k of ['\\u00e9', E, 'x', 'y']) m = step(m, key(k), 3);\n"
+        "if (!r && m.buf !== '\\u00e9' + E + 'x') r = 8;\n"
+        "globalThis.__a44_i = r;\n", "globalThis.__a44_i"), 0);
+    cleanup_js_caps();
+}
+
+/* The JS frame / list arithmetic, held to the same results as the Lua twin
+ * (tui_audit44.frame_title_width_lua / list_fit_height_lua). */
+UTEST(tui_audit44, frame_and_list_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a44_module("hull:__a44_tui_harness2",
+        "import { _tui_layout as L } from 'hull:_tui_layout';\n"
+        "let r = 0;\n"
+        "const b = { tl: '\\u250c', tr: '\\u2510', h: '\\u2500' };\n"
+        "for (const w of [6, 10, 20, 40])\n"
+        "  for (const t of ['T', 'h\\u00e9llo', 'x\\u{1F600}y', 'x'.repeat(50)])\n"
+        "    if (!r && Array.from(L.frameTop(b, w, t)).length !== w) r = w;\n"
+        "if (!r && L.listHeight(24, 'Pick', undefined, 100) !== 23) r = 100;\n"
+        "globalThis.__a44_f = r;\n", "globalThis.__a44_f"), 0);
+    cleanup_js_caps();
+}
+
+UTEST(csv_audit44, empty_header_skipped)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a44_module("<a44>",
+        "import { csv } from 'hull:csv';\n"
+        "const rows = csv.parse('a,,c\\n1,2,3\\n', { headers: true });\n"
+        "globalThis.__a44_c = (rows.length === 1 && Object.keys(rows[0]).join() === 'a,c') ? 0 : 1;\n",
+        "globalThis.__a44_c"), 0);
+    cleanup_js_caps();
+}
+
+UTEST(template_audit44, dot_path_empty_segment_refused)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+    EXPECT_EQ(a44_module("<a44>",
+        "import { template } from 'hull:template';\n"
+        "let r = 0;\n"
+        "['{{ a..b }}', '{{ .a }}', '{{ a. }}'].forEach((src, i) => {\n"
+        "  try { template.renderString(src, { a: { b: 'x' } }); if (!r) r = i + 1; } catch (e) {}\n"
+        "});\n"
+        "globalThis.__a44_d = r;\n", "globalThis.__a44_d"), 0);
+    cleanup_js_caps();
+}
 
 #if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* ── Audit 44: stdlib data-layer findings ─────────────────────────────

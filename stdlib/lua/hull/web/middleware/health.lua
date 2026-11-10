@@ -33,12 +33,17 @@ local _start_time = nil
 
 --- Register a custom readiness check.
 --
--- Replaces any prior check with the same name.
+-- Replaces any prior check with the same name. The name "db" is reserved
+-- for the built-in DB ping and raises: a check under that name overwrote the
+-- ping's result, so a failed ping read "ok" (audit 44).
 --
 -- @function health.register
 -- @tparam string name  Identifier (appears in `/ready` JSON output).
 -- @tparam function fn  `function() -> ok[, msg]` - see contract above.
 function health.register(name, fn)
+    if name == "db" then
+        error("health.register: the name 'db' is reserved for the built-in DB ping", 2)
+    end
     _checks[name] = fn
 end
 
