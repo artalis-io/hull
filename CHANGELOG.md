@@ -20,6 +20,9 @@ release-artifact layout).
   suites swap the crypto through `hull._test_hooks` / `hull:_test_hooks` (`set_crypto` /
   `setCrypto`). An app that passed `crypto` gets the error; drop the option.
   (`ssh_audit44.public_crypto_option_refused`, test_lua / test_js.)
+- **`docs/cli_mode.md` described a JS `ctx.stdin` that does not exist.** It
+  listed `readLine()` / `readAll()` returning Promises; the binding has
+  `read(mode)`, synchronous, returning a string or null, and `close()`.
 
 ## [0.20.0] - 2026-11-10
 
