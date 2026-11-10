@@ -15662,6 +15662,22 @@ UTEST(js_gpu, devices_are_listed)
     jgpu_cleanup();
 }
 
+/* Audit 44: gpu.async.dispatch copied the shader name into a fixed
+ * HL_GPU_NAME_MAX slot, cutting a longer one to a prefix that could name
+ * another compiled shader. It is refused before anything else. */
+UTEST(gpu_audit44, async_dispatch_long_name)
+{
+    ASSERT_EQ(jgpu_init(1), 0);
+    JGPU_EXPECT("try { gpu.async.dispatch('s'.repeat(300), {}); return 'ran'; }"
+                " catch (e) { return (e instanceof RangeError ? 'range ' : 'other ') +"
+                " (e.message.includes('name too long') ? 'long' : e.message); }",
+                "range long");
+    JGPU_EXPECT("try { gpu.async.dispatch('s'.repeat(255), {}); return 'ran'; }"
+                " catch (e) { return e.message.includes('name too long') ? 'long' : 'other'; }",
+                "other");
+    jgpu_cleanup();
+}
+
 UTEST(js_gpu, buffers_are_per_device)
 {
     ASSERT_EQ(jgpu_init(2), 0);

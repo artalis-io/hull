@@ -2546,3 +2546,51 @@ UTEST(wasm_spans, memory64_span_readback)
     hl_cap_wasm_destroy(&cache);
     teardown_dir();
 }
+
+/* ── Audit 44: a span set whose teardown fails is RETAINED by the cache ────
+ * call_buf_impl and instance_call_buf_run ignored -1 from teardown, so the
+ * retained set lived in a stack variable that died at return: its heap and
+ * its mmap borrow could never be released (the mapping was pinned for good).
+ * The set now moves to a per-cache list that hl_cap_wasm_destroy retries,
+ * and the borrow is released once WAMR is gone. */
+UTEST(wasm_audit44, span_teardown_failure_retained)
+{
+    setup();
+    HlWasmCache cache; ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs; hl_vfs_init(&vfs, span_call_entries, NULL);
+    ASSERT_EQ(write_file("a.bin", 40000), 0);
+    HlMappedBuffer *b1 = hl_cap_fs_mmap_window(&cfg, "a.bin", 0, 4096, NULL, NULL);
+    HlMappedBuffer *b2 = hl_cap_fs_mmap_window(&cfg, "a.bin", 8192, 4096, NULL, NULL);
+    ASSERT_TRUE(b1 != NULL && b2 != NULL);
+
+    /* The one-shot call path. */
+    void *out = NULL; size_t out_len = 0; const char *err = NULL;
+    hl_wasm_span_test_fail_destroys(1);
+    int rc = call_echo_with_span(&cache, &vfs, b1, "src", "hi", 2, NULL,
+                                 &out, &out_len, &err);
+    hl_wasm_span_test_fail_destroys(0);
+    EXPECT_EQ(rc, HL_WASM_OK);
+    free(out);
+    EXPECT_EQ(b1->borrow_count, 1);          /* retained, not released */
+
+    /* The persistent-instance path. */
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(&cache, "echo", NULL,
+                                                     &vfs, NULL, NULL, &err);
+    ASSERT_TRUE(pi != NULL);
+    out = NULL; out_len = 0; err = NULL;
+    hl_wasm_span_test_fail_destroys(1);
+    rc = call_inst_with_span(pi, b2, "src", "abcd", 4, NULL, &out, &out_len, &err);
+    hl_wasm_span_test_fail_destroys(0);
+    EXPECT_EQ(rc, HL_WASM_OK);
+    free(out);
+    EXPECT_EQ(b2->borrow_count, 1);
+    hl_cap_wasm_instance_destroy(pi);
+
+    /* Runtime teardown retries the retained sets: both borrows go. */
+    hl_cap_wasm_destroy(&cache);
+    EXPECT_EQ(b1->borrow_count, 0);
+    EXPECT_EQ(b2->borrow_count, 0);
+    hl_cap_fs_munmap(b1);
+    hl_cap_fs_munmap(b2);
+    teardown_dir();
+}

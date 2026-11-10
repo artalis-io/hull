@@ -538,4 +538,37 @@ UTEST(tui_parser, alt_bracket_commits_via_flush_idle)
     hl_tui_parser_free(&p);
 }
 
+/* ── Audit 44: a UTF-8 sequence cut by an escape or a new lead byte ── */
+
+/* An ESC left a partial UTF-8 sequence pending, so the first byte after the
+ * escape sequence was appended to the stale bytes (a continuation completed
+ * a character that was never typed); and a lead byte arriving mid-sequence
+ * was dropped with the partial bytes, losing the character it started. */
+UTEST(tui_audit44, utf8_cut_by_escape)
+{
+    HlTuiParser p; hl_tui_parser_init(&p);
+    HlTuiEvent ev = {0};
+
+    /* Partial é, then an arrow, then a stray continuation: up, nothing more. */
+    hl_tui_parser_feed(&p, "\xC3\x1b[A\xA9", 5);
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 0);
+    EXPECT_STREQ(ev.key, "up");
+    EXPECT_EQ(hl_tui_parser_pop(&p, &ev), 1);
+
+    /* Partial euro sign, an arrow, then a whole é: up, then é. */
+    hl_tui_parser_feed(&p, "\xE2\x82\x1b[A\xC3\xA9", 7);
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 0);
+    EXPECT_STREQ(ev.key, "up");
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 0);
+    EXPECT_EQ(ev.codepoint, 0x00E9u);
+    EXPECT_EQ(hl_tui_parser_pop(&p, &ev), 1);
+
+    /* A lead byte mid-sequence starts its own character. */
+    hl_tui_parser_feed(&p, "\xE2\xC3\xA9", 3);
+    ASSERT_EQ(hl_tui_parser_pop(&p, &ev), 0);
+    EXPECT_EQ(ev.codepoint, 0x00E9u);
+    EXPECT_EQ(hl_tui_parser_pop(&p, &ev), 1);
+    hl_tui_parser_free(&p);
+}
+
 UTEST_MAIN();
