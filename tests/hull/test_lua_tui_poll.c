@@ -49,6 +49,34 @@ int hl_cap_tui_next_event(HlTuiCtx *ctx, HlTuiEvent *out)
 int hl_cap_tui_parser_pending(HlTuiCtx *ctx) { (void)ctx; return 0; }
 int hl_cap_tui_commit_idle(HlTuiCtx *ctx) { (void)ctx; return 0; }
 
+/* Everything else the binding references (its function table is kept
+ * whole - under ASan, or where the linker does not drop it - and the
+ * native Linux base links no TUI cap): inert stubs. */
+int hl_cap_tui_release(HlTuiCtx *ctx) { (void)ctx; return 0; }
+int hl_cap_tui_size(HlTuiCtx *ctx, int *cols, int *rows)
+{ (void)ctx; if (cols) *cols = 80; if (rows) *rows = 24; return 0; }
+uint32_t hl_cap_tui_caps(HlTuiCtx *ctx) { (void)ctx; return 0; }
+const char *hl_cap_tui_theme(HlTuiCtx *ctx) { (void)ctx; return "unknown"; }
+int hl_cap_tui_clear(HlTuiCtx *ctx) { (void)ctx; return 0; }
+int hl_cap_tui_invalidate(HlTuiCtx *ctx) { (void)ctx; return 0; }
+int hl_cap_tui_move(HlTuiCtx *ctx, int x, int y)
+{ (void)ctx; (void)x; (void)y; return 0; }
+int hl_cap_tui_style(HlTuiCtx *ctx, uint32_t fg, uint32_t bg, uint32_t attr)
+{ (void)ctx; (void)fg; (void)bg; (void)attr; return 0; }
+int hl_cap_tui_write(HlTuiCtx *ctx, const char *s, size_t len)
+{ (void)ctx; (void)s; (void)len; return 0; }
+int hl_cap_tui_flush(HlTuiCtx *ctx) { (void)ctx; return 0; }
+size_t hl_cap_tui_last_flush_bytes(const HlTuiCtx *ctx) { (void)ctx; return 0; }
+int hl_cap_tui_clipboard_set(HlTuiCtx *ctx, const char *text, size_t len)
+{ (void)ctx; (void)text; (void)len; return 0; }
+int hl_cap_tui_enable_mouse(HlTuiCtx *ctx, int on) { (void)ctx; (void)on; return 0; }
+int hl_cap_tui_enable_paste(HlTuiCtx *ctx, int on) { (void)ctx; (void)on; return 0; }
+int hl_cap_tui_enable_focus(HlTuiCtx *ctx, int on) { (void)ctx; (void)on; return 0; }
+int hl_cap_tui_enable_kitty_kbd(HlTuiCtx *ctx, int on) { (void)ctx; (void)on; return 0; }
+int lua_hull_spawn(lua_State *L) { (void)L; return 0; }
+void hl_lua_setfuncs(lua_State *L, const luaL_Reg *l, int nup)
+{ luaL_setfuncs(L, l, nup); }
+
 static uint64_t test_now(void) { return 100; }
 static uint64_t test_timer(HlAsyncBackendCtx *ctx, uint64_t ms,
                            HlAsyncTimerFn fn, void *user)

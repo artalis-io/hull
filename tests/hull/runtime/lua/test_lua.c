@@ -17296,6 +17296,7 @@ UTEST(lua_test_audit44, too_many_headers)
 }
 #endif
 
+#ifdef HL_ENABLE_HTTP_SERVER   /* timers are part of the HTTP feature */
 /* Audit 44: a timer that fires while its previous run is still in flight
  * re-adds itself 1 s later - and did so at shutdown too, unlike
  * hl_lua_timer_reschedule, adding a timer to a loop being torn down. */
@@ -17328,6 +17329,7 @@ UTEST(lua_timer_audit44, inflight_retry_not_rearmed_at_shutdown)
     be->tick(actx, 0);
     be->free(actx);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 /* ── Audit 44: template / tui / health / csv (stdlib Lows) ──────────── */
 

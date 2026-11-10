@@ -19238,6 +19238,7 @@ UTEST(template_audit44, dot_path_empty_segment_refused)
     cleanup_js_caps();
 }
 
+#ifdef HL_ENABLE_HTTP_SERVER   /* timers are part of the HTTP feature */
 /* Audit 44 (the Lua twin's): a timer that fires while its previous run is
  * still in flight re-added itself 1 s later at shutdown too, unlike
  * hl_js_timer_reschedule. */
@@ -19268,6 +19269,7 @@ UTEST(js_timer_audit44, inflight_retry_not_rearmed_at_shutdown)
     be->tick(actx, 0);
     be->free(actx);
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 #if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* ── Audit 44: stdlib data-layer findings ─────────────────────────────
