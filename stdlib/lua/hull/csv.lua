@@ -230,7 +230,12 @@ function csv.parse(text, opts)
         for r = 2, #rows do
             local obj = {}
             for c = 1, #header_row do
-                obj[header_row[c]] = rows[r][c] or ""
+                -- An empty header cell names no column (the JS twin skips
+                -- it too; it was kept as a "" key - audit 44).
+                local key = header_row[c]
+                if key ~= "" then
+                    obj[key] = rows[r][c] or ""
+                end
             end
             result[#result + 1] = obj
         end

@@ -43,7 +43,9 @@ let _startTime = null;
 /**
  * Register a custom readiness check.
  *
- * Replaces any prior check with the same name. Contract:
+ * Replaces any prior check with the same name. The name "db" is reserved
+ * for the built-in DB ping and throws: a check under that name overwrote the
+ * ping's result, so a failed ping read "ok" (audit 44). Contract:
  *   - return `true` or no return value → ok
  *   - return `false` → fail
  *   - throw → fail (uses error string)
@@ -52,6 +54,9 @@ let _startTime = null;
  * @param {() => boolean|void} fn
  */
 function register(name, fn) {
+    if (name === "db") {
+        throw new Error("health.register: the name 'db' is reserved for the built-in DB ping");
+    }
     _checks[name] = fn;
 }
 

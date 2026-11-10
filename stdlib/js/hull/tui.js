@@ -12,36 +12,14 @@
  */
 
 import { tui as native } from "hull:_tui";
+/* The pure layout / line-editing arithmetic (code-point truncate, the
+ * frame's top edge, the list's height, tui.input's key handling) lives in
+ * hull:_tui_layout, which has no terminal dependency and so is testable on
+ * a TUI-free build. */
+import { _tui_layout as L } from "hull:_tui_layout";
 
-function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
-
-/* A codepoint counts as "printable input" only if it's outside the C0
- * control range (< 0x20), not DEL (0x7F), and not in the C1 range
- * (0x80..0x9F). tui.input uses this to reject keystrokes that would
- * otherwise inject terminal escape bytes into the returned buffer.
- * The cap-layer write path already strips these on the way to cells,
- * but rejecting at insertion-time keeps the returned string clean.
- */
-function isPrintableCp(cp) {
-    if (!cp) return false;
-    if (cp < 0x20) return false;
-    if (cp === 0x7F) return false;
-    if (cp >= 0x80 && cp <= 0x9F) return false;
-    return true;
-}
-
-/* UTF-8-safe truncate by codepoint count. JS strings are UTF-16, so
- * `.length` counts code units (one for BMP characters, two for
- * surrogate pairs). Use Array.from to split by codepoint so the
- * result never cuts a surrogate pair or multi-byte UTF-8 sequence
- * once written to the cap layer.
- */
-function truncateByCodepoints(s, maxCells) {
-    if (maxCells <= 0) return "";
-    const cps = Array.from(s);
-    if (cps.length <= maxCells) return s;
-    return cps.slice(0, maxCells).join("");
-}
+const clamp = L.clamp;
+const truncateByCodepoints = L.truncateByCodepoints;
 
 /* Per-frame draw context handed to the user's `draw` callback. */
 function makeDrawCtx() {
@@ -149,7 +127,7 @@ function list(items, opts = {}) {
                 t.style({});
                 y += 1;
             }
-            const h = clamp(opts.height ?? (t.rows - (title ? 1 : 0)), 1, count);
+            const h = L.listHeight(t.rows, title, opts.height, count);
             if (cursor < top) top = cursor;
             if (cursor > top + h - 1) top = cursor - h + 1;
             for (let i = 0; i < h; i++) {
@@ -247,18 +225,8 @@ function frame(opts, fn) {
 
     if (opts.style) native.style(opts.style);
 
-    let top = b.tl + b.h.repeat(w - 2) + b.tr;
-    if (opts.title && w - 5 > 0) {
-        /* Layout: ┌─ title ─...─┐ - the framing reserves five chars
-         * (tl + h + " " around the title prefix, then " " + tr at the
-         * suffix end). The previous w-4 cap overshot by one cell
-         * when the title exactly filled the available room. */
-        let tt = truncateByCodepoints(String(opts.title), w - 5);
-        const prefix = b.tl + b.h + " ";
-        const suffixLen = Math.max(0, w - prefix.length - tt.length - 2);
-        top = prefix + tt + " " + b.h.repeat(suffixLen) + b.tr;
-    }
-    native.print(x, y, top);
+    /* Top edge, the title slotted in (┌─ title ─...─┐), sized in cells. */
+    native.print(x, y, L.frameTop(b, w, opts.title));
 
     for (let i = 1; i < h - 1; i++) {
         native.print(x, y + i, b.v);
@@ -285,6 +253,11 @@ function frame(opts, fn) {
 
 /* ── tui.input ───────────────────────────────────────────────── */
 
+/* Editing is by code point (hull:_tui_layout inputStep): a surrogate pair
+ * is one step for backspace / delete / left / right, the mask and the
+ * cursor column count code points, and `maxLen` counts code points, as the
+ * Lua twin's max_len does. */
+
 function input(prompt, opts = {}) {
     const initial = opts.initial ?? "";
     const maxLen  = opts.maxLen ?? 1024;
@@ -298,45 +271,16 @@ function input(prompt, opts = {}) {
         draw(t) {
             t.clear();
             t.print(1, 1, promptStr);
-            const display = password ? "*".repeat(buf.length) : buf;
-            const x = promptStr.length + 1;
-            t.print(x, 1, display);
-            t.move(x + cursor, 1);
+            const v = L.inputView(promptStr, buf, cursor, password);
+            t.print(v.x, 1, v.display);
+            t.move(v.cursorX, 1);
         },
         onEvent(ev) {
             if (ev.kind !== "key") return;
-            const k = ev.key;
-            if (k === "enter") return buf;
-            if (k === "escape" || k === "ctrl+c") return false;
-            if (k === "backspace") {
-                if (cursor > 0) {
-                    buf = buf.slice(0, cursor - 1) + buf.slice(cursor);
-                    cursor -= 1;
-                }
-            } else if (k === "delete") {
-                if (cursor < buf.length) buf = buf.slice(0, cursor) + buf.slice(cursor + 1);
-            } else if (k === "left") {
-                if (cursor > 0) cursor -= 1;
-            } else if (k === "right") {
-                if (cursor < buf.length) cursor += 1;
-            } else if (k === "home") {
-                cursor = 0;
-            } else if (k === "end") {
-                cursor = buf.length;
-            } else if (k === "ctrl+u") {
-                buf = buf.slice(cursor);
-                cursor = 0;
-            } else if (k === "ctrl+k") {
-                buf = buf.slice(0, cursor);
-            } else if (isPrintableCp(ev.codepoint) && !ev.ctrl && !ev.alt) {
-                if (buf.length < maxLen) {
-                    /* isPrintableCp has already filtered C0/DEL/C1,
-                     * so ev.key here can't carry an ANSI-injection
-                     * payload. */
-                    buf = buf.slice(0, cursor) + ev.key + buf.slice(cursor);
-                    cursor += ev.key.length;
-                }
-            }
+            const s = L.inputStep(buf, cursor, ev, maxLen);
+            if ("done" in s) return s.done;
+            buf = s.buf;
+            cursor = s.cursor;
         },
         tickMs: opts.tickMs,
     });

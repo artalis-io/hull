@@ -17329,6 +17329,178 @@ UTEST(lua_timer_audit44, inflight_retry_not_rearmed_at_shutdown)
     be->free(actx);
 }
 
+/* ── Audit 44: template / tui / health / csv (stdlib Lows) ──────────── */
+
+/* Literal template text went into the generated source as a long string,
+ * and Lua's lexer folds CR, CRLF and LFCR inside a long string to LF: the
+ * Lua engine rendered "A\r\nB\rC\n\rD\n" as "A\nB\nC\nD\n" while the JS twin
+ * kept the bytes. The text must come back exactly, NUL and "]]" included. */
+UTEST(template_audit44, crlf_preserved_lua)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local tpl = require('hull.template') "
+        "  local cases = { 'A\\r\\nB\\rC\\n\\rD\\n', '\\r\\n', '\\n\\r', '\\nlead', "
+        "    'x\\0y', 'a]]b]=]c]==]', '\\\\\"q\\'', '\\r', '\\r9', '\\0' .. '1' } "
+        "  for i, s in ipairs(cases) do "
+        "    if tpl.render_string(s, {}) ~= s then return i end "
+        "    if tpl.render_string(s .. '{{ x }}' .. s, { x = 1 }) ~= s .. '1' .. s then return 100 + i end "
+        "  end "
+        "  if tpl.render_string('{% for i in xs %}\\r\\n{{ i }}{% end %}', { xs = { 1, 2 } }) "
+        "     ~= '\\r\\n1\\r\\n2' then return 200 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* A dot path's segments were split with gmatch("[^.]+"), which skips empty
+ * segments: "a..b", ".a" and "a." compiled (as a.b / a) where the JS twin
+ * refuses them. */
+UTEST(template_audit44, dot_path_empty_segment_refused)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local tpl = require('hull.template') "
+        "  local d = { a = { b = 'x' } } "
+        "  for i, src in ipairs({ '{{ a..b }}', '{{ .a }}', '{{ a. }}', "
+        "                         '{% if a..b %}y{% end %}' }) do "
+        "    if pcall(tpl.render_string, src, d) then return i end "
+        "  end "
+        "  if tpl.render_string('{{ a.b }}', d) ~= 'x' then return 10 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* csv.parse with headers kept an empty header cell as a "" key (JS skips
+ * it). */
+UTEST(csv_audit44, empty_header_skipped)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local csv = require('hull.csv') "
+        "  local rows = csv.parse('a,,c\\n1,2,3\\n', { headers = true }) "
+        "  if #rows ~= 1 then return 1 end "
+        "  if rows[1][''] ~= nil then return 2 end "
+        "  if rows[1].a ~= '1' or rows[1].c ~= '3' then return 3 end "
+        "  local n = 0 for _ in pairs(rows[1]) do n = n + 1 end "
+        "  if n ~= 2 then return 4 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+#if defined(HL_ENABLE_HTTP_SERVER)
+/* A readiness check registered as "db" overwrote the built-in DB ping's
+ * entry in the results: a failed ping read "ok" in the /ready body. The
+ * name is reserved now. */
+UTEST(health_audit44, custom_db_name_does_not_mask_ping)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local health = require('hull.web.middleware.health') "
+        "  local ok, err = pcall(health.register, 'db', function() return true end) "
+        "  if ok then health.unregister('db') return 1 end "
+        "  if not tostring(err):find('reserved', 1, true) then return 2 end "
+        "  health.register('cache', function() return true end) "
+        "  local r = health.run_checks({ db_check = false }) "
+        "  health.unregister('cache') "
+        "  if not r.checks.cache or r.checks.cache.status ~= 'ok' then return 3 end "
+        "  if r.checks.db ~= nil then return 4 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+#endif
+
+/* tui.frame sized its titled top edge in BYTES: the default Unicode border's
+ * prefix is 7 bytes but 3 cells, so the edge drew 4 cells short (more with a
+ * non-ASCII title). Measured through hull._tui_layout, the pure part of
+ * hull.tui (hull.tui itself needs the terminal bindings). */
+UTEST(tui_audit44, frame_title_width_lua)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local L = __test_hooks('hull._test_hooks').real('hull._tui_layout') "
+        "  local B = { "
+        "    { tl = '\xe2\x94\x8c', tr = '\xe2\x94\x90', h = '\xe2\x94\x80' }, "
+        "    { tl = '\xe2\x95\x94', tr = '\xe2\x95\x97', h = '\xe2\x95\x90' }, "
+        "    { tl = '+', tr = '+', h = '-' } } "
+        "  for bi, b in ipairs(B) do "
+        "    for _, w in ipairs({ 6, 10, 20, 40 }) do "
+        "      for ti, t in ipairs({ 'T', 'hello', 'h\xc3\xa9llo w\xc3\xb6rld', string.rep('x', 50) }) do "
+        "        local top = L.frame_top(b, w, t) "
+        "        if utf8.len(top) ~= w then return bi * 1000 + w * 10 + ti end "
+        "      end "
+        "      if utf8.len(L.frame_top(b, w, nil)) ~= w then return 9 end "
+        "    end "
+        "  end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* tui.list's fit_height subtracted 2 rows for a one-row title (JS 1), so a
+ * titled list left the last terminal row empty. */
+UTEST(tui_audit44, list_fit_height_lua)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local L = __test_hooks('hull._test_hooks').real('hull._tui_layout') "
+        "  if L.list_height(24, 'Pick', nil, 100) ~= 23 then return 1 end "
+        "  if L.list_height(24, nil, nil, 100) ~= 24 then return 2 end "
+        "  if L.list_height(24, 'Pick', 5, 100) ~= 5 then return 3 end "
+        "  if L.list_height(24, 'Pick', nil, 3) ~= 3 then return 4 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
+/* tui.input's max_len counted bytes in Lua and UTF-16 units in JS; both
+ * count code points now. */
+UTEST(tui_audit44, input_max_len_codepoints_lua)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+    int v = eval_int(
+        "(function() "
+        "  local L = __test_hooks('hull._test_hooks').real('hull._tui_layout') "
+        "  if type(L.input_step) ~= 'function' then return 9 end "
+        "  local function key(k) return { key = k, codepoint = utf8.codepoint(k) } end "
+        "  local buf, cur = '', 1 "
+        "  for _, k in ipairs({ '\xc3\xa9', '\xf0\x9f\x98\x80', 'x' }) do "
+        "    buf, cur = L.input_step(buf, cur, key(k), 3) "
+        "  end "
+        "  if buf ~= '\xc3\xa9\xf0\x9f\x98\x80x' then return 1 end "
+        "  buf, cur = L.input_step(buf, cur, key('y'), 3) "
+        "  if buf ~= '\xc3\xa9\xf0\x9f\x98\x80x' then return 2 end "
+        "  buf, cur = L.input_step(buf, cur, { key = 'backspace' }, 3) "
+        "  buf, cur = L.input_step(buf, cur, { key = 'backspace' }, 3) "
+        "  if buf ~= '\xc3\xa9' or cur ~= 3 then return 3 end "
+        "  return 0 "
+        "end)()");
+    EXPECT_EQ(v, 0);
+    cleanup_lua_caps();
+}
+
 #if defined(HL_ENABLE_HTTP_CLIENT) && defined(HL_ENABLE_HTTP_SERVER)
 /* ── Audit 44: stdlib data-layer findings ─────────────────────────────
  * stdlib/lua/hull/tests/test_stdlib_data_audit44.lua: jobs subscription

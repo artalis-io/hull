@@ -197,6 +197,26 @@ release-artifact layout).
 
 <!-- audit44:template-utils -->
 
+- **Template, TUI, health and csv Lua / JS parity (audit 44, stdlib Lows).** The Lua template
+  engine emitted literal template text as a long string, which Lua's lexer reads with CR, CRLF
+  and LFCR folded to LF: `"A\r\nB"` rendered as `"A\nB"` while the JS twin kept the bytes. It is
+  emitted as a `%q` literal now, byte for byte (`template_audit44.crlf_preserved_lua`). A Lua
+  dot path with an empty segment (`a..b`, `.a`, `a.`) compiled where JS refuses it
+  (`template_audit44.dot_path_empty_segment_refused`), and Lua `csv.parse` with headers kept an
+  empty header as a `""` key where JS skips it (`csv_audit44.empty_header_skipped`).
+  `health.register("db", fn)` overwrote the built-in DB ping's result, so a failed ping read
+  `ok` in `/ready`; the name is reserved and raises in both runtimes
+  (`health_audit44.custom_db_name_does_not_mask_ping`). Lua `tui.frame` sized a titled top
+  edge in bytes (4 cells short with the default Unicode border) and JS in UTF-16 units; both
+  count code points (`tui_audit44.frame_title_width_lua`). Lua `tui.list` gave a one-row
+  title two rows (`tui_audit44.list_fit_height_lua`). JS `tui.input` edited by UTF-16 unit -
+  backspace after an emoji left a lone surrogate, left / right parked between its halves, the
+  password mask and cursor column counted units - and steps by code point now; `max_len` /
+  `maxLen` counts code points in both runtimes (it was bytes in Lua, units in JS;
+  `tui_audit44.input_surrogate_backspace_js`, `tui_audit44.input_max_len_codepoints_lua`). The
+  layout and editing arithmetic moved to the internal `hull._tui_layout` /
+  `hull:_tui_layout`, testable without a terminal.
+
 
 
 <!-- audit44:tooling -->
