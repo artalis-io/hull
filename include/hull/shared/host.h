@@ -38,6 +38,31 @@
 int hl_host_is_windows(void);
 
 /**
+ * @brief Test builds only: force hl_host_is_windows() to @p v (0 / 1), or
+ * back to the real host with -1. Defined only when host.c is compiled with
+ * HL_HOST_TEST_HOOKS (the test binaries' host_th.o); a release build has no
+ * such symbol.
+ */
+void hl_host_test_force_windows(int v);
+
+/**
+ * @brief Would the Windows OS read @p path (an app-supplied path relative to
+ * a root, '/'-separated) differently from Hull?
+ *
+ * 1 on Windows when the path holds a backslash (a separator there) or a ':'
+ * (a drive, "C:x" being drive-relative), or a component - other than "." and
+ * ".." - that ends in a dot or a space (dropped by the OS: "a.db." opens
+ * a.db) or holds "~<digit>" (an 8.3 short name opening its long name). 0
+ * elsewhere, and on POSIX hosts, where those are ordinary name bytes.
+ *
+ * The ONE rule for every app-supplied path Hull checks lexically and then
+ * joins with a root (the fs policy's caller paths, the fs resolver, file
+ * DSNs from the manifest and db.open, blob roots): a new such check calls
+ * this rather than its own copy (audit 44).
+ */
+int hl_host_path_unsafe_on_windows(const char *path);
+
+/**
  * @brief Short host-OS label: "windows" | "darwin" | "linux" | "posix".
  *
  * For diagnostics and for the tool VM (`tool.host_os()`), which needs to

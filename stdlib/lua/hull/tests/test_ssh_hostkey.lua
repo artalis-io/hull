@@ -245,18 +245,23 @@ end)
 
 test("a pending trust is single use: the second connect is refused before any dial", function()
     local ssh = require('hull.ssh')
+    -- The crypto under test goes in through hull._test_hooks ("hull.ssh"):
+    -- a `crypto` option on a public hull.ssh entry point is refused (audit 44).
+    local hooks = require('hull._test_hooks').get('hull.ssh')
+    hooks.set_crypto({})
+    local ok, err = pcall(function()
     local p = ssh.pending_trust()
     -- The first connect takes it (it fails at the dial here, which does not
     -- give it back: the refusal is about the object, not the outcome).
     local c1, e1 = ssh.connect{
-        host = "spark.local", user = "operator", key = {}, crypto = {}, trust = p,
+        host = "spark.local", user = "operator", key = {}, trust = p,
         open_stream = function() return nil, "no route", "connect_failed" end,
     }
     assert_eq(c1, nil)
     assert_eq(e1.code, "connect_failed")
     local dialled = false
     local c2, e2 = ssh.connect{
-        host = "spark.local", user = "operator", key = {}, crypto = {}, trust = p,
+        host = "spark.local", user = "operator", key = {}, trust = p,
         open_stream = function() dialled = true; error("nothing may be dialled") end,
     }
     assert_eq(c2, nil)
@@ -264,12 +269,15 @@ test("a pending trust is single use: the second connect is refused before any di
     assert_eq(dialled, false, "refused before the dial:")
     -- A fresh one connects (as far as the dial) again.
     local c3, e3 = ssh.connect{
-        host = "spark.local", user = "operator", key = {}, crypto = {},
+        host = "spark.local", user = "operator", key = {},
         trust = ssh.pending_trust(),
         open_stream = function() return nil, "no route", "connect_failed" end,
     }
     assert_eq(c3, nil)
     assert_eq(e3.code, "connect_failed")
+    end)
+    hooks.set_crypto(nil)
+    if not ok then error(err, 0) end
 end)
 
 -- signature verification -----------------------------------------------------------

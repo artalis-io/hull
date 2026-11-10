@@ -623,14 +623,6 @@ void hl_fs_policy_free(HlFsPolicy *policy)
  * ENUMERATION target (fs.list of the anchor root itself), never for a leaf op
  * (read/write/stat need a named terminal, so they pass 0 and a 0-component path is
  * rejected "invalid_path"). */
-/* A "~<digit>" in a component: the shape of an 8.3 short name. */
-static int has_short_name_tilde(const char *s, size_t l)
-{
-    for (size_t i = 0; i + 1 < l; i++)
-        if (s[i] == '~' && s[i + 1] >= '0' && s[i + 1] <= '9') return 1;
-    return 0;
-}
-
 static long split_caller(const char *path, const char **comp, size_t *len,
                          int allow_empty, int *state, const char **err)
 {
@@ -639,9 +631,12 @@ static long split_caller(const char *path, const char **comp, size_t *len,
     if (path[0] == '/' || path[0] == '\\') { *err = "invalid_path"; return -1; }
     /* On Windows the OS also splits on a backslash and reads "C:" as a
      * drive, so a..x joined by backslashes was one harmless-looking
-     * component here and a walk out of the root there. Both are ordinary
-     * name bytes on POSIX. */
-    if (hl_host_is_windows() && strpbrk(path, "\\:")) { *err = "invalid_path"; return -1; }
+     * component here and a walk out of the root there; and it drops a
+     * trailing dot or space ("a.txt." opens a.txt) and opens an 8.3 short
+     * name ("secret~1.htm") as its long name - a pattern grant matched the
+     * spelling, the OS opened another file (audit 22). All are ordinary name
+     * bytes on POSIX. The one shared rule (audit 44). */
+    if (hl_host_path_unsafe_on_windows(path)) { *err = "invalid_path"; return -1; }
     size_t plen = strlen(path);
     if (path[plen - 1] == '/') { *err = "invalid_path"; return -1; }   /* trailing slash */
 
@@ -655,15 +650,6 @@ static long split_caller(const char *path, const char **comp, size_t *len,
         size_t l = i - start;
         const char *s = path + start;
         if (l == 1 && s[0] == '.') continue;
-        /* On Windows a trailing dot or space is dropped ("a.txt." opens
-         * a.txt) and an 8.3 short name ("secret~1.htm") opens its long
-         * name: a pattern grant matched the spelling, the OS opened
-         * another file (audit 22). */
-        if (hl_host_is_windows() &&
-            (s[l - 1] == '.' || s[l - 1] == ' ' || has_short_name_tilde(s, l))) {
-            *err = "invalid_path";
-            return -1;
-        }
         if (l == 2 && s[0] == '.' && s[1] == '.') { *err = "invalid_path"; return -1; }
         if (l > NAME_MAX) { *err = "invalid_path"; return -1; }
         if (n >= HL_FS_MAX_DEPTH) { *err = "invalid_path"; return -1; }

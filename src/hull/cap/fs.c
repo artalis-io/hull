@@ -95,6 +95,13 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
         path = rest;
     }
 
+    /* What Windows reads differently - a backslash, a drive, a trailing dot
+     * or space, an 8.3 short name (shared/host.h, the one rule; audit 44). */
+    if (hl_host_path_unsafe_on_windows(path)) {
+        if (err_msg) *err_msg = "invalid_path";
+        return -1;
+    }
+
     /* Reject absolute paths */
     if (path[0] == '/') {
         if (err_msg) *err_msg = "absolute_path";

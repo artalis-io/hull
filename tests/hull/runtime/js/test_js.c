@@ -19044,6 +19044,43 @@ UTEST(js_ssh_bridge, a_known_hosts_line_hashed_by_openssh_is_matched)
     cleanup_js();
 }
 
+/* audit 44: the JS twin of ssh_audit44.public_crypto_option_refused in
+ * test_lua.c - every public hull:ssh entry point refuses a `crypto` option
+ * from app code before it dials or computes anything with it. */
+UTEST(ssh_audit44, public_crypto_option_refused)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+    js_ssh_reset_verdict();
+    js_ssh_eval_as(
+        "import { ssh } from 'hull:ssh';\n"
+        "let used = 0;\n"
+        "const c = new Proxy({}, { get() { used++; return () => 'A'.repeat(32); } });\n"
+        "const out = [];\n"
+        "const verdict = (e) => String(e && e.message).indexOf("
+        "'crypto option is not accepted') >= 0 ? 'refused' : 'other';\n"
+        "async function tryIt(name, f) {\n"
+        "  try { await f(); out.push(name + '=accepted'); }\n"
+        "  catch (e) { out.push(name + '=' + verdict(e)); }\n"
+        "}\n"
+        "let dialled = false;\n"
+        "const u32 = (n) => String.fromCharCode(n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);\n"
+        "const blob = u32(11) + 'ssh-ed25519' + u32(32) + 'k'.repeat(32);\n"
+        "await tryIt('connect', () => ssh.connect({ host: 'spark.local', user: 'operator',\n"
+        "  key: {}, crypto: c,\n"
+        "  openStream: () => { dialled = true; return [null, 'no route', 'connect_failed']; } }));\n"
+        "await tryIt('fingerprint', () => ssh.fingerprint(blob, { crypto: c }));\n"
+        "await tryIt('fileStore', () => ssh.fileStore('kh', { crypto: c,\n"
+        "  fs: { read: () => new ArrayBuffer(0), write: () => true } }));\n"
+        "await tryIt('loadKey', () => ssh.loadKey('x', { crypto: c }));\n"
+        "globalThis.__v = out.join(',') + ';dialled=' + dialled + ';used=' + used;\n", 0);
+    char out[512];
+    js_ssh_verdict(out, sizeof out);
+    EXPECT_STREQ(out, "connect=refused,fingerprint=refused,fileStore=refused,"
+                      "loadKey=refused;dialled=false;used=0");
+    cleanup_js();
+}
+
 UTEST(js_ssh_bridge, a_trust_store_over_the_real_hull_kv)
 {
     /* The real memory backend under ssh.kvStore: set-if-absent, no

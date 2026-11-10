@@ -165,12 +165,20 @@ const fakeCrypto = {
     random: (n) => "r".repeat(n),
 };
 
+// The crypto under test goes in through hull:_test_hooks ("hull:ssh"):
+// a `crypto` option on a public hull:ssh entry point is refused (audit 44).
+// A store takes the crypto it is made with, so each store() sets it.
 function store(fs, opts) {
     needSsh();
     opts = opts || {};
     opts.fs = fs;
-    opts.crypto = fakeCrypto;
-    return ssh.fileStore("kh", opts);
+    const hooks = __testHooks("hull:ssh");
+    hooks.setCrypto(fakeCrypto);
+    try {
+        return ssh.fileStore("kh", opts);
+    } finally {
+        hooks.setCrypto(null);
+    }
 }
 
 await test("a missing file is an empty store, created by the first accept", async () => {
@@ -397,8 +405,11 @@ await test("ssh.fingerprint takes just the key blob", () => {
     needSsh();
     const key = wire.writer().string("ssh-ed25519").string("A".repeat(32)).build();
     const crypto = { sha256: () => "\x00".repeat(32) };
-    assertEq(ssh.fingerprint(key, { crypto }),
-        "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    const hooks = __testHooks("hull:ssh");
+    hooks.setCrypto(crypto);
+    let fp;
+    try { fp = ssh.fingerprint(key); } finally { hooks.setCrypto(null); }
+    assertEq(fp, "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
 });
 
 globalThis.__test_pass = pass;

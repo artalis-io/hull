@@ -22,6 +22,31 @@ release-artifact layout).
   another spelling of the path, was checked and not reproducible: Keel's router normalises no
   path, so only a path that starts with the prefix reaches a route under it.)
 
+- **Windows: a manifest file DSN with a backslash or a drive could leave the app tree** (audit 44,
+  A2 / A3, Medium on Windows). `databases.named` / `databases.internal` file DSNs (`@state/` ones too)
+  were confined with checks that split only on `/`, so on Windows - a cosmo APE, with no kernel sandbox
+  there - `data\..\..\x.db` or `@state/a\..\b.db` had no `..` component for them and opened outside
+  the root, and `C:x.db`, a trailing dot or space and an 8.3 short name were read differently by the OS.
+  The app-supplied part of such a DSN is now refused with the fs policy's rule, which is one predicate
+  (`hl_host_path_unsafe_on_windows`) shared by the fs policy, the fs resolver and `hl_cap_fs_validate`
+  (`db.open`, blob roots). New lint rule INV-11. Tests:
+  `db_registry_audit44.windows_backslash_dsn_refused`, `db_dynamic_audit44.windows_backslash_refused`,
+  `fs_policy_audit44.windows_rule_is_shared`.
+
+- **`hull/ssh`: the crypto test seam is a test hook, not a public option** (audit 44, Low, both
+  runtimes). `ssh.connect`, `ssh.fingerprint`, `ssh.load_key` and `ssh.file_store` (JS
+  `connect`, `fingerprint`, `loadKey`, `fileStore`) took an `opts.crypto` table meant for the
+  unit tests. App code could pass one, and the transport draws its randomness, key exchange,
+  ciphers and host-key verification from it: the app chose every byte written to the granted
+  host after the identification line and could make any host key verify. Each entry point now
+  refuses a `crypto` option with an error naming it, before it dials or computes anything; the
+  suites swap the crypto through `hull._test_hooks` / `hull:_test_hooks` (`set_crypto` /
+  `setCrypto`). An app that passed `crypto` gets the error; drop the option.
+  (`ssh_audit44.public_crypto_option_refused`, test_lua / test_js.)
+- **`docs/cli_mode.md` described a JS `ctx.stdin` that does not exist.** It
+  listed `readLine()` / `readAll()` returning Promises; the binding has
+  `read(mode)`, synchronous, returning a string or null, and `close()`.
+
 ## [0.20.0] - 2026-11-10
 
 Audit round 44 over v0.19.0 (C, JS and Lua), with every finding fixed: no High, 13 Medium and

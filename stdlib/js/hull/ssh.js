@@ -57,8 +57,24 @@ const errText = (e) => (e && typeof e === "object" && typeof e.message === "stri
 // the JS module object is frozen, and a seam on connect's options would hand
 // app code the real stream).
 let newTransport = transport.new;
+// The hull:crypto adapter the whole stack runs on. Only a unit test may swap
+// it, through hull:_test_hooks (setCrypto; null puts the real one back), never
+// through an option (audit 44): the transport draws its randomness, key
+// exchange, ciphers and host-key verification from it, so a `crypto` object on
+// a public entry point chose every byte written to the granted host and could
+// make every host key verify. A public entry point given one refuses it.
+let cryptoOverride = null;
+const cryptoLib = () => cryptoOverride || bytes.crypto;
+function refuseCryptoOption(where, opts) {
+    if (opts !== null && typeof opts === "object"
+        && opts.crypto !== undefined && opts.crypto !== null) {
+        throw new TypeError(where + ": the crypto option is not accepted "
+            + "(hull:ssh always uses hull:crypto)");
+    }
+}
 _test_hooks.register("hull:ssh", {
     setTransportNew(fn) { newTransport = fn || transport.new; },
+    setCrypto(c) { cryptoOverride = c || null; },
 });
 
 // Our coded errors: an Error with `code`, `detail` and the extra fields of a
@@ -149,6 +165,12 @@ function keyError(e) {
  *  opts.passphraseEnv names an environment variable holding the passphrase
  *  (read and scrubbed in C - prefer it); opts.passphrase passes it directly. */
 function loadKey(text, opts) {
+    refuseCryptoOption("ssh.loadKey", opts);
+    if (cryptoOverride !== null) {
+        opts = { passphrase: opts ? opts.passphrase : undefined,
+                 passphraseEnv: opts ? opts.passphraseEnv : undefined,
+                 crypto: cryptoOverride };
+    }
     return privatekey.load(isBuf(text) ? bytes.fromBuf(text) : text, opts);
 }
 
@@ -183,9 +205,10 @@ function memoryStore(seed) {
  *  writes new entries hashed. A missing file is an empty store; any other
  *  read failure throws `store_failed`. */
 function fileStore(path, opts) {
+    refuseCryptoOption("ssh.fileStore", opts);
     opts = opts || {};
     const fsm = opts.fs || fs;
-    const crypto = opts.crypto || bytes.crypto;
+    const crypto = cryptoLib();
     const kh = knownHosts;
 
     const hmac = (key, msg) => crypto.hmacSha1(msg, key);
@@ -702,6 +725,7 @@ async function connect(opts) {
     if (opts === null || typeof opts !== "object") {
         throw new TypeError("ssh.connect: expected an options object");
     }
+    refuseCryptoOption("ssh.connect", opts);
     for (const req of ["host", "user"]) {
         if (isNil(opts[req])) throw new TypeError("ssh.connect: " + req + " is required");
     }
@@ -714,7 +738,7 @@ async function connect(opts) {
     const [offerOk, offerWhy] = kexinit.validateOffer(opts.offer);
     if (!offerOk) throw new TypeError("ssh.connect: " + offerWhy);
 
-    const crypto = opts.crypto || bytes.crypto;
+    const crypto = cryptoLib();
     // Every key is loaded before anything is dialled. Each entry is key-file
     // text (a string or buffer) or a key already loaded with ssh.loadKey.
     const keys = [];
@@ -865,9 +889,11 @@ async function forgetHost(trust, host, port) {
     return guard(() => hostkey.forget(trust, name));
 }
 
-/** Fingerprint a key blob: SHA256:<base64>, what `ssh-keygen -l` prints. */
+/** Fingerprint a key blob: SHA256:<base64>, what `ssh-keygen -l` prints.
+ *  A `crypto` option is refused (audit 44: the seam is a test hook). */
 function fingerprint(keyBlob, opts) {
-    const crypto = (opts && opts.crypto) || bytes.crypto;
+    refuseCryptoOption("ssh.fingerprint", opts);
+    const crypto = cryptoLib();
     return hostkey.fingerprint(crypto.sha256, bytesArg(keyBlob, "keyBlob"));
 }
 
