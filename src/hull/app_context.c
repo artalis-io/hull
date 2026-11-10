@@ -16,6 +16,7 @@
 #include "hull/stdlib_feature.h"
 #include "hull/vfs.h"
 #include "hull/shared/term_escape.h"   /* hl_eprintf_line (audit 34) */
+#include "log.h"
 
 #include "hull/cap/fs_resolve.h"   /* hl_fs_reserve_root_path (audit 42) */
 #include "hull/shared/state_dir.h"  /* the @state/ root (gap 3) */
@@ -35,6 +36,7 @@
 #include "hull/cap/db_sqlite.h"   /* hl_db_sqlite_raw (agent handle) */
 #include "hull/cap/db_registry.h"
 #include "hull/cap/db_internal.h"
+#include "hull/cap/db_budget.h"
 #include <limits.h>
 #include "hull/migrate.h"
 #include "hull/worker_db.h"
@@ -93,12 +95,20 @@ struct HlAppContext {
      * it made can be removed once the manifest named another. */
     char           default_db_dsn[HL_HOST_PATH_MAX + 16];
     int            implicit_db_absent;
+    /* The default internal database worked out from the implicit default,
+     * and whether its file was absent before the app's top level ran: a
+     * top-level stdlib init() makes it, and the re-point carries its tables
+     * over and removes it (audit 44). */
+    char           implicit_internal[HL_HOST_PATH_MAX + 32];
+    int            implicit_internal_absent;
+    int            opt_worker_db;   /* opts->worker_db_path given */
     /* The init options the manifest step (hl_app_context_manifest_db)
      * needs: serve.c defers the app load and runs that step itself. */
     int            opt_no_migrate;
     int            opt_keep_internal;
     int            opt_db_path_explicit;
     int            opt_manifest_default_db;
+    int            opt_peek;          /* manifest_default_db_peek */
     int            opt_no_db;
     char           implicit_db_dsn[HL_HOST_PATH_MAX + 16];
 
@@ -209,7 +219,10 @@ static int load_app_code(HlAppContext *ctx, const char *entry)
 #ifdef HL_ENABLE_DB
 /* Remove the file (and SQLite sidecars) the implicit default made at init,
  * now that the manifest named another default: Hull made it seconds ago and
- * only its own migrations touched it. Regular files only, never a link. */
+ * only its own migrations touched it. Regular files only, never a link. (A
+ * sidecar that was there before the run does not survive the open anyway:
+ * SQLite drops a stale journal of an empty database at open and the -wal /
+ * -shm at close.) */
 static void remove_implicit_db(const char *dsn)
 {
     const char *f = hl_sandbox_db_path(dsn);
@@ -222,6 +235,58 @@ static void remove_implicit_db(const char *dsn)
         struct stat st;
         if (lstat(p, &st) == 0 && S_ISREG(st.st_mode)) (void)unlink(p);
     }
+}
+
+static int any_row(void *ctx, HlColumn *cols, int ncols)
+{
+    (void)cols; (void)ncols;
+    *(int *)ctx = 1;
+    return 0;
+}
+
+/* The internal connection a top-level stdlib init() opened on the implicit
+ * default's internal database (now replaced: the default re-pointed): move
+ * the _hull_* tables it made into the new internal database, close it, and
+ * remove the file when this run made it (audit 44). Without this the
+ * tables (sessions, roles, ...) were left behind, or - in memory - lost. */
+static void carry_replaced_internal(HlAppContext *ctx)
+{
+    HlDbHandle old = {0};
+    if (!hl_db_registry_take_replaced_internal(ctx->db_registry, &old)) return;
+    const char *e = NULL;
+    HlDbHandle *dst = hl_db_registry_internal(ctx->db_registry, &e);
+    char err[512] = {0};
+    int moved = -1;
+    HlDbNativeTag tag = HL_DB_NATIVE_NONE;
+    if (dst) (void)hl_db_backend_native_handle(dst, &tag);
+    if (dst && tag != HL_DB_NATIVE_SQLITE) {
+        /* A network / DuckDB default: the tables cannot be carried over (the
+         * move is SQLite to SQLite). An init() at the top level that made
+         * any did so before the manifest's default was known. */
+        int any = 0;
+        HlDbBudgetBinding budget = hl_db_budget_swap(NULL, NULL);
+        int q = hl_db_query(&old, "SELECT 1 FROM sqlite_master WHERE name LIKE "
+                                  "'\\_hull\\_%' ESCAPE '\\' LIMIT 1",
+                            NULL, 0, any_row, &any, NULL);
+        hl_db_budget_restore(budget);
+        if (q >= 0 && !any)
+            moved = 0;
+        else
+            snprintf(err, sizeof err, "the new default database is not SQLite; "
+                     "call the stdlib's init() from app.main or a handler, or "
+                     "declare databases.internal");
+    } else if (dst) {
+        moved = hl_db_internal_move(&old, dst, "from the internal database the "
+                                    "app's top level used", err, sizeof err);
+    }
+    if (moved < 0)
+        log_warn("[hull:c] the stdlib tables an init() at the app's top level "
+                 "made before the manifest's default database was known were "
+                 "not carried over to the new internal database: %s",
+                 dst ? err : (e ? e : "it cannot be opened"));
+    old.backend->close(&old);
+    if (moved >= 0 && ctx->implicit_internal_absent)
+        remove_implicit_db(ctx->implicit_internal);
 }
 
 /* Make @p dsn (confined) the app's default database: close the implicit
@@ -239,14 +304,22 @@ static int app_context_repoint_default(HlAppContext *ctx, const char *dsn)
         }
     }
     const char *implicit = ctx->implicit_db_dsn[0] ? ctx->implicit_db_dsn : ":memory:";
-    if (hl_db_registry_repoint_default(ctx->db_registry, dsn) != 0) {
+    /* Everything in an implicit default this run created (or an in-memory
+     * one) was made by the app's top level and the migrations: it is kept
+     * open across the re-point so the tables the top level made (jobs,
+     * outbox, inbox, kv, ...) are carried into the new default (audit 44).
+     * An implicit file that was there before the run is not read. */
+    int carry = ctx->implicit_db_absent || strcmp(implicit, ":memory:") == 0;
+    HlDbHandle old = {0};
+    if (hl_db_registry_repoint_default_ex(ctx->db_registry, dsn,
+                                          carry ? &old : NULL) != 0) {
         hl_eprintf_line("[app-context] cannot make the manifest's default database the default");
         return -1;
     }
-    if (ctx->implicit_db_absent) remove_implicit_db(implicit);
     const char *derr = NULL;
     HlDbHandle *def = hl_db_registry_get(ctx->db_registry, "default", &derr);
     if (!def) {
+        if (old.backend) old.backend->close(&old);
         hl_eprintf_line("[app-context] databases.named.default: %s",
                         derr ? derr : "cannot open the database");
         return -1;
@@ -254,18 +327,58 @@ static int app_context_repoint_default(HlAppContext *ctx, const char *dsn)
     ctx->db_open = 1;
     if (!ctx->opt_no_migrate &&
         hl_migrate_run(def, &ctx->app_vfs) == HL_MIGRATE_ERR) {
+        if (old.backend) old.backend->close(&old);
         hl_eprintf_line("[app-context] migrations failed on the manifest's default database");
         return -1;
     }
+    /* The manifest may name the implicit file itself: nothing to carry, and
+     * it is not removed. */
+    int same = 0;
+    {
+        const char *fi = hl_sandbox_db_path(implicit);
+        struct stat a, b;
+        same = fi && f && strcmp(fi, ":memory:") != 0 &&
+               stat(fi, &a) == 0 && stat(f, &b) == 0 &&
+               a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+    }
+    if (old.backend) {
+        if (!same) {
+            char lost[512] = {0}, err[512] = {0};
+            int carried = hl_db_carry_new_tables(&old, def, lost, sizeof lost,
+                                                 err, sizeof err);
+            if (carried < 0) {
+                old.backend->close(&old);
+                hl_eprintf_line("[app-context] cannot carry the tables the app's top "
+                                "level made into the manifest's default database: %s",
+                                err);
+                return -1;
+            }
+            if (lost[0])
+                log_warn("[hull:c] the app's top level made table(s) %s in the "
+                         "implicit default database before the manifest's default "
+                         "was known, and they cannot be carried into it (a view, a "
+                         "virtual table, or a default that is not SQLite): they are "
+                         "lost. Create them in app.main or a handler, or in a "
+                         "migration.", lost);
+        }
+        old.backend->close(&old);
+    }
+    if (ctx->implicit_db_absent && !same) remove_implicit_db(implicit);
     if (hl_db_internal_configure_ex(ctx->db_registry, ctx->app_dir_copy,
                                     ctx->state_dir[0] ? ctx->state_dir : NULL,
                                     dsn, ctx->opt_keep_internal) != 0) {
         hl_eprintf_line("[app-context] cannot work out the internal database path");
         return -1;
     }
+    carry_replaced_internal(ctx);
     size_t n = strlen(dsn);
     if (n >= sizeof ctx->default_db_dsn) return -1;
     memcpy(ctx->default_db_dsn, dsn, n + 1);
+    /* worker.dispatch's `db` and db.async on the default follow it (audit
+     * 44): serve.c runs this step after the context's init, where the
+     * worker DSN was set to the implicit default this re-point removed. No
+     * worker thread runs yet - the pool is held until the phase-2 sandbox. */
+    if (ctx->opt_worker_db) hl_worker_db_init(ctx->default_db_dsn);
     return 0;
 }
 #endif
@@ -304,6 +417,15 @@ int hl_app_context_manifest_db(HlAppContext *ctx, const HlManifest *m,
     const char *d = hl_db_registry_manifest_default_dsn(ctx->db_registry, dbuf,
                                                         sizeof dbuf, &derr);
     hl_db_registry_set_manifest(ctx->db_registry, NULL);
+    if (ctx->opt_peek) {
+        /* Look only: nothing is opened, so nothing is created (audit 44).
+         * A default that cannot be resolved (a state directory not made
+         * yet) is no default. */
+        size_t n = d ? strlen(d) : 0;
+        if (d && n < sizeof ctx->default_db_dsn)
+            memcpy(ctx->default_db_dsn, d, n + 1);
+        return 0;
+    }
     if (!d && derr) {
         hl_eprintf_line("[app-context] databases.named.default: %s", derr);
         return -1;
@@ -389,10 +511,12 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             ctx->implicit_db_absent = f && strcmp(f, ":memory:") != 0 &&
                                       lstat(f, &st) != 0 && errno == ENOENT;
         }
+        ctx->opt_worker_db = opts->worker_db_path != NULL;
         ctx->opt_no_migrate          = opts->no_migrate;
         ctx->opt_keep_internal       = opts->keep_internal_in_app_db;
         ctx->opt_db_path_explicit    = opts->db_path_explicit;
         ctx->opt_manifest_default_db = opts->manifest_default_db;
+        ctx->opt_peek                = opts->manifest_default_db && opts->manifest_default_db_peek;
         ctx->opt_no_db               = opts->no_db;
         if (db_path && strlen(db_path) < sizeof ctx->implicit_db_dsn)
             memcpy(ctx->implicit_db_dsn, db_path, strlen(db_path) + 1);
@@ -429,6 +553,15 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                 ctx->db_registry = NULL;
                 hl_app_context_free(ctx);
                 return -1;
+            }
+            /* What of the implicit default's internal file is there before
+             * the app's top level runs, for a re-point (audit 44). */
+            const char *ip = !opts->db_path_explicit
+                ? hl_db_registry_default_internal_path(ctx->db_registry) : NULL;
+            if (ip && ip[0] == '/' && strlen(ip) < sizeof ctx->implicit_internal) {
+                struct stat st;
+                memcpy(ctx->implicit_internal, ip, strlen(ip) + 1);
+                ctx->implicit_internal_absent = lstat(ip, &st) != 0 && errno == ENOENT;
             }
         }
     }
@@ -552,15 +685,21 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
                     return -1;
                 }
                 if (m.state_name) {
-                    if (hl_state_dir_resolve(m.state_name, ctx->state_dir,
-                                             sizeof ctx->state_dir) != 0) {
+                    /* A read-only look makes no state directory (audit 44). */
+                    int sr = (opts->manifest_default_db && opts->manifest_default_db_peek)
+                             ? (hl_state_dir_peek(m.state_name, ctx->state_dir,
+                                                  sizeof ctx->state_dir) < 0 ? -1 : 0)
+                             : hl_state_dir_resolve(m.state_name, ctx->state_dir,
+                                                    sizeof ctx->state_dir);
+                    if (sr != 0) {
                         hl_eprintf_line("[app-context] the state directory for "
                                         "state.name %s is not usable", m.state_name);
                         hl_manifest_free(&m);
                         hl_app_context_free(ctx);
                         return -1;
                     }
-                    (void)hl_fs_reserve_root_path(ctx->state_dir);
+                    if (ctx->state_dir[0])
+                        (void)hl_fs_reserve_root_path(ctx->state_dir);
                 }
                 /* Wire the fs capability from the manifest, mirroring the serve
                  * path (serve.c::hl_serve_wire_caps). Without this rt->fs_cfg

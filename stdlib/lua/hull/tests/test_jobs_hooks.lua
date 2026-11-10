@@ -121,7 +121,8 @@ function cases.events()
         assert_eq(#jobs.events({ limit = 100 }), before, "retained")
         hooks.events_drain("lag", { now = 1000 })
         jobs.cleanup({ before = future })
-        assert_eq(#jobs.events({ limit = 100 }), 0, "purged")
+        -- All but the newest event, kept as the high-water mark (audit 44).
+        assert_eq(#jobs.events({ limit = 100 }), 1, "purged")
     end)
 end
 

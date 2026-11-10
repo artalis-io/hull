@@ -496,7 +496,7 @@ class Transport {
         for (let i = 0; i < 32; i++) {
             vS = await this.readLine();
             if (vS.startsWith("SSH-")) break;
-            if (opts.onBanner) await opts.onBanner(wire.safeText(vS));
+            if (opts.onBanner) await banner(opts.onBanner, wire.safeText(vS));
             vS = null;
         }
         if (vS === null) return [null, { code: "no_identification" }];
@@ -786,6 +786,17 @@ async function preferKnownKey(opts) {
 
 // Offer one key, under each signature algorithm it has.
 // -> [true] | [null, failure, nextKey]
+// The caller's onBanner, with its own error carried up as { appError } (as
+// onStdout's), so hull:ssh rethrows it unchanged rather than reporting the
+// connection's io_error (audit 44).
+async function banner(cb, text) {
+    try {
+        await cb(text);
+    } catch (e) {
+        throw { appError: e };
+    }
+}
+
 async function offerKey(self, user, key, onBanner) {
     const algorithms = key.algorithm === "ssh-rsa" ? ["rsa-sha2-512", "rsa-sha2-256"]
         : [key.algorithm || userauth.ALGORITHM];
@@ -807,7 +818,7 @@ async function offerKey(self, user, key, onBanner) {
         for (let k = 0; k < 16; k++) {
             const r = userauth.parseResponse(await self.nextMessage());
             if (r.type === "banner") {
-                if (onBanner) await onBanner(r.message);
+                if (onBanner) await banner(onBanner, r.message);
             } else if (r.type === "success") {
                 return [true];
             } else if (r.type === "failure") {

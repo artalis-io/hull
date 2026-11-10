@@ -146,5 +146,9 @@ int hl_wasm_span_set_attach(HlWasmSpanSet *set, void *inst, const char **err);
  */
 int hl_wasm_span_set_teardown(HlWasmSpanSet *set);
 
+/* Test seam: the next @p n span heap destroys fail (as a heap still attached
+ * elsewhere fails), so a test can drive the retain path through a real call. */
+void hl_wasm_span_test_fail_destroys(int n);
+
 #endif /* HL_ENABLE_WASM */
 #endif /* HL_CAP_WASM_SPANS_H */

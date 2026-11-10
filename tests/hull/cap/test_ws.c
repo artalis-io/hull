@@ -193,10 +193,10 @@ UTEST(ws_registry, find_never_returns_a_closed_node)
     int fake = 0;
     KlWsServerConn *ws = (KlWsServerConn *)&fake;
 
-    /* on_close ran (closed set, as the runtimes did before the fix): */
+    /* on_close ran (the runtimes mark the node as it starts): */
     HlWsConn *stale = hl_ws_registry_add(&test_reg, "/ws", ws);
     ASSERT_TRUE(stale != NULL);
-    stale->closed = 1;
+    hl_ws_registry_mark_closed(stale);
     EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", ws) == NULL);
 
     /* The address reused by a new connection: the new node, in either list
@@ -206,7 +206,7 @@ UTEST(ws_registry, find_never_returns_a_closed_node)
     HlWsConn *fresh = hl_ws_registry_add(&test_reg, "/ws", ws);
     stale = hl_ws_registry_add(&test_reg, "/ws", ws);
     ASSERT_TRUE(fresh != NULL && stale != NULL);
-    stale->closed = 1;
+    hl_ws_registry_mark_closed(stale);
     EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", ws) == fresh);
 
     /* mark_closed: closed, and its Keel pointer dropped. */
@@ -222,6 +222,27 @@ UTEST(ws_registry, find_never_returns_a_closed_node)
 
     hl_ws_registry_remove(&test_reg, fresh);
     hl_ws_registry_remove(&test_reg, stale);
+    teardown_reg();
+}
+
+/* Audit 44 M5: a node the APP closed (conn:close() sets `closed`, Keel still
+ * holds the connection) is still found, so Keel's on_close for it runs the
+ * app's on_close and removes the node; skipped, it leaked with its conn object
+ * and the endpoint count. Once on_close marks it, it is gone. */
+UTEST(ws_audit44, app_closed_node_is_found_until_on_close)
+{
+    setup_reg();
+    int fake = 0;
+    KlWsServerConn *ws = (KlWsServerConn *)&fake;
+    HlWsConn *c = hl_ws_registry_add(&test_reg, "/ws", ws);
+    ASSERT_TRUE(c != NULL);
+    c->closed = 1;   /* what conn:close() sets */
+    EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", ws) == c);
+    EXPECT_EQ(0, hl_ws_broadcast_text(&test_reg, "/ws", "x", 1));   /* no send */
+    hl_ws_registry_mark_closed(c);   /* Keel's on_close */
+    EXPECT_TRUE(hl_ws_registry_find(&test_reg, "/ws", ws) == NULL);
+    hl_ws_registry_remove(&test_reg, c);
+    EXPECT_EQ((size_t)0, hl_ws_connections(&test_reg, "/ws"));
     teardown_reg();
 }
 

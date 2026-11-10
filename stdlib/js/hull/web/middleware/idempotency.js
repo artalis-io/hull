@@ -38,11 +38,19 @@ import { _text } from "hull:_text";
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
 
-// An in-flight key expires after this many seconds (or the TTL, if shorter).
-// A handler that threw never completes its row, and with the full TTL every
-// retry got 409 for a day - defeating the point of an idempotent retry. A
-// completed response keeps the full TTL (completedExpiry).
-const INFLIGHT_LEASE = 300;
+// An in-flight key expires after this many seconds. A handler that threw
+// never completes its row, and with the full TTL every retry got 409 for a
+// day - defeating the point of an idempotent retry. A completed response
+// keeps the full TTL (completedExpiry).
+//
+// The lease must outlive any handler that is still running, though (audit
+// 44 M11): a handler parked on one http.fetch can wait up to its 10 min
+// ceiling (HL_HTTP_FETCH_MAX_TIMEOUT_MS), and once the in-flight row expired
+// a client retry deleted it, claimed the key and ran the handler a second
+// time. So it is that ceiling plus a minute - the outbox's CLAIM_LEASE
+// (audit 24) - whatever the key's TTL: a TTL shorter than the lease applies
+// to the completed response, not to the claim. As the Lua twin.
+const INFLIGHT_LEASE = 660;
 
 function completedExpiry(req) {
     return time.now() + (req.ctx._idem_ttl !== undefined ? req.ctx._idem_ttl : idemTtl);
@@ -203,8 +211,8 @@ function init(opts) {
         "  response_body  " + bodyType + "," +
         "  response_headers " + bodyType + "," +
         "  state          VARCHAR(16) NOT NULL DEFAULT 'inflight'," +
-        "  created_at     INTEGER NOT NULL," +
-        "  expires_at     INTEGER NOT NULL," +
+        "  created_at     BIGINT NOT NULL," +
+        "  expires_at     BIGINT NOT NULL," +
         "  PRIMARY KEY (principal_id, " + k + ")" +
         ")"
     );
@@ -577,7 +585,7 @@ function middleware(opts) {
             [K, "principal_id", "fingerprint", "endpoint",
              "state", "created_at", "expires_at"],
             [key, principalId, fingerprint, endpoint,
-             "inflight", now, now + Math.min(ttl, INFLIGHT_LEASE)]
+             "inflight", now, now + INFLIGHT_LEASE]
         );
         if (inserted === 0) {
             res.status(409);
@@ -616,8 +624,18 @@ function middleware(opts) {
 // Shared cache-write path. `bodyStr` is the literal response bytes;
 // `contentType` is folded into the cached headers blob so the replay
 // path serves the response with the correct mime.
-function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, sendFn) {
-    if (req.ctx && req.ctx._idem_key) {
+//
+// `makeBody` returns the body string; it runs INSIDE the store's guard (audit
+// 44): respond's json.encode used to run before it, as an argument, so an
+// encode error left the row in flight (a retry after the lease ran the
+// handler again), and the JSON sent was a second encode of the data, not the
+// string stored. Now an encode error marks the row unstored and is thrown,
+// and the stored string is the one sent.
+function cacheAndSend(req, res, statusCode, makeBody, contentType, extraHeaders, sendFn) {
+    let bodyStr;
+    if (!(req.ctx && req.ctx._idem_key)) {
+        bodyStr = makeBody();
+    } else {
         // Phase 6 audit M-3: filter headers through the allowlist
         // before writing to SQLite so credential headers never
         // persist on disk for the TTL.
@@ -646,7 +664,10 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
         const where = " WHERE principal_id = ? AND " + keyCol() + " = ?" + CLAIM_GUARD;
         const claim = [req.ctx._idem_principal, req.ctx._idem_key,
                        req.ctx._idem_fingerprint, req.ctx._idem_created];
+        let made = false, makeErr = null, makeFailed = false;
         try {
+            bodyStr = makeBody();
+            made = true;
             if (failStoreForTest) throw new Error("injected store failure");
             // Size-checked first, then encoded natively (audit 40).
             const bodyEnc = storedText(typeof bodyStr === "string" ? bodyStr : String(bodyStr ?? ""),
@@ -673,7 +694,11 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
                     + _text.storable(e2 && e2.message !== undefined ? e2.message : e2, 512, true)
                     + "); a retry after the " + INFLIGHT_LEASE + " s lease runs the handler again");
             }
+            // The body could not be made: nothing to send, the error is the
+            // caller's (the key is now processed, never re-runnable).
+            if (!made) { makeFailed = true; makeErr = e; }
         }
+        if (makeFailed) throw makeErr;
     }
 
     res.status(statusCode);
@@ -693,9 +718,20 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
 
 function respond(req, res, statusCode, data, extraHeaders) {
     cacheAndSend(req, res, statusCode,
-        json.encode(data), "application/json",
+        () => json.encode(data), "application/json",
         extraHeaders,
-        (r, _) => r.json(data));
+        (r, body) => {
+            // The stored string itself, as the replay sends it. A caller's
+            // own Content-Type (extraHeaders, set above) wins.
+            let hasCt = false;
+            if (extraHeaders) {
+                const keys = Object.keys(extraHeaders);
+                for (let i = 0; i < keys.length; i++)
+                    if (keys[i].toLowerCase() === "content-type") hasCt = true;
+            }
+            if (!hasCt) r.header("Content-Type", "application/json");
+            r.text(body);
+        });
 }
 
 /**
@@ -714,7 +750,7 @@ function respond(req, res, statusCode, data, extraHeaders) {
  */
 function respondHtml(req, res, statusCode, html, extraHeaders) {
     cacheAndSend(req, res, statusCode,
-        html, "text/html; charset=utf-8",
+        () => html, "text/html; charset=utf-8",
         extraHeaders,
         (r, body) => r.html(body));
 }
@@ -759,7 +795,8 @@ export { idempotency };
 // inside the module, where the _hull_* namespace check admits the query.
 _test_hooks.register("hull:web:middleware:idempotency", {
     rows(key) {
-        return db.query("SELECT state, status, response_body, response_headers " +
+        return db.query("SELECT state, status, response_body, response_headers, " +
+                        "created_at, expires_at " +
                         "FROM _hull_idempotency_keys WHERE " + keyCol() + " = ?", [key]);
     },
     // The principal helpers (audit 23: they were exported on the module).
@@ -769,6 +806,7 @@ _test_hooks.register("hull:web:middleware:idempotency", {
     // Make the response store fail (audit 39: a failed store must leave the
     // key processed, never re-runnable).
     failStore(on) { failStoreForTest = !!on; },
+    inflightLease: INFLIGHT_LEASE,
     // A completed row in the format an earlier Hull wrote (raw body, bare
     // JSON headers), for the backward-compatibility check.
     putLegacy(key, principal, fingerprint, status, body, headersJson) {

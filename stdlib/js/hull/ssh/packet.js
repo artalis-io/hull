@@ -123,6 +123,10 @@ function parse(buf, block) {
     if (payloadLen < 0) {
         throw new Error("ssh.packet: padding exceeds the packet");
     }
+    if (payloadLen < 1) {
+        // Every message carries its type byte (audit 44).
+        throw new Error("ssh.packet: the packet has no payload");
+    }
     return [buf.slice(5, 5 + payloadLen), packetLength + 4];
 }
 

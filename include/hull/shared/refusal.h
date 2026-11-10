@@ -13,8 +13,9 @@
  *                    or a misplaced call in the caller, not a remote answer.
  *   HL_REFUSAL_BUSY  "busy"          an admission cap of this VM is full (the
  *                    in-flight fetch cap, the off-heap copy total, the live
- *                    WebSocket / blob handle caps) - transient and local:
- *                    nothing was sent, a later call may be admitted.
+ *                    WebSocket / blob handle caps, the live kv.open
+ *                    connection cap) - transient and local: nothing was
+ *                    sent, a later call may be admitted.
  *
  * JS: the thrown Error gets an own `code` property (hl_js_refusal_tag,
  * runtime/js/refusal.h). Lua: the error string starts with

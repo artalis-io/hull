@@ -432,6 +432,15 @@ int hl_lua_wire_routes_server(HlLua *lua, KlHttpServer *server,
 void hl_lua_request_done(HlLua *lua, const KlHttpRequest *req);
 
 /*
+ * Teardown backstop (hl_lua_free, before the WebSocket registry goes and
+ * before lua_close): invalidate the conn userdata of every connection still
+ * in the registry, so a __gc finalizer lua_close runs reads the conn as
+ * closed instead of reaching a freed node (audit 44). The twin of
+ * hl_js_ws_conns_release. Never raises.
+ */
+void hl_lua_ws_conns_release(HlLua *lua);
+
+/*
  * Dispatch a middleware call to the Lua handler.
  * Returns 0 (continue), positive (short-circuit), or -1 (error).
  */

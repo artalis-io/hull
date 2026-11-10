@@ -301,6 +301,30 @@ function rbac.has_any_permission(user_id, perms_list)
     return false
 end
 
+-- The role / permission argument of require_role / require_permission: a
+-- name, or a non-empty list of names. Checked when the middleware is made
+-- (audit 44): require_role(nil) made a middleware that raised on every
+-- request.
+local function middleware_names(v, who, what)
+    if type(v) == "string" then
+        if not valid_name(v) then
+            error("rbac." .. who .. ": " .. what .. " must be a non-empty name", 3)
+        end
+        return { v }
+    end
+    if type(v) ~= "table" or #v == 0 then
+        error("rbac." .. who .. ": a " .. what .. " name or a non-empty list of them is required", 3)
+    end
+    local out = {}
+    for i = 1, #v do
+        if not valid_name(v[i]) then
+            error("rbac." .. who .. ": " .. what .. " " .. i .. " must be a non-empty name", 3)
+        end
+        out[i] = v[i]
+    end
+    return out
+end
+
 --- Middleware: require the user to hold a role (or any from a list).
 --
 -- - No `user_id` → `401`.
@@ -316,12 +340,7 @@ end
 function rbac.require_role(role_or_roles, opts)
     opts = opts or {}
     local get_user_id = opts.get_user_id
-    local roles_list
-    if type(role_or_roles) == "string" then
-        roles_list = { role_or_roles }
-    else
-        roles_list = role_or_roles
-    end
+    local roles_list = middleware_names(role_or_roles, "require_role", "role")
 
     return function(req, res)
         local user_id
@@ -331,7 +350,9 @@ function rbac.require_role(role_or_roles, opts)
             local session = req.ctx and req.ctx.session
             user_id = session and session.user_id
         end
-        if not user_id then
+        -- A user id rbac cannot key (1.5, a table, true, "") is no user
+        -- (audit 44): has_role raised on it, a 500 instead of a 401.
+        if _request.user_id(user_id) == nil then
             res:status(401):json({ error = "authentication required" })
             return 1
         end
@@ -359,12 +380,7 @@ end
 function rbac.require_permission(perm_or_perms, opts)
     opts = opts or {}
     local get_user_id = opts.get_user_id
-    local perms_list
-    if type(perm_or_perms) == "string" then
-        perms_list = { perm_or_perms }
-    else
-        perms_list = perm_or_perms
-    end
+    local perms_list = middleware_names(perm_or_perms, "require_permission", "permission")
 
     return function(req, res)
         local user_id
@@ -374,7 +390,9 @@ function rbac.require_permission(perm_or_perms, opts)
             local session = req.ctx and req.ctx.session
             user_id = session and session.user_id
         end
-        if not user_id then
+        -- A user id rbac cannot key (1.5, a table, true, "") is no user
+        -- (audit 44): has_role raised on it, a 500 instead of a 401.
+        if _request.user_id(user_id) == nil then
             res:status(401):json({ error = "authentication required" })
             return 1
         end

@@ -269,6 +269,83 @@ await test("the tunnel options are read once: the Host header names the host the
     assertEq((r.written[0] || "").indexOf("other-origin") < 0, true, "the second answer is never used:");
 });
 
+await test("ssh_tunnel_audit44.write_refusal_unchanged", async () => {
+    // The relay's stream refuses every write after the upgrade the way the
+    // runtime refuses a wait inside a transaction. The refusal says nothing
+    // about the connection: it must reach the caller as it was thrown, not as
+    // io_error text.
+    const refusal = new TypeError("hull:ssh: cannot wait inside a transaction");
+    refusal.code = "wait_refused";
+    const ident = String.fromCharCode(0x80 | ws.OP_BIN, 14) + "SSH-2.0-Fake\r\n";
+    const r = relay(upgraded(ident));
+    let writes = 0;
+    r.write = async function (s) {
+        writes++;
+        if (writes > 1) throw refusal;
+        this.written.push(s);
+        return [true];
+    };
+    const [e] = await connectVia(r, { host: "ssh.example.com" });
+    assertEq(e, refusal, "connect rethrows the refusal unchanged:");
+
+    // And the stream itself, under any caller.
+    const r2 = relay(upgraded());
+    const [s] = await ws.connect(r2, { host: "ssh.example.com", random: stubRandom,
+                                       sha1: stubSha1 });
+    r2.write = async () => { throw refusal; };
+    const e2 = await rejects(s.write("abc"), "write");
+    assertEq(e2, refusal, "write rethrows it unchanged:");
+});
+
+await test("ssh_audit44.banner_callback_error_reraised", async () => {
+    // The caller's own onBanner throwing is the caller's bug, not the
+    // connection's: it comes back as thrown, like onStdout's, and the stream
+    // is closed.
+    const r = relay("a banner line\r\nSSH-2.0-Fake\r\n");
+    const e = await rejects(ssh.connect({
+        host: "spark-7468", user: "operator", key: {}, crypto: cryptoStub,
+        openStream: () => r,
+        onBanner: () => { throw "my bug"; },
+    }), "connect");
+    assertEq(e, "my bug", "the callback's own error:");
+    assertEq(r.closed, true, "the stream is closed:");
+});
+
+await test("ssh_audit44.pending_trust_not_spent_by_bad_args", async () => {
+    // A connect refused for its own arguments dials nothing, so it must not
+    // use up the one connection a pending trust is for.
+    const pt = ssh.pendingTrust();
+    const tryConnect = (o) => {
+        o.host = "spark-7468"; o.user = "operator"; o.key = {};
+        o.crypto = cryptoStub; o.trust = pt;
+        o.openStream = o.openStream || (() => { throw new Error("nothing may be dialled"); });
+        return ssh.connect(o);
+    };
+    for (const o of [{ port: "22" }, { timeoutMs: 1.5 },
+                     { tunnel: { host: "ssh.example.com", port: "443" } },
+                     { tunnel: { host: "ssh.example.com", path: "relay" } },
+                     { software: "Hull\r\nX" }]) {
+        await rejects(tryConnect(o), "a bad argument rejects");
+    }
+    const e2 = await rejects(tryConnect({ openStream: () => relay("") }), "dialled");
+    assertEq(e2.code !== "already_used", true, "the trust is still unused: " + e2.code);
+    const e3 = await rejects(tryConnect({ openStream: () => relay("") }), "again");
+    assertEq(e3.code, "already_used", "and the dialled connect spent it:");
+});
+
+await test("ssh_tunnel_audit44.upgrade_refusal_closes_raw", async () => {
+    // The runtime refuses the upgrade's own write (a wait inside a
+    // transaction): the refusal reaches the caller unchanged, and the relay
+    // stream is closed then, not left open until it is collected.
+    const refusal = new TypeError("hull:ssh: cannot wait inside a transaction");
+    refusal.code = "wait_refused";
+    const r = relay(upgraded());
+    r.write = async () => { throw refusal; };
+    const [e] = await connectVia(r, { host: "ssh.example.com" });
+    assertEq(e, refusal, "unchanged:");
+    assertEq(r.closed, true, "the relay stream is closed:");
+});
+
 await test("the upgrade runs under the connect deadline (#1009 review)", async () => {
     const r = relay(upgraded());
     const log = [];

@@ -165,6 +165,57 @@ UTEST(hl_cap_blob, init_refuses_a_root_through_a_symlink)
     env_free(&e);
 }
 
+/* Audit 44 (Low): blob.init on an "@state/..." root checked the root for a
+ * symbolic link starting at the APP directory's length (fs_cfg->base_len),
+ * not the state directory's: with an app path longer than the state root's,
+ * no component below the state root was looked at, and a planted
+ * @state/data/blobs -> ../elsewhere put the store outside the grant. */
+UTEST(blob_audit44, state_root_symlink_checked_from_state_base)
+{
+    char root[256], app[512], state[512];
+    ASSERT_EQ(hl_test_path(root, sizeof root, "hull-blob-a44-XXXXXX"), 0);
+    ASSERT_TRUE(mkdtemp(root) != NULL);
+    snprintf(app, sizeof app, "%s/app-with-a-long-directory-name-so-its-length-"
+             "passes-the-whole-state-root-path-and-then-some", root);
+    snprintf(state, sizeof state, "%s/s", root);
+    ASSERT_EQ(mkdir(app, 0700), 0);
+    ASSERT_EQ(mkdir(state, 0700), 0);
+    char data[600], other[600], link[600];
+    snprintf(data, sizeof data, "%s/data", state);
+    snprintf(other, sizeof other, "%s/elsewhere", state);
+    snprintf(link, sizeof link, "%s/data/blobs", state);
+    ASSERT_EQ(mkdir(data, 0700), 0);
+    ASSERT_EQ(mkdir(other, 0700), 0);
+    if (symlink("../elsewhere", link) != 0) {
+        rm_rf(root);
+        UTEST_SKIP("the host cannot make a symbolic link");
+    }
+    HlAllocator alloc;
+    hl_alloc_init(&alloc, 0);
+    HlFsPolicy pol = HL_FS_POLICY_INIT;
+    static const char *const grant[] = { "@state/data/" };
+    const char *perr = NULL;
+    ASSERT_EQ(hl_fs_policy_compile_manifest_ex(app, state, &alloc, NULL, 0,
+                                               grant, 1, &pol, &perr), 0);
+    HlFsConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.base_dir = app;
+    cfg.base_len = strlen(app);
+    cfg.state_dir = state;
+    cfg.state_len = strlen(state);
+    cfg.policy = &pol;
+    HlBlob *b = NULL;
+    EXPECT_EQ(hl_cap_blob_init(&b, &cfg, &alloc, "@state/data/blobs", 1, 0), -1);
+    EXPECT_TRUE(b == NULL);
+    if (b) hl_cap_blob_free(b);
+    char made[700];
+    struct stat st;
+    snprintf(made, sizeof made, "%s/blobs", other);
+    EXPECT_NE(stat(made, &st), 0);      /* nothing made through the link */
+    hl_fs_policy_free(&pol);
+    rm_rf(root);
+}
+
 /* The store writes names of its own choosing under its directory, so it needs
  * an fs.write grant covering that directory as a subtree - what fs.write would
  * need for any file the store writes. Inside the app root was all it took. */

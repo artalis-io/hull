@@ -31,6 +31,7 @@
 #endif
 
 #include <sh_json.h>
+#include "hull/shared/json_term_safe.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -41,7 +42,8 @@
 /* Write the JSON text `json` (valid JSON produced in this file, by C) as one
  * raw value, with the bytes a terminal acts on escaped: DEL and the
  * UTF-8-encoded C1 controls (U+0080..U+009F, CSI among them), which a JSON
- * encoder leaves raw inside a string, and any C0 control. Outside a string
+ * encoder leaves raw inside a string, any C0 control, and a stray 0x80-0x9F
+ * byte (as \ufffd). Outside a string
  * valid JSON holds only ASCII structural bytes and whitespace, so the
  * rewritten text is the same JSON value. Built whole first: the writer puts
  * a comma before every raw write that follows a value. */
@@ -50,34 +52,8 @@ static int eval_write_json_safe(ShJsonWriter *w, const char *json, size_t len)
 {
     ShJsonBuf b;
     sh_json_buf_init(&b);
-    size_t run = 0;
-    int rc = 0;
-    for (size_t i = 0; i < len && rc == 0; i++) {
-        unsigned char c = (unsigned char)json[i];
-        unsigned code;
-        size_t skip = 1;
-        if (c < 0x20 || c == 0x7f) {
-            /* A raw tab / CR / LF can only be whitespace between tokens (the
-             * encoders escape them inside strings); any other C0 or DEL can
-             * only be inside a string, where its \u escape is the same. */
-            if (c == '\t' || c == '\n' || c == '\r') continue;
-            code = c;
-        } else if (c == 0xc2 && i + 1 < len &&
-                   (unsigned char)json[i + 1] >= 0x80 &&
-                   (unsigned char)json[i + 1] <= 0x9f) {
-            code = (unsigned char)json[i + 1];
-            skip = 2;
-        } else {
-            continue;
-        }
-        if (i > run) rc |= sh_json_buf_write(&b, json + run, i - run);
-        char esc[8];
-        snprintf(esc, sizeof esc, "\\u%04x", code);
-        rc |= sh_json_buf_write(&b, esc, 6);
-        run = i + skip;
-        i += skip - 1;
-    }
-    if (rc == 0 && len > run) rc |= sh_json_buf_write(&b, json + run, len - run);
+    /* The shared writer (shared/json_term_safe.h, audit 44). */
+    int rc = hl_json_write_terminal_safe(sh_json_buf_write, &b, json, len);
     if (rc == 0 && b.buf && b.len) rc = sh_json_write_raw(w, b.buf, b.len);
     else                           rc = -1;
     sh_json_buf_free(&b);

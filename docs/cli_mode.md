@@ -140,8 +140,23 @@ end)
 - **A second signal** during the grace ends the process at once, 128 + the
   signal. A second signal BEFORE the first could be delivered (main in a
   synchronous stretch the loop never gets to) kills the process as before.
+- **Main then serve.** In an app that registers `app.main` AND handlers, a
+  signal that arrived while main ran is a stop request: the server is not
+  started. A non-zero return from main is still the exit code; a main that
+  handled the interrupt and returned 0 (or returned before it was delivered)
+  exits 128 + the signal, the status of a process the signal ended. Returning
+  0 means "start serving", which the signal countermands; an `app.main`-only
+  program keeps main's return value as its exit code.
+- **Ignored signals stay ignored.** A SIGINT or SIGTERM the process inherited
+  as ignored (a background job of a shell without job control, a supervisor
+  that ignores SIGINT) is left alone and never reaches main.
+- **Stdin after the interrupt.** Main's own code keeps `ctx.stdin` after the
+  interrupt (in JS, its code after `await ctx.signal.promise`); the
+  `onabort` / `on_interrupt` callback is a run of its own and cannot read it.
 - The main window only: once a full build enters the serve loop, Keel's own
-  handler and drain apply. Covered by `tests/e2e_cli_interrupt.sh`
+  handler and drain apply. A handler installed after main's (the TUI's, still
+  acquired when main returns) is left in place; main's, still in its chain,
+  then only passes signals on to what it replaced. Covered by `tests/e2e_cli_interrupt.sh`
   (`make e2e-cli-interrupt`, both runtimes, both runners).
 
 ### A per-user state directory (`@state/`)
@@ -189,9 +204,20 @@ end)
   default (`:memory:` for a built CLI, `<app_dir>/data.db` under `hull app.lua`,
   whose file is removed again) is replaced once the manifest is read, the
   migrations run on the named one, and its internal database (the stdlib's
-  `_hull_*` tables) is `<state>/.hull/internal.db`. `hull migrate` and `hull
-  agent db` with no `-d` open the same file (they load the app to read the
-  manifest). An operator's `-d` still wins; `hull test` keeps its `:memory:`.
+  `_hull_*` tables) is `<state>/.hull/internal.db`. The replacement is
+  seamless for the app's top level: a `db.default()` object taken there is the
+  new default afterwards, `worker.dispatch`'s `db` follows it, the tables a
+  top-level `jobs.init()` (outbox, inbox, kv, search) made in the implicit
+  default are carried into the new one, and the `_hull_*` tables a top-level
+  `session.init()` / `rbac.init()` made before the manifest was read are
+  carried into `<state>/.hull/internal.db`. (A view or virtual table made at
+  the top level, or any table when the default is not SQLite, cannot be
+  carried: a WARN names it.) `hull
+  migrate` with no `-d` opens the same files (it loads the app to read the
+  manifest) and moves the stdlib's tables where the runner reads them; `hull
+  agent db` reads the default only if it exists - it creates neither the
+  database nor the state directory. An operator's `-d` still wins; `hull
+  test` keeps its `:memory:`.
 - **A built tool that keeps everything under `@state/` is rootless.** When a
   BUILT `app.main` binary's manifest declares `state` and every fs grant and
   every file database (the default included) is under `@state/`, it needs

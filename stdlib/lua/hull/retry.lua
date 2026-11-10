@@ -46,17 +46,29 @@ local function ms_opt(v, name, def)
     return v
 end
 
+-- factor: nil takes the default, anything else must be a finite number >= 1
+-- (audit 44: a negative factor made the delay alternate in sign, 0 or a
+-- fraction shrank it to nothing, NaN made it NaN - hull.sleep then took no
+-- time and the retries ran back to back).
+local function factor_opt(v)
+    if v == nil then return DEFAULTS.factor end
+    if type(v) ~= "number" or v ~= v or v < 1 or v == math.huge then
+        error("retry: factor must be a finite number >= 1", 3)
+    end
+    return v
+end
+
 --- Backoff delay (ms) for a 1-based attempt number: `base * factor^(n-1)`,
 -- clamped to `cap`, with optional full jitter (uniform in `[0, delay]`).
 -- Exposed so schedulers can share one backoff curve.
 -- @tparam integer attempt  1-based attempt number.
--- @tparam[opt] table opts  `base_ms` (100), `factor` (2), `cap_ms` (30000),
---   `jitter` (boolean, default false).
+-- @tparam[opt] table opts  `base_ms` (100), `factor` (2; a finite number
+--   >= 1, else it raises), `cap_ms` (30000), `jitter` (boolean, default false).
 -- @treturn integer  Delay in milliseconds.
 function retry.backoff(attempt, opts)
     opts = opts or {}
     local base = ms_opt(opts.base_ms, "base_ms", DEFAULTS.base_ms)
-    local factor = opts.factor or DEFAULTS.factor
+    local factor = factor_opt(opts.factor)
     local cap = ms_opt(opts.cap_ms, "cap_ms", DEFAULTS.cap_ms)
     local d = base * (factor ^ (attempt - 1))
     if d > cap then d = cap end
@@ -121,6 +133,7 @@ function retry.run(fn, opts)
     max = math.floor(max)
     ms_opt(opts.base_ms, "base_ms", 0)   -- refused up front, before fn runs
     ms_opt(opts.cap_ms, "cap_ms", 0)
+    factor_opt(opts.factor)
     local last = { n = 1, false }
     for attempt = 1, max do
         local r = table.pack(pcall(fn))

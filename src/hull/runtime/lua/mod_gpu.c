@@ -1137,6 +1137,14 @@ static GpuAsyncTmp *gpu_async_tmp_open(lua_State *L)
 /* Async dispatch - submits GPU work to thread pool */
 static int l_gpu_async_dispatch(lua_State *L)
 {
+    /* The name is copied into a fixed HL_GPU_NAME_MAX slot: a longer one was
+     * cut to a prefix that could name ANOTHER compiled shader, and that one
+     * ran (audit 44). Refused first, as hl_cap_gpu_compile refuses it. */
+    size_t name_len = 0;
+    const char *name = luaL_checklstring(L, 1, &name_len);
+    if (name_len >= HL_GPU_NAME_MAX)
+        return luaL_error(L, "gpu.async.dispatch: shader name too long "
+                          "(max %d bytes)", HL_GPU_NAME_MAX - 1);
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");
@@ -1145,7 +1153,6 @@ static int l_gpu_async_dispatch(lua_State *L)
     if (!lua->base.gpu_ctx)
         return luaL_error(L, "gpu.async.dispatch: GPU not initialized");
 
-    const char *name = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
 
     /* Parse opts (same as sync dispatch) */

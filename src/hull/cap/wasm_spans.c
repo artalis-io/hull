@@ -14,6 +14,7 @@
 #include "log.h"
 #include "wasm_export.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -252,6 +253,27 @@ hl_wasm_span_set_attach(HlWasmSpanSet *set, void *inst, const char **err)
     return 0;
 }
 
+/* Test seam (audit 44): the next @p n heap destroys report failure, as one
+ * still attached elsewhere does, without calling WAMR. 0 in production. */
+static atomic_int g_fail_destroys;
+
+void
+hl_wasm_span_test_fail_destroys(int n)
+{
+    atomic_store(&g_fail_destroys, n < 0 ? 0 : n);
+}
+
+static int
+span_heap_destroy(void *heap)
+{
+    int n = atomic_load(&g_fail_destroys);
+    while (n > 0) {
+        if (atomic_compare_exchange_weak(&g_fail_destroys, &n, n - 1))
+            return 0;
+    }
+    return wasm_runtime_destroy_shared_heap((wasm_shared_heap_t)heap) ? 1 : 0;
+}
+
 int
 hl_wasm_span_set_teardown(HlWasmSpanSet *set)
 {
@@ -298,8 +320,7 @@ hl_wasm_span_set_teardown(HlWasmSpanSet *set)
     for (int i = set->count - 1; i >= 0; i--) {
         if (!set->spans[i].shared_heap)
             continue; /* already destroyed on a prior pass; do not touch */
-        if (wasm_runtime_destroy_shared_heap(
-                (wasm_shared_heap_t)set->spans[i].shared_heap)) {
+        if (span_heap_destroy(set->spans[i].shared_heap)) {
             set->spans[i].shared_heap = NULL;
             if (set->spans[i].buf) {
                 hl_cap_fs_mmap_release(set->spans[i].buf);

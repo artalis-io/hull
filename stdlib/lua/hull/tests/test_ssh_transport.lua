@@ -1349,6 +1349,46 @@ local function sftp_over(rest, chunk, window)
     return assert(t:sftp()), s
 end
 
+test("ssh_sftp_audit44.lua_send_cut_short_marks_broken", function()
+    -- A 20-byte window: INIT takes 9, so the STAT frame goes out in part and
+    -- the wait for more window then meets the end of the stream.
+    local f, s = sftp_over("", 11, 20)
+    assert_raises(function()
+        local a, e = f:stat("/a/rather/long/path/name")
+        if not a then error(e, 0) end
+    end, "the stat")
+    local before = #s.written
+    local ok, err = pcall(f.stat, f, "/x")
+    assert_eq(ok, false, "a later request raises:")
+    local msg = type(err) == "table" and tostring(err.detail) or tostring(err)
+    assert_eq(msg:find("cut short", 1, true) ~= nil, true, "says why: " .. msg)
+    assert_eq(type(err) == "table" and err.code, "io_error", "coded io_error:")
+    assert_eq(#s.written, before, "and sends nothing:")
+end)
+
+test("ssh_audit44.exec_max_output_validated", function()
+    -- A limit that is not a non-negative integer (NaN, infinity, a float, a
+    -- string) bounds nothing: refused before anything is sent, in exec and in
+    -- the whole-file read.
+    local nan = 0 / 0
+    for _, bad in ipairs({ nan, math.huge, -math.huge, -1, 1.5, "16" }) do
+        local s = fake_stream("", 64)
+        local t = transport.new(s, stub_crypto())
+        local r, err = t:exec("cmd", { max_output = bad })
+        assert_eq(r, nil)
+        assert_eq(err and err.code, "bad_argument", "max_output " .. tostring(bad))
+        assert_eq(#s.written, 0, "nothing sent for " .. tostring(bad))
+    end
+    for _, bad in ipairs({ nan, math.huge, -1, 1.5, "16", math.maxinteger }) do
+        local f, s = sftp_over("", 11)
+        local before = #s.written
+        local r, err = f:read("/etc/motd", bad)
+        assert_eq(r, nil)
+        assert_eq(err and err.code, "bad_argument", "read max " .. tostring(bad))
+        assert_eq(#s.written, before, "nothing sent for " .. tostring(bad))
+    end
+end)
+
 test("stat returns the attributes the server sent", function()
     local f = sftp_over(s_attrs(1, { size = 1234, permissions = 0x41ed,
                                      uid = 1, gid = 2, atime = 5, mtime = 6 }))

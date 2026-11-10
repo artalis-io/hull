@@ -1203,6 +1203,28 @@ await test("a request cut short mid-frame leaves the session broken (#1009 audit
     assertEq(s.written.length, before, "and sends nothing:");
 });
 
+await test("ssh_audit44.exec_max_output_validated", async () => {
+    // A limit that is not a non-negative integer (NaN, infinity, a float, a
+    // string) bounds nothing: refused before anything is sent, in exec and in
+    // the whole-file read.
+    for (const bad of [NaN, Infinity, -Infinity, -1, 1.5, "16"]) {
+        const s = fakeStream("", 64);
+        const t = transport.new(s, stubCrypto());
+        const [r, err] = await t.exec("cmd", { maxOutput: bad });
+        assertEq(r, null);
+        assertEq(err && err.code, "bad_argument", "maxOutput " + String(bad));
+        assertEq(s.written.length, 0, "nothing sent for " + String(bad));
+    }
+    for (const bad of [NaN, Infinity, -1, 1.5, "16", 2 ** 60]) {
+        const [f, s] = await sftpOver("", 11);
+        const before = s.written.length;
+        const [r, err] = await f.read("/etc/motd", bad);
+        assertEq(r, null);
+        assertEq(err && err.code, "bad_argument", "read max " + String(bad));
+        assertEq(s.written.length, before, "nothing sent for " + String(bad));
+    }
+});
+
 await test("stat returns the attributes the server sent", async () => {
     const [f] = await sftpOver(sAttrs(1, { size: 1234, permissions: 0x41ed,
                                            uid: 1, gid: 2, atime: 5, mtime: 6 }));

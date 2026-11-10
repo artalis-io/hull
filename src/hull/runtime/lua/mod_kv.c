@@ -21,6 +21,7 @@
 #include "hull/cap/kv.h"
 #include "protected.h"         /* hl_lua_pushlstring_safe */
 #include "internal.h"          /* hl_lua_budget_charge */
+#include "refusal.h"           /* hl_lua_refuse */
 #include "hull/shared/work_charge.h"   /* hl_work_kv_command_units */
 
 #include <string.h>
@@ -308,6 +309,11 @@ static int l_kv_open(lua_State *L)
         rc = hl_cap_kv_open(&o->c, dsn, timeout_ms, lua ? lua->base.alloc : NULL,
                             err, sizeof err);
     }
+    /* Still at the cap: an admission cap of this VM, coded "busy" (audit 44)
+     * like the blob handle cap - it was a plain error, so the stdlib read it
+     * as a backend failure and a retry loop spent attempts on it. */
+    if (rc == HL_KV_ERR_TOO_MANY)
+        return hl_lua_refuse(L, HL_LUA_REFUSAL_BUSY "%s", err);
     if (rc != 0)
         return luaL_error(L, "%s", err);
     return 1;

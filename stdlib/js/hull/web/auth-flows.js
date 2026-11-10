@@ -31,6 +31,7 @@ const db = dbInternal.connection();
 const usersDb = dbInternal.appConnection();
 import { time }     from "hull:time";
 import { json }     from "hull:json";
+import { app as hullApp } from "hull:app";
 
 const _state = {
     stateSecret:      null,
@@ -119,31 +120,33 @@ const _state = {
     emailChangeReauth:   null,
     loginRedirect:       "/",
     initialized:         false,
+    cleanupCatchupDone:  false,
+    cleanupScheduled:    false,
 };
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS _hull_auth_used_tokens (
     token_hash  VARCHAR(255) PRIMARY KEY,
-    used_at     INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
+    used_at     BIGINT NOT NULL,
+    expires_at  BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
     user_id      VARCHAR(255) PRIMARY KEY,
     new_email    TEXT NOT NULL,
     token_hash   TEXT NOT NULL,
-    created_at   INTEGER NOT NULL,
-    expires_at   INTEGER NOT NULL,
+    created_at   BIGINT NOT NULL,
+    expires_at   BIGINT NOT NULL,
     old_email    TEXT,
-    confirmed_at INTEGER,
+    confirmed_at BIGINT,
     old_verified INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
     user_id        VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
-    last_failed_at INTEGER,
-    locked_until   INTEGER
+    last_failed_at BIGINT,
+    locked_until   BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS _hull_auth_used_tokens_exp
@@ -493,6 +496,9 @@ function sendEmail(to, templateName, ctx, required) {
     return undefined;
 }
 
+// Called opportunistically on the confirm / consume paths, and daily from
+// init (cleanup(); audit 44: /login, which writes a lockout row for every
+// failed attempt - one per unknown address - never ran it).
 function gcExpired() {
     const now = time.now();
     db.exec("DELETE FROM _hull_auth_used_tokens WHERE expires_at < ?", [now]);
@@ -1065,9 +1071,14 @@ function originFor(req) {
     // listened on that port of the trusted host; an entry "host:port" pins one.
     const hp = requestHost(headers);
     if (hp && _state.trustedHosts) {
+        // Compared without case, as originTrusted compares them (audit 44):
+        // "Host: App.Example.com" passed the cross-site check and then built
+        // no link, so its mails were dropped. The link is the ENTRY's text.
+        const host = hp[0].toLowerCase();
         for (let i = 0; i < _state.trustedHosts.length; i++) {
             const allowed = _state.trustedHosts[i];
-            if (hp[0] === allowed || (hp[1] !== null && allowed === hp[0] + ":" + hp[1])) {
+            const a = allowed.toLowerCase();
+            if (host === a || (hp[1] !== null && a === host + ":" + hp[1])) {
                 return requestProto(headers, "https") + "://" + allowed;
             }
         }
@@ -2273,7 +2284,7 @@ function registerRoutes(app) {
  *   CREATE TABLE users (
  *       id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
  *       password_hash TEXT, email_verified INTEGER NOT NULL DEFAULT 0,
- *       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+ *       created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
  *   )
  */
 function standardUsers(opts) {
@@ -2368,6 +2379,10 @@ function init(opts) {
     }
     if (typeof opts.emailSend !== "function") {
         throw new Error("auth-flows.init: emailSend(to, subject, html, text) required");
+    }
+    if (opts.cleanupAt !== undefined && opts.cleanupAt !== null
+        && typeof opts.cleanupAt !== "string") {
+        throw new Error("auth-flows.init: cleanupAt must be a \"HH:MM\" string");
     }
     if (!opts.templates || typeof opts.templates !== "object") {
         throw new Error("auth-flows.init: templates object required");
@@ -2624,7 +2639,7 @@ function init(opts) {
     // column first) is re-checked, as session.js does.
     const cols = db.tableColumns("_hull_auth_pending_email_changes") || [];
     for (const [name, ddl] of [["old_email", "old_email TEXT"],
-                               ["confirmed_at", "confirmed_at INTEGER"],
+                               ["confirmed_at", "confirmed_at BIGINT"],
                                ["old_verified", "old_verified INTEGER"]]) {
         if (cols.includes(name)) continue;
         try {
@@ -2635,6 +2650,35 @@ function init(opts) {
     }
 
     _state.initialized = true;
+
+    // Daily cleanup, as session / totp / audit-log schedule theirs (audit 44;
+    // see the Lua sibling). A catch-up pass at init, then
+    // app.daily(cleanupAt || "03:00"); `cleanup: false` opts out.
+    if (opts.cleanup !== false && !_state.cleanupCatchupDone) {
+        try { gcExpired(); }
+        catch (e) { log.warn("auth-flows: init-time cleanup failed: " + (e && e.message || e)); }
+        _state.cleanupCatchupDone = true;
+    }
+    if (opts.cleanup !== false && !_state.cleanupScheduled) {
+        if (hullApp && typeof hullApp.daily === "function") {
+            hullApp.daily(opts.cleanupAt || "03:00", () => gcExpired());
+            _state.cleanupScheduled = true;
+        } else if (!_state.cleanupWarned) {
+            _state.cleanupWarned = true;
+            log.warn("auth-flows: app.daily not available "
+                + "(CLI flavor or hull/timers not admitted) - expired rows "
+                + "are pruned only at init() and on the confirm paths. Call "
+                + "authFlows.cleanup() from your own cron/worker.");
+        }
+    }
+}
+
+// Prune expired consumed tokens, pending email changes and lockout rows.
+// Scheduled daily by init (unless `cleanup: false`); call it from your own
+// scheduler when app.daily is not available.
+function cleanup() {
+    if (!_state.initialized) throw new Error("auth-flows: call init() before cleanup()");
+    gcExpired();
 }
 
 function routes(app) {
@@ -2720,6 +2764,15 @@ function unlockRecovery(uid) {
 }
 
 const _test = {
+    // Audit 44: a column's declared type (SQLite's table_info), read back by
+    // the suite (the timestamp columns are BIGINT).
+    columnType(tbl, col) {
+        if (typeof tbl !== "string" || !/^_hull_[a-z_]+$/.test(tbl))
+            throw new Error("columnType: not a hull table");
+        const rows = db.query("PRAGMA table_info(" + tbl + ")");
+        for (const r of rows) if (r.name === col) return r.type;
+        return null;
+    },
     originFor,
     state: _state,
     issueToken,
@@ -2741,6 +2794,10 @@ const _test = {
     unknownLoginKey,
     attemptIpKey,
     lockoutRemaining,
+    backdateLoginAttempt(key, secs) {
+        db.exec("UPDATE _hull_auth_login_attempts SET last_failed_at = last_failed_at - ? "
+                + "WHERE user_id = ?", [secs, uidKey(key)]);
+    },
     loginFailedCount(userIdStr) {
         const r = db.query("SELECT failed_count FROM _hull_auth_login_attempts "
                            + "WHERE user_id = ?", [uidKey(userIdStr)]);
@@ -2805,7 +2862,7 @@ const _test = {
 _test_hooks.register("hull:web:auth-flows", _test);
 
 const authFlows = {
-    init, routes, standardUsers,
+    init, routes, standardUsers, cleanup,
     sendVerifyEmail, sendPasswordReset, sendMagicLink, emailReserved,
     unlockRecovery,
 };

@@ -92,6 +92,16 @@ check_contains "call routes has content"  "$OUT" '"content":'
 check_contains "call routes has text"     "$OUT" '"type":"text"'
 check_contains "call routes has runtime"  "$OUT" 'runtime'
 
+# agent_audit44.mcp_db_query_escapes_c1: the MCP result carried the same
+# raw DEL / C1 bytes from a database value.
+OUT=$(mcp_request '{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"hull_db_query","arguments":{"sql":"SELECT char(155) || char(127) AS v","app_dir":"examples/hello"}}}')
+if printf '%s' "$OUT" | LC_ALL=C grep -q "$(printf '[\177\200-\237]')"; then
+    fail "agent_audit44.mcp_db_query_escapes_c1 - raw DEL / C1 byte"
+else
+    pass "agent_audit44.mcp_db_query_escapes_c1"
+fi
+check_contains "agent_audit44.mcp_db_query_escapes_c1 value" "$OUT" '\u009b\u007f'
+
 # ── tools/call: hull_status ─────────────────────────────────────────────
 
 OUT=$(mcp_request '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"hull_status","arguments":{"port":39899}}}')

@@ -261,6 +261,9 @@ semantic layer.
   the middle: use `verify-full`, audit 29). The portable KV subset only; there is NO generic Redis-command escape
   hatch, and cluster / Sentinel / streams / pub-sub / sorted-sets / scripting are
   out of scope and belong in separate future capabilities.
+  At most `HL_KV_OPEN_MAX` (16) connections are live in a process; an open
+  past it (after one collection) is a coded `busy` refusal - Lua `"[hull:busy] "`,
+  JS `e.code === "busy"`, see `hull._refusal` - not a backend error (audit 44).
 - **CacheLib**: evaluated and **declined** - see the design spike
   [docs/archive/design_records/cachelib_spike.md](archive/design_records/cachelib_spike.md). Meta's CacheLib pulls the full
   folly/fbthrift/fizz/wangle stack (~15-20 C++ deps, OpenSSL/boost), is Linux-only

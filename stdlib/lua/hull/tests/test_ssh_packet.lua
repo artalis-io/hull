@@ -111,8 +111,15 @@ end)
 
 -- framing ----------------------------------------------------------------
 
+test("ssh_audit44.empty_payload_refused", function()
+    -- Every SSH message carries at least its type byte: a packet whose
+    -- payload is empty is malformed, refused where it is parsed.
+    local b = packet.frame("", 8, zeros)
+    assert_raises(function() packet.parse(b, 8) end, "an empty payload")
+end)
+
 test("frame and parse round trip", function()
-    for _, payload in ipairs({ "", "x", string.rep("abc", 100) }) do
+    for _, payload in ipairs({ "x", string.rep("abc", 100) }) do
         local b = packet.frame(payload, 8, zeros)
         local got, used = packet.parse(b, 8)
         assert_eq(got, payload)

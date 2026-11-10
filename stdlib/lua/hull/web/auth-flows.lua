@@ -313,6 +313,8 @@ local _state = {
     email_change_reauth   = nil,
     login_redirect        = "/",
     _initialized          = false,
+    _cleanup_catchup_done = false,
+    _cleanup_scheduled    = false,
 }
 
 -- ── Schema ─────────────────────────────────────────────────────────
@@ -320,26 +322,26 @@ local _state = {
 local SCHEMA = [[
 CREATE TABLE IF NOT EXISTS _hull_auth_used_tokens (
     token_hash  VARCHAR(255) PRIMARY KEY,
-    used_at     INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
+    used_at     BIGINT NOT NULL,
+    expires_at  BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
     user_id      VARCHAR(255) PRIMARY KEY,
     new_email    TEXT NOT NULL,
     token_hash   TEXT NOT NULL,
-    created_at   INTEGER NOT NULL,
-    expires_at   INTEGER NOT NULL,
+    created_at   BIGINT NOT NULL,
+    expires_at   BIGINT NOT NULL,
     old_email    TEXT,
-    confirmed_at INTEGER,
+    confirmed_at BIGINT,
     old_verified INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
     user_id        VARCHAR(255) PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
-    last_failed_at INTEGER,
-    locked_until   INTEGER
+    last_failed_at BIGINT,
+    locked_until   BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS _hull_auth_used_tokens_exp
@@ -782,8 +784,13 @@ local function origin_for(req)
     local h = (req and req.headers) or {}
     local host, port = request_host(h)
     if host and _state.trusted_hosts then
+        -- Compared without case, as origin_trusted compares them (audit 44):
+        -- "Host: App.Example.com" passed the cross-site check and then built
+        -- no link, so its mails were dropped. The link is the ENTRY's text.
+        local lhost = host:lower()
         for _, allowed in ipairs(_state.trusted_hosts) do
-            if host == allowed or (port and allowed == host .. ":" .. port) then
+            local a = allowed:lower()
+            if lhost == a or (port and a == lhost .. ":" .. port) then
                 return request_proto(h, "https") .. "://" .. allowed
             end
         end
@@ -962,8 +969,9 @@ end
 
 -- Cheap GC. Called opportunistically from the request path after
 -- a successful confirm so the consumed-token table doesn't grow
--- unboundedly. Apps that want determinism can also schedule
--- gc_expired() via app.daily().
+-- unboundedly, and daily from init (M.cleanup; audit 44: /login, which
+-- writes a lockout row for every failed attempt - one per unknown address
+-- - never ran it).
 local function gc_expired()
     local now = time.now()
     db.exec("DELETE FROM _hull_auth_used_tokens WHERE expires_at < ?", { now })
@@ -2755,8 +2763,8 @@ end
 --       email         TEXT NOT NULL UNIQUE,
 --       password_hash TEXT,
 --       email_verified INTEGER NOT NULL DEFAULT 0,
---       created_at    INTEGER NOT NULL,
---       updated_at    INTEGER NOT NULL
+--       created_at    BIGINT NOT NULL,
+--       updated_at    BIGINT NOT NULL
 --   )
 --
 -- @tparam ?table opts
@@ -2870,6 +2878,9 @@ function M.init(opts)
     end
     if type(opts.templates) ~= "table" then
         error("auth-flows.init: templates table required")
+    end
+    if opts.cleanup_at ~= nil and type(opts.cleanup_at) ~= "string" then
+        error("auth-flows.init: cleanup_at must be a \"HH:MM\" string")
     end
     -- Unverified accounts can sign in, so a pre-registrant (anyone can
     -- register any address) can hold a session when the mailbox holder sets
@@ -3156,7 +3167,7 @@ function M.init(opts)
         cols[n] = true
     end
     for _, c in ipairs({ { "old_email", "old_email TEXT" },
-                         { "confirmed_at", "confirmed_at INTEGER" },
+                         { "confirmed_at", "confirmed_at BIGINT" },
                          { "old_verified", "old_verified INTEGER" } }) do
         if not cols[c[1]] then
             local ok, err = pcall(function()
@@ -3173,6 +3184,40 @@ function M.init(opts)
     end
 
     _state._initialized = true
+
+    -- Daily cleanup, as session / totp / audit-log schedule theirs (audit 44):
+    -- the lockout rows failed logins write (one per unknown address) were
+    -- reaped only by the confirm / consume paths. A catch-up pass at init,
+    -- then app.daily(cleanup_at or "03:00"); `cleanup = false` opts out.
+    if opts.cleanup ~= false and not _state._cleanup_catchup_done then
+        local ok, err = pcall(gc_expired)
+        if not ok then
+            require("hull.log").warn("auth-flows: init-time cleanup failed: " .. tostring(err))
+        end
+        _state._cleanup_catchup_done = true
+    end
+    if opts.cleanup ~= false and not _state._cleanup_scheduled then
+        if type(app) == "table" and type(app.daily) == "function" then
+            app.daily(opts.cleanup_at or "03:00", function() gc_expired() end)
+            _state._cleanup_scheduled = true
+        elseif not _state._cleanup_warned then
+            _state._cleanup_warned = true
+            require("hull.log").warn("auth-flows: app.daily not available "
+                .. "(CLI flavor or hull/timers not admitted) - expired rows "
+                .. "are pruned only at init() and on the confirm paths. Call "
+                .. "auth_flows.cleanup() from your own cron/worker.")
+        end
+    end
+end
+
+--- Prune expired consumed tokens, pending email changes and lockout rows.
+-- Scheduled daily by init (unless `cleanup = false`); call it from your own
+-- scheduler when app.daily is not available.
+function M.cleanup()
+    if not _state._initialized then
+        error("auth-flows: call init() before cleanup()")
+    end
+    gc_expired()
 end
 
 --- Mount all auth-flow routes under `opts.prefix` (default `/auth`).
@@ -3300,6 +3345,17 @@ end
 -- Test-only hooks, registered with the stdlib-internal hull._test_hooks
 -- rather than exported (audit 16): app code could call them.
 require("hull._test_hooks").register("hull.web.auth-flows", {
+    -- Audit 44: a column's declared type (SQLite's table_info), read back
+    -- by the suite (the timestamp columns are BIGINT).
+    column_type = function(tbl, col)
+        if type(tbl) ~= "string" or not tbl:match("^_hull_[a-z_]+$") then
+            error("column_type: not a hull table")
+        end
+        for _, r in ipairs(db.query("PRAGMA table_info(" .. tbl .. ")")) do
+            if r.name == col then return r.type end
+        end
+        return nil
+    end,
     origin_for         = origin_for,
     state              = _state,
     issue_token        = issue_token,
@@ -3321,6 +3377,10 @@ require("hull._test_hooks").register("hull.web.auth-flows", {
     unknown_login_key  = unknown_login_key,
     attempt_ip_key     = attempt_ip_key,
     lockout_remaining  = lockout_remaining,
+    backdate_login_attempt = function(key, secs)
+        db.exec("UPDATE _hull_auth_login_attempts SET last_failed_at = last_failed_at - ? "
+                .. "WHERE user_id = ?", { secs, uid_key(key) })
+    end,
     login_failed_count = function(user_id)
         local r = db.query("SELECT failed_count FROM _hull_auth_login_attempts "
                            .. "WHERE user_id = ?", { uid_key(user_id) })

@@ -142,10 +142,14 @@ HlWsConn *hl_ws_registry_find(HlWsRegistry *reg, const char *path,
     if (!ep)
         return NULL;
 
-    /* A closed node (on_close ran: Keel freed its connection, and the
-     * address may belong to a new one) is never returned - see the header. */
+    /* A node whose on_close ran (Keel freed its connection, and the address
+     * may belong to a new one) has kl_ws NULL and is never returned - see the
+     * header. `closed` alone is not the test: an app's conn:close() sets it
+     * while Keel still holds the connection, and Keel's on_close for it must
+     * still find the node (audit 44: it found none, so the app's on_close
+     * never ran and the node leaked). */
     for (HlWsConn *c = ep->conns; c; c = c->next) {
-        if (!c->closed && c->kl_ws && c->kl_ws == kl_ws)
+        if (c->kl_ws && c->kl_ws == kl_ws)
             return c;
     }
     return NULL;

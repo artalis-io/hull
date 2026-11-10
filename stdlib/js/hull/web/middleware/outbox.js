@@ -106,10 +106,10 @@ function init(opts) {
         "  idempotency_key VARCHAR(255)," +
         "  attempts        INTEGER NOT NULL DEFAULT 0," +
         "  max_attempts    INTEGER NOT NULL DEFAULT 5," +
-        "  next_attempt_at INTEGER NOT NULL," +
+        "  next_attempt_at BIGINT NOT NULL," +
         "  state           VARCHAR(32) NOT NULL DEFAULT 'pending'," +
-        "  created_at      INTEGER NOT NULL," +
-        "  delivered_at    INTEGER," +
+        "  created_at      BIGINT NOT NULL," +
+        "  delivered_at    BIGINT," +
         "  last_error      TEXT" +
         ")"
     );
@@ -427,13 +427,19 @@ function stats() {
  * to delete old failed rows too (when, e.g., you've drained them via an
  * out-of-band investigation).
  *
- * @param {number} maxAge - seconds (default 7 days)
+ * @param {number} maxAge - seconds (default 7 days): a finite number >= 0,
+ *   else it throws (audit 44: a string was concatenated onto the cutoff, NaN
+ *   deleted nothing, a negative age deleted rows delivered in the future).
  * @param {Object} [opts] - { alsoFailed?: boolean }
  * @returns {number} deleted count
  */
 function cleanup(maxAge, opts) {
-    if (maxAge === undefined) maxAge = 86400 * 7;
-    const cutoff = time.now() - maxAge;
+    if (maxAge === undefined || maxAge === null) maxAge = 86400 * 7;
+    if (typeof maxAge !== "number" || !Number.isFinite(maxAge) || maxAge < 0)
+        throw new TypeError("outbox.cleanup: maxAge must be a finite number of seconds >= 0");
+    // Whole seconds: the columns are integers (a fractional cutoff went to
+    // Postgres as a double). As the Lua twin.
+    const cutoff = time.now() - Math.ceil(maxAge);
     const alsoFailed = !!(opts && opts.alsoFailed);
     if (alsoFailed) {
         // Failed rows have delivered_at = NULL (only the success

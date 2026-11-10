@@ -20,7 +20,9 @@
 #ifdef HL_ENABLE_DB
 #include "hull/cap/db_budget.h"
 #endif
+#include "hull/cap/run_watchdog.h"
 #include "hull/limits/gpu.h"
+#include "hull/shared/dispatch_meter.h"
 #include "hull/shared/thread_affinity.h"
 #include "hull/shared/work_charge.h"
 #include "log.h"
@@ -130,6 +132,47 @@ static void transient_settle(HlGpuDevice *dev, size_t transient, int rc)
 }
 
 static const char GPU_BUSY_MSG[] = "gpu_busy";
+
+/* Take the device mutex without holding the calling run past its end
+ * (audit 44 M7). A gpu.async dispatch / pipeline holds the mutex on a pool
+ * thread across the backend's wait - up to its timeout, 60 s - so a
+ * synchronous gpu.* call on the event loop that blocked in
+ * pthread_mutex_lock waited for every queued async job in turn, past the
+ * run's deadline, with nothing polled. The wait is now trylock in short
+ * slices (1 ms, doubling to HL_GPU_COMPILE_POLL_MS), excluded from the
+ * binding meter, that ask the run each slice (a 0-unit charge, and its
+ * deadline): 0 once the mutex is held, -1 when the run stopped first - the
+ * caller refuses as busy. A thread with no run (a pool thread, Hull's own
+ * code outside a run) waits as long as it did before. */
+static int gpu_lock_run_stopped(void)
+{
+    if (hl_run_deadline_left_ms() == 0) return 1;
+#ifdef HL_ENABLE_DB
+    return hl_db_budget_charge(0) != 0;
+#else
+    return 0;
+#endif
+}
+
+static int dev_lock(HlGpuDevice *dev)
+{
+    if (pthread_mutex_trylock(&dev->mutex) == 0) return 0;
+    uint64_t mx = hl_meter_exclude_begin();
+    long slice_us = 1000;
+    int rc = -1;
+    for (;;) {
+        if (gpu_lock_run_stopped()) break;
+        struct timespec ts = { 0, slice_us * 1000L };
+        nanosleep(&ts, NULL);
+        if (pthread_mutex_trylock(&dev->mutex) == 0) { rc = 0; break; }
+        if (slice_us < (long)HL_GPU_COMPILE_POLL_MS * 1000L)
+            slice_us *= 2;
+        if (slice_us > (long)HL_GPU_COMPILE_POLL_MS * 1000L)
+            slice_us = (long)HL_GPU_COMPILE_POLL_MS * 1000L;
+    }
+    hl_meter_exclude_end(mx);
+    return rc;
+}
 
 static size_t sat_add(size_t a, size_t b)
 {
@@ -3262,7 +3305,8 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
      * gpu.async workers take that lock. */
     size_t helper_stack = 0;
     if (admit == HL_GPU_ADMIT_HELPER) {
-        pthread_mutex_lock(&dev->mutex);
+        if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+            return HL_GPU_ERR_BUSY;
         int have = find_pipeline(dev, name) != NULL;
         pthread_mutex_unlock(&dev->mutex);
         if (have)
@@ -3306,7 +3350,8 @@ int hl_cap_gpu_compile_ex(HlGpuCtx *ctx, int device, const char *name,
         }
     }
 
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     /* Check if already compiled */
     if (find_pipeline(dev, name)) {
@@ -3416,7 +3461,10 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
     }
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0) {   /* the run stopped first (audit 44) */
+        if (err_msg) *err_msg = GPU_BUSY_MSG;
+        return HL_GPU_ERR_TIMEOUT;
+    }
 
     /* Find compiled pipeline */
     HlGpuPipeline *pipeline = find_pipeline(dev, shader_name);
@@ -3516,7 +3564,10 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts_in,
     }
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0) {   /* the run stopped first (audit 44) */
+        if (err_msg) *err_msg = GPU_BUSY_MSG;
+        return HL_GPU_ERR_TIMEOUT;
+    }
 
     /* Look up all shader pipelines (fail fast) */
     HlGpuPipeline *pipelines[HL_GPU_MAX_PIPELINE_STAGES];
@@ -3618,7 +3669,8 @@ int hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     /* Check if already exists */
     if (find_buffer(dev, name)) {
@@ -3664,7 +3716,8 @@ int hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     HlGpuBuffer *buf = find_buffer(dev, name);
     if (!buf) {
@@ -3715,7 +3768,8 @@ int hl_cap_gpu_buffer_read(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     HlGpuBuffer *buf = find_buffer(dev, name);
     if (!buf) {
@@ -3753,7 +3807,10 @@ void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name)
         return;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0) {   /* the run stopped first (audit 44) */
+        log_warn("[hull:gpu] destroy of '%s' skipped: %s", name, GPU_BUSY_MSG);
+        return;
+    }
 
     for (int i = 0; i < dev->buffer_count; i++) {
         if (strcmp(dev->buffers[i].name, name) == 0) {
@@ -3797,7 +3854,8 @@ int hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     /* Check if already exists */
     if (find_texture(dev, name)) {
@@ -3844,7 +3902,8 @@ int hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     HlGpuTexture *tex = find_texture(dev, name);
     if (!tex) {
@@ -3879,7 +3938,8 @@ int hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     HlGpuTexture *tex = find_texture(dev, name);
     if (!tex) {
@@ -3919,7 +3979,10 @@ void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name)
         return;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0) {   /* the run stopped first (audit 44) */
+        log_warn("[hull:gpu] destroy of '%s' skipped: %s", name, GPU_BUSY_MSG);
+        return;
+    }
 
     for (int i = 0; i < dev->texture_count; i++) {
         if (strcmp(dev->textures[i].name, name) == 0) {
@@ -3953,7 +4016,8 @@ int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
         return HL_GPU_ERR_DEVICE;
 
     HlGpuDevice *dev = &ctx->devices[dev_idx];
-    pthread_mutex_lock(&dev->mutex);
+    if (dev_lock(dev) != 0)   /* the run stopped first (audit 44) */
+        return HL_GPU_ERR_BUSY;
 
     HlGpuBuffer *src = find_buffer(dev, src_name);
     HlGpuBuffer *dst = find_buffer(dev, dst_name);

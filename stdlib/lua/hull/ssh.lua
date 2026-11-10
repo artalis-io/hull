@@ -630,10 +630,48 @@ end
 -- binding. It is a parameter for the same reason `crypto` is one: the layer
 -- above it is a byte transform that a test can drive without a socket, and a
 -- seam that only production uses is a seam nothing checks.
-local function tunnel_opener(tunnel, crypto, dial)
-    if type(tunnel) ~= "table" then
-        error("ssh.connect: tunnel must be a table", 3)
+--
+-- Every option is read ONCE, here, with rawget into a plain snapshot that the
+-- rest uses (audit 44, the twin of ssh.js): a table whose __index answered
+-- differently on a later read handed the checks one relay host and path and
+-- the dial and the upgrade's Host another.
+local function tunnel_snapshot(t)
+    if type(t) ~= "table" then
+        error("ssh.connect: tunnel must be a table", 4)
     end
+    local s = {
+        host               = rawget(t, "host"),
+        tls_hostname       = rawget(t, "tls_hostname"),
+        destination_header = rawget(t, "destination_header"),
+        path               = rawget(t, "path"),
+        port               = rawget(t, "port"),
+        tls                = rawget(t, "tls"),
+    }
+    if s.tls_hostname == "" then s.tls_hostname = nil end
+    if s.tls_hostname ~= nil and type(s.tls_hostname) ~= "string" then
+        error("ssh.connect: tunnel.tls_hostname must be a host name", 4)
+    end
+    if s.port ~= nil and math.type(s.port) ~= "integer" then
+        error("ssh.connect: tunnel.port must be an integer", 4)
+    end
+    local list = rawget(t, "headers")
+    if list ~= nil and type(list) ~= "table" then
+        error("ssh.connect: tunnel.headers must be a list of 'Name: value' strings", 4)
+    end
+    local copy = {}
+    for i = 1, (list and rawlen(list) or 0) do
+        local line = rawget(list, i)
+        if type(line) ~= "string" then
+            error("ssh.connect: tunnel.headers entries must be strings", 4)
+        end
+        copy[i] = line
+    end
+    s.headers = copy
+    return s
+end
+
+local function tunnel_opener(tunnel_in, crypto, dial)
+    local tunnel = tunnel_snapshot(tunnel_in)
     if type(tunnel.host) ~= "string" or tunnel.host == "" then
         error("ssh.connect: tunnel.host is required", 3)
     end
@@ -683,16 +721,27 @@ local function tunnel_opener(tunnel, crypto, dial)
         -- The dial's bound ends at TCP + TLS; the upgrade's reply would wait
         -- with none (a relay that never answers parked the caller for good).
         -- The transport sets its own deadline once the stream is handed over.
-        if math.type(o.timeout_ms) == "integer" and o.timeout_ms > 0 and raw.deadline then
-            raw:deadline(o.timeout_ms)
+        -- Every way out that is not a stream drops the socket, a raise (a
+        -- runtime refusal of the upgrade's write or read) included: it was
+        -- left open until collected (audit 44).
+        local uok, s, werr = pcall(function()
+            if math.type(o.timeout_ms) == "integer" and o.timeout_ms > 0 and raw.deadline then
+                raw:deadline(o.timeout_ms)
+            end
+            return ws.connect(raw, {
+                host    = tunnel.tls_hostname or tunnel.host,
+                path    = tunnel.path,
+                headers = headers,
+                random  = crypto.random,
+                sha1    = crypto.sha1,
+            })
+        end)
+        if not uok then
+            -- Called by name from this chunk: the native stream refuses a
+            -- call made by pcall itself (see transport stream_call).
+            pcall(function() raw:close() end)
+            error(s, 0)
         end
-        local s, werr = ws.connect(raw, {
-            host    = tunnel.tls_hostname or tunnel.host,
-            path    = tunnel.path,
-            headers = headers,
-            random  = crypto.random,
-            sha1    = crypto.sha1,
-        })
         if not s then
             raw:close()     -- the upgrade failed; the socket is ours to drop
             return nil, werr
@@ -767,18 +816,6 @@ function M.connect(opts)
         keys[#keys + 1] = k
     end
     local trust = opts.trust or M.memory_store()
-    -- A pending trust is for ONE connection: the object that holds a key it
-    -- accepted must not vouch for a second server (hull.ssh.hostkey.check).
-    -- Taken at the connect, success or not: the refusal is a value, before
-    -- anything is dialled.
-    if type(trust) == "table" and trust.pending == true then
-        if trust.used then
-            return nil, { code = "already_used",
-                          detail = "a pending trust is for one connection; "
-                                   .. "make another with ssh.pending_trust()" }
-        end
-        trust.used = true
-    end
 
     -- One budget for everything up to an authenticated connection: TCP (and a
     -- relay's TLS), the version exchange, the key exchange and userauth. A
@@ -793,10 +830,8 @@ function M.connect(opts)
     if math.type(timeout) ~= "integer" then
         error("ssh.connect: timeout_ms must be an integer", 2)
     end
-    if type(opts.tunnel) == "table" and opts.tunnel.port ~= nil
-       and math.type(opts.tunnel.port) ~= "integer" then
-        error("ssh.connect: tunnel.port must be an integer", 2)
-    end
+    -- tunnel.port is checked where the tunnel options are read, once
+    -- (tunnel_snapshot).
     if opts.software ~= nil then
         local sok, why = pcall(packet.build_ident, opts.software)
         if not sok then
@@ -817,6 +852,20 @@ function M.connect(opts)
     else
         local _stream = require('hull.ssh._stream')
         open = function(o) return _stream.connect(o) end
+    end
+
+    -- A pending trust is for ONE connection: the object that holds a key it
+    -- accepted must not vouch for a second server (hull.ssh.hostkey.check).
+    -- Taken at the connect, success or not: the refusal is a value, before
+    -- anything is dialled - and only once every argument has been checked, so
+    -- a connect refused for its own arguments does not spend it (audit 44).
+    if type(trust) == "table" and trust.pending == true then
+        if trust.used then
+            return nil, { code = "already_used",
+                          detail = "a pending trust is for one connection; "
+                                   .. "make another with ssh.pending_trust()" }
+        end
+        trust.used = true
     end
 
     local stream, serr, scode, serrno = open({
@@ -847,7 +896,13 @@ function M.connect(opts)
     t:set_deadline(timeout)
 
     local function step(fn, ...)
-        local r1, r2 = guard(fn, ...)
+        local sok, r1, r2 = pcall(guard, fn, ...)
+        if not sok then
+            -- guard raises only the caller's own error or a runtime refusal:
+            -- the connection goes with it (audit 44, as the JS twin).
+            t:close()
+            error(r1, 0)
+        end
         if r1 == nil and r2 and r2.code == "deadline" then
             r2 = { code = "timeout", detail = "not connected and authenticated within "
                                               .. tostring(timeout) .. " ms" }

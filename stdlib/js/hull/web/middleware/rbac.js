@@ -288,6 +288,25 @@ function hasAnyPermission(userId, permList) {
     return false;
 }
 
+// The role / permission argument of requireRole / requirePermission: a name,
+// or a non-empty array of names. Checked when the middleware is made (audit
+// 44): requireRole(null) made a middleware that answered 403 to everyone.
+function middlewareNames(v, who, what) {
+    if (typeof v === "string") {
+        if (!validName(v)) throw new Error("rbac." + who + ": " + what + " must be a non-empty name");
+        return;
+    }
+    if (!Array.isArray(v) || v.length === 0) {
+        throw new Error("rbac." + who + ": a " + what
+            + " name or a non-empty array of them is required");
+    }
+    for (let i = 0; i < v.length; i++) {
+        if (!validName(v[i])) {
+            throw new Error("rbac." + who + ": " + what + " " + i + " must be a non-empty name");
+        }
+    }
+}
+
 /**
  * Middleware: require the user to hold a role (or any from a list).
  *
@@ -305,6 +324,7 @@ function hasAnyPermission(userId, permList) {
  * app.usePost("*", "/admin/*", rbac.requireRole("admin"));
  */
 function requireRole(roleOrRoles, opts) {
+    middlewareNames(roleOrRoles, "requireRole", "role");
     const isList = Array.isArray(roleOrRoles);
     const getUserId = (opts && opts.getUserId) || null;
 
@@ -312,7 +332,9 @@ function requireRole(roleOrRoles, opts) {
         const userId = getUserId
             ? getUserId(req)
             : (req.ctx && req.ctx.session && req.ctx.session.user_id);
-        if (userId === null || userId === undefined || userId === "") {
+        // A user id rbac cannot key (1.5, an object, true, "") is no user
+        // (audit 44): hasRole threw on it, a 500 instead of a 401.
+        if (_request.userId(userId) === null) {
             res.status(401);
             res.json({ error: "authentication required" });
             return 1;
@@ -342,6 +364,7 @@ function requireRole(roleOrRoles, opts) {
  * @returns {(req, res) => number}
  */
 function requirePermission(permOrPerms, opts) {
+    middlewareNames(permOrPerms, "requirePermission", "permission");
     const isList = Array.isArray(permOrPerms);
     const getUserId = (opts && opts.getUserId) || null;
 
@@ -349,7 +372,9 @@ function requirePermission(permOrPerms, opts) {
         const userId = getUserId
             ? getUserId(req)
             : (req.ctx && req.ctx.session && req.ctx.session.user_id);
-        if (userId === null || userId === undefined || userId === "") {
+        // A user id rbac cannot key (1.5, an object, true, "") is no user
+        // (audit 44): hasRole threw on it, a 500 instead of a 401.
+        if (_request.userId(userId) === null) {
             res.status(401);
             res.json({ error: "authentication required" });
             return 1;

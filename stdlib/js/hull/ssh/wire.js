@@ -209,6 +209,29 @@ class Reader {
         return s.slice(i);
     }
 
+    // As mpint, but only the one minimal encoding (RFC 4251 section 5): a
+    // leading zero byte only when the next byte has its top bit set, zero as
+    // the empty string. For a value that identifies something by its bytes
+    // (an RSA host key), where a second encoding would be a second identity
+    // (audit 44).
+    mpintCanonical() {
+        const n = this.uint32();
+        this.need(n);
+        const s = this.raw(n);
+        if (s.length === 0) return "";
+        const b1 = s.charCodeAt(0);
+        if (b1 >= 0x80) {
+            throw new Error("ssh.wire: negative mpint is not supported");
+        }
+        if (b1 === 0) {
+            if (s.length === 1 || s.charCodeAt(1) < 0x80) {
+                throw new Error("ssh.wire: mpint is not minimally encoded");
+            }
+            return s.slice(1);
+        }
+        return s;
+    }
+
     namelist() {
         const s = this.string();
         const out = [];

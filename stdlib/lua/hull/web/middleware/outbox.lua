@@ -123,10 +123,10 @@ function outbox.init(opts)
         .. "idempotency_key VARCHAR(255),"
         .. "attempts        INTEGER NOT NULL DEFAULT 0,"
         .. "max_attempts    INTEGER NOT NULL DEFAULT 5,"
-        .. "next_attempt_at INTEGER NOT NULL,"
+        .. "next_attempt_at BIGINT NOT NULL,"
         .. "state           VARCHAR(32) NOT NULL DEFAULT 'pending',"
-        .. "created_at      INTEGER NOT NULL,"
-        .. "delivered_at    INTEGER,"
+        .. "created_at      BIGINT NOT NULL,"
+        .. "delivered_at    BIGINT,"
         .. "last_error      TEXT)")
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_outbox_pending
@@ -183,8 +183,12 @@ function outbox.enqueue(opts)
     end
     local delay = delay_secs(opts.delay)
 
+    -- An empty key is no key: stored NULL, as the JS twin stores it (audit
+    -- 44: Lua stored "", so the same enqueue left different rows).
+    local idem_key = opts.idempotency_key
+    if idem_key == "" then idem_key = nil end
     local sql = "INSERT INTO _hull_outbox (kind, destination, payload, headers, idempotency_key, max_attempts, next_attempt_at, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)"
-    local vals = { opts.kind, opts.destination, opts.payload, opts.headers, opts.idempotency_key, max, now + delay, now }
+    local vals = { opts.kind, opts.destination, opts.payload, opts.headers, idem_key, max, now + delay, now }
     -- The new id from the INSERT itself where the backend can (SQLite,
     -- Postgres): last_id has no Postgres implementation, so enqueue returned
     -- nothing there. MySQL has no RETURNING; its last_id is per connection.
@@ -437,12 +441,36 @@ end
 
 --- Delete delivered rows older than `max_age` seconds.
 --
+-- By default only `state = 'delivered'` rows go: failed deliveries (past
+-- max_attempts) are kept as an audit trail. `opts.also_failed = true` deletes
+-- failed rows created more than `max_age` seconds ago too (the JS twin's
+-- `alsoFailed`; audit 44: the Lua sibling had no such option).
+--
 -- @function outbox.cleanup
--- @tparam[opt=604800] number max_age  Age in seconds (default = 7 days).
+-- @tparam[opt=604800] number max_age  Age in seconds (default = 7 days): a
+--   finite number >= 0, else it raises (audit 44: a string raised a bare
+--   arithmetic error here and was concatenated in JS; NaN deleted nothing,
+--   a negative age deleted rows delivered in the future).
+-- @tparam[opt] table opts  `{ also_failed = boolean }`
 -- @treturn number  Count of deleted rows.
-function outbox.cleanup(max_age)
-    max_age = max_age or 86400 * 7  -- default 7 days
-    local cutoff = time.now() - max_age
+function outbox.cleanup(max_age, opts)
+    if max_age == nil then max_age = 86400 * 7 end  -- default 7 days
+    if type(max_age) ~= "number" or max_age ~= max_age or max_age < 0
+       or max_age == math.huge then
+        error("outbox.cleanup: max_age must be a finite number of seconds >= 0", 2)
+    end
+    -- Whole seconds: the columns are integers (a fractional cutoff went to
+    -- Postgres as a double).
+    local cutoff = time.now() - math.ceil(max_age)
+    if type(opts) == "table" and opts.also_failed then
+        -- Failed rows have delivered_at = NULL: gated on created_at.
+        return db.exec(
+            "DELETE FROM _hull_outbox WHERE "
+            .. "(state = 'delivered' AND delivered_at <= ?) "
+            .. "OR (state = 'failed' AND created_at <= ?)",
+            { cutoff, cutoff }
+        )
+    end
     return db.exec(
         "DELETE FROM _hull_outbox WHERE state = 'delivered' AND delivered_at <= ?",
         { cutoff }

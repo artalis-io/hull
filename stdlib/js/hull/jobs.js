@@ -289,13 +289,13 @@ function init(opts) {
         "priority     INTEGER      NOT NULL DEFAULT 0," +
         "attempts     INTEGER      NOT NULL DEFAULT 0," +
         "max_attempts INTEGER      NOT NULL DEFAULT 25," +
-        "run_at       INTEGER      NOT NULL DEFAULT 0," +
+        "run_at       BIGINT       NOT NULL DEFAULT 0," +
         "claim_token  VARCHAR(255)," +
-        "claimed_at   INTEGER," +
+        "claimed_at   BIGINT," +
         "dedup_key    VARCHAR(255)," +
         "last_error   TEXT," +
-        "created_at   INTEGER      NOT NULL," +
-        "updated_at   INTEGER      NOT NULL," +
+        "created_at   BIGINT       NOT NULL," +
+        "updated_at   BIGINT       NOT NULL," +
         "progress     INTEGER      NOT NULL DEFAULT 0," +
         "trace_context VARCHAR(255)," +
         // Per-key concurrency (jobs.enqueue concurrencyKey/concurrency): at most
@@ -307,7 +307,7 @@ function init(opts) {
         // When the current claim began. claimed_at is the claim's lease and
         // moves with every jobs.heartbeat; this does not, so the soft
         // concurrency rank (concApply) orders running peers by claim age.
-        "claim_started_at   INTEGER)");
+        "claim_started_at   BIGINT)");
 
     // Claim scan path: ready-to-run pending jobs in a queue, by priority then id.
     db.exec(
@@ -345,9 +345,9 @@ function init(opts) {
         "queue        VARCHAR(255) NOT NULL DEFAULT 'default'," +
         "priority     INTEGER      NOT NULL DEFAULT 0," +
         "max_attempts INTEGER," +
-        "next_run_at  INTEGER      NOT NULL," +
-        "last_run_at  INTEGER," +
-        "updated_at   INTEGER      NOT NULL," +
+        "next_run_at  BIGINT       NOT NULL," +
+        "last_run_at  BIGINT," +
+        "updated_at   BIGINT       NOT NULL," +
         "tz_offset    INTEGER      NOT NULL DEFAULT 0," +
         // Why a schedule was disabled (its spec stopped parsing or has no
         // next occurrence); NULL while it is live. jobs.cron clears it.
@@ -376,7 +376,7 @@ function init(opts) {
     ensureColumn("_hull_jobs", "concurrency_limit", "concurrency_limit INTEGER");
     ensureColumn("_hull_jobs", "concurrency_strict", "concurrency_strict INTEGER");
     ensureColumn("_hull_cron", "tz_offset", "tz_offset INTEGER NOT NULL DEFAULT 0");
-    ensureColumn("_hull_jobs", "claim_started_at", "claim_started_at INTEGER");
+    ensureColumn("_hull_jobs", "claim_started_at", "claim_started_at BIGINT");
     ensureColumn("_hull_cron", "last_error", "last_error TEXT");
 
     // Concurrency reconcile path: running jobs of a key, ranked by claim age.
@@ -392,7 +392,7 @@ function init(opts) {
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_ratelimit (" +
         "name         VARCHAR(255) NOT NULL PRIMARY KEY," +
-        "window_start INTEGER      NOT NULL," +
+        "window_start BIGINT       NOT NULL," +
         "n            INTEGER      NOT NULL)");
     _rlLock = db.backendName === "sqlite" ? "" : " FOR UPDATE";
 
@@ -445,7 +445,7 @@ function init(opts) {
         "step_key    VARCHAR(255) NOT NULL," +
         "result      TEXT," +
         "status      VARCHAR(16)  NOT NULL DEFAULT 'done'," +
-        "created_at  INTEGER      NOT NULL," +
+        "created_at  BIGINT       NOT NULL," +
         "PRIMARY KEY (workflow_id, step_key))");
 
     // Durable-execution signals (jobs.signal / ctx.waitSignal). One row per
@@ -456,8 +456,8 @@ function init(opts) {
         "workflow_id INTEGER      NOT NULL," +
         "name        VARCHAR(255) NOT NULL," +
         "payload     TEXT," +
-        "created_at  INTEGER      NOT NULL," +
-        "consumed_at INTEGER," +
+        "created_at  BIGINT       NOT NULL," +
+        "consumed_at BIGINT," +
         "PRIMARY KEY (workflow_id, name))");
 
     // Opt-in attempt history (jobs.init { history:true }). One row per attempt,
@@ -488,7 +488,7 @@ function init(opts) {
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_job_events (" +
         "id       " + db.autoincrementIdDdl + ", " +
-        "ts       INTEGER      NOT NULL," +
+        "ts       BIGINT       NOT NULL," +
         "type     VARCHAR(32)  NOT NULL," +
         "job_id   INTEGER," +
         "job_type VARCHAR(255)," +
@@ -507,10 +507,10 @@ function init(opts) {
         "cursor_id   INTEGER      NOT NULL DEFAULT 0," +
         "types       VARCHAR(255)," +
         "lease_token VARCHAR(255)," +
-        "lease_until INTEGER," +
+        "lease_until BIGINT," +
         "failures    INTEGER      NOT NULL DEFAULT 0," +
         "max_failures INTEGER," +   // skip a poison event after N failures (NULL = never)
-        "updated_at  INTEGER      NOT NULL)");
+        "updated_at  BIGINT       NOT NULL)");
 
     // Verify the server actually parses SKIP LOCKED (the compile-time dialect
     // flag says "this backend supports it" but a MySQL<8 / MariaDB<10.6 server
@@ -633,6 +633,32 @@ function keyOpt(v, what, who, allowInt, max) {
 function queueOpt(v, who) {
     if (v === undefined || v === null || v === "") return "default";
     return keyOpt(v, "queue", who, false);
+}
+
+// An optional queue SCOPE (jobs.dead / stats / metrics, audit 44 round 2):
+// undefined, null, false or "" is every queue (null returned), anything else
+// a queue name checked as queueOpt checks it. It was bound raw - a number
+// matched '05' on MySQL, an object reached the driver - as the Lua twin's
+// scope_queue.
+function scopeQueue(v, who) {
+    if (v === undefined || v === null || v === false || v === "") return null;
+    return keyOpt(v, "queue", who, false);
+}
+
+// An event-type list (jobs.events / jobs.subscribe, audit 44 round 2): a
+// callerStrings array of non-empty type names of at most 32 bytes (the
+// _hull_job_events.type column) without a comma (a subscription stores the
+// list comma-joined; a comma split it into other types). The Lua twin's
+// event_types.
+function eventTypes(v, who) {
+    const ts = callerStrings(v, who + ": types");
+    for (let i = 0; i < ts.length; i++) {
+        const t = ts[i];
+        if (t === "" || utf8Length(t) > 32 || t.indexOf(",") >= 0)
+            throw new Error(who + ": types must be non-empty event type names of at most 32 " +
+                            "bytes without a comma");
+    }
+    return ts;
 }
 
 // A job type (audit 44): a non-empty string of at most 255 bytes, the column.
@@ -2342,8 +2368,9 @@ function percentiles(vals) {
 
 function stats(opts) {
     const o = opts || {};
-    const rows = o.queue
-        ? db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs WHERE queue=? GROUP BY status", [o.queue])
+    const queue = scopeQueue(o.queue, "jobs.stats");
+    const rows = queue !== null
+        ? db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs WHERE queue=? GROUP BY status", [queue])
         : db.query("SELECT status, COUNT(*) AS c FROM _hull_jobs GROUP BY status");
     const s = { pending: 0, running: 0, done: 0, dead: 0, blocked: 0 };
     for (const r of rows) s[r.status] = r.c;
@@ -2363,6 +2390,7 @@ function stats(opts) {
  */
 function metrics(opts) {
     const o = opts || {};
+    const queue = scopeQueue(o.queue, "jobs.metrics");
     const now = time.now();
     const LIVE = { pending: 1, running: 1, waiting: 1, blocked: 1, dead: 1 };
     const newBucket = () => ({ pending: 0, running: 0, waiting: 0, blocked: 0, dead: 0 });
@@ -2370,16 +2398,16 @@ function metrics(opts) {
     // inherited (frozen) intrinsic and the bucket write threw, for the whole
     // fleet's metrics (audit 20; #790 fixed the listener map only).
     const queues = Object.create(null), totals = newBucket();
-    const rows = o.queue
-        ? db.query("SELECT queue, status, COUNT(*) AS n FROM _hull_jobs WHERE queue=? GROUP BY queue, status", [o.queue])
+    const rows = queue !== null
+        ? db.query("SELECT queue, status, COUNT(*) AS n FROM _hull_jobs WHERE queue=? GROUP BY queue, status", [queue])
         : db.query("SELECT queue, status, COUNT(*) AS n FROM _hull_jobs GROUP BY queue, status");
     for (const r of rows) {
         const q = queues[r.queue] || (queues[r.queue] = newBucket());
         if (LIVE[r.status]) { q[r.status] = (q[r.status] || 0) + r.n; totals[r.status] += r.n; }
     }
     // Oldest ready-to-run pending job per queue -> backlog age.
-    const ages = o.queue
-        ? db.query("SELECT queue, MIN(created_at) AS oldest FROM _hull_jobs WHERE status='pending' AND run_at<=? AND queue=? GROUP BY queue", [now, o.queue])
+    const ages = queue !== null
+        ? db.query("SELECT queue, MIN(created_at) AS oldest FROM _hull_jobs WHERE status='pending' AND run_at<=? AND queue=? GROUP BY queue", [now, queue])
         : db.query("SELECT queue, MIN(created_at) AS oldest FROM _hull_jobs WHERE status='pending' AND run_at<=? GROUP BY queue", [now]);
     for (const r of ages) {
         const q = queues[r.queue];
@@ -2394,8 +2422,8 @@ function metrics(opts) {
     if (typeof window !== "number" || !Number.isFinite(window) || window <= 0)
         throw new Error("jobs.metrics: opts.window must be a number of seconds > 0");
     const sinceMs = (now - window) * 1000;
-    const sample = o.queue
-        ? db.query("SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ? AND queue=? ORDER BY finished_ms DESC LIMIT 5000", [sinceMs, o.queue])
+    const sample = queue !== null
+        ? db.query("SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ? AND queue=? ORDER BY finished_ms DESC LIMIT 5000", [sinceMs, queue])
         : db.query("SELECT wait_ms, duration_ms, outcome FROM _hull_job_attempts WHERE finished_ms >= ? ORDER BY finished_ms DESC LIMIT 5000", [sinceMs]);
     if (sample.length) {
         const waits = [], runs = []; let doneN = 0, deadN = 0;
@@ -3216,9 +3244,10 @@ function dead(opts) {
     // bind.
     const limit = countOpt(o.limit, 100, 1, 1000);
     const offset = countOpt(o.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    const rows = o.queue
+    const queue = scopeQueue(o.queue, "jobs.dead");
+    const rows = queue !== null
         ? db.query("SELECT * FROM _hull_jobs WHERE status='dead' AND queue=? " +
-                   "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?", [o.queue, limit, offset])
+                   "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?", [queue, limit, offset])
         : db.query("SELECT * FROM _hull_jobs WHERE status='dead' " +
                    "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?", [limit, offset]);
     return rows.map(shapeOps);
@@ -3344,7 +3373,7 @@ function events(opts) {
     const where = ["1=1"], params = [];
     if (o.since !== undefined) { where.push("id > ?"); params.push(o.since); }
     if (o.types !== undefined && o.types !== null) {
-        const types = callerStrings(o.types, "jobs.events: types");
+        const types = eventTypes(o.types, "jobs.events");
         if (types.length) {
             where.push("type IN (" + placeholders(types.length) + ")");
             for (let i = 0; i < types.length; i++) params.push(types[i]);
@@ -3391,11 +3420,15 @@ function subscribe(name, handler, opts) {
     const o = opts || {};
     // Joined by a loop over checked strings, not the caller's own `join`
     // (audit 18; the csv is bound as data, but no caller method runs here).
+    // At most the column's 255 bytes comma-joined (audit 44 round 2: a
+    // longer list failed the INSERT on Postgres / MySQL).
     let typesCsv = null;
     if (o.types !== undefined && o.types !== null) {
-        const types = callerStrings(o.types, "jobs.subscribe: types");
+        const types = eventTypes(o.types, "jobs.subscribe");
         for (let i = 0; i < types.length; i++)
             typesCsv = typesCsv === null ? types[i] : typesCsv + "," + types[i];
+        if (typesCsv !== null && utf8Length(typesCsv) > 255)
+            throw new Error("jobs.subscribe: types too long (at most 255 bytes comma-joined)");
     }
     const maxF = (typeof o.maxFailures === "number" && o.maxFailures > 0) ? o.maxFailures : null;
     // Start cursor: "now" (default) skips existing history; "beginning" replays all.
@@ -3466,20 +3499,38 @@ function eventsDrain(name, opts) {
     let grace = o.grace !== undefined && o.grace !== null ? o.grace : _cfg.eventsGrace;
     if (grace === null || grace === undefined)
         grace = db.backendName === "sqlite" ? 0 : EVENTS_GRACE_DEFAULT;
+    let young = null;
     if (grace > 0) {
         const y = db.query("SELECT MIN(id) AS m FROM _hull_job_events WHERE id > ? AND ts > ?",
             [cursor, now - grace]);
-        const young = y[0] ? y[0].m : null;
-        if (young !== null && young !== undefined) { where.push("id < ?"); params.push(young); }
+        young = y[0] && y[0].m !== undefined ? y[0].m : null;
+        if (young !== null) { where.push("id < ?"); params.push(young); }
     }
+    // A typed subscription scans past events it does not take (audit 44
+    // M10). Its SELECT returned only the matching ones, so with none past the
+    // cursor the cursor never moved: cleanup keeps every event at or above
+    // MIN(cursor_id), so the log grew without bound, and metrics reported an
+    // ever larger lag. The scanned horizon - the newest event past the cursor,
+    // below the commit-order horizon - is read FIRST and bounds the SELECT, so
+    // an event inserted between the two is never passed over; when the batch
+    // is not full every matching event up to it was delivered, and the cursor
+    // moves to it (below). The Lua twin does the same.
+    let horizon = null;
     if (row[0].types) {
         const parts = String(row[0].types).split(",").filter((s) => s.length);
         if (parts.length) {
             where.push("type IN (" + parts.map(() => "?").join(",") + ")");
             for (const t of parts) params.push(t);
+            const hq = young !== null
+                ? db.query("SELECT MAX(id) AS m FROM _hull_job_events WHERE id > ? AND id < ?",
+                           [cursor, young])
+                : db.query("SELECT MAX(id) AS m FROM _hull_job_events WHERE id > ?", [cursor]);
+            horizon = hq[0] && hq[0].m !== undefined ? hq[0].m : null;
+            if (horizon !== null) { where.push("id <= ?"); params.push(horizon); }
         }
     }
-    params.push(countOpt(o.batch, 100, 1, 1000));
+    const batch = countOpt(o.batch, 100, 1, 1000);
+    params.push(batch);
     const evs = db.query(
         "SELECT id, ts, type, job_id, job_type, queue, data FROM _hull_job_events " +
         "WHERE " + where.join(" AND ") + " ORDER BY id LIMIT ?", params);
@@ -3541,6 +3592,10 @@ function eventsDrain(name, opts) {
             }
         }
     }
+    // A filtered batch that was not full delivered every matching event up to
+    // the scanned horizon: move past the ones it does not take (M10).
+    if (horizon !== null && !poison && evs.length < batch && horizon > newCursor)
+        newCursor = horizon;
     if (o.commitCursor === false) newCursor = cursor;
     const release = o.releaseLease !== false;
     db.exec(
@@ -3582,6 +3637,16 @@ function cleanup(opts) {
         (statuses.length ? "status IN (" + placeholders(statuses.length) + ")" : "1=0") +
         " AND updated_at < ?";
     if (o.queue) { sql += " AND queue=?"; params.push(queueOpt(o.queue, "jobs.cleanup")); }
+    // Never the newest job row (audit 44): MySQL before 8.0 (InnoDB) sets a
+    // table's AUTO_INCREMENT to MAX(id)+1 when the server restarts, so a
+    // cleanup that emptied the table let new jobs reuse the ids of deleted
+    // ones - and an event, a result or an edge still naming an old id then
+    // named the new job. The newest row is kept as the high-water mark.
+    const jmx = db.query("SELECT MAX(id) AS m FROM _hull_jobs");
+    if (jmx[0] && jmx[0].m !== null && jmx[0].m !== undefined) {
+        sql += " AND id < ?";
+        params.push(jmx[0].m);
+    }
     const deleted = db.exec(sql, params) || 0;
     // Drop results whose producing job is gone (workflow result store hygiene).
     db.exec("DELETE FROM _hull_job_results WHERE job_id NOT IN (SELECT id FROM _hull_jobs)");
@@ -3600,11 +3665,17 @@ function cleanup(opts) {
     // Durable event log: retained by age, but NEVER past an unconsumed event -
     // min(cursor) across subscriptions is the safe watermark. No subscriptions ->
     // age only (the base behavior).
-    const mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions");
-    const watermark = mc[0] ? mc[0].m : null;
-    if (watermark === null || watermark === undefined) {
-        db.exec("DELETE FROM _hull_job_events WHERE ts < ?", [cutoff]);
-    } else {
+    // The newest event is never deleted (audit 44): it is the high-water mark
+    // that keeps a restarted MySQL < 8.0 from handing out ids at or below a
+    // subscription's cursor again (AUTO_INCREMENT reset to MAX(id)+1), which
+    // every subscription would then skip. Read first, bound as a value (MySQL
+    // refuses a subquery on the table a DELETE deletes from).
+    const emxRow = db.query("SELECT MAX(id) AS m FROM _hull_job_events");
+    const emx = emxRow[0] && emxRow[0].m !== undefined ? emxRow[0].m : null;
+    if (emx !== null) {
+        const mc = db.query("SELECT MIN(cursor_id) AS m FROM _hull_job_subscriptions");
+        let watermark = mc[0] && mc[0].m !== undefined ? mc[0].m : null;
+        if (watermark === null || watermark >= emx) watermark = emx - 1;
         db.exec("DELETE FROM _hull_job_events WHERE ts < ? AND id <= ?", [cutoff, watermark]);
     }
     return deleted;
@@ -3663,6 +3734,21 @@ _test_hooks.register("hull:jobs", {
     },
     cronRow: (name) => db.query(
         "SELECT next_run_at, last_error FROM _hull_cron WHERE name=?", [name])[0] || null,
+    // Audit 44 round 2: a column's declared type (SQLite's table_info), the
+    // event / job ids and a subscription's cursor, read back by the suite.
+    columnType: (tbl, col) => {
+        if (typeof tbl !== "string" || !/^_hull_[a-z_]+$/.test(tbl))
+            throw new Error("columnType: not a jobs table");
+        const rows = db.query("PRAGMA table_info(" + tbl + ")");
+        for (const r of rows) if (r.name === col) return r.type;
+        return null;
+    },
+    eventIds: () => db.query("SELECT id FROM _hull_job_events ORDER BY id").map((r) => r.id),
+    jobIds: () => db.query("SELECT id FROM _hull_jobs ORDER BY id").map((r) => r.id),
+    cursor: (name) => {
+        const r = db.query("SELECT cursor_id FROM _hull_job_subscriptions WHERE name=?", [name]);
+        return r[0] ? r[0].cursor_id : null;
+    },
 });
 export { init, enqueue, enqueueMany, claim, handler, on, work, reap, stats,
          runWorker, stop, get, result, progress, heartbeat, limit, metrics, history, pause, resume,
