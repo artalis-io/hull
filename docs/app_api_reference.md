@@ -1957,6 +1957,12 @@ const r = await httpClient.async.get("https://api.example.com/report", { timeout
 - **On timeout** the call fails like any other transport error: the sync calls raise
   / throw `http.get failed: ...`; `http.async.*` resolves to `nil` (Lua) / `undefined`
   (JS) - the same as a refused connection.
+- **Opts go third on `post` / `put` / `patch`** (sync and `http.async.*`): the
+  second argument is the body. With no body, pass `nil` / `undefined` there -
+  `http.post(url, nil, { timeout_ms = 5000 })`. An opts table in the body's place
+  raises `body must be a string or nil` (Lua) / a `TypeError` `body must be a
+  string, ArrayBuffer or typed array` (JS); before audit 44 Lua dropped it, and its
+  headers and timeout, without a word.
 
 ### Runtime refusal codes
 

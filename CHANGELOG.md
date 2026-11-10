@@ -201,6 +201,20 @@ release-artifact layout).
 
 <!-- audit44:tooling -->
 
+- **Audit 44, tooling and runtime edges (all Low).** `--verbose` CLI logging (and the
+  `-DDEBUG` line callback) printed a log record's source field - a script's module name,
+  so a cloned tree's file name - raw; it is escaped like the message. `hull agent` results
+  and every `hull mcp` message are written with DEL, C1 controls and stray 0x80-0x9F bytes
+  escaped (`include/hull/shared/json_term_safe.h`, now shared with agent eval / inspect):
+  a `data.db` value or column name reached the terminal raw. `app.manifest()` is refused
+  once the app's top level has run (both runtimes): a later call from `app.main` or a
+  handler installed decorations and reported a manifest the runner never extracted,
+  resolved or verified. Lua `http.post` / `put` / `patch` and their `http.async` twins
+  raise on a second argument that is not a string or nil (an opts table there was dropped
+  silently; opts go third, as in JS). A read-only stdlib module view's `pairs` hands out
+  table keys as views too. JS `compute.buffer`'s error message no longer lists WasmBuffer /
+  MappedBuffer, which it does not take.
+
 
 
 <!-- audit44:runtime-c -->

@@ -337,6 +337,15 @@ struct HlRuntime {
      * the base struct unconditionally so consumers don't need ifdefs. */
     int registration_closed;
 
+    /* Set once the app's top level has run (hl_lua_load_app /
+     * hl_js_load_app return): app.manifest() is refused from then on. The
+     * manifest the runners extract, resolve, check (env refs) and verify
+     * (--verify-sig) is the one the top level declared; a later call - from
+     * app.main or a handler - installed decorations and made
+     * app.get_manifest() / __hull_manifest report a manifest none of those
+     * steps saw (audit 44). */
+    int manifest_closed;
+
     /* Teardown list (shared/async.h HlAsyncTeardown): every detached op and
      * WebSocket client still pending on the loop. Drained by
      * vt->stop_async. */

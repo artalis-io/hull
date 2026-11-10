@@ -13542,6 +13542,28 @@ static int a17_load(const char *dir, const char *entry, int built, HlVfs *vfs)
     return hl_js_load_app(&js, path);
 }
 
+/* Audit 44: app.manifest() had no phase gate (the twin of the Lua case):
+ * called after the top level ran, it installed decorations and made
+ * __hull_manifest report a manifest the runner never extracted, resolved or
+ * verified. Refused once the top level has run. */
+UTEST(app_audit44, manifest_after_load_refused_js)
+{
+    char dir[HL_TEST_PATH_MAX];
+    ASSERT_NE(hl_test_mkdtemp(dir, sizeof dir, "hull_a44m"), NULL);
+    a17_write(dir, "planted.js",
+              "import { app } from \"hull:app\";\n"
+              "globalThis.__a44app = app;\n");
+    HlVfs vfs;
+    ASSERT_EQ(a17_load(dir, "planted.js", 0, &vfs), 0);
+    EXPECT_EQ(eval_int("(() => { try { globalThis.__a44app.manifest("
+                       "{ modules: ['hull/timers@1'] }); return 0; } "
+                       "catch (e) { return String(e).includes('top level') "
+                       "? 1 : 0; } })()"), 1);
+    EXPECT_EQ(eval_int("globalThis.__a44app.every === undefined ? 1 : 0"), 1);
+    EXPECT_EQ(eval_int("globalThis.__hull_manifest == null ? 1 : 0"), 1);
+    a17_cleanup(dir);
+}
+
 UTEST(js_audit17, imports_and_templates_read_disk_only_in_development)
 {
     char dir[HL_TEST_PATH_MAX];
