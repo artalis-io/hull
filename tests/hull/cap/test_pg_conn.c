@@ -2176,4 +2176,165 @@ UTEST(pg_backend, lost_connection_reconnects_unless_session_control)
     pgb_free(&ctx, &s, sv);
 }
 
+/* ── Audit 44 ───────────────────────────────────────────────────────── */
+
+/* A writer thread: @p head (a frame header), then @p body_len bytes of
+ * filler, then either a shutdown of the write side or a stall until told to
+ * stop. */
+typedef struct {
+    int fd;
+    uint8_t head[5];
+    size_t body_len;
+    int stall;
+    atomic_int stop;
+} A44Feed;
+
+static void *a44_feed_main(void *p)
+{
+    A44Feed *d = p;
+    if (write(d->fd, d->head, sizeof d->head) != (ssize_t)sizeof d->head)
+        return NULL;
+    static uint8_t chunk[4096];
+    memset(chunk, 'x', sizeof chunk);
+    size_t left = d->body_len;
+    while (left > 0 && !atomic_load(&d->stop)) {
+        size_t n = left < sizeof chunk ? left : sizeof chunk;
+        ssize_t w = write(d->fd, chunk, n);
+        if (w <= 0) break;
+        left -= (size_t)w;
+    }
+    if (!d->stall) { shutdown(d->fd, SHUT_WR); return NULL; }
+    while (!atomic_load(&d->stop)) {
+        struct timespec ts = { 0, 5 * 1000000L };
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
+}
+
+/* Write a whole buffer from a thread, so a full socket buffer cannot block
+ * the test before the client reads. */
+typedef struct { int fd; const uint8_t *p; size_t n; } A44Rest;
+
+static void *a44_rest_main(void *p)
+{
+    A44Rest *r = p;
+    size_t off = 0;
+    while (off < r->n) {
+        ssize_t w = write(r->fd, r->p + off, r->n - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    return NULL;
+}
+
+static void a44_head(uint8_t head[5], char type, uint32_t len)
+{
+    head[0] = (uint8_t)type;
+    head[1] = (uint8_t)(len >> 24); head[2] = (uint8_t)(len >> 16);
+    head[3] = (uint8_t)(len >> 8);  head[4] = (uint8_t)len;
+}
+
+/* A frame announcing more than HL_PG_MAX_MSG (64 MiB) is refused from its
+ * header, before the receive buffer grows to hold any of it: at 256 MiB the
+ * buffer grew, off the VM heap, with whatever the server sent. */
+UTEST(pg_conn_audit44, frame_over_cap_refused_before_growth)
+{
+    signal(SIGPIPE, SIG_IGN);
+    EXPECT_EQ(64u * 1024u * 1024u, (unsigned)HL_PG_MAX_MSG);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 3000;
+    static A44Feed d;
+    memset(&d, 0, sizeof d);
+    d.fd = sv[0];
+    a44_head(d.head, 'D', 100u * 1024u * 1024u + 4u);   /* a 100 MiB DataRow */
+    d.body_len = 256 * 1024;
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, a44_feed_main, &d));
+    int rc = hl_pg_query(&conn, "SELECT big", NULL, 0, NULL, NULL, NULL, NULL);
+    size_t rcap = conn.rcap;
+    hl_pg_conn_close(&conn);          /* closes sv[1]: the feeder stops */
+    atomic_store(&d.stop, 1);
+    pthread_join(th, NULL);
+    EXPECT_EQ(-1, rc);
+    EXPECT_TRUE(rcap <= 8192);        /* the buffer never grew */
+    EXPECT_TRUE(strstr(conn.errmsg, "exceeds") != NULL);
+    close(sv[0]);
+}
+
+/* A frame still arriving is charged chunk by chunk, not only once complete:
+ * a large frame sent part-way and then held, or one the run cannot pay for,
+ * trips the budget while it arrives (Valkey's read_reply rule). */
+UTEST(pg_conn_audit44, partial_frame_chunks_charged)
+{
+    signal(SIGPIPE, SIG_IGN);
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlPgConn conn;
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 3000;
+    static A44Feed d;
+    memset(&d, 0, sizeof d);
+    d.fd = sv[0];
+    a44_head(d.head, 'D', 32u * 1024u * 1024u + 4u);    /* 32 MiB announced */
+    d.body_len = 512 * 1024;                            /* 512 KiB sent, then held */
+    d.stall = 1;
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, a44_feed_main, &d));
+    /* 512 KiB is 8192 units at 64 bytes a unit */
+    HlDbOpBudget budget = { .limit = 2000, .used = 0, .tripped = 0 };
+    HlDbBudgetBinding prev = hl_db_budget_swap(hl_db_op_budget_charge, &budget);
+    int64_t t0 = pg_test_ms();
+    int rc = hl_pg_query(&conn, "SELECT big", NULL, 0, NULL, NULL, NULL, NULL);
+    int64_t spent = pg_test_ms() - t0;
+    hl_db_budget_restore(prev);
+    atomic_store(&d.stop, 1);
+    hl_pg_conn_close(&conn);
+    pthread_join(th, NULL);
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(1, budget.tripped);
+    EXPECT_TRUE(spent < 2500);        /* not the read timeout */
+    close(sv[0]);
+
+    /* A complete large frame is charged once overall: the chunks paid as
+     * they came, the frame only the rest. */
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    ASSERT_TRUE(pg_adopt(&conn, sv[1]) != NULL);
+    conn.read_timeout_ms = 3000;
+    HlPgWriter s;
+    hl_pg_writer_init(&s);
+    size_t m;
+    m = hl_pg_msg_begin(&s, '1'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, '2'); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'N');                       /* a 256 KiB Notice */
+    hl_pg_put_u8(&s, 'M');
+    for (int i = 0; i < 256 * 1024; i++) hl_pg_put_u8(&s, 'x');
+    hl_pg_put_u8(&s, 0);
+    hl_pg_put_u8(&s, 0);
+    hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'C'); hl_pg_put_cstr(&s, "DO"); hl_pg_msg_end(&s, m);
+    m = hl_pg_msg_begin(&s, 'Z'); hl_pg_put_u8(&s, 'I'); hl_pg_msg_end(&s, m);
+    ASSERT_FALSE(s.err);
+    static A44Rest r;
+    r.fd = sv[0]; r.p = s.buf; r.n = s.len;
+    pthread_t th3;
+    ASSERT_EQ(0, pthread_create(&th3, NULL, a44_rest_main, &r));
+    HlDbOpBudget b2 = { .limit = 1000000, .used = 0, .tripped = 0 };
+    prev = hl_db_budget_swap(hl_db_op_budget_charge, &b2);
+    rc = hl_pg_query(&conn, "DO 1", NULL, 0, NULL, NULL, NULL, NULL);
+    hl_db_budget_restore(prev);
+    pthread_join(th3, NULL);
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, b2.tripped);
+    int64_t frame_units = 1 + (256 * 1024 + 4 + HL_DB_ALLOC_UNIT_BYTES - 1) /
+                              HL_DB_ALLOC_UNIT_BYTES;
+    EXPECT_TRUE(b2.used >= frame_units);
+    EXPECT_TRUE(b2.used < frame_units + frame_units / 2);   /* not twice */
+    hl_pg_writer_free(&s);
+    hl_pg_conn_close(&conn);
+    close(sv[0]);
+}
+
 UTEST_MAIN()

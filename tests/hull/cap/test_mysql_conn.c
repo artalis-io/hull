@@ -3061,4 +3061,254 @@ UTEST(mysql_convergence_sql, reset_closes_a_broken_connection)
     close(sv[0]);
 }
 
+/* ── Audit 44 ───────────────────────────────────────────────────────── */
+
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+/* A Handshake v10 greeting naming @p version and @p plugin. */
+static void a44_greeting(HlMyWriter *w, const char *version, const char *plugin)
+{
+    size_t m = hl_my_packet_begin(w, 0);
+    hl_my_put_u8(w, 10);
+    hl_my_put_cstr(w, version);
+    hl_my_put_u32(w, 1);
+    for (int i = 0; i < HL_MY_SCRAMBLE_PART1; i++) hl_my_put_u8(w, (uint8_t)(i + 1));
+    hl_my_put_u8(w, 0);
+    uint32_t caps = HL_MY_CLIENT_SECURE_CONNECTION | HL_MY_CLIENT_PLUGIN_AUTH
+                  | HL_MY_CLIENT_PROTOCOL_41;
+    hl_my_put_u16(w, (uint16_t)(caps & 0xFFFF));
+    hl_my_put_u8(w, HL_MY_DEFAULT_CHARSET);
+    hl_my_put_u16(w, 2);
+    hl_my_put_u16(w, (uint16_t)(caps >> 16));
+    hl_my_put_u8(w, 21);
+    for (int i = 0; i < HL_MY_HANDSHAKE_FILLER; i++) hl_my_put_u8(w, 0);
+    for (int i = 0; i < HL_MY_SCRAMBLE_LEN - HL_MY_SCRAMBLE_PART1; i++)
+        hl_my_put_u8(w, (uint8_t)(i + 9));
+    hl_my_put_u8(w, 0);
+    hl_my_put_cstr(w, plugin);
+    hl_my_packet_end(w, m);
+}
+
+/* A one-column, one-row text result set holding @p v, starting at
+ * sequence 1; @p last_status is the closing EOF's status. */
+static void a44_one_value(HlMyWriter *s, const char *name, const char *v,
+                          uint16_t last_status)
+{
+    size_t m = hl_my_packet_begin(s, 1);
+    hl_my_put_lenenc_int(s, 1);
+    hl_my_packet_end(s, m);
+    put_col_def(s, 2, name, HL_MY_TYPE_VAR_STRING);
+    put_eof(s, 3);
+    m = hl_my_packet_begin(s, 4);
+    hl_my_put_lenenc_str(s, v, strlen(v));
+    hl_my_packet_end(s, m);
+    m = hl_my_packet_begin(s, 5);
+    hl_my_put_u8(s, HL_MY_PKT_EOF);
+    hl_my_put_u16(s, 0);
+    hl_my_put_u16(s, last_status);
+    hl_my_packet_end(s, m);
+}
+
+/* A TCP server on 127.0.0.1 that writes canned bytes to its one client, then
+ * reads (and records) what the client sends until it closes. */
+typedef struct {
+    int lfd;
+    const uint8_t *out;
+    size_t out_len;
+    char got[16384];
+    size_t got_len;
+} A44Server;
+
+static void *a44_server_main(void *p)
+{
+    A44Server *sv = p;
+    int c = accept(sv->lfd, NULL, NULL);
+    if (c < 0) return NULL;
+    if (write(c, sv->out, sv->out_len) != (ssize_t)sv->out_len) { close(c); return NULL; }
+    ssize_t r;
+    while (sv->got_len < sizeof sv->got - 1 &&
+           (r = read(c, sv->got + sv->got_len, sizeof sv->got - 1 - sv->got_len)) > 0)
+        sv->got_len += (size_t)r;
+    sv->got[sv->got_len] = '\0';
+    close(c);
+    return NULL;
+}
+
+static int a44_listen(int *port)
+{
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t al = sizeof a;
+    if (bind(lfd, (struct sockaddr *)&a, sizeof a) != 0 || listen(lfd, 1) != 0 ||
+        getsockname(lfd, (struct sockaddr *)&a, &al) != 0) {
+        close(lfd);
+        return -1;
+    }
+    *port = ntohs(a.sin_port);
+    return lfd;
+}
+
+/* Connect through the backend's own my_connect (the path every MySQL
+ * connection takes) to a server whose greeting names @p greeting_version and
+ * whose session answers VERSION() with @p session_version. The connection is
+ * closed again before the call returns; its server facts stay in @p conn. */
+static int a44_connect(const char *greeting_version, const char *session_version,
+                       HlMyConn *conn, A44Server *sv)
+{
+    HlMyWriter s; hl_my_writer_init(&s);
+    a44_greeting(&s, greeting_version, "mysql_native_password");
+    build_ok(&s, 2);
+    /* SELECT VERSION(); SET autocommit = 1 */
+    a44_one_value(&s, "VERSION()", session_version,
+                  0x0002 | HL_MY_SERVER_MORE_RESULTS);
+    put_ok_more(&s, 6, 0x0002);
+    put_login_row(&s, "NONE", "db", 0x0002);           /* the login capture */
+    int port = 0;
+    memset(sv, 0, sizeof *sv);
+    sv->lfd = a44_listen(&port);
+    if (sv->lfd < 0) { hl_my_writer_free(&s); return -9; }
+    sv->out = s.buf;
+    sv->out_len = s.len;
+    pthread_t th;
+    if (pthread_create(&th, NULL, a44_server_main, sv) != 0) {
+        close(sv->lfd); hl_my_writer_free(&s); return -9;
+    }
+    char dsn[128];
+    snprintf(dsn, sizeof dsn, "mysql://u:p@127.0.0.1:%d/db?sslmode=disable", port);
+    int rc = my_connect(conn, dsn);
+    if (rc == 0) hl_my_conn_close(conn);
+    pthread_join(th, NULL);
+    close(sv->lfd);
+    hl_my_writer_free(&s);
+    return rc;
+}
+
+/* The greeting comes before TLS, so an on-path attacker can rewrite its
+ * version string even under sslmode=verify-full; the facts that drive SQL
+ * Hull writes (the `_hull_*` collation, MariaDB vs MySQL, roles) are read from
+ * the session itself after authentication instead - on every sslmode, one
+ * code path (the plaintext path here). */
+UTEST(mysql_conn_audit44, greeting_version_not_trusted_after_tls)
+{
+    signal(SIGPIPE, SIG_IGN);
+    HlMyConn conn;
+    static A44Server sv;
+    /* greeting 8.0.16 (PAD SPACE utf8mb4_bin), session 8.0.36 */
+    ASSERT_EQ(0, a44_connect("8.0.16", "8.0.36", &conn, &sv));
+    ASSERT_TRUE(conn.bin_collation != NULL);
+    EXPECT_STREQ("utf8mb4_0900_bin", conn.bin_collation);
+    EXPECT_EQ(0, (int)conn.mariadb);
+    EXPECT_EQ(1, (int)conn.roles);
+    EXPECT_TRUE(my_sent_text(sv.got, sv.got_len, "SELECT VERSION()"));
+
+    /* a MySQL greeting, a MariaDB session */
+    ASSERT_EQ(0, a44_connect("8.0.36", "10.11.6-MariaDB-1:10.11.6+maria~ubu2204",
+                             &conn, &sv));
+    EXPECT_EQ(1, (int)conn.mariadb);
+    ASSERT_TRUE(conn.bin_collation != NULL);
+    EXPECT_STREQ("utf8mb4_nopad_bin", conn.bin_collation);
+    EXPECT_EQ(1, (int)conn.roles);
+
+    /* a MariaDB greeting, a MySQL session */
+    ASSERT_EQ(0, a44_connect("5.5.5-10.11.6-MariaDB", "8.0.36", &conn, &sv));
+    EXPECT_EQ(0, (int)conn.mariadb);
+    ASSERT_TRUE(conn.bin_collation != NULL);
+    EXPECT_STREQ("utf8mb4_0900_bin", conn.bin_collation);
+}
+
+/* An AuthSwitchRequest (0xFE): the plugin, then its 20-byte nonce + NUL. */
+static void a44_auth_switch(HlMyWriter *s, uint8_t seq, const char *plugin)
+{
+    size_t m = hl_my_packet_begin(s, seq);
+    hl_my_put_u8(s, HL_MY_PKT_EOF);
+    hl_my_put_cstr(s, plugin);
+    for (int i = 0; i < HL_MY_SCRAMBLE_LEN; i++) hl_my_put_u8(s, (uint8_t)(0x41 + i));
+    hl_my_put_u8(s, 0);
+    hl_my_packet_end(s, m);
+}
+
+/* Count the packets the client sent (the HandshakeResponse41 included). */
+static int a44_client_packets(int fd)
+{
+    uint8_t got[4096];
+    size_t n = 0;
+    ssize_t r;
+    while (n < sizeof got && (r = recv(fd, got + n, sizeof got - n, MSG_DONTWAIT)) > 0)
+        n += (size_t)r;
+    int pkts = 0;
+    size_t off = 0;
+    for (;;) {
+        HlMyFrame f; size_t used = 0;
+        if (hl_my_frame_next(got + off, n - off, &f, &used) != HL_MY_OK) break;
+        off += used;
+        pkts++;
+    }
+    return pkts;
+}
+
+/* The exchange takes at most ONE AuthSwitchRequest: a server that switches
+ * again (any plugin) got a fresh password-derived response to a nonce of its
+ * choosing for every switch. */
+UTEST(mysql_conn_audit44, second_auth_switch_refused)
+{
+    int sv[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    HlMyWriter s; hl_my_writer_init(&s);
+    build_handshake_plugin(&s, 0, "caching_sha2_password");
+    a44_auth_switch(&s, 2, "caching_sha2_password");
+    a44_auth_switch(&s, 4, "caching_sha2_password");
+    build_ok(&s, 6);
+    ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+    HlMyDsn dsn; char err[128];
+    ASSERT_EQ(0, hl_my_dsn_parse("mysql://u:p@localhost/db?sslmode=disable",
+                                 &dsn, err, sizeof err));
+    HlMyConn conn;
+    EXPECT_EQ(-1, hl_my_conn_start(&conn, sv[1], &dsn));
+    EXPECT_TRUE(strstr(conn.errmsg, "auth switch") != NULL);
+    /* the handshake response and ONE switch response */
+    EXPECT_EQ(2, a44_client_packets(sv[0]));
+    hl_my_writer_free(&s);
+    close(sv[0]);
+}
+
+/* A switch to mysql_native_password (a SHA-1 response to the server's nonce)
+ * is answered only over TLS whose certificate was verified, or under an
+ * explicit sslmode=disable - as Postgres keeps cleartext and a weak SCRAM
+ * count to those (audit 29). */
+UTEST(mysql_conn_audit44, auth_switch_native_refused_unverified)
+{
+    const char *dsns[] = { "mysql://u:p@localhost/db",
+                           "mysql://u:p@localhost/db?sslmode=prefer",
+                           "mysql://u:p@localhost/db?sslmode=disable" };
+    for (int i = 0; i < 3; i++) {
+        int sv[2];
+        ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+        HlMyWriter s; hl_my_writer_init(&s);
+        build_handshake_plugin(&s, 0, "caching_sha2_password");
+        a44_auth_switch(&s, 2, "mysql_native_password");
+        build_ok(&s, 4);
+        ASSERT_TRUE(write(sv[0], s.buf, s.len) == (ssize_t)s.len);
+        HlMyDsn dsn; char err[128];
+        ASSERT_EQ(0, hl_my_dsn_parse(dsns[i], &dsn, err, sizeof err));
+        HlMyConn conn;
+        int rc = hl_my_conn_start(&conn, sv[1], &dsn);
+        if (i < 2) {
+            EXPECT_EQ(-1, rc);
+            EXPECT_TRUE(strstr(conn.errmsg, "verify-full") != NULL);
+            EXPECT_EQ(1, a44_client_packets(sv[0]));   /* no native response */
+        } else {
+            EXPECT_EQ(0, rc);
+            EXPECT_EQ(2, a44_client_packets(sv[0]));
+            hl_my_conn_close(&conn);
+        }
+        hl_my_writer_free(&s);
+        close(sv[0]);
+    }
+}
+
 UTEST_MAIN()

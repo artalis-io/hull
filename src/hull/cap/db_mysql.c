@@ -98,11 +98,12 @@ static int my_connect(HlMyConn *conn, const char *dsn)
     int rc = hl_my_conn_open(conn, &parsed, 10000 /* 10s connect */);
     hl_my_dsn_scrub(&parsed);   /* password is secret material */
     if (rc != 0) return rc;
-    /* And the role and database the login made active, which every session
-     * reset puts back (COM_RESET_CONNECTION leaves both as they were; audit
-     * convergence §7.1). */
-    if (hl_my_conn_query(conn, "SET autocommit = 1",
-                         NULL, NULL, NULL, NULL) != 0 ||
+    /* The server's version, read again over the authenticated session (the
+     * greeting's came before TLS; audit 44), in the same round trip as the
+     * autocommit. And the role and database the login made active, which
+     * every session reset puts back (COM_RESET_CONNECTION leaves both as they
+     * were; audit convergence §7.1). */
+    if (hl_my_conn_session_init(conn) != 0 ||
         hl_my_conn_capture_login(conn) != 0) {
         conn->broken = 1;   /* first: the close sends no close_notify */
         char saved[sizeof conn->errmsg];

@@ -1200,7 +1200,12 @@ roadmap §2.9.)
   NoticeResponses), on MySQL every packet of a reply (`reply_frame`: rows,
   and since audit 18 the OK / column-count / column-definition / EOF packets
   too, so a stream of empty result sets is charged) - where a 0-unit charge
-  only asked, which a `db.async` op's budget never tripped on (audit 17). A
+  only asked, which a `db.async` op's budget never tripped on (audit 17).
+  Postgres also charges each received CHUNK as it arrives (1 + bytes / 64,
+  the frame then charged only what is left over, `HlPgConn.frame_prepaid`),
+  and caps a frame at `HL_PG_MAX_MSG` = 64 MiB, refused from its header
+  before the buffer grows (audit 44: 256 MiB, buffered off the VM heap and
+  charged only once complete). A row larger than 64 MiB fails its query. A
   wait for the server is polled in `HL_DB_WAIT_SLICE_MS` (100 ms) slices
   (`hl_db_transport_wait_readable`, bounded in all by `read_timeout`) that ask
   the run's budget with a 0-unit charge, so a `pg_sleep` / `SLEEP()` / lock
@@ -1263,7 +1268,19 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
   `prefer` / `require` would hand it to any MITM (audit 5 M4); otherwise it
   fails with a hint. The RSA public-key exchange is not implemented. Once the
   server has cached the account's hash, the fast path works under any
-  sslmode).
+  sslmode). The exchange takes at most ONE AuthSwitchRequest, and a switch TO
+  `mysql_native_password` is answered only over verified TLS or under
+  `sslmode=disable` (audit 44, the twin of Postgres's audit 29 rule): a MySQL
+  8 account using native over `prefer` / `require` now fails with a hint. The
+  greeting's own plugin is answered on any sslmode (MariaDB's and MySQL 5.7's
+  default is native), and a password-derived response sent over an unverified
+  channel is WARNed once per user@host:port.
+- **Server facts come from the session, not the greeting (audit 44):** the
+  Handshake v10 greeting is plaintext and arrives before TLS, so its version
+  string is only provisional. The first round trip of every connection
+  (`hl_my_conn_session_init`, `SELECT VERSION(); SET autocommit = 1`) sets
+  `mariadb`, `bin_collation` and `roles` from the authenticated session's
+  VERSION(), on every sslmode.
 - **Session reset:** every connection an entry used is reset at the entry
   boundary (`COM_RESET_CONNECTION`, MySQL 5.7.3+ / MariaDB 10.2.4+; else the
   connection is closed and replaced) - see "Session reset at every entry
@@ -1405,7 +1422,7 @@ parsing is bounds-checked over untrusted input (mirrors `cap/pgwire.c`).
 - **Binary collation on `_hull_*` tables (existing deployments: migrate by
   hand).** `db_mysql.c` appends `DEFAULT CHARSET=utf8mb4 COLLATE=<c>` to every
   `CREATE TABLE _hull_*` it runs, `<c>` being the server's NO PAD binary
-  collation (`hl_my_bin_collation`, from the handshake's version):
+  collation (`hl_my_bin_collation`, from the session's VERSION()):
   `utf8mb4_0900_bin` on MySQL 8.0.17+, `utf8mb4_nopad_bin` on MariaDB
   10.2.2+, `utf8mb4_bin` on MySQL before 8.0.17 and MariaDB before 10.2.2
   (neither has a NO PAD binary collation; naming nopad_bin on an old MariaDB

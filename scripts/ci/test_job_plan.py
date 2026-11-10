@@ -309,6 +309,7 @@ CANONICAL_FUZZ = {
     "log_escape", "http_guard", "wasm_log_escape", "migrate_name",    # core (audit 28)
     "pgwire", "pg_dsn", "pg_rewrite", "mysqlwire", "mysql_dsn", "respwire", "valkey_dsn",  # db wire
     "sql_kw", "dsn_redact", "mysql_stmt",                             # db (audit 28)
+    "pg_msg", "mysql_rows",                                           # db (audit 44)
     "span_sdk", "span_window",                                        # compute
 }
 _WF = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),

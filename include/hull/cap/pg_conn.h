@@ -86,6 +86,10 @@ typedef struct HlPgConn {
      * finishing instead of dropping the connection, since the server commits
      * whatever the client does (audit 29). */
     int      commit_sent;
+    /* Units the chunks of the frame conn_next_frame last returned were
+     * charged as they arrived (1 + bytes / HL_DB_ALLOC_UNIT_BYTES a chunk):
+     * the frame's own charge takes only what is left over (audit 44). */
+    int64_t  frame_prepaid;
     /* Told of every NotificationResponse a query or a script reads (a db.async
      * op on a worker's LISTEN connection): they were dropped, so the next
      * wait_notify on that channel missed its wake-up (audit 20). NULL = none;

@@ -356,10 +356,27 @@ static int pg_stop_or_finish(HlPgConn *conn)
 
 /* Read one frame. The returned body is valid until the next call, which
  * compacts the previously-consumed bytes. Returns 0 / -1. */
+/* What a chunk of @p n received bytes is charged: 1 + n / 64, rounded up
+ * (Valkey's read_reply rate, and a frame's). */
+static int64_t pg_chunk_units(size_t n)
+{
+    return 1 + (int64_t)((n + HL_DB_ALLOC_UNIT_BYTES - 1) / HL_DB_ALLOC_UNIT_BYTES);
+}
+
+/* 1 when the header buffered in @p buf announces a body over HL_PG_MAX_MSG. */
+static int pg_frame_too_large(const uint8_t *buf, size_t avail)
+{
+    if (avail < 5) return 0;
+    uint32_t ulen = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16)
+                  | ((uint32_t)buf[3] << 8)  | ((uint32_t)buf[4]);
+    return ulen > HL_PG_MAX_MSG;
+}
+
 static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
 {
     uint64_t started = 0;   /* this frame's reads share one ?read_timeout= */
     int got = 0;            /* a chunk of it came in */
+    conn->frame_prepaid = 0;
     pg_rbuf_compact(conn);
     for (;;) {
         size_t consumed = 0;
@@ -367,8 +384,12 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
         if (r == HL_PG_OK) { conn->consumed = consumed; return 0; }
         if (r == HL_PG_ERR) {
             conn->broken = 1;
+            /* Refused from its header, before the buffer grows to hold any
+             * of it (HL_PG_MAX_MSG, 64 MiB; audit 44). */
             set_err(conn->errmsg, sizeof conn->errmsg,
-                    "malformed message from server");
+                    pg_frame_too_large(conn->rbuf, conn->rlen)
+                        ? "server message exceeds limit (64 MiB)"
+                        : "malformed message from server");
             return -1;
         }
         /* Still incomplete after a chunk: the run is asked after every one,
@@ -449,6 +470,20 @@ static int conn_next_frame(HlPgConn *conn, HlPgFrame *f)
         }
         conn->rlen += (size_t)n;
         got = 1;
+        /* Each chunk is charged to the run as it arrives, not only once its
+         * frame is complete: a frame of up to HL_PG_MAX_MSG was buffered off
+         * the VM heap with only 0-unit asks between its chunks (audit 44,
+         * Valkey's read_reply rule). The frame's own charge then takes only
+         * what is left over (pg_frame_charge_units). A trip stops as a trip
+         * mid-reply does; finishing a COMMIT's reply asks no budget. */
+        if (!conn->finishing) {
+            int64_t units = pg_chunk_units((size_t)n);
+            if (hl_db_budget_charge(units) != 0) {
+                if (pg_stop_or_finish(conn) != 0) return -1;
+            } else {
+                conn->frame_prepaid += units;
+            }
+        }
     }
 }
 
@@ -1385,9 +1420,18 @@ static int64_t pg_frame_units(uint32_t body_len)
                HL_DB_ALLOC_UNIT_BYTES;
 }
 
+/* A frame's charge less what its chunks already paid as they arrived
+ * (conn->frame_prepaid, audit 44); never below 0, which still asks. */
+static int64_t pg_frame_charge_units(HlPgConn *conn, uint32_t body_len)
+{
+    int64_t u = pg_frame_units(body_len) - conn->frame_prepaid;
+    conn->frame_prepaid = 0;
+    return u > 0 ? u : 0;
+}
+
 static int pg_abandon_if_tripped(HlPgConn *conn, uint32_t body_len)
 {
-    if (hl_db_budget_charge(pg_frame_units(body_len)) == 0) return 0;
+    if (hl_db_budget_charge(pg_frame_charge_units(conn, body_len)) == 0) return 0;
     pg_abandon(conn);
     return 1;
 }
@@ -1416,7 +1460,7 @@ static int pg_reply_charge(HlPgConn *conn, const HlPgFrame *f)
         pg_abandon(conn);
         return 1;
     }
-    if (hl_db_budget_charge(pg_frame_units(f->body_len)) == 0) return 0;
+    if (hl_db_budget_charge(pg_frame_charge_units(conn, f->body_len)) == 0) return 0;
     if (conn->commit_sent ||
         (f->type == HL_PG_B_CMD_COMPLETE && f->body_len >= 6 &&
          memcmp(f->body, "COMMIT", 6) == 0)) {
@@ -1855,6 +1899,9 @@ static int wait_notify(HlPgConn *conn, const char *channel, int timeout_ms,
                                     : "connection closed by server");
                       return -1; }
         conn->rlen += (size_t)n;
+        /* Charged as it arrives, as conn_next_frame charges (audit 44): a
+         * trip ends the wait as a timeout, the bytes kept for the next read. */
+        if (hl_db_budget_charge(pg_chunk_units((size_t)n)) != 0) return 0;
     }
 }
 

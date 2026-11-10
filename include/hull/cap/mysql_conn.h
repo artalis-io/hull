@@ -104,7 +104,9 @@ typedef struct HlMyConn {
     uint16_t server_status; /* status flags of the latest OK / EOF */
     uint16_t last_err_code; /* server error code of the latest command's ERR, or 0 */
     /* The `_hull_*` tables' collation for this server (hl_my_bin_collation
-     * of its handshake's version), set at open. */
+     * of its version): provisional from the greeting at open, then from
+     * VERSION() over the authenticated session (hl_my_conn_session_init,
+     * audit 44) - as mariadb and roles below. */
     const char *bin_collation;
     /* The DSN's ?read_timeout= (0 = none): bounds each wait for the server,
      * polled in slices that ask the run's budget (audit 18). */
@@ -316,6 +318,20 @@ int hl_my_conn_reset(HlMyConn *conn);
  * Returns 0, or -1 (conn->errmsg says why).
  */
 int hl_my_conn_capture_login(HlMyConn *conn);
+
+/*
+ * First round trip on a new connection: `SELECT VERSION(); SET autocommit =
+ * 1`. Sets conn->mariadb, conn->bin_collation and conn->roles from the
+ * version the AUTHENTICATED session reports, replacing what the Handshake v10
+ * greeting said: the greeting comes before TLS, so an on-path attacker could
+ * rewrite it even under sslmode=verify-full and downgrade the `_hull_*`
+ * collation to a PAD SPACE one, turn the reset's role restore off, or flip
+ * MariaDB (audit 44). One code path on every sslmode. And turns autocommit on:
+ * a server whose global default is off still reports AUTOCOMMIT in the
+ * handshake (audit 41). Call before hl_my_conn_capture_login (which reads
+ * conn->roles). Returns 0, or -1 (conn->errmsg says why).
+ */
+int hl_my_conn_session_init(HlMyConn *conn);
 #endif
 
 #endif /* HL_CAP_MYSQL_CONN_H */

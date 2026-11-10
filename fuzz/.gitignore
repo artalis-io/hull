@@ -21,6 +21,8 @@ fuzz_http_guard
 fuzz_sql_kw
 fuzz_dsn_redact
 fuzz_mysql_stmt
+fuzz_pg_msg
+fuzz_mysql_rows
 # Debug symbol bundles (macOS)
 *.dSYM/
 # libFuzzer artifacts

@@ -1282,6 +1282,19 @@ fuzz/fuzz_pg_rewrite: fuzz/fuzz_pg_rewrite.c $(SRCDIR)/hull/cap/pg_conn.c $(SRCD
 fuzz/fuzz_mysqlwire: fuzz/fuzz_mysqlwire.c $(SRCDIR)/hull/cap/mysqlwire.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
+# Message-level wire fuzzers (audit 44): the real Postgres / MySQL connection
+# layers (startup + SCRAM / auth exchange, RowDescription / DataRow / column
+# definitions / text + binary rows, ErrorResponse fields, CommandComplete)
+# over a fake transport that serves the input (fuzz_db_wire_stubs.c, which
+# also stands in for the budget, the crypto and the TLS client, so neither
+# links Keel nor mbedTLS). fuzz_meter_stubs.c: the excluded-wait brackets.
+FUZZ_DB_WIRE_STUBS := fuzz/fuzz_db_wire_stubs.c fuzz/fuzz_meter_stubs.c
+fuzz/fuzz_pg_msg: fuzz/fuzz_pg_msg.c $(FUZZ_DB_WIRE_STUBS) fuzz/fuzz_db_wire_stubs.h $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(SRCDIR)/hull/utils/base64.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_POSTGRES -Ifuzz -I$(VENDDIR) -o $@ fuzz/fuzz_pg_msg.c $(FUZZ_DB_WIRE_STUBS) $(SRCDIR)/hull/cap/pg_conn.c $(SRCDIR)/hull/cap/pgwire.c $(SRCDIR)/hull/utils/base64.c
+
+fuzz/fuzz_mysql_rows: fuzz/fuzz_mysql_rows.c $(FUZZ_DB_WIRE_STUBS) fuzz/fuzz_db_wire_stubs.h $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/utils/hex.c $(VENDDIR)/log.c/log.c
+	$(CC) $(FUZZ_CFLAGS) -DHL_ENABLE_MYSQL -Ifuzz -I$(VENDDIR) -I$(VENDDIR)/log.c -o $@ fuzz/fuzz_mysql_rows.c $(FUZZ_DB_WIRE_STUBS) $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/cap/mysqlwire.c $(SRCDIR)/hull/utils/hex.c $(VENDDIR)/log.c/log.c
+
 # MySQL/MariaDB DSN parser (cap/mysql_conn.c). HL_MY_NO_AUTH strips the
 # native_password scramble so the parser fuzzer stays free of cap/crypto.
 fuzz/fuzz_mysql_dsn: fuzz/fuzz_mysql_dsn.c $(SRCDIR)/hull/cap/mysql_conn.c $(SRCDIR)/hull/utils/hex.c
@@ -1421,7 +1434,7 @@ fuzz-js-source: fuzz/fuzz_js_source build/fuzz-corpus/js_source
 
 fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff fuzz/fuzz_host_match fuzz/fuzz_encoding fuzz/fuzz_pgwire fuzz/fuzz_pg_dsn fuzz/fuzz_pg_rewrite fuzz/fuzz_mysqlwire fuzz/fuzz_mysql_dsn fuzz/fuzz_respwire fuzz/fuzz_valkey_dsn fuzz/fuzz_span_sdk fuzz/fuzz_span_window fuzz/fuzz_lua_source fuzz/fuzz_js_source fuzz/fuzz_ssh \
       fuzz/fuzz_log_escape fuzz/fuzz_http_guard fuzz/fuzz_sql_kw fuzz/fuzz_dsn_redact fuzz/fuzz_mysql_stmt \
-      fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name
+      fuzz/fuzz_wasm_log_escape fuzz/fuzz_migrate_name fuzz/fuzz_pg_msg fuzz/fuzz_mysql_rows
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
@@ -1445,6 +1458,8 @@ fuzz-run: fuzz
 	./fuzz/fuzz_sql_kw fuzz/corpus_sql_kw/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_dsn_redact fuzz/corpus_dsn_redact/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_mysql_stmt fuzz/corpus_mysql_stmt/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_pg_msg fuzz/corpus_pg_msg/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_mysql_rows fuzz/corpus_mysql_rows/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_wasm_log_escape fuzz/corpus_wasm_log_escape/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_migrate_name fuzz/corpus_migrate_name/ -max_total_time=$(FUZZ_TIME)
 	$(MAKE) fuzz-lua-source FUZZ_TIME=$(FUZZ_TIME)   # stages the full .lua corpus first

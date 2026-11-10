@@ -243,6 +243,31 @@ release-artifact layout).
 
 <!-- audit44:wire -->
 
+- **MySQL / Postgres wire clients (audit 44).** MySQL: the server facts that
+  drive SQL Hull writes - the `_hull_*` tables' binary collation, MariaDB vs
+  MySQL, whether the server has roles - came from the plaintext Handshake v10
+  greeting, which an on-path attacker could rewrite even under
+  `sslmode=verify-full` (a PAD SPACE collation for `_hull_*` keys, no role
+  restore at the session reset); every connection now reads `VERSION()` over
+  the authenticated session first (`hl_my_conn_session_init`, in the same
+  round trip as `SET autocommit = 1`). The auth exchange takes at most one
+  AuthSwitchRequest, and **a switch to `mysql_native_password` is refused
+  unless the server certificate was verified or `sslmode=disable`** - a MySQL 8
+  account using `mysql_native_password` over the default `sslmode=prefer` (or
+  `require`) now fails to connect with a hint: use `verify-full` / `verify-ca`,
+  or move the account to `caching_sha2_password`. The greeting's own plugin
+  (MariaDB's and MySQL 5.7's default native) is still answered on any sslmode;
+  a password-derived response sent over an unverified channel is WARNed once
+  per user@host:port. Postgres: **a frame is capped at 64 MiB** (was 256 MiB,
+  `HL_PG_MAX_MSG`), refused from its header before the buffer grows - a row or
+  Notice larger than that fails its query - and each received chunk is charged
+  to the run as it arrives (the frame then only what is left over), as
+  Valkey's replies are. New fuzzers `fuzz_pg_msg` and `fuzz_mysql_rows` drive
+  the real connection layers' handlers (SCRAM, RowDescription / DataRow,
+  ErrorResponse fields, column definitions, text and binary rows) over a fake
+  transport; `fuzz_mysqlwire` now also reaches the column-definition,
+  PREPARE_OK, version and CURRENT_ROLE()-list readers.
+
 
 
 ## [0.19.0] - 2026-11-09
